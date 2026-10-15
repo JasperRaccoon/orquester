@@ -27,6 +27,7 @@ import {
   RUNTIME_MODE_LABELS,
   type ProviderModel
 } from "@orquester/api/agent-chat";
+import { agentToolApprovalsJournalFile, agentToolsFile } from "@orquester/config";
 
 import { claudeDeniedMcpServers, claudeDisallowedTools } from "../agent-host/adapters/claude/session-tools.ts";
 import { codexDenyConfig } from "../agent-host/adapters/codex/session-tools.ts";
@@ -366,6 +367,14 @@ describe("acceptance (b) / §14.2.11 'add a skill': edit_agent_profile is an Adm
       refused(supDenied.result, "APPROVAL_DENIED");
       assert.equal((await w.agentProfile.snapshot("claude")).items.some((item) => item.id === "skill:triage"), false, "nothing written on a deny");
 
+      // A declined toolset is not asked for again for 30 minutes (§5.6).
+      const declined = await w.carded("sup", "request_toolset", { toolset: "files-git", reason: "To read the diff." }, { decision: "deny" });
+      assert.equal(declined.card.kind, "toolset");
+      assert.deepEqual({ enabled: ok(declined.result).enabled, outcome: ok(declined.result).outcome }, { enabled: false, outcome: "declined" });
+      refused(await w.uncarded("sup", "request_toolset", { toolset: "files-git", reason: "Please." }), "TOOLSET_DECLINED");
+      // Already on: answered without a card (§13).
+      assert.equal(ok(await w.uncarded("sup", "request_toolset", { toolset: "agent-profile-editing", reason: "x" })).enabled, true);
+
       // Planning: Admin is refused outright (no card); a workflow-owned chat gets ADMIN_NOT_AVAILABLE.
       w.host.userTurn("claude", "Plan more skills.", { plan: true });
       const planning = refused(await w.uncarded("claude", "edit_agent_profile", other), "PERMISSION_DENIED");
@@ -587,6 +596,65 @@ describe("acceptance (d) / §14.2.11 workflows: create → modify → enable →
       // Closing the chat drops its grant.
       assert.equal((await w.user({ method: "DELETE", url: "/api/sessions/claude" })).status, 204);
       assert.equal(w.runtime.tools.snapshot().grants.filter((g) => g.threadId === "claude").length, 0);
+    });
+  });
+});
+
+describe("§12.5 / §7.6 secrets and workspaces: a workflow secret is typed into its card and never crosses the agent; a workflow reaching another workspace is never granted", () => {
+  test("set_workflow_secret: an Admin card in a chat holding a workflows grant, no grant option, the value only in the store — never in results, events, cards or files", async () => {
+    await withWorld(async (w) => {
+      const orq = w.project("jaspersito/orquester");
+      w.host.addChat("claude", { project: orq, title: "Jira bot", runtimeMode: "full-access" });
+      await w.user({ method: "PUT", url: "/api/sessions/claude/agent-tools", payload: { toolsets: { "workflow-authoring": true } } });
+      w.host.userTurn("claude", "Wire Jira.");
+      const created = await w.carded("claude", "create_workflow", {
+        name: "Jira sync", project: { kind: "existing", project: "jaspersito/orquester" },
+        nodes: [{ type: "trigger.manual", name: "Go" }, { type: "shell", name: "Call", config: { script: "echo \"token=$TOKEN\"", env: [{ name: "TOKEN", value: "{{ secrets.JIRA_TOKEN }}" }] } }],
+        edges: [{ source: "Go", target: "Call" }]
+      }, { decision: "approve", grant: "chat" });
+      const id = ok(created.result).workflowId as string;
+      // The chat never passes a value (external-only field).
+      refused(await w.uncarded("claude", "set_workflow_secret", { name: "JIRA_TOKEN", workflowId: id, value: "leak" }), "INVALID_ARGUMENT");
+      const VALUE = "jira-SECRET-value-7f3a9";
+      const set = await w.carded("claude", "set_workflow_secret", { name: "JIRA_TOKEN", workflowId: id, reason: "The sync needs it." }, { decision: "approve", secrets: { value: VALUE } });
+      assert.equal(set.card.kind, "admin");
+      assert.equal(set.card.family, "workflow-secrets");
+      assert.deepEqual(set.card.grantOptions, [], "never grantable, even under a workflows grant at Full access");
+      assert.deepEqual(set.card.secretFields.map((field) => field.key), ["value"]);
+      const result = ok(set.result);
+      assert.equal(result.set, true);
+      assert.equal(w.workflows.secrets.resolve(id).JIRA_TOKEN, VALUE, "stored");
+      // The run reads it; its stored output is redacted.
+      const revision = w.workflows.service.get(id)!.revision;
+      const ran = ok(await w.uncarded("claude", "run_workflow", { workflowId: id, revision, wait: true, timeoutSeconds: 120 }));
+      assert.equal(ran.run.status, "succeeded");
+      const output = ok(await w.uncarded("claude", "get_workflow_runs", { runId: ran.run.runId, nodeId: "Call", log: "stdout" }));
+      assert.match(JSON.stringify(output), /token=/, "the block ran with it");
+      // Never anywhere the agent, a client or a log reader sees.
+      for (const [where, text] of [
+        ["tool results", JSON.stringify([set.result, ran, output])],
+        ["bus events", JSON.stringify(w.events)],
+        ["the card", JSON.stringify(set.card)],
+        ["agent-tools.json", await w.runtime.tools.flush().then(() => readFile(agentToolsFile(w.appdir), "utf8"))],
+        ["the approvals journal", await readFile(agentToolApprovalsJournalFile(w.appdir), "utf8").catch(() => "")]
+      ] as const) assert.doesNotMatch(text, new RegExp(VALUE), `the secret leaked into ${where}`);
+    });
+  });
+
+  test("a workflow whose project is in another workspace: a card naming that workspace's identity, never a grant", async () => {
+    await withWorld(async (w) => {
+      w.host.addChat("claude", { project: w.project("jaspersito/orquester"), title: "Automate", runtimeMode: "full-access" });
+      await w.user({ method: "PUT", url: "/api/sessions/claude/agent-tools", payload: { toolsets: { "workflow-authoring": true } } });
+      w.host.userTurn("claude", "Automate the site.");
+      const { card, result } = await w.carded("claude", "create_workflow", {
+        name: "Site check", project: { kind: "existing", project: "acme/site" },
+        nodes: [{ type: "trigger.manual", name: "Go" }, { type: "code", name: "Ok", config: { source: "export default () => 1" } }], edges: [{ source: "Go", target: "Ok" }]
+      }, { decision: "approve" });
+      assert.equal(card.family, "workflows");
+      assert.deepEqual(card.grantOptions, [], "a project union leaving the caller's project is never granted");
+      assert.ok(card.scope.projects?.some((p) => p.workspace === "acme" && p.gitAccountLabel === "Acme Bot (GitHub)"));
+      ok(result);
+      assert.equal(w.runtime.tools.snapshot().grants.length, 0);
     });
   });
 });
@@ -1029,6 +1097,15 @@ describe("§12.1 / §7.3: an Orquester card is answered only by a person, on its
       const result = await pending;
       const winner = first.status === 200 ? "approve" : "deny";
       assert.equal(result.isError === true, winner === "deny");
+
+      // The chat closes while its card waits: the call ends CANCELLED and the card closes; a late answer finds nothing.
+      w.host.userTurn("auto", "again");
+      const waiting = w.chat("auto", "create_session", { project: "jaspersito/orquester-3", prompt: "y", reply: "none" });
+      const orphan = await w.cards.next();
+      assert.equal((await w.user({ method: "DELETE", url: "/api/sessions/auto" })).status, 204);
+      const cancelled = refused(await waiting, "CANCELLED");
+      assert.match(cancelled.message, /closed/);
+      assert.equal((await w.answer(orphan, { decision: "approve" })).status, 404);
     });
   });
 });
