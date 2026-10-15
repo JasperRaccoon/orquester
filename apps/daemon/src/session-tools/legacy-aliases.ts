@@ -26,7 +26,7 @@
 
 import { z } from "zod";
 
-import type { AnyOrquesterTool, CallContext, ScopeContext, Tier } from "../mcp/catalog/contract.ts";
+import type { AnyOrquesterTool, CallContext, ScopeClaim, ScopeContext, Tier } from "../mcp/catalog/contract.ts";
 import { toolByName } from "../mcp/catalog/index.ts";
 import { ToolError } from "../mcp/errors.ts";
 import { audienceSchema } from "../mcp/executor.ts";
@@ -166,9 +166,9 @@ export function aliasTool(name: string, alias: LegacyChatToolAlias, target: AnyO
     input: alias.input,
     audiences: ["chat"],
     toolset: target.toolset,
-    tier: typeof targetTier === "function" ? (args: Args): Tier => targetTier(mapped(args)) : targetTier,
+    tier: typeof targetTier === "function" ? (args: Args, scope: ScopeClaim): Tier => targetTier(mapped(args), scope) : targetTier,
     ...(targetFamily !== undefined
-      ? { adminFamily: typeof targetFamily === "function" ? (args: Args) => targetFamily(mapped(args)) : targetFamily }
+      ? { adminFamily: typeof targetFamily === "function" ? (args: Args, scope: ScopeClaim) => targetFamily(mapped(args), scope) : targetFamily }
       : {}),
     ...(target.planSafe ? { planSafe: true } : {}),
     scope: (args: Args, ctx: ScopeContext) => target.scope(mapped(args), ctx),

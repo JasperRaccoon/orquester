@@ -124,6 +124,12 @@ export interface ScopeClaim {
   self?: "allow" | "refuse" | "title-only";
   /** Filesystem paths the call reads or uses as cwd: each must lie inside a project (§5.1). */
   paths?: string[];
+  /**
+   * What only `scope`'s own lookup can tell about THIS call (a stored record's state — e.g. whether a
+   * saved prompt is agent-made or used by a workflow): read by the tool's `tier(args, scope)` /
+   * `adminFamily(args, scope)`. Ignored for a tool whose tier is fixed.
+   */
+  resolved?: { tier: Tier; adminFamily?: AdminFamily };
 }
 
 /** What `scope` and `approval` may use: the call context before any approval exists. */
@@ -363,10 +369,15 @@ export interface OrquesterTool<Shape extends z.ZodRawShape = z.ZodRawShape> {
   externalOnlyInput?: readonly (keyof Shape)[];
   audiences: readonly Audience[];
   toolset: ToolsetId;
-  /** The chat tier, fixed or per call (e.g. `dryRun` → read). */
-  tier: Tier | ((args: z.infer<z.ZodObject<Shape>>) => Tier);
-  /** Required when the tier can be `admin`. */
-  adminFamily?: AdminFamily | ((args: z.infer<z.ZodObject<Shape>>) => AdminFamily);
+  /**
+   * The chat tier, fixed or per call: from the arguments (e.g. `dryRun` → read) and the resolved
+   * scope claim (`ScopeClaim.resolved`, what `scope` looked up). Called by the executor AFTER `scope`,
+   * once per call; the gate, the card, grant options and the turn policy all use that one value.
+   * Advertised as its widest (`admin`) wherever no call is at hand (external `_meta`, TOOLSETS badges).
+   */
+  tier: Tier | ((args: z.infer<z.ZodObject<Shape>>, scope: ScopeClaim) => Tier);
+  /** Required when the tier can be `admin`; per call like `tier`. */
+  adminFamily?: AdminFamily | ((args: z.infer<z.ZodObject<Shape>>, scope: ScopeClaim) => AdminFamily);
   /** Allowed while the caller plans even though it changes something (`html_render`, `request_secret`, …). */
   planSafe?: boolean;
   scope(args: z.infer<z.ZodObject<Shape>>, ctx: ScopeContext): Promise<ScopeClaim>;

@@ -424,6 +424,42 @@ test("every gated outcome carries the row's reference: granted (with the grant's
   assert.equal((await granted.call("chat_only", {})).structuredContent?.toolApproval, undefined);
 });
 
+test("tier(args, scope): the tier and family the scope resolved drive the gate, the card and grants — fail closed without one", async () => {
+  const seen: { args: unknown; scope: ScopeClaim }[] = [];
+  const resolvedBy = defineTool({
+    name: "edit_record", title: "Edit a record", description: "d", input: { id: z.string() },
+    audiences: ["chat"], toolset: "core",
+    tier: (args, scope) => {
+      seen.push({ args, scope });
+      return scope.resolved?.tier ?? "admin";
+    },
+    adminFamily: (_args, scope) => scope.resolved?.adminFamily ?? "workflows",
+    // The stored record decides: "mine" is the agent's own (Act), "theirs" the user's (Admin, desktops), else unknown.
+    scope: async (args) => ({
+      ...claim({ projects: [OWN], writes: true }),
+      ...(args.id === "mine" ? { resolved: { tier: "act" as const } } : args.id === "theirs" ? { resolved: { tier: "admin" as const, adminFamily: "desktops" as const } } : {})
+    }),
+    approval: async () => ({ title: "Edit", scopeLabel: "acme/api", sections: [{ kind: "text", text: "x" }] }),
+    annotations: MUTATING, resultKind: "json", run: async () => ({ done: true })
+  });
+  const port = new FakeApprovalPort().grant({ family: "desktops", scope: "chat", threadId: "me", projectPath: OWN });
+  const r = rig({ tools: [resolvedBy], port });
+  // Act: no card, no grant query.
+  assert.equal((await r.call("edit_record", { id: "mine" })).isError, undefined);
+  assert.equal(port.cards.length + port.grantQueries.length, 0);
+  assert.equal(seen[0]!.scope.resolved?.tier, "act", "the tier function sees the claim scope() returned");
+  // Admin, desktops: the chat grant for desktops covers it.
+  const granted = await r.call("edit_record", { id: "theirs" });
+  assert.equal(granted.isError, undefined, message(granted));
+  assert.equal(port.grantQueries.at(-1)!.family, "desktops");
+  assert.equal(port.cards.length, 0, "granted: no card");
+  // Unknown: Admin workflows (never covered by a desktops grant): a card.
+  assert.equal((await r.call("edit_record", { id: "gone" })).isError, undefined);
+  assert.deepEqual([port.cards.at(-1)!.kind, port.cards.at(-1)!.family], ["admin", "workflows"]);
+  // While planning, the resolved Admin tier refuses (the gate reads the computed tier, not a static one).
+  assert.equal(code(await r.call("edit_record", { id: "theirs" }, caller({ planning: true }))), "PERMISSION_DENIED");
+});
+
 test("a caller with no canonical project of its own is never offered a grant (findGrant would never honour it)", async () => {
   const r = rig();
   await r.call("open_desktop", { command: "xterm" }, caller({ projectPath: "", workspace: "" }));

@@ -342,8 +342,10 @@ async function execute(deps: ExecutorDeps, call: { name: string; arguments: unkn
   let card: { preview: ApprovalPreview | null; family: string } | null = null;
 
   if (caller.kind === "thread") {
-    const tier: Tier = typeof tool.tier === "function" ? tool.tier(args) : tool.tier;
-    const adminFamily: AdminFamily | undefined = typeof tool.adminFamily === "function" ? tool.adminFamily(args) : tool.adminFamily;
+    // A per-call tier sees the arguments AND the resolved scope (what `scope` looked up); one value for
+    // the gate, the card, grant options and the turn policy.
+    const tier: Tier = typeof tool.tier === "function" ? tool.tier(args, scope) : tool.tier;
+    const adminFamily: AdminFamily | undefined = typeof tool.adminFamily === "function" ? tool.adminFamily(args, scope) : tool.adminFamily;
     const facts = await gateFacts(api, caller, scope);
     const gateInput = (who: ThreadCaller): GateInput => ({ tool: tool.name, tier, ...(adminFamily ? { adminFamily } : {}), planSafe: tool.planSafe === true, caller: who, scope, ...facts });
     const decision = gate(gateInput(caller));

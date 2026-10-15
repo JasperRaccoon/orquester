@@ -8,8 +8,8 @@
 // - of any prompt a workflow's agent block references (`usedByWorkflows`): Admin, family
 //   `workflows` — the card names those workflows and shows the change, because a referenced
 //   prompt is live workflow code; never grantable.
-// The prompt's kind is read in `scope()` (the call's own arguments object carries it to `tier` /
-// `adminFamily`, which see the arguments only); `approval()` reads it again and pins what it
+// The prompt's kind is read in `scope()`, which resolves the call's tier and family on the claim
+// (`ScopeClaim.resolved`, read by `tier(args, scope)`); `approval()` reads it again and pins what it
 // showed; `run` re-reads it before writing — a prompt that became referenced meanwhile is refused
 // (`PERMISSION_DENIED`, call again) or `PREVIEW_STALE` after a card. Pinning is external-only, and
 // the daemon refuses pinning an agent-created prompt from anyone but the user.
@@ -241,9 +241,6 @@ function checkAction(args: UpdateArgs, external: boolean): void {
   if (args.action === "update" && edits === 0) refuse("needs title, body, description, tags or pinned.");
 }
 
-/** What `scope()` learned about THIS call's prompt, keyed by its arguments object (read by `tier` / `adminFamily`). */
-const looked = new WeakMap<object, { tier: Tier; family?: AdminFamily }>();
-
 async function targetOf(args: UpdateArgs, ctx: ScopeContext): Promise<{ place: Place; prompt: SavedPrompt | null }> {
   if (args.action === "create") {
     if (args.global === true) return { place: GLOBAL, prompt: null };
@@ -365,15 +362,19 @@ const updateSavedPrompts = defineTool({
   externalOnlyInput: ["pinned"],
   audiences: ["external", "chat"],
   toolset: "notes",
-  tier: (args) => (args.action === "create" ? "act" : (looked.get(args)?.tier ?? "admin")),
-  // Fail closed when unknown: `workflows` is never grantable. `approval()` names the call's own family.
-  adminFamily: (args) => looked.get(args)?.family ?? "workflows",
+  // The stored prompt decides (agent-made, used by a workflow): `scope` looks it up and resolves the
+  // call's tier and family on the claim. Fail closed when unknown: Admin `workflows`, never grantable.
+  tier: (args, scope) => (args.action === "create" ? "act" : (scope.resolved?.tier ?? "admin")),
+  adminFamily: (_args, scope) => scope.resolved?.adminFamily ?? "workflows",
   async scope(args, ctx) {
     checkAction(args, ctx.caller.kind === "external");
     const { place, prompt } = await targetOf(args, ctx);
-    if (prompt) looked.set(args, editKind(prompt));
     const projectPath = prompt ? prompt.projectPath : place.projectPath;
     const claim: ScopeClaim = { projects: projectPath ? [projectPath] : [], sessions: [], reads: "none", writes: true, causesTurnIn: [] };
+    if (prompt) {
+      const kind = editKind(prompt);
+      claim.resolved = { tier: kind.tier, ...(kind.family ? { adminFamily: kind.family } : {}) };
+    }
     return claim;
   },
   approval: preview,
