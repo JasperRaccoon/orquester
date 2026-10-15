@@ -10,6 +10,8 @@ import type { InjectOptions } from "fastify";
 import { GitService } from "./git.ts";
 import { createServer } from "./index.js";
 import { SavedPromptsService } from "./saved-prompts.ts";
+import { mintPrincipalToken } from "./mcp/principal.ts";
+import { PRINCIPAL_TOKEN_HEADER, type CallerPrincipal } from "@orquester/api/agent-chat";
 
 // Route-level coverage for /api/saved-prompts, /api/git/working-diff and the
 // saved-prompt cascades of the project/workspace delete routes: status codes,
@@ -19,7 +21,7 @@ import { SavedPromptsService } from "./saved-prompts.ts";
 type CreateServerArgs = Parameters<typeof createServer>;
 const quiet = { warn: () => {}, error: () => {} };
 
-async function harness(options: { unreadableLibrary?: boolean } = {}): Promise<{
+async function harness(options: { unreadableLibrary?: boolean; workflows?: unknown[] } = {}): Promise<{
   root: string;
   workspacesDir: string;
   /** The live paths the routes AND the service read — reassign them as a config change does. */
@@ -70,7 +72,8 @@ async function harness(options: { unreadableLibrary?: boolean } = {}): Promise<{
       deleteByProjectPath: async (path: string) => void todoCascades.push(`deleteByProjectPath ${path}`),
       deleteByWorkspace: async (_name: string, path: string) => void todoCascades.push(`deleteByWorkspace ${path}`)
     },
-    accounts: { unbindWorkspace: async () => {} }
+    accounts: { unbindWorkspace: async () => {} },
+    ...(options.workflows ? { workflows: { list: () => options.workflows } } : {})
   } as unknown as CreateServerArgs[4];
 
   const app = createServer(
@@ -315,4 +318,52 @@ test("working diff route rejects missing and outside paths", async (t) => {
   const outside = await h.inject({ method: "GET", url: `/api/git/working-diff?path=${encodeURIComponent(h.root)}` });
   assert.equal(outside.statusCode, 403);
   assert.equal(outside.json().code, "FS_FORBIDDEN");
+});
+
+/** Headers carrying a live principal token, as the in-process DaemonApi sends them. */
+function as(principal: CallerPrincipal): Record<string, string> {
+  return { [PRINCIPAL_TOKEN_HEADER]: mintPrincipalToken(principal).token };
+}
+
+test("saved prompts: createdBy and the pin refusal follow the server-stamped principal, never the body", async (t) => {
+  const h = await harness();
+  t.after(() => h.close());
+  const agent: CallerPrincipal = { kind: "agent", threadId: "t-1", projectPath: "", agent: "codex", title: "Docs" };
+
+  const created = await h.inject({
+    method: "POST",
+    url: "/api/saved-prompts",
+    headers: as(agent),
+    payload: { title: "By agent", body: "b", projectPath: null, createdBy: { kind: "user" } }
+  });
+  assert.equal(created.statusCode, 201, created.body);
+  const prompt = created.json() as SavedPrompt;
+  assert.deepEqual(prompt.createdBy, { kind: "agent", threadId: "t-1", agent: "codex", title: "Docs" });
+
+  // A forged body field from the user's own UI is ignored too.
+  const forged = await h.inject({ method: "POST", url: "/api/saved-prompts", payload: { title: "Mine", body: "b", projectPath: null, createdBy: { kind: "agent", threadId: "x" } } });
+  assert.equal((forged.json() as SavedPrompt).createdBy, undefined);
+
+  for (const principal of [agent, { kind: "external", credentialId: "cred_1" } as CallerPrincipal]) {
+    const pin = await h.inject({ method: "PUT", url: `/api/saved-prompts/${prompt.id}`, headers: as(principal), payload: { pinned: true } });
+    assert.equal(pin.statusCode, 403, pin.body);
+    assert.equal(pin.json().code, "AGENT_PROMPT_PIN_REFUSED");
+  }
+  // The user's UI (no token) pins it.
+  const pinned = await h.inject({ method: "PUT", url: `/api/saved-prompts/${prompt.id}`, payload: { pinned: true } });
+  assert.equal(pinned.statusCode, 200);
+  assert.equal(pinned.json().pinned, true);
+});
+
+test("saved prompts: list rows name the workflows that reference each prompt, read live from the workflow store", async (t) => {
+  const workflows: unknown[] = [];
+  const h = await harness({ workflows });
+  t.after(() => h.close());
+  const prompt = (await h.inject({ method: "POST", url: "/api/saved-prompts", payload: { title: "Used", body: "b", projectPath: null } })).json() as SavedPrompt;
+  const rows = async () => ((await h.inject({ method: "GET", url: "/api/saved-prompts" })).json() as { prompts: SavedPrompt[] }).prompts;
+  assert.equal((await rows())[0]!.usedByWorkflows, undefined, "absent when none references it");
+  workflows.push({ id: "wf_1", name: "Nightly", nodes: [{ id: "n", name: "Agent", type: "agent", config: { prompt: { kind: "saved", promptId: prompt.id } } }] });
+  assert.deepEqual((await rows())[0]!.usedByWorkflows, [{ workflowId: "wf_1", name: "Nightly" }]);
+  // Never persisted: the stored record has no such field.
+  assert.equal("usedByWorkflows" in h.savedPrompts.get(prompt.id)!, false);
 });
