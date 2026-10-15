@@ -216,15 +216,6 @@ async function setup(options: { parentBusy?: boolean; outbox?: string; outboxIsD
   };
 }
 
-/** Let the service's delivery chain settle: every parent's lane, then its write. */
-async function settled(service: LineageService): Promise<void> {
-  const internals = service as unknown as { writes: Promise<void>; lanes: Map<string, Promise<unknown>> };
-  for (let round = 0; round < 5; round += 1) {
-    await new Promise((resolve) => setImmediate(resolve));
-    await Promise.all([...internals.lanes.values()]);
-    await internals.writes;
-  }
-}
 
 describe("acceptsMessage", () => {
   it("is false while anything runs or waits on the user", () => {
@@ -267,13 +258,13 @@ describe("merge back", () => {
 
     const busy = await setup({ parentBusy: true });
     await busy.service.mergeBack("child", { text: "Plan B.", interactionMode: "plan" });
-    await settled(busy.service);
+    await busy.service.whenIdle();
     const persisted = JSON.parse(await readFile(busy.outboxFile, "utf8")) as { entries: Array<{ interactionMode?: string }> };
     assert.equal(persisted.entries[0]!.interactionMode, "plan");
     busy.world.sessions.set("parent", summary("parent", { title: "Parent", chatSessionStatus: "ready" }));
     busy.world.threads.set("parent", snapshot());
     busy.world.touch("parent");
-    await settled(busy.service);
+    await busy.service.whenIdle();
     assert.equal(busy.world.turns[0]!.body.interactionMode, "plan");
     await busy.cleanup();
   });
@@ -294,11 +285,11 @@ describe("merge back", () => {
     const later = await setup({ parentBusy: true });
     later.world.threads.set("parent", planning(true));
     await later.service.mergeBack("child", { text: "Plain." });
-    await settled(later.service);
+    await later.service.whenIdle();
     later.world.sessions.set("parent", summary("parent", { title: "Parent", chatSessionStatus: "ready" }));
     later.world.threads.set("parent", planning(false));
     later.world.touch("parent");
-    await settled(later.service);
+    await later.service.whenIdle();
     assert.equal(later.world.turns[0]!.body.interactionMode, "plan");
     await later.cleanup();
   });
@@ -344,7 +335,7 @@ describe("merge back", () => {
       outbox: JSON.stringify({ version: 1, entries: [{ fromTheFuture: 1 }], newerBuild: { keep: true } })
     });
     await service.mergeBack("child", { commandId: "kept" });
-    await settled(service);
+    await service.whenIdle();
     const disk = JSON.parse(await readFile(outboxFile, "utf8")) as { newerBuild?: unknown; entries: unknown[] };
     assert.deepEqual(disk.newerBuild, { keep: true });
     assert.equal(disk.entries.length, 2);
@@ -354,7 +345,7 @@ describe("merge back", () => {
   it("drops a merge once its parent and its fork are both closed — never while either is open (D-T2)", async () => {
     const { world, service, outboxFile, cleanup } = await setup({ parentBusy: true });
     await service.mergeBack("child", { commandId: "orphan" });
-    await settled(service);
+    await service.whenIdle();
     // Only the parent closed: kept (failed, for the fork to see and discard).
     world.sessions.delete("parent");
     await service.pruneOrphans();
@@ -363,7 +354,7 @@ describe("merge back", () => {
     world.sessions.delete("child");
     await service.pruneOrphans();
     assert.deepEqual(service.pending(), []);
-    await settled(service);
+    await service.whenIdle();
     const disk = JSON.parse(await readFile(outboxFile, "utf8")) as { entries: unknown[] };
     assert.deepEqual(disk.entries, []);
     await cleanup();
@@ -381,7 +372,7 @@ describe("merge back", () => {
     const result = await service.mergeBack("child", { commandId: "fixed-id" });
     assert.equal(result.delivery, "queued");
     assert.equal(result.mergeId, "fixed-id");
-    await settled(service);
+    await service.whenIdle();
     assert.equal(world.turns.length, 0, "nothing reaches a busy parent");
     const persisted = JSON.parse(await readFile(outboxFile, "utf8")) as { entries: Array<{ mergeId: string }> };
     assert.deepEqual(persisted.entries.map((entry) => entry.mergeId), ["fixed-id"]);
@@ -396,14 +387,14 @@ describe("merge back", () => {
 
     // Still busy: an event changes nothing.
     world.touch("parent");
-    await settled(service);
+    await service.whenIdle();
     assert.equal(world.turns.length, 0);
 
     // The turn ends: the next event delivers it.
     world.sessions.set("parent", summary("parent", { title: "Parent", chatSessionStatus: "ready" }));
     world.threads.set("parent", snapshot());
     world.touch("parent");
-    await settled(service);
+    await service.whenIdle();
     assert.equal(world.turns.length, 1);
     assert.equal(world.turns[0]!.body.commandId, "fixed-id");
     assert.equal(service.pending().length, 0);
@@ -415,7 +406,7 @@ describe("merge back", () => {
   it("keeps a queued merge across a restart, and a host restart, until delivered", async () => {
     const first = await setup({ parentBusy: true });
     await first.service.mergeBack("child", {});
-    await settled(first.service);
+    await first.service.whenIdle();
     await first.service.stop();
 
     // A new daemon: same outbox, parent idle now, host still restarting.
@@ -425,12 +416,12 @@ describe("merge back", () => {
     first.world.threads.set("parent", snapshot());
     first.world.setTurnStatus(503);
     second.attachApi(first.world.api);
-    await settled(second);
+    await second.whenIdle();
     assert.equal(second.pending().length, 1, "a 503 keeps it queued");
 
     first.world.setTurnStatus(200);
     first.world.touch("parent");
-    await settled(second);
+    await second.whenIdle();
     assert.equal(second.pending().length, 0);
     assert.equal(first.world.turns.at(-1)!.body.commandId, "merge-1", "the id it was queued with");
     await second.stop();
@@ -447,7 +438,7 @@ describe("merge back", () => {
         ]
       })
     });
-    await settled(service);
+    await service.whenIdle();
     assert.equal(world.turns.length, 0);
     assert.deepEqual(service.pending().map((merge) => [merge.mergeId, merge.state]), [["old", "failed"]]);
     assert.match(service.pending()[0]!.error ?? "", /closed/);
@@ -469,14 +460,14 @@ describe("merge back", () => {
     world.threads.set("parent", snapshot());
     world.refuseWithDeadline();
     world.touch("parent");
-    await settled(service);
+    await service.whenIdle();
     assert.deepEqual(world.turns.map((turn) => turn.body.commandId), ["m1"]);
     assert.deepEqual([service.pending()[0]!.state, service.pending()[0]!.attempts], ["queued", 1]);
 
     // Its own tab update, and any event before the delay has passed: no new attempt.
     world.touch("parent");
     world.touch("parent");
-    await settled(service);
+    await service.whenIdle();
     assert.equal(world.turns.length, 1, "never back to back");
 
     // The delay passed: the retry is a new command (the host records no receipt for a
@@ -484,7 +475,7 @@ describe("merge back", () => {
     world.setTurnStatus(200);
     advance(1_000);
     world.touch("parent");
-    await settled(service);
+    await service.whenIdle();
     assert.deepEqual(world.turns.map((turn) => turn.body.commandId), ["m1", "m1:1"]);
     assert.equal(service.pending().length, 0, "delivered on the retry");
     await cleanup();
@@ -498,14 +489,14 @@ describe("merge back", () => {
     world.refuseWithDeadline();
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       world.touch("parent");
-      await settled(service);
+      await service.whenIdle();
       assert.equal(service.pending()[0]!.attempts, attempt);
       advance(1_000);
     }
     assert.equal(service.pending()[0]!.state, "failed", "failed after the third refusal of the moment");
     assert.equal(published.get("parent")?.[0]?.state, "failed", "the parent's tab shows it too");
     world.touch("parent");
-    await settled(service);
+    await service.whenIdle();
     assert.equal(service.pending()[0]!.attempts, 3, "a failed merge waits for the user");
 
     world.setTurnStatus(200);
@@ -527,7 +518,7 @@ describe("merge back", () => {
     world.setTurnStatus(200);
     advance(1_000);
     world.touch("parent");
-    await settled(service);
+    await service.whenIdle();
     assert.deepEqual(world.turns.map((turn) => turn.body.commandId), ["m7", "m7:1"]);
     assert.equal(service.pending().length, 0);
     await cleanup();
@@ -540,7 +531,7 @@ describe("merge back", () => {
     world.threads.set("parent", snapshot());
     world.setTurnStatus(409, "COMMAND_REJECTED");
     world.touch("parent");
-    await settled(service);
+    await service.whenIdle();
     const [merge] = service.pending();
     assert.deepEqual([merge!.state, merge!.attempts, merge!.error], ["failed", 1, "refused: COMMAND_REJECTED"]);
     assert.equal(published.get("child")?.[0]?.error, "refused: COMMAND_REJECTED");
@@ -558,7 +549,7 @@ describe("merge back", () => {
       world.threads.set("parent", snapshot());
       world.setTurnStatus(409, code, { message });
       world.touch("parent");
-      await settled(service);
+      await service.whenIdle();
       const [merge] = service.pending();
       assert.deepEqual([merge!.state, merge!.attempts, merge!.error], ["failed", 1, message], code);
       await cleanup();
@@ -587,10 +578,10 @@ describe("merge back", () => {
     world.threads.set("parent", snapshot());
     world.setTurnStatus(503);
     world.touch("parent");
-    await settled(service);
+    await service.whenIdle();
     world.setTurnStatus(400, "INVALID_COMMAND");
     world.touch("parent");
-    await settled(service);
+    await service.whenIdle();
     assert.deepEqual(world.turns.map((turn) => turn.body.commandId), ["m2", "m2"]);
     assert.deepEqual([service.pending()[0]!.state, service.pending()[0]!.attempts], ["failed", 1]);
     await cleanup();
@@ -604,7 +595,7 @@ describe("merge back", () => {
     // The drain gets into the lane first; the discard asked in the meantime runs after it.
     world.touch("parent");
     const discard = service.actOnMerge("child", "m3", { action: "discard" });
-    await settled(service);
+    await service.whenIdle();
     assert.deepEqual(await discard, { mergeId: "m3", outcome: "sent", seq: 9 });
     await assert.rejects(service.actOnMerge("child", "nope", { action: "discard" }), /No pending merge/);
     await cleanup();
@@ -618,7 +609,7 @@ describe("merge back", () => {
     );
     await service.mergeBack("child", { commandId: "m1" });
     world.touch("parent");
-    await settled(service);
+    await service.whenIdle();
     assert.equal(world.turns.length, 0, "the goal keeps it queued");
     const result = await service.actOnMerge("child", "m1", { action: "deliver" });
     assert.deepEqual(result, { mergeId: "m1", outcome: "sent", seq: 9 });
@@ -636,12 +627,12 @@ describe("merge back", () => {
     world.sessions.set("parent", summary("parent", { title: "Parent" }));
     world.threads.set("parent", snapshot());
     const newer = await service.mergeBack("child", { commandId: "newer", text: "second" });
-    await settled(service);
+    await service.whenIdle();
     assert.equal(newer.delivery, "queued", "never overtakes the older one");
     assert.deepEqual(world.turns.map((turn) => turn.body.commandId), ["older"], "the older one went first");
     // The parent is busy with it now; at its next idle point the newer one follows.
     world.touch("parent");
-    await settled(service);
+    await service.whenIdle();
     assert.deepEqual(world.turns.map((turn) => turn.body.commandId), ["older", "newer"]);
     assert.equal(service.pending().length, 0);
     await cleanup();

@@ -529,8 +529,11 @@ export class LineageService {
 
   /**
    * Resolves once nothing is in flight: every parent's delivery lane has drained and the queued
-   * outbox writes have landed — including work those steps started meanwhile (tests wait on it
-   * instead of counting event-loop turns).
+   * outbox writes have landed. It loops while work keeps arriving, so work those steps start
+   * meanwhile is waited for too (tests wait on it instead of counting event-loop turns). It waits
+   * for in-flight work only, never for timers: a retry delay and the safety re-check's next tick
+   * are not work in flight. What the reply router does with a post it is told of is the router's
+   * (`ReplyRouter.whenIdle`; wait for both while either has work).
    */
   async whenIdle(): Promise<void> {
     while (this.hasWorkInFlight()) await Promise.all([...this.lanes.values(), this.writes]);
