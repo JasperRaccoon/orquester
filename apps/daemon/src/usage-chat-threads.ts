@@ -18,6 +18,8 @@ import { join } from "node:path";
 import type { ChatThreadUsageResponse, ChatThreadUsageRow } from "@orquester/api";
 
 const CHUNK_BYTES = 4 * 1024 * 1024;
+/** A line longer than this is skipped (counted in `skippedLines`), never buffered whole. */
+export const MAX_LINE_BYTES = 4 * 1024 * 1024;
 /** How much of a log's head is read to find `thread.created` (its first line). */
 const HEAD_BYTES = 64 * 1024;
 
@@ -38,6 +40,10 @@ interface ThreadEntry {
   model: string;
   /** `day|model` → sums. */
   rows: Map<string, RowSums>;
+  /** Inside an over-long line at `bytesParsed` (read up to there): skip to its newline. */
+  skipping: boolean;
+  /** Over-long lines skipped so far. */
+  skippedLines: number;
 }
 
 const finite = (value: unknown): number | undefined => (typeof value === "number" && Number.isFinite(value) ? value : undefined);
@@ -111,6 +117,9 @@ export class ChatThreadUsageScanner {
   constructor(
     private readonly opts: {
       threadsDir: string;
+      /** Tests: a smaller line cap ({@link MAX_LINE_BYTES}) and read size. */
+      maxLineBytes?: number;
+      chunkBytes?: number;
       /** The agents whose logs are read (others: only their first line, once). */
       agents: readonly string[];
       now: () => number;
@@ -123,8 +132,10 @@ export class ChatThreadUsageScanner {
     if (!this.opts.agents.includes(agent)) return { agent, scope: "orquester-chats", rows: [], asOf: new Date(this.opts.now()).toISOString() };
     await this.scan();
     const merged = new Map<string, ChatThreadUsageRow>();
+    let skippedLines = 0;
     for (const entry of this.threads.values()) {
       if (entry.adapter !== agent) continue;
+      skippedLines += entry.skippedLines;
       for (const [key, sums] of entry.rows) {
         const [day, model] = [key.slice(0, key.indexOf("|")), key.slice(key.indexOf("|") + 1)];
         const row = merged.get(key) ?? { day, model, turns: 0, costedTurns: 0, inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, costUsd: null };
@@ -140,7 +151,7 @@ export class ChatThreadUsageScanner {
     // Float sums of many small costs: keep ten decimals (far below a cent), so equal spends read equal.
     for (const row of merged.values()) if (row.costUsd !== null) row.costUsd = Math.round(row.costUsd * 1e10) / 1e10;
     const rows = [...merged.values()].sort((a, b) => (a.day < b.day ? 1 : a.day > b.day ? -1 : a.model.localeCompare(b.model)));
-    return { agent, scope: "orquester-chats", rows, asOf: new Date(this.opts.now()).toISOString() };
+    return { agent, scope: "orquester-chats", rows, asOf: new Date(this.opts.now()).toISOString(), ...(skippedLines > 0 ? { skippedLines } : {}) };
   }
 
   /** Single-flight: a scan asked for while one runs waits for that one. */
@@ -182,7 +193,7 @@ export class ChatThreadUsageScanner {
     let entry = this.threads.get(id);
     if (entry && size < entry.bytesParsed) entry = undefined; // rebuilt: read again from the start
     if (!entry) {
-      entry = { adapter: await adapterOf(path), bytesParsed: 0, model: "unknown", rows: new Map() };
+      entry = { adapter: await adapterOf(path), bytesParsed: 0, model: "unknown", rows: new Map(), skipping: false, skippedLines: 0 };
       this.threads.set(id, entry);
     }
     if (entry.adapter === null) entry.adapter = await adapterOf(path);
@@ -190,27 +201,54 @@ export class ChatThreadUsageScanner {
     if (entry.adapter === null || !this.opts.agents.includes(entry.adapter)) return;
     if (size === entry.bytesParsed) return;
     const fh = await open(path, "r");
+    const maxLine = this.opts.maxLineBytes ?? MAX_LINE_BYTES;
+    const chunkBytes = this.opts.chunkBytes ?? CHUNK_BYTES;
     try {
       let position = entry.bytesParsed;
-      let carry = "";
+      // The unterminated line so far, as bytes (never more than `maxLine`).
+      let carry: Buffer[] = [];
+      let carryBytes = 0;
+      let skipping = entry.skipping;
       while (position < size) {
-        const length = Math.min(CHUNK_BYTES, size - position);
+        const length = Math.min(chunkBytes, size - position);
         const buffer = Buffer.alloc(length);
         const { bytesRead } = await fh.read(buffer, 0, length, position);
         if (bytesRead === 0) break;
         const chunk = buffer.subarray(0, bytesRead);
         position += bytesRead;
-        const lastNewline = chunk.lastIndexOf(0x0a);
-        if (lastNewline < 0) {
-          carry += chunk.toString("utf8");
-          continue;
+        let start = 0;
+        for (let newline = chunk.indexOf(0x0a, start); newline >= 0; newline = chunk.indexOf(0x0a, start)) {
+          const piece = chunk.subarray(start, newline);
+          if (skipping) {
+            skipping = false;
+            entry.skippedLines += 1;
+          } else if (carryBytes + piece.length > maxLine) {
+            entry.skippedLines += 1;
+          } else {
+            const line = (carryBytes > 0 ? Buffer.concat([...carry, piece]) : piece).toString("utf8");
+            if (line !== "") applyLine(entry, line);
+          }
+          carry = [];
+          carryBytes = 0;
+          start = newline + 1;
+          // Only complete lines advance the cursor: an unterminated tail is read again next time.
+          entry.bytesParsed = position - (chunk.length - start);
         }
-        const complete = carry + chunk.subarray(0, lastNewline).toString("utf8");
-        carry = chunk.subarray(lastNewline + 1).toString("utf8");
-        for (const line of complete.split("\n")) if (line !== "") applyLine(entry, line);
-        // Only complete lines advance the cursor: an unterminated tail is read again next time.
-        entry.bytesParsed = position - Buffer.byteLength(carry, "utf8");
+        const rest = chunk.subarray(start);
+        if (rest.length === 0 || skipping) continue;
+        if (carryBytes + rest.length > maxLine) {
+          // Over-long: dropped as it is read, never held whole; skipped up to its newline.
+          skipping = true;
+          carry = [];
+          carryBytes = 0;
+        } else {
+          carry.push(rest);
+          carryBytes += rest.length;
+        }
       }
+      // Inside an over-long line at the end of the log: what was read of it is never read again.
+      if (skipping) entry.bytesParsed = position;
+      entry.skipping = skipping;
     } finally {
       await fh.close();
     }

@@ -114,3 +114,25 @@ test("tolerant of every line it cannot use: malformed, unknown or old shapes are
     { day: "2026-10-14", model: "grok-4", turns: 3, costedTurns: 2, inputTokens: 100, outputTokens: 10, cachedInputTokens: 0, costUsd: 0.75 }
   ]);
 });
+
+test("an over-long line is skipped and counted, never held whole; lines across read chunks still parse, a multi-byte character across a chunk too", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "chat-usage-long-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  // Tiny reads and a small cap, so the cases fit a test: every line spans several reads.
+  const scanner = new ChatThreadUsageScanner({ threadsDir: dir, agents: ["grok"], now: () => 0, maxLineBytes: 600, chunkBytes: 7 });
+  const path = join(dir, "g1", "events.ndjson");
+  await mkdir(join(dir, "g1"), { recursive: true });
+  const huge = line({ type: "thread.session-set", occurredAt: "2026-10-14T09:00:00Z", payload: { turn: { turnId: "huge", totalCostUsd: 100, pad: "x".repeat(5_000) } } });
+  const named = line({ type: "thread.meta-updated", occurredAt: "2026-10-14T09:30:00Z", payload: { modelSelection: { model: "grök-4" } } });
+  await writeFile(path, created("grok", "grok-4") + settled("2026-10-14T10:00:00Z", 0.25, { input: 10, output: 1 }) + huge + named + settled("2026-10-14T11:00:00Z", 0.5, { input: 20, output: 2 }));
+  const first = await scanner.snapshot("grok");
+  assert.equal(first.skippedLines, 1);
+  assert.deepEqual(first.rows.map((row) => [row.model, row.turns, row.costUsd]), [["grok-4", 1, 0.25], ["grök-4", 1, 0.5]], "the lines after it count; a multi-byte model name survives the chunking");
+  // An over-long line still being written at the end of the log: skipped across scans, counted once.
+  await appendFile(path, huge.slice(0, 2_000));
+  assert.equal((await scanner.snapshot("grok")).skippedLines, 1, "not finished yet");
+  await appendFile(path, huge.slice(2_000) + settled("2026-10-14T12:00:00Z", 1, { input: 1, output: 1 }));
+  const later = await scanner.snapshot("grok");
+  assert.equal(later.skippedLines, 2);
+  assert.equal(later.rows.find((row) => row.model === "grök-4")!.turns, 2, "the line after it counts, once");
+});

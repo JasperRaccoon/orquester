@@ -868,6 +868,8 @@ export interface ChatThreadUsageResponse {
   scope: "orquester-chats";
   rows: ChatThreadUsageRow[];
   asOf: string;
+  /** Log lines too long to read (over 4 MiB) that were skipped; absent when none. */
+  skippedLines?: number;
 }
 
 /** One auto-mode check of the Claude subagent prompt-cache lifetime. */
