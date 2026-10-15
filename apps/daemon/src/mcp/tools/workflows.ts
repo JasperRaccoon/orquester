@@ -92,6 +92,8 @@ import {
   workflowError,
   unionGrantable,
   unionGrantFields,
+  changesSecretUse,
+  SECRET_USE_NOTE,
   workflowFields,
   workflowPin,
   workflowProjectLabel,
@@ -912,10 +914,13 @@ const createWorkflow = defineTool({
     assertSavable(draft, problems);
     const union = await workflowUnion(api, [draft]);
     const prompts = await promptsFor(api, draft, union);
+    // A workflow that reads a secret: no grant covers creating it (nor joining the chat's grant).
+    const secretUse = changesSecretUse(null, draft, null);
     const sections: ApprovalPreviewSection[] = [
       ...(draft.enabled ? [{ kind: "warning" as const, level: "caution" as const, text: "Created ENABLED: its schedule and git triggers start firing at once." }] : []),
+      ...(secretUse ? [SECRET_USE_NOTE] : []),
       workflowFields(draft, api.workspacesDir),
-      ...(await unionSections(api, union, ctx.caller, { childrenJoinGrant: await unionGrantable(api, union, ctx.caller) })),
+      ...(await unionSections(api, union, ctx.caller, { childrenJoinGrant: !secretUse && (await unionGrantable(api, union, ctx.caller)) })),
       ...definitionSections(draft, prompts, api.workspacesDir),
       ...problemSections(problems)
     ];
@@ -924,7 +929,8 @@ const createWorkflow = defineTool({
       scopeLabel: unionLabel(union),
       sections,
       pins: previewPins(null, prompts, union),
-      ...unionGrantFields(union)
+      ...unionGrantFields(union),
+      ...(secretUse ? { ungrantable: true as const } : {})
     };
   },
   annotations: MUTATING,
@@ -986,12 +992,15 @@ const updateWorkflow = defineTool({
     const everything = enables || JSON.stringify(current.project) !== JSON.stringify(after.project);
     const only = everything ? undefined : diff.touched;
     const prompts = await promptsFor(api, after, union, only);
+    // Adding or changing a block that reads a secret, or retargeting one: never granted.
+    const secretUse = changesSecretUse(current, after, diff.touched);
     const sections: ApprovalPreviewSection[] = [
       ...(enables ? [{ kind: "warning" as const, level: "caution" as const, text: "Enables the workflow: its schedule and git triggers start firing." }] : []),
+      ...(secretUse ? [SECRET_USE_NOTE] : []),
       ...diff.sections,
       { kind: "code", title: "Ops", language: "json", text: JSON.stringify(args.ops, null, 2) },
       workflowFields(after, api.workspacesDir, "The workflow after the change"),
-      ...(await unionSections(api, union, ctx.caller, { childrenJoinGrant: await unionGrantable(api, union, ctx.caller) })),
+      ...(await unionSections(api, union, ctx.caller, { childrenJoinGrant: !secretUse && (await unionGrantable(api, union, ctx.caller)) })),
       ...definitionSections(after, prompts, api.workspacesDir, only),
       ...problemSections(problems)
     ];
@@ -1003,7 +1012,8 @@ const updateWorkflow = defineTool({
       workflowId: current.id,
       pins: previewPins(current, prompts, union),
       // A grant covers the edit only if it covers every sub-workflow it wires in (§7.6).
-      ...unionGrantFields(union)
+      ...unionGrantFields(union),
+      ...(secretUse ? { ungrantable: true as const } : {})
     };
   },
   annotations: MUTATING,

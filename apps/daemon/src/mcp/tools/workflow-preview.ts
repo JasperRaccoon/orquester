@@ -21,6 +21,7 @@ import {
   isTriggerType,
   reachableFromTriggers,
   triggerSummaryText,
+  upstreamOf,
   WORKFLOW_LIMITS,
   workflowRoutes,
   type AccountSummary,
@@ -289,6 +290,69 @@ export function unionGrantFields(union: WorkflowUnion): { childWorkflowIds?: str
     ...(union.missing.length > 0 || union.children.some((child) => child.name === null) ? { ungrantable: true as const } : {})
   };
 }
+
+// ---------------------------------------------------------------------------
+// Secrets: a change to what a workflow does with one is never granted (final review)
+// ---------------------------------------------------------------------------
+
+/** A `{{ … secrets … }}` template (any field); in a Code block, `secrets` in its source beyond the argument list. */
+const SECRET_TEMPLATE = /\{\{[^}]*\bsecrets\b/;
+const SECRET_IDENTIFIER = /\bsecrets\b/;
+/** A module's destructured argument list (`function ({ input, secrets, … })`, `({ … }) =>`): naming `secrets` there reads nothing. */
+const ARGUMENT_LISTS = /function\s*\w*\s*\(\s*\{[^}]*\}\s*\)|\(\s*\{[^}]*\}\s*\)\s*=>/g;
+/** Any template other than a secret's: the block interpolates data another block can shape. */
+const ANY_TEMPLATE = /\{\{/g;
+
+/**
+ * Whether a block can read a workflow secret: a `{{ secrets.NAME }}` template in any config field
+ * (HTTP URL/headers/query/body, a Shell `env` value, an agent prompt…) or, in a Code block, the
+ * `secrets` argument used in its body (the standard `function ({ …, secrets, … })` signature alone
+ * does not count). Textual, so best-effort for Code (its process receives every secret); over-matching
+ * only costs a card.
+ */
+export function blockUsesSecrets(node: Pick<WorkflowNode, "type" | "config">): boolean {
+  if (node.type === "code") {
+    const config: unknown = node.config;
+    const source = isRecord(config) && typeof config.source === "string" ? config.source : JSON.stringify(config ?? {});
+    return SECRET_IDENTIFIER.test(source.replace(ARGUMENT_LISTS, ""));
+  }
+  return SECRET_TEMPLATE.test(JSON.stringify(node.config ?? {}));
+}
+
+/** Whether a secret-reading block also takes data another block shapes (code reads `nodes`/`input`; a non-secret template). */
+function interpolatesOtherData(node: Pick<WorkflowNode, "type" | "config">): boolean {
+  if (node.type === "code") return true;
+  const text = JSON.stringify(node.config ?? {});
+  const templates = text.match(ANY_TEMPLATE)?.length ?? 0;
+  const secretTemplates = text.match(/\{\{[^}]*\bsecrets\b/g)?.length ?? 0;
+  return templates > secretTemplates;
+}
+
+/**
+ * Whether a create or an edit changes what the workflow does with a secret — then no grant covers
+ * it and the user approves every such call (`ungrantable`): a created workflow with any block that
+ * reads a secret; an edit that adds or changes such a block, or makes it newly reachable (`touched`,
+ * the graph diff's set), or changes a block upstream of one that also interpolates other blocks'
+ * data (that can retarget it: an HTTP URL built from an earlier block's output).
+ */
+export function changesSecretUse(before: Pick<Workflow, "nodes" | "edges"> | null, after: Pick<Workflow, "nodes" | "edges">, touched: ReadonlySet<string> | null): boolean {
+  const users = after.nodes.filter(blockUsesSecrets);
+  if (users.length === 0) return false;
+  if (before === null || touched === null) return true;
+  for (const node of users) {
+    if (touched.has(node.id)) return true;
+    if (!interpolatesOtherData(node)) continue;
+    for (const id of upstreamOf(after, node.id)) if (touched.has(id)) return true;
+  }
+  return false;
+}
+
+/** The card's note when {@link changesSecretUse}: why no grant is offered. */
+export const SECRET_USE_NOTE: ApprovalPreviewSection = {
+  kind: "warning",
+  level: "caution",
+  text: "This changes a block that reads a workflow secret (or what feeds it): a chat grant never covers such a change, so it asks you every time."
+};
 
 /**
  * Whether a chat grant could be offered on this card at all (the executor and the port decide; this
