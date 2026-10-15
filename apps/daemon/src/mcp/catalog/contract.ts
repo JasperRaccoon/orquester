@@ -160,6 +160,15 @@ export interface ApprovalPreview {
   workflowId?: string;
   /** `workflows` family raised by a saved-prompt edit a workflow references: never grantable. */
   workflowReferencedPrompt?: boolean;
+  /**
+   * `workflows` family: the OTHER workflows the call runs or wires in (sub-workflows, recursively).
+   * A grant covers the call only when the same grant also covers each of them (§7.6: a grant covers
+   * only workflows created or approved in that chat). A grant the user CHOOSES on such a card
+   * (`grantChosen`) is made for the workflow AND these, so the card must name each of them.
+   */
+  childWorkflowIds?: string[];
+  /** This call is never covered by a grant and its card offers none (e.g. a scope member that no longer resolves: fail closed). */
+  ungrantable?: boolean;
 }
 
 /** One card the executor asks the port to show and wait on. */
@@ -212,6 +221,8 @@ export type ApprovalOutcome =
       grantId?: string;
       /** With `grantId`: that grant's reach (the scope the user chose, or the chat grant a create joined). */
       grantScope?: "chat" | "project";
+      /** The grant scope the user CHOSE on this card; absent for approve-once (a create joining the chat's grant included). */
+      grantChosen?: ToolApprovalGrantScope;
       secrets?: Record<string, string>;
     }
   | { outcome: "denied"; approvalId: string; reason?: string }
@@ -225,7 +236,8 @@ export interface ApprovalPort {
   /** Open a card and wait for the user, the deadline or `signal` (→ `cancelled`). */
   request(card: ApprovalRequest, signal: AbortSignal): Promise<ApprovalOutcome>;
   /**
-   * After an approved `create_workflow` ran: add the new workflow's id to the chat's `workflows`
+   * After an approved `create_workflow` ran — or, for the sub-workflows a card named, right after the
+   * user chose a grant on it: add the workflow's id to the chat's `workflows`
    * grant named by `grantId` — the approved outcome's `grantId` (the grant the approval created with
    * `grant: "chat"`, or the one the card said the create would join). Called ONLY with that id:
    * approving once never widens a standing grant (ruling). A no-op when `grantId` is not that chat's

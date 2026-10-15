@@ -349,6 +349,19 @@ describe("engine: the graph walk", () => {
     await assert.rejects(h.engine.run("nope", {}), (error: unknown) => error instanceof WorkflowEngineError && error.code === "WORKFLOW_NOT_FOUND");
   });
 
+  test("expectedRevision: a manual run starts only on that revision, refused before any block otherwise", async () => {
+    const code = scripted("code");
+    const wf = workflow("w1", [T(), node("A", "code")], [edge("T", "A")]);
+    const h = createHarness({ workflows: [wf], executors: { code } });
+    const revision = wf.revision;
+    await assert.rejects(h.engine.run("w1", { expectedRevision: revision + 1 }), (error: unknown) => error instanceof WorkflowEngineError && error.code === "REVISION_CONFLICT" && error.statusCode === 409);
+    await assert.rejects(h.engine.run("w1", { expectedRevision: -1 }), (error: unknown) => error instanceof WorkflowEngineError && error.code === "INVALID_REQUEST");
+    assert.deepEqual(code.seen, [], "no block started");
+    const { run } = await runToEnd(h, "w1", { expectedRevision: revision });
+    assert.equal(run.definition.revision, revision);
+    assert.deepEqual(code.seen, ["A"]);
+  });
+
   test("a projectOverride block runs in that project; a missing one fails the block", async () => {
     let seenPath = "";
     const code = scripted("code", {

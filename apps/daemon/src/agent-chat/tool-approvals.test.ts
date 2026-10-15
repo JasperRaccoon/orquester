@@ -193,7 +193,7 @@ test("a grant outside grantOptions is 400 and the card stays pending; an offered
   const ok = await h.registry.answer("t1", "a1", { decision: "approve", grant: "chat" });
   assert.deepEqual(ok, { ok: true, response: { ok: true, outcome: "approved", grantId: "g1" } });
   assert.equal(committed, "chat");
-  assert.deepEqual(await waiting, { outcome: "approved", approvalId: "a1", grantId: "g1" });
+  assert.deepEqual(await waiting, { outcome: "approved", approvalId: "a1", grantId: "g1", grantChosen: "chat" });
   assert.match(h.logs.at(-1)!, /outcome=approved \(grant=chat\)/);
 });
 

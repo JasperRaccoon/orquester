@@ -90,6 +90,8 @@ test("TOOLSETS agree with the catalog: a chat tool TOOLSETS names sits in that t
 test("transitional counts: the external surface is tool-names.ts's list, each tool legacy or one TOOLSETS names; chat is the legacy session tools plus the families landed", () => {
   assert.deepEqual([...externalMcpToolNames()].sort(), [...EXTERNAL_MCP_TOOL_NAMES].sort());
   assert.equal(catalogFor("external").length, EXTERNAL_MCP_TOOL_NAMES.length);
+  // Task 10 (workflows): 72 − validate_workflow, list_workflow_runs, get_workflow_run + get_workflow_runs.
+  assert.ok(EXTERNAL_MCP_TOOL_NAMES.length <= 72);
   // Each Wave 3 family replaces its legacy entries with TOOLSETS tools (Task 14 pins 41 / 45 / 22).
   const specNames = new Set(chatToolNames());
   for (const tool of catalogFor("external")) {
@@ -178,6 +180,7 @@ const PURE_MODULES = new Set([
   "mcp/tools/usage.ts",
   "mcp/tools/visuals.ts",
   "mcp/tools/watch.ts",
+  "mcp/tools/workflow-preview.ts",
   "mcp/tools/workflows-guide.ts",
   "mcp/tools/workflows.ts",
   // Task 12: the todo tools' /api/todos client (DaemonApi only; the store is a type import).

@@ -54,6 +54,7 @@ import type {
   ApprovalPreview,
   ApprovalRequest,
   Audience,
+  GrantQuery,
   CallContext,
   ScopeClaim,
   ScopeContext,
@@ -353,6 +354,7 @@ async function execute(deps: ExecutorDeps, call: { name: string; arguments: unkn
       approval = outcome.approval;
       card = { preview: outcome.preview, family: outcome.family };
       args = outcome.frozenArgs;
+      if (outcome.grantChosen === true) await recordChildrenInGrant(deps, caller, card, approval);
       // §13: the caller may have changed while the card waited (now planning, a narrower mode): the
       // gate re-runs on it, and the call proceeds as the caller is now. A card it would raise again
       // is the one the user just answered.
@@ -399,6 +401,8 @@ type CardOutcome =
       family: string;
       frozenArgs: Record<string, unknown>;
       reference: ToolApprovalReference;
+      /** The user chose a grant on this card (T10: sub-workflows join that grant). */
+      grantChosen?: boolean;
     }
   | { kind: "refused"; error: ToolError; reference: ToolApprovalReference }
   | { kind: "cancelled"; reason?: ApprovalCancelReason; reference: ToolApprovalReference };
@@ -428,8 +432,8 @@ async function passCard(
 
   // A grant covers the call without a card (full-access, non workflow-owned callers only; §7.6).
   // Grants are recorded for the caller's canonical project: without one, none can match (skip the read).
-  if (port && ownProject !== null) {
-    const grant = await port.findGrant({
+  if (port && ownProject !== null && preview?.ungrantable !== true) {
+    const query: GrantQuery = {
       family,
       callerRuntimeMode: caller.runtimeMode,
       workflowOwned: caller.workflowOwned,
@@ -441,7 +445,15 @@ async function passCard(
       ...(decision.targetProjectPath ? { targetProjectPath: decision.targetProjectPath } : {}),
       ...(preview?.workflowId ? { workflowId: preview.workflowId } : {}),
       ...(preview?.workflowReferencedPrompt ? { workflowReferencedPrompt: true } : {})
-    });
+    };
+    let grant = await port.findGrant(query);
+    // Every other workflow the call runs (sub-workflows) must be covered by that same grant.
+    for (const child of grant ? (preview?.childWorkflowIds ?? []) : []) {
+      if ((await port.findGrant({ ...query, workflowId: child }))?.id !== grant!.id) {
+        grant = null;
+        break;
+      }
+    }
     if (grant) {
       const reference: ToolApprovalReference = {
         kind: decision.approvalKind,
@@ -476,7 +488,7 @@ async function passCard(
   const grantOptions =
     // A grant is recorded for the caller's canonical project: none without one (findGrant never
     // honours projectPath ""); a cross-project grant needs its single target.
-    ownProject === null || (decision.approvalKind === "boundary" && decision.family === "cross-project" && !decision.targetProjectPath)
+    ownProject === null || preview?.ungrantable === true || (decision.approvalKind === "boundary" && decision.family === "cross-project" && !decision.targetProjectPath)
       ? []
       : grantOptionsFor({
           family,
@@ -533,7 +545,8 @@ async function passCard(
         },
         preview,
         family,
-        frozenArgs
+        frozenArgs,
+        ...(outcome.grantChosen !== undefined ? { grantChosen: true } : {})
       };
     case "denied":
       return {
@@ -577,6 +590,29 @@ async function afterApprovedRun(
   await port
     .recordWorkflowInGrant({ threadId: caller.threadId, callerProjectPath: caller.projectPath, workflowId, grantId })
     .catch((error) => console.error("[mcp] could not record a workflow in its grant", error instanceof Error ? error.message : "unknown error"));
+}
+
+/**
+ * A `workflows` card the user approved WITH an explicit grant choice (`grantChosen`; never
+ * approve-once, never a create joining the chat's grant), for a workflow that runs sub-workflows
+ * (`preview.childWorkflowIds`, each named on the card): the grant the user made covers those
+ * children too, so it can ever take effect (§7.6: the grant rule above needs them all).
+ */
+async function recordChildrenInGrant(
+  deps: ExecutorDeps,
+  caller: ThreadCaller,
+  card: { preview: ApprovalPreview | null; family: string },
+  approval: NonNullable<CallContext["approval"]>
+): Promise<void> {
+  const children = card.preview?.childWorkflowIds ?? [];
+  if (card.family !== "workflows" || approval.outcome !== "approved" || !approval.grantId || children.length === 0) return;
+  const port = deps.approvals === undefined ? executorPorts.approvals : deps.approvals;
+  if (!port) return;
+  for (const workflowId of children) {
+    await port
+      .recordWorkflowInGrant({ threadId: caller.threadId, callerProjectPath: caller.projectPath, workflowId, grantId: approval.grantId })
+      .catch((error) => console.error("[mcp] could not record a sub-workflow in its grant", error instanceof Error ? error.message : "unknown error"));
+  }
 }
 
 /**
