@@ -1,3 +1,7 @@
+// Catalog family module `workflows` (Workflows) — owned by plan Task 10 (unified MCP, Wave 3).
+// Task 2 stub: `workflowsFamily` exports this family's tools as catalog tools (`../catalog/legacy.ts`
+// adapters over the pre-catalog definitions below); the owning task replaces it and Task 2 never
+// edits this file again.
 // Automated workflows through the MCP (docs/superpowers/specs/2026-09-28-automated-workflows-design.md §8.3).
 //
 // Every tool is an in-process client of the daemon's workflow routes (`workflowRoutes`), through DaemonApi only. The
@@ -45,6 +49,7 @@ import { daemonError, ToolError } from "../errors.ts";
 import { clipText, fitJsonBytes, jsonBytes, MAX_ECHO_CHARS, MAX_RESULT_BYTES, resultBytes, wholeUtf8Length } from "../result.ts";
 import { defineTool, DESTRUCTIVE, MUTATING, MUTATING_IDEMPOTENT, READ_ONLY, type ToolDef } from "../tool.ts";
 import { WORKFLOW_AUTHORING_GUIDE } from "./workflows-guide.ts";
+import { legacyExternalTools } from "../catalog/legacy.ts";
 
 /** What a workflow tool plans its result to: the cap less room for ok()'s own framing and a few keys added last. */
 const WORKFLOW_RESULT_BUDGET = MAX_RESULT_BYTES - 4_000;
@@ -1063,3 +1068,6 @@ export const workflowTools: ToolDef[] = [
   listBlockTypes, listWorkflows, getWorkflow, createWorkflow, updateWorkflow, validateWorkflowTool, deleteWorkflow,
   previewExpression, runWorkflow, listRuns, getRun, cancelRun, listSecrets, setSecret
 ];
+
+/** This family in the catalog (`../catalog/index.ts`). */
+export const workflowsFamily = legacyExternalTools(workflowTools);

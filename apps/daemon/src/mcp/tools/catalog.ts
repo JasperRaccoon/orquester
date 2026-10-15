@@ -1,3 +1,7 @@
+// Catalog family module `catalog` (Discovery: list_projects, list_agents, list_conversations) — owned by plan Task 9 (unified MCP, Wave 3).
+// Task 2 stub: `catalogFamily` exports this family's tools as catalog tools (`../catalog/legacy.ts`
+// adapters over the pre-catalog definitions below); the owning task replaces it and Task 2 never
+// edits this file again.
 import { z } from "zod";
 import type { AgentConversationsResponse, ProjectSummary, RecentProjectSummary, RegistryResponse, WorkspaceSummary } from "@orquester/api";
 import { resolveProject } from "../addressing.ts";
@@ -7,6 +11,7 @@ import { ToolError, expectOk } from "../errors.ts";
 import { listSessions } from "../reads.ts";
 import { MAX_RESULT_BYTES, resultBytes } from "../result.ts";
 import { defineTool, READ_ONLY, type ToolDef } from "../tool.ts";
+import { legacyExternalTools } from "../catalog/legacy.ts";
 
 /**
  * One workspace's projects, or the warning that stands in for them: a workspace that cannot be read is left out
@@ -144,3 +149,6 @@ const listConversations = defineTool({
 });
 
 export const catalogTools: ToolDef[] = [listProjects, listAgents, listConversations];
+
+/** This family in the catalog (`../catalog/index.ts`). */
+export const catalogFamily = legacyExternalTools(catalogTools);

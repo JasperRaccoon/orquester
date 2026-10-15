@@ -1,3 +1,7 @@
+// Catalog family module `requests` (Provider requests: respond_to_request) — owned by plan Task 7 (unified MCP, Wave 3).
+// Task 2 stub: `requestsFamily` exports this family's tools as catalog tools (`../catalog/legacy.ts`
+// adapters over the pre-catalog definitions below); the owning task replaces it and Task 2 never
+// edits this file again.
 import { z } from "zod";
 import type { ApprovalDecision, AttachmentRef } from "@orquester/api/agent-chat";
 import { attachmentInputSchema, MAX_ATTACHMENTS, uploadInlineAttachments, type AttachmentInput } from "../attachments.ts";
@@ -7,6 +11,7 @@ import { readThread, requireChatSession, sendCommand } from "../reads.ts";
 import { clipText, MAX_ECHO_CHARS } from "../result.ts";
 import { defineTool, MUTATING, type ToolDef } from "../tool.ts";
 import { chatDetail, pendingApprovalViews, pendingQuestionViews, type PendingQuestionView } from "../views.ts";
+import { legacyExternalTools } from "../catalog/legacy.ts";
 
 const sessionIdField = z.string().min(1).describe("The session id from list_sessions.");
 // min(1): an empty requestId is not an omitted one — read as omitted, it would act on the one request pending.
@@ -208,3 +213,6 @@ const resolveApproval = defineTool({
 });
 
 export const requestTools: ToolDef[] = [answerQuestion, dismissQuestion, resolveApproval];
+
+/** This family in the catalog (`../catalog/index.ts`). */
+export const requestsFamily = legacyExternalTools(requestTools);

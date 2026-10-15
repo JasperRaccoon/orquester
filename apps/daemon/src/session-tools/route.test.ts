@@ -16,7 +16,11 @@ import Fastify, { type FastifyInstance } from "fastify";
 
 import { agentHostAuthValue } from "../agent-host/host-protocol.ts";
 import { createDaemonForwarder } from "../agent-host/session-tools/forwarder.ts";
+import { agentChatRoutes } from "@orquester/api/agent-chat";
 import type { DaemonApi } from "../mcp/daemon-api.ts";
+import { legacyChatTools } from "../mcp/catalog/legacy.ts";
+import { chatSummary, head, snapshot } from "../mcp/fixtures.ts";
+import { FakeDaemonApi } from "../mcp/testing.ts";
 import { defineSessionTool, defineSessionToolkit, SESSION_TOOL_READ_ONLY } from "./contract.ts";
 import { createSessionToolRegistry, type SessionToolRegistry } from "./registry.ts";
 import { DAEMON_UNAVAILABLE_MESSAGE, jsonResult } from "./results.ts";
@@ -30,7 +34,19 @@ const TOKEN = "host-token-0123456789";
 const THREADS: Record<string, SessionToolThread> = {
   "thread-a": { projectPath: "/ws/w/proj-a", cwd: "/ws/w/proj-a/sub", agentId: "codex" }
 };
-const fakeApi = {} as DaemonApi;
+/** The daemon's view of thread-a: its tab and its snapshot (the route builds the caller from them). */
+function fakeApiFor(): FakeDaemonApi {
+  return new FakeDaemonApi()
+    .on("GET", "/api/sessions", { status: 200, body: [chatSummary({ id: "thread-a", projectPath: "/ws/w/proj-a", cwd: "/ws/w/proj-a/sub" })] })
+    .on("GET", agentChatRoutes.thread("thread-a"), { status: 200, body: { kind: "snapshot", thread: snapshot({ head: head({ id: "thread-a", runtimeMode: "auto" }) }) } });
+}
+const fakeApi = fakeApiFor();
+
+/** The registry's tools as the catalog would serve them. */
+const lookupOf = (registry: SessionToolRegistry) => {
+  const tools = new Map(legacyChatTools(registry.tools).map((tool) => [tool.name, tool]));
+  return (name: string) => tools.get(name);
+};
 
 /** A tool that parks until its call is cancelled, and says when the handler saw the abort. */
 function holdingToolkit() {
@@ -79,7 +95,7 @@ async function daemon(
     authorizeHost: (authorization) => authorization === agentHostAuthValue(TOKEN),
     resolveThread: (threadId) => THREADS[threadId] ?? null,
     api: () => api,
-    registry: () => registry,
+    lookup: lookupOf(registry),
     ...(secretRequests !== undefined ? { secretRequests } : {})
   });
   await app.listen({ path: socketPath });
@@ -130,7 +146,7 @@ test("results: image content, a coded handler error, an unknown tool", async (t)
   assert.equal(textOf(failed), "CONFLICT: This tool always fails.");
   const unknown = await forward({ threadId: "thread-a", callId: "c", name: "nope", arguments: {} }, signal);
   assert.equal(unknown.isError, true);
-  assert.match(textOf(unknown), /^NOT_FOUND/);
+  assert.match(textOf(unknown), /^TOOL_NOT_FOUND/);
 });
 
 test("only the host's bearer is honoured, and only for a thread the daemon knows", async (t) => {

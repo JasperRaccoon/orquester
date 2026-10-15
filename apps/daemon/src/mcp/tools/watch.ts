@@ -1,3 +1,7 @@
+// Catalog family module `watch` (Waiting: wait_for_session) — owned by plan Task 8 (unified MCP, Wave 3).
+// Task 2 stub: `watchFamily` exports this family's tools as catalog tools (`../catalog/legacy.ts`
+// adapters over the pre-catalog definitions below); the owning task replaces it and Task 2 never
+// edits this file again.
 import { z } from "zod";
 import type { SessionSummary } from "@orquester/api";
 import { resolveProject } from "../addressing.ts";
@@ -6,6 +10,7 @@ import { findSession } from "../reads.ts";
 import { defineTool, READ_ONLY, type ToolDef } from "../tool.ts";
 import { buildViewContext, sessionView } from "../views.ts";
 import { waitForAttention, type WatchScope } from "../wait.ts";
+import { legacyExternalTools } from "../catalog/legacy.ts";
 
 const instant = (stamp: string | null | undefined): number => Date.parse(stamp ?? "");
 const createdAt = (s: SessionSummary): number => { const t = instant(s.createdAt); return Number.isNaN(t) ? 0 : t; };
@@ -51,3 +56,6 @@ const waitForSession = defineTool({
 });
 
 export const watchTools: ToolDef[] = [waitForSession];
+
+/** This family in the catalog (`../catalog/index.ts`). */
+export const watchFamily = legacyExternalTools(watchTools);

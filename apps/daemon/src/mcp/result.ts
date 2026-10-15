@@ -1,3 +1,4 @@
+import type { z } from "zod";
 import { utf8SequenceLength } from "@orquester/api/agent-chat";
 import { FsSandboxError } from "@orquester/config/fs";
 import { TodoError } from "../todos.ts";
@@ -121,4 +122,25 @@ export function toSafeToolError(err: unknown): { content: [TextContent]; structu
   const structured: { code: string; message: string; detail?: unknown } = { code, message };
   if (detail !== undefined) structured.detail = detail;
   return { content: [{ type: "text", text: `${code}: ${message}` }], structuredContent: structured, isError: true };
+}
+
+/** How many refused fields an INVALID_ARGUMENT names before "…". */
+const MAX_NAMED_ISSUES = 5;
+/**
+ * The most one refused field's text takes, and the most its path takes within it. zod's words can echo the caller's
+ * input — the value an enum received, a strict object's unknown keys, a record's key in the path — and a 2 MiB value
+ * must not make a 2 MiB error. The path is cut on its own, so the reason after it still shows.
+ */
+const MAX_ISSUE_CHARS = 200;
+const MAX_ISSUE_PATH_CHARS = 100;
+
+/** The one line an argument the schema refuses answers with: each bad field and why, as zod words it, each capped. */
+export function argumentProblems(toolName: string, error: z.ZodError): string {
+  const oneLine = (text: string) => text.replace(/\s+/g, " ");
+  const named = error.issues.slice(0, MAX_NAMED_ISSUES).map((issue) => {
+    const path = issue.path.length ? clipText(oneLine(issue.path.join(".")), MAX_ISSUE_PATH_CHARS) : "arguments";
+    return clipText(oneLine(`${path}: ${issue.message}`), MAX_ISSUE_CHARS);
+  });
+  const more = error.issues.length > MAX_NAMED_ISSUES ? "; …" : "";
+  return `Invalid arguments for ${toolName}: ${named.join("; ")}${more}.`;
 }

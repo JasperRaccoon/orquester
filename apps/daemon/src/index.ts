@@ -169,7 +169,7 @@ import { InjectDaemonApi } from "./mcp/daemon-api.ts";
 import { HtmlPreviewBrowser } from "./html-preview/index.ts";
 import { FsTools } from "./mcp/fs-tools.ts";
 import { registerMcp } from "./mcp/server.ts";
-import { sessionToolRegistry } from "./session-tools/index.ts";
+import { externalCredentialId, registerPrincipalHook, registerRemoteFieldStripping } from "./mcp/principal.ts";
 import { registerSessionToolsRoute } from "./session-tools/route.ts";
 import { TodoTools } from "./mcp/todo-tools.ts";
 import {
@@ -1517,6 +1517,15 @@ export function createServer(
     }
     throttle.recordSuccess(ip);
   });
+
+  // umcp:t2 begin — principals (unified MCP design 2026-10-15; `@orquester/api` principal.ts).
+  // After the bearer hook: an unauthenticated request never reaches the token registry. Both apps
+  // resolve the in-process principal token; a request without one is the user's (the GUI, a local
+  // CLI, a direct REST call with the bearer). The remote app also strips socket-trusted body
+  // fields (`causedBy` on turns and merge-backs) before any route reads them.
+  registerPrincipalHook(app);
+  if (options.mode === "remote") registerRemoteFieldStripping(app);
+  // umcp:t2 end
 
   // Public: tells the web client whether auth is needed and the bcrypt salt to
   // derive the bearer (the same hash the daemon stores). Never exposes the hash
@@ -4498,17 +4507,18 @@ export function createServer(
     });
   }
 
+  // umcp:t2 begin — both transports of the unified catalog (design 2026-10-15 §3.3), through ONE
+  // executor whose ports (`executorPorts`: approvals, toolsets) the umcp:t3 block wires.
   // Session tools (design 2026-10-14 §1.1) — the agent host's call-back
   // route, SOCKET-ONLY: never on remote HTTP. It also requires the host's
-  // own bearer, and derives the caller's project, cwd and provider from the
-  // thread's tab record. Handlers reach the daemon through the unix app's
-  // in-process client, as the workflow engine does.
+  // own bearer, and derives the caller from the thread's tab record and
+  // snapshot. Handlers reach the daemon through the unix app's in-process
+  // client, as the workflow engine does, each request carrying the agent's principal.
   if (options.mode === "local") {
     registerSessionToolsRoute(app, {
       authorizeHost: (authorization) => services.agentChat?.authorizeHostRequest(authorization) ?? false,
       resolveThread: (threadId) => services.agentChat?.sessionToolThread(threadId) ?? null,
       api: () => services.internalApi,
-      registry: sessionToolRegistry,
       ...(services.secretRequests ? { secretRequests: services.secretRequests } : {})
     });
   }
@@ -4516,7 +4526,8 @@ export function createServer(
   // Orquester MCP — HTTP-only. The unix socket is unauthenticated, so full
   // session drive must never be reachable there; register /mcp only on remote.
   // Each request's tools call this app's own routes in-process with the
-  // caller's bearer (spec §4.2), so every gate and error code is the GUI's.
+  // caller's bearer (spec §4.2), so every gate and error code is the GUI's;
+  // each call acts as the external principal of the authenticated credential.
   if (options.mode === "remote") {
     registerMcp(app, {
       createApi: (authorization) =>
@@ -4528,10 +4539,12 @@ export function createServer(
           fsRoot: resolved.fsRoot,
           workspacesDir: resolved.workspacesDir
         }),
+      credentialId: () => externalCredentialId(config.transports.http.username),
       todos: new TodoTools({ todos, workspacesDir: resolved.workspacesDir }),
       files: new FsTools({ fsRoot: resolved.fsRoot })
     });
   }
+  // umcp:t2 end
 
   // Serve the static web client build for everything outside the API, with an
   // SPA fallback to index.html. Reserved prefixes stay JSON 404s.

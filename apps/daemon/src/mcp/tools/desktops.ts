@@ -1,3 +1,7 @@
+// Catalog family module `desktops` (Desktops) — owned by plan Task 12 (unified MCP, Wave 3).
+// Task 2 stub: `desktopsFamily` exports this family's tools as catalog tools (`../catalog/legacy.ts`
+// adapters over the pre-catalog definitions below); the owning task replaces it and Task 2 never
+// edits this file again.
 // Desktop tabs through the MCP (docs/superpowers/specs/2026-09-30-desktop-tab-design.md §7.4).
 //
 // A desktop is a virtual X display on the daemon's host that GUI apps run in, shown to the user as a tab. Every tool is
@@ -22,6 +26,7 @@ import type { DaemonResponse } from "../daemon-api.ts";
 import { daemonError, ToolError } from "../errors.ts";
 import { clipText, jsonBytes, MAX_ECHO_CHARS } from "../result.ts";
 import { defineTool, DESTRUCTIVE, MUTATING, READ_ONLY, type ToolDef } from "../tool.ts";
+import { legacyExternalTools } from "../catalog/legacy.ts";
 
 /** What desktop_app_log returns of a log at most: its tail, well under ok()'s 60 000-byte cap once JSON-escaped. */
 const LOG_RESULT_BYTES = 50_000;
@@ -240,3 +245,6 @@ const desktopClose = defineTool({
 });
 
 export const desktopTools: ToolDef[] = [desktopsList, desktopHostStatus, desktopOpen, desktopLaunchApp, desktopWindows, desktopWindowAction, desktopAppLog, desktopStopApp, desktopClose];
+
+/** This family in the catalog (`../catalog/index.ts`). */
+export const desktopsFamily = legacyExternalTools(desktopTools);

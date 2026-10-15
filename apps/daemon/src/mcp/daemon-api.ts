@@ -1,15 +1,24 @@
 import type { FastifyInstance } from "fastify";
 import type { Readable } from "node:stream";
 import type { EventMessage } from "@orquester/api";
-import type { HtmlRenderAppearance, HtmlRenderReference } from "@orquester/api/agent-chat";
+import { PRINCIPAL_TOKEN_HEADER, type CallerPrincipal, type HtmlRenderAppearance, type HtmlRenderReference } from "@orquester/api/agent-chat";
 import type { Broadcaster } from "../broadcaster.ts";
 import type { AgentChatService } from "../agent-chat/service.ts";
 import { HtmlRenderPublishError } from "../agent-chat/html-render-publish.ts";
 import { HtmlPreviewError, type HtmlPreview } from "../html-preview/index.ts";
 import { isUploadTooLarge, UploadTooLargeError } from "../upload-stream.ts";
+import { mintPrincipalToken } from "./principal.ts";
 
 export type DaemonMethod = "GET" | "POST" | "PUT" | "DELETE";
 export interface DaemonResponse { status: number; body: unknown }
+
+/**
+ * One request's options. `principal` (unified MCP design 2026-10-15, `@orquester/api`
+ * `agent-chat/principal.ts`): who the request acts for — the in-process client mints a single-use
+ * nonce for it (`./principal.ts`), sends it in the principal header, and releases it once the
+ * request settled; the route reads `request.principal`. Absent: the request is the user's.
+ */
+export interface DaemonRequestOptions { query?: Record<string, string>; body?: unknown; principal?: CallerPrincipal }
 
 /** An answer or a refusal whose message is written for the agent; never a throw. */
 export type DaemonOutcome<T> = { ok: true; value: T } | { ok: false; code: string; message: string };
@@ -40,7 +49,7 @@ export type { HtmlPreview };
  * gate, validation and error code is the GUI's by construction.
  */
 export interface DaemonApi {
-  request(method: DaemonMethod, path: string, opts?: { query?: Record<string, string>; body?: unknown }): Promise<DaemonResponse>;
+  request(method: DaemonMethod, path: string, opts?: DaemonRequestOptions): Promise<DaemonResponse>;
   /** Owns `bytes`: reads it or destroys it. InjectDaemonApi never throws here — a failed upload is an answer (§4.5 codes), as over HTTP. */
   uploadAttachment(sessionId: string, meta: { name: string; type?: string }, bytes: Readable): Promise<{ status: number; value: unknown }>;
   subscribe(listener: (event: EventMessage) => void): () => void;
@@ -92,17 +101,26 @@ export class InjectDaemonApi implements DaemonApi {
     return typeof this.opts.workspacesDir === "function" ? this.opts.workspacesDir() : this.opts.workspacesDir;
   }
 
-  async request(method: DaemonMethod, path: string, opts?: { query?: Record<string, string>; body?: unknown }): Promise<DaemonResponse> {
+  async request(method: DaemonMethod, path: string, opts?: DaemonRequestOptions): Promise<DaemonResponse> {
     const qs = opts?.query ? new URLSearchParams(opts.query).toString() : "";
     const headers: Record<string, string> = { accept: "application/json" };
     if (this.opts.authorization) headers.authorization = this.opts.authorization;
     if (opts?.body !== undefined) headers["content-type"] = "application/json";
-    const res = await this.opts.app.inject({
-      method,
-      url: qs ? `${path}${path.includes("?") ? "&" : "?"}${qs}` : path,
-      headers,
-      payload: opts?.body === undefined ? undefined : JSON.stringify(opts.body)
-    });
+    // A fresh single-use nonce per request; `app.inject` never crosses the network, and the
+    // token is released below whether or not the route resolved it.
+    const minted = opts?.principal ? mintPrincipalToken(opts.principal) : null;
+    if (minted) headers[PRINCIPAL_TOKEN_HEADER] = minted.token;
+    let res;
+    try {
+      res = await this.opts.app.inject({
+        method,
+        url: qs ? `${path}${path.includes("?") ? "&" : "?"}${qs}` : path,
+        headers,
+        payload: opts?.body === undefined ? undefined : JSON.stringify(opts.body)
+      });
+    } finally {
+      minted?.release();
+    }
     let body: unknown = null;
     if (res.body) {
       try { body = JSON.parse(res.body); } catch { body = res.body; }
@@ -158,4 +176,20 @@ export class InjectDaemonApi implements DaemonApi {
     this.opts.broadcaster.add(sink);
     return () => this.opts.broadcaster.remove(sink);
   }
+}
+
+/**
+ * `api` with every request acting for `principal` (the catalog executor's per-call binding): each
+ * `request` mints its own nonce. A request that already names a principal keeps its own.
+ */
+export function withPrincipal(api: DaemonApi, principal: CallerPrincipal): DaemonApi {
+  return {
+    request: (method, path, opts) => api.request(method, path, { ...opts, principal: opts?.principal ?? principal }),
+    uploadAttachment: (sessionId, meta, bytes) => api.uploadAttachment(sessionId, meta, bytes),
+    subscribe: (listener) => api.subscribe(listener),
+    publishHtmlRender: (request) => api.publishHtmlRender(request),
+    previewHtmlRender: (request) => api.previewHtmlRender(request),
+    get fsRoot() { return api.fsRoot; },
+    get workspacesDir() { return api.workspacesDir; }
+  };
 }

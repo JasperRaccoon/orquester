@@ -1,3 +1,7 @@
+// Catalog family module `output` (Tool output: read_tool_output) — owned by plan Task 7 (unified MCP, Wave 3).
+// Task 2 stub: `outputFamily` exports this family's tools as catalog tools (`../catalog/legacy.ts`
+// adapters over the pre-catalog definitions below); the owning task replaces it and Task 2 never
+// edits this file again.
 import { z } from "zod";
 import {
   THREAD_ITEM_OUTPUT_MAX_BYTES,
@@ -15,6 +19,7 @@ import { daemonError, ToolError } from "../errors.ts";
 import { requireChatSession } from "../reads.ts";
 import { clipText, MAX_ECHO_CHARS, MAX_RESULT_BYTES, resultBytes } from "../result.ts";
 import { defineTool, READ_ONLY, type ToolDef } from "../tool.ts";
+import { legacyExternalTools } from "../catalog/legacy.ts";
 
 /** A window's default size, in UTF-8 bytes of the text. */
 const DEFAULT_OUTPUT_BYTES = 40_000;
@@ -232,3 +237,6 @@ const readToolOutput = defineTool({
 });
 
 export const outputTools: ToolDef[] = [readToolOutput];
+
+/** This family in the catalog (`../catalog/index.ts`). */
+export const outputFamily = legacyExternalTools(outputTools);

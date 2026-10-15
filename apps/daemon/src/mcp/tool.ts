@@ -3,6 +3,7 @@ import type { ComposerContextRecord } from "@orquester/api/agent-chat";
 import type { DaemonApi } from "./daemon-api.ts";
 import type { TodoTools } from "./todo-tools.ts";
 import type { FsTools } from "./fs-tools.ts";
+import type { ToolAnnotations } from "./catalog/contract.ts";
 
 export interface ToolContext {
   api: DaemonApi;
@@ -19,8 +20,6 @@ export interface ToolContext {
   turnContext?: readonly ComposerContextRecord[];
 }
 
-export interface ToolAnnotations { readOnlyHint?: boolean; destructiveHint?: boolean; idempotentHint?: boolean; openWorldHint?: boolean }
-
 export interface ToolDef<Shape extends z.ZodRawShape = z.ZodRawShape> {
   name: string;
   title: string;
@@ -35,12 +34,9 @@ export function defineTool<Shape extends z.ZodRawShape>(def: ToolDef<Shape>): To
 }
 
 /**
- * `openWorldHint: false` says a tool touches only the daemon's own state. A read qualifies, as do the todo and file
- * tools; a tool that drives an agent does not — the agent it drives can reach anything — so it keeps the default (true).
+ * The annotation presets and `ToolAnnotations` now live with the catalog contract
+ * (`./catalog/contract.ts`, unified MCP design 2026-10-15 §3.2); re-exported here for the
+ * pre-catalog `ToolDef`s, which Task 14 removes with this shim.
  */
-export const READ_ONLY: ToolAnnotations = { readOnlyHint: true, idempotentHint: true, openWorldHint: false };
-export const MUTATING: ToolAnnotations = { readOnlyHint: false, destructiveHint: false, idempotentHint: false };
-export const MUTATING_IDEMPOTENT: ToolAnnotations = { readOnlyHint: false, destructiveHint: false, idempotentHint: true };
-export const DESTRUCTIVE: ToolAnnotations = { readOnlyHint: false, destructiveHint: true, idempotentHint: true };
-/** A write that stays inside the daemon's own state (the todo store): the same hints, and no open world. */
-export const closedWorld = (annotations: ToolAnnotations): ToolAnnotations => ({ ...annotations, openWorldHint: false });
+export { closedWorld, DESTRUCTIVE, MUTATING, MUTATING_IDEMPOTENT, READ_ONLY } from "./catalog/contract.ts";
+export type { ToolAnnotations } from "./catalog/contract.ts";
