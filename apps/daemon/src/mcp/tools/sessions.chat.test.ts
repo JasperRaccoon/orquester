@@ -57,11 +57,11 @@ function thread(id: string, over: Partial<ThreadSnapshotPayload> = {}): ThreadSn
 const QUESTION = { requestId: "q1", createdAt: stamp(1), dismissible: false, questions: [{ id: "db", header: "DB", question: "Which database?", options: [{ label: "Postgres", description: "pg" }], multiSelect: false, allowCustomAnswer: true }] };
 const SECRET_QUESTION = { requestId: "q2", createdAt: stamp(1), dismissible: false, questions: [{ id: "tok", header: "Token", question: "API token?", options: [], multiSelect: false, allowCustomAnswer: true }] };
 
-function rig(threads: Record<string, ThreadSnapshotPayload> = {}) {
+function rig(threads: Record<string, ThreadSnapshotPayload> = {}, extra: SessionSummary[] = []) {
   const api = new FakeDaemonApi();
   api.fsRoot = ROOT;
   api.workspacesDir = WS;
-  const sessions = tabs();
+  const sessions = [...tabs(), ...extra];
   api.on("GET", "/api/sessions", ({ query }) => ({ status: 200, body: query?.projectPath ? sessions.filter((s) => s.projectPath === query.projectPath) : sessions }))
     .on("GET", "/api/registry", { status: 200, body: { shells: [], ides: [], fileExplorers: [], browsers: [], agents: [{ id: "claude", kind: "agent", name: "Claude Code", bin: ["claude"], enabled: true, installState: "idle", chat: { adapter: "claude" } }] } })
     .on("GET", "/api/agent-accounts", { status: 200, body: { accounts: [], defaults: {} } })
@@ -108,9 +108,11 @@ test("list_sessions \"all\": narrowed below Full access to the workspace, never 
   const supervised = rig();
   const narrowed = body(await supervised.call("list_sessions", { project: "all", kind: "chat" }));
   assert.equal(narrowed.listed, "workspace");
-  assert.equal(narrowed.excludedProjects, 1);
+  assert.equal(narrowed.excludedProjects, 1, "beta/app (far) — a project counted once, for its chat tabs");
   const byId = new Map((narrowed.sessions as Record<string, any>[]).map((row) => [row.id, row]));
-  assert.deepEqual([...byId.keys()].sort(), ["child", "guifork", "me", "sib", "task", "web1"]);
+  // Its own agent-created children come along wherever they are (farkid, in another workspace); a GUI fork is the user's.
+  assert.deepEqual([...byId.keys()].sort(), ["child", "farkid", "guifork", "me", "sib", "task", "web1"]);
+  assert.equal(byId.get("farkid")!.contentOmitted, true, "listed as its own work, but another workspace's content stays out");
   assert.equal(byId.get("web1")!.contentOmitted, true, "another project of the workspace, below auto: no content");
   assert.equal(byId.get("web1")!.chat.goal.objective, undefined);
   assert.equal(byId.get("sib")!.chat.goal.objective, "Ship the secret plan", "own project: content");
@@ -323,5 +325,54 @@ test("a workflow-owned caller's \"all\" is narrowed too, and a would-be card is 
   const r = rig();
   assert.equal(body(await r.call("list_sessions", { project: "all" }, { workflowOwned: true })).listed, "workspace");
   assert.equal(code(await r.call("read_transcript", { sessionId: "web1" }, { workflowOwned: true })), "PERMISSION_DENIED");
+  assert.equal(r.port.cards.length, 0);
+});
+
+test("§4.3: another chat's words are marked — list rows with goal text, and the session detail an Act returns", async () => {
+  const r = rig({ child: thread("child", { pending: { approvals: [], userInputs: [QUESTION] } }) });
+  r.api.on("PUT", "/api/sessions/me", { status: 200, body: {} }).on("PUT", "/api/sessions/child", { status: 200, body: {} });
+  assert.equal(body(await r.call("list_sessions", {})).notice, UNTRUSTED_NOTICE, "sib's goal objective is another chat's words");
+  assert.equal(body(await r.call("list_sessions", { kind: "terminal" })).notice, undefined);
+  const interrupt = body(await r.call("control_session", { sessionId: "sib", action: "interrupt" }));
+  assert.equal(Object.keys(interrupt)[0], "notice");
+  assert.equal(interrupt.notice, UNTRUSTED_NOTICE);
+  assert.equal(body(await r.call("update_session", { sessionId: "child", title: "Kid" })).notice, UNTRUSTED_NOTICE);
+  assert.equal(body(await r.call("update_session", { sessionId: "me", title: "Me" })).notice, undefined, "its own title: its own words");
+  assert.equal(body(await r.call("respond_to_request", { sessionId: "child", answers: { db: "Postgres" } })).notice, UNTRUSTED_NOTICE);
+  assert.equal(body(await r.call("control_session", { sessionId: "child", action: "close" })).notice, undefined, "a closed tab returns no words");
+});
+
+test("the chat frame is measured: a 200-character CJK title cannot push get_turn_diff or read_tool_output past the result cap", async () => {
+  const title = "長".repeat(200);
+  const cjk = tab("cjk", OWN, { title, order: 9 });
+  const huge = "x".repeat(90_000);
+  const r = rig({ cjk: thread("cjk", { checkpoints: [{ turnId: "t1", checkpointTurnCount: 1, checkpointRef: "r", status: "ready", files: [], assistantMessageId: null, completedAt: stamp(2) }] }) }, [cjk]);
+  r.api.on("GET", agentChatRoutes.turnDiff("cjk", 1), { status: 200, body: { fromTurnCount: 0, toTurnCount: 1, diff: huge } });
+  const item = message("assistant", huge, { id: "big" });
+  r.api.on("GET", agentChatRoutes.item("cjk", "big"), { status: 200, body: { item } });
+  for (const [name, args] of [["get_turn_diff", { sessionId: "cjk" }], ["read_tool_output", { sessionId: "cjk", itemId: "big", maxBytes: 55_000 }]] as const) {
+    const result = await r.call(name, args);
+    const text = (result.content[0] as { text: string }).text;
+    assert.equal(body(result).truncated === true && body(result).truncationNote !== undefined, false, `${name}: never cut by ok()`);
+    assert.ok(Buffer.byteLength(text, "utf8") <= 60_000, `${name}: ${Buffer.byteLength(text, "utf8")} bytes`);
+    assert.equal(body(result).threadRef.title, title);
+    assert.equal(body(result).notice, UNTRUSTED_NOTICE);
+  }
+});
+
+test("external callers through the executor: respond_to_request takes a decision; control_session argument errors come from scope, before any read", async () => {
+  const r = rig({ sib: thread("sib", { pending: { approvals: [{ requestId: "r1", requestKind: "command", createdAt: stamp(1) }], userInputs: [] } }) });
+  r.api.on("POST", "/api/sessions/sib/approval", { status: 200, body: { seq: 9 } });
+  const run = (name: string, args: Record<string, unknown>) =>
+    executeToolCall({ approvals: r.port, lookup: (n, audience) => toolByName(n, audience) }, { name, arguments: args }, { caller: { kind: "external" }, api: r.api, signal: new AbortController().signal });
+  const decided = await run("respond_to_request", { sessionId: "sib", decision: "accept" });
+  assert.equal(decided.isError, undefined, JSON.stringify(decided.structuredContent));
+  assert.equal(body(decided).seq, 9);
+  assert.equal(body(decided).notice, undefined, "external results carry no chat frame");
+  const reads = r.api.calls.length;
+  const missing = await run("control_session", { sessionId: "sib", action: "stop_task" });
+  assert.equal(code(missing), "INVALID_ARGUMENT");
+  assert.match(body(missing).message, /needs taskId/);
+  assert.equal(r.api.calls.length, reads, "refused in scope: nothing read");
   assert.equal(r.port.cards.length, 0);
 });

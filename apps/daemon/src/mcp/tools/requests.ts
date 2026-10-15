@@ -12,7 +12,7 @@ import { ToolError } from "../errors.ts";
 import { readThread, requireChatSession, sendCommand } from "../reads.ts";
 import { clipText, MAX_ECHO_CHARS } from "../result.ts";
 import { chatDetail, pendingApprovalViews, pendingQuestionViews, type PendingQuestionView } from "../views.ts";
-import { chatThreadRef, sessionAmongTabs, sessionCard, sessionClaim, sessionIdField } from "./sessions.ts";
+import { chatNotice, chatThreadRef, sessionAmongTabs, sessionCard, sessionClaim, sessionIdField } from "./sessions.ts";
 
 // min(1): an empty requestId is not an omitted one — read as omitted, it would act on the one request pending.
 const requestIdField = z.string().min(1).optional().describe("The request id from get_session; omit when exactly one is pending.");
@@ -274,7 +274,8 @@ const respondToRequest = defineTool({
           : await answer(api, { sessionId: args.sessionId, ...(args.requestId !== undefined ? { requestId: args.requestId } : {}), answers: args.answers!, ...(args.attachments !== undefined ? { attachments: args.attachments } : {}) }, caller.kind === "thread");
     if (caller.kind !== "thread") return result;
     const { summary, sessions } = await sessionAmongTabs(api, args.sessionId);
-    return { ...result, ...chatThreadRef(caller, sessions, summary) };
+    // The detail carries the target's words (its last reply, plan, requests): marked as another chat's data (§4.3).
+    return { ...chatNotice(caller, args.sessionId), ...result, ...chatThreadRef(caller, sessions, summary) };
   }
 });
 

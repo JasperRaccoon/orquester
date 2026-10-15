@@ -117,7 +117,8 @@ async function chatSearchScope(api: DaemonApi, caller: ThreadCaller, project: st
   // Below Full access: another project of the workspace is readable without a card from `auto` (§5.2).
   const workspace = caller.projectPath !== "" && caller.workspace !== "" && caller.runtimeMode === "auto";
   const allows = workspace ? (s: SessionSummary) => own(s) || (caller.projectPath !== "" && projectOf(s)?.workspace === caller.workspace) : own;
-  const excluded = new Set(sessions.filter((s) => !allows(s)).flatMap((s) => (projectOf(s) ? [projectOf(s)!.canonical] : [])));
+  // Counted: the projects with chat tabs left out (search reads chats only).
+  const excluded = new Set(sessions.filter((s) => s.kind === "agent-chat" && !allows(s)).flatMap((s) => (projectOf(s) ? [projectOf(s)!.canonical] : [])));
   return { searched: workspace ? "workspace" : "own-project", ...(workspace ? {} : { projectPath: ownPath }), allows, ...(excluded.size > 0 ? { excludedProjects: excluded.size } : {}) };
 }
 

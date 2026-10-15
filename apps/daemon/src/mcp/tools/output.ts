@@ -17,7 +17,7 @@ import { daemonError, ToolError } from "../errors.ts";
 import { requireChatSession } from "../reads.ts";
 import { clipText, MAX_ECHO_CHARS, MAX_RESULT_BYTES, resultBytes } from "../result.ts";
 import { defineTool, READ_ONLY, type AnyOrquesterTool } from "../catalog/contract.ts";
-import { chatNotice, chatThreadRef, sessionAmongTabs, sessionCard, sessionClaim, sessionIdField } from "./sessions.ts";
+import { chatFrame, sessionAmongTabs, sessionCard, sessionClaim, sessionIdField } from "./sessions.ts";
 
 /** A window's default size, in UTF-8 bytes of the text. */
 const DEFAULT_OUTPUT_BYTES = 40_000;
@@ -223,8 +223,6 @@ async function toolOutput(api: DaemonApi, args: { sessionId: string; itemId: str
   return { itemId: args.itemId, kind, text: bytes.toString("utf8", start, end), offset: start, totalBytes, ...(end < totalBytes ? { nextOffset: end } : {}), ...flags };
 }
 
-/** What a chat caller's result frame (`notice` before, `threadRef` after) takes of the result. */
-const CHAT_FRAME_BYTES = 600;
 
 const readToolOutput = defineTool({
   name: "read_tool_output",
@@ -246,8 +244,9 @@ const readToolOutput = defineTool({
   async run(args, { api, caller }) {
     if (caller.kind !== "thread") return toolOutput(api, args, MAX_RESULT_BYTES);
     const { summary, sessions } = await sessionAmongTabs(api, args.sessionId);
-    const page = await toolOutput(api, args, MAX_RESULT_BYTES - CHAT_FRAME_BYTES);
-    return { ...chatNotice(caller, summary.id), ...page, ...chatThreadRef(caller, sessions, summary) };
+    const frame = chatFrame(caller, sessions, summary);
+    const page = await toolOutput(api, args, MAX_RESULT_BYTES - frame.bytes);
+    return { ...frame.before, ...page, ...frame.after };
   }
 });
 

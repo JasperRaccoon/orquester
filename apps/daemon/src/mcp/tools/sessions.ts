@@ -146,6 +146,17 @@ export function chatThreadRef(caller: ToolCaller, sessions: readonly SessionSumm
   return { threadRef: threadToolReference(target.id, target.title, relationTo(caller.threadId, sessions, target)) };
 }
 
+/**
+ * A chat caller's result frame around a session's data: `notice` first, `threadRef` last, and what the two take of the
+ * result in bytes — measured, so a long title (a 200-character CJK one is 600 bytes in `threadRef`) is budgeted for.
+ */
+export function chatFrame(caller: ToolCaller, sessions: readonly SessionSummary[], target: Pick<SessionSummary, "id" | "title" | "lineage">): { before: { notice?: string }; after: { threadRef?: ThreadToolReference }; bytes: number } {
+  const before = chatNotice(caller, target.id);
+  const after = chatThreadRef(caller, sessions, target);
+  // The keys and a comma each beside the data they join: the measured object's braces cover the commas.
+  return { before, after, bytes: Object.keys(before).length + Object.keys(after).length > 0 ? resultBytes({ ...before, ...after }) : 0 };
+}
+
 /** `workspace/project`, or a phrase when the path is no project. */
 async function projectLabel(api: DaemonApi, projectPath: string): Promise<string> {
   const project = await canonicalProject(api, projectPath);
@@ -284,9 +295,12 @@ const listSessionsTool = defineTool({
       const projectOf = (s: SessionSummary) => projects.get(s.projectPath) ?? null;
       const self = (s: SessionSummary) => s.id === caller.threadId;
       if (all && caller.runtimeMode !== "full-access") {
-        // Below Full access another workspace's metadata needs a card (§5.2, ruling S13): "all" is this workspace's.
-        const inWorkspace = (s: SessionSummary) => self(s) || (caller.projectPath !== "" && caller.workspace !== "" && projectOf(s)?.workspace === caller.workspace);
-        const excluded = new Set(sessions.filter((s) => !inWorkspace(s)).flatMap((s) => (projectOf(s) ? [projectOf(s)!.canonical] : [])));
+        // Below Full access another workspace's metadata needs a card (§5.2, ruling S13): "all" is this workspace's —
+        // and the chats this chat created, wherever they are: they are its own work (§13 c).
+        const ownChild = (s: SessionSummary) => s.lineage?.parentThreadId === caller.threadId && s.lineage.agentCreated === true;
+        const inWorkspace = (s: SessionSummary) => self(s) || ownChild(s) || (caller.projectPath !== "" && caller.workspace !== "" && projectOf(s)?.workspace === caller.workspace);
+        // Counted: the projects with chat tabs left out (a project with only terminals is no chat the caller misses).
+        const excluded = new Set(sessions.filter((s) => s.kind === "agent-chat" && !inWorkspace(s)).flatMap((s) => (projectOf(s) ? [projectOf(s)!.canonical] : [])));
         sessions = sessions.filter(inWorkspace);
         frame.listed = "workspace";
         if (excluded.size > 0) frame.excludedProjects = excluded.size;
@@ -307,15 +321,21 @@ const listSessionsTool = defineTool({
     }
     const listed = args.limit !== undefined ? sessions.slice(0, args.limit) : sessions;
     let omitted = false;
+    let othersWords = false;
     const rows = listed.map((s) => {
       const row = sessionView(s, view);
       if (caller.kind !== "thread") return row;
       const own = s.id === caller.threadId ? { ...row, self: true } : row;
-      if (readable(s)) return own;
+      if (readable(s)) {
+        // A goal's objective is another chat's words (§4.3): the list then opens with the notice.
+        if (s.id !== caller.threadId && row.chat?.goal) othersWords = true;
+        return own;
+      }
       omitted = true;
       return rowWithoutContent(own);
     });
     return {
+      ...(othersWords ? { notice: UNTRUSTED_NOTICE } : {}),
       sessions: rows,
       ...(listed.length < sessions.length ? { more: sessions.length - listed.length } : {}),
       ...frame,
@@ -395,8 +415,6 @@ const MAX_TRANSCRIPT_CHARS = 55_000;
 const TRUNCATED_HINT = "Shed to fit maxChars: reasoning, then tool detail, then the oldest rows (coveredTurns says which turns are left). Raise maxChars (max 55000), include less, or use get_turn_diff for one turn's file changes.";
 /** get_session sheds subagent rows too when its detail would pass the cap (views.ts), so this promises no full roster. */
 const SUBAGENTS_TRIMMED_HINT = "The subagent list was trimmed too; get_session may list more of it.";
-/** What a chat caller's result frame (`notice` before, `threadRef` after) may take of maxChars. */
-const CHAT_FRAME_BYTES = 600;
 
 /**
  * The hint a read_transcript result carries, or none for a whole one that read every turn of its range: first
@@ -469,9 +487,10 @@ const readTranscript = defineTool({
   async run(args, { api, caller }) {
     if (caller.kind !== "thread") return readTranscriptRecord(api, args);
     const { summary, sessions } = await sessionAmongTabs(api, args.sessionId);
+    const frame = chatFrame(caller, sessions, summary);
     // The frame comes out of the caller's own budget, so the answer still keeps within maxChars.
-    const record = await readTranscriptRecord(api, { ...args, maxChars: Math.max(2_000, args.maxChars - CHAT_FRAME_BYTES) });
-    return { ...chatNotice(caller, summary.id), ...record, ...chatThreadRef(caller, sessions, summary) };
+    const record = await readTranscriptRecord(api, { ...args, maxChars: Math.max(2_000, args.maxChars - frame.bytes) });
+    return { ...frame.before, ...record, ...frame.after };
   }
 });
 
@@ -537,8 +556,9 @@ const getTurnDiff = defineTool({
   async run(args, { api, caller }) {
     if (caller.kind !== "thread") return turnDiff(api, args.sessionId, args.turn, MAX_RESULT_BYTES);
     const { summary, sessions } = await sessionAmongTabs(api, args.sessionId);
-    const diff = await turnDiff(api, args.sessionId, args.turn, MAX_RESULT_BYTES - CHAT_FRAME_BYTES);
-    return { ...chatNotice(caller, summary.id), ...diff, ...chatThreadRef(caller, sessions, summary) };
+    const frame = chatFrame(caller, sessions, summary);
+    const diff = await turnDiff(api, args.sessionId, args.turn, MAX_RESULT_BYTES - frame.bytes);
+    return { ...frame.before, ...diff, ...frame.after };
   }
 });
 
@@ -739,7 +759,8 @@ const updateSession = defineTool({
       throw error;
     }
     const session = await chatDetail(api, args.sessionId);
-    return { applied, session, ...(caller.kind === "thread" ? chatThreadRef(caller, await listSessions(api), { ...summary, title: session.title }) : {}) };
+    // The detail carries the target's words (its last reply, plan, requests): another chat's are marked as data (§4.3).
+    return { ...chatNotice(caller, args.sessionId), applied, session, ...(caller.kind === "thread" ? chatThreadRef(caller, await listSessions(api), { ...summary, title: session.title }) : {}) };
   }
 });
 
@@ -970,7 +991,9 @@ const controlSession = defineTool({
     // The link is read before acting: a closed tab is gone after.
     const target = caller.kind === "thread" ? await sessionAmongTabs(api, args.sessionId) : null;
     const result = await control(ctx, args);
-    return target ? { ...result, ...chatThreadRef(caller, target.sessions, target.summary) } : result;
+    if (!target) return result;
+    // A detail carries the target's words (its last reply, plan, requests): marked as another chat's data (§4.3).
+    return { ...("session" in result ? chatNotice(caller, args.sessionId) : {}), ...result, ...chatThreadRef(caller, target.sessions, target.summary) };
   }
 });
 
