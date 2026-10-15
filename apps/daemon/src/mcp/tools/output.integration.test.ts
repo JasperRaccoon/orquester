@@ -7,9 +7,9 @@ import { createTestHost, type TestHost } from "../../agent-host/orchestration/te
 import type { AppendableDomainEvent } from "../../agent-host/services.ts";
 import type { DaemonApi, DaemonMethod, DaemonResponse } from "../daemon-api.ts";
 import { chatSummary } from "../fixtures.ts";
-import type { ToolContext, ToolDef } from "../tool.ts";
-import { messageTools } from "./messages.ts";
-import { outputTools } from "./output.ts";
+import type { AnyOrquesterTool, CallContext } from "../catalog/contract.ts";
+import { outputFamily } from "./output.ts";
+import { sessionsFamily } from "./sessions.ts";
 
 /* Real host fold/retention must keep transcript output references readable as the command grows or ages out. */
 
@@ -50,10 +50,12 @@ function hostApi(host: TestHost): DaemonApi {
   };
 }
 
-const parse = (t: ToolDef, args: Record<string, unknown>) => z.object(t.input).strict().parse(args) as never;
-const ctx = (api: DaemonApi): ToolContext => ({ api, todos: {} as never, files: {} as never, signal: new AbortController().signal, now: () => 0 });
-const transcriptTool = messageTools.find((t) => t.name === "read_transcript")!;
-const outputTool = outputTools.find((t) => t.name === "read_tool_output")!;
+const parse = (t: AnyOrquesterTool, args: Record<string, unknown>) => z.object(t.input).strict().parse(args) as never;
+/** An external caller's context (full trust), as the executor builds it for `/mcp`. */
+const ctx = (api: DaemonApi): CallContext => ({ api, signal: new AbortController().signal, now: () => 0, caller: { kind: "external" }, turn: { interactionMode: "default", provenance: (_origin, text) => text } });
+const asTool = (t: AnyOrquesterTool) => ({ ...t, run: (args: never, c: CallContext) => t.run(args, c) as Promise<Record<string, unknown>> });
+const transcriptTool = asTool(sessionsFamily.find((t) => t.name === "read_transcript")!);
+const outputTool = asTool(outputFamily.find((t) => t.name === "read_tool_output")!);
 
 /** An event as ingestion hands it to the orchestrator's sink. */
 function sinkEvent<T extends AppendableDomainEvent["type"]>(host: TestHost, eventId: string, type: T, payload: Extract<AppendableDomainEvent, { type: T }>["payload"]): AppendableDomainEvent {

@@ -8,8 +8,9 @@ import { ToolError } from "../errors.ts";
 import { toSafeToolError } from "../result.ts";
 import { FakeDaemonApi } from "../testing.ts";
 import { activity,chatSummary,head,shellSummary,snapshot,stamp } from "../fixtures.ts";
+import type { CallContext } from "../catalog/contract.ts";
 import type { ToolContext } from "../tool.ts";
-import { requestTools } from "./requests.ts";
+import { requestsFamily } from "./requests.ts";
 
 // harness() and its constants are copied from sessions.test.ts: the tool test files never import each other.
 const registry = { shells: [], ides: [], fileExplorers: [], browsers: [], agents: [
@@ -35,7 +36,18 @@ async function harness(sessions = [chatSummary(), shellSummary()], snap = snapsh
   return { api, ctx, projectPath, root, close: () => rm(root, { recursive: true, force: true }) };
 }
 
-const tool = (name: string) => requestTools.find((t) => t.name === name)!;
+const respond = requestsFamily.find((t) => t.name === "respond_to_request")!;
+/** An external caller's context (full trust), as the executor builds it for `/mcp`. */
+const external = (ctx: ToolContext): CallContext => ({ api: ctx.api, signal: ctx.signal, now: ctx.now, caller: { kind: "external" }, turn: { interactionMode: "default", provenance: (_origin, text) => text } });
+/**
+ * Spec §11: answer_question / dismiss_question / resolve_approval are respond_to_request {answers} / {dismiss: true} /
+ * {decision} — the ported tests call the old names through that mapping, so every one of them is a parity test.
+ */
+const tool = (name: "answer_question" | "dismiss_question" | "resolve_approval" | string) => ({
+  input: respond.input,
+  run: (args: Record<string, unknown>, ctx: ToolContext) =>
+    respond.run({ ...args, ...(name === "dismiss_question" ? { dismiss: true } : {}) } as never, external(ctx)) as Promise<Record<string, unknown>>
+});
 /** The session detail every request tool returns beside its seq. */
 const detailOf = (r: Record<string, unknown>) => r.session as { id: string; chat: { model: string } };
 const questions = [
@@ -101,7 +113,7 @@ test("dismiss_question only for message-mode questions; resolve_approval validat
   assert.deepEqual([approval.requestId, approval.decision], ["r1", "decline"]);
   await assert.rejects(tool("resolve_approval").run({ sessionId: "c1", decision: "acceptAlways" }, h.ctx), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && ["accept", "decline"].every((decision) => e.message.includes(decision)));
   const blocking = await harness([chatSummary({ hasPendingUserInput: true })], asked()); t.after(blocking.close);
-  await assert.rejects(tool("dismiss_question").run({ sessionId: "c1" }, blocking.ctx), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && /interrupt_session/.test(e.message));
+  await assert.rejects(tool("dismiss_question").run({ sessionId: "c1" }, blocking.ctx), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && /control_session \{action: "interrupt"\}/.test(e.message));
 });
 
 test("answer_question validates every question before uploading any attachment", async (t) => {
@@ -257,4 +269,12 @@ test("answer_question: a host refusal while uploading names the question and tha
     (e: { code: string; message: string }) => e.code === "INVALID_COMMAND" && e.message.includes("Why") && e.message.includes("attachments[0]") && e.message.includes("Attachment exceeds the 50 MiB limit."));
   assert.deepEqual(h.api.uploads.map((u) => u.meta.name), ["app.log", "df.txt"]);
   assert.ok(!h.api.calls.some((c) => c.method === "POST"), "nothing is sent after a refused upload");
+});
+
+test("respond_to_request takes exactly one of answers, dismiss and decision; attachments only beside answers", async (t) => {
+  const h = await harness(); t.after(h.close);
+  for (const args of [{}, { answers: { "1": "a" }, dismiss: true }, { dismiss: true, decision: "accept" }, { dismiss: true, attachments: { "1": [{ path: "x" }] } }]) {
+    await assert.rejects(respond.run({ sessionId: "c1", ...args } as never, external(h.ctx)), (e: ToolError) => e.code === "INVALID_ARGUMENT", JSON.stringify(args));
+  }
+  assert.equal(h.api.calls.length, 0, "refused before anything is read");
 });

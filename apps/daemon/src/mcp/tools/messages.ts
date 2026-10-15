@@ -455,5 +455,8 @@ export const readTranscript = defineTool({
 
 export const messageTools: ToolDef[] = [sendMessage, implementPlan, readTranscript];
 
-/** This family in the catalog (`../catalog/index.ts`). */
-export const messagesFamily = legacyExternalTools(messageTools);
+/**
+ * This family in the catalog (`../catalog/index.ts`). `read_transcript` is served by the sessions family (plan Task 7,
+ * `./sessions.ts`); `readTranscript` stays exported here only for the legacy `thread_read` until Task 14.
+ */
+export const messagesFamily = legacyExternalTools(messageTools.filter((tool) => tool.name !== "read_transcript"));
