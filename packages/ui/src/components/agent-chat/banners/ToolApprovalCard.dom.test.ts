@@ -363,6 +363,30 @@ describe("ToolApprovalCard", () => {
     assert.equal(answers.length, 1);
   });
 
+  it("new content under the same card id drops what was typed for the old content and closes the review sheet", async () => {
+    clock = START + 60_000;
+    render(card({ secretFields: [{ key: "TOKEN", label: "Token" }] }), true);
+    type(q<HTMLInputElement>('input[type="password"]'), "typed-for-the-old-card");
+    const open = Array.from(dom.window.document.querySelectorAll("button")).find((button) => button.textContent === "Deny with a reason…");
+    assert.ok(open);
+    act(() => open.click());
+    type(mount.querySelector("textarea")!, "a reason about the old content");
+    act(() => q<HTMLButtonElement>("[data-review-preview]").click());
+    await flush();
+    assert.ok(dom.window.document.querySelector('[role="dialog"]'), "the review sheet is open");
+    // The daemon re-opens ap-1 with other content.
+    render(card({ secretFields: [{ key: "TOKEN", label: "Token" }], sections: [{ kind: "fields", rows: [{ label: "command", value: "rm -rf build" }] }] }), true);
+    await flush();
+    assert.equal(q<HTMLInputElement>('input[type="password"]').value, "", "the typed secret is gone");
+    assert.equal(q<HTMLButtonElement>("[data-approve]").disabled, true, "nothing typed: Approve waits for the value again");
+    assert.equal(mount.querySelector("textarea"), null, "the deny reason is closed and cleared");
+    assert.equal(dom.window.document.querySelector('[role="dialog"]'), null, "the review sheet closed");
+    // A denial now carries no stale reason.
+    act(() => q<HTMLButtonElement>("[data-deny]").click());
+    await flush();
+    assert.deepEqual(answers, [{ decision: "deny" }]);
+  });
+
   it("on a phone a blocked Approve says why next to it", () => {
     render(card({ fullPreview: true, sections: [{ kind: "text", text: "s", partial: true }] }), true);
     assert.match(q("[data-approve-blocked]").textContent ?? "", /Open Review to load the whole preview/);
