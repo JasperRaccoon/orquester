@@ -86,10 +86,14 @@ test("TOOLSETS agree with the catalog: a chat tool TOOLSETS names sits in that t
   for (const toolset of TOOLSETS) for (const entry of toolset.tools) assert.match(entry.name, TOOL_NAME_PATTERN);
 });
 
-test("transitional counts: the external surface is today's 72 tools; chat is the 16 legacy session tools", () => {
+test("transitional counts: the external surface is tool-names.ts; chat is the legacy session tools plus TOOLSETS tools", () => {
+  // Each Wave 3 family replaces its legacy entries; tool-names.ts follows it (Task 14 sets 41 / 45 / 22).
   assert.deepEqual([...externalMcpToolNames()].sort(), [...EXTERNAL_MCP_TOOL_NAMES].sort());
-  assert.equal(catalogFor("external").length, 72);
-  assert.deepEqual(catalogFor("chat").map((tool) => tool.name).sort(), Object.keys(LEGACY_CHAT_META).sort());
+  assert.equal(catalogFor("external").length, EXTERNAL_MCP_TOOL_NAMES.length);
+  const specNames = new Set(chatToolNames());
+  const chat = catalogFor("chat").map((tool) => tool.name);
+  for (const name of Object.keys(LEGACY_CHAT_META)) assert.ok(chat.includes(name) || specNames.has(name), `${name}: a legacy chat tool vanished`);
+  for (const name of chat) assert.ok(specNames.has(name) || Object.prototype.hasOwnProperty.call(LEGACY_CHAT_META, name), `${name} is in no toolset`);
 });
 
 // ---------------------------------------------------------------------------
@@ -132,6 +136,10 @@ function reachable(entry: string): { modules: Set<string>; packages: Set<string>
  */
 const PURE_MODULES = new Set([
   "agent-chat/activity-ladder.ts",
+  // Task 11: the YAML frontmatter (de)serialiser the adapters write skills with (pure, `yaml` only),
+  // so the card shows a skill's file exactly as it will be written; the card reads' wire types.
+  "agent-profile/infra/frontmatter.ts",
+  "agent-profile/preview-wire.ts",
   "mcp/addressing.ts",
   "mcp/agents.ts",
   "mcp/attachments.ts",
@@ -146,6 +154,7 @@ const PURE_MODULES = new Set([
   "mcp/result.ts",
   "mcp/tool.ts",
   "mcp/tools/agent-profile.ts",
+  "mcp/tools/agent-profile-preview.ts",
   "mcp/tools/catalog.ts",
   "mcp/tools/desktops.ts",
   "mcp/tools/files.ts",
@@ -191,7 +200,9 @@ const PURE_PACKAGES = new Set([
   "node:fs",
   "node:fs/promises",
   "node:path",
-  "node:stream"
+  "node:stream",
+  // Task 11: frontmatter.ts (pure YAML).
+  "yaml"
 ]);
 
 test("import graph: everything reachable from catalog/index.ts is on the pure allow-list", () => {

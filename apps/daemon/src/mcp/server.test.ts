@@ -75,20 +75,9 @@ const CONTRACT: Record<string, { required: string[]; annotations: object }> = {
   list_workflow_secrets: { required: [], annotations: READ },
   set_workflow_secret: { required: ["name", "value"], annotations: WRITE_IDEMPOTENT },
   // Agent profiles (docs/orquester-mcp.md §13): the writes change the agent CLIs' own files, so none claims a closed world.
-  list_agent_profiles: { required: [], annotations: READ },
-  get_agent_profile: { required: ["agent"], annotations: READ },
-  get_agent_profile_item: { required: ["agent", "id"], annotations: READ },
-  create_agent_profile_item: { required: ["agent"], annotations: WRITE },
-  update_agent_profile_item: { required: ["agent", "id"], annotations: WRITE },
-  set_agent_profile_item_enabled: { required: ["agent", "id", "enabled"], annotations: WRITE_IDEMPOTENT },
-  delete_agent_profile_item: { required: ["agent", "id", "confirm"], annotations: DESTROY },
-  copy_agent_profile_item: { required: ["agent", "id", "toAgent"], annotations: WRITE },
-  trust_agent_profile_hook: { required: ["agent", "id"], annotations: WRITE_IDEMPOTENT },
-  get_agent_instructions: { required: ["agent"], annotations: READ },
-  // Replaces the whole file: destructive, and the same text twice is the same file.
-  write_agent_instructions: { required: ["agent", "text"], annotations: DESTROY },
-  import_agent_profile_items: { required: ["agent"], annotations: WRITE },
-  list_marketplace_plugins: { required: ["agent", "marketplace"], annotations: READ },
+  get_agent_profile: { required: [], annotations: READ },
+  // A batch of changes (Task 11): its most dangerous action deletes, and a create is not idempotent.
+  edit_agent_profile: { required: ["agent", "changes"], annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false } },
   // Desktops (desktop tab spec §7.4): launching an app runs anything, so no write claims a closed world.
   desktops_list: { required: [], annotations: READ },
   desktop_host_status: { required: [], annotations: READ },
