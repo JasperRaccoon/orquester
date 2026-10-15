@@ -452,9 +452,11 @@ const updateSession = defineTool({
       if (args.sessionId === caller.threadId && settings) {
         throw new ToolError("PERMISSION_DENIED", "A chat may change only its own title; ask the user to change its model, options, permission mode or account.");
       }
-      // Never broader (§4.1): a chat it created may run in the caller's mode or a narrower one.
-      if (args.runtimeMode !== undefined && !runtimeModesUpTo(caller.runtimeMode).includes(args.runtimeMode)) {
-        throw new ToolError("PERMISSION_DENIED", `runtimeMode ${args.runtimeMode} is broader than this chat's ${caller.runtimeMode}; allowed: ${runtimeModesUpTo(caller.runtimeMode).join(", ")}.`);
+      // Never broader (§4.1): a chat it created may run in the caller's mode or a narrower one. A caller
+      // mode the catalogue does not know allows none (fail closed: `runtimeModesUpTo` is empty for it).
+      const allowed = runtimeModesUpTo(caller.runtimeMode);
+      if (args.runtimeMode !== undefined && !allowed.includes(args.runtimeMode)) {
+        throw new ToolError("PERMISSION_DENIED", `runtimeMode ${args.runtimeMode} is broader than this chat's ${caller.runtimeMode}; allowed: ${allowed.join(", ") || "none"}.`);
       }
     }
     return sessionClaim(ctx, args.sessionId, { reads: "none", writes: true, self: "title-only", ownChildrenOnly: OWN_CHILDREN_UPDATE });

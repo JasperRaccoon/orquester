@@ -288,6 +288,10 @@ test("update_session: own title yes, own settings no; children only; never a bro
   assert.match(body(broader).message, /broader/);
   assert.equal((await r.call("update_session", { sessionId: "child", title: "Kid" })).isError, undefined);
   assert.equal(code(await r.call("update_session", { sessionId: "child", title: "Kid" }, { planning: true })), "PERMISSION_DENIED", "a data change while planning");
+  // A caller mode the catalogue does not know is the narrowest (fail closed): no mode is allowed, not every one.
+  const unknown = await r.call("update_session", { sessionId: "child", runtimeMode: "approval-required" }, { runtimeMode: "god-mode" as never });
+  assert.equal(code(unknown), "PERMISSION_DENIED");
+  assert.match(body(unknown).message, /allowed: none/);
 });
 
 test("respond_to_request: own children's provider questions only; never a decision, a secret, or an Orquester card", async () => {

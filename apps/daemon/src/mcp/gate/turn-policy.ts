@@ -53,15 +53,20 @@ export function runningTurnPlans(snap: ThreadSnapshotPayload): boolean {
   return currentInteractionMode(snap) === "plan";
 }
 
-/** A permission mode's breadth: approval-required < auto-accept-edits < auto < full-access. */
-function breadth(mode: RuntimeMode): number {
+/**
+ * A permission mode's breadth: approval-required < auto-accept-edits < auto < full-access. An
+ * unknown mode fails closed by side: as the CALLER's (what it may reach) it is the narrowest, as a
+ * TARGET's (what it would be given) the broadest.
+ */
+const callerBreadth = (mode: RuntimeMode): number => RUNTIME_MODES.indexOf(mode);
+function targetBreadth(mode: RuntimeMode): number {
   const index = RUNTIME_MODES.indexOf(mode);
   return index === -1 ? RUNTIME_MODES.length : index;
 }
 
 /** (a) Refuse a target thread whose permission mode is broader than the caller's (`PERMISSION_DENIED`). */
 export function assertTargetModeNotBroader(caller: TurnPolicyCaller, target: { threadId: string; runtimeMode: RuntimeMode }): void {
-  if (breadth(target.runtimeMode) > breadth(caller.runtimeMode)) {
+  if (targetBreadth(target.runtimeMode) > callerBreadth(caller.runtimeMode)) {
     throw new ToolError(
       "PERMISSION_DENIED",
       `Thread "${target.threadId}" runs in ${target.runtimeMode} mode, broader than this thread's ${caller.runtimeMode}; only the user can give it work.`
@@ -69,21 +74,22 @@ export function assertTargetModeNotBroader(caller: TurnPolicyCaller, target: { t
   }
 }
 
-/** The permission modes no broader than `mode`, narrowest first. */
+/** The permission modes no broader than a caller's `mode`, narrowest first (none for an unknown mode: fail closed). */
 export function runtimeModesUpTo(mode: RuntimeMode): RuntimeMode[] {
-  return RUNTIME_MODES.filter((m) => breadth(m) <= breadth(mode));
+  return RUNTIME_MODES.filter((m) => targetBreadth(m) <= callerBreadth(mode));
 }
 
 /**
  * (a) for a thread the caller opens: the caller's own permission mode, or the narrower one it names
- * (`requested`); a broader one is refused (`PERMISSION_DENIED`).
+ * (`requested`); a broader one is refused (`PERMISSION_DENIED`). A caller whose own mode is unknown
+ * opens nothing broader than the narrowest mode.
  */
 export function openedThreadRuntimeMode(caller: TurnPolicyCaller, requested: RuntimeMode | undefined): RuntimeMode {
-  if (requested === undefined) return caller.runtimeMode;
-  if (breadth(requested) > breadth(caller.runtimeMode)) {
+  if (requested === undefined) return callerBreadth(caller.runtimeMode) === -1 ? RUNTIME_MODES[0]! : caller.runtimeMode;
+  if (targetBreadth(requested) > callerBreadth(caller.runtimeMode)) {
     throw new ToolError(
       "PERMISSION_DENIED",
-      `runtimeMode ${requested} is broader than this thread's ${caller.runtimeMode}; a thread you open may run in ${runtimeModesUpTo(caller.runtimeMode).join(", ")}.`
+      `runtimeMode ${requested} is broader than this thread's ${caller.runtimeMode}; a thread you open may run in ${runtimeModesUpTo(caller.runtimeMode).join(", ") || "no mode (yours is unknown)"}.`
     );
   }
   return requested;

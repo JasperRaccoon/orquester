@@ -50,3 +50,15 @@ test("(b) a default turn the user steered into plan mode plans (T6-M2)", () => {
   assert.equal(runningTurnPlans(snap), false);
   assert.equal(runningTurnPlans({ ...snap, items: [...snap.items, steer] } as typeof snap), true);
 });
+
+test("(a) an unknown mode fails closed: a caller's is the narrowest (reaches nothing, opens nothing broader), a target's the broadest", () => {
+  const unknown = "god-mode" as never;
+  const odd = caller({ runtimeMode: unknown });
+  assert.deepEqual(runtimeModesUpTo(unknown), []);
+  for (const mode of RUNTIME_MODES) {
+    assert.throws(() => assertTargetModeNotBroader(odd, { threadId: "t", runtimeMode: mode }), (e: { code: string }) => e.code === "PERMISSION_DENIED", mode);
+    assert.throws(() => openedThreadRuntimeMode(odd, mode), (e: { code: string }) => e.code === "PERMISSION_DENIED", mode);
+  }
+  assert.equal(openedThreadRuntimeMode(odd, undefined), "approval-required", "a chat opened by such a caller gets the narrowest mode");
+  assert.throws(() => assertTargetModeNotBroader(caller({ runtimeMode: "full-access" }), { threadId: "t", runtimeMode: unknown }), (e: { code: string }) => e.code === "PERMISSION_DENIED");
+});
