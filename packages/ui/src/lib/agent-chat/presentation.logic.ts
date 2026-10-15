@@ -495,12 +495,6 @@ export const SESSION_TOOL_LABELS: Readonly<Record<string, string>> = {
   // label is the row while it runs or when it failed.
   html_preview: "Previewed HTML",
   html_render: "Rendered HTML",
-  // Scheduling (design 2026-10-14 §5).
-  schedule_task: "Scheduled a task",
-  list_scheduled_tasks: "Listed scheduled tasks",
-  update_scheduled_task: "Updated a scheduled task",
-  delete_scheduled_task: "Deleted a scheduled task",
-  run_scheduled_task_now: "Ran a scheduled task now",
   // Secrets (design 2026-10-14 §5).
   request_secret: "Requested a secret",
   // Threads and delegation (design 2026-10-14 §5, §6).

@@ -92,7 +92,6 @@ import {
   DESKTOP_CHANNEL,
   DESKTOP_WS_PREFIXES,
   MAX_INITIAL_COMMAND,
-  SCHEDULED_TASKS_CHANNEL,
   SECRET_REQUEST_EVENT_TYPE,
   SYSTEM_ACCOUNT_ID
 } from "@orquester/api";
@@ -172,9 +171,6 @@ import { FsTools } from "./mcp/fs-tools.ts";
 import { registerMcp } from "./mcp/server.ts";
 import { sessionToolRegistry } from "./session-tools/index.ts";
 import { registerSessionToolsRoute } from "./session-tools/route.ts";
-import { registerScheduledTaskRoutes } from "./scheduled-tasks/routes.ts";
-import { ScheduledTasksService } from "./scheduled-tasks/service.ts";
-import { ScheduledTasksStore } from "./scheduled-tasks/store.ts";
 import { TodoTools } from "./mcp/todo-tools.ts";
 import {
   UploadTooLargeError,
@@ -222,7 +218,6 @@ import {
   remotesConfigPath,
   resolveDaemonPaths,
   savedPromptsPath,
-  scheduledTasksPath,
   sessionsIndexPath,
   workflowRunsDir,
   workflowSecretsPath,
@@ -289,8 +284,6 @@ interface ResolvedPaths {
   recentProjectsFile: string;
   /** <appdir>/daemon/saved-prompts.json — the shared saved-prompt library. */
   savedPromptsFile: string;
-  /** <appdir>/daemon/scheduled-tasks.json — prompts delivered to chat threads later. */
-  scheduledTasksFile: string;
   /** <appdir>/daemon/workflows.json — automated workflow definitions (workflows spec §3.1). */
   workflowsFile: string;
   /** <appdir>/daemon/workflow-state.json — schedule/git cursors, account cooldowns. */
@@ -436,7 +429,6 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     todosIndexFile: todosIndexPath(paths.baseDir),
     recentProjectsFile: recentProjectsPath(paths.baseDir),
     savedPromptsFile: savedPromptsPath(paths.baseDir),
-    scheduledTasksFile: scheduledTasksPath(paths.baseDir),
     workflowsFile: workflowsPath(paths.baseDir),
     workflowStateFile: workflowStatePath(paths.baseDir),
     workflowSecretsFile: workflowSecretsPath(paths.baseDir),
@@ -636,8 +628,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   );
   // Thread lineage (spec 2026-10-14 §6): the merge-back queue survives a restart; its delivery
   // starts once the daemon's own API exists (`attachApi` below).
-  // Whether the tab records loaded (set by the reattach below): until then a scheduled task or a
-  // queued merge never takes a missing tab for a deleted thread.
+  // Whether the tab records loaded (set by the reattach below): until then a queued merge never
+  // takes a missing tab for a deleted thread.
   let sessionsReattached = false;
   const lineage = new LineageService({
     sessions: agentChat.chat,
@@ -672,15 +664,6 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     logger: console
   });
   await savedPrompts.load();
-  // Scheduled tasks (session tools §5): tolerant like the saved prompts; the scheduler starts once
-  // the daemon's own client exists (below), so nothing is delivered before the agent host is up.
-  const scheduledTasksStore = new ScheduledTasksStore(resolved.scheduledTasksFile);
-  await scheduledTasksStore.load();
-  const scheduledTasks = new ScheduledTasksService({
-    store: scheduledTasksStore,
-    sessionsLoaded: () => sessionsReattached,
-    publish: (type, payload) => broadcaster.publish(SCHEDULED_TASKS_CHANNEL, type, payload)
-  });
   // Built-in plugins (Settings → Plugins; plugins spec §4–5): plugins.json, the tsc-rs install and
   // its hourly update check, and the preload new sessions load through NODE_OPTIONS. Started before
   // any transport serves or any chat or workflow run starts, so new sessions already see the
@@ -1176,7 +1159,6 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     desktops, desktopAudio,
     agentProfile,
     workflows, workflowSecrets, workflowRuns, workflowState, workflowEngine: null, internalApi: null,
-    scheduledTasks,
     lineage,
     workflowProjects: workflowDaemon.runtime.projects,
     workflowCatalogReady: () => workflowDaemon.validationCatalog.ready()
@@ -1235,8 +1217,6 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // usage at once: let the first reading land first (the persisted one, usually no request at all).
   await usage.whenFirstReading(15_000);
   await workflowDaemon.start(services.internalApi).catch((error) => console.error("Workflow engine start failed", error));
-  // Scheduled tasks ride the same client: boot catch-up (the missed-run policy), then the timer.
-  await scheduledTasks.start(services.internalApi).catch((error) => console.error("Scheduled tasks start failed", error));
 
   // The external HTTP transport is opt-in and hot-reloadable: changing its
   // config (password / host / port / enabled) restarts THIS transport only —
@@ -1292,8 +1272,6 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // Both are fast; the 3 s backstop in cli.ts bounds them regardless.
     await workflowDaemon.stop().catch((error) => console.error("Workflow engine stop failed", error));
     await Promise.all([workflows.flush(), workflowSecrets.flush(), workflowRuns.flush(), workflowState.flush()]);
-    scheduledTasks.stop();
-    await scheduledTasksStore.flush();
     // Plugins: the hourly timer, and a running download or smoke test cancelled (its staging dir is
     // emptied at the next start); queued plugins.json writes land.
     await plugins.stop().catch((error) => console.error("Plugins stop failed", error));
@@ -1381,8 +1359,6 @@ interface Services {
   recentProjects: RecentProjectsService;
   /** Daemon-owned saved-prompt library (the right rail), shared by every client. */
   savedPrompts: SavedPromptsService;
-  /** Prompts delivered to chat threads later (session tools §5); absent in test servers. */
-  scheduledTasks?: ScheduledTasksService | null;
   /** Built-in plugins (Settings → Plugins): plugins.json, the tsc-rs install, the session preload. */
   plugins: PluginsService;
   /** Each agent CLI's own global config (agent profile spec §4): the right rail's Agent profile. */
@@ -4030,8 +4006,6 @@ export function createServer(
     }
   );
 
-  // Scheduled tasks (session tools §5) — both transports, like the saved prompts.
-  registerScheduledTaskRoutes(app, { service: () => services.scheduledTasks ?? null });
   // Built-in plugins (plugins spec §5.3). Both transports, like the protect-archived toggle:
   // enabling downloads and runs a verified binary, which is no more than a remote user can do
   // already (installing agent CLIs, running shells), and nothing here is secret.

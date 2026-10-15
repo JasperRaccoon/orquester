@@ -517,9 +517,4 @@ export interface ChatStatusLineProps {
    * path, never around it (goals §8.2).
    */
   onGoalAction?: (action: GoalAction) => void;
-  /**
-   * Show the thread's scheduled-task chip (session tools §5). It loads the thread's tasks itself
-   * and renders nothing while there are none; off where no daemon connection backs the line.
-   */
-  showScheduledTasks?: boolean;
 }

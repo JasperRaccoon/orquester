@@ -1,8 +1,8 @@
 /**
  * A thread's CURRENT interaction mode (default / plan), as every daemon-side turn sender needs it:
- * a turn caused in the thread (a merge back, a scheduled task, a pull request wake) must keep the
- * thread in the mode it is in — the host takes a missing mode as "default", which would flip a
- * planning thread out of plan mode — and a session tool's turn policy must see a caller that plans.
+ * a turn caused in the thread (a merge back) must keep the thread in the mode it is in — the host
+ * takes a missing mode as "default", which would flip a planning thread out of plan mode — and a
+ * session tool's turn policy must see a caller that plans.
  *
  * The mode is the running turn's (else the latest unsettled one's, else the latest turn's), as the
  * turn recorded it when it started — unless a user message steered that turn since: a steer may

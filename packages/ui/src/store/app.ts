@@ -7,7 +7,6 @@ import { wakeBrowserChannels } from "../lib/transporters/ws-browser-channel";
 import { toRemoteConfig, toUiConnection } from "../lib/connections";
 import { notifyProvidersChanged, setProviderSideEffects } from "../lib/agent-chat/providers";
 import { applySavedPromptEvent, resetSavedPrompts } from "../lib/saved-prompts/store";
-import { applyScheduledTaskEvent, resetScheduledTasks } from "../lib/scheduled-tasks/store";
 import { applySecretRequestEvent, resetSecretRequests } from "../lib/agent-chat/secret-requests";
 import { consentActivity, mcpAppConsents } from "../lib/agent-chat/mcp-app-consent";
 import { SECRET_REQUEST_EVENT_TYPE } from "@orquester/api/agent-chat";
@@ -148,7 +147,6 @@ import {
   PLUGINS_CHANGED_EVENT,
   PLUGINS_CHANNEL,
   SAVED_PROMPTS_CHANNEL,
-  SCHEDULED_TASKS_CHANNEL,
   WORKFLOWS_CHANNEL
 } from "@orquester/api";
 import type { PluginInfo } from "@orquester/api";
@@ -1741,7 +1739,6 @@ export const useAppStore = create<AppState>((set, get) => ({
     // prompts (`lib/saved-prompts/store.ts`).
     invalidateProjectIndex();
     resetSavedPrompts();
-    resetScheduledTasks();
     resetSecretRequests();
     resetAgentProfile();
     resetWorkflows();
@@ -3334,11 +3331,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       // client's change lands there (idempotently — a mutation's own answer
       // may already have applied it, and a malformed payload is ignored).
       applySavedPromptEvent(event);
-      return;
-    }
-    if (event.channel === SCHEDULED_TASKS_CHANNEL) {
-      // A chat thread's scheduled tasks (its status-line chip) live in their own module store.
-      applyScheduledTaskEvent(event);
       return;
     }
     if (event.channel === AGENT_PROFILE_CHANNEL) {

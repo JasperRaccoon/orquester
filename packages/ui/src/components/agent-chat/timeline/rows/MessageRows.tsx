@@ -1,7 +1,7 @@
 import React from "react";
 import { ArrowUp, Clock, GitFork, GitMerge, Undo2, X } from "lucide-react";
 
-import { isScheduledTaskMessage, type AttachmentRef } from "@orquester/api";
+import type { AttachmentRef } from "@orquester/api";
 import {
   isMergeBackMessage,
   isThreadAuthoredMessage,
@@ -281,9 +281,6 @@ export const UserMessageRow = React.memo(function UserMessageRow({
   const text = row.message.text;
   const attachments = row.message.attachments ?? [];
   const revertTurnCount = row.revertTurnCount;
-  // Sent by the daemon's scheduler on the thread's behalf (session tools §5): say so, as an agent's
-  // launch prompt does, rather than passing it off as typed.
-  const scheduled = isScheduledTaskMessage(row.message);
   // A fork's result sent back to this thread (spec 2026-10-14 §6): its header
   // becomes a caption, and the bubble holds the result alone.
   // Only a message Orquester marked as such (its context chip, T6-M3) — the same header typed by
@@ -296,8 +293,7 @@ export const UserMessageRow = React.memo(function UserMessageRow({
   const fromThread = React.useMemo(() => (merged || !markedThread ? null : parseThreadMessage(text)), [merged, markedThread, text]);
 
   return (
-    <div className="group flex flex-col items-end gap-1" data-scheduled-task={scheduled ? "true" : undefined}>
-      {scheduled ? <span className="pe-1 text-[11px] text-neutral-500">Scheduled task</span> : null}
+    <div className="group flex flex-col items-end gap-1">
       {merged ? (
         <span className="inline-flex items-center gap-1 pe-1 text-[11px] text-neutral-500" data-merged-back="true">
           <GitMerge size={11} strokeWidth={1.8} aria-hidden />
@@ -306,18 +302,11 @@ export const UserMessageRow = React.memo(function UserMessageRow({
       ) : null}
       {fromThread ? (
         <span className="inline-flex items-center gap-1 pe-1 text-[11px] text-neutral-500" data-from-thread={fromThread.origin}>
-          {fromThread.origin === "delegated"
-            ? "Delegated by"
-            : fromThread.origin === "opened"
-              ? "Opened by"
-              : fromThread.origin === "scheduled"
-                ? "Scheduled by"
-                : "Sent by"}{" "}
-          “{fromThread.fromTitle}”
+          {fromThread.origin === "delegated" ? "Delegated by" : fromThread.origin === "opened" ? "Opened by" : "Sent by"} “{fromThread.fromTitle}”
         </span>
       ) : null}
       <div className="relative max-w-[80%] rounded-2xl bg-neutral-800 p-3 text-neutral-100">
-        <AuthorHeading>{scheduled ? "Scheduled task" : fromThread ? "Another chat" : "You"}</AuthorHeading>
+        <AuthorHeading>{fromThread ? "Another chat" : "You"}</AuthorHeading>
         {attachments.length > 0 ? <AttachmentChips attachments={attachments} /> : null}
         <ClampedBubbleText text={merged ? merged.body : fromThread ? fromThread.body : text} showLabel="Show full message" />
       </div>

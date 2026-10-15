@@ -5,8 +5,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./agent-chat": "./src/agent-chat/index.ts",
-    "./scheduled-tasks": "./src/scheduled-tasks.ts"
+    "./agent-chat": "./src/agent-chat/index.ts"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

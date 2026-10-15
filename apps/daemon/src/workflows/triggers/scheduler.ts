@@ -22,9 +22,9 @@ import type { Clock, FireRequest, TriggerHost, WorkflowLogger } from "../contrac
 import type { WorkflowStateStore } from "../state-store.ts";
 
 /** A due run later than this after its scheduled time is recorded as missed instead of fired. */
-export const MISSED_RUN_GRACE_MINUTES = 15;
+const MISSED_RUN_GRACE_MINUTES = 15;
 /** The timer never sleeps longer than this, so a clock jump is noticed. */
-export const SCHEDULER_MAX_TIMER_MS = 60_000;
+const SCHEDULER_MAX_TIMER_MS = 60_000;
 
 export interface SchedulerDeps {
   host: TriggerHost;

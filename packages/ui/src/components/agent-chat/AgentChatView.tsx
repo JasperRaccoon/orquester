@@ -1207,7 +1207,6 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 goalActions={goalActionList}
                 goalActionsNote={goalNote}
                 onGoalAction={paintOnly ? noop : sendGoalAction}
-                showScheduledTasks
               />
             </div>
             {/* The dock overlaps the composer by 17px so the two read as ONE

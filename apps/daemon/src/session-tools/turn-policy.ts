@@ -1,9 +1,9 @@
 /**
  * Session tools — the turn policy: the one rule every session tool that causes a turn in a
- * thread follows (`thread_send`, `thread_create`, `delegate_task`, `thread_merge_back`; the
- * scheduling toolkit is next). Session tools are pre-approved in every permission and interaction
- * mode (design §1.3), so without this a supervised or planning agent could get unsupervised or
- * editing work done by asking another thread for it.
+ * thread follows (`thread_send`, `thread_create`, `delegate_task`, `thread_merge_back`). Session
+ * tools are pre-approved in every permission and interaction mode (design §1.3), so without this a
+ * supervised or planning agent could get unsupervised or editing work done by asking another
+ * thread for it.
  *
  * (a) **Never broader.** A turn may not be caused in a thread whose permission mode is broader
  *     than the caller's ({@link assertTargetModeNotBroader}); a thread the tool opens runs in the

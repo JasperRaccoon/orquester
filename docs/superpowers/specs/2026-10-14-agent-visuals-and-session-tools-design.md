@@ -17,8 +17,9 @@ Orquester files each part starts from.
 3. **MCP Apps.** Tool calls of third-party MCP servers that declare an MCP Apps UI resource render and
    run inline, on every provider whose protocol exposes the resource.
 4. **Mermaid and math** in chat markdown.
-5. **Orchestration tools.** Delegate tasks, operate other threads, schedule prompts, ask the user for
-   a secret. (Pull request watches were part of this goal; they were removed, see §5 "PR watch".)
+5. **Orchestration tools.** Delegate tasks, operate other threads, ask the user for a secret.
+   (Scheduled prompts and pull request watches were part of this goal; both were removed, see §5
+   "Scheduling" and "PR watch".)
 6. **Thread lineage.** Fork a thread from a message, merge a fork's result back, show parent/child
    relationships.
 
@@ -224,11 +225,12 @@ All operate within the calling thread's **project**. Names (bare):
   `relation: "delegate"`, parent = caller), starts it, returns `taskId` (= child thread id);
   `task_status(taskId)`, `task_wait(taskId, timeoutSeconds)`, `task_cancel(taskId)`. A finished
   delegate's final answer is returned by `task_status/task_wait`.
-- Scheduling: `schedule_task(prompt, at | cron, threadId? = caller)`, `list_scheduled_tasks`,
-  `update_scheduled_task`, `delete_scheduled_task`, `run_scheduled_task_now`. Persisted in the
-  daemon (schema in `packages/config`, tolerant store), survives restarts, delivers by sending the
-  prompt to the thread (queued if busy), shown in the UI per thread with cancel. Reuse the workflow
-  engine's scheduler/timer primitives if they fit; do not duplicate a cron parser.
+- Scheduling: *Removed.* `schedule_task`, `list_scheduled_tasks`, `update_scheduled_task`,
+  `delete_scheduled_task` and `run_scheduled_task_now` (Task 7) were removed from Orquester together
+  with the daemon's scheduler, its store and routes (`/api/scheduled-tasks`) and the UI chip. The
+  shared turn policy (`apps/daemon/src/session-tools/turn-policy.ts`) stays with the thread tools. A
+  leftover `<appdir>/daemon/scheduled-tasks.json` is ignored (never read, never deleted), and a
+  prompt already delivered to a thread renders as an ordinary user message.
 - Secrets: `request_secret(name, prompt, purpose?)` shows a private card in the thread; the user
   types the value (or cancels). The value is never written to `events.ndjson`, logs, or any API
   response other than the tool's result to the requesting agent; the card's persisted record keeps

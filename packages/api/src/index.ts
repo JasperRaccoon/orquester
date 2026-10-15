@@ -36,7 +36,6 @@ import type {
 import { desktopRoutes } from "./desktops.ts";
 export * from "./agent-chat/index.ts";
 export * from "./saved-prompts.ts";
-export * from "./scheduled-tasks.ts";
 export * from "./agent-profile.ts";
 export * from "./prompt-variables.ts";
 export * from "./workflows/index.ts";

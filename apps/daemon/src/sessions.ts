@@ -1395,7 +1395,7 @@ export class LocalSessionManager implements ISessionManager {
 /**
  * `reattach()` could not read the sessions index (unreadable or corrupt): the tab records are not
  * loaded, so a tab missing from the list may still exist. Callers must not treat a missing tab as
- * a deleted thread this run (scheduled tasks, queued merges).
+ * a deleted thread this run (queued merges).
  */
 export class SessionsIndexUnreadableError extends Error {
   constructor() {

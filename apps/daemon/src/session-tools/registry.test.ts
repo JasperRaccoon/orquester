@@ -9,7 +9,6 @@ import { test } from "node:test";
 import { z } from "zod";
 
 import { defineSessionTool, defineSessionToolkit, SESSION_TOOL_READ_ONLY, type SessionToolkit } from "./contract.ts";
-import { schedulingToolkit } from "./scheduling/index.ts";
 import { SESSION_TOOLKITS, sessionToolRegistry } from "./index.ts";
 import { THREADS_TOOLKIT_INSTRUCTIONS, threadsToolkit } from "./threads/index.ts";
 import {
@@ -44,29 +43,33 @@ test("the production registry carries every listed toolkit's tools, within the i
   assert.equal(registry.enabled, true);
   assert.deepEqual(
     SESSION_TOOLKITS.map((toolkit) => toolkit.id),
-    ["html", schedulingToolkit.id, "secrets", threadsToolkit.id]
+    ["html", "secrets", threadsToolkit.id]
   );
   assert.deepEqual(
     registry.tools.map((tool) => tool.name),
     SESSION_TOOLKITS.flatMap((toolkit) => toolkit.tools.map((tool) => tool.name))
   );
-  for (const name of [
-    "html_preview",
-    "html_render",
-    ...schedulingToolkit.tools.map((tool) => tool.name),
-    "request_secret"
-  ]) {
+  for (const name of ["html_preview", "html_render", "request_secret"]) {
     assert.equal(registry.get(name)?.name, name);
   }
   assert.match(registry.instructions, /^## Orquester\n/);
   assert.ok(registry.instructions.includes("### Showing visuals"));
-  // Pull request watches were removed: none of their tools or instructions is advertised.
-  for (const name of ["watch_pull_request", "unwatch_pull_request", "list_pull_request_watches"]) {
+  // Pull request watches and scheduled tasks were removed: none of their tools or instructions is
+  // advertised.
+  for (const name of [
+    "watch_pull_request",
+    "unwatch_pull_request",
+    "list_pull_request_watches",
+    "schedule_task",
+    "list_scheduled_tasks",
+    "update_scheduled_task",
+    "delete_scheduled_task",
+    "run_scheduled_task_now"
+  ]) {
     assert.equal(registry.get(name), undefined, name);
     assert.ok(!registry.instructions.includes(name), name);
   }
   assert.ok(registry.instructions.includes("`request_secret`"));
-  assert.ok(registry.instructions.includes("`schedule_task`"));
   assert.ok(SESSION_TOOLKITS.includes(threadsToolkit));
   for (const tool of threadsToolkit.tools) assert.equal(registry.get(tool.name)?.name, tool.name);
   assert.ok(registry.instructions.includes(THREADS_TOOLKIT_INSTRUCTIONS));

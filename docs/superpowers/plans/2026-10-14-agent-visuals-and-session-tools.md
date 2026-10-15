@@ -113,7 +113,10 @@ delegate child lineage, `task_status`/`task_wait` returning the delegate's final
 presentation (delegate rows link to the child thread; child shows "Delegated by"). Tests for every
 tool incl. scope violations, wait cancellation, and timeouts.
 
-### Task 7: Scheduled tasks
+### Task 7: Scheduled tasks (removed)
+
+*Removed after it shipped: Orquester no longer has agent scheduled tasks (spec §5 "Scheduling").
+The task text below is kept as history.*
 
 Spec §5 "Scheduling". Persisted schema in `packages/config` (tolerant), daemon scheduler (reuse
 workflow timer/cron primitives), delivery via the normal send path (queued when busy), restart

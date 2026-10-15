@@ -57,10 +57,6 @@ import type {
   RepoSummary,
   SavedPrompt,
   SavedPromptListResponse,
-  RunScheduledTaskResponse,
-  ScheduledTask,
-  ScheduledTaskListResponse,
-  UpdateScheduledTaskRequest,
   ServerInfoResponse,
   SessionSummary,
   SessionUploadRequest,
@@ -101,7 +97,7 @@ import {
 import { fsPathQuery } from "./fs-path-query";
 import { parsePluginActionResult, parsePluginsResponse } from "./plugins-state";
 import { buildQueryString } from "./transporter";
-import { agentProfileRoutes, desktopRoutes, pluginRoutes, scheduledTaskRoutes, workflowRoutes } from "@orquester/api";
+import { agentProfileRoutes, desktopRoutes, pluginRoutes, workflowRoutes } from "@orquester/api";
 import type { PluginId, PluginInfo, PluginsResponse, SetPluginWorkspaceRequest } from "@orquester/api";
 import type {
   CreateDesktopRequest,
@@ -720,26 +716,6 @@ export class ApiClient {
   /** An Insert or a Send used the prompt: bumps `lastUsedAt` / `useCount`. */
   markSavedPromptUsed(id: string): Promise<SavedPrompt> {
     return this.send("POST", `/api/saved-prompts/${encodeURIComponent(id)}/used`);
-  }
-
-  // --- Scheduled tasks (session tools §5; daemon-persisted, shared) --------
-
-  /** One chat thread's scheduled tasks. */
-  listScheduledTasks(threadId: string, signal?: AbortSignal): Promise<ScheduledTaskListResponse> {
-    return this.send("GET", scheduledTaskRoutes.list, { query: { threadId }, signal });
-  }
-
-  updateScheduledTask(id: string, patch: UpdateScheduledTaskRequest): Promise<ScheduledTask> {
-    return this.send("PUT", scheduledTaskRoutes.item(id), { body: patch });
-  }
-
-  deleteScheduledTask(id: string): Promise<void> {
-    return this.send("DELETE", scheduledTaskRoutes.item(id));
-  }
-
-  /** Queue a delivery now; it waits for the thread's running turn like a scheduled run. */
-  runScheduledTaskNow(id: string): Promise<RunScheduledTaskResponse> {
-    return this.send("POST", scheduledTaskRoutes.run(id));
   }
 
   // --- Agent profile (agent profile spec §8) --------------------------------

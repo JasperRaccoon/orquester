@@ -48,8 +48,7 @@ API in-process, `../mcp/daemon-api.ts`). Whatever a toolkit imports, the host lo
 ## The turn policy (`turn-policy.ts`)
 
 Session tools are pre-approved in every permission and interaction mode (§1.3), so a tool that
-causes a turn in a thread — `thread_send`, `thread_create`, `delegate_task`, `thread_merge_back`,
-and the scheduling toolkit's `schedule_task`, `update_scheduled_task`, `run_scheduled_task_now` —
+causes a turn in a thread — `thread_send`, `thread_create`, `delegate_task`, `thread_merge_back` —
 follows one rule, so a supervised or planning agent cannot get unsupervised or editing work done by
 asking another thread for it:
 
@@ -73,24 +72,6 @@ asking another thread for it:
   agent never sees it): only a message with it reads as another chat's in the GUI, so the same
   header typed by the user stays the user's; the prompt history strips the header on recall.
 
-**Scheduled tasks** (the scheduling toolkit, S-I1). A delivery happens later, so the rule is
-recorded with the task and checked again by the daemon's scheduler when it delivers
-(`scheduled-tasks/service.ts`):
-
-- `schedule_task` checks (a) for its target thread and (b) for the caller, and records the
-  authorship: `createdByThreadId`, `createdByTitle`, `creatorRuntimeMode`, `interactionMode`.
-- At delivery: (a) again — a target that has become broader than `creatorRuntimeMode` refuses the
-  run (recorded `failed`, a one-shot paused, nothing sent); (b) the turn plans when the task was
-  scheduled from a planning turn, or when the thread is planning when it arrives (a user's task
-  too: a scheduled prompt never flips a thread out of plan mode); (c) an agent's prompt is wrapped
-  as `[Scheduled by thread "<title>"]` with the marker chip; a user's prompt is delivered as written.
-- (d) **Who may change a task.** An agent may update, delete or run now only a task an AGENT
-  scheduled, and only from the thread that scheduled it or the thread it is for (`createdBy` in
-  `list_scheduled_tasks`); a task the user scheduled (`createdBy: "user"`) is the user's alone
-  (`PERMISSION_DENIED`). An update re-stamps the authorship (the task becomes the updating
-  thread's, in its modes); `run_scheduled_task_now` checks (a) and refuses a default-mode task from
-  a planning caller. The user's own routes (`/api/scheduled-tasks`) are not limited.
-
 Not under the rule, by design: `thread_interrupt` / `task_cancel` (they stop work, never start it:
 at worst a nuisance, which project scope bounds) and `thread_fork` (the fork starts idle, in the
 caller's own settings).
@@ -100,7 +81,6 @@ caller's own settings).
 | Directory | Tools | Daemon side |
 |---|---|---|
 | `html/` | `html_preview`, `html_render` | `ctx.api.previewHtmlRender` (the preview browser, `../html-preview/`), `ctx.api.publishHtmlRender` (the page store, `../agent-chat/html-render-publish.ts`) |
-| `scheduling/` | `schedule_task`, `list_scheduled_tasks`, `update_scheduled_task`, `delete_scheduled_task`, `run_scheduled_task_now` | `../scheduled-tasks/` (service, routes `/api/scheduled-tasks`); store `scheduled-tasks.json` (`@orquester/config`); the turn policy above |
 | `secrets/` | `request_secret` | `../agent-chat/secret-requests.ts` through `ctx.secretRequests`; masking in the agent host (`agent-host/session-tools/secret-redaction.ts`) |
 | `threads/` | `thread_list`, `thread_read`, `thread_create`, `thread_send`, `thread_wait`, `thread_interrupt`, `thread_fork`, `thread_merge_back`; `delegate_task`, `task_status`, `task_wait`, `task_cancel` | the daemon's own routes: `/api/sessions` (create, with `chat.lineage` for a delegate), the §6.2 `turn`/`interrupt` commands, Task 4's `fork`/`mergeBack`; reuses the external `/mcp`'s `read_transcript`, `send_message` and turn wait (`../mcp/tools/messages.ts`, `../mcp/wait.ts`) — pure modules the host loads with the toolkit |
 
