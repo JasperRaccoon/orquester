@@ -724,7 +724,7 @@ class OpenCodeAdapterImpl implements AgentAdapter {
       // Design 2026-10-14 §1.2: the thread's own credential, registered on the
       // shared server under the thread's own name (`session-tools.ts`). This
       // issue revokes the thread's previous one; the session revokes this.
-      const grant = await issueSessionToolsGrant(this.ctx, input.threadId);
+      const grant = await issueSessionToolsGrant(this.ctx, input.threadId, "opencode");
       sessionToolsGrant = grant;
       const session = await OpenCodeThreadSession.start(
         {
@@ -754,7 +754,8 @@ class OpenCodeAdapterImpl implements AgentAdapter {
                   serverName: openCodeSessionToolsServerName(input.threadId),
                   url: grant.url,
                   authorization: grant.authorization,
-                  instructions: this.ctx.sessionTools?.instructions ?? "",
+                  instructions: grant.prepared.instructions,
+                  deny: grant.prepared.deny,
                   revoke: grant.revoke
                 }
               }

@@ -59,6 +59,8 @@ import {
   type CreateHostThreadRequest,
   type ForkHostThreadRequest,
   type ForkHostThreadResponse,
+  type SessionToolsRefreshRequest,
+  type SessionToolsRefreshResponse,
   type SetThreadIdentityRequest
 } from "../host-protocol.ts";
 import type { ThreadStore } from "../services.ts";
@@ -122,6 +124,11 @@ export interface AgentHostServerOptions {
   afterStopResponse?(): void;
   /** A watcher handle the provider registry's demand gate counts (§3.2). */
   addProviderWatcher?(): () => void;
+  /**
+   * Unified MCP design 2026-10-15 §9.3: apply a thread's new session-tool manifest
+   * (`agentHostRoutes.sessionToolsRefresh`). Absent → the route is not served (route-miss 404).
+   */
+  sessionToolsRefresh?(threadId: string, body: SessionToolsRefreshRequest): Promise<SessionToolsRefreshResponse>;
 }
 
 export interface AgentHostServer {
@@ -835,6 +842,20 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
       }
       const body = await readJsonBody(request);
       const result = await orchestrator.mcpAppRequest(threadId, operation, body);
+      sendJson(response, 200, result);
+      return;
+    }
+
+    // Unified MCP §9.3: the daemon's new manifest for this thread (its toolsets changed). Applied
+    // in-session where the provider re-lists, else at the session's next idle point; never a turn.
+    if (rest === "/session-tools/refresh" && method === "POST" && options.sessionToolsRefresh) {
+      const body = (await readJsonBody(request)) as Partial<SessionToolsRefreshRequest> | null;
+      const manifest = body?.manifest;
+      const strings = (list: unknown): list is string[] => Array.isArray(list) && list.every((item) => typeof item === "string");
+      if (!manifest || !strings(manifest.tools) || typeof manifest.instructions !== "string" || !strings(manifest.deny)) {
+        throw new AgentChatCommandError("INVALID_COMMAND", "manifest {tools, instructions, deny} is required.");
+      }
+      const result = await options.sessionToolsRefresh(threadId, { manifest: { tools: manifest.tools, instructions: manifest.instructions, deny: manifest.deny } });
       sendJson(response, 200, result);
       return;
     }

@@ -66,6 +66,8 @@ export interface TestHostOptions<S extends HostThreadStore = FakeThreadStore> {
   index?: ThreadIndex;
   /** Told on every host-initiated interrupt (session tools, design 2026-10-14 §1.1). */
   onTurnInterrupt?: (threadId: string) => void;
+  /** Unified MCP §9.3: the session-tool list moved and needs a restart at the next idle point. */
+  sessionToolsStale?: (threadId: string) => boolean;
   /** The orchestrator's `secrets` option (fork links, MCP App answers). */
   secrets?: OrchestratorOptions["secrets"];
   /** Where a transcript fork's handoff waits (default: in memory). */
@@ -181,6 +183,7 @@ export function createTestHost<S extends HostThreadStore = FakeThreadStore>(
     ...(options.isThreadClosed ? { isThreadClosed: options.isThreadClosed } : {}),
     ...(options.index ? { index: options.index } : {}),
     ...(options.onTurnInterrupt ? { onTurnInterrupt: options.onTurnInterrupt } : {}),
+    ...(options.sessionToolsStale ? { sessionToolsStale: options.sessionToolsStale } : {}),
     ...(options.secrets ? { secrets: options.secrets } : {}),
     ...(options.forkHandoffs ? { forkHandoffs: options.forkHandoffs } : {}),
     launchConfigs,

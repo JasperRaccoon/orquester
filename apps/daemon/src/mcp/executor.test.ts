@@ -386,6 +386,44 @@ test("request_toolset's card goes through the executor's port: kind toolset, nev
   assert.equal((externalCtx as CallContext).requestToolsetCard, undefined, "external callers cannot raise a toolset card");
 });
 
+test("an approved toolset card is reported to the chat transport (automatic continue) and is the row's reference; a denied one is not reported", async () => {
+  const approved: [string, string][] = [];
+  const asks = defineTool({
+    name: "asks", title: "Asks", description: "d", input: {}, audiences: ["chat"], toolset: "core", tier: "act", planSafe: true,
+    scope: async () => claim(), annotations: MUTATING, resultKind: "json",
+    run: async (_args, ctx) => ({ outcome: (await ctx.requestToolsetCard!({ toolset: "notes", title: "Claude asks to enable notes", sections: [{ kind: "text", text: "x" }] })).outcome })
+  });
+  const r = rig({ tools: [asks], deps: { onToolsetApproved: (who, toolset) => approved.push([who.threadId, toolset]) } });
+  const result = await r.call("asks", {});
+  assert.deepEqual(approved, [["me", "notes"]]);
+  assert.deepEqual((result.structuredContent as { toolApproval?: unknown }).toolApproval, {
+    approvalId: "a_1", kind: "toolset", family: "toolset", title: "Claude asks to enable notes", outcome: "approved"
+  });
+  r.port!.answerWith({ outcome: "denied", approvalId: "", reason: "not today" });
+  const denied = await r.call("asks", {});
+  assert.deepEqual(approved, [["me", "notes"]], "a denial schedules nothing");
+  assert.deepEqual((denied.structuredContent as { toolApproval?: { outcome: string; reason?: string } }).toolApproval?.reason, "not today");
+});
+
+test("every gated outcome carries the row's reference: granted (with the grant's scope), timed out, cancelled", async () => {
+  const granted = rig({ port: new FakeApprovalPort().grant({ family: "desktops", scope: "project", projectPath: OWN }) });
+  const allowed = await granted.call("open_desktop", { command: "xterm" });
+  assert.deepEqual((allowed.structuredContent as { toolApproval?: unknown }).toolApproval, {
+    kind: "admin", family: "desktops", title: "Claude wants to open a desktop running a command", outcome: "granted", grantId: "g_1", grantScope: "project"
+  });
+  const late = rig({ port: new FakeApprovalPort({ outcome: "timed_out", approvalId: "" }) });
+  const timedOut = await late.call("open_desktop", { command: "xterm" });
+  assert.equal(code(timedOut), "APPROVAL_TIMEOUT");
+  assert.equal((timedOut.structuredContent as { toolApproval?: { outcome: string } }).toolApproval?.outcome, "timed_out");
+  assert.match(String((timedOut.content.at(-1) as { text?: string }).text), /"toolApproval"/);
+  const gone = rig({ port: new FakeApprovalPort({ outcome: "cancelled", approvalId: "", reason: "closed" }) });
+  const cancelled = await gone.call("open_desktop", { command: "xterm" });
+  assert.equal(code(cancelled), "CANCELLED");
+  assert.equal((cancelled.structuredContent as { toolApproval?: { outcome: string } }).toolApproval?.outcome, "cancelled");
+  // A call no card or grant gated carries none.
+  assert.equal((await granted.call("chat_only", {})).structuredContent?.toolApproval, undefined);
+});
+
 test("a caller with no canonical project of its own is never offered a grant (findGrant would never honour it)", async () => {
   const r = rig();
   await r.call("open_desktop", { command: "xterm" }, caller({ projectPath: "", workspace: "" }));

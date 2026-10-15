@@ -127,6 +127,13 @@ async function rig(t: TestContext) {
 
 const errorCode = (result: { structuredContent?: unknown }) => (result.structuredContent as { code?: string } | undefined)?.code;
 const errorMessage = (result: { structuredContent?: unknown }) => (result.structuredContent as { message?: string } | undefined)?.message ?? "";
+/** The tool row's `toolApproval` reference the executor attaches (spec §7.3). */
+const reference = (result: { structuredContent?: unknown }) => (result.structuredContent as { toolApproval?: Record<string, unknown> } | undefined)?.toolApproval;
+/** The result without its reference. */
+const payload = (result: { structuredContent?: unknown }) => {
+  const { toolApproval: _reference, ...rest } = (result.structuredContent ?? {}) as Record<string, unknown>;
+  return rest;
+};
 
 test("an Admin call opens a card through the real port; approved, it runs with the card's approval", async (t) => {
   const r = await rig(t);
@@ -138,7 +145,10 @@ test("an Admin call opens a card through the real port; approved, it runs with t
   assert.ok((await r.runtime.approvals.answer("me", id, { decision: "approve" })).ok);
   const result = await pending;
   assert.equal(result.isError, undefined, errorMessage(result));
-  assert.deepEqual(result.structuredContent, { opened: true });
+  assert.deepEqual(payload(result), { opened: true });
+  // The row's reference: the card, its outcome — no arguments (spec §7.3).
+  assert.deepEqual(reference(result), { approvalId: id, kind: "admin", family: "desktops", title: card.title, outcome: "approved" });
+  assert.match(JSON.stringify(result.content.at(-1)), /toolApproval/, "a text block carries it too (Claude keeps only text)");
   assert.deepEqual(r.runs[0]!.approval, { outcome: "approved", approvalId: id });
   assert.equal(r.runtime.approvals.list("me").length, 0);
 });
@@ -151,6 +161,7 @@ test("denied, the call is refused with the user's words and never runs", async (
   const result = await pending;
   assert.equal(errorCode(result), "APPROVAL_DENIED");
   assert.match(errorMessage(result), /"not now"/);
+  assert.deepEqual(reference(result), { approvalId: id, kind: "admin", family: "desktops", title: "Claude wants to open a desktop", outcome: "denied", reason: "not now" });
   assert.equal(r.runs.length, 0);
 });
 
@@ -165,9 +176,11 @@ test("approved with a chat grant: the next call is covered by the grant without 
   assert.equal((await first).isError, undefined);
   assert.deepEqual(r.runs[0]!.approval, { outcome: "approved", approvalId: id, grantId });
 
+  assert.equal(reference(await first)?.grantId, grantId);
   const second = await r.call("control_desktop");
   assert.equal(second.isError, undefined, errorMessage(second));
   assert.deepEqual(r.runs[1]!.approval, { outcome: "granted", grantId });
+  assert.deepEqual(reference(second), { kind: "admin", family: "desktops", title: "Claude wants to open a desktop", outcome: "granted", grantId, grantScope: "chat" });
   assert.equal(r.opened.length, 0, "no card opened for the granted call");
   assert.equal(r.runtime.approvals.list("me").length, 0);
 
@@ -182,13 +195,15 @@ test("workflows: a create approved with a chat grant joins its new id to that gr
   const r = await rig(t);
   const once = r.call("create_workflow");
   assert.ok((await r.runtime.approvals.answer("me", await r.nextCard(), { decision: "approve" })).ok);
-  assert.deepEqual((await once).structuredContent, { workflowId: "wf_1" });
+  assert.deepEqual(payload(await once), { workflowId: "wf_1" });
+  assert.equal(reference(await once)?.outcome, "approved");
   assert.equal(r.runtime.tools.settingsView().grants.length, 0, "approving once creates and widens nothing");
 
   const granted = r.call("create_workflow");
   const answer = await r.runtime.approvals.answer("me", await r.nextCard(), { decision: "approve", grant: "chat" });
   assert.ok(answer.ok);
-  assert.deepEqual((await granted).structuredContent, { workflowId: "wf_2" });
+  assert.deepEqual(payload(await granted), { workflowId: "wf_2" });
+  assert.equal(reference(await granted)?.grantId, answer.ok ? answer.response.grantId : undefined);
   const grant = r.runtime.tools.settingsView().grants.find((g) => g.family === "workflows");
   assert.deepEqual(grant?.workflowIds, ["wf_2"]);
 
@@ -209,7 +224,8 @@ test("toolsets: off → TOOL_NOT_ENABLED; request_toolset's card through the por
   const card = r.runtime.approvals.list("me")[0]!;
   assert.deepEqual([card.kind, card.family, card.grantOptions], ["toolset", "toolset", []]);
   assert.ok((await r.runtime.approvals.answer("me", id, { decision: "approve" })).ok);
-  assert.deepEqual((await asking).structuredContent, { outcome: "approved" });
+  assert.deepEqual(payload(await asking), { outcome: "approved" });
+  assert.deepEqual(reference(await asking), { approvalId: id, kind: "toolset", family: "toolset", title: card.title, outcome: "approved" });
   assert.deepEqual(r.order, ["toolsets changed: me", "tool resumed"], "the listener runs after the card settled, before the call resumed");
   assert.deepEqual((await r.call("add_todo")).structuredContent, { added: true });
 });

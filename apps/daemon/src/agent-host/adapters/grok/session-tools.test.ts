@@ -31,6 +31,14 @@ test("the mcpServers entry is ACP http, named orquester, with the bearer as a he
   assert.deepEqual(grokSessionMcpServers(undefined), []);
 });
 
+test("a denied server is shadowed by a same-named entry on the inert endpoint (§12.1; never our own name)", () => {
+  const servers = grokSessionMcpServers({ ...launch, deny: ["orquester_remote", "orquester", "orquester_remote"], deniedUrl: "http://127.0.0.1:4711/mcp/denied" });
+  assert.deepEqual(servers.slice(1), [{ type: "http", name: "orquester_remote", url: "http://127.0.0.1:4711/mcp/denied", headers: [] }]);
+  assert.equal(servers[0]!.name, "orquester");
+  // No credential travels to a shadow.
+  assert.doesNotMatch(JSON.stringify(servers.slice(1)), /cred-/);
+});
+
 test("the instruction block is `_meta.rules`, absent when empty", () => {
   assert.deepEqual(grokSessionMeta(launch), { rules: "## Orquester" });
   assert.equal(grokSessionMeta({ ...launch, instructions: "" }), undefined);

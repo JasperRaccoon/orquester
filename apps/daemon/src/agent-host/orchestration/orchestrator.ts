@@ -321,6 +321,14 @@ export interface OrchestratorOptions {
    */
   onTurnInterrupt?: (threadId: string) => void;
   /**
+   * Unified MCP design 2026-10-15 §9.3: true when the thread's live provider session advertises
+   * another session-tool list than the thread's toolsets now call for, and its provider cannot take
+   * it in-session (`session-tools/index.ts` `needsRestart`). The ensure step then restarts it with
+   * resume — only when no turn is running (a steer never restarts), so the change lands at the
+   * thread's next idle point. Optional; must not throw.
+   */
+  sessionToolsStale?: (threadId: string) => boolean;
+  /**
    * Session-tool secrets (design 2026-10-14 §5, `session-tools/secret-redaction.ts`)
    * beyond ingestion's: `link` — a fork's child is masked with its parent's
    * values (called before the child's history replay); `maskValue` — an MCP
@@ -1689,6 +1697,16 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         bound,
         capabilities: adapter.capabilities
       });
+      // Unified MCP §9.3: a session-tool list the session cannot take in-session — at an idle
+      // point only (a steer into a running turn never restarts it), carrying the cursor.
+      if (!decision.restart && options.sessionToolsStale !== undefined) {
+        const live = currentSession(runtime);
+        const idle = live.activeTurnId === null && live.status !== "running";
+        if (idle && options.sessionToolsStale(runtime.id)) {
+          decision.restart = true;
+          decision.reasons.push("sessionTools");
+        }
+      }
       if (!decision.restart) {
         snapshots.ensureWorkspaceSnapshot(head.adapter, head.cwd);
         return bound.session;

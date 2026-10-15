@@ -119,6 +119,12 @@ import { connectExecutor, createAgentToolsRuntime, type AgentToolsRuntime } from
 import { registerAgentToolsRuntimeRoutes } from "./agent-tools/routes.ts";
 import { executorPorts } from "./mcp/executor.ts";
 // umcp:t3 end
+// umcp:t6 begin
+import { agentHostRoutes, type SessionToolsRefreshResponse } from "./agent-host/host-protocol.ts";
+import { catalogFor } from "./mcp/catalog/index.ts";
+import { canonicalProjectPath } from "./agent-tools/approval-port.ts";
+import { registerSessionToolsManifestRoute, SessionToolsRefresher } from "./session-tools/toolset-refresh.ts";
+// umcp:t6 end
 import type { ActivityCause } from "./ansi-activity";
 import { TodoError, TodoListManager } from "./todos";
 import { RecentProjectsService, describeProjectPath } from "./recent-projects";
@@ -1197,6 +1203,54 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // but BEFORE the awaiting call resumes: schedule restarts for the next idle point (Task 6).
   const disconnectExecutor = connectExecutor(agentToolsRuntime, executorPorts);
   // umcp:t3 end
+  // umcp:t6 begin
+  // The chat transport (unified MCP design 2026-10-15 §9.3, §9.4, §12.1): per-thread manifests for
+  // the agent host, toolset changes pushed to it (applied in-session where the provider re-lists,
+  // else at the chat's next idle point), and the automatic continue turn after an approved
+  // `request_toolset` card. `onToolsetsChanged` runs before the awaiting call resumes: the
+  // refresher defers its push to a later macrotask.
+  const sessionToolsRefresher = new SessionToolsRefresher({
+    thread: (id) => {
+      const tab = agentChat.chat.get(id);
+      const info = tab ? agentChat.sessionToolThread(id) : null;
+      if (!tab || !info) return null;
+      return {
+        agentId: info.agentId,
+        home: tab.accountId ? tab.accountId : "system",
+        projectPath: tab.projectPath,
+        canonicalProjectPath: tab.projectPath ? canonicalProjectPath(tab.projectPath) : ""
+      };
+    },
+    openThreads: () => agentChat.chat.list().map((tab) => tab.id),
+    resolvedToolsets: (id, agent) => agentToolsRuntime.tools.resolvedToolsets(id, agent),
+    agentToolsEnabled: () => agentToolsRuntime.tools.snapshot().enabled,
+    catalog: () => catalogFor("chat"),
+    api: () => services.internalApi,
+    pushToHost: async (id, manifest): Promise<SessionToolsRefreshResponse | null> => {
+      const route = agentChat.routeDeps();
+      if (!route.isHostHealthy()) return null;
+      try {
+        const response = await route.client.json<SessionToolsRefreshResponse>("POST", agentHostRoutes.sessionToolsRefresh(id), { manifest }, { timeoutMs: 10_000 });
+        // 404: a host that predates the route — the change applies at the session's next start.
+        return response.status === 200 && response.value ? response.value : null;
+      } catch {
+        return null;
+      }
+    },
+    logger: console
+  });
+  agentToolsRuntime.tools.setAdvertisedToolsets((id) => sessionToolsRefresher.advertisedToolsets(id));
+  const offToolsetsChanged = agentToolsRuntime.tools.onToolsetsChanged((id) => sessionToolsRefresher.toolsetsChanged(id));
+  executorPorts.onToolsetApproved = (caller, toolset) => sessionToolsRefresher.toolsetApproved(caller, toolset);
+  agentChat.chat.lifecycle.on("closed", ({ id }: { id: string }) => sessionToolsRefresher.forget(id));
+  // A changed MCP server config (agent profile) is read afresh by the next manifest.
+  broadcaster.add({
+    send: (data) => {
+      if (data.includes('"channel":"agent-profile"')) sessionToolsRefresher.invalidateDaemonPointing();
+    }
+  });
+  services.sessionToolsRefresher = sessionToolsRefresher;
+  // umcp:t6 end
 
   // The agent host (chat spec §3.1), adopted or spawned AFTER reattach so the
   // chat tab records are already loaded, and before any transport serves.
@@ -1330,6 +1384,11 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     await agentToolsRuntime.shutdown().catch((error) => console.error("Agent tools stop failed", error));
     disconnectExecutor();
     // umcp:t3 end
+    // umcp:t6 begin
+    offToolsetsChanged();
+    executorPorts.onToolsetApproved = null;
+    sessionToolsRefresher.stop();
+    // umcp:t6 end
     await htmlPreview.stop();
     await agentChat.stop();
     await browsers.shutdown();
@@ -1430,6 +1489,10 @@ interface Services {
   /** Approval cards, agent-tools settings, chat toolsets and grants (unified MCP §7, §9). Optional: route tests build a partial `services`. */
   agentToolsRuntime?: AgentToolsRuntime;
   // umcp:t3 end
+  // umcp:t6 begin
+  /** The chat transport's manifests, toolset refreshes and automatic continue turns (unified MCP §9.3, §9.4). Optional: route tests build a partial `services`. */
+  sessionToolsRefresher?: SessionToolsRefresher;
+  // umcp:t6 end
   usage: UsageService;
   usageTokens: UsageTokensScanner;
   /** The Claude subagent cache lifetime as it applies now (auto mode's decision). */
@@ -4555,6 +4618,16 @@ export function createServer(
       );
     });
   }
+
+  // umcp:t6 begin — the in-chat server's per-thread manifest (unified MCP design 2026-10-15 §9.4):
+  // SOCKET-ONLY, and the agent host's bearer besides (it names a thread's MCP denials).
+  if (options.mode === "local" && services.sessionToolsRefresher) {
+    registerSessionToolsManifestRoute(app, {
+      authorizeHost: (authorization) => services.agentChat?.authorizeHostRequest(authorization) ?? false,
+      refresher: services.sessionToolsRefresher
+    });
+  }
+  // umcp:t6 end
 
   // umcp:t2 begin — both transports of the unified catalog (design 2026-10-15 §3.3), through ONE
   // executor whose ports (`executorPorts`: approvals, toolsets) the umcp:t3 block wires.

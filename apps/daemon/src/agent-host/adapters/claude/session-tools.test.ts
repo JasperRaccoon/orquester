@@ -11,7 +11,7 @@ import { describe, it } from "node:test";
 import type { CanUseTool } from "@anthropic-ai/claude-agent-sdk";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { ToolListChangedNotificationSchema, type CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
 import { z } from "zod";
 
@@ -24,7 +24,12 @@ import { TEST_TOOLKIT_INSTRUCTIONS } from "../../../session-tools/testing.ts";
 import { recordingSessionTools } from "../../session-tools/testing.ts";
 import { buildClaudeQueryOptions } from "./launch.ts";
 import { toProviderModels } from "./models.ts";
-import { createClaudeSessionToolsLaunch, isClaudeSessionTool } from "./session-tools.ts";
+import {
+  claudeDeniedMcpServers,
+  claudeDisallowedTools,
+  createClaudeSessionToolsLaunch,
+  isClaudeSessionTool
+} from "./session-tools.ts";
 
 function fakeContext(): SessionToolContext {
   return {
@@ -50,7 +55,7 @@ async function connectInProcess(instance: unknown): Promise<Client> {
 describe("Claude in-process session-tool server", () => {
   it("advertises every registered tool and calls them as its own thread", async () => {
     const tools = recordingSessionTools();
-    const launch = createClaudeSessionToolsLaunch({
+    const launch = await createClaudeSessionToolsLaunch({
       sessionTools: tools,
       threadId: "thread-1",
       signal: new AbortController().signal
@@ -95,7 +100,7 @@ describe("Claude in-process session-tool server", () => {
       })
     ]);
     const tools = recordingSessionTools(registry);
-    const launch = createClaudeSessionToolsLaunch({ sessionTools: tools, threadId: "thread-1", signal: new AbortController().signal });
+    const launch = await createClaudeSessionToolsLaunch({ sessionTools: tools, threadId: "thread-1", signal: new AbortController().signal });
     const client = await connectInProcess(launch.server.instance);
     // The schema is still advertised in full.
     const listed = await client.listTools();
@@ -112,7 +117,7 @@ describe("Claude in-process session-tool server", () => {
   it("ending the session aborts a call still in flight", async () => {
     const tools = recordingSessionTools();
     const life = new AbortController();
-    const launch = createClaudeSessionToolsLaunch({ sessionTools: tools, threadId: "thread-1", signal: life.signal });
+    const launch = await createClaudeSessionToolsLaunch({ sessionTools: tools, threadId: "thread-1", signal: life.signal });
     const client = await connectInProcess(launch.server.instance);
     const called = tools.nextCall();
     const pending = client.callTool({ name: "wait_for_cancel", arguments: {} });
@@ -121,6 +126,21 @@ describe("Claude in-process session-tool server", () => {
     const result = (await pending) as CallToolResult;
     assert.equal(result.isError, true);
     assert.equal(tools.calls[0]!.signal?.aborted, true);
+    await client.close();
+  });
+
+  it("takes a new list in-session: list_changed, the new tools listed and pre-approved", async () => {
+    const tools = recordingSessionTools();
+    const launch = await createClaudeSessionToolsLaunch({ sessionTools: tools, threadId: "thread-1", signal: new AbortController().signal });
+    const client = await connectInProcess(launch.server.instance);
+    let changed!: () => void;
+    const notified = new Promise<void>((resolve) => (changed = resolve));
+    client.setNotificationHandler(ToolListChangedNotificationSchema, async () => changed());
+    assert.equal(launch.names().has("pixel"), true);
+    assert.equal(await tools.applyManifest("thread-1", { tools: ["echo"], instructions: "", deny: [] }), "live");
+    await notified;
+    assert.deepEqual((await client.listTools()).tools.map((tool) => tool.name), ["echo"]);
+    assert.deepEqual([...launch.names()], ["echo"]);
     await client.close();
   });
 
@@ -147,9 +167,9 @@ describe("Claude launch options with session tools", () => {
     canUseTool
   };
 
-  it("attach the in-process server, its pre-approval and its instruction block", () => {
+  it("attach the in-process server, its pre-approval and its instruction block", async () => {
     const tools = recordingSessionTools();
-    const launch = createClaudeSessionToolsLaunch({ sessionTools: tools, threadId: "t", signal: new AbortController().signal });
+    const launch = await createClaudeSessionToolsLaunch({ sessionTools: tools, threadId: "t", signal: new AbortController().signal });
     const { options } = buildClaudeQueryOptions({ ...base, sessionTools: launch });
     assert.deepEqual(Object.keys(options.mcpServers ?? {}), ["orquester"]);
     assert.equal(options.mcpServers?.orquester, launch.server);
@@ -170,6 +190,25 @@ describe("Claude launch options with session tools", () => {
     // `sdk` server as its type and name only, and there is no token at all.
     const { instance: _instance, ...serialisable } = launch.server;
     assert.deepEqual(serialisable, { type: "sdk", name: "orquester" });
+    // A user-config server named `orquester` never connects (it would race ours, Task 6 probe);
+    // nothing else is denied without a manifest denial.
+    assert.deepEqual((options.settings as { deniedMcpServers?: unknown }).deniedMcpServers, [{ serverName: "orquester" }]);
+    assert.equal(options.disallowedTools, undefined);
+  });
+
+  it("deny every daemon-pointing server twice: the server-level rule and deniedMcpServers (§12.1)", async () => {
+    const tools = recordingSessionTools(undefined, { deny: ["orquester_remote", "my.remote", "orquester"] });
+    const launch = await createClaudeSessionToolsLaunch({ sessionTools: tools, threadId: "t", signal: new AbortController().signal });
+    const { options } = buildClaudeQueryOptions({ ...base, sessionTools: launch });
+    // `mcp__orquester` would remove our own server's tools: never.
+    assert.deepEqual(options.disallowedTools, ["mcp__orquester_remote", "mcp__my_remote"]);
+    assert.deepEqual((options.settings as { deniedMcpServers?: unknown }).deniedMcpServers, [
+      { serverName: "orquester" },
+      { serverName: "orquester_remote" },
+      { serverName: "my.remote" }
+    ]);
+    assert.deepEqual(claudeDisallowedTools([]), []);
+    assert.deepEqual(claudeDeniedMcpServers([]), [{ serverName: "orquester" }]);
   });
 
   it("without session tools, nothing changes", () => {

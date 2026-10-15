@@ -68,7 +68,7 @@ async function answeredCall(threadId: string, redactor: SessionSecretRedactor, r
     }
   });
   const host = createSessionToolsHost({
-    registry: sessionToolRegistry(),
+    manifest: async () => ({ kind: "legacy" as const }),
     forward: (call, signal) =>
       executeSessionToolCall(sessionToolRegistry(), call, {
         threadId: call.threadId,

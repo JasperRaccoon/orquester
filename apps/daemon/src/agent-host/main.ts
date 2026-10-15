@@ -77,9 +77,9 @@ import { systemClock, systemIdGen } from "./orchestration/runtime-seams.ts";
 import { createAgentHostServer, type AgentHostServer } from "./server/index.ts";
 import { createThreadStore } from "./store/index.ts";
 import { buildProviderEnv, providerNodePreload } from "./support/env.ts";
-import { sessionToolRegistry, type SessionToolRegistry } from "../session-tools/index.ts";
 import {
   createDaemonForwarder,
+  createDaemonManifestClient,
   createSessionToolsHost,
   type SessionToolsHost
 } from "./session-tools/index.ts";
@@ -246,11 +246,6 @@ interface StartAgentHostOptions {
    * hold a handle to wind down on its own.
    */
   onStopped?: () => void;
-  /**
-   * The session-tool registry (design 2026-10-14 §1). Production uses the
-   * statically imported `SESSION_TOOLKITS`; a test passes its own.
-   */
-  sessionTools?: SessionToolRegistry;
 }
 
 export async function startAgentHost(
@@ -276,26 +271,23 @@ export async function startAgentHost(
   const token = await readOrCreateToken(agentHostTokenPath(appdir));
   const socketPath = agentHostSocketPath(appdir, process.platform === "win32" ? "win32" : "linux");
 
-  // ---- session tools (design 2026-10-14 §1) -------------------------------
-  // Only when a toolkit is registered: with none, no adapter is handed the
-  // service, and nothing a provider is sent changes. Calls go to the DAEMON's
-  // socket — the path the daemon passed (`ORQUESTER_DAEMON_SOCK`), else the
-  // appdir's default — authenticated with this host's own token.
-  const toolRegistry = options.sessionTools ?? sessionToolRegistry();
+  // ---- session tools (design 2026-10-14 §1; unified MCP design 2026-10-15 §9.4) --
+  // The static chat catalog, advertised per thread: each provider session's list, instruction
+  // block and MCP denials come from the DAEMON's manifest (the frozen legacy definitions from a
+  // daemon that predates it). Calls and manifests go to the daemon's socket — the path the daemon
+  // passed (`ORQUESTER_DAEMON_SOCK`), else the appdir's default — with this host's own token.
   const daemonSocketPath =
     env.ORQUESTER_DAEMON_SOCK ??
     defaultSocketPath(appdir, process.platform === "win32" ? "win32" : "linux");
   // Secrets a session tool hands a thread (`request_secret`) are masked in
   // everything of that thread the host persists (design 2026-10-14 §5).
   const secretRedactor = new SessionSecretRedactor();
-  const sessionTools: SessionToolsHost | undefined = toolRegistry.enabled
-    ? createSessionToolsHost({
-        registry: toolRegistry,
-        forward: createDaemonForwarder({ socketPath: () => daemonSocketPath, token }),
-        logger,
-        onSecretValues: (threadId, values) => secretRedactor.remember(threadId, values)
-      })
-    : undefined;
+  const sessionTools: SessionToolsHost = createSessionToolsHost({
+    forward: createDaemonForwarder({ socketPath: () => daemonSocketPath, token }),
+    manifest: createDaemonManifestClient({ socketPath: () => daemonSocketPath, token }),
+    logger,
+    onSecretValues: (threadId, values) => secretRedactor.remember(threadId, values)
+  });
 
   // ---- services ----------------------------------------------------------
   const liveness = createLivenessRegistry();
@@ -464,7 +456,7 @@ export async function startAgentHost(
     sessionPath: () => sessionPath,
     tmpDir: () => tmpDir,
     signal: shutdown.signal,
-    ...(sessionTools !== undefined ? { sessionTools } : {})
+    sessionTools
   });
 
   // ---- provider snapshots ------------------------------------------------
@@ -546,9 +538,7 @@ export async function startAgentHost(
     onAccountEvent: (event) => orchestrator?.onAccountEvent(event),
     logger: { warn: (message, detail) => logger.warn(message, detail) },
     // The provenance of a session-tool row (design 2026-10-14 §1.5).
-    ...(sessionTools !== undefined
-      ? { sessionToolNames: new Set(sessionTools.tools.map((tool) => tool.name)) }
-      : {}),
+    sessionToolNames: sessionTools.knownNames,
     secrets: secretRedactor
   });
 
@@ -588,9 +578,10 @@ export async function startAgentHost(
     ids,
     index: threadIndex,
     // An interrupted turn ends the session-tool calls it was waiting on.
-    ...(sessionTools !== undefined
-      ? { onTurnInterrupt: (threadId: string) => sessionTools.abortThreadCalls(threadId) }
-      : {}),
+    onTurnInterrupt: (threadId: string) => sessionTools.abortThreadCalls(threadId),
+    // A toolset change the live session could not take in-session (unified MCP §9.3): restart it
+    // with resume at its next idle point.
+    sessionToolsStale: (threadId: string) => sessionTools.needsRestart(threadId),
     // A fork's child masked with its parent's secrets; an MCP App's answers masked (§5).
     secrets: {
       link: (threadId, parentThreadId) => secretRedactor.link(threadId, parentThreadId),
@@ -605,6 +596,8 @@ export async function startAgentHost(
   const server = createAgentHostServer({
     orchestrator: host,
     store,
+    // Unified MCP §9.3: the daemon's new manifest for a thread whose toolsets changed.
+    sessionToolsRefresh: async (threadId, body) => ({ applied: await sessionTools.applyManifest(threadId, body.manifest) }),
     logger,
     hostInstanceId,
     token,
@@ -743,7 +736,7 @@ export async function startAgentHost(
       });
     }
     // Every provider session is gone: no credential is left to honour.
-    await sessionTools?.stop().catch((error: unknown) => {
+    await sessionTools.stop().catch((error: unknown) => {
       logger.warn("agent-host: session tools did not stop cleanly", error);
     });
     // Every adapter ends its event stream once its sessions are stopped, and

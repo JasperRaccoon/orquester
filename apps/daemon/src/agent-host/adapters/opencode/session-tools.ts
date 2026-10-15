@@ -35,6 +35,14 @@
  * that ends revokes its credential and disconnects its server, best-effort
  * but awaited, so the thread's next start registers after it.
  *
+ * The list is the thread's manifest (unified MCP §9.4), served per request by the endpoint.
+ * OpenCode 1.18.34 re-lists on `notifications/tools/list_changed` (Task 6 probe), but the loopback
+ * endpoint is stateless and pushes nothing: a changed list reaches it through a session restart.
+ *
+ * Denials (§12.1): each MCP server the manifest denies gets a LAST rule `{permission:
+ * "<name>_*", action: "deny"}` (the name sanitised as OpenCode builds tool ids), so OpenCode drops
+ * every tool of it before each step, exactly as it hides co-tenants' session tools.
+ *
  * Instructions ride the per-turn `system` addendum (`session.ts`), which
  * OpenCode keeps on the message's `system` field, never in its parts.
  */
@@ -58,7 +66,14 @@ export interface OpenCodeSessionToolsLaunch {
   authorization: string;
   /** The "Orquester" instruction block; "" for none. */
   instructions: string;
+  /** MCP servers to deny in this thread's session (§12.1), by their config names. */
+  deny?: readonly string[];
   revoke(): void;
+}
+
+/** A server name as OpenCode spells it inside tool ids (`[a-zA-Z0-9_-]`, anything else `_`). */
+export function openCodeServerRuleName(server: string): string {
+  return server.replace(/[^a-zA-Z0-9_-]/g, "_");
 }
 
 /** The thread's own server name on a shared OpenCode server. */
@@ -90,17 +105,20 @@ export const OPENCODE_SESSION_TOOLS_DENY = `orquester-${"?".repeat(16)}_*`;
  */
 export function withSessionToolRules(
   ruleset: OpenCodePermissionRuleset,
-  isolation: { isolate: boolean; own?: Pick<OpenCodeSessionToolsLaunch, "serverName"> }
+  isolation: { isolate: boolean; own?: Pick<OpenCodeSessionToolsLaunch, "serverName" | "deny"> }
 ): OpenCodePermissionRuleset {
   if (!isolation.isolate && isolation.own === undefined) {
     return ruleset;
   }
+  const denied = [...new Set((isolation.own?.deny ?? []).map(openCodeServerRuleName))].filter((name) => name.length > 0);
   return [
     ...ruleset,
     { permission: OPENCODE_SESSION_TOOLS_DENY, pattern: "*", action: "deny" },
     ...(isolation.own !== undefined
       ? [{ permission: `${isolation.own.serverName}_*`, pattern: "*", action: "allow" as const }]
-      : [])
+      : []),
+    // §12.1, last so nothing above re-allows them: every tool of a denied server.
+    ...denied.map((name) => ({ permission: `${name}_*`, pattern: "*", action: "deny" as const }))
   ];
 }
 

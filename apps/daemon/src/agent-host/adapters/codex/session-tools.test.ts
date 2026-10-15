@@ -27,6 +27,20 @@ after(async () => {
 });
 
 describe("codex session tools — the builders", () => {
+  it("the thread config switches off every server the manifest denies, never our own name, never an unaddressable one (§12.1)", () => {
+    const config = codexSessionToolsConfig({
+      url: "http://127.0.0.1:4711/mcp",
+      instructions: "x",
+      deny: ["orquester_remote", "orquester", "bad.name", "my-remote"]
+    });
+    assert.equal(config["mcp_servers.orquester_remote.enabled"], false);
+    assert.equal(config["mcp_servers.my-remote.enabled"], false);
+    // `orquester` is ours: the thread entry already replaces a user's same-named one.
+    assert.equal(config["mcp_servers.orquester.enabled"], undefined);
+    assert.equal(Object.keys(config).some((key) => key.includes("bad.name")), false);
+    assert.ok(config["mcp_servers.orquester"]);
+  });
+
   it("the thread config attaches the server by URL and env-var NAME, pre-approved", () => {
     const config = codexSessionToolsConfig({ url: "http://127.0.0.1:4711/mcp", instructions: "x" });
     assert.deepEqual(config, {

@@ -284,7 +284,7 @@ class GrokAdapter implements AgentAdapter {
     // Design 2026-10-14 §1.2: a fresh credential per `grok agent stdio`
     // launch, carried by the ACP `mcpServers` entry (`session-tools.ts`); this
     // issue revokes the thread's previous one, and `onClosed` revokes this.
-    const grant = await issueSessionToolsGrant(this.context, input.threadId);
+    const grant = await issueSessionToolsGrant(this.context, input.threadId, "grok");
 
     const session: GrokSession = new GrokSession({
       ...(grant !== undefined
@@ -292,8 +292,10 @@ class GrokAdapter implements AgentAdapter {
             sessionTools: {
               url: grant.url,
               authorization: grant.authorization,
-              instructions: this.context.sessionTools?.instructions ?? "",
-              toolNames: new Set(this.context.sessionTools?.tools.map((tool) => tool.name) ?? [])
+              instructions: grant.prepared.instructions,
+              toolNames: grant.prepared.names,
+              deny: grant.prepared.deny,
+              deniedUrl: grant.deniedUrl
             }
           }
         : {}),

@@ -277,8 +277,8 @@ export class ClaudeSession {
    * call still in flight (design 2026-10-14 §1.1).
    */
   private readonly sessionToolsLife = new AbortController();
-  /** The bare names of the session tools this session launched with (none without the server). */
-  private sessionToolNames: ReadonlySet<string> = new Set();
+  /** The bare names of the session tools this session advertises now (none without the server). */
+  private sessionToolNames: () => ReadonlySet<string> = () => new Set();
   /** One debug line per session for an unavailable context-usage request. */
   private contextUsageUnavailableLogged = false;
   private hostInitiatedStop = false;
@@ -427,17 +427,15 @@ export class ClaudeSession {
       this.historyPrefetch = { sessionId: this.resumeSessionId, messages };
     }
     const sessionTools = this.options.context.sessionTools;
-    this.sessionToolNames = new Set(sessionTools?.tools.map((tool) => tool.name) ?? []);
+    // The thread's manifest (unified MCP §9.4): its tools, instruction block and MCP denials; a
+    // toolset turned on later reaches this session in-session (`session-tools.ts`).
+    const toolsLaunch =
+      sessionTools !== undefined
+        ? await createClaudeSessionToolsLaunch({ sessionTools, threadId: this.threadId, signal: this.sessionToolsLife.signal })
+        : undefined;
+    this.sessionToolNames = toolsLaunch !== undefined ? () => toolsLaunch.names() : () => new Set();
     const built = buildClaudeQueryOptions({
-      ...(sessionTools !== undefined
-        ? {
-            sessionTools: createClaudeSessionToolsLaunch({
-              sessionTools,
-              threadId: this.threadId,
-              signal: this.sessionToolsLife.signal
-            })
-          }
-        : {}),
+      ...(toolsLaunch !== undefined ? { sessionTools: toolsLaunch } : {}),
       cwd: this.options.cwd,
       executablePath: this.options.executablePath,
       env: this.options.env,
@@ -1567,7 +1565,7 @@ export class ClaudeSession {
     // `allowedTools` already covers them, this is the belt to its braces. Only
     // the tools this session attached — never a user's own server's that
     // happen to share its name.
-    if (isClaudeSessionTool(toolName, this.sessionToolNames)) {
+    if (isClaudeSessionTool(toolName, this.sessionToolNames())) {
       return { behavior: "allow", updatedInput: toolInput };
     }
 

@@ -359,7 +359,7 @@ export const createCodexAdapter: AdapterFactory = async (
     // the thread's previous one, and the session revokes this one when its
     // child exits.
     const bin = requireBin();
-    const grant = await issueSessionToolsGrant(context, input.threadId);
+    const grant = await issueSessionToolsGrant(context, input.threadId, "codex");
     const session = new CodexSession({
       context,
       threadId: input.threadId,
@@ -375,7 +375,8 @@ export const createCodexAdapter: AdapterFactory = async (
         ? {
             sessionTools: {
               url: grant.url,
-              instructions: context.sessionTools?.instructions ?? "",
+              instructions: grant.prepared.instructions,
+              deny: grant.prepared.deny,
               revoke: grant.revoke
             }
           }

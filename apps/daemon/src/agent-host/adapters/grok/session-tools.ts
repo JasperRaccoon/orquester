@@ -21,6 +21,17 @@
  *   frame carrying it. Also sent on `session/load`, where a CLI that keeps the
  *   session's first system prompt may ignore it; the tool descriptions carry
  *   the full guidance either way.
+ * - **The list** is the thread's manifest (unified MCP §9.4), served per request by the endpoint;
+ *   Grok 1.0.46 ignores `notifications/tools/list_changed` (Task 6 probe), so a changed list
+ *   reaches it through a session restart.
+ * - **Denials (§12.1).** The `GROK_CONFIG_PATH` overlay cannot carry MCP config (`launch.ts`; the
+ *   Task 6 probe confirmed it: neither `disabled_mcp_servers` nor `[mcp_servers.<name>] enabled =
+ *   false` in the overlay stopped a user server connecting), and an argv `--deny MCPTool(...)` rule
+ *   leaves the server connected. What does work (probed on 1.0.46, twice): an ACP `mcpServers` entry
+ *   REPLACES the user-config server of the same name — the user's is never contacted. So each
+ *   denied server is shadowed by a same-named entry pointing at the host's inert endpoint
+ *   (`/mcp/denied`: no tools, every call refused). The same rule is why a user server named
+ *   `orquester` never shadows ours.
  * - **Approvals.** A `session/request_permission` for one of the REGISTERED
  *   tools is answered `allow_once` without a card (`session.ts`) — by name,
  *   so a user's own server that shares the `orquester` name (the external
@@ -40,6 +51,10 @@ export interface GrokSessionToolsLaunch {
   instructions: string;
   /** The registered tools' bare names: only these are answered without a card. */
   toolNames: ReadonlySet<string>;
+  /** MCP servers to deny in this session (§12.1), by their config names. */
+  deny?: readonly string[];
+  /** The inert endpoint a denied name is shadowed with (`…/mcp/denied`). */
+  deniedUrl?: string;
 }
 
 /** The `mcpServers` list for `session/new` / `session/load`. */
@@ -47,13 +62,21 @@ export function grokSessionMcpServers(launch: GrokSessionToolsLaunch | undefined
   if (launch === undefined) {
     return [];
   }
+  const deniedUrl = launch.deniedUrl;
+  const shadows: McpServer[] =
+    deniedUrl === undefined
+      ? []
+      : [...new Set(launch.deny ?? [])]
+          .filter((name) => name !== SESSION_TOOLS_SERVER_NAME && name.length > 0)
+          .map((name) => ({ type: "http", name, url: deniedUrl, headers: [] }));
   return [
     {
       type: "http",
       name: SESSION_TOOLS_SERVER_NAME,
       url: launch.url,
       headers: [{ name: "Authorization", value: launch.authorization }]
-    }
+    },
+    ...shadows
   ];
 }
 
