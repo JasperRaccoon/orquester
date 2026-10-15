@@ -1,7 +1,12 @@
+// Catalog family module `files` (Files: read_file) — owned by plan Task 9 (unified MCP, Wave 3).
+// Task 2 stub: `filesFamily` exports this family's tools as catalog tools (`../catalog/legacy.ts`
+// adapters over the pre-catalog definitions below); the owning task replaces it and Task 2 never
+// edits this file again.
 import { z } from "zod";
 import { DEFAULT_READ_BYTES, MAX_FS_ENTRIES, MAX_READ_BYTES, type ListFilesResult } from "../fs-tools.ts";
 import { MAX_RESULT_BYTES, resultBytes } from "../result.ts";
 import { defineTool, READ_ONLY, type ToolDef } from "../tool.ts";
+import { legacyExternalTools } from "../catalog/legacy.ts";
 
 /**
  * A listing that fits one result (ok() cuts anything over MAX_RESULT_BYTES and loses its fields):
@@ -62,3 +67,6 @@ const readFile = defineTool({
 });
 
 export const fileTools: ToolDef[] = [listFiles, readFile];
+
+/** This family in the catalog (`../catalog/index.ts`). */
+export const filesFamily = legacyExternalTools(fileTools);

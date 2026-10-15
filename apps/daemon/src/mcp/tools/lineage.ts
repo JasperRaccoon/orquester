@@ -1,3 +1,7 @@
+// Catalog family module `lineage` (Lineage: fork_session, merge_back_session) — owned by plan Task 8 (unified MCP, Wave 3).
+// Task 2 stub: `lineageFamily` exports this family's tools as catalog tools (`../catalog/legacy.ts`
+// adapters over the pre-catalog definitions below); the owning task replaces it and Task 2 never
+// edits this file again.
 import { z } from "zod";
 import type { ForkSessionRequest, ForkSessionResponse, MergeBackActionResponse, MergeBackResponse, SessionLineageResponse } from "@orquester/api";
 import { agentChatRoutes, startedTurns } from "@orquester/api/agent-chat";
@@ -6,6 +10,9 @@ import { postIdempotent, readThread, requireChatSession } from "../reads.ts";
 import { toSafeToolError } from "../result.ts";
 import { defineTool, MUTATING, READ_ONLY, type ToolDef } from "../tool.ts";
 import { chatDetail } from "../views.ts";
+import { legacyChatTools, legacyExternalTools } from "../catalog/legacy.ts";
+import { threadTools as legacyThreadTools } from "../../session-tools/threads/threads.ts";
+import { delegationTools as legacyDelegationTools } from "../../session-tools/threads/delegation.ts";
 
 // Thread lineage (spec 2026-10-14 §6): fork a chat session from a turn, merge a fork's result back into its parent,
 // and read a session's parent and children. Every call goes through the daemon's own routes (agentChatRoutes.fork,
@@ -94,3 +101,11 @@ const resolveMergeBack = defineTool({
 });
 
 export const lineageTools: ToolDef[] = [forkSession, mergeBackSession, resolveMergeBack, getSessionLineage];
+
+/** The legacy in-chat thread tools this family's owner replaces: `thread_send`, `thread_create`, `delegate_task`, `thread_wait`, `task_wait`, `thread_fork`, `thread_merge_back`. */
+const LEGACY_CHAT_NAMES: ReadonlySet<string> = new Set(["thread_send", "thread_create", "delegate_task", "thread_wait", "task_wait", "thread_fork", "thread_merge_back"]);
+/** This family in the catalog (`../catalog/index.ts`). */
+export const lineageFamily = [
+  ...legacyExternalTools(lineageTools),
+  ...legacyChatTools([...legacyThreadTools, ...legacyDelegationTools].filter((tool) => LEGACY_CHAT_NAMES.has(tool.name)))
+];

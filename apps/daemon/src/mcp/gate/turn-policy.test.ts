@@ -7,9 +7,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { parseThreadMessage, RUNTIME_MODES } from "@orquester/api/agent-chat";
 
-import { chatSummary, head, snapshot, turn } from "../mcp/fixtures.ts";
-import { FakeDaemonApi } from "../mcp/testing.ts";
-import type { SessionToolContext } from "./contract.ts";
+import { chatSummary, head, snapshot, turn } from "../fixtures.ts";
+import { FakeDaemonApi } from "../testing.ts";
+import type { SessionToolContext } from "../../session-tools/contract.ts";
 import {
   assertTargetModeNotBroader,
   interactionModeFor,

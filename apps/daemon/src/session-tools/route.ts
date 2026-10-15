@@ -1,6 +1,10 @@
 /**
  * Session tools — the daemon's socket-only route (design §1.1):
- * `POST /api/agent-host/session-tools/call`.
+ * `POST /api/agent-host/session-tools/call` — the in-chat transport of the unified catalog
+ * (design 2026-10-15 §3.3): every call runs through THE executor (`../mcp/executor.ts`) over
+ * `catalogFor("chat")`, as a `thread` caller built here from the thread's own tab and snapshot:
+ * its title, permission mode, whether its running turn plans, the workflow-owned trait (owner +
+ * lineage walk) and the exchange (`causedBy` of its running turn). Never from the arguments.
  *
  * Registered ONLY on the unix-socket app (`createServer` with `mode:
  * "local"`), never on remote HTTP. The socket is trusted local control, yet a
@@ -18,10 +22,17 @@ import type { FastifyInstance } from "fastify";
 import type { AgentAdapterId } from "@orquester/api/agent-chat";
 
 import { daemonRoutesForHost, type SessionToolCallRequest } from "../agent-host/host-protocol.ts";
+import { canonicalProject } from "../mcp/addressing.ts";
+import type { AnyOrquesterTool, ApprovalPort, ThreadCaller } from "../mcp/catalog/contract.ts";
+import { toolByName } from "../mcp/catalog/index.ts";
 import type { DaemonApi } from "../mcp/daemon-api.ts";
+import { ToolError } from "../mcp/errors.ts";
+import { executeToolCall, type EnabledToolsets } from "../mcp/executor.ts";
+import { isWorkflowOwned } from "../mcp/gate/scope.ts";
+import { runningExchange, runningTurnPlans } from "../mcp/gate/turn-policy.ts";
+import { listSessions, readThread } from "../mcp/reads.ts";
+import { toSafeToolError } from "../mcp/result.ts";
 import type { SessionSecretRequests } from "./contract.ts";
-import { executeSessionToolCall } from "./executor.ts";
-import type { SessionToolRegistry } from "./registry.ts";
 
 /** 16 MiB, as the external `/mcp` route: room for an inline page or image argument. */
 const SESSION_TOOL_BODY_LIMIT = 16 * 1024 * 1024;
@@ -40,10 +51,49 @@ export interface SessionToolRouteDeps {
   resolveThread(threadId: string): SessionToolThread | null;
   /** The daemon's in-process API for handlers; null while it does not exist yet. */
   api(): DaemonApi | null;
-  registry(): SessionToolRegistry;
+  /** The chat tools by name (default: the catalog's `chat` audience). */
+  lookup?: (name: string) => AnyOrquesterTool | undefined;
+  /** Cards and grants (default: the daemon's wiring, `executorPorts`). */
+  approvals?: ApprovalPort | null;
+  /** The chat's toolsets (default: the daemon's wiring, else the catalogue defaults). */
+  enabledToolsets?: EnabledToolsets | null;
   /** The daemon's secret requests (`request_secret`); absent where none is wired. */
   secretRequests?: SessionSecretRequests;
   now?: () => number;
+}
+
+/**
+ * The calling chat as the gate judges it, read NOW from its tab and its snapshot (§3.2
+ * `ToolCaller`): the project canonical when it is one, else "" (no own project — every target is
+ * "other"; the contract's `projectPath`).
+ */
+export async function buildThreadCaller(
+  api: DaemonApi,
+  threadId: string,
+  thread: SessionToolThread,
+  callId: string,
+  delivered?: Promise<boolean>
+): Promise<ThreadCaller> {
+  const [sessions, snap] = await Promise.all([listSessions(api), readThread(api, threadId)]);
+  const tab = sessions.find((session) => session.id === threadId);
+  if (!tab) throw new ToolError("THREAD_NOT_FOUND", "This chat thread is no longer open.");
+  const project = thread.projectPath ? await canonicalProject(api, thread.projectPath) : null;
+  return {
+    kind: "thread",
+    threadId,
+    title: tab.title,
+    // Canonical project root, or "" when the tab's path is no (longer a) project: no own project.
+    projectPath: project?.canonical ?? "",
+    workspace: project?.workspace ?? "",
+    cwd: thread.cwd,
+    agentId: thread.agentId,
+    callId,
+    runtimeMode: snap.head.runtimeMode,
+    planning: runningTurnPlans(snap),
+    workflowOwned: isWorkflowOwned(sessions, threadId),
+    exchange: runningExchange(snap),
+    ...(delivered ? { delivered } : {})
+  };
 }
 
 function parseBody(body: unknown): SessionToolCallRequest | null {
@@ -92,22 +142,26 @@ export function registerSessionToolsRoute(app: FastifyInstance, deps: SessionToo
       if (!reply.raw.writableFinished) controller.abort();
       markDelivered(reply.raw.writableFinished);
     });
-    const result = await executeSessionToolCall(
-      deps.registry(),
-      { name: call.name, arguments: call.arguments },
-      {
-        threadId: call.threadId,
-        projectPath: thread.projectPath,
-        cwd: thread.cwd,
-        agentId: thread.agentId,
-        callId: call.callId,
-        signal: controller.signal,
-        api,
-        ...(deps.secretRequests !== undefined ? { secretRequests: deps.secretRequests } : {}),
-        delivered,
-        now: deps.now ?? Date.now
-      }
-    );
+    const now = deps.now ?? Date.now;
+    let result;
+    try {
+      const caller = await buildThreadCaller(api, call.threadId, thread, call.callId, delivered);
+      result = await executeToolCall(
+        {
+          lookup: (name, audience) => (audience === "chat" ? (deps.lookup ? deps.lookup(name) : toolByName(name, "chat")) : undefined),
+          ...(deps.approvals !== undefined ? { approvals: deps.approvals } : {}),
+          ...(deps.enabledToolsets !== undefined ? { enabledToolsets: deps.enabledToolsets } : {}),
+          refreshCaller: (before) => buildThreadCaller(api, before.threadId, thread, before.callId, delivered),
+          ...(deps.secretRequests !== undefined ? { secretRequests: deps.secretRequests } : {}),
+          now
+        },
+        { name: call.name, arguments: call.arguments },
+        { caller, api, signal: controller.signal }
+      );
+    } catch (error) {
+      // The caller could not be read (the thread closed, the host restarting): a coded result.
+      result = toSafeToolError(error);
+    }
     if (controller.signal.aborted) {
       // Nobody is left to read it.
       markDelivered(false);

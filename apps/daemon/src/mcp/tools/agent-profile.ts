@@ -1,3 +1,7 @@
+// Catalog family module `agent-profile` (Agent profiles) — owned by plan Task 11 (unified MCP, Wave 3).
+// Task 2 stub: `agentProfileFamily` exports this family's tools as catalog tools (`../catalog/legacy.ts`
+// adapters over the pre-catalog definitions below); the owning task replaces it and Task 2 never
+// edits this file again.
 // Agent profiles through the MCP: each agent CLI's own global configuration — MCP servers, skills, plugins, plugin
 // marketplaces, hooks, slash commands and the global instruction file (docs/superpowers/specs/2026-09-28-agent-profile-
 // design.md; docs/orquester-mcp.md §13).
@@ -53,6 +57,7 @@ import type { DaemonApi, DaemonMethod, DaemonResponse } from "../daemon-api.ts";
 import { daemonError, ToolError } from "../errors.ts";
 import { clipText, fitJsonBytes, MAX_ECHO_CHARS, MAX_RESULT_BYTES, resultBytes } from "../result.ts";
 import { defineTool, DESTRUCTIVE, MUTATING, MUTATING_IDEMPOTENT, READ_ONLY, type ToolDef } from "../tool.ts";
+import { legacyExternalTools } from "../catalog/legacy.ts";
 
 /** What a profile tool plans its result to: the cap less room for ok()'s own framing and a few keys added last. */
 const PROFILE_RESULT_BUDGET = MAX_RESULT_BYTES - 4_000;
@@ -888,3 +893,6 @@ export const agentProfileTools: ToolDef[] = [
   setAgentProfileItemEnabled, deleteAgentProfileItem, copyAgentProfileItem, trustAgentProfileHook,
   getAgentInstructions, writeAgentInstructions, importAgentProfileItems, listMarketplacePlugins
 ];
+
+/** This family in the catalog (`../catalog/index.ts`). */
+export const agentProfileFamily = legacyExternalTools(agentProfileTools);

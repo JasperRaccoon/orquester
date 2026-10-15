@@ -1,9 +1,16 @@
+// Catalog family module `usage` (Usage: get_usage) — owned by plan Task 9 (unified MCP, Wave 3).
+// Task 2 stub: `usageFamily` exports this family's tools as catalog tools (`../catalog/legacy.ts`
+// adapters over the pre-catalog definitions below); the owning task replaces it and Task 2 never
+// edits this file again.
 import { z } from "zod";
 import type { AgentAccountsResponse, UsageResponse, UsageTokensResponse } from "@orquester/api";
 import { expectOk } from "../errors.ts";
 import { defineTool, READ_ONLY, type ToolDef } from "../tool.ts";
 import { usageView } from "../usage-view.ts";
 import { resultBytes } from "../result.ts";
+import { legacyChatTools, legacyExternalTools } from "../catalog/legacy.ts";
+import { threadTools as legacyThreadTools } from "../../session-tools/threads/threads.ts";
+import { delegationTools as legacyDelegationTools } from "../../session-tools/threads/delegation.ts";
 
 /**
  * get_cost's own budget, counted as ok() counts (UTF-8 bytes of the JSON, result.ts) and 10 000 under its 60 000-byte
@@ -63,3 +70,11 @@ const getCost = defineTool({
 });
 
 export const usageTools: ToolDef[] = [getUsage, getCost];
+
+/** The legacy in-chat thread tools this family's owner replaces: `agent_catalog`. */
+const LEGACY_CHAT_NAMES: ReadonlySet<string> = new Set(["agent_catalog"]);
+/** This family in the catalog (`../catalog/index.ts`). */
+export const usageFamily = [
+  ...legacyExternalTools(usageTools),
+  ...legacyChatTools([...legacyThreadTools, ...legacyDelegationTools].filter((tool) => LEGACY_CHAT_NAMES.has(tool.name)))
+];

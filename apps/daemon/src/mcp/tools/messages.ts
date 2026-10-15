@@ -1,3 +1,7 @@
+// Catalog family module `messages` (Conversation: create_session, send_message) — owned by plan Task 8 (unified MCP, Wave 3).
+// Task 2 stub: `messagesFamily` exports this family's tools as catalog tools (`../catalog/legacy.ts`
+// adapters over the pre-catalog definitions below); the owning task replaces it and Task 2 never
+// edits this file again.
 import { z } from "zod";
 import type { SessionSummary } from "@orquester/api";
 import { agentChatRoutes, buildPlanImplementationPrompt, GOAL_ACTIVITY_KIND, GOAL_COMMAND_FAILED_ACTIVITY_KIND, GOAL_STATUS_ACTIVITY_KIND, isGoalCommandText, isHiddenGoalChange, MAX_TURN_INPUT_CHARS, parseGoalSupport, parseGoalUpdatedPayload, parseThreadGoal, startedTurns, type AttachmentRef, type ThreadGoal, type ThreadItem, type ThreadItemResponse, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
@@ -12,6 +16,7 @@ import { defineTool, MUTATING, READ_ONLY, type ToolContext, type ToolDef } from 
 import { proposedPlan, transcriptEntries, transcriptRange, type TranscriptResult } from "../transcript.ts";
 import { buildViewContext, chatDetail, fitDetail, SETTLED_TURN_STATES, type SessionDetail } from "../views.ts";
 import { turnBaseline, waitForTurn, type TurnBaseline, type TurnOutcome } from "../wait.ts";
+import { legacyExternalTools } from "../catalog/legacy.ts";
 
 const MAX_WAIT_MS = 600_000;
 /** read_transcript's ceiling: the budget covers the whole result in UTF-8 bytes (transcript.ts), 5 000 under ok()'s 60 000-byte cap (result.ts). */
@@ -449,3 +454,6 @@ export const readTranscript = defineTool({
 });
 
 export const messageTools: ToolDef[] = [sendMessage, implementPlan, readTranscript];
+
+/** This family in the catalog (`../catalog/index.ts`). */
+export const messagesFamily = legacyExternalTools(messageTools);

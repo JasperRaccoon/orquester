@@ -1,26 +1,31 @@
 /**
- * Session tools — the daemon side of one call (design §1.1): look the tool
- * up, validate the arguments strictly, run the handler with the context the
- * route derived, and map whatever happens to a `CallToolResult`. Daemon-only:
- * the agent host never imports this module.
+ * Session tools — one call against a {@link SessionToolRegistry} (design 2026-10-14 §1.1), for
+ * callers that hold a registry rather than the catalog (the toolkits' own tests, a provider
+ * adapter's test). It runs through THE executor (`../mcp/executor.ts`, unified MCP design
+ * 2026-10-15 §3.3) — the only caller of a tool's `run` — with the registry's tools adapted as
+ * legacy chat tools (`../mcp/catalog/legacy.ts`). Daemon-only: the agent host never imports it.
+ *
+ * The caller is the context's thread with a neutral mode: a legacy session tool claims no scope
+ * the gate judges and reads the caller's mode and plan itself, so nothing here depends on it.
+ * The production route (`./route.ts`) builds the full caller from the thread's snapshot.
  */
 
-import { z } from "zod";
-
-import { ToolError } from "../mcp/errors.ts";
-import { clipText, MAX_ECHO_CHARS, toSafeToolError } from "../mcp/result.ts";
-import { argumentProblems } from "../mcp/server.ts";
+import type { ThreadCaller } from "../mcp/catalog/contract.ts";
+import { legacyChatTools } from "../mcp/catalog/legacy.ts";
+import type { AnyOrquesterTool } from "../mcp/catalog/contract.ts";
+import { executeToolCall } from "../mcp/executor.ts";
 import type { SessionToolContext, SessionToolResult } from "./contract.ts";
 import type { SessionToolRegistry } from "./registry.ts";
-import { cancelledResult } from "./results.ts";
 
-/** A result is a record with a `content` array; anything else a handler returns is a bug. */
-function isCallToolResult(value: unknown): value is SessionToolResult {
-  return (
-    value !== null &&
-    typeof value === "object" &&
-    Array.isArray((value as { content?: unknown }).content)
-  );
+const adapted = new WeakMap<SessionToolRegistry, ReadonlyMap<string, AnyOrquesterTool>>();
+
+function toolsOf(registry: SessionToolRegistry): ReadonlyMap<string, AnyOrquesterTool> {
+  let tools = adapted.get(registry);
+  if (!tools) {
+    tools = new Map(legacyChatTools(registry.tools).map((tool) => [tool.name, tool]));
+    adapted.set(registry, tools);
+  }
+  return tools;
 }
 
 export async function executeSessionToolCall(
@@ -28,33 +33,32 @@ export async function executeSessionToolCall(
   call: { name: string; arguments: unknown },
   ctx: SessionToolContext
 ): Promise<SessionToolResult> {
-  const tool = registry.get(call.name);
-  if (!tool) {
-    return toSafeToolError(
-      new ToolError("NOT_FOUND", `Session tool ${clipText(call.name, MAX_ECHO_CHARS)} not found.`)
-    );
-  }
-  // Strict, as the external /mcp server: a misspelled key is refused rather
-  // than silently taking a default. No `arguments` at all is `{}`.
-  const parsed = await z.object(tool.input).strict().safeParseAsync(call.arguments ?? {});
-  if (!parsed.success) {
-    return toSafeToolError(new ToolError("INVALID_ARGUMENT", argumentProblems(tool.name, parsed.error)));
-  }
-  if (ctx.signal.aborted) {
-    return cancelledResult();
-  }
-  try {
-    const result = await tool.run(parsed.data, ctx);
-    if (!isCallToolResult(result)) {
-      throw new Error(`session tool ${tool.name} returned no CallToolResult`);
-    }
-    return result;
-  } catch (error) {
-    // A wait that ended because the caller went away is a cancellation, not
-    // an internal error: nothing reads it, but it must not be logged as one.
-    if (ctx.signal.aborted && !(error instanceof ToolError)) {
-      return cancelledResult();
-    }
-    return toSafeToolError(error);
-  }
+  const tools = toolsOf(registry);
+  const caller: ThreadCaller = {
+    kind: "thread",
+    threadId: ctx.threadId,
+    title: "",
+    projectPath: ctx.projectPath,
+    workspace: "",
+    cwd: ctx.cwd,
+    agentId: ctx.agentId,
+    callId: ctx.callId,
+    runtimeMode: "approval-required",
+    planning: false,
+    workflowOwned: false,
+    exchange: null,
+    ...(ctx.delivered ? { delivered: ctx.delivered } : {})
+  };
+  return executeToolCall(
+    {
+      lookup: (name, audience) => (audience === "chat" ? tools.get(name) : undefined),
+      approvals: null,
+      // Every legacy session tool is in the locked `core` toolset.
+      enabledToolsets: async () => new Set(["core"]),
+      ...(ctx.secretRequests ? { secretRequests: ctx.secretRequests } : {}),
+      now: () => ctx.now()
+    },
+    call,
+    { caller, api: ctx.api, signal: ctx.signal }
+  );
 }

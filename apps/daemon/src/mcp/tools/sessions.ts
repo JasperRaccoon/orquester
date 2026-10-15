@@ -1,3 +1,7 @@
+// Catalog family module `sessions` (Sessions: reads and lifecycle) — owned by plan Task 7 (unified MCP, Wave 3).
+// Task 2 stub: `sessionsFamily` exports this family's tools as catalog tools (`../catalog/legacy.ts`
+// adapters over the pre-catalog definitions below); the owning task replaces it and Task 2 never
+// edits this file again.
 import { stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { z } from "zod";
@@ -13,6 +17,7 @@ import { fitJsonBytes, jsonBytes, MAX_RESULT_BYTES, resultBytes, toSafeToolError
 import { defineTool, DESTRUCTIVE, MUTATING, MUTATING_IDEMPOTENT, READ_ONLY, type ToolContext, type ToolDef } from "../tool.ts";
 import { buildViewContext, chatDetail, sessionView } from "../views.ts";
 import { byAttention } from "./watch.ts";
+import { legacyExternalTools } from "../catalog/legacy.ts";
 
 /** The most running tabs a project may hold before a tool opens another (also the session tools' cap, `session-tools/threads`). */
 export const MAX_RUNNING_SESSIONS_PER_PROJECT = 24;
@@ -563,3 +568,6 @@ const compactSession = defineTool({
 });
 
 export const sessionTools: ToolDef[] = [listSessionsTool, getSession, getTurnDiff, createSession, updateSession, interruptSession, stopTask, stopSession, closeSession, revertSession, compactSession];
+
+/** This family in the catalog (`../catalog/index.ts`). */
+export const sessionsFamily = legacyExternalTools(sessionTools);

@@ -7,6 +7,7 @@
  */
 
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,7 +17,13 @@ import Fastify, { type FastifyInstance } from "fastify";
 
 import { agentHostAuthValue } from "../agent-host/host-protocol.ts";
 import { createDaemonForwarder } from "../agent-host/session-tools/forwarder.ts";
+import { agentChatRoutes } from "@orquester/api/agent-chat";
 import type { DaemonApi } from "../mcp/daemon-api.ts";
+import { legacyChatTools } from "../mcp/catalog/legacy.ts";
+import { chatSummary, head, snapshot, turn } from "../mcp/fixtures.ts";
+import { defineTool, READ_ONLY } from "../mcp/catalog/contract.ts";
+import { z } from "zod";
+import { FakeDaemonApi } from "../mcp/testing.ts";
 import { defineSessionTool, defineSessionToolkit, SESSION_TOOL_READ_ONLY } from "./contract.ts";
 import { createSessionToolRegistry, type SessionToolRegistry } from "./registry.ts";
 import { DAEMON_UNAVAILABLE_MESSAGE, jsonResult } from "./results.ts";
@@ -27,10 +34,39 @@ import type { AgentChatSecretRequestEventPayload } from "@orquester/api/agent-ch
 import { secretsToolkit } from "./secrets/index.ts";
 
 const TOKEN = "host-token-0123456789";
+// A real project directory: the route canonicalises the caller's project (and "" for none).
+const ROOT = realpathSync(mkdtempSync(join(tmpdir(), "st-route-ws-")));
+const WS = join(ROOT, "ws");
+const PROJECT = join(WS, "w/proj-a");
+mkdirSync(join(PROJECT, "sub"), { recursive: true });
+test.after(() => rmSync(ROOT, { recursive: true, force: true }));
 const THREADS: Record<string, SessionToolThread> = {
-  "thread-a": { projectPath: "/ws/w/proj-a", cwd: "/ws/w/proj-a/sub", agentId: "codex" }
+  "thread-a": { projectPath: PROJECT, cwd: join(PROJECT, "sub"), agentId: "codex" },
+  "thread-gone": { projectPath: join(WS, "w/removed"), cwd: join(WS, "w/removed"), agentId: "codex" }
 };
-const fakeApi = {} as DaemonApi;
+/** The daemon's view of thread-a: its tab and its snapshot (the route builds the caller from them). */
+function fakeApiFor(): FakeDaemonApi {
+  const api = new FakeDaemonApi()
+    .on("GET", "/api/sessions", {
+      status: 200,
+      body: [
+        chatSummary({ id: "thread-a", projectPath: PROJECT, cwd: join(PROJECT, "sub") }),
+        chatSummary({ id: "thread-gone", projectPath: join(WS, "w/removed"), cwd: join(WS, "w/removed") })
+      ]
+    })
+    .on("GET", agentChatRoutes.thread("thread-a"), { status: 200, body: { kind: "snapshot", thread: snapshot({ head: head({ id: "thread-a", runtimeMode: "auto" }) }) } })
+    .on("GET", agentChatRoutes.thread("thread-gone"), { status: 200, body: { kind: "snapshot", thread: snapshot({ head: head({ id: "thread-gone" }) }) } });
+  api.fsRoot = ROOT;
+  api.workspacesDir = WS;
+  return api;
+}
+const fakeApi = fakeApiFor();
+
+/** The registry's tools as the catalog would serve them. */
+const lookupOf = (registry: SessionToolRegistry) => {
+  const tools = new Map(legacyChatTools(registry.tools).map((tool) => [tool.name, tool]));
+  return (name: string) => tools.get(name);
+};
 
 /** A tool that parks until its call is cancelled, and says when the handler saw the abort. */
 function holdingToolkit() {
@@ -79,7 +115,7 @@ async function daemon(
     authorizeHost: (authorization) => authorization === agentHostAuthValue(TOKEN),
     resolveThread: (threadId) => THREADS[threadId] ?? null,
     api: () => api,
-    registry: () => registry,
+    lookup: lookupOf(registry),
     ...(secretRequests !== undefined ? { secretRequests } : {})
   });
   await app.listen({ path: socketPath });
@@ -104,11 +140,14 @@ test("a call runs with the context the daemon derived — thread record, not arg
   assert.deepEqual(result.structuredContent, {
     text: "hi",
     threadId: "thread-a",
-    projectPath: "/ws/w/proj-a",
-    cwd: "/ws/w/proj-a/sub",
+    projectPath: PROJECT,
+    cwd: join(PROJECT, "sub"),
     agentId: "codex",
     callId: "toolu_1"
   });
+  // A tab whose project was removed has no own project: "" (the contract), never the stale path.
+  const gone = await forward({ threadId: "thread-gone", callId: "c", name: "echo", arguments: { text: "x" } }, new AbortController().signal);
+  assert.equal((gone.structuredContent as { projectPath: string }).projectPath, "");
   // A caller cannot smuggle an identity in as an argument: arguments are strict.
   const smuggled = await forward(
     { threadId: "thread-a", callId: "c", name: "echo", arguments: { text: "hi", threadId: "thread-b" } },
@@ -130,7 +169,7 @@ test("results: image content, a coded handler error, an unknown tool", async (t)
   assert.equal(textOf(failed), "CONFLICT: This tool always fails.");
   const unknown = await forward({ threadId: "thread-a", callId: "c", name: "nope", arguments: {} }, signal);
   assert.equal(unknown.isError, true);
-  assert.match(textOf(unknown), /^NOT_FOUND/);
+  assert.match(textOf(unknown), /^TOOL_NOT_FOUND/);
 });
 
 test("only the host's bearer is honoured, and only for a thread the daemon knows", async (t) => {
@@ -224,4 +263,76 @@ test("request_secret over the socket: the answer reaches the call; the host's ca
   assert.deepEqual([(await closed).open, (await closed).outcome], [false, "cancelled"]);
   assert.equal((await cancelled).isError, true);
   assert.deepEqual(secretRequests.list("thread-a"), []);
+});
+
+test("the caller is built from the thread's tab and snapshot: title, mode, planning, exchange, workflow-owned; toolsets gate the call", async (t) => {
+  const whoami = defineTool({
+    name: "whoami", title: "Who am I", description: "d", input: {}, audiences: ["chat"], toolset: "core", tier: "read",
+    scope: async () => ({ projects: [], sessions: [], reads: "none", writes: false, causesTurnIn: [] }),
+    annotations: READ_ONLY, resultKind: "json",
+    run: async (_args, ctx) => {
+      const { delivered: _delivered, ...caller } = ctx.caller as typeof ctx.caller & { delivered?: unknown };
+      return { caller };
+    }
+  });
+  const notes = defineTool({
+    name: "notes_only", title: "Notes", description: "d", input: { x: z.string().optional() }, audiences: ["chat"], toolset: "notes", tier: "read",
+    scope: async () => ({ projects: [], sessions: [], reads: "none", writes: false, causesTurnIn: [] }),
+    annotations: READ_ONLY, resultKind: "json", run: async () => ({})
+  });
+  const api = new FakeDaemonApi()
+    .on("GET", "/api/sessions", {
+      status: 200,
+      body: [
+        chatSummary({ id: "wf-chat", owner: { kind: "workflow", workflowId: "wf", runId: "r", nodeId: "n" } }),
+        chatSummary({ id: "thread-a", title: "Auth work", projectPath: PROJECT, lineage: { parentThreadId: "wf-chat", relation: "delegate", createdAt: "x", agentCreated: true } })
+      ]
+    })
+    .on("GET", agentChatRoutes.thread("thread-a"), {
+      status: 200,
+      body: {
+        kind: "snapshot",
+        thread: snapshot({
+          head: head({ id: "thread-a", runtimeMode: "auto", session: { status: "running", activeTurnId: "t2" } }),
+          turns: [turn(), turn({ turnId: "t2", state: "running", interactionMode: "plan", causedBy: { threadId: "peer", exchangeId: "ex-9", hop: 2 } })]
+        })
+      }
+    });
+  api.fsRoot = ROOT;
+  api.workspacesDir = WS;
+  const dir = await mkdtemp(join(tmpdir(), "st-route-"));
+  const socketPath = join(dir, "d.sock");
+  const app: FastifyInstance = Fastify();
+  const tools = new Map([whoami, notes].map((tool) => [tool.name, tool]));
+  registerSessionToolsRoute(app, {
+    authorizeHost: (authorization) => authorization === agentHostAuthValue(TOKEN),
+    resolveThread: (threadId) => THREADS[threadId] ?? null,
+    api: () => api,
+    lookup: (name) => tools.get(name),
+    enabledToolsets: async () => new Set(["core"])
+  });
+  await app.listen({ path: socketPath });
+  t.after(async () => {
+    await app.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+  const forward = forwarderFor(socketPath);
+  const result = await forward({ threadId: "thread-a", callId: "toolu_9", name: "whoami", arguments: {} }, new AbortController().signal);
+  assert.deepEqual((result.structuredContent as { caller: unknown }).caller, {
+    kind: "thread",
+    threadId: "thread-a",
+    title: "Auth work",
+    projectPath: PROJECT,
+    workspace: "w",
+    cwd: join(PROJECT, "sub"),
+    agentId: "codex",
+    callId: "toolu_9",
+    runtimeMode: "auto",
+    planning: true,
+    workflowOwned: true,
+    exchange: { id: "ex-9", hop: 2 }
+  });
+  const off = await forward({ threadId: "thread-a", callId: "c", name: "notes_only", arguments: {} }, new AbortController().signal);
+  assert.equal(off.isError, true);
+  assert.match(textOf(off), /^TOOL_NOT_ENABLED: .*request_toolset/);
 });

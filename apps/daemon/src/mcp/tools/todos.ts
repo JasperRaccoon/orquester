@@ -1,9 +1,14 @@
+// Catalog family module `todos` (Notes: list_todos, update_todos) — owned by plan Task 12 (unified MCP, Wave 3).
+// Task 2 stub: `todosFamily` exports this family's tools as catalog tools (`../catalog/legacy.ts`
+// adapters over the pre-catalog definitions below); the owning task replaces it and Task 2 never
+// edits this file again.
 import { z } from "zod";
 import { resolveProject } from "../addressing.ts";
 import { ToolError } from "../errors.ts";
 import { clipText, fitJsonBytes, MAX_RESULT_BYTES, resultBytes } from "../result.ts";
 import type { TodoProjection, TodoSelector } from "../todo-tools.ts";
 import { closedWorld, defineTool, DESTRUCTIVE, MUTATING, MUTATING_IDEMPOTENT, READ_ONLY, type ToolContext, type ToolDef } from "../tool.ts";
+import { legacyExternalTools } from "../catalog/legacy.ts";
 
 // min(1), and `!== undefined` in scope(): an empty field is a field given, never read as omitted — beside the other one
 // it would put the list in the other scope.
@@ -142,3 +147,6 @@ const toggleTodoItem = defineTool({
 });
 
 export const todoTools: ToolDef[] = [listTodos, createTodo, updateTodo, deleteTodo, toggleTodoItem];
+
+/** This family in the catalog (`../catalog/index.ts`). */
+export const todosFamily = legacyExternalTools(todoTools);

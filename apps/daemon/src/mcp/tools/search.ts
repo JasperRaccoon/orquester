@@ -1,3 +1,7 @@
+// Catalog family module `search` (Search: search_sessions) — owned by plan Task 7 (unified MCP, Wave 3).
+// Task 2 stub: `searchFamily` exports this family's tools as catalog tools (`../catalog/legacy.ts`
+// adapters over the pre-catalog definitions below); the owning task replaces it and Task 2 never
+// edits this file again.
 import { z } from "zod";
 import type { SessionSummary } from "@orquester/api";
 import { agentChatRoutes, THREAD_SEARCH_MAX_QUERY_CHARS, THREAD_SEARCH_MAX_RESULTS, type ThreadSearchHit, type ThreadSearchResponse } from "@orquester/api/agent-chat";
@@ -7,6 +11,9 @@ import { ToolError, expectOk } from "../errors.ts";
 import { listSessions } from "../reads.ts";
 import { capText, clipText, MAX_RESULT_BYTES, resultBytes } from "../result.ts";
 import { defineTool, READ_ONLY, type ToolDef } from "../tool.ts";
+import { legacyChatTools, legacyExternalTools } from "../catalog/legacy.ts";
+import { threadTools as legacyThreadTools } from "../../session-tools/threads/threads.ts";
+import { delegationTools as legacyDelegationTools } from "../../session-tools/threads/delegation.ts";
 
 /**
  * A hit's title, in code points: the longest title create_session and update_session accept, so a title set through
@@ -116,3 +123,11 @@ const searchSessions = defineTool({
 });
 
 export const searchTools: ToolDef[] = [searchSessions];
+
+/** The legacy in-chat thread tools this family's owner replaces: `thread_list`, `thread_read`, `task_status`, `task_cancel`, `thread_interrupt`. */
+const LEGACY_CHAT_NAMES: ReadonlySet<string> = new Set(["thread_list", "thread_read", "task_status", "task_cancel", "thread_interrupt"]);
+/** This family in the catalog (`../catalog/index.ts`). */
+export const searchFamily = [
+  ...legacyExternalTools(searchTools),
+  ...legacyChatTools([...legacyThreadTools, ...legacyDelegationTools].filter((tool) => LEGACY_CHAT_NAMES.has(tool.name)))
+];
