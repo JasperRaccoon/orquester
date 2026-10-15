@@ -74,9 +74,21 @@ export interface CanonicalProject {
   name: string;
 }
 
-/** A path as the daemon compares it: realpath inside the sandbox, else resolved. */
+/**
+ * A path as the daemon COMPARES it: realpath inside the sandbox, else resolved. A comparison key
+ * only — never a containment check (its fallback is lexical): use {@link realPathInSandbox}.
+ */
 export async function canonicalPath(api: { fsRoot: string }, path: string): Promise<string> {
   return (await assertInsideFsRoot(api.fsRoot, path).catch(() => null)) ?? resolve(path);
+}
+
+/**
+ * A path's realpath when it lies inside the sandbox (`assertInsideFsRoot`: symlinks resolved, the
+ * deepest existing ancestor checked), else null. THE containment check: unlike {@link canonicalPath}
+ * it never falls back to the lexical path.
+ */
+export async function realPathInSandbox(api: { fsRoot: string }, path: string): Promise<string | null> {
+  return assertInsideFsRoot(api.fsRoot, path).catch(() => null);
 }
 
 /** The workspaces root, canonical (it may itself be reached through a symlink). */
@@ -91,7 +103,10 @@ async function canonicalWorkspacesDir(api: { fsRoot: string; workspacesDir: stri
  */
 export async function canonicalProject(api: { fsRoot: string; workspacesDir: string }, projectPath: string): Promise<CanonicalProject | null> {
   if (!projectPath) return null;
-  const [canonical, root] = await Promise.all([canonicalPath(api, projectPath), canonicalWorkspacesDir(api)]);
+  // Containment: the project's REAL path must lie inside the sandbox — never the lexical fallback of
+  // `canonicalPath`, which would take a project directory that is a symlink out of it for a project.
+  const [canonical, root] = await Promise.all([realPathInSandbox(api, projectPath), canonicalWorkspacesDir(api)]);
+  if (canonical === null) return null;
   const rel = relative(root, canonical);
   if (!rel || rel.startsWith("..") || isAbsolute(rel)) return null;
   const parts = rel.split(sep);

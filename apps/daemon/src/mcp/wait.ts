@@ -4,7 +4,6 @@ import {
   replyNoticeText,
   SETTLED_TURN_STATES,
   startedTurns,
-  type ReplySubscriptionReleaseResponse,
   type ReplyWaitResponse,
   type ThreadSnapshotPayload
 } from "@orquester/api/agent-chat";
@@ -402,12 +401,25 @@ export async function waitWhileWorking(
     for (;;) {
       const seen = events;
       const sessions = await listSessions(api);
+      // A summary that says busy (no open request) is working whatever the thread says: no thread read.
+      const plainlyWorking = (id: string): boolean => {
+        const summary = sessions.find((s) => s.id === id);
+        return summary !== undefined && !summary.hasPendingApprovals && !summary.hasPendingUserInput && summaryBusy(summary) && !until("working");
+      };
       const reports = new Map<string, WorkReport | null>();
-      for (const id of ids) reports.set(id, await readWorkReport(api, id, sessions));
-      if ([...reports.values()].some((report) => report === null || until(report.state))) return { reports, timedOut: false, cancelled: false };
-      if (opts.signal.aborted) return { reports, timedOut: false, cancelled: true };
+      let ended = false;
+      for (const id of ids) {
+        if (plainlyWorking(id)) continue;
+        const report = await readWorkReport(api, id, sessions);
+        reports.set(id, report);
+        if (report === null || until(report.state)) ended = true;
+      }
       const left = remaining();
-      if (left <= 0) return { reports, timedOut: true, cancelled: false };
+      if (ended || opts.signal.aborted || left <= 0) {
+        // The answer reports every session in full.
+        for (const id of ids) if (!reports.has(id)) reports.set(id, await readWorkReport(api, id, sessions));
+        return { reports, timedOut: !ended && !opts.signal.aborted, cancelled: !ended && opts.signal.aborted };
+      }
       if (events === seen) await pause(left);
     }
   } finally {
@@ -415,51 +427,37 @@ export async function waitWhileWorking(
   }
 }
 
-/** How many times a cancelled wait re-sends its release while the waiter has not attached yet. */
-const MAX_RELEASE_TRIES = 50;
-
 /**
  * Attach the caller's waiter to one reply subscription (socket-only route) until the bound turn's
  * reply, `timeoutSeconds`, or that turn asking its user something (§8.1, §8.3). `DaemonApi.request`
  * cannot abort its in-process inject, so when `signal` aborts (the provider cancelled the call, the
- * turn was stopped) the waiter is RELEASED through its own route: the subscription becomes `notify`
- * and the reply arrives as a message instead of being lost. A release that comes before the waiter
- * attached (it answers `released: false` while the subscription is still `waiting`) is sent again
- * once per macrotask until the wait answers.
+ * turn was stopped) the waiter is RELEASED through its own route. The router keeps a release
+ * tombstone: a release that lands before the waiter attached still turns the subscription into
+ * `notify` (the late wait answers at once), and a reply a waiter already took is re-delivered as a
+ * message — so is one whose tool result never reached the provider (`delivered` resolving false,
+ * as `request_secret` and the approval cards read it).
  */
 export async function awaitReplySubscription(
   api: DaemonApi,
   targetId: string,
   subscriptionId: string,
   timeoutSeconds: number,
-  signal: AbortSignal
+  signal: AbortSignal,
+  delivered?: Promise<boolean>
 ): Promise<ReplyWaitResponse> {
-  let answered = false;
-  const waiting = api
-    .request("POST", agentChatRoutes.replySubscriptionWait(targetId, subscriptionId), { body: { timeoutSeconds } })
-    .finally(() => { answered = true; });
-  const release = async (): Promise<ReplySubscriptionReleaseResponse | null> => {
-    try {
-      const res = await api.request("POST", agentChatRoutes.replySubscriptionRelease(targetId, subscriptionId));
-      return res.status < 400 ? (res.body as ReplySubscriptionReleaseResponse) : null;
-    } catch {
-      return null;
-    }
+  const release = (): void => {
+    void api.request("POST", agentChatRoutes.replySubscriptionRelease(targetId, subscriptionId)).catch(() => undefined);
   };
-  const onAbort = (): void => {
-    void (async () => {
-      for (let attempt = 0; attempt < MAX_RELEASE_TRIES && !answered; attempt += 1) {
-        const released = await release();
-        if (released === null || released.released || released.state !== "waiting") return;
-        await new Promise<void>((resolve) => setImmediate(resolve));
-      }
-    })();
-  };
-  if (signal.aborted) onAbort();
-  else signal.addEventListener("abort", onAbort, { once: true });
+  const waiting = api.request("POST", agentChatRoutes.replySubscriptionWait(targetId, subscriptionId), { body: { timeoutSeconds } });
+  if (signal.aborted) release();
+  else signal.addEventListener("abort", release, { once: true });
+  let answer: ReplyWaitResponse;
   try {
-    return expectOk<ReplyWaitResponse>(await waiting);
+    answer = expectOk<ReplyWaitResponse>(await waiting);
   } finally {
-    signal.removeEventListener("abort", onAbort);
+    signal.removeEventListener("abort", release);
   }
+  // The waiter took the reply: if the call's result never reaches the provider, the router sends it as a message.
+  if (answer.outcome === "replied" && delivered) void delivered.then((ok) => { if (!ok) release(); });
+  return answer;
 }

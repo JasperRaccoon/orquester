@@ -172,7 +172,12 @@ interface Posted {
   steered?: true;
 }
 
-type Sub = ReplySubscriptionRecord & { posted?: Posted; ended?: Ended; toTitle?: string; answeredNotice?: string };
+/**
+ * `released`: the release tombstone (passthrough, persisted). The requester's waiting call went away
+ * (cancelled, or its result never reached the provider): no waiter may take this reply any more —
+ * a later wait answers `notify` at once — and its reply goes out as a message.
+ */
+type Sub = ReplySubscriptionRecord & { posted?: Posted; ended?: Ended; toTitle?: string; answeredNotice?: string; released?: true };
 
 /** What a bound turn (or its absence) produced. */
 export type ReplyResult =
@@ -511,6 +516,11 @@ export class ReplyRouter implements DeliveryListener {
       throw new ReplyError(`timeoutSeconds must be a whole number from 1 to ${MAX_WAIT_SECONDS}.`, "INVALID_COMMAND");
     }
     if (sub.state === "notify") return { outcome: "notify", reason: "timeout", willNotify: true };
+    if (sub.released) {
+      // Tombstoned: never attached, never taken back — the reply is (or will be) a message.
+      if (sub.state === "done" && sub.ended !== "delivered" && sub.ended !== "waiter" && sub.ended !== undefined) return this.answerForEnded(sub);
+      return { outcome: "notify", reason: "timeout", willNotify: true };
+    }
     if (sub.state === "done" && sub.ended !== "delivered" && sub.ended !== undefined) {
       return this.answerForEnded(sub);
     }
@@ -593,11 +603,16 @@ export class ReplyRouter implements DeliveryListener {
   }
 
   /**
-   * `POST …/reply-subscriptions/:subscriptionId/release` (socket-only): the waiting tool call was
-   * cancelled — `DaemonApi.request` cannot abort its inject, so the caller says so. The waiter
-   * is marked dead at once (the router never hands it a result) and `waiting` becomes `notify`
-   * (CAS; persisted): the reply comes as a message. A waiter the router already claimed for is
-   * re-delivered as a message by the router itself.
+   * `POST …/reply-subscriptions/:subscriptionId/release` (socket-only): the requester's waiting
+   * call went away — cancelled (`DaemonApi.request` cannot abort its inject, so the caller says so)
+   * or its result never reached the provider. Deterministic in every order, by a persisted tombstone
+   * (`released`):
+   * - a waiter attached: marked dead at once (the router never hands it a result) and `waiting →
+   *   notify` (CAS, persisted) — the reply comes as a message;
+   * - none attached yet: `waiting → notify` all the same, and a wait that attaches later answers
+   *   `notify` at once — it can never become `claimed-by-waiter`;
+   * - a waiter already took the reply (`done`, ended `waiter`, or taken back from the queue): the
+   *   reply is re-delivered as a message, once (one delivery record per subscription).
    */
   async release(
     targetId: string,
@@ -610,18 +625,49 @@ export class ReplyRouter implements DeliveryListener {
     if (principal?.kind === "agent" && principal.threadId !== sub.fromThreadId) {
       throw new ReplyError("Only the chat that asked may release this wait.", "PERMISSION_DENIED");
     }
+    sub.released = true;
     const waiter = this.waiters.get(sub.id);
-    if (!waiter) return { released: false, state: sub.state };
-    waiter.live = false;
-    this.waiters.delete(sub.id);
+    if (waiter) {
+      waiter.live = false;
+      this.waiters.delete(sub.id);
+    }
     if (sub.state === "waiting") {
       sub.state = "notify";
       sub.updatedAt = this.stamp();
-      await this.persist();
     }
-    waiter.release();
+    await this.persist();
+    if (waiter) {
+      waiter.release();
+      void this.evaluate(sub.toThreadId);
+      return { released: true, state: sub.state };
+    }
+    if (sub.state === "done" && sub.ended === "waiter") {
+      await this.redeliver(sub);
+      return { released: true, state: sub.state };
+    }
     void this.evaluate(sub.toThreadId);
-    return { released: true, state: sub.state };
+    return { released: false, state: sub.state };
+  }
+
+  /** A reply a waiter took whose call never got it: delivered as a message (once). */
+  private async redeliver(sub: Sub): Promise<void> {
+    const existing = this.outbox.deliveries.find((d) => d.subscriptionId === sub.id);
+    if (existing) {
+      // Taken back from the queue for a waiter (D-4): put back.
+      if (existing.state === "dropped") {
+        existing.state = "pending";
+        await this.persist();
+        await this.hand(existing);
+      }
+      return;
+    }
+    const result: ReplyResult | null = sub.answeredNotice !== undefined ? { kind: "notice", text: sub.answeredNotice } : await this.resultFor(sub);
+    if (!result) {
+      this.opts.logger?.warn?.("[replies] a released reply could not be read again; not re-delivered", { subscriptionId: sub.id });
+      return;
+    }
+    const deliver = await this.claimForRouter(sub, result);
+    await deliver();
   }
 
   /**
@@ -1059,7 +1105,7 @@ export class ReplyRouter implements DeliveryListener {
   private async claim(sub: Sub, result: ReplyResult): Promise<() => Promise<void>> {
     const nothing = async (): Promise<void> => undefined;
     if (sub.state !== "waiting" && sub.state !== "notify") return nothing;
-    const waiter = sub.state === "waiting" ? this.waiters.get(sub.id) : undefined;
+    const waiter = sub.state === "waiting" && !sub.released ? this.waiters.get(sub.id) : undefined;
     if (waiter?.live) {
       sub.state = "claimed-by-waiter";
       sub.updatedAt = this.stamp();

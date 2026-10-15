@@ -9,7 +9,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -35,7 +35,13 @@ const OWN = join(WS, "jaspersito/orquester");
 const SAME = join(WS, "jaspersito/orquester-3");
 const OTHER = join(WS, "beta/app");
 for (const dir of [OWN, SAME, OTHER, join(OWN, "src")]) mkdirSync(dir, { recursive: true });
-test.after(() => rmSync(ROOT, { recursive: true, force: true }));
+/** Outside the sandbox (`fsRoot` is ROOT). */
+const OUTSIDE = realpathSync(mkdtempSync(join(tmpdir(), "umcp-t8-outside-")));
+symlinkSync(OUTSIDE, join(OWN, "escape"));
+symlinkSync(OTHER, join(OWN, "sidestep"));
+/** A project directory that is itself a link out of the sandbox. */
+symlinkSync(OUTSIDE, join(WS, "jaspersito/linked"));
+test.after(() => { rmSync(ROOT, { recursive: true, force: true }); rmSync(OUTSIDE, { recursive: true, force: true }); });
 
 const tab = (id: string, projectPath: string, over: Partial<SessionSummary> = {}) => chatSummary({ id, title: `Chat ${id}`, projectPath, cwd: projectPath, ...over });
 
@@ -167,14 +173,14 @@ test("send_message wait: a question or the timeout goes on as notify; an empty r
   }
 });
 
-test("send_message wait cancelled: the waiter is released through its route (re-sent until it attached), so the reply comes as a message", async () => {
+test("send_message wait cancelled: the waiter is released through its route, once, so the reply comes as a message", async () => {
   const r = rig();
   r.api.on("POST", agentChatRoutes.replySubscriptions("peer"), { status: 200, body: { subscriptionId: "sub-1", commandId: "cmd-1", delivery: "queued", queueEntryId: "cmd-1" } });
   let answer!: (value: unknown) => void;
   const waited = new Promise((resolve) => { answer = resolve; });
   let arrived!: () => void;
   const waiting = new Promise<void>((resolve) => { arrived = resolve; });
-  // The wait answers only once released; the first release comes before the waiter attached.
+  // The wait answers only once released.
   const realRequest = r.api.request.bind(r.api);
   r.api.request = async (method, path, opts) => {
     if (path === agentChatRoutes.replySubscriptionWait("peer", "sub-1")) {
@@ -187,7 +193,6 @@ test("send_message wait cancelled: the waiter is released through its route (re-
   let releases = 0;
   r.api.on("POST", agentChatRoutes.replySubscriptionRelease("peer", "sub-1"), () => {
     releases += 1;
-    if (releases === 1) return { status: 200, body: { released: false, state: "waiting" } };
     answer({ status: 200, body: { outcome: "notify", reason: "timeout", willNotify: true } });
     return { status: 200, body: { released: true, state: "notify" } };
   });
@@ -196,7 +201,7 @@ test("send_message wait cancelled: the waiter is released through its route (re-
   await waiting;
   controller.abort();
   const result = await running;
-  assert.equal(releases, 2, "re-sent once the first found no waiter yet");
+  assert.equal(releases, 1, "one release: the router's tombstone makes it deterministic in every order");
   assert.equal(body(result).willNotify, true);
 });
 
@@ -207,9 +212,15 @@ test("send_message none: a working target is steered with a header asking for a 
   const result = await r.call("send_message", { sessionId: "peer", text: "FYI: tests are green", reply: "none" });
   assert.equal(result.isError, undefined, JSON.stringify(body(result)));
   const [turnBody] = posted(r.api, "/api/sessions/peer/turn");
-  assert.match(turnBody!.input, /To answer, call send_message with sessionId me\./);
+  // `peer` runs auto, narrower than this Full access chat: it may not message back, and is told so.
+  assert.match(turnBody!.input, /The sender can't be messaged from this chat; your answer is visible in this chat\./);
+  assert.doesNotMatch(turnBody!.input, /send_message/);
   assert.deepEqual(turnBody!.causedBy, { threadId: "me", exchangeId: "ex-new", hop: 1 });
   assert.equal(turnBody!.ifIdle, undefined, "none steers");
+  const peerOfSameMode = rig({ threads: { peer: working } });
+  peerOfSameMode.api.on("POST", "/api/sessions/peer/turn", { status: 200, body: { seq: 13 } });
+  await peerOfSameMode.call("send_message", { sessionId: "peer", text: "FYI", reply: "none" }, { runtimeMode: "auto" });
+  assert.match(posted(peerOfSameMode.api, "/api/sessions/peer/turn")[0]!.input, /To answer, call send_message with sessionId me\./, "a receiver as broad as the sender may answer");
   assert.equal(body(result).outcome, "sent");
   assert.equal(posted(r.api, agentChatRoutes.replySubscriptions("peer")).length, 0);
 
@@ -620,4 +631,74 @@ test("external fork_session and merge_back_session parity (§11): throughTurn, t
   assert.equal(posted(r.api, agentChatRoutes.mergeBack("fork"))[0]!.causedBy, undefined);
   r.api.on("POST", agentChatRoutes.mergeBackItem("me", "m2"), { status: 409, body: { error: { code: "TARGET_BUSY", message: "It is working." } } });
   assert.equal(code(await r.external("merge_back_session", { sessionId: "me", mergeId: "m2", action: "deliver" })), "TARGET_BUSY");
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 1
+// ---------------------------------------------------------------------------
+
+test("cwd containment is by real paths: a link out of the sandbox or into another project is refused, for both audiences", async () => {
+  const r = rig();
+  createRoutes(r.api, r.sessions);
+  const external = await r.external("create_session", { project: "jaspersito/orquester", agent: "claude", cwd: "escape" });
+  assert.equal(code(external), "PATH_NOT_ALLOWED");
+  const sideways = await r.external("create_session", { project: "jaspersito/orquester", agent: "claude", cwd: "sidestep" });
+  assert.equal(code(sideways), "PERMISSION_DENIED");
+  // A chat: the gate classifies the link by its target (outside → denied), and the tool re-checks.
+  assert.equal(code(await r.call("create_session", { prompt: "x", cwd: "escape" })), "PERMISSION_DENIED");
+  assert.equal(code(await r.call("create_session", { prompt: "x", cwd: "sidestep" })), "PERMISSION_DENIED");
+  assert.equal(posted(r.api, "/api/sessions").length, 0, "no tab was opened");
+  // A project directory that links out of the sandbox is no project to the gate (never the lexical path).
+  const linked = rig({ sessions: [...tabs(), tab("odd", join(WS, "jaspersito/linked"))] });
+  assert.equal(code(await linked.call("wait_for_session", { sessionId: "odd" })), "PERMISSION_DENIED");
+});
+
+test("a wait that fails after the message went out is no failed send: willNotify, and the agent is told not to send again", async () => {
+  const r = rig();
+  r.api.on("POST", agentChatRoutes.replySubscriptions("peer"), { status: 200, body: { subscriptionId: "sub-1", commandId: "cmd-1", delivery: "queued", queueEntryId: "cmd-1" } });
+  r.api.on("POST", agentChatRoutes.replySubscriptionWait("peer", "sub-1"), { status: 409, body: { error: { code: "WAIT_CYCLE", message: "It is waiting on you." } } });
+  const result = await r.call("send_message", { sessionId: "peer", text: "hi" });
+  assert.equal(result.isError, undefined, JSON.stringify(body(result)));
+  assert.equal(body(result).willNotify, true);
+  assert.equal(body(result).delivery, "queued");
+  assert.match(body(result).hint, /do not send it again/);
+});
+
+test("a reply the waiter took whose result never reached the provider is released, so it comes again as a message", async () => {
+  const r = rig();
+  replyRoutes(r.api, "peer");
+  r.api.on("POST", agentChatRoutes.replySubscriptionRelease("peer", "sub-1"), { status: 200, body: { released: true, state: "done" } });
+  let undelivered!: (value: boolean) => void;
+  const delivered = new Promise<boolean>((resolve) => { undelivered = resolve; });
+  const result = await r.call("send_message", { sessionId: "peer", text: "hi" }, { delivered });
+  assert.equal(body(result).reply, "Found 3 issues.");
+  assert.equal(posted(r.api, agentChatRoutes.replySubscriptionRelease("peer", "sub-1")).length, 0, "nothing released while the result may still arrive");
+  undelivered(false);
+  await delivered;
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(r.api.calls.filter((c) => c.path === agentChatRoutes.replySubscriptionRelease("peer", "sub-1")).length, 1);
+});
+
+test("an external wait uploads nothing for a message that is never sent, and posts nothing once cancelled", async () => {
+  const busy = thread("peer", { head: head({ id: "peer", session: { status: "running", activeTurnId: "t1" } }), turns: [turn({ state: "running", completedAt: null })] });
+  const r = rig({ threads: { peer: busy } });
+  r.api.on("POST", "/api/sessions/peer/turn", { status: 409, body: { error: { code: "TURN_NOT_IDLE", message: "working" } } });
+  const timedOut = await r.external("send_message", { sessionId: "peer", text: "see", timeoutSeconds: 1, attachments: [{ name: "a.png", base64: Buffer.from("png").toString("base64") }] });
+  assert.equal(body(timedOut).sent, false);
+  assert.equal(r.api.uploads.length, 0, "no orphaned upload");
+  assert.equal(posted(r.api, "/api/sessions/peer/turn").length, 0);
+  // Cancelled while it waits for the session after a refused post: no further post, ever.
+  const later = rig({ threads: { peer: busy } });
+  let refused!: () => void;
+  const firstPost = new Promise<void>((resolve) => { refused = resolve; });
+  later.api.on("POST", "/api/sessions/peer/turn", () => { refused(); return { status: 409, body: { error: { code: "TURN_NOT_IDLE", message: "working" } } }; });
+  const controller = new AbortController();
+  const running = later.external("send_message", { sessionId: "peer", text: "hi", timeoutSeconds: 60 }, controller.signal);
+  await firstPost;
+  controller.abort();
+  later.threads.peer = thread("peer");
+  later.api.emit(busEvent("session.updated", later.sessions.find((s) => s.id === "peer")));
+  const cancelled = await running;
+  assert.equal(cancelled.isError, true);
+  assert.equal(posted(later.api, "/api/sessions/peer/turn").length, 1, "the one refused post only");
 });

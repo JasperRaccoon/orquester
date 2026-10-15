@@ -865,6 +865,8 @@ describe("fix round 1: released waiters", () => {
     assert.equal(w.router.deliveries().length, 1);
     assert.equal(parseThreadMessage(postsTo(w.host, "req")[0]!.body.input as string)?.body, "Here it is.");
     assert.deepEqual(await w.router.release("tgt", res.subscriptionId), { released: false, state: "done" });
+    await settled(w);
+    assert.equal(postsTo(w.host, "req").length, 1, "a delivered reply is never sent twice");
     await w.cleanup();
   });
 
@@ -886,9 +888,11 @@ describe("fix round 1: released waiters", () => {
       assert.equal(answer.outcome, "notify", "the released waiter got nothing");
       assert.equal(delivered, 1, "so the reply was delivered");
     } else {
+      // The waiter took it, then its call went away (the release): the reply comes as a message too.
       assert.equal(answer.outcome, "replied");
-      assert.equal(delivered, 0);
+      assert.equal(delivered, 1);
     }
+    assert.equal(postsTo(w.host, "req").length, 1, "exactly one message either way");
     await w.cleanup();
   });
 
@@ -1365,6 +1369,60 @@ describe("fix round 3", () => {
     w.host.settle("tgt", { reply: "the user's turn" });
     await settled(w);
     assert.equal(postsTo(w.host, "tgt").length, 0, "never delivered afterwards");
+    await w.cleanup();
+  });
+});
+
+describe("Task 8 fix round 1: the release tombstone", () => {
+  it("a release before the waiter attached: the late wait answers notify at once, and the reply is a message — never claimed-by-waiter", async () => {
+    const w = await world();
+    const res = await w.router.subscribe("tgt", request("wait"));
+    assert.deepEqual(await w.router.release("tgt", res.subscriptionId), { released: false, state: "notify" });
+    assert.deepEqual(await w.router.wait("tgt", res.subscriptionId, { timeoutSeconds: 60 }), { outcome: "notify", reason: "timeout", willNotify: true });
+    assert.equal(w.timers.pending(), 0, "the late wait never attached");
+    w.host.settle("tgt", { reply: "As a message." });
+    await settled(w);
+    const sub = w.router.subscriptions()[0]! as { state: string; ended?: string; released?: true };
+    assert.equal(sub.released, true, "the tombstone is persisted with the record");
+    assert.equal(sub.ended, "delivered");
+    assert.equal(parseThreadMessage(postsTo(w.host, "req")[0]!.body.input as string)?.body, "As a message.");
+    await w.cleanup();
+  });
+
+  it("a reply the waiter took, whose call never got it (released after): re-delivered as a message, once", async () => {
+    const w = await world();
+    const res = await w.router.subscribe("tgt", request("wait"));
+    const waiting = w.router.wait("tgt", res.subscriptionId, { timeoutSeconds: 60 });
+    await settled(w);
+    w.host.settle("tgt", { reply: "Took it." });
+    assert.equal((await waiting).outcome, "replied");
+    await settled(w);
+    assert.equal(postsTo(w.host, "req").length, 0, "the waiter had it");
+    // The provider dropped the tool result (`delivered` false): the tool releases.
+    assert.deepEqual(await w.router.release("tgt", res.subscriptionId), { released: true, state: "done" });
+    await settled(w);
+    assert.equal(parseThreadMessage(postsTo(w.host, "req")[0]!.body.input as string)?.body, "Took it.");
+    await w.router.release("tgt", res.subscriptionId);
+    await settled(w);
+    assert.equal(postsTo(w.host, "req").length, 1, "never twice");
+    await w.cleanup();
+  });
+
+  it("a reply taken back from the queue for a late waiter, then released: put back and delivered", async () => {
+    const w = await world();
+    w.host.userTurn("req");
+    const res = await w.router.subscribe("tgt", request("wait"));
+    w.host.settle("tgt", { reply: "Taken back." });
+    await settled(w);
+    // The requester is busy: the reply waits in its queue; a late waiter takes it back (D-4).
+    assert.equal((await w.router.wait("tgt", res.subscriptionId, { timeoutSeconds: 60 })).outcome, "replied");
+    assert.equal(w.queue.pending().filter((entry) => entry.kind === "reply").length, 0);
+    await w.router.release("tgt", res.subscriptionId);
+    await settled(w);
+    assert.equal(w.queue.pending().filter((entry) => entry.kind === "reply").length, 1, "queued again for the requester");
+    w.host.settle("req", { reply: "user turn done" });
+    await settled(w);
+    assert.equal(parseThreadMessage(postsTo(w.host, "req").at(-1)!.body.input as string)?.body, "Taken back.");
     await w.cleanup();
   });
 });

@@ -13,12 +13,13 @@
 // also `send_message`'s `reply: "none"` and the legacy `thread_send {wait}` alias's.
 import { createHash, randomUUID } from "node:crypto";
 import { stat } from "node:fs/promises";
-import { isAbsolute, relative as relativePath, resolve as resolvePath } from "node:path";
+import { basename, isAbsolute, relative as relativePath, resolve as resolvePath } from "node:path";
 import { z } from "zod";
 import type { AgentConversationsResponse, ApprovalPreviewSection, CreateSessionRequest, SessionSummary } from "@orquester/api";
-import { agentChatRoutes, buildPlanImplementationPrompt, GOAL_ACTIVITY_KIND, GOAL_COMMAND_FAILED_ACTIVITY_KIND, GOAL_STATUS_ACTIVITY_KIND, isGoalCommandText, isHiddenGoalChange, MAX_TURN_INPUT_CHARS, parseGoalSupport, parseGoalUpdatedPayload, parseThreadGoal, replyNoticeText, resolveLaunchModel, startedTurns, THREAD_MESSAGE_OVERHEAD_CHARS, threadMessageContext, TURN_NOT_IDLE, UNTRUSTED_NOTICE, type AttachmentRef, type CausedBy, type ComposerContextRecord, type CreateAgentChatSessionFields, type ProviderModel, type ReplySubscriptionResponse, type ReplyWaitResponse, type RuntimeMode, type ThreadGoal, type ThreadItem, type ThreadItemResponse, type ThreadMessageOrigin, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
+import { agentChatRoutes, buildPlanImplementationPrompt, buildThreadMessage, GOAL_ACTIVITY_KIND, GOAL_COMMAND_FAILED_ACTIVITY_KIND, GOAL_STATUS_ACTIVITY_KIND, isGoalCommandText, isHiddenGoalChange, MAX_TURN_INPUT_CHARS, parseGoalSupport, parseGoalUpdatedPayload, parseThreadGoal, replyNoticeText, resolveLaunchModel, startedTurns, THREAD_MESSAGE_OVERHEAD_CHARS, threadMessageContext, TURN_NOT_IDLE, UNTRUSTED_NOTICE, type AttachmentRef, type CausedBy, type ComposerContextRecord, type CreateAgentChatSessionFields, type ProviderModel, type ReplySubscriptionResponse, type ReplyWaitResponse, type RuntimeMode, type ThreadGoal, type ThreadItem, type ThreadItemResponse, type ThreadMessageOrigin, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
 import { findAgent, findModel, loadAgents, resolveModelSelection, supportsFrom, validateAccountId, type AgentView } from "../agents.ts";
-import { canonicalPath, canonicalProject, resolveProject } from "../addressing.ts";
+import { canonicalProject, realPathInSandbox, resolveProject } from "../addressing.ts";
+import { assertInsideFsRoot, FsSandboxError } from "@orquester/config/fs";
 import { attachmentInputSchema, MAX_ATTACHMENTS, uploadInlineAttachments, type AttachmentInput } from "../attachments.ts";
 import type { DaemonApi } from "../daemon-api.ts";
 import { expectOk, ToolError } from "../errors.ts";
@@ -30,7 +31,7 @@ import { proposedPlan, transcriptEntries, transcriptRange, type TranscriptResult
 import { buildViewContext, chatDetail, fitDetail, SETTLED_TURN_STATES, type SessionDetail } from "../views.ts";
 import { awaitReplySubscription, turnBaseline, waitForTurn, waitWhileWorking, type TurnBaseline, type TurnOutcome } from "../wait.ts";
 import { defineTool as defineCatalogTool, MUTATING as CATALOG_MUTATING, type AnyOrquesterTool, type CallContext, type ScopeContext, type ThreadCaller } from "../catalog/contract.ts";
-import { NEW_SESSION, openedThreadRuntimeMode } from "../gate/turn-policy.ts";
+import { NEW_SESSION, openedThreadRuntimeMode, runtimeModesUpTo } from "../gate/turn-policy.ts";
 import { legacyExternalTools } from "../catalog/legacy.ts";
 import { asWaiter } from "../../agent-chat/waits.ts";
 import { MAX_RUNNING_SESSIONS_PER_PROJECT, optionsSchema, runtimeModeSchema } from "./sessions.ts";
@@ -498,6 +499,17 @@ const REPLY_RESULT_MAX_BYTES = 40_000;
 type ReplyMode = "wait" | "notify" | "none";
 
 
+/**
+ * The provenance-headed text of a turn a chat causes (§8.2). With `reply: "none"` the header tells
+ * the receiver how to answer — truthfully: a receiver narrower than the sender may not message it
+ * (never broader, §5.3), so it is told its answer stays visible in its own chat instead.
+ */
+function provenanceFor(ctx: CallContext, caller: ThreadCaller, origin: Exclude<ThreadMessageOrigin, "reply">, text: string, reply: ReplyMode, receiverMode: RuntimeMode): string {
+  if (reply !== "none" || origin === "delegated" || runtimeModesUpTo(receiverMode).includes(caller.runtimeMode)) return ctx.turn.provenance(origin, text, reply);
+  const fromProject = caller.workspace && caller.projectPath ? `${caller.workspace}/${basename(caller.projectPath)}` : "";
+  return buildThreadMessage({ origin, fromTitle: caller.title, text, fromSessionId: caller.threadId, ...(fromProject ? { fromProject } : {}), replyMode: "none", senderReachable: false });
+}
+
 /** Refused for an external caller: the chat-only reply mode (§13: "External client calls a chat-only field"). */
 function externalReply(reply: ReplyMode | undefined): void {
   if (reply === "notify") throw new ToolError("INVALID_ARGUMENT", 'reply "notify" delivers the answer as a message to the calling chat: it is for in-chat agents. Use "wait" or "none".');
@@ -579,7 +591,19 @@ async function converse(
       hint: sub.delivery === "queued" ? "That chat is busy: the message waits as its next turn, and its final reply will be delivered to you as a new message." : "Its final reply will be delivered to you as a new message; end your turn or go on with other work."
     };
   }
-  const answered = await awaitReplySubscription(ctx.api, target.id, sub.subscriptionId, input.timeoutSeconds, ctx.signal);
+  let answered: ReplyWaitResponse;
+  try {
+    answered = await awaitReplySubscription(ctx.api, target.id, sub.subscriptionId, input.timeoutSeconds, ctx.signal, ctx.caller.kind === "thread" ? ctx.caller.delivered : undefined);
+  } catch (error) {
+    // The message is saved and sent (or queued): only the wait failed. Its reply still comes as a
+    // message — never a failed send the agent would repeat.
+    const failure = toSafeToolError(error).structuredContent as { code: string; message: string };
+    return {
+      ...head,
+      willNotify: true,
+      hint: `The message was sent, but waiting for its reply failed (${failure.code}: ${failure.message}). Its final reply will be delivered to you as a new message; do not send it again.`
+    };
+  }
   return { ...head, ...replyResult(answered, target) };
 }
 
@@ -611,23 +635,44 @@ async function targetPlanMode(api: ScopeContext["api"], refId: string): Promise<
  * steer. Posted with the host's `ifIdle` precondition (refused `TURN_NOT_IDLE`, unrecorded) and,
  * while the target works or waits for its user, posted again under the SAME command id once it is
  * idle — then waited on as a turn. Still busy at the timeout: nothing was sent (`sent: false`).
+ * Inline attachments (`upload`) are uploaded only once the session reads idle, right before the
+ * first post, and reused by every retry; the call stops before any post once it is cancelled.
  */
-async function dispatchNextTurn(ctx: SendContext, sessionId: string, body: TurnBody, timeoutMs: number): Promise<Record<string, unknown>> {
+async function dispatchNextTurn(ctx: SendContext, sessionId: string, body: TurnBody, timeoutMs: number, upload?: () => Promise<AttachmentRef[]>): Promise<Record<string, unknown>> {
   const startedAt = ctx.now();
   const startedMono = performance.now();
   const remaining = () => timeoutMs - Math.max(ctx.now() - startedAt, performance.now() - startedMono);
   const commandId = randomUUID();
+  const notSent = { outcome: "timeout", sent: false, hint: 'The session stayed busy for the whole wait, so the message was not sent. Send it again, or with reply "none" to steer its running turn.' };
+  const cancelled = () => new ToolError("CANCELLED", "The call was cancelled before the message was sent.");
+  /** Until the session reads idle (or failed); `afterNextEvent` once the host refused a post. */
+  const untilIdle = async (afterNextEvent: boolean): Promise<"idle" | "timeout"> => {
+    const left = remaining();
+    if (left <= 0) return "timeout";
+    const waited = await waitWhileWorking(ctx.api, [sessionId], { timeoutMs: left, signal: ctx.signal, now: ctx.now, until: (state) => state === "idle" || state === "failed", afterNextEvent });
+    if (waited.reports.get(sessionId) === null) throw new ToolError("SESSION_NOT_FOUND", `Session "${sessionId}" was closed while the message waited for it.`);
+    if (waited.cancelled || ctx.signal.aborted) throw cancelled();
+    return waited.timedOut ? "timeout" : "idle";
+  };
+  let attachments = body.attachments;
+  if (upload !== undefined) {
+    // Nothing is uploaded for a message that may never be sent: first the session must read idle.
+    if ((await untilIdle(false)) === "timeout") return notSent;
+    attachments = await upload();
+  }
   for (;;) {
+    if (ctx.signal.aborted) throw cancelled();
     const summary = await requireChatSession(ctx.api, sessionId);
     const checked = await readThread(ctx.api, sessionId);
     const baseline = turnBaseline(summary);
     const over = turnsOverBefore(checked, summary);
+    if (ctx.signal.aborted) throw cancelled();
     try {
       const { seq } = await sendCommand(
         ctx.api,
         sessionId,
         "turn",
-        { input: body.input, ...(body.attachments?.length ? { attachments: body.attachments } : {}), interactionMode: body.interactionMode, ifIdle: true },
+        { input: body.input, ...(attachments?.length ? { attachments } : {}), interactionMode: body.interactionMode, ifIdle: true },
         { commandId }
       );
       const { outcome, session } = await awaitTurn(ctx, sessionId, baseline, over, Math.max(0, remaining()));
@@ -635,15 +680,11 @@ async function dispatchNextTurn(ctx: SendContext, sessionId: string, body: TurnB
     } catch (error) {
       if (!(error instanceof ToolError) || error.code !== TURN_NOT_IDLE) throw error;
     }
-    const left = remaining();
-    const notSent = { outcome: "timeout", sent: false, hint: 'The session stayed busy for the whole wait, so the message was not sent. Send it again, or with reply "none" to steer its running turn.' };
-    if (left <= 0) return notSent;
     // The host said busy: look again only once something about the session moved, so a busy reason
-    // these reads cannot see (a compaction in flight) never turns into a re-post loop.
-    const waited = await waitWhileWorking(ctx.api, [sessionId], { timeoutMs: left, signal: ctx.signal, now: ctx.now, until: (state) => state === "idle" || state === "failed", afterNextEvent: true });
-    if (waited.reports.get(sessionId) === null) throw new ToolError("SESSION_NOT_FOUND", `Session "${sessionId}" was closed while the message waited for it.`);
-    if (waited.cancelled) throw new ToolError("CANCELLED", "The call was cancelled before the message was sent.");
-    if (waited.timedOut) return notSent;
+    // these reads cannot see (a compaction in flight) never turns into a re-post loop. The uploaded
+    // attachments ride every retry (a message the host never took leaves them to its unreferenced-
+    // attachment sweep only in that last race).
+    if ((await untilIdle(true)) === "timeout") return notSent;
   }
 }
 
@@ -673,7 +714,7 @@ export const sendMessageTool = defineCatalogTool({
   description:
     "Message a chat. `reply` \"wait\" (default): returns the final reply of the turn this message causes (a working chat gets it as its next turn, never a steer), or early when that turn asks its user something, or at timeoutSeconds. \"none\": returns at once; a working chat's running turn is steered (refused while it waits for its user: PENDING_REQUEST). `implementPlan: true` sends its latest proposed plan to implement.",
   chatNote:
-    "\"notify\": returns at once and delivers that turn's final reply to you later as a new message; prefer it for long work, never poll. A \"wait\" cut short goes on as notify (`willNotify`). Never message yourself; answer a [Sent by …] message in your final reply.",
+    "\"notify\": returns at once and delivers that turn's final reply to you later as a new message; use it when you want an answer to long work, never poll. A \"wait\" cut short goes on as notify (`willNotify`). Never message yourself; answer a [Sent by …] message in your final reply.",
   externalNote: "On Codex the host runs `/goal …` itself: no turn starts, and outcome \"goal\" carries its answer.",
   input: {
     sessionId: z.string().min(1).describe("From list_sessions."),
@@ -749,10 +790,12 @@ async function sendExternal(args: SendArgs, ctx: CallContext, summary: SessionSu
   const interactionMode = args.planMode ? "plan" : "default";
   if (hostGoal) return { ...(await dispatchGoalCommand(ctx, summary.id, checked, text, interactionMode, reply === "wait", timeoutMs)) };
   const input = args.implementPlan === true ? buildPlanImplementationPrompt(await actionablePlanMarkdown(ctx.api, summary.id, checked)) : text;
-  const attachments = args.attachments?.length ? await uploadInlineAttachments(ctx.api, summary.id, args.attachments) : [];
-  const body: TurnBody = { input, attachments, interactionMode };
-  if (reply === "none") return { ...(await dispatchTurn(ctx, summary.id, checked, body, false, timeoutMs)) };
-  return dispatchNextTurn(ctx, summary.id, body, timeoutMs);
+  const files = args.attachments;
+  if (reply === "none") {
+    const attachments = files?.length ? await uploadInlineAttachments(ctx.api, summary.id, files) : [];
+    return { ...(await dispatchTurn(ctx, summary.id, checked, { input, attachments, interactionMode }, false, timeoutMs)) };
+  }
+  return dispatchNextTurn(ctx, summary.id, { input, interactionMode }, timeoutMs, files?.length ? () => uploadInlineAttachments(ctx.api, summary.id, files) : undefined);
 }
 
 async function sendFromChat(args: SendArgs, ctx: CallContext, caller: ThreadCaller, summary: SessionSummary, text: string, reply: ReplyMode, timeoutSeconds: number): Promise<Record<string, unknown>> {
@@ -776,7 +819,7 @@ async function sendFromChat(args: SendArgs, ctx: CallContext, caller: ThreadCall
   const input =
     args.implementPlan === true
       ? buildPlanImplementationPrompt(await actionablePlanMarkdown(ctx.api, summary.id, checked))
-      : ctx.turn.provenance("sent", text, reply);
+      : provenanceFor(ctx, caller, "sent", text, reply, checked.head.runtimeMode);
   const attachments = args.attachments?.length ? await uploadInlineAttachments(ctx.api, summary.id, args.attachments) : [];
   const legacyWait = (ctx as CallContext & { legacyAlias?: string }).legacyAlias === "thread_send" && reply === "wait";
   if (reply === "none" || legacyWait) {
@@ -871,12 +914,23 @@ function launchAccount(agent: AgentView, requested: string | undefined, inherite
   return { source: "family-default" };
 }
 
-/** A `cwd` argument inside the target project: absolute, or relative to the project; an existing directory. */
+/**
+ * A `cwd` argument inside the target project: absolute, or relative to the project; an existing
+ * directory. Containment is by REAL paths — a symlink inside the project that leads elsewhere (in
+ * or out of the sandbox) is refused.
+ */
 async function cwdInProject(api: ScopeContext["api"], projectPath: string, input: string): Promise<string> {
   const cwd = resolvePath(projectPath, input);
-  const [real, root] = await Promise.all([canonicalPath(api, cwd), canonicalPath(api, projectPath)]);
-  const rel = relativePath(root, real);
-  if (rel.startsWith("..") || isAbsolute(rel)) throw new ToolError("PERMISSION_DENIED", `cwd "${clipText(input, MAX_ECHO_CHARS)}" is not inside the project the session opens in.`);
+  let real: string;
+  try {
+    real = await assertInsideFsRoot(api.fsRoot, cwd);
+  } catch (error) {
+    if (error instanceof FsSandboxError) throw new ToolError("PATH_NOT_ALLOWED", "cwd is not allowed (outside the sandbox).");
+    throw error;
+  }
+  const root = await realPathInSandbox(api, projectPath);
+  const rel = root === null ? null : relativePath(root, real);
+  if (rel === null || rel.startsWith("..") || isAbsolute(rel)) throw new ToolError("PERMISSION_DENIED", `cwd "${clipText(input, MAX_ECHO_CHARS)}" is not inside the project the session opens in.`);
   const directory = await stat(real).then((info) => info.isDirectory(), () => false);
   if (!directory) throw new ToolError("INVALID_ARGUMENT", `cwd "${clipText(input, MAX_ECHO_CHARS)}" is not an existing directory.`);
   return cwd;
@@ -927,7 +981,7 @@ export const createSessionTool = defineCatalogTool({
   description:
     "Open a chat tab for an agent in a project, or resume a conversation (list_conversations); list_agents lists agents, models, options, modes and accounts. With `prompt` it starts at once: `reply` \"wait\" returns that turn's final reply (or at timeoutSeconds), \"none\" returns at once. The result says what the session got: model (`isLegacy` if legacy), mode, account and `accountSource` (requested, inherited or family-default).",
   chatNote:
-    "Defaults: this chat's project, agent, mode (only narrower) and, same agent, its model, options and account. `prompt` (self-contained) is required unless resuming. `delegate: true` makes it your task: its final reply is the result, delivered to you as a message (reply default \"notify\", else \"none\"). Limits: 6 unfinished chats you opened, 2 levels deep.",
+    "Defaults: this chat's project, agent, mode (only narrower) and, same agent, its model, options and account. `prompt` (self-contained) is required unless resuming. Want its answer back? reply \"notify\" (delivered later as a message). `delegate: true` makes it your task: its final reply is the result (reply default \"notify\", else \"none\"). Limits: 6 unfinished chats you opened, 2 levels deep.",
   externalNote: "`project` is required; runtimeMode defaults to full-access, reply to \"none\".",
   input: {
     project: z.string().min(1).optional().describe("Path or \"workspace/project\"."),
@@ -1130,7 +1184,7 @@ async function createFromChat(args: CreateArgs, ctx: CallContext, caller: Thread
   const ref = chatThreadRef(caller, [...sessions, summary], summary, relation);
   if (args.prompt === undefined) return { ...created, ...ref };
   const origin: Exclude<ThreadMessageOrigin, "reply"> = delegate ? "delegated" : "opened";
-  const input = ctx.turn.provenance(origin, args.prompt, reply);
+  const input = provenanceFor(ctx, caller, origin, args.prompt, reply, runtimeMode);
   let first: Record<string, unknown>;
   try {
     if (reply === "none") {

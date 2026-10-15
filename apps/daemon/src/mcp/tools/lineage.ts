@@ -12,6 +12,7 @@
 import { z } from "zod";
 import type { ForkSessionRequest, ForkSessionResponse, MergeBackActionResponse, MergeBackResponse, SessionLineageResponse, SessionSummary } from "@orquester/api";
 import { agentChatRoutes, SETTLED_TURN_STATES as SETTLED, startedTurns } from "@orquester/api/agent-chat";
+import { canonicalProject } from "../addressing.ts";
 import { findAgent, loadAgents } from "../agents.ts";
 import { ToolError, expectOk } from "../errors.ts";
 import { listSessions, postIdempotent, readThread, requireChatSession } from "../reads.ts";
@@ -140,9 +141,19 @@ async function forkCut(api: Parameters<typeof readThread>[0], sessionId: string,
   return throughTurn === 0 ? { turnId: started[0]!.turnId, role: "user" } : { turnId: started[throughTurn - 1]!.turnId, role: "assistant" };
 }
 
-/** Refuse a fork once the target's project holds as many open chats as a tool may add to (§5.6). */
-function assertRoomInProject(sessions: readonly SessionSummary[], projectPath: string): void {
-  const running = sessions.filter((s) => s.projectPath === projectPath && s.status === "running").length;
+/**
+ * Refuse a fork once the target's project holds as many open chats as a tool may add to (§5.6).
+ * Projects compare canonically (two spellings of one project are one project).
+ */
+async function assertRoomInProject(api: Parameters<typeof canonicalProject>[0], sessions: readonly SessionSummary[], projectPath: string): Promise<void> {
+  const own = (await canonicalProject(api, projectPath))?.canonical;
+  const roots = new Map<string, string | undefined>();
+  let running = 0;
+  for (const s of sessions) {
+    if (s.status !== "running") continue;
+    if (!roots.has(s.projectPath)) roots.set(s.projectPath, (await canonicalProject(api, s.projectPath))?.canonical);
+    if (s.projectPath === projectPath || (own !== undefined && roots.get(s.projectPath) === own)) running += 1;
+  }
   if (running >= MAX_RUNNING_SESSIONS_PER_PROJECT) {
     throw new ToolError("SESSION_BUSY", `${running} sessions are open in this project (limit ${MAX_RUNNING_SESSIONS_PER_PROJECT}); the user has to close some first.`);
   }
@@ -185,7 +196,7 @@ export const forkSessionTool = defineCatalogTool({
     const target = args.sessionId ?? caller!.threadId;
     const summary = await requireChatSession(api, target);
     const sessions = await listSessions(api);
-    assertRoomInProject(sessions, summary.projectPath);
+    await assertRoomInProject(api, sessions, summary.projectPath);
     const body: ForkSessionRequest = {};
     if (args.title !== undefined) body.title = args.title;
     if (args.messageId !== undefined) body.messageId = args.messageId;
