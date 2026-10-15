@@ -489,12 +489,14 @@ const skillFiles = {
   ]
 };
 
-test("chat previews are complete per item kind: a copied skill's files, executables and binaries flagged with hashes", async () => {
+test("chat previews are complete per item kind: a copied skill as the target gets it, executables and binaries flagged with hashes", async () => {
+  const copyPreview = `${base}/items/skill%3Ahandoff/copy-preview`;
   const api = new FakeDaemonApi().on("GET", base, reply(snapshot([item("skill", "handoff", { path: "/h/.claude/skills/handoff" })])))
-    .on("GET", `${base}/items/skill%3Ahandoff/files`, reply(skillFiles))
+    .on("GET", copyPreview, reply({ itemId: "skill:handoff", revision: "item-r1", kind: "skill", name: "handoff", notes: [], tree: skillFiles }))
     .on("POST", `${base}/items/skill%3Ahandoff/copy`, reply({ ...mutation, snapshot: snapshot([], "codex") }));
   const port = new FakeApprovalPort();
   await chat(api, port, { agent: "claude", changes: [{ action: "copy", id: "skill:handoff", toAgent: "codex" }] });
+  assert.deepEqual(request(api, "GET", copyPreview).query, { toAgent: "codex", onConflict: "fail" });
   const card = port.cards[0]!;
   assert.equal(card.title, "Claude wants to copy the skill `handoff` from Claude Code to Codex");
   assert.equal(card.scope.label, "Global — every Claude Code and Codex chat");
@@ -650,6 +652,7 @@ test("looksLikeSecret: key names, known prefixes, bearer values and high-entropy
 test("chat: copying a bearer-carrying MCP server checks what it holds (by id) and flags it in red", async () => {
   const api = new FakeDaemonApi().on("GET", base, reply(snapshot([item("mcp", "jira")]))).on("GET", mcpPath, reply(mcpDetail))
     .on("POST", CHECK, reply({ reason: "bearer" }))
+    .on("GET", `${mcpPath}/copy-preview`, reply({ itemId: "mcp:jira", revision: "item-r1", kind: "mcp", name: "jira", notes: [] }))
     .on("POST", `${mcpPath}/copy`, reply({ snapshot: snapshot([item("mcp", "jira")], "codex"), itemIds: ["mcp:jira"], notes: [] }));
   const port = new FakeApprovalPort();
   await chat(api, port, { agent: "claude", changes: [{ action: "copy", id: "mcp:jira", toAgent: "codex" }] });
@@ -714,22 +717,40 @@ test("chat: an update whose kind is not the item's is refused before any card", 
   assert.deepEqual(writes(api), []);
 });
 
-test("chat: the card shows the name that will be written — a keep-both suffix, a renamed skill's frontmatter", async () => {
-  const api = new FakeDaemonApi().on("GET", base, reply(snapshot([item("skill", "review"), item("skill", "review-2"), item("skill", "handoff")])))
+test("chat: the card shows the name that will be written — the adapter's keep-both name, a renamed skill's frontmatter — always pinned", async () => {
+  const names = `${base}/names/keep-both`;
+  let next = "review-3";
+  const api = new FakeDaemonApi().on("GET", base, reply(snapshot([item("skill", "review")])))
+    .on("GET", names, () => reply({ name: next }))
     .on("POST", `${base}/items`, reply(mutation));
   const port = new FakeApprovalPort();
   await chat(api, port, { agent: "claude", changes: [{ action: "create", onConflict: "keep-both", skill: { name: "review", frontmatter: { name: "review", description: "R" }, body: "B" } }] });
+  assert.deepEqual(request(api, "GET", names).query, { kind: "skill", name: "review" }, "the agent's own naming decides, not the snapshot");
   const [file] = sectionsOf(port.cards[0]!, "code");
   assert.equal(file.title, "review-3/SKILL.md");
   assert.equal(file.text, "---\nname: review-3\ndescription: R\n---\nB");
-  // The suffix it would pick is pinned: another "review-3" appearing meanwhile is PREVIEW_STALE.
+  // The name is pinned: the adapter picking another one by the time of the write is PREVIEW_STALE.
   api.calls = [];
   const raced = new FakeApprovalPort(() => {
-    api.on("GET", base, reply(snapshot([item("skill", "review"), item("skill", "review-2"), item("skill", "review-3")])));
+    next = "review-4";
     return { outcome: "approved", approvalId: "" };
   });
+  next = "review-3";
   await rejects(chat(api, raced, { agent: "claude", changes: [{ action: "create", onConflict: "keep-both", skill: { name: "review", body: "B" } }] }), "PREVIEW_STALE");
   assert.deepEqual(writes(api), []);
+  // A free name is pinned too, so even a card with nothing else to pin re-verifies before writing.
+  const free = new FakeApprovalPort();
+  await chat(api, free, { agent: "claude", changes: [{ action: "create", skill: { name: "fresh", body: "B" } }] });
+  assert.deepEqual(request(api, "POST", `${base}/items`).body, { onConflict: "fail", draft: { kind: "skill", document: { name: "fresh", frontmatter: {}, body: "B" } } });
+  // Copies and import picks show their written names too.
+  const copyPreview = `${base}/items/skill%3Areview/copy-preview`;
+  api.on("GET", copyPreview, reply({ itemId: "skill:review", revision: "item-r1", kind: "skill", name: "review-2", notes: [],
+    tree: { complete: true, files: [{ path: "SKILL.md", size: 1, sha256: "e".repeat(64), text: "---\nname: review-2\n---\nB" }] } }));
+  const copy = new FakeApprovalPort(() => ({ outcome: "denied", approvalId: "" }));
+  await rejects(chat(api, copy, { agent: "claude", changes: [{ action: "copy", id: "skill:review", toAgent: "codex", onConflict: "keep-both" }] }), "APPROVAL_DENIED");
+  assert.deepEqual(request(api, "GET", copyPreview).query, { toAgent: "codex", onConflict: "keep-both" });
+  assert.ok(sectionsOf(copy.cards[0]!, "code").some((section) => section.title === "review-2/SKILL.md" && /name: review-2/.test(section.text)));
+  assert.ok((sectionsOf(copy.cards[0]!, "fields").find((section) => section.title === "As written to Codex")!.rows as { value: string }[])[0]!.value.startsWith("review-2"));
 
   const skillPath = `${base}/items/skill%3Ahandoff`;
   api.on("GET", base, reply(snapshot([item("skill", "handoff", { path: "/h/.claude/skills/handoff" })])))
@@ -740,4 +761,18 @@ test("chat: the card shows the name that will be written — a keep-both suffix,
   await chat(api, rename, { agent: "claude", changes: [{ action: "update", id: "skill:handoff", skill: { name: "hand-off" } }] });
   const after = sectionsOf(rename.cards[0]!, "code").find((section) => section.title === "hand-off/SKILL.md — as it will be");
   assert.equal(after?.text, "---\nname: hand-off\ndescription: D\n---\nSteps");
+});
+
+test("chat: a plugin whose directory is outside the pinned checkout says so in red on its commit row", async () => {
+  const path = `${base}/marketplaces/acme/plugins/p`;
+  const api = new FakeDaemonApi().on("POST", CHECK, reply({ reason: null }))
+    .on("GET", path, reply({ marketplace: "acme", plugin: "p", commit: "a".repeat(40), outsideCheckout: true,
+      source: { type: "local", complete: true, files: [{ path: "x.md", size: 1, sha256: "1".repeat(64), text: "x" }] },
+      provides: { skills: [], commands: [], agents: [], hooks: [], mcpServers: [] } }));
+  const port = new FakeApprovalPort(() => ({ outcome: "denied", approvalId: "" }));
+  await rejects(chat(api, port, { agent: "claude", changes: [{ action: "create", plugin: { plugin: "p", marketplace: "acme" } }] }), "APPROVAL_DENIED");
+  const card = port.cards[0]!;
+  const row = (sectionsOf(card, "fields")[0].rows as { label: string; value: string; state?: string }[]).find((entry) => entry.label === "Marketplace commit");
+  assert.deepEqual(row, { label: "Marketplace commit", value: "plugin directory is outside the pinned checkout (not pinned)", state: "flagged" });
+  assert.ok(sectionsOf(card, "warning").some((w) => w.level === "danger" && /outside the marketplace's checkout/.test(w.text)));
 });

@@ -47,6 +47,7 @@ import { randomUUID } from "node:crypto";
 import { realpath, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import {
+  AGENT_PROFILE_AGENT_LABELS,
   PROFILE_HOOK_EVENTS,
   PROFILE_HOOK_EVENTS_WITHOUT_MATCHER,
   type HookDraft,
@@ -67,6 +68,7 @@ import { profileErrors } from "../../errors.ts";
 import {
   type ProfileBackups,
   SKILL_FILE,
+  assertMcpServerName,
   assertSkillName,
   contentHash,
   copyTree,
@@ -1063,7 +1065,7 @@ export class CodexProfileAdapter implements ProfileAdapter {
     if (typeof name === "string" && Object.hasOwn(servers, name)) {
       if (onConflict === "fail") throw profileErrors.exists(name);
       if (onConflict === "keep-both") {
-        name = uniqueName(name, (candidate) => Object.hasOwn(servers, candidate));
+        name = codexMcpKeepBothName(servers, name);
       } else {
         existing = record(servers[name]);
       }
@@ -1083,7 +1085,7 @@ export class CodexProfileAdapter implements ProfileAdapter {
   ): Promise<AdapterMutationResult> {
     let name = document.name;
     assertSkillName(name);
-    const taken = async (candidate: string) => (await pathKind(join(this.skillsRoot, candidate))) !== null;
+    const taken = (candidate: string) => this.skillNameTaken(candidate);
     if (await taken(name)) {
       if (onConflict === "fail") throw profileErrors.exists(name);
       if (onConflict === "keep-both") {
@@ -1584,6 +1586,26 @@ export class CodexProfileAdapter implements ProfileAdapter {
     });
   }
 
+  /** A skill directory of that name exists (`createSkill` / `importItem`'s check). */
+  private async skillNameTaken(candidate: string): Promise<boolean> {
+    return (await pathKind(join(this.skillsRoot, candidate))) !== null;
+  }
+
+  async keepBothName(kind: "mcp" | "skill" | "command", name: string): Promise<string> {
+    switch (kind) {
+      case "mcp": {
+        assertMcpServerName(name);
+        return codexMcpKeepBothName(record(this.requireConfig(await this.load()).config.mcp_servers), name);
+      }
+      case "skill":
+        assertSkillName(name);
+        return (await this.skillNameTaken(name)) ? uniqueNameAsync(name, (candidate) => this.skillNameTaken(candidate)) : name;
+      case "command":
+        // Codex has no commands: an import or copy makes one a skill before it gets here.
+        throw profileErrors.kindNotSupported(AGENT_PROFILE_AGENT_LABELS.codex, "command");
+    }
+  }
+
   /** `plugin/list`: a local plugin's directory (its `source.path`) inside the marketplace's checkout, else what Codex fetches. */
   async pluginSource(marketplace: string, plugin: string): Promise<PluginSourceLocation> {
     const listed = await this.rpc("plugin/list", {});
@@ -1628,7 +1650,7 @@ export class CodexProfileAdapter implements ProfileAdapter {
       case "skill": {
         let name = item.name;
         assertSkillName(name);
-        const taken = async (candidate: string) => (await pathKind(join(this.skillsRoot, candidate))) !== null;
+        const taken = (candidate: string) => this.skillNameTaken(candidate);
         if (await taken(name)) {
           if (options.onConflict === "fail") throw profileErrors.exists(name);
           if (options.onConflict === "keep-both") {
@@ -1751,10 +1773,12 @@ function describeMarketplaceSource(source: MarketplaceSource): string {
 
 /**
  * Where a Codex marketplace plugin lives before it is installed. `plugin/list` names a
- * marketplace by its MANIFEST (`<root>/.agents/plugins/marketplace.json`, Codex 0.155): the
- * checkout whose commit a card pins is `<root>`, and a relative `source.path` is relative to it
- * (an absolute one, as Codex reports a local source, is taken as it is). A path that leaves the
- * checkout, or a source with no path, is a source Codex fetches at install.
+ * marketplace by its MANIFEST (`<root>/.agents/plugins/marketplace.json`, Codex 0.155; or a
+ * Claude-layout `<root>/.claude-plugin/marketplace.json`): the checkout whose commit a card pins
+ * is `<root>`, and a relative `source.path` is relative to it (an absolute one, as Codex reports a
+ * local source, is taken as it is). Whether the directory really lies inside the checkout is
+ * decided on realpaths by the service (`pluginPreview`): one outside is shown, its commit unpinned.
+ * A source with no path is one Codex fetches at install.
  */
 export function codexPluginLocation(
   manifestPath: string | null,
@@ -1766,18 +1790,25 @@ export function codexPluginLocation(
   const sourcePath = summary.source.path;
   if (typeof sourcePath === "string" && sourcePath !== "") {
     if (isAbsolute(sourcePath)) return { ...base, source: { type: "local", dir: resolve(sourcePath) } };
-    if (root !== null) {
-      const dir = resolve(root, sourcePath);
-      if (dir === root || dir.startsWith(`${root}${sep}`)) return { ...base, source: { type: "local", dir } };
-    }
+    if (root !== null) return { ...base, source: { type: "local", dir: resolve(root, sourcePath) } };
   }
   return { ...base, source: { type: "remote", description: [summary.source.type, summary.source.url ?? sourcePath].filter(Boolean).join(" ") } };
 }
 
-/** `<root>/.agents/plugins/marketplace.json` → `<root>`; another `.json` file → its directory; a directory → itself. */
+/**
+ * The checkout a marketplace manifest belongs to: `<root>/.agents/plugins/marketplace.json` →
+ * `<root>`; `<root>/.claude-plugin/marketplace.json` → `<root>`; another `.json` file → its
+ * directory; a directory → itself.
+ */
 export function codexMarketplaceRoot(manifestPath: string): string {
   const path = resolve(manifestPath);
-  const suffix = `${sep}.agents${sep}plugins${sep}marketplace.json`;
-  if (path.endsWith(suffix)) return path.slice(0, -suffix.length) || sep;
+  for (const suffix of [`${sep}.agents${sep}plugins${sep}marketplace.json`, `${sep}.claude-plugin${sep}marketplace.json`]) {
+    if (path.endsWith(suffix)) return path.slice(0, -suffix.length) || sep;
+  }
   return path.endsWith(".json") ? dirname(path) : path;
+}
+
+/** `name`, or the first free `name-<n>` among `[mcp_servers]` (`createMcp`'s keep-both). */
+function codexMcpKeepBothName(servers: Record<string, unknown>, name: string): string {
+  return Object.hasOwn(servers, name) ? uniqueName(name, (candidate) => Object.hasOwn(servers, candidate)) : name;
 }

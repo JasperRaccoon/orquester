@@ -1191,3 +1191,23 @@ test("a server whose name Claude accepts but the profile's naming rule does not 
     assertCode("INVALID_NAME")
   );
 });
+
+test("keepBothName: the names Claude's own writes would collide with — claude.json servers (not plugin ones), any skills/ entry, stashed commands", async (t) => {
+  const f = await fixture(t);
+  // A plugin ships an MCP server named "rules": it is not in ~/.claude.json, so a new one may take the name.
+  assert.equal(await f.adapter.keepBothName("mcp", "rules"), "rules");
+  assert.equal(await f.adapter.keepBothName("mcp", "centur"), "centur-2");
+  assert.equal(await f.adapter.keepBothName("mcp", "fresh"), "fresh");
+  // Any directory under skills/ takes a name, a skill or not; Claude's own `synced` is never one.
+  await mkdir(join(f.claudeDir, "skills", "notes"), { recursive: true });
+  assert.equal(await f.adapter.keepBothName("skill", "notes"), "notes-2");
+  await assert.rejects(f.adapter.keepBothName("skill", "synced"), (error: unknown) => error instanceof AgentProfileError && error.code === "INVALID_NAME");
+  // A command turned off (stashed) still holds its name.
+  await f.adapter.create({ kind: "command", document: { name: "deploy", frontmatter: {}, body: "x\n" } }, { onConflict: "fail" });
+  const deploy = await item(f.adapter, "command:deploy");
+  await f.adapter.setEnabled(deploy.id, deploy.revision, false);
+  assert.equal(await f.adapter.keepBothName("command", "deploy"), "deploy-2");
+  // And a keep-both create lands exactly there.
+  const created = await f.adapter.create({ kind: "command", document: { name: "deploy", frontmatter: {}, body: "y\n" } }, { onConflict: "keep-both" });
+  assert.deepEqual(created.itemIds, ["command:deploy-2"]);
+});

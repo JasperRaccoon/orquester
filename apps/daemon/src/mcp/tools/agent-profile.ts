@@ -682,7 +682,8 @@ const editAgentProfile = defineTool({
     const changes = args.changes as ProfileChange[];
     validateChanges(args.agent, changes, ctx.caller);
     // What the user approved is what runs: every pin re-read before the first write.
-    if (ctx.approval?.pins && Object.keys(ctx.approval.pins).length > 0) await verifyPins(ctx.api, args.agent, changes, ctx.approval.pins);
+    // Every carded call re-verifies, a card with no pins too (re-reading must still yield none).
+    if (ctx.approval) await verifyPins(ctx.api, args.agent, changes, ctx.approval.pins ?? {});
     const budget = Math.floor(PROFILE_RESULT_BUDGET / changes.length);
     const results: Record<string, unknown>[] = [];
     for (const [index, change] of changes.entries()) {

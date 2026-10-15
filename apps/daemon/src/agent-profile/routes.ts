@@ -76,7 +76,7 @@ export interface AgentProfileRouteDeps {
     | "listMarketplacePlugins"
   > &
     /** The approval-card reads (`@orquester/api` agent-profile.ts); a route answers 503 without them. */
-    Partial<Pick<AgentProfileService, "itemFiles" | "importDetail" | "pluginPreview">>;
+    Partial<Pick<AgentProfileService, "itemFiles" | "importDetail" | "pluginPreview" | "keepBothName" | "copyPreview">>;
   /** `agentProfileImportsDir(appdir)`: where an upload is streamed before its scan. */
   importsDir: string;
 }
@@ -108,7 +108,9 @@ const P = {
   marketplacePlugins: pattern(agentProfileRoutes.marketplacePlugins("claude", "NAME")),
   itemFiles: pattern(agentProfilePreviewRoutes.itemFiles("claude", "ID")),
   importDetail: pattern(agentProfilePreviewRoutes.importDetail("claude", "IMPORT")),
-  pluginPreview: pattern(agentProfilePreviewRoutes.pluginPreview("claude", "NAME", "PLUGIN"))
+  pluginPreview: pattern(agentProfilePreviewRoutes.pluginPreview("claude", "NAME", "PLUGIN")),
+  keepBothName: pattern(agentProfilePreviewRoutes.keepBothName("claude")),
+  copyPreview: pattern(agentProfilePreviewRoutes.copyPreview("claude", "ID"))
 };
 
 /** `/api/agent-profile/claude/items/ID` → `/api/agent-profile/:agent/items/:id`. */
@@ -270,11 +272,32 @@ export function registerAgentProfileRoutes(app: FastifyInstance, deps: AgentProf
       })
     );
 
-    scope.get<{ Params: { agent: string; importId: string } }>(P.importDetail, async (request, reply) =>
+    scope.get<{ Params: { agent: string; importId: string }; Querystring: Record<string, unknown> }>(P.importDetail, async (request, reply) =>
       run(request, reply, () => {
         if (!service.importDetail) throw unavailable();
         const importId = stringField(request.params.importId, "importId", { max: ID_MAX });
-        return service.importDetail(agentParam(request.params), importId);
+        const onConflict = request.query?.onConflict === undefined ? "fail" : conflictPolicy(request.query.onConflict);
+        return service.importDetail(agentParam(request.params), importId, onConflict);
+      })
+    );
+
+    scope.get<{ Params: AgentParams; Querystring: Record<string, unknown> }>(P.keepBothName, async (request, reply) =>
+      run(request, reply, async () => {
+        if (!service.keepBothName) throw unavailable();
+        const kind = request.query?.kind;
+        if (kind !== "mcp" && kind !== "skill" && kind !== "command") throw invalid("kind must be mcp, skill or command.");
+        const name = stringField(request.query?.name, "name", { max: NAME_MAX });
+        return { name: await service.keepBothName(agentParam(request.params), kind, name) };
+      })
+    );
+
+    scope.get<{ Params: ItemParams; Querystring: Record<string, unknown> }>(P.copyPreview, async (request, reply) =>
+      run(request, reply, () => {
+        if (!service.copyPreview) throw unavailable();
+        const toAgent = request.query?.toAgent;
+        if (!isAgentProfileAgentId(toAgent)) throw invalid("toAgent must be an agent.");
+        const onConflict = request.query?.onConflict === undefined ? "fail" : conflictPolicy(request.query.onConflict);
+        return service.copyPreview(agentParam(request.params), idParam(request.params), toAgent, onConflict);
       })
     );
 

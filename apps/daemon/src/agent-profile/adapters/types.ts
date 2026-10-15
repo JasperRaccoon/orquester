@@ -154,6 +154,13 @@ export interface ProfileAdapter {
    */
   pluginSource?(marketplace: string, plugin: string): Promise<PluginSourceLocation>;
 
+  /**
+   * The name a create, import or copy of this kind lands on with `onConflict: "keep-both"` — the
+   * name itself when it is free — computed by the very naming code the write runs (approval
+   * cards show and pin it). Read-only.
+   */
+  keepBothName?(kind: "mcp" | "skill" | "command", name: string): Promise<string>;
+
   /** Lift a copyable item (`PROFILE_COPYABLE_KINDS`) out, real secret values included. Caller owns any temp dir. */
   exportItem(id: string): Promise<PortableItem>;
 

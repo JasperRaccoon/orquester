@@ -6,7 +6,17 @@ import { afterEach, beforeEach, describe, it, mock } from "node:test";
 import { fileURLToPath } from "node:url";
 import { parse as parseToml } from "@decimalturn/toml-patch";
 import type { ProfileItem } from "@orquester/api";
-import { agentProfileBackupsDir } from "@orquester/config";
+import { agentProfileBackupsDir, agentProfileImportsDir } from "@orquester/config";
+import Fastify from "fastify";
+import { Broadcaster } from "../../../broadcaster.ts";
+import { FakeApprovalPort } from "../../../mcp/catalog/approval-double.ts";
+import type { ThreadCaller } from "../../../mcp/catalog/contract.ts";
+import { InjectDaemonApi } from "../../../mcp/daemon-api.ts";
+import { executeToolCall } from "../../../mcp/executor.ts";
+import { createProfileConverter } from "../../convert.ts";
+import { DaemonMcpDetector, registerDaemonMcpServersRoutes } from "../../daemon-mcp.ts";
+import { registerAgentProfileRoutes } from "../../routes.ts";
+import { AgentProfileService } from "../../service.ts";
 import { AgentProfileError } from "../../errors.ts";
 import { ProfileBackups } from "../../infra/index.ts";
 import type { ProfileAdapterContext } from "../types.ts";
@@ -930,6 +940,60 @@ describe("CodexProfileAdapter", () => {
       assert.ok(location.source.type === "local" && location.source.dir.startsWith(`${f.mkt}${sep}`));
       await assert.rejects(f.adapter.pluginSource("test-mkt", "ghost"), assertProfileError("INVALID_REQUEST"));
       await assert.rejects(f.adapter.pluginSource("nope", "other"), assertProfileError("ITEM_NOT_FOUND"));
+    });
+
+    it("enabling an installed plugin reads its VERSION directory: provides, the pointing check, and a missing cache still cards", async () => {
+      // The plugin ships an MCP server that points at this daemon's /mcp.
+      await writeFile(join(f.mkt, "plugins", "other", ".mcp.json"), JSON.stringify({ mcpServers: { orq: { type: "http", url: "http://127.0.0.1:47831/mcp" } } }));
+      await f.adapter.create({ kind: "plugin", plugin: { plugin: "other", marketplace: "test-mkt" } }, { onConflict: "fail" });
+      const other = await f.item("plugin:other@test-mkt");
+      assert.equal(other.path, join(f.codexHome, "plugins", "cache", "test-mkt", "other"), "Codex reports the unversioned cache dir");
+      const quiet = { info: () => undefined, warn: () => undefined, error: () => undefined };
+      const service = new AgentProfileService({
+        adapters: { codex: f.adapter }, agentInfo: (agent) => ({ installed: agent === "codex" }), logger: quiet,
+        converter: createProfileConverter({ tempRoot: agentProfileImportsDir(f.appdir) })
+      });
+      const files = await service.itemFiles("codex", other.id);
+      assert.equal(files.unreadable, undefined);
+      assert.ok(files.files.some((file) => file.path === ".codex-plugin/plugin.json"), "the files of cache/<mkt>/<name>/<version>");
+      assert.deepEqual(files.provides?.skills, ["other-skill"]);
+      assert.deepEqual(files.provides?.mcpServers.map((server) => server.name), ["orq"]);
+
+      const app = Fastify({ logger: false });
+      registerAgentProfileRoutes(app, { service, importsDir: agentProfileImportsDir(f.appdir) });
+      const detector = new DaemonMcpDetector(
+        { verifyBearer: () => false, httpPort: () => 47831, publicOrigins: () => [], env: () => undefined },
+        { homes: f.ctx.homes, accountHomes: async () => [], projects: async () => [], workspacesRoot: () => f.root }
+      );
+      registerDaemonMcpServersRoutes(app, { detector, mode: "local" });
+      await app.ready();
+      try {
+        const api = new InjectDaemonApi({ app, authorization: undefined, agentChat: null, broadcaster: new Broadcaster(), fsRoot: f.root, workspacesDir: f.root });
+        const caller: ThreadCaller = { kind: "thread", threadId: "t1", title: "Chat", projectPath: "", workspace: "", cwd: f.root, agentId: "codex", callId: "c1",
+          runtimeMode: "full-access", planning: false, workflowOwned: false, exchange: null };
+        const enable = async () => {
+          const port = new FakeApprovalPort({ outcome: "denied", approvalId: "" });
+          await executeToolCall(
+            { approvals: port, enabledToolsets: async () => new Set(["core", "reads", "agent-profile-editing"]) },
+            { name: "edit_agent_profile", arguments: { agent: "codex", changes: [{ action: "enable", id: other.id }] } },
+            { caller, api, signal: new AbortController().signal }
+          );
+          assert.equal(port.cards.length, 1, "a card opened");
+          return port.cards[0]!;
+        };
+        const card = await enable();
+        const provided = card.sections.find((section) => section.kind === "changes");
+        assert.ok(provided?.kind === "changes" && provided.items.some((entry) => entry.label === "MCP server orq"));
+        assert.ok(card.sections.some((section) => section.kind === "warning" && section.level === "danger" && /"orq" points at this Orquester/.test(section.text)), "the pointing check ran");
+
+        // The cache is gone: enabling still cards, with the contents named unreadable in red.
+        await rm(join(f.codexHome, "plugins", "cache", "test-mkt", "other"), { recursive: true, force: true });
+        assert.equal((await service.itemFiles("codex", other.id)).unreadable, "contents not readable (cache missing)");
+        const missing = await enable();
+        assert.ok(missing.sections.some((section) => section.kind === "warning" && section.level === "danger" && /contents not readable \(cache missing\)/.test(section.text)));
+      } finally {
+        await app.close();
+      }
     });
 
     it("lists a marketplace's plugins, removes and adds a marketplace", async () => {

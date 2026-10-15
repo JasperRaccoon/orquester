@@ -52,8 +52,10 @@ import {
   DAEMON_MCP_SERVERS_CHECK_ROUTE,
   type DaemonMcpCheckRequest,
   type DaemonMcpCheckResponse,
+  type ProfileCopyPreviewResponse,
   type ProfileImportDetailResponse,
   type ProfileItemFilesResponse,
+  type ProfileKeepBothNameResponse,
   type ProfilePluginPreviewResponse,
   type ProfilePreviewFile,
   type ProfilePreviewTree
@@ -312,7 +314,12 @@ export function profileClient(api: DaemonApi) {
     marketplacePlugins: (agent: Agent, marketplace: string) =>
       call<MarketplacePluginsResponse>("GET", agentProfileRoutes.marketplacePlugins(agent, marketplace)),
     itemFiles: (agent: Agent, id: string) => call<ProfileItemFilesResponse>("GET", agentProfilePreviewRoutes.itemFiles(agent, id)),
-    importDetail: (agent: Agent, importId: string) => call<ProfileImportDetailResponse>("GET", agentProfilePreviewRoutes.importDetail(agent, importId)),
+    importDetail: (agent: Agent, importId: string, onConflict: ProfileConflictPolicy = "fail") =>
+      call<ProfileImportDetailResponse>("GET", agentProfilePreviewRoutes.importDetail(agent, importId), { query: { onConflict } }),
+    keepBothName: (agent: Agent, kind: "mcp" | "skill" | "command", name: string) =>
+      call<ProfileKeepBothNameResponse>("GET", agentProfilePreviewRoutes.keepBothName(agent), { query: { kind, name } }),
+    copyPreview: (agent: Agent, id: string, toAgent: Agent, onConflict: ProfileConflictPolicy) =>
+      call<ProfileCopyPreviewResponse>("GET", agentProfilePreviewRoutes.copyPreview(agent, id), { query: { toAgent, onConflict } }),
     pluginPreview: (agent: Agent, marketplace: string, plugin: string) =>
       call<ProfilePluginPreviewResponse>("GET", agentProfilePreviewRoutes.pluginPreview(agent, marketplace, plugin)),
     daemonPointing: (body: DaemonMcpCheckRequest) => call<DaemonMcpCheckResponse>("POST", DAEMON_MCP_SERVERS_CHECK_ROUTE, { body })
@@ -455,8 +462,10 @@ interface ChangeFacts {
   plugin?: ProfilePluginPreviewResponse;
   /** create with onConflict "replace": the item it would replace. */
   replaces?: ProfileItem;
-  /** create with onConflict "keep-both" over a taken name: the suffixed name the adapter will pick. */
+  /** create (mcp, skill, command): the name it is written under — the adapter's own keep-both naming, or the name itself. */
   writtenName?: string;
+  /** copy: the item as the target will get it (converted, named). */
+  copy?: ProfileCopyPreviewResponse;
   pointing?: DaemonMcpCheckResponse["reason"];
   /** A plugin's MCP servers that point at this daemon (install, or enabling an installed one). */
   pluginPointing?: { name: string; reason: NonNullable<DaemonMcpCheckResponse["reason"]> }[];
@@ -564,18 +573,17 @@ export async function readBatchFacts(api: DaemonApi, agent: Agent, changes: read
         }
         const name = kind === "mcp" ? change.mcp!.name : kind === "skill" || kind === "command" ? change[kind]!.name : kind === "marketplace" ? change.marketplace!.name : undefined;
         const policy = change.onConflict ?? "fail";
-        if (name !== undefined && policy !== "fail") {
-          const items = (await snap()).items;
-          const existing = items.find((entry) => entry.id === `${kind}:${name}`);
-          if (existing && policy === "replace") {
+        if (name !== undefined && (kind === "mcp" || kind === "skill" || kind === "command")) {
+          // The name written, always pinned: keep-both asks the agent's own naming (which knows
+          // what its write would collide with); otherwise it is the name itself.
+          fact.writtenName = policy === "keep-both" ? (await client.keepBothName(agent, kind, name)).name : name;
+          pin("name", fact.writtenName);
+        }
+        if (name !== undefined && policy === "replace") {
+          const existing = (await snap()).items.find((entry) => entry.id === `${kind}:${name}`);
+          if (existing) {
             fact.replaces = existing;
             pin("replaces", existing.revision);
-          } else if (existing && policy === "keep-both") {
-            // As the adapters' `uniqueName`: `<name>-2`, `-3`, … the first one free.
-            let n = 2;
-            while (items.some((entry) => entry.id === `${kind}:${name}-${n}`)) n += 1;
-            fact.writtenName = `${name}-${n}`;
-            pin("name", fact.writtenName);
           }
         }
         break;
@@ -602,8 +610,14 @@ export async function readBatchFacts(api: DaemonApi, agent: Agent, changes: read
         if (fact.item.kind === "mcp" || fact.item.kind === "hook" || fact.item.kind === "plugin" || fact.item.kind === "marketplace" || change.action === "update") {
           fact.detail = await client.item(agent, change.id!);
         }
+        if (change.action === "copy") {
+          // What the target gets: converted, named by the target's own keep-both naming.
+          fact.copy = await client.copyPreview(agent, change.id!, change.toAgent!, change.onConflict ?? "fail");
+          pin("name", fact.copy.name);
+          if (fact.copy.tree) pin("files", treeDigest(fact.copy.tree));
+        }
         const readsFiles =
-          ((fact.item.kind === "skill" || fact.item.kind === "command") && change.action !== "enable" && change.action !== "disable") ||
+          ((fact.item.kind === "skill" || fact.item.kind === "command") && change.action !== "enable" && change.action !== "disable" && change.action !== "copy") ||
           (fact.item.kind === "plugin" && change.action === "enable");
         if (readsFiles && fact.item.path !== undefined) {
           fact.files = await client.itemFiles(agent, change.id!);
@@ -631,12 +645,13 @@ export async function readBatchFacts(api: DaemonApi, agent: Agent, changes: read
         break;
       }
       case "import_pick": {
-        fact.importDetail = await client.importDetail(agent, change.importId!);
+        fact.importDetail = await client.importDetail(agent, change.importId!, change.onConflict ?? "fail");
         const known = new Set(fact.importDetail.candidates.map((candidate) => candidate.ref));
         const missing = change.picks!.filter((ref) => !known.has(ref));
         if (missing.length > 0) throw new ToolError("INVALID_ARGUMENT", `${where(index)}: the import has no item ${missing.slice(0, 3).map((ref) => JSON.stringify(clipText(ref, MAX_ECHO_CHARS))).join(", ")}.`);
         for (const candidate of fact.importDetail.candidates.filter((entry) => change.picks!.includes(entry.ref))) {
           pin(`pick.${candidate.ref}`, treeDigest(candidate));
+          pin(`pick.${candidate.ref}.name`, candidate.writtenName ?? candidate.name);
         }
         if (fact.importDetail.source.type === "git") pin("commit", fact.importDetail.source.commit ?? "none");
         break;
@@ -810,7 +825,7 @@ function mcpSections(agent: Agent, index: number, change: ProfileChange, fact: C
   const rows: { label: string; value: string; state?: "set" | "asked" | "flagged" }[] = [
     {
       label: "Name",
-      value: name + (current && mcp.name && mcp.name !== current.name ? ` (renamed from ${current.name})` : "") + (fact.writtenName ? ` ("${mcp.name}" is taken: keep-both)` : "")
+      value: name + (current && mcp.name && mcp.name !== current.name ? ` (renamed from ${current.name})` : "") + (fact.writtenName && mcp.name && fact.writtenName !== mcp.name ? ` ("${mcp.name}" is taken: keep-both)` : "")
     },
     { label: "Transport", value: transport }
   ];
@@ -947,9 +962,16 @@ function pluginSections(plugin: ProfilePluginPreviewResponse, pointing: ChangeFa
       { label: "Plugin", value: plugin.plugin },
       { label: "Marketplace", value: plugin.marketplace },
       ...(plugin.version ? [{ label: "Version", value: plugin.version }] : []),
-      { label: "Marketplace commit", value: plugin.commit ?? "not a git checkout" }
+      {
+        label: "Marketplace commit",
+        value: plugin.outsideCheckout ? "plugin directory is outside the pinned checkout (not pinned)" : (plugin.commit ?? "not a git checkout"),
+        ...(plugin.outsideCheckout ? { state: "flagged" as const } : {})
+      }
     ]
   }];
+  if (plugin.outsideCheckout && plugin.source.type === "local") {
+    sections.push({ kind: "warning", level: "danger", text: "The plugin's directory lies outside the marketplace's checkout: the commit shown does not pin its files. They are shown below as they are now." });
+  }
   if (plugin.source.type !== "local") {
     sections.push({
       kind: "warning",
@@ -999,7 +1021,7 @@ export function buildPreview(batch: BatchFacts, caller: ToolCaller): ApprovalPre
           const written = fact.writtenName ?? doc.name!;
           const file = kind === "skill" ? `${written}/SKILL.md` : `commands/${written}.md`;
           const frontmatter = kind === "skill" ? skillFrontmatter(doc.frontmatter ?? {}, written) : (doc.frontmatter ?? {});
-          if (fact.writtenName) sections.push({ kind: "text", text: `"${clipText(doc.name!, 80)}" is taken, so it is written as "${fact.writtenName}" (onConflict: keep-both).` });
+          if (written !== doc.name) sections.push({ kind: "text", text: `"${clipText(doc.name!, 80)}" is taken, so it is written as "${fact.writtenName}" (onConflict: keep-both).` });
           sections.push({ kind: "code", title: file, language: "markdown", text: documentText(agent, frontmatter, doc.body ?? "") });
         } else if (kind === "hook") {
           const hook = change.hook!;
@@ -1074,11 +1096,27 @@ export function buildPreview(batch: BatchFacts, caller: ToolCaller): ApprovalPre
       case "trust_hook":
       case "copy": {
         sections.push(itemFields(fact.item!), ...detailSections(fact.detail));
-        if (fact.files) {
+        if (fact.files?.unreadable) {
+          // A plugin whose cache is gone: say so, and let the user decide.
+          sections.push({ kind: "warning", level: "danger", text: `${clipText(fact.files.unreadable, 200)}: Orquester cannot show what this plugin ships. Approve only if you trust it.` });
+        } else if (fact.files) {
           if (!fact.files.complete) throw tooLarge(`The ${KIND_ONE[fact.item!.kind]} ${fact.item!.name}`);
           // An installed plugin turned on: what it ships (its files are pinned); a skill or command: every file.
           if (fact.files.provides) sections.push(...providesSections(fact.files.provides, fact.pluginPointing));
           else sections.push(...fileSections(fact.files.files, fact.item!.kind === "skill" ? fact.item!.name : ""));
+        }
+        if (fact.copy) {
+          const copy = fact.copy;
+          sections.push({
+            kind: "fields",
+            title: `As written to ${CLI_LABELS[change.toAgent!]}`,
+            rows: [{ label: "Name", value: copy.name + (copy.name !== fact.item!.name ? ` (converted or kept both: was "${fact.item!.name}")` : "") }]
+          });
+          if (copy.notes.length > 0) sections.push({ kind: "text", text: copy.notes.map((note) => clipText(note, 300)).join(" ") });
+          if (copy.tree) {
+            if (!copy.tree.complete) throw tooLarge(`The ${KIND_ONE[fact.item!.kind]} ${fact.item!.name}`);
+            sections.push(...fileSections(copy.tree.files, copy.kind === "skill" ? copy.name : ""));
+          }
         }
         if (fact.item!.kind === "mcp") sections.push(...pointingWarning(fact.item!.name, fact.pointing ?? null));
         const effect =
@@ -1117,9 +1155,13 @@ export function buildPreview(batch: BatchFacts, caller: ToolCaller): ApprovalPre
         });
         for (const candidate of detail.candidates.filter((entry) => change.picks!.includes(entry.ref))) {
           if (!candidate.complete) throw tooLarge(`The import item ${candidate.name}`);
-          sections.push({ kind: "text", title: `${KIND_ONE[candidate.kind]} ${candidate.name}`, text: candidate.exists ? `${CLI_LABELS[agent]} already has one by that name (onConflict: ${change.onConflict ?? "fail"}).` : `New in ${CLI_LABELS[agent]}.` });
+          const written = candidate.writtenName ?? candidate.name;
+          const status = written !== candidate.name
+            ? `"${clipText(candidate.name, 80)}" is taken in ${CLI_LABELS[agent]}, so it is written as "${written}" (onConflict: keep-both).`
+            : candidate.exists ? `${CLI_LABELS[agent]} already has one by that name (onConflict: ${change.onConflict ?? "fail"}).` : `New in ${CLI_LABELS[agent]}.`;
+          sections.push({ kind: "text", title: `${KIND_ONE[candidate.kind]} ${written}`, text: status });
           if (candidate.notes?.length) sections.push({ kind: "text", text: `As imported: ${candidate.notes.map((note) => clipText(note, 300)).join(" ")}` });
-          sections.push(...fileSections(candidate.files, candidate.kind === "skill" ? candidate.name : ""));
+          sections.push(...fileSections(candidate.files, candidate.kind === "skill" ? written : ""));
         }
         break;
       }

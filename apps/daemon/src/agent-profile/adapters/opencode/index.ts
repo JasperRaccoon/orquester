@@ -806,7 +806,7 @@ export class OpenCodeProfileAdapter implements ProfileAdapter {
     if (taken(name)) {
       if (policy === "fail") throw profileErrors.exists(name);
       if (policy === "keep-both") {
-        name = keepBothName(name, taken, isValidMcpServerName);
+        name = this.mcpKeepBothName(model, name);
       } else {
         const existing = model.entries.get(itemId("mcp", name)) as Extract<Entry, { kind: "mcp" }>;
         if (!existing.item.deletable) throw profileErrors.notEditable(name);
@@ -820,6 +820,26 @@ export class OpenCodeProfileAdapter implements ProfileAdapter {
         : setJsonc(model.config.targetText, ["mcp", name], entry);
     await this.writeConfig(model.config, text);
     return mutation([itemId("mcp", name)]);
+  }
+
+  /** `name`, or the first free `name-<n>` (`createMcp`'s keep-both). */
+  private mcpKeepBothName(model: Model, name: string): string {
+    const taken = (candidate: string): boolean => model.entries.has(itemId("mcp", candidate));
+    return taken(name) ? keepBothName(name, taken, isValidMcpServerName) : name;
+  }
+
+  async keepBothName(kind: "mcp" | "skill" | "command", name: string): Promise<string> {
+    const model = await this.load();
+    switch (kind) {
+      case "mcp":
+        assertMcpServerName(name);
+        return this.mcpKeepBothName(model, name);
+      case "skill":
+        // `keep-both` claims a name without touching anything (only `replace` removes).
+        return this.claimSkillName(model, name, "keep-both");
+      case "command":
+        return (await this.claimCommandName(model, name, "keep-both")).name;
+    }
   }
 
   private skillsRoot(): string {

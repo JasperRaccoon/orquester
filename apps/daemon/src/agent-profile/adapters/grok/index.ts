@@ -1532,14 +1532,14 @@ export class GrokProfileAdapter implements ProfileAdapter {
     const model = await this.load();
     this.requireConfig(model);
     const servers = tableAt(model.config.doc, ["mcp_servers"]);
-    const mcpNames = new Set(model.entries.filter((entry) => entry.item.kind === "mcp").map((entry) => entry.item.name));
+    const mcpTaken = this.mcpNameTaken(model);
     let name = draft.name;
     const notes: string[] = [];
     let existing: TomlTable | undefined;
-    if (mcpNames.has(name) || servers[name] !== undefined) {
+    if (mcpTaken(name)) {
       if (onConflict === "fail") throw profileErrors.exists(name);
       if (onConflict === "keep-both") {
-        name = nextFreeName(name, (candidate) => mcpNames.has(candidate) || servers[candidate] !== undefined, PROFILE_MCP_NAME_MAX, isValidMcpServerName);
+        name = nextFreeName(name, mcpTaken, PROFILE_MCP_NAME_MAX, isValidMcpServerName);
         notes.push(`Added as "${name}".`);
       } else if (isTable(servers[name])) {
         existing = servers[name] as TomlTable;
@@ -1669,8 +1669,7 @@ export class GrokProfileAdapter implements ProfileAdapter {
     if (await taken(name)) {
       if (onConflict === "fail") throw profileErrors.exists(name);
       if (onConflict === "keep-both") {
-        const used = new Set((await readdir(this.skillsDir).catch(() => [] as string[])));
-        name = nextFreeName(name, (candidate) => used.has(candidate), PROFILE_SKILL_NAME_MAX, isValidSkillName);
+        name = await this.nextFreeSkillName(name);
         notes.push(`Added as "${name}".`);
       } else {
         replace = true;
@@ -1699,13 +1698,12 @@ export class GrokProfileAdapter implements ProfileAdapter {
     this.assertFlatCommand(document.name);
     let name = document.name;
     const notes: string[] = [];
-    const taken = async (candidate: string): Promise<boolean> => (await pathKind(join(this.commandsDir, `${candidate}.md`))) !== null;
+    const taken = (candidate: string): Promise<boolean> => this.commandNameTaken(candidate);
     let replace = false;
     if (await taken(name)) {
       if (onConflict === "fail") throw profileErrors.exists(name);
       if (onConflict === "keep-both") {
-        const used = new Set((await readdir(this.commandsDir).catch(() => [] as string[])).map((file) => file.replace(/\.md$/, "")));
-        name = nextFreeName(name, (candidate) => used.has(candidate), PROFILE_SKILL_NAME_MAX, isValidSkillName);
+        name = await this.nextFreeCommandName(name);
         notes.push(`Added as "${name}".`);
       } else {
         replace = true;
@@ -2192,6 +2190,49 @@ export class GrokProfileAdapter implements ProfileAdapter {
     }
   }
 
+  // --- keep-both names (one code path for creates, imports and card previews) ---
+
+  /** An MCP server name Grok already lists (own or inherited) or `config.toml` holds. */
+  private mcpNameTaken(model: Awaited<ReturnType<GrokProfileAdapter["load"]>>): (candidate: string) => boolean {
+    const servers = tableAt(model.config.doc, ["mcp_servers"]);
+    const mcpNames = new Set(model.entries.filter((entry) => entry.item.kind === "mcp").map((entry) => entry.item.name));
+    return (candidate) => mcpNames.has(candidate) || servers[candidate] !== undefined;
+  }
+
+  private async commandNameTaken(candidate: string): Promise<boolean> {
+    return (await pathKind(join(this.commandsDir, `${candidate}.md`))) !== null;
+  }
+
+  /** The first free `name-<n>` among the skills directory's entries. */
+  private async nextFreeSkillName(name: string): Promise<string> {
+    const used = new Set(await readdir(this.skillsDir).catch(() => [] as string[]));
+    return nextFreeName(name, (candidate) => used.has(candidate), PROFILE_SKILL_NAME_MAX, isValidSkillName);
+  }
+
+  /** The first free `name-<n>` among the commands directory's files. */
+  private async nextFreeCommandName(name: string): Promise<string> {
+    const used = new Set((await readdir(this.commandsDir).catch(() => [] as string[])).map((file) => file.replace(/\.md$/, "")));
+    return nextFreeName(name, (candidate) => used.has(candidate), PROFILE_SKILL_NAME_MAX, isValidSkillName);
+  }
+
+  async keepBothName(kind: "mcp" | "skill" | "command", name: string): Promise<string> {
+    switch (kind) {
+      case "mcp": {
+        assertMcpServerName(name);
+        const model = await this.load();
+        this.requireConfig(model);
+        const taken = this.mcpNameTaken(model);
+        return taken(name) ? nextFreeName(name, taken, PROFILE_MCP_NAME_MAX, isValidMcpServerName) : name;
+      }
+      case "skill":
+        assertSkillName(name);
+        return (await pathKind(join(this.skillsDir, name))) !== null ? this.nextFreeSkillName(name) : name;
+      case "command":
+        this.assertFlatCommand(name);
+        return (await this.commandNameTaken(name)) ? this.nextFreeCommandName(name) : name;
+    }
+  }
+
   private async importSkill(requested: string, dir: string, onConflict: ProfileConflictPolicy): Promise<AdapterMutationResult> {
     assertSkillName(requested);
     assertSafeSegment(requested);
@@ -2201,8 +2242,7 @@ export class GrokProfileAdapter implements ProfileAdapter {
     if ((await pathKind(target(name))) !== null) {
       if (onConflict === "fail") throw profileErrors.exists(name);
       if (onConflict === "keep-both") {
-        const used = new Set(await readdir(this.skillsDir).catch(() => [] as string[]));
-        name = nextFreeName(name, (candidate) => used.has(candidate), PROFILE_SKILL_NAME_MAX, isValidSkillName);
+        name = await this.nextFreeSkillName(name);
         notes.push(`Added as "${name}".`);
       } else {
         await removeProfilePath(target(name), { backups: this.backups, agent: AGENT });

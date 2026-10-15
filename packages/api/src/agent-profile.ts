@@ -14,6 +14,8 @@
  * nothing (spec §8).
  */
 
+import type { DaemonPointingReason } from "./index.ts";
+
 // ---------------------------------------------------------------------------
 // Agents and kinds
 // ---------------------------------------------------------------------------
@@ -663,8 +665,16 @@ export const PROFILE_HOOK_EVENTS_WITHOUT_MATCHER: readonly string[] = ["UserProm
 // picked items in full with the repository's commit, and a marketplace plugin's contents,
 // `provides` and commit — each with SHA-256 content hashes the card pins and the write
 // re-verifies (`PREVIEW_STALE`). Both transports, bearer on HTTP, except the socket-only
-// daemon-pointing check. No secret value ever appears here: MCP servers a plugin ships are listed
-// with their env/header KEYS only.
+// daemon-pointing check.
+//
+// What is and is not guaranteed about secrets:
+// - The values of the agents' OWN MCP servers (env, headers in their config files) never appear in
+//   these responses; `provides.mcpServers` names a plugin's env/header KEYS only.
+// - File contents ARE returned in full — an item's files, an import's files, a plugin's files —
+//   whatever they hold, because the card must show what will be installed. A file a plugin or a
+//   repository ships with a credential in it (a `.mcp.json` header) is shown as it is.
+// - The daemon-pointing check's REQUEST carries candidate values (it is socket-only); its
+//   response is the reason alone.
 
 /** One file a preview shows. `text` is present for a UTF-8 text file (no NUL) within the read cap. */
 export interface ProfilePreviewFile {
@@ -691,6 +701,8 @@ export interface ProfileItemFilesResponse extends ProfilePreviewTree {
   revision: string;
   /** An installed plugin: what it ships (as {@link ProfilePluginPreviewResponse.provides}). */
   provides?: ProfilePluginPreviewResponse["provides"];
+  /** An installed plugin whose files cannot be read (its cache is missing or empty): why. `files` is then empty. */
+  unreadable?: string;
 }
 
 /** `GET agentProfilePreviewRoutes.importDetail(agent, importId)`: what a scan found, in full. */
@@ -702,7 +714,15 @@ export interface ProfileImportDetailResponse {
    * Each candidate as it will be imported: its main document (`SKILL.md` / the command file) with
    * the frontmatter already mapped for the target agent; `notes` name what the mapping dropped.
    */
-  candidates: (ProfilePreviewTree & { ref: string; kind: "skill" | "command"; name: string; exists: boolean; notes?: string[] })[];
+  candidates: (ProfilePreviewTree & {
+    ref: string;
+    kind: "skill" | "command";
+    name: string;
+    exists: boolean;
+    notes?: string[];
+    /** `?onConflict=keep-both`: the name the import will write (`name` itself when free); the shown `SKILL.md` carries it. */
+    writtenName?: string;
+  })[];
 }
 
 /** One MCP server a plugin ships: its command line or URL, and its env / header KEYS. */
@@ -728,6 +748,11 @@ export interface ProfilePluginPreviewResponse {
   version?: string;
   /** The commit the marketplace checkout is at; null when it is not a git checkout. */
   commit: string | null;
+  /**
+   * The plugin's directory does not lie inside the marketplace checkout (realpaths): its files are
+   * shown, but `commit` does not pin them.
+   */
+  outsideCheckout?: boolean;
   /**
    * `local`: the plugin's files as they will be installed. `remote`: the marketplace names a
    * source outside its checkout (fetched by the CLI at install). `unavailable`: this agent's
@@ -762,10 +787,32 @@ export interface DaemonMcpCheckRequest {
 }
 
 export interface DaemonMcpCheckResponse {
-  reason: "bearer" | "url" | "name" | null;
+  reason: DaemonPointingReason | null;
+}
+
+/** `GET agentProfilePreviewRoutes.keepBothName(agent)?kind=&name=`: what a keep-both create lands on, by the agent's own naming. */
+export interface ProfileKeepBothNameResponse {
+  name: string;
+}
+
+/** `GET agentProfilePreviewRoutes.copyPreview(agent, id)?toAgent=&onConflict=`: the item as the copy will write it. */
+export interface ProfileCopyPreviewResponse {
+  itemId: string;
+  revision: string;
+  kind: "mcp" | "skill" | "command";
+  /** The name it is written under on the target (converted; keep-both suffix applied). */
+  name: string;
+  /** A skill's or command's files as written there (a skill's `SKILL.md` carries `name`); absent for an MCP server. */
+  tree?: ProfilePreviewTree;
+  /** What the conversion changed or dropped. */
+  notes: string[];
 }
 
 export const agentProfilePreviewRoutes = {
+  /** Query: `kind`, `name`. */
+  keepBothName: (agent: AgentProfileAgentId): string => `${agentPath(agent)}/names/keep-both`,
+  /** Query: `toAgent`, `onConflict`. */
+  copyPreview: (agent: AgentProfileAgentId, id: string): string => `${agentPath(agent)}/items/${encodeURIComponent(id)}/copy-preview`,
   itemFiles: (agent: AgentProfileAgentId, id: string): string => `${agentPath(agent)}/items/${encodeURIComponent(id)}/files`,
   importDetail: (agent: AgentProfileAgentId, importId: string): string => `${agentPath(agent)}/imports/${encodeURIComponent(importId)}`,
   pluginPreview: (agent: AgentProfileAgentId, marketplace: string, plugin: string): string =>

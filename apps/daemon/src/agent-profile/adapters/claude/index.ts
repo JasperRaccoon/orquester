@@ -895,7 +895,7 @@ export class ClaudeProfileAdapter implements ProfileAdapter {
         if (target in servers) {
           if (onConflict === "fail") throw profileErrors.exists(name);
           if (onConflict === "keep-both") {
-            target = uniqueName(name, (candidate) => candidate in servers);
+            target = keepBothMcpName(servers, name);
           } else {
             const current = servers[target];
             existing = isRecord(current) ? current : undefined;
@@ -1399,6 +1399,21 @@ export class ClaudeProfileAdapter implements ProfileAdapter {
     return catalog.map((entry) => ({ ...entry, installed: installed.has(`${entry.name}@${marketplace}`) }));
   }
 
+  async keepBothName(kind: "mcp" | "skill" | "command", name: string): Promise<string> {
+    switch (kind) {
+      case "mcp": {
+        assertMcpServerName(name);
+        const state = await this.load();
+        return keepBothMcpName(state.claudeJson === null ? {} : mcpServersOf(state.claudeJson), name);
+      }
+      case "skill":
+        // `keep-both` claims a name without touching anything (only `replace` removes).
+        return this.claimSkillName(name, "keep-both");
+      case "command":
+        return this.claimCommandName(name, "keep-both");
+    }
+  }
+
   async pluginSource(marketplace: string, plugin: string): Promise<PluginSourceLocation> {
     const state = await this.load();
     const known = state.marketplaces.find((m) => m.name === marketplace);
@@ -1489,6 +1504,11 @@ export class ClaudeProfileAdapter implements ProfileAdapter {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/** `name`, or the first free `name-<n>` among `servers` (`createMcp`'s keep-both). */
+function keepBothMcpName(servers: Record<string, unknown>, name: string): string {
+  return name in servers ? uniqueName(name, (candidate) => candidate in servers) : name;
+}
 
 function countLines(text: string): number {
   if (text.length === 0) return 0;

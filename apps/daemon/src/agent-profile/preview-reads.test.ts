@@ -6,7 +6,7 @@
  */
 
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -160,7 +160,9 @@ test("routes: the card reads answer what the service reads, and 503 without it",
   const service = {
     itemFiles: async (...args: unknown[]) => (calls.push(["itemFiles", ...args]), { itemId: "skill:a", revision: "r", files: [], complete: true }),
     importDetail: async (...args: unknown[]) => (calls.push(["importDetail", ...args]), { importId: "i", source: { type: "upload", name: "x.zip" }, candidates: [] }),
-    pluginPreview: async (...args: unknown[]) => (calls.push(["pluginPreview", ...args]), { marketplace: "m", plugin: "p", commit: null, source: { type: "unavailable", reason: "r" }, provides: { skills: [], commands: [], agents: [], hooks: [], mcpServers: [] } })
+    pluginPreview: async (...args: unknown[]) => (calls.push(["pluginPreview", ...args]), { marketplace: "m", plugin: "p", commit: null, source: { type: "unavailable", reason: "r" }, provides: { skills: [], commands: [], agents: [], hooks: [], mcpServers: [] } }),
+    keepBothName: async (...args: unknown[]) => (calls.push(["keepBothName", ...args]), "x-2"),
+    copyPreview: async (...args: unknown[]) => (calls.push(["copyPreview", ...args]), { itemId: "skill:a", revision: "r", kind: "skill", name: "a", notes: [] })
   } as unknown as AgentProfileRouteDeps["service"];
   const app = Fastify({ logger: false });
   registerAgentProfileRoutes(app, { service, importsDir: "/tmp/unused" });
@@ -170,7 +172,15 @@ test("routes: the card reads answer what the service reads, and 503 without it",
   assert.equal((await app.inject({ method: "GET", url: "/api/agent-profile/claude/items/skill%3Aa/files" })).statusCode, 200);
   assert.equal((await app.inject({ method: "GET", url: "/api/agent-profile/claude/imports/i" })).statusCode, 200);
   assert.equal((await app.inject({ method: "GET", url: "/api/agent-profile/claude/marketplaces/m/plugins/p" })).statusCode, 200);
-  assert.deepEqual(calls, [["itemFiles", "claude", "skill:a"], ["importDetail", "claude", "i"], ["pluginPreview", "claude", "m", "p"]]);
+  assert.deepEqual(calls, [["itemFiles", "claude", "skill:a"], ["importDetail", "claude", "i", "fail"], ["pluginPreview", "claude", "m", "p"]]);
+  calls.length = 0;
+  assert.deepEqual((await app.inject({ method: "GET", url: "/api/agent-profile/codex/names/keep-both?kind=skill&name=x" })).json(), { name: "x-2" });
+  assert.equal((await app.inject({ method: "GET", url: "/api/agent-profile/codex/names/keep-both?kind=plugin&name=x" })).statusCode, 400);
+  assert.equal((await app.inject({ method: "GET", url: "/api/agent-profile/claude/items/skill%3Aa/copy-preview?toAgent=codex&onConflict=keep-both" })).statusCode, 200);
+  assert.equal((await app.inject({ method: "GET", url: "/api/agent-profile/claude/items/skill%3Aa/copy-preview?toAgent=nope" })).statusCode, 400);
+  assert.equal((await app.inject({ method: "GET", url: "/api/agent-profile/claude/imports/i?onConflict=bogus" })).statusCode, 400);
+  assert.equal((await app.inject({ method: "GET", url: "/api/agent-profile/claude/imports/i?onConflict=keep-both" })).statusCode, 200);
+  assert.deepEqual(calls, [["keepBothName", "codex", "skill", "x"], ["copyPreview", "claude", "skill:a", "codex", "keep-both"], ["importDetail", "claude", "i", "keep-both"]]);
   assert.equal((await app.inject({ method: "GET", url: "/api/agent-profile/nope/imports/i" })).statusCode, 404);
   const missing = await bare.inject({ method: "GET", url: "/api/agent-profile/claude/items/skill%3Aa/files" });
   assert.equal(missing.statusCode, 503);
@@ -231,7 +241,7 @@ test("AgentProfileService.mcpCandidate: header and env values and every Codex en
   assert.equal(await service.mcpCandidate("codex", "skill:x"), null);
 });
 
-test("codexPluginLocation: the checkout is the manifest's root; a relative source is inside it; an escape is a remote source", () => {
+test("codexPluginLocation: the checkout is the manifest's root (either layout); a relative source resolves against it", () => {
   const manifest = "/m/acme/.agents/plugins/marketplace.json";
   assert.equal(codexMarketplaceRoot(manifest), "/m/acme");
   assert.equal(codexMarketplaceRoot("/m/other/catalog.json"), "/m/other");
@@ -239,7 +249,73 @@ test("codexPluginLocation: the checkout is the manifest's root; a relative sourc
   const summary = (path?: string) => ({ version: null, localVersion: "1.0.0", source: { type: "local", ...(path !== undefined ? { path } : {}) } });
   assert.deepEqual(codexPluginLocation(manifest, summary("./plugins/hello")), { marketplaceDir: "/m/acme", version: "1.0.0", source: { type: "local", dir: "/m/acme/plugins/hello" } });
   assert.deepEqual(codexPluginLocation(manifest, summary("/abs/plugins/hello")), { marketplaceDir: "/m/acme", version: "1.0.0", source: { type: "local", dir: "/abs/plugins/hello" } });
-  assert.equal(codexPluginLocation(manifest, summary("../../etc")).source.type, "remote");
+  // Lexically outside: still where Codex reads it from; the service decides containment on realpaths.
+  assert.deepEqual(codexPluginLocation(manifest, summary("../../etc")).source, { type: "local", dir: "/etc" });
+  assert.equal(codexMarketplaceRoot("/m/claude-layout/.claude-plugin/marketplace.json"), "/m/claude-layout");
   assert.deepEqual(codexPluginLocation(null, { version: "2", localVersion: null, source: { type: "git", url: "https://g.example/p.git" } }),
     { marketplaceDir: null, version: "2", source: { type: "remote", description: "git https://g.example/p.git" } });
+});
+
+test("pluginPreview: a plugin directory outside the marketplace checkout (on realpaths, a symlink included) is marked: its commit does not pin it", async (t) => {
+  const root = await tempRoot(t);
+  const market = join(root, "market");
+  const elsewhere = join(root, "elsewhere", "p");
+  await write(join(market, ".git", "HEAD"), `${"a".repeat(40)}\n`);
+  await write(join(market, "plugins", "inside", ".claude-plugin", "plugin.json"), JSON.stringify({ name: "inside" }));
+  await write(join(elsewhere, ".claude-plugin", "plugin.json"), JSON.stringify({ name: "p" }));
+  await symlink(elsewhere, join(market, "plugins", "linked"));
+  class Adapter extends FakeProfileAdapter {
+    async pluginSource(_marketplace: string, plugin: string) {
+      return { marketplaceDir: market, source: { type: "local" as const, dir: plugin === "abs" ? elsewhere : join(market, "plugins", plugin) } };
+    }
+  }
+  const service = new AgentProfileService({ adapters: { codex: new Adapter("codex") }, agentInfo: () => ({ installed: true }), converter: (item) => ({ item, notes: [] }), logger: { warn: () => undefined, error: () => undefined } });
+  const inside = await service.pluginPreview("codex", "m", "inside");
+  assert.equal(inside.outsideCheckout, undefined);
+  assert.equal(inside.commit, "a".repeat(40));
+  for (const plugin of ["abs", "linked"]) {
+    const outside = await service.pluginPreview("codex", "m", plugin);
+    assert.equal(outside.outsideCheckout, true, plugin);
+    assert.equal(outside.source.type, "local");
+  }
+});
+
+
+test("copyPreview and keep-both import detail: written under the target's own keep-both name, SKILL.md carrying it; temp copies removed", async (t) => {
+  const root = await tempRoot(t);
+  class Adapter extends FakeProfileAdapter {
+    async keepBothName(_kind: "mcp" | "skill" | "command", name: string) {
+      return `${name}-2`;
+    }
+  }
+  const claude = new Adapter("claude");
+  claude.items = [fakeItem("skill", "handoff"), fakeItem("command", "deploy"), fakeItem("mcp", "jira")];
+  const codex = new Adapter("codex");
+  const store = new ProfileImportStore({
+    dir: join(root, "imports"), existing: async () => new Set(["skill:alpha"]), logger: { info: () => undefined, warn: () => undefined },
+    clone: async (_url, _ref, dest) => write(join(dest, "skills", "alpha", "SKILL.md"), "---\nname: alpha\ndescription: A\n---\nbody")
+  });
+  t.after(() => store.stop());
+  const service = new AgentProfileService({
+    adapters: { claude, codex, grok: new Adapter("grok") }, agentInfo: () => ({ installed: true }), converter: (item) => ({ item, notes: ["converted"] }), imports: store,
+    logger: { warn: () => undefined, error: () => undefined }
+  });
+  const skill = await service.copyPreview("claude", "skill:handoff", "codex", "keep-both");
+  assert.equal(skill.name, "handoff-2");
+  assert.deepEqual(skill.notes, ["converted"]);
+  assert.match(skill.tree!.files.find((file) => file.path === "SKILL.md")!.text!, /^---\nname: handoff-2\n/);
+  for (const dir of claude.exportedDirs) await assert.rejects(stat(dir), { code: "ENOENT" }, "the exported copy is removed");
+  const plain = await service.copyPreview("claude", "skill:handoff", "codex", "fail");
+  assert.equal(plain.name, "handoff");
+  const command = await service.copyPreview("claude", "command:deploy", "grok", "keep-both");
+  assert.deepEqual([command.name, command.tree?.files.map((file) => file.path)], ["deploy-2", ["deploy-2.md"]]);
+  const mcp = await service.copyPreview("claude", "mcp:jira", "codex", "replace");
+  assert.deepEqual([mcp.name, mcp.tree], ["jira", undefined]);
+
+  const scan = await service.scanGit("claude", "https://git.example/acme/skills.git");
+  const detail = await service.importDetail("claude", scan.importId, "keep-both");
+  const alpha = detail.candidates[0]!;
+  assert.equal(alpha.writtenName, "alpha-2");
+  assert.match(alpha.files.find((file) => file.path === "SKILL.md")!.text!, /^---\nname: alpha-2\n/);
+  assert.equal((await service.importDetail("claude", scan.importId)).candidates[0]!.writtenName, undefined);
 });
