@@ -86,10 +86,15 @@ test("TOOLSETS agree with the catalog: a chat tool TOOLSETS names sits in that t
   for (const toolset of TOOLSETS) for (const entry of toolset.tools) assert.match(entry.name, TOOL_NAME_PATTERN);
 });
 
-test("transitional counts: the external surface is today's 72 tools; chat is the 16 legacy session tools", () => {
+test("transitional counts: the external surface is EXTERNAL_MCP_TOOL_NAMES; chat is the legacy session tools plus the landed families' TOOLSETS tools", () => {
   assert.deepEqual([...externalMcpToolNames()].sort(), [...EXTERNAL_MCP_TOOL_NAMES].sort());
-  assert.equal(catalogFor("external").length, 72);
-  assert.deepEqual(catalogFor("chat").map((tool) => tool.name).sort(), Object.keys(LEGACY_CHAT_META).sort());
+  assert.equal(catalogFor("external").length, EXTERNAL_MCP_TOOL_NAMES.length);
+  // Task 10 (workflows): 72 − validate_workflow, list_workflow_runs, get_workflow_run + get_workflow_runs.
+  assert.ok(EXTERNAL_MCP_TOOL_NAMES.length <= 72);
+  const specNames = new Set(chatToolNames());
+  const chat = catalogFor("chat").map((tool) => tool.name);
+  for (const name of Object.keys(LEGACY_CHAT_META)) assert.ok(chat.includes(name), name);
+  assert.deepEqual(chat.filter((name) => !Object.prototype.hasOwnProperty.call(LEGACY_CHAT_META, name) && !specNames.has(name)), []);
 });
 
 // ---------------------------------------------------------------------------
@@ -164,6 +169,7 @@ const PURE_MODULES = new Set([
   "mcp/tools/usage.ts",
   "mcp/tools/visuals.ts",
   "mcp/tools/watch.ts",
+  "mcp/tools/workflow-preview.ts",
   "mcp/tools/workflows-guide.ts",
   "mcp/tools/workflows.ts",
   "mcp/transcript.ts",

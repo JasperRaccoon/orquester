@@ -1,17 +1,24 @@
-// Catalog family module `workflows` (Workflows) — owned by plan Task 10 (unified MCP, Wave 3).
-// Task 2 stub: `workflowsFamily` exports this family's tools as catalog tools (`../catalog/legacy.ts`
-// adapters over the pre-catalog definitions below); the owning task replaces it and Task 2 never
-// edits this file again.
+// Catalog family module `workflows` (Workflows) — owned by plan Task 10 (unified MCP design
+// 2026-10-15 §4 rows 26–37, §4.1 "Workflows", §7, D-22, D-25).
 // Automated workflows through the MCP (docs/superpowers/specs/2026-09-28-automated-workflows-design.md §8.3).
 //
 // Every tool is an in-process client of the daemon's workflow routes (`workflowRoutes`), through DaemonApi only. The
 // waits ride the bus (`workflowRun.*` on the "workflows" channel) with a periodic re-read as the safety net, never a
 // sleep. Every result is bounded below the 60 000-byte cap by the tool itself and says what it cut.
+//
+// For chat callers (the executor's gate, `../gate/policy.ts`): reads (`list_workflows`, `get_workflow`,
+// `get_workflow_runs`, …) claim the workflow's HOME project; every change — create, update (enable/disable
+// included), delete, run, a secret — is Admin and claims the workflow's whole project UNION
+// (`./workflow-preview.ts`), so any member other than the caller's own project makes the card ungrantable. The card's
+// preview is complete (§7.1) and pins the workflow revision and the shown prompt bodies (§7.2): `run` re-verifies
+// them (`PREVIEW_STALE`). `set_workflow_secret` takes no value from a chat caller: the user types it into the card.
+// External callers are full trust (no card); their behaviour is the pre-catalog tools' except where §4/§11 changed it.
 
 import { z } from "zod";
 import { WORKFLOW_NODE_TYPES, WORKFLOW_SECRET_MAX_VALUE_BYTES, WORKFLOW_SECRET_NAME_PATTERN } from "@orquester/config";
 import {
   applyWorkflowPatch,
+  createWorkflowFromRequest,
   EXPRESSION_PREVIEW_LIMITS,
   isRunActive,
   WORKFLOW_LIMITS,
@@ -19,6 +26,7 @@ import {
   WORKFLOWS_CHANNEL,
   WorkflowPatchError,
   workflowRoutes,
+  type ApprovalPreviewSection,
   type CreateWorkflowRequest,
   type GetWorkflowNodeOutputResponse,
   type GetWorkflowResponse,
@@ -28,7 +36,6 @@ import {
   type ListWorkflowsResponse,
   type PreviewWorkflowExpressionResponse,
   type RunWorkflowResponse,
-  type ValidateWorkflowResponse,
   type Workflow,
   type WorkflowBlockRun,
   type WorkflowBlockTypeInfo,
@@ -43,129 +50,84 @@ import {
   type WorkflowSummary,
   type WorkflowWriteResponse
 } from "@orquester/api";
-import { projectNamesFor, resolveProject } from "../addressing.ts";
-import type { DaemonApi, DaemonResponse } from "../daemon-api.ts";
-import { daemonError, ToolError } from "../errors.ts";
+import { basename, join } from "node:path";
+
+import { resolveProject } from "../addressing.ts";
+import {
+  defineTool,
+  DESTRUCTIVE,
+  MUTATING,
+  MUTATING_IDEMPOTENT,
+  READ_ONLY,
+  type AnyOrquesterTool,
+  type ApprovalPreview,
+  type ScopeClaim,
+  type ScopeContext
+} from "../catalog/contract.ts";
+import type { DaemonApi } from "../daemon-api.ts";
+import { ToolError } from "../errors.ts";
 import { clipText, fitJsonBytes, jsonBytes, MAX_ECHO_CHARS, MAX_RESULT_BYTES, resultBytes, wholeUtf8Length } from "../result.ts";
-import { defineTool, DESTRUCTIVE, MUTATING, MUTATING_IDEMPOTENT, READ_ONLY, type ToolDef } from "../tool.ts";
+import {
+  agentLabel,
+  connectionsOf,
+  definitionSections,
+  expectWorkflowOk,
+  graphDiff,
+  homeScope,
+  isRecord,
+  previewPins,
+  problemSections,
+  problemsView,
+  readWorkflow,
+  resolveSavedPrompts,
+  savedPromptIdsOf,
+  sanitizeProblems,
+  unionScope,
+  unionSections,
+  validateDefinition,
+  verifyPins,
+  workflowError,
+  workflowFields,
+  workflowPin,
+  workflowProjectLabel,
+  workflowUnion,
+  type ReferencedPrompt,
+  type WorkflowUnion
+} from "./workflow-preview.ts";
 import { WORKFLOW_AUTHORING_GUIDE } from "./workflows-guide.ts";
-import { legacyExternalTools } from "../catalog/legacy.ts";
 
 /** What a workflow tool plans its result to: the cap less room for ok()'s own framing and a few keys added last. */
 const WORKFLOW_RESULT_BUDGET = MAX_RESULT_BYTES - 4_000;
-/** Problems listed in a result / an error's detail, and quoted in an error's text. */
-const MAX_PROBLEMS = 100;
-const MAX_PROBLEMS_IN_MESSAGE = 8;
 /** The shortest a definition's long text is cut to before the whole result is left to ok()'s last-resort cut. */
 const MIN_FIELD_CHARS = 200;
 /** How often a run wait re-reads the run whatever the bus says (the safety net). */
 const RUN_REREAD_MS = 10_000;
-/** A block output window read with get_workflow_run {nodeId}. */
+/** A block output or log window read with get_workflow_runs {runId, nodeId}. */
 const OUTPUT_WINDOW_BYTES = 48_000;
+/** The longest wait a call may ask for (spec §5.6). */
+const MAX_WAIT_SECONDS = 600;
+
+/** Every Admin tool's chat note (spec §7.2). */
+const ADMIN_NOTE = "Asks the user to approve in the chat (up to 30 min); batch related changes into one call; if denied, don't retry — ask the user.";
 
 // ---------------------------------------------------------------------------
-// Errors
+// Scope helpers
 // ---------------------------------------------------------------------------
 
-const ERROR_HINTS: Record<string, string> = {
-  WORKFLOW_NOT_FOUND: " list_workflows shows the workflows and their ids.",
-  RUN_NOT_FOUND: " list_workflow_runs shows a workflow's runs.",
-  NODE_NOT_FOUND: " get_workflow lists the blocks' ids and names.",
-  REVISION_CONFLICT: " The workflow changed since you read it: re-read it with get_workflow (its current revision), then send your ops again.",
-  INVALID_WORKFLOW: " Fix the problems listed; list_workflow_block_types shows each block's config.",
-  RUN_NOT_ACTIVE: " The run already ended: get_workflow_run shows how.",
-  SECRET_INVALID: " A secret name is A-Z, 0-9 and _, starting with a letter; a value is at most 64 KiB."
-};
+const NOTHING: ScopeClaim = Object.freeze({ projects: [], sessions: [], reads: "none", writes: false, causesTurnIn: [] }) as ScopeClaim;
+const claim = (over: Partial<ScopeClaim>): ScopeClaim => ({ ...NOTHING, ...over });
+const isChat = (ctx: Pick<ScopeContext, "caller">): boolean => ctx.caller.kind === "thread";
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
+/** A read of `metadata` (§5.2: workflow definitions and runs) in the workflow's home. */
+async function homeRead(ctx: ScopeContext, project: WorkflowProject | undefined): Promise<ScopeClaim> {
+  return claim({ ...(await homeScope(ctx.api, project)), reads: "metadata" });
 }
 
-/** Problems from a daemon body, kept only when they have the shape (a route from another build may send anything). */
-function sanitizeProblems(raw: unknown): WorkflowProblem[] {
-  if (!Array.isArray(raw)) return [];
-  const problems: WorkflowProblem[] = [];
-  for (const entry of raw) {
-    if (!isRecord(entry) || typeof entry.code !== "string" || typeof entry.message !== "string") continue;
-    const severity = entry.severity === "warning" || entry.severity === "info" ? entry.severity : "error";
-    const problem: WorkflowProblem = { severity, code: entry.code, message: clipText(entry.message, 500) };
-    if (typeof entry.nodeId === "string") problem.nodeId = entry.nodeId;
-    if (typeof entry.edgeId === "string") problem.edgeId = entry.edgeId;
-    if (typeof entry.field === "string") problem.field = clipText(entry.field, 200);
-    problems.push(problem);
-  }
-  return problems;
-}
-
-const problemLine = (p: WorkflowProblem): string => clipText(`${p.severity} ${p.code}${p.field ? ` (${p.field})` : ""}: ${p.message}`, 300);
-
-/** Errors first, then warnings, then infos — the order a reader fixes them in. */
-function sortedProblems(problems: readonly WorkflowProblem[]): WorkflowProblem[] {
-  const rank = { error: 0, warning: 1, info: 2 } as const;
-  return [...problems].sort((a, b) => rank[a.severity] - rank[b.severity]);
-}
-
-/** A result's problems: sorted, at most MAX_PROBLEMS, with counts. */
-function problemsView(problems: readonly WorkflowProblem[]): { problems: WorkflowProblem[]; errorCount: number; warningCount: number; problemsOmitted?: number } {
-  const sorted = sortedProblems(problems);
-  const view: { problems: WorkflowProblem[]; errorCount: number; warningCount: number; problemsOmitted?: number } = {
-    problems: sorted.slice(0, MAX_PROBLEMS),
-    errorCount: sorted.filter((p) => p.severity === "error").length,
-    warningCount: sorted.filter((p) => p.severity === "warning").length
-  };
-  if (sorted.length > MAX_PROBLEMS) view.problemsOmitted = sorted.length - MAX_PROBLEMS;
-  return view;
-}
-
-function opIndexOf(env: Record<string, unknown>): number | undefined {
-  for (const holder of [env, env.detail, env.details]) {
-    if (isRecord(holder) && typeof holder.opIndex === "number" && Number.isInteger(holder.opIndex) && holder.opIndex >= 0) return holder.opIndex;
-  }
-  return undefined;
-}
-
-/**
- * A failed workflow route as a ToolError. The workflow envelope `{error: {code, message, problems?}}` passes its code
- * through; its problems go into the text (the part every client shows) and, whole, into `detail.problems`. Anything
- * else falls back to the MCP's generic mapping (daemonError), which never echoes a 5xx body.
- */
-function workflowError(res: DaemonResponse): ToolError {
-  const body = isRecord(res.body) ? res.body : null;
-  const env = body && isRecord(body.error) ? body.error : null;
-  if (!env || typeof env.code !== "string") return daemonError(res);
-  const code = env.code;
-  const problems = sortedProblems(sanitizeProblems(env.problems));
-  let message = typeof env.message === "string" && env.message.trim() !== "" ? env.message.trim() : code;
-  if (!/[.!?]$/.test(message)) message += ".";
-  message += ERROR_HINTS[code] ?? "";
-  if (problems.length > 0) {
-    const shown = problems.slice(0, MAX_PROBLEMS_IN_MESSAGE).map(problemLine);
-    message += ` Problems: ${shown.join("; ")}${problems.length > shown.length ? `; … (${problems.length - shown.length} more in detail.problems)` : ""}.`;
-  }
-  const detail: Record<string, unknown> = {};
-  if (problems.length > 0) Object.assign(detail, problemsView(problems));
-  const opIndex = opIndexOf(env);
-  if (opIndex !== undefined) detail.opIndex = opIndex;
-  return new ToolError(code, message, Object.keys(detail).length > 0 ? detail : undefined);
-}
-
-function expectWorkflowOk<T>(res: DaemonResponse): T {
-  if (res.status >= 400) throw workflowError(res);
-  return res.body as T;
-}
-
-// ---------------------------------------------------------------------------
-// Views
-// ---------------------------------------------------------------------------
-
-/** "ws/project" for an existing project, words for a temp one. */
-function projectLabel(project: WorkflowProject, workspacesDir: string): string {
-  if (project.kind === "existing") {
-    const names = projectNamesFor(project.projectPath, workspacesDir);
-    return names.workspace && names.name ? `${names.workspace}/${names.name}` : project.projectPath;
-  }
-  const source = project.source.kind === "clone" ? `a clone of ${project.source.url}${project.source.ref ? ` at ${project.source.ref}` : ""}` : "empty";
-  return `temporary project in workspace ${project.workspace} (${source})`;
+/** The caller's own project as a `project` argument, for chat callers that named none. */
+function ownProjectArg(ctx: ScopeContext): string | null {
+  const caller = ctx.caller;
+  if (caller.kind !== "thread" || !caller.projectPath || !caller.workspace) return null;
+  return join(ctx.api.workspacesDir, caller.workspace, basename(caller.projectPath));
 }
 
 function runSummaryView(r: WorkflowRunSummary): Record<string, unknown> {
@@ -191,7 +153,7 @@ function workflowSummaryView(w: WorkflowSummary, workspacesDir: string): Record<
   if (w.description) view.description = clipText(w.description, 300);
   view.enabled = w.enabled;
   view.revision = w.revision;
-  view.project = projectLabel(w.project, workspacesDir);
+  view.project = workflowProjectLabel(w.project, workspacesDir);
   if (w.project.kind === "existing") view.projectPath = w.project.projectPath;
   view.triggers = w.triggers.map((t) => clipText(`${t.text}${t.lastError ? ` · error: ${t.lastError}` : ""}`, 300));
   view.nodeCount = w.nodeCount;
@@ -200,12 +162,6 @@ function workflowSummaryView(w: WorkflowSummary, workspacesDir: string): Record<
   view.activeRuns = w.activeRuns.length;
   view.updatedAt = w.updatedAt;
   return view;
-}
-
-/** Every edge in block names: "HasTickets (true) → FixTickets" — `(success)` left implicit. */
-function connectionsOf(workflow: Pick<Workflow, "nodes" | "edges">): string[] {
-  const names = new Map(workflow.nodes.map((n) => [n.id, n.name]));
-  return workflow.edges.map((e) => `${names.get(e.source) ?? e.source}${e.sourceHandle === "success" ? "" : ` (${e.sourceHandle})`} → ${names.get(e.target) ?? e.target}`);
 }
 
 /** A copy of `value` with every string longer than `cap` code points cut (and marked); each cut's path in `cut`. */
@@ -397,7 +353,7 @@ function orderedBlocks(run: WorkflowRun): WorkflowBlockRun[] {
   return out;
 }
 
-const OUTPUT_NOTE = "Outputs marked outputTruncated are cut (outputText is the head of their JSON): read one whole with get_workflow_run {runId, nodeId}.";
+const OUTPUT_NOTE = "Outputs marked outputTruncated are cut (outputText is the head of their JSON): read one whole with get_workflow_runs {runId, nodeId}.";
 
 /** A whole run: summary, every block with its output fitted to the budget, and the final output. */
 function runView(run: WorkflowRun, opts: { includeOutputs: boolean; extra?: Record<string, unknown> }): Record<string, unknown> {
@@ -412,14 +368,10 @@ function runView(run: WorkflowRun, opts: { includeOutputs: boolean; extra?: Reco
   return result;
 }
 
+
 // ---------------------------------------------------------------------------
 // Reads
 // ---------------------------------------------------------------------------
-
-async function readWorkflow(api: DaemonApi, workflowId: string): Promise<GetWorkflowResponse> {
-  const body = expectWorkflowOk<GetWorkflowResponse>(await api.request("GET", workflowRoutes.workflow(workflowId)));
-  return { workflow: body.workflow, problems: sanitizeProblems(body.problems) };
-}
 
 async function readRun(api: DaemonApi, runId: string): Promise<WorkflowRun> {
   return expectWorkflowOk<GetWorkflowRunResponse>(await api.request("GET", workflowRoutes.runDetail(runId))).run;
@@ -533,11 +485,14 @@ async function waitForRunEnd(api: DaemonApi, tap: RunEndTap, runId: string, opts
   }
 }
 
+
 // ---------------------------------------------------------------------------
 // Input schemas
 // ---------------------------------------------------------------------------
 
 const workflowIdArg = z.string().min(1).describe("The workflow's id (list_workflows).");
+const reasonArg = z.string().max(300).optional().describe("Why, in a sentence: shown to the user on the approval card.");
+const dryRunArg = z.boolean().default(false).describe("Only validate: nothing is saved (returns the problems).");
 const nodeRef = z.string().min(1);
 const positionSchema = z.object({ x: z.number().finite(), y: z.number().finite() }).strict();
 const retrySchema = z.object({ maxTries: z.number().int().min(1).max(10), delaySeconds: z.number().min(0).max(3600) }).strict();
@@ -611,142 +566,122 @@ function hostTimeZone(): string {
   try { return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"; } catch { return "UTC"; }
 }
 
-// ---------------------------------------------------------------------------
-// Tools
-// ---------------------------------------------------------------------------
-
-/** One block type, as listed: the daemon's info with the fields an author reads. */
-function blockTypeView(t: WorkflowBlockTypeInfo, withSchema: boolean): Record<string, unknown> {
-  return { type: t.type, category: t.category, title: t.title, description: t.description, handles: t.handles, output: t.output, example: t.example, ...(withSchema ? { configSchema: t.configSchema } : {}) };
+/**
+ * The ops as the daemon takes them: every project a caller names resolved (`set_project`, an added
+ * block's `projectOverride`, and one an `update_node` sets) — PROJECT_NOT_FOUND before anything.
+ */
+async function convertOps(api: DaemonApi, raw: readonly OpArg[]): Promise<WorkflowPatchOp[]> {
+  const ops: WorkflowPatchOp[] = [];
+  for (const op of raw) {
+    if (op.op === "set_project") ops.push({ op: "set_project", project: await toWorkflowProject(api, op.project) });
+    else if (op.op === "add_node") ops.push({ op: "add_node", node: (await toNodeInput(api, op.node)) as Extract<WorkflowPatchOp, { op: "add_node" }>["node"] });
+    else if (op.op === "update_node" && typeof op.set.projectOverride === "string") {
+      ops.push({ ...op, set: { ...op.set, projectOverride: (await resolveProject(api, op.set.projectOverride)).path } });
+    } else if (op.op === "disconnect" && op.edgeId === undefined && (op.source === undefined || op.target === undefined)) {
+      throw new ToolError("INVALID_ARGUMENT", `ops[${ops.length}] (disconnect): name the connection by edgeId, or by source and target (sourceHandle optional).`);
+    } else ops.push(op as WorkflowPatchOp);
+  }
+  return ops;
 }
 
-const listBlockTypes = defineTool({
-  name: "list_workflow_block_types",
-  title: "List workflow block types",
-  description: "Read this before authoring a workflow: every block type (config JSON schema, example, output shape, output handles), the {{ }} expression guide and an authoring guide with a worked example (the Jira fixer). Pass `type` for that block's full contract: its whole config schema (even when the list omits schemas: configSchemasOmitted) and its guide sections (arguments, result, limits…).",
-  input: { type: nodeTypeSchema.optional().describe("Only this block type, with its full contract: the whole config schema and its guide sections.") },
-  annotations: READ_ONLY,
-  async run(args, { api }) {
-    const body = expectWorkflowOk<WorkflowBlockTypesResponse>(await api.request("GET", workflowRoutes.blockTypes));
-    const types = Array.isArray(body.types) ? body.types : [];
-    if (args.type !== undefined) {
-      const one = types.find((t) => t.type === args.type);
-      if (!one) throw new ToolError("NOT_FOUND", `The daemon lists no block type "${args.type}".`);
-      // Its contract (arguments, result, limits…) too: the full listing carries every contract in the
-      // authoring guide already. An older daemon sends none.
-      const guide = Array.isArray(one.guide) && one.guide.length > 0 ? { guide: one.guide } : {};
-      return { types: [{ ...blockTypeView(one, true), ...guide }], expressionGuide: body.expressionGuide };
-    }
-    const result: Record<string, unknown> = { types: types.map((t) => blockTypeView(t, true)), expressionGuide: body.expressionGuide, authoringGuide: WORKFLOW_AUTHORING_GUIDE };
-    // Over budget: drop config schemas, largest first — the examples and the guides stay.
-    const omitted: string[] = [];
-    const bySize = types.map((t, i) => ({ i, size: resultBytes(t.configSchema ?? null) })).sort((a, b) => b.size - a.size);
-    const withNote = () => ({ ...result, configSchemasOmitted: omitted, schemaNote: "Schemas omitted to fit: list_workflow_block_types {type} returns one in full." });
-    for (const { i } of bySize) {
-      if (resultBytes(omitted.length ? withNote() : result) <= WORKFLOW_RESULT_BUDGET) break;
-      const views = result.types as Record<string, unknown>[];
-      delete views[i]!.configSchema;
-      omitted.push(types[i]!.type);
-    }
-    return omitted.length ? withNote() : result;
-  }
-});
+// ---------------------------------------------------------------------------
+// Local replays: what a create or an edit WOULD save (the daemon's own pure functions)
+// ---------------------------------------------------------------------------
 
-const listWorkflows = defineTool({
-  name: "list_workflows",
-  title: "List automated workflows",
-  description: "Automated workflows, all or one project's: id, name, enabled, project, trigger texts, last run, active runs and validation error count. Use the workflowId with get_workflow, update_workflow and run_workflow.",
-  input: { project: z.string().optional().describe("Only this project's workflows: an absolute path or \"<workspace>/<project>\".") },
-  annotations: READ_ONLY,
-  async run(args, { api }) {
-    const query = args.project !== undefined ? { projectPath: (await resolveProject(api, args.project)).path } : undefined;
-    const body = expectWorkflowOk<ListWorkflowsResponse>(await api.request("GET", workflowRoutes.list, query ? { query } : undefined));
-    const rows = (body.workflows ?? []).map((w) => workflowSummaryView(w, api.workspacesDir));
-    const result: Record<string, unknown> = { workflows: rows };
-    let kept = rows.length;
-    while (kept > 0 && resultBytes(result) > WORKFLOW_RESULT_BUDGET) {
-      kept -= 1;
-      result.workflows = rows.slice(0, kept);
-      result.truncated = true;
-      result.omitted = rows.length - kept;
-    }
-    if (result.truncated) result.note = "Workflows past the result size cap were left out: pass project to list fewer.";
-    return result;
-  }
-});
-
-const getWorkflow = defineTool({
-  name: "get_workflow",
-  title: "Get a workflow",
-  description: "One workflow's definition (blocks with ids, names and configs; edges; settings), its revision (update_workflow needs it) and its validation problems. `connections` names every edge by block name. Long texts are cut to fit (truncatedFields); `node` reads one block with more room.",
-  input: {
-    workflowId: workflowIdArg,
-    node: z.string().min(1).optional().describe("Only this block (id or name), its long texts cut later.")
-  },
-  annotations: READ_ONLY,
-  async run(args, { api }) {
-    const { workflow, problems } = await readWorkflow(api, args.workflowId);
-    const head = { workflowId: workflow.id, name: workflow.name, revision: workflow.revision, enabled: workflow.enabled, project: projectLabel(workflow.project, api.workspacesDir) };
-    if (args.node !== undefined) {
-      const node = findNode(workflow, args.node);
-      const own = problems.filter((p) => p.nodeId === node.id);
-      const names = new Map(workflow.nodes.map((n) => [n.id, n.name]));
-      const edges = workflow.edges.filter((e) => e.source === node.id || e.target === node.id)
-        .map((e) => ({ edgeId: e.id, text: `${names.get(e.source) ?? e.source}${e.sourceHandle === "success" ? "" : ` (${e.sourceHandle})`} → ${names.get(e.target) ?? e.target}` }));
-      const frame = (v: unknown) => ({ ...head, node: v, connections: edges, ...problemsView(own), truncatedFields: [], truncationNote: TRUNCATION_NOTE });
-      const { value, cut } = fitLongStrings(node, "node", WORKFLOW_RESULT_BUDGET, frame);
-      const result: Record<string, unknown> = { ...head, node: value, connections: edges, ...problemsView(own) };
-      if (cut.length) { result.truncatedFields = cut.slice(0, 50); result.truncationNote = TRUNCATION_NOTE; }
-      return result;
-    }
-    return definitionView(workflow, { ...head, ...problemsView(problems) });
-  }
-});
-
-/** What a write answers: the definition (fitted), its revision and problems, and what to do next. */
-function writeResult(api: DaemonApi, body: WorkflowWriteResponse, verb: "created" | "updated"): Record<string, unknown> {
-  const problems = problemsView(sanitizeProblems(body.problems));
-  const w = body.workflow;
-  const next: string[] = [];
-  if (problems.errorCount > 0) next.push("Fix the problems of severity \"error\" with update_workflow (the workflow cannot be enabled until then).");
-  if (!w.enabled) next.push("It is disabled: its schedule/git triggers do not fire until update_workflow ops [{\"op\":\"set_enabled\",\"enabled\":true}]; run_workflow runs it now.");
-  const extra = { [verb]: true, workflowId: w.id, name: w.name, revision: w.revision, enabled: w.enabled, project: projectLabel(w.project, api.workspacesDir), ...problems, ...(next.length ? { next: next.join(" ") } : {}) };
-  return definitionView(w, extra);
+/** Ids minted by a local replay: never saved. */
+function replayEnv(now: number) {
+  let n = 0;
+  return { mintId: () => `draft-${(n += 1)}`, now: new Date(now) };
 }
 
-const createWorkflow = defineTool({
-  name: "create_workflow",
-  title: "Create a workflow",
-  description: "Create an automated workflow from named blocks and edges (call list_workflow_block_types first). Edges and {{ nodes.<Name>.output… }} use block names; positions are optional (auto-layout). Created disabled unless enabled:true. Returns the definition, its revision and validation problems.",
-  input: {
-    name: z.string().min(1).max(WORKFLOW_LIMITS.maxNameLength).describe("The workflow's name."),
-    description: z.string().optional().describe("What it does, in a sentence."),
-    project: projectArgSchema.describe("Where it runs: {kind:\"existing\", project:\"<workspace>/<project>\" or an absolute path}, or {kind:\"temp\", workspace, source:{kind:\"empty\"} | {kind:\"clone\", url, ref?}} for a fresh project per run."),
-    settings: settingsSchema.optional().describe("overlap (skip|queue|parallel, default skip), maxConcurrent, timezone (IANA; default the daemon host's), runTimeoutMinutes, notify {onFailure, onSuccess}, keepFailedTempDays."),
-    nodes: z.array(nodeInputSchema).max(WORKFLOW_LIMITS.maxNodes).describe("Blocks: {type, name?, config?, position?, disabled?, notes?, retry?, timeoutMinutes?, projectOverride?}. config is merged over the type's defaults; a name is minted when omitted."),
-    edges: z.array(z.object({ source: nodeRef, sourceHandle: z.string().min(1).optional(), target: nodeRef }).strict()).max(WORKFLOW_LIMITS.maxEdges).default([]).describe("Connections {source, sourceHandle?, target} by block name (or id); sourceHandle defaults to success."),
-    enabled: z.boolean().default(false).describe("Enable its triggers at once (refused while it has errors). Default false.")
-  },
-  annotations: MUTATING,
-  async run(args, { api }) {
-    const project = await toWorkflowProject(api, args.project);
-    const nodes = await Promise.all(args.nodes.map((n) => toNodeInput(api, n)));
-    const request: CreateWorkflowRequest = {
-      name: args.name,
-      ...(args.description !== undefined ? { description: args.description } : {}),
-      enabled: args.enabled,
-      project,
-      settings: { ...args.settings, timezone: args.settings?.timezone ?? hostTimeZone() } as CreateWorkflowRequest["settings"],
-      nodes: nodes as CreateWorkflowRequest["nodes"],
-      edges: args.edges,
-      // Positions are the canvas's business: lay every block out unless the caller placed some itself.
-      autoLayout: !nodes.some((n) => n.position !== undefined)
-    };
-    const res = await api.request("POST", workflowRoutes.create, { body: request });
-    if (res.status >= 400) throw indexedCreateError(workflowError(res), args.nodes.length);
-    return writeResult(api, res.body as WorkflowWriteResponse, "created");
+interface CreateArgs {
+  name: string;
+  description?: string;
+  project: ProjectArg;
+  settings?: z.infer<typeof settingsSchema>;
+  nodes: NodeInput[];
+  edges: { source: string; sourceHandle?: string; target: string }[];
+  enabled: boolean;
+}
+
+interface CreatePlan {
+  request: CreateWorkflowRequest;
+  /** The definition the create would save (ids are placeholders), or null when it cannot apply. */
+  draft: Workflow | null;
+  error: ToolError | null;
+}
+
+async function planCreate(api: DaemonApi, args: CreateArgs, now: number): Promise<CreatePlan> {
+  const project = await toWorkflowProject(api, args.project);
+  const nodes = await Promise.all(args.nodes.map((n) => toNodeInput(api, n)));
+  const request: CreateWorkflowRequest = {
+    name: args.name,
+    ...(args.description !== undefined ? { description: args.description } : {}),
+    enabled: args.enabled,
+    project,
+    settings: { ...args.settings, timezone: args.settings?.timezone ?? hostTimeZone() } as CreateWorkflowRequest["settings"],
+    nodes: nodes as CreateWorkflowRequest["nodes"],
+    edges: args.edges,
+    // Positions are the canvas's business: lay every block out unless the caller placed some itself.
+    autoLayout: !nodes.some((n) => n.position !== undefined)
+  };
+  try {
+    return { request, draft: createWorkflowFromRequest(request, replayEnv(now)), error: null };
+  } catch (error) {
+    if (!(error instanceof WorkflowPatchError)) throw error;
+    const refusal = new ToolError("INVALID_WORKFLOW", `Item ${error.opIndex}: ${error.message}.`, { opIndex: error.opIndex });
+    return { request, draft: null, error: indexedCreateError(refusal, args.nodes.length) };
   }
-});
+}
+
+interface UpdatePlan {
+  current: Workflow;
+  ops: WorkflowPatchOp[];
+  /** The definition the edit would save, or null when it cannot apply (`error`). */
+  after: Workflow | null;
+  error: ToolError | null;
+}
+
+async function planUpdate(api: DaemonApi, args: { workflowId: string; revision: number; ops: OpArg[] }, now: number): Promise<UpdatePlan> {
+  const ops = await convertOps(api, args.ops);
+  const { workflow: current } = await readWorkflow(api, args.workflowId);
+  if (current.revision !== args.revision) {
+    const message = `The workflow is at revision ${current.revision}, not ${args.revision}`;
+    return { current, ops, after: null, error: workflowError({ status: 409, body: { error: { code: "REVISION_CONFLICT", message } } }) };
+  }
+  try {
+    const after = applyWorkflowPatch(current, ops, replayEnv(now));
+    return { current, ops, after: { ...after, id: current.id, revision: current.revision + 1, createdAt: current.createdAt }, error: null };
+  } catch (error) {
+    if (!(error instanceof WorkflowPatchError)) throw error;
+    const index = error.opIndex;
+    const op = ops[index]?.op ?? "op";
+    return { current, ops, after: null, error: new ToolError("INVALID_WORKFLOW", `ops[${index}] (${op}) failed: ${error.message}. Nothing was saved.`, { opIndex: index, op }) };
+  }
+}
+
+/** An enabled definition with errors is refused by the save (the daemon's rule): say so before any card. */
+function assertSavable(workflow: Workflow, problems: readonly WorkflowProblem[]): void {
+  const errors = problems.filter((p) => p.severity === "error");
+  if (workflow.enabled && errors.length > 0) {
+    throw workflowError({
+      status: 400,
+      body: { error: { code: "INVALID_WORKFLOW", message: `An enabled workflow cannot have errors (${errors.length}). Fix them, or save it disabled`, problems } }
+    });
+  }
+}
+
+/** The prompts a preview shows: those the given agent blocks reference. */
+async function promptsFor(api: DaemonApi, workflow: Pick<Workflow, "nodes">, union: WorkflowUnion, only?: ReadonlySet<string>): Promise<Map<string, ReferencedPrompt | null>> {
+  const nodes = only ? workflow.nodes.filter((node) => only.has(node.id)) : workflow.nodes;
+  return resolveSavedPrompts(api, savedPromptIdsOf({ nodes }), union.projects);
+}
+
+const unionLabel = (union: WorkflowUnion): string => {
+  const names = [...union.projects.map((path) => path.split("/").slice(-2).join("/")), ...union.pendingWorkspaces.map((ws) => `a temporary project in ${ws}`)];
+  if (names.length === 0) return "No project";
+  return `${names.length === 1 ? "Project" : "Projects"} ${names.join(", ")}`;
+};
 
 /** The daemon's own "Operation N: " / "Item N: " prefix, dropped where the tool names the entry itself. */
 function withoutEntryPrefix(message: string): string {
@@ -790,170 +725,369 @@ async function indexedPatchError(api: DaemonApi, workflowId: string, revision: n
   return new ToolError(error.code, `${message} Nothing was saved.`, { ...detail, opIndex: index, op: ops[index]!.op });
 }
 
+// ---------------------------------------------------------------------------
+// Tools
+// ---------------------------------------------------------------------------
+
+/** One block type, as listed: the daemon's info with the fields an author reads. */
+function blockTypeView(t: WorkflowBlockTypeInfo, withSchema: boolean): Record<string, unknown> {
+  return { type: t.type, category: t.category, title: t.title, description: t.description, handles: t.handles, output: t.output, example: t.example, ...(withSchema ? { configSchema: t.configSchema } : {}) };
+}
+
+const listBlockTypes = defineTool({
+  name: "list_workflow_block_types",
+  title: "List workflow block types",
+  description: "Read this before authoring a workflow: every block type (config JSON schema, example, output shape, output handles), the {{ }} expression guide and an authoring guide with a worked example (the Jira fixer). Pass `type` for that block's full contract: its whole config schema (even when the list omits schemas: configSchemasOmitted) and its guide sections (arguments, result, limits…).",
+  input: { type: nodeTypeSchema.optional().describe("Only this block type, with its full contract: the whole config schema and its guide sections.") },
+  audiences: ["external", "chat"],
+  toolset: "workflow-authoring",
+  tier: "read",
+  scope: async () => NOTHING,
+  annotations: READ_ONLY,
+  resultKind: "json",
+  async run(args, { api }) {
+    const body = expectWorkflowOk<WorkflowBlockTypesResponse>(await api.request("GET", workflowRoutes.blockTypes));
+    const types = Array.isArray(body.types) ? body.types : [];
+    if (args.type !== undefined) {
+      const one = types.find((t) => t.type === args.type);
+      if (!one) throw new ToolError("NOT_FOUND", `The daemon lists no block type "${args.type}".`);
+      // Its contract (arguments, result, limits…) too: the full listing carries every contract in the
+      // authoring guide already. An older daemon sends none.
+      const guide = Array.isArray(one.guide) && one.guide.length > 0 ? { guide: one.guide } : {};
+      return { types: [{ ...blockTypeView(one, true), ...guide }], expressionGuide: body.expressionGuide };
+    }
+    const result: Record<string, unknown> = { types: types.map((t) => blockTypeView(t, true)), expressionGuide: body.expressionGuide, authoringGuide: WORKFLOW_AUTHORING_GUIDE };
+    // Over budget: drop config schemas, largest first — the examples and the guides stay.
+    const omitted: string[] = [];
+    const bySize = types.map((t, i) => ({ i, size: resultBytes(t.configSchema ?? null) })).sort((a, b) => b.size - a.size);
+    const withNote = () => ({ ...result, configSchemasOmitted: omitted, schemaNote: "Schemas omitted to fit: list_workflow_block_types {type} returns one in full." });
+    for (const { i } of bySize) {
+      if (resultBytes(omitted.length ? withNote() : result) <= WORKFLOW_RESULT_BUDGET) break;
+      const views = result.types as Record<string, unknown>[];
+      delete views[i]!.configSchema;
+      omitted.push(types[i]!.type);
+    }
+    return omitted.length ? withNote() : result;
+  }
+});
+
+/** list_workflows' project: the argument, else (chat) the caller's own; null = every workflow (external only). */
+async function listProject(ctx: ScopeContext, project: string | undefined): Promise<string | null> {
+  if (project !== undefined) return (await resolveProject(ctx.api, project)).path;
+  if (!isChat(ctx)) return null;
+  const own = ownProjectArg(ctx);
+  if (own === null) throw new ToolError("INVALID_ARGUMENT", "This chat has no project of its own: pass project (\"<workspace>/<project>\", list_projects).");
+  return (await resolveProject(ctx.api, own)).path;
+}
+
+const listWorkflows = defineTool({
+  name: "list_workflows",
+  title: "List automated workflows",
+  description: "A project's automated workflows: id, name, enabled, revision, project, trigger texts, last run, active runs and validation error count.",
+  chatNote: "Default: this chat's project.",
+  externalNote: "Without project: every workflow.",
+  input: { project: z.string().optional().describe("An absolute path or \"<workspace>/<project>\".") },
+  audiences: ["external", "chat"],
+  toolset: "reads",
+  tier: "read",
+  async scope(args, ctx) {
+    if (!isChat(ctx)) return NOTHING;
+    const path = await listProject(ctx, args.project);
+    return claim({ projects: path ? [path] : [], reads: "metadata" });
+  },
+  annotations: READ_ONLY,
+  resultKind: "json",
+  async run(args, ctx) {
+    const { api } = ctx;
+    const projectPath = await listProject(ctx, args.project);
+    const body = expectWorkflowOk<ListWorkflowsResponse>(await api.request("GET", workflowRoutes.list, projectPath !== null ? { query: { projectPath } } : undefined));
+    const rows = (body.workflows ?? []).map((w) => workflowSummaryView(w, api.workspacesDir));
+    const result: Record<string, unknown> = { workflows: rows };
+    let kept = rows.length;
+    while (kept > 0 && resultBytes(result) > WORKFLOW_RESULT_BUDGET) {
+      kept -= 1;
+      result.workflows = rows.slice(0, kept);
+      result.truncated = true;
+      result.omitted = rows.length - kept;
+    }
+    if (result.truncated) result.note = "Workflows past the result size cap were left out: pass project to list fewer.";
+    return result;
+  }
+});
+
+const getWorkflow = defineTool({
+  name: "get_workflow",
+  title: "Get a workflow",
+  description: "One workflow's definition (blocks with ids, names and configs; edges; settings), its revision (update_workflow and run_workflow need it) and its validation problems. `connections` names every edge by block name. Long texts are cut to fit (truncatedFields); `node` reads one block with more room.",
+  input: {
+    workflowId: workflowIdArg,
+    node: z.string().min(1).optional().describe("Only this block (id or name), its long texts cut later.")
+  },
+  audiences: ["external", "chat"],
+  toolset: "reads",
+  tier: "read",
+  async scope(args, ctx) {
+    if (!isChat(ctx)) return NOTHING;
+    return homeRead(ctx, (await readWorkflow(ctx.api, args.workflowId)).workflow.project);
+  },
+  annotations: READ_ONLY,
+  resultKind: "json",
+  async run(args, { api }) {
+    const { workflow, problems } = await readWorkflow(api, args.workflowId);
+    const head = { workflowId: workflow.id, name: workflow.name, revision: workflow.revision, enabled: workflow.enabled, project: workflowProjectLabel(workflow.project, api.workspacesDir) };
+    if (args.node !== undefined) {
+      const node = findNode(workflow, args.node);
+      const own = problems.filter((p) => p.nodeId === node.id);
+      const names = new Map(workflow.nodes.map((n) => [n.id, n.name]));
+      const edges = workflow.edges.filter((e) => e.source === node.id || e.target === node.id)
+        .map((e) => ({ edgeId: e.id, text: `${names.get(e.source) ?? e.source}${e.sourceHandle === "success" ? "" : ` (${e.sourceHandle})`} → ${names.get(e.target) ?? e.target}` }));
+      const frame = (v: unknown) => ({ ...head, node: v, connections: edges, ...problemsView(own), truncatedFields: [], truncationNote: TRUNCATION_NOTE });
+      const { value, cut } = fitLongStrings(node, "node", WORKFLOW_RESULT_BUDGET, frame);
+      const result: Record<string, unknown> = { ...head, node: value, connections: edges, ...problemsView(own) };
+      if (cut.length) { result.truncatedFields = cut.slice(0, 50); result.truncationNote = TRUNCATION_NOTE; }
+      return result;
+    }
+    return definitionView(workflow, { ...head, ...problemsView(problems) });
+  }
+});
+
+/** What a write answers: the definition (fitted), its revision and problems, and what to do next. */
+function writeResult(api: DaemonApi, body: WorkflowWriteResponse, verb: "created" | "updated"): Record<string, unknown> {
+  const problems = problemsView(sanitizeProblems(body.problems));
+  const w = body.workflow;
+  const next: string[] = [];
+  if (problems.errorCount > 0) next.push("Fix the problems of severity \"error\" with update_workflow (the workflow cannot be enabled until then).");
+  if (!w.enabled) next.push("It is disabled: its schedule/git triggers do not fire until update_workflow ops [{\"op\":\"set_enabled\",\"enabled\":true}]; run_workflow {workflowId, revision} runs it now.");
+  const extra = { [verb]: true, workflowId: w.id, name: w.name, revision: w.revision, enabled: w.enabled, project: workflowProjectLabel(w.project, api.workspacesDir), ...problems, ...(next.length ? { next: next.join(" ") } : {}) };
+  return definitionView(w, extra);
+}
+
+/** A dry run's answer: the problems the save would see, and the projects it would run in. */
+function dryRunResult(problems: readonly WorkflowProblem[], union: WorkflowUnion, extra: Record<string, unknown> = {}): Record<string, unknown> {
+  const view = problemsView(problems);
+  return { dryRun: true, saved: false, valid: view.errorCount === 0, ...extra, ...view, projects: unionLabel(union) };
+}
+
+const createInput = {
+  name: z.string().min(1).max(WORKFLOW_LIMITS.maxNameLength).describe("The workflow's name."),
+  description: z.string().optional().describe("What it does, in a sentence."),
+  project: projectArgSchema.describe("Where it runs: {kind:\"existing\", project} or {kind:\"temp\", workspace, source:{kind:\"empty\"}|{kind:\"clone\", url, ref?}} (fresh per run)."),
+  settings: settingsSchema.optional().describe("overlap (skip|queue|parallel), maxConcurrent, timezone (IANA; default the host's), runTimeoutMinutes, notify, keepFailedTempDays."),
+  nodes: z.array(nodeInputSchema).max(WORKFLOW_LIMITS.maxNodes).describe("Blocks {type, name?, config?, position?, disabled?, notes?, retry?, timeoutMinutes?, projectOverride?}; config merges over the type's defaults."),
+  edges: z.array(z.object({ source: nodeRef, sourceHandle: z.string().min(1).optional(), target: nodeRef }).strict()).max(WORKFLOW_LIMITS.maxEdges).default([]).describe("Connections {source, sourceHandle?, target} by block name or id; sourceHandle defaults to success."),
+  enabled: z.boolean().default(false).describe("Enable its triggers at once (refused while it has errors). Default false."),
+  dryRun: dryRunArg,
+  reason: reasonArg
+};
+
+const createWorkflow = defineTool({
+  name: "create_workflow",
+  title: "Create a workflow",
+  description: "Create an automated workflow from named blocks and edges (call list_workflow_block_types first). Edges and {{ nodes.<Name>.output… }} use block names; positions are optional (auto-layout); a name is minted for a block without one. Created disabled unless enabled:true. dryRun:true only validates. Returns the definition, its revision and validation problems.",
+  chatNote: ADMIN_NOTE,
+  input: createInput,
+  chatOnlyInput: ["reason"],
+  audiences: ["external", "chat"],
+  toolset: "workflow-authoring",
+  tier: (args) => (args.dryRun ? "read" : "admin"),
+  adminFamily: "workflows",
+  async scope(args, ctx) {
+    if (!isChat(ctx)) return NOTHING;
+    const plan = await planCreate(ctx.api, args, ctx.now());
+    const union = await workflowUnion(ctx.api, [plan.draft ?? { project: plan.request.project, nodes: (plan.request.nodes ?? []) as WorkflowNode[] }]);
+    return claim({ ...unionScope(union), reads: "metadata", writes: !args.dryRun });
+  },
+  async approval(args, ctx): Promise<ApprovalPreview> {
+    const { api } = ctx;
+    const plan = await planCreate(api, args, ctx.now());
+    if (plan.error || !plan.draft) throw plan.error ?? new ToolError("INVALID_WORKFLOW", "The workflow cannot be built.");
+    const draft = plan.draft;
+    const problems = await validateDefinition(api, draft);
+    assertSavable(draft, problems);
+    const union = await workflowUnion(api, [draft]);
+    const prompts = await promptsFor(api, draft, union);
+    const sections: ApprovalPreviewSection[] = [
+      ...(draft.enabled ? [{ kind: "warning" as const, level: "caution" as const, text: "Created ENABLED: its schedule and git triggers start firing at once." }] : []),
+      workflowFields(draft, api.workspacesDir),
+      ...(await unionSections(api, union, ctx.caller)),
+      ...definitionSections(draft, prompts, api.workspacesDir),
+      ...problemSections(problems)
+    ];
+    return {
+      title: `${agentLabel(ctx.caller)} wants to create the workflow "${draft.name}"${draft.enabled ? " and enable it" : ""}`,
+      scopeLabel: unionLabel(union),
+      sections,
+      pins: previewPins(null, prompts)
+    };
+  },
+  annotations: MUTATING,
+  resultKind: "json",
+  async run(args, ctx) {
+    const { api } = ctx;
+    const plan = await planCreate(api, args, ctx.now());
+    if (args.dryRun) {
+      if (plan.error || !plan.draft) throw plan.error ?? new ToolError("INVALID_WORKFLOW", "The workflow cannot be built.");
+      const union = await workflowUnion(api, [plan.draft]);
+      return dryRunResult(await validateDefinition(api, plan.draft), union);
+    }
+    // What the user approved is what is saved: the prompts the card showed are unchanged (§7.2).
+    if (ctx.approval?.pins) await verifyPins(api, ctx.approval.pins, { hintProjects: plan.draft ? (await workflowUnion(api, [plan.draft])).projects : [] });
+    const res = await api.request("POST", workflowRoutes.create, { body: plan.request });
+    if (res.status >= 400) throw indexedCreateError(workflowError(res), args.nodes.length);
+    return writeResult(api, res.body as WorkflowWriteResponse, "created");
+  }
+});
+
 const updateWorkflow = defineTool({
   name: "update_workflow",
   title: "Edit a workflow",
-  description: "Edit a workflow with atomic patch ops, in order: add_node, update_node, remove_node, rename_node, connect, disconnect, set_settings, set_project, set_enabled, set_name, set_pinned. Prefer this to recreating it. `revision` must be get_workflow's current one (else REVISION_CONFLICT: re-read). A failing op is named by index; then nothing is saved.",
+  description: "Edit a workflow with atomic patch ops, in order (prefer this to recreating it). `revision` must be get_workflow's current one (else REVISION_CONFLICT: re-read). Blocks are named by id or name. Ops: add_node {node}; update_node {node, set:{name?, config?, disabled?, notes?, retry?, timeoutMinutes?, projectOverride?, position?}} (config merged one level deep, null clears); remove_node {node}; rename_node {node, to} (rewrites references); connect {source, sourceHandle?, target}; disconnect {edgeId} or {source, sourceHandle?, target}; set_settings {settings}; set_project {project}; set_enabled {enabled}; set_name {name, description?}; set_pinned {node, output|null}. dryRun:true only validates the result. A failing op is named by index; then nothing is saved.",
+  chatNote: ADMIN_NOTE,
   input: {
     workflowId: workflowIdArg,
     revision: z.number().int().nonnegative().describe("The revision get_workflow (or the last write) returned."),
-    ops: z.array(opSchema).min(1).max(500).describe("Blocks are named by id or name. add_node {node}; update_node {node, set:{name?, config?, disabled?, notes?, retry?, timeoutMinutes?, projectOverride?, position?}} (config merged one level deep, null clears); remove_node {node}; rename_node {node, to} (rewrites references); connect {source, sourceHandle?, target}; disconnect {edgeId} or {source, sourceHandle?, target}; set_settings {settings}; set_project {project}; set_enabled {enabled}; set_name {name, description?}; set_pinned {node, output|null}.")
+    ops: z.array(opSchema).min(1).max(500).describe("The patch ops, applied in order (see the description)."),
+    dryRun: dryRunArg,
+    reason: reasonArg
+  },
+  chatOnlyInput: ["reason"],
+  audiences: ["external", "chat"],
+  toolset: "workflow-authoring",
+  tier: (args) => (args.dryRun ? "read" : "admin"),
+  adminFamily: "workflows",
+  async scope(args, ctx) {
+    if (!isChat(ctx)) return NOTHING;
+    const plan = await planUpdate(ctx.api, args, ctx.now());
+    // The union of before and after: an edit touches where the workflow ran and where it will run.
+    const after = plan.after ?? { project: undefined, nodes: plan.ops.flatMap((op) => (op.op === "add_node" ? [op.node as WorkflowNode] : [])) };
+    const extra = plan.after ? [] : plan.ops.flatMap((op) => (op.op === "set_project" ? [{ project: op.project }] : []));
+    const union = await workflowUnion(ctx.api, [plan.current, after, ...extra]);
+    return claim({ ...unionScope(union), reads: "metadata", writes: !args.dryRun });
+  },
+  async approval(args, ctx): Promise<ApprovalPreview> {
+    const { api } = ctx;
+    const plan = await planUpdate(api, args, ctx.now());
+    if (plan.error || !plan.after) throw plan.error ?? new ToolError("INVALID_WORKFLOW", "The edit cannot apply.");
+    const { current, after } = plan;
+    const problems = await validateDefinition(api, after);
+    assertSavable(after, problems);
+    const union = await workflowUnion(api, [current, after]);
+    const diff = graphDiff(current, after, api.workspacesDir);
+    // Enabling arms every block, and moving the workflow runs every block somewhere new: then the
+    // whole definition is shown; otherwise the blocks the edit adds or changes, in full.
+    const enables = after.enabled && !current.enabled;
+    const everything = enables || JSON.stringify(current.project) !== JSON.stringify(after.project);
+    const only = everything ? undefined : diff.touched;
+    const prompts = await promptsFor(api, after, union, only);
+    const sections: ApprovalPreviewSection[] = [
+      ...(enables ? [{ kind: "warning" as const, level: "caution" as const, text: "Enables the workflow: its schedule and git triggers start firing." }] : []),
+      ...diff.sections,
+      { kind: "code", title: "Ops", language: "json", text: JSON.stringify(args.ops, null, 2) },
+      workflowFields(after, api.workspacesDir, "The workflow after the change"),
+      ...(await unionSections(api, union, ctx.caller)),
+      ...definitionSections(after, prompts, api.workspacesDir, only),
+      ...problemSections(problems)
+    ];
+    const verb = enables ? "enable" : !after.enabled && current.enabled ? "disable" : "change";
+    return {
+      title: `${agentLabel(ctx.caller)} wants to ${verb} the workflow "${current.name}"`,
+      scopeLabel: unionLabel(union),
+      sections,
+      workflowId: current.id,
+      pins: previewPins(current, prompts)
+    };
   },
   annotations: MUTATING,
-  async run(args, { api }) {
-    const ops: WorkflowPatchOp[] = [];
-    for (const op of args.ops as OpArg[]) {
-      if (op.op === "set_project") ops.push({ op: "set_project", project: await toWorkflowProject(api, op.project) });
-      else if (op.op === "add_node") ops.push({ op: "add_node", node: (await toNodeInput(api, op.node)) as Extract<WorkflowPatchOp, { op: "add_node" }>["node"] });
-      else if (op.op === "disconnect" && op.edgeId === undefined && (op.source === undefined || op.target === undefined)) {
-        throw new ToolError("INVALID_ARGUMENT", `ops[${ops.length}] (disconnect): name the connection by edgeId, or by source and target (sourceHandle optional).`);
-      } else ops.push(op as WorkflowPatchOp);
+  resultKind: "json",
+  async run(args, ctx) {
+    const { api } = ctx;
+    if (args.dryRun) {
+      const plan = await planUpdate(api, args, ctx.now());
+      if (plan.error || !plan.after) throw plan.error ?? new ToolError("INVALID_WORKFLOW", "The edit cannot apply.");
+      const union = await workflowUnion(api, [plan.current, plan.after]);
+      const changes = graphDiff(plan.current, plan.after, api.workspacesDir).sections[0];
+      return dryRunResult(await validateDefinition(api, plan.after), union, { revision: plan.current.revision, ...(changes?.kind === "changes" ? { changes: changes.items } : {}) });
+    }
+    const ops = await convertOps(api, args.ops);
+    if (ctx.approval?.pins) {
+      const { workflow: current } = await readWorkflow(api, args.workflowId);
+      await verifyPins(api, ctx.approval.pins, { current, hintProjects: (await workflowUnion(api, [current])).projects });
     }
     const res = await api.request("POST", workflowRoutes.patch(args.workflowId), { body: { revision: args.revision, ops } });
-    if (res.status >= 400) throw await indexedPatchError(api, args.workflowId, args.revision, ops, workflowError(res));
+    if (res.status >= 400) {
+      const error = workflowError(res);
+      // Edited between the card and this write: the user approved another revision (§7.2).
+      if (ctx.approval && error.code === "REVISION_CONFLICT") throw new ToolError("PREVIEW_STALE", "The workflow changed after the user approved the card; nothing was saved. Re-read it (get_workflow) and call again.");
+      throw await indexedPatchError(api, args.workflowId, args.revision, ops, error);
+    }
     return writeResult(api, res.body as WorkflowWriteResponse, "updated");
   }
 });
 
-const validateWorkflowTool = defineTool({
-  name: "validate_workflow",
-  title: "Validate a workflow definition",
-  description: "Check a whole definition without saving it (get_workflow's `workflow`, edited): its problems — errors block enabling, warnings do not. create_workflow and update_workflow return problems too; this is for drafts. A missing id, revision, timestamp, block position, edge id or edge sourceHandle is filled in.",
-  input: { workflow: z.record(z.unknown()).describe("The definition: {name, project:{kind:\"existing\", projectPath}|…, settings?, nodes:[{id, type, name, config}], edges:[{source, sourceHandle?, target}]} — ids, not names, in edges.") },
-  annotations: READ_ONLY,
-  async run(args, { api, now }) {
-    const stamp = new Date(now()).toISOString();
-    const workflow: Record<string, unknown> = { id: "draft", revision: 0, enabled: false, createdAt: stamp, updatedAt: stamp, ...args.workflow };
-    // Positions and edge ids are the canvas's business, not a draft's: the real route's schema
-    // requires them, so a draft that leaves them out gets placeholders rather than a schema error.
-    if (Array.isArray(workflow.nodes)) {
-      workflow.nodes = workflow.nodes.map((node: unknown, index: number) =>
-        isRecord(node) && node.position === undefined ? { ...node, position: { x: 320 * index, y: 0 } } : node
-      );
-    }
-    if (Array.isArray(workflow.edges)) {
-      workflow.edges = workflow.edges.map((edge: unknown, index: number) =>
-        isRecord(edge) ? { ...edge, id: edge.id ?? `draft-edge-${index + 1}`, sourceHandle: edge.sourceHandle ?? "success" } : edge
-      );
-    }
-    const body = expectWorkflowOk<ValidateWorkflowResponse>(await api.request("POST", workflowRoutes.validate, { body: { workflow } }));
-    const view = problemsView(sanitizeProblems(body.problems));
-    return { valid: view.errorCount === 0, ...view };
+/** Every run of a workflow, paged to the end (the store keeps at most `runsPerWorkflow`). */
+async function countRuns(api: DaemonApi, workflowId: string): Promise<{ total: number; active: number }> {
+  let total = 0;
+  let active = 0;
+  let before: string | null = null;
+  for (let page = 0; page < 10; page += 1) {
+    const res = await api.request("GET", workflowRoutes.runs(workflowId), { query: { limit: "50", ...(before ? { before } : {}) } });
+    if (res.status >= 400) break;
+    const body = res.body as ListWorkflowRunsResponse;
+    total += body.runs?.length ?? 0;
+    active += (body.runs ?? []).filter((run) => isRunActive(run.status)).length;
+    before = body.before ?? null;
+    if (!before) break;
   }
-});
+  return { total, active };
+}
 
 const deleteWorkflow = defineTool({
   name: "delete_workflow",
   title: "Delete a workflow",
   description: "Delete a workflow for good: cancels its active runs and deletes its run history and its own secrets. Requires confirm: true. To pause one instead, update_workflow [{op:\"set_enabled\", enabled:false}].",
+  chatNote: ADMIN_NOTE,
   input: {
     workflowId: workflowIdArg,
-    confirm: z.literal(true).describe("Must be true: deleting cannot be undone.")
+    confirm: z.literal(true).describe("Must be true: deleting cannot be undone."),
+    reason: reasonArg
+  },
+  chatOnlyInput: ["reason"],
+  audiences: ["external", "chat"],
+  toolset: "workflow-authoring",
+  tier: "admin",
+  adminFamily: "workflows",
+  async scope(args, ctx) {
+    if (!isChat(ctx)) return NOTHING;
+    const union = await workflowUnion(ctx.api, [(await readWorkflow(ctx.api, args.workflowId)).workflow]);
+    return claim({ ...unionScope(union), reads: "metadata", writes: true });
+  },
+  async approval(args, ctx): Promise<ApprovalPreview> {
+    const { api } = ctx;
+    const { workflow } = await readWorkflow(api, args.workflowId);
+    const union = await workflowUnion(api, [workflow]);
+    const runs = await countRuns(api, workflow.id);
+    const secretsRes = await api.request("GET", workflowRoutes.secrets, { query: { workflowId: workflow.id } });
+    const own = secretsRes.status < 400 ? ((secretsRes.body as ListWorkflowSecretsResponse).secrets ?? []).filter((s) => s.scope === "workflow").map((s) => s.name) : [];
+    return {
+      title: `${agentLabel(ctx.caller)} wants to delete the workflow "${workflow.name}"`,
+      scopeLabel: unionLabel(union),
+      sections: [
+        { kind: "warning", level: "danger", text: `Deletes the workflow for good${runs.active > 0 ? `, cancels its ${runs.active} active run(s)` : ""} and removes its ${runs.total} recorded run(s) and ${own.length} own secret(s). This cannot be undone.` },
+        workflowFields(workflow, api.workspacesDir),
+        { kind: "fields", title: "Removed with it", rows: [{ label: "Runs", value: String(runs.total) }, { label: "Its own secrets", value: own.length > 0 ? own.join(", ") : "none" }] },
+        ...(await unionSections(api, union, ctx.caller))
+      ],
+      workflowId: workflow.id,
+      pins: previewPins(workflow, new Map())
+    };
   },
   annotations: DESTRUCTIVE,
-  async run(args, { api }) {
+  resultKind: "json",
+  async run(args, ctx) {
+    const { api } = ctx;
+    if (ctx.approval?.pins) await verifyPins(api, ctx.approval.pins);
     expectWorkflowOk(await api.request("DELETE", workflowRoutes.workflow(args.workflowId)));
     return { deleted: true, workflowId: args.workflowId };
-  }
-});
-
-const runWorkflow = defineTool({
-  name: "run_workflow",
-  title: "Run a workflow",
-  description: "Start a workflow run now (manual; works while disabled). Returns runId; with wait:true, waits (≤ timeoutSeconds, bus-driven) for the run to end and returns each block's status, error and output (capped). The overlap policy may skip it (skipped: \"overlap\"); force:true runs anyway. Agent blocks can take hours: prefer get_workflow_run later.",
-  input: {
-    workflowId: workflowIdArg,
-    input: z.unknown().optional().describe("JSON handed to the trigger: {{ trigger.input }} in the blocks."),
-    wait: z.boolean().default(false).describe("Wait for the run to end (default false)."),
-    timeoutSeconds: z.number().int().min(1).max(600).default(300).describe("How long wait:true waits (max 600)."),
-    force: z.boolean().default(false).describe("Run even when the overlap policy would skip it.")
-  },
-  annotations: MUTATING,
-  async run(args, { api, signal }) {
-    // Tap the bus before starting, so a run that ends before the POST answers is still heard.
-    const tap = args.wait ? new RunEndTap(api) : null;
-    try {
-      const body = { ...(args.input !== undefined ? { input: args.input } : {}), ...(args.force ? { force: true } : {}) };
-      const started = expectWorkflowOk<RunWorkflowResponse>(await api.request("POST", workflowRoutes.run(args.workflowId), { body }));
-      if (started.runId === null || started.skipped) {
-        return { runId: null, skipped: started.skipped ?? "overlap", message: "Not run: a run of this workflow is already active and its overlap policy skipped this one. Pass force:true to run anyway, or wait for the active run (list_workflow_runs)." };
-      }
-      if (!tap) return { runId: started.runId, status: "started", next: "get_workflow_run {runId} shows its progress; run_workflow with wait:true waits for the end." };
-      const { run, ended } = await waitForRunEnd(api, tap, started.runId, { timeoutMs: args.timeoutSeconds * 1_000, signal });
-      if (!run) return { runId: started.runId, finished: false, timedOut: true, next: "get_workflow_run {runId} shows its progress." };
-      const extra = ended ? { runId: run.id, finished: true } : { runId: run.id, finished: false, timedOut: true, next: "Still running: get_workflow_run {runId} later, or cancel_workflow_run." };
-      return runView(run, { includeOutputs: true, extra });
-    } finally {
-      tap?.close();
-    }
-  }
-});
-
-const listRuns = defineTool({
-  name: "list_workflow_runs",
-  title: "List a workflow's runs",
-  description: "A workflow's runs, newest first: status, trigger, times, error. Page with `before` (the previous result's `before`; null means no more). get_workflow_run shows one run's blocks.",
-  input: {
-    workflowId: workflowIdArg,
-    before: z.string().min(1).optional().describe("The previous result's `before` cursor."),
-    limit: z.number().int().min(1).max(50).default(20).describe("Runs per page (max 50).")
-  },
-  annotations: READ_ONLY,
-  async run(args, { api }) {
-    const query: Record<string, string> = { limit: String(args.limit) };
-    if (args.before !== undefined) query.before = args.before;
-    const body = expectWorkflowOk<ListWorkflowRunsResponse>(await api.request("GET", workflowRoutes.runs(args.workflowId), { query }));
-    const rows = (body.runs ?? []).map(runSummaryView);
-    const result: Record<string, unknown> = { runs: rows, before: body.before ?? null };
-    let kept = rows.length;
-    while (kept > 0 && resultBytes(result) > WORKFLOW_RESULT_BUDGET) {
-      kept -= 1;
-      result.runs = rows.slice(0, kept);
-      result.truncated = true;
-      result.omitted = rows.length - kept;
-      result.note = "Runs past the size cap were left out: ask again with a smaller limit.";
-    }
-    return result;
-  }
-});
-
-const getRun = defineTool({
-  name: "get_workflow_run",
-  title: "Get a workflow run",
-  description: "One run: its status, and per block the status, handle taken, attempt, error, warnings, agent session, account choice and hops, and output (capped: outputTruncated). `nodeId` reads that one block's whole output, paged by outputOffset (nextOffset).",
-  input: {
-    runId: z.string().min(1).describe("The run's id (run_workflow, list_workflow_runs)."),
-    includeOutputs: z.boolean().default(true).describe("Include block outputs (default true)."),
-    nodeId: z.string().min(1).optional().describe("Read this block's whole output (its id or name)."),
-    outputOffset: z.number().int().min(0).default(0).describe("With nodeId: the byte offset into the output's JSON text (the previous nextOffset).")
-  },
-  annotations: READ_ONLY,
-  async run(args, { api }) {
-    const run = await readRun(api, args.runId);
-    if (args.nodeId === undefined) return runView(run, { includeOutputs: args.includeOutputs });
-    const block = findBlock(run, args.nodeId);
-    const res = await api.request("GET", workflowRoutes.nodeOutput(run.id, block.nodeId));
-    const output = expectWorkflowOk<GetWorkflowNodeOutputResponse>(res).output;
-    const result: Record<string, unknown> = { run: runSummaryView(run), block: blockView(block) };
-    if (output === undefined) return { ...result, output: null, note: "This block has no output." };
-    if (args.outputOffset === 0 && resultBytes({ ...result, output }) <= WORKFLOW_RESULT_BUDGET) return { ...result, output };
-    const room = Math.min(OUTPUT_WINDOW_BYTES, WORKFLOW_RESULT_BUDGET - resultBytes(result) - 200);
-    const window = outputWindow(JSON.stringify(output), args.outputOffset, Math.max(1_000, room));
-    return { ...result, outputText: window.text, offset: window.offset, totalBytes: window.totalBytes, ...(window.nextOffset !== undefined ? { nextOffset: window.nextOffset, note: "The output's JSON text continues: call again with outputOffset = nextOffset." } : {}) };
-  }
-});
-
-const cancelRun = defineTool({
-  name: "cancel_workflow_run",
-  title: "Cancel a workflow run",
-  description: "Cancel an active run: running agents are interrupted and processes killed; the run ends cancelled. RUN_NOT_ACTIVE when it already ended.",
-  input: { runId: z.string().min(1).describe("The run's id.") },
-  annotations: MUTATING_IDEMPOTENT,
-  async run(args, { api }) {
-    expectWorkflowOk(await api.request("POST", workflowRoutes.runCancel(args.runId)));
-    const res = await api.request("GET", workflowRoutes.runDetail(args.runId));
-    const run = res.status < 400 ? (res.body as GetWorkflowRunResponse).run : null;
-    return { cancelRequested: true, runId: args.runId, ...(run ? { run: runSummaryView(run) } : {}) };
   }
 });
 
@@ -971,14 +1105,22 @@ const previewExpression = defineTool({
   description: "Render {{ … }} templates against a workflow's recorded data without running anything: returns each rendered text (or raw value), the warnings a run would record (a path that read nothing, a filter that failed) and parse errors. `node` is the block the template belongs to — it decides `input` and hides that block and its downstream. Data: a past run (runId; default the latest run that reached `node`) and/or pinned outputs (usePinned). `available` outlines what the context holds (input, trigger, every readable block's output keys, secret names) for discovering paths. Secret values never appear: {{ secrets.X }} renders as «secret:X».",
   input: {
     workflowId: workflowIdArg,
-    template: z.string().max(EXPRESSION_PREVIEW_LIMITS.maxTemplateLength).optional().describe("One template, e.g. \"{{ nodes.Claude.output.text }}\" or \"Fix {{ input.key }}: {{ input.summary | json }}\". Or pass templates."),
+    template: z.string().max(EXPRESSION_PREVIEW_LIMITS.maxTemplateLength).optional().describe("One template, e.g. \"{{ nodes.Claude.output.text }}\". Or pass templates."),
     templates: z.array(z.string().max(EXPRESSION_PREVIEW_LIMITS.maxTemplateLength)).min(1).max(EXPRESSION_PREVIEW_LIMITS.maxTemplates).optional().describe(`Several templates at once (at most ${EXPRESSION_PREVIEW_LIMITS.maxTemplates}), rendered against the same data.`),
-    node: z.string().min(1).optional().describe("The block (id or name) whose field holds the template: its point of view decides `input` (one upstream output as is; several as {<BlockName>: output}). Omit and `input` reads nothing."),
-    runId: z.string().min(1).optional().describe("Read this run's recorded outputs (list_workflow_runs). Default: the latest run that reached `node`, else the latest run."),
-    usePinned: z.boolean().default(false).describe("Pinned outputs (update_workflow set_pinned) replace recorded ones, as a test run uses them. Works with no run on record."),
-    mode: z.enum(["text", "value"]).default("text").describe("\"text\" (default): as a text field (prompt, command, HTTP body) renders it. \"value\": a template that is one lone {{ … }} keeps its raw value — a number stays a number — as If/Switch rule sides, Stop values and sub-workflow input read it.")
+    node: z.string().min(1).optional().describe("The block (id or name) whose field holds the template: it decides `input`. Omit and `input` reads nothing."),
+    runId: z.string().min(1).optional().describe("Read this run's recorded outputs. Default: the latest run that reached `node`, else the latest run."),
+    usePinned: z.boolean().default(false).describe("Pinned outputs (set_pinned) replace recorded ones, as a test run uses them. Works with no run on record."),
+    mode: z.enum(["text", "value"]).default("text").describe("\"text\": as a text field renders it. \"value\": a lone {{ … }} keeps its raw value (rule sides, Stop values, sub-workflow input).")
+  },
+  audiences: ["external", "chat"],
+  toolset: "workflow-authoring",
+  tier: "read",
+  async scope(args, ctx) {
+    if (!isChat(ctx)) return NOTHING;
+    return homeRead(ctx, (await readWorkflow(ctx.api, args.workflowId)).workflow.project);
   },
   annotations: READ_ONLY,
+  resultKind: "json",
   async run(args, { api }) {
     if ((args.template === undefined) === (args.templates === undefined)) {
       throw new ToolError("INVALID_ARGUMENT", "Pass template (one text) or templates (a list), not both and not neither.");
@@ -1031,12 +1173,254 @@ const previewExpression = defineTool({
   }
 });
 
+/** A run's home: where its workflow lives (the frozen definition's project, so a deleted workflow's run still has one). */
+async function runHome(ctx: ScopeContext, runId: string, writes: boolean): Promise<ScopeClaim> {
+  const run = await readRun(ctx.api, runId);
+  return claim({ ...(await homeScope(ctx.api, run.definition?.project)), reads: "metadata", writes });
+}
+
+/** The revision a run must start from; a mismatch before any card is the caller's stale read. */
+function revisionConflict(current: number, asked: number): ToolError {
+  return workflowError({ status: 409, body: { error: { code: "REVISION_CONFLICT", message: `The workflow is at revision ${current}, not ${asked}` } } });
+}
+
+const runWorkflow = defineTool({
+  name: "run_workflow",
+  title: "Run a workflow",
+  description: "Start a run of the workflow at `revision` (get_workflow's; refused if it changed since) now — manual, and it works while disabled. Returns runId; wait:true waits (≤ timeoutSeconds, bus-driven) for the run to end and returns each block's status, error and output (capped). The overlap policy may skip it (skipped: \"overlap\"); force:true runs anyway. Agent blocks can take hours: prefer get_workflow_runs {runId, waitSeconds} later.",
+  chatNote: ADMIN_NOTE,
+  input: {
+    workflowId: workflowIdArg,
+    revision: z.number().int().nonnegative().describe("The revision you read (get_workflow): the run is refused if the workflow changed since."),
+    input: z.unknown().optional().describe("JSON handed to the trigger: {{ trigger.input }} in the blocks."),
+    wait: z.boolean().default(false).describe("Wait for the run to end (default false)."),
+    timeoutSeconds: z.number().int().min(1).max(MAX_WAIT_SECONDS).default(300).describe("How long wait:true waits (max 600)."),
+    force: z.boolean().default(false).describe("Run even when the overlap policy would skip it."),
+    reason: reasonArg
+  },
+  chatOnlyInput: ["reason"],
+  audiences: ["external", "chat"],
+  toolset: "workflow-authoring",
+  tier: "admin",
+  adminFamily: "workflows",
+  async scope(args, ctx) {
+    if (!isChat(ctx)) return NOTHING;
+    const union = await workflowUnion(ctx.api, [(await readWorkflow(ctx.api, args.workflowId)).workflow]);
+    return claim({ ...unionScope(union), reads: "metadata", writes: true });
+  },
+  async approval(args, ctx): Promise<ApprovalPreview> {
+    const { api } = ctx;
+    const { workflow, problems } = await readWorkflow(api, args.workflowId);
+    if (workflow.revision !== args.revision) throw revisionConflict(workflow.revision, args.revision);
+    const union = await workflowUnion(api, [workflow]);
+    const prompts = await resolveSavedPrompts(api, savedPromptIdsOf(workflow), union.projects);
+    const blocks = workflow.nodes.filter((node) => node.type !== "note").map((node) => `${node.type} · ${node.name}${node.disabled ? " (disabled)" : ""}`);
+    const sections: ApprovalPreviewSection[] = [
+      {
+        kind: "fields",
+        title: "Run",
+        rows: [
+          { label: "Workflow", value: `${workflow.name} (${workflow.id})` },
+          { label: "Revision", value: String(workflow.revision) },
+          { label: "Enabled", value: workflow.enabled ? "yes" : "no (a manual run works anyway)" },
+          { label: "Project", value: workflowProjectLabel(workflow.project, api.workspacesDir) },
+          ...(args.force ? [{ label: "Overlap", value: "force: runs even if a run is active", state: "flagged" as const }] : [])
+        ]
+      },
+      { kind: "code", title: "Input ({{ trigger.input }})", language: "json", text: args.input === undefined ? "null" : JSON.stringify(args.input, null, 2) },
+      ...(await unionSections(api, union, ctx.caller)),
+      { kind: "text", title: "Blocks", text: blocks.join("\n") || "none" },
+      ...(prompts.size > 0
+        ? [{ kind: "fields" as const, title: "Saved prompts its agents use (read when each block starts)", rows: [...prompts].map(([id, prompt]) => ({ label: prompt ? prompt.title : id, value: prompt ? `${prompt.body.length} characters` : "missing — that block fails", ...(prompt ? {} : { state: "flagged" as const }) })) }]
+        : []),
+      ...problemSections(problems)
+    ];
+    return {
+      title: `${agentLabel(ctx.caller)} wants to run the workflow "${workflow.name}"`,
+      scopeLabel: unionLabel(union),
+      sections,
+      workflowId: workflow.id,
+      pins: { [workflowPin(workflow.id)]: String(workflow.revision) }
+    };
+  },
+  annotations: MUTATING,
+  resultKind: "json",
+  async run(args, ctx) {
+    const { api, signal } = ctx;
+    const { workflow } = await readWorkflow(api, args.workflowId);
+    if (ctx.approval?.pins) await verifyPins(api, ctx.approval.pins, { current: workflow });
+    if (workflow.revision !== args.revision) throw revisionConflict(workflow.revision, args.revision);
+    // Tap the bus before starting, so a run that ends before the POST answers is still heard.
+    const tap = args.wait ? new RunEndTap(api) : null;
+    try {
+      const body = { ...(args.input !== undefined ? { input: args.input } : {}), ...(args.force ? { force: true } : {}) };
+      const started = expectWorkflowOk<RunWorkflowResponse>(await api.request("POST", workflowRoutes.run(args.workflowId), { body }));
+      if (started.runId === null || started.skipped) {
+        return { runId: null, skipped: started.skipped ?? "overlap", message: "Not run: a run of this workflow is already active and its overlap policy skipped this one. Pass force:true to run anyway, or watch the active run (get_workflow_runs {workflowId})." };
+      }
+      // The run froze the definition it started with: it must be the revision asked for (and
+      // approved). An edit that landed between the check above and the start is cancelled at once.
+      const first = await readRun(api, started.runId).catch(() => null);
+      const ran = first?.definition?.revision;
+      if (typeof ran === "number" && ran !== args.revision) {
+        await api.request("POST", workflowRoutes.runCancel(started.runId)).catch(() => undefined);
+        throw ctx.approval
+          ? new ToolError("PREVIEW_STALE", `The workflow changed (revision ${args.revision} → ${ran}) as the run started: run ${started.runId} was cancelled. Re-read it and call again.`)
+          : revisionConflict(ran, args.revision);
+      }
+      if (!tap) return { runId: started.runId, status: "started", revision: args.revision, next: "get_workflow_runs {runId, waitSeconds} watches it; run_workflow with wait:true waits for the end." };
+      const { run, ended } = await waitForRunEnd(api, tap, started.runId, { timeoutMs: args.timeoutSeconds * 1_000, signal });
+      if (!run) return { runId: started.runId, finished: false, timedOut: true, next: "get_workflow_runs {runId, waitSeconds} watches it." };
+      const extra = ended ? { runId: run.id, finished: true } : { runId: run.id, finished: false, timedOut: true, next: "Still running: get_workflow_runs {runId, waitSeconds} later, or cancel_workflow_run." };
+      return runView(run, { includeOutputs: true, extra });
+    } finally {
+      tap?.close();
+    }
+  }
+});
+
+/** A block's stdout/stderr window: the route answers plain text, `offset`/`maxBytes` in bytes of the log file. */
+async function logWindow(api: DaemonApi, run: WorkflowRun, block: WorkflowBlockRun, stream: "stdout" | "stderr", offset: number | undefined, room: number): Promise<Record<string, unknown>> {
+  const size = block.logs ? (stream === "stdout" ? block.logs.stdoutBytes : block.logs.stderrBytes) : 0;
+  // Default: the tail, where a failure is.
+  const start = offset ?? Math.max(0, size - room);
+  const res = await api.request("GET", workflowRoutes.nodeLog(run.id, block.nodeId), { query: { stream, offset: String(start), maxBytes: String(room) } });
+  if (res.status >= 400) throw workflowError(res);
+  // The in-process client parses a body that happens to be JSON (a log of one number): put it back as text.
+  const exactText = typeof res.body === "string" || res.body === null;
+  const raw = typeof res.body === "string" ? res.body : res.body === null ? "" : JSON.stringify(res.body);
+  const fitted = fitJsonBytes(raw, room);
+  // Secret values are replaced by «secret:NAME» (by the daemon, as stored): offsets then drift from the text's length.
+  const exact = exactText && !fitted.text.includes("«secret:");
+  const next = start + (exact ? Buffer.byteLength(fitted.text, "utf8") : room);
+  return {
+    log: stream,
+    text: fitted.text,
+    offset: start,
+    logBytes: size,
+    ...(next < size ? { nextOffset: next, note: "The log continues: call again with outputOffset = nextOffset." } : {}),
+    ...(exact ? {} : { offsetsApproximate: true })
+  };
+}
+
+const getWorkflowRuns = defineTool({
+  name: "get_workflow_runs",
+  title: "Watch a workflow's runs",
+  description: "Watch and debug runs. {workflowId}: its runs, newest first (page with before). {runId}: its status and each block's status, handle, error, warnings, agent session and output (capped); waitSeconds first waits for it to end. {runId, nodeId}: one block's whole output paged by outputOffset (nextOffset), or its stdout/stderr (log; default: the tail). Secret values read «secret:NAME».",
+  input: {
+    workflowId: z.string().min(1).optional().describe("List this workflow's runs."),
+    runId: z.string().min(1).optional().describe("One run."),
+    nodeId: z.string().min(1).optional().describe("With runId: one block (id or name)."),
+    log: z.enum(["stdout", "stderr"]).optional().describe("With nodeId: read this log instead of the output."),
+    outputOffset: z.number().int().min(0).optional().describe("With nodeId: the byte offset to read from (the last nextOffset)."),
+    includeOutputs: z.boolean().default(true).describe("With runId: include block outputs."),
+    before: z.string().min(1).optional().describe("With workflowId: the last page's before."),
+    limit: z.number().int().min(1).max(50).default(20).describe("With workflowId: runs per page."),
+    waitSeconds: z.number().int().min(1).max(MAX_WAIT_SECONDS).optional().describe("With runId: wait up to this long for the run to end.")
+  },
+  audiences: ["external", "chat"],
+  toolset: "reads",
+  tier: "read",
+  async scope(args, ctx) {
+    if (!isChat(ctx)) return NOTHING;
+    if (args.runId !== undefined) return runHome(ctx, args.runId, false);
+    if (args.workflowId !== undefined) return homeRead(ctx, (await readWorkflow(ctx.api, args.workflowId)).workflow.project);
+    return NOTHING;
+  },
+  annotations: READ_ONLY,
+  resultKind: "json",
+  async run(args, { api, signal }) {
+    if (args.runId === undefined) {
+      if (args.workflowId === undefined) throw new ToolError("INVALID_ARGUMENT", "Pass workflowId (its runs) or runId (one run).");
+      const stray = (["nodeId", "log", "outputOffset", "waitSeconds"] as const).filter((key) => args[key] !== undefined);
+      if (stray.length > 0) throw new ToolError("INVALID_ARGUMENT", `${stray.join(", ")} need${stray.length === 1 ? "s" : ""} runId.`);
+      const query: Record<string, string> = { limit: String(args.limit) };
+      if (args.before !== undefined) query.before = args.before;
+      const body = expectWorkflowOk<ListWorkflowRunsResponse>(await api.request("GET", workflowRoutes.runs(args.workflowId), { query }));
+      const rows = (body.runs ?? []).map(runSummaryView);
+      const result: Record<string, unknown> = { runs: rows, before: body.before ?? null };
+      let kept = rows.length;
+      while (kept > 0 && resultBytes(result) > WORKFLOW_RESULT_BUDGET) {
+        kept -= 1;
+        result.runs = rows.slice(0, kept);
+        result.truncated = true;
+        result.omitted = rows.length - kept;
+        result.note = "Runs past the size cap were left out: ask again with a smaller limit.";
+      }
+      return result;
+    }
+    if (args.log !== undefined && args.nodeId === undefined) throw new ToolError("INVALID_ARGUMENT", "log needs nodeId (the block whose log to read).");
+    // Tap the bus before the first read when waiting, so an end between the read and the wait is heard.
+    const tap = args.waitSeconds !== undefined ? new RunEndTap(api) : null;
+    let run: WorkflowRun;
+    let waited: Record<string, unknown> = {};
+    try {
+      run = await readRun(api, args.runId);
+      if (args.workflowId !== undefined && run.workflowId !== args.workflowId) {
+        throw new ToolError("INVALID_ARGUMENT", `Run ${clipText(run.id, MAX_ECHO_CHARS)} belongs to workflow ${clipText(run.workflowId, MAX_ECHO_CHARS)}, not ${clipText(args.workflowId, MAX_ECHO_CHARS)}.`);
+      }
+      if (tap && isRunActive(run.status)) {
+        const { run: last, ended } = await waitForRunEnd(api, tap, run.id, { timeoutMs: args.waitSeconds! * 1_000, signal });
+        if (last) run = last;
+        waited = ended ? { finished: true } : { finished: false, timedOut: true };
+      } else if (tap) {
+        waited = { finished: true };
+      }
+    } finally {
+      tap?.close();
+    }
+    if (args.nodeId === undefined) return runView(run, { includeOutputs: args.includeOutputs, extra: waited });
+    const block = findBlock(run, args.nodeId);
+    const result: Record<string, unknown> = { ...waited, run: runSummaryView(run), block: blockView(block) };
+    const room = Math.min(OUTPUT_WINDOW_BYTES, WORKFLOW_RESULT_BUDGET - resultBytes(result) - 200);
+    if (args.log !== undefined) return { ...result, ...(await logWindow(api, run, block, args.log, args.outputOffset, Math.max(1_000, room))) };
+    const res = await api.request("GET", workflowRoutes.nodeOutput(run.id, block.nodeId));
+    const output = expectWorkflowOk<GetWorkflowNodeOutputResponse>(res).output;
+    if (output === undefined) return { ...result, output: null, note: "This block has no output." };
+    const offset = args.outputOffset ?? 0;
+    if (offset === 0 && resultBytes({ ...result, output }) <= WORKFLOW_RESULT_BUDGET) return { ...result, output };
+    const window = outputWindow(JSON.stringify(output), offset, Math.max(1_000, room));
+    return { ...result, outputText: window.text, offset: window.offset, totalBytes: window.totalBytes, ...(window.nextOffset !== undefined ? { nextOffset: window.nextOffset, note: "The output's JSON text continues: call again with outputOffset = nextOffset." } : {}) };
+  }
+});
+
+const cancelRun = defineTool({
+  name: "cancel_workflow_run",
+  title: "Cancel a workflow run",
+  description: "Cancel an active run: running agents are interrupted and processes killed; the run ends cancelled. RUN_NOT_ACTIVE when it already ended.",
+  input: { runId: z.string().min(1).describe("The run's id.") },
+  audiences: ["external", "chat"],
+  toolset: "workflow-authoring",
+  tier: "act",
+  async scope(args, ctx) {
+    if (!isChat(ctx)) return NOTHING;
+    return runHome(ctx, args.runId, true);
+  },
+  annotations: MUTATING_IDEMPOTENT,
+  resultKind: "json",
+  async run(args, { api }) {
+    expectWorkflowOk(await api.request("POST", workflowRoutes.runCancel(args.runId)));
+    const res = await api.request("GET", workflowRoutes.runDetail(args.runId));
+    const run = res.status < 400 ? (res.body as GetWorkflowRunResponse).run : null;
+    return { cancelRequested: true, runId: args.runId, ...(run ? { run: runSummaryView(run) } : {}) };
+  }
+});
+
 const listSecrets = defineTool({
   name: "list_workflow_secrets",
   title: "List workflow secret names",
   description: "Workflow secret NAMES, never values: the global ones, plus one workflow's own with workflowId. Blocks read a secret as {{ secrets.NAME }} (HTTP fields, shell env values) or secrets.NAME in code.",
   input: { workflowId: z.string().min(1).optional().describe("Also list this workflow's own secrets.") },
+  audiences: ["external", "chat"],
+  toolset: "workflow-authoring",
+  tier: "read",
+  async scope(args, ctx) {
+    if (!isChat(ctx)) return NOTHING;
+    if (args.workflowId === undefined) return claim({ reads: "metadata" });
+    return homeRead(ctx, (await readWorkflow(ctx.api, args.workflowId)).workflow.project);
+  },
   annotations: READ_ONLY,
+  resultKind: "json",
   async run(args, { api }) {
     const query = args.workflowId !== undefined ? { query: { workflowId: args.workflowId } } : undefined;
     const body = expectWorkflowOk<ListWorkflowSecretsResponse>(await api.request("GET", workflowRoutes.secrets, query));
@@ -1045,29 +1429,91 @@ const listSecrets = defineTool({
   }
 });
 
+/** The card's masked field: the one place a chat caller's secret value comes from (D-11). */
+const SECRET_FIELD = "value";
+
 const setSecret = defineTool({
   name: "set_workflow_secret",
   title: "Set a workflow secret",
-  description: "Create or replace a workflow secret (write-only; with workflowId it is that workflow's own, else global). WARNING: the value you pass stays in YOUR transcript and tool logs — prefer asking the user to set it in Orquester's UI. Names: A-Z, 0-9 and _, starting with a letter.",
+  description: "Create or replace a workflow secret, or delete it (delete:true): with workflowId that workflow's own, else global. Write-only: a value is never shown again. Names: A-Z, 0-9 and _, starting with a letter.",
+  chatNote: `You never see or send the value: the user types it into the approval card. ${ADMIN_NOTE}`,
+  externalNote: "The value you pass stays in your transcript and tool logs: prefer asking the user to set it in Orquester.",
   input: {
     name: z.string().regex(WORKFLOW_SECRET_NAME_PATTERN, "a secret name is A-Z, 0-9 and _, starting with a letter (at most 64)").describe("The secret's name, e.g. JIRA_TOKEN."),
-    value: z.string().min(1).refine((v) => Buffer.byteLength(v, "utf8") <= WORKFLOW_SECRET_MAX_VALUE_BYTES, "a secret value is at most 64 KiB").describe("The value (never shown again)."),
-    workflowId: z.string().min(1).optional().describe("Scope it to this workflow; omit for a global secret.")
+    workflowId: z.string().min(1).optional().describe("Scope it to this workflow; omit for a global secret."),
+    delete: z.boolean().default(false).describe("Delete the secret instead of setting it."),
+    value: z.string().min(1).refine((v) => Buffer.byteLength(v, "utf8") <= WORKFLOW_SECRET_MAX_VALUE_BYTES, "a secret value is at most 64 KiB").optional().describe("The value (never shown again). Required unless delete."),
+    reason: reasonArg
   },
-  annotations: MUTATING_IDEMPOTENT,
-  async run(args, { api }) {
-    const opts = { body: { value: args.value }, ...(args.workflowId !== undefined ? { query: { workflowId: args.workflowId } } : {}) };
-    expectWorkflowOk(await api.request("PUT", workflowRoutes.secret(args.name), opts));
-    const result: Record<string, unknown> = { set: true, name: args.name, scope: args.workflowId !== undefined ? "workflow" : "global", ...(args.workflowId !== undefined ? { workflowId: args.workflowId } : {}) };
-    if (args.value.length < 4) result.warning = "Values under 4 characters are not redacted from stored outputs and logs.";
-    return result;
+  chatOnlyInput: ["reason"],
+  externalOnlyInput: ["value"],
+  audiences: ["external", "chat"],
+  toolset: "workflow-authoring",
+  tier: "admin",
+  adminFamily: "workflow-secrets",
+  async scope(args, ctx) {
+    if (!isChat(ctx)) return NOTHING;
+    // A workflow's own secret feeds its blocks wherever they run: the workflow's union. A global one is global.
+    if (args.workflowId === undefined) return claim({ writes: true });
+    const union = await workflowUnion(ctx.api, [(await readWorkflow(ctx.api, args.workflowId)).workflow]);
+    return claim({ ...unionScope(union), writes: true });
+  },
+  async approval(args, ctx): Promise<ApprovalPreview> {
+    const { api } = ctx;
+    const workflow = args.workflowId !== undefined ? (await readWorkflow(api, args.workflowId)).workflow : null;
+    const listed = await api.request("GET", workflowRoutes.secrets, workflow ? { query: { workflowId: workflow.id } } : undefined);
+    const names = listed.status < 400 ? ((listed.body as ListWorkflowSecretsResponse).secrets ?? []) : [];
+    const exists = names.some((s) => s.name === args.name && (workflow ? s.scope === "workflow" : s.scope === "global"));
+    const union = workflow ? await workflowUnion(api, [workflow]) : null;
+    const scope = workflow ? `Workflow "${workflow.name}" (${workflow.id}) only` : "Global — every workflow's blocks can read it";
+    const sections: ApprovalPreviewSection[] = [
+      {
+        kind: "fields",
+        title: "Workflow secret",
+        rows: [
+          { label: "Name", value: args.name },
+          { label: "Scope", value: scope, ...(workflow ? {} : { state: "flagged" as const }) },
+          { label: "Action", value: args.delete ? (exists ? "delete it" : "delete it (no such secret now)") : exists ? "replace its value" : "create it" },
+          ...(args.delete ? [] : [{ label: "Value", value: "typed by you below; the agent never sees it", state: "asked" as const }])
+        ]
+      },
+      ...(args.delete ? [{ kind: "warning" as const, level: "caution" as const, text: `Blocks that read {{ secrets.${args.name} }} will fail or read nothing.` }] : []),
+      ...(union ? await unionSections(api, union, ctx.caller) : [])
+    ];
+    return {
+      title: args.delete ? `${agentLabel(ctx.caller)} wants to delete the workflow secret ${args.name}` : `${agentLabel(ctx.caller)} asks you to set the workflow secret ${args.name}`,
+      scopeLabel: workflow ? `Workflow ${workflow.name}` : "Global — every workflow",
+      sections,
+      ...(args.delete ? {} : { secretFields: [{ key: SECRET_FIELD, label: `Value of ${args.name}` }] }),
+      ...(workflow ? { pins: previewPins(workflow, new Map()) } : {})
+    };
+  },
+  annotations: DESTRUCTIVE,
+  resultKind: "json",
+  async run(args, ctx) {
+    const { api } = ctx;
+    const scoped = args.workflowId !== undefined ? { query: { workflowId: args.workflowId } } : {};
+    const result: Record<string, unknown> = { name: args.name, scope: args.workflowId !== undefined ? "workflow" : "global", ...(args.workflowId !== undefined ? { workflowId: args.workflowId } : {}) };
+    if (ctx.approval?.pins) await verifyPins(api, ctx.approval.pins);
+    if (args.delete) {
+      if (args.value !== undefined) throw new ToolError("INVALID_ARGUMENT", "Pass value or delete: true, not both.");
+      expectWorkflowOk(await api.request("DELETE", workflowRoutes.secret(args.name), scoped));
+      return { deleted: true, ...result };
+    }
+    // A chat caller's value comes only from the card (D-11); an external caller's from its arguments.
+    const value = ctx.caller.kind === "thread" ? ctx.approval?.secrets?.[SECRET_FIELD] : args.value;
+    if (value === undefined || value === "") {
+      throw new ToolError("INVALID_ARGUMENT", ctx.caller.kind === "thread" ? "The approval card returned no value; nothing was set." : "value is required unless delete: true.");
+    }
+    if (Buffer.byteLength(value, "utf8") > WORKFLOW_SECRET_MAX_VALUE_BYTES) throw new ToolError("INVALID_ARGUMENT", "A secret value is at most 64 KiB.");
+    expectWorkflowOk(await api.request("PUT", workflowRoutes.secret(args.name), { body: { value }, ...scoped }));
+    if (value.length < 4) result.warning = "Values under 4 characters are not redacted from stored outputs and logs.";
+    return { set: true, ...result };
   }
 });
 
-export const workflowTools: ToolDef[] = [
-  listBlockTypes, listWorkflows, getWorkflow, createWorkflow, updateWorkflow, validateWorkflowTool, deleteWorkflow,
-  previewExpression, runWorkflow, listRuns, getRun, cancelRun, listSecrets, setSecret
+/** This family in the catalog (`../catalog/index.ts`), in spec §4 order. */
+export const workflowsFamily: readonly AnyOrquesterTool[] = [
+  listBlockTypes, listWorkflows, getWorkflow, createWorkflow, updateWorkflow, deleteWorkflow,
+  previewExpression, runWorkflow, getWorkflowRuns, cancelRun, listSecrets, setSecret
 ];
-
-/** This family in the catalog (`../catalog/index.ts`). */
-export const workflowsFamily = legacyExternalTools(workflowTools);

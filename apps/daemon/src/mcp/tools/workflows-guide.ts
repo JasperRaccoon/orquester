@@ -145,7 +145,8 @@ ${bullets(WORKFLOW_FAILURE_GUIDE)}
    block (see the recipes). \`chain\` is the agent/model fallback order on usage limits
    (list_agents names each agent's models).
 8. Secrets: see the expression guide. list_workflow_secrets names them; set_workflow_secret sets
-   one (its value lands in YOUR transcript — prefer asking the user).
+   one. In an Orquester chat you never send the value: the user types it into the approval card;
+   an external client's value lands in its transcript — prefer asking the user.
 9. Edit with update_workflow, never by recreating: call get_workflow first for the current
    \`revision\`, then send only what changes. update_node's set.config merges ONE level deep: a
    top-level config key you send replaces that key whole (send the whole \`prompt\` object, the
@@ -153,7 +154,13 @@ ${bullets(WORKFLOW_FAILURE_GUIDE)}
    beside \`config\`. The whole batch applies or none of it.
 10. New workflows are created disabled. Fix every problem of severity "error", then
    update_workflow [{"op":"set_enabled","enabled":true}] — schedule and git triggers fire only
-   while enabled. run_workflow {wait:true} tests it; get_workflow_run shows each block.
+   while enabled. run_workflow {workflowId, revision, wait:true} tests it (the revision you
+   read: a run of a workflow changed since is refused); get_workflow_runs {runId} shows each
+   block, {runId, nodeId} one block's whole output, {runId, nodeId, log: "stderr"} its log.
+11. Check before you change: create_workflow / update_workflow with dryRun:true validate without
+   saving. In an Orquester chat every create, edit (enabling and disabling too), run, delete and
+   secret asks the user on an approval card showing the whole change: batch an edit's ops into one
+   update_workflow call.
 
 ## Block contracts
 
@@ -177,6 +184,6 @@ hourly (revision = the one create_workflow or get_workflow returned):
 
 update_workflow {"workflowId":"<id>","revision":0,"ops":${JSON.stringify(JIRA_FIXER_EDIT_OPS)}}
 
-Finally run_workflow {"workflowId":"<id>","wait":true} and, once it works,
+Finally run_workflow {"workflowId":"<id>","revision":1,"wait":true} and, once it works,
 update_workflow ops [{"op":"set_enabled","enabled":true}].
 `;

@@ -1,31 +1,49 @@
+/**
+ * The workflows family (unified MCP design 2026-10-15 §4 rows 26–37, §4.1, §7, D-22, D-25), run
+ * through THE executor as both audiences: the pre-catalog external tests ported (parity), then the
+ * chat side — the project union, complete previews and PREVIEW_TOO_LARGE, the revision and prompt
+ * pins (PREVIEW_STALE), the chat secret flow, reads' scope, and watch/debug. The chat-grant loop over
+ * the real approval port is in `workflows-grants.test.ts`.
+ */
+
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { z } from "zod";
-import type { Workflow, WorkflowRun } from "@orquester/api";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { TOOLSETS, type ApprovalPreviewSection, type Workflow, type WorkflowRun } from "@orquester/api";
+import { FakeApprovalPort } from "../catalog/approval-double.ts";
+import type { ThreadCaller } from "../catalog/contract.ts";
 import { ToolError } from "../errors.ts";
+import { executeToolCall, type ExecutorDeps } from "../executor.ts";
 import { busEvent, FakeDaemonApi } from "../testing.ts";
-import type { ToolContext } from "../tool.ts";
-import { workflowTools } from "./workflows.ts";
+import { graphDiff, unifiedDiff, workflowsReferencingPrompt, workflowUnion } from "./workflow-preview.ts";
 
 type Result = Record<string, unknown>;
 const stamp = "2026-09-28T12:00:00.000Z";
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 
-async function sandbox(t: { after: (fn: () => Promise<void>) => void }): Promise<FakeDaemonApi> {
-  const root = await mkdtemp(join(tmpdir(), "mcp-wf-"));
+interface Sandbox extends FakeDaemonApi { own: string; same: string; other: string }
+
+async function sandbox(t: { after: (fn: () => Promise<void>) => void }): Promise<Sandbox> {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "mcp-wf-")));
   t.after(() => rm(root, { recursive: true, force: true }));
-  await mkdir(join(root, "acme", "api"), { recursive: true });
-  await mkdir(join(root, "acme", "web"), { recursive: true });
-  const api = new FakeDaemonApi();
+  for (const dir of ["acme/api", "acme/web", "beta/app"]) await mkdir(join(root, dir), { recursive: true });
+  const api = new FakeDaemonApi() as Sandbox;
   api.fsRoot = api.workspacesDir = root;
+  api.own = join(root, "acme", "api");
+  api.same = join(root, "acme", "web");
+  api.other = join(root, "beta", "app");
+  api.on("POST", "/api/workflows/validate", { status: 200, body: { problems: [] } })
+    .on("GET", "/api/workspaces", { status: 200, body: [{ name: "acme", path: join(root, "acme"), projectCount: 2, gitAccountId: "acc1" }, { name: "beta", path: join(root, "beta"), projectCount: 1, gitAccount: { label: "beta-bot", login: "betabot", provider: "github" } }] })
+    .on("GET", "/api/accounts", { status: 200, body: [{ id: "acc1", label: "acme-bot", login: "acmebot" }] })
+    .on("GET", "/api/saved-prompts", { status: 200, body: { prompts: [] } });
   return api;
 }
 
 /** Stored transport data, independent of the workflow creator/validator/patch implementation. */
-function definition(api: FakeDaemonApi): Workflow {
+function definition(api: FakeDaemonApi, over: Partial<Workflow> = {}): Workflow {
   return {
     id: "wf-1", name: "Demo", revision: 7, enabled: false,
     project: { kind: "existing", projectPath: join(api.workspacesDir, "acme", "api") },
@@ -35,14 +53,15 @@ function definition(api: FakeDaemonApi): Workflow {
       { id: "a", name: "Work", type: "code", position: { x: 0, y: 0 }, config: { source: "export default async function () { return 1; }" } },
       { id: "b", name: "Finish", type: "code", position: { x: 0, y: 0 }, config: { source: "export default async function () { return 2; }" } }
     ],
-    edges: [{ id: "ta", source: "t", sourceHandle: "success", target: "a" }, { id: "ab", source: "a", sourceHandle: "error", target: "b" }],
-    createdAt: stamp, updatedAt: stamp
+    edges: [{ id: "ta", source: "t", sourceHandle: "success", target: "a" }, { id: "ab", source: "a", sourceHandle: "success", target: "b" }],
+    createdAt: stamp, updatedAt: stamp,
+    ...over
   } as Workflow;
 }
 
 function serveDefinition(api: FakeDaemonApi, workflow = definition(api)): Workflow {
   const answer = { status: 200, body: { workflow, problems: [] } };
-  api.on("GET", "/api/workflows/wf-1", answer).on("POST", "/api/workflows", answer);
+  api.on("GET", `/api/workflows/${workflow.id}`, answer).on("POST", "/api/workflows", answer);
   return workflow;
 }
 
@@ -52,27 +71,45 @@ const runRecord = (workflow: Workflow, status: WorkflowRun["status"] = "running"
   queuedAt: stamp, definition: workflow, triggerPayload: { kind: "manual", input: null }, blocks: {}, takenEdges: [], deadEdges: []
 });
 
-/** Actual tool schema and handler; the transport supplies only canned daemon responses. */
-async function call(api: FakeDaemonApi, name: string, args: Record<string, unknown>, signal = new AbortController().signal): Promise<Result> {
-  const tool = workflowTools.find((candidate) => candidate.name === name)!;
-  const parsed = z.object(tool.input).strict().safeParse(args);
-  if (!parsed.success) throw new ToolError("INVALID_ARGUMENT", parsed.error.issues.map((issue) => issue.path.join(".")).join("; "));
-  const context: ToolContext = { api, todos: {} as never, files: {} as never, signal, now: () => Date.parse(stamp) };
-  const result = await tool.run(parsed.data as never, context);
-  assert.ok(Buffer.byteLength(JSON.stringify(result), "utf8") <= 60_000, `${name} result exceeds the documented byte cap`);
-  return result;
+function chat(api: Sandbox, over: Partial<ThreadCaller> = {}): ThreadCaller {
+  return {
+    kind: "thread", threadId: "me", title: "Automate", projectPath: api.own, workspace: "acme", cwd: api.own, agentId: "claude", callId: "c1",
+    runtimeMode: "full-access", planning: false, workflowOwned: false, exchange: null, ...over
+  };
+}
+
+const ALL_TOOLSETS = new Set(TOOLSETS.map((toolset) => toolset.id));
+
+/** The tool through the executor: an external caller (parity) unless `who` is a chat. */
+async function exec(api: FakeDaemonApi, name: string, args: Record<string, unknown>, opts: { who?: ThreadCaller; port?: FakeApprovalPort; signal?: AbortSignal } = {}): Promise<CallToolResult> {
+  const deps: ExecutorDeps = { approvals: opts.port ?? null, enabledToolsets: async () => ALL_TOOLSETS, now: () => Date.parse(stamp) };
+  return executeToolCall(deps, { name, arguments: args }, { caller: opts.who ?? { kind: "external" }, api, signal: opts.signal ?? new AbortController().signal });
+}
+
+/** A successful result's record; a failed one thrown as its ToolError. */
+async function call(api: FakeDaemonApi, name: string, args: Record<string, unknown>, opts: { who?: ThreadCaller; port?: FakeApprovalPort; signal?: AbortSignal } = {}): Promise<Result> {
+  const result = await exec(api, name, args, opts);
+  const record = result.structuredContent as Result;
+  if (result.isError) throw new ToolError(String(record.code), String(record.message), record.detail);
+  assert.ok(Buffer.byteLength(JSON.stringify(record), "utf8") <= 60_000, `${name} result exceeds the documented byte cap`);
+  return record;
 }
 
 async function rejects(promise: Promise<unknown>, code: string, match?: RegExp): Promise<ToolError> {
   let caught: unknown;
   await promise.then(() => assert.fail(`expected ${code}`), (error) => { caught = error; });
   assert.ok(caught instanceof ToolError);
-  assert.equal(caught.code, code);
+  assert.equal(caught.code, code, caught.message);
   if (match) assert.match(caught.message, match);
   return caught;
 }
 
 const failure = (status: number, code: string, message: string, extra = {}) => ({ status, body: { error: { code, message, ...extra } } });
+const sectionText = (sections: readonly ApprovalPreviewSection[]): string => JSON.stringify(sections);
+
+// ---------------------------------------------------------------------------
+// Ported: the external tools' behaviour (parity)
+// ---------------------------------------------------------------------------
 
 test("list_workflow_block_types filters the requested block type", async (t) => {
   const api = await sandbox(t);
@@ -96,6 +133,8 @@ test("list_workflow_block_types returns a type's guide sections only when that t
   assert.deepEqual((one.types as Result[])[0]!.guide, guide);
   const all = await call(api, "list_workflow_block_types", {});
   assert.ok(!("guide" in (all.types as Result[])[0]!));
+  assert.match(String(all.authoringGuide), /get_workflow_runs/);
+  assert.doesNotMatch(String(all.authoringGuide), /get_workflow_run\b|list_workflow_runs|validate_workflow/);
 });
 
 test("list_workflow_block_types omits the largest schemas and identifies them", async (t) => {
@@ -132,7 +171,7 @@ test("create_workflow passes temp targets through and refuses unknown projects o
   await call(api, "create_workflow", { ...draft(), project });
   assert.deepEqual((api.calls.at(-1)!.body as { project: unknown }).project, project);
   await rejects(call(api, "create_workflow", { ...draft(), project: { kind: "existing", project: "acme/nope" } }), "PROJECT_NOT_FOUND");
-  for (const args of [{ ...draft(), bogus: 1 }, { ...draft(), nodes: [{ type: "code", nme: "Typo" }] }, { ...draft(), nodes: [{ type: "code", name: "1bad" }] }, { ...draft(), nodes: [{ type: "teleport" }] }]) {
+  for (const args of [{ ...draft(), bogus: 1 }, { ...draft(), nodes: [{ type: "code", nme: "Typo" }] }, { ...draft(), nodes: [{ type: "code", name: "1bad" }] }, { ...draft(), nodes: [{ type: "teleport" }] }, { ...draft(), reason: "chat only" }]) {
     await rejects(call(api, "create_workflow", args), "INVALID_ARGUMENT");
   }
 });
@@ -146,6 +185,28 @@ test("create_workflow identifies refused edges and exposes daemon validation pro
   const invalid = await rejects(call(api, "create_workflow", { ...draft(), enabled: true }), "INVALID_WORKFLOW", /shell_template/);
   assert.equal((invalid.detail as { errorCount: number }).errorCount, 1);
   assert.deepEqual((invalid.detail as { problems: { code: string }[] }).problems.map((problem) => problem.code), ["shell_template"]);
+});
+
+test("create_workflow {dryRun: true} validates the definition the create would save and saves nothing (was validate_workflow)", async (t) => {
+  const api = await sandbox(t);
+  api.on("POST", "/api/workflows/validate", { status: 200, body: { problems: [
+    { severity: "warning", code: "unreachable", message: "Unreachable block" },
+    { severity: "error", code: "cycle", message: "Cycle detected" }
+  ] } });
+  const result = await call(api, "create_workflow", { ...draft(), dryRun: true });
+  assert.equal(result.dryRun, true);
+  assert.equal(result.saved, false);
+  assert.equal(result.valid, false);
+  assert.equal(result.errorCount, 1);
+  assert.equal(result.warningCount, 1);
+  assert.deepEqual((result.problems as { code: string }[]).map((problem) => problem.code), ["cycle", "unreachable"]);
+  assert.equal(result.projects, "Project acme/api");
+  const sent = api.calls.find((c) => c.path === "/api/workflows/validate")!.body as { workflow: Workflow };
+  assert.deepEqual(sent.workflow.nodes.map((node) => node.name), ["Start", "Work"]);
+  assert.equal(sent.workflow.edges[0]!.source, sent.workflow.nodes[0]!.id, "edges by id, as the save has them");
+  assert.ok(!api.calls.some((c) => c.method === "POST" && c.path === "/api/workflows"), "nothing saved");
+  const refused = await rejects(call(api, "create_workflow", { ...draft(), edges: [{ source: "Start", target: "Nobody" }], dryRun: true }), "INVALID_WORKFLOW", /edges\[0\]/);
+  assert.equal((refused.detail as { entry: string }).entry, "edges[0]");
 });
 
 test("get_workflow selects a named block and incident edges and preserves missing-identity diagnostics", async (t) => {
@@ -189,27 +250,35 @@ test("update_workflow preserves conflict hints and recovers a legacy failing-op 
   assert.deepEqual(indexed.detail, { opIndex: 0, op: "remove_node" });
 });
 
-test("update_workflow validates op shapes and resolves project fields before sending the batch", async (t) => {
+test("update_workflow validates op shapes and resolves project fields (set_project, an update_node's projectOverride) before sending the batch", async (t) => {
   const api = await sandbox(t);
   api.on("POST", "/api/workflows/wf-1/patch", { status: 200, body: { workflow: definition(api), problems: [] } });
   for (const ops of [[{ op: "rename_node", from: "Work", to: "X" }], [{ op: "explode" }], [], [{ op: "disconnect", source: "Work" }]]) {
     await rejects(call(api, "update_workflow", { workflowId: "wf-1", revision: 7, ops }), "INVALID_ARGUMENT");
   }
-  await call(api, "update_workflow", { workflowId: "wf-1", revision: 7, ops: [{ op: "set_project", project: { kind: "existing", project: "acme/web" } }, { op: "disconnect", source: "Work", target: "Finish" }] });
-  assert.deepEqual(api.calls.at(-1)!.body, { revision: 7, ops: [{ op: "set_project", project: { kind: "existing", projectPath: join(api.workspacesDir, "acme", "web") } }, { op: "disconnect", source: "Work", target: "Finish" }] });
+  await call(api, "update_workflow", { workflowId: "wf-1", revision: 7, ops: [{ op: "set_project", project: { kind: "existing", project: "acme/web" } }, { op: "disconnect", source: "Work", target: "Finish" }, { op: "update_node", node: "Work", set: { projectOverride: "beta/app" } }] });
+  assert.deepEqual(api.calls.at(-1)!.body, { revision: 7, ops: [
+    { op: "set_project", project: { kind: "existing", projectPath: join(api.workspacesDir, "acme", "web") } },
+    { op: "disconnect", source: "Work", target: "Finish" },
+    { op: "update_node", node: "Work", set: { projectOverride: join(api.workspacesDir, "beta", "app") } }
+  ] });
+  await rejects(call(api, "update_workflow", { workflowId: "wf-1", revision: 7, ops: [{ op: "update_node", node: "Work", set: { projectOverride: "beta/none" } }] }), "PROJECT_NOT_FOUND");
 });
 
-test("validate_workflow reports invalid drafts with errors before warnings", async (t) => {
+test("update_workflow {dryRun: true}: the local replay of the ops is validated, the changes listed, nothing saved", async (t) => {
   const api = await sandbox(t);
-  api.on("POST", "/api/workflows/validate", { status: 200, body: { problems: [
-    { severity: "warning", code: "unreachable", message: "Unreachable block" },
-    { severity: "error", code: "cycle", message: "Cycle detected" }
-  ] } });
-  const result = await call(api, "validate_workflow", { workflow: { name: "Draft", nodes: [], edges: [] } });
-  assert.equal(result.valid, false);
-  assert.equal(result.errorCount, 1);
-  assert.equal(result.warningCount, 1);
-  assert.deepEqual((result.problems as { code: string }[]).map((problem) => problem.code), ["cycle", "unreachable"]);
+  serveDefinition(api);
+  const result = await call(api, "update_workflow", { workflowId: "wf-1", revision: 7, ops: [{ op: "rename_node", node: "Finish", to: "Done" }, { op: "update_node", node: "Work", set: { config: { source: "return 3" } } }], dryRun: true });
+  assert.equal(result.valid, true);
+  assert.equal(result.revision, 7);
+  assert.deepEqual(result.changes, [
+    { label: "code · Work", change: "changed", detail: "config.source" },
+    { label: "code · Finish → Done", change: "changed", detail: "name" }
+  ]);
+  assert.ok(!api.calls.some((c) => c.path.endsWith("/patch")), "nothing saved");
+  await rejects(call(api, "update_workflow", { workflowId: "wf-1", revision: 6, ops: [{ op: "set_enabled", enabled: true }], dryRun: true }), "REVISION_CONFLICT", /revision 7, not 6/);
+  const bad = await rejects(call(api, "update_workflow", { workflowId: "wf-1", revision: 7, ops: [{ op: "set_name", name: "X" }, { op: "remove_node", node: "Ghost" }], dryRun: true }), "INVALID_WORKFLOW", /ops\[1\] \(remove_node\)/);
+  assert.deepEqual(bad.detail, { opIndex: 1, op: "remove_node" });
 });
 
 test("list_workflows resolves the project filter and maps the daemon's summaries", async (t) => {
@@ -221,25 +290,34 @@ test("list_workflows resolves the project filter and maps the daemon's summaries
   const result = await call(api, "list_workflows", { project: "acme/api" });
   assert.deepEqual(result.workflows, [{ workflowId: "wf-1", name: "Demo", enabled: false, revision: 7, project: "acme/api", projectPath: join(api.workspacesDir, "acme", "api"), triggers: ["On demand"], nodeCount: 3, errorCount: 0, activeRuns: 1, updatedAt: stamp }]);
   assert.deepEqual(api.calls.at(-1)!.query, { projectPath: join(api.workspacesDir, "acme", "api") });
+  await call(api, "list_workflows", {});
+  assert.equal(api.calls.at(-1)!.query, undefined, "external: every workflow");
 });
 
-test("run_workflow maps run/overlap answers and sends input or force to the daemon", async (t) => {
+test("run_workflow maps run/overlap answers, needs the revision, and sends input or force to the daemon", async (t) => {
   const api = await sandbox(t);
+  serveDefinition(api);
   api.on("POST", "/api/workflows/wf-1/run", { status: 200, body: { runId: "run-1" } });
-  assert.equal((await call(api, "run_workflow", { workflowId: "wf-1", input: { ticket: "PROJ-1" } })).runId, "run-1");
-  assert.deepEqual(api.calls.at(-1)!.body, { input: { ticket: "PROJ-1" } });
+  api.on("GET", "/api/workflow-runs/run-1", { status: 200, body: { run: runRecord(definition(api)) } });
+  assert.equal((await call(api, "run_workflow", { workflowId: "wf-1", revision: 7, input: { ticket: "PROJ-1" } })).runId, "run-1");
+  assert.deepEqual(api.calls.find((c) => c.path === "/api/workflows/wf-1/run")!.body, { input: { ticket: "PROJ-1" } });
   api.on("POST", "/api/workflows/wf-1/run", { status: 200, body: { runId: null, skipped: "overlap" } });
-  const skipped = await call(api, "run_workflow", { workflowId: "wf-1" });
+  const skipped = await call(api, "run_workflow", { workflowId: "wf-1", revision: 7 });
   assert.equal(skipped.runId, null);
   assert.equal(skipped.skipped, "overlap");
-  await call(api, "run_workflow", { workflowId: "wf-1", force: true });
+  await call(api, "run_workflow", { workflowId: "wf-1", revision: 7, force: true });
   assert.deepEqual(api.calls.at(-1)!.body, { force: true });
-  await rejects(call(api, "run_workflow", { workflowId: "wf-1", timeoutSeconds: 601 }), "INVALID_ARGUMENT");
+  await rejects(call(api, "run_workflow", { workflowId: "wf-1", revision: 7, timeoutSeconds: 601 }), "INVALID_ARGUMENT");
+  await rejects(call(api, "run_workflow", { workflowId: "wf-1" }), "INVALID_ARGUMENT", /revision/);
+  const runsBefore = api.calls.filter((c) => c.path === "/api/workflows/wf-1/run").length;
+  await rejects(call(api, "run_workflow", { workflowId: "wf-1", revision: 6 }), "REVISION_CONFLICT", /revision 7, not 6/);
+  assert.equal(api.calls.filter((c) => c.path === "/api/workflows/wf-1/run").length, runsBefore, "a stale revision never starts a run");
 });
 
 test("run_workflow wait finishes on its event and returns block data in definition order", async (t) => {
   const api = await sandbox(t);
   t.mock.timers.enable({ apis: ["setTimeout"] });
+  serveDefinition(api);
   const run = runRecord(definition(api), "succeeded");
   run.blocks = {
     b: { nodeId: "b", name: "Finish", type: "code", status: "skipped", attempt: 1 },
@@ -249,7 +327,7 @@ test("run_workflow wait finishes on its event and returns block data in definiti
   run.finalOutput = { fixed: "PROJ-1" };
   api.on("POST", "/api/workflows/wf-1/run", { status: 200, body: { runId: "run-1" } });
   api.on("GET", "/api/workflow-runs/run-1", { status: 200, body: { run } });
-  const pending = call(api, "run_workflow", { workflowId: "wf-1", wait: true });
+  const pending = call(api, "run_workflow", { workflowId: "wf-1", revision: 7, wait: true });
   await tick();
   api.emit(busEvent("workflowRun.finished", { run: { id: "run-1", status: "succeeded" } }, "workflows"));
   const result = await pending;
@@ -270,9 +348,10 @@ test("run_workflow timeout returns the current run and releases its subscription
   t.mock.timers.enable({ apis: ["setTimeout"] });
   let clock = 0;
   t.mock.method(performance, "now", () => clock);
+  serveDefinition(api);
   api.on("POST", "/api/workflows/wf-1/run", { status: 200, body: { runId: "run-1" } });
   api.on("GET", "/api/workflow-runs/run-1", { status: 200, body: { run: runRecord(definition(api)) } });
-  const pending = call(api, "run_workflow", { workflowId: "wf-1", wait: true, timeoutSeconds: 1 });
+  const pending = call(api, "run_workflow", { workflowId: "wf-1", revision: 7, wait: true, timeoutSeconds: 1 });
   await tick();
   clock = 1_000;
   t.mock.timers.tick(1_000);
@@ -288,9 +367,10 @@ test("run_workflow wait rereads a silently finished run and releases its subscri
   t.mock.timers.enable({ apis: ["setTimeout"] });
   let clock = 0;
   t.mock.method(performance, "now", () => clock);
+  serveDefinition(api);
   api.on("POST", "/api/workflows/wf-1/run", { status: 200, body: { runId: "run-1" } });
   api.on("GET", "/api/workflow-runs/run-1", { status: 200, body: { run: runRecord(definition(api), "failed") } });
-  const pending = call(api, "run_workflow", { workflowId: "wf-1", wait: true, timeoutSeconds: 30 });
+  const pending = call(api, "run_workflow", { workflowId: "wf-1", revision: 7, wait: true, timeoutSeconds: 30 });
   await tick();
   clock = 10_000;
   t.mock.timers.tick(10_000);
@@ -298,14 +378,15 @@ test("run_workflow wait rereads a silently finished run and releases its subscri
   assert.equal(result.finished, true);
   assert.equal((result.run as { status: string }).status, "failed");
   const controller = new AbortController();
-  const aborted = call(api, "run_workflow", { workflowId: "wf-1", wait: true }, controller.signal);
+  const aborted = exec(api, "run_workflow", { workflowId: "wf-1", revision: 7, wait: true }, { signal: controller.signal });
   await tick();
   controller.abort();
-  assert.equal((await aborted).finished, false);
+  const answer = await aborted;
+  assert.ok(answer.isError ? (answer.structuredContent as { code: string }).code === "CANCELLED" : (answer.structuredContent as Result).finished === false);
   assert.equal(api.listenerCount(), 0);
 });
 
-test("get_workflow_run fits outputs and pages whole Unicode output without losing bytes", async (t) => {
+test("get_workflow_runs {runId} fits outputs and {runId, nodeId} pages whole Unicode output without losing bytes (was get_workflow_run)", async (t) => {
   const api = await sandbox(t);
   const run = runRecord(definition(api), "succeeded");
   const huge = { text: '😀語é"\n'.repeat(15_000) };
@@ -316,29 +397,83 @@ test("get_workflow_run fits outputs and pages whole Unicode output without losin
   api.on("GET", "/api/workflow-runs/run-1", { status: 200, body: { run } });
   api.on("GET", "/api/workflow-runs/run-1/nodes/a/output", { status: 200, body: { output: huge } });
   api.on("GET", "/api/workflow-runs/run-1/nodes/b/output", { status: 200, body: { output: { done: true } } });
-  const result = await call(api, "get_workflow_run", { runId: "run-1" });
+  const result = await call(api, "get_workflow_runs", { runId: "run-1" });
   const blocks = result.blocks as { output?: unknown; outputText?: string; outputTruncated?: boolean }[];
   assert.equal(blocks[0]!.output, undefined);
   assert.equal(blocks[0]!.outputTruncated, true);
   assert.ok(blocks[0]!.outputText!.startsWith('{"text":"😀語é'));
   assert.deepEqual(blocks[1]!.output, { done: true });
   assert.equal(blocks[1]!.outputTruncated, true);
-  const bare = await call(api, "get_workflow_run", { runId: "run-1", includeOutputs: false });
+  assert.match(String(result.outputNote), /get_workflow_runs \{runId, nodeId\}/);
+  const bare = await call(api, "get_workflow_runs", { runId: "run-1", includeOutputs: false });
   assert.deepEqual((bare.blocks as { nodeId: string }[]).map((block) => block.nodeId), ["a", "b"]);
   assert.ok((bare.blocks as { output?: unknown }[]).every((block) => block.output === undefined));
   let text = "";
   let offset = 0;
   for (let page = 0; page < 10; page += 1) {
-    const window = await call(api, "get_workflow_run", { runId: "run-1", nodeId: "Work", outputOffset: offset });
+    const window = await call(api, "get_workflow_runs", { runId: "run-1", nodeId: "Work", outputOffset: offset });
     text += window.outputText as string;
     if (window.nextOffset === undefined) break;
     offset = window.nextOffset as number;
   }
   assert.deepEqual(JSON.parse(text), huge);
-  assert.deepEqual((await call(api, "get_workflow_run", { runId: "run-1", nodeId: "Finish" })).output, { done: true });
-  await rejects(call(api, "get_workflow_run", { runId: "run-1", nodeId: "Ghost" }), "NODE_NOT_FOUND", /Work/);
+  assert.deepEqual((await call(api, "get_workflow_runs", { runId: "run-1", nodeId: "Finish" })).output, { done: true });
+  await rejects(call(api, "get_workflow_runs", { runId: "run-1", nodeId: "Ghost" }), "NODE_NOT_FOUND", /Work/);
   api.on("GET", "/api/workflow-runs/run-9", failure(404, "RUN_NOT_FOUND", "Missing"));
-  await rejects(call(api, "get_workflow_run", { runId: "run-9" }), "RUN_NOT_FOUND", /list_workflow_runs/);
+  await rejects(call(api, "get_workflow_runs", { runId: "run-9" }), "RUN_NOT_FOUND", /get_workflow_runs \{workflowId\}/);
+});
+
+test("get_workflow_runs {workflowId} pages a workflow's runs (was list_workflow_runs); runId-only fields need a runId", async (t) => {
+  const api = await sandbox(t);
+  api.on("GET", "/api/workflows/wf-1/runs", { status: 200, body: { runs: [runRecord(definition(api), "succeeded")], before: "cursor-2" } });
+  const page = await call(api, "get_workflow_runs", { workflowId: "wf-1", limit: 5, before: "cursor-1" });
+  assert.deepEqual(api.calls.at(-1)!.query, { limit: "5", before: "cursor-1" });
+  assert.deepEqual((page.runs as { runId: string; status: string }[]).map((r) => [r.runId, r.status]), [["run-1", "succeeded"]]);
+  assert.equal(page.before, "cursor-2");
+  await rejects(call(api, "get_workflow_runs", {}), "INVALID_ARGUMENT", /workflowId .* or runId/);
+  await rejects(call(api, "get_workflow_runs", { workflowId: "wf-1", nodeId: "Work", waitSeconds: 5 }), "INVALID_ARGUMENT", /nodeId, waitSeconds need runId/);
+  await rejects(call(api, "get_workflow_runs", { runId: "run-1", log: "stdout" }), "INVALID_ARGUMENT", /log needs nodeId/);
+  await rejects(call(api, "get_workflow_runs", { runId: "run-1", waitSeconds: 601 }), "INVALID_ARGUMENT");
+});
+
+test("get_workflow_runs {runId, waitSeconds} waits on the bus for an active run to end (watch), and returns at once for an ended one", async (t) => {
+  const api = await sandbox(t);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let run = runRecord(definition(api), "running");
+  api.on("GET", "/api/workflow-runs/run-1", () => ({ status: 200, body: { run } }));
+  const pending = call(api, "get_workflow_runs", { runId: "run-1", waitSeconds: 120 });
+  await tick();
+  run = runRecord(definition(api), "succeeded");
+  api.emit(busEvent("workflowRun.finished", { run: { id: "run-1", status: "succeeded" } }, "workflows"));
+  const result = await pending;
+  assert.equal(result.finished, true);
+  assert.equal((result.run as { status: string }).status, "succeeded");
+  assert.equal(api.listenerCount(), 0);
+  const again = await call(api, "get_workflow_runs", { runId: "run-1", waitSeconds: 120 });
+  assert.equal(again.finished, true);
+  assert.equal(api.listenerCount(), 0);
+});
+
+test("get_workflow_runs {runId, nodeId, log} reads a block's stdout/stderr (debug): the tail by default, then paged; secrets stay masked", async (t) => {
+  const api = await sandbox(t);
+  const run = runRecord(definition(api), "failed");
+  run.blocks = { a: { nodeId: "a", name: "Work", type: "shell", status: "failed", attempt: 1, error: { kind: "exit_code", message: "exit 1" }, logs: { stdoutBytes: 100_000, stderrBytes: 12 } } };
+  api.on("GET", "/api/workflow-runs/run-1", { status: 200, body: { run } });
+  api.on("GET", "/api/workflow-runs/run-1/nodes/a/log", ({ query }) => ({ status: 200, body: query?.stream === "stderr" ? "boom «secret:JIRA_AUTH»" : "o".repeat(Number(query?.maxBytes)) }));
+  const tail = await call(api, "get_workflow_runs", { runId: "run-1", nodeId: "Work", log: "stdout" });
+  const query = api.calls.at(-1)!.query!;
+  assert.equal(query.stream, "stdout");
+  assert.equal(Number(query.offset) + Number(query.maxBytes), 100_000, "the default window ends at the log's end");
+  assert.equal(tail.offset, Number(query.offset));
+  assert.equal(tail.logBytes, 100_000);
+  assert.equal(tail.nextOffset, undefined);
+  const head = await call(api, "get_workflow_runs", { runId: "run-1", nodeId: "Work", log: "stdout", outputOffset: 0 });
+  assert.equal(head.offset, 0);
+  assert.equal(head.nextOffset, (head.text as string).length, "an unredacted window's next offset is exact");
+  const err = await call(api, "get_workflow_runs", { runId: "run-1", nodeId: "Work", log: "stderr" });
+  assert.equal(err.text, "boom «secret:JIRA_AUTH»");
+  assert.equal(err.offsetsApproximate, true);
+  assert.equal((err.block as { error: { kind: string } }).error.kind, "exit_code");
 });
 
 test("delete_workflow needs confirm: true", async (t) => {
@@ -349,19 +484,24 @@ test("delete_workflow needs confirm: true", async (t) => {
   assert.deepEqual(await call(api, "delete_workflow", { workflowId: "wf-1", confirm: true }), { deleted: true, workflowId: "wf-1" });
 });
 
-test("secrets are write-only and scoped; malformed or oversized secret inputs are refused", async (t) => {
+test("secrets are write-only and scoped; external callers set with value or delete; malformed or oversized secret inputs are refused", async (t) => {
   const api = await sandbox(t);
   api.on("PUT", "/api/workflow-secrets/*", { status: 200, body: { ok: true } });
+  api.on("DELETE", "/api/workflow-secrets/*", { status: 204, body: null });
   assert.deepEqual(await call(api, "set_workflow_secret", { name: "TOKEN", value: "must-stay-private" }), { set: true, name: "TOKEN", scope: "global" });
   const short = await call(api, "set_workflow_secret", { name: "PIN", value: "12", workflowId: "wf-1" });
   assert.ok(short.warning);
   assert.deepEqual(api.calls.at(-1)!.query, { workflowId: "wf-1" });
+  assert.deepEqual(await call(api, "set_workflow_secret", { name: "OLD", delete: true, workflowId: "wf-1" }), { deleted: true, name: "OLD", scope: "workflow", workflowId: "wf-1" });
+  assert.deepEqual(api.calls.at(-1), { method: "DELETE", path: "/api/workflow-secrets/OLD", query: { workflowId: "wf-1" } });
   api.on("GET", "/api/workflow-secrets", { status: 200, body: { secrets: [{ name: "TOKEN", scope: "global", updatedAt: stamp, value: "must-stay-private" }] } });
   const listed = await call(api, "list_workflow_secrets", { workflowId: "wf-1" });
   assert.deepEqual(listed.secrets, [{ name: "TOKEN", scope: "global", updatedAt: stamp }]);
   assert.deepEqual(api.calls.at(-1)!.query, { workflowId: "wf-1" });
   await rejects(call(api, "set_workflow_secret", { name: "lower", value: "x" }), "INVALID_ARGUMENT");
   await rejects(call(api, "set_workflow_secret", { name: "BIG", value: "x".repeat(64 * 1024 + 1) }), "INVALID_ARGUMENT");
+  await rejects(call(api, "set_workflow_secret", { name: "NONE" }), "INVALID_ARGUMENT", /value is required/);
+  await rejects(call(api, "set_workflow_secret", { name: "BOTH", value: "v", delete: true }), "INVALID_ARGUMENT", /not both/);
 });
 
 test("get_workflow maps workflow errors, bounds problem detail and hides internal failures", async (t) => {
@@ -425,7 +565,7 @@ test("preview_expression sends one request per call and names the templates it r
   api.on("POST", "/api/workflows/wf-1/expression-preview", failure(404, "NODE_NOT_FOUND", "No block Nobody."));
   await rejects(call(api, "preview_expression", { workflowId: "wf-1", template: "x", node: "Nobody" }), "NODE_NOT_FOUND", /get_workflow lists/);
   api.on("POST", "/api/workflows/wf-1/expression-preview", failure(404, "RUN_NOT_FOUND", "No run."));
-  await rejects(call(api, "preview_expression", { workflowId: "wf-1", template: "x", runId: "gone" }), "RUN_NOT_FOUND", /list_workflow_runs/);
+  await rejects(call(api, "preview_expression", { workflowId: "wf-1", template: "x", runId: "gone" }), "RUN_NOT_FOUND", /get_workflow_runs/);
 });
 
 test("preview_expression fits large renders, values and outlines under the result cap", async (t) => {
@@ -454,4 +594,318 @@ test("preview_expression fits large renders, values and outlines under the resul
   assert.equal((result.available as Result).keysOmitted, true);
   assert.deepEqual(((result.available as Result).nodes as Record<string, Result>).Block0, { status: "succeeded", output: { type: "object" } });
   assert.ok(Array.isArray(result.truncatedFields));
+});
+
+// ---------------------------------------------------------------------------
+// The project union (§4.1, D-25)
+// ---------------------------------------------------------------------------
+
+test("workflowUnion: the project, every projectOverride, a temp project's workspace and each sub-workflow's own (recursively); removed members are listed, not refused", async (t) => {
+  const api = await sandbox(t);
+  const child = definition(api, { id: "wf-child", name: "Child", project: { kind: "temp", workspace: "beta", source: { kind: "empty" } }, nodes: [
+    { id: "x", name: "There", type: "code", position: { x: 0, y: 0 }, config: { source: "1" }, projectOverride: api.other },
+    { id: "y", name: "Again", type: "workflow", position: { x: 0, y: 0 }, config: { workflowId: "wf-1" } }
+  ] });
+  api.on("GET", "/api/workflows/wf-child", { status: 200, body: { workflow: child, problems: [] } });
+  api.on("GET", "/api/workflows/wf-ghost", failure(404, "WORKFLOW_NOT_FOUND", "gone"));
+  const parent = definition(api, { nodes: [
+    ...definition(api).nodes,
+    { id: "o", name: "Web", type: "code", position: { x: 0, y: 0 }, config: { source: "2" }, projectOverride: join(api.workspacesDir, "acme", "web") },
+    { id: "g", name: "Gone", type: "code", position: { x: 0, y: 0 }, config: { source: "3" }, projectOverride: join(api.workspacesDir, "acme", "removed") },
+    { id: "s", name: "Sub", type: "workflow", position: { x: 0, y: 0 }, config: { workflowId: "wf-child" } },
+    { id: "z", name: "Nowhere", type: "workflow", position: { x: 0, y: 0 }, config: { workflowId: "wf-ghost" } }
+  ] as Workflow["nodes"] });
+  const union = await workflowUnion(api, [parent]);
+  assert.deepEqual(union.projects, [api.own, api.same, api.other]);
+  assert.deepEqual(union.pendingWorkspaces, ["beta"]);
+  assert.deepEqual(union.missing, [join(api.workspacesDir, "acme", "removed")]);
+  assert.deepEqual(union.children.map((c) => [c.workflowId, c.name]), [["wf-child", "Child"], ["wf-ghost", null]]);
+  assert.equal(api.calls.filter((c) => c.path === "/api/workflows/wf-1").length, 0, "the parent itself is never re-read (a cycle stops)");
+});
+
+test("a chat create's scope is the union: another project makes the Admin card ungrantable even in Full access, and the card names each workspace's git identity", async (t) => {
+  const api = await sandbox(t);
+  serveDefinition(api);
+  const port = new FakeApprovalPort({ outcome: "approved", approvalId: "" });
+  const own = await call(api, "create_workflow", { ...draft(), reason: "nightly checks" }, { who: chat(api), port });
+  assert.equal(own.created, true);
+  assert.deepEqual(port.cards[0]!.grantOptions, ["chat"], "own project only: the workflows chat grant is offered");
+  assert.equal(port.cards[0]!.reason, "nightly checks");
+  const nodes = [...draft().nodes, { type: "code", name: "Elsewhere", projectOverride: "beta/app", config: { source: "1" } }];
+  await call(api, "create_workflow", { ...draft(), nodes }, { who: chat(api), port });
+  const card = port.cards[1]!;
+  assert.deepEqual(card.grantOptions, [], "a union beyond the caller's project is never grantable");
+  assert.deepEqual(card.scope.projects?.map((p) => [p.path, p.gitAccountLabel]), [[api.own, "acme-bot"], [api.other, "beta-bot"]]);
+  const temp = { kind: "temp", workspace: "beta", source: { kind: "empty" } };
+  await call(api, "create_workflow", { ...draft(), project: temp }, { who: chat(api), port });
+  assert.deepEqual(port.cards[2]!.grantOptions, []);
+  assert.deepEqual(port.cards[2]!.pendingProjects, [{ workspace: "beta" }]);
+  assert.match(sectionText(port.cards[2]!.sections), /temporary project in workspace beta.*git: beta-bot/);
+});
+
+// ---------------------------------------------------------------------------
+// Previews (§7.1) and PREVIEW_TOO_LARGE
+// ---------------------------------------------------------------------------
+
+test("a create card is complete: triggers, code and shell in full, the whole HTTP request, agent prompts in full incl. a saved prompt's body by title, the union, validation problems", async (t) => {
+  const api = await sandbox(t);
+  serveDefinition(api);
+  const body = "Review {project}.\n".repeat(400);
+  api.on("GET", "/api/saved-prompts", ({ query }) => ({ status: 200, body: { prompts: query?.projectPath === api.own ? [{ id: "p1", title: "Review checklist", body, projectPath: api.own }] : [] } }));
+  api.on("POST", "/api/workflows/validate", { status: 200, body: { problems: [{ severity: "warning", code: "unreachable", message: "Notes is unreachable" }] } });
+  const source = `export default async function () {\n${"  step();\n".repeat(3_000)}}`;
+  const port = new FakeApprovalPort({ outcome: "denied", approvalId: "", reason: "not now" });
+  const denied = await exec(api, "create_workflow", {
+    name: "Nightly",
+    project: { kind: "existing", project: "acme/api" },
+    nodes: [
+      { type: "trigger.schedule", name: "Nightly", config: { preset: { kind: "daily", time: "03:00" }, cron: "0 3 * * *" } },
+      { type: "code", name: "Prepare", config: { source } },
+      { type: "shell", name: "Build", config: { script: "make all\n./deploy.sh", env: [{ name: "TOKEN", value: "{{ secrets.DEPLOY_TOKEN }}" }] } },
+      { type: "http", name: "Notify", config: { method: "POST", url: "https://hooks.example.com/x", headers: [{ name: "Authorization", value: "Bearer {{ secrets.HOOK }}" }], body: { kind: "json", value: "{\"ok\":true}" } } },
+      { type: "agent", name: "Fix", config: { prompt: { kind: "text", text: "Fix every failing test.\nThen commit." }, chain: [{ agent: "claude", model: "opus", accounts: { strategy: "fixed", accounts: ["acct-1"] } }] } },
+      { type: "agent", name: "Review", config: { prompt: { kind: "saved", promptId: "p1", append: "Be brief." }, chain: [{ agent: "codex", model: "gpt-5" }] } }
+    ],
+    edges: [{ source: "Nightly", target: "Prepare" }, { source: "Prepare", target: "Build" }]
+  }, { who: chat(api), port });
+  assert.equal((denied.structuredContent as { code: string }).code, "APPROVAL_DENIED");
+  assert.match((denied.structuredContent as { message: string }).message, /not now/);
+  assert.ok(!api.calls.some((c) => c.method === "POST" && c.path === "/api/workflows"), "denied: nothing created");
+  const card = port.cards[0]!;
+  assert.equal(card.kind, "admin");
+  assert.equal(card.family, "workflows");
+  assert.equal(card.title, "Claude wants to create the workflow \"Nightly\"");
+  const find = (title: RegExp) => card.sections.find((s) => "title" in s && typeof s.title === "string" && title.test(s.title));
+  assert.match((find(/^Triggers$/) as { text: string }).text, /Nightly: /);
+  assert.equal((find(/^Code · Prepare/) as { text: string }).text, source, "code in full");
+  assert.equal((find(/^Shell \(bash\) · Build/) as { text: string }).text, "make all\n./deploy.sh");
+  assert.deepEqual((find(/^Shell environment · Build/) as { rows: unknown[] }).rows, [{ label: "env TOKEN", value: "{{ secrets.DEPLOY_TOKEN }}" }]);
+  const http = find(/^HTTP · Notify/) as { rows: { label: string; value: string }[] };
+  assert.deepEqual(http.rows.slice(0, 2), [{ label: "Request", value: "POST https://hooks.example.com/x" }, { label: "Header Authorization", value: "Bearer {{ secrets.HOOK }}" }]);
+  assert.equal((find(/^HTTP body \(json\) · Notify/) as { text: string }).text, "{\"ok\":true}");
+  assert.equal((find(/^Prompt · Fix/) as { text: string }).text, "Fix every failing test.\nThen commit.");
+  assert.match(JSON.stringify(find(/^Agent · Fix/)), /claude · opus · fixed, accounts acct-1/);
+  const saved = find(/^Saved prompt "Review checklist" · Review/) as { text: string; sha256: string };
+  assert.equal(saved.text, body, "a saved prompt's whole current body");
+  assert.equal((find(/^Appended to the prompt · Review/) as { text: string }).text, "Be brief.");
+  assert.match(sectionText([find(/^Runs in these projects/)!]), /acme\/api \(this chat's project\).*git: acme-bot \(acmebot\)/);
+  assert.match(sectionText(card.sections), /Notes is unreachable/);
+  assert.match(sectionText(card.sections), /Prepare → Build/);
+});
+
+test("PREVIEW_TOO_LARGE: a change whose whole preview passes 1 MiB is refused before any card", async (t) => {
+  const api = await sandbox(t);
+  serveDefinition(api);
+  const port = new FakeApprovalPort();
+  // Each block within the daemon's 512 KiB source limit; together over the 1 MiB preview cap.
+  const big = "x".repeat(400 * 1024);
+  const nodes = ["A", "B", "C"].map((name) => ({ type: "code", name, config: { source: big } }));
+  const result = await exec(api, "create_workflow", { ...draft(), nodes, edges: [] }, { who: chat(api), port });
+  assert.equal((result.structuredContent as { code: string }).code, "PREVIEW_TOO_LARGE");
+  assert.equal(port.cards.length, 0);
+});
+
+test("an update card shows the ops, the graph diff and the changed blocks in full (unchanged ones listed); enabling shows every block", async (t) => {
+  const api = await sandbox(t);
+  serveDefinition(api);
+  api.on("POST", "/api/workflows/wf-1/patch", { status: 200, body: { workflow: definition(api, { revision: 8 }), problems: [] } });
+  const port = new FakeApprovalPort();
+  await call(api, "update_workflow", { workflowId: "wf-1", revision: 7, ops: [{ op: "update_node", node: "Work", set: { config: { source: "return 42" } } }, { op: "add_node", node: { type: "code", name: "Extra", config: { source: "return 'new'" } } }, { op: "connect", source: "Finish", target: "Extra" }] }, { who: chat(api), port });
+  const card = port.cards[0]!;
+  assert.equal(card.title, "Claude wants to change the workflow \"Demo\"");
+  assert.equal(card.workflowId, "wf-1");
+  const changes = card.sections.find((s) => s.kind === "changes") as { items: { label: string; change: string; detail?: string }[] };
+  assert.deepEqual(changes.items, [
+    { label: "code · Work", change: "changed", detail: "config.source" },
+    { label: "code · Extra", change: "added" },
+    { label: "connection Finish → Extra", change: "added" }
+  ]);
+  const diff = card.sections.find((s) => s.kind === "diff" && s.title === "Block Work") as { unifiedDiff: string };
+  assert.match(diff.unifiedDiff, /^-.*return 1; \}"$/m);
+  assert.match(diff.unifiedDiff, /^\+ +"source": "return 42"$/m);
+  assert.ok(card.sections.some((s) => s.kind === "code" && s.title === "Ops"));
+  assert.ok(card.sections.some((s) => s.kind === "code" && s.title === "Code · Extra" && s.text === "return 'new'"));
+  assert.ok(!card.sections.some((s) => s.kind === "code" && s.title === "Code · Finish"), "an unchanged block is listed, not shown");
+  assert.match(sectionText(card.sections), /Unchanged blocks.*code · Finish/);
+  assert.deepEqual(card.grantOptions, ["chat"]);
+  await call(api, "update_workflow", { workflowId: "wf-1", revision: 7, ops: [{ op: "set_enabled", enabled: true }] }, { who: chat(api), port });
+  const enable = port.cards[1]!;
+  assert.equal(enable.title, "Claude wants to enable the workflow \"Demo\"");
+  assert.equal(enable.sections[0]!.kind, "warning");
+  assert.ok(enable.sections.some((s) => s.kind === "code" && s.title === "Code · Finish"), "enabling arms every block: all shown");
+});
+
+test("an update or create the daemon would refuse is refused before any card: a stale revision, a failing op, enabling with errors", async (t) => {
+  const api = await sandbox(t);
+  serveDefinition(api);
+  const port = new FakeApprovalPort();
+  await rejects(call(api, "update_workflow", { workflowId: "wf-1", revision: 6, ops: [{ op: "set_name", name: "X" }] }, { who: chat(api), port }), "REVISION_CONFLICT");
+  await rejects(call(api, "update_workflow", { workflowId: "wf-1", revision: 7, ops: [{ op: "remove_node", node: "Ghost" }] }, { who: chat(api), port }), "INVALID_WORKFLOW", /ops\[0\]/);
+  api.on("POST", "/api/workflows/validate", { status: 200, body: { problems: [{ severity: "error", code: "cycle", message: "Cycle" }] } });
+  await rejects(call(api, "update_workflow", { workflowId: "wf-1", revision: 7, ops: [{ op: "set_enabled", enabled: true }] }, { who: chat(api), port }), "INVALID_WORKFLOW", /enabled workflow cannot have errors/);
+  await rejects(call(api, "create_workflow", { ...draft(), enabled: true }, { who: chat(api), port }), "INVALID_WORKFLOW", /cycle/);
+  assert.equal(port.cards.length, 0);
+});
+
+test("delete and run cards: what is removed; the run's revision, enabled state and input", async (t) => {
+  const api = await sandbox(t);
+  serveDefinition(api, definition(api, { enabled: true }));
+  api.on("GET", "/api/workflows/wf-1/runs", ({ query }) => ({ status: 200, body: query?.before ? { runs: [runRecord(definition(api), "failed")], before: null } : { runs: [runRecord(definition(api)), runRecord(definition(api), "succeeded")], before: "c2" } }));
+  api.on("GET", "/api/workflow-secrets", { status: 200, body: { secrets: [{ name: "GLOBAL", scope: "global", updatedAt: stamp }, { name: "OWN", scope: "workflow", workflowId: "wf-1", updatedAt: stamp }] } });
+  api.on("DELETE", "/api/workflows/wf-1", { status: 200, body: { ok: true } });
+  const port = new FakeApprovalPort();
+  await call(api, "delete_workflow", { workflowId: "wf-1", confirm: true }, { who: chat(api), port });
+  const del = port.cards[0]!;
+  assert.match(sectionText(del.sections), /cancels its 1 active run\(s\) and removes its 3 recorded run\(s\) and 1 own secret/);
+  assert.match(sectionText(del.sections), /"Its own secrets","value":"OWN"/);
+  api.on("POST", "/api/workflows/wf-1/run", { status: 200, body: { runId: "run-1" } });
+  api.on("GET", "/api/workflow-runs/run-1", { status: 200, body: { run: runRecord(definition(api)) } });
+  await call(api, "run_workflow", { workflowId: "wf-1", revision: 7, input: { ticket: "PROJ-9" }, force: true }, { who: chat(api), port });
+  const run = port.cards[1]!;
+  assert.equal(run.title, "Claude wants to run the workflow \"Demo\"");
+  assert.equal(run.workflowId, "wf-1");
+  assert.match(sectionText(run.sections), /"Revision","value":"7".*"Enabled","value":"yes".*force/);
+  assert.ok(run.sections.some((s) => s.kind === "code" && s.text === JSON.stringify({ ticket: "PROJ-9" }, null, 2)));
+  await rejects(call(api, "run_workflow", { workflowId: "wf-1", revision: 5 }, { who: chat(api), port }), "REVISION_CONFLICT");
+  assert.equal(port.cards.length, 2, "a stale revision never reaches the user");
+});
+
+// ---------------------------------------------------------------------------
+// Pins (§7.2): what is approved is what runs
+// ---------------------------------------------------------------------------
+
+test("PREVIEW_STALE: the workflow edited while its update or run card waited — nothing written, no run", async (t) => {
+  const api = await sandbox(t);
+  let current = definition(api);
+  api.on("GET", "/api/workflows/wf-1", () => ({ status: 200, body: { workflow: current, problems: [] } }));
+  api.on("POST", "/api/workflows/wf-1/patch", { status: 200, body: { workflow: current, problems: [] } });
+  api.on("POST", "/api/workflows/wf-1/run", { status: 200, body: { runId: "run-1" } });
+  const port = new FakeApprovalPort(() => {
+    current = definition(api, { revision: 8, name: "Edited by the user" });
+    return { outcome: "approved", approvalId: "" };
+  });
+  await rejects(call(api, "update_workflow", { workflowId: "wf-1", revision: 7, ops: [{ op: "set_name", name: "Mine" }] }, { who: chat(api), port }), "PREVIEW_STALE", /revision 7 → 8/);
+  assert.ok(!api.calls.some((c) => c.path === "/api/workflows/wf-1/patch"));
+  current = definition(api);
+  await rejects(call(api, "run_workflow", { workflowId: "wf-1", revision: 7 }, { who: chat(api), port }), "PREVIEW_STALE");
+  assert.ok(!api.calls.some((c) => c.path === "/api/workflows/wf-1/run"));
+  // The race past the check: the run froze another revision → cancelled at once, PREVIEW_STALE.
+  current = definition(api);
+  port.answerWith({ outcome: "approved", approvalId: "" });
+  api.on("GET", "/api/workflow-runs/run-1", { status: 200, body: { run: runRecord(definition(api, { revision: 9 })) } });
+  api.on("POST", "/api/workflow-runs/run-1/cancel", { status: 200, body: { cancelled: true } });
+  await rejects(call(api, "run_workflow", { workflowId: "wf-1", revision: 7 }, { who: chat(api), port }), "PREVIEW_STALE", /run-1 was cancelled/);
+  assert.ok(api.calls.some((c) => c.path === "/api/workflow-runs/run-1/cancel"));
+  // A patch refused for its revision after the card is PREVIEW_STALE too.
+  api.on("POST", "/api/workflows/wf-1/patch", failure(409, "REVISION_CONFLICT", "Stale"));
+  await rejects(call(api, "update_workflow", { workflowId: "wf-1", revision: 7, ops: [{ op: "set_name", name: "Mine" }] }, { who: chat(api), port }), "PREVIEW_STALE");
+});
+
+test("PREVIEW_STALE: a saved prompt the card showed in full changed before the write", async (t) => {
+  const api = await sandbox(t);
+  serveDefinition(api);
+  let body = "Original body";
+  api.on("GET", "/api/saved-prompts", () => ({ status: 200, body: { prompts: [{ id: "p1", title: "Shared", body, projectPath: null }] } }));
+  const port = new FakeApprovalPort(() => {
+    body = "Swapped body";
+    return { outcome: "approved", approvalId: "" };
+  });
+  const nodes = [{ type: "trigger.manual", name: "Go" }, { type: "agent", name: "Ask", config: { prompt: { kind: "saved", promptId: "p1" }, chain: [{ agent: "claude", model: "opus" }] } }];
+  await rejects(call(api, "create_workflow", { ...draft(), nodes, edges: [] }, { who: chat(api), port }), "PREVIEW_STALE", /saved prompt "Shared"/);
+  assert.ok(!api.calls.some((c) => c.method === "POST" && c.path === "/api/workflows"));
+  assert.match(JSON.stringify(port.cards[0]!.sections), /Original body/);
+});
+
+// ---------------------------------------------------------------------------
+// Workflow secrets for chat callers (D-11)
+// ---------------------------------------------------------------------------
+
+test("set_workflow_secret from a chat: no value argument; the user types it into the card; it reaches the store and nowhere else; never grantable", async (t) => {
+  const api = await sandbox(t);
+  serveDefinition(api);
+  api.on("GET", "/api/workflow-secrets", { status: 200, body: { secrets: [] } });
+  api.on("PUT", "/api/workflow-secrets/*", { status: 200, body: { secrets: [] } });
+  api.on("DELETE", "/api/workflow-secrets/*", { status: 204, body: null });
+  const value = "s3cret-typed-by-the-user";
+  const port = new FakeApprovalPort({ outcome: "approved", approvalId: "", secrets: { value } });
+  // A chat agent can never send a value.
+  const sent = await exec(api, "set_workflow_secret", { name: "JIRA_TOKEN", value: "from-the-agent" }, { who: chat(api), port });
+  assert.equal((sent.structuredContent as { code: string }).code, "INVALID_ARGUMENT");
+  assert.equal(port.cards.length, 0);
+  const result = await call(api, "set_workflow_secret", { name: "JIRA_TOKEN", workflowId: "wf-1", reason: "the fixer needs Jira" }, { who: chat(api), port });
+  const card = port.cards[0]!;
+  assert.equal(card.family, "workflow-secrets");
+  assert.deepEqual(card.secretFields, [{ key: "value", label: "Value of JIRA_TOKEN" }]);
+  assert.deepEqual(card.grantOptions, [], "workflow secrets are never grantable, even in Full access");
+  const put = api.calls.find((c) => c.method === "PUT")!;
+  assert.deepEqual(put, { method: "PUT", path: "/api/workflow-secrets/JIRA_TOKEN", query: { workflowId: "wf-1" }, body: { value } });
+  assert.deepEqual(result, { set: true, name: "JIRA_TOKEN", scope: "workflow", workflowId: "wf-1" });
+  assert.ok(!JSON.stringify(result).includes(value) && !JSON.stringify(card).includes(value), "never in the result or the card");
+  // A global secret's card says so; a delete asks for no value.
+  await call(api, "set_workflow_secret", { name: "OLD", delete: true }, { who: chat(api), port });
+  assert.deepEqual(port.cards[1]!.secretFields, []);
+  assert.match(sectionText(port.cards[1]!.sections), /Global — every workflow's blocks can read it/);
+  // An approval that carries no value (an older client) writes nothing.
+  port.answerWith({ outcome: "approved", approvalId: "" });
+  await rejects(call(api, "set_workflow_secret", { name: "EMPTY" }, { who: chat(api), port }), "INVALID_ARGUMENT", /no value/);
+  assert.equal(api.calls.filter((c) => c.method === "PUT").length, 1);
+});
+
+// ---------------------------------------------------------------------------
+// The gate for chat callers: reads' scope, workflow-owned and planning callers
+// ---------------------------------------------------------------------------
+
+test("chat reads claim the workflow's home: list_workflows defaults to the caller's project; another workspace's workflow cards below Full access", async (t) => {
+  const api = await sandbox(t);
+  api.on("GET", "/api/workflows", { status: 200, body: { workflows: [] } });
+  const port = new FakeApprovalPort();
+  await call(api, "list_workflows", {}, { who: chat(api, { runtimeMode: "approval-required" }), port });
+  assert.deepEqual(api.calls.at(-1)!.query, { projectPath: api.own });
+  assert.equal(port.cards.length, 0);
+  await rejects(call(api, "list_workflows", {}, { who: chat(api, { projectPath: "", workspace: "" }), port }), "INVALID_ARGUMENT", /no project/);
+  serveDefinition(api, definition(api, { id: "wf-beta", project: { kind: "existing", projectPath: api.other } }));
+  await call(api, "get_workflow", { workflowId: "wf-beta" }, { who: chat(api), port });
+  assert.equal(port.cards.length, 0, "Full access reads another workspace's metadata");
+  await call(api, "get_workflow", { workflowId: "wf-beta" }, { who: chat(api, { runtimeMode: "auto" }), port });
+  assert.equal(port.cards[0]!.kind, "boundary");
+  assert.equal(port.cards[0]!.family, "cross-workspace-read");
+});
+
+test("workflow-owned callers get no Admin (ADMIN_NOT_AVAILABLE, no card); planning callers are refused Admin; dry runs stay available", async (t) => {
+  const api = await sandbox(t);
+  serveDefinition(api);
+  const port = new FakeApprovalPort();
+  for (const [name, args] of [["create_workflow", draft()], ["update_workflow", { workflowId: "wf-1", revision: 7, ops: [{ op: "set_enabled", enabled: false }] }], ["run_workflow", { workflowId: "wf-1", revision: 7 }], ["delete_workflow", { workflowId: "wf-1", confirm: true }], ["set_workflow_secret", { name: "X" }]] as const) {
+    await rejects(call(api, name, args as Record<string, unknown>, { who: chat(api, { workflowOwned: true }), port }), "ADMIN_NOT_AVAILABLE");
+    await rejects(call(api, name, args as Record<string, unknown>, { who: chat(api, { planning: true }), port }), "PERMISSION_DENIED", /planning/);
+  }
+  assert.equal(port.cards.length, 0);
+  assert.equal((await call(api, "create_workflow", { ...draft(), dryRun: true }, { who: chat(api, { workflowOwned: true }), port })).dryRun, true);
+});
+
+// ---------------------------------------------------------------------------
+// Pure helpers
+// ---------------------------------------------------------------------------
+
+test("unifiedDiff is exact for a change in the middle; graphDiff ignores canvas moves", async (t) => {
+  const api = await sandbox(t);
+  assert.equal(unifiedDiff("a\nb\nc", "a\nb\nc"), "");
+  assert.equal(unifiedDiff("1\n2\n3\n4\n5\n6\n7\n8", "1\n2\n3\n4\nX\n6\n7\n8"), "@@ -2,7 +2,7 @@\n 2\n 3\n 4\n-5\n+X\n 6\n 7\n 8");
+  const before = definition(api);
+  const moved = definition(api, { nodes: before.nodes.map((n) => ({ ...n, position: { x: 99, y: 99 } })) });
+  assert.deepEqual(graphDiff(before, moved, api.workspacesDir).touched.size, 0);
+});
+
+test("workflowsReferencingPrompt (for Task 12): every workflow whose agent blocks use the saved prompt, with those blocks", async (t) => {
+  const api = await sandbox(t);
+  const agent = (id: string, promptId: string) => ({ id, name: `Ask${id}`, type: "agent", position: { x: 0, y: 0 }, config: { prompt: { kind: "saved", promptId }, chain: [{ agent: "claude", model: "opus" }] } });
+  const uses = definition(api, { id: "wf-a", name: "Uses", nodes: [agent("1", "p1"), agent("2", "p2"), agent("3", "p1")] as Workflow["nodes"] });
+  const other = definition(api, { id: "wf-b", name: "Other", nodes: [agent("4", "p2")] as Workflow["nodes"] });
+  api.on("GET", "/api/workflows", { status: 200, body: { workflows: [{ id: "wf-a" }, { id: "wf-b" }, { id: "wf-gone" }] } });
+  api.on("GET", "/api/workflows/wf-a", { status: 200, body: { workflow: uses, problems: [] } });
+  api.on("GET", "/api/workflows/wf-b", { status: 200, body: { workflow: other, problems: [] } });
+  api.on("GET", "/api/workflows/wf-gone", failure(404, "WORKFLOW_NOT_FOUND", "gone"));
+  const found = await workflowsReferencingPrompt(api, "p1");
+  assert.deepEqual(found.map((use) => [use.workflowId, use.name, use.nodes.map((n) => n.name)]), [["wf-a", "Uses", ["Ask1", "Ask3"]]]);
+  assert.deepEqual(await workflowsReferencingPrompt(api, "p9"), []);
 });
