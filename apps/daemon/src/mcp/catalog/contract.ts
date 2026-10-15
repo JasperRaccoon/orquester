@@ -9,11 +9,13 @@
 
 import type { z } from "zod";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import type { AdminFamily, ApprovalFamily, ApprovalKind, ApprovalPreviewSection, ToolApprovalGrantScope, ToolsetId, ToolTier } from "@orquester/api";
+import type { AdminFamily, ApprovalFamily, ApprovalKind, ApprovalPreviewSection, TOOL_APPROVAL_LIMIT, ToolApprovalGrantScope, ToolsetId, ToolTier } from "@orquester/api";
 import type { AgentAdapterId, CausedBy, InteractionMode, RuntimeMode, ThreadMessageOrigin, ThreadReplyMode } from "@orquester/api/agent-chat";
 import type { AgentToolGrantQuery, AgentToolGrantRecord } from "@orquester/config";
 
 import type { DaemonApi } from "../daemon-api.ts";
+import type { FsTools } from "../fs-tools.ts";
+import type { TodoTools } from "../todo-tools.ts";
 import type { SessionSecretRequests } from "../../session-tools/contract.ts";
 
 export type { AdminFamily, ApprovalFamily, ApprovalKind, ToolsetId };
@@ -31,7 +33,9 @@ export type Tier = ToolTier;
 
 /**
  * The error codes the unified catalog adds (spec §4.3) to the existing ones (`INVALID_ARGUMENT`,
- * `THREAD_NOT_FOUND`, `PERMISSION_DENIED`, `WAIT_CYCLE`, …). Thrown as `ToolError(code, message)`.
+ * `THREAD_NOT_FOUND`, `PERMISSION_DENIED`, `CANCELLED`, and the wire's `WAIT_CYCLE`,
+ * `TARGET_BUSY`, `REPLY_SUBSCRIPTION_LIMIT` from `@orquester/api/agent-chat`). Thrown as
+ * `ToolError(code, message)`.
  */
 export const ORQUESTER_TOOL_ERROR_CODES = {
   /** The tool exists but its toolset is off in this chat; the message names the toolset and suggests `request_toolset`. */
@@ -53,8 +57,10 @@ export const ORQUESTER_TOOL_ERROR_CODES = {
   /** An Admin call from a workflow-owned chat (§5.4): never a card. */
   ADMIN_NOT_AVAILABLE: "ADMIN_NOT_AVAILABLE",
   /** `request_toolset` for a toolset the user denied in the last 30 minutes. */
-  TOOLSET_DECLINED: "TOOLSET_DECLINED"
-} as const;
+  TOOLSET_DECLINED: "TOOLSET_DECLINED",
+  /** `MAX_PENDING_TOOL_APPROVALS_PER_THREAD` cards already wait in this chat: wait for answers, batch changes. */
+  APPROVAL_LIMIT: "APPROVAL_LIMIT"
+} as const satisfies Record<string, string> & { APPROVAL_LIMIT: typeof TOOL_APPROVAL_LIMIT };
 export type OrquesterToolErrorCode = (typeof ORQUESTER_TOOL_ERROR_CODES)[keyof typeof ORQUESTER_TOOL_ERROR_CODES];
 
 // ---------------------------------------------------------------------------
@@ -158,6 +164,11 @@ export interface ApprovalPreview {
 
 /** One card the executor asks the port to show and wait on. */
 export interface ApprovalRequest {
+  /*
+   * The port re-checks what it can from these (defence in depth; the gate stays authoritative):
+   * grant options are narrowed to what the caller's CURRENT traits allow, with
+   * `pendingProjects` / `workflowReferencedPrompt` / other projects in `scope` never grantable.
+   */
   threadId: string;
   /** The caller's canonical project root ("" when it has none): the project a grant is recorded for. */
   callerProjectPath: string;
@@ -176,15 +187,29 @@ export interface ApprovalRequest {
   workflowId?: string;
   /** `cross-project` grants: the target project. */
   targetProjectPath?: string;
+  /** Kind `toolset` (`request_toolset`): the toolset the card turns on for the chat. Required for that kind. */
+  toolset?: ToolsetId;
+  /** `workflows` family raised by a saved-prompt edit a workflow references (`ApprovalPreview`): never grantable. */
+  workflowReferencedPrompt?: boolean;
+  /** `ScopeClaim.pendingProjects`: workflow temp projects not created yet, by workspace — never grantable. */
+  pendingProjects?: { workspace: string }[];
   /** Resolves once the call's result reached the host (the tool row's outcome `not_delivered` otherwise). */
   delivered?: Promise<boolean>;
 }
+
+/**
+ * Why a card ended `cancelled`: the waiting call went away (`aborted` — its signal), the chat tab
+ * `closed`, or Orquester is `restarting` (shutdown). Absent: unknown (an older port). The card's
+ * own deadline is never a cancellation: it ends `timed_out`.
+ */
+export type ApprovalCancelReason = "aborted" | "closed" | "restarting";
 
 /** How a card ended, for the waiting call. Secrets only on `approved`, for this one write. */
 export type ApprovalOutcome =
   | { outcome: "approved"; approvalId: string; grantId?: string; secrets?: Record<string, string> }
   | { outcome: "denied"; approvalId: string; reason?: string }
-  | { outcome: "timed_out" | "cancelled"; approvalId: string };
+  | { outcome: "timed_out"; approvalId: string }
+  | { outcome: "cancelled"; approvalId: string; reason?: ApprovalCancelReason };
 
 /** The executor's view of approvals and grants. */
 export interface ApprovalPort {
@@ -193,18 +218,39 @@ export interface ApprovalPort {
   /** Open a card and wait for the user, the deadline or `signal` (→ `cancelled`). */
   request(card: ApprovalRequest, signal: AbortSignal): Promise<ApprovalOutcome>;
   /**
-   * After an approved (or granted) `create_workflow` ran: add the new workflow's id to the chat's
-   * `workflows` grant (§7.6 — "a create approved under it adds the new id"), so later updates,
-   * runs and deletes of it are covered. `grantId`: the grant the approval created or matched; absent
-   * → the chat's existing `workflows` chat grant, if any. A no-op when there is none, when the caller
-   * is not `full-access`, or when the workflow's project union is not the caller's project.
+   * After an approved `create_workflow` ran: add the new workflow's id to the chat's `workflows`
+   * grant named by `grantId` — the approved outcome's `grantId` (the grant the approval created with
+   * `grant: "chat"`, or the one the card said the create would join). Called ONLY with that id:
+   * approving once never widens a standing grant (ruling). A no-op when `grantId` is not that chat's
+   * `workflows` chat grant in `callerProjectPath`, or when the caller is no longer `full-access`.
    */
-  recordWorkflowInGrant(input: { threadId: string; callerProjectPath: string; workflowId: string; grantId?: string }): Promise<void>;
+  recordWorkflowInGrant(input: { threadId: string; callerProjectPath: string; workflowId: string; grantId: string }): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
 // The call context
 // ---------------------------------------------------------------------------
+
+/** What `request_toolset` asks the executor to show (`CallContext.requestToolsetCard`). */
+export interface ToolsetCardInput {
+  toolset: ToolsetId;
+  /** One line, composed by the tool from structured data ("Claude asks to enable Workflow authoring for this chat"). */
+  title: string;
+  /** The toolset label, its tools with tiers. */
+  sections: ApprovalPreviewSection[];
+  /** The agent's reason, shown labelled as its words. */
+  reason?: string;
+}
+
+/**
+ * TEMPORARY (deleted with `catalog/legacy.ts` in Task 14): the todo and file services the external
+ * `/mcp`'s pre-catalog handlers take (`ToolContext.todos` / `.files`) until Tasks 9 and 12 route them
+ * through `DaemonApi`.
+ */
+export interface LegacyToolServices {
+  todos: TodoTools;
+  files: FsTools;
+}
 
 export interface CallContext {
   /** The daemon's own REST API, in-process: every gate the GUI meets applies by construction. */
@@ -223,6 +269,15 @@ export interface CallContext {
   };
   /** `request_secret`'s port; absent where none is wired (tests). */
   secretRequests?: SessionSecretRequests;
+  /**
+   * Chat callers only (absent for external ones): the ONE way a tool raises a toolset card
+   * (`request_toolset`, spec §9.3). The executor owns the `ApprovalPort`, so it opens the card for
+   * the calling chat — kind and family `toolset`, `ApprovalRequest.toolset` set, no grant options —
+   * and refuses a workflow-owned caller before any card (§5.4).
+   */
+  requestToolsetCard?(input: ToolsetCardInput): Promise<ApprovalOutcome>;
+  /** TEMPORARY: legacy external handlers only ({@link LegacyToolServices}); absent where none is wired. */
+  legacy?: LegacyToolServices;
   /** Set when the call passed a card or a grant. */
   approval?: {
     outcome: "approved" | "granted";

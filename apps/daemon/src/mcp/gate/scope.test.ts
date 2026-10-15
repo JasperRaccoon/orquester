@@ -122,6 +122,18 @@ test("workflow-owned: owner on the tab or any ancestor; a closed ancestor fails 
   assert.equal(isWorkflowOwned(sessions, "unknown"), true, "a thread with no tab fails closed");
 });
 
+test("workflow-owned: the inheritable lineage marker is proof on its own — even behind a GUI fork of a closed parent", () => {
+  const marked = { parentThreadId: "closed", relation: "fork" as const, createdAt: "x", workflowOwned: true as const };
+  const sessions = [
+    chatSummary({ id: "marked-fork", lineage: marked }),
+    chatSummary({ id: "kid", lineage: { parentThreadId: "marked-fork", relation: "fork", createdAt: "x" } }),
+    chatSummary({ id: "plain-fork", lineage: { ...marked, workflowOwned: undefined } })
+  ];
+  assert.equal(isWorkflowOwned(sessions, "marked-fork"), true, "without the marker this GUI fork of a closed parent would read as not owned");
+  assert.equal(isWorkflowOwned(sessions, "kid"), true, "a descendant of a marked thread is owned through the walk");
+  assert.equal(isWorkflowOwned(sessions, "plain-fork"), false);
+});
+
 test("a workflow's project union: names and paths, deduplicated and canonical; temp projects by workspace", async (t) => {
   const { ws, api } = await tree(t);
   const union = await workflowProjectUnion(api, { projects: ["acme/api", join(ws, "acme/api"), "beta/app"], pendingWorkspaces: ["acme", "acme"] });

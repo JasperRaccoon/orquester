@@ -38,6 +38,7 @@ import {
   TOOLSETS,
   type AgentToolGrant,
   type AgentToolsChangedPayload,
+  type AgentToolsErrorCode,
   type AgentToolsetView,
   type AgentToolsResponse,
   type GrantScope,
@@ -61,12 +62,8 @@ import {
 
 import { writeFileAtomic } from "../agent-hooks.ts";
 
-export type AgentToolsServiceErrorCode =
-  | "INVALID_ARGUMENT"
-  | "REVISION_MISMATCH"
-  | "GRANT_NOT_FOUND"
-  | "TOOLSET_LOCKED"
-  | "AGENT_TOOLS_UNAVAILABLE";
+/** The store's refusals: the wire's {@link AgentToolsErrorCode}s (a person-only write is the routes' own) plus `INVALID_ARGUMENT`. */
+export type AgentToolsServiceErrorCode = Exclude<AgentToolsErrorCode, "PERMISSION_DENIED"> | "INVALID_ARGUMENT";
 
 /** A refusal the routes answer verbatim: `status` with `{error: {code, message}}`. */
 export class AgentToolsError extends Error {

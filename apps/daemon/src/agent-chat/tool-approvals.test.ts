@@ -7,15 +7,15 @@ import { test } from "node:test";
 import Fastify from "fastify";
 import {
   ADMIN_APPROVAL_TIMEOUT_MS,
+  MAX_PENDING_TOOL_APPROVALS_PER_THREAD,
+  TOOL_APPROVAL_LIMIT,
   TOOL_APPROVAL_SUMMARY_MAX_BYTES,
   type AgentChatToolApprovalEventPayload,
   type CallerPrincipal
 } from "@orquester/api/agent-chat";
 
 import {
-  MAX_PENDING_TOOL_APPROVALS_PER_THREAD,
   registerToolApprovalRoutes,
-  TOOL_APPROVAL_LIMIT_CODE,
   ToolApprovalAnswerRefusal,
   ToolApprovalRegistry,
   type ToolApprovalClock,
@@ -135,13 +135,13 @@ test("cancel: the call's signal (abort, Stop, session end) ends the wait as canc
   const controller = new AbortController();
   const waiting = h.registry.open(card(), controller.signal);
   controller.abort();
-  assert.deepEqual(await waiting, { outcome: "cancelled", approvalId: "a1" });
+  assert.deepEqual(await waiting, { outcome: "cancelled", approvalId: "a1", reason: "aborted" });
   assert.deepEqual(h.events.at(-1), { threadId: "t1", closed: { approvalId: "a1", outcome: "cancelled" } });
   assert.equal(h.clock.armed, 0);
   // An already-aborted signal opens no card.
   const pre = new AbortController();
   pre.abort();
-  assert.equal((await h.registry.open(card(), pre.signal)).outcome, "cancelled");
+  assert.deepEqual(await h.registry.open(card(), pre.signal), { outcome: "cancelled", approvalId: "a2", reason: "aborted" });
   assert.equal(h.events.filter((e) => e.opened).length, 1);
 });
 
@@ -150,10 +150,10 @@ test("a closed chat cancels its cards; shutdown cancels every card", async () =>
   const a = h.registry.open(card(), new AbortController().signal);
   const b = h.registry.open(card({ threadId: "t2" }), new AbortController().signal);
   h.registry.cancelThread("t1");
-  assert.equal((await a).outcome, "cancelled");
+  assert.deepEqual(await a, { outcome: "cancelled", approvalId: "a1", reason: "closed" });
   assert.equal(h.registry.list("t2").length, 1);
   await h.registry.shutdown();
-  assert.equal((await b).outcome, "cancelled");
+  assert.deepEqual(await b, { outcome: "cancelled", approvalId: "a2", reason: "restarting" });
 });
 
 test("two clients: the first answer wins, the second is 409; unknown cards are 404; another thread's card is 404", async () => {
@@ -357,7 +357,7 @@ test("routes: list, detail, answer; only a person answers (agent and external pr
 test("at most MAX_PENDING_TOOL_APPROVALS_PER_THREAD cards wait per chat (APPROVAL_LIMIT); other chats are not affected", async () => {
   const h = harness();
   for (let i = 0; i < MAX_PENDING_TOOL_APPROVALS_PER_THREAD; i += 1) void h.registry.open(card(), new AbortController().signal);
-  await assert.rejects(h.registry.open(card(), new AbortController().signal), (e: Error & { code?: string }) => e.code === TOOL_APPROVAL_LIMIT_CODE);
+  await assert.rejects(h.registry.open(card(), new AbortController().signal), (e: Error & { code?: string }) => e.code === TOOL_APPROVAL_LIMIT);
   assert.equal(h.registry.list("t1").length, MAX_PENDING_TOOL_APPROVALS_PER_THREAD);
   void h.registry.open(card({ threadId: "t2" }), new AbortController().signal);
   assert.equal(h.registry.list("t2").length, 1);

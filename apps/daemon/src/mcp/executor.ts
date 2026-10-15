@@ -44,6 +44,7 @@ import type { CallerPrincipal } from "@orquester/api/agent-chat";
 import { canonicalProject, type CanonicalProject } from "./addressing.ts";
 import type {
   AnyOrquesterTool,
+  ApprovalCancelReason,
   ApprovalPort,
   ApprovalPreview,
   ApprovalRequest,
@@ -51,11 +52,12 @@ import type {
   CallContext,
   ScopeClaim,
   ScopeContext,
+  LegacyToolServices,
   ThreadCaller,
   Tier,
-  ToolCaller
+  ToolCaller,
+  ToolsetCardInput
 } from "./catalog/contract.ts";
-import { attachCallExtensions, type LegacyToolServices, type ToolsetCardInput } from "./catalog/extensions.ts";
 import { withPrincipal, type DaemonApi } from "./daemon-api.ts";
 import { ToolError } from "./errors.ts";
 import { gate, type GateDecision, type GateInput } from "./gate/policy.ts";
@@ -159,7 +161,18 @@ function isCallToolResult(value: unknown): value is CallToolResult {
   return value !== null && typeof value === "object" && Array.isArray((value as { content?: unknown }).content);
 }
 
-const cancelled = (): CallToolResult => toSafeToolError(new ToolError("CANCELLED", "The call was cancelled."));
+/** What a cancelled call answers; a card withdrawn by a restart says so (the agent may call again later). */
+const cancelled = (reason?: ApprovalCancelReason): CallToolResult =>
+  toSafeToolError(
+    new ToolError(
+      "CANCELLED",
+      reason === "restarting"
+        ? "The call was cancelled: Orquester is restarting, and its approval card was withdrawn. Call it again once Orquester is back."
+        : reason === "closed"
+          ? "The call was cancelled: this chat was closed."
+          : "The call was cancelled."
+    )
+  );
 
 /** Deep-freeze a value (the frozen arguments `run` receives after a card). */
 function deepFreeze<T>(value: T): T {
@@ -294,7 +307,7 @@ async function execute(deps: ExecutorDeps, call: { name: string; arguments: unkn
     if (decision.kind === "deny") throw new ToolError(decision.code, decision.message);
     if (decision.kind === "card") {
       const outcome = await passCard(deps, tool, args, caller, scope, decision, facts, scopeCtx, ownProject);
-      if (outcome.kind === "cancelled") return cancelled();
+      if (outcome.kind === "cancelled") return cancelled(outcome.reason);
       approval = outcome.approval;
       card = { preview: outcome.preview, family: outcome.family };
       args = outcome.frozenArgs;
@@ -322,12 +335,10 @@ async function execute(deps: ExecutorDeps, call: { name: string; arguments: unkn
     caller: who,
     turn,
     ...(deps.secretRequests ? { secretRequests: deps.secretRequests } : {}),
+    ...(deps.legacy ? { legacy: deps.legacy } : {}),
+    ...(who.kind === "thread" ? { requestToolsetCard: (input: ToolsetCardInput) => requestToolsetCard(deps, who, input, signal) } : {}),
     ...(approval ? { approval } : {})
   };
-  attachCallExtensions(ctx, {
-    ...(deps.legacy ? { legacy: deps.legacy } : {}),
-    ...(who.kind === "thread" ? { requestToolsetCard: (input: ToolsetCardInput) => requestToolsetCard(deps, who, input, signal) } : {})
-  });
   if (signal.aborted) return cancelled();
   const result = await tool.run(args, ctx);
   if (card !== null && approval && who.kind === "thread") await afterApprovedRun(deps, who, card, approval, result);
@@ -340,7 +351,7 @@ async function execute(deps: ExecutorDeps, call: { name: string; arguments: unkn
 
 type CardOutcome =
   | { kind: "passed"; approval: NonNullable<CallContext["approval"]>; preview: ApprovalPreview | null; family: string; frozenArgs: Record<string, unknown> }
-  | { kind: "cancelled" };
+  | { kind: "cancelled"; reason?: ApprovalCancelReason };
 
 async function passCard(
   deps: ExecutorDeps,
@@ -366,7 +377,8 @@ async function passCard(
   const family = decision.approvalKind === "admin" ? (preview?.family ?? decision.family) : decision.family;
 
   // A grant covers the call without a card (full-access, non workflow-owned callers only; §7.6).
-  if (port) {
+  // Grants are recorded for the caller's canonical project: without one, none can match (skip the read).
+  if (port && ownProject !== null) {
     const grant = await port.findGrant({
       family,
       callerRuntimeMode: caller.runtimeMode,
@@ -430,6 +442,8 @@ async function passCard(
     grantOptions,
     ...(preview?.workflowId ? { workflowId: preview.workflowId } : {}),
     ...(decision.targetProjectPath ? { targetProjectPath: decision.targetProjectPath } : {}),
+    ...(preview?.workflowReferencedPrompt ? { workflowReferencedPrompt: true } : {}),
+    ...(scope.pendingProjects?.length ? { pendingProjects: scope.pendingProjects.map((pending) => ({ workspace: pending.workspace })) } : {}),
     ...(caller.delivered ? { delivered: caller.delivered } : {})
   };
   const outcome = await port.request(request, ctx.signal);
@@ -457,14 +471,16 @@ async function passCard(
     case "timed_out":
       throw new ToolError("APPROVAL_TIMEOUT", `Nobody answered the approval card for ${tool.name} in time. Don't retry; ask the user.`);
     case "cancelled":
-      return { kind: "cancelled" };
+      return { kind: "cancelled", ...(outcome.reason ? { reason: outcome.reason } : {}) };
   }
 }
 
 /**
- * After an approved or granted Admin call of the `workflows` family that created a workflow (no
- * `preview.workflowId`; the result names `workflowId`): add it to the chat's `workflows` grant
- * (§7.6), so its later updates, runs and deletes are covered. The port decides whether one applies.
+ * After an APPROVED Admin call of the `workflows` family that created a workflow (no
+ * `preview.workflowId`; the result names `workflowId`) whose outcome named a grant (`grantId`: the
+ * one the user chose on the card, or the one the card said the create joins): add the new id to
+ * that grant (§7.6), so its later updates, runs and deletes are covered. Without the outcome's
+ * `grantId` nothing joins (ruling: approving once never widens a standing grant).
  */
 async function afterApprovedRun(
   deps: ExecutorDeps,
@@ -473,14 +489,15 @@ async function afterApprovedRun(
   approval: NonNullable<CallContext["approval"]>,
   result: Record<string, unknown> | CallToolResult
 ): Promise<void> {
-  if (card.family !== "workflows" || card.preview?.workflowId) return;
+  if (card.family !== "workflows" || card.preview?.workflowId || approval.outcome !== "approved" || !approval.grantId) return;
+  const grantId = approval.grantId;
   const record = isCallToolResult(result) ? (result.structuredContent ?? {}) : result;
   if (isCallToolResult(result) && result.isError) return;
   const workflowId = (record as { workflowId?: unknown }).workflowId;
   const port = deps.approvals === undefined ? executorPorts.approvals : deps.approvals;
   if (typeof workflowId !== "string" || !port) return;
   await port
-    .recordWorkflowInGrant({ threadId: caller.threadId, callerProjectPath: caller.projectPath, workflowId, ...(approval.grantId ? { grantId: approval.grantId } : {}) })
+    .recordWorkflowInGrant({ threadId: caller.threadId, callerProjectPath: caller.projectPath, workflowId, grantId })
     .catch((error) => console.error("[mcp] could not record a workflow in its grant", error instanceof Error ? error.message : "unknown error"));
 }
 
@@ -502,6 +519,7 @@ async function requestToolsetCard(deps: ExecutorDeps, caller: ThreadCaller, inpu
       tool: "request_toolset",
       kind: "toolset",
       family: "toolset",
+      toolset: input.toolset,
       title: sanitizeApprovalLabel(input.title),
       scope: { label: sanitizeApprovalLabel(`This chat · ${label}`) },
       ...(input.reason ? { reason: clipText(input.reason, TOOL_APPROVAL_REASON_MAX_CHARS) } : {}),

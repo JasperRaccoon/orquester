@@ -37,8 +37,10 @@ import {
   approvalPreviewBytes,
   parseToolApprovalSummary,
   summarizeApprovalPreview,
+  MAX_PENDING_TOOL_APPROVALS_PER_THREAD,
   TOOL_APPROVAL_EVENT_TYPE,
   TOOL_APPROVAL_FULL_PREVIEW_MAX_BYTES,
+  TOOL_APPROVAL_LIMIT,
   TOOL_APPROVAL_REASON_MAX_CHARS,
   validateToolApprovalAnswer,
   type AgentChatToolApprovalEventPayload,
@@ -80,26 +82,10 @@ export interface ToolApprovalOpenInput {
   grantOptions: ToolApprovalGrantScope[];
 }
 
-/**
- * The card routes' codes: the contract's {@link ToolApprovalErrorCode} plus local ones awaiting the
- * contracts follow-up — `PERMISSION_DENIED` (403, not a person), `AGENT_TOOLS_UNAVAILABLE` (503, the
- * approval needs a write the read-only agent-tools store refuses), `AGENT_TOOLS_DISABLED` (409, a
- * toolset card while the master switch is off).
- */
-export type ToolApprovalRouteErrorCode = ToolApprovalErrorCode | "PERMISSION_DENIED" | "AGENT_TOOLS_UNAVAILABLE" | "AGENT_TOOLS_DISABLED";
-
-/**
- * At most this many cards wait in one chat at once; one more is refused before any card
- * ({@link TOOL_APPROVAL_LIMIT_CODE}). Local until the contracts follow-up names it.
- */
-export const MAX_PENDING_TOOL_APPROVALS_PER_THREAD = 5;
-/** The tool error code of a card refused by {@link MAX_PENDING_TOOL_APPROVALS_PER_THREAD}. */
-export const TOOL_APPROVAL_LIMIT_CODE = "APPROVAL_LIMIT";
-
 /** A refusal of one answer, before the card settles (the card stays pending). */
 export class ToolApprovalAnswerRefusal extends Error {
   constructor(
-    readonly code: ToolApprovalRouteErrorCode,
+    readonly code: ToolApprovalErrorCode,
     message: string,
     /** The HTTP status (default: 409 for `APPROVAL_NOT_PENDING`, 503 for `AGENT_TOOLS_UNAVAILABLE`, else 400). */
     readonly status?: number
@@ -196,7 +182,7 @@ interface JournalEntry {
 
 export type ToolApprovalAnswerResult =
   | { ok: true; response: ToolApprovalAnswerResponse }
-  | { ok: false; status: number; code: ToolApprovalRouteErrorCode; message: string };
+  | { ok: false; status: number; code: ToolApprovalErrorCode; message: string };
 
 // ---------------------------------------------------------------------------
 // The registry
@@ -222,12 +208,12 @@ export class ToolApprovalRegistry {
     const approvalId = (this.opts.newId ?? (() => `ta_${randomUUID()}`))();
     if (signal.aborted) {
       this.decisionLog(input, approvalId, "cancelled", "before the card opened");
-      return Promise.resolve({ outcome: "cancelled", approvalId });
+      return Promise.resolve({ outcome: "cancelled", approvalId, reason: "aborted" });
     }
     if (this.list(input.threadId).length >= MAX_PENDING_TOOL_APPROVALS_PER_THREAD) {
       return Promise.reject(
         new ToolError(
-          TOOL_APPROVAL_LIMIT_CODE,
+          TOOL_APPROVAL_LIMIT,
           `${MAX_PENDING_TOOL_APPROVALS_PER_THREAD} approval cards are already waiting for the user in this chat; wait for them to be answered, and batch related changes into one call.`
         )
       );
@@ -271,7 +257,7 @@ export class ToolApprovalRegistry {
       let settled = false;
       let timer: unknown;
       const onAbort = (): void => {
-        entry.settle({ outcome: "cancelled", approvalId }, "the call was cancelled");
+        entry.settle({ outcome: "cancelled", approvalId, reason: "aborted" }, "the call was cancelled");
       };
       const entry: Pending = {
         summary,
@@ -400,14 +386,14 @@ export class ToolApprovalRegistry {
   /** End every pending card of a thread (its tab closed): `cancelled`. */
   cancelThread(threadId: string): void {
     for (const entry of [...this.pending.values()]) {
-      if (entry.summary.threadId === threadId) entry.settle({ outcome: "cancelled", approvalId: entry.summary.approvalId }, "chat closed");
+      if (entry.summary.threadId === threadId) entry.settle({ outcome: "cancelled", approvalId: entry.summary.approvalId, reason: "closed" }, "chat closed");
     }
   }
 
   /** End every pending card (daemon shutdown): `cancelled`, then flush the journal. */
   async shutdown(): Promise<void> {
     for (const entry of [...this.pending.values()]) {
-      entry.settle({ outcome: "cancelled", approvalId: entry.summary.approvalId }, "Orquester is restarting");
+      entry.settle({ outcome: "cancelled", approvalId: entry.summary.approvalId, reason: "restarting" }, "Orquester is restarting");
     }
     await this.journalWrites;
   }
@@ -548,9 +534,7 @@ export function requestPrincipal(request: FastifyRequest): CallerPrincipal {
   return principal ?? { kind: "user" };
 }
 
-type RouteErrorCode = ToolApprovalRouteErrorCode;
-
-function refusal(code: RouteErrorCode, message: string): { error: { code: RouteErrorCode; message: string } } {
+function refusal(code: ToolApprovalErrorCode, message: string): { error: { code: ToolApprovalErrorCode; message: string } } {
   return { error: { code, message } };
 }
 

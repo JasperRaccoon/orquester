@@ -17,7 +17,6 @@ import { agentChatRoutes, parseThreadMessage, type CallerPrincipal } from "@orqu
 
 import { FakeApprovalPort } from "./catalog/approval-double.ts";
 import { defineTool, MUTATING, READ_ONLY, type AnyOrquesterTool, type CallContext, type ScopeClaim, type ThreadCaller } from "./catalog/contract.ts";
-import { callExtensions } from "./catalog/extensions.ts";
 import type { DaemonMethod, DaemonRequestOptions, DaemonResponse } from "./daemon-api.ts";
 import { audienceShape, executeToolCall, NEW_SESSION, type ExecutorDeps } from "./executor.ts";
 import { head, snapshot } from "./fixtures.ts";
@@ -248,11 +247,15 @@ test("the gate re-runs after the card on the caller as it is now: planning by th
   assert.equal(r.runs.length, 0);
 });
 
-test("an approved workflow create records the new workflow in the chat's grant", async () => {
+test("an approved workflow create records the new workflow only in the grant its outcome names", async () => {
   const r = rig();
-  const result = await r.call("create_wf", { name: "nightly" });
-  assert.equal(result.isError, undefined, message(result));
-  assert.deepEqual(r.port!.recorded, [{ threadId: "me", callerProjectPath: OWN, workflowId: "wf_new" }]);
+  const once = await r.call("create_wf", { name: "nightly" });
+  assert.equal(once.isError, undefined, message(once));
+  assert.deepEqual(r.port!.recorded, [], "approved once, no grant named: nothing joins (never widens a standing grant)");
+  r.port!.answerWith({ outcome: "approved", approvalId: "", grantId: "g_chat" });
+  const granted = await r.call("create_wf", { name: "weekly" });
+  assert.equal(granted.isError, undefined, message(granted));
+  assert.deepEqual(r.port!.recorded, [{ threadId: "me", callerProjectPath: OWN, workflowId: "wf_new", grantId: "g_chat" }]);
 });
 
 test("boundary cards: cross-workspace Act names its one target and git identity; same-workspace Act below full-access cards without grants", async () => {
@@ -353,23 +356,34 @@ test("results: a record is ok()-wrapped, a CallToolResult passes through, an une
 });
 
 test("request_toolset's card goes through the executor's port: kind toolset, never a grant; refused for a workflow-owned chat", async () => {
-  let seen: Awaited<ReturnType<NonNullable<ReturnType<typeof callExtensions>["requestToolsetCard"]>>> | null = null;
+  let seen: Awaited<ReturnType<NonNullable<CallContext["requestToolsetCard"]>>> | null = null;
+  let externalCtx: CallContext | null = null;
   const asks = defineTool({
     name: "asks", title: "Asks", description: "d", input: {}, audiences: ["chat"], toolset: "core", tier: "act", planSafe: true,
     scope: async () => claim(), annotations: MUTATING, resultKind: "json",
     run: async (_args, ctx) => {
-      seen = await callExtensions(ctx).requestToolsetCard!({ toolset: "notes", title: "Claude asks to enable notes", sections: [{ kind: "text", text: "x" }], reason: "todo list" });
+      seen = await ctx.requestToolsetCard!({ toolset: "notes", title: "Claude asks to enable notes", sections: [{ kind: "text", text: "x" }], reason: "todo list" });
       return { outcome: seen.outcome };
     }
   });
-  const r = rig({ tools: [asks] });
+  const external = defineTool({
+    name: "external_ctx", title: "External", description: "d", input: {}, audiences: ["external"], toolset: "core", tier: "read",
+    scope: async () => claim(), annotations: READ_ONLY, resultKind: "json",
+    run: async (_args, ctx) => {
+      externalCtx = ctx;
+      return {};
+    }
+  });
+  const r = rig({ tools: [asks, external] });
   const result = await r.call("asks", {});
   assert.equal(result.isError, undefined, message(result));
   const card = r.port!.cards[0]!;
-  assert.deepEqual([card.kind, card.family, card.grantOptions, card.reason], ["toolset", "toolset", [], "todo list"]);
+  assert.deepEqual([card.kind, card.family, card.toolset, card.grantOptions, card.reason], ["toolset", "toolset", "notes", [], "todo list"]);
   assert.equal(code(await r.call("asks", {}, caller({ workflowOwned: true }))), "PERMISSION_DENIED");
   assert.equal(r.port!.cards.length, 1);
-  assert.equal(callExtensions({} as CallContext).requestToolsetCard, undefined);
+  await r.call("external_ctx", {}, { kind: "external" });
+  assert.ok(externalCtx);
+  assert.equal((externalCtx as CallContext).requestToolsetCard, undefined, "external callers cannot raise a toolset card");
 });
 
 test("a caller with no canonical project of its own is never offered a grant (findGrant would never honour it)", async () => {
@@ -378,6 +392,36 @@ test("a caller with no canonical project of its own is never offered a grant (fi
   const card = r.port!.cards[0]!;
   assert.deepEqual(card.grantOptions, []);
   assert.equal(card.callerProjectPath, "");
+  assert.equal(r.port!.grantQueries.length, 0, "no grant can match without an own project: findGrant is skipped");
+});
+
+test("a cancelled card says why: a restart withdraws it (call again later), a closed chat ends it", async () => {
+  const port = new FakeApprovalPort({ outcome: "cancelled", approvalId: "a", reason: "restarting" });
+  const r = rig({ port });
+  const restarting = await r.call("open_desktop", { command: "xterm" });
+  assert.equal(code(restarting), "CANCELLED");
+  assert.match(message(restarting), /restarting/);
+  port.answerWith({ outcome: "cancelled", approvalId: "a", reason: "closed" });
+  assert.match(message(await r.call("open_desktop", { command: "xterm" })), /closed/);
+  port.answerWith({ outcome: "cancelled", approvalId: "a" });
+  assert.equal(message(await r.call("open_desktop", { command: "xterm" })), "The call was cancelled.");
+  assert.equal(r.runs.length, 0);
+});
+
+test("the card carries what the port re-checks: pending temp projects and a workflow-referenced prompt", async () => {
+  const pendingTool = defineTool({
+    name: "wf_pending", title: "Workflow with a temp project", description: "d", input: {},
+    audiences: ["chat"], toolset: "core", tier: "admin", adminFamily: "workflows",
+    scope: async () => claim({ projects: [OWN], pendingProjects: [{ workspace: "acme" }], writes: true }),
+    approval: async () => ({ title: "Create", scopeLabel: "acme/api", sections: [{ kind: "text", text: "a workflow" }], workflowReferencedPrompt: true }),
+    annotations: MUTATING, resultKind: "json", run: async () => ({})
+  });
+  const r = rig({ tools: [pendingTool] });
+  await r.call("wf_pending", {});
+  const card = r.port!.cards[0]!;
+  assert.deepEqual(card.pendingProjects, [{ workspace: "acme" }]);
+  assert.equal(card.workflowReferencedPrompt, true);
+  assert.deepEqual(card.grantOptions, []);
 });
 
 test("a grant is re-checked on the refreshed caller: no longer full-access → refused, nothing runs", async () => {

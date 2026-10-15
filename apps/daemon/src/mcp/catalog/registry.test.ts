@@ -136,7 +136,6 @@ const PURE_MODULES = new Set([
   "mcp/agents.ts",
   "mcp/attachments.ts",
   "mcp/catalog/contract.ts",
-  "mcp/catalog/extensions.ts",
   "mcp/catalog/index.ts",
   "mcp/catalog/legacy.ts",
   "mcp/errors.ts",

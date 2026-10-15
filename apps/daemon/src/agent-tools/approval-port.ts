@@ -36,13 +36,13 @@ import {
 } from "@orquester/api/agent-chat";
 
 import { realpathSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { resolve } from "node:path";
 import {
   AGENT_TOOLS_CHANGED_EVENT,
   AGENT_TOOLS_CHANNEL
 } from "@orquester/api";
 import { TOOL_APPROVAL_EVENT_TYPE } from "@orquester/api/agent-chat";
-import { agentToolsFile } from "@orquester/config";
+import { agentToolApprovalsJournalFile, agentToolsFile } from "@orquester/config";
 
 import { isAgentAdapterId } from "../agent-host/adapters/index.ts";
 import { ToolApprovalAnswerRefusal, ToolApprovalRegistry, type ToolApprovalClock } from "../agent-chat/tool-approvals.ts";
@@ -68,13 +68,6 @@ export interface ApprovalPortDeps {
   /** Cheap, synchronous: whether the chat or a lineage ancestor is owned by a workflow (§5.4). */
   workflowOwned(threadId: string): boolean;
 }
-
-/**
- * A toolset card names its toolset here. `ApprovalRequest` (Task 1's contract) has no field for it
- * yet: the executor passes it through as `toolset` (requested of Tasks 1/2/13 — see the Task 3
- * report). A toolset card without one is refused rather than guessed.
- */
-type ToolsetCard = ApprovalRequest & { toolset?: unknown };
 
 /** The notice a `create_workflow` card carries when the new workflow will join the chat's grant. */
 export const WORKFLOW_GRANT_NOTICE =
@@ -106,7 +99,7 @@ export class AgentToolsApprovalPort implements ApprovalPort {
         ? new ToolError("ADMIN_NOT_AVAILABLE", "This chat runs inside an automated workflow: changes that need the user's approval are not available.")
         : new ToolError("PERMISSION_DENIED", "This chat runs inside an automated workflow: nothing here can ask the user for approval.");
     }
-    const toolset = card.kind === "toolset" ? this.toolsetOf(card as ToolsetCard) : null;
+    const toolset = card.kind === "toolset" ? this.toolsetOf(card) : null;
     if (toolset !== null) {
       const until = this.deps.tools.toolsetDeclinedUntil(card.threadId, toolset);
       if (until !== null) {
@@ -143,8 +136,8 @@ export class AgentToolsApprovalPort implements ApprovalPort {
    * `grantId` — the one the approval created (`grant: "chat"`) or the one the card said the create
    * would join. Without `grantId` nothing joins (ruling: approving once never widens a grant).
    */
-  async recordWorkflowInGrant(input: { threadId: string; callerProjectPath: string; workflowId: string; grantId?: string }): Promise<void> {
-    if (input.grantId === undefined || this.deps.workflowOwned(input.threadId)) return;
+  async recordWorkflowInGrant(input: { threadId: string; callerProjectPath: string; workflowId: string; grantId: string }): Promise<void> {
+    if (!input.grantId || this.deps.workflowOwned(input.threadId)) return;
     const traits = await this.deps.callerTraits(input.threadId);
     if (!traits || traits.workflowOwned || traits.runtimeMode !== "full-access") return;
     const grantId = input.grantId;
@@ -153,7 +146,8 @@ export class AgentToolsApprovalPort implements ApprovalPort {
 
   // -------------------------------------------------------------------------
 
-  private toolsetOf(card: ToolsetCard): ToolsetId {
+  /** A toolset card names its toolset (`ApprovalRequest.toolset`); one without is refused rather than guessed. */
+  private toolsetOf(card: ApprovalRequest): ToolsetId {
     if (!isToolsetId(card.toolset)) throw new ToolError("INVALID_ARGUMENT", "A toolset card must name its toolset.");
     return card.toolset;
   }
@@ -218,13 +212,16 @@ export class AgentToolsApprovalPort implements ApprovalPort {
   /** The card's grant options narrowed to what the caller's current traits allow (§7.6, MUST 8). */
   private allowedGrantOptions(card: ApprovalRequest, traits: CallerTraits): GrantScope[] {
     if (traits.runtimeMode === null) return [];
+    // A temp project not created yet, or another project in the scope, is never granted (Admin).
     const crossProject =
-      card.family !== "cross-project" && (card.scope.projects ?? []).some((project) => project.path !== card.callerProjectPath);
+      card.family !== "cross-project" &&
+      ((card.scope.projects ?? []).some((project) => project.path !== card.callerProjectPath) || (card.pendingProjects?.length ?? 0) > 0);
     const allowed = grantOptionsFor({
       family: card.family,
       callerRuntimeMode: traits.runtimeMode,
       workflowOwned: traits.workflowOwned,
-      crossProject: crossProject || card.callerProjectPath === ""
+      crossProject: crossProject || card.callerProjectPath === "",
+      ...(card.workflowReferencedPrompt === true ? { workflowReferencedPrompt: true } : {})
     });
     return card.grantOptions.filter((scope) => allowed.includes(scope));
   }
@@ -278,6 +275,8 @@ export function workflowOwnedFromTabs(threadId: string, tab: (id: string) => Tab
     const summary = tab(id);
     if (!summary) return false;
     if (summary.owner?.kind === "workflow") return true;
+    // The inheritable marker (stamped at creation) survives a closed creator's tab.
+    if (summary.lineage?.workflowOwned === true) return true;
     id = summary.lineage?.parentThreadId;
   }
   return false;
@@ -349,14 +348,6 @@ export interface AgentToolsRuntimeDeps {
   timeoutMs?: number;
 }
 
-/**
- * Where the ids of open approval cards are journaled (beside `agent-tools.json`, in the daemon's
- * config dir). Only ids, kinds and times: never a title, preview, argument or value.
- */
-export function toolApprovalJournalFile(baseDir: string): string {
-  return join(dirname(agentToolsFile(baseDir)), "agent-tool-approvals.json");
-}
-
 export function createAgentToolsRuntime(deps: AgentToolsRuntimeDeps): AgentToolsRuntime {
   const logger = deps.logger ?? console;
   const tools = new AgentToolsService({
@@ -369,7 +360,7 @@ export function createAgentToolsRuntime(deps: AgentToolsRuntimeDeps): AgentTools
     publish: (payload) => deps.publish("sessions", TOOL_APPROVAL_EVENT_TYPE, payload),
     onChange: (threadId) => deps.onApprovalsChanged(threadId),
     log: (line) => (logger.log ?? console.log)(line),
-    journalFile: toolApprovalJournalFile(deps.baseDir),
+    journalFile: agentToolApprovalsJournalFile(deps.baseDir),
     ...(deps.clock ? { clock: deps.clock } : {}),
     ...(deps.timeoutMs !== undefined ? { timeoutMs: deps.timeoutMs } : {}),
     logger

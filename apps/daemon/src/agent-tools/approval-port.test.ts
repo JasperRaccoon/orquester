@@ -92,7 +92,7 @@ async function harness(t: TestContext) {
   return { registry, tools, port, clock, events, logs, traits, owned, setMode, opened };
 }
 
-function card(over: Partial<ApprovalRequest> & { toolset?: string } = {}): ApprovalRequest & { toolset?: string } {
+function card(over: Partial<ApprovalRequest> = {}): ApprovalRequest {
   return {
     threadId: "t1",
     callerProjectPath: PROJECT,
@@ -127,6 +127,20 @@ test("approve with a grant: the grant is recorded and honoured for the next call
   h.owned.delete("t1");
   h.tools.revokeGrant("g1");
   assert.equal(await h.port.findGrant(query), null, "revocation is effective for the next call");
+});
+
+test("the card's pending temp projects and a workflow-referenced prompt are never grantable, whatever its options say", async (t) => {
+  const h = await harness(t);
+  const wf = { tool: "update_workflow", family: "workflows" as const, workflowId: "wf1", grantOptions: ["chat" as const] };
+  const signal = new AbortController().signal;
+  void h.port.request(card(wf), signal);
+  void h.port.request(card({ ...wf, pendingProjects: [{ workspace: "ws" }] }), signal);
+  void h.port.request(card({ ...wf, workflowReferencedPrompt: true }), signal);
+  for (let i = 0; i < 3; i += 1) await h.opened();
+  assert.deepEqual(
+    h.registry.list("t1").map((summary) => summary.grantOptions),
+    [["chat"], [], []]
+  );
 });
 
 test("grants are never offered to a caller below full-access, nor for cross-project Admin, whatever the card says", async (t) => {
@@ -204,7 +218,7 @@ test("toolset cards: approval turns the toolset on for the chat (persisted, tool
   assert.deepEqual(await h.port.request(toolsetCard, new AbortController().signal), { outcome: "approved", approvalId: "" });
   assert.equal(h.events.length, before);
 
-  const desktops = { ...toolsetCard, toolset: "desktops", title: "Claude asks to enable Desktops for this chat" };
+  const desktops: ApprovalRequest = { ...toolsetCard, toolset: "desktops", title: "Claude asks to enable Desktops for this chat" };
   const denied = h.port.request(desktops, new AbortController().signal);
   const deniedId = await h.opened();
   assert.ok((await h.registry.answer("t1", deniedId, { decision: "deny", reason: "no" })).ok);
@@ -230,7 +244,7 @@ test("workflows grants (ruling): a create joins the chat's grant and the card sa
   assert.ok(!JSON.stringify(h.registry.list("t1")).includes("'Allow workflows' grant"));
   await h.registry.answer("t1", firstId, { decision: "approve" });
   assert.deepEqual(await first, { outcome: "approved", approvalId: firstId });
-  await h.port.recordWorkflowInGrant({ threadId: "t1", callerProjectPath: PROJECT, workflowId: "wf0" });
+  await h.port.recordWorkflowInGrant({ threadId: "t1", callerProjectPath: PROJECT, workflowId: "wf0", grantId: "" });
   assert.equal(h.tools.settingsView().grants.length, 0, "no grantId: nothing joins, nothing is created");
 
   // (b) The user chooses grant "chat" on a create: the grant starts empty and the new id is added after the create ran.
@@ -325,8 +339,9 @@ test("cancellation reaches the card: the call's signal and the 30-min deadline",
 });
 
 test("traits from the daemon: tab presence, workflow ownership along lineage, the snapshot's mode (unknown on a failed read)", async () => {
-  const tabs = new Map<string, { owner?: { kind: "workflow"; workflowId: string; runId: string; nodeId: string }; lineage?: { parentThreadId: string } }>([
+  const tabs = new Map<string, { owner?: { kind: "workflow"; workflowId: string; runId: string; nodeId: string }; lineage?: { parentThreadId: string; workflowOwned?: true } }>([
     ["root", { owner: { kind: "workflow", workflowId: "w", runId: "r", nodeId: "n" } }],
+    ["marked", { lineage: { parentThreadId: "closed-creator", workflowOwned: true } }],
     ["child", { lineage: { parentThreadId: "root" } }],
     ["grandchild", { lineage: { parentThreadId: "child" } }],
     ["free", {}],
@@ -337,6 +352,7 @@ test("traits from the daemon: tab presence, workflow ownership along lineage, th
   assert.equal(workflowOwnedFromTabs("grandchild", tab), true);
   assert.equal(workflowOwnedFromTabs("free", tab), false);
   assert.equal(workflowOwnedFromTabs("loop-a", tab), false);
+  assert.equal(workflowOwnedFromTabs("marked", tab), true, "the inheritable lineage marker survives its creator's tab closing");
   let fail = false;
   const api = {
     request: async () => {

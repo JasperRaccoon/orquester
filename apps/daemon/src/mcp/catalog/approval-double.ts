@@ -17,7 +17,7 @@ export class FakeApprovalPort implements ApprovalPort {
   /** Every grant query, in order. */
   readonly grantQueries: GrantQuery[] = [];
   /** Every `recordWorkflowInGrant` call. */
-  readonly recorded: { threadId: string; callerProjectPath: string; workflowId: string; grantId?: string }[] = [];
+  readonly recorded: { threadId: string; callerProjectPath: string; workflowId: string; grantId: string }[] = [];
   /** The grants `findGrant` honours (config's rules). */
   file: AgentToolsFile = createDefaultAgentToolsFile();
   private answer: CardAnswer;
@@ -52,7 +52,7 @@ export class FakeApprovalPort implements ApprovalPort {
     return { ...outcome, approvalId: outcome.approvalId || approvalId } as ApprovalOutcome;
   }
 
-  async recordWorkflowInGrant(input: { threadId: string; callerProjectPath: string; workflowId: string; grantId?: string }): Promise<void> {
+  async recordWorkflowInGrant(input: { threadId: string; callerProjectPath: string; workflowId: string; grantId: string }): Promise<void> {
     this.recorded.push(input);
   }
 }

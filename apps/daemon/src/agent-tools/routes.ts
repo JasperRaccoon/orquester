@@ -14,7 +14,7 @@
  */
 
 import type { FastifyInstance, FastifyReply } from "fastify";
-import { agentToolsRoutes, type RevokeAgentToolGrantsResponse } from "@orquester/api";
+import { agentToolsRoutes, type AgentToolsErrorCode, type RevokeAgentToolGrantsResponse } from "@orquester/api";
 import { agentChatRoutes } from "@orquester/api/agent-chat";
 
 import { registerToolApprovalRoutes, requestPrincipal } from "../agent-chat/tool-approvals.ts";
@@ -31,7 +31,7 @@ function pattern(path: string): string {
   return decodeURIComponent(path);
 }
 
-function refuse(reply: FastifyReply, status: number, code: string, message: string) {
+function refuse(reply: FastifyReply, status: number, code: AgentToolsErrorCode | "INVALID_ARGUMENT" | "THREAD_NOT_FOUND", message: string) {
   return reply.code(status).send({ error: { code, message } });
 }
 

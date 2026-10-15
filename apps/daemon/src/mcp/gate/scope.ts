@@ -94,6 +94,10 @@ const MAX_LINEAGE_WALK = 64;
  * Whether a thread is workflow-owned (§5.4): its tab, or any lineage ancestor's, has
  * `owner.kind === "workflow"`. The walk follows open tabs' `lineage.parentThreadId`.
  *
+ * The inheritable marker comes first: a lineage stamped `workflowOwned: true` at creation (its
+ * creator was owned, or carried the marker) is owned without walking further — it survives the
+ * creator's tab closing. Its absence proves nothing (older records), so the walk below still runs.
+ *
  * A closed ancestor's owner is unknowable (it lived on its tab record only). The walk then fails
  * CLOSED (owned) behind any link an agent may have made — `agentCreated`, or relation `delegate` /
  * `opened` ({@link isAgentMadeLink}) — and stops as not owned only behind a `fork` without
@@ -123,6 +127,7 @@ export function isWorkflowOwned(sessions: readonly SessionSummary[], threadId: s
     if (session.owner?.kind === "workflow") return true;
     const lineage = session.lineage;
     if (!lineage) return false;
+    if (lineage.workflowOwned === true) return true;
     agentMadeLink = isAgentMadeLink(lineage);
     id = lineage.parentThreadId;
   }

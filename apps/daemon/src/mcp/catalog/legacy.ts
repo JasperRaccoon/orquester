@@ -25,7 +25,6 @@ import { ok } from "../result.ts";
 import type { ToolDef } from "../tool.ts";
 import type { SessionTool } from "../../session-tools/contract.ts";
 import type { AnyOrquesterTool, ApprovalPreview, OrquesterTool, ScopeClaim, Tier } from "./contract.ts";
-import { callExtensions } from "./extensions.ts";
 
 /** What a legacy tool claims: nothing the gate judges (it validates its own addresses). */
 export const LEGACY_SCOPE: ScopeClaim = Object.freeze({
@@ -175,7 +174,7 @@ export function legacyExternalTools(defs: readonly ToolDef<any>[]): AnyOrquester
       annotations: def.annotations,
       resultKind: "json",
       run: async (args, ctx) => {
-        const legacy = callExtensions(ctx).legacy;
+        const legacy = ctx.legacy;
         // ok() here, as the pre-catalog server did, whatever the record holds (parity).
         return ok(await def.run(args as never, {
           api: ctx.api,
