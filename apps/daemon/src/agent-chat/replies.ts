@@ -194,6 +194,8 @@ type Sub = ReplySubscriptionRecord & {
   lostHandOuts?: number;
   /** A reply a waiter took could not be read again when its call went away: no message follows. */
   unreadable?: true;
+  /** Failed reads of a released reply so far (transient ones are retried by the safety re-check). */
+  rereads?: number;
 };
 
 /** What a bound turn (or its absence) produced. */
@@ -229,6 +231,8 @@ interface Waiter {
 }
 
 const DEFAULT_RECHECK_MS = 30_000;
+/** Reads of a released reply before it is given up as unreadable (the first, then the safety re-checks). */
+export const MAX_REDELIVERY_READS = 5;
 /** Events a `/turn` command appends at most (meta, message, turn start): read back from its receipt seq. */
 const TURN_COMMAND_EVENTS = 3;
 /** `done` subscriptions and final deliveries kept for repeats and late waits; older ones are pruned. */
@@ -268,6 +272,8 @@ export class ReplyRouter implements DeliveryListener {
   private readonly evalQueued = new Set<string>();
   /** Deliveries being handed to the queue right now: never twice at once. */
   private readonly handing = new Set<string>();
+  /** Released replies being re-delivered right now. */
+  private readonly redelivering = new Set<string>();
   /** `claimed-by-router` subscriptions being resumed right now. */
   private readonly resuming = new Set<string>();
   /** Per subscription, when an inconclusive history lookup may run again (and its current delay). */
@@ -313,6 +319,13 @@ export class ReplyRouter implements DeliveryListener {
     }
     let changed = false;
     for (const sub of this.subs()) {
+      // The calls a reply was handed to died with the previous process: their releases never come.
+      // Holders are counted afresh, so a re-sent call is the only one and its lost result delivers.
+      if (sub.state === "done" && sub.ended === "waiter" && !sub.released && ((sub.handOuts ?? 1) !== 0 || (sub.lostHandOuts ?? 0) !== 0)) {
+        sub.handOuts = 0;
+        sub.lostHandOuts = 0;
+        changed = true;
+      }
       if (sub.state === "waiting" || sub.state === "claimed-by-waiter") {
         sub.state = "notify";
         sub.updatedAt = this.stamp();
@@ -616,8 +629,10 @@ export class ReplyRouter implements DeliveryListener {
     }
     if (sub.ended === "waiter" && !sub.posted?.steered) {
       const result = await this.resultFor(sub);
+      // Released while the reply was read (every holder gone): it is a message now.
+      if (sub.released) return { outcome: "notify", reason: "timeout", willNotify: true };
       // A re-sent call (same idempotency key) is handed the reply again: one more holder.
-      if (result && sub.state === "done" && !sub.released) {
+      if (result && sub.state === "done") {
         sub.handOuts = (sub.handOuts ?? 1) + 1;
         await this.persist();
         return waitResponseOf(result);
@@ -695,25 +710,52 @@ export class ReplyRouter implements DeliveryListener {
       await this.hand(existing);
       return { released: true, state: sub.state };
     }
-    const result: ReplyResult | null = sub.answeredNotice !== undefined ? { kind: "notice", text: sub.answeredNotice } : await this.resultFor(sub);
     if (sub.released || this.outbox.deliveries.some((d) => d.subscriptionId === sub.id)) return { released: false, state: sub.state };
     sub.released = true;
-    if (!result) {
-      sub.unreadable = true;
-      this.opts.logger?.warn?.("[replies] a released reply could not be read again; not re-delivered", { subscriptionId: sub.id });
-      await this.persist();
-      return { released: false, state: sub.state };
+    return (await this.redeliver(sub)) ? { released: true, state: sub.state } : { released: false, state: sub.state };
+  }
+
+  /**
+   * Re-deliver a released reply a waiter took: read it again and claim it for the router — the
+   * delivery and the tombstone in one write. A read that fails is retried by the safety re-check
+   * (`recheckNow`), up to {@link MAX_REDELIVERY_READS} reads; only then is the reply `unreadable`
+   * (a later wait says no message follows). True once the delivery is recorded.
+   */
+  private async redeliver(sub: Sub): Promise<boolean> {
+    if (this.redelivering.has(sub.id)) return false;
+    this.redelivering.add(sub.id);
+    try {
+      const result: ReplyResult | null = sub.answeredNotice !== undefined ? { kind: "notice", text: sub.answeredNotice } : await this.resultFor(sub);
+      if (this.outbox.deliveries.some((d) => d.subscriptionId === sub.id) || sub.state !== "done" || sub.ended !== "waiter") return false;
+      if (!result) {
+        sub.rereads = (sub.rereads ?? 0) + 1;
+        if (sub.rereads >= MAX_REDELIVERY_READS) {
+          sub.unreadable = true;
+          this.opts.logger?.warn?.("[replies] a released reply could not be read again; not re-delivered", { subscriptionId: sub.id });
+        }
+        await this.persist();
+        return false;
+      }
+      // claimForRouter persists the claim, the delivery and the tombstone together.
+      const deliver = await this.claimForRouter(sub, result);
+      if (this.outbox.deliveries.some((d) => d.subscriptionId === sub.id)) {
+        await deliver();
+        return true;
+      }
+      // No delivery: the requester closed (claimForRouter recorded the drop — and with it the
+      // tombstone and the counts, which memory keeps as written), or the write failed and nothing
+      // was recorded: the re-check tries again.
+      return false;
+    } finally {
+      this.redelivering.delete(sub.id);
     }
-    // claimForRouter persists the claim, the delivery and the tombstone together.
-    const deliver = await this.claimForRouter(sub, result);
-    if (!this.outbox.deliveries.some((d) => d.subscriptionId === sub.id)) {
-      // The write failed: nothing was recorded, so neither is the tombstone (the next release retries).
-      delete sub.released;
-      sub.lostHandOuts -= 1;
-      return { released: false, state: sub.state };
-    }
-    await deliver();
-    return { released: true, state: sub.state };
+  }
+
+  /** Released replies still to be re-delivered (a read failed): the safety re-check retries them. */
+  private pendingRedeliveries(): Sub[] {
+    return this.subs().filter(
+      (sub) => sub.released && sub.state === "done" && sub.ended === "waiter" && !sub.unreadable && !this.outbox.deliveries.some((d) => d.subscriptionId === sub.id)
+    );
   }
 
   /**
@@ -842,6 +884,8 @@ export class ReplyRouter implements DeliveryListener {
         await this.hand(delivery);
       }
     }
+    // A released reply whose re-delivery was not recorded yet (its read failed): tried again.
+    for (const sub of this.pendingRedeliveries()) await this.redeliver(sub);
     for (const requester of new Set(this.openSubs().map((sub) => sub.fromThreadId))) {
       if (this.isClosed(requester)) await this.requesterClosed(requester);
     }
@@ -1407,14 +1451,21 @@ export class ReplyRouter implements DeliveryListener {
   private armRecheck(): void {
     const ms = this.opts.recheckMs ?? DEFAULT_RECHECK_MS;
     if (ms <= 0 || this.stopped || this.recheck) return;
-    this.recheck = setInterval(() => {
-      for (const delivery of this.outbox.deliveries) if (delivery.state === "pending") void this.hand(delivery);
-      for (const sub of this.openSubs()) if (sub.state === "claimed-by-router") void this.resumeClaimed(sub);
-      // Closures no bus event reported (tabs closed before the records loaded) are found here too.
-      for (const id of new Set(this.openSubs().map((sub) => sub.fromThreadId))) void this.requesterClosed(id);
-      for (const id of new Set(this.openSubs().map((sub) => sub.toThreadId))) void this.evaluate(id);
-    }, ms);
+    this.recheck = setInterval(() => void this.recheckNow(), ms);
     this.recheck.unref?.();
+  }
+
+  /** The safety re-check's pass (run by its timer; tests call it directly instead of waiting). */
+  async recheckNow(): Promise<void> {
+    if (this.stopped) return;
+    const work: Promise<unknown>[] = [];
+    for (const delivery of this.outbox.deliveries) if (delivery.state === "pending") work.push(this.hand(delivery));
+    for (const sub of this.openSubs()) if (sub.state === "claimed-by-router") work.push(this.resumeClaimed(sub));
+    for (const sub of this.pendingRedeliveries()) work.push(this.redeliver(sub));
+    // Closures no bus event reported (tabs closed before the records loaded) are found here too.
+    for (const id of new Set(this.openSubs().map((sub) => sub.fromThreadId))) work.push(this.requesterClosed(id));
+    for (const id of new Set(this.openSubs().map((sub) => sub.toThreadId))) work.push(this.evaluate(id));
+    await Promise.all(work.map((p) => p.catch(() => undefined)));
   }
 
   /** Done records beyond {@link DONE_MEMORY} leave the file, oldest first; open ones never do. */

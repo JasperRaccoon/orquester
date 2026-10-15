@@ -33,7 +33,7 @@ import {
 
 import type { DaemonApi, DaemonResponse } from "../mcp/daemon-api.ts";
 import { LineageService } from "./lineage.ts";
-import { ReplyError, ReplyRouter } from "./replies.ts";
+import { MAX_REDELIVERY_READS, ReplyError, ReplyRouter } from "./replies.ts";
 import { registerWait, waitsOn } from "./waits.ts";
 
 // ---------------------------------------------------------------------------
@@ -1465,6 +1465,10 @@ describe("Task 8 fix round 2: re-delivery after a release", () => {
     w.host.rewindLast("tgt");
     await settled(w);
     assert.deepEqual(await w.router.release("tgt", res.subscriptionId), { released: false, state: "done" });
+    // Retried by the safety re-check, a bounded number of reads, before it is given up.
+    assert.deepEqual(await w.router.wait("tgt", res.subscriptionId, { timeoutSeconds: 60 }), { outcome: "notify", reason: "timeout", willNotify: true }, "still being retried");
+    for (let read = 1; read < MAX_REDELIVERY_READS; read += 1) await w.router.recheckNow();
+    assert.equal((w.router.subscriptions()[0] as { unreadable?: true }).unreadable, true);
     const later = await w.router.wait("tgt", res.subscriptionId, { timeoutSeconds: 60 });
     assert.equal(later.outcome, "replied");
     assert.ok(later.outcome === "replied" && later.state === "failed" && /no message will follow/.test(later.error ?? ""));
@@ -1522,5 +1526,91 @@ describe("Task 8 fix round 2: re-delivery after a release", () => {
     await settled(w);
     assert.equal(postsTo(w.host, "req").length, 1);
     await w.cleanup();
+  });
+});
+
+describe("Task 8 follow-up: re-delivery edges", () => {
+  it("a release that lands while a re-sent call's answer is read: that call answers notify, and one message goes out", async () => {
+    const w = await world();
+    const res = await w.router.subscribe("tgt", request("wait", { idempotencyKey: "call-2" }));
+    const waiting = w.router.wait("tgt", res.subscriptionId, { timeoutSeconds: 60 });
+    await settled(w);
+    w.host.settle("tgt", { reply: "Raced again." });
+    assert.equal((await waiting).outcome, "replied");
+    await settled(w);
+    // The re-sent call's wait reads the reply again; the first call's release lands during that read.
+    const api = w.host.api as { request: typeof w.host.api.request };
+    const read = api.request.bind(w.host.api);
+    let released: Promise<unknown> | null = null;
+    api.request = async (method, path, opts) => {
+      if (released === null && method === "GET" && path === "/api/sessions/tgt/thread" && opts?.query?.after === undefined) {
+        released = w.router.release("tgt", res.subscriptionId);
+        await released;
+      }
+      return read(method, path, opts);
+    };
+    await w.router.subscribe("tgt", request("wait", { idempotencyKey: "call-2" }));
+    const answer = await w.router.wait("tgt", res.subscriptionId, { timeoutSeconds: 60 });
+    api.request = read;
+    assert.deepEqual(answer, { outcome: "notify", reason: "timeout", willNotify: true });
+    await settled(w);
+    assert.equal(postsTo(w.host, "req").length, 1, "the reply is a message, once");
+    await w.cleanup();
+  });
+
+  it("a transient read failure is retried by the safety re-check, and the reply is then delivered once", async () => {
+    const w = await world();
+    const res = await w.router.subscribe("tgt", request("wait"));
+    const waiting = w.router.wait("tgt", res.subscriptionId, { timeoutSeconds: 60 });
+    await settled(w);
+    w.host.settle("tgt", { reply: "Read on the retry." });
+    assert.equal((await waiting).outcome, "replied");
+    await settled(w);
+    const api = w.host.api as { request: typeof w.host.api.request };
+    const read = api.request.bind(w.host.api);
+    let failing = true;
+    api.request = async (method, path, opts) => {
+      if (failing && method === "GET" && path === "/api/sessions/tgt/thread") return { status: 503, body: null };
+      return read(method, path, opts);
+    };
+    assert.deepEqual(await w.router.release("tgt", res.subscriptionId), { released: false, state: "done" });
+    await settled(w);
+    assert.equal(postsTo(w.host, "req").length, 0);
+    assert.equal((w.router.subscriptions()[0] as { unreadable?: true }).unreadable, undefined, "not given up after one failed read");
+    failing = false;
+    api.request = read;
+    await w.router.recheckNow();
+    await settled(w);
+    assert.equal(parseThreadMessage(postsTo(w.host, "req")[0]!.body.input as string)?.body, "Read on the retry.");
+    await w.router.recheckNow();
+    await settled(w);
+    assert.equal(postsTo(w.host, "req").length, 1);
+    await w.cleanup();
+  });
+
+  it("after a daemon restart the old holder's call is gone: a re-sent call's lost result still delivers exactly once", async () => {
+    const w = await world();
+    const res = await w.router.subscribe("tgt", request("wait", { idempotencyKey: "call-3" }));
+    const waiting = w.router.wait("tgt", res.subscriptionId, { timeoutSeconds: 60 });
+    await settled(w);
+    w.host.settle("tgt", { reply: "After the restart." });
+    assert.equal((await waiting).outcome, "replied");
+    await settled(w);
+    // The daemon restarts: the first call died with it, and its release never comes.
+    await w.cleanup(false);
+    const again = await world({ dir: w.dir, host: w.host });
+    const sub = again.router.subscriptions()[0] as { handOuts?: number; lostHandOuts?: number };
+    assert.deepEqual([sub.handOuts, sub.lostHandOuts], [0, 0], "holders are counted afresh");
+    await again.router.subscribe("tgt", request("wait", { idempotencyKey: "call-3" }));
+    const answer = await again.router.wait("tgt", res.subscriptionId, { timeoutSeconds: 60 });
+    assert.ok(answer.outcome === "replied" && answer.reply === "After the restart.");
+    // The re-sent call's result is lost too: its release delivers the reply as a message, once.
+    assert.equal((await again.router.release("tgt", res.subscriptionId)).released, true);
+    await settled(again);
+    assert.equal(postsTo(again.host, "req").length, 1);
+    await again.router.release("tgt", res.subscriptionId);
+    await settled(again);
+    assert.equal(postsTo(again.host, "req").length, 1);
+    await again.cleanup();
   });
 });
