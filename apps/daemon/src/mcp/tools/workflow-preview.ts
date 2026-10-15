@@ -347,7 +347,7 @@ export async function workflowCallers(api: DaemonApi, workflowId: string): Promi
  * The card's part for the workflows that run this one: the fields naming each, and the grant fields
  * (`callerWorkflowIds`; unreadable → `ungrantable`).
  */
-export function callerParts(callers: readonly WorkflowCaller[] | null, verb: "change" | "run" | "delete"): { sections: ApprovalPreviewSection[]; grant: { callerWorkflowIds?: string[]; ungrantable?: true } } {
+export function callerParts(callers: readonly WorkflowCaller[] | null, verb: "change" | "delete"): { sections: ApprovalPreviewSection[]; grant: { callerWorkflowIds?: string[]; ungrantable?: true } } {
   if (callers === null) {
     return {
       sections: [{ kind: "warning", level: "caution", text: "Orquester could not check which workflows run this one as a sub-workflow, so no grant can cover this call." }],
@@ -355,8 +355,7 @@ export function callerParts(callers: readonly WorkflowCaller[] | null, verb: "ch
     };
   }
   if (callers.length === 0) return { sections: [], grant: {} };
-  const effect =
-    verb === "delete" ? "deleting it makes their sub-workflow block fail" : verb === "change" ? "this change changes what they run" : "they run it too";
+  const effect = verb === "delete" ? "deleting it makes their sub-workflow block fail" : "this change changes what they run";
   return {
     sections: [
       {

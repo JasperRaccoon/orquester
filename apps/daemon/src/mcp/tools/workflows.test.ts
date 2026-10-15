@@ -1028,7 +1028,7 @@ test("secrets: editing what a secret-reading block does is never granted (card e
   assert.deepEqual(port.cards.at(-1)!.grantOptions, ["chat"]);
 });
 
-test("reverse direction: a grant never covers a workflow that a workflow outside the grant runs as a sub-workflow (directly or through others)", async (t) => {
+test("reverse direction: a grant never covers changing or deleting a workflow that a workflow outside the grant runs as a sub-workflow (directly or through others); running it stays covered", async (t) => {
   const api = await sandbox(t);
   const child = serveDefinition(api);
   const subBlock = (id: string, target: string) => ({ id, name: `Run ${target}`, type: "workflow", position: { x: 0, y: 0 }, config: { workflowId: target } });
@@ -1040,9 +1040,14 @@ test("reverse direction: a grant never covers a workflow that a workflow outside
   const port = new FakeApprovalPort({ outcome: "denied", approvalId: "" }).grant({ family: "workflows", scope: "chat", threadId: "me", projectPath: api.own, workflowIds: ["wf-1"] });
   const update = () => exec(api, "update_workflow", { workflowId: "wf-1", revision: 7, ops: [{ op: "update_node", node: "Finish", set: { config: { source: "export default async function () { return 3; }" } } }] }, { who: chat(api), port });
   await update();
-  await exec(api, "run_workflow", { workflowId: "wf-1", revision: 7 }, { who: chat(api), port });
   await exec(api, "delete_workflow", { workflowId: "wf-1", confirm: true }, { who: chat(api), port });
-  assert.equal(port.cards.length, 3, "update, run and delete all card");
+  assert.equal(port.cards.length, 2, "update and delete card");
+  // Running it changes nothing Nightly runs: the grant covers the run, and no caller list is read.
+  const listReads = api.calls.filter((c) => c.method === "GET" && c.path === "/api/workflows").length;
+  const ran = await exec(api, "run_workflow", { workflowId: "wf-1", revision: 7 }, { who: chat(api), port });
+  assert.equal(ran.isError, undefined, JSON.stringify(ran.structuredContent));
+  assert.equal(port.cards.length, 2, "the run is covered by the grant");
+  assert.equal(api.calls.filter((c) => c.method === "GET" && c.path === "/api/workflows").length, listReads, "no caller check for a run");
   for (const card of port.cards) {
     assert.deepEqual(card.grantOptions, [], "a grant chosen here could never cover it");
     assert.match(sectionText(card.sections), /Workflows that run it as a sub-workflow/);
@@ -1051,20 +1056,20 @@ test("reverse direction: a grant never covers a workflow that a workflow outside
   // The calling workflow in the same grant: covered again.
   port.file.grants[0]!.workflowIds = ["wf-1", "wf-user"];
   await update();
-  assert.equal(port.cards.length, 3, "caller and callee in one grant: no card");
+  assert.equal(port.cards.length, 2, "caller and callee in one grant: no card");
   // Through another workflow: Weekly (outside) runs Nightly (inside), which runs wf-1.
   const outer = definition(api, { id: "wf-outer", name: "Weekly", nodes: [...definition(api).nodes, subBlock("o", "wf-user")] as Workflow["nodes"] });
   api.on("GET", "/api/workflows/wf-outer", { status: 200, body: { workflow: outer, problems: [] } });
   api.on("GET", "/api/workflows", { status: 200, body: { workflows: [{ id: "wf-1" }, { id: "wf-user" }, { id: "wf-outer" }] } });
   await update();
-  assert.equal(port.cards.length, 4, "a transitive caller outside the grant cards");
-  assert.match(sectionText(port.cards[3]!.sections), /Weekly/);
+  assert.equal(port.cards.length, 3, "a transitive caller outside the grant cards");
+  assert.match(sectionText(port.cards[2]!.sections), /Weekly/);
   // Callers that cannot be read: fail closed.
   api.on("GET", "/api/workflows", { status: 500, body: { error: { code: "INTERNAL", message: "x" } } });
   port.file.grants[0]!.workflowIds = ["wf-1", "wf-user", "wf-outer"];
   await update();
-  assert.equal(port.cards.length, 5);
-  assert.deepEqual(port.cards[4]!.grantOptions, []);
+  assert.equal(port.cards.length, 4);
+  assert.deepEqual(port.cards[3]!.grantOptions, []);
 });
 
 test("changesSecretUse: added, changed, newly reachable and (for interpolating blocks) upstream changes count; unrelated ones do not", () => {

@@ -1892,11 +1892,15 @@ revision of each. In a chat, `run_workflow` checks them against what its approva
 cancels the run (`PREVIEW_STALE`) if one changed between the card and the start.
 
 **Chat grants and sub-workflows.** A chat's "Allow workflows" grant covers a change, run or
-deletion only when it covers every workflow the call runs as a sub-workflow AND every workflow that
-runs the target as one (directly or through others): changing a workflow another workflow outside
-the grant calls changes what that one runs, so it always asks the user (the card names those
-callers). An edit that adds or changes a block reading a workflow secret — or a block feeding one
-that interpolates other blocks' data — always asks too.
+deletion only when it covers every workflow the call runs as a sub-workflow. A change or a deletion
+is also covered only when the grant covers every workflow that runs the target as one (directly or
+through others): changing or deleting a workflow another workflow outside the grant calls changes
+what that one runs, so it always asks the user (the card names those callers); running it changes
+nothing they run, so a run stays covered. An edit that adds or changes a block reading a workflow
+secret — or a block feeding one that interpolates other blocks' data — always asks too. That check
+reads the block's text (`{{ secrets.NAME }}`, or `secrets` used in a Code block's source); a Code
+block's process receives every secret whatever its text says, but grants exist only for Full-access
+chats, which can already read the secrets store, so a Code edit under a grant reaches nothing more.
 
 A run's view lists every block in the definition's order: `status` (`pending`, `queued`,
 `running`, `waiting`, `succeeded`, `failed`, `skipped`, `cancelled`), `handle` (the output it

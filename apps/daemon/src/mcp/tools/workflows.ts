@@ -1303,9 +1303,9 @@ const runWorkflow = defineTool({
     const inputSection: ApprovalPreviewSection = { kind: "code", title: "Input ({{ trigger.input }})", language: "json", text: inputText };
     const problemParts = problemSections(problems);
     const title = `${agentLabel(ctx.caller)} wants to run the workflow "${workflow.name}"`;
-    // A workflow others run: a grant covers running it only if it covers them too.
-    const callers = callerParts(await workflowCallers(api, workflow.id), "run");
-    const base = { title, scopeLabel: unionLabel(union), workflowId: workflow.id, pins: previewPins(workflow, prompts, union), ...callers.grant };
+    // (Callers are not checked here: running a workflow another workflow calls does not change what
+    // that one runs — only an update or a delete does.)
+    const base = { title, scopeLabel: unionLabel(union), workflowId: workflow.id, pins: previewPins(workflow, prompts, union) };
     const tooLargeInput = () =>
       new ToolError("PREVIEW_TOO_LARGE", "The run input is too large to show the user in one approval card. Pass a smaller input (let a block read the bulk from a file or an earlier block).");
     // The definition that will run, in full: a card only opens for a workflow no grant covers —
@@ -1314,16 +1314,12 @@ const runWorkflow = defineTool({
     const full: ApprovalPreviewSection[] = [
       runFields,
       inputSection,
-      ...callers.sections,
       ...(await unionSections(api, union, ctx.caller, { childrenJoinGrant: grantable })),
       ...definitionSections(workflow, prompts, api.workspacesDir),
       ...problemParts
     ];
     // Measured whole, as the executor measures the card. A grant covers the run only if it covers every sub-workflow it calls (§7.6).
-    if (approvalPreviewBytes(full) <= TOOL_APPROVAL_FULL_PREVIEW_MAX_BYTES) {
-      const fields = unionGrantFields(union);
-      return { ...base, sections: full, ...fields, ...(fields.ungrantable || callers.grant.ungrantable ? { ungrantable: true as const } : {}) };
-    }
+    if (approvalPreviewBytes(full) <= TOOL_APPROVAL_FULL_PREVIEW_MAX_BYTES) return { ...base, sections: full, ...unionGrantFields(union) };
     // Over the cap. The input is the agent's and is never cut: when the definition alone would fit,
     // the input is what is too large — refused, the agent passes a smaller one.
     if (approvalPreviewBytes(full.filter((section) => section !== inputSection)) <= TOOL_APPROVAL_FULL_PREVIEW_MAX_BYTES) throw tooLargeInput();
@@ -1334,7 +1330,6 @@ const runWorkflow = defineTool({
       { kind: "warning", level: "danger", text: "This workflow is too large to show here — open it in Workflows to review every block before approving." },
       runFields,
       inputSection,
-      ...callers.sections,
       ...(await unionSections(api, union, ctx.caller)),
       { kind: "text", title: "Blocks", text: outline.join("\n") || "none" },
       ...(prompts.size > 0

@@ -184,8 +184,9 @@ export interface ApprovalPreview {
    */
   childWorkflowIds?: string[];
   /**
-   * `workflows` family: every OTHER workflow that runs `workflowId` as a sub-workflow, directly or
-   * through others (final review: the reverse direction). A change to `workflowId` changes what they
+   * `workflows` family, update and delete cards: every OTHER workflow that runs `workflowId` as a
+   * sub-workflow, directly or through others (final review: the reverse direction; a run changes
+   * nothing they run, so run cards carry none). A change to `workflowId` changes what they
    * run, so a grant covers the call only when the same grant covers each of them too, and the card
    * offers a grant only then. Never added to a grant (unlike `childWorkflowIds`).
    */
