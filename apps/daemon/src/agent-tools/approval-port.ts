@@ -214,6 +214,8 @@ export class AgentToolsApprovalPort implements ApprovalPort {
   /** The card's grant options narrowed to what the caller's current traits allow (§7.6, MUST 8). */
   private allowedGrantOptions(card: ApprovalRequest, traits: CallerTraits): GrantScope[] {
     if (traits.runtimeMode === null) return [];
+    // Workspace-level data lies outside the caller's project wherever it is: never a grant, whatever the card offers.
+    if ((card.workspaceTargets?.length ?? 0) > 0) return [];
     // A temp project not created yet, or another project in the scope, is never granted (Admin).
     const crossProject =
       card.family !== "cross-project" &&

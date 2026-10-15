@@ -115,6 +115,11 @@ export interface ScopeClaim {
    * by workspace name. The gate classifies each against the caller's workspace — its own, or another
    * (S13: below Full access a card, never a refusal; an Act in another workspace is always a card) —
    * and such a target is outside the caller's project, so an Admin call reaching one is never granted.
+   *
+   * ONLY for user-visible, undoable data — by analogy with the matrix's Global row (in its own
+   * workspace a chat may change it without a card). Anything that affects other projects' sessions or
+   * execution — the workspace's git identity, its settings, what its chats or workflows run — is not
+   * a workspace target: such a tool is Admin.
    */
   workspaces?: string[];
   /** Sessions read or acted on. */
@@ -215,6 +220,8 @@ export interface ApprovalRequest {
   workflowReferencedPrompt?: boolean;
   /** `ScopeClaim.pendingProjects`: workflow temp projects not created yet, by workspace — never grantable. */
   pendingProjects?: { workspace: string }[];
+  /** `ScopeClaim.workspaces`: workspace-level data the call reaches (own workspace included) — never grantable. */
+  workspaceTargets?: { workspace: string }[];
   /** Resolves once the call's result reached the host (the tool row's outcome `not_delivered` otherwise). */
   delivered?: Promise<boolean>;
 }

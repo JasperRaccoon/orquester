@@ -17,6 +17,8 @@
  * A workspace-level target (`scope.workspaces`: data a workspace owns outside its projects) uses the
  * `own` row in the caller's own workspace and the `other workspace` row elsewhere, but is never
  * grantable: its Act card names no target project, and an Admin call reaching one is cross-project.
+ * Like the Global row, it is only for user-visible, undoable data (todo lists); anything affecting
+ * other projects' sessions or execution (the workspace git identity, its settings) is Admin instead.
  *
  * Over it: Admin is a card in EVERY mode (ruling S1), refused while planning, and
  * `ADMIN_NOT_AVAILABLE` for a workflow-owned caller at once; a workflow-owned caller's every card

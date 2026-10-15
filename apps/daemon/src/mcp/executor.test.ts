@@ -460,6 +460,53 @@ test("tier(args, scope): the tier and family the scope resolved drive the gate, 
   assert.equal(code(await r.call("edit_record", { id: "theirs" }, caller({ planning: true }))), "PERMISSION_DENIED");
 });
 
+test("Admin cards: the computed adminFamily is the card's; a preview may only make it stricter (a strict subset of its grant scopes)", async () => {
+  const withPreviewFamily = (name: string, computed: "desktops" | "workflows", asked: "agent-profile" | "workflows" | "desktops") =>
+    defineTool({
+      name, title: name, description: "d", input: {}, audiences: ["chat"], toolset: "core", tier: "admin", adminFamily: computed,
+      scope: async () => claim({ projects: [OWN], writes: true }),
+      approval: async () => ({ title: "x", scopeLabel: "acme/api", sections: [{ kind: "text", text: "x" }], family: asked }),
+      annotations: MUTATING, resultKind: "json", run: async () => ({})
+    });
+  const r = rig({
+    tools: [
+      withPreviewFamily("narrow_ok", "desktops", "agent-profile"),
+      withPreviewFamily("subset_ok", "desktops", "workflows"),
+      withPreviewFamily("wider_no", "workflows", "desktops")
+    ]
+  });
+  const familyOf = async (name: string) => {
+    await r.call(name, {});
+    return r.port!.cards.at(-1)!.family;
+  };
+  assert.equal(await familyOf("narrow_ok"), "agent-profile", "never granted ⊂ desktops' grants: stricter, taken");
+  assert.equal(await familyOf("subset_ok"), "workflows", "[chat] ⊂ [chat, project]: stricter, taken");
+  assert.equal(await familyOf("wider_no"), "workflows", "desktops offers MORE grants than workflows: ignored, the computed family stands");
+  assert.deepEqual(r.port!.cards.at(-1)!.grantOptions, ["chat"], "workflows' own grant options, never desktops' project scope");
+});
+
+test("a tier or adminFamily function that throws: the call is an error and run is never called", async () => {
+  let ran = 0;
+  const throwing = (which: "tier" | "family") =>
+    defineTool({
+      name: `throws_${which}`, title: "Throws", description: "d", input: {}, audiences: ["chat"], toolset: "core",
+      tier: which === "tier" ? () => { throw new Error("the record could not be read"); } : "admin",
+      adminFamily: which === "family" ? () => { throw new Error("no family"); } : "desktops",
+      scope: async () => claim({ projects: [OWN], writes: true }),
+      approval: async () => ({ title: "x", scopeLabel: "acme/api", sections: [{ kind: "text", text: "x" }] }),
+      annotations: MUTATING, resultKind: "json", run: async () => ((ran += 1), {})
+    });
+  const r = rig({ tools: [throwing("tier"), throwing("family")] });
+  for (const name of ["throws_tier", "throws_family"]) {
+    const result = await r.call(name, {});
+    assert.equal(result.isError, true, name);
+    assert.equal(code(result), "INTERNAL", `${name}: a thrown non-ToolError is INTERNAL, its text never echoed`);
+    assert.doesNotMatch(message(result), /could not be read|no family/);
+  }
+  assert.equal(ran, 0, "run never called");
+  assert.equal(r.port!.cards.length, 0, "and no card opened");
+});
+
 test("a caller with no canonical project of its own is never offered a grant (findGrant would never honour it)", async () => {
   const r = rig();
   await r.call("open_desktop", { command: "xterm" }, caller({ projectPath: "", workspace: "" }));

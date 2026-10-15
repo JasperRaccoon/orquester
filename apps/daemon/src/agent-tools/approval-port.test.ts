@@ -143,6 +143,19 @@ test("the card's pending temp projects and a workflow-referenced prompt are neve
   );
 });
 
+test("workspace-level targets on the card: the port itself offers no grant, whatever the card's options say", async (t) => {
+  const h = await harness(t);
+  const signal = new AbortController().signal;
+  void h.port.request(card({ workspaceTargets: [{ workspace: "ws" }] }), signal);
+  void h.port.request(card(), signal);
+  await h.opened();
+  await h.opened();
+  assert.deepEqual(
+    h.registry.list("t1").map((summary) => summary.grantOptions),
+    [[], ["chat", "project"]]
+  );
+});
+
 test("grants are never offered to a caller below full-access, nor for cross-project Admin, whatever the card says", async (t) => {
   const h = await harness(t);
   h.setMode("auto");

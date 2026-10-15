@@ -28,6 +28,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import {
   approvalPreviewBytes,
   buildThreadMessage,
+  GRANT_TABLE,
   grantOptionsFor,
   sanitizeApprovalLabel,
   TOOL_APPROVAL_FULL_PREVIEW_MAX_BYTES,
@@ -38,6 +39,7 @@ import {
   TOOL_APPROVAL_REFERENCE_KEY,
   type AccountSummary,
   type AdminFamily,
+  type ApprovalFamily,
   type ApprovalPreviewSection,
   type ToolApprovalReference,
   type ToolsetId,
@@ -433,7 +435,11 @@ async function passCard(
   let preview: ApprovalPreview | null = null;
   if (tool.approval) preview = await tool.approval(frozenArgs, ctx);
   else if (decision.approvalKind === "admin") throw new ToolError("PERMISSION_DENIED", `${tool.name} is not available: it has no approval preview.`);
-  const family = decision.approvalKind === "admin" ? (preview?.family ?? decision.family) : decision.family;
+  // The computed family (`adminFamily(args, scope)`, the gate's) is the call's: a preview may only make
+  // it STRICTER — a family offering a strict subset of its grant scopes (e.g. desktops → one never
+  // granted) — never a different or more grantable one. (A preview that finds the call less safe than
+  // scope did also has `ungrantable` / `workflowReferencedPrompt`.)
+  const family = decision.approvalKind === "admin" ? stricterFamily(decision.family, preview?.family) : decision.family;
 
   // A grant covers the call without a card (full-access, non workflow-owned callers only; §7.6).
   // Grants are recorded for the caller's canonical project: without one, none can match (skip the read).
@@ -521,6 +527,7 @@ async function passCard(
     ...(decision.targetProjectPath ? { targetProjectPath: decision.targetProjectPath } : {}),
     ...(preview?.workflowReferencedPrompt ? { workflowReferencedPrompt: true } : {}),
     ...(scope.pendingProjects?.length ? { pendingProjects: scope.pendingProjects.map((pending) => ({ workspace: pending.workspace })) } : {}),
+    ...(facts.workspaceTargets.length ? { workspaceTargets: facts.workspaceTargets.map((target) => ({ workspace: target.workspace })) } : {}),
     ...(caller.delivered ? { delivered: caller.delivered } : {})
   };
   const outcome = await port.request(request, ctx.signal);
@@ -571,6 +578,14 @@ async function passCard(
     case "cancelled":
       return { kind: "cancelled", reference, ...(outcome.reason ? { reason: outcome.reason } : {}) };
   }
+}
+
+/** `asked` when it offers a strict subset of `computed`'s grant scopes (`GRANT_TABLE`), else `computed`. */
+function stricterFamily(computed: ApprovalFamily, asked: AdminFamily | undefined): ApprovalFamily {
+  if (asked === undefined || asked === computed) return computed;
+  const mine = GRANT_TABLE[computed] ?? [];
+  const theirs = GRANT_TABLE[asked] ?? [];
+  return theirs.length < mine.length && theirs.every((scope) => mine.includes(scope)) ? asked : computed;
 }
 
 /**
