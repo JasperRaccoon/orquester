@@ -16,11 +16,15 @@
  *
  * Grants (§7.6, MUST 8): honoured only for `full-access`, non workflow-owned callers
  * (`findGrant`), stamped `lastUsedAt` on use; a chat's grants and overrides are deleted with its
- * thread; a project grant whose project no longer exists is dropped when next read.
+ * thread; a project grant whose project is missing is dropped only after REPEATED misses over time
+ * ({@link PROJECT_GRANT_PRUNE_MISSES} checks spanning {@link PROJECT_GRANT_PRUNE_AFTER_MS}, counted by
+ * `findGrant`) — never on one transient miss, never from a read route.
  *
  * Changes are announced on the bus (`agent-tools` / `agentTools.changed`) and a chat's toolset
  * change also through {@link AgentToolsService.onToolsetsChanged} (the chat transport re-lists or
- * restarts the provider session at its next idle point).
+ * restarts the provider session at its next idle point). Listeners run ASYNCHRONOUSLY (a microtask
+ * after the change is saved — for an approved toolset card, after the card settled), so no listener
+ * can change the outcome of the write or the card that caused it.
  */
 
 import { randomUUID } from "node:crypto";
@@ -99,7 +103,7 @@ export interface AgentToolsServiceOptions {
   file: string;
   /** Publish `agentTools.changed` on the `agent-tools` channel. */
   publish?(payload: AgentToolsChangedPayload): void;
-  /** Whether a project still exists (project grants of a removed project are dropped). Default: yes. */
+  /** Whether a project still exists (project grants of a long-missing project are pruned). Default: yes. */
   projectExists?(path: string): boolean;
   now?: () => number;
   newId?: () => string;
@@ -107,6 +111,11 @@ export interface AgentToolsServiceOptions {
 }
 
 const EVENT_TOOLSETS_CHANGED = "toolsets-changed";
+
+/** A project grant whose project is missing is pruned after this many `findGrant` misses… */
+export const PROJECT_GRANT_PRUNE_MISSES = 3;
+/** …spanning at least this long (a transient miss — an unmounted disk, a rename in flight — never prunes). */
+export const PROJECT_GRANT_PRUNE_AFTER_MS = 60 * 60 * 1000;
 
 export class AgentToolsService {
   private state: AgentToolsFile = createDefaultAgentToolsFile();
@@ -116,6 +125,8 @@ export class AgentToolsService {
   private readonly events = new EventEmitter();
   /** What each chat's running provider session advertises (the chat transport reports it), for `appliesAtNextIdle`. */
   private advertised: ((threadId: string) => readonly string[] | null) | null = null;
+  /** Project grants seen with their project missing: grant id → first miss and count (memory only). */
+  private readonly projectMisses = new Map<string, { firstAt: number; count: number }>();
 
   constructor(private readonly opts: AgentToolsServiceOptions) {}
 
@@ -222,9 +233,8 @@ export class AgentToolsService {
   // Settings (§9.2)
   // -------------------------------------------------------------------------
 
-  /** `GET /api/agent-tools`. Project grants of removed projects are dropped first. */
+  /** `GET /api/agent-tools`. A read: never writes. */
   settingsView(): AgentToolsResponse {
-    this.dropGrantsOfRemovedProjects();
     const file = this.state;
     const toolsets: AgentToolsetView[] = TOOLSETS.map((toolset) => {
       const catalogDefaults = { ...toolset.defaults } as Record<AgentAdapterId, boolean>;
@@ -394,20 +404,29 @@ export class AgentToolsService {
     return until === null ? null : new Date(until).toISOString();
   }
 
-  /** Listen for a chat's toolsets changing (`threadId`), or every chat's (`null`: a settings change). */
+  /**
+   * Listen for a chat's toolsets changing (`threadId`), or every chat's (`null`: a settings change).
+   * Called asynchronously (a microtask after the change was applied and, for a toolset card, after
+   * the card settled); a listener's result or error never affects the write or the card.
+   */
   onToolsetsChanged(listener: (threadId: string | null) => void): () => void {
     this.events.on(EVENT_TOOLSETS_CHANGED, listener);
     return () => this.events.off(EVENT_TOOLSETS_CHANGED, listener);
   }
 
+  /** Listeners run in a microtask: after the caller (e.g. the card settling) is done, never inside it. */
   private emitToolsetsChanged(threadId: string | null): void {
-    for (const listener of this.events.listeners(EVENT_TOOLSETS_CHANGED)) {
-      try {
-        (listener as (id: string | null) => void)(threadId);
-      } catch (error) {
-        this.opts.logger?.warn?.("agent-tools: a toolsets-changed listener failed", error instanceof Error ? error.name : typeof error);
+    const listeners = this.events.listeners(EVENT_TOOLSETS_CHANGED) as ((id: string | null) => void)[];
+    if (listeners.length === 0) return;
+    queueMicrotask(() => {
+      for (const listener of listeners) {
+        try {
+          listener(threadId);
+        } catch (error) {
+          this.opts.logger?.warn?.("agent-tools: a toolsets-changed listener failed", error instanceof Error ? error.name : typeof error);
+        }
       }
-    }
+    });
   }
 
   private setThreadOverrides(threadId: string, changes: readonly [ToolsetId, boolean | null][]): void {
@@ -430,7 +449,7 @@ export class AgentToolsService {
 
   /** The grant covering a gated call, or null (config `findGrant`); a hit is stamped `lastUsedAt`. */
   findGrant(query: AgentToolGrantQuery): AgentToolGrantRecord | null {
-    this.dropGrantsOfRemovedProjects();
+    this.pruneGrantsOfRemovedProjects();
     const grant = findGrantIn(this.state, query);
     if (!grant) return null;
     const lastUsedAt = new Date(this.now()).toISOString();
@@ -474,16 +493,19 @@ export class AgentToolsService {
   }
 
   /**
-   * Add `workflowId` to the chat's `workflows` grant (§7.6): `grantId` when it is that chat's
-   * `workflows` chat grant in that project, else the chat's existing one. Returns the grant id, or
-   * null when there is none (a no-op).
+   * Add `workflowId` to the chat's `workflows` grant `grantId` (§7.6) — only when `grantId` IS that
+   * chat's `workflows` chat grant in that project. Returns the grant id, or null (a no-op): there is
+   * no fallback to "the chat's grant" (ruling: approving once never widens a standing grant).
    */
-  recordWorkflowInGrant(input: { threadId: string; callerProjectPath: string; workflowId: string; grantId?: string }): string | null {
-    const isChatWorkflowGrant = (grant: AgentToolGrantRecord): boolean =>
-      grant.family === "workflows" && grant.scope === "chat" && grant.threadId === input.threadId && grant.projectPath === input.callerProjectPath;
-    const grant =
-      (input.grantId !== undefined ? this.state.grants.find((g) => g.id === input.grantId && isChatWorkflowGrant(g)) : undefined) ??
-      this.state.grants.find(isChatWorkflowGrant);
+  recordWorkflowInGrant(input: { threadId: string; callerProjectPath: string; workflowId: string; grantId: string }): string | null {
+    const grant = this.state.grants.find(
+      (g) =>
+        g.id === input.grantId &&
+        g.family === "workflows" &&
+        g.scope === "chat" &&
+        g.threadId === input.threadId &&
+        g.projectPath === input.callerProjectPath
+    );
     if (!grant) return null;
     if (!(grant.workflowIds ?? []).includes(input.workflowId)) {
       this.appendWorkflow(grant.id, input.workflowId);
@@ -545,12 +567,30 @@ export class AgentToolsService {
     this.publish();
   }
 
-  private dropGrantsOfRemovedProjects(): void {
+  /**
+   * Count misses of project grants whose project is gone; drop one only once it has missed
+   * {@link PROJECT_GRANT_PRUNE_MISSES} times over at least {@link PROJECT_GRANT_PRUNE_AFTER_MS}. A
+   * project seen again resets its count.
+   */
+  private pruneGrantsOfRemovedProjects(): void {
     const exists = this.opts.projectExists;
     if (!exists || this.blockedReason !== null) return;
-    const gone = this.state.grants.filter((g) => g.scope === "project" && g.projectPath !== "" && !exists(g.projectPath));
+    const now = this.now();
+    const gone: string[] = [];
+    for (const grant of this.state.grants) {
+      if (grant.scope !== "project" || grant.projectPath === "") continue;
+      if (exists(grant.projectPath)) {
+        this.projectMisses.delete(grant.id);
+        continue;
+      }
+      const miss = this.projectMisses.get(grant.id) ?? { firstAt: now, count: 0 };
+      miss.count += 1;
+      this.projectMisses.set(grant.id, miss);
+      if (miss.count >= PROJECT_GRANT_PRUNE_MISSES && now - miss.firstAt >= PROJECT_GRANT_PRUNE_AFTER_MS) gone.push(grant.id);
+    }
     if (gone.length === 0) return;
-    const ids = new Set(gone.map((g) => g.id));
+    for (const id of gone) this.projectMisses.delete(id);
+    const ids = new Set(gone);
     this.mutate((file) => ({ ...file, grants: file.grants.filter((g) => !ids.has(g.id)) }));
     this.publish();
   }

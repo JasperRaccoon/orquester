@@ -13,7 +13,9 @@ import {
 } from "@orquester/api/agent-chat";
 
 import {
+  MAX_PENDING_TOOL_APPROVALS_PER_THREAD,
   registerToolApprovalRoutes,
+  TOOL_APPROVAL_LIMIT_CODE,
   ToolApprovalAnswerRefusal,
   ToolApprovalRegistry,
   type ToolApprovalClock,
@@ -350,4 +352,36 @@ test("routes: list, detail, answer; only a person answers (agent and external pr
   } finally {
     await app.close();
   }
+});
+
+test("at most MAX_PENDING_TOOL_APPROVALS_PER_THREAD cards wait per chat (APPROVAL_LIMIT); other chats are not affected", async () => {
+  const h = harness();
+  for (let i = 0; i < MAX_PENDING_TOOL_APPROVALS_PER_THREAD; i += 1) void h.registry.open(card(), new AbortController().signal);
+  await assert.rejects(h.registry.open(card(), new AbortController().signal), (e: Error & { code?: string }) => e.code === TOOL_APPROVAL_LIMIT_CODE);
+  assert.equal(h.registry.list("t1").length, MAX_PENDING_TOOL_APPROVALS_PER_THREAD);
+  void h.registry.open(card({ threadId: "t2" }), new AbortController().signal);
+  assert.equal(h.registry.list("t2").length, 1);
+  // One answered frees a slot.
+  await h.registry.answer("t1", "a1", { decision: "deny" });
+  void h.registry.open(card(), new AbortController().signal);
+  assert.equal(h.registry.list("t1").length, MAX_PENDING_TOOL_APPROVALS_PER_THREAD);
+  await h.registry.shutdown();
+});
+
+test("a read-only store refusing the approval's write answers 503 AGENT_TOOLS_UNAVAILABLE and keeps the card", async () => {
+  const h = harness();
+  let readOnly = true;
+  const waiting = h.registry.open(card(), new AbortController().signal, {
+    commitApproval: () => {
+      if (readOnly) throw Object.assign(new Error("read-only"), { status: 503, code: "AGENT_TOOLS_UNAVAILABLE" });
+      return {};
+    }
+  });
+  const refused = await h.registry.answer("t1", "a1", { decision: "approve" });
+  assert.deepEqual(refused.ok ? null : [refused.status, refused.code], [503, "AGENT_TOOLS_UNAVAILABLE"]);
+  assert.match(refused.ok ? "" : refused.message, /read-only/);
+  assert.equal(h.registry.list("t1").length, 1);
+  readOnly = false;
+  assert.ok((await h.registry.answer("t1", "a1", { decision: "approve" })).ok);
+  assert.equal((await waiting).outcome, "approved");
 });

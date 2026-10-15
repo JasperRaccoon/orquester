@@ -777,3 +777,24 @@ test("without an approval push the card's needs-input transition pushes the stru
   h.service.secretRequestsChanged("t1");
   assert.deepEqual(h.pushes, [{ id: "t1", type: "needs-input" }]);
 });
+
+test("an approval card pushes once for its life, even when its thread is forgotten and re-adopted", async (t) => {
+  const approvalPushes: Array<{ id: string; title: string }> = [];
+  const h = await harness(t, undefined, undefined, undefined, undefined, approvalPushes);
+  const cards = [{ approvalId: "a1", title: "Claude wants to open a desktop" }];
+  h.service.setSecretRequests({ list: () => [], approvals: () => cards });
+  seedTab(h.chat, "t1");
+  const working = { chatSessionStatus: "running" as const, latestTurn: { turnId: "a", state: "running" as const, startedAt: "2026-09-21T00:00:00.000Z", completedAt: null } };
+  await h.read("t1", working);
+  assert.equal(approvalPushes.length, 1);
+  // The host answers 404 once (state dropped), then the thread is re-adopted; and a forget/re-read.
+  await h.read("t1", {}, undefined, 404);
+  await h.read("t1", working);
+  h.service.forget("t1");
+  await h.read("t1", working);
+  assert.equal(approvalPushes.length, 1, "no duplicate push for the same card");
+  // A new card still pushes.
+  cards.push({ approvalId: "a2", title: "Claude wants to run the workflow Deploy" });
+  h.service.secretRequestsChanged("t1");
+  assert.deepEqual(approvalPushes.map((p) => p.title), ["Claude wants to open a desktop", "Claude wants to run the workflow Deploy"]);
+});

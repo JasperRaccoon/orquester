@@ -159,6 +159,12 @@ export function approvalNeededTitle(cardTitle: string): string {
 export class AgentChatSummaryService {
   private readonly threads = new Map<string, ThreadState>();
   private secretRequests: SummarySecretRequests | null = null;
+  /**
+   * Approval cards already pushed, per thread, for each card's life: a card is pushed at most once
+   * even when its thread's state is dropped and re-adopted (a host 404, `forget`, a handover).
+   * Pruned to the thread's pending cards on every fold, and with the tab.
+   */
+  private readonly pushedApprovals = new Map<string, Set<string>>();
   /** The `observedAt` of each thread's last usage reading handed on. */
   private readonly usageObservedAt = new Map<string, string>();
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -336,6 +342,7 @@ export class AgentChatSummaryService {
     if (!this.opts.chat.has(threadId)) {
       // A thread the daemon has no tab for (closed here, still live there).
       this.threads.delete(threadId);
+      this.pushedApprovals.delete(threadId);
       return;
     }
     const previous = this.threads.get(threadId);
@@ -365,7 +372,15 @@ export class AgentChatSummaryService {
     const attentionChanged = (previous?.activity.attention ?? null) !== resolution.attention;
     const previousPending = previous?.pending ?? new Map<string, AgentHostPendingRequest>();
     const pending = this.publishPendingTransitions(threadId, previousPending, pendingRequests);
-    const newApproval = approvals.find((card) => !previousPending.has(approvalPendingRequestId(card.approvalId)));
+    // Cards not pushed yet (by id, for the card's life — never by "new since the last poll", which a
+    // re-adopted thread would read as new again). Only the oldest pushes; every one is marked.
+    const pushedBefore = this.pushedApprovals.get(threadId) ?? new Set<string>();
+    const unpushed = approvals.filter((card) => !pushedBefore.has(card.approvalId));
+    const newApproval = unpushed[0];
+    const pushedNow = new Set(approvals.filter((card) => pushedBefore.has(card.approvalId)).map((card) => card.approvalId));
+    for (const card of unpushed) pushedNow.add(card.approvalId);
+    if (pushedNow.size > 0) this.pushedApprovals.set(threadId, pushedNow);
+    else this.pushedApprovals.delete(threadId);
     const previousTurn = previous?.fields.latestTurn ?? null;
     const latestTurn = fields.latestTurn ?? null;
     // `needsAttentionAt` is the Attention Center's `flaggedAt` and the MCP

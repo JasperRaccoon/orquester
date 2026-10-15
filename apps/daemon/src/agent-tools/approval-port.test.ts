@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -9,7 +9,15 @@ import type { AgentChatToolApprovalEventPayload, RuntimeMode } from "@orquester/
 import { ToolApprovalRegistry, type ToolApprovalClock } from "../agent-chat/tool-approvals.ts";
 import type { ApprovalRequest } from "../mcp/catalog/contract.ts";
 import type { DaemonApi } from "../mcp/daemon-api.ts";
-import { AgentToolsApprovalPort, callerTraitsFromDaemon, workflowOwnedFromTabs, type CallerTraits } from "./approval-port.ts";
+import {
+  AgentToolsApprovalPort,
+  callerTraitsFromDaemon,
+  canonicalProjectPath,
+  createAgentToolsRuntime,
+  WORKFLOW_GRANT_NOTICE,
+  workflowOwnedFromTabs,
+  type CallerTraits
+} from "./approval-port.ts";
 import { AgentToolsService } from "./service.ts";
 
 class FakeClock implements ToolApprovalClock {
@@ -179,7 +187,10 @@ test("workflow-owned callers never get a card: Admin → ADMIN_NOT_AVAILABLE, bo
 test("toolset cards: approval turns the toolset on for the chat (persisted, toolsetsChanged); a denial blocks asking for 30 min", async (t) => {
   const h = await harness(t);
   const changed: (string | null)[] = [];
-  h.tools.onToolsetsChanged((id) => changed.push(id));
+  h.tools.onToolsetsChanged((id) => {
+    changed.push(`${id}:${h.registry.list("t1").length === 0 ? "settled" : "pending"}`);
+    throw new Error("a listener that throws changes nothing");
+  });
   const toolsetCard = card({ tool: "request_toolset", kind: "toolset", family: "toolset", grantOptions: [], title: "Claude asks to enable Workflow authoring for this chat", toolset: "workflow-authoring" });
   const waiting = h.port.request(toolsetCard, new AbortController().signal);
   const id = await h.opened();
@@ -187,7 +198,7 @@ test("toolset cards: approval turns the toolset on for the chat (persisted, tool
   assert.ok((await h.registry.answer("t1", id, { decision: "approve" })).ok);
   assert.equal((await waiting).outcome, "approved");
   assert.deepEqual(h.tools.resolvedToolsets("t1", "claude"), ["core", "reads", "workflow-authoring"]);
-  assert.deepEqual(changed, ["t1"]);
+  assert.deepEqual(changed, ["t1:settled"], "the listener ran after the card settled, never inside the answer");
   // Already on: no card.
   const before = h.events.length;
   assert.deepEqual(await h.port.request(toolsetCard, new AbortController().signal), { outcome: "approved", approvalId: "" });
@@ -207,30 +218,97 @@ test("toolset cards: approval turns the toolset on for the chat (persisted, tool
   await assert.rejects(h.port.request(unnamed, new AbortController().signal), (e: Error & { code?: string }) => e.code === "INVALID_ARGUMENT");
 });
 
-test("workflows chat grants cover only workflows created or approved in that chat", async (t) => {
+test("workflows grants (ruling): a create joins the chat's grant and the card says so; approving a run once never widens it", async (t) => {
   const h = await harness(t);
+  const query = { family: "workflows", callerRuntimeMode: "full-access", workflowOwned: false, threadId: "t1", projectPath: PROJECT, projects: [PROJECT] };
   const wfCard = (workflowId?: string) =>
     card({ tool: workflowId ? "run_workflow" : "create_workflow", family: "workflows", grantOptions: ["chat"], ...(workflowId ? { workflowId } : {}) });
-  // A create approved with the chat grant: the grant starts empty, the new id is added after the create ran.
+
+  // No grant yet: a plain create approval joins nothing and the card carries no notice.
+  const first = h.port.request(wfCard(), new AbortController().signal);
+  const firstId = await h.opened();
+  assert.ok(!JSON.stringify(h.registry.list("t1")).includes("'Allow workflows' grant"));
+  await h.registry.answer("t1", firstId, { decision: "approve" });
+  assert.deepEqual(await first, { outcome: "approved", approvalId: firstId });
+  await h.port.recordWorkflowInGrant({ threadId: "t1", callerProjectPath: PROJECT, workflowId: "wf0" });
+  assert.equal(h.tools.settingsView().grants.length, 0, "no grantId: nothing joins, nothing is created");
+
+  // (b) The user chooses grant "chat" on a create: the grant starts empty and the new id is added after the create ran.
   const create = h.port.request(wfCard(), new AbortController().signal);
   await h.registry.answer("t1", await h.opened(), { decision: "approve", grant: "chat" });
   const created = await create;
-  assert.equal(created.outcome, "approved");
   const grantId = created.outcome === "approved" ? created.grantId : undefined;
-  await h.port.recordWorkflowInGrant({ threadId: "t1", callerProjectPath: PROJECT, workflowId: "wf1", ...(grantId ? { grantId } : {}) });
-  const query = { family: "workflows", callerRuntimeMode: "full-access", workflowOwned: false, threadId: "t1", projectPath: PROJECT, projects: [PROJECT] };
+  assert.ok(grantId);
+  await h.port.recordWorkflowInGrant({ threadId: "t1", callerProjectPath: PROJECT, workflowId: "wf1", grantId });
   assert.equal((await h.port.findGrant({ ...query, workflowId: "wf1" }))?.id, grantId);
-  assert.equal(await h.port.findGrant({ ...query, workflowId: "wf-elsewhere" }), null);
-  // Approving a run of another workflow in this chat (no grant chosen) adds it to the chat's grant.
-  const run = h.port.request(wfCard("wf2"), new AbortController().signal);
+
+  // A plain approve-once of a run of a user-written workflow does NOT join.
+  const run = h.port.request(wfCard("wf-user"), new AbortController().signal);
   await h.registry.answer("t1", await h.opened(), { decision: "approve" });
-  assert.equal((await run).outcome, "approved");
+  assert.deepEqual(await run, { outcome: "approved", approvalId: h.events.at(-1)!.closed!.approvalId });
+  assert.equal(await h.port.findGrant({ ...query, workflowId: "wf-user" }), null);
+
+  // (b) again: grant "chat" chosen on a run card adds that workflow to the existing grant.
+  const runGranted = h.port.request(wfCard("wf-user"), new AbortController().signal);
+  await h.registry.answer("t1", await h.opened(), { decision: "approve", grant: "chat" });
+  assert.equal((await runGranted).outcome === "approved" && (await runGranted).outcome, "approved");
+  assert.equal((await h.port.findGrant({ ...query, workflowId: "wf-user" }))?.id, grantId);
+
+  // (a) A create while the grant stands: the card says it will join, and the outcome names the grant.
+  const joining = h.port.request(wfCard(), new AbortController().signal);
+  const joiningId = await h.opened();
+  const summary = h.registry.list("t1")[0]!;
+  assert.deepEqual(summary.sections[0], { kind: "warning", level: "caution", text: WORKFLOW_GRANT_NOTICE });
+  await h.registry.answer("t1", joiningId, { decision: "approve" });
+  assert.deepEqual(await joining, { outcome: "approved", approvalId: joiningId, grantId });
+  await h.port.recordWorkflowInGrant({ threadId: "t1", callerProjectPath: PROJECT, workflowId: "wf2", grantId: grantId! });
   assert.equal((await h.port.findGrant({ ...query, workflowId: "wf2" }))?.id, grantId);
-  // Not recorded for a caller no longer in full access.
+
+  // Full access is re-checked at ANSWER time on the join path: left meanwhile → approved, joins nothing.
+  const late = h.port.request(wfCard(), new AbortController().signal);
+  const lateId = await h.opened();
   h.setMode("auto");
-  await h.port.recordWorkflowInGrant({ threadId: "t1", callerProjectPath: PROJECT, workflowId: "wf3" });
+  await h.registry.answer("t1", lateId, { decision: "approve" });
+  assert.deepEqual(await late, { outcome: "approved", approvalId: lateId });
+  // …and at record time too.
+  await h.port.recordWorkflowInGrant({ threadId: "t1", callerProjectPath: PROJECT, workflowId: "wf3", grantId: grantId! });
   h.setMode("full-access");
   assert.equal(await h.port.findGrant({ ...query, workflowId: "wf3" }), null);
+});
+
+test("master switch off: a toolset card is refused up front, and an approval after it was switched off is refused", async (t) => {
+  const h = await harness(t);
+  const toolsetCard = card({ tool: "request_toolset", kind: "toolset", family: "toolset", grantOptions: [], title: "Claude asks to enable Desktops for this chat", toolset: "desktops" });
+  h.tools.updateSettings({ revision: 0, enabled: false });
+  await assert.rejects(h.port.request(toolsetCard, new AbortController().signal), (e: Error & { code?: string; message: string }) => e.code === "PERMISSION_DENIED" && e.message.includes("switched off"));
+  assert.equal(h.events.length, 0, "no card");
+  h.tools.updateSettings({ revision: 1, enabled: true });
+  const waiting = h.port.request(toolsetCard, new AbortController().signal);
+  const id = await h.opened();
+  h.tools.updateSettings({ revision: 2, enabled: false });
+  const refused = await h.registry.answer("t1", id, { decision: "approve" });
+  assert.deepEqual(refused.ok ? null : [refused.status, refused.code], [409, "AGENT_TOOLS_DISABLED"]);
+  assert.equal(h.registry.list("t1").length, 1, "the card stays; deny still works");
+  assert.ok((await h.registry.answer("t1", id, { decision: "deny" })).ok);
+  assert.equal((await waiting).outcome, "denied");
+});
+
+test("a read-only store: a grant or a toolset approval answers 503 AGENT_TOOLS_UNAVAILABLE; approving without a grant works", async (t) => {
+  const h = await harness(t);
+  (h.tools as unknown as { blockedReason: string }).blockedReason = "test: read-only";
+  const waiting = h.port.request(card(), new AbortController().signal);
+  const id = await h.opened();
+  const refused = await h.registry.answer("t1", id, { decision: "approve", grant: "chat" });
+  assert.deepEqual(refused.ok ? null : [refused.status, refused.code], [503, "AGENT_TOOLS_UNAVAILABLE"]);
+  assert.match(refused.ok ? "" : refused.message, /read-only/);
+  assert.ok((await h.registry.answer("t1", id, { decision: "approve" })).ok);
+  assert.equal((await waiting).outcome, "approved");
+  const toolset = h.port.request(card({ tool: "request_toolset", kind: "toolset", family: "toolset", grantOptions: [], toolset: "notes" }), new AbortController().signal);
+  const toolsetId = await h.opened();
+  const refusedToolset = await h.registry.answer("t1", toolsetId, { decision: "approve" });
+  assert.deepEqual(refusedToolset.ok ? null : [refusedToolset.status, refusedToolset.code], [503, "AGENT_TOOLS_UNAVAILABLE"]);
+  h.registry.cancelThread("t1");
+  assert.equal((await toolset).outcome, "cancelled");
 });
 
 test("cancellation reaches the card: the call's signal and the 30-min deadline", async (t) => {
@@ -271,4 +349,44 @@ test("traits from the daemon: tab presence, workflow ownership along lineage, th
   assert.equal(await read("missing"), null);
   fail = true;
   assert.deepEqual(await read("child"), { runtimeMode: null, workflowOwned: true, agent: "codex" });
+});
+
+test("threadInfo reports the CANONICAL project path, so a symlinked project's grants match the executor's", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "orq-canonical-"));
+  const real = join(dir, "ws", "p");
+  await mkdir(real, { recursive: true });
+  const link = join(dir, "link-p");
+  await symlink(real, link);
+  const canonical = await realpath(real);
+  assert.equal(canonicalProjectPath(link), canonical);
+  assert.equal(canonicalProjectPath(""), "");
+  assert.equal(canonicalProjectPath(join(dir, "missing", "..", "gone")), join(dir, "gone"));
+  const rt = createAgentToolsRuntime({
+    baseDir: dir,
+    publish: () => undefined,
+    onApprovalsChanged: () => undefined,
+    tab: (id) => (id === "t1" ? { projectPath: link } : undefined),
+    agentOf: () => "claude",
+    api: () => null,
+    logger: { log: () => undefined, warn: () => undefined, error: () => undefined }
+  });
+  await rt.load();
+  t.after(async () => {
+    await rt.shutdown();
+    await rm(dir, { recursive: true, force: true });
+  });
+  const grantId = rt.tools.addGrant({ family: "desktops", scope: "project", projectPath: canonical, threadId: "t9" });
+  const info = rt.threadInfo("t1")!;
+  assert.equal(info.projectPath, canonical);
+  assert.deepEqual(rt.tools.threadView("t1", info).grants.map((g) => g.id), [grantId]);
+});
+
+test("at most 5 cards wait in one chat; the 6th is refused before any card", async (t) => {
+  const h = await harness(t);
+  for (let i = 0; i < 5; i += 1) {
+    void h.port.request(card(), new AbortController().signal);
+    await h.opened();
+  }
+  await assert.rejects(h.port.request(card(), new AbortController().signal), (e: Error & { code?: string }) => e.code === "APPROVAL_LIMIT");
+  assert.equal(h.registry.list("t1").length, 5);
 });

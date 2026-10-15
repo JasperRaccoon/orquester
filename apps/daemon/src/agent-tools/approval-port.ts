@@ -27,9 +27,16 @@ import {
   type SessionSummary,
   type ToolsetId
 } from "@orquester/api";
-import { agentChatRoutes, type RuntimeMode, type ThreadReadResponse, type ToolApprovalAnswer } from "@orquester/api/agent-chat";
+import {
+  agentChatRoutes,
+  type ApprovalPreviewSection,
+  type RuntimeMode,
+  type ThreadReadResponse,
+  type ToolApprovalAnswer
+} from "@orquester/api/agent-chat";
 
-import { dirname, join } from "node:path";
+import { realpathSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import {
   AGENT_TOOLS_CHANGED_EVENT,
   AGENT_TOOLS_CHANNEL
@@ -69,6 +76,17 @@ export interface ApprovalPortDeps {
  */
 type ToolsetCard = ApprovalRequest & { toolset?: unknown };
 
+/** The notice a `create_workflow` card carries when the new workflow will join the chat's grant. */
+export const WORKFLOW_GRANT_NOTICE =
+  "This chat's 'Allow workflows' grant will cover the new workflow: its later changes, runs and deletion from this chat won't ask again until you revoke the grant.";
+
+const AGENT_TOOLS_OFF = (label: string): string =>
+  `Agent tools are switched off in Settings › Agent tools, so ${label} cannot be turned on for this chat (it would have no effect). Ask the user to turn agent tools on.`;
+const READ_ONLY_TOOLSET =
+  "Agent tool settings are read-only until agent-tools.json is fixed and Orquester restarts, so this toolset cannot be turned on. Deny this card for now.";
+const READ_ONLY_GRANT =
+  "Agent tool settings are read-only until agent-tools.json is fixed and Orquester restarts, so the grant cannot be saved. Approve without a grant, or deny.";
+
 export class AgentToolsApprovalPort implements ApprovalPort {
   /** `<threadId>\u0000<toolset>` of toolset cards pending now (one per toolset per chat). */
   private readonly pendingToolsets = new Set<string>();
@@ -102,6 +120,10 @@ export class AgentToolsApprovalPort implements ApprovalPort {
         // Already on: nothing to ask (spec §13). No card was shown.
         return { outcome: "approved", approvalId: "" };
       }
+      if (!this.deps.tools.snapshot().enabled) {
+        // An override has no effect while the master switch is off: never a card that "approves" nothing.
+        throw new ToolError("PERMISSION_DENIED", AGENT_TOOLS_OFF(toolsetById(toolset).label));
+      }
       const key = `${card.threadId}\u0000${toolset}`;
       if (this.pendingToolsets.has(key)) {
         throw new ToolError("PERMISSION_DENIED", `A request for ${toolsetById(toolset).label} is already waiting for the user in this chat.`);
@@ -116,11 +138,17 @@ export class AgentToolsApprovalPort implements ApprovalPort {
     return this.open(card, signal, traits, null);
   }
 
+  /**
+   * After an approved `create_workflow` ran: add its id to the chat's `workflows` grant named by
+   * `grantId` — the one the approval created (`grant: "chat"`) or the one the card said the create
+   * would join. Without `grantId` nothing joins (ruling: approving once never widens a grant).
+   */
   async recordWorkflowInGrant(input: { threadId: string; callerProjectPath: string; workflowId: string; grantId?: string }): Promise<void> {
-    if (this.deps.workflowOwned(input.threadId)) return;
+    if (input.grantId === undefined || this.deps.workflowOwned(input.threadId)) return;
     const traits = await this.deps.callerTraits(input.threadId);
     if (!traits || traits.workflowOwned || traits.runtimeMode !== "full-access") return;
-    this.deps.tools.recordWorkflowInGrant(input);
+    const grantId = input.grantId;
+    this.deps.tools.recordWorkflowInGrant({ threadId: input.threadId, callerProjectPath: input.callerProjectPath, workflowId: input.workflowId, grantId });
   }
 
   // -------------------------------------------------------------------------
@@ -132,6 +160,14 @@ export class AgentToolsApprovalPort implements ApprovalPort {
 
   private open(card: ApprovalRequest, signal: AbortSignal, traits: CallerTraits, toolset: ToolsetId | null): Promise<ApprovalOutcome> {
     const grantOptions = this.allowedGrantOptions(card, traits);
+    // A create in a chat that holds a `workflows` grant: the new workflow joins it (§7.6, ruling) —
+    // and the card says so. Re-decided with the caller's traits when the answer arrives.
+    const joinable = this.joinableWorkflowGrant(card, grantOptions);
+    const sections: ApprovalPreviewSection[] = joinable
+      ? [{ kind: "warning", level: "caution", text: WORKFLOW_GRANT_NOTICE }, ...card.sections]
+      : card.sections;
+    /** The grant an approved create joins, decided at answer time (absent: none). */
+    let joinGrantId: string | undefined;
     return this.deps.registry.open(
       {
         threadId: card.threadId,
@@ -141,7 +177,7 @@ export class AgentToolsApprovalPort implements ApprovalPort {
         title: card.title,
         scope: card.scope,
         ...(card.reason !== undefined ? { reason: card.reason } : {}),
-        sections: card.sections,
+        sections,
         secretFields: card.secretFields,
         grantOptions
       },
@@ -149,14 +185,29 @@ export class AgentToolsApprovalPort implements ApprovalPort {
       {
         ...(card.delivered !== undefined ? { delivered: card.delivered } : {}),
         prepareApproval: async (answer) => {
-          if (answer.grant === undefined) return;
-          // The caller must still be `full-access` (and not workflow-owned) when the grant is made.
+          joinGrantId = undefined;
+          if (toolset !== null) {
+            if (!this.deps.tools.snapshot().enabled) {
+              throw new ToolApprovalAnswerRefusal("AGENT_TOOLS_DISABLED", `${AGENT_TOOLS_OFF(toolsetById(toolset).label)} Deny this card, or turn agent tools on first.`, 409);
+            }
+            if (this.deps.tools.isReadOnly()) throw new ToolApprovalAnswerRefusal("AGENT_TOOLS_UNAVAILABLE", READ_ONLY_TOOLSET, 503);
+          }
+          if (answer.grant === undefined && !joinable) return;
+          // The caller must still be `full-access` (and not workflow-owned) when a grant is made or joined.
           const now = await this.deps.callerTraits(card.threadId);
-          if (!now || now.workflowOwned || now.runtimeMode !== "full-access" || !this.allowedGrantOptions(card, now).includes(answer.grant)) {
+          const stillFull = !!now && !now.workflowOwned && now.runtimeMode === "full-access" && !this.deps.workflowOwned(card.threadId);
+          if (answer.grant === undefined) {
+            // The create joins the chat's grant only if the caller is still allowed one, and the grant still exists.
+            const grant = stillFull && !this.deps.tools.isReadOnly() ? this.deps.tools.chatWorkflowGrant(card.threadId, card.callerProjectPath) : null;
+            joinGrantId = grant?.id;
+            return;
+          }
+          if (!stillFull || !this.allowedGrantOptions(card, now!).includes(answer.grant)) {
             throw new ToolApprovalAnswerRefusal("INVALID_ARGUMENT", "This chat is no longer in Full access: approve without a grant.");
           }
+          if (this.deps.tools.isReadOnly()) throw new ToolApprovalAnswerRefusal("AGENT_TOOLS_UNAVAILABLE", READ_ONLY_GRANT, 503);
         },
-        commitApproval: (answer) => this.commit(card, answer, toolset, grantOptions),
+        commitApproval: (answer) => this.commit(card, answer, toolset, joinGrantId),
         onDenied: () => {
           if (toolset !== null) this.deps.tools.recordToolsetDecline(card.threadId, toolset);
         }
@@ -178,7 +229,16 @@ export class AgentToolsApprovalPort implements ApprovalPort {
     return card.grantOptions.filter((scope) => allowed.includes(scope));
   }
 
-  private commit(card: ApprovalRequest, answer: ToolApprovalAnswer, toolset: ToolsetId | null, grantOptions: readonly GrantScope[]): { grantId?: string } {
+  /**
+   * The chat's `workflows` grant a `create_workflow` card would join, or null: only a create, only
+   * where the card may offer a chat grant at all (the caller's own project, full-access).
+   */
+  private joinableWorkflowGrant(card: ApprovalRequest, grantOptions: readonly GrantScope[]): boolean {
+    if (card.family !== "workflows" || card.tool !== "create_workflow" || card.workflowId !== undefined || !grantOptions.includes("chat")) return false;
+    return this.deps.tools.chatWorkflowGrant(card.threadId, card.callerProjectPath) !== null;
+  }
+
+  private commit(card: ApprovalRequest, answer: ToolApprovalAnswer, toolset: ToolsetId | null, joinGrantId: string | undefined): { grantId?: string } {
     if (toolset !== null) this.deps.tools.enableToolsetForThread(card.threadId, toolset);
     if (answer.grant !== undefined) {
       const grantId = this.deps.tools.addGrant({
@@ -191,14 +251,10 @@ export class AgentToolsApprovalPort implements ApprovalPort {
       });
       return { grantId };
     }
-    // A workflow approved in a chat that already holds a `workflows` grant joins it (§7.6: the
-    // grant covers the workflows created or approved in that chat) — only where a grant could have
-    // been offered on this card at all.
-    if (card.family === "workflows" && card.workflowId !== undefined && grantOptions.includes("chat")) {
-      const grantId = this.deps.tools.recordWorkflowInGrant({ threadId: card.threadId, callerProjectPath: card.callerProjectPath, workflowId: card.workflowId });
-      if (grantId !== null) return { grantId };
-    }
-    return {};
+    // Ruling: approving ONCE never widens a standing grant. Only a create the card said would join
+    // (decided at answer time) returns the grant; the executor adds the new id after the create ran
+    // (`recordWorkflowInGrant`). A plain approval of a run/update/delete joins nothing.
+    return joinGrantId !== undefined ? { grantId: joinGrantId } : {};
   }
 }
 
@@ -334,7 +390,8 @@ export function createAgentToolsRuntime(deps: AgentToolsRuntimeDeps): AgentTools
       const tab = deps.tab(id);
       const agent = tab ? deps.agentOf(id) : null;
       if (!tab || agent === null || !isAgentAdapterId(agent)) return null;
-      return { agent, projectPath: tab.projectPath, workflowOwned: workflowOwned(id) };
+      // Grants record the caller's CANONICAL project root (the executor's `callerProjectPath`).
+      return { agent, projectPath: canonicalProjectPath(tab.projectPath), workflowOwned: workflowOwned(id) };
     },
     async load() {
       await tools.load();
@@ -353,4 +410,14 @@ export function createAgentToolsRuntime(deps: AgentToolsRuntimeDeps): AgentTools
       await tools.flush();
     }
   };
+}
+
+/** A project root as grants record it: realpath, else the resolved path; "" stays "". */
+export function canonicalProjectPath(path: string): string {
+  if (path === "") return "";
+  try {
+    return realpathSync.native(path);
+  } catch {
+    return resolve(path);
+  }
 }

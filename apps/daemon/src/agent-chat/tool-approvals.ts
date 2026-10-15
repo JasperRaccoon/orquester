@@ -80,15 +80,41 @@ export interface ToolApprovalOpenInput {
   grantOptions: ToolApprovalGrantScope[];
 }
 
+/**
+ * The card routes' codes: the contract's {@link ToolApprovalErrorCode} plus local ones awaiting the
+ * contracts follow-up — `PERMISSION_DENIED` (403, not a person), `AGENT_TOOLS_UNAVAILABLE` (503, the
+ * approval needs a write the read-only agent-tools store refuses), `AGENT_TOOLS_DISABLED` (409, a
+ * toolset card while the master switch is off).
+ */
+export type ToolApprovalRouteErrorCode = ToolApprovalErrorCode | "PERMISSION_DENIED" | "AGENT_TOOLS_UNAVAILABLE" | "AGENT_TOOLS_DISABLED";
+
+/**
+ * At most this many cards wait in one chat at once; one more is refused before any card
+ * ({@link TOOL_APPROVAL_LIMIT_CODE}). Local until the contracts follow-up names it.
+ */
+export const MAX_PENDING_TOOL_APPROVALS_PER_THREAD = 5;
+/** The tool error code of a card refused by {@link MAX_PENDING_TOOL_APPROVALS_PER_THREAD}. */
+export const TOOL_APPROVAL_LIMIT_CODE = "APPROVAL_LIMIT";
+
 /** A refusal of one answer, before the card settles (the card stays pending). */
 export class ToolApprovalAnswerRefusal extends Error {
   constructor(
-    readonly code: ToolApprovalErrorCode,
-    message: string
+    readonly code: ToolApprovalRouteErrorCode,
+    message: string,
+    /** The HTTP status (default: 409 for `APPROVAL_NOT_PENDING`, 503 for `AGENT_TOOLS_UNAVAILABLE`, else 400). */
+    readonly status?: number
   ) {
     super(message);
     this.name = "ToolApprovalAnswerRefusal";
   }
+}
+
+const READ_ONLY_MESSAGE =
+  "Agent tool settings are read-only until agent-tools.json is fixed and Orquester restarts, so this approval cannot be saved. Approve without a grant, or deny.";
+
+/** A read-only store's refusal (the store throws `AgentToolsError` with status 503). */
+function isUnavailable(error: unknown): boolean {
+  return (error as { status?: unknown; code?: unknown })?.status === 503 || (error as { code?: unknown })?.code === "AGENT_TOOLS_UNAVAILABLE";
 }
 
 /** What the opener does around an answer (the approval port: grants, toolset overrides, declines). */
@@ -170,7 +196,7 @@ interface JournalEntry {
 
 export type ToolApprovalAnswerResult =
   | { ok: true; response: ToolApprovalAnswerResponse }
-  | { ok: false; status: number; code: ToolApprovalErrorCode; message: string };
+  | { ok: false; status: number; code: ToolApprovalRouteErrorCode; message: string };
 
 // ---------------------------------------------------------------------------
 // The registry
@@ -197,6 +223,14 @@ export class ToolApprovalRegistry {
     if (signal.aborted) {
       this.decisionLog(input, approvalId, "cancelled", "before the card opened");
       return Promise.resolve({ outcome: "cancelled", approvalId });
+    }
+    if (this.list(input.threadId).length >= MAX_PENDING_TOOL_APPROVALS_PER_THREAD) {
+      return Promise.reject(
+        new ToolError(
+          TOOL_APPROVAL_LIMIT_CODE,
+          `${MAX_PENDING_TOOL_APPROVALS_PER_THREAD} approval cards are already waiting for the user in this chat; wait for them to be answered, and batch related changes into one call.`
+        )
+      );
     }
     if (approvalPreviewBytes(input.sections) > TOOL_APPROVAL_FULL_PREVIEW_MAX_BYTES) {
       return Promise.reject(new ToolError("PREVIEW_TOO_LARGE", "This change's preview is over 1 MiB: split the change into smaller calls."));
@@ -335,8 +369,10 @@ export class ToolApprovalRegistry {
     } catch (error) {
       entry.answering = false;
       if (error instanceof ToolApprovalAnswerRefusal) {
-        return { ok: false, status: error.code === "APPROVAL_NOT_PENDING" ? 409 : 400, code: error.code, message: error.message };
+        const status = error.status ?? (error.code === "APPROVAL_NOT_PENDING" ? 409 : error.code === "AGENT_TOOLS_UNAVAILABLE" ? 503 : 400);
+        return { ok: false, status, code: error.code, message: error.message };
       }
+      if (isUnavailable(error)) return { ok: false, status: 503, code: "AGENT_TOOLS_UNAVAILABLE", message: READ_ONLY_MESSAGE };
       this.opts.logger?.error?.("tool-approvals: preparing an approval failed", errorName(error));
       return { ok: false, status: 400, code: "INVALID_ARGUMENT", message: "The approval could not be applied; try again." };
     }
@@ -347,6 +383,7 @@ export class ToolApprovalRegistry {
       grantId = entry.hooks.commitApproval?.(answer).grantId;
     } catch (error) {
       entry.answering = false;
+      if (isUnavailable(error)) return { ok: false, status: 503, code: "AGENT_TOOLS_UNAVAILABLE", message: READ_ONLY_MESSAGE };
       this.opts.logger?.error?.("tool-approvals: applying an approval failed", errorName(error));
       return { ok: false, status: 400, code: "INVALID_ARGUMENT", message: "The approval could not be applied; try again." };
     }
@@ -511,7 +548,7 @@ export function requestPrincipal(request: FastifyRequest): CallerPrincipal {
   return principal ?? { kind: "user" };
 }
 
-type RouteErrorCode = ToolApprovalErrorCode | "PERMISSION_DENIED";
+type RouteErrorCode = ToolApprovalRouteErrorCode;
 
 function refusal(code: RouteErrorCode, message: string): { error: { code: RouteErrorCode; message: string } } {
   return { error: { code, message } };

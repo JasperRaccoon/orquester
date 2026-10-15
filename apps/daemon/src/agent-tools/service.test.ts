@@ -149,6 +149,8 @@ test("chat toolsets: overrides set and cleared, locked/unknown refused, toolsets
   let view = h.service.updateThreadToolsets("t1", { toolsets: { "workflow-authoring": true, reads: false } }, info);
   assert.deepEqual(view.overrides, { "workflow-authoring": true, reads: false });
   assert.deepEqual(view.resolved, ["core", "workflow-authoring"]);
+  assert.deepEqual(changed, [], "listeners run asynchronously, never inside the write");
+  await Promise.resolve();
   assert.deepEqual(changed, ["t1"]);
   assert.deepEqual(h.published.at(-1), { revision: 0, threadId: "t1" });
   assert.throws(() => h.service.updateThreadToolsets("t1", { toolsets: { core: false } }, info), (e: AgentToolsError) => e.code === "TOOLSET_LOCKED");
@@ -167,6 +169,7 @@ test("chat toolsets: overrides set and cleared, locked/unknown refused, toolsets
   assert.equal(h.service.toolsetDeclinedUntil("t1", "desktops"), null);
   // A settings change reaches every chat.
   h.service.updateSettings({ revision: 0, defaults: { notes: { codex: true } } });
+  await Promise.resolve();
   assert.deepEqual(changed, ["t1", "t1", null]);
 });
 
@@ -188,9 +191,10 @@ test("grants: full-access only; lastUsedAt stamped; revocation effective for the
   assert.equal(h.service.findGrant({ ...fullAccess, family: "workflows", workflowId: "wf1" })?.id, wf);
   assert.equal(h.service.findGrant({ ...fullAccess, family: "workflows", workflowId: "wf2" }), null, "not approved in this chat");
   assert.equal(h.service.findGrant({ ...fullAccess, family: "workflows" }), null, "a create is never covered");
-  assert.equal(h.service.recordWorkflowInGrant({ threadId: "t1", callerProjectPath: "/w/ws/p", workflowId: "wf2" }), wf);
+  assert.equal(h.service.recordWorkflowInGrant({ threadId: "t1", callerProjectPath: "/w/ws/p", workflowId: "wf2", grantId: wf }), wf);
   assert.equal(h.service.findGrant({ ...fullAccess, family: "workflows", workflowId: "wf2" })?.id, wf);
-  assert.equal(h.service.recordWorkflowInGrant({ threadId: "t9", callerProjectPath: "/w/ws/p", workflowId: "wf3" }), null);
+  assert.equal(h.service.recordWorkflowInGrant({ threadId: "t9", callerProjectPath: "/w/ws/p", workflowId: "wf3", grantId: wf }), null, "another chat's");
+  assert.equal(h.service.recordWorkflowInGrant({ threadId: "t1", callerProjectPath: "/w/ws/p", workflowId: "wf3", grantId: "g-unknown" }), null, "no fallback");
   assert.equal(h.service.findGrant({ ...fullAccess, family: "workflows", workflowId: "wf1", projects: ["/w/ws/p", "/w/ws/other"] }), null, "a project union beyond the caller's");
 
   const target = h.service.addGrant({ family: "cross-project", scope: "chat", projectPath: "/w/ws/p", threadId: "t1", targetProjectPath: "/w/other/q" });
@@ -202,7 +206,7 @@ test("grants: full-access only; lastUsedAt stamped; revocation effective for the
   assert.equal(h.service.revokeGrants(), 1, "Revoke all");
 });
 
-test("a closed chat's overrides, declines and chat grants are deleted; project grants stay; removed projects' grants drop", async (t) => {
+test("a closed chat's overrides, declines and chat grants are deleted; project grants stay", async (t) => {
   let exists = true;
   const h = await harness(t, undefined, { projectExists: () => exists });
   h.service.updateThreadToolsets("t1", { toolsets: { notes: true } }, { agent: "claude", projectPath: "/w/ws/p", workflowOwned: false });
@@ -214,8 +218,31 @@ test("a closed chat's overrides, declines and chat grants are deleted; project g
   assert.deepEqual((disk.toolsets as { threads: unknown }).threads, {});
   assert.deepEqual(disk.toolsetDeclines, {});
   assert.deepEqual((disk.grants as { id: string }[]).map((g) => g.id), [project]);
+});
+
+test("a missing project's grants are pruned only after repeated misses over time, never by a read", async (t) => {
+  let exists = false;
+  const h = await harness(t, undefined, { projectExists: () => exists });
+  const grant = h.service.addGrant({ family: "desktops", scope: "project", projectPath: "/w/ws/p", threadId: "t1" });
+  const query = { ...fullAccess, family: "desktops" };
+  const before = JSON.stringify(await h.disk());
+  for (let i = 0; i < 5; i += 1) assert.equal(h.service.settingsView().grants.length, 1, "GET never prunes");
+  assert.equal(JSON.stringify(await h.disk()), before, "GET never writes");
+  // Misses within the hour: kept, however many.
+  for (let i = 0; i < 5; i += 1) h.service.findGrant(query);
+  assert.equal(h.service.settingsView().grants.length, 1);
+  // The project comes back: the count resets.
+  exists = true;
+  assert.equal(h.service.findGrant(query)?.id, grant);
   exists = false;
-  assert.deepEqual(h.service.settingsView().grants, [], "its project is gone");
+  h.advance(2 * 60 * 60 * 1000);
+  h.service.findGrant(query);
+  h.service.findGrant(query);
+  assert.equal(h.service.settingsView().grants.length, 1, "two misses since the reset");
+  h.advance(60 * 60 * 1000);
+  h.service.findGrant(query);
+  assert.equal(h.service.settingsView().grants.length, 0, "three misses over an hour: pruned");
+  assert.deepEqual((await h.disk()).grants, []);
 });
 
 test("writes are serialized: the last write carries the last state", async (t) => {
