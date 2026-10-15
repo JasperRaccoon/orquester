@@ -75,6 +75,9 @@ import { AgentProfileError, profileErrors } from "./errors.ts";
 import type { ProfileConverter } from "./convert.ts";
 import type { ProfileImports } from "./import.ts";
 import { assertCommandName, assertMcpServerName, assertSkillName, contentHash, parseItemId } from "./infra/index.ts";
+import type { McpCandidate } from "./daemon-mcp.ts";
+import { pluginProvidesOf, readGitCommit, readPreviewTree } from "./preview-reads.ts";
+import type { ProfileImportDetailResponse, ProfileItemFilesResponse, ProfilePluginPreviewResponse } from "./preview-wire.ts";
 
 /** What the registry knows about an agent's CLI. */
 interface AgentInstallInfo {
@@ -275,6 +278,75 @@ export class AgentProfileService {
       throw profileErrors.kindNotSupported(AGENT_PROFILE_AGENT_LABELS[agent], "marketplace");
     }
     return adapter.listMarketplacePlugins(marketplace);
+  }
+
+  // -------------------------------------------------------------------------
+  // Approval-card reads (unified MCP design 2026-10-15 §7.1, §7.2; `preview-wire.ts`)
+  // -------------------------------------------------------------------------
+
+  /** A skill's or command's files in full, with hashes, and the item's revision now. */
+  async itemFiles(agent: AgentProfileAgentId, id: string): Promise<ProfileItemFilesResponse> {
+    this.installedAdapter(agent);
+    const item = (await this.snapshot(agent)).items.find((entry) => entry.id === id);
+    if (item === undefined) throw profileErrors.notFound(id);
+    if ((item.kind !== "skill" && item.kind !== "command") || item.path === undefined) {
+      throw profileErrors.invalid(`Only a skill's or a command's files can be read.`);
+    }
+    try {
+      return { itemId: id, revision: item.revision, ...(await readPreviewTree(item.path)) };
+    } catch (error) {
+      throw profileErrors.unreadable(item.path, describe(error));
+    }
+  }
+
+  /** An open import scan in full (its source, commit and every candidate's files). */
+  async importDetail(agent: AgentProfileAgentId, importId: string): Promise<ProfileImportDetailResponse> {
+    this.installedAdapter(agent);
+    const imports = this.requireImports();
+    if (!imports.inspect) throw new AgentProfileError(503, "AGENT_PROFILE_ERROR", "Imports cannot be inspected.");
+    return imports.inspect(agent, importId);
+  }
+
+  /** A marketplace plugin before it is installed: its files, what it ships, the marketplace's commit. */
+  async pluginPreview(agent: AgentProfileAgentId, marketplace: string, plugin: string): Promise<ProfilePluginPreviewResponse> {
+    const adapter = this.installedAdapter(agent);
+    if (!AGENT_PROFILE_KINDS[agent].includes("marketplace")) {
+      throw profileErrors.kindNotSupported(AGENT_PROFILE_AGENT_LABELS[agent], "marketplace");
+    }
+    const provides: ProfilePluginPreviewResponse["provides"] = { skills: [], commands: [], agents: [], hooks: [], mcpServers: [] };
+    if (!adapter.pluginSource) {
+      const reason = `Orquester cannot read a ${AGENT_PROFILE_AGENT_LABELS[agent]} plugin before it is installed.`;
+      return { marketplace, plugin, commit: null, source: { type: "unavailable", reason }, provides };
+    }
+    const location = await adapter.pluginSource(marketplace, plugin);
+    const commit = location.marketplaceDir !== null ? await readGitCommit(location.marketplaceDir) : null;
+    const head = { marketplace, plugin, ...(location.version !== undefined ? { version: location.version } : {}), commit };
+    if (location.source.type === "remote") return { ...head, source: location.source, provides };
+    let tree;
+    try {
+      tree = await readPreviewTree(location.source.dir);
+    } catch (error) {
+      throw profileErrors.unreadable(location.source.dir, describe(error));
+    }
+    return { ...head, source: { type: "local", ...tree }, provides: pluginProvidesOf(tree) };
+  }
+
+  /**
+   * An MCP item's current definition as a daemon-pointing candidate (`daemon-mcp.ts`): REAL
+   * header/env values, for the daemon's own check only — never serialised or logged.
+   */
+  async mcpCandidate(agent: AgentProfileAgentId, id: string): Promise<McpCandidate | null> {
+    if (!id.startsWith("mcp:")) return null;
+    const item = await this.installedAdapter(agent).exportItem(id);
+    if (item.kind !== "mcp") return null;
+    const server = item.server;
+    const bearerEnv = server.advanced?.bearer_token_env_var;
+    return {
+      name: server.name,
+      ...(server.url !== undefined ? { url: server.url } : {}),
+      values: [...Object.values(server.headers ?? {}), ...Object.values(server.env ?? {}), ...(server.args ?? []), ...(server.command ? [server.command] : [])],
+      envRefs: typeof bearerEnv === "string" ? [bearerEnv] : []
+    };
   }
 
   // -------------------------------------------------------------------------

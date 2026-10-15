@@ -51,6 +51,7 @@ import {
   uploadTempPath
 } from "../upload-stream.ts";
 import { AgentProfileError, profileErrors } from "./errors.ts";
+import { agentProfilePreviewRoutes } from "./preview-wire.ts";
 import type { AgentProfileService } from "./service.ts";
 
 export interface AgentProfileRouteDeps {
@@ -73,7 +74,9 @@ export interface AgentProfileRouteDeps {
     | "scanUpload"
     | "assertCanScanUpload"
     | "listMarketplacePlugins"
-  >;
+  > &
+    /** The approval-card reads (`preview-wire.ts`); a route answers 503 without them. */
+    Partial<Pick<AgentProfileService, "itemFiles" | "importDetail" | "pluginPreview">>;
   /** `agentProfileImportsDir(appdir)`: where an upload is streamed before its scan. */
   importsDir: string;
 }
@@ -102,7 +105,10 @@ const P = {
   instructionsMigrateLegacy: pattern(agentProfileRoutes.instructionsMigrateLegacy("claude")),
   importGit: pattern(agentProfileRoutes.importGit("claude")),
   importUpload: pattern(agentProfileRoutes.importUpload("claude")),
-  marketplacePlugins: pattern(agentProfileRoutes.marketplacePlugins("claude", "NAME"))
+  marketplacePlugins: pattern(agentProfileRoutes.marketplacePlugins("claude", "NAME")),
+  itemFiles: pattern(agentProfilePreviewRoutes.itemFiles("claude", "ID")),
+  importDetail: pattern(agentProfilePreviewRoutes.importDetail("claude", "IMPORT")),
+  pluginPreview: pattern(agentProfilePreviewRoutes.pluginPreview("claude", "NAME", "PLUGIN"))
 };
 
 /** `/api/agent-profile/claude/items/ID` → `/api/agent-profile/:agent/items/:id`. */
@@ -110,7 +116,9 @@ function pattern(path: string): string {
   return path
     .replace(/^\/api\/agent-profile\/claude(?=\/|$)/, "/api/agent-profile/:agent")
     .replace("/items/ID", "/items/:id")
-    .replace("/marketplaces/NAME", "/marketplaces/:name");
+    .replace("/marketplaces/NAME", "/marketplaces/:name")
+    .replace("/imports/IMPORT", "/imports/:importId")
+    .replace("/plugins/PLUGIN", "/plugins/:plugin");
 }
 
 type AgentParams = { agent: string };
@@ -250,6 +258,32 @@ export function registerAgentProfileRoutes(app: FastifyInstance, deps: AgentProf
         const agent = agentParam(request.params);
         const name = stringField(request.params.name, "marketplace name", { max: NAME_MAX });
         return { plugins: await service.listMarketplacePlugins(agent, name) };
+      })
+    );
+
+    // The approval-card reads (unified MCP design 2026-10-15 §7.1): whole files with hashes.
+    const unavailable = () => new AgentProfileError(503, "AGENT_PROFILE_ERROR", "This read is not available.");
+    scope.get<{ Params: ItemParams }>(P.itemFiles, async (request, reply) =>
+      run(request, reply, () => {
+        if (!service.itemFiles) throw unavailable();
+        return service.itemFiles(agentParam(request.params), idParam(request.params));
+      })
+    );
+
+    scope.get<{ Params: { agent: string; importId: string } }>(P.importDetail, async (request, reply) =>
+      run(request, reply, () => {
+        if (!service.importDetail) throw unavailable();
+        const importId = stringField(request.params.importId, "importId", { max: ID_MAX });
+        return service.importDetail(agentParam(request.params), importId);
+      })
+    );
+
+    scope.get<{ Params: { agent: string; name: string; plugin: string } }>(P.pluginPreview, async (request, reply) =>
+      run(request, reply, () => {
+        if (!service.pluginPreview) throw unavailable();
+        const name = stringField(request.params.name, "marketplace name", { max: NAME_MAX });
+        const plugin = stringField(request.params.plugin, "plugin name", { max: NAME_MAX });
+        return service.pluginPreview(agentParam(request.params), name, plugin);
       })
     );
 

@@ -108,6 +108,14 @@ export interface PortableMcpServer {
   advanced?: Record<string, unknown>;
 }
 
+/** {@link ProfileAdapter.pluginSource}'s answer. */
+export interface PluginSourceLocation {
+  /** The marketplace's checkout (its commit is pinned on the card); null for a remote-only catalog. */
+  marketplaceDir: string | null;
+  version?: string;
+  source: { type: "local"; dir: string } | { type: "remote"; description: string };
+}
+
 export interface ProfileAdapter {
   readonly agent: AgentProfileAgentId;
 
@@ -138,6 +146,13 @@ export interface ProfileAdapter {
 
   /** The plugins a marketplace offers (Claude, Codex, Grok). */
   listMarketplacePlugins?(marketplace: string): Promise<MarketplacePluginEntry[]>;
+
+  /**
+   * Where a marketplace plugin's files are BEFORE it is installed (approval-card previews,
+   * unified MCP design §7.1): a directory inside the marketplace's checkout, or a source the CLI
+   * fetches at install. Read-only; an adapter without it cannot show a plugin before installing.
+   */
+  pluginSource?(marketplace: string, plugin: string): Promise<PluginSourceLocation>;
 
   /** Lift a copyable item (`PROFILE_COPYABLE_KINDS`) out, real secret values included. Caller owns any temp dir. */
   exportItem(id: string): Promise<PortableItem>;

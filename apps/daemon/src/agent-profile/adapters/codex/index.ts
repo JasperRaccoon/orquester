@@ -45,7 +45,7 @@
 import { SecretDigester } from "../../infra/secret-digest.ts";
 import { randomUUID } from "node:crypto";
 import { realpath, stat } from "node:fs/promises";
-import { join, sep } from "node:path";
+import { isAbsolute, join, resolve, sep } from "node:path";
 import {
   PROFILE_HOOK_EVENTS,
   PROFILE_HOOK_EVENTS_WITHOUT_MATCHER,
@@ -87,6 +87,7 @@ import {
   writeSkill
 } from "../../infra/index.ts";
 import type {
+  PluginSourceLocation,
   AdapterMutationResult,
   AdapterSnapshot,
   PortableItem,
@@ -1581,6 +1582,22 @@ export class CodexProfileAdapter implements ProfileAdapter {
         installed: plugin.installed
       };
     });
+  }
+
+  /** `plugin/list`: a local plugin's directory (its `source.path`, relative to the marketplace), else what Codex fetches. */
+  async pluginSource(marketplace: string, plugin: string): Promise<PluginSourceLocation> {
+    const listed = await this.rpc("plugin/list", {});
+    const entry = listed.marketplaces.find((candidate) => candidate.name === marketplace);
+    if (entry === undefined) throw profileErrors.notFound(itemId("marketplace", marketplace));
+    const summary = entry.plugins.find((candidate) => candidate.name === plugin);
+    if (summary === undefined) throw profileErrors.invalid(`The marketplace "${marketplace}" has no plugin "${plugin}".`);
+    const version = summary.version ?? summary.localVersion ?? undefined;
+    const base = { marketplaceDir: entry.path, ...(version ? { version } : {}) };
+    if (typeof summary.source.path === "string" && summary.source.path !== "") {
+      const dir = isAbsolute(summary.source.path) ? summary.source.path : resolve(entry.path ?? "/", summary.source.path);
+      return { ...base, source: { type: "local", dir } };
+    }
+    return { ...base, source: { type: "remote", description: [summary.source.type, summary.source.url].filter(Boolean).join(" ") } };
   }
 
   // -------------------------------------------------------------------------

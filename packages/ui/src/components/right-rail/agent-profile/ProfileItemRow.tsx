@@ -6,7 +6,8 @@
  * and the description. Off rows are dimmed; locked rows carry a lock;
  * warnings are amber chips — with a Trust button where the agent offers one,
  * and Copy path where the fix is in a file; an inherited row says where it is
- * managed.
+ * managed. An MCP server that reaches this Orquester's own `/mcp` carries a red
+ * "Disabled inside Orquester chats" chip (unified MCP design §12.1).
  *
  * The row never shifts: the switch and the menu keep fixed widths (the menu's
  * place is held when it has nothing to offer), the badge shrinks before the
@@ -18,11 +19,12 @@
  */
 
 import React from "react";
-import { ArrowUpRight, FileText, Loader2, Lock, MoreHorizontal, Pencil, ShieldCheck, Trash2 } from "lucide-react";
+import { ArrowUpRight, FileText, Loader2, Lock, MoreHorizontal, Pencil, ShieldAlert, ShieldCheck, Trash2 } from "lucide-react";
 
 import {
   AGENT_PROFILE_AGENT_LABELS,
   type AgentProfileAgentId,
+  type DaemonPointingReason,
   type ProfileConflictPolicy,
   type ProfileItem
 } from "@orquester/api";
@@ -35,6 +37,7 @@ import { menuFocusIndex } from "../saved-prompts/SavedPromptItem";
 import { RailSwitch, railCardClass } from "../primitives";
 import { agentIcon } from "./AgentPicker";
 import { WarningChip } from "./InstructionsCard";
+import { DAEMON_POINTING_LABEL, daemonPointingTitle } from "./daemon-pointing.logic";
 import {
   manageInAgent,
   profileItemDisplayName,
@@ -61,6 +64,8 @@ interface ProfileItemRowProps {
   /** The agents "Copy to…" offers (installed, and having this kind). */
   copyTargets: readonly AgentProfileAgentId[];
   confirm: ProfileRowConfirm | null;
+  /** This MCP server reaches this Orquester's own `/mcp` (`daemonPointingReasonFor`): Orquester denies it in its chats. */
+  daemonPointing?: DaemonPointingReason | null;
   onToggle: (enabled: boolean) => void;
   onEdit: () => void;
   onCopyTo: (agent: AgentProfileAgentId) => void;
@@ -94,7 +99,8 @@ export const ProfileItemRow: React.FC<ProfileItemRowProps> = (props) => {
     "inline-flex shrink-0 items-center justify-center rounded-md text-neutral-400 transition-colors hover:bg-neutral-800 hover:text-neutral-100",
     sheet ? "h-10 w-10" : "h-7 w-7"
   );
-  const showFooter = item.warnings.length > 0 || owner !== null;
+  const daemonPointing = props.daemonPointing ?? null;
+  const showFooter = item.warnings.length > 0 || owner !== null || daemonPointing !== null;
 
   return (
     <div
@@ -228,6 +234,16 @@ export const ProfileItemRow: React.FC<ProfileItemRowProps> = (props) => {
       {showFooter ? (
         // On a phone the 40 px targets' own padding is the gap above them.
         <div className={cn("flex flex-wrap items-center gap-1.5 px-3", sheet ? "-mt-2 pb-1" : "-mt-0.5 pb-2")}>
+          {daemonPointing !== null ? (
+            <span
+              data-daemon-pointing={daemonPointing}
+              title={daemonPointingTitle(daemonPointing)}
+              className="inline-flex min-w-0 max-w-full items-start gap-1 rounded-md border border-danger-500/40 bg-danger-500/10 px-1.5 py-px text-[11px] leading-4 text-danger"
+            >
+              <ShieldAlert size={10} aria-hidden className="mt-[3px] shrink-0" />
+              <span className="min-w-0 break-words">{DAEMON_POINTING_LABEL}</span>
+            </span>
+          ) : null}
           {item.warnings.map((warning, index) => (
             // Wraps: in a narrow panel the action goes under its message rather than squeezing it.
             <span key={`${index}:${warning.code}`} className="inline-flex min-w-0 max-w-full flex-wrap items-center gap-1.5">

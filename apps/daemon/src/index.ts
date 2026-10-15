@@ -145,6 +145,9 @@ import { createAgentProfileAdapters } from "./agent-profile/adapters/index.ts";
 import { createProfileConverter } from "./agent-profile/convert.ts";
 import { ProfileImportStore } from "./agent-profile/import.ts";
 import { resolveAgentHomes } from "./agent-profile/homes.ts";
+// umcp:t11 begin
+import { DaemonMcpDetector, listProjectDirs, registerDaemonMcpServersRoutes } from "./agent-profile/daemon-mcp.ts";
+// umcp:t11 end
 import type { ValidationCatalog } from "./workflows/agent/validation-catalog.ts";
 import { consoleWorkflowLogger, createWorkflowDaemon } from "./workflows/daemon-wiring.ts";
 import { createInternalDaemonApi } from "./chat-client/index.ts";
@@ -4095,6 +4098,35 @@ export function createServer(
     service: services.agentProfile,
     importsDir: agentProfileImportsDir(resolved.baseDir)
   });
+
+  // umcp:t11 begin — daemon-pointing MCP servers (unified MCP design 2026-10-15 §12.1): every MCP
+  // server in a CLI's user config (system home and every managed account home) or a project-level
+  // config that reaches THIS daemon's /mcp, by its bearer (the transport's own constant-time check;
+  // the credential never leaves the daemon) or its URL. GET on both transports (the chat manifest's
+  // `deny`, the agent-profile panel); the card preview's check is socket-only.
+  registerDaemonMcpServersRoutes(app, {
+    mode: options.mode,
+    detector: new DaemonMcpDetector(
+      {
+        verifyBearer: (token) => authorizeCredential(token, config.transports.http.username, config.transports.http.passwordHash),
+        httpPort: () => config.transports.http.port,
+        // No public origin is configured anywhere: a proxied URL is caught by its bearer.
+        publicOrigins: () => [],
+        env: (name) => process.env[name]
+      },
+      {
+        homes: resolveAgentHomes(process.env, resolved.vars?.userhome),
+        accountHomes: async (agent) =>
+          agent === "opencode"
+            ? []
+            : agentAccounts.list().accounts.filter((account) => account.agent === agent).map((account) => ({ id: account.id, home: agentAccounts.homePath(agent, account.id) })),
+        projects: () => listProjectDirs(resolved.workspacesDir),
+        logger: console
+      }
+    ),
+    current: (agent, id) => services.agentProfile.mcpCandidate(agent, id)
+  });
+  // umcp:t11 end
 
   // Web Push (PWA attention notifications). Allowed on both transports like
   // /api/sessions and /api/accounts — the response never carries the VAPID

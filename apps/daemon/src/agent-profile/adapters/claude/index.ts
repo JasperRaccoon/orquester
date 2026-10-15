@@ -83,6 +83,7 @@ import {
 import type {
   AdapterMutationResult,
   AdapterSnapshot,
+  PluginSourceLocation,
   PortableItem,
   ProfileAdapter,
   ProfileAdapterContext
@@ -100,6 +101,7 @@ import {
   type InstalledPlugin,
   type KnownMarketplace,
   type PluginProvides,
+  claudePluginSource,
   marketplaceSourceArg,
   parseInstalledPlugins,
   parseKnownMarketplaces,
@@ -1395,6 +1397,20 @@ export class ClaudeProfileAdapter implements ProfileAdapter {
     }
     const installed = new Set(state.plugins.map((p) => p.id));
     return catalog.map((entry) => ({ ...entry, installed: installed.has(`${entry.name}@${marketplace}`) }));
+  }
+
+  async pluginSource(marketplace: string, plugin: string): Promise<PluginSourceLocation> {
+    const state = await this.load();
+    const known = state.marketplaces.find((m) => m.name === marketplace);
+    if (known === undefined) throw profileErrors.notFound(itemId("marketplace", marketplace));
+    if (known.installLocation === undefined) {
+      return { marketplaceDir: null, source: { type: "remote", description: "a marketplace with no local checkout" } };
+    }
+    try {
+      return { marketplaceDir: known.installLocation, ...(await claudePluginSource(known.installLocation, plugin)) };
+    } catch (error) {
+      throw profileErrors.unreadable(join(known.installLocation, ".claude-plugin", "marketplace.json"), message(error));
+    }
   }
 
   async exportItem(id: string): Promise<PortableItem> {
