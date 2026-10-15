@@ -319,6 +319,8 @@ test("an unreachable daemon: the SAME launch's last list, else the defaults with
   assert.equal(warnings.length, 0);
   // Another thread of the same agent, home and project: the same config, the same denials.
   assert.deepEqual((await service.issue("thread-z", CODEX)).prepared.deny, ["remote"]);
+  // The thread's OWN last manifest comes first (thread-a's list is ["echo"], not thread-z's).
+  assert.deepEqual([...(await service.issue("thread-a", CODEX)).prepared.names], ["echo"]);
   // Another account home (or project): NEVER that key's denials (Codex fails a thread whose config
   // lacks a denied name) — none, the defaults' safe block, and a warning on the thread.
   const otherHome = await service.issue("thread-y", { ...CODEX, home: "acct-2" });
@@ -345,28 +347,84 @@ test("a failed grant still hands back the thread's denials (they never fail open
   void t;
 });
 
-test("a refresh landing while a session's manifest is read leaves it stale: restart at idle", async (t) => {
-  let release!: () => void;
-  const gate = new Promise<void>((resolve) => (release = resolve));
-  let calls = 0;
-  let entered!: () => void;
-  const reading = new Promise<void>((resolve) => (entered = resolve));
-  const service = testHost(recordingForward().forward, async (threadId) => {
-    calls += 1;
-    if (calls === 1) {
-      entered();
-      await gate;
-    }
-    return manifests().fetch(threadId);
-  });
+test("a refresh landing while a session's manifest is read is judged against what it launched with", async (t) => {
+  for (const [label, refreshTools, expected, stale] of [
+    ["a newer list", ["echo"], "next-idle", true],
+    ["the very list it reads", TEST_NAMES, "unchanged", false]
+  ] as const) {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let entered!: () => void;
+    const reading = new Promise<void>((resolve) => (entered = resolve));
+    let calls = 0;
+    const service = testHost(recordingForward().forward, async (threadId) => {
+      calls += 1;
+      if (calls === 1) {
+        entered();
+        await gate;
+      }
+      return manifests().fetch(threadId);
+    });
+    t.after(() => service.stop());
+    const issuing = service.issue("thread-a", CODEX);
+    await reading;
+    const refreshed = service.applyManifest("thread-a", { tools: [...refreshTools], instructions: "## Orquester (test)", deny: [] });
+    release();
+    await issuing;
+    assert.equal(await refreshed, expected, label);
+    assert.equal(service.needsRestart("thread-a"), stale, label);
+  }
+});
+
+test("pushes finishing out of order never roll a list back (`superseded`)", async (t) => {
+  const service = testHost(recordingForward().forward, async (threadId) => ({
+    kind: "manifest",
+    manifest: { tools: TEST_NAMES, instructions: "## Orquester (test)", deny: [], seq: 10 }
+  }));
   t.after(() => service.stop());
-  const issuing = service.issue("thread-a", CODEX);
-  // The grant was issued, the manifest read is in flight: a toolset change arrives.
-  await reading;
-  assert.equal(await service.applyManifest("thread-a", { tools: ["echo"], instructions: "## Orquester (test)", deny: [] }), "next-idle");
-  release();
-  await issuing;
-  assert.equal(service.needsRestart("thread-a"), true, "the session launched with the older list");
+  await service.issue("thread-a", CODEX);
+  // Older than what the session launched with.
+  assert.equal(await service.applyManifest("thread-a", { tools: ["echo"], instructions: "", deny: [], seq: 9 }), "superseded");
+  assert.equal(service.needsRestart("thread-a"), false);
+  assert.equal(await service.applyManifest("thread-a", { tools: ["echo"], instructions: "", deny: [], seq: 12 }), "next-idle");
+  // The seq-11 push arrives late: ignored, the seq-12 list stays wanted.
+  assert.equal(await service.applyManifest("thread-a", { tools: TEST_NAMES, instructions: "## Orquester (test)", deny: [], seq: 11 }), "superseded");
+  assert.equal(service.needsRestart("thread-a"), true);
+});
+
+test("a session relaunched while its client was being told is not restarted again", async (t) => {
+  const service = testHost(recordingForward().forward);
+  t.after(() => service.stop());
+  let relaunch!: () => Promise<void>;
+  const first = await service.launchInProcess("thread-c", CLAUDE, async () => {
+    // The thread's session restarts meanwhile (an account switch, a crash): it reads the current list.
+    await relaunch();
+    return false;
+  });
+  relaunch = async () => {
+    first.release();
+    await service.launchInProcess("thread-c", CLAUDE, () => true);
+  };
+  assert.equal(await service.applyManifest("thread-c", { tools: TEST_NAMES.filter((name) => name !== "pixel"), instructions: "## Orquester (test)", deny: [] }), "next-idle");
+  // The relaunch read the daemon's manifest (every tool): it still differs, so it is wanted — but not
+  // FORCED: an equal one would owe nothing.
+  assert.equal(service.needsRestart("thread-c"), true);
+  // The relaunch read the very list pushed (the daemon's manifest moved first): nothing is owed.
+  let current: string[] = TEST_NAMES;
+  const again = testHost(recordingForward().forward, async () => ({ kind: "manifest", manifest: { tools: current, instructions: "## Orquester (test)", deny: [] } }));
+  t.after(() => again.stop());
+  let relaunchSame!: () => Promise<void>;
+  const old = await again.launchInProcess("thread-e", CLAUDE, async () => {
+    await relaunchSame();
+    return false;
+  });
+  relaunchSame = async () => {
+    old.release();
+    await again.launchInProcess("thread-e", CLAUDE, () => true);
+  };
+  current = ["echo"];
+  assert.equal(await again.applyManifest("thread-e", { tools: ["echo"], instructions: "## Orquester (test)", deny: [] }), "unchanged");
+  assert.equal(again.needsRestart("thread-e"), false);
 });
 
 test("a thread the daemon does not know advertises nothing", async (t) => {

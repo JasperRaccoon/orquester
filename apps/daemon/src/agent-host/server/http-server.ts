@@ -855,7 +855,10 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
       if (!manifest || !strings(manifest.tools) || typeof manifest.instructions !== "string" || !strings(manifest.deny)) {
         throw new AgentChatCommandError("INVALID_COMMAND", "manifest {tools, instructions, deny} is required.");
       }
-      const result = await options.sessionToolsRefresh(threadId, { manifest: { tools: manifest.tools, instructions: manifest.instructions, deny: manifest.deny } });
+      const seq = typeof manifest.seq === "number" && Number.isFinite(manifest.seq) ? manifest.seq : undefined;
+      const result = await options.sessionToolsRefresh(threadId, {
+        manifest: { tools: manifest.tools, instructions: manifest.instructions, deny: manifest.deny, ...(seq !== undefined ? { seq } : {}) }
+      });
       sendJson(response, 200, result);
       return;
     }

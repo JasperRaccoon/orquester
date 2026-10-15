@@ -81,6 +81,8 @@ export interface PreparedSessionTools {
   readonly denyKnown: boolean;
   /** Equal for equal lists, instructions and denials: a session restarts only when it moved. */
   readonly key: string;
+  /** The daemon's manifest sequence (`SessionToolsManifest.seq`), when it sent one. */
+  readonly seq?: number;
   /**
    * `manifest`: the daemon's; `legacy`: the frozen old definitions (a daemon without the route);
    * `fallback`: the daemon could not be asked — this launch key's last list, else the defaults.
@@ -127,7 +129,7 @@ export interface SessionToolsCallInput {
 }
 
 /** What a refresh did (`SessionToolsRefreshResponse.applied`). */
-export type SessionToolsApplied = "live" | "next-idle" | "next-start" | "unchanged";
+export type SessionToolsApplied = "live" | "next-idle" | "next-start" | "unchanged" | "superseded";
 
 /**
  * A live session that takes a new list in-session (Claude): told the new list, it tells its client
@@ -240,10 +242,17 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
   const desired = new Map<string, PreparedSessionTools>();
   /** Live sessions that must restart at their next idle point although their key did not move (a live apply the client never re-listed). */
   const forced = new Set<string>();
-  /** A refresh that arrived while the thread's session was being launched (its manifest read in flight). */
-  const launching = new Map<string, { refreshed: PreparedSessionTools | null }>();
-  /** The last manifest per launch key — (agent, home, project) — the fallback's only source. */
+  /** A thread whose session is being launched (its manifest read in flight): a refresh waits for it. */
+  const launching = new Map<string, Promise<unknown>>();
+  /** The last manifest per launch key — (agent, home, project) — the fallback for other threads of that key. */
   const lastByLaunch = new Map<string, PreparedSessionTools>();
+  /** Each thread's own last manifest and the launch key it was read for — the first fallback. */
+  const lastByThread = new Map<string, { launchKey: string; prepared: PreparedSessionTools }>();
+  /** The newest manifest sequence each thread launched with or applied: older refreshes are superseded. */
+  const lastSeq = new Map<string, number>();
+  const noteSeq = (threadId: string, seq: number | undefined): void => {
+    if (seq !== undefined && seq > (lastSeq.get(threadId) ?? -Infinity)) lastSeq.set(threadId, seq);
+  };
   let endpoint: Promise<SessionToolsEndpoint> | null = null;
   let stopped = false;
 
@@ -290,8 +299,10 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
     };
   };
 
-  const fromManifest = (threadId: string, manifest: SessionToolsManifest) =>
-    build(threadId, manifest.tools, manifest.instructions, manifest.deny, "manifest");
+  const fromManifest = async (threadId: string, manifest: SessionToolsManifest): Promise<PreparedSessionTools> => {
+    const prepared = await build(threadId, manifest.tools, manifest.instructions, manifest.deny, "manifest");
+    return manifest.seq !== undefined ? { ...prepared, seq: manifest.seq } : prepared;
+  };
 
   /**
    * The daemon could not be asked: this launch key's last manifest (same agent, home and project —
@@ -299,7 +310,11 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
    * Never another key's denials: Codex fails a thread whose config lacks a denied name.
    */
   const fallback = async (threadId: string, launch: SessionToolsLaunch): Promise<PreparedSessionTools> => {
-    const last = lastByLaunch.get(launchKeyOf(launch));
+    const launchKey = launchKeyOf(launch);
+    // The thread's own last manifest first — only for the same launch (an account switch moved it).
+    const own = lastByThread.get(threadId);
+    if (own && own.launchKey === launchKey) return { ...own.prepared, source: "fallback" };
+    const last = lastByLaunch.get(launchKey);
     if (last) return { ...last, threadId, source: "fallback" };
     // Safe values where the thread's own are unknown: workflow-owned (no Admin tool, no
     // approval line), and no toolset can be asked for.
@@ -320,7 +335,9 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
     switch (answer.kind) {
       case "manifest": {
         const prepared = await fromManifest(threadId, answer.manifest);
-        lastByLaunch.set(launchKeyOf(launch), prepared);
+        const launchKey = launchKeyOf(launch);
+        lastByLaunch.set(launchKey, prepared);
+        lastByThread.set(threadId, { launchKey, prepared });
         return prepared;
       }
       case "legacy": {
@@ -346,21 +363,26 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
   };
 
   /**
-   * Read and record what a starting session advertises. A refresh that lands while the manifest is
-   * read (the window between the grant and the record) leaves the session stale: restart at idle.
+   * Read and record what a starting session advertises. A refresh landing while the manifest is
+   * read waits for the record, then is judged against what the session really launched with (an
+   * equal list is `unchanged`; an older one `superseded`; a newer one leaves it stale).
    */
   const launchWith = async (threadId: string, launch: SessionToolsLaunch, owner: string, live?: LiveSessionToolsListener): Promise<PreparedSessionTools> => {
-    const window = { refreshed: null as PreparedSessionTools | null };
-    launching.set(threadId, window);
+    const reading = readPrepared(threadId, launch);
+    const done = reading.then(
+      () => undefined,
+      () => undefined
+    );
+    launching.set(threadId, done);
     try {
-      const prepared = await readPrepared(threadId, launch);
+      const prepared = await reading;
       launched.set(threadId, { prepared, owner, ...(live ? { live } : {}) });
       desired.delete(threadId);
       forced.delete(threadId);
-      if (window.refreshed && window.refreshed.key !== prepared.key) desired.set(threadId, window.refreshed);
+      noteSeq(threadId, prepared.seq);
       return prepared;
     } finally {
-      if (launching.get(threadId) === window) launching.delete(threadId);
+      if (launching.get(threadId) === done) launching.delete(threadId);
     }
   };
 
@@ -442,15 +464,15 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
     current: (threadId) => launched.get(threadId)?.prepared ?? null,
     listSource,
     async applyManifest(threadId, manifest) {
+      // A launch reading its manifest right now: judge the refresh against what it launches with.
+      const inFlight = launching.get(threadId);
+      if (inFlight) await inFlight;
+      // Out of order (a settings refresh and an approval racing): never roll a list back.
+      if (manifest.seq !== undefined && manifest.seq <= (lastSeq.get(threadId) ?? -Infinity)) return "superseded";
       const next = await fromManifest(threadId, manifest);
-      const window = launching.get(threadId);
-      if (window) {
-        // A session is starting with a manifest read before this change: it restarts at idle.
-        window.refreshed = next;
-        return "next-idle";
-      }
       const session = launched.get(threadId);
       if (!session) return "next-start";
+      noteSeq(threadId, manifest.seq);
       if (session.prepared.key === next.key && !forced.has(threadId)) {
         desired.delete(threadId);
         return "unchanged";
@@ -466,6 +488,14 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
           relisted = await session.live(next);
         } catch (error) {
           options.logger?.warn("session tools: a live session could not take its new list", { threadId, error: String(error) });
+        }
+        const now = launched.get(threadId);
+        if (now === undefined) return "next-start";
+        if (now.owner !== session.owner) {
+          // The session relaunched while the client was being told: it read its own manifest.
+          if (now.prepared.key === next.key) return "unchanged";
+          desired.set(threadId, next);
+          return "next-idle";
         }
         if (relisted) {
           forced.delete(threadId);
@@ -518,6 +548,8 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
       desired.clear();
       forced.clear();
       lastByLaunch.clear();
+      lastByThread.clear();
+      lastSeq.clear();
       const open = endpoint;
       endpoint = null;
       if (open !== null) {

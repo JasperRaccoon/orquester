@@ -130,9 +130,12 @@ export class SessionToolsRefresher {
   private readonly continues = new Map<string, PendingContinue>();
   /** The push in flight per chat (a `request_toolset` call awaits its answer). */
   private readonly pushes = new Map<string, Promise<RefreshAnswer>>();
-  private pointing: { at: number; servers: readonly DaemonPointingServer[] } | null = null;
-  /** A read of the daemon-pointing servers has succeeded at least once (a 404 — no detection — counts). */
-  private pointingEverRead = false;
+  /** The last GOOD read of the daemon-pointing servers; `stale` once invalidated (re-read, but kept). */
+  private pointing: { at: number; servers: readonly DaemonPointingServer[]; stale: boolean } | null = null;
+  /** The manifest sequence clock: monotonic here, milliseconds-based so it grows across restarts. */
+  private seqClock = 0;
+  /** The newest sequence each chat's advertised set was taken from: an older answer never overwrites it. */
+  private readonly advertisedSeq = new Map<string, number>();
   private stopped = false;
 
   constructor(private readonly deps: ToolsetRefreshDeps) {}
@@ -149,6 +152,7 @@ export class SessionToolsRefresher {
   /** A closed chat: forget it, and drop its scheduled continue. */
   forget(threadId: string): void {
     this.advertised.delete(threadId);
+    this.advertisedSeq.delete(threadId);
     this.cancelContinue(threadId);
   }
 
@@ -159,25 +163,27 @@ export class SessionToolsRefresher {
 
   /**
    * The daemon-pointing servers (Task 11's read), reused for {@link DAEMON_POINTING_CACHE_MS}.
-   * Fails CLOSED (§12.1): every failed read is a warning; after a failure the last good list is
-   * reused (stale), and with none ever read the answer is `null` — the manifest is then unavailable
-   * (503) and the host falls back to what it knows for that launch. A 404 (a daemon without the
-   * detection) is "none", not a failure.
+   * Fails CLOSED (§12.1): every failed read is a warning and answers the last GOOD list (also
+   * after an invalidation, which only marks it stale), or `null` when none was ever read — the
+   * manifest is then unavailable (503) and the host falls back to what it knows for that launch.
+   * Only a route-miss 404 (a daemon without the detection: Fastify's own not-found body, no `code`)
+   * means "none"; a 404 carrying our own error code is a failure.
    */
   async daemonPointing(): Promise<readonly DaemonPointingServer[] | null> {
     const cached = this.pointing;
-    if (cached && this.now() - cached.at < DAEMON_POINTING_CACHE_MS) return cached.servers;
+    if (cached && !cached.stale && this.now() - cached.at < DAEMON_POINTING_CACHE_MS) return cached.servers;
     const failed = (why: string): readonly DaemonPointingServer[] | null => {
       this.deps.logger?.warn?.(`session-tools: the daemon-pointing MCP servers could not be read (${why}); ${cached ? "the last good list is reused" : "manifests are unavailable until a read succeeds"}`);
-      return cached ? cached.servers : this.pointingEverRead ? [] : null;
+      return cached ? cached.servers : null;
     };
     const api = this.deps.api();
     if (!api) return failed("no API yet");
     try {
       const res = await api.request("GET", AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE);
       if (res.status === 404) {
-        this.pointingEverRead = true;
-        this.pointing = { at: this.now(), servers: [] };
+        const body = res.body as { code?: unknown } | null;
+        if (body !== null && typeof body === "object" && typeof body.code === "string") return failed(`404 ${body.code}`);
+        this.pointing = { at: this.now(), servers: [], stale: false };
         return [];
       }
       const servers = (res.body as Partial<DaemonMcpServersResponse> | null)?.servers;
@@ -186,17 +192,29 @@ export class SessionToolsRefresher {
         (server): server is DaemonPointingServer =>
           server !== null && typeof server === "object" && typeof server.name === "string" && typeof server.agent === "string" && typeof server.home === "string"
       );
-      this.pointingEverRead = true;
-      this.pointing = { at: this.now(), servers: valid };
+      this.pointing = { at: this.now(), servers: valid, stale: false };
       return valid;
     } catch (error) {
       return failed(error instanceof Error ? error.message : "request failed");
     }
   }
 
-  /** A new or changed MCP server config: the next manifest reads the servers afresh. */
+  /** A new or changed MCP server config: the next manifest reads the servers afresh (the last good list stays the fallback). */
   invalidateDaemonPointing(): void {
-    this.pointing = null;
+    if (this.pointing) this.pointing = { ...this.pointing, stale: true };
+  }
+
+  /** The next manifest sequence: strictly increasing, and at least the wall clock (restarts move on). */
+  private nextSeq(): number {
+    this.seqClock = Math.max(this.seqClock + 1, this.now());
+    return this.seqClock;
+  }
+
+  /** Take `toolsets` as what a chat advertises, unless a newer manifest already set it. */
+  private setAdvertised(threadId: string, toolsets: readonly string[], seq: number): void {
+    if (seq < (this.advertisedSeq.get(threadId) ?? -Infinity)) return;
+    this.advertisedSeq.set(threadId, seq);
+    this.advertised.set(threadId, [...toolsets]);
   }
 
   /**
@@ -233,8 +251,9 @@ export class SessionToolsRefresher {
       catalog: this.deps.catalog(),
       daemonPointing
     });
-    if (purpose === "launch") this.advertised.set(threadId, [...toolsets]);
-    return manifest;
+    const seq = this.nextSeq();
+    if (purpose === "launch") this.setAdvertised(threadId, toolsets, seq);
+    return { ...manifest, seq };
   }
 
   /**
@@ -278,7 +297,10 @@ export class SessionToolsRefresher {
       }
       const answer = await this.deps.pushToHost(threadId, manifest);
       const applied: RefreshAnswer = answer?.applied ?? "no-host";
-      if (applied === "live" || applied === "unchanged") this.advertised.set(threadId, manifest.toolsets ?? []);
+      const seq = manifest.seq ?? this.nextSeq();
+      // A newer push decided already: this answer changes nothing.
+      if (applied === "superseded" || seq < (this.advertisedSeq.get(threadId) ?? -Infinity)) return applied;
+      if (applied === "live" || applied === "unchanged") this.setAdvertised(threadId, manifest.toolsets ?? [], seq);
       else this.markPending(threadId);
       return applied;
     })();
@@ -318,14 +340,23 @@ export class SessionToolsRefresher {
    */
   async toolsetApproved(caller: ThreadCaller, toolset: string): Promise<void> {
     if (this.stopped) return;
-    const push = this.pushes.get(caller.threadId) ?? this.pushLogged(caller.threadId);
     let timer: NodeJS.Timeout | undefined;
-    const answer = await Promise.race([
-      push,
-      new Promise<"timeout">((resolve) => {
-        timer = setTimeout(() => resolve("timeout"), this.deps.applyWaitMs ?? TOOLSET_APPLY_WAIT_MS);
-      })
-    ]).finally(() => clearTimeout(timer));
+    const deadline = new Promise<"timeout">((resolve) => {
+      timer = setTimeout(() => resolve("timeout"), this.deps.applyWaitMs ?? TOOLSET_APPLY_WAIT_MS);
+    });
+    let push = this.pushes.get(caller.threadId) ?? this.pushLogged(caller.threadId);
+    let answer: RefreshAnswer | "timeout";
+    try {
+      // A push another one overtook answers `superseded`: the newest one decides.
+      for (;;) {
+        answer = await Promise.race([push, deadline]);
+        const newer = this.pushes.get(caller.threadId);
+        if (answer !== "superseded" || newer === undefined || newer === push) break;
+        push = newer;
+      }
+    } finally {
+      clearTimeout(timer);
+    }
     if (answer === "timeout") {
       this.markPending(caller.threadId);
       return;

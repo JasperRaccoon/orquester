@@ -157,10 +157,10 @@ export const MANIFEST_TIMEOUT_MS = 10_000;
 
 function parseManifest(value: unknown): SessionToolsManifest | null {
   if (value === null || typeof value !== "object") return null;
-  const { tools, instructions, deny, toolsets } = value as Record<string, unknown>;
+  const { tools, instructions, deny, toolsets, seq } = value as Record<string, unknown>;
   const strings = (list: unknown): list is string[] => Array.isArray(list) && list.every((item) => typeof item === "string");
   if (!strings(tools) || typeof instructions !== "string" || !strings(deny)) return null;
-  return { tools, instructions, deny, ...(strings(toolsets) ? { toolsets } : {}) };
+  return { tools, instructions, deny, ...(strings(toolsets) ? { toolsets } : {}), ...(typeof seq === "number" && Number.isFinite(seq) ? { seq } : {}) };
 }
 
 /** `POST daemonRoutesForHost.sessionToolsManifest` with the host's bearer. Never throws. */

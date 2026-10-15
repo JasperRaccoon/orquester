@@ -7360,7 +7360,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     noteSessionToolsWarning: (threadId, detail) => {
       const runtime = runtimes.get(threadId);
       if (!runtime || !runtime.state.head) return;
-      void appendActivity(runtime, { kind: "runtime.warning", tone: "info", summary: "MCP server denial degraded", detail }).catch((error: unknown) =>
+      // The activity tones have no "warning": `error` is the one a user does not scroll past.
+      void appendActivity(runtime, { kind: "runtime.warning", tone: "error", summary: "MCP server denial degraded", detail }).catch((error: unknown) =>
         logger.warn("agent-host: could not record a session-tools warning", error)
       );
     },

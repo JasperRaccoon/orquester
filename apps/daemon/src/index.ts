@@ -1208,8 +1208,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // The chat transport (unified MCP design 2026-10-15 §9.3, §9.4, §12.1): per-thread manifests for
   // the agent host, toolset changes pushed to it (applied in-session where the provider re-lists,
   // else at the chat's next idle point), and the automatic continue turn after an approved
-  // `request_toolset` card. `onToolsetsChanged` runs before the awaiting call resumes: the
-  // refresher defers its push to a later macrotask.
+  // `request_toolset` card. `onToolsetsChanged` runs before the awaiting call resumes: the listener
+  // only STARTS the push; the call awaits the host's answer (bounded) through
+  // `executorPorts.onToolsetApproved`, so it reports "now" / "after-restart" truthfully.
   const sessionToolsRefresher = new SessionToolsRefresher({
     thread: (id) => {
       const tab = agentChat.chat.get(id);

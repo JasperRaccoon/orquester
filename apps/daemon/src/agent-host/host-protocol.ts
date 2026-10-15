@@ -296,6 +296,13 @@ export interface SessionToolsManifest {
   deny: string[];
   /** The resolved toolsets (for the daemon's own bookkeeping and tests; the host ignores it). */
   toolsets?: string[];
+  /**
+   * Monotonic per daemon and increasing across daemon restarts (milliseconds-based): the host
+   * ignores a refresh older than the last manifest it applied or launched with for the thread
+   * (`superseded`), so pushes finishing out of order never roll a list back. Absent from an older
+   * daemon: never superseded.
+   */
+  seq?: number;
 }
 
 /** Body of `POST /threads/:id/session-tools/refresh`. */
@@ -308,9 +315,10 @@ export interface SessionToolsRefreshResponse {
   /**
    * `live`: the running session's list was replaced and the provider told (`list_changed`);
    * `next-idle`: the live session restarts with resume at its next idle point; `next-start`: no live
-   * session — its next start fetches the manifest; `unchanged`: the session already advertises it.
+   * session — its next start fetches the manifest; `unchanged`: the session already advertises it;
+   * `superseded`: an older manifest than one already applied for the thread — ignored.
    */
-  applied: "live" | "next-idle" | "next-start" | "unchanged";
+  applied: "live" | "next-idle" | "next-start" | "unchanged" | "superseded";
 }
 
 /** Body of `POST /api/agent-host/session-tools/call` (design 2026-10-14 §1.1). */

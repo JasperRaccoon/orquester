@@ -29,6 +29,9 @@ const tool = (name: string, toolset: ToolsetId, tier: "read" | "admin" = "read")
 
 const CATALOG = [tool("list_sessions", "core"), tool("list_workflows", "reads"), tool("create_workflow", "workflow-authoring", "admin")];
 
+/** Fastify's default not-found body (no `code`): a route the daemon does not have. */
+const ROUTE_MISS = { message: "Route GET:/api/agent-profile/daemon-mcp-servers not found", error: "Not Found", statusCode: 404 };
+
 /** A rig: one chat per agent, toolsets in a mutable map, the host recorded. */
 function rig(over: Partial<ToolsetRefreshDeps> = {}) {
   const api = new FakeDaemonApi();
@@ -52,6 +55,8 @@ function rig(over: Partial<ToolsetRefreshDeps> = {}) {
     ...over
   };
   api.on("GET", "/api/sessions", { status: 200, body: [chatSummary({ id: "claude-1" }), chatSummary({ id: "codex-1", refId: "codex" })] });
+  // A daemon without the detection (Task 11 not merged): Fastify's own route-miss 404.
+  api.on("GET", AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, { status: 404, body: ROUTE_MISS });
   const refresher = new SessionToolsRefresher(deps);
   return { api, toolsets, pushed, warnings, refresher, setHostAnswer: (answer: SessionToolsRefreshResponse["applied"] | null) => (hostAnswer = answer) };
 }
@@ -95,6 +100,51 @@ test("the daemon-pointing read: none from a daemon without it, reused while fres
   now = 60_000;
   assert.equal((await r.refresher.daemonPointing())!.length, 1, "a failed read keeps the last good list");
   assert.equal(r.warnings.length, 1, "and says so");
+});
+
+test("fail closed after an invalidation too: a failed re-read answers the last GOOD list, never []", async () => {
+  const r = rig();
+  r.api.on("GET", AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, { status: 200, body: { servers: [{ agent: "claude", home: "system", scope: "user", name: "orquester_remote", reason: "bearer" }] } });
+  assert.equal((await r.refresher.daemonPointing())!.length, 1);
+  r.refresher.invalidateDaemonPointing();
+  r.api.on("GET", AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, { status: 500, body: {} });
+  assert.deepEqual((await r.refresher.daemonPointing())!.map((server) => server.name), ["orquester_remote"]);
+  assert.deepEqual((await manifestOf(r, "claude-1")).deny, ["orquester_remote"], "the denial stays");
+  assert.ok(r.warnings.length >= 1);
+});
+
+test("only a route-miss 404 means \"no detection\"; a 404 with our own code is a failure", async () => {
+  const r = rig();
+  r.api.on("GET", AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, { status: 404, body: { code: "THREAD_NOT_FOUND", message: "x" } });
+  assert.equal(await r.refresher.daemonPointing(), null, "never read: unavailable");
+  assert.equal(r.warnings.length, 1);
+  r.api.on("GET", AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, { status: 404, body: { message: "Route GET:/api/agent-profile/daemon-mcp-servers not found", error: "Not Found", statusCode: 404 } });
+  assert.deepEqual(await r.refresher.daemonPointing(), []);
+});
+
+test("an older push finishing last never overwrites the advertised set (sequenced)", async () => {
+  const gates: Array<(answer: SessionToolsRefreshResponse) => void> = [];
+  let both!: () => void;
+  const arrived = new Promise<void>((resolve) => (both = resolve));
+  const r = rig({
+    pushToHost: () =>
+      new Promise((resolve) => {
+        gates.push(resolve);
+        if (gates.length === 2) both();
+      })
+  });
+  await r.refresher.manifest("claude-1");
+  r.toolsets.set("claude-1", ["core", "reads", "notes"]);
+  const first = r.refresher.push("claude-1");
+  r.toolsets.set("claude-1", ["core", "reads", "notes", "files-git"]);
+  const second = r.refresher.push("claude-1");
+  await arrived;
+  gates[1]!({ applied: "live" });
+  await second;
+  assert.deepEqual(r.refresher.advertisedToolsets("claude-1"), ["core", "reads", "notes", "files-git"]);
+  gates[0]!({ applied: "live" });
+  await first;
+  assert.deepEqual(r.refresher.advertisedToolsets("claude-1"), ["core", "reads", "notes", "files-git"], "the older answer is ignored");
 });
 
 test("fail closed: with no good read ever, a failed read makes the manifest unavailable (503), every failure warned", async (t) => {
