@@ -6,8 +6,7 @@ import { defineTool, READ_ONLY, type AnyOrquesterTool, type ToolCaller } from ".
 import type { DaemonApi } from "../daemon-api.ts";
 import { ToolError } from "../errors.ts";
 import { DEFAULT_READ_BYTES, FsDirectoryError, MAX_FS_ENTRIES, MAX_READ_BYTES, type ListFilesResult } from "../fs-tools.ts";
-import { clipText, MAX_ECHO_CHARS, MAX_RESULT_BYTES, resultBytes } from "../result.ts";
-import { canonicalProject, classifyPath } from "../addressing.ts";
+import { MAX_RESULT_BYTES, resultBytes } from "../result.ts";
 
 /**
  * A listing that fits one result (ok() cuts anything over MAX_RESULT_BYTES and loses its fields):
@@ -40,18 +39,6 @@ function fileApi(api: DaemonApi): Required<Pick<DaemonApi, "listDirectory" | "re
   return { listDirectory: api.listDirectory.bind(api), readFileRange: api.readFileRange.bind(api) };
 }
 
-/**
- * Ruling S6 for a chat caller, closing what the path classification alone lets through: a path two levels under the
- * workspaces root is "inside a project" only when that `<ws>/<name>` is a project DIRECTORY — a file lying beside the
- * projects in a workspace directory (`<ws>/notes.txt`), or a path under a project that does not exist, is not.
- */
-async function assertInsideProjectDirectory(api: DaemonApi, path: string, cwd: string): Promise<void> {
-  const where = await classifyPath(api, path, cwd);
-  if (where.kind === "project" && (await canonicalProject(api, where.project.canonical)) === null) {
-    throw new ToolError("PERMISSION_DENIED", `"${clipText(path, MAX_ECHO_CHARS)}" is not inside a project: paths must lie inside a project directory ("<workspace>/<project>/…", list_projects).`);
-  }
-}
-
 const readFile = defineTool({
   name: "read_file",
   title: "Read a file or directory",
@@ -68,9 +55,9 @@ const readFile = defineTool({
   audiences: ["external", "chat"],
   toolset: "files-git",
   tier: "read",
-  // The gate classifies the path (inside a project, else PERMISSION_DENIED) and judges its project's content read.
-  async scope(args, { api, caller }) {
-    if (caller.kind === "thread") await assertInsideProjectDirectory(api, args.path, caller.cwd);
+  // The gate classifies the path (inside a project DIRECTORY, else PERMISSION_DENIED — a file beside the projects,
+  // `<ws>/notes.txt`, included: `classifyPath`) and judges its project's content read.
+  async scope(args) {
     return { projects: [], sessions: [], reads: "content", writes: false, causesTurnIn: [], paths: [args.path] };
   },
   annotations: READ_ONLY,

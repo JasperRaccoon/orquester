@@ -151,6 +151,20 @@ test("read_file for a chat: a path inside its project reads (relative to its dir
   }
 });
 
+test("read_file of <ws>/notes.txt (a file beside the projects): the tool only claims the path; the gate's classifyPath denies it", async (t) => {
+  const { sandbox, ctx } = await harness(t);
+  await mkdir(join(sandbox, "acme", "api"), { recursive: true });
+  const notes = join(sandbox, "acme", "notes.txt");
+  await writeFile(notes, "beside the projects");
+  const caller = chatCaller(sandbox);
+  // No check of its own (D9-7 removed): the scope names the path for the gate to classify.
+  const scope = await readFile.scope({ path: notes, offset: 0, maxBytes: DEFAULT_READ_BYTES }, { api: ctx.api, signal: new AbortController().signal, now: Date.now, caller });
+  assert.deepEqual(scope.paths, [notes]);
+  const denied = await chatRead(ctx.api, caller, { path: notes });
+  assert.equal(answer(denied).code, "PERMISSION_DENIED");
+  assert.match(answer(denied).message, /is not inside a project/);
+});
+
 test("read_file for a chat: another project's content follows the gate (same workspace under auto: allowed; another workspace: a card, refused without a port)", async (t) => {
   const { sandbox, ctx } = await harness(t);
   await mkdir(join(sandbox, "acme", "web"), { recursive: true });
