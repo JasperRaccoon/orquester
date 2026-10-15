@@ -132,6 +132,8 @@ function reachable(entry: string): { modules: Set<string>; packages: Set<string>
  */
 const PURE_MODULES = new Set([
   "agent-chat/activity-ladder.ts",
+  // The in-process wait registry (Task 5, re-exported by session-tools/threads/shared.ts): a map, no service.
+  "agent-chat/waits.ts",
   "mcp/addressing.ts",
   "mcp/agents.ts",
   "mcp/attachments.ts",
