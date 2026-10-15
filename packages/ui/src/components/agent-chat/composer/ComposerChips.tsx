@@ -7,7 +7,7 @@ import type {
   RuntimeMode,
   SelectProviderOptionDescriptor
 } from "@orquester/api/agent-chat";
-import { RUNTIME_MODES } from "@orquester/api/agent-chat";
+import { RUNTIME_MODE_LABELS, RUNTIME_MODE_SHORT_HINTS as RUNTIME_MODE_HINTS, RUNTIME_MODES } from "@orquester/api/agent-chat";
 
 import { cn } from "../../../lib/cn";
 import { useUsageNow } from "../../../hooks/use-usage-display";
@@ -263,20 +263,6 @@ export function OptionChip({
     </ComposerPopover>
   );
 }
-
-const RUNTIME_MODE_LABELS: Record<RuntimeMode, string> = {
-  "approval-required": "Supervised",
-  "auto-accept-edits": "Accept edits",
-  auto: "Auto",
-  "full-access": "Full access"
-};
-
-const RUNTIME_MODE_HINTS: Record<RuntimeMode, string> = {
-  "approval-required": "Every tool call asks first",
-  "auto-accept-edits": "File edits apply without asking",
-  auto: "The provider reviews its own work where it can",
-  "full-access": "Nothing asks. Commands run unsupervised"
-};
 
 export interface RuntimeModeChipProps {
   mode: RuntimeMode;

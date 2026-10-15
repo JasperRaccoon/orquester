@@ -92,3 +92,13 @@ test("the outer shape still throws — an unknown version included — so the fi
   // Absent fields default like the other indexes: an empty object is an empty library.
   assert.deepEqual(parseSavedPromptsConfig({}), { version: 1, prompts: [], rejected: [], extra: {} });
 });
+
+test("createdBy survives a read (unknown fields too); a malformed one is dropped, never the prompt", () => {
+  const createdBy = { kind: "agent", threadId: "t-1", agent: "claude", title: "Implement auth", fromNewerBuild: true };
+  const parsed = parseSavedPromptsConfig({ version: 1, prompts: [record({ createdBy }), record({ id: "p-2", createdBy: { kind: "robot" } })] });
+  assert.deepEqual(parsed.prompts[0]?.createdBy, createdBy);
+  assert.equal(parsed.prompts[1]?.id, "p-2");
+  assert.equal(parsed.prompts[1]?.createdBy, undefined);
+  assert.deepEqual(parsed.rejected, []);
+  assert.equal(parseSavedPromptsConfig({ version: 1, prompts: [record()] }).prompts[0]?.createdBy, undefined, "older prompts are the user's");
+});

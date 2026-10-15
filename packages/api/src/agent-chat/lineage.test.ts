@@ -104,3 +104,18 @@ describe("the merge-back message", () => {
     assert.equal(forkTitle("  "), "Chat (fork)");
   });
 });
+
+describe("opened chats and agent-created children (unified MCP design 2026-10-15 §4.1, §13 c)", () => {
+  it("reads `opened` and `agentCreated: true`; any other agentCreated value is dropped on its own", () => {
+    const opened = { parentThreadId: "p", relation: "opened", createdAt: "x", delegationDepth: 1, agentCreated: true };
+    assert.deepEqual(parseThreadLineage(opened), opened);
+    for (const bad of [false, "true", 1]) {
+      assert.deepEqual(parseThreadLineage({ ...opened, agentCreated: bad }), { parentThreadId: "p", relation: "opened", createdAt: "x", delegationDepth: 1 });
+    }
+  });
+
+  it("an opened chat's merge-back message round-trips", () => {
+    const text = buildMergeBackMessage({ childTitle: "Review", relation: "opened", text: "Done." });
+    assert.deepEqual(parseMergeBackMessage(text), { relation: "opened", childTitle: "Review", body: "Done." });
+  });
+});

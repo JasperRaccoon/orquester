@@ -12,10 +12,14 @@
  * record that carries it.
  */
 
-/** How a child thread came to be. */
-export type ThreadLineageRelation = "fork" | "delegate";
+/**
+ * How a child thread came to be: forked from the parent, delegated a task by it, or `opened` by it
+ * — a chat another chat opened through `create_session` without `delegate` (unified MCP design
+ * 2026-10-15 §4.1, D-15). An older build reads `opened` as no lineage (the record survives).
+ */
+export type ThreadLineageRelation = "fork" | "delegate" | "opened";
 
-export const THREAD_LINEAGE_RELATIONS: readonly ThreadLineageRelation[] = ["fork", "delegate"];
+export const THREAD_LINEAGE_RELATIONS: readonly ThreadLineageRelation[] = ["fork", "delegate", "opened"];
 
 /** Where in the parent a fork was taken: the message it was forked from, and that message's turn. */
 export interface ThreadForkPoint {
@@ -32,12 +36,21 @@ export interface ThreadLineage {
   /** When the child was created. */
   createdAt: string;
   /**
-   * How many delegate links lie between the top-level thread and this one, this one's own
-   * included (a top-level thread's delegate: 1; a fork carries its parent's). Stamped by the
-   * daemon at creation, so closing a thread in the middle never resets it — the session tools'
-   * delegation cap (`session-tools/threads`) reads it. Absent on records written before it.
+   * How many agent links lie between the top-level thread and this one, this one's own included:
+   * every AGENT-CREATED `delegate` or `opened` link counts (unified MCP design 2026-10-15 §5.6,
+   * §13 c); a fork carries its parent's, and a link the user or an external client made adds
+   * nothing. A top-level thread's delegate: 1. Stamped by the daemon at creation, so closing a
+   * thread in the middle never resets it — the agent-depth cap (2) reads it. Absent on records
+   * written before it (records written before the unified MCP counted delegate links only).
    */
   delegationDepth?: number;
+  /**
+   * `true` when a chat tool created this child (`create_session`, `delegate`, `fork_session` from
+   * a chat caller; §13 c): only such children are the parent agent's own — counted by the open
+   * children cap, and the only ones it may stop, rewind, compact, close or reconfigure. A fork the
+   * user made in the GUI, or a session an external client created, carries none. Additive.
+   */
+  agentCreated?: true;
 }
 
 /** The deepest delegation depth a lineage may record (well past any cap). */
@@ -94,7 +107,8 @@ export function parseThreadLineage(value: unknown): ThreadLineage | undefined {
     relation: relation as ThreadLineageRelation,
     ...(forkedFrom !== undefined ? { forkedFrom } : {}),
     createdAt,
-    ...(delegationDepth !== undefined ? { delegationDepth } : {})
+    ...(delegationDepth !== undefined ? { delegationDepth } : {}),
+    ...(record.agentCreated === true ? { agentCreated: true as const } : {})
   };
 }
 
@@ -212,6 +226,14 @@ export interface MergeBackResponse {
  * the user (`deliver`) or dropped by them (`discard`) — never silently.
  */
 export interface PendingMergeBack {
+  /**
+   * What the queued turn is (unified MCP design 2026-10-15 §8.3): a fork's `merge` (absent reads
+   * as `merge`, as from every daemon before the field), a `reply` another chat's turn produced for
+   * this one, or a `message` sent with `reply: "wait" | "notify"` that waits for this busy chat's
+   * next idle point. For `reply` and `message`, `childSessionId` is the other chat (the one that
+   * replied / sent) and `parentSessionId` the one that receives it.
+   */
+  kind?: "merge" | "reply" | "message";
   mergeId: string;
   parentSessionId: string;
   childSessionId: string;
@@ -245,15 +267,22 @@ export interface MergeBackActionResponse {
   seq?: number;
 }
 
-const MERGE_BACK_HEADER = /^\[Merged back from (fork|delegated task) "((?:[^"\\\n]|\\.)*)"\]$/;
+const MERGE_BACK_HEADER = /^\[Merged back from (fork|delegated task|opened chat) "((?:[^"\\\n]|\\.)*)"\]$/;
 
 const MERGE_BACK_EXPLANATIONS: Record<ThreadLineageRelation, string> = {
   fork: "This conversation was forked earlier; what the fork concluded follows.",
-  delegate: "A task delegated from this conversation finished; its result follows."
+  delegate: "A task delegated from this conversation finished; its result follows.",
+  opened: "A chat opened from this conversation sent back its result; it follows."
+};
+
+const MERGE_BACK_LABELS: Record<ThreadLineageRelation, string> = {
+  fork: "fork",
+  delegate: "delegated task",
+  opened: "opened chat"
 };
 
 function headerLabel(relation: ThreadLineageRelation): string {
-  return relation === "delegate" ? "delegated task" : "fork";
+  return MERGE_BACK_LABELS[relation];
 }
 
 /** Quote a title for the header: one line, `"` and `\` escaped. */
@@ -293,7 +322,7 @@ export function parseMergeBackMessage(text: string): ParsedMergeBackMessage | nu
   const header = newline === -1 ? text : text.slice(0, newline);
   const match = MERGE_BACK_HEADER.exec(header);
   if (!match) return null;
-  const relation: ThreadLineageRelation = match[1] === "delegated task" ? "delegate" : "fork";
+  const relation: ThreadLineageRelation = match[1] === "delegated task" ? "delegate" : match[1] === "opened chat" ? "opened" : "fork";
   const childTitle = match[2]!.replace(/\\(.)/g, "$1");
   let rest = newline === -1 ? "" : text.slice(newline + 1);
   const explanation = MERGE_BACK_EXPLANATIONS[relation];
