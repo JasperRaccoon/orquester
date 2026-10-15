@@ -341,6 +341,92 @@ describe("engine: resume after a restart", () => {
     assert.deepEqual(code.seen, ["B"]);
   });
 
+  test("a Run workflow block whose child the stopping engine refused (ENGINE_UNAVAILABLE) is no validation failure: it runs again after the restart", async () => {
+    // Projects whose branch read can be held: the block is marked running, then the stop begins
+    // before it asks for its child.
+    class HeldProjects extends FakeProjects {
+      private held: Promise<void> | null = null;
+      private releaseHeld: (() => void) | null = null;
+      hold(): void {
+        this.held = new Promise((resolve) => {
+          this.releaseHeld = resolve;
+        });
+      }
+      release(): void {
+        this.releaseHeld?.();
+        this.held = null;
+      }
+      override async currentBranch(): Promise<string | undefined> {
+        if (this.held) await this.held;
+        return super.currentBranch();
+      }
+    }
+    const runStore = new HeldRunStore();
+    const projects = new HeldProjects();
+    const env = restartable([
+      workflow("p", [T(), node("A", "shell"), node("S", "workflow", { workflowId: "c" })], [edge("T", "A"), edge("A", "S")]),
+      workflow("c", [T(), node("X", "code")], [edge("T", "X")])
+    ]);
+    const shared = { ...env.shared, runStore, projects };
+    const gate = controlledExecutor("shell");
+    const first = createHarness({ ...shared, executors: { shell: gate, code: scripted("code") } });
+    const { runId } = await first.engine.run("p", {});
+    await flush();
+    projects.hold();
+    gate.calls[0]!.resolve({ status: "succeeded", output: null });
+    await flush();
+    assert.equal((await runStore.load(runId!))!.blocks.S!.status, "running", "S is marked running, waiting on its branch read");
+    runStore.hold();
+    const stopping = first.engine.stop();
+    projects.release();
+    await flush();
+    await flush();
+    runStore.release();
+    await stopping;
+    const saved = (await runStore.load(runId!))!;
+    assert.equal(saved.status, "running", "not failed");
+    assert.equal(saved.blocks.S!.status, "running");
+    assert.equal(saved.blocks.S!.error, undefined, "no validation failure");
+    assert.equal([...runStore.runs.values()].filter((run) => run.workflowId === "c").length, 0, "no child was started");
+
+    const code = scripted("code");
+    const second = createHarness({ ...shared, executors: { code } });
+    await second.engine.resume();
+    const result = await second.engine.waitForRun(runId!);
+    assert.equal(result.status, "succeeded");
+    assert.deepEqual(code.seen, ["X"], "the child ran once, after the restart");
+    assert.equal([...runStore.runs.values()].filter((run) => run.workflowId === "c").length, 1);
+  });
+
+  test("a Run workflow block found running without its WaitingOn adopts the child it did start (never a second one)", async () => {
+    const env = restartable([
+      workflow("p", [T(), node("S", "workflow", { workflowId: "c" })], [edge("T", "S")]),
+      workflow("c", [T(), node("X", "code")], [edge("T", "X")])
+    ]);
+    const first = env.boot({ code: scripted("code") });
+    const { runId } = await first.engine.run("p", {});
+    await first.engine.waitForRun(runId!);
+    await first.engine.stop();
+    // Rewind the parent to "S launched its child but died before recording it".
+    const saved = (await env.shared.runStore.load(runId!))!;
+    saved.status = "running";
+    delete saved.endedAt;
+    const s = saved.blocks.S!;
+    s.status = "running";
+    delete s.output;
+    delete s.handle;
+    delete s.endedAt;
+    delete s.waitingOn;
+    await env.shared.runStore.save(saved);
+    const code = scripted("code");
+    const second = env.boot({ code });
+    await second.engine.resume();
+    const result = await second.engine.waitForRun(runId!);
+    assert.equal(result.status, "succeeded");
+    assert.deepEqual(code.seen, [], "the finished child was adopted, not run again");
+    assert.equal([...env.shared.runStore.runs.values()].filter((run) => run.workflowId === "c").length, 1);
+  });
+
   test("a side-effecting block running without a WaitingOn is interrupted (no retry)", async () => {
     const env = restartable([workflow("w1", [T(), node("A", "code"), node("B", "code")], [edge("T", "A"), edge("A", "B", "error")])]);
     const first = env.boot({ code: controlledExecutor("code") });

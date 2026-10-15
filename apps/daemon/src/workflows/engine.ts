@@ -1870,6 +1870,29 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
   // Resume
   // -------------------------------------------------------------------------
 
+  /**
+   * The run a parent run's Run workflow block started (newest first among the child workflow's
+   * runs); null when it started none; undefined when that cannot be told (the caller fails closed).
+   */
+  const childRunOf = async (parentRunId: string, parentNodeId: string, childWorkflowId: unknown): Promise<string | null | undefined> => {
+    const named = (run: { parentRunId?: string; triggerPayload: PersistedRun["triggerPayload"] }): boolean =>
+      run.parentRunId === parentRunId && run.triggerPayload?.kind === "subworkflow" && run.triggerPayload.parentNodeId === parentNodeId;
+    for (const a of active.values()) if (named(a.run)) return a.run.id;
+    if (typeof childWorkflowId !== "string") return null;
+    try {
+      const page = await runStore.listForWorkflow(childWorkflowId, { limit: 50 });
+      for (const summary of page.runs) {
+        if (summary.parentRunId !== parentRunId) continue;
+        const run = await runStore.load(summary.id);
+        if (run && named(run)) return run.id;
+      }
+    } catch (error) {
+      logger.warn("a sub-workflow's child run could not be looked up", { parentRunId, error: errorMessage(error) });
+      return undefined;
+    }
+    return null;
+  };
+
   const resume = async (): Promise<void> => {
     let runs: PersistedRun[];
     try {
@@ -1917,6 +1940,26 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
       }
       active.set(run.id, a);
       if (run.status === "running") toWalk.push(a);
+    }
+    // A Run workflow block found running without a WaitingOn (the engine stopped between marking it
+    // running and recording its child — e.g. `launch` refused the child while stopping): adopt the
+    // child it did start, if any, else run the block again — it started nothing.
+    for (const a of toWalk) {
+      for (const node of a.def.nodes) {
+        const block = a.run.blocks[node.id];
+        if (node.type !== "workflow" || !block || block.status !== "running" || block.waitingOn !== undefined) continue;
+        const child = await childRunOf(a.run.id, node.id, node.config.workflowId);
+        // Unknown: left as it is (resumed as "interrupted"), never run twice.
+        if (child === undefined) continue;
+        if (child !== null) {
+          block.waitingOn = { kind: "child-run", runId: child };
+        } else {
+          block.status = "pending";
+          block.attempt = Math.max(0, block.attempt - 1);
+          delete block.startedAt;
+        }
+        markDirty(a, node.id);
+      }
     }
     // Parents know their children (a child names its parent), and a child redacts its ancestors'
     // secrets too — parents first, so a grandchild reads its parent's union.
