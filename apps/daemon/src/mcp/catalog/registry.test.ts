@@ -86,10 +86,19 @@ test("TOOLSETS agree with the catalog: a chat tool TOOLSETS names sits in that t
   for (const toolset of TOOLSETS) for (const entry of toolset.tools) assert.match(entry.name, TOOL_NAME_PATTERN);
 });
 
-test("transitional counts: the external surface is today's 72 tools; chat is the 16 legacy session tools", () => {
+test("transitional counts: every external tool is a legacy one or a catalog tool TOOLSETS names; chat adds the 16 legacy session tools", () => {
   assert.deepEqual([...externalMcpToolNames()].sort(), [...EXTERNAL_MCP_TOOL_NAMES].sort());
-  assert.equal(catalogFor("external").length, 72);
-  assert.deepEqual(catalogFor("chat").map((tool) => tool.name).sort(), Object.keys(LEGACY_CHAT_META).sort());
+  // Wave 3 families replace their legacy entries one by one; Task 14 pins the final 41 / 45 / 22.
+  const specNames = new Set(chatToolNames());
+  for (const tool of catalogFor("external")) {
+    assert.ok(Object.prototype.hasOwnProperty.call(LEGACY_EXTERNAL_META, tool.name) || specNames.has(tool.name), `${tool.name}: neither legacy nor in TOOLSETS`);
+  }
+  const replaced = catalogFor("chat").filter((tool) => !Object.prototype.hasOwnProperty.call(LEGACY_CHAT_META, tool.name));
+  assert.deepEqual(
+    catalogFor("chat").map((tool) => tool.name).sort(),
+    [...Object.keys(LEGACY_CHAT_META), ...replaced.map((tool) => tool.name)].sort()
+  );
+  for (const tool of replaced) assert.ok(specNames.has(tool.name), `${tool.name} is a chat tool TOOLSETS does not name`);
 });
 
 // ---------------------------------------------------------------------------
@@ -147,6 +156,7 @@ const PURE_MODULES = new Set([
   "mcp/tool.ts",
   "mcp/tools/agent-profile.ts",
   "mcp/tools/catalog.ts",
+  "mcp/tools/desktop-preview.ts",
   "mcp/tools/desktops.ts",
   "mcp/tools/files.ts",
   "mcp/tools/git.ts",
@@ -166,6 +176,8 @@ const PURE_MODULES = new Set([
   "mcp/tools/watch.ts",
   "mcp/tools/workflows-guide.ts",
   "mcp/tools/workflows.ts",
+  // Task 12: the todo tools' /api/todos client (DaemonApi only; the store is a type import).
+  "mcp/todo-tools.ts",
   "mcp/transcript.ts",
   "mcp/usage-view.ts",
   "mcp/views.ts",

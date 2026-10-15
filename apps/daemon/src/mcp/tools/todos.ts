@@ -1,31 +1,70 @@
-// Catalog family module `todos` (Notes: list_todos, update_todos) — owned by plan Task 12 (unified MCP, Wave 3).
-// Task 2 stub: `todosFamily` exports this family's tools as catalog tools (`../catalog/legacy.ts`
-// adapters over the pre-catalog definitions below); the owning task replaces it and Task 2 never
-// edits this file again.
+// Catalog family module `todos` (Notes: list_todos, update_todos) — unified MCP design 2026-10-15
+// §4 rows 22–23, plan Task 12. Both audiences; Read / Act in the `notes` toolset. Every read and
+// write goes through `/api/todos` (`../todo-tools.ts`, D-19).
+//
+// Scope: a project's lists claim that project (the gate's matrix, §5.2). A workspace's own lists
+// belong to no project: in the caller's own workspace they are the caller's; in another workspace
+// a write claims that workspace as a pending target (a card, never a grant) and a read below Full
+// access is refused — the claim has no workspace-level read target (reported to the coordinator).
+
+import { basename, join } from "node:path";
 import { z } from "zod";
 import { resolveProject } from "../addressing.ts";
 import { ToolError } from "../errors.ts";
 import { clipText, fitJsonBytes, MAX_RESULT_BYTES, resultBytes } from "../result.ts";
-import type { TodoProjection, TodoSelector } from "../todo-tools.ts";
-import { closedWorld, defineTool, DESTRUCTIVE, MUTATING, MUTATING_IDEMPOTENT, READ_ONLY, type ToolContext, type ToolDef } from "../tool.ts";
-import { legacyExternalTools } from "../catalog/legacy.ts";
+import {
+  createTodoList,
+  deleteTodoList,
+  listTodoLists,
+  todoListRef,
+  toggleTodoItem,
+  updateTodoList,
+  type TodoProjection,
+  type TodoSelector
+} from "../todo-tools.ts";
+import { closedWorld, defineTool, READ_ONLY, type AnyOrquesterTool, type ScopeClaim, type ScopeContext } from "../catalog/contract.ts";
 
-// min(1), and `!== undefined` in scope(): an empty field is a field given, never read as omitted — beside the other one
+// min(1), and `!== undefined` below: an empty field is a field given, never read as omitted — beside the other one
 // it would put the list in the other scope.
 const scopeFields = {
   workspace: z.string().min(1).optional().describe("Workspace name, for that workspace's own lists. Pass this or `project`."),
-  project: z.string().min(1).optional().describe("Absolute project path or \"<workspace>/<project>\", for that project's lists. Pass this or `workspace`.")
+  project: z.string().min(1).optional().describe("Absolute project path or \"<workspace>/<project>\", for that project's lists.")
 };
-const idField = z.string().min(1).describe("The todo list id from list_todos or create_todo.");
 
-/** Spec §7.9: exactly one of `workspace` / `project`, the project resolved like every other tool's. */
-async function scope(ctx: ToolContext, args: { workspace?: string; project?: string }): Promise<TodoSelector> {
-  if ((args.workspace !== undefined) === (args.project !== undefined)) throw new ToolError("INVALID_ARGUMENT", "Pass exactly one of workspace or project.");
+const CHAT_DEFAULT_NOTE = "Without workspace or project: this chat's project.";
+
+/**
+ * Exactly one of `workspace` / `project`, the project resolved like every other tool's. A chat
+ * caller naming neither means its own project (§5.1).
+ */
+async function selectorOf(args: { workspace?: string; project?: string }, ctx: ScopeContext): Promise<TodoSelector> {
+  const given = (args.workspace !== undefined ? 1 : 0) + (args.project !== undefined ? 1 : 0);
+  if (given === 0 && ctx.caller.kind === "thread" && ctx.caller.projectPath && ctx.caller.workspace) {
+    return { workspace: ctx.caller.workspace, project: basename(ctx.caller.projectPath) };
+  }
+  if (given !== 1) throw new ToolError("INVALID_ARGUMENT", "Pass exactly one of workspace or project.");
   if (args.project === undefined) return { workspace: args.workspace! };
   const ref = await resolveProject(ctx.api, args.project);
   // resolveProject only returns a `<workspace>/<project>` directory; the guard narrows the types.
   if (!ref.workspace || !ref.name) throw new ToolError("PROJECT_NOT_FOUND", "Todo lists need a project inside a workspace.");
   return { workspace: ref.workspace, project: ref.name };
+}
+
+/** What a call on `sel`'s lists claims (see the module notes). */
+async function claimFor(sel: TodoSelector, ctx: ScopeContext, access: "read" | "act"): Promise<ScopeClaim> {
+  await todoListRef(ctx.api, sel); // PROJECT_NOT_FOUND before anything is judged
+  const claim: ScopeClaim = { projects: [], sessions: [], reads: access === "read" ? "metadata" : "none", writes: access === "act", causesTurnIn: [] };
+  if (sel.project !== undefined) return { ...claim, projects: [join(ctx.api.workspacesDir, sel.workspace, sel.project)] };
+  const caller = ctx.caller;
+  if (caller.kind !== "thread" || caller.workspace === sel.workspace) return claim;
+  if (access === "act") return { ...claim, pendingProjects: [{ workspace: sel.workspace }] };
+  if (caller.runtimeMode !== "full-access") {
+    throw new ToolError(
+      "PERMISSION_DENIED",
+      `Workspace "${clipText(sel.workspace, 100)}" is not this chat's: reading its own lists needs Full access. Read a project's lists there (project), or ask the user.`
+    );
+  }
+  return claim;
 }
 
 /** A listed todo list: `bodyTruncated` marks one whose body is only its head — written back whole, it would lose the rest. */
@@ -60,7 +99,7 @@ const listResult = (todos: ListedTodo[], omitted: number) => ({ todos, truncated
 /**
  * Lists that fit one result (ok() would otherwise cut the JSON and lose them all): the newest ones, the oldest left out
  * first, still oldest first — `truncated` when anything was left out or cut, `omittedLists` counting the lists left
- * out. A body is never cut silently: update_todo replaces a whole body, so an agent that edits a cut one and writes it
+ * out. A body is never cut silently: an update replaces a whole body, so an agent that edits a cut one and writes it
  * back deletes its tail. Only a newest list too big for a result on its own is cut (`fitBody`) — to the head of its
  * body, marked `bodyTruncated`.
  */
@@ -84,69 +123,94 @@ function fitTodos(todos: TodoProjection[]): { todos: ListedTodo[]; truncated?: t
 const listTodos = defineTool({
   name: "list_todos",
   title: "List todo lists",
-  description: "The shared todo lists of a workspace or of one project, oldest first, each with its markdown body. When they do not all fit one result the oldest are left out (truncated:true, omittedLists counts them). A newest list too big on its own keeps the head of its body: a list marked bodyTruncated is incomplete — never write it back whole. The human sees and edits the same lists live in the Todo tab.",
+  description:
+    "The shared todo lists of a workspace or of one project, oldest first, each with its id and markdown body. When they do not all fit one result the oldest are left out (truncated:true, omittedLists counts them). A newest list too big on its own keeps the head of its body: a list marked bodyTruncated is incomplete — never write it back whole. The user sees and edits the same lists live in the Todo tab.",
+  chatNote: CHAT_DEFAULT_NOTE,
   input: scopeFields,
+  audiences: ["external", "chat"],
+  toolset: "notes",
+  tier: "read",
+  scope: async (args, ctx) => claimFor(await selectorOf(args, ctx), ctx, "read"),
   annotations: READ_ONLY,
+  resultKind: "json",
   async run(args, ctx) {
-    return fitTodos(ctx.todos.list(await scope(ctx, args)));
+    return fitTodos(await listTodoLists(ctx.api, await selectorOf(args, ctx)));
   }
 });
 
-const createTodo = defineTool({
-  name: "create_todo",
-  title: "Create a todo list",
-  description: "Create a shared todo list in a workspace or a project. Its body starts empty: fill it with update_todo ('- [ ] item' lines).",
-  input: { ...scopeFields, name: z.string().min(1).describe("List name.") },
-  annotations: closedWorld(MUTATING),
-  async run(args, ctx) {
-    return { todo: fitBody(await ctx.todos.create(await scope(ctx, args), args.name), (todo) => ({ todo }), clipName) };
-  }
-});
+const UPDATE_ACTIONS = ["create", "update", "toggle", "delete"] as const;
+type UpdateAction = (typeof UPDATE_ACTIONS)[number];
 
-const updateTodo = defineTool({
-  name: "update_todo",
-  title: "Update a todo list",
-  description: "Rename a todo list and/or replace its whole markdown body ('- [ ] item' / '- [x] item' lines). To tick one item use toggle_todo_item, which cannot clobber an edit made meanwhile. On a list too big for one result, the result's body is only its head (bodyTruncated:true); the write itself is whole.",
-  input: {
-    id: idField,
-    name: z.string().min(1).optional().describe("New list name."),
-    body: z.string().optional().describe("The new markdown body, replacing the old one whole. Never send a body marked bodyTruncated — list_todos, and this tool's and toggle_todo_item's results, mark a body cut to fit: it is only the list's head, and the rest would be lost. Tick items with toggle_todo_item (it edits the full stored body), rename with `name` alone (the body is kept), or put new items in a new list.")
+const updateInput = {
+  action: z.enum(UPDATE_ACTIONS),
+  ...scopeFields,
+  id: z.string().min(1).optional().describe("The list's id (list_todos), for update, toggle and delete."),
+  name: z.string().min(1).optional().describe("create: the new list's name. update: its new name."),
+  body: z
+    .string()
+    .optional()
+    .describe("update: the whole new markdown body ('- [ ] item' lines), replacing the old one. Never a body marked bodyTruncated."),
+  item: z.union([z.string(), z.number().int().min(1)]).optional().describe("toggle: the item's 1-based index among the list's items, or its exact text."),
+  checked: z.boolean().optional().describe("toggle: the state to set; omit to flip the item.")
+};
+type UpdateArgs = z.infer<z.ZodObject<typeof updateInput>>;
+
+/** The fields each action takes (required, then allowed) — anything else given is refused, never ignored. */
+const ACTION_FIELDS: Readonly<Record<UpdateAction, { required: readonly (keyof UpdateArgs)[]; allowed: readonly (keyof UpdateArgs)[] }>> = {
+  create: { required: ["name"], allowed: [] },
+  update: { required: ["id"], allowed: ["name", "body"] },
+  toggle: { required: ["id", "item"], allowed: ["checked"] },
+  delete: { required: ["id"], allowed: [] }
+};
+
+function checkAction(args: UpdateArgs): void {
+  const fields = ACTION_FIELDS[args.action];
+  for (const key of fields.required) {
+    if (args[key] === undefined) throw new ToolError("INVALID_ARGUMENT", `update_todos ${args.action} needs ${key}.`);
+  }
+  for (const key of ["id", "name", "body", "item", "checked"] as const) {
+    if (args[key] !== undefined && !fields.required.includes(key) && !fields.allowed.includes(key)) {
+      throw new ToolError("INVALID_ARGUMENT", `update_todos ${args.action} takes no ${key}.`);
+    }
+  }
+  if (args.action === "update" && args.name === undefined && args.body === undefined) {
+    throw new ToolError("INVALID_ARGUMENT", "update_todos update needs name, body or both.");
+  }
+}
+
+const updateTodos = defineTool({
+  name: "update_todos",
+  title: "Change todo lists",
+  description:
+    "Change the shared todo lists of a workspace or a project; the user sees them live in the Todo tab. action create: a new empty list named `name`. update: rename it (`name`) and/or replace its whole markdown body (`body`). toggle: check or uncheck one `item` in the stored body (atomic, keeps edits made meanwhile) — prefer it to rewriting the body. delete: remove the list. update, toggle and delete name the list by `id` with its workspace or project. On a list too big for one result, the result's body is only its head (bodyTruncated:true); the write itself is whole.",
+  chatNote: CHAT_DEFAULT_NOTE,
+  input: updateInput,
+  audiences: ["external", "chat"],
+  toolset: "notes",
+  tier: "act",
+  async scope(args, ctx) {
+    checkAction(args);
+    return claimFor(await selectorOf(args, ctx), ctx, "act");
   },
-  annotations: closedWorld(MUTATING_IDEMPOTENT),
+  // The most dangerous action is delete; a toggle without `checked` flips, so a retry is not a no-op.
+  annotations: closedWorld({ readOnlyHint: false, destructiveHint: true, idempotentHint: false }),
+  resultKind: "json",
   async run(args, ctx) {
-    return { todo: fitBody(await ctx.todos.update(args.id, { name: args.name, body: args.body }), (todo) => ({ todo }), clipName) };
+    checkAction(args);
+    const sel = await selectorOf(args, ctx);
+    switch (args.action) {
+      case "create":
+        return { todo: fitBody(await createTodoList(ctx.api, sel, args.name!), (todo) => ({ todo }), clipName) };
+      case "update":
+        return { todo: fitBody(await updateTodoList(ctx.api, sel, args.id!, { name: args.name, body: args.body }), (todo) => ({ todo }), clipName) };
+      case "toggle":
+        return { ...fitBody(await toggleTodoItem(ctx.api, sel, args.id!, args.item!, args.checked), (result) => result, clipItem) };
+      case "delete":
+        await deleteTodoList(ctx.api, sel, args.id!);
+        return { deleted: true, id: args.id! };
+    }
   }
 });
-
-const deleteTodo = defineTool({
-  name: "delete_todo",
-  title: "Delete a todo list",
-  description: "Delete a todo list and its body.",
-  input: { id: idField },
-  annotations: closedWorld(DESTRUCTIVE),
-  async run(args, ctx) {
-    await ctx.todos.remove(args.id);
-    return { deleted: true, id: args.id };
-  }
-});
-
-const toggleTodoItem = defineTool({
-  name: "toggle_todo_item",
-  title: "Toggle a todo item",
-  description: "Check or uncheck one item of a todo list, atomically, by its 1-based index among the list's items or by its exact text. Omit `checked` to flip it; pass it to make a retry harmless. On a list too big for one result, the result's body is only its head (bodyTruncated:true); the toggle itself is whole.",
-  input: {
-    id: idField,
-    item: z.union([z.string(), z.number().int().min(1)]).describe("The item's exact text, or its 1-based index among the list's items."),
-    checked: z.boolean().optional().describe("The state to set; omit to flip the item.")
-  },
-  // Omitting `checked` flips the item: a repeated identical call is not a no-op, so this is not idempotent.
-  annotations: closedWorld(MUTATING),
-  async run(args, ctx) {
-    return { ...fitBody(await ctx.todos.toggleItem(args.id, args.item, args.checked), (result) => result, clipItem) };
-  }
-});
-
-export const todoTools: ToolDef[] = [listTodos, createTodo, updateTodo, deleteTodo, toggleTodoItem];
 
 /** This family in the catalog (`../catalog/index.ts`). */
-export const todosFamily = legacyExternalTools(todoTools);
+export const todosFamily: readonly AnyOrquesterTool[] = [listTodos, updateTodos];

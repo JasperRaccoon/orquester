@@ -1,19 +1,53 @@
+/**
+ * The todo tools' `/api/todos` client (unified MCP design 2026-10-15 D-19): the daemon's real todo
+ * routes (`createServer`, inject only — nothing listens) over a real TodoListManager, reached
+ * through the in-process `InjectDaemonApi` exactly as the catalog tools reach them.
+ */
+import { createWriteStream } from "node:fs";
 import { mkdir,mkdtemp,rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { TodoError,TodoListManager } from "../todos.ts";
-import { TodoTools } from "./todo-tools.ts";
+import { createDefaultClientConfig, createDefaultDaemonConfig } from "@orquester/config";
+import { createServer } from "../index.ts";
+import { TodoListManager } from "../todos.ts";
+import { InjectDaemonApi } from "./daemon-api.ts";
+import { createTodoList, deleteTodoList, listTodoLists, toggleTodoItem, updateTodoList, type TodoSelector } from "./todo-tools.ts";
 import { ToolError } from "./errors.ts";
 import { toSafeToolError } from "./result.ts";
+import { FakeDaemonApi } from "./testing.ts";
 
+type CreateServerArgs = Parameters<typeof createServer>;
+
+/** A sandbox `<root>/w/p`, the daemon's todo routes over a real store, and the in-process client. */
 async function makeTools(t: TestContext) {
   const root = await mkdtemp(join(tmpdir(), "todo-tools-"));
-  t.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(join(root, "w", "p"), { recursive: true });
   const todos = new TodoListManager(join(root, "todos.json"), { warn() {} });
-  return { root, todos, tools: new TodoTools({ todos, workspacesDir: root }) };
+  const resolved = { daemonDir: join(root, "daemon"), workspacesDir: root, workspacesMetaFile: join(root, "workspaces.json"), fsRoot: root };
+  const app = createServer(
+    createDefaultDaemonConfig({ env: {} }),
+    resolved as unknown as CreateServerArgs[1],
+    createDefaultClientConfig(join(root, "daemon.sock")),
+    createWriteStream("/dev/null"),
+    { todos } as unknown as CreateServerArgs[4],
+    { authRequired: false, mode: "local" }
+  );
+  t.after(async () => {
+    await app.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const api = new InjectDaemonApi({ app, authorization: undefined, agentChat: null, broadcaster: { add() {}, remove() {} } as never, fsRoot: root, workspacesDir: root });
+  const W: TodoSelector = { workspace: "w" };
+  const tools = {
+    create: (sel: TodoSelector, name: string) => createTodoList(api, sel, name),
+    list: (sel: TodoSelector) => listTodoLists(api, sel),
+    update: (id: string, patch: { name?: string; body?: string }, sel: TodoSelector = W) => updateTodoList(api, sel, id, patch),
+    remove: (id: string, sel: TodoSelector = W) => deleteTodoList(api, sel, id),
+    toggleItem: (id: string, item: string | number, checked?: boolean, sel: TodoSelector = W) => toggleTodoItem(api, sel, id, item, checked)
+  };
+  return { root, todos, tools, api };
 }
 
 test("workspace scope create/list stores by workspace name and omits refKey", async (t) => {
@@ -25,7 +59,15 @@ test("workspace scope create/list stores by workspace name and omits refKey", as
   assert.equal(created.name, "Workspace tasks");
   assert.equal("refKey" in created, false);
   assert.deepEqual(todos.list("workspace", "w").map((t) => t.id), [created.id]);
-  assert.deepEqual(tools.list({ workspace: "w" }), [created]);
+  assert.deepEqual(await tools.list({ workspace: "w" }), [created]);
+});
+
+test("a project list is keyed by the project path, as the GUI keys it", async (t) => {
+  const { root, todos, tools } = await makeTools(t);
+  const created = await tools.create({ workspace: "w", project: "p" }, "Bugs");
+  assert.equal(created.scope, "project");
+  assert.deepEqual(todos.list("project", join(root, "w", "p")).map((r) => r.id), [created.id]);
+  assert.deepEqual(await tools.list({ workspace: "w" }), [], "a workspace's own lists are another scope");
 });
 
 test("invalid names and missing directories reject as PROJECT_NOT_FOUND before creating todos", async (t) => {
@@ -40,6 +82,18 @@ test("invalid names and missing directories reject as PROJECT_NOT_FOUND before c
   assert.equal(todos.list("workspace", "w").length, 0);
   assert.equal(todos.list("project", join(root, "w", "p")).length, 0);
   assert.equal(todos.list("project", join(root, "escape")).length, 0);
+});
+
+test("a write names the list's own scope: an id from another scope is NOT_FOUND and nothing changes", async (t) => {
+  const { tools, todos } = await makeTools(t);
+  const project = await tools.create({ workspace: "w", project: "p" }, "Project list");
+  const notFound = (err: unknown) => err instanceof ToolError && err.code === "NOT_FOUND" && err.message.includes(project.id);
+  await assert.rejects(() => tools.update(project.id, { name: "x" }), notFound);
+  await assert.rejects(() => tools.remove(project.id), notFound);
+  await assert.rejects(() => tools.toggleItem(project.id, 1), notFound);
+  assert.equal(todos.get(project.id)?.name, "Project list");
+  assert.deepEqual(await tools.remove(project.id, { workspace: "w", project: "p" }), { deleted: true });
+  assert.equal(todos.get(project.id), undefined);
 });
 
 test("toggleItem by 1-based index flips and explicitly sets while preserving non-task lines", async (t) => {
@@ -109,8 +163,8 @@ test("toggleItem errors are safe and actionable", async (t) => {
     return true;
   });
 
-  // A list that does not exist is the store's 404, for result.ts to map (NOT_FOUND) — named: the id and where the ids are.
-  const missing = (err: unknown) => err instanceof TodoError && err.status === 404 && err.message.includes("missing");
+  // A list that does not exist is NOT_FOUND — named: the id and where the ids are.
+  const missing = (err: unknown) => err instanceof ToolError && err.code === "NOT_FOUND" && err.message.includes("missing") && /list_todos/.test(err.message);
   await assert.rejects(() => tools.toggleItem("missing", 1), missing);
   await assert.rejects(() => tools.update("missing", { name: "x" }), missing);
   await assert.rejects(() => tools.remove("missing"), missing);
@@ -123,13 +177,25 @@ test("a missing list's id is echoed capped and escaped: one short line whatever 
     ["a\nb\"c", /"a\\nb\\"c"/]
   ];
   for (const [id, expected] of cases) {
-    await assert.rejects(() => tools.remove(id), (err) => err instanceof TodoError && err.status === 404 && expected.test(err.message) && !err.message.includes("\n") && err.message.length < 200);
+    await assert.rejects(() => tools.remove(id), (err) => err instanceof ToolError && err.code === "NOT_FOUND" && expected.test(err.message) && !err.message.includes("\n") && err.message.length < 200);
   }
-  // Any other store refusal passes through untouched.
-  const conflict = new TodoError(409, "todo changed meanwhile");
-  const refusing = new TodoTools({ todos: { update: async () => { throw conflict; }, delete: async () => { throw conflict; } } as never, workspacesDir: "/w" });
-  await assert.rejects(() => refusing.update("t1", { body: "" }), (err) => err === conflict);
-  await assert.rejects(() => refusing.remove("t1"), (err) => err === conflict);
+});
+
+test("the routes' other refusals map as the store's always did: 409 CONFLICT, 4xx INVALID_ARGUMENT, a 5xx never echoed", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "todo-tools-fake-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, "w"), { recursive: true });
+  const api = new FakeDaemonApi();
+  api.fsRoot = api.workspacesDir = root;
+  const listed = { id: "t1", name: "L", scope: "workspace", refKey: "w", body: "- [ ] a", createdAt: "2026-10-15T00:00:00.000Z", updatedAt: "2026-10-15T00:00:00.000Z" };
+  api.on("GET", "/api/todos", { status: 200, body: [listed] });
+  api.on("PUT", "/api/todos/t1", { status: 409, body: { code: "TODO_ERROR", message: "todo changed meanwhile" } });
+  await assert.rejects(() => updateTodoList(api, { workspace: "w" }, "t1", { body: "" }), (err) => err instanceof ToolError && err.code === "CONFLICT" && err.message === "todo changed meanwhile");
+  api.on("PUT", "/api/todos/t1", { status: 400, body: { code: "TODO_ERROR", message: "name too long" } });
+  await assert.rejects(() => toggleTodoItem(api, { workspace: "w" }, "t1", 1), (err) => err instanceof ToolError && err.code === "INVALID_ARGUMENT" && err.message === "name too long");
+  api.on("DELETE", "/api/todos/t1", { status: 500, body: { code: "TODO_ERROR", message: "EACCES /secret/host/path" } });
+  await assert.rejects(() => deleteTodoList(api, { workspace: "w" }, "t1"), (err) => err instanceof ToolError && err.code === "INTERNAL" && !err.message.includes("/secret"));
+  assert.deepEqual(api.calls[0], { method: "GET", path: "/api/todos", query: { scope: "workspace", refKey: "w" } });
 });
 
 test("a refusal quotes the caller's item capped and escaped, and a long list's items bounded, never the whole list", async (t) => {
