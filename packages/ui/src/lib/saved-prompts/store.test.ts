@@ -7,6 +7,7 @@ import type {
   SavedPromptListResponse,
   UpdateSavedPromptRequest
 } from "@orquester/api";
+import { promptsForProject } from "./list.logic.ts";
 
 import {
   applySavedPromptEvent,
@@ -67,6 +68,7 @@ const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 class FakeApi implements SavedPromptsApi {
   connection = { id: "local" };
   server = new Map<string, SavedPrompt>();
+  repoKeys = new Map<string, string>();
   listCalls: (string | null)[] = [];
   nextList: Deferred<SavedPromptListResponse> | null = null;
   failList: unknown = null;
@@ -81,10 +83,12 @@ class FakeApi implements SavedPromptsApi {
       this.nextList = null;
       return pending.promise;
     }
+    const projectRepoKey = projectPath === null ? undefined : this.repoKeys.get(projectPath);
     const prompts = [...this.server.values()].filter(
-      (entry) => entry.projectPath === null || entry.projectPath === projectPath
+      (entry) => entry.projectPath === null || (entry.repoKey
+        ? entry.repoKey === projectRepoKey : entry.projectPath === projectPath)
     );
-    return Promise.resolve({ prompts });
+    return Promise.resolve({ prompts, ...(projectRepoKey ? { projectRepoKey } : {}) });
   }
 
   createSavedPrompt(_request: CreateSavedPromptRequest): Promise<SavedPrompt> {
@@ -159,6 +163,47 @@ describe("wire validation", () => {
 });
 
 describe("loads", () => {
+  it("loads repository context for clone filters and applies live edits and deletes by shared id", async () => {
+    const api = new FakeApi();
+    const repoKey = "github.com/acme/site";
+    const clone = "/w/other/site2";
+    api.repoKeys.set(PROJECT, repoKey);
+    api.repoKeys.set(clone, repoKey);
+    const shared = prompt({ id: "shared", projectPath: PROJECT, repoKey });
+    api.server.set(shared.id, shared);
+    await loadSavedPrompts(api, clone);
+    const visible = (path: string) => promptsForProject(
+      state().prompts.values(), path, state().loads[savedPromptsLoadKey(path)]?.projectRepoKey
+    );
+    assert.deepEqual(visible(clone), [shared]);
+    await loadSavedPrompts(api, PROJECT);
+    const edited = { ...shared, body: "Edited", updatedAt: "2026-10-01T00:00:00.000Z" };
+    applySavedPromptEvent({ type: "savedPrompt.upserted", payload: edited });
+    assert.deepEqual(visible(clone), [edited]);
+    assert.deepEqual(visible(PROJECT), [edited]);
+    const created = { ...shared, id: "new", projectPath: "/w/third/site" };
+    applySavedPromptEvent({ type: "savedPrompt.upserted", payload: created });
+    assert.equal(visible(clone).length, 2, "new prompts from other checkouts appear live");
+    applySavedPromptEvent({ type: "savedPrompt.deleted", payload: { id: shared.id, projectPath: PROJECT } });
+    assert.deepEqual(visible(clone), [created]);
+  });
+
+  it("a clone refresh drops missing repository records and keeps context after a failed refresh", async () => {
+    const api = new FakeApi();
+    api.repoKeys.set(PROJECT, "github.com/acme/site");
+    const shared = prompt({ id: "shared", projectPath: "/w/other/site", repoKey: "github.com/acme/site" });
+    api.server.set(shared.id, shared);
+    await loadSavedPrompts(api, PROJECT);
+    api.failList = new Error("Offline");
+    await loadSavedPrompts(api, PROJECT, { force: true });
+    assert.equal(state().loads[KEY]?.projectRepoKey, shared.repoKey);
+    assert.deepEqual(held(), [shared.id]);
+    api.failList = null;
+    api.server.clear();
+    await loadSavedPrompts(api, PROJECT, { force: true });
+    assert.deepEqual(held(), []);
+  });
+
   it("shares concurrent loads and refreshes only when stale or forced", async () => {
     const api = new FakeApi();
     api.server.set("g", prompt({ id: "g" }));

@@ -34,7 +34,7 @@ import type {
 } from "@orquester/api";
 
 import { savedPromptErrorStatus, savedPromptErrorText } from "./errors";
-import { normalizeProjectPath } from "./list.logic";
+import { belongsToProject, normalizeProjectPath } from "./list.logic";
 
 /** The routes this store calls — `ApiClient` satisfies it; tests pass a fake. */
 export interface SavedPromptsApi {
@@ -51,6 +51,8 @@ export type SavedPromptsLoadStatus = "loading" | "loaded" | "error";
 
 /** One scope's load: the global list (`"global"`) or a project's (`"project:<path>"`). */
 export interface SavedPromptsLoad {
+  /** Repository identity answered by the daemon for this project's list. */
+  projectRepoKey?: string;
   status: SavedPromptsLoadStatus;
   /** The last failure: the first load's (`status: "error"`), or a refresh's over rows still shown. */
   error: string | null;
@@ -163,6 +165,7 @@ function sanitizeSavedPrompt(value: unknown): SavedPrompt | null {
       ? value.tags.filter((tag): tag is string => typeof tag === "string" && tag.length > 0)
       : [],
     projectPath,
+    ...(typeof value.repoKey === "string" && value.repoKey.length > 0 ? { repoKey: value.repoKey } : {}),
     pinned: value.pinned === true,
     createdAt: typeof value.createdAt === "string" ? value.createdAt : "",
     updatedAt: typeof value.updatedAt === "string" ? value.updatedAt : "",
@@ -174,7 +177,7 @@ function sanitizeSavedPrompt(value: unknown): SavedPrompt | null {
   };
 }
 
-function readListResponse(response: unknown): SavedPrompt[] {
+function readListResponse(response: unknown): SavedPromptListResponse {
   if (!isRecord(response) || !Array.isArray(response.prompts)) {
     throw new Error("The daemon answered the saved-prompt list in an unexpected shape.");
   }
@@ -183,7 +186,11 @@ function readListResponse(response: unknown): SavedPrompt[] {
     const prompt = sanitizeSavedPrompt(raw);
     if (prompt !== null) prompts.push(prompt);
   }
-  return prompts;
+  return {
+    prompts,
+    ...(typeof response.projectRepoKey === "string" && response.projectRepoKey.length > 0
+      ? { projectRepoKey: response.projectRepoKey } : {})
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -216,6 +223,7 @@ function samePrompt(a: SavedPrompt, b: SavedPrompt): boolean {
     a.description === b.description &&
     a.body === b.body &&
     a.projectPath === b.projectPath &&
+    (a.repoKey ?? null) === (b.repoKey ?? null) &&
     a.pinned === b.pinned &&
     a.createdAt === b.createdAt &&
     a.updatedAt === b.updatedAt &&
@@ -297,17 +305,17 @@ function bindConnection(api: SavedPromptsApi): void {
  * is, so a reload repairs a held copy whatever its timestamps say (a daemon
  * clock stepped back must not pin a stale copy forever).
  */
-function applyLoaded(key: string, fresh: readonly SavedPrompt[], touched: ReadonlySet<string>): void {
+function applyLoaded(key: string, response: SavedPromptListResponse, touched: ReadonlySet<string>): void {
   const scopePath = key === GLOBAL_KEY ? null : key.slice(PROJECT_KEY_PREFIX.length);
   const inScope = (prompt: SavedPrompt): boolean =>
     prompt.projectPath === null ||
-    (scopePath !== null && normalizeProjectPath(prompt.projectPath) === scopePath);
+    (scopePath !== null && belongsToProject(prompt, scopePath, response.projectRepoKey));
   const state = getState();
   const prompts = new Map<string, SavedPrompt>();
   for (const [id, prompt] of state.prompts) {
     if (!inScope(prompt) || touched.has(id)) prompts.set(id, prompt);
   }
-  for (const prompt of fresh) {
+  for (const prompt of response.prompts) {
     if (tombstones.has(prompt.id)) continue;
     const current = state.prompts.get(prompt.id);
     const keep = touched.has(prompt.id)
@@ -393,10 +401,13 @@ export function loadSavedPrompts(
     try {
       // Reset before the request left: another connection's, never sent.
       if (gen !== generation) return;
-      const response = await api.listSavedPrompts(requestPath);
+      const response = readListResponse(await api.listSavedPrompts(requestPath));
       if (gen !== generation) return;
-      applyLoaded(key, readListResponse(response), touched);
-      setLoad(key, { status: "loaded", error: null, refreshing: false, stale: epoch !== staleEpoch });
+      applyLoaded(key, response, touched);
+      setLoad(key, {
+        status: "loaded", error: null, refreshing: false, stale: epoch !== staleEpoch,
+        ...(key !== GLOBAL_KEY && response.projectRepoKey ? { projectRepoKey: response.projectRepoKey } : {})
+      });
     } catch (error) {
       if (gen !== generation) return;
       fallBackToGlobal = key !== GLOBAL_KEY && savedPromptErrorStatus(error) === 400;
@@ -404,7 +415,7 @@ export function loadSavedPrompts(
       setLoad(
         key,
         hadRows
-          ? { status: "loaded", error: message, refreshing: false, stale: true }
+          ? { ...entry, status: "loaded", error: message, refreshing: false, stale: true }
           : { status: "error", error: message, refreshing: false, stale: false }
       );
     } finally {

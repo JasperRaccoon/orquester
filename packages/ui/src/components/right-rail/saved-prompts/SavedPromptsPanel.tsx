@@ -190,8 +190,8 @@ export const SavedPromptsPanel: React.FC<RightRailPanelProps> = ({
 
   const effectiveScope: SavedPromptScopeFilter = projectAvailable ? scope : "all";
   const sections = useMemo(
-    () => savedPromptSections(view.prompts, { scope: effectiveScope, projectPath, query }),
-    [view.prompts, effectiveScope, projectPath, query]
+    () => savedPromptSections(view.prompts, { scope: effectiveScope, projectPath, projectRepoKey: view.projectRepoKey, query }),
+    [view.prompts, view.projectRepoKey, effectiveScope, projectPath, query]
   );
   const empty = savedPromptsEmptyState({
     status: view.status,

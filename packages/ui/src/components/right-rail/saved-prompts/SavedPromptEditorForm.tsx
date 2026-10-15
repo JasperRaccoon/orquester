@@ -92,7 +92,7 @@ export const SavedPromptEditorForm: React.FC<SavedPromptEditorFormProps> = (prop
       id: "project",
       label: "This project",
       title: props.projectScopeAvailable
-        ? "Only in this project"
+        ? "Shared with checkouts of the same Git repository; otherwise only this folder"
         : "Open a project to save a prompt to it",
       disabled: !props.projectScopeAvailable
     }

@@ -51,6 +51,16 @@ test("a repeated id keeps its first record; the others are set aside, not droppe
   assert.deepEqual(parsed.rejected, [second]);
 });
 
+test("repository scope round-trips, accepts legacy records, and preserves invalid entries", () => {
+  const legacy = record();
+  const repository = record({ id: "repo", repoKey: "github.com/acme/site" });
+  const global = record({ id: "global", projectPath: null, repoKey: null });
+  const invalid = [record({ id: "empty", repoKey: "" }), record({ id: "invalid", repoKey: 42 })];
+  const parsed = parseSavedPromptsConfig({ version: 1, prompts: [legacy, repository, global, ...invalid] });
+  assert.deepEqual(parsed.prompts, [legacy, repository, global]);
+  assert.deepEqual(parsed.rejected, invalid);
+});
+
 test("unknown top-level keys are kept, exactly as found", () => {
   const parsed = parseSavedPromptsConfig(
     JSON.parse('{"version":1,"order":["b","a"],"prompts":[],"__proto__":{"polluted":true},"layout":{"width":320}}')

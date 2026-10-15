@@ -1604,6 +1604,8 @@ export const savedPromptRecordSchema = z
     tags: z.array(z.string()).default([]),
     /** `null` = global; else the project directory's path as the client spells it. */
     projectPath: z.string().min(1).nullable().default(null),
+    /** Repository scope added without replacing the original project path. */
+    repoKey: z.string().min(1).nullable().optional(),
     pinned: z.boolean().default(false),
     createdAt: z.string().datetime({ offset: true }),
     updatedAt: z.string().datetime({ offset: true }),

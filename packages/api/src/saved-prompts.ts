@@ -38,8 +38,10 @@ export interface SavedPrompt {
   body: string;
   /** Free-form labels ("Review"), trimmed and unique, in the user's order. */
   tags: string[];
-  /** `null` = global; else the absolute project directory it belongs to. */
+  /** `null` = global; else the original project directory. */
   projectPath: string | null;
+  /** Canonical Git origin identity; shared across checkouts. Absent/null for a folder-only scope. */
+  repoKey?: string | null;
   /** A favourite: listed in the Pinned section, first. */
   pinned: boolean;
   createdAt: string;
@@ -51,7 +53,8 @@ export interface SavedPrompt {
 
 /**
  * `GET /api/saved-prompts?projectPath=` — every global prompt, plus that
- * project's own when `projectPath` is given. Unordered: the client sorts.
+ * repository's prompts when `projectPath` is given (folder-only without a
+ * remote). Unordered: the client sorts.
  */
 export interface SavedPromptListQuery {
   projectPath?: string;
@@ -59,6 +62,8 @@ export interface SavedPromptListQuery {
 
 export interface SavedPromptListResponse {
   prompts: SavedPrompt[];
+  /** The queried project's canonical Git origin identity, when available. */
+  projectRepoKey?: string;
 }
 
 /** `POST /api/saved-prompts` → the created {@link SavedPrompt}. */
@@ -67,7 +72,7 @@ export interface CreateSavedPromptRequest {
   body: string;
   description?: string;
   tags?: string[];
-  /** `null` = global; else a project directory (`<workspacesDir>/<ws>/<project>`). */
+  /** `null` = global; else a project directory whose Git origin determines the shared scope, when available. */
   projectPath: string | null;
   pinned?: boolean;
 }

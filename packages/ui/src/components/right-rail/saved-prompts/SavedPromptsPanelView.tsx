@@ -91,11 +91,11 @@ export const SavedPromptsPanelView: React.FC<SavedPromptsPanelViewProps> = (prop
   const { sections, actions } = props;
   const sheet = props.variant === "sheet";
   const scopeOptions: RailSegmentOption<SavedPromptScopeFilter>[] = [
-    { id: "all", label: "All", title: "Global prompts and this project's own" },
+    { id: "all", label: "All", title: "Global prompts and this project's shared prompts" },
     {
       id: "project",
       label: "Project",
-      title: props.projectAvailable ? "Only this project's prompts" : "Open a project to list its prompts",
+      title: props.projectAvailable ? "Prompts shared by this repository's checkouts" : "Open a project to list its prompts",
       disabled: !props.projectAvailable
     }
   ];
@@ -250,7 +250,7 @@ const EmptyState: React.FC<{ empty: SavedPromptsEmptyState; onRetry: () => void 
       return (
         <RailEmptyState
           title="No project prompts yet"
-          hint="Prompts saved to this project are listed here."
+          hint="Project prompts are shared across checkouts of the same Git repository."
         />
       );
     case "no-matches":

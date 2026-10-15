@@ -20,24 +20,28 @@ export function normalizeProjectPath(path: string): string {
   return stripped.length > 0 || path.length === 0 ? stripped : path.charAt(0);
 }
 
-/** True when `prompt` is the project's own — never a global prompt, never with no project open. */
-function belongsToProject(
-  prompt: Pick<SavedPrompt, "projectPath">,
-  projectPath: string
+/** Repository identity wins over folder identity; folder-only prompts still match their original path. */
+export function belongsToProject(
+  prompt: Pick<SavedPrompt, "projectPath" | "repoKey">,
+  projectPath: string,
+  projectRepoKey?: string
 ): boolean {
   if (prompt.projectPath === null) return false;
   const wanted = normalizeProjectPath(projectPath);
-  return wanted.length > 0 && normalizeProjectPath(prompt.projectPath) === wanted;
+  return wanted.length > 0 && (prompt.repoKey
+    ? prompt.repoKey === projectRepoKey
+    : normalizeProjectPath(prompt.projectPath) === wanted);
 }
 
 /** Everything the open project can use: every global prompt and the project's own. */
 export function promptsForProject(
   prompts: Iterable<SavedPrompt>,
-  projectPath: string
+  projectPath: string,
+  projectRepoKey?: string
 ): SavedPrompt[] {
   const out: SavedPrompt[] = [];
   for (const prompt of prompts) {
-    if (prompt.projectPath === null || belongsToProject(prompt, projectPath)) out.push(prompt);
+    if (prompt.projectPath === null || belongsToProject(prompt, projectPath, projectRepoKey)) out.push(prompt);
   }
   return out;
 }
@@ -46,12 +50,13 @@ export function promptsForProject(
 function promptsInScope(
   prompts: readonly SavedPrompt[],
   scope: SavedPromptScopeFilter,
-  projectPath: string
+  projectPath: string,
+  projectRepoKey?: string
 ): SavedPrompt[] {
   return prompts.filter((prompt) =>
     scope === "project"
-      ? belongsToProject(prompt, projectPath)
-      : prompt.projectPath === null || belongsToProject(prompt, projectPath)
+      ? belongsToProject(prompt, projectPath, projectRepoKey)
+      : prompt.projectPath === null || belongsToProject(prompt, projectPath, projectRepoKey)
   );
 }
 
@@ -153,9 +158,9 @@ export interface SavedPromptSections {
 /** Scope, then search, then Pinned first and the rest after, each in its order. */
 export function savedPromptSections(
   prompts: readonly SavedPrompt[],
-  input: { scope: SavedPromptScopeFilter; projectPath: string; query: string }
+  input: { scope: SavedPromptScopeFilter; projectPath: string; projectRepoKey?: string; query: string }
 ): SavedPromptSections {
-  const scoped = promptsInScope(prompts, input.scope, input.projectPath);
+  const scoped = promptsInScope(prompts, input.scope, input.projectPath, input.projectRepoKey);
   const words = searchWords(input.query);
   const pinned: SavedPrompt[] = [];
   const others: SavedPrompt[] = [];
