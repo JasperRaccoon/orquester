@@ -8,6 +8,14 @@
  * `credentials.ts`) — anything else is a 401 — and the thread a call acts as
  * is the one that credential was issued for, never anything in the request.
  *
+ * The list a request is served is its thread's CURRENT list (`listFor`, the manifest's names —
+ * unified MCP design 2026-10-15 §9.4). Stateless, so nothing is pushed: a changed list reaches a
+ * provider that re-lists on its own or through its session's restart.
+ *
+ * `/mcp/denied` (no credential, nothing of any thread) is the inert server a denied MCP server name
+ * is shadowed with (Grok: an ACP entry replaces the user's config entry of that name, §12.1): it
+ * lists no tools and refuses every call.
+ *
  * Cancellation: a provider that cancels a call sends `notifications/cancelled`
  * naming its JSON-RPC id, in a separate POST a stateless server cannot tie to
  * the first. So in-flight calls are filed by (grant, request id) and such a
@@ -21,24 +29,31 @@ import type { AddressInfo } from "node:net";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
-import type { SessionToolDefinition } from "../../session-tools/contract.ts";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+
 import { bearerToken, type SessionToolCredentials, type SessionToolGrantScope } from "./credentials.ts";
-import { buildSessionToolsMcpServer, type SessionToolInvocation } from "./mcp-server.ts";
+import { buildDeniedMcpServer, buildSessionToolsMcpServer, type SessionToolInvocation, type SessionToolsListSource } from "./mcp-server.ts";
 
 /** 16 MiB, as the daemon's own route. */
 const MAX_BODY_BYTES = 16 * 1024 * 1024;
 
 export const SESSION_TOOLS_ENDPOINT_PATH = "/mcp";
 
+/** The inert server's path (a denied server name's shadow). */
+export const SESSION_TOOLS_DENIED_PATH = "/mcp/denied";
+
 export interface SessionToolsEndpoint {
   /** `http://127.0.0.1:<port>/mcp`. */
   readonly url: string;
+  /** `http://127.0.0.1:<port>/mcp/denied`. */
+  readonly deniedUrl: string;
   close(): Promise<void>;
 }
 
 export interface SessionToolsEndpointOptions {
   credentials: SessionToolCredentials;
-  tools: readonly SessionToolDefinition[];
+  /** The thread's current list, read per request. */
+  listFor(scope: SessionToolGrantScope): SessionToolsListSource;
   /** Run one call as `scope`'s thread. */
   invoke(scope: SessionToolGrantScope, invocation: SessionToolInvocation): Promise<CallToolResult>;
   logger?: { warn(message: string, detail?: unknown): void };
@@ -95,6 +110,10 @@ export async function startSessionToolsEndpoint(options: SessionToolsEndpointOpt
 
   const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const path = (req.url ?? "").split("?")[0];
+    if (path === SESSION_TOOLS_DENIED_PATH) {
+      await serveStateless(req, res, () => buildDeniedMcpServer());
+      return;
+    }
     if (path !== SESSION_TOOLS_ENDPOINT_PATH) {
       jsonRpcError(res, 404, -32601, "Not found");
       return;
@@ -133,7 +152,7 @@ export async function startSessionToolsEndpoint(options: SessionToolsEndpointOpt
       if (!res.writableFinished) connection.abort();
     });
 
-    const mcp = buildSessionToolsMcpServer(options.tools, async (invocation) => {
+    const mcp = buildSessionToolsMcpServer(options.listFor(scope), async (invocation) => {
       const call = new AbortController();
       const abort = () => call.abort();
       connection.signal.addEventListener("abort", abort, { once: true });
@@ -148,6 +167,11 @@ export async function startSessionToolsEndpoint(options: SessionToolsEndpointOpt
         invocation.signal.removeEventListener("abort", abort);
       }
     });
+    await connectAndHandle(mcp, req, res, body);
+  };
+
+  /** One JSON-RPC request through a fresh, stateless server. */
+  const connectAndHandle = async (mcp: McpServer, req: IncomingMessage, res: ServerResponse, body: unknown): Promise<void> => {
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
       enableJsonResponse: true,
@@ -163,6 +187,28 @@ export async function startSessionToolsEndpoint(options: SessionToolsEndpointOpt
     await transport.handleRequest(req, res, body);
   };
 
+  /** The inert server: POST only, a parsed body, nothing else read. */
+  const serveStateless = async (req: IncomingMessage, res: ServerResponse, build: () => McpServer): Promise<void> => {
+    if (req.method !== "POST") {
+      req.resume();
+      jsonRpcError(res, 405, -32000, "Method not allowed.", { allow: "POST" });
+      return;
+    }
+    const raw = await readBody(req);
+    if (raw === null) {
+      jsonRpcError(res, 413, -32600, "Request too large");
+      return;
+    }
+    let body: unknown;
+    try {
+      body = JSON.parse(raw.toString("utf8"));
+    } catch {
+      jsonRpcError(res, 400, -32700, "Parse error");
+      return;
+    }
+    await connectAndHandle(build(), req, res, body);
+  };
+
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
     server.listen({ host: "127.0.0.1", port: 0 }, () => {
@@ -176,6 +222,7 @@ export async function startSessionToolsEndpoint(options: SessionToolsEndpointOpt
 
   return {
     url: `http://127.0.0.1:${port}${SESSION_TOOLS_ENDPOINT_PATH}`,
+    deniedUrl: `http://127.0.0.1:${port}${SESSION_TOOLS_DENIED_PATH}`,
     close: () =>
       new Promise<void>((resolve) => {
         for (const controller of inFlight.values()) controller.abort();

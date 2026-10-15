@@ -16,7 +16,7 @@
 import type { CanUseTool, Options as ClaudeQueryOptions } from "@anthropic-ai/claude-agent-sdk";
 import type { ModelSelection, ProviderModel, RuntimeMode } from "@orquester/api/agent-chat";
 
-import type { ClaudeSessionToolsLaunch } from "./session-tools.ts";
+import { claudeDeniedMcpServers, claudeDisallowedTools, type ClaudeSessionToolsLaunch } from "./session-tools.ts";
 import {
   CLAUDE_OPTION_IDS,
   findModel,
@@ -127,7 +127,11 @@ export function buildClaudeQueryOptions(
     ...(fastMode === true ? { fastMode: true } : {}),
     // Ultracode is xhigh effort PLUS the setting, exactly as T3's manifest
     // paired them; the SDK requires an xhigh-capable model for it.
-    ...(ultracode === true ? { ultracode: true } : {})
+    ...(ultracode === true ? { ultracode: true } : {}),
+    // Unified MCP §12.1: the daemon-pointing servers never connect in this chat, and a user server
+    // named `orquester` never races ours (`session-tools.ts`). `deniedMcpServers` merges from every
+    // settings source, so the user's own denials stay.
+    ...(input.sessionTools !== undefined ? { deniedMcpServers: claudeDeniedMcpServers(input.sessionTools.deny) } : {})
   };
   const effectiveEffort = ultracode === true ? ("xhigh" as const) : effort;
 
@@ -196,6 +200,10 @@ export function buildClaudeQueryOptions(
     // Session tools never raise an approval card (§1.3): each one is
     // pre-approved by name in every permission mode (`session-tools.ts`).
     ...(input.sessionTools !== undefined ? { allowedTools: [...input.sessionTools.allowedTools] } : {}),
+    // ...and the server-level rule of every denied server (§12.1): no tool of it reaches the model.
+    ...(input.sessionTools !== undefined && claudeDisallowedTools(input.sessionTools.deny).length > 0
+      ? { disallowedTools: claudeDisallowedTools(input.sessionTools.deny) }
+      : {}),
     ...(Object.keys(extraArgs).length > 0 ? { extraArgs } : {}),
     ...(input.stderr !== undefined ? { stderr: input.stderr } : {})
   };

@@ -78,7 +78,7 @@ import {
   type OpenCodeInventory
 } from "./snapshot.ts";
 import { openCodeRoutes, type ProviderListResponse } from "./routes.ts";
-import { issueSessionToolsGrant } from "../../session-tools/index.ts";
+import { issueSessionToolsGrant, launchHomeKey } from "../../session-tools/index.ts";
 import { openCodeSessionToolsServerName } from "./session-tools.ts";
 import { Mutex } from "./util.ts";
 
@@ -724,7 +724,12 @@ class OpenCodeAdapterImpl implements AgentAdapter {
       // Design 2026-10-14 §1.2: the thread's own credential, registered on the
       // shared server under the thread's own name (`session-tools.ts`). This
       // issue revokes the thread's previous one; the session revokes this.
-      const grant = await issueSessionToolsGrant(this.ctx, input.threadId);
+      const tools = await issueSessionToolsGrant(this.ctx, input.threadId, {
+        agent: "opencode",
+        home: launchHomeKey(input.home),
+        project: input.projectPath ?? input.cwd
+      });
+      const grant = tools.grant;
       sessionToolsGrant = grant;
       const session = await OpenCodeThreadSession.start(
         {
@@ -748,13 +753,16 @@ class OpenCodeAdapterImpl implements AgentAdapter {
           // The isolation rules whenever the host has session tools — this
           // thread's own grant may have failed, its co-tenants' did not.
           isolateSessionTools: this.ctx.sessionTools !== undefined,
+          // §12.1: denied with or without the thread's own grant.
+          deniedMcpServers: tools.prepared?.deny ?? [],
           ...(grant !== undefined
             ? {
                 sessionTools: {
                   serverName: openCodeSessionToolsServerName(input.threadId),
                   url: grant.url,
                   authorization: grant.authorization,
-                  instructions: this.ctx.sessionTools?.instructions ?? "",
+                  instructions: grant.prepared.instructions,
+                  deny: grant.prepared.deny,
                   revoke: grant.revoke
                 }
               }

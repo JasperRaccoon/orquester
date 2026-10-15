@@ -31,12 +31,16 @@ import {
   grantOptionsFor,
   sanitizeApprovalLabel,
   TOOL_APPROVAL_FULL_PREVIEW_MAX_BYTES,
+  TOOL_APPROVAL_DENY_REASON_MAX_CHARS,
   TOOL_APPROVAL_REASON_MAX_CHARS,
   TOOLSETS,
   toolsetById,
+  TOOL_APPROVAL_REFERENCE_KEY,
   type AccountSummary,
   type AdminFamily,
   type ApprovalPreviewSection,
+  type ToolApprovalReference,
+  type ToolsetId,
   type WorkspaceSummary
 } from "@orquester/api";
 import type { CallerPrincipal } from "@orquester/api/agent-chat";
@@ -45,6 +49,7 @@ import { canonicalProject, type CanonicalProject } from "./addressing.ts";
 import type {
   AnyOrquesterTool,
   ApprovalCancelReason,
+  ApprovalOutcome,
   ApprovalPort,
   ApprovalPreview,
   ApprovalRequest,
@@ -84,9 +89,17 @@ export interface ExecutorPorts {
   approvals: ApprovalPort | null;
   /** The chat's resolved toolsets; null → the catalogue defaults for its agent ({@link defaultEnabledToolsets}). */
   enabledToolsets: EnabledToolsets | null;
+  /**
+   * A toolset card a chat raised (`request_toolset`) was APPROVED by the user — a real card, not
+   * "already on" — while the call still runs. AWAITED before the call resumes: the chat transport
+   * waits (bounded) for the host to apply the toolset, so the tool answers "now" / "after-restart"
+   * truthfully, and schedules the automatic continue turn (spec §9.3). Its errors are logged,
+   * never thrown into the call; null → nothing waited for or scheduled.
+   */
+  onToolsetApproved?: ((caller: ThreadCaller, toolset: ToolsetId) => void | Promise<void>) | null;
 }
 
-export const executorPorts: ExecutorPorts = { approvals: null, enabledToolsets: null };
+export const executorPorts: ExecutorPorts = { approvals: null, enabledToolsets: null, onToolsetApproved: null };
 
 export interface ExecutorDeps {
   /** The tools by name for an audience (default: the catalog). */
@@ -95,6 +108,8 @@ export interface ExecutorDeps {
   enabledToolsets?: EnabledToolsets | null;
   /** The caller as it is NOW (mode, planning) — the gate re-runs on it after a card (§13). */
   refreshCaller?: (caller: ThreadCaller) => Promise<ThreadCaller>;
+  /** See {@link ExecutorPorts.onToolsetApproved} (default: the daemon's wiring). */
+  onToolsetApproved?: ((caller: ThreadCaller, toolset: ToolsetId) => void | Promise<void>) | null;
   legacy?: LegacyToolServices;
   secretRequests?: SessionSecretRequests;
   now?: () => number;
@@ -241,17 +256,42 @@ function boundaryPreview(tool: AnyOrquesterTool, caller: ThreadCaller, args: unk
 // The executor
 // ---------------------------------------------------------------------------
 
-export async function executeToolCall(deps: ExecutorDeps, call: { name: string; arguments: unknown }, env: CallEnv): Promise<CallToolResult> {
-  try {
-    return await execute(deps, call, env);
-  } catch (error) {
-    // A wait that ended because the caller went away is a cancellation, not a failure.
-    if (env.signal.aborted && !(error instanceof ToolError)) return cancelled();
-    return toSafeToolError(error);
-  }
+/** What one call learned about its Orquester card or grant: the tool row's `toolApproval` reference (§7.3). */
+interface CallRecord {
+  reference?: ToolApprovalReference;
 }
 
-async function execute(deps: ExecutorDeps, call: { name: string; arguments: unknown }, env: CallEnv): Promise<CallToolResult> {
+/**
+ * The result with the call's `toolApproval` reference (§7.1 "After", §7.3): in
+ * `structuredContent` (Codex keeps it) and as one more JSON text block (Claude, Grok and OpenCode
+ * keep only the text), where the host's slimming finds it (`sessionToolReferences`). No arguments,
+ * no secrets: ids, kind, family, the card's title, the outcome and the user's deny reason.
+ */
+export function withApprovalReference(result: CallToolResult, reference: ToolApprovalReference): CallToolResult {
+  const structured =
+    result.structuredContent !== null && typeof result.structuredContent === "object" && !Array.isArray(result.structuredContent)
+      ? (result.structuredContent as Record<string, unknown>)
+      : {};
+  return {
+    ...result,
+    content: [...(Array.isArray(result.content) ? result.content : []), { type: "text", text: JSON.stringify({ [TOOL_APPROVAL_REFERENCE_KEY]: reference }) }],
+    structuredContent: { ...structured, [TOOL_APPROVAL_REFERENCE_KEY]: reference }
+  };
+}
+
+export async function executeToolCall(deps: ExecutorDeps, call: { name: string; arguments: unknown }, env: CallEnv): Promise<CallToolResult> {
+  const record: CallRecord = {};
+  let result: CallToolResult;
+  try {
+    result = await execute(deps, call, env, record);
+  } catch (error) {
+    // A wait that ended because the caller went away is a cancellation, not a failure.
+    result = env.signal.aborted && !(error instanceof ToolError) ? cancelled() : toSafeToolError(error);
+  }
+  return record.reference ? withApprovalReference(result, record.reference) : result;
+}
+
+async function execute(deps: ExecutorDeps, call: { name: string; arguments: unknown }, env: CallEnv, record: CallRecord): Promise<CallToolResult> {
   const { signal } = env;
   let caller = env.caller;
   const audience: Audience = caller.kind === "external" ? "external" : "chat";
@@ -307,6 +347,8 @@ async function execute(deps: ExecutorDeps, call: { name: string; arguments: unkn
     if (decision.kind === "deny") throw new ToolError(decision.code, decision.message);
     if (decision.kind === "card") {
       const outcome = await passCard(deps, tool, args, caller, scope, decision, facts, scopeCtx, ownProject);
+      record.reference = outcome.reference;
+      if (outcome.kind === "refused") throw outcome.error;
       if (outcome.kind === "cancelled") return cancelled(outcome.reason);
       approval = outcome.approval;
       card = { preview: outcome.preview, family: outcome.family };
@@ -336,7 +378,7 @@ async function execute(deps: ExecutorDeps, call: { name: string; arguments: unkn
     turn,
     ...(deps.secretRequests ? { secretRequests: deps.secretRequests } : {}),
     ...(deps.legacy ? { legacy: deps.legacy } : {}),
-    ...(who.kind === "thread" ? { requestToolsetCard: (input: ToolsetCardInput) => requestToolsetCard(deps, who, input, signal) } : {}),
+    ...(who.kind === "thread" ? { requestToolsetCard: (input: ToolsetCardInput) => requestToolsetCard(deps, who, input, signal, record) } : {}),
     ...(approval ? { approval } : {})
   };
   if (signal.aborted) return cancelled();
@@ -350,8 +392,16 @@ async function execute(deps: ExecutorDeps, call: { name: string; arguments: unkn
 // ---------------------------------------------------------------------------
 
 type CardOutcome =
-  | { kind: "passed"; approval: NonNullable<CallContext["approval"]>; preview: ApprovalPreview | null; family: string; frozenArgs: Record<string, unknown> }
-  | { kind: "cancelled"; reason?: ApprovalCancelReason };
+  | {
+      kind: "passed";
+      approval: NonNullable<CallContext["approval"]>;
+      preview: ApprovalPreview | null;
+      family: string;
+      frozenArgs: Record<string, unknown>;
+      reference: ToolApprovalReference;
+    }
+  | { kind: "refused"; error: ToolError; reference: ToolApprovalReference }
+  | { kind: "cancelled"; reason?: ApprovalCancelReason; reference: ToolApprovalReference };
 
 async function passCard(
   deps: ExecutorDeps,
@@ -393,7 +443,15 @@ async function passCard(
       ...(preview?.workflowReferencedPrompt ? { workflowReferencedPrompt: true } : {})
     });
     if (grant) {
-      return { kind: "passed", approval: { outcome: "granted", grantId: grant.id, ...(preview?.pins ? { pins: { ...preview.pins } } : {}) }, preview, family, frozenArgs };
+      const reference: ToolApprovalReference = {
+        kind: decision.approvalKind,
+        family: family as ToolApprovalReference["family"],
+        title: sanitizeApprovalLabel(preview?.title ?? tool.title),
+        outcome: "granted",
+        grantId: grant.id,
+        ...(grant.scope === "chat" || grant.scope === "project" ? { grantScope: grant.scope } : {})
+      };
+      return { kind: "passed", approval: { outcome: "granted", grantId: grant.id, ...(preview?.pins ? { pins: { ...preview.pins } } : {}) }, preview, family, frozenArgs, reference };
     }
   }
 
@@ -447,10 +505,24 @@ async function passCard(
     ...(caller.delivered ? { delivered: caller.delivered } : {})
   };
   const outcome = await port.request(request, ctx.signal);
-  if (argumentsHash(frozenArgs) !== hash) throw new ToolError("PREVIEW_STALE", "The arguments changed after the card opened; nothing was done.");
+  const reference: ToolApprovalReference = {
+    ...(outcome.approvalId ? { approvalId: outcome.approvalId } : {}),
+    kind: request.kind,
+    family: request.family,
+    title: request.title,
+    outcome: outcome.outcome,
+    ...(outcome.outcome === "approved" && outcome.grantId ? { grantId: outcome.grantId } : {}),
+    ...(outcome.outcome === "approved" && outcome.grantId && outcome.grantScope ? { grantScope: outcome.grantScope } : {}),
+    ...(outcome.outcome === "denied" && outcome.reason ? { reason: clipText(outcome.reason, TOOL_APPROVAL_DENY_REASON_MAX_CHARS) } : {})
+  };
+  // The user answered: the row keeps that answer even when the call is refused for staleness.
+  if (argumentsHash(frozenArgs) !== hash) {
+    return { kind: "refused", reference, error: new ToolError("PREVIEW_STALE", "The arguments changed after the card opened; nothing was done.") };
+  }
   switch (outcome.outcome) {
     case "approved":
       return {
+        reference,
         kind: "passed",
         approval: {
           outcome: "approved",
@@ -464,14 +536,20 @@ async function passCard(
         frozenArgs
       };
     case "denied":
-      throw new ToolError(
-        "APPROVAL_DENIED",
-        outcome.reason ? `The user denied ${tool.name}: "${clipText(outcome.reason, 500)}". Don't retry; ask the user.` : `The user denied ${tool.name}. Don't retry; ask the user.`
-      );
+      return {
+        kind: "refused",
+        reference,
+        error: new ToolError(
+          "APPROVAL_DENIED",
+          outcome.reason
+          ? `The user denied ${tool.name}: "${clipText(outcome.reason, TOOL_APPROVAL_DENY_REASON_MAX_CHARS)}". Don't retry; ask the user.`
+          : `The user denied ${tool.name}. Don't retry; ask the user.`
+        )
+      };
     case "timed_out":
-      throw new ToolError("APPROVAL_TIMEOUT", `Nobody answered the approval card for ${tool.name} in time. Don't retry; ask the user.`);
+      return { kind: "refused", reference, error: new ToolError("APPROVAL_TIMEOUT", `Nobody answered the approval card for ${tool.name} in time. Don't retry; ask the user.`) };
     case "cancelled":
-      return { kind: "cancelled", ...(outcome.reason ? { reason: outcome.reason } : {}) };
+      return { kind: "cancelled", reference, ...(outcome.reason ? { reason: outcome.reason } : {}) };
   }
 }
 
@@ -501,8 +579,13 @@ async function afterApprovedRun(
     .catch((error) => console.error("[mcp] could not record a workflow in its grant", error instanceof Error ? error.message : "unknown error"));
 }
 
-/** `request_toolset`'s card (spec §9.3): kind/family `toolset`, never a grant; refused for workflow-owned callers. */
-async function requestToolsetCard(deps: ExecutorDeps, caller: ThreadCaller, input: ToolsetCardInput, signal: AbortSignal) {
+/**
+ * `request_toolset`'s card (spec §9.3): kind/family `toolset`, never a grant; refused for
+ * workflow-owned callers. The outcome is the call's `toolApproval` reference; an approved real card
+ * (not "already on", which opens none) is reported to the chat transport, which schedules the
+ * automatic continue turn where the provider cannot take the tools in-session.
+ */
+async function requestToolsetCard(deps: ExecutorDeps, caller: ThreadCaller, input: ToolsetCardInput, signal: AbortSignal, record: CallRecord): Promise<ApprovalOutcome> {
   if (caller.workflowOwned) {
     throw new ToolError("PERMISSION_DENIED", "This chat runs inside an automated workflow, where nobody can approve a toolset.");
   }
@@ -512,7 +595,8 @@ async function requestToolsetCard(deps: ExecutorDeps, caller: ThreadCaller, inpu
     throw new ToolError("PREVIEW_TOO_LARGE", "The toolset card is too large to show.");
   }
   const label = toolsetById(input.toolset)?.label ?? input.toolset;
-  return port.request(
+  const title = sanitizeApprovalLabel(input.title);
+  const outcome = await port.request(
     {
       threadId: caller.threadId,
       callerProjectPath: caller.projectPath,
@@ -520,7 +604,7 @@ async function requestToolsetCard(deps: ExecutorDeps, caller: ThreadCaller, inpu
       kind: "toolset",
       family: "toolset",
       toolset: input.toolset,
-      title: sanitizeApprovalLabel(input.title),
+      title,
       scope: { label: sanitizeApprovalLabel(`This chat · ${label}`) },
       ...(input.reason ? { reason: clipText(input.reason, TOOL_APPROVAL_REASON_MAX_CHARS) } : {}),
       sections: input.sections,
@@ -530,6 +614,26 @@ async function requestToolsetCard(deps: ExecutorDeps, caller: ThreadCaller, inpu
     },
     signal
   );
+  // "Already on" opens no card (`approvalId: ""`): nothing to record, nothing changed.
+  if (outcome.approvalId) {
+    record.reference = {
+      approvalId: outcome.approvalId,
+      kind: "toolset",
+      family: "toolset",
+      title,
+      outcome: outcome.outcome,
+      ...(outcome.outcome === "denied" && outcome.reason ? { reason: clipText(outcome.reason, TOOL_APPROVAL_DENY_REASON_MAX_CHARS) } : {})
+    };
+    if (outcome.outcome === "approved") {
+      const hook = deps.onToolsetApproved === undefined ? executorPorts.onToolsetApproved : deps.onToolsetApproved;
+      try {
+        await hook?.(caller, input.toolset);
+      } catch (error) {
+        console.error("[mcp] toolset approval hook failed", error instanceof Error ? error.message : "unknown error");
+      }
+    }
+  }
+  return outcome;
 }
 
 // ---------------------------------------------------------------------------

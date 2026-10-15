@@ -24,7 +24,6 @@ import type { AgentAdapterId } from "@orquester/api/agent-chat";
 import { daemonRoutesForHost, type SessionToolCallRequest } from "../agent-host/host-protocol.ts";
 import { canonicalProject } from "../mcp/addressing.ts";
 import type { AnyOrquesterTool, ApprovalPort, ThreadCaller } from "../mcp/catalog/contract.ts";
-import { toolByName } from "../mcp/catalog/index.ts";
 import type { DaemonApi } from "../mcp/daemon-api.ts";
 import { ToolError } from "../mcp/errors.ts";
 import { executeToolCall, type EnabledToolsets } from "../mcp/executor.ts";
@@ -33,6 +32,7 @@ import { runningExchange, runningTurnPlans } from "../mcp/gate/turn-policy.ts";
 import { listSessions, readThread } from "../mcp/reads.ts";
 import { toSafeToolError } from "../mcp/result.ts";
 import type { SessionSecretRequests } from "./contract.ts";
+import { chatToolByName } from "./legacy-aliases.ts";
 
 /** 16 MiB, as the external `/mcp` route: room for an inline page or image argument. */
 const SESSION_TOOL_BODY_LIMIT = 16 * 1024 * 1024;
@@ -51,7 +51,7 @@ export interface SessionToolRouteDeps {
   resolveThread(threadId: string): SessionToolThread | null;
   /** The daemon's in-process API for handlers; null while it does not exist yet. */
   api(): DaemonApi | null;
-  /** The chat tools by name (default: the catalog's `chat` audience). */
+  /** The chat tools by name (default: the catalog's `chat` audience, then the legacy aliases, spec §14.1). */
   lookup?: (name: string) => AnyOrquesterTool | undefined;
   /** Cards and grants (default: the daemon's wiring, `executorPorts`). */
   approvals?: ApprovalPort | null;
@@ -148,7 +148,7 @@ export function registerSessionToolsRoute(app: FastifyInstance, deps: SessionToo
       const caller = await buildThreadCaller(api, call.threadId, thread, call.callId, delivered);
       result = await executeToolCall(
         {
-          lookup: (name, audience) => (audience === "chat" ? (deps.lookup ? deps.lookup(name) : toolByName(name, "chat")) : undefined),
+          lookup: (name, audience) => (audience === "chat" ? (deps.lookup ? deps.lookup(name) : chatToolByName(name)) : undefined),
           ...(deps.approvals !== undefined ? { approvals: deps.approvals } : {}),
           ...(deps.enabledToolsets !== undefined ? { enabledToolsets: deps.enabledToolsets } : {}),
           refreshCaller: (before) => buildThreadCaller(api, before.threadId, thread, before.callId, delivered),

@@ -1037,6 +1037,52 @@ describe("orchestrator — session restart policy (§3.4)", () => {
     await host.stop();
   });
 
+  it("a session-tool list the session cannot take in-session never restarts it under a running turn (a steer)", async () => {
+    let stale = false;
+    const host = createTestHost({ sessionToolsStale: () => stale });
+    const threadId = await host.createThread();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
+    await host.settle();
+    assert.notEqual(host.orchestrator.threadContext(threadId)?.session?.activeTurnId ?? null, null, "the turn runs");
+    // The toolsets changed while the turn runs (request_toolset): a steer must not kill the turn.
+    stale = true;
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "steer" });
+    await host.settle();
+    assert.equal(host.adapter.calls.filter((call) => call.kind === "startSession").length, 1, "a steer never restarts the session");
+    stale = false;
+    await host.stop();
+  });
+
+  it("…and restarts it, carrying the cursor, at the next idle point (the next turn's send)", async () => {
+    let stale = false;
+    const host = createTestHost({ sessionToolsStale: () => stale });
+    const threadId = await host.createThread();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
+    await host.settle();
+    // The provider finished: ingestion settles the session (`thread.session-set`, as identity.test does).
+    await host.orchestrator.ingestionSink(threadId, [
+      {
+        eventId: `turn-end-${threadId}`,
+        threadId,
+        type: "thread.session-set",
+        payload: { session: { status: "ready", activeTurnId: null } },
+        occurredAt: host.clock.nowIso(),
+        commandId: null,
+        causationEventId: null,
+        metadata: {}
+      }
+    ]);
+    await host.settle();
+    assert.equal(host.orchestrator.threadContext(threadId)?.session?.activeTurnId ?? null, null, "idle");
+    stale = true;
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "continue" });
+    await host.settle();
+    assert.equal(host.adapter.calls.filter((call) => call.kind === "startSession").length, 2);
+    assert.deepEqual(host.adapter.lastStart?.resumeCursor, { cursor: "turn-1" });
+    stale = false;
+    await host.stop();
+  });
+
   it("a mode change on a thread with no session starts nothing", async () => {
     const host = createTestHost();
     const threadId = await host.createThread();

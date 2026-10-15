@@ -217,7 +217,18 @@ export const agentHostRoutes = {
    * predates the route answers its generic route-miss 404, which the daemon
    * ignores — `AGENT_HOST_PROTOCOL_VERSION` did not move for it.
    */
-  recycleIdleOpenCode: "/opencode/recycle-idle"
+  recycleIdleOpenCode: "/opencode/recycle-idle",
+
+  /**
+   * Unified MCP design 2026-10-15 §9.3/§9.4: `POST` {@link SessionToolsRefreshRequest} →
+   * {@link SessionToolsRefreshResponse}. The daemon hands the thread's NEW manifest (its toolsets
+   * changed): a provider that re-lists on `notifications/tools/list_changed` (Claude, probed) gets
+   * the new list at once; any other live session is restarted with resume at its next idle point
+   * (the next turn's send — never under a running turn); a thread with no live session takes it at
+   * its next start. Additive: a host that predates it answers its generic route-miss 404, and the
+   * change then applies whenever the thread's session next starts.
+   */
+  sessionToolsRefresh: (threadId: string): string => `${thread(threadId)}/session-tools/refresh`
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -244,8 +255,88 @@ export const daemonRoutesForHost = {
    * the daemon has no chat tab for; 503 while the daemon cannot run it. The
    * call is cancelled when the host drops the connection.
    */
-  sessionToolCall: "/api/agent-host/session-tools/call"
+  sessionToolCall: "/api/agent-host/session-tools/call",
+  /**
+   * Unified MCP design 2026-10-15 §9.4: `POST` {@link SessionToolsManifestRequest} → 200
+   * {@link SessionToolsManifest}, the chat tools, instruction block and MCP-server denials ONE
+   * provider session of the thread launches with; 401 without the host's bearer; 404
+   * `THREAD_NOT_FOUND` for a thread with no chat tab. A daemon that predates the route answers its
+   * generic 404 too — the host then advertises the frozen legacy definitions
+   * (`session-tools/legacy-definitions.ts`) its old handlers match (spec §14.1).
+   */
+  sessionToolsManifest: "/api/agent-host/session-tools/manifest"
 } as const;
+
+/** Body of `POST /api/agent-host/session-tools/manifest`. */
+export interface SessionToolsManifestRequest {
+  threadId: string;
+  /**
+   * `launch` (default): a provider session is starting with it — the daemon records its toolsets as
+   * what the thread advertises. `check`: a look only.
+   */
+  purpose?: "launch" | "check";
+}
+
+/**
+ * What one provider session of a thread is given (spec §9.4). Provider-neutral: each adapter turns
+ * `deny` into its own denial (Claude `disallowedTools` + `deniedMcpServers`, Codex
+ * `mcp_servers.<name>.enabled = false`, Grok a same-named inert ACP entry, OpenCode `<name>_*`
+ * deny rules).
+ */
+export interface SessionToolsManifest {
+  /** The chat tools to advertise, by bare name (the host filters its static catalog by them). */
+  tools: string[];
+  /** The "Orquester" instruction block for this thread (spec §10, ≤ 2 048 bytes). */
+  instructions: string;
+  /**
+   * MCP server names, as the thread's CLI config names them, to deny in this chat: every server of
+   * the thread's agent, in the thread's account home or its project's config, that points at this
+   * daemon's full-trust `/mcp` (spec §12.1). Empty when none is known.
+   */
+  deny: string[];
+  /** The resolved toolsets (for the daemon's own bookkeeping and tests; the host ignores it). */
+  toolsets?: string[];
+  /**
+   * Monotonic per daemon and increasing across daemon restarts (milliseconds-based): the host
+   * ignores a refresh older than the last manifest it applied or launched with for the thread
+   * (`superseded`), so pushes finishing out of order never roll a list back. Absent from an older
+   * daemon: never superseded.
+   */
+  seq?: number;
+  /**
+   * The daemon process that stamped `seq` (a random id per boot): sequences compare only within
+   * one epoch — a new epoch is accepted and restarts the comparison, so a wall clock stepping back
+   * across a daemon restart never rejects refreshes. Absent with `seq` from an older build.
+   */
+  epoch?: string;
+}
+
+/**
+ * The longest the host takes to answer a refresh: a launch's manifest read it waits for (the
+ * host's own manifest timeout, 10 s) plus Claude's bounded re-list wait (5 s). The daemon's push
+ * and `request_toolset`'s wait are set above it ({@link SESSION_TOOLS_REFRESH_TIMEOUT_MS}), so an
+ * answer is never lost to a timeout and "now" / "after-restart" stay truthful.
+ */
+export const SESSION_TOOLS_REFRESH_HOST_MAX_MS = 15_000;
+
+/** The daemon's bound on a refresh push (and `request_toolset`'s wait for it). */
+export const SESSION_TOOLS_REFRESH_TIMEOUT_MS = SESSION_TOOLS_REFRESH_HOST_MAX_MS + 5_000;
+
+/** Body of `POST /threads/:id/session-tools/refresh`. */
+export interface SessionToolsRefreshRequest {
+  manifest: SessionToolsManifest;
+}
+
+/** `POST /threads/:id/session-tools/refresh`. */
+export interface SessionToolsRefreshResponse {
+  /**
+   * `live`: the running session's list was replaced and the provider told (`list_changed`);
+   * `next-idle`: the live session restarts with resume at its next idle point; `next-start`: no live
+   * session — its next start fetches the manifest; `unchanged`: the session already advertises it;
+   * `superseded`: an older manifest than one already applied for the thread — ignored.
+   */
+  applied: "live" | "next-idle" | "next-start" | "unchanged" | "superseded";
+}
 
 /** Body of `POST /api/agent-host/session-tools/call` (design 2026-10-14 §1.1). */
 export interface SessionToolCallRequest {

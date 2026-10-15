@@ -322,6 +322,16 @@ export interface OrchestratorOptions {
    */
   onTurnInterrupt?: (threadId: string) => void;
   /**
+   * Unified MCP design 2026-10-15 §9.3: true when the thread's live provider session advertises
+   * another session-tool list than the thread's toolsets now call for, and its provider cannot take
+   * it in-session (`session-tools/index.ts` `needsRestart`). The ensure step then restarts it with
+   * resume — only when no turn is running (a steer never restarts), so the change lands at the
+   * thread's next idle point. Optional; must not throw.
+   */
+  sessionToolsStale?: (threadId: string) => boolean;
+  /** A thread was deleted (after everything of it is freed): per-thread state elsewhere goes too. Must not throw. */
+  onThreadDeleted?: (threadId: string) => void;
+  /**
    * Session-tool secrets (design 2026-10-14 §5, `session-tools/secret-redaction.ts`)
    * beyond ingestion's: `link` — a fork's child is masked with its parent's
    * values (called before the child's history replay); `maskValue` — an MCP
@@ -760,6 +770,12 @@ export interface Orchestrator {
    * `recycleIdleServers`, or nothing recycled when no adapter serves it.
    */
   recycleIdleOpenCodeServers(): Promise<{ recycled: number; deferred: number }>;
+  /**
+   * Unified MCP §12.1: a thread's provider session started with its MCP denials degraded (the
+   * daemon could not be asked and nothing is known for its launch): one `runtime.warning` row, so
+   * it is never silent. Fire and forget; a thread not loaded is skipped. Never throws.
+   */
+  noteSessionToolsWarning(threadId: string, detail: string): void;
 
   /** §3.3 step 1, for an intentional stop. Returns the threads it marked. */
   markThreadsForContinuation(): Promise<string[]>;
@@ -1690,6 +1706,16 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         bound,
         capabilities: adapter.capabilities
       });
+      // Unified MCP §9.3: a session-tool list the session cannot take in-session — at an idle
+      // point only (a steer into a running turn never restarts it), carrying the cursor.
+      if (!decision.restart && options.sessionToolsStale !== undefined) {
+        const live = currentSession(runtime);
+        const idle = live.activeTurnId === null && live.status !== "running";
+        if (idle && options.sessionToolsStale(runtime.id)) {
+          decision.restart = true;
+          decision.reasons.push("sessionTools");
+        }
+      }
       if (!decision.restart) {
         snapshots.ensureWorkspaceSnapshot(head.adapter, head.cwd);
         return bound.session;
@@ -4587,6 +4613,11 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       liveUsageLimits.delete(threadId);
       runtimes.delete(threadId);
       loadingRuntimes.delete(threadId);
+      try {
+        options.onThreadDeleted?.(threadId);
+      } catch (error) {
+        logger.warn("agent-host: a thread-deleted listener failed", error);
+      }
     });
 
   // -------------------------------------------------------------------------
@@ -7360,6 +7391,14 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     resumeGoalSessionsAfterHandover,
     recycleIdleOpenCodeServers: async () =>
       (await options.adapters.get("opencode")?.recycleIdleServers?.()) ?? { recycled: 0, deferred: 0 },
+    noteSessionToolsWarning: (threadId, detail) => {
+      const runtime = runtimes.get(threadId);
+      if (!runtime || !runtime.state.head) return;
+      // The activity tones have no "warning": `error` is the one a user does not scroll past.
+      void appendActivity(runtime, { kind: "runtime.warning", tone: "error", summary: "MCP server denial degraded", detail }).catch((error: unknown) =>
+        logger.warn("agent-host: could not record a session-tools warning", error)
+      );
+    },
     markThreadsForContinuation,
     clearContinuationMarkers,
     reconcile,

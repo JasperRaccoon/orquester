@@ -206,7 +206,14 @@ export type ApprovalCancelReason = "aborted" | "closed" | "restarting";
 
 /** How a card ended, for the waiting call. Secrets only on `approved`, for this one write. */
 export type ApprovalOutcome =
-  | { outcome: "approved"; approvalId: string; grantId?: string; secrets?: Record<string, string> }
+  | {
+      outcome: "approved";
+      approvalId: string;
+      grantId?: string;
+      /** With `grantId`: that grant's reach (the scope the user chose, or the chat grant a create joined). */
+      grantScope?: "chat" | "project";
+      secrets?: Record<string, string>;
+    }
   | { outcome: "denied"; approvalId: string; reason?: string }
   | { outcome: "timed_out"; approvalId: string }
   | { outcome: "cancelled"; approvalId: string; reason?: ApprovalCancelReason };
@@ -278,6 +285,14 @@ export interface CallContext {
   requestToolsetCard?(input: ToolsetCardInput): Promise<ApprovalOutcome>;
   /** TEMPORARY: legacy external handlers only ({@link LegacyToolServices}); absent where none is wired. */
   legacy?: LegacyToolServices;
+  /**
+   * Set when an OLD agent host called a legacy chat name that the daemon aliases onto this tool
+   * (`session-tools/legacy-aliases.ts`, spec §14.1) and the alias keeps the old semantics a mapped
+   * argument cannot say: `thread_send` with `wait` — `send_message` `reply: "wait"` WITHOUT the
+   * queue rule's notify conversion (a timeout returns, nothing is delivered later). The tool's own
+   * name is unchanged; only the semantics the legacy caller was promised differ.
+   */
+  legacyAlias?: string;
   /** Set when the call passed a card or a grant. */
   approval?: {
     outcome: "approved" | "granted";

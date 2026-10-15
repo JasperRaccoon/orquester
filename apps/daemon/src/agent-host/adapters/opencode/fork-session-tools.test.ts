@@ -224,3 +224,54 @@ test("a fork's child registers its own server under its own grant, and its rules
   assert.equal(decides(fake.rulesetOf(parentSession), `${childName}_echo`), "deny");
   assert.equal(parentGrant!.revoked, false);
 });
+
+test("the thread's denied MCP servers are disconnected and ruled out — also without a grant (§12.1)", async (t) => {
+  for (const failGrant of [false, true]) {
+    const fake = new FakeOpenCode();
+    await new Promise<void>((resolve) => fake.http.listen(0, "127.0.0.1", resolve));
+    const upstream = `http://127.0.0.1:${(fake.http.address() as AddressInfo).port}`;
+    const peer = makePeer();
+    const project = await mkdtemp(join(tmpdir(), "orq-opencode-deny-"));
+    const abort = new AbortController();
+    const recording = recordingSessionTools(undefined, { deny: ["remote"] });
+    const tools = failGrant ? { ...recording, issue: async () => Promise.reject(new Error("the endpoint could not bind")) } : recording;
+    let ids = 0;
+    const ctx: AdapterContext = {
+      logger: { debug: () => undefined, info: () => undefined, warn: () => undefined, error: () => undefined },
+      clock: { now: () => new Date(0), nowIso: () => "2026-10-14T00:00:00.000Z" },
+      ids: { eventId: () => `evt-${(ids += 1)}`, messageId: (prefix: string) => `${prefix}-${(ids += 1)}`, uuid: () => `uuid-${(ids += 1)}` },
+      resolveAttachmentPath: async (_threadId, attachmentId) => join(peer.dir, attachmentId),
+      attachmentsDir: () => peer.dir,
+      logRawFrame: () => undefined,
+      buildEnv: () => ({ PATH: process.env.PATH ?? "", HOME: peer.dir, TMPDIR: peer.dir, MOCK_VERSION: "1.18.32", MOCK_UPSTREAM: upstream }),
+      resolveBin: async () => peer.bin,
+      sessionPath: () => "/usr/bin",
+      tmpDir: () => peer.dir,
+      signal: abort.signal,
+      sessionTools: tools
+    };
+    const adapter = await createOpenCodeAdapter(ctx);
+    const consumed = (async () => {
+      for await (const _event of adapter.events) void _event;
+    })();
+    const started = await adapter.startSession({
+      threadId: "thread-d",
+      projectPath: project,
+      cwd: project,
+      home: { kind: "system", path: peer.dir },
+      modelSelection: { model: "openrouter/google/gemini-3.1-flash-lite" },
+      runtimeMode: "full-access"
+    });
+    const session = (started.resumeCursor as { sessionId: string }).sessionId;
+    assert.equal(decides(fake.rulesetOf(session), "remote_list"), "deny", `the denied server's tools (grant ${!failGrant})`);
+    assert.ok(fake.requests.some((request) => request.method === "POST" && request.path === "/mcp/remote/disconnect"), "disconnected on the instance");
+    await adapter.stopAll();
+    abort.abort();
+    await consumed;
+    fake.http.closeAllConnections();
+    await new Promise<void>((resolve) => fake.http.close(() => resolve()));
+    peer.cleanup();
+    await rm(project, { recursive: true, force: true });
+  }
+  void t;
+});

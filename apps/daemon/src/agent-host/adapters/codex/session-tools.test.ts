@@ -27,6 +27,20 @@ after(async () => {
 });
 
 describe("codex session tools — the builders", () => {
+  it("the thread config switches off every server the manifest denies, never our own name, never an unaddressable one (§12.1)", () => {
+    const config = codexSessionToolsConfig({
+      url: "http://127.0.0.1:4711/mcp",
+      instructions: "x",
+      deny: ["orquester_remote", "orquester", "bad.name", "my-remote"]
+    });
+    assert.equal(config["mcp_servers.orquester_remote.enabled"], false);
+    assert.equal(config["mcp_servers.my-remote.enabled"], false);
+    // `orquester` is ours: the thread entry already replaces a user's same-named one.
+    assert.equal(config["mcp_servers.orquester.enabled"], undefined);
+    assert.equal(Object.keys(config).some((key) => key.includes("bad.name")), false);
+    assert.ok(config["mcp_servers.orquester"]);
+  });
+
   it("the thread config attaches the server by URL and env-var NAME, pre-approved", () => {
     const config = codexSessionToolsConfig({ url: "http://127.0.0.1:4711/mcp", instructions: "x" });
     assert.deepEqual(config, {
@@ -49,6 +63,25 @@ describe("codex session tools — the builders", () => {
 });
 
 describe("codex session tools — a launch", () => {
+  for (const failGrant of [false, true]) {
+    it(`the thread's MCP denials reach thread/start's config${failGrant ? " — also when no grant could be issued" : ""}`, async () => {
+      const server = writeMockCodexServer({ turns: [] });
+      cleanups.push(() => rmSync(server.dir, { recursive: true, force: true }));
+      const recording = recordingSessionTools(undefined, { deny: ["orquester_remote"] });
+      const tools = failGrant
+        ? { ...recording, issue: async () => Promise.reject(new Error("the endpoint could not bind")) }
+        : recording;
+      const { context } = createFakeContext({ resolveBin: () => Promise.resolve(server.bin), sessionTools: tools });
+      const adapter = await createCodexAdapter(context);
+      cleanups.push(() => adapter.stopAll());
+      await adapter.refreshSnapshot({ cwd: process.cwd() });
+      await adapter.startSession({ threadId: "thread-d", cwd: process.cwd(), home: { kind: "system", path: "" }, modelSelection: { model: "gpt-5.5" }, runtimeMode: "approval-required" });
+      const config = (server.received().find((frame) => frame.method === "thread/start")?.params as { config?: Record<string, unknown> }).config;
+      assert.equal(config?.["mcp_servers.orquester_remote.enabled"], false);
+      assert.equal(config?.["mcp_servers.orquester"] !== undefined, !failGrant, "our own server only with a grant");
+    });
+  }
+
   it("credential in env only; config on thread/start; context on turn/start; revoked at exit", async () => {
     const server = writeMockCodexServer({ turns: [{ kind: "text", text: "done" }] });
     cleanups.push(() => rmSync(server.dir, { recursive: true, force: true }));

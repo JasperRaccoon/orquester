@@ -116,7 +116,7 @@ export interface ToolApprovalHooks {
    * The approval's side effects, synchronous and run only once the card is known to be settling
    * (a grant recorded, a toolset turned on). Returns the grant the answer created, if any.
    */
-  commitApproval?(answer: ToolApprovalAnswer): { grantId?: string };
+  commitApproval?(answer: ToolApprovalAnswer): { grantId?: string; grantScope?: "chat" | "project" };
   /** A denial's side effects (a toolset decline). */
   onDenied?(answer: ToolApprovalAnswer): void;
 }
@@ -372,8 +372,11 @@ export class ToolApprovalRegistry {
     // The deadline or the signal may have won while the answer was prepared.
     if (!this.pending.has(approvalId)) return notPending();
     let grantId: string | undefined;
+    let grantScope: "chat" | "project" | undefined;
     try {
-      grantId = entry.hooks.commitApproval?.(answer).grantId;
+      const committed = entry.hooks.commitApproval?.(answer);
+      grantId = committed?.grantId;
+      grantScope = committed?.grantScope;
     } catch (error) {
       entry.answering = false;
       if (isUnavailable(error)) return { ok: false, status: 503, code: "AGENT_TOOLS_UNAVAILABLE", message: READ_ONLY_MESSAGE };
@@ -384,6 +387,7 @@ export class ToolApprovalRegistry {
       outcome: "approved",
       approvalId,
       ...(grantId !== undefined ? { grantId } : {}),
+      ...(grantId !== undefined && grantScope !== undefined ? { grantScope } : {}),
       ...(answer.secrets !== undefined ? { secrets: answer.secrets } : {})
     };
     entry.settle(outcome, answer.grant !== undefined ? `grant=${answer.grant}` : undefined);
