@@ -939,7 +939,7 @@ describe("engine: sub-workflows", () => {
     const code = scripted("code", { X: (ctx) => ({ status: "succeeded", output: ctx.node.config.source }) });
     const parent = workflow("p", [T(), node("A", "shell"), node("S", "workflow", { workflowId: "c" })], [edge("T", "A"), edge("A", "S")]);
     const mid = workflow("c", [T(), node("S2", "workflow", { workflowId: "g" })], [edge("T", "S2")]);
-    const grand = workflow("g", [T(), node("X", "code", { source: "v1" })], [edge("T", "X")]);
+    const grand = { ...workflow("g", [T(), node("X", "code", { source: "v1" })], [edge("T", "X")]), pinned: { X: "a big pinned test output" } };
     const h = createHarness({ workflows: [parent, mid, grand], executors: { code, shell: gate } });
     const { runId } = await h.engine.run("p", {});
     await flush();
@@ -957,7 +957,13 @@ describe("engine: sub-workflows", () => {
     const childRun = (await h.engine.getRun(run.blocks.S!.childRunId!))!;
     assert.equal(childRun.definition.revision, mid.revision);
     assert.equal(childRun.definition.name, mid.name);
-    assert.deepEqual(childRun.subWorkflowRevisions, { c: mid.revision, g: grand.revision }, "a child carries its top-level run's map");
+    assert.deepEqual(childRun.subWorkflowRevisions, { g: grand.revision }, "a child carries only its own subtree");
+    const stored = h.runStore.runs.get(runId!)!;
+    assert.deepEqual(Object.keys(stored.subWorkflows!).sort(), ["c", "g"]);
+    assert.equal(stored.subWorkflows!.g!.pinned, undefined, "pinned test data is not frozen");
+    assert.deepEqual(Object.keys(h.runStore.runs.get(childRun.id)!.subWorkflows!), ["g"]);
+    const grandRun = h.runStore.runs.get((await h.engine.getRun(childRun.blocks.S2!.childRunId!))!.id)!;
+    assert.deepEqual(grandRun.subWorkflows ?? {}, {}, "a leaf child stores nothing");
     // A run started after the edit runs the new definitions.
     const next = h.engine.run("p", {});
     const nextId = (await next).runId!;

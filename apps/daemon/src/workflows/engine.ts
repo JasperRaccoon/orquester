@@ -1654,13 +1654,35 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
     }
   };
 
+  /** The workflow ids a definition's Run workflow blocks name. */
+  const childIds = (definition: Workflow): string[] =>
+    definition.nodes.flatMap((node) => (node.type === "workflow" && typeof node.config.workflowId === "string" ? [node.config.workflowId] : []));
+
+  /**
+   * The part of a frozen map a child run of `rootId` needs: the workflows ITS blocks reach,
+   * recursively — never its parent's whole map (each run.json holds only its own subtree).
+   */
+  const subtreeOf = (rootId: string, frozen: Readonly<Record<string, Workflow>>): Record<string, Workflow> => {
+    const out: Record<string, Workflow> = {};
+    const root = Object.hasOwn(frozen, rootId) ? frozen[rootId]! : null;
+    let frontier = root ? childIds(root) : [];
+    while (frontier.length > 0) {
+      const next: string[] = [];
+      for (const id of frontier) {
+        if (id === rootId || Object.hasOwn(out, id) || !Object.hasOwn(frozen, id)) continue;
+        out[id] = frozen[id]!;
+        next.push(...childIds(frozen[id]!));
+      }
+      frontier = next;
+    }
+    return out;
+  };
+
   /**
    * Every sub-workflow `workflow` reaches through its Run workflow blocks (recursively, each once, to
    * the depth cap), as stored NOW: what its runs will run. Undefined when it has none.
    */
   const freezeSubWorkflows = (workflow: Workflow): Record<string, Workflow> | undefined => {
-    const childIds = (definition: Workflow): string[] =>
-      definition.nodes.flatMap((node) => (node.type === "workflow" && typeof node.config.workflowId === "string" ? [node.config.workflowId] : []));
     const frozen: Record<string, Workflow> = {};
     let frontier = childIds(workflow);
     if (frontier.length === 0) return undefined;
@@ -1670,7 +1692,9 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
         if (id === workflow.id || Object.hasOwn(frozen, id)) continue;
         const child = store.get(id);
         if (!child) continue; // a missing child fails its block when it is reached, as before
-        frozen[id] = structuredClone(child);
+        // Pinned test data is only ever used by a top-level test run: a child never reads it.
+        const { pinned: _pinned, ...definition } = structuredClone(child);
+        frozen[id] = definition;
         next.push(...childIds(child));
       }
       frontier = next;
@@ -1827,7 +1851,8 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
       force: true,
       depth,
       parentRunId: input.parentRunId,
-      ...(frozen !== undefined ? { subWorkflows: frozen } : {})
+      // The child carries only its own subtree of the frozen map.
+      ...(frozen !== undefined ? { subWorkflows: subtreeOf(input.workflowId, frozen) } : {})
     });
     const runId = launched.response.runId!;
     parent?.children.add(runId);

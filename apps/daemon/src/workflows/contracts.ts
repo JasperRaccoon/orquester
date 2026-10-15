@@ -134,8 +134,9 @@ export interface PersistedRun extends Omit<WorkflowRun, "blocks"> {
    * The sub-workflow definitions frozen when the top-level run started (by workflow id; every
    * workflow its Run workflow blocks reach, recursively, up to the depth cap): a child run runs the
    * frozen definition, never a later edit — what a run's approval showed is what runs. A child run
-   * carries its top-level run's map. Absent: none to freeze, or a run recorded by an older build (its
-   * children then read the current definitions).
+   * carries only its own subtree of its top-level run's map (what its blocks reach). Pinned test data
+   * is left out (a child never uses it). Absent: none to freeze, or a run recorded by an older build
+   * (its children then read the current definitions).
    */
   subWorkflows?: Record<string, Workflow>;
 }
