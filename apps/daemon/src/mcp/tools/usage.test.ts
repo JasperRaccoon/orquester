@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { z } from "zod";
-import type { Turn } from "@orquester/api/agent-chat";
+import type { ThreadItem, Turn } from "@orquester/api/agent-chat";
 import type { AnyOrquesterTool, CallContext, ThreadCaller } from "../catalog/contract.ts";
 import { chatSummary, head, snapshot, turn } from "../fixtures.ts";
 import { FakeDaemonApi } from "../testing.ts";
@@ -127,9 +127,9 @@ test("get_usage cost by week: one row per agent, model and ISO week, priced when
 });
 
 /** A chat session `s1` whose snapshot holds `turns` (and a history window when `hasOlder`). */
-function sessionApi(turns: Turn[], over: { model?: string; refId?: string; adapter?: "claude" | "codex" | "grok" | "opencode"; hasOlder?: boolean; providers?: unknown } = {}): FakeDaemonApi {
+function sessionApi(turns: Turn[], over: { model?: string; refId?: string; adapter?: "claude" | "codex" | "grok" | "opencode"; hasOlder?: boolean; providers?: unknown; items?: ThreadItem[] } = {}): FakeDaemonApi {
   const adapter = over.adapter ?? "codex";
-  const thread = snapshot({ head: head({ id: "s1", refId: over.refId ?? adapter, adapter, modelSelection: { model: over.model ?? "gpt-5.6-sol", options: [] } }), turns, ...(over.hasOlder !== undefined ? { history: { indexed: true, hasOlder: over.hasOlder, beforeCursor: over.hasOlder ? "c" : null, oldestRetainedOrdinal: 4, totalTurns: 9 } } : {}) });
+  const thread = snapshot({ ...(over.items ? { items: over.items } : {}), head: head({ id: "s1", refId: over.refId ?? adapter, adapter, modelSelection: { model: over.model ?? "gpt-5.6-sol", options: [] } }), turns, ...(over.hasOlder !== undefined ? { history: { indexed: true, hasOlder: over.hasOlder, beforeCursor: over.hasOlder ? "c" : null, oldestRetainedOrdinal: 4, totalTurns: 9 } } : {}) });
   return new FakeDaemonApi()
     .on("GET", "/api/agent/providers", { status: 200, body: over.providers ?? { hostInstanceId: "h", providers: [] } })
     .on("GET", "/api/sessions", { status: 200, body: [chatSummary({ id: "s1", refId: over.refId ?? adapter, projectPath: "" })] })
@@ -149,7 +149,7 @@ test("get_usage session: sums the snapshot's turn tokens and prices Codex turns 
   assert.deepEqual(r, {
     sessionId: "s1", agent: "codex", model: "gpt-5.6-sol", turnsCounted: 3, partial: false,
     inputTokens: 1_200_000, outputTokens: 100_000, cachedInputTokens: 200_000, cacheCreationTokens: 0, reasoningTokens: 40_000,
-    costUsd: 8.1, costSource: "estimated", estimatedUsd: 8.1, turnsWithoutUsage: 1
+    costUsd: 8.1, costSource: "estimated", estimatedUsd: 8.1, turnsWithoutUsage: 1, mainAgentOnly: true
   });
   // A sessionId alone means the session view; quota is not read.
   assert.ok(!api.calls.some((call) => call.path === "/api/usage"));
@@ -184,12 +184,14 @@ const FIXTURE_11 = [
   { tokens: { input: 2, read: 34_867, write: 27, output: 15 }, cumulative: 0.010853100000000001 }
 ];
 /**
- * Fixture 12's first turn (a new process: its cumulative cost is that turn's alone; the main model's share). Fixtures 17
- * and 19 run `claude-opus-5-5`, which the price table prices at its `claude-opus-5` row — not the CLI's own rate for
- * it — so they assert only the token sums (the table is the Cost tab's, not this tool's to change).
+ * First turns of a process (its cumulative cost is that turn's alone; `modelCost` = the main model's share in the
+ * frame's `modelUsage`): fixture 12 (claude-sonnet-5), fixtures 17, 18, 19 (claude-opus-5-5, the table's exact row).
  */
 const FIRST_TURNS = [
-  { model: "claude-sonnet-5", tokens: { input: 4, read: 65_525, write: 4_293, output: 130 }, modelCost: 0.0473775 }
+  { model: "claude-sonnet-5", tokens: { input: 4, read: 65_525, write: 4_293, output: 130 }, modelCost: 0.0473775 },
+  { model: "claude-opus-5-5", tokens: { input: 4, read: 29_426, write: 6_900, output: 333 }, modelCost: 0.06776120000000001 },
+  { model: "claude-opus-5-5", tokens: { input: 4, read: 29_295, write: 6_651, output: 202 }, modelCost: 0.063123 },
+  { model: "claude-opus-5-5", tokens: { input: 4, read: 31_004, write: 4_847, output: 176 }, modelCost: 0.0485128 }
 ];
 const claudeTurn = (id: string, t: { input: number; read: number; write: number; output: number }, totalCostUsd?: number, model?: string) =>
   turn({ turnId: id, ...(model ? { model } : {}), ...(totalCostUsd !== undefined ? { totalCostUsd } : {}), tokenUsage: usage(t.input + t.read + t.write, t.output, { cachedInputTokens: t.read, cacheCreationTokens: t.write }) });
@@ -215,6 +217,9 @@ test("get_usage session: a Claude session is priced from its turns' own tokens, 
     claudeTurn("t2", { input: 4, read: 18_714, write: 954, output: 33 }, 0.161081, "claude-opus-5-5")
   ], { adapter: "claude" }), { sessionId: "s1" })).session;
   assert.deepEqual([workflow.outputTokens, workflow.cachedInputTokens, workflow.cacheCreationTokens, workflow.costSource], [366, 48_140, 7_854, "estimated"]);
+  // Turn 1 is exactly the CLI's opus charge; turn 2's cumulative also carries the workflow's agents, which no main-agent
+  // usage holds (hence mainAgentOnly: the estimate is a floor).
+  assert.equal(workflow.costUsd, Math.round((0.0677612 + 0.0120508) * 10_000) / 10_000);
   assert.ok(workflow.costUsd < 0.161081 + 0.06897020000000001 - 0.05, "not the sum of the cumulative totals");
 });
 
@@ -244,4 +249,31 @@ test("get_usage session needs a sessionId and a chat session; its scope is that 
   const scope = await getUsage.scope(z.object(getUsage.input).parse({ sessionId: "s1" }), { api, signal: new AbortController().signal, now: () => NOW, caller: chat });
   assert.deepEqual(scope, { projects: [], sessions: ["s1"], reads: "metadata", writes: false, causesTurnIn: [] });
   assert.deepEqual(await getUsage.scope(z.object(getUsage.input).parse({}), { api, signal: new AbortController().signal, now: () => NOW, caller: chat }), { projects: [], sessions: [], reads: "metadata", writes: false, causesTurnIn: [] });
+});
+
+test("get_usage session: a context-tagged model (claude-opus-4-8[1m]) is priced at its standard rates — fixture 01's catalogue: `default` and `opus[1m]`", async () => {
+  // Fixture 01's catalogue: both slugs resolve to the 1M-context opus; its result frame billed it at standard rates (0.21547).
+  const providers = { hostInstanceId: "h", providers: [{ id: "claude", installed: true, status: "ready", auth: { status: "authenticated" }, models: [
+    { slug: "default", name: "Default (recommended)", subProvider: "claude-opus-4-8[1m]", isDefault: true, capabilities: null },
+    { slug: "opus[1m]", name: "Opus", subProvider: "claude-opus-4-8[1m]", capabilities: null },
+    { slug: "sonnet", name: "Sonnet", subProvider: "claude-sonnet-5", capabilities: null }
+  ] }] };
+  for (const model of ["default", "opus[1m]"]) {
+    const r = (await run(sessionApi([claudeTurn("t1", { input: 2, read: 0, write: 21_536, output: 4 })], { adapter: "claude", model, providers }), { sessionId: "s1" })).session;
+    assert.equal(r.costUsd, 0.2155, model);
+    assert.equal(r.costSource, "estimated", model);
+  }
+  // Unrounded, the estimate is the CLI's charge exactly (usage-tokens.test.ts).
+});
+
+test("get_usage session: mainAgentOnly always, with the turns that ran subagents and the conversation's compactions counted (the estimate is a floor there)", async () => {
+  const compaction = (id: string, state: string): ThreadItem => ({ kind: "activity", id, tone: "info", activityKind: "context-compaction", summary: "Compacted", payload: { state }, turnId: "t2", createdAt: "2026-10-15T00:00:00.000Z", updatedAt: "2026-10-15T00:00:00.000Z" });
+  const api = sessionApi([
+    turn({ turnId: "t1", tokenUsage: { ...usage(10, 5), hasSubagents: true } }),
+    turn({ turnId: "t2", tokenUsage: usage(10, 5) })
+  ], { items: [compaction("k1", "compacted"), compaction("k2", "compacting")] });
+  const r = (await run(api, { sessionId: "s1" })).session;
+  assert.deepEqual([r.mainAgentOnly, r.turnsWithSubagents, r.compactions], [true, 1, 1], "only a settled compaction counts");
+  const plain = (await run(sessionApi([turn({ tokenUsage: usage(1, 1) })]), { sessionId: "s1" })).session;
+  assert.deepEqual([plain.mainAgentOnly, plain.turnsWithSubagents, plain.compactions], [true, undefined, undefined]);
 });

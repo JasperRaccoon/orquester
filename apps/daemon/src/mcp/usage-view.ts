@@ -1,5 +1,5 @@
 import type { AgentAccount, AgentUsage, UsageAccount, UsageResponse, UsageTokensResponse, UsageWindow } from "@orquester/api";
-import type { ThreadSnapshotPayload } from "@orquester/api/agent-chat";
+import { isSettledConversationCompaction, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
 // The Cost tab's own price table (API-equivalent USD per token class): one table for both views.
 import { estimateCostParts } from "../usage-tokens.ts";
 
@@ -181,9 +181,11 @@ function priceTurn(model: string, tokens: { input: number; output: number; cache
  *   estimate (Codex reports tokens only).
  *
  * `costSource`: `reported`, `estimated` or `mixed`. A turn neither reported nor priceable counts in `unpricedTurns` and
- * adds $0; with no priced turn `costUsd` is null.
+ * adds $0; with no priced turn `costUsd` is null. `mainAgentOnly: true` always: turn usage is the main agent's, so
+ * `turnsWithSubagents` and `compactions` (settled conversation compactions in the snapshot) say where the totals and
+ * the estimate are a floor.
  */
-export function sessionUsageView(snapshot: Pick<ThreadSnapshotPayload, "head" | "turns" | "history">, opts?: { resolveModel?: (slug: string) => string }): Record<string, unknown> {
+export function sessionUsageView(snapshot: Pick<ThreadSnapshotPayload, "head" | "turns" | "history" | "items">, opts?: { resolveModel?: (slug: string) => string }): Record<string, unknown> {
   const claude = snapshot.head.adapter === "claude";
   const resolve = opts?.resolveModel ?? ((slug: string) => slug);
   const sums = { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, cacheCreationTokens: 0, reasoningTokens: 0 };
@@ -193,8 +195,10 @@ export function sessionUsageView(snapshot: Pick<ThreadSnapshotPayload, "head" | 
   let estimatedTurns = 0;
   let unpricedTurns = 0;
   let turnsWithoutUsage = 0;
+  let turnsWithSubagents = 0;
   for (const turn of snapshot.turns) {
     const usage = turn.tokenUsage;
+    if (usage?.hasSubagents === true) turnsWithSubagents += 1;
     const input = usage?.inputTokens;
     const output = usage?.outputTokens;
     const hasTokens = typeof input === "number" || typeof output === "number";
@@ -226,6 +230,7 @@ export function sessionUsageView(snapshot: Pick<ThreadSnapshotPayload, "head" | 
       unpricedTurns += 1;
     }
   }
+  const compactions = snapshot.items.filter(isSettledConversationCompaction).length;
   const costSource = reportedTurns > 0 && estimatedTurns > 0 ? "mixed" : reportedTurns > 0 ? "reported" : estimatedTurns > 0 ? "estimated" : null;
   return {
     sessionId: snapshot.head.id,
@@ -239,6 +244,11 @@ export function sessionUsageView(snapshot: Pick<ThreadSnapshotPayload, "head" | 
     ...(costSource !== null ? { costSource } : {}),
     ...(estimatedTurns > 0 ? { estimatedUsd: round4(estimated) } : {}),
     ...(unpricedTurns > 0 ? { unpricedTurns } : {}),
-    ...(turnsWithoutUsage > 0 ? { turnsWithoutUsage } : {})
+    ...(turnsWithoutUsage > 0 ? { turnsWithoutUsage } : {}),
+    // Every turn's usage is the main agent's (`usageScope: "main_agent"`): subagents' and compactions' tokens are not in
+    // it, so the totals and an estimate are a floor where either happened.
+    mainAgentOnly: true,
+    ...(turnsWithSubagents > 0 ? { turnsWithSubagents } : {}),
+    ...(compactions > 0 ? { compactions } : {})
   };
 }

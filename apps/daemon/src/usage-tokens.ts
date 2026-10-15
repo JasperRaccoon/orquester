@@ -12,6 +12,8 @@ const MODEL_PRICING: Record<
 > = {
   "claude-fable-5": { input: 10, output: 50, cacheRead: 1, cacheWrite5m: 12.5, cacheWrite1h: 20 },
   "claude-opus-5": { input: 5, output: 25, cacheRead: 0.5, cacheWrite5m: 6.25, cacheWrite1h: 10 },
+  // Derived from the CLI's own charges (claude fixtures 17, 18, 19: per-turn costUSD over the frames' token counts).
+  "claude-opus-5-5": { input: 4, output: 20, cacheRead: 0.2, cacheWrite5m: 5, cacheWrite1h: 8 },
   "claude-opus-4-8": { input: 5, output: 25, cacheRead: 0.5, cacheWrite5m: 6.25, cacheWrite1h: 10 },
   "claude-sonnet-5": { input: 3, output: 15, cacheRead: 0.3, cacheWrite5m: 3.75, cacheWrite1h: 6 },
   "claude-haiku-4-5": { input: 1, output: 5, cacheRead: 0.1, cacheWrite5m: 1.25, cacheWrite1h: 2 },
@@ -25,8 +27,10 @@ const MODEL_PRICING: Record<
 // Transcripts record versioned model ids (e.g. "claude-opus-4-8-20260115") that
 // never equal the bare pricing keys. Resolve a raw id to a known key by exact
 // match, then by longest matching prefix (which also absorbs a trailing
-// `-YYYYMMDD` release-date suffix). Genuinely unknown models resolve to null.
-function resolveModelKey(model: string): string | null {
+// `-YYYYMMDD` release-date suffix). A trailing context tag (`claude-opus-4-8[1m]`, the CLI's 1M-context variant) is
+// dropped first: the CLI bills it at the model's standard rates (claude fixture 01). Unknown models resolve to null.
+function resolveModelKey(raw: string): string | null {
+  const model = raw.replace(/\[[^\]]*\]$/, "");
   if (MODEL_PRICING[model]) return model;
   let best: string | null = null;
   for (const key of Object.keys(MODEL_PRICING)) {
