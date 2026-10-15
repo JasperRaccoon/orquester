@@ -154,6 +154,11 @@ test("a closed chat cancels its cards; shutdown cancels every card", async () =>
   assert.equal(h.registry.list("t2").length, 1);
   await h.registry.shutdown();
   assert.deepEqual(await b, { outcome: "cancelled", approvalId: "a2", reason: "restarting" });
+  // After shutdown no card opens: a late request is cancelled as restarting, never shown.
+  const opened = h.events.filter((e) => e.opened).length;
+  assert.deepEqual(await h.registry.open(card(), new AbortController().signal), { outcome: "cancelled", approvalId: "a3", reason: "restarting" });
+  assert.equal(h.events.filter((e) => e.opened).length, opened);
+  assert.equal(h.registry.list("t1").length, 0);
 });
 
 test("two clients: the first answer wins, the second is 409; unknown cards are 404; another thread's card is 404", async () => {

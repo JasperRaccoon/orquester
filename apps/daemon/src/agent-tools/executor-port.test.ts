@@ -19,7 +19,7 @@ import { defineTool, MUTATING, type AnyOrquesterTool, type CallContext, type Sco
 import { executeToolCall, executorPorts } from "../mcp/executor.ts";
 import { head, snapshot } from "../mcp/fixtures.ts";
 import { FakeDaemonApi } from "../mcp/testing.ts";
-import { connectExecutor, createAgentToolsRuntime } from "./approval-port.ts";
+import { connectExecutor, createAgentToolsRuntime, lockedToolsetsOnly } from "./approval-port.ts";
 
 const ROOT = realpathSync(mkdtempSync(join(tmpdir(), "umcp-exec-port-")));
 const WS = join(ROOT, "w");
@@ -97,6 +97,11 @@ async function rig(t: TestContext) {
         runs.push(ctx);
         return { ran: true };
       }
+    }),
+    defineTool({
+      name: "read_more", title: "Read more", description: "d", input: {},
+      audiences: ["chat"], toolset: "reads", tier: "read", scope: async () => claim({ projects: [], writes: false }),
+      annotations: MUTATING, resultKind: "json", run: async () => ({ read: true })
     }),
     defineTool({
       name: "add_todo", title: "Add a todo", description: "d", input: {},
@@ -214,14 +219,43 @@ test("toolsets: off → TOOL_NOT_ENABLED; request_toolset's card through the por
   assert.deepEqual((await r.call("add_todo")).structuredContent, { added: true });
 });
 
-test("disconnected (shutdown): an Admin call fails closed without a card, and toolsets fall back to the catalogue defaults", async (t) => {
+test("shutdown: disconnected first — no card, no grant, locked toolsets only (never the catalogue defaults); a late card is cancelled", async (t) => {
   const r = await rig(t);
+  // A chat grant exists, and `reads` (on by default for Claude) works before the disconnect.
+  const first = r.call("control_desktop");
+  const answer = await r.runtime.approvals.answer("me", await r.nextCard(), { decision: "approve", grant: "chat" });
+  assert.ok(answer.ok);
+  assert.equal((await first).isError, undefined);
+  assert.equal((await r.call("read_more")).isError, undefined);
+  const runsBefore = r.runs.length;
+
+  // What `index.ts` does at stop, in order: disconnect, then stop the runtime.
   r.disconnect();
   assert.equal(executorPorts.approvals, null);
-  assert.equal(executorPorts.enabledToolsets, null);
-  const refused = await r.call("control_desktop");
-  assert.equal(errorCode(refused), "PERMISSION_DENIED");
+  assert.equal(errorCode(await r.call("control_desktop")), "PERMISSION_DENIED", "the grant is not honoured once disconnected");
+  assert.equal(r.opened.length, 0, "no card opened");
+  assert.equal(r.runs.length, runsBefore);
+  assert.equal(errorCode(await r.call("read_more")), "TOOL_NOT_ENABLED", "locked toolsets only, not the catalogue defaults");
+  assert.equal((await r.call("request_toolset")).isError, true, "no toolset card either");
+
+  // A call already past the port lookup when the runtime stops: cancelled, never a card.
+  await r.runtime.shutdown();
+  const late = await r.runtime.port.request(
+    { threadId: "me", callerProjectPath: OWN, tool: "control_desktop", kind: "admin", family: "desktops", title: "Late", scope: { label: "x" }, sections: [], secretFields: [], grantOptions: [] },
+    new AbortController().signal
+  );
+  assert.deepEqual([late.outcome, late.outcome === "cancelled" ? late.reason : undefined], ["cancelled", "restarting"]);
   assert.equal(r.opened.length, 0);
-  assert.equal(r.runs.length, 0);
-  assert.equal(errorCode(await r.call("add_todo")), "TOOL_NOT_ENABLED", "notes is off by default");
+});
+
+test("a disconnect clears only the ports that are still its own", async (t) => {
+  const r = await rig(t);
+  const other = await rig(t);
+  // `other` connected last: `r`'s disconnect leaves its ports alone.
+  r.disconnect();
+  assert.equal(executorPorts.approvals, other.runtime.port);
+  assert.notEqual(executorPorts.enabledToolsets, lockedToolsetsOnly);
+  other.disconnect();
+  assert.equal(executorPorts.approvals, null);
+  assert.equal(executorPorts.enabledToolsets, lockedToolsetsOnly);
 });

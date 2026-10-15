@@ -1192,9 +1192,10 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   });
   services.agentToolsRuntime = agentToolsRuntime;
   // The catalog executor (both transports) asks THIS port for cards and grants, and resolves a
-  // chat's toolsets from the same store. Until connected every card is refused and toolsets are the
-  // catalogue defaults (fail closed). `onToolsetsChanged` listeners run after a toolset card settles
-  // but BEFORE the awaiting call resumes: schedule restarts for the next idle point (Task 6).
+  // chat's toolsets from the same store. Before this runs no transport serves yet; after the
+  // disconnect at stop, cards are refused and chats get the locked toolsets only. `onToolsetsChanged`
+  // listeners run after a toolset card settles but BEFORE the awaiting call resumes: schedule
+  // restarts for the next idle point (Task 6).
   const disconnectExecutor = connectExecutor(agentToolsRuntime, executorPorts);
   // umcp:t3 end
 
@@ -1326,9 +1327,11 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // running so in-flight turns survive the deploy (chat spec §3.1).
     await lineage.stop();
     // umcp:t3 begin
-    // Pending cards end `cancelled` ("restarting"); later calls find no port and fail closed.
-    await agentToolsRuntime.shutdown().catch((error) => console.error("Agent tools stop failed", error));
+    // Disconnect FIRST, while the transports may still serve: new calls get no card or grant
+    // (PERMISSION_DENIED) and the locked toolsets only. Then pending cards end `cancelled`
+    // ("restarting"), and a call already past the port lookup is cancelled the same way.
     disconnectExecutor();
+    await agentToolsRuntime.shutdown().catch((error) => console.error("Agent tools stop failed", error));
     // umcp:t3 end
     await htmlPreview.stop();
     await agentChat.stop();

@@ -22,6 +22,7 @@
 import {
   grantOptionsFor,
   isToolsetId,
+  TOOLSETS,
   toolsetById,
   type GrantScope,
   type SessionSummary,
@@ -404,21 +405,30 @@ export function createAgentToolsRuntime(deps: AgentToolsRuntimeDeps): AgentTools
   };
 }
 
+/** The toolsets a chat has while no store answers (shutdown): the locked ones only. */
+export const lockedToolsetsOnly = async (): Promise<ReadonlySet<string>> =>
+  new Set(TOOLSETS.filter((toolset) => toolset.locked).map((toolset) => toolset.id));
+
 /**
  * Point the catalog executor (both transports) at this runtime: cards and grants through its port,
  * a chat's toolsets resolved from its store (overrides, settings, master switch). Returns the
- * disconnect (shutdown): later calls find no port and fail closed.
+ * disconnect, called at shutdown BEFORE the runtime stops: from then on no card opens and no grant
+ * is honoured (the executor refuses `PERMISSION_DENIED`), and every chat has the locked toolsets
+ * only — never the catalogue defaults, which would ignore the master switch and chat overrides
+ * while the transports still serve. Each port is cleared only while it is still this runtime's.
  *
  * An approved toolset card fires `tools.onToolsetsChanged` listeners in a microtask after the card
  * settles but BEFORE the awaiting `request()` resumes in the executor (the tool result is not sent
  * yet): a listener only schedules its re-list/restart for the chat's next idle point.
  */
 export function connectExecutor(runtime: Pick<AgentToolsRuntime, "port" | "tools">, ports: ExecutorPorts): () => void {
+  const enabledToolsets: NonNullable<ExecutorPorts["enabledToolsets"]> = async (caller) =>
+    new Set(runtime.tools.resolvedToolsets(caller.threadId, caller.agentId));
   ports.approvals = runtime.port;
-  ports.enabledToolsets = async (caller) => new Set(runtime.tools.resolvedToolsets(caller.threadId, caller.agentId));
+  ports.enabledToolsets = enabledToolsets;
   return () => {
     if (ports.approvals === runtime.port) ports.approvals = null;
-    ports.enabledToolsets = null;
+    if (ports.enabledToolsets === enabledToolsets) ports.enabledToolsets = lockedToolsetsOnly;
   };
 }
 

@@ -194,6 +194,8 @@ export class ToolApprovalRegistry {
   private readonly closed = new Map<string, { threadId: string; closedAt: number }>();
   private readonly clock: ToolApprovalClock;
   private journalWrites: Promise<void> = Promise.resolve();
+  /** Set by {@link shutdown}: no card opens after it (a late request is cancelled "restarting"). */
+  private stopped = false;
 
   constructor(private readonly opts: ToolApprovalRegistryOptions) {
     this.clock = opts.clock ?? SYSTEM_APPROVAL_CLOCK;
@@ -209,6 +211,11 @@ export class ToolApprovalRegistry {
     if (signal.aborted) {
       this.decisionLog(input, approvalId, "cancelled", "before the card opened");
       return Promise.resolve({ outcome: "cancelled", approvalId, reason: "aborted" });
+    }
+    if (this.stopped) {
+      // A call that reached the port while Orquester stops: never a card nobody can answer.
+      this.decisionLog(input, approvalId, "cancelled", "Orquester is restarting");
+      return Promise.resolve({ outcome: "cancelled", approvalId, reason: "restarting" });
     }
     if (this.list(input.threadId).length >= MAX_PENDING_TOOL_APPROVALS_PER_THREAD) {
       return Promise.reject(
@@ -392,6 +399,7 @@ export class ToolApprovalRegistry {
 
   /** End every pending card (daemon shutdown): `cancelled`, then flush the journal. */
   async shutdown(): Promise<void> {
+    this.stopped = true;
     for (const entry of [...this.pending.values()]) {
       entry.settle({ outcome: "cancelled", approvalId: entry.summary.approvalId, reason: "restarting" }, "Orquester is restarting");
     }
