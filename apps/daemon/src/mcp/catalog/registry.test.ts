@@ -29,6 +29,7 @@ import { audienceDescription, audienceSchema, audienceShape } from "../executor.
 import type { AnyOrquesterTool, Audience } from "./contract.ts";
 import { buildCatalog, CATALOG, catalogFor, TOOL_NAME_PATTERN, toolByName } from "./index.ts";
 import { LEGACY_CHAT_META, LEGACY_EXTERNAL_META } from "./legacy.ts";
+import { chatToolByName } from "../../session-tools/legacy-aliases.ts";
 
 const SRC = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const isLegacy = (tool: AnyOrquesterTool) =>
@@ -97,6 +98,9 @@ test("transitional counts: the external surface is tool-names.ts's list, each to
   for (const tool of catalogFor("chat")) assert.ok(specNames.has(tool.name) || Object.prototype.hasOwnProperty.call(LEGACY_CHAT_META, tool.name), tool.name);
   const replaced = catalogFor("chat").filter((tool) => !Object.prototype.hasOwnProperty.call(LEGACY_CHAT_META, tool.name));
   for (const tool of replaced) assert.ok(specNames.has(tool.name), `${tool.name} is a chat tool TOOLSETS does not name`);
+  // Every legacy session-tool name is still served to chats — the catalog's own tool, or Task 6's
+  // alias onto the family tool that replaced it (Task 13's check, kept through the aliases).
+  for (const name of Object.keys(LEGACY_CHAT_META)) assert.ok(chatToolByName(name), `${name} is no longer served to chats`);
 });
 
 // ---------------------------------------------------------------------------
