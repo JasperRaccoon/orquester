@@ -501,9 +501,6 @@ export const SESSION_TOOL_LABELS: Readonly<Record<string, string>> = {
   update_scheduled_task: "Updated a scheduled task",
   delete_scheduled_task: "Deleted a scheduled task",
   run_scheduled_task_now: "Ran a scheduled task now",
-  watch_pull_request: "Watched pull request",
-  unwatch_pull_request: "Stopped watching pull request",
-  list_pull_request_watches: "Listed pull request watches",
   // Secrets (design 2026-10-14 §5).
   request_secret: "Requested a secret",
   // Threads and delegation (design 2026-10-14 §5, §6).

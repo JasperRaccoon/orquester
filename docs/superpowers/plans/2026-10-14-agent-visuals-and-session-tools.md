@@ -128,7 +128,10 @@ pieces where they fit), cancel path, value lifecycle (memory only, delivered onc
 call), redaction tests proving the value is absent from `events.ndjson`, logs, slimmed and full item
 reads, search index, and API responses other than the tool result.
 
-### Task 9: Pull request watches
+### Task 9: Pull request watches (removed)
+
+*Removed after it shipped: Orquester no longer has pull request watches (spec §5 "PR watch"). The
+task text below is kept as history.*
 
 Spec §5 "PR watch". Reuse the daemon's git-host providers and the workflow `git-poller` patterns;
 persisted watches (tolerant schema), change detection (checks, reviews/comments, mergeability,

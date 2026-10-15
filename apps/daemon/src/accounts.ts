@@ -41,8 +41,6 @@ import {
   type ProviderCreds,
   type ProviderIdentity,
   type PullRequestInfo,
-  type PullRequestStatus,
-  type PullRequestStatusOptions,
   type ReleaseInfo
 } from "./providers/types";
 import {
@@ -1060,25 +1058,6 @@ export class AccountsService {
   ): Promise<ConditionalPage<PullRequestInfo>> {
     const { provider, repo, creds } = await this.restTarget(accountId, url);
     return provider.listPullRequests(creds, repo, opts);
-  }
-
-  /**
-   * One pull request's watch read (spec 2026-10-14 §5 "PR watch"): state, head, mergeability,
-   * checks and the remarks since `opts.remarksSince`, read through the account exactly as the
-   * listings are (`restTarget`). `viewer` names the account's own logins, so its own comments — the
-   * agent's replies made through it — never count as news. Never returns a token.
-   */
-  async pullRequestStatus(
-    accountId: string | null,
-    url: string,
-    number: number,
-    opts: PullRequestStatusOptions = {}
-  ): Promise<{ status: PullRequestStatus; viewer: string[] }> {
-    const { provider, repo, creds } = await this.restTarget(accountId, url);
-    const status = await provider.getPullRequestStatus(creds, repo, number, opts);
-    const account = accountId === null ? null : await this.requireAccount(accountId);
-    const viewer = account ? [account.login, account.loginRef ?? ""].filter((login) => login.length > 0) : [];
-    return { status, viewer };
   }
 
   /** One page of the repo's releases, newest first (GitHub only; others `{items: [], unsupported: true}`). */

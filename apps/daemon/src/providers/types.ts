@@ -117,76 +117,6 @@ export interface PullRequestInfo {
   updatedAt: string;
 }
 
-/**
- * One CI check on a pull request's head commit, normalised across providers (GitHub check runs and
- * commit statuses, Bitbucket build statuses). A check that ran more than once is its latest run.
- */
-export interface PullRequestCheck {
-  name: string;
-  status: "pending" | "success" | "failure" | "cancelled" | "action-required" | "skipped" | "neutral";
-  url: string | null;
-  /** Whether the base branch requires it; null when the provider cannot say. */
-  required: boolean | null;
-}
-
-/** A comment, review or review verdict on a pull request, normalised across providers. */
-export interface PullRequestRemark {
-  /** Unique within the pull request (prefixed by kind, e.g. `ic:123`). */
-  id: string;
-  kind: "comment" | "review" | "review-comment";
-  /** Login (GitHub login, Bitbucket nickname or display name, DC username); null when unknown. */
-  author: string | null;
-  /** A second identity to match the viewer by (Bitbucket Cloud account UUID / id), when known. */
-  authorRef?: string | null;
-  /**
-   * The repository vouches for the author (GitHub `author_association` OWNER / MEMBER /
-   * COLLABORATOR). False where the provider cannot say: the text of an untrusted remark is never
-   * quoted to the agent (prompt injection).
-   */
-  trusted: boolean;
-  body: string;
-  /** ISO. */
-  createdAt: string;
-  /** ISO, when it was edited after it was posted. */
-  editedAt: string | null;
-  /** The file a review comment is anchored to. */
-  path: string | null;
-  url: string | null;
-  /** A review's verdict ("approved", "changes requested", …); null for a comment. */
-  reviewState: string | null;
-}
-
-/**
- * What a pull request watch reads (spec 2026-10-14 §5 "PR watch"). For a pull request that is
- * not open, `checks` and `remarks` are empty: nothing more is read.
- */
-export interface PullRequestStatus {
-  number: number;
-  title: string;
-  /** The pull request's web page. */
-  url: string;
-  state: "open" | "merged" | "closed";
-  /** The author's login; "" when unknown. */
-  author: string;
-  /** Bitbucket Cloud: abbreviated (12 hex). Null when the provider gave none. */
-  headSha: string | null;
-  headBranch: string;
-  baseBranch: string;
-  /** "unknown" while the host is still computing it, or where it cannot be read. */
-  mergeability: "clean" | "conflicting" | "unknown";
-  checks: PullRequestCheck[];
-  /**
-   * Remarks active (posted or edited) at or after `remarksSince`, oldest first; null when the
-   * read could not list them all (they are read again next time).
-   */
-  remarks: PullRequestRemark[] | null;
-}
-
-export interface PullRequestStatusOptions {
-  /** ISO: older remarks may be left out. */
-  remarksSince?: string;
-}
-
 /** A GitHub release (Bitbucket has none — see `GitProvider.supportsReleases`). */
 export interface ReleaseInfo {
   id: string;
@@ -314,16 +244,6 @@ export interface GitProvider {
     repo: ParsedRepo,
     opts?: ConditionalListOptions
   ): Promise<ConditionalPage<PullRequestInfo>>;
-  /**
-   * One pull request's state, head, mergeability, checks and recent remarks, for a pull request
-   * watch. `creds: null` reads anonymously where the provider allows it.
-   */
-  getPullRequestStatus(
-    creds: ProviderCreds | null,
-    repo: ParsedRepo,
-    number: number,
-    opts?: PullRequestStatusOptions
-  ): Promise<PullRequestStatus>;
   /** One page of releases, newest first (GitHub only; others answer `unsupported`). */
   listReleases(
     creds: ProviderCreds | null,

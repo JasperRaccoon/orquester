@@ -30,7 +30,6 @@ export * from "./open-work.ts";
 export * from "./interaction-mode.ts";
 export * from "./pending.ts";
 export * from "./plan.ts";
-export * from "./pr-watch.ts";
 export * from "./prompts.ts";
 export * from "./re-emitted.ts";
 export * from "./roster.ts";

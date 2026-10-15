@@ -8,7 +8,6 @@ import { toRemoteConfig, toUiConnection } from "../lib/connections";
 import { notifyProvidersChanged, setProviderSideEffects } from "../lib/agent-chat/providers";
 import { applySavedPromptEvent, resetSavedPrompts } from "../lib/saved-prompts/store";
 import { applyScheduledTaskEvent, resetScheduledTasks } from "../lib/scheduled-tasks/store";
-import { applyPullRequestWatchesEvent, resetPullRequestWatches } from "../lib/pr-watches/store";
 import { applySecretRequestEvent, resetSecretRequests } from "../lib/agent-chat/secret-requests";
 import { consentActivity, mcpAppConsents } from "../lib/agent-chat/mcp-app-consent";
 import { SECRET_REQUEST_EVENT_TYPE } from "@orquester/api/agent-chat";
@@ -148,7 +147,6 @@ import {
   DESKTOP_CHANNEL,
   PLUGINS_CHANGED_EVENT,
   PLUGINS_CHANNEL,
-  PR_WATCHES_CHANNEL,
   SAVED_PROMPTS_CHANNEL,
   SCHEDULED_TASKS_CHANNEL,
   WORKFLOWS_CHANNEL
@@ -1744,7 +1742,6 @@ export const useAppStore = create<AppState>((set, get) => ({
     invalidateProjectIndex();
     resetSavedPrompts();
     resetScheduledTasks();
-    resetPullRequestWatches();
     resetSecretRequests();
     resetAgentProfile();
     resetWorkflows();
@@ -3342,12 +3339,6 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (event.channel === SCHEDULED_TASKS_CHANNEL) {
       // A chat thread's scheduled tasks (its status-line chip) live in their own module store.
       applyScheduledTaskEvent(event);
-      return;
-    }
-    if (event.channel === PR_WATCHES_CHANNEL) {
-      // A chat thread's pull request watches (the whole list per event), kept
-      // in their own module store; a malformed payload is ignored there.
-      applyPullRequestWatchesEvent(event);
       return;
     }
     if (event.channel === AGENT_PROFILE_CHANNEL) {

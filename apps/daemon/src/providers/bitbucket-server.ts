@@ -15,11 +15,7 @@ import type {
   ParsedRepo,
   ProviderCreds,
   ProviderIdentity,
-  PullRequestCheck,
   PullRequestInfo,
-  PullRequestRemark,
-  PullRequestStatus,
-  PullRequestStatusOptions,
   ReleaseInfo,
   SshProbe,
   UrlContext
@@ -467,135 +463,6 @@ function resolveDcLogin(headerValue: string | null | undefined, typedUsername: s
   return authenticated;
 }
 
-// ---------------------------------------------------------------------------
-// Pull request watch reads (spec 2026-10-14 §5 "PR watch")
-// ---------------------------------------------------------------------------
-
-/** Activity pages (of 100) a watch read follows before calling the listing incomplete. */
-const WATCH_MAX_PAGES = 5;
-
-const isoOfMs = (value: unknown): string => (typeof value === "number" && Number.isFinite(value) ? new Date(value).toISOString() : "");
-
-function dcBuildStatus(state: unknown): PullRequestCheck["status"] {
-  switch (state) {
-    case "SUCCESSFUL":
-      return "success";
-    case "FAILED":
-      return "failure";
-    case "CANCELLED":
-      return "cancelled";
-    default:
-      return "pending";
-  }
-}
-
-/**
- * The head commit's build statuses (`/rest/build-status/1.0/commits/:sha`), newest per key. An
- * instance without the build-status API (404) has no checks to report.
- */
-async function dcChecks(creds: ProviderCreds, sha: string): Promise<PullRequestCheck[]> {
-  let values: any[];
-  try {
-    const res = await dcRequest(creds, "GET", `/rest/build-status/1.0/commits/${encodeURIComponent(sha)}?limit=100`);
-    values = Array.isArray(res.data?.values) ? res.data.values : [];
-  } catch (error) {
-    if (error instanceof GitRemoteError && error.httpStatus === 404) return [];
-    throw error;
-  }
-  const newest = new Map<string, any>();
-  for (const build of values) {
-    if (!build || typeof build !== "object") continue;
-    const key = String(build.key ?? build.name ?? "");
-    const held = newest.get(key);
-    if (!held || (build.dateAdded ?? 0) > (held.dateAdded ?? 0)) newest.set(key, build);
-  }
-  return [...newest.values()].map((build) => ({
-    name: typeof build.name === "string" && build.name ? build.name : String(build.key ?? "build"),
-    status: dcBuildStatus(build.state),
-    url: typeof build.url === "string" && build.url ? build.url : null,
-    required: null
-  }));
-}
-
-/** `GET …/merge`: CONFLICTED is a conflict; a refusal to answer says nothing. */
-async function dcMergeability(creds: ProviderCreds, prefix: string): Promise<PullRequestStatus["mergeability"]> {
-  try {
-    const res = await dcRequest(creds, "GET", `${prefix}/merge`);
-    if (res.data?.conflicted === true || res.data?.outcome === "CONFLICTED") return "conflicting";
-    return res.data?.outcome === "CLEAN" || res.data?.conflicted === false ? "clean" : "unknown";
-  } catch (error) {
-    if (error instanceof GitRemoteError && error.kind === "rate_limited") throw error;
-    return "unknown";
-  }
-}
-
-/**
- * Remarks from the activity stream (newest first, paged until older than `since`): comments and
- * replies (`COMMENTED`; an edit counts by the comment's `updatedDate`), approvals (`APPROVED`) and
- * "needs work" verdicts (`REVIEWED`).
- */
-async function dcRemarks(creds: ProviderCreds, prefix: string, webUrl: string, since: string | undefined): Promise<PullRequestRemark[] | null> {
-  const sinceMs = since ? Date.parse(since) : Number.NaN;
-  const before = (ms: number) => !Number.isNaN(sinceMs) && ms < sinceMs;
-  const remarks: PullRequestRemark[] = [];
-  let start = 0;
-  for (let page = 0; page < WATCH_MAX_PAGES; page += 1) {
-    const res = await dcRequest(creds, "GET", `${prefix}/activities?limit=100&start=${start}`);
-    const values: any[] = Array.isArray(res.data?.values) ? res.data.values : [];
-    let reachedOlder = false;
-    for (const activity of values) {
-      if (!activity || typeof activity !== "object") continue;
-      const comment = activity.comment;
-      const activeMs = Math.max(Number(activity.createdDate) || 0, Number(comment?.updatedDate) || 0);
-      if (before(activeMs)) {
-        reachedOlder = true;
-        continue;
-      }
-      const user = activity.user ?? {};
-      const login = typeof user.name === "string" && user.name ? user.name : typeof user.slug === "string" ? user.slug : null;
-      if (activity.action === "COMMENTED" && comment && typeof comment === "object" && activity.commentAction !== "DELETED") {
-        const author = comment.author ?? user;
-        const created = isoOfMs(comment.createdDate);
-        const updated = isoOfMs(comment.updatedDate);
-        remarks.push({
-          id: `c:${String(comment.id ?? "")}`,
-          kind: activity.commentAnchor?.path ? "review-comment" : "comment",
-          author: (typeof author.name === "string" && author.name) || login,
-          authorRef: typeof author.slug === "string" ? author.slug : null,
-          // DC says nothing of the author's standing in the repository: never quoted.
-          trusted: false,
-          body: typeof comment.text === "string" ? comment.text : "",
-          createdAt: created,
-          editedAt: updated && updated !== created ? updated : null,
-          path: typeof activity.commentAnchor?.path === "string" ? activity.commentAnchor.path : null,
-          url: webUrl ? `${webUrl.replace(/\/overview$/, "")}/overview?commentId=${String(comment.id ?? "")}` : null,
-          reviewState: null
-        });
-      } else if (activity.action === "APPROVED" || activity.action === "REVIEWED") {
-        remarks.push({
-          id: `a:${String(activity.id ?? "")}`,
-          kind: "review",
-          author: login,
-          authorRef: typeof user.slug === "string" ? user.slug : null,
-          trusted: false,
-          body: "",
-          createdAt: isoOfMs(activity.createdDate),
-          editedAt: null,
-          path: null,
-          url: null,
-          reviewState: activity.action === "APPROVED" ? "approved" : "needs work"
-        });
-      }
-    }
-    const next = res.data?.nextPageStart;
-    if (reachedOlder || res.data?.isLastPage !== false || typeof next !== "number" || next <= start) {
-      return remarks.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-    }
-    start = next;
-  }
-  return null;
-}
-
 export const bitbucketServerProvider: GitProvider = {
   id: "bitbucket-server",
   scopesHint: SCOPES,
@@ -824,47 +691,6 @@ export const bitbucketServerProvider: GitProvider = {
   /** Bitbucket has no releases (the editor offers "tag" there). */
   async listReleases(): Promise<ConditionalPage<ReleaseInfo>> {
     return { items: [], unsupported: true };
-  },
-
-  /**
-   * `GET …/pull-requests/:id`, then — only while it is open — the head's build statuses, `…/merge`
-   * for conflicts and the activity stream for remarks since `opts.remarksSince`. Needs an account.
-   */
-  async getPullRequestStatus(
-    creds: ProviderCreds | null,
-    repo: ParsedRepo,
-    number: number,
-    opts?: PullRequestStatusOptions
-  ): Promise<PullRequestStatus> {
-    if (!creds?.token || !creds.baseUrl) {
-      throw new GitRemoteError(
-        400,
-        "Watching a Bitbucket Server pull request needs a connected account with a token.",
-        "unsupported"
-      );
-    }
-    const prefix = `/rest/api/1.0/projects/${encodeURIComponent(repo.owner)}/repos/${encodeURIComponent(repo.repo)}/pull-requests/${number}`;
-    const res = await dcRequest(creds, "GET", prefix);
-    const info = toServerPullRequest(res.data);
-    const status: PullRequestStatus = {
-      number: info.number || number,
-      title: info.title,
-      url: info.url,
-      state: info.state,
-      author: info.author,
-      headSha: info.headSha || null,
-      headBranch: info.head,
-      baseBranch: info.base,
-      mergeability: "unknown",
-      checks: [],
-      remarks: []
-    };
-    if (status.state !== "open") return status;
-    // One after another: a read's requests never fan out against the instance's limits.
-    const checks = status.headSha ? await dcChecks(creds, status.headSha) : [];
-    const remarks = await dcRemarks(creds, prefix, status.url, opts?.remarksSince);
-    const mergeability = await dcMergeability(creds, prefix);
-    return { ...status, checks, remarks, mergeability };
   }
 };
 

@@ -102,17 +102,7 @@ caller's own settings).
 | `html/` | `html_preview`, `html_render` | `ctx.api.previewHtmlRender` (the preview browser, `../html-preview/`), `ctx.api.publishHtmlRender` (the page store, `../agent-chat/html-render-publish.ts`) |
 | `scheduling/` | `schedule_task`, `list_scheduled_tasks`, `update_scheduled_task`, `delete_scheduled_task`, `run_scheduled_task_now` | `../scheduled-tasks/` (service, routes `/api/scheduled-tasks`); store `scheduled-tasks.json` (`@orquester/config`); the turn policy above |
 | `secrets/` | `request_secret` | `../agent-chat/secret-requests.ts` through `ctx.secretRequests`; masking in the agent host (`agent-host/session-tools/secret-redaction.ts`) |
-| `pull-requests/` | `watch_pull_request`, `unwatch_pull_request`, `list_pull_request_watches` | `../pr-watch/` (service, routes `agentChatRoutes.prWatches`/`prWatch`, change detection); store `pr-watches.json` (`@orquester/config`) |
 | `threads/` | `thread_list`, `thread_read`, `thread_create`, `thread_send`, `thread_wait`, `thread_interrupt`, `thread_fork`, `thread_merge_back`; `delegate_task`, `task_status`, `task_wait`, `task_cancel` | the daemon's own routes: `/api/sessions` (create, with `chat.lineage` for a delegate), the §6.2 `turn`/`interrupt` commands, Task 4's `fork`/`mergeBack`; reuses the external `/mcp`'s `read_transcript`, `send_message` and turn wait (`../mcp/tools/messages.ts`, `../mcp/wait.ts`) — pure modules the host loads with the toolkit |
-
-### `pull-requests/`: reach (S-M6)
-
-`watch_pull_request` reads a pull request through the project's git account (the workspace's
-identity), so it reaches every repository that account can read — not only the project's origin:
-an agent can watch, and so learn the state, checks and (vouched-for) comments of, any pull request
-the account sees. Give a project's git account the least privilege its work needs (a token scoped
-to the repositories of that workspace), as for any agent with a shell and that account's
-credentials.
 
 ### `threads/`: scope and caps
 

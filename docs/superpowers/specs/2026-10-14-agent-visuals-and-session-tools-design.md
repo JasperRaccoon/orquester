@@ -18,7 +18,7 @@ Orquester files each part starts from.
    run inline, on every provider whose protocol exposes the resource.
 4. **Mermaid and math** in chat markdown.
 5. **Orchestration tools.** Delegate tasks, operate other threads, schedule prompts, ask the user for
-   a secret, watch a pull request.
+   a secret. (Pull request watches were part of this goal; they were removed, see §5 "PR watch".)
 6. **Thread lineage.** Fork a thread from a message, merge a fork's result back, show parent/child
    relationships.
 
@@ -237,11 +237,11 @@ All operate within the calling thread's **project**. Names (bare):
   in daemon memory and handed to the waiting call's result only; the agent host masks it (by value
   and by result shape) in everything of the thread it persists. The provider's own transcript keeps
   the result. Details: `apps/daemon/src/session-tools/README.md` "`request_secret`".
-- PR watch: `watch_pull_request(url | number)`, `unwatch_pull_request`, `list_pull_request_watches`.
-  Persisted watches poll the PR through Orquester's existing git-host providers (GitHub, Bitbucket);
-  on a change in checks, reviews/comments, mergeability/conflicts, or state, the daemon sends the
-  thread a concise system-authored message (queued if busy) describing the change; watches end on
-  merge/close/unwatch; UI shows the thread's active watches with stop.
+- PR watch: *Removed.* `watch_pull_request`, `unwatch_pull_request` and
+  `list_pull_request_watches` (Task 9) were removed from Orquester together with the daemon's watch
+  service, its routes, the provider pull-request status reads and the UI strip. A leftover
+  `<appdir>/daemon/pr-watches.json` is ignored (never read, never deleted), and a wake message
+  already in a thread's log renders as an ordinary user message.
 - External `/mcp` parity: expose fork/merge (and delegate where meaningful) to external agents too,
   following the existing MCP tool conventions.
 

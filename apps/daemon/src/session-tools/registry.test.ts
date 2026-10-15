@@ -9,7 +9,6 @@ import { test } from "node:test";
 import { z } from "zod";
 
 import { defineSessionTool, defineSessionToolkit, SESSION_TOOL_READ_ONLY, type SessionToolkit } from "./contract.ts";
-import { pullRequestsToolkit } from "./pull-requests/index.ts";
 import { schedulingToolkit } from "./scheduling/index.ts";
 import { SESSION_TOOLKITS, sessionToolRegistry } from "./index.ts";
 import { THREADS_TOOLKIT_INSTRUCTIONS, threadsToolkit } from "./threads/index.ts";
@@ -45,7 +44,7 @@ test("the production registry carries every listed toolkit's tools, within the i
   assert.equal(registry.enabled, true);
   assert.deepEqual(
     SESSION_TOOLKITS.map((toolkit) => toolkit.id),
-    ["html", schedulingToolkit.id, pullRequestsToolkit.id, "secrets", threadsToolkit.id]
+    ["html", schedulingToolkit.id, "secrets", threadsToolkit.id]
   );
   assert.deepEqual(
     registry.tools.map((tool) => tool.name),
@@ -55,16 +54,17 @@ test("the production registry carries every listed toolkit's tools, within the i
     "html_preview",
     "html_render",
     ...schedulingToolkit.tools.map((tool) => tool.name),
-    "watch_pull_request",
-    "unwatch_pull_request",
-    "list_pull_request_watches",
     "request_secret"
   ]) {
     assert.equal(registry.get(name)?.name, name);
   }
   assert.match(registry.instructions, /^## Orquester\n/);
   assert.ok(registry.instructions.includes("### Showing visuals"));
-  assert.match(registry.instructions, /watch_pull_request/);
+  // Pull request watches were removed: none of their tools or instructions is advertised.
+  for (const name of ["watch_pull_request", "unwatch_pull_request", "list_pull_request_watches"]) {
+    assert.equal(registry.get(name), undefined, name);
+    assert.ok(!registry.instructions.includes(name), name);
+  }
   assert.ok(registry.instructions.includes("`request_secret`"));
   assert.ok(registry.instructions.includes("`schedule_task`"));
   assert.ok(SESSION_TOOLKITS.includes(threadsToolkit));
