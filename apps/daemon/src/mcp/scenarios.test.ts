@@ -16,16 +16,39 @@ import { readFile } from "node:fs/promises";
 import { describe, test } from "node:test";
 
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { parseThreadMessage } from "@orquester/api/agent-chat";
+import {
+  agentChatRoutes,
+  currentOptionValue,
+  modelChipLabel,
+  modelPickerHint,
+  optionDescriptors,
+  parseThreadMessage,
+  resolveLaunchModel,
+  RUNTIME_MODE_LABELS,
+  type ProviderModel
+} from "@orquester/api/agent-chat";
 
+import { claudeDeniedMcpServers, claudeDisallowedTools } from "../agent-host/adapters/claude/session-tools.ts";
+import { codexDenyConfig } from "../agent-host/adapters/codex/session-tools.ts";
+import { GROK_UNREACHABLE_SHADOW_URL, grokSessionMcpServers } from "../agent-host/adapters/grok/session-tools.ts";
+import { withSessionToolRules } from "../agent-host/adapters/opencode/session-tools.ts";
+import { daemonRoutesForHost } from "../agent-host/host-protocol.ts";
 import { estimateCostParts } from "../usage-tokens.ts";
+import { catalogFor } from "./catalog/index.ts";
 import { isoWeek } from "./usage-view.ts";
-import { out, scenarioWorld, writeHomeFile, type ScenarioWorld } from "./scenario-world.ts";
+import { DAEMON_BEARER, DAEMON_PORT, HOST_BEARER, out, scenarioWorld, writeHomeFile, type ScenarioWorld } from "./scenario-world.ts";
 
 const SEED = {
   projects: { jaspersito: ["orquester", "orquester-3"], acme: ["site", "docs"] },
   gitAccounts: { jaspersito: "acct-jasper", acme: "acct-acme" }
 };
+
+/** The chat manifest the agent host reads at launch (socket-only route, the host's bearer). */
+async function manifestOf(w: ScenarioWorld, threadId: string): Promise<{ tools: string[]; deny: string[]; toolsets: string[]; instructions: string }> {
+  const res = await w.local.inject({ method: "POST", url: daemonRoutesForHost.sessionToolsManifest, headers: { authorization: HOST_BEARER }, payload: { threadId } });
+  assert.equal(res.statusCode, 200, res.body);
+  return res.json();
+}
 
 /** A world for one test, closed after it. */
 async function withWorld(run: (w: ScenarioWorld) => Promise<void>): Promise<void> {
@@ -302,7 +325,7 @@ describe("acceptance (b) / §14.2.11 'add a skill': edit_agent_profile is an Adm
       assert.equal(card.reason, "The user asked for a release-notes skill.");
       assert.equal((await w.answer(card, { decision: "approve", grant: "chat" })).status, 400);
       // The whole preview the GUI's "View all" opens: the code section is the file to be written.
-      const detail = await w.user({ method: "GET", url: `/api/sessions/claude/tool-approvals/${card.approvalId}` });
+      const detail = await w.user({ method: "GET", url: agentChatRoutes.toolApproval("claude", card.approvalId) });
       assert.equal(detail.status, 200);
       const shown = (detail.body.approval.sections as { kind: string; text?: string; title?: string }[]).find((section) => section.kind === "code");
       assert.equal((await w.answer(card, { decision: "approve" })).status, 200);
@@ -746,6 +769,247 @@ describe("acceptance (f) / §14.2.11 review: Claude (Full access) opens Codex (S
       const fresh = w.host.runningTurn(codex)!.causedBy!;
       assert.equal(fresh.hop, 1);
       assert.notEqual(fresh.exchangeId, exchangeId);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (g) Models per provider = the composer's picker (§4.1 list_agents, D-20)
+// ---------------------------------------------------------------------------
+
+describe("acceptance (g): list_agents lists each provider's models exactly as the composer's model picker offers them, from the same snapshot", () => {
+  test("per provider: same models in order, names, chip labels, hints, default and option defaults; legacy only on request; chat vs external views", async () => {
+    await withWorld(async (w) => {
+      w.host.addChat("claude", { project: w.project("jaspersito/orquester"), title: "Picker", runtimeMode: "auto" });
+      // The composer reads the provider snapshots from this route (the GUI's own request).
+      const snapshots = (await w.user({ method: "GET", url: "/api/agent/providers" })).body.providers as { id: string; models: ProviderModel[] }[];
+      assert.deepEqual(snapshots.map((p) => p.id), ["claude", "codex", "grok", "opencode"]);
+      const all = ok(await w.uncarded("claude", "list_agents", { includeLegacy: true }));
+      const visible = ok(await w.uncarded("claude", "list_agents", {}));
+      for (const snapshot of snapshots) {
+        const agent = all.agents.find((a: { id: string }) => a.id === snapshot.id);
+        // The composer's model menu: every model of the snapshot, labelled by name with modelPickerHint, its chip modelChipLabel.
+        const composer = snapshot.models.map((model) => ({
+          slug: model.slug, name: model.name, hint: modelPickerHint(model), chip: modelChipLabel(model, null),
+          options: Object.fromEntries(optionDescriptors(model).map((descriptor) => [descriptor.id, currentOptionValue(null, descriptor)]))
+        }));
+        const listed = agent.models.map((model: { slug: string; name: string; hint?: string; shortName?: string; options: { id: string; default?: unknown }[] }) => ({
+          slug: model.slug, name: model.name, hint: model.hint, chip: model.shortName ?? model.name,
+          options: Object.fromEntries(model.options.map((option) => [option.id, option.default]))
+        }));
+        assert.deepEqual(listed, composer, `${snapshot.id}: list_agents = the composer's picker`);
+        // The default is what a launch naming no model gets, as the composer's new chat resolves it.
+        assert.equal(agent.defaultModel, resolveLaunchModel(snapshot.models)?.slug ?? null);
+        assert.deepEqual(agent.models.filter((m: { isDefault: boolean }) => m.isDefault).map((m: { slug: string }) => m.slug), [agent.defaultModel]);
+        // Without includeLegacy: the New-tab menu's list (legacy models left out).
+        const plain = visible.agents.find((a: { id: string }) => a.id === snapshot.id);
+        assert.deepEqual(plain.models.map((m: { slug: string }) => m.slug), snapshot.models.filter((m) => m.isLegacy !== true).map((m) => m.slug));
+      }
+      assert.equal(all.agents.find((a: { id: string }) => a.id === "claude").models.find((m: { slug: string }) => m.slug === "claude-opus-4-8").isLegacy, true);
+      // query matches slug, name, chip label or sub-provider.
+      const sonnet = ok(await w.uncarded("claude", "list_agents", { query: "claude-sonnet-5" }));
+      assert.deepEqual(sonnet.agents.map((a: { id: string; models: { slug: string }[] }) => [a.id, a.models.map((m) => m.slug)]), [["claude", ["sonnet"]], ["opencode", ["anthropic/claude-sonnet-5"]]]);
+      // Chat view: this chat's settings and the modes a chat it opens may take (never broader); external: every mode.
+      assert.deepEqual(all.allowedRuntimeModes, ["approval-required", "auto-accept-edits", "auto"]);
+      assert.equal(all.thisThread.agent, "claude");
+      assert.deepEqual(all.permissionModes.map((m: { id: string; label: string }) => [m.id, m.label]), Object.entries(RUNTIME_MODE_LABELS));
+      const external = ok(await w.external("list_agents", {}));
+      assert.equal(external.thisThread, undefined);
+      assert.equal(external.allowedRuntimeModes, undefined);
+      // A launch through create_session gets the reported default; a legacy model named explicitly is accepted and marked.
+      w.host.userTurn("claude", "open helpers");
+      const launched = ok(await w.uncarded("claude", "create_session", { agent: "codex", prompt: "x", reply: "none" }));
+      assert.equal(launched.model, "gpt-5.6-terra");
+      const legacy = ok(await w.uncarded("claude", "create_session", { model: "claude-opus-4-8", prompt: "x", reply: "none" }));
+      assert.equal(legacy.isLegacy, true);
+      assert.equal(w.host.threads.get(legacy.sessionId)!.model, "claude-opus-4-8");
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (h) Workflow-owned and planning chats (§5.4, §5.2 plan rule, §6)
+// ---------------------------------------------------------------------------
+
+describe("acceptance (h): a workflow-owned chat gets no Admin tools and asks for nothing; a planning chat causes no edits elsewhere", () => {
+  test("workflow-owned: no Admin tool or request_toolset advertised; Admin calls ADMIN_NOT_AVAILABLE, every card a denial — inherited by the chats it opens, even after it closes", async () => {
+    await withWorld(async (w) => {
+      const orq = w.project("jaspersito/orquester");
+      w.host.addChat("wf", { project: orq, title: "Nightly agent", runtimeMode: "full-access", owner: { kind: "workflow", workflowId: "wf-1", runId: "run-1", nodeId: "agent" } });
+      // The user turns every toolset on in its Tools chip: still no Admin tool.
+      const on = Object.fromEntries(["notes", "chat-extras", "files-git", "workflow-authoring", "agent-profile-editing", "desktops"].map((id) => [id, true]));
+      assert.equal((await w.user({ method: "PUT", url: "/api/sessions/wf/agent-tools", payload: { toolsets: on } })).status, 200);
+      const manifest = await manifestOf(w, "wf");
+      const admin = catalogFor("chat").filter((tool) => tool.tier === "admin").map((tool) => tool.name);
+      assert.deepEqual(manifest.tools.filter((name) => admin.includes(name)), [], "no Admin tool advertised");
+      assert.equal(manifest.tools.includes("request_toolset"), false);
+      assert.ok(manifest.tools.includes("create_session"));
+      w.host.userTurn("wf", "Do the nightly work.");
+      // The user's own workflow in this project.
+      const userWf = (await w.user({ method: "POST", url: "/api/workflows", payload: { name: "Mine", project: { kind: "existing", projectPath: orq }, nodes: [{ type: "trigger.manual", name: "Go" }] } })).body.workflow;
+      const cardsBefore = w.cards.opened.length;
+      refused(await w.chat("wf", "run_workflow", { workflowId: userWf.id, revision: userWf.revision }), "ADMIN_NOT_AVAILABLE");
+      refused(await w.chat("wf", "edit_agent_profile", { agent: "claude", changes: [{ action: "create", skill: { name: "x", frontmatter: { description: "x" }, body: "x" } }] }), "ADMIN_NOT_AVAILABLE");
+      const createWf = refused(await w.chat("wf", "create_workflow", { name: "Spawn", project: { kind: "existing", project: "jaspersito/orquester" }, nodes: [{ type: "trigger.manual", name: "Go" }] }), "ADMIN_NOT_AVAILABLE");
+      assert.match(createWf.message, /automated workflow/);
+      const userPrompt = await w.user({ method: "POST", url: "/api/saved-prompts", payload: { title: "Mine", body: "b", projectPath: null } });
+      refused(await w.chat("wf", "update_saved_prompts", { action: "update", id: userPrompt.body.id, body: "changed" }), "ADMIN_NOT_AVAILABLE");
+      refused(await w.chat("wf", "request_toolset", { toolset: "workflow-authoring", reason: "x" }), "PERMISSION_DENIED");
+      // A boundary card becomes a denial too (another workspace's content, below Full access).
+      w.host.addChat("site", { project: w.project("acme/site"), title: "Site", runtimeMode: "auto" });
+      w.host.setMode("wf", "auto");
+      refused(await w.chat("wf", "read_transcript", { sessionId: "site" }), "PERMISSION_DENIED");
+      w.host.setMode("wf", "full-access");
+      // Its own project's Act still works: the agent-made prompt needs no card.
+      ok(await w.chat("wf", "update_saved_prompts", { action: "create", title: "Nightly notes", body: "notes" }));
+      assert.equal(w.cards.opened.length, cardsBefore, "nothing ever asked the user");
+
+      // A chat it opens is workflow-owned (lineage), and stays so after the workflow's chat closes.
+      const child = ok(await w.chat("wf", "create_session", { prompt: "Help with the nightly work.", reply: "none" })).sessionId as string;
+      assert.equal(w.host.tabs.get(child)!.lineage?.workflowOwned, true);
+      assert.equal((await w.user({ method: "DELETE", url: "/api/sessions/wf" })).status, 204);
+      await w.user({ method: "PUT", url: `/api/sessions/${child}/agent-tools`, payload: { toolsets: on } });
+      assert.deepEqual((await manifestOf(w, child)).tools.filter((name) => admin.includes(name)), []);
+      refused(await w.chat(child, "run_workflow", { workflowId: userWf.id, revision: userWf.revision }), "ADMIN_NOT_AVAILABLE");
+      refused(await w.chat(child, "create_session", { project: "jaspersito/orquester-3", prompt: "x", reply: "none" }), "PERMISSION_DENIED");
+      assert.equal(w.cards.opened.length, cardsBefore);
+      assert.equal(w.runtime.tools.snapshot().grants.length, 0);
+    });
+  });
+
+  test("planning: data-changing Act and Admin refused; a turn it causes elsewhere plans too, and an agent without plan mode is refused", async () => {
+    await withWorld(async (w) => {
+      const orq = w.project("jaspersito/orquester");
+      w.host.addChat("planner", { project: orq, title: "Planner", runtimeMode: "full-access" });
+      await w.user({ method: "PUT", url: "/api/sessions/planner/agent-tools", payload: { toolsets: { notes: true, "workflow-authoring": true, "agent-profile-editing": true } } });
+      w.host.addChat("sibling", { project: w.project("jaspersito/orquester-3"), title: "Sibling", agent: "claude", runtimeMode: "auto" });
+      w.host.addChat("codex", { project: w.project("jaspersito/orquester-3"), title: "Codex", agent: "codex", runtimeMode: "auto" });
+      w.host.userTurn("planner", "Plan the migration.", { plan: true });
+      const cardsBefore = w.cards.opened.length;
+      const promptsBefore = (await w.savedPrompts.list(orq)).length;
+      assert.match(refused(await w.chat("planner", "update_saved_prompts", { action: "create", title: "x", body: "y" }), "PERMISSION_DENIED").message, /planning/);
+      assert.equal((await w.savedPrompts.list(orq)).length, promptsBefore);
+      refused(await w.chat("planner", "create_workflow", { name: "W", project: { kind: "existing", project: "jaspersito/orquester" }, nodes: [{ type: "trigger.manual", name: "Go" }] }), "PERMISSION_DENIED");
+      refused(await w.chat("planner", "edit_agent_profile", { agent: "claude", changes: [{ action: "create", skill: { name: "x", frontmatter: { description: "x" }, body: "x" } }] }), "PERMISSION_DENIED");
+      // Messages to other chats carry the plan: the sibling's caused turn runs in plan mode.
+      ok(await w.chat("planner", "send_message", { sessionId: "sibling", text: "Plan your half.", reply: "none" }));
+      assert.equal(w.host.postsTo("sibling")[0]!.interactionMode, "plan");
+      assert.equal(w.host.runningTurn("sibling")!.interactionMode, "plan");
+      // Codex has no plan mode: it cannot be given work from a planning chat.
+      refused(await w.chat("planner", "send_message", { sessionId: "codex", text: "Edit it.", reply: "none" }), "PERMISSION_DENIED");
+      assert.equal(w.host.postsTo("codex").length, 0);
+      // implementPlan starts editing work: refused while planning.
+      refused(await w.chat("planner", "send_message", { sessionId: "sibling", text: "go", implementPlan: true, reply: "none" }), "PERMISSION_DENIED");
+      assert.equal(w.cards.opened.length, cardsBefore, "planning never raises a card");
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (i) A user MCP server pointing at this daemon is denied inside chats (§12.1, MUST 1)
+// ---------------------------------------------------------------------------
+
+describe("acceptance (i) / §14.2.11: a user-installed server reaching this daemon's /mcp (by URL or by bearer) is denied in every provider's chats", () => {
+  test("detected in each CLI's user config and a project's config, denied in the chat manifest, and applied by each provider's launch: Claude disallowedTools, Codex enabled=false, Grok shadowed, OpenCode deny rules", async () => {
+    await withWorld(async (w) => {
+      const orq = w.project("jaspersito/orquester");
+      const url = `http://127.0.0.1:${DAEMON_PORT}/mcp`;
+      const bearer = `Bearer ${DAEMON_BEARER}`;
+      await writeHomeFile(w.homes.claudeJson, JSON.stringify({ mcpServers: {
+        claude_by_url: { type: "http", url },
+        claude_by_bearer: { type: "http", url: "https://proxy.example/anything", headers: { Authorization: bearer } },
+        claude_fine: { command: "fine" }
+      } }));
+      await writeHomeFile(`${w.homes.codexHome}/config.toml`, [
+        "[mcp_servers.codex_by_url]", `url = "http://localhost:${DAEMON_PORT}/mcp"`, "",
+        "[mcp_servers.codex_by_bearer]", 'url = "https://proxy.example/x"', "[mcp_servers.codex_by_bearer.http_headers]", `Authorization = "${bearer}"`, "",
+        "[mcp_servers.codex_fine]", 'command = "fine"'
+      ].join("\n"));
+      await writeHomeFile(`${w.homes.grokHome}/config.toml`, [
+        "[mcp_servers.grok_by_url]", `url = "${url}"`, "",
+        "[mcp_servers.grok_by_bearer]", 'command = "npx"', `args = ["-y", "mcp-remote", "https://proxy.example/mcp", "--header", "Authorization: ${bearer}"]`, "",
+        "[mcp_servers.grok_fine]", 'command = "fine"'
+      ].join("\n"));
+      await writeHomeFile(`${w.homes.opencodeDir}/opencode.json`, JSON.stringify({ mcp: {
+        oc_by_url: { type: "remote", url },
+        oc_by_bearer: { type: "remote", url: "https://proxy.example/mcp", headers: { Authorization: bearer } },
+        oc_fine: { type: "local", command: ["fine"] }
+      } }));
+      // A project-level config of the chat's own project.
+      await writeHomeFile(`${orq}/.mcp.json`, JSON.stringify({ mcpServers: { project_orq: { type: "http", url } } }));
+
+      const chats = { claude: "c-claude", codex: "c-codex", grok: "c-grok", opencode: "c-opencode" } as const;
+      for (const [agent, id] of Object.entries(chats)) w.host.addChat(id, { project: orq, agent: agent as "claude", runtimeMode: "full-access" });
+      const deny = Object.fromEntries(await Promise.all(Object.entries(chats).map(async ([agent, id]) => {
+        const manifest = await manifestOf(w, id);
+        assert.doesNotMatch(JSON.stringify(manifest), new RegExp(DAEMON_BEARER), "the manifest never carries the credential");
+        return [agent, manifest.deny] as const;
+      })));
+      assert.deepEqual(deny, {
+        claude: ["claude_by_bearer", "claude_by_url", "project_orq"],
+        codex: ["codex_by_bearer", "codex_by_url"],
+        // Grok also loads the user's Claude servers, in every home (Task 6's probe).
+        grok: ["claude_by_bearer", "claude_by_url", "grok_by_bearer", "grok_by_url"],
+        opencode: ["oc_by_bearer", "oc_by_url"]
+      });
+
+      // Each provider's launch applies the denial (the agent host's own translation of the manifest).
+      assert.deepEqual(claudeDisallowedTools(deny.claude!), ["mcp__claude_by_bearer", "mcp__claude_by_url", "mcp__project_orq"]);
+      assert.deepEqual(claudeDeniedMcpServers(deny.claude!).map((entry) => entry.serverName).sort(), ["claude_by_bearer", "claude_by_url", "orquester", "project_orq"]);
+      assert.deepEqual(codexDenyConfig(deny.codex!), { "mcp_servers.codex_by_bearer.enabled": false, "mcp_servers.codex_by_url.enabled": false });
+      const grokServers = grokSessionMcpServers({ url: "http://127.0.0.1:1/session-tools", authorization: "Bearer own", instructions: "", toolNames: new Set(), deny: deny.grok! });
+      assert.deepEqual(grokServers.filter((server) => server.name !== "orquester").map((server) => [server.name, (server as { url?: string }).url]), deny.grok!.map((name) => [name, GROK_UNREACHABLE_SHADOW_URL]), "Grok: each denied name is shadowed by an inert endpoint");
+      const rules = withSessionToolRules([], { isolate: true, deny: deny.opencode! });
+      assert.deepEqual(rules.filter((rule) => rule.action === "deny" && rule.permission.startsWith("oc_")).map((rule) => rule.permission), ["oc_by_bearer_*", "oc_by_url_*"]);
+      // Harmless servers are untouched everywhere.
+      assert.doesNotMatch(JSON.stringify(deny), /_fine/);
+
+      // The agent-profile panel lists each flagged server ("Disabled inside Orquester chats"), never its credential.
+      const panel = await w.user({ method: "GET", url: "/api/agent-profile/daemon-mcp-servers" });
+      assert.equal(panel.status, 200);
+      assert.doesNotMatch(JSON.stringify(panel.body), new RegExp(DAEMON_BEARER));
+      assert.deepEqual([...new Set(panel.body.servers.map((server: { name: string }) => server.name))].sort(), ["claude_by_bearer", "claude_by_url", "codex_by_bearer", "codex_by_url", "grok_by_bearer", "grok_by_url", "oc_by_bearer", "oc_by_url", "project_orq"]);
+
+      // An agent adding one through edit_agent_profile: the Admin card flags it in red; denied, nothing written.
+      w.host.userTurn("c-claude", "Add an Orquester MCP server.");
+      await w.user({ method: "PUT", url: "/api/sessions/c-claude/agent-tools", payload: { toolsets: { "agent-profile-editing": true } } });
+      const add = await w.carded("c-claude", "edit_agent_profile", { agent: "claude", changes: [{ action: "create", mcp: { name: "orq_remote", transport: "http", url } }] }, { decision: "deny" });
+      assert.ok(add.card.sections.some((section) => section.kind === "warning" && section.level === "danger" && /full control of Orquester without approvals/.test(section.text)));
+      refused(add.result, "APPROVAL_DENIED");
+      assert.doesNotMatch(await readFile(w.homes.claudeJson, "utf8"), /orq_remote/);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// External vs chat: who answers a card (§12.1, §7.3, §13)
+// ---------------------------------------------------------------------------
+
+describe("§12.1 / §7.3: an Orquester card is answered only by a person, on its card route — never through the MCP, never by an agent or an external client", () => {
+  test("respond_to_request cannot reach it, the card route refuses agent and external principals, two answers race to one winner", async () => {
+    await withWorld(async (w) => {
+      w.host.addChat("auto", { project: w.project("jaspersito/orquester"), title: "Auto", runtimeMode: "auto" });
+      w.host.addChat("orq3", { project: w.project("jaspersito/orquester-3"), title: "Sibling", runtimeMode: "auto" });
+      w.host.userTurn("auto", "go");
+      const pending = w.chat("auto", "create_session", { project: "jaspersito/orquester-3", prompt: "x", reply: "none" });
+      const card = await w.cards.next();
+      // The external MCP: no request by that id (cards are not provider requests).
+      const viaMcp = await w.external("respond_to_request", { sessionId: "auto", requestId: card.approvalId, decision: "accept" });
+      assert.equal(viaMcp.isError, true);
+      // Another chat's agent, even holding chat-extras: no request by that id either.
+      await w.user({ method: "PUT", url: "/api/sessions/orq3/agent-tools", payload: { toolsets: { "chat-extras": true } } });
+      assert.equal((await w.chat("orq3", "respond_to_request", { sessionId: "auto", requestId: card.approvalId, answers: { "1": "yes" } })).isError, true);
+      // The card route itself refuses any principal but the user's.
+      const route = agentChatRoutes.toolApproval(card.threadId, card.approvalId);
+      for (const principal of [{ kind: "agent", threadId: "orq3", projectPath: w.project("jaspersito/orquester-3"), agent: "claude", title: "Sibling" }, { kind: "external", credentialId: "cred_x" }] as const) {
+        assert.equal((await w.internalApi.request("POST", route, { body: { decision: "approve" }, principal })).status, 403);
+      }
+      // Two people answer: the first wins, the second is told it is no longer pending.
+      const [first, second] = await Promise.all([w.answer(card, { decision: "approve" }), w.answer(card, { decision: "deny" })]);
+      assert.deepEqual([first.status, second.status].sort(), [200, 409]);
+      const result = await pending;
+      const winner = first.status === 200 ? "approve" : "deny";
+      assert.equal(result.isError === true, winner === "deny");
     });
   });
 });
