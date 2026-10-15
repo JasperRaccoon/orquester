@@ -89,7 +89,12 @@ test("TOOLSETS agree with the catalog: a chat tool TOOLSETS names sits in that t
 test("transitional counts: the external surface is today's 72 tools; chat is the 16 legacy session tools", () => {
   assert.deepEqual([...externalMcpToolNames()].sort(), [...EXTERNAL_MCP_TOOL_NAMES].sort());
   assert.equal(catalogFor("external").length, 72);
-  assert.deepEqual(catalogFor("chat").map((tool) => tool.name).sort(), Object.keys(LEGACY_CHAT_META).sort());
+  // Every legacy session-tool name is still served (a family that replaced it keeps the name); any
+  // other chat tool is a new one TOOLSETS names (Task 13: request_toolset).
+  const chat = catalogFor("chat").map((tool) => tool.name);
+  for (const name of Object.keys(LEGACY_CHAT_META)) assert.ok(chat.includes(name), `${name} is no longer served to chats`);
+  const specNames = new Set(chatToolNames());
+  for (const name of chat.filter((n) => !Object.prototype.hasOwnProperty.call(LEGACY_CHAT_META, n))) assert.ok(specNames.has(name), `${name} is in no toolset of TOOLSETS`);
 });
 
 // ---------------------------------------------------------------------------
