@@ -147,6 +147,9 @@ const PURE_MODULES = new Set([
   "agent-chat/activity-ladder.ts",
   // The in-process wait registry (Task 5, re-exported by session-tools/threads/shared.ts): a map, no service.
   "agent-chat/waits.ts",
+  // Task 11: the YAML frontmatter (de)serialiser the adapters write skills with (pure, `yaml` only),
+  // so the card shows a skill's file exactly as it will be written.
+  "agent-profile/infra/frontmatter.ts",
   "mcp/addressing.ts",
   "mcp/agents.ts",
   "mcp/attachments.ts",
@@ -161,6 +164,7 @@ const PURE_MODULES = new Set([
   "mcp/result.ts",
   "mcp/tool.ts",
   "mcp/tools/agent-profile.ts",
+  "mcp/tools/agent-profile-preview.ts",
   "mcp/tools/catalog.ts",
   "mcp/tools/desktop-preview.ts",
   "mcp/tools/desktops.ts",
@@ -213,7 +217,9 @@ const PURE_PACKAGES = new Set([
   "node:fs",
   "node:fs/promises",
   "node:path",
-  "node:stream"
+  "node:stream",
+  // Task 11: frontmatter.ts (pure YAML).
+  "yaml"
 ]);
 
 test("import graph: everything reachable from catalog/index.ts is on the pure allow-list", () => {

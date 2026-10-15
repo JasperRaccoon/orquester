@@ -99,3 +99,8 @@ export async function assertInside(root: string, candidatePath: string): Promise
     throw error;
   }
 }
+
+/** `keepBothNames`' claimed names as one mutable set per kind (each name a request is given joins its set). */
+export function keepBothTakenSets(alsoTaken: Partial<Record<"mcp" | "skill" | "command", Iterable<string>>> = {}): Record<"mcp" | "skill" | "command", Set<string>> {
+  return { mcp: new Set(alsoTaken.mcp ?? []), skill: new Set(alsoTaken.skill ?? []), command: new Set(alsoTaken.command ?? []) };
+}

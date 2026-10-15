@@ -64,6 +64,7 @@ import {
   contentHash,
   copyTree,
   itemId,
+  keepBothTakenSets,
   parseMarkdownDocument,
   pathKind,
   readSkillFiles,
@@ -83,6 +84,9 @@ import {
 import type {
   AdapterMutationResult,
   AdapterSnapshot,
+  KeepBothRequest,
+  KeepBothTaken,
+  PluginSourceLocation,
   PortableItem,
   ProfileAdapter,
   ProfileAdapterContext
@@ -100,6 +104,7 @@ import {
   type InstalledPlugin,
   type KnownMarketplace,
   type PluginProvides,
+  claudePluginSource,
   marketplaceSourceArg,
   parseInstalledPlugins,
   parseKnownMarketplaces,
@@ -893,7 +898,7 @@ export class ClaudeProfileAdapter implements ProfileAdapter {
         if (target in servers) {
           if (onConflict === "fail") throw profileErrors.exists(name);
           if (onConflict === "keep-both") {
-            target = uniqueName(name, (candidate) => candidate in servers);
+            target = keepBothMcpName(servers, name);
           } else {
             const current = servers[target];
             existing = isRecord(current) ? current : undefined;
@@ -918,14 +923,14 @@ export class ClaudeProfileAdapter implements ProfileAdapter {
   }
 
   /** The directory name a new skill lands in, per `onConflict`; "replace" removes the old directory (backed up). */
-  private async claimSkillName(name: string, onConflict: ProfileConflictPolicy): Promise<string> {
+  private async claimSkillName(name: string, onConflict: ProfileConflictPolicy, alsoTaken: ReadonlySet<string> = NO_NAMES): Promise<string> {
     assertSkillName(name);
     assertSafeSegment(name);
     if (name === SYNCED_DIR) {
       throw profileErrors.invalidName(`"${SYNCED_DIR}" is Claude's own directory under skills/.`);
     }
     const taken = async (candidate: string): Promise<boolean> =>
-      candidate === SYNCED_DIR || (await pathKind(join(this.skillsRoot, candidate))) !== null;
+      candidate === SYNCED_DIR || alsoTaken.has(candidate) || (await pathKind(join(this.skillsRoot, candidate))) !== null;
     if (!(await taken(name))) return name;
     if (onConflict === "fail") throw profileErrors.exists(name);
     if (onConflict === "keep-both") return uniqueNameAsync(name, taken);
@@ -941,8 +946,9 @@ export class ClaudeProfileAdapter implements ProfileAdapter {
   }
 
   /** The command name a new command takes, per `onConflict`; "replace" removes the file and any stashed copy. */
-  private async claimCommandName(name: string, onConflict: ProfileConflictPolicy): Promise<string> {
+  private async claimCommandName(name: string, onConflict: ProfileConflictPolicy, alsoTaken: ReadonlySet<string> = NO_NAMES): Promise<string> {
     const taken = async (candidate: string): Promise<boolean> =>
+      alsoTaken.has(candidate) ||
       (await pathKind(this.commandFile(candidate))) !== null ||
       (await this.stash.get(AGENT, "command", itemId("command", candidate))) !== null;
     this.commandFile(name);
@@ -1397,6 +1403,45 @@ export class ClaudeProfileAdapter implements ProfileAdapter {
     return catalog.map((entry) => ({ ...entry, installed: installed.has(`${entry.name}@${marketplace}`) }));
   }
 
+  async keepBothNames(requests: readonly KeepBothRequest[], alsoTaken?: KeepBothTaken): Promise<string[]> {
+    const taken = keepBothTakenSets(alsoTaken);
+    let servers: Record<string, unknown> | undefined;
+    const out: string[] = [];
+    for (const { kind, name } of requests) {
+      let written: string;
+      if (kind === "mcp") {
+        assertMcpServerName(name);
+        if (servers === undefined) {
+          const state = await this.load();
+          servers = state.claudeJson === null ? {} : mcpServersOf(state.claudeJson);
+        }
+        written = keepBothMcpName(servers, name, taken.mcp);
+      } else if (kind === "skill") {
+        // `keep-both` claims a name without touching anything (only `replace` removes).
+        written = await this.claimSkillName(name, "keep-both", taken.skill);
+      } else {
+        written = await this.claimCommandName(name, "keep-both", taken.command);
+      }
+      taken[kind].add(written);
+      out.push(written);
+    }
+    return out;
+  }
+
+  async pluginSource(marketplace: string, plugin: string): Promise<PluginSourceLocation> {
+    const state = await this.load();
+    const known = state.marketplaces.find((m) => m.name === marketplace);
+    if (known === undefined) throw profileErrors.notFound(itemId("marketplace", marketplace));
+    if (known.installLocation === undefined) {
+      return { marketplaceDir: null, source: { type: "remote", description: "a marketplace with no local checkout" } };
+    }
+    try {
+      return { marketplaceDir: known.installLocation, ...(await claudePluginSource(known.installLocation, plugin)) };
+    } catch (error) {
+      throw profileErrors.unreadable(join(known.installLocation, ".claude-plugin", "marketplace.json"), message(error));
+    }
+  }
+
   async exportItem(id: string): Promise<PortableItem> {
     const state = await this.load();
     const entry = this.find(state, id);
@@ -1473,6 +1518,15 @@ export class ClaudeProfileAdapter implements ProfileAdapter {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/** `name`, or the first free `name-<n>` among `servers` (`createMcp`'s keep-both). */
+function keepBothMcpName(servers: Record<string, unknown>, name: string, alsoTaken: ReadonlySet<string> = NO_NAMES): string {
+  const taken = (candidate: string) => candidate in servers || alsoTaken.has(candidate);
+  return taken(name) ? uniqueName(name, taken) : name;
+}
+
+/** No names taken beyond the agent's own (the also-taken default of the naming helpers). */
+const NO_NAMES: ReadonlySet<string> = new Set();
 
 function countLines(text: string): number {
   if (text.length === 0) return 0;

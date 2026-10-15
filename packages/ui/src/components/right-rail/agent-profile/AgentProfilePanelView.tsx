@@ -19,6 +19,7 @@ import {
   type AgentProfileAgentId,
   type AgentProfileSnapshot,
   type ProfileConflictPolicy,
+  type DaemonPointingReason,
   type ProfileItem,
   type ProfileItemKind
 } from "@orquester/api";
@@ -64,6 +65,8 @@ export interface ProfileItemActions {
 
 interface AgentProfilePanelViewProps {
   variant: "docked" | "sheet";
+  /** Why an MCP row's server reaches this Orquester's own /mcp (`daemonPointingReasonFor`), or null. */
+  daemonPointingFor?: (item: ProfileItem) => DaemonPointingReason | null;
   agent: AgentProfileAgentId;
   agents: readonly AgentProfileAgentOption[];
   onAgentChange: (agent: AgentProfileAgentId) => void;
@@ -217,6 +220,7 @@ export const AgentProfilePanelView: React.FC<AgentProfilePanelViewProps> = (prop
                   busy={props.pendingIds.has(item.id)}
                   highlighted={props.highlightId === item.id}
                   copyTargets={props.copyTargetsFor(item)}
+                  daemonPointing={props.daemonPointingFor?.(item) ?? null}
                   confirm={
                     props.confirming?.itemId === item.id
                       ? props.confirming.kind === "delete"

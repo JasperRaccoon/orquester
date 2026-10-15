@@ -97,9 +97,10 @@ import {
 import { fsPathQuery } from "./fs-path-query";
 import { parsePluginActionResult, parsePluginsResponse } from "./plugins-state";
 import { buildQueryString } from "./transporter";
-import { agentProfileRoutes, agentToolsRoutes, desktopRoutes, pluginRoutes, workflowRoutes } from "@orquester/api";
+import { AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, agentProfileRoutes, agentToolsRoutes, desktopRoutes, pluginRoutes, workflowRoutes } from "@orquester/api";
 import type {
   AgentToolsResponse,
+  DaemonMcpServersResponse,
   RevokeAgentToolGrantsResponse,
   ThreadAgentToolsResponse,
   UpdateAgentToolsSettingsRequest,
@@ -734,6 +735,11 @@ export class ApiClient {
 
   getAgentProfileOverview(signal?: AbortSignal): Promise<AgentProfileOverviewResponse> {
     return this.send("GET", agentProfileRoutes.overview, { signal });
+  }
+
+  /** MCP servers in the agents' configs that reach this daemon's own `/mcp` (unified MCP design §12.1). */
+  getDaemonMcpServers(signal?: AbortSignal): Promise<DaemonMcpServersResponse> {
+    return this.send("GET", AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, { signal });
   }
 
   getAgentProfile(agent: AgentProfileAgentId, signal?: AbortSignal): Promise<AgentProfileSnapshot> {

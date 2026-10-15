@@ -49,6 +49,7 @@ export {
   isValidCommandName,
   isValidMcpServerName,
   isValidSkillName,
+  keepBothTakenSets,
   uniqueName,
   uniqueNameAsync
 } from "./names.ts";

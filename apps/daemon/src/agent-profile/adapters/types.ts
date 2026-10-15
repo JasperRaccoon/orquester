@@ -108,6 +108,23 @@ export interface PortableMcpServer {
   advanced?: Record<string, unknown>;
 }
 
+/** One name {@link ProfileAdapter.keepBothNames} resolves. */
+export interface KeepBothRequest {
+  kind: "mcp" | "skill" | "command";
+  name: string;
+}
+
+/** Names already claimed, by kind. */
+export type KeepBothTaken = Partial<Record<KeepBothRequest["kind"], Iterable<string>>>;
+
+/** {@link ProfileAdapter.pluginSource}'s answer. */
+export interface PluginSourceLocation {
+  /** The marketplace's checkout (its commit is pinned on the card); null for a remote-only catalog. */
+  marketplaceDir: string | null;
+  version?: string;
+  source: { type: "local"; dir: string } | { type: "remote"; description: string };
+}
+
 export interface ProfileAdapter {
   readonly agent: AgentProfileAgentId;
 
@@ -138,6 +155,22 @@ export interface ProfileAdapter {
 
   /** The plugins a marketplace offers (Claude, Codex, Grok). */
   listMarketplacePlugins?(marketplace: string): Promise<MarketplacePluginEntry[]>;
+
+  /**
+   * Where a marketplace plugin's files are BEFORE it is installed (approval-card previews,
+   * unified MCP design §7.1): a directory inside the marketplace's checkout, or a source the CLI
+   * fetches at install. Read-only; an adapter without it cannot show a plugin before installing.
+   */
+  pluginSource?(marketplace: string, plugin: string): Promise<PluginSourceLocation>;
+
+  /**
+   * The names creates, imports or copies land on with `onConflict: "keep-both"`, in order — each
+   * the name itself when it is free — computed by the very naming code the writes run (approval
+   * cards show and pin them). The requests are named one after another as the writes happen:
+   * each name given counts as taken for the next. `alsoTaken`: names an earlier change of the same
+   * batch writes first. The agent's state is read once per call. Read-only.
+   */
+  keepBothNames?(requests: readonly KeepBothRequest[], alsoTaken?: KeepBothTaken): Promise<string[]>;
 
   /** Lift a copyable item (`PROFILE_COPYABLE_KINDS`) out, real secret values included. Caller owns any temp dir. */
   exportItem(id: string): Promise<PortableItem>;

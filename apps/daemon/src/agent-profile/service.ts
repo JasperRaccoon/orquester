@@ -35,6 +35,7 @@
  *   directory a copy exports or converts is removed once the copy finishes.
  */
 
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { watch as fsWatch } from "node:fs";
 import { realpath as fsRealpath, rm } from "node:fs/promises";
@@ -68,13 +69,24 @@ import type {
   AdapterMutationResult,
   AdapterSnapshot,
   AgentHomes,
+  KeepBothRequest,
   PortableItem,
   ProfileAdapter
 } from "./adapters/types.ts";
 import { AgentProfileError, profileErrors } from "./errors.ts";
 import type { ProfileConverter } from "./convert.ts";
 import type { ProfileImports } from "./import.ts";
-import { assertCommandName, assertMcpServerName, assertSkillName, contentHash, parseItemId } from "./infra/index.ts";
+import { assertCommandName, assertMcpServerName, assertSkillName, contentHash, parseItemId, parseMarkdownDocument, serializeMarkdownDocument } from "./infra/index.ts";
+import type { McpCandidate } from "./daemon-mcp.ts";
+import { pluginProvidesOf, readGitCommit, readInstalledPlugin, readPreviewTree } from "./preview-reads.ts";
+import type {
+  ProfileCopyPreviewResponse,
+  ProfileImportDetailResponse,
+  ProfileItemFilesResponse,
+  ProfilePluginPreviewResponse,
+  ProfilePreviewFile,
+  ProfileTakenNames
+} from "@orquester/api";
 
 /** What the registry knows about an agent's CLI. */
 interface AgentInstallInfo {
@@ -275,6 +287,182 @@ export class AgentProfileService {
       throw profileErrors.kindNotSupported(AGENT_PROFILE_AGENT_LABELS[agent], "marketplace");
     }
     return adapter.listMarketplacePlugins(marketplace);
+  }
+
+  // -------------------------------------------------------------------------
+  // Approval-card reads (unified MCP design 2026-10-15 §7.1, §7.2; `@orquester/api` agent-profile.ts)
+  // -------------------------------------------------------------------------
+
+  /** A skill's, command's or installed plugin's files in full, with hashes, and the item's revision now; a plugin's `provides` too. */
+  async itemFiles(agent: AgentProfileAgentId, id: string): Promise<ProfileItemFilesResponse> {
+    this.installedAdapter(agent);
+    const item = (await this.snapshot(agent)).items.find((entry) => entry.id === id);
+    if (item === undefined) throw profileErrors.notFound(id);
+    if ((item.kind !== "skill" && item.kind !== "command" && item.kind !== "plugin") || item.path === undefined) {
+      throw profileErrors.invalid(`Only a skill's, a command's or an installed plugin's files can be read.`);
+    }
+    try {
+      if (item.kind === "plugin") {
+        // Codex reports the unversioned cache directory; the files are in its version directory.
+        const installed = await readInstalledPlugin(item.path, item.meta?.version);
+        return { itemId: id, revision: item.revision, ...installed.tree, provides: installed.provides, ...(installed.unreadable ? { unreadable: installed.unreadable } : {}) };
+      }
+      const tree = await readPreviewTree(item.path);
+      return { itemId: id, revision: item.revision, ...tree };
+    } catch (error) {
+      throw profileErrors.unreadable(item.path, describe(error));
+    }
+  }
+
+  /** An open import scan in full (its source, commit and every candidate's files). */
+  async importDetail(
+    agent: AgentProfileAgentId,
+    importId: string,
+    onConflict: ProfileConflictPolicy = "fail",
+    order: { picks?: string[]; taken?: ProfileTakenNames } = {}
+  ): Promise<ProfileImportDetailResponse> {
+    this.installedAdapter(agent);
+    const imports = this.requireImports();
+    if (!imports.inspect) throw new AgentProfileError(503, "AGENT_PROFILE_ERROR", "Imports cannot be inspected.");
+    const detail = await imports.inspect(agent, importId);
+    if (onConflict !== "keep-both") return detail;
+    // keep-both: each pick as the import will write it — in pick order, one after another (as
+    // `take` and the adapter's imports do), so a name an earlier pick takes is taken for the next;
+    // its `SKILL.md` carrying the name (as every adapter's import aligns it).
+    // Only the picks are named (an unpicked candidate's name is never asked, so never refused),
+    // all in one adapter call (its state read once).
+    const byRef = new Map(detail.candidates.map((candidate) => [candidate.ref, candidate]));
+    const refs = order.picks ? [...new Set(order.picks)].filter((ref) => byRef.has(ref)) : detail.candidates.map((candidate) => candidate.ref);
+    const names = await this.keepBothNames(agent, refs.map((ref) => ({ kind: byRef.get(ref)!.kind, name: byRef.get(ref)!.name })), order.taken);
+    const written = new Map(refs.map((ref, index) => [ref, names[index]!]));
+    const candidates = detail.candidates.map((candidate) => {
+      const name = written.get(candidate.ref);
+      if (name === undefined) return candidate;
+      // A skill's SKILL.md carries the name; a command's file is shown as the file it is written to.
+      const files = candidate.kind === "skill"
+        ? renameSkillFile(candidate.files, name, agent)
+        : candidate.files.map((file) => (file.path === `${candidate.name}.md` ? { ...file, path: `${name}.md` } : file));
+      return { ...candidate, writtenName: name, files };
+    });
+    return { ...detail, candidates };
+  }
+
+  /**
+   * The name a keep-both create of this kind lands on, by the agent's own naming (`name` when
+   * free); `alsoTaken`: names an earlier change of the same batch writes first.
+   */
+  async keepBothName(
+    agent: AgentProfileAgentId,
+    kind: "mcp" | "skill" | "command",
+    name: string,
+    alsoTaken?: ProfileTakenNames
+  ): Promise<string> {
+    return (await this.keepBothNames(agent, [{ kind, name }], alsoTaken))[0]!;
+  }
+
+  /** Several keep-both names in order, each counting the ones before it as taken (`ProfileAdapter.keepBothNames`). */
+  async keepBothNames(agent: AgentProfileAgentId, requests: readonly KeepBothRequest[], alsoTaken?: ProfileTakenNames): Promise<string[]> {
+    const adapter = this.installedAdapter(agent);
+    if (!adapter.keepBothNames) throw new AgentProfileError(503, "AGENT_PROFILE_ERROR", `${AGENT_PROFILE_AGENT_LABELS[agent]} cannot name a keep-both copy ahead.`);
+    return requests.length === 0 ? [] : adapter.keepBothNames(requests, alsoTaken);
+  }
+
+  /**
+   * An item as a copy to `toAgent` will write it: exported, converted (exactly as `copy` does),
+   * named by the target's own keep-both naming when asked, a skill's `SKILL.md` carrying that name.
+   * Nothing is written; the exported and converted copies are removed.
+   */
+  async copyPreview(
+    fromAgent: AgentProfileAgentId,
+    id: string,
+    toAgent: AgentProfileAgentId,
+    onConflict: ProfileConflictPolicy,
+    taken?: ProfileTakenNames
+  ): Promise<ProfileCopyPreviewResponse> {
+    assertAgent(fromAgent);
+    assertAgent(toAgent);
+    if (fromAgent === toAgent) throw profileErrors.invalid("Copy to a different agent: an item cannot be copied onto its own agent.");
+    const idKind = kindOfId(id);
+    if (idKind && !PROFILE_COPYABLE_KINDS.includes(idKind)) throw notCopyable(idKind);
+    const source = this.installedAdapter(fromAgent);
+    this.installedAdapter(toAgent);
+    const item = (await this.snapshot(fromAgent)).items.find((entry) => entry.id === id);
+    if (item === undefined) throw profileErrors.notFound(id);
+    const portable = await this.enqueue(fromAgent, () => source.exportItem(id));
+    const owned: PortableItem[] = [portable];
+    try {
+      if (!PROFILE_COPYABLE_KINDS.includes(portable.kind)) throw notCopyable(portable.kind);
+      const conversion = await this.converter(portable, fromAgent, toAgent);
+      owned.push(conversion.item);
+      assertPortableReceivable(toAgent, conversion.item);
+      const converted = conversion.item;
+      const base = converted.kind === "mcp" ? converted.server.name : converted.name;
+      const name = onConflict === "keep-both" ? await this.keepBothName(toAgent, converted.kind, base, taken) : base;
+      const head = { itemId: id, revision: item.revision, kind: converted.kind, name, notes: [...conversion.notes] };
+      if (converted.kind === "mcp") return head;
+      if (converted.kind === "skill") {
+        const tree = await readPreviewTree(converted.dir);
+        return { ...head, tree: { ...tree, files: renameSkillFile(tree.files, name, toAgent) } };
+      }
+      const text = serializeMarkdownDocument(converted.frontmatter, converted.body, toAgent === "opencode" ? { yaml: "1.1" } : {});
+      const bytes = Buffer.from(text, "utf8");
+      return { ...head, tree: { complete: true, files: [{ path: `${name}.md`, size: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex"), text }] } };
+    } finally {
+      await this.disposePortable(owned);
+    }
+  }
+
+  /** A marketplace plugin before it is installed: its files, what it ships, the marketplace's commit. */
+  async pluginPreview(agent: AgentProfileAgentId, marketplace: string, plugin: string): Promise<ProfilePluginPreviewResponse> {
+    const adapter = this.installedAdapter(agent);
+    if (!AGENT_PROFILE_KINDS[agent].includes("marketplace")) {
+      throw profileErrors.kindNotSupported(AGENT_PROFILE_AGENT_LABELS[agent], "marketplace");
+    }
+    const provides: ProfilePluginPreviewResponse["provides"] = { skills: [], commands: [], agents: [], hooks: [], mcpServers: [] };
+    if (!adapter.pluginSource) {
+      const reason = `Orquester cannot read a ${AGENT_PROFILE_AGENT_LABELS[agent]} plugin before it is installed.`;
+      return { marketplace, plugin, commit: null, source: { type: "unavailable", reason }, provides };
+    }
+    const location = await adapter.pluginSource(marketplace, plugin);
+    const commit = location.marketplaceDir !== null ? await readGitCommit(location.marketplaceDir) : null;
+    const head = { marketplace, plugin, ...(location.version !== undefined ? { version: location.version } : {}), commit };
+    if (location.source.type === "remote") return { ...head, source: location.source, provides };
+    // The commit pins the plugin only when its directory really lies in the checkout (realpaths).
+    if (location.marketplaceDir === null || !(await realpathInside(location.marketplaceDir, location.source.dir))) {
+      Object.assign(head, { outsideCheckout: true });
+    }
+    let tree;
+    try {
+      tree = await readPreviewTree(location.source.dir);
+    } catch (error) {
+      throw profileErrors.unreadable(location.source.dir, describe(error));
+    }
+    return { ...head, source: { type: "local", ...tree }, provides: pluginProvidesOf(tree) };
+  }
+
+  /**
+   * An MCP item's current definition as a daemon-pointing candidate (`daemon-mcp.ts`): REAL
+   * header/env values, for the daemon's own check only — never serialised or logged.
+   */
+  async mcpCandidate(agent: AgentProfileAgentId, id: string): Promise<McpCandidate | null> {
+    if (!id.startsWith("mcp:")) return null;
+    const item = await this.installedAdapter(agent).exportItem(id);
+    if (item.kind !== "mcp") return null;
+    const server = item.server;
+    // Codex names its bearer by environment variable: `bearer_token_env_var`, the header → variable
+    // map `env_http_headers`, and the passed-through `env_vars`.
+    const names = (value: unknown): string[] =>
+      typeof value === "string" ? [value]
+      : Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string")
+      : value !== null && typeof value === "object" ? Object.values(value).filter((entry): entry is string => typeof entry === "string")
+      : [];
+    const advanced = server.advanced ?? {};
+    return {
+      name: server.name,
+      ...(server.url !== undefined ? { url: server.url } : {}),
+      values: [...Object.values(server.headers ?? {}), ...Object.values(server.env ?? {}), ...(server.args ?? []), ...(server.command ? [server.command] : [])],
+      envRefs: [...names(advanced.bearer_token_env_var), ...names(advanced.env_http_headers), ...names(advanced.env_vars)]
+    };
   }
 
   // -------------------------------------------------------------------------
@@ -874,4 +1062,35 @@ function excerpt(value: string, max = 80): string {
 /** An error for a log line. Adapter errors never carry secret values (the adapter contract). */
 function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * A skill's files with its `SKILL.md` frontmatter `name` set to `name`, as the adapters align a
+ * renamed import or copy (in place, or first). A file that already carries it is left as it is.
+ */
+function renameSkillFile(files: ProfilePreviewFile[], name: string, agent: AgentProfileAgentId): ProfilePreviewFile[] {
+  return files.map((file) => {
+    if (file.path !== "SKILL.md" || file.text === undefined) return file;
+    let document;
+    try {
+      document = parseMarkdownDocument(file.text);
+    } catch {
+      return file;
+    }
+    if (document.frontmatter.name === name) return file;
+    const frontmatter = "name" in document.frontmatter ? { ...document.frontmatter, name } : { name, ...document.frontmatter };
+    const text = serializeMarkdownDocument(frontmatter, document.body, agent === "opencode" ? { yaml: "1.1" } : {});
+    const bytes = Buffer.from(text, "utf8");
+    return { ...file, size: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex"), text };
+  });
+}
+
+/** Whether `path`'s realpath lies inside (or is) `root`'s realpath; false when either cannot be resolved. */
+async function realpathInside(root: string, path: string): Promise<boolean> {
+  try {
+    const [realRoot, realPath] = await Promise.all([fsRealpath(root), fsRealpath(path)]);
+    return realPath === realRoot || realPath.startsWith(realRoot.endsWith("/") ? realRoot : `${realRoot}/`);
+  } catch {
+    return false;
+  }
 }
