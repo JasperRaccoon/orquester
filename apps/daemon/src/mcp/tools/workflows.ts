@@ -370,7 +370,10 @@ const OUTPUT_NOTE = "Outputs marked outputTruncated are cut (outputText is the h
 function runView(run: WorkflowRun, opts: { includeOutputs: boolean; extra?: Record<string, unknown> }): Record<string, unknown> {
   const blocks = orderedBlocks(run);
   const views = blocks.map(blockView);
-  const result: Record<string, unknown> = { ...(opts.extra ?? {}), run: runSummaryView(run), blocks: views };
+  const summary = runSummaryView(run);
+  // The sub-workflow revisions the run froze as it started (what its Run workflow blocks run).
+  if (run.subWorkflowRevisions && Object.keys(run.subWorkflowRevisions).length > 0) summary.subWorkflowRevisions = { ...run.subWorkflowRevisions };
+  const result: Record<string, unknown> = { ...(opts.extra ?? {}), run: summary, blocks: views };
   if (!opts.includeOutputs) return result;
   const slots: OutputSlot[] = blocks.map((b, i) => ({ holder: views[i]!, value: b.output, daemonTruncated: b.outputTruncated === true, key: "output" }));
   const runHolder = result.run as Record<string, unknown>;

@@ -959,6 +959,9 @@ test("run_workflow: the run's frozen sub-workflows must be the pinned revisions,
   api.on("GET", "/api/workflow-runs/run-1", { status: 200, body: { run: { ...runRecord(parent), subWorkflowRevisions: { "wf-child": 3 } } } });
   const started = await call(api, "run_workflow", { workflowId: "wf-1", revision: 7 }, { who: chat(api), port });
   assert.equal(started.status, "started");
+  // Watching the run names what it froze.
+  const watched = await call(api, "get_workflow_runs", { runId: "run-1" });
+  assert.deepEqual((watched.run as Record<string, unknown>).subWorkflowRevisions, { "wf-child": 3 });
 });
 
 test("grants fail closed on a union member that no longer resolves, and cover a sub-workflow only when the same grant covers it", async (t) => {
