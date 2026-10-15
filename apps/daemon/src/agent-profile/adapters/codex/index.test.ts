@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { cp, lstat, mkdir, mkdtemp, readFile, readlink, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, it } from "node:test";
+import { afterEach, beforeEach, describe, it, mock } from "node:test";
 import { fileURLToPath } from "node:url";
 import { parse as parseToml } from "@decimalturn/toml-patch";
 import type { ProfileItem } from "@orquester/api";
@@ -232,12 +232,21 @@ describe("CodexProfileAdapter", () => {
   let f: Fixture;
 
   beforeEach(async () => {
+    // The app-server client's deadlines are wall-clock timers (a call's, the idle close's, the kill
+    // grace's). This suite tests the adapter, not them (codex-config-client.test.ts does), and its
+    // app-server is a Node script whose startup on a loaded host can outlast any deadline: mocked and
+    // never ticked, none of them fires here.
+    mock.timers.enable({ apis: ["setTimeout"] });
     f = await makeFixture();
   });
 
   afterEach(async () => {
-    await f.adapter.close();
-    await rm(f.root, { recursive: true, force: true });
+    try {
+      await f.adapter.close();
+      await rm(f.root, { recursive: true, force: true });
+    } finally {
+      mock.timers.reset();
+    }
   });
 
   describe("snapshot", () => {

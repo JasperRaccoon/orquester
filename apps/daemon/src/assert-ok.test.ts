@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { fork } from "node:child_process";
+import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -31,43 +31,41 @@ test("message-less assertions in a long tsx module fail promptly", async (t) => 
     '}',
     'process.stdout.write(String(failures));'
   ].join("\n"));
-  // Keep the handshake outside the position-sensitive regression fixture.
+  // Keep the measurement outside the position-sensitive regression fixture.
   const runner = join(dir, "runner.mjs");
   await writeFile(runner, [
-    'await new Promise((resolve) => {',
-    '  process.once("message", resolve);',
-    '  process.send("ready");',
-    '});',
+    'const before = process.cpuUsage();',
     'await import("./failure.mts");',
-    'process.disconnect();'
+    'const { user, system } = process.cpuUsage(before);',
+    'process.send((user + system) / 1000, () => process.disconnect());'
   ].join("\n"));
-  const child = fork(runner, [], {
-    execArgv: [
-      "--import", import.meta.resolve("tsx"),
-      "--import", fileURLToPath(new URL("../../../scripts/test/assert-ok.mjs", import.meta.url))
-    ],
-    silent: true
+  // Both limits are CPU time, never wall time: the regression is a CPU-bound re-parse, and on a
+  // loaded host (ten runnable processes per core) the wall time of a healthy run is unbounded.
+  // The kernel ends a child that burns CPU_LIMIT_S however it got there (RLIMIT_CPU, soft = hard,
+  // so SIGKILL); ASSERTIONS_CPU_MS bounds the assertions, which include the first one's lazy
+  // TypeScript parser load, and excludes the loader startup before them.
+  const CPU_LIMIT_S = 60;
+  const ASSERTIONS_CPU_MS = 10_000;
+  const node = [
+    process.execPath,
+    "--import", import.meta.resolve("tsx"),
+    "--import", fileURLToPath(new URL("../../../scripts/test/assert-ok.mjs", import.meta.url)),
+    runner
+  ];
+  const child = spawn("/bin/sh", ["-c", `ulimit -t ${CPU_LIMIT_S} && exec "$@"`, "sh", ...node], {
+    stdio: ["ignore", "pipe", "pipe", "ipc"]
   });
+  t.after(() => { child.kill("SIGKILL"); });
   let stdout = "";
   let stderr = "";
   child.stdout!.on("data", (chunk) => { stdout += chunk; });
   child.stderr!.on("data", (chunk) => { stderr += chunk; });
-  let phase = "startup";
-  let timer = setTimeout(() => child.kill("SIGKILL"), 30_000);
-  child.once("message", () => {
-    clearTimeout(timer);
-    phase = "assertions";
-    // Exclude loader startup, but include the first assertion's lazy parser load.
-    timer = setTimeout(() => child.kill("SIGKILL"), 10_000);
-    child.send("run");
-  });
-  try {
-    const [code, signal] = await once(child, "close");
-    assert.equal(signal, null, `${phase} exceeded its deadline: ${stderr}`);
-    assert.equal(code, 0, stderr);
-    assert.equal(stdout, "2", "both failing entrypoints completed with AssertionError");
-  } finally {
-    clearTimeout(timer);
-    child.kill("SIGKILL");
-  }
+  let assertionsCpuMs: number | undefined;
+  child.once("message", (cpuMs) => { assertionsCpuMs = cpuMs as number; });
+  const [code, signal] = await once(child, "close");
+  assert.equal(signal, null, `the child was killed (its CPU limit is ${CPU_LIMIT_S} s): ${stderr}`);
+  assert.equal(code, 0, stderr);
+  assert.equal(stdout, "2", "both failing entrypoints completed with AssertionError");
+  assert.ok(assertionsCpuMs !== undefined, "the runner reported its CPU time");
+  assert.ok(assertionsCpuMs < ASSERTIONS_CPU_MS, `the assertions took ${assertionsCpuMs} ms of CPU`);
 });

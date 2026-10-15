@@ -29,6 +29,8 @@ describe("CodexAppServerClient", () => {
     await rm(dir, { recursive: true, force: true });
   });
 
+  // Every test mocks setTimeout: a deadline fires only when the test ticks it, never because the
+  // fake app-server (a Node script) started slowly on a loaded host.
   function client(extra: Partial<ConstructorParameters<typeof CodexAppServerClient>[0]> = {}) {
     const created = new CodexAppServerClient({
       bin: process.execPath,
@@ -53,7 +55,8 @@ describe("CodexAppServerClient", () => {
       .map((line) => JSON.parse(line) as { pid: number; method: string; params: unknown });
   }
 
-  it("spawns on demand with CODEX_HOME, handshakes once and reuses the child", async () => {
+  it("spawns on demand with CODEX_HOME, handshakes once and reuses the child", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
     const c = client();
     const read = await c.call("config/read", { includeLayers: true });
     assert.equal(read.layers?.[0].name.type, "user");
@@ -119,7 +122,8 @@ describe("CodexAppServerClient", () => {
     }
   });
 
-  it("hands an answered error back as CodexRpcError, mapped by toProfileError", async () => {
+  it("hands an answered error back as CodexRpcError, mapped by toProfileError", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
     const c = client();
     const error = await c
       .call("config/batchWrite", {
@@ -142,7 +146,8 @@ describe("CodexAppServerClient", () => {
     assert.equal(invalid.code, "INVALID_ITEM");
   });
 
-  it("reports a binary that does not start as AGENT_CLI_FAILED", async () => {
+  it("reports a binary that does not start as AGENT_CLI_FAILED", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
     const c = client({ bin: join(dir, "no-such-codex"), args: ["app-server"] });
     await assert.rejects(c.call("config/read", {}), (error: unknown) => {
       assert.ok(error instanceof AgentProfileError);
