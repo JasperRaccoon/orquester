@@ -423,6 +423,8 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
 
   /** A refresh for a thread whose launch is reading its manifest: hand it over (the newest wins). */
   const offerPushed = (threadId: string, manifest: SessionToolsManifest): void => {
+    // A push older than what the thread already launched with (or from a retired daemon) is no answer.
+    if (isStale(threadId, stampOf(manifest))) return;
     for (const box of mailboxes.get(threadId) ?? []) {
       if (box.pushed !== undefined && !newerThan(stampOf(manifest), stampOf(box.pushed))) continue;
       box.pushed = manifest;
