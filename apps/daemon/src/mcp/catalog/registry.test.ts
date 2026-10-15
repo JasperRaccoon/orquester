@@ -86,10 +86,14 @@ test("TOOLSETS agree with the catalog: a chat tool TOOLSETS names sits in that t
   for (const toolset of TOOLSETS) for (const entry of toolset.tools) assert.match(entry.name, TOOL_NAME_PATTERN);
 });
 
-test("transitional counts: the external surface is today's 72 tools; chat is the 16 legacy session tools", () => {
+test("transitional counts: the external surface is tool-names.ts's list; chat is the legacy session tools plus the landed TOOLSETS tools", () => {
   assert.deepEqual([...externalMcpToolNames()].sort(), [...EXTERNAL_MCP_TOOL_NAMES].sort());
-  assert.equal(catalogFor("external").length, 72);
-  assert.deepEqual(catalogFor("chat").map((tool) => tool.name).sort(), Object.keys(LEGACY_CHAT_META).sort());
+  assert.equal(catalogFor("external").length, EXTERNAL_MCP_TOOL_NAMES.length);
+  // Each Wave 3 family replaces its legacy entries with the TOOLSETS tools it owns (Task 14 asserts 41 / 45 / 22).
+  const specNames = new Set(chatToolNames());
+  for (const tool of catalogFor("chat")) {
+    assert.ok(specNames.has(tool.name) || Object.prototype.hasOwnProperty.call(LEGACY_CHAT_META, tool.name), `${tool.name} is neither a TOOLSETS tool nor a legacy session tool`);
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -178,7 +182,10 @@ const PURE_MODULES = new Set([
   "session-tools/threads/delegation.ts",
   "session-tools/threads/shared.ts",
   "session-tools/threads/threads.ts",
-  "session-tools/turn-policy.ts"
+  "session-tools/turn-policy.ts",
+  // get_usage prices Codex session tokens with the Cost tab's own table (`estimateCostParts`): no side effect at load,
+  // node:fs/promises + node:path + types only (unified MCP Task 9).
+  "usage-tokens.ts"
 ]);
 
 const PURE_PACKAGES = new Set([
@@ -318,7 +325,9 @@ test("byte budgets: §9.5 for every non-legacy tool; legacy tools held to their 
         const defaults = rows.filter((row) => on.has(toolByName(row.name)!.toolset));
         assert.ok(total(defaults) <= 32_768, `${agent}: default chat tools/list is ${total(defaults)} bytes`);
       }
-      const core = rows.filter((row) => toolByName(row.name)!.toolset === "core");
+      // Transitional: while legacy session tools still sit in core beside the tools that will replace them, core is
+      // held to §9.5 without them (the default set above counts everything); Task 14 drops the exemption.
+      const core = rows.filter((row) => toolByName(row.name)!.toolset === "core" && !isLegacy(toolByName(row.name)!));
       assert.ok(total(core) <= 25_600, `core alone is ${total(core)} bytes`);
       for (const row of rows) assert.equal((row.listed as { _meta?: unknown })._meta, undefined, "chat entries carry no _meta");
     }

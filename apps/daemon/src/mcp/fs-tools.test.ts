@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname,join } from "node:path";
 import { FsSandboxError } from "@orquester/config/fs";
 import { ToolError } from "./errors.ts";
-import { FsTools } from "./fs-tools.ts";
+import { FsDirectoryError, FsTools } from "./fs-tools.ts";
 
 async function makeRoot(t: TestContext) {
   const root = await mkdtemp(join(tmpdir(), "orq-fs-tools-"));
@@ -133,8 +133,7 @@ test("readFileWindow refuses binary files, directories, and missing files with s
   await assert.rejects(
     () => tools.readFileWindow("dir"),
     (error) => {
-      assert.ok(error instanceof ToolError);
-      assert.match(error.message, /list_files/);
+      assert.ok(error instanceof FsDirectoryError, "read_file lists a directory instead");
       return true;
     }
   );

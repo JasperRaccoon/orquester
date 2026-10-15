@@ -7,6 +7,7 @@ import type { AgentChatService } from "../agent-chat/service.ts";
 import { HtmlRenderPublishError } from "../agent-chat/html-render-publish.ts";
 import { HtmlPreviewError, type HtmlPreview } from "../html-preview/index.ts";
 import { isUploadTooLarge, UploadTooLargeError } from "../upload-stream.ts";
+import { FsTools, type ListFilesResult, type ReadFileWindowResult } from "./fs-tools.ts";
 import { mintPrincipalToken } from "./principal.ts";
 
 export type DaemonMethod = "GET" | "POST" | "PUT" | "DELETE";
@@ -57,6 +58,14 @@ export interface DaemonApi {
   publishHtmlRender(request: HtmlRenderPublishRequest): Promise<DaemonOutcome<HtmlRenderReference>>;
   /** Screenshot a page in headless Chromium, as `threadId`'s reader would see it. */
   previewHtmlRender(request: HtmlPreviewRequest): Promise<DaemonOutcome<HtmlPreview>>;
+  /**
+   * A directory listing inside the sandbox (`FsTools.listFiles`, D-19): a relative path is taken from `fsRoot`. Throws
+   * `ToolError`s written for the agent. Optional so the many test doubles of this seam need not grow it; `read_file`
+   * answers UNAVAILABLE without it.
+   */
+  listDirectory?(path: string): Promise<ListFilesResult>;
+  /** A text file's byte window inside the sandbox (`FsTools.readFileWindow`); a directory throws `FsDirectoryError`. */
+  readFileRange?(path: string, opts: { offset?: number; maxBytes?: number }): Promise<ReadFileWindowResult>;
   readonly fsRoot: string;
   readonly workspacesDir: string;
 }
@@ -170,6 +179,15 @@ export class InjectDaemonApi implements DaemonApi {
     }
   }
 
+  /** Read at every call: `fsRoot` follows `PUT /api/config/daemon`. */
+  listDirectory(path: string): Promise<ListFilesResult> {
+    return new FsTools({ fsRoot: this.fsRoot }).listFiles(path);
+  }
+
+  readFileRange(path: string, opts: { offset?: number; maxBytes?: number }): Promise<ReadFileWindowResult> {
+    return new FsTools({ fsRoot: this.fsRoot }).readFileWindow(path, opts);
+  }
+
   subscribe(listener: (event: EventMessage) => void): () => void {
     // `Broadcaster.publish` drops a sink whose `send` throws — never throw here.
     const sink = { send: (data: string) => { try { listener(JSON.parse(data) as EventMessage); } catch { /* ignore */ } } };
@@ -190,6 +208,8 @@ export function withPrincipal(api: DaemonApi, principal: CallerPrincipal): Daemo
     subscribe: (listener) => api.subscribe(listener),
     publishHtmlRender: (request) => api.publishHtmlRender(request),
     previewHtmlRender: (request) => api.previewHtmlRender(request),
+    ...(api.listDirectory ? { listDirectory: (path: string) => api.listDirectory!(path) } : {}),
+    ...(api.readFileRange ? { readFileRange: (path: string, opts: { offset?: number; maxBytes?: number }) => api.readFileRange!(path, opts) } : {}),
     get fsRoot() { return api.fsRoot; },
     get workspacesDir() { return api.workspacesDir; }
   };

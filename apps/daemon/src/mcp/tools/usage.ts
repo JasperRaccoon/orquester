@@ -1,80 +1,66 @@
-// Catalog family module `usage` (Usage: get_usage) — owned by plan Task 9 (unified MCP, Wave 3).
-// Task 2 stub: `usageFamily` exports this family's tools as catalog tools (`../catalog/legacy.ts`
-// adapters over the pre-catalog definitions below); the owning task replaces it and Task 2 never
-// edits this file again.
+// Catalog family module `usage` (get_usage) — plan Task 9 (unified MCP design 2026-10-15 §4 row 18, §4.1, ruling S9):
+// quota windows, cost by day or ISO week, and one chat session's tokens and cost.
 import { z } from "zod";
 import type { AgentAccountsResponse, UsageResponse, UsageTokensResponse } from "@orquester/api";
-import { expectOk } from "../errors.ts";
-import { defineTool, READ_ONLY, type ToolDef } from "../tool.ts";
-import { usageView } from "../usage-view.ts";
-import { resultBytes } from "../result.ts";
-import { legacyChatTools, legacyExternalTools } from "../catalog/legacy.ts";
-import { threadTools as legacyThreadTools } from "../../session-tools/threads/threads.ts";
-import { delegationTools as legacyDelegationTools } from "../../session-tools/threads/delegation.ts";
+import { canonicalProject } from "../addressing.ts";
+import { defineTool, READ_ONLY, type AnyOrquesterTool, type ScopeClaim } from "../catalog/contract.ts";
+import { expectOk, ToolError } from "../errors.ts";
+import { readThread, requireChatSession } from "../reads.ts";
+import { costView, sessionUsageView, usageView } from "../usage-view.ts";
 
-/**
- * get_cost's own budget, counted as ok() counts (UTF-8 bytes of the JSON, result.ts) and 10 000 under its 60 000-byte
- * cap: an oversized cost table is shed here, whole days oldest first, so it never reaches ok()'s last-resort cut,
- * which would keep only the head of the text. The head itself (≤ 90 byDay rows, a few KB) is never shed.
- */
-const MAX_COST_RESULT_BYTES = 50_000;
+const INCLUDES = ["quota", "cost", "session"] as const;
+type Include = (typeof INCLUDES)[number];
 
-const round4 = (usd: number): number => Math.round(usd * 10_000) / 10_000;
+/** `include` as given, else `session` when a sessionId is named, else `quota` (§4.1). */
+function includes(args: { include?: readonly Include[]; sessionId?: string }): Set<Include> {
+  return new Set(args.include ?? (args.sessionId !== undefined ? ["session"] : ["quota"]));
+}
 
 const getUsage = defineTool({
   name: "get_usage",
-  title: "Get subscription usage",
-  description: "Quota per agent family and per managed account — the 5h, weekly and per-model (e.g. Fable) windows as % USED with reset times — exactly as the usage widget shows them. An absent family is not signed in; stale:true with no asOf means no reading yet. refresh:true may still return last-known data; never call it in a loop.",
-  input: { refresh: z.boolean().default(false).describe("Ask the daemon to re-fetch before answering.") },
+  title: "Get usage and cost",
+  description: "quota: % USED per agent/account window, with resets. cost: API-equivalent USD per agent/model by UTC day or ISO week. session: one chat's tokens and cost; costSource reported, estimated or mixed; partial: older turns uncounted. Never poll.",
+  input: {
+    include: z.array(z.enum(INCLUDES)).min(1).max(3).optional().describe("Default quota; session with sessionId."),
+    bucket: z.enum(["day", "week"]).default("day"),
+    days: z.number().int().min(1).max(90).default(7).describe("cost: days back."),
+    sessionId: z.string().min(1).max(200).optional(),
+    refresh: z.boolean().default(false)
+  },
+  audiences: ["external", "chat"],
+  toolset: "core",
+  tier: "read",
+  async scope(args, { api }): Promise<ScopeClaim> {
+    if (!includes(args).has("session") || args.sessionId === undefined) return { projects: [], sessions: [], reads: "metadata", writes: false, causesTurnIn: [] };
+    // One session's usage is that session's metadata: its project is the target the gate classifies (§5.2).
+    const session = await requireChatSession(api, args.sessionId);
+    const project = session.projectPath ? await canonicalProject(api, session.projectPath) : null;
+    return { projects: project ? [project.canonical] : [], sessions: [args.sessionId], reads: "metadata", writes: false, causesTurnIn: [] };
+  },
   annotations: READ_ONLY,
-  async run(args, { api, now }) {
-    const usage = expectOk<UsageResponse>(await api.request("GET", "/api/usage", args.refresh ? { query: { refresh: "1" } } : undefined));
-    const accountsRes = await api.request("GET", "/api/agent-accounts");
-    const accounts = accountsRes.status < 400 ? (accountsRes.body as AgentAccountsResponse).accounts ?? [] : [];
-    return usageView(usage, accounts, now()) as unknown as Record<string, unknown>;
+  resultKind: "json",
+  async run(args, { api, now, caller }) {
+    const wanted = includes(args);
+    if (wanted.has("session") && args.sessionId === undefined) throw new ToolError("INVALID_ARGUMENT", "include \"session\" needs sessionId (list_sessions).");
+    const result: Record<string, unknown> = {};
+    if (wanted.has("quota")) {
+      const usage = expectOk<UsageResponse>(await api.request("GET", "/api/usage", args.refresh ? { query: { refresh: "1" } } : undefined));
+      const accountsRes = await api.request("GET", "/api/agent-accounts");
+      const accounts = accountsRes.status < 400 ? (accountsRes.body as AgentAccountsResponse).accounts ?? [] : [];
+      // Chat callers never see an account's email (§4.1).
+      Object.assign(result, usageView(usage, accounts, now(), { withEmail: caller.kind === "external" }));
+    }
+    if (wanted.has("cost")) {
+      const tokens = expectOk<UsageTokensResponse>(await api.request("GET", "/api/usage/tokens"));
+      result.cost = costView(tokens, { days: args.days, bucket: args.bucket, now: now() });
+    }
+    if (wanted.has("session") && args.sessionId !== undefined) {
+      await requireChatSession(api, args.sessionId);
+      result.session = sessionUsageView(await readThread(api, args.sessionId));
+    }
+    return result;
   }
 });
 
-const getCost = defineTool({
-  name: "get_cost",
-  title: "Get estimated cost",
-  description: "API-equivalent cost estimate per agent, model and UTC day from local transcripts (the usage widget's Cost tab), for the last N days. Unpriced models count as $0 in byDay and totalUsd; their rows keep costUsd:null. A result too large loses rows oldest day first (truncated:true, rowsDropped); byDay and totalUsd still count every row.",
-  input: { days: z.number().int().min(1).max(90).default(7).describe("How many UTC days back, including today.") },
-  annotations: READ_ONLY,
-  async run(args, { api, now }) {
-    const res = expectOk<UsageTokensResponse>(await api.request("GET", "/api/usage/tokens"));
-    const today = new Date(now());
-    const start = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - (args.days - 1))).toISOString().slice(0, 10);
-    // Newest day first, so a cut below takes the oldest days; the daemon's order within a day is kept.
-    const inWindow = res.rows.filter((r) => r.day >= start).sort((a, b) => (a.day < b.day ? 1 : a.day > b.day ? -1 : 0));
-    const byDayMap = new Map<string, number>();
-    for (const r of inWindow) byDayMap.set(r.day, (byDayMap.get(r.day) ?? 0) + (r.costUsd ?? 0));
-    const byDay = [...byDayMap.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([day, usd]) => ({ day, usd: round4(usd) }));
-    const totalUsd = round4(byDay.reduce((sum, d) => sum + d.usd, 0));
-    const rows = inWindow.map((r) => ({ agent: r.agent, model: r.model, day: r.day, inputTokens: r.inputTokens, outputTokens: r.outputTokens, cacheReadTokens: r.cacheReadTokens, cacheWriteTokens: r.cacheWriteTokens, costUsd: typeof r.costUsd === "number" ? round4(r.costUsd) : null }));
-    const head = { asOf: res.asOf, days: args.days, totalUsd, byDay };
-    const whole = { ...head, rows };
-    if (resultBytes(whole) <= MAX_COST_RESULT_BYTES) return whole;
-    // Over budget: drop whole days of rows, oldest first, until the rest fits. Each row is measured once, with the
-    // comma that joins it; only the frame around the rows is re-measured, as rowsDropped's digits move.
-    const rowBytes = rows.map((row) => resultBytes(row) + 1);
-    let rowsBytes = rowBytes.reduce((sum, n) => sum + n, 0) - 1; // n rows are joined by n - 1 commas
-    let kept = rows.length;
-    const frame = () => resultBytes({ ...head, rows: [], truncated: true, rowsDropped: rows.length - kept });
-    do {
-      const oldest = rows[kept - 1]!.day;
-      while (kept > 0 && rows[kept - 1]!.day === oldest) rowsBytes -= rowBytes[--kept]!;
-    } while (kept > 0 && frame() + rowsBytes > MAX_COST_RESULT_BYTES);
-    return { ...head, rows: rows.slice(0, kept), truncated: true, rowsDropped: rows.length - kept };
-  }
-});
-
-export const usageTools: ToolDef[] = [getUsage, getCost];
-
-/** The legacy in-chat thread tools this family's owner replaces: `agent_catalog`. */
-const LEGACY_CHAT_NAMES: ReadonlySet<string> = new Set(["agent_catalog"]);
 /** This family in the catalog (`../catalog/index.ts`). */
-export const usageFamily = [
-  ...legacyExternalTools(usageTools),
-  ...legacyChatTools([...legacyThreadTools, ...legacyDelegationTools].filter((tool) => LEGACY_CHAT_NAMES.has(tool.name)))
-];
+export const usageFamily: readonly AnyOrquesterTool[] = [getUsage];

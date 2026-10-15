@@ -119,6 +119,9 @@ import { connectExecutor, createAgentToolsRuntime, type AgentToolsRuntime } from
 import { registerAgentToolsRuntimeRoutes } from "./agent-tools/routes.ts";
 import { executorPorts } from "./mcp/executor.ts";
 // umcp:t3 end
+// umcp:t9 begin
+import { registerPushNotifyRoute } from "./push.ts";
+// umcp:t9 end
 import type { ActivityCause } from "./ansi-activity";
 import { TodoError, TodoListManager } from "./todos";
 import { RecentProjectsService, describeProjectPath } from "./recent-projects";
@@ -4129,6 +4132,10 @@ export function createServer(
 
   // Send a test push to every subscription; returns how many were delivered.
   app.post("/api/push/test", async (): Promise<PushTestResponse> => ({ sent: await push.sendTest() }));
+
+  // umcp:t9 begin — `notify_user`'s push (unified MCP design 2026-10-15 §4.1): rate-limited by request.principal.
+  registerPushNotifyRoute(app, push);
+  // umcp:t9 end
 
   // Daemon event bus (newline-delimited JSON): lifecycle broadcasts + heartbeat.
   app.get<{ Querystring: { project?: string } }>("/events", async (request, reply) => {
