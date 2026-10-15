@@ -36,7 +36,8 @@ import type {
   HistoryImportProgress,
   HtmlRenderReference,
   McpAppReference,
-  ThreadToolReference
+  ThreadToolReference,
+  ToolApprovalReference
 } from "@orquester/api/agent-chat";
 import type { ComposerDraft } from "./composer.logic";
 
@@ -287,6 +288,12 @@ export interface WorkLogEntry {
    * from its result's `threadRef` — the row links to it.
    */
   threadLink?: ThreadToolReference;
+  /**
+   * How the Orquester approval card (or grant) that gated this call ended
+   * (unified MCP §7.3, the row's `toolApproval` reference) — no arguments, no
+   * secrets. Read only from a row the host marked as its own session tool's.
+   */
+  toolApproval?: ToolApprovalReference;
   /**
    * True when §5.6's slimming dropped something and `GET …/items/:itemId`
    * genuinely holds more, so the expanded row may offer "load full output".
