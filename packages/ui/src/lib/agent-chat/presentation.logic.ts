@@ -617,17 +617,23 @@ export const SESSION_TOOL_LABELS: Readonly<Record<string, string>> = {
 
 /**
  * How an approval-gated call ended, as its row says it (unified MCP §7.1
- * "After"). The reference carries no deny reason (the agent's result holds the
- * user's words), so a denial reads "Denied by you".
+ * "After"): "Denied: <reason>" when the reference carries the user's words
+ * (one line), else "Denied by you"; a grant names its reach when known.
  */
-export function toolApprovalOutcomeText(reference: Pick<ToolApprovalReference, "kind" | "outcome">): string {
+export function toolApprovalOutcomeText(reference: Pick<ToolApprovalReference, "kind" | "outcome" | "reason" | "grantScope">): string {
   switch (reference.outcome) {
     case "approved":
       return reference.kind === "toolset" ? "Enabled by you" : "Approved by you";
     case "granted":
-      return "Allowed by a grant";
-    case "denied":
-      return "Denied by you";
+      return reference.grantScope === "chat"
+        ? "Allowed by a chat grant"
+        : reference.grantScope === "project"
+          ? "Allowed by a project grant"
+          : "Allowed by a grant";
+    case "denied": {
+      const reason = reference.reason?.replace(/\s+/g, " ").trim();
+      return reason ? `Denied: ${reason}` : "Denied by you";
+    }
     case "timed_out":
       return "Expired";
     case "cancelled":

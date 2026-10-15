@@ -85,6 +85,11 @@ describe("session tool labels (unified MCP §4)", () => {
     assert.equal(gated("cancelled"), "Created a workflow · Cancelled");
     assert.equal(gated("approved", "toolset"), "Asked for more tools · Enabled by you");
     assert.match(toolApprovalOutcomeText({ kind: "admin", outcome: "not_delivered" }), /never reached the agent/);
+    // The reference's deny reason and grant scope (contracts follow-up).
+    assert.equal(toolApprovalOutcomeText({ kind: "admin", outcome: "denied", reason: "not on\n  Fridays" }), "Denied: not on Fridays");
+    assert.equal(toolApprovalOutcomeText({ kind: "admin", outcome: "denied", reason: "  " }), "Denied by you");
+    assert.equal(toolApprovalOutcomeText({ kind: "admin", outcome: "granted", grantScope: "chat" }), "Allowed by a chat grant");
+    assert.equal(toolApprovalOutcomeText({ kind: "admin", outcome: "granted", grantScope: "project" }), "Allowed by a project grant");
     // No card: the tool's own label.
     assert.equal(workEntryDisplayLabel(entry({ sessionTool: "list_projects" })), "Listed projects");
   });
