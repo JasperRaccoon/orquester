@@ -845,6 +845,8 @@ export const pluginLastErrorSchema = z
 
 export const pluginStateSchema = z
   .object({
+    /** A global plugin's on/off; absent is off. Workspace plugins use `enabledWorkspaces`. */
+    enabled: z.boolean().optional(),
     /** Workspace names the plugin is on for. Unknown names are kept and ignored at runtime. */
     enabledWorkspaces: z.array(z.string()).default([]),
     current: pluginInstalledVersionSchema.optional(),

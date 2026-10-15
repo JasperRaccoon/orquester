@@ -5,6 +5,7 @@ import {
   ChevronRight,
   ExternalLink,
   Loader2,
+  PenTool,
   Puzzle,
   RefreshCw,
   RotateCcw,
@@ -31,8 +32,8 @@ import {
 } from "./plugins.logic";
 import { Badge, EmptyState, InfoRow, Notice, SettingRow, SettingsCard, SettingsPage, SettingsSection } from "./primitives";
 
-/** The letters on each built-in plugin's icon tile. */
-const PLUGIN_GLYPH: Record<PluginId, string> = { "ts-rust": "TS" };
+/** What each built-in plugin's icon tile shows. */
+const PLUGIN_GLYPH: Record<PluginId, React.ReactNode> = { "ts-rust": "TS", excalidraw: <PenTool size={15} /> };
 
 /** The daemon's error text for a failed request, else the error's own. */
 const errorText = (err: unknown): string => {
@@ -51,7 +52,7 @@ interface ActionError {
 }
 
 const ACTION_FAILED: Record<PluginAction, string> = {
-  toggle: "Could not change the plugin for this workspace",
+  toggle: "Could not change the plugin",
   check: "Could not start an update check",
   rollback: "Could not roll back",
   remove: "Could not remove the downloads"
@@ -72,9 +73,9 @@ const PluginTile: React.FC<{ plugin: PluginInfo; large?: boolean }> = ({ plugin,
 
 /**
  * Settings → Plugins (spec §6): the built-in plugins, each turned on per
- * workspace. The list and the detail panel act on the workspace in the scope
- * picker; the daemon owns the state, and every change comes back through
- * `plugins.changed`.
+ * workspace or, for a global plugin, once for the server. A workspace
+ * plugin's toggles act on the workspace in the scope picker; the daemon owns
+ * the state, and every change comes back through `plugins.changed`.
  */
 export const PluginsSettings: React.FC = () => {
   const api = useAppStore((s) => s.api);
@@ -134,7 +135,12 @@ export const PluginsSettings: React.FC = () => {
   const toggle = (plugin: PluginInfo, enabled: boolean) => {
     setSelectedId(plugin.id);
     const decision = pluginToggleDecision(plugin, scope, enabled);
-    if (decision === "blocked" || scope === null) return;
+    if (decision === "blocked") return;
+    if (plugin.scope === "global") {
+      if (api) void run(plugin, "toggle", () => api.setPluginEnabled(plugin.id, enabled));
+      return;
+    }
+    if (scope === null) return;
     if (decision === "confirm") {
       setConfirmEnable({ plugin, workspace: scope });
       return;
@@ -185,7 +191,7 @@ export const PluginsSettings: React.FC = () => {
 
       {workspaces.length === 0 && (
         <Notice tone="info" title="No workspaces yet">
-          Plugins are turned on per workspace. Create a workspace to turn one on.
+          Workspace plugins are turned on per workspace. Create a workspace to turn one on.
         </Notice>
       )}
 
@@ -268,6 +274,10 @@ export const PluginsSettings: React.FC = () => {
   );
 };
 
+/** The switch's accessible name: the scope's workspace for a workspace plugin. */
+const toggleLabel = (plugin: PluginInfo, scope: string | null): string =>
+  plugin.scope === "workspace" && scope ? `Enable ${plugin.name} for ${scope}` : `Enable ${plugin.name}`;
+
 /** "Scope: <workspace>" — the workspace the toggles act on. */
 const ScopePicker: React.FC<{
   workspaces: string[];
@@ -340,6 +350,8 @@ const PluginRow: React.FC<{
               <Badge tone="info" icon={<Loader2 size={10} className="animate-spin" />}>
                 Installing…
               </Badge>
+            ) : !plugin.updates ? (
+              <Badge>Built in</Badge>
             ) : (
               plugin.current && <Badge tone="ok">Installed</Badge>
             )}
@@ -351,7 +363,7 @@ const PluginRow: React.FC<{
       </button>
       {pending === "toggle" && <Loader2 size={13} className="shrink-0 animate-spin text-neutral-500" />}
       <Switch
-        label={scope ? `Enable ${plugin.name} for ${scope}` : `Enable ${plugin.name}`}
+        label={toggleLabel(plugin, scope)}
         checked={pluginEnabledIn(plugin, scope)}
         disabled={!controls.toggle}
         onChange={onToggle}
@@ -423,73 +435,77 @@ const PluginDetail: React.FC<{
         </Notice>
       )}
 
-      <SettingsSection title="Status">
-        <InfoRow
-          label="Version"
-          value={
-            plugin.current ? (
-              <span className="font-mono text-xs">
-                v{plugin.current.version}
-                {relativeTime(plugin.current.installedAt) && (
-                  <span className="font-sans text-neutral-500"> · installed {relativeTime(plugin.current.installedAt)}</span>
-                )}
-              </span>
-            ) : (
-              "Not installed"
-            )
-          }
-        />
-        <InfoRow
-          label="Updates"
-          value={
-            plugin.lastCheckAt && relativeTime(plugin.lastCheckAt)
-              ? `Checked ${relativeTime(plugin.lastCheckAt)}`
-              : "Never checked"
-          }
-        />
-        {plugin.skippedVersion && (
-          <InfoRow label="Skipped" value={<span className="font-mono text-xs">v{plugin.skippedVersion}</span>} />
-        )}
-        {jobLabel && (
-          <div role="status" className="flex items-center gap-2 px-4 py-2.5 text-sm text-info">
-            <Loader2 size={13} className="animate-spin" /> {jobLabel}
-          </div>
-        )}
-        {plugin.lastError && (
-          <div className="px-4 py-3">
-            <Notice tone="warn" title={`The last update failed ${relativeTime(plugin.lastError.at)}`.trim()}>
-              <span className="break-words">{pluginErrorText(plugin.lastError)}</span>
-            </Notice>
-          </div>
-        )}
-        <div className="flex flex-wrap gap-2 px-4 py-3">
-          <Button size="sm" variant="outline" disabled={!controls.checkForUpdates} onClick={onCheck}>
-            {spinner("check") ?? <RefreshCw size={13} />} Check for updates
-          </Button>
-          {controls.showRollback && plugin.previous && (
-            <Button size="sm" variant="outline" disabled={!controls.rollback} onClick={onRollback}>
-              {spinner("rollback") ?? <RotateCcw size={13} />} Roll back to v{plugin.previous.version}
-            </Button>
-          )}
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={!controls.removeDownloads}
-            title={
-              plugin.enabledWorkspaces.length > 0 ? "Turn the plugin off in every workspace first." : undefined
+      {plugin.updates && (
+        <SettingsSection title="Status">
+          <InfoRow
+            label="Version"
+            value={
+              plugin.current ? (
+                <span className="font-mono text-xs">
+                  v{plugin.current.version}
+                  {relativeTime(plugin.current.installedAt) && (
+                    <span className="font-sans text-neutral-500"> · installed {relativeTime(plugin.current.installedAt)}</span>
+                  )}
+                </span>
+              ) : (
+                "Not installed"
+              )
             }
-            onClick={onRemove}
-          >
-            {spinner("remove") ?? <Trash2 size={13} />} Remove downloads
-          </Button>
-        </div>
-      </SettingsSection>
+          />
+          <InfoRow
+            label="Updates"
+            value={
+              plugin.lastCheckAt && relativeTime(plugin.lastCheckAt)
+                ? `Checked ${relativeTime(plugin.lastCheckAt)}`
+                : "Never checked"
+            }
+          />
+          {plugin.skippedVersion && (
+            <InfoRow label="Skipped" value={<span className="font-mono text-xs">v{plugin.skippedVersion}</span>} />
+          )}
+          {jobLabel && (
+            <div role="status" className="flex items-center gap-2 px-4 py-2.5 text-sm text-info">
+              <Loader2 size={13} className="animate-spin" /> {jobLabel}
+            </div>
+          )}
+          {plugin.lastError && (
+            <div className="px-4 py-3">
+              <Notice tone="warn" title={`The last update failed ${relativeTime(plugin.lastError.at)}`.trim()}>
+                <span className="break-words">{pluginErrorText(plugin.lastError)}</span>
+              </Notice>
+            </div>
+          )}
+          <div className="flex flex-wrap gap-2 px-4 py-3">
+            <Button size="sm" variant="outline" disabled={!controls.checkForUpdates} onClick={onCheck}>
+              {spinner("check") ?? <RefreshCw size={13} />} Check for updates
+            </Button>
+            {controls.showRollback && plugin.previous && (
+              <Button size="sm" variant="outline" disabled={!controls.rollback} onClick={onRollback}>
+                {spinner("rollback") ?? <RotateCcw size={13} />} Roll back to v{plugin.previous.version}
+              </Button>
+            )}
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={!controls.removeDownloads}
+              title={
+                plugin.enabledWorkspaces.length > 0 ? "Turn the plugin off in every workspace first." : undefined
+              }
+              onClick={onRemove}
+            >
+              {spinner("remove") ?? <Trash2 size={13} />} Remove downloads
+            </Button>
+          </div>
+        </SettingsSection>
+      )}
 
       <SettingsSection title="Settings">
         <SettingRow
-          label="Enable for this workspace"
+          label={plugin.scope === "global" ? "Enable on this server" : "Enable for this workspace"}
           description={
-            scope ? (
+            plugin.scope === "global" ? (
+              "Turn this plugin on for every workspace and project. It ships with Orquester, so there is nothing to download."
+            ) : scope ? (
               <>
                 Allow this plugin to be used in the <span className="text-neutral-300">{scope}</span> workspace.
               </>
@@ -500,7 +516,7 @@ const PluginDetail: React.FC<{
         >
           {pending === "toggle" && <Loader2 size={13} className="animate-spin text-neutral-500" />}
           <Switch
-            label={scope ? `Enable ${plugin.name} for ${scope}` : `Enable ${plugin.name}`}
+            label={toggleLabel(plugin, scope)}
             checked={pluginEnabledIn(plugin, scope)}
             disabled={!controls.toggle}
             onChange={onToggle}

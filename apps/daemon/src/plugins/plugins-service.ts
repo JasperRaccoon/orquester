@@ -1,8 +1,10 @@
 /**
  * The built-in plugins behind Settings → Plugins (spec §3.3, §4.3–4.4, §5).
- * Today one plugin, "Better TS Typecheck": tsc-rs installed and kept up to
+ * "Better TS Typecheck" is per workspace: tsc-rs installed and kept up to
  * date under `<appdir>/daemon/plugins/ts-rust/`, and redirected to from every
- * `tsc` an Orquester session in an enabled workspace runs.
+ * `tsc` an Orquester session in an enabled workspace runs. "Excalidraw
+ * Whiteboard" is global and ships with the app: its state is only `enabled`,
+ * which the clients read to offer the whiteboard tab; it has no jobs.
  *
  * - **plugins.json** is the durable state. Every change is a read-modify-write
  *   of the file in one serialized queue, so the file on disk always wins over a
@@ -75,7 +77,9 @@ type PluginsErrorCode =
   | "PLUGIN_BUSY"
   | "PLUGIN_ENABLED"
   | "NO_PREVIOUS_VERSION"
-  | "WORKSPACE_NOT_FOUND";
+  | "WORKSPACE_NOT_FOUND"
+  | "PLUGIN_SCOPE"
+  | "PLUGIN_BUNDLED";
 
 /** A refusal the routes answer verbatim: `status` with `{ code, message }`. */
 export class PluginsError extends Error {
@@ -236,6 +240,9 @@ export class PluginsService {
    * installed yet queues the first install.
    */
   async setWorkspaceEnabled(id: PluginId, workspace: string, enabled: boolean): Promise<PluginInfo> {
+    if (pluginCatalogEntry(id).scope !== "workspace") {
+      throw new PluginsError(409, "PLUGIN_SCOPE", "This plugin is turned on for the whole server, not per workspace.");
+    }
     if (enabled && this.platformPackage === null) {
       throw this.unsupported();
     }
@@ -259,8 +266,27 @@ export class PluginsService {
     return this.get(id);
   }
 
+  /** Turn a global plugin on or off for the whole server. */
+  async setEnabled(id: PluginId, enabled: boolean): Promise<PluginInfo> {
+    if (pluginCatalogEntry(id).scope !== "global") {
+      throw new PluginsError(409, "PLUGIN_SCOPE", "This plugin is turned on per workspace.");
+    }
+    await this.ensureReadable();
+    await this.mutate((config) => {
+      const state = stateIn(config, id);
+      if (enabled) {
+        state.enabled = true;
+      } else {
+        delete state.enabled;
+      }
+    });
+    this.emitChanged();
+    return this.get(id);
+  }
+
   /** `POST /check`: queue a check now, whether or not the plugin is on anywhere. */
-  async checkNow(_id: PluginId): Promise<void> {
+  async checkNow(id: PluginId): Promise<void> {
+    this.assertUpdatable(id);
     if (this.platformPackage === null) {
       throw this.unsupported();
     }
@@ -273,6 +299,7 @@ export class PluginsService {
    * registry's latest moves past it. Prunes nothing.
    */
   async rollback(id: PluginId): Promise<PluginInfo> {
+    this.assertUpdatable(id);
     await this.ensureReadable();
     this.assertIdle();
     await this.onJobQueue(async () => {
@@ -301,6 +328,7 @@ export class PluginsService {
 
   /** Delete every downloaded version. Refused while the plugin is on in any existing workspace. */
   async removeDownloads(id: PluginId): Promise<PluginInfo> {
+    this.assertUpdatable(id);
     await this.ensureReadable();
     this.assertIdle();
     await this.onJobQueue(async () => {
@@ -438,6 +466,13 @@ export class PluginsService {
     const run = this.jobQueue.then(task);
     this.jobQueue = run.catch(() => undefined);
     return run;
+  }
+
+  /** The version routes are for plugins the daemon downloads; a bundled one has no versions. */
+  private assertUpdatable(id: PluginId): void {
+    if (!pluginCatalogEntry(id).updates) {
+      throw new PluginsError(409, "PLUGIN_BUNDLED", "This plugin ships with Orquester and has no downloads or updates.");
+    }
   }
 
   private assertIdle(): void {
@@ -625,12 +660,29 @@ export class PluginsService {
     job: PluginJobState,
     workspaceNames: readonly string[]
   ): PluginInfo {
+    const entry = pluginCatalogEntry(id);
     const state = pluginStateOf(config ?? createDefaultPluginsConfig(), id);
+    if (entry.scope === "global") {
+      return {
+        ...entry,
+        platform: "supported",
+        enabled: state.enabled === true,
+        enabledWorkspaces: [],
+        current: null,
+        previous: null,
+        skippedVersion: null,
+        lastCheckAt: null,
+        lastError: null,
+        job: "idle"
+      };
+    }
     const existing = new Set(workspaceNames);
+    const enabledWorkspaces = state.enabledWorkspaces.filter((name) => existing.has(name));
     return {
-      ...pluginCatalogEntry(id),
+      ...entry,
       platform: this.platformPackage === null ? "unsupported" : "supported",
-      enabledWorkspaces: state.enabledWorkspaces.filter((name) => existing.has(name)),
+      enabled: enabledWorkspaces.length > 0,
+      enabledWorkspaces,
       current: installedInfo(state.current),
       previous: installedInfo(state.previous),
       skippedVersion: state.skippedVersion ?? null,

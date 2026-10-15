@@ -8,10 +8,12 @@ import {
   type PluginInfo,
   type PluginsResponse,
   PLUGINS_CHANGED_EVENT,
+  EXCALIDRAW_PLUGIN_ID,
   PLUGINS_CHANNEL,
   TS_RUST_PLUGIN_ID,
   pluginRoutes
 } from "@orquester/api";
+import { readFile } from "node:fs/promises";
 import { createDefaultClientConfig, createDefaultDaemonConfig, pluginsConfigPath } from "@orquester/config";
 import type { InjectOptions } from "fastify";
 import { Broadcaster } from "../broadcaster.ts";
@@ -123,9 +125,53 @@ test("GET lists the built-in plugins", async (t) => {
   assert.equal(res.statusCode, 200);
   const body = res.json() as PluginsResponse;
   assert.deepEqual(
-    body.plugins.map((plugin) => [plugin.id, plugin.name, plugin.platform, plugin.job]),
-    [[ID, "Better TS Typecheck", "supported", "idle"]]
+    body.plugins.map((plugin) => [plugin.id, plugin.name, plugin.scope, plugin.updates, plugin.platform, plugin.job]),
+    [
+      [ID, "Better TS Typecheck", "workspace", true, "supported", "idle"],
+      [EXCALIDRAW_PLUGIN_ID, "Excalidraw Whiteboard", "global", false, "supported", "idle"]
+    ]
   );
+  assert.equal(body.plugins[1]?.enabled, false);
+});
+
+test("a global plugin is switched for the whole server, persists, and broadcasts", async (t) => {
+  const h = await harness(t);
+  const res = await h.inject({ method: "PUT", url: pluginRoutes.plugin(EXCALIDRAW_PLUGIN_ID), payload: { enabled: true } });
+  assert.equal(res.statusCode, 200);
+  const info = res.json() as PluginInfo;
+  assert.equal(info.enabled, true);
+  assert.deepEqual(info.enabledWorkspaces, []);
+  assert.equal(info.current, null);
+  await h.plugins.settled();
+  const last = h.published.at(-1)?.payload as PluginsResponse;
+  assert.equal(last.plugins.find((plugin) => plugin.id === EXCALIDRAW_PLUGIN_ID)?.enabled, true);
+  const saved = JSON.parse(await readFile(pluginsConfigPath(join(h.root, "appdir")), "utf8")) as {
+    plugins: Record<string, { enabled?: boolean }>;
+  };
+  assert.equal(saved.plugins[EXCALIDRAW_PLUGIN_ID]?.enabled, true);
+  // Nothing was downloaded for it.
+  assert.equal(h.registry.calls.latest, 0);
+
+  const off = await h.inject({ method: "PUT", url: pluginRoutes.plugin(EXCALIDRAW_PLUGIN_ID), payload: { enabled: false } });
+  assert.equal((off.json() as PluginInfo).enabled, false);
+});
+
+test("scope and version refusals: the wrong toggle route 409, a bundled plugin's version routes 409", async (t) => {
+  const h = await harness(t);
+  const expect = async (request: InjectOptions, status: number, code: string) => {
+    const res = await h.inject(request);
+    assert.equal(res.statusCode, status, `${request.method} ${request.url}: ${res.body}`);
+    assert.equal((res.json() as { code: string }).code, code);
+  };
+  const X = EXCALIDRAW_PLUGIN_ID;
+  await expect({ method: "PUT", url: pluginRoutes.workspace(X, "acme"), payload: { enabled: true } }, 409, "PLUGIN_SCOPE");
+  await expect({ method: "PUT", url: pluginRoutes.plugin(ID), payload: { enabled: true } }, 409, "PLUGIN_SCOPE");
+  await expect({ method: "PUT", url: pluginRoutes.plugin(X), payload: { enabled: 1 } }, 400, "INVALID_REQUEST");
+  await expect({ method: "PUT", url: pluginRoutes.plugin("nope"), payload: { enabled: true } }, 404, "PLUGIN_NOT_FOUND");
+  await expect({ method: "POST", url: pluginRoutes.check(X) }, 409, "PLUGIN_BUNDLED");
+  await expect({ method: "POST", url: pluginRoutes.rollback(X) }, 409, "PLUGIN_BUNDLED");
+  await expect({ method: "DELETE", url: pluginRoutes.downloads(X) }, 409, "PLUGIN_BUNDLED");
+  assert.equal(h.registry.calls.latest, 0);
 });
 
 test("refusals: unknown plugin 404, bad workspace name 400, unknown workspace 404, bad body 400", async (t) => {

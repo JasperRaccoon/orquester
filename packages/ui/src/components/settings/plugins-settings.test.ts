@@ -13,7 +13,10 @@ function plugin(overrides: Partial<PluginInfo> = {}): PluginInfo {
     description: "Runs tsc-rs instead of tsc.",
     source: { label: "pingdotgg/ts-rust", url: "https://github.com/pingdotgg/ts-rust" },
     provider: "Community",
+    scope: "workspace",
+    updates: true,
     platform: "supported",
+    enabled: false,
     enabledWorkspaces: [],
     current: null,
     previous: null,
@@ -95,6 +98,32 @@ test("without workspaces the section explains why nothing can be turned on", (t)
   const html = render(t, { workspaces: [], currentWorkspace: null, currentProject: null, plugins: [plugin()] });
   assert.match(html, /No workspaces yet/);
   for (const toggle of switches(html)) assert.match(toggle, / disabled=""/);
+});
+
+test("a global plugin has one server-wide switch and no version controls, even without workspaces", (t) => {
+  const html = render(t, {
+    workspaces: [],
+    currentWorkspace: null,
+    currentProject: null,
+    plugins: [
+      plugin({
+        id: "excalidraw",
+        name: "Excalidraw Whiteboard",
+        scope: "global",
+        updates: false,
+        enabled: true,
+        source: { label: "excalidraw/excalidraw", url: "https://github.com/excalidraw/excalidraw" }
+      })
+    ]
+  });
+  assert.match(html, />Built in</);
+  assert.match(html, /Enable on this server/);
+  assert.doesNotMatch(html, /Check for updates|Remove downloads|Not installed|Enable for this workspace/);
+  for (const toggle of switches(html)) {
+    assert.match(toggle, /aria-checked="true"/);
+    assert.match(toggle, /aria-label="Enable Excalidraw Whiteboard"/);
+    assert.doesNotMatch(toggle, / disabled=""/);
+  }
 });
 
 test("before the first load the section shows it is loading", (t) => {

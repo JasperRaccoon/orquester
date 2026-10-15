@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import type { PluginInfo } from "@orquester/api";
 
 import {
+  isGlobalPluginEnabled,
   parsePluginActionResult,
   parsePluginInfo,
   parsePluginsResponse,
@@ -17,7 +18,10 @@ function plugin(overrides: Partial<PluginInfo> = {}): PluginInfo {
     description: "Runs tsc-rs instead of tsc.",
     source: { label: "pingdotgg/ts-rust", url: "https://github.com/pingdotgg/ts-rust" },
     provider: "Community",
+    scope: "workspace",
+    updates: true,
     platform: "supported",
+    enabled: true,
     enabledWorkspaces: ["acme"],
     current: { version: "0.7.0", integrity: "sha512-a", installedAt: "2026-10-14T10:00:00.000Z" },
     previous: null,
@@ -54,6 +58,33 @@ test("absent nullable fields read as null and unknown fields are dropped", () =>
   });
 });
 
+test("a daemon from before global plugins: a workspace plugin with updates, enabled while on anywhere", () => {
+  const sent: Record<string, unknown> = { ...plugin() };
+  delete sent.scope;
+  delete sent.updates;
+  delete sent.enabled;
+  assert.deepEqual(parsePluginInfo(sent), plugin());
+  assert.equal(parsePluginInfo({ ...sent, enabledWorkspaces: [] })?.enabled, false);
+});
+
+test("a global plugin parses, and reads as enabled only when it is on", () => {
+  const global = plugin({
+    id: "excalidraw",
+    name: "Excalidraw Whiteboard",
+    scope: "global",
+    updates: false,
+    enabled: true,
+    enabledWorkspaces: [],
+    current: null,
+    lastCheckAt: null
+  });
+  assert.deepEqual(parsePluginInfo(global), global);
+  assert.equal(isGlobalPluginEnabled([plugin(), global], "excalidraw"), true);
+  assert.equal(isGlobalPluginEnabled([plugin(), { ...global, enabled: false }], "excalidraw"), false);
+  assert.equal(isGlobalPluginEnabled([plugin()], "ts-rust"), false, "a workspace plugin is not global");
+  assert.equal(isGlobalPluginEnabled(null, "excalidraw"), false);
+});
+
 test("a plugin with a malformed field is rejected", () => {
   const bad: unknown[] = [
     null,
@@ -71,7 +102,10 @@ test("a plugin with a malformed field is rejected", () => {
     { ...plugin(), skippedVersion: 7 },
     { ...plugin(), lastCheckAt: false },
     { ...plugin(), lastError: { at: "x", step: "download" } },
-    { ...plugin(), job: "running" }
+    { ...plugin(), job: "running" },
+    { ...plugin(), scope: "project" },
+    { ...plugin(), updates: "yes" },
+    { ...plugin(), enabled: 1 }
   ];
   for (const value of bad) {
     assert.equal(parsePluginInfo(value), null, JSON.stringify(value));

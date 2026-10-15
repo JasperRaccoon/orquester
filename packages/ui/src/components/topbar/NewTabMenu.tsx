@@ -10,10 +10,13 @@ import {
   ListTodo,
   LoaderCircle,
   Monitor,
+  PenTool,
   Plus,
   SlidersHorizontal
 } from "lucide-react";
 import {
+  EXCALIDRAW_PLUGIN_ID,
+  type FsEntry,
   RUNTIME_MODES,
   SYSTEM_ACCOUNT_ID,
   type CreateAgentChatSessionFields,
@@ -45,6 +48,8 @@ import {
 import { useProviderSnapshot } from "../../lib/agent-chat/hooks";
 import { launchModelList, resolveLaunchModel } from "../../lib/launch-models";
 import { copyText } from "../../lib/clipboard";
+import { isGlobalPluginEnabled } from "../../lib/plugins-state";
+import { isWhiteboardFile, whiteboardTitle, whiteboardsDirOf } from "../../lib/whiteboard";
 
 /** Past conversations listed inline per agent before the "…and N more" cutoff. */
 const MAX_INLINE_CONVERSATIONS = 10;
@@ -505,6 +510,48 @@ const DesktopEntries: React.FC<{ projectPath: string }> = ({ projectPath }) => {
 };
 
 /**
+ * The whiteboard entries (the Excalidraw plugin, while it is on): a new
+ * whiteboard, and each `.excalidraw` file in `<project>/whiteboards/`, read
+ * when the menu opens. Other `.excalidraw` files open from the file browser.
+ */
+const WhiteboardEntries: React.FC<{ projectPath: string }> = ({ projectPath }) => {
+  const api = useAppStore((s) => s.api);
+  const createWhiteboard = useAppStore((s) => s.createWhiteboard);
+  const openWhiteboard = useAppStore((s) => s.openWhiteboard);
+  const [files, setFiles] = React.useState<FsEntry[]>([]);
+
+  React.useEffect(() => {
+    if (!api) return;
+    const controller = new AbortController();
+    api
+      .listFiles(whiteboardsDirOf(projectPath), controller.signal)
+      .then((listing) =>
+        setFiles(
+          listing.entries
+            .filter((entry) => entry.kind === "file" && isWhiteboardFile(entry.name))
+            .sort((a, b) => a.name.localeCompare(b.name))
+        )
+      )
+      // No whiteboards folder yet is the common case: nothing to list.
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, [api, projectPath]);
+
+  return (
+    <>
+      <DropdownItem icon={<PenTool size={14} />} onClick={() => void createWhiteboard()}>
+        New whiteboard
+      </DropdownItem>
+      {files.map((file) => (
+        <DropdownItem key={file.path} icon={<PenTool size={14} />} onClick={() => openWhiteboard(file.path)}>
+          {whiteboardTitle(file.path)}
+        </DropdownItem>
+      ))}
+    </>
+  );
+};
+
+/**
  * The "+" new-tab button. In a project it lists detected shells and INSTALLED
  * agents (manage installs in Settings → Agents / Harnesses) plus built-in tools
  * and to-do lists; in a workspace context it offers only to-do lists. Choosing
@@ -521,6 +568,7 @@ export const NewTabMenu: React.FC = () => {
   const todos = useAppStore((s) => s.todos);
   const createTodo = useAppStore((s) => s.createTodo);
   const openTodo = useAppStore((s) => s.openTodo);
+  const whiteboardsOn = useAppStore((s) => isGlobalPluginEnabled(s.plugins, EXCALIDRAW_PLUGIN_ID));
   const registry = useRegistry();
 
   const shells = registry.shells.filter((s) => s.enabled);
@@ -612,6 +660,7 @@ export const NewTabMenu: React.FC = () => {
           {rec.name}
         </DropdownItem>
       ))}
+      {whiteboardsOn && ctx?.kind === "project" ? <WhiteboardEntries projectPath={ctx.project.path} /> : null}
 
       <DropdownSeparator />
 

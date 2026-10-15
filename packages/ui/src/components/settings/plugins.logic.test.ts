@@ -23,7 +23,10 @@ function plugin(overrides: Partial<PluginInfo> = {}): PluginInfo {
     description: "Runs tsc-rs instead of tsc.",
     source: { label: "pingdotgg/ts-rust", url: "https://github.com/pingdotgg/ts-rust" },
     provider: "Community",
+    scope: "workspace",
+    updates: true,
     platform: "supported",
+    enabled: false,
     enabledWorkspaces: [],
     current: null,
     previous: null,
@@ -83,6 +86,22 @@ test("turning a plugin on where it is on nowhere asks first; other flips go ahea
     pluginToggleDecision(plugin({ platform: "unsupported", enabledWorkspaces: ["acme"] }), "acme", false),
     "blocked"
   );
+});
+
+test("a global plugin: its own switch, no scope needed, no confirmation, no version actions", () => {
+  const whiteboard = plugin({ id: "excalidraw", scope: "global", updates: false, enabled: true });
+  assert.equal(pluginEnabledIn(whiteboard, null), true);
+  assert.equal(pluginEnabledIn({ ...whiteboard, enabled: false }, "acme"), false);
+  assert.equal(pluginToggleDecision({ ...whiteboard, enabled: false }, null, true), "apply");
+  assert.equal(pluginToggleDecision(whiteboard, "acme", false), "apply");
+  assert.deepEqual(pluginControls(whiteboard, null, false), {
+    toggle: true,
+    checkForUpdates: false,
+    showRollback: false,
+    rollback: false,
+    removeDownloads: false
+  });
+  assert.equal(pluginControls(whiteboard, null, true).toggle, false);
 });
 
 test("the first-enable confirmation says what the owner approved", () => {
