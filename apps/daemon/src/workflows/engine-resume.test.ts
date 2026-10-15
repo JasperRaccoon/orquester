@@ -3,7 +3,7 @@ import { describe, test } from "node:test";
 
 import type { Workflow } from "@orquester/api";
 
-import type { NodeExecutorRegistry, NodeResult } from "./contracts.ts";
+import type { NodeExecutionContext, NodeExecutorRegistry, NodeResult } from "./contracts.ts";
 import { createHttpExecutor } from "./nodes/http.ts";
 import {
   controlledExecutor,
@@ -40,6 +40,25 @@ function restartable(workflows: Workflow[]) {
       return createHarness({ ...shared, executors });
     }
   };
+}
+
+// A run store whose writes can be held, so the stop is still in progress when the block persists.
+class HeldRunStore extends InMemoryRunStore {
+  private held: Promise<void> | null = null;
+  private releaseHeld: (() => void) | null = null;
+  hold(): void {
+    this.held = new Promise((resolve) => {
+      this.releaseHeld = resolve;
+    });
+  }
+  release(): void {
+    this.releaseHeld?.();
+    this.held = null;
+  }
+  override async save(run: Parameters<InMemoryRunStore["save"]>[0]): Promise<void> {
+    if (this.held) await this.held;
+    return super.save(run);
+  }
 }
 
 async function blockOf(h: Harness, runId: string, nodeId: string) {
@@ -241,46 +260,45 @@ describe("engine: resume after a restart", () => {
   });
 
   test("the engine stopping while a block persists its wait state: the run is not failed, and resumes after the restart", async () => {
-    // A run store whose writes can be held, so the stop is still in progress when the block persists.
-    class HeldRunStore extends InMemoryRunStore {
-      private held: Promise<void> | null = null;
-      private releaseHeld: (() => void) | null = null;
-      hold(): void {
-        this.held = new Promise((resolve) => {
-          this.releaseHeld = resolve;
-        });
-      }
-      release(): void {
-        this.releaseHeld?.();
-        this.held = null;
-      }
-      override async save(run: Parameters<InMemoryRunStore["save"]>[0]): Promise<void> {
-        if (this.held) await this.held;
-        return super.save(run);
-      }
-    }
     const runStore = new HeldRunStore();
-    const env = restartable([workflow("w1", [T(), node("A", "shell"), node("W", "wait", { kind: "duration", minutes: 10 }), node("B", "code")], [edge("T", "A"), edge("A", "W"), edge("W", "B")])]);
+    const env = restartable([workflow("w1", [T(), node("W", "wait", { kind: "duration", minutes: 10 }), node("B", "code")], [edge("T", "W"), edge("W", "B")])]);
     const shared = { ...env.shared, runStore };
-    const gate = controlledExecutor("shell");
-    const first = createHarness({ ...shared, executors: { shell: gate } });
+    // A Wait block already running when the stop begins, whose first act — persisting its timer —
+    // lands in the stop window (and is refused there with EngineStoppedError).
+    let persist!: () => void;
+    const persisting = new Promise<void>((resolve) => {
+      persist = resolve;
+    });
+    let refused: unknown = null;
+    const wait = {
+      type: "wait" as const,
+      async execute(ctx: NodeExecutionContext<"wait">): Promise<NodeResult> {
+        await persisting;
+        try {
+          await ctx.setWaitingOn({ kind: "timer", until: "2026-09-28T10:10:00.000Z", purpose: "wait" });
+        } catch (error) {
+          refused = error;
+          throw error;
+        }
+        return { status: "succeeded", output: null };
+      }
+    };
+    const first = createHarness({ ...shared, executors: { wait } as NodeExecutorRegistry });
     const { runId } = await first.engine.run("w1", {});
     await flush();
-    assert.equal(gate.calls.length, 1, "A is running");
-    // The daemon starts stopping (its final save is held); A finishes and the Wait block starts,
-    // whose first act is persisting its timer — refused, as the engine is stopping.
+    assert.equal((await runStore.load(runId!))!.blocks.W!.status, "running", "W is running");
     runStore.hold();
     const stopping = first.engine.stop();
-    gate.calls[0]!.resolve({ status: "succeeded", output: null });
+    persist();
     await flush();
     await flush();
     runStore.release();
     await stopping;
+    assert.equal((refused as Error | null)?.name, "EngineStoppedError");
     const saved = (await runStore.load(runId!))!;
-    assert.notEqual(saved.status, "failed");
-    assert.equal(saved.status, "running");
+    assert.equal(saved.status, "running", "not failed");
     assert.equal(saved.blocks.W!.status, "running", "an engine stop is no block failure: W resumes");
-    assert.equal(saved.blocks.A!.status, "succeeded");
+    assert.equal(saved.blocks.B!.status, "pending", "the walk did not go past W");
 
     const code = scripted("code");
     const second = createHarness({ ...shared, executors: { code } });
@@ -289,6 +307,37 @@ describe("engine: resume after a restart", () => {
     await env.shared.clock.advance(10 * 60_000);
     const result = await second.engine.waitForRun(runId!);
     assert.equal(result.status, "succeeded");
+    assert.deepEqual(code.seen, ["B"]);
+  });
+
+  test("a block reached while the engine stops never starts: it stays pending and runs after the restart (not interrupted)", async () => {
+    const runStore = new HeldRunStore();
+    const env = restartable([workflow("w1", [T(), node("A", "shell"), node("B", "code")], [edge("T", "A"), edge("A", "B")])]);
+    const shared = { ...env.shared, runStore };
+    const gate = controlledExecutor("shell");
+    // B uses the real Code executor (its first act is persisting a WaitingOn), and has no retries.
+    const first = createHarness({ ...shared, executors: { shell: gate } });
+    const { runId } = await first.engine.run("w1", {});
+    await flush();
+    runStore.hold();
+    const stopping = first.engine.stop();
+    gate.calls[0]!.resolve({ status: "succeeded", output: null });
+    await flush();
+    await flush();
+    runStore.release();
+    await stopping;
+    const saved = (await runStore.load(runId!))!;
+    assert.equal(saved.blocks.A!.status, "succeeded");
+    assert.notEqual(saved.blocks.B!.status, "running", "never marked running");
+    assert.equal(saved.blocks.B!.attempt, 0, "no attempt started");
+
+    const code = scripted("code");
+    const second = createHarness({ ...shared, executors: { code } });
+    await second.engine.resume();
+    const result = await second.engine.waitForRun(runId!);
+    const run = (await runStore.load(runId!))!;
+    assert.equal(result.status, "succeeded");
+    assert.equal(run.blocks.B!.status, "succeeded", "not interrupted");
     assert.deepEqual(code.seen, ["B"]);
   });
 

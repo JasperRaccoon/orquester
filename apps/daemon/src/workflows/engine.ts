@@ -762,6 +762,13 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
           return { status: "cancelled" };
         }
       }
+      // The engine is stopping: an attempt not marked running yet never starts — the block stays
+      // pending/queued (or keeps its WaitingOn) as run.json holds it, and runs after the restart
+      // (a fresh side-effecting attempt started now would be found "interrupted").
+      if (stopping) {
+        releaseSlot(a, node.id);
+        return null;
+      }
       block.attempt = attempt;
       if (!resuming) {
         block.status = "running";
