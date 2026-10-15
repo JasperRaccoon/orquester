@@ -1,0 +1,356 @@
+/**
+ * THE executor (unified MCP design 2026-10-15 §3.3, §14.2.2–3): strict parse per audience and its
+ * stripped keys, TOOL_NOT_FOUND / TOOL_NOT_ENABLED, deny / card / allow through the ApprovalPort
+ * double, grants, frozen arguments and pins, PREVIEW_TOO_LARGE, the re-run gate after a card, the
+ * turn policy and the exchange, the principal on every daemon request.
+ */
+
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import { z } from "zod";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { agentChatRoutes, parseThreadMessage, type CallerPrincipal } from "@orquester/api/agent-chat";
+
+import { FakeApprovalPort } from "./catalog/approval-double.ts";
+import { defineTool, MUTATING, READ_ONLY, type AnyOrquesterTool, type CallContext, type ScopeClaim, type ThreadCaller } from "./catalog/contract.ts";
+import { callExtensions } from "./catalog/extensions.ts";
+import type { DaemonMethod, DaemonRequestOptions, DaemonResponse } from "./daemon-api.ts";
+import { audienceShape, executeToolCall, NEW_SESSION, type ExecutorDeps } from "./executor.ts";
+import { head, snapshot } from "./fixtures.ts";
+import { FakeDaemonApi } from "./testing.ts";
+
+/** A FakeDaemonApi that also records each request's principal. */
+class PrincipalApi extends FakeDaemonApi {
+  principals: (CallerPrincipal | undefined)[] = [];
+  override async request(method: DaemonMethod, path: string, opts?: DaemonRequestOptions): Promise<DaemonResponse> {
+    this.principals.push(opts?.principal);
+    return super.request(method, path, opts);
+  }
+}
+
+const OWN = "/w/acme/api";
+const SAME = "/w/acme/web";
+const OTHER = "/w/beta/app";
+
+function caller(over: Partial<ThreadCaller> = {}): ThreadCaller {
+  return {
+    kind: "thread", threadId: "me", title: "Implement auth", projectPath: OWN, workspace: "acme", cwd: OWN, agentId: "claude", callId: "call-1",
+    runtimeMode: "full-access", planning: false, workflowOwned: false, exchange: null, ...over
+  };
+}
+
+const claim = (over: Partial<ScopeClaim> = {}): ScopeClaim => ({ projects: [], sessions: [], reads: "none", writes: false, causesTurnIn: [], ...over });
+
+/** One tool per behaviour; `runs` records what `run` saw. */
+function rig(over: { tools?: AnyOrquesterTool[]; port?: FakeApprovalPort | null; deps?: Partial<ExecutorDeps> } = {}) {
+  const runs: { args: Record<string, unknown>; ctx: CallContext }[] = [];
+  const record = (args: Record<string, unknown>, ctx: CallContext) => {
+    runs.push({ args, ctx });
+    return { done: true };
+  };
+  const tools: AnyOrquesterTool[] = [
+    defineTool({
+      name: "both_ways", title: "Both ways", description: "d", input: { text: z.string(), delegate: z.boolean().optional(), value: z.string().optional() },
+      chatOnlyInput: ["delegate"], externalOnlyInput: ["value"], audiences: ["external", "chat"], toolset: "core", tier: "read",
+      scope: async () => claim(), annotations: READ_ONLY, resultKind: "json", run: async (args, ctx) => record(args, ctx)
+    }),
+    defineTool({
+      name: "chat_only", title: "Chat only", description: "d", input: {}, audiences: ["chat"], toolset: "core", tier: "read",
+      scope: async () => claim(), annotations: READ_ONLY, resultKind: "json", run: async (args, ctx) => record(args, ctx)
+    }),
+    defineTool({
+      name: "notes_tool", title: "Notes", description: "d", input: {}, audiences: ["chat"], toolset: "notes", tier: "act",
+      scope: async () => claim({ writes: true }), annotations: MUTATING, resultKind: "json", run: async (args, ctx) => record(args, ctx)
+    }),
+    defineTool({
+      name: "open_desktop", title: "Open a desktop", description: "d", input: { command: z.string(), reason: z.string().optional(), big: z.boolean().optional() },
+      audiences: ["external", "chat"], toolset: "core", tier: "admin", adminFamily: "desktops",
+      scope: async () => claim({ projects: [OWN], writes: true }),
+      approval: async (args) => ({
+        title: "Claude wants to open a desktop‮ running a command",
+        scopeLabel: "Project acme/api",
+        sections: [{ kind: "code", title: "Command", text: args.big ? "x".repeat(1_100_000) : args.command }],
+        pins: { "desktop:revision": "r1" }
+      }),
+      annotations: MUTATING, resultKind: "json", run: async (args, ctx) => record(args, ctx)
+    }),
+    defineTool({
+      name: "create_wf", title: "Create a workflow", description: "d", input: { name: z.string() },
+      audiences: ["chat"], toolset: "core", tier: "admin", adminFamily: "workflows",
+      scope: async () => claim({ projects: [OWN], writes: true }),
+      approval: async () => ({ title: "Create", scopeLabel: "acme/api", sections: [{ kind: "text", text: "a workflow" }] }),
+      annotations: MUTATING, resultKind: "json", run: async (args, ctx) => ({ ...record(args, ctx), workflowId: "wf_new" })
+    }),
+    defineTool({
+      name: "act_in", title: "Act in a project", description: "d", input: { project: z.string() },
+      audiences: ["chat"], toolset: "core", tier: "act",
+      scope: async (args) => claim({ projects: [args.project], writes: true }), annotations: MUTATING, resultKind: "json", run: async (args, ctx) => record(args, ctx)
+    }),
+    defineTool({
+      name: "message", title: "Message", description: "d", input: { to: z.string() },
+      audiences: ["external", "chat"], toolset: "core", tier: "act",
+      scope: async (args) => claim({ sessions: [args.to], causesTurnIn: [args.to] }), annotations: MUTATING, resultKind: "json",
+      run: async (args, ctx) => ({ ...record(args, ctx), text: ctx.turn.provenance("sent", "hello", "notify") })
+    }),
+    defineTool({
+      name: "boom", title: "Boom", description: "d", input: {}, audiences: ["chat"], toolset: "core", tier: "read",
+      scope: async () => claim(), annotations: READ_ONLY, resultKind: "json", run: async () => { throw new Error("/secret/host/path exploded"); }
+    }),
+    defineTool({
+      name: "image", title: "Image", description: "d", input: {}, audiences: ["chat"], toolset: "core", tier: "read",
+      scope: async () => claim(), annotations: READ_ONLY, resultKind: "image",
+      run: async (): Promise<CallToolResult> => ({ content: [{ type: "image", data: "AA==", mimeType: "image/png" }] })
+    }),
+    ...(over.tools ?? [])
+  ];
+  const byName = new Map(tools.map((tool) => [tool.name, tool]));
+  const api = new PrincipalApi()
+    .on("GET", "/api/workspaces", { status: 200, body: [{ name: "beta", path: "/w/beta", projectCount: 1, gitAccountId: "acc1" }] })
+    .on("GET", "/api/accounts", { status: 200, body: [{ id: "acc1", label: "beta-bot" }] })
+    .on("GET", agentChatRoutes.thread("t2"), { status: 200, body: { kind: "snapshot", thread: snapshot({ head: head({ id: "t2", runtimeMode: "auto" }) }) } })
+    .on("GET", agentChatRoutes.thread("wide"), { status: 200, body: { kind: "snapshot", thread: snapshot({ head: head({ id: "wide", runtimeMode: "full-access" }) }) } });
+  const port = over.port === undefined ? new FakeApprovalPort() : over.port;
+  const deps: ExecutorDeps = {
+    lookup: (name, audience) => {
+      const tool = byName.get(name);
+      return tool && tool.audiences.includes(audience) ? tool : undefined;
+    },
+    approvals: port,
+    enabledToolsets: async () => new Set(["core"]),
+    newId: () => "ex-new",
+    ...over.deps
+  };
+  const call = (name: string, args: unknown, who: ThreadCaller | { kind: "external" } = caller(), signal = new AbortController().signal, principal?: CallerPrincipal) =>
+    executeToolCall(deps, { name, arguments: args }, { caller: who, api, signal, ...(principal ? { principal } : {}) });
+  return { runs, api, port, deps, call };
+}
+
+const code = (result: CallToolResult) => (result.structuredContent as { code?: string } | undefined)?.code;
+const message = (result: CallToolResult) => (result.structuredContent as { message?: string } | undefined)?.message ?? "";
+
+test("strict parse per audience: each audience's only-inputs are stripped from the other's schema and refused", async () => {
+  const r = rig();
+  const tool = r.deps.lookup!("both_ways", "chat")!;
+  assert.deepEqual(Object.keys(audienceShape(tool, "external")), ["text", "value"]);
+  assert.deepEqual(Object.keys(audienceShape(tool, "chat")), ["text", "delegate"]);
+  const ext = await r.call("both_ways", { text: "a", delegate: true }, { kind: "external" });
+  assert.equal(code(ext), "INVALID_ARGUMENT");
+  assert.match(message(ext), /delegate/);
+  const chat = await r.call("both_ways", { text: "a", value: "v" });
+  assert.equal(code(chat), "INVALID_ARGUMENT");
+  assert.match(message(chat), /value/);
+  assert.equal(code(await r.call("both_ways", { text: "a", texxt: "b" })), "INVALID_ARGUMENT", "an unknown key is refused, never dropped");
+  assert.equal(code(await r.call("both_ways", {})), "INVALID_ARGUMENT");
+  assert.equal(r.runs.length, 0);
+  assert.equal((await r.call("both_ways", { text: "a", delegate: true })).isError, undefined);
+  assert.equal((await r.call("both_ways", { text: "a", value: "v" }, { kind: "external" })).isError, undefined);
+});
+
+test("TOOL_NOT_FOUND for another audience's tool or an unknown name; TOOL_NOT_ENABLED names the toolset and request_toolset", async () => {
+  const r = rig();
+  assert.equal(code(await r.call("chat_only", {}, { kind: "external" })), "TOOL_NOT_FOUND");
+  const unknown = await r.call("x".repeat(5_000), {});
+  assert.equal(code(unknown), "TOOL_NOT_FOUND");
+  assert.ok(message(unknown).length < 200, "the name is quoted capped");
+  const off = await r.call("notes_tool", {});
+  assert.equal(code(off), "TOOL_NOT_ENABLED");
+  assert.match(message(off), /request_toolset/);
+  assert.match(message(off), /"notes"/);
+  assert.match(message(off), /Todos & saved-prompt editing/);
+  // The catalogue defaults when nothing is wired: reads on, notes off.
+  const defaults = rig({ deps: { enabledToolsets: null } });
+  assert.equal(code(await defaults.call("notes_tool", {})), "TOOL_NOT_ENABLED");
+  assert.equal((await defaults.call("chat_only", {})).isError, undefined);
+  assert.equal(r.runs.length, 0);
+  assert.equal(defaults.runs.length, 1);
+});
+
+test("Admin from a workflow-owned chat is ADMIN_NOT_AVAILABLE at once: no preview, no card, no run", async () => {
+  const r = rig();
+  const result = await r.call("open_desktop", { command: "xterm" }, caller({ workflowOwned: true }));
+  assert.equal(code(result), "ADMIN_NOT_AVAILABLE");
+  assert.equal(r.port!.cards.length, 0);
+  assert.equal(r.port!.grantQueries.length, 0);
+  assert.equal(r.runs.length, 0);
+});
+
+test("an Admin card: what runs is the frozen copy that was shown; pins and the approval reach run; grant options follow the mode", async () => {
+  const r = rig();
+  const result = await r.call("open_desktop", { command: "xterm", reason: "to test the UI" });
+  assert.equal(result.isError, undefined, message(result));
+  const card = r.port!.cards[0]!;
+  assert.equal(card.kind, "admin");
+  assert.equal(card.family, "desktops");
+  assert.equal(card.threadId, "me");
+  assert.equal(card.callerProjectPath, OWN);
+  assert.equal(card.title, "Claude wants to open a desktop running a command", "the bidi override is stripped");
+  assert.equal(card.reason, "to test the UI");
+  assert.deepEqual(card.grantOptions, ["chat", "project"], "full-access: the desktops grants");
+  assert.deepEqual(card.scope.projects?.map((project) => project.path), [OWN]);
+  const run = r.runs[0]!;
+  assert.equal(Object.isFrozen(run.args), true);
+  assert.deepEqual(run.args, { command: "xterm", reason: "to test the UI" });
+  assert.deepEqual(run.ctx.approval, { outcome: "approved", approvalId: "a_1", pins: { "desktop:revision": "r1" } });
+
+  await r.call("open_desktop", { command: "xterm" }, caller({ runtimeMode: "auto" }));
+  assert.deepEqual(r.port!.cards[1]!.grantOptions, [], "grants only for full-access callers");
+});
+
+test("card outcomes: denied quotes the user, timed out, cancelled; no port fails closed; an oversized preview never opens a card", async () => {
+  const denied = rig({ port: new FakeApprovalPort({ outcome: "denied", approvalId: "a", reason: "not now" }) });
+  const d = await denied.call("open_desktop", { command: "xterm" });
+  assert.equal(code(d), "APPROVAL_DENIED");
+  assert.match(message(d), /"not now"/);
+  const timedOut = rig({ port: new FakeApprovalPort({ outcome: "timed_out", approvalId: "a" }) });
+  assert.equal(code(await timedOut.call("open_desktop", { command: "xterm" })), "APPROVAL_TIMEOUT");
+  const cancelled = rig({ port: new FakeApprovalPort({ outcome: "cancelled", approvalId: "a" }) });
+  assert.equal(code(await cancelled.call("open_desktop", { command: "xterm" })), "CANCELLED");
+  const none = rig({ port: null });
+  assert.equal(code(await none.call("open_desktop", { command: "xterm" })), "PERMISSION_DENIED");
+  const big = rig();
+  const tooLarge = await big.call("open_desktop", { command: "xterm", big: true });
+  assert.equal(code(tooLarge), "PREVIEW_TOO_LARGE");
+  assert.match(message(tooLarge), /[Ss]plit the change/);
+  assert.equal(big.port!.cards.length, 0);
+  for (const rr of [denied, timedOut, cancelled, none, big]) assert.equal(rr.runs.length, 0);
+});
+
+test("grants: honoured for a full-access caller without a card; never below full-access", async () => {
+  const port = new FakeApprovalPort().grant({ family: "desktops", scope: "project", projectPath: OWN });
+  const r = rig({ port });
+  const granted = await r.call("open_desktop", { command: "xterm" });
+  assert.equal(granted.isError, undefined, message(granted));
+  assert.equal(port.cards.length, 0);
+  assert.deepEqual(r.runs[0]!.ctx.approval, { outcome: "granted", grantId: "g_1", pins: { "desktop:revision": "r1" } });
+  assert.equal(port.grantQueries[0]!.projectPath, OWN);
+  assert.deepEqual(port.grantQueries[0]!.projects, [OWN]);
+  await r.call("open_desktop", { command: "xterm" }, caller({ runtimeMode: "auto" }));
+  assert.equal(port.cards.length, 1, "an auto caller gets the card despite the grant");
+});
+
+test("the gate re-runs after the card on the caller as it is now: planning by then refuses, nothing runs", async () => {
+  const r = rig({ deps: { refreshCaller: async (before) => ({ ...before, planning: true }) } });
+  const result = await r.call("open_desktop", { command: "xterm" });
+  assert.equal(code(result), "PERMISSION_DENIED");
+  assert.match(message(result), /planning/);
+  assert.equal(r.port!.cards.length, 1);
+  assert.equal(r.runs.length, 0);
+});
+
+test("an approved workflow create records the new workflow in the chat's grant", async () => {
+  const r = rig();
+  const result = await r.call("create_wf", { name: "nightly" });
+  assert.equal(result.isError, undefined, message(result));
+  assert.deepEqual(r.port!.recorded, [{ threadId: "me", callerProjectPath: OWN, workflowId: "wf_new" }]);
+});
+
+test("boundary cards: cross-workspace Act names its one target and git identity; same-workspace Act below full-access cards without grants", async () => {
+  const r = rig();
+  const other = await r.call("act_in", { project: OTHER });
+  assert.equal(other.isError, undefined, message(other));
+  const card = r.port!.cards[0]!;
+  assert.equal(card.kind, "boundary");
+  assert.equal(card.family, "cross-project");
+  assert.equal(card.targetProjectPath, OTHER);
+  assert.deepEqual(card.grantOptions, ["chat"]);
+  assert.deepEqual(card.scope.projects, [{ path: OTHER, workspace: "beta", gitAccountLabel: "beta-bot" }]);
+  assert.match(card.title, /Act in a project in beta\/app/);
+  assert.ok(card.sections.some((section) => section.kind === "code" && section.text.includes(OTHER)), "the arguments are shown in full");
+
+  await r.call("act_in", { project: SAME }, caller({ runtimeMode: "auto" }));
+  assert.deepEqual([r.port!.cards[1]!.family, r.port!.cards[1]!.grantOptions], ["cross-project", []]);
+  const full = await r.call("act_in", { project: SAME });
+  assert.equal(full.isError, undefined);
+  assert.equal(r.port!.cards.length, 2, "full-access acts in its own workspace without a card");
+  assert.equal(code(await r.call("act_in", { project: "/w/acme" })), "PROJECT_NOT_FOUND", "a workspace is no project");
+});
+
+test("turn policy and the exchange: hop + 1, a new exchange at hop 1, EXCHANGE_LIMIT past 8, never into a broader chat, plan carries on", async () => {
+  const r = rig();
+  const sent = await r.call("message", { to: "t2" }, caller({ runtimeMode: "auto", exchange: { id: "ex-1", hop: 3 } }));
+  assert.equal(sent.isError, undefined, message(sent));
+  assert.deepEqual(r.runs[0]!.ctx.turn.causedBy, { threadId: "me", exchangeId: "ex-1", hop: 4 });
+  assert.equal(r.runs[0]!.ctx.turn.interactionMode, "default");
+  const header = parseThreadMessage((sent.structuredContent as { text: string }).text);
+  assert.equal(header?.fromSessionId, "me");
+  assert.equal(header?.fromProject, "acme/api");
+
+  await r.call("message", { to: "t2" }, caller({ runtimeMode: "auto", planning: true }));
+  assert.deepEqual(r.runs[1]!.ctx.turn.causedBy, { threadId: "me", exchangeId: "ex-new", hop: 1 });
+  assert.equal(r.runs[1]!.ctx.turn.interactionMode, "plan");
+
+  const limit = await r.call("message", { to: "t2" }, caller({ runtimeMode: "auto", exchange: { id: "ex-1", hop: 8 } }));
+  assert.equal(code(limit), "EXCHANGE_LIMIT");
+  const broader = await r.call("message", { to: "wide" }, caller({ runtimeMode: "auto" }));
+  assert.equal(code(broader), "PERMISSION_DENIED");
+  const self = await r.call("message", { to: "me" });
+  assert.equal(code(self), "PERMISSION_DENIED");
+  assert.equal(r.runs.length, 2);
+
+  const external = await r.call("message", { to: "wide" }, { kind: "external" });
+  assert.equal(external.isError, undefined, "external callers are full trust");
+  assert.equal(r.runs[2]!.ctx.turn.causedBy, undefined, "an external client's turn starts a fresh exchange");
+  assert.equal((external.structuredContent as { text: string }).text, "hello", "no provenance header for an external client");
+});
+
+test("a session the call creates takes the exchange but no mode check", async () => {
+  const opens = defineTool({
+    name: "opens", title: "Opens", description: "d", input: {}, audiences: ["chat"], toolset: "core", tier: "act",
+    scope: async () => claim({ causesTurnIn: [NEW_SESSION] }), annotations: MUTATING, resultKind: "json",
+    run: async (_args, ctx) => ({ causedBy: ctx.turn.causedBy })
+  });
+  const r = rig({ tools: [opens] });
+  const result = await r.call("opens", {}, caller({ exchange: { id: "e", hop: 1 } }));
+  assert.deepEqual((result.structuredContent as { causedBy: unknown }).causedBy, { threadId: "me", exchangeId: "e", hop: 2 });
+  assert.equal(r.api.calls.filter((c) => c.path.includes("/api/sessions/")).length, 0, "nothing to read for a new session");
+});
+
+test("every daemon request carries the caller's principal: agent for a chat, the transport's external principal", async () => {
+  const reads = defineTool({
+    name: "reads", title: "Reads", description: "d", input: {}, audiences: ["external", "chat"], toolset: "core", tier: "read",
+    scope: async (_args, ctx) => { await ctx.api.request("GET", "/api/x"); return claim(); },
+    annotations: READ_ONLY, resultKind: "json",
+    run: async (_args, ctx) => { await ctx.api.request("GET", "/api/y"); await ctx.api.request("GET", "/api/z", { principal: { kind: "user" } }); return {}; }
+  });
+  const r = rig({ tools: [reads] });
+  await r.call("reads", {}, caller({ exchange: { id: "e", hop: 2 } }));
+  const agent = { kind: "agent", threadId: "me", projectPath: OWN, agent: "claude", title: "Implement auth", exchange: { id: "e", hop: 2 } };
+  assert.deepEqual(r.api.principals, [agent, agent, { kind: "user" }]);
+  r.api.principals.length = 0;
+  await r.call("reads", {}, { kind: "external" }, new AbortController().signal, { kind: "external", credentialId: "cred_1" });
+  assert.deepEqual(r.api.principals.slice(0, 2), [{ kind: "external", credentialId: "cred_1" }, { kind: "external", credentialId: "cred_1" }]);
+});
+
+test("results: a record is ok()-wrapped, a CallToolResult passes through, an unexpected throw is INTERNAL without its text; an aborted call is cancelled", async () => {
+  const r = rig();
+  const recordResult = await r.call("chat_only", {});
+  assert.deepEqual(recordResult.structuredContent, { done: true });
+  assert.equal((await r.call("image", {})).content[0]!.type, "image");
+  const boom = await r.call("boom", {});
+  assert.equal(code(boom), "INTERNAL");
+  assert.doesNotMatch(JSON.stringify(boom), /secret\/host/);
+  const controller = new AbortController();
+  controller.abort();
+  assert.equal(code(await r.call("chat_only", {}, caller(), controller.signal)), "CANCELLED");
+});
+
+test("request_toolset's card goes through the executor's port: kind toolset, never a grant; refused for a workflow-owned chat", async () => {
+  let seen: Awaited<ReturnType<NonNullable<ReturnType<typeof callExtensions>["requestToolsetCard"]>>> | null = null;
+  const asks = defineTool({
+    name: "asks", title: "Asks", description: "d", input: {}, audiences: ["chat"], toolset: "core", tier: "act", planSafe: true,
+    scope: async () => claim(), annotations: MUTATING, resultKind: "json",
+    run: async (_args, ctx) => {
+      seen = await callExtensions(ctx).requestToolsetCard!({ toolset: "notes", title: "Claude asks to enable notes", sections: [{ kind: "text", text: "x" }], reason: "todo list" });
+      return { outcome: seen.outcome };
+    }
+  });
+  const r = rig({ tools: [asks] });
+  const result = await r.call("asks", {});
+  assert.equal(result.isError, undefined, message(result));
+  const card = r.port!.cards[0]!;
+  assert.deepEqual([card.kind, card.family, card.grantOptions, card.reason], ["toolset", "toolset", [], "todo list"]);
+  assert.equal(code(await r.call("asks", {}, caller({ workflowOwned: true }))), "PERMISSION_DENIED");
+  assert.equal(r.port!.cards.length, 1);
+  assert.equal(callExtensions({} as CallContext).requestToolsetCard, undefined);
+});

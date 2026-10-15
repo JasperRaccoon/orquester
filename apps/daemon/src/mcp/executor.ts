@@ -243,7 +243,8 @@ export async function executeToolCall(deps: ExecutorDeps, call: { name: string; 
 }
 
 async function execute(deps: ExecutorDeps, call: { name: string; arguments: unknown }, env: CallEnv): Promise<CallToolResult> {
-  const { caller, signal } = env;
+  const { signal } = env;
+  let caller = env.caller;
   const audience: Audience = caller.kind === "external" ? "external" : "chat";
   const lookup = deps.lookup ?? toolByName;
   const tool = lookup(call.name, audience);
@@ -297,30 +298,34 @@ async function execute(deps: ExecutorDeps, call: { name: string; arguments: unkn
       approval = outcome.approval;
       card = { preview: outcome.preview, family: outcome.family };
       args = outcome.frozenArgs;
-      // §13: the caller may have changed while the card waited (now planning, a narrower mode).
-      const now2 = deps.refreshCaller ? await deps.refreshCaller(caller) : caller;
-      const again = gate(gateInput(now2));
+      // §13: the caller may have changed while the card waited (now planning, a narrower mode): the
+      // gate re-runs on it, and the call proceeds as the caller is now. A card it would raise again
+      // is the one the user just answered.
+      const current: ThreadCaller = deps.refreshCaller ? await deps.refreshCaller(caller) : caller;
+      const again = gate(gateInput(current));
       if (again.kind === "deny") throw new ToolError(again.code, again.message);
+      caller = current;
     }
   }
 
-  const turn = await turnFor(deps, tool, caller, scope, api);
+  const who: ToolCaller = caller;
+  const turn = await turnFor(deps, tool, who, scope, api);
   const ctx: CallContext = {
     api,
     signal,
     now,
-    caller,
+    caller: who,
     turn,
     ...(deps.secretRequests ? { secretRequests: deps.secretRequests } : {}),
     ...(approval ? { approval } : {})
   };
   attachCallExtensions(ctx, {
     ...(deps.legacy ? { legacy: deps.legacy } : {}),
-    ...(caller.kind === "thread" ? { requestToolsetCard: (input: ToolsetCardInput) => requestToolsetCard(deps, caller, input, signal) } : {})
+    ...(who.kind === "thread" ? { requestToolsetCard: (input: ToolsetCardInput) => requestToolsetCard(deps, who, input, signal) } : {})
   });
   if (signal.aborted) return cancelled();
   const result = await tool.run(args, ctx);
-  if (card !== null && approval && caller.kind === "thread") await afterApprovedRun(deps, caller, card, approval, result);
+  if (card !== null && approval && who.kind === "thread") await afterApprovedRun(deps, who, card, approval, result);
   return isCallToolResult(result) ? result : ok(result);
 }
 

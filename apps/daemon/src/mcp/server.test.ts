@@ -143,6 +143,18 @@ test("tools/list pins every tool's required params and annotations (spec §12 sn
   } finally { await app.close(); }
 });
 
+test("tools/list is generated from the catalog's external audience: each entry's _meta names its chat tier and toolset", async () => {
+  const app = mcpApp({ createApi: () => new FakeDaemonApi() });
+  try {
+    const list = await postMcp(app, { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
+    const meta = Object.fromEntries((list.result.tools as (ListedTool & { _meta?: Record<string, string> })[]).map((t) => [t.name, t._meta]));
+    assert.deepEqual(meta.list_sessions, { "orquester/tier": "read", "orquester/toolset": "core" });
+    assert.deepEqual(meta.create_workflow, { "orquester/tier": "admin", "orquester/toolset": "workflow-authoring" });
+    assert.deepEqual(meta.desktop_close, { "orquester/tier": "act", "orquester/toolset": "desktops" });
+    assert.ok(Object.values(meta).every((m) => m !== undefined && typeof m["orquester/tier"] === "string"));
+  } finally { await app.close(); }
+});
+
 test("a tool call returns structuredContent + text; a ToolError becomes isError with a code; the api is built with the caller's bearer", async () => {
   const api = new FakeDaemonApi().on("GET", "/api/sessions", { status: 200, body: [chatSummary()] })
     .on("GET", "/api/registry", { status: 200, body: { shells: [], ides: [], fileExplorers: [], browsers: [], agents: [] } })
