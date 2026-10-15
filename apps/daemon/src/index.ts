@@ -120,7 +120,7 @@ import { registerAgentToolsRuntimeRoutes } from "./agent-tools/routes.ts";
 import { executorPorts } from "./mcp/executor.ts";
 // umcp:t3 end
 // umcp:t6 begin
-import { agentHostRoutes, type SessionToolsRefreshResponse } from "./agent-host/host-protocol.ts";
+import { agentHostRoutes, SESSION_TOOLS_REFRESH_TIMEOUT_MS, type SessionToolsRefreshResponse } from "./agent-host/host-protocol.ts";
 import { catalogFor } from "./mcp/catalog/index.ts";
 import { canonicalProjectPath } from "./agent-tools/approval-port.ts";
 import { registerSessionToolsManifestRoute, SessionToolsRefresher } from "./session-tools/toolset-refresh.ts";
@@ -1232,7 +1232,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
       const route = agentChat.routeDeps();
       if (!route.isHostHealthy()) return null;
       try {
-        const response = await route.client.json<SessionToolsRefreshResponse>("POST", agentHostRoutes.sessionToolsRefresh(id), { manifest }, { timeoutMs: 10_000 });
+        const response = await route.client.json<SessionToolsRefreshResponse>("POST", agentHostRoutes.sessionToolsRefresh(id), { manifest }, { timeoutMs: SESSION_TOOLS_REFRESH_TIMEOUT_MS });
         // 404: a host that predates the route — the change applies at the session's next start.
         return response.status === 200 && response.value ? response.value : null;
       } catch {

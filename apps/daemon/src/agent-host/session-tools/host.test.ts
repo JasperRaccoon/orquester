@@ -486,3 +486,77 @@ test("the inert /mcp/denied server lists nothing and refuses every call, without
   assert.deepEqual((await client.listTools()).tools, []);
   await assert.rejects(client.callTool({ name: "echo", arguments: {} }));
 });
+
+test("an older refresh queued behind a launch read is superseded by a newer one queued with it (the stamp is claimed atomically)", async (t) => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  let entered!: () => void;
+  const reading = new Promise<void>((resolve) => (entered = resolve));
+  const service = testHost(recordingForward().forward, async () => {
+    entered();
+    await gate;
+    return { kind: "manifest", manifest: { tools: TEST_NAMES, instructions: "## Orquester (test)", deny: [], seq: 10, epoch: "e1" } };
+  });
+  t.after(() => service.stop());
+  const launching = service.launchInProcess("thread-c", CLAUDE, () => true);
+  await reading;
+  const twelve = service.applyManifest("thread-c", { tools: ["echo"], instructions: "## Orquester (test)", deny: [], seq: 12, epoch: "e1" });
+  const eleven = service.applyManifest("thread-c", { tools: ["pixel"], instructions: "## Orquester (test)", deny: [], seq: 11, epoch: "e1" });
+  release();
+  await launching;
+  assert.deepEqual(await Promise.all([twelve, eleven]), ["live", "superseded"]);
+  assert.deepEqual(service.listSource("thread-c").list().map((tool) => tool.name), ["echo"], "seq 12's list");
+});
+
+test("sequences compare within one daemon epoch: a restarted daemon (new epoch, smaller seq) is accepted", async (t) => {
+  const service = testHost(recordingForward().forward, async () => ({
+    kind: "manifest",
+    manifest: { tools: TEST_NAMES, instructions: "## Orquester (test)", deny: [], seq: 1_000_000, epoch: "old-boot" }
+  }));
+  t.after(() => service.stop());
+  await service.issue("thread-a", CODEX);
+  assert.equal(await service.applyManifest("thread-a", { tools: ["echo"], instructions: "", deny: [], seq: 5, epoch: "old-boot" }), "superseded");
+  assert.equal(await service.applyManifest("thread-a", { tools: ["echo"], instructions: "", deny: [], seq: 1, epoch: "new-boot" }), "next-idle");
+  // …and the new epoch is the one compared from now on.
+  assert.equal(await service.applyManifest("thread-a", { tools: TEST_NAMES, instructions: "", deny: [], seq: 1, epoch: "new-boot" }), "superseded");
+  // A deleted thread forgets its stamps.
+  service.forgetThread("thread-a");
+  assert.equal(await service.applyManifest("thread-a", { tools: ["echo"], instructions: "", deny: [], seq: 1, epoch: "new-boot" }), "next-idle");
+});
+
+test("the launch-key fallback copies another thread's list WITHOUT its stamp", async (t) => {
+  let up = true;
+  const service = testHost(recordingForward().forward, async () =>
+    up ? { kind: "manifest", manifest: { tools: TEST_NAMES, instructions: "## Orquester (test)", deny: ["remote"], seq: 50, epoch: "e1" } } : { kind: "unavailable" }
+  );
+  t.after(() => service.stop());
+  await service.issue("thread-a", CODEX);
+  up = false;
+  const copy = await service.issue("thread-b", CODEX);
+  assert.deepEqual(copy.prepared.deny, ["remote"]);
+  assert.equal(copy.prepared.seq, undefined);
+  assert.equal(copy.prepared.epoch, undefined);
+  // thread-b's own refreshes are not judged against thread-a's sequence.
+  assert.equal(await service.applyManifest("thread-b", { tools: ["echo"], instructions: "", deny: ["remote"], seq: 7, epoch: "e1" }), "next-idle");
+});
+
+test("a relaunch that already read this change or a newer one owes nothing (`superseded`)", async (t) => {
+  let seq = 1;
+  let tools: string[] = TEST_NAMES;
+  const service = testHost(recordingForward().forward, async () => ({ kind: "manifest", manifest: { tools, instructions: "## Orquester (test)", deny: [], seq, epoch: "e1" } }));
+  t.after(() => service.stop());
+  let relaunch!: () => Promise<void>;
+  const first = await service.launchInProcess("thread-c", CLAUDE, async () => {
+    await relaunch();
+    return false;
+  });
+  relaunch = async () => {
+    first.release();
+    // The daemon moved on to seq 3 (yet another list) before the relaunch read it.
+    seq = 3;
+    tools = ["pixel"];
+    await service.launchInProcess("thread-c", CLAUDE, () => true);
+  };
+  assert.equal(await service.applyManifest("thread-c", { tools: ["echo"], instructions: "## Orquester (test)", deny: [], seq: 2, epoch: "e1" }), "superseded");
+  assert.equal(service.needsRestart("thread-c"), false);
+});

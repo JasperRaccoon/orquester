@@ -350,3 +350,42 @@ test("a refused post (a user turn raced in: TURN_NOT_IDLE) is skipped, never ret
   r.api.on("POST", agentChatCommandPath("codex-1", "turn"), { status: 409, body: { error: { code: "TURN_NOT_IDLE", message: "busy" } } });
   assert.equal(await r.refresher.scheduleContinue("codex-1", "notes", "default"), "skipped");
 });
+
+test("request_toolset whose push was overtaken by one that already finished takes THAT outcome (the continue is not lost)", async () => {
+  const scheduled: string[] = [];
+  const answers: Array<(answer: SessionToolsRefreshResponse) => void> = [];
+  let both!: () => void;
+  const arrived = new Promise<void>((resolve) => (both = resolve));
+  const r = rig({
+    pushToHost: () =>
+      new Promise((resolve) => {
+        answers.push(resolve);
+        if (answers.length === 2) both();
+      })
+  });
+  r.refresher.scheduleContinue = async (threadId) => (scheduled.push(threadId), "posted");
+  const caller: ThreadCaller = {
+    kind: "thread", threadId: "codex-1", title: "t", projectPath: "", workspace: "", cwd: "/", agentId: "codex", callId: "c", runtimeMode: "full-access", planning: false, workflowOwned: false, exchange: null
+  };
+  // The approval's own push, then a settings refresh's newer one.
+  r.refresher.toolsetsChanged("codex-1");
+  const approval = r.refresher.toolsetApproved(caller, "notes");
+  r.refresher.toolsetsChanged("codex-1");
+  await arrived;
+  // The newer push finishes first (a restart is pending); the older one is superseded.
+  answers[1]!({ applied: "next-idle" });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  answers[0]!({ applied: "superseded" });
+  await approval;
+  assert.deepEqual(scheduled, ["codex-1"]);
+});
+
+test("manifests carry this daemon's epoch beside the sequence", async () => {
+  const r = rig();
+  const a = await manifestOf(r, "codex-1");
+  const b = await manifestOf(r, "codex-1");
+  assert.equal(typeof a.epoch, "string");
+  assert.equal(a.epoch, b.epoch);
+  assert.ok(b.seq! > a.seq!);
+  assert.notEqual(a.epoch, (await manifestOf(rig(), "codex-1")).epoch, "another daemon process, another epoch");
+});

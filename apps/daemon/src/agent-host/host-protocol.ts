@@ -303,7 +303,24 @@ export interface SessionToolsManifest {
    * daemon: never superseded.
    */
   seq?: number;
+  /**
+   * The daemon process that stamped `seq` (a random id per boot): sequences compare only within
+   * one epoch — a new epoch is accepted and restarts the comparison, so a wall clock stepping back
+   * across a daemon restart never rejects refreshes. Absent with `seq` from an older build.
+   */
+  epoch?: string;
 }
+
+/**
+ * The longest the host takes to answer a refresh: a launch's manifest read it waits for (the
+ * host's own manifest timeout, 10 s) plus Claude's bounded re-list wait (5 s). The daemon's push
+ * and `request_toolset`'s wait are set above it ({@link SESSION_TOOLS_REFRESH_TIMEOUT_MS}), so an
+ * answer is never lost to a timeout and "now" / "after-restart" stay truthful.
+ */
+export const SESSION_TOOLS_REFRESH_HOST_MAX_MS = 15_000;
+
+/** The daemon's bound on a refresh push (and `request_toolset`'s wait for it). */
+export const SESSION_TOOLS_REFRESH_TIMEOUT_MS = SESSION_TOOLS_REFRESH_HOST_MAX_MS + 5_000;
 
 /** Body of `POST /threads/:id/session-tools/refresh`. */
 export interface SessionToolsRefreshRequest {

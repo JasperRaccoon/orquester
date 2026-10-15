@@ -856,8 +856,15 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
         throw new AgentChatCommandError("INVALID_COMMAND", "manifest {tools, instructions, deny} is required.");
       }
       const seq = typeof manifest.seq === "number" && Number.isFinite(manifest.seq) ? manifest.seq : undefined;
+      const epoch = typeof manifest.epoch === "string" && manifest.epoch.length <= 128 ? manifest.epoch : undefined;
       const result = await options.sessionToolsRefresh(threadId, {
-        manifest: { tools: manifest.tools, instructions: manifest.instructions, deny: manifest.deny, ...(seq !== undefined ? { seq } : {}) }
+        manifest: {
+          tools: manifest.tools,
+          instructions: manifest.instructions,
+          deny: manifest.deny,
+          ...(seq !== undefined ? { seq } : {}),
+          ...(epoch !== undefined ? { epoch } : {})
+        }
       });
       sendJson(response, 200, result);
       return;

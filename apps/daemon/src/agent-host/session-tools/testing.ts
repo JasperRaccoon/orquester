@@ -139,6 +139,9 @@ export function recordingSessionTools(
     abortThreadCalls: (threadId) => {
       abortedThreads.push(threadId);
     },
+    forgetThread: (threadId) => {
+      launched.delete(threadId);
+    },
     stop: async () => {}
   };
 }

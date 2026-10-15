@@ -48,6 +48,7 @@ import {
 
 import {
   daemonRoutesForHost,
+  SESSION_TOOLS_REFRESH_TIMEOUT_MS,
   type SessionToolsManifest,
   type SessionToolsManifestRequest,
   type SessionToolsRefreshResponse
@@ -65,8 +66,12 @@ export const TOOLSET_CONTINUE_WAIT_MS = 60 * 60 * 1000;
 /** How long a read of the daemon-pointing servers is reused (the read walks every account home). */
 export const DAEMON_POINTING_CACHE_MS = 30_000;
 
-/** How long `request_toolset` waits for the host to apply its toolset (Claude re-lists within ms; the host bounds its own wait at 5 s). */
-export const TOOLSET_APPLY_WAIT_MS = 8_000;
+/**
+ * How long `request_toolset` waits for the host to apply its toolset: just above the push's own
+ * bound, which is above the host's worst case (a launch read it waits for + Claude's re-list), so
+ * an answer the host gives is never lost to this wait — the result stays truthful.
+ */
+export const TOOLSET_APPLY_WAIT_MS = SESSION_TOOLS_REFRESH_TIMEOUT_MS + 1_000;
 
 /** Chats refreshed at once after a settings change. */
 export const REFRESH_CONCURRENCY = 4;
@@ -132,8 +137,12 @@ export class SessionToolsRefresher {
   private readonly pushes = new Map<string, Promise<RefreshAnswer>>();
   /** The last GOOD read of the daemon-pointing servers; `stale` once invalidated (re-read, but kept). */
   private pointing: { at: number; servers: readonly DaemonPointingServer[]; stale: boolean } | null = null;
-  /** The manifest sequence clock: monotonic here, milliseconds-based so it grows across restarts. */
+  /** The manifest sequence clock: monotonic within this daemon process. */
   private seqClock = 0;
+  /** This daemon process's epoch: the host compares sequences only within one epoch. */
+  private readonly epoch = randomUUID();
+  /** The newest push each chat got an answer for (a superseded `request_toolset` reads it). */
+  private readonly latestAnswer = new Map<string, { seq: number; answer: RefreshAnswer }>();
   /** The newest sequence each chat's advertised set was taken from: an older answer never overwrites it. */
   private readonly advertisedSeq = new Map<string, number>();
   private stopped = false;
@@ -153,6 +162,7 @@ export class SessionToolsRefresher {
   forget(threadId: string): void {
     this.advertised.delete(threadId);
     this.advertisedSeq.delete(threadId);
+    this.latestAnswer.delete(threadId);
     this.cancelContinue(threadId);
   }
 
@@ -204,9 +214,9 @@ export class SessionToolsRefresher {
     if (this.pointing) this.pointing = { ...this.pointing, stale: true };
   }
 
-  /** The next manifest sequence: strictly increasing, and at least the wall clock (restarts move on). */
+  /** The next manifest sequence: strictly increasing within this process (its epoch orders restarts). */
   private nextSeq(): number {
-    this.seqClock = Math.max(this.seqClock + 1, this.now());
+    this.seqClock += 1;
     return this.seqClock;
   }
 
@@ -253,7 +263,7 @@ export class SessionToolsRefresher {
     });
     const seq = this.nextSeq();
     if (purpose === "launch") this.setAdvertised(threadId, toolsets, seq);
-    return { ...manifest, seq };
+    return { ...manifest, seq, epoch: this.epoch };
   }
 
   /**
@@ -300,6 +310,7 @@ export class SessionToolsRefresher {
       const seq = manifest.seq ?? this.nextSeq();
       // A newer push decided already: this answer changes nothing.
       if (applied === "superseded" || seq < (this.advertisedSeq.get(threadId) ?? -Infinity)) return applied;
+      if (seq > (this.latestAnswer.get(threadId)?.seq ?? -Infinity)) this.latestAnswer.set(threadId, { seq, answer: applied });
       if (applied === "live" || applied === "unchanged") this.setAdvertised(threadId, manifest.toolsets ?? [], seq);
       else this.markPending(threadId);
       return applied;
@@ -350,9 +361,15 @@ export class SessionToolsRefresher {
       // A push another one overtook answers `superseded`: the newest one decides.
       for (;;) {
         answer = await Promise.race([push, deadline]);
+        if (answer !== "superseded") break;
         const newer = this.pushes.get(caller.threadId);
-        if (answer !== "superseded" || newer === undefined || newer === push) break;
-        push = newer;
+        if (newer !== undefined && newer !== push) {
+          push = newer;
+          continue;
+        }
+        // The newer push that overtook this one has finished already: ITS outcome is the change's.
+        answer = this.latestAnswer.get(caller.threadId)?.answer ?? "superseded";
+        break;
       }
     } finally {
       clearTimeout(timer);

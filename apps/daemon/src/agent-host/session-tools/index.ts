@@ -62,6 +62,15 @@ export function launchHomeKey(home: { kind: string; accountId?: string }): strin
   return home.kind === "account" && home.accountId ? home.accountId : "system";
 }
 
+/** A manifest's ordering stamp: its sequence within its daemon epoch. */
+interface Stamp {
+  seq: number;
+  epoch: string | undefined;
+}
+
+const stampOf = (value: { seq?: number; epoch?: string }): Stamp | undefined =>
+  value.seq === undefined ? undefined : { seq: value.seq, epoch: value.epoch };
+
 const launchKeyOf = (launch: SessionToolsLaunch): string => `${launch.agent}\u0000${launch.home}\u0000${launch.project}`;
 
 /** What ONE provider session of a thread advertises. */
@@ -81,8 +90,9 @@ export interface PreparedSessionTools {
   readonly denyKnown: boolean;
   /** Equal for equal lists, instructions and denials: a session restarts only when it moved. */
   readonly key: string;
-  /** The daemon's manifest sequence (`SessionToolsManifest.seq`), when it sent one. */
+  /** The daemon's manifest sequence and boot epoch (`SessionToolsManifest.seq` / `.epoch`), when it sent them. */
   readonly seq?: number;
+  readonly epoch?: string;
   /**
    * `manifest`: the daemon's; `legacy`: the frozen old definitions (a daemon without the route);
    * `fallback`: the daemon could not be asked — this launch key's last list, else the defaults.
@@ -166,6 +176,8 @@ export interface SessionToolsHost {
   deniedUrl(): Promise<string | undefined>;
   /** Abort every call `threadId` has in flight (its turn was interrupted). */
   abortThreadCalls(threadId: string): void;
+  /** The thread was deleted: drop its fallbacks and sequence bookkeeping. */
+  forgetThread(threadId: string): void;
   /** Revoke everything and close the endpoint (the host's teardown). */
   stop(): Promise<void>;
 }
@@ -248,10 +260,18 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
   const lastByLaunch = new Map<string, PreparedSessionTools>();
   /** Each thread's own last manifest and the launch key it was read for — the first fallback. */
   const lastByThread = new Map<string, { launchKey: string; prepared: PreparedSessionTools }>();
-  /** The newest manifest sequence each thread launched with or applied: older refreshes are superseded. */
-  const lastSeq = new Map<string, number>();
-  const noteSeq = (threadId: string, seq: number | undefined): void => {
-    if (seq !== undefined && seq > (lastSeq.get(threadId) ?? -Infinity)) lastSeq.set(threadId, seq);
+  /** The newest manifest stamp each thread launched with, applied or CLAIMED: older refreshes are superseded. */
+  const lastSeq = new Map<string, Stamp>();
+  /** True when `stamp` is no newer than the thread's last one (same daemon epoch only). */
+  const isStale = (threadId: string, stamp: Stamp | undefined): boolean => {
+    if (stamp === undefined) return false;
+    const last = lastSeq.get(threadId);
+    if (last === undefined || last.epoch !== stamp.epoch) return false;
+    return stamp.seq <= last.seq;
+  };
+  /** Record `stamp` as the thread's newest (a new epoch restarts the comparison). */
+  const noteSeq = (threadId: string, stamp: Stamp | undefined): void => {
+    if (stamp !== undefined && !isStale(threadId, stamp)) lastSeq.set(threadId, stamp);
   };
   let endpoint: Promise<SessionToolsEndpoint> | null = null;
   let stopped = false;
@@ -301,7 +321,7 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
 
   const fromManifest = async (threadId: string, manifest: SessionToolsManifest): Promise<PreparedSessionTools> => {
     const prepared = await build(threadId, manifest.tools, manifest.instructions, manifest.deny, "manifest");
-    return manifest.seq !== undefined ? { ...prepared, seq: manifest.seq } : prepared;
+    return manifest.seq !== undefined ? { ...prepared, seq: manifest.seq, ...(manifest.epoch !== undefined ? { epoch: manifest.epoch } : {}) } : prepared;
   };
 
   /**
@@ -315,7 +335,11 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
     const own = lastByThread.get(threadId);
     if (own && own.launchKey === launchKey) return { ...own.prepared, source: "fallback" };
     const last = lastByLaunch.get(launchKey);
-    if (last) return { ...last, threadId, source: "fallback" };
+    if (last) {
+      // Another thread's manifest: its stamp orders THAT thread's refreshes, never this one's.
+      const { seq: _seq, epoch: _epoch, ...copy } = last;
+      return { ...copy, threadId, source: "fallback" };
+    }
     // Safe values where the thread's own are unknown: workflow-owned (no Admin tool, no
     // approval line), and no toolset can be asked for.
     const on = new Set(TOOLSETS.filter((toolset) => toolset.locked || toolset.defaults[launch.agent] === true).map((toolset) => toolset.id));
@@ -379,7 +403,7 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
       launched.set(threadId, { prepared, owner, ...(live ? { live } : {}) });
       desired.delete(threadId);
       forced.delete(threadId);
-      noteSeq(threadId, prepared.seq);
+      noteSeq(threadId, stampOf(prepared));
       return prepared;
     } finally {
       if (launching.get(threadId) === done) launching.delete(threadId);
@@ -467,12 +491,18 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
       // A launch reading its manifest right now: judge the refresh against what it launches with.
       const inFlight = launching.get(threadId);
       if (inFlight) await inFlight;
-      // Out of order (a settings refresh and an approval racing): never roll a list back.
-      if (manifest.seq !== undefined && manifest.seq <= (lastSeq.get(threadId) ?? -Infinity)) return "superseded";
+      // Out of order (a settings refresh and an approval racing): never roll a list back. The
+      // stamp is CLAIMED before any await, so an older refresh queued behind this one is
+      // superseded however their awaits interleave.
+      const stamp = stampOf(manifest);
+      if (isStale(threadId, stamp)) return "superseded";
+      noteSeq(threadId, stamp);
+      const claimed = lastSeq.get(threadId);
+      const overtaken = (): boolean => stamp !== undefined && lastSeq.get(threadId) !== claimed;
       const next = await fromManifest(threadId, manifest);
+      if (overtaken()) return "superseded";
       const session = launched.get(threadId);
       if (!session) return "next-start";
-      noteSeq(threadId, manifest.seq);
       if (session.prepared.key === next.key && !forced.has(threadId)) {
         desired.delete(threadId);
         return "unchanged";
@@ -494,9 +524,15 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
         if (now.owner !== session.owner) {
           // The session relaunched while the client was being told: it read its own manifest.
           if (now.prepared.key === next.key) return "unchanged";
+          const relaunchStamp = stampOf(now.prepared);
+          if (stamp !== undefined && relaunchStamp !== undefined && relaunchStamp.epoch === stamp.epoch && relaunchStamp.seq >= stamp.seq) {
+            // The relaunch read this change or a newer one: nothing of this refresh is owed.
+            return "superseded";
+          }
           desired.set(threadId, next);
           return "next-idle";
         }
+        if (overtaken()) return "superseded";
         if (relisted) {
           forced.delete(threadId);
           return "live";
@@ -540,6 +576,12 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
         .catch(() => undefined);
     },
     abortThreadCalls: (threadId) => abortWhere((call) => call.threadId === threadId),
+    forgetThread(threadId) {
+      lastByThread.delete(threadId);
+      lastSeq.delete(threadId);
+      desired.delete(threadId);
+      forced.delete(threadId);
+    },
     async stop() {
       stopped = true;
       credentials.revokeAll();

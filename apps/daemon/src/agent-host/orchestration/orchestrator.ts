@@ -328,6 +328,8 @@ export interface OrchestratorOptions {
    * thread's next idle point. Optional; must not throw.
    */
   sessionToolsStale?: (threadId: string) => boolean;
+  /** A thread was deleted (after everything of it is freed): per-thread state elsewhere goes too. Must not throw. */
+  onThreadDeleted?: (threadId: string) => void;
   /**
    * Session-tool secrets (design 2026-10-14 §5, `session-tools/secret-redaction.ts`)
    * beyond ingestion's: `link` — a fork's child is masked with its parent's
@@ -4584,6 +4586,11 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       liveUsageLimits.delete(threadId);
       runtimes.delete(threadId);
       loadingRuntimes.delete(threadId);
+      try {
+        options.onThreadDeleted?.(threadId);
+      } catch (error) {
+        logger.warn("agent-host: a thread-deleted listener failed", error);
+      }
     });
 
   // -------------------------------------------------------------------------

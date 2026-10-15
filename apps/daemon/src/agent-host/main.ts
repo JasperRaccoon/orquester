@@ -584,6 +584,7 @@ export async function startAgentHost(
     // A toolset change the live session could not take in-session (unified MCP §9.3): restart it
     // with resume at its next idle point.
     sessionToolsStale: (threadId: string) => sessionTools.needsRestart(threadId),
+    onThreadDeleted: (threadId: string) => sessionTools.forgetThread(threadId),
     // A fork's child masked with its parent's secrets; an MCP App's answers masked (§5).
     secrets: {
       link: (threadId, parentThreadId) => secretRedactor.link(threadId, parentThreadId),
