@@ -438,6 +438,8 @@ export interface ScenarioWorld {
   usageTokens: UsageTokensScanner;
   /** The quota snapshot `GET /api/usage` answers. */
   quota: UsageResponse;
+  /** The managed agent accounts `GET /api/agent-accounts` answers. */
+  agentAccounts: AgentAccountsResponse;
   events: EventMessage[];
   cards: CardWatch;
   /** A tool call from chat `threadId`, through the socket-only session-tool route as the host makes it. */
@@ -650,7 +652,10 @@ export async function scenarioWorld(seed: WorkspaceSeed): Promise<ScenarioWorld>
   // Token usage (the Cost tab's scanner over this world's home) and the quota snapshot.
   const usageTokens = new UsageTokensScanner({ userhome: home, cacheFile: join(appdir, "usage-tokens.json"), now: () => Date.now() });
   await usageTokens.init();
-  const world = { quota: { agents: [] } as UsageResponse };
+  const world = {
+    quota: { agents: [] } as UsageResponse,
+    agentAccounts: { accounts: [], defaults: { claude: null, codex: null, grok: null } } as AgentAccountsResponse
+  };
 
   // Workspace and git-account listings (the daemon reads them from workspaces.json and accounts.json).
   const accounts: AccountSummary[] = [gitAccount("acct-jasper", "JasperDev (GitHub)", "jasperdev"), gitAccount("acct-acme", "Acme Bot (GitHub)", "acme-bot")];
@@ -685,7 +690,7 @@ export async function scenarioWorld(seed: WorkspaceSeed): Promise<ScenarioWorld>
       closed: (id) => runtime.threadClosed(id)
     });
     app.get("/api/registry", async () => registry);
-    app.get("/api/agent-accounts", async (): Promise<AgentAccountsResponse> => ({ accounts: [], defaults: { claude: null, codex: null, grok: null } }) as AgentAccountsResponse);
+    app.get("/api/agent-accounts", async (): Promise<AgentAccountsResponse> => world.agentAccounts);
     app.get("/api/accounts", async () => accounts);
     app.get("/api/workspaces", async () => workspaces());
     app.get<{ Params: { workspace: string } }>("/api/workspaces/:workspace/projects", async (request, reply): Promise<ProjectSummary[] | FastifyReply> => {
@@ -790,6 +795,8 @@ export async function scenarioWorld(seed: WorkspaceSeed): Promise<ScenarioWorld>
     workflows: { service, runStore, secrets, daemon }, agentProfile, lineage, router, refresher, usageTokens,
     get quota() { return world.quota; },
     set quota(value: UsageResponse) { world.quota = value; },
+    get agentAccounts() { return world.agentAccounts; },
+    set agentAccounts(value: AgentAccountsResponse) { world.agentAccounts = value; },
     events, cards, chat, external, answer, carded, uncarded: (threadId, name, args = {}) => noCard(() => chat(threadId, name, args)), user, waitEvent, drain,
     async close() {
       if (closed) return;

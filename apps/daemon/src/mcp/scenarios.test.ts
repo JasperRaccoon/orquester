@@ -16,8 +16,11 @@ import { readFile } from "node:fs/promises";
 import { describe, test } from "node:test";
 
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { parseThreadMessage } from "@orquester/api/agent-chat";
 
-import { out, scenarioWorld, type ScenarioWorld } from "./scenario-world.ts";
+import { estimateCostParts } from "../usage-tokens.ts";
+import { isoWeek } from "./usage-view.ts";
+import { out, scenarioWorld, writeHomeFile, type ScenarioWorld } from "./scenario-world.ts";
 
 const SEED = {
   projects: { jaspersito: ["orquester", "orquester-3"], acme: ["site", "docs"] },
@@ -419,6 +422,330 @@ describe("acceptance (c) / §14.2.11 saved prompts: global and per project; the 
       assert.equal(w.savedPrompts.get(project.id)!.body, "Review the auth module, then the session module.");
       // Even the chat's saved-prompts grant does not cover it: the next edit cards again.
       refused((await w.carded("claude", "update_saved_prompts", { action: "update", id: project.id, title: "Renamed" }, { decision: "deny" })).result, "APPROVAL_DENIED");
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (d) Workflows under one chat grant (§4.1 "Workflows", §7.2 revisions, §7.6 grants, rulings)
+// ---------------------------------------------------------------------------
+
+describe("acceptance (d) / §14.2.11 workflows: create → modify → enable → run (revision pinned) → watch → debug → fix → disable → enable → delete under one chat grant", () => {
+  test("the grant made on the create card covers every later call in that chat; a user-made sub-workflow it does not cover forces a card", async () => {
+    await withWorld(async (w) => {
+      const orq = w.project("jaspersito/orquester");
+      w.host.addChat("claude", { project: orq, title: "Automate", runtimeMode: "full-access" });
+      assert.equal((await w.user({ method: "PUT", url: "/api/sessions/claude/agent-tools", payload: { toolsets: { "workflow-authoring": true } } })).status, 200);
+      w.host.userTurn("claude", "Automate the build check.");
+
+      // A dry run validates (Read): no card, nothing saved.
+      const definition = {
+        name: "Build check",
+        project: { kind: "existing", project: "jaspersito/orquester" },
+        nodes: [
+          { type: "trigger.manual", name: "Go" },
+          { type: "shell", name: "Check", config: { script: "echo building; echo 'error: missing lockfile' >&2; exit 3" } }
+        ],
+        edges: [{ source: "Go", target: "Check" }]
+      };
+      const dry = ok(await w.uncarded("claude", "create_workflow", { ...definition, dryRun: true }));
+      assert.equal(dry.valid, true, JSON.stringify(dry.problems));
+      assert.equal(w.workflows.service.list().length, 0);
+
+      // create: Admin card, family workflows, grantable for this chat; the user approves with the grant.
+      const created = await w.carded("claude", "create_workflow", { ...definition, reason: "The user asked to automate the build check." }, { decision: "approve", grant: "chat" });
+      assert.equal(created.card.kind, "admin");
+      assert.equal(created.card.family, "workflows");
+      assert.deepEqual(created.card.grantOptions, ["chat"]);
+      assert.match(created.card.title, /create the workflow "Build check"/);
+      assert.match(JSON.stringify(created.card.sections), /missing lockfile/, "the card shows the script that will run");
+      const wf = ok(created.result);
+      const id = wf.workflowId as string;
+      assert.equal(w.workflows.service.get(id)!.enabled, false, "created disabled");
+      const grant = w.runtime.tools.snapshot().grants.find((g) => g.family === "workflows")!;
+      assert.equal(grant.scope, "chat");
+      assert.equal(grant.threadId, "claude");
+      assert.deepEqual(grant.workflowIds, [id], "the new workflow joined the grant");
+
+      // modify, enable — no card (the grant), persisted.
+      let revision = wf.revision as number;
+      const renamed = ok(await w.uncarded("claude", "update_workflow", { workflowId: id, revision, ops: [{ op: "set_name", name: "Build check (CI)" }] }));
+      assert.equal(renamed.toolApproval.outcome, "granted");
+      revision = renamed.revision;
+      revision = ok(await w.uncarded("claude", "update_workflow", { workflowId: id, revision, ops: [{ op: "set_enabled", enabled: true }] })).revision;
+      assert.equal(w.workflows.service.get(id)!.enabled, true);
+      assert.equal(w.workflows.service.get(id)!.name, "Build check (CI)");
+
+      // run at a stale revision: refused before anything runs (the run route pins the revision).
+      refused(await w.uncarded("claude", "run_workflow", { workflowId: id, revision: revision - 1, wait: true }), "REVISION_CONFLICT");
+      assert.deepEqual(ok(await w.uncarded("claude", "get_workflow_runs", { workflowId: id })).runs, [], "nothing ran");
+      // run and wait: the shell block fails.
+      const failed = ok(await w.uncarded("claude", "run_workflow", { workflowId: id, revision, wait: true, timeoutSeconds: 120 }));
+      assert.equal(failed.finished, true);
+      assert.equal(failed.run.status, "failed");
+      const runId = failed.run.runId as string;
+      // watch / inspect / debug: the run list, the run, the failing block's stderr.
+      const runs = ok(await w.uncarded("claude", "get_workflow_runs", { workflowId: id }));
+      assert.deepEqual(runs.runs.map((run: { runId: string }) => run.runId), [runId]);
+      const inspected = ok(await w.uncarded("claude", "get_workflow_runs", { runId }));
+      assert.equal(inspected.run.status, "failed");
+      const stderr = ok(await w.uncarded("claude", "get_workflow_runs", { runId, nodeId: "Check", log: "stderr" }));
+      assert.match(JSON.stringify(stderr), /missing lockfile/);
+      const stdout = ok(await w.uncarded("claude", "get_workflow_runs", { runId, nodeId: "Check", log: "stdout" }));
+      assert.match(JSON.stringify(stdout), /building/);
+
+      // fix, run without waiting, then watch it to the end (bus-driven wait).
+      revision = ok(await w.uncarded("claude", "update_workflow", { workflowId: id, revision, ops: [{ op: "update_node", node: "Check", set: { config: { script: "echo build ok" } } }] })).revision;
+      const started = ok(await w.uncarded("claude", "run_workflow", { workflowId: id, revision }));
+      const watched = ok(await w.uncarded("claude", "get_workflow_runs", { runId: started.runId, waitSeconds: 120 }));
+      assert.equal(watched.run.status, "succeeded", JSON.stringify(watched).slice(0, 400));
+      const output = ok(await w.uncarded("claude", "get_workflow_runs", { runId: started.runId, nodeId: "Check" }));
+      assert.match(JSON.stringify(output.output), /build ok/);
+
+      // disable, enable — still no card.
+      revision = ok(await w.uncarded("claude", "update_workflow", { workflowId: id, revision, ops: [{ op: "set_enabled", enabled: false }] })).revision;
+      assert.equal(w.workflows.service.get(id)!.enabled, false);
+      revision = ok(await w.uncarded("claude", "update_workflow", { workflowId: id, revision, ops: [{ op: "set_enabled", enabled: true }] })).revision;
+      assert.equal(w.workflows.service.get(id)!.enabled, true);
+
+      // A sub-workflow the grant does not cover: the user's own workflow, called from the agent's.
+      const users = await w.user({
+        method: "POST", url: "/api/workflows",
+        payload: { name: "Notify team", project: { kind: "existing", projectPath: orq }, nodes: [{ type: "trigger.manual", name: "Start" }, { type: "code", name: "Say", config: { source: "export default () => ({ said: 'hi' })" } }], edges: [{ source: "Start", target: "Say" }] }
+      });
+      assert.ok(users.status < 300, JSON.stringify(users.body));
+      const childId = users.body.workflow.id as string;
+      const addChild = await w.carded("claude", "update_workflow", {
+        workflowId: id, revision,
+        ops: [{ op: "add_node", node: { type: "workflow", name: "Notify", config: { workflowId: childId } } }, { op: "connect", source: "Check", target: "Notify" }]
+      }, { decision: "approve" });
+      assert.equal(addChild.card.family, "workflows");
+      assert.match(JSON.stringify(addChild.card.sections), /Notify team/, "the card names the workflow it would start calling");
+      revision = ok(addChild.result).revision;
+      assert.deepEqual(w.runtime.tools.snapshot().grants.find((g) => g.family === "workflows")!.workflowIds, [id], "approving once never widens the grant");
+      // Running it now cards too (the child is not covered); approved once, the run includes the child's.
+      const childRun = await w.carded("claude", "run_workflow", { workflowId: id, revision, wait: true, timeoutSeconds: 120 }, { decision: "approve" });
+      assert.match(childRun.card.title, /run the workflow "Build check \(CI\)"/);
+      const ran = ok(childRun.result);
+      assert.equal(ran.run.status, "succeeded", JSON.stringify(ran).slice(0, 600));
+      // The user's workflow run directly: a card (never the agent's grant).
+      const direct = await w.carded("claude", "run_workflow", { workflowId: childId, revision: w.workflows.service.get(childId)!.revision }, { decision: "deny" });
+      refused(direct.result, "APPROVAL_DENIED");
+      // Deleting the user's workflow cards; deleting the agent's own does not.
+      refused((await w.carded("claude", "delete_workflow", { workflowId: childId, confirm: true }, { decision: "deny" })).result, "APPROVAL_DENIED");
+      assert.ok(w.workflows.service.get(childId));
+      ok(await w.uncarded("claude", "delete_workflow", { workflowId: id, confirm: true }));
+      assert.equal(w.workflows.service.get(id) ?? null, null, "deleted");
+
+      // Another chat, even at Full access, holds no grant: its first call on a workflow cards.
+      w.host.addChat("other", { project: orq, title: "Other", runtimeMode: "full-access" });
+      await w.user({ method: "PUT", url: "/api/sessions/other/agent-tools", payload: { toolsets: { "workflow-authoring": true } } });
+      w.host.userTurn("other", "run it");
+      refused((await w.carded("other", "run_workflow", { workflowId: childId, revision: w.workflows.service.get(childId)!.revision }, { decision: "deny" })).result, "APPROVAL_DENIED");
+      // Closing the chat drops its grant.
+      assert.equal((await w.user({ method: "DELETE", url: "/api/sessions/claude" })).status, 204);
+      assert.equal(w.runtime.tools.snapshot().grants.filter((g) => g.threadId === "claude").length, 0);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (e) Usage per session and per week (§4.1 get_usage, ruling S9)
+// ---------------------------------------------------------------------------
+
+describe("acceptance (e) / §14.2.11 usage: per session for Claude, Codex and Grok, and per ISO week, priced from the Cost tab's one price table", () => {
+  test("session cost: Claude estimated (1h cache writes, the picker's resolved model), Codex estimated, Grok reported; floor flags; weekly buckets from the scanner; quota without emails for chats", async () => {
+    const saved = { claude: process.env.CLAUDE_CONFIG_DIR, codex: process.env.CODEX_HOME };
+    delete process.env.CLAUDE_CONFIG_DIR;
+    delete process.env.CODEX_HOME;
+    try {
+      await withWorld(async (w) => {
+        const orq = w.project("jaspersito/orquester");
+        const price = (model: string, t: { input: number; output: number; cacheRead: number; cacheWrite: number; cacheWrite1h: number }) => {
+          const parts = estimateCostParts(model, t)!;
+          return parts.input + parts.output + parts.cache;
+        };
+        const round4 = (usd: number) => Math.round(usd * 10_000) / 10_000;
+
+        // A Claude chat on `default` (the picker resolves it to claude-opus-5-5): one plain turn, one with
+        // subagents, a settled compaction, older turns outside the window.
+        w.host.addChat("claude", { project: orq, title: "Claude work", agent: "claude", runtimeMode: "full-access" });
+        w.host.userTurn("claude", "one");
+        w.host.settle("claude", "done", { tokenUsage: { usageScope: "main_agent", usageStatus: "complete", inputTokens: 10_000, outputTokens: 1_000, cachedInputTokens: 6_000, cacheCreationTokens: 2_000, hasSubagents: false } });
+        w.host.userTurn("claude", "two");
+        w.host.settle("claude", "done", { totalCostUsd: 99, tokenUsage: { usageScope: "main_agent", usageStatus: "complete", inputTokens: 4_000, outputTokens: 500, cachedInputTokens: 3_000, cacheCreationTokens: 0, hasSubagents: true } });
+        w.host.threads.get("claude")!.items.push({ kind: "activity", id: "compact-1", tone: "info", activityKind: "context-compaction", summary: "Compacted", payload: { state: "compacted" }, turnId: null, createdAt: "t", updatedAt: "t" } as never);
+        w.host.setHistory("claude", { hasOlder: true, totalTurns: 7 } as never);
+        const claude = ok(await w.uncarded("claude", "get_usage", { sessionId: "claude" })).session;
+        const claudeExpected = price("claude-opus-5-5", { input: 2_000, output: 1_000, cacheRead: 6_000, cacheWrite: 2_000, cacheWrite1h: 2_000 })
+          + price("claude-opus-5-5", { input: 1_000, output: 500, cacheRead: 3_000, cacheWrite: 0, cacheWrite1h: 0 });
+        assert.equal(claude.costSource, "estimated", "Claude's cumulative total_cost_usd is never summed");
+        assert.equal(claude.costUsd, round4(claudeExpected));
+        assert.equal(claude.costUsd, 0.0598, "hand-checked: (2k·4 + 1k·20 + 6k·0.2 + 2k·8 + 1k·4 + 0.5k·20 + 3k·0.2) / 1M");
+        assert.deepEqual({ partial: claude.partial, totalTurns: claude.totalTurns, mainAgentOnly: claude.mainAgentOnly, sub: claude.turnsWithSubagents, compactions: claude.compactions }, { partial: true, totalTurns: 7, mainAgentOnly: true, sub: 1, compactions: 1 }, "floor flags");
+
+        // Codex reports tokens only: estimated from the same table (no cache-write rate: writes bill as input).
+        w.host.addChat("codex", { project: orq, title: "Codex work", agent: "codex", runtimeMode: "auto" });
+        w.host.userTurn("codex", "go");
+        w.host.settle("codex", "done", { tokenUsage: { usageScope: "main_agent", usageStatus: "complete", inputTokens: 5_000, outputTokens: 500, cachedInputTokens: 1_000, hasSubagents: false } });
+        const codex = ok(await w.uncarded("claude", "get_usage", { sessionId: "codex" })).session;
+        assert.equal(codex.costSource, "estimated");
+        assert.equal(codex.model, "gpt-5.6-terra");
+        assert.equal(codex.costUsd, round4(price("gpt-5.6-terra", { input: 4_000, output: 500, cacheRead: 1_000, cacheWrite: 0, cacheWrite1h: 0 })));
+
+        // Grok reports a per-turn cost: used as reported.
+        w.host.addChat("grok", { project: orq, title: "Grok work", agent: "grok", runtimeMode: "auto" });
+        w.host.userTurn("grok", "go");
+        w.host.settle("grok", "done", { totalCostUsd: 0.0123, tokenUsage: { usageScope: "main_agent", usageStatus: "complete", inputTokens: 900, outputTokens: 100, hasSubagents: false } });
+        const grok = ok(await w.uncarded("claude", "get_usage", { sessionId: "grok" })).session;
+        assert.deepEqual({ source: grok.costSource, usd: grok.costUsd }, { source: "reported", usd: 0.0123 });
+
+        // Per week: the Cost tab's scanner over this world's home — Claude and Codex transcripts in two ISO weeks.
+        const now = Date.now();
+        const today = new Date(now).toISOString().slice(0, 10);
+        const lastWeek = new Date(now - 7 * 86_400_000).toISOString().slice(0, 10);
+        const line = (o: unknown) => JSON.stringify(o);
+        await writeHomeFile(`${w.homes.claudeDir}/projects/p/t.jsonl`, [
+          line({ timestamp: `${today}T01:00:00Z`, requestId: "r1", message: { id: "m1", model: "claude-opus-5-5", usage: { input_tokens: 2_000, output_tokens: 1_000, cache_read_input_tokens: 6_000, cache_creation_input_tokens: 2_000, cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 2_000 } } } }),
+          line({ timestamp: `${lastWeek}T01:00:00Z`, requestId: "r2", message: { id: "m2", model: "claude-opus-5-5", usage: { input_tokens: 1_000, output_tokens: 100, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } })
+        ].join("\n"));
+        await writeHomeFile(`${w.homes.codexHome}/sessions/s.jsonl`, [
+          line({ timestamp: `${today}T02:00:00Z`, type: "turn_context", payload: { model: "gpt-5.6-terra" } }),
+          line({ timestamp: `${today}T02:00:00Z`, type: "event_msg", payload: { type: "token_count", info: { total_token_usage: { total_tokens: 5_500 }, last_token_usage: { input_tokens: 5_000, output_tokens: 500, cached_input_tokens: 1_000, total_tokens: 5_500 } } } })
+        ].join("\n"));
+        // The daemon's transcript watcher rescans (as get_cost did, `refresh` re-reads the quota only).
+        await w.usageTokens.snapshot(true);
+        const cost = ok(await w.uncarded("claude", "get_usage", { include: ["cost"], bucket: "week", days: 14 })).cost;
+        const thisWeek = isoWeek(today).week;
+        const priorWeek = isoWeek(lastWeek).week;
+        assert.notEqual(thisWeek, priorWeek);
+        const claudeThisWeek = price("claude-opus-5-5", { input: 2_000, output: 1_000, cacheRead: 6_000, cacheWrite: 2_000, cacheWrite1h: 2_000 });
+        const codexThisWeek = price("gpt-5.6-terra", { input: 4_000, output: 500, cacheRead: 1_000, cacheWrite: 0, cacheWrite1h: 0 });
+        const claudePrior = price("claude-opus-5-5", { input: 1_000, output: 100, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0 });
+        const byWeek = Object.fromEntries(cost.byWeek.map((row: { week: string; usd: number }) => [row.week, row.usd]));
+        assert.equal(byWeek[thisWeek], round4(claudeThisWeek + codexThisWeek));
+        assert.equal(byWeek[priorWeek], round4(claudePrior));
+        assert.deepEqual(cost.rows.map((row: { agent: string; week: string }) => `${row.week} ${row.agent}`).sort(), [`${priorWeek} claude`, `${thisWeek} claude`, `${thisWeek} codex`].sort());
+        // Grok has no transcript scanner (the Cost tab's source): it never appears in the weekly cost.
+        assert.equal(cost.rows.some((row: { agent: string }) => row.agent === "grok"), false);
+
+        // Quota windows: chats never see an account's email; external callers do.
+        w.quota = { agents: [
+          { id: "claude", available: true, stale: false, plan: "Max", session: { percent: 12 }, weekly: { percent: 40 }, accounts: [{ id: "acct-1", label: "Work", available: true, stale: false, session: { percent: 12 }, weekly: { percent: 40 } }] },
+          { id: "codex", available: true, stale: false, session: { percent: 3 }, weekly: { percent: 9 } },
+          { id: "grok", available: true, stale: false, session: null, weekly: { percent: 55 } }
+        ] } as never;
+        w.agentAccounts = { accounts: [{ id: "acct-1", agent: "claude", label: "Work", email: "me@example.com", plan: "Max", needsReauth: false, createdAt: "t", importedAt: "t" }], defaults: { claude: "acct-1", codex: null, grok: null } };
+        const quota = ok(await w.uncarded("claude", "get_usage", {}));
+        assert.deepEqual(quota.agents.map((agent: { id: string }) => agent.id), ["claude", "codex", "grok"]);
+        assert.equal(quota.agents[2].windows[0].percentUsed, 55);
+        assert.equal(quota.agents[0].accounts[0].label, "Work");
+        assert.doesNotMatch(JSON.stringify(quota), /me@example\.com/, "a chat never sees an account's email");
+        assert.equal(ok(await w.external("get_usage", {})).agents[0].accounts[0].email, "me@example.com");
+
+        // Another workspace's session usage is metadata there: a card below Full access (S13).
+        w.host.addChat("site", { project: w.project("acme/site"), title: "Site", agent: "codex", runtimeMode: "auto" });
+        w.host.addChat("auto", { project: orq, title: "Auto", runtimeMode: "auto" });
+        const away = await w.carded("auto", "get_usage", { sessionId: "site" }, { decision: "deny" });
+        assert.equal(away.card.family, "cross-workspace-read");
+        refused(away.result, "APPROVAL_DENIED");
+        ok(await w.uncarded("auto", "get_usage", { sessionId: "codex" }));
+      });
+    } finally {
+      if (saved.claude !== undefined) process.env.CLAUDE_CONFIG_DIR = saved.claude;
+      if (saved.codex !== undefined) process.env.CODEX_HOME = saved.codex;
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (f) The review conversation (§8, §8.7, §5.3 never broader, ruling)
+// ---------------------------------------------------------------------------
+
+describe("acceptance (f) / §14.2.11 review: Claude (Full access) opens Codex (Supervised) in its own project; notify and wait round trips; never broader, WAIT_CYCLE and the hop cap hold", () => {
+  test("two notify round trips and a wait, Codex's own send refused, WAIT_CYCLE once raised, EXCHANGE_LIMIT at hop 8, a user turn starts a fresh exchange", async () => {
+    await withWorld(async (w) => {
+      const orq = w.project("jaspersito/orquester");
+      w.host.addChat("claude", { project: orq, title: "Implement auth", runtimeMode: "full-access" });
+      w.host.userTurn("claude", "Implement auth, then get it reviewed by Codex.");
+
+      // 1. Own project, Act: no card. The child is opened, agent-created, Supervised.
+      const opened = ok(await w.uncarded("claude", "create_session", {
+        agent: "codex", runtimeMode: "approval-required", title: "Codex review",
+        prompt: "Review the uncommitted diff in this project; list the issues.", reply: "notify"
+      }));
+      assert.equal(opened.willNotify, true);
+      const codex = opened.sessionId as string;
+      assert.deepEqual({ ...w.host.tabs.get(codex)!.lineage, createdAt: undefined }, { parentThreadId: "claude", relation: "opened", agentCreated: true, createdAt: undefined, delegationDepth: 1 });
+      assert.equal(w.host.threads.get(codex)!.runtimeMode, "approval-required");
+      await w.drain();
+      const exchangeId = w.host.runningTurn(codex)!.causedBy!.exchangeId;
+      assert.deepEqual(w.host.runningTurn(codex)!.causedBy, { threadId: "claude", exchangeId, hop: 1 });
+      const header = parseThreadMessage(w.host.postsTo(codex)[0]!.input)!;
+      assert.equal(header.origin, "opened");
+      assert.equal(header.fromProject, "jaspersito/orquester");
+
+      // 2. Claude ends its turn; Codex's review comes back to Claude as a Reply (notify, hop 2).
+      w.host.settle("claude", "Asked Codex for a review.");
+      w.host.settle(codex, "1. Missing CSRF check. 2. Token logged.");
+      await w.drain();
+      const deliveries = () => w.host.postsTo("claude").map((body) => parseThreadMessage(body.input)!);
+      assert.equal(deliveries().length, 1);
+      assert.equal(deliveries()[0]!.origin, "reply");
+      assert.match(deliveries()[0]!.body, /Missing CSRF check/);
+      assert.deepEqual(w.host.runningTurn("claude")!.causedBy, { threadId: codex, exchangeId, hop: 2 });
+
+      // 3. Claude follows up with reply:"wait" (hop 3) and gets the answer in the call.
+      const posted = w.host.nextPost(codex);
+      const asking = w.chat("claude", "send_message", { sessionId: codex, text: "Fixed 1 and 2; re-review.", reply: "wait", timeoutSeconds: 120 });
+      await posted;
+      await w.drain();
+      assert.deepEqual(w.host.runningTurn(codex)!.causedBy, { threadId: "claude", exchangeId, hop: 3 });
+      // Codex starting its own conversation with the broader Claude is refused in every reply mode (never broader).
+      for (const reply of ["wait", "notify", "none"] as const) {
+        const own = refused(await w.uncarded(codex, "send_message", { sessionId: "claude", text: "Which CSRF library?", reply }), "PERMISSION_DENIED");
+        assert.match(own.message, /broader/);
+      }
+      // Raised to Full access by the user, the same blocking wait would close a cycle: WAIT_CYCLE, nothing queued.
+      w.host.setMode(codex, "full-access");
+      refused(await w.uncarded(codex, "send_message", { sessionId: "claude", text: "Which CSRF library?", reply: "wait" }), "WAIT_CYCLE");
+      w.host.setMode(codex, "approval-required");
+      assert.equal(w.lineage.pending().filter((entry) => entry.parentSessionId === "claude").length, 0);
+      w.host.settle(codex, "Looks good now. One question: which CSRF library?");
+      const answered = ok(await asking);
+      assert.equal(answered.outcome, "completed");
+      assert.equal(answered.reply, "Looks good now. One question: which CSRF library?");
+      assert.ok(answered.notice, "another agent's words are marked as data");
+      await w.drain();
+      assert.equal(deliveries().length, 1, "a reply a waiter took is never also delivered");
+
+      // 4. Claude answers with reply:"notify" round trips until the exchange reaches its cap.
+      for (const expectedHop of [3, 5, 7]) {
+        const sent = ok(await w.uncarded("claude", "send_message", { sessionId: codex, text: `Answer ${expectedHop}: csurf.`, reply: "notify" }));
+        assert.equal(sent.willNotify, true);
+        await w.drain();
+        assert.equal(w.host.runningTurn(codex)!.causedBy!.hop, expectedHop);
+        w.host.settle("claude", "Waiting for Codex.");
+        w.host.settle(codex, `Reply to ${expectedHop}.`);
+        await w.drain();
+        assert.equal(w.host.runningTurn("claude")!.causedBy!.hop, expectedHop + 1, "the delivery is the next hop");
+        assert.match(deliveries().at(-1)!.body, new RegExp(`Reply to ${expectedHop}`));
+      }
+      // Claude's turn is hop 8 now: no further agent-caused turn.
+      const capped = refused(await w.uncarded("claude", "send_message", { sessionId: codex, text: "One more?", reply: "notify" }), "EXCHANGE_LIMIT");
+      assert.match(capped.message, /summar/i);
+      const before = w.host.posts.length;
+      refused(await w.uncarded("claude", "create_session", { prompt: "Another helper.", reply: "none" }), "EXCHANGE_LIMIT");
+      assert.equal(w.host.posts.length, before, "nothing posted");
+
+      // 5. The user's own message starts a fresh exchange.
+      w.host.settle("claude", "Summary for the user.");
+      w.host.userTurn("claude", "Thanks — ask Codex for a final pass.");
+      ok(await w.uncarded("claude", "send_message", { sessionId: codex, text: "Final pass, please.", reply: "notify" }));
+      await w.drain();
+      const fresh = w.host.runningTurn(codex)!.causedBy!;
+      assert.equal(fresh.hop, 1);
+      assert.notEqual(fresh.exchangeId, exchangeId);
     });
   });
 });
