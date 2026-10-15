@@ -39,13 +39,17 @@ test("message-less assertions in a long tsx module fail promptly", async (t) => 
     'const { user, system } = process.cpuUsage(before);',
     'process.send((user + system) / 1000, () => process.disconnect());'
   ].join("\n"));
-  // Both limits are CPU time, never wall time: the regression is a CPU-bound re-parse, and on a
-  // loaded host (ten runnable processes per core) the wall time of a healthy run is unbounded.
-  // The kernel ends a child that burns CPU_LIMIT_S however it got there (RLIMIT_CPU, soft = hard,
-  // so SIGKILL); ASSERTIONS_CPU_MS bounds the assertions, which include the first one's lazy
-  // TypeScript parser load, and excludes the loader startup before them.
+  // Pass and fail are decided on CPU time, never wall time: the regression is a CPU-bound re-parse,
+  // and on a loaded host (ten runnable processes per core) the wall time of a healthy run is
+  // unbounded. The kernel SIGKILLs the Node child once it has burnt CPU_LIMIT_S (RLIMIT_CPU, soft =
+  // hard); a helper process it starts, such as esbuild's, counts against its own copy of the limit,
+  // not this one. ASSERTIONS_CPU_MS bounds the Node child's CPU time over the assertions, which
+  // include the first one's lazy TypeScript parser load, and excludes the loader startup before them.
+  // HANG_GUARD_MS is only a safety net for a child blocked without burning CPU (an IPC or loader
+  // deadlock), which no CPU limit ends: far above any healthy run, it fails the test, never passes it.
   const CPU_LIMIT_S = 60;
   const ASSERTIONS_CPU_MS = 10_000;
+  const HANG_GUARD_MS = 10 * 60_000;
   const node = [
     process.execPath,
     "--import", import.meta.resolve("tsx"),
@@ -62,7 +66,10 @@ test("message-less assertions in a long tsx module fail promptly", async (t) => 
   child.stderr!.on("data", (chunk) => { stderr += chunk; });
   let assertionsCpuMs: number | undefined;
   child.once("message", (cpuMs) => { assertionsCpuMs = cpuMs as number; });
-  const [code, signal] = await once(child, "close");
+  const [code, signal] = await once(child, "close", { signal: AbortSignal.timeout(HANG_GUARD_MS) }).catch((error: unknown) => {
+    child.kill("SIGKILL");
+    throw new Error(`hang guard: the child was still running after ${HANG_GUARD_MS / 60_000} min: ${stderr}`, { cause: error });
+  });
   assert.equal(signal, null, `the child was killed (its CPU limit is ${CPU_LIMIT_S} s): ${stderr}`);
   assert.equal(code, 0, stderr);
   assert.equal(stdout, "2", "both failing entrypoints completed with AssertionError");
