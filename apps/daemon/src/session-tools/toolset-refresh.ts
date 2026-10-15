@@ -76,6 +76,16 @@ export const TOOLSET_APPLY_WAIT_MS = SESSION_TOOLS_REFRESH_TIMEOUT_MS + 1_000;
 /** Chats refreshed at once after a settings change. */
 export const REFRESH_CONCURRENCY = 4;
 
+/** How long the daemon-pointing read may take before the last good list (or "unavailable") answers. */
+export const DAEMON_POINTING_READ_TIMEOUT_MS = 5_000;
+
+/** One push in flight: its outcome, its stamp once its manifest is built, and when the host was asked. */
+export interface PushHandle {
+  done: Promise<RefreshAnswer>;
+  stamp: { seq: number; epoch: string } | undefined;
+  hostStarted: Promise<void>;
+}
+
 /** What the host did with a pushed manifest; `no-host` — nothing reached a live session. */
 export type RefreshAnswer = SessionToolsRefreshResponse["applied"] | "no-host";
 
@@ -109,6 +119,8 @@ export interface ToolsetRefreshDeps {
   now?: () => number;
   /** Overrides {@link TOOLSET_APPLY_WAIT_MS} (tests). */
   applyWaitMs?: number;
+  /** Overrides {@link DAEMON_POINTING_READ_TIMEOUT_MS} (tests). */
+  pointingReadTimeoutMs?: number;
   logger?: { log?(message: string): void; warn?(message: string, detail?: unknown): void };
 }
 
@@ -134,15 +146,15 @@ export class SessionToolsRefresher {
   private readonly advertised = new Map<string, readonly string[]>();
   private readonly continues = new Map<string, PendingContinue>();
   /** The push in flight per chat (a `request_toolset` call awaits its answer). */
-  private readonly pushes = new Map<string, Promise<RefreshAnswer>>();
+  private readonly pushes = new Map<string, PushHandle>();
   /** The last GOOD read of the daemon-pointing servers; `stale` once invalidated (re-read, but kept). */
   private pointing: { at: number; servers: readonly DaemonPointingServer[]; stale: boolean } | null = null;
   /** The manifest sequence clock: monotonic within this daemon process. */
   private seqClock = 0;
   /** This daemon process's epoch: the host compares sequences only within one epoch. */
   private readonly epoch = randomUUID();
-  /** The newest push each chat got an answer for (a superseded `request_toolset` reads it). */
-  private readonly latestAnswer = new Map<string, { seq: number; answer: RefreshAnswer }>();
+  /** The newest push each chat got an answer for, with its stamp (a superseded `request_toolset` reads it). */
+  private readonly latestAnswer = new Map<string, { seq: number; epoch: string; answer: RefreshAnswer }>();
   /** The newest sequence each chat's advertised set was taken from: an older answer never overwrites it. */
   private readonly advertisedSeq = new Map<string, number>();
   private stopped = false;
@@ -189,7 +201,14 @@ export class SessionToolsRefresher {
     const api = this.deps.api();
     if (!api) return failed("no API yet");
     try {
-      const res = await api.request("GET", AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE);
+      let timer: NodeJS.Timeout | undefined;
+      const res = await Promise.race([
+        api.request("GET", AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE),
+        new Promise<"timeout">((resolve) => {
+          timer = setTimeout(() => resolve("timeout"), this.deps.pointingReadTimeoutMs ?? DAEMON_POINTING_READ_TIMEOUT_MS);
+        })
+      ]).finally(() => clearTimeout(timer));
+      if (res === "timeout") return failed("timed out");
       if (res.status === 404) {
         const body = res.body as { code?: unknown } | null;
         if (body !== null && typeof body === "object" && typeof body.code === "string") return failed(`404 ${body.code}`);
@@ -285,41 +304,56 @@ export class SessionToolsRefresher {
     );
   }
 
-  private pushLogged(threadId: string): Promise<RefreshAnswer> {
-    return this.push(threadId).catch((error: unknown) => {
+  private pushLogged(threadId: string): PushHandle {
+    const handle = this.push(threadId);
+    // The same handle (its stamp is filled in later), its outcome never a rejection.
+    handle.done = handle.done.catch((error: unknown) => {
       this.deps.logger?.warn?.("session-tools: refresh failed", error instanceof Error ? error.message : String(error));
       return "no-host" as const;
     });
+    return handle;
   }
 
   /**
    * Push one chat's manifest and record what its live session advertises now: the new set only
    * when the host applied it (`live`, `unchanged`); otherwise PENDING — the old set, or none — so
-   * `appliesAtNextIdle` never claims "now" falsely.
+   * `appliesAtNextIdle` never claims "now" falsely. The handle names the push's stamp once its
+   * manifest is built, and `hostStarted` resolves when the host is asked (or the push ends first).
    */
-  push(threadId: string): Promise<RefreshAnswer> {
-    const pending = (async (): Promise<RefreshAnswer> => {
-      const manifest = await this.manifest(threadId, "check");
-      if (manifest === null) return "no-host";
-      if (manifest === "unavailable") {
-        this.markPending(threadId);
-        return "no-host";
+  push(threadId: string): PushHandle {
+    let markStarted!: () => void;
+    const hostStarted = new Promise<void>((resolve) => (markStarted = resolve));
+    const handle: PushHandle = { done: Promise.resolve("no-host"), stamp: undefined, hostStarted };
+    handle.done = (async (): Promise<RefreshAnswer> => {
+      try {
+        const manifest = await this.manifest(threadId, "check");
+        if (manifest === null) return "no-host";
+        if (manifest === "unavailable") {
+          this.markPending(threadId);
+          return "no-host";
+        }
+        const seq = manifest.seq ?? this.nextSeq();
+        handle.stamp = { seq, epoch: this.epoch };
+        markStarted();
+        const answer = await this.deps.pushToHost(threadId, manifest);
+        const applied: RefreshAnswer = answer?.applied ?? "no-host";
+        // A newer push decided already: this answer changes nothing.
+        if (applied === "superseded" || seq < (this.advertisedSeq.get(threadId) ?? -Infinity)) return applied;
+        if (seq > (this.latestAnswer.get(threadId)?.seq ?? -Infinity)) this.latestAnswer.set(threadId, { seq, epoch: this.epoch, answer: applied });
+        if (applied === "live" || applied === "unchanged") this.setAdvertised(threadId, manifest.toolsets ?? [], seq);
+        else this.markPending(threadId);
+        return applied;
+      } finally {
+        markStarted();
       }
-      const answer = await this.deps.pushToHost(threadId, manifest);
-      const applied: RefreshAnswer = answer?.applied ?? "no-host";
-      const seq = manifest.seq ?? this.nextSeq();
-      // A newer push decided already: this answer changes nothing.
-      if (applied === "superseded" || seq < (this.advertisedSeq.get(threadId) ?? -Infinity)) return applied;
-      if (seq > (this.latestAnswer.get(threadId)?.seq ?? -Infinity)) this.latestAnswer.set(threadId, { seq, answer: applied });
-      if (applied === "live" || applied === "unchanged") this.setAdvertised(threadId, manifest.toolsets ?? [], seq);
-      else this.markPending(threadId);
-      return applied;
     })();
-    this.pushes.set(threadId, pending);
-    void pending.finally(() => {
-      if (this.pushes.get(threadId) === pending) this.pushes.delete(threadId);
-    }).catch(() => undefined);
-    return pending;
+    this.pushes.set(threadId, handle);
+    void handle.done
+      .finally(() => {
+        if (this.pushes.get(threadId) === handle) this.pushes.delete(threadId);
+      })
+      .catch(() => undefined);
+    return handle;
   }
 
   /** The live session keeps what it launched with (or, unknown, nothing): the change is pending. */
@@ -335,7 +369,7 @@ export class SessionToolsRefresher {
     const worker = async (): Promise<void> => {
       while (next < ids.length && !this.stopped) {
         const id = ids[next++]!;
-        answers.set(id, await this.pushLogged(id));
+        answers.set(id, await this.pushLogged(id).done);
       }
     };
     await Promise.all(Array.from({ length: Math.min(REFRESH_CONCURRENCY, ids.length) }, worker));
@@ -349,31 +383,48 @@ export class SessionToolsRefresher {
    * automatic continue is scheduled ("after-restart"); anything else (no host, no live session, no
    * answer in time) — pending, truthfully "after-restart", and NO continue (nothing would restart).
    */
-  async toolsetApproved(caller: ThreadCaller, toolset: string): Promise<void> {
-    if (this.stopped) return;
+  async toolsetApproved(caller: ThreadCaller, toolset: string, signal?: AbortSignal): Promise<void> {
+    if (this.stopped || signal?.aborted) return;
     let timer: NodeJS.Timeout | undefined;
-    const deadline = new Promise<"timeout">((resolve) => {
-      timer = setTimeout(() => resolve("timeout"), this.deps.applyWaitMs ?? TOOLSET_APPLY_WAIT_MS);
+    let onAbort: (() => void) | undefined;
+    const aborted = new Promise<"aborted">((resolve) => {
+      onAbort = () => resolve("aborted");
+      signal?.addEventListener("abort", onAbort, { once: true });
     });
     let push = this.pushes.get(caller.threadId) ?? this.pushLogged(caller.threadId);
-    let answer: RefreshAnswer | "timeout";
+    const own = push;
+    let answer: RefreshAnswer | "timeout" | "aborted";
     try {
+      // The bound covers the HOST (its worst case is below it): it starts when the host is asked,
+      // after the manifest was built (that build has its own bounds, `DAEMON_POINTING_READ_TIMEOUT_MS`).
+      const started = await Promise.race([own.hostStarted, aborted]);
+      if (started === "aborted") return;
+      const deadline = new Promise<"timeout">((resolve) => {
+        timer = setTimeout(() => resolve("timeout"), this.deps.applyWaitMs ?? TOOLSET_APPLY_WAIT_MS);
+      });
       // A push another one overtook answers `superseded`: the newest one decides.
       for (;;) {
-        answer = await Promise.race([push, deadline]);
+        answer = await Promise.race([push.done.catch(() => "no-host" as const), deadline, aborted]);
         if (answer !== "superseded") break;
         const newer = this.pushes.get(caller.threadId);
         if (newer !== undefined && newer !== push) {
           push = newer;
           continue;
         }
-        // The newer push that overtook this one has finished already: ITS outcome is the change's.
-        answer = this.latestAnswer.get(caller.threadId)?.answer ?? "superseded";
+        // The newer push that overtook this one finished already: ITS outcome is the change's —
+        // only when it really is newer than this call's own push (a relaunch that superseded it
+        // owes nothing, and an older recorded answer is no answer to this change).
+        const latest = this.latestAnswer.get(caller.threadId);
+        const ownStamp = own.stamp;
+        answer = latest !== undefined && ownStamp !== undefined && latest.epoch === ownStamp.epoch && latest.seq > ownStamp.seq ? latest.answer : "superseded";
         break;
       }
     } finally {
       clearTimeout(timer);
+      if (onAbort) signal?.removeEventListener("abort", onAbort);
     }
+    // The call went away (Stop, the provider cancelled it): nothing is scheduled for it.
+    if (answer === "aborted" || signal?.aborted) return;
     if (answer === "timeout") {
       this.markPending(caller.threadId);
       return;
@@ -421,7 +472,10 @@ export class SessionToolsRefresher {
       // Only a turn that finished on its own: a Stop, a failure, a plan or a question is the user's.
       if (outcome !== "completed" || !after || after.latestTurn?.turnId !== baseline.turnId) return done("skipped");
       const settled = await readThread(api, threadId);
+      // The user spoke first, or stopped the turn (its own record says so, whatever the summary read).
       if ([...userMessageIds(settled)].some((id) => !seen.has(id))) return done("skipped");
+      const asked = settled.turns.find((turn) => turn.turnId === baseline.turnId);
+      if (asked !== undefined && asked.state !== "completed") return done("skipped");
       if (controller.signal.aborted) return done("cancelled");
       const label = (isToolsetId(toolset) ? toolsetById(toolset)?.label : undefined) ?? toolset;
       try {

@@ -262,16 +262,33 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
   const lastByThread = new Map<string, { launchKey: string; prepared: PreparedSessionTools }>();
   /** The newest manifest stamp each thread launched with, applied or CLAIMED: older refreshes are superseded. */
   const lastSeq = new Map<string, Stamp>();
-  /** True when `stamp` is no newer than the thread's last one (same daemon epoch only). */
+  /**
+   * Daemon epochs some thread has moved on from (host-wide): a daemon that restarted never comes
+   * back, so a stamp from a retired epoch — a push that outlived its daemon — is always stale.
+   */
+  const retiredEpochs = new Set<string>();
+  const epochKey = (stamp: Stamp): string => stamp.epoch ?? "";
+  /** True when `stamp` is no newer than the thread's last one (same daemon epoch), or from a retired epoch. */
   const isStale = (threadId: string, stamp: Stamp | undefined): boolean => {
     if (stamp === undefined) return false;
+    if (retiredEpochs.has(epochKey(stamp))) return true;
     const last = lastSeq.get(threadId);
     if (last === undefined || last.epoch !== stamp.epoch) return false;
     return stamp.seq <= last.seq;
   };
-  /** Record `stamp` as the thread's newest (a new epoch restarts the comparison). */
+  /** `a` is newer than `b` (a missing `b`, or `b`'s epoch retired by `a`'s, counts as older). */
+  const newerThan = (a: Stamp | undefined, b: Stamp | undefined): boolean => {
+    if (a === undefined) return false;
+    if (b === undefined) return true;
+    if (a.epoch !== b.epoch) return retiredEpochs.has(epochKey(b));
+    return a.seq > b.seq;
+  };
+  /** Record `stamp` as the thread's newest; a new epoch retires the thread's previous one host-wide. */
   const noteSeq = (threadId: string, stamp: Stamp | undefined): void => {
-    if (stamp !== undefined && !isStale(threadId, stamp)) lastSeq.set(threadId, stamp);
+    if (stamp === undefined || isStale(threadId, stamp)) return;
+    const last = lastSeq.get(threadId);
+    if (last !== undefined && last.epoch !== stamp.epoch) retiredEpochs.add(epochKey(last));
+    lastSeq.set(threadId, stamp);
   };
   let endpoint: Promise<SessionToolsEndpoint> | null = null;
   let stopped = false;
@@ -283,8 +300,8 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
   };
   const forget = (threadId: string): void => {
     launched.delete(threadId);
-    desired.delete(threadId);
     forced.delete(threadId);
+    // `desired` stays: the thread's NEXT launch drops it only when it read that change or a newer one.
   };
   credentials.onRevoke((scope) => {
     abortWhere((call) => call.grantId === scope.grantId);
@@ -333,7 +350,11 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
     const launchKey = launchKeyOf(launch);
     // The thread's own last manifest first — only for the same launch (an account switch moved it).
     const own = lastByThread.get(threadId);
-    if (own && own.launchKey === launchKey) return { ...own.prepared, source: "fallback" };
+    if (own && own.launchKey === launchKey) {
+      // A fallback orders nothing: its stamp is the daemon's word on a launch long past.
+      const { seq: _seq, epoch: _epoch, ...copy } = own.prepared;
+      return { ...copy, source: "fallback" };
+    }
     const last = lastByLaunch.get(launchKey);
     if (last) {
       // Another thread's manifest: its stamp orders THAT thread's refreshes, never this one's.
@@ -401,9 +422,11 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
     try {
       const prepared = await reading;
       launched.set(threadId, { prepared, owner, ...(live ? { live } : {}) });
-      desired.delete(threadId);
+      // A refresh that claimed a NEWER manifest while this read was in flight keeps what it wants.
+      const wanted = desired.get(threadId);
+      if (wanted === undefined || !newerThan(stampOf(wanted), stampOf(prepared))) desired.delete(threadId);
       forced.delete(threadId);
-      noteSeq(threadId, stampOf(prepared));
+      if (prepared.source !== "fallback") noteSeq(threadId, stampOf(prepared));
       return prepared;
     } finally {
       if (launching.get(threadId) === done) launching.delete(threadId);
@@ -592,6 +615,7 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
       lastByLaunch.clear();
       lastByThread.clear();
       lastSeq.clear();
+      retiredEpochs.clear();
       const open = endpoint;
       endpoint = null;
       if (open !== null) {

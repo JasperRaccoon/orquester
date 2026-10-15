@@ -96,7 +96,7 @@ export interface ExecutorPorts {
    * truthfully, and schedules the automatic continue turn (spec §9.3). Its errors are logged,
    * never thrown into the call; null → nothing waited for or scheduled.
    */
-  onToolsetApproved?: ((caller: ThreadCaller, toolset: ToolsetId) => void | Promise<void>) | null;
+  onToolsetApproved?: ((caller: ThreadCaller, toolset: ToolsetId, signal: AbortSignal) => void | Promise<void>) | null;
 }
 
 export const executorPorts: ExecutorPorts = { approvals: null, enabledToolsets: null, onToolsetApproved: null };
@@ -109,7 +109,7 @@ export interface ExecutorDeps {
   /** The caller as it is NOW (mode, planning) — the gate re-runs on it after a card (§13). */
   refreshCaller?: (caller: ThreadCaller) => Promise<ThreadCaller>;
   /** See {@link ExecutorPorts.onToolsetApproved} (default: the daemon's wiring). */
-  onToolsetApproved?: ((caller: ThreadCaller, toolset: ToolsetId) => void | Promise<void>) | null;
+  onToolsetApproved?: ((caller: ThreadCaller, toolset: ToolsetId, signal: AbortSignal) => void | Promise<void>) | null;
   legacy?: LegacyToolServices;
   secretRequests?: SessionSecretRequests;
   now?: () => number;
@@ -627,7 +627,8 @@ async function requestToolsetCard(deps: ExecutorDeps, caller: ThreadCaller, inpu
     if (outcome.outcome === "approved") {
       const hook = deps.onToolsetApproved === undefined ? executorPorts.onToolsetApproved : deps.onToolsetApproved;
       try {
-        await hook?.(caller, input.toolset);
+        // The call's own signal: a Stop or a provider cancel ends the wait at once.
+        await hook?.(caller, input.toolset, signal);
       } catch (error) {
         console.error("[mcp] toolset approval hook failed", error instanceof Error ? error.message : "unknown error");
       }

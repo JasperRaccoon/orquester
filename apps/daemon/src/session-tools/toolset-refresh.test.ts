@@ -15,7 +15,7 @@ import { z } from "zod";
 
 import { daemonRoutesForHost, type SessionToolsManifest, type SessionToolsRefreshResponse } from "../agent-host/host-protocol.ts";
 import { defineTool, READ_ONLY, type AnyOrquesterTool, type ThreadCaller, type ToolsetId } from "../mcp/catalog/contract.ts";
-import { chatSummary, message, snapshot, stamp } from "../mcp/fixtures.ts";
+import { chatSummary, message, snapshot, stamp, turn } from "../mcp/fixtures.ts";
 import { FakeDaemonApi } from "../mcp/testing.ts";
 import { REFRESH_CONCURRENCY, registerSessionToolsManifestRoute, SessionToolsRefresher, userMessageIds, type ToolsetRefreshDeps } from "./toolset-refresh.ts";
 
@@ -135,9 +135,9 @@ test("an older push finishing last never overwrites the advertised set (sequence
   });
   await r.refresher.manifest("claude-1");
   r.toolsets.set("claude-1", ["core", "reads", "notes"]);
-  const first = r.refresher.push("claude-1");
+  const first = r.refresher.push("claude-1").done;
   r.toolsets.set("claude-1", ["core", "reads", "notes", "files-git"]);
-  const second = r.refresher.push("claude-1");
+  const second = r.refresher.push("claude-1").done;
   await arrived;
   gates[1]!({ applied: "live" });
   await second;
@@ -160,7 +160,7 @@ test("fail closed: with no good read ever, a failed read makes the manifest unav
   assert.equal(res.statusCode, 503, "the host falls back to what it knows for that launch");
   assert.equal(r.refresher.advertisedToolsets("claude-1"), null, "nothing was handed out");
   // A toolset change cannot be pushed then: pending, no "now".
-  await r.refresher.push("claude-1");
+  await r.refresher.push("claude-1").done;
   assert.deepEqual(r.refresher.advertisedToolsets("claude-1"), []);
   assert.equal(r.pushed.length, 0);
   // Once a read succeeds the manifest is back.
@@ -195,19 +195,19 @@ test("a push moves the advertised set only when the host applied it; otherwise t
   r.toolsets.set("claude-1", ["core", "reads", "notes"]);
   r.toolsets.set("codex-1", ["core", "reads", "notes"]);
   // Claude, applied in-session.
-  assert.equal(await r.refresher.push("claude-1"), "live");
+  assert.equal(await r.refresher.push("claude-1").done, "live");
   assert.deepEqual(r.refresher.advertisedToolsets("claude-1"), ["core", "reads", "notes"]);
   // Codex: a restart is pending — the live session keeps what it launched with.
   r.setHostAnswer("next-idle");
-  assert.equal(await r.refresher.push("codex-1"), "next-idle");
+  assert.equal(await r.refresher.push("codex-1").done, "next-idle");
   assert.deepEqual(r.refresher.advertisedToolsets("codex-1"), ["core", "reads"]);
   // Claude whose client did not re-list (next-idle), or no host at all: never "now".
   r.toolsets.set("claude-1", ["core", "reads", "notes", "files-git"]);
-  assert.equal(await r.refresher.push("claude-1"), "next-idle");
+  assert.equal(await r.refresher.push("claude-1").done, "next-idle");
   assert.deepEqual(r.refresher.advertisedToolsets("claude-1"), ["core", "reads", "notes"]);
   r.setHostAnswer(null);
   r.refresher.forget("claude-1");
-  assert.equal(await r.refresher.push("claude-1"), "no-host");
+  assert.equal(await r.refresher.push("claude-1").done, "no-host");
   assert.deepEqual(r.refresher.advertisedToolsets("claude-1"), [], "unknown → pending");
 });
 
@@ -388,4 +388,90 @@ test("manifests carry this daemon's epoch beside the sequence", async () => {
   assert.equal(a.epoch, b.epoch);
   assert.ok(b.seq! > a.seq!);
   assert.notEqual(a.epoch, (await manifestOf(rig(), "codex-1")).epoch, "another daemon process, another epoch");
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 4
+// ---------------------------------------------------------------------------
+
+const codexCaller: ThreadCaller = {
+  kind: "thread", threadId: "codex-1", title: "t", projectPath: "", workspace: "", cwd: "/", agentId: "codex", callId: "c", runtimeMode: "full-access", planning: false, workflowOwned: false, exchange: null
+};
+
+test("an OLDER recorded next-idle is no answer to a push the host superseded (a relaunch read it): no continue", async () => {
+  const scheduled: string[] = [];
+  let answer: SessionToolsRefreshResponse["applied"] = "next-idle";
+  const r = rig({ pushToHost: async () => ({ applied: answer }) });
+  r.refresher.scheduleContinue = async (threadId) => (scheduled.push(threadId), "posted");
+  // An earlier push (a settings change) said a restart is pending…
+  assert.equal(await r.refresher.push("codex-1").done, "next-idle");
+  // …then the session relaunched with the change, and the approval's own (newer) push is superseded.
+  answer = "superseded";
+  r.refresher.toolsetsChanged("codex-1");
+  await r.refresher.toolsetApproved(codexCaller, "notes");
+  assert.deepEqual(scheduled, []);
+});
+
+test("an aborted call (Stop, the provider cancelled) stops waiting at once and schedules nothing", async () => {
+  const scheduled: string[] = [];
+  let asked!: () => void;
+  const hostAsked = new Promise<void>((resolve) => (asked = resolve));
+  const r = rig({
+    pushToHost: () => {
+      asked();
+      return new Promise(() => undefined);
+    }
+  });
+  r.refresher.scheduleContinue = async (threadId) => (scheduled.push(threadId), "posted");
+  const controller = new AbortController();
+  r.refresher.toolsetsChanged("codex-1");
+  const waiting = r.refresher.toolsetApproved(codexCaller, "notes", controller.signal);
+  await hostAsked;
+  controller.abort();
+  await waiting;
+  assert.deepEqual(scheduled, []);
+  const before = new AbortController();
+  before.abort();
+  await r.refresher.toolsetApproved(codexCaller, "notes", before.signal);
+  assert.deepEqual(scheduled, []);
+});
+
+test("the wait starts when the host is asked (a slow manifest build does not eat it); the pointing read is bounded", async () => {
+  const scheduled: string[] = [];
+  const r = rig({ applyWaitMs: 50, pointingReadTimeoutMs: 20, pushToHost: async () => ({ applied: "next-idle" }) });
+  r.refresher.scheduleContinue = async (threadId) => (scheduled.push(threadId), "posted");
+  // The daemon-pointing read never answers: bounded at 20 ms, then the build goes on (no read ever → unavailable).
+  const request = r.api.request.bind(r.api);
+  let release!: () => void;
+  const slow = new Promise<void>((resolve) => (release = resolve));
+  r.api.request = async (method, path, opts) => {
+    if (path === AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE) {
+      await slow;
+    }
+    return request(method, path, opts);
+  };
+  assert.equal(await r.refresher.daemonPointing(), null, "timed out, nothing ever read: unavailable");
+  release();
+  // A good read, then a slow build longer than the apply wait: the host is still awaited.
+  assert.deepEqual(await r.refresher.daemonPointing(), []);
+  r.refresher.invalidateDaemonPointing();
+  let releaseBuild!: () => void;
+  const build = new Promise<void>((resolve) => (releaseBuild = resolve));
+  r.api.request = async (method, path, opts) => {
+    if (path === AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE) await build;
+    return request(method, path, opts);
+  };
+  r.refresher.toolsetsChanged("codex-1");
+  const waiting = r.refresher.toolsetApproved(codexCaller, "notes");
+  setTimeout(releaseBuild, 15);
+  await waiting;
+  assert.deepEqual(scheduled, ["codex-1"]);
+});
+
+test("a turn the user stopped is no turn to continue, even when the summary reads it completed", async () => {
+  const before = snapshot({ items: [message("user", "build it")], turns: [turn({ turnId: "t2", state: "running", completedAt: null })] });
+  const stopped = snapshot({ items: before.items, turns: [turn({ turnId: "t2", state: "interrupted" })] });
+  const r = continueRig(SETTLED, [before, stopped]);
+  assert.equal(await r.refresher.scheduleContinue("codex-1", "notes", "default"), "skipped");
+  assert.equal(r.posted.length, 0);
 });

@@ -1243,7 +1243,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   });
   agentToolsRuntime.tools.setAdvertisedToolsets((id) => sessionToolsRefresher.advertisedToolsets(id));
   const offToolsetsChanged = agentToolsRuntime.tools.onToolsetsChanged((id) => sessionToolsRefresher.toolsetsChanged(id));
-  executorPorts.onToolsetApproved = (caller, toolset) => sessionToolsRefresher.toolsetApproved(caller, toolset);
+  executorPorts.onToolsetApproved = (caller, toolset, signal) => sessionToolsRefresher.toolsetApproved(caller, toolset, signal);
   agentChat.chat.lifecycle.on("closed", ({ id }: { id: string }) => sessionToolsRefresher.forget(id));
   // A changed MCP server config (agent profile) is read afresh by the next manifest.
   const agentProfileSink = {
