@@ -24,6 +24,7 @@
 import React from "react";
 import { ChevronDown, KeyRound, Settings2, ShieldAlert, Wrench } from "lucide-react";
 import {
+  sanitizeApprovalLabel,
   TOOL_APPROVAL_DENY_REASON_MAX_CHARS,
   TOOL_APPROVAL_KEYBOARD_GUARD_MS,
   TOOL_APPROVAL_SECRET_MAX_CHARS,
@@ -267,7 +268,11 @@ export function ToolApprovalCard({
             {card.scope.label}
           </span>
           {(card.scope.projects ?? []).map((project) => (
-            <span key={project.path} className="rounded-full bg-neutral-800/70 px-2 py-0.5 text-neutral-400" title={project.path}>
+            <span
+              key={project.path}
+              className="rounded-full bg-neutral-800/70 px-2 py-0.5 text-neutral-400"
+              title={sanitizeApprovalLabel(project.path, 4096)}
+            >
               {project.workspace}
               {project.gitAccountLabel ? ` · git ${project.gitAccountLabel}` : ""}
             </span>
