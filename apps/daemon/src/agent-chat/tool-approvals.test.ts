@@ -304,7 +304,7 @@ test("a daemon that died with cards open resolves them as cancelled at the next 
   assert.equal(after.logs.length, 2);
   assert.ok(after.logs.every((line) => line.includes("outcome=cancelled (Orquester restarted)")));
   const late = await after.registry.answer("t1", "a1", { decision: "approve" });
-  assert.deepEqual(late.ok ? null : late.status, 409, "the old card can never be approved");
+  assert.deepEqual(late.ok ? null : [late.status, late.code], [404, "APPROVAL_NOT_FOUND"], "the old card is gone (spec §13) and can never be approved");
   assert.deepEqual((JSON.parse(await readFile(journalFile, "utf8")) as { open: unknown[] }).open, []);
   // A garbled journal is ignored.
   await writeFile(journalFile, "{not json");

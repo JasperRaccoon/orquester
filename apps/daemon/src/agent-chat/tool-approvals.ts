@@ -377,7 +377,8 @@ export class ToolApprovalRegistry {
 
   /**
    * Boot: every card the journal says was open when the daemon last stopped is resolved as
-   * `cancelled` — a `closed` event and a log line each — and the journal is cleared. Never throws.
+   * `cancelled` — a `closed` event and a log line each — and the journal is cleared. An answer to
+   * one is then 404 (the card is gone), never an approval. Never throws.
    */
   async recover(): Promise<void> {
     const file = this.opts.journalFile;
@@ -394,7 +395,7 @@ export class ToolApprovalRegistry {
     }
     for (const entry of entries) {
       if (this.pending.has(entry.approvalId)) continue;
-      this.remember(entry.approvalId, entry.threadId);
+      // Not remembered: an answer to it is 404 like any card a restart dropped (spec §13).
       this.publish({ threadId: entry.threadId, closed: { approvalId: entry.approvalId, outcome: "cancelled" } });
       this.decisionLog(entry, entry.approvalId, "cancelled", "Orquester restarted");
     }
