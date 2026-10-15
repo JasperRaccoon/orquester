@@ -336,13 +336,23 @@ export interface ReferencedPrompt {
 
 const sha256 = (text: string): string => createHash("sha256").update(text, "utf8").digest("hex");
 
+/**
+ * THE rule for "a workflow references a saved prompt" (one source for the tools and the saved-prompt
+ * list rows' `usedByWorkflows`): an agent block — a disabled one too, it is still part of the
+ * definition — whose prompt is `{kind: "saved", promptId}`. The id, or null for any other block.
+ */
+export function savedPromptIdOfNode(node: { type: string; config?: unknown }): string | null {
+  if (node.type !== "agent" || !isRecord(node.config) || !isRecord(node.config.prompt)) return null;
+  const prompt = node.config.prompt;
+  return prompt.kind === "saved" && typeof prompt.promptId === "string" ? prompt.promptId : null;
+}
+
 /** Every saved-prompt id the definition's agent blocks reference, in block order, each once. */
-export function savedPromptIdsOf(workflow: { nodes?: readonly WorkflowNode[] }): string[] {
+export function savedPromptIdsOf(workflow: { nodes?: readonly { type: string; config?: unknown }[] }): string[] {
   const ids: string[] = [];
   for (const node of workflow.nodes ?? []) {
-    if (node.type !== "agent" || !isRecord(node.config) || !isRecord(node.config.prompt)) continue;
-    const prompt = node.config.prompt;
-    if (prompt.kind === "saved" && typeof prompt.promptId === "string" && !ids.includes(prompt.promptId)) ids.push(prompt.promptId);
+    const id = savedPromptIdOfNode(node);
+    if (id !== null && !ids.includes(id)) ids.push(id);
   }
   return ids;
 }
@@ -419,9 +429,7 @@ export async function workflowsReferencingPrompt(api: DaemonApi, promptId: strin
     const res = await api.request("GET", workflowRoutes.workflow(summary.id));
     if (res.status === 404) continue; // deleted meanwhile
     const workflow = expectWorkflowOk<GetWorkflowResponse>(res).workflow;
-    const nodes = workflow.nodes
-      .filter((node) => node.type === "agent" && isRecord(node.config) && isRecord(node.config.prompt) && node.config.prompt.kind === "saved" && node.config.prompt.promptId === promptId)
-      .map((node) => ({ id: node.id, name: node.name }));
+    const nodes = workflow.nodes.filter((node) => savedPromptIdOfNode(node) === promptId).map((node) => ({ id: node.id, name: node.name }));
     if (nodes.length > 0) uses.push({ workflowId: workflow.id, name: workflow.name, revision: workflow.revision, project: workflow.project, nodes });
   }
   return uses;

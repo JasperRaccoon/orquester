@@ -14,6 +14,7 @@ import {
   publishSavedPromptEvents,
   savedPromptWorkflowUses
 } from "./saved-prompts.ts";
+import { savedPromptIdsOf } from "./mcp/tools/workflow-preview.ts";
 
 type Logger = { warn: (...args: unknown[]) => void; error: (...args: unknown[]) => void };
 const quiet: Logger = { warn: () => {}, error: () => {} };
@@ -857,12 +858,17 @@ test("createdBy tolerance: a newer kind, unknown fields and a null survive the r
 
 test("savedPromptWorkflowUses: every workflow whose agent block names a saved prompt, once each", () => {
   const agent = (id: string, prompt: unknown) => ({ id, name: id, type: "agent", config: { prompt } });
-  const uses = savedPromptWorkflowUses([
+  const workflows = [
     { id: "wf_1", name: "Nightly", nodes: [agent("a", { kind: "saved", promptId: "p1" }), agent("b", { kind: "saved", promptId: "p1" }), agent("c", { kind: "text", text: "p2" })] },
     { id: "wf_2", name: "Review", nodes: [{ id: "x", name: "x", type: "code", config: { prompt: { kind: "saved", promptId: "p2" } } }, agent("d", { kind: "saved", promptId: "p2" })] }
-  ] as never);
+  ];
+  const uses = savedPromptWorkflowUses(workflows as never);
   assert.deepEqual(Object.fromEntries(uses), {
     p1: [{ workflowId: "wf_1", name: "Nightly" }],
     p2: [{ workflowId: "wf_2", name: "Review" }]
   });
+  // One rule: the list rows agree with Task 10's `savedPromptIdsOf`, which the workflow tools use.
+  for (const workflow of workflows) {
+    for (const id of savedPromptIdsOf(workflow)) assert.ok(uses.get(id)?.some((use) => use.workflowId === workflow.id), `${workflow.id} → ${id}`);
+  }
 });

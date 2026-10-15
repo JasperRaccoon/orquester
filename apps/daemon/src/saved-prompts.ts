@@ -28,6 +28,7 @@ import { assertInsideFsRoot } from "@orquester/config/fs";
 import { writeFileAtomic } from "./agent-hooks.ts";
 import type { Broadcaster } from "./broadcaster.ts";
 import { describeProjectPath } from "./recent-projects.ts";
+import { savedPromptIdsOf } from "./mcp/tools/workflow-preview.ts";
 
 /**
  * The prompts a first run starts with, in this order. Seeded exactly once —
@@ -578,19 +579,11 @@ export function savedPromptWorkflowUses(
   const uses = new Map<string, SavedPromptWorkflowUse[]>();
   for (const workflow of workflows) {
     const workspace = workflowWorkspace(workflow.project, workspacesDir);
-    for (const node of workflow.nodes) {
-      if (node.type !== "agent") {
-        continue;
-      }
-      const prompt = (node.config as { prompt?: { kind?: unknown; promptId?: unknown } } | undefined)?.prompt;
-      if (prompt?.kind !== "saved" || typeof prompt.promptId !== "string") {
-        continue;
-      }
-      const list = uses.get(prompt.promptId) ?? [];
-      if (!list.some((use) => use.workflowId === workflow.id)) {
-        list.push({ workflowId: workflow.id, name: workflow.name, ...(workspace ? { workspace } : {}) });
-      }
-      uses.set(prompt.promptId, list);
+    // Task 10's rule (`savedPromptIdsOf`): the same one the workflow tools apply.
+    for (const promptId of savedPromptIdsOf(workflow)) {
+      const list = uses.get(promptId) ?? [];
+      list.push({ workflowId: workflow.id, name: workflow.name, ...(workspace ? { workspace } : {}) });
+      uses.set(promptId, list);
     }
   }
   return uses;
