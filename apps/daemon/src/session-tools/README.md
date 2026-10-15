@@ -55,7 +55,8 @@ asking another thread for it:
 - **(a) Never broader.** `assertTargetModeNotBroader(caller, {threadId, runtimeMode})` refuses a
   target whose permission mode (approval-required < auto-accept-edits < auto < full-access) is
   broader than the caller's (`PERMISSION_DENIED`). A thread a tool opens runs in
-  `caller.runtimeMode`.
+  `caller.runtimeMode`, or a narrower mode the call names (`openedThreadRuntimeMode`; a broader one
+  is `PERMISSION_DENIED`).
 - **(b) Plan carries on.** `interactionModeFor(caller, {agent, supportsPlanMode})` is `"plan"` while
   the caller's running turn is in plan mode (`Turn.interactionMode`), refusing an agent with no plan
   mode; else `"default"`. Pass it as the caused turn's `interactionMode` (`MergeBackRequest` and the
@@ -82,7 +83,7 @@ caller's own settings).
 |---|---|---|
 | `html/` | `html_preview`, `html_render` | `ctx.api.previewHtmlRender` (the preview browser, `../html-preview/`), `ctx.api.publishHtmlRender` (the page store, `../agent-chat/html-render-publish.ts`) |
 | `secrets/` | `request_secret` | `../agent-chat/secret-requests.ts` through `ctx.secretRequests`; masking in the agent host (`agent-host/session-tools/secret-redaction.ts`) |
-| `threads/` | `thread_list`, `thread_read`, `thread_create`, `thread_send`, `thread_wait`, `thread_interrupt`, `thread_fork`, `thread_merge_back`; `delegate_task`, `task_status`, `task_wait`, `task_cancel` | the daemon's own routes: `/api/sessions` (create, with `chat.lineage` for a delegate), the §6.2 `turn`/`interrupt` commands, Task 4's `fork`/`mergeBack`; reuses the external `/mcp`'s `read_transcript`, `send_message` and turn wait (`../mcp/tools/messages.ts`, `../mcp/wait.ts`) — pure modules the host loads with the toolkit |
+| `threads/` | `thread_list`, `thread_read`, `thread_create`, `agent_catalog`, `thread_send`, `thread_wait`, `thread_interrupt`, `thread_fork`, `thread_merge_back`; `delegate_task`, `task_status`, `task_wait`, `task_cancel` | the daemon's own routes: `/api/sessions` (create, with `chat.lineage` for a delegate), the §6.2 `turn`/`interrupt` commands, Task 4's `fork`/`mergeBack`; reuses the external `/mcp`'s `read_transcript`, `send_message`, turn wait and `list_agents` listing (`../mcp/tools/messages.ts`, `../mcp/wait.ts`, `../mcp/tools/catalog.ts` `agentCatalog`) — pure modules the host loads with the toolkit |
 
 ### `threads/`: scope and caps
 
@@ -90,6 +91,21 @@ caller's own settings).
   both paths as the daemon does (realpath inside the sandbox). Another project's thread, a terminal
   or a closed tab is `THREAD_NOT_FOUND`; `task_*` take only the caller's own delegates
   (`TASK_NOT_FOUND` otherwise). A thread bound to no project sees only itself.
+- **A new thread's settings** (`thread_create`, `delegate_task`; `create.ts`). It always works in the
+  caller's directory and project. `agent`, `model`, `options`, `accountId` and `runtimeMode` are
+  optional and validated as the external `/mcp`'s `create_session` validates them (its
+  `optionsSchema` / `runtimeModeSchema`, `resolveModelSelection`, `validateAccountId`), so an
+  unknown model, option, value or account is refused with the valid ones. Omitted, each is as
+  before: the same agent takes the caller's model, options and account (an account it no longer
+  has falls back to the family default); another agent its default model, no options, its family's
+  default account; the mode is the caller's. Options combine per id: the inherited ones (the
+  caller's, same agent only — all of them on the same model, on another model only those it
+  advertises with a value it accepts) are the base, and each named option replaces its id.
+  `accountId` takes any of the target agent's managed accounts, or `"system"`. `runtimeMode` may
+  only be the caller's or narrower (turn policy (a)). `agent_catalog` lists the valid agents,
+  models, options and accounts (`list_agents`' listing, without its permission modes), the caller's
+  own settings (`thisThread`) and the modes a new thread may take (`runtimeModes`); the result
+  reports the settings the thread got.
 - **Self.** `thread_wait`, `thread_send` and `thread_interrupt` refuse the caller (a wait on
   yourself never ends; an interrupt would cut the very call).
 - **Turn policy.** `thread_send`, `thread_create`, `delegate_task` and `thread_merge_back` follow

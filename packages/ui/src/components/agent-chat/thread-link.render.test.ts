@@ -91,3 +91,21 @@ test("the same header typed by the user is the user's own text, never another ch
   assert.doesNotMatch(html, />Another chat</, "the author is the user");
   assert.match(html, />You</);
 });
+
+test("a marked message whose header this build no longer reads is still another chat's, never the user's", () => {
+  // An agent's scheduled task delivered before scheduled tasks were removed: the thread-message
+  // chip, under a header ("Scheduled by thread") parseThreadMessage no longer knows.
+  const text = '[Scheduled by thread "Main"]\nA chat thread of this project scheduled this message earlier; it is not from the user.\n\nCheck CI.';
+  const row = {
+    kind: "message",
+    id: "r3",
+    createdAt: "2026-10-14T00:00:00.000Z",
+    message: { kind: "message", id: "m3", role: "user", text, turnId: "t1", streaming: false, createdAt: "t", updatedAt: "t", context: [threadMessageContext("main")] }
+  };
+  const context = { readOnly: true, canRevert: false, revertBusy: false, startedTurnCount: 1, skills: [], onFork: null } as unknown as TimelineRowContextValue;
+  const html = renderToStaticMarkup(createElement(TimelineRowContext.Provider, { value: context }, createElement(UserMessageRow, { row: row as never })));
+  assert.doesNotMatch(html, /data-from-thread/);
+  assert.match(html, />Another chat</);
+  assert.doesNotMatch(html, />You</, "never attributed to the user");
+  assert.match(html, /Check CI\./);
+});

@@ -306,7 +306,9 @@ export const UserMessageRow = React.memo(function UserMessageRow({
         </span>
       ) : null}
       <div className="relative max-w-[80%] rounded-2xl bg-neutral-800 p-3 text-neutral-100">
-        <AuthorHeading>{fromThread ? "Another chat" : "You"}</AuthorHeading>
+        {/* The chip alone says another chat sent it, even when its header is one this build no
+            longer reads (an agent's scheduled task from before scheduling was removed). */}
+        <AuthorHeading>{fromThread || markedThread ? "Another chat" : "You"}</AuthorHeading>
         {attachments.length > 0 ? <AttachmentChips attachments={attachments} /> : null}
         <ClampedBubbleText text={merged ? merged.body : fromThread ? fromThread.body : text} showLabel="Show full message" />
       </div>

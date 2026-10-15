@@ -28,7 +28,7 @@ import {
 } from "../contract.ts";
 import { cancelledResult, jsonResult } from "../results.ts";
 import { TURN_PROVENANCE_OVERHEAD_CHARS } from "../turn-policy.ts";
-import { openThread } from "./create.ts";
+import { createdSettings, newThreadSettings, newThreadSettingsInput, openThread } from "./create.ts";
 import {
   DEFAULT_WAIT_SECONDS,
   MAX_WAIT_SECONDS,
@@ -142,15 +142,14 @@ const delegateTask = defineSessionTool({
   title: "Delegate a task",
   description:
     "Hand one task to a new child chat thread of THIS thread and start it: it gets only `prompt` — not this conversation — so make the prompt self-contained (goal, context, constraints, what to report back). " +
-    "It runs in this project and directory with this thread's permission mode; the same agent keeps this thread's model and account unless `agent`/`model` name others (an agent's own subagents may be cheaper for small same-model work). " +
+    "It runs in this project and directory with this thread's permission mode; the same agent keeps this thread's model, options and account. `agent`, `model`, `options`, `accountId` and a narrower `runtimeMode` set others (agent_catalog lists the valid ones; never a broader mode). An agent's own subagents may be cheaper for small same-model work. " +
     "Returns at once with `taskId` (= the child's thread id; the user sees it as a tab marked \"Delegated by\" this thread). Then task_wait for its result (its final reply), task_status to look without waiting, task_cancel to stop it; thread_send to that id sends a follow-up. " +
     "While you are in plan mode the task plans too (refused for an agent with no plan mode). " +
     `Limits: ${MAX_OPEN_TASKS} unfinished tasks per thread, tasks of tasks only ${MAX_DELEGATION_DEPTH} levels deep, and the project's open-chat limit. ` +
     "After an error saying Orquester is restarting, check thread_list before trying again: the task may already be open (there is no retry key), and a second call opens a second one.",
   input: {
     prompt: z.string().trim().min(1).max(MAX_TURN_INPUT_CHARS - TURN_PROVENANCE_OVERHEAD_CHARS).describe("The task, self-contained."),
-    agent: z.string().min(1).max(64).optional().describe("Agent id: claude, codex, opencode or grok. Default: this thread's agent."),
-    model: z.string().min(1).max(200).optional().describe("Model slug for that agent. Default: this thread's model for the same agent, else the agent's default."),
+    ...newThreadSettingsInput,
     title: z.string().trim().min(1).max(200).optional().describe("The task's tab title. Default: \"Task: \" and the prompt's first line.")
   },
   annotations: SESSION_TOOL_MUTATING,
@@ -169,12 +168,11 @@ const delegateTask = defineSessionTool({
     const created = await openThread(ctx, project, {
       prompt: args.prompt,
       delegate: true,
-      ...(args.agent !== undefined ? { agent: args.agent } : {}),
-      ...(args.model !== undefined ? { model: args.model } : {}),
+      ...newThreadSettings(args),
       ...(args.title !== undefined ? { title: args.title } : {})
     });
     const s = created.session;
-    return jsonResult({ taskId: s.id, title: s.title, agent: s.refId, model: created.model, state: "working", ...(created.planMode ? { planMode: true } : {}), threadRef: referenceTo(s, "delegate") });
+    return jsonResult({ taskId: s.id, title: s.title, ...createdSettings(created), state: "working", ...(created.planMode ? { planMode: true } : {}), threadRef: referenceTo(s, "delegate") });
   }
 });
 

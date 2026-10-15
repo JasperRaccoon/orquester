@@ -501,6 +501,7 @@ export const SESSION_TOOL_LABELS: Readonly<Record<string, string>> = {
   thread_list: "Listed this project's chats",
   thread_read: "Read a chat",
   thread_create: "Opened a chat",
+  agent_catalog: "Listed agents and models",
   thread_send: "Messaged a chat",
   thread_wait: "Waited for a chat",
   thread_interrupt: "Interrupted a chat",
