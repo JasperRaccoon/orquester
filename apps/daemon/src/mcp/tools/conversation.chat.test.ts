@@ -624,16 +624,33 @@ test("wait_for_session: an empty final reply says so; several sessions return wh
 // ---- The chat's blocking wait on a working chat (watch.ts settleWait → wait.ts waitWhileWorking), ported from the old thread_wait tests ----
 
 const working = (id: string) => thread(id, { head: head({ id, session: { status: "running", activeTurnId: "t2" } }), turns: [turn(), turn({ turnId: "t2", turnCount: 2, state: "running", completedAt: null })] });
-/** Macrotask turns until `ready` holds: the in-process fakes need no real time, a stuck wait fails the test. */
-async function until(ready: () => boolean): Promise<void> {
-  for (let i = 0; i < 1_000 && !ready(); i += 1) await new Promise<void>((resolve) => setImmediate(resolve));
-  assert.ok(ready(), "the wait never got there");
+/** Resolves when the next bus listener subscribes: the wait has started watching (a barrier, not a sleep). */
+function nextSubscription(api: FakeDaemonApi): Promise<void> {
+  const subscribe = api.subscribe.bind(api);
+  return new Promise<void>((resolve) => {
+    api.subscribe = (listener) => {
+      api.subscribe = subscribe;
+      const off = subscribe(listener);
+      resolve();
+      return off;
+    };
+  });
 }
 
 test("wait_for_session from a chat on a working chat: the bus ends the wait when it settles; the wait is registered while it lasts and released after", async () => {
   const r = rig({ threads: { peer: working("peer") } });
+  // The wait has read the target as working once it is watching the bus and has read its thread.
+  let readWorking!: () => void;
+  const seenWorking = new Promise<void>((resolve) => { readWorking = resolve; });
+  r.api.on("GET", agentChatRoutes.thread("peer"), () => {
+    const current = r.threads.peer!;
+    if (current.head.session.status === "running") readWorking();
+    return { status: 200, body: { kind: "snapshot", thread: current } };
+  });
+  const watching = nextSubscription(r.api);
   const pending = r.call("wait_for_session", { sessionId: "peer", timeoutSeconds: 600 });
-  await until(() => r.api.listenerCount() > 0);
+  await watching;
+  await seenWorking;
   assert.equal(waitsOn("me", "peer"), true, "registered: a reverse wait would be a cycle");
   assert.throws(() => registerWait("peer", "me"), (e: { code: string }) => e.code === "WAIT_CYCLE");
   r.threads.peer = thread("peer", { items: [message("user", "go", { turnId: "t2" }), message("assistant", "Done: 3 issues.", { turnId: "t2" })], turns: [turn(), turn({ turnId: "t2", turnCount: 2 })] });
@@ -651,8 +668,9 @@ test("wait_for_session from a chat on a working chat: the bus ends the wait when
 test("wait_for_session from a chat: a cancelled wait is CANCELLED at once — listeners removed, nothing posted, the wait released", async () => {
   const r = rig({ threads: { peer: working("peer") } });
   const abort = new AbortController();
+  const watching = nextSubscription(r.api);
   const pending = r.call("wait_for_session", { sessionId: "peer", timeoutSeconds: 600 }, {}, abort.signal);
-  await until(() => r.api.listenerCount() > 0);
+  await watching;
   abort.abort();
   const result = await pending;
   assert.equal(code(result), "CANCELLED");

@@ -513,25 +513,46 @@ test("send_message's result keeps within the cap beside a full detail: the pendi
   assert.equal(session.subagentsTruncated, true);
 });
 
-test("send_message: a reply too wide for one result beside a wide plan is cut by bytes, on a code-point boundary, and comes back as `reply` with replyTruncated", async (t) => {
-  const h = await harness(); t.after(h.close);
+test("send_message: a reply too wide for one result beside a wide plan is cut by bytes, on a code-point boundary, and comes back as `reply` with replyTruncated — the plan kept whole", async (t) => {
   const plan = "漢".repeat(16_384); // 49 152 bytes of UTF-8
   const reply = "😀".repeat(16_384); // 65 536 bytes
   const after = snapshot({ turns: [turn(), turn({ turnId: "t2", turnCount: 2, requestedAt: stamp(2), startedAt: stamp(2), completedAt: stamp(3) })],
     items: [message("user", "plan it", { turnId: "t2" }), message("assistant", reply, { turnId: "t2" }), activity("turn.proposed.completed", { planId: "p1", planMarkdown: plan }, { turnId: "t2" })] });
-  let posted = false;
-  h.api.on("POST", "/api/sessions/c1/turn", () => { posted = true; return { status: 200, body: { seq: 30 } }; });
-  h.api.on("GET", "/api/sessions/c1/thread", () => ({ status: 200, body: { kind: "snapshot", thread: posted ? { ...after, head: { ...after.head, projectPath: h.projectPath, cwd: h.projectPath } } : snapshot() } }));
-  const p = tool("send_message").run({ sessionId: "c1", text: "go", planMode: false, wait: true, timeoutMs: 5_000 }, h.ctx);
-  await tick();
-  h.api.emit(busEvent("session.updated", { ...done(), projectPath: h.projectPath }));
-  const r = await p;
-  assert.equal(r.outcome, "completed"); assert.equal(r.turnId, "t2");
-  assert.ok(resultBytes(r) <= 60_000, `${resultBytes(r)} bytes`);
-  const text = r.reply as string;
-  assert.equal(r.replyTruncated, true);
-  assert.ok(text.length > 0 && text.length < reply.length && reply.startsWith(text) && !/[\uD800-\uDBFF]$/.test(text), "a head of the reply, whole code points");
-  assert.equal(r.session, undefined, "the alias answers the reply, not the session detail");
+  /** The send, its turn settling with that reply and plan, through `run`. */
+  const scenario = async (run: (h: Awaited<ReturnType<typeof harness>>) => Promise<Record<string, unknown>>) => {
+    const h = await harness(); t.after(h.close);
+    let posted = false;
+    // The barrier: the turn wait's own bus subscription, the first one after the post (never a sleep).
+    let watching!: () => void;
+    const awaitingTurn = new Promise<void>((resolve) => { watching = resolve; });
+    const subscribe = h.api.subscribe.bind(h.api);
+    h.api.subscribe = (listener) => {
+      const off = subscribe(listener);
+      if (posted) watching();
+      return off;
+    };
+    h.api.on("POST", "/api/sessions/c1/turn", () => { posted = true; return { status: 200, body: { seq: 30 } }; });
+    h.api.on("GET", "/api/sessions/c1/thread", () => ({ status: 200, body: { kind: "snapshot", thread: posted ? { ...after, head: { ...after.head, projectPath: h.projectPath, cwd: h.projectPath } } : snapshot() } }));
+    const p = run(h);
+    await awaitingTurn;
+    h.api.emit(busEvent("session.updated", { ...done(), projectPath: h.projectPath }));
+    const r = await p;
+    assert.equal(r.outcome, "completed"); assert.equal(r.turnId, "t2");
+    assert.ok(resultBytes(r) <= 60_000, `${resultBytes(r)} bytes`);
+    const text = r.reply as string;
+    assert.equal(r.replyTruncated, true);
+    assert.ok(text.length > 0 && text.length < reply.length && reply.startsWith(text) && !/[\uD800-\uDBFF]$/.test(text), "a head of the reply, whole code points");
+    return r;
+  };
+  // An external `reply: "wait"` answers the session detail beside the reply (sendResult's fit): the reply went first,
+  // and cutting it made room for the whole plan.
+  const external = await scenario((h) => sendMessageTool.run({ sessionId: "c1", text: "go", reply: "wait", timeoutSeconds: 5 } as never, { ...h.ctx, caller: { kind: "external" }, turn: turnOf }) as Promise<Record<string, unknown>>);
+  const session = external.session as { lastReply?: unknown; plan?: { markdown: string; truncated: boolean } };
+  assert.equal(session.lastReply, undefined, "returned once, as reply");
+  assert.deepEqual([session.plan?.markdown === plan, session.plan?.truncated], [true, false], "the reply went first, and cutting it made room");
+  // The old host's `thread_send {wait}` alias: the same cut reply, without the detail.
+  const alias = await scenario((h) => tool("send_message").run({ sessionId: "c1", text: "go", planMode: false, wait: true, timeoutMs: 5_000 }, h.ctx));
+  assert.equal(alias.session, undefined, "the alias answers the reply, not the session detail");
 });
 
 // ---- Older history (design item 3): read_transcript pages the host's thread index. ----

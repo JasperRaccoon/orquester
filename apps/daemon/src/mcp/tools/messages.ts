@@ -170,6 +170,12 @@ async function awaitTurn(ctx: SendContext, sessionId: string, baseline: TurnBase
   }
 }
 
+/**
+ * A send's result with its session detail fitted beside it (the reply cut first, then the plan): the
+ * external `send_message` and `create_session` answer it whole (`reply: "none"`, and `"wait"` through
+ * `dispatchNextTurn`); an old host's `thread_send {wait}` alias (`sendFromChat`'s legacy path) answers
+ * the same reply without the detail.
+ */
 function sendResult(seq: number, outcome: SendResult["outcome"], session: SessionDetail, over: ReadonlySet<string>): SendResult {
   // The message's turn: one not over when it was posted — a new turn, or the running turn it steered (spec §7.4).
   const ours = (turnId: string | null | undefined): turnId is string => typeof turnId === "string" && turnId !== "" && !over.has(turnId);

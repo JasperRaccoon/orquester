@@ -107,10 +107,14 @@ none of this.
   minutes (`APPROVAL_TIMEOUT`), at most 5 per chat (`APPROVAL_LIMIT`); a denial is
   `APPROVAL_DENIED` with the user's reason. Cards are answerable only on their own route, by the
   user — never through `respond_to_request` or a provider's request route.
-- **Grants** (§7.6) let a Full-access chat skip a family's cards for this chat or its project; they
-  are honoured only while the chat is still Full access, never for agent profiles, secrets or
-  another project, and a `workflows` grant covers only the workflows that chat created or was
-  approved for.
+- **Grants** (§7.6; `grantOptionsFor` in `@orquester/api` `agent-tools.ts`, `findGrant` in
+  `@orquester/config`) let a Full-access chat skip later cards of one family: `workflows`,
+  `saved-prompts` and `cross-project` for this chat, `desktops` for this chat or its project. They
+  are offered and honoured only while the chat is Full access and not workflow-owned; agent-profile,
+  workflow-secret, toolset and cross-project/cross-workspace read cards are never grantable, nor is
+  an edit of a workflow-referenced prompt. An Admin grant never covers another project (a card
+  reaching one offers none); a cross-project grant names its one target project. A `workflows`
+  grant covers only the workflows that chat created or was approved for.
 - **Plan mode**: Reads run; turn-causing Acts run in plan mode too (plan carries on); data-changing
   Acts are refused; `planSafe` tools (`html_*`, `request_secret`, `notify_user`, `request_toolset`)
   run.
