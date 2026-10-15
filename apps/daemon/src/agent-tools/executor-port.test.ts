@@ -177,6 +177,7 @@ test("approved with a chat grant: the next call is covered by the grant without 
   assert.deepEqual(r.runs[0]!.approval, { outcome: "approved", approvalId: id, grantId });
 
   assert.equal(reference(await first)?.grantId, grantId);
+  assert.equal(reference(await first)?.grantScope, "chat", "the grant the card created, with its reach");
   const second = await r.call("control_desktop");
   assert.equal(second.isError, undefined, errorMessage(second));
   assert.deepEqual(r.runs[1]!.approval, { outcome: "granted", grantId });

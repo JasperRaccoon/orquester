@@ -206,7 +206,14 @@ export type ApprovalCancelReason = "aborted" | "closed" | "restarting";
 
 /** How a card ended, for the waiting call. Secrets only on `approved`, for this one write. */
 export type ApprovalOutcome =
-  | { outcome: "approved"; approvalId: string; grantId?: string; secrets?: Record<string, string> }
+  | {
+      outcome: "approved";
+      approvalId: string;
+      grantId?: string;
+      /** With `grantId`: that grant's reach (the scope the user chose, or the chat grant a create joined). */
+      grantScope?: "chat" | "project";
+      secrets?: Record<string, string>;
+    }
   | { outcome: "denied"; approvalId: string; reason?: string }
   | { outcome: "timed_out"; approvalId: string }
   | { outcome: "cancelled"; approvalId: string; reason?: ApprovalCancelReason };

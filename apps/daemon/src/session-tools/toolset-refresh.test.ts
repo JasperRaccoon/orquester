@@ -17,7 +17,7 @@ import { daemonRoutesForHost, type SessionToolsManifest, type SessionToolsRefres
 import { defineTool, READ_ONLY, type AnyOrquesterTool, type ThreadCaller, type ToolsetId } from "../mcp/catalog/contract.ts";
 import { chatSummary, message, snapshot, stamp } from "../mcp/fixtures.ts";
 import { FakeDaemonApi } from "../mcp/testing.ts";
-import { registerSessionToolsManifestRoute, SessionToolsRefresher, userMessageIds, type ToolsetRefreshDeps } from "./toolset-refresh.ts";
+import { REFRESH_CONCURRENCY, registerSessionToolsManifestRoute, SessionToolsRefresher, userMessageIds, type ToolsetRefreshDeps } from "./toolset-refresh.ts";
 
 const tool = (name: string, toolset: ToolsetId, tier: "read" | "admin" = "read"): AnyOrquesterTool =>
   defineTool({
@@ -35,8 +35,8 @@ function rig(over: Partial<ToolsetRefreshDeps> = {}) {
   const toolsets = new Map<string, string[]>([["claude-1", ["core", "reads"]], ["codex-1", ["core", "reads"]]]);
   const agents: Record<string, AgentAdapterId> = { "claude-1": "claude", "codex-1": "codex" };
   const pushed: { threadId: string; manifest: SessionToolsManifest }[] = [];
-  const deferred: (() => void)[] = [];
-  let hostAnswer: SessionToolsRefreshResponse["applied"] = "live";
+  let hostAnswer: SessionToolsRefreshResponse["applied"] | null = "live";
+  const warnings: string[] = [];
   const deps: ToolsetRefreshDeps = {
     thread: (id) => (agents[id] ? { agentId: agents[id]!, home: "system", projectPath: "/w/acme/api" } : null),
     openThreads: () => Object.keys(agents),
@@ -46,18 +46,22 @@ function rig(over: Partial<ToolsetRefreshDeps> = {}) {
     api: () => api,
     pushToHost: async (threadId, manifest) => {
       pushed.push({ threadId, manifest });
-      return { applied: hostAnswer };
+      return hostAnswer === null ? null : { applied: hostAnswer };
     },
-    defer: (run) => deferred.push(run),
+    logger: { warn: (message) => warnings.push(message) },
     ...over
   };
   api.on("GET", "/api/sessions", { status: 200, body: [chatSummary({ id: "claude-1" }), chatSummary({ id: "codex-1", refId: "codex" })] });
   const refresher = new SessionToolsRefresher(deps);
-  return { api, toolsets, pushed, deferred, refresher, setHostAnswer: (answer: SessionToolsRefreshResponse["applied"]) => (hostAnswer = answer) };
+  return { api, toolsets, pushed, warnings, refresher, setHostAnswer: (answer: SessionToolsRefreshResponse["applied"] | null) => (hostAnswer = answer) };
 }
 
-/** Wait for every queued promise continuation (the refresh is async but never waits on time). */
-const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
+/** The manifest of an open chat (not null, not unavailable). */
+const manifestOf = async (r: ReturnType<typeof rig>, threadId: string): Promise<SessionToolsManifest> => {
+  const manifest = await r.refresher.manifest(threadId);
+  assert.ok(manifest !== null && manifest !== "unavailable", "a manifest");
+  return manifest as SessionToolsManifest;
+};
 
 test("the manifest: the thread's toolsets, its block, its denials; Admin tools not for a workflow-owned chat", async () => {
   const r = rig();
@@ -66,30 +70,52 @@ test("the manifest: the thread's toolsets, its block, its denials; Admin tools n
     body: { servers: [{ agent: "claude", home: "system", scope: "user", name: "orquester_remote", reason: "bearer" }, { agent: "codex", home: "system", scope: "user", name: "codex_remote", reason: "url" }] }
   });
   r.toolsets.set("claude-1", ["core", "reads", "workflow-authoring"]);
-  const manifest = (await r.refresher.manifest("claude-1"))!;
+  const manifest = await manifestOf(r, "claude-1");
   assert.deepEqual(manifest.tools, ["list_sessions", "list_workflows", "create_workflow"]);
   assert.deepEqual(manifest.deny, ["orquester_remote"]);
   assert.match(manifest.instructions, /^## Orquester/);
   assert.equal(await r.refresher.manifest("nobody"), null);
   // Owned by a workflow run: no Admin tool advertised (§5.4).
   r.api.on("GET", "/api/sessions", { status: 200, body: [chatSummary({ id: "claude-1", owner: { kind: "workflow", workflowId: "wf", runId: "r" } } as Partial<SessionSummary>)] });
-  assert.deepEqual((await r.refresher.manifest("claude-1"))!.tools, ["list_sessions", "list_workflows"]);
+  assert.deepEqual((await manifestOf(r, "claude-1")).tools, ["list_sessions", "list_workflows"]);
   // Unreadable: fail closed (treated as owned).
   r.api.on("GET", "/api/sessions", { status: 503, body: { code: "UNAVAILABLE" } });
-  assert.deepEqual((await r.refresher.manifest("claude-1"))!.tools, ["list_sessions", "list_workflows"]);
+  assert.deepEqual((await manifestOf(r, "claude-1")).tools, ["list_sessions", "list_workflows"]);
 });
 
 test("the daemon-pointing read: none from a daemon without it, reused while fresh, read again once invalidated", async () => {
   let now = 0;
   const r = rig({ now: () => now });
-  assert.deepEqual(await r.refresher.daemonPointing(), [], "404 → none");
+  assert.deepEqual(await r.refresher.daemonPointing(), [], "404 → none (no detection is not a failure)");
   r.api.on("GET", AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, { status: 200, body: { servers: [{ agent: "claude", home: "system", scope: "user", name: "a", reason: "url" }] } });
   assert.deepEqual(await r.refresher.daemonPointing(), [], "cached for 30 s");
   r.refresher.invalidateDaemonPointing();
-  assert.equal((await r.refresher.daemonPointing()).length, 1);
+  assert.equal((await r.refresher.daemonPointing())!.length, 1);
   r.api.on("GET", AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, { status: 500, body: {} });
   now = 60_000;
-  assert.equal((await r.refresher.daemonPointing()).length, 1, "a failed read keeps the last good list");
+  assert.equal((await r.refresher.daemonPointing())!.length, 1, "a failed read keeps the last good list");
+  assert.equal(r.warnings.length, 1, "and says so");
+});
+
+test("fail closed: with no good read ever, a failed read makes the manifest unavailable (503), every failure warned", async (t) => {
+  const r = rig();
+  r.api.on("GET", AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, { status: 500, body: {} });
+  assert.equal(await r.refresher.daemonPointing(), null);
+  assert.equal(await r.refresher.manifest("claude-1"), "unavailable");
+  assert.equal(r.warnings.length, 2);
+  const app = Fastify();
+  t.after(() => app.close());
+  registerSessionToolsManifestRoute(app, { authorizeHost: () => true, refresher: r.refresher });
+  const res = await app.inject({ method: "POST", url: daemonRoutesForHost.sessionToolsManifest, payload: { threadId: "claude-1" } });
+  assert.equal(res.statusCode, 503, "the host falls back to what it knows for that launch");
+  assert.equal(r.refresher.advertisedToolsets("claude-1"), null, "nothing was handed out");
+  // A toolset change cannot be pushed then: pending, no "now".
+  await r.refresher.push("claude-1");
+  assert.deepEqual(r.refresher.advertisedToolsets("claude-1"), []);
+  assert.equal(r.pushed.length, 0);
+  // Once a read succeeds the manifest is back.
+  r.api.on("GET", AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, { status: 200, body: { servers: [] } });
+  assert.deepEqual((await manifestOf(r, "claude-1")).deny, []);
 });
 
 test("the manifest route: socket-only bearer, 404 for no chat, and a launch records what the thread advertises", async (t) => {
@@ -112,46 +138,85 @@ test("the manifest route: socket-only bearer, 404 for no chat, and a launch reco
   assert.deepEqual(r.refresher.advertisedToolsets("claude-1"), ["core", "reads"]);
 });
 
-test("a toolset change: in-session providers move their advertised set at once and push; others keep it and push later", async () => {
+test("a push moves the advertised set only when the host applied it; otherwise the change stays pending", async () => {
   const r = rig();
   await r.refresher.manifest("claude-1");
   await r.refresher.manifest("codex-1");
   r.toolsets.set("claude-1", ["core", "reads", "notes"]);
   r.toolsets.set("codex-1", ["core", "reads", "notes"]);
-  r.refresher.toolsetsChanged("claude-1");
-  // Synchronously, before the awaiting request_toolset call resumes (it reads appliesAtNextIdle).
+  // Claude, applied in-session.
+  assert.equal(await r.refresher.push("claude-1"), "live");
   assert.deepEqual(r.refresher.advertisedToolsets("claude-1"), ["core", "reads", "notes"]);
-  r.refresher.toolsetsChanged("codex-1");
-  assert.deepEqual(r.refresher.advertisedToolsets("codex-1"), ["core", "reads"], "the live session keeps its list until it restarts");
-  assert.equal(r.deferred.length, 1, "the restart-path push waits for a later macrotask");
-  await settle();
-  assert.deepEqual(r.pushed.map((push) => push.threadId), ["claude-1"]);
+  // Codex: a restart is pending — the live session keeps what it launched with.
   r.setHostAnswer("next-idle");
-  r.deferred.shift()!();
-  await settle();
-  assert.deepEqual(r.pushed.map((push) => push.threadId), ["claude-1", "codex-1"]);
+  assert.equal(await r.refresher.push("codex-1"), "next-idle");
   assert.deepEqual(r.refresher.advertisedToolsets("codex-1"), ["core", "reads"]);
-  // A settings change refreshes every open chat; an unknown advertised set of a restart-path chat reads "pending".
-  r.refresher.forget("codex-1");
-  r.refresher.toolsetsChanged(null);
-  assert.deepEqual(r.refresher.advertisedToolsets("codex-1"), []);
+  // Claude whose client did not re-list (next-idle), or no host at all: never "now".
+  r.toolsets.set("claude-1", ["core", "reads", "notes", "files-git"]);
+  assert.equal(await r.refresher.push("claude-1"), "next-idle");
+  assert.deepEqual(r.refresher.advertisedToolsets("claude-1"), ["core", "reads", "notes"]);
+  r.setHostAnswer(null);
+  r.refresher.forget("claude-1");
+  assert.equal(await r.refresher.push("claude-1"), "no-host");
+  assert.deepEqual(r.refresher.advertisedToolsets("claude-1"), [], "unknown → pending");
 });
 
-test("the automatic continue: scheduled only where the tools wait for a restart (mirrors appliesAtNextIdle)", async () => {
-  const r = rig();
+test("a settings change pushes every chat, at most REFRESH_CONCURRENCY at a time", async () => {
+  let inFlight = 0;
+  let most = 0;
+  let calls = 0;
+  let released = false;
+  const gates: (() => void)[] = [];
+  let full!: () => void;
+  const saturated = new Promise<void>((resolve) => (full = resolve));
+  const many = Object.fromEntries(Array.from({ length: 10 }, (_, i) => [`codex-${i}`, "codex" as AgentAdapterId]));
+  const r = rig({
+    thread: (id) => (many[id] ? { agentId: many[id]!, home: "system", projectPath: "/w/acme/api" } : null),
+    openThreads: () => Object.keys(many),
+    pushToHost: async () => {
+      calls += 1;
+      inFlight += 1;
+      most = Math.max(most, inFlight);
+      if (inFlight === REFRESH_CONCURRENCY) full();
+      if (!released) await new Promise<void>((resolve) => gates.push(resolve));
+      inFlight -= 1;
+      return { applied: "next-idle" };
+    }
+  });
+  const done = r.refresher.refresh(null);
+  await saturated;
+  assert.equal(calls, REFRESH_CONCURRENCY, "no more pushes start while the pool is full");
+  released = true;
+  gates.splice(0).forEach((go) => go());
+  const answers = await done;
+  assert.equal(answers.size, 10);
+  assert.equal(most, REFRESH_CONCURRENCY);
+});
+
+test("request_toolset waits for the host: `next-idle` schedules the continue; live, no host or no answer do not", async () => {
   const scheduled: string[] = [];
-  r.refresher.scheduleContinue = async (threadId) => (scheduled.push(threadId), "posted");
   const asCaller = (threadId: string, agentId: AgentAdapterId): ThreadCaller => ({
     kind: "thread", threadId, title: "t", projectPath: "", workspace: "", cwd: "/", agentId, callId: "c", runtimeMode: "full-access", planning: false, workflowOwned: false, exchange: null
   });
-  await r.refresher.manifest("claude-1");
-  await r.refresher.manifest("codex-1");
-  r.toolsets.set("claude-1", ["core", "reads", "notes"]);
-  r.toolsets.set("codex-1", ["core", "reads", "notes"]);
-  r.refresher.toolsetsChanged("claude-1");
-  r.refresher.toolsetsChanged("codex-1");
-  r.refresher.toolsetApproved(asCaller("claude-1", "claude"), "notes");
-  r.refresher.toolsetApproved(asCaller("codex-1", "codex"), "notes");
+  const fresh = (over: Partial<ToolsetRefreshDeps> = {}) => {
+    const r = rig(over);
+    r.refresher.scheduleContinue = async (threadId) => (scheduled.push(threadId), "posted");
+    return r;
+  };
+  const live = fresh();
+  live.refresher.toolsetsChanged("claude-1");
+  await live.refresher.toolsetApproved(asCaller("claude-1", "claude"), "notes");
+  const restart = fresh();
+  restart.setHostAnswer("next-idle");
+  restart.refresher.toolsetsChanged("codex-1");
+  await restart.refresher.toolsetApproved(asCaller("codex-1", "codex"), "notes");
+  const none = fresh();
+  none.setHostAnswer(null);
+  await none.refresher.toolsetApproved(asCaller("codex-1", "codex"), "notes");
+  assert.deepEqual(none.refresher.advertisedToolsets("codex-1"), []);
+  const slow = fresh({ applyWaitMs: 10, pushToHost: () => new Promise(() => undefined) });
+  await slow.refresher.toolsetApproved(asCaller("codex-1", "codex"), "notes");
+  assert.deepEqual(slow.refresher.advertisedToolsets("codex-1"), [], "no answer in time: pending");
   assert.deepEqual(scheduled, ["codex-1"]);
 });
 
@@ -215,8 +280,16 @@ test("another chat's message or a reply is not the user speaking; a closed chat'
   const closing = rig();
   closing.api.on("GET", "/api/sessions", { status: 200, body: [chatSummary({ id: "codex-1", refId: "codex", ...RUNNING })] });
   closing.api.on("GET", agentChatRoutes.thread("codex-1"), { status: 200, body: { kind: "snapshot", thread: before } });
+  let subscribed!: () => void;
+  const watching = new Promise<void>((resolve) => (subscribed = resolve));
+  const subscribe = closing.api.subscribe.bind(closing.api);
+  closing.api.subscribe = (listener) => {
+    const off = subscribe(listener);
+    subscribed();
+    return off;
+  };
   const pending = closing.refresher.scheduleContinue("codex-1", "notes", "default");
-  while (closing.api.listenerCount() === 0) await settle();
+  await watching;
   closing.refresher.forget("codex-1");
   assert.equal(await pending, "cancelled");
 });

@@ -100,7 +100,7 @@ for (const mode of ["approval-required", "full-access"] as const) {
 
 test("every tool of a denied server is dropped, its own tools kept (§12.1)", () => {
   const own = openCodeSessionToolsServerName("thread-a");
-  const session = withSessionToolRules(buildOpenCodePermissionRules("full-access"), { isolate: true, own: { serverName: own, deny: ["orquester", "remote.api"] } });
+  const session = withSessionToolRules(buildOpenCodePermissionRules("full-access"), { isolate: true, own: { serverName: own }, deny: ["orquester", "remote.api"] });
   const tools = [toolId(own, "echo"), toolId("orquester", "send_message"), toolId("remote_api", "list"), toolId("github", "issue"), "bash"];
   const hidden = disabled(tools, [...AGENT_RULES, ...session]);
   assert.deepEqual([...hidden].sort(), [toolId("orquester", "send_message"), toolId("remote_api", "list")].sort());

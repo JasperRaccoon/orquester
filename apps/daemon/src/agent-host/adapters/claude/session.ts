@@ -70,6 +70,7 @@ import { ClaudeGoalTranscript, locateClaudeTranscript } from "./goal-transcript.
 import { createClaudeHistoryReader, type ClaudeHistoryReader } from "./history.ts";
 import { buildClaudeQueryOptions } from "./launch.ts";
 import { createClaudeSessionToolsLaunch, isClaudeSessionTool } from "./session-tools.ts";
+import { launchHomeKey } from "../../session-tools/index.ts";
 import { CLAUDE_OPTION_IDS, findModel, resolveEffortLevel, selectionStringOption } from "./models.ts";
 import {
   ClaudeNormalizer,
@@ -431,7 +432,12 @@ export class ClaudeSession {
     // toolset turned on later reaches this session in-session (`session-tools.ts`).
     const toolsLaunch =
       sessionTools !== undefined
-        ? await createClaudeSessionToolsLaunch({ sessionTools, threadId: this.threadId, signal: this.sessionToolsLife.signal })
+        ? await createClaudeSessionToolsLaunch({
+            sessionTools,
+            threadId: this.threadId,
+            launch: { home: launchHomeKey(this.options.home), project: this.options.cwd },
+            signal: this.sessionToolsLife.signal
+          })
         : undefined;
     this.sessionToolNames = toolsLaunch !== undefined ? () => toolsLaunch.names() : () => new Set();
     const built = buildClaudeQueryOptions({

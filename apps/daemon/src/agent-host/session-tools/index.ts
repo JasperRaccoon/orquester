@@ -17,6 +17,12 @@
  * server, {@link SessionToolsHost.launchInProcess}); any other live session is marked stale and the
  * orchestrator restarts it with resume at its next idle point ({@link SessionToolsHost.needsRestart}).
  *
+ * When the daemon cannot be asked (down, restarting, or it cannot read the daemon-pointing MCP
+ * servers: 503), a session launches with a FALLBACK keyed by (agent, account home, project): that
+ * key's last manifest, else the agent's defaults with no denial — logged and surfaced on the thread
+ * as a warning (`onWarning`), never silent, never another home's denials (Codex refuses a thread
+ * whose config names a server it does not have).
+ *
  * Per provider (§1.2):
  * - Claude: an in-process SDK server bound to the thread at launch
  *   (`adapters/claude/session-tools.ts`) → {@link SessionToolsHost.call}.
@@ -42,6 +48,22 @@ import type { FetchSessionToolsManifest, ForwardSessionToolCall } from "./forwar
 import { LEGACY_SESSION_TOOL_DEFINITIONS, LEGACY_SESSION_TOOL_INSTRUCTIONS } from "./legacy-definitions.ts";
 import type { SessionToolsListSource } from "./mcp-server.ts";
 
+/** Where a provider session runs: what its fallback is keyed on. */
+export interface SessionToolsLaunch {
+  agent: AgentAdapterId;
+  /** `"system"` or the managed account id (the daemon's manifest key for the home). */
+  home: string;
+  /** The thread's project root (else its cwd). */
+  project: string;
+}
+
+/** `"system"` or the account id of a resolved account home. */
+export function launchHomeKey(home: { kind: string; accountId?: string }): string {
+  return home.kind === "account" && home.accountId ? home.accountId : "system";
+}
+
+const launchKeyOf = (launch: SessionToolsLaunch): string => `${launch.agent}\u0000${launch.home}\u0000${launch.project}`;
+
 /** What ONE provider session of a thread advertises. */
 export interface PreparedSessionTools {
   readonly threadId: string;
@@ -52,11 +74,16 @@ export interface PreparedSessionTools {
   readonly instructions: string;
   /** MCP server names to deny in this chat (§12.1), as its CLI's config names them. */
   readonly deny: readonly string[];
+  /**
+   * False when the denials could not be derived for THIS launch (no manifest and no fallback for
+   * its agent, home and project): `deny` is then empty and the denial is degraded (warned).
+   */
+  readonly denyKnown: boolean;
   /** Equal for equal lists, instructions and denials: a session restarts only when it moved. */
   readonly key: string;
   /**
    * `manifest`: the daemon's; `legacy`: the frozen old definitions (a daemon without the route);
-   * `fallback`: the daemon could not be asked — the thread's last list, else its agent's defaults.
+   * `fallback`: the daemon could not be asked — this launch key's last list, else the defaults.
    */
   readonly source: "manifest" | "legacy" | "fallback";
 }
@@ -81,6 +108,16 @@ export interface SessionToolsGrant {
   revoke(): void;
 }
 
+/** What an endpoint provider's session starts with: its grant when one was issued, its denials ALWAYS. */
+export interface SessionToolsLaunchResult {
+  /** Absent when no credential could be issued (the session runs without Orquester's tools). */
+  grant?: SessionToolsGrant;
+  /** The thread's list and denials — present even without a grant (§12.1 never fails open). */
+  prepared: PreparedSessionTools | null;
+  /** The inert endpoint for shadows, when the endpoint is up (Grok falls back to an unreachable one). */
+  deniedUrl?: string;
+}
+
 export interface SessionToolsCallInput {
   threadId: string;
   name: string;
@@ -92,8 +129,11 @@ export interface SessionToolsCallInput {
 /** What a refresh did (`SessionToolsRefreshResponse.applied`). */
 export type SessionToolsApplied = "live" | "next-idle" | "next-start" | "unchanged";
 
-/** A live session that takes a new list in-session (Claude): told the new list, it re-lists. */
-export type LiveSessionToolsListener = (prepared: PreparedSessionTools) => void;
+/**
+ * A live session that takes a new list in-session (Claude): told the new list, it tells its client
+ * and resolves true once the client re-listed (bounded), false when it did not in time.
+ */
+export type LiveSessionToolsListener = (prepared: PreparedSessionTools) => boolean | Promise<boolean>;
 
 export interface SessionToolsHost {
   /** Always true for a host an adapter is handed; kept for tests. */
@@ -101,13 +141,13 @@ export interface SessionToolsHost {
   /** Every name this host may advertise (catalog ∪ legacy) — the provenance marker of rows. */
   readonly knownNames: ReadonlySet<string>;
   /** Read the thread's manifest (nothing recorded: a look). */
-  prepare(threadId: string, agent: AgentAdapterId): Promise<PreparedSessionTools>;
+  prepare(threadId: string, launch: SessionToolsLaunch): Promise<PreparedSessionTools>;
   /**
    * An in-process session starts (Claude): read the thread's manifest and record it as what the
    * session advertises, with `listener` told every new list {@link applyManifest} hands over
-   * in-session (it answers `live`). `release` when the session ends.
+   * in-session (it answers `live` once the client re-listed). `release` when the session ends.
    */
-  launchInProcess(threadId: string, agent: AgentAdapterId, listener: LiveSessionToolsListener): Promise<{ prepared: PreparedSessionTools; release(): void }>;
+  launchInProcess(threadId: string, launch: SessionToolsLaunch, listener: LiveSessionToolsListener): Promise<{ prepared: PreparedSessionTools; release(): void }>;
   /** What the thread's live session advertises now, or null without one. */
   current(threadId: string): PreparedSessionTools | null;
   /** The thread's current list as an MCP server reads it, per request. */
@@ -119,7 +159,9 @@ export interface SessionToolsHost {
   /** Run one call as `threadId` — Claude's in-process path, and the endpoint's. Never throws. */
   call(input: SessionToolsCallInput): Promise<CallToolResult>;
   /** Issue a credential for one provider session of `threadId`, revoking the thread's earlier ones. */
-  issue(threadId: string, agent: AgentAdapterId): Promise<SessionToolsGrant>;
+  issue(threadId: string, launch: SessionToolsLaunch): Promise<SessionToolsGrant>;
+  /** The inert endpoint's URL, when the endpoint is (or can be) up; undefined otherwise. Never throws. */
+  deniedUrl(): Promise<string | undefined>;
   /** Abort every call `threadId` has in flight (its turn was interrupted). */
   abortThreadCalls(threadId: string): void;
   /** Revoke everything and close the endpoint (the host's teardown). */
@@ -136,6 +178,11 @@ export interface CreateSessionToolsHostOptions {
   knownNames?: ReadonlySet<string>;
   credentials?: SessionToolCredentials;
   logger?: { warn(message: string, detail?: unknown): void };
+  /**
+   * A thread's session starts degraded (no manifest, and no denials known for its launch key):
+   * surfaced on the thread (a `runtime.warning` row, `main.ts`). Must not throw.
+   */
+  onWarning?: (threadId: string, message: string) => void;
   /**
    * Handed the secret values a tool's result carries (its definition's
    * `secretResultKeys`) BEFORE the result goes back to the provider, so the
@@ -176,6 +223,10 @@ const keyOf = (tools: readonly Tool[], instructions: string, deny: readonly stri
     .update(JSON.stringify([tools.map((tool) => tool.name), instructions, [...deny]]))
     .digest("hex");
 
+/** The warning a degraded launch is surfaced with. */
+export const DENIAL_DEGRADED_WARNING =
+  "Orquester could not read which MCP servers point at it, so this chat's session started without denying them. They are denied again once Orquester answers (the session restarts at its next idle point after a change).";
+
 export function createSessionToolsHost(options: CreateSessionToolsHostOptions): SessionToolsHost {
   const credentials = options.credentials ?? new SessionToolCredentials();
   const definitions = options.definitions ?? buildChatToolDefinitions();
@@ -187,10 +238,12 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
   const launched = new Map<string, LaunchedSession>();
   /** A newer list a live (non-in-session) session has not taken yet. */
   const desired = new Map<string, PreparedSessionTools>();
-  /** The last denial list seen per agent: the fallback when the daemon cannot be asked. */
-  const lastDeny = new Map<AgentAdapterId, readonly string[]>();
-  /** The last list the daemon gave each thread (outlives its session): the first fallback. */
-  const lastManifest = new Map<string, PreparedSessionTools>();
+  /** Live sessions that must restart at their next idle point although their key did not move (a live apply the client never re-listed). */
+  const forced = new Set<string>();
+  /** A refresh that arrived while the thread's session was being launched (its manifest read in flight). */
+  const launching = new Map<string, { refreshed: PreparedSessionTools | null }>();
+  /** The last manifest per launch key — (agent, home, project) — the fallback's only source. */
+  const lastByLaunch = new Map<string, PreparedSessionTools>();
   let endpoint: Promise<SessionToolsEndpoint> | null = null;
   let stopped = false;
 
@@ -199,16 +252,25 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
       if (predicate(call)) call.controller.abort();
     }
   };
+  const forget = (threadId: string): void => {
+    launched.delete(threadId);
+    desired.delete(threadId);
+    forced.delete(threadId);
+  };
   credentials.onRevoke((scope) => {
     abortWhere((call) => call.grantId === scope.grantId);
     // The session that grant served has ended: it advertises nothing any more.
-    if (launched.get(scope.threadId)?.owner === scope.grantId) {
-      launched.delete(scope.threadId);
-      desired.delete(scope.threadId);
-    }
+    if (launched.get(scope.threadId)?.owner === scope.grantId) forget(scope.threadId);
   });
 
-  const build = async (threadId: string, names: readonly string[], instructions: string, deny: readonly string[], source: PreparedSessionTools["source"]): Promise<PreparedSessionTools> => {
+  const build = async (
+    threadId: string,
+    names: readonly string[],
+    instructions: string,
+    deny: readonly string[],
+    source: PreparedSessionTools["source"],
+    denyKnown = true
+  ): Promise<PreparedSessionTools> => {
     const defs = await definitions.catch(() => null);
     const tools: Tool[] = [];
     for (const name of names) {
@@ -222,6 +284,7 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
       names: new Set(tools.map((tool) => tool.name)),
       instructions,
       deny: [...deny],
+      denyKnown,
       key: keyOf(tools, instructions, deny),
       source
     };
@@ -230,24 +293,34 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
   const fromManifest = (threadId: string, manifest: SessionToolsManifest) =>
     build(threadId, manifest.tools, manifest.instructions, manifest.deny, "manifest");
 
-  /** The thread's last list, else its agent's catalogue defaults with the agent's last denials. */
-  const fallback = async (threadId: string, agent: AgentAdapterId): Promise<PreparedSessionTools> => {
-    const last = lastManifest.get(threadId);
-    if (last) return { ...last, source: "fallback" };
-    // The agent's catalogue defaults; no Admin tool (the workflow-owned trait cannot be read).
-    const on = new Set(TOOLSETS.filter((toolset) => toolset.locked || toolset.defaults[agent] === true).map((toolset) => toolset.id));
+  /**
+   * The daemon could not be asked: this launch key's last manifest (same agent, home and project —
+   * its denials are this config's), else the agent's catalogue defaults with NO denial, warned.
+   * Never another key's denials: Codex fails a thread whose config lacks a denied name.
+   */
+  const fallback = async (threadId: string, launch: SessionToolsLaunch): Promise<PreparedSessionTools> => {
+    const last = lastByLaunch.get(launchKeyOf(launch));
+    if (last) return { ...last, threadId, source: "fallback" };
+    // Safe values where the thread's own are unknown: workflow-owned (no Admin tool, no
+    // approval line), and no toolset can be asked for.
+    const on = new Set(TOOLSETS.filter((toolset) => toolset.locked || toolset.defaults[launch.agent] === true).map((toolset) => toolset.id));
     const names = catalogFor("chat").filter((tool) => on.has(tool.toolset) && tool.tier !== "admin").map((tool) => tool.name);
-    const instructions = composeOrquesterInstructions({ enabledToolsets: on, workflowOwned: false, canRequestToolsets: true });
-    return build(threadId, names, instructions, lastDeny.get(agent) ?? [], "fallback");
+    const instructions = composeOrquesterInstructions({ enabledToolsets: on, workflowOwned: true, canRequestToolsets: false });
+    options.logger?.warn("session tools: no denials known for this launch; MCP server denial is degraded", { threadId, agent: launch.agent });
+    try {
+      options.onWarning?.(threadId, DENIAL_DEGRADED_WARNING);
+    } catch {
+      // Surfacing is best effort; the log above stands.
+    }
+    return build(threadId, names, instructions, [], "fallback", false);
   };
 
-  const readPrepared = async (threadId: string, agent: AgentAdapterId): Promise<PreparedSessionTools> => {
+  const readPrepared = async (threadId: string, launch: SessionToolsLaunch): Promise<PreparedSessionTools> => {
     const answer = await options.manifest(threadId);
     switch (answer.kind) {
       case "manifest": {
-        lastDeny.set(agent, answer.manifest.deny);
         const prepared = await fromManifest(threadId, answer.manifest);
-        lastManifest.set(threadId, prepared);
+        lastByLaunch.set(launchKeyOf(launch), prepared);
         return prepared;
       }
       case "legacy": {
@@ -259,6 +332,7 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
           names: new Set(tools.map((tool) => tool.name)),
           instructions: LEGACY_SESSION_TOOL_INSTRUCTIONS,
           deny: [],
+          denyKnown: true,
           key: keyOf(tools, LEGACY_SESSION_TOOL_INSTRUCTIONS, []),
           source: "legacy"
         };
@@ -266,14 +340,28 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
       case "no-thread":
         return build(threadId, [], "", [], "manifest");
       case "unavailable":
-        options.logger?.warn("session tools: no manifest from the daemon; this session uses its last or default list", { threadId });
-        return fallback(threadId, agent);
+        options.logger?.warn("session tools: no manifest from the daemon; this session uses its launch key's last list or the defaults", { threadId });
+        return fallback(threadId, launch);
     }
   };
 
-  const record = (prepared: PreparedSessionTools, owner: string, live?: LiveSessionToolsListener): void => {
-    launched.set(prepared.threadId, { prepared, owner, ...(live ? { live } : {}) });
-    desired.delete(prepared.threadId);
+  /**
+   * Read and record what a starting session advertises. A refresh that lands while the manifest is
+   * read (the window between the grant and the record) leaves the session stale: restart at idle.
+   */
+  const launchWith = async (threadId: string, launch: SessionToolsLaunch, owner: string, live?: LiveSessionToolsListener): Promise<PreparedSessionTools> => {
+    const window = { refreshed: null as PreparedSessionTools | null };
+    launching.set(threadId, window);
+    try {
+      const prepared = await readPrepared(threadId, launch);
+      launched.set(threadId, { prepared, owner, ...(live ? { live } : {}) });
+      desired.delete(threadId);
+      forced.delete(threadId);
+      if (window.refreshed && window.refreshed.key !== prepared.key) desired.set(threadId, window.refreshed);
+      return prepared;
+    } finally {
+      if (launching.get(threadId) === window) launching.delete(threadId);
+    }
   };
 
   const run = async (input: SessionToolsCallInput, grantId: string | undefined): Promise<CallToolResult> => {
@@ -340,61 +428,71 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
   return {
     enabled: true,
     knownNames,
-    prepare: (threadId, agent) => readPrepared(threadId, agent),
-    async launchInProcess(threadId, agent, listener) {
-      const prepared = await readPrepared(threadId, agent);
+    prepare: (threadId, launch) => readPrepared(threadId, launch),
+    async launchInProcess(threadId, launch, listener) {
       const owner = `in-process-${randomUUID()}`;
-      record(prepared, owner, listener);
+      const prepared = await launchWith(threadId, launch, owner, listener);
       return {
         prepared,
         release: () => {
-          if (launched.get(threadId)?.owner === owner) {
-            launched.delete(threadId);
-            desired.delete(threadId);
-          }
+          if (launched.get(threadId)?.owner === owner) forget(threadId);
         }
       };
     },
     current: (threadId) => launched.get(threadId)?.prepared ?? null,
     listSource,
     async applyManifest(threadId, manifest) {
-      const session = launched.get(threadId);
       const next = await fromManifest(threadId, manifest);
+      const window = launching.get(threadId);
+      if (window) {
+        // A session is starting with a manifest read before this change: it restarts at idle.
+        window.refreshed = next;
+        return "next-idle";
+      }
+      const session = launched.get(threadId);
       if (!session) return "next-start";
-      if (session.prepared.key === next.key) {
+      if (session.prepared.key === next.key && !forced.has(threadId)) {
         desired.delete(threadId);
         return "unchanged";
       }
-      // In-session: only the tool list can change live (the instruction block rides the system
-      // prompt, the denials the launch); anything else waits for the restart.
+      // In-session: the tool list (and the bookkeeping of the block) change live; the denials ride
+      // the launch, so a change of them waits for the restart.
       const sameDeny = session.prepared.deny.join("\u0000") === next.deny.join("\u0000");
       if (session.live && sameDeny) {
         launched.set(threadId, { ...session, prepared: next });
         desired.delete(threadId);
+        let relisted = false;
         try {
-          session.live(next);
+          relisted = await session.live(next);
         } catch (error) {
           options.logger?.warn("session tools: a live session could not take its new list", { threadId, error: String(error) });
         }
-        return "live";
+        if (relisted) {
+          forced.delete(threadId);
+          return "live";
+        }
+        // The client did not re-list in time: the list is served, but only a restart is certain.
+        forced.add(threadId);
+        return "next-idle";
       }
       desired.set(threadId, next);
       return "next-idle";
     },
     needsRestart(threadId) {
-      const want = desired.get(threadId);
       const have = launched.get(threadId)?.prepared;
-      return want !== undefined && have !== undefined && want.key !== have.key;
+      if (have === undefined) return false;
+      if (forced.has(threadId)) return true;
+      const want = desired.get(threadId);
+      return want !== undefined && want.key !== have.key;
     },
     call: (input) => run(input, undefined),
-    async issue(threadId, agent) {
+    async issue(threadId, launch) {
       if (stopped) throw new Error("session tools: the host is stopping");
       const { url, deniedUrl } = await ensureEndpoint();
       // Issue first (it revokes the thread's earlier grant, ending that session's list), then read
       // and record what this session advertises.
       const issued = credentials.issue(threadId);
-      const prepared = await readPrepared(threadId, agent);
-      record(prepared, issued.grantId);
+      const prepared = await launchWith(threadId, launch, issued.grantId);
       return {
         threadId,
         url,
@@ -405,6 +503,12 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
         revoke: () => credentials.revokeGrant(issued.grantId)
       };
     },
+    async deniedUrl() {
+      if (stopped) return undefined;
+      return ensureEndpoint()
+        .then((open) => open.deniedUrl)
+        .catch(() => undefined);
+    },
     abortThreadCalls: (threadId) => abortWhere((call) => call.threadId === threadId),
     async stop() {
       stopped = true;
@@ -412,7 +516,8 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
       abortWhere(() => true);
       launched.clear();
       desired.clear();
-      lastManifest.clear();
+      forced.clear();
+      lastByLaunch.clear();
       const open = endpoint;
       endpoint = null;
       if (open !== null) {
@@ -423,27 +528,31 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
 }
 
 /**
- * An adapter's way to get its grant: the context's service issues one, and
- * a failure (the endpoint could not bind, the host is stopping) costs the
- * session its tools — logged — never its start. Undefined without session
- * tools.
+ * An endpoint provider's way into its session: the context's service issues a grant, and a
+ * failure (the endpoint could not bind, the host is stopping) costs the session its TOOLS —
+ * logged — never its start, and never its DENIALS: the thread's list and denials are still read
+ * and handed back (§12.1 does not fail open). `{prepared: null}` without session tools.
  */
 export async function issueSessionToolsGrant(
   context: { sessionTools?: SessionToolsHost; logger: { warn(message: string, detail?: unknown): void } },
   threadId: string,
-  agent: AgentAdapterId
-): Promise<SessionToolsGrant | undefined> {
-  if (context.sessionTools === undefined) {
-    return undefined;
+  launch: SessionToolsLaunch
+): Promise<SessionToolsLaunchResult> {
+  const host = context.sessionTools;
+  if (host === undefined) {
+    return { prepared: null };
   }
   try {
-    return await context.sessionTools.issue(threadId, agent);
+    const grant = await host.issue(threadId, launch);
+    return { grant, prepared: grant.prepared, deniedUrl: grant.deniedUrl };
   } catch (error) {
-    context.logger.warn("session tools: no credential for this session; it runs without them", {
+    context.logger.warn("session tools: no credential for this session; it runs without them (its MCP denials still apply)", {
       threadId,
       error: error instanceof Error ? error.message : String(error)
     });
-    return undefined;
+    const prepared = await host.prepare(threadId, launch).catch(() => null);
+    const deniedUrl = await host.deniedUrl();
+    return { prepared, ...(deniedUrl !== undefined ? { deniedUrl } : {}) };
   }
 }
 

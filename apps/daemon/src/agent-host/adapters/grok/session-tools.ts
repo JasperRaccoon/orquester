@@ -44,40 +44,42 @@ import type { McpServer, ToolCallUpdate } from "./acp/_generated/schema.ts";
 
 /** What a Grok session is given when session tools are on. */
 export interface GrokSessionToolsLaunch {
-  url: string;
-  /** `Bearer <credential>`. */
-  authorization: string;
+  /** Our endpoint; absent when no credential could be issued (no tools — the denials still apply). */
+  url?: string;
+  /** `Bearer <credential>`; with `url`. */
+  authorization?: string;
   /** The "Orquester" instruction block; "" for none. */
   instructions: string;
   /** The registered tools' bare names: only these are answered without a card. */
   toolNames: ReadonlySet<string>;
   /** MCP servers to deny in this session (§12.1), by their config names. */
   deny?: readonly string[];
-  /** The inert endpoint a denied name is shadowed with (`…/mcp/denied`). */
+  /** The inert endpoint a denied name is shadowed with (`…/mcp/denied`); else {@link GROK_UNREACHABLE_SHADOW_URL}. */
   deniedUrl?: string;
 }
+
+/**
+ * The shadow's URL when the host's endpoint is not up: nothing listens there, so the shadowed
+ * server fails to connect — the user's same-named server is still replaced (fail closed).
+ */
+export const GROK_UNREACHABLE_SHADOW_URL = "http://127.0.0.1:9/mcp/denied";
 
 /** The `mcpServers` list for `session/new` / `session/load`. */
 export function grokSessionMcpServers(launch: GrokSessionToolsLaunch | undefined): McpServer[] {
   if (launch === undefined) {
     return [];
   }
-  const deniedUrl = launch.deniedUrl;
-  const shadows: McpServer[] =
-    deniedUrl === undefined
-      ? []
-      : [...new Set(launch.deny ?? [])]
-          .filter((name) => name !== SESSION_TOOLS_SERVER_NAME && name.length > 0)
-          .map((name) => ({ type: "http", name, url: deniedUrl, headers: [] }));
-  return [
-    {
-      type: "http",
-      name: SESSION_TOOLS_SERVER_NAME,
-      url: launch.url,
-      headers: [{ name: "Authorization", value: launch.authorization }]
-    },
-    ...shadows
-  ];
+  const deniedUrl = launch.deniedUrl ?? GROK_UNREACHABLE_SHADOW_URL;
+  const own: McpServer[] =
+    launch.url !== undefined && launch.authorization !== undefined
+      ? [{ type: "http", name: SESSION_TOOLS_SERVER_NAME, url: launch.url, headers: [{ name: "Authorization", value: launch.authorization }] }]
+      : [];
+  // Without our own entry, a user's `orquester` would load: shadow it too.
+  const names = new Set(launch.deny ?? []);
+  if (own.length === 0) names.add(SESSION_TOOLS_SERVER_NAME);
+  else names.delete(SESSION_TOOLS_SERVER_NAME);
+  const shadows: McpServer[] = [...names].filter((name) => name.length > 0).map((name) => ({ type: "http", name, url: deniedUrl, headers: [] }));
+  return [...own, ...shadows];
 }
 
 /** `session/new`'s (and `session/load`'s) `_meta` for the instruction block, or undefined. */

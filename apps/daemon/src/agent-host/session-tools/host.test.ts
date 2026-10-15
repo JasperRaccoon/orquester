@@ -26,6 +26,9 @@ import { createSessionToolsHost, issueSessionToolsGrant, type SessionToolsGrant,
 import { LEGACY_SESSION_TOOL_DEFINITIONS, LEGACY_SESSION_TOOL_INSTRUCTIONS } from "./legacy-definitions.ts";
 
 const TEST_TOOLS = legacyChatTools(testSessionToolRegistry().tools);
+/** A Codex launch in the system home of project /p (what the fallback is keyed on). */
+const CODEX = { agent: "codex" as const, home: "system", project: "/p" };
+const CLAUDE = { agent: "claude" as const, home: "system", project: "/p" };
 const TEST_NAMES = TEST_TOOLS.map((tool) => tool.name);
 
 /** The daemon's manifests: every test-toolkit tool for a thread unless `byThread` says otherwise. */
@@ -106,7 +109,7 @@ const initialize = (authorization?: string) => ({
 
 test("a provider lists the registered tools and calls them as its credential's thread", async (t) => {
   const { host: service, rec } = host(t);
-  const grant = await service.issue("thread-a", "codex");
+  const grant = await service.issue("thread-a", CODEX);
   assert.match(grant.url, /^http:\/\/127\.0\.0\.1:\d+\/mcp$/);
   assert.equal(grant.authorization, `Bearer ${grant.token}`);
   const client = await connect(t, grant);
@@ -131,8 +134,8 @@ test("a provider lists the registered tools and calls them as its credential's t
 
 test("each credential acts only as its own thread", async (t) => {
   const { host: service, rec } = host(t);
-  const a = await connect(t, await service.issue("thread-a", "codex"));
-  const b = await connect(t, await service.issue("thread-b", "codex"));
+  const a = await connect(t, await service.issue("thread-a", CODEX));
+  const b = await connect(t, await service.issue("thread-b", CODEX));
   await b.callTool({ name: "echo", arguments: { text: "from b" } });
   await a.callTool({ name: "echo", arguments: { text: "from a" } });
   assert.deepEqual(
@@ -146,13 +149,13 @@ test("each credential acts only as its own thread", async (t) => {
 
 test("no credential, a wrong one, or one a relaunch revoked is a 401", async (t) => {
   const { host: service } = host(t);
-  const first = await service.issue("thread-a", "codex");
+  const first = await service.issue("thread-a", CODEX);
   assert.equal((await fetch(first.url, initialize(first.authorization))).status, 200);
   assert.equal((await fetch(first.url, initialize())).status, 401);
   assert.equal((await fetch(first.url, initialize("Bearer not-a-credential"))).status, 401);
   assert.equal((await fetch(first.url, initialize(`Basic ${first.token}`))).status, 401);
   // The relaunch: a new credential for the same thread revokes the first.
-  const second = await service.issue("thread-a", "codex");
+  const second = await service.issue("thread-a", CODEX);
   assert.equal((await fetch(first.url, initialize(first.authorization))).status, 401);
   assert.equal((await fetch(second.url, initialize(second.authorization))).status, 200);
   // The session ended.
@@ -162,7 +165,7 @@ test("no credential, a wrong one, or one a relaunch revoked is a 401", async (t)
 
 test("the endpoint serves POST /mcp only", async (t) => {
   const { host: service } = host(t);
-  const grant = await service.issue("thread-a", "codex");
+  const grant = await service.issue("thread-a", CODEX);
   const get = await fetch(grant.url, { headers: { authorization: grant.authorization } });
   assert.equal(get.status, 405);
   assert.equal(get.headers.get("allow"), "POST");
@@ -172,7 +175,7 @@ test("the endpoint serves POST /mcp only", async (t) => {
 
 test("a provider's own cancel aborts the call", async (t) => {
   const { host: service, rec } = host(t);
-  const client = await connect(t, await service.issue("thread-a", "codex"));
+  const client = await connect(t, await service.issue("thread-a", CODEX));
   const controller = new AbortController();
   const started = rec.nextCall();
   const pending = client.callTool({ name: "wait_for_cancel", arguments: {} }, undefined, { signal: controller.signal });
@@ -190,8 +193,8 @@ test("a provider's own cancel aborts the call", async (t) => {
 
 test("an interrupted turn aborts its thread's calls, and only its thread's", async (t) => {
   const { host: service, rec } = host(t);
-  const a = await connect(t, await service.issue("thread-a", "codex"));
-  const b = await connect(t, await service.issue("thread-b", "codex"));
+  const a = await connect(t, await service.issue("thread-a", CODEX));
+  const b = await connect(t, await service.issue("thread-b", CODEX));
   let started = rec.nextCall();
   const pendingA = a.callTool({ name: "wait_for_cancel", arguments: {} });
   await started;
@@ -209,7 +212,7 @@ test("an interrupted turn aborts its thread's calls, and only its thread's", asy
 
 test("revoking a credential aborts the calls made with it", async (t) => {
   const { host: service, rec } = host(t);
-  const grant = await service.issue("thread-a", "codex");
+  const grant = await service.issue("thread-a", CODEX);
   const client = await connect(t, grant);
   const started = rec.nextCall();
   const pending = client.callTool({ name: "wait_for_cancel", arguments: {} });
@@ -233,7 +236,7 @@ test("the in-process path (Claude's) files calls under the thread it was bound t
 test("with the daemon down, a call answers the restart message — no throw, no hang", async (t) => {
   const service = testHost(createDaemonForwarder({ socketPath: () => join(tmpdir(), "no-such-orquester.sock"), token: "t" }));
   t.after(() => service.stop());
-  const client = await connect(t, await service.issue("thread-a", "codex"));
+  const client = await connect(t, await service.issue("thread-a", CODEX));
   const result = (await client.callTool({ name: "echo", arguments: { text: "x" } })) as CallToolResult;
   assert.equal(result.isError, true);
   assert.deepEqual(result.content, [{ type: "text", text: DAEMON_UNAVAILABLE_MESSAGE }]);
@@ -241,20 +244,20 @@ test("with the daemon down, a call answers the restart message — no throw, no 
 
 test("stop revokes every credential and closes the endpoint", async (t) => {
   const { host: service } = host(t);
-  const grant = await service.issue("thread-a", "codex");
+  const grant = await service.issue("thread-a", CODEX);
   await service.stop();
   await assert.rejects(fetch(grant.url, initialize(grant.authorization)));
-  await assert.rejects(service.issue("thread-a", "codex"), /stopping/);
+  await assert.rejects(service.issue("thread-a", CODEX), /stopping/);
 });
 
 test("an adapter whose grant cannot be issued starts without session tools, logged", async (t) => {
   const { host: service } = host(t);
   await service.stop();
   const warnings: string[] = [];
-  const grant = await issueSessionToolsGrant({ sessionTools: service, logger: { warn: (message) => warnings.push(message) } }, "thread-a", "codex");
-  assert.equal(grant, undefined);
+  const launched = await issueSessionToolsGrant({ sessionTools: service, logger: { warn: (message) => warnings.push(message) } }, "thread-a", CODEX);
+  assert.equal(launched.grant, undefined);
   assert.equal(warnings.length, 1);
-  assert.equal(await issueSessionToolsGrant({ logger: { warn: () => {} } }, "thread-a", "codex"), undefined, "no service, no grant");
+  assert.deepEqual(await issueSessionToolsGrant({ logger: { warn: () => {} } }, "thread-a", CODEX), { prepared: null }, "no service, no grant");
 });
 
 // ---------------------------------------------------------------------------
@@ -265,8 +268,8 @@ test("each thread lists its own manifest's tools, instructions and denials", asy
   const daemon = manifests({ "thread-b": { tools: ["echo"], instructions: "## B", deny: ["orquester_remote"] } });
   const service = testHost(recordingForward().forward, daemon.fetch);
   t.after(() => service.stop());
-  const a = await service.issue("thread-a", "codex");
-  const b = await service.issue("thread-b", "codex");
+  const a = await service.issue("thread-a", CODEX);
+  const b = await service.issue("thread-b", CODEX);
   assert.deepEqual([...a.prepared.names], TEST_NAMES);
   assert.deepEqual([...b.prepared.names], ["echo"]);
   assert.equal(b.prepared.instructions, "## B");
@@ -279,13 +282,13 @@ test("each thread lists its own manifest's tools, instructions and denials", asy
   // A name the host does not know (a newer daemon) is not advertised.
   const newer = testHost(recordingForward().forward, manifests({ x: { tools: ["echo", "from_the_future"] } }).fetch);
   t.after(() => newer.stop());
-  assert.deepEqual([...(await newer.prepare("x", "codex")).names], ["echo"]);
+  assert.deepEqual([...(await newer.prepare("x", CODEX)).names], ["echo"]);
 });
 
 test("a daemon without the manifest route gets the frozen legacy definitions", async (t) => {
   const service = createSessionToolsHost({ forward: recordingForward().forward, manifest: async () => ({ kind: "legacy" }) });
   t.after(() => service.stop());
-  const grant = await service.issue("thread-a", "codex");
+  const grant = await service.issue("thread-a", CODEX);
   assert.equal(grant.prepared.source, "legacy");
   assert.deepEqual(grant.prepared.tools, LEGACY_SESSION_TOOL_DEFINITIONS);
   assert.equal(grant.prepared.instructions, LEGACY_SESSION_TOOL_INSTRUCTIONS);
@@ -294,29 +297,82 @@ test("a daemon without the manifest route gets the frozen legacy definitions", a
   assert.deepEqual(json(listed.tools), json(LEGACY_SESSION_TOOL_DEFINITIONS), "the old server's tools/list, verbatim");
 });
 
-test("an unreachable daemon: the thread's last list, else its agent's catalogue defaults", async (t) => {
+test("an unreachable daemon: the SAME launch's last list, else the defaults with no denial — warned, never silent", async (t) => {
   let up = true;
+  const warnings: [string, string][] = [];
   const daemon = manifests({ "thread-a": { tools: ["echo"], deny: ["remote"] } });
-  const service = testHost(recordingForward().forward, async (threadId) => (up ? daemon.fetch(threadId) : { kind: "unavailable" }));
+  const service = createSessionToolsHost({
+    forward: recordingForward().forward,
+    manifest: async (threadId) => (up ? daemon.fetch(threadId) : { kind: "unavailable" }),
+    definitions: buildChatToolDefinitions(TEST_TOOLS),
+    knownNames: knownSessionToolNames(TEST_TOOLS),
+    onWarning: (threadId, message) => warnings.push([threadId, message])
+  });
   t.after(() => service.stop());
-  await service.issue("thread-a", "codex");
+  await service.issue("thread-a", CODEX);
   up = false;
-  const again = await service.issue("thread-a", "codex");
+  const again = await service.issue("thread-a", CODEX);
   assert.equal(again.prepared.source, "fallback");
   assert.deepEqual([...again.prepared.names], ["echo"]);
   assert.deepEqual(again.prepared.deny, ["remote"]);
-  // A thread never seen: the defaults (no test-toolkit tool is in a catalogue toolset), the
-  // agent's last denials.
-  const fresh = await service.issue("thread-z", "codex");
-  assert.equal(fresh.prepared.source, "fallback");
-  assert.deepEqual(fresh.prepared.deny, ["remote"]);
-  assert.match(fresh.prepared.instructions, /^## Orquester/);
+  assert.equal(again.prepared.denyKnown, true);
+  assert.equal(warnings.length, 0);
+  // Another thread of the same agent, home and project: the same config, the same denials.
+  assert.deepEqual((await service.issue("thread-z", CODEX)).prepared.deny, ["remote"]);
+  // Another account home (or project): NEVER that key's denials (Codex fails a thread whose config
+  // lacks a denied name) — none, the defaults' safe block, and a warning on the thread.
+  const otherHome = await service.issue("thread-y", { ...CODEX, home: "acct-2" });
+  assert.equal(otherHome.prepared.source, "fallback");
+  assert.deepEqual(otherHome.prepared.deny, []);
+  assert.equal(otherHome.prepared.denyKnown, false);
+  assert.match(otherHome.prepared.instructions, /^## Orquester/);
+  assert.match(otherHome.prepared.instructions, /automated workflow/, "workflow-owned unknown: the safe value");
+  assert.doesNotMatch(otherHome.prepared.instructions, /request_toolset with its id/, "no toolset can be asked for");
+  assert.deepEqual(warnings.map(([threadId]) => threadId), ["thread-y"]);
+  assert.deepEqual((await service.issue("thread-x", { ...CODEX, project: "/q" })).prepared.deny, []);
+  // An account switch of thread-a: its own last manifest is the OLD home's — not reused.
+  const switched = await service.issue("thread-a", { ...CODEX, home: "acct-3" });
+  assert.deepEqual(switched.prepared.deny, []);
+  assert.equal(switched.prepared.denyKnown, false);
+});
+
+test("a failed grant still hands back the thread's denials (they never fail open)", async (t) => {
+  const service = testHost(recordingForward().forward, manifests({ "thread-a": { deny: ["remote"] } }).fetch);
+  await service.stop();
+  const launched = await issueSessionToolsGrant({ sessionTools: service, logger: { warn: () => {} } }, "thread-a", CODEX);
+  assert.equal(launched.grant, undefined);
+  assert.deepEqual(launched.prepared?.deny, ["remote"]);
+  void t;
+});
+
+test("a refresh landing while a session's manifest is read leaves it stale: restart at idle", async (t) => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  let calls = 0;
+  let entered!: () => void;
+  const reading = new Promise<void>((resolve) => (entered = resolve));
+  const service = testHost(recordingForward().forward, async (threadId) => {
+    calls += 1;
+    if (calls === 1) {
+      entered();
+      await gate;
+    }
+    return manifests().fetch(threadId);
+  });
+  t.after(() => service.stop());
+  const issuing = service.issue("thread-a", CODEX);
+  // The grant was issued, the manifest read is in flight: a toolset change arrives.
+  await reading;
+  assert.equal(await service.applyManifest("thread-a", { tools: ["echo"], instructions: "## Orquester (test)", deny: [] }), "next-idle");
+  release();
+  await issuing;
+  assert.equal(service.needsRestart("thread-a"), true, "the session launched with the older list");
 });
 
 test("a thread the daemon does not know advertises nothing", async (t) => {
   const service = testHost(recordingForward().forward, async () => ({ kind: "no-thread" }));
   t.after(() => service.stop());
-  assert.equal((await service.issue("ghost", "codex")).prepared.tools.length, 0);
+  assert.equal((await service.issue("ghost", CODEX)).prepared.tools.length, 0);
 });
 
 test("a refresh: in-session for a live listener, at the next idle point otherwise, nothing without a session", async (t) => {
@@ -326,19 +382,22 @@ test("a refresh: in-session for a live listener, at the next idle point otherwis
   // No session.
   assert.equal(await service.applyManifest("nobody", changed), "next-start");
   // An endpoint session: marked stale until its next start.
-  const grant = await service.issue("thread-a", "codex");
+  const grant = await service.issue("thread-a", CODEX);
   assert.equal(await service.applyManifest("thread-a", { tools: TEST_NAMES, instructions: "## Orquester (test)", deny: [] }), "unchanged");
   assert.equal(service.needsRestart("thread-a"), false);
   assert.equal(await service.applyManifest("thread-a", changed), "next-idle");
   assert.equal(service.needsRestart("thread-a"), true);
   // The relaunch reads the daemon's manifest again: nothing owed.
-  await service.issue("thread-a", "codex");
+  await service.issue("thread-a", CODEX);
   assert.equal(service.needsRestart("thread-a"), false);
   // A revoked session (it ended) owes nothing either.
   grant.revoke();
   // An in-process session (Claude) takes the list live.
   const seen: string[][] = [];
-  const { prepared, release } = await service.launchInProcess("thread-c", "claude", (next) => seen.push([...next.names]));
+  const { prepared, release } = await service.launchInProcess("thread-c", CLAUDE, (next) => {
+    seen.push([...next.names]);
+    return true;
+  });
   assert.deepEqual([...prepared.names], TEST_NAMES);
   assert.equal(await service.applyManifest("thread-c", changed), "live");
   assert.deepEqual(seen, [["echo"]]);
@@ -351,11 +410,17 @@ test("a refresh: in-session for a live listener, at the next idle point otherwis
   release();
   assert.equal(service.current("thread-c"), null);
   assert.equal(service.needsRestart("thread-c"), false);
+  // A client that never re-lists in time: served, but only a restart is certain.
+  const slow = await service.launchInProcess("thread-d", CLAUDE, () => false);
+  assert.equal(await service.applyManifest("thread-d", changed), "next-idle");
+  assert.equal(service.needsRestart("thread-d"), true);
+  assert.deepEqual(service.listSource("thread-d").list().map((tool) => tool.name), ["echo"]);
+  slow.release();
 });
 
 test("the inert /mcp/denied server lists nothing and refuses every call, without a credential", async (t) => {
   const { host: service } = host(t);
-  const grant = await service.issue("thread-a", "codex");
+  const grant = await service.issue("thread-a", CODEX);
   assert.equal(grant.deniedUrl, grant.url.replace(/\/mcp$/, "/mcp/denied"));
   const client = new Client({ name: "grok-stand-in", version: "0" });
   await client.connect(new StreamableHTTPClientTransport(new URL(grant.deniedUrl)));

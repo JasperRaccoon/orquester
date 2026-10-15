@@ -2313,3 +2313,25 @@ test("session tools: without a registered toolkit, session/new carries no server
   await r.waitFor((event) => event.type === "turn.completed", "turn.completed");
   await r.dispose();
 });
+
+// Unified MCP §12.1: the thread's denials reach session/new — as same-named inert entries — with
+// or without a grant (and without one, a user's `orquester` is shadowed too).
+for (const failGrant of [false, true]) {
+  test(`session tools: denied MCP servers are shadowed on session/new${failGrant ? " even when no grant could be issued" : ""}`, async () => {
+    const recording = recordingSessionTools(undefined, { deny: ["orquester_remote"] });
+    const tools = failGrant ? { ...recording, issue: async () => Promise.reject(new Error("the endpoint could not bind")) } : recording;
+    const rawFrames: unknown[] = [];
+    const r = await rig({ sessionTools: tools, rawFrames });
+    await start(r);
+    const sent = rawFrames
+      .map((entry) => entry as { direction: string; frame: { method?: string; params?: { mcpServers?: Array<{ name: string; url: string }> } } })
+      .find((entry) => entry.direction === "send" && entry.frame.method === "session/new");
+    const servers = sent?.frame.params?.mcpServers ?? [];
+    const shadow = servers.find((server) => server.name === "orquester_remote");
+    assert.equal(shadow?.url, "http://127.0.0.1:65000/mcp/denied");
+    const own = servers.find((server) => server.name === "orquester");
+    if (failGrant) assert.equal(own?.url, "http://127.0.0.1:65000/mcp/denied", "no grant: a user's `orquester` is shadowed");
+    else assert.equal(own?.url, "http://127.0.0.1:65000/mcp", "our own server");
+    await r.dispose();
+  });
+}

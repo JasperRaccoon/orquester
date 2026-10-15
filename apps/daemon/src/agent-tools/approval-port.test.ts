@@ -274,7 +274,7 @@ test("workflows grants (ruling): a create joins the chat's grant and the card sa
   const summary = h.registry.list("t1")[0]!;
   assert.deepEqual(summary.sections[0], { kind: "warning", level: "caution", text: WORKFLOW_GRANT_NOTICE });
   await h.registry.answer("t1", joiningId, { decision: "approve" });
-  assert.deepEqual(await joining, { outcome: "approved", approvalId: joiningId, grantId });
+  assert.deepEqual(await joining, { outcome: "approved", approvalId: joiningId, grantId, grantScope: "chat" });
   await h.port.recordWorkflowInGrant({ threadId: "t1", callerProjectPath: PROJECT, workflowId: "wf2", grantId: grantId! });
   assert.equal((await h.port.findGrant({ ...query, workflowId: "wf2" }))?.id, grantId);
 

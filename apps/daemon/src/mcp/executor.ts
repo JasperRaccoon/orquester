@@ -31,6 +31,7 @@ import {
   grantOptionsFor,
   sanitizeApprovalLabel,
   TOOL_APPROVAL_FULL_PREVIEW_MAX_BYTES,
+  TOOL_APPROVAL_DENY_REASON_MAX_CHARS,
   TOOL_APPROVAL_REASON_MAX_CHARS,
   TOOLSETS,
   toolsetById,
@@ -90,10 +91,12 @@ export interface ExecutorPorts {
   enabledToolsets: EnabledToolsets | null;
   /**
    * A toolset card a chat raised (`request_toolset`) was APPROVED by the user — a real card, not
-   * "already on" — while the call still runs (the chat transport schedules the automatic continue
-   * turn, spec §9.3). Never throws into the executor; null → nothing scheduled.
+   * "already on" — while the call still runs. AWAITED before the call resumes: the chat transport
+   * waits (bounded) for the host to apply the toolset, so the tool answers "now" / "after-restart"
+   * truthfully, and schedules the automatic continue turn (spec §9.3). Its errors are logged,
+   * never thrown into the call; null → nothing waited for or scheduled.
    */
-  onToolsetApproved?: ((caller: ThreadCaller, toolset: ToolsetId) => void) | null;
+  onToolsetApproved?: ((caller: ThreadCaller, toolset: ToolsetId) => void | Promise<void>) | null;
 }
 
 export const executorPorts: ExecutorPorts = { approvals: null, enabledToolsets: null, onToolsetApproved: null };
@@ -106,7 +109,7 @@ export interface ExecutorDeps {
   /** The caller as it is NOW (mode, planning) — the gate re-runs on it after a card (§13). */
   refreshCaller?: (caller: ThreadCaller) => Promise<ThreadCaller>;
   /** See {@link ExecutorPorts.onToolsetApproved} (default: the daemon's wiring). */
-  onToolsetApproved?: ((caller: ThreadCaller, toolset: ToolsetId) => void) | null;
+  onToolsetApproved?: ((caller: ThreadCaller, toolset: ToolsetId) => void | Promise<void>) | null;
   legacy?: LegacyToolServices;
   secretRequests?: SessionSecretRequests;
   now?: () => number;
@@ -509,9 +512,13 @@ async function passCard(
     title: request.title,
     outcome: outcome.outcome,
     ...(outcome.outcome === "approved" && outcome.grantId ? { grantId: outcome.grantId } : {}),
-    ...(outcome.outcome === "denied" && outcome.reason ? { reason: clipText(outcome.reason, 500) } : {})
+    ...(outcome.outcome === "approved" && outcome.grantId && outcome.grantScope ? { grantScope: outcome.grantScope } : {}),
+    ...(outcome.outcome === "denied" && outcome.reason ? { reason: clipText(outcome.reason, TOOL_APPROVAL_DENY_REASON_MAX_CHARS) } : {})
   };
-  if (argumentsHash(frozenArgs) !== hash) throw new ToolError("PREVIEW_STALE", "The arguments changed after the card opened; nothing was done.");
+  // The user answered: the row keeps that answer even when the call is refused for staleness.
+  if (argumentsHash(frozenArgs) !== hash) {
+    return { kind: "refused", reference, error: new ToolError("PREVIEW_STALE", "The arguments changed after the card opened; nothing was done.") };
+  }
   switch (outcome.outcome) {
     case "approved":
       return {
@@ -534,7 +541,9 @@ async function passCard(
         reference,
         error: new ToolError(
           "APPROVAL_DENIED",
-          outcome.reason ? `The user denied ${tool.name}: "${clipText(outcome.reason, 500)}". Don't retry; ask the user.` : `The user denied ${tool.name}. Don't retry; ask the user.`
+          outcome.reason
+          ? `The user denied ${tool.name}: "${clipText(outcome.reason, TOOL_APPROVAL_DENY_REASON_MAX_CHARS)}". Don't retry; ask the user.`
+          : `The user denied ${tool.name}. Don't retry; ask the user.`
         )
       };
     case "timed_out":
@@ -613,12 +622,12 @@ async function requestToolsetCard(deps: ExecutorDeps, caller: ThreadCaller, inpu
       family: "toolset",
       title,
       outcome: outcome.outcome,
-      ...(outcome.outcome === "denied" && outcome.reason ? { reason: clipText(outcome.reason, 500) } : {})
+      ...(outcome.outcome === "denied" && outcome.reason ? { reason: clipText(outcome.reason, TOOL_APPROVAL_DENY_REASON_MAX_CHARS) } : {})
     };
     if (outcome.outcome === "approved") {
       const hook = deps.onToolsetApproved === undefined ? executorPorts.onToolsetApproved : deps.onToolsetApproved;
       try {
-        hook?.(caller, input.toolset);
+        await hook?.(caller, input.toolset);
       } catch (error) {
         console.error("[mcp] toolset approval hook failed", error instanceof Error ? error.message : "unknown error");
       }

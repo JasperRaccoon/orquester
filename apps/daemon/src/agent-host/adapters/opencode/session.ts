@@ -81,6 +81,7 @@ import {
   disconnectOpenCodeSessionTools,
   registerOpenCodeSessionTools,
   withSessionToolInstructions,
+  resolveOpenCodeDenials,
   withSessionToolRules,
   type OpenCodeSessionToolsLaunch
 } from "./session-tools.ts";
@@ -253,6 +254,8 @@ interface StartOpenCodeSessionInput {
    * session-tool servers even when this thread got none of its own.
    */
   isolateSessionTools?: boolean;
+  /** MCP servers this thread's session denies (§12.1) — with or without its own grant. */
+  deniedMcpServers?: readonly string[];
 }
 
 export class OpenCodeThreadSession {
@@ -301,6 +304,8 @@ export class OpenCodeThreadSession {
   private readonly sessionTools: OpenCodeSessionToolsLaunch | undefined;
   /** Every ruleset this session sends carries the session-tool isolation rules. */
   private readonly isolateSessionTools: boolean;
+  /** The denied servers whose `<name>_*` rule every ruleset carries (`resolveOpenCodeDenials`). */
+  private readonly deniedRules: readonly string[];
 
   private constructor(input: {
     deps: OpenCodeThreadSessionDeps;
@@ -312,9 +317,11 @@ export class OpenCodeThreadSession {
     contextLimits: ReadonlyMap<string, number>;
     sessionTools: OpenCodeSessionToolsLaunch | undefined;
     isolateSessionTools: boolean;
+    deniedRules: readonly string[];
   }) {
     this.sessionTools = input.sessionTools;
     this.isolateSessionTools = input.isolateSessionTools;
+    this.deniedRules = input.deniedRules;
     this.deps = input.deps;
     this.server = input.server;
     this.client = input.client;
@@ -341,9 +348,12 @@ export class OpenCodeThreadSession {
     // The session-tool isolation rules ride every ruleset this session sends
     // (`session-tools.ts`); none without session tools.
     const isolateSessionTools = input.isolateSessionTools === true || input.sessionTools !== undefined;
+    // §12.1: the thread's denied MCP servers, disconnected on this instance and ruled out.
+    const deniedRules = await resolveOpenCodeDenials(client, input.deniedMcpServers ?? input.sessionTools?.deny ?? [], deps.ctx.logger);
     const ruleset = withSessionToolRules(buildOpenCodePermissionRules(input.runtimeMode), {
       isolate: isolateSessionTools,
-      ...(input.sessionTools !== undefined ? { own: input.sessionTools } : {})
+      ...(input.sessionTools !== undefined ? { own: input.sessionTools } : {}),
+      deny: deniedRules
     });
     const resume = parseOpenCodeResume(input.resumeCursor);
     if (input.sessionTools !== undefined) {
@@ -455,7 +465,8 @@ export class OpenCodeThreadSession {
       modelSlug: input.modelSelection.model,
       contextLimits,
       sessionTools: input.sessionTools,
-      isolateSessionTools
+      isolateSessionTools,
+      deniedRules
     });
 
     session.emit({
@@ -2528,7 +2539,8 @@ export class OpenCodeThreadSession {
           body: {
             permission: withSessionToolRules(buildOpenCodePermissionRules(this.state.runtimeMode), {
               isolate: this.isolateSessionTools,
-              ...(this.sessionTools !== undefined ? { own: this.sessionTools } : {})
+              ...(this.sessionTools !== undefined ? { own: this.sessionTools } : {}),
+              deny: this.deniedRules
             })
           } satisfies UpdateSessionBody
         });

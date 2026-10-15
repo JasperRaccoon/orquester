@@ -124,6 +124,7 @@ import { agentHostRoutes, type SessionToolsRefreshResponse } from "./agent-host/
 import { catalogFor } from "./mcp/catalog/index.ts";
 import { canonicalProjectPath } from "./agent-tools/approval-port.ts";
 import { registerSessionToolsManifestRoute, SessionToolsRefresher } from "./session-tools/toolset-refresh.ts";
+import { AGENT_PROFILE_CHANNEL } from "@orquester/api";
 // umcp:t6 end
 import type { ActivityCause } from "./ansi-activity";
 import { TodoError, TodoListManager } from "./todos";
@@ -1244,11 +1245,20 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   executorPorts.onToolsetApproved = (caller, toolset) => sessionToolsRefresher.toolsetApproved(caller, toolset);
   agentChat.chat.lifecycle.on("closed", ({ id }: { id: string }) => sessionToolsRefresher.forget(id));
   // A changed MCP server config (agent profile) is read afresh by the next manifest.
-  broadcaster.add({
-    send: (data) => {
-      if (data.includes('"channel":"agent-profile"')) sessionToolsRefresher.invalidateDaemonPointing();
+  const agentProfileSink = {
+    send: (data: string) => {
+      // Cheap pre-filter (every bus event passes here), then the typed check on the parsed event.
+      if (!data.includes(AGENT_PROFILE_CHANNEL)) return;
+      let channel: unknown;
+      try {
+        channel = (JSON.parse(data) as { channel?: unknown }).channel;
+      } catch {
+        return;
+      }
+      if (channel === AGENT_PROFILE_CHANNEL) sessionToolsRefresher.invalidateDaemonPointing();
     }
-  });
+  };
+  broadcaster.add(agentProfileSink);
   services.sessionToolsRefresher = sessionToolsRefresher;
   // umcp:t6 end
 
@@ -1386,6 +1396,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // umcp:t3 end
     // umcp:t6 begin
     offToolsetsChanged();
+    broadcaster.remove(agentProfileSink);
     executorPorts.onToolsetApproved = null;
     sessionToolsRefresher.stop();
     // umcp:t6 end

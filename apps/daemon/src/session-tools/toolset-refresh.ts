@@ -7,16 +7,17 @@
  *   daemon-pointing MCP servers (`GET /api/agent-profile/daemon-mcp-servers`, Task 11's read; none
  *   until it answers). What a `launch` hands out is what the thread advertises
  *   (`AgentToolsService.setAdvertisedToolsets` → the Tools chip's `appliesAtNextIdle`).
- * - **Refresh**: on `onToolsetsChanged` (a chat's toolsets, or every chat's on a settings change)
- *   the new manifest is pushed to the host (`agentHostRoutes.sessionToolsRefresh`). The listener
- *   runs after a toolset card settled but BEFORE the awaiting call resumes (and `request_toolset`
- *   answers `now` / `after-restart` from `appliesAtNextIdle`): where the provider re-lists on
- *   `tools/list_changed` (Claude) the advertised set moves at once and the host replaces the list
- *   in-session; any other live session keeps its list, the push is deferred to a later macrotask,
- *   and the host restarts it with resume at its NEXT idle point (the next turn's send), never under
- *   a running turn.
- * - **The automatic continue turn** (§9.3): after an approved `request_toolset` card in a chat whose
- *   provider cannot take the tools in-session, wait for the turn that asked to settle; then, unless
+ * - **Refresh**: on `onToolsetsChanged` (a chat's toolsets, or every chat's on a settings change,
+ *   {@link REFRESH_CONCURRENCY} chats at a time) the new manifest is pushed to the host
+ *   (`agentHostRoutes.sessionToolsRefresh`). The host applies it in-session where the provider
+ *   re-lists on `tools/list_changed` (Claude: answered `live` once the CLI re-listed, bounded) and
+ *   otherwise marks the live session stale (`next-idle`: restart with resume at its next idle point,
+ *   never under a running turn). The advertised set moves only on `live`/`unchanged`; any other
+ *   answer leaves the change PENDING, so `appliesAtNextIdle` (what `request_toolset` answers
+ *   from) never claims "now" falsely. An approved `request_toolset` card awaits that answer
+ *   ({@link SessionToolsRefresher.toolsetApproved}) before the call resumes.
+ * - **The automatic continue turn** (§9.3): after an approved `request_toolset` card whose push the
+ *   host answered `next-idle` (a restart really is pending), wait for the turn that asked to settle; then, unless
  *   the user spoke first (a user message since, or another turn ran), post `[Orquester] The <label>
  *   tools are now available. Continue the task you were doing.` with the `toolset-continue` chip, in
  *   the chat's interaction mode at request time, `ifIdle` (a racing user turn wins), no `causedBy`.
@@ -56,13 +57,22 @@ import type { DaemonApi } from "../mcp/daemon-api.ts";
 import { isWorkflowOwned } from "../mcp/gate/scope.ts";
 import { listSessions, readThread, sendCommand } from "../mcp/reads.ts";
 import { turnBaseline, waitForTurn } from "../mcp/wait.ts";
-import { buildSessionToolsManifest, toolsetAvailability, type ManifestThread } from "./manifest.ts";
+import { buildSessionToolsManifest, type ManifestThread } from "./manifest.ts";
 
 /** How long a scheduled continue waits for the asking turn to settle; past it nothing is posted. */
 export const TOOLSET_CONTINUE_WAIT_MS = 60 * 60 * 1000;
 
 /** How long a read of the daemon-pointing servers is reused (the read walks every account home). */
 export const DAEMON_POINTING_CACHE_MS = 30_000;
+
+/** How long `request_toolset` waits for the host to apply its toolset (Claude re-lists within ms; the host bounds its own wait at 5 s). */
+export const TOOLSET_APPLY_WAIT_MS = 8_000;
+
+/** Chats refreshed at once after a settings change. */
+export const REFRESH_CONCURRENCY = 4;
+
+/** What the host did with a pushed manifest; `no-host` — nothing reached a live session. */
+export type RefreshAnswer = SessionToolsRefreshResponse["applied"] | "no-host";
 
 export interface ToolsetRefreshThread {
   agentId: AgentAdapterId;
@@ -92,8 +102,8 @@ export interface ToolsetRefreshDeps {
    */
   pushToHost(threadId: string, manifest: SessionToolsManifest): Promise<SessionToolsRefreshResponse | null>;
   now?: () => number;
-  /** Schedules the refresh on a LATER macrotask (default `setImmediate`); tests drive it. */
-  defer?: (run: () => void) => void;
+  /** Overrides {@link TOOLSET_APPLY_WAIT_MS} (tests). */
+  applyWaitMs?: number;
   logger?: { log?(message: string): void; warn?(message: string, detail?: unknown): void };
 }
 
@@ -118,7 +128,11 @@ export function userMessageIds(snapshot: ThreadSnapshotPayload): Set<string> {
 export class SessionToolsRefresher {
   private readonly advertised = new Map<string, readonly string[]>();
   private readonly continues = new Map<string, PendingContinue>();
+  /** The push in flight per chat (a `request_toolset` call awaits its answer). */
+  private readonly pushes = new Map<string, Promise<RefreshAnswer>>();
   private pointing: { at: number; servers: readonly DaemonPointingServer[] } | null = null;
+  /** A read of the daemon-pointing servers has succeeded at least once (a 404 — no detection — counts). */
+  private pointingEverRead = false;
   private stopped = false;
 
   constructor(private readonly deps: ToolsetRefreshDeps) {}
@@ -144,30 +158,39 @@ export class SessionToolsRefresher {
   }
 
   /**
-   * The daemon-pointing servers (Task 11's read), reused for {@link DAEMON_POINTING_CACHE_MS}. A
-   * failed read keeps the last good list (a 404 from a daemon without the detection is "none").
+   * The daemon-pointing servers (Task 11's read), reused for {@link DAEMON_POINTING_CACHE_MS}.
+   * Fails CLOSED (§12.1): every failed read is a warning; after a failure the last good list is
+   * reused (stale), and with none ever read the answer is `null` — the manifest is then unavailable
+   * (503) and the host falls back to what it knows for that launch. A 404 (a daemon without the
+   * detection) is "none", not a failure.
    */
-  async daemonPointing(): Promise<readonly DaemonPointingServer[]> {
+  async daemonPointing(): Promise<readonly DaemonPointingServer[] | null> {
     const cached = this.pointing;
     if (cached && this.now() - cached.at < DAEMON_POINTING_CACHE_MS) return cached.servers;
+    const failed = (why: string): readonly DaemonPointingServer[] | null => {
+      this.deps.logger?.warn?.(`session-tools: the daemon-pointing MCP servers could not be read (${why}); ${cached ? "the last good list is reused" : "manifests are unavailable until a read succeeds"}`);
+      return cached ? cached.servers : this.pointingEverRead ? [] : null;
+    };
     const api = this.deps.api();
-    if (!api) return cached?.servers ?? [];
+    if (!api) return failed("no API yet");
     try {
       const res = await api.request("GET", AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE);
       if (res.status === 404) {
+        this.pointingEverRead = true;
         this.pointing = { at: this.now(), servers: [] };
         return [];
       }
       const servers = (res.body as Partial<DaemonMcpServersResponse> | null)?.servers;
-      if (res.status !== 200 || !Array.isArray(servers)) return cached?.servers ?? [];
+      if (res.status !== 200 || !Array.isArray(servers)) return failed(`HTTP ${res.status}`);
       const valid = servers.filter(
         (server): server is DaemonPointingServer =>
           server !== null && typeof server === "object" && typeof server.name === "string" && typeof server.agent === "string" && typeof server.home === "string"
       );
+      this.pointingEverRead = true;
       this.pointing = { at: this.now(), servers: valid };
       return valid;
-    } catch {
-      return cached?.servers ?? [];
+    } catch (error) {
+      return failed(error instanceof Error ? error.message : "request failed");
     }
   }
 
@@ -176,10 +199,15 @@ export class SessionToolsRefresher {
     this.pointing = null;
   }
 
-  /** The thread's manifest, or null when it is no open chat. */
-  async manifest(threadId: string, purpose: "launch" | "check" = "launch"): Promise<SessionToolsManifest | null> {
+  /**
+   * The thread's manifest; null when it is no open chat; `"unavailable"` when its denials cannot
+   * be derived (no daemon-pointing read ever succeeded) — the route answers 503 then.
+   */
+  async manifest(threadId: string, purpose: "launch" | "check" = "launch"): Promise<SessionToolsManifest | null | "unavailable"> {
     const thread = this.deps.thread(threadId);
     if (!thread) return null;
+    const daemonPointing = await this.daemonPointing();
+    if (daemonPointing === null) return "unavailable";
     const api = this.deps.api();
     // The workflow-owned trait walks lineage through closed tabs (the gate's own walk): fail
     // closed — an unreadable list counts as owned, so no Admin tool is advertised.
@@ -203,7 +231,7 @@ export class SessionToolsRefresher {
       toolsets,
       agentToolsEnabled: this.deps.agentToolsEnabled(),
       catalog: this.deps.catalog(),
-      daemonPointing: await this.daemonPointing()
+      daemonPointing
     });
     if (purpose === "launch") this.advertised.set(threadId, [...toolsets]);
     return manifest;
@@ -211,77 +239,98 @@ export class SessionToolsRefresher {
 
   /**
    * `onToolsetsChanged`: a chat's (`threadId`) or every chat's (`null`) toolsets changed. It runs
-   * after a toolset card settled and BEFORE the awaiting `request_toolset` call resumes — which
-   * reads `appliesAtNextIdle` (the advertised set against the resolved one) to answer `now` or
-   * `after-restart`. So, synchronously, per chat:
-   * - a provider that re-lists in-session (Claude): the advertised set becomes the new one and the
-   *   manifest is pushed at once (the host replaces the list and sends `list_changed`; nothing
-   *   restarts, the running call is untouched);
-   * - any other: the advertised set stays what the live session launched with (unknown → none), and
-   *   the push is deferred to a later macrotask; the host restarts that session with resume at its
-   *   next idle point.
+   * after a toolset card settled and BEFORE the awaiting `request_toolset` call resumes; the push
+   * only starts here — the host applies it in-session where the provider re-lists (Claude) or marks
+   * the live session stale for a restart at its next idle point, never under the running call —
+   * and the call itself awaits the host's answer through {@link toolsetApproved} before it reads
+   * `appliesAtNextIdle`.
    */
   toolsetsChanged(threadId: string | null): void {
     if (this.stopped) return;
-    const ids = threadId === null ? this.deps.openThreads() : [threadId];
-    const deferred: string[] = [];
-    for (const id of ids) {
-      const thread = this.deps.thread(id);
-      if (!thread) continue;
-      if (toolsetAvailability(thread.agentId) === "now") {
-        if (this.advertised.has(id)) this.advertised.set(id, [...this.deps.resolvedToolsets(id, thread.agentId)]);
-        this.pushLogged(id);
-      } else {
-        // The live session keeps what it launched with until it restarts.
-        if (!this.advertised.has(id)) this.advertised.set(id, []);
-        deferred.push(id);
-      }
+    if (threadId !== null) {
+      this.pushLogged(threadId);
+      return;
     }
-    if (deferred.length === 0) return;
-    const defer = this.deps.defer ?? ((run: () => void) => void setImmediate(run));
-    defer(() => {
-      for (const id of deferred) this.pushLogged(id);
-    });
-  }
-
-  private pushLogged(threadId: string): void {
-    void this.refresh(threadId).catch((error: unknown) =>
+    void this.refresh(null).catch((error: unknown) =>
       this.deps.logger?.warn?.("session-tools: refresh failed", error instanceof Error ? error.message : String(error))
     );
   }
 
-  /** Push the new manifest of one chat, or of every open chat. Returns what each host answered. */
-  async refresh(threadId: string | null): Promise<Map<string, SessionToolsRefreshResponse["applied"] | "no-host">> {
-    const answers = new Map<string, SessionToolsRefreshResponse["applied"] | "no-host">();
-    const ids = threadId === null ? this.deps.openThreads() : [threadId];
-    for (const id of ids) {
-      if (this.stopped) break;
-      const manifest = await this.manifest(id, "check");
-      if (!manifest) continue;
-      const answer = await this.deps.pushToHost(id, manifest);
-      answers.set(id, answer?.applied ?? "no-host");
-      if (answer?.applied === "live" || answer?.applied === "unchanged") {
-        // What the live session advertises now.
-        this.advertised.set(id, manifest.toolsets ?? []);
-      } else if (answer?.applied === "next-idle" && this.advertised.has(id) && toolsetAvailability(this.deps.thread(id)?.agentId ?? "") === "now") {
-        // An in-session provider that could not take it live (its denials moved): pending again.
-        this.advertised.set(id, []);
+  private pushLogged(threadId: string): Promise<RefreshAnswer> {
+    return this.push(threadId).catch((error: unknown) => {
+      this.deps.logger?.warn?.("session-tools: refresh failed", error instanceof Error ? error.message : String(error));
+      return "no-host" as const;
+    });
+  }
+
+  /**
+   * Push one chat's manifest and record what its live session advertises now: the new set only
+   * when the host applied it (`live`, `unchanged`); otherwise PENDING — the old set, or none — so
+   * `appliesAtNextIdle` never claims "now" falsely.
+   */
+  push(threadId: string): Promise<RefreshAnswer> {
+    const pending = (async (): Promise<RefreshAnswer> => {
+      const manifest = await this.manifest(threadId, "check");
+      if (manifest === null) return "no-host";
+      if (manifest === "unavailable") {
+        this.markPending(threadId);
+        return "no-host";
       }
-    }
+      const answer = await this.deps.pushToHost(threadId, manifest);
+      const applied: RefreshAnswer = answer?.applied ?? "no-host";
+      if (applied === "live" || applied === "unchanged") this.advertised.set(threadId, manifest.toolsets ?? []);
+      else this.markPending(threadId);
+      return applied;
+    })();
+    this.pushes.set(threadId, pending);
+    void pending.finally(() => {
+      if (this.pushes.get(threadId) === pending) this.pushes.delete(threadId);
+    }).catch(() => undefined);
+    return pending;
+  }
+
+  /** The live session keeps what it launched with (or, unknown, nothing): the change is pending. */
+  private markPending(threadId: string): void {
+    if (!this.advertised.has(threadId)) this.advertised.set(threadId, []);
+  }
+
+  /** Push the new manifest of one chat, or of every open chat ({@link REFRESH_CONCURRENCY} at a time). */
+  async refresh(threadId: string | null): Promise<Map<string, RefreshAnswer>> {
+    const answers = new Map<string, RefreshAnswer>();
+    const ids = threadId === null ? this.deps.openThreads() : [threadId];
+    let next = 0;
+    const worker = async (): Promise<void> => {
+      while (next < ids.length && !this.stopped) {
+        const id = ids[next++]!;
+        answers.set(id, await this.pushLogged(id));
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(REFRESH_CONCURRENCY, ids.length) }, worker));
     return answers;
   }
 
   /**
-   * `executorPorts.onToolsetApproved`: a `request_toolset` card was approved while the call runs.
-   * Where the provider cannot take the tools in-session, the automatic continue is scheduled.
+   * `executorPorts.onToolsetApproved`, awaited by the executor before `request_toolset` resumes:
+   * wait (bounded) for the host's answer to the push the change started. `live` / `unchanged` —
+   * the advertised set is the new one ("now"); `next-idle` — a restart really is pending: the
+   * automatic continue is scheduled ("after-restart"); anything else (no host, no live session, no
+   * answer in time) — pending, truthfully "after-restart", and NO continue (nothing would restart).
    */
-  toolsetApproved(caller: ThreadCaller, toolset: string): void {
-    // Mirrors `appliesAtNextIdle`, which `request_toolset` answers from: the listener ran before
-    // this, so an in-session provider's advertised set is already the new one ("now").
-    const advertised = this.advertised.get(caller.threadId);
-    const resolved = this.deps.resolvedToolsets(caller.threadId, caller.agentId);
-    const pending = advertised !== undefined && (advertised.length !== resolved.length || resolved.some((id) => !advertised.includes(id)));
-    if (this.stopped || !pending) return;
+  async toolsetApproved(caller: ThreadCaller, toolset: string): Promise<void> {
+    if (this.stopped) return;
+    const push = this.pushes.get(caller.threadId) ?? this.pushLogged(caller.threadId);
+    let timer: NodeJS.Timeout | undefined;
+    const answer = await Promise.race([
+      push,
+      new Promise<"timeout">((resolve) => {
+        timer = setTimeout(() => resolve("timeout"), this.deps.applyWaitMs ?? TOOLSET_APPLY_WAIT_MS);
+      })
+    ]).finally(() => clearTimeout(timer));
+    if (answer === "timeout") {
+      this.markPending(caller.threadId);
+      return;
+    }
+    if (answer !== "next-idle") return;
     void this.scheduleContinue(caller.threadId, toolset, caller.planning ? "plan" : "default").catch((error: unknown) =>
       this.deps.logger?.warn?.("session-tools: the automatic continue failed", error instanceof Error ? error.message : String(error))
     );
@@ -369,6 +418,9 @@ export function registerSessionToolsManifestRoute(app: FastifyInstance, deps: Se
     }
     const manifest = await deps.refresher.manifest(threadId, body?.purpose === "check" ? "check" : "launch");
     if (!manifest) return reply.code(404).send({ code: "THREAD_NOT_FOUND", message: "No chat thread with that id." });
+    // §12.1 fails closed: no denials can be derived — the host falls back to what it knows for
+    // this launch, and warns.
+    if (manifest === "unavailable") return reply.code(503).send({ code: "UNAVAILABLE", message: "The daemon-pointing MCP servers cannot be read yet." });
     return reply.code(200).send(manifest);
   });
 }

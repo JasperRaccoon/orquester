@@ -60,6 +60,28 @@ const CODEX_SERVER_KEY = /^[A-Za-z0-9_-]+$/;
 /** `thread/start`'s (and `thread/resume`'s) `config` map. */
 type ThreadConfig = NonNullable<CodexProtocol.v2.ThreadStartParams["config"]>;
 
+/**
+ * The `mcp_servers.<name>.enabled = false` keys for a thread's denials (§12.1). A name that is not
+ * a bare config key (`[A-Za-z0-9_-]`) cannot be addressed as a dotted override and is returned in
+ * `dropped` — the caller logs it (Codex itself only creates bare names through `codex mcp add`).
+ * Our own `orquester` is never denied: the thread entry replaces a user's same-named one.
+ */
+export function codexDeniedServerKeys(deny: readonly string[] = []): { keys: string[]; dropped: string[] } {
+  const keys: string[] = [];
+  const dropped: string[] = [];
+  for (const name of new Set(deny)) {
+    if (name === SESSION_TOOLS_SERVER_NAME) continue;
+    if (CODEX_SERVER_KEY.test(name)) keys.push(`mcp_servers.${name}.enabled`);
+    else dropped.push(name);
+  }
+  return { keys, dropped };
+}
+
+/** The thread `config` that switches the denied servers off — also without our own server (no grant). */
+export function codexDenyConfig(deny: readonly string[] = []): ThreadConfig {
+  return Object.fromEntries(codexDeniedServerKeys(deny).keys.map((key) => [key, false]));
+}
+
 /** The thread `config` overrides that attach the server. Names an env var, never the credential. */
 export function codexSessionToolsConfig(launch: CodexSessionToolsLaunch): ThreadConfig {
   return {
@@ -71,11 +93,7 @@ export function codexSessionToolsConfig(launch: CodexSessionToolsLaunch): Thread
       // that waits for the user (`request_secret`) ends its own wait first.
       tool_timeout_sec: SESSION_TOOL_CALL_TIMEOUT_MS / 1000
     },
-    ...Object.fromEntries(
-      (launch.deny ?? [])
-        .filter((name) => name !== SESSION_TOOLS_SERVER_NAME && CODEX_SERVER_KEY.test(name))
-        .map((name) => [`mcp_servers.${name}.enabled`, false])
-    )
+    ...codexDenyConfig(launch.deny)
   };
 }
 

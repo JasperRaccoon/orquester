@@ -767,6 +767,12 @@ export interface Orchestrator {
    * `recycleIdleServers`, or nothing recycled when no adapter serves it.
    */
   recycleIdleOpenCodeServers(): Promise<{ recycled: number; deferred: number }>;
+  /**
+   * Unified MCP §12.1: a thread's provider session started with its MCP denials degraded (the
+   * daemon could not be asked and nothing is known for its launch): one `runtime.warning` row, so
+   * it is never silent. Fire and forget; a thread not loaded is skipped. Never throws.
+   */
+  noteSessionToolsWarning(threadId: string, detail: string): void;
 
   /** §3.3 step 1, for an intentional stop. Returns the threads it marked. */
   markThreadsForContinuation(): Promise<string[]>;
@@ -7351,6 +7357,13 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     resumeGoalSessionsAfterHandover,
     recycleIdleOpenCodeServers: async () =>
       (await options.adapters.get("opencode")?.recycleIdleServers?.()) ?? { recycled: 0, deferred: 0 },
+    noteSessionToolsWarning: (threadId, detail) => {
+      const runtime = runtimes.get(threadId);
+      if (!runtime || !runtime.state.head) return;
+      void appendActivity(runtime, { kind: "runtime.warning", tone: "info", summary: "MCP server denial degraded", detail }).catch((error: unknown) =>
+        logger.warn("agent-host: could not record a session-tools warning", error)
+      );
+    },
     markThreadsForContinuation,
     clearContinuationMarkers,
     reconcile,

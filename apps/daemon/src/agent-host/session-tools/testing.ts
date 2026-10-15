@@ -62,6 +62,7 @@ export function recordingSessionTools(
       names: new Set(tools.map((tool) => tool.name)),
       instructions: registry.instructions,
       deny,
+      denyKnown: true,
       key: createHash("sha256").update(JSON.stringify([tools.map((tool) => tool.name), registry.instructions, deny])).digest("hex"),
       source: "manifest"
     };
@@ -76,7 +77,7 @@ export function recordingSessionTools(
     enabled: true,
     knownNames,
     prepare: (threadId) => prepare(threadId),
-    async launchInProcess(threadId, _agent, listener) {
+    async launchInProcess(threadId, _launch, listener) {
       const prepared = await prepare(threadId);
       const entry = { prepared, live: listener };
       launched.set(threadId, entry);
@@ -98,12 +99,12 @@ export function recordingSessionTools(
       const next = await prepare(threadId, manifest.tools);
       if (session.live) {
         session.prepared = next;
-        session.live(next);
-        return "live";
+        return (await session.live(next)) ? "live" : "next-idle";
       }
       return "next-idle";
     },
     needsRestart: () => false,
+    deniedUrl: async () => "http://127.0.0.1:65000/mcp/denied",
     async call(input): Promise<CallToolResult> {
       calls.push(input);
       callWaiters.splice(0).forEach((wake) => wake(input));

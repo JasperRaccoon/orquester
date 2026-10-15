@@ -148,6 +148,8 @@ import {
 } from "./protocol.ts";
 import { CodexUsageTracker } from "./usage.ts";
 import {
+  codexDeniedServerKeys,
+  codexDenyConfig,
   codexSessionToolsConfig,
   codexSessionToolsContext,
   type CodexSessionToolsLaunch
@@ -225,6 +227,11 @@ export interface CodexSessionOptions {
    * `env`; `revoke` is called once the child is gone.
    */
   sessionTools?: CodexSessionToolsLaunch & { revoke(): void };
+  /**
+   * MCP servers to switch off when the thread has NO session-tool grant (its denials never fail
+   * open, unified MCP §12.1); with a grant they ride `sessionTools.deny`.
+   */
+  deniedMcpServers?: readonly string[];
   /**
    * What the thread's MCP Apps told the agent (`ui/update-model-context`,
    * spec 2026-10-14 §3), keyed by app, read at every `turn/start`: each rides
@@ -1485,8 +1492,16 @@ export class CodexSession {
   /** `{config}` attaching the `orquester` server to the thread, or nothing. */
   private sessionToolsThreadConfig(): { config?: NonNullable<CodexProtocol.v2.ThreadStartParams["config"]> } {
     const tools = this.options.sessionTools;
-    return tools === undefined ? {} : { config: codexSessionToolsConfig(tools) };
+    const deny = tools?.deny ?? this.options.deniedMcpServers ?? [];
+    const { dropped } = codexDeniedServerKeys(deny);
+    if (dropped.length > 0) {
+      this.options.context.logger.warn("codex: MCP servers whose names cannot be addressed in thread config are NOT denied", { threadId: this.threadId, dropped });
+    }
+    if (tools !== undefined) return { config: codexSessionToolsConfig(tools) };
+    const config = codexDenyConfig(deny);
+    return Object.keys(config).length > 0 ? { config } : {};
   }
+
 
   private async openThread(): Promise<void> {
     const peer = this.requirePeer();

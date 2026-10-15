@@ -37,8 +37,15 @@
 import type { McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-sdk";
 import { SESSION_TOOLS_SERVER_NAME } from "@orquester/api/agent-chat";
 
-import type { SessionToolsHost } from "../../session-tools/index.ts";
+import type { SessionToolsHost, SessionToolsLaunch } from "../../session-tools/index.ts";
 import { buildSessionToolsMcpServer, type SessionToolsMcpServer } from "../../session-tools/mcp-server.ts";
+
+/**
+ * How long a live apply waits for the CLI's own `tools/list` after the notification (Task 6 probe:
+ * 2.1.285 re-lists within ~70 ms). Past it the apply answers truthfully that only a restart is
+ * certain (`next-idle`), and the host restarts the session at its next idle point.
+ */
+export const CLAUDE_RELIST_TIMEOUT_MS = 5_000;
 
 const TOOL_PREFIX = `mcp__${SESSION_TOOLS_SERVER_NAME}__`;
 
@@ -90,24 +97,53 @@ export function claudeDeniedMcpServers(deny: readonly string[]): { serverName: s
 export async function createClaudeSessionToolsLaunch(input: {
   sessionTools: SessionToolsHost;
   threadId: string;
+  /** What the thread's fallback is keyed on (agent `claude`, its account home, its project). */
+  launch: Omit<SessionToolsLaunch, "agent">;
   signal: AbortSignal;
+  /** Overrides {@link CLAUDE_RELIST_TIMEOUT_MS} (tests). */
+  relistTimeoutMs?: number;
 }): Promise<ClaudeSessionToolsLaunch> {
   let names: ReadonlySet<string> = new Set();
   let instance: SessionToolsMcpServer | undefined;
-  const { prepared, release } = await input.sessionTools.launchInProcess(input.threadId, "claude", (next) => {
+  /** Woken by the CLI's next `tools/list`. */
+  const listWaiters = new Set<() => void>();
+  const source = input.sessionTools.listSource(input.threadId);
+  const relisted = (): Promise<boolean> =>
+    new Promise<boolean>((resolve) => {
+      const done = (value: boolean) => {
+        clearTimeout(timer);
+        listWaiters.delete(wake);
+        resolve(value);
+      };
+      const wake = () => done(true);
+      const timer = setTimeout(() => done(false), input.relistTimeoutMs ?? CLAUDE_RELIST_TIMEOUT_MS);
+      listWaiters.add(wake);
+    });
+  const { prepared, release } = await input.sessionTools.launchInProcess(input.threadId, { agent: "claude", ...input.launch }, async (next) => {
     names = next.names;
-    // The CLI re-lists on the notification (probed on 2.1.285); the list is read per request.
-    void instance?.toolsChanged();
+    if (!instance?.isConnected()) return false;
+    // Resolved by the CLI's own re-list (probed on 2.1.285), bounded: the caller answers truthfully.
+    const listed = relisted();
+    await instance.toolsChanged();
+    return listed;
   });
   names = prepared.names;
-  instance = buildSessionToolsMcpServer(input.sessionTools.listSource(input.threadId), (invocation) =>
-    input.sessionTools.call({
-      threadId: input.threadId,
-      name: invocation.name,
-      arguments: invocation.arguments,
-      ...(invocation.callId !== undefined ? { callId: invocation.callId } : {}),
-      signal: AbortSignal.any([invocation.signal, input.signal])
-    })
+  instance = buildSessionToolsMcpServer(
+    {
+      list: () => {
+        for (const wake of [...listWaiters]) wake();
+        return source.list();
+      },
+      accepts: (name) => source.accepts(name)
+    },
+    (invocation) =>
+      input.sessionTools.call({
+        threadId: input.threadId,
+        name: invocation.name,
+        arguments: invocation.arguments,
+        ...(invocation.callId !== undefined ? { callId: invocation.callId } : {}),
+        signal: AbortSignal.any([invocation.signal, input.signal])
+      })
   );
   input.signal.addEventListener("abort", release, { once: true });
   return {

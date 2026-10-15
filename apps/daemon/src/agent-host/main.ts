@@ -286,6 +286,8 @@ export async function startAgentHost(
     forward: createDaemonForwarder({ socketPath: () => daemonSocketPath, token }),
     manifest: createDaemonManifestClient({ socketPath: () => daemonSocketPath, token }),
     logger,
+    // A degraded denial (§12.1) is a row on the thread, never silent.
+    onWarning: (threadId, message) => orchestrator?.noteSessionToolsWarning(threadId, message),
     onSecretValues: (threadId, values) => secretRedactor.remember(threadId, values)
   });
 

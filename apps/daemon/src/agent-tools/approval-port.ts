@@ -236,7 +236,12 @@ export class AgentToolsApprovalPort implements ApprovalPort {
     return this.deps.tools.chatWorkflowGrant(card.threadId, card.callerProjectPath) !== null;
   }
 
-  private commit(card: ApprovalRequest, answer: ToolApprovalAnswer, toolset: ToolsetId | null, joinGrantId: string | undefined): { grantId?: string } {
+  private commit(
+    card: ApprovalRequest,
+    answer: ToolApprovalAnswer,
+    toolset: ToolsetId | null,
+    joinGrantId: string | undefined
+  ): { grantId?: string; grantScope?: "chat" | "project" } {
     if (toolset !== null) this.deps.tools.enableToolsetForThread(card.threadId, toolset);
     if (answer.grant !== undefined) {
       const grantId = this.deps.tools.addGrant({
@@ -247,12 +252,12 @@ export class AgentToolsApprovalPort implements ApprovalPort {
         ...(card.family === "cross-project" && card.targetProjectPath !== undefined ? { targetProjectPath: card.targetProjectPath } : {}),
         ...(card.family === "workflows" && card.workflowId !== undefined ? { workflowId: card.workflowId } : {})
       });
-      return { grantId };
+      return { grantId, grantScope: answer.grant };
     }
     // Ruling: approving ONCE never widens a standing grant. Only a create the card said would join
     // (decided at answer time) returns the grant; the executor adds the new id after the create ran
     // (`recordWorkflowInGrant`). A plain approval of a run/update/delete joins nothing.
-    return joinGrantId !== undefined ? { grantId: joinGrantId } : {};
+    return joinGrantId !== undefined ? { grantId: joinGrantId, grantScope: "chat" } : {};
   }
 }
 

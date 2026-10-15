@@ -67,7 +67,7 @@ import {
   probeGrok,
   probeSkills
 } from "./probe.ts";
-import { issueSessionToolsGrant } from "../../session-tools/index.ts";
+import { issueSessionToolsGrant, launchHomeKey } from "../../session-tools/index.ts";
 import { GrokSession } from "./session.ts";
 import { McpAppSnapshotStore } from "../mcp-app-capture.ts";
 import { recordLeftoverWork, sweepLeftoverWork } from "../../support/leftover-work.ts";
@@ -284,7 +284,12 @@ class GrokAdapter implements AgentAdapter {
     // Design 2026-10-14 §1.2: a fresh credential per `grok agent stdio`
     // launch, carried by the ACP `mcpServers` entry (`session-tools.ts`); this
     // issue revokes the thread's previous one, and `onClosed` revokes this.
-    const grant = await issueSessionToolsGrant(this.context, input.threadId, "grok");
+    const tools = await issueSessionToolsGrant(this.context, input.threadId, {
+      agent: "grok",
+      home: launchHomeKey(input.home),
+      project: input.projectPath ?? input.cwd
+    });
+    const grant = tools.grant;
 
     const session: GrokSession = new GrokSession({
       ...(grant !== undefined
@@ -298,7 +303,18 @@ class GrokAdapter implements AgentAdapter {
               deniedUrl: grant.deniedUrl
             }
           }
-        : {}),
+        : this.context.sessionTools !== undefined
+          ? {
+              // No grant: no tools, but every denied server — and a user's `orquester` — is still
+              // shadowed (§12.1 never fails open).
+              sessionTools: {
+                instructions: "",
+                toolNames: new Set<string>(),
+                deny: tools.prepared?.deny ?? [],
+                ...(tools.deniedUrl !== undefined ? { deniedUrl: tools.deniedUrl } : {})
+              }
+            }
+          : {}),
       threadId: input.threadId,
       cwd: input.cwd,
       home: input.home,

@@ -393,7 +393,7 @@ test("an approved toolset card is reported to the chat transport (automatic cont
     scope: async () => claim(), annotations: MUTATING, resultKind: "json",
     run: async (_args, ctx) => ({ outcome: (await ctx.requestToolsetCard!({ toolset: "notes", title: "Claude asks to enable notes", sections: [{ kind: "text", text: "x" }] })).outcome })
   });
-  const r = rig({ tools: [asks], deps: { onToolsetApproved: (who, toolset) => approved.push([who.threadId, toolset]) } });
+  const r = rig({ tools: [asks], deps: { onToolsetApproved: (who, toolset) => void approved.push([who.threadId, toolset]) } });
   const result = await r.call("asks", {});
   assert.deepEqual(approved, [["me", "notes"]]);
   assert.deepEqual((result.structuredContent as { toolApproval?: unknown }).toolApproval, {
