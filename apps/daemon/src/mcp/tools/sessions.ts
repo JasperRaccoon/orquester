@@ -16,8 +16,10 @@ import { byAttention } from "./watch.ts";
 
 /** The most running tabs a project may hold before a tool opens another (also the session tools' cap, `session-tools/threads`). */
 export const MAX_RUNNING_SESSIONS_PER_PROJECT = 24;
-const runtimeModeSchema = z.enum(RUNTIME_MODES as unknown as [RuntimeMode, ...RuntimeMode[]]);
-const optionsSchema = z.record(z.union([z.string(), z.boolean()])).describe("Model options by id, e.g. {\"effort\":\"high\",\"thinking\":true}. `effort` works for every agent.");
+/** A permission mode, as create_session and update_session take it (also the session tools' thread_create / delegate_task). */
+export const runtimeModeSchema = z.enum(RUNTIME_MODES as unknown as [RuntimeMode, ...RuntimeMode[]]);
+/** Model options by id, as create_session and update_session take them (also the session tools' thread_create / delegate_task). */
+export const optionsSchema = z.record(z.union([z.string(), z.boolean()])).describe("Model options by id, e.g. {\"effort\":\"high\",\"thinking\":true}. `effort` works for every agent.");
 const sessionIdField = z.string().min(1).describe("The session id from list_sessions.");
 
 /**

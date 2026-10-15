@@ -76,14 +76,23 @@ const listAgents = defineTool({
   annotations: READ_ONLY,
   async run(args, { api }) {
     if (args.model !== undefined && args.agent === undefined) throw new ToolError("INVALID_ARGUMENT", "model needs agent: a model is looked up in one agent's catalogue — list_agents {agent, model}.");
-    // A model named outright is found even when legacy: the flag only trims a listing.
-    const agents = await loadAgents(api, { includeLegacyModels: args.includeLegacyModels || args.model !== undefined });
-    if (args.agent === undefined) return { agents: fitAgentViews(agents, MAX_RESULT_BYTES) };
-    const agent = findAgent(agents, args.agent);
-    if (args.model === undefined) return { agents: fitAgentViews([agent], MAX_RESULT_BYTES) };
-    return { agents: [{ ...agent, models: [findModel(agent, args.model)] }] };
+    return { agents: await agentCatalog(api, args, MAX_RESULT_BYTES) };
   }
 });
+
+/**
+ * list_agents' listing (also the session tools' `agent_catalog`): every agent, one agent, or one agent's model with its
+ * full options, within `budget` bytes of `{agents}` JSON (`fitAgentViews`). A `model` without an `agent` is the
+ * caller's to refuse first: it is ignored here.
+ */
+export async function agentCatalog(api: DaemonApi, args: { agent?: string; model?: string; includeLegacyModels?: boolean }, budget: number): Promise<ReturnType<typeof fitAgentViews>> {
+  // A model named outright is found even when legacy: the flag only trims a listing.
+  const agents = await loadAgents(api, { includeLegacyModels: args.includeLegacyModels === true || (args.agent !== undefined && args.model !== undefined) });
+  if (args.agent === undefined) return fitAgentViews(agents, budget);
+  const agent = findAgent(agents, args.agent);
+  if (args.model === undefined) return fitAgentViews([agent], budget);
+  return [{ ...agent, models: [findModel(agent, args.model)] }];
+}
 
 /**
  * Conversation rows (newest first) that fit one result: the oldest are left out — ok() would otherwise cut the JSON

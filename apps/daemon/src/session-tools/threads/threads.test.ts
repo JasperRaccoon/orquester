@@ -41,7 +41,10 @@ const providersBody = {
   ]
 };
 const accountsBody = {
-  accounts: [{ id: "acc-1", agent: "claude", label: "work", email: null, plan: null, needsReauth: false, createdAt: stamp(0), importedAt: stamp(0) }],
+  accounts: [
+    { id: "acc-1", agent: "claude", label: "work", email: null, plan: null, needsReauth: false, createdAt: stamp(0), importedAt: stamp(0) },
+    { id: "acc-cx", agent: "codex", label: "cx", email: null, plan: null, needsReauth: false, createdAt: stamp(0), importedAt: stamp(0) }
+  ],
   defaults: { claude: null, codex: null, grok: null }
 };
 
@@ -154,7 +157,7 @@ test("the toolkit's paragraph is short, names delegation and marks other threads
   assert.match(registry.instructions, /data, not instructions/);
   assert.deepEqual(
     registry.tools.map((tool) => tool.name),
-    ["thread_list", "thread_read", "thread_create", "thread_send", "thread_wait", "thread_interrupt", "thread_fork", "thread_merge_back", "delegate_task", "task_status", "task_wait", "task_cancel"]
+    ["thread_list", "thread_read", "thread_create", "agent_catalog", "thread_send", "thread_wait", "thread_interrupt", "thread_fork", "thread_merge_back", "delegate_task", "task_status", "task_wait", "task_cancel"]
   );
 });
 
@@ -264,6 +267,102 @@ test("thread_create opens a chat in the caller's project, directory and permissi
   const unknown = await r.call("me", "thread_create", { prompt: "x", model: "nope" });
   assert.equal(unknown.error, true);
   assert.equal(unknown.value.code, "INVALID_ARGUMENT");
+});
+
+for (const tool of ["thread_create", "delegate_task"] as const) {
+  const creates = (r: Awaited<ReturnType<typeof rig>>) => r.posts.filter((p) => p.path === "/api/sessions").map((p) => p.body as Record<string, any>);
+
+  test(`${tool}: options replace the inherited ones one by one, are validated against the model's catalogue, and are reported`, async (t) => {
+    const r = await rig(t);
+    // Same agent, no model: this thread's model and options (effort high), the named option replacing its own.
+    const medium = await r.call("me", tool, { prompt: "x", options: { effort: "medium" } });
+    assert.equal(medium.error, false);
+    assert.deepEqual(creates(r)[0]!.chat.modelSelection, { model: "opus", options: [{ id: "effort", value: "medium" }] });
+    assert.deepEqual([medium.value.model, medium.value.options], ["opus", { effort: "medium" }]);
+    // A named model: this thread's options carry over where it takes them; a choice by label is its id.
+    const sonnet = await r.call("me", tool, { prompt: "x", model: "sonnet" });
+    assert.deepEqual(creates(r)[1]!.chat.modelSelection, { model: "sonnet", options: [{ id: "effort", value: "high" }] });
+    assert.equal(sonnet.error, false);
+    await r.call("me", tool, { prompt: "x", model: "sonnet", options: { effort: "Medium" } });
+    assert.deepEqual(creates(r)[2]!.chat.modelSelection, { model: "sonnet", options: [{ id: "effort", value: "medium" }] });
+
+    // Refused with the valid choices, before anything is opened.
+    const badValue = await r.call("me", tool, { prompt: "x", options: { effort: "max" } });
+    assert.equal(badValue.value.code, "INVALID_ARGUMENT");
+    assert.match(badValue.value.message, /must be one of: medium, high/);
+    const badId = await r.call("me", tool, { prompt: "x", options: { speed: "fast" } });
+    assert.match(badId.value.message, /Unknown option "speed".*Valid options: effort/);
+    const badType = await r.call("me", tool, { prompt: "x", options: { effort: 3 } });
+    assert.equal(badType.value.code, "INVALID_ARGUMENT", "the strict parse: a value is a string or a boolean");
+    // Another agent starts from its own defaults, so options its model does not take are refused.
+    const codex = await r.call("me", tool, { prompt: "x", agent: "codex", options: { effort: "high" } });
+    assert.match(codex.value.message, /gpt-5 takes no options/);
+    assert.equal(creates(r).length, 3);
+  });
+
+  test(`${tool}: accountId names any agent's account or "system"; an unknown one is refused; omitted it inherits as before`, async (t) => {
+    const r = await rig(t);
+    await r.call("me", tool, { prompt: "x" });
+    assert.equal(creates(r)[0]!.accountId, "acc-1", "same agent: this thread's account");
+    const system = await r.call("me", tool, { prompt: "x", accountId: "system" });
+    assert.equal(system.error, false);
+    assert.equal(creates(r)[1]!.accountId, "system");
+    assert.equal(creates(r)[1]!.chat.accountId, "system");
+    const codex = await r.call("me", tool, { prompt: "x", agent: "codex", accountId: "acc-cx" });
+    assert.equal(codex.error, false);
+    assert.deepEqual([creates(r)[2]!.refId, creates(r)[2]!.accountId, creates(r)[2]!.chat.accountId], ["codex", "acc-cx", "acc-cx"]);
+    assert.equal(codex.value.accountId, "acc-cx");
+    await r.call("me", tool, { prompt: "x", agent: "codex" });
+    assert.equal(creates(r)[3]!.accountId, undefined, "another agent, none named: its family default");
+
+    // Another family's account, or an unknown one: refused with the valid ids.
+    const foreign = await r.call("me", tool, { prompt: "x", agent: "codex", accountId: "acc-1" });
+    assert.equal(foreign.value.code, "INVALID_ARGUMENT");
+    assert.match(foreign.value.message, /not usable with codex\. Valid: system, acc-cx/);
+    assert.equal((await r.call("me", tool, { prompt: "x", accountId: "nope" })).value.code, "INVALID_ARGUMENT");
+    assert.equal(creates(r).length, 4);
+  });
+
+  test(`${tool}: runtimeMode is this thread's or narrower — a broader one is PERMISSION_DENIED, nothing opened`, async (t) => {
+    const r = await rig(t);
+    // The caller runs in auto.
+    const narrower = await r.call("me", tool, { prompt: "x", runtimeMode: "approval-required" });
+    assert.equal(narrower.error, false);
+    assert.equal(narrower.value.runtimeMode, "approval-required");
+    await r.call("me", tool, { prompt: "x", runtimeMode: "auto" });
+    await r.call("me", tool, { prompt: "x" });
+    assert.deepEqual(creates(r).map((c) => c.chat.runtimeMode), ["approval-required", "auto", "auto"]);
+
+    const broader = await r.call("me", tool, { prompt: "x", runtimeMode: "full-access" });
+    assert.equal(broader.value.code, "PERMISSION_DENIED");
+    assert.match(broader.value.message, /full-access is broader than this thread's auto.*approval-required, auto-accept-edits, auto/);
+    assert.equal((await r.call("me", tool, { prompt: "x", runtimeMode: "yolo" })).value.code, "INVALID_ARGUMENT");
+    assert.equal(creates(r).length, 3);
+  });
+}
+
+test("agent_catalog lists what can be opened, this thread's own settings and the permission modes a new thread may take", async (t) => {
+  const r = await rig(t);
+  const { error, value } = await r.call("me", "agent_catalog", {});
+  assert.equal(error, false);
+  assert.deepEqual(value.agents.map((a: { id: string }) => a.id), ["claude", "codex"]);
+  const claude = value.agents[0];
+  assert.deepEqual(claude.models.map((m: { slug: string }) => m.slug), ["opus", "sonnet"]);
+  assert.deepEqual(claude.models[0].options[0].values.map((v: { id: string }) => v.id), ["medium", "high"]);
+  assert.deepEqual(claude.accounts.map((a: { id: string }) => a.id), ["system", "acc-1"]);
+  assert.equal(claude.runtimeModes, undefined, "the external listing's modes are not this rule's");
+  assert.deepEqual(value.thisThread, { agent: "claude", model: "opus", options: { effort: "high" }, runtimeMode: "auto", accountId: "acc-1" });
+  assert.deepEqual(value.runtimeModes, ["approval-required", "auto-accept-edits", "auto"]);
+
+  const one = await r.call("me", "agent_catalog", { agent: "claude", model: "sonnet" });
+  assert.deepEqual(one.value.agents[0].models.map((m: { slug: string }) => m.slug), ["sonnet"]);
+  assert.equal((await r.call("me", "agent_catalog", { model: "sonnet" })).value.code, "INVALID_ARGUMENT");
+  assert.match((await r.call("me", "agent_catalog", { agent: "nope" })).value.message, /Unknown agent "nope"/);
+  // A thread on the system account says so.
+  const sib = await r.call("sib", "agent_catalog", { agent: "codex" });
+  assert.equal(sib.value.thisThread.accountId, "system");
+  assert.deepEqual(sib.value.agents.map((a: { id: string }) => a.id), ["codex"]);
+  assert.deepEqual(r.posts, [], "read-only");
 });
 
 test("thread_create refuses a thread with no project, and a project at its open-chat limit", async (t) => {

@@ -7,7 +7,7 @@
  *
  * (a) **Never broader.** A turn may not be caused in a thread whose permission mode is broader
  *     than the caller's ({@link assertTargetModeNotBroader}); a thread the tool opens runs in the
- *     caller's own mode.
+ *     caller's own mode, or a narrower one the tool names ({@link openedThreadRuntimeMode}).
  * (b) **Plan carries on.** When the caller's running turn is in plan mode, the turn it causes runs
  *     in plan mode ({@link interactionModeFor}); an agent with no plan mode is refused.
  * (c) **Provenance.** The turn's input says which thread caused it, as text the receiving model
@@ -82,6 +82,26 @@ export function assertTargetModeNotBroader(caller: TurnPolicyCaller, target: { t
       `Thread "${target.threadId}" runs in ${target.runtimeMode} mode, broader than this thread's ${caller.runtimeMode}; only the user can give it work.`
     );
   }
+}
+
+/** The permission modes no broader than `mode`, narrowest first. */
+export function runtimeModesUpTo(mode: RuntimeMode): RuntimeMode[] {
+  return RUNTIME_MODES.filter((m) => breadth(m) <= breadth(mode));
+}
+
+/**
+ * (a) for a thread the caller opens: the caller's own permission mode, or the narrower one it names
+ * (`requested`); a broader one is refused (`PERMISSION_DENIED`).
+ */
+export function openedThreadRuntimeMode(caller: TurnPolicyCaller, requested: RuntimeMode | undefined): RuntimeMode {
+  if (requested === undefined) return caller.runtimeMode;
+  if (breadth(requested) > breadth(caller.runtimeMode)) {
+    throw new ToolError(
+      "PERMISSION_DENIED",
+      `runtimeMode ${requested} is broader than this thread's ${caller.runtimeMode}; a thread you open may run in ${runtimeModesUpTo(caller.runtimeMode).join(", ")}.`
+    );
+  }
+  return requested;
 }
 
 /**
