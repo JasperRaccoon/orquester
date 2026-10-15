@@ -56,9 +56,15 @@ describe("session tool labels (unified MCP §4)", () => {
       "get_cost", "list_files", "create_todo", "update_todo", "delete_todo", "toggle_todo_item", "validate_workflow",
       "list_workflow_runs", "get_workflow_run", "list_agent_profiles", "get_agent_profile_item", "get_agent_instructions",
       "list_marketplace_plugins", "desktops_list", "desktop_host_status", "desktop_windows", "desktop_app_log",
-      "desktop_open", "desktop_launch_app", "desktop_window_action", "desktop_stop_app", "desktop_close"
+      "desktop_open", "desktop_launch_app", "desktop_window_action", "desktop_stop_app", "desktop_close",
+      // The eight agent-profile write tools `edit_agent_profile` replaced.
+      "create_agent_profile_item", "update_agent_profile_item", "delete_agent_profile_item", "copy_agent_profile_item",
+      "set_agent_profile_item_enabled", "trust_agent_profile_hook", "write_agent_instructions", "import_agent_profile_items"
     ];
-    for (const name of legacy) assert.ok(Object.hasOwn(SESSION_TOOL_LABELS, name), `${name} has no label`);
+    for (const name of legacy) {
+      assert.ok(Object.hasOwn(SESSION_TOOL_LABELS, name), `${name} has no label`);
+      assert.doesNotMatch(SESSION_TOOL_LABELS[name]!, /^Orquester:/);
+    }
     // Old transcripts read as before.
     assert.equal(SESSION_TOOL_LABELS.thread_wait, "Waited for a chat");
     assert.equal(SESSION_TOOL_LABELS.delegate_task, "Delegated a task");

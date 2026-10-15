@@ -144,6 +144,11 @@ export function ToolApprovalPreview({
   );
 }
 
+/** A preview block's accessible name: what it is, and that it is cut short while clamped. */
+export function previewBlockLabel(name: string, open: boolean): string {
+  return open ? name : `${name} (shortened: View all shows the rest)`;
+}
+
 function SectionTitle({ children, extra }: { children: React.ReactNode; extra?: React.ReactNode }): React.ReactElement {
   return (
     <div className="mb-1 flex min-w-0 items-baseline gap-2 text-[11px]">
@@ -159,7 +164,12 @@ function PreviewSection({ section, open }: { section: ApprovalPreviewSection; op
       return (
         <div className="min-w-0">
           {section.title ? <SectionTitle>{section.title}</SectionTitle> : null}
-          <div className={cn(BLOCK, "whitespace-pre-wrap break-words text-neutral-200", open ? OPEN : CLAMPED)} tabIndex={0}>
+          <div
+            className={cn(BLOCK, "whitespace-pre-wrap break-words text-neutral-200", open ? OPEN : CLAMPED)}
+            tabIndex={0}
+            role="region"
+            aria-label={previewBlockLabel(section.title ?? "Text", open)}
+          >
             {section.text}
           </div>
         </div>
@@ -181,7 +191,12 @@ function PreviewSection({ section, open }: { section: ApprovalPreviewSection; op
           >
             {section.title}
           </SectionTitle>
-          <pre className={cn(BLOCK, "whitespace-pre font-mono text-neutral-200", open ? OPEN : CLAMPED)} tabIndex={0}>
+          <pre
+            className={cn(BLOCK, "whitespace-pre font-mono text-neutral-200", open ? OPEN : CLAMPED)}
+            tabIndex={0}
+            role="region"
+            aria-label={previewBlockLabel(section.title, open)}
+          >
             {section.text}
           </pre>
         </div>
@@ -190,7 +205,12 @@ function PreviewSection({ section, open }: { section: ApprovalPreviewSection; op
       return (
         <div className="min-w-0">
           <SectionTitle>{section.title}</SectionTitle>
-          <pre className={cn(BLOCK, "whitespace-pre font-mono", open ? OPEN : CLAMPED)} tabIndex={0}>
+          <pre
+            className={cn(BLOCK, "whitespace-pre font-mono", open ? OPEN : CLAMPED)}
+            tabIndex={0}
+            role="region"
+            aria-label={previewBlockLabel(`Changes to ${section.title}`, open)}
+          >
             {section.unifiedDiff.split("\n").map((line, index) => (
               <span key={index} className={cn("block", DIFF_TONE[diffLineTone(line)])}>
                 {line === "" ? " " : line}
@@ -203,7 +223,10 @@ function PreviewSection({ section, open }: { section: ApprovalPreviewSection; op
       return (
         <div className="min-w-0">
           {section.title ? <SectionTitle>{section.title}</SectionTitle> : null}
-          <dl className={cn(BLOCK, "grid grid-cols-[minmax(0,auto)_minmax(0,1fr)] gap-x-3 gap-y-1", open ? OPEN : CLAMPED)}>
+          <dl
+            className={cn(BLOCK, "grid grid-cols-[minmax(0,auto)_minmax(0,1fr)] gap-x-3 gap-y-1", open ? OPEN : CLAMPED)}
+            aria-label={previewBlockLabel(section.title ?? "Settings", open)}
+          >
             {section.rows.map((row, index) => (
               <React.Fragment key={index}>
                 <dt className="min-w-0 truncate text-neutral-500" title={row.label}>
@@ -228,7 +251,7 @@ function PreviewSection({ section, open }: { section: ApprovalPreviewSection; op
       return (
         <div className="min-w-0">
           <SectionTitle>{section.title}</SectionTitle>
-          <ul className={cn(BLOCK, "flex flex-col gap-1", open ? OPEN : CLAMPED)}>
+          <ul className={cn(BLOCK, "flex flex-col gap-1", open ? OPEN : CLAMPED)} aria-label={previewBlockLabel(section.title, open)}>
             {section.items.map((item, index) => {
               const Icon = item.change === "added" ? Plus : item.change === "removed" ? Minus : Pencil;
               return (

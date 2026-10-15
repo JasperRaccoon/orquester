@@ -6,15 +6,19 @@
  *
  * What makes it safe to decide on:
  *
- *  - **No autofocus, ever.** Nothing on the card takes focus by itself — not on appearing, not on
- *    opening the deny reason. The user may be typing in the composer when it slides in.
+ *  - **No autofocus, ever.** Nothing on the card takes focus by itself when it appears. The user
+ *    may be typing in the composer when it slides in. (Pressing "Deny with a reason…" moves focus
+ *    into the field that replaces the pressed toggle — the user's own act.)
  *  - **Keyboard approval is ⌘/Ctrl+Enter on the focused card, and only after 1.5 s.** The chord is
  *    ignored for {@link TOOL_APPROVAL_KEYBOARD_GUARD_MS} after the card appears or changes
  *    (`toolApprovalGuardKey`), and Enter alone never approves — not on the card, not on a focused
  *    Approve button, not on a grant row. The composer's own ⌘/Ctrl+Enter never reaches the card:
  *    the card only listens to keys pressed inside it, and swallows the chords it owns.
  *  - **The preview is complete.** A long section has "View all"; a summary the daemon had to cut
- *    fetches the whole preview (`GET toolApproval`) before showing the rest.
+ *    fetches the whole preview (`GET toolApproval`) before showing the rest, and Approve (grant
+ *    rows too) stays disabled, with its reason as the tooltip, until the user loaded it.
+ *  - **A double click never approves the next card.** A pointer click on Approve or a grant row is
+ *    ignored for `TOOL_APPROVAL_POINTER_GUARD_MS` after the card appears or changes.
  *  - **Grants only as offered.** The Approve menu lists exactly the card's `grantOptions`.
  *  - **Secrets stay in this component.** Masked inputs for `secretFields`; the values go into the
  *    answer body and are cleared from state as soon as it is sent, whatever the outcome.
@@ -39,7 +43,7 @@ import { ComposerMenuRow, ComposerPopover } from "../composer/ComposerPopover";
 import { BannerCard } from "../primitives";
 import {
   toolApprovalAnswerFailure,
-  toolApprovalCanApprove,
+  toolApprovalApproveBlockedReason,
   toolApprovalChangeSentence,
   toolApprovalExpired,
   toolApprovalExpiryText,
@@ -47,6 +51,8 @@ import {
   toolApprovalGuardKey,
   toolApprovalKeyAction,
   toolApprovalKindBadge,
+  toolApprovalPointerGuarded,
+  toolApprovalPreviewIsCut,
   toolApprovalPrimaryLabel,
   type ToolApprovalKeyEvent
 } from "./banner-model";
@@ -122,10 +128,15 @@ export function ToolApprovalCard({
   // Enter then a click can both land before a re-render; this guard is synchronous.
   const inFlight = React.useRef(false);
   const denyReasonId = React.useId();
+  const denyReasonRef = React.useRef<HTMLTextAreaElement>(null);
+  // Set when the user opens the reason field: focus follows into it (the toggle they pressed is gone).
+  const focusDenyReason = React.useRef(false);
 
   const shown = full ?? card;
-  const guardKey = toolApprovalGuardKey(shown, full ? 1 : 0);
-  // When the card (or what it says) last changed: keyboard approval waits 1.5 s from here.
+  // Memoised: hashing a large preview on every countdown tick would be wasted work.
+  const guardKey = React.useMemo(() => toolApprovalGuardKey(shown, full ? 1 : 0), [shown, full]);
+  // When the card (or what it says) last changed: keyboard approval waits 1.5 s from here, and a
+  // pointer click on Approve is ignored for TOOL_APPROVAL_POINTER_GUARD_MS.
   const shownAt = React.useRef(now());
   const lastGuardKey = React.useRef(guardKey);
   if (lastGuardKey.current !== guardKey) {
@@ -144,9 +155,20 @@ export function ToolApprovalCard({
     setSheetOpen(false);
   }, [card.approvalId]);
 
+  React.useEffect(() => {
+    if (denyOpen && focusDenyReason.current) {
+      focusDenyReason.current = false;
+      denyReasonRef.current?.focus({ preventScroll: true });
+    }
+  }, [denyOpen]);
+
   const time = useTicker(now, 1000);
   const expired = toolApprovalExpired(card.expiresAt, time);
-  const canApprove = toolApprovalCanApprove({ card, secrets, submitting, expired });
+  // A summary the daemon had to cut: approving waits until the user loaded the whole preview.
+  const previewCut = toolApprovalPreviewIsCut(card);
+  const previewComplete = !previewCut || full !== null;
+  const approveBlocked = toolApprovalApproveBlockedReason({ card, secrets, submitting, expired, previewComplete });
+  const canApprove = approveBlocked === null;
   const grantChoices = toolApprovalGrantChoices(card);
   const toolset = card.kind === "toolset";
 
@@ -179,6 +201,19 @@ export function ToolApprovalCard({
   };
 
   const guarded = (): boolean => now() - shownAt.current < TOOL_APPROVAL_KEYBOARD_GUARD_MS;
+
+  /**
+   * A click on a control that approves: a POINTER click (`detail ≥ 1`) inside the pointer guard is
+   * ignored — the second click of a double click meant for the previous card. Keyboard activation
+   * (`detail` 0) has its own guard in {@link approveKeys}.
+   */
+  const approveClick = (run: () => void) => (event: React.MouseEvent<HTMLButtonElement>) => {
+    if (toolApprovalPointerGuarded({ detail: event.detail, now: now(), shownAt: shownAt.current })) {
+      event.preventDefault();
+      return;
+    }
+    run();
+  };
 
   /**
    * The keyboard on a control that approves: Enter alone never does (it would be the same Enter
@@ -228,12 +263,12 @@ export function ToolApprovalCard({
     <>
       <ToolApprovalPreview
         sections={shown.sections}
-        fullLoaded={full !== null || !card.fullPreview}
+        fullLoaded={previewComplete}
         loadingFull={loadingFull}
         onLoadFull={loadFull}
         expandAll={expandAll}
       />
-      {card.fullPreview && full === null ? (
+      {previewCut && full === null ? (
         <button type="button" className={cn(LINK, "mt-1.5 text-info-300")} disabled={loadingFull} onClick={loadFull} data-load-full="">
           {loadingFull ? "Loading the full preview…" : "View all — load the whole preview"}
         </button>
@@ -243,6 +278,7 @@ export function ToolApprovalCard({
   );
 
   const flags = previewFlagSections(shown.sections);
+  const warningCount = flags.length;
 
   return (
     <BannerCard
@@ -291,11 +327,25 @@ export function ToolApprovalCard({
         <div className="mt-2 min-w-0">
           {isMobile ? (
             <>
+              {/* The flags stay in sight on the card; screen readers get them once, in the sheet
+                  (the review button says how many there are). */}
               {flags.length > 0 ? (
-                <ToolApprovalPreview sections={flags} fullLoaded loadingFull={false} onLoadFull={loadFull} />
+                <div aria-hidden="true" data-flags-duplicate="">
+                  <ToolApprovalPreview sections={flags} fullLoaded loadingFull={false} onLoadFull={loadFull} />
+                </div>
               ) : null}
-              <button type="button" className={cn(BUTTON, SECONDARY, "mt-2 w-full justify-center")} onClick={() => setSheetOpen(true)}>
-                Review what will run ({shown.sections.length} {shown.sections.length === 1 ? "part" : "parts"})
+              <button
+                type="button"
+                className={cn(BUTTON, SECONDARY, "mt-2 w-full justify-center")}
+                onClick={() => {
+                  setSheetOpen(true);
+                  // Opening the review is viewing it: a cut preview loads whole there.
+                  if (previewCut) loadFull();
+                }}
+                data-review-preview=""
+              >
+                Review what will run ({shown.sections.length} {shown.sections.length === 1 ? "part" : "parts"}
+                {warningCount > 0 ? `, ${warningCount} ${warningCount === 1 ? "flag" : "flags"}` : ""})
               </button>
               <BottomSheet open={sheetOpen} onClose={() => setSheetOpen(false)} label={`Preview: ${card.title}`}>
                 <div className="px-2 pb-3 text-xs">
@@ -347,6 +397,7 @@ export function ToolApprovalCard({
               Why not? Sent to the agent as your words (optional)
             </label>
             <textarea
+              ref={denyReasonRef}
               id={denyReasonId}
               value={denyReason}
               disabled={submitting}
@@ -378,7 +429,15 @@ export function ToolApprovalCard({
           </div>
           <div className="flex shrink-0 flex-wrap items-center gap-2">
             {!denyOpen ? (
-              <button type="button" className={LINK} disabled={submitting} onClick={() => setDenyOpen(true)}>
+              <button
+                type="button"
+                className={LINK}
+                disabled={submitting}
+                onClick={() => {
+                  focusDenyReason.current = true;
+                  setDenyOpen(true);
+                }}
+              >
                 Deny with a reason…
               </button>
             ) : null}
@@ -390,10 +449,10 @@ export function ToolApprovalCard({
                 type="button"
                 className={cn(BUTTON, PRIMARY, grantChoices.length > 0 && "rounded-r-none")}
                 disabled={!canApprove}
-                onClick={() => approve()}
+                onClick={approveClick(() => approve())}
                 {...approveKeys(() => approve())}
                 data-approve=""
-                title={expired ? "This approval has expired" : undefined}
+                title={approveBlocked ?? undefined}
               >
                 {submitting ? "Sending…" : toolApprovalPrimaryLabel(card)}
               </button>
@@ -408,7 +467,7 @@ export function ToolApprovalCard({
                       type="button"
                       disabled={!canApprove}
                       aria-label="More ways to approve"
-                      title="More ways to approve"
+                      title={approveBlocked ?? "More ways to approve"}
                       className={cn(BUTTON, PRIMARY, "w-7 justify-center rounded-l-none border-l border-neutral-400 px-0")}
                       data-grant-menu=""
                     >
@@ -422,15 +481,16 @@ export function ToolApprovalCard({
                         key={choice.scope}
                         disabled={!canApprove}
                         hint={choice.hint}
+                        title={approveBlocked ?? undefined}
                         data-grant={choice.scope}
                         {...approveKeys(() => {
                           close();
                           approve(choice.scope);
                         })}
-                        onClick={() => {
+                        onClick={approveClick(() => {
                           close();
                           approve(choice.scope);
-                        }}
+                        })}
                       >
                         {choice.label}
                       </ComposerMenuRow>

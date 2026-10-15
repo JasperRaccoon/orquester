@@ -85,12 +85,14 @@ let answers: ToolApprovalAnswer[];
 let loads: number;
 let full: ParsedToolApprovalSummary | null;
 
-function render(summary: ParsedToolApprovalSummary): void {
+function render(summary: ParsedToolApprovalSummary, isMobile = false): void {
   act(() => {
     root.render(
       createElement(ToolApprovalCard, {
+        key: summary.approvalId,
         card: summary,
         pendingCount: 1,
+        isMobile,
         now,
         onAnswer: async (answer: ToolApprovalAnswer) => {
           answers.push(answer);
@@ -110,9 +112,18 @@ function q<T extends Element>(selector: string): T {
   return element;
 }
 
-function key(target: Element, init: KeyboardEventInit): void {
+function key(target: Element, init: KeyboardEventInit): KeyboardEvent {
+  const event = new dom.window.KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init });
   act(() => {
-    target.dispatchEvent(new dom.window.KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init }));
+    target.dispatchEvent(event);
+  });
+  return event;
+}
+
+/** A pointer click: `detail` is the click count (1, then 2 for a double click's second). */
+function pointerClick(target: Element, detail: number): void {
+  act(() => {
+    target.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true, cancelable: true, detail }));
   });
 }
 
@@ -186,7 +197,10 @@ describe("ToolApprovalCard", () => {
     clock = START + 60_000;
     const approve = q<HTMLButtonElement>("[data-approve]");
     approve.focus();
-    key(approve, { key: "Enter" });
+    // jsdom never turns Enter into a click by itself: what proves the browser would not either is
+    // that the card cancelled the key's default action on the focused button.
+    const enter = key(approve, { key: "Enter" });
+    assert.equal(enter.defaultPrevented, true, "Enter on the focused Approve button is cancelled");
     key(q('[data-tool-approval="ap-1"]'), { key: "Enter" });
     await flush();
     assert.equal(answers.length, 0);
@@ -225,7 +239,7 @@ describe("ToolApprovalCard", () => {
     act(() => open.click());
     const reason = mount.querySelector("textarea");
     assert.ok(reason);
-    assert.notEqual(dom.window.document.activeElement, reason, "opening the reason does not move focus");
+    assert.equal(dom.window.document.activeElement, reason, "focus follows the pressed toggle into the field that replaced it");
     type(reason, "Not on this machine");
     key(reason, { key: "Enter", ctrlKey: true });
     await flush();
@@ -251,5 +265,62 @@ describe("ToolApprovalCard", () => {
     act(() => (rows[0] as HTMLButtonElement).click());
     await flush();
     assert.deepEqual(answers, [{ decision: "approve", grant: "project" }]);
+  });
+
+  it("a cut preview keeps Approve disabled until View all loaded the whole preview", async () => {
+    clock = START + 60_000;
+    full = card({ sections: [{ kind: "text", text: "the whole text" }] });
+    render(card({ fullPreview: true, sections: [{ kind: "text", text: "the who", partial: true }] }));
+    const approve = q<HTMLButtonElement>("[data-approve]");
+    assert.equal(approve.disabled, true);
+    assert.match(approve.title, /View all/);
+    key(q('[data-tool-approval="ap-1"]'), { key: "Enter", ctrlKey: true });
+    await flush();
+    assert.equal(answers.length, 0, "the keyboard chord cannot bypass it");
+    act(() => q<HTMLButtonElement>("[data-view-all]").click());
+    await flush();
+    await flush();
+    assert.equal(q<HTMLButtonElement>("[data-approve]").disabled, false);
+  });
+
+  it("on a phone, opening the review sheet loads the cut preview and only then enables Approve", async () => {
+    clock = START + 60_000;
+    full = card({ sections: [{ kind: "text", text: "the whole text" }] });
+    render(card({ fullPreview: true, sections: [{ kind: "text", text: "the who", partial: true }] }), true);
+    assert.equal(q<HTMLButtonElement>("[data-approve]").disabled, true);
+    act(() => q<HTMLButtonElement>("[data-review-preview]").click());
+    await flush();
+    await flush();
+    assert.equal(loads, 1);
+    assert.match(dom.window.document.body.innerHTML, /the whole text/);
+    assert.equal(q<HTMLButtonElement>("[data-approve]").disabled, false);
+  });
+
+  it("a double click never approves the card that replaces the answered one", async () => {
+    clock = START;
+    render(card());
+    clock = START + 5_000;
+    pointerClick(q("[data-approve]"), 1);
+    await flush();
+    assert.deepEqual(answers, [{ decision: "approve" }]);
+    // The next card mounts under the pointer; the double click's second click lands on it.
+    render(card({ approvalId: "ap-2", title: "Claude wants to open another desktop" }));
+    pointerClick(q("[data-approve]"), 2);
+    await flush();
+    assert.equal(answers.length, 1, "the second click is ignored");
+    // A deliberate click after the pointer guard approves.
+    clock = START + 5_000 + 800;
+    pointerClick(q("[data-approve]"), 1);
+    await flush();
+    assert.equal(answers.length, 2);
+  });
+
+  it("a grant row ignores a pointer click inside the guard too", async () => {
+    clock = START;
+    render(card({ grantOptions: ["chat"] }));
+    act(() => q<HTMLButtonElement>("[data-grant-menu]").click());
+    pointerClick(q('[data-grant="chat"]'), 1);
+    await flush();
+    assert.equal(answers.length, 0);
   });
 });

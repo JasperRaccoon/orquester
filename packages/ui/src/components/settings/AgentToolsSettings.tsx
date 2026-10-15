@@ -285,7 +285,12 @@ function MatrixTableRow({
                   onChange={(on) => onToggle(cell.agent, on)}
                 />
                 {cell.customised ? (
-                  <span className="h-1.5 w-1.5 rounded-full bg-info" title="Changed from the default" aria-label="Changed from the default" />
+                  <span
+                    role="img"
+                    className="h-1.5 w-1.5 rounded-full bg-info"
+                    title="Changed from the default"
+                    aria-label="Changed from the default"
+                  />
                 ) : null}
               </span>
             )}

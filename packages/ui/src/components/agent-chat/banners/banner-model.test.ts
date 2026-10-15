@@ -9,9 +9,15 @@ import {
   toolApprovalCanApprove,
   toolApprovalChangeSentence,
   toolApprovalExpiryText,
+  toolApprovalApproveBlockedReason,
   toolApprovalGrantChoices,
-  toolApprovalKeyAction
+  toolApprovalGuardKey,
+  toolApprovalKeyAction,
+  toolApprovalPointerGuarded,
+  toolApprovalPreviewIsCut,
+  TOOL_APPROVAL_POINTER_GUARD_MS
 } from "./banner-model.ts";
+import { parseToolApprovalSummary } from "@orquester/api/agent-chat";
 
 test("the default four split into Approve/Decline primary and the rest overflow", () => {
   const { primary, overflow } = splitApprovalOptions();
@@ -161,12 +167,44 @@ test("a late answer says the agent stopped waiting; a bad one keeps the card", (
   assert.equal(toolApprovalAnswerFailure(null).closed, false);
 });
 
-test("approval needs every secret, a live card and a known kind", () => {
+test("approval needs every secret, a live card, a known kind and — when cut — the whole preview", () => {
   const card = { kind: "admin" as const, family: "workflow-secrets" as const, secretFields: [{ key: "K", label: "Key" }] };
-  assert.equal(toolApprovalCanApprove({ card, secrets: {}, submitting: false, expired: false }), false);
-  assert.equal(toolApprovalCanApprove({ card, secrets: { K: "v" }, submitting: false, expired: false }), true);
-  assert.equal(toolApprovalCanApprove({ card, secrets: { K: "v" }, submitting: false, expired: true }), false);
-  assert.equal(toolApprovalCanApprove({ card: { ...card, kind: "unknown" }, secrets: { K: "v" }, submitting: false, expired: false }), false);
+  const base = { card, secrets: { K: "v" }, submitting: false, expired: false, previewComplete: true };
+  assert.equal(toolApprovalCanApprove({ ...base, secrets: {} }), false);
+  assert.equal(toolApprovalCanApprove(base), true);
+  assert.equal(toolApprovalCanApprove({ ...base, expired: true }), false);
+  assert.equal(toolApprovalCanApprove({ ...base, card: { ...card, kind: "unknown" } }), false);
+  assert.equal(toolApprovalCanApprove({ ...base, previewComplete: false }), false);
+  assert.match(toolApprovalApproveBlockedReason({ ...base, previewComplete: false }) ?? "", /View all/);
+  assert.match(toolApprovalApproveBlockedReason({ ...base, secrets: {} }) ?? "", /secret/);
+  assert.equal(toolApprovalApproveBlockedReason(base), null);
+});
+
+const parsed = (extra: Record<string, unknown>) =>
+  parseToolApprovalSummary({
+    approvalId: "a", threadId: "t", tool: "x", kind: "admin", family: "desktops", title: "T", scope: { label: "S" },
+    sections: [{ kind: "code", title: "run.sh", text: "echo hi" }], fullPreview: false, secretFields: [], grantOptions: [],
+    requestedAt: "r", expiresAt: "e", ...extra
+  })!;
+
+test("a preview is cut when the summary says so or any section is partial", () => {
+  assert.equal(toolApprovalPreviewIsCut(parsed({})), false);
+  assert.equal(toolApprovalPreviewIsCut(parsed({ fullPreview: true })), true);
+  assert.equal(toolApprovalPreviewIsCut(parsed({ sections: [{ kind: "diff", title: "d", unifiedDiff: "+a", partial: true }] })), true);
+});
+
+test("the guard key moves with section CONTENT, not only its count", () => {
+  const a = toolApprovalGuardKey(parsed({}));
+  assert.equal(toolApprovalGuardKey(parsed({})), a);
+  assert.notEqual(toolApprovalGuardKey(parsed({ sections: [{ kind: "code", title: "run.sh", text: "rm -rf ~" }] })), a);
+  assert.notEqual(toolApprovalGuardKey(parsed({ reason: "because" })), a);
+});
+
+test("pointer clicks are ignored inside the pointer guard; keyboard activation is not a pointer click", () => {
+  assert.equal(toolApprovalPointerGuarded({ detail: 1, now: TOOL_APPROVAL_POINTER_GUARD_MS - 1, shownAt: 0 }), true);
+  assert.equal(toolApprovalPointerGuarded({ detail: 2, now: 10, shownAt: 0 }), true);
+  assert.equal(toolApprovalPointerGuarded({ detail: 1, now: TOOL_APPROVAL_POINTER_GUARD_MS, shownAt: 0 }), false);
+  assert.equal(toolApprovalPointerGuarded({ detail: 0, now: 10, shownAt: 0 }), false);
 });
 
 test("every family has its own what-will-change sentence", () => {

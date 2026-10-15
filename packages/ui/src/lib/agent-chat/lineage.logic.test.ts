@@ -138,5 +138,8 @@ describe("opened chats (unified MCP §4.1)", () => {
     const child = (relation: "fork" | "delegate" | "opened") => ({ lineage: { parentThreadId: "p", relation, createdAt: "t" } }) as Pick<SessionSummary, "lineage">;
     assert.equal(lineageChildrenLabel([child("fork"), child("opened"), child("opened")]), "1 fork · 2 opened chats");
     assert.equal(lineageChildrenLabel([child("delegate")]), "1 task");
+    // A newer daemon's relation is counted, in a neutral bucket.
+    const future = { lineage: { parentThreadId: "p", relation: "adopted", createdAt: "t" } } as unknown as Pick<SessionSummary, "lineage">;
+    assert.equal(lineageChildrenLabel([child("fork"), future, future]), "1 fork · 2 other chats");
   });
 });

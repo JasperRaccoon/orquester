@@ -37,12 +37,22 @@ export function lineageRelationNoun(relation: ThreadLineage["relation"] | undefi
   }
 }
 
-/** A parent's children counted by relation: "2 forks · 1 task · 1 opened chat". */
+/**
+ * A parent's children counted by relation: "2 forks · 1 task · 1 opened chat". A relation this
+ * build does not know (a newer daemon's) is counted in a neutral "other chat" bucket, never dropped.
+ */
 export function lineageChildrenLabel(children: readonly Pick<SessionSummary, "lineage">[]): string {
+  const known: readonly ThreadLineage["relation"][] = ["fork", "delegate", "opened"];
   const count = (relation: ThreadLineage["relation"]): number =>
     children.filter((child) => (child.lineage?.relation ?? "fork") === relation).length;
+  const other = children.filter((child) => !known.includes(child.lineage?.relation ?? "fork")).length;
   const plural = (n: number, noun: string): string | null => (n > 0 ? `${n} ${noun}${n === 1 ? "" : "s"}` : null);
-  return [plural(count("fork"), "fork"), plural(count("delegate"), "task"), plural(count("opened"), "opened chat")]
+  return [
+    plural(count("fork"), "fork"),
+    plural(count("delegate"), "task"),
+    plural(count("opened"), "opened chat"),
+    plural(other, "other chat")
+  ]
     .filter((part): part is string => part !== null)
     .join(" · ");
 }

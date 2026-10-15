@@ -344,12 +344,70 @@ export function toolApprovalGuardKey(card: ParsedToolApprovalSummary, previewRev
     card.approvalId,
     card.title,
     card.scope.label,
+    card.scope.projects ?? [],
+    card.reason ?? "",
     card.grantOptions,
     card.secretFields.map((field) => field.key),
     card.sections.length,
+    // The sections' content, not just their count: an edited command under the same shape is a change.
+    contentHash(JSON.stringify(card.sections)),
     card.fullPreview,
     previewRevision
   ]);
+}
+
+/** FNV-1a (32-bit) of a string, hex: a cheap change detector, not a security measure. */
+export function contentHash(text: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+/**
+ * How long a POINTER activation of Approve (or a grant row) is ignored after the card appears or
+ * its content changes: the second click of a double click aimed at the previous card's Approve
+ * must not approve the card that just mounted under the pointer.
+ */
+export const TOOL_APPROVAL_POINTER_GUARD_MS = 800;
+
+/** Whether a click is a pointer click (`detail ≥ 1`; keyboard activation is 0) inside the pointer guard. */
+export function toolApprovalPointerGuarded(input: { detail: number; now: number; shownAt: number }): boolean {
+  return input.detail > 0 && input.now - input.shownAt < TOOL_APPROVAL_POINTER_GUARD_MS;
+}
+
+/**
+ * Whether the card's preview was cut for the summary — `fullPreview`, or any section marked
+ * `partial` — so the whole preview must be loaded (by the user opening "View all") before
+ * approving (coordinator ruling on spec §7.1 MUST 5).
+ */
+export function toolApprovalPreviewIsCut(card: Pick<ParsedToolApprovalSummary, "fullPreview" | "sections">): boolean {
+  return (
+    card.fullPreview ||
+    card.sections.some((section) => (section.kind === "text" || section.kind === "code" || section.kind === "diff") && section.partial === true)
+  );
+}
+
+/** Why Approve is disabled, for its tooltip; null when it is not. */
+export function toolApprovalApproveBlockedReason(input: {
+  card: Pick<ParsedToolApprovalSummary, "secretFields" | "kind" | "family">;
+  secrets: Readonly<Record<string, string>>;
+  submitting: boolean;
+  expired: boolean;
+  previewComplete: boolean;
+}): string | null {
+  if (input.submitting) return "Sending your answer…";
+  if (input.expired) return "This approval has expired";
+  if (input.card.kind === "unknown" || input.card.family === "unknown") {
+    return "This approval comes from a newer Orquester: open it on an updated client to approve";
+  }
+  if (!input.previewComplete) return "Open “View all” to load the whole preview before approving";
+  if (!input.card.secretFields.every((field) => (input.secrets[field.key] ?? "").length > 0)) {
+    return "Fill in every secret field first";
+  }
+  return null;
 }
 
 /** "Expires in 29 min" / "Expires in 40 s" / "Expired", from the card's deadline. */
@@ -376,17 +434,17 @@ export function toolApprovalAnswerFailure(status: number | null): { text: string
 }
 
 /**
- * A card is ready to approve: not expired, nothing in flight, every asked secret typed — and of a
- * kind this client knows: a newer daemon's card can only be denied here (fail closed; its caution
- * says to use an updated client).
+ * A card is ready to approve: not expired, nothing in flight, every asked secret typed, the whole
+ * preview loaded when the summary was cut (`previewComplete`) — and of a kind this client knows: a
+ * newer daemon's card can only be denied here (fail closed; its caution says to use an updated
+ * client). Grant rows follow the same rule.
  */
 export function toolApprovalCanApprove(input: {
   card: Pick<ParsedToolApprovalSummary, "secretFields" | "kind" | "family">;
   secrets: Readonly<Record<string, string>>;
   submitting: boolean;
   expired: boolean;
+  previewComplete: boolean;
 }): boolean {
-  if (input.submitting || input.expired) return false;
-  if (input.card.kind === "unknown" || input.card.family === "unknown") return false;
-  return input.card.secretFields.every((field) => (input.secrets[field.key] ?? "").length > 0);
+  return toolApprovalApproveBlockedReason(input) === null;
 }

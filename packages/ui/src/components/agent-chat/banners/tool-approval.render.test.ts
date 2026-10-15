@@ -115,6 +115,23 @@ test("a long section is clamped behind View all; a cut summary offers to load th
   });
   assert.match(cut, /data-load-full=""/);
   assert.match(cut, /data-view-all=""/, "a partial section offers View all even when short");
+  // A clamped block says so in its accessible name.
+  assert.match(html, /aria-label="hook\.sh \(shortened: View all shows the rest\)"/);
+});
+
+test("a cut preview keeps Approve and the grant menu disabled, saying why, until the whole preview is loaded", () => {
+  const blocked = /<button\b[^>]*disabled=""[^>]*data-approve=""[^>]*title="Open “View all” to load the whole preview before approving"/;
+  const cutSummary = render({
+    card: card({ fullPreview: true, family: "desktops", grantOptions: ["chat"], sections: [{ kind: "text", text: "start…", partial: true }] })
+  });
+  assert.match(cutSummary, blocked);
+  assert.match(cutSummary, /<button\b[^>]*disabled=""[^>]*title="Open “View all”[^"]*"[^>]*data-grant-menu=""/);
+  // A partial section alone (the summary flag missing) is cut too.
+  assert.match(render({ card: card({ sections: [{ kind: "code", title: "x", text: "y", partial: true }] }) }), blocked);
+  // On a phone as well.
+  assert.match(render({ isMobile: true, card: card({ fullPreview: true, sections: [{ kind: "text", text: "s", partial: true }] }) }), blocked);
+  // An uncut preview does not wait.
+  assert.doesNotMatch(render(), /<button\b[^>]*disabled=""[^>]*data-approve=""/);
 });
 
 test("the grant menu exists only when the daemon offered grants", () => {
@@ -163,8 +180,10 @@ test("a newer daemon's card can only be denied here", () => {
 
 test("on a phone the preview goes behind a sheet; the flags stay on the card", () => {
   const html = render({ isMobile: true });
-  assert.match(html, /Review what will run \(8 parts\)/);
+  assert.match(html, /Review what will run \(8 parts, 3 flags\)/);
   assert.match(html, /data-file-flag="executable"/);
+  // The card's copy of the flags is for the eye: screen readers get them once, in the sheet.
+  assert.match(html, /<div aria-hidden="true" data-flags-duplicate="">/);
   assert.match(html, /data-warning="danger"/);
   assert.doesNotMatch(html, /data-preview-section="code"/);
 });
