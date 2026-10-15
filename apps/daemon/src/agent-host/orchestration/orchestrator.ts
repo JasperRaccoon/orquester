@@ -2979,6 +2979,19 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     return (runtime.state.turns ?? []).some((turn: Turn) => !SETTLED_TURN_STATES.has(turn.state));
   };
 
+  /**
+   * Idle as the daemon's delivery queue reads it (`lineage.ts` `acceptsMessage`): no turn active
+   * or requested-but-unstarted (`turnIsActive`), no session starting or running, no compaction in
+   * flight or turns queued behind one, no approval or question open. The `ifIdle` precondition.
+   */
+  const threadIdleForDelivery = (runtime: ThreadRuntime): boolean => {
+    const session = currentSession(runtime);
+    if (turnIsActive(runtime) || session.status === "starting" || session.status === "running") return false;
+    if (runtime.compacting || runtime.queuedTurns.length > 0) return false;
+    const pending = runtime.state.pending;
+    return (pending?.approvals.length ?? 0) === 0 && (pending?.userInputs.length ?? 0) === 0;
+  };
+
   const decideCompaction = (
     runtime: ThreadRuntime,
     commandId: string,
@@ -3171,7 +3184,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         // queue posts a reply-bound message or a reply only as a NEW turn, never a steer. With a
         // turn active the command is refused — not recorded, so the same id may be posted again at
         // the next idle point. An older host ignores the field (the race window stays there).
-        if (body.ifIdle === true && session.activeTurnId !== null) {
+        if (body.ifIdle === true && !threadIdleForDelivery(runtime)) {
           throw new TurnNotIdleRefusal();
         }
         runtime.lastInteractionMode = interactionMode;

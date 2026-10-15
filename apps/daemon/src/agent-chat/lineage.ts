@@ -477,11 +477,11 @@ export class LineageService {
       if (!current) return this.settledOutcome(mergeId);
       // A reply-bound `message` is a turn of its own, never a steer (§8.3): with the target busy,
       // "Deliver now" is refused and the message stays queued for its next idle point.
-      if (current.kind === "message" && !(await this.isIdle(api, current.parentSessionId))) {
+      if (isReplyBoundMessage(current) && !(await this.isIdle(api, current.parentSessionId))) {
         throw new LineageError("That chat is working; the message is delivered at its next idle point.", "TARGET_BUSY");
       }
       // A reply delivered now may join a running turn: it is plain text for the requester.
-      const sent = await this.deliver(api, current, { steer: current.kind !== "message" });
+      const sent = await this.deliver(api, current, { steer: !isReplyBoundMessage(current) });
       if (sent.kind === "busy") {
         throw new LineageError("That chat is working; the message is delivered at its next idle point.", "TARGET_BUSY");
       }
@@ -590,7 +590,9 @@ export class LineageService {
           ...(Array.isArray(attachments) && attachments.length > 0 ? { attachments } : {}),
           // The exchange the turn belongs to (§8.4); socket-trusted, this is the daemon itself.
           ...(entry.causedBy ? { causedBy: entry.causedBy } : {}),
-          ...((entry.kind === "message" || entry.kind === "reply") && opts.steer !== true ? { ifIdle: true } : {})
+          ...((entry.kind === "message" || entry.kind === "reply") && entry.subscriptionId !== undefined && opts.steer !== true
+            ? { ifIdle: true }
+            : {})
         }
       });
       if (res.status < 400) return { kind: "sent", seq: (res.body as { seq?: number } | null)?.seq ?? 0, commandId };
@@ -686,10 +688,17 @@ export class LineageService {
     const entry = this.outbox.entries.find((other) => other.mergeId === mergeId);
     if (!entry) return false;
     return this.lane(entry.parentSessionId, async () => {
-      if (!this.outbox.entries.some((other) => other.mergeId === mergeId)) return false;
-      this.outbox.entries = this.outbox.entries.filter((other) => other.mergeId !== mergeId);
-      this.retryAt.delete(mergeId);
-      return this.persist([entry.parentSessionId, entry.childSessionId]);
+      const index = this.outbox.entries.findIndex((other) => other.mergeId === mergeId);
+      if (index === -1) return false;
+      const [taken] = this.outbox.entries.splice(index, 1);
+      if (await this.persist([entry.parentSessionId, entry.childSessionId])) {
+        this.retryAt.delete(mergeId);
+        return true;
+      }
+      // Not written: it stays queued (in memory and on disk) and is delivered as before.
+      this.outbox.entries.splice(index, 0, taken!);
+      this.publish([entry.parentSessionId, entry.childSessionId]);
+      return false;
     });
   }
 
@@ -901,6 +910,11 @@ async function writeAtomic(path: string, content: string): Promise<void> {
     await rm(tmp, { force: true }).catch(() => undefined);
     throw error;
   }
+}
+
+/** A `message` entry a reply subscription is bound to: a turn of its own, never a steer (§8.3). */
+function isReplyBoundMessage(entry: MergeOutboxEntry): boolean {
+  return entry.kind === "message" && entry.subscriptionId !== undefined;
 }
 
 function pendingOf(entry: MergeOutboxEntry): PendingMergeBack {

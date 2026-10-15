@@ -85,4 +85,67 @@ describe("causedBy on turn commands", () => {
     assert.equal(starts(host, threadId).length, 1);
     await host.stop();
   });
+
+  it("ifIdle: a turn requested but not yet started (no settle in between) is not idle — never a steer into the user's turn", async () => {
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    // The user's turn: no settle, so it may still be the pending row (sendTurn not returned).
+    const user = host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "the user's turn" });
+    const id = cmd();
+    await assert.rejects(
+      host.orchestrator.command(threadId, "turn", { commandId: id, input: "a reply-bound message", ifIdle: true }),
+      (error: unknown) => isAgentChatCommandError(error) && (error.detail as { reason?: unknown } | undefined)?.reason === "turn-not-idle"
+    );
+    await user;
+    await host.settle();
+    const userMessages = (host.store.logs.get(threadId) ?? []).filter(
+      (event) => event.type === "thread.message-sent" && (event.payload as { role?: string }).role === "user"
+    );
+    assert.equal(userMessages.length, 1, "the message never joined the user's turn");
+    assert.equal(host.store.receipts.has(id), false);
+    await host.stop();
+  });
+
+  it("ifIdle: a turn queued behind a compaction is not idle", async () => {
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "first" });
+    await host.settle();
+    await host.orchestrator.ingestionSink(threadId, [
+      {
+        eventId: "settle",
+        threadId,
+        type: "thread.session-set",
+        payload: { session: { status: "ready", activeTurnId: null } },
+        occurredAt: host.clock.nowIso(),
+        commandId: null,
+        causationEventId: null,
+        metadata: {}
+      }
+    ] as never);
+    let releaseCompact: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      releaseCompact = () => resolve();
+    });
+    const compact = host.adapter.compact.bind(host.adapter);
+    host.adapter.compact = async (id: string) => {
+      await gate;
+      return compact(id);
+    };
+    await host.orchestrator.command(threadId, "compact", { commandId: cmd() });
+    await new Promise((resolve) => setImmediate(resolve));
+    await assert.rejects(
+      host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "during compaction", ifIdle: true }),
+      (error: unknown) => isAgentChatCommandError(error) && (error.detail as { reason?: unknown } | undefined)?.reason === "turn-not-idle"
+    );
+    // A user turn is queued behind it; still not idle for a reply-bound one.
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "queued by the user" });
+    await assert.rejects(
+      host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "behind the queue", ifIdle: true }),
+      (error: unknown) => isAgentChatCommandError(error)
+    );
+    releaseCompact();
+    await host.settle();
+    await host.stop();
+  });
 });

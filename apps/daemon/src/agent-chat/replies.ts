@@ -62,6 +62,8 @@ import {
   type ComposerContextRecord,
   type ReplySubscriptionResponse,
   type ReplyWaitResponse,
+  THREAD_HISTORY_MAX_TURNS,
+  type ThreadHistoryPage,
   type ThreadReadResponse,
   type ThreadSnapshotPayload,
   type Turn
@@ -167,7 +169,7 @@ interface Posted {
   steered?: true;
 }
 
-type Sub = ReplySubscriptionRecord & { posted?: Posted; ended?: Ended; toTitle?: string };
+type Sub = ReplySubscriptionRecord & { posted?: Posted; ended?: Ended; toTitle?: string; answeredNotice?: string };
 
 /** What a bound turn (or its absence) produced. */
 export type ReplyResult =
@@ -208,6 +210,8 @@ const TURN_COMMAND_EVENTS = 3;
 const DONE_MEMORY = 200;
 const MAX_IDEMPOTENCY_KEY_CHARS = 180;
 const MAX_WAIT_SECONDS = 600;
+/** History pages read looking for a bound turn below the snapshot's window. */
+const HISTORY_PAGES = 5;
 /** A subscription open this long ends with a notice and frees its slot (no reply came). */
 export const MAX_SUBSCRIPTION_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 /** A posted message whose turn could not be identified (no readable receipt events, no fallback match) for this long ends with a notice. */
@@ -236,6 +240,8 @@ export class ReplyRouter implements DeliveryListener {
   private readonly evalQueued = new Set<string>();
   /** Deliveries being handed to the queue right now: never twice at once. */
   private readonly handing = new Set<string>();
+  /** `claimed-by-router` subscriptions being resumed right now. */
+  private readonly resuming = new Set<string>();
   /** Per target, the summary fields last evaluated on: an event that changes none of them reads nothing. */
   private readonly seen = new Map<string, string>();
 
@@ -497,6 +503,9 @@ export class ReplyRouter implements DeliveryListener {
       throw new ReplyError(`timeoutSeconds must be a whole number from 1 to ${MAX_WAIT_SECONDS}.`, "INVALID_COMMAND");
     }
     if (sub.state === "notify") return { outcome: "notify", reason: "timeout", willNotify: true };
+    if (sub.state === "done" && sub.ended !== "delivered" && sub.ended !== undefined) {
+      return this.answerForEnded(sub);
+    }
     if (sub.state === "claimed-by-router" || sub.state === "done") {
       if (sub.ended === "closed") return { outcome: "closed" };
       // The turn settled before this waiter attached: the reply was queued for the requester —
@@ -555,6 +564,24 @@ export class ReplyRouter implements DeliveryListener {
       else opts.signal?.addEventListener("abort", onAbort, { once: true });
       void this.evaluate(sub.toThreadId);
     });
+  }
+
+  /**
+   * What a wait on a subscription that already ended answers, truthfully: the reply again when a
+   * wait already took it (it is never delivered as a message too); `closed`; or, for one that
+   * ended without a reply (dropped, refused, discarded), a `failed` answer saying no reply comes.
+   */
+  private async answerForEnded(sub: Sub): Promise<ReplyWaitResponse> {
+    if (sub.ended === "closed") return { outcome: "closed" };
+    if (sub.ended === "waiter" && sub.answeredNotice !== undefined) {
+      return { outcome: "replied", turnId: null, state: "failed", error: sub.answeredNotice };
+    }
+    if (sub.ended === "waiter" && !sub.posted?.steered) {
+      const result = await this.resultFor(sub);
+      if (result) return waitResponseOf(result);
+      return { outcome: "replied", turnId: sub.turnId ?? null, state: "failed", error: "This reply was already returned to an earlier wait; no message will follow." };
+    }
+    return { outcome: "replied", turnId: null, state: "failed", error: "This exchange ended without a reply; no message will follow." };
   }
 
   /**
@@ -634,7 +661,8 @@ export class ReplyRouter implements DeliveryListener {
       commandId,
       seq,
       at: this.stamp(),
-      inputHash: hashText(entry.input),
+      // The host stores the text trimmed (`parseTurnInput`): hashed as it will be read back.
+      inputHash: hashText(entry.input.trim()),
       ...(binding.messageId !== undefined ? { messageId: binding.messageId } : {}),
       ...(binding.steeredTurnId !== undefined ? { steered: true as const } : {})
     };
@@ -717,6 +745,16 @@ export class ReplyRouter implements DeliveryListener {
    * result read again — at boot and on every safety re-check, so it is never stranded.
    */
   private async resumeClaimed(sub: Sub): Promise<void> {
+    if (this.resuming.has(sub.id)) return;
+    this.resuming.add(sub.id);
+    try {
+      await this.resumeClaimedNow(sub);
+    } finally {
+      this.resuming.delete(sub.id);
+    }
+  }
+
+  private async resumeClaimedNow(sub: Sub): Promise<void> {
     const delivery = this.outbox.deliveries.find((d) => d.subscriptionId === sub.id);
     if (delivery) {
       if (delivery.state === "pending") await this.hand(delivery);
@@ -744,7 +782,55 @@ export class ReplyRouter implements DeliveryListener {
       return null;
     }
     const turn = this.boundTurn(sub, snap);
-    return turn && SETTLED_TURN_STATES.has(turn.state) ? resultOf(snap, turn) : null;
+    if (turn) return SETTLED_TURN_STATES.has(turn.state) ? resultOf(snap, turn) : null;
+    const outside = await this.lookOutsideWindow(api, sub, snap);
+    return outside.kind === "found" ? outside.result : null;
+  }
+
+  /**
+   * A bound turn missing from the snapshot may only have left its retained window (lazy boot,
+   * retention): looked up in the indexed history (`GET …/history`, a few pages) before anything is
+   * concluded. `found` (with its result once it settled — the index records completion, not the
+   * end state, so a settled one reads `completed`), `absent` (the thread holds no such turn: no
+   * older history, or every page read), or `unknown` (no usable index, or not reached).
+   */
+  private async lookOutsideWindow(
+    api: DaemonApi,
+    sub: Sub,
+    snap: ThreadSnapshotPayload
+  ): Promise<{ kind: "found"; result: ReplyResult | null } | { kind: "absent" } | { kind: "unknown" }> {
+    const messageId = sub.posted?.messageId;
+    if (messageId === undefined && sub.turnId === undefined) return { kind: "unknown" };
+    const bounds = snap.history;
+    if (!bounds || !bounds.hasOlder) return { kind: "absent" };
+    if (!bounds.indexed) return { kind: "unknown" };
+    let cursor = bounds.beforeCursor;
+    for (let page = 0; cursor !== null && page < HISTORY_PAGES; page += 1) {
+      let body: ThreadHistoryPage;
+      try {
+        const res = await api.request("GET", agentChatRoutes.history(sub.toThreadId), {
+          query: { before: cursor, turns: String(THREAD_HISTORY_MAX_TURNS) }
+        });
+        if (res.status >= 400) return { kind: "unknown" };
+        body = res.body as ThreadHistoryPage;
+      } catch {
+        return { kind: "unknown" };
+      }
+      const turn = body.turns.find(
+        (candidate) => (sub.turnId !== undefined && candidate.turnId === sub.turnId) || (messageId !== undefined && candidate.userMessageId === messageId)
+      );
+      if (turn) {
+        return {
+          kind: "found",
+          result:
+            turn.completedAt === null
+              ? null
+              : { kind: "turn", turnId: turn.turnId, state: "completed", reply: assistantTextForTurn(body.items, turn.turnId).trim() }
+        };
+      }
+      cursor = body.page.beforeCursor;
+    }
+    return cursor === null ? { kind: "absent" } : { kind: "unknown" };
   }
 
   /**
@@ -818,6 +904,17 @@ export class ReplyRouter implements DeliveryListener {
       if (!sub.posted || sub.posted.steered || (sub.state !== "waiting" && sub.state !== "notify")) continue;
       const turn = this.boundTurn(sub, snap);
       if (!turn) {
+        if (sub.posted.messageId !== undefined || sub.turnId !== undefined) {
+          const outside = await this.lookOutsideWindow(api, sub, snap);
+          if (outside.kind === "found") {
+            if (outside.result) {
+              const deliver = await this.claim(sub, outside.result);
+              await deliver();
+            }
+            continue;
+          }
+          if (outside.kind === "unknown") continue;
+        }
         if (this.bindingLost(sub, snap)) {
           // Rewound away, or never identifiable: no reply will come for it.
           const deliver = await this.claim(sub, { kind: "notice", text: this.noticeText("lost", sub) });
@@ -870,7 +967,7 @@ export class ReplyRouter implements DeliveryListener {
       if (turn.causedBy?.threadId !== sub.fromThreadId || turn.causedBy.exchangeId !== sub.exchange.id || turn.causedBy.hop !== sub.exchange.hop) return false;
       if (turn.turnId !== null && held.has(turn.turnId)) return false;
       const text = textOf(turn.userMessageId);
-      return text !== undefined && hashText(text) === inputHash;
+      return text !== undefined && hashText(text.trim()) === inputHash;
     });
   }
 
@@ -936,6 +1033,7 @@ export class ReplyRouter implements DeliveryListener {
       if (waiter.live) {
         waiter.resolve(result);
         this.finish(sub, result.kind === "closed" ? "closed" : "waiter");
+        if (result.kind === "notice") sub.answeredNotice = result.text;
         await this.persist();
         return nothing;
       }
@@ -951,6 +1049,10 @@ export class ReplyRouter implements DeliveryListener {
    */
   private async claimForRouter(sub: Sub, result: ReplyResult): Promise<() => Promise<void>> {
     const nothing = async (): Promise<void> => undefined;
+    // One delivery per subscription, whoever claims (a boot reconciliation and a re-check may
+    // resume the same claim at once): an existing record is handed, never a second one made.
+    const existing = this.outbox.deliveries.find((d) => d.subscriptionId === sub.id);
+    if (existing) return () => this.hand(existing);
     const prior = sub.state;
     if (this.isClosed(sub.fromThreadId)) {
       this.opts.logger?.warn?.("[replies] the requester closed before its reply arrived; dropped", { subscriptionId: sub.id });

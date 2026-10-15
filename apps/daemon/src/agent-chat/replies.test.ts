@@ -11,8 +11,9 @@
  */
 
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -45,6 +46,8 @@ interface FakeThread {
   items: ThreadItem[];
   events: Array<{ seq: number; type: string; commandId: string | null; payload: Record<string, unknown> }>;
   asking: boolean;
+  /** Turns below the snapshot's retained window, served by `GET …/history` only. */
+  archived: Turn[];
 }
 
 interface Post {
@@ -89,7 +92,7 @@ function fakeHost() {
   const thread = (id: string): FakeThread => {
     let t = threads.get(id);
     if (!t) {
-      t = { seq: 1, turns: [], items: [], events: [], asking: false };
+      t = { seq: 1, turns: [], items: [], events: [], asking: false, archived: [] };
       threads.set(id, t);
     }
     return t;
@@ -105,7 +108,10 @@ function fakeHost() {
       checkpoints: [],
       pending: { approvals: [], userInputs: t.asking ? [{ requestId: "q1" }] : [] },
       roster: [],
-      seq: t.seq
+      seq: t.seq,
+      ...(t.archived.length > 0
+        ? { history: { indexed: true, hasOlder: true, beforeCursor: "older-1", oldestRetainedOrdinal: t.archived.length + 1, totalTurns: t.archived.length + t.turns.length } }
+        : {})
     } as unknown as ThreadSnapshotPayload;
   };
   const touch = (id: string, type = "updated"): void => {
@@ -138,6 +144,29 @@ function fakeHost() {
         }
         snapshotReads.set(id, (snapshotReads.get(id) ?? 0) + 1);
         return { status: 200, body: { kind: "snapshot", thread: snapshotOf(id) } };
+      }
+      const history = /^\/api\/sessions\/([^/]+)\/history$/.exec(path);
+      if (method === "GET" && history) {
+        const t = thread(decodeURIComponent(history[1]!));
+        return {
+          status: 200,
+          body: {
+            threadId: history[1],
+            turns: t.archived.map((turn, i) => ({
+              turnId: turn.turnId,
+              ordinal: i + 1,
+              userMessageId: turn.userMessageId ?? null,
+              requestedAt: "t",
+              startedAt: "t",
+              completedAt: turn.completedAt,
+              rewindable: true
+            })),
+            items: t.items,
+            checkpoints: [],
+            page: { beforeCursor: null },
+            seq: t.seq
+          }
+        };
       }
       const turnPath = /^\/api\/sessions\/([^/]+)\/turn$/.exec(path);
       if (method === "POST" && turnPath) {
@@ -229,6 +258,11 @@ function fakeHost() {
       raceOnNextPost.add(id);
     },
     snapshotReads: (id: string) => snapshotReads.get(id) ?? 0,
+    /** Move the target's oldest turns below the snapshot's window (still in the index). */
+    archive(id: string, count: number): void {
+      const t = thread(id);
+      t.archived.push(...t.turns.splice(0, count));
+    },
     /** Rewind the target past its latest turn: the turn and its user message are gone. */
     rewindLast(id: string): void {
       const t = thread(id);
@@ -1103,6 +1137,142 @@ describe("fix round 1: exchanges", () => {
     w.host.settle("req", { reply: "user's answer" });
     await settled(w);
     assert.deepEqual(postsTo(w.host, "req")[0]!.body.causedBy, { threadId: "tgt", exchangeId: "ex-1", hop: 5 });
+    await w.cleanup();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 2
+// ---------------------------------------------------------------------------
+
+const hash32 = (text: string): string => createHash("sha256").update(text).digest("hex").slice(0, 32);
+
+describe("fix round 2", () => {
+  it("a bound turn that left the snapshot's window is looked up in the history, not declared lost", async () => {
+    const w = await world();
+    await w.router.subscribe("tgt", request("notify"));
+    await settled(w);
+    // Lazy boot / retention: the bound turn is below the window now, still running.
+    w.host.archive("tgt", 1);
+    w.host.userTurn("tgt", "newer");
+    w.host.touch("tgt");
+    await settled(w);
+    assert.equal(w.router.deliveries().length, 0, "not lost: the index still has it, unsettled");
+    assert.equal(w.router.subscriptions()[0]!.state, "notify");
+    // It settles (the index records completion), with its reply.
+    const t = w.host.thread("tgt");
+    const bound = t.archived[0]!;
+    bound.state = "completed";
+    bound.completedAt = "t2";
+    t.items.push({ kind: "message", id: "a-old", role: "assistant", text: "From the index.", turnId: bound.turnId, streaming: false, createdAt: "t", updatedAt: "t" } as ThreadItem);
+    w.host.settle("tgt", { reply: "the newer turn" });
+    await settled(w);
+    assert.equal(parseThreadMessage(w.router.deliveries()[0]!.input)?.body, "From the index.");
+    await w.cleanup();
+  });
+
+  it("Deliver now on a message no reply waits for may steer as before (only reply-bound messages are TARGET_BUSY)", async () => {
+    const w = await world();
+    w.host.userTurn("tgt");
+    await w.queue.enqueue({
+      mergeId: "plain-1",
+      parentSessionId: "tgt",
+      childSessionId: "req",
+      input: "no reply wanted",
+      queuedAt: "t",
+      state: "queued",
+      attempts: 0,
+      kind: "message"
+    });
+    const res = await w.queue.actOnMerge("tgt", "plain-1", { action: "deliver" });
+    assert.equal(res.outcome, "sent");
+    const post = postsTo(w.host, "tgt")[0]!;
+    assert.equal("ifIdle" in post.body, false, "no precondition for a message no reply is bound to");
+    await w.cleanup();
+  });
+
+  it("the fallback match compares the trimmed text the host stores", async () => {
+    const host = fakeHost();
+    host.sessions.set("req", summary("req"));
+    host.sessions.set("tgt", summary("tgt"));
+    host.thread("req");
+    // The host trims the input; the subscription hashed it trimmed too.
+    await host.api.request("POST", "/api/sessions/tgt/turn", { body: { commandId: "c-3", input: "Review it.", causedBy: exchange() } });
+    host.settle("tgt", { reply: "Matched by text." });
+    const outbox = {
+      version: 1,
+      subscriptions: [
+        { id: "s-3", fromThreadId: "req", toThreadId: "tgt", commandId: "c-3", queueEntryId: "c-3", state: "notify", interactionMode: "default", exchange: { id: "ex-1", hop: 1 }, createdAt: new Date().toISOString(), posted: { commandId: "c-3", seq: 3, at: new Date().toISOString(), inputHash: hash32("Review it.") } }
+      ],
+      deliveries: []
+    };
+    const w = await world({ host, replyOutbox: JSON.stringify(outbox) });
+    await settled(w);
+    assert.equal(parseThreadMessage(w.router.deliveries()[0]!.input)?.body, "Matched by text.");
+    await w.cleanup();
+  });
+
+  it("two resumes of one claimed-by-router subscription at once make one delivery", async () => {
+    const host = fakeHost();
+    host.sessions.set("req", summary("req"));
+    host.sessions.set("tgt", summary("tgt"));
+    host.thread("req");
+    await host.api.request("POST", "/api/sessions/tgt/turn", { body: { commandId: "c-4", input: "Review", causedBy: exchange() } });
+    host.settle("tgt", { reply: "One." });
+    const outbox = {
+      version: 1,
+      subscriptions: [
+        { id: "s-4", fromThreadId: "req", toThreadId: "tgt", commandId: "c-4", queueEntryId: "c-4", state: "claimed-by-router", interactionMode: "default", exchange: { id: "ex-1", hop: 1 }, createdAt: "t", posted: { commandId: "c-4", seq: 3, messageId: "msg-1" } }
+      ],
+      deliveries: []
+    };
+    const w = await world({ host, replyOutbox: JSON.stringify(outbox) });
+    const internals = w.router as unknown as { resumeClaimed(sub: unknown): Promise<void>; claimForRouter(sub: unknown, r: unknown): Promise<() => Promise<void>> };
+    const sub = w.router.subscriptions()[0]!;
+    await Promise.all([internals.resumeClaimed(sub), internals.resumeClaimed(sub)]);
+    // Even two direct claims (different callers) never make a second record.
+    await internals.claimForRouter(sub, { kind: "turn", turnId: "turn-1", state: "completed", reply: "One." });
+    await settled(w);
+    assert.equal(w.router.deliveries().length, 1);
+    assert.equal(postsTo(host, "req").length, 1);
+    await w.cleanup();
+  });
+
+  it("a second wait after a take-back answers truthfully: the same reply, and no message follows", async () => {
+    const w = await world();
+    w.host.userTurn("req");
+    const res = await w.router.subscribe("tgt", request("wait"));
+    await settled(w);
+    w.host.settle("tgt", { reply: "Early." });
+    await settled(w);
+    assert.equal((await w.router.wait("tgt", res.subscriptionId, { timeoutSeconds: 60 })).outcome, "replied");
+    const again = await w.router.wait("tgt", res.subscriptionId, { timeoutSeconds: 60 });
+    assert.deepEqual(again, { outcome: "replied", turnId: "turn-1", state: "completed", reply: "Early." });
+    w.host.settle("req", {});
+    await settled(w);
+    assert.equal(postsTo(w.host, "req").length, 0);
+    await w.cleanup();
+  });
+
+  it("a take-back whose queue write fails leaves the reply queued, delivered without a restart", async () => {
+    const w = await world();
+    w.host.userTurn("req");
+    const res = await w.router.subscribe("tgt", request("wait"));
+    await settled(w);
+    w.host.settle("tgt", { reply: "Kept." });
+    await settled(w);
+    const delivery = w.router.deliveries()[0]!;
+    // The merge outbox cannot be written now.
+    await rm(w.mergeFile, { force: true });
+    await mkdir(join(w.mergeFile, "blocked"), { recursive: true });
+    assert.equal(await w.queue.retract(delivery.queueEntryId!), false);
+    assert.equal(w.queue.has(delivery.queueEntryId!), true, "restored in memory");
+    // So the late waiter is told it comes as a message — and it does.
+    assert.deepEqual(await w.router.wait("tgt", res.subscriptionId, { timeoutSeconds: 60 }), { outcome: "notify", reason: "timeout", willNotify: true });
+    await rm(w.mergeFile, { recursive: true, force: true });
+    w.host.settle("req", {});
+    await settled(w);
+    assert.equal(parseThreadMessage(postsTo(w.host, "req")[0]!.body.input as string)?.body, "Kept.");
     await w.cleanup();
   });
 });
