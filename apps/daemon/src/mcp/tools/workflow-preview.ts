@@ -292,6 +292,84 @@ export function unionGrantFields(union: WorkflowUnion): { childWorkflowIds?: str
 }
 
 // ---------------------------------------------------------------------------
+// Callers: the workflows that run one as a sub-workflow (final review: the reverse direction)
+// ---------------------------------------------------------------------------
+
+export interface WorkflowCaller {
+  workflowId: string;
+  name: string;
+  enabled: boolean;
+}
+
+/**
+ * Every workflow that runs `workflowId` as a sub-workflow, directly or through others (the reverse
+ * of the union's children): a change to it changes what they run. Reads every definition (the list
+ * carries no blocks). Null when they cannot be read — the caller fails closed (`ungrantable`).
+ */
+export async function workflowCallers(api: DaemonApi, workflowId: string): Promise<WorkflowCaller[] | null> {
+  const listed = await api.request("GET", workflowRoutes.list);
+  if (listed.status >= 400) return null;
+  const callersOf = new Map<string, Set<string>>();
+  const info = new Map<string, WorkflowCaller>();
+  for (const summary of (listed.body as ListWorkflowsResponse).workflows ?? []) {
+    if (summary.id === workflowId) continue;
+    const res = await api.request("GET", workflowRoutes.workflow(summary.id));
+    if (res.status === 404) continue; // deleted meanwhile
+    if (res.status >= 400) return null;
+    const workflow = (res.body as GetWorkflowResponse).workflow;
+    info.set(workflow.id, { workflowId: workflow.id, name: workflow.name, enabled: workflow.enabled });
+    for (const child of membersOf(workflow).childIds) {
+      const set = callersOf.get(child) ?? new Set<string>();
+      set.add(workflow.id);
+      callersOf.set(child, set);
+    }
+  }
+  const found: WorkflowCaller[] = [];
+  const seen = new Set<string>([workflowId]);
+  let frontier = [workflowId];
+  while (frontier.length > 0) {
+    const next: string[] = [];
+    for (const id of frontier) {
+      for (const parent of callersOf.get(id) ?? []) {
+        if (seen.has(parent)) continue;
+        seen.add(parent);
+        const caller = info.get(parent);
+        if (caller) found.push(caller);
+        next.push(parent);
+      }
+    }
+    frontier = next;
+  }
+  return found;
+}
+
+/**
+ * The card's part for the workflows that run this one: the fields naming each, and the grant fields
+ * (`callerWorkflowIds`; unreadable → `ungrantable`).
+ */
+export function callerParts(callers: readonly WorkflowCaller[] | null, verb: "change" | "run" | "delete"): { sections: ApprovalPreviewSection[]; grant: { callerWorkflowIds?: string[]; ungrantable?: true } } {
+  if (callers === null) {
+    return {
+      sections: [{ kind: "warning", level: "caution", text: "Orquester could not check which workflows run this one as a sub-workflow, so no grant can cover this call." }],
+      grant: { ungrantable: true }
+    };
+  }
+  if (callers.length === 0) return { sections: [], grant: {} };
+  const effect =
+    verb === "delete" ? "deleting it makes their sub-workflow block fail" : verb === "change" ? "this change changes what they run" : "they run it too";
+  return {
+    sections: [
+      {
+        kind: "fields",
+        title: `Workflows that run it as a sub-workflow (${effect}; a chat grant covers this only if it covers them too)`,
+        rows: callers.map((caller) => ({ label: caller.name, value: `${caller.workflowId}${caller.enabled ? "" : " (disabled)"}` }))
+      }
+    ],
+    grant: { callerWorkflowIds: callers.map((caller) => caller.workflowId) }
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Secrets: a change to what a workflow does with one is never granted (final review)
 // ---------------------------------------------------------------------------
 
@@ -329,11 +407,11 @@ function interpolatesOtherData(node: Pick<WorkflowNode, "type" | "config">): boo
 }
 
 /**
- * Whether a create or an edit changes what the workflow does with a secret — then no grant covers
- * it and the user approves every such call (`ungrantable`): a created workflow with any block that
- * reads a secret; an edit that adds or changes such a block, or makes it newly reachable (`touched`,
- * the graph diff's set), or changes a block upstream of one that also interpolates other blocks'
- * data (that can retarget it: an HTTP URL built from an earlier block's output).
+ * Whether an edit changes what the workflow does with a secret — then no grant covers it and the
+ * user approves every such call (`ungrantable`): an edit that adds or changes a block that reads a
+ * secret, or makes one newly reachable (`touched`, the graph diff's set), or changes a block
+ * upstream of one that also interpolates other blocks' data (that can retarget it: an HTTP URL
+ * built from an earlier block's output). With no `before` (a whole definition), any such block.
  */
 export function changesSecretUse(before: Pick<Workflow, "nodes" | "edges"> | null, after: Pick<Workflow, "nodes" | "edges">, touched: ReadonlySet<string> | null): boolean {
   const users = after.nodes.filter(blockUsesSecrets);

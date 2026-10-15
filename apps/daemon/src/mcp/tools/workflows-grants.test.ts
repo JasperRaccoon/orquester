@@ -52,6 +52,8 @@ function workflowBackend(api: FakeDaemonApi) {
     return { status: 201, body: { workflow, problems: [] } };
   });
   api.on("GET", "/api/workflows/*", () => notFound);
+  // The list (ids are what the callers check reads; each definition comes from its own route).
+  api.on("GET", "/api/workflows", () => ({ status: 200, body: { workflows: [...store.values()].map((w) => ({ id: w.id, name: w.name, enabled: w.enabled, revision: w.revision })) } }));
   const serve = (id: string) => {
     api.on("GET", `/api/workflows/${id}`, () => (store.has(id) ? { status: 200, body: { workflow: store.get(id), problems: [] } } : notFound));
     api.on("POST", `/api/workflows/${id}/patch`, ({ body }) => {

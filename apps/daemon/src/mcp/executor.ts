@@ -479,9 +479,10 @@ async function passCard(
       ...(preview?.workflowReferencedPrompt ? { workflowReferencedPrompt: true } : {})
     };
     let grant = await port.findGrant(query);
-    // Every other workflow the call runs (sub-workflows) must be covered by that same grant.
-    for (const child of grant ? (preview?.childWorkflowIds ?? []) : []) {
-      if ((await port.findGrant({ ...query, workflowId: child }))?.id !== grant!.id) {
+    // Every other workflow the call runs (sub-workflows), and every workflow that runs this one
+    // (callers: a change here changes what they run), must be covered by that same grant.
+    for (const other of grant ? [...(preview?.childWorkflowIds ?? []), ...(preview?.callerWorkflowIds ?? [])] : []) {
+      if ((await port.findGrant({ ...query, workflowId: other }))?.id !== grant!.id) {
         grant = null;
         break;
       }
@@ -517,10 +518,13 @@ async function passCard(
   if (decision.approvalKind === "boundary" && ownProject) named(ownProject.canonical, ownProject.workspace);
   for (const target of facts.targets.filter((t) => decision.approvalKind === "admin" || t.class !== "own")) named(target.project, target.workspace);
   const crossProject = decision.crossProject;
+  // A workflow other workflows run: a grant chosen here could cover it only if the chat's grant
+  // already covers every one of them (one grant for all) — otherwise the card offers none.
+  const callersCovered = port && ownProject !== null ? await callersInOneGrant(port, caller, ownProject.canonical, family, preview) : false;
   const grantOptions =
     // A grant is recorded for the caller's canonical project: none without one (findGrant never
     // honours projectPath ""); a cross-project grant needs its single target.
-    ownProject === null || preview?.ungrantable === true || (decision.approvalKind === "boundary" && decision.family === "cross-project" && !decision.targetProjectPath)
+    ownProject === null || preview?.ungrantable === true || !callersCovered || (decision.approvalKind === "boundary" && decision.family === "cross-project" && !decision.targetProjectPath)
       ? []
       : grantOptionsFor({
           family,
@@ -598,6 +602,33 @@ async function passCard(
     case "cancelled":
       return { kind: "cancelled", reference, ...(outcome.reason ? { reason: outcome.reason } : {}) };
   }
+}
+
+/**
+ * Whether every workflow that runs the card's workflow as a sub-workflow (`callerWorkflowIds`) is
+ * covered by one and the same grant of this chat (the one a grant chosen on the card extends).
+ * True when there are none.
+ */
+async function callersInOneGrant(port: ApprovalPort, caller: ThreadCaller, projectPath: string, family: string, preview: ApprovalPreview | null): Promise<boolean> {
+  const callers = preview?.callerWorkflowIds ?? [];
+  if (callers.length === 0) return true;
+  let id: string | undefined;
+  for (const workflowId of callers) {
+    const grant = await port.findGrant({
+      family,
+      callerRuntimeMode: caller.runtimeMode,
+      workflowOwned: caller.workflowOwned,
+      threadId: caller.threadId,
+      projectPath,
+      projects: [],
+      pendingProjects: 0,
+      workspaceTargets: 0,
+      workflowId
+    });
+    if (!grant || (id !== undefined && grant.id !== id)) return false;
+    id = grant.id;
+  }
+  return true;
 }
 
 /** The tool row's reference without the grant a card chose but that was never recorded. */

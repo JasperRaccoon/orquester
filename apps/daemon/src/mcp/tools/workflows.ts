@@ -94,6 +94,8 @@ import {
   unionGrantFields,
   changesSecretUse,
   SECRET_USE_NOTE,
+  callerParts,
+  workflowCallers,
   workflowFields,
   workflowPin,
   workflowProjectLabel,
@@ -914,13 +916,12 @@ const createWorkflow = defineTool({
     assertSavable(draft, problems);
     const union = await workflowUnion(api, [draft]);
     const prompts = await promptsFor(api, draft, union);
-    // A workflow that reads a secret: no grant covers creating it (nor joining the chat's grant).
-    const secretUse = changesSecretUse(null, draft, null);
+    // (A create always cards — no grant covers a workflow before it exists; its later edits of a
+    // secret-reading block are never granted: `changesSecretUse` on update.)
     const sections: ApprovalPreviewSection[] = [
       ...(draft.enabled ? [{ kind: "warning" as const, level: "caution" as const, text: "Created ENABLED: its schedule and git triggers start firing at once." }] : []),
-      ...(secretUse ? [SECRET_USE_NOTE] : []),
       workflowFields(draft, api.workspacesDir),
-      ...(await unionSections(api, union, ctx.caller, { childrenJoinGrant: !secretUse && (await unionGrantable(api, union, ctx.caller)) })),
+      ...(await unionSections(api, union, ctx.caller, { childrenJoinGrant: await unionGrantable(api, union, ctx.caller) })),
       ...definitionSections(draft, prompts, api.workspacesDir),
       ...problemSections(problems)
     ];
@@ -929,8 +930,7 @@ const createWorkflow = defineTool({
       scopeLabel: unionLabel(union),
       sections,
       pins: previewPins(null, prompts, union),
-      ...unionGrantFields(union),
-      ...(secretUse ? { ungrantable: true as const } : {})
+      ...unionGrantFields(union)
     };
   },
   annotations: MUTATING,
@@ -994,10 +994,13 @@ const updateWorkflow = defineTool({
     const prompts = await promptsFor(api, after, union, only);
     // Adding or changing a block that reads a secret, or retargeting one: never granted.
     const secretUse = changesSecretUse(current, after, diff.touched);
+    // Workflows that run this one: the edit changes what they run (covered only with them).
+    const callers = callerParts(await workflowCallers(api, current.id), "change");
     const sections: ApprovalPreviewSection[] = [
       ...(enables ? [{ kind: "warning" as const, level: "caution" as const, text: "Enables the workflow: its schedule and git triggers start firing." }] : []),
       ...(secretUse ? [SECRET_USE_NOTE] : []),
       ...diff.sections,
+      ...callers.sections,
       { kind: "code", title: "Ops", language: "json", text: JSON.stringify(args.ops, null, 2) },
       workflowFields(after, api.workspacesDir, "The workflow after the change"),
       ...(await unionSections(api, union, ctx.caller, { childrenJoinGrant: !secretUse && (await unionGrantable(api, union, ctx.caller)) })),
@@ -1011,9 +1014,11 @@ const updateWorkflow = defineTool({
       sections,
       workflowId: current.id,
       pins: previewPins(current, prompts, union),
-      // A grant covers the edit only if it covers every sub-workflow it wires in (§7.6).
+      // A grant covers the edit only if it covers every sub-workflow it wires in (§7.6), and every
+      // workflow that runs this one.
       ...unionGrantFields(union),
-      ...(secretUse ? { ungrantable: true as const } : {})
+      ...callers.grant,
+      ...(secretUse || callers.grant.ungrantable ? { ungrantable: true as const } : {})
     };
   },
   annotations: MUTATING,
@@ -1087,6 +1092,7 @@ const deleteWorkflow = defineTool({
     const runs = await countRuns(api, workflow.id);
     const secretsRes = await api.request("GET", workflowRoutes.secrets, { query: { workflowId: workflow.id } });
     const own = secretsRes.status < 400 ? ((secretsRes.body as ListWorkflowSecretsResponse).secrets ?? []).filter((s) => s.scope === "workflow").map((s) => s.name) : [];
+    const callers = callerParts(await workflowCallers(api, workflow.id), "delete");
     return {
       title: `${agentLabel(ctx.caller)} wants to delete the workflow "${workflow.name}"`,
       scopeLabel: unionLabel(union),
@@ -1094,10 +1100,12 @@ const deleteWorkflow = defineTool({
         { kind: "warning", level: "danger", text: `Deletes the workflow for good${runs.active > 0 ? `, cancels its ${runs.active} active run(s)` : ""} and removes its ${runs.total} recorded run(s) and ${own.length} own secret(s). This cannot be undone.` },
         workflowFields(workflow, api.workspacesDir),
         { kind: "fields", title: "Removed with it", rows: [{ label: "Runs", value: String(runs.total) }, { label: "Its own secrets", value: own.length > 0 ? own.join(", ") : "none" }] },
+        ...callers.sections,
         ...(await unionSections(api, union, ctx.caller))
       ],
       workflowId: workflow.id,
       pins: previewPins(workflow, new Map()),
+      ...callers.grant,
       ...(union.missing.length > 0 ? { ungrantable: true } : {})
     };
   },
@@ -1276,7 +1284,9 @@ const runWorkflow = defineTool({
     const inputSection: ApprovalPreviewSection = { kind: "code", title: "Input ({{ trigger.input }})", language: "json", text: inputText };
     const problemParts = problemSections(problems);
     const title = `${agentLabel(ctx.caller)} wants to run the workflow "${workflow.name}"`;
-    const base = { title, scopeLabel: unionLabel(union), workflowId: workflow.id, pins: previewPins(workflow, prompts, union) };
+    // A workflow others run: a grant covers running it only if it covers them too.
+    const callers = callerParts(await workflowCallers(api, workflow.id), "run");
+    const base = { title, scopeLabel: unionLabel(union), workflowId: workflow.id, pins: previewPins(workflow, prompts, union), ...callers.grant };
     const tooLargeInput = () =>
       new ToolError("PREVIEW_TOO_LARGE", "The run input is too large to show the user in one approval card. Pass a smaller input (let a block read the bulk from a file or an earlier block).");
     // The definition that will run, in full: a card only opens for a workflow no grant covers —
@@ -1285,12 +1295,16 @@ const runWorkflow = defineTool({
     const full: ApprovalPreviewSection[] = [
       runFields,
       inputSection,
+      ...callers.sections,
       ...(await unionSections(api, union, ctx.caller, { childrenJoinGrant: grantable })),
       ...definitionSections(workflow, prompts, api.workspacesDir),
       ...problemParts
     ];
     // Measured whole, as the executor measures the card. A grant covers the run only if it covers every sub-workflow it calls (§7.6).
-    if (approvalPreviewBytes(full) <= TOOL_APPROVAL_FULL_PREVIEW_MAX_BYTES) return { ...base, sections: full, ...unionGrantFields(union) };
+    if (approvalPreviewBytes(full) <= TOOL_APPROVAL_FULL_PREVIEW_MAX_BYTES) {
+      const fields = unionGrantFields(union);
+      return { ...base, sections: full, ...fields, ...(fields.ungrantable || callers.grant.ungrantable ? { ungrantable: true as const } : {}) };
+    }
     // Over the cap. The input is the agent's and is never cut: when the definition alone would fit,
     // the input is what is too large — refused, the agent passes a smaller one.
     if (approvalPreviewBytes(full.filter((section) => section !== inputSection)) <= TOOL_APPROVAL_FULL_PREVIEW_MAX_BYTES) throw tooLargeInput();
@@ -1301,6 +1315,7 @@ const runWorkflow = defineTool({
       { kind: "warning", level: "danger", text: "This workflow is too large to show here — open it in Workflows to review every block before approving." },
       runFields,
       inputSection,
+      ...callers.sections,
       ...(await unionSections(api, union, ctx.caller)),
       { kind: "text", title: "Blocks", text: outline.join("\n") || "none" },
       ...(prompts.size > 0

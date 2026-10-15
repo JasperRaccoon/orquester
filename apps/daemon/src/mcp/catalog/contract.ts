@@ -183,6 +183,13 @@ export interface ApprovalPreview {
    * (`grantChosen`) is made for the workflow AND these, so the card must name each of them.
    */
   childWorkflowIds?: string[];
+  /**
+   * `workflows` family: every OTHER workflow that runs `workflowId` as a sub-workflow, directly or
+   * through others (final review: the reverse direction). A change to `workflowId` changes what they
+   * run, so a grant covers the call only when the same grant covers each of them too, and the card
+   * offers a grant only then. Never added to a grant (unlike `childWorkflowIds`).
+   */
+  callerWorkflowIds?: string[];
   /** This call is never covered by a grant and its card offers none (e.g. a scope member that no longer resolves: fail closed). */
   ungrantable?: boolean;
 }

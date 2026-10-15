@@ -38,7 +38,9 @@ async function sandbox(t: { after: (fn: () => Promise<void>) => void }): Promise
   api.on("POST", "/api/workflows/validate", { status: 200, body: { problems: [] } })
     .on("GET", "/api/workspaces", { status: 200, body: [{ name: "acme", path: join(root, "acme"), projectCount: 2, gitAccountId: "acc1" }, { name: "beta", path: join(root, "beta"), projectCount: 1, gitAccount: { label: "beta-bot", login: "betabot", provider: "github" } }] })
     .on("GET", "/api/accounts", { status: 200, body: [{ id: "acc1", label: "acme-bot", login: "acmebot" }] })
-    .on("GET", "/api/saved-prompts", { status: 200, body: { prompts: [] } });
+    .on("GET", "/api/saved-prompts", { status: 200, body: { prompts: [] } })
+    // No other workflow (none runs another as a sub-workflow) unless a test serves a list.
+    .on("GET", "/api/workflows", { status: 200, body: { workflows: [] } });
   return api;
 }
 
@@ -963,7 +965,7 @@ test("grants fail closed on a union member that no longer resolves, and cover a 
   assert.equal(port.cards.length, 2, "parent and child covered by the same grant: no card");
 });
 
-test("secrets: creating or editing what a secret-reading block does is never granted (card every time); an unrelated edit stays covered", async (t) => {
+test("secrets: editing what a secret-reading block does is never granted (card every time); an unrelated edit stays covered", async (t) => {
   const api = await sandbox(t);
   const base = definition(api, {
     nodes: [
@@ -996,14 +998,50 @@ test("secrets: creating or editing what a secret-reading block does is never gra
   await update([{ op: "add_node", node: { type: "shell", name: "Publish", config: { script: "npm publish", env: [{ name: "NPM_TOKEN", value: "{{ secrets.NPM_TOKEN }}" }] } } }]);
   assert.equal(port.cards.length, 3);
   assert.deepEqual(port.cards[2]!.grantOptions, []);
-  // A create with a Code block using `secrets`: no grant options; without one, the chat grant is offered.
+  // A create always cards (no grant covers a workflow that does not exist yet); its grant options stand.
   serveDefinition(api, base);
   await exec(api, "create_workflow", { ...draft(), nodes: [{ type: "trigger.manual", name: "Start" }, { type: "code", name: "Work", config: { source: "export default async function ({ secrets }) { return secrets.KEY; }" } }] }, { who: chat(api), port });
-  assert.deepEqual(port.cards.at(-1)!.grantOptions, []);
-  assert.match(sectionText(port.cards.at(-1)!.sections), /reads a workflow secret/);
-  await exec(api, "create_workflow", draft(), { who: chat(api), port });
+  assert.equal(port.cards.length, 4);
   assert.deepEqual(port.cards.at(-1)!.grantOptions, ["chat"]);
-  assert.doesNotMatch(sectionText(port.cards.at(-1)!.sections), /reads a workflow secret/);
+});
+
+test("reverse direction: a grant never covers a workflow that a workflow outside the grant runs as a sub-workflow (directly or through others)", async (t) => {
+  const api = await sandbox(t);
+  const child = serveDefinition(api);
+  const subBlock = (id: string, target: string) => ({ id, name: `Run ${target}`, type: "workflow", position: { x: 0, y: 0 }, config: { workflowId: target } });
+  const userParent = definition(api, { id: "wf-user", name: "Nightly", enabled: true, nodes: [...definition(api).nodes, subBlock("s", "wf-1")] as Workflow["nodes"] });
+  api.on("GET", "/api/workflows/wf-user", { status: 200, body: { workflow: userParent, problems: [] } });
+  api.on("GET", "/api/workflows", { status: 200, body: { workflows: [{ id: "wf-1" }, { id: "wf-user" }] } });
+  api.on("POST", "/api/workflows/wf-1/run", { status: 200, body: { runId: "run-1" } });
+  api.on("GET", "/api/workflow-runs/run-1", { status: 200, body: { run: runRecord(child) } });
+  const port = new FakeApprovalPort({ outcome: "denied", approvalId: "" }).grant({ family: "workflows", scope: "chat", threadId: "me", projectPath: api.own, workflowIds: ["wf-1"] });
+  const update = () => exec(api, "update_workflow", { workflowId: "wf-1", revision: 7, ops: [{ op: "update_node", node: "Finish", set: { config: { source: "export default async function () { return 3; }" } } }] }, { who: chat(api), port });
+  await update();
+  await exec(api, "run_workflow", { workflowId: "wf-1", revision: 7 }, { who: chat(api), port });
+  await exec(api, "delete_workflow", { workflowId: "wf-1", confirm: true }, { who: chat(api), port });
+  assert.equal(port.cards.length, 3, "update, run and delete all card");
+  for (const card of port.cards) {
+    assert.deepEqual(card.grantOptions, [], "a grant chosen here could never cover it");
+    assert.match(sectionText(card.sections), /Workflows that run it as a sub-workflow/);
+    assert.match(sectionText(card.sections), /Nightly/);
+  }
+  // The calling workflow in the same grant: covered again.
+  port.file.grants[0]!.workflowIds = ["wf-1", "wf-user"];
+  await update();
+  assert.equal(port.cards.length, 3, "caller and callee in one grant: no card");
+  // Through another workflow: Weekly (outside) runs Nightly (inside), which runs wf-1.
+  const outer = definition(api, { id: "wf-outer", name: "Weekly", nodes: [...definition(api).nodes, subBlock("o", "wf-user")] as Workflow["nodes"] });
+  api.on("GET", "/api/workflows/wf-outer", { status: 200, body: { workflow: outer, problems: [] } });
+  api.on("GET", "/api/workflows", { status: 200, body: { workflows: [{ id: "wf-1" }, { id: "wf-user" }, { id: "wf-outer" }] } });
+  await update();
+  assert.equal(port.cards.length, 4, "a transitive caller outside the grant cards");
+  assert.match(sectionText(port.cards[3]!.sections), /Weekly/);
+  // Callers that cannot be read: fail closed.
+  api.on("GET", "/api/workflows", { status: 500, body: { error: { code: "INTERNAL", message: "x" } } });
+  port.file.grants[0]!.workflowIds = ["wf-1", "wf-user", "wf-outer"];
+  await update();
+  assert.equal(port.cards.length, 5);
+  assert.deepEqual(port.cards[4]!.grantOptions, []);
 });
 
 test("changesSecretUse: added, changed, newly reachable and (for interpolating blocks) upstream changes count; unrelated ones do not", () => {
