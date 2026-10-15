@@ -2,7 +2,7 @@
  * `request_secret` end to end (design 2026-10-14 §5 "Secrets"): the value
  * reaches the requesting call — and nothing the host persists or serves.
  *
- * The daemon's real tool and registry answer a call through the host's real
+ * The daemon's real tool (the catalog's, through the executor) answers a call through the host's real
  * session-tools service; each provider's REAL normaliser then reports that
  * result the way its protocol carries it (Claude's `tool_result`, Codex's
  * `mcpToolCall` item, Grok's ACP `tool_call_update`, OpenCode's tool part);
@@ -30,8 +30,8 @@ import {
 } from "@orquester/api/agent-chat";
 
 import { SecretRequestRegistry } from "../../agent-chat/secret-requests.ts";
-import { executeSessionToolCall } from "../../session-tools/executor.ts";
-import { sessionToolRegistry } from "../../session-tools/index.ts";
+import { catalogFor } from "../../mcp/catalog/index.ts";
+import { executeTestChatCall } from "../../session-tools/testing.ts";
 import type { DaemonApi } from "../../mcp/daemon-api.ts";
 import { createThreadIndex } from "../index/index.ts";
 import { createIngestion } from "../ingestion/index.ts";
@@ -47,6 +47,7 @@ import { GrokNormalizer } from "../adapters/grok/normalize.ts";
 import { normalizeOpenCodeEvent } from "../adapters/opencode/normalize.ts";
 import { asRawEvent } from "../adapters/opencode/protocol.ts";
 import { createSessionState } from "../adapters/opencode/state.ts";
+import { knownSessionToolNames } from "./definitions.ts";
 import { createSessionToolsHost } from "./index.ts";
 import { isDistinctiveSecret, SessionSecretRedactor } from "./secret-redaction.ts";
 
@@ -70,7 +71,7 @@ async function answeredCall(threadId: string, redactor: SessionSecretRedactor, r
   const host = createSessionToolsHost({
     manifest: async () => ({ kind: "legacy" as const }),
     forward: (call, signal) =>
-      executeSessionToolCall(sessionToolRegistry(), call, {
+      executeTestChatCall(catalogFor("chat"), call, {
         threadId: call.threadId,
         projectPath: "/work/project",
         cwd: "/work/project",
@@ -266,7 +267,7 @@ async function pipeline(t: TestContext) {
     liveness: new RecordingLiveness(),
     clock: new FakeClock(),
     idGen: counterIdGen(),
-    sessionToolNames: new Set(sessionToolRegistry().tools.map((tool) => tool.name)),
+    sessionToolNames: knownSessionToolNames(),
     secrets: redactor,
     logger: { warn: (message, detail) => warnings.push([message, detail]) }
   });

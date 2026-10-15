@@ -220,7 +220,7 @@ export interface MergeBackRequest {
   commandId?: string;
   /**
    * The mode the parent's turn runs in: `"plan"` when the merge comes from a turn that is
-   * planning (session tools' turn policy, `apps/daemon/src/session-tools/turn-policy.ts`), so a
+   * planning (the turn policy, `apps/daemon/src/mcp/gate/turn-policy.ts`), so a
    * planning fork never starts editing work in its parent. Absent: `"default"`.
    */
   interactionMode?: "default" | "plan";

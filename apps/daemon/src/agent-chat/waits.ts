@@ -1,13 +1,12 @@
 /**
- * The wait registry (unified MCP design 2026-10-15 §8.6; moved from
- * `session-tools/threads/shared.ts`, which re-exports it): who waits on whom right now, in this
- * daemon — every blocking wait of a chat on another chat (`thread_wait`, `task_wait`,
- * `thread_send` with `wait`, `send_message`/`wait_for_session`, the reply-subscription waiter).
+ * The wait registry (unified MCP design 2026-10-15 §8.6): who waits on whom right now, in this
+ * daemon — every blocking wait of a chat on another chat (`send_message` with `reply: "wait"`,
+ * `wait_for_session`, the reply-subscription waiter, an old host's `thread_send {wait}` alias).
  * A wait that would close a cycle — the target is itself waiting, directly or through others, on
  * the caller — is refused at once (`WAIT_CYCLE`) instead of both sides sitting out their
  * timeouts. Project-blind: a cycle across projects is a cycle.
  *
- * Pure (no daemon service): the agent host loads the session-tool tree that re-exports it.
+ * Pure (no daemon service): reachable from the catalog, which the agent host loads statically.
  */
 
 import { WAIT_CYCLE } from "@orquester/api/agent-chat";
@@ -35,7 +34,7 @@ export function waitsOn(from: string, to: string): boolean {
 export function waitCycleError(target: string): ToolError {
   return new ToolError(
     WAIT_CYCLE,
-    `Thread "${target}" is itself waiting on this thread, so waiting on it would only run out the clock. Answer it (finish your turn), or read it with thread_read.`
+    `Chat "${target}" is itself waiting on this chat, so waiting on it would only run out the clock. Answer it (finish your turn), or read it with read_transcript.`
   );
 }
 

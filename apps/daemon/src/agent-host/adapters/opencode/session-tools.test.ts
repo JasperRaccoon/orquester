@@ -16,7 +16,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { EXTERNAL_MCP_TOOL_NAMES } from "../../../mcp/tool-names.ts";
+import { catalogFor } from "../../../mcp/catalog/index.ts";
 import { buildOpenCodePermissionRules, type OpenCodePermissionRuleset } from "./ruleset.ts";
 import { openCodeSessionToolsServerName, withSessionToolInstructions, withSessionToolRules } from "./session-tools.ts";
 
@@ -120,7 +120,7 @@ test("the external /mcp under the name docs/orquester-mcp.md suggests keeps ever
   const serverA = openCodeSessionToolsServerName("thread-a");
   const session = withSessionToolRules(buildOpenCodePermissionRules("full-access"), { isolate: true, own: { serverName: serverA } });
   const offered = (server: string) =>
-    disabled(EXTERNAL_MCP_TOOL_NAMES.map((tool) => toolId(server, tool)), [...AGENT_RULES, ...session]);
+    disabled(catalogFor("external").map((tool) => toolId(server, tool.name)), [...AGENT_RULES, ...session]);
   // The suggested name, and the guide's own `orquester`, can never meet the
   // deny's literal `orquester-` prefix.
   assert.deepEqual([...offered(SUGGESTED_EXTERNAL_NAME)], []);

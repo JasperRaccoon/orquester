@@ -16,11 +16,8 @@ import { ToolListChangedNotificationSchema, type CallToolResult } from "@modelco
 import { z } from "zod";
 
 import type { DaemonApi } from "../../../mcp/daemon-api.ts";
-import { defineSessionTool, defineSessionToolkit, SESSION_TOOL_READ_ONLY, type SessionToolContext } from "../../../session-tools/contract.ts";
-import { executeSessionToolCall } from "../../../session-tools/executor.ts";
-import { createSessionToolRegistry } from "../../../session-tools/registry.ts";
 import { jsonResult } from "../../../session-tools/results.ts";
-import { TEST_TOOLKIT_INSTRUCTIONS } from "../../../session-tools/testing.ts";
+import { executeTestChatCall, TEST_INSTRUCTIONS, testChatTool, type TestCallContext } from "../../../session-tools/testing.ts";
 import { recordingSessionTools } from "../../session-tools/testing.ts";
 import { buildClaudeQueryOptions } from "./launch.ts";
 import { toProviderModels } from "./models.ts";
@@ -33,7 +30,7 @@ import {
 
 const LAUNCH = { home: "system", project: "/p" };
 
-function fakeContext(): SessionToolContext {
+function fakeContext(): TestCallContext {
   return {
     threadId: "thread-1",
     projectPath: "/p",
@@ -86,23 +83,16 @@ describe("Claude in-process session-tool server", () => {
   });
 
   it("forwards the arguments raw: an unknown key survives and no default is applied", async () => {
-    const registry = createSessionToolRegistry([
-      defineSessionToolkit({
-        id: "defaults",
-        tools: [
-          defineSessionTool({
-            name: "paged",
-            title: "Paged",
-            description: "Has a default.",
-            input: { limit: z.number().int().default(20), text: z.string().optional() },
-            annotations: SESSION_TOOL_READ_ONLY,
-            resultKind: "json",
-            run: async () => jsonResult({})
-          })
-        ]
+    const paged = [
+      testChatTool({
+        name: "paged",
+        title: "Paged",
+        description: "Has a default.",
+        input: { limit: z.number().int().default(20), text: z.string().optional() },
+        run: async () => jsonResult({})
       })
-    ]);
-    const tools = recordingSessionTools(registry);
+    ];
+    const tools = recordingSessionTools(paged);
     const launch = await createClaudeSessionToolsLaunch({ sessionTools: tools, threadId: "thread-1", launch: LAUNCH, signal: new AbortController().signal });
     const client = await connectInProcess(launch.server.instance);
     // The schema is still advertised in full.
@@ -111,7 +101,7 @@ describe("Claude in-process session-tool server", () => {
     await client.callTool({ name: "paged", arguments: { text: "x", bogus: true } });
     assert.deepEqual(tools.calls[0]!.arguments, { text: "x", bogus: true }, "the daemon sees what the model sent");
     // …so its refusal is the same one every provider gets.
-    const refused = await executeSessionToolCall(registry, { name: "paged", arguments: tools.calls[0]!.arguments }, fakeContext());
+    const refused = await executeTestChatCall(paged, { name: "paged", arguments: tools.calls[0]!.arguments }, fakeContext());
     assert.equal(refused.isError, true);
     assert.match((refused.content[0] as { text: string }).text, /^INVALID_ARGUMENT: Invalid arguments for paged: arguments: Unrecognized key\(s\) in object: 'bogus'/);
     await client.close();
@@ -202,7 +192,7 @@ describe("Claude launch options with session tools", () => {
     const systemPrompt = options.systemPrompt as { type: string; append: string };
     assert.equal(systemPrompt.type, "preset");
     assert.ok(systemPrompt.append.startsWith("You are running inside Orquester's agent chat"));
-    assert.ok(systemPrompt.append.endsWith(TEST_TOOLKIT_INSTRUCTIONS));
+    assert.ok(systemPrompt.append.endsWith(TEST_INSTRUCTIONS));
     // `strictMcpConfig` stays unset: the user's own servers keep loading.
     assert.equal(options.strictMcpConfig, undefined);
     // Nothing that reaches argv carries a credential: the SDK serialises an

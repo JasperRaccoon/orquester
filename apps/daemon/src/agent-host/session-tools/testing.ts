@@ -1,9 +1,9 @@
 /**
  * Test scaffolding only: a {@link SessionToolsHost} that records every call
- * and issue, over the framework's test-only toolkit
+ * and issue, over the transport's test-only chat tools
  * (`../../session-tools/testing.ts`). `wait_for_cancel` parks until its call
- * is cancelled. Every thread's "manifest" is the whole toolkit, the toolkit's
- * instruction block and `deny` (default none); `setManifest` changes one
+ * is cancelled. Every thread's "manifest" is all the given tools, the test
+ * instruction block and `deny` (default none); `applyManifest` changes one
  * thread's, as a refresh from the daemon would.
  */
 
@@ -11,9 +11,8 @@ import { createHash } from "node:crypto";
 
 import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 
-import { legacyChatTools } from "../../mcp/catalog/legacy.ts";
-import type { SessionToolRegistry } from "../../session-tools/registry.ts";
-import { testSessionToolRegistry } from "../../session-tools/testing.ts";
+import type { AnyOrquesterTool } from "../../mcp/catalog/contract.ts";
+import { TEST_CHAT_TOOLS, TEST_INSTRUCTIONS } from "../../session-tools/testing.ts";
 import { serializeChatTools } from "./definitions.ts";
 import type {
   LiveSessionToolsListener,
@@ -29,7 +28,7 @@ export interface RecordingSessionTools extends SessionToolsHost {
   /** Every grant issued, in order, with whether it was revoked. */
   readonly grants: Array<SessionToolsGrant & { revoked: boolean }>;
   readonly abortedThreads: string[];
-  /** The toolkit's instruction block (what every prepared list carries). */
+  /** The instruction block every prepared list carries. */
   readonly instructions: string;
   /** Resolves with the next call made from now on. */
   nextCall(): Promise<SessionToolsCallInput>;
@@ -38,18 +37,21 @@ export interface RecordingSessionTools extends SessionToolsHost {
 export interface RecordingSessionToolsOptions {
   /** MCP server names every thread denies. */
   deny?: readonly string[];
+  /** The instruction block (default {@link TEST_INSTRUCTIONS}). */
+  instructions?: string;
 }
 
 export function recordingSessionTools(
-  registry: SessionToolRegistry = testSessionToolRegistry(),
+  chatTools: readonly AnyOrquesterTool[] = TEST_CHAT_TOOLS,
   options: RecordingSessionToolsOptions = {}
 ): RecordingSessionTools {
+  const instructions = options.instructions ?? TEST_INSTRUCTIONS;
   const calls: SessionToolsCallInput[] = [];
   const callWaiters: Array<(call: SessionToolsCallInput) => void> = [];
   const grants: Array<SessionToolsGrant & { revoked: boolean }> = [];
   const abortedThreads: string[] = [];
-  const entries: Promise<Tool[]> = serializeChatTools(legacyChatTools(registry.tools));
-  const knownNames = new Set(registry.tools.map((tool) => tool.name));
+  const entries: Promise<Tool[]> = serializeChatTools(chatTools);
+  const knownNames = new Set(chatTools.map((tool) => tool.name));
   const launched = new Map<string, { prepared: PreparedSessionTools; live?: LiveSessionToolsListener }>();
 
   const prepare = async (threadId: string, names?: readonly string[]): Promise<PreparedSessionTools> => {
@@ -60,10 +62,10 @@ export function recordingSessionTools(
       threadId,
       tools,
       names: new Set(tools.map((tool) => tool.name)),
-      instructions: registry.instructions,
+      instructions,
       deny,
       denyKnown: true,
-      key: createHash("sha256").update(JSON.stringify([tools.map((tool) => tool.name), registry.instructions, deny])).digest("hex"),
+      key: createHash("sha256").update(JSON.stringify([tools.map((tool) => tool.name), instructions, deny])).digest("hex"),
       source: "manifest"
     };
   };
@@ -72,7 +74,7 @@ export function recordingSessionTools(
     calls,
     grants,
     abortedThreads,
-    instructions: registry.instructions,
+    instructions,
     nextCall: () => new Promise((resolve) => callWaiters.push(resolve)),
     enabled: true,
     knownNames,

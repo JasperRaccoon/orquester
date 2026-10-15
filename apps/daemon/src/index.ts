@@ -187,11 +187,9 @@ import { resolveZipTool, spawnDirZip } from "./zip";
 import { FsSearchError, listProjectFiles, searchProjectFiles } from "./search";
 import { InjectDaemonApi } from "./mcp/daemon-api.ts";
 import { HtmlPreviewBrowser } from "./html-preview/index.ts";
-import { FsTools } from "./mcp/fs-tools.ts";
 import { registerMcp } from "./mcp/server.ts";
 import { externalCredentialId, registerPrincipalHook, registerRemoteFieldStripping } from "./mcp/principal.ts";
 import { registerSessionToolsRoute } from "./session-tools/route.ts";
-import { TodoTools } from "./mcp/todo-tools.ts";
 import {
   UploadTooLargeError,
   acceptRawBody,
@@ -4688,9 +4686,7 @@ export function createServer(
           fsRoot: resolved.fsRoot,
           workspacesDir: resolved.workspacesDir
         }),
-      credentialId: () => externalCredentialId(config.transports.http.username),
-      todos: new TodoTools({ todos, workspacesDir: resolved.workspacesDir }),
-      files: new FsTools({ fsRoot: resolved.fsRoot })
+      credentialId: () => externalCredentialId(config.transports.http.username)
     });
   }
   // umcp:t2 end

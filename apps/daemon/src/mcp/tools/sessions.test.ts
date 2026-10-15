@@ -12,9 +12,11 @@ import { busEvent, FakeDaemonApi } from "../testing.ts";
 import { activity, chatSummary, head, message, shellSummary, snapshot, stamp, turn } from "../fixtures.ts";
 import type { CallContext } from "../catalog/contract.ts";
 import { catalogFor } from "../catalog/index.ts";
-import type { ToolContext } from "../tool.ts";
-import { legacyCreateSessionTools, sessionsFamily } from "./sessions.ts";
+import { createSessionTool } from "./messages.ts";
+import { sessionsFamily } from "./sessions.ts";
 
+/** What these tests hand a tool: the daemon API, the call's signal and clock. */
+type ToolContext = Pick<CallContext, "api" | "signal" | "now">;
 /** An external caller's context (full trust), as the executor builds it for `/mcp`. */
 const external = (ctx: ToolContext): CallContext => ({ api: ctx.api, signal: ctx.signal, now: ctx.now, caller: { kind: "external" }, turn: { interactionMode: "default", provenance: (_origin, text) => text } });
 /** Spec §11: the six session controls are control_session actions now — the ported tests call the old names through it. */
@@ -22,10 +24,9 @@ const CONTROL_ACTIONS: Readonly<Record<string, string>> = {
   interrupt_session: "interrupt", stop_task: "stop_task", stop_session: "stop_process", close_session: "close", revert_session: "rewind", compact_session: "compact"
 };
 const tool = (name: string) => {
-  // create_session is still the pre-catalog tool (Task 8 replaces it).
-  if (name === "create_session") return legacyCreateSessionTools[0]!;
   const action = CONTROL_ACTIONS[name];
-  const unified = sessionsFamily.find((t) => t.name === (action ? "control_session" : name))!;
+  // create_session is the conversation family's (messages.ts); its external path is the pre-catalog tool's, ported.
+  const unified = name === "create_session" ? createSessionTool : sessionsFamily.find((t) => t.name === (action ? "control_session" : name))!;
   return {
     input: unified.input,
     run: (args: Record<string, unknown>, ctx: ToolContext) => unified.run({ ...args, ...(action ? { action } : {}) } as never, external(ctx)) as Promise<Record<string, unknown>>
@@ -53,7 +54,7 @@ async function harness(sessions = [chatSummary(), shellSummary()], snap = snapsh
     .on("GET", "/api/registry", { status: 200, body: registry }).on("GET", "/api/agent/providers", { status: 200, body: providers })
     .on("GET", "/api/agent-accounts", { status: 200, body: accounts })
     .on("GET", "/api/sessions/c1/lineage", { status: 200, body: { sessionId: "c1", lineage: null, parent: null, children: [], pendingMerges: [] } });
-  const ctx: ToolContext = { api, todos: {} as never, files: {} as never, signal: new AbortController().signal, now: () => Date.parse("2026-09-22T12:00:00.000Z") };
+  const ctx: ToolContext = { api, signal: new AbortController().signal, now: () => Date.parse("2026-09-22T12:00:00.000Z") };
   return { api, ctx, projectPath, root, close: () => rm(root, { recursive: true, force: true }) };
 }
 

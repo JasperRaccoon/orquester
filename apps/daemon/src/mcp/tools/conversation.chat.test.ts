@@ -21,7 +21,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { TOOLSET_IDS, type SessionSummary } from "@orquester/api";
 import { agentChatRoutes, parseThreadMessage, replyNoticeText, THREAD_MESSAGE_CONTEXT_KIND, UNTRUSTED_NOTICE, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
 
-import { registerWait } from "../../agent-chat/waits.ts";
+import { registerWait, waitsOn } from "../../agent-chat/waits.ts";
 import { FakeApprovalPort } from "../catalog/approval-double.ts";
 import type { ThreadCaller } from "../catalog/contract.ts";
 import { toolByName } from "../catalog/index.ts";
@@ -77,6 +77,8 @@ function thread(id: string, over: Partial<ThreadSnapshotPayload> = {}): ThreadSn
 interface RigOptions {
   sessions?: SessionSummary[];
   threads?: Record<string, ThreadSnapshotPayload>;
+  /** The executor's clock (default: the real one). */
+  now?: () => number;
 }
 
 function rig(options: RigOptions = {}) {
@@ -97,7 +99,7 @@ function rig(options: RigOptions = {}) {
     kind: "thread", threadId: "me", title: "Implement auth", projectPath: OWN, workspace: "jaspersito", cwd: OWN, agentId: "claude",
     callId: `call-${Math.random()}`, runtimeMode: "full-access", planning: false, workflowOwned: false, exchange: null, ...over
   });
-  const deps = { approvals: port, enabledToolsets: async () => new Set(TOOLSET_IDS), lookup: (n: string, audience: "external" | "chat") => toolByName(n, audience), newId: () => "ex-new" };
+  const deps = { approvals: port, enabledToolsets: async () => new Set(TOOLSET_IDS), lookup: (n: string, audience: "external" | "chat") => toolByName(n, audience), newId: () => "ex-new", ...(options.now ? { now: options.now } : {}) };
   const call = (name: string, args: Record<string, unknown>, over: Partial<ThreadCaller> = {}, signal = new AbortController().signal) =>
     executeToolCall(deps, { name, arguments: args }, { caller: caller(over), api, signal });
   const external = (name: string, args: Record<string, unknown>, signal = new AbortController().signal) =>
@@ -436,6 +438,37 @@ test("create_session caps and refusals: a broader mode, no prompt, 6 unfinished 
   assert.equal(code(await deep.call("create_session", { prompt: "x" })), "DELEGATION_LIMIT");
 });
 
+test("create_session (ported from the old delegate_task): a child opened a moment ago counts before its summary shows a turn, one that never started stops counting after its grace; depth is counted up the open tabs; a chat with no project names one", async () => {
+  const child = (id: string, createdAt: string) => tab(id, OWN, { createdAt, latestTurn: null, lineage: { parentThreadId: "me", relation: "delegate", createdAt: stamp(1), agentCreated: true } });
+  // Six just opened, no turn on their summary yet: they hold their slots.
+  const fresh = new Date().toISOString();
+  const r = rig({ sessions: [...tabs().filter((s) => s.lineage?.parentThreadId !== "me"), ...Array.from({ length: 6 }, (_, i) => child(`kid${i}`, fresh))] });
+  createRoutes(r.api, r.sessions);
+  assert.equal(code(await r.call("create_session", { prompt: "x", delegate: true })), "DELEGATION_LIMIT");
+  // Six that never started, opened more than the grace window ago: no slot held.
+  const stale = new Date(Date.now() - 61_000).toISOString();
+  const later = rig({ sessions: [...tabs().filter((s) => s.lineage?.parentThreadId !== "me"), ...Array.from({ length: 6 }, (_, i) => child(`old${i}`, stale))] });
+  createRoutes(later.api, later.sessions);
+  const room = await later.call("create_session", { prompt: "x", delegate: true, reply: "none" });
+  assert.equal(room.isError, undefined, JSON.stringify(body(room)));
+  // Lineage records from before `delegationDepth`: counted up the open tabs (me → d1 → d1f (a fork, not counted) → d2).
+  const chain = [
+    ...tabs().map((s) => (s.id === "me" ? { ...s, lineage: undefined } : s)),
+    tab("d1", OWN, { lineage: { parentThreadId: "me", relation: "delegate", createdAt: stamp(1), agentCreated: true } }),
+    tab("d1f", OWN, { lineage: { parentThreadId: "d1", relation: "fork", createdAt: stamp(1), agentCreated: true } }),
+    tab("d2", OWN, { lineage: { parentThreadId: "d1f", relation: "delegate", createdAt: stamp(1), agentCreated: true } })
+  ];
+  const deep = rig({ sessions: chain, threads: { d1: thread("d1", { head: head({ id: "d1", runtimeMode: "full-access" }) }), d2: thread("d2", { head: head({ id: "d2", runtimeMode: "full-access" }) }) } });
+  createRoutes(deep.api, deep.sessions);
+  assert.equal(code(await deep.call("create_session", { prompt: "more", delegate: true }, { threadId: "d2" })), "DELEGATION_LIMIT");
+  const fine = await deep.call("create_session", { prompt: "fine", delegate: true, reply: "none" }, { threadId: "d1" });
+  assert.equal(fine.isError, undefined, JSON.stringify(body(fine)));
+  // A chat bound to no project opens a chat only where it names one.
+  const homeless = rig();
+  createRoutes(homeless.api, homeless.sessions);
+  assert.equal(code(await homeless.call("create_session", { prompt: "x" }, { projectPath: "", workspace: "" })), "INVALID_ARGUMENT");
+});
+
 test("create_session in another workspace: a boundary card showing the prompt; workflow-owned callers are denied; an inherited account gone falls back", async () => {
   const r = rig();
   createRoutes(r.api, r.sessions);
@@ -506,6 +539,49 @@ test("merge_back_session: forks only — a delegate is told its final reply goes
   assert.equal(code(await r.call("merge_back_session", { mergeId: "m1" })), "INVALID_ARGUMENT");
 });
 
+test("plan carries on (§5.3) for create_session: a planning caller's first turn plans; an agent with no plan mode is refused before any tab opens", async () => {
+  const r = rig();
+  const creates = createRoutes(r.api, r.sessions);
+  const planned = await r.call("create_session", { prompt: "Plan the migration" }, { planning: true });
+  assert.equal(planned.isError, undefined, JSON.stringify(body(planned)));
+  assert.equal(body(planned).planMode, true);
+  const [turnBody] = posted(r.api, "/api/sessions/new/turn");
+  assert.equal(turnBody!.interactionMode, "plan", "the first turn plans");
+  assert.equal(creates.length, 1);
+  // Codex has no plan mode: refused before the tab is created or anything is posted.
+  const fresh = rig();
+  const none = createRoutes(fresh.api, fresh.sessions);
+  const refused = await fresh.call("create_session", { agent: "codex", prompt: "Plan it" }, { planning: true });
+  assert.equal(code(refused), "PERMISSION_DENIED");
+  assert.match(body(refused).message, /plan mode/);
+  assert.equal(none.length, 0, "no tab opened");
+  assert.equal(fresh.api.calls.filter((c) => c.method === "POST").length, 0, "nothing posted");
+});
+
+test("plan carries on (§5.3) for merge_back_session: a planning fork's merge plans; a parent with no plan mode is refused; the parent's turn is under the turn policy", async () => {
+  const sessions = [
+    ...tabs(),
+    tab("cfork", OWN, { title: "Codex fork", lineage: { parentThreadId: "peer", relation: "fork", createdAt: stamp(1), agentCreated: true } })
+  ];
+  const r = rig({ sessions });
+  r.api.on("POST", agentChatRoutes.mergeBack("fork"), { status: 200, body: { parentSessionId: "me", delivery: "sent", mergeId: "m1", seq: 3 } });
+  r.api.on("POST", agentChatRoutes.mergeBack("cfork"), { status: 200, body: { parentSessionId: "peer", delivery: "sent", mergeId: "m2", seq: 4 } });
+  const planned = await r.call("merge_back_session", { text: "Plan: use B." }, { threadId: "fork", title: "My fork", planning: true });
+  assert.equal(planned.isError, undefined, JSON.stringify(body(planned)));
+  assert.equal(posted(r.api, agentChatRoutes.mergeBack("fork"))[0]!.interactionMode, "plan");
+  // The parent runs Codex: no plan mode, so a planning fork's result cannot be merged into it now.
+  const noPlan = await r.call("merge_back_session", { text: "Plan: use B." }, { threadId: "cfork", title: "Codex fork", planning: true });
+  assert.equal(code(noPlan), "PERMISSION_DENIED");
+  assert.match(body(noPlan).message, /plan mode/);
+  assert.equal(posted(r.api, agentChatRoutes.mergeBack("cfork")).length, 0);
+  // The merge causes a turn in the parent (causesTurnIn: [parent]): a parent broader than the fork is refused.
+  const before = posted(r.api, agentChatRoutes.mergeBack("fork")).length;
+  const broader = await r.call("merge_back_session", { text: "Use B." }, { threadId: "fork", title: "My fork", runtimeMode: "approval-required" });
+  assert.equal(code(broader), "PERMISSION_DENIED");
+  assert.match(body(broader).message, /broader/);
+  assert.equal(posted(r.api, agentChatRoutes.mergeBack("fork")).length, before, "nothing posted");
+});
+
 // ---------------------------------------------------------------------------
 // wait_for_session
 // ---------------------------------------------------------------------------
@@ -545,6 +621,77 @@ test("wait_for_session: an empty final reply says so; several sessions return wh
   }
 });
 
+// ---- The chat's blocking wait on a working chat (watch.ts settleWait → wait.ts waitWhileWorking), ported from the old thread_wait tests ----
+
+const working = (id: string) => thread(id, { head: head({ id, session: { status: "running", activeTurnId: "t2" } }), turns: [turn(), turn({ turnId: "t2", turnCount: 2, state: "running", completedAt: null })] });
+/** Resolves when the next bus listener subscribes: the wait has started watching (a barrier, not a sleep). */
+function nextSubscription(api: FakeDaemonApi): Promise<void> {
+  const subscribe = api.subscribe.bind(api);
+  return new Promise<void>((resolve) => {
+    api.subscribe = (listener) => {
+      api.subscribe = subscribe;
+      const off = subscribe(listener);
+      resolve();
+      return off;
+    };
+  });
+}
+
+test("wait_for_session from a chat on a working chat: the bus ends the wait when it settles; the wait is registered while it lasts and released after", async () => {
+  const r = rig({ threads: { peer: working("peer") } });
+  // The wait has read the target as working once it is watching the bus and has read its thread.
+  let readWorking!: () => void;
+  const seenWorking = new Promise<void>((resolve) => { readWorking = resolve; });
+  r.api.on("GET", agentChatRoutes.thread("peer"), () => {
+    const current = r.threads.peer!;
+    if (current.head.session.status === "running") readWorking();
+    return { status: 200, body: { kind: "snapshot", thread: current } };
+  });
+  const watching = nextSubscription(r.api);
+  const pending = r.call("wait_for_session", { sessionId: "peer", timeoutSeconds: 600 });
+  await watching;
+  await seenWorking;
+  assert.equal(waitsOn("me", "peer"), true, "registered: a reverse wait would be a cycle");
+  assert.throws(() => registerWait("peer", "me"), (e: { code: string }) => e.code === "WAIT_CYCLE");
+  r.threads.peer = thread("peer", { items: [message("user", "go", { turnId: "t2" }), message("assistant", "Done: 3 issues.", { turnId: "t2" })], turns: [turn(), turn({ turnId: "t2", turnCount: 2 })] });
+  r.api.emit(busEvent("session.updated", { ...tab("peer", OWN, { title: "Peer", refId: "codex" }) }));
+  const result = await pending;
+  assert.equal(result.isError, undefined, JSON.stringify(body(result)));
+  assert.equal(body(result).state, "idle");
+  assert.equal(body(result).reply, "Done: 3 issues.");
+  assert.equal(body(result).timedOut, false);
+  assert.equal(r.api.listenerCount(), 0, "the bus listener is removed");
+  assert.equal(waitsOn("me", "peer"), false, "released once it ended");
+  registerWait("peer", "me")();
+});
+
+test("wait_for_session from a chat: a cancelled wait is CANCELLED at once — listeners removed, nothing posted, the wait released", async () => {
+  const r = rig({ threads: { peer: working("peer") } });
+  const abort = new AbortController();
+  const watching = nextSubscription(r.api);
+  const pending = r.call("wait_for_session", { sessionId: "peer", timeoutSeconds: 600 }, {}, abort.signal);
+  await watching;
+  abort.abort();
+  const result = await pending;
+  assert.equal(code(result), "CANCELLED");
+  assert.equal(r.api.listenerCount(), 0);
+  assert.equal(r.api.calls.filter((c) => c.method === "POST").length, 0, "the other chat is untouched");
+  assert.equal(waitsOn("me", "peer"), false);
+  registerWait("peer", "me")();
+});
+
+test("wait_for_session from a chat: a timeout says timedOut and never stops the other chat", async () => {
+  let t = Date.parse("2026-09-22T12:00:00.000Z");
+  const r = rig({ threads: { peer: working("peer") }, now: () => (t += 3_600_000) });
+  const result = await r.call("wait_for_session", { sessionId: "peer", timeoutSeconds: 1 });
+  assert.equal(result.isError, undefined, JSON.stringify(body(result)));
+  assert.equal(body(result).timedOut, true);
+  assert.equal(body(result).state, "working");
+  assert.equal(r.api.calls.filter((c) => c.method === "POST").length, 0, "no interrupt, nothing posted");
+  assert.equal(r.api.listenerCount(), 0);
+  assert.equal(waitsOn("me", "peer"), false);
+});
+
 test("wait_for_session from an external client: attention after the cursor, timeoutSeconds, and a single session's state and reply", async () => {
   const flagged = tab("peer", OWN, { title: "Peer", activity: { state: "idle", attention: "finished", lastOutputAt: null, needsAttentionAt: stamp(7) } });
   const r = rig({ sessions: [...tabs().filter((s) => s.id !== "peer"), flagged] });
@@ -558,7 +705,7 @@ test("wait_for_session from an external client: attention after the cursor, time
 });
 
 // ---------------------------------------------------------------------------
-// Byte budgets (§9.5 trim plan): the registry test exempts these names as legacy until Task 14
+// Byte budgets (§9.5 trim plan): each conversation tool's own target, under the registry test's ceilings
 // ---------------------------------------------------------------------------
 
 const TARGETS: Record<string, number> = { create_session: 2_900, send_message: 2_300, wait_for_session: 1_200, fork_session: 1_200, merge_back_session: 1_100 };

@@ -14,6 +14,7 @@ import { defineTool, MUTATING, READ_ONLY, type AnyOrquesterTool, type CallContex
 import { audienceShape, executeToolCall } from "../mcp/executor.ts";
 import { toolByName } from "../mcp/catalog/index.ts";
 import { FakeDaemonApi } from "../mcp/testing.ts";
+import { LEGACY_SESSION_TOOL_DEFINITIONS } from "../agent-host/session-tools/legacy-definitions.ts";
 import { chatToolByName, LEGACY_CHAT_TOOL_ALIASES, LEGACY_CHAT_TOOL_NAMES } from "./legacy-aliases.ts";
 
 const caller: ThreadCaller = {
@@ -68,6 +69,17 @@ test("every legacy name has an alias onto spec §14.1's tool", () => {
   ]);
   assert.equal(LEGACY_CHAT_TOOL_ALIASES.thread_send!.target, "send_message");
   assert.equal(LEGACY_CHAT_TOOL_ALIASES.delegate_task!.target, "create_session");
+});
+
+test("an old host on this daemon: every name of the old server (the frozen definitions) is the catalog's own tool or an alias", () => {
+  for (const { name } of LEGACY_SESSION_TOOL_DEFINITIONS) {
+    const own = toolByName(name, "chat");
+    const alias = Object.prototype.hasOwnProperty.call(LEGACY_CHAT_TOOL_ALIASES, name);
+    assert.ok(own !== undefined || alias, `${name} is no longer served to chats`);
+    assert.ok(!(own !== undefined && alias), `${name}: the catalog serves it, so it must not be aliased too`);
+    assert.ok(chatToolByName(name), name);
+  }
+  assert.deepEqual(LEGACY_SESSION_TOOL_DEFINITIONS.map(({ name }) => name).filter((name) => toolByName(name, "chat")), ["html_preview", "html_render", "request_secret"]);
 });
 
 test("against the production catalog every legacy name resolves; agent_catalog is Task 9's list_agents, and its old fields fit the target's chat schema", () => {

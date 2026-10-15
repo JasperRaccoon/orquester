@@ -9,7 +9,9 @@ import { toSafeToolError } from "../result.ts";
 import { FakeDaemonApi } from "../testing.ts";
 import { activity,chatSummary,head,shellSummary,snapshot,stamp } from "../fixtures.ts";
 import type { CallContext } from "../catalog/contract.ts";
-import type { ToolContext } from "../tool.ts";
+
+/** What these tests hand a tool: the daemon API, the call's signal and clock. */
+type ToolContext = Pick<CallContext, "api" | "signal" | "now">;
 import { requestsFamily } from "./requests.ts";
 
 // harness() and its constants are copied from sessions.test.ts: the tool test files never import each other.
@@ -32,7 +34,7 @@ async function harness(sessions = [chatSummary(), shellSummary()], snap = snapsh
     .on("GET", "/api/sessions/c1/thread", { status: 200, body: { kind: "snapshot", thread: { ...snap, head: { ...snap.head, projectPath, cwd: projectPath } } } })
     .on("GET", "/api/registry", { status: 200, body: registry }).on("GET", "/api/agent/providers", { status: 200, body: providers })
     .on("GET", "/api/agent-accounts", { status: 200, body: accounts });
-  const ctx: ToolContext = { api, todos: {} as never, files: {} as never, signal: new AbortController().signal, now: () => Date.parse("2026-09-22T12:00:00.000Z") };
+  const ctx: ToolContext = { api, signal: new AbortController().signal, now: () => Date.parse("2026-09-22T12:00:00.000Z") };
   return { api, ctx, projectPath, root, close: () => rm(root, { recursive: true, force: true }) };
 }
 

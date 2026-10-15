@@ -60,7 +60,6 @@ import type {
   CallContext,
   ScopeClaim,
   ScopeContext,
-  LegacyToolServices,
   ThreadCaller,
   Tier,
   ToolCaller,
@@ -115,7 +114,6 @@ export interface ExecutorDeps {
   refreshCaller?: (caller: ThreadCaller) => Promise<ThreadCaller>;
   /** See {@link ExecutorPorts.onToolsetApproved} (default: the daemon's wiring). */
   onToolsetApproved?: ((caller: ThreadCaller, toolset: ToolsetId, signal: AbortSignal) => ToolsetApplyOutcome | void | Promise<ToolsetApplyOutcome | void>) | null;
-  legacy?: LegacyToolServices;
   secretRequests?: SessionSecretRequests;
   now?: () => number;
   newId?: () => string;
@@ -385,7 +383,6 @@ async function execute(deps: ExecutorDeps, call: { name: string; arguments: unkn
     caller: who,
     turn,
     ...(deps.secretRequests ? { secretRequests: deps.secretRequests } : {}),
-    ...(deps.legacy ? { legacy: deps.legacy } : {}),
     ...(who.kind === "thread" ? { requestToolsetCard: (input: ToolsetCardInput) => requestToolsetCard(deps, who, input, signal, record) } : {}),
     ...(approval ? { approval } : {})
   };

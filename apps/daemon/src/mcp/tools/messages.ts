@@ -7,38 +7,31 @@
 // forget. Reply-requesting messages go through the reply-subscription routes (Task 5's services,
 // socket-only): persisted before posting, queued as the target's next turn — never a steer.
 //
-// The pre-catalog definitions below (`sendMessage`, `implementPlan`, `readTranscript`,
-// `messageTools`) stay exported, unserved, for the legacy session toolkit
-// (`session-tools/threads`) and their tests until plan Task 14 deletes them; their send path is
-// also `send_message`'s `reply: "none"` and the legacy `thread_send {wait}` alias's.
+// The steer-and-await path (`dispatchTurn` with `wait`, `awaitTurn`) serves an old agent host's
+// `thread_send {wait}` alias (spec §14.1); `reply: "none"` is `dispatchTurn` without the wait.
 import { createHash, randomUUID } from "node:crypto";
 import { stat } from "node:fs/promises";
 import { isAbsolute, relative as relativePath, resolve as resolvePath } from "node:path";
 import { z } from "zod";
 import type { AgentConversationsResponse, ApprovalPreviewSection, CreateSessionRequest, SessionSummary } from "@orquester/api";
-import { agentChatRoutes, buildPlanImplementationPrompt, GOAL_ACTIVITY_KIND, GOAL_COMMAND_FAILED_ACTIVITY_KIND, GOAL_STATUS_ACTIVITY_KIND, isGoalCommandText, isHiddenGoalChange, MAX_TURN_INPUT_CHARS, parseGoalSupport, parseGoalUpdatedPayload, parseThreadGoal, replyNoticeText, resolveLaunchModel, startedTurns, THREAD_MESSAGE_OVERHEAD_CHARS, threadMessageContext, TURN_NOT_IDLE, UNTRUSTED_NOTICE, WAIT_CYCLE, type AttachmentRef, type CausedBy, type ComposerContextRecord, type CreateAgentChatSessionFields, type ProviderModel, type ReplySubscriptionResponse, type ReplyWaitResponse, type RuntimeMode, type ThreadGoal, type ThreadItem, type ThreadItemResponse, type ThreadMessageOrigin, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
+import { agentChatRoutes, buildPlanImplementationPrompt, GOAL_ACTIVITY_KIND, GOAL_COMMAND_FAILED_ACTIVITY_KIND, GOAL_STATUS_ACTIVITY_KIND, isGoalCommandText, isHiddenGoalChange, MAX_TURN_INPUT_CHARS, parseGoalSupport, parseGoalUpdatedPayload, parseThreadGoal, replyNoticeText, resolveLaunchModel, THREAD_MESSAGE_OVERHEAD_CHARS, threadMessageContext, TURN_NOT_IDLE, UNTRUSTED_NOTICE, WAIT_CYCLE, type AttachmentRef, type CausedBy, type ComposerContextRecord, type CreateAgentChatSessionFields, type ProviderModel, type ReplySubscriptionResponse, type ReplyWaitResponse, type RuntimeMode, type ThreadGoal, type ThreadItem, type ThreadItemResponse, type ThreadMessageOrigin, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
 import { findAgent, findModel, loadAgents, resolveModelSelection, supportsFrom, validateAccountId, type AgentView } from "../agents.ts";
 import { canonicalProject, realPathInSandbox, resolveProject } from "../addressing.ts";
 import { assertInsideFsRoot, FsSandboxError } from "@orquester/config/fs";
 import { attachmentInputSchema, MAX_ATTACHMENTS, uploadInlineAttachments, type AttachmentInput } from "../attachments.ts";
 import type { DaemonApi } from "../daemon-api.ts";
 import { expectOk, ToolError } from "../errors.ts";
-import { readOlderHistory, unavailableHint } from "../history.ts";
 import { listSessions, readThread, requireChatSession, sendCommand } from "../reads.ts";
 import { clipText, fitJsonBytes, MAX_ECHO_CHARS, MAX_RESULT_BYTES, resultBytes, toSafeToolError } from "../result.ts";
-import { defineTool, MUTATING, READ_ONLY, type ToolContext, type ToolDef } from "../tool.ts";
-import { proposedPlan, transcriptEntries, transcriptRange, type TranscriptResult } from "../transcript.ts";
+import { proposedPlan } from "../transcript.ts";
 import { buildViewContext, chatDetail, fitDetail, SETTLED_TURN_STATES, type SessionDetail } from "../views.ts";
 import { awaitReplySubscription, turnBaseline, waitForTurn, waitWhileWorking, type TurnBaseline, type TurnOutcome } from "../wait.ts";
-import { defineTool as defineCatalogTool, MUTATING as CATALOG_MUTATING, type AnyOrquesterTool, type CallContext, type ScopeContext, type ThreadCaller } from "../catalog/contract.ts";
+import { defineTool, MUTATING, type AnyOrquesterTool, type CallContext, type ScopeContext, type ThreadCaller } from "../catalog/contract.ts";
 import { NEW_SESSION, openedThreadRuntimeMode, runtimeModesUpTo } from "../gate/turn-policy.ts";
 import { asWaiter } from "../../agent-chat/waits.ts";
 import { MAX_RUNNING_SESSIONS_PER_PROJECT, optionsSchema, runtimeModeSchema } from "./sessions.ts";
-import { agentLabel, chatThreadRef, sessionCard, sessionClaim, threadCaller } from "./watch.ts";
+import { agentLabel, chatThreadRef, sessionCard, sessionClaim, threadCaller } from "./session-access.ts";
 
-const MAX_WAIT_MS = 600_000;
-/** read_transcript's ceiling: the budget covers the whole result in UTF-8 bytes (transcript.ts), 5 000 under ok()'s 60 000-byte cap (result.ts). */
-const MAX_TRANSCRIPT_CHARS = 55_000;
 /**
  * How long a needs-input the snapshot contradicts waits for the summary to move before looking again anyway: just
  * past one host poll (`SUMMARY_POLL_INTERVAL_MS`, 1.5 s, agent-chat/summary.ts). The session's next bus event
@@ -62,35 +55,6 @@ const GOAL_ANSWER_RECHECK_MS = 1_000;
 /** The most an answer takes, in UTF-8 bytes of its JSON: a status quotes an objective of up to 4 000 characters. */
 const GOAL_ANSWER_BYTES = 8_192;
 const GOAL_NO_ANSWER_HINT = "No answer came: the command changed nothing (the goal was already so), or the host is still on it. session.chat.goal is the goal as it stands; read_transcript shows an answer that lands later.";
-const TRUNCATED_HINT = "Shed to fit maxChars: reasoning, then tool detail, then the oldest rows (coveredTurns says which turns are left). Raise maxChars (max 55000), include less, or use get_turn_diff for one turn's file changes.";
-/** get_session sheds subagent rows too when its detail would pass the cap (views.ts), so this promises no full roster. */
-const SUBAGENTS_TRIMMED_HINT = "The subagent list was trimmed too; get_session may list more of it.";
-
-/**
- * The hint a read_transcript result carries, or none for a whole one that read every turn of its range: first
- * `unavailable`, the sentence about the turns it could not read whole (history.ts `unavailableHint`), then the shed
- * hint. That one keys on `truncated`, which transcript.ts sets on every result it sheds, a trimmed subagent list alone
- * included; `subagentsTruncated` is present only when the list was trimmed. A shed result stays TRANSCRIPT_HINT_BYTES
- * under `maxChars` for this field, and the `unavailable` sentence's bytes more, so the answer, hint included, keeps
- * within `maxChars`.
- */
-function transcriptHint(result: Pick<TranscriptResult, "truncated" | "subagentsTruncated">, unavailable?: string): string | undefined {
-  const shed = !result.truncated ? undefined : result.subagentsTruncated ? `${TRUNCATED_HINT} ${SUBAGENTS_TRIMMED_HINT}` : TRUNCATED_HINT;
-  return unavailable && shed ? `${unavailable} ${shed}` : unavailable || shed;
-}
-
-/** Why a `beforeTurn` past the last turn is refused, naming the range that is not. */
-function beforeTurnRefusal(turnCount: number): string {
-  if (turnCount === 0) return "This conversation has no started turn yet, so there is no turn to read before: leave beforeTurn out.";
-  const valid = turnCount === 1 ? "2" : `between 2 and ${turnCount + 1}`;
-  return `beforeTurn must be ${valid}: this conversation has ${turnCount} started turn${turnCount === 1 ? "" : "s"}.`;
-}
-
-const sessionIdField = z.string().min(1).describe("The session id from list_sessions.");
-const waitFields = {
-  wait: z.boolean().default(true).describe("Block until the turn settles or the agent asks something (default true)."),
-  timeoutMs: z.number().int().min(1_000).max(MAX_WAIT_MS).default(120_000).describe("How long to wait, in ms (max 600000). On timeout the turn keeps running.")
-};
 
 /**
  * The send preconditions the GUI applies (spec §7.4), and the snapshot they were checked on. An open request holds back
@@ -113,8 +77,8 @@ async function readyToSend(api: DaemonApi, summary: SessionSummary, opts: { host
 }
 
 type TurnBody = { input: string; attachments?: AttachmentRef[]; interactionMode: "default" | "plan"; context?: readonly ComposerContextRecord[]; causedBy?: CausedBy };
-/** What the send path reads of its context: the legacy `ToolContext`, or a catalog tool's. */
-type SendContext = Pick<ToolContext, "api" | "signal" | "now" | "turnContext">;
+/** What the send path reads of a catalog tool's context. */
+type SendContext = Pick<CallContext, "api" | "signal" | "now">;
 type SendResult = { seq: number; outcome: TurnOutcome | "sent" | "goal"; turnId?: string; reply?: string; replyTruncated?: boolean; answer?: string; answerTruncated?: true; hint?: string; pending?: SessionDetail["pending"]; session: SessionDetail };
 
 /**
@@ -126,7 +90,7 @@ async function dispatchTurn(ctx: SendContext, sessionId: string, checked: Thread
   const summary = await requireChatSession(ctx.api, sessionId);
   const baseline = turnBaseline(summary);
   const over = turnsOverBefore(checked, summary);
-  const context = body.context ?? ctx.turnContext;
+  const context = body.context;
   const { seq } = await sendCommand(ctx.api, sessionId, "turn", {
     input: body.input,
     ...(body.attachments?.length ? { attachments: body.attachments } : {}),
@@ -145,7 +109,7 @@ async function dispatchTurn(ctx: SendContext, sessionId: string, checked: Thread
  * Settled is decided by the state alone, as wait.ts and views.ts decide it: a running turn's `completedAt` can hold a
  * mid-turn placeholder stamp (turn-state.ts), and a steer into that turn is this message's.
  */
-export function turnsOverBefore(checked: ThreadSnapshotPayload, summary: SessionSummary): ReadonlySet<string> {
+function turnsOverBefore(checked: ThreadSnapshotPayload, summary: SessionSummary): ReadonlySet<string> {
   const over = new Set<string>();
   for (const t of [...checked.turns, summary.latestTurn]) {
     if (t?.turnId && SETTLED_TURN_STATES.has(t.state)) over.add(t.turnId);
@@ -161,7 +125,7 @@ export function turnsOverBefore(checked: ThreadSnapshotPayload, summary: Session
  * `over` when the message was posted is the list catching up, not this message's outcome: the wait rebases on it and
  * goes on. A session in error is a real failure whatever its latest turn.
  */
-export async function awaitTurn(ctx: Pick<ToolContext, "api" | "signal" | "now">, sessionId: string, baseline: TurnBaseline, over: ReadonlySet<string>, timeoutMs: number): Promise<{ outcome: TurnOutcome; session: SessionDetail }> {
+async function awaitTurn(ctx: SendContext, sessionId: string, baseline: TurnBaseline, over: ReadonlySet<string>, timeoutMs: number): Promise<{ outcome: TurnOutcome; session: SessionDetail }> {
   // Elapsed time as wait.ts counts it: the larger of the caller's clock and the monotonic one.
   const startedAt = ctx.now();
   const startedMono = performance.now();
@@ -206,6 +170,12 @@ export async function awaitTurn(ctx: Pick<ToolContext, "api" | "signal" | "now">
   }
 }
 
+/**
+ * A send's result with its session detail fitted beside it (the reply cut first, then the plan): the
+ * external `send_message` and `create_session` answer it whole (`reply: "none"`, and `"wait"` through
+ * `dispatchNextTurn`); an old host's `thread_send {wait}` alias (`sendFromChat`'s legacy path) answers
+ * the same reply without the detail.
+ */
 function sendResult(seq: number, outcome: SendResult["outcome"], session: SessionDetail, over: ReadonlySet<string>): SendResult {
   // The message's turn: one not over when it was posted — a new turn, or the running turn it steered (spec §7.4).
   const ours = (turnId: string | null | undefined): turnId is string => typeof turnId === "string" && turnId !== "" && !over.has(turnId);
@@ -355,50 +325,6 @@ async function awaitGoalAnswer(ctx: SendContext, sessionId: string, input: strin
   }
 }
 
-export const sendMessage = defineTool({
-  name: "send_message",
-  title: "Send a message",
-  description: "Send a message to a chat session (with optional image/file attachments, optionally in plan mode). With wait:true (default) it returns the agent's reply, or the question/approval it stopped on. While a turn is running the message steers it. On Codex the host runs `/goal …` itself: no turn starts, and outcome \"goal\" carries its `answer`.",
-  input: {
-    sessionId: sessionIdField,
-    text: z.string().optional().describe("The message. Required unless attachments are given."),
-    attachments: z.array(attachmentInputSchema).max(MAX_ATTACHMENTS).optional().describe(`Up to ${MAX_ATTACHMENTS}: {path} inside the sandbox, or {name, base64, mimeType?}.`),
-    planMode: z.boolean().default(false).describe("Send in plan mode (the agent plans, does not edit). Only where the agent supports it; OpenCode uses options.agent=\"plan\"."),
-    ...waitFields
-  },
-  annotations: MUTATING,
-  async run(args, ctx) {
-    const summary = await requireChatSession(ctx.api, args.sessionId);
-    const text = (args.text ?? "").trim();
-    if (!text && !args.attachments?.length) throw new ToolError("INVALID_ARGUMENT", "A message needs text or at least one attachment.");
-    if (text.length > MAX_TURN_INPUT_CHARS) throw new ToolError("INVALID_ARGUMENT", `The message is ${text.length} characters; the limit is ${MAX_TURN_INPUT_CHARS}.`);
-    // goals §5.1: where the HOST runs goals (Codex), `/goal …` is a goal command and never a prompt — the host's rule and
-    // the composer's (`isGoalCommandText`, `capabilities.goals.command`).
-    const goalText = isGoalCommandText(text);
-    const view = goalText || args.planMode ? await buildViewContext(ctx.api) : null;
-    const adapter = view?.adapterByRefId.get(summary.refId);
-    const caps = adapter ? view?.capabilitiesByAdapter.get(adapter) : undefined;
-    // Where a /goal goes is the agent's capabilities' to say: unread, the host might run it as a command while this call
-    // waited on a turn that never starts — so it is refused, as plan mode is when they cannot be read.
-    if (goalText && !caps) throw new ToolError("INVALID_ARGUMENT", `A /goal can't be routed for ${summary.refId} right now: its capabilities could not be read. Retry shortly.`);
-    const hostGoal = goalText && parseGoalSupport(caps?.goals)?.command === "host";
-    // The host refuses it too (`parseHostGoalCommand`), but only once the files are uploaded: refused here, none are.
-    if (hostGoal && args.attachments?.length) throw new ToolError("INVALID_ARGUMENT", "A goal can't include attachments.");
-    const checked = await readyToSend(ctx.api, summary, { hostGoal });
-    if (args.planMode) {
-      // The gate get_session reports as supports.planMode: capabilities that could not be read are no plan mode.
-      if (!supportsFrom(caps).planMode) {
-        throw new ToolError("INVALID_ARGUMENT", caps
-          ? `${summary.refId} has no plan mode toggle${adapter === "opencode" ? ' — use update_session {options:{agent:"plan"}}' : ""}.`
-          : `Plan mode can't be confirmed for ${summary.refId} right now: its capabilities could not be read. Retry shortly, or send without planMode.`);
-      }
-    }
-    if (hostGoal) return dispatchGoalCommand(ctx, args.sessionId, checked, text, args.planMode ? "plan" : "default", args.wait, args.timeoutMs);
-    const attachments = args.attachments?.length ? await uploadInlineAttachments(ctx.api, args.sessionId, args.attachments) : [];
-    return dispatchTurn(ctx, args.sessionId, checked, { input: text, attachments, interactionMode: args.planMode ? "plan" : "default" }, args.wait, args.timeoutMs);
-  }
-});
-
 /**
  * The plan the GUI's Implement button sends: the LATEST proposed plan, unless a later user message already
  * implemented it. That is the host's own `hasActionableProposedPlan` rule, judged on the snapshot just read
@@ -420,63 +346,6 @@ async function actionablePlanMarkdown(api: DaemonApi, sessionId: string, snap: T
   if (!markdown.trim()) throw new ToolError("INVALID_ARGUMENT", "The latest proposed plan has no text to implement.");
   return markdown;
 }
-
-const implementPlan = defineTool({
-  name: "implement_plan",
-  title: "Implement the proposed plan",
-  description: "The GUI's Implement button: sends the agent's latest proposed plan back as 'PLEASE IMPLEMENT THIS PLAN' in default mode. To refine a plan instead, send_message with planMode:true.",
-  input: { sessionId: sessionIdField, ...waitFields },
-  annotations: MUTATING,
-  async run(args, ctx) {
-    const summary = await requireChatSession(ctx.api, args.sessionId);
-    const snap = await readyToSend(ctx.api, summary);
-    const plan = await actionablePlanMarkdown(ctx.api, args.sessionId, snap);
-    return dispatchTurn(ctx, args.sessionId, snap, { input: buildPlanImplementationPrompt(plan), interactionMode: "default" }, args.wait, args.timeoutMs);
-  }
-});
-
-export const readTranscript = defineTool({
-  name: "read_transcript",
-  title: "Read the transcript",
-  // A list cut to fit ends in one element of its own shape counting the rest (transcript.ts `cutRow`): a changedFiles
-  // "…N more files" string, a files row {path: "…N more files", additions, deletions} with the rest's line totals, an
-  // attachments row {name: "…N more attachments", type: "omitted"}. The description has to say so: it reads as data.
-  description: "What was said and done in a session, newest turns last: messages, tool calls, approvals, questions, plans, file changes, errors. `beforeTurn` reads older turns; `agentId` drills into a subagent. A list cut to fit (a checkpoint's files, a tool's changedFiles, a message's attachments) ends in a marker counting the rest (\"…12 more files\"; a files marker has their real line totals), not a real entry.",
-  input: {
-    sessionId: sessionIdField,
-    turns: z.number().int().min(1).max(200).default(3).describe("How many turns to include: the latest ones, or those just before beforeTurn."),
-    beforeTurn: z.number().int().min(2).optional().describe("Read the turns just before this turn number (2 to turnCount + 1) instead of the latest; turns older than the live window are read from the host's history index. To page back, pass the last result's olderTurns + 1. Turns that could not be read whole are named in unavailableTurns."),
-    agentId: z.string().min(1).optional().describe("A subagent id from get_session.subagents to read its own timeline; a workflow agent's id is <coordinator>:wf:<slot>."),
-    include: z.array(z.enum(["reasoning", "tools", "activity"])).default(["tools", "activity"]).describe("Extra row kinds; reasoning is opt-in."),
-    maxChars: z.number().int().min(2_000).max(MAX_TRANSCRIPT_CHARS).default(40_000).describe("Size budget for the result, in UTF-8 bytes (max 55000; every tool result is capped at 60000 bytes). Over it, the transcript sheds reasoning, then tool detail, then its oldest rows, and cuts the latest reply last; the subagent list keeps at least a quarter when it needs it, plus whatever the transcript leaves unused.")
-  },
-  annotations: READ_ONLY,
-  async run(args, { api }) {
-    await requireChatSession(api, args.sessionId);
-    const snap = await readThread(api, args.sessionId);
-    const turnCount = startedTurns(snap.turns).length;
-    if (args.beforeTurn !== undefined && args.beforeTurn > turnCount + 1) throw new ToolError("INVALID_ARGUMENT", beforeTurnRefusal(turnCount));
-    // Turns older than the window come from the host's thread index; a page it cannot read is reported, never thrown.
-    const range = transcriptRange(turnCount, args.turns, args.beforeTurn);
-    const older = await readOlderHistory(api, args.sessionId, snap, range, args.agentId !== undefined ? { agentId: args.agentId } : {});
-    const read = older.snapshot;
-    // "" names no subagent: refused like any unknown id, never read as "the main view" (the schema refuses it first).
-    // A subagent of an older turn is known by the rows a page brought back.
-    if (args.agentId !== undefined && !read.roster.some((r) => r.id === args.agentId) && !read.items.some((i) => i.agentId === args.agentId)) {
-      throw new ToolError("INVALID_ARGUMENT", `No subagent "${args.agentId}". Known: ${read.roster.map((r) => r.id).join(", ") || "none"}.`);
-    }
-    const unavailable = older.unavailable ? { turns: older.unavailable.turns, hint: unavailableHint(older.unavailable, range.end) } : undefined;
-    const result = transcriptEntries(read, {
-      turns: args.turns, ...(args.beforeTurn !== undefined ? { beforeTurn: args.beforeTurn } : {}), ...(args.agentId !== undefined ? { agentId: args.agentId } : {}),
-      include: new Set(args.include), maxChars: args.maxChars, windowItems: snap.items, ...(unavailable ? { unavailable } : {})
-    });
-    const hint = transcriptHint(result, unavailable?.hint);
-    return hint ? { ...result, hint } : { ...result };
-  }
-});
-
-/** The pre-catalog definitions (unserved; the legacy session toolkit and their tests run them until plan Task 14). */
-export const messageTools: ToolDef[] = [sendMessage, implementPlan, readTranscript];
 
 // ---------------------------------------------------------------------------
 // The catalog tools (unified MCP design 2026-10-15 §4 rows 10 and 13, §8)
@@ -723,7 +592,7 @@ const timeoutSecondsField = z.number().int().min(1).max(MAX_REPLY_WAIT_SECONDS).
 // send_message (§4 row 13, §8.1)
 // ---------------------------------------------------------------------------
 
-export const sendMessageTool = defineCatalogTool({
+export const sendMessageTool = defineTool({
   name: "send_message",
   title: "Send a message",
   description:
@@ -762,8 +631,8 @@ export const sendMessageTool = defineCatalogTool({
       { label: "Reply", value: args.reply ?? "wait" },
       ...(args.planMode ? [{ label: "Mode", value: "plan" }] : []),
       ...attachmentRows(args.attachments)
-    ], args.implementPlan ? undefined : args.text),
-  annotations: CATALOG_MUTATING,
+    ], { text: args.implementPlan ? undefined : args.text }),
+  annotations: MUTATING,
   resultKind: "json",
   async run(args, ctx) {
     const caller = threadCaller(ctx.caller);
@@ -991,7 +860,7 @@ function createReply(args: CreateArgs, chat: boolean): ReplyMode {
   return reply;
 }
 
-export const createSessionTool = defineCatalogTool({
+export const createSessionTool = defineTool({
   name: "create_session",
   title: "Open a chat session",
   description:
@@ -1060,9 +929,9 @@ export const createSessionTool = defineCatalogTool({
     ];
     const sections: ApprovalPreviewSection[] = [{ kind: "fields", title: "Request", rows }];
     if (args.prompt !== undefined) sections.push({ kind: "text", title: "First message", text: args.prompt });
-    return { title: `${caller ? agentLabel(caller) : "An agent"} wants to open a chat in ${where}`, scopeLabel: `Project ${where}`, sections };
+    return { title: `${agentLabel(ctx.caller)} wants to open a chat in ${where}`, scopeLabel: `Project ${where}`, sections };
   },
-  annotations: CATALOG_MUTATING,
+  annotations: MUTATING,
   resultKind: "json",
   async run(args, ctx) {
     const caller = threadCaller(ctx.caller);
@@ -1222,8 +1091,5 @@ async function createFromChat(args: CreateArgs, ctx: CallContext, caller: Thread
   return { ...(notice !== undefined ? { notice } : {}), ...created, ...rest, ...ref };
 }
 
-/**
- * This family in the catalog (`../catalog/index.ts`). `read_transcript` is served by the sessions family (plan Task 7,
- * `./sessions.ts`); `readTranscript` stays exported here only for the legacy `thread_read` until Task 14.
- */
+/** This family in the catalog (`../catalog/index.ts`). `read_transcript` is the sessions family's (`./sessions.ts`). */
 export const messagesFamily: readonly AnyOrquesterTool[] = [createSessionTool, sendMessageTool];

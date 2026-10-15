@@ -50,15 +50,20 @@ export function offToolsetsText(enabled: ReadonlySet<string>): string {
     .join(", ");
 }
 
-/** Compose the block for one thread. */
+/**
+ * Compose the block for one thread. The toolset line is worded as of the chat's start: Claude's SDK
+ * keeps the system prompt it launched with until compaction, so a toolset enabled later (a
+ * `request_toolset` card, Settings, the Tools chip) is not reflected here — `request_toolset`'s
+ * result is authoritative (Task 6 ruling).
+ */
 export function composeOrquesterInstructions(input: OrquesterInstructionsInput): string {
   const lines: string[] = [ORQUESTER_INSTRUCTIONS_FIXED];
   const off = offToolsetsText(input.enabledToolsets);
   if (off) {
     lines.push(
       input.canRequestToolsets
-        ? `Off in this chat: ${off}. If a task needs one, call request_toolset with its id.`
-        : `Off in this chat: ${off}.`
+        ? `Off at chat start: ${off}. If a task needs one, call request_toolset with its id; its result says what is on now.`
+        : `Off at chat start: ${off}.`
     );
   }
   if (input.workflowOwned) lines.push(WORKFLOW_OWNED_LINE);

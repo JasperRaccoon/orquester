@@ -6,9 +6,10 @@
  * the daemon has no manifest route (an OLD daemon answers its route-miss 404), so the old daemon's
  * own handlers match every name and argument the provider sends.
  *
- * Generated once from the pre-catalog toolkits (`session-tools/{html,secrets,threads}`) through a
- * real MCP client; `legacy-definitions.test.ts` holds it equal to them while they exist. Never edit
- * by hand; removed with the aliases once no older peer is reported (plan Task 14).
+ * Generated once from the pre-catalog toolkits (`session-tools/{html,secrets,threads}`, deleted in
+ * plan Task 14) through a real MCP client; `legacy-definitions.test.ts` pins it by hash. Never edit
+ * by hand. Removed with the daemon's aliases (`session-tools/legacy-aliases.ts`) by the criterion
+ * in `session-tools/README.md` ("Legacy names and definitions").
  */
 
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";

