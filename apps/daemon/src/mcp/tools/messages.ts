@@ -896,6 +896,8 @@ export const createSessionTool = defineTool({
     }
     if (args.prompt === undefined && args.resume === undefined) throw new ToolError("INVALID_ARGUMENT", "prompt is required: the chat's first message, self-contained.");
     createReply(args, true);
+    // Turn policy (a) before any card: a mode broader than this chat's is refused at once — never a card the call could not honour.
+    openedThreadRuntimeMode(caller, args.runtimeMode);
     const path = await createTarget(ctx.api, caller, args.project);
     const project = await canonicalProject(ctx.api, path);
     if (project === null) throw new ToolError("PROJECT_NOT_FOUND", `No project at "${clipText(args.project ?? path, MAX_ECHO_CHARS)}". Use list_projects.`);
@@ -921,7 +923,8 @@ export const createSessionTool = defineTool({
       { label: "Agent", value: args.agent ?? "this chat's" },
       ...(args.model ? [{ label: "Model", value: args.model }] : []),
       ...(args.options ? [{ label: "Options", value: JSON.stringify(args.options) }] : []),
-      { label: "Permission mode", value: args.runtimeMode ?? (caller ? caller.runtimeMode : "full-access") },
+      // The mode the chat will really get (an unknown caller mode opens the narrowest): what is approved is what runs.
+      { label: "Permission mode", value: caller ? openedThreadRuntimeMode(caller, args.runtimeMode) : (args.runtimeMode ?? "full-access") },
       ...(args.accountId ? [{ label: "Account", value: args.accountId }] : []),
       ...(args.cwd ? [{ label: "Working directory", value: args.cwd }] : []),
       ...(args.resume ? [{ label: "Resume", value: args.resume.conversationId }] : []),

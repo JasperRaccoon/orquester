@@ -485,6 +485,23 @@ test("create_session in another workspace: a boundary card showing the prompt; w
   assert.match(fallback.accountNote, /not usable/);
 });
 
+test("create_session card: the permission mode shown is the one the chat will get (an unknown caller mode opens the narrowest); a broader mode is refused before any card", async () => {
+  const r = rig();
+  const creates = createRoutes(r.api, r.sessions);
+  const shown = () => (r.port.cards.at(-1)!.sections[0] as { rows: { label: string; value: string }[] }).rows.find((row) => row.label === "Permission mode")!.value;
+  // A mode this build does not know (a newer host's) reads as the narrowest: the card says so, and so does the launch.
+  assert.equal(code(await r.call("create_session", { project: "jaspersito/orquester-3", prompt: "x", reply: "none" }, { runtimeMode: "bypass-everything" as never })), undefined);
+  assert.equal(shown(), "approval-required");
+  assert.equal(creates.at(-1)!.chat.runtimeMode, "approval-required");
+  // A narrower mode named: shown as named.
+  assert.equal(code(await r.call("create_session", { project: "beta/app", prompt: "x", runtimeMode: "auto", reply: "none" })), undefined);
+  assert.equal(shown(), "auto");
+  // A broader one: refused in scope, so the user never approves a card the call cannot honour.
+  const cards = r.port.cards.length;
+  assert.equal(code(await r.call("create_session", { project: "beta/app", prompt: "x", runtimeMode: "full-access" }, { runtimeMode: "auto" })), "PERMISSION_DENIED");
+  assert.equal(r.port.cards.length, cards);
+});
+
 test("create_session from an external client: project required, full-access by default, no lineage, reply none by default", async () => {
   const r = rig();
   const creates = createRoutes(r.api, r.sessions);
