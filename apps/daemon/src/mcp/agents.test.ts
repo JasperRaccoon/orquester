@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { providerPickerView } from "@orquester/api/agent-chat";
 import { FakeDaemonApi } from "./testing.ts";
 import { stamp } from "./fixtures.ts";
 import { findAgent,loadAgents,resolveModelSelection,validateAccountId,type AgentView } from "./agents.ts";
@@ -40,7 +41,8 @@ test("loadAgents lists only chat-capable entries with models, options, accounts 
   assert.equal(claude.adapter, "claude"); assert.equal(claude.enabled, true); assert.equal(claude.version, "2.1.280"); assert.equal(claude.auth.status, "authenticated");
   assert.deepEqual(claude.models.map((m) => m.slug), ["default", "haiku"]);
   assert.equal(claude.models[0].isDefault, true);
-  assert.deepEqual(claude.models[0].options[0], { id: "effort", label: "Effort", type: "select", values: [{ id: "medium", label: "Medium", isDefault: true }, { id: "high", label: "High" }] });
+  // The picker's view: each option names the value a launch naming none gets.
+  assert.deepEqual(claude.models[0].options[0], { id: "effort", label: "Effort", type: "select", values: [{ id: "medium", label: "Medium", isDefault: true }, { id: "high", label: "High" }], default: "medium" });
   assert.deepEqual(claude.models[0].options[1], { id: "thinking", label: "Thinking", type: "boolean" });
   assert.equal(claude.effortOptionId, "effort");
   assert.deepEqual(claude.supports, { planMode: true, rollback: true, compaction: true, backgroundTasks: true, taskStop: true, goals: null, contextWindow: true });
@@ -155,4 +157,23 @@ test("a degraded provider row (an older host's) is normalised field by field, ne
     const broken = api().on("GET", "/api/agent/providers", { status: 200, body });
     assert.deepEqual(findAgent(await loadAgents(broken), "claude").auth, { status: "unknown" }, JSON.stringify(body));
   }
+});
+
+test("the launch default is the picker's (resolveLaunchModel): a default-flagged legacy model is never chosen, and resolveModelSelection agrees with defaultModel", async () => {
+  const legacyFirst = { ...providers, providers: [{ ...providers.providers[0]!, models: [
+    { slug: "old", name: "Old", isDefault: true, isLegacy: true, capabilities: null },
+    { slug: "opus", name: "Opus", shortName: "Opus 5", capabilities: { optionDescriptors: [] } },
+    { slug: "haiku", name: "Haiku", capabilities: { optionDescriptors: [] } }
+  ] }] };
+  const daemon = api().on("GET", "/api/agent/providers", { status: 200, body: legacyFirst });
+  const claude = findAgent(await loadAgents(daemon), "claude");
+  const view = providerPickerView({ status: "ready", models: legacyFirst.providers[0]!.models as never });
+  assert.equal(claude.defaultModel, view.defaultModel);
+  assert.equal(claude.defaultModel, "opus");
+  assert.deepEqual(claude.models.map((m) => [m.slug, m.isDefault, m.shortName]), [["opus", true, "Opus 5"], ["haiku", false, undefined]]);
+  assert.equal(resolveModelSelection(claude, {}).model, "opus");
+  assert.equal(claude.catalogueLoading, false);
+  // Listed with legacy: still marked, still not the default.
+  const all = findAgent(await loadAgents(daemon, { includeLegacyModels: true }), "claude");
+  assert.deepEqual(all.models.map((m) => [m.slug, m.isDefault, m.isLegacy === true]), [["old", false, true], ["opus", true, false], ["haiku", false, false]]);
 });

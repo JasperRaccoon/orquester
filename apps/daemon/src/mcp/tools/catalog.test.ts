@@ -1,18 +1,32 @@
 import { test,type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp,mkdir,rm } from "node:fs/promises";
+import { mkdtemp,mkdir,realpath,rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FakeDaemonApi } from "../testing.ts";
 import { chatSummary,shellSummary,stamp } from "../fixtures.ts";
 import { ok } from "../result.ts";
-import type { ToolContext } from "../tool.ts";
-import { catalogTools } from "./catalog.ts";
+import type { AnyOrquesterTool, CallContext, ThreadCaller } from "../catalog/contract.ts";
+import { providerPickerView } from "@orquester/api/agent-chat";
+import { FakeApprovalPort } from "../catalog/approval-double.ts";
+import { executeToolCall } from "../executor.ts";
+import { catalogFamily } from "./catalog.ts";
 
 const resultBytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value), "utf8");
 
-const tool = (name: string) => catalogTools.find((t) => t.name === name)!;
-const ctx = (api: FakeDaemonApi): ToolContext => ({ api, todos: {} as never, files: {} as never, signal: new AbortController().signal, now: () => Date.parse("2026-09-22T12:00:00.000Z") });
+/** A catalog tool whose `run` answers a record (every tool of this family does). */
+const tool = (name: string) => {
+  const def: AnyOrquesterTool = catalogFamily.find((t) => t.name === name)!;
+  return { input: def.input, run: async (args: Record<string, unknown>, c: CallContext) => (await def.run(args, c)) as Record<string, any> };
+};
+const ctx = (api: FakeDaemonApi, caller: CallContext["caller"] = { kind: "external" }): CallContext => ({
+  api, signal: new AbortController().signal, now: () => Date.parse("2026-09-22T12:00:00.000Z"), caller,
+  turn: { interactionMode: "default", provenance: (_origin, text) => text }
+});
+const thread = (over: Partial<ThreadCaller> = {}): ThreadCaller => ({
+  kind: "thread", threadId: "c1", title: "Claude Code", projectPath: "/w/acme/api", workspace: "acme", cwd: "/w/acme/api", agentId: "claude", callId: "call-1",
+  runtimeMode: "auto", planning: false, workflowOwned: false, exchange: null, ...over
+});
 
 test("list_projects flattens workspaces, hides archived by default, marks recency and open sessions, recent first", async () => {
   const api = new FakeDaemonApi()
@@ -22,7 +36,7 @@ test("list_projects flattens workspaces, hides archived by default, marks recenc
     .on("GET", "/api/projects/recent", { status: 200, body: [{ name: "api", workspace: "acme", path: "/w/acme/api", lastInteractedAt: stamp(5), interactionCount: 3 }] })
     .on("GET", "/api/sessions", { status: 200, body: [chatSummary(), chatSummary({ id: "c2" })] });
   const r = await tool("list_projects").run({ includeArchived: false }, ctx(api));
-  assert.deepEqual(r, { projects: [{ workspace: "acme", name: "api", path: "/w/acme/api", isArchived: false, lastInteractedAt: stamp(5), openSessions: 2 }] });
+  assert.deepEqual(r, { projects: [{ workspace: "acme", name: "api", path: "/w/acme/api", isArchived: false, lastInteractedAt: stamp(5), openSessions: 2 }], workspaces: [{ name: "acme", gitAccount: null }] });
   const all = await tool("list_projects").run({ includeArchived: true }, ctx(api));
   assert.deepEqual((all.projects as { path: string }[]).map((p) => p.path), ["/w/acme/api", "/w/acme/web", "/w/old/x"]);
   const one = await tool("list_projects").run({ workspace: "old", includeArchived: true }, ctx(api));
@@ -36,7 +50,7 @@ test("list_projects reports a project of an archived workspace as archived (the 
     .on("GET", "/api/projects/recent", { status: 200, body: [] })
     .on("GET", "/api/sessions", { status: 200, body: [] });
   const r = await tool("list_projects").run({ includeArchived: true }, ctx(api));
-  assert.deepEqual(r, { projects: [{ workspace: "old", name: "x", path: "/w/old/x", isArchived: true, openSessions: 0 }] });
+  assert.deepEqual(r, { projects: [{ workspace: "old", name: "x", path: "/w/old/x", isArchived: true, openSessions: 0 }], workspaces: [{ name: "old", isArchived: true, gitAccount: null }] });
 });
 
 test("list_projects orders recent projects newest first, then the rest alphabetically", async () => {
@@ -186,7 +200,7 @@ test("an empty filter is refused like any unknown one, never read as \"no filter
   await assert.rejects(tool("list_projects").run({ workspace: "", includeArchived: false }, ctx(api)), refused, "list_projects");
   await assert.rejects(tool("list_agents").run({ agent: "", includeLegacyModels: false }, ctx(api)), refused, "list_agents");
   await assert.rejects(tool("list_conversations").run({ project: "acme/api", agent: "", limit: 20 }, ctx(api)), refused, "list_conversations");
-  for (const def of catalogTools) {
+  for (const def of catalogFamily) {
     const filter = (def.input as Record<string, { safeParse(v: unknown): { success: boolean } }>)[def.name === "list_projects" ? "workspace" : "agent"]!;
     assert.equal(filter.safeParse("").success, false, `${def.name}'s schema refuses ""`);
   }
@@ -325,4 +339,191 @@ test("list_conversations: a row is resumable only through an ENABLED chat agent,
   assert.deepEqual((r.conversations as { id: string; agent: string; resumable: boolean }[]).map((c) => [c.id, c.agent, c.resumable]), [["s1", "codex", false], ["s2", "claude", true]]);
   // The filter still names the disabled agent's rows: it lists them, it just cannot resume them.
   assert.deepEqual((await tool("list_conversations").run({ project: "acme/api", agent: "codex", limit: 20 }, ctx(api))).conversations, [{ id: "s1", agent: "codex", title: "Codex chat", updatedAt: stamp(3), home: "system", resumable: false }]);
+});
+
+// ---- Unified MCP Task 9: repoId, git accounts, chat current/sameRepo; the picker view; chat views ----
+
+test("list_projects: repoId per project, each workspace's git account joined from /api/accounts (label, login, provider only), query filter", async () => {
+  const account = { id: "acct-1", label: "Work GitHub", provider: "github", login: "jasper", githubLogin: "jasper", host: "github.com", gitName: "J", gitEmail: "j@x.io", publicKey: "ssh-ed25519 AAAA", repoAccess: true, createdAt: stamp(0) };
+  const api = new FakeDaemonApi()
+    .on("GET", "/api/workspaces", { status: 200, body: [{ name: "acme", path: "/w/acme", projectCount: 2, gitAccountId: "acct-1" }, { name: "solo", path: "/w/solo", projectCount: 1, gitAccountId: "gone" }, { name: "free", path: "/w/free", projectCount: 1 }] })
+    .on("GET", "/api/workspaces/acme/projects", { status: 200, body: [{ name: "orquester", workspace: "acme", path: "/w/acme/orquester", repoId: "github.com/acme/orquester" }, { name: "orquester-3", workspace: "acme", path: "/w/acme/orquester-3", repoId: "github.com/acme/orquester" }] })
+    .on("GET", "/api/workspaces/solo/projects", { status: 200, body: [{ name: "orq", workspace: "solo", path: "/w/solo/orq", repoId: "github.com/acme/orquester" }] })
+    .on("GET", "/api/workspaces/free/projects", { status: 200, body: [{ name: "notes", workspace: "free", path: "/w/free/notes" }] })
+    .on("GET", "/api/projects/recent", { status: 200, body: [] })
+    .on("GET", "/api/sessions", { status: 200, body: [] })
+    .on("GET", "/api/accounts", { status: 200, body: [account] });
+  const r = await tool("list_projects").run({ includeArchived: false }, ctx(api));
+  assert.deepEqual(r.workspaces, [
+    { name: "acme", gitAccount: { label: "Work GitHub", login: "jasper", provider: "github" } },
+    { name: "solo", gitAccount: null },
+    { name: "free", gitAccount: null }
+  ]);
+  assert.ok(!JSON.stringify(r).includes("ssh-ed25519") && !JSON.stringify(r).includes("j@x.io"), "no key, no git email");
+  const byName = new Map((r.projects as { workspace: string; name: string; repoId?: string; current?: true; sameRepo?: true }[]).map((p) => [`${p.workspace}/${p.name}`, p]));
+  assert.equal(byName.get("acme/orquester")!.repoId, "github.com/acme/orquester");
+  assert.equal(byName.get("free/notes")!.repoId, undefined);
+  for (const p of byName.values()) assert.equal(p.current ?? p.sameRepo, undefined, "external callers get no current/sameRepo");
+  const filtered = await tool("list_projects").run({ query: "ORQ", includeArchived: false }, ctx(api));
+  assert.deepEqual((filtered.projects as { name: string }[]).map((p) => p.name).sort(), ["orq", "orquester", "orquester-3"]);
+  assert.deepEqual((filtered.workspaces as { name: string }[]).map((w) => w.name), ["acme", "solo"], "only workspaces with a listed project");
+  // A daemon row that already carries gitAccount is taken as it is (never a key from anywhere).
+  api.on("GET", "/api/workspaces", { status: 200, body: [{ name: "free", path: "/w/free", projectCount: 1, gitAccount: { label: "Bitbucket", login: "jb", provider: "bitbucket-cloud" } }] });
+  assert.deepEqual((await tool("list_projects").run({ includeArchived: false }, ctx(api))).workspaces, [{ name: "free", gitAccount: { label: "Bitbucket", login: "jb", provider: "bitbucket-cloud" } }]);
+});
+
+test("list_projects for a chat: `current` marks its project and `sameRepo` every other clone of its repository, in any workspace", async () => {
+  const api = new FakeDaemonApi()
+    .on("GET", "/api/workspaces", { status: 200, body: [{ name: "acme", path: "/w/acme", projectCount: 3 }, { name: "solo", path: "/w/solo", projectCount: 1 }] })
+    .on("GET", "/api/workspaces/acme/projects", { status: 200, body: [
+      { name: "orquester", workspace: "acme", path: "/w/acme/orquester", repoId: "r1" },
+      { name: "orquester-3", workspace: "acme", path: "/w/acme/orquester-3", repoId: "r1", isArchived: true },
+      { name: "site", workspace: "acme", path: "/w/acme/site", repoId: "r2" }
+    ] })
+    .on("GET", "/api/workspaces/solo/projects", { status: 200, body: [{ name: "fork", workspace: "solo", path: "/w/solo/fork", repoId: "r1" }] })
+    .on("GET", "/api/projects/recent", { status: 200, body: [] })
+    .on("GET", "/api/sessions", { status: 200, body: [] });
+  // The caller's canonical path may be spelt differently from the listing's: matched by workspace/name.
+  // Full access: every workspace is listed (below it, other workspaces are only counted — the S13 ruling test below).
+  const caller = thread({ projectPath: "/real/w/acme/orquester", workspace: "acme", runtimeMode: "full-access" });
+  const rows = (await tool("list_projects").run({ includeArchived: true }, ctx(api, caller))).projects as { name: string; current?: true; sameRepo?: true }[];
+  assert.deepEqual(rows.map((p) => [p.name, p.current === true, p.sameRepo === true]), [["orquester", true, false], ["orquester-3", false, true], ["site", false, false], ["fork", false, true]]);
+  // An archived own project still names the repository its listed siblings share.
+  const hidden = await tool("list_projects").run({ includeArchived: false }, ctx(api, thread({ projectPath: "/w/acme/orquester-3", runtimeMode: "full-access" })));
+  // The repository is the own project's whatever the filter lists: naming another workspace still marks its clones.
+  const filtered = await tool("list_projects").run({ workspace: "solo", includeArchived: false }, ctx(api, thread({ projectPath: "/w/acme/orquester", runtimeMode: "full-access" })));
+  assert.deepEqual((filtered.projects as { name: string; sameRepo?: true }[]).map((p) => [p.name, p.sameRepo]), [["fork", true]]);
+  assert.deepEqual((hidden.projects as { name: string; sameRepo?: true }[]).filter((p) => p.sameRepo).map((p) => p.name), ["orquester", "fork"]);
+  // A chat with no project: nothing is current, nothing sameRepo.
+  const none = await tool("list_projects").run({ includeArchived: true }, ctx(api, thread({ projectPath: "", workspace: "", runtimeMode: "full-access" })));
+  assert.ok((none.projects as { current?: true; sameRepo?: true }[]).every((p) => p.current === undefined && p.sameRepo === undefined));
+});
+
+/** A catalogue with a legacy default-flagged model, a sub-provider, a chip label and option defaults. */
+function pickerApi(): FakeDaemonApi {
+  const effort = { id: "effort", label: "Effort", type: "select", options: [{ id: "low", label: "Low" }, { id: "high", label: "High", isDefault: true }] };
+  const fast = { id: "fastMode", label: "Fast", type: "boolean", currentValue: false };
+  const codexModels = [
+    { slug: "gpt-5.5", name: "GPT-5.5", isDefault: true, isLegacy: true, capabilities: { optionDescriptors: [effort] } },
+    { slug: "gpt-6-sol", name: "GPT-6 Sol", shortName: "Sol", capabilities: { optionDescriptors: [effort, fast] } },
+    { slug: "openai/gpt-6-luna", name: "GPT-6 Luna", subProvider: "OpenRouter", capabilities: { optionDescriptors: [] } }
+  ];
+  const row = (id: string, models: unknown[], auth: object) => ({ id, refIds: [id], installed: true, version: "1.0.0", status: "ready", auth, checkedAt: stamp(0), slashCommands: [], skills: [], capabilities: { sessionModelSwitch: "in-session", showPlanModeToggle: true }, models });
+  return new FakeDaemonApi()
+    .on("GET", "/api/registry", { status: 200, body: { shells: [], ides: [], fileExplorers: [], browsers: [], agents: [chatAgent("claude", "Claude Code", "claude"), chatAgent("codex", "Codex", "codex")] } })
+    .on("GET", "/api/agent/providers", { status: 200, body: { hostInstanceId: "h", providers: [row("claude", [], { status: "authenticated", email: "me@x.io" }), row("codex", codexModels, { status: "authenticated", email: "me@x.io" })] } })
+    .on("GET", "/api/agent-accounts", { status: 200, body: { accounts: [{ id: "acc-9", agent: "codex", label: "Work", email: "work@x.io", plan: "pro", needsReauth: false, createdAt: stamp(0), importedAt: stamp(0) }], defaults: { claude: null, codex: "acc-9", grok: null } } })
+    .on("GET", "/api/sessions", { status: 200, body: [chatSummary({ id: "c1", refId: "codex", accountId: "acc-9" })] })
+    .on("GET", "/api/sessions/c1/thread", { status: 200, body: { kind: "snapshot", thread: { head: { modelSelection: { model: "gpt-6-sol", options: [{ id: "effort", value: "low" }] } } } } });
+}
+
+test("list_agents is the composer picker's view: the launch default (never a legacy model), chip labels, hints, option defaults; legacy only on request", async () => {
+  const codex = (r: Record<string, any>) => (r.agents as ListedAgent[]).find((a) => a.id === "codex")! as ListedAgent & { defaultModel: string | null; catalogueLoading: boolean };
+  const listed = await tool("list_agents").run({}, ctx(pickerApi()));
+  const view = codex(listed);
+  // The picker's own view over the same snapshot (`providerPickerView`, the composer's source), shortName listed only where it differs.
+  const picker = providerPickerView({ status: "ready", models: [
+    { slug: "gpt-5.5", name: "GPT-5.5", isDefault: true, isLegacy: true, capabilities: { optionDescriptors: [{ id: "effort", label: "Effort", type: "select", options: [{ id: "low", label: "Low" }, { id: "high", label: "High", isDefault: true }] }] } },
+    { slug: "gpt-6-sol", name: "GPT-6 Sol", shortName: "Sol", capabilities: { optionDescriptors: [{ id: "effort", label: "Effort", type: "select", options: [{ id: "low", label: "Low" }, { id: "high", label: "High", isDefault: true }] }, { id: "fastMode", label: "Fast", type: "boolean", currentValue: false }] } },
+    { slug: "openai/gpt-6-luna", name: "GPT-6 Luna", subProvider: "OpenRouter", capabilities: { optionDescriptors: [] } }
+  ] });
+  assert.deepEqual(view.models, picker.models.map(({ shortName, ...m }) => (shortName !== m.name ? { ...m, shortName } : m)));
+  assert.equal(view.defaultModel, "gpt-6-sol", "the default flag sits on a legacy model: the launch default is the first non-legacy one");
+  assert.equal(view.defaultModel, picker.defaultModel);
+  assert.deepEqual(view.models.map((m) => [m.slug, m.isDefault]), [["gpt-6-sol", true], ["openai/gpt-6-luna", false]]);
+  const sol = view.models[0] as unknown as { shortName: string; options: { id: string; default?: unknown }[] };
+  assert.equal(sol.shortName, "Sol");
+  assert.deepEqual(sol.options.map((o) => [o.id, o.default]), [["effort", "high"], ["fastMode", false]]);
+  assert.equal((view.models[1] as unknown as { hint: string }).hint, "OpenRouter");
+  assert.equal(view.catalogueLoading, false);
+  assert.equal((listed.agents as (ListedAgent & { catalogueLoading: boolean })[]).find((a) => a.id === "claude")!.catalogueLoading, true, "a ready provider with no models is still loading");
+  assert.deepEqual((listed.permissionModes as { id: string; label: string }[]).map((m) => m.label), ["Supervised", "Accept edits", "Auto", "Full access"]);
+  // Legacy: listed only with includeLegacy (or the old includeLegacyModels), always marked; found when named.
+  for (const flag of [{ includeLegacy: true }, { includeLegacyModels: true }]) {
+    const all = codex(await tool("list_agents").run(flag, ctx(pickerApi())));
+    assert.deepEqual(all.models.map((m) => [m.slug, m.isLegacy === true, m.isDefault]), [["gpt-5.5", true, false], ["gpt-6-sol", false, true], ["openai/gpt-6-luna", false, false]]);
+  }
+  const named = codex(await tool("list_agents").run({ agent: "codex", model: "gpt-5.5" }, ctx(pickerApi())));
+  assert.deepEqual(named.models.map((m) => [m.slug, m.isLegacy]), [["gpt-5.5", true]]);
+  // query: slug, name, chip label or sub-provider.
+  for (const [query, slugs] of [["sol", ["gpt-6-sol"]], ["openrouter", ["openai/gpt-6-luna"]], ["GPT-6", ["gpt-6-sol", "openai/gpt-6-luna"]]] as const) {
+    const r = await tool("list_agents").run({ query }, ctx(pickerApi()));
+    assert.deepEqual((r.agents as ListedAgent[]).map((a) => [a.id, a.models.map((m) => m.slug)]), [["codex", slugs]], query);
+  }
+});
+
+test("list_agents for a chat: thisThread, allowedRuntimeModes, and no email anywhere (accounts as id, label, plan, needsReauth, isDefault)", async () => {
+  const api = pickerApi();
+  const r = await tool("list_agents").run({}, ctx(api, thread({ runtimeMode: "auto-accept-edits", agentId: "codex" })));
+  assert.deepEqual(r.thisThread, { agent: "codex", model: "gpt-6-sol", options: { effort: "low" }, runtimeMode: "auto-accept-edits", accountId: "acc-9" });
+  assert.deepEqual(r.allowedRuntimeModes, ["approval-required", "auto-accept-edits"]);
+  const codex = (r.agents as Record<string, any>[]).find((a) => a.id === "codex")!;
+  assert.deepEqual(codex.accounts, [{ id: "system", label: "System", plan: null, needsReauth: false, isDefault: false }, { id: "acc-9", label: "Work", plan: "pro", needsReauth: false, isDefault: true }]);
+  assert.equal(codex.runtimeModes, undefined);
+  assert.equal(codex.defaultRuntimeMode, undefined);
+  assert.ok(!JSON.stringify(r).includes("@x.io"), "no email in the chat view");
+  // The external view keeps them, as it always did.
+  const external = await tool("list_agents").run({}, ctx(api));
+  assert.ok(JSON.stringify(external).includes("work@x.io"));
+  assert.equal(external.thisThread, undefined);
+});
+
+test("list_conversations: a chat's project defaults to its own; an external caller must name one", async (t) => {
+  const api = await projectApi(t);
+  api.on("GET", "/api/registry", { status: 200, body: chatRegistry })
+    .on("GET", "/api/agents/conversations", ({ query }) => ({ status: 200, body: { conversations: query?.path === join(api.workspacesDir, "acme", "api") ? [{ id: "s1", agentRefId: "claude", title: "A", updatedAt: stamp(1) }] : [] } }));
+  const caller = thread({ projectPath: join(api.workspacesDir, "acme", "api"), workspace: "acme" });
+  assert.deepEqual((await tool("list_conversations").run({ limit: 20 }, ctx(api, caller))).conversations, [{ id: "s1", agent: "claude", title: "A", updatedAt: stamp(1), home: "system", resumable: true }]);
+  await assert.rejects(tool("list_conversations").run({ limit: 20 }, ctx(api)), (e: { code: string }) => e.code === "INVALID_ARGUMENT");
+  await assert.rejects(tool("list_conversations").run({ limit: 20 }, ctx(api, thread({ projectPath: "", workspace: "" }))), (e: { code: string }) => e.code === "PROJECT_NOT_FOUND");
+});
+
+test("list_projects below Full access (ruling S13): its own workspace whole, the others only counted; naming another workspace raises the cross-workspace metadata card", async (t) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "mcp-cat-s13-")));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  for (const dir of ["acme/api", "acme/web", "beta/app", "beta/old", "gamma/x"]) await mkdir(join(root, dir), { recursive: true });
+  const api = new FakeDaemonApi(); api.fsRoot = root; api.workspacesDir = root;
+  const project = (ws: string, name: string, over: object = {}) => ({ name, workspace: ws, path: join(root, ws, name), ...over });
+  api.on("GET", "/api/workspaces", { status: 200, body: [
+    { name: "acme", path: join(root, "acme"), projectCount: 2 },
+    { name: "beta", path: join(root, "beta"), projectCount: 2, archivedProjectCount: 1 },
+    { name: "gamma", path: join(root, "gamma"), projectCount: 1, isArchived: true }
+  ] })
+    .on("GET", "/api/workspaces/acme/projects", { status: 200, body: [project("acme", "api"), project("acme", "web")] })
+    .on("GET", "/api/workspaces/beta/projects", { status: 200, body: [project("beta", "app"), project("beta", "old", { isArchived: true })] })
+    .on("GET", "/api/workspaces/gamma/projects", { status: 200, body: [project("gamma", "x")] })
+    .on("GET", "/api/projects/recent", { status: 200, body: [] })
+    .on("GET", "/api/sessions", { status: 200, body: [] });
+  const me = thread({ projectPath: join(root, "acme", "api"), workspace: "acme", cwd: join(root, "acme", "api"), runtimeMode: "auto" });
+  const listed = await tool("list_projects").run({ includeArchived: false }, ctx(api, me));
+  assert.deepEqual((listed.projects as { workspace: string; name: string }[]).map((p) => `${p.workspace}/${p.name}`), ["acme/api", "acme/web"]);
+  assert.deepEqual(listed.excludedWorkspaces, [{ workspace: "beta", projectCount: 1 }]);
+  assert.ok(!api.calls.some((c) => c.path === "/api/workspaces/beta/projects"), "an excluded workspace's projects are never read");
+  assert.deepEqual((await tool("list_projects").run({ includeArchived: true }, ctx(api, me))).excludedWorkspaces, [{ workspace: "beta", projectCount: 2 }, { workspace: "gamma", projectCount: 1 }]);
+  // A chat with no project has no own workspace: everything is counted, nothing listed.
+  const loose = await tool("list_projects").run({ includeArchived: false }, ctx(api, thread({ projectPath: "", workspace: "", runtimeMode: "auto" })));
+  assert.deepEqual([loose.projects, (loose.excludedWorkspaces as { workspace: string }[]).map((w) => w.workspace)], [[], ["acme", "beta"]]);
+  // Full access and external callers list everything.
+  for (const who of [thread({ ...me, runtimeMode: "full-access" }), { kind: "external" } as const]) {
+    const all = await tool("list_projects").run({ includeArchived: false }, ctx(api, who));
+    assert.deepEqual((all.projects as { workspace: string; name: string }[]).map((p) => `${p.workspace}/${p.name}`), ["acme/api", "acme/web", "beta/app"]);
+    assert.equal(all.excludedWorkspaces, undefined);
+  }
+
+  // Naming another workspace: its projects are the call's targets, so the gate cards it (approved → listed); own: no card.
+  const port = new FakeApprovalPort({ outcome: "approved", approvalId: "a1" });
+  const call = (args: Record<string, unknown>, caller: ThreadCaller = me) =>
+    executeToolCall({ approvals: port, enabledToolsets: async () => new Set(["core"]) }, { name: "list_projects", arguments: args }, { caller, api, signal: new AbortController().signal });
+  const named = await call({ workspace: "beta" });
+  assert.equal(named.isError, undefined, JSON.stringify(named.content));
+  assert.equal(port.cards.length, 1);
+  assert.equal(port.cards[0]!.kind, "boundary");
+  assert.deepEqual(port.cards[0]!.scope.projects?.map((p) => p.workspace), ["acme", "beta"]);
+  assert.deepEqual(((named.structuredContent as { projects: { name: string }[] }).projects).map((p) => p.name), ["app"]);
+  await call({ workspace: "acme" });
+  await call({ workspace: "beta" }, thread({ ...me, runtimeMode: "full-access" }));
+  await call({});
+  assert.equal(port.cards.length, 1, "own workspace, Full access and the unnamed list raise no card");
+  port.answerWith({ outcome: "denied", approvalId: "a2", reason: "no" });
+  assert.equal((((await call({ workspace: "beta" })).structuredContent) as { code: string }).code, "APPROVAL_DENIED");
 });

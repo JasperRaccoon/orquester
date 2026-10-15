@@ -194,7 +194,10 @@ const PURE_MODULES = new Set([
   "session-tools/threads/delegation.ts",
   "session-tools/threads/shared.ts",
   "session-tools/threads/threads.ts",
-  "session-tools/turn-policy.ts"
+  "session-tools/turn-policy.ts",
+  // get_usage prices Codex session tokens with the Cost tab's own table (`estimateCostParts`): no side effect at load,
+  // node:fs/promises + node:path + types only (unified MCP Task 9).
+  "usage-tokens.ts"
 ]);
 
 const PURE_PACKAGES = new Set([
@@ -334,7 +337,9 @@ test("byte budgets: §9.5 for every non-legacy tool; legacy tools held to their 
         const defaults = rows.filter((row) => on.has(toolByName(row.name)!.toolset));
         assert.ok(total(defaults) <= 32_768, `${agent}: default chat tools/list is ${total(defaults)} bytes`);
       }
-      const core = rows.filter((row) => toolByName(row.name)!.toolset === "core");
+      // Transitional: while legacy session tools still sit in core beside the tools that will replace them, core is
+      // held to §9.5 without them (the default set above counts everything); Task 14 drops the exemption.
+      const core = rows.filter((row) => toolByName(row.name)!.toolset === "core" && !isLegacy(toolByName(row.name)!));
       assert.ok(total(core) <= 25_600, `core alone is ${total(core)} bytes`);
       for (const row of rows) assert.equal((row.listed as { _meta?: unknown })._meta, undefined, "chat entries carry no _meta");
     }

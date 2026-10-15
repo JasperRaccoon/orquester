@@ -1,4 +1,16 @@
-import type { PushInfoResponse, PushSubscribeRequest, SessionSummary } from "@orquester/api";
+import type { FastifyInstance } from "fastify";
+import {
+  PUSH_NOTIFY_BODY_MAX_CHARS,
+  PUSH_NOTIFY_TITLE_MAX_CHARS,
+  sanitizeApprovalLabel,
+  sanitizeApprovalProse,
+  type PushInfoResponse,
+  type PushNotifyRequest,
+  type PushNotifyResponse,
+  type PushSubscribeRequest,
+  type SessionSummary
+} from "@orquester/api";
+import type { CallerPrincipal } from "@orquester/api/agent-chat";
 import {
   type PushConfig,
   type PushSubscriptionRecord,
@@ -21,6 +33,22 @@ const STRUCTURAL_PUSH_VERB = {
   finished: "finished",
   "plan-ready": "has a plan ready"
 } as const;
+
+/**
+ * `notify_user` rate limits (unified MCP design 2026-10-15 §4.1, §5.6): one push per agent chat per 5 minutes, one per
+ * external credential per minute. A person's own request (the GUI, a local client) is not limited.
+ */
+export const AGENT_PUSH_THREAD_INTERVAL_MS = 5 * 60_000;
+export const AGENT_PUSH_CREDENTIAL_INTERVAL_MS = 60_000;
+/** 429 code of a rate-limited `POST /api/push/notify`. */
+export const PUSH_RATE_LIMITED = "RATE_LIMITED";
+
+/** Where an agent push counts against a limit: the calling chat, or the external credential; null — not limited. */
+export function pushRateKey(principal: CallerPrincipal | undefined): { key: string; intervalMs: number } | null {
+  if (principal?.kind === "agent") return { key: `thread:${principal.threadId}`, intervalMs: AGENT_PUSH_THREAD_INTERVAL_MS };
+  if (principal?.kind === "external") return { key: `credential:${principal.credentialId ?? "external"}`, intervalMs: AGENT_PUSH_CREDENTIAL_INTERVAL_MS };
+  return null;
+}
 
 interface Logger {
   error(...args: unknown[]): void;
@@ -78,12 +106,18 @@ export class PushService {
   private loading: Promise<PushConfig> | null = null;
   /** Last-push timestamp per `<sessionId>:<type>` key, for the per-type debounce. */
   private readonly lastPushAt = new Map<string, number>();
+  /** Last agent push per rate key (`pushRateKey`), for `notify_user`'s limits. */
+  private readonly lastAgentPushAt = new Map<string, number>();
+  private readonly now: () => number;
 
   constructor(
     /** Absolute path to push.json (resolved by the daemon via pushConfigPath). */
     private readonly configPath: string,
-    private readonly logger: Logger = console
-  ) {}
+    private readonly logger: Logger = console,
+    opts?: { now?: () => number }
+  ) {
+    this.now = opts?.now ?? Date.now;
+  }
 
   // --- Persistence ---------------------------------------------------------
 
@@ -209,9 +243,66 @@ export class PushService {
     await this.notify(session, type, STRUCTURAL_PUSH_VERB[type]);
   }
 
+  /**
+   * An Orquester approval card opened (unified MCP design 2026-10-15 §7.5; `agent-chat/summary.ts` calls it once per
+   * card): "Approval needed: <card title>", the chat and its project as the body, deep-linked to the session. NO action
+   * button — approval happens only on the card — and nothing but the card's own (already sanitised) title. Debounced
+   * per session like every attention push. Never throws.
+   */
+  async notifyApprovalNeeded(session: SessionSummary, cardTitle: string): Promise<void> {
+    try {
+      if (this.debounced(`${session.id}:approval`, this.now())) {
+        return;
+      }
+      const project = session.projectPath ? basename(session.projectPath) : "";
+      const payload = JSON.stringify({
+        title: sanitizeApprovalLabel(`Approval needed: ${cardTitle}`, PUSH_NOTIFY_TITLE_MAX_CHARS),
+        body: sanitizeApprovalLabel(project ? `${session.title} in ${project}` : session.title, PUSH_NOTIFY_BODY_MAX_CHARS),
+        tag: `session-${session.id}`,
+        sessionId: session.id
+      });
+      await this.deliver(payload);
+    } catch (error) {
+      this.logger.error("approval push failed", error);
+    }
+  }
+
+  /**
+   * An agent's own push (`notify_user`, `POST /api/push/notify`): `title` and `body` flattened to safe text and cut to
+   * their caps, deep-linked to `sessionId` (`tag: session-<id>`) when given; no action button. `rate` is the caller's
+   * limit ({@link pushRateKey}): a key that pushed within its interval is refused with the wait left, and every accepted
+   * call takes its slot, delivered or not (no subscriber, push unsupported), so a limit cannot be probed around.
+   */
+  async notifyAgent(
+    input: PushNotifyRequest,
+    rate: { key: string; intervalMs: number } | null
+  ): Promise<{ ok: true; sent: number } | { ok: false; retryAfterMs: number }> {
+    if (rate) {
+      const now = this.now();
+      for (const [key, at] of this.lastAgentPushAt) {
+        if (now - at >= AGENT_PUSH_THREAD_INTERVAL_MS) this.lastAgentPushAt.delete(key);
+      }
+      const last = this.lastAgentPushAt.get(rate.key);
+      if (last !== undefined && now - last < rate.intervalMs) {
+        return { ok: false, retryAfterMs: rate.intervalMs - (now - last) };
+      }
+      this.lastAgentPushAt.set(rate.key, now);
+    }
+    const title = sanitizeApprovalLabel(input.title, PUSH_NOTIFY_TITLE_MAX_CHARS);
+    const body = input.body ? sanitizeApprovalProse(input.body, PUSH_NOTIFY_BODY_MAX_CHARS).trim() : "";
+    const sessionId = input.sessionId ?? "";
+    try {
+      const sent = await this.deliver(JSON.stringify({ title, body, tag: sessionId ? `session-${sessionId}` : "orquester-agent", sessionId }));
+      return { ok: true, sent };
+    } catch (error) {
+      this.logger.error("agent push failed", error);
+      return { ok: true, sent: 0 };
+    }
+  }
+
   private async notify(session: SessionSummary, type: string, verb: string): Promise<void> {
     try {
-      if (this.debounced(`${session.id}:${type}`, Date.now())) {
+      if (this.debounced(`${session.id}:${type}`, this.now())) {
         return;
       }
       const project = session.projectPath ? basename(session.projectPath) : "";
@@ -291,4 +382,39 @@ export class PushService {
     }
     return sent;
   }
+}
+
+/**
+ * `POST /api/push/notify` (`PushNotifyRequest` → `PushNotifyResponse`): an agent's Web Push to the user's devices
+ * (`notify_user`). Both transports, like the other push routes. The rate limit keys on `request.principal` — never on
+ * anything in the body: an agent chat (and its push always deep-links to that chat, whatever `sessionId` says), an
+ * external MCP credential, or nobody for a person's own request. 400 on a bad body, 429 `RATE_LIMITED` with
+ * `retryAfterSeconds` past the limit.
+ */
+export function registerPushNotifyRoute(app: FastifyInstance, push: Pick<PushService, "notifyAgent">): void {
+  app.post("/api/push/notify", async (request, reply): Promise<PushNotifyResponse | void> => {
+    const body = (request.body ?? {}) as Partial<Record<keyof PushNotifyRequest, unknown>>;
+    const title = typeof body.title === "string" ? body.title.trim() : "";
+    // Empty once flattened to the safe text the push shows (only control or format characters): refused, no slot taken.
+    if (!title || title.length > PUSH_NOTIFY_TITLE_MAX_CHARS || sanitizeApprovalLabel(title, PUSH_NOTIFY_TITLE_MAX_CHARS) === "") {
+      return reply.code(400).send({ code: "INVALID_ARGUMENT", message: `title is required, at most ${PUSH_NOTIFY_TITLE_MAX_CHARS} characters.` });
+    }
+    if (body.body !== undefined && (typeof body.body !== "string" || body.body.length > PUSH_NOTIFY_BODY_MAX_CHARS)) {
+      return reply.code(400).send({ code: "INVALID_ARGUMENT", message: `body must be text of at most ${PUSH_NOTIFY_BODY_MAX_CHARS} characters.` });
+    }
+    if (body.sessionId !== undefined && (typeof body.sessionId !== "string" || body.sessionId.length > 200)) {
+      return reply.code(400).send({ code: "INVALID_ARGUMENT", message: "sessionId must be a session id." });
+    }
+    const principal = request.principal;
+    const sessionId = principal?.kind === "agent" ? principal.threadId : (body.sessionId as string | undefined) || undefined;
+    const result = await push.notifyAgent(
+      { title, ...(typeof body.body === "string" && body.body.trim() ? { body: body.body } : {}), ...(sessionId ? { sessionId } : {}) },
+      pushRateKey(principal)
+    );
+    if (!result.ok) {
+      const retryAfterSeconds = Math.max(1, Math.ceil(result.retryAfterMs / 1_000));
+      return reply.code(429).send({ code: PUSH_RATE_LIMITED, message: `Too many notifications: try again in ${retryAfterSeconds} s.`, retryAfterSeconds });
+    }
+    return { sent: result.sent };
+  });
 }

@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import Fastify from "fastify";
 import { existsSync } from "node:fs";
-import { mkdtemp,readdir,rm,writeFile } from "node:fs/promises";
+import { mkdir,mkdtemp,readdir,rm,writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -12,7 +12,8 @@ import { HtmlPreviewError } from "../html-preview/index.ts";
 import { Broadcaster } from "../broadcaster.ts";
 import { UploadTooLargeError } from "../upload-stream.ts";
 import { uploadInlineAttachments } from "./attachments.ts";
-import { InjectDaemonApi } from "./daemon-api.ts";
+import { InjectDaemonApi, withPrincipal } from "./daemon-api.ts";
+import { FsDirectoryError } from "./fs-tools.ts";
 
 test("request runs the app's own route with the caller's bearer and parses JSON", async () => {
   const app = Fastify();
@@ -176,4 +177,24 @@ test("visual pages answer outcomes: the publisher's and preview's messages pass,
     code: "HOST_UNAVAILABLE",
     message: "The agent host is restarting."
   });
+});
+
+test("listDirectory / readFileRange read through FsTools under the LIVE fsRoot, inside the sandbox only; withPrincipal forwards them", async (t) => {
+  const first = await mkdtemp(join(tmpdir(), "orq-api-fs-a-"));
+  const second = await mkdtemp(join(tmpdir(), "orq-api-fs-b-"));
+  t.after(async () => { await rm(first, { recursive: true, force: true }); await rm(second, { recursive: true, force: true }); });
+  await mkdir(join(first, "dir"));
+  await writeFile(join(first, "a.txt"), "first root");
+  await writeFile(join(second, "a.txt"), "second root");
+  let root = first;
+  const app = Fastify();
+  const api = new InjectDaemonApi({ app, authorization: undefined, agentChat: null, broadcaster: new Broadcaster(), fsRoot: () => root, workspacesDir: () => root });
+  const bound = withPrincipal(api, { kind: "external", credentialId: "cred_x" });
+  assert.equal((await bound.readFileRange!("a.txt", { offset: 0, maxBytes: 100 })).text, "first root");
+  assert.deepEqual((await bound.listDirectory!(".")).entries.map((e) => [e.name, e.kind]), [["a.txt", "file"], ["dir", "dir"]]);
+  await assert.rejects(api.readFileRange("dir", {}), (e) => e instanceof FsDirectoryError);
+  await assert.rejects(api.readFileRange(join(second, "a.txt"), {}), /outside the sandbox/);
+  root = second;
+  assert.equal((await api.readFileRange("a.txt", {})).text, "second root", "a config change moves the root in place");
+  await app.close();
 });

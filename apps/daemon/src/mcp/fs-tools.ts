@@ -18,7 +18,15 @@ export type ListFilesResult = {
   truncated: boolean;
 };
 
-type ReadFileWindowResult = {
+/** `readFileWindow` on a directory: `read_file` lists it instead (`listFiles`). */
+export class FsDirectoryError extends ToolError {
+  constructor() {
+    super("INVALID_ARGUMENT", "Path is a directory.");
+    this.name = "FsDirectoryError";
+  }
+}
+
+export type ReadFileWindowResult = {
   path: string;
   text: string;
   size: number;
@@ -75,7 +83,7 @@ export class FsTools {
         throw new ToolError("INVALID_ARGUMENT", "Directory not found.");
       }
       if (code === "ENOTDIR") {
-        throw new ToolError("INVALID_ARGUMENT", "Path is not a directory. Use read_file instead.");
+        throw new ToolError("INVALID_ARGUMENT", "Path is not a directory.");
       }
       throw new ToolError("INVALID_ARGUMENT", "Unable to list directory.");
     }
@@ -109,7 +117,7 @@ export class FsTools {
     }
 
     if (fileStat.isDirectory()) {
-      throw new ToolError("INVALID_ARGUMENT", "Path is a directory. Use list_files instead.");
+      throw new FsDirectoryError();
     }
     if (!fileStat.isFile()) {
       throw new ToolError("INVALID_ARGUMENT", "Path is not a regular file.");

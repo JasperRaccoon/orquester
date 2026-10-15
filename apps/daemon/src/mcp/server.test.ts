@@ -20,7 +20,7 @@ const closed = (a: object) => ({ ...a, openWorldHint: false });
 const CONTRACT: Record<string, { required: string[]; annotations: object }> = {
   list_projects: { required: [], annotations: READ },
   list_agents: { required: [], annotations: READ },
-  list_conversations: { required: ["project"], annotations: READ },
+  list_conversations: { required: [], annotations: READ },
   list_sessions: { required: [], annotations: READ },
   get_session: { required: ["sessionId"], annotations: READ },
   get_turn_diff: { required: ["sessionId"], annotations: READ },
@@ -43,9 +43,10 @@ const CONTRACT: Record<string, { required: string[]; annotations: object }> = {
   respond_to_request: { required: ["sessionId"], annotations: WRITE },
   wait_for_session: { required: [], annotations: READ },
   get_usage: { required: [], annotations: READ },
-  get_cost: { required: [], annotations: READ },
-  list_files: { required: ["path"], annotations: READ },
+  // Unified MCP Task 9: get_cost → get_usage {include: ["cost"]}, list_files → read_file on a directory.
+  notify_user: { required: ["title"], annotations: WRITE },
   read_file: { required: ["path"], annotations: READ },
+  get_git_state: { required: ["view"], annotations: READ },
   list_todos: { required: [], annotations: READ },
   // Task 12: one tool for every todo write; the most dangerous is delete, and a toggle that flips is not idempotent.
   update_todos: { required: ["action"], annotations: closed({ ...WRITE, destructiveHint: true }) },
@@ -253,8 +254,12 @@ test("an unknown tool's name is quoted capped: a 2 MiB name gets a short −3260
 
 test("the route takes a 2 MiB tools/call — its own 16 MiB body limit, past Fastify's 1 MiB default", async () => {
   let seen = 0;
-  const files = { readFileWindow: async (path: string) => { seen = path.length; return { path: "/w/a.txt", text: "", size: 0, offset: 0, truncated: false, consumed: 0 }; } };
-  const app = mcpApp({ createApi: () => new FakeDaemonApi(), files: files as never });
+  // read_file reads through DaemonApi.readFileRange (unified MCP Task 9).
+  const api = Object.assign(new FakeDaemonApi(), {
+    listDirectory: async () => ({ path: "/w", entries: [], truncated: false }),
+    readFileRange: async (path: string) => { seen = path.length; return { path: "/w/a.txt", text: "", size: 0, offset: 0, truncated: false, consumed: 0 }; }
+  });
+  const app = mcpApp({ createApi: () => api });
   try {
     const big = "p".repeat(2 * 1024 * 1024);
     const r = await postMcp(app, call(15, "read_file", { path: big }));
