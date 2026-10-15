@@ -107,3 +107,12 @@ test("createdBy survives a read and a rewrite verbatim — newer kinds and field
   assert.equal(older?.createdBy, undefined);
   assert.equal(isAgentCreatedPrompt(older?.createdBy), false, "older prompts are the user's");
 });
+
+test("a null createdBy reads (and is rewritten) as absent; only a structurally invalid non-null value sets the record aside", () => {
+  const parsed = parseSavedPromptsConfig({ version: 1, prompts: [record({ createdBy: null }), record({ id: "p-2", createdBy: [] }), record({ id: "p-3", createdBy: {} })] });
+  assert.deepEqual(parsed.prompts.map((prompt) => prompt.id), ["p-1"]);
+  assert.equal(parsed.prompts[0]?.createdBy, undefined);
+  assert.equal(isAgentCreatedPrompt(parsed.prompts[0]?.createdBy), false);
+  assert.equal("createdBy" in JSON.parse(JSON.stringify(parsed.prompts[0])), false);
+  assert.equal(parsed.rejected.length, 2);
+});

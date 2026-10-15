@@ -50,7 +50,7 @@ export interface SavedPrompt {
   /**
    * Who created it (unified MCP design 2026-10-15 D-16), derived by the daemon from the creating
    * request's principal — never from a body. Absent: the user — every prompt written before the
-   * field, and every one the UI or an external client creates. An agent-created prompt shows a
+   * field, every one the UI or an external client creates, and a stored `null`. An agent-created prompt shows a
    * "by <agent>" badge and cannot be pinned: `PUT` with `pinned` from any principal but `user` is
    * 403 {@link AGENT_PROMPT_PIN_REFUSED}.
    */

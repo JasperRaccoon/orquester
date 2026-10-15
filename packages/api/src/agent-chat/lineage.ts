@@ -170,9 +170,9 @@ export interface ForkSessionRequest extends ThreadForkTarget {
   commandId?: string;
   /**
    * Mark the fork agent-created (`ThreadLineage.agentCreated`, unified MCP design 2026-10-15
-   * §13 c). A HINT honoured only when the request's server-stamped principal is an agent whose
-   * `threadId` is the forked chat (`principal.ts`); ignored from any other caller — a fork the user
-   * makes in the GUI is never the agent's child.
+   * §13 c). PRINCIPAL-GATED: honoured only when the request's server-stamped principal is an agent
+   * whose `threadId` is the forked chat (`principal.ts`); ignored from any other caller, socket
+   * callers included — a fork the user makes in the GUI is never the agent's child.
    */
   agentCreated?: true;
 }
@@ -215,10 +215,11 @@ export interface MergeBackRequest {
    */
   interactionMode?: "default" | "plan";
   /**
-   * The exchange of the parent turn this merge causes (unified MCP design 2026-10-15 §8.4):
-   * TRUSTED-PATH ONLY — honoured only when the request's principal is an agent whose `threadId` is
-   * the child (`principal.ts`); ignored from the GUI and external clients (their merges start no
-   * exchange) and stripped by the remote transport like `TurnCommandBody.causedBy`.
+   * The exchange of the parent turn this merge causes (unified MCP design 2026-10-15 §8.4).
+   * SOCKET-TRUSTED (`principal.ts`): honoured from any unix-socket / in-process caller (the
+   * catalog executor, the delivery queue) and stripped by the remote transport
+   * (`stripRemoteMergeBackFields`), like `TurnCommandBody.causedBy`; the GUI's and external
+   * clients' merges start no exchange.
    */
   causedBy?: CausedBy;
 }

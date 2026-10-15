@@ -559,9 +559,9 @@ export interface CreateAgentChatSessionFields {
    * parent's conversation and is created by `POST …/fork` instead. The daemon checks the parent
    * and stamps `createdAt` and `delegationDepth` itself.
    *
-   * `agentCreated: true` is a HINT honoured only when the request's server-stamped principal is an
-   * agent whose `threadId` is `parentThreadId` (`principal.ts`, `isAgentPrincipalFor`); from any
-   * other caller it is ignored (and a remote body's is never trusted).
+   * `agentCreated: true` is PRINCIPAL-GATED: honoured only when the request's server-stamped
+   * principal is an agent whose `threadId` is `parentThreadId` (`principal.ts`,
+   * `isAgentPrincipalFor`); ignored from every other caller, socket callers included.
    */
   lineage?: { parentThreadId: string; relation: "delegate" | "opened"; agentCreated?: true };
 }
@@ -599,13 +599,13 @@ export interface TurnCommandBody extends AgentChatCommandBase {
   context?: ComposerContextRecord[];
   /**
    * The agent exchange the turn belongs to, when another chat caused it (unified MCP design
-   * 2026-10-15 §8.4). TRUSTED-PATH ONLY: set by the daemon from an agent principal
-   * (`principal.ts`) — the catalog executor, the reply router, the delivery queue. The REMOTE
-   * transport strips it before the route sees the body ({@link stripRemoteTurnFields}, listed in
-   * {@link REMOTE_STRIPPED_TURN_FIELDS}; Task 5 enforces), and the socket route honours it only
-   * from an agent principal; the GUI, the external MCP and user-authored turns never carry one.
-   * The host persists it with the turn (`Turn.causedBy`); a steer leaves the running turn's own.
-   * Additive: an older host ignores it.
+   * 2026-10-15 §8.4). SOCKET-TRUSTED (`principal.ts`): honoured from any unix-socket /
+   * in-process caller — the catalog executor, and the daemon's own workers (reply router,
+   * delivery queue) that post without a principal — and STRIPPED by the remote transport before
+   * the route sees the body ({@link stripRemoteTurnFields}, {@link REMOTE_STRIPPED_TURN_FIELDS};
+   * Task 5 enforces). The GUI, the external MCP and user-authored turns never carry one. The host
+   * persists it with the turn (`Turn.causedBy`); a steer leaves the running turn's own. Additive:
+   * an older host ignores it.
    */
   causedBy?: CausedBy;
 }
@@ -613,12 +613,24 @@ export interface TurnCommandBody extends AgentChatCommandBase {
 /** The {@link TurnCommandBody} fields only the daemon may set: removed from every remote body. */
 export const REMOTE_STRIPPED_TURN_FIELDS = ["causedBy"] as const satisfies readonly (keyof TurnCommandBody)[];
 
-/** `body` without the trusted-path-only fields — what the remote transport forwards. Same reference when none was present. */
-export function stripRemoteTurnFields<T extends object>(body: T): T {
-  if (!REMOTE_STRIPPED_TURN_FIELDS.some((field) => Object.prototype.hasOwnProperty.call(body, field))) return body;
+/** The {@link MergeBackRequest} fields only socket / in-process callers may set: removed from every remote body. */
+export const REMOTE_STRIPPED_MERGE_BACK_FIELDS = ["causedBy"] as const satisfies readonly (keyof MergeBackRequest)[];
+
+function stripFields<T extends object>(body: T, fields: readonly string[]): T {
+  if (!fields.some((field) => Object.prototype.hasOwnProperty.call(body, field))) return body;
   const copy = { ...body } as Record<string, unknown>;
-  for (const field of REMOTE_STRIPPED_TURN_FIELDS) delete copy[field];
+  for (const field of fields) delete copy[field];
   return copy as T;
+}
+
+/** A turn body without its socket-trusted fields — what the remote transport forwards. Same reference when none was present. */
+export function stripRemoteTurnFields<T extends object>(body: T): T {
+  return stripFields(body, REMOTE_STRIPPED_TURN_FIELDS);
+}
+
+/** A merge-back body without its socket-trusted fields — what the remote transport forwards. Same reference when none was present. */
+export function stripRemoteMergeBackFields<T extends object>(body: T): T {
+  return stripFields(body, REMOTE_STRIPPED_MERGE_BACK_FIELDS);
 }
 
 /**
@@ -1190,7 +1202,9 @@ export type AgentChatEventType =
 // ---------------------------------------------------------------------------
 
 /**
- * `POST agentChatRoutes.replySubscriptions(targetSessionId)`: the subscription is persisted
+ * `POST agentChatRoutes.replySubscriptions(targetSessionId)` — SOCKET-ONLY, every field
+ * socket-trusted (`principal.ts`); when the request carries an agent principal its `threadId` must
+ * be `fromThreadId` (403 otherwise). The subscription is persisted
  * (`agent-reply-outbox.json`) BEFORE the message is posted or queued. An idle target gets the turn
  * at once; a working one (or one waiting for its user) gets it as its next turn — never a steer —
  * under the response's fixed `commandId`, which binds the reply to that turn.

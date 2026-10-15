@@ -7,9 +7,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { isAgentPrincipalFor, PRINCIPAL_ROUTES, PRINCIPAL_TOKEN_HEADER, USER_PRINCIPAL, type CallerPrincipal } from "./principal.ts";
+import {
+  isAgentPrincipalFor,
+  PRINCIPAL_ROUTES,
+  PRINCIPAL_TOKEN_HEADER,
+  PRINCIPAL_TOKEN_INVALID,
+  PRINCIPAL_TOKEN_MIN_BYTES,
+  PRINCIPAL_TOKEN_TTL_MS,
+  USER_PRINCIPAL,
+  type CallerPrincipal
+} from "./principal.ts";
 import { readThreadToolReference } from "./thread-tools.ts";
-import { REMOTE_STRIPPED_TURN_FIELDS, stripRemoteTurnFields, type TurnCommandBody } from "./wire.ts";
+import { REMOTE_STRIPPED_MERGE_BACK_FIELDS, REMOTE_STRIPPED_TURN_FIELDS, stripRemoteMergeBackFields, stripRemoteTurnFields, type TurnCommandBody } from "./wire.ts";
 
 test("an agent hint is honoured only for that very agent", () => {
   const agent: CallerPrincipal = { kind: "agent", threadId: "t1", projectPath: "/w/ws/app" };
@@ -33,4 +42,26 @@ test("the remote transport strips causedBy from a turn body, and leaves a clean 
 
 test("a threadRef may name an opened chat", () => {
   assert.deepEqual(readThreadToolReference({ threadId: "c1", title: "Review", relation: "opened" }), { threadId: "c1", title: "Review", relation: "opened" });
+});
+
+test("token requirements and gates are written into the contract", () => {
+  assert.ok(PRINCIPAL_TOKEN_MIN_BYTES >= 16, "at least 128 bits");
+  assert.ok(PRINCIPAL_TOKEN_TTL_MS > 0 && PRINCIPAL_TOKEN_TTL_MS <= 60_000, "short expiry");
+  assert.equal(PRINCIPAL_TOKEN_INVALID, "PRINCIPAL_TOKEN_INVALID");
+  const gate = (method: string, path: string) => PRINCIPAL_ROUTES.find((route) => route.method === method && route.path === path)?.gate;
+  assert.equal(gate("POST", "/api/sessions/:id/turn"), "socket", "workers post /turn without a principal");
+  assert.equal(gate("POST", "/api/sessions/:id/merge-back"), "socket");
+  assert.equal(gate("POST", "/api/sessions/:id/reply-subscriptions"), "socket");
+  assert.equal(gate("POST", "/api/sessions"), "principal");
+  assert.equal(gate("POST", "/api/sessions/:id/fork"), "principal");
+  assert.equal(gate("PUT", "/api/saved-prompts/:id"), "principal");
+  assert.equal(gate("POST", "/api/push/notify"), "principal");
+});
+
+test("the remote transport strips causedBy from a merge-back body too", () => {
+  const body = { text: "done", commandId: "m1", causedBy: { threadId: "a", exchangeId: "x", hop: 2 } };
+  assert.deepEqual(stripRemoteMergeBackFields(body), { text: "done", commandId: "m1" });
+  const clean = { text: "done" };
+  assert.equal(stripRemoteMergeBackFields(clean), clean);
+  assert.deepEqual([...REMOTE_STRIPPED_MERGE_BACK_FIELDS], ["causedBy"]);
 });

@@ -1960,9 +1960,9 @@ export function parseRecentProjectsConfig(raw: unknown): RecentProjectsConfig {
 /**
  * `SavedPrompt.createdBy` in `@orquester/api`. Open on purpose (`kind` any string, unknown fields
  * passed through) so a newer build's value survives this build's rewrite verbatim; a kind other
- * than `agent` reads as the user's (fail closed: an agent's edit of it needs approval). A value
- * that is not even this shape makes its record unreadable — kept verbatim in `rejected`, as any
- * malformed record is.
+ * than `agent` reads as the user's (fail closed: an agent's edit of it needs approval). `null`
+ * reads as absent; a non-null value that is not even this shape makes its record unreadable —
+ * kept verbatim in `rejected`, as any malformed record is.
  */
 export const savedPromptCreatedBySchema = z
   .object({
@@ -2012,10 +2012,13 @@ export const savedPromptRecordSchema = z
     lastUsedAt: z.string().datetime({ offset: true }).nullable().default(null),
     useCount: z.number().int().nonnegative().default(0),
     /**
-     * Who created the prompt (`SavedPrompt.createdBy`, unified MCP design 2026-10-15 D-16). Absent:
-     * the user. Never dropped or rewritten by this build ({@link savedPromptCreatedBySchema}).
+     * Who created the prompt (`SavedPrompt.createdBy`, unified MCP design 2026-10-15 D-16). Absent
+     * or `null`: the user (a `null` reads, and is rewritten, as absent). Any object of the open
+     * {@link savedPromptCreatedBySchema} is kept verbatim; only a structurally invalid non-null
+     * value (a string, a list, an object without `kind`) sets the record aside (`rejected`, kept
+     * verbatim).
      */
-    createdBy: savedPromptCreatedBySchema.optional()
+    createdBy: z.preprocess((value) => (value === null ? undefined : value), savedPromptCreatedBySchema.optional())
   })
   .passthrough();
 
