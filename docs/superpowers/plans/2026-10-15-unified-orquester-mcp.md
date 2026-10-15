@@ -95,8 +95,9 @@ Wave 1. Everything later compiles against it.
 - `packages/api/src/agent-chat/thread-tools.ts`: header v2 build/parse (v1 still parsed), origin
   `reply`, mode-dependent second lines, `THREAD_MESSAGE_OVERHEAD_CHARS = 768`,
   `replyDeliveryContext()`, `toolsetContinueContext()`, `UNTRUSTED_NOTICE` wording.
-- `packages/api/src/agent-chat/lineage.ts`: relation `opened`; `delegationDepth` documented as
-  delegate + opened links; `parseThreadLineage` accepts `opened`.
+- `packages/api/src/agent-chat/lineage.ts`: relation `opened`; `agentCreated?: true` (spec §13 c);
+  `delegationDepth` documented as agent-created delegate + opened links; `parseThreadLineage`
+  accepts both.
 - `packages/api/src/agent-chat/wire.ts`: `agentChatRoutes.toolApprovals`, `toolApproval`,
   `replySubscriptions` (socket-only), `agentTools(sessionId)`; `TurnCommandBody.causedBy?:
   {threadId, exchangeId, hop}`; `PendingMergeBack.kind?: "merge" | "reply" | "message"`;
@@ -236,7 +237,8 @@ Wave 2.
   Deliver now / Discard rules (parent or that child), the socket-only `replySubscriptions` route
   (subscribe → `{subscriptionId, commandId}`), exchange notices at the cap.
 - `apps/daemon/src/agent-chat/service.ts`, `apps/daemon/src/agent-chat/chat-sessions.ts`: lineage
-  stamping at creation (`opened` relation, `delegationDepth` counting delegate + opened links),
+  stamping at creation (`opened` relation, `agentCreated` for children a chat tool makes,
+  `delegationDepth` counting agent-created delegate + opened links),
   `causedBy` passed on turn commands.
 - `packages/api/src/agent-chat/fold.ts`, `agent-chat/domain-events.ts` (only `causedBy`: additive
   optional field on the turn-start event, folded onto `Turn.causedBy`), and the host's turn command
@@ -244,7 +246,9 @@ Wave 2.
 - `apps/daemon/src/index.ts` block `umcp:t5`.
 
 **Tests**: spec §14.2.6 service-level cases: queue binding by command id, persisted-before-post,
-CAS races in both orders, restart conversion and receipt-deduped re-post, notices, hop carried on
+CAS races in both orders, restart conversion and receipt-deduped re-post, boot reconciliation of
+turns that settled while the daemon was down (spec §13 e: delivered exactly once; claimed ones
+resumed, not re-claimed), the empty-reply delivery text (§13 d), notices, hop carried on
 merges/replies/messages and reset only by a user turn, `causedBy` fold round trip and older logs
 without it.
 
@@ -291,10 +295,13 @@ Wave 3 (needs Task 2).
 **Deliverables**: `list_sessions`, `get_session` (lineage, pending deliveries, delegate `result`),
 `read_transcript`, `read_tool_output`, `get_turn_diff`, `search_sessions`, `update_session`, `control_session` (own-children rules,
 spec §4.1), `respond_to_request` (provider requests only; never Orquester cards). Scope claims and
-chat notes; `notice` and `threadRef`.
+chat notes; `notice` and `threadRef`; content omitted on cross-project metadata reads without
+content rights (spec §13 a, `list_sessions` rows too); `search_sessions "all"` narrowing (§13 b);
+own children = `agentCreated` children only (§13 c).
 
 **Tests**: ported external tests; one per spec §11 row of this family; chat scope cases (own
-project default, `"all"`, own-children, self, plan-mode data-change refusal); a card id passed to
+project default, `"all"` narrowing per mode, `contentOmitted`, own children excluding GUI forks,
+self, plan-mode data-change refusal); a card id passed to
 `respond_to_request` is not found.
 
 ---
@@ -309,7 +316,9 @@ Wave 3 (needs Tasks 2 and 5).
 **Deliverables**: `create_session` (prompt/reply/delegate, defaults, caps, account source, legacy
 models marked), `send_message` (reply modes, queue-not-steer via Task 5's route, subscription
 before posting, wait→notify on timeout/needs-input, `implementPlan` refused while planning, header
-v2), `wait_for_session` (`sessionIds`, `timeoutSeconds`), `fork_session`, `merge_back_session`
+v2), `wait_for_session` (`sessionIds`, `timeoutSeconds`,
+`contentOmitted` per §13 a, `emptyReply` per §13 d), `create_session`/`fork_session` stamp
+`agentCreated`, `fork_session`, `merge_back_session`
 (forks only; deliver/discard by parent or child).
 
 **Tests**: tool-level spec §14.2.6 cases, `WAIT_CYCLE` across projects, caps, cross-project

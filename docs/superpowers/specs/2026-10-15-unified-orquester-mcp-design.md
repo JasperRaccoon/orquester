@@ -218,11 +218,11 @@ own. "Content" marks reads of transcript/file/diff/output text (§5.2).
 | 2 | `list_agents` | The composer picker's catalogue (§4.1); chat adds `thisThread`, `allowedRuntimeModes`; chat accounts omit email | `{agent?, model?, query?, includeLegacy?}` | both | Read | core | `list_agents`, `agent_catalog` |
 | 3 | `list_conversations` | Resumable provider conversations | `{project?}` | both | Read | chat-extras | same |
 | 4 | `list_sessions` | Open tabs: status, attention, relation, parent; chat: `self`, own project by default | `{project? \| "all", attention?, kind?, limit?}` | both | Read | core | `list_sessions`, `thread_list` |
-| 5 | `get_session` | State, settings, pending requests, plan, subagents, context, last reply / delegate `result`, lineage, pending deliveries | `{sessionId}` | both | Read (content for the reply) | core | `get_session`, `get_session_lineage`, `task_status` |
+| 5 | `get_session` | State, settings, pending requests, plan, subagents, context, last reply / delegate `result`, lineage, pending deliveries | `{sessionId}` | both | Read (metadata; the reply/result only with content rights, §13 a) | core | `get_session`, `get_session_lineage`, `task_status` |
 | 6 | `read_transcript` | Turns, tools, plans, file changes; subagent drill-in | `{sessionId, turns?, beforeTurn?, agentId?, include?, maxChars?}` | both | Read · content | core | `read_transcript`, `thread_read` |
 | 7 | `read_tool_output` | A tool row's whole output, paged | `{sessionId, itemId, offset?, maxBytes?}` | both | Read · content | chat-extras | same |
 | 8 | `get_turn_diff` | A turn's unified diff | `{sessionId, turn?}` | both | Read · content | chat-extras | same |
-| 9 | `search_sessions` | Full-text search; chat default own project | `{query, project? \| "all", limit?}` | both | Read · content | core | same |
+| 9 | `search_sessions` | Full-text search; chat default own project; `"all"` narrowed below Full access (§13 b) | `{query, project? \| "all", limit?}` | both | Read · content | core | same |
 | 10 | `create_session` | Open a chat; resume; first `prompt` with a `reply` mode; chat `delegate` | `{project?, agent?, model?, options?, runtimeMode?, accountId?, title?, cwd?, resume?, prompt?, reply?, timeoutSeconds?, delegate?(chat)}` | both | Act | core | `create_session`, `thread_create`, `delegate_task` |
 | 11 | `update_session` | Title (self or own children); model/options/account/mode (own children; mode never broader) | `{sessionId, title?, model?, options?, runtimeMode?, accountId?, force?}` | both | Act | chat-extras | same |
 | 12 | `control_session` | `interrupt`, `stop_task` (any but self); `stop_process`, `compact`, `rewind`, `close` (own children only) | `{sessionId, action, taskId?, keepTurns?}` | both | Act | core | `interrupt_session`, `stop_task`, `stop_session`, `close_session`, `revert_session`, `compact_session`, `thread_interrupt`, `task_cancel` |
@@ -294,7 +294,7 @@ own. "Content" marks reads of transcript/file/diff/output text (§5.2).
   `implementPlan: true` sends the latest actionable plan; refused while the caller is planning.
   `timeoutSeconds` default 120, max 600. Self refused.
 - **`control_session`** (chat): `interrupt` and `stop_task` on any session but self (they only stop
-  work); `stop_process`, `compact`, `rewind`, `close` only on own children (lineage parent = caller).
+  work); `stop_process`, `compact`, `rewind`, `close` only on own children (lineage parent = caller and `agentCreated`, §13 c).
 - **`merge_back_session`** (chat): `send` only from a **fork** (delegates' final replies are their
   results, §8.5; a delegate calling it gets "your final reply is delivered to your parent
   automatically"); `deliver`/`discard` only by the parent or the child of that merge.
@@ -411,7 +411,9 @@ Over all of it:
   (`adapters/codex/modes.ts`): a session opened or a turn caused elsewhere executes code outside
   that sandbox — the user's definition of needing a human. Reading another project of the same
   workspace reveals no more than the agent could read with its own tools there.
-- **Own children** (lineage parent = caller; fork, delegate, opened; any project). **Self**:
+- **Own children** (lineage parent = caller and the lineage record's `agentCreated: true` — a
+  fork, delegate or opened chat the caller made through a tool; any project). A fork the user made
+  in the GUI is the user's, never the agent's child (§13 c). **Self**:
   `send_message`, `wait_for_session`, `control_session interrupt` refuse self; `update_session`
   title only; `fork_session`/`merge_back_session` default to self.
 - **External callers**: address validation only.
@@ -445,7 +447,7 @@ Workflows run with each member project's identity (§4.1 union). No git write to
 | Cap | Value | Applies to |
 |---|---|---|
 | Open chats per project | 24 (existing) | `create_session`, `fork_session` |
-| Unfinished children per caller | 6 (`MAX_OPEN_TASKS`, now every relation) | `create_session` |
+| Unfinished children per caller | 6 (`MAX_OPEN_TASKS`, agent-created children of every relation; GUI forks never count, §13 c) | `create_session` |
 | Agent depth | 2 — the existing `delegationDepth`, extended to count `opened` links too | `create_session` |
 | Pending reply subscriptions per caller | 20 | `reply: wait/notify` |
 | Exchange hops | 8 (§8.4) | every agent-caused turn |
@@ -660,13 +662,15 @@ message read as another chat's; an older client shows the v2 header as text.
   handed to the in-memory waiter if one is attached, else turned into a delivery. The waiter, on
   timeout or on the target needing its user, does `compare-and-set(waiting → notify)`; if that
   fails, the router already claimed it and the waiter returns the reply it was handed. Each
-  transition is persisted (serialized writes) before its effect. After a daemon restart no waiter
+  transition is persisted (serialized writes) before its effect. Startup reconciliation: §13 e.
+  After a daemon restart no waiter
   exists: every `waiting` subscription becomes `notify` on load. Result: no double delivery at the
   timeout edge, none lost in a crash; deliveries post under fixed command ids so a re-post after a
   crash is deduped by host receipts.
 - **Deliveries** go through the same queue: delivered when the requester is idle, oldest first,
   one per idle point; shown on the requester's tab as pending deliveries (`pendingMerges` entries
-  of kind `reply`) with Deliver now / Discard. A bound turn that failed/was interrupted delivers a
+  of kind `reply`) with Deliver now / Discard. An empty final reply delivers the text of §13 d. A
+  bound turn that failed/was interrupted delivers a
   notice with its state and error; a target closed first delivers "closed before replying"; a
   requester closed first drops the subscription (logged). The delivered turn's interaction mode is
   the one recorded at request time, plan if the requester is planning when it lands.
@@ -986,6 +990,11 @@ Caps §5.6; rate limits; per-thread subscription and toolset-request limits; car
 | Legacy model named explicitly | Accepted and marked `isLegacy` (§4.1). |
 | Inherited account no longer exists | Family default, reported `accountSource: "family-default"`. |
 | Old host on new daemon / new host on old daemon | §14.1. |
+| **(a)** `get_session` on another project's chat | A metadata read, never a card: status, settings, pending-request counts, lineage, plan presence, subagent roster, context meter are returned. The last reply, a delegate's `result`, plan text, pending-request texts and subagent texts are **omitted** when the caller lacks content rights for that project under §5.2 (below `auto` for the same workspace, below Full access for another workspace); the result then carries `contentOmitted: true` and `hint: "read_transcript asks for content access"` — `read_transcript` is where the boundary card is raised. Same rule for `wait_for_session` and `list_sessions` rows. |
+| **(b)** `search_sessions {project: "all"}` below Full access | Never a card (one card for a fan-out over unknown projects cannot be judged). The search is narrowed to the projects the caller may read content of without a card: `auto` → every project of its own workspace; below `auto` → its own project only. The result says `searched: "workspace" \| "own-project"` and `excludedProjects: <count>`. Searching one named other project follows §5.2 (card where required). Full access → every project. |
+| **(c)** Children cap and user-made forks | Only **agent-caused** children count toward `MAX_OPEN_TASKS` and own-children rights: the lineage record gains `agentCreated: true` (additive, tolerant), stamped when a chat tool creates the child (`create_session`, `delegate`, `fork_session` from a chat caller). Forks the user makes in the GUI and sessions an external client creates carry no flag: they neither count nor become the agent's to close, rewind, compact or reconfigure. `delegationDepth` (§5.6) likewise counts agent-created links only. |
+| **(d)** The target's final reply is empty | A turn that settles `completed` with no assistant text (only tool calls, or an empty message): the delivery reads `[Reply from thread "<title>" · session <id> · <project>]` + `"<title>" finished its turn without a written reply. Read what it did with read_transcript {sessionId: "<id>"}.`; a `wait` result has no `reply`, `emptyReply: true` and the same hint. A failed/interrupted turn keeps its own notice (§8.3). |
+| **(e)** Target turn settled while the daemon was down | On boot, before it accepts new subscriptions, the ReplyRouter loads every subscription not `done`: `waiting` → `notify` (no waiter survives); for each, it resolves the bound turn from the target's log (the host receipt maps `commandId` → `turnId`) and, if that turn settled, performs the normal `compare-and-set(notify → claimed-by-router)`, persists the delivery and hands it to the queue — exactly once, because a subscription already `claimed-by-router` is not claimed again and its persisted delivery is resumed instead, and the delivery posts under its fixed `commandId` (host receipts dedupe a re-post). An unsettled turn is watched on the bus as usual; a target closed meanwhile gets the "closed before replying" notice; a requester closed meanwhile drops the subscription. |
 
 ---
 
@@ -1101,6 +1110,7 @@ Gate: `pnpm check`, `pnpm test`, `pnpm build` where UI changes.
 | D-25 | A workflow's scope is the union of all projects it touches; any other project → card without grant. | §4.1 |
 | D-26 | Workflow-owned chats (and their descendants) never raise approval, boundary or toolset cards. | §5.4 |
 | D-27 | Chat paths must lie inside a project directory. | §5.1 |
+| D-28 | Cross-project `get_session` returns metadata without content when content rights are missing; `search_sessions "all"` is narrowed, never carded; only agent-created children count (`agentCreated`); empty replies deliver a pointer to `read_transcript`; boot reconciliation delivers each settled subscription exactly once. | §13 (a)–(e) |
 
 ---
 
@@ -1117,6 +1127,6 @@ Gate: `pnpm check`, `pnpm test`, `pnpm build` where UI changes.
 | MUST 7 reply races, delegates | §8.3, §8.5 |
 | MUST 8 grants | §7.6 |
 | MUST 9 plan ownership | plan (global constraints, Tasks 1–15) |
-| S1 · S2 · S3 · S4 · S5 · S6 · S7 · S8 · S9 · S10 · S11 · S12 · S13 | §5.2 / §9.3 / §9.5 / §4.1 / §4.1 / §5.1 / §7.1, §7.3, §7.5 / §14.1 / §4.1 `get_usage` / §5.5 / §12.1 / §13 / §5.2 |
+| S1 · S2 · S3 · S4 · S5 · S6 · S7 · S8 · S9 · S10 · S11 · S12 · S13 | §5.2 / §9.3 / §9.5 / §4.1 / §4.1 / §5.1 / §7.1, §7.3, §7.5 / §14.1 / §4.1 `get_usage` / §5.5 / §12.1 / §13 incl. rows (a)–(e) / §5.2 |
 | Nice-to-haves | YAGNI cuts (§5.3, §9.2), `notify_user` kept, revision pin (§4.1), `implementPlan` refused while planning, §8.7 own project, import-graph allow-list (§3.1), labels check (§14.2) |
 | Thread-options minors | accounts without email, legacy models, account source (§4.1) |
