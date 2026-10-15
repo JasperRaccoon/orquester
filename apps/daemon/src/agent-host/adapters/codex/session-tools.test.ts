@@ -16,6 +16,7 @@ import { createCodexAdapter } from "./index.ts";
 import {
   CODEX_SESSION_TOOLS_CONTEXT_KEY,
   CODEX_SESSION_TOOLS_TOKEN_ENV,
+  codexDenyConfig,
   codexSessionToolsConfig,
   codexSessionToolsContext
 } from "./session-tools.ts";
@@ -27,18 +28,31 @@ after(async () => {
 });
 
 describe("codex session tools — the builders", () => {
-  it("the thread config switches off every server the manifest denies, never our own name, never an unaddressable one (§12.1)", () => {
+  it("the thread config switches off every server the manifest denies, never our own name (§12.1)", () => {
     const config = codexSessionToolsConfig({
       url: "http://127.0.0.1:4711/mcp",
       instructions: "x",
-      deny: ["orquester_remote", "orquester", "bad.name", "my-remote"]
+      deny: ["orquester_remote", "orquester", "my remote", "my-remote"]
     });
     assert.equal(config["mcp_servers.orquester_remote.enabled"], false);
     assert.equal(config["mcp_servers.my-remote.enabled"], false);
+    // Any character but `.` is fine in a dotted key (probed on 0.159.0).
+    assert.equal(config["mcp_servers.my remote.enabled"], false);
     // `orquester` is ours: the thread entry already replaces a user's same-named one.
     assert.equal(config["mcp_servers.orquester.enabled"], undefined);
-    assert.equal(Object.keys(config).some((key) => key.includes("bad.name")), false);
     assert.ok(config["mcp_servers.orquester"]);
+  });
+
+  it("a denied name with a `.` is never dropped: the whole override becomes ONE mcp_servers table", () => {
+    const ours = { url: "http://127.0.0.1:4711/mcp", bearer_token_env_var: "ORQUESTER_SESSION_TOOLS_TOKEN", default_tools_approval_mode: "approve", tool_timeout_sec: 3900 };
+    // Codex splits override keys on every `.` (`mcp_servers."a.b"` fails the thread), and a separate
+    // `mcp_servers` key would replace `mcp_servers.orquester`: one table, merged into the config.
+    assert.deepEqual(codexSessionToolsConfig({ url: "http://127.0.0.1:4711/mcp", instructions: "x", deny: ["remote.prod", "plain", "orquester"] }), {
+      mcp_servers: { orquester: ours, "remote.prod": { enabled: false }, plain: { enabled: false } }
+    });
+    assert.deepEqual(codexDenyConfig(["remote.prod", "plain"]), { mcp_servers: { "remote.prod": { enabled: false }, plain: { enabled: false } } });
+    assert.deepEqual(codexDenyConfig(["plain"]), { "mcp_servers.plain.enabled": false });
+    assert.deepEqual(codexDenyConfig([]), {});
   });
 
   it("the thread config attaches the server by URL and env-var NAME, pre-approved", () => {

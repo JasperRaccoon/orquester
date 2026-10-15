@@ -148,7 +148,6 @@ import {
 } from "./protocol.ts";
 import { CodexUsageTracker } from "./usage.ts";
 import {
-  codexDeniedServerKeys,
   codexDenyConfig,
   codexSessionToolsConfig,
   codexSessionToolsContext,
@@ -1492,13 +1491,9 @@ export class CodexSession {
   /** `{config}` attaching the `orquester` server to the thread, or nothing. */
   private sessionToolsThreadConfig(): { config?: NonNullable<CodexProtocol.v2.ThreadStartParams["config"]> } {
     const tools = this.options.sessionTools;
-    const deny = tools?.deny ?? this.options.deniedMcpServers ?? [];
-    const { dropped } = codexDeniedServerKeys(deny);
-    if (dropped.length > 0) {
-      this.options.context.logger.warn("codex: MCP servers whose names cannot be addressed in thread config are NOT denied", { threadId: this.threadId, dropped });
-    }
     if (tools !== undefined) return { config: codexSessionToolsConfig(tools) };
-    const config = codexDenyConfig(deny);
+    // Every denied name is addressed, whatever its characters (`session-tools.ts`).
+    const config = codexDenyConfig(this.options.deniedMcpServers ?? []);
     return Object.keys(config).length > 0 ? { config } : {};
   }
 
