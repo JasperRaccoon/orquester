@@ -25,7 +25,8 @@ import {
   MAX_WAITING_CALLS,
   PREVIEW_PROFILE_PREFIX,
   PREVIEWS_BUSY_MESSAGE,
-  STALE_PROFILE_AGE_MS
+  STALE_PROFILE_AGE_MS,
+  type StartTimer
 } from "./browser.ts";
 import { measureHtmlPage, previewHtmlPage } from "./index.ts";
 
@@ -54,9 +55,15 @@ let browser: HtmlPreviewBrowser;
 
 before(async () => {
   scratch = await mkdtemp(join(tmpdir(), "orq-html-preview-test-"));
-  // Measuring loads many pages; a loaded test machine must not turn the
-  // measuring tests into budget tests (the budget has its own test).
-  browser = new HtmlPreviewBrowser({ resolveChromium: () => CHROMIUM, tmpDir: scratch, measureTimeoutMs: 60_000 });
+  // Real Chromium on a loaded test machine can take longer than the production
+  // budgets: those must not turn the rendering tests into budget tests (the
+  // budgets have their own tests).
+  browser = new HtmlPreviewBrowser({
+    resolveChromium: () => CHROMIUM,
+    tmpDir: scratch,
+    captureTimeoutMs: 60_000,
+    measureTimeoutMs: 60_000
+  });
 });
 
 after(async () => {
@@ -71,6 +78,37 @@ const TEST_TIMEOUT_MS = 120_000;
 
 const FIXED = (height: number): string =>
   `<!doctype html><html><head><style>html,body{margin:0}</style></head><body><div style="height:${height}px"></div></body></html>`;
+
+interface ManualTimer {
+  readonly ms: number;
+  cancelled: boolean;
+  fired: boolean;
+  fire(): void;
+}
+
+/** Timers the test runs out by hand: none ever fires by itself. `started` lists every one, in order. */
+function manualTimers(): { startTimer: StartTimer; started: ManualTimer[] } {
+  const started: ManualTimer[] = [];
+  return {
+    started,
+    startTimer: (onTimeout, ms) => {
+      const timer: ManualTimer = {
+        ms,
+        cancelled: false,
+        fired: false,
+        fire: () => {
+          assert.ok(!timer.cancelled && !timer.fired, "a live timer");
+          timer.fired = true;
+          onTimeout();
+        }
+      };
+      started.push(timer);
+      return () => {
+        timer.cancelled = true;
+      };
+    }
+  };
+}
 
 describe("html preview browser", { skip }, () => {
   it("screenshots the page at the width asked, measuring its content height", { timeout: TEST_TIMEOUT_MS }, async () => {
@@ -215,13 +253,42 @@ describe("html preview browser", { skip }, () => {
   });
 
   it("gives up at the deadline, killing the browser and removing its profile", { timeout: TEST_TIMEOUT_MS }, async () => {
-    const hurried = new HtmlPreviewBrowser({ resolveChromium: () => CHROMIUM, tmpDir: scratch, captureTimeoutMs: 2000 });
-    const started = Date.now();
+    const timers = manualTimers();
+    let loading!: () => void;
+    const pageLoading = new Promise<void>((resolve) => (loading = resolve));
+    const hurried = new HtmlPreviewBrowser({
+      resolveChromium: () => CHROMIUM,
+      tmpDir: scratch,
+      captureTimeoutMs: 2000,
+      startTimer: timers.startTimer,
+      // The page's image never answers, so the page never finishes loading.
+      proxy: {
+        resolve: () => {
+          loading();
+          return new Promise(() => undefined);
+        }
+      }
+    });
+    const pending = hurried.capture({
+      html: `<img src="http://stalls.example/never.png"><script>setTimeout(() => { while (true) {} })</script>`,
+      width: 320,
+      urlFragment: ""
+    });
+    pending.catch(() => undefined);
+    // The page is loading (its image went out): its deadline runs out now.
+    await pageLoading;
+    const deadline = timers.started.find((timer) => timer.ms === 2000 && !timer.cancelled);
+    assert.ok(deadline);
+    deadline.fire();
     await assert.rejects(
-      hurried.capture({ html: "<script>while (true) {}</script>", width: 320, urlFragment: "" }),
+      pending,
       (error: unknown) => error instanceof HtmlPreviewError && error.code === "timeout" && /within 2 seconds/.test(error.message)
     );
-    assert.ok(Date.now() - started < 10_000);
+    // Only the deadline ran out: it alone ended the call, its browser killed and gone.
+    assert.deepEqual(
+      timers.started.filter((timer) => timer.fired),
+      [deadline]
+    );
     assert.deepEqual(await readdir(scratch), []);
   });
 
@@ -419,20 +486,23 @@ describe("the browser gate", () => {
   });
 });
 
-/**
- * A "Chromium" that starts and then never answers: it marks its start with a
- * file named after its pid, then sleeps. What a hung or slow launch looks like.
- */
-async function hangingChromium(): Promise<{
+interface FakeChromium {
   executable: string;
+  /** The pids of the first `count` to reach their mark, once they have. */
   started(count: number): Promise<number[]>;
   cleanup(): Promise<void>;
-}> {
-  const dir = await mkdtemp(join(tmpdir(), "orq-hanging-chromium-"));
+}
+
+/**
+ * A "Chromium" from `script`, which marks a moment of its own by creating a
+ * file named after its pid in the directory it is given.
+ */
+async function fakeChromium(script: (marks: string) => string): Promise<FakeChromium> {
+  const dir = await mkdtemp(join(tmpdir(), "orq-fake-chromium-"));
   const marks = join(dir, "marks");
   await mkdir(marks);
   const executable = join(dir, "chromium");
-  await writeFile(executable, `#!/bin/sh\ntouch "${marks}/$$"\nexec sleep 300\n`, { mode: 0o755 });
+  await writeFile(executable, script(marks), { mode: 0o755 });
   const watcher = watch(marks);
   const pids = async (): Promise<number[]> => (await readdir(marks)).map(Number);
   return {
@@ -458,6 +528,47 @@ async function hangingChromium(): Promise<{
   };
 }
 
+/**
+ * A "Chromium" that starts and then never answers: it marks its start, then
+ * sleeps. What a hung or slow launch looks like.
+ */
+function hangingChromium(): Promise<FakeChromium> {
+  return fakeChromium((marks) => `#!/bin/sh\ntouch "${marks}/$$"\nexec sleep 300\n`);
+}
+
+/**
+ * A "Chromium" that answers puppeteer over the pipe until puppeteer sets up
+ * its first tab, then never attaches the tab's page: puppeteer's wait for it
+ * has no end of its own, not even once the pipe closes. It marks the moment
+ * puppeteer has taken the tab and is waiting.
+ */
+function chromiumStuckAtFirstTab(): Promise<FakeChromium> {
+  return fakeChromium(
+    (marks) => `#!${process.execPath}
+const { createReadStream, writeFileSync, writeSync } = require("node:fs");
+const send = (...messages) => writeSync(4, messages.map((message) => JSON.stringify(message) + "\\0").join(""));
+let buffered = "";
+createReadStream(null, { fd: 3 }).on("data", (chunk) => {
+  buffered += chunk;
+  for (let end = buffered.indexOf("\\0"); end !== -1; end = buffered.indexOf("\\0")) {
+    const { id, method, sessionId } = JSON.parse(buffered.slice(0, end));
+    buffered = buffered.slice(end + 1);
+    if (method === "Target.getBrowserContexts") send({ id, result: { browserContextIds: [] } });
+    else if (method === "Target.setAutoAttach" && sessionId === undefined) {
+      // The first tab, attached during the initial auto-attach, and in the same read its answer.
+      const targetInfo = { targetId: "tab", type: "tab", title: "", url: "about:blank", attached: true, canAccessOpener: false };
+      send({ method: "Target.attachedToTarget", params: { sessionId: "tab", targetInfo, waitingForDebugger: false } }, { id, result: {} });
+    } else {
+      send({ id, sessionId, result: {} });
+      // Puppeteer resumes the tab as it takes it, and takes the answer sent with the tab on that same turn.
+      if (method === "Runtime.runIfWaitingForDebugger" && sessionId === "tab") writeFileSync(${JSON.stringify(marks)} + "/" + process.pid, "");
+    }
+  }
+});
+`
+  );
+}
+
 /** Gone, or a zombie awaiting its reap: either way no longer running. */
 function notRunning(pid: number): boolean {
   try {
@@ -471,13 +582,14 @@ describe("html preview browser: slots, queue and cancellation", () => {
   it("a cancel kills a launch that hangs at once, and frees its slot", { timeout: TEST_TIMEOUT_MS }, async (t) => {
     const fake = await hangingChromium();
     t.after(() => fake.cleanup());
-    const browser = new HtmlPreviewBrowser({ resolveChromium: () => fake.executable, tmpDir: scratch, captureTimeoutMs: 60_000 });
+    // No timer runs out here: the cancels alone end both calls.
+    const timers = manualTimers();
+    const browser = new HtmlPreviewBrowser({ resolveChromium: () => fake.executable, tmpDir: scratch, startTimer: timers.startTimer });
     const first = new AbortController();
     const second = new AbortController();
     const one = browser.capture({ html: FIXED(1), width: 320, urlFragment: "", signal: first.signal });
     const two = browser.capture({ html: FIXED(1), width: 320, urlFragment: "", signal: second.signal });
     const [pidOne, pidTwo] = await fake.started(2);
-    const cancelledAt = Date.now();
     // Both outcomes are taken at once: neither rejection may go unhandled while the other is awaited.
     const outcomes = Promise.allSettled([one, two]);
     first.abort();
@@ -487,7 +599,8 @@ describe("html preview browser: slots, queue and cancellation", () => {
       const error = (outcome as PromiseRejectedResult).reason;
       assert.ok(error instanceof HtmlPreviewError && error.code === "cancelled", String(error));
     }
-    assert.ok(Date.now() - cancelledAt < 5_000, `${Date.now() - cancelledAt} ms`);
+    assert.ok(timers.started.every((timer) => !timer.fired));
+    // Each call ended only once its Chromium had exited.
     assert.ok(notRunning(pidOne!) && notRunning(pidTwo!));
     // Both slots are free again: a third launch starts at once.
     const third = new AbortController();
@@ -603,17 +716,62 @@ describe("html preview browser: slots, queue and cancellation", () => {
     const fake = await hangingChromium();
     t.after(() => fake.cleanup());
     const deadline = 1_500;
-    const browser = new HtmlPreviewBrowser({ resolveChromium: () => fake.executable, tmpDir: scratch, captureTimeoutMs: deadline });
-    const started = Date.now();
+    const queueBound = 30_000;
+    const timers = manualTimers();
+    const browser = new HtmlPreviewBrowser({
+      resolveChromium: () => fake.executable,
+      tmpDir: scratch,
+      captureTimeoutMs: deadline,
+      queueTimeoutMs: queueBound,
+      startTimer: timers.startTimer
+    });
+    const deadlines = (): ManualTimer[] => timers.started.filter((timer) => timer.ms === deadline);
     const calls = [0, 1, 2].map(() => browser.capture({ html: FIXED(1), width: 320, urlFragment: "" }));
-    const settled = await Promise.allSettled(calls);
-    for (const outcome of settled) {
-      assert.equal(outcome.status, "rejected");
-      const error = (outcome as PromiseRejectedResult).reason;
-      assert.ok(error instanceof HtmlPreviewError && error.code === "timeout", String(error));
+    for (const call of calls) call.catch(() => undefined);
+    await fake.started(2);
+    // Two hold the slots, each with its deadline; the third waits, on its queue bound only.
+    assert.equal(deadlines().length, 2);
+    assert.equal(timers.started.filter((timer) => timer.ms === queueBound).length, 3);
+    deadlines()[0]!.fire();
+    await assert.rejects(calls[0]!, (error: unknown) => error instanceof HtmlPreviewError && error.code === "timeout");
+    // The freed slot went to the third, whose whole deadline starts only now.
+    await fake.started(3);
+    assert.equal(deadlines().length, 3);
+    assert.ok(!deadlines()[2]!.fired && !deadlines()[2]!.cancelled);
+    for (const timer of deadlines().slice(1)) timer.fire();
+    for (const call of calls.slice(1)) {
+      await assert.rejects(call, (error: unknown) => error instanceof HtmlPreviewError && error.code === "timeout");
     }
-    // The third waited for a slot (one deadline) and then had its own whole one.
-    assert.ok(Date.now() - started >= 2 * deadline - 100, `${Date.now() - started} ms`);
     assert.deepEqual(await readdir(scratch), []);
+  });
+
+  it("the deadline ends a call even where puppeteer would wait forever: Chromium killed while puppeteer sets up its first tab", { timeout: TEST_TIMEOUT_MS }, async (t) => {
+    const fake = await chromiumStuckAtFirstTab();
+    t.after(() => fake.cleanup());
+    const own = await mkdtemp(join(tmpdir(), "orq-html-preview-stuck-"));
+    t.after(() => rm(own, { recursive: true, force: true }));
+    const timers = manualTimers();
+    const browser = new HtmlPreviewBrowser({
+      resolveChromium: () => fake.executable,
+      tmpDir: own,
+      captureTimeoutMs: 20_000,
+      startTimer: timers.startTimer
+    });
+    const pending = browser.capture({ html: FIXED(1), width: 320, urlFragment: "" });
+    pending.catch(() => undefined);
+    const [pid] = await fake.started(1);
+    timers.started.find((timer) => timer.ms === 20_000)!.fire();
+    await assert.rejects(pending, (error: unknown) => error instanceof HtmlPreviewError && error.code === "timeout");
+    // It ended only once its Chromium had exited, and left nothing behind.
+    assert.ok(notRunning(pid!));
+    assert.deepEqual(await readdir(own), []);
+    // And its slot is free: the next call starts at once (and is cancelled the same way).
+    const next = new AbortController();
+    const after = browser.capture({ html: FIXED(1), width: 320, urlFragment: "", signal: next.signal });
+    after.catch(() => undefined);
+    await fake.started(2);
+    next.abort();
+    await assert.rejects(after, (error: unknown) => error instanceof HtmlPreviewError && error.code === "cancelled");
+    assert.deepEqual(await readdir(own), []);
   });
 });
