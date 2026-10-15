@@ -28,8 +28,10 @@
  * delivery is resumed (deliveries post under fixed command ids, so the host's receipts dedupe a
  * re-post). A message never saved to the queue (the request died first) is dropped.
  *
- * Closures: a target closed before replying delivers "closed before replying"; a requester closed
- * first drops its subscriptions and pending deliveries (logged). Notices: an empty final reply
+ * Closures: a target closed before replying delivers "closed before replying"; one closed after a
+ * waiter took its reply still has that reply re-delivered (kept in memory when it was handed out)
+ * should the call go away; a requester closed first drops its subscriptions and pending
+ * deliveries (logged). Notices: an empty final reply
  * (§13 d), a failed or interrupted bound turn, a message discarded from the target's queue. A
  * delivery past {@link MAX_EXCHANGE_HOPS} (`hop + 1` of the replying turn) is delivered with the
  * exchange-limit notice and outcome `exchange-limit`; its turn's hop is past the cap, so no tool
@@ -665,7 +667,7 @@ export class ReplyRouter implements DeliveryListener {
       return { outcome: "replied", turnId: null, state: "failed", error: sub.answeredNotice };
     }
     if (sub.ended === "waiter" && !sub.posted?.steered) {
-      const result = await this.handedOutResult(sub);
+      const { result } = await this.readHandedOut(sub);
       // Released while the reply was read (every holder gone): it is a message now.
       if (sub.released) return { outcome: "notify", reason: "timeout", willNotify: true };
       // A re-sent call (same idempotency key) is handed the reply again: one more holder.
@@ -1005,10 +1007,6 @@ export class ReplyRouter implements DeliveryListener {
   private async readHandedOut(sub: Sub): Promise<{ result: ReplyResult | null; read: boolean }> {
     if (!this.isClosed(sub.toThreadId)) return this.readResult(sub);
     return { result: this.handedOut.get(sub.id) ?? { kind: "closed", afterReply: true }, read: true };
-  }
-
-  private async handedOutResult(sub: Sub): Promise<ReplyResult | null> {
-    return (await this.readHandedOut(sub)).result;
   }
 
   /** Keep the reply a waiter was handed (the newest {@link HANDED_OUT_MEMORY}). */
