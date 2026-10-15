@@ -758,7 +758,6 @@ export async function scenarioWorld(seed: WorkspaceSeed): Promise<ScenarioWorld>
   };
   const answer = (card: ToolApprovalSummary, response: ToolApprovalAnswer) =>
     user({ method: "POST", url: agentChatRoutes.toolApproval(card.threadId, card.approvalId), payload: response as unknown as Record<string, unknown> });
-  /** A call that opens one card, answered by the user as given. */
   /** The card `pending` opens; the call settling first fails at once (never a wait for a card that will not come). */
   const cardFor = async (pending: Promise<CallToolResult>, what: string): Promise<ToolApprovalSummary> => {
     const waiter = cards.next();
@@ -768,6 +767,7 @@ export async function scenarioWorld(seed: WorkspaceSeed): Promise<ScenarioWorld>
     cardWaiters.splice(0, cardWaiters.length);
     return assert.fail(`${what} opened no card; it answered ${JSON.stringify(first.result.structuredContent).slice(0, 400)}`);
   };
+  /** A call that opens one card, answered by the user as given. */
   const carded = async (threadId: string, name: string, args: Record<string, unknown>, response: ToolApprovalAnswer) => {
     assert.equal(unread.length, 0, "a card from an earlier call is still unanswered");
     const pending = chat(threadId, name, args);
