@@ -715,9 +715,12 @@ caps §5.6.
    thread "Codex review" · …]` (hop 2).
 3. Claude fixes and calls `send_message {sessionId: <codex>, text: "Fixed 1–3; re-review", reply:
    "notify"}` (hop 3); Codex is idle, so the turn starts at once; its reply returns (hop 4).
-4. Mid-review, Codex calls `send_message {sessionId: <claude>, reply: "wait"}`; Claude is idle;
-   the question becomes Claude's next turn (hop +1) and Codex receives Claude's reply. Had Claude
-   been blocked on Codex, `WAIT_CYCLE` would tell Codex to ask in its final reply instead.
+4. Mid-review, Codex has a question for Claude. It does **not** `send_message` Claude: Codex runs
+   `approval-required`, Claude `full-access`, and an agent-initiated turn is never caused in a
+   broader chat (§5.3, ruling during implementation). Codex asks in its **final reply**, which is
+   the reply Claude's own `notify` request receives (hop +1); Claude answers with another
+   `send_message {reply: "notify"}`. (Between chats of equal or narrower mode a direct
+   `send_message {reply: "wait"}` works; had the target been blocked on the sender, `WAIT_CYCLE`.)
 5. At hop 8 the next agent-caused turn is refused; Claude summarises for the user, whose next
    message starts a fresh exchange.
 
@@ -854,7 +857,8 @@ Changes outside your sandbox (workflows, agent profiles, desktops, other project
 ```
 
 The fixed part measures 1 445 bytes (1 648 with both conditional lines as templates); with the optional lines at their longest it stays under
-2 048 (asserted). The external `SERVER_INSTRUCTIONS` (≤ 2 KB) is rewritten for the new names.
+2 048 (asserted). Implemented wording of the toolset line (Task 14): "Off at chat start: <labels>. If a task needs one, call
+request_toolset with its id; its result says what is on now." — Claude keeps its launch system prompt until compaction. The external `SERVER_INSTRUCTIONS` (≤ 2 KB) is rewritten for the new names.
 
 ---
 
