@@ -40,7 +40,7 @@
  * `ended` (`delivered | waiter | closed | dropped | refused | discarded`), how a `done` one ended.
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname } from "node:path";
 
@@ -81,7 +81,7 @@ import type { DaemonApi } from "../mcp/daemon-api.ts";
 import { ToolError } from "../mcp/errors.ts";
 import { assistantTextForTurn } from "../mcp/views.ts";
 import { LineageError, type DeliveryListener, type LineageSessions } from "./lineage.ts";
-import { registerWait } from "./waits.ts";
+import { registerWait, waitCycleError, waitsOn } from "./waits.ts";
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -95,7 +95,8 @@ export type ReplyErrorCode =
   | "EXCHANGE_LIMIT"
   | "REPLY_SUBSCRIPTION_LIMIT"
   | "PERMISSION_DENIED"
-  | "WAIT_CYCLE";
+  | "WAIT_CYCLE"
+  | "TARGET_BUSY";
 
 /** HTTP status per refusal (the routes answer `{error: {code, message}}`). */
 export const REPLY_ERROR_STATUS: Record<ReplyErrorCode, number> = {
@@ -106,7 +107,8 @@ export const REPLY_ERROR_STATUS: Record<ReplyErrorCode, number> = {
   EXCHANGE_LIMIT: 409,
   REPLY_SUBSCRIPTION_LIMIT: 429,
   PERMISSION_DENIED: 403,
-  WAIT_CYCLE: 409
+  WAIT_CYCLE: 409,
+  TARGET_BUSY: 409
 };
 
 export class ReplyError extends Error {
@@ -128,6 +130,8 @@ export interface DeliveryQueue {
   enqueue(entry: MergeOutboxEntry): Promise<{ delivery: "sent"; seq: number } | { delivery: "queued" }>;
   has(mergeId: string): boolean;
   drop(mergeId: string): Promise<void>;
+  /** Take a queued entry back if no post of it started; true when it is gone now. */
+  retract(mergeId: string): Promise<boolean>;
 }
 
 export interface ReplyRouterOptions {
@@ -149,11 +153,18 @@ export interface ReplyRouterOptions {
 /** How a `done` subscription ended (persisted as `ended`). */
 type Ended = "delivered" | "waiter" | "closed" | "dropped" | "refused" | "discarded";
 
-/** The post that landed: its command id, the receipt's seq, and the user message it opened. */
+/**
+ * The post that landed: its command id, the receipt's seq, when, the user message it opened, a
+ * hash of the message text (the fallback match, never a `reply: "none"` turn), and `steered` when
+ * an older host ignored `ifIdle` and the message joined a running turn.
+ */
 interface Posted {
   commandId: string;
   seq: number;
+  at?: string;
   messageId?: string;
+  inputHash?: string;
+  steered?: true;
 }
 
 type Sub = ReplySubscriptionRecord & { posted?: Posted; ended?: Ended; toTitle?: string };
@@ -171,11 +182,23 @@ export type ReplyResult =
       causedBy?: CausedBy;
     }
   | { kind: "closed" }
-  | { kind: "discarded"; error: string };
+  /**
+   * No reply will come, said in `text` (a whole sentence for the requester): the message was
+   * discarded from the target's queue, joined a running turn (an older host), its turn was rewound
+   * or could not be identified, or the subscription outlived {@link MAX_SUBSCRIPTION_AGE_MS}.
+   */
+  | { kind: "notice"; text: string };
 
+/**
+ * One attached wait. `live` is the liveness token: false once its caller is gone (released,
+ * timed out, aborted) — the router hands a result only to a live waiter, else delivers it.
+ */
 interface Waiter {
+  live: boolean;
   resolve(result: ReplyResult): void;
   needsInput(): void;
+  /** The caller is gone: settle the wait as `notify` (the reply comes as a message). */
+  release(): void;
 }
 
 const DEFAULT_RECHECK_MS = 30_000;
@@ -185,6 +208,10 @@ const TURN_COMMAND_EVENTS = 3;
 const DONE_MEMORY = 200;
 const MAX_IDEMPOTENCY_KEY_CHARS = 180;
 const MAX_WAIT_SECONDS = 600;
+/** A subscription open this long ends with a notice and frees its slot (no reply came). */
+export const MAX_SUBSCRIPTION_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+/** A posted message whose turn could not be identified (no readable receipt events, no fallback match) for this long ends with a notice. */
+export const UNBOUND_GRACE_MS = 60 * 60 * 1000;
 /** Room the exchange-limit line and the cut marker need below the turn cap. */
 const DELIVERY_SLACK_CHARS = 512;
 export const REPLY_DELIVERY_MAX_TEXT_CHARS = MAX_TURN_INPUT_CHARS - THREAD_MESSAGE_OVERHEAD_CHARS - DELIVERY_SLACK_CHARS;
@@ -207,6 +234,10 @@ export class ReplyRouter implements DeliveryListener {
   /** Per target: the evaluation chain, and whether one more pass is already queued on it. */
   private readonly evalTail = new Map<string, Promise<void>>();
   private readonly evalQueued = new Set<string>();
+  /** Deliveries being handed to the queue right now: never twice at once. */
+  private readonly handing = new Set<string>();
+  /** Per target, the summary fields last evaluated on: an event that changes none of them reads nothing. */
+  private readonly seen = new Map<string, string>();
 
   constructor(private readonly opts: ReplyRouterOptions) {}
 
@@ -263,7 +294,7 @@ export class ReplyRouter implements DeliveryListener {
       if (event.channel !== "sessions") return;
       const id = (event.payload as { id?: unknown } | null)?.id;
       if (typeof id !== "string") return;
-      if (this.openSubs().some((sub) => sub.toThreadId === id)) void this.evaluate(id);
+      if (this.openSubs().some((sub) => sub.toThreadId === id) && this.summaryMoved(id)) void this.evaluate(id);
       if (this.isClosed(id)) void this.requesterClosed(id);
     });
     this.ready = this.reconcile().catch((error: unknown) => {
@@ -365,6 +396,10 @@ export class ReplyRouter implements DeliveryListener {
     if (body.context !== undefined && body.context !== null && !Array.isArray(body.context)) {
       throw new ReplyError("context must be a list.", "INVALID_COMMAND");
     }
+    // A wait that would close a cycle is refused before anything is saved or queued (§8.6).
+    if (body.reply === "wait" && waitsOn(targetId, fromThreadId)) {
+      throw new ReplyError(waitCycleError(targetId).message, "WAIT_CYCLE");
+    }
     const pending = this.subs().filter((sub) => sub.fromThreadId === fromThreadId && sub.state !== "done").length;
     if (pending >= MAX_PENDING_REPLY_SUBSCRIPTIONS) {
       throw new ReplyError(
@@ -463,14 +498,19 @@ export class ReplyRouter implements DeliveryListener {
     }
     if (sub.state === "notify") return { outcome: "notify", reason: "timeout", willNotify: true };
     if (sub.state === "claimed-by-router" || sub.state === "done") {
-      return sub.ended === "closed" ? { outcome: "closed" } : { outcome: "notify", reason: "timeout", willNotify: true };
+      if (sub.ended === "closed") return { outcome: "closed" };
+      // The turn settled before this waiter attached: the reply was queued for the requester —
+      // which is busy in this very tool call, so it has not landed. Taken back, it is returned here.
+      const taken = await this.takeBack(sub);
+      if (taken) return waitResponseOf(taken);
+      return { outcome: "notify", reason: "timeout", willNotify: true };
     }
     if (sub.state === "claimed-by-waiter" || this.waiters.has(sub.id)) {
       throw new ReplyError("Another wait already holds this reply.", "COMMAND_REJECTED");
     }
-    let release: () => void;
+    let unregister: () => void;
     try {
-      release = registerWait(sub.fromThreadId, sub.toThreadId);
+      unregister = registerWait(sub.fromThreadId, sub.toThreadId);
     } catch (error) {
       if (error instanceof ToolError) throw new ReplyError(error.message, "WAIT_CYCLE");
       throw error;
@@ -484,19 +524,18 @@ export class ReplyRouter implements DeliveryListener {
       const finishWith = (response: ReplyWaitResponse): void => {
         if (settled) return;
         settled = true;
+        waiter.live = false;
+        if (this.waiters.get(sub.id) === waiter) this.waiters.delete(sub.id);
         if (timer !== null) clearTimer(timer);
         opts.signal?.removeEventListener("abort", onAbort);
-        release();
+        unregister();
         resolve(response);
       };
-      const waiter: Waiter = {
-        resolve: (result) => finishWith(waitResponseOf(result)),
-        needsInput: () => giveUp("needs-input")
-      };
-      // The waiter's CAS: `waiting → notify`. Lost to the router (it set `claimed-by-waiter` and
-      // took the waiter out first), the router's result is on its way to `waiter.resolve`.
+      // The waiter's CAS: `waiting → notify`. Lost to the router (it set `claimed-by-waiter`
+      // first), the router's result is on its way to `waiter.resolve` — while this waiter is live.
       const giveUp = (reason: "timeout" | "needs-input"): void => {
         if (settled || sub.state !== "waiting" || this.waiters.get(sub.id) !== waiter) return;
+        waiter.live = false;
         this.waiters.delete(sub.id);
         sub.state = "notify";
         sub.updatedAt = this.stamp();
@@ -504,12 +543,74 @@ export class ReplyRouter implements DeliveryListener {
         // Persisted `notify` can now be claimed by the router: look again (the turn may have settled).
         void this.evaluate(sub.toThreadId);
       };
+      const waiter: Waiter = {
+        live: true,
+        resolve: (result) => finishWith(waitResponseOf(result)),
+        needsInput: () => giveUp("needs-input"),
+        release: () => finishWith({ outcome: "notify", reason: "timeout", willNotify: true })
+      };
       this.waiters.set(sub.id, waiter);
       timer = setTimer(() => giveUp("timeout"), timeoutSeconds * 1000);
       if (opts.signal?.aborted) giveUp("timeout");
       else opts.signal?.addEventListener("abort", onAbort, { once: true });
       void this.evaluate(sub.toThreadId);
     });
+  }
+
+  /**
+   * `POST …/reply-subscriptions/:subscriptionId/release` (socket-only): the waiting tool call was
+   * cancelled — `DaemonApi.request` cannot abort its inject, so the caller says so. The waiter
+   * is marked dead at once (the router never hands it a result) and `waiting` becomes `notify`
+   * (CAS; persisted): the reply comes as a message. A waiter the router already claimed for is
+   * re-delivered as a message by the router itself.
+   */
+  async release(
+    targetId: string,
+    subscriptionId: string,
+    principal?: CallerPrincipal
+  ): Promise<{ released: boolean; state: ReplySubscriptionRecord["state"] }> {
+    if (!this.api || !this.ready) throw new ReplyError("Orquester is still starting. Try again in a moment.", "HOST_UNAVAILABLE");
+    const sub = this.subs().find((candidate) => candidate.id === subscriptionId && candidate.toThreadId === targetId);
+    if (!sub) throw new ReplyError("No reply subscription with that id for this session.", "THREAD_NOT_FOUND");
+    if (principal?.kind === "agent" && principal.threadId !== sub.fromThreadId) {
+      throw new ReplyError("Only the chat that asked may release this wait.", "PERMISSION_DENIED");
+    }
+    const waiter = this.waiters.get(sub.id);
+    if (!waiter) return { released: false, state: sub.state };
+    waiter.live = false;
+    this.waiters.delete(sub.id);
+    if (sub.state === "waiting") {
+      sub.state = "notify";
+      sub.updatedAt = this.stamp();
+      await this.persist();
+    }
+    waiter.release();
+    void this.evaluate(sub.toThreadId);
+    return { released: true, state: sub.state };
+  }
+
+  /**
+   * D-4: a reply the router queued for a requester whose waiter attached only afterwards. Taken
+   * back (CAS on the delivery: a `pending` one is marked `dropped` before it is handed; a `queued`
+   * one is retracted from the queue in the requester's lane) and returned to the waiter — or null
+   * once a post of it may have started, or for a notice.
+   */
+  private async takeBack(sub: Sub): Promise<ReplyResult | null> {
+    const delivery = this.outbox.deliveries.find((d) => d.subscriptionId === sub.id);
+    if (!delivery || (delivery as { notice?: unknown }).notice === true || this.handing.has(delivery.id)) return null;
+    if (delivery.state !== "pending" && delivery.state !== "queued") return null;
+    const result = await this.resultFor(sub);
+    if (!result || result.kind !== "turn") return null;
+    if (delivery.state === "queued") {
+      if (this.handing.has(delivery.id) || !(await this.opts.queue.retract(delivery.queueEntryId ?? delivery.id))) return null;
+    } else if (this.handing.has(delivery.id)) {
+      return null;
+    }
+    if (delivery.state !== "pending" && delivery.state !== "queued") return null;
+    delivery.state = "dropped";
+    this.finish(sub, "waiter");
+    await this.persist();
+    return result;
   }
 
   // --- the delivery queue's hooks (DeliveryListener) -----------------------------
@@ -529,10 +630,24 @@ export class ReplyRouter implements DeliveryListener {
     const sub = this.subs().find((candidate) => candidate.id === entry.subscriptionId);
     if (!sub || sub.posted) return;
     const binding = await this.bindingOf(entry.parentSessionId, commandId, seq);
-    sub.posted = { commandId, seq, ...(binding.messageId !== undefined ? { messageId: binding.messageId } : {}) };
-    if (binding.turnId !== undefined) sub.turnId = binding.turnId;
+    sub.posted = {
+      commandId,
+      seq,
+      at: this.stamp(),
+      inputHash: hashText(entry.input),
+      ...(binding.messageId !== undefined ? { messageId: binding.messageId } : {}),
+      ...(binding.steeredTurnId !== undefined ? { steered: true as const } : {})
+    };
+    if (binding.steeredTurnId !== undefined) sub.turnId = binding.steeredTurnId;
     sub.updatedAt = this.stamp();
     await this.persist();
+    if (sub.posted.steered) {
+      // An older host ignored `ifIdle`: the message joined a running turn, whose reply is not an
+      // answer to it (§8.3). The requester hears that instead — never that turn's reply.
+      const deliver = await this.claim(sub, { kind: "notice", text: this.noticeText("steered", sub) });
+      void deliver();
+      return;
+    }
     void this.evaluate(entry.parentSessionId);
   }
 
@@ -552,19 +667,14 @@ export class ReplyRouter implements DeliveryListener {
     if (bySessionId === sub.fromThreadId) {
       // The requester took its own message back: nothing to tell it, a waiter hears it at once.
       const waiter = this.waiters.get(sub.id);
-      this.waiters.delete(sub.id);
       this.finish(sub, "discarded");
       await this.persist();
-      waiter?.resolve({ kind: "discarded", error: "You discarded the message before it ran." });
+      waiter?.resolve({ kind: "notice", text: "You discarded the message before it ran, so no reply will come." });
       return;
     }
-    const title = sub.toTitle ?? this.opts.sessions.get(sub.toThreadId)?.title ?? sub.toThreadId;
     // The claim is recorded before the queue lets the entry go; its delivery follows outside the
     // target's lane (it goes into the requester's).
-    const deliver = await this.claim(sub, {
-      kind: "discarded",
-      error: `the message was discarded from "${oneLine(title)}"'s queue before it ran`
-    });
+    const deliver = await this.claim(sub, { kind: "notice", text: this.noticeText("discarded", sub) });
     void deliver();
   }
 
@@ -601,20 +711,25 @@ export class ReplyRouter implements DeliveryListener {
     await Promise.all([...new Set(this.openSubs().map((sub) => sub.toThreadId))].map((id) => this.evaluate(id)));
   }
 
-  /** A `claimed-by-router` subscription after a restart: its persisted delivery resumes, never a second claim. */
+  /**
+   * A `claimed-by-router` subscription: its persisted delivery resumes, never a second claim. One
+   * without a delivery record (written by a build before claim and record were one write) has its
+   * result read again — at boot and on every safety re-check, so it is never stranded.
+   */
   private async resumeClaimed(sub: Sub): Promise<void> {
     const delivery = this.outbox.deliveries.find((d) => d.subscriptionId === sub.id);
     if (delivery) {
       if (delivery.state === "pending") await this.hand(delivery);
-      else {
-        this.finish(sub, "delivered");
+      else if (sub.state !== "done") {
+        this.finish(sub, sub.ended === "closed" ? "closed" : "delivered");
         await this.persist();
       }
       return;
     }
-    // Claimed, but the crash came before its delivery was written: read the result again.
     const result = await this.resultFor(sub);
-    if (result) await this.deliverResult(sub, result);
+    if (!result) return;
+    const deliver = await this.claimForRouter(sub, result);
+    await deliver();
   }
 
   /** The bound turn's result now, for a subscription already claimed; null while it cannot be read. */
@@ -630,6 +745,26 @@ export class ReplyRouter implements DeliveryListener {
     }
     const turn = this.boundTurn(sub, snap);
     return turn && SETTLED_TURN_STATES.has(turn.state) ? resultOf(snap, turn) : null;
+  }
+
+  /**
+   * Whether a target's summary moved since its last evaluation (latest turn, its state, open
+   * requests, session status): a bus event that changes none of them needs no thread read.
+   */
+  private summaryMoved(targetId: string): boolean {
+    const summary = this.opts.sessions.get(targetId);
+    const key = summary
+      ? JSON.stringify([
+          summary.latestTurn?.turnId ?? null,
+          summary.latestTurn?.state ?? null,
+          summary.hasPendingApprovals === true,
+          summary.hasPendingUserInput === true,
+          summary.chatSessionStatus ?? null
+        ])
+      : "closed";
+    if (this.seen.get(targetId) === key) return false;
+    this.seen.set(targetId, key);
+    return true;
   }
 
   /** Look at a target's thread for its open subscriptions: serialized per target, one pass queued at most. */
@@ -653,7 +788,15 @@ export class ReplyRouter implements DeliveryListener {
   private async evaluateNow(targetId: string): Promise<void> {
     const api = this.api;
     if (!api || this.stopped) return;
-    const subs = this.openSubs().filter((sub) => sub.toThreadId === targetId && (sub.state === "waiting" || sub.state === "notify"));
+    const open = (sub: Sub): boolean => sub.toThreadId === targetId && (sub.state === "waiting" || sub.state === "notify");
+    // Past the maximum age (§12.7): no reply came; the requester hears so and its slot is freed.
+    for (const sub of this.openSubs().filter(open)) {
+      if (this.ageMs(sub.createdAt) > MAX_SUBSCRIPTION_AGE_MS) {
+        const deliver = await this.claim(sub, { kind: "notice", text: this.noticeText("expired", sub) });
+        await deliver();
+      }
+    }
+    const subs = this.openSubs().filter(open);
     if (subs.length === 0) return;
     if (this.isClosed(targetId)) {
       for (const sub of subs) {
@@ -672,9 +815,16 @@ export class ReplyRouter implements DeliveryListener {
     const asking = snap.pending.approvals.length + snap.pending.userInputs.length > 0;
     let dirty = false;
     for (const sub of subs) {
-      if (!sub.posted || (sub.state !== "waiting" && sub.state !== "notify")) continue;
+      if (!sub.posted || sub.posted.steered || (sub.state !== "waiting" && sub.state !== "notify")) continue;
       const turn = this.boundTurn(sub, snap);
-      if (!turn) continue;
+      if (!turn) {
+        if (this.bindingLost(sub, snap)) {
+          // Rewound away, or never identifiable: no reply will come for it.
+          const deliver = await this.claim(sub, { kind: "notice", text: this.noticeText("lost", sub) });
+          await deliver();
+        }
+        continue;
+      }
       if (turn.turnId !== null && sub.turnId !== turn.turnId) {
         sub.turnId = turn.turnId;
         dirty = true;
@@ -694,8 +844,9 @@ export class ReplyRouter implements DeliveryListener {
   /**
    * The turn a posted message opened: by its recorded turn id, else by the user message the
    * command appended (`Turn.userMessageId`). Without a recorded message (the receipt's events
-   * could not be read back): the requester's turn at this exchange hop that no other subscription
-   * holds, oldest first — the queue posts one sender's messages to one target in order.
+   * could not be read back): the requester's turn at this exchange hop whose own user message is
+   * this very text (by hash — never a `reply: "none"` message's turn, whose header differs) and
+   * that no other subscription holds, oldest first.
    */
   private boundTurn(sub: Sub, snap: ThreadSnapshotPayload): Turn | undefined {
     if (sub.turnId !== undefined) {
@@ -704,23 +855,43 @@ export class ReplyRouter implements DeliveryListener {
     }
     const messageId = sub.posted?.messageId;
     if (messageId !== undefined) return snap.turns.find((turn) => turn.userMessageId === messageId);
-    if (sub.turnId !== undefined) return undefined;
+    const inputHash = sub.posted?.inputHash;
+    if (sub.turnId !== undefined || inputHash === undefined) return undefined;
     const held = new Set(
       this.subs()
         .filter((other) => other !== sub && other.toThreadId === sub.toThreadId && other.turnId !== undefined)
         .map((other) => other.turnId!)
     );
-    return snap.turns.find(
-      (turn) =>
-        turn.causedBy?.threadId === sub.fromThreadId &&
-        turn.causedBy.exchangeId === sub.exchange.id &&
-        turn.causedBy.hop === sub.exchange.hop &&
-        !(turn.turnId !== null && held.has(turn.turnId))
-    );
+    const textOf = (id: string | undefined): string | undefined => {
+      const item = id === undefined ? undefined : snap.items.find((candidate) => candidate.kind === "message" && candidate.id === id);
+      return item?.kind === "message" ? item.text : undefined;
+    };
+    return snap.turns.find((turn) => {
+      if (turn.causedBy?.threadId !== sub.fromThreadId || turn.causedBy.exchangeId !== sub.exchange.id || turn.causedBy.hop !== sub.exchange.hop) return false;
+      if (turn.turnId !== null && held.has(turn.turnId)) return false;
+      const text = textOf(turn.userMessageId);
+      return text !== undefined && hashText(text) === inputHash;
+    });
   }
 
-  /** The user message (or, for a steer, the running turn) the command `commandId` opened, from its receipt's events. */
-  private async bindingOf(targetId: string, commandId: string, seq: number): Promise<{ messageId?: string; turnId?: string }> {
+  /**
+   * A posted message's turn is gone for good: its user message and its turn are both absent from
+   * the thread (a rewind), or it could not be identified at all for {@link UNBOUND_GRACE_MS}.
+   */
+  private bindingLost(sub: Sub, snap: ThreadSnapshotPayload): boolean {
+    const messageId = sub.posted?.messageId;
+    if (messageId !== undefined) {
+      return !snap.turns.some((turn) => turn.userMessageId === messageId) && !snap.items.some((item) => item.id === messageId);
+    }
+    if (sub.turnId !== undefined) return !snap.turns.some((turn) => turn.turnId === sub.turnId);
+    return this.ageMs(sub.posted?.at ?? sub.createdAt) > UNBOUND_GRACE_MS;
+  }
+
+  /**
+   * What the command `commandId` opened, from its receipt's events: the user message of a new turn,
+   * or — no turn start: an older host ignored `ifIdle` and the message steered — the running turn.
+   */
+  private async bindingOf(targetId: string, commandId: string, seq: number): Promise<{ messageId?: string; steeredTurnId?: string }> {
     const api = this.api;
     if (!api) return {};
     try {
@@ -734,8 +905,7 @@ export class ReplyRouter implements DeliveryListener {
       if (start?.type === "thread.turn-start-requested") return { messageId: start.payload.messageId };
       const message = own.find((event) => event.type === "thread.message-sent" && event.payload.role === "user");
       if (message?.type === "thread.message-sent") {
-        // No turn start: the target was working after all and the message steered its turn.
-        return message.payload.turnId !== null ? { turnId: message.payload.turnId } : { messageId: message.payload.messageId };
+        return message.payload.turnId !== null ? { steeredTurnId: message.payload.turnId } : { messageId: message.payload.messageId };
       }
       return {};
     } catch {
@@ -746,48 +916,64 @@ export class ReplyRouter implements DeliveryListener {
   // --- claiming and delivering ------------------------------------------------------
 
   /**
-   * The router's CAS on a settled (or ended) bound turn. Persists the claim, hands a waiter its
-   * result, and returns the delivery step for a router claim (a no-op otherwise) — the caller runs
-   * it now or, inside another chat's lane, outside it.
+   * The router's CAS on a settled (or ended) bound turn, persisted before any effect — a failed
+   * write aborts it (state restored; the next look tries again). A LIVE waiter is handed the
+   * result; a waiter released meanwhile is not, and the result is delivered instead. Returns the
+   * delivery step of a router claim (a no-op otherwise): the caller runs it now or, inside another
+   * chat's lane, outside it.
    */
   private async claim(sub: Sub, result: ReplyResult): Promise<() => Promise<void>> {
     const nothing = async (): Promise<void> => undefined;
     if (sub.state !== "waiting" && sub.state !== "notify") return nothing;
     const waiter = sub.state === "waiting" ? this.waiters.get(sub.id) : undefined;
-    if (waiter) {
-      this.waiters.delete(sub.id);
+    if (waiter?.live) {
       sub.state = "claimed-by-waiter";
       sub.updatedAt = this.stamp();
-      await this.persist();
-      waiter.resolve(result);
-      this.finish(sub, result.kind === "closed" ? "closed" : "waiter");
-      await this.persist();
-      return nothing;
+      if (!(await this.persist())) {
+        sub.state = "waiting";
+        return nothing;
+      }
+      if (waiter.live) {
+        waiter.resolve(result);
+        this.finish(sub, result.kind === "closed" ? "closed" : "waiter");
+        await this.persist();
+        return nothing;
+      }
+      // Released while the claim was written: nobody reads that answer, so it is delivered.
+      sub.state = "notify";
     }
-    sub.state = "claimed-by-router";
-    sub.updatedAt = this.stamp();
-    await this.persist();
-    return () => this.deliverResult(sub, result);
+    return this.claimForRouter(sub, result);
   }
 
-  /** A claimed result becomes a delivery to the requester — persisted, then handed to the queue. */
-  private async deliverResult(sub: Sub, result: ReplyResult): Promise<void> {
+  /**
+   * `waiting | notify → claimed-by-router` and the delivery record in ONE persisted write, so no
+   * crash leaves a claim without its delivery. A requester already closed drops it instead.
+   */
+  private async claimForRouter(sub: Sub, result: ReplyResult): Promise<() => Promise<void>> {
+    const nothing = async (): Promise<void> => undefined;
+    const prior = sub.state;
     if (this.isClosed(sub.fromThreadId)) {
       this.opts.logger?.warn?.("[replies] the requester closed before its reply arrived; dropped", { subscriptionId: sub.id });
       this.finish(sub, "dropped");
       await this.persist();
-      return;
+      return nothing;
     }
     const delivery = this.makeDelivery(sub, result);
-    this.outbox.deliveries.push(delivery);
+    sub.state = "claimed-by-router";
+    sub.updatedAt = this.stamp();
     if (result.kind === "closed") sub.ended = "closed";
-    await this.persist();
-    await this.hand(delivery);
+    this.outbox.deliveries.push(delivery);
+    if (!(await this.persist())) {
+      sub.state = prior;
+      this.outbox.deliveries = this.outbox.deliveries.filter((other) => other !== delivery);
+      return nothing;
+    }
+    return () => this.hand(delivery);
   }
 
-  private makeDelivery(sub: Sub, result: ReplyResult): ReplyDeliveryRecord {
+  private makeDelivery(sub: Sub, result: ReplyResult): ReplyDeliveryRecord & { notice?: true } {
     const id = this.newId();
-    const title = this.opts.sessions.get(sub.toThreadId)?.title ?? sub.toTitle ?? sub.toThreadId;
+    const title = this.titleOf(sub);
     const project = this.opts.sessions.get(sub.toThreadId)?.projectPath ?? "";
     // A delivery is the hop after the turn whose reply it carries (§8.4).
     const replying = result.kind === "turn" && result.causedBy ? result.causedBy.hop : sub.exchange.hop;
@@ -800,9 +986,9 @@ export class ReplyRouter implements DeliveryListener {
     if (result.kind === "closed") {
       outcome = "closed";
       text = replyNoticeText("closed", notice);
-    } else if (result.kind === "discarded") {
+    } else if (result.kind === "notice") {
       outcome = "failed";
-      text = replyNoticeText("failed", { ...notice, error: result.error });
+      text = result.text;
     } else if (result.state !== "completed") {
       outcome = result.state;
       text = replyNoticeText(result.state, { ...notice, ...(result.error ? { error: result.error } : {}) });
@@ -837,12 +1023,27 @@ export class ReplyRouter implements DeliveryListener {
       interactionMode: sub.interactionMode,
       causedBy,
       state: "pending",
-      createdAt: this.stamp()
+      createdAt: this.stamp(),
+      // A notice is never taken back by a late waiter (D-4): it carries no reply.
+      ...(result.kind === "notice" || result.kind === "closed" ? { notice: true as const } : {})
     };
   }
 
-  /** Into the requester's delivery queue (kind `reply`, a fixed id): queued until it is idle, oldest first. */
+  /**
+   * Into the requester's delivery queue (kind `reply`, a fixed id): queued until it is idle, oldest
+   * first. Only a `pending` delivery, and never twice at once (`handing`).
+   */
   private async hand(delivery: ReplyDeliveryRecord): Promise<void> {
+    if (delivery.state !== "pending" || this.handing.has(delivery.id)) return;
+    this.handing.add(delivery.id);
+    try {
+      await this.handNow(delivery);
+    } finally {
+      this.handing.delete(delivery.id);
+    }
+  }
+
+  private async handNow(delivery: ReplyDeliveryRecord): Promise<void> {
     const sub = this.subs().find((candidate) => candidate.id === delivery.subscriptionId);
     if (this.isClosed(delivery.toThreadId)) {
       delivery.state = "dropped";
@@ -879,14 +1080,16 @@ export class ReplyRouter implements DeliveryListener {
     await this.persist();
   }
 
-  /** A requester closed: its open subscriptions and undelivered replies are dropped (logged). */
+  /** A requester closed: its open subscriptions (and their waiters) and undelivered replies are dropped (logged). */
   private async requesterClosed(requesterId: string): Promise<void> {
     if (!this.isClosed(requesterId)) return;
     let changed = false;
     for (const sub of this.openSubs()) {
       if (sub.fromThreadId !== requesterId || sub.state === "claimed-by-router") continue;
-      this.waiters.delete(sub.id);
+      const waiter = this.waiters.get(sub.id);
       this.finish(sub, "dropped");
+      // Its wait ends now, its registration released (the chat that waited is gone).
+      waiter?.resolve({ kind: "closed" });
       changed = true;
     }
     for (const delivery of this.outbox.deliveries) {
@@ -922,6 +1125,31 @@ export class ReplyRouter implements DeliveryListener {
     sub.updatedAt = this.stamp();
   }
 
+  private titleOf(sub: Sub): string {
+    return this.opts.sessions.get(sub.toThreadId)?.title ?? sub.toTitle ?? sub.toThreadId;
+  }
+
+  /** The sentence a requester reads when no reply will come (`ReplyResult` kind `notice`). */
+  private noticeText(kind: "discarded" | "steered" | "lost" | "expired", sub: Sub): string {
+    const title = oneLine(this.titleOf(sub)) || "Untitled";
+    const look = `Read what it did with read_transcript {sessionId: "${sub.toThreadId}"}.`;
+    switch (kind) {
+      case "discarded":
+        return `Your message to "${title}" was discarded from its queue before it ran, so no reply will come.`;
+      case "steered":
+        return `"${title}" was already working, so your message joined its running turn instead of starting its own; no reply of its own will come. ${look}`;
+      case "lost":
+        return `Orquester lost track of the turn your message to "${title}" started (it was rewound, or could not be identified), so no reply will come. ${look}`;
+      case "expired":
+        return `No reply from "${title}" came within ${Math.round(MAX_SUBSCRIPTION_AGE_MS / 86_400_000)} days; Orquester stopped waiting for it. ${look}`;
+    }
+  }
+
+  private ageMs(iso: string): number {
+    const at = Date.parse(iso);
+    return Number.isNaN(at) ? 0 : this.now().getTime() - at;
+  }
+
   private now(): Date {
     return this.opts.now?.() ?? new Date();
   }
@@ -939,6 +1167,7 @@ export class ReplyRouter implements DeliveryListener {
     if (ms <= 0 || this.stopped || this.recheck) return;
     this.recheck = setInterval(() => {
       for (const delivery of this.outbox.deliveries) if (delivery.state === "pending") void this.hand(delivery);
+      for (const sub of this.openSubs()) if (sub.state === "claimed-by-router") void this.resumeClaimed(sub);
       // Closures no bus event reported (tabs closed before the records loaded) are found here too.
       for (const id of new Set(this.openSubs().map((sub) => sub.fromThreadId))) void this.requesterClosed(id);
       for (const id of new Set(this.openSubs().map((sub) => sub.toThreadId))) void this.evaluate(id);
@@ -990,6 +1219,11 @@ function record(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
+/** A short, stable hash of a message text (the binding fallback compares texts by it). */
+function hashText(text: string): string {
+  return createHash("sha256").update(text).digest("hex").slice(0, 32);
+}
+
 /** Context chips as the queue entry stores them (its schema keeps unknown chip fields). */
 function queueContext(chips: ComposerContextRecord[]): NonNullable<MergeOutboxEntry["context"]> {
   return chips as unknown as NonNullable<MergeOutboxEntry["context"]>;
@@ -1030,7 +1264,7 @@ export function resultOf(snap: ThreadSnapshotPayload, turn: Turn): ReplyResult {
 /** What a waiter answers for a result (§13 d: an empty reply is `emptyReply`, no `reply`). */
 export function waitResponseOf(result: ReplyResult): ReplyWaitResponse {
   if (result.kind === "closed") return { outcome: "closed" };
-  if (result.kind === "discarded") return { outcome: "replied", turnId: null, state: "failed", error: result.error };
+  if (result.kind === "notice") return { outcome: "replied", turnId: null, state: "failed", error: result.text };
   return {
     outcome: "replied",
     turnId: result.turnId,

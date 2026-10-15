@@ -3167,6 +3167,13 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         // this turn in (unified MCP design 2026-10-15 §8.4). The daemon alone sets it — the remote
         // transport strips it — so a value that does not parse is dropped, never a refusal.
         const causedBy = parseCausedBy(body.causedBy);
+        // `ifIdle: true` (unified MCP design 2026-10-15 §8.3, additive): the daemon's delivery
+        // queue posts a reply-bound message or a reply only as a NEW turn, never a steer. With a
+        // turn active the command is refused — not recorded, so the same id may be posted again at
+        // the next idle point. An older host ignores the field (the race window stays there).
+        if (body.ifIdle === true && session.activeTurnId !== null) {
+          throw new TurnNotIdleRefusal();
+        }
         runtime.lastInteractionMode = interactionMode;
         const modelSelection =
           body.modelSelection === undefined
@@ -8168,4 +8175,20 @@ function withForkedMcpApp(event: RuntimeEvent, apps: ReadonlyMap<string, McpAppR
   const record = data !== null && typeof data === "object" && !Array.isArray(data) ? (data as Record<string, unknown>) : {};
   if ("mcpApp" in record) return event;
   return { ...event, payload: { ...event.payload, data: { ...record, mcpApp } } };
+}
+
+/**
+ * The `/turn` precondition `ifIdle: true` refused: a turn is active, so the message would steer it.
+ * 409 `COMMAND_REJECTED` with `detail.reason: "turn-not-idle"` (the daemon's delivery queue reads
+ * the same literal, `lineage.ts` `TURN_NOT_IDLE_REASON`), and NOT recorded as a receipt: a refusal
+ * of the moment, the same command id may land later.
+ */
+class TurnNotIdleRefusal extends AgentChatCommandError {
+  constructor() {
+    super("COMMAND_REJECTED", "The thread is working; the message waits for its next idle point.", { reason: "turn-not-idle" });
+  }
+
+  override get recorded(): boolean {
+    return false;
+  }
 }

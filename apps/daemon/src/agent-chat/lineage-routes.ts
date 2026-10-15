@@ -39,6 +39,7 @@ import type { FastifyRequest } from "fastify";
 
 import { LineageError, type LineageService } from "./lineage.ts";
 import { REPLY_ERROR_STATUS, ReplyError, type ReplyRouter } from "./replies.ts";
+import { replySubscriptionReleasePath } from "./waits.ts";
 
 export interface LineageRouteDeps {
   /** Null until the daemon's own API exists; the routes then answer 503. */
@@ -74,7 +75,7 @@ function codeOf(error: unknown): AgentChatErrorCode {
 }
 
 function refuse(reply: FastifyReply, error: unknown, fallback: string): FastifyReply {
-  if (error instanceof LineageError && error.code === "EXCHANGE_LIMIT") {
+  if (error instanceof LineageError && (error.code === "EXCHANGE_LIMIT" || error.code === "TARGET_BUSY")) {
     return reply.code(409).send({ error: { code: error.code, message: error.message } });
   }
   const code = codeOf(error);
@@ -275,6 +276,23 @@ export function registerReplySubscriptionRoutes(app: FastifyInstance, deps: Repl
         return refuseReply(reply, error, "Could not wait for the reply.");
       } finally {
         reply.raw.off("close", onClose);
+      }
+    }
+  );
+
+  // The waiting tool call was cancelled: release its waiter (the reply then comes as a message).
+  app.post<{ Params: { id: string; subscriptionId: string } }>(
+    pattern(replySubscriptionReleasePath(":id", ":subscriptionId")),
+    async (request, reply): Promise<{ released: boolean; state: string } | FastifyReply> => {
+      const { id, subscriptionId } = request.params;
+      const replies = deps.replies();
+      if (!replies) {
+        return reply.code(503).send(envelope("HOST_UNAVAILABLE", "Orquester is still starting. Try again in a moment."));
+      }
+      try {
+        return await replies.release(id, subscriptionId, principalOf(request));
+      } catch (error) {
+        return refuseReply(reply, error, "Could not release the wait.");
       }
     }
   );

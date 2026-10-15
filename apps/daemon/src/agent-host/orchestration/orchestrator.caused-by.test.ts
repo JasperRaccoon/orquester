@@ -9,6 +9,7 @@ import { describe, it } from "node:test";
 
 import type { DomainEvent } from "@orquester/api/agent-chat";
 
+import { isAgentChatCommandError } from "./errors.ts";
 import { createTestHost, type TestHost } from "./testing/index.ts";
 
 let seq = 0;
@@ -59,5 +60,29 @@ describe("causedBy on turn commands", () => {
       assert.equal((await turns(host, threadId))[0]!.causedBy, undefined);
       await host.stop();
     }
+  });
+
+  it("ifIdle: a new turn on an idle thread; with a turn active, refused (not recorded) instead of steering", async () => {
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "first", ifIdle: true });
+    await host.settle();
+    assert.equal(starts(host, threadId).length, 1, "idle: it starts a turn");
+    const id = cmd();
+    const before = (host.store.logs.get(threadId) ?? []).length;
+    await assert.rejects(
+      host.orchestrator.command(threadId, "turn", { commandId: id, input: "would steer", ifIdle: true }),
+      (error: unknown) =>
+        isAgentChatCommandError(error) &&
+        error.code === "COMMAND_REJECTED" &&
+        (error.detail as { reason?: unknown } | undefined)?.reason === "turn-not-idle"
+    );
+    assert.equal((host.store.logs.get(threadId) ?? []).length, before, "nothing appended");
+    assert.equal(host.store.receipts.has(id), false, "not recorded: the same id may land later");
+    // Without the precondition the same message steers, as before.
+    await host.orchestrator.command(threadId, "turn", { commandId: id, input: "steers" });
+    await host.settle();
+    assert.equal(starts(host, threadId).length, 1);
+    await host.stop();
   });
 });

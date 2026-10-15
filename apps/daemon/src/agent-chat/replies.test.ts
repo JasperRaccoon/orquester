@@ -19,6 +19,7 @@ import { describe, it } from "node:test";
 
 import type { EventMessage, SessionSummary } from "@orquester/api";
 import {
+  nextCausedBy,
   parseThreadMessage,
   replyNoticeText,
   THREAD_MESSAGE_CONTEXT_KIND,
@@ -32,7 +33,7 @@ import {
 import type { DaemonApi, DaemonResponse } from "../mcp/daemon-api.ts";
 import { LineageService } from "./lineage.ts";
 import { ReplyError, ReplyRouter } from "./replies.ts";
-import { registerWait } from "./waits.ts";
+import { registerWait, waitsOn } from "./waits.ts";
 
 // ---------------------------------------------------------------------------
 // The fake host
@@ -78,6 +79,12 @@ function fakeHost() {
   let beforePost: ((post: Post) => void) | null = null;
   /** The next post's refusal, once. */
   let refuseNext: DaemonResponse | null = null;
+  /** An older host: `ifIdle` ignored (a busy target is steered). */
+  let ignoreIfIdle = false;
+  /** Sessions whose user starts a turn just before the next post lands (the idle-check race). */
+  const raceOnNextPost = new Set<string>();
+  /** Full thread reads (snapshots) per session. */
+  const snapshotReads = new Map<string, number>();
 
   const thread = (id: string): FakeThread => {
     let t = threads.get(id);
@@ -102,6 +109,17 @@ function fakeHost() {
     } as unknown as ThreadSnapshotPayload;
   };
   const touch = (id: string, type = "updated"): void => {
+    // The summary follows the thread, as the host's poll makes it.
+    const tab = sessions.get(id);
+    if (tab) {
+      const t = thread(id);
+      const last = t.turns.at(-1);
+      sessions.set(id, {
+        ...tab,
+        ...(last ? { latestTurn: { turnId: last.turnId, state: last.state } } : {}),
+        hasPendingUserInput: t.asking
+      } as SessionSummary);
+    }
     for (const listener of listeners) listener({ channel: "sessions", type, payload: { id } } as unknown as EventMessage);
   };
 
@@ -118,6 +136,7 @@ function fakeHost() {
           const t = thread(id);
           return { status: 200, body: { kind: "events", seq: t.seq, events: t.events.filter((e) => e.seq > Number(after)) } };
         }
+        snapshotReads.set(id, (snapshotReads.get(id) ?? 0) + 1);
         return { status: 200, body: { kind: "snapshot", thread: snapshotOf(id) } };
       }
       const turnPath = /^\/api\/sessions\/([^/]+)\/turn$/.exec(path);
@@ -133,10 +152,19 @@ function fakeHost() {
           if (refusal.status !== 503) receipts.set(commandId, refusal);
           return refusal;
         }
+        if (raceOnNextPost.delete(sessionId)) {
+          const raced = thread(sessionId);
+          raced.seq += 1;
+          raced.turns.push({ turnId: "raced-turn", state: "running", turnCount: null, requestedAt: "t", startedAt: "t", completedAt: null, assistantMessageId: null });
+        }
+        const t = thread(sessionId);
+        if (body.ifIdle === true && !ignoreIfIdle && active(t)) {
+          // The host's precondition: refused, NOT recorded (the same id may land later).
+          return { status: 409, body: { error: { code: "COMMAND_REJECTED", message: "working", detail: { reason: "turn-not-idle" } } } };
+        }
         const post = { sessionId, body };
         beforePost?.(post);
         posts.push(post);
-        const t = thread(sessionId);
         const messageId = `msg-${(ids += 1)}`;
         const running = active(t);
         t.seq += 1;
@@ -194,6 +222,21 @@ function fakeHost() {
     refuseNextWith(response: DaemonResponse) {
       refuseNext = response;
     },
+    olderHost() {
+      ignoreIfIdle = true;
+    },
+    raceNextPost(id: string) {
+      raceOnNextPost.add(id);
+    },
+    snapshotReads: (id: string) => snapshotReads.get(id) ?? 0,
+    /** Rewind the target past its latest turn: the turn and its user message are gone. */
+    rewindLast(id: string): void {
+      const t = thread(id);
+      const turn = t.turns.pop();
+      if (turn?.userMessageId) t.items = t.items.filter((item) => item.id !== turn.userMessageId);
+      t.seq += 1;
+      touch(id);
+    },
     /** Start a turn of the target's own (the user typed): it is busy. */
     userTurn(id: string, turnId = "user-turn"): void {
       const t = thread(id);
@@ -245,7 +288,7 @@ function fakeTimers() {
   };
 }
 
-async function world(options: { replyOutbox?: string; mergeOutbox?: string; host?: Host; dir?: string } = {}) {
+async function world(options: { replyOutbox?: string; mergeOutbox?: string; host?: Host; dir?: string; now?: () => Date } = {}) {
   const dir = options.dir ?? (await mkdtemp(join(tmpdir(), "orq-replies-")));
   const replyFile = join(dir, "agent-reply-outbox.json");
   const mergeFile = join(dir, "agent-merge-outbox.json");
@@ -274,6 +317,7 @@ async function world(options: { replyOutbox?: string; mergeOutbox?: string; host
     queue,
     recheckMs: 0,
     newId: () => `id-${(n += 1)}`,
+    ...(options.now ? { now: options.now } : {}),
     setTimer: timers.setTimer,
     clearTimer: timers.clearTimer
   });
@@ -589,7 +633,7 @@ describe("reply subscriptions: notices", () => {
     await settled(w);
     const delivery = w.router.deliveries()[0]!;
     assert.equal(delivery.outcome, "failed");
-    assert.match(parseThreadMessage(delivery.input)!.body, /discarded from "Codex review"'s queue before it ran/);
+    assert.match(parseThreadMessage(delivery.input)!.body, /Your message to "Codex review" was discarded from its queue before it ran/);
     await w.cleanup();
 
     const v = await world();
@@ -748,6 +792,317 @@ describe("reply subscriptions: restart (§13 e)", () => {
     await settled(w);
     assert.equal(w.router.subscriptions()[0]!.state, "done");
     assert.equal(postsTo(w.host, "tgt").length, 0);
+    await w.cleanup();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 1
+// ---------------------------------------------------------------------------
+
+/** Spin until `check` holds (bounded): reaching an intermediate state of the router's own async steps. */
+async function until(check: () => boolean): Promise<void> {
+  for (let i = 0; i < 500 && !check(); i += 1) await new Promise((resolve) => setImmediate(resolve));
+}
+
+describe("fix round 1: released waiters", () => {
+  it("a released waiter is never handed the reply: it is delivered as a message instead", async () => {
+    const w = await world();
+    const res = await w.router.subscribe("tgt", request("wait"));
+    const waiting = w.router.wait("tgt", res.subscriptionId, { timeoutSeconds: 60 });
+    await settled(w);
+    // The tool call was cancelled; its inject cannot be aborted, so the tool releases the wait.
+    assert.deepEqual(await w.router.release("tgt", res.subscriptionId), { released: true, state: "notify" });
+    assert.deepEqual(await waiting, { outcome: "notify", reason: "timeout", willNotify: true });
+    assert.equal(w.timers.pending(), 0, "its timer is cleared");
+    w.host.settle("tgt", { reply: "Here it is." });
+    await settled(w);
+    assert.equal(w.router.deliveries().length, 1);
+    assert.equal(parseThreadMessage(postsTo(w.host, "req")[0]!.body.input as string)?.body, "Here it is.");
+    assert.deepEqual(await w.router.release("tgt", res.subscriptionId), { released: false, state: "done" });
+    await w.cleanup();
+  });
+
+  it("release racing the router's claim: exactly one consumer — the reply is delivered, never lost", async () => {
+    const w = await world();
+    const res = await w.router.subscribe("tgt", request("wait"));
+    const waiting = w.router.wait("tgt", res.subscriptionId, { timeoutSeconds: 60 });
+    await settled(w);
+    w.host.settle("tgt", { reply: "Raced." });
+    // The router has written `claimed-by-waiter` (or is writing it) when the release lands.
+    await until(() => w.router.subscriptions()[0]!.state !== "waiting");
+    const state = w.router.subscriptions()[0]!.state;
+    const released = await w.router.release("tgt", res.subscriptionId);
+    const answer = await waiting;
+    await settled(w);
+    const delivered = w.router.deliveries().length;
+    if (state === "claimed-by-waiter") {
+      assert.equal(released.released, true);
+      assert.equal(answer.outcome, "notify", "the released waiter got nothing");
+      assert.equal(delivered, 1, "so the reply was delivered");
+    } else {
+      assert.equal(answer.outcome, "replied");
+      assert.equal(delivered, 0);
+    }
+    await w.cleanup();
+  });
+
+  it("a requester closed while it waits: the wait ends 'closed' and its registration is released", async () => {
+    const w = await world();
+    const res = await w.router.subscribe("tgt", request("wait"));
+    const waiting = w.router.wait("tgt", res.subscriptionId, { timeoutSeconds: 60 });
+    await settled(w);
+    assert.equal(waitsOn("req", "tgt"), true);
+    w.host.sessions.delete("req");
+    w.host.touch("req", "session.closed");
+    assert.deepEqual(await waiting, { outcome: "closed" });
+    assert.equal(waitsOn("req", "tgt"), false);
+    await w.cleanup();
+  });
+});
+
+describe("fix round 1: never someone else's turn", () => {
+  it("Deliver now on a queued message while the target works is refused TARGET_BUSY and stays queued", async () => {
+    const w = await world();
+    w.host.userTurn("tgt");
+    const res = await w.router.subscribe("tgt", request("notify"));
+    await assert.rejects(w.queue.actOnMerge("tgt", res.commandId, { action: "deliver" }), (e: unknown) => (e as { code?: string }).code === "TARGET_BUSY");
+    assert.equal(w.queue.has(res.commandId), true);
+    assert.equal(postsTo(w.host, "tgt").length, 0, "never a steer");
+    await w.cleanup();
+  });
+
+  it("the idle-check race: the host's ifIdle refusal keeps the message queued (no attempt counted), posted at the next idle point", async () => {
+    const w = await world();
+    w.host.raceNextPost("tgt");
+    const res = await w.router.subscribe("tgt", request("notify"));
+    assert.equal(res.delivery, "queued", "the host refused the post: a turn had started");
+    assert.equal(postsTo(w.host, "tgt").length, 0);
+    assert.equal(w.queue.pending()[0]!.attempts, 0);
+    w.host.settle("tgt", { reply: "the user's turn" });
+    await settled(w);
+    const post = postsTo(w.host, "tgt")[0]!;
+    assert.equal(post.body.commandId, res.commandId, "the same id: the refusal was not recorded");
+    assert.equal(post.body.ifIdle, true);
+    w.host.settle("tgt", { reply: "Mine." });
+    await settled(w);
+    assert.equal(parseThreadMessage(w.router.deliveries()[0]!.input)?.body, "Mine.");
+    await w.cleanup();
+  });
+
+  it("an older host steers anyway: the requester gets 'joined a running turn', never that turn's reply", async () => {
+    const w = await world();
+    w.host.olderHost();
+    w.host.raceNextPost("tgt");
+    const res = await w.router.subscribe("tgt", request("notify"));
+    assert.equal(res.delivery, "sent");
+    await settled(w);
+    const delivery = w.router.deliveries()[0]!;
+    assert.equal(delivery.outcome, "failed");
+    assert.match(parseThreadMessage(delivery.input)!.body, /joined its running turn instead of starting its own/);
+    w.host.settle("tgt", { reply: "someone else's answer" });
+    await settled(w);
+    assert.equal(w.router.deliveries().length, 1, "that turn's reply is never delivered");
+    await w.cleanup();
+  });
+});
+
+describe("fix round 1: crash windows and duplicates", () => {
+  it("the claim and its delivery record are one write: on disk together before the reply is posted", async () => {
+    const w = await world();
+    let disk: { subscriptions: Array<{ state: string }>; deliveries: unknown[] } | null = null;
+    w.host.onBeforePost((post) => {
+      if (post.sessionId === "req") disk = JSON.parse(readFileSync(w.replyFile, "utf8"));
+    });
+    w.host.userTurn("req");
+    await w.router.subscribe("tgt", request("notify"));
+    await settled(w);
+    w.host.settle("tgt", { reply: "x" });
+    await settled(w);
+    // The requester is busy: the delivery is queued. What is on disk now is what a crash leaves.
+    const now = JSON.parse(await readFile(w.replyFile, "utf8")) as { subscriptions: Array<{ state: string }>; deliveries: Array<{ state: string }> };
+    assert.equal(now.deliveries.length, 1);
+    assert.equal(now.subscriptions[0]!.state, "done");
+    w.host.settle("req", {});
+    await settled(w);
+    assert.ok(disk, "posted");
+    assert.equal((disk as { deliveries: unknown[] }).deliveries.length, 1);
+    await w.cleanup();
+  });
+
+  it("a claimed-by-router subscription with no delivery record (an older build's crash) is delivered once", async () => {
+    const host = fakeHost();
+    host.sessions.set("req", summary("req"));
+    host.sessions.set("tgt", summary("tgt"));
+    host.thread("req");
+    await host.api.request("POST", "/api/sessions/tgt/turn", { body: { commandId: "c-1", input: "Review", causedBy: exchange() } });
+    host.settle("tgt", { reply: "Recovered." });
+    const outbox = {
+      version: 1,
+      subscriptions: [
+        { id: "s-1", fromThreadId: "req", toThreadId: "tgt", commandId: "c-1", queueEntryId: "c-1", state: "claimed-by-router", interactionMode: "default", exchange: { id: "ex-1", hop: 1 }, createdAt: "t", posted: { commandId: "c-1", seq: 3, messageId: "msg-1" } }
+      ],
+      deliveries: []
+    };
+    const w = await world({ host, replyOutbox: JSON.stringify(outbox) });
+    await settled(w);
+    assert.equal(w.router.deliveries().length, 1);
+    assert.equal(parseThreadMessage(postsTo(host, "req")[0]!.body.input as string)?.body, "Recovered.");
+    await w.cleanup();
+  });
+
+  it("a pending delivery handed twice at once is queued and posted once", async () => {
+    const w = await world();
+    w.host.userTurn("req");
+    await w.router.subscribe("tgt", request("notify"));
+    await settled(w);
+    w.host.settle("tgt", { reply: "once" });
+    await settled(w);
+    const delivery = w.router.deliveries()[0]!;
+    delivery.state = "pending";
+    const internals = w.router as unknown as { hand(d: unknown): Promise<void> };
+    await Promise.all([internals.hand(delivery), internals.hand(delivery)]);
+    w.host.settle("req", {});
+    await settled(w);
+    assert.equal(postsTo(w.host, "req").length, 1);
+    await w.cleanup();
+  });
+
+  it("a wait that would close a cycle is refused at subscribe, with nothing saved or queued", async () => {
+    const w = await world();
+    const release = registerWait("tgt", "req");
+    await assert.rejects(w.router.subscribe("tgt", request("wait")), (e) => e instanceof ReplyError && e.code === "WAIT_CYCLE");
+    release();
+    assert.equal(w.router.subscriptions().length, 0);
+    assert.equal(w.queue.pending().length, 0);
+    assert.equal(postsTo(w.host, "tgt").length, 0);
+    await w.cleanup();
+  });
+});
+
+describe("fix round 1: late waiters, lost turns, quiet events", () => {
+  it("a reply that settled before the waiter attached is returned to it (taken back from the queue), not delivered", async () => {
+    const w = await world();
+    w.host.userTurn("req"); // the requester is in its tool call: busy
+    const res = await w.router.subscribe("tgt", request("wait"));
+    await settled(w);
+    w.host.settle("tgt", { reply: "Early." });
+    await settled(w);
+    assert.equal(w.router.deliveries()[0]!.state, "queued");
+    const answer = await w.router.wait("tgt", res.subscriptionId, { timeoutSeconds: 60 });
+    assert.deepEqual(answer, { outcome: "replied", turnId: "turn-1", state: "completed", reply: "Early." });
+    assert.equal(w.queue.pending().length, 0, "taken back");
+    w.host.settle("req", {});
+    await settled(w);
+    assert.equal(postsTo(w.host, "req").length, 0, "exactly once: the waiter had it");
+    await w.cleanup();
+  });
+
+  it("a bound turn rewound away ends with a notice and frees the slot", async () => {
+    const w = await world();
+    await w.router.subscribe("tgt", request("notify"));
+    await settled(w);
+    w.host.rewindLast("tgt");
+    await settled(w);
+    const delivery = w.router.deliveries()[0]!;
+    assert.match(parseThreadMessage(delivery.input)!.body, /lost track of the turn your message to "Codex review" started/);
+    assert.equal(w.router.subscriptions()[0]!.state, "done");
+    await w.cleanup();
+  });
+
+  it("the fallback match needs the message's own text: a reply-none turn of the same hop is never taken", async () => {
+    let now = Date.parse("2026-10-15T10:00:00.000Z");
+    const w = await world({ now: () => new Date(now) });
+    // A `reply: "none"` message of the same exchange and hop is already the target's turn.
+    await w.host.api.request("POST", "/api/sessions/tgt/turn", { body: { commandId: "none-1", input: "fire and forget", causedBy: exchange() } });
+    w.host.settle("tgt", { reply: "not for the subscription" });
+    // The subscription's message landed, but its receipt events could not be read back.
+    const outbox = {
+      version: 1,
+      subscriptions: [
+        { id: "s-2", fromThreadId: "req", toThreadId: "tgt", commandId: "c-2", queueEntryId: "c-2", state: "notify", interactionMode: "default", exchange: { id: "ex-1", hop: 1 }, createdAt: new Date(now).toISOString(), posted: { commandId: "c-2", seq: 9, at: new Date(now).toISOString(), inputHash: "0".repeat(32) } }
+      ],
+      deliveries: []
+    };
+    await w.cleanup(false);
+    const again = await world({ host: w.host, dir: w.dir, replyOutbox: JSON.stringify(outbox), now: () => new Date(now) });
+    await settled(again);
+    assert.equal(again.router.deliveries().length, 0, "the reply-none turn is not its reply");
+    // Unidentified past the grace period: a notice, the slot freed.
+    now += 61 * 60 * 1000;
+    again.host.touch("tgt", "session.updated-later");
+    (again.router as unknown as { seen: Map<string, string> }).seen.clear();
+    again.host.touch("tgt");
+    await settled(again);
+    assert.match(parseThreadMessage(again.router.deliveries()[0]!.input)!.body, /lost track of the turn/);
+    await again.cleanup();
+  });
+
+  it("a subscription past its maximum age ends with a notice", async () => {
+    let now = Date.parse("2026-10-15T10:00:00.000Z");
+    const w = await world({ now: () => new Date(now) });
+    w.host.userTurn("tgt");
+    await w.router.subscribe("tgt", request("notify"));
+    now += 8 * 24 * 60 * 60 * 1000;
+    w.host.touch("tgt");
+    await settled(w);
+    assert.match(parseThreadMessage(w.router.deliveries()[0]!.input)!.body, /came within 7 days; Orquester stopped waiting/);
+    assert.equal(w.router.subscriptions()[0]!.state, "done");
+    await w.cleanup();
+  });
+
+  it("a sessions event that moves nothing in the target's summary reads no thread", async () => {
+    const w = await world();
+    // Posted at once: the bound turn runs, nothing waits in the target's queue.
+    await w.router.subscribe("tgt", request("notify"));
+    w.host.touch("tgt");
+    await settled(w);
+    const reads = w.host.snapshotReads("tgt");
+    for (let i = 0; i < 5; i += 1) w.host.touch("tgt");
+    await settled(w);
+    assert.equal(w.host.snapshotReads("tgt"), reads);
+    await w.cleanup();
+  });
+});
+
+describe("fix round 1: exchanges", () => {
+  it("merge-back causedBy must name the merging session", async () => {
+    const w = await world();
+    w.host.sessions.set("fork", summary("fork", { lineage: { parentThreadId: "req", relation: "fork", createdAt: "t" } }));
+    w.host.thread("fork");
+    await assert.rejects(w.queue.mergeBack("fork", { text: "x", causedBy: { threadId: "req", exchangeId: "e", hop: 2 } }), /causedBy\.threadId/);
+    await w.cleanup();
+  });
+
+  it("the hop carries on through deliveries and resets only on a user turn", async () => {
+    const w = await world();
+    await w.router.subscribe("tgt", request("notify", { causedBy: exchange(2) }));
+    await settled(w);
+    // The target's user speaks after the bound turn started: the delivery still continues the exchange.
+    w.host.settle("tgt", { reply: "r1" });
+    await settled(w);
+    const delivered = postsTo(w.host, "req")[0]!.body.causedBy as CausedBy;
+    assert.deepEqual(delivered, { threadId: "tgt", exchangeId: "ex-1", hop: 3 });
+    // What the requester's next tool call computes (the executor's rule) from its own turns:
+    const reqTurns = w.host.thread("req").turns;
+    assert.deepEqual(nextCausedBy({ callerThreadId: "req", running: reqTurns.at(-1)!.causedBy, newExchangeId: "fresh" }), { threadId: "req", exchangeId: "ex-1", hop: 4 });
+    w.host.settle("req", {});
+    w.host.userTurn("req", "typed-by-user");
+    assert.deepEqual(nextCausedBy({ callerThreadId: "req", running: w.host.thread("req").turns.at(-1)!.causedBy, newExchangeId: "fresh" }), { threadId: "req", exchangeId: "fresh", hop: 1 }, "only a user turn starts a new exchange");
+    await w.cleanup();
+  });
+
+  it("a delivery queued behind the requester's own user turn keeps its causedBy", async () => {
+    const w = await world();
+    await w.router.subscribe("tgt", request("notify", { causedBy: exchange(4) }));
+    await settled(w);
+    w.host.userTurn("req", "user-spoke-first");
+    w.host.settle("tgt", { reply: "later" });
+    await settled(w);
+    assert.equal(postsTo(w.host, "req").length, 0, "queued behind the user's turn");
+    w.host.settle("req", { reply: "user's answer" });
+    await settled(w);
+    assert.deepEqual(postsTo(w.host, "req")[0]!.body.causedBy, { threadId: "tgt", exchangeId: "ex-1", hop: 5 });
     await w.cleanup();
   });
 });

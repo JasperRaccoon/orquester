@@ -73,7 +73,7 @@ import { assistantTextForTurn } from "../mcp/views.ts";
 export class LineageError extends Error {
   constructor(
     message: string,
-    readonly code: "THREAD_NOT_FOUND" | "INVALID_COMMAND" | "COMMAND_REJECTED" | "HOST_UNAVAILABLE" | "EXCHANGE_LIMIT"
+    readonly code: "THREAD_NOT_FOUND" | "INVALID_COMMAND" | "COMMAND_REJECTED" | "HOST_UNAVAILABLE" | "EXCHANGE_LIMIT" | "TARGET_BUSY"
   ) {
     super(message);
     this.name = "LineageError";
@@ -123,6 +123,13 @@ export interface DeliveryListener {
 }
 
 const DEFAULT_RECHECK_MS = 30_000;
+
+/**
+ * `detail.reason` of the host's refusal of a `/turn` sent with `ifIdle: true` while a turn is active
+ * (`agent-host/orchestration/orchestrator.ts` `TurnNotIdleRefusal`, the same literal). Never recorded
+ * by the host: the entry stays queued, its attempt count untouched, for the next idle point.
+ */
+export const TURN_NOT_IDLE_REASON = "turn-not-idle";
 /** What a merge's text may hold, header excluded: the parent's `/turn` cap minus the header. */
 export const MERGE_BACK_MAX_TEXT_CHARS = MAX_TURN_INPUT_CHARS - MERGE_BACK_OVERHEAD_CHARS;
 
@@ -364,6 +371,9 @@ export class LineageService {
     if (body.causedBy !== undefined && body.causedBy !== null && causedBy === undefined) {
       throw new LineageError("causedBy must be {threadId, exchangeId, hop}.", "INVALID_COMMAND");
     }
+    if (causedBy !== undefined && causedBy.threadId !== childId) {
+      throw new LineageError("causedBy.threadId must be the session merging back.", "INVALID_COMMAND");
+    }
     if (causedBy !== undefined && exceedsExchangeLimit(causedBy)) {
       throw new LineageError(
         `This exchange reached its limit of ${MAX_EXCHANGE_HOPS} agent-caused turns; summarise for your user instead.`,
@@ -465,7 +475,16 @@ export class LineageService {
     return this.lane(entry.parentSessionId, async (): Promise<MergeBackActionResponse> => {
       const current = find();
       if (!current) return this.settledOutcome(mergeId);
-      const sent = await this.deliver(api, current);
+      // A reply-bound `message` is a turn of its own, never a steer (§8.3): with the target busy,
+      // "Deliver now" is refused and the message stays queued for its next idle point.
+      if (current.kind === "message" && !(await this.isIdle(api, current.parentSessionId))) {
+        throw new LineageError("That chat is working; the message is delivered at its next idle point.", "TARGET_BUSY");
+      }
+      // A reply delivered now may join a running turn: it is plain text for the requester.
+      const sent = await this.deliver(api, current, { steer: current.kind !== "message" });
+      if (sent.kind === "busy") {
+        throw new LineageError("That chat is working; the message is delivered at its next idle point.", "TARGET_BUSY");
+      }
       if (sent.kind === "unavailable") {
         throw new LineageError("The agent host is restarting; the merge stays queued.", "HOST_UNAVAILABLE");
       }
@@ -546,7 +565,12 @@ export class LineageService {
     }
   }
 
-  private async deliver(api: DaemonApi, entry: MergeOutboxEntry): Promise<Delivery> {
+  /**
+   * Post an entry's turn. A `message` or `reply` goes with the host precondition `ifIdle: true`
+   * (never a steer; refused `busy` while a turn is active) unless `steer` — a user's Deliver now of
+   * a reply. An older host ignores the field: the idle check before the post is then all there is.
+   */
+  private async deliver(api: DaemonApi, entry: MergeOutboxEntry, opts: { steer?: boolean } = {}): Promise<Delivery> {
     try {
       // A merge from a planning turn plans (Task 6's turn policy); any other keeps the parent in
       // the mode it is in — the host takes a missing mode as "default", which would flip a
@@ -565,12 +589,15 @@ export class LineageService {
           context: entry.context ?? [mergeBackContext(entry.mergeId)],
           ...(Array.isArray(attachments) && attachments.length > 0 ? { attachments } : {}),
           // The exchange the turn belongs to (§8.4); socket-trusted, this is the daemon itself.
-          ...(entry.causedBy ? { causedBy: entry.causedBy } : {})
+          ...(entry.causedBy ? { causedBy: entry.causedBy } : {}),
+          ...((entry.kind === "message" || entry.kind === "reply") && opts.steer !== true ? { ifIdle: true } : {})
         }
       });
       if (res.status < 400) return { kind: "sent", seq: (res.body as { seq?: number } | null)?.seq ?? 0, commandId };
       const error = (res.body as { error?: { code?: string; message?: string } } | null)?.error;
       if (res.status === 503 || error?.code === "HOST_UNAVAILABLE") return { kind: "unavailable" };
+      const reason = (error as { detail?: { reason?: unknown } } | undefined)?.detail?.reason;
+      if (res.status === 409 && reason === TURN_NOT_IDLE_REASON) return { kind: "busy" };
       return {
         kind: "refused",
         message: error?.message ?? `The parent refused the message (${res.status}).`,
@@ -611,6 +638,9 @@ export class LineageService {
     const receiver = entry.parentSessionId;
     const result = await this.lane(receiver, async (): Promise<{ delivery: "sent"; seq: number } | { delivery: "queued" }> => {
       if (this.outbox.entries.some((other) => other.mergeId === entry.mergeId)) return { delivery: "queued" };
+      // Delivered already (a repeat after it landed): never posted again under its base id.
+      const landed = this.delivered.get(entry.mergeId);
+      if (landed !== undefined) return { delivery: "sent", seq: landed };
       const olderWaiting = this.queuedFor(receiver).length > 0;
       this.outbox.entries.push(entry);
       if (!(await this.persist([receiver, entry.childSessionId]))) {
@@ -645,6 +675,22 @@ export class LineageService {
   /** Whether an entry with this id waits in the queue. */
   has(mergeId: string): boolean {
     return this.outbox.entries.some((entry) => entry.mergeId === mergeId);
+  }
+
+  /**
+   * Take a queued entry back if no post of it has started (the router hands a waiter a reply it
+   * had queued for the requester, §8.3): true when it was still queued and is now gone. Runs in the
+   * receiver's lane, so it never races a drain posting it.
+   */
+  async retract(mergeId: string): Promise<boolean> {
+    const entry = this.outbox.entries.find((other) => other.mergeId === mergeId);
+    if (!entry) return false;
+    return this.lane(entry.parentSessionId, async () => {
+      if (!this.outbox.entries.some((other) => other.mergeId === mergeId)) return false;
+      this.outbox.entries = this.outbox.entries.filter((other) => other.mergeId !== mergeId);
+      this.retryAt.delete(mergeId);
+      return this.persist([entry.parentSessionId, entry.childSessionId]);
+    });
   }
 
   /** The router drops an entry nobody can take any more (its receiver or its sender closed). No listener call. */
@@ -721,7 +767,7 @@ export class LineageService {
     const snap = await this.idleParent(api, parentId);
     if (snap === null) return;
     const sent = await this.deliver(api, entry);
-    if (sent.kind === "unavailable") return;
+    if (sent.kind === "unavailable" || sent.kind === "busy") return;
     if (sent.kind === "refused") {
       this.noteRetry(entry, sent.message);
       if (!sent.retryable || (entry.attempts ?? 0) >= MAX_DRAIN_ATTEMPTS) {
@@ -813,6 +859,8 @@ export class LineageService {
 
 type Delivery =
   | { kind: "sent"; seq: number; commandId: string }
+  /** The host refused an `ifIdle` post: a turn is active. Not an attempt; tried at the next idle point. */
+  | { kind: "busy" }
   | { kind: "unavailable" }
   | { kind: "refused"; message: string; retryable: boolean };
 

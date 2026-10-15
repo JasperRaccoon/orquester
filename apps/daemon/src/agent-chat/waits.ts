@@ -10,6 +10,8 @@
  * Pure (no daemon service): the agent host loads the session-tool tree that re-exports it.
  */
 
+import { agentChatRoutes } from "@orquester/api/agent-chat";
+
 import { ToolError } from "../mcp/errors.ts";
 
 /** waiter → targets, counted (one chat may wait on one target more than once at a time). */
@@ -68,4 +70,15 @@ export function registerWait(waiter: string, target: string): () => void {
     else targets.delete(target);
     if (targets.size === 0 && activeWaits.get(waiter) === targets) activeWaits.delete(waiter);
   };
+}
+
+/**
+ * SOCKET-ONLY `POST /api/sessions/:targetId/reply-subscriptions/:subscriptionId/release` → `{released,
+ * state}`: the requester's waiting tool call was cancelled (an in-process `DaemonApi.request` cannot
+ * abort its inject), so the attached waiter is released and the reply comes as a message instead
+ * (unified MCP design 2026-10-15 §8.3). Built from `agentChatRoutes.replySubscriptions` until the
+ * shared route table gains its own entry.
+ */
+export function replySubscriptionReleasePath(targetSessionId: string, subscriptionId: string): string {
+  return `${agentChatRoutes.replySubscriptions(targetSessionId)}/${encodeURIComponent(subscriptionId)}/release`;
 }
