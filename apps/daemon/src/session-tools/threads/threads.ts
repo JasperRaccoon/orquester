@@ -15,9 +15,11 @@ import type { ForkSessionRequest, ForkSessionResponse, MergeBackResponse } from 
 import { agentChatRoutes, MAX_TURN_INPUT_CHARS, SETTLED_TURN_STATES, startedTurns, threadMessageContext } from "@orquester/api/agent-chat";
 
 import { findAgent, loadAgents } from "../../mcp/agents.ts";
+import { agentCatalog } from "../../mcp/tools/catalog.ts";
 
 import { ToolError } from "../../mcp/errors.ts";
-import { postIdempotent, readThread, sendCommand } from "../../mcp/reads.ts";
+import { listSessions, postIdempotent, readThread, sendCommand } from "../../mcp/reads.ts";
+import { MAX_RESULT_BYTES, resultBytes } from "../../mcp/result.ts";
 import { readTranscript, sendMessage } from "../../mcp/tools/messages.ts";
 import {
   defineSessionTool,
@@ -27,10 +29,11 @@ import {
   type SessionToolContext
 } from "../contract.ts";
 import { cancelledResult, jsonResult } from "../results.ts";
-import { assertRoomInProject, openThread } from "./create.ts";
+import { assertRoomInProject, createdSettings, newThreadSettings, newThreadSettingsInput, openThread } from "./create.ts";
 import {
   assertTargetModeNotBroader,
   interactionModeFor,
+  runtimeModesUpTo,
   TURN_PROVENANCE_OVERHEAD_CHARS,
   turnPolicyCallerFrom,
   withProvenance
@@ -63,13 +66,6 @@ const timeoutField = z
   .max(MAX_WAIT_SECONDS)
   .default(DEFAULT_WAIT_SECONDS)
   .describe(`How long to wait, in seconds (default ${DEFAULT_WAIT_SECONDS}, max ${MAX_WAIT_SECONDS}). A timeout never stops the other thread.`);
-const agentField = z.string().min(1).max(64).optional().describe("Agent id: claude, codex, opencode or grok. Default: this thread's agent.");
-const modelField = z
-  .string()
-  .min(1)
-  .max(200)
-  .optional()
-  .describe("Model slug for that agent; an unknown one is refused with the valid list. Default: this thread's model for the same agent, else the agent's default.");
 
 const NOT_SELF_SEND = "That is this thread. Write to the user in your reply instead.";
 const NOT_SELF_WAIT = "That is this thread: waiting on yourself never ends.";
@@ -151,11 +147,10 @@ const threadCreate = defineSessionTool({
   title: "Open a thread",
   description:
     "Open a new, ordinary chat thread (a tab) in this project and send it `prompt` as its first message. Only when the user asks for a separate thread or conversation; for work you hand off and want back, use delegate_task. " +
-    "It works in this thread's directory and permission mode (never a broader one); with the same agent it takes this thread's model and account unless `model` names another. While you are in plan mode its first turn plans too (refused for an agent with no plan mode). Returns its threadId at once; follow it with thread_wait / thread_read. After an error saying Orquester is restarting, check thread_list before trying again: the thread may already be open (there is no retry key), and a second call opens a second one.",
+    "It works in this thread's directory and permission mode; with the same agent it takes this thread's model, options and account. `agent`, `model`, `options`, `accountId` and a narrower `runtimeMode` set others (agent_catalog lists the valid ones; never a broader mode). While you are in plan mode its first turn plans too (refused for an agent with no plan mode). Returns its threadId at once; follow it with thread_wait / thread_read. After an error saying Orquester is restarting, check thread_list before trying again: the thread may already be open (there is no retry key), and a second call opens a second one.",
   input: {
     prompt: z.string().trim().min(1).max(MAX_TURN_INPUT_CHARS - TURN_PROVENANCE_OVERHEAD_CHARS).describe("The first message, self-contained: the new thread does not see this conversation."),
-    agent: agentField,
-    model: modelField,
+    ...newThreadSettingsInput,
     title: z.string().trim().min(1).max(200).optional().describe("Tab title. Default: the agent's name.")
   },
   annotations: SESSION_TOOL_MUTATING,
@@ -165,12 +160,45 @@ const threadCreate = defineSessionTool({
     const project = await projectThreads(ctx);
     const created = await openThread(ctx, project, {
       prompt: args.prompt,
-      ...(args.agent !== undefined ? { agent: args.agent } : {}),
-      ...(args.model !== undefined ? { model: args.model } : {}),
+      ...newThreadSettings(args),
       ...(args.title !== undefined ? { title: args.title } : {})
     });
     const s = created.session;
-    return jsonResult({ threadId: s.id, title: s.title, agent: s.refId, model: created.model, state: "working", ...(created.planMode ? { planMode: true } : {}), threadRef: referenceTo(s, "thread") });
+    return jsonResult({ threadId: s.id, title: s.title, ...createdSettings(created), state: "working", ...(created.planMode ? { planMode: true } : {}), threadRef: referenceTo(s, "thread") });
+  }
+});
+
+const agentCatalogTool = defineSessionTool({
+  name: "agent_catalog",
+  title: "List agents and models",
+  description:
+    "What thread_create and delegate_task can open: each agent (claude, codex, opencode, grok; only `enabled` ones open) with its models, each model's options (effort…) and their valid values, and its accounts (`id` for accountId; \"system\" is the host's own login). " +
+    "`thisThread` is this thread's own agent, model, options, permission mode and account — what a thread it opens inherits (model, options and account with the same agent only); `runtimeModes` the permission modes such a thread may run in (this thread's or narrower). A catalogue too big for one result is cut (optionsOmitted, modelsTruncated): call with {agent, model} for one model's full options.",
+  input: {
+    agent: z.string().min(1).max(64).optional().describe("Only this agent id."),
+    model: z.string().min(1).max(200).optional().describe("Needs agent: just this model (by slug), with its full options.")
+  },
+  annotations: SESSION_TOOL_READ_ONLY,
+  resultKind: "json",
+  run: async (args, ctx) => {
+    if (args.model !== undefined && args.agent === undefined) throw new ToolError("INVALID_ARGUMENT", "model needs agent: a model is looked up in one agent's catalogue — agent_catalog {agent, model}.");
+    const [sessions, own] = await Promise.all([listSessions(ctx.api), readThread(ctx.api, ctx.threadId)]);
+    const tab = sessions.find((s) => s.id === ctx.threadId);
+    if (!tab) throw new ToolError("THREAD_NOT_FOUND", "This chat thread is no longer open.");
+    const frame = {
+      thisThread: {
+        agent: tab.refId,
+        model: own.head.modelSelection.model,
+        options: Object.fromEntries((own.head.modelSelection.options ?? []).map((o) => [o.id, o.value])),
+        runtimeMode: own.head.runtimeMode,
+        // The tab record spells the system identity as an absent id.
+        accountId: tab.accountId || "system"
+      },
+      runtimeModes: runtimeModesUpTo(own.head.runtimeMode)
+    };
+    // list_agents' listing, less its permission modes (a thread opened here has its own rule: `runtimeModes`).
+    const agents = (await agentCatalog(ctx.api, args, MAX_RESULT_BYTES - resultBytes(frame))).map(({ runtimeModes: _modes, defaultRuntimeMode: _default, ...agent }) => agent);
+    return jsonResult({ agents, ...frame });
   }
 });
 
@@ -370,4 +398,4 @@ const threadMergeBack = defineSessionTool({
   }
 });
 
-export const threadTools = [threadList, threadRead, threadCreate, threadSend, threadWait, threadInterrupt, threadFork, threadMergeBack];
+export const threadTools = [threadList, threadRead, threadCreate, agentCatalogTool, threadSend, threadWait, threadInterrupt, threadFork, threadMergeBack];

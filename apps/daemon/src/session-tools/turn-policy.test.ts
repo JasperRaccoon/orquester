@@ -13,7 +13,9 @@ import type { SessionToolContext } from "./contract.ts";
 import {
   assertTargetModeNotBroader,
   interactionModeFor,
+  openedThreadRuntimeMode,
   readTurnPolicyCaller,
+  runtimeModesUpTo,
   runningTurnPlans,
   TURN_PROVENANCE_OVERHEAD_CHARS,
   turnPolicyCallerFrom,
@@ -29,6 +31,19 @@ test("(a) a target broader than the caller is refused; the same or narrower is n
       const check = () => assertTargetModeNotBroader(caller({ runtimeMode: callerMode }), { threadId: "t", runtimeMode: targetMode });
       if (j > i) assert.throws(check, (e: { code: string }) => e.code === "PERMISSION_DENIED", `${callerMode} → ${targetMode}`);
       else assert.doesNotThrow(check, `${callerMode} → ${targetMode}`);
+    }
+  }
+});
+
+test("(a) a thread the caller opens runs in its mode by default, or a narrower one named; a broader one is refused", () => {
+  for (const [i, callerMode] of RUNTIME_MODES.entries()) {
+    const c = caller({ runtimeMode: callerMode });
+    assert.equal(openedThreadRuntimeMode(c, undefined), callerMode);
+    assert.deepEqual(runtimeModesUpTo(callerMode), RUNTIME_MODES.slice(0, i + 1));
+    for (const [j, requested] of RUNTIME_MODES.entries()) {
+      const pick = () => openedThreadRuntimeMode(c, requested);
+      if (j > i) assert.throws(pick, (e: { code: string }) => e.code === "PERMISSION_DENIED", `${callerMode} → ${requested}`);
+      else assert.equal(pick(), requested, `${callerMode} → ${requested}`);
     }
   }
 });
