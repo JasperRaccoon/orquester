@@ -115,8 +115,9 @@ import { LineageService } from "./agent-chat/lineage.ts";
 import { registerLineageRoutes } from "./agent-chat/lineage-routes.ts";
 import { registerSecretRequestRoutes, SecretRequestRegistry } from "./agent-chat/secret-requests.ts";
 // umcp:t3 begin
-import { createAgentToolsRuntime, type AgentToolsRuntime } from "./agent-tools/approval-port.ts";
+import { connectExecutor, createAgentToolsRuntime, type AgentToolsRuntime } from "./agent-tools/approval-port.ts";
 import { registerAgentToolsRuntimeRoutes } from "./agent-tools/routes.ts";
+import { executorPorts } from "./mcp/executor.ts";
 // umcp:t3 end
 import type { ActivityCause } from "./ansi-activity";
 import { TodoError, TodoListManager } from "./todos";
@@ -1190,6 +1191,11 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     if (!rolledBack) agentToolsRuntime.threadClosed(id);
   });
   services.agentToolsRuntime = agentToolsRuntime;
+  // The catalog executor (both transports) asks THIS port for cards and grants, and resolves a
+  // chat's toolsets from the same store. Until connected every card is refused and toolsets are the
+  // catalogue defaults (fail closed). `onToolsetsChanged` listeners run after a toolset card settles
+  // but BEFORE the awaiting call resumes: schedule restarts for the next idle point (Task 6).
+  const disconnectExecutor = connectExecutor(agentToolsRuntime, executorPorts);
   // umcp:t3 end
 
   // The agent host (chat spec §3.1), adopted or spawned AFTER reattach so the
@@ -1320,7 +1326,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // running so in-flight turns survive the deploy (chat spec §3.1).
     await lineage.stop();
     // umcp:t3 begin
+    // Pending cards end `cancelled` ("restarting"); later calls find no port and fail closed.
     await agentToolsRuntime.shutdown().catch((error) => console.error("Agent tools stop failed", error));
+    disconnectExecutor();
     // umcp:t3 end
     await htmlPreview.stop();
     await agentChat.stop();

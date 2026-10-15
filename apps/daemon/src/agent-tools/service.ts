@@ -405,6 +405,11 @@ export class AgentToolsService {
    * Listen for a chat's toolsets changing (`threadId`), or every chat's (`null`: a settings change).
    * Called asynchronously (a microtask after the change was applied and, for a toolset card, after
    * the card settled); a listener's result or error never affects the write or the card.
+   *
+   * Timing for an approved toolset card: the listener runs AFTER the card settles but BEFORE the
+   * awaiting `request()` resumes in the executor — `request_toolset`'s result has not been sent to
+   * the provider yet. A listener must not restart or re-list the chat's session synchronously; it
+   * schedules that for the chat's next idle point.
    */
   onToolsetsChanged(listener: (threadId: string | null) => void): () => void {
     this.events.on(EVENT_TOOLSETS_CHANGED, listener);

@@ -48,6 +48,7 @@ import { isAgentAdapterId } from "../agent-host/adapters/index.ts";
 import { ToolApprovalAnswerRefusal, ToolApprovalRegistry, type ToolApprovalClock } from "../agent-chat/tool-approvals.ts";
 import type { ApprovalOutcome, ApprovalPort, ApprovalRequest, Grant, GrantQuery } from "../mcp/catalog/contract.ts";
 import type { DaemonApi } from "../mcp/daemon-api.ts";
+import type { ExecutorPorts } from "../mcp/executor.ts";
 import { ToolError } from "../mcp/errors.ts";
 import { AgentToolsService, type AgentToolsThreadInfo } from "./service.ts";
 
@@ -400,6 +401,24 @@ export function createAgentToolsRuntime(deps: AgentToolsRuntimeDeps): AgentTools
       await approvals.shutdown();
       await tools.flush();
     }
+  };
+}
+
+/**
+ * Point the catalog executor (both transports) at this runtime: cards and grants through its port,
+ * a chat's toolsets resolved from its store (overrides, settings, master switch). Returns the
+ * disconnect (shutdown): later calls find no port and fail closed.
+ *
+ * An approved toolset card fires `tools.onToolsetsChanged` listeners in a microtask after the card
+ * settles but BEFORE the awaiting `request()` resumes in the executor (the tool result is not sent
+ * yet): a listener only schedules its re-list/restart for the chat's next idle point.
+ */
+export function connectExecutor(runtime: Pick<AgentToolsRuntime, "port" | "tools">, ports: ExecutorPorts): () => void {
+  ports.approvals = runtime.port;
+  ports.enabledToolsets = async (caller) => new Set(runtime.tools.resolvedToolsets(caller.threadId, caller.agentId));
+  return () => {
+    if (ports.approvals === runtime.port) ports.approvals = null;
+    ports.enabledToolsets = null;
   };
 }
 
