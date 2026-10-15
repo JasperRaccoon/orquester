@@ -341,6 +341,7 @@ test("master switch off: a toolset card is refused up front, and an approval aft
   h.tools.updateSettings({ revision: 2, enabled: false });
   const refused = await h.registry.answer("t1", id, { decision: "approve" });
   assert.deepEqual(refused.ok ? null : [refused.status, refused.code], [409, "AGENT_TOOLS_DISABLED"]);
+  assert.match(refused.ok ? "" : refused.message, /"Extra toolsets for agent chats" is switched off.*Deny this card, or turn that switch on first/, "names the switch as Settings shows it");
   assert.equal(h.registry.list("t1").length, 1, "the card stays; deny still works");
   assert.ok((await h.registry.answer("t1", id, { decision: "deny" })).ok);
   assert.equal((await waiting).outcome, "denied");

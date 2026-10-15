@@ -188,7 +188,12 @@ export class AgentToolsApprovalPort implements ApprovalPort {
           joinGrantId = undefined;
           if (toolset !== null) {
             if (!this.deps.tools.snapshot().enabled) {
-              throw new ToolApprovalAnswerRefusal("AGENT_TOOLS_DISABLED", `${AGENT_TOOLS_OFF(toolsetById(toolset).label)} Deny this card, or turn agent tools on first.`, 409);
+              // Shown to the user who answered: names the switch as Settings shows it.
+              throw new ToolApprovalAnswerRefusal(
+                "AGENT_TOOLS_DISABLED",
+                `"Extra toolsets for agent chats" is switched off in Settings › Agent tools, so ${toolsetById(toolset).label} would have no effect in this chat. Deny this card, or turn that switch on first.`,
+                409
+              );
             }
             if (this.deps.tools.isReadOnly()) throw new ToolApprovalAnswerRefusal("AGENT_TOOLS_UNAVAILABLE", READ_ONLY_TOOLSET, 503);
           }
