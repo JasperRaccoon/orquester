@@ -64,7 +64,6 @@ export function recordingSessionTools(
       names: new Set(tools.map((tool) => tool.name)),
       instructions,
       deny,
-      denyKnown: true,
       key: createHash("sha256").update(JSON.stringify([tools.map((tool) => tool.name), instructions, deny])).digest("hex"),
       source: "manifest"
     };

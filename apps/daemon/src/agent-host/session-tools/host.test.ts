@@ -21,7 +21,15 @@ import { DAEMON_UNAVAILABLE_MESSAGE, cancelledResult } from "../../session-tools
 import { TEST_CHAT_TOOLS } from "../../session-tools/testing.ts";
 import { buildChatToolDefinitions, knownSessionToolNames } from "./definitions.ts";
 import { createDaemonForwarder, type ManifestAnswer } from "./forwarder.ts";
-import { createSessionToolsHost, issueSessionToolsGrant, type SessionToolsGrant, type SessionToolsHost } from "./index.ts";
+import {
+  createSessionToolsHost,
+  DENIAL_DEGRADED_WARNING,
+  DENIALS_UNKNOWN_MESSAGE,
+  isSessionToolsDenialsUnknown,
+  issueSessionToolsGrant,
+  type SessionToolsGrant,
+  type SessionToolsHost
+} from "./index.ts";
 import { LEGACY_SESSION_TOOL_DEFINITIONS, LEGACY_SESSION_TOOL_INSTRUCTIONS } from "./legacy-definitions.ts";
 
 const TEST_TOOLS = TEST_CHAT_TOOLS;
@@ -296,7 +304,7 @@ test("a daemon without the manifest route gets the frozen legacy definitions", a
   assert.deepEqual(json(listed.tools), json(LEGACY_SESSION_TOOL_DEFINITIONS), "the old server's tools/list, verbatim");
 });
 
-test("an unreachable daemon: the SAME launch's last list, else the defaults with no denial — warned, never silent", async (t) => {
+test("an unreachable daemon: the SAME launch's last list, warned; denials never known are never skipped", async (t) => {
   let up = true;
   const warnings: [string, string][] = [];
   const daemon = manifests({ "thread-a": { tools: ["echo"], deny: ["remote"] } });
@@ -305,7 +313,9 @@ test("an unreachable daemon: the SAME launch's last list, else the defaults with
     manifest: async (threadId) => (up ? daemon.fetch(threadId) : { kind: "unavailable" }),
     definitions: buildChatToolDefinitions(TEST_TOOLS),
     knownNames: knownSessionToolNames(TEST_TOOLS),
-    onWarning: (threadId, message) => warnings.push([threadId, message])
+    onWarning: (threadId, message) => warnings.push([threadId, message]),
+    // The wait for denials is the behaviour under test; its bound is kept short.
+    denialsWaitMs: 20
   });
   t.after(() => service.stop());
   await service.issue("thread-a", CODEX);
@@ -314,27 +324,143 @@ test("an unreachable daemon: the SAME launch's last list, else the defaults with
   assert.equal(again.prepared.source, "fallback");
   assert.deepEqual([...again.prepared.names], ["echo"]);
   assert.deepEqual(again.prepared.deny, ["remote"]);
-  assert.equal(again.prepared.denyKnown, true);
-  assert.equal(warnings.length, 0);
+  assert.deepEqual(warnings, [["thread-a", DENIAL_DEGRADED_WARNING]], "a fallback is never silent");
   // Another thread of the same agent, home and project: the same config, the same denials.
   assert.deepEqual((await service.issue("thread-z", CODEX)).prepared.deny, ["remote"]);
   // The thread's OWN last manifest comes first (thread-a's list is ["echo"], not thread-z's).
   assert.deepEqual([...(await service.issue("thread-a", CODEX)).prepared.names], ["echo"]);
   // Another account home (or project): NEVER that key's denials (Codex fails a thread whose config
-  // lacks a denied name) — none, the defaults' safe block, and a warning on the thread.
-  const otherHome = await service.issue("thread-y", { ...CODEX, home: "acct-2" });
-  assert.equal(otherHome.prepared.source, "fallback");
-  assert.deepEqual(otherHome.prepared.deny, []);
-  assert.equal(otherHome.prepared.denyKnown, false);
-  assert.match(otherHome.prepared.instructions, /^## Orquester/);
-  assert.match(otherHome.prepared.instructions, /automated workflow/, "workflow-owned unknown: the safe value");
-  assert.doesNotMatch(otherHome.prepared.instructions, /request_toolset with its id/, "no toolset can be asked for");
-  assert.deepEqual(warnings.map(([threadId]) => threadId), ["thread-y"]);
-  assert.deepEqual((await service.issue("thread-x", { ...CODEX, project: "/q" })).prepared.deny, []);
+  // lacks a denied name) — and no launch without denials either: refused, retryable.
+  await assert.rejects(service.issue("thread-y", { ...CODEX, home: "acct-2" }), (error: unknown) => {
+    assert.ok(isSessionToolsDenialsUnknown(error));
+    assert.equal(error.message, DENIALS_UNKNOWN_MESSAGE);
+    assert.equal(error.retryable, true);
+    return true;
+  });
+  assert.equal(service.current("thread-y"), null, "nothing launched");
+  await assert.rejects(service.issue("thread-x", { ...CODEX, project: "/q" }), isSessionToolsDenialsUnknown);
   // An account switch of thread-a: its own last manifest is the OLD home's — not reused.
-  const switched = await service.issue("thread-a", { ...CODEX, home: "acct-3" });
-  assert.deepEqual(switched.prepared.deny, []);
-  assert.equal(switched.prepared.denyKnown, false);
+  await assert.rejects(service.issue("thread-a", { ...CODEX, home: "acct-3" }), isSessionToolsDenialsUnknown);
+});
+
+test("a cold host refuses a launch it knows no denials for, and launches with them once the daemon answers", async (t) => {
+  let up = false;
+  const daemon = manifests({ "thread-a": { deny: ["remote"] } });
+  const service = createSessionToolsHost({
+    forward: recordingForward().forward,
+    manifest: async (threadId) => (up ? daemon.fetch(threadId) : { kind: "unavailable" }),
+    definitions: buildChatToolDefinitions(TEST_TOOLS),
+    knownNames: knownSessionToolNames(TEST_TOOLS),
+    denialsWaitMs: 20
+  });
+  t.after(() => service.stop());
+  const warnings: string[] = [];
+  const context = { sessionTools: service, logger: { warn: (message: string) => warnings.push(message) } };
+  // The adapter's way in: never a grant, never a launch without the denials.
+  await assert.rejects(issueSessionToolsGrant(context, "thread-a", CODEX), isSessionToolsDenialsUnknown);
+  assert.equal(service.current("thread-a"), null);
+  assert.deepEqual(warnings, [], "not the tools-only failure path");
+  up = true;
+  const retried = await issueSessionToolsGrant(context, "thread-a", CODEX);
+  assert.deepEqual(retried.prepared?.deny, ["remote"]);
+  assert.equal(retried.prepared?.source, "manifest");
+  retried.grant?.revoke();
+});
+
+test("a launch waiting for its denials takes the manifest the daemon pushes for its thread", async (t) => {
+  let entered!: () => void;
+  const asked = new Promise<void>((resolve) => (entered = resolve));
+  const service = testHost(recordingForward().forward, async () => {
+    entered();
+    return { kind: "unavailable" };
+  });
+  t.after(() => service.stop());
+  const launch = service.issue("thread-a", CODEX);
+  await asked;
+  const pushed: SessionToolsManifest = { tools: ["echo"], instructions: "## pushed", deny: ["remote"], seq: 4, epoch: "e1" };
+  // The daemon's push once its read succeeded: the waiting launch launches with it…
+  const applied = service.applyManifest("thread-a", pushed);
+  const grant = await launch;
+  assert.equal(grant.prepared.source, "manifest");
+  assert.deepEqual(grant.prepared.deny, ["remote"]);
+  assert.deepEqual([...grant.prepared.names], ["echo"]);
+  // …and the push has nothing left to apply (no restart churn).
+  assert.equal(await applied, "unchanged");
+  assert.equal(service.needsRestart("thread-a"), false);
+  grant.revoke();
+});
+
+test("a launch waiting for its denials takes the manifest another launch of its key reads", async (t) => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  let entered!: () => void;
+  const asked = new Promise<void>((resolve) => (entered = resolve));
+  const service = testHost(recordingForward().forward, async (threadId) => {
+    if (threadId === "thread-a") {
+      entered();
+      return { kind: "unavailable" };
+    }
+    await gate;
+    return { kind: "manifest", manifest: { tools: TEST_NAMES, instructions: "## Orquester (test)", deny: ["remote"], seq: 9, epoch: "e1" } };
+  });
+  t.after(() => service.stop());
+  const waiting = service.issue("thread-a", CODEX);
+  await asked;
+  const other = service.issue("thread-b", CODEX);
+  release();
+  const [a, b] = await Promise.all([waiting, other]);
+  assert.equal(a.prepared.source, "fallback");
+  assert.deepEqual(a.prepared.deny, ["remote"]);
+  assert.equal(a.prepared.seq, undefined, "another thread's stamp never orders this one");
+  assert.equal(b.prepared.source, "manifest");
+  a.revoke();
+  b.revoke();
+});
+
+test("a launch waiting for its denials gives up when the host stops", async () => {
+  let entered!: () => void;
+  const asked = new Promise<void>((resolve) => (entered = resolve));
+  const service = testHost(recordingForward().forward, async () => {
+    entered();
+    return { kind: "unavailable" };
+  });
+  const launch = service.issue("thread-a", CODEX);
+  await asked;
+  await service.stop();
+  await assert.rejects(launch, isSessionToolsDenialsUnknown);
+});
+
+test("a fallback launch drops a wanted list it cannot read anyway (no restart at every idle point)", async (t) => {
+  let up = true;
+  const service = testHost(recordingForward().forward, async () =>
+    up ? { kind: "manifest", manifest: { tools: TEST_NAMES, instructions: "## Orquester (test)", deny: [], seq: 1, epoch: "e1" } } : { kind: "unavailable" }
+  );
+  t.after(() => service.stop());
+  await service.issue("thread-a", CODEX);
+  assert.equal(await service.applyManifest("thread-a", { tools: ["echo"], instructions: "", deny: [], seq: 2, epoch: "e1" }), "next-idle");
+  assert.equal(service.needsRestart("thread-a"), true);
+  // The restart could not ask the daemon: it fell back, and does not ask to restart again.
+  up = false;
+  const relaunched = await service.issue("thread-a", CODEX);
+  assert.equal(relaunched.prepared.source, "fallback");
+  assert.equal(service.needsRestart("thread-a"), false);
+});
+
+test("a late push of an EARLIER daemon epoch never retires the newer one (handover inversion)", async (t) => {
+  let epoch = "old";
+  const service = testHost(recordingForward().forward, async () => ({ kind: "manifest", manifest: { tools: TEST_NAMES, instructions: "## Orquester (test)", deny: [], seq: 10, epoch } }));
+  t.after(() => service.stop());
+  // thread-b launched under the old daemon; thread-a's FIRST launch is the new daemon's.
+  await service.issue("thread-b", CODEX);
+  epoch = "new";
+  await service.issue("thread-a", CODEX);
+  // The old daemon's late push to thread-a: stale (its epoch was seen first) — and retires nothing.
+  assert.equal(await service.applyManifest("thread-a", { tools: ["pixel"], instructions: "", deny: [], seq: 99, epoch: "old" }), "superseded");
+  // The new daemon still speaks for both threads.
+  assert.equal(await service.applyManifest("thread-a", { tools: ["echo"], instructions: "", deny: [], seq: 11, epoch: "new" }), "next-idle");
+  assert.equal(await service.applyManifest("thread-b", { tools: ["echo"], instructions: "", deny: [], seq: 12, epoch: "new" }), "next-idle");
+  // …and once thread-b moved on, the old epoch is retired everywhere.
+  assert.equal(await service.applyManifest("thread-b", { tools: ["pixel"], instructions: "", deny: [], seq: 100, epoch: "old" }), "superseded");
 });
 
 test("a failed grant still hands back the thread's denials (they never fail open)", async (t) => {
