@@ -119,6 +119,7 @@ import type { ActivityCause } from "./ansi-activity";
 import { TodoError, TodoListManager } from "./todos";
 import { RecentProjectsService, describeProjectPath } from "./recent-projects";
 import { SavedPromptsService, publishSavedPromptEvents, registerSavedPromptRoutes } from "./saved-prompts.ts";
+import { registerTodoToggleRoute } from "./todo-items.ts";
 import { PluginsService, publishPluginEvents } from "./plugins/plugins-service.ts";
 import { registerPluginRoutes } from "./plugins/routes.ts";
 import { detectRepoId } from "./repo-id";
@@ -4002,8 +4003,14 @@ export function createServer(
 
   // umcp:t12 begin — the saved-prompt routes live with their service (unified MCP design
   // 2026-10-15 D-16): `createdBy` and the pin refusal read the server-stamped principal, and the
-  // list rows carry `usedByWorkflows` from the workflow store.
-  registerSavedPromptRoutes(app, { service: services.savedPrompts, workflows: () => services.workflows?.list() });
+  // list rows carry `usedByWorkflows` (with each workflow's workspace) from the workflow store.
+  // The atomic todo-item toggle beside the other /api/todos routes (update_todos toggle).
+  registerSavedPromptRoutes(app, {
+    service: services.savedPrompts,
+    workflows: () => services.workflows.list(),
+    workspacesDir: () => resolved.workspacesDir
+  });
+  registerTodoToggleRoute(app, todos);
   // umcp:t12 end
 
   // Built-in plugins (plugins spec §5.3). Both transports, like the protect-archived toggle:

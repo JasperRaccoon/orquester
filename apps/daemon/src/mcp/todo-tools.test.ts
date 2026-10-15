@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import { createDefaultClientConfig, createDefaultDaemonConfig } from "@orquester/config";
 import { createServer } from "../index.ts";
 import { TodoListManager } from "../todos.ts";
-import { InjectDaemonApi } from "./daemon-api.ts";
+import { InjectDaemonApi, type DaemonApi } from "./daemon-api.ts";
 import { createTodoList, deleteTodoList, listTodoLists, toggleTodoItem, updateTodoList, type TodoSelector } from "./todo-tools.ts";
 import { ToolError } from "./errors.ts";
 import { toSafeToolError } from "./result.ts";
@@ -191,8 +191,9 @@ test("the routes' other refusals map as the store's always did: 409 CONFLICT, 4x
   api.on("GET", "/api/todos", { status: 200, body: [listed] });
   api.on("PUT", "/api/todos/t1", { status: 409, body: { code: "TODO_ERROR", message: "todo changed meanwhile" } });
   await assert.rejects(() => updateTodoList(api, { workspace: "w" }, "t1", { body: "" }), (err) => err instanceof ToolError && err.code === "CONFLICT" && err.message === "todo changed meanwhile");
-  api.on("PUT", "/api/todos/t1", { status: 400, body: { code: "TODO_ERROR", message: "name too long" } });
-  await assert.rejects(() => toggleTodoItem(api, { workspace: "w" }, "t1", 1), (err) => err instanceof ToolError && err.code === "INVALID_ARGUMENT" && err.message === "name too long");
+  api.on("POST", "/api/todos/t1/toggle", { status: 400, body: { code: "TODO_ERROR", message: "No task item at index 9." } });
+  await assert.rejects(() => toggleTodoItem(api, { workspace: "w" }, "t1", 9), (err) => err instanceof ToolError && err.code === "INVALID_ARGUMENT" && err.message === "No task item at index 9.");
+  assert.deepEqual(api.calls.at(-1), { method: "POST", path: "/api/todos/t1/toggle", body: { item: 9 } });
   api.on("DELETE", "/api/todos/t1", { status: 500, body: { code: "TODO_ERROR", message: "EACCES /secret/host/path" } });
   await assert.rejects(() => deleteTodoList(api, { workspace: "w" }, "t1"), (err) => err instanceof ToolError && err.code === "INTERNAL" && !err.message.includes("/secret"));
   assert.deepEqual(api.calls[0], { method: "GET", path: "/api/todos", query: { scope: "workspace", refKey: "w" } });
@@ -208,7 +209,8 @@ test("a refusal quotes the caller's item capped and escaped, and a long list's i
     return err.message;
   };
   // An unknown item: its text quoted, at most 100 code points, escaped onto one line; the items still listed.
-  const junk = await refusal(`${"q".repeat(2 * 1024 * 1024)}"\n`);
+  // Half a MiB: the route takes a JSON body up to Fastify's 1 MiB limit (as PUT /api/todos/:id does).
+  const junk = await refusal(`${"q".repeat(512 * 1024)}"\n`);
   assert.match(junk, /"q{99}…"/);
   assert.match(junk, /1\. Alpha, 2\. Beta/);
   const escaped = await refusal('say "hi"\nnow');
@@ -257,4 +259,40 @@ test("the longest refusal there can be ends whole under the error cap, whatever 
     // So the backstop (result.ts) never cuts its tail: toSafeToolError hands it on untouched.
     assert.equal(toSafeToolError(new ToolError("INVALID_ARGUMENT", message)).structuredContent.message, message);
   }
+});
+
+test("a toggle is atomic: an edit landing after the tool read the list survives, and concurrent toggles both land", async (t) => {
+  const { todos, tools, api } = await makeTools(t);
+  const todo = await tools.create({ workspace: "w" }, "Tasks");
+  await tools.update(todo.id, { body: "- [ ] first\n- [ ] second" });
+  // The user (another client) appends an item right after the tool's scope read — exactly where a
+  // read-then-PUT toggle computed its body from the stale copy and wrote the item away.
+  let raced = false;
+  const racing: DaemonApi = Object.create(api);
+  racing.request = async (method, path, opts) => {
+    const res = await api.request(method, path, opts);
+    if (method === "GET" && path === "/api/todos" && !raced) {
+      raced = true;
+      await todos.update(todo.id, { body: `${todos.get(todo.id)!.body}\n- [ ] added meanwhile` });
+    }
+    return res;
+  };
+  const toggled = await toggleTodoItem(racing, { workspace: "w" }, todo.id, 1);
+  assert.ok(raced);
+  assert.equal(toggled.body, "- [x] first\n- [ ] second\n- [ ] added meanwhile");
+  assert.equal(todos.get(todo.id)!.body, "- [x] first\n- [ ] second\n- [ ] added meanwhile", "both writes survive");
+  // Two toggles at once, different items: both land.
+  await Promise.all([tools.toggleItem(todo.id, "second"), tools.toggleItem(todo.id, 3)]);
+  assert.equal(todos.get(todo.id)!.body, "- [x] first\n- [x] second\n- [x] added meanwhile");
+});
+
+test("the toggle route refuses a bad body (400) and an unknown list (404) with the todo envelope", async (t) => {
+  const { api, tools } = await makeTools(t);
+  const todo = await tools.create({ workspace: "w" }, "Tasks");
+  for (const body of [{}, { item: 0 }, { item: 1.5 }, { item: "a", checked: "yes" }]) {
+    const res = await api.request("POST", `/api/todos/${todo.id}/toggle`, { body });
+    assert.equal(res.status, 400, JSON.stringify(body));
+    assert.equal((res.body as { code: string }).code, "TODO_ERROR");
+  }
+  assert.equal((await api.request("POST", "/api/todos/nope/toggle", { body: { item: 1 } })).status, 404);
 });

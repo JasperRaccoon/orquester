@@ -572,10 +572,12 @@ function pinRefused(): SavedPromptError {
  * `workflows` approval card naming them.
  */
 export function savedPromptWorkflowUses(
-  workflows: readonly Pick<Workflow, "id" | "name" | "nodes">[]
+  workflows: readonly (Pick<Workflow, "id" | "name" | "nodes"> & { project?: Workflow["project"] })[],
+  workspacesDir?: string
 ): Map<string, SavedPromptWorkflowUse[]> {
   const uses = new Map<string, SavedPromptWorkflowUse[]>();
   for (const workflow of workflows) {
+    const workspace = workflowWorkspace(workflow.project, workspacesDir);
     for (const node of workflow.nodes) {
       if (node.type !== "agent") {
         continue;
@@ -586,12 +588,20 @@ export function savedPromptWorkflowUses(
       }
       const list = uses.get(prompt.promptId) ?? [];
       if (!list.some((use) => use.workflowId === workflow.id)) {
-        list.push({ workflowId: workflow.id, name: workflow.name });
+        list.push({ workflowId: workflow.id, name: workflow.name, ...(workspace ? { workspace } : {}) });
       }
       uses.set(prompt.promptId, list);
     }
   }
   return uses;
+}
+
+/** The workspace of a workflow's own project: a temp project's, or an existing project's under `workspacesDir`. */
+function workflowWorkspace(project: Workflow["project"] | undefined, workspacesDir: string | undefined): string | null {
+  if (!project) return null;
+  if (project.kind === "temp") return project.workspace;
+  if (project.kind === "existing" && workspacesDir) return describeProjectPath(workspacesDir, project.projectPath)?.workspace ?? null;
+  return null;
 }
 
 /** A prompt as a list row: `usedByWorkflows` from `uses`, never a stored value; absent when none. */
@@ -607,7 +617,9 @@ export interface SavedPromptRoutesDeps {
    * The workflow definitions, read per list request (`usedByWorkflows`); absent or null: no
    * workflow store (the rows carry none).
    */
-  workflows?: () => readonly Pick<Workflow, "id" | "name" | "nodes">[] | null | undefined;
+  workflows?: () => readonly (Pick<Workflow, "id" | "name" | "nodes"> & { project?: Workflow["project"] })[] | null | undefined;
+  /** The workspaces root, read per request, to name each referencing workflow's workspace. */
+  workspacesDir?: () => string;
 }
 
 /**
@@ -623,7 +635,7 @@ export interface SavedPromptRoutesDeps {
  */
 export function registerSavedPromptRoutes(app: FastifyInstance, deps: SavedPromptRoutesDeps): void {
   const { service } = deps;
-  const uses = (): Map<string, SavedPromptWorkflowUse[]> => savedPromptWorkflowUses(deps.workflows?.() ?? []);
+  const uses = (): Map<string, SavedPromptWorkflowUse[]> => savedPromptWorkflowUses(deps.workflows?.() ?? [], deps.workspacesDir?.());
 
   app.get<{ Querystring: { projectPath?: string } }>(
     "/api/saved-prompts",

@@ -39,7 +39,7 @@ async function harness(t: TestContext) {
   await writeFile(file, JSON.stringify({ version: 1, prompts: [] }));
   const library = new SavedPromptsService({ file, workspacesDir: () => workspacesDir, fsRoot: () => workspacesDir, logger: { warn() {}, error() {} } });
   await library.load();
-  const workflows: { id: string; name: string; nodes: unknown[] }[] = [];
+  const workflows: { id: string; name: string; project?: unknown; nodes: unknown[] }[] = [];
   let workflowReads = 0;
   const workflowsList = { list: () => { workflowReads += 1; return hooks.workflows(workflowReads); } };
   const hooks = { workflows: (_read: number) => workflows };
@@ -85,8 +85,8 @@ async function harness(t: TestContext) {
   /** A prompt the user made in the right rail (no principal). */
   const userPrompt = (fields: Partial<{ title: string; body: string; projectPath: string | null }> = {}) =>
     library.create({ title: "Mine", body: "Review {diff}", projectPath: null, ...fields });
-  const reference = (prompt: { id: string }, workflow = { id: "wf_1", name: "Nightly review" }) =>
-    workflows.push({ ...workflow, nodes: [{ id: "n1", name: "Agent", type: "agent", config: { prompt: { kind: "saved", promptId: prompt.id } } }] });
+  const reference = (prompt: { id: string }, workflow = { id: "wf_1", name: "Nightly review" }, projectPath = own) =>
+    workflows.push({ ...workflow, project: { kind: "existing", projectPath }, nodes: [{ id: "n1", name: "Agent", type: "agent", config: { prompt: { kind: "saved", promptId: prompt.id } } }] } as never);
   return { library, workflows, hooks, own, workspacesDir, chat, call, value, refused, userPrompt, reference };
 }
 
@@ -219,7 +219,7 @@ test("list_saved_prompts: the chat's project and the global prompts, with create
   const listed = (await h.value("list_saved_prompts", {}, h.chat({ runtimeMode: "approval-required" }))).prompts as Row[];
   assert.deepEqual(listed.map((row) => row.title), ["Api prompt", "Global one"], "the project's own first, then the global ones");
   assert.equal(listed[0]!.createdBy?.kind, "agent");
-  assert.deepEqual(listed[1]!.usedByWorkflows, [{ workflowId: "wf_1", name: "Nightly review" }]);
+  assert.deepEqual(listed[1]!.usedByWorkflows, [{ workflowId: "wf_1", name: "Nightly review", workspace: "acme" }]);
   assert.equal("body" in listed[0]!, false);
   assert.equal(listed[0]!.bodyChars, "api body".length);
   const bodies = (await h.value("list_saved_prompts", { includeBody: true, query: "API" }, h.chat())).prompts as Row[];
@@ -240,4 +240,26 @@ test("unifiedDiff: every changed line, three lines of context, separate hunks fo
   assert.ok(diff.startsWith("--- a/body\n+++ b/body\n@@ -1,5 +1,5 @@\n line 1\n-line 2\n+LINE 2\n line 3"));
   assert.ok(diff.includes("@@ -15,6 +15,6 @@\n line 15\n line 16\n line 17\n-line 18\n+LINE 18\n line 19\n line 20"));
   assert.equal(unifiedDiff("a", "a\nb", "t"), "--- a/t\n+++ b/t\n@@ -1,1 +1,2 @@\n a\n+b");
+});
+
+test("ruling S13: workflows of another workspace reach a chat below Full access only as a count; the user's card still names them", async (t) => {
+  const h = await harness(t);
+  const created = (await h.value("update_saved_prompts", { action: "create", title: "Shared", body: "b", global: true }, h.chat())).prompt as Row;
+  h.reference(created, { id: "wf_own", name: "Own nightly" });
+  h.reference(created, { id: "wf_beta", name: "Beta secret" }, join(h.workspacesDir, "beta", "app"));
+  const rowFor = async (mode: ThreadCaller["runtimeMode"]) =>
+    ((await h.value("list_saved_prompts", {}, h.chat({ runtimeMode: mode }))).prompts as (Row & { usedByWorkflowsElsewhere?: number })[]).find((row) => row.id === created.id)!;
+  const narrow = await rowFor("auto");
+  assert.deepEqual(narrow.usedByWorkflows, [{ workflowId: "wf_own", name: "Own nightly", workspace: "acme" }]);
+  assert.equal(narrow.usedByWorkflowsElsewhere, 1);
+  assert.ok(!JSON.stringify(narrow).includes("Beta secret"));
+  const wide = await rowFor("full-access");
+  assert.equal(wide.usedByWorkflows?.length, 2);
+  assert.equal("usedByWorkflowsElsewhere" in wide, false);
+  // The update's result row follows the same rule; the card (shown to the user, never to the agent) names both.
+  const port = new FakeApprovalPort();
+  const result = await h.value("update_saved_prompts", { action: "update", id: created.id, title: "Shared 2" }, h.chat({ runtimeMode: "auto" }), port);
+  assert.ok(!JSON.stringify(result).includes("Beta secret"));
+  assert.equal((result.prompt as { usedByWorkflowsElsewhere?: number }).usedByWorkflowsElsewhere, 1);
+  assert.ok(JSON.stringify(port.cards[0]!.sections).includes("Beta secret"));
 });

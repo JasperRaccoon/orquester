@@ -73,7 +73,7 @@ async function harness(options: { unreadableLibrary?: boolean; workflows?: unkno
       deleteByWorkspace: async (_name: string, path: string) => void todoCascades.push(`deleteByWorkspace ${path}`)
     },
     accounts: { unbindWorkspace: async () => {} },
-    ...(options.workflows ? { workflows: { list: () => options.workflows } } : {})
+    workflows: { list: () => options.workflows ?? [] }
   } as unknown as CreateServerArgs[4];
 
   const app = createServer(
@@ -363,7 +363,10 @@ test("saved prompts: list rows name the workflows that reference each prompt, re
   const rows = async () => ((await h.inject({ method: "GET", url: "/api/saved-prompts" })).json() as { prompts: SavedPrompt[] }).prompts;
   assert.equal((await rows())[0]!.usedByWorkflows, undefined, "absent when none references it");
   workflows.push({ id: "wf_1", name: "Nightly", nodes: [{ id: "n", name: "Agent", type: "agent", config: { prompt: { kind: "saved", promptId: prompt.id } } }] });
-  assert.deepEqual((await rows())[0]!.usedByWorkflows, [{ workflowId: "wf_1", name: "Nightly" }]);
+  assert.deepEqual((await rows())[0]!.usedByWorkflows, [{ workflowId: "wf_1", name: "Nightly" }], "no project: no workspace named");
+  workflows.push({ id: "wf_2", name: "Temp", project: { kind: "temp", workspace: "beta", source: { kind: "empty" } }, nodes: [{ id: "n", name: "Agent", type: "agent", config: { prompt: { kind: "saved", promptId: prompt.id } } }] });
+  workflows.push({ id: "wf_3", name: "Api", project: { kind: "existing", projectPath: join(h.workspacesDir, "acme", "api") }, nodes: [{ id: "n", name: "Agent", type: "agent", config: { prompt: { kind: "saved", promptId: prompt.id } } }] });
+  assert.deepEqual((await rows())[0]!.usedByWorkflows!.map((use) => use.workspace), [undefined, "beta", "acme"], "each workflow's own workspace");
   // Never persisted: the stored record has no such field.
   assert.equal("usedByWorkflows" in h.savedPrompts.get(prompt.id)!, false);
 });

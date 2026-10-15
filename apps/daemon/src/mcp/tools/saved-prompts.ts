@@ -107,11 +107,38 @@ function editKind(prompt: SavedPrompt): { tier: Tier; family?: AdminFamily } {
 // list_saved_prompts
 // ---------------------------------------------------------------------------
 
-type PromptRow = Omit<SavedPrompt, "body"> & { scope: "global" | "project"; bodyChars: number; body?: string; bodyTruncated?: true };
+type PromptRow = Omit<SavedPrompt, "body"> & {
+  scope: "global" | "project";
+  bodyChars: number;
+  body?: string;
+  bodyTruncated?: true;
+  /** Workflows in other workspaces using it, counted only (ruling S13: a chat below Full access). */
+  usedByWorkflowsElsewhere?: number;
+};
 
-function rowOf(prompt: SavedPrompt, includeBody: boolean): PromptRow {
-  const { body, ...rest } = prompt;
-  return { ...rest, scope: prompt.projectPath === null ? "global" : "project", bodyChars: body.length, ...(includeBody ? { body } : {}) };
+/**
+ * The workflows a caller may see by name (§5.2, ruling S13): every one for external callers and
+ * Full-access chats; for other chats, those of the chat's own workspace — the rest only counted (a
+ * workflow whose workspace is unknown counts as elsewhere: fail closed).
+ */
+function visibleUses(prompt: SavedPrompt, caller: ScopeContext["caller"]): { usedByWorkflows?: SavedPrompt["usedByWorkflows"]; usedByWorkflowsElsewhere?: number } {
+  const uses = workflowsOf(prompt);
+  if (uses.length === 0) return {};
+  if (caller.kind !== "thread" || caller.runtimeMode === "full-access") return { usedByWorkflows: uses };
+  const shown = uses.filter((use) => use.workspace !== undefined && use.workspace === caller.workspace);
+  const hidden = uses.length - shown.length;
+  return { ...(shown.length > 0 ? { usedByWorkflows: shown } : {}), ...(hidden > 0 ? { usedByWorkflowsElsewhere: hidden } : {}) };
+}
+
+function rowOf(prompt: SavedPrompt, includeBody: boolean, caller: ScopeContext["caller"]): PromptRow {
+  const { body, usedByWorkflows: _uses, ...rest } = prompt;
+  return {
+    ...rest,
+    scope: prompt.projectPath === null ? "global" : "project",
+    ...visibleUses(prompt, caller),
+    bodyChars: body.length,
+    ...(includeBody ? { body } : {})
+  };
 }
 
 function matches(prompt: SavedPrompt, query: string): boolean {
@@ -146,12 +173,12 @@ const listSavedPrompts = defineTool({
   name: "list_saved_prompts",
   title: "List saved prompts",
   description:
-    "The user's saved prompts (the right rail's library): the global ones plus one project's. Rows: id, title, description, tags, scope, projectPath, pinned, createdBy (absent: the user's), usedByWorkflows (workflows running it), bodyChars; bodies with includeBody.",
-  chatNote: "Without project: this chat's project.",
-  externalNote: "Without project: the global prompts only.",
+    "The user's saved prompts: global plus one project's. Rows: id, title, description, tags, scope, projectPath, pinned, createdBy (absent: the user's), usedByWorkflows, bodyChars; body with includeBody.",
+  chatNote: "Default: this chat's project.",
+  externalNote: "Default: global only.",
   input: {
-    project: z.string().min(1).optional().describe("Absolute path or \"<workspace>/<project>\"."),
-    query: z.string().optional().describe("Text in the title, description, tags or body."),
+    project: z.string().min(1).optional().describe("Path or \"ws/project\"."),
+    query: z.string().optional().describe("Text to find."),
     includeBody: z.boolean().optional()
   },
   audiences: ["external", "chat"],
@@ -168,7 +195,7 @@ const listSavedPrompts = defineTool({
       .filter((prompt) => args.query === undefined || matches(prompt, args.query))
       // The project's own first, then the global ones; pinned first within each; then by title.
       .sort((a, b) => Number(a.projectPath === null) - Number(b.projectPath === null) || Number(b.pinned) - Number(a.pinned) || a.title.localeCompare(b.title));
-    return fitRows(prompts.map((prompt) => rowOf(prompt, args.includeBody === true)));
+    return fitRows(prompts.map((prompt) => rowOf(prompt, args.includeBody === true, ctx.caller)));
   }
 });
 
@@ -329,10 +356,11 @@ const updateSavedPrompts = defineTool({
   name: "update_saved_prompts",
   title: "Change saved prompts",
   description:
-    "Create, edit or delete a saved prompt in the user's library (the right rail), global or for one project. create: title and body (+ description, tags), in a project or global. update: change title, body, description or tags of the prompt `id`. delete: remove it. A prompt you create is marked as made by an agent and cannot be pinned by you.",
+    "Create, edit or delete a saved prompt in the user's library (the right rail), global or for one project. create: title and body (+ description, tags), in a project or global. update: change title, body, description or tags of the prompt `id`. delete: remove it.",
   chatNote:
-    "Without project: this chat's project. Editing or deleting a prompt no agent created, or one a workflow uses (usedByWorkflows), asks the user to approve in the chat (up to 30 min); if denied, don't retry — ask the user.",
-  externalNote: "update and delete look for a project prompt in `project` (else among the global ones).",
+    "A prompt you create is marked as made by an agent; you cannot pin prompts. Without project: this chat's project. Editing or deleting a prompt no agent created, or one a workflow uses (usedByWorkflows), asks the user to approve in the chat (up to 30 min); if denied, don't retry — ask the user.",
+  externalNote:
+    "update and delete look for a project prompt in `project` (else among the global ones). _meta tier admin is the widest: in Orquester chats create and edits of agent-made prompts are act.",
   input: updateInput,
   externalOnlyInput: ["pinned"],
   audiences: ["external", "chat"],
@@ -366,7 +394,7 @@ const updateSavedPrompts = defineTool({
       };
       const res = await ctx.api.request("POST", ROUTE, { body });
       if (res.status >= 400) throw daemonError(res);
-      return { prompt: rowOf(res.body as SavedPrompt, true) };
+      return { prompt: rowOf(res.body as SavedPrompt, true, ctx.caller) };
     }
     const id = prompt!.id;
     if (args.action === "delete") {
@@ -383,7 +411,7 @@ const updateSavedPrompts = defineTool({
     };
     const res = await ctx.api.request("PUT", `${ROUTE}/${encodeURIComponent(id)}`, { body: patch });
     if (res.status >= 400) throw daemonError(res);
-    return { prompt: rowOf({ ...(res.body as SavedPrompt), ...(prompt!.usedByWorkflows ? { usedByWorkflows: prompt!.usedByWorkflows } : {}) }, true) };
+    return { prompt: rowOf({ ...(res.body as SavedPrompt), ...(prompt!.usedByWorkflows ? { usedByWorkflows: prompt!.usedByWorkflows } : {}) }, true, ctx.caller) };
   }
 });
 

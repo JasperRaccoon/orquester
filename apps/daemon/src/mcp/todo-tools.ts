@@ -10,7 +10,7 @@
 
 import { stat } from "node:fs/promises";
 import { join } from "node:path";
-import type { CreateTodoRequest, TodoListRecord, TodoScope, UpdateTodoRequest } from "@orquester/api";
+import { todoToggleRoute, type CreateTodoRequest, type TodoListRecord, type TodoScope, type ToggleTodoItemRequest, type ToggleTodoItemResponse, type UpdateTodoRequest } from "@orquester/api";
 import { isValidName } from "@orquester/config";
 import type { DaemonApi, DaemonResponse } from "./daemon-api.ts";
 import { ToolError } from "./errors.ts";
@@ -36,23 +36,6 @@ export type TodoListRef = {
   refKey: string;
 };
 
-type BodyLine = {
-  text: string;
-  newline: string;
-};
-
-type TaskLine = {
-  index: number;
-  lineIndex: number;
-  prefix: string;
-  afterMark: string;
-  suffix: string;
-  item: string;
-  checked: boolean;
-};
-
-const TASK_LINE = /^(\s*[-*]\s+\[)( |x|X)(\]\s*)(.*)$/;
-
 async function isDirectory(path: string): Promise<boolean> {
   try {
     return (await stat(path)).isDirectory();
@@ -72,61 +55,7 @@ function projectTodo(record: TodoListRecord): TodoProjection {
   };
 }
 
-function splitBodyLines(body: string): BodyLine[] {
-  const lines: BodyLine[] = [];
-  let start = 0;
-  for (let i = 0; i < body.length; i++) {
-    const ch = body[i];
-    if (ch !== "\r" && ch !== "\n") continue;
-    const newline = ch === "\r" && body[i + 1] === "\n" ? "\r\n" : ch;
-    lines.push({ text: body.slice(start, i), newline });
-    i += newline.length - 1;
-    start = i + 1;
-  }
-  if (start < body.length) {
-    lines.push({ text: body.slice(start), newline: "" });
-  }
-  return lines;
-}
-
-function taskLines(lines: BodyLine[]): TaskLine[] {
-  const tasks: TaskLine[] = [];
-  for (const [lineIndex, line] of lines.entries()) {
-    const match = TASK_LINE.exec(line.text);
-    if (!match) continue;
-    const [, prefix, mark, afterMark, suffix] = match;
-    tasks.push({
-      index: tasks.length + 1,
-      lineIndex,
-      prefix,
-      afterMark,
-      suffix,
-      item: suffix.trim(),
-      checked: mark.toLowerCase() === "x"
-    });
-  }
-  return tasks;
-}
-
-/**
- * How many of a list's items a refusal names, and the most of each: the list's own text, of any length and count. 70,
- * not more: beside a quote escaped at its longest (602 characters), the longest refusal — the ambiguous one, 40 items at
- * 70 — is 3 701 characters for a 3 000-item list, so MAX_ERROR_MESSAGE_CHARS (result.ts) never cuts its tail, whatever
- * the input. At 80 it was 4 101.
- */
-const MAX_LISTED_ITEMS = 40;
-const MAX_LISTED_ITEM_CHARS = 70;
-
-function availableItems(tasks: TaskLine[]): string {
-  const listed = tasks.slice(0, MAX_LISTED_ITEMS).map((task) => `${task.index}. ${clipText(task.item, MAX_LISTED_ITEM_CHARS)}`).join(", ");
-  return tasks.length > MAX_LISTED_ITEMS ? `${listed}, … (${tasks.length} items)` : listed;
-}
-
-/**
- * A caller's value — a list id, an item's text — as a refusal quotes it: capped, quoted and escaped onto one line. The
- * cap is in code points and comes BEFORE the escaping, so a control character or a lone surrogate costs six characters:
- * a quote is at most 602.
- */
+/** A caller's value as a refusal quotes it: capped, quoted and escaped onto one line. */
 const quoted = (text: string): string => JSON.stringify(clipText(text, MAX_ECHO_CHARS));
 
 /** The 404 for a list a scope does not have, said where the id is known: the id, quoted, and where the ids are. */
@@ -223,9 +152,10 @@ export async function deleteTodoList(api: DaemonApi, sel: TodoSelector, id: stri
 
 /**
  * Check or uncheck one item of the selector's list `id`, by its 1-based index among the list's
- * items or by its exact text (trimmed, case-insensitive). It edits the STORED body as read just
- * before the write — never a copy the agent holds — and only that item's mark. An explicit
- * `checked` equal to the item's state writes nothing.
+ * items or by its exact text (trimmed, case-insensitive), through the daemon's ATOMIC toggle route
+ * (`todoToggleRoute`): the daemon edits that item's mark in the stored body in one step, so an edit
+ * made meanwhile — by the user or another agent — is never overwritten. An explicit `checked`
+ * equal to the item's state writes nothing.
  */
 export async function toggleTodoItem(
   api: DaemonApi,
@@ -234,47 +164,12 @@ export async function toggleTodoItem(
   item: string | number,
   checked?: boolean
 ): Promise<TodoToggleResult> {
-  const todo = await findRecord(api, sel, id);
-  const lines = splitBodyLines(todo.body);
-  const tasks = taskLines(lines);
-  if (tasks.length === 0) {
-    throw new ToolError("INVALID_ARGUMENT", "No task items in todo.");
-  }
-  const task = resolveTask(tasks, item);
-  const nextChecked = checked ?? !task.checked;
-  if (checked !== undefined && nextChecked === task.checked) {
-    return { id: todo.id, item: task.item, checked: task.checked, body: todo.body };
-  }
-  lines[task.lineIndex].text = `${task.prefix}${nextChecked ? "x" : " "}${task.afterMark}${task.suffix}`;
-  const body = lines.map((line) => `${line.text}${line.newline}`).join("");
-  const updated = await putRecord(api, id, { body });
-  return { id: updated.id, item: task.item, checked: nextChecked, body: updated.body };
-}
-
-function resolveTask(tasks: TaskLine[], item: string | number): TaskLine {
-  if (typeof item === "number") {
-    if (!Number.isInteger(item) || item < 1 || item > tasks.length) {
-      throw new ToolError("INVALID_ARGUMENT", `No task item at index ${item}. Available items: ${availableItems(tasks)}.`);
-    }
-    return tasks[item - 1];
-  }
-
-  const needle = item.trim();
-  if (!needle) {
-    throw new ToolError("INVALID_ARGUMENT", `Task item text is required. Available items: ${availableItems(tasks)}.`);
-  }
-
-  // Lowercased ONCE: the caller's text can be megabytes, and lowercasing it per item blocked the event loop for
-  // seconds on a long list.
-  const wanted = needle.toLowerCase();
-  const matches = tasks.filter((task) => task.item.toLowerCase() === wanted);
-  if (matches.length === 0) {
-    throw new ToolError("INVALID_ARGUMENT", `No task item matching ${quoted(item)}. Available items: ${availableItems(tasks)}.`);
-  }
-  if (matches.length > 1) {
-    throw new ToolError("INVALID_ARGUMENT", `Task item ${quoted(item)} is ambiguous; use index. Available items: ${availableItems(tasks)}.`);
-  }
-  return matches[0];
+  await findRecord(api, sel, id);
+  const body: ToggleTodoItemRequest = { item, ...(checked !== undefined ? { checked } : {}) };
+  const res = await api.request("POST", todoToggleRoute(id), { body });
+  if (res.status >= 400) throw todoError(res, id);
+  const answer = res.body as ToggleTodoItemResponse;
+  return { id: answer.id, item: answer.item, checked: answer.checked, body: answer.body };
 }
 
 /**
