@@ -15,7 +15,6 @@ import { isValidName } from "@orquester/config";
 import type { DaemonApi, DaemonResponse } from "./daemon-api.ts";
 import { ToolError } from "./errors.ts";
 import { clipText, MAX_ECHO_CHARS } from "./result.ts";
-import type { TodoListManager } from "../todos.ts";
 
 export type TodoProjection = {
   id: string;
@@ -170,13 +169,4 @@ export async function toggleTodoItem(
   if (res.status >= 400) throw todoError(res, id);
   const answer = res.body as ToggleTodoItemResponse;
   return { id: answer.id, item: answer.item, checked: answer.checked, body: answer.body };
-}
-
-/**
- * TEMPORARY (deleted with `catalog/legacy.ts` in Task 14): `LegacyToolServices.todos` and the
- * pre-catalog `ToolContext.todos` still name this, and the daemon still builds one; no tool reads
- * it any more — the todo tools go through `/api/todos` (the functions above).
- */
-export class TodoTools {
-  constructor(readonly deps: { todos: TodoListManager; workspacesDir: string }) {}
 }

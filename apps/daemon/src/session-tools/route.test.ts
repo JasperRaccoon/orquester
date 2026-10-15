@@ -19,19 +19,16 @@ import { agentHostAuthValue } from "../agent-host/host-protocol.ts";
 import { createDaemonForwarder } from "../agent-host/session-tools/forwarder.ts";
 import { agentChatRoutes } from "@orquester/api/agent-chat";
 import type { DaemonApi } from "../mcp/daemon-api.ts";
-import { legacyChatTools } from "../mcp/catalog/legacy.ts";
 import { chatSummary, head, snapshot, turn } from "../mcp/fixtures.ts";
-import { defineTool, READ_ONLY } from "../mcp/catalog/contract.ts";
+import { defineTool, READ_ONLY, type AnyOrquesterTool } from "../mcp/catalog/contract.ts";
+import { toolByName } from "../mcp/catalog/index.ts";
 import { z } from "zod";
 import { FakeDaemonApi } from "../mcp/testing.ts";
-import { defineSessionTool, defineSessionToolkit, SESSION_TOOL_READ_ONLY } from "./contract.ts";
-import { createSessionToolRegistry, type SessionToolRegistry } from "./registry.ts";
 import { DAEMON_UNAVAILABLE_MESSAGE, jsonResult } from "./results.ts";
 import { registerSessionToolsRoute, type SessionToolThread } from "./route.ts";
-import { TEST_PNG_BASE64, testSessionToolkit } from "./testing.ts";
+import { TEST_CHAT_TOOLS, TEST_PNG_BASE64, testChatTool } from "./testing.ts";
 import { SecretRequestRegistry } from "../agent-chat/secret-requests.ts";
 import type { AgentChatSecretRequestEventPayload } from "@orquester/api/agent-chat";
-import { secretsToolkit } from "./secrets/index.ts";
 
 const TOKEN = "host-token-0123456789";
 // A real project directory: the route canonicalises the caller's project (and "" for none).
@@ -62,14 +59,14 @@ function fakeApiFor(): FakeDaemonApi {
 }
 const fakeApi = fakeApiFor();
 
-/** The registry's tools as the catalog would serve them. */
-const lookupOf = (registry: SessionToolRegistry) => {
-  const tools = new Map(legacyChatTools(registry.tools).map((tool) => [tool.name, tool]));
-  return (name: string) => tools.get(name);
+/** The chat tools the route serves, by name. */
+const lookupOf = (tools: readonly AnyOrquesterTool[]) => {
+  const byName = new Map(tools.map((tool) => [tool.name, tool]));
+  return (name: string) => byName.get(name);
 };
 
 /** A tool that parks until its call is cancelled, and says when the handler saw the abort. */
-function holdingToolkit() {
+function holdingTools() {
   let sawAbort!: () => void;
   const aborted = new Promise<void>((resolve) => {
     sawAbort = resolve;
@@ -78,33 +75,28 @@ function holdingToolkit() {
   const running = new Promise<void>((resolve) => {
     started = resolve;
   });
-  const toolkit = defineSessionToolkit({
-    id: "hold",
-    tools: [
-      defineSessionTool({
-        name: "hold",
-        title: "Hold",
-        description: "Parks until cancelled.",
-        input: {},
-        annotations: SESSION_TOOL_READ_ONLY,
-        resultKind: "json",
-        run: (_args, ctx) =>
-          new Promise((resolve) => {
-            started();
-            ctx.signal.addEventListener("abort", () => {
-              sawAbort();
-              resolve(jsonResult({ late: true }));
-            });
-          })
-      })
-    ]
-  });
-  return { toolkit, aborted, running };
+  const tools = [
+    testChatTool({
+      name: "hold",
+      title: "Hold",
+      description: "Parks until cancelled.",
+      input: {},
+      run: (_args, ctx) =>
+        new Promise((resolve) => {
+          started();
+          ctx.signal.addEventListener("abort", () => {
+            sawAbort();
+            resolve(jsonResult({ late: true }));
+          });
+        })
+    })
+  ];
+  return { tools, aborted, running };
 }
 
 async function daemon(
   t: { after(fn: () => Promise<void>): void },
-  registry: SessionToolRegistry,
+  tools: readonly AnyOrquesterTool[],
   api: DaemonApi | null = fakeApi,
   secretRequests?: SecretRequestRegistry
 ) {
@@ -115,7 +107,7 @@ async function daemon(
     authorizeHost: (authorization) => authorization === agentHostAuthValue(TOKEN),
     resolveThread: (threadId) => THREADS[threadId] ?? null,
     api: () => api,
-    lookup: lookupOf(registry),
+    lookup: lookupOf(tools),
     ...(secretRequests !== undefined ? { secretRequests } : {})
   });
   await app.listen({ path: socketPath });
@@ -130,7 +122,7 @@ const forwarderFor = (socketPath: string, token = TOKEN) => createDaemonForwarde
 const textOf = (result: { content: unknown[] }) => (result.content[0] as { text?: string }).text ?? "";
 
 test("a call runs with the context the daemon derived — thread record, not arguments", async (t) => {
-  const { socketPath } = await daemon(t, createSessionToolRegistry([testSessionToolkit]));
+  const { socketPath } = await daemon(t, TEST_CHAT_TOOLS);
   const forward = forwarderFor(socketPath);
   const result = await forward(
     { threadId: "thread-a", callId: "toolu_1", name: "echo", arguments: { text: "hi" } },
@@ -158,7 +150,7 @@ test("a call runs with the context the daemon derived — thread record, not arg
 });
 
 test("results: image content, a coded handler error, an unknown tool", async (t) => {
-  const { socketPath } = await daemon(t, createSessionToolRegistry([testSessionToolkit]));
+  const { socketPath } = await daemon(t, TEST_CHAT_TOOLS);
   const forward = forwarderFor(socketPath);
   const signal = new AbortController().signal;
   const pixel = await forward({ threadId: "thread-a", callId: "c", name: "pixel", arguments: {} }, signal);
@@ -173,7 +165,7 @@ test("results: image content, a coded handler error, an unknown tool", async (t)
 });
 
 test("only the host's bearer is honoured, and only for a thread the daemon knows", async (t) => {
-  const { app, socketPath } = await daemon(t, createSessionToolRegistry([testSessionToolkit]));
+  const { app, socketPath } = await daemon(t, TEST_CHAT_TOOLS);
   const signal = new AbortController().signal;
   const wrong = await forwarderFor(socketPath, "not-the-token")(
     { threadId: "thread-a", callId: "c", name: "echo", arguments: { text: "x" } },
@@ -192,7 +184,7 @@ test("only the host's bearer is honoured, and only for a thread the daemon knows
 });
 
 test("a daemon that cannot serve yet, or is not there at all, answers the restart message", async (t) => {
-  const { socketPath } = await daemon(t, createSessionToolRegistry([testSessionToolkit]), null);
+  const { socketPath } = await daemon(t, TEST_CHAT_TOOLS, null);
   const signal = new AbortController().signal;
   const starting = await forwarderFor(socketPath)({ threadId: "thread-a", callId: "c", name: "echo", arguments: { text: "x" } }, signal);
   assert.deepEqual(starting, { content: [{ type: "text", text: DAEMON_UNAVAILABLE_MESSAGE }], isError: true });
@@ -204,8 +196,8 @@ test("a daemon that cannot serve yet, or is not there at all, answers the restar
 });
 
 test("a daemon that dies mid-call answers the restart message", async (t) => {
-  const hold = holdingToolkit();
-  const { app, socketPath } = await daemon(t, createSessionToolRegistry([hold.toolkit]));
+  const hold = holdingTools();
+  const { app, socketPath } = await daemon(t, hold.tools);
   const pending = forwarderFor(socketPath)({ threadId: "thread-a", callId: "c", name: "hold", arguments: {} }, new AbortController().signal);
   await hold.running;
   app.server.closeAllConnections();
@@ -216,8 +208,8 @@ test("a daemon that dies mid-call answers the restart message", async (t) => {
 });
 
 test("cancelling the call on the host aborts the daemon-side handler", async (t) => {
-  const hold = holdingToolkit();
-  const { socketPath } = await daemon(t, createSessionToolRegistry([hold.toolkit]));
+  const hold = holdingTools();
+  const { socketPath } = await daemon(t, hold.tools);
   const controller = new AbortController();
   const pending = forwarderFor(socketPath)({ threadId: "thread-a", callId: "c", name: "hold", arguments: {} }, controller.signal);
   await hold.running;
@@ -238,7 +230,7 @@ test("request_secret over the socket: the answer reaches the call; the host's ca
     }
   });
   const nextEvent = () => new Promise<AgentChatSecretRequestEventPayload>((resolve) => waiters.push(resolve));
-  const { socketPath } = await daemon(t, createSessionToolRegistry([secretsToolkit]), fakeApi, secretRequests);
+  const { socketPath } = await daemon(t, [toolByName("request_secret", "chat")!], fakeApi, secretRequests);
   const forward = forwarderFor(socketPath);
   const args = { name: "API_KEY", prompt: "Paste it." };
 

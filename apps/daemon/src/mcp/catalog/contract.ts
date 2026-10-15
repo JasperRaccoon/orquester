@@ -14,8 +14,6 @@ import type { AgentAdapterId, CausedBy, InteractionMode, RuntimeMode, ThreadMess
 import type { AgentToolGrantQuery, AgentToolGrantRecord } from "@orquester/config";
 
 import type { DaemonApi } from "../daemon-api.ts";
-import type { FsTools } from "../fs-tools.ts";
-import type { TodoTools } from "../todo-tools.ts";
 import type { SessionSecretRequests } from "../../session-tools/contract.ts";
 
 export type { AdminFamily, ApprovalFamily, ApprovalKind, ToolsetId };
@@ -293,16 +291,6 @@ export interface ToolsetCardInput {
   reason?: string;
 }
 
-/**
- * TEMPORARY (deleted with `catalog/legacy.ts` in Task 14): the todo and file services the external
- * `/mcp`'s pre-catalog handlers take (`ToolContext.todos` / `.files`) until Tasks 9 and 12 route them
- * through `DaemonApi`.
- */
-export interface LegacyToolServices {
-  todos: TodoTools;
-  files: FsTools;
-}
-
 export interface CallContext {
   /** The daemon's own REST API, in-process: every gate the GUI meets applies by construction. */
   api: DaemonApi;
@@ -330,8 +318,6 @@ export interface CallContext {
    * and refuses a workflow-owned caller before any card (§5.4).
    */
   requestToolsetCard?(input: ToolsetCardInput): Promise<ToolsetCardOutcome>;
-  /** TEMPORARY: legacy external handlers only ({@link LegacyToolServices}); absent where none is wired. */
-  legacy?: LegacyToolServices;
   /**
    * Set when an OLD agent host called a legacy chat name that the daemon aliases onto this tool
    * (`session-tools/legacy-aliases.ts`, spec §14.1) and the alias keeps the old semantics a mapped

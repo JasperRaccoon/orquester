@@ -12,8 +12,8 @@ import type { DaemonApi, DaemonMethod, DaemonResponse } from "./daemon-api.ts";
 import { chatSummary } from "./fixtures.ts";
 import { readOlderHistory, unavailableHint } from "./history.ts";
 import { readThread } from "./reads.ts";
-import type { ToolContext } from "./tool.ts";
-import { messageTools } from "./tools/messages.ts";
+import type { CallContext } from "./catalog/contract.ts";
+import { sessionsFamily } from "./tools/sessions.ts";
 
 /*
  * The MCP's older-history walk (history.ts) against the REAL orchestrator's `readHistory`: its block planning, the
@@ -151,14 +151,14 @@ async function walk(api: ReturnType<typeof hostApi>, start: number, end: number)
 describe("read_transcript's older history against the real orchestrator (design 2026-09-23, C)", () => {
   it("paging back by olderTurns through the tool never skips a turn, however much each read sheds", async (t) => {
     const { host, api } = await threadOf(t, Array.from({ length: 20 }, () => 60));
-    const read = messageTools.find((t) => t.name === "read_transcript")!;
-    const ctx: ToolContext = { api, todos: {} as never, files: {} as never, signal: new AbortController().signal, now: () => Date.now() };
+    const read = sessionsFamily.find((t) => t.name === "read_transcript")!;
+    const ctx: CallContext = { api, signal: new AbortController().signal, now: () => Date.now(), caller: { kind: "external" }, turn: { interactionMode: "default", provenance: (_origin, text) => text } };
     const shown = new Set<number>();
     let beforeTurn: number | undefined;
     let shed = 0;
     for (let call = 0; call < 40; call += 1) {
       // Five turns asked, about two fit: the shed drops the oldest rows of every read.
-      const r = await read.run({ sessionId: THREAD, turns: 5, include: ["tools", "activity"], maxChars: 15_000, ...(beforeTurn === undefined ? {} : { beforeTurn }) }, ctx);
+      const r = (await read.run({ sessionId: THREAD, turns: 5, include: ["tools", "activity"], maxChars: 15_000, ...(beforeTurn === undefined ? {} : { beforeTurn }) }, ctx)) as Record<string, unknown>;
       assert.equal(r.unavailableTurns, undefined, `call ${call}: every turn asked was read`);
       const [from, to] = r.coveredTurns as [number, number];
       for (let n = from; n <= to; n += 1) shown.add(n);

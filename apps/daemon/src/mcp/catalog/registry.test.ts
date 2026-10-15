@@ -3,12 +3,10 @@
  * tiers, toolsets and their agreement with `TOOLSETS`; Admin tools carry a family and a preview;
  * the import graph reachable from `catalog/index.ts` stays inside an allow-list of pure modules
  * (the agent host loads it statically); only the executor runs a tool; and the byte budgets,
- * measured on `tools/list` exactly as an MCP client receives it.
+ * measured on `tools/list` exactly as an MCP client receives it — for every tool, no exemption.
  *
- * Transitional (Task 2): every tool is still a legacy adapter (`./legacy.ts`), so the counts are
- * today's (72 external, 16 chat) and legacy tools are held to their measured baselines; the full
- * §9.5 budgets apply to every non-legacy tool now, and Task 14 tightens the counts (41 / 45 / 22)
- * and the external total (≤ 81 920) once every family has landed.
+ * Counts (spec §1.4, §9.1): 41 external tools, 45 chat tools (41 shared + 4 chat-only), 22 on by
+ * default (core 17 + reads 5) for every agent.
  */
 
 import assert from "node:assert/strict";
@@ -24,16 +22,14 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { ADMIN_FAMILIES, chatToolNames, isToolsetId, TOOLSETS, toolsetById, toolsetOfTool } from "@orquester/api";
 
 import { externalMcpToolNames } from "../server.ts";
-import { EXTERNAL_MCP_TOOL_NAMES } from "../tool-names.ts";
 import { audienceDescription, audienceSchema, audienceShape } from "../executor.ts";
 import type { AnyOrquesterTool, Audience } from "./contract.ts";
 import { buildCatalog, CATALOG, catalogFor, TOOL_NAME_PATTERN, toolByName } from "./index.ts";
-import { LEGACY_CHAT_META, LEGACY_EXTERNAL_META } from "./legacy.ts";
-import { chatToolByName } from "../../session-tools/legacy-aliases.ts";
 
 const SRC = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const isLegacy = (tool: AnyOrquesterTool) =>
-  Object.prototype.hasOwnProperty.call(LEGACY_EXTERNAL_META, tool.name) || Object.prototype.hasOwnProperty.call(LEGACY_CHAT_META, tool.name);
+
+/** The chat-only tools (spec §4 rows 42–45). */
+const CHAT_ONLY = ["html_preview", "html_render", "request_secret", "request_toolset"];
 
 test("names, audiences, toolsets, tiers: well-formed and unique; Admin-capable tools carry a family and a preview", () => {
   const names = new Set<string>();
@@ -68,41 +64,34 @@ test("lookups: catalogFor and toolByName agree; an audience never sees another's
   assert.equal(toolByName("no_such_tool"), undefined);
 });
 
-test("TOOLSETS agree with the catalog: a chat tool TOOLSETS names sits in that toolset at that highest tier", () => {
-  const specNames = new Set(chatToolNames());
+test("TOOLSETS agree with the catalog: every chat tool sits in the toolset TOOLSETS names, at that highest tier", () => {
   for (const tool of catalogFor("chat")) {
-    if (specNames.has(tool.name)) {
-      const spec = toolsetById(toolsetOfTool(tool.name)!)!;
-      assert.equal(tool.toolset, spec.id, `${tool.name}: toolset`);
-      const tier = spec.tools.find((entry) => entry.name === tool.name)!.tier;
-      if (typeof tool.tier === "string") assert.equal(tool.tier, tier, `${tool.name}: tier`);
-      else assert.equal(tier, "admin", `${tool.name}: a per-call tier is badged Admin`);
-    } else {
-      // Transitional: the only chat tools TOOLSETS does not name are the legacy session tools.
-      assert.ok(Object.prototype.hasOwnProperty.call(LEGACY_CHAT_META, tool.name), `${tool.name} is in no toolset of TOOLSETS`);
-      assert.equal(tool.toolset, "core");
-    }
+    const id = toolsetOfTool(tool.name);
+    assert.ok(id !== undefined, `${tool.name} is in no toolset of TOOLSETS`);
+    const spec = toolsetById(id)!;
+    assert.equal(tool.toolset, spec.id, `${tool.name}: toolset`);
+    const tier = spec.tools.find((entry) => entry.name === tool.name)!.tier;
+    if (typeof tool.tier === "string") assert.equal(tool.tier, tier, `${tool.name}: tier`);
+    else assert.equal(tier, "admin", `${tool.name}: a per-call tier is badged Admin`);
   }
-  // Every toolset id the catalog uses exists, and every TOOLSETS tool is a catalog name or still to come.
-  for (const toolset of TOOLSETS) for (const entry of toolset.tools) assert.match(entry.name, TOOL_NAME_PATTERN);
+  // …and TOOLSETS names no tool the catalog lacks.
+  assert.deepEqual([...chatToolNames()].sort(), catalogFor("chat").map((tool) => tool.name).sort());
 });
 
-test("transitional counts: the external surface is tool-names.ts's list, each tool legacy or one TOOLSETS names; chat is the legacy session tools plus the families landed", () => {
-  assert.deepEqual([...externalMcpToolNames()].sort(), [...EXTERNAL_MCP_TOOL_NAMES].sort());
-  assert.equal(catalogFor("external").length, EXTERNAL_MCP_TOOL_NAMES.length);
-  // Task 10 (workflows): 72 − validate_workflow, list_workflow_runs, get_workflow_run + get_workflow_runs.
-  assert.ok(EXTERNAL_MCP_TOOL_NAMES.length <= 72);
-  // Each Wave 3 family replaces its legacy entries with TOOLSETS tools (Task 14 pins 41 / 45 / 22).
-  const specNames = new Set(chatToolNames());
-  for (const tool of catalogFor("external")) {
-    assert.ok(Object.prototype.hasOwnProperty.call(LEGACY_EXTERNAL_META, tool.name) || specNames.has(tool.name), `${tool.name}: neither legacy nor in TOOLSETS`);
+test("counts: 41 external, 45 chat (the 41 plus 4 chat-only), 22 on by default for every agent, 17 in core", () => {
+  const external = catalogFor("external").map((tool) => tool.name);
+  const chat = catalogFor("chat").map((tool) => tool.name);
+  assert.equal(external.length, 41);
+  assert.equal(chat.length, 45);
+  assert.deepEqual(externalMcpToolNames(), external);
+  assert.deepEqual(chat.filter((name) => !external.includes(name)), CHAT_ONLY);
+  assert.deepEqual(external.filter((name) => !chat.includes(name)), [], "every external tool is a chat tool too");
+  assert.equal(CATALOG.length, 45);
+  for (const agent of ["claude", "codex", "grok", "opencode"] as const) {
+    const on = new Set(TOOLSETS.filter((toolset) => toolset.locked || toolset.defaults[agent]).map((toolset) => toolset.id));
+    assert.equal(catalogFor("chat").filter((tool) => on.has(tool.toolset)).length, 22, agent);
   }
-  for (const tool of catalogFor("chat")) assert.ok(specNames.has(tool.name) || Object.prototype.hasOwnProperty.call(LEGACY_CHAT_META, tool.name), tool.name);
-  const replaced = catalogFor("chat").filter((tool) => !Object.prototype.hasOwnProperty.call(LEGACY_CHAT_META, tool.name));
-  for (const tool of replaced) assert.ok(specNames.has(tool.name), `${tool.name} is a chat tool TOOLSETS does not name`);
-  // Every legacy session-tool name is still served to chats — the catalog's own tool, or Task 6's
-  // alias onto the family tool that replaced it (Task 13's check, kept through the aliases).
-  for (const name of Object.keys(LEGACY_CHAT_META)) assert.ok(chatToolByName(name), `${name} is no longer served to chats`);
+  assert.equal(catalogFor("chat").filter((tool) => tool.toolset === "core").length, 17);
 });
 
 // ---------------------------------------------------------------------------
@@ -145,7 +134,7 @@ function reachable(entry: string): { modules: Set<string>; packages: Set<string>
  */
 const PURE_MODULES = new Set([
   "agent-chat/activity-ladder.ts",
-  // The in-process wait registry (Task 5, re-exported by session-tools/threads/shared.ts): a map, no service.
+  // The in-process wait registry (Task 5): a map, no service.
   "agent-chat/waits.ts",
   // Task 11: the YAML frontmatter (de)serialiser the adapters write skills with (pure, `yaml` only),
   // so the card shows a skill's file exactly as it will be written.
@@ -155,14 +144,12 @@ const PURE_MODULES = new Set([
   "mcp/attachments.ts",
   "mcp/catalog/contract.ts",
   "mcp/catalog/index.ts",
-  "mcp/catalog/legacy.ts",
   "mcp/errors.ts",
   "mcp/fs-tools.ts",
   "mcp/gate/turn-policy.ts",
   "mcp/history.ts",
   "mcp/reads.ts",
   "mcp/result.ts",
-  "mcp/tool.ts",
   "mcp/tools/agent-profile.ts",
   "mcp/tools/agent-profile-preview.ts",
   "mcp/tools/catalog.ts",
@@ -187,25 +174,17 @@ const PURE_MODULES = new Set([
   "mcp/tools/workflow-preview.ts",
   "mcp/tools/workflows-guide.ts",
   "mcp/tools/workflows.ts",
-  // Task 12: the todo tools' /api/todos client (DaemonApi only; the store is a type import).
+  // Task 12: the todo tools' /api/todos client (DaemonApi only).
   "mcp/todo-tools.ts",
   "mcp/transcript.ts",
   "mcp/usage-view.ts",
   "mcp/views.ts",
   "mcp/wait.ts",
-  "session-tools/contract.ts",
-  "session-tools/html/index.ts",
-  "session-tools/results.ts",
-  "session-tools/secrets/index.ts",
-  "session-tools/threads/create.ts",
-  "session-tools/threads/delegation.ts",
-  "session-tools/threads/shared.ts",
-  "session-tools/threads/threads.ts",
-  "session-tools/turn-policy.ts",
   // get_usage prices Codex session tokens with the Cost tab's own table (`estimateCostParts`): no side effect at load,
   // node:fs/promises + node:path + types only (unified MCP Task 9).
   "usage-tokens.ts"
 ]);
+
 
 const PURE_PACKAGES = new Set([
   "zod",
@@ -226,6 +205,8 @@ test("import graph: everything reachable from catalog/index.ts is on the pure al
   const { modules, packages } = reachable("mcp/catalog/index.ts");
   const unexpected = [...modules].filter((module) => !PURE_MODULES.has(module)).sort();
   assert.deepEqual(unexpected, [], "a module the agent host would load is not on the allow-list (no daemon services, no stores)");
+  // …and the allow-list holds nothing stale: every entry is reachable.
+  assert.deepEqual([...PURE_MODULES].filter((module) => !modules.has(module)).sort(), [], "an allow-listed module is no longer reachable: drop it");
   assert.deepEqual([...packages].filter((name) => !PURE_PACKAGES.has(name)).sort(), []);
   // The daemon-only halves never reach the host.
   for (const daemonOnly of ["mcp/executor.ts", "mcp/server.ts", "mcp/daemon-api.ts", "mcp/principal.ts", "todos.ts", "index.ts"]) {
@@ -254,11 +235,11 @@ function sourceFiles(dir: string): string[] {
 
 test("only the executor runs a tool: no other module calls a tool's run", () => {
   const callers = sourceFiles(SRC)
-    .filter((file) => /\b(?:tool|def|sessionTool|entry\.tool|toolDef|catalogTool)\s*\.\s*run\s*\(/.test(readFileSync(file, "utf8")))
+    .filter((file) => /\b(?:tool|def|sessionTool|entry\.tool|toolDef|catalogTool|target)\s*\.\s*run\s*\(/.test(readFileSync(file, "utf8")))
     .map((file) => relative(SRC, file))
     .sort();
-  // `legacy.ts` is the adapter: a catalog tool's own `run` calls the pre-catalog handler it wraps.
-  assert.deepEqual(callers, ["mcp/catalog/legacy.ts", "mcp/executor.ts"]);
+  // `legacy-aliases.ts` is an alias tool's own `run` (called by the executor) handing the mapped call to its target.
+  assert.deepEqual(callers, ["mcp/executor.ts", "session-tools/legacy-aliases.ts"]);
 });
 
 // ---------------------------------------------------------------------------
@@ -315,17 +296,12 @@ function describeTexts(schema: z.ZodTypeAny | undefined, out: string[] = []): st
   return out;
 }
 
-test("byte budgets: §9.5 for every non-legacy tool; legacy tools held to their measured baselines", async () => {
+test("byte budgets (§9.5): every tool, every description and field text; the external set, the default chat set and core", async () => {
   for (const audience of ["external", "chat"] as Audience[]) {
     const tools = catalogFor(audience);
     const rows = await listTools(tools, audience);
     for (const row of rows) {
       const tool = toolByName(row.name)!;
-      if (isLegacy(tool)) {
-        // The 72-tool surface's largest is update_workflow (6 050 + _meta); the chat's html_render (3 669).
-        assert.ok(row.bytes <= 6_200, `${row.name}: ${row.bytes} bytes`);
-        continue;
-      }
       assert.ok(row.bytes <= TOOL_BYTES(row.name), `${audience} ${row.name}: ${row.bytes} bytes > ${TOOL_BYTES(row.name)}`);
       assert.ok(Buffer.byteLength(row.description, "utf8") <= DESCRIPTION_BYTES(row.name), `${row.name}: description over budget`);
       for (const text of Object.values(audienceShape(tool, audience)).flatMap((field) => describeTexts(field))) {
@@ -333,8 +309,7 @@ test("byte budgets: §9.5 for every non-legacy tool; legacy tools held to their 
       }
     }
     if (audience === "external") {
-      // Baseline 91 551 bytes for 72 tools (spec §2.1) plus `_meta` (≤ 70 bytes a tool); Task 14: ≤ 81 920.
-      assert.ok(total(rows) <= 91_551 + 70 * rows.length, `external tools/list is ${total(rows)} bytes`);
+      assert.ok(total(rows) <= 81_920, `external tools/list is ${total(rows)} bytes`);
       for (const row of rows) {
         const meta = (row.listed as { _meta?: Record<string, unknown> })._meta;
         assert.deepEqual(Object.keys(meta ?? {}).sort(), ["orquester/tier", "orquester/toolset"], row.name);
@@ -346,9 +321,7 @@ test("byte budgets: §9.5 for every non-legacy tool; legacy tools held to their 
         const defaults = rows.filter((row) => on.has(toolByName(row.name)!.toolset));
         assert.ok(total(defaults) <= 32_768, `${agent}: default chat tools/list is ${total(defaults)} bytes`);
       }
-      // Transitional: while legacy session tools still sit in core beside the tools that will replace them, core is
-      // held to §9.5 without them (the default set above counts everything); Task 14 drops the exemption.
-      const core = rows.filter((row) => toolByName(row.name)!.toolset === "core" && !isLegacy(toolByName(row.name)!));
+      const core = rows.filter((row) => toolByName(row.name)!.toolset === "core");
       assert.ok(total(core) <= 25_600, `core alone is ${total(core)} bytes`);
       for (const row of rows) assert.equal((row.listed as { _meta?: unknown })._meta, undefined, "chat entries carry no _meta");
     }

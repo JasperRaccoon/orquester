@@ -90,7 +90,7 @@ async function markConsumed(request: FastifyRequest): Promise<void> {
 
 function mcpApp(deps: Partial<McpDeps> & Pick<McpDeps, "createApi">): FastifyInstance {
   const app = Fastify();
-  registerMcp(app, { todos: {} as never, files: {} as never, ...deps });
+  registerMcp(app, deps);
   app.addHook("preHandler", markConsumed);
   return app;
 }

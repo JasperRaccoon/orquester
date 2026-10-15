@@ -4,9 +4,6 @@
 // conversation family shares (content rights, a session-addressed scope claim, the chat result
 // frame): `messages.ts` and `lineage.ts` import them from here, never the other way round
 // (`sessions.ts` imports this module for `byAttention`).
-//
-// The pre-catalog `wait_for_session` definition (`watchTools`) stays exported, unserved, for its
-// tests until plan Task 14 deletes the legacy definitions.
 import { resolve as resolvePath } from "node:path";
 import { z } from "zod";
 import type { ApprovalPreviewSection, SessionSummary } from "@orquester/api";
@@ -15,11 +12,10 @@ import { canonicalProject, resolveProject, type CanonicalProject } from "../addr
 import { ToolError } from "../errors.ts";
 import { findSession, listSessions } from "../reads.ts";
 import { clipText, MAX_ECHO_CHARS } from "../result.ts";
-import { defineTool, READ_ONLY, type ToolDef } from "../tool.ts";
 import { buildViewContext, sessionView, type SessionView } from "../views.ts";
 import { readWorkReport, waitForAttention, waitWhileWorking, type WatchScope, type WorkReport } from "../wait.ts";
 import { registerWait } from "../../agent-chat/waits.ts";
-import { defineTool as defineCatalogTool, READ_ONLY as CATALOG_READ_ONLY, type AnyOrquesterTool, type ApprovalPreview, type ScopeClaim, type ScopeContext, type ThreadCaller, type ToolCaller } from "../catalog/contract.ts";
+import { defineTool, READ_ONLY, type AnyOrquesterTool, type ApprovalPreview, type ScopeClaim, type ScopeContext, type ThreadCaller, type ToolCaller } from "../catalog/contract.ts";
 
 const instant = (stamp: string | null | undefined): number => Date.parse(stamp ?? "");
 const createdAt = (s: SessionSummary): number => { const t = instant(s.createdAt); return Number.isNaN(t) ? 0 : t; };
@@ -34,38 +30,6 @@ const flaggedAt = (s: SessionSummary): number => { const t = instant(s.activity?
 export function byAttention(a: SessionSummary, b: SessionSummary): number {
   return flaggedAt(b) - flaggedAt(a) || createdAt(b) - createdAt(a);
 }
-
-const waitForSession = defineTool({
-  name: "wait_for_session",
-  title: "Wait for a session to need you",
-  description: "Block until a session (or any session of a project, or any at all) needs attention — a question, an approval, a plan to review, a finished turn, an error — after `after`. Pass the returned `cursor` as the next call's `after` so nothing is missed or repeated. Never poll: call this instead.",
-  input: {
-    sessionId: z.string().min(1).optional().describe("Watch one session."),
-    project: z.string().optional().describe("Watch every session of this project (path or \"workspace/project\")."),
-    after: z.string().optional().describe("ISO timestamp; only attention raised after it counts. Default: now. Use the previous result's cursor."),
-    timeoutMs: z.number().int().min(1_000).max(600_000).default(120_000).describe("How long to wait (ms, max 600000).")
-  },
-  annotations: READ_ONLY,
-  async run(args, { api, signal, now }) {
-    if (args.sessionId !== undefined && args.project !== undefined) throw new ToolError("INVALID_ARGUMENT", "Pass sessionId or project, not both.");
-    // Before any await, so a bare call waits for what happens after the call itself.
-    const after = args.after ?? new Date(now()).toISOString();
-    if (Number.isNaN(Date.parse(after))) throw new ToolError("INVALID_ARGUMENT", "`after` must be an ISO-8601 timestamp.");
-    // One session: its close ends the wait (SESSION_NOT_FOUND). A wider wait just stops watching a closed one.
-    let scope: WatchScope = { select: () => true };
-    if (args.sessionId !== undefined) scope = { sessionId: (await findSession(api, args.sessionId)).id };
-    else if (args.project !== undefined) { const path = (await resolveProject(api, args.project)).path; scope = { select: (s) => s.projectPath === path }; }
-    const r = await waitForAttention(api, { ...scope, after, timeoutMs: args.timeoutMs, signal, now });
-    if (r.sessions.length === 0) return { sessions: [], cursor: r.cursor, timedOut: r.timedOut };
-    const ctx = await buildViewContext(api);
-    // Newest attention first, as the Attention Center lists its flagged rows (attentionQualifies guarantees each a stamp).
-    const sessions = [...r.sessions].sort(byAttention).map((s) => sessionView(s, ctx));
-    return { sessions, cursor: r.cursor, timedOut: r.timedOut };
-  }
-});
-
-/** The pre-catalog definition (unserved; its tests run it until plan Task 14 deletes it). */
-export const watchTools: ToolDef[] = [waitForSession];
 
 // ---------------------------------------------------------------------------
 // Shared by the conversation family (messages.ts, lineage.ts, watch.ts)
@@ -284,7 +248,7 @@ function pickWords(report: WorkReport): Record<string, unknown> {
 
 const sessionIdField = z.string().min(1);
 
-export const waitForSessionTool = defineCatalogTool({
+export const waitForSessionTool = defineTool({
   name: "wait_for_session",
   title: "Wait for a session",
   description:
@@ -330,7 +294,7 @@ export const waitForSessionTool = defineCatalogTool({
     const sections: ApprovalPreviewSection[] = [{ kind: "fields", title: "Request", rows: [{ label: "Action", value: "wait on the status of" }, { label: args.project !== undefined ? "Project" : "Sessions", value: where }, ...rows] }];
     return { title: `${caller ? agentLabel(caller) : "An agent"} wants to wait on chats in another project`, scopeLabel: "Another project", sections };
   },
-  annotations: CATALOG_READ_ONLY,
+  annotations: READ_ONLY,
   resultKind: "json",
   async run(args, ctx) {
     checkWaitArgs(args);

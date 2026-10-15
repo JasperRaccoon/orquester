@@ -22,7 +22,7 @@ before(async () => {
   dir = await tempAppdir(["acme/api"]);
   h = await boot(dir.root);
   mcp = Fastify();
-  registerMcp(mcp, { createApi: () => h.api, todos: {} as never, files: {} as never });
+  registerMcp(mcp, { createApi: () => h.api });
   // Match IncomingMessage after Fastify has consumed its body (light-my-request omits it).
   mcp.addHook("preHandler", async (request) => { (request.raw as unknown as { destroyed: boolean }).destroyed = true; });
   await mcp.ready();

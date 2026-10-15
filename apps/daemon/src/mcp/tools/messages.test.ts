@@ -1,3 +1,15 @@
+/**
+ * The send and read paths of the conversation family's tools, ported from the pre-catalog
+ * definitions' tests (spec §11: `send_message {wait, timeoutMs}` is `{reply, timeoutSeconds}`,
+ * `implement_plan` is `send_message {implementPlan: true}`; `read_transcript` is the sessions
+ * family's):
+ * - `wait: false` is the external `reply: "none"` — unchanged: a working session is steered;
+ * - `wait: true` on a turn the message steers or starts, waited on itself, is the old semantics an
+ *   OLD agent host's `thread_send {wait}` keeps (spec §14.1, `legacyAlias`): the tests drive it as
+ *   that alias's call (a chat caller whose provenance passes the text through, so the posted input
+ *   is the message itself); an external `reply: "wait"` queues instead (`conversation.chat.test.ts`);
+ * - a `/goal` the host runs (Codex) is the external `reply: "wait"` / `"none"` (`goalTool`).
+ */
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp,mkdir,rm } from "node:fs/promises";
@@ -7,8 +19,9 @@ import { z } from "zod";
 import { agentChatRoutes,encodeHistoryCursor,type ThreadItem,type ThreadSnapshotPayload,type Turn } from "@orquester/api/agent-chat";
 import { busEvent,FakeDaemonApi } from "../testing.ts";
 import { activity,chatSummary,head,message,shellSummary,snapshot,stamp,turn,WF,workflowRoster } from "../fixtures.ts";
-import type { ToolContext } from "../tool.ts";
-import { messageTools } from "./messages.ts";
+import type { CallContext } from "../catalog/contract.ts";
+import { sendMessageTool } from "./messages.ts";
+import { sessionsFamily } from "./sessions.ts";
 
 const resultBytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value), "utf8");
 
@@ -32,7 +45,7 @@ async function harness(sessions = [chatSummary(), shellSummary()], snap = snapsh
     .on("GET", "/api/sessions/c1/thread", { status: 200, body: { kind: "snapshot", thread: { ...snap, head: { ...snap.head, projectPath, cwd: projectPath } } } })
     .on("GET", "/api/registry", { status: 200, body: registry }).on("GET", "/api/agent/providers", { status: 200, body: providers })
     .on("GET", "/api/agent-accounts", { status: 200, body: accounts });
-  const ctx: ToolContext = { api, todos: {} as never, files: {} as never, signal: new AbortController().signal, now: () => Date.parse("2026-09-22T12:00:00.000Z") };
+  const ctx: ToolContext = { api, signal: new AbortController().signal, now: () => Date.parse("2026-09-22T12:00:00.000Z") };
   return { api, ctx, projectPath, root, close: () => rm(root, { recursive: true, force: true }) };
 }
 
@@ -49,7 +62,35 @@ function settledFlag(p: Promise<unknown>): () => boolean {
   return () => settled;
 }
 
-const tool = (name: string) => messageTools.find((t) => t.name === name)!;
+/** What these tests hand a tool: the daemon API, the call's signal and clock. */
+type ToolContext = Pick<CallContext, "api" | "signal" | "now">;
+const turnOf = { interactionMode: "default" as const, provenance: (_origin: unknown, text: string) => text };
+/** An external caller (full trust), as the executor builds it for `/mcp`. */
+const external = (ctx: ToolContext): CallContext => ({ ...ctx, caller: { kind: "external" }, turn: turnOf });
+/** An old host's `thread_send {wait: true}` (spec §14.1): a chat caller in Full access, the alias's old semantics. */
+const legacyWait = (ctx: ToolContext): CallContext => ({
+  ...ctx,
+  caller: { kind: "thread", threadId: "me", title: "Old host chat", projectPath: "", workspace: "", cwd: "/tmp", agentId: "claude", callId: "call-1", runtimeMode: "full-access", planning: false, workflowOwned: false, exchange: null },
+  turn: turnOf,
+  legacyAlias: "thread_send"
+});
+type Run = (args: Record<string, unknown>, ctx: ToolContext) => Promise<Record<string, unknown>>;
+const seconds = (ms: unknown) => Math.max(1, Math.ceil(Number(ms) / 1000));
+const sendRun: Run = ({ wait, timeoutMs, ...args }, ctx) =>
+  (wait === true
+    ? sendMessageTool.run({ ...args, reply: "wait", timeoutSeconds: seconds(timeoutMs) } as never, legacyWait(ctx))
+    : sendMessageTool.run({ ...args, reply: "none" } as never, external(ctx))) as Promise<Record<string, unknown>>;
+/** A Codex `/goal` the host runs: the external tool, `wait` as `reply: "wait"`. */
+const goalTool: { run: Run } = {
+  run: ({ wait, timeoutMs, ...args }, ctx) =>
+    sendMessageTool.run({ ...args, reply: wait === true ? "wait" : "none", ...(wait === true ? { timeoutSeconds: seconds(timeoutMs) } : {}) } as never, external(ctx)) as Promise<Record<string, unknown>>
+};
+const readTranscriptTool = sessionsFamily.find((t) => t.name === "read_transcript")!;
+const tool = (name: "send_message" | "implement_plan" | "read_transcript"): { input: typeof readTranscriptTool.input; run: Run } => {
+  if (name === "read_transcript") return { input: readTranscriptTool.input, run: (args, ctx) => readTranscriptTool.run(args as never, external(ctx)) as Promise<Record<string, unknown>> };
+  if (name === "implement_plan") return { input: sendMessageTool.input, run: ({ wait: _wait, timeoutMs: _timeout, ...args }, ctx) => sendMessageTool.run({ ...args, implementPlan: true, reply: "none" } as never, external(ctx)) as Promise<Record<string, unknown>> };
+  return { input: sendMessageTool.input, run: sendRun };
+};
 const done = (over = {}) => chatSummary({ latestTurn: { turnId: "t2", state: "completed", startedAt: stamp(2), completedAt: stamp(3) }, ...over });
 
 test("send_message posts the turn body, waits for the new turn and returns its reply", async (t) => {
@@ -171,7 +212,7 @@ test("send_message: a needs-input the snapshot does not confirm is the summary's
   assert.ok(settled(), "the bus event ends the stale wait at once, long before the 2 s re-check");
   const r = await p;
   assert.equal(r.outcome, "completed"); assert.equal(r.turnId, "t2"); assert.equal(r.reply, "done."); assert.equal(r.pending, undefined);
-  assert.equal((r.session as { lastReply?: unknown }).lastReply, undefined, "the reply is returned once, as `reply`");
+  assert.equal(r.session, undefined, "the alias answers the reply, not the session detail");
 });
 
 test("send_message: a wait on a flag the snapshot never confirms still ends — at the timeout, on a close, on an abort", async (t) => {
@@ -490,9 +531,7 @@ test("send_message: a reply too wide for one result beside a wide plan is cut by
   const text = r.reply as string;
   assert.equal(r.replyTruncated, true);
   assert.ok(text.length > 0 && text.length < reply.length && reply.startsWith(text) && !/[\uD800-\uDBFF]$/.test(text), "a head of the reply, whole code points");
-  const session = r.session as { lastReply?: unknown; plan?: { markdown: string; truncated: boolean } };
-  assert.equal(session.lastReply, undefined, "returned once, as reply");
-  assert.deepEqual([session.plan?.markdown === plan, session.plan?.truncated], [true, false], "the reply went first, and cutting it made room");
+  assert.equal(r.session, undefined, "the alias answers the reply, not the session detail");
 });
 
 // ---- Older history (design item 3): read_transcript pages the host's thread index. ----
@@ -599,7 +638,7 @@ async function goalHarness(before: ThreadSnapshotPayload, after: (input: string)
 
 test("goals §5.1: a Codex /goal status runs on the host — no turn wait, and the status row is the answer", async (t) => {
   const h = await goalHarness(snapshot(), (input) => snapshot({ items: [message("user", input), goalStatusRow()] })); t.after(h.close);
-  const r = await tool("send_message").run({ sessionId: "c1", text: "  /goal status ", planMode: false, wait: true, timeoutMs: 120_000 }, h.ctx);
+  const r = await goalTool.run({ sessionId: "c1", text: "  /goal status ", planMode: false, wait: true, timeoutMs: 120_000 }, h.ctx);
   assert.deepEqual(h.bodies.map(({ input, interactionMode }) => ({ input, interactionMode })), [{ input: "/goal status", interactionMode: "default" }]);
   assert.equal(r.outcome, "goal");
   assert.equal(r.answer, "Goal: Ship the parser (active, 2 rounds)");
@@ -614,7 +653,7 @@ test("goals §5.1: a goal update answers /goal <objective>, with the rest of the
   let phase = 1;
   const h = await goalHarness(snapshot(), (input) => snapshot({ items: [message("user", input), cleared, ...(phase === 2 ? [set] : [])] })); t.after(h.close);
   let now = Date.parse("2026-09-22T12:00:00.000Z");
-  const p = tool("send_message").run({ sessionId: "c1", text: "/goal Ship it", planMode: false, wait: true, timeoutMs: 120_000 }, { ...h.ctx, now: () => now });
+  const p = goalTool.run({ sessionId: "c1", text: "/goal Ship it", planMode: false, wait: true, timeoutMs: 120_000 }, { ...h.ctx, now: () => now });
   const settled = settledFlag(p);
   await ticks(10);
   assert.equal(settled(), false, "an update alone waits for its siblings");
@@ -630,7 +669,7 @@ test("goals §5.1: a goal update answers /goal <objective>, with the rest of the
 test("goals §5.1: a failed goal command is outcome failed, and the answer says why", async (t) => {
   const failed = activity("goal.command.failed", { detail: "codex: thread/goal/set timed out" }, { summary: "Goal command failed", tone: "error" });
   const h = await goalHarness(snapshot(), (input) => snapshot({ items: [message("user", input), failed] })); t.after(h.close);
-  const r = await tool("send_message").run({ sessionId: "c1", text: "/goal pause", planMode: false, wait: true, timeoutMs: 120_000 }, h.ctx);
+  const r = await goalTool.run({ sessionId: "c1", text: "/goal pause", planMode: false, wait: true, timeoutMs: 120_000 }, h.ctx);
   assert.equal(r.outcome, "failed");
   assert.equal(r.answer, "Goal command failed: codex: thread/goal/set timed out");
 });
@@ -640,7 +679,7 @@ test("goals §5.1: only rows after the command's own message answer it, and a hi
   const achieved = activity("goal.updated", { goal: { objective: "Old", status: "complete" }, change: "achieved" }, { summary: "Goal achieved: Old" });
   const progress = activity("goal.updated", { goal: { objective: "Ship it", status: "active" }, change: "progress" }, { id: "goal-progress:c1", summary: "Goal progress" });
   const h = await goalHarness(snapshot(), (input) => snapshot({ items: [achieved, message("user", input), progress, goalStatusRow()] })); t.after(h.close);
-  const r = await tool("send_message").run({ sessionId: "c1", text: "/goal", planMode: false, wait: true, timeoutMs: 120_000 }, h.ctx);
+  const r = await goalTool.run({ sessionId: "c1", text: "/goal", planMode: false, wait: true, timeoutMs: 120_000 }, h.ctx);
   assert.equal(r.outcome, "goal");
   assert.equal(r.answer, "Goal: Ship the parser (active, 2 rounds)");
 });
@@ -648,7 +687,7 @@ test("goals §5.1: only rows after the command's own message answer it, and a hi
 test("goals §5.1: a command that writes no row comes back without an answer once the wait runs out", async (t) => {
   // Pausing a paused goal changes nothing, so nothing is written: the goal as it stands is in session.chat.
   const h = await goalHarness(snapshot(), (input) => snapshot({ items: [message("user", input)] })); t.after(h.close);
-  const r = await tool("send_message").run({ sessionId: "c1", text: "/goal pause", planMode: false, wait: true, timeoutMs: 120_000 }, { ...h.ctx, now: racing() });
+  const r = await goalTool.run({ sessionId: "c1", text: "/goal pause", planMode: false, wait: true, timeoutMs: 120_000 }, { ...h.ctx, now: racing() });
   assert.equal(r.outcome, "goal");
   assert.equal(r.answer, undefined);
   assert.ok(typeof r.hint === "string" && r.hint.length > 0);
@@ -657,7 +696,7 @@ test("goals §5.1: a command that writes no row comes back without an answer onc
 
 test("goals §5.1: wait:false posts a host /goal and returns sent, as for any message", async (t) => {
   const h = await goalHarness(snapshot(), (input) => snapshot({ items: [message("user", input), goalStatusRow()] })); t.after(h.close);
-  const r = await tool("send_message").run({ sessionId: "c1", text: "/goal clear", planMode: false, wait: false, timeoutMs: 1_000 }, h.ctx);
+  const r = await goalTool.run({ sessionId: "c1", text: "/goal clear", planMode: false, wait: false, timeoutMs: 1_000 }, h.ctx);
   assert.equal(r.outcome, "sent");
   assert.equal(r.answer, undefined);
   assert.equal(h.bodies.length, 1);
@@ -667,34 +706,34 @@ test("goals §5.1: an open request holds back every message but a /goal the host
   const asked = snapshot({ pending: { approvals: [{ requestId: "r1", requestKind: "command", createdAt: stamp(5) }], userInputs: [] } });
   const h = await goalHarness(asked, (input) => snapshot({ ...asked, items: [message("user", input), activity("goal.updated", { goal: { objective: "Ship it", status: "paused" }, change: "paused" }, { summary: "Goal paused" })] }), { hasPendingApprovals: true, chatSessionStatus: "running" });
   t.after(h.close);
-  const r = await tool("send_message").run({ sessionId: "c1", text: "/goal pause", planMode: false, wait: true, timeoutMs: 120_000 }, { ...h.ctx, now: racing() });
+  const r = await goalTool.run({ sessionId: "c1", text: "/goal pause", planMode: false, wait: true, timeoutMs: 120_000 }, { ...h.ctx, now: racing() });
   assert.equal(r.outcome, "goal");
   assert.equal(r.answer, "Goal paused");
   assert.equal((r.pending as { approvals: { requestId: string }[] }).approvals[0]!.requestId, "r1", "the request is still open, and reported");
   // A prompt still waits for the card, on the same tab.
-  await assert.rejects(tool("send_message").run({ sessionId: "c1", text: "hi", planMode: false, wait: false, timeoutMs: 1_000 }, h.ctx), (e: { code: string }) => e.code === "PENDING_REQUEST");
+  await assert.rejects(goalTool.run({ sessionId: "c1", text: "hi", planMode: false, wait: false, timeoutMs: 1_000 }, h.ctx), (e: { code: string }) => e.code === "PENDING_REQUEST");
   assert.equal(h.bodies.length, 1);
   // Where the provider parses /goal (Claude), it is a prompt like any other.
   const claude = await harness([chatSummary({ hasPendingApprovals: true })], asked); t.after(claude.close);
-  await assert.rejects(tool("send_message").run({ sessionId: "c1", text: "/goal Ship it", planMode: false, wait: false, timeoutMs: 1_000 }, claude.ctx), (e: { code: string }) => e.code === "PENDING_REQUEST");
+  await assert.rejects(goalTool.run({ sessionId: "c1", text: "/goal Ship it", planMode: false, wait: false, timeoutMs: 1_000 }, claude.ctx), (e: { code: string }) => e.code === "PENDING_REQUEST");
 });
 
 test("goals §5.1: a /goal whose route cannot be told — the capabilities unread — is refused, as plan mode is", async (t) => {
   // Sent as a prompt, the host might run it as a command while the call waited on a turn that never starts.
   const blind = await goalHarness(snapshot(), () => snapshot()); t.after(blind.close);
   blind.api.on("GET", "/api/agent/providers", { status: 503, body: { code: "HOST_UNAVAILABLE", message: "down" } });
-  await assert.rejects(tool("send_message").run({ sessionId: "c1", text: "/goal pause", planMode: false, wait: true, timeoutMs: 120_000 }, blind.ctx),
+  await assert.rejects(goalTool.run({ sessionId: "c1", text: "/goal pause", planMode: false, wait: true, timeoutMs: 120_000 }, blind.ctx),
     (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT");
   assert.equal(blind.bodies.length, 0, "nothing was sent");
   // Any other text is unaffected: it needs no route.
   blind.api.on("GET", "/api/sessions/c1/thread", { status: 200, body: { kind: "snapshot", thread: { ...snapshot(), head: { ...snapshot().head, adapter: "codex", refId: "codex", projectPath: blind.projectPath, cwd: blind.projectPath } } } });
-  assert.equal((await tool("send_message").run({ sessionId: "c1", text: "hi", planMode: false, wait: false, timeoutMs: 1_000 }, blind.ctx)).outcome, "sent");
+  assert.equal((await goalTool.run({ sessionId: "c1", text: "hi", planMode: false, wait: false, timeoutMs: 1_000 }, blind.ctx)).outcome, "sent");
 });
 
 test("goals §5.1: a host /goal with attachments is refused before anything is uploaded or posted", async (t) => {
   const h = await goalHarness(snapshot(), () => snapshot()); t.after(h.close);
   await assert.rejects(
-    tool("send_message").run({ sessionId: "c1", text: "/goal Ship it", attachments: [{ name: "a.png", base64: Buffer.from("png").toString("base64") }], planMode: false, wait: false, timeoutMs: 1_000 }, h.ctx),
+    goalTool.run({ sessionId: "c1", text: "/goal Ship it", attachments: [{ name: "a.png", base64: Buffer.from("png").toString("base64") }], planMode: false, wait: false, timeoutMs: 1_000 }, h.ctx),
     (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT"
   );
   assert.equal(h.api.uploads.length, 0);
@@ -726,7 +765,7 @@ test("goals §5.1: the answer window runs from when the session is up — a cold
       ? snapshot({ head: head({ session: { status: "starting", activeTurnId: null } }), items: [message("user", input)] })
       : snapshot({ items: [message("user", input), statusRow] }), { chatSessionStatus: "stopped" }); t.after(h.close);
   let now = Date.parse("2026-09-22T12:00:00.000Z");
-  const p = tool("send_message").run({ sessionId: "c1", text: "/goal status", planMode: false, wait: true, timeoutMs: 120_000 }, { ...h.ctx, now: () => now });
+  const p = goalTool.run({ sessionId: "c1", text: "/goal status", planMode: false, wait: true, timeoutMs: 120_000 }, { ...h.ctx, now: () => now });
   const settled = settledFlag(p);
   await ticks(10);
   now += 20_000;
@@ -746,7 +785,7 @@ test("goals §5.1: a pause of a paused goal, or a resume of an active one, waits
     const h = await goalHarness(checked, (input) => snapshot({ ...checked, items: [message("user", input)] }));
     let now = Date.parse("2026-09-22T12:00:00.000Z");
     const abort = new AbortController();
-    const p = tool("send_message").run({ sessionId: "c1", text, planMode: false, wait: true, timeoutMs: 120_000 }, { ...h.ctx, signal: abort.signal, now: () => now });
+    const p = goalTool.run({ sessionId: "c1", text, planMode: false, wait: true, timeoutMs: 120_000 }, { ...h.ctx, signal: abort.signal, now: () => now });
     const settled = settledFlag(p);
     await ticks(10);
     now += 1_000;
@@ -772,7 +811,7 @@ test("goals §5.1: an answer is cut by bytes, and says so, so the result keeps i
   // A status quoting a 4 000-character objective in three-byte characters, and a detail beside it.
   const huge = activity("goal.status", {}, { summary: `Goal: ${"語".repeat(20_000)}` });
   const h = await goalHarness(snapshot(), (input) => snapshot({ items: [message("user", input), huge] })); t.after(h.close);
-  const r = await tool("send_message").run({ sessionId: "c1", text: "/goal status", planMode: false, wait: true, timeoutMs: 120_000 }, h.ctx);
+  const r = await goalTool.run({ sessionId: "c1", text: "/goal status", planMode: false, wait: true, timeoutMs: 120_000 }, h.ctx);
   assert.equal(r.outcome, "goal");
   assert.equal(r.answerTruncated, true);
   assert.ok(Buffer.byteLength(JSON.stringify(r.answer), "utf8") - 2 <= 8_192);
@@ -787,7 +826,7 @@ test("goals §5.7: a deploy's hold row is no answer: /goal status settles on its
   let phase = 1;
   const h = await goalHarness(snapshot(), (input) => snapshot({ items: [message("user", input), held, ...(phase === 2 ? [goalStatusRow()] : [])] })); t.after(h.close);
   let now = Date.parse("2026-09-22T12:00:00.000Z");
-  const p = tool("send_message").run({ sessionId: "c1", text: "/goal status", planMode: false, wait: true, timeoutMs: 120_000 }, { ...h.ctx, now: () => now });
+  const p = goalTool.run({ sessionId: "c1", text: "/goal status", planMode: false, wait: true, timeoutMs: 120_000 }, { ...h.ctx, now: () => now });
   const settled = settledFlag(p);
   await ticks(10);
   assert.equal(settled(), false, "the hold's row settled nothing");

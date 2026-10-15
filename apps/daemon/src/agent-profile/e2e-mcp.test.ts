@@ -64,7 +64,7 @@ test("MCP profile creation and partial edits persist secrets without returning t
   await app.ready();
   const api = new InjectDaemonApi({ app, authorization: undefined, agentChat: null, broadcaster: new Broadcaster(), fsRoot: root, workspacesDir: root });
   mcp = Fastify({ logger: false });
-  registerMcp(mcp, { createApi: () => api, todos: {} as never, files: {} as never });
+  registerMcp(mcp, { createApi: () => api });
   const address = await mcp.listen({ host: "127.0.0.1", port: 0 });
 
   const token = "e2e-SECRET-token-0001";

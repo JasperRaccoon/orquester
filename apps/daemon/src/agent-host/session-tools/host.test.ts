@@ -17,15 +17,14 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
 import type { SessionToolCallRequest, SessionToolsManifest } from "../host-protocol.ts";
-import { legacyChatTools } from "../../mcp/catalog/legacy.ts";
 import { DAEMON_UNAVAILABLE_MESSAGE, cancelledResult } from "../../session-tools/results.ts";
-import { testSessionToolRegistry } from "../../session-tools/testing.ts";
+import { TEST_CHAT_TOOLS } from "../../session-tools/testing.ts";
 import { buildChatToolDefinitions, knownSessionToolNames } from "./definitions.ts";
 import { createDaemonForwarder, type ManifestAnswer } from "./forwarder.ts";
 import { createSessionToolsHost, issueSessionToolsGrant, type SessionToolsGrant, type SessionToolsHost } from "./index.ts";
 import { LEGACY_SESSION_TOOL_DEFINITIONS, LEGACY_SESSION_TOOL_INSTRUCTIONS } from "./legacy-definitions.ts";
 
-const TEST_TOOLS = legacyChatTools(testSessionToolRegistry().tools);
+const TEST_TOOLS = TEST_CHAT_TOOLS;
 /** A Codex launch in the system home of project /p (what the fallback is keyed on). */
 const CODEX = { agent: "codex" as const, home: "system", project: "/p" };
 const CLAUDE = { agent: "claude" as const, home: "system", project: "/p" };

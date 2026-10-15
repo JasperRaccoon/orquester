@@ -7,7 +7,6 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { ToolError } from "../mcp/errors.ts";
-import { asWaiter as reExported } from "../session-tools/threads/shared.ts";
 import { asWaiter, registerWait, waitsOn } from "./waits.ts";
 
 const isCycle = (error: unknown) => error instanceof ToolError && error.code === "WAIT_CYCLE";
@@ -37,9 +36,5 @@ describe("wait registry", () => {
     assert.throws(() => registerWait("y", "x"), isCycle);
     two();
     assert.equal(waitsOn("x", "y"), false);
-  });
-
-  it("is the registry the session-tool toolkit uses (re-exported, one per daemon)", () => {
-    assert.equal(reExported, asWaiter);
   });
 });

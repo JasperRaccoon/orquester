@@ -436,6 +436,37 @@ test("create_session caps and refusals: a broader mode, no prompt, 6 unfinished 
   assert.equal(code(await deep.call("create_session", { prompt: "x" })), "DELEGATION_LIMIT");
 });
 
+test("create_session (ported from the old delegate_task): a child opened a moment ago counts before its summary shows a turn, one that never started stops counting after its grace; depth is counted up the open tabs; a chat with no project names one", async () => {
+  const child = (id: string, createdAt: string) => tab(id, OWN, { createdAt, latestTurn: null, lineage: { parentThreadId: "me", relation: "delegate", createdAt: stamp(1), agentCreated: true } });
+  // Six just opened, no turn on their summary yet: they hold their slots.
+  const fresh = new Date().toISOString();
+  const r = rig({ sessions: [...tabs().filter((s) => s.lineage?.parentThreadId !== "me"), ...Array.from({ length: 6 }, (_, i) => child(`kid${i}`, fresh))] });
+  createRoutes(r.api, r.sessions);
+  assert.equal(code(await r.call("create_session", { prompt: "x", delegate: true })), "DELEGATION_LIMIT");
+  // Six that never started, opened more than the grace window ago: no slot held.
+  const stale = new Date(Date.now() - 61_000).toISOString();
+  const later = rig({ sessions: [...tabs().filter((s) => s.lineage?.parentThreadId !== "me"), ...Array.from({ length: 6 }, (_, i) => child(`old${i}`, stale))] });
+  createRoutes(later.api, later.sessions);
+  const room = await later.call("create_session", { prompt: "x", delegate: true, reply: "none" });
+  assert.equal(room.isError, undefined, JSON.stringify(body(room)));
+  // Lineage records from before `delegationDepth`: counted up the open tabs (me → d1 → d1f (a fork, not counted) → d2).
+  const chain = [
+    ...tabs().map((s) => (s.id === "me" ? { ...s, lineage: undefined } : s)),
+    tab("d1", OWN, { lineage: { parentThreadId: "me", relation: "delegate", createdAt: stamp(1), agentCreated: true } }),
+    tab("d1f", OWN, { lineage: { parentThreadId: "d1", relation: "fork", createdAt: stamp(1), agentCreated: true } }),
+    tab("d2", OWN, { lineage: { parentThreadId: "d1f", relation: "delegate", createdAt: stamp(1), agentCreated: true } })
+  ];
+  const deep = rig({ sessions: chain, threads: { d1: thread("d1", { head: head({ id: "d1", runtimeMode: "full-access" }) }), d2: thread("d2", { head: head({ id: "d2", runtimeMode: "full-access" }) }) } });
+  createRoutes(deep.api, deep.sessions);
+  assert.equal(code(await deep.call("create_session", { prompt: "more", delegate: true }, { threadId: "d2" })), "DELEGATION_LIMIT");
+  const fine = await deep.call("create_session", { prompt: "fine", delegate: true, reply: "none" }, { threadId: "d1" });
+  assert.equal(fine.isError, undefined, JSON.stringify(body(fine)));
+  // A chat bound to no project opens a chat only where it names one.
+  const homeless = rig();
+  createRoutes(homeless.api, homeless.sessions);
+  assert.equal(code(await homeless.call("create_session", { prompt: "x" }, { projectPath: "", workspace: "" })), "INVALID_ARGUMENT");
+});
+
 test("create_session in another workspace: a boundary card showing the prompt; workflow-owned callers are denied; an inherited account gone falls back", async () => {
   const r = rig();
   createRoutes(r.api, r.sessions);

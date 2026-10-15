@@ -1,15 +1,12 @@
 // Catalog family module `sessions` (Sessions: reads and lifecycle) — owned by plan Task 7 (unified MCP, Wave 3):
 // list_sessions, get_session, read_transcript, get_turn_diff, update_session, control_session (unified MCP design
-// 2026-10-15 §4 rows 4–6, 8, 11, 12; §4.1; §5; §13 a–c). `create_session` stays the pre-catalog external tool here,
-// wrapped by `../catalog/legacy.ts`, until Task 8 replaces it (`messages.ts`).
+// 2026-10-15 §4 rows 4–6, 8, 11, 12; §4.1; §5; §13 a–c). `create_session` is the conversation family's (`messages.ts`).
 //
 // Shared with this task's other family modules (`output.ts`, `requests.ts`, `search.ts`): the scope claim of a
 // session-addressed call (`sessionClaim`), content rights (§5.2, §13 a), the chat result frame (`notice`, `threadRef`,
 // §4.3) and the boundary card a session-addressed call shows (`sessionCard`, §7.1).
-import { stat } from "node:fs/promises";
-import { resolve } from "node:path";
 import { z } from "zod";
-import { SYSTEM_ACCOUNT_ID, type AgentConversationsResponse, type ApprovalPreviewSection, type CreateSessionRequest, type SessionLineageResponse, type SessionSummary } from "@orquester/api";
+import { SYSTEM_ACCOUNT_ID, type ApprovalPreviewSection, type SessionLineageResponse, type SessionSummary } from "@orquester/api";
 import {
   agentChatRoutes,
   isSettledConversationCompaction,
@@ -18,8 +15,6 @@ import {
   startedTurns,
   threadToolReference,
   UNTRUSTED_NOTICE,
-  type AccountHomeKind,
-  type CreateAgentChatSessionFields,
   type ModelSelection,
   type RuntimeMode,
   type StartedTurn,
@@ -30,13 +25,11 @@ import {
   type ThreadToolRelation,
   type TurnDiffResponse
 } from "@orquester/api/agent-chat";
-import { assertInsideFsRoot, FsSandboxError } from "@orquester/config/fs";
 import { canonicalProject, resolveProject, type CanonicalProject } from "../addressing.ts";
 import { findAgent, loadAgents, resolveModelSelection, validateAccountId, type ResolvedSelection } from "../agents.ts";
 import {
   defineTool,
   DESTRUCTIVE,
-  MUTATING,
   MUTATING_IDEMPOTENT,
   READ_ONLY,
   type AnyOrquesterTool,
@@ -53,7 +46,6 @@ import { runtimeModesUpTo } from "../gate/turn-policy.ts";
 import { readOlderHistory, unavailableHint } from "../history.ts";
 import { findSession, listSessions, readThread, requireChatSession, sendCommand } from "../reads.ts";
 import { clipText, fitJsonBytes, jsonBytes, MAX_ECHO_CHARS, MAX_RESULT_BYTES, resultBytes, toSafeToolError } from "../result.ts";
-import { defineTool as defineLegacyTool, type ToolDef } from "../tool.ts";
 import { transcriptEntries, transcriptRange, type TranscriptResult } from "../transcript.ts";
 import { buildViewContext, chatDetail, CONTENT_OMITTED_HINT, detailWithoutContent, fitDetail, rowWithoutContent, sessionDetail, sessionView, type SessionDetail } from "../views.ts";
 import { byAttention } from "./watch.ts";
@@ -560,91 +552,6 @@ const getTurnDiff = defineTool({
     return { ...frame.before, ...diff, ...frame.after };
   }
 });
-
-// ---------------------------------------------------------------------------
-// create_session — the pre-catalog external tool, until Task 8 replaces it
-// ---------------------------------------------------------------------------
-
-async function isDirectory(path: string): Promise<boolean> {
-  try { return (await stat(path)).isDirectory(); } catch { return false; }
-}
-
-/** A `cwd` argument: absolute, or relative to the project; an existing directory inside the sandbox. */
-async function resolveCwd(api: DaemonApi, projectPath: string, input: string): Promise<string> {
-  const cwd = resolve(projectPath, input);
-  let real: string;
-  try {
-    real = await assertInsideFsRoot(api.fsRoot, cwd);
-  } catch (error) {
-    if (error instanceof FsSandboxError) throw new ToolError("PATH_NOT_ALLOWED", "cwd is not allowed (outside the sandbox).");
-    throw error;
-  }
-  // The sandbox check accepts a path that does not exist yet; a session needs a real directory.
-  if (!(await isDirectory(real))) throw new ToolError("INVALID_ARGUMENT", `cwd "${input}" is not an existing directory.`);
-  return cwd;
-}
-
-interface ResumeRow { id: string; agent: string; title: string; home: AccountHomeKind; accountId?: string }
-
-const createSession = defineLegacyTool({
-  name: "create_session",
-  title: "Open a chat session",
-  description: "Open a new chat tab for an agent in a project — the GUI's '+' menu — with model, options (effort…), permission mode and account; or resume a past conversation from list_conversations. Returns the session detail. Send the first message with send_message.",
-  input: {
-    project: z.string().describe("Absolute project path or \"<workspace>/<project>\"."),
-    agent: z.string().min(1).optional().describe("Agent id from list_agents (claude, codex, opencode, grok). Required unless `resume` is given."),
-    // min(1): an empty model would read as none, so the default model would launch in its place (agents.ts).
-    model: z.string().min(1).optional().describe("Model slug from list_agents; default: the agent's default."),
-    options: optionsSchema.optional(),
-    runtimeMode: runtimeModeSchema.default("full-access").describe("Permission mode: approval-required (Supervised), auto-accept-edits, auto, full-access."),
-    accountId: z.string().optional().describe("A managed account id from list_agents, or \"system\"; default: the family's default account."),
-    title: z.string().min(1).max(300).optional().describe("Tab title; default: the agent's name (or the conversation's)."),
-    // min(1): an empty cwd resolves to the project itself, the default, which is reading it as omitted.
-    cwd: z.string().min(1).optional().describe("Working directory: absolute or relative to the project, an existing directory inside the sandbox; default: the project path."),
-    resume: z.object({ conversationId: z.string().min(1).describe("Conversation id from list_conversations for the same project.") }).optional().describe("Resume this conversation (id from list_conversations for the same project). One stored in a managed account's home resumes under that account.")
-  },
-  annotations: MUTATING,
-  async run(args, { api }) {
-    const project = await resolveProject(api, args.project);
-    let resumeRow: ResumeRow | undefined;
-    if (args.resume) {
-      const res = expectOk<AgentConversationsResponse>(await api.request("GET", "/api/agents/conversations", { query: { path: project.path } }));
-      const row = res.conversations.find((c) => c.id === args.resume!.conversationId);
-      if (!row) throw new ToolError("INVALID_ARGUMENT", `No conversation "${args.resume.conversationId}" in this project; pick one from list_conversations.`);
-      resumeRow = { id: row.id, agent: row.agentRefId, title: row.title, home: row.home ?? "system", ...(row.accountId ? { accountId: row.accountId } : {}) };
-    }
-    const refId = args.agent ?? resumeRow?.agent;
-    if (!refId) throw new ToolError("INVALID_ARGUMENT", "agent is required (see list_agents).");
-    if (resumeRow && args.agent && resumeRow.agent !== args.agent) throw new ToolError("INVALID_ARGUMENT", `Conversation "${resumeRow.id}" belongs to ${resumeRow.agent}, not ${args.agent}.`);
-    const agent = findAgent(await loadAgents(api), refId);
-    if (!agent.enabled) throw new ToolError("INVALID_ARGUMENT", `${refId} is not available on this host (not installed or disabled).`);
-    const selection = resolveModelSelection(agent, { model: args.model, options: args.options });
-    let accountId = validateAccountId(agent, args.accountId);
-    // The GUI's `resumeAccountId`: a transcript in a managed account's home is visible only from there, so that
-    // account is forced. A system-home transcript is visible from every home (each managed home links its history
-    // back), so the caller's pick stands and an omitted one stays omitted — the family default, as the GUI's chip
-    // pre-selects; forcing System there broke resume whenever the system login was stale.
-    if (resumeRow?.home === "account" && resumeRow.accountId) accountId = resumeRow.accountId;
-    const cwd = args.cwd === undefined ? project.path : await resolveCwd(api, project.path, args.cwd);
-    const running = (await listSessions(api, project.path)).filter((s) => s.status === "running").length;
-    if (running >= MAX_RUNNING_SESSIONS_PER_PROJECT) throw new ToolError("SESSION_BUSY", `${running} sessions are open in this project (limit ${MAX_RUNNING_SESSIONS_PER_PROJECT}); close some first.`);
-    const chat: CreateAgentChatSessionFields = { ...(accountId ? { accountId } : {}), modelSelection: { model: selection.model, options: selection.options }, runtimeMode: args.runtimeMode };
-    if (resumeRow) chat.resume = { home: resumeRow.home, conversationId: resumeRow.id };
-    const body: CreateSessionRequest = { kind: "agent-chat", refId, projectPath: project.path, cwd, title: args.title ?? (resumeRow?.title || agent.name), ...(accountId ? { accountId } : {}), chat };
-    const summary = expectOk<SessionSummary>(await api.request("POST", "/api/sessions", { body }));
-    try {
-      return { session: await chatDetail(api, summary.id) };
-    } catch (error) {
-      // The tab exists now: a caller told only that the read failed would retry and open a second one. The failure keeps
-      // the code and safe message it would have had (a thrown one is logged, never echoed); the detail names the tab.
-      const failure = toSafeToolError(error).structuredContent;
-      throw new ToolError(failure.code, `Session ${summary.id} was created but could not be read: ${failure.message}`, { ...detailFields(failure.detail), sessionId: summary.id, created: true });
-    }
-  }
-});
-
-/** The pre-catalog `create_session` (external only) — Task 8's `create_session` replaces it. */
-export const legacyCreateSessionTools: ToolDef[] = [createSession];
 
 // ---------------------------------------------------------------------------
 // update_session

@@ -6,9 +6,7 @@ import type { DaemonApi } from "./daemon-api.ts";
 import type { AnyOrquesterTool } from "./catalog/contract.ts";
 import { catalogFor } from "./catalog/index.ts";
 import { audienceDescription, audienceSchema, audienceShape, executeToolCall } from "./executor.ts";
-import type { FsTools } from "./fs-tools.ts";
 import { argumentProblems, clipText, MAX_ECHO_CHARS } from "./result.ts";
-import type { TodoTools } from "./todo-tools.ts";
 
 export { argumentProblems };
 
@@ -18,8 +16,6 @@ const MCP_BODY_LIMIT = 16 * 1024 * 1024;
 export interface McpDeps {
   /** Built per request with the caller's own `Authorization` header, so every daemon call is authorised as the caller (spec §4.2). */
   createApi: (authorization: string | undefined) => DaemonApi;
-  todos: TodoTools;
-  files: FsTools;
   /**
    * The external principal's `credentialId` for an authenticated request (`./principal.ts`
    * `externalCredentialId`): every daemon call a tool makes acts as `{kind: "external",
@@ -92,7 +88,7 @@ function buildServer(deps: McpDeps, authorization: string | undefined, signal: A
     // The name is the caller's text, of any length: quoted back capped, as every refusal quotes a caller's value.
     if (!tool) throw new McpError(ErrorCode.InvalidParams, `Tool ${clipText(request.params.name, MAX_ECHO_CHARS)} not found`);
     return executeToolCall(
-      { legacy: { todos: deps.todos, files: deps.files } },
+      {},
       { name: tool.name, arguments: request.params.arguments },
       { caller: { kind: "external" }, api, signal, principal }
     );
