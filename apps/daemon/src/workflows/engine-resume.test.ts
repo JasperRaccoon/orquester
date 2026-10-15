@@ -240,6 +240,58 @@ describe("engine: resume after a restart", () => {
     assert.deepEqual(code.seen, ["B"], "A was not re-run");
   });
 
+  test("the engine stopping while a block persists its wait state: the run is not failed, and resumes after the restart", async () => {
+    // A run store whose writes can be held, so the stop is still in progress when the block persists.
+    class HeldRunStore extends InMemoryRunStore {
+      private held: Promise<void> | null = null;
+      private releaseHeld: (() => void) | null = null;
+      hold(): void {
+        this.held = new Promise((resolve) => {
+          this.releaseHeld = resolve;
+        });
+      }
+      release(): void {
+        this.releaseHeld?.();
+        this.held = null;
+      }
+      override async save(run: Parameters<InMemoryRunStore["save"]>[0]): Promise<void> {
+        if (this.held) await this.held;
+        return super.save(run);
+      }
+    }
+    const runStore = new HeldRunStore();
+    const env = restartable([workflow("w1", [T(), node("A", "shell"), node("W", "wait", { kind: "duration", minutes: 10 }), node("B", "code")], [edge("T", "A"), edge("A", "W"), edge("W", "B")])]);
+    const shared = { ...env.shared, runStore };
+    const gate = controlledExecutor("shell");
+    const first = createHarness({ ...shared, executors: { shell: gate } });
+    const { runId } = await first.engine.run("w1", {});
+    await flush();
+    assert.equal(gate.calls.length, 1, "A is running");
+    // The daemon starts stopping (its final save is held); A finishes and the Wait block starts,
+    // whose first act is persisting its timer — refused, as the engine is stopping.
+    runStore.hold();
+    const stopping = first.engine.stop();
+    gate.calls[0]!.resolve({ status: "succeeded", output: null });
+    await flush();
+    await flush();
+    runStore.release();
+    await stopping;
+    const saved = (await runStore.load(runId!))!;
+    assert.notEqual(saved.status, "failed");
+    assert.equal(saved.status, "running");
+    assert.equal(saved.blocks.W!.status, "running", "an engine stop is no block failure: W resumes");
+    assert.equal(saved.blocks.A!.status, "succeeded");
+
+    const code = scripted("code");
+    const second = createHarness({ ...shared, executors: { code } });
+    await second.engine.resume();
+    await flush();
+    await env.shared.clock.advance(10 * 60_000);
+    const result = await second.engine.waitForRun(runId!);
+    assert.equal(result.status, "succeeded");
+    assert.deepEqual(code.seen, ["B"]);
+  });
+
   test("a side-effecting block running without a WaitingOn is interrupted (no retry)", async () => {
     const env = restartable([workflow("w1", [T(), node("A", "code"), node("B", "code")], [edge("T", "A"), edge("A", "B", "error")])]);
     const first = env.boot({ code: controlledExecutor("code") });

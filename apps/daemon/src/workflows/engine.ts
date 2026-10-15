@@ -598,7 +598,7 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
     signal: AbortSignal,
     resumeFrom: WaitingOn | undefined,
     project: ProjectContext
-  ): Promise<NodeResult> => {
+  ): Promise<NodeResult | null> => {
     const executor = opts.executors[node.type] as { execute(ctx: NodeExecutionContext): Promise<NodeResult> } | undefined;
     if (!executor) {
       return { status: "failed", error: { kind: "internal", message: `No executor is installed for "${node.type}" blocks.` } };
@@ -691,6 +691,9 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
       }
       return result;
     } catch (error) {
+      // The engine stopped while the block persisted its wait state: no result — the block keeps
+      // what run.json last held and resumes after the restart (never recorded as failed).
+      if (error instanceof EngineStoppedError) return null;
       if (signal.aborted) return { status: "cancelled" };
       return { status: "failed", error: { kind: "internal", message: errorMessage(error) } };
     }
@@ -781,7 +784,7 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
 
       const result = await runExecutor(a, node, attempt, signal, resumeFrom, project);
       resumeFrom = undefined;
-      if (!alive(a)) return null;
+      if (result === null || !alive(a)) return null;
       releaseSlot(a, node.id);
 
       if (result.status === "failed" && isRetryable(result.error) && attempt < maxTriesOf(node) && !signal.aborted && a.ending === null) {
@@ -898,9 +901,13 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
     const onRunAbort = (): void => blockAbort.abort();
     if (a.abort.signal.aborted) blockAbort.abort();
     else a.abort.signal.addEventListener("abort", onRunAbort, { once: true });
+    // No result (the engine stopped, or the run ended, meanwhile): the walk must not go on past this
+    // block — it is unfinished, and resumes from run.json after the restart.
+    let unfinished = false;
     try {
       const result = await attemptLoop(a, node, blockAbort.signal, resume);
       if (result !== null) await finishBlock(a, node, result);
+      else unfinished = true;
     } catch (error) {
       logger.error("workflow block crashed", { runId: a.run.id, nodeId, error: errorMessage(error) });
       if (alive(a)) await finishBlock(a, node, { status: "failed", error: { kind: "internal", message: errorMessage(error) } });
@@ -908,7 +915,7 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
       a.abort.signal.removeEventListener("abort", onRunAbort);
       releaseSlot(a, nodeId);
       a.inFlight.delete(nodeId);
-      if (alive(a)) {
+      if (alive(a) && !unfinished) {
         refreshCurrent(a);
         markDirty(a);
         step(a);
