@@ -22,8 +22,12 @@ import { buildWorkflowSummary } from "./summary.ts";
 
 const roots: string[] = [];
 const apps: FastifyInstance[] = [];
+const stores: Array<{ flush(): Promise<void> }> = [];
 after(async () => {
   await Promise.all(apps.map((app) => app.close()));
+  // The stores write in the background (the run index is fire-and-forget): removing a directory
+  // while one still writes into it fails with ENOTEMPTY.
+  await Promise.all(stores.map((store) => store.flush()));
   await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -65,6 +69,7 @@ async function harness(options: { engine?: WorkflowEngine | null; projects?: Wor
   registerWorkflowRoutes(app, deps);
   await app.ready();
   apps.push(app);
+  stores.push(secrets, service, runStore);
   return { app, dir, service, secrets, runStore, setEngine: (next) => void (engine = next) };
 }
 
