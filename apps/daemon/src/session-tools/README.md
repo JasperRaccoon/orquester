@@ -360,14 +360,31 @@ session tools. See `agent-host/adapters/opencode/session-tools.ts`.
   `{tools, instructions, deny}`: the thread's resolved toolsets over `catalogFor("chat")`, no
   always-Admin tool for a workflow-owned chat, the per-thread instruction block (`instructions.ts`,
   worst case ≤ 2 048 bytes) and the daemon-pointing MCP servers of the thread's agent in its own
-  account home or project (`GET /api/agent-profile/daemon-mcp-servers`; none until it answers).
-  The host filters its static catalog by the names (`agent-host/session-tools/definitions.ts`); a
-  daemon without the route (404) gets the frozen legacy definitions
+  account home or project — the project root's configs and, for a chat started in a directory
+  inside it, every directory's on the way down to its cwd (`GET
+  /api/agent-profile/daemon-mcp-servers`, and `?projectPath=&cwd=` for such a chat). The host
+  filters its static catalog by the names (`agent-host/session-tools/definitions.ts`); a daemon
+  without the route (404) gets the frozen legacy definitions
   (`agent-host/session-tools/legacy-definitions.ts`).
+- **Unknown denials never launch (§12.1).** The daemon reads the daemon-pointing servers once per
+  scope at a time (concurrent manifests share the read), bounded at 5 s per manifest, reused for
+  30 s, the last good list kept after a failure. With no good read ever, the manifest route answers
+  503 and remembers the chat. The host then launches with the denials it last read for the same
+  agent, account home and project (the thread's own, else another thread's), with a
+  `runtime.warning` row on the thread. With none, it waits — at most 15 s from the launch's start
+  (`DENIALS_WAIT_MS`) — for a manifest: the daemon pushes one to every chat it refused once a read
+  lands, and another launch of the same key may read one. Still none: the session is not started;
+  the turn fails with the retryable row "Orquester is still checking your MCP servers…", and the
+  next message tries again.
 - **Denials per provider.** Claude: `disallowedTools` `mcp__<name>` and flag-settings
   `deniedMcpServers: [{serverName}]` — and always `orquester`. Codex: thread config
-  `mcp_servers.<name>.enabled = false` (only names its config has). Grok: a same-named ACP entry on
-  the host's inert `/mcp/denied`. OpenCode: a last ruleset rule `<name>_*` deny.
+  `mcp_servers.<name>.enabled = false` (only names its config has); a name containing `.` cannot
+  be a dotted key, so the override is then sent as one `mcp_servers` table (merged into the config,
+  probed). Grok: a same-named ACP entry on the host's inert `/mcp/denied`. OpenCode: each denied
+  server is disconnected on the shared instance and gets a last ruleset rule `<name>_*` deny —
+  except where that rule would also hide another server whose name extends it; there the
+  disconnect alone denies it, and it is disconnected again at every turn start (the rule is added
+  once a disconnect fails).
 - **Refresh.** A toolset change (`onToolsetsChanged`) pushes the new manifest to the host
   (`POST /threads/:id/session-tools/refresh`): Claude takes it in-session (`list_changed`); any
   other live session restarts with resume at its next idle point (the orchestrator's ensure step,
@@ -382,5 +399,5 @@ session tools. See `agent-host/adapters/opencode/session-tools.ts`.
 |---|---|---|---|---|
 | `tools/list_changed` | re-lists at once, in-process SDK server and HTTP server alike | delivered on the session's stream, no `tools/list` follows; `config/mcpServer/reload` does not reconnect the thread's server | delivered, no `tools/list` follows | re-lists at once (the host's stateless endpoint cannot push it) |
 | Deny a user server | `disallowedTools: ["mcp__ext"]` (and `mcp__ext__*`) remove its tools from the context; `deniedMcpServers: [{serverName}]` keeps it from connecting at all | `mcp_servers.ext.enabled = false` (thread config): never contacted; for a name the config lacks `thread/start` fails "invalid transport" | overlay `disabled_mcp_servers` / `enabled = false`: ignored; `--deny MCPTool(ext__*)`: still connects; a same-named ACP entry replaces it (never contacted) | `<name>_*` deny rule (OpenCode's own `Permission.disabled`) |
-| A user server named `orquester` | RACES ours: in 2 of 6 runs its tools merged into `mcp__orquester__*`; `deniedMcpServers` stops it (3/3) | the thread entry replaces it (0.159.0, earlier probe) | the ACP entry replaces it (2/2) | distinct name (`orquester-<16 hex>` is ours) |
+| A user server named `orquester` | RACES ours: in 2 of 6 runs its tools merged into `mcp__orquester__*`; `deniedMcpServers` stops it (3/3) | the thread entry is merged into it field by field: an HTTP one is replaced; a stdio one (`command`) fails `thread/start` ("url is not supported for stdio", fix wave A probe) | the ACP entry replaces it (2/2) | distinct name (`orquester-<16 hex>` is ours) |
 | MCP tool search | every MCP tool deferred (`isLoaded: false`), the in-process server's too | — | — | — |
