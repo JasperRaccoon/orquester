@@ -670,6 +670,10 @@ export class ReplyRouter implements DeliveryListener {
       const { result } = await this.readHandedOut(sub);
       // Released while the reply was read (every holder gone): it is a message now.
       if (sub.released) return { outcome: "notify", reason: "timeout", willNotify: true };
+      // It replied and closed, and the reply is gone: said so, and nobody holds it now.
+      if (result?.kind === "closed" && result.afterReply) {
+        return { outcome: "replied", turnId: sub.turnId ?? null, state: "failed", error: this.closedAfterReplyText(sub) };
+      }
       // A re-sent call (same idempotency key) is handed the reply again: one more holder.
       if (result && sub.state === "done") {
         sub.handOuts = (sub.handOuts ?? 1) + 1;
@@ -1384,9 +1388,7 @@ export class ReplyRouter implements DeliveryListener {
     const notice = { title, sessionId: sub.toThreadId };
     if (result.kind === "closed") {
       outcome = "closed";
-      text = result.afterReply
-        ? `"${oneLine(title) || "Untitled"}" replied, but it was closed before its reply could be delivered again, and the reply can no longer be read.`
-        : replyNoticeText("closed", notice);
+      text = replyNoticeText(result.afterReply ? "closed-after-reply" : "closed", notice);
     } else if (result.kind === "notice") {
       outcome = "failed";
       text = result.text;
@@ -1529,6 +1531,11 @@ export class ReplyRouter implements DeliveryListener {
 
   private titleOf(sub: Sub): string {
     return this.opts.sessions.get(sub.toThreadId)?.title ?? sub.toTitle ?? sub.toThreadId;
+  }
+
+  /** A taken reply whose target closed and which can no longer be read (a wait's `error`). */
+  private closedAfterReplyText(sub: Sub): string {
+    return replyNoticeText("closed-after-reply", { title: this.titleOf(sub), sessionId: sub.toThreadId });
   }
 
   /** The sentence a requester reads when no reply will come (`ReplyResult` kind `notice`). */
@@ -1675,6 +1682,11 @@ export function resultOf(snap: ThreadSnapshotPayload, turn: Turn): ReplyResult {
 
 /** What a waiter answers for a result (§13 d: an empty reply is `emptyReply`, no `reply`). */
 export function waitResponseOf(result: ReplyResult): ReplyWaitResponse {
+  // It replied, then closed: never `closed` (read as "closed before replying"); a failed answer
+  // with the reason, which every reader of this response already shows.
+  if (result.kind === "closed" && result.afterReply) {
+    return { outcome: "replied", turnId: null, state: "failed", error: "That chat replied, then was closed before its reply could be handed out again; the reply can no longer be read." };
+  }
   if (result.kind === "closed") return { outcome: "closed" };
   if (result.kind === "notice") return { outcome: "replied", turnId: null, state: "failed", error: result.text };
   return {

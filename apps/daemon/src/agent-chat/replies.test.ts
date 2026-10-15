@@ -33,7 +33,7 @@ import {
 
 import type { DaemonApi, DaemonResponse } from "../mcp/daemon-api.ts";
 import { LineageService } from "./lineage.ts";
-import { HISTORY_RETRY_MAX_MS, MAX_REDELIVERY_READS, ReplyError, ReplyRouter } from "./replies.ts";
+import { HISTORY_RETRY_MAX_MS, MAX_REDELIVERY_READS, ReplyError, ReplyRouter, waitResponseOf } from "./replies.ts";
 import { registerWait, waitsOn } from "./waits.ts";
 
 // ---------------------------------------------------------------------------
@@ -1718,7 +1718,7 @@ describe("final fix wave: re-delivery reads and closed targets", () => {
     const delivery = again.router.deliveries()[0]!;
     assert.equal(delivery.outcome, "closed");
     const body = parseThreadMessage(delivery.input)?.body ?? "";
-    assert.match(body, /replied, but it was closed before its reply could be delivered again/);
+    assert.equal(body, replyNoticeText("closed-after-reply", { title: "Codex review", sessionId: "tgt" }));
     assert.doesNotMatch(body, /closed before replying/);
     assert.equal(postsTo(again.host, "req").length, 1);
     await again.cleanup();
@@ -1761,5 +1761,40 @@ describe("final fix wave follow-up: deferred releases and closed-after-reply ans
     await idle(again);
     assert.equal(postsTo(again.host, "req").length, 1, "exactly once");
     await again.cleanup();
+  });
+
+  it("a wait on a taken reply whose target closed and whose reply is gone: a truthful failed answer, never a hand-out", async () => {
+    const w = await world();
+    const res = await w.router.subscribe("tgt", request("wait"));
+    const waiting = w.router.wait("tgt", res.subscriptionId, { timeoutSeconds: 60 });
+    await idle(w);
+    w.host.settle("tgt", { reply: "Gone with the restart." });
+    assert.equal((await waiting).outcome, "replied");
+    await idle(w);
+    await w.cleanup(false);
+    w.host.sessions.delete("tgt");
+    const again = await world({ dir: w.dir, host: w.host });
+    const answer = await again.router.wait("tgt", res.subscriptionId, { timeoutSeconds: 60 });
+    assert.deepEqual(answer, {
+      outcome: "replied",
+      turnId: "turn-1",
+      state: "failed",
+      error: replyNoticeText("closed-after-reply", { title: "Codex review", sessionId: "tgt" })
+    });
+    const sub = again.router.subscriptions()[0] as { handOuts?: number };
+    assert.equal(sub.handOuts, 0, "nobody holds the reply: not a hand-out");
+    // So the call's release is the last holder gone: the requester hears it once, as the notice.
+    assert.equal((await again.router.release("tgt", res.subscriptionId)).released, true);
+    await idle(again);
+    assert.equal(again.router.deliveries()[0]!.outcome, "closed");
+    assert.equal(postsTo(again.host, "req").length, 1);
+    await again.cleanup();
+  });
+
+  it("waitResponseOf: closed after replying is a failed answer saying so, never outcome closed", () => {
+    const answer = waitResponseOf({ kind: "closed", afterReply: true });
+    assert.equal(answer.outcome, "replied");
+    assert.ok(answer.outcome === "replied" && answer.state === "failed" && /replied, then was closed/.test(answer.error ?? ""));
+    assert.deepEqual(waitResponseOf({ kind: "closed" }), { outcome: "closed" });
   });
 });
