@@ -56,6 +56,8 @@ import {
   agentProfileBackupsDir,
   agentProfileImportsDir,
   agentProfileStashDir,
+  savedPromptsPath,
+  usageTokensCacheFile,
   workflowRunsDir,
   workflowSecretsPath,
   workflowStatePath,
@@ -295,7 +297,7 @@ export class FakeHost {
   }
 
   /** The daemon's session and chat-proxy routes, answered from the host's memory. */
-  register(app: FastifyInstance, deps: { workspacesDir: string; providers: () => unknown; closed: (id: string) => void }): void {
+  register(app: FastifyInstance, deps: { providers: () => unknown; closed: (id: string) => void }): void {
     const notFound = (reply: FastifyReply) => reply.code(404).send({ error: { code: "THREAD_NOT_FOUND", message: "No chat session with that id." } });
     app.get<{ Querystring: { projectPath?: string } }>("/api/sessions", async (request) =>
       [...this.tabs.values()].filter((tab) => !request.query.projectPath || tab.projectPath === request.query.projectPath)
@@ -394,7 +396,6 @@ export class FakeHost {
       return { query: request.query.q ?? "", hits: hits.slice(0, limit), truncated: hits.length > limit, indexed: true };
     });
     app.get<{ Querystring: { path?: string } }>("/api/agents/conversations", async () => ({ conversations: [] }));
-    void deps.workspacesDir;
   }
 }
 
@@ -586,7 +587,7 @@ export async function scenarioWorld(seed: WorkspaceSeed): Promise<ScenarioWorld>
   lineage.setDeliveryListener(router);
 
   // Saved prompts (umcp:t12) and workflows (the engine as startDaemon wires it).
-  const savedPrompts = new SavedPromptsService({ file: join(appdir, "daemon", "saved-prompts.json"), workspacesDir: () => workspacesDir, fsRoot: () => workspacesDir, logger: quiet });
+  const savedPrompts = new SavedPromptsService({ file: savedPromptsPath(appdir), workspacesDir: () => workspacesDir, fsRoot: () => workspacesDir, logger: quiet });
   await savedPrompts.load();
   const secrets = new WorkflowSecretsService({ file: workflowSecretsPath(appdir), logger: quiet });
   await secrets.load();
@@ -650,7 +651,7 @@ export async function scenarioWorld(seed: WorkspaceSeed): Promise<ScenarioWorld>
   executorPorts.onToolsetApproved = (caller, toolset, signal) => refresher.toolsetApproved(caller, toolset, signal);
 
   // Token usage (the Cost tab's scanner over this world's home) and the quota snapshot.
-  const usageTokens = new UsageTokensScanner({ userhome: home, cacheFile: join(appdir, "usage-tokens.json"), now: () => Date.now() });
+  const usageTokens = new UsageTokensScanner({ userhome: home, cacheFile: usageTokensCacheFile(appdir), now: () => Date.now() });
   await usageTokens.init();
   const world = {
     quota: { agents: [] } as UsageResponse,
@@ -685,7 +686,6 @@ export async function scenarioWorld(seed: WorkspaceSeed): Promise<ScenarioWorld>
     });
     registerAgentToolsRuntimeRoutes(app, runtime);
     host.register(app, {
-      workspacesDir,
       providers: () => ({ hostInstanceId: "scenario-host", providers: (["claude", "codex", "grok", "opencode"] as const).map(providerSnapshot) }),
       closed: (id) => runtime.threadClosed(id)
     });
