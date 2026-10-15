@@ -53,6 +53,7 @@ test("paths: inside a project (symlinks resolved) → that project; the root, a 
   }
   assert.equal(await canonicalProject(api, join(ws, "acme")), null, "a workspace is no project");
   assert.equal(await canonicalProject(api, join(ws, "acme/api/src")), null, "nor is a directory inside one");
+  assert.equal(await canonicalProject(api, join(ws, "acme/removed")), null, "a removed project is none (PROJECT_NOT_FOUND)");
 });
 
 test("target classes, and a caller bound to no project: every target is other", async (t) => {
@@ -103,6 +104,8 @@ test("workflow-owned: owner on the tab or any ancestor; a closed ancestor fails 
     tab("user-kid", { lineage: link("user", true) }),
     tab("orphan-agent", { lineage: link("closed", true) }),
     tab("orphan-gui", { lineage: { ...link("closed", false), relation: "fork" } }),
+    tab("orphan-legacy-delegate", { lineage: link("closed", false) }),
+    tab("orphan-opened", { lineage: { ...link("closed", false), relation: "opened" } }),
     tab("loop-a", { lineage: link("loop-b", true) }),
     tab("loop-b", { lineage: link("loop-a", true) })
   ];
@@ -113,6 +116,8 @@ test("workflow-owned: owner on the tab or any ancestor; a closed ancestor fails 
   assert.equal(isWorkflowOwned(sessions, "user-kid"), false);
   assert.equal(isWorkflowOwned(sessions, "orphan-agent"), true, "an agent made it and its parent is gone: fail closed");
   assert.equal(isWorkflowOwned(sessions, "orphan-gui"), false, "a person forked it: not owned");
+  assert.equal(isWorkflowOwned(sessions, "orphan-legacy-delegate"), true, "an unflagged (legacy) delegate behind a closed parent fails closed");
+  assert.equal(isWorkflowOwned(sessions, "orphan-opened"), true, "an unflagged opened chat behind a closed parent fails closed");
   assert.equal(isWorkflowOwned(sessions, "loop-a"), true, "a lineage cycle fails closed");
   assert.equal(isWorkflowOwned(sessions, "unknown"), true, "a thread with no tab fails closed");
 });

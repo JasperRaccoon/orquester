@@ -6,6 +6,9 @@
  */
 
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import { z } from "zod";
@@ -29,9 +32,14 @@ class PrincipalApi extends FakeDaemonApi {
   }
 }
 
-const OWN = "/w/acme/api";
-const SAME = "/w/acme/web";
-const OTHER = "/w/beta/app";
+// Real directories: the gate canonicalises projects and refuses one that no longer exists (§13).
+const ROOT = realpathSync(mkdtempSync(join(tmpdir(), "umcp-exec-")));
+const WS = join(ROOT, "w");
+const OWN = join(WS, "acme/api");
+const SAME = join(WS, "acme/web");
+const OTHER = join(WS, "beta/app");
+for (const dir of [OWN, SAME, OTHER]) mkdirSync(dir, { recursive: true });
+test.after(() => rmSync(ROOT, { recursive: true, force: true }));
 
 function caller(over: Partial<ThreadCaller> = {}): ThreadCaller {
   return {
@@ -106,10 +114,12 @@ function rig(over: { tools?: AnyOrquesterTool[]; port?: FakeApprovalPort | null;
   ];
   const byName = new Map(tools.map((tool) => [tool.name, tool]));
   const api = new PrincipalApi()
-    .on("GET", "/api/workspaces", { status: 200, body: [{ name: "beta", path: "/w/beta", projectCount: 1, gitAccountId: "acc1" }] })
-    .on("GET", "/api/accounts", { status: 200, body: [{ id: "acc1", label: "beta-bot" }] })
+    .on("GET", "/api/workspaces", { status: 200, body: [{ name: "beta", path: join(WS, "beta"), projectCount: 1, gitAccountId: "acc1" }, { name: "acme", path: join(WS, "acme"), projectCount: 2, gitAccountId: "acc2" }] })
+    .on("GET", "/api/accounts", { status: 200, body: [{ id: "acc1", label: "beta-bot" }, { id: "acc2", label: "acme-bot" }] })
     .on("GET", agentChatRoutes.thread("t2"), { status: 200, body: { kind: "snapshot", thread: snapshot({ head: head({ id: "t2", runtimeMode: "auto" }) }) } })
     .on("GET", agentChatRoutes.thread("wide"), { status: 200, body: { kind: "snapshot", thread: snapshot({ head: head({ id: "wide", runtimeMode: "full-access" }) }) } });
+  api.fsRoot = ROOT;
+  api.workspacesDir = WS;
   const port = over.port === undefined ? new FakeApprovalPort() : over.port;
   const deps: ExecutorDeps = {
     lookup: (name, audience) => {
@@ -254,7 +264,10 @@ test("boundary cards: cross-workspace Act names its one target and git identity;
   assert.equal(card.family, "cross-project");
   assert.equal(card.targetProjectPath, OTHER);
   assert.deepEqual(card.grantOptions, ["chat"]);
-  assert.deepEqual(card.scope.projects, [{ path: OTHER, workspace: "beta", gitAccountLabel: "beta-bot" }]);
+  assert.deepEqual(card.scope.projects, [
+    { path: OWN, workspace: "acme", gitAccountLabel: "acme-bot" },
+    { path: OTHER, workspace: "beta", gitAccountLabel: "beta-bot" }
+  ], "the caller's own project and identity beside the target's");
   assert.match(card.title, /Act in a project in beta\/app/);
   assert.ok(card.sections.some((section) => section.kind === "code" && section.text.includes(OTHER)), "the arguments are shown in full");
 
@@ -263,7 +276,8 @@ test("boundary cards: cross-workspace Act names its one target and git identity;
   const full = await r.call("act_in", { project: SAME });
   assert.equal(full.isError, undefined);
   assert.equal(r.port!.cards.length, 2, "full-access acts in its own workspace without a card");
-  assert.equal(code(await r.call("act_in", { project: "/w/acme" })), "PROJECT_NOT_FOUND", "a workspace is no project");
+  assert.equal(code(await r.call("act_in", { project: join(WS, "acme") })), "PROJECT_NOT_FOUND", "a workspace is no project");
+  assert.equal(code(await r.call("act_in", { project: join(WS, "acme/removed") })), "PROJECT_NOT_FOUND", "a removed project is not found");
 });
 
 test("turn policy and the exchange: hop + 1, a new exchange at hop 1, EXCHANGE_LIMIT past 8, never into a broader chat, plan carries on", async () => {
@@ -306,7 +320,7 @@ test("a session the call creates takes the exchange but no mode check", async ()
   assert.equal(r.api.calls.filter((c) => c.path.includes("/api/sessions/")).length, 0, "nothing to read for a new session");
 });
 
-test("every daemon request carries the caller's principal: agent for a chat, the transport's external principal", async () => {
+test("every daemon request carries the caller's principal, forced: a tool cannot name another; agent projectPath is canonical or \"\"", async () => {
   const reads = defineTool({
     name: "reads", title: "Reads", description: "d", input: {}, audiences: ["external", "chat"], toolset: "core", tier: "read",
     scope: async (_args, ctx) => { await ctx.api.request("GET", "/api/x"); return claim(); },
@@ -316,7 +330,10 @@ test("every daemon request carries the caller's principal: agent for a chat, the
   const r = rig({ tools: [reads] });
   await r.call("reads", {}, caller({ exchange: { id: "e", hop: 2 } }));
   const agent = { kind: "agent", threadId: "me", projectPath: OWN, agent: "claude", title: "Implement auth", exchange: { id: "e", hop: 2 } };
-  assert.deepEqual(r.api.principals, [agent, agent, { kind: "user" }]);
+  assert.deepEqual(r.api.principals, [agent, agent, agent], "a tool's explicit principal is replaced");
+  r.api.principals.length = 0;
+  await r.call("reads", {}, caller({ projectPath: join(WS, "acme/removed"), workspace: "acme" }));
+  assert.equal((r.api.principals[0] as { projectPath: string }).projectPath, "", "no canonical project: \"\"");
   r.api.principals.length = 0;
   await r.call("reads", {}, { kind: "external" }, new AbortController().signal, { kind: "external", credentialId: "cred_1" });
   assert.deepEqual(r.api.principals.slice(0, 2), [{ kind: "external", credentialId: "cred_1" }, { kind: "external", credentialId: "cred_1" }]);
@@ -353,4 +370,22 @@ test("request_toolset's card goes through the executor's port: kind toolset, nev
   assert.equal(code(await r.call("asks", {}, caller({ workflowOwned: true }))), "PERMISSION_DENIED");
   assert.equal(r.port!.cards.length, 1);
   assert.equal(callExtensions({} as CallContext).requestToolsetCard, undefined);
+});
+
+test("a caller with no canonical project of its own is never offered a grant (findGrant would never honour it)", async () => {
+  const r = rig();
+  await r.call("open_desktop", { command: "xterm" }, caller({ projectPath: "", workspace: "" }));
+  const card = r.port!.cards[0]!;
+  assert.deepEqual(card.grantOptions, []);
+  assert.equal(card.callerProjectPath, "");
+});
+
+test("a grant is re-checked on the refreshed caller: no longer full-access → refused, nothing runs", async () => {
+  const port = new FakeApprovalPort().grant({ family: "desktops", scope: "project", projectPath: OWN });
+  const r = rig({ port, deps: { refreshCaller: async (before) => ({ ...before, runtimeMode: "auto" }) } });
+  const result = await r.call("open_desktop", { command: "xterm" });
+  assert.equal(code(result), "PERMISSION_DENIED");
+  assert.match(message(result), /Full access/);
+  assert.equal(port.cards.length, 0);
+  assert.equal(r.runs.length, 0);
 });

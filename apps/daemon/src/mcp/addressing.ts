@@ -86,7 +86,8 @@ async function canonicalWorkspacesDir(api: { fsRoot: string; workspacesDir: stri
 
 /**
  * The project `projectPath` is, canonical, or null when it is not exactly
- * `<workspacesDir>/<ws>/<project>` (the root, a workspace, anything deeper or outside).
+ * `<workspacesDir>/<ws>/<project>` (the root, a workspace, anything deeper or outside) or no
+ * longer exists as a directory (a removed project or workspace is `PROJECT_NOT_FOUND`, §13).
  */
 export async function canonicalProject(api: { fsRoot: string; workspacesDir: string }, projectPath: string): Promise<CanonicalProject | null> {
   if (!projectPath) return null;
@@ -95,6 +96,7 @@ export async function canonicalProject(api: { fsRoot: string; workspacesDir: str
   if (!rel || rel.startsWith("..") || isAbsolute(rel)) return null;
   const parts = rel.split(sep);
   if (parts.length !== 2 || !isValidName(parts[0]) || !isValidName(parts[1])) return null;
+  if (!(await isDirectory(canonical))) return null;
   return { canonical: join(root, parts[0], parts[1]), workspace: parts[0], name: parts[1] };
 }
 

@@ -180,11 +180,12 @@ export class InjectDaemonApi implements DaemonApi {
 
 /**
  * `api` with every request acting for `principal` (the catalog executor's per-call binding): each
- * `request` mints its own nonce. A request that already names a principal keeps its own.
+ * `request` mints its own nonce. The binding is FORCED: a `principal` a tool passes is replaced,
+ * so only the executor ever decides who a tool's request acts for.
  */
 export function withPrincipal(api: DaemonApi, principal: CallerPrincipal): DaemonApi {
   return {
-    request: (method, path, opts) => api.request(method, path, { ...opts, principal: opts?.principal ?? principal }),
+    request: (method, path, opts) => api.request(method, path, { ...opts, principal }),
     uploadAttachment: (sessionId, meta, bytes) => api.uploadAttachment(sessionId, meta, bytes),
     subscribe: (listener) => api.subscribe(listener),
     publishHtmlRender: (request) => api.publishHtmlRender(request),

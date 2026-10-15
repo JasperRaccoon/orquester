@@ -21,6 +21,7 @@ import type { AdminFamily, ToolsetId } from "@orquester/api";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
 import { ToolError } from "../errors.ts";
+import { ok } from "../result.ts";
 import type { ToolDef } from "../tool.ts";
 import type { SessionTool } from "../../session-tools/contract.ts";
 import type { AnyOrquesterTool, ApprovalPreview, OrquesterTool, ScopeClaim, Tier } from "./contract.ts";
@@ -175,14 +176,15 @@ export function legacyExternalTools(defs: readonly ToolDef<any>[]): AnyOrquester
       resultKind: "json",
       run: async (args, ctx) => {
         const legacy = callExtensions(ctx).legacy;
-        return def.run(args as never, {
+        // ok() here, as the pre-catalog server did, whatever the record holds (parity).
+        return ok(await def.run(args as never, {
           api: ctx.api,
           // Only the todo and file tools read these; an executor without them fails those calls closed.
           todos: legacy?.todos ?? (undefined as never),
           files: legacy?.files ?? (undefined as never),
           signal: ctx.signal,
           now: () => ctx.now()
-        });
+        }));
       }
     };
     return tool;

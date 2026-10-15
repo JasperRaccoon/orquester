@@ -64,7 +64,8 @@ export interface SessionToolRouteDeps {
 
 /**
  * The calling chat as the gate judges it, read NOW from its tab and its snapshot (§3.2
- * `ToolCaller`): the project canonical when it is one, else as the tab names it.
+ * `ToolCaller`): the project canonical when it is one, else "" (no own project — every target is
+ * "other"; the contract's `projectPath`).
  */
 export async function buildThreadCaller(
   api: DaemonApi,
@@ -81,7 +82,8 @@ export async function buildThreadCaller(
     kind: "thread",
     threadId,
     title: tab.title,
-    projectPath: project?.canonical ?? thread.projectPath,
+    // Canonical project root, or "" when the tab's path is no (longer a) project: no own project.
+    projectPath: project?.canonical ?? "",
     workspace: project?.workspace ?? "",
     cwd: thread.cwd,
     agentId: thread.agentId,

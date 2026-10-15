@@ -95,11 +95,20 @@ const MAX_LINEAGE_WALK = 64;
  * `owner.kind === "workflow"`. The walk follows open tabs' `lineage.parentThreadId`.
  *
  * A closed ancestor's owner is unknowable (it lived on its tab record only). The walk then fails
- * CLOSED when an agent created the link to it (`agentCreated`: an agent — maybe a workflow's —
- * made this child, and its parent is gone), and stops as not owned when the user or an external
- * client made the link (a GUI fork: a person made it and is watching it). A thread with no tab
+ * CLOSED (owned) behind any link an agent may have made — `agentCreated`, or relation `delegate` /
+ * `opened` ({@link isAgentMadeLink}) — and stops as not owned only behind a `fork` without
+ * `agentCreated` (a GUI fork: a person made it and is watching it). A thread with no tab
  * (the caller itself unknown) is treated as owned.
  */
+/**
+ * Whether an agent (maybe a workflow's) may have made this lineage link: `agentCreated`, or any
+ * `delegate` / `opened` link — legacy delegates carry no flag, and only an agent delegates or opens
+ * a chat as a child. Only a `fork` without `agentCreated` is the user's (a GUI fork).
+ */
+function isAgentMadeLink(lineage: { relation: string; agentCreated?: true }): boolean {
+  return lineage.agentCreated === true || lineage.relation !== "fork";
+}
+
 export function isWorkflowOwned(sessions: readonly SessionSummary[], threadId: string): boolean {
   const byId = new Map(sessions.map((session) => [session.id, session]));
   const seen = new Set<string>();
@@ -114,7 +123,7 @@ export function isWorkflowOwned(sessions: readonly SessionSummary[], threadId: s
     if (session.owner?.kind === "workflow") return true;
     const lineage = session.lineage;
     if (!lineage) return false;
-    agentMadeLink = lineage.agentCreated === true;
+    agentMadeLink = isAgentMadeLink(lineage);
     id = lineage.parentThreadId;
   }
   // A chain this deep is no lineage the daemon writes: fail closed.

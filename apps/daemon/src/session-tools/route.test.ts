@@ -7,6 +7,7 @@
  */
 
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -33,14 +34,31 @@ import type { AgentChatSecretRequestEventPayload } from "@orquester/api/agent-ch
 import { secretsToolkit } from "./secrets/index.ts";
 
 const TOKEN = "host-token-0123456789";
+// A real project directory: the route canonicalises the caller's project (and "" for none).
+const ROOT = realpathSync(mkdtempSync(join(tmpdir(), "st-route-ws-")));
+const WS = join(ROOT, "ws");
+const PROJECT = join(WS, "w/proj-a");
+mkdirSync(join(PROJECT, "sub"), { recursive: true });
+test.after(() => rmSync(ROOT, { recursive: true, force: true }));
 const THREADS: Record<string, SessionToolThread> = {
-  "thread-a": { projectPath: "/ws/w/proj-a", cwd: "/ws/w/proj-a/sub", agentId: "codex" }
+  "thread-a": { projectPath: PROJECT, cwd: join(PROJECT, "sub"), agentId: "codex" },
+  "thread-gone": { projectPath: join(WS, "w/removed"), cwd: join(WS, "w/removed"), agentId: "codex" }
 };
 /** The daemon's view of thread-a: its tab and its snapshot (the route builds the caller from them). */
 function fakeApiFor(): FakeDaemonApi {
-  return new FakeDaemonApi()
-    .on("GET", "/api/sessions", { status: 200, body: [chatSummary({ id: "thread-a", projectPath: "/ws/w/proj-a", cwd: "/ws/w/proj-a/sub" })] })
-    .on("GET", agentChatRoutes.thread("thread-a"), { status: 200, body: { kind: "snapshot", thread: snapshot({ head: head({ id: "thread-a", runtimeMode: "auto" }) }) } });
+  const api = new FakeDaemonApi()
+    .on("GET", "/api/sessions", {
+      status: 200,
+      body: [
+        chatSummary({ id: "thread-a", projectPath: PROJECT, cwd: join(PROJECT, "sub") }),
+        chatSummary({ id: "thread-gone", projectPath: join(WS, "w/removed"), cwd: join(WS, "w/removed") })
+      ]
+    })
+    .on("GET", agentChatRoutes.thread("thread-a"), { status: 200, body: { kind: "snapshot", thread: snapshot({ head: head({ id: "thread-a", runtimeMode: "auto" }) }) } })
+    .on("GET", agentChatRoutes.thread("thread-gone"), { status: 200, body: { kind: "snapshot", thread: snapshot({ head: head({ id: "thread-gone" }) }) } });
+  api.fsRoot = ROOT;
+  api.workspacesDir = WS;
+  return api;
 }
 const fakeApi = fakeApiFor();
 
@@ -122,11 +140,14 @@ test("a call runs with the context the daemon derived — thread record, not arg
   assert.deepEqual(result.structuredContent, {
     text: "hi",
     threadId: "thread-a",
-    projectPath: "/ws/w/proj-a",
-    cwd: "/ws/w/proj-a/sub",
+    projectPath: PROJECT,
+    cwd: join(PROJECT, "sub"),
     agentId: "codex",
     callId: "toolu_1"
   });
+  // A tab whose project was removed has no own project: "" (the contract), never the stale path.
+  const gone = await forward({ threadId: "thread-gone", callId: "c", name: "echo", arguments: { text: "x" } }, new AbortController().signal);
+  assert.equal((gone.structuredContent as { projectPath: string }).projectPath, "");
   // A caller cannot smuggle an identity in as an argument: arguments are strict.
   const smuggled = await forward(
     { threadId: "thread-a", callId: "c", name: "echo", arguments: { text: "hi", threadId: "thread-b" } },
@@ -264,7 +285,7 @@ test("the caller is built from the thread's tab and snapshot: title, mode, plann
       status: 200,
       body: [
         chatSummary({ id: "wf-chat", owner: { kind: "workflow", workflowId: "wf", runId: "r", nodeId: "n" } }),
-        chatSummary({ id: "thread-a", title: "Auth work", projectPath: "/ws/w/proj-a", lineage: { parentThreadId: "wf-chat", relation: "delegate", createdAt: "x", agentCreated: true } })
+        chatSummary({ id: "thread-a", title: "Auth work", projectPath: PROJECT, lineage: { parentThreadId: "wf-chat", relation: "delegate", createdAt: "x", agentCreated: true } })
       ]
     })
     .on("GET", agentChatRoutes.thread("thread-a"), {
@@ -277,6 +298,8 @@ test("the caller is built from the thread's tab and snapshot: title, mode, plann
         })
       }
     });
+  api.fsRoot = ROOT;
+  api.workspacesDir = WS;
   const dir = await mkdtemp(join(tmpdir(), "st-route-"));
   const socketPath = join(dir, "d.sock");
   const app: FastifyInstance = Fastify();
@@ -299,9 +322,9 @@ test("the caller is built from the thread's tab and snapshot: title, mode, plann
     kind: "thread",
     threadId: "thread-a",
     title: "Auth work",
-    projectPath: "/ws/w/proj-a",
-    workspace: "",
-    cwd: "/ws/w/proj-a/sub",
+    projectPath: PROJECT,
+    workspace: "w",
+    cwd: join(PROJECT, "sub"),
     agentId: "codex",
     callId: "toolu_9",
     runtimeMode: "auto",

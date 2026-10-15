@@ -218,3 +218,42 @@ test("the external /mcp acts as external {credentialId} on every daemon call; th
     await app.close();
   }
 });
+
+test("through createServer's real routes: the remote app strips causedBy from a turn and a merge-back; the socket app keeps it", async () => {
+  const causedBy = { threadId: "a", exchangeId: "x", hop: 1 };
+  for (const mode of ["remote", "local"] as const) {
+    const forwarded: unknown[] = [];
+    const merged: unknown[] = [];
+    // Just enough of the chat service for the §6.2 command routes: the host client records the body it would forward.
+    const routeDeps = new Proxy(
+      {
+        client: { json: async (_method: string, _path: string, body: unknown) => { forwarded.push(body); return { status: 200, body: { seq: 1 } }; } },
+        isHostHealthy: () => true,
+        chatSession: () => chatSummary({ id: "s1" }),
+        noteSeq: () => {}
+      } as Record<string, unknown>,
+      { get: (target, key) => (key in target ? target[key as string] : () => undefined) }
+    );
+    const { app } = daemonApp(mode, {
+      sessions: { list: () => [chatSummary({ id: "s1" })] },
+      agentChat: { routeDeps: () => routeDeps, chat: { has: () => true, get: () => chatSummary({ id: "s1" }) } },
+      lineage: { mergeBack: async (_id: string, body: unknown) => { merged.push(body); return { parentSessionId: "p", delivery: "queued", mergeId: "m" }; } }
+    });
+    const auth = mode === "remote" ? { authorization: BEARER } : {};
+    try {
+      const turn = await app.inject({ method: "POST", url: "/api/sessions/s1/turn", headers: auth, payload: { commandId: "c", input: "hi", causedBy } });
+      assert.equal(turn.statusCode, 200, `${mode} turn: ${turn.body}`);
+      const merge = await app.inject({ method: "POST", url: "/api/sessions/s1/merge-back", headers: auth, payload: { text: "r", causedBy } });
+      assert.equal(merge.statusCode, 200, `${mode} merge-back: ${merge.body}`);
+      if (mode === "remote") {
+        assert.deepEqual(forwarded, [{ commandId: "c", input: "hi" }]);
+        assert.deepEqual(merged, [{ text: "r" }]);
+      } else {
+        assert.deepEqual(forwarded, [{ commandId: "c", input: "hi", causedBy }], "socket-trusted on the socket app");
+        assert.deepEqual(merged, [{ text: "r", causedBy }]);
+      }
+    } finally {
+      await app.close();
+    }
+  }
+});

@@ -41,7 +41,7 @@ import {
 } from "@orquester/api";
 import type { CallerPrincipal } from "@orquester/api/agent-chat";
 
-import { canonicalProject } from "./addressing.ts";
+import { canonicalProject, type CanonicalProject } from "./addressing.ts";
 import type {
   AnyOrquesterTool,
   ApprovalPort,
@@ -251,12 +251,16 @@ async function execute(deps: ExecutorDeps, call: { name: string; arguments: unkn
   let args: Record<string, unknown> = parsed.data as Record<string, unknown>;
   if (signal.aborted) return cancelled();
 
+  // The agent principal names the caller's canonical project root, or "" when it has none.
+  // An unreadable one counts as none (no grants, every target "other"): fail closed.
+  const ownProject =
+    caller.kind === "thread" && caller.projectPath ? await canonicalProject(env.api, caller.projectPath).catch(() => null) : null;
   const principal: CallerPrincipal =
     caller.kind === "thread"
       ? {
           kind: "agent",
           threadId: caller.threadId,
-          projectPath: caller.projectPath,
+          projectPath: ownProject?.canonical ?? "",
           agent: caller.agentId,
           title: caller.title,
           ...(caller.exchange ? { exchange: { ...caller.exchange } } : {})
@@ -289,7 +293,7 @@ async function execute(deps: ExecutorDeps, call: { name: string; arguments: unkn
     const decision = gate(gateInput(caller));
     if (decision.kind === "deny") throw new ToolError(decision.code, decision.message);
     if (decision.kind === "card") {
-      const outcome = await passCard(deps, tool, args, caller, scope, decision, facts, scopeCtx);
+      const outcome = await passCard(deps, tool, args, caller, scope, decision, facts, scopeCtx, ownProject);
       if (outcome.kind === "cancelled") return cancelled();
       approval = outcome.approval;
       card = { preview: outcome.preview, family: outcome.family };
@@ -300,6 +304,11 @@ async function execute(deps: ExecutorDeps, call: { name: string; arguments: unkn
       const current: ThreadCaller = deps.refreshCaller ? await deps.refreshCaller(caller) : caller;
       const again = gate(gateInput(current));
       if (again.kind === "deny") throw new ToolError(again.code, again.message);
+      // A grant is honoured only while the caller is full-access and not workflow-owned (§7.6):
+      // re-checked on the caller as it is now, closing the race with a mode change.
+      if (approval.outcome === "granted" && (current.runtimeMode !== "full-access" || current.workflowOwned)) {
+        throw new ToolError("PERMISSION_DENIED", `${tool.name}: the grant covering it applies only while this chat is in Full access. Call it again to ask the user.`);
+      }
       caller = current;
     }
   }
@@ -341,7 +350,8 @@ async function passCard(
   scope: ScopeClaim,
   decision: Extract<GateDecision, { kind: "card" }>,
   facts: Pick<GateInput, "targets" | "pendingTargets">,
-  ctx: ScopeContext
+  ctx: ScopeContext,
+  ownProject: CanonicalProject | null
 ): Promise<CardOutcome> {
   const port = deps.approvals === undefined ? executorPorts.approvals : deps.approvals;
   // What runs is what was shown: a deep, frozen copy, hashed (§7.2).
@@ -362,7 +372,7 @@ async function passCard(
       callerRuntimeMode: caller.runtimeMode,
       workflowOwned: caller.workflowOwned,
       threadId: caller.threadId,
-      projectPath: caller.projectPath,
+      projectPath: ownProject?.canonical ?? "",
       // Canonical, as the caller's own `projectPath` is (§7.6: Admin only inside the caller's project).
       projects: decision.approvalKind === "admin" ? facts.targets.map((target) => target.project) : [],
       pendingProjects: scope.pendingProjects?.length ?? 0,
@@ -382,14 +392,21 @@ async function passCard(
   if (!port) throw new ToolError("PERMISSION_DENIED", `${tool.name} needs the user's approval, and approval cards are not available right now.`);
 
   const labels = await gitAccountLabels(ctx.api);
-  const projects = [];
-  for (const target of facts.targets.filter((t) => decision.approvalKind === "admin" || t.class !== "own")) {
-    const label = labels.get(target.workspace);
-    projects.push({ path: target.project, workspace: target.workspace, ...(label ? { gitAccountLabel: label } : {}) });
-  }
+  const projects: { path: string; workspace: string; gitAccountLabel?: string }[] = [];
+  const named = (path: string, workspace: string) => {
+    if (projects.some((project) => project.path === path)) return;
+    const label = labels.get(workspace);
+    projects.push({ path, workspace, ...(label ? { gitAccountLabel: label } : {}) });
+  };
+  // A boundary card names the caller's own project and identity beside the targets (§5.2: a
+  // cross-workspace action runs with the other workspace's identity, which the user compares).
+  if (decision.approvalKind === "boundary" && ownProject) named(ownProject.canonical, ownProject.workspace);
+  for (const target of facts.targets.filter((t) => decision.approvalKind === "admin" || t.class !== "own")) named(target.project, target.workspace);
   const crossProject = decision.crossProject;
   const grantOptions =
-    decision.approvalKind === "boundary" && decision.family === "cross-project" && !decision.targetProjectPath
+    // A grant is recorded for the caller's canonical project: none without one (findGrant never
+    // honours projectPath ""); a cross-project grant needs its single target.
+    ownProject === null || (decision.approvalKind === "boundary" && decision.family === "cross-project" && !decision.targetProjectPath)
       ? []
       : grantOptionsFor({
           family,
@@ -401,7 +418,7 @@ async function passCard(
   const reason = agentReason(frozenArgs);
   const request: ApprovalRequest = {
     threadId: caller.threadId,
-    callerProjectPath: caller.projectPath,
+    callerProjectPath: ownProject?.canonical ?? "",
     tool: tool.name,
     kind: decision.approvalKind,
     family: family as ApprovalRequest["family"],
