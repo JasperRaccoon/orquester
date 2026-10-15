@@ -103,6 +103,14 @@ test("deny: the thread's agent, in its own account home or its project — exact
   assert.deepEqual(denyFor(thread({ projectPaths: ["/w/acme/api-link", "/w/acme/api"] }), [server({ name: "p", scope: "project", projectPath: "/w/acme/api" })]), ["p"]);
 });
 
+test("deny: a server every home of the agent loads (Grok's inherited ~/.claude.json, allHomes) is denied in an account home too", () => {
+  const inherited = server({ agent: "grok", home: "system", name: "claude_inherited", allHomes: true });
+  const ownConfig = server({ agent: "grok", home: "system", name: "grok_system_only" });
+  assert.deepEqual(denyFor(thread({ agentId: "grok", home: "acct-g" }), [inherited, ownConfig]), ["claude_inherited"]);
+  assert.deepEqual(denyFor(thread({ agentId: "grok", home: "system" }), [inherited, ownConfig]), ["claude_inherited", "grok_system_only"]);
+  assert.deepEqual(denyFor(thread({ agentId: "claude", home: "acct-g" }), [inherited]), [], "only the agent it is reported under");
+});
+
 test("the manifest: tools, the composed block, the deny list and the toolsets", () => {
   const manifest = buildSessionToolsManifest({
     thread: thread({ workflowOwned: true }),

@@ -142,6 +142,25 @@ export function userMessageIds(snapshot: ThreadSnapshotPayload): Set<string> {
   return new Set(snapshot.items.filter(isUserAuthored).map((item) => item.id));
 }
 
+/**
+ * Fastify's own 404 for a route the app does not have (`{message: "Route GET:<url> not found",
+ * error: "Not Found", statusCode: 404}`, nothing else): the detection route does not exist. Any
+ * other 404 body — an error envelope, a flat code — came from a route that does.
+ */
+export function isFastifyRouteMiss(body: unknown): boolean {
+  if (body === null || typeof body !== "object" || Array.isArray(body)) return false;
+  const record = body as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  return (
+    keys.length === 3 &&
+    keys.join(",") === "error,message,statusCode" &&
+    record.statusCode === 404 &&
+    record.error === "Not Found" &&
+    typeof record.message === "string" &&
+    /^Route [A-Z]+:\S* not found$/.test(record.message)
+  );
+}
+
 export class SessionToolsRefresher {
   private readonly advertised = new Map<string, readonly string[]>();
   private readonly continues = new Map<string, PendingContinue>();
@@ -188,8 +207,10 @@ export class SessionToolsRefresher {
    * Fails CLOSED (§12.1): every failed read is a warning and answers the last GOOD list (also
    * after an invalidation, which only marks it stale), or `null` when none was ever read — the
    * manifest is then unavailable (503) and the host falls back to what it knows for that launch.
-   * Only a route-miss 404 (a daemon without the detection: Fastify's own not-found body, no `code`)
-   * means "none"; a 404 carrying our own error code is a failure.
+   * Only a route-miss 404 (a daemon without the detection) means "none", and only when its body is
+   * exactly Fastify's default not-found body ({@link isFastifyRouteMiss}). Every answer of the
+   * detection itself that is not a 200 list — its own 404 or 400 (e.g. a `projectPath` outside the
+   * workspaces root) in any envelope — is a failed read.
    */
   async daemonPointing(): Promise<readonly DaemonPointingServer[] | null> {
     const cached = this.pointing;
@@ -209,9 +230,7 @@ export class SessionToolsRefresher {
         })
       ]).finally(() => clearTimeout(timer));
       if (res === "timeout") return failed("timed out");
-      if (res.status === 404) {
-        const body = res.body as { code?: unknown } | null;
-        if (body !== null && typeof body === "object" && typeof body.code === "string") return failed(`404 ${body.code}`);
+      if (res.status === 404 && isFastifyRouteMiss(res.body)) {
         this.pointing = { at: this.now(), servers: [], stale: false };
         return [];
       }

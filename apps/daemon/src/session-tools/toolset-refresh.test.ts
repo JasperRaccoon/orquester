@@ -17,7 +17,7 @@ import { daemonRoutesForHost, type SessionToolsManifest, type SessionToolsRefres
 import { defineTool, READ_ONLY, type AnyOrquesterTool, type ThreadCaller, type ToolsetId } from "../mcp/catalog/contract.ts";
 import { chatSummary, message, snapshot, stamp, turn } from "../mcp/fixtures.ts";
 import { FakeDaemonApi } from "../mcp/testing.ts";
-import { REFRESH_CONCURRENCY, registerSessionToolsManifestRoute, SessionToolsRefresher, userMessageIds, type ToolsetRefreshDeps } from "./toolset-refresh.ts";
+import { isFastifyRouteMiss, REFRESH_CONCURRENCY, registerSessionToolsManifestRoute, SessionToolsRefresher, userMessageIds, type ToolsetRefreshDeps } from "./toolset-refresh.ts";
 
 const tool = (name: string, toolset: ToolsetId, tier: "read" | "admin" = "read"): AnyOrquesterTool =>
   defineTool({
@@ -120,6 +120,26 @@ test("only a route-miss 404 means \"no detection\"; a 404 with our own code is a
   assert.equal(r.warnings.length, 1);
   r.api.on("GET", AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, { status: 404, body: { message: "Route GET:/api/agent-profile/daemon-mcp-servers not found", error: "Not Found", statusCode: 404 } });
   assert.deepEqual(await r.refresher.daemonPointing(), []);
+});
+
+test("Task 11's own refusals (its {error: {code}} envelope: a 404, a 400 for a projectPath outside the workspaces root) are failed reads: the last good list, else unavailable (503)", async () => {
+  const t11NotFound = { status: 404, body: { error: { code: "AGENT_NOT_FOUND", message: "x" } } };
+  const t11Outside = { status: 400, body: { error: { code: "INVALID_REQUEST", message: "projectPath is not a project under the workspaces root." } } };
+  for (const answer of [t11NotFound, t11Outside]) {
+    const never = rig();
+    never.api.on("GET", AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, answer);
+    assert.equal(await never.refresher.daemonPointing(), null, `${answer.status}: never read → unavailable`);
+    assert.equal(await never.refresher.manifest("claude-1"), "unavailable", "the manifest route answers 503; the host uses its keyed fallback");
+    const good = rig();
+    good.api.on("GET", AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, { status: 200, body: { servers: [{ agent: "claude", home: "system", scope: "user", name: "orquester_remote", reason: "bearer" }] } });
+    assert.equal((await good.refresher.daemonPointing())!.length, 1);
+    good.refresher.invalidateDaemonPointing();
+    good.api.on("GET", AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, answer);
+    assert.deepEqual((await manifestOf(good, "claude-1")).deny, ["orquester_remote"], `${answer.status}: the last good list stays`);
+  }
+  // Only Fastify's exact default body is a route miss: a look-alike with more fields is not.
+  assert.equal(isFastifyRouteMiss({ ...ROUTE_MISS, code: "X" }), false);
+  assert.equal(isFastifyRouteMiss({ message: "Route GET:/x not found", error: "Not Found", statusCode: 404 }), true);
 });
 
 test("an older push finishing last never overwrites the advertised set (sequenced)", async () => {

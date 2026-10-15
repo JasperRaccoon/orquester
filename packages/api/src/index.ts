@@ -939,6 +939,13 @@ export interface DaemonPointingServer {
   /** The server's name as the CLI knows it (what a deny rule names). */
   name: string;
   reason: DaemonPointingReason;
+  /**
+   * `true` when EVERY home of `agent` loads it, whatever `home` says. Grok inherits the user's system
+   * `~/.claude.json` servers, and a managed Grok account sets only `GROK_HOME`, so those servers are
+   * reported under `grok` with this flag and must be denied in every Grok chat. Absent: only `home`
+   * loads it. Additive: an older reader ignores it.
+   */
+  allHomes?: true;
 }
 
 export interface DaemonMcpServersResponse {

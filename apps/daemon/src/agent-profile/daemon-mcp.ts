@@ -262,6 +262,8 @@ interface ScanTarget {
   shape: FileShape;
   /** `claude-json` user files: also read `projects[<p>].mcpServers` (local scope) — of `localFor` only, or of every project. */
   local?: { only?: string };
+  /** Every home of `agent` loads this file (`DaemonPointingServer.allHomes`). */
+  allHomes?: true;
 }
 
 export class DaemonMcpDetector {
@@ -303,9 +305,16 @@ export class DaemonMcpDetector {
         const reason = pointingReason(candidate, this.identity);
         if (reason === null) continue;
         const key = [target.agent, target.home, scope, projectPath ?? "", candidate.name].join("\0");
-        if (seen.has(key)) continue;
+        if (seen.has(key)) {
+          // The same name in the system Grok config and in ~/.claude.json: every Grok home loads it.
+          if (target.allHomes) {
+            const entry = out.find((server) => [server.agent, server.home, server.scope, server.projectPath ?? "", server.name].join("\0") === key);
+            if (entry) entry.allHomes = true;
+          }
+          continue;
+        }
         seen.add(key);
-        out.push({ agent: target.agent, home: target.home, scope, ...(projectPath ? { projectPath } : {}), name: candidate.name, reason });
+        out.push({ agent: target.agent, home: target.home, scope, ...(projectPath ? { projectPath } : {}), name: candidate.name, reason, ...(target.allHomes ? { allHomes: true as const } : {}) });
       }
     }
     return out;
@@ -336,7 +345,8 @@ export class DaemonMcpDetector {
     targets.push({ agent: "codex", home: "system", scope: "user", path: join(homes.codexHome, "config.toml"), shape: "toml" });
     targets.push({ agent: "grok", home: "system", scope: "user", path: join(homes.grokHome, "config.toml"), shape: "toml" });
     // Grok loads the user's Claude servers too (`grok inspect`: source `claudeJson`).
-    targets.push({ agent: "grok", home: "system", scope: "user", path: homes.claudeJson, shape: "claude-json" });
+    // A managed Grok account sets only GROK_HOME (HOME stays the user's): every Grok home loads them.
+    targets.push({ agent: "grok", home: "system", scope: "user", path: homes.claudeJson, shape: "claude-json", allHomes: true });
     for (const name of OPENCODE_FILES) {
       targets.push({ agent: "opencode", home: "system", scope: "user", path: join(homes.opencodeDir, name), shape: "opencode" });
     }

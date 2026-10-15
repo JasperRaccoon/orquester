@@ -99,10 +99,12 @@ export function denyFor(thread: ManifestThread, servers: readonly DaemonPointing
   const names = new Set<string>();
   for (const server of servers) {
     if (server.agent !== thread.agentId || typeof server.name !== "string" || server.name === "") continue;
+    // A user server every home of the agent loads (Grok's inherited ~/.claude.json, `allHomes`) is
+    // denied in every home; any other only in its own.
     const inScope =
       server.scope === "project"
         ? server.projectPath !== undefined && thread.projectPaths.some((path) => samePath(path, server.projectPath!))
-        : server.home === thread.home;
+        : server.allHomes === true || server.home === thread.home;
     if (inScope) names.add(server.name);
   }
   return [...names].sort();

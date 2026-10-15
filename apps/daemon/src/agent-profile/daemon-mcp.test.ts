@@ -124,6 +124,11 @@ test("detect: every CLI's user config shape in the system home", async (t) => {
   ].sort());
   assert.ok(!JSON.stringify(servers).includes(BEARER), "the result never carries the credential");
   assert.ok(!logs.join("\n").includes(BEARER));
+  // Grok's servers inherited from ~/.claude.json load in every Grok home (a managed account sets only
+  // GROK_HOME): flagged allHomes — also when the same name sits in the system Grok config.
+  const allHomes = servers.filter((s) => s.allHomes === true).map((s) => `${s.agent}|${s.name}`).sort();
+  assert.deepEqual(allHomes, ["grok|bridge", "grok|orquester_remote"]);
+  assert.equal(servers.find((s) => s.agent === "grok" && s.name === "g")?.allHomes, undefined, "a Grok config.toml server stays in its home");
 });
 
 test("detect: every managed account home, each file read once, and project-level configs (all projects or one)", async (t) => {
@@ -176,7 +181,7 @@ test("routes: GET lists flagged servers on both transports; the socket-only chec
   for (const app of [local, remote]) {
     const res = await app.inject({ method: "GET", url: "/api/agent-profile/daemon-mcp-servers" });
     assert.equal(res.statusCode, 200);
-    assert.deepEqual(res.json(), { servers: [{ agent: "claude", home: "system", scope: "user", name: "o", reason: "bearer" }, { agent: "grok", home: "system", scope: "user", name: "o", reason: "bearer" }] });
+    assert.deepEqual(res.json(), { servers: [{ agent: "claude", home: "system", scope: "user", name: "o", reason: "bearer" }, { agent: "grok", home: "system", scope: "user", name: "o", reason: "bearer", allHomes: true }] });
     assert.ok(!res.body.includes(BEARER));
   }
   assert.equal((await local.inject({ method: "GET", url: "/api/agent-profile/daemon-mcp-servers?projectPath=relative" })).statusCode, 400);
