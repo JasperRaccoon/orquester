@@ -8,24 +8,38 @@
  * sandbox-then-`--no-sandbox` launch as `../browsers.ts`). Never the user's
  * browser tabs' process or profile:
  *
- * - **Isolated.** Each preview or measurement launches its own browser over a
- *   pipe (no debugging port) with a fresh temporary profile, removed after,
- *   downloads denied and popups blocked — no cookie, storage or cache is
- *   shared with anything.
+ * - **Isolated.** Each preview or measurement starts its own browser, driven
+ *   over a pipe (no debugging port), with a fresh temporary profile, removed
+ *   after, downloads denied and popups blocked — no cookie, storage or cache
+ *   is shared with anything.
  * - **No local network.** Every connection, loopback included, goes through
  *   `public-proxy.ts`, which resolves the target itself and connects only to
  *   public addresses; WebRTC is removed (its UDP bypasses any proxy).
  * - **The page is served, never a file.** It loads from a made-up web origin
  *   answered by request interception, so it cannot read local files; local
  *   images reach it already inlined. The main frame stays on the page.
- * - **Bounded.** A hard deadline kills the browser's process group; console
- *   output is capped; at most two browsers run at once.
+ * - **Bounded.** A hard deadline kills the browser's process group (its tree
+ *   on Windows); console output is capped; at most two browsers run at once.
+ *   Chromium is spawned here and puppeteer gets only its pipe, so a stop kills
+ *   the process even
+ *   while puppeteer is still connecting, and every call ends once Chromium
+ *   has exited — never waiting on puppeteer, which leaves some of its waits
+ *   pending forever when Chromium dies under them (a target it is still
+ *   setting up never settles).
  */
 
+import { spawn, spawnSync } from "node:child_process";
 import { lstat, mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import puppeteer, { type Browser, type ConsoleMessage as PuppeteerConsoleMessage, type HTTPRequest, type Page } from "puppeteer-core";
+import type { Readable, Writable } from "node:stream";
+import puppeteer, {
+  type Browser,
+  type ConnectionTransport,
+  type ConsoleMessage as PuppeteerConsoleMessage,
+  type HTTPRequest,
+  type Page
+} from "puppeteer-core";
 
 import { isRetryableSandboxFailure } from "../browsers.ts";
 import { startPublicProxy, type PublicProxyOptions } from "./public-proxy.ts";
@@ -90,7 +104,6 @@ const MAX_CONCURRENT_BROWSERS = 2;
 export const MAX_WAITING_CALLS = 8;
 // Each measuring load is its own page in the one browser.
 const MEASURE_CONCURRENCY = 3;
-const CLOSE_GRACE_MS = 2_000;
 
 // A made-up web origin, answered by interception: never a file, so the page
 // can read no local file. `.localhost` keeps it a secure context that may
@@ -125,6 +138,14 @@ const CONSOLE_LEVELS: Readonly<Record<string, HtmlConsoleMessage["level"]>> = {
   assert: "error"
 };
 
+/** Starts a timer and answers what cancels it. */
+export type StartTimer = (onTimeout: () => void, ms: number) => () => void;
+
+const startRealTimer: StartTimer = (onTimeout, ms) => {
+  const timer = setTimeout(onTimeout, ms);
+  return () => clearTimeout(timer);
+};
+
 export interface HtmlPreviewBrowserOptions {
   /** The Chromium-family binary, or undefined when the host has none (yet). */
   resolveChromium(): string | undefined;
@@ -134,6 +155,8 @@ export interface HtmlPreviewBrowserOptions {
   captureTimeoutMs?: number;
   measureTimeoutMs?: number;
   queueTimeoutMs?: number;
+  /** For tests: the timers behind the queue bound and the deadline. */
+  startTimer?: StartTimer;
   /** Where temporary profiles go; the OS temp dir by default. */
   tmpDir?: string;
   log?: (message: string, error?: unknown) => void;
@@ -170,16 +193,113 @@ function consoleText(message: PuppeteerConsoleMessage): string {
   return url && !text.includes(url) ? `${text} ${url}` : text;
 }
 
-/** Kills a launched browser's whole process group, now. */
-function killBrowser(browser: Browser): void {
-  const child = browser.process();
-  if (!child?.pid) return;
-  try {
-    // puppeteer spawns Chromium detached, so its pid leads its group.
-    process.kill(-child.pid, "SIGKILL");
-  } catch {
-    child.kill("SIGKILL");
+/**
+ * CDP over Chromium's `--remote-debugging-pipe`: Chromium reads fd 3 and
+ * writes fd 4, each message ended by a NUL byte.
+ */
+class PipeTransport implements ConnectionTransport {
+  onmessage?: (message: string) => void;
+  onclose?: () => void;
+  private pending: Buffer[] = [];
+
+  constructor(
+    private readonly toChromium: Writable,
+    private readonly fromChromium: Readable
+  ) {
+    toChromium.on("error", () => undefined);
+    fromChromium.on("error", () => undefined);
+    fromChromium.on("data", (chunk: Buffer) => this.receive(chunk));
+    // After the messages already read, as they are delivered.
+    fromChromium.on("close", () => setImmediate(() => this.onclose?.()));
   }
+
+  send(message: string): void {
+    if (!this.toChromium.destroyed) this.toChromium.write(`${message}\0`);
+  }
+
+  close(): void {
+    this.toChromium.destroy();
+    this.fromChromium.destroy();
+  }
+
+  private receive(chunk: Buffer): void {
+    // A screenshot spans many chunks: joined once, when its end arrives.
+    if (!chunk.includes(0)) {
+      this.pending.push(chunk);
+      return;
+    }
+    const data = Buffer.concat([...this.pending, chunk]);
+    this.pending = [];
+    let start = 0;
+    for (let end = data.indexOf(0); end !== -1; end = data.indexOf(0, start)) {
+      const message = data.toString("utf8", start, end);
+      start = end + 1;
+      // Each on its own turn, as puppeteer's own pipe transport delivers them.
+      setImmediate(() => this.onmessage?.(message));
+    }
+    if (start < data.length) this.pending.push(data.subarray(start));
+  }
+}
+
+/** A Chromium this module started, from its first instant. */
+interface Chromium {
+  readonly transport: ConnectionTransport;
+  /** Kills it and every process it started, now (until it has exited). */
+  kill(): void;
+  /** Resolves once its process has exited; with the error when it never started (a missing binary). */
+  readonly exited: Promise<Error | undefined>;
+}
+
+/** The kills of every Chromium still running: the daemon exiting takes them with it. */
+const running = new Set<() => void>();
+let killOnExitInstalled = false;
+
+function startChromium(executable: string, args: string[]): Chromium {
+  if (!killOnExitInstalled) {
+    killOnExitInstalled = true;
+    process.on("exit", () => {
+      for (const kill of running) kill();
+    });
+  }
+  // On POSIX, detached: its pid leads a process group that every process it
+  // starts joins, killed as one. Windows has no such groups: its tree is
+  // killed by pid instead.
+  const posix = process.platform !== "win32";
+  const child = spawn(executable, args, {
+    detached: posix,
+    windowsHide: true,
+    stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"]
+  });
+  const kill = (): void => {
+    // Until it is reaped its pid (and so its group's id) cannot be reused.
+    if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) return;
+    if (!posix) {
+      // Synchronous, as this also runs while the daemon exits.
+      const tree = spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+      if (tree.status !== 0) child.kill();
+      return;
+    }
+    try {
+      process.kill(-child.pid, "SIGKILL");
+    } catch {
+      child.kill("SIGKILL");
+    }
+  };
+  running.add(kill);
+  const exited = new Promise<Error | undefined>((resolve) => {
+    child.once("exit", () => {
+      running.delete(kill);
+      resolve(undefined);
+    });
+    // Every error is taken (a failed kill emits one too); only a failure to
+    // start, which leaves no pid, ends it here.
+    child.on("error", (error) => {
+      if (child.pid !== undefined) return;
+      running.delete(kill);
+      resolve(error);
+    });
+  });
+  return { transport: new PipeTransport(child.stdio[3] as Writable, child.stdio[4] as Readable), kill, exited };
 }
 
 export const PREVIEWS_BUSY_MESSAGE = "Previews are busy right now; try again in a few seconds.";
@@ -390,32 +510,34 @@ export class HtmlPreviewBrowser {
     const onAbort = (): void => stop(new HtmlPreviewError("cancelled", "The preview was cancelled."));
     if (signal?.aborted) onAbort();
     signal?.addEventListener("abort", onAbort, { once: true });
-    const timers: NodeJS.Timeout[] = [];
+    const startTimer = this.opts.startTimer ?? startRealTimer;
     const stopped = new Promise<never>((_, reject) => {
       if (controller.signal.aborted) reject(controller.signal.reason);
       controller.signal.addEventListener("abort", () => reject(controller.signal.reason), { once: true });
     });
     stopped.catch(() => undefined);
-    let browser: Browser | undefined;
+    // Every wait on puppeteer ends at the stop at the latest: some of its
+    // waits never settle once Chromium is gone.
+    const untilStopped = <V>(promise: Promise<V>): Promise<V> => {
+      promise.catch(() => undefined);
+      return Promise.race([promise, stopped]);
+    };
+    let chromium: Chromium | undefined;
     let profile: string | undefined;
     let proxy: Awaited<ReturnType<typeof startPublicProxy>> | undefined;
     let release: (() => void) | undefined;
+    let cancelDeadline: (() => void) | undefined;
+    const cancelQueueBound = startTimer(() => stop(new HtmlPreviewError("busy", PREVIEWS_BUSY_MESSAGE)), bounds.queueTimeoutMs);
     const run = (async (): Promise<T> => {
-      timers.push(setTimeout(() => stop(new HtmlPreviewError("busy", PREVIEWS_BUSY_MESSAGE)), bounds.queueTimeoutMs));
       release = await this.gate.enter(controller.signal);
-      clearTimeout(timers.pop());
+      cancelQueueBound();
       // The deadline runs from the slot's start, not from the queue.
-      timers.push(
-        setTimeout(
-          () =>
-            stop(
-              new HtmlPreviewError(
-                "timeout",
-                `The page did not finish loading within ${Math.round(bounds.timeoutMs / 1000)} seconds.`
-              )
-            ),
-          bounds.timeoutMs
-        )
+      cancelDeadline = startTimer(
+        () =>
+          stop(
+            new HtmlPreviewError("timeout", `The page did not finish loading within ${Math.round(bounds.timeoutMs / 1000)} seconds.`)
+          ),
+        bounds.timeoutMs
       );
       let html: string;
       try {
@@ -427,10 +549,10 @@ export class HtmlPreviewBrowser {
       proxy = await startPublicProxy(this.opts.proxy);
       profile = await mkdtemp(join(this.opts.tmpDir ?? tmpdir(), PREVIEW_PROFILE_PREFIX));
       controller.signal.throwIfAborted();
-      browser = await this.launch(executable, profile, proxy.port, controller.signal, bounds.timeoutMs);
-      // Killed at once if the deadline passed while it was starting.
-      if (controller.signal.aborted) killBrowser(browser);
-      return await work(browser, html);
+      const browser = await this.launch(executable, profile, proxy.port, controller.signal, untilStopped, (started) => {
+        chromium = started;
+      });
+      return await untilStopped(work(browser, html));
     })();
     run.catch(() => undefined);
     let done = false;
@@ -444,18 +566,22 @@ export class HtmlPreviewBrowser {
       this.opts.log?.("[html-preview] the browser failed", error);
       throw new HtmlPreviewError("browser-failed", "Headless Chromium could not render the page.");
     } finally {
-      for (const timer of timers) clearTimeout(timer);
+      cancelQueueBound();
+      cancelDeadline?.();
       signal?.removeEventListener("abort", onAbort);
-      if (!done) {
-        // Stop whatever still runs: a launch in progress is killed by
-        // puppeteer on this abort (its `signal`), a launched browser here.
-        stop(new HtmlPreviewError("cancelled", "The preview was cancelled."));
-        if (browser) killBrowser(browser);
-      }
-      // Wait for the work to settle, so nothing below races it: a killed
-      // browser fails it promptly.
+      // Stop whatever still runs.
+      if (!done) stop(new HtmlPreviewError("cancelled", "The preview was cancelled."));
+      // Killed, not asked to close, even after a page that rendered: its
+      // profile is thrown away, and one signal to the whole group leaves no
+      // process of it running on and writing there, as a polite close (which
+      // ends the browser process first and lets the rest wind down) would.
+      chromium?.kill();
+      // Settles promptly, so nothing below races it: every wait in it on
+      // puppeteer has ended at the stop, the rest (the page source, the proxy's
+      // and the profile's creation) end by themselves.
       await run.catch(() => undefined);
-      if (browser) await closeBrowser(browser);
+      // Gone before its profile is removed.
+      await chromium?.exited;
       await proxy?.close();
       if (profile) await rm(profile, { recursive: true, force: true }).catch(() => undefined);
       release?.();
@@ -464,28 +590,25 @@ export class HtmlPreviewBrowser {
     }
   }
 
-  /** Launches with the sandbox, and once more without it where it cannot start (as `../browsers.ts`). */
+  /**
+   * Starts Chromium with the sandbox, and once more without it where it
+   * cannot start (as `../browsers.ts`). Each Chromium goes to `started` the
+   * moment it is spawned, so a stop kills even one still starting; a failed
+   * attempt's has exited before this goes on.
+   */
   private async launch(
     executable: string,
     profile: string,
     proxyPort: number,
     signal: AbortSignal,
-    launchTimeoutMs: number
+    untilStopped: <V>(promise: Promise<V>) => Promise<V>,
+    started: (chromium: Chromium) => void
   ): Promise<Browser> {
     const attempt = async (sandboxed: boolean): Promise<Browser> => {
-      const browser = await puppeteer.launch({
-        executablePath: executable,
-        userDataDir: profile,
-        // The deadline or a cancellation kills the launching process at once.
-        timeout: launchTimeoutMs,
-        signal,
+      // What `puppeteer.launch` would start, over the pipe.
+      const args = puppeteer.defaultArgs({
         headless: true,
-        pipe: true,
-        defaultViewport: null,
-        handleSIGINT: false,
-        handleSIGTERM: false,
-        handleSIGHUP: false,
-        downloadBehavior: { policy: "deny" },
+        userDataDir: profile,
         args: [
           "--headless=new",
           "--no-first-run",
@@ -506,43 +629,41 @@ export class HtmlPreviewBrowser {
           ...(sandboxed ? [] : ["--no-sandbox"])
         ]
       });
-      if (signal.aborted) return browser;
+      const chromium = startChromium(executable, [...args, "--remote-debugging-pipe"]);
+      started(chromium);
       try {
+        const browser = await untilStopped(
+          puppeteer.connect({ transport: chromium.transport, defaultViewport: null, downloadBehavior: { policy: "deny" } })
+        );
         // A present-but-broken sandbox lets the pipe connect, then aborts the
         // first renderer: start one now so that fails here.
-        const probe = await browser.newPage();
-        await probe.close();
+        const probe = await untilStopped(browser.newPage());
+        await untilStopped(probe.close());
         return browser;
       } catch (error) {
-        killBrowser(browser);
-        throw error;
+        chromium.kill();
+        const notStarted = await chromium.exited;
+        if (notStarted === undefined) throw error;
+        // A binary that cannot run (gone after an upgrade, not executable) is
+        // no sandbox failure: never retried without the sandbox, and named.
+        this.opts.log?.(`[html-preview] Chromium at ${executable} could not be started`, notStarted);
+        const reason = (notStarted as NodeJS.ErrnoException).code ?? notStarted.message;
+        throw new HtmlPreviewError(
+          "browser-unavailable",
+          `Orquester could not start the Chromium-family browser at ${executable} (${reason}). Ask the user to reinstall it or choose another under Settings › Tools, then call again; html_render still works without it.`
+        );
       }
     };
     if (!this.sandboxWorks) return attempt(false);
     try {
       return await attempt(true);
     } catch (error) {
-      if (signal.aborted || !isRetryableSandboxFailure(error)) throw error;
+      if (signal.aborted || error instanceof HtmlPreviewError || !isRetryableSandboxFailure(error)) throw error;
       this.sandboxWorks = false;
       this.opts.log?.("[html-preview] Chromium's sandbox is unavailable here; previews run without it", error);
       return attempt(false);
     }
   }
-}
-
-/** Closes politely, and kills what has not gone after a short grace. */
-async function closeBrowser(browser: Browser): Promise<void> {
-  let timer: NodeJS.Timeout | undefined;
-  await Promise.race([
-    browser.close().catch(() => killBrowser(browser)),
-    new Promise<void>((resolve) => {
-      timer = setTimeout(() => {
-        killBrowser(browser);
-        resolve();
-      }, CLOSE_GRACE_MS);
-    })
-  ]);
-  clearTimeout(timer);
 }
 
 /** A page at `width` that serves `html` at {@link PAGE_URL} and nothing else of its own. */
