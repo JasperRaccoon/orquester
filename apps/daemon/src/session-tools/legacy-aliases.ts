@@ -20,7 +20,8 @@
  * input shapes below are a frozen copy of the old tools' FIELD NAMES — the target's own schema
  * validates the mapped arguments, so its refusal text is the one every caller meets.
  *
- * Removed with the legacy host definitions once the handover reports no older peer (plan Task 14).
+ * Removed with the frozen legacy host definitions by the criterion in `./README.md` ("Legacy names and
+ * definitions").
  * Daemon-only: the route (`./route.ts`) resolves names through {@link chatToolByName}.
  */
 

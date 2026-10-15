@@ -589,7 +589,7 @@ test("wait_for_session from an external client: attention after the cursor, time
 });
 
 // ---------------------------------------------------------------------------
-// Byte budgets (§9.5 trim plan): the registry test exempts these names as legacy until Task 14
+// Byte budgets (§9.5 trim plan): each conversation tool's own target, under the registry test's ceilings
 // ---------------------------------------------------------------------------
 
 const TARGETS: Record<string, number> = { create_session: 2_900, send_message: 2_300, wait_for_session: 1_200, fork_session: 1_200, merge_back_session: 1_100 };

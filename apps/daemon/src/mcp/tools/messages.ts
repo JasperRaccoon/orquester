@@ -1085,8 +1085,5 @@ async function createFromChat(args: CreateArgs, ctx: CallContext, caller: Thread
   return { ...(notice !== undefined ? { notice } : {}), ...created, ...rest, ...ref };
 }
 
-/**
- * This family in the catalog (`../catalog/index.ts`). `read_transcript` is served by the sessions family (plan Task 7,
- * `./sessions.ts`); `readTranscript` stays exported here only for the legacy `thread_read` until Task 14.
- */
+/** This family in the catalog (`../catalog/index.ts`). `read_transcript` is the sessions family's (`./sessions.ts`). */
 export const messagesFamily: readonly AnyOrquesterTool[] = [createSessionTool, sendMessageTool];
