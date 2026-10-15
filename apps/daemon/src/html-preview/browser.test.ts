@@ -599,7 +599,9 @@ describe("html preview browser: slots, queue and cancellation", () => {
       const error = (outcome as PromiseRejectedResult).reason;
       assert.ok(error instanceof HtmlPreviewError && error.code === "cancelled", String(error));
     }
-    assert.ok(timers.started.every((timer) => !timer.fired));
+    // Each call took down its own bounds as it ended: its queue bound once in a slot, its deadline after.
+    assert.equal(timers.started.length, 4);
+    assert.ok(timers.started.every((timer) => timer.cancelled && !timer.fired));
     // Each call ended only once its Chromium had exited.
     assert.ok(notRunning(pidOne!) && notRunning(pidTwo!));
     // Both slots are free again: a third launch starts at once.
@@ -635,6 +637,50 @@ describe("html preview browser: slots, queue and cancellation", () => {
     assert.ok(args.includes("--proxy-bypass-list=<-loopback>"));
     assert.ok(args.some((arg) => arg.startsWith("--proxy-server=socks5://127.0.0.1:")));
     assert.ok(args.includes("--force-webrtc-ip-handling-policy=disable_non_proxied_udp"));
+    // Driven over the pipe only, never a debugging port, from a fresh profile of its own.
+    assert.ok(args.includes("--remote-debugging-pipe"));
+    assert.ok(!args.some((arg) => arg.startsWith("--remote-debugging-port")));
+    const profiles = args.filter((arg) => arg.startsWith("--user-data-dir="));
+    assert.equal(profiles.length, 1);
+    assert.ok(profiles[0]!.startsWith(`--user-data-dir=${join(own, PREVIEW_PROFILE_PREFIX)}`), profiles[0]);
+  });
+
+  it("names a browser binary that cannot be started, and never takes it for a sandbox failure", { timeout: TEST_TIMEOUT_MS }, async (t) => {
+    const own = await mkdtemp(join(tmpdir(), "orq-html-preview-missing-"));
+    t.after(() => rm(own, { recursive: true, force: true }));
+    // The registry's cached path, after the browser was removed or upgraded away.
+    let executable = join(own, "gone", "chromium");
+    const logged: string[] = [];
+    const browser = new HtmlPreviewBrowser({
+      resolveChromium: () => executable,
+      tmpDir: own,
+      log: (message, error) => logged.push(`${message}: ${String(error)}`)
+    });
+    await assert.rejects(
+      browser.capture({ html: FIXED(1), width: 320, urlFragment: "" }),
+      (error: unknown) =>
+        error instanceof HtmlPreviewError &&
+        error.code === "browser-unavailable" &&
+        error.message.includes(executable) &&
+        error.message.includes("ENOENT") &&
+        /html_render still works/.test(error.message)
+    );
+    assert.equal(logged.length, 1, logged.join("\n"));
+    assert.ok(logged[0]!.includes(executable) && logged[0]!.includes("ENOENT"), logged[0]);
+    assert.deepEqual(await readdir(own), [], "no profile left");
+    // Once a browser is back, previews still run sandboxed: nothing was learnt from the missing one.
+    const fake = await fakeChromium((marks) => `#!/bin/sh\nprintf '%s\\n' "$@" > "${marks}/../args"\ntouch "${marks}/$$"\nexec sleep 300\n`);
+    t.after(() => fake.cleanup());
+    executable = fake.executable;
+    const cancel = new AbortController();
+    const running = browser.capture({ html: FIXED(1), width: 320, urlFragment: "", signal: cancel.signal });
+    running.catch(() => undefined);
+    await fake.started(1);
+    const args = readFileSync(join(fake.executable, "..", "args"), "utf8").split("\n");
+    cancel.abort();
+    await assert.rejects(running, (error: unknown) => error instanceof HtmlPreviewError && error.code === "cancelled");
+    assert.ok(args.includes("--remote-debugging-pipe"), args.join(" "));
+    assert.ok(!args.includes("--no-sandbox"), args.join(" "));
   });
 
   it("the daemon's stop kills a preview in flight, removes its profile, and refuses any after it (D-M4)", { timeout: TEST_TIMEOUT_MS }, async (t) => {
