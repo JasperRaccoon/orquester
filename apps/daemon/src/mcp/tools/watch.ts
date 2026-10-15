@@ -9,7 +9,7 @@
 // tests until plan Task 14 deletes the legacy definitions.
 import { resolve as resolvePath } from "node:path";
 import { z } from "zod";
-import type { SessionSummary } from "@orquester/api";
+import type { ApprovalPreviewSection, SessionSummary } from "@orquester/api";
 import { RUNTIME_MODES, threadToolReference, UNTRUSTED_NOTICE, type RuntimeMode, type ThreadToolReference, type ThreadToolRelation } from "@orquester/api/agent-chat";
 import { canonicalProject, resolveProject, type CanonicalProject } from "../addressing.ts";
 import { ToolError } from "../errors.ts";
@@ -19,7 +19,7 @@ import { defineTool, READ_ONLY, type ToolDef } from "../tool.ts";
 import { buildViewContext, sessionView, type SessionView } from "../views.ts";
 import { readWorkReport, waitForAttention, waitWhileWorking, type WatchScope, type WorkReport } from "../wait.ts";
 import { registerWait } from "../../agent-chat/waits.ts";
-import { defineTool as defineCatalogTool, READ_ONLY as CATALOG_READ_ONLY, type AnyOrquesterTool, type ScopeClaim, type ScopeContext, type ThreadCaller, type ToolCaller } from "../catalog/contract.ts";
+import { defineTool as defineCatalogTool, READ_ONLY as CATALOG_READ_ONLY, type AnyOrquesterTool, type ApprovalPreview, type ScopeClaim, type ScopeContext, type ThreadCaller, type ToolCaller } from "../catalog/contract.ts";
 
 const instant = (stamp: string | null | undefined): number => Date.parse(stamp ?? "");
 const createdAt = (s: SessionSummary): number => { const t = instant(s.createdAt); return Number.isNaN(t) ? 0 : t; };
@@ -139,6 +139,25 @@ function viewWithoutContent(view: SessionView): Record<string, unknown> {
   if (!view.chat?.goal) return { ...view, contentOmitted: true };
   const { objective: _objective, ...goal } = view.chat.goal;
   return { ...view, chat: { ...view.chat, goal }, contentOmitted: true };
+}
+
+const AGENT_LABELS: Readonly<Record<string, string>> = { claude: "Claude", codex: "Codex", grok: "Grok", opencode: "OpenCode" };
+/** The calling chat's agent, as a card's title names it. */
+export const agentLabel = (caller: ThreadCaller): string => AGENT_LABELS[caller.agentId] ?? caller.agentId;
+
+/** A boundary card's content for a session-addressed conversation call (§7.1): composed from structured data, never the raw arguments. */
+export async function sessionCard(ctx: ScopeContext, sessionId: string, action: string, rows: { label: string; value: string }[], text: string | undefined): Promise<ApprovalPreview> {
+  const caller = threadCaller(ctx.caller);
+  const sessions = await listSessions(ctx.api);
+  const summary = sessions.find((s) => s.id === sessionId);
+  const project = summary ? await canonicalProject(ctx.api, summary.projectPath) : null;
+  const where = project ? `${project.workspace}/${project.name}` : "another project";
+  const title = clipText((summary?.title ?? sessionId).replace(/\s+/g, " ").trim(), 80);
+  const sections: ApprovalPreviewSection[] = [
+    { kind: "fields", title: "Request", rows: [{ label: "Action", value: action }, { label: "Session", value: `${summary?.title ?? sessionId} · ${sessionId}` }, { label: "Project", value: where }, ...rows] }
+  ];
+  if (text !== undefined) sections.push({ kind: "text", title: "Message", text });
+  return { title: `${caller ? agentLabel(caller) : "An agent"} wants to ${action} the chat "${title}" in ${where}`, scopeLabel: `Project ${where}`, sections };
 }
 
 // ---------------------------------------------------------------------------
@@ -263,21 +282,20 @@ function pickWords(report: WorkReport): Record<string, unknown> {
   return { ...(lastTurn ? { lastTurn } : {}), ...(reply !== undefined ? { reply } : {}), ...(replyTruncated ? { replyTruncated } : {}), ...(emptyReply ? { emptyReply, hint } : {}), ...(error !== undefined ? { error } : {}) };
 }
 
-const sessionIdField = z.string().min(1).max(200);
+const sessionIdField = z.string().min(1);
 
 export const waitForSessionTool = defineCatalogTool({
   name: "wait_for_session",
   title: "Wait for a session",
   description:
-    "Block until a session (sessionId), any of several (sessionIds), a project's sessions or any session needs attention — a question, an approval, a plan, a finished turn, an error — after `after` (default: now). Pass the result's `cursor` back as `after` so nothing is missed or repeated; never poll. A single session's result adds its `state` and latest `reply`.",
-  chatNote:
-    "Without `after`, sessionId / sessionIds return once one of them is not working (at once if one already is), with its state and final reply. Default scope: this chat's project. To hand off work, prefer send_message or create_session with reply \"notify\".",
+    "Block until a session (sessionId, any of sessionIds, a project's, or any) needs attention — a question, approval, plan, finished turn or error — after `after` (default now); pass the result's `cursor` back as `after`. Never poll. One session's result adds its `state` and latest `reply`.",
+  chatNote: "Without `after`, sessionId(s) return once one is not working (at once if one already is) with its final reply. Default: this chat's project.",
   input: {
-    sessionId: sessionIdField.optional().describe("Wait on this session."),
-    sessionIds: z.array(sessionIdField).min(1).max(MAX_WAIT_SESSIONS).optional().describe(`Wait on any of these sessions (up to ${MAX_WAIT_SESSIONS}).`),
-    project: z.string().optional().describe("Every session of this project (path or \"workspace/project\")."),
-    after: z.string().optional().describe("ISO time; only attention after it counts. Default: now. Use the last result's cursor."),
-    timeoutSeconds: z.number().int().min(1).max(MAX_WAIT_SECONDS).default(120).describe(`Seconds to wait (max ${MAX_WAIT_SECONDS}).`)
+    sessionId: sessionIdField.optional(),
+    sessionIds: z.array(sessionIdField).min(1).max(MAX_WAIT_SESSIONS).optional(),
+    project: z.string().optional().describe("Path or \"workspace/project\"."),
+    after: z.string().optional().describe("ISO time: the last result's cursor."),
+    timeoutSeconds: z.number().int().min(1).max(MAX_WAIT_SECONDS).default(120)
   },
   audiences: ["external", "chat"],
   toolset: "core",
@@ -302,6 +320,15 @@ export const waitForSessionTool = defineCatalogTool({
       projects.push(project.canonical);
     }
     return { ...base, projects, self: "refuse" };
+  },
+  async approval(args, ctx) {
+    const targets = waitTargets(args);
+    const rows = [{ label: "Timeout", value: `${args.timeoutSeconds} s` }];
+    if (targets.length === 1) return sessionCard(ctx, targets[0]!, "wait on", rows, undefined);
+    const caller = threadCaller(ctx.caller);
+    const where = args.project ?? targets.join(", ");
+    const sections: ApprovalPreviewSection[] = [{ kind: "fields", title: "Request", rows: [{ label: "Action", value: "wait on the status of" }, { label: args.project !== undefined ? "Project" : "Sessions", value: where }, ...rows] }];
+    return { title: `${caller ? agentLabel(caller) : "An agent"} wants to wait on chats in another project`, scopeLabel: "Another project", sections };
   },
   annotations: CATALOG_READ_ONLY,
   resultKind: "json",

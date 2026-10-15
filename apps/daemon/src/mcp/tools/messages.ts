@@ -29,12 +29,12 @@ import { defineTool, MUTATING, READ_ONLY, type ToolContext, type ToolDef } from 
 import { proposedPlan, transcriptEntries, transcriptRange, type TranscriptResult } from "../transcript.ts";
 import { buildViewContext, chatDetail, fitDetail, SETTLED_TURN_STATES, type SessionDetail } from "../views.ts";
 import { awaitReplySubscription, turnBaseline, waitForTurn, waitWhileWorking, type TurnBaseline, type TurnOutcome } from "../wait.ts";
-import { defineTool as defineCatalogTool, MUTATING as CATALOG_MUTATING, type AnyOrquesterTool, type ApprovalPreview, type CallContext, type ScopeContext, type ThreadCaller } from "../catalog/contract.ts";
+import { defineTool as defineCatalogTool, MUTATING as CATALOG_MUTATING, type AnyOrquesterTool, type CallContext, type ScopeContext, type ThreadCaller } from "../catalog/contract.ts";
 import { NEW_SESSION, openedThreadRuntimeMode } from "../gate/turn-policy.ts";
 import { legacyExternalTools } from "../catalog/legacy.ts";
 import { asWaiter } from "../../agent-chat/waits.ts";
 import { MAX_RUNNING_SESSIONS_PER_PROJECT, optionsSchema, runtimeModeSchema } from "./sessions.ts";
-import { chatThreadRef, sessionClaim, threadCaller } from "./watch.ts";
+import { agentLabel, chatThreadRef, sessionCard, sessionClaim, threadCaller } from "./watch.ts";
 
 const MAX_WAIT_MS = 600_000;
 /** read_transcript's ceiling: the budget covers the whole result in UTF-8 bytes (transcript.ts), 5 000 under ok()'s 60 000-byte cap (result.ts). */
@@ -155,7 +155,7 @@ export function turnsOverBefore(checked: ThreadSnapshotPayload, summary: Session
 
 /**
  * §9.1's wait, then the detail the result is built from. A needs-input the snapshot does not confirm is no outcome:
- * the summary trails the host by up to one poll, so right after answer_question it can still flag the request just
+ * the summary trails the host by up to one poll, so right after respond_to_request answers it can still flag the request just
  * settled. The wait then goes on until a real outcome or the timeout — resuming on the session's next bus event (or
  * after STALE_RECHECK_MS), never looping on the stale summary. For the same lag, a verdict on a turn that was already
  * `over` when the message was posted is the list catching up, not this message's outcome: the wait rebases on it and
@@ -497,8 +497,6 @@ const REPLY_RESULT_MAX_BYTES = 40_000;
 
 type ReplyMode = "wait" | "notify" | "none";
 
-const AGENT_LABELS: Readonly<Record<string, string>> = { claude: "Claude", codex: "Codex", grok: "Grok", opencode: "OpenCode" };
-const agentLabel = (caller: ThreadCaller): string => AGENT_LABELS[caller.agentId] ?? caller.agentId;
 
 /** Refused for an external caller: the chat-only reply mode (§13: "External client calls a chat-only field"). */
 function externalReply(reply: ReplyMode | undefined): void {
@@ -647,21 +645,6 @@ async function dispatchNextTurn(ctx: SendContext, sessionId: string, body: TurnB
   }
 }
 
-/** A boundary card's content for a session-addressed conversation call (§7.1): composed, never the raw arguments. */
-async function conversationCard(ctx: ScopeContext, sessionId: string, action: string, rows: { label: string; value: string }[], text: string | undefined): Promise<ApprovalPreview> {
-  const caller = threadCaller(ctx.caller);
-  const sessions = await listSessions(ctx.api);
-  const summary = sessions.find((s) => s.id === sessionId);
-  const project = summary ? await canonicalProject(ctx.api, summary.projectPath) : null;
-  const where = project ? `${project.workspace}/${project.name}` : "another project";
-  const title = clipText((summary?.title ?? sessionId).replace(/\s+/g, " ").trim(), 80);
-  const sections: ApprovalPreviewSection[] = [
-    { kind: "fields", title: "Request", rows: [{ label: "Action", value: action }, { label: "Session", value: `${summary?.title ?? sessionId} · ${sessionId}` }, { label: "Project", value: where }, ...rows] }
-  ];
-  if (text !== undefined) sections.push({ kind: "text", title: "Message", text });
-  return { title: `${caller ? agentLabel(caller) : "An agent"} wants to ${action} the chat "${title}" in ${where}`, scopeLabel: `Project ${where}`, sections };
-}
-
 /** Attachments as a card lists them: a path, or a name and size — never the bytes. */
 function attachmentRows(attachments: readonly AttachmentInput[] | undefined): { label: string; value: string }[] {
   return (attachments ?? []).map((file, index) => ({
@@ -676,7 +659,7 @@ function attachmentPaths(api: ScopeContext["api"], attachments: readonly Attachm
 }
 
 const replyField = z.enum(["wait", "notify", "none"]);
-const timeoutSecondsField = z.number().int().min(1).max(MAX_REPLY_WAIT_SECONDS).optional().describe(`With reply "wait": seconds to wait (default ${DEFAULT_REPLY_WAIT_SECONDS}, max ${MAX_REPLY_WAIT_SECONDS}).`);
+const timeoutSecondsField = z.number().int().min(1).max(MAX_REPLY_WAIT_SECONDS).optional().describe(`For "wait" (default ${DEFAULT_REPLY_WAIT_SECONDS}).`);
 
 // ---------------------------------------------------------------------------
 // send_message (§4 row 13, §8.1)
@@ -686,17 +669,17 @@ export const sendMessageTool = defineCatalogTool({
   name: "send_message",
   title: "Send a message",
   description:
-    "Message a chat session (attachments optional). `reply`: \"wait\" (default) returns the final reply of the turn this message causes — a working session gets it as its next turn, never a steer — or returns early when that turn asks its user something, or at timeoutSeconds; \"none\" sends and returns at once (a working session's running turn is steered by it; refused while the session waits for its user: PENDING_REQUEST). `implementPlan: true` sends its latest proposed plan to implement (the GUI's Implement); `planMode: true` sends in plan mode where the agent has one.",
+    "Message a chat. `reply` \"wait\" (default): returns the final reply of the turn this message causes (a working chat gets it as its next turn, never a steer), or early when that turn asks its user something, or at timeoutSeconds. \"none\": returns at once; a working chat's running turn is steered (refused while it waits for its user: PENDING_REQUEST). `implementPlan: true` sends its latest proposed plan to implement.",
   chatNote:
-    "\"notify\" returns at once and delivers that turn's final reply to you later as a new message: prefer it for long work, and never poll. A \"wait\" that times out or meets a question goes on as notify (`willNotify`). Never message yourself; answer a [Sent by …] message in your final reply instead.",
+    "\"notify\": returns at once and delivers that turn's final reply to you later as a new message; prefer it for long work, never poll. A \"wait\" cut short goes on as notify (`willNotify`). Never message yourself; answer a [Sent by …] message in your final reply.",
   externalNote: "On Codex the host runs `/goal …` itself: no turn starts, and outcome \"goal\" carries its answer.",
   input: {
-    sessionId: z.string().min(1).max(200).describe("The session id from list_sessions."),
-    text: z.string().optional().describe("The message. Required unless attachments or implementPlan are given."),
-    attachments: z.array(attachmentInputSchema).max(MAX_ATTACHMENTS).optional().describe(`Up to ${MAX_ATTACHMENTS}: {path} inside a project, or {name, base64, mimeType?}.`),
-    planMode: z.boolean().optional().describe("Send in plan mode (the agent plans, does not edit). OpenCode: update_session options.agent=\"plan\"."),
-    implementPlan: z.boolean().optional().describe("Send the session's latest proposed plan to implement, in default mode."),
-    reply: replyField.optional().describe("How the answer comes back: \"wait\" (default), \"notify\" (chat only) or \"none\"."),
+    sessionId: z.string().min(1).describe("From list_sessions."),
+    text: z.string().optional().describe("The message."),
+    attachments: z.array(attachmentInputSchema).max(MAX_ATTACHMENTS).optional().describe("{path} inside a project, or {name, base64}."),
+    planMode: z.boolean().optional().describe("Send in plan mode."),
+    implementPlan: z.boolean().optional().describe("Send its latest proposed plan to implement."),
+    reply: replyField.optional(),
     timeoutSeconds: timeoutSecondsField
   },
   audiences: ["external", "chat"],
@@ -717,7 +700,7 @@ export const sendMessageTool = defineCatalogTool({
     return paths.length > 0 ? { ...claim, paths } : claim;
   },
   approval: async (args, ctx) =>
-    conversationCard(ctx, args.sessionId, args.implementPlan ? "send its plan for implementation to" : "send a message to", [
+    sessionCard(ctx, args.sessionId, args.implementPlan ? "send its plan for implementation to" : "send a message to", [
       { label: "Reply", value: args.reply ?? "wait" },
       ...(args.planMode ? [{ label: "Mode", value: "plan" }] : []),
       ...attachmentRows(args.attachments)
@@ -940,25 +923,25 @@ export const createSessionTool = defineCatalogTool({
   name: "create_session",
   title: "Open a chat session",
   description:
-    "Open a chat tab for an agent in a project (the GUI's '+'), or resume a conversation from list_conversations. list_agents lists the agents, models, options (effort…), permission modes and accounts. With `prompt` it starts working at once; `reply` says how its answer comes back: \"wait\" returns the final reply of that first turn (or at timeoutSeconds), \"none\" returns at once. The result reports the model, mode and account the session actually got (`accountSource`: requested, inherited or family-default; a legacy model is marked `isLegacy`).",
+    "Open a chat tab for an agent in a project, or resume a conversation (list_conversations); list_agents lists agents, models, options, modes and accounts. With `prompt` it starts at once: `reply` \"wait\" returns that turn's final reply (or at timeoutSeconds), \"none\" returns at once. The result says what the session got: model (`isLegacy` if legacy), mode, account and `accountSource` (requested, inherited or family-default).",
   chatNote:
-    "Defaults: this chat's project, agent, permission mode and — same agent — model, options and account; only a narrower runtimeMode; `cwd` inside the project. `prompt` is required unless resuming: self-contained, the chat does not see this conversation. `delegate: true` makes it your task: its final reply is the result, delivered to you as a new message (reply defaults to \"notify\"; else \"none\"). Limits: 6 unfinished chats you opened, 2 levels deep, 24 open per project.",
+    "Defaults: this chat's project, agent, mode (only narrower) and, same agent, its model, options and account. `prompt` (self-contained) is required unless resuming. `delegate: true` makes it your task: its final reply is the result, delivered to you as a message (reply default \"notify\", else \"none\"). Limits: 6 unfinished chats you opened, 2 levels deep.",
   externalNote: "`project` is required; runtimeMode defaults to full-access, reply to \"none\".",
   input: {
-    project: z.string().min(1).optional().describe("Absolute project path or \"<workspace>/<project>\"."),
-    agent: z.string().min(1).max(64).optional().describe("Agent id from list_agents (claude, codex, opencode, grok)."),
+    project: z.string().min(1).optional().describe("Path or \"workspace/project\"."),
+    agent: z.string().min(1).max(64).optional().describe("From list_agents."),
     // min(1): an empty model would read as none, so the default model would launch in its place.
-    model: z.string().min(1).max(200).optional().describe("Model slug from list_agents; default: the agent's default."),
-    options: optionsSchema.optional(),
-    runtimeMode: runtimeModeSchema.optional().describe("Permission mode: approval-required (Supervised), auto-accept-edits, auto, full-access."),
-    accountId: z.string().min(1).max(200).optional().describe("A managed account id from list_agents, or \"system\"."),
-    title: z.string().trim().min(1).max(300).optional().describe("Tab title; default: the agent's name (a task: its prompt's first line)."),
-    cwd: z.string().min(1).optional().describe("Working directory inside the project: absolute or relative to it; default: the project."),
-    resume: z.object({ conversationId: z.string().min(1).describe("Conversation id from list_conversations for that project.") }).optional(),
+    model: z.string().min(1).max(200).optional(),
+    options: optionsSchema.optional().describe("By id, e.g. {\"effort\":\"high\"}."),
+    runtimeMode: runtimeModeSchema.optional(),
+    accountId: z.string().min(1).max(200).optional().describe("From list_agents, or \"system\"."),
+    title: z.string().trim().min(1).max(300).optional(),
+    cwd: z.string().min(1).optional().describe("Inside the project; default: the project."),
+    resume: z.object({ conversationId: z.string().min(1) }).optional().describe("From list_conversations."),
     prompt: z.string().trim().min(1).max(CHAT_TEXT_MAX_CHARS).optional().describe("The first message."),
-    reply: replyField.optional().describe("How the first turn's answer comes back: \"wait\", \"notify\" (chat only) or \"none\"."),
+    reply: replyField.optional(),
     timeoutSeconds: timeoutSecondsField,
-    delegate: z.boolean().optional().describe("Make it your task (lineage delegate): its final reply is the result.")
+    delegate: z.boolean().optional()
   },
   chatOnlyInput: ["delegate"],
   audiences: ["external", "chat"],

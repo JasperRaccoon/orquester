@@ -14,6 +14,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { TOOLSET_IDS, type SessionSummary } from "@orquester/api";
 import { agentChatRoutes, parseThreadMessage, replyNoticeText, THREAD_MESSAGE_CONTEXT_KIND, UNTRUSTED_NOTICE, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
@@ -22,7 +25,7 @@ import { registerWait } from "../../agent-chat/waits.ts";
 import { FakeApprovalPort } from "../catalog/approval-double.ts";
 import type { ThreadCaller } from "../catalog/contract.ts";
 import { toolByName } from "../catalog/index.ts";
-import { executeToolCall } from "../executor.ts";
+import { audienceDescription, audienceSchema, audienceShape, executeToolCall } from "../executor.ts";
 import { chatSummary, head, message, snapshot, stamp, turn } from "../fixtures.ts";
 import { busEvent, FakeDaemonApi } from "../testing.ts";
 
@@ -541,4 +544,59 @@ test("wait_for_session from an external client: attention after the cursor, time
   assert.equal(body(result).reply, "reply of peer");
   assert.equal(code(await r.external("wait_for_session", { sessionId: "peer", project: "x/y" })), "INVALID_ARGUMENT");
   assert.equal(code(await r.external("wait_for_session", { timeoutMs: 1_000 })), "INVALID_ARGUMENT", "timeoutMs is gone");
+});
+
+// ---------------------------------------------------------------------------
+// Byte budgets (§9.5 trim plan): the registry test exempts these names as legacy until Task 14
+// ---------------------------------------------------------------------------
+
+const TARGETS: Record<string, number> = { create_session: 2_900, send_message: 2_300, wait_for_session: 1_200, fork_session: 1_200, merge_back_session: 1_100 };
+
+test("the conversation tools meet their §9.5 targets in tools/list, for both audiences (descriptions ≤ 1 000 bytes, field texts ≤ 160)", async () => {
+  for (const audience of ["chat", "external"] as const) {
+    const server = new McpServer({ name: "orquester", version: "test" });
+    for (const name of Object.keys(TARGETS)) {
+      const tool = toolByName(name, audience)!;
+      const shape = audienceShape(tool, audience);
+      server.registerTool(name, {
+        title: tool.title, description: audienceDescription(tool, audience), inputSchema: Object.keys(shape).length > 0 ? shape : audienceSchema(tool, audience), annotations: tool.annotations,
+        ...(audience === "external" ? { _meta: { "orquester/tier": tool.tier as string, "orquester/toolset": tool.toolset } } : {})
+      }, () => ({ content: [] }));
+    }
+    const [serverSide, clientSide] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "budget", version: "test" });
+    await Promise.all([server.connect(serverSide), client.connect(clientSide)]);
+    try {
+      for (const entry of (await client.listTools()).tools) {
+        const bytes = Buffer.byteLength(JSON.stringify(entry), "utf8");
+        assert.ok(bytes <= TARGETS[entry.name]!, `${audience} ${entry.name}: ${bytes} bytes > ${TARGETS[entry.name]}`);
+        assert.ok(Buffer.byteLength(entry.description ?? "", "utf8") <= 1_000, `${entry.name}: description`);
+        for (const field of Object.values((entry.inputSchema as { properties?: Record<string, { description?: string }> }).properties ?? {})) {
+          assert.ok(Buffer.byteLength(field.description ?? "", "utf8") <= 160, `${entry.name}: a field text`);
+        }
+      }
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  }
+});
+
+test("external send_message parity: none steers and refuses an open request (respond_to_request named); attachments are uploaded and referenced", async () => {
+  const asking = thread("peer", { pending: { approvals: [{ requestId: "r1", requestKind: "command", createdAt: stamp(5) }], userInputs: [] } as never });
+  const r = rig({ threads: { peer: asking } });
+  const refused = await r.external("send_message", { sessionId: "peer", text: "hi", reply: "none" });
+  assert.equal(code(refused), "PENDING_REQUEST");
+  assert.match(body(refused).message, /respond_to_request/);
+  const ok = rig();
+  ok.api.on("POST", "/api/sessions/peer/turn", { status: 200, body: { seq: 3 } });
+  const sent = await ok.external("send_message", { sessionId: "peer", text: "see", reply: "none", attachments: [{ name: "a.png", base64: Buffer.from("png").toString("base64") }] });
+  assert.equal(sent.isError, undefined, JSON.stringify(body(sent)));
+  assert.equal(body(sent).outcome, "sent");
+  const [turnBody] = posted(ok.api, "/api/sessions/peer/turn");
+  assert.equal(turnBody!.input, "see");
+  assert.deepEqual(turnBody!.attachments.map((a: { id: string }) => a.id), ["peer-att-1"]);
+  assert.equal(turnBody!.causedBy, undefined, "external turns start no exchange");
+  assert.equal(code(await ok.external("send_message", { sessionId: "peer", text: "  " })), "INVALID_ARGUMENT");
+  assert.equal(code(await ok.external("send_message", { sessionId: "peer", implementPlan: true, text: "and this" })), "INVALID_ARGUMENT");
 });

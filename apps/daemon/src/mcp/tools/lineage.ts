@@ -19,7 +19,7 @@ import { clipText, MAX_ECHO_CHARS, toSafeToolError } from "../result.ts";
 import { defineTool, MUTATING, READ_ONLY, type ToolDef } from "../tool.ts";
 import { chatDetail } from "../views.ts";
 import { defineTool as defineCatalogTool, MUTATING as CATALOG_MUTATING, type AnyOrquesterTool, type ScopeClaim } from "../catalog/contract.ts";
-import { chatThreadRef, sessionClaim, threadCaller } from "./watch.ts";
+import { chatThreadRef, sessionCard, sessionClaim, threadCaller } from "./watch.ts";
 import { MAX_RUNNING_SESSIONS_PER_PROJECT } from "./sessions.ts";
 
 // Thread lineage (spec 2026-10-14 §6): fork a chat session from a turn, merge a fork's result back into its parent,
@@ -115,7 +115,7 @@ export const lineageTools: ToolDef[] = [forkSession, mergeBackSession, resolveMe
 // The catalog tools (unified MCP design 2026-10-15 §4 rows 15–16)
 // ---------------------------------------------------------------------------
 
-const catalogSessionId = z.string().min(1).max(200);
+const catalogSessionId = z.string().min(1);
 
 /** The fork body's cut by turn number (the transcript's numbers): `finishedOnly` while the caller forks its own running conversation. */
 async function forkCut(api: Parameters<typeof readThread>[0], sessionId: string, throughTurn: number, finishedOnly: boolean): Promise<Pick<ForkSessionRequest, "turnId" | "role">> {
@@ -152,13 +152,13 @@ export const forkSessionTool = defineCatalogTool({
   name: "fork_session",
   title: "Fork a chat session",
   description:
-    "Fork a chat (the GUI's 'Fork from here'): a new tab in the same project with the same agent, model, options, mode and account, whose conversation is the original's through turn `throughTurn` (the transcript's turn numbers; default: the latest finished turn) or up to `messageId`. The original is untouched. Grok has no native fork: its fork is handed the conversation so far (`strategy: \"transcript\"`). The fork starts idle: give it work with send_message; it sends its result back with merge_back_session.",
-  chatNote: "Default sessionId: this chat (the turn you are in is still running, so it is not part of the fork).",
+    "Fork a chat (the GUI's 'Fork from here'): a new tab, same project, agent and settings, whose conversation is the original's through turn `throughTurn` (transcript numbers; default: the latest finished turn) or up to `messageId`. Grok's fork is handed the transcript (`strategy`). The fork starts idle: send_message it work; it returns its result with merge_back_session.",
+  chatNote: "Default: this chat (your running turn is not included).",
   input: {
-    sessionId: catalogSessionId.optional().describe("The session to fork (list_sessions)."),
-    throughTurn: z.number().int().min(0).optional().describe("Keep turns 1..throughTurn (0: before the first message)."),
-    messageId: z.string().min(1).max(200).optional().describe("Fork at this message instead (an assistant message keeps its turn; a user message forks just before it)."),
-    title: z.string().trim().min(1).max(200).optional().describe("The fork's tab title; default: the original's + \" (fork)\".")
+    sessionId: catalogSessionId.optional(),
+    throughTurn: z.number().int().min(0).optional().describe("Keep turns 1..N (0: none)."),
+    messageId: z.string().min(1).max(200).optional().describe("Fork at this message (a user message: just before it)."),
+    title: z.string().trim().min(1).max(200).optional()
   },
   audiences: ["external", "chat"],
   toolset: "core",
@@ -171,6 +171,12 @@ export const forkSessionTool = defineCatalogTool({
     // The fork carries the original's conversation into a tab the caller can read: a content read.
     return sessionClaim(ctx, target, { reads: "content", writes: false, causesTurnIn: [], self: "allow" });
   },
+  approval: async (args, ctx) =>
+    sessionCard(ctx, args.sessionId ?? threadCaller(ctx.caller)?.threadId ?? "", "fork", [
+      ...(args.throughTurn !== undefined ? [{ label: "Through turn", value: String(args.throughTurn) }] : []),
+      ...(args.messageId !== undefined ? [{ label: "At message", value: args.messageId }] : []),
+      ...(args.title !== undefined ? [{ label: "Fork title", value: args.title }] : [])
+    ], undefined),
   annotations: CATALOG_MUTATING,
   resultKind: "json",
   async run(args, ctx) {
@@ -230,13 +236,13 @@ export const mergeBackSessionTool = defineCatalogTool({
   name: "merge_back_session",
   title: "Merge a fork back",
   description:
-    "Send a FORK's result to the chat it was forked from: `text` (or, from outside the fork, its final reply) arrives there marked as from the fork — at once when that chat is idle, else queued until it is (`delivery: \"queued\"`, kept across restarts). Forks only: a delegated or opened chat's final reply goes back by itself. With `mergeId` and `action` it delivers now or discards a queued delivery instead (get_session's pendingDeliveries), as its receiver or sender. Each send is a new message.",
-  chatNote: "Default sessionId: this chat, which must be the fork. Write the whole result into `text`: your reply in this turn is not finished yet.",
+    "A fork's result to the chat it was forked from, marked as the fork's: `text` (from outside the fork, default: its final reply), sent at once to an idle chat, else queued (`delivery: \"queued\"`). Forks only: delegated and opened chats' final replies go back by themselves. `mergeId` + `action` deliver now or discard a queued delivery (get_session's pendingDeliveries), as its receiver or sender.",
+  chatNote: "Default: this chat, the fork; put your whole result in `text`.",
   input: {
-    sessionId: catalogSessionId.optional().describe("The fork; for mergeId: the chat holding the delivery or the one that sent it."),
-    text: z.string().trim().min(1).max(100_000).optional().describe("The result to send, self-contained."),
-    mergeId: z.string().min(1).max(200).optional().describe("A queued delivery (get_session's pendingDeliveries)."),
-    action: z.enum(["deliver", "discard"]).optional().describe("With mergeId: deliver it now, or discard it.")
+    sessionId: catalogSessionId.optional(),
+    text: z.string().trim().min(1).max(100_000).optional(),
+    mergeId: z.string().min(1).max(200).optional(),
+    action: z.enum(["deliver", "discard"]).optional()
   },
   audiences: ["external", "chat"],
   toolset: "core",
@@ -265,6 +271,12 @@ export const mergeBackSessionTool = defineCatalogTool({
     if (!parent) return { projects: [], sessions: [caller.threadId], reads: "none", writes: false, causesTurnIn: [] };
     const claim = await sessionClaim(ctx, parent.id, { reads: "none", writes: false, causesTurnIn: [parent.id] });
     return { ...claim, sessions: [caller.threadId, parent.id] } satisfies ScopeClaim;
+  },
+  async approval(args, ctx) {
+    // Only a send reaches another chat: its parent (a fork lives in its parent's project, so this card is rare).
+    const caller = threadCaller(ctx.caller);
+    const parent = caller ? (await listSessions(ctx.api)).find((s) => s.id === caller.threadId)?.lineage?.parentThreadId : undefined;
+    return sessionCard(ctx, parent ?? args.sessionId ?? "", "merge a fork's result into", [], args.text);
   },
   annotations: CATALOG_MUTATING,
   resultKind: "json",
