@@ -842,6 +842,34 @@ export interface UsageTokensResponse {
   asOf: string;
 }
 
+/**
+ * `GET /api/usage/chat-threads?agent=<adapter>`: what one agent's Orquester agent-chat threads
+ * recorded per settled turn — the provider-REPORTED cost and tokens — summed per UTC day and model,
+ * read from the threads' own event logs (closed chats included). Only Orquester's chats: the
+ * agent's use outside Orquester is not in it (`scope`). For agents with no transcript scanner
+ * (Grok); additive — an older daemon answers 404.
+ */
+export interface ChatThreadUsageRow {
+  day: string;
+  model: string;
+  /** Settled turns counted. */
+  turns: number;
+  /** Turns whose provider reported a cost (the rest add tokens only). */
+  costedTurns: number;
+  /** Input tokens, cached ones included (the adapters' convention). */
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens: number;
+  /** The sum of the reported costs; null when no turn of the row reported one. */
+  costUsd: number | null;
+}
+export interface ChatThreadUsageResponse {
+  agent: string;
+  scope: "orquester-chats";
+  rows: ChatThreadUsageRow[];
+  asOf: string;
+}
+
 /** One auto-mode check of the Claude subagent prompt-cache lifetime. */
 export interface SubagentCacheTtlCheck {
   at: string;

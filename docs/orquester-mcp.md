@@ -1296,7 +1296,10 @@ starts.
   UTC day or ISO week (`bucket`), for the last `days` days including today. Amounts are rounded to
   4 decimals; a model without a known price counts as $0 and its rows carry `costUsd: null`. The
   rows bound themselves to the result by dropping whole buckets, oldest first (`truncated: true`,
-  `rowsDropped`); the totals still count every row.
+  `rowsDropped`); the totals still count every row. **Grok** has no local transcript to scan: its
+  rows (`scope: "orquester-chats"`) are the cost and tokens Grok itself reported per turn in
+  Orquester's own agent chats (closed ones included), read from their logs — Grok used outside
+  Orquester is not counted, and `orquesterChatsOnly` says so (or that the source could not be read).
 - **session** — one chat's token usage: the per-turn `tokenUsage` of the turns its thread holds
   (`turnsCounted`; `partial: true` when older turns lie outside it), priced as the provider reported
   it where it did and by the Cost tab's pricing table otherwise (Codex reports tokens only):

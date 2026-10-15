@@ -1,4 +1,4 @@
-import type { AgentAccount, AgentUsage, UsageAccount, UsageResponse, UsageTokensResponse, UsageWindow } from "@orquester/api";
+import type { AgentAccount, AgentUsage, ChatThreadUsageResponse, UsageAccount, UsageResponse, UsageTokenRow, UsageTokensResponse, UsageWindow } from "@orquester/api";
 import { isSettledConversationCompaction, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
 // The Cost tab's own price table (API-equivalent USD per token class): one table for both views.
 import { estimateCostParts } from "../usage-tokens.ts";
@@ -95,7 +95,32 @@ export function isoWeek(day: string): { week: string; from: string } {
   return { week: `${year}-W${String(week).padStart(2, "0")}`, from: monday.toISOString().slice(0, 10) };
 }
 
-type CostRowView = { agent: string; model: string; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; costUsd: number | null } & ({ day: string } | { week: string });
+type CostRowView = { agent: string; model: string; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; costUsd: number | null; scope?: "orquester-chats" } & ({ day: string } | { week: string });
+
+/** A cost row and where it came from: the Cost tab's transcript scan, or Orquester's own chat logs (reported cost). */
+type CostInputRow = Pick<UsageTokenRow, "agent" | "model" | "day" | "inputTokens" | "outputTokens" | "cacheReadTokens" | "cacheWriteTokens" | "costUsd"> & { scope?: "orquester-chats" };
+
+/** What the cost view says of an agent counted from Orquester's own chats only. */
+export const ORQUESTER_CHATS_ONLY_NOTE = (agent: string): string =>
+  `${AGENT_NAMES[agent] ?? agent}: Orquester chats only — the cost and tokens it reported per turn in Orquester's own agent chats (closed ones included). Its use outside Orquester (its own CLI) is not counted.`;
+
+/**
+ * The chat-log rows of an agent with no transcript scanner (Grok) as cost rows: the reported cost,
+ * input split into fresh and cached (the adapters' input counts the cached tokens).
+ */
+function chatRowsAsCost(chats: ChatThreadUsageResponse): CostInputRow[] {
+  return chats.rows.map((row) => ({
+    agent: chats.agent,
+    model: row.model,
+    day: row.day,
+    inputTokens: Math.max(0, row.inputTokens - row.cachedInputTokens),
+    outputTokens: row.outputTokens,
+    cacheReadTokens: row.cachedInputTokens,
+    cacheWriteTokens: 0,
+    costUsd: row.costUsd,
+    scope: "orquester-chats" as const
+  }));
+}
 
 /**
  * API-equivalent cost per agent and model, bucketed by UTC day or ISO week (UTC), over the last `days` UTC days — for
@@ -103,13 +128,18 @@ type CostRowView = { agent: string; model: string; inputTokens: number; outputTo
  * models count as $0 in the totals and keep `costUsd: null` on their rows. Over {@link MAX_COST_VIEW_BYTES} the rows lose
  * whole buckets, oldest first (`truncated`, `rowsDropped`); the totals still count every row.
  */
-export function costView(res: UsageTokensResponse, opts: { days: number; bucket: "day" | "week"; now: number }): Record<string, unknown> {
+export function costView(
+  res: UsageTokensResponse,
+  opts: { days: number; bucket: "day" | "week"; now: number },
+  chats: readonly { agent: string; usage: ChatThreadUsageResponse | null }[] = []
+): Record<string, unknown> {
   const today = new Date(opts.now);
   const firstDay = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - (opts.days - 1))).toISOString().slice(0, 10);
   // Weeks are whole: the window starts on the Monday of its first week, so no week is a partial sum (`since` says so).
   const start = opts.bucket === "week" ? isoWeek(firstDay).from : firstDay;
   // Newest first, so a cut below takes the oldest buckets; the daemon's order within a day is kept.
-  const inWindow = res.rows.filter((r) => r.day >= start).sort((a, b) => (a.day < b.day ? 1 : a.day > b.day ? -1 : 0));
+  const all: CostInputRow[] = [...res.rows, ...chats.flatMap((chat) => (chat.usage ? chatRowsAsCost(chat.usage) : []))];
+  const inWindow = all.filter((r) => r.day >= start).sort((a, b) => (a.day < b.day ? 1 : a.day > b.day ? -1 : 0));
   const keyOf = (day: string): string => (opts.bucket === "day" ? day : isoWeek(day).week);
   const totals = new Map<string, number>();
   for (const r of inWindow) totals.set(keyOf(r.day), (totals.get(keyOf(r.day)) ?? 0) + (r.costUsd ?? 0));
@@ -120,21 +150,25 @@ export function costView(res: UsageTokensResponse, opts: { days: number; bucket:
   const totalUsd = round4(ordered.reduce((sum, [, usd]) => sum + round4(usd), 0));
   let rows: CostRowView[];
   if (opts.bucket === "day") {
-    rows = inWindow.map((r) => ({ agent: r.agent, model: r.model, day: r.day, inputTokens: r.inputTokens, outputTokens: r.outputTokens, cacheReadTokens: r.cacheReadTokens, cacheWriteTokens: r.cacheWriteTokens, costUsd: typeof r.costUsd === "number" ? round4(r.costUsd) : null }));
+    rows = inWindow.map((r) => ({ agent: r.agent, model: r.model, day: r.day, inputTokens: r.inputTokens, outputTokens: r.outputTokens, cacheReadTokens: r.cacheReadTokens, cacheWriteTokens: r.cacheWriteTokens, costUsd: typeof r.costUsd === "number" ? round4(r.costUsd) : null, ...(r.scope ? { scope: r.scope } : {}) }));
   } else {
     // One row per agent, model and week, newest week first; a row is priced when any of its days is.
     const merged = new Map<string, CostRowView & { week: string }>();
     for (const r of inWindow) {
       const week = keyOf(r.day);
       const key = `${week}|${r.agent}|${r.model}`;
-      const row = merged.get(key) ?? { agent: r.agent, model: r.model, week, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: null };
+      const row = merged.get(key) ?? { agent: r.agent, model: r.model, week, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: null, ...(r.scope ? { scope: r.scope } : {}) };
       row.inputTokens += r.inputTokens; row.outputTokens += r.outputTokens; row.cacheReadTokens += r.cacheReadTokens; row.cacheWriteTokens += r.cacheWriteTokens;
       if (typeof r.costUsd === "number") row.costUsd = (row.costUsd ?? 0) + r.costUsd;
       merged.set(key, row);
     }
     rows = [...merged.values()].map((row) => ({ ...row, costUsd: row.costUsd === null ? null : round4(row.costUsd) }));
   }
-  const head = { asOf: res.asOf, days: opts.days, bucket: opts.bucket, since: start, totalUsd, ...byBucket };
+  // Agents counted from Orquester's own chats only say so, and an unreadable source says that.
+  const chatOnly = chats.map((chat) =>
+    chat.usage ? { agent: chat.agent, scope: "orquester-chats", note: ORQUESTER_CHATS_ONLY_NOTE(chat.agent) } : { agent: chat.agent, scope: "orquester-chats", unavailable: true, note: `${AGENT_NAMES[chat.agent] ?? chat.agent}'s usage from Orquester's chats could not be read; it is not counted.` }
+  );
+  const head = { asOf: res.asOf, days: opts.days, bucket: opts.bucket, since: start, totalUsd, ...byBucket, ...(chatOnly.length > 0 ? { orquesterChatsOnly: chatOnly } : {}) };
   const whole = { ...head, rows };
   if (jsonBytes(whole) <= MAX_COST_VIEW_BYTES) return whole;
   // Over budget: drop whole buckets of rows, oldest first, until the rest fits. Each row is measured once, with the
