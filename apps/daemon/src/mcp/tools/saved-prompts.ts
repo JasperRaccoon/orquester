@@ -48,11 +48,10 @@ import {
   type SavedPromptListResponse,
   type UpdateSavedPromptRequest
 } from "@orquester/api";
-import { canonicalProject, projectNamesFor, resolveProject } from "../addressing.ts";
+import { canonicalProject, projectNamesFor, resolveProject, type CanonicalProject } from "../addressing.ts";
 import type { DaemonApi } from "../daemon-api.ts";
 import { daemonError, ToolError } from "../errors.ts";
 import { listSessions } from "../reads.ts";
-import { classifyTarget, callerProject } from "../gate/scope.ts";
 import { clipText, fitJsonBytes, MAX_ECHO_CHARS, MAX_RESULT_BYTES, resultBytes } from "../result.ts";
 import {
   closedWorld,
@@ -254,12 +253,13 @@ function rowOf(prompt: SavedPrompt, includeBody: boolean, caller: ScopeContext["
  * prompts would be — card-free in the caller's project and workspace, from another workspace (or a
  * first checkout that is gone, which could be anywhere) only to Full access; else counted.
  */
-async function reachesCaller(api: DaemonApi, prompt: SavedPrompt, caller: ScopeContext["caller"], place: Place, own: Awaited<ReturnType<typeof callerProject>>): Promise<boolean> {
+async function reachesCaller(api: DaemonApi, prompt: SavedPrompt, caller: ScopeContext["caller"], place: Place, own: CanonicalProject | null): Promise<boolean> {
   if (prompt.projectPath === null || prompt.projectPath === place.projectPath) return true;
   if (caller.kind !== "thread" || caller.runtimeMode === "full-access") return true;
   const origin = await originOf(api, prompt);
   if (origin.kind !== "project") return false;
-  return classifyTarget(own, { canonical: origin.canonical, workspace: origin.workspace }) !== "other-workspace";
+  // The gate's classification (§5.2): the caller's own project, or another of its workspace, reads card-free.
+  return own !== null && origin.workspace === own.workspace;
 }
 
 function matches(prompt: SavedPrompt, query: string): boolean {
@@ -313,7 +313,7 @@ const listSavedPrompts = defineTool({
   resultKind: "json",
   async run(args, ctx) {
     const place = await placeOf(args.project, ctx);
-    const own = ctx.caller.kind === "thread" ? await callerProject(ctx.api, ctx.caller) : null;
+    const own = ctx.caller.kind === "thread" && ctx.caller.projectPath ? await canonicalProject(ctx.api, ctx.caller.projectPath) : null;
     const listed = (await listing(ctx.api, place, { readOnly: false })).prompts.filter((prompt) => args.query === undefined || matches(prompt, args.query));
     const shown: SavedPrompt[] = [];
     let elsewhere = 0;
