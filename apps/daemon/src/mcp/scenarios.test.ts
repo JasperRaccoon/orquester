@@ -12,9 +12,11 @@
  */
 
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, test } from "node:test";
+import { promisify } from "node:util";
 
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import {
@@ -472,6 +474,42 @@ describe("acceptance (c) / §14.2.11 saved prompts: global and per project; the 
       assert.equal(w.savedPrompts.get(project.id)!.body, "Review the auth module, then the session module.");
       // Even the chat's saved-prompts grant does not cover it: the next edit cards again.
       refused((await w.carded("claude", "update_saved_prompts", { action: "update", id: project.id, title: "Renamed" }, { decision: "deny" })).result, "APPROVAL_DENIED");
+    });
+  });
+});
+
+describe("saved prompts shared by a repository's checkouts, on workflow cards", () => {
+  test("a repository prompt whose only checkout was deleted: the create card shows its body in full and pins it, never as missing", async () => {
+    await withWorld(async (w) => {
+      const exec = promisify(execFile);
+      const orq = w.project("jaspersito/orquester");
+      const clone = w.project("jaspersito/orquester-3");
+      // Only orquester-3 is a checkout of the repository; orquester is a plain folder.
+      await exec("git", ["init", "-q", clone]);
+      await exec("git", ["-C", clone, "remote", "add", "origin", "git@github.com:jaspersito/orquester.git"]);
+      const created = await w.user({ method: "POST", url: "/api/saved-prompts", payload: { title: "Shared review", body: "Review {diff} for the release.", projectPath: clone } });
+      assert.equal(created.status, 201, JSON.stringify(created.body));
+      assert.equal(created.body.repoKey, "github.com/jaspersito/orquester");
+      await rm(clone, { recursive: true, force: true });
+      // No current checkout lists it any more; the engine still renders it by id.
+      assert.equal((await w.savedPrompts.list(orq)).prompts.some((prompt) => prompt.id === created.body.id), false);
+      assert.equal(w.savedPrompts.get(created.body.id)?.body, "Review {diff} for the release.");
+
+      w.host.addChat("claude", { project: orq, title: "Automate", runtimeMode: "full-access" });
+      assert.equal((await w.user({ method: "PUT", url: "/api/sessions/claude/agent-tools", payload: { toolsets: { "workflow-authoring": true } } })).status, 200);
+      w.host.userTurn("claude", "Automate the release review.");
+      const card = await w.carded("claude", "create_workflow", {
+        name: "Release review",
+        project: { kind: "existing", project: "jaspersito/orquester" },
+        nodes: [{ type: "trigger.manual", name: "Go" }, { type: "agent", name: "Review", config: { prompt: { kind: "saved", promptId: created.body.id } } }],
+        edges: [{ source: "Go", target: "Review" }]
+      }, { decision: "approve" });
+      const sections = JSON.stringify(card.card.sections);
+      assert.match(sections, /Saved prompt \\"Shared review\\"/);
+      assert.match(sections, /Review \{diff\} for the release\./);
+      assert.doesNotMatch(sections, /does not exist/);
+      // The pins the card took verify against the same lookup: the create runs.
+      ok(card.result);
     });
   });
 });

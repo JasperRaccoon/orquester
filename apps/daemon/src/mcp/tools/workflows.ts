@@ -686,9 +686,9 @@ function assertSavable(workflow: Workflow, problems: readonly WorkflowProblem[])
 }
 
 /** The prompts a preview shows: those the given agent blocks reference. */
-async function promptsFor(api: DaemonApi, workflow: Pick<Workflow, "nodes">, union: WorkflowUnion, only?: ReadonlySet<string>): Promise<Map<string, ReferencedPrompt | null>> {
+async function promptsFor(api: DaemonApi, workflow: Pick<Workflow, "nodes">, only?: ReadonlySet<string>): Promise<Map<string, ReferencedPrompt | null>> {
   const nodes = only ? workflow.nodes.filter((node) => only.has(node.id)) : workflow.nodes;
-  return resolveSavedPrompts(api, savedPromptIdsOf({ nodes }), union.projects);
+  return resolveSavedPrompts(api, savedPromptIdsOf({ nodes }));
 }
 
 const unionLabel = (union: WorkflowUnion): string => {
@@ -919,7 +919,7 @@ const createWorkflow = defineTool({
     const problems = await validateDefinition(api, draft);
     assertSavable(draft, problems);
     const union = await workflowUnion(api, [draft]);
-    const prompts = await promptsFor(api, draft, union);
+    const prompts = await promptsFor(api, draft);
     // (A create always cards — no grant covers a workflow before it exists; its later edits of a
     // secret-reading block are never granted: `changesSecretUse` on update.)
     const sections: ApprovalPreviewSection[] = [
@@ -948,7 +948,7 @@ const createWorkflow = defineTool({
       return dryRunResult(await validateDefinition(api, plan.draft), union);
     }
     // What the user approved is what is saved: the prompts the card showed are unchanged (§7.2).
-    if (ctx.approval?.pins) await verifyPins(api, ctx.approval.pins, { creating: true, via: ctx.approval.outcome, hintProjects: plan.draft ? (await workflowUnion(api, [plan.draft])).projects : [] });
+    if (ctx.approval?.pins) await verifyPins(api, ctx.approval.pins, { creating: true, via: ctx.approval.outcome });
     const res = await api.request("POST", workflowRoutes.create, { body: plan.request });
     if (res.status >= 400) throw indexedCreateError(workflowError(res), args.nodes.length);
     return writeResult(api, res.body as WorkflowWriteResponse, "created");
@@ -995,7 +995,7 @@ const updateWorkflow = defineTool({
     const enables = after.enabled && !current.enabled;
     const everything = enables || JSON.stringify(current.project) !== JSON.stringify(after.project);
     const only = everything ? undefined : diff.touched;
-    const prompts = await promptsFor(api, after, union, only);
+    const prompts = await promptsFor(api, after, only);
     // Adding or changing a block that reads a secret, or retargeting one: never granted.
     const secretUse = changesSecretUse(current, after, diff.touched);
     // Workflows that run this one: the edit changes what they run (covered only with them).
@@ -1039,7 +1039,7 @@ const updateWorkflow = defineTool({
     const ops = await convertOps(api, args.ops);
     if (ctx.approval?.pins) {
       const { workflow: current } = await readWorkflow(api, args.workflowId);
-      await verifyPins(api, ctx.approval.pins, { current, via: ctx.approval.outcome, hintProjects: (await workflowUnion(api, [current])).projects });
+      await verifyPins(api, ctx.approval.pins, { current, via: ctx.approval.outcome });
     }
     const res = await api.request("POST", workflowRoutes.patch(args.workflowId), { body: { revision: args.revision, ops } });
     if (res.status >= 400) {
@@ -1287,7 +1287,7 @@ const runWorkflow = defineTool({
     const { workflow, problems } = await readWorkflow(api, args.workflowId);
     if (workflow.revision !== args.revision) throw revisionConflict(workflow.revision, args.revision);
     const union = await workflowUnion(api, [workflow]);
-    const prompts = await resolveSavedPrompts(api, savedPromptIdsOf(workflow), union.projects);
+    const prompts = await resolveSavedPrompts(api, savedPromptIdsOf(workflow));
     const runFields: ApprovalPreviewSection = {
       kind: "fields",
       title: "Run",
@@ -1345,7 +1345,7 @@ const runWorkflow = defineTool({
   async run(args, ctx) {
     const { api, signal } = ctx;
     const { workflow } = await readWorkflow(api, args.workflowId);
-    if (ctx.approval?.pins) await verifyPins(api, ctx.approval.pins, { current: workflow, via: ctx.approval.outcome, hintProjects: (await workflowUnion(api, [workflow])).projects });
+    if (ctx.approval?.pins) await verifyPins(api, ctx.approval.pins, { current: workflow, via: ctx.approval.outcome });
     if (workflow.revision !== args.revision) throw revisionConflict(workflow.revision, args.revision);
     // Tap the bus before starting, so a run that ends before the POST answers is still heard.
     const tap = args.wait ? new RunEndTap(api) : null;

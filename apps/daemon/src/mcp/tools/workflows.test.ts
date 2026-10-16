@@ -38,7 +38,6 @@ async function sandbox(t: { after: (fn: () => Promise<void>) => void }): Promise
   api.on("POST", "/api/workflows/validate", { status: 200, body: { problems: [] } })
     .on("GET", "/api/workspaces", { status: 200, body: [{ name: "acme", path: join(root, "acme"), projectCount: 2, gitAccountId: "acc1" }, { name: "beta", path: join(root, "beta"), projectCount: 1, gitAccount: { label: "beta-bot", login: "betabot", provider: "github" } }] })
     .on("GET", "/api/accounts", { status: 200, body: [{ id: "acc1", label: "acme-bot", login: "acmebot" }] })
-    .on("GET", "/api/saved-prompts", { status: 200, body: { prompts: [] } })
     // No other workflow (none runs another as a sub-workflow) unless a test serves a list.
     .on("GET", "/api/workflows", { status: 200, body: { workflows: [] } });
   return api;
@@ -651,7 +650,7 @@ test("a create card is complete: triggers, code and shell in full, the whole HTT
   const api = await sandbox(t);
   serveDefinition(api);
   const body = "Review {project}.\n".repeat(400);
-  api.on("GET", "/api/saved-prompts", ({ query }) => ({ status: 200, body: { prompts: query?.projectPath === api.own ? [{ id: "p1", title: "Review checklist", body, projectPath: api.own }] : [] } }));
+  api.on("GET", "/api/saved-prompts/p1", { status: 200, body: { id: "p1", title: "Review checklist", body, projectPath: api.own } });
   api.on("POST", "/api/workflows/validate", { status: 200, body: { problems: [{ severity: "warning", code: "unreachable", message: "Notes is unreachable" }] } });
   const source = `export default async function () {\n${"  step();\n".repeat(3_000)}}`;
   const port = new FakeApprovalPort({ outcome: "denied", approvalId: "", reason: "not now" });
@@ -806,7 +805,7 @@ test("PREVIEW_STALE: a saved prompt the card showed in full changed before the w
   const api = await sandbox(t);
   serveDefinition(api);
   let body = "Original body";
-  api.on("GET", "/api/saved-prompts", () => ({ status: 200, body: { prompts: [{ id: "p1", title: "Shared", body, projectPath: null }] } }));
+  api.on("GET", "/api/saved-prompts/p1", () => ({ status: 200, body: { id: "p1", title: "Shared", body, projectPath: null } }));
   const port = new FakeApprovalPort(() => {
     body = "Swapped body";
     return { outcome: "approved", approvalId: "" };
@@ -1123,7 +1122,7 @@ test("a run card whose DEFINITION is too large to show: measured whole, an outli
     { id: "p", name: "Ask", type: "agent", position: { x: 0, y: 0 }, config: { prompt: { kind: "saved", promptId: "p1" }, chain: [{ agent: "claude", model: "opus" }] } }
   ] as Workflow["nodes"] });
   serveDefinition(api, huge);
-  api.on("GET", "/api/saved-prompts", { status: 200, body: { prompts: [{ id: "p1", title: "Triage", body: "Look.", projectPath: null }] } });
+  api.on("GET", "/api/saved-prompts/p1", { status: 200, body: { id: "p1", title: "Triage", body: "Look.", projectPath: null } });
   api.on("POST", "/api/workflows/wf-1/run", { status: 200, body: { runId: "run-1" } });
   api.on("GET", "/api/workflow-runs/run-1", { status: 200, body: { run: runRecord(huge) } });
   // A grant that would cover wf-1: an outline card is never covered.

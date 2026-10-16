@@ -705,6 +705,20 @@ export function registerSavedPromptRoutes(app: FastifyInstance, deps: SavedPromp
     }
   );
 
+  // One prompt by id, whatever its scope: the lookup the workflow engine renders an agent block's
+  // saved prompt with (`service.get`), so a workflow card shows exactly what a run would use —
+  // a repository prompt no current checkout lists included.
+  app.get<{ Params: { id: string } }>(
+    "/api/saved-prompts/:id",
+    async (request, reply): Promise<SavedPrompt | void> => {
+      const prompt = service.get(request.params.id);
+      if (!prompt) {
+        return savedPromptError(reply, new SavedPromptError(404, "SAVED_PROMPT_NOT_FOUND", `No saved prompt with id ${excerpt(request.params.id)}.`));
+      }
+      return listRow(prompt, uses());
+    }
+  );
+
   app.post<{ Body: CreateSavedPromptRequest }>(
     "/api/saved-prompts",
     async (request, reply): Promise<SavedPrompt | void> => {

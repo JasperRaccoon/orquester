@@ -133,6 +133,9 @@ export interface UpdateSavedPromptRequest {
   pinned?: boolean;
 }
 
+// `GET /api/saved-prompts/:id` → that {@link SavedPrompt} (a list row, with `usedByWorkflows`),
+// whatever its scope — also a repository prompt no current checkout lists. 404
+// `SAVED_PROMPT_NOT_FOUND`. The lookup a workflow run uses, for the workflow tools' cards.
 // `DELETE /api/saved-prompts/:id` → 204.
 // `POST /api/saved-prompts/:id/used` → the updated {@link SavedPrompt}
 // (`lastUsedAt` now, `useCount` + 1): an Insert or a Send happened.

@@ -28,9 +28,7 @@ import {
   type ApprovalPreviewSection,
   type GetWorkflowResponse,
   type ListWorkflowsResponse,
-  type ProjectSummary,
   type SavedPrompt,
-  type SavedPromptListResponse,
   type Workflow,
   type WorkflowNode,
   type WorkflowProblem,
@@ -498,51 +496,28 @@ export function savedPromptIdsOf(workflow: { nodes?: readonly { type: string; co
   return ids;
 }
 
-async function listPrompts(api: DaemonApi, projectPath: string | null): Promise<SavedPrompt[]> {
-  const res = await api.request("GET", "/api/saved-prompts", projectPath ? { query: { projectPath } } : undefined);
-  if (res.status >= 400) return [];
-  const prompts = (res.body as SavedPromptListResponse | null)?.prompts;
-  return Array.isArray(prompts) ? prompts : [];
-}
-
 /**
  * The current body of every prompt in `ids` (`null`: no such prompt — the block fails at run, and
- * validation says so). Saved prompts are global or per project and the list route is per project:
- * the globals and the `hintProjects` (the workflow's union) are read first, then every other
- * project only while some prompt is still unfound.
+ * validation says so), each read by id (`GET /api/saved-prompts/:id`): the very lookup the engine
+ * renders an agent block's saved prompt with, so a card shows and pins what a run would use — a
+ * repository prompt no current checkout lists too. Any refusal but 404 fails the call: a card
+ * never calls a prompt missing that it could not read.
  */
-export async function resolveSavedPrompts(api: DaemonApi, ids: readonly string[], hintProjects: readonly string[]): Promise<Map<string, ReferencedPrompt | null>> {
+export async function resolveSavedPrompts(api: DaemonApi, ids: readonly string[]): Promise<Map<string, ReferencedPrompt | null>> {
   const found = new Map<string, ReferencedPrompt | null>();
-  if (ids.length === 0) return found;
-  const wanted = new Set(ids);
-  const take = (prompts: readonly SavedPrompt[]) => {
-    for (const prompt of prompts) {
-      if (!wanted.has(prompt.id) || found.has(prompt.id) || typeof prompt.body !== "string") continue;
-      found.set(prompt.id, { id: prompt.id, title: String(prompt.title ?? ""), body: prompt.body, projectPath: prompt.projectPath ?? null, sha256: sha256(prompt.body) });
+  for (const id of ids) {
+    if (found.has(id)) continue;
+    const res = await api.request("GET", `/api/saved-prompts/${encodeURIComponent(id)}`);
+    if (res.status === 404) {
+      found.set(id, null);
+      continue;
     }
-  };
-  const done = () => ids.every((id) => found.has(id));
-  take(await listPrompts(api, null));
-  const tried = new Set<string>();
-  for (const project of hintProjects) {
-    if (done()) break;
-    tried.add(project);
-    take(await listPrompts(api, project));
+    if (res.status >= 400) throw daemonError(res);
+    const prompt = res.body as SavedPrompt | null;
+    found.set(id, prompt && typeof prompt.body === "string"
+      ? { id, title: String(prompt.title ?? ""), body: prompt.body, projectPath: prompt.projectPath ?? null, sha256: sha256(prompt.body) }
+      : null);
   }
-  if (!done()) {
-    const workspaces = await api.request("GET", "/api/workspaces");
-    for (const workspace of Array.isArray(workspaces.body) ? (workspaces.body as WorkspaceSummary[]) : []) {
-      if (done()) break;
-      const projects = await api.request("GET", `/api/workspaces/${encodeURIComponent(workspace.name)}/projects`);
-      for (const project of Array.isArray(projects.body) ? (projects.body as ProjectSummary[]) : []) {
-        if (done()) break;
-        if (tried.has(project.path)) continue;
-        tried.add(project.path);
-        take(await listPrompts(api, project.path));
-      }
-    }
-  }
-  for (const id of ids) if (!found.has(id)) found.set(id, null);
   return found;
 }
 
@@ -614,12 +589,12 @@ const stale = (what: string, via: PassedBy | undefined) =>
 /**
  * Re-verify a card's pins immediately before the write (§7.2): the workflow's revision, then each
  * shown prompt's body hash. Any mismatch is `PREVIEW_STALE`, nothing written. `current` is the
- * definition the caller just read (it saves a read); prompts are looked up in `hintProjects` first.
+ * definition the caller just read (it saves a read).
  */
 export async function verifyPins(
   api: DaemonApi,
   pins: Readonly<Record<string, string>> | undefined,
-  opts: { current?: { id: string; revision: number }; hintProjects?: readonly string[]; via?: PassedBy; creating?: boolean } = {}
+  opts: { current?: { id: string; revision: number }; via?: PassedBy; creating?: boolean } = {}
 ): Promise<void> {
   if (!pins) return;
   // The workflow the call is about: the one read, else the first workflow pin (`previewPins` writes it
@@ -641,7 +616,7 @@ export async function verifyPins(
   }
   const promptIds = Object.keys(pins).filter((key) => key.startsWith(PROMPT_PIN)).map((key) => key.slice(PROMPT_PIN.length));
   if (promptIds.length === 0) return;
-  const now = await resolveSavedPrompts(api, promptIds, opts.hintProjects ?? []);
+  const now = await resolveSavedPrompts(api, promptIds);
   for (const id of promptIds) {
     const prompt = now.get(id) ?? null;
     if ((prompt ? prompt.sha256 : MISSING) !== pins[`${PROMPT_PIN}${id}`]) throw stale(`The saved prompt ${prompt ? `"${clipText(prompt.title, 80)}"` : id}`, opts.via);

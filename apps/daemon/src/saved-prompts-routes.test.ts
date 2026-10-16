@@ -404,3 +404,22 @@ test("saved prompts: list rows name the workflows that reference each prompt, re
   // Never persisted: the stored record has no such field.
   assert.equal("usedByWorkflows" in h.savedPrompts.get(prompt.id)!, false);
 });
+
+test("GET /api/saved-prompts/:id answers one prompt whatever its scope (a repository prompt no checkout lists too); 404 when none", async (t) => {
+  const h = await harness();
+  t.after(() => h.close());
+  const site = join(h.workspacesDir, "acme", "site");
+  await mkdir(site, { recursive: true });
+  await exec("git", ["init", "-q", site]);
+  await exec("git", ["-C", site, "remote", "add", "origin", "git@github.com:acme/site.git"]);
+  const created = await h.inject({ method: "POST", url: "/api/saved-prompts", payload: { title: "Shared", body: "B", projectPath: site } });
+  assert.equal(created.statusCode, 201, created.body);
+  const prompt = created.json() as SavedPrompt;
+  await rm(site, { recursive: true, force: true });
+  const read = await h.inject({ method: "GET", url: `/api/saved-prompts/${prompt.id}` });
+  assert.equal(read.statusCode, 200, read.body);
+  assert.deepEqual(read.json(), prompt);
+  const none = await h.inject({ method: "GET", url: "/api/saved-prompts/nope" });
+  assert.equal(none.statusCode, 404);
+  assert.equal(none.json().code, "SAVED_PROMPT_NOT_FOUND");
+});
