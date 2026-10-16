@@ -427,6 +427,11 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
     // A newer list the daemon pushed for this thread's session of the same key (a toolset change
     // pending its restart) comes first: launching with an older one would lose the change.
     const pending = desiredLaunchKey.get(threadId) === launchKey ? desired.get(threadId) : undefined;
+    if (pending !== undefined) {
+      // Adopted: it is this key's last list from now on, so a second fallback keeps it too.
+      lastByThread.set(threadId, { launchKey, prepared: pending });
+      lastByLaunch.set(launchKey, pending);
+    }
     // A fallback orders nothing: its stamp is the daemon's word on a launch long past (and
     // another thread's stamp orders THAT thread's refreshes, never this one's).
     const source = pending ?? (own && own.launchKey === launchKey ? own.prepared : lastByLaunch.get(launchKey));
@@ -451,6 +456,8 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
   const mailboxes = new Map<string, Set<LaunchMailbox>>();
   /** What a launch read from the daemon itself (not a push it adopted): its epoch is the live daemon's. */
   const pulled = new WeakSet<PreparedSessionTools>();
+  /** What a launch read from a daemon socket no longer current when it answered: no stamp recorded. */
+  const stalePulls = new WeakSet<PreparedSessionTools>();
   /** Manifests a waiting launch took from a refresh: that refresh then has nothing left to apply. */
   const adopted = new WeakSet<SessionToolsManifest>();
 
@@ -540,7 +547,10 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
       switch (answer.kind) {
         case "manifest": {
           const prepared = await recordManifest(threadId, launchKey, answer.manifest);
-          pulled.add(prepared);
+          // From the daemon the host's socket names now: its epoch is the live one. An answer from
+          // a socket that is no longer current is stale — used for this launch, its stamp unrecorded.
+          if (answer.current === false) stalePulls.add(prepared);
+          else pulled.add(prepared);
           return prepared;
         }
         case "legacy": {
@@ -599,7 +609,7 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
       const wanted = desired.get(threadId);
       if (prepared.source === "fallback" || wanted === undefined || !newerThan(stampOf(wanted), stampOf(prepared))) desired.delete(threadId);
       forced.delete(threadId);
-      if (prepared.source !== "fallback") noteSeq(threadId, stampOf(prepared), pulled.has(prepared));
+      if (prepared.source !== "fallback" && !stalePulls.has(prepared)) noteSeq(threadId, stampOf(prepared), pulled.has(prepared));
       return prepared;
     } finally {
       if (launching.get(threadId) === done) launching.delete(threadId);

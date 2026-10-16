@@ -508,6 +508,19 @@ test("an epoch never seen before counts as newest — until a manifest the host 
   assert.equal(await service.applyManifest("thread-a", { tools: ["echo"], instructions: "", deny: [], seq: 2, epoch: "old" }), "superseded");
 });
 
+test("a pulled manifest names the live daemon only when its socket is still the current one", async (t) => {
+  let answer: ManifestAnswer = { kind: "manifest", manifest: { tools: TEST_NAMES, instructions: "## Orquester (test)", deny: [], seq: 10, epoch: "new" } };
+  const service = testHost(recordingForward().forward, async () => answer);
+  t.after(() => service.stop());
+  await service.issue("thread-a", CODEX);
+  // A relaunch's read answered by the OLD daemon's socket after the host moved on: used, not recorded.
+  answer = { kind: "manifest", manifest: { tools: ["echo"], instructions: "", deny: [], seq: 99, epoch: "old" }, current: false };
+  const relaunched = await service.issue("thread-a", CODEX);
+  assert.deepEqual([...relaunched.prepared.names], ["echo"]);
+  // The new daemon's epoch is still the live one: its next push applies.
+  assert.equal(await service.applyManifest("thread-a", { tools: TEST_NAMES, instructions: "", deny: [], seq: 11, epoch: "new" }), "next-idle");
+});
+
 test("forgetting a thread, or interrupting its turn, ends a launch's wait for its denials at once", async (t) => {
   for (const end of ["forgetThread", "abortThreadCalls"] as const) {
     let entered!: () => void;
@@ -545,6 +558,9 @@ test("a fallback launch takes a pending pushed list of the same launch key over 
   assert.deepEqual([...relaunched.prepared.names], ["echo"]);
   assert.equal(relaunched.prepared.instructions, "## changed");
   assert.equal(service.needsRestart("thread-a"), false, "no restart churn");
+  // A second fallback keeps it: it became the key's last list when it was adopted.
+  assert.deepEqual([...(await service.issue("thread-a", CODEX)).prepared.names], ["echo"]);
+  assert.deepEqual([...(await service.issue("thread-z", CODEX)).prepared.names], ["echo"], "another thread of the key too");
   // Another launch key (an account switch) never takes it.
   await assert.rejects(service.issue("thread-a", { ...CODEX, home: "acct-2" }), isSessionToolsDenialsUnknown);
 });
