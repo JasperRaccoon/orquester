@@ -133,6 +133,14 @@ export const agentHostRoutes = {
 
   // §6.3 reads.
   read: (threadId: string): string => `${thread(threadId)}/thread`,
+  /**
+   * `GET ?replyChars=` → `ThreadHeadResponse`: the thread's head (`threadHeadOf` over the in-memory
+   * fold, no log read beyond a cold thread's ordinary load). Additive: a host that predates it
+   * answers its generic route-miss 404 `THREAD_NOT_FOUND` ("No route for …"); the daemon then reads
+   * {@link agentHostRoutes.read} and derives the same head itself, and asks that host instance no
+   * more — `AGENT_HOST_PROTOCOL_VERSION` did not move for it.
+   */
+  head: (threadId: string): string => `${thread(threadId)}/head`,
   events: (threadId: string): string => `${thread(threadId)}/events`,
   turnDiff: (threadId: string, turnCount: number): string =>
     `${thread(threadId)}/turns/${turnCount}/diff`,
