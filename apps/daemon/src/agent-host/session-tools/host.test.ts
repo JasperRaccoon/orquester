@@ -495,6 +495,60 @@ test("a late push of an EARLIER daemon epoch never retires the newer one (handov
   assert.equal(await service.applyManifest("thread-b", { tools: ["pixel"], instructions: "", deny: [], seq: 100, epoch: "old" }), "superseded");
 });
 
+test("an epoch never seen before counts as newest — until a manifest the host asks for says which daemon is live", async (t) => {
+  const service = testHost(recordingForward().forward, async () => ({ kind: "manifest", manifest: { tools: TEST_NAMES, instructions: "## Orquester (test)", deny: [], seq: 10, epoch: "new" } }));
+  t.after(() => service.stop());
+  await service.issue("thread-a", CODEX);
+  // A host started mid-handover hears the old daemon (never seen) after the new one: taken as newer.
+  assert.equal(await service.applyManifest("thread-a", { tools: ["echo"], instructions: "", deny: [], seq: 1, epoch: "old" }), "next-idle");
+  assert.equal(await service.applyManifest("thread-a", { tools: ["pixel"], instructions: "", deny: [], seq: 11, epoch: "new" }), "superseded", "the residual");
+  // A relaunch asks the daemon its socket reaches — the new one — and that epoch is live again.
+  await service.issue("thread-a", CODEX);
+  assert.equal(await service.applyManifest("thread-a", { tools: ["pixel"], instructions: "", deny: [], seq: 12, epoch: "new" }), "next-idle");
+  assert.equal(await service.applyManifest("thread-a", { tools: ["echo"], instructions: "", deny: [], seq: 2, epoch: "old" }), "superseded");
+});
+
+test("forgetting a thread, or interrupting its turn, ends a launch's wait for its denials at once", async (t) => {
+  for (const end of ["forgetThread", "abortThreadCalls"] as const) {
+    let entered!: () => void;
+    const asked = new Promise<void>((resolve) => (entered = resolve));
+    const service = testHost(recordingForward().forward, async () => {
+      entered();
+      return { kind: "unavailable" };
+    });
+    t.after(() => service.stop());
+    const launch = service.issue("thread-a", CODEX);
+    await asked;
+    service[end]("thread-a");
+    await assert.rejects(launch, isSessionToolsDenialsUnknown, end);
+  }
+});
+
+test("a fallback launch takes a pending pushed list of the same launch key over the older last one (no change lost, no churn)", async (t) => {
+  let up = true;
+  const service = createSessionToolsHost({
+    forward: recordingForward().forward,
+    manifest: async () =>
+      up ? { kind: "manifest", manifest: { tools: TEST_NAMES, instructions: "## Orquester (test)", deny: ["remote"], seq: 1, epoch: "e1" } } : { kind: "unavailable" },
+    definitions: buildChatToolDefinitions(TEST_TOOLS),
+    knownNames: knownSessionToolNames(TEST_TOOLS),
+    denialsWaitMs: 20
+  });
+  t.after(() => service.stop());
+  await service.issue("thread-a", CODEX);
+  // A toolset change waits for the session's restart…
+  assert.equal(await service.applyManifest("thread-a", { tools: ["echo"], instructions: "## changed", deny: ["remote"], seq: 2, epoch: "e1" }), "next-idle");
+  up = false;
+  // …and the restart cannot ask the daemon: it launches with the pending list, not the older one.
+  const relaunched = await service.issue("thread-a", CODEX);
+  assert.equal(relaunched.prepared.source, "fallback");
+  assert.deepEqual([...relaunched.prepared.names], ["echo"]);
+  assert.equal(relaunched.prepared.instructions, "## changed");
+  assert.equal(service.needsRestart("thread-a"), false, "no restart churn");
+  // Another launch key (an account switch) never takes it.
+  await assert.rejects(service.issue("thread-a", { ...CODEX, home: "acct-2" }), isSessionToolsDenialsUnknown);
+});
+
 test("a failed grant still hands back the thread's denials (they never fail open)", async (t) => {
   const service = testHost(recordingForward().forward, manifests({ "thread-a": { deny: ["remote"] } }).fetch);
   await service.stop();
