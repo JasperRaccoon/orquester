@@ -95,6 +95,8 @@ export interface SavedPromptWorkflowUse {
  */
 export interface SavedPromptListQuery {
   projectPath?: string;
+  /** `"omit"`: rows without `usedByWorkflows` (a caller that reads the workflow reference index itself). */
+  usedByWorkflows?: "omit";
 }
 
 export interface SavedPromptListResponse {

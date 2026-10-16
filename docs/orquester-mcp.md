@@ -1836,7 +1836,7 @@ routes, like every other tool; everything a tool changes shows up live in the ed
   fire. Disabled means "no triggers of its own", nothing more: manual runs (`run_workflow`) work
   either way, and another workflow's Run workflow block runs it — a workflow meant only to be called
   by others is simply left disabled. Approval cards note a disabled sub-workflow as such ("disabled —
-  runs only when another workflow calls it"). Enabling is refused while the definition has a
+  runs only when another workflow calls it or you run it manually"). Enabling is refused while the definition has a
   problem of severity `error`. `dryRun: true` on `create_workflow` or `update_workflow` validates
   without saving.
 - **`problems`** come back on every read and write: `{severity: "error" | "warning" | "info", code,

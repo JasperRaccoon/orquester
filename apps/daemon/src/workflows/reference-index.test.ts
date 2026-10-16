@@ -311,3 +311,37 @@ test("routes: GET the references of a workflow and of a saved prompt; DELETE ?ex
   assert.equal(gone.statusCode, 204);
   assert.equal(store.get(child.id), null);
 });
+
+test("a load that fails part-way never leaves a known index: every answer is unknown, and the error is rethrown", async () => {
+  const dir = await scratch();
+  const file = join(dir, "workflows.json");
+  // A readable child and caller, and a record this build cannot read: the map is filled before the warning.
+  await writeFile(file, JSON.stringify({ version: 1, workflows: [stored("child"), stored("parent", [sub("s", "child")]), { id: "newer" }] }));
+  const store = new WorkflowService({ file, logger: { warn: () => { throw new Error("logger down"); }, error: () => undefined } });
+  flushers.push(store);
+  await assert.rejects(store.load(), /logger down/);
+  const answer = store.references.callers("child");
+  assert.equal(answer.callers, null, "never the partial map as known");
+  assert.match(answer.unknownReason ?? "", /could not be loaded/);
+  assert.match(store.references.promptUses("p1").unknownReason ?? "", /could not be loaded/);
+});
+
+test("routes without a wired projectPathFilter name no guessed workspace for an existing project (a temp project's stays)", async () => {
+  const dir = await scratch();
+  const secrets = new WorkflowSecretsService({ file: join(dir, "workflow-secrets.json"), logger: quiet });
+  await secrets.load();
+  const store = await service(join(dir, "workflows.json"));
+  const runStore = new FileRunStore({ dir: join(dir, "workflow-runs"), logger: quiet });
+  await runStore.init();
+  flushers.push(secrets, runStore);
+  const app = Fastify({ logger: false });
+  registerWorkflowRoutes(app, { service: store, secrets, runStore, engine: () => null, savedPromptIds: () => [] });
+  await app.ready();
+  after(() => app.close());
+  const child = (await store.create(createRequest("Child"))).workflow;
+  const callNode = { id: "s", type: "workflow" as const, name: "Call", config: { workflowId: child.id } };
+  const existing = (await store.create(createRequest("Existing", [callNode]))).workflow;
+  const temp = (await store.create({ ...createRequest("Temp", [callNode]), project: { kind: "temp", workspace: "beta", source: { kind: "empty" } } })).workflow;
+  const refs = (await app.inject({ method: "GET", url: workflowRoutes.workflowReferences(child.id) })).json() as WorkflowReferencesResponse;
+  assert.deepEqual(refs.callers?.map((caller) => [caller.workflowId, caller.workspace]), [[existing.id, undefined], [temp.id, "beta"]]);
+});

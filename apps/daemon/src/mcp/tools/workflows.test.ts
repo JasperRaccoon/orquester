@@ -939,7 +939,9 @@ test("a run card shows the definition that will run in full, and pins every sub-
   const card = port.cards[0]!;
   assert.ok(card.sections.some((s) => s.kind === "code" && s.title === "Code · Work" && s.text.includes("return 1")), "block contents in full");
   // A disabled sub-workflow is intended (called only by others): a neutral note, never a red flag.
-  assert.ok(card.sections.some((s) => s.kind === "text" && s.title === "Disabled sub-workflow" && /"Child" \(wf-child\) is disabled — runs only when another workflow calls it/.test(s.text)));
+  const line = card.sections.filter((s) => s.kind === "text" && /Runs the workflow "Child" \(wf-child/.test(s.text));
+  assert.equal(line.length, 1, "said once, in the sub-workflow's own line");
+  assert.match((line[0] as { text: string }).text, /It is disabled — runs only when another workflow calls it or you run it manually \(Run now\)\./);
   assert.ok(!card.sections.some((s) => s.kind === "warning" && /disabled/i.test(s.text)), "no warning for it");
   assert.equal(card.workflowId, "wf-1");
 });

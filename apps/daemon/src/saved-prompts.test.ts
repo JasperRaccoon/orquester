@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
 import {
+  savedPromptIdsOf,
   type EventMessage,
   type SavedPrompt
 } from "@orquester/api";
@@ -14,7 +15,6 @@ import {
   publishSavedPromptEvents,
   savedPromptWorkflowUses
 } from "./saved-prompts.ts";
-import { savedPromptIdsOf } from "./mcp/tools/workflow-preview.ts";
 import { WorkflowReferenceIndex } from "./workflows/reference-index.ts";
 
 type Logger = { warn: (...args: unknown[]) => void; error: (...args: unknown[]) => void };

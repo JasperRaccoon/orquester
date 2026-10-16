@@ -629,13 +629,14 @@ export function registerSavedPromptRoutes(app: FastifyInstance, deps: SavedPromp
     return index ? (promptId) => savedPromptWorkflowUses(index, promptId, workspacesDir) : () => [];
   };
 
-  app.get<{ Querystring: { projectPath?: string } }>(
+  app.get<{ Querystring: { projectPath?: string; usedByWorkflows?: string } }>(
     "/api/saved-prompts",
     async (request, reply): Promise<SavedPromptListResponse | void> => {
       const { projectPath } = request.query;
       try {
         const prompts = await service.list(projectPath ? projectPath : null);
-        const byPrompt = uses();
+        // `?usedByWorkflows=omit`: the caller reads the reference index itself — no lookup here.
+        const byPrompt = request.query.usedByWorkflows === "omit" ? () => [] : uses();
         return { prompts: prompts.map((prompt) => listRow(prompt, byPrompt)) };
       } catch (error) {
         return savedPromptError(reply, error);

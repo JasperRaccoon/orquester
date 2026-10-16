@@ -224,8 +224,7 @@ test("what is approved is what runs: a prompt edited while its card waits is PRE
   const created = (await h.value("update_saved_prompts", { action: "create", title: "Mine", body: "a" }, h.chat())).prompt as Row;
   const used = [{ id: "wf_9", name: "Late", nodes: [{ id: "n", name: "A", type: "agent", config: { prompt: { kind: "saved", promptId: created.id } } }] }];
   let reads = 0;
-  // The gate's scope reads the index twice (the list row, then the index route): it still sees no workflow.
-  h.hooks.workflows = () => (++reads >= 3 ? used : []);
+  h.hooks.workflows = () => (++reads >= 2 ? used : []);
   assert.match(await h.refused("update_saved_prompts", { action: "update", id: created.id, body: "b" }, "PERMISSION_DENIED", h.chat()), /approval/);
   assert.equal(h.library.get(created.id)!.body, "a");
 });
@@ -296,4 +295,17 @@ test("ruling S13: workflows of another workspace reach a chat below Full access 
   assert.ok(!JSON.stringify(result).includes("Beta secret"));
   assert.equal((result.prompt as { usedByWorkflowsElsewhere?: number }).usedByWorkflowsElsewhere, 1);
   assert.ok(JSON.stringify(port.cards[0]!.sections).includes("Beta secret"));
+});
+
+test("a workflow whose workspace is unknown (its project is no workspace's) reaches a chat below Full access only as a count — list rows and the update's result", async (t) => {
+  const h = await harness(t);
+  const created = (await h.value("update_saved_prompts", { action: "create", title: "Shared", body: "b", global: true }, h.chat())).prompt as Row;
+  h.reference(created, { id: "wf_out", name: "Outside secret" }, "/somewhere/else/proj");
+  const row = ((await h.value("list_saved_prompts", {}, h.chat({ runtimeMode: "auto" }))).prompts as (Row & { usedByWorkflowsElsewhere?: number })[]).find((r) => r.id === created.id)!;
+  assert.equal(row.usedByWorkflows, undefined);
+  assert.equal(row.usedByWorkflowsElsewhere, 1);
+  assert.ok(!JSON.stringify(row).includes("Outside secret"));
+  const result = await h.value("update_saved_prompts", { action: "update", id: created.id, title: "Shared 2" }, h.chat({ runtimeMode: "auto" }), new FakeApprovalPort());
+  assert.ok(!JSON.stringify(result).includes("Outside secret"));
+  assert.equal((result.prompt as { usedByWorkflowsElsewhere?: number }).usedByWorkflowsElsewhere, 1);
 });

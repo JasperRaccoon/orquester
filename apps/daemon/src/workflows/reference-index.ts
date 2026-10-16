@@ -4,8 +4,8 @@
 // - workflow → the sub-workflows its `workflow` blocks run, and the reverse (who runs it, directly or
 //   through others) — what a chat grant must also cover before it covers an edit or delete;
 // - saved prompt → the workflows whose agent blocks use it (and those blocks).
-// The rules are the MCP's own (`membersOf`, `savedPromptIdOfNode`): one source for "calls" and
-// "uses". The index is global, not per project — a workflow in one project may run, or use a prompt
+// The rules are the shared ones in `@orquester/api` (`membersOf`, `savedPromptIdOfNode`), which the
+// MCP's previews use too: one source for "calls" and "uses". The index is global, not per project — a workflow in one project may run, or use a prompt
 // of, another — and each answer names every workflow's own project (and workspace).
 //
 // It changes only with the store's map, in the same synchronous step (`WorkflowService` calls `set` /
@@ -17,8 +17,7 @@
 // uses — UNKNOWN (null / `unknownReason`), never "none". Before the first rebuild, and while the
 // file cannot be read at all, every answer is unknown.
 
-import type { Workflow, WorkflowProject, WorkflowReference } from "@orquester/api";
-import { membersOf, savedPromptIdOfNode } from "../mcp/tools/workflow-preview.ts";
+import { membersOf, savedPromptIdOfNode, type Workflow, type WorkflowProject, type WorkflowReference } from "@orquester/api";
 
 interface Entry {
   info: Omit<WorkflowReference, "workspace">;

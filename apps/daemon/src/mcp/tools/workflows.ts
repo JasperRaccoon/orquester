@@ -18,6 +18,7 @@ import { z } from "zod";
 import { WORKFLOW_NODE_TYPES, WORKFLOW_SECRET_MAX_VALUE_BYTES, WORKFLOW_SECRET_NAME_PATTERN } from "@orquester/config";
 import {
   applyWorkflowPatch,
+  savedPromptIdsOf,
   approvalPreviewBytes,
   TOOL_APPROVAL_FULL_PREVIEW_MAX_BYTES,
   createWorkflowFromRequest,
@@ -83,7 +84,6 @@ import {
   problemsView,
   readWorkflow,
   resolveSavedPrompts,
-  savedPromptIdsOf,
   sanitizeProblems,
   unionScope,
   unionSections,

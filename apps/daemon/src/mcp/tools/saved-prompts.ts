@@ -75,17 +75,24 @@ async function placeOf(project: string | undefined, ctx: ScopeContext): Promise<
   return { projectPath: join(ctx.api.workspacesDir, names.workspace, names.name), label: `${names.workspace}/${names.name}` };
 }
 
-/** Every global prompt, plus `place`'s own (the route's list rows: `createdBy`, `usedByWorkflows`). */
-async function listPrompts(api: DaemonApi, place: Place): Promise<SavedPrompt[]> {
-  const res = await api.request("GET", ROUTE, place.projectPath ? { query: { projectPath: place.projectPath } } : undefined);
+/**
+ * Every global prompt, plus `place`'s own (the route's list rows: `createdBy`, `usedByWorkflows`).
+ * `withUses: false`: rows without `usedByWorkflows` — the caller reads the reference index itself.
+ */
+async function listPrompts(api: DaemonApi, place: Place, withUses = true): Promise<SavedPrompt[]> {
+  const query: Record<string, string> = {
+    ...(place.projectPath ? { projectPath: place.projectPath } : {}),
+    ...(withUses ? {} : { usedByWorkflows: "omit" })
+  };
+  const res = await api.request("GET", ROUTE, Object.keys(query).length > 0 ? { query } : undefined);
   if (res.status >= 400) throw daemonError(res);
   const prompts = (res.body as { prompts?: unknown } | null)?.prompts;
   return Array.isArray(prompts) ? (prompts as SavedPrompt[]) : [];
 }
 
-/** The prompt `id` among the global prompts and `place`'s own. */
+/** The prompt `id` among the global prompts and `place`'s own (its uses are not read: see `targetOf`). */
 async function findPrompt(api: DaemonApi, place: Place, id: string): Promise<SavedPrompt> {
-  const prompt = (await listPrompts(api, place)).find((row) => row.id === id);
+  const prompt = (await listPrompts(api, place, false)).find((row) => row.id === id);
   if (!prompt) {
     const where = place.projectPath ? `the global prompts or ${place.label}'s` : "the global prompts";
     throw new ToolError(
@@ -348,13 +355,13 @@ function promptFields(prompt: { title: string; description: string; tags: readon
 }
 
 /**
- * Before writing, the prompt as it is NOW: a chat call that passed no card must still be an Act
- * (a workflow may have started using the prompt since `scope()`); a carded or granted one must
- * match what the card showed (§7.2).
+ * Before writing, the prompt as it is NOW (`target`, read once by `run`): a chat call that passed
+ * no card must still be an Act (a workflow may have started using the prompt since `scope()`); a
+ * carded or granted one must match what the card showed (§7.2).
  */
-async function recheck(args: UpdateArgs, ctx: CallContext): Promise<void> {
+async function recheck(target: Target, ctx: CallContext): Promise<void> {
   if (ctx.caller.kind !== "thread") return;
-  const { prompt, usesUnknown } = await targetOf(args, ctx);
+  const { prompt, usesUnknown } = target;
   if (prompt === null) return;
   if (ctx.approval) {
     const pins = ctx.approval.pins ?? {};
@@ -402,8 +409,10 @@ const updateSavedPrompts = defineTool({
   resultKind: "json",
   async run(args, ctx) {
     checkAction(args, ctx.caller.kind === "external");
-    await recheck(args, ctx);
-    const { place, prompt } = await targetOf(args, ctx);
+    // One read of the prompt and its uses: what the recheck judged is what is written.
+    const target = await targetOf(args, ctx);
+    await recheck(target, ctx);
+    const { place, prompt } = target;
     if (args.action === "create") {
       const body: CreateSavedPromptRequest = {
         title: args.title!,

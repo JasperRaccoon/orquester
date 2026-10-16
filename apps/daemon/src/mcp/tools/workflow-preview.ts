@@ -22,6 +22,8 @@
 import { createHash } from "node:crypto";
 import {
   downstreamOf,
+  membersOf,
+  type WorkflowMembers,
   isTriggerType,
   reachableFromTriggers,
   triggerSummaryText,
@@ -193,30 +195,6 @@ function canonicalLabel(path: string): string {
 // ---------------------------------------------------------------------------
 // The project union (D-25)
 // ---------------------------------------------------------------------------
-
-/** What one definition names: its project, its blocks' overrides, its sub-workflows. */
-export interface WorkflowMembers {
-  /** Existing project paths, as stored (absolute). */
-  projects: string[];
-  /** A temporary project's workspace (one per run, not created yet). */
-  pendingWorkspaces: string[];
-  /** Workflow ids `workflow` blocks run. */
-  childIds: string[];
-}
-
-export function membersOf(workflow: { project?: WorkflowProject; nodes?: readonly WorkflowNode[] }): WorkflowMembers {
-  const members: WorkflowMembers = { projects: [], pendingWorkspaces: [], childIds: [] };
-  const project = workflow.project;
-  if (project?.kind === "existing") members.projects.push(project.projectPath);
-  else if (project?.kind === "temp") members.pendingWorkspaces.push(project.workspace);
-  for (const node of workflow.nodes ?? []) {
-    if (typeof node.projectOverride === "string" && node.projectOverride !== "") members.projects.push(node.projectOverride);
-    if (node.type === "workflow" && isRecord(node.config) && typeof node.config.workflowId === "string" && node.config.workflowId !== "") {
-      members.childIds.push(node.config.workflowId);
-    }
-  }
-  return members;
-}
 
 export interface WorkflowUnion {
   /** Canonical project roots, deduplicated, first seen first. */
@@ -480,27 +458,6 @@ export interface ReferencedPrompt {
 
 const sha256 = (text: string): string => createHash("sha256").update(text, "utf8").digest("hex");
 
-/**
- * THE rule for "a workflow references a saved prompt" (one source for the tools and the saved-prompt
- * list rows' `usedByWorkflows`): an agent block — a disabled one too, it is still part of the
- * definition — whose prompt is `{kind: "saved", promptId}`. The id, or null for any other block.
- */
-export function savedPromptIdOfNode(node: { type: string; config?: unknown }): string | null {
-  if (node.type !== "agent" || !isRecord(node.config) || !isRecord(node.config.prompt)) return null;
-  const prompt = node.config.prompt;
-  return prompt.kind === "saved" && typeof prompt.promptId === "string" ? prompt.promptId : null;
-}
-
-/** Every saved-prompt id the definition's agent blocks reference, in block order, each once. */
-export function savedPromptIdsOf(workflow: { nodes?: readonly { type: string; config?: unknown }[] }): string[] {
-  const ids: string[] = [];
-  for (const node of workflow.nodes ?? []) {
-    const id = savedPromptIdOfNode(node);
-    if (id !== null && !ids.includes(id)) ids.push(id);
-  }
-  return ids;
-}
-
 async function listPrompts(api: DaemonApi, projectPath: string | null): Promise<SavedPrompt[]> {
   const res = await api.request("GET", "/api/saved-prompts", projectPath ? { query: { projectPath } } : undefined);
   if (res.status >= 400) return [];
@@ -722,11 +679,10 @@ export async function unionSections(api: DaemonApi, union: WorkflowUnion, caller
       continue;
     }
     // Disabled means "no triggers of its own": a workflow meant only to be called by others is
-    // disabled on purpose. A neutral note, kept on the card so the user knows what the block runs.
-    if (child.enabled === false) {
-      sections.push({ kind: "text", title: "Disabled sub-workflow", text: `"${child.name}" (${child.workflowId}) is disabled — runs only when another workflow calls it, as this block does.` });
-    }
-    sections.push({ kind: "text", title: "Sub-workflow", text: `Runs the workflow "${child.name}" (${child.workflowId}, revision ${child.revision ?? "?"}${child.enabled === false ? ", disabled" : ""}) in ${child.project ? workflowProjectLabel(child.project, api.workspacesDir) : "its project"}; its projects are counted above.` });
+    // disabled on purpose. Said once, neutrally, in its line — kept on the card so the user knows
+    // what the block runs.
+    const disabled = child.enabled === false ? ` It is disabled — runs only when another workflow calls it or you run it manually (Run now).` : "";
+    sections.push({ kind: "text", title: "Sub-workflow", text: `Runs the workflow "${child.name}" (${child.workflowId}, revision ${child.revision ?? "?"}) in ${child.project ? workflowProjectLabel(child.project, api.workspacesDir) : "its project"}; its projects are counted above.${disabled}` });
   }
   if (union.children.length > 0) {
     // A chat grant chosen on this card covers these too (§7.6): each is named, with the revision it is at.

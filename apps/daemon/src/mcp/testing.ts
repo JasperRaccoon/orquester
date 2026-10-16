@@ -122,13 +122,23 @@ export function busEvent(type: string, payload: unknown, channel = "sessions"): 
  * answered as the daemon answers them: by a REAL {@link WorkflowReferenceIndex} rebuilt from
  * `workflows()` (and `unreadable()`, records the store cannot read) on every request.
  */
-export function serveWorkflowReferences(api: FakeDaemonApi, workflows: () => readonly Workflow[], unreadable: () => readonly unknown[] = () => []): FakeDaemonApi {
+export function serveWorkflowReferences(
+  api: FakeDaemonApi,
+  workflows: () => readonly Workflow[],
+  unreadable: () => readonly unknown[] = () => [],
+  /** An existing project's workspace, as the daemon's wired `projectPathFilter` names it (none: unknown). */
+  workspaceOfPath: (projectPath: string) => string | undefined = (projectPath) => basename(dirname(projectPath))
+): FakeDaemonApi {
   const index = (): WorkflowReferenceIndex => {
     const built = new WorkflowReferenceIndex();
     built.rebuild({ workflows: workflows(), unreadable: unreadable() });
     return built;
   };
-  const workspaceOf = (project: WorkflowProject): string => (project.kind === "temp" ? project.workspace : basename(dirname(project.projectPath)));
+  const workspaceOf = (project: WorkflowProject): string | undefined => (project.kind === "temp" ? project.workspace : workspaceOfPath(project.projectPath));
+  const withWorkspace = <T extends { project: WorkflowProject }>(entry: T): T & { workspace?: string } => {
+    const workspace = workspaceOf(entry.project);
+    return { ...entry, ...(workspace ? { workspace } : {}) };
+  };
   const tail = (path: string, prefix: string) => decodeURIComponent(path.slice(prefix.length));
   const WORKFLOWS = "/api/workflow-references/workflows/";
   const PROMPTS = "/api/workflow-references/prompts/";
@@ -140,7 +150,7 @@ export function serveWorkflowReferences(api: FakeDaemonApi, workflows: () => rea
       version: answer.version,
       workflowId: id,
       calls: built.calls(id),
-      callers: answer.callers === null ? null : answer.callers.map((caller) => ({ ...caller, workspace: workspaceOf(caller.project) })),
+      callers: answer.callers === null ? null : answer.callers.map((caller) => withWorkspace(caller)),
       ...(answer.unknownReason ? { unknownReason: answer.unknownReason } : {})
     };
     return { status: 200, body };
@@ -151,7 +161,7 @@ export function serveWorkflowReferences(api: FakeDaemonApi, workflows: () => rea
     const body: PromptReferencesResponse = {
       version: answer.version,
       promptId,
-      workflows: answer.workflows.map((use) => ({ ...use, workspace: workspaceOf(use.project) })),
+      workflows: answer.workflows.map((use) => withWorkspace(use)),
       ...(answer.unknownReason ? { unknownReason: answer.unknownReason } : {})
     };
     return { status: 200, body };

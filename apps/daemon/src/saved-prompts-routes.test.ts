@@ -376,6 +376,9 @@ test("saved prompts: list rows name the workflows that reference each prompt, re
   workflows.push({ id: "wf_2", name: "Temp", project: { kind: "temp", workspace: "beta", source: { kind: "empty" } }, nodes: [{ id: "n", name: "Agent", type: "agent", config: { prompt: { kind: "saved", promptId: prompt.id } } }] });
   workflows.push({ id: "wf_3", name: "Api", project: { kind: "existing", projectPath: join(h.workspacesDir, "acme", "api") }, nodes: [{ id: "n", name: "Agent", type: "agent", config: { prompt: { kind: "saved", promptId: prompt.id } } }] });
   assert.deepEqual((await rows())[0]!.usedByWorkflows!.map((use) => use.workspace), [undefined, "beta", "acme"], "each workflow's own workspace");
+  // `?usedByWorkflows=omit`: a caller that reads the reference index itself gets the rows without it.
+  const omitted = ((await h.inject({ method: "GET", url: "/api/saved-prompts?usedByWorkflows=omit" })).json() as { prompts: SavedPrompt[] }).prompts;
+  assert.deepEqual([omitted.length, "usedByWorkflows" in omitted[0]!], [1, false]);
   // Never persisted: the stored record has no such field.
   assert.equal("usedByWorkflows" in h.savedPrompts.get(prompt.id)!, false);
 });

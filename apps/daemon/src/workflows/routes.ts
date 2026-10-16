@@ -302,6 +302,11 @@ function optionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
+/**
+ * The list's `?projectPath=` fallback when no `projectPathFilter` is wired (the parent directory as
+ * the workspace, for matching temp workflows). Never used to NAME a workflow's workspace in an answer
+ * (the reference routes leave it unknown instead).
+ */
 function defaultProjectFilter(projectPath: string): { path: string; workspace: string } {
   const path = resolve(projectPath);
   return { path, workspace: basename(dirname(path)) };
@@ -500,10 +505,14 @@ export function registerWorkflowRoutes(app: FastifyInstance, deps: WorkflowRoute
 
   // ---- The reference index (read-only) --------------------------------------------------------
 
-  /** The workspace of a workflow's own project, when known. */
+  /**
+   * The workspace of a workflow's own project, when KNOWN: a temp project's, or what the wired
+   * `projectPathFilter` says. Without one, none — never the path's parent guessed as one (a reader
+   * that hides other workspaces' names treats an unknown workspace as another's).
+   */
   const workspaceOf = (project: WorkflowProject): string | undefined => {
     if (project.kind === "temp") return project.workspace;
-    return (deps.projectPathFilter ?? defaultProjectFilter)(project.projectPath)?.workspace;
+    return deps.projectPathFilter?.(project.projectPath)?.workspace;
   };
   const named = <T extends Omit<WorkflowReference, "workspace">>(entry: T): T & { workspace?: string } => {
     const workspace = workspaceOf(entry.project);

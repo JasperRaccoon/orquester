@@ -24,7 +24,12 @@
 // the same synchronous step as the map — `commit` / `remove` are the only places either changes, and
 // `load` rebuilds it — so it never answers for a state the map has left. A patch or delete may carry
 // `expectCallers` (the callers an approval card showed): checked against the index in that same step
-// (409 `CALLERS_CHANGED`).
+// (409 `CALLERS_CHANGED`). Its answers are unknown — never "none" — before `load`, while the file
+// cannot be read (`blocked`), if `load` fails part-way, and for any id a record this build cannot read
+// mentions. A QUARANTINED file (corrupt, moved aside) deliberately leaves a known, empty index: the
+// workflows in it no longer exist for this daemon — none runs, none can be edited, and a new
+// `workflows.json` starts empty — so "nobody runs this one" is true; answering "unknown" would only
+// make every later card ungrantable until a restart, after which the answer is "known" anyway.
 
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
@@ -116,9 +121,12 @@ export class WorkflowService implements WorkflowStore {
     this.references.rebuild({ workflows: [], unavailable: "the workflow definitions are being read" });
     try {
       await this.read();
-    } finally {
-      this.references.rebuild({ workflows: [...this.workflows.values()], unreadable: this.rejected, unavailable: this.blockedReason });
+    } catch (error) {
+      // An unexpected failure part-way: whatever the map holds is not the file. Never a "known" index.
+      this.references.rebuild({ workflows: [], unavailable: "the workflow definitions could not be loaded" });
+      throw error;
     }
+    this.references.rebuild({ workflows: [...this.workflows.values()], unreadable: this.rejected, unavailable: this.blockedReason });
   }
 
   private async read(): Promise<void> {
