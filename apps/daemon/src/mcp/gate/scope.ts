@@ -50,7 +50,7 @@ export async function gateFacts(
   api: DaemonApi,
   caller: ThreadCaller,
   scope: ScopeClaim
-): Promise<Pick<GateInput, "targets" | "pendingTargets" | "workspaceTargets" | "deniedPaths" | "notOwnChildren">> {
+): Promise<Pick<GateInput, "targets" | "pendingTargets" | "unknownTargets" | "workspaceTargets" | "deniedPaths" | "notOwnChildren">> {
   // Read only when something is to be classified (most calls claim no project at all).
   const needsOwn = scope.projects.length > 0 || (scope.paths?.length ?? 0) > 0 || (scope.pendingProjects?.length ?? 0) > 0;
   const own = needsOwn ? await callerProject(api, caller) : null;
@@ -89,7 +89,8 @@ export async function gateFacts(
       notOwnChildren = others.filter((id) => !children.has(id));
     }
   }
-  return { targets, pendingTargets, workspaceTargets, deniedPaths, notOwnChildren };
+  const unknownTargets = [...new Set(scope.unknownProjects ?? [])];
+  return { targets, pendingTargets, unknownTargets, workspaceTargets, deniedPaths, notOwnChildren };
 }
 
 /** The deepest lineage walk (well past the agent-depth cap; a cycle stops at the first repeat). */

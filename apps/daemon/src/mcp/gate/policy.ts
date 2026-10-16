@@ -58,6 +58,8 @@ export interface GateInput {
   targets: readonly GateTarget[];
   /** `scope.pendingProjects`, classified by workspace (a project not created yet is never `own`). */
   pendingTargets: readonly { workspace: string; class: Exclude<TargetClass, "own"> }[];
+  /** `scope.unknownProjects`: no project now, so unclassifiable — a card in every mode, never grantable. */
+  unknownTargets: readonly string[];
   /**
    * `scope.workspaces` (workspace-level data, outside any project), classified: the caller's own
    * workspace reads as `own`, any other (or every one, for a caller bound to no project) as
@@ -148,7 +150,7 @@ export function gate(input: GateInput): GateDecision {
       return deny("PERMISSION_DENIED", `${tool} is not available: it declares no approval family.`);
     }
     // Workspace-level data lies outside the caller's project wherever it is: never a grant.
-    const crossProject = input.targets.some((target) => target.class !== "own") || input.pendingTargets.length > 0 || input.workspaceTargets.length > 0;
+    const crossProject = input.targets.some((target) => target.class !== "own") || input.pendingTargets.length > 0 || input.workspaceTargets.length > 0 || input.unknownTargets.length > 0;
     return {
       kind: "card",
       approvalKind: "admin",
@@ -168,7 +170,7 @@ export function gate(input: GateInput): GateDecision {
     ...input.pendingTargets,
     ...input.workspaceTargets.filter((target) => target.class !== "own")
   ];
-  if (input.tier === "act" && caller.workflowOwned && away.length > 0) {
+  if (input.tier === "act" && caller.workflowOwned && (away.length > 0 || input.unknownTargets.length > 0)) {
     return deny("PERMISSION_DENIED", `${WORKFLOW_OWNED} work in another project: ${tool} may act only in this chat's own project.`);
   }
 
@@ -181,7 +183,10 @@ export function gate(input: GateInput): GateDecision {
       ...input.pendingTargets.map((pending) => ({ project: "", ...pending })),
       ...input.workspaceTargets.map((target) => ({ project: "", ...target }))
     ].filter((target) => target.class !== "own" && needsCard(target.class, "act", caller.runtimeMode));
-    if (carded.length > 0) {
+    if (input.unknownTargets.length > 0) {
+      // Unclassifiable: a card in every mode, and never a grant (no single known target).
+      actCard = { kind: "card", approvalKind: "boundary", family: "cross-project", crossProject: true, reason: "an action in a project that no longer exists" };
+    } else if (carded.length > 0) {
       const single = carded.length === 1 && carded[0]!.class === "other-workspace" && carded[0]!.project !== "" ? carded[0]!.project : undefined;
       actCard = {
         kind: "card",
@@ -197,7 +202,9 @@ export function gate(input: GateInput): GateDecision {
   if (actCard === null && scope.reads !== "none") {
     const access: Access = scope.reads;
     const carded = [...input.targets, ...input.workspaceTargets].filter((target) => target.class !== "own" && needsCard(target.class, access, caller.runtimeMode));
-    if (carded.length > 0) {
+    if (input.unknownTargets.length > 0) {
+      readCard = { kind: "card", approvalKind: "boundary", family: CARD_FAMILY["other-workspace"][access], crossProject: true, reason: "reading a project that no longer exists" };
+    } else if (carded.length > 0) {
       // The wider boundary names the card.
       const widest = carded.some((target) => target.class === "other-workspace") ? "other-workspace" : "same-workspace";
       readCard = {

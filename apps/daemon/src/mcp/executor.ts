@@ -47,7 +47,7 @@ import {
 } from "@orquester/api";
 import type { CallerPrincipal } from "@orquester/api/agent-chat";
 
-import { canonicalProject, type CanonicalProject } from "./addressing.ts";
+import { canonicalProject, projectNamesFor, type CanonicalProject } from "./addressing.ts";
 import type {
   AnyOrquesterTool,
   ApprovalCancelReason,
@@ -401,6 +401,7 @@ async function execute(deps: ExecutorDeps, call: { name: string; arguments: unkn
     signal,
     now,
     caller: who,
+    scope,
     turn,
     ...(deps.secretRequests ? { secretRequests: deps.secretRequests } : {}),
     ...(who.kind === "thread" ? { requestToolsetCard: (input: ToolsetCardInput) => requestToolsetCard(deps, who, input, signal, record) } : {}),
@@ -439,7 +440,7 @@ async function passCard(
   caller: ThreadCaller,
   scope: ScopeClaim,
   decision: Extract<GateDecision, { kind: "card" }>,
-  facts: Pick<GateInput, "targets" | "pendingTargets" | "workspaceTargets">,
+  facts: Pick<GateInput, "targets" | "pendingTargets" | "unknownTargets" | "workspaceTargets">,
   ctx: ScopeContext,
   ownProject: CanonicalProject | null
 ): Promise<CardOutcome> {
@@ -449,7 +450,8 @@ async function passCard(
   const hash = argumentsHash(frozenArgs);
   const where = facts.targets.find((target) => target.class !== "own");
   const awayWorkspace = facts.pendingTargets[0]?.workspace ?? facts.workspaceTargets.find((target) => target.class !== "own")?.workspace;
-  const whereLabel = where ? await projectLabel(ctx.api, where.project) : (awayWorkspace ? `workspace ${awayWorkspace}` : "");
+  const unknown = facts.unknownTargets[0];
+  const whereLabel = where ? await projectLabel(ctx.api, where.project) : unknown !== undefined ? `${unknown} (no longer a project)` : (awayWorkspace ? `workspace ${awayWorkspace}` : "");
 
   let preview: ApprovalPreview | null = null;
   if (tool.approval) preview = await tool.approval(frozenArgs, ctx);
@@ -470,7 +472,8 @@ async function passCard(
       threadId: caller.threadId,
       projectPath: ownProject?.canonical ?? "",
       // Canonical, as the caller's own `projectPath` is (§7.6: Admin only inside the caller's project).
-      projects: decision.approvalKind === "admin" ? facts.targets.map((target) => target.project) : [],
+      // An unclassifiable target is never the caller's project: no Admin grant covers it.
+      projects: decision.approvalKind === "admin" ? [...facts.targets.map((target) => target.project), ...facts.unknownTargets] : [],
       pendingProjects: scope.pendingProjects?.length ?? 0,
       // Workspace-level data is outside the caller's project: an Admin grant never covers it.
       workspaceTargets: facts.workspaceTargets.length,
@@ -517,6 +520,7 @@ async function passCard(
   // cross-workspace action runs with the other workspace's identity, which the user compares).
   if (decision.approvalKind === "boundary" && ownProject) named(ownProject.canonical, ownProject.workspace);
   for (const target of facts.targets.filter((t) => decision.approvalKind === "admin" || t.class !== "own")) named(target.project, target.workspace);
+  for (const path of facts.unknownTargets) named(path, projectNamesFor(path, ctx.api.workspacesDir).workspace ?? "");
   const crossProject = decision.crossProject;
   // A workflow other workflows run: a grant chosen here could cover it only if the chat's grant
   // already covers every one of them (one grant for all) — otherwise the card offers none.

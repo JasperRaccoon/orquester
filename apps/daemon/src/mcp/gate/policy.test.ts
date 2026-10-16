@@ -29,7 +29,7 @@ function scope(over: Partial<ScopeClaim> = {}): ScopeClaim {
 }
 
 function input(over: Partial<GateInput> & { tier: Tier }): GateInput {
-  return { tool: "t", planSafe: false, caller: caller(), scope: scope(), targets: [], pendingTargets: [], workspaceTargets: [], deniedPaths: [], notOwnChildren: [], ...over };
+  return { tool: "t", planSafe: false, caller: caller(), scope: scope(), targets: [], pendingTargets: [], unknownTargets: [], workspaceTargets: [], deniedPaths: [], notOwnChildren: [], ...over };
 }
 
 /** A decision as a short string: `allow`, `card:<kind>:<family>`, `deny:<code>`. */
@@ -185,4 +185,17 @@ test("workspace-level targets (S13): own workspace = own row; another workspace 
   // A workflow-owned chat never acts there, and its read card is a denial.
   assert.equal(short(gate(input({ tier: "act", caller: caller({ workflowOwned: true, runtimeMode: "full-access" }), scope: scope({ writes: true }), workspaceTargets: away }))), "deny:PERMISSION_DENIED");
   assert.equal(short(gate(input({ tier: "read", caller: caller({ workflowOwned: true }), scope: scope({ reads: "metadata" }), workspaceTargets: away }))), "deny:PERMISSION_DENIED");
+});
+
+test("an unknown project (a stored path that is no project now): a boundary card in every mode, never a grant target; Admin cross-project; workflow-owned refused", () => {
+  const unknownTargets = ["/w/acme/gone"];
+  for (const mode of RUNTIME_MODES) {
+    const act = gate(input({ tier: "act", caller: caller({ runtimeMode: mode }), scope: scope({ writes: true, unknownProjects: unknownTargets }), unknownTargets }));
+    assert.equal(short(act), CARD_XP_ACT, mode);
+    assert.ok(act.kind === "card" && act.crossProject && act.targetProjectPath === undefined, mode);
+    const admin = gate(input({ tier: "admin", adminFamily: "saved-prompts", caller: caller({ runtimeMode: mode }), scope: scope({ writes: true }), unknownTargets }));
+    assert.ok(admin.kind === "card" && admin.approvalKind === "admin" && admin.crossProject, mode);
+    assert.equal(short(gate(input({ tier: "read", caller: caller({ runtimeMode: mode }), scope: scope({ reads: "metadata" }), unknownTargets }))), CARD_XWS_READ, mode);
+  }
+  assert.equal(short(gate(input({ tier: "act", caller: caller({ runtimeMode: "full-access", workflowOwned: true }), scope: scope({ writes: true }), unknownTargets }))), "deny:PERMISSION_DENIED");
 });

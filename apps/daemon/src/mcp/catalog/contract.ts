@@ -109,6 +109,13 @@ export interface ScopeClaim {
   /** A workflow temp project not created yet, by workspace. */
   pendingProjects?: { workspace: string }[];
   /**
+   * Projects the call reaches that cannot be classified: a server-validated stored path (a saved
+   * prompt's first checkout) whose directory is no project any more. Never `own`: a boundary card
+   * naming it in every permission mode, never grantable (an Admin call reaching one is
+   * cross-project); a workflow-owned caller is refused.
+   */
+  unknownProjects?: string[];
+  /**
    * Workspace-level targets: data a workspace owns outside any of its projects (its own todo lists),
    * by workspace name. The gate classifies each against the caller's workspace — its own, or another
    * (S13: below Full access a card, never a refusal; an Act in another workspace is always a card) —
@@ -314,6 +321,12 @@ export interface CallContext {
   signal: AbortSignal;
   now(): number;
   caller: ToolCaller;
+  /**
+   * The claim `scope` returned for this call — what the gate judged (set by the executor; absent
+   * where a test builds the context by hand). A tool whose target can move between `scope` and
+   * `run` compares against it.
+   */
+  scope?: ScopeClaim;
   turn: {
     /** The interaction mode of a turn this call causes (plan carries on, §5.3). */
     interactionMode: InteractionMode;
