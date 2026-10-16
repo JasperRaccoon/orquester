@@ -20,11 +20,7 @@ export function currentInteractionMode(snap: {
   turns: readonly Turn[];
   items: readonly ThreadItem[];
 }): InteractionMode {
-  const active = snap.head.session.activeTurnId;
-  const turn =
-    (active !== null ? snap.turns.find((candidate) => candidate.turnId === active) : undefined) ??
-    [...snap.turns].reverse().find((candidate) => !SETTLED_TURN_STATES.has(candidate.state)) ??
-    snap.turns.at(-1);
+  const turn = runningTurnOf(snap);
   if (turn === undefined) return "default";
   for (let index = snap.items.length - 1; index >= 0; index -= 1) {
     const item = snap.items[index]!;
@@ -39,4 +35,21 @@ export function currentInteractionMode(snap: {
     if (earlier === "plan" || earlier === "default") return earlier;
   }
   return "default";
+}
+
+/**
+ * The thread's running turn as every daemon-side reader picks it: the active turn, else the latest
+ * unsettled one, else the latest — the turn {@link currentInteractionMode} reads and whose
+ * `causedBy` a session tool's call continues (§8.4). Undefined for a thread with no turn.
+ */
+export function runningTurnOf(snap: {
+  head: { session: { activeTurnId: string | null } };
+  turns: readonly Turn[];
+}): Turn | undefined {
+  const active = snap.head.session.activeTurnId;
+  return (
+    (active !== null ? snap.turns.find((candidate) => candidate.turnId === active) : undefined) ??
+    [...snap.turns].reverse().find((candidate) => !SETTLED_TURN_STATES.has(candidate.state)) ??
+    snap.turns.at(-1)
+  );
 }

@@ -204,6 +204,14 @@ export const agentChatRoutes = {
 
   // §6.3 reads
   thread: (sessionId: string): string => `${sessionBase(sessionId)}/thread`,
+  /**
+   * `GET ?replyChars=` → `ThreadHeadResponse` (`thread-head.ts`): the thread's head — status,
+   * running and recent turns, open requests, goal, modes, lineage, and with `replyChars` the last
+   * reply — without the retained window a whole snapshot carries. For the daemon's per-call and
+   * per-event readers. Against a host that predates its own `/head` route the daemon derives the
+   * same answer from the host's snapshot (`threadHeadOf`), so every daemon answers it.
+   */
+  threadHead: (sessionId: string): string => `${sessionBase(sessionId)}/head`,
   events: (sessionId: string): string => `${sessionBase(sessionId)}/events`,
   turnDiff: (sessionId: string, turnCount: number): string =>
     `${sessionBase(sessionId)}/turns/${turnCount}/diff`,

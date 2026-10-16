@@ -62,14 +62,15 @@ import {
   isDeadlineRefusal,
   TARGET_BUSY,
   TURN_NOT_IDLE,
+  type ThreadHeadResponse,
   type ThreadReadResponse,
   type ThreadSnapshotPayload
 } from "@orquester/api/agent-chat";
-import { agentChatRoutes, currentInteractionMode, mergeBackContext } from "@orquester/api/agent-chat";
+import { agentChatRoutes, mergeBackContext } from "@orquester/api/agent-chat";
 import { parseMergeOutbox, serializeMergeOutbox, type MergeOutbox, type MergeOutboxEntry } from "@orquester/config";
 
 import type { DaemonApi } from "../mcp/daemon-api.ts";
-import { assistantTextForTurn } from "../mcp/views.ts";
+import { assistantTextForTurn } from "@orquester/api/agent-chat";
 
 /** A refusal the route maps onto the §6.2 envelope. */
 export class LineageError extends Error {
@@ -136,16 +137,16 @@ export const MERGE_BACK_MAX_TEXT_CHARS = MAX_TURN_INPUT_CHARS - MERGE_BACK_OVERH
  * flushes on the same). Read from the tab's summary AND the thread itself,
  * because the summary trails the host by a poll.
  */
-export function acceptsMessage(summary: SessionSummary, snap: ThreadSnapshotPayload): boolean {
+export function acceptsMessage(summary: SessionSummary, thread: Pick<ThreadHeadResponse, "head" | "recentTurns" | "pending">): boolean {
   if (summary.chatSessionStatus === "running" || summary.chatSessionStatus === "starting") return false;
   if (summary.latestTurn?.state === "running" || summary.latestTurn?.state === "pending") return false;
   if (summary.hasPendingApprovals || summary.hasPendingUserInput) return false;
   if (summary.goal?.continuing === true) return false;
-  const head = snap.head.session;
+  const head = thread.head.session;
   if (head.activeTurnId !== null || head.status === "running" || head.status === "starting") return false;
-  const last = snap.turns.at(-1);
+  const last = thread.recentTurns.at(-1);
   if (last && !SETTLED_TURN_STATES.has(last.state)) return false;
-  return snap.pending.approvals.length === 0 && snap.pending.userInputs.length === 0;
+  return thread.pending.approvals.length === 0 && thread.pending.userInputs.length === 0;
 }
 
 /** The child's final assistant reply: its latest settled turn's answer, as the timeline shows it. */
@@ -564,17 +565,27 @@ export class LineageService {
     return body.thread;
   }
 
+  /** The thread's head (`threadHeadOf`): what the delivery checks read, never the whole window. */
+  private async readThreadHead(api: DaemonApi, sessionId: string): Promise<ThreadHeadResponse> {
+    const res = await api.request("GET", agentChatRoutes.threadHead(sessionId));
+    const body = res.body as ThreadHeadResponse | null;
+    if (res.status >= 400 || body === null || typeof body !== "object" || !body.head) {
+      throw new LineageError("The session's conversation could not be read. Try again in a moment.", "HOST_UNAVAILABLE");
+    }
+    return body;
+  }
+
   private async isIdle(api: DaemonApi, parentId: string): Promise<boolean> {
     return (await this.idleParent(api, parentId)) !== null;
   }
 
-  /** The parent's thread when it can take a message now, else null. */
-  private async idleParent(api: DaemonApi, parentId: string): Promise<ThreadSnapshotPayload | null> {
+  /** The parent's thread head when it can take a message now, else null. */
+  private async idleParent(api: DaemonApi, parentId: string): Promise<ThreadHeadResponse | null> {
     const summary = this.opts.sessions.get(parentId);
     if (!summary) return null;
     try {
-      const snap = await this.readThread(api, parentId);
-      return acceptsMessage(summary, snap) ? snap : null;
+      const head = await this.readThreadHead(api, parentId);
+      return acceptsMessage(summary, head) ? head : null;
     } catch {
       return null;
     }
@@ -591,7 +602,7 @@ export class LineageService {
       // the mode it is in — the host takes a missing mode as "default", which would flip a
       // planning parent out of plan mode (D-I1).
       const interactionMode =
-        entry.interactionMode === "plan" ? "plan" : currentInteractionMode(await this.readThread(api, entry.parentSessionId));
+        entry.interactionMode === "plan" ? "plan" : (await this.readThreadHead(api, entry.parentSessionId)).interactionMode;
       const commandId = attemptCommandId(entry);
       const attachments = (entry as { attachments?: unknown }).attachments;
       const res = await api.request("POST", agentChatCommandPath(entry.parentSessionId, "turn"), {

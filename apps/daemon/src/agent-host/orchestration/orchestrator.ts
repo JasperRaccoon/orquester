@@ -37,6 +37,7 @@ import {
   THREAD_SEARCH_MAX_RESULTS,
   applyDomainEvent,
   createEmptyThreadState,
+  threadHeadOf,
   toThreadSnapshot,
   decodeHistoryCursor,
   deserializeFoldState,
@@ -85,6 +86,8 @@ import {
   type ThreadItemOutputWindowResponse,
   type ThreadPromptsResponse,
   type ThreadPromptTextResponse,
+  type ThreadHeadQuery,
+  type ThreadHeadResponse,
   type ThreadReadResponse,
   type ThreadSearchResponse,
   type ThreadSessionState,
@@ -661,6 +664,12 @@ export interface Orchestrator {
   ): Promise<{ seq: number }>;
 
   readThread(threadId: string, afterSeq?: number): Promise<ThreadReadResponse>;
+  /**
+   * The thread's head (`threadHeadOf`, `@orquester/api`'s `thread-head.ts`) from the in-memory fold:
+   * the same answer the daemon derives from a snapshot at the same `seq`, without serialising the
+   * retained window.
+   */
+  readThreadHead(threadId: string, query: ThreadHeadQuery): Promise<ThreadHeadResponse>;
   /**
    * A page of turns OLDER than the retained window (design 2026-09-23, C):
    * their turn rows from the index, their items folded from exactly the log
@@ -5147,6 +5156,27 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     }
   };
 
+  const readThreadHead = async (threadId: string, query: ThreadHeadQuery): Promise<ThreadHeadResponse> =>
+    whenReady(async () => {
+      const runtime = await loadRuntime(threadId);
+      const head = requireHead(runtime);
+      const { state } = runtime;
+      // The snapshot's own pieces (`snapshotOf`) with no copy of the window: the head reads only
+      // messages of `items`, which the read-time slimming leaves untouched.
+      return threadHeadOf(
+        {
+          // `requireHead` answers it with the head-only state applied, as `snapshotOf` does.
+          head,
+          turns: state.turns,
+          items: state.items,
+          pending: state.pending,
+          seq: state.seq,
+          goal: state.goal ?? null
+        },
+        query
+      );
+    });
+
   const readThread = async (threadId: string, afterSeq?: number): Promise<ThreadReadResponse> =>
     whenReady(async () => {
       const runtime = await loadRuntime(threadId);
@@ -7346,6 +7376,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     deleteThread,
     command,
     readThread,
+    readThreadHead,
     readHistory,
     searchThreads,
     readPrompts,

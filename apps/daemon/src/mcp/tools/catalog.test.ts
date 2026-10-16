@@ -4,7 +4,7 @@ import { mkdtemp,mkdir,realpath,rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FakeDaemonApi } from "../testing.ts";
-import { chatSummary,shellSummary,stamp } from "../fixtures.ts";
+import { chatSummary,head,shellSummary,snapshot,stamp } from "../fixtures.ts";
 import { ok } from "../result.ts";
 import type { AnyOrquesterTool, CallContext, ThreadCaller } from "../catalog/contract.ts";
 import { providerPickerView } from "@orquester/api/agent-chat";
@@ -414,7 +414,7 @@ function pickerApi(): FakeDaemonApi {
     .on("GET", "/api/agent/providers", { status: 200, body: { hostInstanceId: "h", providers: [row("claude", [], { status: "authenticated", email: "me@x.io" }), row("codex", codexModels, { status: "authenticated", email: "me@x.io" })] } })
     .on("GET", "/api/agent-accounts", { status: 200, body: { accounts: [{ id: "acc-9", agent: "codex", label: "Work", email: "work@x.io", plan: "pro", needsReauth: false, createdAt: stamp(0), importedAt: stamp(0) }], defaults: { claude: null, codex: "acc-9", grok: null } } })
     .on("GET", "/api/sessions", { status: 200, body: [chatSummary({ id: "c1", refId: "codex", accountId: "acc-9" })] })
-    .on("GET", "/api/sessions/c1/thread", { status: 200, body: { kind: "snapshot", thread: { head: { modelSelection: { model: "gpt-6-sol", options: [{ id: "effort", value: "low" }] } } } } });
+    .on("GET", "/api/sessions/c1/thread", { status: 200, body: { kind: "snapshot", thread: snapshot({ head: head({ modelSelection: { model: "gpt-6-sol", options: [{ id: "effort", value: "low" }] } }) }) } });
 }
 
 test("list_agents is the composer picker's view: the launch default (never a legacy model), chip labels, hints, option defaults; legacy only on request", async () => {

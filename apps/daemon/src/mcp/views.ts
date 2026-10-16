@@ -1,6 +1,6 @@
 import { SYSTEM_ACCOUNT_ID, type AgentAccountsResponse, type RegistryResponse, type SessionSummary } from "@orquester/api";
-import { agentChatRoutes, isUnfinishedGoal, parseAgentGoal, parseThreadGoal, reEmittedAssistantCopies, repairsReEmittedAssistantCopies, SETTLED_TURN_STATES as TURN_SETTLED_STATES, startedTurns } from "@orquester/api/agent-chat";
-import type { AccountHomeKind, AdapterCapabilities, AgentAdapterId, AgentGoalStatus, ApprovalDecision, ApprovalOption, LatestTurnSummary, ProviderOptionSelection, ProviderRequestKind, RuntimeMode, RuntimeSubagent, ThreadActivityItem, ThreadItem, ThreadSessionStatus, ThreadSnapshotPayload, ThreadTokenUsage, Turn, UserInputQuestion } from "@orquester/api/agent-chat";
+import { agentChatRoutes, assistantTextForTurn, isUnfinishedGoal, lastReplyOf, parseAgentGoal, parseThreadGoal, SETTLED_TURN_STATES as TURN_SETTLED_STATES, startedTurns, type ThreadHeadReply } from "@orquester/api/agent-chat";
+import type { AccountHomeKind, AdapterCapabilities, AgentAdapterId, AgentGoalStatus, ApprovalDecision, ApprovalOption, LatestTurnSummary, ProviderOptionSelection, ProviderRequestKind, RuntimeMode, RuntimeSubagent, ThreadActivityItem, ThreadItem, ThreadSessionStatus, ThreadSnapshotPayload, ThreadTokenUsage, UserInputQuestion } from "@orquester/api/agent-chat";
 import { resolveChatActivity, type ChatActivityRung } from "../agent-chat/activity-ladder.ts";
 import { projectNamesFor, type ProjectRef } from "./addressing.ts";
 import { providerRows, supportsFrom, type AgentSupports } from "./agents.ts";
@@ -308,41 +308,28 @@ export function fitDetail(detail: SessionDetail, budget: number): SessionDetail 
   return fitted;
 }
 
-function latestSettledTurn(turns: readonly Turn[]): Turn | null {
-  for (let i = turns.length - 1; i >= 0; i -= 1) {
-    const t = turns[i]!;
-    if (t.turnId && SETTLED_TURN_STATES.has(t.state)) return t;
-  }
-  return null;
-}
-
 /**
- * The main agent's answer in a turn: its assistant messages, joined. A message the provider marked as commentary
- * (Codex's `phase`, carried as `messageKind`) is the running "I'll do X next" narration, not the answer, while the turn
- * has one (`isCommentaryAssistantMessage`). A turn with none — interrupted, ended on a tool, a Codex goal turn the Stop
- * paused then interrupted — ends on its last commentary, as the GUI's timeline does (`deriveTerminalAssistantMessageIds`).
- * A message `skip` names is no part of the turn at all, neither answer nor commentary: a re-emitted copy (`lastReply`).
+ * The main agent's answer in a turn (`@orquester/api`'s `thread-head.ts`, where the host's head reads it too):
+ * re-exported for the daemon's readers that import it from here.
  */
-export function assistantTextForTurn(items: readonly ThreadItem[], turnId: string, skip?: ReadonlySet<string>): string {
-  const own = items.filter((i): i is Extract<ThreadItem, { kind: "message" }> => i.kind === "message" && i.role === "assistant" && i.turnId === turnId && !i.agentId && !skip?.has(i.id));
-  const answer = own.filter((i) => i.messageKind !== "commentary").map((i) => i.text).filter(Boolean).join("\n\n");
-  if (answer) return answer;
-  for (let i = own.length - 1; i >= 0; i -= 1) if (own[i]!.messageKind === "commentary") return own[i]!.text;
-  return "";
-}
+export { assistantTextForTurn };
 
 /**
- * The latest settled turn's answer, as the parent's timeline shows it. On a Claude thread that leaves out the opening
- * paragraph a host before the pre-turn-stream fix wrote a second time at `result`, which an old log keeps: the GUI's
- * rule, from the one implementation (`reEmittedAssistantCopies`, `@orquester/api/agent-chat`), counted over the window.
- * `cap`: the most characters the text keeps (the session tools' task results take more than a detail's).
+ * The latest settled turn's answer, as the parent's timeline shows it (`lastReplyOf`, the rule the host's thread head
+ * applies: the re-emitted Claude copies left out). `cap`: the most characters the text keeps.
  */
 export function lastReply(snap: ThreadSnapshotPayload, cap = VIEW_TEXT_CAP): SessionDetail["lastReply"] | null {
-  const t = latestSettledTurn(snap.turns);
-  if (!t?.turnId) return null;
-  const copies = repairsReEmittedAssistantCopies(snap.head.adapter) ? reEmittedAssistantCopies(snap.items) : undefined;
-  const capped = capText(assistantTextForTurn(snap.items, t.turnId, copies), cap);
-  return { turnId: t.turnId, text: capped.text, truncated: capped.truncated, completedAt: t.completedAt };
+  return lastReplyOf(snap, cap);
+}
+
+/**
+ * A head's last reply (read with `replyChars` ≥ `cap`) within `cap` characters: the same text and flag as
+ * {@link lastReply} over the snapshot of the same `seq` — a cut of a cut at the larger cap is the cut at the smaller.
+ */
+export function replyWithin(reply: ThreadHeadReply | null | undefined, cap = VIEW_TEXT_CAP): SessionDetail["lastReply"] | null {
+  if (!reply) return null;
+  const capped = capText(reply.text, cap);
+  return { turnId: reply.turnId, text: capped.text, truncated: reply.truncated || capped.truncated, completedAt: reply.completedAt };
 }
 
 function latestContextWindow(items: readonly ThreadItem[]): SessionDetail["chat"]["contextWindow"] | undefined {

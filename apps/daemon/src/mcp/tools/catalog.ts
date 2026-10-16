@@ -10,7 +10,7 @@ import { defineTool, READ_ONLY, type AnyOrquesterTool, type ScopeContext, type T
 import type { DaemonApi } from "../daemon-api.ts";
 import { ToolError, expectOk } from "../errors.ts";
 import { runtimeModesUpTo } from "../gate/turn-policy.ts";
-import { listSessions, readThread } from "../reads.ts";
+import { listSessions, readThreadHead } from "../reads.ts";
 import { MAX_RESULT_BYTES, resultBytes } from "../result.ts";
 
 /**
@@ -156,7 +156,7 @@ function chatAgentView({ runtimeModes: _modes, defaultRuntimeMode: _default, aut
 
 /** This chat's own agent, model, options, permission mode and account: what a chat it opens with the same agent inherits. */
 async function thisThread(api: DaemonApi, caller: Extract<ToolCaller, { kind: "thread" }>) {
-  const [sessions, own] = await Promise.all([listSessions(api), readThread(api, caller.threadId)]);
+  const [sessions, own] = await Promise.all([listSessions(api), readThreadHead(api, caller.threadId)]);
   const tab = sessions.find((s) => s.id === caller.threadId);
   if (!tab) throw new ToolError("THREAD_NOT_FOUND", "This chat is no longer open.");
   return {

@@ -44,6 +44,7 @@ import { FakeApprovalPort } from "../catalog/approval-double.ts";
 import { toolByName } from "../catalog/index.ts";
 import type { DaemonApi, DaemonResponse } from "../daemon-api.ts";
 import { executeToolCall } from "../executor.ts";
+import { headFromThreadRead } from "../testing.ts";
 
 const ROOT = realpathSync(mkdtempSync(join(tmpdir(), "umcp-t8-e2e-")));
 const WS = join(ROOT, "w");
@@ -151,6 +152,12 @@ function world() {
         const lineage = body.chat.lineage ? { ...body.chat.lineage, createdAt: "t", delegationDepth: 1 } : undefined;
         addTab(id, { refId: body.refId, title: body.title, projectPath: body.projectPath, cwd: body.cwd, ...(lineage ? { lineage } : {}) }, body.chat.runtimeMode);
         return { status: 200, body: sessions.get(id) };
+      }
+      const headRead = /^\/api\/sessions\/([^/]+)\/head$/.exec(path);
+      if (method === "GET" && headRead) {
+        const id = decodeURIComponent(headRead[1]!);
+        if (!threads.has(id)) return { status: 404, body: { error: { code: "THREAD_NOT_FOUND", message: "gone" } } };
+        return headFromThreadRead({ status: 200, body: { kind: "snapshot", thread: snapshotOf(id) } }, opts?.query);
       }
       const read = /^\/api\/sessions\/([^/]+)\/thread$/.exec(path);
       if (method === "GET" && read) {

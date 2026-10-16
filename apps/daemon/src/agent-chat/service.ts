@@ -670,6 +670,7 @@ export class AgentChatService {
     return {
       client: this.client,
       isHostHealthy: () => this.supervisor.isHealthy(),
+      hostInstanceId: () => this.supervisor.status().hostInstanceId,
       chatSession: (id) => this.chat.get(id),
       noteSeq: (id, seq) => this.chat.noteSeq(id, seq),
       switchAccount: (id, body) => this.switchAccount(id, body),

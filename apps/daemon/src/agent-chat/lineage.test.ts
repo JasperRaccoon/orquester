@@ -12,9 +12,10 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import type { EventMessage, PendingMergeBack, SessionSummary } from "@orquester/api";
-import { mergeBackContext, parseMergeBackMessage, type ThreadSnapshotPayload, type Turn } from "@orquester/api/agent-chat";
+import { mergeBackContext, parseMergeBackMessage, threadHeadOf, type ThreadSnapshotPayload, type Turn } from "@orquester/api/agent-chat";
 
 import type { DaemonApi, DaemonResponse } from "../mcp/daemon-api.ts";
+import { headFromThreadRead } from "../mcp/testing.ts";
 import { acceptsMessage, LineageError, LineageService } from "./lineage.ts";
 
 const turn = (turnId: string, state: Turn["state"]): Turn => ({
@@ -89,10 +90,11 @@ function fakeWorld() {
     fsRoot: "/",
     workspacesDir: "/w",
     async request(method, path, opts): Promise<DaemonResponse> {
-      const read = /^\/api\/sessions\/([^/]+)\/thread$/.exec(path);
+      const read = /^\/api\/sessions\/([^/]+)\/(thread|head)$/.exec(path);
       if (method === "GET" && read) {
         const snap = threads.get(decodeURIComponent(read[1]!));
-        return snap ? { status: 200, body: { kind: "snapshot", thread: snap } } : { status: 404, body: null };
+        const answer: DaemonResponse = snap ? { status: 200, body: { kind: "snapshot", thread: snap } } : { status: 404, body: null };
+        return read[2] === "head" ? headFromThreadRead(answer, opts?.query) : answer;
       }
       const post = /^\/api\/sessions\/([^/]+)\/turn$/.exec(path);
       if (method === "POST" && post) {
@@ -219,12 +221,12 @@ async function setup(options: { parentBusy?: boolean; outbox?: string; outboxIsD
 
 describe("acceptsMessage", () => {
   it("is false while anything runs or waits on the user", () => {
-    assert.equal(acceptsMessage(summary("p"), snapshot()), true);
-    assert.equal(acceptsMessage(summary("p"), snapshot({ busy: true })), false);
-    assert.equal(acceptsMessage(summary("p", { hasPendingApprovals: true }), snapshot()), false);
-    assert.equal(acceptsMessage(summary("p", { chatSessionStatus: "starting" }), snapshot()), false);
+    assert.equal(acceptsMessage(summary("p"), threadHeadOf(snapshot())), true);
+    assert.equal(acceptsMessage(summary("p"), threadHeadOf(snapshot({ busy: true }))), false);
+    assert.equal(acceptsMessage(summary("p", { hasPendingApprovals: true }), threadHeadOf(snapshot())), false);
+    assert.equal(acceptsMessage(summary("p", { chatSessionStatus: "starting" }), threadHeadOf(snapshot())), false);
     assert.equal(
-      acceptsMessage(summary("p", { goal: { objective: "x", status: "active", continuing: true } } as Partial<SessionSummary>), snapshot()),
+      acceptsMessage(summary("p", { goal: { objective: "x", status: "active", continuing: true } } as Partial<SessionSummary>), threadHeadOf(snapshot())),
       false
     );
   });

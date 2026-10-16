@@ -30,12 +30,15 @@ import {
   THREAD_PROMPTS_MAX_LIMIT,
   THREAD_SEARCH_MAX_QUERY_CHARS,
   THREAD_SEARCH_MAX_RESULTS,
+  threadHeadQueryOf,
+  threadHeadQueryProblem,
   type AgentChatCommandName,
   type AgentChatErrorCode,
   type AgentChatStreamFrame,
   type AgentHostStopResponse,
   type AgentProvidersResponse,
   type RefreshProviderResponse,
+  type ThreadHeadResponse,
   type ThreadHistoryPage,
   type ThreadItemOutputResponse,
   type ThreadItemOutputWindowQuery,
@@ -638,6 +641,23 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
     if (rest === "/thread" && method === "GET") {
       const after = parseAfter(url);
       const body = await orchestrator.readThread(threadId, after);
+      sendJson(response, 200, body);
+      return;
+    }
+
+    // The thread's head (`threadHeadOf`): the daemon's per-call and per-event readers' compact read.
+    if (rest === "/head" && method === "GET") {
+      const query = threadHeadQueryOf({
+        replyChars: url.searchParams.get("replyChars") ?? undefined,
+        turnIds: url.searchParams.get("turnIds") ?? undefined,
+        messageIds: url.searchParams.get("messageIds") ?? undefined
+      });
+      const problem = threadHeadQueryProblem(query);
+      if (problem !== null) {
+        sendJson(response, 400, { error: { code: "INVALID_COMMAND", message: problem } });
+        return;
+      }
+      const body: ThreadHeadResponse = await orchestrator.readThreadHead(threadId, query);
       sendJson(response, 200, body);
       return;
     }

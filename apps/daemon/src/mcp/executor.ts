@@ -73,7 +73,7 @@ import { gate, type GateDecision, type GateInput } from "./gate/policy.ts";
 import { gateFacts } from "./gate/scope.ts";
 import { assertExchangeRoom, assertTargetModeNotBroader, causedByFor, NEW_SESSION } from "./gate/turn-policy.ts";
 import { toolByName } from "./catalog/index.ts";
-import { readThread } from "./reads.ts";
+import { readThreadHead } from "./reads.ts";
 import { argumentProblems, clipText, MAX_ECHO_CHARS, ok, toSafeToolError } from "./result.ts";
 import type { SessionSecretRequests } from "../session-tools/contract.ts";
 
@@ -788,8 +788,8 @@ async function turnFor(deps: ExecutorDeps, tool: AnyOrquesterTool, caller: ToolC
   for (const target of new Set(scope.causesTurnIn)) {
     if (target === NEW_SESSION) continue;
     if (target === caller.threadId) throw new ToolError("PERMISSION_DENIED", `${tool.name} cannot cause a turn in this chat itself.`);
-    const snap = await readThread(api, target);
-    assertTargetModeNotBroader(caller, { threadId: target, runtimeMode: snap.head.runtimeMode });
+    const { head } = await readThreadHead(api, target);
+    assertTargetModeNotBroader(caller, { threadId: target, runtimeMode: head.runtimeMode });
   }
   return { ...turn, causedBy };
 }

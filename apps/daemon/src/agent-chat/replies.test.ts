@@ -32,6 +32,7 @@ import {
 } from "@orquester/api/agent-chat";
 
 import type { DaemonApi, DaemonResponse } from "../mcp/daemon-api.ts";
+import { headFromThreadRead } from "../mcp/testing.ts";
 import { LineageService } from "./lineage.ts";
 import { HISTORY_RETRY_MAX_MS, MAX_REDELIVERY_READS, ReplyError, ReplyRouter, waitResponseOf } from "./replies.ts";
 import { registerWait, waitsOn } from "./waits.ts";
@@ -88,6 +89,7 @@ function fakeHost() {
   const raceOnNextPost = new Set<string>();
   /** Full thread reads (snapshots) per session. */
   const snapshotReads = new Map<string, number>();
+  const headReads = new Map<string, number>();
   /** History pages read, and how the index behaves: `endless` never reaches turn 1. */
   let historyReads = 0;
   const historyMode = { endless: false };
@@ -147,6 +149,13 @@ function fakeHost() {
         }
         snapshotReads.set(id, (snapshotReads.get(id) ?? 0) + 1);
         return { status: 200, body: { kind: "snapshot", thread: snapshotOf(id) } };
+      }
+      const head = /^\/api\/sessions\/([^/]+)\/head$/.exec(path);
+      if (method === "GET" && head) {
+        const id = decodeURIComponent(head[1]!);
+        if (!sessions.has(id)) return { status: 404, body: null };
+        headReads.set(id, (headReads.get(id) ?? 0) + 1);
+        return headFromThreadRead({ status: 200, body: { kind: "snapshot", thread: snapshotOf(id) } }, opts?.query);
       }
       const history = /^\/api\/sessions\/([^/]+)\/history$/.exec(path);
       if (method === "GET" && history) {
@@ -265,6 +274,7 @@ function fakeHost() {
       raceOnNextPost.add(id);
     },
     snapshotReads: (id: string) => snapshotReads.get(id) ?? 0,
+    headReads: (id: string) => headReads.get(id) ?? 0,
     historyReads: () => historyReads,
     endlessHistory(): void {
       historyMode.endless = true;
@@ -1796,5 +1806,45 @@ describe("final fix wave follow-up: deferred releases and closed-after-reply ans
     assert.equal(answer.outcome, "replied");
     assert.ok(answer.outcome === "replied" && answer.state === "failed" && /replied, then was closed/.test(answer.error ?? ""));
     assert.deepEqual(waitResponseOf({ kind: "closed" }), { outcome: "closed" });
+  });
+});
+
+describe("head-only re-checks (follow-up: head reads)", () => {
+  it("a re-check with every message still queued reads nothing", async () => {
+    const w = await world();
+    w.host.userTurn("tgt");
+    await w.router.subscribe("tgt", request("notify"));
+    await idle(w);
+    assert.equal(w.router.subscriptions()[0]!.posted, undefined, "queued behind the user's turn");
+    const heads = w.host.headReads("tgt");
+    const snapshots = w.host.snapshotReads("tgt");
+    w.host.ask("tgt");
+    await idle(w);
+    // One head read: the delivery queue's own idle check of the target. The router reads nothing.
+    assert.equal(w.host.headReads("tgt"), heads + 1);
+    assert.equal(w.host.snapshotReads("tgt"), snapshots);
+    await w.cleanup();
+  });
+
+  it("while the bound turn runs, the router's re-check and a wait's attach read the target's head, never its snapshot", async () => {
+    const w = await world();
+    const res = await w.router.subscribe("tgt", request("wait"));
+    const waiting = w.router.wait("tgt", res.subscriptionId, { timeoutSeconds: 60 });
+    await idle(w);
+    const snapshots = w.host.snapshotReads("tgt");
+    const heads = w.host.headReads("tgt");
+    // The summary moves (a question opens): the router looks, and the head alone decides.
+    w.host.ask("tgt");
+    assert.deepEqual(await waiting, { outcome: "notify", reason: "needs-input", willNotify: true });
+    await idle(w);
+    assert.ok(w.host.headReads("tgt") > heads, "the head was read");
+    assert.equal(w.host.snapshotReads("tgt"), snapshots, "no snapshot while the bound turn runs");
+    // Once the turn settles, its reply is read whole from the snapshot and delivered once.
+    w.host.thread("tgt").asking = false;
+    w.host.settle("tgt", { reply: "Answered." });
+    await idle(w);
+    assert.equal(w.router.deliveries().length, 1);
+    assert.ok(w.host.snapshotReads("tgt") > snapshots);
+    await w.cleanup();
   });
 });

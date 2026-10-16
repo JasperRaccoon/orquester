@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { SessionSummary } from "@orquester/api";
-import type { AgentChatCommandName, ThreadReadResponse, ThreadSnapshotPayload } from "@orquester/api/agent-chat";
-import { agentChatCommandPath, agentChatRoutes } from "@orquester/api/agent-chat";
+import type { AgentChatCommandName, ThreadHeadQuery, ThreadHeadResponse, ThreadReadResponse, ThreadSnapshotPayload } from "@orquester/api/agent-chat";
+import { agentChatCommandPath, agentChatRoutes, threadHeadQueryParams } from "@orquester/api/agent-chat";
 import type { DaemonApi, DaemonResponse } from "./daemon-api.ts";
 import { ToolError, daemonError, expectOk } from "./errors.ts";
 
@@ -29,6 +29,19 @@ export async function readThread(api: DaemonApi, sessionId: string): Promise<Thr
   const body = expectOk<ThreadReadResponse | null>(res);
   if (body?.kind !== "snapshot") throw new ToolError("INTERNAL", "Expected a thread snapshot.");
   return body.thread;
+}
+
+/**
+ * The thread's head (`ThreadHeadResponse`, `@orquester/api`'s `thread-head.ts`) — for a reader
+ * that needs its status, its running or latest turns, its open requests, its goal, its modes or
+ * (with `replyChars`) its last reply, and none of the retained window {@link readThread} carries.
+ */
+export async function readThreadHead(api: DaemonApi, sessionId: string, query: ThreadHeadQuery = {}): Promise<ThreadHeadResponse> {
+  const params = threadHeadQueryParams(query);
+  const res = await api.request("GET", agentChatRoutes.threadHead(sessionId), Object.keys(params).length ? { query: params } : undefined);
+  const body = expectOk<ThreadHeadResponse | null>(res);
+  if (body === null || typeof body !== "object" || !body.head) throw new ToolError("INTERNAL", "Expected a thread head.");
+  return body;
 }
 
 const defaultRetryDelay = (attempt: number): number => Math.min(4_000, 250 * 2 ** attempt);
