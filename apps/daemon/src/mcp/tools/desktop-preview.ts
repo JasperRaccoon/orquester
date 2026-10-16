@@ -1,8 +1,10 @@
 // The approval card of `control_desktop` (unified MCP design 2026-10-15 §7.1: "desktop
-// open/launch: command, cwd, env keys") — plan Task 12. Pure: built from the frozen arguments and
-// the desktop as `/api/desktops` lists it. Env VALUES are never shown (they may be credentials the
-// agent passes along); their keys are, and a key that changes how a program is loaded or found is
-// flagged, because it can make the command run something else.
+// open/launch: command, cwd, env keys"; values too, per final review F2) — plan Task 12. Pure: built
+// from the frozen arguments and the desktop as `/api/desktops` lists it. Every env value is shown in full beside its key (the agent
+// wrote them, so masking would hide nothing from it and everything from the user — final review F2),
+// and a key that changes which code runs (loader paths, the search path, runtime preloads, shell
+// startup files, git's ssh/exec hooks) is named in a warning, because it can make the command run
+// something else.
 
 import type { ApprovalPreviewSection, DesktopSummary } from "@orquester/api";
 import type { ApprovalPreview } from "../catalog/contract.ts";
@@ -12,8 +14,36 @@ const AGENT_LABELS: Readonly<Record<string, string>> = { claude: "Claude", codex
 /** The agent's display name for card titles ("An agent" for external callers, who never see a card). */
 export const agentLabel = (agentId: string | undefined): string => (agentId ? (AGENT_LABELS[agentId] ?? agentId) : "An agent");
 
-/** Environment keys that change which code runs: loader paths, the search path, runtime preloads. */
-const LOADER_KEY = /^(LD_|DYLD_)|^(PATH|NODE_OPTIONS|PYTHONPATH|PYTHONSTARTUP|PERL5LIB|PERL5OPT|RUBYOPT|BASH_ENV|ENV)$/;
+/**
+ * Environment keys that change which code runs: dynamic-loader paths and preloads, the search path,
+ * language runtime preloads and module paths, shell startup files, git's ssh/exec/config hooks, and
+ * GUI toolkit / graphics driver plugin paths (a desktop runs GUI apps).
+ */
+const LOADER_KEYS: ReadonlySet<string> = new Set([
+  "PATH",
+  // Shells: files sourced or commands run at startup / every prompt.
+  "BASH_ENV", "ENV", "ZDOTDIR", "PROMPT_COMMAND", "SHELLOPTS", "BASHOPTS", "IFS",
+  // Node / Electron.
+  "NODE_OPTIONS", "NODE_PATH", "ELECTRON_RUN_AS_NODE",
+  // Python, Perl, Ruby.
+  "PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME", "PYTHONUSERBASE", "PERL5LIB", "PERLLIB", "PERL5OPT", "RUBYOPT", "RUBYLIB",
+  // JVM, .NET.
+  "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS", "CLASSPATH", "DOTNET_STARTUP_HOOKS", "DOTNET_ADDITIONAL_DEPS",
+  // git: commands it runs and config it reads.
+  "GIT_SSH", "GIT_SSH_COMMAND", "GIT_EXEC_PATH", "GIT_ASKPASS", "SSH_ASKPASS", "GIT_EDITOR", "GIT_PAGER", "GIT_EXTERNAL_DIFF",
+  "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_TEMPLATE_DIR",
+  // Programs other programs start.
+  "EDITOR", "VISUAL", "PAGER", "BROWSER", "LESSOPEN", "LESSCLOSE",
+  // GUI toolkits and graphics drivers: plugins loaded into every app.
+  "GTK_MODULES", "GTK3_MODULES", "GTK_PATH", "QT_PLUGIN_PATH", "QT_QPA_PLATFORM_PLUGIN_PATH", "LIBGL_DRIVERS_PATH",
+  "VK_ICD_FILENAMES", "VK_DRIVER_FILES", "VK_LAYER_PATH", "VK_ADD_LAYER_PATH", "VK_INSTANCE_LAYERS", "__EGL_VENDOR_LIBRARY_FILENAMES",
+  "GCONV_PATH"
+]);
+/** Key prefixes with the same effect: the dynamic loaders, git's numbered config entries, .NET/CLR profilers. */
+const LOADER_PREFIX = /^(LD_|DYLD_|GIT_CONFIG_KEY_|GIT_CONFIG_VALUE_|CORECLR_|COR_PROFILER)/;
+
+/** Whether setting `key` can change which program, library or startup code a command runs. */
+export const isLoaderEnvKey = (key: string): boolean => LOADER_KEYS.has(key) || LOADER_PREFIX.test(key);
 
 export interface DesktopPreviewInput {
   action: "open" | "launch_app" | "stop_app" | "close_window" | "close";
@@ -37,13 +67,18 @@ export interface DesktopPreviewInput {
 function launchSections(input: DesktopPreviewInput): ApprovalPreviewSection[] {
   if (input.command === undefined) return [];
   const sections: ApprovalPreviewSection[] = [{ kind: "code", title: "Command", language: "sh", text: input.command }];
-  const rows: { label: string; value: string; state?: "flagged" }[] = [{ label: "Working directory", value: input.cwd ?? "the project" }];
-  const keys = Object.keys(input.env ?? {}).sort();
-  for (const key of keys) rows.push({ label: "Environment", value: key, ...(LOADER_KEY.test(key) ? { state: "flagged" as const } : {}) });
-  sections.push({ kind: "fields", title: "How it runs", rows });
-  const flagged = keys.filter((key) => LOADER_KEY.test(key));
+  sections.push({ kind: "fields", title: "How it runs", rows: [{ label: "Working directory", value: input.cwd ?? "the project" }] });
+  const env = input.env ?? {};
+  const keys = Object.keys(env).sort();
+  // Every value in full: the agent wrote it, and the user approves what actually runs.
+  if (keys.length > 0) sections.push({ kind: "fields", title: "Environment", rows: keys.map((key) => ({ label: key, value: env[key] ?? "" })) });
+  const flagged = keys.filter(isLoaderEnvKey);
   if (flagged.length > 0) {
-    sections.push({ kind: "warning", level: "caution", text: `${flagged.join(", ")} change${flagged.length === 1 ? "s" : ""} which program or library the command loads.` });
+    sections.push({
+      kind: "warning",
+      level: "caution",
+      text: `${flagged.join(", ")} change${flagged.length === 1 ? "s" : ""} which program, library or startup code the command runs.`
+    });
   }
   return sections;
 }

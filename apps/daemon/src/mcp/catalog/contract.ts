@@ -183,6 +183,14 @@ export interface ApprovalPreview {
    * (`grantChosen`) is made for the workflow AND these, so the card must name each of them.
    */
   childWorkflowIds?: string[];
+  /**
+   * `workflows` family, update and delete cards: every OTHER workflow that runs `workflowId` as a
+   * sub-workflow, directly or through others (final review: the reverse direction; a run changes
+   * nothing they run, so run cards carry none). A change to `workflowId` changes what they
+   * run, so a grant covers the call only when the same grant covers each of them too, and the card
+   * offers a grant only then. Never added to a grant (unlike `childWorkflowIds`).
+   */
+  callerWorkflowIds?: string[];
   /** This call is never covered by a grant and its card offers none (e.g. a scope member that no longer resolves: fail closed). */
   ungrantable?: boolean;
 }
@@ -241,6 +249,14 @@ export type ApprovalOutcome =
       grantScope?: "chat" | "project";
       /** The grant scope the user CHOSE on this card; absent for approve-once (a create joining the chat's grant included). */
       grantChosen?: ToolApprovalGrantScope;
+      /**
+       * With `grantChosen`, from the real port: the grant is NOT recorded yet. The executor calls this
+       * once the post-card gate re-run passed (§13), so a call refused there leaves no grant behind.
+       * Resolves the recorded grant (its id may differ from `grantId` when an equal grant appeared
+       * meanwhile), or null when none could be (the caller left Full access, the store is read-only):
+       * the call then proceeds as approved once. Absent: the grant (if any) is already recorded.
+       */
+      commitGrant?: () => Promise<{ grantId: string; grantScope: "chat" | "project" } | null>;
       secrets?: Record<string, string>;
     }
   | { outcome: "denied"; approvalId: string; reason?: string }
@@ -254,8 +270,8 @@ export interface ApprovalPort {
   /** Open a card and wait for the user, the deadline or `signal` (→ `cancelled`). */
   request(card: ApprovalRequest, signal: AbortSignal): Promise<ApprovalOutcome>;
   /**
-   * After an approved `create_workflow` ran — or, for the sub-workflows a card named, right after the
-   * user chose a grant on it: add the workflow's id to the chat's `workflows`
+   * After an approved `create_workflow` ran — or, for the sub-workflows a card named, once the grant
+   * the user chose on it was recorded (after the post-card re-gate): add the workflow's id to the chat's `workflows`
    * grant named by `grantId` — the approved outcome's `grantId` (the grant the approval created with
    * `grant: "chat"`, or the one the card said the create would join). Called ONLY with that id:
    * approving once never widens a standing grant (ruling). A no-op when `grantId` is not that chat's

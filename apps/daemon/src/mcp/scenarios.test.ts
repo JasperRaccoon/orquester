@@ -13,6 +13,7 @@
 
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { describe, test } from "node:test";
 
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
@@ -27,7 +28,7 @@ import {
   RUNTIME_MODE_LABELS,
   type ProviderModel
 } from "@orquester/api/agent-chat";
-import { agentToolApprovalsJournalFile, agentToolsFile } from "@orquester/config";
+import { agentChatThreadsDir, agentToolApprovalsJournalFile, agentToolsFile } from "@orquester/config";
 
 import { claudeDeniedMcpServers, claudeDisallowedTools } from "../agent-host/adapters/claude/session-tools.ts";
 import { codexDenyConfig } from "../agent-host/adapters/codex/session-tools.ts";
@@ -721,6 +722,13 @@ describe("acceptance (e) / §14.2.11 usage: per session for Claude, Codex and Gr
           line({ timestamp: `${today}T02:00:00Z`, type: "turn_context", payload: { model: "gpt-5.6-terra" } }),
           line({ timestamp: `${today}T02:00:00Z`, type: "event_msg", payload: { type: "token_count", info: { total_token_usage: { total_tokens: 5_500 }, last_token_usage: { input_tokens: 5_000, output_tokens: 500, cached_input_tokens: 1_000, total_tokens: 5_500 } } } })
         ].join("\n"));
+        // Grok has no transcript the Cost tab scans: its per-turn reported cost from Orquester's own chat logs
+        // (a Grok chat's durable events.ndjson, closed or open), labelled "Orquester chats only".
+        await writeHomeFile(join(agentChatThreadsDir(w.appdir), "grok-weekly", "events.ndjson"), [
+          line({ type: "thread.created", occurredAt: `${lastWeek}T00:00:00Z`, payload: { adapter: "grok", modelSelection: { model: "grok-4" } }, seq: 1 }),
+          line({ type: "thread.session-set", occurredAt: `${lastWeek}T03:00:00Z`, payload: { session: { status: "ready", activeTurnId: null }, turn: { turnId: "g1", totalCostUsd: 0.25, tokenUsage: { usageScope: "main_agent", usageStatus: "complete", inputTokens: 900, outputTokens: 100, hasSubagents: false } } }, seq: 2 }),
+          line({ type: "thread.session-set", occurredAt: `${today}T03:00:00Z`, payload: { session: { status: "ready", activeTurnId: null }, turn: { turnId: "g2", totalCostUsd: 0.5, tokenUsage: { usageScope: "main_agent", usageStatus: "complete", inputTokens: 1_800, outputTokens: 200, cachedInputTokens: 800, hasSubagents: false } } }, seq: 3 })
+        ].join("\n") + "\n");
         // The daemon's transcript watcher rescans (as get_cost did, `refresh` re-reads the quota only).
         await w.usageTokens.snapshot(true);
         const cost = ok(await w.uncarded("claude", "get_usage", { include: ["cost"], bucket: "week", days: 14 })).cost;
@@ -731,11 +739,19 @@ describe("acceptance (e) / §14.2.11 usage: per session for Claude, Codex and Gr
         const codexThisWeek = price("gpt-5.6-terra", { input: 4_000, output: 500, cacheRead: 1_000, cacheWrite: 0, cacheWrite1h: 0 });
         const claudePrior = price("claude-opus-5-5", { input: 1_000, output: 100, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0 });
         const byWeek = Object.fromEntries(cost.byWeek.map((row: { week: string; usd: number }) => [row.week, row.usd]));
-        assert.equal(byWeek[thisWeek], round4(claudeThisWeek + codexThisWeek));
-        assert.equal(byWeek[priorWeek], round4(claudePrior));
-        assert.deepEqual(cost.rows.map((row: { agent: string; week: string }) => `${row.week} ${row.agent}`).sort(), [`${priorWeek} claude`, `${thisWeek} claude`, `${thisWeek} codex`].sort());
-        // Grok's weekly cost is not asserted: the Cost tab's scanner reads Claude and Codex transcripts only. The planned
-        // fix (final fix wave) adds Grok weekly usage from Orquester's own thread logs; extend this scenario with it then.
+        assert.equal(byWeek[thisWeek], round4(claudeThisWeek + codexThisWeek + 0.5));
+        assert.equal(byWeek[priorWeek], round4(claudePrior + 0.25));
+        assert.deepEqual(
+          cost.rows.map((row: { agent: string; week: string }) => `${row.week} ${row.agent}`).sort(),
+          [`${priorWeek} claude`, `${thisWeek} claude`, `${thisWeek} codex`, `${priorWeek} grok`, `${thisWeek} grok`].sort()
+        );
+        const grokThisWeek = cost.rows.find((row: { agent: string; week: string }) => row.agent === "grok" && row.week === thisWeek);
+        assert.deepEqual(
+          { usd: grokThisWeek.costUsd, scope: grokThisWeek.scope, input: grokThisWeek.inputTokens, cached: grokThisWeek.cacheReadTokens, model: grokThisWeek.model },
+          { usd: 0.5, scope: "orquester-chats", input: 1_000, cached: 800, model: "grok-4" },
+          "Grok per week: its reported cost from Orquester's chats"
+        );
+        assert.match(cost.orquesterChatsOnly.find((entry: { agent: string }) => entry.agent === "grok").note, /Orquester chats only.*not counted/);
 
         // Quota windows: chats never see an account's email; external callers do.
         w.quota = { agents: [

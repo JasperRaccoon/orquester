@@ -396,6 +396,12 @@ export interface WorkflowRunSummary {
 export interface WorkflowRun extends WorkflowRunSummary {
   /** The frozen definition the run started with. */
   definition: Workflow;
+  /**
+   * The revision of every sub-workflow the run froze when its top-level run started (by workflow
+   * id; recursively): its Run workflow blocks run these definitions, not later edits. Optional: an
+   * older daemon omits it, and a run with no sub-workflow has none.
+   */
+  subWorkflowRevisions?: Record<string, number>;
   triggerPayload: WorkflowTriggerPayload | null;
   blocks: Record<string, WorkflowBlockRun>;
   /** Taken edges (ids), for the canvas overlay. */

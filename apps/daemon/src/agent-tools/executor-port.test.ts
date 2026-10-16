@@ -91,7 +91,13 @@ async function rig(t: TestContext) {
     defineTool({
       name: "run_workflow", title: "Run a workflow", description: "d", input: { workflowId: z.string() },
       audiences: ["chat"], toolset: "core", tier: "admin", adminFamily: "workflows", scope: async () => claim(),
-      approval: async (args) => ({ title: "Run a workflow", scopeLabel: "acme/api", sections: [{ kind: "text", text: String(args.workflowId) }], workflowId: String(args.workflowId) }),
+      approval: async (args) => ({
+        title: "Run a workflow",
+        scopeLabel: "acme/api",
+        sections: [{ kind: "text", text: String(args.workflowId) }],
+        workflowId: String(args.workflowId),
+        ...(args.workflowId === "wf-parent" ? { childWorkflowIds: ["wf-child"] } : {})
+      }),
       annotations: MUTATING, resultKind: "json",
       run: async (_args, ctx) => {
         runs.push(ctx);
@@ -125,9 +131,18 @@ async function rig(t: TestContext) {
     runtimeMode: "full-access", planning: false, workflowOwned: false, exchange: null
   };
   // The deps carry no ports: the executor reads the ones `connectExecutor` set, as in production.
+  // `refresh` stands for the caller as it is after the card (§13's re-gate).
+  let refresh: ((who: ThreadCaller) => ThreadCaller) | undefined;
   const call = (name: string, args: unknown = {}) =>
-    executeToolCall({ lookup: (n) => byName.get(n) }, { name, arguments: args }, { caller, api, signal: new AbortController().signal });
-  return { runtime, disconnect, call, nextCard, runs, order, opened };
+    executeToolCall(
+      { lookup: (n) => byName.get(n), refreshCaller: async (who) => (refresh ? refresh(who) : who) },
+      { name, arguments: args },
+      { caller, api, signal: new AbortController().signal }
+    );
+  const setRefresh = (fn: ((who: ThreadCaller) => ThreadCaller) | undefined) => {
+    refresh = fn;
+  };
+  return { runtime, disconnect, call, nextCard, runs, order, opened, setRefresh };
 }
 
 const errorCode = (result: { structuredContent?: unknown }) => (result.structuredContent as { code?: string } | undefined)?.code;
@@ -195,6 +210,36 @@ test("approved with a chat grant: the next call is covered by the grant without 
   const thirdId = await r.nextCard();
   assert.ok((await r.runtime.approvals.answer("me", thirdId, { decision: "deny" })).ok);
   assert.equal(errorCode(await third), "APPROVAL_DENIED");
+});
+
+test("a grant chosen on a card is recorded only once the call passed the post-card re-gate: refused there, no grant and no sub-workflow joins", async (t) => {
+  const r = await rig(t);
+  // The chat starts planning while the card waits: Admin is refused on the re-gate.
+  r.setRefresh((who) => ({ ...who, planning: true }));
+  const refused = r.call("run_workflow", { workflowId: "wf-parent" });
+  const id = await r.nextCard();
+  const answer = await r.runtime.approvals.answer("me", id, { decision: "approve", grant: "chat" });
+  assert.ok(answer.ok);
+  const result = await refused;
+  assert.equal(errorCode(result), "PERMISSION_DENIED");
+  assert.equal(r.runs.length, 0);
+  assert.deepEqual(r.runtime.tools.settingsView().grants, [], "no grant was recorded");
+  const row = reference(result);
+  assert.equal(row?.outcome, "approved");
+  assert.ok(!("grantId" in (row ?? {})) && !("grantScope" in (row ?? {})), "the row claims no grant");
+
+  // The same card passing its re-gate: the grant is recorded with the workflow and its child.
+  r.setRefresh(undefined);
+  const passing = r.call("run_workflow", { workflowId: "wf-parent" });
+  const answered = await r.runtime.approvals.answer("me", await r.nextCard(), { decision: "approve", grant: "chat" });
+  assert.ok(answered.ok);
+  const ok = await passing;
+  assert.equal(ok.isError, undefined, errorMessage(ok));
+  const grants = r.runtime.tools.settingsView().grants;
+  assert.equal(grants.length, 1);
+  assert.deepEqual(grants[0]!.workflowIds, ["wf-parent", "wf-child"]);
+  assert.equal(reference(ok)?.grantId, grants[0]!.id);
+  assert.equal(r.runs[0]!.approval?.grantId, grants[0]!.id);
 });
 
 test("workflows: a create approved with a chat grant joins its new id to that grant (only the outcome's grantId); approve-once joins nothing", async (t) => {

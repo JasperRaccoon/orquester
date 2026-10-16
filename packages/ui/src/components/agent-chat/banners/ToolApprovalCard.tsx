@@ -151,14 +151,17 @@ export function ToolApprovalCard({
     shownAt.current = now();
   }
 
-  // A new card is a new card: nothing typed for the last one survives.
+  // A new card — or new content under the same card id (the daemon re-opened it in place) — is a new
+  // card: nothing typed for the last one survives (typed secrets, the deny reason), and the phone's
+  // review sheet closes, so nothing answers content the user has not seen.
+  const resetKey = React.useMemo(() => `${cardKey}\u0000${JSON.stringify(card.secretFields)}`, [cardKey, card.secretFields]);
   React.useEffect(() => {
     setSecrets({});
     setError(null);
     setDenyOpen(false);
     setDenyReason("");
     setSheetOpen(false);
-  }, [card.approvalId]);
+  }, [resetKey]);
   // New content (same card or not): the full preview loaded for the old content is dropped, and
   // the guards restart (the guard key moves with the shown content).
   React.useEffect(() => {

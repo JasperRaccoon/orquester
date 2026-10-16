@@ -92,6 +92,11 @@ import {
   workflowError,
   unionGrantable,
   unionGrantFields,
+  changesSecretUse,
+  SECRET_USE_NOTE,
+  callerParts,
+  workflowCallers,
+  frozenChildMismatch,
   workflowFields,
   workflowPin,
   workflowProjectLabel,
@@ -365,7 +370,10 @@ const OUTPUT_NOTE = "Outputs marked outputTruncated are cut (outputText is the h
 function runView(run: WorkflowRun, opts: { includeOutputs: boolean; extra?: Record<string, unknown> }): Record<string, unknown> {
   const blocks = orderedBlocks(run);
   const views = blocks.map(blockView);
-  const result: Record<string, unknown> = { ...(opts.extra ?? {}), run: runSummaryView(run), blocks: views };
+  const summary = runSummaryView(run);
+  // The sub-workflow revisions the run froze as it started (what its Run workflow blocks run).
+  if (run.subWorkflowRevisions && Object.keys(run.subWorkflowRevisions).length > 0) summary.subWorkflowRevisions = { ...run.subWorkflowRevisions };
+  const result: Record<string, unknown> = { ...(opts.extra ?? {}), run: summary, blocks: views };
   if (!opts.includeOutputs) return result;
   const slots: OutputSlot[] = blocks.map((b, i) => ({ holder: views[i]!, value: b.output, daemonTruncated: b.outputTruncated === true, key: "output" }));
   const runHolder = result.run as Record<string, unknown>;
@@ -912,6 +920,8 @@ const createWorkflow = defineTool({
     assertSavable(draft, problems);
     const union = await workflowUnion(api, [draft]);
     const prompts = await promptsFor(api, draft, union);
+    // (A create always cards — no grant covers a workflow before it exists; its later edits of a
+    // secret-reading block are never granted: `changesSecretUse` on update.)
     const sections: ApprovalPreviewSection[] = [
       ...(draft.enabled ? [{ kind: "warning" as const, level: "caution" as const, text: "Created ENABLED: its schedule and git triggers start firing at once." }] : []),
       workflowFields(draft, api.workspacesDir),
@@ -986,12 +996,18 @@ const updateWorkflow = defineTool({
     const everything = enables || JSON.stringify(current.project) !== JSON.stringify(after.project);
     const only = everything ? undefined : diff.touched;
     const prompts = await promptsFor(api, after, union, only);
+    // Adding or changing a block that reads a secret, or retargeting one: never granted.
+    const secretUse = changesSecretUse(current, after, diff.touched);
+    // Workflows that run this one: the edit changes what they run (covered only with them).
+    const callers = callerParts(await workflowCallers(api, current.id), "change");
     const sections: ApprovalPreviewSection[] = [
       ...(enables ? [{ kind: "warning" as const, level: "caution" as const, text: "Enables the workflow: its schedule and git triggers start firing." }] : []),
+      ...(secretUse ? [SECRET_USE_NOTE] : []),
       ...diff.sections,
+      ...callers.sections,
       { kind: "code", title: "Ops", language: "json", text: JSON.stringify(args.ops, null, 2) },
       workflowFields(after, api.workspacesDir, "The workflow after the change"),
-      ...(await unionSections(api, union, ctx.caller, { childrenJoinGrant: await unionGrantable(api, union, ctx.caller) })),
+      ...(await unionSections(api, union, ctx.caller, { childrenJoinGrant: !secretUse && (await unionGrantable(api, union, ctx.caller)) })),
       ...definitionSections(after, prompts, api.workspacesDir, only),
       ...problemSections(problems)
     ];
@@ -1002,8 +1018,11 @@ const updateWorkflow = defineTool({
       sections,
       workflowId: current.id,
       pins: previewPins(current, prompts, union),
-      // A grant covers the edit only if it covers every sub-workflow it wires in (§7.6).
-      ...unionGrantFields(union)
+      // A grant covers the edit only if it covers every sub-workflow it wires in (§7.6), and every
+      // workflow that runs this one.
+      ...unionGrantFields(union),
+      ...callers.grant,
+      ...(secretUse || callers.grant.ungrantable ? { ungrantable: true as const } : {})
     };
   },
   annotations: MUTATING,
@@ -1077,6 +1096,7 @@ const deleteWorkflow = defineTool({
     const runs = await countRuns(api, workflow.id);
     const secretsRes = await api.request("GET", workflowRoutes.secrets, { query: { workflowId: workflow.id } });
     const own = secretsRes.status < 400 ? ((secretsRes.body as ListWorkflowSecretsResponse).secrets ?? []).filter((s) => s.scope === "workflow").map((s) => s.name) : [];
+    const callers = callerParts(await workflowCallers(api, workflow.id), "delete");
     return {
       title: `${agentLabel(ctx.caller)} wants to delete the workflow "${workflow.name}"`,
       scopeLabel: unionLabel(union),
@@ -1084,10 +1104,12 @@ const deleteWorkflow = defineTool({
         { kind: "warning", level: "danger", text: `Deletes the workflow for good${runs.active > 0 ? `, cancels its ${runs.active} active run(s)` : ""} and removes its ${runs.total} recorded run(s) and ${own.length} own secret(s). This cannot be undone.` },
         workflowFields(workflow, api.workspacesDir),
         { kind: "fields", title: "Removed with it", rows: [{ label: "Runs", value: String(runs.total) }, { label: "Its own secrets", value: own.length > 0 ? own.join(", ") : "none" }] },
+        ...callers.sections,
         ...(await unionSections(api, union, ctx.caller))
       ],
       workflowId: workflow.id,
       pins: previewPins(workflow, new Map()),
+      ...callers.grant,
       ...(union.missing.length > 0 ? { ungrantable: true } : {})
     };
   },
@@ -1216,6 +1238,21 @@ async function refuseStartedRun(api: DaemonApi, runId: string, asked: number, ra
   throw via ? new ToolError("PREVIEW_STALE", `${message} Re-read it (get_workflow) and call again.`, detail) : new ToolError("REVISION_CONFLICT", message, detail);
 }
 
+/** A started run whose frozen sub-workflow is not the one pinned: cancelled, PREVIEW_STALE. */
+async function refuseStaleChildRun(api: DaemonApi, runId: string, child: string, via: PassedBy): Promise<never> {
+  const cancel = await api.request("POST", workflowRoutes.runCancel(runId)).catch(() => null);
+  const outcome = cancel === null || cancel.status >= 500
+    ? `it could NOT be cancelled (the cancel failed): cancel it with cancel_workflow_run {runId: "${runId}"}`
+    : cancel.status >= 400
+      ? "it had already ended"
+      : "it was cancelled";
+  throw new ToolError(
+    "PREVIEW_STALE",
+    `The sub-workflow ${child} changed as run ${runId} started, ${passedPhrase(via)}; ${outcome}. Re-read it (get_workflow) and call again.`,
+    { runId, cancelled: cancel !== null && cancel.status < 400 }
+  );
+}
+
 /** The revision a run must start from; a mismatch before any card is the caller's stale read. */
 function revisionConflict(current: number, asked: number): ToolError {
   return workflowError({ status: 409, body: { error: { code: "REVISION_CONFLICT", message: `The workflow is at revision ${current}, not ${asked}` } } });
@@ -1266,6 +1303,8 @@ const runWorkflow = defineTool({
     const inputSection: ApprovalPreviewSection = { kind: "code", title: "Input ({{ trigger.input }})", language: "json", text: inputText };
     const problemParts = problemSections(problems);
     const title = `${agentLabel(ctx.caller)} wants to run the workflow "${workflow.name}"`;
+    // (Callers are not checked here: running a workflow another workflow calls does not change what
+    // that one runs — only an update or a delete does.)
     const base = { title, scopeLabel: unionLabel(union), workflowId: workflow.id, pins: previewPins(workflow, prompts, union) };
     const tooLargeInput = () =>
       new ToolError("PREVIEW_TOO_LARGE", "The run input is too large to show the user in one approval card. Pass a smaller input (let a block read the bulk from a file or an earlier block).");
@@ -1328,6 +1367,12 @@ const runWorkflow = defineTool({
       const first = await readRun(api, started.runId).catch(() => null);
       const ran = first?.definition?.revision;
       if (ran !== args.revision) await refuseStartedRun(api, started.runId, args.revision, ran, ctx.approval?.outcome);
+      // The run froze its sub-workflows as it started: they must be the revisions the card (or the
+      // grant's check) pinned, or the run is cancelled — what was approved is what runs.
+      if (ctx.approval?.pins) {
+        const child = frozenChildMismatch(ctx.approval.pins, args.workflowId, first?.subWorkflowRevisions);
+        if (child !== null) await refuseStaleChildRun(api, started.runId, child, ctx.approval.outcome);
+      }
       if (!tap) return { runId: started.runId, status: "started", revision: args.revision, next: "get_workflow_runs {runId, waitSeconds} watches it; run_workflow with wait:true waits for the end." };
       const { run, ended } = await waitForRunEnd(api, tap, started.runId, { timeoutMs: args.timeoutSeconds * 1_000, signal });
       if (!run) return { runId: started.runId, finished: false, timedOut: true, next: "get_workflow_runs {runId, waitSeconds} watches it." };

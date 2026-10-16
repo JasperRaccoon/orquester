@@ -1296,7 +1296,10 @@ starts.
   UTC day or ISO week (`bucket`), for the last `days` days including today. Amounts are rounded to
   4 decimals; a model without a known price counts as $0 and its rows carry `costUsd: null`. The
   rows bound themselves to the result by dropping whole buckets, oldest first (`truncated: true`,
-  `rowsDropped`); the totals still count every row.
+  `rowsDropped`); the totals still count every row. **Grok** has no local transcript to scan: its
+  rows (`scope: "orquester-chats"`) are the cost and tokens Grok itself reported per turn in
+  Orquester's own agent chats (closed ones included), read from their logs — Grok used outside
+  Orquester is not counted, and `orquesterChatsOnly` says so (or that the source could not be read).
 - **session** — one chat's token usage: the per-turn `tokenUsage` of the turns its thread holds
   (`turnsCounted`; `partial: true` when older turns lie outside it), priced as the provider reported
   it where it did and by the Cost tab's pricing table otherwise (Codex reports tokens only):
@@ -1812,7 +1815,8 @@ routes, like every other tool; everything a tool changes shows up live in the ed
   defaults to the daemon host's own zone), `runTimeoutMinutes`, `notify {onFailure, onSuccess}`,
   `keepFailedTempDays` (0–30).
 - A new workflow is **disabled** unless `enabled: true` — its schedule and git triggers do not
-  fire. Manual runs (`run_workflow`) work either way. Enabling is refused while the definition has
+  fire. Manual runs (`run_workflow`) work either way, and **a disabled workflow still runs when
+  another workflow calls it** through a Run workflow block (disabling stops triggers only). Enabling is refused while the definition has
   a problem of severity `error`. `dryRun: true` on `create_workflow` or `update_workflow` validates
   without saving.
 - **`problems`** come back on every read and write: `{severity: "error" | "warning" | "info", code,
@@ -1879,6 +1883,24 @@ run as it stands: `finished: true`, or `finished: false, timedOut: true` for a r
 Agent blocks can take hours: for those, start without `wait` and check back. When the overlap policy skips the run
 (`overlap: "skip"` and a run already active) the answer is `{runId: null, skipped: "overlap"}`;
 `force: true` runs anyway.
+
+**Sub-workflows are frozen when a run starts.** A top-level run records the definition of every
+workflow its Run workflow blocks reach (recursively) as it starts, and each child run runs that
+frozen definition — an edit made while the run is going applies to the next run, never this one; a
+sub-workflow deleted meanwhile fails its block. The run view's `subWorkflowRevisions` names the
+revision of each. In a chat, `run_workflow` checks them against what its approval card showed and
+cancels the run (`PREVIEW_STALE`) if one changed between the card and the start.
+
+**Chat grants and sub-workflows.** A chat's "Allow workflows" grant covers a change, run or
+deletion only when it covers every workflow the call runs as a sub-workflow. A change or a deletion
+is also covered only when the grant covers every workflow that runs the target as one (directly or
+through others): changing or deleting a workflow another workflow outside the grant calls changes
+what that one runs, so it always asks the user (the card names those callers); running it changes
+nothing they run, so a run stays covered. An edit that adds or changes a block reading a workflow
+secret — or a block feeding one that interpolates other blocks' data — always asks too. That check
+reads the block's text (`{{ secrets.NAME }}`, or `secrets` used in a Code block's source); a Code
+block's process receives every secret whatever its text says, but grants exist only for Full-access
+chats, which can already read the secrets store, so a Code edit under a grant reaches nothing more.
 
 A run's view lists every block in the definition's order: `status` (`pending`, `queued`,
 `running`, `waiting`, `succeeded`, `failed`, `skipped`, `cancelled`), `handle` (the output it

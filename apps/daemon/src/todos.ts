@@ -40,7 +40,21 @@ export class TodoListManager {
     }
   }
 
-  private async persist(): Promise<void> {
+  /** The write in flight (or the last one): every persist runs after it, never beside it. */
+  private writing: Promise<void> = Promise.resolve();
+
+  /**
+   * Write the index. Serialized: overlapping changes (an agent's toggles, a UI edit) each queue one
+   * write behind the previous, which reads the map when it starts — so two writes never share the
+   * tmp file, and the last write on disk holds the newest state.
+   */
+  private persist(): Promise<void> {
+    const next = this.writing.then(() => this.writeIndex());
+    this.writing = next;
+    return next;
+  }
+
+  private async writeIndex(): Promise<void> {
     const tmpPath = `${this.indexPath}.tmp`;
     try {
       await mkdir(dirname(this.indexPath), { recursive: true });

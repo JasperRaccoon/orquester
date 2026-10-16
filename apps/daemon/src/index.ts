@@ -169,6 +169,7 @@ import { PushService, isValidPushEndpoint } from "./push";
 import { GitError, GitService, GitWatcher, passesGitEventFilter, workingDiffMaxBytes } from "./git";
 import { UsageService } from "./usage";
 import { UsageTokensScanner } from "./usage-tokens";
+import { ChatThreadUsageScanner } from "./usage-chat-threads.ts";
 import { SubagentCacheTtlController, type SubagentCacheTtl } from "./subagent-cache-ttl";
 import {
   createClaudeSource,
@@ -244,6 +245,7 @@ import {
   tmuxSocketPath,
   todosIndexPath,
   usageTokensCacheFile,
+  agentChatThreadsDir,
   subagentCacheTtlStateFile,
   usageStateFile,
   workspacesMetaPath,
@@ -495,6 +497,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
         .map((a) => ({ agent: a.agent, home: agentAccounts.homePath(a.agent, a.id) }))
     ]
   });
+  // Grok's usage per day, from Orquester's own chat logs (it has no transcript the scanner reads).
+  const chatThreadUsage = new ChatThreadUsageScanner({ threadsDir: agentChatThreadsDir(paths.baseDir), agents: ["grok"], now: () => Date.now(), logger: console });
   // Auto mode of the Claude subagent cache lifetime decides from the requests
   // the scanner already holds. A daemon that just started has scanned nothing:
   // ask for a scan and keep the stored decision until it is in.
@@ -1172,7 +1176,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   agentChat.setSecretRequests(secretRequests);
   const services: Services = {
     secretRequests,
-    registry, sessions, grokDeviceLink, accounts, git, gitWatcher, todos, recentProjects, savedPrompts, usage, usageTokens, subagentCacheTtl, push, broadcaster, agentAccounts, browsers, urlWatcher, agentChat,
+    registry, sessions, grokDeviceLink, accounts, git, gitWatcher, todos, recentProjects, savedPrompts, usage, usageTokens, chatThreadUsage, subagentCacheTtl, push, broadcaster, agentAccounts, browsers, urlWatcher, agentChat,
     plugins,
     desktops, desktopAudio,
     agentProfile,
@@ -1534,6 +1538,8 @@ interface Services {
   // umcp:t6 end
   usage: UsageService;
   usageTokens: UsageTokensScanner;
+  /** Per-day usage from Orquester's own chat logs, for agents without a transcript scanner (Grok). Optional: route tests build a partial `services`. */
+  chatThreadUsage?: ChatThreadUsageScanner;
   /** The Claude subagent cache lifetime as it applies now (auto mode's decision). */
   subagentCacheTtl: SubagentCacheTtlController;
   push: PushService;
@@ -3513,6 +3519,14 @@ export function createServer(
   app.get("/api/usage/tokens", async (request) => {
     const force = (request.query as { refresh?: string })?.refresh === "1";
     return usageTokens.snapshot(force);
+  });
+
+  // Grok's usage from Orquester's own chat logs ("Orquester chats only"): get_usage's weekly cost.
+  app.get<{ Querystring: { agent?: string } }>("/api/usage/chat-threads", async (request, reply) => {
+    const agent = request.query.agent;
+    if (agent !== "grok") return reply.code(400).send({ code: "INVALID_REQUEST", message: "agent must be grok." });
+    if (!services.chatThreadUsage) return reply.code(503).send({ code: "UNAVAILABLE", message: "Chat usage is not available." });
+    return services.chatThreadUsage.snapshot(agent);
   });
 
   // Read fresh, like a launch does: this is what the next Claude session gets.

@@ -264,6 +264,10 @@ export class InMemoryRunStore implements RunStore {
     return run ? structuredClone(run) : null;
   }
 
+  async exists(runId: string): Promise<boolean> {
+    return this.runs.has(runId);
+  }
+
   async listUnfinished(): Promise<PersistedRun[]> {
     return [...this.runs.values()].filter((run) => isRunActive(run.status)).map((run) => structuredClone(run));
   }

@@ -21,6 +21,7 @@ import {
   isTriggerType,
   reachableFromTriggers,
   triggerSummaryText,
+  upstreamOf,
   WORKFLOW_LIMITS,
   workflowRoutes,
   type AccountSummary,
@@ -290,6 +291,146 @@ export function unionGrantFields(union: WorkflowUnion): { childWorkflowIds?: str
   };
 }
 
+// ---------------------------------------------------------------------------
+// Callers: the workflows that run one as a sub-workflow (final review: the reverse direction)
+// ---------------------------------------------------------------------------
+
+export interface WorkflowCaller {
+  workflowId: string;
+  name: string;
+  enabled: boolean;
+}
+
+/**
+ * Every workflow that runs `workflowId` as a sub-workflow, directly or through others (the reverse
+ * of the union's children): a change to it changes what they run. Reads every definition (the list
+ * carries no blocks). Null when they cannot be read — the caller fails closed (`ungrantable`).
+ */
+export async function workflowCallers(api: DaemonApi, workflowId: string): Promise<WorkflowCaller[] | null> {
+  const listed = await api.request("GET", workflowRoutes.list);
+  if (listed.status >= 400) return null;
+  const callersOf = new Map<string, Set<string>>();
+  const info = new Map<string, WorkflowCaller>();
+  for (const summary of (listed.body as ListWorkflowsResponse).workflows ?? []) {
+    if (summary.id === workflowId) continue;
+    const res = await api.request("GET", workflowRoutes.workflow(summary.id));
+    if (res.status === 404) continue; // deleted meanwhile
+    if (res.status >= 400) return null;
+    const workflow = (res.body as GetWorkflowResponse).workflow;
+    info.set(workflow.id, { workflowId: workflow.id, name: workflow.name, enabled: workflow.enabled });
+    for (const child of membersOf(workflow).childIds) {
+      const set = callersOf.get(child) ?? new Set<string>();
+      set.add(workflow.id);
+      callersOf.set(child, set);
+    }
+  }
+  const found: WorkflowCaller[] = [];
+  const seen = new Set<string>([workflowId]);
+  let frontier = [workflowId];
+  while (frontier.length > 0) {
+    const next: string[] = [];
+    for (const id of frontier) {
+      for (const parent of callersOf.get(id) ?? []) {
+        if (seen.has(parent)) continue;
+        seen.add(parent);
+        const caller = info.get(parent);
+        if (caller) found.push(caller);
+        next.push(parent);
+      }
+    }
+    frontier = next;
+  }
+  return found;
+}
+
+/**
+ * The card's part for the workflows that run this one: the fields naming each, and the grant fields
+ * (`callerWorkflowIds`; unreadable → `ungrantable`).
+ */
+export function callerParts(callers: readonly WorkflowCaller[] | null, verb: "change" | "delete"): { sections: ApprovalPreviewSection[]; grant: { callerWorkflowIds?: string[]; ungrantable?: true } } {
+  if (callers === null) {
+    return {
+      sections: [{ kind: "warning", level: "caution", text: "Orquester could not check which workflows run this one as a sub-workflow, so no grant can cover this call." }],
+      grant: { ungrantable: true }
+    };
+  }
+  if (callers.length === 0) return { sections: [], grant: {} };
+  const effect = verb === "delete" ? "deleting it makes their sub-workflow block fail" : "this change changes what they run";
+  return {
+    sections: [
+      {
+        kind: "fields",
+        title: `Workflows that run it as a sub-workflow (${effect}; a chat grant covers this only if it covers them too)`,
+        rows: callers.map((caller) => ({ label: caller.name, value: `${caller.workflowId}${caller.enabled ? "" : " (disabled)"}` }))
+      }
+    ],
+    grant: { callerWorkflowIds: callers.map((caller) => caller.workflowId) }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Secrets: a change to what a workflow does with one is never granted (final review)
+// ---------------------------------------------------------------------------
+
+/** A `{{ … secrets … }}` template (any field); in a Code block, `secrets` in its source beyond the argument list. */
+const SECRET_TEMPLATE = /\{\{[^}]*\bsecrets\b/;
+const SECRET_IDENTIFIER = /\bsecrets\b/;
+/** A module's destructured argument list (`function ({ input, secrets, … })`, `({ … }) =>`): naming `secrets` there reads nothing. */
+const ARGUMENT_LISTS = /function\s*\w*\s*\(\s*\{[^}]*\}\s*\)|\(\s*\{[^}]*\}\s*\)\s*=>/g;
+/** Any template other than a secret's: the block interpolates data another block can shape. */
+const ANY_TEMPLATE = /\{\{/g;
+
+/**
+ * Whether a block can read a workflow secret: a `{{ secrets.NAME }}` template in any config field
+ * (HTTP URL/headers/query/body, a Shell `env` value, an agent prompt…) or, in a Code block, the
+ * `secrets` argument used in its body (the standard `function ({ …, secrets, … })` signature alone
+ * does not count). Textual, so best-effort for Code (its process receives every secret); over-matching
+ * only costs a card.
+ */
+export function blockUsesSecrets(node: Pick<WorkflowNode, "type" | "config">): boolean {
+  if (node.type === "code") {
+    const config: unknown = node.config;
+    const source = isRecord(config) && typeof config.source === "string" ? config.source : JSON.stringify(config ?? {});
+    return SECRET_IDENTIFIER.test(source.replace(ARGUMENT_LISTS, ""));
+  }
+  return SECRET_TEMPLATE.test(JSON.stringify(node.config ?? {}));
+}
+
+/** Whether a secret-reading block also takes data another block shapes (code reads `nodes`/`input`; a non-secret template). */
+function interpolatesOtherData(node: Pick<WorkflowNode, "type" | "config">): boolean {
+  if (node.type === "code") return true;
+  const text = JSON.stringify(node.config ?? {});
+  const templates = text.match(ANY_TEMPLATE)?.length ?? 0;
+  const secretTemplates = text.match(/\{\{[^}]*\bsecrets\b/g)?.length ?? 0;
+  return templates > secretTemplates;
+}
+
+/**
+ * Whether an edit changes what the workflow does with a secret — then no grant covers it and the
+ * user approves every such call (`ungrantable`): an edit that adds or changes a block that reads a
+ * secret, or makes one newly reachable (`touched`, the graph diff's set), or changes a block
+ * upstream of one that also interpolates other blocks' data (that can retarget it: an HTTP URL
+ * built from an earlier block's output). With no `before` (a whole definition), any such block.
+ */
+export function changesSecretUse(before: Pick<Workflow, "nodes" | "edges"> | null, after: Pick<Workflow, "nodes" | "edges">, touched: ReadonlySet<string> | null): boolean {
+  const users = after.nodes.filter(blockUsesSecrets);
+  if (users.length === 0) return false;
+  if (before === null || touched === null) return true;
+  for (const node of users) {
+    if (touched.has(node.id)) return true;
+    if (!interpolatesOtherData(node)) continue;
+    for (const id of upstreamOf(after, node.id)) if (touched.has(id)) return true;
+  }
+  return false;
+}
+
+/** The card's note when {@link changesSecretUse}: why no grant is offered. */
+export const SECRET_USE_NOTE: ApprovalPreviewSection = {
+  kind: "warning",
+  level: "caution",
+  text: "This changes a block that reads a workflow secret (or what feeds it): a chat grant never covers such a change, so it asks you every time."
+};
+
 /**
  * Whether a chat grant could be offered on this card at all (the executor and the port decide; this
  * only keeps the card's wording true): a full-access chat that is not workflow-owned, a union inside
@@ -505,6 +646,23 @@ export async function verifyPins(
     const prompt = now.get(id) ?? null;
     if ((prompt ? prompt.sha256 : MISSING) !== pins[`${PROMPT_PIN}${id}`]) throw stale(`The saved prompt ${prompt ? `"${clipText(prompt.title, 80)}"` : id}`, opts.via);
   }
+}
+
+/**
+ * After a run started: the first sub-workflow whose revision the run froze (`subWorkflowRevisions`,
+ * the engine's map) differs from the card's pin — "wf-child (revision 2 → 3)" — or null when every
+ * pinned child is what the run will run (a `missing` pin: not frozen either).
+ */
+export function frozenChildMismatch(pins: Readonly<Record<string, string>>, parentId: string, frozen: Readonly<Record<string, number>> | undefined): string | null {
+  for (const [key, value] of Object.entries(pins)) {
+    if (!key.startsWith(WORKFLOW_PIN)) continue;
+    const id = key.slice(WORKFLOW_PIN.length);
+    if (id === parentId) continue;
+    const ran = frozen?.[id];
+    const expected = value === MISSING ? undefined : value;
+    if ((ran === undefined ? undefined : String(ran)) !== expected) return `${id} (revision ${value} → ${ran ?? "missing"})`;
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------

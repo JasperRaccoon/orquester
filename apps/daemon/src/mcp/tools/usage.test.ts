@@ -126,6 +126,39 @@ test("get_usage cost by week: one row per agent, model and ISO week, priced when
   ]);
 });
 
+test("get_usage cost counts Grok from Orquester's own chats (its reported cost), labelled Orquester chats only; an unreadable source says so", async () => {
+  const claudeRow = (day: string, costUsd: number) => ({ agent: "claude", model: "opus", day, inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd, costSource: "api_equivalent" });
+  const grokRow = (day: string, costUsd: number | null) => ({ day, model: "grok-4", turns: 2, costedTurns: costUsd === null ? 0 : 2, inputTokens: 1_000, outputTokens: 100, cachedInputTokens: 400, costUsd });
+  const api = new FakeDaemonApi()
+    .on("GET", "/api/usage/tokens", { status: 200, body: { asOf: "2026-10-15T11:00:00.000Z", rows: [claudeRow("2026-10-15", 1), claudeRow("2026-10-06", 2)] } })
+    .on("GET", "/api/usage/chat-threads", ({ query }) => {
+      assert.deepEqual(query, { agent: "grok" });
+      return { status: 200, body: { agent: "grok", scope: "orquester-chats", asOf: "2026-10-15T11:00:00.000Z", rows: [grokRow("2026-10-14", 0.25), grokRow("2026-10-07", 0.5), grokRow("2026-10-01", 9), grokRow("2026-10-13", null)] } };
+    });
+  const at = Date.parse("2026-10-15T12:00:00.000Z");
+  const cost = async (args: Record<string, unknown>) => ((await getUsage.run(z.object(getUsage.input).strict().parse(args), { api, signal: new AbortController().signal, now: () => at, caller: external, turn: { interactionMode: "default", provenance: (_o, t) => t } })) as Record<string, any>).cost;
+  // Ten days back from Thursday the 15th is Tuesday the 6th: weeks W41 (from Monday the 5th) and W42; the 1st is outside.
+  const weekly = await cost({ include: ["cost"], bucket: "week", days: 10 });
+  assert.deepEqual(weekly.byWeek, [{ week: "2026-W41", from: "2026-10-05", usd: 2.5 }, { week: "2026-W42", from: "2026-10-12", usd: 1.25 }]);
+  assert.deepEqual(
+    weekly.rows.filter((row: { agent: string }) => row.agent === "grok"),
+    [
+      { agent: "grok", model: "grok-4", week: "2026-W42", inputTokens: 1_200, outputTokens: 200, cacheReadTokens: 800, cacheWriteTokens: 0, costUsd: 0.25, scope: "orquester-chats" },
+      { agent: "grok", model: "grok-4", week: "2026-W41", inputTokens: 600, outputTokens: 100, cacheReadTokens: 400, cacheWriteTokens: 0, costUsd: 0.5, scope: "orquester-chats" }
+    ],
+    "fresh input = input − cached; the reported cost; a turn without one adds tokens only"
+  );
+  assert.equal(weekly.orquesterChatsOnly.length, 1);
+  assert.equal(weekly.orquesterChatsOnly[0].agent, "grok");
+  assert.match(weekly.orquesterChatsOnly[0].note, /Orquester chats only.*outside Orquester .*not counted/);
+  // The source unreadable (an older daemon): Grok is not counted, and the result says so.
+  api.on("GET", "/api/usage/chat-threads", { status: 404, body: { code: "NOT_FOUND", message: "x" } });
+  const without = await cost({ include: ["cost"], bucket: "week", days: 14 });
+  assert.ok(!without.rows.some((row: { agent: string }) => row.agent === "grok"));
+  assert.equal(without.orquesterChatsOnly[0].unavailable, true);
+  assert.match(without.orquesterChatsOnly[0].note, /could not be read/);
+});
+
 /** A chat session `s1` whose snapshot holds `turns` (and a history window when `hasOlder`). */
 function sessionApi(turns: Turn[], over: { model?: string; refId?: string; adapter?: "claude" | "codex" | "grok" | "opencode"; hasOlder?: boolean; providers?: unknown; items?: ThreadItem[] } = {}): FakeDaemonApi {
   const adapter = over.adapter ?? "codex";

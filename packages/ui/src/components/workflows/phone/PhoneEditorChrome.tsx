@@ -134,7 +134,7 @@ export const PhoneTopBar: React.FC<PhoneTopBarProps> = (props) => {
         type="button"
         role="switch"
         aria-checked={props.enabled}
-        aria-label={props.enabled ? "Enabled — its triggers fire" : "Disabled — only Run now starts it"}
+        aria-label={props.enabled ? "Enabled — its triggers fire" : "Disabled — triggers off; Run now and sub-workflow calls still run it"}
         title={blocked ? props.enableRefusal! : undefined}
         disabled={props.readOnly}
         onClick={() => {
@@ -175,7 +175,7 @@ export const PhoneTopBar: React.FC<PhoneTopBarProps> = (props) => {
         onClose={() => setMenu(false)}
         label="Workflow menu"
         title={props.name}
-        subtitle={props.enabled ? "Enabled — its triggers fire" : "Disabled — only Run now starts it"}
+        subtitle={props.enabled ? "Enabled — its triggers fire" : "Disabled — triggers off; Run now and sub-workflow calls still run it"}
         actions={[
           { id: "settings", label: "Settings", hint: "Project, overlap, time zone, notifications", icon: <Settings2 size={18} />, onSelect: props.onSettings },
           { id: "runs", label: "Runs", hint: "Its run history", icon: <Play size={18} />, onSelect: props.onRuns },

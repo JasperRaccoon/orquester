@@ -7,7 +7,7 @@
 // agent opens appears in every client as the GUI's own would (`desktop.created`).
 //
 // Chat tiers: `open` and `launch_app` start processes on the host — Admin (`desktops`), with a card
-// naming the command, the working directory and the env keys (`./desktop-preview.ts`);
+// naming the command, the working directory and every env value in full (`./desktop-preview.ts`);
 // `stop_app`, `close_window` and `close` only stop things — Act. A desktop's project is its target
 // (§5.2); a chat caller's `cwd` must lie inside a project (ruling S6).
 

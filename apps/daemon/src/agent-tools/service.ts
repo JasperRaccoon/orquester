@@ -463,24 +463,19 @@ export class AgentToolsService {
 
   /**
    * Record a grant an approved card chose. A matching grant of the same chat (or project) is reused
-   * (a `workflows` chat grant gains the workflow id) rather than duplicated. Returns its id.
+   * (a `workflows` chat grant gains the workflow id) rather than duplicated. Returns its id; a new
+   * grant takes `id` when given (from {@link plannedGrantId}).
    */
-  addGrant(input: NewAgentToolGrant): string {
+  addGrant(input: NewAgentToolGrant, id?: string): string {
     const createdAt = new Date(this.now()).toISOString();
-    const same = (grant: AgentToolGrantRecord): boolean =>
-      grant.family === input.family &&
-      grant.scope === input.scope &&
-      grant.projectPath === input.projectPath &&
-      (input.scope === "project" || grant.threadId === input.threadId) &&
-      (grant.targetProjectPath ?? null) === (input.targetProjectPath ?? null);
-    const existing = this.state.grants.find(same);
+    const existing = this.sameGrant(input);
     if (existing) {
       if (input.workflowId !== undefined) this.appendWorkflow(existing.id, input.workflowId);
       this.publish(input.scope === "chat" ? input.threadId : undefined);
       return existing.id;
     }
     const grant: AgentToolGrantRecord = {
-      id: (this.opts.newId ?? (() => `g_${randomUUID()}`))(),
+      id: id ?? this.newGrantId(),
       family: input.family,
       scope: input.scope,
       projectPath: input.projectPath,
@@ -492,6 +487,31 @@ export class AgentToolsService {
     this.mutate((file) => ({ ...file, grants: [...file.grants, grant] }));
     this.publish(input.scope === "chat" ? input.threadId : undefined);
     return grant.id;
+  }
+
+  /**
+   * The id {@link addGrant} would answer for `input` now — the equal grant's, or a fresh one to pass
+   * back to it — without recording anything (a card's grant is recorded only once its call passed
+   * the post-card gate re-run; the answer names it before that).
+   */
+  plannedGrantId(input: NewAgentToolGrant): string {
+    return this.sameGrant(input)?.id ?? this.newGrantId();
+  }
+
+  private newGrantId(): string {
+    return (this.opts.newId ?? (() => `g_${randomUUID()}`))();
+  }
+
+  /** The grant of the same chat (or project) `input` would reuse rather than duplicate. */
+  private sameGrant(input: NewAgentToolGrant): AgentToolGrantRecord | undefined {
+    return this.state.grants.find(
+      (grant) =>
+        grant.family === input.family &&
+        grant.scope === input.scope &&
+        grant.projectPath === input.projectPath &&
+        (input.scope === "project" || grant.threadId === input.threadId) &&
+        (grant.targetProjectPath ?? null) === (input.targetProjectPath ?? null)
+    );
   }
 
   /**

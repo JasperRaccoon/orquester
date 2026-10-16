@@ -934,6 +934,61 @@ describe("engine: sub-workflows", () => {
     assert.equal((await h.engine.waitForRun(runId!)).status, "cancelled");
   });
 
+  test("sub-workflow definitions are frozen when the top-level run starts: a child (and a grandchild) edited mid-run runs as it was", async () => {
+    const gate = controlledExecutor("shell");
+    const code = scripted("code", { X: (ctx) => ({ status: "succeeded", output: ctx.node.config.source }) });
+    const parent = workflow("p", [T(), node("A", "shell"), node("S", "workflow", { workflowId: "c" })], [edge("T", "A"), edge("A", "S")]);
+    const mid = workflow("c", [T(), node("S2", "workflow", { workflowId: "g" })], [edge("T", "S2")]);
+    const grand = { ...workflow("g", [T(), node("X", "code", { source: "v1" })], [edge("T", "X")]), pinned: { X: "a big pinned test output" } };
+    const h = createHarness({ workflows: [parent, mid, grand], executors: { code, shell: gate } });
+    const { runId } = await h.engine.run("p", {});
+    await flush();
+    assert.equal(gate.calls.length, 1, "the parent waits at A, before its sub-workflow block");
+    const started = (await h.engine.getRun(runId!))!;
+    assert.deepEqual(started.subWorkflowRevisions, { c: mid.revision, g: grand.revision }, "the wire names what it froze");
+    // Edited after the run started: the run keeps what it started with.
+    h.store.put({ ...grand, revision: grand.revision + 1, nodes: [T(), node("X", "code", { source: "v2" })] });
+    h.store.put({ ...mid, revision: mid.revision + 1, name: "Mid v2" });
+    gate.calls[0]!.resolve({ status: "succeeded", output: null });
+    const result = await h.engine.waitForRun(runId!);
+    assert.equal(result.status, "succeeded");
+    const run = (await h.engine.getRun(runId!))!;
+    assert.equal(run.blocks.S!.output, "v1", "the frozen grandchild ran");
+    const childRun = (await h.engine.getRun(run.blocks.S!.childRunId!))!;
+    assert.equal(childRun.definition.revision, mid.revision);
+    assert.equal(childRun.definition.name, mid.name);
+    assert.deepEqual(childRun.subWorkflowRevisions, { g: grand.revision }, "a child carries only its own subtree");
+    const stored = h.runStore.runs.get(runId!)!;
+    assert.deepEqual(Object.keys(stored.subWorkflows!).sort(), ["c", "g"]);
+    assert.equal(stored.subWorkflows!.g!.pinned, undefined, "pinned test data is not frozen");
+    assert.deepEqual(Object.keys(h.runStore.runs.get(childRun.id)!.subWorkflows!), ["g"]);
+    const grandRun = h.runStore.runs.get((await h.engine.getRun(childRun.blocks.S2!.childRunId!))!.id)!;
+    assert.deepEqual(grandRun.subWorkflows ?? {}, {}, "a leaf child stores nothing");
+    // A run started after the edit runs the new definitions.
+    const next = h.engine.run("p", {});
+    const nextId = (await next).runId!;
+    await flush();
+    gate.calls[1]!.resolve({ status: "succeeded", output: null });
+    await h.engine.waitForRun(nextId);
+    assert.equal((await h.engine.getRun(nextId))!.blocks.S!.output, "v2");
+  });
+
+  test("a sub-workflow deleted after the run started fails its block; none frozen when there are no sub-workflows", async () => {
+    const gate = controlledExecutor("shell");
+    const parent = workflow("p", [T(), node("A", "shell"), node("S", "workflow", { workflowId: "c" })], [edge("T", "A"), edge("A", "S")]);
+    const h = createHarness({ workflows: [parent, child("c"), child("plain")], executors: { code: scripted("code"), shell: gate } });
+    const { runId } = await h.engine.run("p", {});
+    await flush();
+    h.store.remove("c");
+    gate.calls[0]!.resolve({ status: "succeeded", output: null });
+    await h.engine.waitForRun(runId!);
+    const run = (await h.engine.getRun(runId!))!;
+    assert.equal(run.blocks.S!.status, "failed");
+    assert.match(run.blocks.S!.error!.message, /deleted after this run started/);
+    const { run: plain } = await runToEnd(h, "plain");
+    assert.equal(plain.subWorkflowRevisions, undefined);
+  });
+
   test("child runs bypass the global run cap (no deadlock)", async () => {
     const chain = Array.from({ length: 5 }, (_, i) => workflow(
       `w${i}`,

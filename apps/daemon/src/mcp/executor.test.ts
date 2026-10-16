@@ -247,6 +247,42 @@ test("the gate re-runs after the card on the caller as it is now: planning by th
   assert.equal(r.runs.length, 0);
 });
 
+test("a chosen grant is committed only after the re-gate passes; refused there, or not recordable, the row claims no grant", async () => {
+  const commits: string[] = [];
+  const chosen = (result: { grantId: string; grantScope: "chat" | "project" } | null) => ({
+    outcome: "approved" as const,
+    approvalId: "a1",
+    grantId: "g_planned",
+    grantScope: "project" as const,
+    grantChosen: "project" as const,
+    commitGrant: async () => {
+      commits.push("commit");
+      return result;
+    }
+  });
+  const toolApproval = (result: CallToolResult) => (result.structuredContent as { toolApproval?: Record<string, unknown> }).toolApproval;
+  // Refused by the re-gate: never committed.
+  const planning = rig({ port: new FakeApprovalPort(chosen({ grantId: "g_planned", grantScope: "project" })), deps: { refreshCaller: async (before) => ({ ...before, planning: true }) } });
+  const refused = await planning.call("open_desktop", { command: "xterm" });
+  assert.equal(code(refused), "PERMISSION_DENIED");
+  assert.deepEqual(commits, []);
+  assert.equal(toolApproval(refused)?.grantId, undefined);
+  // Passing: committed once, and the recorded grant's id is what runs and what the row names.
+  const passing = rig({ port: new FakeApprovalPort(chosen({ grantId: "g_real", grantScope: "project" })) });
+  const ok = await passing.call("open_desktop", { command: "xterm" });
+  assert.equal(ok.isError, undefined, message(ok));
+  assert.deepEqual(commits, ["commit"]);
+  assert.equal(passing.runs[0]!.ctx.approval?.grantId, "g_real");
+  assert.equal(toolApproval(ok)?.grantId, "g_real");
+  // Not recordable (the chat left Full access): approved once.
+  const lost = rig({ port: new FakeApprovalPort(chosen(null)) });
+  const once = await lost.call("open_desktop", { command: "xterm" });
+  assert.equal(once.isError, undefined, message(once));
+  assert.equal(lost.runs[0]!.ctx.approval?.grantId, undefined);
+  assert.equal(toolApproval(once)?.grantId, undefined);
+  assert.equal(toolApproval(once)?.outcome, "approved");
+});
+
 test("an approved workflow create records the new workflow only in the grant its outcome names", async () => {
   const r = rig();
   const once = await r.call("create_wf", { name: "nightly" });

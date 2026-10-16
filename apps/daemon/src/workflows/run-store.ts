@@ -28,7 +28,7 @@ import {
 } from "@orquester/api";
 import { writeFileAtomic } from "../agent-hooks.ts";
 import type { PersistedRun, RunStore } from "./contracts.ts";
-import { jsonBytes, toRunSummary } from "./run-context.ts";
+import { jsonBytes, subWorkflowRevisionsOf, toRunSummary } from "./run-context.ts";
 
 export interface RunStoreOptions {
   /** `workflowRunsDir(baseDir)`. */
@@ -58,11 +58,12 @@ function previewOutput(output: unknown): { output: unknown; truncated: boolean }
 
 /**
  * A persisted run as the wire serves it (`GET /api/workflow-runs/:runId` without the engine): the
- * store's own bookkeeping (`version`, `depth`, `seededOutputs`, `fromNodeId`, each block's
+ * store's own bookkeeping (`version`, `depth`, `seededOutputs`, `fromNodeId`, the frozen
+ * `subWorkflows` — as their revisions only —, each block's
  * `waitingOn` and `outputFile`) is dropped and every block output is cut to the inline preview.
  */
 export function persistedRunToWire(run: PersistedRun): WorkflowRun {
-  const { version: _version, depth: _depth, seededOutputs: _seeded, fromNodeId: _from, blocks, ...rest } = run;
+  const { version: _version, depth: _depth, seededOutputs: _seeded, fromNodeId: _from, subWorkflows: _frozen, parentAttempt: _attempt, blocks, ...rest } = run;
   const wireBlocks: Record<string, WorkflowBlockRun> = {};
   for (const [nodeId, block] of Object.entries(blocks)) {
     const { waitingOn: _waitingOn, outputFile, ...wire } = block;
@@ -75,7 +76,8 @@ export function persistedRunToWire(run: PersistedRun): WorkflowRun {
     }
     wireBlocks[nodeId] = wire;
   }
-  return { ...(rest as Omit<WorkflowRun, "blocks">), blocks: wireBlocks };
+  const revisions = subWorkflowRevisionsOf(run);
+  return { ...(rest as Omit<WorkflowRun, "blocks">), blocks: wireBlocks, ...(revisions !== undefined ? { subWorkflowRevisions: revisions } : {}) };
 }
 
 const SAFE_SEGMENT = /^[A-Za-z0-9_-]{1,128}$/;
@@ -174,6 +176,17 @@ export class FileRunStore implements RunStore {
     // A write in flight is the newest state: wait for it rather than read the file under it.
     await this.writers.get(runId)?.writing.catch(() => undefined);
     return this.readRunFile(runId);
+  }
+
+  async exists(runId: string): Promise<boolean> {
+    if (!isRunId(runId) || this.deleted.has(runId)) return false;
+    try {
+      await stat(join(this.dir, runId, "run.json"));
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return false;
+      throw error;
+    }
   }
 
   /** The summary of a run the index knows (no I/O). */

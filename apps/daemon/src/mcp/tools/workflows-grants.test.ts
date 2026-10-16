@@ -52,6 +52,8 @@ function workflowBackend(api: FakeDaemonApi) {
     return { status: 201, body: { workflow, problems: [] } };
   });
   api.on("GET", "/api/workflows/*", () => notFound);
+  // The list (ids are what the callers check reads; each definition comes from its own route).
+  api.on("GET", "/api/workflows", () => ({ status: 200, body: { workflows: [...store.values()].map((w) => ({ id: w.id, name: w.name, enabled: w.enabled, revision: w.revision })) } }));
   const serve = (id: string) => {
     api.on("GET", `/api/workflows/${id}`, () => (store.has(id) ? { status: 200, body: { workflow: store.get(id), problems: [] } } : notFound));
     api.on("POST", `/api/workflows/${id}/patch`, ({ body }) => {
@@ -65,7 +67,20 @@ function workflowBackend(api: FakeDaemonApi) {
     api.on("POST", `/api/workflows/${id}/run`, () => {
       runs += 1;
       const runId = `run-${runs}`;
-      api.on("GET", `/api/workflow-runs/${runId}`, { status: 200, body: { run: { id: runId, workflowId: id, workflowName: "x", status: "running", trigger: { kind: "manual" }, test: false, queuedAt: "2026-10-15T00:00:00Z", definition: store.get(id), blocks: {}, takenEdges: [], deadEdges: [], triggerPayload: null } } });
+      // As the engine does: the sub-workflows are frozen as the run starts (their revisions on the wire).
+      const frozen: Record<string, number> = {};
+      const walk = (workflow: Workflow | undefined): void => {
+        for (const node of workflow?.nodes ?? []) {
+          const child = node.type === "workflow" ? store.get(node.config.workflowId) : undefined;
+          if (child && !(child.id in frozen)) {
+            frozen[child.id] = child.revision;
+            walk(child);
+          }
+        }
+      };
+      walk(store.get(id));
+      const subWorkflowRevisions = Object.keys(frozen).length > 0 ? { subWorkflowRevisions: frozen } : {};
+      api.on("GET", `/api/workflow-runs/${runId}`, { status: 200, body: { run: { id: runId, workflowId: id, workflowName: "x", status: "running", trigger: { kind: "manual" }, test: false, queuedAt: "2026-10-15T00:00:00Z", definition: store.get(id), blocks: {}, takenEdges: [], deadEdges: [], triggerPayload: null, ...subWorkflowRevisions } } });
       return { status: 200, body: { runId } };
     });
     api.on("DELETE", `/api/workflows/${id}`, () => (store.delete(id) ? { status: 200, body: { ok: true } } : notFound));

@@ -1,7 +1,7 @@
 // Catalog family module `usage` (get_usage) — plan Task 9 (unified MCP design 2026-10-15 §4 row 18, §4.1, ruling S9):
 // quota windows, cost by day or ISO week, and one chat session's tokens and cost.
 import { z } from "zod";
-import type { AgentAccountsResponse, UsageResponse, UsageTokensResponse } from "@orquester/api";
+import type { AgentAccountsResponse, ChatThreadUsageResponse, UsageResponse, UsageTokensResponse } from "@orquester/api";
 import { agentChatRoutes } from "@orquester/api/agent-chat";
 import { canonicalProject } from "../addressing.ts";
 import { providerRows } from "../agents.ts";
@@ -41,7 +41,7 @@ async function modelResolver(api: DaemonApi, adapter: string): Promise<(slug: st
 const getUsage = defineTool({
   name: "get_usage",
   title: "Get usage and cost",
-  description: "quota: % USED per account window, with resets. cost: API-equivalent USD per agent/model by UTC day or ISO week. session: one chat's tokens and cost (see costSource; partial: older turns uncounted). Never poll.",
+  description: "quota: % USED per account window, with resets. cost: API-equivalent USD per agent/model by UTC day or ISO week (Grok: its reported cost in Orquester chats only). session: one chat's tokens and cost (see costSource; partial: older turns uncounted). Never poll.",
   input: {
     include: z.array(z.enum(INCLUDES)).min(1).max(3).optional().describe("Default quota (session with sessionId)."),
     bucket: z.enum(["day", "week"]).default("day"),
@@ -75,7 +75,10 @@ const getUsage = defineTool({
     }
     if (wanted.has("cost")) {
       const tokens = expectOk<UsageTokensResponse>(await api.request("GET", "/api/usage/tokens"));
-      result.cost = costView(tokens, { days: args.days, bucket: args.bucket, now: now() });
+      // Grok has no transcript the Cost tab scans: its reported cost from Orquester's own chats (labelled so).
+      const grokRes = await api.request("GET", "/api/usage/chat-threads", { query: { agent: "grok" } }).catch(() => null);
+      const grok = grokRes !== null && grokRes.status < 400 ? (grokRes.body as ChatThreadUsageResponse) : null;
+      result.cost = costView(tokens, { days: args.days, bucket: args.bucket, now: now() }, [{ agent: "grok", usage: grok }]);
     }
     if (wanted.has("session") && args.sessionId !== undefined) {
       await requireChatSession(api, args.sessionId);

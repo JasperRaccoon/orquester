@@ -108,7 +108,7 @@ function card(over: Partial<ApprovalRequest> = {}): ApprovalRequest {
   };
 }
 
-test("approve with a grant: the grant is recorded and honoured for the next call while the caller is full-access", async (t) => {
+test("approve with a grant: the grant is recorded (by commitGrant, after the call's re-gate) and honoured for the next call while the caller is full-access", async (t) => {
   const h = await harness(t);
   const waiting = h.port.request(card(), new AbortController().signal);
   const id = await h.opened();
@@ -120,6 +120,12 @@ test("approve with a grant: the grant is recorded and honoured for the next call
   const grantId = outcome.outcome === "approved" ? outcome.grantId : undefined;
   assert.equal(grantId, "g1");
   const query = { family: "desktops", callerRuntimeMode: "full-access", workflowOwned: false, threadId: "t1", projectPath: PROJECT, projects: [PROJECT] };
+  assert.equal(h.tools.settingsView().grants.length, 0, "the answer alone records nothing");
+  assert.equal(await h.port.findGrant(query), null);
+  assert.ok(outcome.outcome === "approved" && outcome.commitGrant);
+  assert.deepEqual(await outcome.commitGrant(), { grantId: "g1", grantScope: "chat" });
+  assert.deepEqual(await outcome.commitGrant(), { grantId: "g1", grantScope: "chat" }, "idempotent");
+  assert.equal(h.tools.settingsView().grants.length, 1);
   assert.equal((await h.port.findGrant(query))?.id, "g1");
   assert.equal(await h.port.findGrant({ ...query, callerRuntimeMode: "auto" }), null, "honoured only while full-access");
   h.owned.add("t1");
@@ -127,6 +133,22 @@ test("approve with a grant: the grant is recorded and honoured for the next call
   h.owned.delete("t1");
   h.tools.revokeGrant("g1");
   assert.equal(await h.port.findGrant(query), null, "revocation is effective for the next call");
+});
+
+test("commitGrant re-checks Full access: a chat that left it after answering gets no grant", async (t) => {
+  const h = await harness(t);
+  const waiting = h.port.request(card(), new AbortController().signal);
+  await h.registry.answer("t1", await h.opened(), { decision: "approve", grant: "project" });
+  const outcome = await waiting;
+  h.setMode("auto");
+  assert.ok(outcome.outcome === "approved" && outcome.commitGrant);
+  assert.equal(await outcome.commitGrant(), null);
+  assert.equal(h.tools.settingsView().grants.length, 0);
+  // An approve-once outcome carries no commitGrant.
+  const once = h.port.request(card(), new AbortController().signal);
+  await h.registry.answer("t1", await h.opened(), { decision: "approve" });
+  const plain = await once;
+  assert.ok(plain.outcome === "approved" && plain.commitGrant === undefined);
 });
 
 test("the card's pending temp projects and a workflow-referenced prompt are never grantable, whatever its options say", async (t) => {
@@ -266,6 +288,7 @@ test("workflows grants (ruling): a create joins the chat's grant and the card sa
   const created = await create;
   const grantId = created.outcome === "approved" ? created.grantId : undefined;
   assert.ok(grantId);
+  assert.equal((await (created.outcome === "approved" ? created.commitGrant?.() : null))?.grantId, grantId);
   await h.port.recordWorkflowInGrant({ threadId: "t1", callerProjectPath: PROJECT, workflowId: "wf1", grantId });
   assert.equal((await h.port.findGrant({ ...query, workflowId: "wf1" }))?.id, grantId);
 
@@ -278,7 +301,10 @@ test("workflows grants (ruling): a create joins the chat's grant and the card sa
   // (b) again: grant "chat" chosen on a run card adds that workflow to the existing grant.
   const runGranted = h.port.request(wfCard("wf-user"), new AbortController().signal);
   await h.registry.answer("t1", await h.opened(), { decision: "approve", grant: "chat" });
-  assert.equal((await runGranted).outcome === "approved" && (await runGranted).outcome, "approved");
+  const runOutcome = await runGranted;
+  assert.equal(runOutcome.outcome, "approved");
+  assert.equal(await h.port.findGrant({ ...query, workflowId: "wf-user" }), null, "not before commitGrant");
+  assert.equal((await (runOutcome.outcome === "approved" ? runOutcome.commitGrant?.() : null))?.grantId, grantId);
   assert.equal((await h.port.findGrant({ ...query, workflowId: "wf-user" }))?.id, grantId);
 
   // (a) A create while the grant stands: the card says it will join, and the outcome names the grant.
@@ -315,6 +341,7 @@ test("master switch off: a toolset card is refused up front, and an approval aft
   h.tools.updateSettings({ revision: 2, enabled: false });
   const refused = await h.registry.answer("t1", id, { decision: "approve" });
   assert.deepEqual(refused.ok ? null : [refused.status, refused.code], [409, "AGENT_TOOLS_DISABLED"]);
+  assert.match(refused.ok ? "" : refused.message, /"Extra toolsets for agent chats" is switched off.*Deny this card, or turn that switch on first/, "names the switch as Settings shows it");
   assert.equal(h.registry.list("t1").length, 1, "the card stays; deny still works");
   assert.ok((await h.registry.answer("t1", id, { decision: "deny" })).ok);
   assert.equal((await waiting).outcome, "denied");

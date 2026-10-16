@@ -358,19 +358,39 @@ async function execute(deps: ExecutorDeps, call: { name: string; arguments: unkn
       approval = outcome.approval;
       card = { preview: outcome.preview, family: outcome.family };
       args = outcome.frozenArgs;
-      if (outcome.grantChosen === true) await recordChildrenInGrant(deps, caller, card, approval);
       // §13: the caller may have changed while the card waited (now planning, a narrower mode): the
       // gate re-runs on it, and the call proceeds as the caller is now. A card it would raise again
-      // is the one the user just answered.
+      // is the one the user just answered. A grant the user chose is recorded only AFTER this passes:
+      // a call refused here leaves no grant (and no sub-workflows joined to one) behind.
       const current: ThreadCaller = deps.refreshCaller ? await deps.refreshCaller(caller) : caller;
       const again = gate(gateInput(current));
-      if (again.kind === "deny") throw new ToolError(again.code, again.message);
+      if (again.kind === "deny") {
+        record.reference = withoutChosenGrant(record.reference, outcome);
+        throw new ToolError(again.code, again.message);
+      }
       // A grant is honoured only while the caller is full-access and not workflow-owned (§7.6):
       // re-checked on the caller as it is now, closing the race with a mode change.
       if (approval.outcome === "granted" && (current.runtimeMode !== "full-access" || current.workflowOwned)) {
         throw new ToolError("PERMISSION_DENIED", `${tool.name}: the grant covering it applies only while this chat is in Full access. Call it again to ask the user.`);
       }
       caller = current;
+      if (outcome.commitGrant) {
+        const committed = await outcome.commitGrant().catch(() => null);
+        if (committed) {
+          approval = { ...approval, grantId: committed.grantId };
+          record.reference = { ...outcome.reference, grantId: committed.grantId, grantScope: committed.grantScope };
+          await recordChildrenInGrant(deps, caller, card, approval);
+        } else {
+          // No grant could be recorded (the chat left Full access meanwhile): the user's approval of
+          // this one call stands; nothing is granted.
+          const { grantId: _dropped, ...once } = approval;
+          approval = once;
+          record.reference = withoutChosenGrant(record.reference, outcome);
+        }
+      } else if (outcome.grantChosen === true) {
+        // A port that recorded the grant at answer time (test doubles): its children join it now.
+        await recordChildrenInGrant(deps, caller, card, approval);
+      }
     }
   }
 
@@ -406,6 +426,8 @@ type CardOutcome =
       reference: ToolApprovalReference;
       /** The user chose a grant on this card (T10: sub-workflows join that grant). */
       grantChosen?: boolean;
+      /** Records the chosen grant (the real port defers it until the post-card gate re-run passed). */
+      commitGrant?: () => Promise<{ grantId: string; grantScope: "chat" | "project" } | null>;
     }
   | { kind: "refused"; error: ToolError; reference: ToolApprovalReference }
   | { kind: "cancelled"; reason?: ApprovalCancelReason; reference: ToolApprovalReference };
@@ -457,9 +479,10 @@ async function passCard(
       ...(preview?.workflowReferencedPrompt ? { workflowReferencedPrompt: true } : {})
     };
     let grant = await port.findGrant(query);
-    // Every other workflow the call runs (sub-workflows) must be covered by that same grant.
-    for (const child of grant ? (preview?.childWorkflowIds ?? []) : []) {
-      if ((await port.findGrant({ ...query, workflowId: child }))?.id !== grant!.id) {
+    // Every other workflow the call runs (sub-workflows), and every workflow that runs this one
+    // (callers: a change here changes what they run), must be covered by that same grant.
+    for (const other of grant ? [...(preview?.childWorkflowIds ?? []), ...(preview?.callerWorkflowIds ?? [])] : []) {
+      if ((await port.findGrant({ ...query, workflowId: other }))?.id !== grant!.id) {
         grant = null;
         break;
       }
@@ -495,10 +518,13 @@ async function passCard(
   if (decision.approvalKind === "boundary" && ownProject) named(ownProject.canonical, ownProject.workspace);
   for (const target of facts.targets.filter((t) => decision.approvalKind === "admin" || t.class !== "own")) named(target.project, target.workspace);
   const crossProject = decision.crossProject;
+  // A workflow other workflows run: a grant chosen here could cover it only if the chat's grant
+  // already covers every one of them (one grant for all) — otherwise the card offers none.
+  const callersCovered = port && ownProject !== null ? await callersInOneGrant(port, caller, ownProject.canonical, family, preview) : false;
   const grantOptions =
     // A grant is recorded for the caller's canonical project: none without one (findGrant never
     // honours projectPath ""); a cross-project grant needs its single target.
-    ownProject === null || preview?.ungrantable === true || (decision.approvalKind === "boundary" && decision.family === "cross-project" && !decision.targetProjectPath)
+    ownProject === null || preview?.ungrantable === true || !callersCovered || (decision.approvalKind === "boundary" && decision.family === "cross-project" && !decision.targetProjectPath)
       ? []
       : grantOptionsFor({
           family,
@@ -557,7 +583,8 @@ async function passCard(
         preview,
         family,
         frozenArgs,
-        ...(outcome.grantChosen !== undefined ? { grantChosen: true } : {})
+        ...(outcome.grantChosen !== undefined ? { grantChosen: true } : {}),
+        ...(outcome.grantChosen !== undefined && outcome.commitGrant ? { commitGrant: outcome.commitGrant } : {})
       };
     case "denied":
       return {
@@ -575,6 +602,40 @@ async function passCard(
     case "cancelled":
       return { kind: "cancelled", reference, ...(outcome.reason ? { reason: outcome.reason } : {}) };
   }
+}
+
+/**
+ * Whether every workflow that runs the card's workflow as a sub-workflow (`callerWorkflowIds`) is
+ * covered by one and the same grant of this chat (the one a grant chosen on the card extends).
+ * True when there are none.
+ */
+async function callersInOneGrant(port: ApprovalPort, caller: ThreadCaller, projectPath: string, family: string, preview: ApprovalPreview | null): Promise<boolean> {
+  const callers = preview?.callerWorkflowIds ?? [];
+  if (callers.length === 0) return true;
+  let id: string | undefined;
+  for (const workflowId of callers) {
+    const grant = await port.findGrant({
+      family,
+      callerRuntimeMode: caller.runtimeMode,
+      workflowOwned: caller.workflowOwned,
+      threadId: caller.threadId,
+      projectPath,
+      projects: [],
+      pendingProjects: 0,
+      workspaceTargets: 0,
+      workflowId
+    });
+    if (!grant || (id !== undefined && grant.id !== id)) return false;
+    id = grant.id;
+  }
+  return true;
+}
+
+/** The tool row's reference without the grant a card chose but that was never recorded. */
+function withoutChosenGrant(reference: ToolApprovalReference | undefined, outcome: { grantChosen?: boolean; commitGrant?: unknown }): ToolApprovalReference | undefined {
+  if (!reference || !outcome.commitGrant) return reference;
+  const { grantId: _id, grantScope: _scope, ...rest } = reference;
+  return rest;
 }
 
 /** `asked` when it offers a strict subset of `computed`'s grant scopes (`GRANT_TABLE`), else `computed`. */
