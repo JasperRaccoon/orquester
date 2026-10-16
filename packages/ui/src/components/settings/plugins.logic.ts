@@ -4,7 +4,7 @@
  * confirmation, and which controls are usable. No React import.
  */
 
-import type { PluginInfo } from "@orquester/api";
+import { type PluginInfo, TS_RUST_PLUGIN_ID } from "@orquester/api";
 
 /** Shown before the first workspace turns a plugin on (spec §6, first-enable confirmation). */
 export const FIRST_ENABLE_MESSAGE =
@@ -37,14 +37,17 @@ export function selectedPlugin(listed: readonly PluginInfo[], selectedId: string
   return listed.find((p) => p.id === selectedId) ?? listed[0] ?? null;
 }
 
+/** Whether the plugin's toggle reads on: a global plugin's own switch, else the scope's. */
 export function pluginEnabledIn(plugin: PluginInfo, scope: string | null): boolean {
+  if (plugin.scope === "global") return plugin.enabled;
   return scope !== null && plugin.enabledWorkspaces.includes(scope);
 }
 
 /**
  * What flipping a plugin's toggle for `scope` to `enable` does: nothing
- * (`blocked`: unsupported platform or no workspace), ask first (`confirm`:
- * turning it on while it is on nowhere), or go ahead (`apply`).
+ * (`blocked`: unsupported platform, or no workspace for a workspace plugin),
+ * ask first (`confirm`: turning tsc-rs on while it is on nowhere), or go ahead
+ * (`apply`). A global plugin ignores `scope`.
  */
 export type PluginToggleDecision = "blocked" | "confirm" | "apply";
 
@@ -53,8 +56,10 @@ export function pluginToggleDecision(
   scope: string | null,
   enable: boolean
 ): PluginToggleDecision {
-  if (plugin.platform !== "supported" || scope === null) return "blocked";
-  if (enable && plugin.enabledWorkspaces.length === 0) return "confirm";
+  if (plugin.platform !== "supported") return "blocked";
+  if (plugin.scope === "global") return "apply";
+  if (scope === null) return "blocked";
+  if (enable && plugin.id === TS_RUST_PLUGIN_ID && plugin.enabledWorkspaces.length === 0) return "confirm";
   return "apply";
 }
 
@@ -71,17 +76,19 @@ export interface PluginControls {
 /**
  * Which controls are usable. `pending` is true while one of this section's
  * own requests for the plugin is in flight; a running daemon job (`job`)
- * blocks the version actions but not the toggle.
+ * blocks the version actions but not the toggle. A plugin with no updates
+ * (it ships with the app) has no version actions at all.
  */
 export function pluginControls(plugin: PluginInfo, scope: string | null, pending: boolean): PluginControls {
   const supported = plugin.platform === "supported";
   const idle = plugin.job === "idle" && !pending;
+  const versions = plugin.updates;
   return {
-    toggle: supported && scope !== null && !pending,
-    checkForUpdates: supported && idle,
-    showRollback: plugin.previous !== null,
-    rollback: supported && idle && plugin.previous !== null,
-    removeDownloads: idle && plugin.current !== null && plugin.enabledWorkspaces.length === 0
+    toggle: supported && (plugin.scope === "global" || scope !== null) && !pending,
+    checkForUpdates: versions && supported && idle,
+    showRollback: versions && plugin.previous !== null,
+    rollback: versions && supported && idle && plugin.previous !== null,
+    removeDownloads: versions && idle && plugin.current !== null && plugin.enabledWorkspaces.length === 0
   };
 }
 

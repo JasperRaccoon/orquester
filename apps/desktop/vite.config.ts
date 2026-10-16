@@ -1,6 +1,7 @@
 import react from "@vitejs/plugin-react";
 import svgr from "vite-plugin-svgr";
 import { defineConfig } from "vite";
+import { excalidrawAssets } from "../../packages/ui/vite/excalidraw-assets";
 
 export default defineConfig({
   base: "./",
@@ -16,6 +17,8 @@ export default defineConfig({
   optimizeDeps: { esbuildOptions: { target: "es2022" } },
   plugins: [
     react(),
+    // The whiteboard plugin's fonts, served from the app (see the plugin).
+    excalidrawAssets(),
     svgr({
       svgrOptions: {
         icon: true,

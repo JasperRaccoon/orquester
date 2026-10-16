@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Dot, FolderTree, GitBranch, Globe, ListTodo, Monitor, Pencil, Trash2, Workflow, X } from "lucide-react";
+import { Dot, FolderTree, GitBranch, Globe, ListTodo, Monitor, Pencil, PenTool, Trash2, Workflow, X } from "lucide-react";
 import { cn } from "../../lib/cn";
 import { shortAccountLabel } from "../../lib/account-label";
 import { getRegistryIcon } from "../../icons";
@@ -90,6 +90,7 @@ export const TabStrip: React.FC = () => {
   const activeTabId = useActiveTabId();
   const activateTab = useAppStore((s) => s.activateTab);
   const requestCloseTab = useAppStore((s) => s.requestCloseTab);
+  const revealInFileBrowser = useAppStore((s) => s.revealInFileBrowser);
   const renameTab = useAppStore((s) => s.renameTab);
   const renameTodo = useAppStore((s) => s.renameTodo);
   const deleteTodo = useAppStore((s) => s.deleteTodo);
@@ -155,6 +156,12 @@ export const TabStrip: React.FC = () => {
         { label: "Close", icon: <X size={13} />, onClick: () => void requestCloseTab(tab.id) }
       ];
     }
+    if (tab.type === "whiteboard") {
+      return [
+        { label: "Show in Files", icon: <FolderTree size={13} />, onClick: () => revealInFileBrowser(tab.path) },
+        { label: "Close", icon: <X size={13} />, danger: true, onClick: () => void requestCloseTab(tab.id) }
+      ];
+    }
     return [{ label: "Close", icon: <X size={13} />, danger: true, onClick: () => void requestCloseTab(tab.id) }];
   };
 
@@ -189,6 +196,8 @@ export const TabStrip: React.FC = () => {
           <ListTodo size={13} />
         ) : tab.type === "workflow" ? (
           <Workflow size={13} />
+        ) : tab.type === "whiteboard" ? (
+          <PenTool size={13} />
         ) : tab.type === "browser" ? (
           <Globe size={13} />
         ) : tab.type === "desktop" ? (

@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { createWriteStream } from "node:fs";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
 import type { SavedPrompt } from "@orquester/api";
 import { createDefaultClientConfig, createDefaultDaemonConfig } from "@orquester/config";
 import type { InjectOptions } from "fastify";
@@ -20,6 +22,7 @@ import { PRINCIPAL_TOKEN_HEADER, type CallerPrincipal } from "@orquester/api/age
 
 type CreateServerArgs = Parameters<typeof createServer>;
 const quiet = { warn: () => {}, error: () => {} };
+const exec = promisify(execFile);
 
 async function harness(options: { unreadableLibrary?: boolean; workflows?: unknown[] } = {}): Promise<{
   root: string;
@@ -195,7 +198,38 @@ test("saved prompts: ?projectPath= adds that project's prompts to the global one
   assert.deepEqual(await ids("/api/saved-prompts?projectPath="), [global.id], "an empty value is no project");
 });
 
-test("deleting a project, then its workspace, deletes their saved prompts", async (t) => {
+test("repository prompts list and stay editable from another checkout after deleting the original workspace", async (t) => {
+  const h = await harness();
+  t.after(() => h.close());
+  const site = join(h.workspacesDir, "acme", "site");
+  const clone = join(h.workspacesDir, "other", "site2");
+  for (const [path, remote] of [
+    [site, "git@github.com:acme/site.git"],
+    [clone, "https://github.com/acme/site.git"]
+  ]) {
+    await mkdir(path, { recursive: true });
+    await exec("git", ["init", "-q", path]);
+    await exec("git", ["-C", path, "remote", "add", "origin", remote]);
+  }
+  const created = await h.inject({
+    method: "POST", url: "/api/saved-prompts", payload: { title: "Shared", body: "B", projectPath: site }
+  });
+  assert.equal(created.statusCode, 201, created.body);
+  const prompt = created.json() as SavedPrompt;
+  const url = `/api/saved-prompts?projectPath=${encodeURIComponent(clone)}`;
+  assert.deepEqual((await h.inject({ method: "GET", url })).json(), {
+    prompts: [prompt], projectRepoKey: "github.com/acme/site"
+  });
+  assert.equal((await h.inject({ method: "DELETE", url: "/api/workspaces/acme/projects/site" })).statusCode, 204);
+  assert.equal((await h.inject({ method: "DELETE", url: "/api/workspaces/acme" })).statusCode, 204);
+  const edited = await h.inject({
+    method: "PUT", url: `/api/saved-prompts/${prompt.id}`, payload: { title: "Edited from clone" }
+  });
+  assert.equal(edited.statusCode, 200, edited.body);
+  assert.equal((await h.inject({ method: "GET", url })).json().prompts[0].title, "Edited from clone");
+});
+
+test("deleting a project, then its workspace, deletes their folder prompts", async (t) => {
   const h = await harness();
   t.after(() => h.close());
   const site = join(h.workspacesDir, "acme", "site");

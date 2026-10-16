@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
+import { promisify } from "node:util";
 import {
   type EventMessage,
   type SavedPrompt
@@ -18,6 +20,12 @@ import { savedPromptIdsOf } from "./mcp/tools/workflow-preview.ts";
 
 type Logger = { warn: (...args: unknown[]) => void; error: (...args: unknown[]) => void };
 const quiet: Logger = { warn: () => {}, error: () => {} };
+const exec = promisify(execFile);
+
+async function repository(path: string, remote: string): Promise<void> {
+  await exec("git", ["init", "-q", path]);
+  await exec("git", ["-C", path, "remote", "add", "origin", remote]);
+}
 
 interface Scratch {
   root: string;
@@ -136,7 +144,7 @@ test("first-run starter prompts are usable global records persisted before mutat
   const service = s.service();
   await service.load();
 
-  const prompts = await service.list(null);
+  const prompts = (await service.list(null)).prompts;
   assert.ok(prompts.length > 0, "a new library includes starter prompts");
   assert.equal(new Set(prompts.map((prompt) => prompt.id)).size, prompts.length);
   for (const prompt of prompts) {
@@ -156,14 +164,14 @@ test("the starters are seeded once: after deleting them, restarts never bring th
   t.after(s.cleanup);
   const first = s.service();
   await first.load();
-  for (const prompt of await first.list(null)) {
+  for (const prompt of (await first.list(null)).prompts) {
     await first.delete(prompt.id);
   }
 
   for (let boot = 0; boot < 2; boot++) {
     const restarted = s.service();
     await restarted.load();
-    assert.deepEqual(await restarted.list(null), [], `boot ${boot + 2} must not re-seed`);
+    assert.deepEqual((await restarted.list(null)).prompts, [], `boot ${boot + 2} must not re-seed`);
   }
   assert.deepEqual(await onDisk(s), { version: 1, prompts: [] });
 });
@@ -178,7 +186,7 @@ test("a corrupt file is moved aside byte for byte, and the library starts empty 
   const service = s.service();
   await service.load();
 
-  assert.deepEqual(await service.list(null), [], "nothing is seeded over a library that may hold the user's prompts");
+  assert.deepEqual((await service.list(null)).prompts, [], "nothing is seeded over a library that may hold the user's prompts");
   const aside = join(dirname(s.file), "saved-prompts.json.corrupt-2026-09-27T10-11-12-345Z");
   assert.equal(await readFile(aside, "utf8"), "{ not json", "the corrupt file is recoverable, untouched");
   // The empty library is written in its place — the file is the "seeded" marker,
@@ -186,7 +194,7 @@ test("a corrupt file is moved aside byte for byte, and the library starts empty 
   assert.deepEqual(await onDisk(s), { version: 1, prompts: [] });
   const restarted = s.service();
   await restarted.load();
-  assert.deepEqual(await restarted.list(null), []);
+  assert.deepEqual((await restarted.list(null)).prompts, []);
 });
 
 test("an unknown version, or a file that is not a library at all, is treated as corrupt", async (t) => {
@@ -202,7 +210,7 @@ test("an unknown version, or a file that is not a library at all, is treated as 
     await writeLibrary(s, raw);
     const service = s.service();
     await service.load();
-    assert.deepEqual(await service.list(null), [], `${raw}: starts empty, unseeded`);
+    assert.deepEqual((await service.list(null)).prompts, [], `${raw}: starts empty, unseeded`);
     const names = await readdir(dirname(s.file));
     const aside = names.filter((name) => name.startsWith("saved-prompts.json.corrupt-"));
     assert.equal(aside.length, 1, `${raw}: moved aside`);
@@ -231,7 +239,7 @@ test("a corrupt file that cannot be moved aside makes the library read-only", { 
     503,
     "SAVED_PROMPTS_UNAVAILABLE"
   );
-  assert.deepEqual(await service.list(null), [], "nothing reached memory");
+  assert.deepEqual((await service.list(null)).prompts, [], "nothing reached memory");
   assert.deepEqual(events, []);
   assert.equal(await readFile(s.file, "utf8"), "{ not json", "the original is untouched");
 });
@@ -246,7 +254,7 @@ test("a file that cannot be READ is left where it is, and the library is read-on
   await service.load();
 
   const events = recordEvents(service);
-  assert.deepEqual(await service.list(null), [], "reads still answer: an empty library, not seeded");
+  assert.deepEqual((await service.list(null)).prompts, [], "reads still answer: an empty library, not seeded");
   for (const mutation of [
     () => service.create({ title: "T", body: "x", projectPath: null }),
     () => service.update("any", { title: "x" }),
@@ -309,7 +317,7 @@ test("the tolerant read sets aside only the malformed prompts, and keeps what a 
   const service = s.service();
   await service.load();
 
-  const prompts = await service.list(null);
+  const prompts = (await service.list(null)).prompts;
   assert.deepEqual(prompts.map((p) => p.id), ["good", "minimal", "long"]);
   assert.equal(prompts[0].title, "Stored", "the first record for a duplicated id wins");
   assert.deepEqual(
@@ -355,7 +363,7 @@ test("entries this build cannot read, and unknown top-level keys, survive every 
   await writeLibrary(s, { version: 1, order, prompts: [storedRecord({ id: "kept" }), newer, duplicate], layout });
   const service = s.service();
   await service.load();
-  assert.deepEqual((await service.list(site)).map((p) => p.id), ["kept"], "neither is listed");
+  assert.deepEqual((await service.list(site)).prompts.map((p) => p.id), ["kept"], "neither is listed");
 
   const untouched = async (step: string) => {
     const file = JSON.parse(await readFile(s.file, "utf8")) as {
@@ -625,7 +633,7 @@ test("delete removes the prompt, writes, and announces its id and scope", async 
 
   await service.delete(gone.id);
   assert.deepEqual(events, [{ type: "deleted", id: gone.id, projectPath: project }]);
-  assert.deepEqual((await service.list(project)).map((p) => p.id), [kept.id]);
+  assert.deepEqual((await service.list(project)).prompts.map((p) => p.id), [kept.id]);
   assert.deepEqual((await onDisk(s)).prompts.map((p) => p.id), [kept.id]);
   await refuses(service.delete(gone.id), 404, "SAVED_PROMPT_NOT_FOUND");
 });
@@ -642,7 +650,7 @@ test("overlapping mutations are all on disk, in their final state", async (t) =>
 
   const reloaded = s.service();
   await reloaded.load();
-  const byId = new Map((await reloaded.list(null)).map((p) => [p.id, p]));
+  const byId = new Map((await reloaded.list(null)).prompts.map((p) => [p.id, p]));
   assert.equal(byId.size, 20);
   for (const [i, prompt] of created.entries()) {
     if (i >= 20) {
@@ -695,7 +703,7 @@ test("a project path must be <workspaces>/<workspace>/<project>, inside the sand
       "INVALID_PROJECT_PATH"
     );
   }
-  assert.deepEqual(await service.list(null), [], "no refused create stored anything");
+  assert.deepEqual((await service.list(null)).prompts, [], "no refused create stored anything");
 });
 
 test("list answers the global prompts plus the named project's own, and validates the project", async (t) => {
@@ -709,9 +717,9 @@ test("list answers the global prompts plus the named project's own, and validate
   await service.create({ title: "Docs", body: "B", projectPath: docs });
 
   assert.equal(mine.projectPath, site);
-  assert.deepEqual((await service.list(null)).map((p) => p.id), [global.id]);
+  assert.deepEqual((await service.list(null)).prompts.map((p) => p.id), [global.id]);
   assert.deepEqual(
-    (await service.list(site)).map((p) => p.id),
+    (await service.list(site)).prompts.map((p) => p.id),
     [global.id, mine.id]
   );
   await refuses(service.list(join(s.root, "outside")), 400, "INVALID_PROJECT_PATH");
@@ -721,7 +729,132 @@ test("list answers the global prompts plus the named project's own, and validate
   await refuses(service.list(site), 400, "INVALID_PROJECT_PATH");
 });
 
-test("deleting a project or a workspace takes its prompts along, announcing each one", async (t) => {
+test("project prompts are shared by normalized origin across checkouts and workspaces", async (t) => {
+  const s = await scratch();
+  t.after(s.cleanup);
+  const site = await s.project("acme", "site");
+  const clone = await s.project("other", "site2");
+  const unrelated = await s.project("acme", "unrelated");
+  await repository(site, "git@github.com:Acme/Site.git");
+  await repository(clone, "https://github.com/acme/site/");
+  await repository(unrelated, "https://github.com/elsewhere/site.git");
+  const service = await emptyService(s);
+  const global = await service.create({ title: "Global", body: "B", projectPath: null });
+  const shared = await service.create({ title: "Shared", body: "B", projectPath: site });
+  const fromClone = await service.create({ title: "Clone", body: "B", projectPath: clone });
+
+  assert.equal(shared.repoKey, "github.com/acme/site");
+  for (const path of [site, clone]) {
+    assert.deepEqual(await service.list(path), {
+      projectRepoKey: "github.com/acme/site", prompts: [global, shared, fromClone]
+    });
+  }
+  assert.deepEqual((await service.list(unrelated)).prompts, [global]);
+  assert.deepEqual((await service.list(null)).prompts, [global]);
+
+  await service.update(shared.id, { title: "Edited", pinned: true });
+  const used = await service.markUsed(shared.id);
+  assert.equal((await service.list(clone)).prompts.find((p) => p.id === shared.id), used);
+  assert.equal(used.title, "Edited");
+  assert.equal(used.useCount, 1);
+  await service.delete(shared.id);
+  assert.deepEqual((await service.list(site)).prompts, [global, fromClone]);
+});
+
+test("legacy prompts gain durable repository scope without losing fields or metadata", async (t) => {
+  const s = await scratch();
+  t.after(s.cleanup);
+  const site = await s.project("acme", "site");
+  const clone = await s.project("other", "site2");
+  await repository(site, "https://test-token@github.com/acme/site.git");
+  await repository(clone, "ssh://git@github.com/acme/site.git");
+  const legacy = storedRecord({ projectPath: site, useCount: 7, color: "teal" });
+  const unknown = { id: "future", future: true };
+  await writeLibrary(s, { version: 1, prompts: [legacy, unknown], layout: { width: 320 } });
+  const service = s.service();
+  await service.load();
+  const migrated = { ...legacy, repoKey: "github.com/acme/site" };
+  assert.deepEqual((await service.list(clone)).prompts, [migrated]);
+  assert.deepEqual(await onDisk(s), {
+    version: 1, prompts: [migrated, unknown], layout: { width: 320 }
+  });
+  assert.equal((await readFile(s.file, "utf8")).includes("test-token"), false);
+
+  await rm(site, { recursive: true });
+  await service.deleteForProject(site);
+  await service.deleteForWorkspace(join(s.workspacesDir, "acme"));
+  const restarted = s.service();
+  await restarted.load();
+  assert.deepEqual((await restarted.list(clone)).prompts, [migrated], "scope survives losing the original checkout");
+});
+
+test("a remote added after saving shares the prompt; moving scope resets repository identity", async (t) => {
+  const s = await scratch();
+  t.after(s.cleanup);
+  const site = await s.project("acme", "site");
+  const clone = await s.project("acme", "site2");
+  const other = await s.project("acme", "other");
+  const service = await emptyService(s);
+  const saved = await service.create({ title: "T", body: "B", projectPath: site });
+  await repository(site, "git@github.com:acme/site.git");
+  await repository(clone, "https://github.com/acme/site.git");
+  await repository(other, "https://github.com/acme/other.git");
+  const events = recordEvents(service);
+  assert.deepEqual((await service.list(clone)).prompts.map((p) => p.id), [saved.id]);
+  assert.equal(events[0]?.type, "upserted", "clients hear the repository binding");
+
+  await exec("git", ["-C", site, "remote", "set-url", "origin", "https://github.com/acme/other.git"]);
+  assert.deepEqual((await service.list(site)).prompts, [], "a different repository at the same path cannot inherit the prompt");
+  assert.deepEqual((await service.list(clone)).prompts.map((p) => p.id), [saved.id]);
+  const moved = await service.update(saved.id, { projectPath: other });
+  assert.equal(moved.repoKey, "github.com/acme/other");
+  assert.deepEqual((await service.list(clone)).prompts, []);
+  assert.deepEqual((await service.list(site)).prompts, [moved]);
+  const global = await service.update(saved.id, { projectPath: null });
+  assert.equal(global.repoKey, null);
+  assert.deepEqual((await service.list(null)).prompts, [global]);
+});
+
+test("repository migration never reads Git config outside the project sandbox", async (t) => {
+  const s = await scratch();
+  t.after(s.cleanup);
+  const site = await s.project("acme", "site");
+  const outside = join(s.root, "outside");
+  const escaped = join(s.workspacesDir, "acme", "escape");
+  await mkdir(outside);
+  await symlink(outside, escaped, "dir");
+  const records = [
+    storedRecord({ id: "valid", projectPath: site }),
+    storedRecord({ id: "outside", projectPath: outside }),
+    storedRecord({ id: "escaped", projectPath: escaped })
+  ];
+  await writeLibrary(s, { version: 1, prompts: records });
+  const reads: string[] = [];
+  const service = new SavedPromptsService({
+    file: s.file, workspacesDir: () => s.workspacesDir, fsRoot: () => s.workspacesDir, logger: quiet,
+    git: { remoteUrl: async (path) => { reads.push(path); return "https://github.com/acme/site.git"; } }
+  });
+  await service.load();
+  assert.deepEqual(reads, [site]);
+  assert.deepEqual((await onDisk(s)).prompts, [
+    { ...records[0], repoKey: "github.com/acme/site" }, records[1], records[2]
+  ]);
+});
+
+test("repository prompts are shared with Git worktrees", async (t) => {
+  const s = await scratch();
+  t.after(s.cleanup);
+  const site = await s.project("acme", "site");
+  const worktree = join(s.workspacesDir, "acme", "site2");
+  await repository(site, "git@github.com:acme/site.git");
+  await exec("git", ["-C", site, "-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "--allow-empty", "-qm", "Initial"]);
+  await exec("git", ["-C", site, "worktree", "add", "-qb", "feature", worktree]);
+  const service = await emptyService(s);
+  const saved = await service.create({ title: "T", body: "B", projectPath: site });
+  assert.deepEqual((await service.list(worktree)).prompts, [saved]);
+});
+
+test("deleting a project or a workspace takes its folder prompts along, announcing each one", async (t) => {
   const s = await scratch();
   t.after(s.cleanup);
   const service = await emptyService(s);
@@ -760,7 +893,7 @@ test("deleting a project or a workspace takes its prompts along, announcing each
   const reloaded = s.service();
   await reloaded.load();
   assert.deepEqual(
-    [...(await reloaded.list(null)), ...(await reloaded.list(other)), ...(await reloaded.list(lookalike))]
+    [...(await reloaded.list(null)).prompts, ...(await reloaded.list(other)).prompts, ...(await reloaded.list(lookalike)).prompts]
       .map((p) => p.id)
       .filter((id, i, all) => all.indexOf(id) === i),
     [global.id, otherA.id, lookalikeA.id]
@@ -816,7 +949,7 @@ test("pinning an agent-created prompt is the user's alone: 403 AGENT_PROMPT_PIN_
   t.after(s.cleanup);
   const service = await emptyService(s);
   await refuses(service.create({ title: "A", body: "a", projectPath: null, pinned: true }, AGENT), 403, "AGENT_PROMPT_PIN_REFUSED");
-  assert.equal((await service.list(null)).length, 0, "nothing was created");
+  assert.equal((await service.list(null)).prompts.length, 0, "nothing was created");
   const prompt = await service.create({ title: "A", body: "a", projectPath: null }, AGENT);
   await refuses(service.update(prompt.id, { pinned: true }, AGENT), 403, "AGENT_PROMPT_PIN_REFUSED");
   await refuses(service.update(prompt.id, { pinned: true, title: "x" }, { kind: "external" }), 403, "AGENT_PROMPT_PIN_REFUSED");
@@ -843,7 +976,7 @@ test("createdBy tolerance: a newer kind, unknown fields and a null survive the r
   });
   const service = s.service();
   await service.load();
-  assert.deepEqual((await service.list(null)).map((p) => p.id), ["agent", "newer", "null"], "a non-object createdBy sets the record aside");
+  assert.deepEqual((await service.list(null)).prompts.map((p) => p.id), ["agent", "newer", "null"], "a non-object createdBy sets the record aside");
   assert.equal(service.get("null")!.createdBy, undefined, "null reads as absent (the user's)");
   // A newer build's kind reads as the user's: anyone may pin it.
   assert.equal((await service.update("newer", { pinned: true }, AGENT)).pinned, true);

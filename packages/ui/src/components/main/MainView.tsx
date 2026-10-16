@@ -1,5 +1,5 @@
 import React from "react";
-import { FolderTree, GitBranch, Globe, ListTodo, Monitor, Workflow, X } from "lucide-react";
+import { FolderTree, GitBranch, Globe, ListTodo, Monitor, PenTool, Workflow, X } from "lucide-react";
 import { cn } from "../../lib/cn";
 import { EmptyState } from "./EmptyState";
 import { ProjectOverview } from "./ProjectOverview";
@@ -9,6 +9,7 @@ import { FileBrowser } from "../files";
 import { GitView } from "../git";
 import { TodoView } from "../todo";
 import { WorkflowEditorTab } from "../workflows/WorkflowEditorTab";
+import { WhiteboardView } from "../whiteboard/WhiteboardView";
 import { BrowserView } from "../browser";
 import { DesktopView } from "../desktop/DesktopView";
 import { desktopTabTitle } from "../../lib/desktop-state";
@@ -43,6 +44,8 @@ function cellIcon(tab: ProjectTab): React.ReactNode {
     <ListTodo size={13} />
   ) : tab.type === "workflow" ? (
     <Workflow size={13} />
+  ) : tab.type === "whiteboard" ? (
+    <PenTool size={13} />
   ) : tab.type === "browser" ? (
     <Globe size={13} />
   ) : tab.type === "desktop" ? (
@@ -392,6 +395,8 @@ export const MainView: React.FC = () => {
                     }
                     onCloseTab={() => void requestCloseTab(tab.id)}
                   />
+                ) : tab.type === "whiteboard" ? (
+                  <WhiteboardView path={tab.path} title={tab.title} active={show} />
                 ) : tab.type === "workflow" ? (
                   <WorkflowEditorTab
                     workflowId={tab.workflowId}

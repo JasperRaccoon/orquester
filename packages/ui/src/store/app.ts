@@ -30,6 +30,13 @@ import {
   upsertDesktopIn
 } from "../lib/desktop-state";
 import { parsePluginsResponse, upsertPluginIn } from "../lib/plugins-state";
+import {
+  NEW_WHITEBOARD_NAME,
+  WHITEBOARDS_DIR,
+  emptyWhiteboardFile,
+  whiteboardTitle,
+  whiteboardsDirOf
+} from "../lib/whiteboard";
 import type { AgentAdapterId } from "@orquester/api/agent-chat";
 import {
   buildCredential,
@@ -528,6 +535,18 @@ export interface TodoTab {
 }
 
 /**
+ * A client-local whiteboard tab (the Excalidraw plugin): one `.excalidraw`
+ * file of the project, one tab per file; `title` is the file name without the
+ * extension.
+ */
+export interface WhiteboardTab {
+  id: string;
+  projectPath: string;
+  path: string;
+  title: string;
+}
+
+/**
  * A tab in the current project: a daemon session or a local tool tab.
  *
  * `agent-chat` is a SIXTH arm (spec §7.1) rather than a `kind` check inside the
@@ -564,6 +583,7 @@ export type ProjectTab =
   | { id: string; type: "git"; title: string }
   | { id: string; type: "todo"; todoId: string; title: string }
   | { id: string; type: "workflow"; workflowId: string; title: string; runId?: string | null }
+  | { id: string; type: "whiteboard"; path: string; title: string }
   | { id: string; type: "browser"; browser: BrowserSummary }
   | { id: string; type: "desktop"; desktop: DesktopSummary };
 
@@ -876,6 +896,7 @@ export interface AppState {
   todoTabsByContext: Record<string, TodoTab[]>;
   /** Client-local automated-workflow editor tabs per project path. */
   workflowTabsByProject: Record<string, WorkflowTab[]>;
+  whiteboardTabsByProject: Record<string, WhiteboardTab[]>;
   /** Server cache of to-do records (all loaded scopes/refs). */
   todos: TodoListRecord[];
   /**
@@ -1062,6 +1083,13 @@ export interface AppState {
    */
   revealInFileBrowser: (path: string) => void;
   openGit: () => void;
+  /** Open (or focus) the whiteboard tab of `.excalidraw` file `path` in the current project. */
+  openWhiteboard: (path: string) => void;
+  /**
+   * Create a new empty whiteboard file in `<project>/whiteboards/` (the daemon
+   * picks a free name) and open it. Raises a notice when it cannot.
+   */
+  createWhiteboard: () => Promise<void>;
   /**
    * Open (or focus) the editor tab of workflow `workflowId` in project
    * `projectPath` — one per workflow, reused when open; `runId` selects a run
@@ -1224,6 +1252,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   gitTabsByProject: {},
   todoTabsByContext: {},
   workflowTabsByProject: {},
+  whiteboardTabsByProject: {},
   todos: [],
   activeTabByProject: {},
   viewModeByProject: loadViewModes(),
@@ -1431,7 +1460,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       // path (each pre-auth 401 burst counted against the login throttle);
       // both are fail-soft and cheap, so per-connect is fine.
       get().loadAppConfig(),
-      get().loadRemotes()
+      get().loadRemotes(),
+      // Built-in plugins gate tools (the whiteboard) outside Settings too. Fail-soft:
+      // an older daemon has no plugin routes.
+      get().loadPlugins().catch(() => undefined)
     ]);
     // Preempted during the fan-out. A newer establish() tears our stream down
     // via closeEvents(), but stopReconnect()/scheduleLockedReconnect() bump
@@ -1774,8 +1806,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       // next one. connect() reloads it from the newly selected daemon.
       protectArchived: false,
       protectArchivedLoaded: false,
-      // Workflow editor tabs name the previous daemon's workflows.
-      ...withoutWorkflowTabs(get()),
+      // Workflow editor tabs name the previous daemon's workflows, and
+      // whiteboard tabs its files.
+      ...withoutDaemonTabs(get()),
       sessions: [],
       browsers: [],
       desktops: [],
@@ -2151,6 +2184,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         state.gitTabsByProject,
         state.todoTabsByContext,
         state.workflowTabsByProject,
+        state.whiteboardTabsByProject,
         project.path
       );
       return {
@@ -2682,6 +2716,58 @@ export const useAppStore = create<AppState>((set, get) => ({
         activeTabByProject: { ...state.activeTabByProject, [project.path]: tab.id }
       };
     }),
+
+  openWhiteboard: (path) =>
+    set((state) => {
+      const project = state.currentProject;
+      if (!project) {
+        return state;
+      }
+      const tabs = state.whiteboardTabsByProject[project.path] ?? [];
+      const existing = tabs.find((t) => t.path === path);
+      if (existing) {
+        return { activeTabByProject: { ...state.activeTabByProject, [project.path]: existing.id } };
+      }
+      const tab: WhiteboardTab = { id: crypto.randomUUID(), projectPath: project.path, path, title: whiteboardTitle(path) };
+      return {
+        whiteboardTabsByProject: { ...state.whiteboardTabsByProject, [project.path]: [...tabs, tab] },
+        activeTabByProject: { ...state.activeTabByProject, [project.path]: tab.id }
+      };
+    }),
+
+  createWhiteboard: async () => {
+    const { api, currentProject: project } = get();
+    if (!api || !project) {
+      return;
+    }
+    try {
+      // "error" first: the daemon's "rename" numbers the name even when it is free.
+      const upload = (onConflict: "error" | "rename") =>
+        api.uploadFsEntry(
+          { destDir: whiteboardsDirOf(project.path), relativePath: NEW_WHITEBOARD_NAME, onConflict },
+          new Blob([emptyWhiteboardFile()], { type: "application/json" })
+        );
+      let created = await upload("error");
+      if (created.conflict && created.conflictKind === "file") {
+        created = await upload("rename");
+      }
+      // "rename" always finds a free name, so a conflict left means the folder itself is a file.
+      if (created.conflict || !created.path) {
+        throw new Error(`a file named "${WHITEBOARDS_DIR}" is in the way.`);
+      }
+      // Still the project it was created for, else it opens there on the next visit.
+      if (get().currentProject?.path === project.path) {
+        get().openWhiteboard(created.path);
+      }
+    } catch (error) {
+      get().setNotice({
+        title: "Whiteboard",
+        message: `Could not create a whiteboard: ${
+          error instanceof ApiError ? (error.serverMessage ?? error.message) : error instanceof Error ? error.message : String(error)
+        }`
+      });
+    }
+  },
 
   openWorkflowTab: (projectPath, workflowId, opts) =>
     set((state) => {
@@ -3463,7 +3549,8 @@ setProviderSideEffects({
 
 /**
  * First remaining tab id for a context (session, then browser, then desktop,
- * then file, then git, then to-do, then workflow — `useProjectTabs`' order).
+ * then file, then git, then to-do, then workflow, then whiteboard —
+ * `useProjectTabs`' order).
  */
 function firstTabId(
   sessions: SessionSummary[],
@@ -3473,6 +3560,7 @@ function firstTabId(
   gitTabs: Record<string, GitTab[]>,
   todoTabs: Record<string, TodoTab[]>,
   workflowTabs: Record<string, WorkflowTab[]>,
+  whiteboardTabs: Record<string, WhiteboardTab[]>,
   path: string
 ): string | null {
   return (
@@ -3483,6 +3571,7 @@ function firstTabId(
     gitTabs[path]?.[0]?.id ??
     todoTabs[path]?.[0]?.id ??
     workflowTabs[path]?.[0]?.id ??
+    whiteboardTabs[path]?.[0]?.id ??
     null
   );
 }
@@ -3496,12 +3585,13 @@ function reassignActive(
   fileTabs: Record<string, FileTab[]>,
   gitTabs: Record<string, GitTab[]>,
   todoTabs: Record<string, TodoTab[]>,
-  workflowTabs: Record<string, WorkflowTab[]>
+  workflowTabs: Record<string, WorkflowTab[]>,
+  whiteboardTabs: Record<string, WhiteboardTab[]>
 ): Record<string, string | null> {
   const next = { ...activeTabByProject };
   for (const [path, activeId] of Object.entries(next)) {
     if (activeId === removedId) {
-      next[path] = firstTabId(sessions, browsers, desktops, fileTabs, gitTabs, todoTabs, workflowTabs, path);
+      next[path] = firstTabId(sessions, browsers, desktops, fileTabs, gitTabs, todoTabs, workflowTabs, whiteboardTabs, path);
     }
   }
   return next;
@@ -3521,7 +3611,8 @@ function removeSession(state: AppState, id: string): Partial<AppState> {
       state.fileTabsByProject,
       state.gitTabsByProject,
       state.todoTabsByContext,
-      state.workflowTabsByProject
+      state.workflowTabsByProject,
+      state.whiteboardTabsByProject
     )
   };
 }
@@ -3540,7 +3631,8 @@ function removeBrowser(state: AppState, id: string): Partial<AppState> {
       state.fileTabsByProject,
       state.gitTabsByProject,
       state.todoTabsByContext,
-      state.workflowTabsByProject
+      state.workflowTabsByProject,
+      state.whiteboardTabsByProject
     )
   };
 }
@@ -3564,12 +3656,13 @@ function removeDesktopState(state: AppState, id: string): Partial<AppState> {
       state.fileTabsByProject,
       state.gitTabsByProject,
       state.todoTabsByContext,
-      state.workflowTabsByProject
+      state.workflowTabsByProject,
+      state.whiteboardTabsByProject
     )
   };
 }
 
-/** Drop a client-local (non-session) tab — file browser, git, to-do OR workflow — by id. */
+/** Drop a client-local (non-session) tab — file browser, git, to-do, workflow OR whiteboard — by id. */
 function removeLocalTab(state: AppState, id: string): Partial<AppState> {
   const fileTabsByProject: Record<string, FileTab[]> = {};
   for (const [path, tabs] of Object.entries(state.fileTabsByProject)) {
@@ -3587,11 +3680,16 @@ function removeLocalTab(state: AppState, id: string): Partial<AppState> {
   for (const [path, tabs] of Object.entries(state.workflowTabsByProject)) {
     workflowTabsByProject[path] = tabs.filter((t) => t.id !== id);
   }
+  const whiteboardTabsByProject: Record<string, WhiteboardTab[]> = {};
+  for (const [path, tabs] of Object.entries(state.whiteboardTabsByProject)) {
+    whiteboardTabsByProject[path] = tabs.filter((t) => t.id !== id);
+  }
   return {
     fileTabsByProject,
     gitTabsByProject,
     todoTabsByContext,
     workflowTabsByProject,
+    whiteboardTabsByProject,
     activeTabByProject: reassignActive(
       state.activeTabByProject,
       id,
@@ -3601,23 +3699,25 @@ function removeLocalTab(state: AppState, id: string): Partial<AppState> {
       fileTabsByProject,
       gitTabsByProject,
       todoTabsByContext,
-      workflowTabsByProject
+      workflowTabsByProject,
+      whiteboardTabsByProject
     )
   };
 }
 
 /**
- * Drop the previous daemon's workflow editor tabs on a connection switch,
- * and any active-tab pointer at one.
+ * Drop the previous daemon's workflow editor and whiteboard tabs on a
+ * connection switch, and any active-tab pointer at one.
  */
-function withoutWorkflowTabs(
-  state: Pick<AppState, "workflowTabsByProject" | "activeTabByProject">
-): Pick<AppState, "workflowTabsByProject" | "activeTabByProject"> {
+function withoutDaemonTabs(
+  state: Pick<AppState, "workflowTabsByProject" | "whiteboardTabsByProject" | "activeTabByProject">
+): Pick<AppState, "workflowTabsByProject" | "whiteboardTabsByProject" | "activeTabByProject"> {
   const ids = new Set<string>();
   for (const tabs of Object.values(state.workflowTabsByProject)) for (const tab of tabs) ids.add(tab.id);
+  for (const tabs of Object.values(state.whiteboardTabsByProject)) for (const tab of tabs) ids.add(tab.id);
   const activeTabByProject: Record<string, string | null> = {};
   for (const [path, id] of Object.entries(state.activeTabByProject)) activeTabByProject[path] = id !== null && ids.has(id) ? null : id;
-  return { workflowTabsByProject: {}, activeTabByProject };
+  return { workflowTabsByProject: {}, whiteboardTabsByProject: {}, activeTabByProject };
 }
 
 /** Retitle every open editor tab of workflow `workflowId` (a `workflow.upserted` — a rename anywhere). */
@@ -3730,6 +3830,12 @@ function clearProjectLocalState(
       workflowTabsByProject[path] = tabs;
     }
   }
+  const whiteboardTabsByProject: Record<string, WhiteboardTab[]> = {};
+  for (const [path, tabs] of Object.entries(state.whiteboardTabsByProject)) {
+    if (!match(path)) {
+      whiteboardTabsByProject[path] = tabs;
+    }
+  }
   // To-do tabs are keyed by context key (project path here); drop matching keys.
   const todoTabsByContext: Record<string, TodoTab[]> = {};
   for (const [key, tabs] of Object.entries(state.todoTabsByContext)) {
@@ -3751,6 +3857,7 @@ function clearProjectLocalState(
     gridTracksByProject,
     todoTabsByContext,
     workflowTabsByProject,
+    whiteboardTabsByProject,
     todos
   };
 }
@@ -3787,6 +3894,7 @@ export function useProjectTabs(): ProjectTab[] {
   const gitTabsByProject = useAppStore((s) => s.gitTabsByProject);
   const todoTabsByContext = useAppStore((s) => s.todoTabsByContext);
   const workflowTabsByProject = useAppStore((s) => s.workflowTabsByProject);
+  const whiteboardTabsByProject = useAppStore((s) => s.whiteboardTabsByProject);
   const project = useAppStore((s) => s.currentProject);
   const workspace = useAppStore((s) => s.currentWorkspace);
   return useMemo(() => {
@@ -3839,8 +3947,25 @@ export function useProjectTabs(): ProjectTab[] {
       title: t.title,
       runId: t.runId ?? null
     }));
-    return [...sessionTabs, ...browserTabs, ...desktopTabs, ...fileTabs, ...gitTabs, ...todoTabs, ...workflowTabs];
-  }, [sessions, browsers, desktops, fileTabsByProject, gitTabsByProject, todoTabsByContext, workflowTabsByProject, project, workspace]);
+    const whiteboardTabs = (whiteboardTabsByProject[key] ?? []).map<ProjectTab>((t) => ({
+      id: t.id,
+      type: "whiteboard",
+      path: t.path,
+      title: t.title
+    }));
+    return [...sessionTabs, ...browserTabs, ...desktopTabs, ...fileTabs, ...gitTabs, ...todoTabs, ...workflowTabs, ...whiteboardTabs];
+  }, [
+    sessions,
+    browsers,
+    desktops,
+    fileTabsByProject,
+    gitTabsByProject,
+    todoTabsByContext,
+    workflowTabsByProject,
+    whiteboardTabsByProject,
+    project,
+    workspace
+  ]);
 }
 
 export function useActiveTabId(): string | null {

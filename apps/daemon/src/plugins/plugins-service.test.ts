@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdir, readFile, readdir, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { type TestContext, test } from "node:test";
-import { type PluginInfo, type PluginsResponse, TS_RUST_PLUGIN_ID } from "@orquester/api";
+import { EXCALIDRAW_PLUGIN_ID, type PluginInfo, type PluginsResponse, TS_RUST_PLUGIN_ID } from "@orquester/api";
 import { pluginsConfigPath, tsRustPluginDir, tsRustPreloadPath } from "@orquester/config";
 import { PLUGIN_CHECK_INTERVAL_MS, PluginsError, PluginsService } from "./plugins-service.ts";
 import { type FakeRegistry, fakeRegistry, publish, tempRoot } from "./testing.ts";
@@ -118,10 +118,13 @@ async function harness(
   return h;
 }
 
-async function plugin(h: Harness): Promise<PluginInfo> {
+async function plugin(h: Harness, id: PluginInfo["id"] = ID): Promise<PluginInfo> {
   const response = await h.service.list();
-  assert.equal(response.plugins.length, 1);
-  return response.plugins[0] as PluginInfo;
+  assert.deepEqual(
+    response.plugins.map((p) => p.id),
+    [ID, EXCALIDRAW_PLUGIN_ID]
+  );
+  return response.plugins.find((p) => p.id === id) as PluginInfo;
 }
 
 async function onDisk(h: Harness): Promise<any> {
@@ -171,7 +174,10 @@ test("a first start with no plugins.json: nothing written, nothing fetched, no p
     description: "Use tsc-rs instead of tsc for faster TypeScript typechecking.",
     source: { label: "pingdotgg/ts-rust", url: "https://github.com/pingdotgg/ts-rust" },
     provider: "Community",
+    scope: "workspace",
+    updates: true,
     platform: "supported",
+    enabled: false,
     enabledWorkspaces: [],
     current: null,
     previous: null,
@@ -389,6 +395,45 @@ test("unknown fields and unknown plugin ids survive a write", async (t) => {
   assert.deepEqual(stored.plugins["other-plugin"], { enabledWorkspaces: ["acme"], extra: 1 });
   assert.equal(stored.plugins[ID].newerField, "x");
   assert.deepEqual(stored.plugins[ID].enabledWorkspaces, ["beta"]);
+});
+
+test("the global Excalidraw plugin: an enabled flag only, no workspaces, no jobs, kept beside ts-rust", async (t) => {
+  const h = await harness(t, {
+    seed: { version: 1, plugins: { [ID]: { enabledWorkspaces: ["acme"], newerField: "x" } } }
+  });
+  const initial = await plugin(h, EXCALIDRAW_PLUGIN_ID);
+  assert.equal(initial.scope, "global");
+  assert.equal(initial.updates, false);
+  assert.equal(initial.enabled, false);
+  assert.equal((await plugin(h)).enabled, true, "a workspace plugin is enabled while on in an existing workspace");
+
+  const on = await h.service.setEnabled(EXCALIDRAW_PLUGIN_ID, true);
+  assert.equal(on.enabled, true);
+  assert.deepEqual(on.enabledWorkspaces, []);
+  assert.equal(on.job, "idle");
+  let stored = await onDisk(h);
+  assert.deepEqual(stored.plugins[EXCALIDRAW_PLUGIN_ID], { enabledWorkspaces: [], enabled: true });
+  assert.equal(stored.plugins[ID].newerField, "x");
+  assert.deepEqual(stored.plugins[ID].enabledWorkspaces, ["acme"]);
+  await h.service.settled();
+  assert.equal(h.events.at(-1)?.plugins.find((p) => p.id === EXCALIDRAW_PLUGIN_ID)?.enabled, true);
+
+  await h.service.setEnabled(EXCALIDRAW_PLUGIN_ID, false);
+  stored = await onDisk(h);
+  assert.equal(stored.plugins[EXCALIDRAW_PLUGIN_ID].enabled, undefined);
+
+  await refusal(h.service.setWorkspaceEnabled(EXCALIDRAW_PLUGIN_ID, "acme", true), 409, "PLUGIN_SCOPE");
+  await refusal(h.service.setEnabled(ID, true), 409, "PLUGIN_SCOPE");
+  await refusal(h.service.checkNow(EXCALIDRAW_PLUGIN_ID), 409, "PLUGIN_BUNDLED");
+  await refusal(h.service.rollback(EXCALIDRAW_PLUGIN_ID), 409, "PLUGIN_BUNDLED");
+  await refusal(h.service.removeDownloads(EXCALIDRAW_PLUGIN_ID), 409, "PLUGIN_BUNDLED");
+});
+
+test("a malformed excalidraw record is unreadable and kept", async (t) => {
+  const malformed = JSON.stringify({ version: 1, plugins: { [EXCALIDRAW_PLUGIN_ID]: { enabled: "yes" } } });
+  const h = await harness(t, { seed: malformed });
+  await refusal(h.service.setEnabled(EXCALIDRAW_PLUGIN_ID, false), 500, "PLUGINS_UNREADABLE");
+  assert.equal(await readFile(h.file, "utf8"), malformed);
 });
 
 test("a corrupt plugins.json is never overwritten, and every operation reports it", async (t) => {

@@ -27,8 +27,10 @@ import { type SavedPromptsFile, parseSavedPromptsConfig } from "@orquester/confi
 import { assertInsideFsRoot } from "@orquester/config/fs";
 import { writeFileAtomic } from "./agent-hooks.ts";
 import type { Broadcaster } from "./broadcaster.ts";
+import { GitService } from "./git.ts";
 import { describeProjectPath } from "./recent-projects.ts";
 import { savedPromptIdsOf } from "./mcp/tools/workflow-preview.ts";
+import { repoKeyOf } from "./workflows/git-remote/remote-url.ts";
 
 /**
  * The prompts a first run starts with, in this order. Seeded exactly once —
@@ -111,6 +113,7 @@ interface SavedPromptsServiceOptions {
   workspacesDir: () => string;
   /** …and must realpath inside this sandbox root (the file browser's `fsRoot`). */
   fsRoot: () => string;
+  git?: Pick<GitService, "remoteUrl">;
   logger?: Pick<Console, "warn" | "error">;
 }
 
@@ -163,12 +166,14 @@ export class SavedPromptsService {
   private readonly workspacesDir: () => string;
   private readonly fsRoot: () => string;
   private readonly logger: Pick<Console, "warn" | "error">;
+  private readonly git: Pick<GitService, "remoteUrl">;
 
   constructor(options: SavedPromptsServiceOptions) {
     this.file = options.file;
     this.workspacesDir = options.workspacesDir;
     this.fsRoot = options.fsRoot;
     this.logger = options.logger ?? console;
+    this.git = options.git ?? new GitService();
   }
 
   /**
@@ -214,14 +219,22 @@ export class SavedPromptsService {
           "shape, or a repeated id) are not listed; they stay in the file untouched."
       );
     }
+    await this.bindRepositories();
   }
 
-  /** Every global prompt, plus `projectPath`'s own when given (validated as on create). Unordered. */
-  async list(projectPath: string | null): Promise<SavedPrompt[]> {
+  /** Global prompts plus this repository's prompts, falling back to folder scope without an origin. */
+  async list(projectPath: string | null): Promise<SavedPromptListResponse> {
     const project = projectPath === null ? null : await this.resolveProjectPath(projectPath);
-    return [...this.prompts.values()].filter(
-      (prompt) => prompt.projectPath === null || prompt.projectPath === project
+    const projectRepoKey = await this.repositoryKey(project);
+    // Also picks up a remote added since startup, or an old record whose
+    // directory was temporarily unavailable when the library loaded.
+    if (projectRepoKey !== null) await this.bindRepositories();
+    const prompts = [...this.prompts.values()].filter(
+      (prompt) => prompt.projectPath === null || (project !== null && (
+        prompt.repoKey ? prompt.repoKey === projectRepoKey : prompt.projectPath === project
+      ))
     );
+    return { prompts, ...(projectRepoKey === null ? {} : { projectRepoKey }) };
   }
 
   get(id: string): SavedPrompt | undefined {
@@ -256,6 +269,7 @@ export class SavedPromptsService {
       fields.projectPath === undefined || fields.projectPath === null
         ? null
         : await this.resolveProjectPath(fields.projectPath);
+    const repoKey = await this.repositoryKey(projectPath);
 
     // Counted after the last await, so two racing creates cannot both take the last slot.
     if (this.prompts.size >= SAVED_PROMPTS_MAX) {
@@ -273,6 +287,7 @@ export class SavedPromptsService {
       body,
       tags,
       projectPath,
+      ...(repoKey === null ? {} : { repoKey }),
       pinned,
       createdAt: now,
       updatedAt: now,
@@ -307,6 +322,7 @@ export class SavedPromptsService {
     if (fields.projectPath !== undefined) {
       changes.projectPath =
         fields.projectPath === null ? null : await this.resolveProjectPath(fields.projectPath);
+      changes.repoKey = await this.repositoryKey(changes.projectPath);
     }
 
     // Re-read after the await: the prompt may have been deleted meanwhile.
@@ -344,17 +360,17 @@ export class SavedPromptsService {
     this.emitDeleted(current);
   }
 
-  /** Cascade of a project delete: every prompt of that project goes with it. */
+  /** Only folder-scoped prompts go with a checkout; repository prompts outlive it. */
   async deleteForProject(projectPath: string): Promise<void> {
     const target = resolve(projectPath);
-    await this.removeWhere((prompt) => prompt.projectPath !== null && resolve(prompt.projectPath) === target);
+    await this.removeWhere((prompt) => !prompt.repoKey && prompt.projectPath !== null && resolve(prompt.projectPath) === target);
   }
 
-  /** Cascade of a workspace delete: the prompts of every project under `workspaceDir`. */
+  /** Cascade of a workspace delete: folder prompts go; shared repository prompts stay. */
   async deleteForWorkspace(workspaceDir: string): Promise<void> {
     const root = resolve(workspaceDir);
     await this.removeWhere(
-      (prompt) => prompt.projectPath !== null && isInside(root, resolve(prompt.projectPath))
+      (prompt) => !prompt.repoKey && prompt.projectPath !== null && isInside(root, resolve(prompt.projectPath))
     );
   }
 
@@ -364,8 +380,8 @@ export class SavedPromptsService {
    * `<workspacesDir>/<workspace>/<project>` (both names through
    * `isValidName`), realpath'd inside the sandbox root, an existing directory.
    * Answered spelled the way `ProjectSummary.path` is — the raw join, symlinks
-   * NOT resolved, no trailing slash — never the realpath: the client filters
-   * prompts by comparing this string with its own project's path.
+   * NOT resolved, no trailing slash — never the realpath. This is also the
+   * fallback scope for directories without a Git origin.
    */
   async resolveProjectPath(value: unknown): Promise<string> {
     if (typeof value !== "string" || value.length === 0 || !isAbsolute(value)) {
@@ -396,6 +412,42 @@ export class SavedPromptsService {
       throw invalidProject(`projectPath is not an existing directory: ${excerpt(value)}`);
     }
     return path;
+  }
+
+  /** Local Git config only: no network access, and no remote credentials leave this method. */
+  private async repositoryKey(project: string | null): Promise<string | null> {
+    if (project === null) return null;
+    try {
+      const remote = await this.git.remoteUrl(project);
+      return remote === null ? null : repoKeyOf(remote);
+    } catch {
+      return null;
+    }
+  }
+
+  /** Upgrade existing project prompts in place, retaining ids, usage and unknown fields. */
+  private async bindRepositories(): Promise<void> {
+    const paths = new Set<string>();
+    for (const prompt of this.prompts.values()) {
+      if (prompt.projectPath !== null && !prompt.repoKey) paths.add(prompt.projectPath);
+    }
+    const keys = new Map(await Promise.all([...paths].map(async (path) => {
+      // Persisted paths can be stale or outside the current sandbox. Validate
+      // before reading Git config, just as create and list do.
+      const project = await this.resolveProjectPath(path).catch(() => null);
+      return [path, await this.repositoryKey(project)] as const;
+    })));
+    const changed: SavedPrompt[] = [];
+    for (const [id, prompt] of this.prompts) {
+      const repoKey = prompt.projectPath === null ? null : keys.get(prompt.projectPath);
+      if (prompt.repoKey || !repoKey) continue;
+      const next = { ...prompt, repoKey };
+      this.prompts.set(id, next);
+      changed.push(next);
+    }
+    if (changed.length === 0) return;
+    await this.persist();
+    for (const prompt of changed) this.lifecycle.emit("upserted", prompt);
   }
 
   private require(id: string): SavedPrompt {
@@ -635,9 +687,9 @@ export function registerSavedPromptRoutes(app: FastifyInstance, deps: SavedPromp
     async (request, reply): Promise<SavedPromptListResponse | void> => {
       const { projectPath } = request.query;
       try {
-        const prompts = await service.list(projectPath ? projectPath : null);
+        const listed = await service.list(projectPath ? projectPath : null);
         const byPrompt = uses();
-        return { prompts: prompts.map((prompt) => listRow(prompt, byPrompt)) };
+        return { ...listed, prompts: listed.prompts.map((prompt) => listRow(prompt, byPrompt)) };
       } catch (error) {
         return savedPromptError(reply, error);
       }
@@ -812,6 +864,7 @@ function sameContent(a: SavedPrompt, b: SavedPrompt): boolean {
     a.body === b.body &&
     a.pinned === b.pinned &&
     a.projectPath === b.projectPath &&
+    (a.repoKey ?? null) === (b.repoKey ?? null) &&
     a.tags.length === b.tags.length &&
     a.tags.every((tag, index) => tag === b.tags[index])
   );

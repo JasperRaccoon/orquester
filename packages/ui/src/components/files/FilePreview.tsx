@@ -1,5 +1,6 @@
-import React, { useCallback } from "react";
-import { ArrowLeft, Download, File, Save } from "lucide-react";
+import React, { useCallback, useState } from "react";
+import { ArrowLeft, Download, File, FileCode, PenTool, Save } from "lucide-react";
+import { EXCALIDRAW_PLUGIN_ID } from "@orquester/api";
 import { Button, IconButton } from "../ui";
 import { Editor } from "./Editor";
 import { ImageViewer } from "./viewers/ImageViewer";
@@ -14,6 +15,9 @@ import { useApi } from "../../context/orquester-context";
 import { useFileText } from "../../hooks";
 import { detectFileKind, PREVIEW_CAP_BY_KIND, DOWNLOAD_MAX_BYTES } from "../../lib/file-kind";
 import { downloadPath } from "../../lib/download";
+import { isGlobalPluginEnabled } from "../../lib/plugins-state";
+import { isWhiteboardFile } from "../../lib/whiteboard";
+import { useAppStore } from "../../store/app";
 
 const baseName = (p: string) => p.slice(p.lastIndexOf("/") + 1);
 
@@ -37,6 +41,7 @@ export const FilePreview: React.FC<{
 }> = ({ path, size, onBack, jumpToLine, jumpToColumn, jumpLength, jumpNonce }) => {
   const api = useApi();
   const fetchBytes = useCallback((p: string, signal?: AbortSignal) => api.readFileBytes(p, signal), [api]);
+  const whiteboardsOn = useAppStore((s) => isGlobalPluginEnabled(s.plugins, EXCALIDRAW_PLUGIN_ID));
 
   if (!path) {
     return (
@@ -48,6 +53,19 @@ export const FilePreview: React.FC<{
 
   const name = baseName(path);
   const { kind, mime } = detectFileKind(name);
+
+  // An Excalidraw drawing, while the whiteboard plugin is on: offered in a whiteboard tab.
+  if (whiteboardsOn && isWhiteboardFile(name)) {
+    return (
+      <WhiteboardFilePreview
+        key={path}
+        path={path}
+        name={name}
+        text={<TextPreview path={path} mime={mime} size={size} onBack={onBack} jumpToLine={jumpToLine} jumpToColumn={jumpToColumn} jumpLength={jumpLength} jumpNonce={jumpNonce} />}
+        onBack={onBack}
+      />
+    );
+  }
 
   // Text keeps its own header (Save button + dirty dot) — delegate wholesale.
   if (kind === "text") {
@@ -107,6 +125,35 @@ export const FilePreview: React.FC<{
     <>
       <PreviewHeader path={path} name={name} onBack={onBack} />
       <div className="min-h-0 flex-1 overflow-hidden">{body}</div>
+    </>
+  );
+};
+
+/** An `.excalidraw` file: open it in a whiteboard tab, or edit its JSON as text (`text`). */
+const WhiteboardFilePreview: React.FC<{ path: string; name: string; text: React.ReactNode; onBack: () => void }> = ({
+  path,
+  name,
+  text,
+  onBack
+}) => {
+  const openWhiteboard = useAppStore((s) => s.openWhiteboard);
+  const [asText, setAsText] = useState(false);
+  if (asText) return <>{text}</>;
+  return (
+    <>
+      <PreviewHeader path={path} name={name} onBack={onBack} />
+      <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-6 text-sm text-neutral-400">
+        <PenTool size={22} className="text-neutral-500" />
+        <span>An Excalidraw drawing.</span>
+        <div className="flex flex-wrap justify-center gap-2">
+          <Button size="sm" onClick={() => openWhiteboard(path)}>
+            <PenTool size={13} /> Open in Whiteboard
+          </Button>
+          <Button size="sm" variant="outline" onClick={() => setAsText(true)}>
+            <FileCode size={13} /> Edit as text
+          </Button>
+        </div>
+      </div>
     </>
   );
 };

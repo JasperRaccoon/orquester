@@ -22,6 +22,7 @@ import {
 } from "./store";
 
 export interface SavedPromptsView {
+  projectRepoKey?: string;
   /** Every global prompt and the open project's own, pending pin flips applied. Unordered. */
   prompts: readonly SavedPrompt[];
   /** This project's load. Not asked yet (not connected) reads as `loading`. */
@@ -83,17 +84,17 @@ export function useSavedPrompts(projectPath: string): SavedPromptsView {
 
   const prompts = useMemo(
     () =>
-      promptsForProject(state.prompts.values(), projectPath).map((prompt) =>
+      promptsForProject(state.prompts.values(), projectPath, load?.projectRepoKey).map((prompt) =>
         withPinOverride(prompt, state.pinOverrides)
       ),
-    [state.prompts, state.pinOverrides, projectPath]
+    [state.prompts, state.pinOverrides, projectPath, load?.projectRepoKey]
   );
 
   const status = load?.status ?? "loading";
   const error = load?.error ?? null;
   const refreshing = load?.refreshing ?? false;
   return useMemo(
-    () => ({ prompts, status, error, refreshing, notice: state.notice }),
-    [prompts, status, error, refreshing, state.notice]
+    () => ({ prompts, status, error, refreshing, notice: state.notice, projectRepoKey: load?.projectRepoKey }),
+    [prompts, status, error, refreshing, state.notice, load?.projectRepoKey]
   );
 }

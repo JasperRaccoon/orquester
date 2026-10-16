@@ -106,7 +106,13 @@ import type {
   UpdateAgentToolsSettingsRequest,
   UpdateThreadAgentToolsRequest
 } from "@orquester/api";
-import type { PluginId, PluginInfo, PluginsResponse, SetPluginWorkspaceRequest } from "@orquester/api";
+import type {
+  PluginId,
+  PluginInfo,
+  PluginsResponse,
+  SetPluginEnabledRequest,
+  SetPluginWorkspaceRequest
+} from "@orquester/api";
 import type {
   CreateDesktopRequest,
   DesktopAppSummary,
@@ -367,6 +373,14 @@ export class ApiClient {
   async setPluginWorkspace(id: PluginId, workspace: string, enabled: boolean): Promise<PluginInfo | null> {
     const data = await this.send<unknown>("PUT", pluginRoutes.workspace(id, workspace), {
       body: { enabled } satisfies SetPluginWorkspaceRequest
+    });
+    return parsePluginActionResult(data, id);
+  }
+
+  /** Turn a global plugin on or off for the whole server. Resolves like {@link setPluginWorkspace}. */
+  async setPluginEnabled(id: PluginId, enabled: boolean): Promise<PluginInfo | null> {
+    const data = await this.send<unknown>("PUT", pluginRoutes.plugin(id), {
+      body: { enabled } satisfies SetPluginEnabledRequest
     });
     return parsePluginActionResult(data, id);
   }

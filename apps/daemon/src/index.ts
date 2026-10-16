@@ -679,6 +679,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // prompts; a file it cannot read is moved aside, never written over.
   const savedPrompts = new SavedPromptsService({
     file: resolved.savedPromptsFile,
+    git,
     // Getters: PUT /api/config/daemon reassigns both in place, and the routes
     // read them per request — a startup copy would 400 every project prompt.
     workspacesDir: () => resolved.workspacesDir,
@@ -2246,8 +2247,9 @@ export function createServer(
       await rm(safe, { recursive: true, force: true });
       // Only now that the directory is gone: cascade-delete this project's
       // to-do lists (match `target`, the raw-join path used as the list refKey
-      // — not the realpath `safe`) and its saved prompts (the same spelling). A
-      // failed rm must not leave the project on disk with its data deleted.
+      // — not the realpath `safe`) and its folder-scoped saved prompts. Shared
+      // repository prompts survive deleting a checkout. A failed rm must not
+      // leave the project on disk with its data deleted.
       await todos.deleteByProjectPath(target);
       await services.savedPrompts.deleteForProject(target);
 
@@ -2297,8 +2299,9 @@ export function createServer(
       // Only now that the tree is gone: cascade-delete the workspace's own to-do
       // lists AND every list under a project inside it (`workspace` = name
       // refKey; `target` = raw-join path), and the saved prompts of every
-      // project inside it. A failed rm must not leave the projects on disk with
-      // their data deleted.
+      // project inside it that have only folder scope. Repository prompts stay
+      // shared with other checkouts. A failed rm must not leave the projects on
+      // disk with their data deleted.
       await todos.deleteByWorkspace(workspace, target);
       await services.savedPrompts.deleteForWorkspace(target);
       // Non-fatal, same as the project delete above: the tree is already gone,

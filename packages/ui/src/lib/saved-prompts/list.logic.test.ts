@@ -45,6 +45,26 @@ describe("scopes", () => {
     assert.deepEqual(listed(list, "", "project"), ["mine"]);
     assert.deepEqual(listed(list, "", "project", ""), []);
   });
+
+  it("both filters include matching repository prompts from other folders", () => {
+    const repoKey = "github.com/acme/site";
+    const list = [
+      prompt({ id: "global" }),
+      prompt({ id: "shared", projectPath: "/w/other/site", repoKey }),
+      prompt({ id: "unrelated", projectPath: "/w/other/site2", repoKey: "github.com/other/site" }),
+      prompt({ id: "folder", projectPath: PROJECT })
+    ];
+    const visible = promptsForProject(list, PROJECT, repoKey);
+    assert.deepEqual(ids(visible), ["global", "shared", "folder"]);
+    for (const scope of ["all", "project"] as const) {
+      const sections = savedPromptSections(visible, { scope, projectPath: PROJECT, projectRepoKey: repoKey, query: "" });
+      assert.deepEqual(ids(sections.others), scope === "all" ? ["folder", "global", "shared"] : ["folder", "shared"]);
+    }
+    assert.deepEqual(ids(promptsForProject(list, "", repoKey)), ["global"]);
+    assert.deepEqual(ids(promptsForProject([
+      prompt({ id: "old-repo", projectPath: PROJECT, repoKey: "github.com/old/site" })
+    ], PROJECT, repoKey)), [], "a reused path cannot override repository scope");
+  });
 });
 
 describe("search", () => {

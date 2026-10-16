@@ -2,10 +2,13 @@
 // a later built-in plugin needs an entry here and its own service handler, and
 // there is no generic plugin runtime.
 
-import { type PluginId, type PluginInfo, TS_RUST_PLUGIN_ID } from "@orquester/api";
+import { EXCALIDRAW_PLUGIN_ID, type PluginId, type PluginInfo, TS_RUST_PLUGIN_ID } from "@orquester/api";
 
-/** A plugin's display fields, as `PluginInfo` carries them. */
-export type PluginCatalogEntry = Pick<PluginInfo, "id" | "name" | "description" | "source" | "provider">;
+/** A plugin's display fields and kind, as `PluginInfo` carries them. */
+export type PluginCatalogEntry = Pick<
+  PluginInfo,
+  "id" | "name" | "description" | "source" | "provider" | "scope" | "updates"
+>;
 
 export const BUILT_IN_PLUGINS: readonly PluginCatalogEntry[] = [
   {
@@ -13,7 +16,20 @@ export const BUILT_IN_PLUGINS: readonly PluginCatalogEntry[] = [
     name: "Better TS Typecheck",
     description: "Use tsc-rs instead of tsc for faster TypeScript typechecking.",
     source: { label: "pingdotgg/ts-rust", url: "https://github.com/pingdotgg/ts-rust" },
-    provider: "Community"
+    provider: "Community",
+    scope: "workspace",
+    updates: true
+  },
+  {
+    // Ships with the app (the UI bundles @excalidraw/excalidraw); turning it on
+    // only shows the whiteboard in every project's Tools menu.
+    id: EXCALIDRAW_PLUGIN_ID,
+    name: "Excalidraw Whiteboard",
+    description: "Sketch hand-drawn diagrams in a whiteboard tab, saved as .excalidraw files in the project.",
+    source: { label: "excalidraw/excalidraw", url: "https://github.com/excalidraw/excalidraw" },
+    provider: "Community",
+    scope: "global",
+    updates: false
   }
 ];
 

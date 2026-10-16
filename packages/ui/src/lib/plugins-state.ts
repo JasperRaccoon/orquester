@@ -14,6 +14,7 @@ import {
 } from "@orquester/api";
 
 const PLATFORMS = new Set(["supported", "unsupported"]);
+const SCOPES = new Set(["workspace", "global"]);
 const JOBS = new Set(["idle", "checking", "installing"]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -55,7 +56,9 @@ function parseLastError(value: unknown): PluginLastErrorInfo | null | undefined 
 
 /**
  * A `PluginInfo` the Plugins section can render, or null. Every field the
- * section reads is checked; nullable fields may also be absent.
+ * section reads is checked; nullable fields may also be absent. `scope`,
+ * `updates` and `enabled` may be absent too (a daemon from before global
+ * plugins): such a plugin is a per-workspace one the daemon keeps up to date.
  */
 export function parsePluginInfo(value: unknown): PluginInfo | null {
   if (
@@ -72,10 +75,14 @@ export function parsePluginInfo(value: unknown): PluginInfo | null {
     !Array.isArray(value.enabledWorkspaces) ||
     !value.enabledWorkspaces.every((w) => typeof w === "string") ||
     typeof value.job !== "string" ||
-    !JOBS.has(value.job)
+    !JOBS.has(value.job) ||
+    (value.scope !== undefined && (typeof value.scope !== "string" || !SCOPES.has(value.scope))) ||
+    (value.updates !== undefined && typeof value.updates !== "boolean") ||
+    (value.enabled !== undefined && typeof value.enabled !== "boolean")
   ) {
     return null;
   }
+  const enabledWorkspaces = value.enabledWorkspaces as string[];
   const current = parseInstalledVersion(value.current);
   const previous = parseInstalledVersion(value.previous);
   const skippedVersion = optionalString(value.skippedVersion);
@@ -96,8 +103,11 @@ export function parsePluginInfo(value: unknown): PluginInfo | null {
     description: value.description,
     source: { label: value.source.label, url: value.source.url },
     provider: value.provider,
+    scope: (value.scope as PluginInfo["scope"] | undefined) ?? "workspace",
+    updates: (value.updates as boolean | undefined) ?? true,
     platform: value.platform as PluginInfo["platform"],
-    enabledWorkspaces: value.enabledWorkspaces as string[],
+    enabled: (value.enabled as boolean | undefined) ?? enabledWorkspaces.length > 0,
+    enabledWorkspaces,
     current,
     previous,
     skippedVersion,
@@ -142,6 +152,12 @@ export function parsePluginActionResult(value: unknown, id: string): PluginInfo 
   }
   const plugin = parsePluginInfo(value);
   return plugin && plugin.id === id ? plugin : null;
+}
+
+/** Whether built-in plugin `id` is turned on for the whole server (a global plugin). */
+export function isGlobalPluginEnabled(plugins: readonly PluginInfo[] | null, id: string): boolean {
+  const plugin = plugins?.find((p) => p.id === id);
+  return plugin !== undefined && plugin.scope === "global" && plugin.enabled;
 }
 
 /** Replace a plugin by id, or append it. */

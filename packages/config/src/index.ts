@@ -893,6 +893,8 @@ export const pluginLastErrorSchema = z
 
 export const pluginStateSchema = z
   .object({
+    /** A global plugin's on/off; absent is off. Workspace plugins use `enabledWorkspaces`. */
+    enabled: z.boolean().optional(),
     /** Workspace names the plugin is on for. Unknown names are kept and ignored at runtime. */
     enabledWorkspaces: z.array(z.string()).default([]),
     current: pluginInstalledVersionSchema.optional(),
@@ -2039,6 +2041,8 @@ export const savedPromptRecordSchema = z
     tags: z.array(z.string()).default([]),
     /** `null` = global; else the project directory's path as the client spells it. */
     projectPath: z.string().min(1).nullable().default(null),
+    /** Repository scope added without replacing the original project path. */
+    repoKey: z.string().min(1).nullable().optional(),
     pinned: z.boolean().default(false),
     createdAt: z.string().datetime({ offset: true }),
     updatedAt: z.string().datetime({ offset: true }),

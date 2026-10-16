@@ -984,9 +984,9 @@ describe("acceptance (h): a workflow-owned chat gets no Admin tools and asks for
       w.host.addChat("sibling", { project: w.project("jaspersito/orquester-3"), title: "Sibling", agent: "claude", runtimeMode: "auto" });
       w.host.addChat("codex", { project: w.project("jaspersito/orquester-3"), title: "Codex", agent: "codex", runtimeMode: "auto" });
       w.host.userTurn("planner", "Plan the migration.", { plan: true });
-      const promptsBefore = (await w.savedPrompts.list(orq)).length;
+      const promptsBefore = (await w.savedPrompts.list(orq)).prompts.length;
       assert.match(refused(await w.uncarded("planner", "update_saved_prompts", { action: "create", title: "x", body: "y" }), "PERMISSION_DENIED").message, /planning/);
-      assert.equal((await w.savedPrompts.list(orq)).length, promptsBefore);
+      assert.equal((await w.savedPrompts.list(orq)).prompts.length, promptsBefore);
       refused(await w.uncarded("planner", "create_workflow", { name: "W", project: { kind: "existing", project: "jaspersito/orquester" }, nodes: [{ type: "trigger.manual", name: "Go" }] }), "PERMISSION_DENIED");
       refused(await w.uncarded("planner", "edit_agent_profile", { agent: "claude", changes: [{ action: "create", skill: { name: "x", frontmatter: { description: "x" }, body: "x" } }] }), "PERMISSION_DENIED");
       // Messages to other chats carry the plan: the sibling's caused turn runs in plan mode.

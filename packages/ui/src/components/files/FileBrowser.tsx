@@ -11,11 +11,12 @@ import {
   FolderDown,
   FolderPlus,
   Pencil,
+  PenTool,
   RefreshCw,
   Trash2,
   Upload
 } from "lucide-react";
-import type { FsEntry } from "@orquester/api";
+import { EXCALIDRAW_PLUGIN_ID, type FsEntry } from "@orquester/api";
 import { cn } from "../../lib/cn";
 import {
   AdaptiveMenu,
@@ -38,6 +39,8 @@ import { PANE_DEFAULTS, PANE_FLEX_RESERVE, clampPaneWidth } from "../../lib/pane
 import { gatherFromDataTransfer, gatherFromInput } from "../../lib/files";
 import { downloadPath } from "../../lib/download";
 import { copyText } from "../../lib/clipboard";
+import { isGlobalPluginEnabled } from "../../lib/plugins-state";
+import { isWhiteboardFile } from "../../lib/whiteboard";
 import { useFileUpload } from "./use-file-upload";
 import { UploadConflictModal } from "./UploadConflictModal";
 
@@ -80,6 +83,8 @@ export const FileBrowser: React.FC<{ rootPath: string; active?: boolean; reveal?
   reveal
 }) => {
   const api = useApi();
+  const whiteboardsOn = useAppStore((s) => isGlobalPluginEnabled(s.plugins, EXCALIDRAW_PLUGIN_ID));
+  const openWhiteboard = useAppStore((s) => s.openWhiteboard);
   // Persisted tree-pane width, keyed by project path (rootPath). Applied inline
   // only at md+ so the mobile w-full/hidden master-detail classes still win.
   const isDesktop = useIsDesktop();
@@ -480,6 +485,15 @@ export const FileBrowser: React.FC<{ rootPath: string; active?: boolean; reveal?
         { label: "Refresh", icon: <RefreshCw size={13} />, onClick: () => void loadDir(menu.dir) },
         ...(menu.target
           ? [
+              ...(whiteboardsOn && menu.target.kind === "file" && isWhiteboardFile(menu.target.name)
+                ? [
+                    {
+                      label: "Open in Whiteboard",
+                      icon: <PenTool size={14} />,
+                      onClick: () => openWhiteboard(menu.target!.path)
+                    }
+                  ]
+                : []),
               {
                 label: menu.target.kind === "dir" ? "Download as Zip" : "Download",
                 icon: menu.target.kind === "dir" ? <FolderDown size={14} /> : <Download size={14} />,
