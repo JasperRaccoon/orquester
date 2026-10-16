@@ -374,8 +374,21 @@ session tools. See `agent-host/adapters/opencode/session-tools.ts`.
   `runtime.warning` row on the thread. With none, it waits — at most 15 s from the launch's start
   (`DENIALS_WAIT_MS`) — for a manifest: the daemon pushes one to every chat it refused once a read
   lands, and another launch of the same key may read one. Still none: the session is not started;
-  the turn fails with the retryable row "Orquester is still checking your MCP servers…", and the
-  next message tries again.
+  the turn fails with the row "Orquester could not check your MCP servers yet…" (send again; the
+  daemon's log names a check that keeps failing), and the next message tries again. A chat whose
+  cwd resolves outside its project (a symlink out), or whose project's real path is outside the
+  workspaces root, gets its project root's denials (the all-projects read), never a refusal. The
+  daemon's manifest is bounded (4 s pointing read + 3 s session list) below the host's 10 s bound
+  on asking for it; a refused chat stays remembered until a push actually reached the host.
+  Exception: a daemon that predates the manifest route (a handover to an older daemon) gets the
+  legacy definitions, and those chats start without per-chat denials.
+- **Ordering across daemons.** Manifests carry `{seq, epoch}`; the host orders epochs by when it
+  first saw them, so an old daemon's late push never retires the new one. An epoch the host has
+  never seen counts as the newest: a host that first hears from a new daemon and only then from
+  an old one it never saw (a host started mid-handover) takes the old one's push as newer — the
+  epochs are opaque ids, and nothing else orders them. The next relaunch puts it right: a
+  manifest the host ASKS for comes from the daemon its socket reaches now, so its epoch counts as
+  the newest again.
 - **Denials per provider.** Claude: `disallowedTools` `mcp__<name>` and flag-settings
   `deniedMcpServers: [{serverName}]` — and always `orquester`. Codex: thread config
   `mcp_servers.<name>.enabled = false` (only names its config has: a project-level server only
