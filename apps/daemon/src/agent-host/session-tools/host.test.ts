@@ -343,6 +343,38 @@ test("an unreachable daemon: the SAME launch's last list, warned; denials never 
   await assert.rejects(service.issue("thread-a", { ...CODEX, home: "acct-3" }), isSessionToolsDenialsUnknown);
 });
 
+test("the degraded row is added once per degraded state: again only after a good manifest", async (t) => {
+  let up = true;
+  const warnings: string[] = [];
+  const service = createSessionToolsHost({
+    forward: recordingForward().forward,
+    manifest: async (threadId) => (up ? manifests().fetch(threadId) : { kind: "unavailable" }),
+    definitions: buildChatToolDefinitions(TEST_TOOLS),
+    knownNames: knownSessionToolNames(TEST_TOOLS),
+    onWarning: (threadId) => warnings.push(threadId)
+  });
+  t.after(() => service.stop());
+  await service.issue("thread-a", CODEX);
+  up = false;
+  await service.issue("thread-a", CODEX);
+  await service.issue("thread-a", CODEX);
+  await service.issue("thread-a", CODEX);
+  assert.deepEqual(warnings, ["thread-a"], "one row for the whole degraded stretch");
+  // A good manifest ends it; the next degraded launch is a new state, warned again.
+  up = true;
+  await service.issue("thread-a", CODEX);
+  up = false;
+  await service.issue("thread-a", CODEX);
+  assert.deepEqual(warnings, ["thread-a", "thread-a"]);
+  // A pushed manifest is a good one too.
+  await service.applyManifest("thread-a", { tools: TEST_NAMES, instructions: "", deny: [] });
+  await service.issue("thread-a", CODEX);
+  assert.deepEqual(warnings, ["thread-a", "thread-a", "thread-a"]);
+  // Another thread has its own state.
+  await service.issue("thread-b", CODEX);
+  assert.deepEqual(warnings, ["thread-a", "thread-a", "thread-a", "thread-b"]);
+});
+
 test("a cold host refuses a launch it knows no denials for, and launches with them once the daemon answers", async (t) => {
   let up = false;
   const daemon = manifests({ "thread-a": { deny: ["remote"] } });

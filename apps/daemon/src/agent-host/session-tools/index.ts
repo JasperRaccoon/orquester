@@ -408,7 +408,11 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
     return { ...copy, threadId, source: "fallback" };
   };
 
+  /** Threads warned for their current degraded state: warned again only after a good manifest. */
+  const degradedWarned = new Set<string>();
   const warnFallback = (threadId: string): void => {
+    if (degradedWarned.has(threadId)) return;
+    degradedWarned.add(threadId);
     try {
       options.onWarning?.(threadId, DENIAL_DEGRADED_WARNING);
     } catch {
@@ -446,6 +450,8 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
   /** A manifest this launch read or was handed: what it advertises, recorded as its key's last. */
   const recordManifest = async (threadId: string, launchKey: string, manifest: SessionToolsManifest): Promise<PreparedSessionTools> => {
     const prepared = await fromManifest(threadId, manifest);
+    // A good manifest ends the thread's degraded state: a later fallback is warned again.
+    degradedWarned.delete(threadId);
     lastByLaunch.set(launchKey, prepared);
     lastByThread.set(threadId, { launchKey, prepared });
     offerKeyed(launchKey, prepared);
@@ -655,6 +661,8 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
       const overtaken = (): boolean => stamp !== undefined && lastSeq.get(threadId) !== claimed;
       const next = await fromManifest(threadId, manifest);
       if (overtaken()) return "superseded";
+      // The daemon answers again: the thread's degraded state is over.
+      degradedWarned.delete(threadId);
       const session = launched.get(threadId);
       if (!session) return "next-start";
       if (session.prepared.key === next.key && !forced.has(threadId)) {
@@ -738,6 +746,7 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
     },
     abortThreadCalls: (threadId) => abortWhere((call) => call.threadId === threadId),
     forgetThread(threadId) {
+      degradedWarned.delete(threadId);
       lastByThread.delete(threadId);
       lastSeq.delete(threadId);
       desired.delete(threadId);
@@ -754,6 +763,7 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
       forced.clear();
       lastByLaunch.clear();
       lastByThread.clear();
+      degradedWarned.clear();
       lastSeq.clear();
       retiredEpochs.clear();
       const open = endpoint;
