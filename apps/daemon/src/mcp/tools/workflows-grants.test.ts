@@ -276,10 +276,10 @@ test("no escape through sub-workflows: wiring the user's (disabled) workflow int
   r.backend.serve(id);
   const theirs = r.backend.seed("Theirs");
   assert.equal(theirs.enabled, false);
-  // The edit that wires it in: a card (the grant covers the parent, not the child), its warning naming the disabled child.
+  // The edit that wires it in: a card (the grant covers the parent, not the child), its note naming the disabled child.
   const wire = await r.carded("update_workflow", { workflowId: id, revision: 0, ops: [{ op: "add_node", node: { type: "workflow", name: "Call", config: { workflowId: theirs.id } } }, { op: "connect", source: "Fix", target: "Call" }] }, { decision: "approve" });
   ok(wire.result);
-  assert.ok(wire.card.sections.some((s) => s.kind === "warning" && /DISABLED workflow "Theirs"/.test(s.text)));
+  assert.ok(wire.card.sections.some((s) => s.kind === "text" && s.title === "Disabled sub-workflow" && /"Theirs" .* is disabled — runs only when another workflow calls it/.test(s.text)));
   assert.deepEqual(r.workflowGrant()[0]!.workflowIds, [id], "approve-once did not widen the grant");
   // Running the parent now runs the user's workflow: a card every time.
   const run = await r.carded("run_workflow", { workflowId: id, revision: 1 }, { decision: "deny" });

@@ -1833,9 +1833,11 @@ routes, like every other tool; everything a tool changes shows up live in the ed
   defaults to the daemon host's own zone), `runTimeoutMinutes`, `notify {onFailure, onSuccess}`,
   `keepFailedTempDays` (0–30).
 - A new workflow is **disabled** unless `enabled: true` — its schedule and git triggers do not
-  fire. Manual runs (`run_workflow`) work either way, and **a disabled workflow still runs when
-  another workflow calls it** through a Run workflow block (disabling stops triggers only). Enabling is refused while the definition has
-  a problem of severity `error`. `dryRun: true` on `create_workflow` or `update_workflow` validates
+  fire. Disabled means "no triggers of its own", nothing more: manual runs (`run_workflow`) work
+  either way, and another workflow's Run workflow block runs it — a workflow meant only to be called
+  by others is simply left disabled. Approval cards note a disabled sub-workflow as such ("disabled —
+  runs only when another workflow calls it"). Enabling is refused while the definition has a
+  problem of severity `error`. `dryRun: true` on `create_workflow` or `update_workflow` validates
   without saving.
 - **`problems`** come back on every read and write: `{severity: "error" | "warning" | "info", code,
   message, nodeId?, edgeId?, field?}`, errors first, at most 100 (`problemsOmitted` counts the

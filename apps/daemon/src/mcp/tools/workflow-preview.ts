@@ -721,9 +721,10 @@ export async function unionSections(api: DaemonApi, union: WorkflowUnion, caller
       sections.push({ kind: "warning", level: "caution", text: `A block runs the workflow ${child.workflowId}, which does not exist: that block will fail.` });
       continue;
     }
-    // A disabled workflow still runs when another one calls it: say so where it cannot be missed.
+    // Disabled means "no triggers of its own": a workflow meant only to be called by others is
+    // disabled on purpose. A neutral note, kept on the card so the user knows what the block runs.
     if (child.enabled === false) {
-      sections.push({ kind: "warning", level: "danger", text: `A block runs the DISABLED workflow "${child.name}" (${child.workflowId}): being disabled does not stop it running as a sub-workflow.` });
+      sections.push({ kind: "text", title: "Disabled sub-workflow", text: `"${child.name}" (${child.workflowId}) is disabled — runs only when another workflow calls it, as this block does.` });
     }
     sections.push({ kind: "text", title: "Sub-workflow", text: `Runs the workflow "${child.name}" (${child.workflowId}, revision ${child.revision ?? "?"}${child.enabled === false ? ", disabled" : ""}) in ${child.project ? workflowProjectLabel(child.project, api.workspacesDir) : "its project"}; its projects are counted above.` });
   }
