@@ -1370,7 +1370,7 @@ are capped and say so.
 |---|---|---|---|
 | `list_todos` | `workspace?` or `project?` (exactly one) | `{todos: Todo[], truncated?, omittedLists?}` | The Todo tab |
 | `update_todos` | `action` (`"create"` \| `"update"` \| `"toggle"` \| `"delete"`), `workspace?` or `project?`, `id?`, `name?`, `body?`, `item?`, `checked?` | create / update: `{todo: Todo}`; toggle: `{id, item, checked, body, bodyTruncated?}`; delete: `{deleted: true, id}` | Adding, renaming, editing, ticking, deleting a list |
-| `list_saved_prompts` | `project?`, `query?`, `includeBody? = false` | `{prompts: [{id, title, description, tags, scope, projectPath, pinned, createdBy?, usedByWorkflows?, bodyChars, body?}], truncated?, omittedPrompts?}` | The right rail's Saved prompts |
+| `list_saved_prompts` | `project?`, `query?`, `includeBody? = false` | `{prompts: [{id, title, description, tags, scope, projectPath?, repoKey?, pinned, createdBy?, usedByWorkflows?, bodyChars, body?}], truncated?, omittedPrompts?}` | The right rail's Saved prompts |
 | `update_saved_prompts` | `action` (`"create"` \| `"update"` \| `"delete"`), `id?`, `title?`, `body?`, `description?`, `tags?`, `project?` or `global?`, `pinned?`, `reason?` | `{prompt}` (its row, with its body), or `{deleted: true, id}` | Saving, editing, pinning, deleting a prompt |
 
 `Todo = {id, name, scope: "workspace" | "project", body, createdAt, updatedAt, bodyTruncated?}`. A
@@ -1399,6 +1399,15 @@ user's), and `usedByWorkflows` the workflows whose agent blocks run it — such 
 workflow code. `update_saved_prompts` `update` and `delete` look for a project prompt in `project`
 (else among the global ones). A prompt an in-chat agent created cannot be pinned through the MCP
 (only the user pins it, in the rail).
+
+A project prompt is shared by every checkout of the same Git repository (`repoKey`, the canonical
+origin; a folder without an origin keeps folder-only prompts), and `projectPath` names the checkout
+that first saved it. A call claims the project it addresses — a chat's own checkout, or the
+checkout named in `project` — never that stored path: in a chat, the repository's prompts are its
+own project's, also when `project` names a sibling checkout of the same repository. A project that
+is not a checkout of the chat's repository is another project, as everywhere. For a chat below
+Full access, a repository prompt first saved in another workspace's checkout is listed without
+its `projectPath`.
 
 ### Automated workflows, agent profiles, desktops
 
