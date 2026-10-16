@@ -22,6 +22,13 @@
  * forks the same). `deferGoalContinuation` keeps a goal the parent is
  * continuing from starting a turn inside this throwaway process. Should the
  * fork fail anyway, the host falls back to the transcript handoff.
+ *
+ * No MCP server runs in it (§12.1): no turn ever does, so every server the thread's effective
+ * config defines (`config/read` with the cwd) is switched off in the fork's own `config`. Probed on
+ * 0.159.0 (one minimal turn in a scratch home): `thread/fork` takes `config`, the server is
+ * `disabled` in that process, and the override is NOT persisted — the child's own session, resumed
+ * later, loads its servers (and its denials) as any resume does. A config that cannot be read
+ * leaves the fork as it was (logged).
  */
 
 import type { AdapterLogger } from "../../adapter.ts";
@@ -29,6 +36,7 @@ import { AGENT_HOST_DEADLINES, withDeadline } from "../../support/deadline.ts";
 import { describeExit, spawnProviderChild } from "../../support/spawn.ts";
 import { isUsableConversationId } from "../../orchestration/resume.ts";
 import { CodexPeer } from "./protocol.ts";
+import { codexDenyConfig } from "./session-tools.ts";
 
 export const CODEX_FORK_NO_THREAD =
   "Codex has no saved conversation for this thread yet, so there is nothing to fork.";
@@ -83,6 +91,20 @@ export async function forkCodexThread(input: ForkCodexThreadInput): Promise<stri
       { label: "codex fork initialize", timeoutMs: AGENT_HOST_DEADLINES.handshakeMs }
     );
     peer.notify("initialized");
+    let config: ReturnType<typeof codexDenyConfig> = {};
+    try {
+      const read = await withDeadline(() => peer.request("config/read", { cwd: input.cwd }), {
+        label: "codex fork config/read",
+        timeoutMs: AGENT_HOST_DEADLINES.sessionOpenMs
+      });
+      const servers = (read.config as { mcp_servers?: unknown } | null | undefined)?.mcp_servers;
+      const defined = servers !== null && typeof servers === "object" ? Object.keys(servers) : [];
+      config = codexDenyConfig(defined, "", new Set(defined));
+    } catch (error) {
+      input.logger.warn("codex: could not read the MCP servers for a fork; they may start in its short-lived process", {
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
     const forked = await withDeadline(
       () =>
         peer.request("thread/fork", {
@@ -95,7 +117,8 @@ export async function forkCodexThread(input: ForkCodexThreadInput): Promise<stri
           // A goal is carried into the fork without its automatic
           // continuation: no turn may start in this short-lived process; the
           // child's own next turn owns the goal.
-          deferGoalContinuation: true
+          deferGoalContinuation: true,
+          ...(Object.keys(config).length > 0 ? { config } : {})
         }),
       { label: "codex thread/fork", timeoutMs: AGENT_HOST_DEADLINES.sessionOpenMs }
     );

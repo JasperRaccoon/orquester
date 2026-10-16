@@ -32,11 +32,26 @@ describe("forkCodexThread", () => {
       excludeTurns: true,
       deferGoalContinuation: true
     });
-    // Only the handshake and the fork: the source thread is never resumed.
+    // Only the handshake, the config read and the fork: the source thread is never resumed.
     assert.deepEqual(
       mock.received().flatMap((frame) => (frame.method !== undefined ? [frame.method] : [])),
-      ["initialize", "initialized", "thread/fork"]
+      ["initialize", "initialized", "config/read", "thread/fork"]
     );
+  });
+
+  it("starts no MCP server in its short-lived process: every server the config defines is switched off", async () => {
+    const mock = writeMockCodexServer({ forkThreadId: "forked-2", mcpServers: { orquester_remote: { url: "http://127.0.0.1:47831/mcp" }, "dot.ted": { command: "x" } } });
+    const { context } = createFakeContext();
+    await forkCodexThread({
+      bin: mock.bin,
+      env: { PATH: process.env.PATH ?? "", HOME: tmpdir() },
+      cwd: tmpdir(),
+      sourceCodexThreadId: "source-1",
+      lastTurnId: "turn-2",
+      logger: context.logger
+    });
+    const fork = mock.received().find((frame) => frame.method === "thread/fork")?.params as { config?: unknown };
+    assert.deepEqual(fork.config, { mcp_servers: { orquester_remote: { enabled: false }, "dot.ted": { enabled: false } } });
   });
 
   it("rejects with the provider's refusal", async () => {
