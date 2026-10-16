@@ -407,3 +407,14 @@ test("base64 runs: adversarial input â€” many runs one short of the threshold â€
   // Generous: a linear pass takes tens of milliseconds; the old pattern took minutes here.
   assert.ok(performance.now() - started < 5_000, `${Math.round(performance.now() - started)} ms`);
 });
+
+test("Codex's alternate name for our server is ours; a row its adapter says is another server's never is", () => {
+  const registered = new Set(["echo"]);
+  assert.equal(isSessionToolsServerName("orquester_session"), true);
+  assert.equal(isSessionToolsServerName("orquester_session_2"), true);
+  assert.equal(isSessionToolsServerName("orquester_sessions"), false);
+  const marked = sessionToolMarkedData({ server: "orquester_session", tool: "echo", sessionToolsServer: true }, registered) as Record<string, unknown>;
+  assert.deepEqual(marked.sessionTool, { name: "echo" });
+  // A user's own `orquester` in a chat where ours is `orquester_session`: same spelling, not ours.
+  assert.equal("sessionTool" in (sessionToolMarkedData({ server: "orquester", tool: "echo", sessionToolsServer: false }, registered) as Record<string, unknown>), false);
+});

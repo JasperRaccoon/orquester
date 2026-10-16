@@ -10,7 +10,11 @@
  *
  * Each harness spells the tool its own way:
  * - Claude: `mcp__orquester__<tool>` (`data.toolName`);
- * - Codex: `{server: "orquester", tool}` (`data.server` / `data.tool`);
+ * - Codex: `{server: "orquester", tool}` (`data.server` / `data.tool`) — or, in a chat whose Codex
+ *   config already has a server named `orquester` (a user's own), `orquester_session` (then
+ *   `orquester_session_2`, …): Codex merges same-named overrides into it, so ours takes the next
+ *   free name. The adapter says which server is ours on each live row (`data.sessionToolsServer`);
+ *   a replayed row is read by its spelling;
  * - Grok: `orquester__<tool>` (`data.vendorTool`, `_meta["x.ai/tool"].name`),
  *   or — the way it really calls an MCP tool — its `use_tool` meta-tool with
  *   that qualified catalog key in `data.rawInput.tool_name`;
@@ -21,6 +25,12 @@
 
 /** The MCP server name every provider is given. */
 export const SESSION_TOOLS_SERVER_NAME = "orquester";
+
+/** Codex's name for our server where its config already has an `orquester` (see the header). */
+export const CODEX_SESSION_TOOLS_ALTERNATE_NAME = "orquester_session";
+
+/** `orquester_session`, `orquester_session_2`, … */
+export const CODEX_SESSION_TOOLS_ALTERNATE_PATTERN = /^orquester_session(?:_[1-9][0-9]{0,3})?$/;
 
 /** A bare session-tool name: what tool descriptions and instructions use. */
 export const SESSION_TOOL_NAME_PATTERN = /^[a-z][a-z0-9_]{0,47}$/;
@@ -61,7 +71,9 @@ export function parseSessionToolName(name: unknown): string | null {
 export function isSessionToolsServerName(server: unknown): boolean {
   return (
     typeof server === "string" &&
-    (server === SESSION_TOOLS_SERVER_NAME || OPENCODE_SESSION_TOOLS_SERVER_PATTERN.test(server))
+    (server === SESSION_TOOLS_SERVER_NAME ||
+      OPENCODE_SESSION_TOOLS_SERVER_PATTERN.test(server) ||
+      CODEX_SESSION_TOOLS_ALTERNATE_PATTERN.test(server))
   );
 }
 
@@ -86,8 +98,10 @@ export function sessionToolNameFromProviderData(data: unknown): string | null {
   }
   const item = asRecord(record.item);
   for (const holder of item ? [record, item] : [record]) {
-    // Codex names the server apart: then only the server says whose tool it is.
+    // Codex names the server apart: then only the server says whose tool it is — or the adapter,
+    // which knows which server is ours in a chat where a user's own is named `orquester` too.
     if (typeof holder.server === "string") {
+      if (holder.sessionToolsServer === false) continue;
       if (isSessionToolsServerName(holder.server) && typeof holder.tool === "string") {
         if (SESSION_TOOL_NAME_PATTERN.test(holder.tool)) {
           return holder.tool;

@@ -150,6 +150,7 @@ import { CodexUsageTracker } from "./usage.ts";
 import {
   codexDenyConfig,
   codexSessionToolsConfig,
+  codexSessionToolsServerName,
   codexSessionToolsContext,
   type CodexSessionToolsLaunch
 } from "./session-tools.ts";
@@ -318,6 +319,10 @@ export class CodexSession {
   /** `/goal` commands waiting for {@link CodexGoalTracker.settled} (fix round 1). */
   private readonly goalSettleWaiters = new Set<() => void>();
   private readonly normaliser: CodexNormaliser;
+  /** The name our server has in this thread, once `start` read the config (none without a grant). */
+  private sessionToolsServerName: string | undefined;
+  /** The MCP servers this thread's effective config defines (`config/read`); undefined when unread. */
+  private effectiveMcpServers: ReadonlySet<string> | undefined;
   /**
    * §3.1 requires the excerpt to be redacted before it leaves the host — home
    * paths collapsed to `~` as well as token masking. `redactStderr` only
@@ -579,6 +584,7 @@ export class CodexSession {
       });
     }
 
+    await this.resolveSessionToolsServerName();
     await this.openThread();
     this.setStatus("ready");
     return this.summary();
@@ -635,7 +641,7 @@ export class CodexSession {
     const config = runtimeModeToThreadConfig(this.runtimeMode);
     const effort = selectedOptionOf(this.modelSelection, "effort");
     const serviceTier = selectedOptionOf(this.modelSelection, "serviceTier");
-    const sessionToolsContext = codexSessionToolsContext(this.options.sessionTools);
+    const sessionToolsContext = codexSessionToolsContext(this.sessionToolsLaunch());
 
     const params: CodexProtocol.v2.TurnStartParams = {
       threadId: providerThreadId,
@@ -1488,12 +1494,57 @@ export class CodexSession {
   // Thread open / resume
   // -------------------------------------------------------------------------
 
+  /**
+   * The name our server takes in this thread (`session-tools.ts`): `orquester`, unless the
+   * thread's effective config — the account home and every trusted project layer down to the cwd,
+   * as `config/read` with the cwd answers — already has one (a user's own, which an override of
+   * the same name would be merged into). Without a grant nothing is registered, and rows are read
+   * by their spelling as before. A read that fails keeps `orquester` (logged).
+   */
+  private async resolveSessionToolsServerName(): Promise<void> {
+    const deny = this.options.sessionTools?.deny ?? this.options.deniedMcpServers ?? [];
+    if (this.options.sessionTools !== undefined || deny.length > 0) {
+      let configured: string[] = [];
+      try {
+        const read = await this.bounded(
+          () => this.requirePeer().request("config/read", { cwd: this.options.cwd }),
+          AGENT_HOST_DEADLINES.sessionOpenMs,
+          "config/read"
+        );
+        const servers = (read.config as { mcp_servers?: unknown } | null | undefined)?.mcp_servers;
+        configured = servers !== null && typeof servers === "object" ? Object.keys(servers) : [];
+        this.effectiveMcpServers = new Set(configured);
+      } catch (error) {
+        this.options.context.logger.warn("codex: could not read the thread's MCP servers; Orquester's keeps the name `orquester`", {
+          threadId: this.threadId,
+          error: describeError(error)
+        });
+      }
+      if (this.options.sessionTools !== undefined) {
+        this.sessionToolsServerName = codexSessionToolsServerName(configured);
+        this.normaliser.sessionToolsServerName = this.sessionToolsServerName;
+      }
+    }
+  }
+
+  /** The session's own server, under the name it has in this thread. */
+  private sessionToolsLaunch(): CodexSessionToolsLaunch | undefined {
+    const tools = this.options.sessionTools;
+    if (tools === undefined) return undefined;
+    return {
+      ...tools,
+      ...(this.sessionToolsServerName ? { serverName: this.sessionToolsServerName } : {}),
+      ...(this.effectiveMcpServers !== undefined ? { configured: this.effectiveMcpServers } : {})
+    };
+  }
+
   /** `{config}` attaching the `orquester` server to the thread, or nothing. */
   private sessionToolsThreadConfig(): { config?: NonNullable<CodexProtocol.v2.ThreadStartParams["config"]> } {
-    const tools = this.options.sessionTools;
+    const tools = this.sessionToolsLaunch();
     if (tools !== undefined) return { config: codexSessionToolsConfig(tools) };
-    // Every denied name is addressed, whatever its characters (`session-tools.ts`).
-    const config = codexDenyConfig(this.options.deniedMcpServers ?? []);
+    // Every denied name is addressed, whatever its characters, and harmlessly where this
+    // thread's config does not have it (`session-tools.ts`).
+    const config = codexDenyConfig(this.options.deniedMcpServers ?? [], "", this.effectiveMcpServers);
     return Object.keys(config).length > 0 ? { config } : {};
   }
 
@@ -1568,7 +1619,17 @@ export class CodexSession {
         }),
       AGENT_HOST_DEADLINES.sessionOpenMs,
       "thread/start"
-    );
+    ).catch((error: unknown) => {
+      // Codex names the server whose settings it refused (`… in \`mcp_servers.<name>\``): say what
+      // Orquester sent it for, and what to look at.
+      const detail = describeError(error);
+      if (/mcp_servers\./.test(detail)) {
+        throw new Error(
+          `Codex refused the MCP settings Orquester sent for this chat (${detail.trim()}). Orquester switches off, in its chats, MCP servers that point at Orquester; check that server's definition in your Codex config (or the project's .codex/config.toml), then send your message again.`
+        );
+      }
+      throw error;
+    });
     // NOT `{threadId}` — `result.thread.id` (fixtures README observation 1).
     this.providerThreadId = started.thread.id;
     this.announceThread(started.thread.id);
@@ -1701,7 +1762,7 @@ export class CodexSession {
       item.status !== "completed" ||
       item.result === null ||
       item.error !== null ||
-      isSessionToolsServerName(item.server) ||
+      (this.sessionToolsServerName !== undefined ? item.server === this.sessionToolsServerName : isSessionToolsServerName(item.server)) ||
       this.providerThreadId === null ||
       p.threadId !== this.providerThreadId
     ) {
@@ -1825,7 +1886,7 @@ export class CodexSession {
       // the user's config and needs no reload (a reload keeps it — verified
       // on 0.159.0 — but it would cost every turn a round trip for nothing).
       const name = (params as { name?: unknown } | null)?.name;
-      if (!(this.options.sessionTools !== undefined && name === SESSION_TOOLS_SERVER_NAME)) {
+      if (!(this.options.sessionTools !== undefined && name === (this.sessionToolsServerName || SESSION_TOOLS_SERVER_NAME))) {
         this.sawMcpServer = true;
       }
       // A server (re)started: its tools may have changed.
