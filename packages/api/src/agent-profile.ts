@@ -442,7 +442,12 @@ export interface AgentProfileChangedPayload {
 
 export type AgentProfileErrorCode =
   | "INVALID_REQUEST"
-  /** A `projectPath` / `cwd` whose real path is outside the workspaces root (or the project): refused, never read. */
+  /**
+   * `GET …/daemon-mcp-servers?projectPath=[&cwd=]`: the `projectPath`'s real path is not inside the
+   * workspaces root, or the `cwd`'s not inside that project — refused, never read. (The
+   * all-projects scan, without `projectPath`, lists a project that is itself a symlink by its link
+   * path: a detection-only exception, documented in the daemon's session-tools README.)
+   */
   | "PATH_NOT_CONTAINED"
   | "UNKNOWN_AGENT"
   | "AGENT_NOT_INSTALLED"

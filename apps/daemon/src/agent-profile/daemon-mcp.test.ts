@@ -275,3 +275,24 @@ test("codexLoadingHomes: Codex's own trust rules (probed on 0.159.0)", () => {
   // No entry (or an unreadable table): nothing loads it.
   assert.deepEqual(codexLoadingHomes(P, P, P, trust({})), []);
 });
+
+test("a project reached through a symlink: its link path's ancestors are read for Codex too; listing follows project links only", async (t) => {
+  const fx = await fixture();
+  t.after(() => rm(fx.root, { recursive: true, force: true }));
+  const real = join(fx.workspaces, "other", "real");
+  await mkdir(join(real, "sub"), { recursive: true });
+  const link = join(fx.workspaces, "acme", "link");
+  await symlink(real, link);
+  // Codex may resolve its layers from the link's path: a config above the LINK, not above the real dir.
+  await write(join(fx.workspaces, "acme", ".codex", "config.toml"), `[mcp_servers.lex_orq]\nurl = "http://127.0.0.1:47831/mcp"\n`);
+  await write(join(fx.workspaces, "other", ".codex", "config.toml"), `[mcp_servers.real_orq]\nurl = "http://127.0.0.1:47831/mcp"\n`);
+  const detector = new DaemonMcpDetector(identity(), { homes: fx.homes, accountHomes: async () => [], projects: () => listProjectDirs(fx.workspaces), workspacesRoot: () => fx.workspaces });
+  const names = (servers: DaemonPointingServer[]) => servers.map((server) => server.name).sort();
+  assert.deepEqual(names(await detector.detect({ projectPath: link, cwd: join(link, "sub") })), ["lex_orq", "real_orq"]);
+  assert.deepEqual(names(await detector.detect({ projectPath: real })), ["real_orq"], "the real path alone: its own ancestors only");
+  // The all-projects listing follows a project's own link, never a workspace's.
+  await symlink(join(fx.workspaces, "other"), join(fx.workspaces, "wslink"));
+  const listed = await listProjectDirs(fx.workspaces);
+  assert.ok(listed.includes(link));
+  assert.ok(!listed.some((path) => path.startsWith(join(fx.workspaces, "wslink"))));
+});

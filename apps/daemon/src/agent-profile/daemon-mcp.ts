@@ -68,7 +68,7 @@
 
 import type { Dirent } from "node:fs";
 import { lstat, readdir, readFile, realpath, stat } from "node:fs/promises";
-import { dirname, join, sep } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import type { FastifyInstance } from "fastify";
 import {
   AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE,
@@ -313,7 +313,10 @@ export class DaemonMcpDetector {
     if (options.cwd !== undefined && !options.projectPath) throw new AgentProfileError(400, "INVALID_REQUEST", "cwd needs projectPath.");
     const projectFilter = options.projectPath ? await this.containedProject(options.projectPath) : undefined;
     const dirs = projectFilter !== undefined ? await this.configDirs(projectFilter, options.cwd) : undefined;
-    const targets = await this.targets(dirs, options.cwd !== undefined ? dirs?.at(-1) : undefined);
+    // A project reached through a symlink: Codex may resolve its layers from the LINK's path, so
+    // that path's ancestors are read too.
+    const lexical = options.projectPath !== undefined && projectFilter !== undefined && resolve(options.projectPath) !== projectFilter ? [resolve(options.projectPath)] : [];
+    const targets = await this.targets(dirs, options.cwd !== undefined ? dirs?.at(-1) : undefined, lexical);
     const codexTrust = targets.some((target) => target.codexCwd !== undefined) ? await this.codexTrust() : [];
     const gitRoots = new Map<string, Promise<string | undefined>>();
     const seenFiles = new Set<string>();
@@ -462,7 +465,7 @@ export class DaemonMcpDetector {
     }
   }
 
-  private async targets(dirs: readonly string[] | undefined, cwd: string | undefined): Promise<ScanTarget[]> {
+  private async targets(dirs: readonly string[] | undefined, cwd: string | undefined, lexical: readonly string[] = []): Promise<ScanTarget[]> {
     const { homes } = this.sources;
     const targets: ScanTarget[] = [];
     const local = dirs ? { only: new Set(dirs) } : {};
@@ -507,7 +510,7 @@ export class DaemonMcpDetector {
     // project. Denying a server Codex does not load is harmless (the session sends a stub for it),
     // so every ancestor of a scanned project is read for Codex too, up to the filesystem root.
     const ancestors = new Set<string>();
-    for (const project of projects) {
+    for (const project of [...projects, ...lexical]) {
       for (let dir = dirname(project); ; dir = dirname(dir)) {
         if (!projects.includes(dir)) ancestors.add(dir);
         if (dirname(dir) === dir) break;
@@ -592,33 +595,35 @@ async function realpathOr(path: string): Promise<string> {
   }
 }
 
-/** Every `<root>/<workspace>/<project>` directory (hidden names skipped). */
+/**
+ * Every `<root>/<workspace>/<project>` directory (hidden names skipped). A PROJECT that is a symlink
+ * to a directory is listed too — one level, the project's own link, never a workspace's — by the
+ * path of its link: its chats load its configs through it. A deliberate exception to realpath
+ * containment, for this detection read only (`session-tools/README.md`).
+ */
 export async function listProjectDirs(workspacesRoot: string): Promise<string[]> {
   const out: string[] = [];
-  // A project that is a symlink is a project too (its chats load its configs through the link).
-  const dirs = async (path: string) => {
-    let entries: Dirent[];
+  const entries = async (path: string): Promise<Dirent[]> => {
     try {
-      entries = await readdir(path, { withFileTypes: true });
+      return await readdir(path, { withFileTypes: true });
     } catch {
       return [];
     }
-    const out: string[] = [];
-    for (const entry of entries) {
-      if (entry.name.startsWith(".")) continue;
-      if (entry.isDirectory()) out.push(entry.name);
-      else if (entry.isSymbolicLink()) {
+  };
+  for (const workspace of await entries(workspacesRoot)) {
+    if (workspace.name.startsWith(".") || !workspace.isDirectory()) continue;
+    const dir = join(workspacesRoot, workspace.name);
+    for (const project of await entries(dir)) {
+      if (project.name.startsWith(".")) continue;
+      if (project.isDirectory()) out.push(join(dir, project.name));
+      else if (project.isSymbolicLink()) {
         try {
-          if ((await stat(join(path, entry.name))).isDirectory()) out.push(entry.name);
+          if ((await stat(join(dir, project.name))).isDirectory()) out.push(join(dir, project.name));
         } catch {
           // A dangling link is no project.
         }
       }
     }
-    return out;
-  };
-  for (const workspace of await dirs(workspacesRoot)) {
-    for (const project of await dirs(join(workspacesRoot, workspace))) out.push(join(workspacesRoot, workspace, project));
   }
   return out;
 }
