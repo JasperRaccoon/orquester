@@ -43,6 +43,17 @@ export class EngineStoppedError extends Error {
   }
 }
 
+/**
+ * `runChild` cannot tell whether this attempt's child run exists (its record unreadable, or one still
+ * being started): the block fails `interrupted` and is never retried — a child is never started twice.
+ */
+export class ChildRunUnknownError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ChildRunUnknownError";
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Limits
 // ---------------------------------------------------------------------------

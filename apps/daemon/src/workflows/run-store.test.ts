@@ -257,3 +257,24 @@ test("toRunSummary / persistedRunToWire: bookkeeping stripped, outputs cut to th
   assert.ok(!("outputFile" in wire.blocks.b!));
   assert.ok(!("waitingOn" in wire.blocks.c!));
 });
+
+test("exists: a recorded run (readable or not) is true; a missing one false; another I/O error throws; deleted and invalid ids are false", async () => {
+  const dir = await scratch();
+  const store = new FileRunStore({ dir, logger: quiet().logger });
+  await store.init();
+  await store.create(run("run-a", { workflowId: "wf-x" }));
+  assert.equal(await store.exists("run-a"), true);
+  assert.equal(await store.exists("run-missing"), false, "ENOENT");
+  // Recorded but unreadable: still recorded.
+  await mkdir(join(dir, "run-bad"), { recursive: true });
+  await writeFile(join(dir, "run-bad", "run.json"), "{not json");
+  assert.equal(await store.load("run-bad"), null);
+  assert.equal(await store.exists("run-bad"), true);
+  // A run id whose directory is a file: ENOTDIR, which says nothing definite — thrown.
+  await writeFile(join(dir, "run-file"), "x");
+  await assert.rejects(store.exists("run-file"), (error: NodeJS.ErrnoException) => error.code === "ENOTDIR");
+  assert.equal(await store.exists("../escape"), false, "an invalid id is never looked up");
+  assert.equal(await store.exists(""), false);
+  await store.deleteForWorkflow("wf-x");
+  assert.equal(await store.exists("run-a"), false, "deleted");
+});

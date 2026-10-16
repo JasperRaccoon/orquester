@@ -88,6 +88,7 @@ import {
   retryDelayMs,
   sleepUntil,
   toRunSummary,
+  ChildRunUnknownError,
   EngineStoppedError,
   WorkflowEngineError
 } from "./run-context.ts";
@@ -193,7 +194,8 @@ interface RunSpec {
   testNodeOnly?: boolean;
   usePinned?: boolean;
   /** A child run: its top-level run's frozen sub-workflow definitions (`PersistedRun.subWorkflows`). */
-  subWorkflows?: Record<string, Workflow>;  /** A child run: its id, derived from its parent run, block and attempt (`childRunIdFor`). */
+  subWorkflows?: Record<string, Workflow>;
+  /** A child run: its id, derived from its parent run, block and attempt (`childRunIdFor`). */
   runId?: string;
   /** A child run: the attempt of the parent's block that started it. */
   parentAttempt?: number;
@@ -224,15 +226,21 @@ const SAFE_TO_RERUN: ReadonlySet<WorkflowNodeType> = new Set<WorkflowNodeType>([
  * block, attempt), so the binding is exact and durable — asking again finds that run, never another.
  */
 export function childRunIdFor(parentRunId: string, nodeId: string, attempt: number): string {
-  return `sub-${createHash("sha256").update(`${parentRunId}\u0000${nodeId}\u0000${attempt}`).digest("hex").slice(0, 40)}`;
+  // UUID-shaped, hash first (as minted ids are): the 8-character prefixes temp-project names and
+  // the UI's short labels take keep their full entropy.
+  const h = createHash("sha256").update(`${parentRunId}\u0000${nodeId}\u0000${attempt}`).digest("hex");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
 }
 
 /** Failures a retry cannot fix: every account of the chain is burnt, or a hard limit was hit. */
 const NOT_RETRIED: ReadonlySet<WorkflowBlockError["kind"]> = new Set<WorkflowBlockError["kind"]>(["all_burnt", "limit_exceeded"]);
 
 function isRetryable(error: WorkflowBlockError): boolean {
+  if (isRecordLike(error.detail) && error.detail.childRunUnknown === true) return false;
   return !NOT_RETRIED.has(error.kind);
 }
+
+const isRecordLike = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 
 /**
  * A WaitingOn that means the block is WAITING (not working): a timer (Wait, retry delay), or an
@@ -1717,6 +1725,10 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
   const launch = async (workflow: Workflow, spec: RunSpec): Promise<{ response: RunWorkflowResponse; run?: ActiveRun }> => {
     if (stopped || stopping) throw new WorkflowEngineError(503, "ENGINE_UNAVAILABLE", "The workflow engine is stopping.");
     const runId = spec.runId ?? opts.mintId();
+    // A given id (a child's, bound to its attempt) is never started twice.
+    if (spec.runId !== undefined && (active.has(runId) || reserving.has(runId))) {
+      throw new ChildRunUnknownError(`A run with id "${runId}" is already being started.`);
+    }
     const secrets = opts.secrets.resolve(workflow.id);
     const redactSecrets = chainSecrets(secrets, spec.parentRunId);
     const redactor = createRedactor(redactSecrets);
@@ -1842,9 +1854,25 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
     // One child per attempt: its id is bound to (parent run, block, attempt). One that exists — a
     // resumed attempt asking again — is that attempt's child: returned, never started twice.
     const boundId = input.attempt !== undefined ? childRunIdFor(input.parentRunId, input.parentNodeId, input.attempt) : undefined;
-    if (boundId !== undefined && (active.has(boundId) || (await runStore.exists(boundId)))) {
-      parent?.children.add(boundId);
-      return { runId: boundId, wait: awaitRun(boundId, input.signal) };
+    if (boundId !== undefined) {
+      let held = active.has(boundId) || reserving.has(boundId);
+      if (!held) {
+        try {
+          held = await runStore.exists(boundId);
+        } catch (error) {
+          // Whether this attempt already started its child cannot be told: never a second one, and
+          // never a retryable validation failure.
+          throw new ChildRunUnknownError(`Whether this attempt already started its sub-workflow could not be read: ${errorMessage(error)}`);
+        }
+      }
+      if (held) {
+        // Still being recorded by a launch in flight: wait for it (awaitRun needs it active).
+        if (!active.has(boundId) && reserving.has(boundId)) {
+          throw new ChildRunUnknownError("This attempt's sub-workflow is still being started.");
+        }
+        parent?.children.add(boundId);
+        return { runId: boundId, wait: awaitRun(boundId, input.signal) };
+      }
     }
     // The definition frozen when the top-level run started (what its approval showed), never a later
     // edit; a run recorded before freezing existed (no map) reads the current one.
@@ -1944,7 +1972,9 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
         if (since !== undefined && summary.queuedAt < since) return null;
         if (summary.parentRunId !== parentRunId) continue;
         const run = await runStore.load(summary.id);
-        if (run && legacy(run)) return run.id;
+        // Listed but unreadable (I/O, parse): not a definite absence — the lookup failed.
+        if (run === null) throw new Error(`the run ${summary.id} is listed but cannot be read`);
+        if (legacy(run)) return run.id;
       }
       if (page.before === null || page.runs.length === 0) return null;
       before = page.before;
@@ -2010,6 +2040,16 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
       active.set(run.id, a);
       if (run.status === "running") toWalk.push(a);
     }
+    // Parents know their children (a child names its parent), and a child redacts its ancestors'
+    // secrets too — parents first, so a grandchild reads its parent's union.
+    const depthOf = (a: ActiveRun): number => (typeof a.run.depth === "number" ? a.run.depth : 0);
+    for (const a of [...active.values()].sort((x, y) => depthOf(x) - depthOf(y))) {
+      if (a.run.parentRunId === undefined) continue;
+      active.get(a.run.parentRunId)?.children.add(a.run.id);
+      a.redactSecrets = chainSecrets(a.secrets, a.run.parentRunId);
+      a.redactor = createRedactor(a.redactSecrets);
+    }
+    // (After the links: interrupting a block fails its run, which cancels the run's children.)
     // A Run workflow block found running without a WaitingOn (the engine stopped between marking it
     // running and recording its child — e.g. `launch` refused the child while stopping): adopt the
     // child it did start, if any, else run the block again — it started nothing.
@@ -2036,15 +2076,6 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
         }
         markDirty(a, node.id);
       }
-    }
-    // Parents know their children (a child names its parent), and a child redacts its ancestors'
-    // secrets too — parents first, so a grandchild reads its parent's union.
-    const depthOf = (a: ActiveRun): number => (typeof a.run.depth === "number" ? a.run.depth : 0);
-    for (const a of [...active.values()].sort((x, y) => depthOf(x) - depthOf(y))) {
-      if (a.run.parentRunId === undefined) continue;
-      active.get(a.run.parentRunId)?.children.add(a.run.id);
-      a.redactSecrets = chainSecrets(a.secrets, a.run.parentRunId);
-      a.redactor = createRedactor(a.redactSecrets);
     }
     for (const a of toWalk) begin(a, true);
     pump();

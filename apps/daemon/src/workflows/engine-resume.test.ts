@@ -536,6 +536,118 @@ describe("engine: resume after a restart", () => {
     assert.equal([...runStore.runs.values()].filter((r) => r.workflowId === "c").length, 1);
   });
 
+  test("a failed child lookup fails the run only after its children are linked: a sibling block's live child is cancelled with it", async () => {
+    class FailingLookupStore extends InMemoryRunStore {
+      failFor: string | null = null;
+      override async exists(runId: string): Promise<boolean> {
+        if (runId === this.failFor) throw new Error("EIO");
+        return super.exists(runId);
+      }
+    }
+    const runStore = new FailingLookupStore();
+    const env = restartable([
+      workflow("p", [T(), node("S1", "workflow", { workflowId: "c1" }), node("S2", "workflow", { workflowId: "c2" })], [edge("T", "S1"), edge("T", "S2")]),
+      workflow("c1", [T(), node("X", "code")], [edge("T", "X")]),
+      workflow("c2", [T(), node("W", "wait", { kind: "duration", minutes: 60 })], [edge("T", "W")])
+    ]);
+    const shared = { ...env.shared, runStore };
+    const first = createHarness({ ...shared, executors: { code: scripted("code") } });
+    const { runId } = await first.engine.run("p", {});
+    await flush();
+    await flush();
+    const c2Run = childRunIdFor(runId!, "S2", 1);
+    assert.equal((await runStore.load(c2Run))!.status, "running", "S2's child waits on its timer");
+    await first.engine.stop();
+    // S1 cut off as "running, child unrecorded"; its lookup will fail.
+    const saved = (await runStore.load(runId!))!;
+    const s1 = saved.blocks.S1!;
+    s1.status = "running";
+    delete s1.output;
+    delete s1.handle;
+    delete s1.endedAt;
+    delete s1.waitingOn;
+    await runStore.save(saved);
+    runStore.failFor = childRunIdFor(runId!, "S1", 1);
+    const second = createHarness({ ...shared, executors: { code: scripted("code") } });
+    await second.engine.resume();
+    assert.equal((await second.engine.waitForRun(runId!)).status, "failed");
+    await flush();
+    await flush();
+    assert.equal((await second.engine.getRun(c2Run))!.status, "cancelled", "the sibling's child is not left running");
+  });
+
+  test("runChild cannot tell whether the attempt's child exists: the block fails interrupted, never retried, no child started", async () => {
+    class FailingLookupStore extends InMemoryRunStore {
+      override async exists(): Promise<boolean> {
+        throw new Error("EIO");
+      }
+    }
+    const runStore = new FailingLookupStore();
+    const env = restartable([
+      workflow("p", [T(), node("S", "workflow", { workflowId: "c" }, { retry: { maxTries: 3, delaySeconds: 0 } })], [edge("T", "S")]),
+      workflow("c", [T(), node("X", "code")], [edge("T", "X")])
+    ]);
+    const code = scripted("code");
+    const h = createHarness({ ...env.shared, runStore, executors: { code } });
+    const { runId } = await h.engine.run("p", {});
+    assert.equal((await h.engine.waitForRun(runId!)).status, "failed");
+    const run = (await runStore.load(runId!))!;
+    assert.equal(run.blocks.S!.error?.kind, "interrupted", "not a (retryable) validation failure");
+    assert.equal(run.blocks.S!.attempt, 1, "never retried");
+    assert.deepEqual(code.seen, []);
+    assert.equal([...runStore.runs.values()].filter((r) => r.workflowId === "c").length, 0);
+  });
+
+  test("an older build's child listed but unreadable is no definite absence: the block is interrupted, not re-run", async () => {
+    class UnreadableStore extends InMemoryRunStore {
+      unreadable: string | null = null;
+      override async load(runId: string) {
+        return runId === this.unreadable ? null : super.load(runId);
+      }
+    }
+    const runStore = new UnreadableStore();
+    const env = restartable([
+      workflow("p", [T(), node("S", "workflow", { workflowId: "c" }, { retry: { maxTries: 3, delaySeconds: 0 } })], [edge("T", "S")]),
+      workflow("c", [T(), node("X", "code")], [edge("T", "X")])
+    ]);
+    const shared = { ...env.shared, runStore };
+    const first = createHarness({ ...shared, executors: { code: scripted("code") } });
+    const { runId } = await first.engine.run("p", {});
+    await first.engine.waitForRun(runId!);
+    await first.engine.stop();
+    const bound = childRunIdFor(runId!, "S", 1);
+    const child = runStore.runs.get(bound)!;
+    runStore.runs.delete(bound);
+    delete child.parentAttempt;
+    child.id = "legacy-child";
+    runStore.runs.set(child.id, child);
+    const saved = (await runStore.load(runId!))!;
+    const s = saved.blocks.S!;
+    s.status = "running";
+    delete s.output;
+    delete s.handle;
+    delete s.endedAt;
+    delete s.waitingOn;
+    saved.status = "running";
+    delete saved.endedAt;
+    await runStore.save(saved);
+    runStore.unreadable = "legacy-child";
+    const code = scripted("code");
+    const second = createHarness({ ...shared, executors: { code } });
+    await second.engine.resume();
+    assert.equal((await second.engine.waitForRun(runId!)).status, "failed");
+    assert.equal((await runStore.load(runId!))!.blocks.S!.error?.kind, "interrupted");
+    assert.deepEqual(code.seen, [], "no second child");
+  });
+
+  test("child run ids are deterministic, UUID-shaped and hash-first (full-entropy 8-character prefixes)", () => {
+    const id = childRunIdFor("run-1", "S", 2);
+    assert.equal(id, childRunIdFor("run-1", "S", 2));
+    assert.notEqual(id, childRunIdFor("run-1", "S", 3));
+    assert.match(id, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+    assert.match(id, /^[A-Za-z0-9_-]{1,128}$/, "a valid run-store segment");
+  });
+
   test("a side-effecting block running without a WaitingOn is interrupted (no retry)", async () => {
     const env = restartable([workflow("w1", [T(), node("A", "code"), node("B", "code")], [edge("T", "A"), edge("A", "B", "error")])]);
     const first = env.boot({ code: controlledExecutor("code") });

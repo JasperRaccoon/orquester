@@ -3,7 +3,7 @@
 // not succeed fails the block with `child_run_failed`. Resumable through the `child-run` WaitingOn.
 
 import type { NodeExecutor, NodeResult } from "../contracts.ts";
-import { EngineStoppedError, WorkflowEngineError } from "../run-context.ts";
+import { ChildRunUnknownError, EngineStoppedError, WorkflowEngineError } from "../run-context.ts";
 import { describeDuration } from "./process.ts";
 
 export function createSubWorkflowExecutor(): NodeExecutor<"workflow"> {
@@ -51,6 +51,11 @@ export function createSubWorkflowExecutor(): NodeExecutor<"workflow"> {
             // its child) after the restart; never a validation failure.
             if (error instanceof WorkflowEngineError && error.code === "ENGINE_UNAVAILABLE") throw new EngineStoppedError();
             const message = error instanceof Error ? error.message : String(error);
+            // Only a definition the child cannot run is a validation failure: not knowing whether this
+            // attempt's child exists (or one being started) is an interruption, never retried.
+            if (error instanceof ChildRunUnknownError) {
+              return { status: "failed", error: { kind: "interrupted", message, detail: { childRunUnknown: true } } };
+            }
             const kind = error instanceof WorkflowEngineError && error.code === "LIMIT_EXCEEDED" ? "limit_exceeded" : "validation";
             return { status: "failed", error: { kind, message } };
           }
