@@ -21,6 +21,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { chmodSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -39,7 +40,7 @@ import type { AdapterLogger } from "./adapter.ts";
 import { writeMockCodexServer } from "./adapters/codex/testing.ts";
 import { startAgentHost, type AgentHost } from "./main.ts";
 import { AgentHostClient } from "../agent-chat/host-client.ts";
-import { agentHostRoutes } from "./host-protocol.ts";
+import { agentHostRoutes, daemonRoutesForHost, type SessionToolsManifest } from "./host-protocol.ts";
 import { withDeadline } from "./support/deadline.ts";
 
 const GROK_MOCK = join(dirname(fileURLToPath(import.meta.url)), "adapters/grok/testing/mock-grok.mjs");
@@ -203,8 +204,27 @@ async function stopThroughHttp(rig: Rig, markedThreadIds: string[]): Promise<voi
 }
 
 /**
+ * The daemon's half a provider session needs at its start: the session-tool manifest route
+ * (`daemonRoutesForHost.sessionToolsManifest`), answering every thread with no tools and no MCP
+ * denials. Without a daemon the host knows no denials and refuses to start a session (§12.1).
+ * Unref'd: it never keeps the file's process alive.
+ */
+async function serveDaemonManifests(socketPath: string): Promise<void> {
+  const manifest: SessionToolsManifest = { tools: [], instructions: "", deny: [] };
+  const server = createServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      const known = req.method === "POST" && req.url === daemonRoutesForHost.sessionToolsManifest;
+      res.writeHead(known ? 200 : 404, { "content-type": "application/json" }).end(JSON.stringify(known ? manifest : { code: "THREAD_NOT_FOUND" }));
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+  server.unref();
+}
+
+/**
  * A host on a temp appdir whose PATH resolves exactly `shims` — name → the
- * script the shim runs under this node.
+ * script the shim runs under this node — and a daemon socket that answers manifests.
  */
 async function bootHost(shims: Record<string, string>, extraEnv: Record<string, string> = {}): Promise<Rig> {
   const root = await mkdtemp(join(tmpdir(), "host-teardown-"));
@@ -217,7 +237,9 @@ async function bootHost(shims: Record<string, string>, extraEnv: Record<string, 
   for (const [name, script] of Object.entries(shims)) {
     await writeShim(home, name, script);
   }
-  const env = { HOME: home, PATH: "/usr/bin:/bin", ORQUESTER_APPDIR: appdir, TMPDIR: join(appdir, "tmp"), ...extraEnv };
+  const daemonSocket = join(root, "daemon.sock");
+  await serveDaemonManifests(daemonSocket);
+  const env = { HOME: home, PATH: "/usr/bin:/bin", ORQUESTER_APPDIR: appdir, TMPDIR: join(appdir, "tmp"), ORQUESTER_DAEMON_SOCK: daemonSocket, ...extraEnv };
   let onStopped!: () => void;
   const stopped = new Promise<void>((resolve) => { onStopped = resolve; });
   const host = await startHost(appdir, env, onStopped);
