@@ -832,7 +832,7 @@ test("repository migration never reads Git config outside the project sandbox", 
   const reads: string[] = [];
   const service = new SavedPromptsService({
     file: s.file, workspacesDir: () => s.workspacesDir, fsRoot: () => s.workspacesDir, logger: quiet,
-    git: { remoteUrl: async (path) => { reads.push(path); return "https://github.com/acme/site.git"; } }
+    git: { topLevel: async (path) => path, remoteUrl: async (path) => { reads.push(path); return "https://github.com/acme/site.git"; } }
   });
   await service.load();
   assert.deepEqual(reads, [site]);
@@ -852,6 +852,33 @@ test("repository prompts are shared with Git worktrees", async (t) => {
   const service = await emptyService(s);
   const saved = await service.create({ title: "T", body: "B", projectPath: site });
   assert.deepEqual((await service.list(worktree)).prompts, [saved]);
+});
+
+test("only a project that is its repository's top level has a repository key: a plain folder inside a repository, or a repository without an origin, keeps folder scope", async (t) => {
+  const s = await scratch();
+  t.after(s.cleanup);
+  const site = await s.project("acme", "site");
+  await repository(site, "git@github.com:acme/site.git");
+  // The workspace directory is itself a repository with an origin; `plain` is a folder inside it.
+  await repository(join(s.workspacesDir, "acme"), "git@github.com:acme/monorepo.git");
+  const plain = await s.project("acme", "plain");
+  const sibling = await s.project("acme", "plain-2");
+  const bare = await s.project("acme", "bare");
+  await exec("git", ["init", "-q", bare]);
+  // A symlinked spelling of a top-level checkout still counts (compared after realpath).
+  await symlink(site, join(s.workspacesDir, "acme", "site-link"), "dir");
+  const link = join(s.workspacesDir, "acme", "site-link");
+  const service = await emptyService(s);
+  assert.equal((await service.list(site)).projectRepoKey, "github.com/acme/site");
+  assert.equal((await service.list(link)).projectRepoKey, "github.com/acme/site");
+  for (const project of [plain, bare]) {
+    assert.equal("projectRepoKey" in (await service.list(project)), false, project);
+    assert.equal("repoKey" in (await service.create({ title: "F", body: "B", projectPath: project })), false, project);
+  }
+  // So the two plain folders share nothing: each lists only its own folder prompt.
+  await service.create({ title: "Sibling", body: "B", projectPath: sibling });
+  assert.deepEqual((await service.list(plain)).prompts.map((prompt) => prompt.projectPath), [plain]);
+  assert.equal((await service.create({ title: "R", body: "B", projectPath: site })).repoKey, "github.com/acme/site");
 });
 
 test("deleting a project or a workspace takes its folder prompts along, announcing each one", async (t) => {

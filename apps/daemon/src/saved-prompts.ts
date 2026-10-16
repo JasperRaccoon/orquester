@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { readFile, rename, stat } from "node:fs/promises";
+import { readFile, realpath, rename, stat } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import {
@@ -113,7 +113,7 @@ interface SavedPromptsServiceOptions {
   workspacesDir: () => string;
   /** …and must realpath inside this sandbox root (the file browser's `fsRoot`). */
   fsRoot: () => string;
-  git?: Pick<GitService, "remoteUrl">;
+  git?: Pick<GitService, "remoteUrl" | "topLevel">;
   logger?: Pick<Console, "warn" | "error">;
 }
 
@@ -166,7 +166,7 @@ export class SavedPromptsService {
   private readonly workspacesDir: () => string;
   private readonly fsRoot: () => string;
   private readonly logger: Pick<Console, "warn" | "error">;
-  private readonly git: Pick<GitService, "remoteUrl">;
+  private readonly git: Pick<GitService, "remoteUrl" | "topLevel">;
 
   constructor(options: SavedPromptsServiceOptions) {
     this.file = options.file;
@@ -414,10 +414,19 @@ export class SavedPromptsService {
     return path;
   }
 
-  /** Local Git config only: no network access, and no remote credentials leave this method. */
+  /**
+   * Local Git config only: no network access, and no remote credentials leave this method. Only a
+   * project that IS its repository's top level (realpath'd, so a symlinked spelling still counts)
+   * has a key: git searches upward, and a plain folder inside some other repository must not take
+   * that repository's origin and share its prompts — it keeps folder scope.
+   */
   private async repositoryKey(project: string | null): Promise<string | null> {
     if (project === null) return null;
     try {
+      const top = await this.git.topLevel(project);
+      if (top === null) return null;
+      const [topReal, projectReal] = await Promise.all([realpath(top), realpath(project)]);
+      if (topReal !== projectReal) return null;
       const remote = await this.git.remoteUrl(project);
       return remote === null ? null : repoKeyOf(remote);
     } catch {

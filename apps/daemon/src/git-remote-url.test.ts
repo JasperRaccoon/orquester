@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -63,4 +63,20 @@ test("currentBranch names the branch, even unborn; null when detached", async ()
     await git("checkout", "-q", "--detach");
     assert.equal(await service.currentBranch(dir), null);
   });
+});
+
+test("topLevel names the work tree's top directory, also from a folder below it; null outside a repo", async () => {
+  await withRepo(async (dir) => {
+    const service = new GitService();
+    const below = join(dir, "sub", "folder");
+    await mkdir(below, { recursive: true });
+    assert.equal(await realpath((await service.topLevel(dir))!), await realpath(dir));
+    assert.equal(await realpath((await service.topLevel(below))!), await realpath(dir), "git searches upward");
+  });
+  const outside = await mkdtemp(join(tmpdir(), "orq-git-toplevel-none-"));
+  try {
+    assert.equal(await new GitService().topLevel(outside), null);
+  } finally {
+    await rm(outside, { recursive: true, force: true });
+  }
 });

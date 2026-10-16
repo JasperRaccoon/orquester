@@ -585,6 +585,13 @@ export class GitService {
     return code === 0 && url ? stripUrlCredentials(url) : null;
   }
 
+  /** The work tree's top-level directory as git prints it, or null (not inside a work tree). */
+  async topLevel(cwd: string): Promise<string | null> {
+    const { stdout, code } = await this.exec(cwd, ["rev-parse", "--show-toplevel"], { allowFail: true });
+    const top = stdout.trim();
+    return code === 0 && top ? top : null;
+  }
+
   /** The checked-out branch's short name, or null (detached HEAD, no repo). */
   async currentBranch(cwd: string): Promise<string | null> {
     const { stdout, code } = await this.exec(cwd, ["symbolic-ref", "--quiet", "--short", "HEAD"], {

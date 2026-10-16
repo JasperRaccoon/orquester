@@ -42,7 +42,7 @@ async function harness(t: TestContext, options: { remotes?: Record<string, strin
   await mkdir(join(root, "daemon"), { recursive: true });
   await writeFile(file, JSON.stringify({ version: 1, prompts: [] }));
   const remotes = new Map(Object.entries(options.remotes ?? {}).map(([ref, url]) => [join(workspacesDir, ref), url]));
-  const git = { remoteUrl: async (cwd: string) => remotes.get(cwd) ?? null };
+  const git = { topLevel: async (cwd: string) => cwd, remoteUrl: async (cwd: string) => remotes.get(cwd) ?? null };
   const library = new SavedPromptsService({ file, workspacesDir: () => workspacesDir, fsRoot: () => workspacesDir, git, logger: { warn() {}, error() {} } });
   await library.load();
   const workflows: { id: string; name: string; project?: unknown; nodes: unknown[] }[] = [];
