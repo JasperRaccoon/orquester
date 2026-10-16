@@ -51,6 +51,7 @@ import {
 import { canonicalProject, projectNamesFor, resolveProject } from "../addressing.ts";
 import type { DaemonApi } from "../daemon-api.ts";
 import { daemonError, ToolError } from "../errors.ts";
+import { listSessions } from "../reads.ts";
 import { classifyTarget, callerProject } from "../gate/scope.ts";
 import { clipText, fitJsonBytes, MAX_ECHO_CHARS, MAX_RESULT_BYTES, resultBytes } from "../result.ts";
 import {
@@ -207,13 +208,39 @@ function seesOrigin(prompt: SavedPrompt, caller: ScopeContext["caller"], workspa
   return origin !== null && origin === caller.workspace;
 }
 
-function rowOf(prompt: SavedPrompt, includeBody: boolean, caller: ScopeContext["caller"], workspacesDir: string, place: Place): PromptRow {
+/**
+ * Who may be named as a GLOBAL prompt's creator (`createdBy` beyond its `kind`): for external
+ * callers and Full-access chats, anyone; for other chats, the caller itself and chats of its own
+ * workspace — the creating thread's workspace read from the open tabs through `DaemonApi`. A thread
+ * no tab names (closed, or unknown) counts as another workspace's: its details stay out.
+ */
+type CreatorFilter = (prompt: SavedPrompt) => boolean;
+
+async function creatorFilter(api: DaemonApi, caller: ScopeContext["caller"], prompts: readonly SavedPrompt[]): Promise<CreatorFilter> {
+  if (caller.kind !== "thread" || caller.runtimeMode === "full-access") return () => true;
+  const asked = prompts.some((prompt) => prompt.projectPath === null && prompt.createdBy?.threadId !== undefined && prompt.createdBy.threadId !== caller.threadId);
+  const workspaceOf = new Map<string, string | null>();
+  if (asked) {
+    for (const session of await listSessions(api).catch(() => [])) {
+      workspaceOf.set(session.id, session.projectPath ? projectNamesFor(session.projectPath, api.workspacesDir).workspace : null);
+    }
+  }
+  return (prompt) => {
+    const threadId = prompt.createdBy?.threadId;
+    if (threadId === undefined || threadId === caller.threadId) return true;
+    const workspace = workspaceOf.get(threadId);
+    return workspace !== undefined && workspace !== null && workspace !== "" && workspace === caller.workspace;
+  };
+}
+
+function rowOf(prompt: SavedPrompt, includeBody: boolean, caller: ScopeContext["caller"], workspacesDir: string, place: Place, creators: CreatorFilter): PromptRow {
   const { body, usedByWorkflows: _uses, projectPath, createdBy, ...rest } = prompt;
   const sees = seesOrigin(prompt, caller, workspacesDir, place);
+  const namesCreator = sees && (prompt.projectPath !== null || creators(prompt));
   return {
     ...rest,
     ...(sees ? { projectPath } : {}),
-    ...(createdBy ? { createdBy: sees ? createdBy : { kind: createdBy.kind } } : {}),
+    ...(createdBy ? { createdBy: namesCreator ? createdBy : { kind: createdBy.kind } } : {}),
     scope: prompt.projectPath === null ? "global" : "project",
     ...visibleUses(prompt, caller),
     bodyChars: body.length,
@@ -296,7 +323,8 @@ const listSavedPrompts = defineTool({
     }
     // The project's own first, then the global ones; pinned first within each; then by title.
     shown.sort((a, b) => Number(a.projectPath === null) - Number(b.projectPath === null) || Number(b.pinned) - Number(a.pinned) || a.title.localeCompare(b.title));
-    const rows = fitRows(shown.map((prompt) => rowOf(prompt, args.includeBody === true, ctx.caller, ctx.api.workspacesDir, place)));
+    const creators = await creatorFilter(ctx.api, ctx.caller, shown);
+    const rows = fitRows(shown.map((prompt) => rowOf(prompt, args.includeBody === true, ctx.caller, ctx.api.workspacesDir, place, creators)));
     return elsewhere > 0 ? { ...rows, sharedElsewhere: elsewhere } : rows;
   }
 });
@@ -540,7 +568,8 @@ const updateSavedPrompts = defineTool({
       };
       const res = await ctx.api.request("POST", ROUTE, { body });
       if (res.status >= 400) throw daemonError(res);
-      return { prompt: rowOf(res.body as SavedPrompt, true, ctx.caller, ctx.api.workspacesDir, place) };
+      const made = res.body as SavedPrompt;
+      return { prompt: rowOf(made, true, ctx.caller, ctx.api.workspacesDir, place, await creatorFilter(ctx.api, ctx.caller, [made])) };
     }
     const id = prompt!.id;
     // The uses this call was judged on (its card's, or the Act the recheck confirmed), re-checked by
@@ -569,7 +598,8 @@ const updateSavedPrompts = defineTool({
     const res = await ctx.api.request("PUT", `${ROUTE}/${encodeURIComponent(id)}`, { body: patch });
     usesStale(res);
     if (res.status >= 400) throw daemonError(res);
-    return { prompt: rowOf({ ...(res.body as SavedPrompt), ...(prompt!.usedByWorkflows ? { usedByWorkflows: prompt!.usedByWorkflows } : {}) }, true, ctx.caller, ctx.api.workspacesDir, place) };
+    const updated: SavedPrompt = { ...(res.body as SavedPrompt), ...(prompt!.usedByWorkflows ? { usedByWorkflows: prompt!.usedByWorkflows } : {}) };
+    return { prompt: rowOf(updated, true, ctx.caller, ctx.api.workspacesDir, place, await creatorFilter(ctx.api, ctx.caller, [updated])) };
   }
 });
 

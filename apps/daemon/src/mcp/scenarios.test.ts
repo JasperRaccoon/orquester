@@ -478,6 +478,39 @@ describe("acceptance (c) / §14.2.11 saved prompts: global and per project; the 
   });
 });
 
+describe("a global prompt's creator below Full access", () => {
+  test("createdBy is named only for the caller itself and chats of its workspace; another workspace's, or an unknown thread, reads as its kind", async () => {
+    await withWorld(async (w) => {
+      const site = w.project("acme/site");
+      const docs = w.project("acme/docs");
+      const orq = w.project("jaspersito/orquester");
+      w.host.addChat("maker", { project: site, title: "Maker", runtimeMode: "auto" });
+      w.host.addChat("neighbour", { project: docs, title: "Neighbour", runtimeMode: "auto" });
+      w.host.addChat("stranger", { project: orq, title: "Stranger", runtimeMode: "auto" });
+      w.host.addChat("wide", { project: orq, title: "Wide", runtimeMode: "full-access" });
+      for (const id of ["maker", "neighbour", "stranger", "wide"]) {
+        assert.equal((await w.user({ method: "PUT", url: `/api/sessions/${id}/agent-tools`, payload: { toolsets: { notes: true } } })).status, 200);
+        w.host.userTurn(id, "Look at the prompts.");
+      }
+      const made = ok(await w.uncarded("maker", "update_saved_prompts", { action: "create", global: true, title: "Shared checklist", body: "Check it." })).prompt;
+      // A global prompt whose creating chat no open tab names any more.
+      const ghost = await w.savedPrompts.create({ title: "Ghost's", body: "b", projectPath: null }, { kind: "agent", threadId: "ghost-thread", projectPath: "", agent: "codex", title: "Gone chat" });
+      const creatorOf = async (threadId: string, id: string) =>
+        (ok(await w.uncarded(threadId, "list_saved_prompts", {})).prompts as { id: string; createdBy?: Record<string, unknown> }[]).find((row) => row.id === id)?.createdBy;
+      const full = { kind: "agent", threadId: "maker", agent: "claude", title: "Maker" };
+      assert.deepEqual(await creatorOf("maker", made.id), full, "the caller itself");
+      assert.deepEqual(await creatorOf("neighbour", made.id), full, "a chat of the caller's workspace");
+      assert.deepEqual(await creatorOf("stranger", made.id), { kind: "agent" }, "another workspace's chat");
+      assert.deepEqual(await creatorOf("wide", made.id), full, "Full access");
+      assert.deepEqual(await creatorOf("neighbour", ghost.id), { kind: "agent" }, "an unknown thread counts as another workspace");
+      assert.equal((await creatorOf("wide", ghost.id))?.title, "Gone chat");
+      // The update's result row follows the same rule.
+      const edited = ok(await w.uncarded("stranger", "update_saved_prompts", { action: "update", id: made.id, body: "Check it twice." })).prompt;
+      assert.deepEqual(edited.createdBy, { kind: "agent" });
+    });
+  });
+});
+
 describe("saved prompts shared by a repository's checkouts, on workflow cards", () => {
   test("a repository prompt whose only checkout was deleted: the create card shows its body in full and pins it, never as missing", async () => {
     await withWorld(async (w) => {
