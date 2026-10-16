@@ -39,6 +39,7 @@ import {
   SAVED_PROMPT_TAG_MAX,
   SAVED_PROMPT_TAGS_MAX,
   SAVED_PROMPT_TITLE_MAX,
+  SAVED_PROMPT_WORKFLOW_USES_CHANGED,
   TOOL_APPROVAL_REASON_MAX_CHARS,
   type ApprovalPreviewSection,
   type CreateSavedPromptRequest,
@@ -542,8 +543,18 @@ const updateSavedPrompts = defineTool({
       return { prompt: rowOf(res.body as SavedPrompt, true, ctx.caller, ctx.api.workspacesDir, place) };
     }
     const id = prompt!.id;
+    // The uses this call was judged on (its card's, or the Act the recheck confirmed), re-checked by
+    // the store in the write's own step: a workflow that started using the prompt meanwhile refuses
+    // the write. Unknown uses were judged unknown (Admin `workflows`, the user approved so): none sent.
+    const expected = ctx.caller.kind === "thread" && !target.usesUnknown ? workflowsOf(prompt!).map((use) => use.workflowId).sort() : undefined;
+    const usesStale = (res: { status: number; body: unknown }): void => {
+      if (res.status === 409 && (res.body as { code?: unknown } | null)?.code === SAVED_PROMPT_WORKFLOW_USES_CHANGED) {
+        throw new ToolError("PREVIEW_STALE", `The workflows that use the saved prompt "${clipText(prompt!.title, 80)}" changed after the check; nothing was done. Call update_saved_prompts again.`);
+      }
+    };
     if (args.action === "delete") {
-      const res = await ctx.api.request("DELETE", `${ROUTE}/${encodeURIComponent(id)}`);
+      const res = await ctx.api.request("DELETE", `${ROUTE}/${encodeURIComponent(id)}`, expected ? { query: { expectWorkflowUses: expected.join(",") } } : undefined);
+      usesStale(res);
       if (res.status >= 400) throw daemonError(res);
       return { deleted: true, id };
     }
@@ -552,9 +563,11 @@ const updateSavedPrompts = defineTool({
       ...(args.body !== undefined ? { body: args.body } : {}),
       ...(args.description !== undefined ? { description: args.description } : {}),
       ...(args.tags !== undefined ? { tags: [...args.tags] } : {}),
-      ...(args.pinned !== undefined ? { pinned: args.pinned } : {})
+      ...(args.pinned !== undefined ? { pinned: args.pinned } : {}),
+      ...(expected ? { expectWorkflowUses: expected } : {})
     };
     const res = await ctx.api.request("PUT", `${ROUTE}/${encodeURIComponent(id)}`, { body: patch });
+    usesStale(res);
     if (res.status >= 400) throw daemonError(res);
     return { prompt: rowOf({ ...(res.body as SavedPrompt), ...(prompt!.usedByWorkflows ? { usedByWorkflows: prompt!.usedByWorkflows } : {}) }, true, ctx.caller, ctx.api.workspacesDir, place) };
   }

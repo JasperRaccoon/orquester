@@ -22,6 +22,7 @@ import {
   SAVED_PROMPT_TAGS_MAX,
   SAVED_PROMPT_TITLE_MAX,
   SAVED_PROMPTS_CHANNEL,
+  SAVED_PROMPT_WORKFLOW_USES_CHANGED,
   SAVED_PROMPTS_MAX
 } from "@orquester/api";
 import { USER_PRINCIPAL, type CallerPrincipal } from "@orquester/api/agent-chat";
@@ -90,7 +91,8 @@ type SavedPromptErrorCode =
   | "INVALID_PROJECT_PATH"
   | "SAVED_PROMPT_NOT_FOUND"
   | "SAVED_PROMPTS_FULL"
-  | "SAVED_PROMPTS_UNAVAILABLE";
+  | "SAVED_PROMPTS_UNAVAILABLE"
+  | typeof SAVED_PROMPT_WORKFLOW_USES_CHANGED;
 
 /** A refusal the routes answer verbatim: `status` with `{ code, message }`. */
 export class SavedPromptError extends Error {
@@ -102,6 +104,11 @@ export class SavedPromptError extends Error {
     super(message);
     this.name = "SavedPromptError";
   }
+}
+
+/** A write's guard: run in the same synchronous step as the map change it guards; throwing refuses it. */
+interface WriteOptions {
+  precondition?: () => void;
 }
 
 interface SavedPromptsServiceOptions {
@@ -317,7 +324,12 @@ export class SavedPromptsService {
    * other `principal` is 403 {@link AGENT_PROMPT_PIN_REFUSED} (unpinning stays
    * open, it only takes the prompt out of the Pinned section).
    */
-  async update(id: string, patch: UpdateSavedPromptRequest, principal: CallerPrincipal = USER_PRINCIPAL): Promise<SavedPrompt> {
+  async update(
+    id: string,
+    patch: UpdateSavedPromptRequest,
+    principal: CallerPrincipal = USER_PRINCIPAL,
+    opts: WriteOptions = {}
+  ): Promise<SavedPrompt> {
     this.requireWritable();
     this.require(id);
     const fields = fieldsOf(patch);
@@ -335,6 +347,8 @@ export class SavedPromptsService {
 
     // Re-read after the await: the prompt may have been deleted meanwhile.
     const current = this.require(id);
+    // From here to the map write nothing awaits: the precondition holds for the write it guards.
+    opts.precondition?.();
     if (changes.pinned === true && principal.kind !== "user" && current.createdBy?.kind === "agent") {
       throw pinRefused();
     }
@@ -360,9 +374,10 @@ export class SavedPromptsService {
     return next;
   }
 
-  async delete(id: string): Promise<void> {
+  async delete(id: string, opts: WriteOptions = {}): Promise<void> {
     this.requireWritable();
     const current = this.require(id);
+    opts.precondition?.();
     this.prompts.delete(id);
     await this.persist();
     this.emitDeleted(current);
@@ -738,20 +753,49 @@ export function registerSavedPromptRoutes(app: FastifyInstance, deps: SavedPromp
     }
   );
 
+  // `expectWorkflowUses` (body; `?expectWorkflowUses=a,b` on DELETE, empty: none): the workflow uses
+  // an agent tool's check or card judged — re-read from the reference index in the write's own step.
+  const usesPrecondition = (id: string, expected: unknown): (() => void) | undefined => {
+    if (expected === undefined) return undefined;
+    if (!Array.isArray(expected) || !expected.every((entry) => typeof entry === "string")) {
+      throw invalid("expectWorkflowUses must be a list of workflow ids.");
+    }
+    const wanted = usesKey(expected);
+    return () => {
+      const index = deps.workflowReferences?.();
+      const now = index ? index.promptUses(id) : { workflows: [] };
+      if ("unknownReason" in now && now.unknownReason) {
+        throw new SavedPromptError(409, SAVED_PROMPT_WORKFLOW_USES_CHANGED, `Orquester cannot tell which workflows use this prompt (${now.unknownReason}); nothing was saved.`);
+      }
+      if (usesKey(now.workflows.map((use) => use.workflowId)) !== wanted) {
+        throw new SavedPromptError(409, SAVED_PROMPT_WORKFLOW_USES_CHANGED, "The workflows that use this prompt changed since it was read; nothing was saved. Read it again.");
+      }
+    };
+  };
+
   app.put<{ Params: { id: string }; Body: UpdateSavedPromptRequest }>(
     "/api/saved-prompts/:id",
     async (request, reply): Promise<SavedPrompt | void> => {
       try {
-        return await service.update(request.params.id, request.body, request.principal ?? USER_PRINCIPAL);
+        // The precondition is not a field of the prompt: taken off the patch (a non-object body is the service's to refuse).
+        const body: unknown = request.body;
+        const record = typeof body === "object" && body !== null && !Array.isArray(body) ? (body as Record<string, unknown>) : null;
+        const { expectWorkflowUses, ...patch } = record ?? {};
+        const precondition = usesPrecondition(request.params.id, expectWorkflowUses);
+        const fields = (record ? patch : body) as UpdateSavedPromptRequest;
+        return await service.update(request.params.id, fields, request.principal ?? USER_PRINCIPAL, precondition ? { precondition } : {});
       } catch (error) {
         return savedPromptError(reply, error);
       }
     }
   );
 
-  app.delete<{ Params: { id: string } }>("/api/saved-prompts/:id", async (request, reply): Promise<void> => {
+  app.delete<{ Params: { id: string }; Querystring: { expectWorkflowUses?: string } }>("/api/saved-prompts/:id", async (request, reply): Promise<void> => {
     try {
-      await service.delete(request.params.id);
+      const expect = request.query.expectWorkflowUses;
+      if (expect !== undefined && typeof expect !== "string") throw invalid("expectWorkflowUses must be a comma-separated list of workflow ids.");
+      const precondition = usesPrecondition(request.params.id, expect === undefined ? undefined : expect.split(",").filter((entry) => entry !== ""));
+      await service.delete(request.params.id, precondition ? { precondition } : {});
       return reply.code(204).send();
     } catch (error) {
       return savedPromptError(reply, error);
@@ -899,6 +943,11 @@ function sameContent(a: SavedPrompt, b: SavedPrompt): boolean {
     a.tags.length === b.tags.length &&
     a.tags.every((tag, index) => tag === b.tags[index])
   );
+}
+
+/** A set of workflow ids as one comparable string. */
+function usesKey(ids: readonly string[]): string {
+  return [...new Set(ids)].sort().join(",");
 }
 
 /** `path` is `root` or below it. */

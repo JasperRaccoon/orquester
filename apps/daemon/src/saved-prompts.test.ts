@@ -11,10 +11,12 @@ import {
   type SavedPrompt
 } from "@orquester/api";
 import { Broadcaster } from "./broadcaster.ts";
+import Fastify from "fastify";
 import {
   SavedPromptError,
   SavedPromptsService,
   publishSavedPromptEvents,
+  registerSavedPromptRoutes,
   savedPromptWorkflowUses
 } from "./saved-prompts.ts";
 import { WorkflowReferenceIndex } from "./workflows/reference-index.ts";
@@ -1076,4 +1078,67 @@ test("savedPromptWorkflowUses: every workflow whose agent block names a saved pr
   for (const workflow of workflows) {
     for (const id of savedPromptIdsOf(workflow)) assert.ok(uses.get(id)?.some((use) => use.workflowId === workflow.id), `${workflow.id} → ${id}`);
   }
+});
+
+/** A workflow whose agent block uses saved prompt `promptId`. */
+function usingWorkflow(id: string, promptId: string): never {
+  return { id, name: id, project: { kind: "existing", projectPath: "/w/acme/site" }, nodes: [{ id: "n", name: "Agent", type: "agent", config: { prompt: { kind: "saved", promptId } } }] } as never;
+}
+
+async function usesRoutes(t: TestContext, onGitRead: () => void = () => {}) {
+  const s = await scratch();
+  t.after(s.cleanup);
+  await writeLibrary(s, { version: 1, prompts: [] });
+  // The library's Git read is an await inside the write: a hook there lands a concurrent save mid-write.
+  const service = new SavedPromptsService({
+    file: s.file, workspacesDir: () => s.workspacesDir, fsRoot: () => s.workspacesDir, logger: quiet,
+    git: { topLevel: async (path) => path, remoteUrl: async () => { onGitRead(); return null; } }
+  });
+  await service.load();
+  const index = new WorkflowReferenceIndex();
+  index.rebuild({ workflows: [] });
+  const app = Fastify();
+  registerSavedPromptRoutes(app, { service, workflowReferences: () => index });
+  await app.ready();
+  t.after(() => app.close());
+  const prompt = await service.create({ title: "T", body: "B", projectPath: null });
+  return { s, service, index, app, prompt };
+}
+
+test("expectWorkflowUses on PUT and DELETE: refused 409 WORKFLOW_USES_CHANGED, nothing saved, unless the index's uses are exactly those; without it (the UI) nothing changes", async (t) => {
+  const { service, index, app, prompt } = await usesRoutes(t);
+  const put = (payload: Record<string, unknown>) => app.inject({ method: "PUT", url: `/api/saved-prompts/${prompt.id}`, payload });
+  index.set(usingWorkflow("wf_1", prompt.id));
+  const stale = await put({ title: "Changed", expectWorkflowUses: [] });
+  assert.equal(stale.statusCode, 409, stale.body);
+  assert.equal(stale.json().code, "WORKFLOW_USES_CHANGED");
+  assert.equal(service.get(prompt.id)?.title, "T");
+  const matching = await put({ title: "Changed", expectWorkflowUses: ["wf_1"] });
+  assert.equal(matching.statusCode, 200, matching.body);
+  assert.equal(matching.json().title, "Changed");
+  assert.equal("expectWorkflowUses" in service.get(prompt.id)!, false, "a precondition, never a stored field");
+  const ui = await put({ title: "From the rail" });
+  assert.equal(ui.statusCode, 200, "the UI sends none: unchanged behaviour");
+  assert.equal((await put({ title: "x", expectWorkflowUses: "wf_1" })).statusCode, 400);
+  // Unknown uses (a record this build cannot read mentions the prompt): refused even when the list "matches".
+  index.rebuild({ workflows: [usingWorkflow("wf_1", prompt.id)], unreadable: [{ id: "wf_x", nodes: [{ config: { prompt: { promptId: prompt.id } } }] }] });
+  assert.equal((await put({ title: "y", expectWorkflowUses: ["wf_1"] })).statusCode, 409);
+  index.rebuild({ workflows: [usingWorkflow("wf_1", prompt.id)] });
+  const del = (expect?: string) => app.inject({ method: "DELETE", url: `/api/saved-prompts/${prompt.id}${expect === undefined ? "" : `?expectWorkflowUses=${expect}`}` });
+  assert.equal((await del("")).statusCode, 409);
+  assert.ok(service.get(prompt.id), "not deleted");
+  assert.equal((await del("wf_1")).statusCode, 204);
+  assert.equal(service.get(prompt.id), undefined);
+});
+
+test("expectWorkflowUses race: a workflow saved while the write awaits is seen in the write's own step, and the write is refused", async (t) => {
+  let land: (() => void) | null = null;
+  const { s, service, index, app, prompt } = await usesRoutes(t, () => { land?.(); land = null; });
+  const site = await s.project("acme", "site");
+  // The checks before the write passed (no use); the move's own await is where the save lands.
+  land = () => index.set(usingWorkflow("wf_late", prompt.id));
+  const res = await app.inject({ method: "PUT", url: `/api/saved-prompts/${prompt.id}`, payload: { title: "Moved", projectPath: site, expectWorkflowUses: [] } });
+  assert.equal(res.statusCode, 409, res.body);
+  assert.equal(res.json().code, "WORKFLOW_USES_CHANGED");
+  assert.deepEqual([service.get(prompt.id)?.title, service.get(prompt.id)?.projectPath], ["T", null], "nothing saved");
 });

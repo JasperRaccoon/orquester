@@ -145,9 +145,20 @@ export interface UpdateSavedPromptRequest {
   tags?: string[];
   projectPath?: string | null;
   pinned?: boolean;
+  /**
+   * A precondition, not a change: refuse with 409 {@link SAVED_PROMPT_WORKFLOW_USES_CHANGED},
+   * nothing saved, unless the workflows whose agent blocks use this prompt (the workflow reference
+   * index, read in the same step as the write) are exactly these ids, in any order — and known. The
+   * daemon's agent tools send the uses their check or approval card judged; the right rail sends
+   * none. Also `?expectWorkflowUses=<id,id…>` (empty: none) on `DELETE /api/saved-prompts/:id`.
+   */
+  expectWorkflowUses?: string[];
 }
 
-// `DELETE /api/saved-prompts/:id` → 204.
+/** 409 code: the workflows using a prompt are no longer the ones an `expectWorkflowUses` named. */
+export const SAVED_PROMPT_WORKFLOW_USES_CHANGED = "WORKFLOW_USES_CHANGED";
+
+// `DELETE /api/saved-prompts/:id` → 204 (`?expectWorkflowUses=`: see UpdateSavedPromptRequest).
 // `POST /api/saved-prompts/:id/used` → the updated {@link SavedPrompt}
 // (`lastUsedAt` now, `useCount` + 1): an Insert or a Send happened.
 

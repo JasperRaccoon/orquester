@@ -412,3 +412,28 @@ test("a workflow whose workspace is unknown (its project is no workspace's) reac
   assert.ok(!JSON.stringify(result).includes("Outside secret"));
   assert.equal((result.prompt as { usedByWorkflowsElsewhere?: number }).usedByWorkflowsElsewhere, 1);
 });
+
+test("expectWorkflowUses: a workflow that starts using the prompt between the tool's check and the store's write refuses the write — PREVIEW_STALE, nothing changed", async (t) => {
+  const h = await harness(t);
+  const created = (await h.value("update_saved_prompts", { action: "create", title: "Mine", body: "one" }, h.chat({ runtimeMode: "approval-required" }))).prompt as Row;
+  // The store's write is the last step: the workflow lands just before it, after every check passed.
+  const lateUse = (write: (...args: never[]) => Promise<unknown>) => async (...args: never[]) => {
+    h.reference(created, { id: "wf_late", name: "Late" });
+    return write(...args);
+  };
+  const update = h.library.update.bind(h.library);
+  h.library.update = lateUse(update as never) as typeof h.library.update;
+  const port = new FakeApprovalPort();
+  assert.match(await h.refused("update_saved_prompts", { action: "update", id: created.id, body: "two" }, "PREVIEW_STALE", h.chat({ runtimeMode: "approval-required" }), port), /workflows that use/);
+  assert.equal(port.cards.length, 0, "it passed as an Act: the store caught the change");
+  assert.equal(h.library.get(created.id)!.body, "one");
+  h.library.update = update;
+  h.workflows.length = 0;
+  const remove = h.library.delete.bind(h.library);
+  h.library.delete = lateUse(remove as never) as typeof h.library.delete;
+  await h.refused("update_saved_prompts", { action: "delete", id: created.id }, "PREVIEW_STALE", h.chat({ runtimeMode: "approval-required" }));
+  assert.ok(h.library.get(created.id), "not deleted");
+  // The right rail sends no precondition: its edit of the now-used prompt goes through as before.
+  h.library.delete = remove;
+  assert.equal((await h.library.update(created.id, { body: "from the rail" })).body, "from the rail");
+});
