@@ -80,6 +80,13 @@ git checkout -q "$BRANCH"
 git reset --hard -q "origin/$BRANCH"
 CI=1 ELECTRON_SKIP_BINARY_DOWNLOAD=1 pnpm install --frozen-lockfile </dev/null
 ELECTRON_SKIP_BINARY_DOWNLOAD=1 pnpm --filter @orquester/web build </dev/null
+# The daemon loads better-sqlite3 and node-pty under /usr/bin/node (the unit's
+# ExecStart interpreter): prove they load there, rebuilding any that don't,
+# before the service is started below.
+if ! CI=1 /usr/bin/node scripts/ensure-node-native.mjs </dev/null; then
+  echo "[provision] native modules do not load under /usr/bin/node $(/usr/bin/node -v) — not starting the daemon." >&2
+  exit 1
+fi
 chown -R root:root /opt/orquester
 
 log "4/7 /etc/orquester/daemon.env"

@@ -8,7 +8,7 @@
     "dev": "concurrently -k \"vite --host 127.0.0.1 --port 5174\" \"pnpm build:main --watch\" \"wait-on http://127.0.0.1:5174 dist-electron/main.cjs && cross-env ORQUESTER_DESKTOP_DEV_URL=http://127.0.0.1:5174 electron .\"",
     "build:main": "tsx scripts/build-main.ts",
     "build:ui": "vite build",
-    "build:electron": "electron-builder",
+    "build:electron": "node ../../scripts/ensure-node-native.mjs --detach && electron-builder && node ../../scripts/ensure-node-native.mjs",
     "build": "pnpm build:main && pnpm build:ui && pnpm build:electron",
     "typecheck": "tsc -p tsconfig.json",
     "test": "node --import tsx --import ../../scripts/test/assert-ok.mjs --test $(find src -name '*.test.ts')"
