@@ -61,6 +61,12 @@ export interface ManifestThread {
    * project: the project-level configs of every directory from the root down to it are loaded too.
    */
   cwdPaths?: readonly string[];
+  /**
+   * Its cwd's real path leaves its project, or its project's real path leaves the workspaces root:
+   * what its CLI loads cannot be told, so EVERY daemon-pointing server of its agent known in any
+   * scope or home is denied by name (an unrelated same-named server too — harmless otherwise).
+   */
+  denyEveryKnown?: boolean;
   /** Spec §5.4: no Admin tool is advertised to it. */
   workflowOwned: boolean;
 }
@@ -107,7 +113,13 @@ export const isWithinDir = (dir: string, parent: string): boolean => {
  * that path; Claude, OpenCode and Grok search upward from the cwd).
  */
 const loadsProjectConfigIn = (thread: ManifestThread, dir: string): boolean =>
-  thread.projectPaths.some((root) => samePath(root, dir) || (isWithinDir(dir, root) && (thread.cwdPaths ?? []).some((cwd) => isWithinDir(cwd, dir))));
+  thread.projectPaths.some(
+    (root) =>
+      samePath(root, dir) ||
+      // An ancestor of the project (Codex reads from its project root — the git root, maybe above).
+      isWithinDir(root, dir) ||
+      (isWithinDir(dir, root) && (thread.cwdPaths ?? []).some((cwd) => isWithinDir(cwd, dir)))
+  );
 
 /**
  * The servers to deny in this thread: its agent's, in ITS account home (user scope) or its
@@ -120,16 +132,19 @@ export function denyFor(thread: ManifestThread, servers: readonly DaemonPointing
   const names = new Set<string>();
   for (const server of servers) {
     if (server.agent !== thread.agentId || typeof server.name !== "string" || server.name === "") continue;
+    if (thread.denyEveryKnown) {
+      names.add(server.name);
+      continue;
+    }
     // A user server every home of the agent loads (Grok's inherited ~/.claude.json, `allHomes`) is
     // denied in every home; any other only in its own.
     const inScope =
       server.scope === "project"
         ? server.projectPath !== undefined && loadsProjectConfigIn(thread, server.projectPath)
         : server.allHomes === true || server.home === thread.home;
-    // A Codex project config that this home's Codex does not load (it does not trust the directory)
-    // needs no denial — and must get none.
-    const loaded = server.loadedByHomes === undefined || server.loadedByHomes.includes(thread.home);
-    if (inScope && loaded) names.add(server.name);
+    // `loadedByHomes` is display only: a Codex denial of a server its config does not load is
+    // harmless (the session sends a disabled stub for it), so trust is never predicted here.
+    if (inScope) names.add(server.name);
   }
   return [...names].sort();
 }

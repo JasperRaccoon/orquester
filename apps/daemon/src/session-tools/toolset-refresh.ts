@@ -298,7 +298,8 @@ export class SessionToolsRefresher {
       const res = await api.request("GET", AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, scope ? { query: { projectPath: scope.projectPath, cwd: scope.cwd } } : undefined);
       // A chat-cwd read the detection refuses outright (its project's or cwd's real path is not
       // inside the workspaces root): no per-cwd scan is possible — never a failure that lasts.
-      if (scope && res.status === 400) return { uncontained: true };
+      const code = (res.body as { error?: { code?: unknown } } | null)?.error?.code;
+      if (scope && res.status === 400 && code === "PATH_NOT_CONTAINED") return { uncontained: true };
       let servers: DaemonPointingServer[];
       if (res.status === 404 && isFastifyRouteMiss(res.body)) servers = [];
       else {
@@ -362,27 +363,40 @@ export class SessionToolsRefresher {
     if (!thread) return null;
     const projectPaths = [thread.projectPath, thread.canonicalProjectPath ?? ""].filter((path) => path !== "");
     // A chat started in a directory inside its project also loads the configs on the way down to
-    // it — decided on REAL paths: a cwd that resolves outside its project (a symlink out) gets the
-    // project root's denials only, as one lexically outside does.
+    // it — decided on REAL paths. A cwd whose real path leaves its project (a symlink out), or a
+    // project whose real path leaves the workspaces root (the detection refuses it: 400
+    // PATH_NOT_CONTAINED), cannot be told what its CLI loads: every daemon-pointing server of its
+    // agent known in any scope is denied by name, plus what the real cwd's own location configures.
     const realProject = thread.canonicalProjectPath || thread.projectPath;
     const realCwd = thread.canonicalCwd || thread.cwd || "";
-    const inside =
-      thread.projectPath !== "" &&
-      thread.cwd !== undefined &&
-      realCwd !== "" &&
-      resolvePath(realCwd) !== resolvePath(realProject) &&
-      isWithinDir(realCwd, realProject);
-    // Its own read holds what a CLI loads at its cwd (Codex's trust is decided for that cwd); the
-    // all-projects read reads each project root as its own cwd.
-    const scopedRead = inside ? await this.daemonPointing({ projectPath: thread.projectPath, cwd: thread.cwd! }) : "uncontained";
-    // The detection refuses that scope for good (the project's real path is not inside the
-    // workspaces root): the all-projects read, as before per-cwd reads — never "unavailable" forever.
-    const scanned = inside && scopedRead !== "uncontained";
-    const daemonPointing = scopedRead === "uncontained" ? await this.daemonPointing() : scopedRead;
+    const atRoot = realCwd === "" || resolvePath(realCwd) === resolvePath(realProject);
+    const inside = thread.projectPath !== "" && thread.cwd !== undefined && !atRoot && isWithinDir(realCwd, realProject);
+    const escapes = thread.projectPath !== "" && !atRoot && !inside;
+    // A project reached through a symlink: its own read says whether it is contained.
+    const linked = thread.projectPath !== "" && resolvePath(realProject) !== resolvePath(thread.projectPath);
+    let uncontained = false;
+    let daemonPointing: readonly DaemonPointingServer[] | null = null;
+    if (inside || (linked && !escapes)) {
+      // Its own read holds what a CLI loads at its cwd (Codex's ancestors included); the
+      // all-projects read reads each project root as its own cwd.
+      const scoped = await this.daemonPointing({ projectPath: thread.projectPath, cwd: inside ? thread.cwd! : thread.projectPath });
+      if (scoped === "uncontained") uncontained = true;
+      else daemonPointing = scoped;
+    }
+    if (!(inside || (linked && !escapes)) || uncontained) daemonPointing = await this.daemonPointing();
+    const denyEveryKnown = escapes || uncontained;
+    if (denyEveryKnown && daemonPointing !== null && realCwd !== "") {
+      // What the real cwd's own location configures, when the detection may read it (inside the
+      // workspaces root); outside it, the names known anywhere stand.
+      const own = await this.daemonPointing({ projectPath: realCwd, cwd: realCwd });
+      if (own === null) daemonPointing = null;
+      else if (own !== "uncontained") daemonPointing = [...daemonPointing, ...own];
+    }
     if (daemonPointing === null) {
       if (!this.refused.has(threadId)) this.refused.set(threadId, this.now());
       return "unavailable";
     }
+    const scanned = inside && !uncontained;
     const refusedAt = this.refused.get(threadId);
     if (refusedAt !== undefined && this.now() - refusedAt > REFUSED_PUSH_WINDOW_MS) this.refused.delete(threadId);
     // Refused before (and maybe still waited for — the host may have given up on an earlier
@@ -416,6 +430,7 @@ export class SessionToolsRefresher {
       home: thread.home,
       projectPaths,
       ...(cwdPaths.length > 0 ? { cwdPaths } : {}),
+      ...(denyEveryKnown ? { denyEveryKnown: true } : {}),
       workflowOwned
     };
     const toolsets = this.deps.resolvedToolsets(threadId, thread.agentId);

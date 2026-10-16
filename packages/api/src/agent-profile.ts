@@ -442,6 +442,8 @@ export interface AgentProfileChangedPayload {
 
 export type AgentProfileErrorCode =
   | "INVALID_REQUEST"
+  /** A `projectPath` / `cwd` whose real path is outside the workspaces root (or the project): refused, never read. */
+  | "PATH_NOT_CONTAINED"
   | "UNKNOWN_AGENT"
   | "AGENT_NOT_INSTALLED"
   | "KIND_NOT_SUPPORTED"

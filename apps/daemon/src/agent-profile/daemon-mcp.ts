@@ -23,11 +23,13 @@
  * 0.159.0): in a git repository, each directory from the repository root down to the cwd, a
  * directory trusted when its own `[projects."<dir>"] trust_level` in that home's `config.toml` is
  * `"trusted"`, else when the repository root's is (an explicit `"untrusted"` wins; keys match
- * exactly); outside a repository, the cwd's directory alone, by its own entry. Denying a server
- * Codex does not load fails the thread ("invalid transport"), so each Codex project-level server
- * carries `loadedByHomes`: the Codex homes that load it for that cwd (a project root is its own cwd
- * in the all-projects view). An unreadable trust table trusts nothing — Codex then loads nothing to
- * deny.
+ * exactly); outside a repository, the cwd's directory alone, by its own entry. That is reported
+ * for display only (`loadedByHomes`): a chat denies every Codex server found whatever the trust,
+ * because the Codex session sends a harmless disabled stub for one its config does not define
+ * (`adapters/codex/session-tools.ts`). For the same reason every ancestor of a scanned project is
+ * read for a `.codex/config.toml` too, up to the filesystem root (Codex starts at its project
+ * root — the git root, or what `project_root_markers` names — which may lie above an Orquester
+ * project).
  *
  * Homes: the daemon user's own (`home: "system"`) and **every managed account home** of the
  * agent's family (`home: <account id>`; spec S11). A file already read through another home (an
@@ -45,7 +47,9 @@
  *    host (`localhost`, `127.0.0.0/8`, `::1`, `0.0.0.0`) on the daemon's HTTP port, or one of the
  *    configured public origins, with path `/mcp`.
  * 3. `name` — it is named exactly `orquester` (Orquester's own in-chat server is injected at
- *    launch, never written to a user or project config).
+ *    launch, never written to a user or project config). Not for Codex: there Orquester's own
+ *    server takes another name when the config has an `orquester`, so a user's that points
+ *    nowhere near this daemon is left alone.
  *
  * Unreadable or unparsable files contribute nothing (logged by path, never by content).
  *
@@ -62,7 +66,8 @@
  *   `POST /api/agent-profile/daemon-mcp-servers/check` for the tool's card preview.
  */
 
-import { lstat, readdir, readFile, realpath } from "node:fs/promises";
+import type { Dirent } from "node:fs";
+import { lstat, readdir, readFile, realpath, stat } from "node:fs/promises";
 import { dirname, join, sep } from "node:path";
 import type { FastifyInstance } from "fastify";
 import {
@@ -330,7 +335,10 @@ export class DaemonMcpDetector {
       }
       for (const { candidate, scope, projectPath } of found) {
         const reason = pointingReason(candidate, this.identity);
-        if (reason === null) continue;
+        // Codex registers Orquester's own server under another name where the config has an
+        // `orquester` (`adapters/codex/session-tools.ts`): a user's `orquester` that does not point
+        // at this daemon is left alone there.
+        if (reason === null || (target.agent === "codex" && reason === "name")) continue;
         const key = [target.agent, target.home, scope, projectPath ?? "", candidate.name].join("\0");
         if (seen.has(key)) {
           // The same name in the system Grok config and in ~/.claude.json: every Grok home loads it.
@@ -377,9 +385,9 @@ export class DaemonMcpDetector {
     try {
       [real, root] = await Promise.all([realpath(projectPath), realpath(this.sources.workspacesRoot())]);
     } catch {
-      throw new AgentProfileError(400, "INVALID_REQUEST", "projectPath is not a project under the workspaces root.");
+      throw new AgentProfileError(400, "PATH_NOT_CONTAINED", "projectPath is not a project under the workspaces root.");
     }
-    if (!real.startsWith(`${root}${sep}`)) throw new AgentProfileError(400, "INVALID_REQUEST", "projectPath is not a project under the workspaces root.");
+    if (!real.startsWith(`${root}${sep}`)) throw new AgentProfileError(400, "PATH_NOT_CONTAINED", "projectPath is not a project under the workspaces root.");
     return real;
   }
 
@@ -394,10 +402,10 @@ export class DaemonMcpDetector {
     try {
       real = await realpath(cwd);
     } catch {
-      throw new AgentProfileError(400, "INVALID_REQUEST", "cwd is not a directory inside projectPath.");
+      throw new AgentProfileError(400, "PATH_NOT_CONTAINED", "cwd is not a directory inside projectPath.");
     }
     if (real === project) return [project];
-    if (!real.startsWith(`${project}${sep}`)) throw new AgentProfileError(400, "INVALID_REQUEST", "cwd is not a directory inside projectPath.");
+    if (!real.startsWith(`${project}${sep}`)) throw new AgentProfileError(400, "PATH_NOT_CONTAINED", "cwd is not a directory inside projectPath.");
     const dirs = [project];
     let dir = project;
     for (const part of real.slice(project.length + 1).split(sep)) {
@@ -441,23 +449,17 @@ export class DaemonMcpDetector {
     return out;
   }
 
-  /** The git repository `cwd` is in, as Codex finds it — searched no higher than the workspaces root. */
+  /** The git repository `cwd` is in, as Codex finds it (display only: `loadedByHomes`). */
   private async gitRoot(cwd: string): Promise<string | undefined> {
-    let root: string;
-    try {
-      root = await realpath(this.sources.workspacesRoot());
-    } catch {
-      return undefined;
-    }
-    for (let dir = cwd; dir.startsWith(`${root}${sep}`); dir = dirname(dir)) {
+    for (let dir = cwd; ; dir = dirname(dir)) {
       try {
         await lstat(join(dir, ".git"));
         return dir;
       } catch {
         // Not here: one level up.
       }
+      if (dirname(dir) === dir) return undefined;
     }
-    return undefined;
   }
 
   private async targets(dirs: readonly string[] | undefined, cwd: string | undefined): Promise<ScanTarget[]> {
@@ -499,6 +501,20 @@ export class DaemonMcpDetector {
       } catch {
         projects = [];
       }
+    }
+    // Codex reads a `.codex/config.toml` in every directory from its project root (the git root,
+    // or what `project_root_markers` names) down to the cwd — which may lie ABOVE an Orquester
+    // project. Denying a server Codex does not load is harmless (the session sends a stub for it),
+    // so every ancestor of a scanned project is read for Codex too, up to the filesystem root.
+    const ancestors = new Set<string>();
+    for (const project of projects) {
+      for (let dir = dirname(project); ; dir = dirname(dir)) {
+        if (!projects.includes(dir)) ancestors.add(dir);
+        if (dirname(dir) === dir) break;
+      }
+    }
+    for (const dir of ancestors) {
+      targets.push({ home: "system", scope: "project", projectPath: dir, agent: "codex", path: join(dir, ".codex", "config.toml"), shape: "toml", codexCwd: cwd ?? dir });
     }
     for (const project of projects) {
       const base = { home: "system", scope: "project" as const, projectPath: project };
@@ -579,12 +595,27 @@ async function realpathOr(path: string): Promise<string> {
 /** Every `<root>/<workspace>/<project>` directory (hidden names skipped). */
 export async function listProjectDirs(workspacesRoot: string): Promise<string[]> {
   const out: string[] = [];
+  // A project that is a symlink is a project too (its chats load its configs through the link).
   const dirs = async (path: string) => {
+    let entries: Dirent[];
     try {
-      return (await readdir(path, { withFileTypes: true })).filter((entry) => entry.isDirectory() && !entry.name.startsWith(".")).map((entry) => entry.name);
+      entries = await readdir(path, { withFileTypes: true });
     } catch {
       return [];
     }
+    const out: string[] = [];
+    for (const entry of entries) {
+      if (entry.name.startsWith(".")) continue;
+      if (entry.isDirectory()) out.push(entry.name);
+      else if (entry.isSymbolicLink()) {
+        try {
+          if ((await stat(join(path, entry.name))).isDirectory()) out.push(entry.name);
+        } catch {
+          // A dangling link is no project.
+        }
+      }
+    }
+    return out;
   };
   for (const workspace of await dirs(workspacesRoot)) {
     for (const project of await dirs(join(workspacesRoot, workspace))) out.push(join(workspacesRoot, workspace, project));

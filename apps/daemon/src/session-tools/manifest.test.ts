@@ -110,18 +110,29 @@ test("deny: a chat in a directory inside its project — the configs from the ro
     server({ name: "at_cwd", scope: "project", projectPath: "/w/acme/api/packages/app/" }),
     server({ name: "deeper", scope: "project", projectPath: "/w/acme/api/packages/app/src" }),
     server({ name: "sibling", scope: "project", projectPath: "/w/acme/api/docs" }),
-    server({ name: "outside", scope: "project", projectPath: "/w/acme" })
+    server({ name: "outside", scope: "project", projectPath: "/w/acme" }),
+    server({ name: "other_project", scope: "project", projectPath: "/w/acme/web" })
   ];
-  assert.deepEqual(denyFor(thread({ cwdPaths: ["/w/acme/api/packages/app"] }), servers), ["at_cwd", "on_the_way", "root"]);
-  assert.deepEqual(denyFor(thread(), servers), ["root"], "at the project root: the root's alone");
+  // An ancestor of the project counts (Codex reads from its project root — the git root, maybe above).
+  assert.deepEqual(denyFor(thread({ cwdPaths: ["/w/acme/api/packages/app"] }), servers), ["at_cwd", "on_the_way", "outside", "root"]);
+  assert.deepEqual(denyFor(thread(), servers), ["outside", "root"], "at the project root: the root's and its ancestors'");
 });
 
-test("deny: a Codex project server only in a home whose Codex loads it (it trusts the project)", () => {
+test("deny: a Codex project server in every home — trust (`loadedByHomes`) is display only", () => {
   const codex = (loadedByHomes?: string[]) => server({ agent: "codex", home: "system", scope: "project", projectPath: "/w/acme/api", name: "proj", ...(loadedByHomes ? { loadedByHomes } : {}) });
-  assert.deepEqual(denyFor(thread({ agentId: "codex", home: "acct-1" }), [codex(["acct-1"])]), ["proj"]);
-  assert.deepEqual(denyFor(thread({ agentId: "codex", home: "system" }), [codex(["acct-1"])]), [], "another home's trust is not this one's");
-  assert.deepEqual(denyFor(thread({ agentId: "codex", home: "acct-1" }), [codex([])]), [], "untrusted everywhere: never denied");
-  assert.deepEqual(denyFor(thread({ agentId: "codex", home: "acct-1" }), [codex()]), ["proj"], "absent: an older detector — every home");
+  for (const loadedByHomes of [["acct-1"], [], undefined]) {
+    assert.deepEqual(denyFor(thread({ agentId: "codex", home: "system" }), [codex(loadedByHomes)]), ["proj"]);
+  }
+});
+
+test("deny: a chat whose cwd or project leaves its bounds — every server of its agent known anywhere", () => {
+  const servers = [
+    server({ name: "other_home", home: "acct-2" }),
+    server({ name: "other_project", scope: "project", projectPath: "/w/acme/web" }),
+    server({ name: "codex_one", agent: "codex" })
+  ];
+  assert.deepEqual(denyFor(thread({ denyEveryKnown: true }), servers), ["other_home", "other_project"], "its own agent's only");
+  assert.deepEqual(denyFor(thread(), servers), []);
 });
 
 test("deny: a server every home of the agent loads (Grok's inherited ~/.claude.json, allHomes) is denied in an account home too", () => {

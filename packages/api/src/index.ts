@@ -955,8 +955,8 @@ export interface DaemonPointingServer {
   /**
    * A Codex project-level server: the Codex homes (`"system"` or account ids) that load it — Codex
    * reads a project's `.codex/config.toml` only where that home trusts the directory. Absent: every
-   * home of `agent` loads it. A chat is denied it only in one of these homes (Codex refuses a thread
-   * that denies a server it did not load). Additive: an older reader ignores it.
+   * home of `agent` loads it. Display only: chats deny it in every home (a denial of a server Codex
+   * did not load is harmless). Additive: an older reader ignores it.
    */
   loadedByHomes?: string[];
 }
