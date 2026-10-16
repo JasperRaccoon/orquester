@@ -1396,7 +1396,8 @@ kept), or put new items in a new list.
 Saved prompts are the user's library (global, or one project's). `list_saved_prompts` lists the
 global ones, plus `project`'s first; `createdBy` names an agent that created one (absent: the
 user's), and `usedByWorkflows` the workflows whose agent blocks run it — such a prompt is live
-workflow code. `update_saved_prompts` `update` and `delete` look for a project prompt in `project`
+workflow code. An edit or deletion of one by an in-chat agent asks the user; so does one of a
+prompt Orquester cannot rule out (a workflow definition it cannot read mentions it). `update_saved_prompts` `update` and `delete` look for a project prompt in `project`
 (else among the global ones). A prompt an in-chat agent created cannot be pinned through the MCP
 (only the user pins it, in the rail).
 
@@ -1913,7 +1914,11 @@ deletion only when it covers every workflow the call runs as a sub-workflow. A c
 is also covered only when the grant covers every workflow that runs the target as one (directly or
 through others): changing or deleting a workflow another workflow outside the grant calls changes
 what that one runs, so it always asks the user (the card names those callers); running it changes
-nothing they run, so a run stays covered. An edit that adds or changes a block reading a workflow
+nothing they run, so a run stays covered. The callers come from the daemon's workflow reference
+index, kept in step with every save: when it cannot tell (a definition this Orquester build cannot
+read may call the workflow), the card says so and offers no grant. The write is refused
+(`PREVIEW_STALE`, nothing done) if the callers changed between the card — or the grant's check —
+and the write. An edit that adds or changes a block reading a workflow
 secret — or a block feeding one that interpolates other blocks' data — always asks too. That check
 reads the block's text (`{{ secrets.NAME }}`, or `secrets` used in a Code block's source); a Code
 block's process receives every secret whatever its text says, but grants exist only for Full-access

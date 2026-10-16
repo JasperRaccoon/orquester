@@ -693,7 +693,7 @@ export async function scenarioWorld(seed: WorkspaceSeed): Promise<ScenarioWorld>
     app.get<{ Querystring: { agent?: string } }>("/api/usage/chat-threads", async (request, reply) =>
       request.query.agent === "grok" ? chatThreadUsage.snapshot("grok") : reply.code(400).send({ code: "INVALID_REQUEST", message: "agent must be grok." })
     );
-    registerSavedPromptRoutes(app, { service: savedPrompts, workflows: () => service.list(), workspacesDir: () => workspacesDir });
+    registerSavedPromptRoutes(app, { service: savedPrompts, workflowReferences: () => service.references, workspacesDir: () => workspacesDir });
     registerWorkflowRoutes(app, {
       service, secrets, runStore, engine: () => daemon.runtime.engine, savedPromptIds: () => savedPrompts.allIds(),
       agentCatalogReady: async () => catalogRef?.ready()

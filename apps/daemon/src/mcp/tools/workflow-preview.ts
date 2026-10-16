@@ -13,7 +13,11 @@
 //   ops and a graph diff;
 // - the pins those previews freeze (§7.2: the workflow revision, each shown prompt's SHA-256) and
 //   their re-verification (`PREVIEW_STALE`);
-// - for Task 12: which workflows reference a saved prompt (`workflowsReferencingPrompt`).
+// - for Task 12: which workflows reference a saved prompt (`workflowsReferencingPrompt`);
+// - the workflows that run one as a sub-workflow (`workflowCallers`).
+// The last two read the daemon's reference index (`workflowRoutes.workflowReferences` /
+// `promptReferences`), which the workflow store keeps in step with every save; an answer the index
+// cannot give (a definition this build cannot read) is `null` here, and callers fail closed.
 
 import { createHash } from "node:crypto";
 import {
@@ -27,14 +31,15 @@ import {
   type AccountSummary,
   type ApprovalPreviewSection,
   type GetWorkflowResponse,
-  type ListWorkflowsResponse,
   type ProjectSummary,
+  type PromptReferencesResponse,
   type SavedPrompt,
   type SavedPromptListResponse,
   type Workflow,
   type WorkflowNode,
   type WorkflowProblem,
   type WorkflowProject,
+  type WorkflowReferencesResponse,
   type WorkspaceSummary
 } from "@orquester/api";
 
@@ -303,44 +308,42 @@ export interface WorkflowCaller {
 
 /**
  * Every workflow that runs `workflowId` as a sub-workflow, directly or through others (the reverse
- * of the union's children): a change to it changes what they run. Reads every definition (the list
- * carries no blocks). Null when they cannot be read — the caller fails closed (`ungrantable`).
+ * of the union's children): a change to it changes what they run. From the daemon's reference index
+ * (one read). Null when they are unknown — the index cannot tell, or cannot be read: the caller fails
+ * closed (`ungrantable`).
  */
 export async function workflowCallers(api: DaemonApi, workflowId: string): Promise<WorkflowCaller[] | null> {
-  const listed = await api.request("GET", workflowRoutes.list);
-  if (listed.status >= 400) return null;
-  const callersOf = new Map<string, Set<string>>();
-  const info = new Map<string, WorkflowCaller>();
-  for (const summary of (listed.body as ListWorkflowsResponse).workflows ?? []) {
-    if (summary.id === workflowId) continue;
-    const res = await api.request("GET", workflowRoutes.workflow(summary.id));
-    if (res.status === 404) continue; // deleted meanwhile
-    if (res.status >= 400) return null;
-    const workflow = (res.body as GetWorkflowResponse).workflow;
-    info.set(workflow.id, { workflowId: workflow.id, name: workflow.name, enabled: workflow.enabled });
-    for (const child of membersOf(workflow).childIds) {
-      const set = callersOf.get(child) ?? new Set<string>();
-      set.add(workflow.id);
-      callersOf.set(child, set);
-    }
-  }
+  const res = await api.request("GET", workflowRoutes.workflowReferences(workflowId));
+  if (res.status >= 400 || !isRecord(res.body)) return null;
+  const callers = (res.body as Partial<WorkflowReferencesResponse>).callers;
+  if (!Array.isArray(callers)) return null;
   const found: WorkflowCaller[] = [];
-  const seen = new Set<string>([workflowId]);
-  let frontier = [workflowId];
-  while (frontier.length > 0) {
-    const next: string[] = [];
-    for (const id of frontier) {
-      for (const parent of callersOf.get(id) ?? []) {
-        if (seen.has(parent)) continue;
-        seen.add(parent);
-        const caller = info.get(parent);
-        if (caller) found.push(caller);
-        next.push(parent);
-      }
-    }
-    frontier = next;
+  for (const caller of callers) {
+    // A route from another build may send anything: an entry without an id is a caller nobody can judge.
+    if (!isRecord(caller) || typeof caller.workflowId !== "string") return null;
+    if (caller.workflowId === workflowId) continue;
+    found.push({ workflowId: caller.workflowId, name: typeof caller.name === "string" ? caller.name : caller.workflowId, enabled: caller.enabled !== false });
   }
   return found;
+}
+
+const CALLERS_PIN = "callers:";
+const UNKNOWN = "unknown";
+
+/** The pin of what a card showed about `workflowId`'s callers: their ids, sorted (`unknown` when they were). */
+export function callersPin(workflowId: string, callers: readonly WorkflowCaller[] | null): Record<string, string> {
+  return { [`${CALLERS_PIN}${workflowId}`]: callers === null ? UNKNOWN : [...new Set(callers.map((caller) => caller.workflowId))].sort().join(",") };
+}
+
+/**
+ * The write's `expectCallers` precondition from a card's pins: the callers it showed, which the
+ * daemon re-checks in the same step as the write (409 `CALLERS_CHANGED`). Undefined without such a
+ * pin, or when the card showed them as unknown (the user approved not knowing).
+ */
+export function expectedCallers(pins: Readonly<Record<string, string>> | undefined, workflowId: string): string[] | undefined {
+  const value = pins?.[`${CALLERS_PIN}${workflowId}`];
+  if (value === undefined || value === UNKNOWN) return undefined;
+  return value === "" ? [] : value.split(",");
 }
 
 /**
@@ -552,6 +555,8 @@ export interface PromptWorkflowUse {
   name: string;
   revision: number;
   project: WorkflowProject;
+  /** The workspace of its own project, when known. */
+  workspace?: string;
   /** The agent blocks whose prompt is `{kind: "saved", promptId}`. */
   nodes: { id: string; name: string }[];
 }
@@ -561,17 +566,26 @@ export interface PromptWorkflowUse {
  * every workflow whose agent blocks reference `promptId`. A non-empty answer makes an agent's
  * update/delete of that prompt Admin `workflows` (`ApprovalPreview.workflowReferencedPrompt: true`,
  * never grantable); the card names these workflows, and `workflowUnion(api, <their definitions>)`
- * is the scope such an edit touches. Reads every definition (the list route carries no blocks).
+ * is the scope such an edit touches. From the daemon's reference index (one read). Null when the
+ * answer may be incomplete (a definition this build cannot read) or cannot be read: the caller treats
+ * the prompt as used — fail closed.
  */
-export async function workflowsReferencingPrompt(api: DaemonApi, promptId: string): Promise<PromptWorkflowUse[]> {
-  const listed = expectWorkflowOk<ListWorkflowsResponse>(await api.request("GET", workflowRoutes.list));
+export async function workflowsReferencingPrompt(api: DaemonApi, promptId: string): Promise<PromptWorkflowUse[] | null> {
+  const res = await api.request("GET", workflowRoutes.promptReferences(promptId));
+  if (res.status >= 400 || !isRecord(res.body)) return null;
+  const body = res.body as Partial<PromptReferencesResponse>;
+  if (body.unknownReason !== undefined || !Array.isArray(body.workflows)) return null;
   const uses: PromptWorkflowUse[] = [];
-  for (const summary of listed.workflows ?? []) {
-    const res = await api.request("GET", workflowRoutes.workflow(summary.id));
-    if (res.status === 404) continue; // deleted meanwhile
-    const workflow = expectWorkflowOk<GetWorkflowResponse>(res).workflow;
-    const nodes = workflow.nodes.filter((node) => savedPromptIdOfNode(node) === promptId).map((node) => ({ id: node.id, name: node.name }));
-    if (nodes.length > 0) uses.push({ workflowId: workflow.id, name: workflow.name, revision: workflow.revision, project: workflow.project, nodes });
+  for (const entry of body.workflows) {
+    if (!isRecord(entry) || typeof entry.workflowId !== "string") return null;
+    uses.push({
+      workflowId: entry.workflowId,
+      name: typeof entry.name === "string" ? entry.name : entry.workflowId,
+      revision: typeof entry.revision === "number" ? entry.revision : 0,
+      project: entry.project as WorkflowProject,
+      ...(typeof entry.workspace === "string" ? { workspace: entry.workspace } : {}),
+      nodes: Array.isArray(entry.nodes) ? entry.nodes.filter(isRecord).map((node) => ({ id: String(node.id), name: String(node.name) })) : []
+    });
   }
   return uses;
 }

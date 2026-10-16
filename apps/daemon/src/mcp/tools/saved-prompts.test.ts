@@ -17,6 +17,7 @@ import { TOOLSETS, type SavedPrompt } from "@orquester/api";
 import { createDefaultClientConfig, createDefaultDaemonConfig } from "@orquester/config";
 import { createServer } from "../../index.ts";
 import { SavedPromptsService } from "../../saved-prompts.ts";
+import { WorkflowReferenceIndex } from "../../workflows/reference-index.ts";
 import { FakeApprovalPort } from "../catalog/approval-double.ts";
 import type { ThreadCaller } from "../catalog/contract.ts";
 import { InjectDaemonApi } from "../daemon-api.ts";
@@ -29,7 +30,10 @@ type Row = SavedPrompt & { scope: string; bodyChars: number };
 
 const ALL = new Set(TOOLSETS.map((toolset) => toolset.id));
 
-/** Workspaces `acme` (`api`, `web`) and `beta` (`app`); a real library behind the daemon's routes; a mutable workflow list. */
+/**
+ * Workspaces `acme` (`api`, `web`) and `beta` (`app`); a real library behind the daemon's routes; a
+ * mutable workflow list behind the workflow store's reference index (a real index, rebuilt per read).
+ */
 async function harness(t: TestContext) {
   const root = realpathSync(await mkdtemp(join(tmpdir(), "mcp-saved-prompts-")));
   const workspacesDir = join(root, "workspaces");
@@ -41,7 +45,18 @@ async function harness(t: TestContext) {
   await library.load();
   const workflows: { id: string; name: string; project?: unknown; nodes: unknown[] }[] = [];
   let workflowReads = 0;
-  const workflowsList = { list: () => { workflowReads += 1; return hooks.workflows(workflowReads); } };
+  const workflowsList = {
+    list: () => { workflowReads += 1; return hooks.workflows(workflowReads); },
+    /** What both the list rows and the agent tools' index route read. */
+    get references() {
+      workflowReads += 1;
+      const index = new WorkflowReferenceIndex();
+      index.rebuild({ workflows: hooks.workflows(workflowReads) as never, unreadable: unreadable });
+      return index;
+    }
+  };
+  /** Records the workflow store keeps but cannot read. */
+  const unreadable: unknown[] = [];
   const hooks = { workflows: (_read: number) => workflows };
   const resolved = { daemonDir: join(root, "daemon"), workspacesDir, workspacesMetaFile: join(root, "workspaces.json"), fsRoot: workspacesDir };
   const app = createServer(
@@ -87,7 +102,7 @@ async function harness(t: TestContext) {
     library.create({ title: "Mine", body: "Review {diff}", projectPath: null, ...fields });
   const reference = (prompt: { id: string }, workflow = { id: "wf_1", name: "Nightly review" }, projectPath = own) =>
     workflows.push({ ...workflow, project: { kind: "existing", projectPath }, nodes: [{ id: "n1", name: "Agent", type: "agent", config: { prompt: { kind: "saved", promptId: prompt.id } } }] } as never);
-  return { library, workflows, hooks, own, workspacesDir, chat, call, value, refused, userPrompt, reference };
+  return { library, workflows, unreadable, hooks, own, workspacesDir, chat, call, value, refused, userPrompt, reference };
 }
 
 test("from a chat: add a per-project prompt (the chat's project by default) and a global one — Act, no card, createdBy stamped by the daemon", async (t) => {
@@ -178,6 +193,24 @@ test("a prompt a workflow uses: Admin workflows — the card names the workflows
   await h.refused("update_saved_prompts", { action: "update", id: created.id, title: "x" }, "ADMIN_NOT_AVAILABLE", h.chat({ workflowOwned: true }));
 });
 
+test("fail closed: a prompt a workflow definition the daemon cannot read mentions counts as used — Admin workflows, never grantable, the card says why", async (t) => {
+  const h = await harness(t);
+  const created = (await h.value("update_saved_prompts", { action: "create", title: "Draft", body: "one" }, h.chat())).prompt as Row;
+  // A newer build's record (not readable here) that names the prompt.
+  h.unreadable.push({ id: "wf_future", name: "From a newer build", nodes: [{ type: "agent", config: { prompt: { kind: "saved-v2", ref: created.id } } }] });
+  const port = new FakeApprovalPort().grant({ family: "saved-prompts", scope: "chat", threadId: "me", projectPath: h.own });
+  await h.value("update_saved_prompts", { action: "update", id: created.id, body: "two" }, h.chat(), port);
+  const card = port.cards[0]!;
+  assert.ok(card, "no longer an Act: a card");
+  assert.deepEqual([card.kind, card.family, card.workflowReferencedPrompt], ["admin", "workflows", true]);
+  assert.deepEqual(card.grantOptions, []);
+  assert.ok(card.sections.some((section) => section.kind === "warning" && /could not check which workflows use this prompt/.test(section.text)));
+  // A prompt it does not mention stays an Act.
+  const other = (await h.value("update_saved_prompts", { action: "create", title: "Other", body: "x" }, h.chat())).prompt as Row;
+  await h.value("update_saved_prompts", { action: "update", id: other.id, body: "y" }, h.chat(), port);
+  assert.equal(port.cards.length, 1);
+});
+
 test("what is approved is what runs: a prompt edited while its card waits is PREVIEW_STALE; one a workflow started using is refused", async (t) => {
   const h = await harness(t);
   const mine = await h.userPrompt({ title: "Shared", body: "v1" });
@@ -191,7 +224,8 @@ test("what is approved is what runs: a prompt edited while its card waits is PRE
   const created = (await h.value("update_saved_prompts", { action: "create", title: "Mine", body: "a" }, h.chat())).prompt as Row;
   const used = [{ id: "wf_9", name: "Late", nodes: [{ id: "n", name: "A", type: "agent", config: { prompt: { kind: "saved", promptId: created.id } } }] }];
   let reads = 0;
-  h.hooks.workflows = () => (++reads >= 2 ? used : []);
+  // The gate's scope reads the index twice (the list row, then the index route): it still sees no workflow.
+  h.hooks.workflows = () => (++reads >= 3 ? used : []);
   assert.match(await h.refused("update_saved_prompts", { action: "update", id: created.id, body: "b" }, "PERMISSION_DENIED", h.chat()), /approval/);
   assert.equal(h.library.get(created.id)!.body, "a");
 });

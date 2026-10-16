@@ -28,7 +28,8 @@ import { connectExecutor, createAgentToolsRuntime, WORKFLOW_GRANT_NOTICE } from 
 import type { ThreadCaller } from "../catalog/contract.ts";
 import { executeToolCall, executorPorts } from "../executor.ts";
 import { head, snapshot } from "../fixtures.ts";
-import { FakeDaemonApi } from "../testing.ts";
+import { FakeDaemonApi, serveWorkflowReferences } from "../testing.ts";
+import { callersKey, WorkflowReferenceIndex } from "../../workflows/reference-index.ts";
 
 const ROOT = realpathSync(mkdtempSync(join(tmpdir(), "umcp-wf-grants-")));
 const WS = join(ROOT, "w");
@@ -52,14 +53,23 @@ function workflowBackend(api: FakeDaemonApi) {
     return { status: 201, body: { workflow, problems: [] } };
   });
   api.on("GET", "/api/workflows/*", () => notFound);
-  // The list (ids are what the callers check reads; each definition comes from its own route).
-  api.on("GET", "/api/workflows", () => ({ status: 200, body: { workflows: [...store.values()].map((w) => ({ id: w.id, name: w.name, enabled: w.enabled, revision: w.revision })) } }));
+  // The reference index, as the workflow store keeps it (callers and prompt uses).
+  serveWorkflowReferences(api, () => [...store.values()]);
+  /** The daemon's `expectCallers` precondition (409 CALLERS_CHANGED). */
+  const callersChanged = (id: string, expected: string[] | undefined) => {
+    if (expected === undefined) return null;
+    const index = new WorkflowReferenceIndex();
+    index.rebuild({ workflows: [...store.values()] });
+    return index.callersKey(id) === callersKey(expected) ? null : { status: 409, body: { error: { code: "CALLERS_CHANGED", message: "Callers changed" } } };
+  };
   const serve = (id: string) => {
     api.on("GET", `/api/workflows/${id}`, () => (store.has(id) ? { status: 200, body: { workflow: store.get(id), problems: [] } } : notFound));
     api.on("POST", `/api/workflows/${id}/patch`, ({ body }) => {
       const current = store.get(id)!;
-      const { revision, ops } = body as { revision: number; ops: WorkflowPatchOp[] };
+      const { revision, ops, expectCallers } = body as { revision: number; ops: WorkflowPatchOp[]; expectCallers?: string[] };
       if (revision !== current.revision) return { status: 409, body: { error: { code: "REVISION_CONFLICT", message: "Stale" } } };
+      const changed = callersChanged(id, expectCallers);
+      if (changed) return changed;
       const next = { ...applyWorkflowPatch(current, ops, env()), id, revision: current.revision + 1 };
       store.set(id, next);
       return { status: 200, body: { workflow: next, problems: [] } };
@@ -83,7 +93,11 @@ function workflowBackend(api: FakeDaemonApi) {
       api.on("GET", `/api/workflow-runs/${runId}`, { status: 200, body: { run: { id: runId, workflowId: id, workflowName: "x", status: "running", trigger: { kind: "manual" }, test: false, queuedAt: "2026-10-15T00:00:00Z", definition: store.get(id), blocks: {}, takenEdges: [], deadEdges: [], triggerPayload: null, ...subWorkflowRevisions } } });
       return { status: 200, body: { runId } };
     });
-    api.on("DELETE", `/api/workflows/${id}`, () => (store.delete(id) ? { status: 200, body: { ok: true } } : notFound));
+    api.on("DELETE", `/api/workflows/${id}`, ({ query }) => {
+      const changed = callersChanged(id, query?.expectCallers === undefined ? undefined : query.expectCallers.split(",").filter(Boolean));
+      if (changed) return changed;
+      return store.delete(id) ? { status: 200, body: { ok: true } } : notFound;
+    });
   };
   /** A workflow the USER made (not through this chat). */
   const seed = (name: string): Workflow => {
@@ -280,4 +294,42 @@ test("no escape through sub-workflows: wiring the user's (disabled) workflow int
   assert.deepEqual(named.rows.map((row) => [row.label, row.value]), [[`Theirs (${theirs.id})`, `revision ${theirs.revision}, disabled`]]);
   assert.deepEqual(r.workflowGrant()[0]!.workflowIds, [id, theirs.id]);
   ok(await r.uncarded("run_workflow", { workflowId: id, revision: 1 }));
+});
+
+test("race: a workflow outside the grant that starts running this one between the grant's check and the write — PREVIEW_STALE, nothing saved or deleted", async (t) => {
+  const r = await rig(t);
+  const id = ok((await r.carded("create_workflow", fixer, { decision: "approve", grant: "chat" })).result).workflowId as string;
+  r.backend.serve(id);
+  // The next read of its callers answers (none), and right after it the user saves a workflow that runs it.
+  let raced = false;
+  const index = () => {
+    const built = new WorkflowReferenceIndex();
+    built.rebuild({ workflows: [...r.backend.store.values()] });
+    return built;
+  };
+  r.api.on("GET", `/api/workflow-references/workflows/${id}`, () => {
+    const built = index();
+    const answer = built.callers(id);
+    const body = { version: answer.version, workflowId: id, calls: built.calls(id), callers: answer.callers };
+    if (!raced) {
+      raced = true;
+      const theirs = r.backend.seed("Theirs");
+      r.backend.store.set(theirs.id, { ...theirs, nodes: [...theirs.nodes, { id: "call", name: "Call", type: "workflow", position: { x: 0, y: 0 }, config: { workflowId: id } }] } as Workflow);
+    }
+    return { status: 200, body };
+  });
+  const edit = await r.uncarded("update_workflow", { workflowId: id, revision: 0, ops: [{ op: "set_name", name: "Renamed" }] });
+  assert.equal(codeOf(edit), "PREVIEW_STALE", JSON.stringify(edit.structuredContent));
+  assert.equal(r.backend.store.get(id)!.name, "Fixer", "nothing saved");
+  assert.equal(r.backend.store.get(id)!.revision, 0);
+  // Now the caller is known: the edit cards (a caller outside the grant), as the reverse rule says.
+  const carded = await r.carded("update_workflow", { workflowId: id, revision: 0, ops: [{ op: "set_name", name: "Renamed" }] }, { decision: "deny" });
+  assert.match(JSON.stringify(carded.card), /Workflows that run it as a sub-workflow/);
+  // The same race on a delete.
+  raced = false;
+  const stillThere = [...r.backend.store.values()].filter((w) => w.name === "Theirs").map((w) => w.id);
+  for (const other of stillThere) r.backend.store.delete(other);
+  const del = await r.uncarded("delete_workflow", { workflowId: id, confirm: true });
+  assert.equal(codeOf(del), "PREVIEW_STALE", JSON.stringify(del.structuredContent));
+  assert.ok(r.backend.store.has(id), "nothing deleted");
 });

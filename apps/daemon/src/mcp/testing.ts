@@ -1,5 +1,6 @@
+import { basename, dirname } from "node:path";
 import type { Readable } from "node:stream";
-import type { EventMessage } from "@orquester/api";
+import type { EventMessage, PromptReferencesResponse, Workflow, WorkflowProject, WorkflowReferencesResponse } from "@orquester/api";
 import type { HtmlRenderReference } from "@orquester/api/agent-chat";
 import type {
   DaemonApi,
@@ -10,9 +11,10 @@ import type {
   HtmlPreviewRequest,
   HtmlRenderPublishRequest
 } from "./daemon-api.ts";
+import { WorkflowReferenceIndex } from "../workflows/reference-index.ts";
 
 type Call = { method: DaemonMethod; path: string; query?: Record<string, string>; body?: unknown };
-type Responder = DaemonResponse | ((call: { query?: Record<string, string>; body?: unknown }) => DaemonResponse);
+type Responder = DaemonResponse | ((call: { query?: Record<string, string>; body?: unknown; path: string }) => DaemonResponse);
 
 /**
  * In-memory DaemonApi for tool tests. The rules a test can rely on:
@@ -21,8 +23,8 @@ type Responder = DaemonResponse | ((call: { query?: Record<string, string>; body
  *   matches and whose path matches — exactly, or as a prefix when the registered path ends in `*`
  *   (`"/api/sessions/*"`). Exact and prefix routes are not ranked: registration order alone decides, so a later `on`
  *   overrides an earlier one for the paths it covers. `opts.query` never takes part in matching (a `?` written into
- *   `path` itself is part of the path and matches literally); a function responder receives `{query, body}` and can
- *   branch on it.
+ *   `path` itself is part of the path and matches literally); a function responder receives `{query, body, path}` and
+ *   can branch on it.
  * - Answers. A responder is a canned `DaemonResponse` or a function returning one; a function that throws makes
  *   `request` reject (a transport failure). An unmatched request answers `404 {code: "NOT_FOUND"}`; it never throws.
  *   Every request, matched or not, is appended to `calls` (`query`/`body` only when given).
@@ -68,7 +70,7 @@ export class FakeDaemonApi implements DaemonApi {
     this.calls.push(call);
     const route = this.routes.find((r) => r.method === method && (r.path.endsWith("*") ? path.startsWith(r.path.slice(0, -1)) : r.path === path));
     if (!route) return { status: 404, body: { code: "NOT_FOUND", message: `no fake route for ${method} ${path}` } };
-    return typeof route.responder === "function" ? route.responder({ query: opts?.query, body: opts?.body }) : route.responder;
+    return typeof route.responder === "function" ? route.responder({ query: opts?.query, body: opts?.body, path }) : route.responder;
   }
   async uploadAttachment(sessionId: string, meta: { name: string; type?: string }, bytes: Readable): Promise<{ status: number; value: unknown }> {
     const chunks: Buffer[] = [];
@@ -113,4 +115,46 @@ export class FakeDaemonApi implements DaemonApi {
 /** A bus event as the daemon publishes it. */
 export function busEvent(type: string, payload: unknown, channel = "sessions"): EventMessage {
   return { id: `${type}-${Math.random()}`, channel, type, createdAt: new Date().toISOString(), payload } as EventMessage;
+}
+
+/**
+ * The workflow reference index's routes (`workflowRoutes.workflowReferences` / `promptReferences`),
+ * answered as the daemon answers them: by a REAL {@link WorkflowReferenceIndex} rebuilt from
+ * `workflows()` (and `unreadable()`, records the store cannot read) on every request.
+ */
+export function serveWorkflowReferences(api: FakeDaemonApi, workflows: () => readonly Workflow[], unreadable: () => readonly unknown[] = () => []): FakeDaemonApi {
+  const index = (): WorkflowReferenceIndex => {
+    const built = new WorkflowReferenceIndex();
+    built.rebuild({ workflows: workflows(), unreadable: unreadable() });
+    return built;
+  };
+  const workspaceOf = (project: WorkflowProject): string => (project.kind === "temp" ? project.workspace : basename(dirname(project.projectPath)));
+  const tail = (path: string, prefix: string) => decodeURIComponent(path.slice(prefix.length));
+  const WORKFLOWS = "/api/workflow-references/workflows/";
+  const PROMPTS = "/api/workflow-references/prompts/";
+  api.on("GET", `${WORKFLOWS}*`, ({ path }) => {
+    const id = tail(path, WORKFLOWS);
+    const built = index();
+    const answer = built.callers(id);
+    const body: WorkflowReferencesResponse = {
+      version: answer.version,
+      workflowId: id,
+      calls: built.calls(id),
+      callers: answer.callers === null ? null : answer.callers.map((caller) => ({ ...caller, workspace: workspaceOf(caller.project) })),
+      ...(answer.unknownReason ? { unknownReason: answer.unknownReason } : {})
+    };
+    return { status: 200, body };
+  });
+  api.on("GET", `${PROMPTS}*`, ({ path }) => {
+    const promptId = tail(path, PROMPTS);
+    const answer = index().promptUses(promptId);
+    const body: PromptReferencesResponse = {
+      version: answer.version,
+      promptId,
+      workflows: answer.workflows.map((use) => ({ ...use, workspace: workspaceOf(use.project) })),
+      ...(answer.unknownReason ? { unknownReason: answer.unknownReason } : {})
+    };
+    return { status: 200, body };
+  });
+  return api;
 }

@@ -19,6 +19,12 @@
 // holds an error, so a write that would leave one enabled with errors is refused whole (400
 // `INVALID_WORKFLOW` with the problems) — enabling included. Records are never mutated in place: a
 // change replaces the map entry, so an object already handed out stays what it was.
+//
+// The reference index (`references`: sub-workflow calls and callers, saved-prompt uses) changes in
+// the same synchronous step as the map — `commit` / `remove` are the only places either changes, and
+// `load` rebuilds it — so it never answers for a state the map has left. A patch or delete may carry
+// `expectCallers` (the callers an approval card showed): checked against the index in that same step
+// (409 `CALLERS_CHANGED`).
 
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
@@ -49,6 +55,7 @@ import { writeFileAtomic } from "../agent-hooks.ts";
 import type { Broadcaster } from "../broadcaster.ts";
 import type { WorkflowStore } from "./contracts.ts";
 import { excerpt, invalidRequest, WorkflowError, workflowNotFound } from "./errors.ts";
+import { callersKey, WorkflowReferenceIndex } from "./reference-index.ts";
 import { jsonBytes } from "./run-context.ts";
 
 export interface WorkflowServiceOptions {
@@ -78,6 +85,8 @@ function patchError(error: unknown, what: "op" | "item"): WorkflowError {
 export class WorkflowService implements WorkflowStore {
   /** Emits `"upserted"` (the whole {@link Workflow}) and `"deleted"` (`{id}`) after each write lands. */
   readonly lifecycle = new EventEmitter();
+  /** Who runs whom, and which workflows use which saved prompt — kept in step with every write. */
+  readonly references = new WorkflowReferenceIndex();
   private readonly workflows = new Map<string, Workflow>();
   private rejected: unknown[] = [];
   private extra: Record<string, unknown> = {};
@@ -103,6 +112,16 @@ export class WorkflowService implements WorkflowStore {
     this.rejected = [];
     this.extra = {};
     this.blockedReason = null;
+    // Until the file is read, nobody may learn "no callers" from an empty map.
+    this.references.rebuild({ workflows: [], unavailable: "the workflow definitions are being read" });
+    try {
+      await this.read();
+    } finally {
+      this.references.rebuild({ workflows: [...this.workflows.values()], unreadable: this.rejected, unavailable: this.blockedReason });
+    }
+  }
+
+  private async read(): Promise<void> {
     let text: string;
     try {
       text = await readFile(this.file, "utf8");
@@ -229,6 +248,7 @@ export class WorkflowService implements WorkflowStore {
     if (!isRecord(body) || !Array.isArray(body.ops)) throw invalidRequest("The body must be {revision, ops}.");
     const current = this.require(id);
     this.requireRevision(current, body.revision);
+    this.requireCallers(id, body.expectCallers);
     let next: Workflow;
     try {
       next = applyWorkflowPatch(current, body.ops, { mintId: randomUUID, now: () => new Date() });
@@ -274,12 +294,16 @@ export class WorkflowService implements WorkflowStore {
     return this.write(this.check(candidate));
   }
 
-  /** Remove a definition (the caller cascades runs and secrets). `revision`, when given, is checked. */
-  async delete(id: string, revision?: number): Promise<Workflow> {
+  /**
+   * Remove a definition (the caller cascades runs and secrets). `revision` and `expectCallers`, when
+   * given, are checked.
+   */
+  async delete(id: string, revision?: number, expectCallers?: readonly string[]): Promise<Workflow> {
     this.requireWritable();
     const current = this.require(id);
     if (revision !== undefined) this.requireRevision(current, revision);
-    this.workflows.delete(id);
+    this.requireCallers(id, expectCallers);
+    this.remove(id);
     await this.persist();
     const payload: WorkflowDeletedPayload = { id };
     this.lifecycle.emit("deleted", payload);
@@ -338,10 +362,37 @@ export class WorkflowService implements WorkflowStore {
   }
 
   private async write(response: WorkflowWriteResponse): Promise<WorkflowWriteResponse> {
-    this.workflows.set(response.workflow.id, response.workflow);
+    this.commit(response.workflow);
     await this.persist();
     this.lifecycle.emit("upserted", response.workflow);
     return response;
+  }
+
+  /** THE place a definition is stored: the map and the reference index, in one synchronous step. */
+  private commit(workflow: Workflow): void {
+    this.workflows.set(workflow.id, workflow);
+    this.references.set(workflow);
+  }
+
+  /** THE place a definition is removed: the map and the reference index, in one synchronous step. */
+  private remove(id: string): void {
+    this.workflows.delete(id);
+    this.references.delete(id);
+  }
+
+  /** `expectCallers` (absent: no check) must be exactly the workflows that run `id` now — and they must be known. */
+  private requireCallers(id: string, expected: unknown): void {
+    if (expected === undefined) return;
+    if (!Array.isArray(expected) || !expected.every((entry) => typeof entry === "string")) {
+      throw invalidRequest("expectCallers must be a list of workflow ids.");
+    }
+    const now = this.references.callers(id);
+    if (now.callers === null) {
+      throw new WorkflowError(409, "CALLERS_CHANGED", `Orquester cannot tell which workflows run this one as a sub-workflow (${now.unknownReason}); nothing was saved.`);
+    }
+    if (callersKey(now.callers.map((caller) => caller.workflowId)) !== callersKey(expected)) {
+      throw new WorkflowError(409, "CALLERS_CHANGED", "The workflows that run this one as a sub-workflow changed since it was read; nothing was saved. Read them again.");
+    }
   }
 
   private requireRevision(current: Workflow, revision: unknown): void {

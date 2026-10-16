@@ -17,7 +17,7 @@ import { FakeApprovalPort } from "../catalog/approval-double.ts";
 import type { ThreadCaller } from "../catalog/contract.ts";
 import { ToolError } from "../errors.ts";
 import { executeToolCall, type ExecutorDeps } from "../executor.ts";
-import { busEvent, FakeDaemonApi } from "../testing.ts";
+import { busEvent, FakeDaemonApi, serveWorkflowReferences } from "../testing.ts";
 import { blockUsesSecrets, changesSecretUse, graphDiff, unifiedDiff, workflowsReferencingPrompt, workflowUnion } from "./workflow-preview.ts";
 
 type Result = Record<string, unknown>;
@@ -39,8 +39,9 @@ async function sandbox(t: { after: (fn: () => Promise<void>) => void }): Promise
     .on("GET", "/api/workspaces", { status: 200, body: [{ name: "acme", path: join(root, "acme"), projectCount: 2, gitAccountId: "acc1" }, { name: "beta", path: join(root, "beta"), projectCount: 1, gitAccount: { label: "beta-bot", login: "betabot", provider: "github" } }] })
     .on("GET", "/api/accounts", { status: 200, body: [{ id: "acc1", label: "acme-bot", login: "acmebot" }] })
     .on("GET", "/api/saved-prompts", { status: 200, body: { prompts: [] } })
-    // No other workflow (none runs another as a sub-workflow) unless a test serves a list.
     .on("GET", "/api/workflows", { status: 200, body: { workflows: [] } });
+  // The reference index: no other workflow (none runs another as a sub-workflow) unless a test serves one.
+  serveWorkflowReferences(api, () => []);
   return api;
 }
 
@@ -1034,7 +1035,11 @@ test("reverse direction: a grant never covers changing or deleting a workflow th
   const subBlock = (id: string, target: string) => ({ id, name: `Run ${target}`, type: "workflow", position: { x: 0, y: 0 }, config: { workflowId: target } });
   const userParent = definition(api, { id: "wf-user", name: "Nightly", enabled: true, nodes: [...definition(api).nodes, subBlock("s", "wf-1")] as Workflow["nodes"] });
   api.on("GET", "/api/workflows/wf-user", { status: 200, body: { workflow: userParent, problems: [] } });
-  api.on("GET", "/api/workflows", { status: 200, body: { workflows: [{ id: "wf-1" }, { id: "wf-user" }] } });
+  // The daemon's reference index over the stored definitions.
+  const stored: Workflow[] = [child, userParent];
+  const unreadable: unknown[] = [];
+  serveWorkflowReferences(api, () => stored, () => unreadable);
+  const referenceReads = () => api.calls.filter((c) => c.method === "GET" && c.path.startsWith("/api/workflow-references/")).length;
   api.on("POST", "/api/workflows/wf-1/run", { status: 200, body: { runId: "run-1" } });
   api.on("GET", "/api/workflow-runs/run-1", { status: 200, body: { run: runRecord(child) } });
   const port = new FakeApprovalPort({ outcome: "denied", approvalId: "" }).grant({ family: "workflows", scope: "chat", threadId: "me", projectPath: api.own, workflowIds: ["wf-1"] });
@@ -1043,11 +1048,13 @@ test("reverse direction: a grant never covers changing or deleting a workflow th
   await exec(api, "delete_workflow", { workflowId: "wf-1", confirm: true }, { who: chat(api), port });
   assert.equal(port.cards.length, 2, "update and delete card");
   // Running it changes nothing Nightly runs: the grant covers the run, and no caller list is read.
-  const listReads = api.calls.filter((c) => c.method === "GET" && c.path === "/api/workflows").length;
+  const readsBefore = referenceReads();
   const ran = await exec(api, "run_workflow", { workflowId: "wf-1", revision: 7 }, { who: chat(api), port });
   assert.equal(ran.isError, undefined, JSON.stringify(ran.structuredContent));
   assert.equal(port.cards.length, 2, "the run is covered by the grant");
-  assert.equal(api.calls.filter((c) => c.method === "GET" && c.path === "/api/workflows").length, listReads, "no caller check for a run");
+  assert.equal(referenceReads(), readsBefore, "no caller check for a run");
+  // One index read per card, never a read of every definition.
+  assert.ok(!api.calls.some((c) => c.method === "GET" && c.path === "/api/workflows"), "no list read for callers");
   for (const card of port.cards) {
     assert.deepEqual(card.grantOptions, [], "a grant chosen here could never cover it");
     assert.match(sectionText(card.sections), /Workflows that run it as a sub-workflow/);
@@ -1060,16 +1067,26 @@ test("reverse direction: a grant never covers changing or deleting a workflow th
   // Through another workflow: Weekly (outside) runs Nightly (inside), which runs wf-1.
   const outer = definition(api, { id: "wf-outer", name: "Weekly", nodes: [...definition(api).nodes, subBlock("o", "wf-user")] as Workflow["nodes"] });
   api.on("GET", "/api/workflows/wf-outer", { status: 200, body: { workflow: outer, problems: [] } });
-  api.on("GET", "/api/workflows", { status: 200, body: { workflows: [{ id: "wf-1" }, { id: "wf-user" }, { id: "wf-outer" }] } });
+  stored.push(outer);
   await update();
   assert.equal(port.cards.length, 3, "a transitive caller outside the grant cards");
   assert.match(sectionText(port.cards[2]!.sections), /Weekly/);
-  // Callers that cannot be read: fail closed.
-  api.on("GET", "/api/workflows", { status: 500, body: { error: { code: "INTERNAL", message: "x" } } });
+  // All three in the grant: covered.
   port.file.grants[0]!.workflowIds = ["wf-1", "wf-user", "wf-outer"];
+  await update();
+  assert.equal(port.cards.length, 3);
+  // A definition the daemon cannot read that names one of them: the callers are unknown — fail closed.
+  unreadable.push({ id: "wf-future", name: "From a newer build", nodes: [{ type: "workflow.v2", config: { target: "wf-user" } }] });
   await update();
   assert.equal(port.cards.length, 4);
   assert.deepEqual(port.cards[3]!.grantOptions, []);
+  assert.match(sectionText(port.cards[3]!.sections), /could not check which workflows run this one/);
+  unreadable.length = 0;
+  // Callers that cannot be read at all: fail closed too.
+  api.on("GET", "/api/workflow-references/workflows/*", { status: 500, body: { error: { code: "INTERNAL", message: "x" } } });
+  await update();
+  assert.equal(port.cards.length, 5);
+  assert.deepEqual(port.cards[4]!.grantOptions, []);
 });
 
 test("changesSecretUse: added, changed, newly reachable and (for interpolating blocks) upstream changes count; unrelated ones do not", () => {
@@ -1246,11 +1263,17 @@ test("workflowsReferencingPrompt (for Task 12): every workflow whose agent block
   const agent = (id: string, promptId: string) => ({ id, name: `Ask${id}`, type: "agent", position: { x: 0, y: 0 }, config: { prompt: { kind: "saved", promptId }, chain: [{ agent: "claude", model: "opus" }] } });
   const uses = definition(api, { id: "wf-a", name: "Uses", nodes: [agent("1", "p1"), agent("2", "p2"), agent("3", "p1")] as Workflow["nodes"] });
   const other = definition(api, { id: "wf-b", name: "Other", nodes: [agent("4", "p2")] as Workflow["nodes"] });
-  api.on("GET", "/api/workflows", { status: 200, body: { workflows: [{ id: "wf-a" }, { id: "wf-b" }, { id: "wf-gone" }] } });
-  api.on("GET", "/api/workflows/wf-a", { status: 200, body: { workflow: uses, problems: [] } });
-  api.on("GET", "/api/workflows/wf-b", { status: 200, body: { workflow: other, problems: [] } });
-  api.on("GET", "/api/workflows/wf-gone", failure(404, "WORKFLOW_NOT_FOUND", "gone"));
+  const unreadable: unknown[] = [];
+  serveWorkflowReferences(api, () => [uses, other], () => unreadable);
   const found = await workflowsReferencingPrompt(api, "p1");
-  assert.deepEqual(found.map((use) => [use.workflowId, use.name, use.nodes.map((n) => n.name)]), [["wf-a", "Uses", ["Ask1", "Ask3"]]]);
+  assert.deepEqual(found!.map((use) => [use.workflowId, use.name, use.nodes.map((n) => n.name)]), [["wf-a", "Uses", ["Ask1", "Ask3"]]]);
   assert.deepEqual(await workflowsReferencingPrompt(api, "p9"), []);
+  // One index read, never every definition.
+  assert.ok(!api.calls.some((c) => c.path === "/api/workflows" || c.path.startsWith("/api/workflows/")));
+  // A record the daemon cannot read that mentions the prompt: unknown (null) — the caller fails closed.
+  unreadable.push({ id: "wf-new", nodes: [{ type: "agent.v2", prompt: { ref: "p9" } }] });
+  assert.equal(await workflowsReferencingPrompt(api, "p9"), null);
+  assert.equal((await workflowsReferencingPrompt(api, "p1"))?.length, 1, "a prompt it does not mention stays known");
+  api.on("GET", "/api/workflow-references/prompts/*", { status: 503, body: { error: { code: "WORKFLOWS_UNAVAILABLE", message: "x" } } });
+  assert.equal(await workflowsReferencingPrompt(api, "p1"), null, "an unreadable index: unknown");
 });

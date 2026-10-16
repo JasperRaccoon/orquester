@@ -10,6 +10,7 @@ import type { InjectOptions } from "fastify";
 import { GitService } from "./git.ts";
 import { createServer } from "./index.js";
 import { SavedPromptsService } from "./saved-prompts.ts";
+import { WorkflowReferenceIndex } from "./workflows/reference-index.ts";
 import { mintPrincipalToken } from "./mcp/principal.ts";
 import { PRINCIPAL_TOKEN_HEADER, type CallerPrincipal } from "@orquester/api/agent-chat";
 
@@ -73,7 +74,15 @@ async function harness(options: { unreadableLibrary?: boolean; workflows?: unkno
       deleteByWorkspace: async (_name: string, path: string) => void todoCascades.push(`deleteByWorkspace ${path}`)
     },
     accounts: { unbindWorkspace: async () => {} },
-    workflows: { list: () => options.workflows ?? [] }
+    workflows: {
+      list: () => options.workflows ?? [],
+      // The store's reference index, over the (mutable) list as it is when read.
+      get references() {
+        const index = new WorkflowReferenceIndex();
+        index.rebuild({ workflows: (options.workflows ?? []) as never });
+        return index;
+      }
+    }
   } as unknown as CreateServerArgs[4];
 
   const app = createServer(
@@ -355,7 +364,7 @@ test("saved prompts: createdBy and the pin refusal follow the server-stamped pri
   assert.equal(pinned.json().pinned, true);
 });
 
-test("saved prompts: list rows name the workflows that reference each prompt, read live from the workflow store", async (t) => {
+test("saved prompts: list rows name the workflows that reference each prompt, read live from the workflow store's reference index", async (t) => {
   const workflows: unknown[] = [];
   const h = await harness({ workflows });
   t.after(() => h.close());

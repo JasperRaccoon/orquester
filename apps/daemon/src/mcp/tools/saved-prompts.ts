@@ -5,9 +5,10 @@
 // - create: Act — the daemon stamps `createdBy: agent` from the call's principal;
 // - update / delete of an agent-created prompt no workflow references: Act;
 // - of a prompt no agent created (the user's): Admin, family `saved-prompts`;
-// - of any prompt a workflow's agent block references (`usedByWorkflows`): Admin, family
-//   `workflows` — the card names those workflows and shows the change, because a referenced
-//   prompt is live workflow code; never grantable.
+// - of any prompt a workflow's agent block references (the daemon's workflow reference index,
+//   `workflowsReferencingPrompt`): Admin, family `workflows` — the card names those workflows and
+//   shows the change, because a referenced prompt is live workflow code; never grantable. When the
+//   index cannot tell (a definition this build cannot read), the prompt counts as used: fail closed.
 // The prompt's kind is read in `scope()`, which resolves the call's tier and family on the claim
 // (`ScopeClaim.resolved`, read by `tier(args, scope)`); `approval()` reads it again and pins what it
 // showed; `run` re-reads it before writing — a prompt that became referenced meanwhile is refused
@@ -45,6 +46,7 @@ import {
   type Tier
 } from "../catalog/contract.ts";
 import { agentLabel } from "./desktop-preview.ts";
+import { workflowsReferencingPrompt } from "./workflow-preview.ts";
 
 const ROUTE = "/api/saved-prompts";
 
@@ -97,9 +99,9 @@ async function findPrompt(api: DaemonApi, place: Place, id: string): Promise<Sav
 const isAgentCreated = (prompt: SavedPrompt): boolean => prompt.createdBy?.kind === "agent";
 const workflowsOf = (prompt: SavedPrompt) => prompt.usedByWorkflows ?? [];
 
-/** What an agent's edit of `prompt` is (§4.1). */
-function editKind(prompt: SavedPrompt): { tier: Tier; family?: AdminFamily } {
-  if (workflowsOf(prompt).length > 0) return { tier: "admin", family: "workflows" };
+/** What an agent's edit of `prompt` is (§4.1); `usesUnknown`: workflows may use it (fail closed). */
+function editKind(prompt: SavedPrompt, usesUnknown: boolean): { tier: Tier; family?: AdminFamily } {
+  if (usesUnknown || workflowsOf(prompt).length > 0) return { tier: "admin", family: "workflows" };
   return isAgentCreated(prompt) ? { tier: "act" } : { tier: "admin", family: "saved-prompts" };
 }
 
@@ -241,17 +243,28 @@ function checkAction(args: UpdateArgs, external: boolean): void {
   if (args.action === "update" && edits === 0) refuse("needs title, body, description, tags or pinned.");
 }
 
-async function targetOf(args: UpdateArgs, ctx: ScopeContext): Promise<{ place: Place; prompt: SavedPrompt | null }> {
+/** The prompt an update or delete names, with the workflows using it now (the reference index), or unknown. */
+interface Target {
+  place: Place;
+  prompt: SavedPrompt | null;
+  /** The index could not tell which workflows use it: treated as used. */
+  usesUnknown: boolean;
+}
+
+async function targetOf(args: UpdateArgs, ctx: ScopeContext): Promise<Target> {
   if (args.action === "create") {
-    if (args.global === true) return { place: GLOBAL, prompt: null };
+    if (args.global === true) return { place: GLOBAL, prompt: null, usesUnknown: false };
     const place = await placeOf(args.project, ctx);
     // A chat with no project of its own never makes a global prompt by omission.
     if (place.projectPath === null) throw new ToolError("INVALID_ARGUMENT", "update_saved_prompts create: this chat has no project; pass project, or global: true.");
-    return { place, prompt: null };
+    return { place, prompt: null, usesUnknown: false };
   }
   // External callers naming no project look among the global prompts.
   const place = await placeOf(args.project, ctx);
-  return { place, prompt: await findPrompt(ctx.api, place, args.id!) };
+  const { usedByWorkflows: _listed, ...found } = await findPrompt(ctx.api, place, args.id!);
+  const uses = await workflowsReferencingPrompt(ctx.api, found.id);
+  const used = (uses ?? []).map((use) => ({ workflowId: use.workflowId, name: use.name, ...(use.workspace !== undefined ? { workspace: use.workspace } : {}) }));
+  return { place, prompt: used.length > 0 ? { ...found, usedByWorkflows: used } : found, usesUnknown: uses === null };
 }
 
 const createdByText = (prompt: SavedPrompt): string =>
@@ -259,18 +272,18 @@ const createdByText = (prompt: SavedPrompt): string =>
     ? `Created by ${agentLabel(prompt.createdBy?.agent)}${prompt.createdBy?.title ? ` in the chat "${prompt.createdBy.title}"` : ""}.`
     : "Created by you.";
 
-/** Pins of what a card showed about `prompt`: its revision (`updatedAt`) and the workflows using it. */
-function pinsOf(prompt: SavedPrompt): Record<string, string> {
+/** Pins of what a card showed about `prompt`: its revision (`updatedAt`) and the workflows using it (`unknown`: could not tell). */
+function pinsOf(prompt: SavedPrompt, usesUnknown: boolean): Record<string, string> {
   return {
     [`savedPrompt:${prompt.id}:updatedAt`]: prompt.updatedAt,
-    [`savedPrompt:${prompt.id}:workflows`]: workflowsOf(prompt).map((use) => use.workflowId).sort().join(",")
+    [`savedPrompt:${prompt.id}:workflows`]: usesUnknown ? "unknown" : workflowsOf(prompt).map((use) => use.workflowId).sort().join(",")
   };
 }
 
 /** The card (§7.1 "saved prompt edit: title/body diff, and the workflows that reference it"). */
 async function preview(args: UpdateArgs, ctx: ScopeContext): Promise<ApprovalPreview> {
   const agent = ctx.caller.kind === "thread" ? agentLabel(ctx.caller.agentId) : "An agent";
-  const { place, prompt } = await targetOf(args, ctx);
+  const { place, prompt, usesUnknown } = await targetOf(args, ctx);
   const scopeLabel = place.projectPath ? `Project ${place.label}` : "Global — every project";
   if (prompt === null) {
     return {
@@ -283,9 +296,16 @@ async function preview(args: UpdateArgs, ctx: ScopeContext): Promise<ApprovalPre
     };
   }
   const uses = workflowsOf(prompt);
-  const kind = editKind(prompt);
+  const kind = editKind(prompt, usesUnknown);
   const verb = args.action === "delete" ? "delete" : "edit";
   const sections: ApprovalPreviewSection[] = [];
+  if (usesUnknown) {
+    sections.push({
+      kind: "warning",
+      level: "caution",
+      text: "Orquester could not check which workflows use this prompt (a workflow definition it cannot read may), so it is treated as used by a workflow."
+    });
+  }
   if (uses.length > 0) {
     sections.push({
       kind: "warning",
@@ -314,8 +334,8 @@ async function preview(args: UpdateArgs, ctx: ScopeContext): Promise<ApprovalPre
     ...(kind.family ? { family: kind.family } : {}),
     scopeLabel,
     sections,
-    pins: pinsOf(prompt),
-    ...(uses.length > 0 ? { workflowReferencedPrompt: true } : {})
+    pins: pinsOf(prompt, usesUnknown),
+    ...(uses.length > 0 || usesUnknown ? { workflowReferencedPrompt: true } : {})
   };
 }
 
@@ -334,17 +354,17 @@ function promptFields(prompt: { title: string; description: string; tags: readon
  */
 async function recheck(args: UpdateArgs, ctx: CallContext): Promise<void> {
   if (ctx.caller.kind !== "thread") return;
-  const { prompt } = await targetOf(args, ctx);
+  const { prompt, usesUnknown } = await targetOf(args, ctx);
   if (prompt === null) return;
   if (ctx.approval) {
     const pins = ctx.approval.pins ?? {};
-    const now = pinsOf(prompt);
+    const now = pinsOf(prompt, usesUnknown);
     for (const [key, value] of Object.entries(pins)) {
       if (now[key] !== value) throw new ToolError("PREVIEW_STALE", `The saved prompt "${clipText(prompt.title, 80)}" changed after the card opened; nothing was done.`);
     }
     return;
   }
-  if (editKind(prompt).tier !== "act") {
+  if (editKind(prompt, usesUnknown).tier !== "act") {
     throw new ToolError("PERMISSION_DENIED", `The saved prompt "${clipText(prompt.title, 80)}" changed meanwhile (a workflow uses it now): changing it needs the user's approval. Call update_saved_prompts again.`);
   }
 }
@@ -368,11 +388,11 @@ const updateSavedPrompts = defineTool({
   adminFamily: (_args, scope) => scope.resolved?.adminFamily ?? "workflows",
   async scope(args, ctx) {
     checkAction(args, ctx.caller.kind === "external");
-    const { place, prompt } = await targetOf(args, ctx);
+    const { place, prompt, usesUnknown } = await targetOf(args, ctx);
     const projectPath = prompt ? prompt.projectPath : place.projectPath;
     const claim: ScopeClaim = { projects: projectPath ? [projectPath] : [], sessions: [], reads: "none", writes: true, causesTurnIn: [] };
     if (prompt) {
-      const kind = editKind(prompt);
+      const kind = editKind(prompt, usesUnknown);
       claim.resolved = { tier: kind.tier, ...(kind.family ? { adminFamily: kind.family } : {}) };
     }
     return claim;
