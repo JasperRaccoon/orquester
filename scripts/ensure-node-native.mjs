@@ -25,7 +25,7 @@
 import { spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, lstatSync, readdirSync, renameSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const TAG = "[ensure-node-native]";
@@ -93,8 +93,14 @@ export function probeInChild(mod) {
 /** `pnpm rebuild` the named packages for the running Node. Returns true on success. */
 export function pnpmRebuild(names) {
   // -r: the packages are dependencies of workspace projects, not of the root.
+  // This node's directory goes first on PATH so pnpm and node-gyp build for the
+  // Node that was probed, not another one found on PATH.
+  // (Windows spells the variable "Path"; reuse whatever key is there.)
+  const pathKey = Object.keys(process.env).find((key) => key.toUpperCase() === "PATH") ?? "PATH";
+  const path = [dirname(process.execPath), process.env[pathKey]].filter(Boolean).join(delimiter);
   const result = spawnSync("pnpm", ["rebuild", "-r", ...names], {
     cwd: repoRoot,
+    env: { ...process.env, [pathKey]: path },
     stdio: "inherit",
     shell: process.platform === "win32"
   });
@@ -152,7 +158,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   if (process.argv.includes("--detach")) {
     for (const mod of NATIVE_MODULES) {
       const count = detachBuildFiles(packageDir(mod.name));
-      if (count > 0) console.log(`${TAG} ${mod.name}: gave ${count} store-linked build file(s) their own copy`);
+      if (count > 0) console.log(`${TAG} ${mod.name}: gave ${count} hard-linked build file(s) their own copy`);
     }
   } else {
     process.exitCode = main();

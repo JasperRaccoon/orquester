@@ -36,11 +36,11 @@ echo "[remote-update] HEAD: ${old_head:0:7} -> ${new_head:0:7}"
 # </dev/null: pnpm must never read stdin. Build runs bare: set -e catches failures.
 $SUDO env CI=1 ELECTRON_SKIP_BINARY_DOWNLOAD=1 pnpm install --frozen-lockfile </dev/null
 $SUDO env ELECTRON_SKIP_BINARY_DOWNLOAD=1 pnpm --filter @orquester/web build </dev/null
-# The daemon loads better-sqlite3 and node-pty under this host's Node: prove they
-# load (rebuilding any that don't) BEFORE the restart, so a deploy never restarts
-# into a daemon that cannot start.
-if ! $SUDO env CI=1 node scripts/ensure-node-native.mjs </dev/null; then
-  echo "[remote-update] native modules do not load under node $(node -v) — NOT restarting." >&2
+# The daemon loads better-sqlite3 and node-pty under /usr/bin/node (the unit's
+# ExecStart interpreter): prove they load there, rebuilding any that don't,
+# BEFORE the restart, so a deploy never restarts into a daemon that cannot start.
+if ! $SUDO env CI=1 /usr/bin/node scripts/ensure-node-native.mjs </dev/null; then
+  echo "[remote-update] native modules do not load under /usr/bin/node $(/usr/bin/node -v) — NOT restarting." >&2
   echo "[remote-update] The running daemon keeps its current process; fix the rebuild and re-deploy." >&2
   exit 1
 fi
