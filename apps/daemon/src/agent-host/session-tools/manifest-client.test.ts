@@ -73,3 +73,15 @@ test("a refusal, a malformed manifest, a dead socket or a silent daemon: unavail
   silent = true;
   assert.deepEqual(await fetchManifest("x"), { kind: "unavailable" }, "bounded: a session start never hangs on it");
 });
+
+test("an answer from a socket the host no longer names (the daemon moved during the read) is marked not current", async (t) => {
+  let current = "";
+  const first = await daemon(t, (_req, _body, res) => {
+    // The host moves to another daemon while this one answers.
+    current = "/elsewhere/daemon.sock";
+    json(res, 200, { tools: [], instructions: "", deny: [], seq: 3, epoch: "old" });
+  });
+  current = first;
+  const fetchManifest = createDaemonManifestClient({ socketPath: () => current, token: "t" });
+  assert.deepEqual(await fetchManifest("x"), { kind: "manifest", manifest: { tools: [], instructions: "", deny: [], seq: 3, epoch: "old" }, current: false });
+});

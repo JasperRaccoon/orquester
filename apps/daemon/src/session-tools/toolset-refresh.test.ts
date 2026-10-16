@@ -17,7 +17,13 @@ import { daemonRoutesForHost, type SessionToolsManifest, type SessionToolsRefres
 import { defineTool, READ_ONLY, type AnyOrquesterTool, type ThreadCaller, type ToolsetId } from "../mcp/catalog/contract.ts";
 import { chatSummary, message, snapshot, stamp, turn } from "../mcp/fixtures.ts";
 import { FakeDaemonApi } from "../mcp/testing.ts";
-import { isFastifyRouteMiss, REFRESH_CONCURRENCY, registerSessionToolsManifestRoute, SessionToolsRefresher, userMessageIds, type ToolsetRefreshDeps } from "./toolset-refresh.ts";
+import { MANIFEST_TIMEOUT_MS } from "../agent-host/session-tools/forwarder.ts";
+import {
+  DAEMON_POINTING_READ_TIMEOUT_MS,
+  MANIFEST_SESSIONS_READ_TIMEOUT_MS,
+  MAX_POINTING_SCOPES,
+  isFastifyRouteMiss,
+  REFRESH_CONCURRENCY, registerSessionToolsManifestRoute, SessionToolsRefresher, userMessageIds, type ToolsetRefreshDeps } from "./toolset-refresh.ts";
 
 const tool = (name: string, toolset: ToolsetId, tier: "read" | "admin" = "read"): AnyOrquesterTool =>
   defineTool({
@@ -494,4 +500,140 @@ test("a turn the user stopped is no turn to continue, even when the summary read
   const r = continueRig(SETTLED, [before, stopped]);
   assert.equal(await r.refresher.scheduleContinue("codex-1", "notes", "default"), "skipped");
   assert.equal(r.posted.length, 0);
+});
+
+test("concurrent manifests share ONE daemon-pointing read", async () => {
+  const r = rig();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  const request = r.api.request.bind(r.api);
+  let reads = 0;
+  r.api.request = async (method, path, opts) => {
+    if (path === AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE) {
+      reads += 1;
+      await gate;
+    }
+    return request(method, path, opts);
+  };
+  const both = Promise.all([r.refresher.manifest("claude-1"), r.refresher.manifest("codex-1"), r.refresher.daemonPointing()]);
+  release();
+  const [claude, codex, servers] = await both;
+  assert.equal(reads, 1, "one read in flight, shared");
+  assert.notEqual(claude, "unavailable");
+  assert.notEqual(codex, "unavailable");
+  assert.deepEqual(servers, []);
+});
+
+test("the session list read inside a manifest is bounded: no answer in time counts as workflow-owned", async () => {
+  const r = rig({ sessionsReadTimeoutMs: 20 });
+  r.toolsets.set("claude-1", ["core", "reads", "workflow-authoring"]);
+  const request = r.api.request.bind(r.api);
+  r.api.request = async (method, path, opts) => (path === "/api/sessions" ? new Promise(() => undefined) : request(method, path, opts));
+  const manifest = await manifestOf(r, "claude-1");
+  assert.deepEqual(manifest.tools, ["list_sessions", "list_workflows"], "no Admin tool (fail closed)");
+  assert.ok(r.warnings.some((warning) => /session list did not answer/.test(warning)));
+});
+
+test("a chat refused for unknown denials gets its manifest pushed once the daemon-pointing read lands", async () => {
+  let pushedTo!: (push: { threadId: string; deny: string[] }) => void;
+  const pushedOnce = new Promise<{ threadId: string; deny: string[] }>((resolve) => (pushedTo = resolve));
+  const r = rig({
+    pointingReadTimeoutMs: 20,
+    pushToHost: async (threadId, manifest) => {
+      pushedTo({ threadId, deny: manifest.deny });
+      return { applied: "unchanged" };
+    }
+  });
+  r.api.on("GET", AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, { status: 200, body: { servers: [{ agent: "codex", home: "system", scope: "user", name: "codex_remote", reason: "url" }] } });
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  const request = r.api.request.bind(r.api);
+  r.api.request = async (method, path, opts) => {
+    if (path === AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE) await gate;
+    return request(method, path, opts);
+  };
+  // The read outlasts the launch's bound: the manifest route answers 503…
+  assert.equal(await r.refresher.manifest("codex-1"), "unavailable");
+  // …and when the read lands, the host (whose launch waits for its denials) is handed the manifest.
+  release();
+  assert.deepEqual(await pushedOnce, { threadId: "codex-1", deny: ["codex_remote"] });
+});
+
+test("a chat started in a directory inside its project is denied the servers configured on the way down to it", async () => {
+  const r = rig({
+    thread: (id) => (id === "codex-1" ? { agentId: "codex", home: "system", projectPath: "/w/acme/api", cwd: "/w/acme/api/packages/app" } : null)
+  });
+  const queries: unknown[] = [];
+  r.api.on("GET", AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, (request: { query?: Record<string, string> }) => {
+    queries.push(request.query);
+    const scoped = request.query?.cwd !== undefined;
+    return {
+      status: 200,
+      body: {
+        servers: scoped
+          ? [
+              { agent: "codex", home: "system", scope: "project", projectPath: "/w/acme/api", name: "root_remote", reason: "url" },
+              { agent: "codex", home: "system", scope: "project", projectPath: "/w/acme/api/packages", name: "sub_remote", reason: "url" },
+              { agent: "codex", home: "system", scope: "project", projectPath: "/w/acme/api/packages/app", name: "cwd_remote", reason: "url" },
+              { agent: "codex", home: "system", scope: "project", projectPath: "/w/acme/api/docs", name: "sibling_remote", reason: "url" }
+            ]
+          : [{ agent: "codex", home: "system", scope: "project", projectPath: "/w/acme/api", name: "from_the_root_read", reason: "url" }]
+      }
+    };
+  });
+  const manifest = await manifestOf(r, "codex-1");
+  assert.deepEqual(manifest.deny, ["cwd_remote", "root_remote", "sub_remote"], "never a sibling directory's (Codex refuses a name its config lacks)");
+  // Only its own read: what loads at ITS cwd (Codex's trust and layers are decided for it).
+  assert.deepEqual(queries, [{ projectPath: "/w/acme/api", cwd: "/w/acme/api/packages/app" }]);
+});
+
+test("a refused chat stays remembered until a push actually reached the host", async () => {
+  let delivered = false;
+  const pushes: string[] = [];
+  const r = rig({
+    pushToHost: async (threadId) => {
+      pushes.push(threadId);
+      return delivered ? { applied: "unchanged" } : null;
+    }
+  });
+  /** The push in flight for a chat, run to its end (the refresher's own handle). */
+  const pushSettled = async (threadId: string) => {
+    await (r.refresher as unknown as { pushes: Map<string, { done: Promise<unknown> }> }).pushes.get(threadId)?.done;
+  };
+  r.api.on("GET", AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, { status: 500, body: {} });
+  assert.equal(await r.refresher.manifest("codex-1"), "unavailable");
+  // A read lands, but the push reaches no host (it timed out, or restarts): still remembered.
+  r.api.on("GET", AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, { status: 200, body: { servers: [] } });
+  assert.deepEqual(await r.refresher.daemonPointing(), []);
+  await pushSettled("codex-1");
+  assert.deepEqual(pushes, ["codex-1"]);
+  // The chat's own later launch manifest (one the host may have given up on) pushes again; this one lands.
+  delivered = true;
+  assert.notEqual(await r.refresher.manifest("codex-1"), "unavailable");
+  await pushSettled("codex-1");
+  assert.deepEqual(pushes, ["codex-1", "codex-1"]);
+  // Delivered: nothing more is owed to it.
+  r.refresher.invalidateDaemonPointing();
+  await r.refresher.daemonPointing();
+  await r.refresher.manifest("codex-1");
+  await pushSettled("codex-1");
+  assert.deepEqual(pushes, ["codex-1", "codex-1"]);
+});
+
+test("per-cwd reads are cached for at most MAX_POINTING_SCOPES scopes (the all-projects read always stays)", async () => {
+  const r = rig();
+  r.api.on("GET", AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, { status: 200, body: { servers: [] } });
+  await r.refresher.daemonPointing();
+  for (let i = 0; i <= MAX_POINTING_SCOPES + 5; i += 1) await r.refresher.daemonPointing({ projectPath: "/w/acme/api", cwd: `/w/acme/api/d${i}` });
+  const reads = () => r.api.calls.filter((call) => call.path === AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE).length;
+  const count = reads();
+  await r.refresher.daemonPointing();
+  await r.refresher.daemonPointing({ projectPath: "/w/acme/api", cwd: `/w/acme/api/d${MAX_POINTING_SCOPES + 5}` });
+  assert.equal(reads(), count, "the newest scopes and the all-projects read are cached");
+  await r.refresher.daemonPointing({ projectPath: "/w/acme/api", cwd: "/w/acme/api/d0" });
+  assert.equal(reads(), count + 1, "the oldest scope was evicted");
+});
+
+test("a manifest's own bounds stay below the host's bound on asking for it", () => {
+  assert.ok(DAEMON_POINTING_READ_TIMEOUT_MS + MANIFEST_SESSIONS_READ_TIMEOUT_MS + 2_000 <= MANIFEST_TIMEOUT_MS);
 });

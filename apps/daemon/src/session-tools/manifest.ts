@@ -10,7 +10,7 @@
  * import {@link toolsetAvailability} without pulling anything else in.
  */
 
-import { resolve } from "node:path";
+import { isAbsolute, relative, resolve } from "node:path";
 
 import type { AgentAdapterId } from "@orquester/api/agent-chat";
 import type { DaemonPointingServer } from "@orquester/api";
@@ -56,6 +56,17 @@ export interface ManifestThread {
   home: string;
   /** Every spelling of its project root the daemon knows (the tab's and the canonical one); none when unbound. */
   projectPaths: readonly string[];
+  /**
+   * Every spelling of its cwd (the tab's and the canonical one) when it is a directory INSIDE the
+   * project: the project-level configs of every directory from the root down to it are loaded too.
+   */
+  cwdPaths?: readonly string[];
+  /**
+   * Its cwd's real path leaves its project, or its project's real path leaves the workspaces root:
+   * what its CLI loads cannot be told, so EVERY daemon-pointing server of its agent known in any
+   * scope or home is denied by name (an unrelated same-named server too — harmless otherwise).
+   */
+  denyEveryKnown?: boolean;
   /** Spec §5.4: no Admin tool is advertised to it. */
   workflowOwned: boolean;
 }
@@ -89,9 +100,31 @@ export function advertisedChatTools(catalog: readonly AnyOrquesterTool[], toolse
 
 const samePath = (a: string, b: string): boolean => a !== "" && b !== "" && resolve(a) === resolve(b);
 
+/** `dir` is `parent` or a directory inside it (lexically). */
+export const isWithinDir = (dir: string, parent: string): boolean => {
+  if (dir === "" || parent === "") return false;
+  const rel = relative(resolve(parent), resolve(dir));
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+};
+
+/**
+ * Whether a project-scope config in `dir` is one this thread's CLI loads: its project root, or a
+ * directory on the way from it down to the thread's cwd (Codex loads each `.codex/config.toml` on
+ * that path; Claude, OpenCode and Grok search upward from the cwd).
+ */
+const loadsProjectConfigIn = (thread: ManifestThread, dir: string): boolean =>
+  thread.projectPaths.some(
+    (root) =>
+      samePath(root, dir) ||
+      // An ancestor of the project (Codex reads from its project root — the git root, maybe above).
+      isWithinDir(root, dir) ||
+      (isWithinDir(dir, root) && (thread.cwdPaths ?? []).some((cwd) => isWithinDir(cwd, dir)))
+  );
+
 /**
  * The servers to deny in this thread: its agent's, in ITS account home (user scope) or its
- * project's config (project scope) — exactly the ones its CLI will load. Codex refuses a thread
+ * project's configs (project scope: the root's, and every directory's down to its cwd) — exactly
+ * the ones its CLI will load. Codex refuses a thread
  * whose config names a server it does not have (`mcp_servers.<absent>.enabled = false` → "invalid
  * transport", probed on 0.159.0), so a name from another home is never sent. Sorted, unique.
  */
@@ -99,12 +132,18 @@ export function denyFor(thread: ManifestThread, servers: readonly DaemonPointing
   const names = new Set<string>();
   for (const server of servers) {
     if (server.agent !== thread.agentId || typeof server.name !== "string" || server.name === "") continue;
+    if (thread.denyEveryKnown) {
+      names.add(server.name);
+      continue;
+    }
     // A user server every home of the agent loads (Grok's inherited ~/.claude.json, `allHomes`) is
     // denied in every home; any other only in its own.
     const inScope =
       server.scope === "project"
-        ? server.projectPath !== undefined && thread.projectPaths.some((path) => samePath(path, server.projectPath!))
+        ? server.projectPath !== undefined && loadsProjectConfigIn(thread, server.projectPath)
         : server.allHomes === true || server.home === thread.home;
+    // `loadedByHomes` is display only: a Codex denial of a server its config does not load is
+    // harmless (the session sends a disabled stub for it), so trust is never predicted here.
     if (inScope) names.add(server.name);
   }
   return [...names].sort();

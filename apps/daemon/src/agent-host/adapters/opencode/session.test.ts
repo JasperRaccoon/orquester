@@ -391,6 +391,8 @@ async function startSession(
     sessionTools?: OpenCodeSessionToolsLaunch;
     /** The host has session tools (this thread's grant may still have failed). */
     isolateSessionTools?: boolean;
+    /** The thread's denied MCP servers (§12.1). */
+    deniedMcpServers?: readonly string[];
   } = {}
 ): Promise<OpenCodeThreadSession> {
   return await OpenCodeThreadSession.start(
@@ -408,7 +410,8 @@ async function startSession(
       ...(options.resumeCursor !== undefined ? { resumeCursor: options.resumeCursor } : {}),
       server: harness.server,
       ...(options.sessionTools !== undefined ? { sessionTools: options.sessionTools } : {}),
-      ...(options.isolateSessionTools !== undefined ? { isolateSessionTools: options.isolateSessionTools } : {})
+      ...(options.isolateSessionTools !== undefined ? { isolateSessionTools: options.isolateSessionTools } : {}),
+      ...(options.deniedMcpServers !== undefined ? { deniedMcpServers: options.deniedMcpServers } : {})
     }
   );
 }
@@ -4514,6 +4517,63 @@ test("session tools: a thread whose grant failed still sends the deny, and no al
   const create = harness.fake.find("POST", "/session")?.body as { permission: Array<{ permission: string; action: string }> };
   assert.deepEqual(create.permission.at(-1), { permission: "orquester-????????????????_*", pattern: "*", action: "deny" });
   assert.equal(create.permission.some((rule) => rule.action === "allow" && rule.permission.startsWith("orquester-")), false);
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
+test("session tools: a denial by disconnect alone (an overlapping name) is re-asserted at every turn start, and ruled once it cannot be", async () => {
+  const harness = makeHarness();
+  type Rule = { permission: string; pattern: string; action: string };
+  const ruledOut = (rules: Rule[] | undefined) => (rules ?? []).some((rule) => rule.permission === "remote_*" && rule.action === "deny");
+  // `remote_*` would also hide `remote_api`'s tools: `remote` is denied by its disconnect alone.
+  const instance = (disconnect: () => Response) => {
+    harness.fake.overrides.set("GET /mcp", () => json({ remote: { status: "connected" }, remote_api: { status: "connected" } }));
+    harness.fake.overrides.set("POST /mcp/remote/disconnect", disconnect);
+  };
+  instance(() => json(true));
+  const session = await startSession(harness, { isolateSessionTools: true, deniedMcpServers: ["remote"] });
+  const create = harness.fake.find("POST", "/session")?.body as { permission: Rule[] };
+  assert.equal(ruledOut(create.permission), false, "exact: no over-wide rule while the disconnect holds");
+  const disconnects = () => harness.fake.requests.filter((request) => request.method === "POST" && request.path === "/mcp/remote/disconnect").length;
+  assert.equal(disconnects(), 1);
+
+  // Something on the shared instance reconnected it: the next turn start disconnects it again.
+  instance(() => json(true));
+  await session.sendTurn({ threadId: "thread-1", input: "hello", attachments: [], interactionMode: "default" });
+  assert.equal(disconnects(), 2);
+  assert.equal(harness.fake.find("PATCH", `/session/${session.sessionId}`), undefined, "nothing else to send");
+
+  // A disconnect that fails now: the rule rides the session's ruleset after all (fail closed).
+  instance(() => json({ name: "UnknownError" }, 500));
+  await session.sendTurn({ threadId: "thread-1", input: "and again", attachments: [], interactionMode: "default" });
+  assert.equal(disconnects(), 3);
+  const patch = harness.fake.find("PATCH", `/session/${session.sessionId}`)?.body as { permission: Rule[] } | undefined;
+  assert.ok(ruledOut(patch?.permission), "the denied server's tools are ruled out");
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
+test("session tools: a rule whose send failed is not taken as sent — the next turn start sends it again", async () => {
+  const harness = makeHarness();
+  type Rule = { permission: string; pattern: string; action: string };
+  const ruledOut = (rules: Rule[] | undefined) => (rules ?? []).some((rule) => rule.permission === "remote_*" && rule.action === "deny");
+  const instance = (disconnect: () => Response) => {
+    harness.fake.overrides.set("GET /mcp", () => json({ remote: { status: "connected" }, remote_api: { status: "connected" } }));
+    harness.fake.overrides.set("POST /mcp/remote/disconnect", disconnect);
+  };
+  instance(() => json(true));
+  const session = await startSession(harness, { isolateSessionTools: true, deniedMcpServers: ["remote"] });
+  const patches = () => harness.fake.requests.filter((request) => request.method === "PATCH" && request.path === `/session/${session.sessionId}`);
+  // The disconnect fails, and so does sending the rule: the turn fails, nothing is recorded.
+  instance(() => json({ name: "UnknownError" }, 500));
+  harness.fake.overrides.set(`PATCH /session/${session.sessionId}`, () => json({ name: "UnknownError" }, 500));
+  await assert.rejects(session.sendTurn({ threadId: "thread-1", input: "hello", attachments: [], interactionMode: "default" }));
+  assert.equal(harness.fake.find("POST", "/prompt_async"), undefined, "never run undenied");
+  // Still undisconnectable at the next turn start: the rule is sent again, and this time it lands.
+  instance(() => json({ name: "UnknownError" }, 500));
+  await session.sendTurn({ threadId: "thread-1", input: "again", attachments: [], interactionMode: "default" });
+  assert.equal(patches().length, 2);
+  assert.ok(ruledOut((patches().at(-1)?.body as { permission: Rule[] }).permission));
   await session.stop({ reason: "test", hostInitiated: true });
   harness.dispose();
 });

@@ -142,7 +142,11 @@ export function createDaemonForwarder(options: DaemonForwarderOptions): ForwardS
 
 /** What the daemon said about a thread's manifest. */
 export type ManifestAnswer =
-  | { kind: "manifest"; manifest: SessionToolsManifest }
+  /**
+   * `current: false` — the socket it came from is no longer the one the host names now (the daemon
+   * moved during the read): usable, but its epoch is not taken as the live one.
+   */
+  | { kind: "manifest"; manifest: SessionToolsManifest; current?: boolean }
   /** A daemon from before the manifest route (its route-miss 404): advertise the legacy definitions. */
   | { kind: "legacy" }
   /** The daemon has no chat tab for the thread. */
@@ -168,6 +172,7 @@ export function createDaemonManifestClient(options: DaemonForwarderOptions & { t
   return (threadId) =>
     new Promise<ManifestAnswer>((resolve) => {
       const payload = JSON.stringify({ threadId, purpose: "launch" } satisfies SessionToolsManifestRequest);
+      const socketPath = options.socketPath();
       let settled = false;
       const settle = (answer: ManifestAnswer): void => {
         if (settled) return;
@@ -177,7 +182,7 @@ export function createDaemonManifestClient(options: DaemonForwarderOptions & { t
       };
       const req = httpRequest(
         {
-          socketPath: options.socketPath(),
+          socketPath,
           agent: false,
           path: daemonRoutesForHost.sessionToolsManifest,
           method: "POST",
@@ -215,7 +220,7 @@ export function createDaemonManifestClient(options: DaemonForwarderOptions & { t
               return;
             }
             const manifest = res.statusCode === 200 ? parseManifest(body) : null;
-            settle(manifest ? { kind: "manifest", manifest } : { kind: "unavailable" });
+            settle(manifest ? { kind: "manifest", manifest, ...(options.socketPath() !== socketPath ? { current: false } : {}) } : { kind: "unavailable" });
           });
         }
       );

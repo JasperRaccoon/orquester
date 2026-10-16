@@ -513,14 +513,19 @@ export function mcpCallOfActivityPayload(payload: unknown): { server: string; to
  *
  * Orquester's own session tools are never an MCP App (their pages are the
  * `visual` row, `html-render.ts`): a row the ingestion marked as a session
- * tool's (`data.sessionTool`), or an app naming a session-tools server, has none.
+ * tool's (`data.sessionTool`), or an app of a session-tools server — as the adapter says
+ * (`data.sessionToolsServer`), else by its spelling — has none.
  */
 export function mcpAppReferenceOfActivityPayload(payload: unknown): McpAppReference | undefined {
   const data = asRecord(asRecord(payload)?.data);
   if (data === undefined || !("mcpApp" in data)) return undefined;
   if (sessionToolNameOfData(data) !== null) return undefined;
   const reference = readMcpAppReference(data.mcpApp);
-  if (reference === undefined || isSessionToolsServerName(reference.server)) return undefined;
+  if (reference === undefined) return undefined;
+  // The adapter's word on whose server the call went to, where it gave one (Codex: a user's own
+  // `orquester` beside ours is NOT ours); the spelling only for rows written without it.
+  const ours = typeof data.sessionToolsServer === "boolean" ? data.sessionToolsServer : isSessionToolsServerName(reference.server);
+  if (ours) return undefined;
   const call = mcpCallOfActivityPayload(payload);
   if (call !== undefined && (call.server !== reference.server || call.tool !== reference.tool)) {
     return undefined;

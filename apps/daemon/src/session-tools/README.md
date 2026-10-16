@@ -360,14 +360,76 @@ session tools. See `agent-host/adapters/opencode/session-tools.ts`.
   `{tools, instructions, deny}`: the thread's resolved toolsets over `catalogFor("chat")`, no
   always-Admin tool for a workflow-owned chat, the per-thread instruction block (`instructions.ts`,
   worst case ≤ 2 048 bytes) and the daemon-pointing MCP servers of the thread's agent in its own
-  account home or project (`GET /api/agent-profile/daemon-mcp-servers`; none until it answers).
-  The host filters its static catalog by the names (`agent-host/session-tools/definitions.ts`); a
-  daemon without the route (404) gets the frozen legacy definitions
+  account home or project — the project root's configs and, for a chat started in a directory
+  inside it, every directory's on the way down to its cwd (`GET
+  /api/agent-profile/daemon-mcp-servers`, and `?projectPath=&cwd=` for such a chat). The host
+  filters its static catalog by the names (`agent-host/session-tools/definitions.ts`); a daemon
+  without the route (404) gets the frozen legacy definitions
   (`agent-host/session-tools/legacy-definitions.ts`).
+- **Unknown denials never launch (§12.1).** The daemon reads the daemon-pointing servers once per
+  scope at a time (concurrent manifests share the read), bounded at 5 s per manifest, reused for
+  30 s, the last good list kept after a failure. With no good read ever, the manifest route answers
+  503 and remembers the chat. The host then launches with the denials it last read for the same
+  agent, account home and project (the thread's own, else another thread's), with a
+  `runtime.warning` row on the thread. With none, it waits — at most 15 s from the launch's start
+  (`DENIALS_WAIT_MS`) — for a manifest: the daemon pushes one to every chat it refused once a read
+  lands, and another launch of the same key may read one. Still none: the session is not started;
+  the turn fails with the row "Orquester could not check your MCP servers yet…" (send again; the
+  daemon's log names a check that keeps failing), and the next message tries again. A chat whose
+  cwd's real path leaves its project (a symlink out), or whose project's real path leaves the
+  workspaces root (the detection refuses it: 400 `PATH_NOT_CONTAINED`; any other 400 is a failed
+  read), cannot be told what its CLI loads: it is denied EVERY daemon-pointing server of its
+  agent known in any scope or home, by name, plus what its real cwd's own location configures
+  when that is inside the workspaces root — over-denying a same-named unrelated server, never a
+  refusal. The
+  daemon's manifest is bounded (4 s pointing read + 3 s session list) below the host's 10 s bound
+  on asking for it; a refused chat stays remembered until a push actually reached the host.
+  Exception: a daemon that predates the manifest route (a handover to an older daemon) gets the
+  legacy definitions, and those chats start without per-chat denials.
+- **Detection reads and containment.** Detection only READS agent configs and returns flagged
+  servers' names, reasons and directories — never a value. Every file it opens is lstat'd after
+  realpath, a regular file, at most 8 MiB. Two deliberate exceptions to realpath containment, for
+  these reads only: the all-projects scan follows ONE level of project symlinks (a project that is
+  a link to a directory is read through its link path; a workspace link is not followed), and a
+  Codex read takes `.codex/config.toml` from every ancestor of a project — its real path's and its
+  link path's — up to the filesystem root, since Codex starts at its own project root. A scoped
+  read (`?projectPath=&cwd=`) still refuses a path whose real path leaves the workspaces root
+  (`PATH_NOT_CONTAINED`). Every other file operation stays contained.
+- **Ordering across daemons.** Manifests carry `{seq, epoch}`; the host orders epochs by when it
+  first saw them, so an old daemon's late push never retires the new one. An epoch the host has
+  never seen counts as the newest: a host that first hears from a new daemon and only then from
+  an old one it never saw (a host started mid-handover) takes the old one's push as newer — the
+  epochs are opaque ids, and nothing else orders them. The next relaunch puts it right: a
+  manifest the host ASKS for comes from the daemon its socket reaches now, so its epoch counts as
+  the newest again — only when that socket is still the one the host names when the answer
+  arrives; an answer from a socket the host moved away from meanwhile is used for that launch, its
+  stamp never recorded.
 - **Denials per provider.** Claude: `disallowedTools` `mcp__<name>` and flag-settings
-  `deniedMcpServers: [{serverName}]` — and always `orquester`. Codex: thread config
-  `mcp_servers.<name>.enabled = false` (only names its config has). Grok: a same-named ACP entry on
-  the host's inert `/mcp/denied`. OpenCode: a last ruleset rule `<name>_*` deny.
+  `deniedMcpServers: [{serverName}]` — and always `orquester`. Codex: denials are harmless by construction (probes below). The session reads the
+  thread's effective config first (`config/read` with its cwd: the account home and every
+  trusted project layer); a defined server gets `mcp_servers.<name>.enabled = false` (merged:
+  keeps its transport), one the config does not define a complete disabled stub `{url:
+  http://127.0.0.1:9/orquester-denied, enabled: false}` (never contacted). So the daemon denies
+  every daemon-pointing Codex server whatever Codex's trust (`loadedByHomes` is display only), and
+  reads `.codex/config.toml` in every ancestor of a chat's project up to the filesystem root (Codex
+  starts at its project root — the git root, or what `project_root_markers` names). Without the
+  read, `enabled = false` is sent, and a refusal names the server and what to check. `config/read`
+  with `cwd` is in the bindings captured from 0.154.0 and on 0.159.0 (probed); Orquester sets no
+  minimum Codex version (`MINIMUM_CLI_VERSIONS.codex` is null), so an older Codex that lacks it
+  answers -32601 and fails closed: ours keeps the name `orquester`, every denial is sent as
+  `enabled = false`, and a denial Codex cannot apply fails the start with that message — never a
+  launch without it. A fork's short-lived app-server switches every server its config defines off
+  (`fork.ts`; the override is not persisted, probed), so none starts there. Where the
+  config already has an `orquester` of the user's, ours is registered as `orquester_session`
+  (`_2`, … while taken), the user's is denied by name only when it points at this daemon (a
+  Codex `orquester` is not flagged by name alone), rows say which server is ours
+  (`data.sessionToolsServer`) and the instruction block names ours. A name containing `.` cannot
+  be a dotted key, so the override is then sent as one `mcp_servers` table (merged into the
+  config, probed). Grok: a same-named ACP entry on the host's inert `/mcp/denied`. OpenCode: each denied
+  server is disconnected on the shared instance and gets a last ruleset rule `<name>_*` deny —
+  except where that rule would also hide another server whose name extends it; there the
+  disconnect alone denies it, and it is disconnected again at every turn start (the rule is added
+  once a disconnect fails).
 - **Refresh.** A toolset change (`onToolsetsChanged`) pushes the new manifest to the host
   (`POST /threads/:id/session-tools/refresh`): Claude takes it in-session (`list_changed`); any
   other live session restarts with resume at its next idle point (the orchestrator's ensure step,
@@ -376,11 +438,28 @@ session tools. See `agent-host/adapters/opencode/session-tools.ts`.
 - **Tool rows.** The executor attaches the `toolApproval` reference (card or grant, outcome, deny
   reason, grant scope) to every gated call's result.
 
+### Codex denial probes (fix wave A, codex-cli 0.159.0 `app-server`; scratch 0700 `CODEX_HOME`, no auth needed, no prompts, `rm -rf` after)
+
+| Thread override for server X | X not defined | X a user URL server | X a user stdio server |
+|---|---|---|---|
+| `mcp_servers.X.enabled = false` | fails: "invalid transport in `mcp_servers.X`" | disabled | disabled |
+| `{command: "false", enabled: false}` | disabled | fails: "url is not supported for stdio" | disabled |
+| `{url: <stub>, enabled: false}` | disabled | disabled | fails: "url is not supported for stdio" |
+| `{command, url: null}` / `{url, command: null}` / both | fails | fails | fails |
+
+No single form fits all three, so the session matches the form to the thread's effective config
+(`config/read {cwd}` lists every server of the home and of each trusted project layer); the
+generated configs (ours as `orquester_session` beside a user stdio `orquester`, denials of a
+defined URL server, a defined stdio one, an undefined one, `orquester` and a dotted name) started
+and showed every denied server `disabled`, other servers untouched. Codex trust: in a git repo
+each directory from the root down to the cwd loads by its own `[projects."<dir>"] trust_level`,
+else the root's (an explicit `untrusted` wins, keys match exactly); outside a repo the cwd alone.
+
 ### Probe evidence (Task 6, 2026-10-15; scratch HOME/config dirs, stub MCP servers, no prompts)
 
 | Probe | Claude Code 2.1.285 (SDK 0.3.278) | Codex 0.159.0 (`app-server`) | Grok 1.0.46 (ACP) | OpenCode 1.18.34 (`serve`) |
 |---|---|---|---|---|
 | `tools/list_changed` | re-lists at once, in-process SDK server and HTTP server alike | delivered on the session's stream, no `tools/list` follows; `config/mcpServer/reload` does not reconnect the thread's server | delivered, no `tools/list` follows | re-lists at once (the host's stateless endpoint cannot push it) |
 | Deny a user server | `disallowedTools: ["mcp__ext"]` (and `mcp__ext__*`) remove its tools from the context; `deniedMcpServers: [{serverName}]` keeps it from connecting at all | `mcp_servers.ext.enabled = false` (thread config): never contacted; for a name the config lacks `thread/start` fails "invalid transport" | overlay `disabled_mcp_servers` / `enabled = false`: ignored; `--deny MCPTool(ext__*)`: still connects; a same-named ACP entry replaces it (never contacted) | `<name>_*` deny rule (OpenCode's own `Permission.disabled`) |
-| A user server named `orquester` | RACES ours: in 2 of 6 runs its tools merged into `mcp__orquester__*`; `deniedMcpServers` stops it (3/3) | the thread entry replaces it (0.159.0, earlier probe) | the ACP entry replaces it (2/2) | distinct name (`orquester-<16 hex>` is ours) |
+| A user server named `orquester` | RACES ours: in 2 of 6 runs its tools merged into `mcp__orquester__*`; `deniedMcpServers` stops it (3/3) | the thread entry is merged into it field by field: an HTTP one is replaced; a stdio one (`command`) fails `thread/start` ("url is not supported for stdio") — so ours takes `orquester_session` there (fix wave A: both start, `config/read {cwd}` lists theirs) | the ACP entry replaces it (2/2) | distinct name (`orquester-<16 hex>` is ours) |
 | MCP tool search | every MCP tool deferred (`isLoaded: false`), the in-process server's too | — | — | — |

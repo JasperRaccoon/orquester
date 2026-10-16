@@ -13,7 +13,7 @@ import test from "node:test";
 import Fastify from "fastify";
 import type { DaemonPointingServer } from "@orquester/api";
 import type { AgentHomes } from "./adapters/types.ts";
-import { DaemonMcpDetector, listProjectDirs, pointingReason, registerDaemonMcpServersRoutes, urlReachesDaemon, type DaemonMcpIdentity } from "./daemon-mcp.ts";
+import { codexLoadingHomes, DaemonMcpDetector, listProjectDirs, pointingReason, registerDaemonMcpServersRoutes, urlReachesDaemon, type DaemonMcpIdentity } from "./daemon-mcp.ts";
 
 const BEARER = "dXNlcjokMmEkMTIkc2VjcmV0LWhhc2g="; // base64("user:$2a$12$secret-hash")
 const PORT = 47831;
@@ -211,4 +211,88 @@ test("a projectPath filter must realpath inside the workspaces root; outside (or
   }
   const inside = await app.inject({ method: "GET", url: `/api/agent-profile/daemon-mcp-servers?projectPath=${encodeURIComponent(fx.project)}` });
   assert.equal(inside.statusCode, 200);
+});
+
+test("a chat in a subdirectory: every directory from the project down to its cwd is scanned, nothing outside", async (t) => {
+  const fx = await fixture();
+  t.after(() => rm(fx.root, { recursive: true, force: true }));
+  const sub = join(fx.project, "packages");
+  const cwd = join(sub, "app");
+  const sibling = join(fx.project, "docs");
+  await mkdir(cwd, { recursive: true });
+  const url = "http://localhost:47831/mcp";
+  // Claude local scope keyed by the cwd and by the project root; one keyed by a sibling is not loaded.
+  await write(fx.homes.claudeJson, JSON.stringify({
+    projects: { [cwd]: { mcpServers: { localCwd: { url } } }, [fx.project]: { mcpServers: { localRoot: { url } } }, [sibling]: { mcpServers: { localSibling: { url } } } }
+  }));
+  await write(join(fx.project, ".mcp.json"), JSON.stringify({ mcpServers: { rootMcp: { url } } }));
+  await write(join(sub, ".codex", "config.toml"), `[mcp_servers.subCodex]\nurl = "${url}"\n`);
+  await write(join(cwd, "opencode.json"), JSON.stringify({ mcp: { cwdOpencode: { type: "remote", url } } }));
+  await write(join(cwd, ".grok", "config.toml"), `[mcp_servers.cwdGrok]\nurl = "${url}"\n`);
+  await write(join(sibling, ".mcp.json"), JSON.stringify({ mcpServers: { siblingMcp: { url } } }));
+  const detector = new DaemonMcpDetector(identity(), { homes: fx.homes, accountHomes: async () => [], projects: async () => [], workspacesRoot: () => fx.workspaces });
+  assert.deepEqual(byKey(await detector.detect({ projectPath: fx.project, cwd })), [
+    `claude|system|project|${cwd}|localCwd|url`,
+    `claude|system|project|${fx.project}|localRoot|url`,
+    `claude|system|project|${fx.project}|rootMcp|url`,
+    `codex|system|project|${sub}|subCodex|url`,
+    `grok|system|project|${cwd}|cwdGrok|url`,
+    `opencode|system|project|${cwd}|cwdOpencode|url`
+  ].sort());
+  // Without a cwd: the project root's configs only.
+  assert.deepEqual(byKey(await detector.detect({ projectPath: fx.project })), [
+    `claude|system|project|${fx.project}|localRoot|url`,
+    `claude|system|project|${fx.project}|rootMcp|url`
+  ].sort());
+  // A cwd outside the project (or missing) is refused, never read; cwd needs projectPath.
+  const app = Fastify({ logger: false });
+  t.after(() => app.close());
+  registerDaemonMcpServersRoutes(app, { detector, mode: "local" });
+  const get = (query: string) => app.inject({ method: "GET", url: `/api/agent-profile/daemon-mcp-servers?${query}` });
+  for (const bad of [fx.other, join(fx.project, "missing"), fx.workspaces]) {
+    const res = await get(`projectPath=${encodeURIComponent(fx.project)}&cwd=${encodeURIComponent(bad)}`);
+    assert.equal(res.statusCode, 400, bad);
+  }
+  assert.equal((await get(`cwd=${encodeURIComponent(cwd)}`)).statusCode, 400);
+  assert.equal((await get(`projectPath=${encodeURIComponent(fx.project)}&cwd=relative`)).statusCode, 400);
+  const ok = await get(`projectPath=${encodeURIComponent(fx.project)}&cwd=${encodeURIComponent(cwd)}`);
+  assert.equal(ok.statusCode, 200);
+  assert.ok((ok.json() as { servers: DaemonPointingServer[] }).servers.some((server) => server.name === "cwdOpencode"));
+});
+
+test("codexLoadingHomes: Codex's own trust rules (probed on 0.159.0)", () => {
+  const trust = (entries: Record<string, string>) => [{ home: "system", levels: new Map(Object.entries(entries)) }];
+  const P = "/w/acme/api";
+  // In a git repository: each directory from its root down to the cwd, by its own entry, else the root's.
+  assert.deepEqual(codexLoadingHomes(`${P}/sub`, `${P}/sub/deeper`, P, trust({ [P]: "trusted" })), ["system"]);
+  assert.deepEqual(codexLoadingHomes(P, `${P}/sub/deeper`, P, trust({ [`${P}/sub`]: "trusted" })), [], "an inner directory's trust is not the root's");
+  assert.deepEqual(codexLoadingHomes(`${P}/sub/deeper`, `${P}/sub/deeper`, P, trust({ [`${P}/sub`]: "trusted" })), [], "nor its children's");
+  assert.deepEqual(codexLoadingHomes(`${P}/sub`, `${P}/sub/deeper`, P, trust({ [P]: "trusted", [`${P}/sub`]: "untrusted" })), [], "an explicit untrusted wins");
+  assert.deepEqual(codexLoadingHomes(`${P}/docs`, `${P}/sub`, P, trust({ [P]: "trusted" })), [], "never a sibling of the cwd");
+  // Outside a repository: the cwd's directory alone, by its own entry.
+  assert.deepEqual(codexLoadingHomes(P, `${P}/sub`, undefined, trust({ [P]: "trusted" })), []);
+  assert.deepEqual(codexLoadingHomes(`${P}/sub`, `${P}/sub`, undefined, trust({ [`${P}/sub`]: "trusted" })), ["system"]);
+  // No entry (or an unreadable table): nothing loads it.
+  assert.deepEqual(codexLoadingHomes(P, P, P, trust({})), []);
+});
+
+test("a project reached through a symlink: its link path's ancestors are read for Codex too; listing follows project links only", async (t) => {
+  const fx = await fixture();
+  t.after(() => rm(fx.root, { recursive: true, force: true }));
+  const real = join(fx.workspaces, "other", "real");
+  await mkdir(join(real, "sub"), { recursive: true });
+  const link = join(fx.workspaces, "acme", "link");
+  await symlink(real, link);
+  // Codex may resolve its layers from the link's path: a config above the LINK, not above the real dir.
+  await write(join(fx.workspaces, "acme", ".codex", "config.toml"), `[mcp_servers.lex_orq]\nurl = "http://127.0.0.1:47831/mcp"\n`);
+  await write(join(fx.workspaces, "other", ".codex", "config.toml"), `[mcp_servers.real_orq]\nurl = "http://127.0.0.1:47831/mcp"\n`);
+  const detector = new DaemonMcpDetector(identity(), { homes: fx.homes, accountHomes: async () => [], projects: () => listProjectDirs(fx.workspaces), workspacesRoot: () => fx.workspaces });
+  const names = (servers: DaemonPointingServer[]) => servers.map((server) => server.name).sort();
+  assert.deepEqual(names(await detector.detect({ projectPath: link, cwd: join(link, "sub") })), ["lex_orq", "real_orq"]);
+  assert.deepEqual(names(await detector.detect({ projectPath: real })), ["real_orq"], "the real path alone: its own ancestors only");
+  // The all-projects listing follows a project's own link, never a workspace's.
+  await symlink(join(fx.workspaces, "other"), join(fx.workspaces, "wslink"));
+  const listed = await listProjectDirs(fx.workspaces);
+  assert.ok(listed.includes(link));
+  assert.ok(!listed.some((path) => path.startsWith(join(fx.workspaces, "wslink"))));
 });

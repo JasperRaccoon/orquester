@@ -115,15 +115,32 @@ Replace `<URL>` with your endpoint and `<CREDENTIAL>` with the `base64(...)` val
 > cards (`apps/daemon/src/session-tools/README.md`). **Orquester disables this server inside the
 > chats it launches**, whatever you name it and wherever you install it (user scope, a managed
 > account's home, a project's `.mcp.json`, `.codex/config.toml`, `opencode.json` or Grok's project
-> config): a server whose headers carry a bearer this daemon accepts, or whose URL is this daemon's
+> config — for a chat started in a subdirectory, those of every directory from the project down to
+> it): a server whose headers carry a bearer this daemon accepts, or whose URL is this daemon's
 > `/mcp`, is denied in every Orquester chat — Claude: `disallowedTools` and `deniedMcpServers` (it
-> never connects); Codex: `mcp_servers.<name>.enabled = false` in the thread's config; Grok: a
-> same-named inert entry that shadows it; OpenCode: a session-ruleset deny — so a chat can never
-> reach full trust around its cards. The agent-profile panel marks such a server "Disabled inside
-> Orquester chats". Still give it another name than `orquester` — `orquester_remote` (underscore):
-> a server of yours named exactly `orquester` is always denied in Claude chats and replaced by
-> Orquester's own in Codex and Grok chats. Avoid names starting with `orquester-` (hyphen): OpenCode
-> chats hide the per-thread servers by that prefix.
+> never connects); Codex: switched off in the thread's config (a project's `.codex/config.toml`
+> whether Codex trusts the project or not — a server it does not load gets a harmless disabled
+> stub); Grok: a
+> same-named inert entry that shadows it; OpenCode: the server is disconnected and a
+> session-ruleset rule denies its tools — so a chat can never reach full trust around its cards. A
+> chat never starts without these denials: if Orquester cannot read your MCP configs when a chat's
+> session starts, it uses what it last read for that agent, account and project (and says so on
+> the chat); with nothing read yet it waits up to 15 seconds, then refuses to start the session
+> with "Orquester could not check your MCP servers yet…" — send the message again in a moment;
+> if it keeps happening, the daemon's log says why the check fails. One exception: while a
+> deploy hands chats over to an older daemon that has no per-chat manifest route, chats started
+> in that window run the older catalog without per-chat denials, until the new daemon is up. A
+> chat whose working directory is a symlink out of its project (or whose project is a symlink out
+> of the workspaces folder) is denied every Orquester-pointing server name Orquester knows of for
+> that agent — a server of yours that merely shares such a name is switched off there too. The
+> agent-profile panel marks such a server "Disabled inside Orquester chats". Still give
+> it another name than `orquester` — `orquester_remote` (underscore): a server of yours named
+> exactly `orquester` is always denied in Claude chats and replaced by Orquester's own in Grok
+> chats; in Codex chats Orquester's own takes the name `orquester_session` instead, and yours is
+> switched off only when it points at Orquester. Reserved spellings — avoid them for your own
+> servers: names starting with `orquester-` (hyphen: OpenCode chats hide the per-thread servers by
+> that prefix) and `orquester_session`, `orquester_session_2`, … (Codex chats' name for Orquester's
+> own server when yours is named `orquester`).
 
 ### Claude Code (CLI)
 

@@ -18,10 +18,15 @@
  * orchestrator restarts it with resume at its next idle point ({@link SessionToolsHost.needsRestart}).
  *
  * When the daemon cannot be asked (down, restarting, or it cannot read the daemon-pointing MCP
- * servers: 503), a session launches with a FALLBACK keyed by (agent, account home, project): that
- * key's last manifest, else the agent's defaults with no denial — logged and surfaced on the thread
- * as a warning (`onWarning`), never silent, never another home's denials (Codex refuses a thread
- * whose config names a server it does not have).
+ * servers: 503), a session launches with a FALLBACK keyed by (agent, account home, project): the
+ * thread's own last manifest for that key, else that key's last manifest of another thread —
+ * logged and surfaced on the thread as a warning (`onWarning`), never another home's denials (Codex
+ * refuses a thread whose config names a server it does not have). With neither, the denials are
+ * UNKNOWN and the session never launches without them (§12.1): the launch waits, bounded by
+ * {@link DENIALS_WAIT_MS} from its start, for a manifest — one the daemon pushes for the thread
+ * (`applyManifest`, which the daemon sends to a thread it refused once its read succeeds) or one
+ * another launch of the same key reads — and otherwise fails with the retryable
+ * {@link SessionToolsDenialsUnknownError} (a "turn start failed" row; the next message retries).
  *
  * Per provider (§1.2):
  * - Claude: an in-process SDK server bound to the thread at launch
@@ -34,11 +39,8 @@
 import { createHash, randomUUID } from "node:crypto";
 
 import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
-import { TOOLSETS } from "@orquester/api";
 import type { AgentAdapterId } from "@orquester/api/agent-chat";
 
-import { catalogFor } from "../../mcp/catalog/index.ts";
-import { composeOrquesterInstructions } from "../../session-tools/instructions.ts";
 import { cancelledResult, errorResult } from "../../session-tools/results.ts";
 import type { SessionToolsManifest } from "../host-protocol.ts";
 import { SessionToolCredentials } from "./credentials.ts";
@@ -83,11 +85,6 @@ export interface PreparedSessionTools {
   readonly instructions: string;
   /** MCP server names to deny in this chat (§12.1), as its CLI's config names them. */
   readonly deny: readonly string[];
-  /**
-   * False when the denials could not be derived for THIS launch (no manifest and no fallback for
-   * its agent, home and project): `deny` is then empty and the denial is degraded (warned).
-   */
-  readonly denyKnown: boolean;
   /** Equal for equal lists, instructions and denials: a session restarts only when it moved. */
   readonly key: string;
   /** The daemon's manifest sequence and boot epoch (`SessionToolsManifest.seq` / `.epoch`), when it sent them. */
@@ -95,7 +92,7 @@ export interface PreparedSessionTools {
   readonly epoch?: string;
   /**
    * `manifest`: the daemon's; `legacy`: the frozen old definitions (a daemon without the route);
-   * `fallback`: the daemon could not be asked — this launch key's last list, else the defaults.
+   * `fallback`: the daemon could not be asked — the last list read for this launch key.
    */
   readonly source: "manifest" | "legacy" | "fallback";
 }
@@ -193,10 +190,12 @@ export interface CreateSessionToolsHostOptions {
   credentials?: SessionToolCredentials;
   logger?: { warn(message: string, detail?: unknown): void };
   /**
-   * A thread's session starts degraded (no manifest, and no denials known for its launch key):
+   * A thread's session starts degraded (no manifest: the last denials known for its launch key):
    * surfaced on the thread (a `runtime.warning` row, `main.ts`). Must not throw.
    */
   onWarning?: (threadId: string, message: string) => void;
+  /** Overrides {@link DENIALS_WAIT_MS} (tests). */
+  denialsWaitMs?: number;
   /**
    * Handed the secret values a tool's result carries (its definition's
    * `secretResultKeys`) BEFORE the result goes back to the provider, so the
@@ -230,6 +229,8 @@ interface LaunchedSession {
   /** The grant it came in on (endpoint providers) or the live attach (Claude). */
   owner: string;
   live?: LiveSessionToolsListener;
+  /** The launch key (agent, home, project) it launched under. */
+  launchKey: string;
 }
 
 const keyOf = (tools: readonly Tool[], instructions: string, deny: readonly string[]): string =>
@@ -237,9 +238,50 @@ const keyOf = (tools: readonly Tool[], instructions: string, deny: readonly stri
     .update(JSON.stringify([tools.map((tool) => tool.name), instructions, [...deny]]))
     .digest("hex");
 
-/** The warning a degraded launch is surfaced with. */
+/** The warning a fallback launch is surfaced with: the denials are the last ones read, not fresh. */
 export const DENIAL_DEGRADED_WARNING =
-  "Orquester could not read which MCP servers point at it, so this chat's session started without denying them. They are denied again once Orquester answers (the session restarts at its next idle point after a change).";
+  "Orquester could not check which MCP servers point at it just now, so this chat's session started with the MCP servers it last denied for this agent, account and project. A server added since is denied once Orquester answers (the session restarts at its next idle point after a change).";
+
+/** The longest a launch whose denials are unknown waits for a manifest, from its start. */
+export const DENIALS_WAIT_MS = 15_000;
+
+/**
+ * What a launch refused for unknown denials says: a retry helps when the check was only late (the
+ * daemon starting, a slow read), and the daemon's log names a check that keeps failing.
+ */
+export const DENIALS_UNKNOWN_MESSAGE =
+  "Orquester could not check your MCP servers yet, so this chat's session did not start (it never runs without denying the ones that point at Orquester). Send your message again in a moment; if this keeps happening, the daemon's log says why the check fails.";
+
+/**
+ * A launch whose MCP denials are unknown (no manifest, and none known for its agent, account home
+ * and project) after {@link DENIALS_WAIT_MS}: the session is not started. Retryable — the next
+ * message starts it once the daemon answers.
+ */
+export class SessionToolsDenialsUnknownError extends Error {
+  readonly code = "SESSION_TOOLS_DENIALS_UNKNOWN";
+  readonly retryable = true;
+  constructor() {
+    super(DENIALS_UNKNOWN_MESSAGE);
+    this.name = "SessionToolsDenialsUnknownError";
+  }
+}
+
+export function isSessionToolsDenialsUnknown(error: unknown): error is SessionToolsDenialsUnknownError {
+  return error instanceof SessionToolsDenialsUnknownError;
+}
+
+/**
+ * A launch reading its manifest: a manifest pushed for its thread meanwhile, or one another launch
+ * of its key read, is delivered here — and wakes it when it waits for its denials.
+ */
+interface LaunchMailbox {
+  readonly launchKey: string;
+  /** The thread was deleted or its turn interrupted: a wait for its denials ends now. */
+  cancelled?: boolean;
+  pushed?: SessionToolsManifest;
+  keyed?: PreparedSessionTools;
+  wake?: () => void;
+}
 
 export function createSessionToolsHost(options: CreateSessionToolsHostOptions): SessionToolsHost {
   const credentials = options.credentials ?? new SessionToolCredentials();
@@ -252,6 +294,14 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
   const launched = new Map<string, LaunchedSession>();
   /** A newer list a live (non-in-session) session has not taken yet. */
   const desired = new Map<string, PreparedSessionTools>();
+  /** The launch key of the session each `desired` list was pushed for. */
+  const desiredLaunchKey = new Map<string, string>();
+  const want = (threadId: string, next: PreparedSessionTools): void => {
+    desired.set(threadId, next);
+    const launchKey = launched.get(threadId)?.launchKey;
+    if (launchKey !== undefined) desiredLaunchKey.set(threadId, launchKey);
+    else desiredLaunchKey.delete(threadId);
+  };
   /** Live sessions that must restart at their next idle point although their key did not move (a live apply the client never re-listed). */
   const forced = new Set<string>();
   /** A thread whose session is being launched (its manifest read in flight): a refresh waits for it. */
@@ -267,26 +317,52 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
    * back, so a stamp from a retired epoch — a push that outlived its daemon — is always stale.
    */
   const retiredEpochs = new Set<string>();
+  /**
+   * The order this host first took a stamp of each daemon epoch in: epochs are opaque, and in a
+   * handover the old daemon's late push may land after the new daemon's first one — an epoch first
+   * seen EARLIER is the older daemon's, never a newer one. An epoch never seen counts as newest.
+   */
+  const epochOrder = new Map<string, number>();
   const epochKey = (stamp: Stamp): string => stamp.epoch ?? "";
-  /** True when `stamp` is no newer than the thread's last one (same daemon epoch), or from a retired epoch. */
+  const orderOf = (stamp: Stamp): number => epochOrder.get(epochKey(stamp)) ?? Number.POSITIVE_INFINITY;
+  /** `a`'s epoch is a later daemon's than `b`'s. */
+  const laterEpoch = (a: Stamp, b: Stamp): boolean => retiredEpochs.has(epochKey(b)) || orderOf(a) > orderOf(b);
+  /**
+   * True when `stamp` is no newer than the thread's last one: the same daemon epoch and a sequence
+   * no higher, an epoch retired host-wide, or an epoch first seen before the thread's last one's.
+   */
   const isStale = (threadId: string, stamp: Stamp | undefined): boolean => {
     if (stamp === undefined) return false;
     if (retiredEpochs.has(epochKey(stamp))) return true;
     const last = lastSeq.get(threadId);
-    if (last === undefined || last.epoch !== stamp.epoch) return false;
+    if (last === undefined) return false;
+    if (last.epoch !== stamp.epoch) return !laterEpoch(stamp, last);
     return stamp.seq <= last.seq;
   };
-  /** `a` is newer than `b` (a missing `b`, or `b`'s epoch retired by `a`'s, counts as older). */
+  /** `a` is newer than `b` (a missing `b`, or `b` from an earlier daemon epoch than `a`'s, counts as older). */
   const newerThan = (a: Stamp | undefined, b: Stamp | undefined): boolean => {
     if (a === undefined) return false;
     if (b === undefined) return true;
-    if (a.epoch !== b.epoch) return retiredEpochs.has(epochKey(b));
+    if (a.epoch !== b.epoch) return laterEpoch(a, b);
     return a.seq > b.seq;
   };
-  /** Record `stamp` as the thread's newest; a new epoch retires the thread's previous one host-wide. */
-  const noteSeq = (threadId: string, stamp: Stamp | undefined): void => {
-    if (stamp === undefined || isStale(threadId, stamp)) return;
+  /**
+   * Record `stamp` as the thread's newest. Only a LATER epoch than the thread's last one (not stale,
+   * so first seen after it, or never seen) retires that one host-wide.
+   */
+  let epochClock = 0;
+  const noteSeq = (threadId: string, stamp: Stamp | undefined, fromPull = false): void => {
+    if (stamp === undefined) return;
+    const key = epochKey(stamp);
     const last = lastSeq.get(threadId);
+    if (fromPull && last?.epoch !== stamp.epoch) {
+      // A manifest the host ASKED for comes from the daemon its socket reaches now: that epoch is
+      // the newest, whatever a late push of an epoch never seen before made the host believe.
+      retiredEpochs.delete(key);
+      epochOrder.set(key, (epochClock += 1));
+    }
+    if (isStale(threadId, stamp)) return;
+    if (!epochOrder.has(key)) epochOrder.set(key, (epochClock += 1));
     if (last !== undefined && last.epoch !== stamp.epoch) retiredEpochs.add(epochKey(last));
     lastSeq.set(threadId, stamp);
   };
@@ -314,8 +390,7 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
     names: readonly string[],
     instructions: string,
     deny: readonly string[],
-    source: PreparedSessionTools["source"],
-    denyKnown = true
+    source: PreparedSessionTools["source"]
   ): Promise<PreparedSessionTools> => {
     const defs = await definitions.catch(() => null);
     const tools: Tool[] = [];
@@ -330,7 +405,6 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
       names: new Set(tools.map((tool) => tool.name)),
       instructions,
       deny: [...deny],
-      denyKnown,
       key: keyOf(tools, instructions, deny),
       source
     };
@@ -342,68 +416,175 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
   };
 
   /**
-   * The daemon could not be asked: this launch key's last manifest (same agent, home and project —
-   * its denials are this config's), else the agent's catalogue defaults with NO denial, warned.
-   * Never another key's denials: Codex fails a thread whose config lacks a denied name.
+   * The daemon could not be asked: the denials last known for this launch key — the thread's own
+   * last manifest for it, else another thread's of the same key (same agent, home and project: its
+   * denials are this config's) — warned; null when none is known. Never another key's denials:
+   * Codex fails a thread whose config lacks a denied name.
    */
-  const fallback = async (threadId: string, launch: SessionToolsLaunch): Promise<PreparedSessionTools> => {
-    const launchKey = launchKeyOf(launch);
+  const lastKnown = (threadId: string, launchKey: string): PreparedSessionTools | null => {
     // The thread's own last manifest first — only for the same launch (an account switch moved it).
     const own = lastByThread.get(threadId);
-    if (own && own.launchKey === launchKey) {
-      // A fallback orders nothing: its stamp is the daemon's word on a launch long past.
-      const { seq: _seq, epoch: _epoch, ...copy } = own.prepared;
-      return { ...copy, source: "fallback" };
+    // A newer list the daemon pushed for this thread's session of the same key (a toolset change
+    // pending its restart) comes first: launching with an older one would lose the change.
+    const pending = desiredLaunchKey.get(threadId) === launchKey ? desired.get(threadId) : undefined;
+    if (pending !== undefined) {
+      // Adopted: it is this key's last list from now on, so a second fallback keeps it too.
+      lastByThread.set(threadId, { launchKey, prepared: pending });
+      lastByLaunch.set(launchKey, pending);
     }
-    const last = lastByLaunch.get(launchKey);
-    if (last) {
-      // Another thread's manifest: its stamp orders THAT thread's refreshes, never this one's.
-      const { seq: _seq, epoch: _epoch, ...copy } = last;
-      return { ...copy, threadId, source: "fallback" };
-    }
-    // Safe values where the thread's own are unknown: workflow-owned (no Admin tool, no
-    // approval line), and no toolset can be asked for.
-    const on = new Set(TOOLSETS.filter((toolset) => toolset.locked || toolset.defaults[launch.agent] === true).map((toolset) => toolset.id));
-    const names = catalogFor("chat").filter((tool) => on.has(tool.toolset) && tool.tier !== "admin").map((tool) => tool.name);
-    const instructions = composeOrquesterInstructions({ enabledToolsets: on, workflowOwned: true, canRequestToolsets: false });
-    options.logger?.warn("session tools: no denials known for this launch; MCP server denial is degraded", { threadId, agent: launch.agent });
+    // A fallback orders nothing: its stamp is the daemon's word on a launch long past (and
+    // another thread's stamp orders THAT thread's refreshes, never this one's).
+    const source = pending ?? (own && own.launchKey === launchKey ? own.prepared : lastByLaunch.get(launchKey));
+    if (source === undefined) return null;
+    const { seq: _seq, epoch: _epoch, ...copy } = source;
+    return { ...copy, threadId, source: "fallback" };
+  };
+
+  /** Threads warned for their current degraded state: warned again only after a good manifest. */
+  const degradedWarned = new Set<string>();
+  const warnFallback = (threadId: string): void => {
+    if (degradedWarned.has(threadId)) return;
+    degradedWarned.add(threadId);
     try {
       options.onWarning?.(threadId, DENIAL_DEGRADED_WARNING);
     } catch {
-      // Surfacing is best effort; the log above stands.
+      // Surfacing is best effort; the log stands.
     }
-    return build(threadId, names, instructions, [], "fallback", false);
+  };
+
+  /** Every launch of `threadId` reading its manifest right now. */
+  const mailboxes = new Map<string, Set<LaunchMailbox>>();
+  /** What a launch read from the daemon itself (not a push it adopted): its epoch is the live daemon's. */
+  const pulled = new WeakSet<PreparedSessionTools>();
+  /** What a launch read from a daemon socket no longer current when it answered: no stamp recorded. */
+  const stalePulls = new WeakSet<PreparedSessionTools>();
+  /** Manifests a waiting launch took from a refresh: that refresh then has nothing left to apply. */
+  const adopted = new WeakSet<SessionToolsManifest>();
+
+  /** A refresh for a thread whose launch is reading its manifest: hand it over (the newest wins). */
+  const offerPushed = (threadId: string, manifest: SessionToolsManifest): void => {
+    // A push older than what the thread already launched with (or from a retired daemon) is no answer.
+    if (isStale(threadId, stampOf(manifest))) return;
+    for (const box of mailboxes.get(threadId) ?? []) {
+      if (box.pushed !== undefined && !newerThan(stampOf(manifest), stampOf(box.pushed))) continue;
+      box.pushed = manifest;
+      box.wake?.();
+    }
+  };
+
+  /** The thread was deleted, or its turn interrupted: a launch waiting for its denials gives up now. */
+  const cancelLaunchWaits = (threadId: string): void => {
+    for (const box of mailboxes.get(threadId) ?? []) {
+      box.cancelled = true;
+      box.wake?.();
+    }
+  };
+
+  /** A launch read a manifest for `launchKey`: the other launches of that key waiting for denials take it. */
+  const offerKeyed = (launchKey: string, prepared: PreparedSessionTools): void => {
+    for (const boxes of mailboxes.values()) {
+      for (const box of boxes) {
+        if (box.launchKey !== launchKey) continue;
+        box.keyed = prepared;
+        box.wake?.();
+      }
+    }
+  };
+
+  /** A manifest this launch read or was handed: what it advertises, recorded as its key's last. */
+  const recordManifest = async (threadId: string, launchKey: string, manifest: SessionToolsManifest): Promise<PreparedSessionTools> => {
+    const prepared = await fromManifest(threadId, manifest);
+    // A good manifest ends the thread's degraded state: a later fallback is warned again.
+    degradedWarned.delete(threadId);
+    lastByLaunch.set(launchKey, prepared);
+    lastByThread.set(threadId, { launchKey, prepared });
+    offerKeyed(launchKey, prepared);
+    return prepared;
+  };
+
+  /**
+   * No manifest, and no denials known for this launch key: wait (until `deadline`) for a manifest
+   * pushed for the thread or read by another launch of the key; else refuse the launch.
+   */
+  const awaitDenials = async (threadId: string, launchKey: string, box: LaunchMailbox, deadline: Promise<void>): Promise<PreparedSessionTools> => {
+    let expired = false;
+    void deadline.then(() => {
+      expired = true;
+      box.wake?.();
+    });
+    for (;;) {
+      if (box.pushed !== undefined) {
+        const manifest = box.pushed;
+        adopted.add(manifest);
+        return recordManifest(threadId, launchKey, manifest);
+      }
+      if (box.keyed !== undefined) {
+        const { seq: _seq, epoch: _epoch, ...copy } = box.keyed;
+        return { ...copy, threadId, source: "fallback" };
+      }
+      if (expired || stopped || box.cancelled) {
+        options.logger?.warn("session tools: no MCP denials known for this launch; the session is not started", { threadId });
+        throw new SessionToolsDenialsUnknownError();
+      }
+      await new Promise<void>((resolve) => (box.wake = resolve));
+      box.wake = undefined;
+    }
   };
 
   const readPrepared = async (threadId: string, launch: SessionToolsLaunch): Promise<PreparedSessionTools> => {
-    const answer = await options.manifest(threadId);
-    switch (answer.kind) {
-      case "manifest": {
-        const prepared = await fromManifest(threadId, answer.manifest);
-        const launchKey = launchKeyOf(launch);
-        lastByLaunch.set(launchKey, prepared);
-        lastByThread.set(threadId, { launchKey, prepared });
-        return prepared;
+    const launchKey = launchKeyOf(launch);
+    const box: LaunchMailbox = { launchKey };
+    const boxes = mailboxes.get(threadId) ?? new Set<LaunchMailbox>();
+    boxes.add(box);
+    mailboxes.set(threadId, boxes);
+    // The bound covers the whole read: the daemon's own answer (bounded itself) and the wait.
+    let timer: NodeJS.Timeout | undefined;
+    const deadline = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, options.denialsWaitMs ?? DENIALS_WAIT_MS);
+    });
+    try {
+      const answer = await options.manifest(threadId);
+      switch (answer.kind) {
+        case "manifest": {
+          const prepared = await recordManifest(threadId, launchKey, answer.manifest);
+          // From the daemon the host's socket names now: its epoch is the live one. An answer from
+          // a socket that is no longer current is stale — used for this launch, its stamp unrecorded.
+          if (answer.current === false) stalePulls.add(prepared);
+          else pulled.add(prepared);
+          return prepared;
+        }
+        case "legacy": {
+          // The old server's list VERBATIM (its schemas are what the old daemon's handlers parse).
+          const tools = [...LEGACY_SESSION_TOOL_DEFINITIONS];
+          return {
+            threadId,
+            tools,
+            names: new Set(tools.map((tool) => tool.name)),
+            instructions: LEGACY_SESSION_TOOL_INSTRUCTIONS,
+            deny: [],
+            key: keyOf(tools, LEGACY_SESSION_TOOL_INSTRUCTIONS, []),
+            source: "legacy"
+          };
+        }
+        case "no-thread":
+          return await build(threadId, [], "", [], "manifest");
+        case "unavailable": {
+          // A refresh that reached this thread while the daemon was asked is the daemon's word.
+          if (box.pushed !== undefined) return await awaitDenials(threadId, launchKey, box, deadline);
+          const known = lastKnown(threadId, launchKey);
+          if (known !== null) {
+            options.logger?.warn("session tools: no manifest from the daemon; this session uses the denials last known for its launch key", { threadId });
+            warnFallback(threadId);
+            return known;
+          }
+          options.logger?.warn("session tools: no manifest from the daemon and no denials known for this launch; waiting for them", { threadId, agent: launch.agent });
+          return await awaitDenials(threadId, launchKey, box, deadline);
+        }
       }
-      case "legacy": {
-        // The old server's list VERBATIM (its schemas are what the old daemon's handlers parse).
-        const tools = [...LEGACY_SESSION_TOOL_DEFINITIONS];
-        return {
-          threadId,
-          tools,
-          names: new Set(tools.map((tool) => tool.name)),
-          instructions: LEGACY_SESSION_TOOL_INSTRUCTIONS,
-          deny: [],
-          denyKnown: true,
-          key: keyOf(tools, LEGACY_SESSION_TOOL_INSTRUCTIONS, []),
-          source: "legacy"
-        };
-      }
-      case "no-thread":
-        return build(threadId, [], "", [], "manifest");
-      case "unavailable":
-        options.logger?.warn("session tools: no manifest from the daemon; this session uses its launch key's last list or the defaults", { threadId });
-        return fallback(threadId, launch);
+    } finally {
+      clearTimeout(timer);
+      boxes.delete(box);
+      if (boxes.size === 0 && mailboxes.get(threadId) === boxes) mailboxes.delete(threadId);
     }
   };
 
@@ -421,12 +602,14 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
     launching.set(threadId, done);
     try {
       const prepared = await reading;
-      launched.set(threadId, { prepared, owner, ...(live ? { live } : {}) });
-      // A refresh that claimed a NEWER manifest while this read was in flight keeps what it wants.
+      launched.set(threadId, { prepared, owner, launchKey: launchKeyOf(launch), ...(live ? { live } : {}) });
+      // A refresh that claimed a NEWER manifest while this read was in flight keeps what it wants —
+      // unless this launch could not ask the daemon at all: a restart would only fall back again
+      // (restart churn at every idle point); the daemon's next answer or push brings the change.
       const wanted = desired.get(threadId);
-      if (wanted === undefined || !newerThan(stampOf(wanted), stampOf(prepared))) desired.delete(threadId);
+      if (prepared.source === "fallback" || wanted === undefined || !newerThan(stampOf(wanted), stampOf(prepared))) desired.delete(threadId);
       forced.delete(threadId);
-      if (prepared.source !== "fallback") noteSeq(threadId, stampOf(prepared));
+      if (prepared.source !== "fallback" && !stalePulls.has(prepared)) noteSeq(threadId, stampOf(prepared), pulled.has(prepared));
       return prepared;
     } finally {
       if (launching.get(threadId) === done) launching.delete(threadId);
@@ -511,9 +694,13 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
     current: (threadId) => launched.get(threadId)?.prepared ?? null,
     listSource,
     async applyManifest(threadId, manifest) {
-      // A launch reading its manifest right now: judge the refresh against what it launches with.
+      // A launch reading its manifest right now takes it if the daemon cannot answer it (it waits
+      // for its denials); otherwise the refresh is judged against what it launches with.
+      offerPushed(threadId, manifest);
       const inFlight = launching.get(threadId);
       if (inFlight) await inFlight;
+      // The launch launched with this very manifest: nothing is left to apply.
+      if (adopted.has(manifest)) return launched.has(threadId) ? "unchanged" : "next-start";
       // Out of order (a settings refresh and an approval racing): never roll a list back. The
       // stamp is CLAIMED before any await, so an older refresh queued behind this one is
       // superseded however their awaits interleave.
@@ -524,6 +711,8 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
       const overtaken = (): boolean => stamp !== undefined && lastSeq.get(threadId) !== claimed;
       const next = await fromManifest(threadId, manifest);
       if (overtaken()) return "superseded";
+      // The daemon answers again: the thread's degraded state is over.
+      degradedWarned.delete(threadId);
       const session = launched.get(threadId);
       if (!session) return "next-start";
       if (session.prepared.key === next.key && !forced.has(threadId)) {
@@ -552,7 +741,7 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
             // The relaunch read this change or a newer one: nothing of this refresh is owed.
             return "superseded";
           }
-          desired.set(threadId, next);
+          want(threadId, next);
           return "next-idle";
         }
         if (overtaken()) return "superseded";
@@ -564,7 +753,7 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
         forced.add(threadId);
         return "next-idle";
       }
-      desired.set(threadId, next);
+      want(threadId, next);
       return "next-idle";
     },
     needsRestart(threadId) {
@@ -581,7 +770,14 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
       // Issue first (it revokes the thread's earlier grant, ending that session's list), then read
       // and record what this session advertises.
       const issued = credentials.issue(threadId);
-      const prepared = await launchWith(threadId, launch, issued.grantId);
+      let prepared: PreparedSessionTools;
+      try {
+        prepared = await launchWith(threadId, launch, issued.grantId);
+      } catch (error) {
+        // No session starts on it (its denials are unknown): the credential dies here.
+        credentials.revokeGrant(issued.grantId);
+        throw error;
+      }
       return {
         threadId,
         url,
@@ -598,8 +794,14 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
         .then((open) => open.deniedUrl)
         .catch(() => undefined);
     },
-    abortThreadCalls: (threadId) => abortWhere((call) => call.threadId === threadId),
+    abortThreadCalls(threadId) {
+      abortWhere((call) => call.threadId === threadId);
+      cancelLaunchWaits(threadId);
+    },
     forgetThread(threadId) {
+      cancelLaunchWaits(threadId);
+      degradedWarned.delete(threadId);
+      desiredLaunchKey.delete(threadId);
       lastByThread.delete(threadId);
       lastSeq.delete(threadId);
       desired.delete(threadId);
@@ -607,13 +809,17 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
     },
     async stop() {
       stopped = true;
+      // A launch waiting for its denials gives up now.
+      for (const boxes of mailboxes.values()) for (const box of boxes) box.wake?.();
       credentials.revokeAll();
       abortWhere(() => true);
       launched.clear();
       desired.clear();
+      desiredLaunchKey.clear();
       forced.clear();
       lastByLaunch.clear();
       lastByThread.clear();
+      degradedWarned.clear();
       lastSeq.clear();
       retiredEpochs.clear();
       const open = endpoint;
@@ -629,7 +835,9 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
  * An endpoint provider's way into its session: the context's service issues a grant, and a
  * failure (the endpoint could not bind, the host is stopping) costs the session its TOOLS —
  * logged — never its start, and never its DENIALS: the thread's list and denials are still read
- * and handed back (§12.1 does not fail open). `{prepared: null}` without session tools.
+ * and handed back (§12.1 does not fail open). Denials that stay unknown
+ * ({@link SessionToolsDenialsUnknownError}) are thrown: the session does not start.
+ * `{prepared: null}` without session tools.
  */
 export async function issueSessionToolsGrant(
   context: { sessionTools?: SessionToolsHost; logger: { warn(message: string, detail?: unknown): void } },
@@ -644,11 +852,16 @@ export async function issueSessionToolsGrant(
     const grant = await host.issue(threadId, launch);
     return { grant, prepared: grant.prepared, deniedUrl: grant.deniedUrl };
   } catch (error) {
+    // Unknown denials refuse the session itself (§12.1), never only its tools.
+    if (isSessionToolsDenialsUnknown(error)) throw error;
     context.logger.warn("session tools: no credential for this session; it runs without them (its MCP denials still apply)", {
       threadId,
       error: error instanceof Error ? error.message : String(error)
     });
-    const prepared = await host.prepare(threadId, launch).catch(() => null);
+    const prepared = await host.prepare(threadId, launch).catch((failure: unknown) => {
+      if (isSessionToolsDenialsUnknown(failure)) throw failure;
+      return null;
+    });
     const deniedUrl = await host.deniedUrl();
     return { prepared, ...(deniedUrl !== undefined ? { deniedUrl } : {}) };
   }
