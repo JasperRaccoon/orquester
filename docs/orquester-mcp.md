@@ -1416,7 +1416,12 @@ be shown: from another workspace (or a gone checkout) only to a Full-access chat
 counted in `sharedElsewhere`; a result row about another workspace's prompt carries no
 `projectPath` and only `createdBy.kind`. Reads before an approval list with `readOnly=1`, and
 `update_saved_prompts` refuses with `PREVIEW_STALE` when the project a prompt belongs to changed
-between the check and the write.
+between the check and the write. Its writes carry `expectWorkflowUses` (the workflows its check or
+card judged to use the prompt); the daemon re-reads them from the workflow reference index in the
+write's own step and refuses a change (409 `WORKFLOW_USES_CHANGED`, nothing saved), which the
+agent sees as `PREVIEW_STALE`. A global prompt's `createdBy` names its creating chat to a chat
+below Full access only when that chat is the caller or an open chat of its workspace; otherwise
+only `createdBy.kind`.
 
 ### Automated workflows, agent profiles, desktops
 
