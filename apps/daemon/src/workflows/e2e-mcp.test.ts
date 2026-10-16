@@ -1,7 +1,7 @@
 // End to end: the MCP workflow tools against the REAL workflow routes and the REAL runtime (the
 // daemon's own `InjectDaemonApi` over a Fastify app carrying `registerWorkflowRoutes`, the stores on
 // a temp appdir, the engine as `startDaemon` wires it). These retain the authoring guide,
-// draft validation and run/output round trip against the production services.
+// dry-run validation, the revision-pinned run and the run/output round trip against the production services.
 
 import assert from "node:assert/strict";
 import { join } from "node:path";
@@ -22,7 +22,7 @@ before(async () => {
   dir = await tempAppdir(["acme/api"]);
   h = await boot(dir.root);
   mcp = Fastify();
-  registerMcp(mcp, { createApi: () => h.api, todos: {} as never, files: {} as never });
+  registerMcp(mcp, { createApi: () => h.api });
   // Match IncomingMessage after Fastify has consumed its body (light-my-request omits it).
   mcp.addHook("preHandler", async (request) => { (request.raw as unknown as { destroyed: boolean }).destroyed = true; });
   await mcp.ready();
@@ -69,21 +69,42 @@ describe("e2e: the MCP workflow tools against the real routes", () => {
     await retainWorkflowArtifact(t, { created, updated });
   });
 
-  test("validate_workflow: a draft with the placeholders the tool fills in validates on the real route", async (t) => {
-    const projectPath = join(dir.workspacesDir, "acme", "api");
-    const minimal = await call("validate_workflow", {
-      workflow: {
-        name: "Minimal",
-        project: { kind: "existing", projectPath },
-        nodes: [
-          { id: "t", type: "trigger.manual", name: "Go", config: {} },
-          { id: "c", type: "code", name: "Work", config: { source: "export default () => 1" } }
-        ],
-        edges: [{ source: "t", target: "c" }]
-      }
+  test("create_workflow and update_workflow {dryRun: true} validate on the real route and save nothing", async (t) => {
+    const before = h.service.list().length;
+    const minimal = await call("create_workflow", {
+      name: "Minimal",
+      project: { kind: "existing", project: "acme/api" },
+      nodes: [
+        { type: "trigger.manual", name: "Go" },
+        { type: "code", name: "Work", config: { source: "export default () => 1" } }
+      ],
+      edges: [{ source: "Go", target: "Work" }],
+      dryRun: true
     });
     assert.equal(minimal.valid, true, JSON.stringify(minimal.problems));
-    await retainWorkflowArtifact(t, minimal);
+    assert.equal(minimal.saved, false);
+    assert.equal(minimal.projects, "Project acme/api");
+    const broken = await call("create_workflow", {
+      name: "Broken",
+      project: { kind: "existing", project: "acme/api" },
+      nodes: [{ type: "shell", name: "Sh", config: { script: "echo {{ input }}" } }],
+      dryRun: true
+    });
+    assert.equal(broken.valid, false);
+    assert.equal(h.service.list().length, before, "a dry run saves nothing");
+    const created = await call("create_workflow", {
+      name: "Edited",
+      project: { kind: "existing", project: "acme/api" },
+      nodes: [{ type: "trigger.manual", name: "Go" }, { type: "code", name: "Work", config: { source: "export default () => 1" } }],
+      edges: [{ source: "Go", target: "Work" }]
+    });
+    const id = created.workflowId as string;
+    const dry = await call("update_workflow", { workflowId: id, revision: created.revision, ops: [{ op: "rename_node", node: "Work", to: "Renamed" }], dryRun: true });
+    assert.equal(dry.valid, true, JSON.stringify(dry.problems));
+    assert.deepEqual(dry.changes, [{ label: "code · Work → Renamed", change: "changed", detail: "name" }]);
+    assert.equal(h.service.get(id)!.revision, created.revision, "a dry run saves nothing");
+    await call("delete_workflow", { workflowId: id, confirm: true });
+    await retainWorkflowArtifact(t, { minimal, broken, dry });
   });
 
   test("run_workflow waits for a real run and its stored output can be read by node name", async (t) => {
@@ -97,15 +118,16 @@ describe("e2e: the MCP workflow tools against the real routes", () => {
       edges: [{ source: "Go", target: "Double" }]
     });
     const id = created.workflowId as string;
-    const ran = await call("run_workflow", { workflowId: id, input: { n: 21 }, wait: true, timeoutSeconds: 60 });
+    await assert.rejects(call("run_workflow", { workflowId: id, revision: (created.revision as number) + 1 }), (error: ToolError) => error.code === "REVISION_CONFLICT");
+    const ran = await call("run_workflow", { workflowId: id, revision: created.revision, input: { n: 21 }, wait: true, timeoutSeconds: 60 });
     assert.equal(ran.finished, true, JSON.stringify(ran));
     const run = ran.run as { runId: string; status: string };
     assert.equal(run.status, "succeeded");
     const blocks = ran.blocks as { name: string; output?: unknown }[];
     assert.deepEqual(blocks.find((block) => block.name === "Double")!.output, { doubled: 42 });
-    const runs = await call("list_workflow_runs", { workflowId: id });
+    const runs = await call("get_workflow_runs", { workflowId: id });
     assert.deepEqual((runs.runs as { runId: string }[]).map((row) => row.runId), [run.runId]);
-    const one = await call("get_workflow_run", { runId: run.runId, nodeId: "Double" });
+    const one = await call("get_workflow_runs", { runId: run.runId, nodeId: "Double" });
     assert.deepEqual(one.output, { doubled: 42 });
     assert.equal((await h.runStore.load(run.runId))!.status, "succeeded");
     await retainWorkflowArtifact(t, { ran, runs, output: one.output });

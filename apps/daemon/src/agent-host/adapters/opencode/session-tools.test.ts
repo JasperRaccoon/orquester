@@ -16,7 +16,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { EXTERNAL_MCP_TOOL_NAMES } from "../../../mcp/tool-names.ts";
+import { catalogFor } from "../../../mcp/catalog/index.ts";
 import { buildOpenCodePermissionRules, type OpenCodePermissionRuleset } from "./ruleset.ts";
 import { openCodeSessionToolsServerName, withSessionToolInstructions, withSessionToolRules } from "./session-tools.ts";
 
@@ -98,6 +98,16 @@ for (const mode of ["approval-required", "full-access"] as const) {
   });
 }
 
+test("every tool of a denied server is dropped, its own tools kept (§12.1)", () => {
+  const own = openCodeSessionToolsServerName("thread-a");
+  const session = withSessionToolRules(buildOpenCodePermissionRules("full-access"), { isolate: true, own: { serverName: own }, deny: ["orquester", "remote.api"] });
+  const tools = [toolId(own, "echo"), toolId("orquester", "send_message"), toolId("remote_api", "list"), toolId("github", "issue"), "bash"];
+  const hidden = disabled(tools, [...AGENT_RULES, ...session]);
+  assert.deepEqual([...hidden].sort(), [toolId("orquester", "send_message"), toolId("remote_api", "list")].sort());
+  // The denials come last, so nothing above re-allows them.
+  assert.deepEqual(session.slice(-2).map((rule) => [rule.permission, rule.action]), [["orquester_*", "deny"], ["remote_api_*", "deny"]]);
+});
+
 test("a thread whose own grant failed is still kept off every co-tenant's tools", () => {
   const serverA = openCodeSessionToolsServerName("thread-a");
   const tools = [toolId(serverA, "echo"), "bash"];
@@ -110,7 +120,7 @@ test("the external /mcp under the name docs/orquester-mcp.md suggests keeps ever
   const serverA = openCodeSessionToolsServerName("thread-a");
   const session = withSessionToolRules(buildOpenCodePermissionRules("full-access"), { isolate: true, own: { serverName: serverA } });
   const offered = (server: string) =>
-    disabled(EXTERNAL_MCP_TOOL_NAMES.map((tool) => toolId(server, tool)), [...AGENT_RULES, ...session]);
+    disabled(catalogFor("external").map((tool) => toolId(server, tool.name)), [...AGENT_RULES, ...session]);
   // The suggested name, and the guide's own `orquester`, can never meet the
   // deny's literal `orquester-` prefix.
   assert.deepEqual([...offered(SUGGESTED_EXTERNAL_NAME)], []);

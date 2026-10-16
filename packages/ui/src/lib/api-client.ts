@@ -97,7 +97,15 @@ import {
 import { fsPathQuery } from "./fs-path-query";
 import { parsePluginActionResult, parsePluginsResponse } from "./plugins-state";
 import { buildQueryString } from "./transporter";
-import { agentProfileRoutes, desktopRoutes, pluginRoutes, workflowRoutes } from "@orquester/api";
+import { AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, agentProfileRoutes, agentToolsRoutes, desktopRoutes, pluginRoutes, workflowRoutes } from "@orquester/api";
+import type {
+  AgentToolsResponse,
+  DaemonMcpServersResponse,
+  RevokeAgentToolGrantsResponse,
+  ThreadAgentToolsResponse,
+  UpdateAgentToolsSettingsRequest,
+  UpdateThreadAgentToolsRequest
+} from "@orquester/api";
 import type { PluginId, PluginInfo, PluginsResponse, SetPluginWorkspaceRequest } from "@orquester/api";
 import type {
   CreateDesktopRequest,
@@ -167,6 +175,10 @@ import type {
   ThreadPromptsQuery,
   ThreadPromptsResponse,
   ThreadPromptTextResponse,
+  ToolApprovalAnswer,
+  ToolApprovalAnswerResponse,
+  ToolApprovalDetailResponse,
+  ToolApprovalListResponse,
   TurnDiffQuery,
   TurnDiffResponse
 } from "@orquester/api/agent-chat";
@@ -723,6 +735,11 @@ export class ApiClient {
 
   getAgentProfileOverview(signal?: AbortSignal): Promise<AgentProfileOverviewResponse> {
     return this.send("GET", agentProfileRoutes.overview, { signal });
+  }
+
+  /** MCP servers in the agents' configs that reach this daemon's own `/mcp` (unified MCP design §12.1). */
+  getDaemonMcpServers(signal?: AbortSignal): Promise<DaemonMcpServersResponse> {
+    return this.send("GET", AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, { signal });
   }
 
   getAgentProfile(agent: AgentProfileAgentId, signal?: AbortSignal): Promise<AgentProfileSnapshot> {
@@ -1385,6 +1402,54 @@ export class ApiClient {
     body: SecretRequestAnswerRequest
   ): Promise<SecretRequestAnswerResponse> {
     return this.send("POST", agentChatRoutes.secretRequest(id, requestId), { body });
+  }
+
+  /** The chat's pending Orquester approval cards (unified MCP §7.3; never a secret value). */
+  listToolApprovals(id: string, signal?: AbortSignal): Promise<ToolApprovalListResponse> {
+    return this.send("GET", agentChatRoutes.toolApprovals(id), { signal });
+  }
+
+  /** One pending card with its WHOLE preview ("View all"). */
+  getToolApproval(id: string, approvalId: string, signal?: AbortSignal): Promise<ToolApprovalDetailResponse> {
+    return this.send("GET", agentChatRoutes.toolApproval(id, approvalId), { signal });
+  }
+
+  /**
+   * Answer a card — the only way to (§7.3). Card secrets ride in this body only, never a URL, a
+   * log or a store; the response carries the outcome alone.
+   */
+  answerToolApproval(id: string, approvalId: string, body: ToolApprovalAnswer): Promise<ToolApprovalAnswerResponse> {
+    return this.send("POST", agentChatRoutes.toolApproval(id, approvalId), { body });
+  }
+
+  /** Settings › Agent tools: master switch, toolsets × agents, grants (§9.2). */
+  getAgentTools(signal?: AbortSignal): Promise<AgentToolsResponse> {
+    return this.send("GET", agentToolsRoutes.settings, { signal });
+  }
+
+  /** Change the settings; a stale `revision` is 409 `REVISION_MISMATCH`. */
+  updateAgentToolsSettings(body: UpdateAgentToolsSettingsRequest): Promise<AgentToolsResponse> {
+    return this.send("PUT", agentToolsRoutes.updateSettings, { body });
+  }
+
+  /** Revoke one grant (204; 404 `GRANT_NOT_FOUND` once it is gone). */
+  async revokeAgentToolGrant(grantId: string): Promise<void> {
+    await this.send("DELETE", agentToolsRoutes.grant(grantId));
+  }
+
+  /** Revoke every grant, or every grant of one chat. */
+  revokeAgentToolGrants(threadId?: string): Promise<RevokeAgentToolGrantsResponse> {
+    return this.send("DELETE", agentToolsRoutes.grants, threadId ? { query: { threadId } } : {});
+  }
+
+  /** One chat's toolsets and grants (the Tools chip). */
+  getThreadAgentTools(id: string, signal?: AbortSignal): Promise<ThreadAgentToolsResponse> {
+    return this.send("GET", agentChatRoutes.agentTools(id), { signal });
+  }
+
+  /** Set or clear (`null` = inherit) a chat's toolset overrides. */
+  updateThreadAgentTools(id: string, body: UpdateThreadAgentToolsRequest): Promise<ThreadAgentToolsResponse> {
+    return this.send("PUT", agentChatRoutes.agentTools(id), { body });
   }
 
   sendSessionInput(id: string, data: string): Promise<void> {

@@ -54,7 +54,12 @@ export interface ClassifiedItem {
  * built from `item/agentMessage/delta`. Were `item.text` ever forwarded, it
  * would belong in `data.text`, which ingestion always reads as text.
  */
-export function classifyItem(item: CodexThreadItem): ClassifiedItem {
+/**
+ * `sessionToolsServer`: the name the session registered OUR server under (`orquester`, or an
+ * alternate where the thread's config has its own `orquester`); undefined when unknown (history),
+ * then the spelling decides.
+ */
+export function classifyItem(item: CodexThreadItem, sessionToolsServer?: string): ClassifiedItem {
   switch (item.type) {
     case "userMessage":
       return { itemType: "user_message" };
@@ -125,7 +130,8 @@ export function classifyItem(item: CodexThreadItem): ClassifiedItem {
         data: { changes: item.changes }
       };
 
-    case "mcpToolCall":
+    case "mcpToolCall": {
+      const ours = sessionToolsServer !== undefined ? item.server === sessionToolsServer : isSessionToolsServerName(item.server);
       return {
         itemType: "mcp_tool_call",
         status: item.status,
@@ -145,13 +151,16 @@ export function classifyItem(item: CodexThreadItem): ClassifiedItem {
           // An app's result is persisted bounded as a session tool's is
           // (ingestion): no image bytes, base64 blob or oversized string in
           // `events.ndjson` — the model already had it whole.
-          ...(item.result !== null && isSessionToolsServerName(item.server)
+          ...(item.result !== null && ours
             ? { result: item.result }
             : item.result !== null && namesMcpAppResource(item)
               ? { result: boundSessionToolData(item.result) }
-              : {})
+              : {}),
+          // Provenance where the session knows it: a user's own `orquester` server is never ours.
+          ...(sessionToolsServer !== undefined ? { sessionToolsServer: ours } : {})
         }
       };
+    }
 
     case "dynamicToolCall":
       return {

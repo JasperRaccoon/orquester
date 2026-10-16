@@ -1,12 +1,17 @@
+// Catalog family module `catalog` (Discovery: list_projects, list_agents, list_conversations) — plan Task 9
+// (unified MCP design 2026-10-15 §4 rows 1–3, §4.1, §5.5).
+import { basename } from "node:path";
 import { z } from "zod";
-import type { AgentConversationsResponse, ProjectSummary, RecentProjectSummary, RegistryResponse, WorkspaceSummary } from "@orquester/api";
+import type { AccountSummary, AgentConversationsResponse, ProjectSummary, RecentProjectSummary, RegistryResponse, WorkspaceGitAccount, WorkspaceSummary } from "@orquester/api";
+import { RUNTIME_MODE_HINTS, RUNTIME_MODE_LABELS, RUNTIME_MODES } from "@orquester/api/agent-chat";
 import { resolveProject } from "../addressing.ts";
-import { findAgent, findModel, fitAgentViews, loadAgents, nameList } from "../agents.ts";
+import { findAgent, findModel, fitAgentViews, loadAgents, nameList, type AgentView } from "../agents.ts";
+import { defineTool, READ_ONLY, type AnyOrquesterTool, type ScopeContext, type ToolCaller } from "../catalog/contract.ts";
 import type { DaemonApi } from "../daemon-api.ts";
 import { ToolError, expectOk } from "../errors.ts";
-import { listSessions } from "../reads.ts";
+import { runtimeModesUpTo } from "../gate/turn-policy.ts";
+import { listSessions, readThread } from "../reads.ts";
 import { MAX_RESULT_BYTES, resultBytes } from "../result.ts";
-import { defineTool, READ_ONLY, type ToolDef } from "../tool.ts";
 
 /**
  * One workspace's projects, or the warning that stands in for them: a workspace that cannot be read is left out
@@ -23,75 +28,199 @@ async function readWorkspace(api: DaemonApi, workspace: string): Promise<{ proje
   }
 }
 
+/**
+ * The workspace's git identity as a list may show it (§5.5): label, login, provider — never a key, key path or token.
+ * The daemon row's own `gitAccount` wins when it carries one; else `gitAccountId` is joined with `/api/accounts`.
+ * `null`: no binding, or an account that no longer exists.
+ */
+export function workspaceGitAccount(ws: WorkspaceSummary, accounts: readonly AccountSummary[]): WorkspaceGitAccount | null {
+  if (ws.gitAccount) return { label: ws.gitAccount.label, login: ws.gitAccount.login, provider: ws.gitAccount.provider };
+  const account = ws.gitAccountId ? accounts.find((a) => a.id === ws.gitAccountId) : undefined;
+  return account ? { label: account.label, login: account.login, provider: account.provider } : null;
+}
+
+interface ProjectRow { workspace: string; name: string; path: string; isArchived: boolean; lastInteractedAt?: string; openSessions: number; repoId?: string; current?: true; sameRepo?: true }
+
+/**
+ * Which workspaces a caller sees whole (coordinator ruling on §5.2 S13): an external or Full-access caller every one;
+ * a chat below Full access only its own workspace — another one only when it names it (`workspace`, carded by its
+ * scope) — and the rest as `excludedWorkspaces` counts. A chat with no project has no own workspace.
+ */
+function seesWorkspace(caller: ToolCaller, workspace: string, named: string | undefined): boolean {
+  if (caller.kind === "external" || caller.runtimeMode === "full-access") return true;
+  if (named !== undefined) return workspace === named;
+  return caller.projectPath !== "" && workspace === caller.workspace;
+}
+
 const listProjects = defineTool({
   name: "list_projects",
   title: "List projects",
-  description: "List projects (workspace/name and absolute path) with recency and open-session counts, recent first; archived ones only with includeArchived. A workspace that cannot be read is left out and named in `warnings`. Use the `path` or `workspace/name` as the `project` argument of other tools.",
+  description: "Projects (workspace/name, path), recent first, with open-session counts. Clones of one repository share `repoId`; `workspaces` gives each one's git account. Pass workspace/name as other tools' `project`.",
+  chatNote: "`current`: this chat's project; `sameRepo`: its clones. Below Full access, other workspaces are only counted.",
   input: {
-    workspace: z.string().min(1).optional().describe("Only this workspace (by name; an unknown one is refused)."),
-    includeArchived: z.boolean().default(false).describe("Include archived workspaces and projects.")
+    workspace: z.string().min(1).optional().describe("Only this workspace."),
+    query: z.string().trim().min(1).max(200).optional().describe("Filter on workspace/name."),
+    includeArchived: z.boolean().default(false).describe("Include archived ones.")
+  },
+  audiences: ["external", "chat"],
+  toolset: "core",
+  tier: "read",
+  /*
+   * A discovery list is global metadata (§5.2), except that a chat below Full access naming ANOTHER workspace reads that
+   * workspace's projects: their paths are the targets, so the gate raises the cross-workspace metadata card (S13).
+   */
+  async scope(args, { api, caller }) {
+    const none = { projects: [], sessions: [], reads: "metadata" as const, writes: false, causesTurnIn: [] };
+    if (caller.kind === "external" || caller.runtimeMode === "full-access" || args.workspace === undefined) return none;
+    if (caller.projectPath !== "" && args.workspace === caller.workspace) return none;
+    const read = await readWorkspace(api, args.workspace);
+    // An unknown or unreadable workspace reveals nothing here; `run` refuses or warns as for anyone.
+    if ("warning" in read) return none;
+    return { ...none, projects: read.projects.filter((p) => args.includeArchived || !p.isArchived).map((p) => p.path) };
   },
   annotations: READ_ONLY,
-  async run(args, { api }) {
-    const [workspacesRes, recentRes, sessions] = await Promise.all([api.request("GET", "/api/workspaces"), api.request("GET", "/api/projects/recent"), listSessions(api)]);
+  resultKind: "json",
+  async run(args, { api, caller }) {
+    const [workspacesRes, recentRes, sessions, accountsRes] = await Promise.all([api.request("GET", "/api/workspaces"), api.request("GET", "/api/projects/recent"), listSessions(api), api.request("GET", "/api/accounts")]);
     const workspaces = expectOk<WorkspaceSummary[]>(workspacesRes);
     // Recency only orders the list: without it the list is alphabetical, not a failure.
     const recent = recentRes.status < 400 ? (recentRes.body as RecentProjectSummary[]) : [];
+    // Git identities only label the list: without the accounts store each reads as its row's own (or null).
+    const accounts = accountsRes.status < 400 && Array.isArray(accountsRes.body) ? (accountsRes.body as AccountSummary[]) : [];
     const warnings: string[] = [];
     if (args.workspace !== undefined) {
       const named = workspaces.find((ws) => ws.name === args.workspace);
       if (!named) throw new ToolError("INVALID_ARGUMENT", `Unknown workspace "${args.workspace}". Workspaces: ${nameList(workspaces.map((ws) => ws.name))}.`);
       if (named.isArchived && !args.includeArchived) warnings.push(`Workspace "${named.name}" is archived; pass includeArchived: true to list its projects.`);
     }
-    const listed = workspaces.filter((ws) => (args.workspace === undefined || ws.name === args.workspace) && (!ws.isArchived || args.includeArchived));
+    const shownArchive = (ws: WorkspaceSummary) => !ws.isArchived || args.includeArchived;
+    const listed = workspaces.filter((ws) => (args.workspace === undefined || ws.name === args.workspace) && shownArchive(ws) && seesWorkspace(caller, ws.name, args.workspace));
+    const excluded = args.workspace === undefined
+      ? workspaces.filter((ws) => shownArchive(ws) && !seesWorkspace(caller, ws.name, undefined))
+        .map((ws) => ({ workspace: ws.name, projectCount: Math.max(0, ws.projectCount - (args.includeArchived ? 0 : ws.archivedProjectCount ?? 0)) }))
+      : [];
     const reads = await Promise.all(listed.map((ws) => readWorkspace(api, ws.name)));
-    const projects: { workspace: string; name: string; path: string; isArchived: boolean; lastInteractedAt?: string; openSessions: number }[] = [];
+    const needle = args.query?.toLowerCase();
+    // The caller's own project, by name (its path is canonical, a listing's may be spelt through a link).
+    const own = caller.kind === "thread" && caller.projectPath ? { workspace: caller.workspace, name: basename(caller.projectPath) } : null;
+    // Its repository, whatever the filters list: read from its own workspace when that is not listed.
+    let ownRepoId: string | undefined;
+    if (own !== null) {
+      const at = listed.findIndex((ws) => ws.name === own.workspace);
+      const ownRead = at >= 0 ? reads[at]! : await readWorkspace(api, own.workspace);
+      if (!("warning" in ownRead)) ownRepoId = ownRead.projects.find((p) => p.name === own.name)?.repoId;
+    }
+    const projects: ProjectRow[] = [];
     for (const [i, ws] of listed.entries()) {
       const read = reads[i]!;
       if ("warning" in read) { warnings.push(read.warning); continue; }
       for (const p of read.projects) {
+        const isOwn = own !== null && ws.name === own.workspace && p.name === own.name;
         if (p.isArchived && !args.includeArchived) continue;
+        if (needle !== undefined && !`${ws.name}/${p.name}`.toLowerCase().includes(needle)) continue;
         const r = recent.find((x) => x.path === p.path);
         // The daemon's project flag is per-project only; a project of an archived workspace is archived too.
-        projects.push({ workspace: ws.name, name: p.name, path: p.path, isArchived: ws.isArchived === true || p.isArchived === true, ...(r ? { lastInteractedAt: r.lastInteractedAt } : {}), openSessions: sessions.filter((s) => s.projectPath === p.path).length });
+        projects.push({
+          workspace: ws.name, name: p.name, path: p.path, isArchived: ws.isArchived === true || p.isArchived === true,
+          ...(r ? { lastInteractedAt: r.lastInteractedAt } : {}),
+          openSessions: sessions.filter((s) => s.projectPath === p.path).length,
+          ...(p.repoId ? { repoId: p.repoId } : {}),
+          ...(isOwn ? { current: true as const } : {}),
+          ...(!isOwn && ownRepoId !== undefined && p.repoId === ownRepoId ? { sameRepo: true as const } : {})
+        });
       }
     }
     projects.sort((a, b) => {
       if (a.lastInteractedAt !== b.lastInteractedAt) { if (!a.lastInteractedAt) return 1; if (!b.lastInteractedAt) return -1; return a.lastInteractedAt < b.lastInteractedAt ? 1 : -1; }
       return `${a.workspace}/${a.name}`.localeCompare(`${b.workspace}/${b.name}`);
     });
-    return warnings.length ? { projects, warnings } : { projects };
+    const shown = new Set(projects.map((row) => row.workspace));
+    const workspaceRows = listed.filter((ws) => shown.has(ws.name)).map((ws) => ({ name: ws.name, ...(ws.isArchived ? { isArchived: true } : {}), gitAccount: workspaceGitAccount(ws, accounts) }));
+    return { projects, workspaces: workspaceRows, ...(excluded.length ? { excludedWorkspaces: excluded } : {}), ...(warnings.length ? { warnings } : {}) };
   }
 });
+
+/** The permission modes with the composer's labels and hints (`@orquester/api` model-selection.ts). */
+const PERMISSION_MODES = RUNTIME_MODES.map((id) => ({ id, label: RUNTIME_MODE_LABELS[id], hint: RUNTIME_MODE_HINTS[id] }));
+
+/** Whether a model matches a `query`: slug, name, chip label or sub-provider contain it (any case). */
+function modelMatches(model: AgentView["models"][number], needle: string): boolean {
+  return [model.slug, model.name, model.shortName, model.subProvider].some((text) => typeof text === "string" && text.toLowerCase().includes(needle));
+}
+
+/** An agent as a chat caller sees it: accounts and the provider login without email; modes are `allowedRuntimeModes`. */
+function chatAgentView({ runtimeModes: _modes, defaultRuntimeMode: _default, auth, accounts, ...agent }: AgentView) {
+  const { email: _email, ...login } = auth;
+  return { ...agent, auth: login, accounts: accounts.map(({ email: _accountEmail, ...account }) => account) };
+}
+
+/** This chat's own agent, model, options, permission mode and account: what a chat it opens with the same agent inherits. */
+async function thisThread(api: DaemonApi, caller: Extract<ToolCaller, { kind: "thread" }>) {
+  const [sessions, own] = await Promise.all([listSessions(api), readThread(api, caller.threadId)]);
+  const tab = sessions.find((s) => s.id === caller.threadId);
+  if (!tab) throw new ToolError("THREAD_NOT_FOUND", "This chat is no longer open.");
+  return {
+    agent: tab.refId,
+    model: own.head.modelSelection.model,
+    options: Object.fromEntries((own.head.modelSelection.options ?? []).map((o) => [o.id, o.value])),
+    runtimeMode: caller.runtimeMode,
+    // The tab record spells the system identity as an absent id.
+    accountId: tab.accountId || "system"
+  };
+}
 
 const listAgents = defineTool({
   name: "list_agents",
   title: "List launchable agents",
-  description: "Every chat agent (claude, codex, opencode, grok): valid models, model options (effort…), permission modes, capabilities, accounts. Only enabled ones open (a disabled one's CLI was not found on this host). Call it before create_session or update_session. A catalogue too big for one result is cut (optionsOmitted, modelsTruncated): list_agents {agent, model} gives a model's full options.",
+  description: "The composer's model picker per chat agent (claude, codex, opencode, grok): enabled, installed, status, models (shortName: chip label if not name; isDefault = what a launch naming none gets; options with values and default), permission modes, capabilities, accounts. Only enabled agents open. Legacy models only with includeLegacy, marked isLegacy. A cut catalogue (optionsOmitted, modelsTruncated): ask {agent, model}.",
+  chatNote: "`thisThread`: this chat's settings (same-agent chats you open inherit them); `allowedRuntimeModes`: modes they may take.",
   input: {
-    agent: z.string().min(1).optional().describe("Only this agent id."),
-    model: z.string().min(1).optional().describe("Needs agent: just this model (by slug), with its full options — how to read the options a cut catalogue omits (optionsOmitted). A legacy model (isLegacy) is found too, but serves only an existing session: create_session refuses it, update_session takes it."),
-    includeLegacyModels: z.boolean().default(false).describe("Also list models flagged legacy.")
+    agent: z.string().min(1).max(64).optional().describe("Only this agent."),
+    model: z.string().min(1).max(200).optional().describe("With agent: this model only, options whole."),
+    query: z.string().trim().min(1).max(200).optional().describe("Filter models on slug, name, shortName, subProvider."),
+    includeLegacy: z.boolean().default(false).describe("List legacy models too."),
+    includeLegacyModels: z.boolean().optional().describe("Old includeLegacy.")
   },
+  externalOnlyInput: ["includeLegacyModels"],
+  audiences: ["external", "chat"],
+  toolset: "core",
+  tier: "read",
+  scope: async () => ({ projects: [], sessions: [], reads: "metadata", writes: false, causesTurnIn: [] }),
   annotations: READ_ONLY,
-  async run(args, { api }) {
+  resultKind: "json",
+  async run(args, { api, caller }) {
     if (args.model !== undefined && args.agent === undefined) throw new ToolError("INVALID_ARGUMENT", "model needs agent: a model is looked up in one agent's catalogue — list_agents {agent, model}.");
-    return { agents: await agentCatalog(api, args, MAX_RESULT_BYTES) };
+    const includeLegacy = args.includeLegacy || args.includeLegacyModels === true;
+    if (caller.kind === "external") {
+      const frame = { permissionModes: PERMISSION_MODES };
+      return { agents: await agentCatalog(api, { ...args, includeLegacyModels: includeLegacy }, MAX_RESULT_BYTES - resultBytes(frame) - 12), ...frame };
+    }
+    const frame = { thisThread: await thisThread(api, caller), allowedRuntimeModes: runtimeModesUpTo(caller.runtimeMode), permissionModes: PERMISSION_MODES };
+    const agents = await agentCatalog(api, { ...args, includeLegacyModels: includeLegacy }, MAX_RESULT_BYTES - resultBytes(frame) - 12, chatAgentView);
+    return { agents, ...frame };
   }
 });
 
 /**
- * list_agents' listing (also the session tools' `agent_catalog`): every agent, one agent, or one agent's model with its
- * full options, within `budget` bytes of `{agents}` JSON (`fitAgentViews`). A `model` without an `agent` is the
- * caller's to refuse first: it is ignored here.
+ * list_agents' listing (also the legacy session tools' `agent_catalog`): every agent, one agent, or one agent's model
+ * with its full options, the models narrowed by `query`, within `budget` bytes of `{agents}` JSON (`fitAgentViews`),
+ * each agent shaped by `view` (the chat caller's). A `model` without an `agent` is the caller's to refuse first.
  */
-export async function agentCatalog(api: DaemonApi, args: { agent?: string; model?: string; includeLegacyModels?: boolean }, budget: number): Promise<ReturnType<typeof fitAgentViews>> {
+export async function agentCatalog(api: DaemonApi, args: { agent?: string; model?: string; query?: string; includeLegacyModels?: boolean }, budget: number, view?: (agent: AgentView) => object): Promise<ReturnType<typeof fitAgentViews>> {
   // A model named outright is found even when legacy: the flag only trims a listing.
-  const agents = await loadAgents(api, { includeLegacyModels: args.includeLegacyModels === true || (args.agent !== undefined && args.model !== undefined) });
-  if (args.agent === undefined) return fitAgentViews(agents, budget);
-  const agent = findAgent(agents, args.agent);
-  if (args.model === undefined) return fitAgentViews([agent], budget);
-  return [{ ...agent, models: [findModel(agent, args.model)] }];
+  let agents = await loadAgents(api, { includeLegacyModels: args.includeLegacyModels === true || (args.agent !== undefined && args.model !== undefined) });
+  const shape = (list: AgentView[]): AgentView[] => (view ? (list.map(view) as unknown as AgentView[]) : list);
+  if (args.agent !== undefined) {
+    const agent = findAgent(agents, args.agent);
+    if (args.model !== undefined) return shape([{ ...agent, models: [findModel(agent, args.model)] }]);
+    agents = [agent];
+  }
+  if (args.query !== undefined) {
+    const needle = args.query.toLowerCase();
+    // An agent none of whose models matches is left out, unless it was named.
+    agents = agents.map((agent) => ({ ...agent, models: agent.models.filter((m) => modelMatches(m, needle)) })).filter((agent) => args.agent !== undefined || agent.models.length > 0);
+  }
+  return fitAgentViews(shape(agents), budget);
 }
 
 /**
@@ -110,18 +239,33 @@ function fitConversations<T>(rows: readonly T[]): { conversations: T[]; truncate
   return { conversations: rows.slice(0, kept), truncated: true, omitted: rows.length - kept };
 }
 
+/** list_conversations' project: the named one, else the chat caller's own; an external caller must name one. */
+async function conversationsProject(project: string | undefined, ctx: Pick<ScopeContext, "api" | "caller">): Promise<{ path: string }> {
+  if (project !== undefined) return resolveProject(ctx.api, project);
+  // The plain `<workspacesDir>/<ws>/<name>` the GUI records conversations under (the caller's own path is canonical).
+  if (ctx.caller.kind === "thread" && ctx.caller.projectPath) return resolveProject(ctx.api, `${ctx.caller.workspace}/${basename(ctx.caller.projectPath)}`);
+  throw new ToolError(ctx.caller.kind === "thread" ? "PROJECT_NOT_FOUND" : "INVALID_ARGUMENT", ctx.caller.kind === "thread" ? "This chat has no project: pass project (list_projects)." : "project is required: an absolute path or \"<workspace>/<project>\".");
+}
+
 const listConversations = defineTool({
   name: "list_conversations",
   title: "List past conversations",
-  description: "Provider conversations recorded for a project, newest first. A row with `resumable: true` can be resumed: pass its `id` as create_session.resume.conversationId (`agent` is the agent it resumes with). Rows past the result size cap are left out, oldest first (truncated, omitted).",
+  description: "Provider conversations recorded for a project, newest first. A `resumable` row resumes with create_session.resume.conversationId = its `id` (with its `agent`). Rows past the result cap are left out, oldest first (truncated, omitted).",
+  chatNote: "`project` defaults to this chat's.",
   input: {
-    project: z.string().describe("Absolute project path or \"<workspace>/<project>\"."),
+    project: z.string().min(1).optional().describe("Absolute project path or \"<workspace>/<project>\"."),
     agent: z.string().min(1).optional().describe("Only rows whose `agent` is this agent id (an unknown one is refused)."),
     limit: z.number().int().min(1).max(200).default(20).describe("Maximum rows; fewer when they would pass the result size cap.")
   },
+  audiences: ["external", "chat"],
+  toolset: "chat-extras",
+  tier: "read",
+  scope: async (args, ctx) => ({ projects: [(await conversationsProject(args.project, ctx)).path], sessions: [], reads: "metadata", writes: false, causesTurnIn: [] }),
   annotations: READ_ONLY,
-  async run(args, { api }) {
-    const project = await resolveProject(api, args.project);
+  resultKind: "json",
+  async run(args, ctx) {
+    const { api } = ctx;
+    const project = await conversationsProject(args.project, ctx);
     const [registry, conversations] = await Promise.all([api.request("GET", "/api/registry"), api.request("GET", "/api/agents/conversations", { query: { path: project.path } })]);
     // As list_agents: without the registry no row's resumability is known, and `false` on every row would be a lie.
     if (registry.status >= 400) throw new ToolError("INTERNAL", "Could not read the agent registry.");
@@ -143,4 +287,5 @@ const listConversations = defineTool({
   }
 });
 
-export const catalogTools: ToolDef[] = [listProjects, listAgents, listConversations];
+/** This family in the catalog (`../catalog/index.ts`). */
+export const catalogFamily: readonly AnyOrquesterTool[] = [listProjects, listAgents, listConversations];

@@ -261,6 +261,8 @@ export interface MockConfig {
    * echoes the tool and its arguments.
    */
   mcpApps?: { contents?: unknown[] | "hang"; tools?: Record<string, unknown> };
+  /** `config/read`'s effective `mcp_servers` (the thread's config: home + trusted project layers). */
+  mcpServers?: Record<string, unknown>;
   /** Everything the mock received, appended as NDJSON. */
   logPath: string;
 }
@@ -869,6 +871,9 @@ function handle(frame) {
       return;
     case "mcpServer/tool/call":
       send({ id, result: { content: [{ type: "text", text: "called " + params.tool }], structuredContent: { arguments: params.arguments ?? null }, _meta: null } });
+      return;
+    case "config/read":
+      send({ id, result: { config: { mcp_servers: config.mcpServers ?? {} }, origins: {}, layers: null } });
       return;
     case "mcpServerStatus/list":
       send({ id, result: { data: [{ name: "apps", runtimeStatus: "connected", pluginId: null, serverInfo: null, tools: config.mcpApps?.tools ?? {}, toolsError: null, resources: [], resourceTemplates: [], authStatus: "unsupported" }], nextCursor: null } });

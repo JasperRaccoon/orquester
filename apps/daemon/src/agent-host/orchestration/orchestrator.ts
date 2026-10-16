@@ -97,6 +97,7 @@ import {
 
 import type { AccountHome, HistoryImportProgress, McpAppOperation, McpAppReference } from "@orquester/api/agent-chat";
 import { htmlRenderReferenceOfActivityPayload, mcpAppReferenceOfActivityPayload } from "@orquester/api/agent-chat";
+import { parseCausedBy } from "@orquester/api/agent-chat";
 import { runMcpAppRequest } from "../mcp-apps.ts";
 
 import { stat } from "node:fs/promises";
@@ -320,6 +321,16 @@ export interface OrchestratorOptions {
    * §1.1). Optional; must not throw.
    */
   onTurnInterrupt?: (threadId: string) => void;
+  /**
+   * Unified MCP design 2026-10-15 §9.3: true when the thread's live provider session advertises
+   * another session-tool list than the thread's toolsets now call for, and its provider cannot take
+   * it in-session (`session-tools/index.ts` `needsRestart`). The ensure step then restarts it with
+   * resume — only when no turn is running (a steer never restarts), so the change lands at the
+   * thread's next idle point. Optional; must not throw.
+   */
+  sessionToolsStale?: (threadId: string) => boolean;
+  /** A thread was deleted (after everything of it is freed): per-thread state elsewhere goes too. Must not throw. */
+  onThreadDeleted?: (threadId: string) => void;
   /**
    * Session-tool secrets (design 2026-10-14 §5, `session-tools/secret-redaction.ts`)
    * beyond ingestion's: `link` — a fork's child is masked with its parent's
@@ -759,6 +770,12 @@ export interface Orchestrator {
    * `recycleIdleServers`, or nothing recycled when no adapter serves it.
    */
   recycleIdleOpenCodeServers(): Promise<{ recycled: number; deferred: number }>;
+  /**
+   * Unified MCP §12.1: a thread's provider session started with its MCP denials degraded (the
+   * daemon could not be asked and nothing is known for its launch): one `runtime.warning` row, so
+   * it is never silent. Fire and forget; a thread not loaded is skipped. Never throws.
+   */
+  noteSessionToolsWarning(threadId: string, detail: string): void;
 
   /** §3.3 step 1, for an intentional stop. Returns the threads it marked. */
   markThreadsForContinuation(): Promise<string[]>;
@@ -1689,6 +1706,16 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         bound,
         capabilities: adapter.capabilities
       });
+      // Unified MCP §9.3: a session-tool list the session cannot take in-session — at an idle
+      // point only (a steer into a running turn never restarts it), carrying the cursor.
+      if (!decision.restart && options.sessionToolsStale !== undefined) {
+        const live = currentSession(runtime);
+        const idle = live.activeTurnId === null && live.status !== "running";
+        if (idle && options.sessionToolsStale(runtime.id)) {
+          decision.restart = true;
+          decision.reasons.push("sessionTools");
+        }
+      }
       if (!decision.restart) {
         snapshots.ensureWorkspaceSnapshot(head.adapter, head.cwd);
         return bound.session;
@@ -2978,6 +3005,19 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     return (runtime.state.turns ?? []).some((turn: Turn) => !SETTLED_TURN_STATES.has(turn.state));
   };
 
+  /**
+   * Idle as the daemon's delivery queue reads it (`lineage.ts` `acceptsMessage`): no turn active
+   * or requested-but-unstarted (`turnIsActive`), no session starting or running, no compaction in
+   * flight or turns queued behind one, no approval or question open. The `ifIdle` precondition.
+   */
+  const threadIdleForDelivery = (runtime: ThreadRuntime): boolean => {
+    const session = currentSession(runtime);
+    if (turnIsActive(runtime) || session.status === "starting" || session.status === "running") return false;
+    if (runtime.compacting || runtime.queuedTurns.length > 0) return false;
+    const pending = runtime.state.pending;
+    return (pending?.approvals.length ?? 0) === 0 && (pending?.userInputs.length ?? 0) === 0;
+  };
+
   const decideCompaction = (
     runtime: ThreadRuntime,
     commandId: string,
@@ -3162,6 +3202,17 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         const attachments = parseAttachments(body.attachments);
         const context = parseComposerContext(body.context);
         const interactionMode = parseInteractionMode(body.interactionMode);
+        // The agent exchange another chat's tool (or Orquester delivering a reply or merge) caused
+        // this turn in (unified MCP design 2026-10-15 §8.4). The daemon alone sets it — the remote
+        // transport strips it — so a value that does not parse is dropped, never a refusal.
+        const causedBy = parseCausedBy(body.causedBy);
+        // `ifIdle: true` (unified MCP design 2026-10-15 §8.3, additive): the daemon's delivery
+        // queue posts a reply-bound message or a reply only as a NEW turn, never a steer. With a
+        // turn active the command is refused — not recorded, so the same id may be posted again at
+        // the next idle point. An older host ignores the field (the race window stays there).
+        if (body.ifIdle === true && !threadIdleForDelivery(runtime)) {
+          throw new TurnNotIdleRefusal();
+        }
         runtime.lastInteractionMode = interactionMode;
         const modelSelection =
           body.modelSelection === undefined
@@ -3246,7 +3297,9 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
                 turnId: null,
                 messageId,
                 interactionMode,
-                ...(modelSelection !== undefined ? { modelSelection } : {})
+                ...(modelSelection !== undefined ? { modelSelection } : {}),
+                // A steer joins the running turn and leaves its own exchange (no event here).
+                ...(causedBy !== undefined ? { causedBy } : {})
               },
               { commandId, occurredAt }
             )
@@ -4560,6 +4613,11 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       liveUsageLimits.delete(threadId);
       runtimes.delete(threadId);
       loadingRuntimes.delete(threadId);
+      try {
+        options.onThreadDeleted?.(threadId);
+      } catch (error) {
+        logger.warn("agent-host: a thread-deleted listener failed", error);
+      }
     });
 
   // -------------------------------------------------------------------------
@@ -7333,6 +7391,14 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     resumeGoalSessionsAfterHandover,
     recycleIdleOpenCodeServers: async () =>
       (await options.adapters.get("opencode")?.recycleIdleServers?.()) ?? { recycled: 0, deferred: 0 },
+    noteSessionToolsWarning: (threadId, detail) => {
+      const runtime = runtimes.get(threadId);
+      if (!runtime || !runtime.state.head) return;
+      // The activity tones have no "warning": `error` is the one a user does not scroll past.
+      void appendActivity(runtime, { kind: "runtime.warning", tone: "error", summary: "MCP server denial degraded", detail }).catch((error: unknown) =>
+        logger.warn("agent-host: could not record a session-tools warning", error)
+      );
+    },
     markThreadsForContinuation,
     clearContinuationMarkers,
     reconcile,
@@ -8161,4 +8227,15 @@ function withForkedMcpApp(event: RuntimeEvent, apps: ReadonlyMap<string, McpAppR
   const record = data !== null && typeof data === "object" && !Array.isArray(data) ? (data as Record<string, unknown>) : {};
   if ("mcpApp" in record) return event;
   return { ...event, payload: { ...event.payload, data: { ...record, mcpApp } } };
+}
+
+/**
+ * The `/turn` precondition `ifIdle: true` refused: a turn is active, so the message would steer it.
+ * 409 `TURN_NOT_IDLE` (`TurnCommandBody.ifIdle`), which is not a recorded rejection code: a refusal
+ * of the moment, the same command id may land later.
+ */
+class TurnNotIdleRefusal extends AgentChatCommandError {
+  constructor() {
+    super("TURN_NOT_IDLE", "The thread is working; the message waits for its next idle point.");
+  }
 }

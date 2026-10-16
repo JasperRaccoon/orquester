@@ -5,8 +5,11 @@ import type { AttachmentRef } from "@orquester/api";
 import {
   isMergeBackMessage,
   isThreadAuthoredMessage,
+  isToolsetContinueMessage,
   parseMergeBackMessage,
-  parseThreadMessage
+  parseThreadMessage,
+  type ParsedThreadMessage,
+  type ThreadLineageRelation
 } from "@orquester/api/agent-chat";
 
 import { FileTypeIcon } from "../../../../icons/files";
@@ -28,6 +31,30 @@ import { splitSkillMentions } from "../row-chrome";
 import { formatRowTimestamp, formatRowTimestampTooltip } from "../timestamp";
 
 type Row<K extends AgentChatTimelineRow["kind"]> = Extract<AgentChatTimelineRow, { kind: K }>;
+
+/**
+ * The caption over a message another chat sent (unified MCP §8.2): how it came — sent, opened,
+ * delegated, or a reply to this chat's own message — and from which chat (and project, when the
+ * v2 header names one).
+ */
+export function threadMessageCaption(message: Pick<ParsedThreadMessage, "origin" | "fromTitle" | "fromProject">): string {
+  const verb =
+    message.origin === "delegated"
+      ? "Delegated by"
+      : message.origin === "opened"
+        ? "Opened by"
+        : message.origin === "reply"
+          ? "Reply from"
+          : "Sent by";
+  return `${verb} “${message.fromTitle}”${message.fromProject ? ` · ${message.fromProject}` : ""}`;
+}
+
+/** The caption over a child chat's result sent back here (thread lineage §6; `opened` chats too). */
+export function mergedBackCaption(relation: ThreadLineageRelation, childTitle: string): string {
+  const what =
+    relation === "delegate" ? "Result of delegated task" : relation === "opened" ? "Merged back from opened chat" : "Merged back from fork";
+  return `${what} “${childTitle}”`;
+}
 
 /** The row's own author heading: structure for screen readers, alignment for eyes. */
 function AuthorHeading({ children }: { children: React.ReactNode }): React.ReactElement {
@@ -288,27 +315,30 @@ export const UserMessageRow = React.memo(function UserMessageRow({
   const markedMerge = isMergeBackMessage(row.message);
   const markedThread = isThreadAuthoredMessage(row.message);
   const merged = React.useMemo(() => (markedMerge ? parseMergeBackMessage(text) : null), [markedMerge, text]);
-  // Sent, opened or delegated by another thread through a session tool (design 2026-10-14 §5):
-  // the provenance header the agent read becomes a caption; the bubble holds the message alone.
+  // Sent, opened or delegated by another thread through a session tool (design 2026-10-14 §5), or
+  // another chat's reply to this one's message (unified MCP §8.2): the provenance header the agent
+  // read becomes a caption; the bubble holds the message alone.
   const fromThread = React.useMemo(() => (merged || !markedThread ? null : parseThreadMessage(text)), [merged, markedThread, text]);
+  // Orquester's own automatic "continue" after an approved toolset card (unified MCP §9.3).
+  const fromOrquester = !merged && !markedThread && isToolsetContinueMessage(row.message);
 
   return (
     <div className="group flex flex-col items-end gap-1">
       {merged ? (
         <span className="inline-flex items-center gap-1 pe-1 text-[11px] text-neutral-500" data-merged-back="true">
           <GitMerge size={11} strokeWidth={1.8} aria-hidden />
-          {merged.relation === "delegate" ? "Result of delegated task" : "Merged back from fork"} “{merged.childTitle}”
+          {mergedBackCaption(merged.relation, merged.childTitle)}
         </span>
       ) : null}
       {fromThread ? (
         <span className="inline-flex items-center gap-1 pe-1 text-[11px] text-neutral-500" data-from-thread={fromThread.origin}>
-          {fromThread.origin === "delegated" ? "Delegated by" : fromThread.origin === "opened" ? "Opened by" : "Sent by"} “{fromThread.fromTitle}”
+          {threadMessageCaption(fromThread)}
         </span>
       ) : null}
       <div className="relative max-w-[80%] rounded-2xl bg-neutral-800 p-3 text-neutral-100">
         {/* The chip alone says another chat sent it, even when its header is one this build no
             longer reads (an agent's scheduled task from before scheduling was removed). */}
-        <AuthorHeading>{fromThread || markedThread ? "Another chat" : "You"}</AuthorHeading>
+        <AuthorHeading>{fromThread || markedThread ? "Another chat" : fromOrquester ? "Orquester" : "You"}</AuthorHeading>
         {attachments.length > 0 ? <AttachmentChips attachments={attachments} /> : null}
         <ClampedBubbleText text={merged ? merged.body : fromThread ? fromThread.body : text} showLabel="Show full message" />
       </div>

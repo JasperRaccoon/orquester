@@ -60,10 +60,13 @@ import {
   removeProfilePath,
   writeCommand,
   writeProfileFile,
+  keepBothTakenSets,
   writeProfileFileVerified,
   writeSkill
 } from "../../infra/index.ts";
 import type {
+  KeepBothRequest,
+  KeepBothTaken,
   AdapterMutationResult,
   AdapterSnapshot,
   PortableItem,
@@ -180,6 +183,9 @@ function specOf(raw: unknown): string | null {
   if (Array.isArray(raw) && typeof raw[0] === "string") return raw[0];
   return null;
 }
+
+/** No names taken beyond the agent's own (the also-taken default of the naming helpers). */
+const NO_NAMES: ReadonlySet<string> = new Set();
 
 /** `base-2`, `base-3`, … — the first free name `valid` accepts. */
 function keepBothName(base: string, taken: (name: string) => boolean, valid: (name: string) => boolean): string {
@@ -806,7 +812,7 @@ export class OpenCodeProfileAdapter implements ProfileAdapter {
     if (taken(name)) {
       if (policy === "fail") throw profileErrors.exists(name);
       if (policy === "keep-both") {
-        name = keepBothName(name, taken, isValidMcpServerName);
+        name = this.mcpKeepBothName(model, name);
       } else {
         const existing = model.entries.get(itemId("mcp", name)) as Extract<Entry, { kind: "mcp" }>;
         if (!existing.item.deletable) throw profileErrors.notEditable(name);
@@ -820,6 +826,33 @@ export class OpenCodeProfileAdapter implements ProfileAdapter {
         : setJsonc(model.config.targetText, ["mcp", name], entry);
     await this.writeConfig(model.config, text);
     return mutation([itemId("mcp", name)]);
+  }
+
+  /** `name`, or the first free `name-<n>` (`createMcp`'s keep-both). */
+  private mcpKeepBothName(model: Model, name: string, alsoTaken: ReadonlySet<string> = NO_NAMES): string {
+    const taken = (candidate: string): boolean => model.entries.has(itemId("mcp", candidate)) || alsoTaken.has(candidate);
+    return taken(name) ? keepBothName(name, taken, isValidMcpServerName) : name;
+  }
+
+  async keepBothNames(requests: readonly KeepBothRequest[], alsoTaken?: KeepBothTaken): Promise<string[]> {
+    const taken = keepBothTakenSets(alsoTaken);
+    const model = await this.load();
+    const out: string[] = [];
+    for (const { kind, name } of requests) {
+      let written: string;
+      if (kind === "mcp") {
+        assertMcpServerName(name);
+        written = this.mcpKeepBothName(model, name, taken.mcp);
+      } else if (kind === "skill") {
+        // `keep-both` claims a name without touching anything (only `replace` removes).
+        written = await this.claimSkillName(model, name, "keep-both", taken.skill);
+      } else {
+        written = (await this.claimCommandName(model, name, "keep-both", taken.command)).name;
+      }
+      taken[kind].add(written);
+      out.push(written);
+    }
+    return out;
   }
 
   private skillsRoot(): string {
@@ -837,9 +870,9 @@ export class OpenCodeProfileAdapter implements ProfileAdapter {
   }
 
   /** The skill name to create under, after the conflict policy; `replace` removes the one it replaces. */
-  private async claimSkillName(model: Model, name: string, policy: ProfileConflictPolicy): Promise<string> {
+  private async claimSkillName(model: Model, name: string, policy: ProfileConflictPolicy, alsoTaken: ReadonlySet<string> = NO_NAMES): Promise<string> {
     assertSkillName(name);
-    const taken = (candidate: string): boolean => model.entries.has(itemId("skill", candidate));
+    const taken = (candidate: string): boolean => model.entries.has(itemId("skill", candidate)) || alsoTaken.has(candidate);
     const onDisk = async (candidate: string): Promise<boolean> =>
       (await pathKind(join(this.skillsRoot(), candidate))) !== null;
     if (!taken(name) && !(await onDisk(name))) return name;
@@ -891,7 +924,12 @@ export class OpenCodeProfileAdapter implements ProfileAdapter {
     return join(this.dir, "commands");
   }
 
-  private async claimCommandName(model: Model, name: string, policy: ProfileConflictPolicy): Promise<{ name: string; replace: boolean }> {
+  private async claimCommandName(
+    model: Model,
+    name: string,
+    policy: ProfileConflictPolicy,
+    alsoTaken: ReadonlySet<string> = NO_NAMES
+  ): Promise<{ name: string; replace: boolean }> {
     assertCommandName(name);
     // A file whose frontmatter `name` is this one already owns it in OpenCode.
     const renamedTo = new Set(
@@ -899,7 +937,7 @@ export class OpenCodeProfileAdapter implements ProfileAdapter {
         entry.kind === "command" && entry.origin === "file" && entry.command.invokedAs !== undefined ? [entry.command.invokedAs] : []
       )
     );
-    const taken = (candidate: string): boolean => model.entries.has(itemId("command", candidate)) || renamedTo.has(candidate);
+    const taken = (candidate: string): boolean => model.entries.has(itemId("command", candidate)) || renamedTo.has(candidate) || alsoTaken.has(candidate);
     if (!taken(name)) return { name, replace: false };
     if (policy === "fail") throw profileErrors.exists(name);
     if (policy === "keep-both") return { name: keepBothName(name, taken, isValidCommandName), replace: false };

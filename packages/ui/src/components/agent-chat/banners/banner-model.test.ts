@@ -4,8 +4,21 @@ import assert from "node:assert/strict";
 import {
   resolveDockCard,
   showBackgroundLivenessBanner,
-  splitApprovalOptions
+  splitApprovalOptions,
+  toolApprovalAnswerFailure,
+  toolApprovalCanApprove,
+  toolApprovalChangeSentence,
+  toolApprovalExpiryText,
+  toolApprovalApproveBlockedReason,
+  toolApprovalGrantChoices,
+  toolApprovalGuardKey,
+  toolApprovalKeyAction,
+  toolApprovalCardKey,
+  toolApprovalClickGuarded,
+  toolApprovalPreviewIsCut,
+  TOOL_APPROVAL_POINTER_GUARD_MS
 } from "./banner-model.ts";
+import { parseToolApprovalSummary } from "@orquester/api/agent-chat";
 
 test("the default four split into Approve/Decline primary and the rest overflow", () => {
   const { primary, overflow } = splitApprovalOptions();
@@ -101,4 +114,105 @@ test("an agent's request for a secret docks after approvals and questions, befor
   // The agent's own secret request comes before an MCP App's consent.
   assert.equal(resolveDockCard({ ...base, hasSecretRequest: true, hasAppConsent: true }), "secret");
   assert.equal(resolveDockCard({ ...base, hasSecretRequest: false, hasAppConsent: true }), "app-consent");
+});
+
+// ---------------------------------------------------------------------------
+// Orquester approval cards (unified MCP §7.1)
+// ---------------------------------------------------------------------------
+
+test("an Orquester card comes after a provider approval and before everything else", () => {
+  const base = { hasApproval: false, hasUserInput: true, hasSecretRequest: true, hasActionableProposedPlan: true, isComposerCollapsedMobile: false, hasAppConsent: true };
+  assert.equal(resolveDockCard({ ...base, hasToolApproval: true }), "tool-approval");
+  assert.equal(resolveDockCard({ ...base, hasApproval: true, hasToolApproval: true }), "approval");
+  assert.equal(resolveDockCard({ ...base, hasToolApproval: false }), "question");
+  assert.equal(resolveDockCard({ ...base, isComposerCollapsedMobile: true, hasToolApproval: true }), "tool-approval");
+});
+
+test("only ⌘/Ctrl+Enter approves, and never within the guard", () => {
+  const key = (init: Partial<{ key: string; metaKey: boolean; ctrlKey: boolean; shiftKey: boolean; altKey: boolean; repeat: boolean }>) => ({
+    key: "Enter", metaKey: false, ctrlKey: false, shiftKey: false, altKey: false, ...init
+  });
+  const late = { now: 10_000, shownAt: 0 };
+  assert.equal(toolApprovalKeyAction(key({}), late), null, "Enter alone");
+  assert.equal(toolApprovalKeyAction(key({ ctrlKey: true }), late), "approve");
+  assert.equal(toolApprovalKeyAction(key({ metaKey: true }), late), "approve");
+  assert.equal(toolApprovalKeyAction(key({ metaKey: true, shiftKey: true }), late), null);
+  assert.equal(toolApprovalKeyAction(key({ ctrlKey: true, altKey: true }), late), null);
+  assert.equal(toolApprovalKeyAction(key({ key: "a", ctrlKey: true }), late), null);
+  assert.equal(toolApprovalKeyAction(key({ ctrlKey: true }), { now: 1_499, shownAt: 0 }), "guarded");
+  assert.equal(toolApprovalKeyAction(key({ ctrlKey: true }), { now: 1_500, shownAt: 0 }), "approve");
+  assert.equal(toolApprovalKeyAction(key({ ctrlKey: true, repeat: true }), late), "guarded", "a held chord");
+  assert.equal(toolApprovalKeyAction(key({ ctrlKey: true }), { ...late, inDenyReason: true }), "deny");
+});
+
+test("grant choices are exactly the offered scopes", () => {
+  assert.deepEqual(toolApprovalGrantChoices({ grantOptions: [], family: "desktops" }), []);
+  assert.deepEqual(toolApprovalGrantChoices({ grantOptions: ["project"], family: "desktops" }).map((choice) => choice.scope), ["project"]);
+  const both = toolApprovalGrantChoices({ grantOptions: ["chat", "project"], family: "workflows" });
+  assert.deepEqual(both.map((choice) => choice.scope), ["chat", "project"]);
+  assert.match(both[0]!.hint, /workflows created or approved in this chat/);
+});
+
+test("the card counts down and says when it expired", () => {
+  const at = Date.parse("2026-10-15T10:00:00.000Z");
+  assert.equal(toolApprovalExpiryText("2026-10-15T10:30:00.000Z", at), "Expires in 30 min");
+  assert.equal(toolApprovalExpiryText("2026-10-15T10:00:41.000Z", at), "Expires in 41 s");
+  assert.equal(toolApprovalExpiryText("2026-10-15T10:00:00.000Z", at), "Expired");
+  assert.equal(toolApprovalExpiryText("not a date", at), "");
+});
+
+test("a late answer says the agent stopped waiting; a bad one keeps the card", () => {
+  assert.deepEqual(toolApprovalAnswerFailure(409), { text: "The agent stopped waiting: your answer was not used.", closed: true });
+  assert.equal(toolApprovalAnswerFailure(404).closed, true);
+  assert.equal(toolApprovalAnswerFailure(400).closed, false);
+  assert.equal(toolApprovalAnswerFailure(null).closed, false);
+});
+
+test("approval needs every secret, a live card, a known kind and — when cut — the whole preview", () => {
+  const card = { kind: "admin" as const, family: "workflow-secrets" as const, secretFields: [{ key: "K", label: "Key" }] };
+  const base = { card, secrets: { K: "v" }, submitting: false, expired: false, previewComplete: true };
+  assert.equal(toolApprovalCanApprove({ ...base, secrets: {} }), false);
+  assert.equal(toolApprovalCanApprove(base), true);
+  assert.equal(toolApprovalCanApprove({ ...base, expired: true }), false);
+  assert.equal(toolApprovalCanApprove({ ...base, card: { ...card, kind: "unknown" } }), false);
+  assert.equal(toolApprovalCanApprove({ ...base, previewComplete: false }), false);
+  assert.match(toolApprovalApproveBlockedReason({ ...base, previewComplete: false }) ?? "", /View all/);
+  assert.match(toolApprovalApproveBlockedReason({ ...base, secrets: {} }) ?? "", /secret/);
+  assert.equal(toolApprovalApproveBlockedReason(base), null);
+});
+
+const parsed = (extra: Record<string, unknown>) =>
+  parseToolApprovalSummary({
+    approvalId: "a", threadId: "t", tool: "x", kind: "admin", family: "desktops", title: "T", scope: { label: "S" },
+    sections: [{ kind: "code", title: "run.sh", text: "echo hi" }], fullPreview: false, secretFields: [], grantOptions: [],
+    requestedAt: "r", expiresAt: "e", ...extra
+  })!;
+
+test("a preview is cut when the summary says so or any section is partial", () => {
+  assert.equal(toolApprovalPreviewIsCut(parsed({})), false);
+  assert.equal(toolApprovalPreviewIsCut(parsed({ fullPreview: true })), true);
+  assert.equal(toolApprovalPreviewIsCut(parsed({ sections: [{ kind: "diff", title: "d", unifiedDiff: "+a", partial: true }] })), true);
+});
+
+test("the guard key moves with section CONTENT, not only its count", () => {
+  const a = toolApprovalGuardKey(parsed({}));
+  assert.equal(toolApprovalGuardKey(parsed({})), a);
+  assert.notEqual(toolApprovalGuardKey(parsed({ sections: [{ kind: "code", title: "run.sh", text: "rm -rf ~" }] })), a);
+  assert.notEqual(toolApprovalGuardKey(parsed({ reason: "because" })), a);
+});
+
+test("every click inside the appearance window is ignored, whatever its detail", () => {
+  assert.equal(toolApprovalClickGuarded({ now: TOOL_APPROVAL_POINTER_GUARD_MS - 1, shownAt: 0 }), true);
+  assert.equal(toolApprovalClickGuarded({ now: 10, shownAt: 0 }), true);
+  assert.equal(toolApprovalClickGuarded({ now: TOOL_APPROVAL_POINTER_GUARD_MS, shownAt: 0 }), false);
+});
+
+test("the card key moves with the summary's content under the same id", () => {
+  const a = toolApprovalCardKey(parsed({}));
+  assert.equal(toolApprovalCardKey(parsed({})), a);
+  assert.notEqual(toolApprovalCardKey(parsed({ sections: [{ kind: "code", title: "run.sh", text: "other" }] })), a);
+  assert.notEqual(toolApprovalCardKey(parsed({ fullPreview: true })), a);
+  assert.notEqual(toolApprovalCardKey(parsed({ title: "T2" })), a);
+  assert.notEqual(toolApprovalCardKey(parsed({ scope: { label: "S2" } })), a);
+  assert.notEqual(toolApprovalCardKey(parsed({ reason: "r" })), a);
 });

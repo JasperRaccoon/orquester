@@ -2,12 +2,18 @@ import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { readFile, rename, stat } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import type { FastifyInstance, FastifyReply } from "fastify";
 import {
   type CreateSavedPromptRequest,
   type SavedPrompt,
+  type SavedPromptCreatedBy,
   type SavedPromptDeletedPayload,
   type SavedPromptEventType,
+  type SavedPromptListResponse,
+  type SavedPromptWorkflowUse,
   type UpdateSavedPromptRequest,
+  type Workflow,
+  AGENT_PROMPT_PIN_REFUSED,
   SAVED_PROMPT_BODY_MAX,
   SAVED_PROMPT_DESCRIPTION_MAX,
   SAVED_PROMPT_TAG_MAX,
@@ -16,11 +22,13 @@ import {
   SAVED_PROMPTS_CHANNEL,
   SAVED_PROMPTS_MAX
 } from "@orquester/api";
+import { USER_PRINCIPAL, type CallerPrincipal } from "@orquester/api/agent-chat";
 import { type SavedPromptsFile, parseSavedPromptsConfig } from "@orquester/config";
 import { assertInsideFsRoot } from "@orquester/config/fs";
 import { writeFileAtomic } from "./agent-hooks.ts";
 import type { Broadcaster } from "./broadcaster.ts";
 import { describeProjectPath } from "./recent-projects.ts";
+import { savedPromptIdsOf } from "./mcp/tools/workflow-preview.ts";
 
 /**
  * The prompts a first run starts with, in this order. Seeded exactly once —
@@ -73,6 +81,7 @@ const STARTER_PROMPTS: ReadonlyArray<
 ];
 
 type SavedPromptErrorCode =
+  | typeof AGENT_PROMPT_PIN_REFUSED
   | "INVALID_REQUEST"
   | "INVALID_PROJECT_PATH"
   | "SAVED_PROMPT_NOT_FOUND"
@@ -82,7 +91,7 @@ type SavedPromptErrorCode =
 /** A refusal the routes answer verbatim: `status` with `{ code, message }`. */
 export class SavedPromptError extends Error {
   constructor(
-    readonly status: 400 | 404 | 409 | 503,
+    readonly status: 400 | 403 | 404 | 409 | 503,
     readonly code: SavedPromptErrorCode,
     message: string
   ) {
@@ -224,7 +233,13 @@ export class SavedPromptsService {
     return [...this.prompts.keys()];
   }
 
-  async create(request: CreateSavedPromptRequest): Promise<SavedPrompt> {
+  /**
+   * `principal` is the request's server-stamped caller (unified MCP design 2026-10-15 D-16): an
+   * agent's create is stamped `createdBy: {kind: "agent", …}` from it — never from the body, whose
+   * `createdBy` is ignored — and may not pin the prompt (403 {@link AGENT_PROMPT_PIN_REFUSED}).
+   * Everyone else's prompt is the user's (no `createdBy`).
+   */
+  async create(request: CreateSavedPromptRequest, principal: CallerPrincipal = USER_PRINCIPAL): Promise<SavedPrompt> {
     this.requireWritable();
     const fields = fieldsOf(request);
     const title = normalizeTitle(fields.title);
@@ -232,6 +247,10 @@ export class SavedPromptsService {
     const description = fields.description === undefined ? "" : normalizeDescription(fields.description);
     const tags = fields.tags === undefined ? [] : normalizeTags(fields.tags);
     const pinned = fields.pinned === undefined ? false : normalizePinned(fields.pinned);
+    const createdBy = createdByOf(principal);
+    if (pinned && createdBy !== undefined) {
+      throw pinRefused();
+    }
     // An omitted projectPath is a global prompt, the same as an explicit null.
     const projectPath =
       fields.projectPath === undefined || fields.projectPath === null
@@ -258,7 +277,8 @@ export class SavedPromptsService {
       createdAt: now,
       updatedAt: now,
       lastUsedAt: null,
-      useCount: 0
+      useCount: 0,
+      ...(createdBy ? { createdBy } : {})
     };
     this.prompts.set(prompt.id, prompt);
     await this.persist();
@@ -269,9 +289,12 @@ export class SavedPromptsService {
   /**
    * Apply a partial edit; `projectPath` moves the prompt between global and a
    * project. A patch that changes nothing answers the prompt as it is — no
-   * new `updatedAt`, no write, no event.
+   * new `updatedAt`, no write, no event. `createdBy` never changes. Pinning an
+   * agent-created prompt is the user's alone: `pinned: true` on one from any
+   * other `principal` is 403 {@link AGENT_PROMPT_PIN_REFUSED} (unpinning stays
+   * open, it only takes the prompt out of the Pinned section).
    */
-  async update(id: string, patch: UpdateSavedPromptRequest): Promise<SavedPrompt> {
+  async update(id: string, patch: UpdateSavedPromptRequest, principal: CallerPrincipal = USER_PRINCIPAL): Promise<SavedPrompt> {
     this.requireWritable();
     this.require(id);
     const fields = fieldsOf(patch);
@@ -288,6 +311,9 @@ export class SavedPromptsService {
 
     // Re-read after the await: the prompt may have been deleted meanwhile.
     const current = this.require(id);
+    if (changes.pinned === true && principal.kind !== "user" && current.createdBy?.kind === "agent") {
+      throw pinRefused();
+    }
     const next: SavedPrompt = { ...current, ...changes };
     if (sameContent(current, next)) {
       return current;
@@ -515,6 +541,164 @@ export function publishSavedPromptEvents(
     broadcaster.publish(SAVED_PROMPTS_CHANNEL, type, payload);
   service.lifecycle.on("upserted", (prompt: SavedPrompt) => publish("savedPrompt.upserted", prompt));
   service.lifecycle.on("deleted", (payload: SavedPromptDeletedPayload) => publish("savedPrompt.deleted", payload));
+}
+
+/** What a create by `principal` is stamped with: an agent's chat, else nothing (the user's). */
+function createdByOf(principal: CallerPrincipal): SavedPromptCreatedBy | undefined {
+  if (principal.kind !== "agent") {
+    return undefined;
+  }
+  return {
+    kind: "agent",
+    threadId: principal.threadId,
+    ...(principal.agent ? { agent: principal.agent } : {}),
+    ...(principal.title ? { title: principal.title } : {})
+  };
+}
+
+function pinRefused(): SavedPromptError {
+  return new SavedPromptError(
+    403,
+    AGENT_PROMPT_PIN_REFUSED,
+    "An agent-created prompt can be pinned only by the user, in the prompt library."
+  );
+}
+
+/**
+ * Which workflows reference which saved prompt: every agent block whose prompt is
+ * `{kind: "saved", promptId}` (a disabled block too — it is still part of the
+ * definition), by prompt id, each workflow once, in the workflows' order. A
+ * referenced prompt is live workflow code (unified MCP design 2026-10-15 §4.1):
+ * the list rows carry it as `usedByWorkflows`, and an agent's edit of it is a
+ * `workflows` approval card naming them.
+ */
+export function savedPromptWorkflowUses(
+  workflows: readonly (Pick<Workflow, "id" | "name" | "nodes"> & { project?: Workflow["project"] })[],
+  workspacesDir?: string
+): Map<string, SavedPromptWorkflowUse[]> {
+  const uses = new Map<string, SavedPromptWorkflowUse[]>();
+  for (const workflow of workflows) {
+    const workspace = workflowWorkspace(workflow.project, workspacesDir);
+    // Task 10's rule (`savedPromptIdsOf`): the same one the workflow tools apply.
+    for (const promptId of savedPromptIdsOf(workflow)) {
+      const list = uses.get(promptId) ?? [];
+      list.push({ workflowId: workflow.id, name: workflow.name, ...(workspace ? { workspace } : {}) });
+      uses.set(promptId, list);
+    }
+  }
+  return uses;
+}
+
+/** The workspace of a workflow's own project: a temp project's, or an existing project's under `workspacesDir`. */
+function workflowWorkspace(project: Workflow["project"] | undefined, workspacesDir: string | undefined): string | null {
+  if (!project) return null;
+  if (project.kind === "temp") return project.workspace;
+  if (project.kind === "existing" && workspacesDir) return describeProjectPath(workspacesDir, project.projectPath)?.workspace ?? null;
+  return null;
+}
+
+/** A prompt as a list row: `usedByWorkflows` from `uses`, never a stored value; absent when none. */
+function listRow(prompt: SavedPrompt, uses: ReadonlyMap<string, SavedPromptWorkflowUse[]>): SavedPrompt {
+  const { usedByWorkflows: _stored, ...row } = prompt;
+  const used = uses.get(prompt.id);
+  return used && used.length > 0 ? { ...row, usedByWorkflows: used.map((use) => ({ ...use })) } : row;
+}
+
+export interface SavedPromptRoutesDeps {
+  service: SavedPromptsService;
+  /**
+   * The workflow definitions, read per list request (`usedByWorkflows`); absent or null: no
+   * workflow store (the rows carry none).
+   */
+  workflows?: () => readonly (Pick<Workflow, "id" | "name" | "nodes"> & { project?: Workflow["project"] })[] | null | undefined;
+  /** The workspaces root, read per request, to name each referencing workflow's workspace. */
+  workspacesDir?: () => string;
+}
+
+/**
+ * The right rail's library routes, `/api/saved-prompts` (channel "saved-prompts"). Both
+ * transports, like /api/todos (no secret is returned). Refusals are SavedPromptError's own status
+ * + `{ code, message }`: 400 INVALID_REQUEST / INVALID_PROJECT_PATH, 403
+ * AGENT_PROMPT_PIN_REFUSED, 404 SAVED_PROMPT_NOT_FOUND, 409 SAVED_PROMPTS_FULL, 503
+ * SAVED_PROMPTS_UNAVAILABLE. A missing `projectPath` lists the global prompts only.
+ *
+ * Who calls is `request.principal`, stamped server-side (`mcp/principal.ts`; never a body field
+ * or a header a client chooses): a create by an agent is `createdBy: agent`, and only the user may
+ * pin an agent-created prompt.
+ */
+export function registerSavedPromptRoutes(app: FastifyInstance, deps: SavedPromptRoutesDeps): void {
+  const { service } = deps;
+  const uses = (): Map<string, SavedPromptWorkflowUse[]> => savedPromptWorkflowUses(deps.workflows?.() ?? [], deps.workspacesDir?.());
+
+  app.get<{ Querystring: { projectPath?: string } }>(
+    "/api/saved-prompts",
+    async (request, reply): Promise<SavedPromptListResponse | void> => {
+      const { projectPath } = request.query;
+      try {
+        const prompts = await service.list(projectPath ? projectPath : null);
+        const byPrompt = uses();
+        return { prompts: prompts.map((prompt) => listRow(prompt, byPrompt)) };
+      } catch (error) {
+        return savedPromptError(reply, error);
+      }
+    }
+  );
+
+  app.post<{ Body: CreateSavedPromptRequest }>(
+    "/api/saved-prompts",
+    async (request, reply): Promise<SavedPrompt | void> => {
+      try {
+        return reply.code(201).send(await service.create(request.body, request.principal ?? USER_PRINCIPAL));
+      } catch (error) {
+        return savedPromptError(reply, error);
+      }
+    }
+  );
+
+  app.put<{ Params: { id: string }; Body: UpdateSavedPromptRequest }>(
+    "/api/saved-prompts/:id",
+    async (request, reply): Promise<SavedPrompt | void> => {
+      try {
+        return await service.update(request.params.id, request.body, request.principal ?? USER_PRINCIPAL);
+      } catch (error) {
+        return savedPromptError(reply, error);
+      }
+    }
+  );
+
+  app.delete<{ Params: { id: string } }>("/api/saved-prompts/:id", async (request, reply): Promise<void> => {
+    try {
+      await service.delete(request.params.id);
+      return reply.code(204).send();
+    } catch (error) {
+      return savedPromptError(reply, error);
+    }
+  });
+
+  // An Insert or a Send used the prompt: `lastUsedAt` now, `useCount` + 1. No body.
+  app.post<{ Params: { id: string } }>(
+    "/api/saved-prompts/:id/used",
+    async (request, reply): Promise<SavedPrompt | void> => {
+      try {
+        return await service.markUsed(request.params.id);
+      } catch (error) {
+        return savedPromptError(reply, error);
+      }
+    }
+  );
+}
+
+/**
+ * Map a saved-prompt route failure to the wire: a `SavedPromptError` carries
+ * its own status and code; anything else is an unexpected 500.
+ */
+function savedPromptError(reply: FastifyReply, error: unknown): void {
+  if (error instanceof SavedPromptError) {
+    void reply.code(error.status).send({ code: error.code, message: error.message });
+    return;
+  }
+  const message = error instanceof Error ? error.message : "Saved prompt operation failed.";
+  void reply.code(500).send({ code: "SAVED_PROMPTS_ERROR", message });
 }
 
 function invalid(message: string): SavedPromptError {

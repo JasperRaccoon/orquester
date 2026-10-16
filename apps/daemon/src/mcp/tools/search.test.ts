@@ -8,13 +8,15 @@ import { agentChatRoutes,THREAD_SEARCH_MAX_QUERY_CHARS,THREAD_SEARCH_MAX_RESULTS
 import { chatSummary,shellSummary,stamp } from "../fixtures.ts";
 import { ok } from "../result.ts";
 import { FakeDaemonApi } from "../testing.ts";
-import type { ToolContext } from "../tool.ts";
-import { searchTools } from "./search.ts";
+import type { CallContext } from "../catalog/contract.ts";
+import { searchFamily } from "./search.ts";
 
 const resultBytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value), "utf8");
 
-const tool = searchTools.find((t) => t.name === "search_sessions")!;
-const ctx = (api: FakeDaemonApi): ToolContext => ({ api, todos: {} as never, files: {} as never, signal: new AbortController().signal, now: () => Date.parse("2026-09-23T12:00:00.000Z") });
+const searchTool = searchFamily.find((t) => t.name === "search_sessions")!;
+const tool = { ...searchTool, run: (args: Record<string, unknown>, c: CallContext) => searchTool.run(args as never, c) as Promise<Record<string, unknown>> };
+/** An external caller's context (full trust), as the executor builds it for `/mcp`. */
+const ctx = (api: FakeDaemonApi): CallContext => ({ api, signal: new AbortController().signal, now: () => Date.parse("2026-09-23T12:00:00.000Z"), caller: { kind: "external" }, turn: { interactionMode: "default", provenance: (_origin, text) => text } });
 
 /** A hit as the host sends it: an assistant message of turn 1 in session c1, unless overridden. */
 function hit(over: Partial<ThreadSearchHit> = {}): ThreadSearchHit {

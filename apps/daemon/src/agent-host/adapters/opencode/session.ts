@@ -81,6 +81,7 @@ import {
   disconnectOpenCodeSessionTools,
   registerOpenCodeSessionTools,
   withSessionToolInstructions,
+  resolveOpenCodeDenials,
   withSessionToolRules,
   type OpenCodeSessionToolsLaunch
 } from "./session-tools.ts";
@@ -253,6 +254,8 @@ interface StartOpenCodeSessionInput {
    * session-tool servers even when this thread got none of its own.
    */
   isolateSessionTools?: boolean;
+  /** MCP servers this thread's session denies (§12.1) — with or without its own grant. */
+  deniedMcpServers?: readonly string[];
 }
 
 export class OpenCodeThreadSession {
@@ -301,6 +304,10 @@ export class OpenCodeThreadSession {
   private readonly sessionTools: OpenCodeSessionToolsLaunch | undefined;
   /** Every ruleset this session sends carries the session-tool isolation rules. */
   private readonly isolateSessionTools: boolean;
+  /** The denied servers whose `<name>_*` rule every ruleset carries (`resolveOpenCodeDenials`). */
+  private deniedRules: readonly string[];
+  /** Every MCP server this thread denies (§12.1): disconnected again at every turn start. */
+  private readonly deniedServers: readonly string[];
 
   private constructor(input: {
     deps: OpenCodeThreadSessionDeps;
@@ -312,9 +319,13 @@ export class OpenCodeThreadSession {
     contextLimits: ReadonlyMap<string, number>;
     sessionTools: OpenCodeSessionToolsLaunch | undefined;
     isolateSessionTools: boolean;
+    deniedRules: readonly string[];
+    deniedServers: readonly string[];
   }) {
     this.sessionTools = input.sessionTools;
     this.isolateSessionTools = input.isolateSessionTools;
+    this.deniedRules = input.deniedRules;
+    this.deniedServers = input.deniedServers;
     this.deps = input.deps;
     this.server = input.server;
     this.client = input.client;
@@ -341,9 +352,13 @@ export class OpenCodeThreadSession {
     // The session-tool isolation rules ride every ruleset this session sends
     // (`session-tools.ts`); none without session tools.
     const isolateSessionTools = input.isolateSessionTools === true || input.sessionTools !== undefined;
+    // §12.1: the thread's denied MCP servers, disconnected on this instance and ruled out.
+    const deniedServers = input.deniedMcpServers ?? input.sessionTools?.deny ?? [];
+    const deniedRules = await resolveOpenCodeDenials(client, deniedServers, deps.ctx.logger);
     const ruleset = withSessionToolRules(buildOpenCodePermissionRules(input.runtimeMode), {
       isolate: isolateSessionTools,
-      ...(input.sessionTools !== undefined ? { own: input.sessionTools } : {})
+      ...(input.sessionTools !== undefined ? { own: input.sessionTools } : {}),
+      deny: deniedRules
     });
     const resume = parseOpenCodeResume(input.resumeCursor);
     if (input.sessionTools !== undefined) {
@@ -455,7 +470,9 @@ export class OpenCodeThreadSession {
       modelSlug: input.modelSelection.model,
       contextLimits,
       sessionTools: input.sessionTools,
-      isolateSessionTools
+      isolateSessionTools,
+      deniedRules,
+      deniedServers
     });
 
     session.emit({
@@ -1755,6 +1772,33 @@ export class OpenCodeThreadSession {
 
   // -- turns ---------------------------------------------------------------
 
+  /**
+   * §12.1, again at every turn start (a reused session's too): a denied server whose name another
+   * server's extends is denied by its DISCONNECT alone (no `<name>_*` rule), and anything that
+   * reconnects it on the shared instance (a reload, another registration) would undeny it — so the
+   * disconnect is re-asserted (idempotent). One that cannot be disconnected now takes its rule
+   * after all (fail closed), sent with the session's ruleset; a failure to send it fails the turn.
+   */
+  private async reassertDenials(): Promise<void> {
+    if (this.deniedServers.length === 0) return;
+    const ruled = await resolveOpenCodeDenials(this.client, this.deniedServers, this.deps.ctx.logger);
+    const added = ruled.filter((name) => !this.deniedRules.includes(name));
+    if (added.length === 0) return;
+    const deniedRules = [...this.deniedRules, ...added];
+    await this.client.patch<unknown>(openCodeRoutes.session(this.state.openCodeSessionId), {
+      timeoutMs: AGENT_HOST_DEADLINES.sessionOpenMs,
+      body: {
+        permission: withSessionToolRules(buildOpenCodePermissionRules(this.state.runtimeMode), {
+          isolate: this.isolateSessionTools,
+          ...(this.sessionTools !== undefined ? { own: this.sessionTools } : {}),
+          deny: deniedRules
+        })
+      } satisfies UpdateSessionBody
+    });
+    // Recorded only once OpenCode has it: a failed send is tried again at the next turn start.
+    this.deniedRules = deniedRules;
+  }
+
   async sendTurn(input: SendTurnInput): Promise<SendTurnResult> {
     const selection = input.modelSelection ?? { model: this.lastModelSlug };
     const parsedModel = parseOpenCodeModelSlug(selection.model);
@@ -1777,6 +1821,7 @@ export class OpenCodeThreadSession {
     if (text.length === 0 && fileParts.length === 0) {
       throw new Error("OpenCode turns require text input or at least one attachment.");
     }
+    await this.reassertDenials();
 
     // §4.6.5(c): a prompt matching `^/name( args)?$` whose name is in a
     // FRESHLY fetched `command.list` is dispatched natively; a name that is
@@ -2528,7 +2573,8 @@ export class OpenCodeThreadSession {
           body: {
             permission: withSessionToolRules(buildOpenCodePermissionRules(this.state.runtimeMode), {
               isolate: this.isolateSessionTools,
-              ...(this.sessionTools !== undefined ? { own: this.sessionTools } : {})
+              ...(this.sessionTools !== undefined ? { own: this.sessionTools } : {}),
+              deny: this.deniedRules
             })
           } satisfies UpdateSessionBody
         });

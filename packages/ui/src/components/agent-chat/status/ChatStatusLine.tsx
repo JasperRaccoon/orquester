@@ -1,7 +1,8 @@
 /**
  * The status line that sits between the timeline and the banner dock (§7.6):
  * elapsed time, tokens so far, the current activity label, the thread's goal
- * (goals §8.2), and the context-window meter.
+ * (goals §8.2), the chat's Orquester tools (unified MCP §9.2), and the
+ * context-window meter.
  *
  * **Anything that changes every second is a self-ticking leaf.** The elapsed
  * readout is an {@link ElapsedTicker} — a DOM write, zero React commits — and
@@ -26,6 +27,7 @@ import { deriveContextMeter, formatContextTokens } from "./context-meter";
 import { GoalChip } from "./GoalChip";
 import type { GoalActionModel } from "./goal-chip";
 import { formatPlanProgress, planIsRunning, resolveStatusLine } from "./status-line";
+import { ToolsChip } from "./ToolsChip";
 
 /** Stable empties, so a thread without goal actions never churns the chip's props. */
 const NO_GOAL_ACTIONS: readonly GoalActionModel[] = [];
@@ -138,6 +140,10 @@ export function ChatStatusLine({
             </span>
           </span>
         ) : null}
+
+        {/* Unified MCP §9.2: this chat's Orquester toolsets and grants, before
+            the token count; it renders nothing until the daemon answered. */}
+        <ToolsChip sessionId={sessionId} />
 
         {meter ? (
           <>

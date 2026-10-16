@@ -26,6 +26,14 @@ import {
   type SetThreadIdentityRequest
 } from "../agent-host/host-protocol.ts";
 import { AgentChatService, FORK_CONFIRM_MAX_BACKOFF_MS, FORK_CONFIRM_MAX_REFUSALS, forkIdFor } from "./service.ts";
+import { realpath as realpathOf } from "node:fs/promises";
+import { TOOLSET_IDS, type ForkSessionRequest } from "@orquester/api";
+import type { CallerPrincipal } from "@orquester/api/agent-chat";
+import type { DaemonApi } from "../mcp/daemon-api.ts";
+import { FakeApprovalPort } from "../mcp/catalog/approval-double.ts";
+import { toolByName } from "../mcp/catalog/index.ts";
+import { executeToolCall } from "../mcp/executor.ts";
+import { gateForkBody } from "./lineage-routes.ts";
 import { ChatSessionError, ChatSessionManager } from "./chat-sessions.ts";
 import { HostUnavailableError } from "./host-client.ts";
 import { UploadTooLargeError } from "../upload-stream.ts";
@@ -1438,7 +1446,7 @@ test("a fork refuses a parent whose account is gone, and rolls its tab back on a
   await f.cleanup();
 });
 
-test("a delegate names a parent in its own project; anything else is refused", async () => {
+test("a delegate or opened chat names a parent in any project; any other relation is refused", async () => {
   const f = await makeFixture(CLAUDE, null);
   const parent = await f.service.createSession({ kind: "agent-chat", refId: "claude", projectPath: "/w/p" }, 0);
   const child = await f.service.createSession(
@@ -1453,18 +1461,18 @@ test("a delegate names a parent in its own project; anything else is refused", a
   assert.equal(child.lineage?.parentThreadId, parent.id);
   assert.equal(child.lineage?.relation, "delegate");
   assert.equal(f.created.at(-1)?.lineage?.relation, "delegate", "the host records it too");
-  await assert.rejects(
-    f.service.createSession(
-      {
-        kind: "agent-chat",
-        refId: "claude",
-        projectPath: "/w/other",
-        chat: { modelSelection: { model: "" }, lineage: { parentThreadId: parent.id, relation: "delegate" } }
-      },
-      2
-    ),
-    /parent's project/
+  // Unified MCP design 2026-10-15 §4.1: create_session opens chats in any project.
+  const elsewhere = await f.service.createSession(
+    {
+      kind: "agent-chat",
+      refId: "claude",
+      projectPath: "/w/other",
+      chat: { modelSelection: { model: "" }, lineage: { parentThreadId: parent.id, relation: "delegate" } }
+    },
+    2
   );
+  assert.equal(elsewhere.projectPath, "/w/other");
+  assert.equal(elsewhere.lineage?.parentThreadId, parent.id);
   await assert.rejects(
     f.service.createSession(
       {
@@ -1526,6 +1534,85 @@ test("a delegate's lineage records its delegation depth, a fork carries its pare
   assert.equal(f.service.delegationDepthOf({ lineage: d2.lineage! }), 2);
   const d3 = await delegate(d2.id, 5);
   assert.equal(d3.lineage?.delegationDepth, 3);
+  await f.cleanup();
+});
+
+test("opened and delegate links: agentCreated is stamped as given, and only agent-made links deepen delegationDepth (§13 c)", async () => {
+  const f = await makeFixture(CLAUDE, null);
+  const top = await f.service.createSession({ kind: "agent-chat", refId: "claude", projectPath: "/w/p" }, 0);
+  const open = (parentId: string, relation: "opened" | "delegate", agentCreated: boolean, order: number) =>
+    f.service.createSession(
+      {
+        kind: "agent-chat",
+        refId: "claude",
+        projectPath: "/w/q",
+        chat: { modelSelection: { model: "" }, lineage: { parentThreadId: parentId, relation, ...(agentCreated ? { agentCreated: true as const } : {}) } }
+      },
+      order
+    );
+  const byUser = await open(top.id, "opened", false, 1);
+  assert.equal(byUser.lineage?.relation, "opened");
+  assert.equal(byUser.lineage?.agentCreated, undefined, "an opened chat the user (or an external client) made is nobody's child");
+  assert.equal(byUser.lineage?.delegationDepth, 0, "recorded even at 0");
+  const byAgent = await open(top.id, "opened", true, 2);
+  assert.equal(byAgent.lineage?.agentCreated, true);
+  assert.equal(byAgent.lineage?.delegationDepth, 1);
+  assert.equal(f.created.at(-1)?.lineage?.agentCreated, true, "the host records it too");
+  assert.equal(f.created.at(-1)?.lineage?.relation, "opened");
+  const task = await open(byAgent.id, "delegate", true, 3);
+  assert.equal(task.lineage?.delegationDepth, 2, "an agent's opened chat delegating: two links");
+  // Kept on the tab record across a reload of the records.
+  assert.equal(f.service.chat.get(byAgent.id)?.lineage?.agentCreated, true);
+  // A record from before the recorded depth is counted by the same rule.
+  assert.equal(f.service.delegationDepthOf({ lineage: { parentThreadId: "gone", relation: "opened", createdAt: "" } }), 0);
+  assert.equal(f.service.delegationDepthOf({ lineage: { parentThreadId: "gone", relation: "opened", createdAt: "", agentCreated: true } }), 1);
+  assert.equal(f.service.delegationDepthOf({ lineage: { parentThreadId: "gone", relation: "delegate", createdAt: "" } }), 1);
+  await f.cleanup();
+});
+
+test("a fork records agentCreated only when the (gated) request carries it, and keeps it on a keyed repeat", async () => {
+  const f = await makeFixture(CLAUDE, null);
+  const parent = await f.service.createSession({ kind: "agent-chat", refId: "claude", projectPath: "/w/p" }, 0);
+  const byAgent = await f.service.forkSession(parent.id, { commandId: "a", agentCreated: true }, 1);
+  assert.equal(byAgent.lineage.agentCreated, true);
+  assert.equal(byAgent.session.lineage?.agentCreated, true);
+  assert.equal(byAgent.lineage.relation, "fork");
+  const repeat = await f.service.forkSession(parent.id, { commandId: "a" }, 1);
+  assert.equal(repeat.lineage.agentCreated, true, "the first answer's record stands");
+  const byUser = await f.service.forkSession(parent.id, {}, 2);
+  assert.equal(byUser.lineage.agentCreated, undefined, "a GUI fork is nobody's child");
+  await f.cleanup();
+});
+
+test("workflowOwned is stamped at creation from a workflow-owned creator (or a marked one), through delegate, opened and fork, and survives the creator closing (§5.4)", async () => {
+  const f = await makeFixture(OPENCODE, null);
+  const owner = { kind: "workflow" as const, workflowId: "wf-1", runId: "run-1", nodeId: "node-1" };
+  const owned = await f.service.createSession({ kind: "agent-chat", refId: "opencode", projectPath: "/w/p", cwd: "/w/p", owner }, 0);
+  const free = await f.service.createSession({ kind: "agent-chat", refId: "opencode", projectPath: "/w/p", cwd: "/w/p" }, 1);
+  const child = (parentId: string, relation: "opened" | "delegate", order: number) =>
+    f.service.createSession(
+      { kind: "agent-chat", refId: "opencode", projectPath: "/w/p", chat: { modelSelection: { model: "" }, lineage: { parentThreadId: parentId, relation, agentCreated: true } } },
+      order
+    );
+  const delegate = await child(owned.id, "delegate", 2);
+  assert.equal(delegate.lineage?.workflowOwned, true, "the creator is owned by a workflow");
+  const grandchild = await child(delegate.id, "opened", 3);
+  assert.equal(grandchild.lineage?.workflowOwned, true, "a descendant of an owned chat inherits it");
+  const fork = await f.service.forkSession(delegate.id, {}, 4);
+  assert.equal(fork.lineage.workflowOwned, true, "a fork of an owned descendant too (the daemon's stamp, not the host's)");
+  assert.equal(fork.session.lineage?.workflowOwned, true);
+  assert.equal((await child(free.id, "opened", 5)).lineage?.workflowOwned, undefined, "a free creator stamps nothing");
+  assert.equal((await f.service.forkSession(free.id, {}, 6)).lineage.workflowOwned, undefined);
+
+  // The owned chat and its delegate close: the marked chat still makes owned children, and the
+  // marker rides sessions.json through a restart.
+  f.service.chat.close(owned.id);
+  f.service.chat.close(delegate.id);
+  assert.equal((await child(grandchild.id, "delegate", 7)).lineage?.workflowOwned, true, "the marker alone proves it");
+  const reloaded = new ChatSessionManager();
+  reloaded.adopt(parseSessionsConfig({ version: 1, sessions: f.service.chat.records() }).sessions);
+  assert.equal(reloaded.get(grandchild.id)?.lineage?.workflowOwned, true);
+  assert.equal(reloaded.get(fork.session.id)?.lineage?.workflowOwned, true);
   await f.cleanup();
 });
 
@@ -1939,4 +2026,55 @@ test("previewHtmlRender without a page browser says so", async (t) => {
     f.service.previewHtmlRender({ threadId: "thread-1", html: "<p>x</p>" }),
     (error: unknown) => error instanceof HtmlPreviewError && error.code === "browser-unavailable"
   );
+});
+
+test("fork_session through the fork route's real principal gate and this service: a self-fork is agentCreated, a fork of another chat is not, workflow ownership is inherited (unified MCP Task 8)", async () => {
+  const f = await makeFixture(OPENCODE, null);
+  const projectDir = join(f.appdir, "w", "acme", "api");
+  await mkdir(projectDir, { recursive: true });
+  const project = await realpathOf(projectDir);
+  const owner = { kind: "workflow" as const, workflowId: "wf-1", runId: "run-1", nodeId: "node-1" };
+  const free = await f.service.createSession({ kind: "agent-chat", refId: "opencode", projectPath: projectDir, cwd: projectDir }, 0);
+  const other = await f.service.createSession({ kind: "agent-chat", refId: "opencode", projectPath: projectDir, cwd: projectDir }, 1);
+  const owned = await f.service.createSession({ kind: "agent-chat", refId: "opencode", projectPath: projectDir, cwd: projectDir, owner }, 2);
+  let order = 3;
+  const api: DaemonApi = {
+    fsRoot: f.appdir,
+    workspacesDir: join(f.appdir, "w"),
+    async request(method, path, opts) {
+      if (method === "GET" && path === "/api/sessions") return { status: 200, body: f.service.chat.list() };
+      const fork = /^\/api\/sessions\/([^/]+)\/fork$/.exec(path);
+      if (method === "POST" && fork) {
+        const id = decodeURIComponent(fork[1]!);
+        // The route's own gate, fed the principal the executor stamped on this request.
+        const body = gateForkBody((opts?.body ?? {}) as ForkSessionRequest, id, (opts as { principal?: CallerPrincipal } | undefined)?.principal);
+        return { status: 200, body: await f.service.forkSession(id, body, (order += 1)) };
+      }
+      return { status: 404, body: { error: { code: "NOT_FOUND", message: path } } };
+    },
+    async uploadAttachment() { return { status: 503, value: null }; },
+    async publishHtmlRender() { return { ok: false, code: "UNAVAILABLE", message: "none" }; },
+    async previewHtmlRender() { return { ok: false, code: "UNAVAILABLE", message: "none" }; },
+    subscribe: () => () => undefined
+  };
+  const fork = async (callerId: string, args: Record<string, unknown>, workflowOwned = false) => {
+    const result = await executeToolCall(
+      { approvals: new FakeApprovalPort(), enabledToolsets: async () => new Set(TOOLSET_IDS), lookup: (name, audience) => toolByName(name, audience) },
+      { name: "fork_session", arguments: args },
+      { caller: { kind: "thread", threadId: callerId, title: "Chat", projectPath: project, workspace: "acme", cwd: project, agentId: "opencode", callId: `c-${order}`, runtimeMode: "full-access", planning: false, workflowOwned, exchange: null }, api, signal: new AbortController().signal }
+    );
+    assert.equal(result.isError, undefined, JSON.stringify(result.structuredContent));
+    return f.service.chat.get((result.structuredContent as { sessionId: string }).sessionId)!.lineage!;
+  };
+  const self = await fork(free.id, {});
+  assert.equal(self.parentThreadId, free.id);
+  assert.equal(self.agentCreated, true, "a chat's own fork is its child");
+  const ofAnother = await fork(free.id, { sessionId: other.id });
+  assert.equal(ofAnother.parentThreadId, other.id);
+  assert.equal(ofAnother.agentCreated, undefined, "the gate drops the flag: the forked chat's agent did not ask");
+  assert.equal(ofAnother.workflowOwned, undefined);
+  const ownedFork = await fork(owned.id, {}, true);
+  assert.equal(ownedFork.agentCreated, true);
+  assert.equal(ownedFork.workflowOwned, true, "a workflow-owned chat's fork inherits the ownership");
+  await f.cleanup();
 });

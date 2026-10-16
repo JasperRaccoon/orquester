@@ -34,6 +34,7 @@ import type {
   LaunchAppRequest
 } from "./desktops.ts";
 import { desktopRoutes } from "./desktops.ts";
+import type { AgentProfileAgentId } from "./agent-profile.ts";
 export * from "./agent-chat/index.ts";
 export * from "./saved-prompts.ts";
 export * from "./agent-profile.ts";
@@ -41,6 +42,7 @@ export * from "./prompt-variables.ts";
 export * from "./workflows/index.ts";
 export * from "./desktops.ts";
 export * from "./plugins.ts";
+export * from "./agent-tools.ts";
 
 export type {
   AgentChatBackgroundLiveness,
@@ -85,10 +87,24 @@ export interface WorkspaceSummary {
    * to a label from its accounts store; this contract carries only the id.
    */
   gitAccountId?: string | null;
+  /**
+   * The bound git account's public identity (unified MCP design 2026-10-15 §5.5): label, login,
+   * provider — never a key, key path or token. `null` with no binding (or an account that no
+   * longer exists); absent from daemons that predate the field. Filled by joining `gitAccountId`
+   * with the accounts store (`/api/accounts`); `list_projects` (Task 9) does the join.
+   */
+  gitAccount?: WorkspaceGitAccount | null;
   /** ISO creation timestamp from workspaces.json, when present. */
   createdAt?: string;
   /** Hidden from the sidebar lists (workspaces.json flag). Absent = false. */
   isArchived?: boolean;
+}
+
+/** A workspace's git identity as tools and lists may show it. */
+export interface WorkspaceGitAccount {
+  label: string;
+  login: string;
+  provider: GitProviderId;
 }
 
 /**
@@ -702,6 +718,30 @@ export interface UpdateTodoRequest {
   body?: string;
 }
 
+/** `POST /api/todos/:id/toggle` — check or uncheck ONE task item of a list, atomically. */
+export const todoToggleRoute = (id: string): string => `/api/todos/${encodeURIComponent(id)}/toggle`;
+
+/**
+ * `POST /api/todos/:id/toggle` body. The daemon edits that item's mark in the STORED body in one
+ * step (no other write can land between its read and its write), so a toggle never overwrites a
+ * concurrent edit. `item`: the item's 1-based index among the list's task items, or its exact text
+ * (trimmed, case-insensitive). `checked`: the state to set; omitted flips it. Setting the state it
+ * already has writes nothing. Refusals: 404 (no such list), 400 (no such / an ambiguous item),
+ * `{code: "TODO_ERROR", message}` like the other todo routes.
+ */
+export interface ToggleTodoItemRequest {
+  item: string | number;
+  checked?: boolean;
+}
+
+/** `POST /api/todos/:id/toggle` answer: the item as matched, its state now, the list's whole body now. */
+export interface ToggleTodoItemResponse {
+  id: string;
+  item: string;
+  checked: boolean;
+  body: string;
+}
+
 /** `/events` channel "todos"; type one of these. Payload is always a full TodoListRecord
  *  (for "todo.deleted" it is the record as it was at deletion — clients remove by id). */
 export type TodoEventType = "todo.created" | "todo.updated" | "todo.deleted";
@@ -802,6 +842,36 @@ export interface UsageTokensResponse {
   asOf: string;
 }
 
+/**
+ * `GET /api/usage/chat-threads?agent=<adapter>`: what one agent's Orquester agent-chat threads
+ * recorded per settled turn — the provider-REPORTED cost and tokens — summed per UTC day and model,
+ * read from the threads' own event logs (closed chats included). Only Orquester's chats: the
+ * agent's use outside Orquester is not in it (`scope`). For agents with no transcript scanner
+ * (Grok); additive — an older daemon answers 404.
+ */
+export interface ChatThreadUsageRow {
+  day: string;
+  model: string;
+  /** Settled turns counted. */
+  turns: number;
+  /** Turns whose provider reported a cost (the rest add tokens only). */
+  costedTurns: number;
+  /** Input tokens, cached ones included (the adapters' convention). */
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens: number;
+  /** The sum of the reported costs; null when no turn of the row reported one. */
+  costUsd: number | null;
+}
+export interface ChatThreadUsageResponse {
+  agent: string;
+  scope: "orquester-chats";
+  rows: ChatThreadUsageRow[];
+  asOf: string;
+  /** Log lines too long to read (over 4 MiB) that were skipped; absent when none. */
+  skippedLines?: number;
+}
+
 /** One auto-mode check of the Claude subagent prompt-cache lifetime. */
 export interface SubagentCacheTtlCheck {
   at: string;
@@ -851,6 +921,78 @@ export interface PushUnsubscribeRequest {
 
 export interface PushTestResponse {
   sent: number;
+}
+
+/** `notify_user` caps (unified MCP design 2026-10-15 §4.1). */
+export const PUSH_NOTIFY_TITLE_MAX_CHARS = 120;
+export const PUSH_NOTIFY_BODY_MAX_CHARS = 300;
+
+/**
+ * `POST /api/push/notify` — an agent's Web Push to the user's devices (`notify_user`), deep-linked
+ * to `sessionId` (payload `tag: session-<id>`) when given. Rate-limited by the daemon (1 per chat
+ * per 5 min; 1 per external credential per minute → 429). No push carries an action button.
+ */
+export interface PushNotifyRequest {
+  title: string;
+  body?: string;
+  /** The chat to open on click; also the push's tag (`session-<id>`). */
+  sessionId?: string;
+}
+
+/** `sent`: devices the push reached (0 when push is unsupported or nobody subscribed). */
+export interface PushNotifyResponse {
+  sent: number;
+}
+
+// Daemon-pointing MCP servers (unified MCP design 2026-10-15 §12.1): MCP servers in an agent
+// CLI's config that reach THIS daemon's full-trust `/mcp` — denied inside every Orquester chat.
+
+/**
+ * `GET [?projectPath=<abs>[&cwd=<abs>]]` → {@link DaemonMcpServersResponse}. Both transports, bearer
+ * on HTTP. Without `projectPath`: every project's configs (the panel's view); with it, that
+ * project's — and with `cwd` (a directory inside it), every directory's from the project down to
+ * `cwd` (what a chat started there loads). Each project-scope server names the directory whose
+ * config holds it as its `projectPath`.
+ */
+export const AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE = "/api/agent-profile/daemon-mcp-servers";
+
+/**
+ * Why a server is flagged: its headers carry a bearer this daemon accepts (`bearer`), its URL
+ * resolves to this daemon's `/mcp` (`url`), or it is named `orquester` without being Orquester's
+ * own (`name`).
+ */
+export type DaemonPointingReason = "bearer" | "url" | "name";
+
+/** One flagged server. Never its bearer, headers or env values. */
+export interface DaemonPointingServer {
+  agent: AgentProfileAgentId;
+  /** The account home whose config holds it: `"system"` or a managed account id. */
+  home: string;
+  /** `user`: the CLI's user config in that home; `project`: a project-level config. */
+  scope: "user" | "project";
+  /** `scope: "project"`: the project (or, for a `cwd` read, the directory inside it) whose config holds it. */
+  projectPath?: string;
+  /** The server's name as the CLI knows it (what a deny rule names). */
+  name: string;
+  reason: DaemonPointingReason;
+  /**
+   * `true` when EVERY home of `agent` loads it, whatever `home` says. Grok inherits the user's system
+   * `~/.claude.json` servers, and a managed Grok account sets only `GROK_HOME`, so those servers are
+   * reported under `grok` with this flag and must be denied in every Grok chat. Absent: only `home`
+   * loads it. Additive: an older reader ignores it.
+   */
+  allHomes?: true;
+  /**
+   * A Codex project-level server: the Codex homes (`"system"` or account ids) that load it — Codex
+   * reads a project's `.codex/config.toml` only where that home trusts the directory. Absent: every
+   * home of `agent` loads it. Display only: chats deny it in every home (a denial of a server Codex
+   * did not load is harmless). Additive: an older reader ignores it.
+   */
+  loadedByHomes?: string[];
+}
+
+export interface DaemonMcpServersResponse {
+  servers: DaemonPointingServer[];
 }
 
 /** Public auth metadata for the HTTP transport (no secrets). */

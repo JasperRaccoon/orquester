@@ -1,28 +1,14 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { CallToolRequestSchema, ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import type { DaemonApi } from "./daemon-api.ts";
-import { ToolError } from "./errors.ts";
-import type { FsTools } from "./fs-tools.ts";
-import { clipText, MAX_ECHO_CHARS, ok, toSafeToolError } from "./result.ts";
-import type { TodoTools } from "./todo-tools.ts";
-import type { ToolContext, ToolDef } from "./tool.ts";
-import { agentProfileTools } from "./tools/agent-profile.ts";
-import { catalogTools } from "./tools/catalog.ts";
-import { desktopTools } from "./tools/desktops.ts";
-import { fileTools } from "./tools/files.ts";
-import { messageTools } from "./tools/messages.ts";
-import { outputTools } from "./tools/output.ts";
-import { requestTools } from "./tools/requests.ts";
-import { searchTools } from "./tools/search.ts";
-import { sessionTools } from "./tools/sessions.ts";
-import { lineageTools } from "./tools/lineage.ts";
-import { todoTools } from "./tools/todos.ts";
-import { usageTools } from "./tools/usage.ts";
-import { watchTools } from "./tools/watch.ts";
-import { workflowTools } from "./tools/workflows.ts";
+import type { AnyOrquesterTool } from "./catalog/contract.ts";
+import { catalogFor } from "./catalog/index.ts";
+import { audienceDescription, audienceSchema, audienceShape, executeToolCall } from "./executor.ts";
+import { argumentProblems, clipText, MAX_ECHO_CHARS } from "./result.ts";
+
+export { argumentProblems };
 
 /** 16 MiB: room for inline base64 attachments (spec §8.2). */
 const MCP_BODY_LIMIT = 16 * 1024 * 1024;
@@ -30,45 +16,41 @@ const MCP_BODY_LIMIT = 16 * 1024 * 1024;
 export interface McpDeps {
   /** Built per request with the caller's own `Authorization` header, so every daemon call is authorised as the caller (spec §4.2). */
   createApi: (authorization: string | undefined) => DaemonApi;
-  todos: TodoTools;
-  files: FsTools;
+  /**
+   * The external principal's `credentialId` for an authenticated request (`./principal.ts`
+   * `externalCredentialId`): every daemon call a tool makes acts as `{kind: "external",
+   * credentialId}`. Absent: `{kind: "external"}` without one.
+   */
+  credentialId?: (authorization: string | undefined) => string | undefined;
 }
 
-const SERVER_VERSION = "2.0.0";
+/** 3.0.0: the unified catalog (design 2026-10-15 §11) — 41 tools, renamed and merged from the 72-tool 2.x surface. */
+export const SERVER_VERSION = "3.0.0";
 
 /**
  * ≤ 2 KB: Claude Code truncates server instructions around there (and surfaces them only with tool
- * search on), so every load-bearing rule is also in the description of the tool it governs.
+ * search on), so every load-bearing rule is also in the description of the tool it governs. Every
+ * tool it names is an external catalog tool (`catalog/names.test.ts`).
  */
-const SERVER_INSTRUCTIONS = `Orquester MCP drives Orquester's agent chat sessions (Claude Code, Codex, OpenCode, Grok) like the chat GUI. A session is a tab: a chat with an agent, or a terminal (listed and closable only). Addressing: sessions by sessionId (list_sessions); projects by absolute path or "workspace/project" (list_projects). Call list_agents for the valid models, options (effort…), permission modes and accounts before create_session or update_session. create_session opens a chat tab, or resumes a conversation from list_conversations; send_message talks to it — wait:true (default) returns the reply or the question/approval it stopped on; while a turn runs, a message steers it. get_session shows status (status/attention/reason), pending questions and approvals with their ids and options, the proposed plan, subagents and the context meter; read_transcript shows what was said and done (agentId drills into a subagent), read_tool_output a tool row's whole output (its outputItemId); search_sessions finds words across every chat. answer_question / resolve_approval / dismiss_question act on pending requests; implement_plan is the GUI's Implement button. update_session changes model, effort/options, permission mode, account or title. fork_session branches a chat from a turn into a new tab; merge_back_session sends the fork's result back to its parent (queued while the parent is busy); get_session_lineage lists parent and children. wait_for_session blocks until a session needs you — pass its cursor back as \`after\`; never poll in a loop. Attachments are inline ({path} in the sandbox or {name, base64}). get_usage percentages are % USED. Automated workflows: list_workflow_block_types first, then create_workflow; edit with update_workflow ops (revision from get_workflow); preview_expression checks a {{ }} template against a past run's or pinned data without running; run_workflow, get_workflow_run. Agent profiles (each CLI's global MCP servers, skills, plugins, hooks, commands, instruction file): list_agent_profiles, get_agent_profile first; MCP secret values are write-only. GUI desktops: desktop_host_status first. Errors carry a code (SESSION_BUSY, PENDING_REQUEST, INVALID_ARGUMENT…) and a message naming the fix.`;
+export const SERVER_INSTRUCTIONS = `Orquester MCP drives Orquester's agent chats (Claude Code, Codex, OpenCode, Grok) like its GUI. A session is a tab: an agent chat, or a terminal (listed and closable only). Address sessions by sessionId (list_sessions) and projects by absolute path or "workspace/project" (list_projects). list_agents gives the valid agents, models, options, permission modes and accounts for create_session and update_session.
+create_session opens a chat (or resumes one from list_conversations), optionally with a first prompt. send_message talks to a chat: reply "wait" (default) returns the reply of the turn it causes, queued behind a working chat; reply "none" returns at once, steering a working chat. get_session shows status, pending requests, plan, lineage and context; read_transcript what was said and done; read_tool_output a tool row's whole output; get_turn_diff a turn's diff; search_sessions searches chats. respond_to_request answers (or dismisses) a question or decides a tool approval. control_session interrupts, stops, compacts, rewinds or closes. fork_session branches a chat; merge_back_session sends a fork's result back. wait_for_session blocks until a session needs you: pass its cursor back as \`after\`; never poll. Attachments are inline ({path} in the sandbox or {name, base64}).
+Read only: read_file, get_git_state, get_usage (percentages are % used). Notes: list_todos, update_todos, list_saved_prompts, update_saved_prompts. notify_user pushes to the user's devices.
+Workflows: list_workflow_block_types first, then create_workflow (dryRun validates); edit with update_workflow ops (revision from get_workflow); preview_expression checks a {{ }} template; run_workflow takes the revision; get_workflow_runs shows runs. Agent profiles (each CLI's MCP servers, skills, plugins, hooks, commands, instructions): get_agent_profile, then edit_agent_profile; secret values are write-only. Desktops: get_desktops, control_desktop.
+Errors carry a code (SESSION_BUSY, PENDING_REQUEST, INVALID_ARGUMENT…) and a message naming the fix.`;
 
-/** Every tool, in tools/list order. */
-const ALL_TOOLS: ToolDef[] = [...catalogTools, ...sessionTools, ...lineageTools, ...searchTools, ...messageTools, ...outputTools, ...requestTools, ...watchTools, ...usageTools, ...fileTools, ...todoTools, ...workflowTools, ...agentProfileTools, ...desktopTools];
-
-/** Every tool name this server serves, in tools/list order (the session tools' reserved names check against it). */
-export function externalMcpToolNames(): string[] {
-  return ALL_TOOLS.map((tool) => tool.name);
+/** Every external tool, in tools/list order: the catalog's `external` audience (unified MCP design 2026-10-15 §3.1). */
+function externalTools(): readonly AnyOrquesterTool[] {
+  return catalogFor("external");
 }
 
-/** How many refused fields an INVALID_ARGUMENT names before "…". */
-const MAX_NAMED_ISSUES = 5;
-/**
- * The most one refused field's text takes, and the most its path takes within it. zod's words can echo the caller's
- * input — the value an enum received, a strict object's unknown keys, a record's key in the path — and a 2 MiB value
- * must not make a 2 MiB error. The path is cut on its own, so the reason after it still shows.
- */
-const MAX_ISSUE_CHARS = 200;
-const MAX_ISSUE_PATH_CHARS = 100;
+/** Every tool name this server serves, in tools/list order. */
+export function externalMcpToolNames(): string[] {
+  return externalTools().map((tool) => tool.name);
+}
 
-/** The one line an argument the schema refuses answers with: each bad field and why, as zod words it, each capped. */
-export function argumentProblems(toolName: string, error: z.ZodError): string {
-  const oneLine = (text: string) => text.replace(/\s+/g, " ");
-  const named = error.issues.slice(0, MAX_NAMED_ISSUES).map((issue) => {
-    const path = issue.path.length ? clipText(oneLine(issue.path.join(".")), MAX_ISSUE_PATH_CHARS) : "arguments";
-    return clipText(oneLine(`${path}: ${issue.message}`), MAX_ISSUE_CHARS);
-  });
-  const more = error.issues.length > MAX_NAMED_ISSUES ? "; …" : "";
-  return `Invalid arguments for ${toolName}: ${named.join("; ")}${more}.`;
+/** A tool's highest chat tier, as `_meta` reports it (a per-call tier reports its widest: Admin). */
+function metaTier(tool: AnyOrquesterTool): string {
+  return typeof tool.tier === "function" ? "admin" : tool.tier;
 }
 
 /**
@@ -84,31 +66,38 @@ export function argumentProblems(toolName: string, error: z.ZodError): string {
  */
 function buildServer(deps: McpDeps, authorization: string | undefined, signal: AbortSignal): McpServer {
   const server = new McpServer({ name: "orquester", version: SERVER_VERSION }, { instructions: SERVER_INSTRUCTIONS });
-  const ctx: ToolContext = { api: deps.createApi(authorization), todos: deps.todos, files: deps.files, signal, now: () => Date.now() };
-  const call = async (tool: ToolDef, args: unknown) => {
-    try {
-      return ok(await tool.run(args as never, ctx));
-    } catch (error) {
-      return toSafeToolError(error);
-    }
-  };
-  const tools = new Map<string, { tool: ToolDef; schema: z.ZodTypeAny }>();
-  for (const tool of ALL_TOOLS) {
+  const api = deps.createApi(authorization);
+  const credentialId = deps.credentialId?.(authorization);
+  const principal = { kind: "external" as const, ...(credentialId ? { credentialId } : {}) };
+  const tools = new Map<string, AnyOrquesterTool>();
+  for (const tool of externalTools()) {
+    tools.set(tool.name, tool);
     // Match tools/list's additionalProperties:false; reject misspelled keys instead of silently taking defaults.
-    const schema = z.object(tool.input).strict();
-    tools.set(tool.name, { tool, schema });
+    const shape = audienceShape(tool, "external");
     // The SDK lists an empty shape as a bare `{type: "object"}`; the strict object keeps additionalProperties:false.
-    const inputSchema = Object.keys(tool.input).length > 0 ? tool.input : schema;
-    // Never invoked — the tools/call handler below replaces the SDK's — but it would answer the same way.
-    server.registerTool(tool.name, { title: tool.title, description: tool.description, inputSchema, annotations: tool.annotations }, (args: Record<string, unknown>) => call(tool, args));
+    const inputSchema = Object.keys(shape).length > 0 ? shape : audienceSchema(tool, "external");
+    // Never invoked — the tools/call handler below replaces the SDK's.
+    server.registerTool(
+      tool.name,
+      {
+        title: tool.title,
+        description: audienceDescription(tool, "external"),
+        inputSchema,
+        annotations: tool.annotations,
+        _meta: { "orquester/tier": metaTier(tool), "orquester/toolset": tool.toolset }
+      },
+      () => ({ content: [] })
+    );
   }
   server.server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    const entry = tools.get(request.params.name);
+    const tool = tools.get(request.params.name);
     // The name is the caller's text, of any length: quoted back capped, as every refusal quotes a caller's value.
-    if (!entry) throw new McpError(ErrorCode.InvalidParams, `Tool ${clipText(request.params.name, MAX_ECHO_CHARS)} not found`);
-    const parsed = await entry.schema.safeParseAsync(request.params.arguments ?? {});
-    if (!parsed.success) return toSafeToolError(new ToolError("INVALID_ARGUMENT", argumentProblems(entry.tool.name, parsed.error)));
-    return call(entry.tool, parsed.data);
+    if (!tool) throw new McpError(ErrorCode.InvalidParams, `Tool ${clipText(request.params.name, MAX_ECHO_CHARS)} not found`);
+    return executeToolCall(
+      {},
+      { name: tool.name, arguments: request.params.arguments },
+      { caller: { kind: "external" }, api, signal, principal }
+    );
   });
   return server;
 }

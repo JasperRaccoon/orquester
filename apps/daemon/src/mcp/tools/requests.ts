@@ -1,16 +1,22 @@
+// Catalog family module `requests` (Provider requests: respond_to_request) — owned by plan Task 7 (unified MCP, Wave 3;
+// design 2026-10-15 §4 row 17, §4.1, D-21). It answers PROVIDER requests only — the questions and tool approvals in the
+// thread snapshot. Orquester cards (tool approvals, boundary, toolset and secret cards) have their own ids, are never in
+// that snapshot, and are answered only on their card route (§7.3, §12.1): an id of one is not found here.
+import { resolve } from "node:path";
 import { z } from "zod";
 import type { ApprovalDecision, AttachmentRef } from "@orquester/api/agent-chat";
 import { attachmentInputSchema, MAX_ATTACHMENTS, uploadInlineAttachments, type AttachmentInput } from "../attachments.ts";
+import { defineTool, MUTATING, type AnyOrquesterTool } from "../catalog/contract.ts";
 import type { DaemonApi } from "../daemon-api.ts";
 import { ToolError } from "../errors.ts";
 import { readThread, requireChatSession, sendCommand } from "../reads.ts";
 import { clipText, MAX_ECHO_CHARS } from "../result.ts";
-import { defineTool, MUTATING, type ToolDef } from "../tool.ts";
 import { chatDetail, pendingApprovalViews, pendingQuestionViews, type PendingQuestionView } from "../views.ts";
+import { chatNotice, chatThreadRef, sessionAmongTabs, sessionCard, sessionClaim } from "./session-access.ts";
+import { sessionIdField } from "./sessions.ts";
 
-const sessionIdField = z.string().min(1).describe("The session id from list_sessions.");
 // min(1): an empty requestId is not an omitted one — read as omitted, it would act on the one request pending.
-const requestIdField = z.string().min(1).optional().describe("The request id from get_session; may be omitted when exactly one is pending.");
+const requestIdField = z.string().min(1).optional().describe("The request id from get_session; omit when exactly one is pending.");
 const DECISIONS = ["accept", "acceptForSession", "acceptAlways", "decline", "cancel"] as const satisfies readonly ApprovalDecision[];
 
 /** How many of the caller's values one refusal quotes; the rest are counted. */
@@ -122,89 +128,157 @@ function pointAtQuestion(error: ToolError, batches: readonly Batch[]): ToolError
   return error;
 }
 
-const answerQuestion = defineTool({
-  name: "answer_question",
-  title: "Answer the agent's question",
-  description: "Answer a pending question request, every question at once. Keys: question ids from get_session, or 1-based indexes (an exact id wins). A string picks an option (label or value) or, where allowCustomAnswer, is a custom answer; an array picks several on a multiSelect question. Attachments per question are optional (not on secret or options-only questions); files alone answer a question.",
+type AnswerArgs = { sessionId: string; requestId?: string; answers: Record<string, Answer>; attachments?: Record<string, AttachmentInput[]> };
+
+/** Answer a pending question, every question at once (the pre-catalog answer_question). */
+async function answer(api: DaemonApi, args: AnswerArgs, chat: boolean): Promise<Record<string, unknown>> {
+  await requireChatSession(api, args.sessionId);
+  const snap = await readThread(api, args.sessionId);
+  const req = pick(pendingQuestionViews(snap), args.requestId, "question");
+  // A secret question asks the USER for a secret: no secret value passes through a chat agent (§12.5, D-11).
+  if (chat && req.questions.some((q) => q.isSecret)) {
+    throw new ToolError("PERMISSION_DENIED", `Question "${req.requestId}" asks for a secret: only the user answers it, in that chat's tab.`);
+  }
+  // Pass 1 validates the whole request and reports every problem at once: nothing is uploaded unless it all passes.
+  const errors: string[] = [];
+  const unknown = new Set<string>();
+  const given = byQuestion(args.answers, req.questions, unknown, errors);
+  const attached = byQuestion(args.attachments, req.questions, unknown, errors);
+  if (unknown.size) errors.push(`${quoteValues([...unknown])} ${unknown.size === 1 ? "is not a question" : "are not questions"} of this request. Questions: ${req.questions.map((q) => `${q.index}: ${q.id}`).join(" | ")}.`);
+  const answers: Record<string, Answer> = {};
+  const batches: Batch[] = [];
+  const missing: string[] = [];
+  for (const q of req.questions) {
+    const raw = given.get(q.index);
+    const files = attached.get(q.index) ?? [];
+    // The GUI offers files only beside a custom answer, and never on a secret (`allowsAnswerAttachments`); refused
+    // files never stand in for the answer.
+    const filesAllowed = q.allowCustomAnswer && !q.isSecret;
+    if (files.length && !filesAllowed) errors.push(q.isSecret ? `"${nameOf(q)}" is a secret field and takes no attachments.` : `"${nameOf(q)}" takes only its listed options, so no attachments.`);
+    else if (files.length > MAX_ATTACHMENTS) errors.push(`"${nameOf(q)}" takes at most ${MAX_ATTACHMENTS} attachments.`);
+    else if (files.length) batches.push({ q, files });
+    if (raw === undefined || isBlank(raw)) {
+      if (files.length && filesAllowed) answers[q.id] = "";
+      else missing.push(nameOf(q));
+      continue;
+    }
+    const encoded = encodeAnswer(q, raw);
+    if ("error" in encoded) errors.push(encoded.error);
+    else answers[q.id] = encoded.value;
+  }
+  if (missing.length) errors.push(`Every question must be answered. Missing: ${missing.join(", ")}.`);
+  if (errors.length) throw new ToolError("INVALID_ARGUMENT", errors.join(" "));
+  // Pass 2 uploads every file in question order, in one call that validates them all first, before the command (§8.3).
+  const attachmentsByQuestionId = await uploadAll(api, args.sessionId, batches);
+  const { seq } = await sendCommand(api, args.sessionId, "answer", { requestId: req.requestId, answers, ...(Object.keys(attachmentsByQuestionId).length ? { attachmentsByQuestionId } : {}) });
+  return { seq, session: await chatDetail(api, args.sessionId) };
+}
+
+/** Close a dismissible question without answering it (the pre-catalog dismiss_question). */
+async function dismiss(api: DaemonApi, args: { sessionId: string; requestId?: string }): Promise<Record<string, unknown>> {
+  await requireChatSession(api, args.sessionId);
+  const snap = await readThread(api, args.sessionId);
+  const req = pick(pendingQuestionViews(snap), args.requestId, "question");
+  if (!req.dismissible) throw new ToolError("INVALID_ARGUMENT", `Question "${req.requestId}" blocks the agent and cannot be dismissed; answer it, or stop the turn with control_session {action: "interrupt"}.`);
+  const { seq } = await sendCommand(api, args.sessionId, "dismiss", { requestId: req.requestId });
+  return { seq, session: await chatDetail(api, args.sessionId) };
+}
+
+/** Decide a provider tool approval with one of its offered decisions (the pre-catalog resolve_approval). External only. */
+async function decide(api: DaemonApi, args: { sessionId: string; requestId?: string; decision: ApprovalDecision }): Promise<Record<string, unknown>> {
+  await requireChatSession(api, args.sessionId);
+  const snap = await readThread(api, args.sessionId);
+  const req = pick(pendingApprovalViews(snap), args.requestId, "approval");
+  if (!req.decisions.some((d) => d.decision === args.decision)) {
+    throw new ToolError("INVALID_ARGUMENT", `"${args.decision}" is not offered for this request. Offered: ${req.decisions.map((d) => d.decision).join(", ")}.`);
+  }
+  const { seq } = await sendCommand(api, args.sessionId, "approval", { requestId: req.requestId, decision: args.decision });
+  return { seq, session: await chatDetail(api, args.sessionId) };
+}
+
+/** Exactly one of `answers`, `dismiss` and `decision`; attachments only beside answers. */
+function responseProblem(args: { answers?: unknown; dismiss?: true; decision?: unknown; attachments?: unknown }): string | null {
+  const given = [args.answers !== undefined, args.dismiss === true, args.decision !== undefined].filter(Boolean).length;
+  if (given !== 1) return "Give exactly one of answers, dismiss: true or decision.";
+  if (args.attachments !== undefined && args.answers === undefined) return "attachments go with answers.";
+  return null;
+}
+
+/** The attachment `{path}`s a call names, as the upload resolves them (under the sandbox root). */
+function attachmentPaths(api: DaemonApi, attachments: Record<string, AttachmentInput[]> | undefined): string[] {
+  return Object.values(attachments ?? {}).flatMap((files) => files.flatMap((file) => ("path" in file ? [resolve(api.fsRoot, file.path)] : [])));
+}
+
+const OWN_CHILDREN_RESPOND = "respond_to_request answers only the questions of chats this chat created (create_session, fork_session); the user answers the rest.";
+
+const respondToRequest = defineTool({
+  name: "respond_to_request",
+  title: "Respond to a request",
+  description:
+    "Answer or dismiss an agent's pending question, or decide a provider tool approval (get_session lists them with ids and options). answers: question id or 1-based index → an option's label/value, a custom answer where allowCustomAnswer, or an array on multiSelect; attachments per question are optional. dismiss: true closes a dismissible question. Approval cards Orquester shows in a chat are not requests: the user answers those.",
+  chatNote: "Only questions of chats you created; never approvals or secret questions.",
+  externalNote: "decision quirks: on Claude acceptAlways denies; on OpenCode acceptForSession/acceptAlways mean 'always' for the directory.",
   input: {
     sessionId: sessionIdField,
     requestId: requestIdField,
-    answers: z.record(z.union([z.string(), z.array(z.string())])).describe("questionId (or index) → answer."),
-    attachments: z.record(z.array(attachmentInputSchema).max(MAX_ATTACHMENTS)).optional().describe("questionId (or index) → attachments.")
+    answers: z.record(z.union([z.string(), z.array(z.string())])).optional().describe("questionId (or index) → answer."),
+    attachments: z.record(z.array(attachmentInputSchema).max(MAX_ATTACHMENTS)).optional().describe("questionId (or index) → attachments."),
+    dismiss: z.literal(true).optional().describe("Close a dismissible question unanswered."),
+    decision: z.enum(DECISIONS).optional().describe("A tool approval's decision.")
   },
+  externalOnlyInput: ["decision"],
+  audiences: ["external", "chat"],
+  toolset: "chat-extras",
+  tier: "act",
+  async scope(args, ctx) {
+    const problem = responseProblem(args);
+    if (problem) throw new ToolError("INVALID_ARGUMENT", problem);
+    const paths = ctx.caller.kind === "thread" ? attachmentPaths(ctx.api, args.attachments) : [];
+    const claim = await sessionClaim(ctx, args.sessionId, { reads: "none", writes: true, self: "refuse", ownChildrenOnly: OWN_CHILDREN_RESPOND });
+    return paths.length > 0 ? { ...claim, paths } : claim;
+  },
+  approval: (args, ctx) =>
+    sessionCard(
+      ctx,
+      args.sessionId,
+      args.dismiss ? "dismiss a question of" : args.decision !== undefined ? "decide a tool approval of" : "answer a question of",
+      [
+        ...(args.requestId !== undefined ? [{ label: "Request", value: args.requestId }] : []),
+        ...(args.decision !== undefined ? [{ label: "Decision", value: args.decision }] : [])
+      ],
+      { sections: [
+        ...(args.answers !== undefined
+          ? [{ kind: "fields" as const, title: "Answers", rows: Object.entries(args.answers).map(([key, value]) => ({ label: key, value: Array.isArray(value) ? value.join(", ") : value })) }]
+          : []),
+        // Files by name (a path, or an inline file's name and size) — never their bytes.
+        ...(args.attachments !== undefined
+          ? [{
+              kind: "fields" as const,
+              title: "Attachments",
+              rows: Object.entries(args.attachments).flatMap(([key, files]) =>
+                files.map((file) => ({ label: key, value: "path" in file ? file.path : `${file.name} (${Math.floor((file.base64.replace(/\s+/g, "").length * 3) / 4)} bytes, inline)` }))
+              )
+            }]
+          : [])
+      ] }
+    ),
   annotations: MUTATING,
-  async run(args, { api }) {
-    await requireChatSession(api, args.sessionId);
-    const snap = await readThread(api, args.sessionId);
-    const req = pick(pendingQuestionViews(snap), args.requestId, "question");
-    // Pass 1 validates the whole request and reports every problem at once: nothing is uploaded unless it all passes.
-    const errors: string[] = [];
-    const unknown = new Set<string>();
-    const given = byQuestion(args.answers, req.questions, unknown, errors);
-    const attached = byQuestion(args.attachments, req.questions, unknown, errors);
-    if (unknown.size) errors.push(`${quoteValues([...unknown])} ${unknown.size === 1 ? "is not a question" : "are not questions"} of this request. Questions: ${req.questions.map((q) => `${q.index}: ${q.id}`).join(" | ")}.`);
-    const answers: Record<string, Answer> = {};
-    const batches: Batch[] = [];
-    const missing: string[] = [];
-    for (const q of req.questions) {
-      const raw = given.get(q.index);
-      const files = attached.get(q.index) ?? [];
-      // The GUI offers files only beside a custom answer, and never on a secret (`allowsAnswerAttachments`); refused
-      // files never stand in for the answer.
-      const filesAllowed = q.allowCustomAnswer && !q.isSecret;
-      if (files.length && !filesAllowed) errors.push(q.isSecret ? `"${nameOf(q)}" is a secret field and takes no attachments.` : `"${nameOf(q)}" takes only its listed options, so no attachments.`);
-      else if (files.length > MAX_ATTACHMENTS) errors.push(`"${nameOf(q)}" takes at most ${MAX_ATTACHMENTS} attachments.`);
-      else if (files.length) batches.push({ q, files });
-      if (raw === undefined || isBlank(raw)) {
-        if (files.length && filesAllowed) answers[q.id] = "";
-        else missing.push(nameOf(q));
-        continue;
-      }
-      const encoded = encodeAnswer(q, raw);
-      if ("error" in encoded) errors.push(encoded.error);
-      else answers[q.id] = encoded.value;
-    }
-    if (missing.length) errors.push(`Every question must be answered. Missing: ${missing.join(", ")}.`);
-    if (errors.length) throw new ToolError("INVALID_ARGUMENT", errors.join(" "));
-    // Pass 2 uploads every file in question order, in one call that validates them all first, before the command (§8.3).
-    const attachmentsByQuestionId = await uploadAll(api, args.sessionId, batches);
-    const { seq } = await sendCommand(api, args.sessionId, "answer", { requestId: req.requestId, answers, ...(Object.keys(attachmentsByQuestionId).length ? { attachmentsByQuestionId } : {}) });
-    return { seq, session: await chatDetail(api, args.sessionId) };
+  resultKind: "json",
+  async run(args, { api, caller }) {
+    const problem = responseProblem(args);
+    if (problem) throw new ToolError("INVALID_ARGUMENT", problem);
+    const result =
+      args.decision !== undefined
+        ? await decide(api, { sessionId: args.sessionId, ...(args.requestId !== undefined ? { requestId: args.requestId } : {}), decision: args.decision })
+        : args.dismiss
+          ? await dismiss(api, { sessionId: args.sessionId, ...(args.requestId !== undefined ? { requestId: args.requestId } : {}) })
+          : await answer(api, { sessionId: args.sessionId, ...(args.requestId !== undefined ? { requestId: args.requestId } : {}), answers: args.answers!, ...(args.attachments !== undefined ? { attachments: args.attachments } : {}) }, caller.kind === "thread");
+    if (caller.kind !== "thread") return result;
+    const { summary, sessions } = await sessionAmongTabs(api, args.sessionId);
+    // The detail carries the target's words (its last reply, plan, requests): marked as another chat's data (§4.3).
+    return { ...chatNotice(caller, args.sessionId), ...result, ...chatThreadRef(caller, sessions, summary) };
   }
 });
 
-const dismissQuestion = defineTool({
-  name: "dismiss_question",
-  title: "Dismiss a question",
-  description: "Close a dismissible (message-mode / async) question without answering it. A blocking question cannot be dismissed — answer it or interrupt_session.",
-  input: { sessionId: sessionIdField, requestId: requestIdField },
-  annotations: MUTATING,
-  async run(args, { api }) {
-    await requireChatSession(api, args.sessionId);
-    const snap = await readThread(api, args.sessionId);
-    const req = pick(pendingQuestionViews(snap), args.requestId, "question");
-    if (!req.dismissible) throw new ToolError("INVALID_ARGUMENT", `Question "${req.requestId}" blocks the agent and cannot be dismissed; answer it with answer_question or stop the turn with interrupt_session.`);
-    const { seq } = await sendCommand(api, args.sessionId, "dismiss", { requestId: req.requestId });
-    return { seq, session: await chatDetail(api, args.sessionId) };
-  }
-});
-
-const resolveApproval = defineTool({
-  name: "resolve_approval",
-  title: "Resolve a tool approval",
-  description: "Answer a pending tool-permission request with one of its offered decisions (get_session lists them). Quirks: on Claude acceptAlways denies; on OpenCode acceptForSession/acceptAlways both mean 'always' for the whole directory.",
-  input: { sessionId: sessionIdField, requestId: requestIdField, decision: z.enum(DECISIONS).describe("The decision.") },
-  annotations: MUTATING,
-  async run(args, { api }) {
-    await requireChatSession(api, args.sessionId);
-    const snap = await readThread(api, args.sessionId);
-    const req = pick(pendingApprovalViews(snap), args.requestId, "approval");
-    if (!req.decisions.some((d) => d.decision === args.decision)) {
-      throw new ToolError("INVALID_ARGUMENT", `"${args.decision}" is not offered for this request. Offered: ${req.decisions.map((d) => d.decision).join(", ")}.`);
-    }
-    const { seq } = await sendCommand(api, args.sessionId, "approval", { requestId: req.requestId, decision: args.decision });
-    return { seq, session: await chatDetail(api, args.sessionId) };
-  }
-});
-
-export const requestTools: ToolDef[] = [answerQuestion, dismissQuestion, resolveApproval];
+/** This family in the catalog (`../catalog/index.ts`). */
+export const requestsFamily: readonly AnyOrquesterTool[] = [respondToRequest];

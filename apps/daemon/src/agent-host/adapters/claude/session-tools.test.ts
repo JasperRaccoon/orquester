@@ -11,22 +11,26 @@ import { describe, it } from "node:test";
 import type { CanUseTool } from "@anthropic-ai/claude-agent-sdk";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { ToolListChangedNotificationSchema, type CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
 import { z } from "zod";
 
 import type { DaemonApi } from "../../../mcp/daemon-api.ts";
-import { defineSessionTool, defineSessionToolkit, SESSION_TOOL_READ_ONLY, type SessionToolContext } from "../../../session-tools/contract.ts";
-import { executeSessionToolCall } from "../../../session-tools/executor.ts";
-import { createSessionToolRegistry } from "../../../session-tools/registry.ts";
 import { jsonResult } from "../../../session-tools/results.ts";
-import { TEST_TOOLKIT_INSTRUCTIONS } from "../../../session-tools/testing.ts";
+import { executeTestChatCall, TEST_INSTRUCTIONS, testChatTool, type TestCallContext } from "../../../session-tools/testing.ts";
 import { recordingSessionTools } from "../../session-tools/testing.ts";
 import { buildClaudeQueryOptions } from "./launch.ts";
 import { toProviderModels } from "./models.ts";
-import { createClaudeSessionToolsLaunch, isClaudeSessionTool } from "./session-tools.ts";
+import {
+  claudeDeniedMcpServers,
+  claudeDisallowedTools,
+  createClaudeSessionToolsLaunch,
+  isClaudeSessionTool
+} from "./session-tools.ts";
 
-function fakeContext(): SessionToolContext {
+const LAUNCH = { home: "system", project: "/p" };
+
+function fakeContext(): TestCallContext {
   return {
     threadId: "thread-1",
     projectPath: "/p",
@@ -50,9 +54,10 @@ async function connectInProcess(instance: unknown): Promise<Client> {
 describe("Claude in-process session-tool server", () => {
   it("advertises every registered tool and calls them as its own thread", async () => {
     const tools = recordingSessionTools();
-    const launch = createClaudeSessionToolsLaunch({
+    const launch = await createClaudeSessionToolsLaunch({
       sessionTools: tools,
       threadId: "thread-1",
+      launch: LAUNCH,
       signal: new AbortController().signal
     });
     assert.equal(launch.server.type, "sdk");
@@ -78,24 +83,17 @@ describe("Claude in-process session-tool server", () => {
   });
 
   it("forwards the arguments raw: an unknown key survives and no default is applied", async () => {
-    const registry = createSessionToolRegistry([
-      defineSessionToolkit({
-        id: "defaults",
-        tools: [
-          defineSessionTool({
-            name: "paged",
-            title: "Paged",
-            description: "Has a default.",
-            input: { limit: z.number().int().default(20), text: z.string().optional() },
-            annotations: SESSION_TOOL_READ_ONLY,
-            resultKind: "json",
-            run: async () => jsonResult({})
-          })
-        ]
+    const paged = [
+      testChatTool({
+        name: "paged",
+        title: "Paged",
+        description: "Has a default.",
+        input: { limit: z.number().int().default(20), text: z.string().optional() },
+        run: async () => jsonResult({})
       })
-    ]);
-    const tools = recordingSessionTools(registry);
-    const launch = createClaudeSessionToolsLaunch({ sessionTools: tools, threadId: "thread-1", signal: new AbortController().signal });
+    ];
+    const tools = recordingSessionTools(paged);
+    const launch = await createClaudeSessionToolsLaunch({ sessionTools: tools, threadId: "thread-1", launch: LAUNCH, signal: new AbortController().signal });
     const client = await connectInProcess(launch.server.instance);
     // The schema is still advertised in full.
     const listed = await client.listTools();
@@ -103,7 +101,7 @@ describe("Claude in-process session-tool server", () => {
     await client.callTool({ name: "paged", arguments: { text: "x", bogus: true } });
     assert.deepEqual(tools.calls[0]!.arguments, { text: "x", bogus: true }, "the daemon sees what the model sent");
     // …so its refusal is the same one every provider gets.
-    const refused = await executeSessionToolCall(registry, { name: "paged", arguments: tools.calls[0]!.arguments }, fakeContext());
+    const refused = await executeTestChatCall(paged, { name: "paged", arguments: tools.calls[0]!.arguments }, fakeContext());
     assert.equal(refused.isError, true);
     assert.match((refused.content[0] as { text: string }).text, /^INVALID_ARGUMENT: Invalid arguments for paged: arguments: Unrecognized key\(s\) in object: 'bogus'/);
     await client.close();
@@ -112,7 +110,7 @@ describe("Claude in-process session-tool server", () => {
   it("ending the session aborts a call still in flight", async () => {
     const tools = recordingSessionTools();
     const life = new AbortController();
-    const launch = createClaudeSessionToolsLaunch({ sessionTools: tools, threadId: "thread-1", signal: life.signal });
+    const launch = await createClaudeSessionToolsLaunch({ sessionTools: tools, threadId: "thread-1", launch: LAUNCH, signal: life.signal });
     const client = await connectInProcess(launch.server.instance);
     const called = tools.nextCall();
     const pending = client.callTool({ name: "wait_for_cancel", arguments: {} });
@@ -122,6 +120,37 @@ describe("Claude in-process session-tool server", () => {
     assert.equal(result.isError, true);
     assert.equal(tools.calls[0]!.signal?.aborted, true);
     await client.close();
+  });
+
+  it("takes a new list in-session: list_changed, answered `live` only once the client re-listed", async () => {
+    const tools = recordingSessionTools();
+    const launch = await createClaudeSessionToolsLaunch({ sessionTools: tools, threadId: "thread-1", launch: LAUNCH, signal: new AbortController().signal });
+    const client = await connectInProcess(launch.server.instance);
+    const relisted: string[][] = [];
+    // The CLI's behaviour (probed on 2.1.285): the notification makes it list again.
+    client.setNotificationHandler(ToolListChangedNotificationSchema, async () => {
+      relisted.push((await client.listTools()).tools.map((tool) => tool.name));
+    });
+    assert.equal(launch.names().has("pixel"), true);
+    assert.equal(await tools.applyManifest("thread-1", { tools: ["echo"], instructions: "", deny: [] }), "live");
+    assert.deepEqual(relisted, [["echo"]], "the apply resolved on the client's own re-list");
+    assert.deepEqual([...launch.names()], ["echo"]);
+    await client.close();
+  });
+
+  it("a client that does not re-list in time: answered truthfully (`next-idle`), never `live`", async () => {
+    const tools = recordingSessionTools();
+    const launch = await createClaudeSessionToolsLaunch({ sessionTools: tools, threadId: "thread-1", launch: LAUNCH, signal: new AbortController().signal, relistTimeoutMs: 20 });
+    const client = await connectInProcess(launch.server.instance);
+    client.setNotificationHandler(ToolListChangedNotificationSchema, async () => undefined);
+    assert.equal(await tools.applyManifest("thread-1", { tools: ["echo"], instructions: "", deny: [] }), "next-idle");
+    // The list is served all the same; the session restarts at its next idle point (host).
+    assert.deepEqual([...launch.names()], ["echo"]);
+    await client.close();
+    // Not connected at all: nothing to tell, not live.
+    const unconnected = await createClaudeSessionToolsLaunch({ sessionTools: tools, threadId: "thread-2", launch: LAUNCH, signal: new AbortController().signal });
+    assert.equal(await tools.applyManifest("thread-2", { tools: ["echo"], instructions: "", deny: [] }), "next-idle");
+    void unconnected;
   });
 
   it("names only the REGISTERED tools of the orquester server as session tools", () => {
@@ -147,9 +176,9 @@ describe("Claude launch options with session tools", () => {
     canUseTool
   };
 
-  it("attach the in-process server, its pre-approval and its instruction block", () => {
+  it("attach the in-process server, its pre-approval and its instruction block", async () => {
     const tools = recordingSessionTools();
-    const launch = createClaudeSessionToolsLaunch({ sessionTools: tools, threadId: "t", signal: new AbortController().signal });
+    const launch = await createClaudeSessionToolsLaunch({ sessionTools: tools, threadId: "t", launch: LAUNCH, signal: new AbortController().signal });
     const { options } = buildClaudeQueryOptions({ ...base, sessionTools: launch });
     assert.deepEqual(Object.keys(options.mcpServers ?? {}), ["orquester"]);
     assert.equal(options.mcpServers?.orquester, launch.server);
@@ -163,13 +192,32 @@ describe("Claude launch options with session tools", () => {
     const systemPrompt = options.systemPrompt as { type: string; append: string };
     assert.equal(systemPrompt.type, "preset");
     assert.ok(systemPrompt.append.startsWith("You are running inside Orquester's agent chat"));
-    assert.ok(systemPrompt.append.endsWith(TEST_TOOLKIT_INSTRUCTIONS));
+    assert.ok(systemPrompt.append.endsWith(TEST_INSTRUCTIONS));
     // `strictMcpConfig` stays unset: the user's own servers keep loading.
     assert.equal(options.strictMcpConfig, undefined);
     // Nothing that reaches argv carries a credential: the SDK serialises an
     // `sdk` server as its type and name only, and there is no token at all.
     const { instance: _instance, ...serialisable } = launch.server;
     assert.deepEqual(serialisable, { type: "sdk", name: "orquester" });
+    // A user-config server named `orquester` never connects (it would race ours, Task 6 probe);
+    // nothing else is denied without a manifest denial.
+    assert.deepEqual((options.settings as { deniedMcpServers?: unknown }).deniedMcpServers, [{ serverName: "orquester" }]);
+    assert.equal(options.disallowedTools, undefined);
+  });
+
+  it("deny every daemon-pointing server twice: the server-level rule and deniedMcpServers (§12.1)", async () => {
+    const tools = recordingSessionTools(undefined, { deny: ["orquester_remote", "my.remote", "orquester"] });
+    const launch = await createClaudeSessionToolsLaunch({ sessionTools: tools, threadId: "t", launch: LAUNCH, signal: new AbortController().signal });
+    const { options } = buildClaudeQueryOptions({ ...base, sessionTools: launch });
+    // `mcp__orquester` would remove our own server's tools: never.
+    assert.deepEqual(options.disallowedTools, ["mcp__orquester_remote", "mcp__my_remote"]);
+    assert.deepEqual((options.settings as { deniedMcpServers?: unknown }).deniedMcpServers, [
+      { serverName: "orquester" },
+      { serverName: "orquester_remote" },
+      { serverName: "my.remote" }
+    ]);
+    assert.deepEqual(claudeDisallowedTools([]), []);
+    assert.deepEqual(claudeDeniedMcpServers([]), [{ serverName: "orquester" }]);
   });
 
   it("without session tools, nothing changes", () => {

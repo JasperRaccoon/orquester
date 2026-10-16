@@ -1,26 +1,59 @@
-import { stat } from "node:fs/promises";
-import { resolve } from "node:path";
+// Catalog family module `sessions` (Sessions: reads and lifecycle) — owned by plan Task 7 (unified MCP, Wave 3):
+// list_sessions, get_session, read_transcript, get_turn_diff, update_session, control_session (unified MCP design
+// 2026-10-15 §4 rows 4–6, 8, 11, 12; §4.1; §5; §13 a–c). `create_session` is the conversation family's (`messages.ts`).
+//
+// The scope claim of a session-addressed call, content rights (§5.2, §13 a), the chat result frame (§4.3) and the
+// boundary cards (§7.1) are shared with every session-addressed family (`./session-access.ts`).
 import { z } from "zod";
-import { SYSTEM_ACCOUNT_ID, type AgentConversationsResponse, type CreateSessionRequest, type SessionSummary } from "@orquester/api";
-import { agentChatRoutes, isSettledConversationCompaction, parseThreadGoal, RUNTIME_MODES, startedTurns, type AccountHomeKind, type CreateAgentChatSessionFields, type ModelSelection, type RuntimeMode, type StartedTurn, type ThreadActivityItem, type ThreadItem, type ThreadSnapshotPayload, type TurnDiffResponse } from "@orquester/api/agent-chat";
-import { assertInsideFsRoot, FsSandboxError } from "@orquester/config/fs";
-import { resolveProject } from "../addressing.ts";
+import { SYSTEM_ACCOUNT_ID, type SessionLineageResponse, type SessionSummary } from "@orquester/api";
+import {
+  agentChatRoutes,
+  isSettledConversationCompaction,
+  parseThreadGoal,
+  RUNTIME_MODES,
+  startedTurns,
+  UNTRUSTED_NOTICE,
+  type ModelSelection,
+  type RuntimeMode,
+  type StartedTurn,
+  type ThreadActivityItem,
+  type ThreadItem,
+  type ThreadSnapshotPayload,
+  type TurnDiffResponse
+} from "@orquester/api/agent-chat";
+import { canonicalProject, resolveProject } from "../addressing.ts";
 import { findAgent, loadAgents, resolveModelSelection, validateAccountId, type ResolvedSelection } from "../agents.ts";
+import {
+  defineTool,
+  DESTRUCTIVE,
+  MUTATING_IDEMPOTENT,
+  READ_ONLY,
+  type AnyOrquesterTool,
+  type CallContext,
+  type ScopeClaim
+} from "../catalog/contract.ts";
 import type { DaemonApi } from "../daemon-api.ts";
 import { ToolError, expectOk } from "../errors.ts";
+import { runtimeModesUpTo } from "../gate/turn-policy.ts";
+import { readOlderHistory, unavailableHint } from "../history.ts";
 import { findSession, listSessions, readThread, requireChatSession, sendCommand } from "../reads.ts";
 import { fitJsonBytes, jsonBytes, MAX_RESULT_BYTES, resultBytes, toSafeToolError } from "../result.ts";
-import { defineTool, DESTRUCTIVE, MUTATING, MUTATING_IDEMPOTENT, READ_ONLY, type ToolContext, type ToolDef } from "../tool.ts";
-import { buildViewContext, chatDetail, sessionView } from "../views.ts";
-import { byAttention } from "./watch.ts";
+import { transcriptEntries, transcriptRange, type TranscriptResult } from "../transcript.ts";
+import { buildViewContext, chatDetail, CONTENT_OMITTED_HINT, detailWithoutContent, fitDetail, rowWithoutContent, sessionDetail, sessionView, type SessionDetail } from "../views.ts";
+import { byAttention, canonicalProjects, chatFrame, chatNotice, chatThreadRef, hasContentRights, projectCard, sessionAmongTabs, sessionCard, sessionClaim } from "./session-access.ts";
 
-/** The most running tabs a project may hold before a tool opens another (also the session tools' cap, `session-tools/threads`). */
+/** The most running tabs a project may hold before a tool opens another (`create_session`, `fork_session`; spec §5.6). */
 export const MAX_RUNNING_SESSIONS_PER_PROJECT = 24;
 /** A permission mode, as create_session and update_session take it (also the session tools' thread_create / delegate_task). */
 export const runtimeModeSchema = z.enum(RUNTIME_MODES as unknown as [RuntimeMode, ...RuntimeMode[]]);
 /** Model options by id, as create_session and update_session take them (also the session tools' thread_create / delegate_task). */
 export const optionsSchema = z.record(z.union([z.string(), z.boolean()])).describe("Model options by id, e.g. {\"effort\":\"high\",\"thinking\":true}. `effort` works for every agent.");
-const sessionIdField = z.string().min(1).describe("The session id from list_sessions.");
+/** The session a call names (§9.5: shared field texts stay short). */
+export const sessionIdField = z.string().min(1).describe("The session id (list_sessions).");
+
+// ---------------------------------------------------------------------------
+// Turn and goal state (shared by update_session and control_session)
+// ---------------------------------------------------------------------------
 
 /**
  * A turn is starting or running. The summary can trail the host by a beat, so the thread head just
@@ -59,8 +92,8 @@ function switchRefusal(s: SessionSummary, snap: ThreadSnapshotPayload): string |
   if (goalHeldForUpdate(s, snap)) return "The goal is held for an Orquester update and resumes by itself once the agent host has restarted, when it continues again. Take it back first — send_message \"/goal pause\" keeps it paused — then switch accounts.";
   // Goals §5.5, ahead of the turn check as on the host: between a continuing goal's turns idle never comes, so "wait for
   // the turn" is advice that never comes true — and a switch let through between two of them would be the host's 409
-  // only after the other fields were written. A `/goal pause` only stops the NEXT turn; interrupt_session stops both.
-  if (goalContinuing(s, snap)) return "Pause the goal before switching accounts: interrupt_session pauses it and stops the running turn (or send_message \"/goal pause\", then let the turn finish).";
+  // only after the other fields were written. A `/goal pause` only stops the NEXT turn; an interrupt stops both.
+  if (goalContinuing(s, snap)) return "Pause the goal before switching accounts: control_session {action: \"interrupt\"} pauses it and stops the running turn (or send_message \"/goal pause\", then let the turn finish).";
   if (isTurnActive(s, snap)) return "Wait for the agent to finish the current turn before switching accounts.";
   if (s.hasPendingApprovals || s.hasPendingUserInput || snap.pending.approvals.length > 0 || snap.pending.userInputs.length > 0) return "Answer the agent's open request before switching accounts.";
   if (s.backgroundLiveness) return "Wait for the background work to finish before switching accounts.";
@@ -78,21 +111,65 @@ function detailFields(detail: unknown): Record<string, unknown> {
   return detail !== null && typeof detail === "object" && !Array.isArray(detail) ? { ...(detail as Record<string, unknown>) } : { cause: detail };
 }
 
+// ---------------------------------------------------------------------------
+// list_sessions
+// ---------------------------------------------------------------------------
+
 const listSessionsTool = defineTool({
   name: "list_sessions",
   title: "List sessions",
-  description: "The open tabs: chat sessions (Claude/Codex/OpenCode/Grok) and terminals, with status (working/waiting/idle), attention and why. `attention:true` returns only sessions that need you, ordered like the Attention Center.",
+  description: "Open tabs (chats and terminals): status, attention and why, lineage. attention: true lists only tabs needing the user.",
+  chatNote: "Default: this chat's project; \"all\": every project you may see.",
+  externalNote: "Default: every project.",
   input: {
-    project: z.string().optional().describe("Absolute project path or \"<workspace>/<project>\"; omit for every project."),
-    kind: z.enum(["chat", "terminal", "all"]).default("all").describe("Which tabs to list."),
-    attention: z.boolean().default(false).describe("Only sessions with attention set or waiting on you.")
+    project: z.string().optional().describe("\"ws/project\", a path, or \"all\"."),
+    kind: z.enum(["chat", "terminal", "all"]).default("all"),
+    attention: z.boolean().default(false),
+    limit: z.number().int().min(1).max(500).optional()
   },
+  audiences: ["external", "chat"],
+  toolset: "core",
+  tier: "read",
+  async scope(args, ctx) {
+    const claim: ScopeClaim = { projects: [], sessions: [], reads: "metadata", writes: false, causesTurnIn: [] };
+    const { caller } = ctx;
+    // "all" is narrowed in run, never carded (a fan-out over unknown projects cannot be judged on one card, §13 b).
+    if (caller.kind !== "thread" || args.project === "all") return claim;
+    if (args.project === undefined) return { ...claim, projects: caller.projectPath ? [caller.projectPath] : [] };
+    return { ...claim, projects: [(await resolveProject(ctx.api, args.project)).path] };
+  },
+  approval: (args, ctx) => projectCard(ctx, args.project ?? "", "list the chats of"),
   annotations: READ_ONLY,
-  async run(args, { api }) {
+  resultKind: "json",
+  async run(args, { api, caller }) {
+    const all = args.project === "all";
     // `!== undefined`, as wait_for_session tests it: an empty project is refused by resolveProject, never "every project".
-    const projectPath = args.project !== undefined ? (await resolveProject(api, args.project)).path : undefined;
-    const ctx = await buildViewContext(api);
+    const projectPath = args.project !== undefined && !all ? (await resolveProject(api, args.project)).path : undefined;
+    const view = await buildViewContext(api);
     let sessions = await listSessions(api, projectPath);
+    const frame: Record<string, unknown> = {};
+    let readable: (s: SessionSummary) => boolean = () => true;
+    if (caller.kind === "thread") {
+      const projects = await canonicalProjects(api, sessions);
+      const projectOf = (s: SessionSummary) => projects.get(s.projectPath) ?? null;
+      const self = (s: SessionSummary) => s.id === caller.threadId;
+      if (all && caller.runtimeMode !== "full-access") {
+        // Below Full access another workspace's metadata needs a card (§5.2, ruling S13): "all" is this workspace's —
+        // and the chats this chat created, wherever they are: they are its own work (§13 c).
+        const ownChild = (s: SessionSummary) => s.lineage?.parentThreadId === caller.threadId && s.lineage.agentCreated === true;
+        const inWorkspace = (s: SessionSummary) => self(s) || ownChild(s) || (caller.projectPath !== "" && caller.workspace !== "" && projectOf(s)?.workspace === caller.workspace);
+        // Counted: the projects with chat tabs left out (a project with only terminals is no chat the caller misses).
+        const excluded = new Set(sessions.filter((s) => s.kind === "agent-chat" && !inWorkspace(s)).flatMap((s) => (projectOf(s) ? [projectOf(s)!.canonical] : [])));
+        sessions = sessions.filter(inWorkspace);
+        frame.listed = "workspace";
+        if (excluded.size > 0) frame.excludedProjects = excluded.size;
+      } else if (all) {
+        frame.listed = "all";
+      } else if (projectPath === undefined) {
+        sessions = sessions.filter((s) => self(s) || (caller.projectPath !== "" && projectOf(s)?.canonical === caller.projectPath));
+      }
+      readable = (s) => hasContentRights(caller, projectOf(s), self(s));
+    }
     if (args.kind !== "all") sessions = sessions.filter((s) => (args.kind === "chat") === (s.kind === "agent-chat"));
     if (args.attention) {
       sessions = sessions.filter((s) => s.activity && (s.activity.attention !== null || s.activity.state === "waiting"));
@@ -101,22 +178,184 @@ const listSessionsTool = defineTool({
     } else {
       sessions.sort((a, b) => a.projectPath.localeCompare(b.projectPath) || a.order - b.order);
     }
-    return { sessions: sessions.map((s) => sessionView(s, ctx)) };
+    const listed = args.limit !== undefined ? sessions.slice(0, args.limit) : sessions;
+    let omitted = false;
+    let othersWords = false;
+    const rows = listed.map((s) => {
+      const row = sessionView(s, view);
+      if (caller.kind !== "thread") return row;
+      const own = s.id === caller.threadId ? { ...row, self: true } : row;
+      if (readable(s)) {
+        // A goal's objective is another chat's words (§4.3): the list then opens with the notice.
+        if (s.id !== caller.threadId && row.chat?.goal) othersWords = true;
+        return own;
+      }
+      omitted = true;
+      return rowWithoutContent(own);
+    });
+    return {
+      ...(othersWords ? { notice: UNTRUSTED_NOTICE } : {}),
+      sessions: rows,
+      ...(listed.length < sessions.length ? { more: sessions.length - listed.length } : {}),
+      ...frame,
+      ...(omitted ? { hint: `Rows marked contentOmitted leave out the goal's text: ${CONTENT_OMITTED_HINT}.` } : {})
+    };
   }
 });
 
+// ---------------------------------------------------------------------------
+// get_session
+// ---------------------------------------------------------------------------
+
+/** The most children get_session lists; `childrenOmitted` counts the rest. */
+const MAX_LINEAGE_CHILDREN = 50;
+
 const getSession = defineTool({
   name: "get_session",
-  title: "Get session status",
-  description: "Everything about one session: status and why, model/options/permission mode/account, pending questions and approvals (with their options and ids), the proposed plan, subagents, the context meter and the last reply.",
+  title: "Get session",
+  description: "One session: status, settings, pending requests (ids, options), plan, subagents, context meter, last reply (a delegate's: result), lineage, pending deliveries.",
+  chatNote: "Without content access: metadata only.",
   input: { sessionId: sessionIdField },
+  audiences: ["external", "chat"],
+  toolset: "core",
+  tier: "read",
+  scope: (args, ctx) => sessionClaim(ctx, args.sessionId, { reads: "metadata", writes: false, self: "allow" }),
+  approval: (args, ctx) => sessionCard(ctx, args.sessionId, "read the status of"),
   annotations: READ_ONLY,
-  async run(args, { api }) {
-    const summary = await findSession(api, args.sessionId);
-    if (summary.kind !== "agent-chat") return { session: sessionView(summary, await buildViewContext(api)) };
-    return { session: await chatDetail(api, args.sessionId) };
+  resultKind: "json",
+  async run(args, { api, caller }) {
+    const { summary, sessions } = await sessionAmongTabs(api, args.sessionId);
+    const ref = chatThreadRef(caller, sessions, summary);
+    if (summary.kind !== "agent-chat") return { session: sessionView(summary, await buildViewContext(api)), ...ref };
+    const self = caller.kind === "thread" && summary.id === caller.threadId;
+    const readable = caller.kind !== "thread" || hasContentRights(caller, await canonicalProject(api, summary.projectPath), self);
+    const [snap, view, lineage] = await Promise.all([
+      readThread(api, args.sessionId),
+      buildViewContext(api),
+      api.request("GET", agentChatRoutes.lineage(args.sessionId)).then((res) => expectOk<SessionLineageResponse>(res))
+    ]);
+    const { parentThreadId: _parentId, ...link } = lineage.lineage ?? ({} as Partial<NonNullable<SessionLineageResponse["lineage"]>>);
+    const children = lineage.children.slice(0, MAX_LINEAGE_CHILDREN);
+    const lineageView = {
+      ...link,
+      parent: lineage.parent,
+      children,
+      ...(lineage.children.length > children.length ? { childrenOmitted: lineage.children.length - children.length } : {})
+    };
+    // A queued delivery's preview is another chat's words: content.
+    const pendingDeliveries = readable ? lineage.pendingMerges : lineage.pendingMerges.map(({ preview: _preview, error: _error, ...rest }) => rest);
+    // The detail gets what the result leaves beside the lineage (ok()'s cap less a margin for the frame).
+    let detail: SessionDetail = fitDetail(sessionDetail(summary, snap, view), MAX_RESULT_BYTES - 1_000 - resultBytes({ lineageView, pendingDeliveries }));
+    // §8.5: a delegate's final reply IS its task's result, once the turn that produced it settled.
+    let result: Record<string, unknown> | undefined;
+    if (summary.lineage?.relation === "delegate" && detail.lastReply && !isTurnActive(summary, snap)) {
+      const { lastReply, ...rest } = detail;
+      detail = rest;
+      result = { text: lastReply.text, turnId: lastReply.turnId, ...(lastReply.truncated ? { truncated: true } : {}) };
+    }
+    return {
+      ...(readable ? chatNotice(caller, summary.id) : {}),
+      session: readable ? detail : detailWithoutContent(detail),
+      lineage: lineageView,
+      pendingDeliveries,
+      ...(readable && result ? { result } : {}),
+      ...(readable ? {} : { contentOmitted: true, hint: CONTENT_OMITTED_HINT }),
+      ...ref
+    };
   }
 });
+
+// ---------------------------------------------------------------------------
+// read_transcript
+// ---------------------------------------------------------------------------
+
+/** read_transcript's ceiling: the budget covers the whole result in UTF-8 bytes (transcript.ts), 5 000 under ok()'s 60 000-byte cap (result.ts). */
+const MAX_TRANSCRIPT_CHARS = 55_000;
+const TRUNCATED_HINT = "Shed to fit maxChars: reasoning, then tool detail, then the oldest rows (coveredTurns says which turns are left). Raise maxChars (max 55000), include less, or use get_turn_diff for one turn's file changes.";
+/** get_session sheds subagent rows too when its detail would pass the cap (views.ts), so this promises no full roster. */
+const SUBAGENTS_TRIMMED_HINT = "The subagent list was trimmed too; get_session may list more of it.";
+
+/**
+ * The hint a read_transcript result carries, or none for a whole one that read every turn of its range: first
+ * `unavailable`, the sentence about the turns it could not read whole (history.ts `unavailableHint`), then the shed
+ * hint. That one keys on `truncated`, which transcript.ts sets on every result it sheds, a trimmed subagent list alone
+ * included; `subagentsTruncated` is present only when the list was trimmed. A shed result stays TRANSCRIPT_HINT_BYTES
+ * under `maxChars` for this field, and the `unavailable` sentence's bytes more, so the answer, hint included, keeps
+ * within `maxChars`.
+ */
+function transcriptHint(result: Pick<TranscriptResult, "truncated" | "subagentsTruncated">, unavailable?: string): string | undefined {
+  const shed = !result.truncated ? undefined : result.subagentsTruncated ? `${TRUNCATED_HINT} ${SUBAGENTS_TRIMMED_HINT}` : TRUNCATED_HINT;
+  return unavailable && shed ? `${unavailable} ${shed}` : unavailable || shed;
+}
+
+/** Why a `beforeTurn` past the last turn is refused, naming the range that is not. */
+function beforeTurnRefusal(turnCount: number): string {
+  if (turnCount === 0) return "This conversation has no started turn yet, so there is no turn to read before: leave beforeTurn out.";
+  const valid = turnCount === 1 ? "2" : `between 2 and ${turnCount + 1}`;
+  return `beforeTurn must be ${valid}: this conversation has ${turnCount} started turn${turnCount === 1 ? "" : "s"}.`;
+}
+
+interface TranscriptArgs { sessionId: string; turns: number; beforeTurn?: number; agentId?: string; include: ("reasoning" | "tools" | "activity")[]; maxChars: number }
+
+/** The transcript as read_transcript has always answered it (the pre-catalog tool, moved here from `messages.ts`). */
+async function readTranscriptRecord(api: DaemonApi, args: TranscriptArgs): Promise<Record<string, unknown>> {
+  await requireChatSession(api, args.sessionId);
+  const snap = await readThread(api, args.sessionId);
+  const turnCount = startedTurns(snap.turns).length;
+  if (args.beforeTurn !== undefined && args.beforeTurn > turnCount + 1) throw new ToolError("INVALID_ARGUMENT", beforeTurnRefusal(turnCount));
+  // Turns older than the window come from the host's thread index; a page it cannot read is reported, never thrown.
+  const range = transcriptRange(turnCount, args.turns, args.beforeTurn);
+  const older = await readOlderHistory(api, args.sessionId, snap, range, args.agentId !== undefined ? { agentId: args.agentId } : {});
+  const read = older.snapshot;
+  // "" names no subagent: refused like any unknown id, never read as "the main view" (the schema refuses it first).
+  // A subagent of an older turn is known by the rows a page brought back.
+  if (args.agentId !== undefined && !read.roster.some((r) => r.id === args.agentId) && !read.items.some((i) => i.agentId === args.agentId)) {
+    throw new ToolError("INVALID_ARGUMENT", `No subagent "${args.agentId}". Known: ${read.roster.map((r) => r.id).join(", ") || "none"}.`);
+  }
+  const unavailable = older.unavailable ? { turns: older.unavailable.turns, hint: unavailableHint(older.unavailable, range.end) } : undefined;
+  const result = transcriptEntries(read, {
+    turns: args.turns, ...(args.beforeTurn !== undefined ? { beforeTurn: args.beforeTurn } : {}), ...(args.agentId !== undefined ? { agentId: args.agentId } : {}),
+    include: new Set(args.include), maxChars: args.maxChars, windowItems: snap.items, ...(unavailable ? { unavailable } : {})
+  });
+  const hint = transcriptHint(result, unavailable?.hint);
+  return hint ? { ...result, hint } : { ...result };
+}
+
+const readTranscript = defineTool({
+  name: "read_transcript",
+  title: "Read the transcript",
+  // A list cut to fit ends in one element of its own shape counting the rest (transcript.ts `cutRow`): a changedFiles
+  // "…N more files" string, a files row {path: "…N more files", additions, deletions} with the rest's line totals, an
+  // attachments row {name: "…N more attachments", type: "omitted"}. The description has to say so: it reads as data.
+  description: "A session's turns, newest last: messages, tool calls, approvals, questions, plans, file changes, errors. A list cut to fit ends in a marker counting the rest (\"…12 more files\"), not an entry.",
+  input: {
+    sessionId: sessionIdField,
+    turns: z.number().int().min(1).max(200).default(3).describe("Turns to read: the latest, or those before beforeTurn."),
+    beforeTurn: z.number().int().min(2).optional().describe("Page back: the last result's olderTurns + 1."),
+    agentId: z.string().min(1).optional().describe("A subagent id (get_session): its own timeline."),
+    include: z.array(z.enum(["reasoning", "tools", "activity"])).default(["tools", "activity"]),
+    maxChars: z.number().int().min(2_000).max(MAX_TRANSCRIPT_CHARS).default(40_000).describe("Result budget in bytes; over it rows are shed.")
+  },
+  audiences: ["external", "chat"],
+  toolset: "core",
+  tier: "read",
+  scope: (args, ctx) => sessionClaim(ctx, args.sessionId, { reads: "content", writes: false, self: "allow" }),
+  approval: (args, ctx) => sessionCard(ctx, args.sessionId, "read the transcript of", [{ label: "Turns", value: args.beforeTurn !== undefined ? `${args.turns} before turn ${args.beforeTurn}` : `the latest ${args.turns}` }]),
+  annotations: READ_ONLY,
+  resultKind: "json",
+  async run(args, { api, caller }) {
+    if (caller.kind !== "thread") return readTranscriptRecord(api, args);
+    const { summary, sessions } = await sessionAmongTabs(api, args.sessionId);
+    const frame = chatFrame(caller, sessions, summary);
+    // The frame comes out of the caller's own budget, so the answer still keeps within maxChars.
+    const record = await readTranscriptRecord(api, { ...args, maxChars: Math.max(2_000, args.maxChars - frame.bytes) });
+    return { ...frame.before, ...record, ...frame.after };
+  }
+});
+
+// ---------------------------------------------------------------------------
+// get_turn_diff
+// ---------------------------------------------------------------------------
 
 /**
  * The room get_turn_diff's file list always has in the result, in JSON bytes, however big the diff: a turn that
@@ -139,116 +378,60 @@ function fitFiles(files: readonly { path: string; additions: number; deletions: 
   return { files: kept, omitted: files.length - kept.length };
 }
 
+/** A turn's diff within `budget` bytes of result (the pre-catalog get_turn_diff's answer at the full cap). */
+async function turnDiff(api: DaemonApi, sessionId: string, turn: number | undefined, budget: number): Promise<Record<string, unknown>> {
+  await requireChatSession(api, sessionId);
+  const snap = await readThread(api, sessionId);
+  // Checkpoints are keyed by turn ORDINAL and sparse (a non-git project captures nothing);
+  // default to the latest turn that has one.
+  const latestCheckpointed = snap.checkpoints.reduce((max, c) => Math.max(max, c.checkpointTurnCount), 0);
+  const turnCount = turn ?? latestCheckpointed;
+  if (turnCount < 1) throw new ToolError("INVALID_ARGUMENT", "This session has no checkpointed turn yet.");
+  const res = expectOk<TurnDiffResponse>(await api.request("GET", agentChatRoutes.turnDiff(sessionId, turnCount), { query: { ignoreWhitespace: "1" } }));
+  const files = snap.checkpoints.find((c) => c.checkpointTurnCount === turnCount)?.files ?? [];
+  // The list gets its floor, or all the diff leaves unused of the result beside the frame — the frame counted with the
+  // markers a cut list would carry.
+  const frame = resultBytes({ turn: res.toTurnCount, fromTurn: res.fromTurnCount, files: [], filesTruncated: true, omittedFiles: files.length, diff: "", truncated: false });
+  const listed = fitFiles(files, Math.max(MIN_DIFF_FILES_BYTES, budget - frame - jsonBytes(res.diff)));
+  const result = { turn: res.toTurnCount, fromTurn: res.fromTurnCount, files: listed.files, ...(listed.omitted ? { filesTruncated: true, omittedFiles: listed.omitted } : {}), diff: "", truncated: false };
+  // The diff gets whatever the rest of the result leaves of the result budget, so the whole
+  // result survives `ok()` intact instead of being shed to a bare prefix.
+  const diff = fitJsonBytes(res.diff, budget - resultBytes(result));
+  return { ...result, diff: diff.text, truncated: diff.truncated };
+}
+
 const getTurnDiff = defineTool({
   name: "get_turn_diff",
   title: "Get a turn's diff",
-  description: "The unified diff of the files a turn changed (the GUI's changed-files card). Defaults to the latest turn with a checkpoint. A diff too large for one result is cut at the end (truncated:true); a file list too long is cut too (filesTruncated:true, omittedFiles counts the rest).",
+  description: "The unified diff of the files a turn changed (the GUI's changed-files card); default: the latest turn with a checkpoint. A diff too large is cut at the end (truncated:true); a long file list too (filesTruncated, omittedFiles).",
   input: { sessionId: sessionIdField, turn: z.number().int().min(1).optional().describe("Turn number (1-based); default: the latest checkpointed turn.") },
+  audiences: ["external", "chat"],
+  toolset: "chat-extras",
+  tier: "read",
+  scope: (args, ctx) => sessionClaim(ctx, args.sessionId, { reads: "content", writes: false, self: "allow" }),
+  approval: (args, ctx) => sessionCard(ctx, args.sessionId, "read a turn's file changes in", [{ label: "Turn", value: args.turn !== undefined ? String(args.turn) : "the latest checkpointed" }]),
   annotations: READ_ONLY,
-  async run(args, { api }) {
-    await requireChatSession(api, args.sessionId);
-    const snap = await readThread(api, args.sessionId);
-    // Checkpoints are keyed by turn ORDINAL and sparse (a non-git project captures nothing);
-    // default to the latest turn that has one.
-    const latestCheckpointed = snap.checkpoints.reduce((max, c) => Math.max(max, c.checkpointTurnCount), 0);
-    const turnCount = args.turn ?? latestCheckpointed;
-    if (turnCount < 1) throw new ToolError("INVALID_ARGUMENT", "This session has no checkpointed turn yet.");
-    const res = expectOk<TurnDiffResponse>(await api.request("GET", agentChatRoutes.turnDiff(args.sessionId, turnCount), { query: { ignoreWhitespace: "1" } }));
-    const files = snap.checkpoints.find((c) => c.checkpointTurnCount === turnCount)?.files ?? [];
-    // The list gets its floor, or all the diff leaves unused of the result beside the frame — the frame counted with the
-    // markers a cut list would carry.
-    const frame = resultBytes({ turn: res.toTurnCount, fromTurn: res.fromTurnCount, files: [], filesTruncated: true, omittedFiles: files.length, diff: "", truncated: false });
-    const listed = fitFiles(files, Math.max(MIN_DIFF_FILES_BYTES, MAX_RESULT_BYTES - frame - jsonBytes(res.diff)));
-    const result = { turn: res.toTurnCount, fromTurn: res.fromTurnCount, files: listed.files, ...(listed.omitted ? { filesTruncated: true, omittedFiles: listed.omitted } : {}), diff: "", truncated: false };
-    // The diff gets whatever the rest of the result leaves of the result budget, so the whole
-    // result survives `ok()` intact instead of being shed to a bare prefix.
-    const diff = fitJsonBytes(res.diff, MAX_RESULT_BYTES - resultBytes(result));
-    return { ...result, diff: diff.text, truncated: diff.truncated };
+  resultKind: "json",
+  async run(args, { api, caller }) {
+    if (caller.kind !== "thread") return turnDiff(api, args.sessionId, args.turn, MAX_RESULT_BYTES);
+    const { summary, sessions } = await sessionAmongTabs(api, args.sessionId);
+    const frame = chatFrame(caller, sessions, summary);
+    const diff = await turnDiff(api, args.sessionId, args.turn, MAX_RESULT_BYTES - frame.bytes);
+    return { ...frame.before, ...diff, ...frame.after };
   }
 });
 
-async function isDirectory(path: string): Promise<boolean> {
-  try { return (await stat(path)).isDirectory(); } catch { return false; }
-}
+// ---------------------------------------------------------------------------
+// update_session
+// ---------------------------------------------------------------------------
 
-/** A `cwd` argument: absolute, or relative to the project; an existing directory inside the sandbox. */
-async function resolveCwd(api: DaemonApi, projectPath: string, input: string): Promise<string> {
-  const cwd = resolve(projectPath, input);
-  let real: string;
-  try {
-    real = await assertInsideFsRoot(api.fsRoot, cwd);
-  } catch (error) {
-    if (error instanceof FsSandboxError) throw new ToolError("PATH_NOT_ALLOWED", "cwd is not allowed (outside the sandbox).");
-    throw error;
-  }
-  // The sandbox check accepts a path that does not exist yet; a session needs a real directory.
-  if (!(await isDirectory(real))) throw new ToolError("INVALID_ARGUMENT", `cwd "${input}" is not an existing directory.`);
-  return cwd;
-}
-
-interface ResumeRow { id: string; agent: string; title: string; home: AccountHomeKind; accountId?: string }
-
-const createSession = defineTool({
-  name: "create_session",
-  title: "Open a chat session",
-  description: "Open a new chat tab for an agent in a project — the GUI's '+' menu — with model, options (effort…), permission mode and account; or resume a past conversation from list_conversations. Returns the session detail. Send the first message with send_message.",
-  input: {
-    project: z.string().describe("Absolute project path or \"<workspace>/<project>\"."),
-    agent: z.string().min(1).optional().describe("Agent id from list_agents (claude, codex, opencode, grok). Required unless `resume` is given."),
-    // min(1): an empty model would read as none, so the default model would launch in its place (agents.ts).
-    model: z.string().min(1).optional().describe("Model slug from list_agents; default: the agent's default."),
-    options: optionsSchema.optional(),
-    runtimeMode: runtimeModeSchema.default("full-access").describe("Permission mode: approval-required (Supervised), auto-accept-edits, auto, full-access."),
-    accountId: z.string().optional().describe("A managed account id from list_agents, or \"system\"; default: the family's default account."),
-    title: z.string().min(1).max(300).optional().describe("Tab title; default: the agent's name (or the conversation's)."),
-    // min(1): an empty cwd resolves to the project itself, the default, which is reading it as omitted.
-    cwd: z.string().min(1).optional().describe("Working directory: absolute or relative to the project, an existing directory inside the sandbox; default: the project path."),
-    resume: z.object({ conversationId: z.string().min(1).describe("Conversation id from list_conversations for the same project.") }).optional().describe("Resume this conversation (id from list_conversations for the same project). One stored in a managed account's home resumes under that account.")
-  },
-  annotations: MUTATING,
-  async run(args, { api }) {
-    const project = await resolveProject(api, args.project);
-    let resumeRow: ResumeRow | undefined;
-    if (args.resume) {
-      const res = expectOk<AgentConversationsResponse>(await api.request("GET", "/api/agents/conversations", { query: { path: project.path } }));
-      const row = res.conversations.find((c) => c.id === args.resume!.conversationId);
-      if (!row) throw new ToolError("INVALID_ARGUMENT", `No conversation "${args.resume.conversationId}" in this project; pick one from list_conversations.`);
-      resumeRow = { id: row.id, agent: row.agentRefId, title: row.title, home: row.home ?? "system", ...(row.accountId ? { accountId: row.accountId } : {}) };
-    }
-    const refId = args.agent ?? resumeRow?.agent;
-    if (!refId) throw new ToolError("INVALID_ARGUMENT", "agent is required (see list_agents).");
-    if (resumeRow && args.agent && resumeRow.agent !== args.agent) throw new ToolError("INVALID_ARGUMENT", `Conversation "${resumeRow.id}" belongs to ${resumeRow.agent}, not ${args.agent}.`);
-    const agent = findAgent(await loadAgents(api), refId);
-    if (!agent.enabled) throw new ToolError("INVALID_ARGUMENT", `${refId} is not available on this host (not installed or disabled).`);
-    const selection = resolveModelSelection(agent, { model: args.model, options: args.options });
-    let accountId = validateAccountId(agent, args.accountId);
-    // The GUI's `resumeAccountId`: a transcript in a managed account's home is visible only from there, so that
-    // account is forced. A system-home transcript is visible from every home (each managed home links its history
-    // back), so the caller's pick stands and an omitted one stays omitted — the family default, as the GUI's chip
-    // pre-selects; forcing System there broke resume whenever the system login was stale.
-    if (resumeRow?.home === "account" && resumeRow.accountId) accountId = resumeRow.accountId;
-    const cwd = args.cwd === undefined ? project.path : await resolveCwd(api, project.path, args.cwd);
-    const running = (await listSessions(api, project.path)).filter((s) => s.status === "running").length;
-    if (running >= MAX_RUNNING_SESSIONS_PER_PROJECT) throw new ToolError("SESSION_BUSY", `${running} sessions are open in this project (limit ${MAX_RUNNING_SESSIONS_PER_PROJECT}); close some first.`);
-    const chat: CreateAgentChatSessionFields = { ...(accountId ? { accountId } : {}), modelSelection: { model: selection.model, options: selection.options }, runtimeMode: args.runtimeMode };
-    if (resumeRow) chat.resume = { home: resumeRow.home, conversationId: resumeRow.id };
-    const body: CreateSessionRequest = { kind: "agent-chat", refId, projectPath: project.path, cwd, title: args.title ?? (resumeRow?.title || agent.name), ...(accountId ? { accountId } : {}), chat };
-    const summary = expectOk<SessionSummary>(await api.request("POST", "/api/sessions", { body }));
-    try {
-      return { session: await chatDetail(api, summary.id) };
-    } catch (error) {
-      // The tab exists now: a caller told only that the read failed would retry and open a second one. The failure keeps
-      // the code and safe message it would have had (a thrown one is logged, never echoed); the detail names the tab.
-      const failure = toSafeToolError(error).structuredContent;
-      throw new ToolError(failure.code, `Session ${summary.id} was created but could not be read: ${failure.message}`, { ...detailFields(failure.detail), sessionId: summary.id, created: true });
-    }
-  }
-});
+const OWN_CHILDREN_UPDATE = "update_session changes only this chat's own title, or the chats this chat created (create_session, fork_session).";
 
 const updateSession = defineTool({
   name: "update_session",
   title: "Update session settings",
-  description: "Change what the composer bar holds — model, options (effort…), permission mode, account — and/or rename the tab. Model/permission changes restart a live agent session and are refused while a turn runs unless force:true; an account switch applies on the next message, needs an idle session and is refused while a goal continues.",
+  description: "Change a chat's model, options (effort…), permission mode or account, and/or rename it. Model/mode changes restart a live agent and are refused mid-turn unless force:true; an account switch applies on the next message and needs an idle session.",
+  chatNote: "Only chats you created (create_session, fork_session); never a broader mode than yours. This chat: title only.",
   input: {
     sessionId: sessionIdField,
     title: z.string().min(1).max(300).optional().describe("New tab title."),
@@ -257,10 +440,39 @@ const updateSession = defineTool({
     options: optionsSchema.optional(),
     runtimeMode: runtimeModeSchema.optional().describe("Permission mode."),
     accountId: z.string().optional().describe("Managed account id or \"system\"; applied on the next message."),
-    force: z.boolean().default(false).describe("Apply model/permission changes even while a turn is running (this cuts the turn).")
+    force: z.boolean().default(false).describe("Apply model/mode changes even mid-turn (cuts the turn).")
   },
+  audiences: ["external", "chat"],
+  toolset: "chat-extras",
+  tier: "act",
+  async scope(args, ctx) {
+    const { caller } = ctx;
+    if (caller.kind === "thread") {
+      const settings = args.model !== undefined || args.options !== undefined || args.runtimeMode !== undefined || args.accountId !== undefined;
+      if (args.sessionId === caller.threadId && settings) {
+        throw new ToolError("PERMISSION_DENIED", "A chat may change only its own title; ask the user to change its model, options, permission mode or account.");
+      }
+      // Never broader (§4.1): a chat it created may run in the caller's mode or a narrower one. A caller
+      // mode the catalogue does not know allows none (fail closed: `runtimeModesUpTo` is empty for it).
+      const allowed = runtimeModesUpTo(caller.runtimeMode);
+      if (args.runtimeMode !== undefined && !allowed.includes(args.runtimeMode)) {
+        throw new ToolError("PERMISSION_DENIED", `runtimeMode ${args.runtimeMode} is broader than this chat's ${caller.runtimeMode}; allowed: ${allowed.join(", ") || "none"}.`);
+      }
+    }
+    return sessionClaim(ctx, args.sessionId, { reads: "none", writes: true, self: "title-only", ownChildrenOnly: OWN_CHILDREN_UPDATE });
+  },
+  approval: (args, ctx) =>
+    sessionCard(ctx, args.sessionId, "change the settings of", [
+      ...(args.title !== undefined ? [{ label: "Title", value: args.title }] : []),
+      ...(args.model !== undefined ? [{ label: "Model", value: args.model }] : []),
+      ...(args.options !== undefined ? [{ label: "Options", value: JSON.stringify(args.options) }] : []),
+      ...(args.runtimeMode !== undefined ? [{ label: "Permission mode", value: args.runtimeMode }] : []),
+      ...(args.accountId !== undefined ? [{ label: "Account", value: args.accountId }] : []),
+      ...(args.force ? [{ label: "Force", value: "yes — cuts a running turn" }] : [])
+    ]),
   annotations: MUTATING_IDEMPOTENT,
-  async run(args, { api }) {
+  resultKind: "json",
+  async run(args, { api, caller }) {
     const summary = await requireChatSession(api, args.sessionId);
     const snap = await readThread(api, args.sessionId);
     const current = snap.head.modelSelection;
@@ -291,11 +503,11 @@ const updateSession = defineTool({
     // value is skipped below and cuts nothing.
     if (modeFields.length && isTurnActive(summary, snap) && !args.force) {
       // Under a continuing goal the next turn starts as this one ends (goals §4.7): waiting never helps, and a
-      // `/goal pause` alone lets this turn run to its end — interrupt_session pauses the goal and stops the turn. A goal
+      // `/goal pause` alone lets this turn run to its end — an interrupt pauses the goal and stops the turn. A goal
       // an Orquester update holds (§5.7) starts no next turn here: waiting does help.
       throw new ToolError("SESSION_BUSY", goalContinuing(summary, snap) && !goalHeldForUpdate(summary, snap)
-        ? "A goal turn is running, and the goal starts the next one by itself; changing the model or permission mode restarts the agent and would cut it. interrupt_session pauses the goal and stops the turn — or pass force:true."
-        : "A turn is running; changing the model or permission mode restarts the agent and would cut it. Wait, interrupt_session, or pass force:true.");
+        ? "A goal turn is running, and the goal starts the next one by itself; changing the model or permission mode restarts the agent and would cut it. control_session {action: \"interrupt\"} pauses the goal and stops the turn — or pass force:true."
+        : "A turn is running; changing the model or permission mode restarts the agent and would cut it. Wait, control_session {action: \"interrupt\"}, or pass force:true.");
     }
     // The tab record spells the system identity as an absent id; the wire spells it "system".
     const switchAccount = accountId !== undefined && accountId !== (summary.accountId || SYSTEM_ACCOUNT_ID);
@@ -322,69 +534,17 @@ const updateSession = defineTool({
       if (error instanceof ToolError) throw new ToolError(error.code, error.message, { applied, ...(error.detail !== undefined ? { cause: error.detail } : {}) });
       throw error;
     }
-    return { applied, session: await chatDetail(api, args.sessionId) };
+    const session = await chatDetail(api, args.sessionId);
+    // The detail carries the target's words (its last reply, plan, requests): another chat's are marked as data (§4.3).
+    return { ...chatNotice(caller, args.sessionId), applied, session, ...(caller.kind === "thread" ? chatThreadRef(caller, await listSessions(api), { ...summary, title: session.title }) : {}) };
   }
 });
 
-const interruptSession = defineTool({
-  name: "interrupt_session",
-  title: "Interrupt",
-  description: "The GUI's Stop: interrupts the running turn (its pending requests are cancelled); with no turn running, stops every live subagent, background shell and watch loop. On an agent that continues a goal by itself (Codex), Stop pauses the goal first; resume it with send_message \"/goal resume\".",
-  input: { sessionId: sessionIdField },
-  // Not idempotent: a retry after the turn has stopped goes on to stop the background work.
-  annotations: MUTATING,
-  async run(args, { api }) {
-    await requireChatSession(api, args.sessionId);
-    const snap = await readThread(api, args.sessionId);
-    // Name the turn only while the session runs one — read from the same head as the turn id.
-    const { status, activeTurnId } = snap.head.session;
-    const turnId = status === "running" ? activeTurnId : null;
-    const { seq } = await sendCommand(api, args.sessionId, "interrupt", turnId ? { turnId } : {});
-    return { seq, session: await chatDetail(api, args.sessionId) };
-  }
-});
+// ---------------------------------------------------------------------------
+// control_session
+// ---------------------------------------------------------------------------
 
-const stopTask = defineTool({
-  name: "stop_task",
-  title: "Stop one background task",
-  description: "Stop ONE live background task of a chat — a workflow run, a subagent or a background shell — by its id in get_session's subagents; the turn and every other task keep running (interrupt_session with no turn running stops them all). A workflow's agents cannot be stopped one by one: pass the workflow's own id (kind \"workflow\"). Only where the agent's supports.taskStop is true (Claude); a task that already finished is refused.",
-  input: { sessionId: sessionIdField, taskId: z.string().min(1).describe("The task's id: a subagents[].id from get_session.") },
-  // Not idempotent: a retry after the task has stopped is refused as no longer running.
-  annotations: MUTATING,
-  async run(args, { api }) {
-    await requireChatSession(api, args.sessionId);
-    const { seq } = await sendCommand(api, args.sessionId, "task/stop", { taskId: args.taskId });
-    return { seq, session: await chatDetail(api, args.sessionId) };
-  }
-});
-
-const stopSession = defineTool({
-  name: "stop_session",
-  title: "Stop the agent process",
-  description: "Stop the provider process but keep the tab, its history and resume cursor; the next send_message resumes it. Use it to recover a session whose chat.sessionStatus is error. For Grok it also stops the processes the agent's work started (background shells, a dev server they run), earlier launches' included, which a deploy, a restart or a crash leaves running.",
-  input: { sessionId: sessionIdField },
-  annotations: MUTATING_IDEMPOTENT,
-  async run(args, { api }) {
-    await requireChatSession(api, args.sessionId);
-    const { seq } = await sendCommand(api, args.sessionId, "session/stop", {});
-    return { seq, session: await chatDetail(api, args.sessionId) };
-  }
-});
-
-const closeSession = defineTool({
-  name: "close_session",
-  title: "Close a session",
-  description: "Close a tab (chat or terminal). A chat's thread is deleted; the provider's own transcript stays resumable via list_conversations for Claude, Codex and Grok; OpenCode history is not listed. A Grok chat's background processes are stopped as stop_session stops them.",
-  input: { sessionId: sessionIdField },
-  annotations: DESTRUCTIVE,
-  async run(args, { api }) {
-    await findSession(api, args.sessionId);
-    expectOk(await api.request("DELETE", `/api/sessions/${encodeURIComponent(args.sessionId)}`));
-    return { closed: true, sessionId: args.sessionId };
-  }
-});
-
-/** How long revert_session waits for the host to finish the rewind it accepted. */
+/** How long a rewind waits for the host to finish the rewind it accepted. */
 const REWIND_WAIT_MS = 10_000;
 /**
  * How long that wait goes without reading the thread again when no bus event about the session wakes it first: a
@@ -442,8 +602,8 @@ function pendingRefusal(snap: ThreadSnapshotPayload): ToolError | null {
   const { approvals, userInputs } = snap.pending;
   if (!approvals.length && !userInputs.length) return null;
   const open = [
-    ...approvals.map((a) => `approval ${a.requestId} (resolve_approval)`),
-    ...userInputs.map((q) => `question ${q.requestId} (answer_question${q.dismissible ? " or dismiss_question" : ""})`)
+    ...approvals.map((a) => `approval ${a.requestId} (respond_to_request with decision)`),
+    ...userInputs.map((q) => `question ${q.requestId} (respond_to_request with answers${q.dismissible ? " or dismiss" : ""})`)
   ];
   return new ToolError("PENDING_REQUEST", `Resolve the agent's open request before rewinding: it is waiting on ${open.join(" and ")}. get_session shows the details.`, { approvals: approvals.map((a) => a.requestId), questions: userInputs.map((q) => q.requestId) });
 }
@@ -464,14 +624,14 @@ function rewindFailed(row: ThreadActivityItem, seq: number): ToolError {
  * REWIND_RECHECK_MS — never a fixed sleep — until REWIND_WAIT_MS; a closed request ends the wait at once. The bus
  * listener, the timer and the abort listener are always removed.
  */
-async function awaitRewind(ctx: ToolContext, sessionId: string, target: { keepTurns: number; firstDroppedTurnId: string; seq: number }, knownFailures: ReadonlySet<string>): Promise<void> {
+async function awaitRewind(ctx: Pick<CallContext, "api" | "signal" | "now">, sessionId: string, target: { keepTurns: number; firstDroppedTurnId: string; seq: number }, knownFailures: ReadonlySet<string>): Promise<void> {
   // Elapsed time as wait.ts counts it: the larger of the caller's clock and the monotonic one.
   const startedAt = ctx.now();
   const startedMono = performance.now();
   const remaining = () => REWIND_WAIT_MS - Math.max(ctx.now() - startedAt, performance.now() - startedMono);
   // A retry would take a late failure row of THIS rewind for its own (the row names no command), and get_session shows
   // no failure: so the text says how to tell the outcome instead.
-  const inProgress = () => new ToolError("SESSION_BUSY", `The rewind is still in progress — do not call revert_session again. It has landed once get_session's chat.turnCount comes down to keepTurns (${target.keepTurns}); if it failed, read_transcript shows a "Rewind failed" error.`, { seq: target.seq });
+  const inProgress = () => new ToolError("SESSION_BUSY", `The rewind is still in progress — do not rewind again. It has landed once get_session's chat.turnCount comes down to keepTurns (${target.keepTurns}); if it failed, read_transcript shows a "Rewind failed" error.`, { seq: target.seq });
   let events = 0;
   let closed = false;
   let wake: (() => void) | null = null;
@@ -510,56 +670,152 @@ async function awaitRewind(ctx: ToolContext, sessionId: string, target: { keepTu
   }
 }
 
-const revertSession = defineTool({
-  name: "revert_session",
-  title: "Rewind the conversation",
-  description: "Rewind the conversation to keep only the first `keepTurns` turns (the GUI's 'Rewind to here'). Conversation only — files are not restored. Refused before the last context compaction, while a request is pending or a turn runs, and without rollback (Grok). Waits up to 10 s for the host: the session once rewound, COMMAND_REJECTED with its reason, or SESSION_BUSY if still going.",
-  input: { sessionId: sessionIdField, keepTurns: z.number().int().min(0).describe("Number of turns to keep, counted from the first (0 = rewind to before the first turn; N = keep turns 1..N and discard the rest).") },
-  annotations: DESTRUCTIVE,
+/** The GUI's "Rewind to here" (the pre-catalog revert_session). */
+async function rewind(ctx: CallContext, sessionId: string, keepTurns: number): Promise<Record<string, unknown>> {
+  const { api } = ctx;
+  const summary = await requireChatSession(api, sessionId);
+  const snap = await readThread(api, sessionId);
+  const agent = findAgent(await loadAgents(api), summary.refId);
+  if (!agent.supports.rollback) throw new ToolError("INVALID_ARGUMENT", `${summary.refId} does not support conversation rollback.`);
+  const started = startedTurns(snap.turns); // turns are counted by START ORDER (turns.ts), never by checkpoints
+  if (started.length === 0) throw new ToolError("INVALID_ARGUMENT", "This conversation has no turns to rewind.");
+  if (keepTurns >= started.length) throw new ToolError("INVALID_ARGUMENT", `keepTurns must be between 0 and ${started.length - 1}: this conversation has ${started.length} started turn${started.length === 1 ? "" : "s"}.`);
+  const fewest = fewestKeptTurns(snap);
+  if (keepTurns < fewest) {
+    const why = "Cannot rewind past the last context compaction — the agent no longer holds what came before it";
+    throw new ToolError("INVALID_ARGUMENT", fewest < started.length ? `${why}. keepTurns must be between ${fewest} and ${started.length - 1}.` : `${why}, and it happened in the latest turn: there is no turn to rewind to.`);
+  }
+  if (isTurnActive(summary, snap)) throw new ToolError("SESSION_BUSY", "Stop the current turn before rewinding.");
+  const pending = pendingRefusal(snap);
+  if (pending) throw pending;
+  // Only a failure row that appears after the POST answers this rewind.
+  const knownFailures = new Set(snap.items.filter(isRevertFailure).map((item) => item.id));
+  const { seq } = await sendCommand(api, sessionId, "revert", { targetTurnCount: keepTurns });
+  try {
+    await awaitRewind(ctx, sessionId, { keepTurns, firstDroppedTurnId: started[keepTurns]!.turnId, seq }, knownFailures);
+    return { seq, session: await chatDetail(api, sessionId) };
+  } catch (error) {
+    // The host accepted the command: whatever fails after it — a thread read in the wait, the detail read after it —
+    // keeps its code and safe message (a thrown one is logged, never echoed) and gains the command's seq.
+    const failure = toSafeToolError(error).structuredContent;
+    throw new ToolError(failure.code, failure.message, { ...detailFields(failure.detail), seq });
+  }
+}
+
+const CONTROL_ACTIONS = ["interrupt", "stop_task", "stop_process", "compact", "rewind", "close"] as const;
+type ControlAction = (typeof CONTROL_ACTIONS)[number];
+/** Spec §4.1: these act only on the caller's own children (lineage parent + `agentCreated`, §13 c). */
+const OWN_CHILD_ACTIONS: ReadonlySet<ControlAction> = new Set(["stop_process", "compact", "rewind", "close"]);
+/** These change the conversation or the tab (refused while planning); interrupt and stops only stop work. */
+const DATA_ACTIONS: ReadonlySet<ControlAction> = new Set(["compact", "rewind", "close"]);
+const ACTION_VERBS: Readonly<Record<ControlAction, string>> = {
+  interrupt: "interrupt",
+  stop_task: "stop a background task of",
+  stop_process: "stop the agent process of",
+  compact: "compact the context of",
+  rewind: "rewind",
+  close: "close"
+};
+
+/** `taskId` belongs to stop_task, `keepTurns` to rewind, and each needs its own. */
+function controlArgsProblem(args: { action: ControlAction; taskId?: string; keepTurns?: number }): string | null {
+  if (args.action === "stop_task" && args.taskId === undefined) return "stop_task needs taskId (a subagents[].id from get_session).";
+  if (args.action === "rewind" && args.keepTurns === undefined) return "rewind needs keepTurns.";
+  if (args.taskId !== undefined && args.action !== "stop_task") return "taskId is for action stop_task only.";
+  if (args.keepTurns !== undefined && args.action !== "rewind") return "keepTurns is for action rewind only.";
+  return null;
+}
+
+const controlSession = defineTool({
+  name: "control_session",
+  title: "Control a session",
+  description:
+    "The GUI's controls. interrupt: Stop the turn (none running: background work; pauses a goal). stop_task: one background task (taskId: subagents[].id). " +
+    "stop_process: stop the agent, keep the tab. compact: compact the context. rewind: keep the first keepTurns turns (conversation only). close: close the tab.",
+  chatNote: "Not this chat. stop_process, compact, rewind, close: only chats you created.",
+  input: {
+    sessionId: sessionIdField,
+    action: z.enum(CONTROL_ACTIONS),
+    taskId: z.string().min(1).optional(),
+    keepTurns: z.number().int().min(0).optional()
+  },
+  audiences: ["external", "chat"],
+  toolset: "core",
+  tier: "act",
+  async scope(args, ctx) {
+    const problem = controlArgsProblem(args);
+    if (problem) throw new ToolError("INVALID_ARGUMENT", problem);
+    return sessionClaim(ctx, args.sessionId, {
+      reads: "none",
+      writes: DATA_ACTIONS.has(args.action),
+      self: "refuse",
+      ...(OWN_CHILD_ACTIONS.has(args.action) ? { ownChildrenOnly: `control_session ${args.action} acts only on chats this chat created (create_session, fork_session).` } : {})
+    });
+  },
+  approval: (args, ctx) =>
+    sessionCard(ctx, args.sessionId, ACTION_VERBS[args.action], [
+      ...(args.taskId !== undefined ? [{ label: "Task", value: args.taskId }] : []),
+      ...(args.keepTurns !== undefined ? [{ label: "Turns kept", value: String(args.keepTurns) }] : [])
+    ]),
+  // close and rewind discard, and an interrupt retried goes on to stop background work: the most dangerous action names the hints.
+  annotations: { ...DESTRUCTIVE, idempotentHint: false },
+  resultKind: "json",
   async run(args, ctx) {
-    const { api } = ctx;
-    const summary = await requireChatSession(api, args.sessionId);
-    const snap = await readThread(api, args.sessionId);
-    const agent = findAgent(await loadAgents(api), summary.refId);
-    if (!agent.supports.rollback) throw new ToolError("INVALID_ARGUMENT", `${summary.refId} does not support conversation rollback.`);
-    const started = startedTurns(snap.turns); // turns are counted by START ORDER (turns.ts), never by checkpoints
-    if (started.length === 0) throw new ToolError("INVALID_ARGUMENT", "This conversation has no turns to rewind.");
-    if (args.keepTurns >= started.length) throw new ToolError("INVALID_ARGUMENT", `keepTurns must be between 0 and ${started.length - 1}: this conversation has ${started.length} started turn${started.length === 1 ? "" : "s"}.`);
-    const fewest = fewestKeptTurns(snap);
-    if (args.keepTurns < fewest) {
-      const why = "Cannot rewind past the last context compaction — the agent no longer holds what came before it";
-      throw new ToolError("INVALID_ARGUMENT", fewest < started.length ? `${why}. keepTurns must be between ${fewest} and ${started.length - 1}.` : `${why}, and it happened in the latest turn: there is no turn to rewind to.`);
-    }
-    if (isTurnActive(summary, snap)) throw new ToolError("SESSION_BUSY", "Stop the current turn before rewinding.");
-    const pending = pendingRefusal(snap);
-    if (pending) throw pending;
-    // Only a failure row that appears after the POST answers this rewind.
-    const knownFailures = new Set(snap.items.filter(isRevertFailure).map((item) => item.id));
-    const { seq } = await sendCommand(api, args.sessionId, "revert", { targetTurnCount: args.keepTurns });
-    try {
-      await awaitRewind(ctx, args.sessionId, { keepTurns: args.keepTurns, firstDroppedTurnId: started[args.keepTurns]!.turnId, seq }, knownFailures);
+    const { api, caller } = ctx;
+    const problem = controlArgsProblem(args);
+    if (problem) throw new ToolError("INVALID_ARGUMENT", problem);
+    // The link is read before acting: a closed tab is gone after.
+    const target = caller.kind === "thread" ? await sessionAmongTabs(api, args.sessionId) : null;
+    const result = await control(ctx, args);
+    if (!target) return result;
+    // A detail carries the target's words (its last reply, plan, requests): marked as another chat's data (§4.3).
+    return { ...("session" in result ? chatNotice(caller, args.sessionId) : {}), ...result, ...chatThreadRef(caller, target.sessions, target.summary) };
+  }
+});
+
+async function control(ctx: CallContext, args: { sessionId: string; action: ControlAction; taskId?: string; keepTurns?: number }): Promise<Record<string, unknown>> {
+  const { api } = ctx;
+  switch (args.action) {
+    case "interrupt": {
+      await requireChatSession(api, args.sessionId);
+      const snap = await readThread(api, args.sessionId);
+      // Name the turn only while the session runs one — read from the same head as the turn id.
+      const { status, activeTurnId } = snap.head.session;
+      const turnId = status === "running" ? activeTurnId : null;
+      const { seq } = await sendCommand(api, args.sessionId, "interrupt", turnId ? { turnId } : {});
       return { seq, session: await chatDetail(api, args.sessionId) };
-    } catch (error) {
-      // The host accepted the command: whatever fails after it — a thread read in the wait, the detail read after it —
-      // keeps its code and safe message (a thrown one is logged, never echoed) and gains the command's seq.
-      const failure = toSafeToolError(error).structuredContent;
-      throw new ToolError(failure.code, failure.message, { ...detailFields(failure.detail), seq });
+    }
+    case "stop_task": {
+      await requireChatSession(api, args.sessionId);
+      const { seq } = await sendCommand(api, args.sessionId, "task/stop", { taskId: args.taskId! });
+      return { seq, session: await chatDetail(api, args.sessionId) };
+    }
+    case "stop_process": {
+      await requireChatSession(api, args.sessionId);
+      const { seq } = await sendCommand(api, args.sessionId, "session/stop", {});
+      return { seq, session: await chatDetail(api, args.sessionId) };
+    }
+    case "compact": {
+      await requireChatSession(api, args.sessionId);
+      const { seq } = await sendCommand(api, args.sessionId, "compact", {});
+      return { seq, session: await chatDetail(api, args.sessionId) };
+    }
+    case "rewind":
+      return rewind(ctx, args.sessionId, args.keepTurns!);
+    case "close": {
+      await findSession(api, args.sessionId);
+      expectOk(await api.request("DELETE", `/api/sessions/${encodeURIComponent(args.sessionId)}`));
+      return { closed: true, sessionId: args.sessionId };
     }
   }
-});
+}
 
-const compactSession = defineTool({
-  name: "compact_session",
-  title: "Compact context",
-  description: "Ask the agent to compact its context window (the GUI's 'Compact context'). Refused on an empty conversation and while a turn runs — while a Codex goal continues, with \"Pause the goal before compacting.\": interrupt_session pauses it and stops the turn. A goal an Orquester update holds (heldForUpdate) starts no next turn, so it gets the plain refusal: wait for the turn.",
-  input: { sessionId: sessionIdField },
-  // Not idempotent: a retry compacts again.
-  annotations: MUTATING,
-  async run(args, { api }) {
-    await requireChatSession(api, args.sessionId);
-    const { seq } = await sendCommand(api, args.sessionId, "compact", {});
-    return { seq, session: await chatDetail(api, args.sessionId) };
-  }
-});
-
-export const sessionTools: ToolDef[] = [listSessionsTool, getSession, getTurnDiff, createSession, updateSession, interruptSession, stopTask, stopSession, closeSession, revertSession, compactSession];
+/** This family in the catalog (`../catalog/index.ts`), in catalog order. */
+export const sessionsFamily: readonly AnyOrquesterTool[] = [
+  listSessionsTool,
+  getSession,
+  readTranscript,
+  getTurnDiff,
+  updateSession,
+  controlSession
+];

@@ -30,7 +30,10 @@ const STATUS_BY_CODE: Readonly<Record<AgentChatErrorCode, number>> = {
   // `THREAD_NOT_FOUND`) can be told apart. A read, never recorded.
   ITEM_NOT_FOUND: 404,
   // `GET …/prompts/:messageId` alone, for the same reason. A read, never recorded.
-  PROMPT_NOT_FOUND: 404
+  PROMPT_NOT_FOUND: 404,
+  // `turn` with `ifIdle: true` while a turn is active (unified MCP §8.3): a refusal of the moment,
+  // never recorded — the same command id may land at the next idle point.
+  TURN_NOT_IDLE: 409
 };
 
 /**

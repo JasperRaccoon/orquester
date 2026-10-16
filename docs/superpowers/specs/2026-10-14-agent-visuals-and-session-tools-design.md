@@ -1,6 +1,7 @@
 # Agent visuals, session tools, and thread lineage — design
 
 Status: binding for the plan `docs/superpowers/plans/2026-10-14-agent-visuals-and-session-tools.md`.
+**Superseded:** §1.3 (approvals) and §5 (orchestration tools) by `2026-10-15-unified-orquester-mcp-design.md` (the unified catalog, tiers and approval cards; the `thread_*`/`task_*` tools are gone).
 
 Reference implementation: T3 Code (MIT), a local checkout at `.t3code/` (git-excluded; HEAD
 `737192594`). Orquester's agent chat was ported from it, so its shapes map closely. Port ideas and

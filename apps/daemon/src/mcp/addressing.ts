@@ -60,3 +60,92 @@ export async function resolveProject(api: { fsRoot: string; workspacesDir: strin
   }
   return names;
 }
+
+// ---------------------------------------------------------------------------
+// Canonical projects, workspaces and path classification (unified MCP design 2026-10-15 §5.1)
+// ---------------------------------------------------------------------------
+
+/** A project as the gate compares it. */
+export interface CanonicalProject {
+  /** Realpath inside the sandbox, else `path.resolve` — the form two spellings of one project share. */
+  canonical: string;
+  /** `<workspace>` and `<project>` under the (canonical) workspaces root. */
+  workspace: string;
+  name: string;
+}
+
+/**
+ * A path as the daemon COMPARES it: realpath inside the sandbox, else resolved. A comparison key
+ * only — never a containment check (its fallback is lexical): use {@link realPathInSandbox}.
+ */
+export async function canonicalPath(api: { fsRoot: string }, path: string): Promise<string> {
+  return (await assertInsideFsRoot(api.fsRoot, path).catch(() => null)) ?? resolve(path);
+}
+
+/**
+ * A path's realpath when it lies inside the sandbox (`assertInsideFsRoot`: symlinks resolved, the
+ * deepest existing ancestor checked), else null. THE containment check: unlike {@link canonicalPath}
+ * it never falls back to the lexical path.
+ */
+export async function realPathInSandbox(api: { fsRoot: string }, path: string): Promise<string | null> {
+  return assertInsideFsRoot(api.fsRoot, path).catch(() => null);
+}
+
+/** The workspaces root, canonical (it may itself be reached through a symlink). */
+async function canonicalWorkspacesDir(api: { fsRoot: string; workspacesDir: string }): Promise<string> {
+  return canonicalPath(api, api.workspacesDir);
+}
+
+/**
+ * The project `projectPath` is, canonical, or null when it is not exactly
+ * `<workspacesDir>/<ws>/<project>` (the root, a workspace, anything deeper or outside) or no
+ * longer exists as a directory (a removed project or workspace is `PROJECT_NOT_FOUND`, §13).
+ */
+export async function canonicalProject(api: { fsRoot: string; workspacesDir: string }, projectPath: string): Promise<CanonicalProject | null> {
+  if (!projectPath) return null;
+  // Containment: the project's REAL path must lie inside the sandbox — never the lexical fallback of
+  // `canonicalPath`, which would take a project directory that is a symlink out of it for a project.
+  const [canonical, root] = await Promise.all([realPathInSandbox(api, projectPath), canonicalWorkspacesDir(api)]);
+  if (canonical === null) return null;
+  const rel = relative(root, canonical);
+  if (!rel || rel.startsWith("..") || isAbsolute(rel)) return null;
+  const parts = rel.split(sep);
+  if (parts.length !== 2 || !isValidName(parts[0]) || !isValidName(parts[1])) return null;
+  if (!(await isDirectory(canonical))) return null;
+  return { canonical: join(root, parts[0], parts[1]), workspace: parts[0], name: parts[1] };
+}
+
+/** The workspace a project path lies in ("" when it is no project). */
+export async function workspaceOfProject(api: { fsRoot: string; workspacesDir: string }, projectPath: string): Promise<string> {
+  return (await canonicalProject(api, projectPath))?.workspace ?? "";
+}
+
+/**
+ * Where a filesystem path a chat caller passes lies (ruling S6): inside a project directory
+ * (`<workspacesDir>/<ws>/<project>[/…]`, the project directory itself included) → that project;
+ * anything else — outside the sandbox, the workspaces root, a workspace directory itself, a file
+ * directly in the root or in a workspace (`<ws>/notes.txt` is no project), a project directory that
+ * does not exist — is `outside`, which the gate refuses (never "unclassified"). A relative path is
+ * taken from `cwd`. Symlinks are resolved first, so a link inside a project that points elsewhere
+ * classifies by its target.
+ */
+export type PathClass = { kind: "project"; project: CanonicalProject; path: string } | { kind: "outside"; path: string };
+
+export async function classifyPath(api: { fsRoot: string; workspacesDir: string }, rawPath: string, cwd: string): Promise<PathClass> {
+  const resolved = isAbsolute(rawPath) ? resolve(rawPath) : resolve(cwd || "/", rawPath);
+  let real: string;
+  try {
+    real = await assertInsideFsRoot(api.fsRoot, resolved);
+  } catch {
+    return { kind: "outside", path: resolved };
+  }
+  const root = await canonicalWorkspacesDir(api);
+  const rel = relative(root, real);
+  if (!rel || rel.startsWith("..") || isAbsolute(rel)) return { kind: "outside", path: real };
+  const [workspace, name] = rel.split(sep);
+  if (!isValidName(workspace) || !isValidName(name)) return { kind: "outside", path: real };
+  // A project is a DIRECTORY: a file beside the projects (`<ws>/notes.txt`) is no project.
+  const project = join(root, workspace, name);
+  if (!(await isDirectory(project))) return { kind: "outside", path: real };
+  return { kind: "project", project: { canonical: project, workspace, name }, path: real };
+}

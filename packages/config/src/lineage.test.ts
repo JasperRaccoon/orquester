@@ -7,10 +7,15 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  agentChatReplyOutboxFile,
+  agentToolApprovalsJournalFile,
+  agentToolsFile,
   parseAgentThreadHead,
   parseForkHandoff,
   parseMergeOutbox,
+  parseReplyOutbox,
   serializeMergeOutbox,
+  serializeReplyOutbox,
   parseSessionsConfig
 } from "./index.ts";
 
@@ -137,4 +142,130 @@ test("a queued merge keeps its plan mode; an unknown mode is dropped, never the 
   const odd = parseMergeOutbox({ entries: [{ ...entry, interactionMode: "edit" }] }).entries[0];
   assert.equal(odd?.mergeId, "m1");
   assert.equal(odd?.interactionMode, undefined);
+});
+
+// ---------------------------------------------------------------------------
+// Unified MCP (design 2026-10-15): `opened`, `agentCreated`, the delivery queue's kinds, the reply outbox
+// ---------------------------------------------------------------------------
+
+test("a tab record keeps an `opened` lineage and `agentCreated: true`; any other agentCreated is dropped on its own", () => {
+  const opened = { ...LINEAGE, relation: "opened", forkedFrom: undefined, delegationDepth: 1, agentCreated: true };
+  const kept = parseSessionsConfig({ version: 1, sessions: [chatRecord({ lineage: opened })] });
+  assert.equal(kept.sessions[0]?.lineage?.relation, "opened");
+  assert.equal(kept.sessions[0]?.lineage?.agentCreated, true);
+  const odd = parseSessionsConfig({ version: 1, sessions: [chatRecord({ lineage: { ...opened, agentCreated: "yes" } })] });
+  assert.equal(odd.sessions[0]?.lineage?.relation, "opened");
+  assert.equal(odd.sessions[0]?.lineage?.agentCreated, undefined);
+});
+
+test("the delivery queue: merge, reply and message entries; an unknown kind is kept verbatim, never delivered as a merge", () => {
+  const entry = { mergeId: "m1", parentSessionId: "p", childSessionId: "c", input: "x", queuedAt: "t" };
+  const reply = {
+    ...entry,
+    mergeId: "r1",
+    kind: "reply",
+    subscriptionId: "s1",
+    causedBy: { threadId: "c", exchangeId: "x1", hop: 3 },
+    context: [{ kind: "thread-reply", label: "Reply from another chat", ref: "c" }]
+  };
+  const parsed = parseMergeOutbox({ entries: [entry, reply, { ...entry, mergeId: "q1", kind: "message" }, { ...entry, mergeId: "z", kind: "hologram" }] });
+  assert.deepEqual(parsed.entries.map((e) => [e.mergeId, e.kind]), [["m1", undefined], ["r1", "reply"], ["q1", "message"]]);
+  assert.deepEqual(parsed.entries[1]?.causedBy, { threadId: "c", exchangeId: "x1", hop: 3 });
+  assert.equal(parsed.entries[1]?.subscriptionId, "s1");
+  assert.equal(parsed.unreadable.length, 1);
+  const badCause = parseMergeOutbox({ entries: [{ ...reply, causedBy: { hop: 0 } }] }).entries[0];
+  assert.equal(badCause?.mergeId, "r1");
+  assert.equal(badCause?.causedBy, undefined, "a bad causedBy is dropped, never the entry");
+});
+
+const subscription = {
+  id: "s1",
+  fromThreadId: "claude",
+  toThreadId: "codex",
+  commandId: "cmd-1",
+  state: "waiting",
+  interactionMode: "default",
+  exchange: { id: "x1", hop: 2 },
+  createdAt: "2026-10-15T10:00:00.000Z"
+};
+const delivery = {
+  id: "d1",
+  subscriptionId: "s1",
+  toThreadId: "claude",
+  fromThreadId: "codex",
+  commandId: "cmd-d1",
+  outcome: "reply",
+  input: "[Reply from thread \"Codex review\" · session codex]\n…\n\nLGTM",
+  interactionMode: "plan",
+  causedBy: { threadId: "codex", exchangeId: "x1", hop: 3 },
+  state: "pending",
+  createdAt: "2026-10-15T10:01:00.000Z"
+};
+
+test("the reply outbox round-trips and keeps unknown fields, unknown states and unreadable entries verbatim", () => {
+  const raw = {
+    version: 1,
+    note: "newer",
+    subscriptions: [{ ...subscription, fromNewerBuild: 1 }, { ...subscription, id: "s2", state: "teleported" }, { ...subscription, id: "s1", state: "done" }, 7],
+    deliveries: [delivery, { ...delivery, id: "d2", outcome: "poem" }]
+  };
+  const outbox = parseReplyOutbox(raw);
+  assert.deepEqual(outbox.subscriptions.map((s) => [s.id, s.state]), [["s1", "waiting"]], "the first of a duplicate id wins");
+  assert.equal((outbox.subscriptions[0] as Record<string, unknown>).fromNewerBuild, 1);
+  assert.equal(outbox.unreadableSubscriptions.length, 3);
+  assert.deepEqual(outbox.deliveries.map((d) => [d.id, d.outcome, d.interactionMode]), [["d1", "reply", "plan"]]);
+  assert.equal(outbox.unreadableDeliveries.length, 1);
+  assert.deepEqual(outbox.extra, { note: "newer" });
+  const rewritten = JSON.parse(serializeReplyOutbox(outbox));
+  assert.deepEqual(rewritten, raw, "a rewrite puts every entry back");
+  assert.deepEqual(parseReplyOutbox({}), { subscriptions: [], deliveries: [], unreadableSubscriptions: [], unreadableDeliveries: [] });
+});
+
+test("a subscription keeps its idempotency key and its retry-stable queue entry", () => {
+  const read = parseReplyOutbox({
+    subscriptions: [{ ...subscription, idempotencyKey: "k1", queueEntryId: "q-1" }],
+    deliveries: [{ ...delivery, queueEntryId: "r-1" }]
+  });
+  assert.equal(read.subscriptions[0]?.idempotencyKey, "k1");
+  assert.equal(read.subscriptions[0]?.queueEntryId, "q-1");
+  assert.equal(read.deliveries[0]?.queueEntryId, "r-1");
+  assert.equal(parseReplyOutbox({ subscriptions: [{ ...subscription, idempotencyKey: 7 }] }).unreadableSubscriptions.length, 1);
+});
+
+test("the reply outbox refuses anything but a version-1 outbox", () => {
+  for (const value of [null, [], "x", { version: 2 }, { subscriptions: {} }, { deliveries: "no" }]) {
+    assert.throws(() => parseReplyOutbox(value), /reply outbox/, JSON.stringify(value));
+  }
+  // A subscription's missing interaction mode reads as default; an unknown origin is dropped on its own.
+  const read = parseReplyOutbox({ subscriptions: [{ ...subscription, interactionMode: undefined, origin: "carrier-pigeon" }] });
+  assert.equal(read.subscriptions[0]?.interactionMode, "default");
+  assert.equal(read.subscriptions[0]?.origin, undefined);
+});
+
+test("the new stores live beside the merge outbox", () => {
+  assert.equal(agentChatReplyOutboxFile("/srv/orq"), "/srv/orq/daemon/agent-reply-outbox.json");
+  assert.equal(agentToolsFile("/srv/orq"), "/srv/orq/daemon/agent-tools.json");
+  assert.equal(agentToolApprovalsJournalFile("/srv/orq"), "/srv/orq/daemon/agent-tool-approvals.json");
+});
+
+test("a lineage keeps the inherited `workflowOwned: true`; any other value is dropped on its own", () => {
+  const owned = { ...LINEAGE, relation: "delegate", forkedFrom: undefined, agentCreated: true, workflowOwned: true };
+  assert.equal(parseSessionsConfig({ version: 1, sessions: [chatRecord({ lineage: owned })] }).sessions[0]?.lineage?.workflowOwned, true);
+  const odd = parseSessionsConfig({ version: 1, sessions: [chatRecord({ lineage: { ...owned, workflowOwned: 1 } })] });
+  assert.equal(odd.sessions[0]?.lineage?.relation, "delegate");
+  assert.equal(odd.sessions[0]?.lineage?.workflowOwned, undefined);
+});
+
+test("a subscription's posted / ended / toTitle round-trip; a newer ending is kept, a malformed post makes the entry unreadable", () => {
+  const posted = { commandId: "cmd-1", seq: 12, messageId: "m-9" };
+  const read = parseReplyOutbox({
+    subscriptions: [{ ...subscription, state: "done", posted, ended: "delivered", toTitle: "Codex review" }, { ...subscription, id: "s2", ended: "teleported" }]
+  });
+  assert.deepEqual(read.subscriptions[0]?.posted, posted);
+  assert.equal(read.subscriptions[0]?.ended, "delivered");
+  assert.equal(read.subscriptions[0]?.toTitle, "Codex review");
+  assert.equal(read.subscriptions[1]?.ended, "teleported", "a newer build's ending is kept as is");
+  const bad = parseReplyOutbox({ subscriptions: [{ ...subscription, posted: { commandId: "cmd-1" } }] });
+  assert.equal(bad.subscriptions.length, 0);
+  assert.equal(bad.unreadableSubscriptions.length, 1);
 });

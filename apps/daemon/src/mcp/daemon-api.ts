@@ -1,15 +1,25 @@
 import type { FastifyInstance } from "fastify";
 import type { Readable } from "node:stream";
 import type { EventMessage } from "@orquester/api";
-import type { HtmlRenderAppearance, HtmlRenderReference } from "@orquester/api/agent-chat";
+import { PRINCIPAL_TOKEN_HEADER, type CallerPrincipal, type HtmlRenderAppearance, type HtmlRenderReference } from "@orquester/api/agent-chat";
 import type { Broadcaster } from "../broadcaster.ts";
 import type { AgentChatService } from "../agent-chat/service.ts";
 import { HtmlRenderPublishError } from "../agent-chat/html-render-publish.ts";
 import { HtmlPreviewError, type HtmlPreview } from "../html-preview/index.ts";
 import { isUploadTooLarge, UploadTooLargeError } from "../upload-stream.ts";
+import { FsTools, type ListFilesResult, type ReadFileWindowResult } from "./fs-tools.ts";
+import { mintPrincipalToken } from "./principal.ts";
 
 export type DaemonMethod = "GET" | "POST" | "PUT" | "DELETE";
 export interface DaemonResponse { status: number; body: unknown }
+
+/**
+ * One request's options. `principal` (unified MCP design 2026-10-15, `@orquester/api`
+ * `agent-chat/principal.ts`): who the request acts for — the in-process client mints a single-use
+ * nonce for it (`./principal.ts`), sends it in the principal header, and releases it once the
+ * request settled; the route reads `request.principal`. Absent: the request is the user's.
+ */
+export interface DaemonRequestOptions { query?: Record<string, string>; body?: unknown; principal?: CallerPrincipal }
 
 /** An answer or a refusal whose message is written for the agent; never a throw. */
 export type DaemonOutcome<T> = { ok: true; value: T } | { ok: false; code: string; message: string };
@@ -40,7 +50,7 @@ export type { HtmlPreview };
  * gate, validation and error code is the GUI's by construction.
  */
 export interface DaemonApi {
-  request(method: DaemonMethod, path: string, opts?: { query?: Record<string, string>; body?: unknown }): Promise<DaemonResponse>;
+  request(method: DaemonMethod, path: string, opts?: DaemonRequestOptions): Promise<DaemonResponse>;
   /** Owns `bytes`: reads it or destroys it. InjectDaemonApi never throws here — a failed upload is an answer (§4.5 codes), as over HTTP. */
   uploadAttachment(sessionId: string, meta: { name: string; type?: string }, bytes: Readable): Promise<{ status: number; value: unknown }>;
   subscribe(listener: (event: EventMessage) => void): () => void;
@@ -48,6 +58,14 @@ export interface DaemonApi {
   publishHtmlRender(request: HtmlRenderPublishRequest): Promise<DaemonOutcome<HtmlRenderReference>>;
   /** Screenshot a page in headless Chromium, as `threadId`'s reader would see it. */
   previewHtmlRender(request: HtmlPreviewRequest): Promise<DaemonOutcome<HtmlPreview>>;
+  /**
+   * A directory listing inside the sandbox (`FsTools.listFiles`, D-19): a relative path is taken from `fsRoot`. Throws
+   * `ToolError`s written for the agent. Optional so the many test doubles of this seam need not grow it; `read_file`
+   * answers UNAVAILABLE without it.
+   */
+  listDirectory?(path: string): Promise<ListFilesResult>;
+  /** A text file's byte window inside the sandbox (`FsTools.readFileWindow`); a directory throws `FsDirectoryError`. */
+  readFileRange?(path: string, opts: { offset?: number; maxBytes?: number }): Promise<ReadFileWindowResult>;
   readonly fsRoot: string;
   readonly workspacesDir: string;
 }
@@ -92,17 +110,26 @@ export class InjectDaemonApi implements DaemonApi {
     return typeof this.opts.workspacesDir === "function" ? this.opts.workspacesDir() : this.opts.workspacesDir;
   }
 
-  async request(method: DaemonMethod, path: string, opts?: { query?: Record<string, string>; body?: unknown }): Promise<DaemonResponse> {
+  async request(method: DaemonMethod, path: string, opts?: DaemonRequestOptions): Promise<DaemonResponse> {
     const qs = opts?.query ? new URLSearchParams(opts.query).toString() : "";
     const headers: Record<string, string> = { accept: "application/json" };
     if (this.opts.authorization) headers.authorization = this.opts.authorization;
     if (opts?.body !== undefined) headers["content-type"] = "application/json";
-    const res = await this.opts.app.inject({
-      method,
-      url: qs ? `${path}${path.includes("?") ? "&" : "?"}${qs}` : path,
-      headers,
-      payload: opts?.body === undefined ? undefined : JSON.stringify(opts.body)
-    });
+    // A fresh single-use nonce per request; `app.inject` never crosses the network, and the
+    // token is released below whether or not the route resolved it.
+    const minted = opts?.principal ? mintPrincipalToken(opts.principal) : null;
+    if (minted) headers[PRINCIPAL_TOKEN_HEADER] = minted.token;
+    let res;
+    try {
+      res = await this.opts.app.inject({
+        method,
+        url: qs ? `${path}${path.includes("?") ? "&" : "?"}${qs}` : path,
+        headers,
+        payload: opts?.body === undefined ? undefined : JSON.stringify(opts.body)
+      });
+    } finally {
+      minted?.release();
+    }
     let body: unknown = null;
     if (res.body) {
       try { body = JSON.parse(res.body); } catch { body = res.body; }
@@ -152,10 +179,38 @@ export class InjectDaemonApi implements DaemonApi {
     }
   }
 
+  /** Read at every call: `fsRoot` follows `PUT /api/config/daemon`. */
+  listDirectory(path: string): Promise<ListFilesResult> {
+    return new FsTools({ fsRoot: this.fsRoot }).listFiles(path);
+  }
+
+  readFileRange(path: string, opts: { offset?: number; maxBytes?: number }): Promise<ReadFileWindowResult> {
+    return new FsTools({ fsRoot: this.fsRoot }).readFileWindow(path, opts);
+  }
+
   subscribe(listener: (event: EventMessage) => void): () => void {
     // `Broadcaster.publish` drops a sink whose `send` throws — never throw here.
     const sink = { send: (data: string) => { try { listener(JSON.parse(data) as EventMessage); } catch { /* ignore */ } } };
     this.opts.broadcaster.add(sink);
     return () => this.opts.broadcaster.remove(sink);
   }
+}
+
+/**
+ * `api` with every request acting for `principal` (the catalog executor's per-call binding): each
+ * `request` mints its own nonce. The binding is FORCED: a `principal` a tool passes is replaced,
+ * so only the executor ever decides who a tool's request acts for.
+ */
+export function withPrincipal(api: DaemonApi, principal: CallerPrincipal): DaemonApi {
+  return {
+    request: (method, path, opts) => api.request(method, path, { ...opts, principal }),
+    uploadAttachment: (sessionId, meta, bytes) => api.uploadAttachment(sessionId, meta, bytes),
+    subscribe: (listener) => api.subscribe(listener),
+    publishHtmlRender: (request) => api.publishHtmlRender(request),
+    previewHtmlRender: (request) => api.previewHtmlRender(request),
+    ...(api.listDirectory ? { listDirectory: (path: string) => api.listDirectory!(path) } : {}),
+    ...(api.readFileRange ? { readFileRange: (path: string, opts: { offset?: number; maxBytes?: number }) => api.readFileRange!(path, opts) } : {}),
+    get fsRoot() { return api.fsRoot; },
+    get workspacesDir() { return api.workspacesDir; }
+  };
 }

@@ -23,7 +23,9 @@ import {
 import {
   agentHostAuthValue,
   daemonRoutesForHost,
-  type SessionToolCallRequest
+  type SessionToolCallRequest,
+  type SessionToolsManifest,
+  type SessionToolsManifestRequest
 } from "../host-protocol.ts";
 
 /** The most of a daemon answer read back: room for an image result. */
@@ -130,6 +132,104 @@ export function createDaemonForwarder(options: DaemonForwarderOptions): ForwardS
       // ECONNREFUSED / ENOENT (no daemon), ECONNRESET / socket hang up (it
       // died mid-call): all the same to the agent.
       req.on("error", () => settle(signal.aborted ? cancelledResult() : daemonUnavailableResult()));
+      req.end(payload);
+    });
+}
+
+// ---------------------------------------------------------------------------
+// The manifest (unified MCP design 2026-10-15 §9.4)
+// ---------------------------------------------------------------------------
+
+/** What the daemon said about a thread's manifest. */
+export type ManifestAnswer =
+  /**
+   * `current: false` — the socket it came from is no longer the one the host names now (the daemon
+   * moved during the read): usable, but its epoch is not taken as the live one.
+   */
+  | { kind: "manifest"; manifest: SessionToolsManifest; current?: boolean }
+  /** A daemon from before the manifest route (its route-miss 404): advertise the legacy definitions. */
+  | { kind: "legacy" }
+  /** The daemon has no chat tab for the thread. */
+  | { kind: "no-thread" }
+  /** Down, restarting, refusing, or an unreadable answer. */
+  | { kind: "unavailable" };
+
+export type FetchSessionToolsManifest = (threadId: string) => Promise<ManifestAnswer>;
+
+/** The longest a session start waits for its manifest before it uses the fallback set. */
+export const MANIFEST_TIMEOUT_MS = 10_000;
+
+function parseManifest(value: unknown): SessionToolsManifest | null {
+  if (value === null || typeof value !== "object") return null;
+  const { tools, instructions, deny, toolsets, seq, epoch } = value as Record<string, unknown>;
+  const strings = (list: unknown): list is string[] => Array.isArray(list) && list.every((item) => typeof item === "string");
+  if (!strings(tools) || typeof instructions !== "string" || !strings(deny)) return null;
+  return { tools, instructions, deny, ...(strings(toolsets) ? { toolsets } : {}), ...(typeof seq === "number" && Number.isFinite(seq) ? { seq } : {}), ...(typeof epoch === "string" && epoch.length <= 128 ? { epoch } : {}) };
+}
+
+/** `POST daemonRoutesForHost.sessionToolsManifest` with the host's bearer. Never throws. */
+export function createDaemonManifestClient(options: DaemonForwarderOptions & { timeoutMs?: number }): FetchSessionToolsManifest {
+  return (threadId) =>
+    new Promise<ManifestAnswer>((resolve) => {
+      const payload = JSON.stringify({ threadId, purpose: "launch" } satisfies SessionToolsManifestRequest);
+      const socketPath = options.socketPath();
+      let settled = false;
+      const settle = (answer: ManifestAnswer): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(answer);
+      };
+      const req = httpRequest(
+        {
+          socketPath,
+          agent: false,
+          path: daemonRoutesForHost.sessionToolsManifest,
+          method: "POST",
+          headers: {
+            host: "daemon.localhost",
+            authorization: agentHostAuthValue(options.token),
+            "content-type": "application/json",
+            "content-length": String(Buffer.byteLength(payload))
+          }
+        },
+        (res) => {
+          const chunks: Buffer[] = [];
+          let received = 0;
+          res.on("data", (chunk: Buffer) => {
+            received += chunk.length;
+            if (received > MAX_RESPONSE_BYTES) {
+              res.destroy();
+              settle({ kind: "unavailable" });
+              return;
+            }
+            chunks.push(chunk);
+          });
+          res.on("error", () => settle({ kind: "unavailable" }));
+          res.on("end", () => {
+            let body: unknown = null;
+            try {
+              body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+            } catch {
+              body = null;
+            }
+            if (res.statusCode === 404) {
+              // Our own refusal names the code; anything else is a daemon without the route.
+              const code = body !== null && typeof body === "object" ? (body as { code?: unknown }).code : undefined;
+              settle(code === "THREAD_NOT_FOUND" ? { kind: "no-thread" } : { kind: "legacy" });
+              return;
+            }
+            const manifest = res.statusCode === 200 ? parseManifest(body) : null;
+            settle(manifest ? { kind: "manifest", manifest, ...(options.socketPath() !== socketPath ? { current: false } : {}) } : { kind: "unavailable" });
+          });
+        }
+      );
+      const timer = setTimeout(() => {
+        req.destroy();
+        settle({ kind: "unavailable" });
+      }, options.timeoutMs ?? MANIFEST_TIMEOUT_MS);
+      timer.unref();
+      req.on("error", () => settle({ kind: "unavailable" }));
       req.end(payload);
     });
 }

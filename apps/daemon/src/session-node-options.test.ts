@@ -16,7 +16,7 @@ import { appendNodeRequireOption } from "@orquester/config";
 
 import { setSessionNodePreload } from "./plugins/session-env.ts";
 import type { RegistryService } from "./registry.ts";
-import { LocalSessionManager, SessionManager } from "./sessions.ts";
+import { drainSessionIndexWrites, LocalSessionManager, SessionManager } from "./sessions.ts";
 import { Tmux, tmuxAvailable, tmuxVersionOk } from "./tmux.ts";
 
 const PRELOAD = "/srv/orq/daemon/plugins/ts-rust/preload.cjs";
@@ -37,7 +37,9 @@ after(async () => {
   setSessionNodePreload(null);
   if (savedNodeOptions === undefined) delete process.env.NODE_OPTIONS;
   else process.env.NODE_OPTIONS = savedNodeOptions;
-  await rm(root, { recursive: true, force: true });
+  // Every child has exited and every index write has landed by now (the suites' own teardowns);
+  // the retries are only a backstop.
+  await rm(root, { recursive: true, force: true, maxRetries: 5 });
 });
 
 /** A shell entry whose command records its NODE_OPTIONS (or `<unset>`) in a fresh file. */
@@ -176,7 +178,11 @@ describe("tmux-backed sessions", { skip: tmuxAvailable() && tmuxVersionOk() ? fa
   });
 
   after(async () => {
+    // Closing a tmux session (and each session's exit) rewrites the manager's sessions index under
+    // `root` — a temp file, then a rename — without anyone awaiting it: wait for those writes, or
+    // they race the directory's removal (ENOTEMPTY, or a rename into a directory already gone).
     for (const manager of managers) manager.closeAll();
+    await drainSessionIndexWrites();
     await new Promise<void>((resolve) => execFile("tmux", ["-S", socket, "kill-server"], () => resolve()));
   });
 

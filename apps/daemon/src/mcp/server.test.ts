@@ -20,85 +20,60 @@ const closed = (a: object) => ({ ...a, openWorldHint: false });
 const CONTRACT: Record<string, { required: string[]; annotations: object }> = {
   list_projects: { required: [], annotations: READ },
   list_agents: { required: [], annotations: READ },
-  list_conversations: { required: ["project"], annotations: READ },
+  list_conversations: { required: [], annotations: READ },
   list_sessions: { required: [], annotations: READ },
   get_session: { required: ["sessionId"], annotations: READ },
   get_turn_diff: { required: ["sessionId"], annotations: READ },
-  create_session: { required: ["project"], annotations: WRITE },
+  // `project` is required of external callers in the tool (a chat's defaults to its own; one shared schema).
+  create_session: { required: [], annotations: WRITE },
   update_session: { required: ["sessionId"], annotations: WRITE_IDEMPOTENT },
-  // A retry is not a no-op: once the turn has stopped, a second interrupt goes on to stop the background work.
-  interrupt_session: { required: ["sessionId"], annotations: WRITE },
-  // A retry is refused once the task has stopped.
-  stop_task: { required: ["sessionId", "taskId"], annotations: WRITE },
-  stop_session: { required: ["sessionId"], annotations: WRITE_IDEMPOTENT },
-  close_session: { required: ["sessionId"], annotations: DESTROY },
-  revert_session: { required: ["sessionId", "keepTurns"], annotations: DESTROY },
-  // A retry compacts the context again.
-  compact_session: { required: ["sessionId"], annotations: WRITE },
-  // Thread lineage (spec 2026-10-14 §6): a retry forks again, and merges again.
-  fork_session: { required: ["sessionId"], annotations: WRITE },
-  merge_back_session: { required: ["sessionId"], annotations: WRITE },
-  resolve_merge_back: { required: ["sessionId", "mergeId", "action"], annotations: WRITE },
-  get_session_lineage: { required: ["sessionId"], annotations: READ },
+  // Unified MCP (Task 7): interrupt/stop_task/stop_process/compact/rewind/close. The most dangerous action names the
+  // hints: close and rewind discard; a retried interrupt goes on to stop background work, so not idempotent.
+  control_session: { required: ["sessionId", "action"], annotations: { ...DESTROY, idempotentHint: false } },
+  // Thread lineage (spec 2026-10-14 §6): a retry forks again, and merges again. `sessionId` is required of external
+  // callers in the tool (a chat's defaults to itself); resolve_merge_back is merge_back_session {mergeId, action} and
+  // get_session_lineage is get_session's lineage (unified MCP §11, Task 8).
+  fork_session: { required: [], annotations: WRITE },
+  merge_back_session: { required: [], annotations: WRITE },
   search_sessions: { required: ["query"], annotations: READ },
+  // implement_plan is send_message {implementPlan: true} (unified MCP §11).
   send_message: { required: ["sessionId"], annotations: WRITE },
-  implement_plan: { required: ["sessionId"], annotations: WRITE },
   read_transcript: { required: ["sessionId"], annotations: READ },
   read_tool_output: { required: ["sessionId", "itemId"], annotations: READ },
-  answer_question: { required: ["sessionId", "answers"], annotations: WRITE },
-  dismiss_question: { required: ["sessionId"], annotations: WRITE },
-  resolve_approval: { required: ["sessionId", "decision"], annotations: WRITE },
+  // Unified MCP (Task 7): answer_question / dismiss_question / resolve_approval in one tool.
+  respond_to_request: { required: ["sessionId"], annotations: WRITE },
   wait_for_session: { required: [], annotations: READ },
   get_usage: { required: [], annotations: READ },
-  get_cost: { required: [], annotations: READ },
-  list_files: { required: ["path"], annotations: READ },
+  // Unified MCP Task 9: get_cost → get_usage {include: ["cost"]}, list_files → read_file on a directory.
+  notify_user: { required: ["title"], annotations: WRITE },
   read_file: { required: ["path"], annotations: READ },
+  get_git_state: { required: ["view"], annotations: READ },
   list_todos: { required: [], annotations: READ },
-  create_todo: { required: ["name"], annotations: closed(WRITE) },
-  update_todo: { required: ["id"], annotations: closed(WRITE_IDEMPOTENT) },
-  delete_todo: { required: ["id"], annotations: closed(DESTROY) },
-  // Omitting `checked` flips the item, so a repeated call is not a no-op: not idempotent.
-  toggle_todo_item: { required: ["id", "item"], annotations: closed(WRITE) },
+  // Task 12: one tool for every todo write; the most dangerous is delete, and a toggle that flips is not idempotent.
+  update_todos: { required: ["action"], annotations: closed({ ...WRITE, destructiveHint: true }) },
+  list_saved_prompts: { required: [], annotations: READ },
+  update_saved_prompts: { required: ["action"], annotations: closed({ ...WRITE, destructiveHint: true }) },
   // Automated workflows (workflows spec §8.3). run_workflow drives agents, so no tool that writes claims a closed world.
   list_workflow_block_types: { required: [], annotations: READ },
   list_workflows: { required: [], annotations: READ },
   get_workflow: { required: ["workflowId"], annotations: READ },
   create_workflow: { required: ["name", "project", "nodes"], annotations: WRITE },
   update_workflow: { required: ["workflowId", "revision", "ops"], annotations: WRITE },
-  validate_workflow: { required: ["workflow"], annotations: READ },
   preview_expression: { required: ["workflowId"], annotations: READ },
   delete_workflow: { required: ["workflowId", "confirm"], annotations: DESTROY },
-  run_workflow: { required: ["workflowId"], annotations: WRITE },
-  list_workflow_runs: { required: ["workflowId"], annotations: READ },
-  get_workflow_run: { required: ["runId"], annotations: READ },
+  run_workflow: { required: ["workflowId", "revision"], annotations: WRITE },
+  get_workflow_runs: { required: [], annotations: READ },
   cancel_workflow_run: { required: ["runId"], annotations: WRITE_IDEMPOTENT },
   list_workflow_secrets: { required: [], annotations: READ },
-  set_workflow_secret: { required: ["name", "value"], annotations: WRITE_IDEMPOTENT },
+  // Deletes too (delete: true), and replacing a value loses the old one.
+  set_workflow_secret: { required: ["name"], annotations: DESTROY },
   // Agent profiles (docs/orquester-mcp.md §13): the writes change the agent CLIs' own files, so none claims a closed world.
-  list_agent_profiles: { required: [], annotations: READ },
-  get_agent_profile: { required: ["agent"], annotations: READ },
-  get_agent_profile_item: { required: ["agent", "id"], annotations: READ },
-  create_agent_profile_item: { required: ["agent"], annotations: WRITE },
-  update_agent_profile_item: { required: ["agent", "id"], annotations: WRITE },
-  set_agent_profile_item_enabled: { required: ["agent", "id", "enabled"], annotations: WRITE_IDEMPOTENT },
-  delete_agent_profile_item: { required: ["agent", "id", "confirm"], annotations: DESTROY },
-  copy_agent_profile_item: { required: ["agent", "id", "toAgent"], annotations: WRITE },
-  trust_agent_profile_hook: { required: ["agent", "id"], annotations: WRITE_IDEMPOTENT },
-  get_agent_instructions: { required: ["agent"], annotations: READ },
-  // Replaces the whole file: destructive, and the same text twice is the same file.
-  write_agent_instructions: { required: ["agent", "text"], annotations: DESTROY },
-  import_agent_profile_items: { required: ["agent"], annotations: WRITE },
-  list_marketplace_plugins: { required: ["agent", "marketplace"], annotations: READ },
+  get_agent_profile: { required: [], annotations: READ },
+  // A batch of changes (Task 11): its most dangerous action deletes, and a create is not idempotent.
+  edit_agent_profile: { required: ["agent", "changes"], annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false } },
   // Desktops (desktop tab spec §7.4): launching an app runs anything, so no write claims a closed world.
-  desktops_list: { required: [], annotations: READ },
-  desktop_host_status: { required: [], annotations: READ },
-  desktop_open: { required: ["projectPath"], annotations: WRITE },
-  desktop_launch_app: { required: ["desktopId", "command"], annotations: WRITE },
-  desktop_windows: { required: ["desktopId"], annotations: READ },
-  desktop_window_action: { required: ["desktopId", "windowId", "action"], annotations: WRITE },
-  desktop_app_log: { required: ["desktopId", "appId"], annotations: READ },
-  desktop_stop_app: { required: ["desktopId", "appId"], annotations: DESTROY },
-  desktop_close: { required: ["desktopId"], annotations: DESTROY }
+  get_desktops: { required: [], annotations: READ },
+  control_desktop: { required: ["action"], annotations: { ...WRITE, destructiveHint: true } }
 };
 
 type ListedTool = { name: string; title?: string; description: string; annotations?: object; inputSchema: { properties?: Record<string, { description?: string }>; required?: string[]; additionalProperties?: unknown } };
@@ -115,7 +90,7 @@ async function markConsumed(request: FastifyRequest): Promise<void> {
 
 function mcpApp(deps: Partial<McpDeps> & Pick<McpDeps, "createApi">): FastifyInstance {
   const app = Fastify();
-  registerMcp(app, { todos: {} as never, files: {} as never, ...deps });
+  registerMcp(app, deps);
   app.addHook("preHandler", markConsumed);
   return app;
 }
@@ -140,6 +115,19 @@ test("tools/list pins every tool's required params and annotations (spec §12 sn
     const expected = Object.fromEntries(Object.entries(CONTRACT).map(([name, c]) => [name, { required: [...c.required].sort(), annotations: c.annotations }]));
     assert.deepEqual(actual, expected);
     for (const tool of list.result.tools as ListedTool[]) assert.equal(tool.inputSchema.additionalProperties, false, tool.name);
+  } finally { await app.close(); }
+});
+
+test("tools/list is generated from the catalog's external audience: each entry's _meta names its chat tier and toolset", async () => {
+  const app = mcpApp({ createApi: () => new FakeDaemonApi() });
+  try {
+    const list = await postMcp(app, { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
+    const meta = Object.fromEntries((list.result.tools as (ListedTool & { _meta?: Record<string, string> })[]).map((t) => [t.name, t._meta]));
+    assert.deepEqual(meta.list_sessions, { "orquester/tier": "read", "orquester/toolset": "core" });
+    assert.deepEqual(meta.create_workflow, { "orquester/tier": "admin", "orquester/toolset": "workflow-authoring" });
+    assert.deepEqual(meta.control_desktop, { "orquester/tier": "admin", "orquester/toolset": "desktops" });
+    assert.deepEqual(meta.update_todos, { "orquester/tier": "act", "orquester/toolset": "notes" });
+    assert.ok(Object.values(meta).every((m) => m !== undefined && typeof m["orquester/tier"] === "string"));
   } finally { await app.close(); }
 });
 
@@ -205,7 +193,7 @@ test("an argument name the tool does not take is refused and named, never droppe
     assert.equal(bad.result.content[0].text, `INVALID_ARGUMENT: ${bad.result.structuredContent.message}`);
     assert.deepEqual(api.calls, [], "refused before the tool ran: nothing was read, nothing was sent");
     // Every unknown key is named, in one issue; the known keys beside them do not save the call.
-    const several = await postMcp(app, call(41, "wait_for_session", { sessionid: "c1", timeout: 5, timeoutMs: 1_000 }));
+    const several = await postMcp(app, call(41, "wait_for_session", { sessionid: "c1", timeout: 5, timeoutSeconds: 1 }));
     assert.equal(several.result.structuredContent.code, "INVALID_ARGUMENT");
     assert.match(several.result.structuredContent.message, /sessionid/);
     assert.match(several.result.structuredContent.message, /timeout/);
@@ -255,8 +243,12 @@ test("an unknown tool's name is quoted capped: a 2 MiB name gets a short −3260
 
 test("the route takes a 2 MiB tools/call — its own 16 MiB body limit, past Fastify's 1 MiB default", async () => {
   let seen = 0;
-  const files = { readFileWindow: async (path: string) => { seen = path.length; return { path: "/w/a.txt", text: "", size: 0, offset: 0, truncated: false, consumed: 0 }; } };
-  const app = mcpApp({ createApi: () => new FakeDaemonApi(), files: files as never });
+  // read_file reads through DaemonApi.readFileRange (unified MCP Task 9).
+  const api = Object.assign(new FakeDaemonApi(), {
+    listDirectory: async () => ({ path: "/w", entries: [], truncated: false }),
+    readFileRange: async (path: string) => { seen = path.length; return { path: "/w/a.txt", text: "", size: 0, offset: 0, truncated: false, consumed: 0 }; }
+  });
+  const app = mcpApp({ createApi: () => api });
   try {
     const big = "p".repeat(2 * 1024 * 1024);
     const r = await postMcp(app, call(15, "read_file", { path: big }));
@@ -271,7 +263,7 @@ test("a client that disconnects aborts the request's signal: a wait lets go of t
   let raw: { destroy(): void } | undefined;
   app.addHook("onRequest", async (_request, reply) => { raw = reply.raw; });
   try {
-    const answered = app.inject({ method: "POST", url: "/mcp", headers: MCP_HEADERS, payload: call(16, "wait_for_session", { timeoutMs: 5_000 }) }).then(() => "answered", () => "closed");
+    const answered = app.inject({ method: "POST", url: "/mcp", headers: MCP_HEADERS, payload: call(16, "wait_for_session", { timeoutSeconds: 5 }) }).then(() => "answered", () => "closed");
     for (let i = 0; i < 200 && api.listenerCount() === 0; i += 1) await tick();
     assert.equal(api.listenerCount(), 1, "the wait is on the bus");
     raw!.destroy(); // the client goes away: the response closes before it finished
@@ -290,7 +282,7 @@ test("a client already gone when the route runs gets nothing done for it: its 'c
     await tick(); // the response's 'close' is emitted here, before the route could listen for it
   });
   try {
-    const answered = await app.inject({ method: "POST", url: "/mcp", headers: MCP_HEADERS, payload: call(17, "wait_for_session", { timeoutMs: 1_000 }) }).then(() => "answered", () => "closed");
+    const answered = await app.inject({ method: "POST", url: "/mcp", headers: MCP_HEADERS, payload: call(17, "wait_for_session", { timeoutSeconds: 1 }) }).then(() => "answered", () => "closed");
     assert.equal(answered, "closed");
     await ticks(20);
     assert.equal(built, 0, "no server built, no tool run");

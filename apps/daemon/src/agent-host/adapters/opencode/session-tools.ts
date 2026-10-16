@@ -35,6 +35,19 @@
  * that ends revokes its credential and disconnects its server, best-effort
  * but awaited, so the thread's next start registers after it.
  *
+ * The list is the thread's manifest (unified MCP §9.4), served per request by the endpoint.
+ * OpenCode 1.18.34 re-lists on `notifications/tools/list_changed` (Task 6 probe), but the loopback
+ * endpoint is stateless and pushes nothing: a changed list reaches it through a session restart.
+ *
+ * Denials (§12.1): each MCP server the manifest denies is DISCONNECTED on the session's instance
+ * (`POST /mcp/{name}/disconnect` — every session there is an Orquester chat with the same config,
+ * so the same denials) and gets a LAST rule `{permission: "<name>_*", action: "deny"}` (the name
+ * sanitised as OpenCode builds tool ids), so OpenCode drops every tool of it before each step. A
+ * tool id is `<server>_<tool>` and OpenCode's globs have only `*` and `?`, so `remote_*` would
+ * also hide another configured server `remote_api`: where such a server exists (`GET /mcp`), the
+ * rule is left out and the disconnect alone denies `remote` — exact. Only when that disconnect
+ * failed too is the over-wide rule kept (fail closed) and the overlap logged.
+ *
  * Instructions ride the per-turn `system` addendum (`session.ts`), which
  * OpenCode keeps on the message's `system` field, never in its parts.
  */
@@ -58,7 +71,14 @@ export interface OpenCodeSessionToolsLaunch {
   authorization: string;
   /** The "Orquester" instruction block; "" for none. */
   instructions: string;
+  /** MCP servers to deny in this thread's session (§12.1), by their config names. */
+  deny?: readonly string[];
   revoke(): void;
+}
+
+/** A server name as OpenCode spells it inside tool ids (`[a-zA-Z0-9_-]`, anything else `_`). */
+export function openCodeServerRuleName(server: string): string {
+  return server.replace(/[^a-zA-Z0-9_-]/g, "_");
 }
 
 /** The thread's own server name on a shared OpenCode server. */
@@ -90,18 +110,73 @@ export const OPENCODE_SESSION_TOOLS_DENY = `orquester-${"?".repeat(16)}_*`;
  */
 export function withSessionToolRules(
   ruleset: OpenCodePermissionRuleset,
-  isolation: { isolate: boolean; own?: Pick<OpenCodeSessionToolsLaunch, "serverName"> }
+  isolation: {
+    isolate: boolean;
+    own?: Pick<OpenCodeSessionToolsLaunch, "serverName">;
+    /** Server names (config spelling) whose `<name>_*` rule is exact here (`resolveOpenCodeDenials`). */
+    deny?: readonly string[];
+  }
 ): OpenCodePermissionRuleset {
-  if (!isolation.isolate && isolation.own === undefined) {
+  const denied = [...new Set((isolation.deny ?? []).map(openCodeServerRuleName))].filter((name) => name.length > 0);
+  if (!isolation.isolate && isolation.own === undefined && denied.length === 0) {
     return ruleset;
   }
   return [
     ...ruleset,
-    { permission: OPENCODE_SESSION_TOOLS_DENY, pattern: "*", action: "deny" },
+    ...(isolation.isolate || isolation.own !== undefined ? [{ permission: OPENCODE_SESSION_TOOLS_DENY, pattern: "*", action: "deny" as const }] : []),
     ...(isolation.own !== undefined
       ? [{ permission: `${isolation.own.serverName}_*`, pattern: "*", action: "allow" as const }]
-      : [])
+      : []),
+    // §12.1, last so nothing above re-allows them: every tool of a denied server.
+    ...denied.map((name) => ({ permission: `${name}_*`, pattern: "*", action: "deny" as const }))
   ];
+}
+
+/** Of `deny`, the names whose `<name>_*` rule would also hide ANOTHER configured server's tools. */
+export function overlappingDenials(deny: readonly string[], configured: readonly string[]): Set<string> {
+  const overlapping = new Set<string>();
+  for (const name of deny) {
+    const prefix = `${openCodeServerRuleName(name)}_`;
+    if (configured.some((other) => other !== name && openCodeServerRuleName(other).startsWith(prefix))) overlapping.add(name);
+  }
+  return overlapping;
+}
+
+/**
+ * Deny `deny` on the session's instance (§12.1): disconnect each (best effort, bounded) and answer
+ * which names take the `<name>_*` rule — every one, except an overlapping name whose disconnect
+ * worked (the rule would hide another server's tools; the disconnect alone is exact). Never throws.
+ */
+export async function resolveOpenCodeDenials(
+  client: OpenCodeClient,
+  deny: readonly string[],
+  logger?: { warn(message: string, detail?: unknown): void }
+): Promise<string[]> {
+  const names = [...new Set(deny)].filter((name) => name.length > 0);
+  if (names.length === 0) return [];
+  let configured: string[] = [];
+  try {
+    const status = await client.get<Record<string, unknown>>(openCodeRoutes.mcp, { timeoutMs: AGENT_HOST_DEADLINES.probeMs });
+    configured = status !== null && typeof status === "object" ? Object.keys(status) : [];
+  } catch {
+    configured = [];
+  }
+  const overlapping = overlappingDenials(names, configured);
+  const ruled: string[] = [];
+  for (const name of names) {
+    let disconnected = false;
+    try {
+      await client.post<unknown>(openCodeRoutes.mcpDisconnect(name), { timeoutMs: AGENT_HOST_DEADLINES.probeMs });
+      disconnected = true;
+    } catch {
+      disconnected = false;
+    }
+    if (!overlapping.has(name) || !disconnected) ruled.push(name);
+    if (overlapping.has(name) && !disconnected) {
+      logger?.warn("opencode: a denied MCP server could not be disconnected; its deny rule also hides a server whose name extends it", { name });
+    }
+  }
+  return ruled;
 }
 
 /** `POST /mcp` — register (or re-register) the thread's server on its directory's instance. */

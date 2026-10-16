@@ -1,6 +1,6 @@
+import type { z } from "zod";
 import { utf8SequenceLength } from "@orquester/api/agent-chat";
 import { FsSandboxError } from "@orquester/config/fs";
-import { TodoError } from "../todos.ts";
 import { ToolError } from "./errors.ts";
 
 /** Claude Code discards MCP results above ~25k tokens; stay well under (spec §4.5). */
@@ -98,6 +98,14 @@ export function ok(value: Record<string, unknown>): { content: [TextContent]; st
 }
 
 /**
+ * The todo store's refusal (`../todos.ts` `TodoError`), recognised by shape: this module is
+ * reachable from the catalog the agent host loads, which must not pull the daemon's todo store in.
+ */
+function isTodoError(err: unknown): err is Error & { status: number } {
+  return err instanceof Error && err.name === "TodoError" && typeof (err as { status?: unknown }).status === "number";
+}
+
+/**
  * Map any thrown error to an isError result with a SAFE message (no path/stack leak), capped at MAX_ERROR_MESSAGE_CHARS
  * whatever it quotes.
  */
@@ -110,7 +118,7 @@ export function toSafeToolError(err: unknown): { content: [TextContent]; structu
   } else if (err instanceof FsSandboxError) {
     code = "PATH_NOT_ALLOWED";
     message = "Path is not allowed (outside the sandbox).";
-  } else if (err instanceof TodoError) {
+  } else if (isTodoError(err)) {
     // The todo store's own messages ("todo not found", "invalid scope") carry no path or stack.
     code = err.status === 404 ? "NOT_FOUND" : err.status === 409 ? "CONFLICT" : "INVALID_ARGUMENT";
     message = err.message;
@@ -121,4 +129,25 @@ export function toSafeToolError(err: unknown): { content: [TextContent]; structu
   const structured: { code: string; message: string; detail?: unknown } = { code, message };
   if (detail !== undefined) structured.detail = detail;
   return { content: [{ type: "text", text: `${code}: ${message}` }], structuredContent: structured, isError: true };
+}
+
+/** How many refused fields an INVALID_ARGUMENT names before "…". */
+const MAX_NAMED_ISSUES = 5;
+/**
+ * The most one refused field's text takes, and the most its path takes within it. zod's words can echo the caller's
+ * input — the value an enum received, a strict object's unknown keys, a record's key in the path — and a 2 MiB value
+ * must not make a 2 MiB error. The path is cut on its own, so the reason after it still shows.
+ */
+const MAX_ISSUE_CHARS = 200;
+const MAX_ISSUE_PATH_CHARS = 100;
+
+/** The one line an argument the schema refuses answers with: each bad field and why, as zod words it, each capped. */
+export function argumentProblems(toolName: string, error: z.ZodError): string {
+  const oneLine = (text: string) => text.replace(/\s+/g, " ");
+  const named = error.issues.slice(0, MAX_NAMED_ISSUES).map((issue) => {
+    const path = issue.path.length ? clipText(oneLine(issue.path.join(".")), MAX_ISSUE_PATH_CHARS) : "arguments";
+    return clipText(oneLine(`${path}: ${issue.message}`), MAX_ISSUE_CHARS);
+  });
+  const more = error.issues.length > MAX_NAMED_ISSUES ? "; …" : "";
+  return `Invalid arguments for ${toolName}: ${named.join("; ")}${more}.`;
 }

@@ -77,7 +77,7 @@ Coding agents are long-running, chatty processes that want your attention at unp
 - Web Push (VAPID) when an agent needs input or finishes — debounced, per-session, with a test button.
 
 ### 🔌 MCP server built in
-The daemon exposes a Streamable-HTTP **MCP endpoint** (`POST /mcp`, on the authenticated remote transport) so *other* agents can drive your agent chat sessions the way you do in the GUI: open, resume and configure Claude Code, Codex, OpenCode and Grok sessions, send messages with attachments and get the reply back, answer questions and approvals, read transcripts and diffs, wait for a session to need attention, and check usage and cost — plus shared todos, sandboxed file reads, automated workflows, desktop tabs and each agent CLI's global profile (MCP servers, skills, plugins, hooks, commands, instruction file). Setup and the tool reference: [`docs/orquester-mcp.md`](docs/orquester-mcp.md).
+The daemon exposes a Streamable-HTTP **MCP endpoint** (`POST /mcp`, on the authenticated remote transport) so *other* agents can drive your agent chat sessions the way you do in the GUI: open, resume and configure Claude Code, Codex, OpenCode and Grok sessions, send messages with attachments and get the reply back, answer questions and approvals, read transcripts and diffs, wait for a session to need attention, and check usage and cost — plus shared todos and saved prompts, sandboxed file and git reads, automated workflows, desktop tabs and each agent CLI's global profile (MCP servers, skills, plugins, hooks, commands, instruction file). The same 41-tool catalog serves the agents chatting *inside* Orquester (their own `orquester` server), where every tool is Read, Act or Admin and Admin changes wait for your approval card; Orquester keeps this full-trust endpoint out of those chats. Setup and the tool reference: [`docs/orquester-mcp.md`](docs/orquester-mcp.md); the in-chat side: [`apps/daemon/src/session-tools/README.md`](apps/daemon/src/session-tools/README.md).
 
 ---
 
@@ -127,7 +127,7 @@ flowchart LR
 - **Two transports, one server**: an always-on Unix socket (desktop, trusted) and an opt-in, hot-reloadable HTTP transport (remote web, bearer-auth) — flip remote access on/off without touching running sessions.
 - **tmux-backed persistence**: commands live in a dedicated tmux server, so a daemon restart or redeploy reattaches to every running agent. Falls back to direct node-pty where tmux < 3.2 (Windows, stock macOS) — sessions then don't survive restarts.
 - **State is plain JSON** under one appdir (`~/.orquester` by default); the one SQLite file, the agent host's thread index, is a disposable cache rebuilt from the chat logs.
-- **External agents over MCP**: `POST /mcp` (remote transport only) drives chat sessions as an in-process client of the daemon's own REST API — the same routes and gates the GUI uses, no terminal keystrokes. See [`docs/orquester-mcp.md`](docs/orquester-mcp.md).
+- **External agents over MCP**: `POST /mcp` (remote transport only) drives chat sessions as an in-process client of the daemon's own REST API — the same routes and gates the GUI uses, no terminal keystrokes. One tool catalog (`apps/daemon/src/mcp/catalog/`) serves it and the in-chat `orquester` server the agent host gives every chat (`apps/daemon/src/session-tools/`), with tiers, toolsets and approval cards on the chat side. See [`docs/orquester-mcp.md`](docs/orquester-mcp.md).
 
 ### Monorepo layout
 

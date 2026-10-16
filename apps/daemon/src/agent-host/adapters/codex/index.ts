@@ -53,7 +53,7 @@ import {
   probeCodex,
   uninstalledCodexSnapshot
 } from "./probe.ts";
-import { issueSessionToolsGrant } from "../../session-tools/index.ts";
+import { issueSessionToolsGrant, launchHomeKey } from "../../session-tools/index.ts";
 import { CODEX_SESSION_TOOLS_TOKEN_ENV } from "./session-tools.ts";
 import { CodexSession } from "./session.ts";
 import { McpAppSnapshotStore } from "../mcp-app-capture.ts";
@@ -359,7 +359,12 @@ export const createCodexAdapter: AdapterFactory = async (
     // the thread's previous one, and the session revokes this one when its
     // child exits.
     const bin = requireBin();
-    const grant = await issueSessionToolsGrant(context, input.threadId);
+    const tools = await issueSessionToolsGrant(context, input.threadId, {
+      agent: "codex",
+      home: launchHomeKey(input.home),
+      project: input.projectPath ?? input.cwd
+    });
+    const grant = tools.grant;
     const session = new CodexSession({
       context,
       threadId: input.threadId,
@@ -375,11 +380,13 @@ export const createCodexAdapter: AdapterFactory = async (
         ? {
             sessionTools: {
               url: grant.url,
-              instructions: context.sessionTools?.instructions ?? "",
+              instructions: grant.prepared.instructions,
+              deny: grant.prepared.deny,
               revoke: grant.revoke
             }
           }
-        : {}),
+        : // No grant: no tools, but the thread's MCP denials still apply (§12.1).
+          { deniedMcpServers: tools.prepared?.deny ?? [] }),
       runtimeMode: input.runtimeMode,
       modelSelection: input.modelSelection,
       ...(input.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),

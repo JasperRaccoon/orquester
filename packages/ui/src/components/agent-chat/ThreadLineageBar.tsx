@@ -1,5 +1,5 @@
 import React from "react";
-import { CornerDownRight, GitFork, GitMerge, X } from "lucide-react";
+import { GitFork, GitMerge, X } from "lucide-react";
 
 import type { SessionSummary } from "@orquester/api";
 
@@ -7,9 +7,12 @@ import { cn } from "../../lib/cn";
 import {
   lineageChildStatus,
   lineageChildren,
+  lineageChildrenLabel,
   lineageParent,
+  lineageRelationNoun,
   lineageVerb
 } from "../../lib/agent-chat/lineage.logic";
+import { lineageIcon } from "./LineageMark";
 import { Dropdown, DropdownItem } from "../ui";
 
 export interface LineageNotice {
@@ -19,7 +22,8 @@ export interface LineageNotice {
 
 /**
  * The thread's relations, over its timeline (thread lineage, spec 2026-10-14
- * §6): for a child, "Forked from <title>" / "Delegated by <title>" — the
+ * §6): for a child, "Forked from <title>" / "Delegated by <title>" / "Opened
+ * by <title>" (a chat another chat's agent opened, unified MCP §4.1) — the
  * title opens the parent — and "Merge back", which sends the parent the
  * fork's result (its last answer, editable first); for a parent, its forks
  * and delegated tasks, each with what it is doing, each opening its tab.
@@ -92,7 +96,8 @@ export function ThreadLineageBar({
       .finally(() => setSending(false));
   };
 
-  const RelationIcon = lineage?.relation === "delegate" ? CornerDownRight : GitFork;
+  const RelationIcon = lineageIcon(lineage?.relation);
+  const noun = lineageRelationNoun(lineage?.relation);
 
   return (
     <div className="shrink-0 border-b border-neutral-800/70 bg-neutral-950" data-thread-lineage="true">
@@ -127,7 +132,7 @@ export function ThreadLineageBar({
               composing && "bg-neutral-800 text-neutral-100"
             )}
             aria-expanded={composing}
-            title={`Send this ${lineage.relation === "delegate" ? "task's" : "fork's"} result to “${parent.title}”`}
+            title={`Send this ${noun}'s result to “${parent.title}”`}
           >
             <GitMerge size={12} strokeWidth={1.8} aria-hidden />
             Merge back
@@ -137,25 +142,19 @@ export function ThreadLineageBar({
           <Dropdown
             align="left"
             width="w-72"
-            ariaLabel="Forks and delegated tasks"
+            ariaLabel="Forks, delegated tasks and opened chats"
             triggerClassName="rounded focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500"
             trigger={
               <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-neutral-300 hover:bg-neutral-800 hover:text-neutral-100">
                 <GitFork size={12} strokeWidth={1.8} aria-hidden />
-                {childrenLabel(children)}
+                {lineageChildrenLabel(children)}
               </span>
             }
           >
             {children.map((child) => (
               <DropdownItem
                 key={child.id}
-                icon={
-                  child.lineage?.relation === "delegate" ? (
-                    <CornerDownRight size={13} aria-hidden />
-                  ) : (
-                    <GitFork size={13} aria-hidden />
-                  )
-                }
+                icon={React.createElement(lineageIcon(child.lineage?.relation), { size: 13, "aria-hidden": true })}
                 onClick={() => onOpenSession(child.id)}
               >
                 <span className="min-w-0 flex-1 truncate">{child.title}</span>
@@ -236,7 +235,7 @@ export function ThreadLineageBar({
       {composing && parent ? (
         <div className="mx-auto w-full min-w-0 max-w-3xl px-3 pb-2 sm:px-5">
           <label className="mb-1 block text-xs text-neutral-500" htmlFor={`merge-back-${session.id}`}>
-            Sent to “{parent.title}” as a message from this {lineage?.relation === "delegate" ? "task" : "fork"} —
+            Sent to “{parent.title}” as a message from this {noun} —
             queued if it is busy.
           </label>
           <textarea
@@ -278,14 +277,4 @@ export function ThreadLineageBar({
       ) : null}
     </div>
   );
-}
-
-function childrenLabel(children: readonly SessionSummary[]): string {
-  const forks = children.filter((child) => child.lineage?.relation !== "delegate").length;
-  const tasks = children.length - forks;
-  const parts = [
-    forks > 0 ? `${forks} fork${forks === 1 ? "" : "s"}` : null,
-    tasks > 0 ? `${tasks} task${tasks === 1 ? "" : "s"}` : null
-  ].filter(Boolean);
-  return parts.join(" · ");
 }

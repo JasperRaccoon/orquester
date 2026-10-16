@@ -11,8 +11,10 @@ import { Broadcaster } from "./broadcaster.ts";
 import {
   SavedPromptError,
   SavedPromptsService,
-  publishSavedPromptEvents
+  publishSavedPromptEvents,
+  savedPromptWorkflowUses
 } from "./saved-prompts.ts";
+import { savedPromptIdsOf } from "./mcp/tools/workflow-preview.ts";
 
 type Logger = { warn: (...args: unknown[]) => void; error: (...args: unknown[]) => void };
 const quiet: Logger = { warn: () => {}, error: () => {} };
@@ -786,4 +788,87 @@ test("upserts and deletions reach the /events bus on the saved-prompts channel",
       { channel: "saved-prompts", type: "savedPrompt.deleted", payload: { id: created.id, projectPath: null } }
     ]
   );
+});
+
+// --- Who created it (unified MCP design 2026-10-15 D-16) ------------------------
+
+const AGENT = { kind: "agent" as const, threadId: "t-1", projectPath: "/w/acme/api", agent: "claude", title: "Fix auth" };
+
+test("createdBy is derived from the principal: an agent's create is stamped, the user's and an external client's are not", async (t) => {
+  const s = await scratch();
+  t.after(s.cleanup);
+  const service = await emptyService(s);
+  const byAgent = await service.create({ title: "A", body: "a", projectPath: null }, AGENT);
+  assert.deepEqual(byAgent.createdBy, { kind: "agent", threadId: "t-1", agent: "claude", title: "Fix auth" });
+  // A body field naming createdBy is ignored, whoever sends it.
+  const forged = { title: "U", body: "u", projectPath: null, createdBy: { kind: "agent", threadId: "x" } };
+  assert.equal("createdBy" in (await service.create(forged as never)), false, "the user's create carries none");
+  assert.equal("createdBy" in (await service.create({ title: "E", body: "e", projectPath: null }, { kind: "external", credentialId: "cred_1" })), false);
+  const stored = (await onDisk(s)).prompts.find((p) => p.id === byAgent.id);
+  assert.deepEqual(stored?.createdBy, byAgent.createdBy, "persisted");
+  // A later edit never changes it.
+  const edited = await service.update(byAgent.id, { title: "A2" }, { kind: "user" });
+  assert.deepEqual(edited.createdBy, byAgent.createdBy);
+});
+
+test("pinning an agent-created prompt is the user's alone: 403 AGENT_PROMPT_PIN_REFUSED for agents and external clients", async (t) => {
+  const s = await scratch();
+  t.after(s.cleanup);
+  const service = await emptyService(s);
+  await refuses(service.create({ title: "A", body: "a", projectPath: null, pinned: true }, AGENT), 403, "AGENT_PROMPT_PIN_REFUSED");
+  assert.equal((await service.list(null)).length, 0, "nothing was created");
+  const prompt = await service.create({ title: "A", body: "a", projectPath: null }, AGENT);
+  await refuses(service.update(prompt.id, { pinned: true }, AGENT), 403, "AGENT_PROMPT_PIN_REFUSED");
+  await refuses(service.update(prompt.id, { pinned: true, title: "x" }, { kind: "external" }), 403, "AGENT_PROMPT_PIN_REFUSED");
+  assert.equal(service.get(prompt.id)?.title, "A", "a refused patch changes nothing");
+  // The user pins it (the default principal is the user); anyone may unpin.
+  assert.equal((await service.update(prompt.id, { pinned: true })).pinned, true);
+  assert.equal((await service.update(prompt.id, { pinned: false }, AGENT)).pinned, false);
+  // A user-created prompt pins from any caller.
+  const mine = await service.create({ title: "U", body: "u", projectPath: null });
+  assert.equal((await service.update(mine.id, { pinned: true }, { kind: "external" })).pinned, true);
+});
+
+test("createdBy tolerance: a newer kind, unknown fields and a null survive the read and every rewrite", async (t) => {
+  const s = await scratch();
+  t.after(s.cleanup);
+  await writeLibrary(s, {
+    version: 1,
+    prompts: [
+      storedRecord({ id: "agent", createdBy: { kind: "agent", threadId: "t-9", agent: "codex", title: "T", model: "gpt" } }),
+      storedRecord({ id: "newer", createdBy: { kind: "workflow", workflowId: "wf_1" } }),
+      storedRecord({ id: "null", createdBy: null }),
+      storedRecord({ id: "broken", createdBy: "agent" })
+    ]
+  });
+  const service = s.service();
+  await service.load();
+  assert.deepEqual((await service.list(null)).map((p) => p.id), ["agent", "newer", "null"], "a non-object createdBy sets the record aside");
+  assert.equal(service.get("null")!.createdBy, undefined, "null reads as absent (the user's)");
+  // A newer build's kind reads as the user's: anyone may pin it.
+  assert.equal((await service.update("newer", { pinned: true }, AGENT)).pinned, true);
+  await refuses(service.update("agent", { pinned: true }, AGENT), 403, "AGENT_PROMPT_PIN_REFUSED");
+  await service.update("agent", { title: "Renamed" });
+  const disk = await onDisk(s);
+  assert.deepEqual(disk.prompts.find((p) => p.id === "agent")?.createdBy, { kind: "agent", threadId: "t-9", agent: "codex", title: "T", model: "gpt" });
+  assert.deepEqual(disk.prompts.find((p) => p.id === "newer")?.createdBy, { kind: "workflow", workflowId: "wf_1" });
+  assert.deepEqual(disk.prompts.find((p) => p.id === "broken"), storedRecord({ id: "broken", createdBy: "agent" }), "kept verbatim");
+  assert.equal("createdBy" in disk.prompts.find((p) => p.id === "null")!, false, "rewritten as absent");
+});
+
+test("savedPromptWorkflowUses: every workflow whose agent block names a saved prompt, once each", () => {
+  const agent = (id: string, prompt: unknown) => ({ id, name: id, type: "agent", config: { prompt } });
+  const workflows = [
+    { id: "wf_1", name: "Nightly", nodes: [agent("a", { kind: "saved", promptId: "p1" }), agent("b", { kind: "saved", promptId: "p1" }), agent("c", { kind: "text", text: "p2" })] },
+    { id: "wf_2", name: "Review", nodes: [{ id: "x", name: "x", type: "code", config: { prompt: { kind: "saved", promptId: "p2" } } }, agent("d", { kind: "saved", promptId: "p2" })] }
+  ];
+  const uses = savedPromptWorkflowUses(workflows as never);
+  assert.deepEqual(Object.fromEntries(uses), {
+    p1: [{ workflowId: "wf_1", name: "Nightly" }],
+    p2: [{ workflowId: "wf_2", name: "Review" }]
+  });
+  // One rule: the list rows agree with Task 10's `savedPromptIdsOf`, which the workflow tools use.
+  for (const workflow of workflows) {
+    for (const id of savedPromptIdsOf(workflow)) assert.ok(uses.get(id)?.some((use) => use.workflowId === workflow.id), `${workflow.id} → ${id}`);
+  }
 });

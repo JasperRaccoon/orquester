@@ -731,31 +731,29 @@ export class AgentChatService {
     if (!owner.ok) {
       throw new ChatSessionError(owner.message, owner.code);
     }
-    // Spec 2026-10-14 §6: a delegate names its parent — a chat tab of the same project. A fork
-    // carries the parent's conversation and is created by `forkSession`, never here.
+    // Spec 2026-10-14 §6, unified MCP design 2026-10-15 §4.1: a `delegate` (a task) or an `opened`
+    // chat names its parent — a chat tab of any project. A fork carries the parent's conversation
+    // and is created by `forkSession`, never here.
     let lineage: ThreadLineage | undefined;
     if (fields.lineage !== undefined) {
       const parentId = fields.lineage?.parentThreadId;
       const parent = typeof parentId === "string" ? this.chat.get(parentId) : undefined;
-      if (fields.lineage?.relation !== "delegate" || !parent) {
+      const relation = fields.lineage?.relation;
+      if ((relation !== "delegate" && relation !== "opened") || !parent) {
         throw new ChatSessionError(
-          "lineage must name a chat session as parent, with relation \"delegate\".",
+          "lineage must name a chat session as parent, with relation \"delegate\" or \"opened\".",
           "INVALID_LINEAGE"
         );
       }
       // Compared as the daemon resolves a project everywhere else — realpath inside the
-      // workspaces sandbox, else a plain resolve — so `/w/p/` and `/w/./p` are one project.
-      if (!(await this.sameProject(parent.projectPath, req.projectPath ?? ""))) {
-        throw new ChatSessionError("A delegated session opens in its parent's project.", "INVALID_LINEAGE");
+      // workspaces sandbox, else a plain resolve — so `/w/p/` and `/w/./p` are one project. A child
+      // of the parent's project groups with its tabs under the parent's own spelling of the path.
+      if (await this.sameProject(parent.projectPath, req.projectPath ?? "")) {
+        req = { ...req, projectPath: parent.projectPath };
       }
-      // The child's tab groups with its parent's: the parent's own spelling of the path.
-      req = { ...req, projectPath: parent.projectPath };
-      lineage = {
-        parentThreadId: parent.id,
-        relation: "delegate",
-        createdAt: new Date().toISOString(),
-        delegationDepth: this.delegationDepthOf(parent) + 1
-      };
+      // PRINCIPAL-GATED (`principal.ts`): the route removed `agentCreated` unless the request's
+      // principal is the parent's own agent (`gateSessionCreateBody`), so a `true` here is one.
+      lineage = createdChildLineage(parent, { relation, agentCreated: fields.lineage.agentCreated === true }, (id) => this.chat.get(id), new Date().toISOString());
     }
     if (fields.resume && !isUsableConversationId(fields.resume.conversationId)) {
       throw new ChatSessionError(
@@ -871,23 +869,21 @@ export class AgentChatService {
   }
 
   /**
-   * How many delegate links lie above and including `tab` (spec 2026-10-14 §5 "Delegation"):
-   * its lineage's recorded `delegationDepth`, else — a record from before the field — counted up
+   * How many agent-made links lie above and including `tab` (spec 2026-10-14 §5 "Delegation";
+   * unified MCP design 2026-10-15 §5.6, §13 c — {@link countsTowardDelegationDepth}): its
+   * lineage's recorded `delegationDepth`, else — a record from before the field — counted up
    * through the open tabs its lineage names.
    */
   delegationDepthOf(tab: { lineage?: ThreadLineage }): number {
-    let depth = 0;
-    let current: { lineage?: ThreadLineage } | undefined = tab;
-    const seen = new Set<string>();
-    while (current?.lineage) {
-      if (current.lineage.delegationDepth !== undefined) return depth + current.lineage.delegationDepth;
-      if (current.lineage.relation === "delegate") depth += 1;
-      const parentId: string = current.lineage.parentThreadId;
-      if (seen.has(parentId)) break;
-      seen.add(parentId);
-      current = this.chat.get(parentId) ?? undefined;
-    }
-    return depth;
+    return lineageDelegationDepth(tab, (id) => this.chat.get(id));
+  }
+
+  /**
+   * Whether a chat created from `creator` (its delegate, opened chat or fork) inherits workflow
+   * ownership — {@link lineageInheritsWorkflowOwnership} over the open tabs.
+   */
+  inheritsWorkflowOwnership(creator: { owner?: SessionSummary["owner"]; lineage?: ThreadLineage }): boolean {
+    return lineageInheritsWorkflowOwnership(creator, (id) => this.chat.get(id));
   }
 
   /** Two project paths name one project once resolved (realpath in the sandbox, else `resolve`). */
@@ -1012,6 +1008,10 @@ export class AgentChatService {
       throw new ChatSessionError('role must be "user" or "assistant".', "INVALID_COMMAND");
     }
     const title = optionalField(body.title, "title", 200)?.trim();
+    // PRINCIPAL-GATED (`ForkSessionRequest.agentCreated`): the fork route removed it unless the
+    // request's principal is the forked chat's own agent, so a `true` here is one (§13 c). A
+    // repeat of a keyed fork keeps what the first recorded.
+    const agentCreated = existingAgentCreated(this.chat.get(id)) ?? body.agentCreated === true;
     const entry = this.opts.registryEntry(parent.refId);
     if (!entry?.resolvedBin || !entry.enabled || !entry.chat?.adapter) {
       throw new ChatSessionError(`Registry entry "${parent.refId}" is not available.`);
@@ -1054,7 +1054,12 @@ export class AgentChatService {
       accountId: parentAccount,
       home,
       // Provisional until the host answers with the fork point it resolved.
-      lineage: withDelegationDepth({ parentThreadId: parentId, relation: "fork", createdAt: new Date().toISOString() }, this.delegationDepthOf(parent)),
+      lineage: withLineageStamps(
+        { parentThreadId: parentId, relation: "fork", createdAt: new Date().toISOString() },
+        this.delegationDepthOf(parent),
+        agentCreated,
+        this.inheritsWorkflowOwnership(parent)
+      ),
       // Recorded for every fork (an unkeyed one too): it tells a keyed repeat from a reuse, and
       // it is the cut a reconcile re-sends (`confirmFork`).
       forkFingerprint: fingerprint ?? forkFingerprint(req),
@@ -1129,7 +1134,7 @@ export class AgentChatService {
       throw new ChatSessionError(error instanceof Error ? error.message : String(error), "HOST_UNAVAILABLE");
     }
     // The host resolves the fork point; the depth is the daemon's, from the parent's record.
-    const lineage = withDelegationDepth(result.lineage, this.delegationDepthOf(parent));
+    const lineage = withLineageStamps(result.lineage, this.delegationDepthOf(parent), agentCreated, this.inheritsWorkflowOwnership(parent));
     const forked = this.chat.setLineage(id, lineage) ?? summary;
     return { session: forked, lineage, strategy: result.strategy };
   }
@@ -1248,7 +1253,16 @@ export class AgentChatService {
     if (this.forkChildrenInFlight.has(id) || !this.chat.has(id)) return;
     if (response.status < 400 && response.value?.head) {
       this.forkRefusals.delete(id);
-      this.chat.setLineage(id, withDelegationDepth(response.value.lineage ?? response.value.head.lineage ?? tab.lineage!, tab.lineage?.delegationDepth ?? 0));
+      this.chat.setLineage(
+        id,
+        withLineageStamps(
+          response.value.lineage ?? response.value.head.lineage ?? tab.lineage!,
+          tab.lineage?.delegationDepth ?? 0,
+          tab.lineage?.agentCreated === true,
+          // What the tab recorded at creation (the parent may have closed since).
+          tab.lineage?.workflowOwned === true
+        )
+      );
       return;
     }
     // Only "no such thread" — the host's own 404, or an older host's route miss — says the child
@@ -1865,10 +1879,102 @@ function isUsableConversationId(value: unknown): boolean {
 
 export { ChatSessionError };
 
-/** `lineage` with a delegation depth stamped, unless it is 0 (a lineage without one reads as 0). */
-function withDelegationDepth(lineage: ThreadLineage, depth: number): ThreadLineage {
-  const { delegationDepth: _dropped, ...rest } = lineage;
-  return depth > 0 ? { ...rest, delegationDepth: depth } : rest;
+/** A tab as the lineage stamps read it. */
+type LineageTab = { owner?: SessionSummary["owner"]; lineage?: ThreadLineage };
+
+/**
+ * How many agent-made links lie above and including `tab` (spec 2026-10-14 §5 "Delegation";
+ * unified MCP design 2026-10-15 §5.6, §13 c — {@link countsTowardDelegationDepth}): its
+ * lineage's recorded `delegationDepth`, else — a record from before the field — counted up
+ * through the open tabs (`tabs`) its lineage names.
+ */
+export function lineageDelegationDepth(tab: { lineage?: ThreadLineage }, tabs: (id: string) => LineageTab | undefined): number {
+  let depth = 0;
+  let current: { lineage?: ThreadLineage } | undefined = tab;
+  const seen = new Set<string>();
+  while (current?.lineage) {
+    if (current.lineage.delegationDepth !== undefined) return depth + current.lineage.delegationDepth;
+    if (countsTowardDelegationDepth(current.lineage)) depth += 1;
+    const parentId: string = current.lineage.parentThreadId;
+    if (seen.has(parentId)) break;
+    seen.add(parentId);
+    current = tabs(parentId) ?? undefined;
+  }
+  return depth;
+}
+
+/**
+ * Whether a chat created from `creator` (its delegate, opened chat or fork) inherits workflow
+ * ownership (unified MCP design 2026-10-15 §5.4): `creator` or an ancestor over the open tabs is
+ * owned by a workflow, or carries the inherited marker (`ThreadLineage.workflowOwned`). Only
+ * proven ownership is stamped — the marker is permanent; a walk that meets a closed ancestor stops
+ * here, and the gate's own walk (fail-closed behind agent-made links) still applies.
+ */
+export function lineageInheritsWorkflowOwnership(creator: LineageTab, tabs: (id: string) => LineageTab | undefined): boolean {
+  let current: LineageTab | undefined = creator;
+  const seen = new Set<string>();
+  while (current) {
+    if (current.owner?.kind === "workflow" || current.lineage?.workflowOwned === true) return true;
+    const parentId = current.lineage?.parentThreadId;
+    if (parentId === undefined || seen.has(parentId)) return false;
+    seen.add(parentId);
+    current = tabs(parentId);
+  }
+  return false;
+}
+
+/**
+ * The lineage the daemon records for a `delegate` or `opened` child of `parent` (spec 2026-10-14
+ * §6; unified MCP design 2026-10-15 §4.1, §5.4, §5.6, §13 c): its depth (recorded even at 0, so no
+ * later read walks the chain for this link), `agentCreated` when a chat tool made it (the route's
+ * principal gate already removed a forged one), and the inherited workflow-ownership marker.
+ */
+export function createdChildLineage(
+  parent: LineageTab & { id: string },
+  link: { relation: "delegate" | "opened"; agentCreated: boolean },
+  tabs: (id: string) => LineageTab | undefined,
+  createdAt: string
+): ThreadLineage {
+  return {
+    parentThreadId: parent.id,
+    relation: link.relation,
+    createdAt,
+    delegationDepth: lineageDelegationDepth(parent, tabs) + (countsTowardDelegationDepth(link) ? 1 : 0),
+    ...(link.agentCreated ? { agentCreated: true as const } : {}),
+    ...(lineageInheritsWorkflowOwnership(parent, tabs) ? { workflowOwned: true as const } : {})
+  };
+}
+
+/**
+ * `lineage` with the daemon's own stamps: the delegation depth, unless it is 0 (a fork's lineage
+ * without one reads as its parent's), and `agentCreated` when a chat tool made the child — never
+ * taken from the host's answer, which does not know (unified MCP design 2026-10-15 §13 c).
+ */
+function withLineageStamps(lineage: ThreadLineage, depth: number, agentCreated: boolean, workflowOwned: boolean): ThreadLineage {
+  const { delegationDepth: _depth, agentCreated: _agent, workflowOwned: _owned, ...rest } = lineage;
+  return {
+    ...rest,
+    ...(depth > 0 ? { delegationDepth: depth } : {}),
+    ...(agentCreated ? { agentCreated: true as const } : {}),
+    // §5.4: the daemon's own stamp from the forked chat's tab, never the host's answer.
+    ...(workflowOwned ? { workflowOwned: true as const } : {})
+  };
+}
+
+/** A keyed fork's tab already recorded whether a chat tool made it; undefined when there is no tab yet. */
+function existingAgentCreated(tab: { lineage?: ThreadLineage } | undefined): boolean | undefined {
+  return tab?.lineage ? tab.lineage.agentCreated === true : undefined;
+}
+
+/**
+ * Whether a lineage link counts toward `delegationDepth` (unified MCP design 2026-10-15 §5.6,
+ * §13 c; D-15): a chat tool's `opened` child (`agentCreated`) and every `delegate` — only the
+ * delegation tools make delegates, and a delegate from a build before `agentCreated` carries no
+ * flag, so counting every one keeps that older chain's cap. A fork never counts, nor does an
+ * `opened` chat the user or an external client made.
+ */
+export function countsTowardDelegationDepth(lineage: { relation: ThreadLineage["relation"]; agentCreated?: boolean }): boolean {
+  return lineage.relation === "delegate" || (lineage.relation === "opened" && lineage.agentCreated === true);
 }
 
 /** A fork the host keeps refusing to confirm (other than "no such thread") is asked again after this, doubling. */

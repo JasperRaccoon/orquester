@@ -10,7 +10,9 @@ import {
   lineageChildStatus,
   lineageChildren,
   lineageParent,
-  lineageVerb
+  lineageVerb,
+  lineageChildrenLabel,
+  lineageRelationNoun
 } from "./lineage.logic";
 
 const tab = (id: string, extra: Partial<SessionSummary> = {}): SessionSummary =>
@@ -120,5 +122,24 @@ describe("lineage in the client", () => {
       keys.settle(key, "b", null);
       assert.equal(keys.commandIdFor(key, () => "fresh"), "fresh");
     });
+  });
+});
+
+describe("opened chats (unified MCP §4.1)", () => {
+  it("read as opened, never as forks", () => {
+    assert.equal(lineageVerb({ relation: "opened" }), "Opened by");
+    assert.equal(lineageVerb({ relation: "fork" }), "Forked from");
+    assert.equal(lineageVerb({ relation: "delegate" }), "Delegated by");
+    assert.equal(lineageRelationNoun("opened"), "opened chat");
+    assert.equal(lineageRelationNoun(undefined), "fork");
+  });
+
+  it("a parent counts its children by relation", () => {
+    const child = (relation: "fork" | "delegate" | "opened") => ({ lineage: { parentThreadId: "p", relation, createdAt: "t" } }) as Pick<SessionSummary, "lineage">;
+    assert.equal(lineageChildrenLabel([child("fork"), child("opened"), child("opened")]), "1 fork · 2 opened chats");
+    assert.equal(lineageChildrenLabel([child("delegate")]), "1 task");
+    // A newer daemon's relation is counted, in a neutral bucket.
+    const future = { lineage: { parentThreadId: "p", relation: "adopted", createdAt: "t" } } as unknown as Pick<SessionSummary, "lineage">;
+    assert.equal(lineageChildrenLabel([child("fork"), future, future]), "1 fork · 2 other chats");
   });
 });

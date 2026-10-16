@@ -240,6 +240,9 @@ export class CodexNormaliser {
    */
   private readonly settledTurns = new Set<string>();
 
+  /** The name the session registered our `orquester` server under, once it knows it. */
+  sessionToolsServerName: string | undefined;
+
   constructor(options: CodexNormaliserOptions) {
     this.usage = options.usage;
     this.ownThreadId = options.ownThreadId ?? ((): string | null => null);
@@ -1100,7 +1103,7 @@ export class CodexNormaliser {
     raw: RuntimeEventRaw
   ): RuntimeEventDraft[] {
     const item = p.item as CodexThreadItem;
-    const classified = classifyItem(item);
+    const classified = classifyItem(item, this.sessionToolsServerName);
     const events: RuntimeEventDraft[] = [];
 
     // A message still open when the next item of its turn starts is one the
@@ -1477,7 +1480,7 @@ export class CodexNormaliser {
           | CodexProtocol.v2.ItemStartedNotification
           | CodexProtocol.v2.ItemCompletedNotification;
         const item = p.item as CodexThreadItem;
-        const classified = classifyItem(item);
+        const classified = classifyItem(item, this.sessionToolsServerName);
         if (item.type === "collabAgentToolCall") {
           // A child spawning or prompting an agent of its own: the grandchild's
           // start carries it, as the parent's calls give theirs. Keyed as its

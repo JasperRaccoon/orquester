@@ -250,6 +250,27 @@ interface Chromium {
   readonly exited: Promise<Error | undefined>;
 }
 
+/**
+ * How long `taskkill` may take before the direct kill takes over: the tree kill is synchronous (it
+ * also runs while the daemon exits), so a `taskkill` that hangs must never hang the daemon with it.
+ */
+export const TASKKILL_TIMEOUT_MS = 5_000;
+
+/**
+ * Kill a Windows process tree by pid (`taskkill /pid <pid> /T /F`), bounded by `timeoutMs` (the
+ * command is killed past it). True only when it reported success in time; the caller then falls
+ * back to killing the process itself. `run` is the test seam (a `spawnSync`).
+ */
+export function killWindowsTree(pid: number, opts: { run?: typeof spawnSync; timeoutMs?: number } = {}): boolean {
+  const result = (opts.run ?? spawnSync)("taskkill", ["/pid", String(pid), "/T", "/F"], {
+    stdio: "ignore",
+    windowsHide: true,
+    timeout: opts.timeoutMs ?? TASKKILL_TIMEOUT_MS,
+    killSignal: "SIGKILL"
+  });
+  return result.status === 0 && result.error === undefined;
+}
+
 /** The kills of every Chromium still running: the daemon exiting takes them with it. */
 const running = new Set<() => void>();
 let killOnExitInstalled = false;
@@ -274,9 +295,8 @@ function startChromium(executable: string, args: string[]): Chromium {
     // Until it is reaped its pid (and so its group's id) cannot be reused.
     if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) return;
     if (!posix) {
-      // Synchronous, as this also runs while the daemon exits.
-      const tree = spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
-      if (tree.status !== 0) child.kill();
+      // Synchronous, as this also runs while the daemon exits — and bounded (TASKKILL_TIMEOUT_MS).
+      if (!killWindowsTree(child.pid)) child.kill();
       return;
     }
     try {

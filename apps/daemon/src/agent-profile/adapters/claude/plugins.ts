@@ -6,7 +6,7 @@
  */
 
 import { readdir, readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
 import type { MarketplaceSource } from "@orquester/api";
 import { readTextIfExists } from "../../infra/index.ts";
 import { isRecord, parseJsonText } from "./settings.ts";
@@ -219,4 +219,36 @@ export async function pluginProvides(
     if (!counts[key]) delete counts[key];
   }
   return counts;
+}
+
+/**
+ * Where `plugin` of a known marketplace lives before it is installed (approval-card previews):
+ * the marketplace catalogue entry's `source` — a path inside the checkout (`./plugins/x`, or a
+ * bare name under `metadata.pluginRoot`), else a source the CLI fetches at install (`github`,
+ * `url`, `git-subdir`, …). Throws an `Error` when the catalogue cannot be read or does not list it.
+ */
+export async function claudePluginSource(
+  installLocation: string,
+  plugin: string
+): Promise<{ version?: string; source: { type: "local"; dir: string } | { type: "remote"; description: string } }> {
+  const doc: unknown = JSON.parse(await readFile(join(installLocation, ".claude-plugin", "marketplace.json"), "utf8"));
+  if (!isRecord(doc) || !Array.isArray(doc.plugins)) throw new Error("marketplace.json has no plugins list");
+  const entry = doc.plugins.find((candidate) => isRecord(candidate) && candidate.name === plugin);
+  if (!isRecord(entry)) throw new Error(`the marketplace does not list ${plugin}`);
+  const version = typeof entry.version === "string" ? { version: entry.version } : {};
+  const source = entry.source;
+  if (typeof source === "string") {
+    const pluginRoot = isRecord(doc.metadata) && typeof doc.metadata.pluginRoot === "string" ? doc.metadata.pluginRoot : "";
+    const relative = source.startsWith("./") || source.startsWith("../") || pluginRoot === "" ? source : join(pluginRoot, source);
+    const root = resolve(installLocation);
+    const dir = resolve(root, relative);
+    if (dir !== root && !dir.startsWith(`${root}${sep}`)) throw new Error("the plugin's source lies outside the marketplace");
+    return { ...version, source: { type: "local", dir } };
+  }
+  if (isRecord(source)) {
+    const kind = typeof source.source === "string" ? source.source : "unknown";
+    const where = [source.repo, source.url, source.path, source.ref].filter((part): part is string => typeof part === "string").join(" ");
+    return { ...version, source: { type: "remote", description: `${kind}${where ? ` ${where}` : ""}` } };
+  }
+  throw new Error("the plugin has no source");
 }

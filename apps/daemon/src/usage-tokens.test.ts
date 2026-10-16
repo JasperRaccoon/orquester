@@ -297,3 +297,22 @@ test("subagent requests are unknown until the transcripts have been scanned once
   await scanner.recompute();
   assert.deepEqual(scanner.subagentRequests(0), []);
 });
+
+test("claude-opus-5-5 has its own row: it reproduces the CLI's charges in claude fixtures 17, 18 and 19 (1-hour cache writes)", () => {
+  const cost = (input: number, output: number, cacheRead: number, cacheWrite: number) => {
+    const parts = estimateCostParts("claude-opus-5-5", { input, output, cacheRead, cacheWrite, cacheWrite1h: cacheWrite })!;
+    return parts.input + parts.output + parts.cache;
+  };
+  const close = (actual: number, expected: number) => assert.ok(Math.abs(actual - expected) < 1e-9, `${actual} vs ${expected}`);
+  close(cost(4, 333, 29_426, 6_900), 0.0677612); // fixture 17, turn 1
+  close(cost(4, 202, 29_295, 6_651), 0.063123); // fixture 18
+  close(cost(4, 176, 31_004, 4_847), 0.0485128); // fixture 19, turn 1
+  // Not the claude-opus-5 row any more (the prefix fallback priced it at opus 5's rates before).
+  assert.notEqual(estimateCostParts("claude-opus-5-5", { input: 1_000_000, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0 })!.input, 5);
+});
+
+test("a trailing context tag is dropped before the lookup: claude-opus-4-8[1m] bills at standard opus 4.8 rates (claude fixture 01: 0.21547)", () => {
+  const parts = estimateCostParts("claude-opus-4-8[1m]", { input: 2, output: 4, cacheRead: 0, cacheWrite: 21_536, cacheWrite1h: 21_536 })!;
+  assert.ok(Math.abs(parts.input + parts.output + parts.cache - 0.21547) < 1e-9);
+  assert.notEqual(estimateCostParts("claude-fable-5[1m]", { input: 1, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0 }), null);
+});

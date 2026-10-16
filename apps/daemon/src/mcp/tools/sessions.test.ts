@@ -10,10 +10,28 @@ import type { DaemonResponse } from "../daemon-api.ts";
 import type { ToolError } from "../errors.ts";
 import { busEvent, FakeDaemonApi } from "../testing.ts";
 import { activity, chatSummary, head, message, shellSummary, snapshot, stamp, turn } from "../fixtures.ts";
-import type { ToolContext } from "../tool.ts";
-import { sessionTools } from "./sessions.ts";
+import type { CallContext } from "../catalog/contract.ts";
+import { catalogFor } from "../catalog/index.ts";
+import { createSessionTool } from "./messages.ts";
+import { sessionsFamily } from "./sessions.ts";
 
-const tool = (name: string) => sessionTools.find((t) => t.name === name)!;
+/** What these tests hand a tool: the daemon API, the call's signal and clock. */
+type ToolContext = Pick<CallContext, "api" | "signal" | "now">;
+/** An external caller's context (full trust), as the executor builds it for `/mcp`. */
+const external = (ctx: ToolContext): CallContext => ({ api: ctx.api, signal: ctx.signal, now: ctx.now, caller: { kind: "external" }, turn: { interactionMode: "default", provenance: (_origin, text) => text } });
+/** Spec §11: the six session controls are control_session actions now — the ported tests call the old names through it. */
+const CONTROL_ACTIONS: Readonly<Record<string, string>> = {
+  interrupt_session: "interrupt", stop_task: "stop_task", stop_session: "stop_process", close_session: "close", revert_session: "rewind", compact_session: "compact"
+};
+const tool = (name: string) => {
+  const action = CONTROL_ACTIONS[name];
+  // create_session is the conversation family's (messages.ts); its external path is the pre-catalog tool's, ported.
+  const unified = name === "create_session" ? createSessionTool : sessionsFamily.find((t) => t.name === (action ? "control_session" : name))!;
+  return {
+    input: unified.input,
+    run: (args: Record<string, unknown>, ctx: ToolContext) => unified.run({ ...args, ...(action ? { action } : {}) } as never, external(ctx)) as Promise<Record<string, unknown>>
+  };
+};
 const registry = { shells: [], ides: [], fileExplorers: [], browsers: [], agents: [
   { id: "claude", kind: "agent", name: "Claude Code", bin: ["claude"], enabled: true, installState: "idle", chat: { adapter: "claude" } },
   { id: "grok", kind: "agent", name: "Grok Build", bin: ["grok"], enabled: false, installState: "idle", chat: { adapter: "grok" } }
@@ -34,8 +52,9 @@ async function harness(sessions = [chatSummary(), shellSummary()], snap = snapsh
   api.on("GET", "/api/sessions", { status: 200, body: sessions.map(fix) })
     .on("GET", "/api/sessions/c1/thread", { status: 200, body: { kind: "snapshot", thread: { ...snap, head: { ...snap.head, projectPath, cwd: projectPath } } } })
     .on("GET", "/api/registry", { status: 200, body: registry }).on("GET", "/api/agent/providers", { status: 200, body: providers })
-    .on("GET", "/api/agent-accounts", { status: 200, body: accounts });
-  const ctx: ToolContext = { api, todos: {} as never, files: {} as never, signal: new AbortController().signal, now: () => Date.parse("2026-09-22T12:00:00.000Z") };
+    .on("GET", "/api/agent-accounts", { status: 200, body: accounts })
+    .on("GET", "/api/sessions/c1/lineage", { status: 200, body: { sessionId: "c1", lineage: null, parent: null, children: [], pendingMerges: [] } });
+  const ctx: ToolContext = { api, signal: new AbortController().signal, now: () => Date.parse("2026-09-22T12:00:00.000Z") };
   return { api, ctx, projectPath, root, close: () => rm(root, { recursive: true, force: true }) };
 }
 
@@ -707,4 +726,32 @@ test("get_turn_diff bounds a huge file list too: the head that fits, filesTrunca
   assert.ok(bytes <= 60_000, `${bytes} bytes: within one result, the diff filling the rest`);
   assert.ok((r.diff as string).length > 0);
 
+});
+
+test("spec §11: get_session_lineage is get_session's lineage and pending deliveries; the external surface names the unified tools only", async (t) => {
+  const h = await harness([chatSummary({ lineage: { parentThreadId: "p1", relation: "fork", createdAt: stamp(0) } }), shellSummary()]); t.after(h.close);
+  const merge = { mergeId: "m1", parentSessionId: "p1", childSessionId: "c1", queuedAt: stamp(1), state: "queued", preview: "found it", attempts: 0 };
+  h.api.on("GET", "/api/sessions/c1/lineage", { status: 200, body: { sessionId: "c1", lineage: { parentThreadId: "p1", relation: "fork", createdAt: stamp(0) }, parent: { sessionId: "p1", title: "Parent", exists: true }, children: [], pendingMerges: [merge] } });
+  const r = await tool("get_session").run({ sessionId: "c1" }, h.ctx);
+  assert.deepEqual(r.lineage, { relation: "fork", createdAt: stamp(0), parent: { sessionId: "p1", title: "Parent", exists: true }, children: [] });
+  assert.deepEqual(r.pendingDeliveries, [merge]);
+  assert.equal(r.notice, undefined, "external results carry no chat notice");
+  assert.equal(r.threadRef, undefined);
+  const names = new Set(catalogFor("external").map((x) => x.name));
+  for (const gone of ["interrupt_session", "stop_task", "stop_session", "close_session", "revert_session", "compact_session", "answer_question", "dismiss_question", "resolve_approval"]) assert.ok(!names.has(gone), gone);
+  for (const kept of ["list_sessions", "get_session", "read_transcript", "read_tool_output", "get_turn_diff", "search_sessions", "update_session", "control_session", "respond_to_request"]) assert.ok(names.has(kept), kept);
+});
+
+test("control_session refuses arguments of another action, and an action missing its own", async (t) => {
+  const h = await harness(); t.after(h.close);
+  const control = sessionsFamily.find((x) => x.name === "control_session")!;
+  for (const [args, pattern] of [
+    [{ action: "stop_task" }, /needs taskId/],
+    [{ action: "rewind" }, /needs keepTurns/],
+    [{ action: "interrupt", taskId: "x" }, /taskId is for action stop_task/],
+    [{ action: "compact", keepTurns: 1 }, /keepTurns is for action rewind/]
+  ] as const) {
+    await assert.rejects(control.run({ sessionId: "c1", ...args } as never, external(h.ctx)), (e: ToolError) => e.code === "INVALID_ARGUMENT" && pattern.test(e.message));
+  }
+  assert.ok(!h.api.calls.some((c) => c.method === "POST"));
 });

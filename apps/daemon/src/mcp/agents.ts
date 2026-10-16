@@ -1,18 +1,28 @@
 import type { AgentAccountsResponse, RegistryEntry, RegistryResponse } from "@orquester/api";
-import { agentChatRoutes, DEFAULT_RUNTIME_MODE, parseGoalSupport, RUNTIME_MODES, type AdapterCapabilities, type AdapterGoalSupport, type AgentAdapterId, type ModelSelection, type ProviderModel, type RuntimeMode } from "@orquester/api/agent-chat";
+import { agentChatRoutes, DEFAULT_RUNTIME_MODE, parseGoalSupport, providerPickerView, RUNTIME_MODES, type AdapterCapabilities, type AdapterGoalSupport, type AgentAdapterId, type ModelSelection, type ProviderModel, type ProviderOptionDescriptor, type ProviderSnapshot, type RuntimeMode } from "@orquester/api/agent-chat";
 import type { DaemonApi } from "./daemon-api.ts";
 import { ToolError } from "./errors.ts";
 import { clipText, MAX_ECHO_CHARS, resultBytes } from "./result.ts";
 
 const EFFORT_OPTION_IDS: Record<AgentAdapterId, string> = { claude: "effort", codex: "effort", opencode: "variant", grok: "reasoningEffort" };
-interface AgentModelOptionView { id: string; label: string; type: "select" | "boolean"; description?: string; values?: { id: string; label: string; description?: string; isDefault?: boolean }[] }
-interface AgentModelView { slug: string; name: string; shortName?: string; isDefault: boolean; isLegacy?: boolean; options: AgentModelOptionView[] }
+/** One model option as the composer picker shows it; `default` is the value a launch naming no options gets. */
+interface AgentModelOptionView { id: string; label: string; type: "select" | "boolean"; description?: string; values?: { id: string; label: string; description?: string; isDefault?: boolean }[]; default?: string | boolean }
+/**
+ * One model as the composer picker shows it (`providerPickerView`, `@orquester/api` model-selection.ts): `shortName` is
+ * the chip label (listed only when it differs from `name`), `hint` the picker row's hint, `isDefault` the model a launch naming none gets (exactly one per
+ * catalogue, never a legacy one while another exists). `shortName`/`hint` are optional only for hand-built views.
+ */
+interface AgentModelView { slug: string; name: string; shortName?: string; subProvider?: string; hint?: string; isDefault: boolean; isLegacy?: boolean; options: AgentModelOptionView[] }
 interface AgentAccountView { id: string; label: string; email: string | null; plan: string | null; needsReauth: boolean; isDefault: boolean }
 /** What an agent supports, as list_agents and get_session both report it (`supportsFrom`). */
 export interface AgentSupports { planMode: boolean; rollback: boolean; compaction: boolean; backgroundTasks: boolean; taskStop: boolean; goals: AdapterGoalSupport | null }
-/** `enabled` is the registry's: false when the agent's CLI was not found on this host. */
+/**
+ * `enabled` is the registry's: false when the agent's CLI was not found on this host. `defaultModel` is what a launch
+ * naming no model gets (`resolveLaunchModel`, the picker's default; null with no models); `catalogueLoading` is true
+ * while a ready-or-unknown provider lists no model yet. Both are optional only for hand-built views.
+ */
 export interface AgentView { id: string; name: string; adapter: AgentAdapterId; enabled: boolean; installed: boolean; version: string | null; status: string; message?: string; auth: { status: string; label?: string; email?: string };
-  models: AgentModelView[]; effortOptionId: string; runtimeModes: readonly RuntimeMode[]; defaultRuntimeMode: RuntimeMode; supports: AgentSupports & { contextWindow: boolean }; accounts: AgentAccountView[]; defaultAccountId: string }
+  models: AgentModelView[]; defaultModel?: string | null; catalogueLoading?: boolean; effortOptionId: string; runtimeModes: readonly RuntimeMode[]; defaultRuntimeMode: RuntimeMode; supports: AgentSupports & { contextWindow: boolean }; accounts: AgentAccountView[]; defaultAccountId: string }
 
 /**
  * The capability flags list_agents and get_session both report. No snapshot, or an absent flag, reads false — and so
@@ -28,29 +38,52 @@ type Raw = Record<string, unknown>;
 const isRecord = (v: unknown): v is Raw => v !== null && typeof v === "object" && !Array.isArray(v);
 const nonEmpty = (v: unknown): v is string => typeof v === "string" && v !== "";
 
-/** One model option as list_agents shows it; null for one nobody could set — no id or label, or a select with no choice (no adapter emits one). */
-function optionView(d: unknown): AgentModelOptionView | null {
+/**
+ * One option descriptor of a provider row, re-built from checked fields; null for one nobody could set — no id or
+ * label, or a select with no choice (no adapter emits one). An older host's row can mistype anything.
+ */
+function cleanDescriptor(d: unknown): ProviderOptionDescriptor | null {
   if (!isRecord(d) || !nonEmpty(d.id) || typeof d.label !== "string" || (d.type !== "select" && d.type !== "boolean")) return null;
-  const o: AgentModelOptionView = { id: d.id, label: d.label, type: d.type };
-  if (nonEmpty(d.description)) o.description = d.description;
-  if (d.type === "boolean") return o;
-  const values = (Array.isArray(d.options) ? d.options : []).filter((c): c is Raw => isRecord(c) && nonEmpty(c.id) && typeof c.label === "string")
+  const description = nonEmpty(d.description) ? { description: d.description } : {};
+  if (d.type === "boolean") return { id: d.id, label: d.label, type: "boolean", ...description, ...(typeof d.currentValue === "boolean" ? { currentValue: d.currentValue } : {}) };
+  const options = (Array.isArray(d.options) ? d.options : []).filter((c): c is Raw => isRecord(c) && nonEmpty(c.id) && typeof c.label === "string")
     .map((c) => ({ id: c.id as string, label: c.label as string, ...(nonEmpty(c.description) ? { description: c.description } : {}), ...(c.isDefault === true ? { isDefault: true } : {}) }));
-  if (!values.length) return null;
-  o.values = values;
-  return o;
+  if (!options.length) return null;
+  const current = nonEmpty(d.currentValue) && options.some((c) => c.id === d.currentValue) ? { currentValue: d.currentValue } : {};
+  return { id: d.id, label: d.label, type: "select", ...description, options, ...current };
 }
 
-function modelView(m: ProviderModel): AgentModelView {
-  const v: AgentModelView = { slug: m.slug, name: m.name, isDefault: m.isDefault === true, options: [] };
-  if (nonEmpty(m.shortName)) v.shortName = m.shortName;
-  if (m.isLegacy === true) v.isLegacy = true;
+/** A provider model re-built from checked fields (its descriptors through {@link cleanDescriptor}). */
+function cleanModel(m: Raw & { slug: string; name: string }): ProviderModel {
   const descriptors: unknown = isRecord(m.capabilities) ? m.capabilities.optionDescriptors : undefined;
-  for (const d of Array.isArray(descriptors) ? descriptors : []) {
-    const o = optionView(d);
-    if (o) v.options.push(o);
-  }
-  return v;
+  const optionDescriptors = (Array.isArray(descriptors) ? descriptors : []).map(cleanDescriptor).filter((d): d is ProviderOptionDescriptor => d !== null);
+  return {
+    slug: m.slug, name: m.name,
+    ...(nonEmpty(m.shortName) ? { shortName: m.shortName } : {}),
+    ...(nonEmpty(m.subProvider) ? { subProvider: m.subProvider } : {}),
+    ...(m.isDefault === true ? { isDefault: true } : {}),
+    ...(m.isLegacy === true ? { isLegacy: true } : {}),
+    capabilities: { optionDescriptors }
+  };
+}
+
+const PROVIDER_STATUSES: ReadonlySet<string> = new Set(["ready", "degraded", "error", "unknown"]);
+
+/**
+ * The composer picker's view of one provider's catalogue (`providerPickerView`, the one source the GUI's model chip
+ * reads): models in catalogue order (legacy ones only with `includeLegacy`, marked), chip labels, hints, the launch
+ * default and each option's default value.
+ */
+export function pickerModels(row: { status: string; models: readonly ProviderModel[] } | undefined, includeLegacy: boolean): { models: AgentModelView[]; defaultModel: string | null; catalogueLoading: boolean } {
+  const status = (row && PROVIDER_STATUSES.has(row.status) ? row.status : "unknown") as ProviderSnapshot["status"];
+  const view = providerPickerView({ status, models: [...(row?.models ?? [])] }, { includeLegacy });
+  return {
+    // The chip label is listed only where it differs from the name (most catalogues: never): a big catalogue's rows stay
+    // as small as before the picker view.
+    models: view.models.map(({ shortName, ...m }) => ({ ...m, ...(shortName !== m.name ? { shortName } : {}), options: m.options.map((o) => ({ ...o })) })),
+    defaultModel: view.defaultModel,
+    catalogueLoading: view.catalogueLoading
+  };
 }
 
 /** What loadAgents reads of a provider snapshot. */
@@ -73,7 +106,7 @@ export function providerRows(body: unknown): Map<string, ProviderRow> {
       installed: p.installed === true, version: nonEmpty(p.version) ? p.version : null, status: nonEmpty(p.status) ? p.status : "unknown",
       ...(nonEmpty(p.message) ? { message: p.message } : {}),
       auth: { status: nonEmpty(auth.status) ? auth.status : "unknown", ...(nonEmpty(auth.label) ? { label: auth.label } : {}), ...(nonEmpty(auth.email) ? { email: auth.email } : {}) },
-      models: (Array.isArray(p.models) ? p.models : []).filter((m): m is ProviderModel => isRecord(m) && nonEmpty(m.slug) && typeof m.name === "string"),
+      models: (Array.isArray(p.models) ? p.models : []).filter((m): m is Raw & { slug: string; name: string } => isRecord(m) && nonEmpty(m.slug) && typeof m.name === "string").map(cleanModel),
       ...(isRecord(p.capabilities) ? { capabilities: p.capabilities as unknown as AdapterCapabilities } : {})
     });
   }
@@ -95,13 +128,14 @@ export async function loadAgents(api: DaemonApi, opts?: { includeLegacyModels?: 
     const family = entry.id as keyof AgentAccountsResponse["defaults"];
     const familyAccounts = accounts.accounts.filter((a) => a.agent === family);
     const defaultAccountId = familyAccounts.some((a) => a.id === accounts.defaults[family]) ? (accounts.defaults[family] as string) : "system";
-    const models = (snapshot?.models ?? []).filter((m) => opts?.includeLegacyModels || m.isLegacy !== true).map(modelView);
+    // The picker's own view: its default (`resolveLaunchModel`) is judged over the whole catalogue, legacy included.
+    const { models, defaultModel, catalogueLoading } = pickerModels(snapshot, opts?.includeLegacyModels === true);
     const caps = snapshot?.capabilities;
     const view: AgentView = {
       id: entry.id, name: entry.name, adapter, enabled: entry.enabled,
       installed: snapshot?.installed ?? false, version: entry.version ?? snapshot?.version ?? null,
       status: snapshot?.status ?? "unknown", auth: snapshot?.auth ?? { status: "unknown" },
-      models, effortOptionId: EFFORT_OPTION_IDS[adapter], runtimeModes: RUNTIME_MODES, defaultRuntimeMode: DEFAULT_RUNTIME_MODE,
+      models, defaultModel, catalogueLoading, effortOptionId: EFFORT_OPTION_IDS[adapter], runtimeModes: RUNTIME_MODES, defaultRuntimeMode: DEFAULT_RUNTIME_MODE,
       supports: { ...supportsFrom(caps), contextWindow: caps?.reportsContextWindow === true },
       accounts: [{ id: "system", label: "System", email: null, plan: null, needsReauth: false, isDefault: defaultAccountId === "system" }, ...familyAccounts.map((a) => ({ id: a.id, label: a.label, email: a.email, plan: a.plan, needsReauth: a.needsReauth, isDefault: a.id === defaultAccountId }))],
       defaultAccountId
@@ -204,7 +238,9 @@ export interface ResolvedSelection { model: string; options: { id: string; value
 
 export function resolveModelSelection(agent: AgentView, input: { model?: string; options?: Record<string, string | boolean>; current?: ModelSelection }): ResolvedSelection {
   // `||`, not `??`: an empty model is "none" (the daemon's spelling of "the provider's own default"), so it never wins.
-  const model = input.model || input.current?.model || agent.models.find((m) => m.isDefault)?.slug || agent.models[0]?.slug;
+  // The launch default is the picker's (`resolveLaunchModel`): what list_agents reports as `defaultModel`.
+  const launchDefault = agent.models.some((m) => m.slug === agent.defaultModel) ? agent.defaultModel : undefined;
+  const model = input.model || input.current?.model || launchDefault || agent.models.find((m) => m.isDefault)?.slug || agent.models[0]?.slug;
   if (!model) throw new ToolError("INVALID_ARGUMENT", `Still loading ${agent.id}'s models — retry in a moment (list_agents).`);
   const modelView = agent.models.find((m) => m.slug === model);
   if (agent.models.length && !modelView) throw unknownModel(agent, model);

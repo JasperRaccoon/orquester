@@ -10,7 +10,6 @@ import type {
   CreateAccountRequest,
   CreateBrowserRequest,
   CreateProjectRequest,
-  CreateSavedPromptRequest,
   CreateSessionRequest,
   CreateTodoRequest,
   CreateWorkspaceRequest,
@@ -61,8 +60,6 @@ import type {
   RenameSessionRequest,
   RepoSummary,
   ReorderSessionsRequest,
-  SavedPrompt,
-  SavedPromptListResponse,
   ServerInfoResponse,
   SetAgentAccountDefaultsRequest,
   SetProtectArchivedRequest,
@@ -78,7 +75,6 @@ import type {
   SystemProcessesResponse,
   SystemResourcesResponse,
   UpdateProjectRequest,
-  UpdateSavedPromptRequest,
   UpdateTodoRequest,
   UpdateWorkspaceRequest,
   UsageAccount,
@@ -113,11 +109,32 @@ import { ChatAwareSessionManager } from "./agent-chat/session-router.ts";
 import { AGENT_VISUAL_ROUTE_PATTERN, registerAgentChatRoutes } from "./agent-chat/proxy-routes.ts";
 import { LineageService } from "./agent-chat/lineage.ts";
 import { registerLineageRoutes } from "./agent-chat/lineage-routes.ts";
+// umcp:t5 begin
+import { registerReplySubscriptionRoutes } from "./agent-chat/lineage-routes.ts";
+import { ReplyRouter } from "./agent-chat/replies.ts";
+import { agentChatReplyOutboxFile } from "@orquester/config";
+// umcp:t5 end
 import { registerSecretRequestRoutes, SecretRequestRegistry } from "./agent-chat/secret-requests.ts";
+// umcp:t3 begin
+import { connectExecutor, createAgentToolsRuntime, type AgentToolsRuntime } from "./agent-tools/approval-port.ts";
+import { registerAgentToolsRuntimeRoutes } from "./agent-tools/routes.ts";
+import { executorPorts } from "./mcp/executor.ts";
+// umcp:t3 end
+// umcp:t6 begin
+import { agentHostRoutes, SESSION_TOOLS_REFRESH_TIMEOUT_MS, type SessionToolsRefreshResponse } from "./agent-host/host-protocol.ts";
+import { catalogFor } from "./mcp/catalog/index.ts";
+import { canonicalProjectPath } from "./agent-tools/approval-port.ts";
+import { registerSessionToolsManifestRoute, SessionToolsRefresher } from "./session-tools/toolset-refresh.ts";
+import { AGENT_PROFILE_CHANNEL } from "@orquester/api";
+// umcp:t6 end
+// umcp:t9 begin
+import { registerPushNotifyRoute } from "./push.ts";
+// umcp:t9 end
 import type { ActivityCause } from "./ansi-activity";
 import { TodoError, TodoListManager } from "./todos";
 import { RecentProjectsService, describeProjectPath } from "./recent-projects";
-import { SavedPromptError, SavedPromptsService, publishSavedPromptEvents } from "./saved-prompts.ts";
+import { SavedPromptsService, publishSavedPromptEvents, registerSavedPromptRoutes } from "./saved-prompts.ts";
+import { registerTodoToggleRoute } from "./todo-items.ts";
 import { PluginsService, publishPluginEvents } from "./plugins/plugins-service.ts";
 import { registerPluginRoutes } from "./plugins/routes.ts";
 import { detectRepoId } from "./repo-id";
@@ -140,6 +157,9 @@ import { createAgentProfileAdapters } from "./agent-profile/adapters/index.ts";
 import { createProfileConverter } from "./agent-profile/convert.ts";
 import { ProfileImportStore } from "./agent-profile/import.ts";
 import { resolveAgentHomes } from "./agent-profile/homes.ts";
+// umcp:t11 begin
+import { DaemonMcpDetector, listProjectDirs, registerDaemonMcpServersRoutes } from "./agent-profile/daemon-mcp.ts";
+// umcp:t11 end
 import type { ValidationCatalog } from "./workflows/agent/validation-catalog.ts";
 import { consoleWorkflowLogger, createWorkflowDaemon } from "./workflows/daemon-wiring.ts";
 import { createInternalDaemonApi } from "./chat-client/index.ts";
@@ -149,6 +169,7 @@ import { PushService, isValidPushEndpoint } from "./push";
 import { GitError, GitService, GitWatcher, passesGitEventFilter, workingDiffMaxBytes } from "./git";
 import { UsageService } from "./usage";
 import { UsageTokensScanner } from "./usage-tokens";
+import { ChatThreadUsageScanner } from "./usage-chat-threads.ts";
 import { SubagentCacheTtlController, type SubagentCacheTtl } from "./subagent-cache-ttl";
 import {
   createClaudeSource,
@@ -167,11 +188,9 @@ import { resolveZipTool, spawnDirZip } from "./zip";
 import { FsSearchError, listProjectFiles, searchProjectFiles } from "./search";
 import { InjectDaemonApi } from "./mcp/daemon-api.ts";
 import { HtmlPreviewBrowser } from "./html-preview/index.ts";
-import { FsTools } from "./mcp/fs-tools.ts";
 import { registerMcp } from "./mcp/server.ts";
-import { sessionToolRegistry } from "./session-tools/index.ts";
+import { externalCredentialId, registerPrincipalHook, registerRemoteFieldStripping } from "./mcp/principal.ts";
 import { registerSessionToolsRoute } from "./session-tools/route.ts";
-import { TodoTools } from "./mcp/todo-tools.ts";
 import {
   UploadTooLargeError,
   acceptRawBody,
@@ -226,6 +245,7 @@ import {
   tmuxSocketPath,
   todosIndexPath,
   usageTokensCacheFile,
+  agentChatThreadsDir,
   subagentCacheTtlStateFile,
   usageStateFile,
   workspacesMetaPath,
@@ -477,6 +497,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
         .map((a) => ({ agent: a.agent, home: agentAccounts.homePath(a.agent, a.id) }))
     ]
   });
+  // Grok's usage per day, from Orquester's own chat logs (it has no transcript the scanner reads).
+  const chatThreadUsage = new ChatThreadUsageScanner({ threadsDir: agentChatThreadsDir(paths.baseDir), agents: ["grok"], now: () => Date.now(), logger: console });
   // Auto mode of the Claude subagent cache lifetime decides from the requests
   // the scanner already holds. A daemon that just started has scanned nothing:
   // ask for a scan and keep the stored decision until it is in.
@@ -1154,7 +1176,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   agentChat.setSecretRequests(secretRequests);
   const services: Services = {
     secretRequests,
-    registry, sessions, grokDeviceLink, accounts, git, gitWatcher, todos, recentProjects, savedPrompts, usage, usageTokens, subagentCacheTtl, push, broadcaster, agentAccounts, browsers, urlWatcher, agentChat,
+    registry, sessions, grokDeviceLink, accounts, git, gitWatcher, todos, recentProjects, savedPrompts, usage, usageTokens, chatThreadUsage, subagentCacheTtl, push, broadcaster, agentAccounts, browsers, urlWatcher, agentChat,
     plugins,
     desktops, desktopAudio,
     agentProfile,
@@ -1163,6 +1185,96 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     workflowProjects: workflowDaemon.runtime.projects,
     workflowCatalogReady: () => workflowDaemon.validationCatalog.ready()
   };
+  // umcp:t3 begin
+  // Orquester approval cards (memory only; a journal of open ids resolves a crash's leftovers as
+  // cancelled) and `agent-tools.json` (settings, chat toolsets, declines, grants). A pending card
+  // is pending user input like a secret card; a closed chat's cards, overrides and chat grants go.
+  const agentToolsRuntime = createAgentToolsRuntime({
+    baseDir: paths.baseDir,
+    publish: (channel, type, payload) => broadcaster.publish(channel, type, payload),
+    onApprovalsChanged: (threadId) => agentChat.secretRequestsChanged(threadId),
+    tab: (id) => agentChat.chat.get(id),
+    agentOf: (id) => agentChat.sessionToolThread(id)?.agentId ?? null,
+    api: () => services.internalApi,
+    projectExists: (path) => existsSync(path),
+    logger: console
+  });
+  await agentToolsRuntime.load();
+  agentChat.setSecretRequests({
+    list: (threadId) => secretRequests.list(threadId),
+    approvals: (threadId) => agentToolsRuntime.approvals.pendingTitles(threadId)
+  });
+  agentChat.chat.lifecycle.on("closed", ({ id, rolledBack }: { id: string; rolledBack?: boolean }) => {
+    if (!rolledBack) agentToolsRuntime.threadClosed(id);
+  });
+  services.agentToolsRuntime = agentToolsRuntime;
+  // The catalog executor (both transports) asks THIS port for cards and grants, and resolves a
+  // chat's toolsets from the same store. Before this runs no transport serves yet; after the
+  // disconnect at stop, cards are refused and chats get the locked toolsets only. `onToolsetsChanged`
+  // listeners run after a toolset card settles but BEFORE the awaiting call resumes: schedule
+  // restarts for the next idle point (Task 6).
+  const disconnectExecutor = connectExecutor(agentToolsRuntime, executorPorts);
+  // umcp:t3 end
+  // umcp:t6 begin
+  // The chat transport (unified MCP design 2026-10-15 §9.3, §9.4, §12.1): per-thread manifests for
+  // the agent host, toolset changes pushed to it (applied in-session where the provider re-lists,
+  // else at the chat's next idle point), and the automatic continue turn after an approved
+  // `request_toolset` card. `onToolsetsChanged` runs before the awaiting call resumes: the listener
+  // only STARTS the push; the call awaits the host's answer (bounded) through
+  // `executorPorts.onToolsetApproved`, so it reports "now" / "after-restart" truthfully.
+  const sessionToolsRefresher = new SessionToolsRefresher({
+    thread: (id) => {
+      const tab = agentChat.chat.get(id);
+      const info = tab ? agentChat.sessionToolThread(id) : null;
+      if (!tab || !info) return null;
+      return {
+        agentId: info.agentId,
+        home: tab.accountId ? tab.accountId : "system",
+        projectPath: tab.projectPath,
+        canonicalProjectPath: tab.projectPath ? canonicalProjectPath(tab.projectPath) : "",
+        // A chat started in a directory inside its project loads the configs down to it too.
+        ...(tab.cwd ? { cwd: tab.cwd, canonicalCwd: canonicalProjectPath(tab.cwd) } : {})
+      };
+    },
+    openThreads: () => agentChat.chat.list().map((tab) => tab.id),
+    resolvedToolsets: (id, agent) => agentToolsRuntime.tools.resolvedToolsets(id, agent),
+    agentToolsEnabled: () => agentToolsRuntime.tools.snapshot().enabled,
+    catalog: () => catalogFor("chat"),
+    api: () => services.internalApi,
+    pushToHost: async (id, manifest): Promise<SessionToolsRefreshResponse | null> => {
+      const route = agentChat.routeDeps();
+      if (!route.isHostHealthy()) return null;
+      try {
+        const response = await route.client.json<SessionToolsRefreshResponse>("POST", agentHostRoutes.sessionToolsRefresh(id), { manifest }, { timeoutMs: SESSION_TOOLS_REFRESH_TIMEOUT_MS });
+        // 404: a host that predates the route — the change applies at the session's next start.
+        return response.status === 200 && response.value ? response.value : null;
+      } catch {
+        return null;
+      }
+    },
+    logger: console
+  });
+  agentToolsRuntime.tools.setAdvertisedToolsets((id) => sessionToolsRefresher.advertisedToolsets(id));
+  const offToolsetsChanged = agentToolsRuntime.tools.onToolsetsChanged((id) => sessionToolsRefresher.toolsetsChanged(id));
+  executorPorts.onToolsetApproved = (caller, toolset, signal) => sessionToolsRefresher.toolsetApproved(caller, toolset, signal);
+  agentChat.chat.lifecycle.on("closed", ({ id }: { id: string }) => sessionToolsRefresher.forget(id));
+  // A changed MCP server config (agent profile) is read afresh by the next manifest.
+  const agentProfileSink = {
+    send: (data: string) => {
+      // Cheap pre-filter (every bus event passes here), then the typed check on the parsed event.
+      if (!data.includes(AGENT_PROFILE_CHANNEL)) return;
+      let channel: unknown;
+      try {
+        channel = (JSON.parse(data) as { channel?: unknown }).channel;
+      } catch {
+        return;
+      }
+      if (channel === AGENT_PROFILE_CHANNEL) sessionToolsRefresher.invalidateDaemonPointing();
+    }
+  };
+  broadcaster.add(agentProfileSink);
+  services.sessionToolsRefresher = sessionToolsRefresher;
+  // umcp:t6 end
 
   // The agent host (chat spec §3.1), adopted or spawned AFTER reattach so the
   // chat tab records are already loaded, and before any transport serves.
@@ -1182,6 +1294,24 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     authRequired: false,
     mode: "local"
   });
+  // umcp:t5 begin
+  // Reply subscriptions (unified MCP design 2026-10-15 §8.3): persisted before posting, delivered
+  // through the lineage delivery queue. The router starts and stops with that queue (its
+  // `attachApi` below binds both); its routes are SOCKET-ONLY — the unix app alone.
+  const replies = new ReplyRouter({
+    outboxFile: agentChatReplyOutboxFile(paths.baseDir),
+    sessions: agentChat.chat,
+    queue: lineage,
+    logger: console,
+    sessionsLoaded: () => sessionsReattached
+  });
+  await replies.load();
+  lineage.setDeliveryListener(replies);
+  registerReplySubscriptionRoutes(unixServer, {
+    replies: () => replies,
+    isChatSession: (id) => agentChat.chat.has(id)
+  });
+  // umcp:t5 end
   await unixServer.listen({ path: paths.socketPath });
 
   // The daemon's in-process client of its OWN REST API for the workflow engine's agent blocks
@@ -1291,6 +1421,19 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // Stops supervising only: under tmux the agent host is deliberately left
     // running so in-flight turns survive the deploy (chat spec §3.1).
     await lineage.stop();
+    // umcp:t3 begin
+    // Disconnect FIRST, while the transports may still serve: new calls get no card or grant
+    // (PERMISSION_DENIED) and the locked toolsets only. Then pending cards end `cancelled`
+    // ("restarting"), and a call already past the port lookup is cancelled the same way.
+    disconnectExecutor();
+    await agentToolsRuntime.shutdown().catch((error) => console.error("Agent tools stop failed", error));
+    // umcp:t3 end
+    // umcp:t6 begin
+    offToolsetsChanged();
+    broadcaster.remove(agentProfileSink);
+    executorPorts.onToolsetApproved = null;
+    sessionToolsRefresher.stop();
+    // umcp:t6 end
     await htmlPreview.stop();
     await agentChat.stop();
     await browsers.shutdown();
@@ -1387,8 +1530,18 @@ interface Services {
   internalApi: InjectDaemonApi | null;
   /** Pending `request_secret` cards, memory only (optional: route-level tests build a partial `services`). */
   secretRequests?: SecretRequestRegistry;
+  // umcp:t3 begin
+  /** Approval cards, agent-tools settings, chat toolsets and grants (unified MCP §7, §9). Optional: route tests build a partial `services`. */
+  agentToolsRuntime?: AgentToolsRuntime;
+  // umcp:t3 end
+  // umcp:t6 begin
+  /** The chat transport's manifests, toolset refreshes and automatic continue turns (unified MCP §9.3, §9.4). Optional: route tests build a partial `services`. */
+  sessionToolsRefresher?: SessionToolsRefresher;
+  // umcp:t6 end
   usage: UsageService;
   usageTokens: UsageTokensScanner;
+  /** Per-day usage from Orquester's own chat logs, for agents without a transcript scanner (Grok). Optional: route tests build a partial `services`. */
+  chatThreadUsage?: ChatThreadUsageScanner;
   /** The Claude subagent cache lifetime as it applies now (auto mode's decision). */
   subagentCacheTtl: SubagentCacheTtlController;
   push: PushService;
@@ -1517,6 +1670,15 @@ export function createServer(
     }
     throttle.recordSuccess(ip);
   });
+
+  // umcp:t2 begin — principals (unified MCP design 2026-10-15; `@orquester/api` principal.ts).
+  // After the bearer hook: an unauthenticated request never reaches the token registry. Both apps
+  // resolve the in-process principal token; a request without one is the user's (the GUI, a local
+  // CLI, a direct REST call with the bearer). The remote app also strips socket-trusted body
+  // fields (`causedBy` on turns and merge-backs) before any route reads them.
+  registerPrincipalHook(app);
+  if (options.mode === "remote") registerRemoteFieldStripping(app);
+  // umcp:t2 end
 
   // Public: tells the web client whether auth is needed and the bcrypt salt to
   // derive the bearer (the same hash the daemon stores). Never exposes the hash
@@ -3361,6 +3523,14 @@ export function createServer(
     return usageTokens.snapshot(force);
   });
 
+  // Grok's usage from Orquester's own chat logs ("Orquester chats only"): get_usage's weekly cost.
+  app.get<{ Querystring: { agent?: string } }>("/api/usage/chat-threads", async (request, reply) => {
+    const agent = request.query.agent;
+    if (agent !== "grok") return reply.code(400).send({ code: "INVALID_REQUEST", message: "agent must be grok." });
+    if (!services.chatThreadUsage) return reply.code(503).send({ code: "UNAVAILABLE", message: "Chat usage is not available." });
+    return services.chatThreadUsage.snapshot(agent);
+  });
+
   // Read fresh, like a launch does: this is what the next Claude session gets.
   app.get("/api/usage/subagent-cache-ttl", async (): Promise<SubagentCacheTtlStatus> =>
     subagentCacheTtl.status((await readAppConfigFile(resolved.appConfigFile)).agents.claudeSubagentCacheTtl)
@@ -3502,6 +3672,12 @@ export function createServer(
       });
     }
   }
+  // umcp:t3 begin
+  // Approval cards and agent tools: daemon-owned, both transports (the bearer hook guards remote).
+  if (services.agentToolsRuntime) {
+    registerAgentToolsRuntimeRoutes(app, services.agentToolsRuntime);
+  }
+  // umcp:t3 end
 
   // Sessions (PTYs and chat tabs — one list, one per-project order)
   app.get<{ Querystring: { projectPath?: string } }>(
@@ -3946,65 +4122,17 @@ export function createServer(
     }
   });
 
-  // Saved prompts — the right rail's library, global and per project (channel
-  // "saved-prompts"). Allowed on both transports like /api/todos (no secret
-  // returned). Refusals are SavedPromptError's own status + { code, message }:
-  // 400 INVALID_REQUEST / INVALID_PROJECT_PATH, 404 SAVED_PROMPT_NOT_FOUND,
-  // 409 SAVED_PROMPTS_FULL. A missing `projectPath` lists the global prompts only.
-  app.get<{ Querystring: { projectPath?: string } }>(
-    "/api/saved-prompts",
-    async (request, reply): Promise<SavedPromptListResponse | void> => {
-      const { projectPath } = request.query;
-      try {
-        return { prompts: await services.savedPrompts.list(projectPath ? projectPath : null) };
-      } catch (error) {
-        return savedPromptError(reply, error);
-      }
-    }
-  );
-
-  app.post<{ Body: CreateSavedPromptRequest }>(
-    "/api/saved-prompts",
-    async (request, reply): Promise<SavedPrompt | void> => {
-      try {
-        return reply.code(201).send(await services.savedPrompts.create(request.body));
-      } catch (error) {
-        return savedPromptError(reply, error);
-      }
-    }
-  );
-
-  app.put<{ Params: { id: string }; Body: UpdateSavedPromptRequest }>(
-    "/api/saved-prompts/:id",
-    async (request, reply): Promise<SavedPrompt | void> => {
-      try {
-        return await services.savedPrompts.update(request.params.id, request.body);
-      } catch (error) {
-        return savedPromptError(reply, error);
-      }
-    }
-  );
-
-  app.delete<{ Params: { id: string } }>("/api/saved-prompts/:id", async (request, reply): Promise<void> => {
-    try {
-      await services.savedPrompts.delete(request.params.id);
-      return reply.code(204).send();
-    } catch (error) {
-      return savedPromptError(reply, error);
-    }
+  // umcp:t12 begin — the saved-prompt routes live with their service (unified MCP design
+  // 2026-10-15 D-16): `createdBy` and the pin refusal read the server-stamped principal, and the
+  // list rows carry `usedByWorkflows` (with each workflow's workspace) from the workflow store.
+  // The atomic todo-item toggle beside the other /api/todos routes (update_todos toggle).
+  registerSavedPromptRoutes(app, {
+    service: services.savedPrompts,
+    workflows: () => services.workflows.list(),
+    workspacesDir: () => resolved.workspacesDir
   });
-
-  // An Insert or a Send used the prompt: `lastUsedAt` now, `useCount` + 1. No body.
-  app.post<{ Params: { id: string } }>(
-    "/api/saved-prompts/:id/used",
-    async (request, reply): Promise<SavedPrompt | void> => {
-      try {
-        return await services.savedPrompts.markUsed(request.params.id);
-      } catch (error) {
-        return savedPromptError(reply, error);
-      }
-    }
-  );
+  registerTodoToggleRoute(app, todos);
+  // umcp:t12 end
 
   // Built-in plugins (plugins spec §5.3). Both transports, like the protect-archived toggle:
   // enabling downloads and runs a verified binary, which is no more than a remote user can do
@@ -4037,6 +4165,36 @@ export function createServer(
     service: services.agentProfile,
     importsDir: agentProfileImportsDir(resolved.baseDir)
   });
+
+  // umcp:t11 begin — daemon-pointing MCP servers (unified MCP design 2026-10-15 §12.1): every MCP
+  // server in a CLI's user config (system home and every managed account home) or a project-level
+  // config that reaches THIS daemon's /mcp, by its bearer (the transport's own constant-time check;
+  // the credential never leaves the daemon) or its URL. GET on both transports (the chat manifest's
+  // `deny`, the agent-profile panel); the card preview's check is socket-only.
+  registerDaemonMcpServersRoutes(app, {
+    mode: options.mode,
+    detector: new DaemonMcpDetector(
+      {
+        verifyBearer: (token) => authorizeCredential(token, config.transports.http.username, config.transports.http.passwordHash),
+        httpPort: () => config.transports.http.port,
+        // No public origin is configured anywhere: a proxied URL is caught by its bearer.
+        publicOrigins: () => [],
+        env: (name) => process.env[name]
+      },
+      {
+        homes: resolveAgentHomes(process.env, resolved.vars?.userhome),
+        accountHomes: async (agent) =>
+          agent === "opencode"
+            ? []
+            : agentAccounts.list().accounts.filter((account) => account.agent === agent).map((account) => ({ id: account.id, home: agentAccounts.homePath(agent, account.id) })),
+        projects: () => listProjectDirs(resolved.workspacesDir),
+        workspacesRoot: () => resolved.workspacesDir,
+        logger: console
+      }
+    ),
+    current: (agent, id) => services.agentProfile.mcpCandidate(agent, id)
+  });
+  // umcp:t11 end
 
   // Web Push (PWA attention notifications). Allowed on both transports like
   // /api/sessions and /api/accounts — the response never carries the VAPID
@@ -4071,6 +4229,10 @@ export function createServer(
 
   // Send a test push to every subscription; returns how many were delivered.
   app.post("/api/push/test", async (): Promise<PushTestResponse> => ({ sent: await push.sendTest() }));
+
+  // umcp:t9 begin — `notify_user`'s push (unified MCP design 2026-10-15 §4.1): rate-limited by request.principal.
+  registerPushNotifyRoute(app, push);
+  // umcp:t9 end
 
   // Daemon event bus (newline-delimited JSON): lifecycle broadcasts + heartbeat.
   app.get<{ Querystring: { project?: string } }>("/events", async (request, reply) => {
@@ -4498,17 +4660,28 @@ export function createServer(
     });
   }
 
+  // umcp:t6 begin — the in-chat server's per-thread manifest (unified MCP design 2026-10-15 §9.4):
+  // SOCKET-ONLY, and the agent host's bearer besides (it names a thread's MCP denials).
+  if (options.mode === "local" && services.sessionToolsRefresher) {
+    registerSessionToolsManifestRoute(app, {
+      authorizeHost: (authorization) => services.agentChat?.authorizeHostRequest(authorization) ?? false,
+      refresher: services.sessionToolsRefresher
+    });
+  }
+  // umcp:t6 end
+
+  // umcp:t2 begin — both transports of the unified catalog (design 2026-10-15 §3.3), through ONE
+  // executor whose ports (`executorPorts`: approvals, toolsets) the umcp:t3 block wires.
   // Session tools (design 2026-10-14 §1.1) — the agent host's call-back
   // route, SOCKET-ONLY: never on remote HTTP. It also requires the host's
-  // own bearer, and derives the caller's project, cwd and provider from the
-  // thread's tab record. Handlers reach the daemon through the unix app's
-  // in-process client, as the workflow engine does.
+  // own bearer, and derives the caller from the thread's tab record and
+  // snapshot. Handlers reach the daemon through the unix app's in-process
+  // client, as the workflow engine does, each request carrying the agent's principal.
   if (options.mode === "local") {
     registerSessionToolsRoute(app, {
       authorizeHost: (authorization) => services.agentChat?.authorizeHostRequest(authorization) ?? false,
       resolveThread: (threadId) => services.agentChat?.sessionToolThread(threadId) ?? null,
       api: () => services.internalApi,
-      registry: sessionToolRegistry,
       ...(services.secretRequests ? { secretRequests: services.secretRequests } : {})
     });
   }
@@ -4516,7 +4689,8 @@ export function createServer(
   // Orquester MCP — HTTP-only. The unix socket is unauthenticated, so full
   // session drive must never be reachable there; register /mcp only on remote.
   // Each request's tools call this app's own routes in-process with the
-  // caller's bearer (spec §4.2), so every gate and error code is the GUI's.
+  // caller's bearer (spec §4.2), so every gate and error code is the GUI's;
+  // each call acts as the external principal of the authenticated credential.
   if (options.mode === "remote") {
     registerMcp(app, {
       createApi: (authorization) =>
@@ -4528,10 +4702,10 @@ export function createServer(
           fsRoot: resolved.fsRoot,
           workspacesDir: resolved.workspacesDir
         }),
-      todos: new TodoTools({ todos, workspacesDir: resolved.workspacesDir }),
-      files: new FsTools({ fsRoot: resolved.fsRoot })
+      credentialId: () => externalCredentialId(config.transports.http.username)
     });
   }
+  // umcp:t2 end
 
   // Serve the static web client build for everything outside the API, with an
   // SPA fallback to index.html. Reserved prefixes stay JSON 404s.
@@ -4795,19 +4969,6 @@ function gitError(reply: FastifyReply, error: unknown): void {
   const status = error instanceof GitError ? error.status : 500;
   const message = error instanceof Error ? error.message : "Git operation failed.";
   void reply.code(status).send({ code: "GIT_ERROR", message });
-}
-
-/**
- * Map a saved-prompt route failure to the wire: a `SavedPromptError` carries
- * its own status and code; anything else is an unexpected 500.
- */
-function savedPromptError(reply: FastifyReply, error: unknown): void {
-  if (error instanceof SavedPromptError) {
-    void reply.code(error.status).send({ code: error.code, message: error.message });
-    return;
-  }
-  const message = error instanceof Error ? error.message : "Saved prompt operation failed.";
-  void reply.code(500).send({ code: "SAVED_PROMPTS_ERROR", message });
 }
 
 /**

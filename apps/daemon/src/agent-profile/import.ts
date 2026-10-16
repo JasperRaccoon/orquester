@@ -34,12 +34,14 @@
  * one more TTL, then removes it anyway.
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { Stats } from "node:fs";
 import { lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { basename, extname, join } from "node:path";
-import type { AgentProfileAgentId, ProfileImportCandidate, ProfileImportScanResponse } from "@orquester/api";
+import type { AgentProfileAgentId, ProfileImportCandidate, ProfileImportScanResponse, ProfilePreviewTree } from "@orquester/api";
 import type { PortableItem } from "./adapters/types.ts";
+import { readGitCommit, readPreviewTree } from "./preview-reads.ts";
+import type { ProfileImportDetailResponse } from "@orquester/api";
 import {
   CODEX_COMMAND_NOTE,
   commandNameFor,
@@ -99,6 +101,11 @@ export interface ProfileImports {
   /** `filePath` is a temp file the route owns and deletes after this resolves: its content is copied/extracted here. */
   scanUpload(agent: AgentProfileAgentId, name: string, filePath: string): Promise<ProfileImportScanResponse>;
   take(agent: AgentProfileAgentId, importId: string, picks: string[]): Promise<ProfileImportTake>;
+  /**
+   * An open (not yet taken) scan in full, for an approval card (unified MCP design §7.1): its
+   * source (a git scan's URL and commit) and every candidate's files with their hashes.
+   */
+  inspect?(agent: AgentProfileAgentId, importId: string): Promise<ProfileImportDetailResponse>;
 }
 
 export interface ProfileImportStoreOptions {
@@ -127,6 +134,8 @@ interface ImportRecord {
   id: string;
   agent: AgentProfileAgentId;
   root: string;
+  /** Where the scan came from (a git scan's commit is read before `.git` is deleted). */
+  origin: ProfileImportDetailResponse["source"];
   candidates: Map<string, StoredCandidate>;
   expiresAt: number;
   takenAt?: number;
@@ -159,7 +168,13 @@ export class ProfileImportStore implements ProfileImports {
   async scanGit(agent: AgentProfileAgentId, url: string): Promise<ProfileImportScanResponse> {
     await this.sweep();
     const source = parseGitImportUrl(url);
-    return this.openImport(agent, "git", async (root) => {
+    const origin: ProfileImportDetailResponse["source"] = {
+      type: "git",
+      url: source.cloneUrl,
+      ...(source.ref !== undefined ? { ref: source.ref } : {}),
+      commit: null
+    };
+    return this.openImport(agent, origin, async (root) => {
       const tree = join(root, "tree");
       try {
         await this.clone(source.cloneUrl, source.ref, tree, { timeoutMs: this.limits.cloneTimeoutMs });
@@ -170,6 +185,7 @@ export class ProfileImportStore implements ProfileImports {
       if ((await lstatOrNull(tree))?.isDirectory() !== true) {
         throw profileErrors.importFailed(`Cloning ${source.cloneUrl} produced no checkout.`);
       }
+      origin.commit = await readGitCommit(tree);
       await rm(join(tree, ".git"), { recursive: true, force: true });
       await this.assertCheckoutSize(tree);
       const scanRoot = await this.subFolder(tree, source.subPath);
@@ -186,7 +202,7 @@ export class ProfileImportStore implements ProfileImports {
     const extension = extname(fileName).toLowerCase();
     const stem = fileName.slice(0, fileName.length - extension.length);
     if (extension === ".zip") {
-      return this.openImport(agent, "upload", async (root) => {
+      return this.openImport(agent, { type: "upload", name: fileName }, async (root) => {
         const tree = join(root, "tree");
         await mkdir(tree, { mode: 0o700 });
         await extractZip(filePath, tree, { maxEntries: this.limits.maxZipEntries, maxBytes: this.limits.maxZipBytes });
@@ -194,7 +210,7 @@ export class ProfileImportStore implements ProfileImports {
       });
     }
     if (extension === ".md") {
-      return this.openImport(agent, "upload", async (root) => {
+      return this.openImport(agent, { type: "upload", name: fileName }, async (root) => {
         const st = await lstat(filePath);
         if (st.size > this.limits.maxMarkdownBytes) {
           throw profileErrors.importFailed(`The file is larger than ${this.limits.maxMarkdownBytes} bytes.`);
@@ -258,6 +274,71 @@ export class ProfileImportStore implements ProfileImports {
     }
   }
 
+  async inspect(agent: AgentProfileAgentId, importId: string): Promise<ProfileImportDetailResponse> {
+    await this.sweep();
+    const record = this.imports.get(importId);
+    if (record === undefined || record.agent !== agent || record.takenAt !== undefined) {
+      throw profileErrors.importNotFound(importId);
+    }
+    const existing = await this.existing(agent);
+    const candidates: ProfileImportDetailResponse["candidates"] = [];
+    for (const [ref, candidate] of record.candidates) {
+      const tree = await readPreviewTree(await assertInside(record.root, candidate.found.path));
+      const mapped = await this.asImported(record, agent, candidate, tree);
+      candidates.push({ ref, kind: candidate.kind, name: candidate.name, exists: existing.has(`${candidate.kind}:${candidate.name}`), ...mapped });
+    }
+    return { importId, source: { ...record.origin }, candidates };
+  }
+
+  /**
+   * A candidate's tree as `take` will hand it over: its main document (`SKILL.md`, or the command
+   * file) with the frontmatter mapped for `agent` exactly as {@link buildItem} maps it — the `name`
+   * key, dropped keys, a Codex command made a skill — so the card shows what is written. Nothing is
+   * written here. Dropped keys come back as `notes`.
+   */
+  private async asImported(
+    record: ImportRecord,
+    agent: AgentProfileAgentId,
+    candidate: StoredCandidate,
+    tree: ProfilePreviewTree
+  ): Promise<ProfilePreviewTree & { notes?: string[] }> {
+    const path = await assertInside(record.root, candidate.found.path);
+    let main: string;
+    let text: string;
+    let renamed: string | undefined;
+    let notes: string[];
+    if (candidate.found.kind === "skill") {
+      main = SKILL_FILE;
+      const document = parseMarkdownDocument(await readFile(join(path, SKILL_FILE), "utf8"));
+      const mapped = mapFrontmatter(document.frontmatter, "skill", agent);
+      const frontmatter = Object.hasOwn(mapped.frontmatter, "name") ? { ...mapped.frontmatter, name: candidate.name } : { name: candidate.name, ...mapped.frontmatter };
+      text = serializeMarkdownDocument(frontmatter, document.body);
+      notes = droppedKeysNote(mapped.dropped, agent);
+    } else {
+      main = tree.files[0]?.path ?? basename(path);
+      const document = parseMarkdownDocument(await readFile(path, "utf8"));
+      if (candidate.kind === "skill") {
+        const skill = commandToSkillDocument(candidate.found.name, document.frontmatter);
+        text = serializeMarkdownDocument(skill.frontmatter, document.body);
+        renamed = SKILL_FILE;
+        notes = [CODEX_COMMAND_NOTE, ...droppedKeysNote(skill.dropped, agent)];
+      } else {
+        const mapped = mapFrontmatter(document.frontmatter, "command", agent);
+        text = serializeMarkdownDocument(mapped.frontmatter, document.body);
+        // Shown as the command it becomes (`git/pr` for Claude, `git-pr` for Grok), not the source path.
+        renamed = `${candidate.name}.md`;
+        notes = droppedKeysNote(mapped.dropped, agent);
+      }
+    }
+    const bytes = Buffer.from(text, "utf8");
+    const files = tree.files.map((file) =>
+      file.path === main
+        ? { ...file, path: renamed ?? file.path, size: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex"), text }
+        : file
+    );
+    return { ...tree, files, ...(notes.length > 0 ? { notes } : {}) };
+  }
+
   /** Removes every import, the directory with them; later calls are refused. */
   async stop(): Promise<void> {
     this.stopped = true;
@@ -271,7 +352,7 @@ export class ProfileImportStore implements ProfileImports {
 
   private async openImport(
     agent: AgentProfileAgentId,
-    source: "git" | "upload",
+    origin: ProfileImportDetailResponse["source"],
     fetch: (root: string) => Promise<{ candidates: ScannedImportCandidate[]; notes: string[] }>
   ): Promise<ProfileImportScanResponse> {
     if (this.stopped) {
@@ -312,8 +393,8 @@ export class ProfileImportStore implements ProfileImports {
       if (this.stopped) {
         throw profileErrors.importFailed("Imports are not available while the daemon stops.");
       }
-      this.imports.set(id, { id, agent, root, candidates, expiresAt: this.now().getTime() + this.ttlMs });
-      this.logger.info(`agent-profile import ${id} (${agent}, ${source}): ${candidates.size} candidate(s)`);
+      this.imports.set(id, { id, agent, root, origin, candidates, expiresAt: this.now().getTime() + this.ttlMs });
+      this.logger.info(`agent-profile import ${id} (${agent}, ${origin.type}): ${candidates.size} candidate(s)`);
       const wire: ProfileImportCandidate[] = [...candidates.entries()].map(([ref, candidate]) => ({
         ref,
         kind: candidate.kind,

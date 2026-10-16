@@ -5,6 +5,7 @@
  */
 
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, watch } from "node:fs";
 import { on } from "node:events";
 import { mkdir, mkdtemp, readdir, rm, symlink, utimes, writeFile } from "node:fs/promises";
@@ -19,6 +20,7 @@ import {
   Gate,
   HtmlPreviewBrowser,
   HtmlPreviewError,
+  killWindowsTree,
   MAX_CONSOLE_MESSAGES,
   MAX_CONSOLE_TEXT_CHARS,
   MAX_SCREENSHOT_BASE64_CHARS,
@@ -26,6 +28,7 @@ import {
   PREVIEW_PROFILE_PREFIX,
   PREVIEWS_BUSY_MESSAGE,
   STALE_PROFILE_AGE_MS,
+  TASKKILL_TIMEOUT_MS,
   type StartTimer
 } from "./browser.ts";
 import { measureHtmlPage, previewHtmlPage } from "./index.ts";
@@ -819,5 +822,29 @@ describe("html preview browser: slots, queue and cancellation", () => {
     next.abort();
     await assert.rejects(after, (error: unknown) => error instanceof HtmlPreviewError && error.code === "cancelled");
     assert.deepEqual(await readdir(own), []);
+  });
+});
+
+describe("the Windows tree kill", () => {
+  it("runs taskkill /T /F on the pid, bounded by a timeout, and says whether it worked", () => {
+    const calls: { command: string; args: readonly string[]; options: Record<string, unknown> }[] = [];
+    const run = ((command: string, args: readonly string[], options: Record<string, unknown>) => {
+      calls.push({ command, args, options });
+      return { status: calls.length === 1 ? 0 : 1, signal: null, output: [], pid: 1, stdout: null, stderr: null };
+    }) as unknown as typeof spawnSync;
+    assert.equal(killWindowsTree(4242, { run }), true);
+    assert.deepEqual(calls[0]!.args, ["/pid", "4242", "/T", "/F"]);
+    assert.equal(calls[0]!.command, "taskkill");
+    assert.equal(calls[0]!.options.timeout, TASKKILL_TIMEOUT_MS);
+    assert.equal(killWindowsTree(4242, { run }), false, "a failed taskkill: the caller kills the process itself");
+  });
+
+  it("a taskkill that hangs is killed at its bound: the call returns false instead of hanging", { timeout: TEST_TIMEOUT_MS }, () => {
+    // A stand-in that never exits, run through the real spawnSync with the options the kill passes.
+    const run = ((_command: string, _args: readonly string[], options: Parameters<typeof spawnSync>[2]) =>
+      spawnSync(process.execPath, ["-e", "setInterval(() => {}, 1000)"], options)) as unknown as typeof spawnSync;
+    const started = Date.now();
+    assert.equal(killWindowsTree(4242, { run, timeoutMs: 300 }), false);
+    assert.ok(Date.now() - started < TEST_TIMEOUT_MS, "bounded");
   });
 });

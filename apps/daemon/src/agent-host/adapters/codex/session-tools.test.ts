@@ -13,11 +13,15 @@ import { after, describe, it } from "node:test";
 
 import { recordingSessionTools } from "../../session-tools/testing.ts";
 import { createCodexAdapter } from "./index.ts";
+import { classifyItem } from "./items.ts";
 import {
+  CODEX_DENIED_STUB_URL,
   CODEX_SESSION_TOOLS_CONTEXT_KEY,
   CODEX_SESSION_TOOLS_TOKEN_ENV,
+  codexDenyConfig,
   codexSessionToolsConfig,
-  codexSessionToolsContext
+  codexSessionToolsContext,
+  codexSessionToolsServerName
 } from "./session-tools.ts";
 import { createFakeContext, EventCollector, writeMockCodexServer } from "./testing.ts";
 
@@ -27,6 +31,33 @@ after(async () => {
 });
 
 describe("codex session tools — the builders", () => {
+  it("the thread config switches off every server the manifest denies, never our own name (§12.1)", () => {
+    const config = codexSessionToolsConfig({
+      url: "http://127.0.0.1:4711/mcp",
+      instructions: "x",
+      deny: ["orquester_remote", "orquester", "my remote", "my-remote"]
+    });
+    assert.equal(config["mcp_servers.orquester_remote.enabled"], false);
+    assert.equal(config["mcp_servers.my-remote.enabled"], false);
+    // Any character but `.` is fine in a dotted key (probed on 0.159.0).
+    assert.equal(config["mcp_servers.my remote.enabled"], false);
+    // `orquester` is ours: the thread entry already replaces a user's same-named one.
+    assert.equal(config["mcp_servers.orquester.enabled"], undefined);
+    assert.ok(config["mcp_servers.orquester"]);
+  });
+
+  it("a denied name with a `.` is never dropped: the whole override becomes ONE mcp_servers table", () => {
+    const ours = { url: "http://127.0.0.1:4711/mcp", bearer_token_env_var: "ORQUESTER_SESSION_TOOLS_TOKEN", default_tools_approval_mode: "approve", tool_timeout_sec: 3900 };
+    // Codex splits override keys on every `.` (`mcp_servers."a.b"` fails the thread), and a separate
+    // `mcp_servers` key would replace `mcp_servers.orquester`: one table, merged into the config.
+    assert.deepEqual(codexSessionToolsConfig({ url: "http://127.0.0.1:4711/mcp", instructions: "x", deny: ["remote.prod", "plain", "orquester"] }), {
+      mcp_servers: { orquester: ours, "remote.prod": { enabled: false }, plain: { enabled: false } }
+    });
+    assert.deepEqual(codexDenyConfig(["remote.prod", "plain"]), { mcp_servers: { "remote.prod": { enabled: false }, plain: { enabled: false } } });
+    assert.deepEqual(codexDenyConfig(["plain"]), { "mcp_servers.plain.enabled": false });
+    assert.deepEqual(codexDenyConfig([]), {});
+  });
+
   it("the thread config attaches the server by URL and env-var NAME, pre-approved", () => {
     const config = codexSessionToolsConfig({ url: "http://127.0.0.1:4711/mcp", instructions: "x" });
     assert.deepEqual(config, {
@@ -49,6 +80,26 @@ describe("codex session tools — the builders", () => {
 });
 
 describe("codex session tools — a launch", () => {
+  for (const [failGrant, defined] of [[false, true], [true, true], [false, false], [true, false]] as const) {
+    it(`the thread's MCP denials reach thread/start's config${failGrant ? " — also when no grant could be issued" : ""}${defined ? "" : " — as a harmless stub where its config does not define the server"}`, async () => {
+      const server = writeMockCodexServer({ turns: [], mcpServers: defined ? { orquester_remote: { url: "http://127.0.0.1:47831/mcp" } } : {} });
+      cleanups.push(() => rmSync(server.dir, { recursive: true, force: true }));
+      const recording = recordingSessionTools(undefined, { deny: ["orquester_remote"] });
+      const tools = failGrant
+        ? { ...recording, issue: async () => Promise.reject(new Error("the endpoint could not bind")) }
+        : recording;
+      const { context } = createFakeContext({ resolveBin: () => Promise.resolve(server.bin), sessionTools: tools });
+      const adapter = await createCodexAdapter(context);
+      cleanups.push(() => adapter.stopAll());
+      await adapter.refreshSnapshot({ cwd: process.cwd() });
+      await adapter.startSession({ threadId: "thread-d", cwd: process.cwd(), home: { kind: "system", path: "" }, modelSelection: { model: "gpt-5.5" }, runtimeMode: "approval-required" });
+      const config = (server.received().find((frame) => frame.method === "thread/start")?.params as { config?: Record<string, unknown> }).config;
+      if (defined) assert.equal(config?.["mcp_servers.orquester_remote.enabled"], false);
+      else assert.deepEqual(config?.["mcp_servers.orquester_remote"], { url: CODEX_DENIED_STUB_URL, enabled: false });
+      assert.equal(config?.["mcp_servers.orquester"] !== undefined, !failGrant, "our own server only with a grant");
+    });
+  }
+
   it("credential in env only; config on thread/start; context on turn/start; revoked at exit", async () => {
     const server = writeMockCodexServer({ turns: [{ kind: "text", text: "done" }] });
     cleanups.push(() => rmSync(server.dir, { recursive: true, force: true }));
@@ -258,5 +309,63 @@ describe("codex session tools — a fork (thread lineage, spec 2026-10-14 §6)",
     assert.equal(childGrant.revoked, true);
     assert.equal(parentGrant.revoked, false, "ending the child never ends the parent's");
     await adapter.stopAll();
+  });
+});
+
+describe("codex session tools — a config that has its own `orquester`", () => {
+  it("names ours orquester_session (then _2, …) only where `orquester` is taken", () => {
+    assert.equal(codexSessionToolsServerName([]), "orquester");
+    assert.equal(codexSessionToolsServerName(["keep"]), "orquester");
+    assert.equal(codexSessionToolsServerName(["orquester"]), "orquester_session");
+    assert.equal(codexSessionToolsServerName(["orquester", "orquester_session", "orquester_session_2"]), "orquester_session_3");
+  });
+
+  for (const pointsAtUs of [false, true]) {
+    it(`launches with ours under the alternate name; theirs is ${pointsAtUs ? "denied by name (it points at Orquester)" : "left alone"}`, async () => {
+      // A user's stdio `orquester` (probed: merging ours into it fails thread/start on 0.159.0).
+      const server = writeMockCodexServer({ turns: [{ kind: "text", text: "done" }], mcpServers: { orquester: { command: "sh", args: [] } } });
+      cleanups.push(() => rmSync(server.dir, { recursive: true, force: true }));
+      const tools = recordingSessionTools(undefined, { deny: pointsAtUs ? ["orquester"] : [] });
+      const { context } = createFakeContext({ resolveBin: () => Promise.resolve(server.bin), sessionTools: tools });
+      const adapter = await createCodexAdapter(context);
+      cleanups.push(() => adapter.stopAll());
+      const events = new EventCollector(adapter.events);
+      await adapter.refreshSnapshot({ cwd: process.cwd() });
+      await adapter.startSession({ threadId: "thread-o", cwd: process.cwd(), home: { kind: "system", path: "" }, modelSelection: { model: "gpt-5.5" }, runtimeMode: "approval-required" });
+      const read = server.received().find((frame) => frame.method === "config/read");
+      assert.deepEqual(read?.params, { cwd: process.cwd() }, "the thread's own effective config, project layers included");
+      const config = (server.received().find((frame) => frame.method === "thread/start")?.params as { config?: Record<string, unknown> }).config ?? {};
+      const grant = tools.grants[0]!;
+      assert.deepEqual(config["mcp_servers.orquester_session"], {
+        url: grant.url,
+        bearer_token_env_var: CODEX_SESSION_TOOLS_TOKEN_ENV,
+        default_tools_approval_mode: "approve",
+        tool_timeout_sec: 3900
+      }, "ours, pre-approved, under the alternate name");
+      assert.equal(config["mcp_servers.orquester"], undefined, "never merged into theirs");
+      assert.equal(config["mcp_servers.orquester.enabled"], pointsAtUs ? false : undefined);
+      // The instruction block says the chat's name for our server.
+      await adapter.sendTurn({ threadId: "thread-o", input: "hello", attachments: [], interactionMode: "default" });
+      await events.waitForType("turn.completed");
+      const turn = server.received().find((frame) => frame.method === "turn/start")?.params as { additionalContext?: Record<string, { value: string }> };
+      const block = turn.additionalContext?.[CODEX_SESSION_TOOLS_CONTEXT_KEY]?.value ?? "";
+      assert.match(block, /named `orquester_session`/);
+      assert.match(block, pointsAtUs ? /points at Orquester; it is switched off in this chat/ : /the user's own, not Orquester's/);
+    });
+  }
+
+  it("a row says whose server it came from: ours under its alternate name, never the user's `orquester`", () => {
+    const call = (server: string) => ({
+      type: "mcpToolCall" as const, id: "c", server, tool: "echo", status: "completed" as const, arguments: {}, appContext: null,
+      pluginId: null, readOnlyHint: true, result: { content: [], structuredContent: { ok: true }, _meta: null }, error: null, durationMs: 1
+    });
+    const ours = classifyItem(call("orquester_session") as never, "orquester_session").data as Record<string, unknown>;
+    const theirs = classifyItem(call("orquester") as never, "orquester_session").data as Record<string, unknown>;
+    assert.equal(ours.sessionToolsServer, true);
+    assert.ok("result" in ours, "our result is kept");
+    assert.equal(theirs.sessionToolsServer, false);
+    assert.equal("result" in theirs, false, "theirs is any other server's");
+    // History (no session to ask): the spelling decides, the alternate name included.
+    assert.ok("result" in (classifyItem(call("orquester_session") as never).data as Record<string, unknown>));
   });
 });

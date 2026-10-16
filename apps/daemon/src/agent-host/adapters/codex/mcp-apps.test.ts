@@ -249,7 +249,8 @@ describe("codex — MCP Apps", () => {
   });
 
   it("a session tool's call is never an app, even one naming a ui:// resource; its result is still kept", async () => {
-    const r = rig({ turns: [] });
+    // A thread with Orquester's server registered (a grant): `orquester` is ours.
+    const r = rig({ turns: [] }, { sessionTools: { url: "http://127.0.0.1:9/mcp", instructions: "", revoke: () => undefined } });
     await r.session.start();
     const threadId = threadIdOf(r.session);
     const reference = { htmlRender: { attachmentId: STORED_ID, title: "Chart", height: 420 } };
@@ -273,6 +274,27 @@ describe("codex — MCP Apps", () => {
     assert.equal("mcpApp" in data, false);
     // Task 1's rule stands: the session tool's result carries its reference.
     assert.deepEqual((data.result as { structuredContent?: unknown }).structuredContent, reference);
+    await r.stop();
+  });
+
+  it("without a grant no live row is Orquester's: a user's own `orquester` MCP App is captured like any other", async () => {
+    const r = rig({ turns: [], mcpApps: { contents: [{ uri: "ui://orquester/page.html", mimeType: "text/html;profile=mcp-app", text: "<p>mine</p>" }] } });
+    await r.session.start();
+    const threadId = threadIdOf(r.session);
+    const userApp = appCall({
+      id: "user-orquester",
+      server: "orquester",
+      tool: "show",
+      appContext: { connectorId: "orquester", linkId: null, resourceUri: "ui://orquester/page.html", appName: null, actionName: null }
+    });
+    await r.notify("item/completed", { item: userApp, threadId, turnId: "t", completedAtMs: 1 });
+    const completed = (await r.events.waitFor(
+      (event) => event.type === "item.completed" && event.itemId === "user-orquester",
+      "the user's call"
+    )) as Extract<RuntimeEvent, { type: "item.completed" }>;
+    const data = completed.payload.data as Record<string, unknown>;
+    assert.equal(data.sessionToolsServer, false, "never Orquester's");
+    assert.ok(r.received().some((frame) => frame.method === "mcpServer/resource/read"), "its app resource is read");
     await r.stop();
   });
 

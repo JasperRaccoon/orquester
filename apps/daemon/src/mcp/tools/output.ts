@@ -1,3 +1,5 @@
+// Catalog family module `output` (Tool output: read_tool_output) — owned by plan Task 7 (unified MCP, Wave 3; design
+// 2026-10-15 §4 row 7): a content read, `chat-extras` for chat callers.
 import { z } from "zod";
 import {
   THREAD_ITEM_OUTPUT_MAX_BYTES,
@@ -14,7 +16,9 @@ import type { DaemonApi } from "../daemon-api.ts";
 import { daemonError, ToolError } from "../errors.ts";
 import { requireChatSession } from "../reads.ts";
 import { clipText, MAX_ECHO_CHARS, MAX_RESULT_BYTES, resultBytes } from "../result.ts";
-import { defineTool, READ_ONLY, type ToolDef } from "../tool.ts";
+import { defineTool, READ_ONLY, type AnyOrquesterTool } from "../catalog/contract.ts";
+import { chatFrame, sessionAmongTabs, sessionCard, sessionClaim } from "./session-access.ts";
+import { sessionIdField } from "./sessions.ts";
 
 /** A window's default size, in UTF-8 bytes of the text. */
 const DEFAULT_OUTPUT_BYTES = 40_000;
@@ -179,7 +183,7 @@ function windowEnd(bytes: Uint8Array, start: number, maxBytes: number, room: num
  * it falls in); at most `maxBytes` — or one whole character, up to 4 bytes; inside the join; and empty only at its end.
  * Anything else is INTERNAL, never a page.
  */
-function windowPage(args: { itemId: string } & ByteWindow, output: { kind: "command-output"; window: ThreadItemOutputWindowResponse } & StreamFlags) {
+function windowPage(args: { itemId: string } & ByteWindow, output: { kind: "command-output"; window: ThreadItemOutputWindowResponse } & StreamFlags, budget: number) {
   const { kind, window, ...flags } = output;
   const { totalBytes } = window;
   const requested = Math.min(args.offset, THREAD_ITEM_OUTPUT_MAX_BYTES + 1, totalBytes);
@@ -190,45 +194,62 @@ function windowPage(args: { itemId: string } & ByteWindow, output: { kind: "comm
   if (!sane) throw new ToolError("INTERNAL", "Expected a window of a tool call's streamed output.");
   if (args.offset > totalBytes) throw pastTheEnd(args.offset, totalBytes);
   const frame = resultBytes({ itemId: args.itemId, kind, text: "", offset: window.offset, totalBytes, nextOffset: totalBytes, ...flags });
-  const kept = windowEnd(bytes, 0, args.maxBytes, MAX_RESULT_BYTES - frame);
+  const kept = windowEnd(bytes, 0, args.maxBytes, budget - frame);
   const end = window.offset + kept;
   return { itemId: args.itemId, kind, text: bytes.toString("utf8", 0, kept), offset: window.offset, totalBytes, ...(end < totalBytes ? { nextOffset: end } : {}), ...flags };
 }
 
+/** A tool row's output window within `budget` bytes of result (the pre-catalog read_tool_output's answer at the full cap). */
+async function toolOutput(api: DaemonApi, args: { sessionId: string; itemId: string } & ByteWindow, budget: number): Promise<Record<string, unknown>> {
+  await requireChatSession(api, args.sessionId);
+  // The unslimmed item (§5.6), the GUI's "Load full output" read: `GET /api/sessions/:id/items/:itemId`.
+  const res = await api.request("GET", agentChatRoutes.item(args.sessionId, args.itemId));
+  if (res.status === 404) {
+    throw new ToolError("NOT_FOUND", `No item "${clipText(args.itemId, MAX_ECHO_CHARS)}" in this session: it is gone, or it never existed. Item ids come from read_transcript — a tool row's outputItemId.`);
+  }
+  if (res.status >= 400) throw daemonError(res);
+  const item = (res.body as Partial<ThreadItemResponse> | null)?.item;
+  if (!isThreadItem(item)) throw new ToolError("INTERNAL", "Expected a thread item.");
+  const output = await itemOutput(api, args.sessionId, item, args);
+  if ("window" in output) return windowPage(args, output, budget);
+  const { kind, text, ...flags } = output;
+  // The text's UTF-8, which every offset counts in (a lone surrogate, which UTF-8 cannot hold, reads as U+FFFD).
+  const bytes = Buffer.from(text, "utf8");
+  const totalBytes = bytes.length;
+  if (args.offset > totalBytes) throw pastTheEnd(args.offset, totalBytes);
+  const start = characterStart(bytes, args.offset);
+  // The text's room: the cap less the answer around it, with nextOffset at its widest (it never passes totalBytes).
+  const frame = resultBytes({ itemId: args.itemId, kind, text: "", offset: start, totalBytes, nextOffset: totalBytes, ...flags });
+  const end = windowEnd(bytes, start, args.maxBytes, budget - frame);
+  return { itemId: args.itemId, kind, text: bytes.toString("utf8", start, end), offset: start, totalBytes, ...(end < totalBytes ? { nextOffset: end } : {}), ...flags };
+}
+
+
 const readToolOutput = defineTool({
   name: "read_tool_output",
   title: "Read a tool's full output",
-  description: "A tool call's whole output, as the GUI's \"Load full output\" reads it: pass a tool row's outputItemId from read_transcript as itemId. kind: command-output (a command's output — so far if running is true; only part of it if truncated is true), message or payload (the item's payload as JSON). Read in UTF-8 byte windows: while nextOffset is present, call again with offset = nextOffset.",
+  description: "A tool call's whole output, as the GUI's \"Load full output\": itemId = a tool row's outputItemId from read_transcript. kind: command-output (so far if running; only part if truncated), message or payload (JSON). Read in UTF-8 byte windows: while nextOffset is present, call again with offset = nextOffset.",
   input: {
-    sessionId: z.string().min(1).describe("The session id from list_sessions."),
-    itemId: z.string().min(1).describe("The item to read: a tool row's outputItemId from read_transcript."),
-    offset: z.number().int().min(0).default(0).describe("UTF-8 byte offset to start at: 0, or the previous result's nextOffset. An offset inside a character starts at that character."),
-    maxBytes: z.number().int().min(1).max(MAX_OUTPUT_BYTES).default(DEFAULT_OUTPUT_BYTES).describe(`Most bytes of text to return (max ${MAX_OUTPUT_BYTES}), or one whole character when maxBytes is smaller than it; fewer come back when one result cannot hold them.`)
+    sessionId: sessionIdField,
+    itemId: z.string().min(1).describe("A tool row's outputItemId from read_transcript."),
+    offset: z.number().int().min(0).default(0).describe("UTF-8 byte offset: 0, or the last result's nextOffset."),
+    maxBytes: z.number().int().min(1).max(MAX_OUTPUT_BYTES).default(DEFAULT_OUTPUT_BYTES).describe(`Most bytes of text (max ${MAX_OUTPUT_BYTES}); fewer when one result cannot hold them.`)
   },
+  audiences: ["external", "chat"],
+  toolset: "chat-extras",
+  tier: "read",
+  scope: (args, ctx) => sessionClaim(ctx, args.sessionId, { reads: "content", writes: false, self: "allow" }),
+  approval: (args, ctx) => sessionCard(ctx, args.sessionId, "read a tool's output in", [{ label: "Item", value: args.itemId }]),
   annotations: READ_ONLY,
-  async run(args, { api }) {
-    await requireChatSession(api, args.sessionId);
-    // The unslimmed item (§5.6), the GUI's "Load full output" read: `GET /api/sessions/:id/items/:itemId`.
-    const res = await api.request("GET", agentChatRoutes.item(args.sessionId, args.itemId));
-    if (res.status === 404) {
-      throw new ToolError("NOT_FOUND", `No item "${clipText(args.itemId, MAX_ECHO_CHARS)}" in this session: it is gone, or it never existed. Item ids come from read_transcript — a tool row's outputItemId.`);
-    }
-    if (res.status >= 400) throw daemonError(res);
-    const item = (res.body as Partial<ThreadItemResponse> | null)?.item;
-    if (!isThreadItem(item)) throw new ToolError("INTERNAL", "Expected a thread item.");
-    const output = await itemOutput(api, args.sessionId, item, args);
-    if ("window" in output) return windowPage(args, output);
-    const { kind, text, ...flags } = output;
-    // The text's UTF-8, which every offset counts in (a lone surrogate, which UTF-8 cannot hold, reads as U+FFFD).
-    const bytes = Buffer.from(text, "utf8");
-    const totalBytes = bytes.length;
-    if (args.offset > totalBytes) throw pastTheEnd(args.offset, totalBytes);
-    const start = characterStart(bytes, args.offset);
-    // The text's room: the cap less the answer around it, with nextOffset at its widest (it never passes totalBytes).
-    const frame = resultBytes({ itemId: args.itemId, kind, text: "", offset: start, totalBytes, nextOffset: totalBytes, ...flags });
-    const end = windowEnd(bytes, start, args.maxBytes, MAX_RESULT_BYTES - frame);
-    return { itemId: args.itemId, kind, text: bytes.toString("utf8", start, end), offset: start, totalBytes, ...(end < totalBytes ? { nextOffset: end } : {}), ...flags };
+  resultKind: "json",
+  async run(args, { api, caller }) {
+    if (caller.kind !== "thread") return toolOutput(api, args, MAX_RESULT_BYTES);
+    const { summary, sessions } = await sessionAmongTabs(api, args.sessionId);
+    const frame = chatFrame(caller, sessions, summary);
+    const page = await toolOutput(api, args, MAX_RESULT_BYTES - frame.bytes);
+    return { ...frame.before, ...page, ...frame.after };
   }
 });
 
-export const outputTools: ToolDef[] = [readToolOutput];
+/** This family in the catalog (`../catalog/index.ts`). */
+export const outputFamily: readonly AnyOrquesterTool[] = [readToolOutput];

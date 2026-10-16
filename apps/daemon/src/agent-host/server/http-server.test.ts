@@ -73,6 +73,7 @@ async function harness(
     openGate?: boolean;
     index?: ThreadIndex;
     adapters?: TestHostOptions["adapters"];
+    sessionToolsRefresh?: Parameters<typeof createAgentHostServer>[0]["sessionToolsRefresh"];
   } = {}
 ): Promise<Harness> {
   const dir = await mkdtemp(join(tmpdir(), "agent-host-test-"));
@@ -92,7 +93,8 @@ async function harness(
     tmpDir: join(dir, "tmp"),
     startedAt: "1970-01-01T00:00:00.000Z",
     pid: 4242,
-    onStop: async () => ({ ok: true, markedThreadIds: [] })
+    onStop: async () => ({ ok: true, markedThreadIds: [] }),
+    ...(options.sessionToolsRefresh ? { sessionToolsRefresh: options.sessionToolsRefresh } : {})
   });
   await server.listen();
 
@@ -1171,6 +1173,40 @@ describe("agent host server — the thread's prompts (the right rail's History)"
     } finally {
       await h.stop();
       await release();
+    }
+  });
+});
+
+describe("agent host server — unified MCP §9.3, a thread's new session-tool manifest", () => {
+  it("POST /threads/:id/session-tools/refresh hands the manifest over and answers what was applied", async () => {
+    const seen: [string, unknown][] = [];
+    const h = await harness({
+      sessionToolsRefresh: async (threadId, body) => {
+        seen.push([threadId, body]);
+        return { applied: "next-idle" };
+      }
+    });
+    try {
+      const manifest = { tools: ["list_sessions"], instructions: "## Orquester", deny: ["remote"] };
+      const answered = await h.call("POST", agentHostRoutes.sessionToolsRefresh("thread-1"), { manifest });
+      assert.equal(answered.status, 200);
+      assert.deepEqual(answered.body, { applied: "next-idle" });
+      assert.deepEqual(seen, [["thread-1", { manifest }]]);
+      assert.equal((await h.call("POST", agentHostRoutes.sessionToolsRefresh("thread-1"), { manifest: { tools: "x" } })).status, 400);
+      assert.equal((await h.call("POST", agentHostRoutes.sessionToolsRefresh("thread-1"), { manifest }, "wrong-token")).status, 401);
+      assert.equal(seen.length, 1);
+    } finally {
+      await h.stop();
+    }
+  });
+
+  it("a host without the hook answers the route-miss 404 (an older host)", async () => {
+    const h = await harness();
+    try {
+      const answered = await h.call("POST", agentHostRoutes.sessionToolsRefresh("thread-1"), { manifest: { tools: [], instructions: "", deny: [] } });
+      assert.equal(answered.status, 404);
+    } finally {
+      await h.stop();
     }
   });
 });

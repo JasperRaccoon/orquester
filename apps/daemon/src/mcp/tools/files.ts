@@ -1,7 +1,12 @@
+// Catalog family module `files` (read_file) — plan Task 9 (unified MCP design 2026-10-15 §4 row 20, §5.1 ruling S6,
+// D-19): a file (paged) or a directory listing, through `DaemonApi.readFileRange` / `listDirectory`.
+import { isAbsolute, resolve } from "node:path";
 import { z } from "zod";
-import { DEFAULT_READ_BYTES, MAX_FS_ENTRIES, MAX_READ_BYTES, type ListFilesResult } from "../fs-tools.ts";
+import { defineTool, READ_ONLY, type AnyOrquesterTool, type ToolCaller } from "../catalog/contract.ts";
+import type { DaemonApi } from "../daemon-api.ts";
+import { ToolError } from "../errors.ts";
+import { DEFAULT_READ_BYTES, FsDirectoryError, MAX_FS_ENTRIES, MAX_READ_BYTES, type ListFilesResult } from "../fs-tools.ts";
 import { MAX_RESULT_BYTES, resultBytes } from "../result.ts";
-import { defineTool, READ_ONLY, type ToolDef } from "../tool.ts";
 
 /**
  * A listing that fits one result (ok() cuts anything over MAX_RESULT_BYTES and loses its fields):
@@ -20,39 +25,61 @@ function fitListing(listing: ListFilesResult): ListFilesResult {
   return { ...listing, entries: listing.entries.slice(0, kept), truncated: true };
 }
 
-const listFiles = defineTool({
-  name: "list_files",
-  title: "List files",
-  description: `List a directory inside the workspaces sandbox (absolute path, or relative to the sandbox root): each entry's name, kind (dir, file, symlink, other) and size, sorted by name. At most ${MAX_FS_ENTRIES} entries, fewer when one result cannot hold them; truncated:true means some were left out.`,
-  input: { path: z.string().min(1).describe("Directory path: absolute, or relative to the sandbox root.") },
-  annotations: READ_ONLY,
-  async run(args, ctx) {
-    return fitListing(await ctx.files.listFiles(args.path));
-  }
-});
+/**
+ * The path a call reads: a chat caller's relative path is taken from its working directory (the one the gate
+ * classified, §5.1), an external caller's from the sandbox root (as `read_file` always took it).
+ */
+function targetPath(path: string, caller: ToolCaller): string {
+  return caller.kind === "thread" && !isAbsolute(path) ? resolve(caller.cwd || "/", path) : path;
+}
+
+/** The two `DaemonApi` file reads, or UNAVAILABLE where the seam has none (a test double). */
+function fileApi(api: DaemonApi): Required<Pick<DaemonApi, "listDirectory" | "readFileRange">> {
+  if (!api.listDirectory || !api.readFileRange) throw new ToolError("UNAVAILABLE", "File reads are not available here.");
+  return { listDirectory: api.listDirectory.bind(api), readFileRange: api.readFileRange.bind(api) };
+}
 
 const readFile = defineTool({
   name: "read_file",
-  title: "Read a file",
+  title: "Read a file or directory",
   // A window never splits a character (fs-tools.ts): one narrower than the character at `offset` takes that character
-  // whole — up to 4 bytes, past a maxBytes under 4 — so paging always advances. Both descriptions say so.
-  description: `Read a text file inside the workspaces sandbox (absolute path, or relative to the sandbox root) as a byte window: from \`offset\`, at most \`maxBytes\` (default ${DEFAULT_READ_BYTES}), or one whole character when maxBytes is smaller than it. A window too large for one result comes back shorter. truncated:true means more follows: call again with offset = nextOffset. Binary files are refused.`,
+  // whole — up to 4 bytes, past a maxBytes under 4 — so paging always advances.
+  description: `A text file as a byte window from \`offset\` (≤ maxBytes, whole characters; truncated: more at nextOffset), or a directory's entries (name, kind, size; ≤ ${MAX_FS_ENTRIES}). Binary files are refused.`,
+  chatNote: "Only inside a project; relative to this chat's directory.",
+  externalNote: "In the sandbox; relative to its root.",
   input: {
-    path: z.string().min(1).describe("File path: absolute, or relative to the sandbox root."),
-    offset: z.number().int().min(0).default(0).describe("Byte offset to start at: 0, or the previous result's nextOffset."),
-    maxBytes: z.number().int().min(1).max(MAX_READ_BYTES).default(DEFAULT_READ_BYTES).describe(`Most bytes to read (max ${MAX_READ_BYTES}), or one whole character when maxBytes is smaller than it; fewer come back when one result cannot hold them.`)
+    path: z.string().min(1),
+    offset: z.number().int().min(0).default(0),
+    maxBytes: z.number().int().min(1).max(MAX_READ_BYTES).default(DEFAULT_READ_BYTES)
+  },
+  audiences: ["external", "chat"],
+  toolset: "files-git",
+  tier: "read",
+  // The gate classifies the path (inside a project DIRECTORY, else PERMISSION_DENIED — a file beside the projects,
+  // `<ws>/notes.txt`, included: `classifyPath`) and judges its project's content read.
+  async scope(args) {
+    return { projects: [], sessions: [], reads: "content", writes: false, causesTurnIn: [], paths: [args.path] };
   },
   annotations: READ_ONLY,
-  async run(args, ctx) {
-    // FsTools reads byte windows, so the window is what shrinks until the result fits: each pass scales it by
-    // the room left for the text, and always by at least one byte.
+  resultKind: "json",
+  async run(args, { api, caller }) {
+    const files = fileApi(api);
+    const path = targetPath(args.path, caller);
+    // FsTools reads byte windows, so the window is what shrinks until the result fits: each pass scales it by the room
+    // left for the text, and always by at least one byte.
     let window = args.maxBytes;
     for (;;) {
-      const read = await ctx.files.readFileWindow(args.path, { offset: args.offset, maxBytes: window });
-      // A window ends on a character boundary, so it can cover fewer bytes than asked: the next one starts right
-      // after the bytes it consumed, never at offset + window. nextOffset says so; `consumed` is not repeated.
+      let read;
+      try {
+        read = await files.readFileRange(path, { offset: args.offset, maxBytes: window });
+      } catch (error) {
+        if (error instanceof FsDirectoryError) return { kind: "directory", ...fitListing(await files.listDirectory(path)) };
+        throw error;
+      }
+      // A window ends on a character boundary, so it can cover fewer bytes than asked: the next one starts right after
+      // the bytes it consumed, never at offset + window. nextOffset says so; `consumed` is not repeated.
       const { consumed, ...page } = read;
-      const result: Record<string, unknown> = read.truncated ? { ...page, nextOffset: read.offset + consumed } : { ...page };
+      const result: Record<string, unknown> = read.truncated ? { kind: "file", ...page, nextOffset: read.offset + consumed } : { kind: "file", ...page };
       const size = resultBytes(result);
       if (size <= MAX_RESULT_BYTES || window === 1) return result;
       const overhead = resultBytes({ ...result, text: "" });
@@ -61,4 +88,5 @@ const readFile = defineTool({
   }
 });
 
-export const fileTools: ToolDef[] = [listFiles, readFile];
+/** This family in the catalog (`../catalog/index.ts`). */
+export const filesFamily: readonly AnyOrquesterTool[] = [readFile];

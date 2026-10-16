@@ -1,21 +1,37 @@
+// Catalog family module `messages` (Conversation: create_session, send_message) — plan Task 8 (unified MCP, Wave 3).
+//
+// The agent-to-agent conversation (spec §4 rows 10 and 13, §8): `create_session` opens a chat —
+// for a chat caller as its `opened` child or its `delegate` task, `agentCreated` (§13 c) — and
+// `send_message` talks to one, each with a reply mode: `wait` returns the final reply of the turn
+// the message causes, `notify` (chat only) delivers it later as a new message, `none` is fire and
+// forget. Reply-requesting messages go through the reply-subscription routes (Task 5's services,
+// socket-only): persisted before posting, queued as the target's next turn — never a steer.
+//
+// The steer-and-await path (`dispatchTurn` with `wait`, `awaitTurn`) serves an old agent host's
+// `thread_send {wait}` alias (spec §14.1); `reply: "none"` is `dispatchTurn` without the wait.
+import { createHash, randomUUID } from "node:crypto";
+import { stat } from "node:fs/promises";
+import { isAbsolute, relative as relativePath, resolve as resolvePath } from "node:path";
 import { z } from "zod";
-import type { SessionSummary } from "@orquester/api";
-import { agentChatRoutes, buildPlanImplementationPrompt, GOAL_ACTIVITY_KIND, GOAL_COMMAND_FAILED_ACTIVITY_KIND, GOAL_STATUS_ACTIVITY_KIND, isGoalCommandText, isHiddenGoalChange, MAX_TURN_INPUT_CHARS, parseGoalSupport, parseGoalUpdatedPayload, parseThreadGoal, startedTurns, type AttachmentRef, type ThreadGoal, type ThreadItem, type ThreadItemResponse, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
-import { supportsFrom } from "../agents.ts";
-import { attachmentInputSchema, MAX_ATTACHMENTS, uploadInlineAttachments } from "../attachments.ts";
+import type { AgentConversationsResponse, ApprovalPreviewSection, CreateSessionRequest, SessionSummary } from "@orquester/api";
+import { agentChatRoutes, buildPlanImplementationPrompt, GOAL_ACTIVITY_KIND, GOAL_COMMAND_FAILED_ACTIVITY_KIND, GOAL_STATUS_ACTIVITY_KIND, isGoalCommandText, isHiddenGoalChange, MAX_TURN_INPUT_CHARS, parseGoalSupport, parseGoalUpdatedPayload, parseThreadGoal, replyNoticeText, resolveLaunchModel, THREAD_MESSAGE_OVERHEAD_CHARS, threadMessageContext, TURN_NOT_IDLE, UNTRUSTED_NOTICE, WAIT_CYCLE, type AttachmentRef, type CausedBy, type ComposerContextRecord, type CreateAgentChatSessionFields, type ProviderModel, type ReplySubscriptionResponse, type ReplyWaitResponse, type RuntimeMode, type ThreadGoal, type ThreadItem, type ThreadItemResponse, type ThreadMessageOrigin, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
+import { findAgent, findModel, loadAgents, resolveModelSelection, supportsFrom, validateAccountId, type AgentView } from "../agents.ts";
+import { canonicalProject, realPathInSandbox, resolveProject } from "../addressing.ts";
+import { assertInsideFsRoot, FsSandboxError } from "@orquester/config/fs";
+import { attachmentInputSchema, MAX_ATTACHMENTS, uploadInlineAttachments, type AttachmentInput } from "../attachments.ts";
 import type { DaemonApi } from "../daemon-api.ts";
 import { expectOk, ToolError } from "../errors.ts";
-import { readOlderHistory, unavailableHint } from "../history.ts";
-import { readThread, requireChatSession, sendCommand } from "../reads.ts";
-import { fitJsonBytes, MAX_RESULT_BYTES, resultBytes } from "../result.ts";
-import { defineTool, MUTATING, READ_ONLY, type ToolContext, type ToolDef } from "../tool.ts";
-import { proposedPlan, transcriptEntries, transcriptRange, type TranscriptResult } from "../transcript.ts";
+import { listSessions, readThread, requireChatSession, sendCommand } from "../reads.ts";
+import { clipText, fitJsonBytes, MAX_ECHO_CHARS, MAX_RESULT_BYTES, resultBytes, toSafeToolError } from "../result.ts";
+import { proposedPlan } from "../transcript.ts";
 import { buildViewContext, chatDetail, fitDetail, SETTLED_TURN_STATES, type SessionDetail } from "../views.ts";
-import { turnBaseline, waitForTurn, type TurnBaseline, type TurnOutcome } from "../wait.ts";
+import { awaitReplySubscription, turnBaseline, waitForTurn, waitWhileWorking, type TurnBaseline, type TurnOutcome } from "../wait.ts";
+import { defineTool, MUTATING, type AnyOrquesterTool, type CallContext, type ScopeContext, type ThreadCaller } from "../catalog/contract.ts";
+import { NEW_SESSION, openedThreadRuntimeMode, runtimeModesUpTo } from "../gate/turn-policy.ts";
+import { asWaiter } from "../../agent-chat/waits.ts";
+import { MAX_RUNNING_SESSIONS_PER_PROJECT, optionsSchema, runtimeModeSchema } from "./sessions.ts";
+import { agentLabel, chatThreadRef, sessionCard, sessionClaim, threadCaller } from "./session-access.ts";
 
-const MAX_WAIT_MS = 600_000;
-/** read_transcript's ceiling: the budget covers the whole result in UTF-8 bytes (transcript.ts), 5 000 under ok()'s 60 000-byte cap (result.ts). */
-const MAX_TRANSCRIPT_CHARS = 55_000;
 /**
  * How long a needs-input the snapshot contradicts waits for the summary to move before looking again anyway: just
  * past one host poll (`SUMMARY_POLL_INTERVAL_MS`, 1.5 s, agent-chat/summary.ts). The session's next bus event
@@ -39,35 +55,6 @@ const GOAL_ANSWER_RECHECK_MS = 1_000;
 /** The most an answer takes, in UTF-8 bytes of its JSON: a status quotes an objective of up to 4 000 characters. */
 const GOAL_ANSWER_BYTES = 8_192;
 const GOAL_NO_ANSWER_HINT = "No answer came: the command changed nothing (the goal was already so), or the host is still on it. session.chat.goal is the goal as it stands; read_transcript shows an answer that lands later.";
-const TRUNCATED_HINT = "Shed to fit maxChars: reasoning, then tool detail, then the oldest rows (coveredTurns says which turns are left). Raise maxChars (max 55000), include less, or use get_turn_diff for one turn's file changes.";
-/** get_session sheds subagent rows too when its detail would pass the cap (views.ts), so this promises no full roster. */
-const SUBAGENTS_TRIMMED_HINT = "The subagent list was trimmed too; get_session may list more of it.";
-
-/**
- * The hint a read_transcript result carries, or none for a whole one that read every turn of its range: first
- * `unavailable`, the sentence about the turns it could not read whole (history.ts `unavailableHint`), then the shed
- * hint. That one keys on `truncated`, which transcript.ts sets on every result it sheds, a trimmed subagent list alone
- * included; `subagentsTruncated` is present only when the list was trimmed. A shed result stays TRANSCRIPT_HINT_BYTES
- * under `maxChars` for this field, and the `unavailable` sentence's bytes more, so the answer, hint included, keeps
- * within `maxChars`.
- */
-function transcriptHint(result: Pick<TranscriptResult, "truncated" | "subagentsTruncated">, unavailable?: string): string | undefined {
-  const shed = !result.truncated ? undefined : result.subagentsTruncated ? `${TRUNCATED_HINT} ${SUBAGENTS_TRIMMED_HINT}` : TRUNCATED_HINT;
-  return unavailable && shed ? `${unavailable} ${shed}` : unavailable || shed;
-}
-
-/** Why a `beforeTurn` past the last turn is refused, naming the range that is not. */
-function beforeTurnRefusal(turnCount: number): string {
-  if (turnCount === 0) return "This conversation has no started turn yet, so there is no turn to read before: leave beforeTurn out.";
-  const valid = turnCount === 1 ? "2" : `between 2 and ${turnCount + 1}`;
-  return `beforeTurn must be ${valid}: this conversation has ${turnCount} started turn${turnCount === 1 ? "" : "s"}.`;
-}
-
-const sessionIdField = z.string().min(1).describe("The session id from list_sessions.");
-const waitFields = {
-  wait: z.boolean().default(true).describe("Block until the turn settles or the agent asks something (default true)."),
-  timeoutMs: z.number().int().min(1_000).max(MAX_WAIT_MS).default(120_000).describe("How long to wait, in ms (max 600000). On timeout the turn keeps running.")
-};
 
 /**
  * The send preconditions the GUI applies (spec §7.4), and the snapshot they were checked on. An open request holds back
@@ -81,15 +68,17 @@ async function readyToSend(api: DaemonApi, summary: SessionSummary, opts: { host
   const { approvals, userInputs } = snap.pending;
   if (approvals.length || userInputs.length) {
     const open = [
-      ...approvals.map((a) => `approval ${a.requestId} (resolve_approval)`),
-      ...userInputs.map((q) => `question ${q.requestId} (answer_question${q.dismissible ? " or dismiss_question" : ""})`)
+      ...approvals.map((a) => `approval ${a.requestId}`),
+      ...userInputs.map((q) => `question ${q.requestId}`)
     ];
-    throw new ToolError("PENDING_REQUEST", `Answer the agent first: it is waiting on ${open.join(" and ")}. get_session shows the details.`, { approvals: approvals.map((a) => a.requestId), questions: userInputs.map((q) => q.requestId) });
+    throw new ToolError("PENDING_REQUEST", `Answer the agent first: it is waiting on ${open.join(" and ")} (respond_to_request${userInputs.some((q) => q.dismissible) ? "; a dismissible question may be dismissed" : ""}). get_session shows the details; reply "wait" queues the message behind them instead.`, { approvals: approvals.map((a) => a.requestId), questions: userInputs.map((q) => q.requestId) });
   }
   return snap;
 }
 
-type TurnBody = { input: string; attachments?: AttachmentRef[]; interactionMode: "default" | "plan" };
+type TurnBody = { input: string; attachments?: AttachmentRef[]; interactionMode: "default" | "plan"; context?: readonly ComposerContextRecord[]; causedBy?: CausedBy };
+/** What the send path reads of a catalog tool's context. */
+type SendContext = Pick<CallContext, "api" | "signal" | "now">;
 type SendResult = { seq: number; outcome: TurnOutcome | "sent" | "goal"; turnId?: string; reply?: string; replyTruncated?: boolean; answer?: string; answerTruncated?: true; hint?: string; pending?: SessionDetail["pending"]; session: SessionDetail };
 
 /**
@@ -97,15 +86,17 @@ type SendResult = { seq: number; outcome: TurnOutcome | "sent" | "goal"; turnId?
  * snapshot the send was checked on. The baseline is the summary read right before the POST: the checks, the catalogue
  * read and the uploads take time, and a turn that ended meanwhile must not read as this message's outcome.
  */
-async function dispatchTurn(ctx: ToolContext, sessionId: string, checked: ThreadSnapshotPayload, body: TurnBody, wait: boolean, timeoutMs: number): Promise<SendResult> {
+async function dispatchTurn(ctx: SendContext, sessionId: string, checked: ThreadSnapshotPayload, body: TurnBody, wait: boolean, timeoutMs: number): Promise<SendResult> {
   const summary = await requireChatSession(ctx.api, sessionId);
   const baseline = turnBaseline(summary);
   const over = turnsOverBefore(checked, summary);
+  const context = body.context;
   const { seq } = await sendCommand(ctx.api, sessionId, "turn", {
     input: body.input,
     ...(body.attachments?.length ? { attachments: body.attachments } : {}),
     interactionMode: body.interactionMode,
-    ...(ctx.turnContext?.length ? { context: [...ctx.turnContext] } : {})
+    ...(context?.length ? { context: [...context] } : {}),
+    ...(body.causedBy ? { causedBy: body.causedBy } : {})
   });
   const { outcome, session } = wait ? await awaitTurn(ctx, sessionId, baseline, over, timeoutMs) : { outcome: "sent" as const, session: await chatDetail(ctx.api, sessionId) };
   return sendResult(seq, outcome, session, over);
@@ -118,7 +109,7 @@ async function dispatchTurn(ctx: ToolContext, sessionId: string, checked: Thread
  * Settled is decided by the state alone, as wait.ts and views.ts decide it: a running turn's `completedAt` can hold a
  * mid-turn placeholder stamp (turn-state.ts), and a steer into that turn is this message's.
  */
-export function turnsOverBefore(checked: ThreadSnapshotPayload, summary: SessionSummary): ReadonlySet<string> {
+function turnsOverBefore(checked: ThreadSnapshotPayload, summary: SessionSummary): ReadonlySet<string> {
   const over = new Set<string>();
   for (const t of [...checked.turns, summary.latestTurn]) {
     if (t?.turnId && SETTLED_TURN_STATES.has(t.state)) over.add(t.turnId);
@@ -128,13 +119,13 @@ export function turnsOverBefore(checked: ThreadSnapshotPayload, summary: Session
 
 /**
  * §9.1's wait, then the detail the result is built from. A needs-input the snapshot does not confirm is no outcome:
- * the summary trails the host by up to one poll, so right after answer_question it can still flag the request just
+ * the summary trails the host by up to one poll, so right after respond_to_request answers it can still flag the request just
  * settled. The wait then goes on until a real outcome or the timeout — resuming on the session's next bus event (or
  * after STALE_RECHECK_MS), never looping on the stale summary. For the same lag, a verdict on a turn that was already
  * `over` when the message was posted is the list catching up, not this message's outcome: the wait rebases on it and
  * goes on. A session in error is a real failure whatever its latest turn.
  */
-export async function awaitTurn(ctx: Pick<ToolContext, "api" | "signal" | "now">, sessionId: string, baseline: TurnBaseline, over: ReadonlySet<string>, timeoutMs: number): Promise<{ outcome: TurnOutcome; session: SessionDetail }> {
+async function awaitTurn(ctx: SendContext, sessionId: string, baseline: TurnBaseline, over: ReadonlySet<string>, timeoutMs: number): Promise<{ outcome: TurnOutcome; session: SessionDetail }> {
   // Elapsed time as wait.ts counts it: the larger of the caller's clock and the monotonic one.
   const startedAt = ctx.now();
   const startedMono = performance.now();
@@ -179,6 +170,12 @@ export async function awaitTurn(ctx: Pick<ToolContext, "api" | "signal" | "now">
   }
 }
 
+/**
+ * A send's result with its session detail fitted beside it (the reply cut first, then the plan): the
+ * external `send_message` and `create_session` answer it whole (`reply: "none"`, and `"wait"` through
+ * `dispatchNextTurn`); an old host's `thread_send {wait}` alias (`sendFromChat`'s legacy path) answers
+ * the same reply without the detail.
+ */
 function sendResult(seq: number, outcome: SendResult["outcome"], session: SessionDetail, over: ReadonlySet<string>): SendResult {
   // The message's turn: one not over when it was posted — a new turn, or the running turn it steered (spec §7.4).
   const ours = (turnId: string | null | undefined): turnId is string => typeof turnId === "string" && turnId !== "" && !over.has(turnId);
@@ -205,7 +202,7 @@ function sendResult(seq: number, outcome: SendResult["outcome"], session: Sessio
  * came and `hint` when none did. No `turnId` and no `reply`: the host records the message inside a running turn, but
  * no agent read it.
  */
-async function dispatchGoalCommand(ctx: ToolContext, sessionId: string, checked: ThreadSnapshotPayload, input: string, interactionMode: TurnBody["interactionMode"], wait: boolean, timeoutMs: number): Promise<SendResult> {
+async function dispatchGoalCommand(ctx: SendContext, sessionId: string, checked: ThreadSnapshotPayload, input: string, interactionMode: TurnBody["interactionMode"], wait: boolean, timeoutMs: number): Promise<SendResult> {
   // Every row the send was checked on: the answer is written after them.
   const seen = new Set(checked.items.map((item) => item.id));
   const windowMs = goalCommandChangesNothing(input, parseThreadGoal(checked.goal)) ? GOAL_ANSWER_SETTLE_MS : GOAL_ANSWER_WAIT_MS;
@@ -277,7 +274,7 @@ function goalAnswerRows(items: readonly ThreadItem[], input: string, seen: Reado
  * `timeoutMs` bounds everything. The thread is read again on each bus event about the session, else every
  * GOAL_ANSWER_RECHECK_MS: a status answer moves no field of the summary. null when no row came.
  */
-async function awaitGoalAnswer(ctx: ToolContext, sessionId: string, input: string, seen: ReadonlySet<string>, opts: { timeoutMs: number; windowMs: number }): Promise<{ text: string; failed: boolean } | null> {
+async function awaitGoalAnswer(ctx: SendContext, sessionId: string, input: string, seen: ReadonlySet<string>, opts: { timeoutMs: number; windowMs: number }): Promise<{ text: string; failed: boolean } | null> {
   // Elapsed time as wait.ts counts it, for every bound alike: the larger of the caller's clock and the monotonic one.
   const mark = () => ({ clock: ctx.now(), mono: performance.now() });
   const since = (at: { clock: number; mono: number }) => Math.max(ctx.now() - at.clock, performance.now() - at.mono);
@@ -328,50 +325,6 @@ async function awaitGoalAnswer(ctx: ToolContext, sessionId: string, input: strin
   }
 }
 
-export const sendMessage = defineTool({
-  name: "send_message",
-  title: "Send a message",
-  description: "Send a message to a chat session (with optional image/file attachments, optionally in plan mode). With wait:true (default) it returns the agent's reply, or the question/approval it stopped on. While a turn is running the message steers it. On Codex the host runs `/goal …` itself: no turn starts, and outcome \"goal\" carries its `answer`.",
-  input: {
-    sessionId: sessionIdField,
-    text: z.string().optional().describe("The message. Required unless attachments are given."),
-    attachments: z.array(attachmentInputSchema).max(MAX_ATTACHMENTS).optional().describe(`Up to ${MAX_ATTACHMENTS}: {path} inside the sandbox, or {name, base64, mimeType?}.`),
-    planMode: z.boolean().default(false).describe("Send in plan mode (the agent plans, does not edit). Only where the agent supports it; OpenCode uses options.agent=\"plan\"."),
-    ...waitFields
-  },
-  annotations: MUTATING,
-  async run(args, ctx) {
-    const summary = await requireChatSession(ctx.api, args.sessionId);
-    const text = (args.text ?? "").trim();
-    if (!text && !args.attachments?.length) throw new ToolError("INVALID_ARGUMENT", "A message needs text or at least one attachment.");
-    if (text.length > MAX_TURN_INPUT_CHARS) throw new ToolError("INVALID_ARGUMENT", `The message is ${text.length} characters; the limit is ${MAX_TURN_INPUT_CHARS}.`);
-    // goals §5.1: where the HOST runs goals (Codex), `/goal …` is a goal command and never a prompt — the host's rule and
-    // the composer's (`isGoalCommandText`, `capabilities.goals.command`).
-    const goalText = isGoalCommandText(text);
-    const view = goalText || args.planMode ? await buildViewContext(ctx.api) : null;
-    const adapter = view?.adapterByRefId.get(summary.refId);
-    const caps = adapter ? view?.capabilitiesByAdapter.get(adapter) : undefined;
-    // Where a /goal goes is the agent's capabilities' to say: unread, the host might run it as a command while this call
-    // waited on a turn that never starts — so it is refused, as plan mode is when they cannot be read.
-    if (goalText && !caps) throw new ToolError("INVALID_ARGUMENT", `A /goal can't be routed for ${summary.refId} right now: its capabilities could not be read. Retry shortly.`);
-    const hostGoal = goalText && parseGoalSupport(caps?.goals)?.command === "host";
-    // The host refuses it too (`parseHostGoalCommand`), but only once the files are uploaded: refused here, none are.
-    if (hostGoal && args.attachments?.length) throw new ToolError("INVALID_ARGUMENT", "A goal can't include attachments.");
-    const checked = await readyToSend(ctx.api, summary, { hostGoal });
-    if (args.planMode) {
-      // The gate get_session reports as supports.planMode: capabilities that could not be read are no plan mode.
-      if (!supportsFrom(caps).planMode) {
-        throw new ToolError("INVALID_ARGUMENT", caps
-          ? `${summary.refId} has no plan mode toggle${adapter === "opencode" ? ' — use update_session {options:{agent:"plan"}}' : ""}.`
-          : `Plan mode can't be confirmed for ${summary.refId} right now: its capabilities could not be read. Retry shortly, or send without planMode.`);
-      }
-    }
-    if (hostGoal) return dispatchGoalCommand(ctx, args.sessionId, checked, text, args.planMode ? "plan" : "default", args.wait, args.timeoutMs);
-    const attachments = args.attachments?.length ? await uploadInlineAttachments(ctx.api, args.sessionId, args.attachments) : [];
-    return dispatchTurn(ctx, args.sessionId, checked, { input: text, attachments, interactionMode: args.planMode ? "plan" : "default" }, args.wait, args.timeoutMs);
-  }
-});
-
 /**
  * The plan the GUI's Implement button sends: the LATEST proposed plan, unless a later user message already
  * implemented it. That is the host's own `hasActionableProposedPlan` rule, judged on the snapshot just read
@@ -394,58 +347,752 @@ async function actionablePlanMarkdown(api: DaemonApi, sessionId: string, snap: T
   return markdown;
 }
 
-const implementPlan = defineTool({
-  name: "implement_plan",
-  title: "Implement the proposed plan",
-  description: "The GUI's Implement button: sends the agent's latest proposed plan back as 'PLEASE IMPLEMENT THIS PLAN' in default mode. To refine a plan instead, send_message with planMode:true.",
-  input: { sessionId: sessionIdField, ...waitFields },
-  annotations: MUTATING,
-  async run(args, ctx) {
-    const summary = await requireChatSession(ctx.api, args.sessionId);
-    const snap = await readyToSend(ctx.api, summary);
-    const plan = await actionablePlanMarkdown(ctx.api, args.sessionId, snap);
-    return dispatchTurn(ctx, args.sessionId, snap, { input: buildPlanImplementationPrompt(plan), interactionMode: "default" }, args.wait, args.timeoutMs);
-  }
-});
+// ---------------------------------------------------------------------------
+// The catalog tools (unified MCP design 2026-10-15 §4 rows 10 and 13, §8)
+// ---------------------------------------------------------------------------
 
-export const readTranscript = defineTool({
-  name: "read_transcript",
-  title: "Read the transcript",
-  // A list cut to fit ends in one element of its own shape counting the rest (transcript.ts `cutRow`): a changedFiles
-  // "…N more files" string, a files row {path: "…N more files", additions, deletions} with the rest's line totals, an
-  // attachments row {name: "…N more attachments", type: "omitted"}. The description has to say so: it reads as data.
-  description: "What was said and done in a session, newest turns last: messages, tool calls, approvals, questions, plans, file changes, errors. `beforeTurn` reads older turns; `agentId` drills into a subagent. A list cut to fit (a checkpoint's files, a tool's changedFiles, a message's attachments) ends in a marker counting the rest (\"…12 more files\"; a files marker has their real line totals), not a real entry.",
-  input: {
-    sessionId: sessionIdField,
-    turns: z.number().int().min(1).max(200).default(3).describe("How many turns to include: the latest ones, or those just before beforeTurn."),
-    beforeTurn: z.number().int().min(2).optional().describe("Read the turns just before this turn number (2 to turnCount + 1) instead of the latest; turns older than the live window are read from the host's history index. To page back, pass the last result's olderTurns + 1. Turns that could not be read whole are named in unavailableTurns."),
-    agentId: z.string().min(1).optional().describe("A subagent id from get_session.subagents to read its own timeline; a workflow agent's id is <coordinator>:wf:<slot>."),
-    include: z.array(z.enum(["reasoning", "tools", "activity"])).default(["tools", "activity"]).describe("Extra row kinds; reasoning is opt-in."),
-    maxChars: z.number().int().min(2_000).max(MAX_TRANSCRIPT_CHARS).default(40_000).describe("Size budget for the result, in UTF-8 bytes (max 55000; every tool result is capped at 60000 bytes). Over it, the transcript sheds reasoning, then tool detail, then its oldest rows, and cuts the latest reply last; the subagent list keeps at least a quarter when it needs it, plus whatever the transcript leaves unused.")
-  },
-  annotations: READ_ONLY,
-  async run(args, { api }) {
-    await requireChatSession(api, args.sessionId);
-    const snap = await readThread(api, args.sessionId);
-    const turnCount = startedTurns(snap.turns).length;
-    if (args.beforeTurn !== undefined && args.beforeTurn > turnCount + 1) throw new ToolError("INVALID_ARGUMENT", beforeTurnRefusal(turnCount));
-    // Turns older than the window come from the host's thread index; a page it cannot read is reported, never thrown.
-    const range = transcriptRange(turnCount, args.turns, args.beforeTurn);
-    const older = await readOlderHistory(api, args.sessionId, snap, range, args.agentId !== undefined ? { agentId: args.agentId } : {});
-    const read = older.snapshot;
-    // "" names no subagent: refused like any unknown id, never read as "the main view" (the schema refuses it first).
-    // A subagent of an older turn is known by the rows a page brought back.
-    if (args.agentId !== undefined && !read.roster.some((r) => r.id === args.agentId) && !read.items.some((i) => i.agentId === args.agentId)) {
-      throw new ToolError("INVALID_ARGUMENT", `No subagent "${args.agentId}". Known: ${read.roster.map((r) => r.id).join(", ") || "none"}.`);
+const MAX_REPLY_WAIT_SECONDS = 600;
+const DEFAULT_REPLY_WAIT_SECONDS = 120;
+/** The most unfinished children a chat's tools may have made (§5.6: every relation, agent-created only, §13 c). */
+export const MAX_OPEN_CHILDREN = 6;
+/** Agent depth (§5.6, D-15): agent-created delegate and opened links, a top-level chat's child being 1. */
+export const MAX_AGENT_DEPTH = 2;
+/** How long a child with no turn on its summary yet counts as unfinished (its first turn shows within a host poll). */
+const NEW_CHILD_GRACE_MS = 60_000;
+/** A chat caller's text, room left for the provenance header (§8.2). */
+const CHAT_TEXT_MAX_CHARS = MAX_TURN_INPUT_CHARS - THREAD_MESSAGE_OVERHEAD_CHARS;
+/** A reply's ceiling in a result, in UTF-8 bytes of its JSON. */
+const REPLY_RESULT_MAX_BYTES = 40_000;
+
+type ReplyMode = "wait" | "notify" | "none";
+
+
+/**
+ * The provenance-headed text of a turn a chat causes (§8.2), through the executor's one header
+ * builder. With `reply: "none"` the header tells the receiver how to answer — truthfully: a receiver
+ * narrower than the sender may not message it (never broader, §5.3), so it is told its answer stays
+ * visible in its own chat instead (`senderReachable`).
+ */
+function provenanceFor(ctx: CallContext, caller: ThreadCaller, origin: Exclude<ThreadMessageOrigin, "reply">, text: string, reply: ReplyMode, receiverMode: RuntimeMode): string {
+  return ctx.turn.provenance(origin, text, reply, { senderReachable: runtimeModesUpTo(receiverMode).includes(caller.runtimeMode) });
+}
+
+/** Refused for an external caller: the chat-only reply mode (§13: "External client calls a chat-only field"). */
+function externalReply(reply: ReplyMode | undefined): void {
+  if (reply === "notify") throw new ToolError("INVALID_ARGUMENT", 'reply "notify" delivers the answer as a message to the calling chat: it is for in-chat agents. Use "wait" or "none".');
+}
+
+/**
+ * The subscription's idempotency key: one per tool call (the provider's call id), so a host that
+ * re-sends the same call after a restart answers the same subscription, never a second message.
+ */
+function subscriptionKey(caller: ThreadCaller, tool: string, target: string): string {
+  return createHash("sha256").update(`${caller.threadId}\0${caller.callId}\0${tool}\0${target}`).digest("hex").slice(0, 64);
+}
+
+/** What a reply wait answered, as a result: the reply (another chat's words), a notice, or that it will come as a message. */
+function replyResult(wait: ReplyWaitResponse, target: { id: string; title: string }): Record<string, unknown> {
+  switch (wait.outcome) {
+    case "replied": {
+      const turn = wait.turnId !== null ? { turnId: wait.turnId } : {};
+      if (wait.state === "completed" && wait.reply === undefined) {
+        return { outcome: "completed", ...turn, emptyReply: true, hint: replyNoticeText("empty", { title: target.title, sessionId: target.id }) };
+      }
+      const reply = wait.reply !== undefined ? fitJsonBytes(wait.reply, REPLY_RESULT_MAX_BYTES) : null;
+      return {
+        notice: UNTRUSTED_NOTICE,
+        outcome: wait.state,
+        ...turn,
+        ...(reply ? { reply: reply.text, ...(reply.truncated ? { replyTruncated: true } : {}) } : {}),
+        ...(wait.error !== undefined ? { error: wait.error } : {})
+      };
     }
-    const unavailable = older.unavailable ? { turns: older.unavailable.turns, hint: unavailableHint(older.unavailable, range.end) } : undefined;
-    const result = transcriptEntries(read, {
-      turns: args.turns, ...(args.beforeTurn !== undefined ? { beforeTurn: args.beforeTurn } : {}), ...(args.agentId !== undefined ? { agentId: args.agentId } : {}),
-      include: new Set(args.include), maxChars: args.maxChars, windowItems: snap.items, ...(unavailable ? { unavailable } : {})
-    });
-    const hint = transcriptHint(result, unavailable?.hint);
-    return hint ? { ...result, hint } : { ...result };
+    case "notify":
+      return {
+        outcome: wait.reason === "needs-input" ? "needs-input" : "timeout",
+        willNotify: true,
+        hint:
+          wait.reason === "needs-input"
+            ? "That chat's turn is waiting for its user; its final reply will be delivered to you as a new message. End your turn or go on with other work."
+            : "No reply yet; it will be delivered to you as a new message. End your turn or go on with other work; never poll."
+      };
+    case "closed":
+      return { outcome: "closed", hint: `"${clipText(target.title, MAX_ECHO_CHARS)}" was closed before replying.` };
+  }
+}
+
+/**
+ * A wait that failed after its message went out, said truthfully (the message is never to be sent
+ * again): a wait refused for a cycle or while Orquester restarts leaves the subscription without a
+ * waiter, so its reply is delivered as a message; another wait holding it gets it there; a
+ * subscription that is gone delivers nothing here.
+ */
+function waitFailure(failure: { code: string; message: string }): Record<string, unknown> {
+  const why = `${failure.code}: ${failure.message}`;
+  switch (failure.code) {
+    case WAIT_CYCLE:
+    case "HOST_UNAVAILABLE":
+      return { willNotify: true, hint: `The message was sent, but its reply could not be waited for here (${why}). Its final reply will be delivered to you as a new message; do not send it again.` };
+    case "COMMAND_REJECTED":
+      return { willNotify: false, hint: `The message was sent, and another wait of this chat already holds its reply (${why}): the reply returns there, not here. Do not send it again.` };
+    case "THREAD_NOT_FOUND":
+      return { willNotify: false, hint: `The message was sent, but its reply subscription is gone (${why}) — the chat may have closed. No reply will come here; get_session shows its state. Do not send it again.` };
+    default:
+      return { willNotify: false, hint: `The message was sent, but waiting for its reply failed (${why}). Whether the reply arrives as a message is unknown; check with get_session or read_transcript before sending again.` };
+  }
+}
+
+/**
+ * Send a chat caller's reply-requesting message (§8.3): the subscription is persisted before the
+ * message is posted or queued as the target's next turn (Task 5's socket-only route); with `wait`,
+ * the caller's waiter attaches until the bound turn's reply, the timeout or a question (then the
+ * reply comes as a message: `willNotify`). A cancelled call releases its waiter.
+ */
+async function converse(
+  ctx: CallContext,
+  caller: ThreadCaller,
+  target: { id: string; title: string },
+  input: { text: string; reply: "wait" | "notify"; origin: Exclude<ThreadMessageOrigin, "reply">; interactionMode: "default" | "plan"; attachments?: AttachmentRef[]; timeoutSeconds: number; tool: string }
+): Promise<Record<string, unknown>> {
+  const causedBy = ctx.turn.causedBy;
+  if (!causedBy) throw new ToolError("INTERNAL", "The turn this message causes has no exchange.");
+  const sub = expectOk<ReplySubscriptionResponse>(
+    await ctx.api.request("POST", agentChatRoutes.replySubscriptions(target.id), {
+      body: {
+        fromThreadId: caller.threadId,
+        reply: input.reply,
+        input: input.text,
+        ...(input.attachments?.length ? { attachments: input.attachments } : {}),
+        interactionMode: input.interactionMode,
+        context: [threadMessageContext(caller.threadId)],
+        causedBy,
+        origin: input.origin,
+        idempotencyKey: subscriptionKey(caller, input.tool, target.id)
+      }
+    })
+  );
+  const head = { delivery: sub.delivery, subscriptionId: sub.subscriptionId };
+  if (input.reply === "notify") {
+    return {
+      ...head,
+      willNotify: true,
+      hint: sub.delivery === "queued" ? "That chat is busy: the message waits as its next turn, and its final reply will be delivered to you as a new message." : "Its final reply will be delivered to you as a new message; end your turn or go on with other work."
+    };
+  }
+  let answered: ReplyWaitResponse;
+  try {
+    answered = await awaitReplySubscription(ctx.api, target.id, sub.subscriptionId, input.timeoutSeconds, ctx.signal, ctx.caller.kind === "thread" ? ctx.caller.delivered : undefined);
+  } catch (error) {
+    // The message is saved and sent (or queued): only the wait failed — never a failed send the
+    // agent would repeat. What happens to the reply depends on why the wait failed.
+    const failure = toSafeToolError(error).structuredContent as { code: string; message: string };
+    return { ...head, ...waitFailure(failure) };
+  }
+  return { ...head, ...replyResult(answered, target) };
+}
+
+/** The refusal of a message to a chat that waits for its user, worded for a chat caller (who answers only its own children's questions). */
+function chatPendingRefusal(snap: ThreadSnapshotPayload, sessionId: string): ToolError | null {
+  const { approvals, userInputs } = snap.pending;
+  if (approvals.length === 0 && userInputs.length === 0) return null;
+  const open = [...approvals.map((a) => `approval ${a.requestId}`), ...userInputs.map((q) => `question ${q.requestId}`)].join(" and ");
+  return new ToolError(
+    "PENDING_REQUEST",
+    `Session "${sessionId}" is waiting for its user to answer ${open}; it takes no steering message until they do. Send with reply "wait" or "notify" to queue the message as its next turn, or respond_to_request for a question of a chat you created.`,
+    { approvals: approvals.map((a) => a.requestId), questions: userInputs.map((q) => q.requestId) }
+  );
+}
+
+/**
+ * Whether the target's agent has a plan mode, from the capability catalogue (as get_session reports
+ * `supports.planMode`); null when the capabilities could not be read.
+ */
+async function targetPlanMode(api: ScopeContext["api"], refId: string): Promise<{ supported: boolean | null; adapter?: string }> {
+  const view = await buildViewContext(api);
+  const adapter = view.adapterByRefId.get(refId);
+  const caps = adapter ? view.capabilitiesByAdapter.get(adapter) : undefined;
+  return { supported: caps ? supportsFrom(caps).planMode : null, ...(adapter ? { adapter } : {}) };
+}
+
+/**
+ * External `reply: "wait"` (§11): a working target gets the message as its NEXT turn, never a
+ * steer. Posted with the host's `ifIdle` precondition (refused `TURN_NOT_IDLE`, unrecorded) and,
+ * while the target works or waits for its user, posted again under the SAME command id once it is
+ * idle — then waited on as a turn. Still busy at the timeout: nothing was sent (`sent: false`).
+ * Inline attachments (`upload`) are uploaded only once the session reads idle, right before the
+ * first post, and reused by every retry; the call stops before any post once it is cancelled.
+ */
+async function dispatchNextTurn(ctx: SendContext, sessionId: string, body: TurnBody, timeoutMs: number, upload?: () => Promise<AttachmentRef[]>): Promise<Record<string, unknown>> {
+  const startedAt = ctx.now();
+  const startedMono = performance.now();
+  const remaining = () => timeoutMs - Math.max(ctx.now() - startedAt, performance.now() - startedMono);
+  const commandId = randomUUID();
+  const notSent = { outcome: "timeout", sent: false, hint: 'The session stayed busy for the whole wait, so the message was not sent. Send it again, or with reply "none" to steer its running turn.' };
+  const cancelled = () => new ToolError("CANCELLED", "The call was cancelled before the message was sent.");
+  /** Until the session reads idle (or failed); `afterNextEvent` once the host refused a post. */
+  const untilIdle = async (afterNextEvent: boolean): Promise<"idle" | "timeout"> => {
+    const left = remaining();
+    if (left <= 0) return "timeout";
+    const waited = await waitWhileWorking(ctx.api, [sessionId], { timeoutMs: left, signal: ctx.signal, now: ctx.now, until: (state) => state === "idle" || state === "failed", afterNextEvent });
+    if (waited.reports.get(sessionId) === null) throw new ToolError("SESSION_NOT_FOUND", `Session "${sessionId}" was closed while the message waited for it.`);
+    if (waited.cancelled || ctx.signal.aborted) throw cancelled();
+    return waited.timedOut ? "timeout" : "idle";
+  };
+  let attachments = body.attachments;
+  if (upload !== undefined) {
+    // Nothing is uploaded for a message that may never be sent: first the session must read idle.
+    if ((await untilIdle(false)) === "timeout") return notSent;
+    attachments = await upload();
+  }
+  for (;;) {
+    if (ctx.signal.aborted) throw cancelled();
+    const summary = await requireChatSession(ctx.api, sessionId);
+    const checked = await readThread(ctx.api, sessionId);
+    const baseline = turnBaseline(summary);
+    const over = turnsOverBefore(checked, summary);
+    if (ctx.signal.aborted) throw cancelled();
+    try {
+      const { seq } = await sendCommand(
+        ctx.api,
+        sessionId,
+        "turn",
+        { input: body.input, ...(attachments?.length ? { attachments } : {}), interactionMode: body.interactionMode, ifIdle: true },
+        { commandId }
+      );
+      const { outcome, session } = await awaitTurn(ctx, sessionId, baseline, over, Math.max(0, remaining()));
+      return { ...sendResult(seq, outcome, session, over) };
+    } catch (error) {
+      if (!(error instanceof ToolError) || error.code !== TURN_NOT_IDLE) throw error;
+    }
+    // The host said busy: look again only once something about the session moved, so a busy reason
+    // these reads cannot see (a compaction in flight) never turns into a re-post loop. The uploaded
+    // attachments ride every retry (a message the host never took leaves them to its unreferenced-
+    // attachment sweep only in that last race).
+    if ((await untilIdle(true)) === "timeout") return notSent;
+  }
+}
+
+/** Attachments as a card lists them: a path, or a name and size — never the bytes. */
+function attachmentRows(attachments: readonly AttachmentInput[] | undefined): { label: string; value: string }[] {
+  return (attachments ?? []).map((file, index) => ({
+    label: `Attachment ${index + 1}`,
+    value: "path" in file ? file.path : `${file.name} (${Math.floor((file.base64.length * 3) / 4)} bytes)`
+  }));
+}
+
+/** Filesystem paths among the attachments, as the gate classifies them (each must lie inside a project, §5.1). */
+function attachmentPaths(api: ScopeContext["api"], attachments: readonly AttachmentInput[] | undefined): string[] {
+  return (attachments ?? []).flatMap((file) => ("path" in file ? [resolvePath(api.fsRoot, file.path)] : []));
+}
+
+const replyField = z.enum(["wait", "notify", "none"]);
+const timeoutSecondsField = z.number().int().min(1).max(MAX_REPLY_WAIT_SECONDS).optional().describe(`For "wait" (default ${DEFAULT_REPLY_WAIT_SECONDS}).`);
+
+// ---------------------------------------------------------------------------
+// send_message (§4 row 13, §8.1)
+// ---------------------------------------------------------------------------
+
+export const sendMessageTool = defineTool({
+  name: "send_message",
+  title: "Send a message",
+  description:
+    "Message a chat. `reply` \"wait\" (default): returns the final reply of the turn this message causes (a working chat gets it as its next turn, never a steer), or early when that turn asks its user something, or at timeoutSeconds. \"none\": returns at once; a working chat's running turn is steered (refused while it waits for its user: PENDING_REQUEST). `implementPlan: true` sends its latest proposed plan to implement.",
+  chatNote:
+    "\"notify\": returns at once and delivers that turn's final reply to you later as a new message; use it when you want an answer to long work, never poll. A \"wait\" cut short goes on as notify (`willNotify`). Never message yourself; answer a [Sent by …] message in your final reply.",
+  externalNote: "On Codex the host runs `/goal …` itself: no turn starts, and outcome \"goal\" carries its answer.",
+  input: {
+    sessionId: z.string().min(1).describe("From list_sessions."),
+    text: z.string().optional().describe("The message."),
+    attachments: z.array(attachmentInputSchema).max(MAX_ATTACHMENTS).optional().describe("{path} inside a project, or {name, base64}."),
+    planMode: z.boolean().optional().describe("Send in plan mode."),
+    implementPlan: z.boolean().optional().describe("Send its latest proposed plan to implement."),
+    reply: replyField.optional(),
+    timeoutSeconds: timeoutSecondsField
+  },
+  audiences: ["external", "chat"],
+  toolset: "core",
+  tier: "act",
+  async scope(args, ctx) {
+    const caller = threadCaller(ctx.caller);
+    if (caller === null) {
+      externalReply(args.reply);
+      return { projects: [], sessions: [args.sessionId], reads: "none", writes: false, causesTurnIn: [] };
+    }
+    if (args.implementPlan === true && caller.planning) {
+      throw new ToolError("PERMISSION_DENIED", "You are planning: implementing a plan starts editing work. Propose it in your plan instead.");
+    }
+    // A turn-causing Act (plan carries on, §5.3); its reply is read with the Act's own rights (§5.2).
+    const claim = await sessionClaim(ctx, args.sessionId, { reads: "none", writes: false, causesTurnIn: [args.sessionId], self: "refuse" });
+    const paths = attachmentPaths(ctx.api, args.attachments);
+    return paths.length > 0 ? { ...claim, paths } : claim;
+  },
+  approval: async (args, ctx) =>
+    sessionCard(ctx, args.sessionId, args.implementPlan ? "send its plan for implementation to" : "send a message to", [
+      { label: "Reply", value: args.reply ?? "wait" },
+      ...(args.planMode ? [{ label: "Mode", value: "plan" }] : []),
+      ...attachmentRows(args.attachments)
+    ], { text: args.implementPlan ? undefined : args.text }),
+  annotations: MUTATING,
+  resultKind: "json",
+  async run(args, ctx) {
+    const caller = threadCaller(ctx.caller);
+    const reply: ReplyMode = args.reply ?? "wait";
+    const timeoutSeconds = args.timeoutSeconds ?? DEFAULT_REPLY_WAIT_SECONDS;
+    const summary = await requireChatSession(ctx.api, args.sessionId);
+    const text = (args.text ?? "").trim();
+    if (args.implementPlan === true) {
+      if (text || args.attachments?.length) throw new ToolError("INVALID_ARGUMENT", "implementPlan sends the session's own plan: give no text or attachments.");
+      if (args.planMode === true) throw new ToolError("INVALID_ARGUMENT", "implementPlan sends in default mode: leave planMode out.");
+    } else if (!text && !args.attachments?.length) {
+      throw new ToolError("INVALID_ARGUMENT", "A message needs text or at least one attachment.");
+    }
+    const limit = caller === null ? MAX_TURN_INPUT_CHARS : CHAT_TEXT_MAX_CHARS;
+    if (text.length > limit) throw new ToolError("INVALID_ARGUMENT", `The message is ${text.length} characters; the limit is ${limit}.`);
+    return caller === null ? sendExternal(args, ctx, summary, text, reply, timeoutSeconds) : sendFromChat(args, ctx, caller, summary, text, reply, timeoutSeconds);
   }
 });
 
-export const messageTools: ToolDef[] = [sendMessage, implementPlan, readTranscript];
+type SendArgs = { sessionId: string; text?: string; attachments?: AttachmentInput[]; planMode?: boolean; implementPlan?: boolean };
+
+async function sendExternal(args: SendArgs, ctx: CallContext, summary: SessionSummary, text: string, reply: ReplyMode, timeoutSeconds: number): Promise<Record<string, unknown>> {
+  const timeoutMs = timeoutSeconds * 1000;
+  // goals §5.1: where the HOST runs goals (Codex), `/goal …` is a goal command and never a prompt.
+  const goalText = args.implementPlan !== true && isGoalCommandText(text);
+  const view = goalText || args.planMode ? await buildViewContext(ctx.api) : null;
+  const adapter = view?.adapterByRefId.get(summary.refId);
+  const caps = adapter ? view?.capabilitiesByAdapter.get(adapter) : undefined;
+  if (goalText && !caps) throw new ToolError("INVALID_ARGUMENT", `A /goal can't be routed for ${summary.refId} right now: its capabilities could not be read. Retry shortly.`);
+  const hostGoal = goalText && parseGoalSupport(caps?.goals)?.command === "host";
+  if (hostGoal && args.attachments?.length) throw new ToolError("INVALID_ARGUMENT", "A goal can't include attachments.");
+  // A steer is held back by an open request; a message for the next turn waits behind it (§4.1).
+  const checked = reply === "none" || hostGoal ? await readyToSend(ctx.api, summary, { hostGoal }) : await readThread(ctx.api, summary.id);
+  if (args.planMode && !supportsFrom(caps).planMode) {
+    throw new ToolError("INVALID_ARGUMENT", caps
+      ? `${summary.refId} has no plan mode toggle${adapter === "opencode" ? ' — use update_session {options:{agent:"plan"}}' : ""}.`
+      : `Plan mode can't be confirmed for ${summary.refId} right now: its capabilities could not be read. Retry shortly, or send without planMode.`);
+  }
+  const interactionMode = args.planMode ? "plan" : "default";
+  if (hostGoal) return { ...(await dispatchGoalCommand(ctx, summary.id, checked, text, interactionMode, reply === "wait", timeoutMs)) };
+  const input = args.implementPlan === true ? buildPlanImplementationPrompt(await actionablePlanMarkdown(ctx.api, summary.id, checked)) : text;
+  const files = args.attachments;
+  if (reply === "none") {
+    const attachments = files?.length ? await uploadInlineAttachments(ctx.api, summary.id, files) : [];
+    return { ...(await dispatchTurn(ctx, summary.id, checked, { input, attachments, interactionMode }, false, timeoutMs)) };
+  }
+  return dispatchNextTurn(ctx, summary.id, { input, interactionMode }, timeoutMs, files?.length ? () => uploadInlineAttachments(ctx.api, summary.id, files) : undefined);
+}
+
+async function sendFromChat(args: SendArgs, ctx: CallContext, caller: ThreadCaller, summary: SessionSummary, text: string, reply: ReplyMode, timeoutSeconds: number): Promise<Record<string, unknown>> {
+  const sessions = await listSessions(ctx.api);
+  const ref = chatThreadRef(caller, sessions, summary);
+  const target = { id: summary.id, title: summary.title };
+  // Plan carries on (§5.3): a planning caller's message plans too; an agent with no plan mode is refused.
+  const interactionMode: "default" | "plan" = ctx.turn.interactionMode === "plan" || args.planMode === true ? "plan" : "default";
+  if (interactionMode === "plan") {
+    const plan = await targetPlanMode(ctx.api, summary.refId);
+    if (plan.supported !== true) {
+      if (ctx.turn.interactionMode === "plan") {
+        throw new ToolError("PERMISSION_DENIED", `You are planning and ${summary.refId} has no plan mode, so it cannot be given work from here. Propose it in your plan instead.`);
+      }
+      throw new ToolError("INVALID_ARGUMENT", plan.supported === false ? `${summary.refId} has no plan mode toggle.` : `Plan mode can't be confirmed for ${summary.refId} right now. Retry shortly, or send without planMode.`);
+    }
+  }
+  const checked = await readThread(ctx.api, summary.id);
+  // The plan is the target's own words, sent as the GUI's Implement sends it (the host marks the plan
+  // implemented by that prefix); the context chip, not a header, says another chat sent it.
+  const input =
+    args.implementPlan === true
+      ? buildPlanImplementationPrompt(await actionablePlanMarkdown(ctx.api, summary.id, checked))
+      : provenanceFor(ctx, caller, "sent", text, reply, checked.head.runtimeMode);
+  const attachments = args.attachments?.length ? await uploadInlineAttachments(ctx.api, summary.id, args.attachments) : [];
+  // Task 6's alias sets `legacyAlias: "thread_send"` exactly for `thread_send {wait: true}` (legacy-aliases.ts).
+  const legacyWait = ctx.legacyAlias === "thread_send" && reply === "wait";
+  if (reply === "none" || legacyWait) {
+    const pending = chatPendingRefusal(checked, summary.id);
+    if (pending) throw pending;
+    const body: TurnBody = { input, attachments, interactionMode, context: [threadMessageContext(caller.threadId)], ...(ctx.turn.causedBy ? { causedBy: ctx.turn.causedBy } : {}) };
+    if (reply === "none") {
+      const sent = await dispatchTurn(ctx, summary.id, checked, body, false, 0);
+      return { sessionId: summary.id, outcome: sent.outcome, seq: sent.seq, ...(interactionMode === "plan" ? { planMode: true } : {}), ...ref };
+    }
+    // The legacy `thread_send {wait}` alias (§14.1): the old semantics — a working target is steered
+    // and that turn waited on; a timeout just returns (nothing is delivered later).
+    const sent = await asWaiter(caller.threadId, summary.id, () => dispatchTurn(ctx, summary.id, checked, body, true, timeoutSeconds * 1000));
+    const { session: _detail, reply: words, replyTruncated, ...rest } = sent;
+    return { ...(words !== undefined ? { notice: UNTRUSTED_NOTICE } : {}), sessionId: summary.id, ...rest, ...(words !== undefined ? { reply: words, ...(replyTruncated ? { replyTruncated } : {}) } : {}), ...ref };
+  }
+  const answered = await converse(ctx, caller, target, { text: input, reply, origin: "sent", interactionMode, attachments, timeoutSeconds, tool: "send_message" });
+  const { notice, ...rest } = answered;
+  return { ...(notice !== undefined ? { notice } : {}), sessionId: summary.id, ...rest, ...(interactionMode === "plan" ? { planMode: true } : {}), ...ref };
+}
+
+// ---------------------------------------------------------------------------
+// create_session (§4 row 10, §4.1)
+// ---------------------------------------------------------------------------
+
+type AccountSource = "requested" | "inherited" | "family-default";
+
+interface ResumeRow { id: string; agent: string; title: string; home: "system" | "account"; accountId?: string }
+
+/** A delegated task's default tab title: "Task: " and the prompt's first line, cut short. */
+function delegateTitle(prompt: string): string {
+  const line = prompt.trim().split("\n", 1)[0]!.trim();
+  const cut = line.length > 60 ? `${line.slice(0, 59)}…` : line;
+  return cut ? `Task: ${cut}` : "Task";
+}
+
+/** A child that has not finished: working, waiting for its user, or opened a moment ago with no turn yet. */
+function unfinished(s: SessionSummary, now: number): boolean {
+  if (s.hasPendingApprovals || s.hasPendingUserInput || s.chatPending === true) return true;
+  if (s.chatSessionStatus === "running" || s.chatSessionStatus === "starting" || s.latestTurn?.state === "running" || s.latestTurn?.state === "pending" || s.goal?.continuing === true) return true;
+  return !s.latestTurn && now - Date.parse(s.createdAt) < NEW_CHILD_GRACE_MS;
+}
+
+/** The agent depth of a tab: its lineage's recorded `delegationDepth`, else the counting links walked up the open tabs. */
+function agentDepth(sessions: readonly SessionSummary[], threadId: string): number {
+  const byId = new Map(sessions.map((s) => [s.id, s]));
+  let depth = 0;
+  const seen = new Set<string>();
+  let current = byId.get(threadId);
+  while (current?.lineage && !seen.has(current.id)) {
+    if (current.lineage.delegationDepth !== undefined) return depth + current.lineage.delegationDepth;
+    seen.add(current.id);
+    if (current.lineage.relation === "delegate" || (current.lineage.relation === "opened" && current.lineage.agentCreated === true)) depth += 1;
+    current = byId.get(current.lineage.parentThreadId);
+  }
+  return depth;
+}
+
+/**
+ * The model a launch gets (D-23, `resolveLaunchModel`, the one function `list_agents` reports its
+ * default with): the named one — legacy accepted and marked —, else the inherited one while the
+ * catalogue still lists it, else the catalogue default (never a legacy model).
+ */
+function launchModel(agent: AgentView, requested: string | undefined, inherited: string | undefined): { slug: string; isLegacy: boolean } {
+  if (requested !== undefined) {
+    const model = findModel(agent, requested);
+    return { slug: model.slug, isLegacy: model.isLegacy === true };
+  }
+  const own = inherited ? agent.models.find((model) => model.slug === inherited) : undefined;
+  if (own) return { slug: own.slug, isLegacy: own.isLegacy === true };
+  const catalogue: ProviderModel[] = agent.models.map((model) => ({ slug: model.slug, name: model.name, isDefault: model.isDefault, ...(model.isLegacy ? { isLegacy: true } : {}), capabilities: null }));
+  const pick = resolveLaunchModel(catalogue);
+  if (!pick) throw new ToolError("INVALID_ARGUMENT", `Still loading ${agent.id}'s models — retry in a moment (list_agents).`);
+  return { slug: pick.slug, isLegacy: pick.isLegacy === true };
+}
+
+/** The account a launch names and where it came from (D-24): requested, this chat's (same agent), or the family default. */
+function launchAccount(agent: AgentView, requested: string | undefined, inherited: string | undefined, resume: ResumeRow | undefined): { accountId?: string; source: AccountSource; note?: string } {
+  // A transcript in a managed account's home is visible only from there: that account is forced (the GUI's `resumeAccountId`).
+  if (resume?.home === "account" && resume.accountId) {
+    if (requested !== undefined) validateAccountId(agent, requested);
+    return { accountId: resume.accountId, source: requested === resume.accountId ? "requested" : "inherited", ...(requested === resume.accountId ? {} : { note: "The conversation is stored in this account's home, so it resumes under it." }) };
+  }
+  if (requested !== undefined) return { accountId: validateAccountId(agent, requested), source: "requested" };
+  if (inherited) {
+    try {
+      return { accountId: validateAccountId(agent, inherited), source: "inherited" };
+    } catch {
+      return { source: "family-default", note: `This chat's account is not usable with ${agent.id} any more, so the family default was used.` };
+    }
+  }
+  return { source: "family-default" };
+}
+
+/**
+ * A `cwd` argument inside the target project: absolute, or relative to the project; an existing
+ * directory. Containment is by REAL paths — a symlink inside the project that leads elsewhere (in
+ * or out of the sandbox) is refused.
+ */
+async function cwdInProject(api: ScopeContext["api"], projectPath: string, input: string): Promise<string> {
+  const cwd = resolvePath(projectPath, input);
+  let real: string;
+  try {
+    real = await assertInsideFsRoot(api.fsRoot, cwd);
+  } catch (error) {
+    if (error instanceof FsSandboxError) throw new ToolError("PATH_NOT_ALLOWED", "cwd is not allowed (outside the sandbox).");
+    throw error;
+  }
+  const root = await realPathInSandbox(api, projectPath);
+  const rel = root === null ? null : relativePath(root, real);
+  if (rel === null || rel.startsWith("..") || isAbsolute(rel)) throw new ToolError("PERMISSION_DENIED", `cwd "${clipText(input, MAX_ECHO_CHARS)}" is not inside the project the session opens in.`);
+  const directory = await stat(real).then((info) => info.isDirectory(), () => false);
+  if (!directory) throw new ToolError("INVALID_ARGUMENT", `cwd "${clipText(input, MAX_ECHO_CHARS)}" is not an existing directory.`);
+  return cwd;
+}
+
+interface CreateArgs {
+  project?: string;
+  agent?: string;
+  model?: string;
+  options?: Record<string, string | boolean>;
+  runtimeMode?: RuntimeMode;
+  accountId?: string;
+  title?: string;
+  cwd?: string;
+  resume?: { conversationId: string };
+  prompt?: string;
+  reply?: ReplyMode;
+  timeoutSeconds?: number;
+  delegate?: boolean;
+}
+
+/** The project a create opens in: the named one, else (chat) the caller's own. */
+async function createTarget(api: ScopeContext["api"], caller: ThreadCaller | null, project: string | undefined): Promise<string> {
+  if (project !== undefined) return (await resolveProject(api, project)).path;
+  if (caller === null) throw new ToolError("INVALID_ARGUMENT", "project is required: an absolute path or \"<workspace>/<project>\".");
+  if (caller.projectPath === "") throw new ToolError("INVALID_ARGUMENT", "This chat belongs to no project: name the project to open the chat in (list_projects).");
+  return caller.projectPath;
+}
+
+/** The conversation a resume names, from the project's list. */
+async function resumeRowFor(api: ScopeContext["api"], projectPath: string, conversationId: string): Promise<ResumeRow> {
+  const res = expectOk<AgentConversationsResponse>(await api.request("GET", "/api/agents/conversations", { query: { path: projectPath } }));
+  const row = res.conversations.find((c) => c.id === conversationId);
+  if (!row) throw new ToolError("INVALID_ARGUMENT", `No conversation "${clipText(conversationId, MAX_ECHO_CHARS)}" in this project; pick one from list_conversations.`);
+  return { id: row.id, agent: row.agentRefId, title: row.title, home: row.home ?? "system", ...(row.accountId ? { accountId: row.accountId } : {}) };
+}
+
+/** The reply mode a create asks for (§4.1): chat `delegate` → notify, else none; `wait`/`notify` need a prompt. */
+function createReply(args: CreateArgs, chat: boolean): ReplyMode {
+  const reply = args.reply ?? (chat && args.delegate === true ? "notify" : "none");
+  if (reply !== "none" && args.prompt === undefined) throw new ToolError("INVALID_ARGUMENT", `reply "${reply}" answers a prompt: give the first message in \`prompt\`.`);
+  return reply;
+}
+
+export const createSessionTool = defineTool({
+  name: "create_session",
+  title: "Open a chat session",
+  description:
+    "Open a chat tab for an agent in a project, or resume a conversation (list_conversations); list_agents lists agents, models, options, modes and accounts. With `prompt` it starts at once: `reply` \"wait\" returns that turn's final reply (or at timeoutSeconds), \"none\" returns at once. The result says what the session got: model (`isLegacy` if legacy), mode, account and `accountSource` (requested, inherited or family-default).",
+  chatNote:
+    "Defaults: this chat's project, agent, mode (only narrower) and, same agent, its model, options and account. `prompt` (self-contained) is required unless resuming. Want its answer back? reply \"notify\" (delivered later as a message). `delegate: true` makes it your task: its final reply is the result (reply default \"notify\", else \"none\"). Limits: 6 unfinished chats you opened, 2 levels deep.",
+  externalNote: "`project` is required; runtimeMode defaults to full-access, reply to \"none\".",
+  input: {
+    project: z.string().min(1).optional().describe("Path or \"workspace/project\"."),
+    agent: z.string().min(1).max(64).optional().describe("From list_agents."),
+    // min(1): an empty model would read as none, so the default model would launch in its place.
+    model: z.string().min(1).max(200).optional(),
+    options: optionsSchema.optional().describe("By id, e.g. {\"effort\":\"high\"}."),
+    runtimeMode: runtimeModeSchema.optional(),
+    accountId: z.string().min(1).max(200).optional().describe("From list_agents, or \"system\"."),
+    title: z.string().trim().min(1).max(300).optional(),
+    cwd: z.string().min(1).optional().describe("Inside the project; default: the project."),
+    resume: z.object({ conversationId: z.string().min(1) }).optional().describe("From list_conversations."),
+    prompt: z.string().trim().min(1).max(CHAT_TEXT_MAX_CHARS).optional().describe("The first message."),
+    reply: replyField.optional(),
+    timeoutSeconds: timeoutSecondsField,
+    delegate: z.boolean().optional()
+  },
+  chatOnlyInput: ["delegate"],
+  audiences: ["external", "chat"],
+  toolset: "core",
+  tier: "act",
+  async scope(args, ctx) {
+    const caller = threadCaller(ctx.caller);
+    if (caller === null) {
+      externalReply(args.reply);
+      return { projects: [], sessions: [], reads: "none", writes: false, causesTurnIn: [] };
+    }
+    if (args.prompt === undefined && args.resume === undefined) throw new ToolError("INVALID_ARGUMENT", "prompt is required: the chat's first message, self-contained.");
+    createReply(args, true);
+    // Turn policy (a) before any card: a mode broader than this chat's is refused at once — never a card the call could not honour.
+    openedThreadRuntimeMode(caller, args.runtimeMode);
+    const path = await createTarget(ctx.api, caller, args.project);
+    const project = await canonicalProject(ctx.api, path);
+    if (project === null) throw new ToolError("PROJECT_NOT_FOUND", `No project at "${clipText(args.project ?? path, MAX_ECHO_CHARS)}". Use list_projects.`);
+    return {
+      projects: [project.canonical],
+      sessions: [],
+      // A resumed conversation's words come into a tab this chat can read.
+      reads: args.resume !== undefined ? "content" : "none",
+      writes: false,
+      // The first turn is agent-caused (§8.4); the opened chat runs no broader than this one (turn policy a).
+      causesTurnIn: args.prompt !== undefined ? [NEW_SESSION] : [],
+      ...(args.cwd !== undefined ? { paths: [resolvePath(project.canonical, args.cwd)] } : {})
+    };
+  },
+  async approval(args, ctx) {
+    const caller = threadCaller(ctx.caller);
+    const path = await createTarget(ctx.api, caller, args.project);
+    const project = await canonicalProject(ctx.api, path);
+    const where = project ? `${project.workspace}/${project.name}` : clipText(path, MAX_ECHO_CHARS);
+    const rows = [
+      { label: "Action", value: args.delegate ? "delegate a task to a new chat" : args.resume ? "resume a conversation" : "open a chat" },
+      { label: "Project", value: where },
+      { label: "Agent", value: args.agent ?? "this chat's" },
+      ...(args.model ? [{ label: "Model", value: args.model }] : []),
+      ...(args.options ? [{ label: "Options", value: JSON.stringify(args.options) }] : []),
+      // The mode the chat will really get (an unknown caller mode opens the narrowest): what is approved is what runs.
+      { label: "Permission mode", value: caller ? openedThreadRuntimeMode(caller, args.runtimeMode) : (args.runtimeMode ?? "full-access") },
+      ...(args.accountId ? [{ label: "Account", value: args.accountId }] : []),
+      ...(args.cwd ? [{ label: "Working directory", value: args.cwd }] : []),
+      ...(args.resume ? [{ label: "Resume", value: args.resume.conversationId }] : []),
+      ...(args.prompt !== undefined ? [{ label: "Reply", value: args.reply ?? (args.delegate ? "notify" : "none") }] : [])
+    ];
+    const sections: ApprovalPreviewSection[] = [{ kind: "fields", title: "Request", rows }];
+    if (args.prompt !== undefined) sections.push({ kind: "text", title: "First message", text: args.prompt });
+    return { title: `${agentLabel(ctx.caller)} wants to open a chat in ${where}`, scopeLabel: `Project ${where}`, sections };
+  },
+  annotations: MUTATING,
+  resultKind: "json",
+  async run(args, ctx) {
+    const caller = threadCaller(ctx.caller);
+    return caller === null ? createExternal(args, ctx) : createFromChat(args, ctx, caller);
+  }
+});
+
+/** The first message's outcome, for a create that carried a prompt. */
+type FirstTurn = Record<string, unknown>;
+
+async function createExternal(args: CreateArgs, ctx: CallContext): Promise<Record<string, unknown>> {
+  const { api } = ctx;
+  const projectPath = await createTarget(api, null, args.project);
+  const reply = createReply(args, false);
+  const resume = args.resume ? await resumeRowFor(api, projectPath, args.resume.conversationId) : undefined;
+  const refId = args.agent ?? resume?.agent;
+  if (!refId) throw new ToolError("INVALID_ARGUMENT", "agent is required (see list_agents).");
+  if (resume && args.agent && resume.agent !== args.agent) throw new ToolError("INVALID_ARGUMENT", `Conversation "${resume.id}" belongs to ${resume.agent}, not ${args.agent}.`);
+  const agent = findAgent(await loadAgents(api, { includeLegacyModels: true }), refId);
+  if (!agent.enabled) throw new ToolError("INVALID_ARGUMENT", `${refId} is not available on this host (not installed or disabled).`);
+  const model = launchModel(agent, args.model, undefined);
+  const selection = resolveModelSelection(agent, { model: model.slug, ...(args.options !== undefined ? { options: args.options } : {}) });
+  const account = launchAccount(agent, args.accountId, undefined, resume);
+  const cwd = args.cwd === undefined ? projectPath : await cwdInProject(api, projectPath, args.cwd);
+  const running = (await listSessions(api, projectPath)).filter((s) => s.status === "running").length;
+  if (running >= MAX_RUNNING_SESSIONS_PER_PROJECT) throw new ToolError("SESSION_BUSY", `${running} sessions are open in this project (limit ${MAX_RUNNING_SESSIONS_PER_PROJECT}); close some first.`);
+  const chat: CreateAgentChatSessionFields = {
+    ...(account.accountId ? { accountId: account.accountId } : {}),
+    modelSelection: { model: selection.model, options: selection.options },
+    runtimeMode: args.runtimeMode ?? "full-access",
+    ...(resume ? { resume: { home: resume.home, conversationId: resume.id } } : {})
+  };
+  const body: CreateSessionRequest = { kind: "agent-chat", refId, projectPath, cwd, title: args.title ?? (resume?.title || agent.name), ...(account.accountId ? { accountId: account.accountId } : {}), chat };
+  const summary = expectOk<SessionSummary>(await api.request("POST", "/api/sessions", { body }));
+  const created = { sessionId: summary.id, accountId: summary.accountId || account.accountId || "system", accountSource: account.source, ...(account.note ? { accountNote: account.note } : {}), ...(model.isLegacy ? { isLegacy: true } : {}) };
+  let first: FirstTurn = {};
+  if (args.prompt !== undefined) {
+    try {
+      const checked = await readThread(api, summary.id);
+      const turn: TurnBody = { input: args.prompt, interactionMode: "default" };
+      first = reply === "wait" ? await dispatchNextTurn(ctx, summary.id, turn, (args.timeoutSeconds ?? DEFAULT_REPLY_WAIT_SECONDS) * 1000) : { ...(await dispatchTurn(ctx, summary.id, checked, turn, false, 0)) };
+    } catch (error) {
+      throw createdButFailed(summary.id, "its first message could not be sent", error, "Send it with send_message; do not open another.");
+    }
+    // The first turn's own detail is the session's: returned once, as `session`.
+    const { session, ...outcome } = first as { session?: unknown };
+    if (session !== undefined) return { ...created, firstTurn: outcome, session };
+    first = { firstTurn: outcome };
+  }
+  try {
+    return { ...created, ...first, session: await chatDetail(api, summary.id) };
+  } catch (error) {
+    throw createdButFailed(summary.id, "it could not be read", error, "");
+  }
+}
+
+/** A failure after the tab exists: the error names it, so the caller does not open a second one. */
+function createdButFailed(sessionId: string, what: string, error: unknown, advice: string): ToolError {
+  const failure = toSafeToolError(error).structuredContent as { code: string; message: string; detail?: unknown };
+  const detail = failure.detail !== null && typeof failure.detail === "object" && !Array.isArray(failure.detail) ? (failure.detail as Record<string, unknown>) : {};
+  return new ToolError(failure.code, `Session ${sessionId} was created but ${what}: ${failure.message}${advice ? ` ${advice}` : ""}`, { ...detail, sessionId, created: true });
+}
+
+async function createFromChat(args: CreateArgs, ctx: CallContext, caller: ThreadCaller): Promise<Record<string, unknown>> {
+  const { api } = ctx;
+  const projectPath = await createTarget(api, caller, args.project);
+  const reply = createReply(args, true);
+  const delegate = args.delegate === true;
+  const sessions = await listSessions(api);
+  const tab = sessions.find((s) => s.id === caller.threadId);
+  if (!tab) throw new ToolError("THREAD_NOT_FOUND", "This chat thread is no longer open.");
+  // Caps (§5.6): the project's open chats, this chat's unfinished children, agent depth.
+  const canonical = await canonicalProject(api, projectPath);
+  const roots = new Map<string, string | undefined>();
+  let running = 0;
+  for (const s of sessions.filter((tab) => tab.status === "running")) {
+    if (!roots.has(s.projectPath)) roots.set(s.projectPath, (await canonicalProject(api, s.projectPath))?.canonical);
+    if (s.projectPath === projectPath || (canonical !== null && roots.get(s.projectPath) === canonical.canonical)) running += 1;
+  }
+  if (running >= MAX_RUNNING_SESSIONS_PER_PROJECT) throw new ToolError("SESSION_BUSY", `${running} chats are open in that project (limit ${MAX_RUNNING_SESSIONS_PER_PROJECT}); the user has to close some first.`);
+  const now = ctx.now();
+  const open = sessions.filter((s) => s.lineage?.parentThreadId === caller.threadId && s.lineage.agentCreated === true && unfinished(s, now)).length;
+  if (open >= MAX_OPEN_CHILDREN) {
+    throw new ToolError("DELEGATION_LIMIT", `This chat already has ${open} unfinished chats it opened (limit ${MAX_OPEN_CHILDREN}). Wait for their replies, or stop one with control_session.`);
+  }
+  const depth = agentDepth(sessions, caller.threadId) + 1;
+  if (depth > MAX_AGENT_DEPTH) {
+    throw new ToolError("DELEGATION_LIMIT", `This chat was itself opened by another agent ${depth - 1} level${depth === 2 ? "" : "s"} deep; agents may open chats only ${MAX_AGENT_DEPTH} levels deep. Do the work here, or report back.`);
+  }
+  const resume = args.resume ? await resumeRowFor(api, projectPath, args.resume.conversationId) : undefined;
+  const refId = args.agent ?? resume?.agent ?? tab.refId;
+  if (resume && args.agent && resume.agent !== args.agent) throw new ToolError("INVALID_ARGUMENT", `Conversation "${resume.id}" belongs to ${resume.agent}, not ${args.agent}.`);
+  const agent = findAgent(await loadAgents(api, { includeLegacyModels: true }), refId);
+  if (!agent.enabled) throw new ToolError("INVALID_ARGUMENT", `${refId} is not available on this host (not installed or disabled).`);
+  // Turn policy (a): this chat's permission mode, or a narrower one — never broader.
+  const runtimeMode = openedThreadRuntimeMode(caller, args.runtimeMode);
+  // Turn policy (b): a planning caller's first turn plans too; an agent with no plan mode is refused.
+  const interactionMode = ctx.turn.interactionMode;
+  if (args.prompt !== undefined && interactionMode === "plan" && !agent.supports.planMode) {
+    throw new ToolError("PERMISSION_DENIED", `You are planning and ${refId} has no plan mode, so it cannot be given work from here. Propose it in your plan instead.`);
+  }
+  const sameAgent = refId === tab.refId;
+  const current = sameAgent ? (await readThread(api, caller.threadId)).head.modelSelection : undefined;
+  const model = launchModel(agent, args.model, current?.model);
+  const selection = resolveModelSelection(agent, { model: model.slug, ...(args.options !== undefined ? { options: args.options } : {}), ...(current ? { current } : {}) });
+  const account = launchAccount(agent, args.accountId, sameAgent && tab.accountId ? tab.accountId : undefined, resume);
+  const ownProject = canonical !== null && canonical.canonical === caller.projectPath;
+  const cwd = args.cwd !== undefined ? await cwdInProject(api, projectPath, args.cwd) : ownProject && caller.cwd ? caller.cwd : projectPath;
+  const chat: CreateAgentChatSessionFields = {
+    ...(account.accountId ? { accountId: account.accountId } : {}),
+    modelSelection: { model: selection.model, options: selection.options },
+    runtimeMode,
+    ...(resume ? { resume: { home: resume.home, conversationId: resume.id } } : {}),
+    // The caller's own child (§13 c): honoured because this request's principal is the caller's agent.
+    lineage: { parentThreadId: caller.threadId, relation: delegate ? "delegate" : "opened", agentCreated: true }
+  };
+  const title = args.title ?? (resume?.title || (delegate && args.prompt !== undefined ? delegateTitle(args.prompt) : agent.name));
+  const body: CreateSessionRequest = { kind: "agent-chat", refId, projectPath, cwd, title, ...(account.accountId ? { accountId: account.accountId } : {}), chat };
+  const summary = expectOk<SessionSummary>(await api.request("POST", "/api/sessions", { body }));
+  const relation = delegate ? "delegate" : "opened";
+  const created = {
+    sessionId: summary.id,
+    title: summary.title,
+    agent: refId,
+    model: selection.model,
+    ...(model.isLegacy ? { isLegacy: true } : {}),
+    options: Object.fromEntries(selection.options.map((option) => [option.id, option.value])),
+    runtimeMode,
+    accountId: summary.accountId || account.accountId || "system",
+    accountSource: account.source,
+    ...(account.note ? { accountNote: account.note } : {}),
+    relation,
+    ...(args.prompt !== undefined && interactionMode === "plan" ? { planMode: true } : {})
+  };
+  const ref = chatThreadRef(caller, [...sessions, summary], summary, relation);
+  if (args.prompt === undefined) return { ...created, ...ref };
+  const origin: Exclude<ThreadMessageOrigin, "reply"> = delegate ? "delegated" : "opened";
+  const input = provenanceFor(ctx, caller, origin, args.prompt, reply, runtimeMode);
+  let first: Record<string, unknown>;
+  try {
+    if (reply === "none") {
+      const { seq } = await sendCommand(api, summary.id, "turn", {
+        input,
+        interactionMode,
+        // The marker that the message is the calling chat's, not the user's.
+        context: [threadMessageContext(caller.threadId)],
+        ...(ctx.turn.causedBy ? { causedBy: ctx.turn.causedBy } : {})
+      });
+      first = { outcome: "sent", seq };
+    } else {
+      first = await converse(ctx, caller, { id: summary.id, title: summary.title }, { text: input, reply, origin, interactionMode, timeoutSeconds: args.timeoutSeconds ?? DEFAULT_REPLY_WAIT_SECONDS, tool: "create_session" });
+    }
+  } catch (error) {
+    throw createdButFailed(summary.id, "its first message could not be sent", error, "Send it with send_message; do not open another.");
+  }
+  const { notice, ...rest } = first;
+  return { ...(notice !== undefined ? { notice } : {}), ...created, ...rest, ...ref };
+}
+
+/** This family in the catalog (`../catalog/index.ts`). `read_transcript` is the sessions family's (`./sessions.ts`). */
+export const messagesFamily: readonly AnyOrquesterTool[] = [createSessionTool, sendMessageTool];

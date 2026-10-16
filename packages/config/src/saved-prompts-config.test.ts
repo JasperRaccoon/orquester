@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseSavedPromptsConfig, savedPromptsPath } from "./index.ts";
+import { isAgentCreatedPrompt, parseSavedPromptsConfig, savedPromptsPath } from "./index.ts";
 
 const record = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
   id: "p-1",
@@ -91,4 +91,28 @@ test("the outer shape still throws — an unknown version included — so the fi
   }
   // Absent fields default like the other indexes: an empty object is an empty library.
   assert.deepEqual(parseSavedPromptsConfig({}), { version: 1, prompts: [], rejected: [], extra: {} });
+});
+
+test("createdBy survives a read and a rewrite verbatim — newer kinds and fields too; a non-object makes the record unreadable, kept verbatim", () => {
+  const createdBy = { kind: "agent", threadId: "t-1", agent: "claude", title: "Implement auth", fromNewerBuild: true };
+  const newer = { kind: "workflow", workflowId: "wf_1" };
+  const broken = record({ id: "p-3", createdBy: "agent" });
+  const parsed = parseSavedPromptsConfig({ version: 1, prompts: [record({ createdBy }), record({ id: "p-2", createdBy: newer }), broken] });
+  assert.deepEqual(parsed.prompts[0]?.createdBy, createdBy);
+  assert.deepEqual(parsed.prompts[1]?.createdBy, newer);
+  assert.equal(isAgentCreatedPrompt(parsed.prompts[0]?.createdBy), true);
+  assert.equal(isAgentCreatedPrompt(parsed.prompts[1]?.createdBy), false, "an unknown kind reads as the user's");
+  assert.deepEqual(parsed.rejected, [broken]);
+  const older = parseSavedPromptsConfig({ version: 1, prompts: [record()] }).prompts[0];
+  assert.equal(older?.createdBy, undefined);
+  assert.equal(isAgentCreatedPrompt(older?.createdBy), false, "older prompts are the user's");
+});
+
+test("a null createdBy reads (and is rewritten) as absent; only a structurally invalid non-null value sets the record aside", () => {
+  const parsed = parseSavedPromptsConfig({ version: 1, prompts: [record({ createdBy: null }), record({ id: "p-2", createdBy: [] }), record({ id: "p-3", createdBy: {} })] });
+  assert.deepEqual(parsed.prompts.map((prompt) => prompt.id), ["p-1"]);
+  assert.equal(parsed.prompts[0]?.createdBy, undefined);
+  assert.equal(isAgentCreatedPrompt(parsed.prompts[0]?.createdBy), false);
+  assert.equal("createdBy" in JSON.parse(JSON.stringify(parsed.prompts[0])), false);
+  assert.equal(parsed.rejected.length, 2);
 });
