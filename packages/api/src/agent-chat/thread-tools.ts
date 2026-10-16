@@ -276,7 +276,7 @@ export const UNTRUSTED_NOTICE =
 // ---------------------------------------------------------------------------
 
 /** What a reply delivery says instead of a reply. */
-export type ReplyNoticeKind = "empty" | "failed" | "interrupted" | "closed" | "exchange-limit";
+export type ReplyNoticeKind = "empty" | "failed" | "interrupted" | "closed" | "closed-after-reply" | "exchange-limit";
 
 function noticeTitle(title: string): string {
   return title.replace(/\s+/g, " ").trim().slice(0, QUOTED_TITLE_MAX_CHARS) || "Untitled";
@@ -285,7 +285,9 @@ function noticeTitle(title: string): string {
 /**
  * The text a delivery (or a `wait` result's hint) carries when the bound turn produced no reply:
  * `empty` — it settled `completed` with no assistant text (§13 d); `failed` / `interrupted` — its
- * state and error; `closed` — the target was closed first; `exchange-limit` — the line added to a
+ * state and error; `closed` — the target was closed first; `closed-after-reply` — it replied (a wait
+ * took the reply) and was closed before the reply could be handed out again, which can no longer
+ * be read; `exchange-limit` — the line added to a
  * delivery that reached {@link MAX_EXCHANGE_HOPS}.
  */
 export function replyNoticeText(kind: ReplyNoticeKind, input: { title: string; sessionId: string; error?: string }): string {
@@ -300,6 +302,8 @@ export function replyNoticeText(kind: ReplyNoticeKind, input: { title: string; s
       return `"${title}"'s turn was interrupted before it replied. ${look}`;
     case "closed":
       return `"${title}" was closed before replying.`;
+    case "closed-after-reply":
+      return `"${title}" replied, then was closed before its reply could be handed out again; the reply can no longer be read.`;
     case "exchange-limit":
       return `This exchange reached its limit of ${MAX_EXCHANGE_HOPS} agent-caused turns: no further agent-caused turns follow. Summarise for your user instead.`;
   }

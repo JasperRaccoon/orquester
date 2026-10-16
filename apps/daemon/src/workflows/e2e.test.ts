@@ -222,7 +222,16 @@ describe("e2e: a daemon restart mid-run", () => {
           (e.payload as { run: { id: string }; blocks: { nodeId: string; status: string }[] }).run.id === runId &&
           (e.payload as { blocks: { nodeId: string; status: string }[] }).blocks.some((block) => block.nodeId === "sleep" && block.status === "running")
       );
-      const persisted = await waitForFileState(join(workflowRunsDir(dir.root), runId, "run.json"), () => h.runStore.load(runId), (run) => run?.blocks.sleep?.waitingOn?.kind === "process");
+      // The spawned runner's handle, not the pre-spawn marker (`spawning`, pid 0): stopping while the
+      // spawn is in flight is a different case (its handle write would land on a stopping engine).
+      const persisted = await waitForFileState(
+        join(workflowRunsDir(dir.root), runId, "run.json"),
+        () => h.runStore.load(runId),
+        (run) => {
+          const waiting = run?.blocks.sleep?.waitingOn;
+          return waiting?.kind === "process" && waiting.spawning !== true && waiting.pid > 0;
+        }
+      );
       const waitingOn = persisted!.blocks.sleep!.waitingOn;
       assert.equal(waitingOn?.kind, "process", JSON.stringify(persisted!.blocks.sleep));
       const pid = (waitingOn as { pid: number }).pid;
@@ -231,7 +240,7 @@ describe("e2e: a daemon restart mid-run", () => {
       // The detached child outlived the runtime that started it.
       assert.doesNotThrow(() => process.kill(pid, 0), "the sandbox child survives the stop");
       const stopped = await h.runStore.load(runId);
-      assert.equal(stopped!.status, "running");
+      assert.equal(stopped!.status, "running", JSON.stringify(stopped, null, 2));
 
       h = await boot(dir.root);
       await writeFile(join(dir.root, "release"), "go");

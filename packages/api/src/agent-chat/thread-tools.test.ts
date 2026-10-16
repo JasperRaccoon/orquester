@@ -227,6 +227,10 @@ test("reply notices: the empty reply reads exactly as §13 d says", () => {
     '"Codex review" finished its turn without a written reply. Read what it did with read_transcript {sessionId: "9b1c"}.'
   );
   assert.equal(replyNoticeText("closed", { title: "A\nB", sessionId: "x" }), '"A B" was closed before replying.');
+  assert.equal(
+    replyNoticeText("closed-after-reply", { title: "A\nB", sessionId: "x" }),
+    '"A B" replied, then was closed before its reply could be handed out again; the reply can no longer be read.'
+  );
   assert.match(replyNoticeText("failed", { title: "A", sessionId: "x", error: "boom\nline" }), /failed before it replied: boom line\./);
   assert.match(replyNoticeText("exchange-limit", { title: "A", sessionId: "x" }), /limit of 8 agent-caused turns/);
 });

@@ -28,8 +28,10 @@
  * delivery is resumed (deliveries post under fixed command ids, so the host's receipts dedupe a
  * re-post). A message never saved to the queue (the request died first) is dropped.
  *
- * Closures: a target closed before replying delivers "closed before replying"; a requester closed
- * first drops its subscriptions and pending deliveries (logged). Notices: an empty final reply
+ * Closures: a target closed before replying delivers "closed before replying"; one closed after a
+ * waiter took its reply still has that reply re-delivered (kept in memory when it was handed out)
+ * should the call go away; a requester closed first drops its subscriptions and pending
+ * deliveries (logged). Notices: an empty final reply
  * (§13 d), a failed or interrupted bound turn, a message discarded from the target's queue. A
  * delivery past {@link MAX_EXCHANGE_HOPS} (`hop + 1` of the replying turn) is delivered with the
  * exchange-limit notice and outcome `exchange-limit`; its turn's hop is past the cap, so no tool
@@ -194,7 +196,10 @@ type Sub = ReplySubscriptionRecord & {
   lostHandOuts?: number;
   /** A reply a waiter took could not be read again when its call went away: no message follows. */
   unreadable?: true;
-  /** Failed reads of a released reply so far (transient ones are retried by the safety re-check). */
+  /**
+   * Failed reads of a released reply so far (transient ones are retried by the safety re-check).
+   * Only reads that ran count: a look skipped while the history lookup backs off is no attempt.
+   */
   rereads?: number;
 };
 
@@ -210,7 +215,11 @@ export type ReplyResult =
       /** The replying turn's own exchange, when the host recorded it. */
       causedBy?: CausedBy;
     }
-  | { kind: "closed" }
+  /**
+   * The target is closed. `afterReply`: it had replied (a waiter took the reply), but the reply
+   * can no longer be read for a re-delivery — said truthfully, never "closed before replying".
+   */
+  | { kind: "closed"; afterReply?: true }
   /**
    * No reply will come, said in `text` (a whole sentence for the requester): the message was
    * discarded from the target's queue, joined a running turn (an older host), its turn was rewound
@@ -233,6 +242,8 @@ interface Waiter {
 const DEFAULT_RECHECK_MS = 30_000;
 /** Reads of a released reply before it is given up as unreadable (the first, then the safety re-checks). */
 export const MAX_REDELIVERY_READS = 5;
+/** Replies handed to waiters kept in memory, newest last, so a target closing afterwards does not lose them. */
+const HANDED_OUT_MEMORY = 32;
 /** Events a `/turn` command appends at most (meta, message, turn start): read back from its receipt seq. */
 const TURN_COMMAND_EVENTS = 3;
 /** `done` subscriptions and final deliveries kept for repeats and late waits; older ones are pruned. */
@@ -282,6 +293,13 @@ export class ReplyRouter implements DeliveryListener {
   private readonly historyBackoff = new Map<string, { nextAt: number; delayMs: number }>();
   /** Per target, the summary fields last evaluated on: an event that changes none of them reads nothing. */
   private readonly seen = new Map<string, string>();
+  /**
+   * The reply each recent waiter was handed, by subscription: a closed target's thread can no
+   * longer be read, so a re-delivery after it closed takes the reply from here (this process only).
+   */
+  private readonly handedOut = new Map<string, ReplyResult>();
+  /** Steps started without a caller awaiting them (deliveries, a wait attaching): {@link whenIdle} waits for them. */
+  private readonly inFlight = new Set<Promise<unknown>>();
 
   constructor(private readonly opts: ReplyRouterOptions) {}
 
@@ -346,11 +364,13 @@ export class ReplyRouter implements DeliveryListener {
       const id = (event.payload as { id?: unknown } | null)?.id;
       if (typeof id !== "string") return;
       if (this.openSubs().some((sub) => sub.toThreadId === id) && this.summaryMoved(id)) void this.evaluate(id);
-      if (this.isClosed(id)) void this.requesterClosed(id);
+      if (this.isClosed(id)) this.track(this.requesterClosed(id));
     });
-    this.ready = this.reconcile().catch((error: unknown) => {
-      this.opts.logger?.warn?.("[replies] the boot reconciliation failed", error);
-    });
+    this.ready = this.track(
+      this.reconcile().catch((error: unknown) => {
+        this.opts.logger?.warn?.("[replies] the boot reconciliation failed", error);
+      })
+    );
     this.armRecheck();
   }
 
@@ -530,11 +550,27 @@ export class ReplyRouter implements DeliveryListener {
    * waiter until the bound turn's reply, the timeout, or the bound turn needing the target's user.
    * `signal` (the request going away) ends it like the timeout.
    */
-  async wait(
+  wait(
     targetId: string,
     subscriptionId: string,
     raw: unknown,
     opts: { principal?: CallerPrincipal; signal?: AbortSignal } = {}
+  ): Promise<ReplyWaitResponse> {
+    // In flight (whenIdle) until the waiter is attached or the wait answered at once — never
+    // while it is attached: that lasts until a reply, a release or its timer.
+    let attached!: () => void;
+    this.track(new Promise<void>((resolve) => (attached = resolve)));
+    const answer = this.waitNow(targetId, subscriptionId, raw, opts, attached);
+    void answer.then(attached, attached);
+    return answer;
+  }
+
+  private async waitNow(
+    targetId: string,
+    subscriptionId: string,
+    raw: unknown,
+    opts: { principal?: CallerPrincipal; signal?: AbortSignal },
+    attached: () => void
   ): Promise<ReplyWaitResponse> {
     if (!this.api || !this.ready) throw new ReplyError("Orquester is still starting. Try again in a moment.", "HOST_UNAVAILABLE");
     await this.ready;
@@ -616,6 +652,7 @@ export class ReplyRouter implements DeliveryListener {
       if (opts.signal?.aborted) giveUp("timeout");
       else opts.signal?.addEventListener("abort", onAbort, { once: true });
       void this.evaluate(sub.toThreadId);
+      attached();
     });
   }
 
@@ -630,12 +667,17 @@ export class ReplyRouter implements DeliveryListener {
       return { outcome: "replied", turnId: null, state: "failed", error: sub.answeredNotice };
     }
     if (sub.ended === "waiter" && !sub.posted?.steered) {
-      const result = await this.resultFor(sub);
+      const { result } = await this.readHandedOut(sub);
       // Released while the reply was read (every holder gone): it is a message now.
       if (sub.released) return { outcome: "notify", reason: "timeout", willNotify: true };
+      // It replied and closed, and the reply is gone: said so, and nobody holds it now.
+      if (result?.kind === "closed" && result.afterReply) {
+        return { outcome: "replied", turnId: sub.turnId ?? null, state: "failed", error: this.closedAfterReplyText(sub) };
+      }
       // A re-sent call (same idempotency key) is handed the reply again: one more holder.
       if (result && sub.state === "done") {
         sub.handOuts = (sub.handOuts ?? 1) + 1;
+        this.rememberHandedOut(sub, result);
         await this.persist();
         return waitResponseOf(result);
       }
@@ -719,17 +761,29 @@ export class ReplyRouter implements DeliveryListener {
 
   /**
    * Re-deliver a released reply a waiter took: read it again and claim it for the router — the
-   * delivery and the tombstone in one write. A read that fails is retried by the safety re-check
-   * (`recheckNow`), up to {@link MAX_REDELIVERY_READS} reads; only then is the reply `unreadable`
-   * (a later wait says no message follows). True once the delivery is recorded.
+   * delivery and the tombstone in one write. A target closed since is no reason to lose the reply:
+   * the requester still gets its text (the reply this process handed out); only a reply that can
+   * no longer be read at all becomes a notice that the target closed after replying. A read that
+   * fails is retried by the safety re-check (`recheckNow`), up to {@link MAX_REDELIVERY_READS}
+   * reads that actually ran; only then is the reply `unreadable` (a later wait says no message
+   * follows). True once the delivery is recorded.
    */
   private async redeliver(sub: Sub): Promise<boolean> {
     if (this.redelivering.has(sub.id)) return false;
     this.redelivering.add(sub.id);
     try {
-      const result: ReplyResult | null = sub.answeredNotice !== undefined ? { kind: "notice", text: sub.answeredNotice } : await this.resultFor(sub);
+      let result: ReplyResult | null;
+      let read = true;
+      if (sub.answeredNotice !== undefined) result = { kind: "notice", text: sub.answeredNotice };
+      else ({ result, read } = await this.readHandedOut(sub));
       if (this.outbox.deliveries.some((d) => d.subscriptionId === sub.id) || sub.state !== "done" || sub.ended !== "waiter") return false;
       if (!result) {
+        // A look that read nothing (the history lookup is backing off) is not a failed read — but the
+        // release's tombstone and holder count are saved now, so a restart still re-delivers it.
+        if (!read) {
+          await this.persist();
+          return false;
+        }
         sub.rereads = (sub.rereads ?? 0) + 1;
         if (sub.rereads >= MAX_REDELIVERY_READS) {
           sub.unreadable = true;
@@ -741,6 +795,7 @@ export class ReplyRouter implements DeliveryListener {
       // claimForRouter persists the claim, the delivery and the tombstone together.
       const deliver = await this.claimForRouter(sub, result);
       if (this.outbox.deliveries.some((d) => d.subscriptionId === sub.id)) {
+        this.handedOut.delete(sub.id);
         await deliver();
         return true;
       }
@@ -789,6 +844,7 @@ export class ReplyRouter implements DeliveryListener {
     delivery.state = "dropped";
     this.finish(sub, "waiter");
     sub.handOuts = 1;
+    this.rememberHandedOut(sub, result);
     await this.persist();
     return result;
   }
@@ -826,7 +882,7 @@ export class ReplyRouter implements DeliveryListener {
       // An older host ignored `ifIdle`: the message joined a running turn, whose reply is not an
       // answer to it (§8.3). The requester hears that instead — never that turn's reply.
       const deliver = await this.claim(sub, { kind: "notice", text: this.noticeText("steered", sub) });
-      void deliver();
+      this.track(deliver());
       return;
     }
     void this.evaluate(entry.parentSessionId);
@@ -856,7 +912,7 @@ export class ReplyRouter implements DeliveryListener {
     // The claim is recorded before the queue lets the entry go; its delivery follows outside the
     // target's lane (it goes into the requester's).
     const deliver = await this.claim(sub, { kind: "notice", text: this.noticeText("discarded", sub) });
-    void deliver();
+    this.track(deliver());
   }
 
   // --- reconciliation and evaluation ------------------------------------------------
@@ -927,19 +983,49 @@ export class ReplyRouter implements DeliveryListener {
 
   /** The bound turn's result now, for a subscription already claimed; null while it cannot be read. */
   private async resultFor(sub: Sub): Promise<ReplyResult | null> {
-    if (this.isClosed(sub.toThreadId)) return { kind: "closed" };
+    return (await this.readResult(sub)).result;
+  }
+
+  /**
+   * {@link resultFor}, saying whether a read actually ran: `read` is false when nothing was read
+   * (no API yet, or the history lookup is backing off) — such a miss is no failed read.
+   */
+  private async readResult(sub: Sub): Promise<{ result: ReplyResult | null; read: boolean }> {
+    if (this.isClosed(sub.toThreadId)) return { result: { kind: "closed" }, read: true };
     const api = this.api;
-    if (!api) return null;
+    if (!api) return { result: null, read: false };
     let snap: ThreadSnapshotPayload;
     try {
       snap = await readThread(api, sub.toThreadId);
     } catch {
-      return null;
+      return { result: null, read: true };
     }
     const turn = this.boundTurn(sub, snap);
-    if (turn) return SETTLED_TURN_STATES.has(turn.state) ? resultOf(snap, turn) : null;
+    if (turn) return { result: SETTLED_TURN_STATES.has(turn.state) ? resultOf(snap, turn) : null, read: true };
     const outside = await this.lookOutsideWindow(api, sub, snap);
-    return outside.kind === "found" ? outside.result : null;
+    if (outside.kind === "found") return { result: outside.result, read: true };
+    return { result: null, read: !(outside.kind === "unknown" && outside.deferred === true) };
+  }
+
+  /**
+   * The reply a waiter already took, for handing it out again: read afresh while the target is
+   * open; once it closed (its thread can no longer be read), the reply this process handed out —
+   * or, without one, the target closed after replying.
+   */
+  private async readHandedOut(sub: Sub): Promise<{ result: ReplyResult | null; read: boolean }> {
+    if (!this.isClosed(sub.toThreadId)) return this.readResult(sub);
+    return { result: this.handedOut.get(sub.id) ?? { kind: "closed", afterReply: true }, read: true };
+  }
+
+  /** Keep the reply a waiter was handed (the newest {@link HANDED_OUT_MEMORY}). */
+  private rememberHandedOut(sub: Sub, result: ReplyResult): void {
+    if (result.kind !== "turn") return;
+    this.handedOut.delete(sub.id);
+    this.handedOut.set(sub.id, result);
+    for (const id of this.handedOut.keys()) {
+      if (this.handedOut.size <= HANDED_OUT_MEMORY) break;
+      this.handedOut.delete(id);
+    }
   }
 
   /**
@@ -947,13 +1033,14 @@ export class ReplyRouter implements DeliveryListener {
    * retention): looked up in the indexed history (`GET …/history`, a few pages) before anything is
    * concluded. `found` (with its result once it settled — the index records completion, not the
    * end state, so a settled one reads `completed`), `absent` (the thread holds no such turn: no
-   * older history, or every page read), or `unknown` (no usable index, or not reached).
+   * older history, or every page read), or `unknown` (no usable index, or not reached; `deferred`
+   * when no lookup ran because an earlier inconclusive one is backing off).
    */
   private async lookOutsideWindow(
     api: DaemonApi,
     sub: Sub,
     snap: ThreadSnapshotPayload
-  ): Promise<{ kind: "found"; result: ReplyResult | null } | { kind: "absent" } | { kind: "unknown" }> {
+  ): Promise<{ kind: "found"; result: ReplyResult | null } | { kind: "absent" } | { kind: "unknown"; deferred?: true }> {
     const messageId = sub.posted?.messageId;
     if (messageId === undefined && sub.turnId === undefined) return { kind: "unknown" };
     const bounds = snap.history;
@@ -966,7 +1053,7 @@ export class ReplyRouter implements DeliveryListener {
     // An inconclusive lookup is not repeated on every look: it backs off (1 min, doubling to 1 h).
     const backoff = this.historyBackoff.get(sub.id);
     const nowMs = this.now().getTime();
-    if (backoff && nowMs < backoff.nextAt) return { kind: "unknown" };
+    if (backoff && nowMs < backoff.nextAt) return { kind: "unknown", deferred: true };
     const outcome = await this.readHistoryFor(api, sub, bounds.indexed ? bounds.beforeCursor : null, bounds.indexed);
     if (outcome.kind === "unknown") {
       const delayMs = Math.min(backoff ? backoff.delayMs * 2 : HISTORY_RETRY_MIN_MS, HISTORY_RETRY_MAX_MS);
@@ -1036,17 +1123,31 @@ export class ReplyRouter implements DeliveryListener {
   }
 
   /**
-   * Resolves once nothing is in flight: every target's evaluation has finished and the queued
-   * outbox writes have landed — including work those started meanwhile (tests wait on it instead
-   * of counting event-loop turns). A delivery handed to the queue is the queue's (`whenIdle` there).
+   * Resolves once nothing is in flight: every target's evaluation has finished, every step started
+   * without an awaiting caller (a delivery, a requester's closure, a wait still attaching) is done,
+   * and the queued outbox writes have landed. It loops while work keeps arriving, so work those
+   * steps start meanwhile is waited for too (tests wait on it instead of counting event-loop
+   * turns). It waits for in-flight work only, never for timers: an attached waiter, its timeout
+   * and the safety re-check's next tick are not work in flight. What the delivery queue does with
+   * a handed delivery afterwards is the queue's (`LineageService.whenIdle`).
    */
   async whenIdle(): Promise<void> {
-    while (this.hasWorkInFlight()) await Promise.all([...this.evalTail.values(), this.writes]);
+    while (this.hasWorkInFlight()) await Promise.all([...this.evalTail.values(), ...this.inFlight, this.writes]);
   }
 
   /** True while a step is in flight (see {@link whenIdle}). */
   hasWorkInFlight(): boolean {
-    return this.evalTail.size > 0 || this.pendingWrites > 0;
+    return this.evalTail.size > 0 || this.inFlight.size > 0 || this.pendingWrites > 0;
+  }
+
+  /** Count a step nobody awaits as in flight until it settles ({@link whenIdle}); never rejects. */
+  private track<T>(step: Promise<T>): Promise<T | void> {
+    const tracked = step.catch((error: unknown) => {
+      this.opts.logger?.warn?.("[replies] a background step failed", error);
+    });
+    this.inFlight.add(tracked);
+    void tracked.then(() => this.inFlight.delete(tracked));
+    return tracked;
   }
 
   /** Look at a target's thread for its open subscriptions: serialized per target, one pass queued at most. */
@@ -1232,6 +1333,7 @@ export class ReplyRouter implements DeliveryListener {
         waiter.resolve(result);
         this.finish(sub, result.kind === "closed" ? "closed" : "waiter");
         sub.handOuts = 1;
+        this.rememberHandedOut(sub, result);
         if (result.kind === "notice") sub.answeredNotice = result.text;
         await this.persist();
         return nothing;
@@ -1286,7 +1388,7 @@ export class ReplyRouter implements DeliveryListener {
     const notice = { title, sessionId: sub.toThreadId };
     if (result.kind === "closed") {
       outcome = "closed";
-      text = replyNoticeText("closed", notice);
+      text = replyNoticeText(result.afterReply ? "closed-after-reply" : "closed", notice);
     } else if (result.kind === "notice") {
       outcome = "failed";
       text = result.text;
@@ -1431,6 +1533,11 @@ export class ReplyRouter implements DeliveryListener {
     return this.opts.sessions.get(sub.toThreadId)?.title ?? sub.toTitle ?? sub.toThreadId;
   }
 
+  /** A taken reply whose target closed and which can no longer be read (a wait's `error`). */
+  private closedAfterReplyText(sub: Sub): string {
+    return replyNoticeText("closed-after-reply", { title: this.titleOf(sub), sessionId: sub.toThreadId });
+  }
+
   /** The sentence a requester reads when no reply will come (`ReplyResult` kind `notice`). */
   private noticeText(kind: "discarded" | "steered" | "lost" | "expired", sub: Sub): string {
     const title = oneLine(this.titleOf(sub)) || "Untitled";
@@ -1467,7 +1574,7 @@ export class ReplyRouter implements DeliveryListener {
   private armRecheck(): void {
     const ms = this.opts.recheckMs ?? DEFAULT_RECHECK_MS;
     if (ms <= 0 || this.stopped || this.recheck) return;
-    this.recheck = setInterval(() => void this.recheckNow(), ms);
+    this.recheck = setInterval(() => this.track(this.recheckNow()), ms);
     this.recheck.unref?.();
   }
 
@@ -1575,6 +1682,11 @@ export function resultOf(snap: ThreadSnapshotPayload, turn: Turn): ReplyResult {
 
 /** What a waiter answers for a result (§13 d: an empty reply is `emptyReply`, no `reply`). */
 export function waitResponseOf(result: ReplyResult): ReplyWaitResponse {
+  // It replied, then closed: never `closed` (read as "closed before replying"); a failed answer
+  // with the reason, which every reader of this response already shows.
+  if (result.kind === "closed" && result.afterReply) {
+    return { outcome: "replied", turnId: null, state: "failed", error: "That chat replied, then was closed before its reply could be handed out again; the reply can no longer be read." };
+  }
   if (result.kind === "closed") return { outcome: "closed" };
   if (result.kind === "notice") return { outcome: "replied", turnId: null, state: "failed", error: result.text };
   return {
