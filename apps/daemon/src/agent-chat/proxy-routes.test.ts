@@ -9,6 +9,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import type { SessionSummary } from "@orquester/api";
 import {
   agentChatRoutes,
+  THREAD_HEAD_LOOKUP_MAX,
   threadHeadOf,
   type AgentChatErrorCode,
   type ThreadHistoryPage,
@@ -1019,5 +1020,37 @@ test("a head the host refuses for its own reason passes through, never falling b
   assert.equal(h.host.requests.length, 1);
   h.healthy = false;
   assert.equal((await h.app.inject({ method: "GET", url: agentChatRoutes.threadHead("t1") })).statusCode, 503);
+  await h.close();
+});
+
+test("a route miss is remembered only for a host instance adopted before AND after the answer", async () => {
+  let instance = "host-old";
+  const h = await makeHarness({ t1: tab("t1") }, { hostInstanceId: () => instance });
+  headHost(h, null);
+  // The handover lands while the old host answers its route miss.
+  const answer = h.host.handler;
+  h.host.handler = (req, res, body) => {
+    if ((req.url ?? "").startsWith("/threads/t1/head")) instance = "host-new";
+    answer(req, res, body);
+  };
+  const first = await h.app.inject({ method: "GET", url: agentChatRoutes.threadHead("t1") });
+  assert.deepEqual(first.json(), threadHeadOf(headSnapshot), "this read still answers, from the snapshot");
+  // Not pinned to the fallback: the new instance is asked for its head.
+  const hostHead = threadHeadOf(headSnapshot);
+  headHost(h, hostHead);
+  const second = await h.app.inject({ method: "GET", url: agentChatRoutes.threadHead("t1") });
+  assert.deepEqual(second.json(), hostHead);
+  assert.deepEqual(h.host.requests.map((r) => r.url.split("?")[0]), ["/threads/t1/head", "/threads/t1/thread", "/threads/t1/head"]);
+  await h.close();
+});
+
+test("a head lookup past the cap is refused 400 INVALID_COMMAND, before the host is asked", async () => {
+  const h = await makeHarness({ t1: tab("t1") }, { hostInstanceId: () => "host-1" });
+  headHost(h, threadHeadOf(headSnapshot));
+  const ids = Array.from({ length: THREAD_HEAD_LOOKUP_MAX + 1 }, (_, i) => `t${i}`).join(",");
+  const refused = await h.app.inject({ method: "GET", url: `${agentChatRoutes.threadHead("t1")}?turnIds=${ids}` });
+  assert.equal(refused.statusCode, 400);
+  assert.equal(refused.json().error.code, "INVALID_COMMAND");
+  assert.equal(h.host.requests.length, 0);
   await h.close();
 });

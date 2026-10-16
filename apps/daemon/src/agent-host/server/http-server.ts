@@ -31,6 +31,7 @@ import {
   THREAD_SEARCH_MAX_QUERY_CHARS,
   THREAD_SEARCH_MAX_RESULTS,
   threadHeadQueryOf,
+  threadHeadQueryProblem,
   type AgentChatCommandName,
   type AgentChatErrorCode,
   type AgentChatStreamFrame,
@@ -646,14 +647,17 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
 
     // The thread's head (`threadHeadOf`): the daemon's per-call and per-event readers' compact read.
     if (rest === "/head" && method === "GET") {
-      const body: ThreadHeadResponse = await orchestrator.readThreadHead(
-        threadId,
-        threadHeadQueryOf({
-          replyChars: url.searchParams.get("replyChars") ?? undefined,
-          turnIds: url.searchParams.get("turnIds") ?? undefined,
-          messageIds: url.searchParams.get("messageIds") ?? undefined
-        })
-      );
+      const query = threadHeadQueryOf({
+        replyChars: url.searchParams.get("replyChars") ?? undefined,
+        turnIds: url.searchParams.get("turnIds") ?? undefined,
+        messageIds: url.searchParams.get("messageIds") ?? undefined
+      });
+      const problem = threadHeadQueryProblem(query);
+      if (problem !== null) {
+        sendJson(response, 400, { error: { code: "INVALID_COMMAND", message: problem } });
+        return;
+      }
+      const body: ThreadHeadResponse = await orchestrator.readThreadHead(threadId, query);
       sendJson(response, 200, body);
       return;
     }

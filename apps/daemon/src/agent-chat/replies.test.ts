@@ -1810,6 +1810,22 @@ describe("final fix wave follow-up: deferred releases and closed-after-reply ans
 });
 
 describe("head-only re-checks (follow-up: head reads)", () => {
+  it("a re-check with every message still queued reads nothing", async () => {
+    const w = await world();
+    w.host.userTurn("tgt");
+    await w.router.subscribe("tgt", request("notify"));
+    await idle(w);
+    assert.equal(w.router.subscriptions()[0]!.posted, undefined, "queued behind the user's turn");
+    const heads = w.host.headReads("tgt");
+    const snapshots = w.host.snapshotReads("tgt");
+    w.host.ask("tgt");
+    await idle(w);
+    // One head read: the delivery queue's own idle check of the target. The router reads nothing.
+    assert.equal(w.host.headReads("tgt"), heads + 1);
+    assert.equal(w.host.snapshotReads("tgt"), snapshots);
+    await w.cleanup();
+  });
+
   it("while the bound turn runs, the router's re-check and a wait's attach read the target's head, never its snapshot", async () => {
     const w = await world();
     const res = await w.router.subscribe("tgt", request("wait"));

@@ -28,6 +28,7 @@ import {
   threadHeadOf,
   threadHeadQueryOf,
   threadHeadQueryParams,
+  threadHeadQueryProblem,
   type AgentChatCommandName,
   type AgentChatErrorCode,
   type AgentChatErrorEnvelope,
@@ -282,7 +283,9 @@ export function registerAgentChatRoutes(app: FastifyInstance, deps: AgentChatRou
       if (!deps.chatSession(id)) return reply.code(404).send(THREAD_NOT_FOUND);
       if (!deps.isHostHealthy()) return reply.code(503).send(HOST_UNAVAILABLE);
       const query = threadHeadQueryOf(request.query);
-      // Read BEFORE the request: a host replaced meanwhile leaves a stale id, never a wrong one.
+      const problem = threadHeadQueryProblem(query);
+      if (problem !== null) return reply.code(400).send(chatError("INVALID_COMMAND", problem));
+      // Read BEFORE the request, and again after a route miss (below).
       const instance = deps.hostInstanceId?.() ?? null;
       if (instance === null || headRouteMissingOn !== instance) {
         let response: HostJsonResponse<unknown>;
@@ -302,7 +305,9 @@ export function registerAgentChatRoutes(app: FastifyInstance, deps: AgentChatRou
           if (response.status < 400) noteHeadSeq(deps, id, response.value);
           return reply.code(response.status).send(response.value);
         }
-        if (instance !== null) headRouteMissingOn = instance;
+        // Kept only when the same instance was adopted before and after the answer: a host swapped
+        // mid-request may be the one that has the route, and it is asked again on the next read.
+        if (instance !== null && (deps.hostInstanceId?.() ?? null) === instance) headRouteMissingOn = instance;
       }
       const value = await forwardJson(deps, reply, "GET", agentHostRoutes.read(id));
       noteSeqFrom(deps, id, value);

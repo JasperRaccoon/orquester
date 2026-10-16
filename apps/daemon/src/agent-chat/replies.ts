@@ -1203,6 +1203,8 @@ export class ReplyRouter implements DeliveryListener {
     // the same as the loop below decides on a snapshot holding those turns — and the window is not
     // read. A turn that settled, or one the head cannot place, takes the whole snapshot.
     const posted = subs.filter((sub) => sub.posted && !sub.posted.steered && (sub.state === "waiting" || sub.state === "notify"));
+    // Nothing posted yet (every message still queued): nothing a read could decide.
+    if (posted.length === 0) return;
     const ahead = await this.runningBoundTurns(api, targetId, posted);
     if (ahead === "unreadable") return;
     if (ahead !== null) {

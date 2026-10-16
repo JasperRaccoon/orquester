@@ -14,6 +14,7 @@ import Database from "better-sqlite3";
 import {
   isDeadlineRefusal,
   isThreadGoneStreamError,
+  THREAD_HEAD_LOOKUP_MAX,
   threadHeadOf,
   threadHeadQueryParams,
   type AgentChatStreamErrorLine,
@@ -1421,6 +1422,17 @@ describe("agent host server — the thread's head (follow-up: head reads)", () =
     const body = head.body as ThreadHeadResponse;
     assert.equal(body.seq, snap.seq);
     assert.equal(body.matchedTurns?.length, snap.turns.some((t) => t.userMessageId === messageId) ? 1 : 0);
+    await h.stop();
+  });
+
+  it("refuses a lookup past the cap with 400 INVALID_COMMAND rather than cutting it short", async () => {
+    const h = await harness();
+    const threadId = await h.host.createThread();
+    const ids = Array.from({ length: THREAD_HEAD_LOOKUP_MAX + 1 }, (_, i) => `m${i}`);
+    const params = new URLSearchParams(threadHeadQueryParams({ messageIds: ids })).toString();
+    const refused = await h.call("GET", `${agentHostRoutes.head(threadId)}?${params}`);
+    assert.equal(refused.status, 400);
+    assert.equal((refused.body as { error: { code: string } }).error.code, "INVALID_COMMAND");
     await h.stop();
   });
 

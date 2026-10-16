@@ -15,6 +15,7 @@ import {
   threadHeadOf,
   threadHeadQueryOf,
   threadHeadQueryParams,
+  threadHeadQueryProblem,
   threadHeadReplyChars,
   type ThreadHeadSource
 } from "./thread-head.ts";
@@ -122,8 +123,13 @@ test("the query crosses the wire and back; malformed parts name nothing, lists a
   assert.deepEqual(threadHeadQueryOf({ replyChars: "0", turnIds: "%E0%A4%A,,ok", messageIds: "" }), { turnIds: ["ok"] });
   assert.equal(threadHeadReplyChars("12x"), undefined);
   assert.equal(threadHeadReplyChars(String(THREAD_HEAD_REPLY_MAX_CHARS + 1)), THREAD_HEAD_REPLY_MAX_CHARS);
-  const many = Array.from({ length: THREAD_HEAD_LOOKUP_MAX + 5 }, (_, i) => `t${i}`).join(",");
-  assert.equal(threadHeadQueryOf({ turnIds: many }).turnIds?.length, THREAD_HEAD_LOOKUP_MAX);
+  const ids = (n: number) => Array.from({ length: n }, (_, i) => `t${i}`).join(",");
+  // Read whole, then refused past the cap — never cut short.
+  const over = threadHeadQueryOf({ turnIds: ids(THREAD_HEAD_LOOKUP_MAX + 5) });
+  assert.equal(over.turnIds?.length, THREAD_HEAD_LOOKUP_MAX + 5);
+  assert.match(threadHeadQueryProblem(over) ?? "", /turnIds names 69 ids/);
+  assert.match(threadHeadQueryProblem(threadHeadQueryOf({ messageIds: ids(THREAD_HEAD_LOOKUP_MAX + 1) })) ?? "", /messageIds/);
+  assert.equal(threadHeadQueryProblem(threadHeadQueryOf({ turnIds: ids(THREAD_HEAD_LOOKUP_MAX), messageIds: ids(THREAD_HEAD_LOOKUP_MAX) })), null);
 });
 
 test("a head's size does not grow with the window: no item and no older turn rides it", () => {

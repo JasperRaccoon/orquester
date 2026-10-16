@@ -32,7 +32,10 @@ export const THREAD_HEAD_RECENT_TURNS = 16;
 /** The most code points of the last reply a head carries, whatever `replyChars` asks. */
 export const THREAD_HEAD_REPLY_MAX_CHARS = 64_000;
 
-/** The most ids a head looks turns up by, per list ({@link ThreadHeadQuery.turnIds}); the rest are ignored. */
+/**
+ * The most ids a head looks turns up by, per list ({@link ThreadHeadQuery.turnIds}): a head request
+ * naming more is refused (400 `INVALID_COMMAND`, {@link threadHeadQueryProblem}), never cut short.
+ */
 export const THREAD_HEAD_LOOKUP_MAX = 64;
 
 /** Query of `GET …/head`. On the wire each id list is its ids, each URI-encoded, joined by `,`. */
@@ -102,7 +105,10 @@ export function threadHeadQueryParams(query: ThreadHeadQuery): Record<string, st
   return params;
 }
 
-/** A head query from its URL parameters (absent, malformed or empty entries dropped; lists bounded). */
+/**
+ * A head query from its URL parameters (absent, malformed or empty entries dropped). Lists are
+ * read whole: a route checks them with {@link threadHeadQueryProblem} before serving.
+ */
 export function threadHeadQueryOf(params: { replyChars?: unknown; turnIds?: unknown; messageIds?: unknown }): ThreadHeadQuery {
   const query: ThreadHeadQuery = {};
   const replyChars = threadHeadReplyChars(params.replyChars);
@@ -118,7 +124,6 @@ function idList(raw: unknown): string[] {
   if (typeof raw !== "string" || raw === "") return [];
   const ids: string[] = [];
   for (const part of raw.split(",")) {
-    if (ids.length === THREAD_HEAD_LOOKUP_MAX) break;
     try {
       const id = decodeURIComponent(part);
       if (id !== "") ids.push(id);
@@ -127,6 +132,14 @@ function idList(raw: unknown): string[] {
     }
   }
   return ids;
+}
+
+/** Why a head query cannot be served (an id list past {@link THREAD_HEAD_LOOKUP_MAX}), or null. */
+export function threadHeadQueryProblem(query: ThreadHeadQuery): string | null {
+  for (const [name, ids] of [["turnIds", query.turnIds], ["messageIds", query.messageIds]] as const) {
+    if ((ids?.length ?? 0) > THREAD_HEAD_LOOKUP_MAX) return `${name} names ${ids!.length} ids; a head looks up at most ${THREAD_HEAD_LOOKUP_MAX}.`;
+  }
+  return null;
 }
 
 /** `?replyChars=` as a head serves it: a positive integer clamped to the cap, else undefined (no reply). */
@@ -168,11 +181,11 @@ export function threadHeadOf(source: ThreadHeadSource, query: ThreadHeadQuery = 
 /** {@link ThreadHeadResponse.matchedTurns}: each id's first turn of the window, in window order. */
 function matchedTurns(turns: readonly Turn[], query: ThreadHeadQuery): Turn[] {
   const picked = new Set<Turn>();
-  for (const id of (query.turnIds ?? []).slice(0, THREAD_HEAD_LOOKUP_MAX)) {
+  for (const id of query.turnIds ?? []) {
     const turn = turns.find((candidate) => candidate.turnId === id);
     if (turn) picked.add(turn);
   }
-  for (const id of (query.messageIds ?? []).slice(0, THREAD_HEAD_LOOKUP_MAX)) {
+  for (const id of query.messageIds ?? []) {
     const turn = turns.find((candidate) => candidate.userMessageId === id);
     if (turn) picked.add(turn);
   }
