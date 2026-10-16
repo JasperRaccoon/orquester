@@ -12,6 +12,7 @@ import type { InjectOptions } from "fastify";
 import { GitService } from "./git.ts";
 import { createServer } from "./index.js";
 import { SavedPromptsService } from "./saved-prompts.ts";
+import { WorkflowReferenceIndex } from "./workflows/reference-index.ts";
 import { mintPrincipalToken } from "./mcp/principal.ts";
 import { PRINCIPAL_TOKEN_HEADER, type CallerPrincipal } from "@orquester/api/agent-chat";
 
@@ -76,7 +77,15 @@ async function harness(options: { unreadableLibrary?: boolean; workflows?: unkno
       deleteByWorkspace: async (_name: string, path: string) => void todoCascades.push(`deleteByWorkspace ${path}`)
     },
     accounts: { unbindWorkspace: async () => {} },
-    workflows: { list: () => options.workflows ?? [] }
+    workflows: {
+      list: () => options.workflows ?? [],
+      // The store's reference index, over the (mutable) list as it is when read.
+      get references() {
+        const index = new WorkflowReferenceIndex();
+        index.rebuild({ workflows: (options.workflows ?? []) as never });
+        return index;
+      }
+    }
   } as unknown as CreateServerArgs[4];
 
   const app = createServer(
@@ -389,7 +398,7 @@ test("saved prompts: createdBy and the pin refusal follow the server-stamped pri
   assert.equal(pinned.json().pinned, true);
 });
 
-test("saved prompts: list rows name the workflows that reference each prompt, read live from the workflow store", async (t) => {
+test("saved prompts: list rows name the workflows that reference each prompt, read live from the workflow store's reference index", async (t) => {
   const workflows: unknown[] = [];
   const h = await harness({ workflows });
   t.after(() => h.close());
@@ -401,6 +410,9 @@ test("saved prompts: list rows name the workflows that reference each prompt, re
   workflows.push({ id: "wf_2", name: "Temp", project: { kind: "temp", workspace: "beta", source: { kind: "empty" } }, nodes: [{ id: "n", name: "Agent", type: "agent", config: { prompt: { kind: "saved", promptId: prompt.id } } }] });
   workflows.push({ id: "wf_3", name: "Api", project: { kind: "existing", projectPath: join(h.workspacesDir, "acme", "api") }, nodes: [{ id: "n", name: "Agent", type: "agent", config: { prompt: { kind: "saved", promptId: prompt.id } } }] });
   assert.deepEqual((await rows())[0]!.usedByWorkflows!.map((use) => use.workspace), [undefined, "beta", "acme"], "each workflow's own workspace");
+  // `?usedByWorkflows=omit`: a caller that reads the reference index itself gets the rows without it.
+  const omitted = ((await h.inject({ method: "GET", url: "/api/saved-prompts?usedByWorkflows=omit" })).json() as { prompts: SavedPrompt[] }).prompts;
+  assert.deepEqual([omitted.length, "usedByWorkflows" in omitted[0]!], [1, false]);
   // Never persisted: the stored record has no such field.
   assert.equal("usedByWorkflows" in h.savedPrompts.get(prompt.id)!, false);
 });

@@ -414,7 +414,7 @@ export const WORKFLOW_BLOCK_GUIDES: Record<WorkflowNodeType, readonly WorkflowGu
       items: [
         {
           term: "workflowId",
-          text: `Another workflow without validation errors — not itself, not one already running above it; nested at most ${WORKFLOW_LIMITS.maxSubWorkflowDepth} deep.`
+          text: `Another workflow without validation errors — not itself, not one already running above it; nested at most ${WORKFLOW_LIMITS.maxSubWorkflowDepth} deep. Enabled or not: a workflow meant only to be called by others stays disabled (no triggers of its own).`
         },
         {
           term: "input",

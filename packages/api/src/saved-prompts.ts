@@ -103,6 +103,8 @@ export interface SavedPromptListQuery {
    * no event). The daemon's agent tools read so before an approval.
    */
   readOnly?: "1";
+  /** `"omit"`: rows without `usedByWorkflows` (a caller that reads the workflow reference index itself). */
+  usedByWorkflows?: "omit";
 }
 
 export interface SavedPromptListResponse {

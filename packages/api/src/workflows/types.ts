@@ -562,7 +562,11 @@ export const workflowRoutes = {
   nodeLog: (runId: string, nodeId: string): string =>
     `/api/workflow-runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nodeId)}/log`,
   secrets: "/api/workflow-secrets",
-  secret: (name: string): string => `/api/workflow-secrets/${encodeURIComponent(name)}`
+  secret: (name: string): string => `/api/workflow-secrets/${encodeURIComponent(name)}`,
+  /** The reference index: what a workflow runs as sub-workflows, and every workflow that runs it. */
+  workflowReferences: (id: string): string => `/api/workflow-references/workflows/${encodeURIComponent(id)}`,
+  /** The reference index: every workflow whose agent blocks use a saved prompt. */
+  promptReferences: (promptId: string): string => `/api/workflow-references/prompts/${encodeURIComponent(promptId)}`
 } as const;
 
 export type WorkflowErrorCode =
@@ -576,7 +580,8 @@ export type WorkflowErrorCode =
   | "LIMIT_EXCEEDED"
   | "SECRET_INVALID"
   | "RUN_NOT_ACTIVE"
-  | "ENGINE_UNAVAILABLE";
+  | "ENGINE_UNAVAILABLE"
+  | "CALLERS_CHANGED";
 
 /** Error body: `{ error: { code, message, problems? } }`. */
 export interface WorkflowErrorBody {
@@ -624,6 +629,13 @@ export interface ReplaceWorkflowRequest {
 export interface PatchWorkflowRequest {
   revision: number;
   ops: WorkflowPatchOp[];
+  /**
+   * Refuse with 409 `CALLERS_CHANGED`, nothing saved, unless the workflows that run this one as a
+   * sub-workflow (directly or through others) are exactly these ids — and are known. The MCP sends
+   * what its approval card showed. Also `?expectCallers=<id,id…>` on `DELETE /api/workflows/:id`
+   * (an empty value: none).
+   */
+  expectCallers?: string[];
 }
 
 /** Create / replace / patch / duplicate all answer this. */
@@ -680,6 +692,49 @@ export interface GetWorkflowRunResponse {
 /** GET …/nodes/:nodeId/output */
 export interface GetWorkflowNodeOutputResponse {
   output: unknown;
+}
+
+/** A workflow as the reference index names it. */
+export interface WorkflowReference {
+  workflowId: string;
+  name: string;
+  enabled: boolean;
+  revision: number;
+  project: WorkflowProject;
+  /** The workspace of its own project (an existing project's, or a temp project's), when known. */
+  workspace?: string;
+}
+
+/**
+ * GET /api/workflow-references/workflows/:id — from the index the workflow store keeps in step with
+ * every save and delete (rebuilt from `workflows.json` at startup). Answers for any id, stored or not.
+ */
+export interface WorkflowReferencesResponse {
+  /** Moves on every change to the index (a definition saved or deleted, a rebuild). */
+  version: number;
+  workflowId: string;
+  /** The sub-workflow ids its `workflow` blocks run, in block order, each once ([] when it is not stored). */
+  calls: string[];
+  /**
+   * Every workflow that runs it as a sub-workflow, directly or through others. `null`: unknown — a
+   * definition this build cannot read may run it, or the definitions could not be read — and a
+   * caller must fail closed (never read it as "no callers"); `unknownReason` says why.
+   */
+  callers: WorkflowReference[] | null;
+  unknownReason?: string;
+}
+
+/** GET /api/workflow-references/prompts/:promptId */
+export interface PromptReferencesResponse {
+  version: number;
+  promptId: string;
+  /** Every stored workflow with an agent block whose prompt is `{kind: "saved", promptId}`, with those blocks. */
+  workflows: (WorkflowReference & { nodes: { id: string; name: string }[] })[];
+  /**
+   * Set when the list may be incomplete — a definition this build cannot read may use the prompt, or
+   * the definitions could not be read: a caller must treat the prompt as used (fail closed).
+   */
+  unknownReason?: string;
 }
 
 /** POST /api/workflows/account-preview */

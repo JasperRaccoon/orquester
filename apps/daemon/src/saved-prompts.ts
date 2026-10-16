@@ -31,8 +31,8 @@ import { writeFileAtomic } from "./agent-hooks.ts";
 import type { Broadcaster } from "./broadcaster.ts";
 import { GitService } from "./git.ts";
 import { describeProjectPath } from "./recent-projects.ts";
-import { savedPromptIdsOf } from "./mcp/tools/workflow-preview.ts";
 import { repoKeyOf } from "./workflows/git-remote/remote-url.ts";
+import type { WorkflowReferenceIndex } from "./workflows/reference-index.ts";
 
 /**
  * The prompts a first run starts with, in this order. Seeded exactly once —
@@ -634,28 +634,23 @@ function pinRefused(): SavedPromptError {
 }
 
 /**
- * Which workflows reference which saved prompt: every agent block whose prompt is
- * `{kind: "saved", promptId}` (a disabled block too — it is still part of the
- * definition), by prompt id, each workflow once, in the workflows' order. A
- * referenced prompt is live workflow code (unified MCP design 2026-10-15 §4.1):
- * the list rows carry it as `usedByWorkflows`, and an agent's edit of it is a
- * `workflows` approval card naming them.
+ * The workflows that reference `promptId`, as list rows carry them: every agent block whose prompt
+ * is `{kind: "saved", promptId}` (a disabled block too — it is still part of the definition), each
+ * workflow once, in the store's order, from the workflow store's reference index (Task 10's rule,
+ * `savedPromptIdOfNode`). A referenced prompt is live workflow code (unified MCP design 2026-10-15
+ * §4.1): the list rows carry it as `usedByWorkflows`, and an agent's edit of it is a `workflows`
+ * approval card naming them (the agent tools read the index themselves, and fail closed when it
+ * cannot tell; a list row only names what it knows).
  */
 export function savedPromptWorkflowUses(
-  workflows: readonly (Pick<Workflow, "id" | "name" | "nodes"> & { project?: Workflow["project"] })[],
+  index: Pick<WorkflowReferenceIndex, "promptUses">,
+  promptId: string,
   workspacesDir?: string
-): Map<string, SavedPromptWorkflowUse[]> {
-  const uses = new Map<string, SavedPromptWorkflowUse[]>();
-  for (const workflow of workflows) {
-    const workspace = workflowWorkspace(workflow.project, workspacesDir);
-    // Task 10's rule (`savedPromptIdsOf`): the same one the workflow tools apply.
-    for (const promptId of savedPromptIdsOf(workflow)) {
-      const list = uses.get(promptId) ?? [];
-      list.push({ workflowId: workflow.id, name: workflow.name, ...(workspace ? { workspace } : {}) });
-      uses.set(promptId, list);
-    }
-  }
-  return uses;
+): SavedPromptWorkflowUse[] {
+  return index.promptUses(promptId).workflows.map((use) => {
+    const workspace = workflowWorkspace(use.project, workspacesDir);
+    return { workflowId: use.workflowId, name: use.name, ...(workspace ? { workspace } : {}) };
+  });
 }
 
 /** The workspace of a workflow's own project: a temp project's, or an existing project's under `workspacesDir`. */
@@ -667,19 +662,19 @@ function workflowWorkspace(project: Workflow["project"] | undefined, workspacesD
 }
 
 /** A prompt as a list row: `usedByWorkflows` from `uses`, never a stored value; absent when none. */
-function listRow(prompt: SavedPrompt, uses: ReadonlyMap<string, SavedPromptWorkflowUse[]>): SavedPrompt {
+function listRow(prompt: SavedPrompt, uses: (promptId: string) => SavedPromptWorkflowUse[]): SavedPrompt {
   const { usedByWorkflows: _stored, ...row } = prompt;
-  const used = uses.get(prompt.id);
-  return used && used.length > 0 ? { ...row, usedByWorkflows: used.map((use) => ({ ...use })) } : row;
+  const used = uses(prompt.id);
+  return used.length > 0 ? { ...row, usedByWorkflows: used } : row;
 }
 
 export interface SavedPromptRoutesDeps {
   service: SavedPromptsService;
   /**
-   * The workflow definitions, read per list request (`usedByWorkflows`); absent or null: no
-   * workflow store (the rows carry none).
+   * The workflow store's reference index, read per list request (`usedByWorkflows`); absent or
+   * null: no workflow store (the rows carry none).
    */
-  workflows?: () => readonly (Pick<Workflow, "id" | "name" | "nodes"> & { project?: Workflow["project"] })[] | null | undefined;
+  workflowReferences?: () => Pick<WorkflowReferenceIndex, "promptUses"> | null | undefined;
   /** The workspaces root, read per request, to name each referencing workflow's workspace. */
   workspacesDir?: () => string;
 }
@@ -697,7 +692,11 @@ export interface SavedPromptRoutesDeps {
  */
 export function registerSavedPromptRoutes(app: FastifyInstance, deps: SavedPromptRoutesDeps): void {
   const { service } = deps;
-  const uses = (): Map<string, SavedPromptWorkflowUse[]> => savedPromptWorkflowUses(deps.workflows?.() ?? [], deps.workspacesDir?.());
+  const uses = (): ((promptId: string) => SavedPromptWorkflowUse[]) => {
+    const index = deps.workflowReferences?.();
+    const workspacesDir = deps.workspacesDir?.();
+    return index ? (promptId) => savedPromptWorkflowUses(index, promptId, workspacesDir) : () => [];
+  };
 
   app.get<{ Querystring: SavedPromptListQuery }>(
     "/api/saved-prompts",
@@ -705,7 +704,8 @@ export function registerSavedPromptRoutes(app: FastifyInstance, deps: SavedPromp
       const { projectPath, readOnly } = request.query;
       try {
         const listed = await service.list(projectPath ? projectPath : null, { readOnly: readOnly === "1" });
-        const byPrompt = uses();
+        // `?usedByWorkflows=omit`: the caller reads the reference index itself — no lookup here.
+        const byPrompt = request.query.usedByWorkflows === "omit" ? () => [] : uses();
         return { ...listed, prompts: listed.prompts.map((prompt) => listRow(prompt, byPrompt)) };
       } catch (error) {
         return savedPromptError(reply, error);

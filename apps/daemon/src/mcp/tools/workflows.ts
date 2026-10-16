@@ -18,6 +18,7 @@ import { z } from "zod";
 import { WORKFLOW_NODE_TYPES, WORKFLOW_SECRET_MAX_VALUE_BYTES, WORKFLOW_SECRET_NAME_PATTERN } from "@orquester/config";
 import {
   applyWorkflowPatch,
+  savedPromptIdsOf,
   approvalPreviewBytes,
   TOOL_APPROVAL_FULL_PREVIEW_MAX_BYTES,
   createWorkflowFromRequest,
@@ -83,7 +84,6 @@ import {
   problemsView,
   readWorkflow,
   resolveSavedPrompts,
-  savedPromptIdsOf,
   sanitizeProblems,
   unionScope,
   unionSections,
@@ -95,6 +95,8 @@ import {
   changesSecretUse,
   SECRET_USE_NOTE,
   callerParts,
+  callersPin,
+  expectedCallers,
   workflowCallers,
   frozenChildMismatch,
   workflowFields,
@@ -999,7 +1001,8 @@ const updateWorkflow = defineTool({
     // Adding or changing a block that reads a secret, or retargeting one: never granted.
     const secretUse = changesSecretUse(current, after, diff.touched);
     // Workflows that run this one: the edit changes what they run (covered only with them).
-    const callers = callerParts(await workflowCallers(api, current.id), "change");
+    const callerList = await workflowCallers(api, current.id);
+    const callers = callerParts(callerList, "change");
     const sections: ApprovalPreviewSection[] = [
       ...(enables ? [{ kind: "warning" as const, level: "caution" as const, text: "Enables the workflow: its schedule and git triggers start firing." }] : []),
       ...(secretUse ? [SECRET_USE_NOTE] : []),
@@ -1017,7 +1020,8 @@ const updateWorkflow = defineTool({
       scopeLabel: unionLabel(union),
       sections,
       workflowId: current.id,
-      pins: previewPins(current, prompts, union),
+      // The callers too: the write is refused if they changed since (CALLERS_CHANGED → PREVIEW_STALE).
+      pins: { ...previewPins(current, prompts, union), ...callersPin(current.id, callerList) },
       // A grant covers the edit only if it covers every sub-workflow it wires in (§7.6), and every
       // workflow that runs this one.
       ...unionGrantFields(union),
@@ -1041,16 +1045,23 @@ const updateWorkflow = defineTool({
       const { workflow: current } = await readWorkflow(api, args.workflowId);
       await verifyPins(api, ctx.approval.pins, { current, via: ctx.approval.outcome });
     }
-    const res = await api.request("POST", workflowRoutes.patch(args.workflowId), { body: { revision: args.revision, ops } });
+    const expectCallers = expectedCallers(ctx.approval?.pins, args.workflowId);
+    const res = await api.request("POST", workflowRoutes.patch(args.workflowId), { body: { revision: args.revision, ops, ...(expectCallers ? { expectCallers } : {}) } });
     if (res.status >= 400) {
       const error = workflowError(res);
       // Edited between the card and this write: the user approved another revision (§7.2).
       if (ctx.approval && error.code === "REVISION_CONFLICT") throw new ToolError("PREVIEW_STALE", `The workflow changed ${passedPhrase(ctx.approval.outcome)}; nothing was saved. Re-read it (get_workflow) and call again.`);
+      if (ctx.approval && error.code === "CALLERS_CHANGED") throw callersStale(ctx.approval.outcome);
       throw await indexedPatchError(api, args.workflowId, args.revision, ops, error);
     }
     return writeResult(api, res.body as WorkflowWriteResponse, "updated");
   }
 });
+
+/** The workflows that run this one changed between the card (or the grant's check) and the write. */
+function callersStale(via: PassedBy): ToolError {
+  return new ToolError("PREVIEW_STALE", `The workflows that run this one as a sub-workflow changed ${passedPhrase(via)}; nothing was done. Re-read it (get_workflow) and call again.`);
+}
 
 /** Every run of a workflow, paged to the end (the store keeps at most `runsPerWorkflow`). */
 async function countRuns(api: DaemonApi, workflowId: string): Promise<{ total: number; active: number }> {
@@ -1096,7 +1107,8 @@ const deleteWorkflow = defineTool({
     const runs = await countRuns(api, workflow.id);
     const secretsRes = await api.request("GET", workflowRoutes.secrets, { query: { workflowId: workflow.id } });
     const own = secretsRes.status < 400 ? ((secretsRes.body as ListWorkflowSecretsResponse).secrets ?? []).filter((s) => s.scope === "workflow").map((s) => s.name) : [];
-    const callers = callerParts(await workflowCallers(api, workflow.id), "delete");
+    const callerList = await workflowCallers(api, workflow.id);
+    const callers = callerParts(callerList, "delete");
     return {
       title: `${agentLabel(ctx.caller)} wants to delete the workflow "${workflow.name}"`,
       scopeLabel: unionLabel(union),
@@ -1108,7 +1120,7 @@ const deleteWorkflow = defineTool({
         ...(await unionSections(api, union, ctx.caller))
       ],
       workflowId: workflow.id,
-      pins: previewPins(workflow, new Map()),
+      pins: { ...previewPins(workflow, new Map()), ...callersPin(workflow.id, callerList) },
       ...callers.grant,
       ...(union.missing.length > 0 ? { ungrantable: true } : {})
     };
@@ -1118,7 +1130,13 @@ const deleteWorkflow = defineTool({
   async run(args, ctx) {
     const { api } = ctx;
     if (ctx.approval?.pins) await verifyPins(api, ctx.approval.pins, { via: ctx.approval.outcome });
-    expectWorkflowOk(await api.request("DELETE", workflowRoutes.workflow(args.workflowId)));
+    const expectCallers = expectedCallers(ctx.approval?.pins, args.workflowId);
+    const res = await api.request("DELETE", workflowRoutes.workflow(args.workflowId), expectCallers ? { query: { expectCallers: expectCallers.join(",") } } : undefined);
+    if (res.status >= 400) {
+      const error = workflowError(res);
+      if (ctx.approval && error.code === "CALLERS_CHANGED") throw callersStale(ctx.approval.outcome);
+      throw error;
+    }
     return { deleted: true, workflowId: args.workflowId };
   }
 });

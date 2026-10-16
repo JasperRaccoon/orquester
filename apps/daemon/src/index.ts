@@ -4127,11 +4127,11 @@ export function createServer(
 
   // umcp:t12 begin — the saved-prompt routes live with their service (unified MCP design
   // 2026-10-15 D-16): `createdBy` and the pin refusal read the server-stamped principal, and the
-  // list rows carry `usedByWorkflows` (with each workflow's workspace) from the workflow store.
-  // The atomic todo-item toggle beside the other /api/todos routes (update_todos toggle).
+  // list rows carry `usedByWorkflows` (with each workflow's workspace) from the workflow store's
+  // reference index. The atomic todo-item toggle beside the other /api/todos routes (update_todos toggle).
   registerSavedPromptRoutes(app, {
     service: services.savedPrompts,
-    workflows: () => services.workflows.list(),
+    workflowReferences: () => services.workflows.references,
     workspacesDir: () => resolved.workspacesDir
   });
   registerTodoToggleRoute(app, todos);

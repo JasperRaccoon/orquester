@@ -38,6 +38,7 @@ import {
   type ListWorkflowsResponse,
   type PatchWorkflowRequest,
   type PreviewWorkflowExpressionResponse,
+  type PromptReferencesResponse,
   type ReplaceWorkflowRequest,
   type RunWorkflowRequest,
   type RunWorkflowResponse,
@@ -48,6 +49,9 @@ import {
   type WorkflowBlockTypesResponse,
   type WorkflowNode,
   type WorkflowNodeType,
+  type WorkflowProject,
+  type WorkflowReference,
+  type WorkflowReferencesResponse,
   type WorkflowSummary,
   type WorkflowWriteResponse
 } from "@orquester/api";
@@ -193,9 +197,10 @@ function summarizeWorkflow(
 async function deleteWorkflowCascade(
   deps: Pick<WorkflowRouteDeps, "service" | "secrets" | "runStore" | "engine" | "projects">,
   id: string,
-  revision?: number
+  revision?: number,
+  expectCallers?: readonly string[]
 ): Promise<void> {
-  await deps.service.delete(id, revision);
+  await deps.service.delete(id, revision, expectCallers);
   const engine = deps.engine();
   const cancelled: string[] = [];
   if (engine !== null) {
@@ -297,6 +302,11 @@ function optionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
+/**
+ * The list's `?projectPath=` fallback when no `projectPathFilter` is wired (the parent directory as
+ * the workspace, for matching temp workflows). Never used to NAME a workflow's workspace in an answer
+ * (the reference routes leave it unknown instead).
+ */
 function defaultProjectFilter(projectPath: string): { path: string; workspace: string } {
   const path = resolve(projectPath);
   return { path, workspace: basename(dirname(path)) };
@@ -465,7 +475,11 @@ export function registerWorkflowRoutes(app: FastifyInstance, deps: WorkflowRoute
         request.query.revision === undefined || request.query.revision === ""
           ? undefined
           : intQuery(request.query.revision, 0, 0, Number.MAX_SAFE_INTEGER, "revision");
-      await deleteWorkflowCascade(deps, request.params.id, revision);
+      // `?expectCallers=a,b` (empty: none): the callers an approval card showed (409 CALLERS_CHANGED).
+      const expect = request.query.expectCallers;
+      if (expect !== undefined && typeof expect !== "string") throw invalidRequest("expectCallers must be a comma-separated list of workflow ids.");
+      const expectCallers = expect === undefined ? undefined : expect.split(",").filter((id) => id !== "");
+      await deleteWorkflowCascade(deps, request.params.id, revision, expectCallers);
       return reply.code(204).send();
     })
   );
@@ -486,6 +500,52 @@ export function registerWorkflowRoutes(app: FastifyInstance, deps: WorkflowRoute
     guarded(async (request, reply) => {
       await catalogReady();
       return reply.code(201).send(await service.duplicate(request.params.id));
+    })
+  );
+
+  // ---- The reference index (read-only) --------------------------------------------------------
+
+  /**
+   * The workspace of a workflow's own project, when KNOWN: a temp project's, or what the wired
+   * `projectPathFilter` says. Without one, none — never the path's parent guessed as one (a reader
+   * that hides other workspaces' names treats an unknown workspace as another's).
+   */
+  const workspaceOf = (project: WorkflowProject): string | undefined => {
+    if (project.kind === "temp") return project.workspace;
+    return deps.projectPathFilter?.(project.projectPath)?.workspace;
+  };
+  const named = <T extends Omit<WorkflowReference, "workspace">>(entry: T): T & { workspace?: string } => {
+    const workspace = workspaceOf(entry.project);
+    return { ...entry, ...(workspace ? { workspace } : {}) };
+  };
+
+  app.get(
+    "/api/workflow-references/workflows/:id",
+    guarded(async (request): Promise<WorkflowReferencesResponse> => {
+      const id = request.params.id;
+      const index = service.references;
+      const answer = index.callers(id);
+      return {
+        version: answer.version,
+        workflowId: id,
+        calls: index.calls(id),
+        callers: answer.callers === null ? null : answer.callers.map(named),
+        ...(answer.unknownReason ? { unknownReason: answer.unknownReason } : {})
+      };
+    })
+  );
+
+  app.get(
+    "/api/workflow-references/prompts/:promptId",
+    guarded(async (request): Promise<PromptReferencesResponse> => {
+      const promptId = request.params.promptId!;
+      const answer = service.references.promptUses(promptId);
+      return {
+        version: answer.version,
+        promptId,
+        workflows: answer.workflows.map(named),
+        ...(answer.unknownReason ? { unknownReason: answer.unknownReason } : {})
+      };
     })
   );
 

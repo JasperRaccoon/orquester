@@ -1,5 +1,6 @@
+import { basename, dirname } from "node:path";
 import type { Readable } from "node:stream";
-import type { EventMessage } from "@orquester/api";
+import type { EventMessage, PromptReferencesResponse, Workflow, WorkflowProject, WorkflowReferencesResponse } from "@orquester/api";
 import { threadHeadOf, threadHeadQueryOf, type HtmlRenderReference, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
 import type {
   DaemonApi,
@@ -10,9 +11,10 @@ import type {
   HtmlPreviewRequest,
   HtmlRenderPublishRequest
 } from "./daemon-api.ts";
+import { WorkflowReferenceIndex } from "../workflows/reference-index.ts";
 
 type Call = { method: DaemonMethod; path: string; query?: Record<string, string>; body?: unknown };
-type Responder = DaemonResponse | ((call: { query?: Record<string, string>; body?: unknown }) => DaemonResponse);
+type Responder = DaemonResponse | ((call: { query?: Record<string, string>; body?: unknown; path: string }) => DaemonResponse);
 
 /**
  * In-memory DaemonApi for tool tests. The rules a test can rely on:
@@ -21,8 +23,8 @@ type Responder = DaemonResponse | ((call: { query?: Record<string, string>; body
  *   matches and whose path matches — exactly, or as a prefix when the registered path ends in `*`
  *   (`"/api/sessions/*"`). Exact and prefix routes are not ranked: registration order alone decides, so a later `on`
  *   overrides an earlier one for the paths it covers. `opts.query` never takes part in matching (a `?` written into
- *   `path` itself is part of the path and matches literally); a function responder receives `{query, body}` and can
- *   branch on it.
+ *   `path` itself is part of the path and matches literally); a function responder receives `{query, body, path}` and
+ *   can branch on it.
  * - Answers. A responder is a canned `DaemonResponse` or a function returning one; a function that throws makes
  *   `request` reject (a transport failure). An unmatched request answers `404 {code: "NOT_FOUND"}`; it never throws.
  *   Every request, matched or not, is appended to `calls` (`query`/`body` only when given).
@@ -72,16 +74,17 @@ export class FakeDaemonApi implements DaemonApi {
     const route = this.find(method, path);
     const head = method === "GET" && !route ? /^\/api\/sessions\/([^/]+)\/head$/.exec(path) : null;
     if (head) {
-      const thread = this.find("GET", `/api/sessions/${head[1]}/thread`);
-      if (thread) return headFromThreadRead(this.answer(thread, {}), opts?.query);
+      const threadPath = `/api/sessions/${head[1]}/thread`;
+      const thread = this.find("GET", threadPath);
+      if (thread) return headFromThreadRead(this.answer(thread, { path: threadPath }), opts?.query);
     }
     if (!route) return { status: 404, body: { code: "NOT_FOUND", message: `no fake route for ${method} ${path}` } };
-    return this.answer(route, { query: opts?.query, body: opts?.body });
+    return this.answer(route, { query: opts?.query, body: opts?.body, path });
   }
   private find(method: DaemonMethod, path: string): { responder: Responder } | undefined {
     return this.routes.find((r) => r.method === method && (r.path.endsWith("*") ? path.startsWith(r.path.slice(0, -1)) : r.path === path));
   }
-  private answer(route: { responder: Responder }, call: { query?: Record<string, string>; body?: unknown }): DaemonResponse {
+  private answer(route: { responder: Responder }, call: { query?: Record<string, string>; body?: unknown; path: string }): DaemonResponse {
     return typeof route.responder === "function" ? route.responder(call) : route.responder;
   }
   async uploadAttachment(sessionId: string, meta: { name: string; type?: string }, bytes: Readable): Promise<{ status: number; value: unknown }> {
@@ -138,4 +141,56 @@ export function headFromThreadRead(read: DaemonResponse, query?: Record<string, 
   const body = read.body as { kind?: unknown; thread?: unknown } | null;
   if (read.status >= 400 || body?.kind !== "snapshot") return read;
   return { status: read.status, body: threadHeadOf(body.thread as ThreadSnapshotPayload, threadHeadQueryOf(query ?? {})) };
+}
+
+/**
+ * The workflow reference index's routes (`workflowRoutes.workflowReferences` / `promptReferences`),
+ * answered as the daemon answers them: by a REAL {@link WorkflowReferenceIndex} rebuilt from
+ * `workflows()` (and `unreadable()`, records the store cannot read) on every request.
+ */
+export function serveWorkflowReferences(
+  api: FakeDaemonApi,
+  workflows: () => readonly Workflow[],
+  unreadable: () => readonly unknown[] = () => [],
+  /** An existing project's workspace, as the daemon's wired `projectPathFilter` names it (none: unknown). */
+  workspaceOfPath: (projectPath: string) => string | undefined = (projectPath) => basename(dirname(projectPath))
+): FakeDaemonApi {
+  const index = (): WorkflowReferenceIndex => {
+    const built = new WorkflowReferenceIndex();
+    built.rebuild({ workflows: workflows(), unreadable: unreadable() });
+    return built;
+  };
+  const workspaceOf = (project: WorkflowProject): string | undefined => (project.kind === "temp" ? project.workspace : workspaceOfPath(project.projectPath));
+  const withWorkspace = <T extends { project: WorkflowProject }>(entry: T): T & { workspace?: string } => {
+    const workspace = workspaceOf(entry.project);
+    return { ...entry, ...(workspace ? { workspace } : {}) };
+  };
+  const tail = (path: string, prefix: string) => decodeURIComponent(path.slice(prefix.length));
+  const WORKFLOWS = "/api/workflow-references/workflows/";
+  const PROMPTS = "/api/workflow-references/prompts/";
+  api.on("GET", `${WORKFLOWS}*`, ({ path }) => {
+    const id = tail(path, WORKFLOWS);
+    const built = index();
+    const answer = built.callers(id);
+    const body: WorkflowReferencesResponse = {
+      version: answer.version,
+      workflowId: id,
+      calls: built.calls(id),
+      callers: answer.callers === null ? null : answer.callers.map((caller) => withWorkspace(caller)),
+      ...(answer.unknownReason ? { unknownReason: answer.unknownReason } : {})
+    };
+    return { status: 200, body };
+  });
+  api.on("GET", `${PROMPTS}*`, ({ path }) => {
+    const promptId = tail(path, PROMPTS);
+    const answer = index().promptUses(promptId);
+    const body: PromptReferencesResponse = {
+      version: answer.version,
+      promptId,
+      workflows: answer.workflows.map((use) => withWorkspace(use)),
+      ...(answer.unknownReason ? { unknownReason: answer.unknownReason } : {})
+    };
+    return { status: 200, body };
+  });
+  return api;
 }
