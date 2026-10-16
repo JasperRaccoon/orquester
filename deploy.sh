@@ -151,7 +151,7 @@ if ${s:+$s }test -f \"\$cfg\"; then
   ${s:+$s }node -e \"const fs=require('fs'),f=process.argv[1],c=JSON.parse(fs.readFileSync(f,'utf8'));if(c.transports&&c.transports.http)delete c.transports.http.passwordHash;fs.writeFileSync(f,JSON.stringify(c,null,2)+'\n')\" \"\$cfg\"
 fi
 ${s:+$s }systemctl restart orquester
-curl -fsS --retry 25 --retry-delay 1 --retry-connrefused http://127.0.0.1:47831/health; echo
+curl -fsS --retry 120 --retry-delay 1 --retry-max-time 150 --retry-connrefused http://127.0.0.1:47831/health; echo
 after=\$(salt || true)
 if [ \"\$after\" = \"\$before\" ] && [ -n \"\$after\" ]; then
   echo 'rotate-password: FAILED — the stored hash did not change, the OLD password is still valid' >&2

@@ -53,7 +53,8 @@ if ! $SUDO git diff --quiet "$drift_base" "$new_head" -- deploy/Caddyfile; then
 fi
 
 $SUDO systemctl restart orquester
-curl -fsS --retry 25 --retry-delay 1 --retry-connrefused http://127.0.0.1:47831/health; echo
+# A loaded host can take well over 30 s to bring the daemon up; wait up to 2 min.
+curl -fsS --retry 120 --retry-delay 1 --retry-max-time 150 --retry-connrefused http://127.0.0.1:47831/health; echo
 printf '%s\n' "$new_head" | $SUDO tee "$state_file" >/dev/null
 echo "[remote-update] service=$(systemctl is-active orquester)"
 echo "[remote-update] bundle=$(curl -s http://127.0.0.1:47831/ | grep -o 'index-[^.]*\.js' | head -n1)"
