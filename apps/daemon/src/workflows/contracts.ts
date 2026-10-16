@@ -139,6 +139,11 @@ export interface PersistedRun extends Omit<WorkflowRun, "blocks"> {
    * (its children then read the current definitions).
    */
   subWorkflows?: Record<string, Workflow>;
+  /**
+   * A child run: the attempt of its parent's Run workflow block that started it (its id is derived
+   * from parent run, block and attempt). Absent on a child recorded by an older build.
+   */
+  parentAttempt?: number;
 }
 
 export interface RunStore {
@@ -146,6 +151,8 @@ export interface RunStore {
   /** Atomic rewrite of run.json; serialized per run. */
   save(run: PersistedRun): Promise<void>;
   load(runId: string): Promise<PersistedRun | null>;
+  /** Whether a run with this id is recorded (readable or not); throws when that cannot be told. */
+  exists(runId: string): Promise<boolean>;
   /** Runs whose status is queued/running (for resume at boot). */
   listUnfinished(): Promise<PersistedRun[]>;
   listForWorkflow(workflowId: string, opts: { before?: string; limit: number }): Promise<ListWorkflowRunsResponse>;
@@ -419,7 +426,11 @@ export interface EngineServices {
   prompts: PromptRenderer;
   store: WorkflowStore;
   /** Starts a child run (sub-workflow block) and resolves when it ends. */
-  runChild(input: { workflowId: string; input: unknown; parentRunId: string; parentNodeId: string; depth: number; signal: AbortSignal }): Promise<{ runId: string; wait: Promise<WorkflowRunSummary & { finalOutput?: unknown }> }>;
+  /**
+   * Start the child run of one attempt of a Run workflow block — idempotent per (parent run, block,
+   * `attempt`): the child's id is derived from them, and asking again returns the run that exists.
+   */
+  runChild(input: { workflowId: string; input: unknown; parentRunId: string; parentNodeId: string; depth: number; signal: AbortSignal; attempt?: number }): Promise<{ runId: string; wait: Promise<WorkflowRunSummary & { finalOutput?: unknown }> }>;
   /** Re-attach to a child run after a restart. */
   awaitRun(runId: string, signal: AbortSignal): Promise<WorkflowRunSummary & { finalOutput?: unknown }>;
   logger: WorkflowLogger;

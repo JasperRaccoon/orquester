@@ -63,7 +63,7 @@ function previewOutput(output: unknown): { output: unknown; truncated: boolean }
  * `waitingOn` and `outputFile`) is dropped and every block output is cut to the inline preview.
  */
 export function persistedRunToWire(run: PersistedRun): WorkflowRun {
-  const { version: _version, depth: _depth, seededOutputs: _seeded, fromNodeId: _from, subWorkflows: _frozen, blocks, ...rest } = run;
+  const { version: _version, depth: _depth, seededOutputs: _seeded, fromNodeId: _from, subWorkflows: _frozen, parentAttempt: _attempt, blocks, ...rest } = run;
   const wireBlocks: Record<string, WorkflowBlockRun> = {};
   for (const [nodeId, block] of Object.entries(blocks)) {
     const { waitingOn: _waitingOn, outputFile, ...wire } = block;
@@ -176,6 +176,17 @@ export class FileRunStore implements RunStore {
     // A write in flight is the newest state: wait for it rather than read the file under it.
     await this.writers.get(runId)?.writing.catch(() => undefined);
     return this.readRunFile(runId);
+  }
+
+  async exists(runId: string): Promise<boolean> {
+    if (!isRunId(runId) || this.deleted.has(runId)) return false;
+    try {
+      await stat(join(this.dir, runId, "run.json"));
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return false;
+      throw error;
+    }
   }
 
   /** The summary of a run the index knows (no I/O). */

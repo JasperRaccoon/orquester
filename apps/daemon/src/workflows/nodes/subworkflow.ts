@@ -42,7 +42,9 @@ export function createSubWorkflowExecutor(): NodeExecutor<"workflow"> {
               parentRunId: ctx.runId,
               parentNodeId: ctx.node.id,
               depth: ctx.depth,
-              signal: controller.signal
+              signal: controller.signal,
+              // One child per attempt: asking again (a resumed attempt) returns the same run.
+              attempt: ctx.attempt
             });
           } catch (error) {
             // The engine is stopping: no child started, and none may — the block resumes (and starts
