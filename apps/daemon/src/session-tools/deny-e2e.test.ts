@@ -17,6 +17,7 @@ import type { AgentAdapterId } from "@orquester/api/agent-chat";
 
 import type { AgentHomes } from "../agent-profile/adapters/types.ts";
 import { DaemonMcpDetector, listProjectDirs, registerDaemonMcpServersRoutes } from "../agent-profile/daemon-mcp.ts";
+import { codexDenyConfig } from "../agent-host/adapters/codex/session-tools.ts";
 import { catalogFor } from "../mcp/catalog/index.ts";
 import type { DaemonApi } from "../mcp/daemon-api.ts";
 import { SessionToolsRefresher } from "./toolset-refresh.ts";
@@ -119,4 +120,77 @@ test("a user MCP server carrying this daemon's bearer is denied in the chat mani
   // Grok in a managed account (GROK_HOME only): the inherited Claude server still loads; the system
   // Grok config's does not.
   assert.deepEqual(await deny("grok-account"), ["claude_orq"]);
+});
+
+test("Codex: a project-level server is denied only where that home's Codex trusts the project (and so loads it)", async (t) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "orq-deny-trust-")));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const homes: AgentHomes = {
+    home, claudeDir: join(home, ".claude"), claudeJson: join(home, ".claude.json"), codexHome: join(home, ".codex"),
+    grokHome: join(home, ".grok"), opencodeDir: join(home, ".config", "opencode"), agentsSkillsDir: join(home, ".agents", "skills")
+  };
+  const workspaces = join(root, "workspaces");
+  const project = join(workspaces, "acme", "api");
+  await mkdir(join(project, ".git"), { recursive: true });
+  await write(join(project, ".codex", "config.toml"), ["[mcp_servers.proj_orq]", `url = "http://127.0.0.1:${PORT}/mcp"`].join("\n"));
+  const trusting = join(root, "accounts", "codex", "acct-t", "home");
+  const untrusting = join(root, "accounts", "codex", "acct-u", "home");
+  const unreadable = join(root, "accounts", "codex", "acct-x", "home");
+  const trusted = `[projects."${project}"]\ntrust_level = "trusted"\n`;
+  await write(join(trusting, "config.toml"), trusted);
+  await write(join(untrusting, "config.toml"), `[projects."${project}"]\ntrust_level = "untrusted"\n`);
+  await write(join(unreadable, "config.toml"), `[projects."${project}"\ntrust_level = "trusted"\n`);
+  await write(join(homes.codexHome, "config.toml"), "");
+
+  const detector = new DaemonMcpDetector(
+    { verifyBearer: () => false, httpPort: () => PORT, publicOrigins: () => [], env: () => undefined },
+    {
+      homes,
+      accountHomes: async (agent) =>
+        agent === "codex" ? [{ id: "acct-t", home: trusting }, { id: "acct-u", home: untrusting }, { id: "acct-x", home: unreadable }] : [],
+      projects: () => listProjectDirs(workspaces),
+      workspacesRoot: () => workspaces
+    }
+  );
+  const app = Fastify();
+  registerDaemonMcpServersRoutes(app, { detector, mode: "local" });
+  await app.ready();
+  t.after(() => app.close());
+  const api = {
+    fsRoot: root,
+    workspacesDir: workspaces,
+    async request(method: string, path: string, opts?: { query?: Record<string, string> }) {
+      const query = opts?.query ? `?${new URLSearchParams(opts.query).toString()}` : "";
+      const res = await app.inject({ method: method as "GET", url: `${path}${query}` });
+      return { status: res.statusCode, body: res.body ? res.json() : null };
+    }
+  } as unknown as DaemonApi;
+  const refresher = new SessionToolsRefresher({
+    thread: (id) => ({ agentId: "codex", home: id, projectPath: project }),
+    openThreads: () => [],
+    resolvedToolsets: () => ["core"],
+    agentToolsEnabled: () => true,
+    catalog: () => catalogFor("chat"),
+    api: () => api,
+    pushToHost: async () => null
+  });
+  const deny = async (home: string): Promise<string[]> => {
+    const manifest = await refresher.manifest(home);
+    assert.ok(manifest !== null && manifest !== "unavailable", `${home}: a manifest`);
+    return [...manifest.deny];
+  };
+
+  // Trusted: Codex loads it, so it is denied (switched off in the thread config).
+  assert.deepEqual(await deny("acct-t"), ["proj_orq"]);
+  assert.deepEqual(codexDenyConfig(await deny("acct-t")), { "mcp_servers.proj_orq.enabled": false });
+  // Untrusted, no trust entry, or a trust table that cannot be read: Codex does not load it, and a
+  // denial of a server it did not load would fail thread/start ("invalid transport") — none is sent.
+  assert.deepEqual(await deny("acct-u"), []);
+  assert.deepEqual(await deny("system"), []);
+  assert.deepEqual(await deny("acct-x"), []);
+  assert.deepEqual(codexDenyConfig(await deny("system")), {});
+  // The panel still lists the server, saying which homes load it.
+  const listed = (await app.inject({ method: "GET", url: "/api/agent-profile/daemon-mcp-servers" })).json() as { servers: Array<{ name: string; loadedByHomes?: string[] }> };
+  assert.deepEqual(listed.servers.find((server) => server.name === "proj_orq")?.loadedByHomes, ["acct-t"]);
 });

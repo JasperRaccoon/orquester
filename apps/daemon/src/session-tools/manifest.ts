@@ -126,7 +126,10 @@ export function denyFor(thread: ManifestThread, servers: readonly DaemonPointing
       server.scope === "project"
         ? server.projectPath !== undefined && loadsProjectConfigIn(thread, server.projectPath)
         : server.allHomes === true || server.home === thread.home;
-    if (inScope) names.add(server.name);
+    // A Codex project config that this home's Codex does not load (it does not trust the directory)
+    // needs no denial — and must get none.
+    const loaded = server.loadedByHomes === undefined || server.loadedByHomes.includes(thread.home);
+    if (inScope && loaded) names.add(server.name);
   }
   return [...names].sort();
 }

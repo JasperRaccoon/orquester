@@ -566,17 +566,17 @@ test("a chat started in a directory inside its project is denied the servers con
       body: {
         servers: scoped
           ? [
-              { agent: "codex", home: "system", scope: "project", projectPath: "/w/acme/api/packages", name: "sub_remote", reason: "url" },
-              { agent: "codex", home: "system", scope: "project", projectPath: "/w/acme/api/packages/app", name: "cwd_remote", reason: "url" }
-            ]
-          : [
               { agent: "codex", home: "system", scope: "project", projectPath: "/w/acme/api", name: "root_remote", reason: "url" },
+              { agent: "codex", home: "system", scope: "project", projectPath: "/w/acme/api/packages", name: "sub_remote", reason: "url" },
+              { agent: "codex", home: "system", scope: "project", projectPath: "/w/acme/api/packages/app", name: "cwd_remote", reason: "url" },
               { agent: "codex", home: "system", scope: "project", projectPath: "/w/acme/api/docs", name: "sibling_remote", reason: "url" }
             ]
+          : [{ agent: "codex", home: "system", scope: "project", projectPath: "/w/acme/api", name: "from_the_root_read", reason: "url" }]
       }
     };
   });
   const manifest = await manifestOf(r, "codex-1");
   assert.deepEqual(manifest.deny, ["cwd_remote", "root_remote", "sub_remote"], "never a sibling directory's (Codex refuses a name its config lacks)");
-  assert.deepEqual(queries, [undefined, { projectPath: "/w/acme/api", cwd: "/w/acme/api/packages/app" }]);
+  // Only its own read: what loads at ITS cwd (Codex's trust and layers are decided for it).
+  assert.deepEqual(queries, [{ projectPath: "/w/acme/api", cwd: "/w/acme/api/packages/app" }]);
 });

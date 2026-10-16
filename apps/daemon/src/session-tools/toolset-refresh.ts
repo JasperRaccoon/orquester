@@ -342,16 +342,14 @@ export class SessionToolsRefresher {
     // A chat started in a directory inside its project also loads the configs on the way down to it.
     const cwdPaths = [thread.cwd ?? "", thread.canonicalCwd ?? ""].filter((path) => path !== "" && !projectPaths.some((root) => resolvePath(root) === resolvePath(path)));
     const inside = thread.cwd !== undefined && cwdPaths.includes(thread.cwd) && isWithinDir(thread.cwd, thread.projectPath);
-    const [everyProject, ownCwd] = await Promise.all([
-      this.daemonPointing(),
-      inside ? this.daemonPointing({ projectPath: thread.projectPath, cwd: thread.cwd! }) : Promise.resolve([] as readonly DaemonPointingServer[])
-    ]);
-    if (everyProject === null || ownCwd === null) {
+    // Its own read holds what a CLI loads at its cwd (Codex's trust is decided for that cwd); the
+    // all-projects read reads each project root as its own cwd.
+    const daemonPointing = inside ? await this.daemonPointing({ projectPath: thread.projectPath, cwd: thread.cwd! }) : await this.daemonPointing();
+    if (daemonPointing === null) {
       if (!this.refused.has(threadId)) this.refused.set(threadId, this.now());
       return "unavailable";
     }
     this.refused.delete(threadId);
-    const daemonPointing = [...everyProject, ...ownCwd];
     const api = this.deps.api();
     // The workflow-owned trait walks lineage through closed tabs (the gate's own walk): fail
     // closed — an unreadable (or unanswered, bounded) list counts as owned, so no Admin tool is

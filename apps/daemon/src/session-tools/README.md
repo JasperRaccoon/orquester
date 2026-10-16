@@ -378,7 +378,10 @@ session tools. See `agent-host/adapters/opencode/session-tools.ts`.
   next message tries again.
 - **Denials per provider.** Claude: `disallowedTools` `mcp__<name>` and flag-settings
   `deniedMcpServers: [{serverName}]` — and always `orquester`. Codex: thread config
-  `mcp_servers.<name>.enabled = false` (only names its config has); a name containing `.` cannot
+  `mcp_servers.<name>.enabled = false` (only names its config has: a project-level server only
+  in a home whose Codex trusts that directory — `[projects."<dir>"] trust_level`, else the git
+  root's — since Codex loads nothing else and fails a thread that denies a server it did not load,
+  `DaemonPointingServer.loadedByHomes`; probed on 0.159.0); a name containing `.` cannot
   be a dotted key, so the override is then sent as one `mcp_servers` table (merged into the config,
   probed). Grok: a same-named ACP entry on the host's inert `/mcp/denied`. OpenCode: each denied
   server is disconnected on the shared instance and gets a last ruleset rule `<name>_*` deny —

@@ -19,6 +19,16 @@
  * scope may be keyed by any of them: with `cwd`, each of those directories is scanned as a project
  * (`projectPath` = the directory that holds the config).
  *
+ * Codex loads a project-level `.codex/config.toml` only where it TRUSTS the directory (probed on
+ * 0.159.0): in a git repository, each directory from the repository root down to the cwd, a
+ * directory trusted when its own `[projects."<dir>"] trust_level` in that home's `config.toml` is
+ * `"trusted"`, else when the repository root's is (an explicit `"untrusted"` wins; keys match
+ * exactly); outside a repository, the cwd's directory alone, by its own entry. Denying a server
+ * Codex does not load fails the thread ("invalid transport"), so each Codex project-level server
+ * carries `loadedByHomes`: the Codex homes that load it for that cwd (a project root is its own cwd
+ * in the all-projects view). An unreadable trust table trusts nothing — Codex then loads nothing to
+ * deny.
+ *
  * Homes: the daemon user's own (`home: "system"`) and **every managed account home** of the
  * agent's family (`home: <account id>`; spec S11). A file already read through another home (an
  * account's `config.toml` is a symlink to the system one) is read once, under the first home.
@@ -53,7 +63,7 @@
  */
 
 import { lstat, readdir, readFile, realpath } from "node:fs/promises";
-import { join, sep } from "node:path";
+import { dirname, join, sep } from "node:path";
 import type { FastifyInstance } from "fastify";
 import {
   AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE,
@@ -271,7 +281,12 @@ interface ScanTarget {
   local?: { only?: ReadonlySet<string> };
   /** Every home of `agent` loads this file (`DaemonPointingServer.allHomes`). */
   allHomes?: true;
+  /** A Codex project-level file: the cwd of the chat it is read for (its trust decides who loads it). */
+  codexCwd?: string;
 }
+
+/** Each Codex home's project trust table (`[projects."<dir>"] trust_level`). */
+type CodexTrust = { home: string; levels: ReadonlyMap<string, string> }[];
 
 export class DaemonMcpDetector {
   constructor(
@@ -293,7 +308,9 @@ export class DaemonMcpDetector {
     if (options.cwd !== undefined && !options.projectPath) throw new AgentProfileError(400, "INVALID_REQUEST", "cwd needs projectPath.");
     const projectFilter = options.projectPath ? await this.containedProject(options.projectPath) : undefined;
     const dirs = projectFilter !== undefined ? await this.configDirs(projectFilter, options.cwd) : undefined;
-    const targets = await this.targets(dirs);
+    const targets = await this.targets(dirs, options.cwd !== undefined ? dirs?.at(-1) : undefined);
+    const codexTrust = targets.some((target) => target.codexCwd !== undefined) ? await this.codexTrust() : [];
+    const gitRoots = new Map<string, Promise<string | undefined>>();
     const seenFiles = new Set<string>();
     const out: DaemonPointingServer[] = [];
     const seen = new Set<string>();
@@ -324,7 +341,27 @@ export class DaemonMcpDetector {
           continue;
         }
         seen.add(key);
-        out.push({ agent: target.agent, home: target.home, scope, ...(projectPath ? { projectPath } : {}), name: candidate.name, reason, ...(target.allHomes ? { allHomes: true as const } : {}) });
+        let loadedByHomes: string[] | undefined;
+        if (target.codexCwd !== undefined && target.projectPath !== undefined) {
+          // Codex matches its trust keys against real paths.
+          const cwd = await realpathOr(target.codexCwd);
+          let gitRoot = gitRoots.get(cwd);
+          if (gitRoot === undefined) {
+            gitRoot = this.gitRoot(cwd);
+            gitRoots.set(cwd, gitRoot);
+          }
+          loadedByHomes = codexLoadingHomes(await realpathOr(target.projectPath), cwd, await gitRoot, codexTrust);
+        }
+        out.push({
+          agent: target.agent,
+          home: target.home,
+          scope,
+          ...(projectPath ? { projectPath } : {}),
+          name: candidate.name,
+          reason,
+          ...(target.allHomes ? { allHomes: true as const } : {}),
+          ...(loadedByHomes !== undefined ? { loadedByHomes } : {})
+        });
       }
     }
     return out;
@@ -370,7 +407,60 @@ export class DaemonMcpDetector {
     return dirs;
   }
 
-  private async targets(dirs: readonly string[] | undefined): Promise<ScanTarget[]> {
+  /** The trust table of every Codex home (system and managed accounts); an unreadable one trusts nothing. */
+  private async codexTrust(): Promise<CodexTrust> {
+    let accounts: { id: string; home: string }[] = [];
+    try {
+      accounts = await this.sources.accountHomes("codex");
+    } catch {
+      accounts = [];
+    }
+    const homes = [{ id: "system", home: this.sources.homes.codexHome }, ...accounts];
+    const out: { home: string; levels: Map<string, string> }[] = [];
+    for (const { id, home } of homes) {
+      const levels = new Map<string, string>();
+      const text = await this.read(await realpathOr(join(home, "config.toml")));
+      let projects: unknown;
+      try {
+        projects = text === null ? undefined : parseToml(text).projects;
+      } catch {
+        projects = undefined;
+      }
+      if (isTable(projects)) {
+        for (const [dir, entry] of Object.entries(projects)) {
+          if (!isTable(entry) || typeof entry.trust_level !== "string") continue;
+          // As written, and as its real path: a key spelled through a symlink still counts (at worst
+          // a server is denied that Codex would not load — the thread fails closed, never open).
+          levels.set(dir, entry.trust_level);
+          const real = await realpathOr(dir);
+          if (!levels.has(real)) levels.set(real, entry.trust_level);
+        }
+      }
+      out.push({ home: id, levels });
+    }
+    return out;
+  }
+
+  /** The git repository `cwd` is in, as Codex finds it — searched no higher than the workspaces root. */
+  private async gitRoot(cwd: string): Promise<string | undefined> {
+    let root: string;
+    try {
+      root = await realpath(this.sources.workspacesRoot());
+    } catch {
+      return undefined;
+    }
+    for (let dir = cwd; dir.startsWith(`${root}${sep}`); dir = dirname(dir)) {
+      try {
+        await lstat(join(dir, ".git"));
+        return dir;
+      } catch {
+        // Not here: one level up.
+      }
+    }
+    return undefined;
+  }
+
+  private async targets(dirs: readonly string[] | undefined, cwd: string | undefined): Promise<ScanTarget[]> {
     const { homes } = this.sources;
     const targets: ScanTarget[] = [];
     const local = dirs ? { only: new Set(dirs) } : {};
@@ -413,7 +503,8 @@ export class DaemonMcpDetector {
     for (const project of projects) {
       const base = { home: "system", scope: "project" as const, projectPath: project };
       targets.push({ ...base, agent: "claude", path: join(project, ".mcp.json"), shape: "mcp-json" });
-      targets.push({ ...base, agent: "codex", path: join(project, ".codex", "config.toml"), shape: "toml" });
+      // A project root read on its own (no chat cwd) is its own cwd.
+      targets.push({ ...base, agent: "codex", path: join(project, ".codex", "config.toml"), shape: "toml", codexCwd: cwd ?? project });
       targets.push({ ...base, agent: "grok", path: join(project, ".grok", "config.toml"), shape: "toml" });
       for (const name of OPENCODE_PROJECT_FILES) targets.push({ ...base, agent: "opencode", path: join(project, name), shape: "opencode" });
     }
@@ -463,6 +554,18 @@ export class DaemonMcpDetector {
       return null;
     }
   }
+}
+
+/**
+ * The Codex homes that load the project-level `.codex/config.toml` in `dir` for a chat in `cwd`
+ * (see the module header): `dir` is one of the layers Codex reads there, and that home trusts it.
+ */
+export function codexLoadingHomes(dir: string, cwd: string, gitRoot: string | undefined, trust: CodexTrust): string[] {
+  const layer = gitRoot !== undefined ? (dir === gitRoot || dir.startsWith(`${gitRoot}${sep}`)) && (cwd === dir || cwd.startsWith(`${dir}${sep}`)) : dir === cwd;
+  if (!layer) return [];
+  return trust
+    .filter(({ levels }) => (levels.get(dir) ?? (gitRoot !== undefined ? levels.get(gitRoot) : undefined)) === "trusted")
+    .map(({ home }) => home);
 }
 
 async function realpathOr(path: string): Promise<string> {

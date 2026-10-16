@@ -118,7 +118,8 @@ Replace `<URL>` with your endpoint and `<CREDENTIAL>` with the `base64(...)` val
 > config — for a chat started in a subdirectory, those of every directory from the project down to
 > it): a server whose headers carry a bearer this daemon accepts, or whose URL is this daemon's
 > `/mcp`, is denied in every Orquester chat — Claude: `disallowedTools` and `deniedMcpServers` (it
-> never connects); Codex: `mcp_servers.<name>.enabled = false` in the thread's config; Grok: a
+> never connects); Codex: `mcp_servers.<name>.enabled = false` in the thread's config (a project's
+> `.codex/config.toml` only where Codex trusts the project — it loads it nowhere else); Grok: a
 > same-named inert entry that shadows it; OpenCode: the server is disconnected and a
 > session-ruleset rule denies its tools — so a chat can never reach full trust around its cards. A
 > chat never starts without these denials: if Orquester cannot read your MCP configs when a chat's

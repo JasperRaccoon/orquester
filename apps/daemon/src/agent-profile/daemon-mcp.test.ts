@@ -13,7 +13,7 @@ import test from "node:test";
 import Fastify from "fastify";
 import type { DaemonPointingServer } from "@orquester/api";
 import type { AgentHomes } from "./adapters/types.ts";
-import { DaemonMcpDetector, listProjectDirs, pointingReason, registerDaemonMcpServersRoutes, urlReachesDaemon, type DaemonMcpIdentity } from "./daemon-mcp.ts";
+import { codexLoadingHomes, DaemonMcpDetector, listProjectDirs, pointingReason, registerDaemonMcpServersRoutes, urlReachesDaemon, type DaemonMcpIdentity } from "./daemon-mcp.ts";
 
 const BEARER = "dXNlcjokMmEkMTIkc2VjcmV0LWhhc2g="; // base64("user:$2a$12$secret-hash")
 const PORT = 47831;
@@ -258,4 +258,20 @@ test("a chat in a subdirectory: every directory from the project down to its cwd
   const ok = await get(`projectPath=${encodeURIComponent(fx.project)}&cwd=${encodeURIComponent(cwd)}`);
   assert.equal(ok.statusCode, 200);
   assert.ok((ok.json() as { servers: DaemonPointingServer[] }).servers.some((server) => server.name === "cwdOpencode"));
+});
+
+test("codexLoadingHomes: Codex's own trust rules (probed on 0.159.0)", () => {
+  const trust = (entries: Record<string, string>) => [{ home: "system", levels: new Map(Object.entries(entries)) }];
+  const P = "/w/acme/api";
+  // In a git repository: each directory from its root down to the cwd, by its own entry, else the root's.
+  assert.deepEqual(codexLoadingHomes(`${P}/sub`, `${P}/sub/deeper`, P, trust({ [P]: "trusted" })), ["system"]);
+  assert.deepEqual(codexLoadingHomes(P, `${P}/sub/deeper`, P, trust({ [`${P}/sub`]: "trusted" })), [], "an inner directory's trust is not the root's");
+  assert.deepEqual(codexLoadingHomes(`${P}/sub/deeper`, `${P}/sub/deeper`, P, trust({ [`${P}/sub`]: "trusted" })), [], "nor its children's");
+  assert.deepEqual(codexLoadingHomes(`${P}/sub`, `${P}/sub/deeper`, P, trust({ [P]: "trusted", [`${P}/sub`]: "untrusted" })), [], "an explicit untrusted wins");
+  assert.deepEqual(codexLoadingHomes(`${P}/docs`, `${P}/sub`, P, trust({ [P]: "trusted" })), [], "never a sibling of the cwd");
+  // Outside a repository: the cwd's directory alone, by its own entry.
+  assert.deepEqual(codexLoadingHomes(P, `${P}/sub`, undefined, trust({ [P]: "trusted" })), []);
+  assert.deepEqual(codexLoadingHomes(`${P}/sub`, `${P}/sub`, undefined, trust({ [`${P}/sub`]: "trusted" })), ["system"]);
+  // No entry (or an unreadable table): nothing loads it.
+  assert.deepEqual(codexLoadingHomes(P, P, P, trust({})), []);
 });

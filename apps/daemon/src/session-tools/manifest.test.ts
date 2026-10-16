@@ -116,6 +116,14 @@ test("deny: a chat in a directory inside its project — the configs from the ro
   assert.deepEqual(denyFor(thread(), servers), ["root"], "at the project root: the root's alone");
 });
 
+test("deny: a Codex project server only in a home whose Codex loads it (it trusts the project)", () => {
+  const codex = (loadedByHomes?: string[]) => server({ agent: "codex", home: "system", scope: "project", projectPath: "/w/acme/api", name: "proj", ...(loadedByHomes ? { loadedByHomes } : {}) });
+  assert.deepEqual(denyFor(thread({ agentId: "codex", home: "acct-1" }), [codex(["acct-1"])]), ["proj"]);
+  assert.deepEqual(denyFor(thread({ agentId: "codex", home: "system" }), [codex(["acct-1"])]), [], "another home's trust is not this one's");
+  assert.deepEqual(denyFor(thread({ agentId: "codex", home: "acct-1" }), [codex([])]), [], "untrusted everywhere: never denied");
+  assert.deepEqual(denyFor(thread({ agentId: "codex", home: "acct-1" }), [codex()]), ["proj"], "absent: an older detector — every home");
+});
+
 test("deny: a server every home of the agent loads (Grok's inherited ~/.claude.json, allHomes) is denied in an account home too", () => {
   const inherited = server({ agent: "grok", home: "system", name: "claude_inherited", allHomes: true });
   const ownConfig = server({ agent: "grok", home: "system", name: "grok_system_only" });
