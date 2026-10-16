@@ -36,7 +36,7 @@ import type { DaemonApi } from "../daemon-api.ts";
 import { ToolError, expectOk } from "../errors.ts";
 import { runtimeModesUpTo } from "../gate/turn-policy.ts";
 import { readOlderHistory, unavailableHint } from "../history.ts";
-import { findSession, listSessions, readThread, requireChatSession, sendCommand } from "../reads.ts";
+import { findSession, listSessions, readThread, readThreadHead, requireChatSession, sendCommand } from "../reads.ts";
 import { fitJsonBytes, jsonBytes, MAX_RESULT_BYTES, resultBytes, toSafeToolError } from "../result.ts";
 import { transcriptEntries, transcriptRange, type TranscriptResult } from "../transcript.ts";
 import { buildViewContext, chatDetail, CONTENT_OMITTED_HINT, detailWithoutContent, fitDetail, rowWithoutContent, sessionDetail, sessionView, type SessionDetail } from "../views.ts";
@@ -59,7 +59,10 @@ export const sessionIdField = z.string().min(1).describe("The session id (list_s
  * A turn is starting or running. The summary can trail the host by a beat, so the thread head just
  * read counts too — the fields the host's own `identitySwitchRefusal` reads.
  */
-function isTurnActive(s: SessionSummary, snap: ThreadSnapshotPayload): boolean {
+/** What these checks read of a thread: its head or its whole snapshot alike. */
+type ThreadState = Pick<ThreadSnapshotPayload, "head" | "goal" | "pending">;
+
+function isTurnActive(s: SessionSummary, snap: ThreadState): boolean {
   if (s.chatSessionStatus === "starting" || s.chatSessionStatus === "running" || s.latestTurn?.state === "running" || s.latestTurn?.state === "pending") return true;
   const { status, activeTurnId } = snap.head.session;
   return status === "starting" || status === "running" || activeTurnId !== null;
@@ -71,7 +74,7 @@ function isTurnActive(s: SessionSummary, snap: ThreadSnapshotPayload): boolean {
  * `/goal pause` it can still say continuing), and the host reports a goal continuing only while it is active — or while
  * an Orquester update holds it ({@link goalHeldForUpdate}).
  */
-function goalContinuing(s: SessionSummary, snap: ThreadSnapshotPayload): boolean {
+function goalContinuing(s: SessionSummary, snap: ThreadState): boolean {
   return (s.goal?.continuing === true && parseThreadGoal(snap.goal)?.status === "active") || goalHeldForUpdate(s, snap);
 }
 
@@ -80,12 +83,12 @@ function goalContinuing(s: SessionSummary, snap: ThreadSnapshotPayload): boolean
  * host itself once it has restarted. The host reports it `paused` and continuing, and the thread just read holds it
  * `paused`: the GUI's "paused for update" (`isGoalHeldForUpdate`).
  */
-function goalHeldForUpdate(s: SessionSummary, snap: ThreadSnapshotPayload): boolean {
+function goalHeldForUpdate(s: SessionSummary, snap: ThreadState): boolean {
   return s.goal?.continuing === true && s.goal.status === "paused" && parseThreadGoal(snap.goal)?.status === "paused";
 }
 
 /** The GUI's `canSwitchChatAccount` / the host's `identitySwitchRefusal`; the host stays authoritative. */
-function switchRefusal(s: SessionSummary, snap: ThreadSnapshotPayload): string | null {
+function switchRefusal(s: SessionSummary, snap: ThreadState): string | null {
   // Goals §5.7: the host refuses the switch while it holds the goal, which it will set going again by itself — and
   // then it continues, and is refused anyway: waiting never opens the switch. Any `/goal` but `status` takes the goal
   // back from the hold and leaves it paused, and a paused goal may switch (the host's `GOAL_HELD_SWITCH_REFUSAL`).
@@ -474,7 +477,7 @@ const updateSession = defineTool({
   resultKind: "json",
   async run(args, { api, caller }) {
     const summary = await requireChatSession(api, args.sessionId);
-    const snap = await readThread(api, args.sessionId);
+    const snap = await readThreadHead(api, args.sessionId);
     const current = snap.head.modelSelection;
     const wantsSelection = args.model !== undefined || args.options !== undefined;
     // Decided on the registry id first, then the thread's adapter — the GUI's `chatAccountSwitchSupported`.
@@ -778,9 +781,9 @@ async function control(ctx: CallContext, args: { sessionId: string; action: Cont
   switch (args.action) {
     case "interrupt": {
       await requireChatSession(api, args.sessionId);
-      const snap = await readThread(api, args.sessionId);
+      const { head } = await readThreadHead(api, args.sessionId);
       // Name the turn only while the session runs one — read from the same head as the turn id.
-      const { status, activeTurnId } = snap.head.session;
+      const { status, activeTurnId } = head.session;
       const turnId = status === "running" ? activeTurnId : null;
       const { seq } = await sendCommand(api, args.sessionId, "interrupt", turnId ? { turnId } : {});
       return { seq, session: await chatDetail(api, args.sessionId) };

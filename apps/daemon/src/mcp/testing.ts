@@ -1,6 +1,6 @@
 import type { Readable } from "node:stream";
 import type { EventMessage } from "@orquester/api";
-import type { HtmlRenderReference } from "@orquester/api/agent-chat";
+import { threadHeadOf, threadHeadQueryOf, type HtmlRenderReference, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
 import type {
   DaemonApi,
   DaemonMethod,
@@ -26,6 +26,9 @@ type Responder = DaemonResponse | ((call: { query?: Record<string, string>; body
  * - Answers. A responder is a canned `DaemonResponse` or a function returning one; a function that throws makes
  *   `request` reject (a transport failure). An unmatched request answers `404 {code: "NOT_FOUND"}`; it never throws.
  *   Every request, matched or not, is appended to `calls` (`query`/`body` only when given).
+ * - Thread heads. A `GET /api/sessions/:id/head` no route matches is answered as the daemon answers it against a host
+ *   without the head route: from that session's `/thread` route (its snapshot through `threadHeadOf`, any other answer
+ *   passed through) — {@link headFromThreadRead}. Only the head call is recorded in `calls`.
  * - Uploads. `uploadAttachment` reads the whole stream into `uploads`, then answers with the `onUpload` handler, else
  *   a 200 AttachmentRef (`image` for an image/* type); a source stream that errors makes it reject. InjectDaemonApi
  *   answers that case 503 HOST_UNAVAILABLE instead: `countingLimit` (agent-chat/service.ts) forwards the source's error
@@ -66,9 +69,20 @@ export class FakeDaemonApi implements DaemonApi {
     if (opts?.query) call.query = opts.query;
     if (opts?.body !== undefined) call.body = opts.body;
     this.calls.push(call);
-    const route = this.routes.find((r) => r.method === method && (r.path.endsWith("*") ? path.startsWith(r.path.slice(0, -1)) : r.path === path));
+    const route = this.find(method, path);
+    const head = method === "GET" && !route ? /^\/api\/sessions\/([^/]+)\/head$/.exec(path) : null;
+    if (head) {
+      const thread = this.find("GET", `/api/sessions/${head[1]}/thread`);
+      if (thread) return headFromThreadRead(this.answer(thread, {}), opts?.query);
+    }
     if (!route) return { status: 404, body: { code: "NOT_FOUND", message: `no fake route for ${method} ${path}` } };
-    return typeof route.responder === "function" ? route.responder({ query: opts?.query, body: opts?.body }) : route.responder;
+    return this.answer(route, { query: opts?.query, body: opts?.body });
+  }
+  private find(method: DaemonMethod, path: string): { responder: Responder } | undefined {
+    return this.routes.find((r) => r.method === method && (r.path.endsWith("*") ? path.startsWith(r.path.slice(0, -1)) : r.path === path));
+  }
+  private answer(route: { responder: Responder }, call: { query?: Record<string, string>; body?: unknown }): DaemonResponse {
+    return typeof route.responder === "function" ? route.responder(call) : route.responder;
   }
   async uploadAttachment(sessionId: string, meta: { name: string; type?: string }, bytes: Readable): Promise<{ status: number; value: unknown }> {
     const chunks: Buffer[] = [];
@@ -113,4 +127,15 @@ export class FakeDaemonApi implements DaemonApi {
 /** A bus event as the daemon publishes it. */
 export function busEvent(type: string, payload: unknown, channel = "sessions"): EventMessage {
   return { id: `${type}-${Math.random()}`, channel, type, createdAt: new Date().toISOString(), payload } as EventMessage;
+}
+
+/**
+ * A `GET …/head` answer from a `GET …/thread` one, as the daemon's proxy derives it from a host that predates the head
+ * route: a snapshot through `threadHeadOf` (with the head's query), anything else — an error, an events answer — as
+ * it came.
+ */
+export function headFromThreadRead(read: DaemonResponse, query?: Record<string, string>): DaemonResponse {
+  const body = read.body as { kind?: unknown; thread?: unknown } | null;
+  if (read.status >= 400 || body?.kind !== "snapshot") return read;
+  return { status: read.status, body: threadHeadOf(body.thread as ThreadSnapshotPayload, threadHeadQueryOf(query ?? {})) };
 }

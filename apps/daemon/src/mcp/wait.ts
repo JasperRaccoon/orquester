@@ -3,16 +3,15 @@ import {
   agentChatRoutes,
   replyNoticeText,
   SETTLED_TURN_STATES,
-  startedTurns,
   type ReplyWaitResponse,
-  type ThreadSnapshotPayload
+  type ThreadHeadResponse
 } from "@orquester/api/agent-chat";
 import { resolveChatActivity } from "../agent-chat/activity-ladder.ts";
 import type { DaemonApi } from "./daemon-api.ts";
 import { expectOk, ToolError } from "./errors.ts";
-import { listSessions, readThread } from "./reads.ts";
+import { listSessions, readThreadHead } from "./reads.ts";
 import { fitJsonBytes } from "./result.ts";
-import { lastReply } from "./views.ts";
+import { replyWithin } from "./views.ts";
 
 interface WatchState { sessions: ReadonlyMap<string, SessionSummary>; closed: ReadonlySet<string> }
 /**
@@ -294,14 +293,14 @@ function summaryBusy(s: SessionSummary): boolean {
 }
 
 /**
- * A chat's state from its summary AND its thread just read — the summary trails the host by up to
- * one poll, so either one saying busy is busy, and the thread's own open requests are the truth
- * about needs-input.
+ * A chat's state from its summary AND its thread's head just read — the summary trails the host by
+ * up to one poll, so either one saying busy is busy, and the thread's own open requests are the
+ * truth about needs-input.
  */
-export function workState(s: SessionSummary, snap: ThreadSnapshotPayload): WorkState {
-  if (snap.pending.approvals.length > 0 || snap.pending.userInputs.length > 0) return "needs-input";
-  const head = snap.head.session;
-  const last = snap.turns.at(-1);
+export function workState(s: SessionSummary, thread: ThreadHeadResponse): WorkState {
+  if (thread.pending.approvals.length > 0 || thread.pending.userInputs.length > 0) return "needs-input";
+  const head = thread.head.session;
+  const last = thread.recentTurns.at(-1);
   if (summaryBusy(s) || head.activeTurnId !== null || head.status === "running" || head.status === "starting" || (last !== undefined && !SETTLED_TURN_STATES.has(last.state))) {
     return "working";
   }
@@ -309,21 +308,17 @@ export function workState(s: SessionSummary, snap: ThreadSnapshotPayload): WorkS
   return "idle";
 }
 
-/** The report of one chat, its summary and thread already read. */
-export function workReport(s: SessionSummary, snap: ThreadSnapshotPayload): WorkReport {
-  const state = workState(s, snap);
-  const started = startedTurns(snap.turns);
-  const report: WorkReport = { sessionId: s.id, title: s.title, agent: s.refId, state, turnCount: started.length };
-  for (let i = snap.turns.length - 1; i >= 0; i -= 1) {
-    const turn = snap.turns[i]!;
-    if (turn.turnId !== null && SETTLED_TURN_STATES.has(turn.state)) {
-      const number = started.findIndex((t) => t.turnId === turn.turnId);
-      report.lastTurn = { turn: number === -1 ? started.length : number + 1, turnId: turn.turnId, state: turn.state };
-      if (turn.state === "failed" && turn.errorMessage) report.error = turn.errorMessage;
-      break;
-    }
+/** The report of one chat, its summary and thread head (read with `replyChars: WORK_REPLY_MAX_CHARS`) already read. */
+export function workReport(s: SessionSummary, thread: ThreadHeadResponse): WorkReport {
+  const state = workState(s, thread);
+  const report: WorkReport = { sessionId: s.id, title: s.title, agent: s.refId, state, turnCount: thread.startedTurnCount };
+  const settled = thread.lastSettledTurn;
+  if (settled) {
+    const turn = settled.turn;
+    report.lastTurn = { turn: settled.ordinal ?? thread.startedTurnCount, turnId: turn.turnId!, state: turn.state };
+    if (turn.state === "failed" && turn.errorMessage) report.error = turn.errorMessage;
   }
-  const reply = lastReply(snap, WORK_REPLY_MAX_CHARS);
+  const reply = replyWithin(thread.lastReply, WORK_REPLY_MAX_CHARS);
   if (reply && reply.text.trim()) {
     const fitted = fitJsonBytes(reply.text, WORK_REPLY_MAX_BYTES);
     report.reply = fitted.text;
@@ -332,17 +327,17 @@ export function workReport(s: SessionSummary, snap: ThreadSnapshotPayload): Work
     report.emptyReply = true;
     report.hint = replyNoticeText("empty", { title: s.title, sessionId: s.id });
   }
-  if (state === "failed" && snap.head.session.lastError) report.error = snap.head.session.lastError;
-  if (state === "needs-input") report.waitingOn = { approvals: snap.pending.approvals.length, questions: snap.pending.userInputs.length };
+  if (state === "failed" && thread.head.session.lastError) report.error = thread.head.session.lastError;
+  if (state === "needs-input") report.waitingOn = { approvals: thread.pending.approvals.length, questions: thread.pending.userInputs.length };
   return report;
 }
 
-/** A chat's report now; null once it is closed. */
+/** A chat's report now; null once it is closed. Reads the thread's head, never its whole snapshot. */
 export async function readWorkReport(api: DaemonApi, sessionId: string, sessions?: readonly SessionSummary[]): Promise<WorkReport | null> {
   const summary = (sessions ?? (await listSessions(api))).find((s) => s.id === sessionId);
   if (!summary) return null;
   try {
-    return workReport(summary, await readThread(api, sessionId));
+    return workReport(summary, await readThreadHead(api, sessionId, { replyChars: WORK_REPLY_MAX_CHARS }));
   } catch (error) {
     // Closed between the list and the read.
     if (error instanceof ToolError && (error.code === "THREAD_NOT_FOUND" || error.code === "NOT_FOUND")) return null;

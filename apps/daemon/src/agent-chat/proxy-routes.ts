@@ -25,15 +25,19 @@ import {
   agentChatCommandPath,
   agentChatRoutes,
   isHtmlRenderAttachmentId,
+  threadHeadOf,
+  threadHeadQueryOf,
+  threadHeadQueryParams,
   type AgentChatCommandName,
   type AgentChatErrorCode,
   type AgentChatErrorEnvelope,
   type McpAppOperation,
-  type ThreadSearchResponse
+  type ThreadSearchResponse,
+  type ThreadSnapshotPayload
 } from "@orquester/api/agent-chat";
 import { agentHostRoutes } from "../agent-host/host-protocol.ts";
 import { agentHostExtraRoutes } from "../agent-host/server/extra-routes.ts";
-import { AgentHostClient, HostUnavailableError } from "./host-client.ts";
+import { AgentHostClient, HostUnavailableError, type HostJsonResponse } from "./host-client.ts";
 import { VISUAL_PAGE_HEADERS, type VisualUrlSigner } from "./visual-urls.ts";
 
 /** Maps a §6.2 command name onto the host's route for the same command. */
@@ -57,6 +61,12 @@ export interface AgentChatRouteDeps {
   isHostHealthy(): boolean;
   /** The tab, or undefined when this id is not a chat session. */
   chatSession(id: string): SessionSummary | undefined;
+  /**
+   * The adopted host's instance id (`AgentHostHealthResponse.hostInstanceId`), null when none. Keys
+   * what this daemon learned about that host's routes (the head route's miss): a restart or a
+   * handover brings another id, and the host is asked afresh. Absent: nothing is remembered.
+   */
+  hostInstanceId?(): string | null;
   /** Remember the sequence a client has been served to (§5.2 `lastSeq`). */
   noteSeq(id: string, seq: number): void;
   /**
@@ -254,6 +264,51 @@ export function registerAgentChatRoutes(app: FastifyInstance, deps: AgentChatRou
         withQuery(agentHostRoutes.read(id), { after: request.query.after })
       );
       noteSeqFrom(deps, id, value);
+      return value;
+    }
+  );
+
+  // The thread's head (`thread-head.ts`): the daemon's per-call and per-event readers (the MCP's
+  // waits and status reads, the reply router, the delivery queue, session-tool callers) ask for
+  // this instead of a whole snapshot. A host that predates its `/head` route answers the route
+  // miss; the head is then derived here from that host's snapshot by the same `threadHeadOf`, so
+  // the answer is the same either way — and that host instance is not asked again: the decision
+  // is kept per host instance, so a handover's new host is asked afresh.
+  let headRouteMissingOn: string | null = null;
+  app.get<{ Params: { id: string }; Querystring: { replyChars?: string; turnIds?: string; messageIds?: string } }>(
+    pattern(agentChatRoutes.threadHead(":id")),
+    async (request, reply) => {
+      const { id } = request.params;
+      if (!deps.chatSession(id)) return reply.code(404).send(THREAD_NOT_FOUND);
+      if (!deps.isHostHealthy()) return reply.code(503).send(HOST_UNAVAILABLE);
+      const query = threadHeadQueryOf(request.query);
+      // Read BEFORE the request: a host replaced meanwhile leaves a stale id, never a wrong one.
+      const instance = deps.hostInstanceId?.() ?? null;
+      if (instance === null || headRouteMissingOn !== instance) {
+        let response: HostJsonResponse<unknown>;
+        try {
+          response = await deps.client.json<unknown>(
+            "GET",
+            withQuery(agentHostRoutes.head(id), threadHeadQueryParams(query))
+          );
+        } catch (error) {
+          if (!(error instanceof HostUnavailableError)) deps.logger?.error?.("agent host proxy failed on a thread head", error);
+          return reply.code(503).send(HOST_UNAVAILABLE);
+        }
+        if (!isHostRouteMiss(response)) {
+          if (response.value === null) {
+            return reply.code(502).send(chatError("HOST_UNAVAILABLE", "The agent host returned an unreadable response."));
+          }
+          if (response.status < 400) noteHeadSeq(deps, id, response.value);
+          return reply.code(response.status).send(response.value);
+        }
+        if (instance !== null) headRouteMissingOn = instance;
+      }
+      const value = await forwardJson(deps, reply, "GET", agentHostRoutes.read(id));
+      noteSeqFrom(deps, id, value);
+      if (isRecord(value) && value.kind === "snapshot" && isRecord(value.thread)) {
+        return threadHeadOf(value.thread as unknown as ThreadSnapshotPayload, query);
+      }
       return value;
     }
   );
@@ -704,6 +759,21 @@ async function forwardJson(
     deps.logger?.error?.(`agent host proxy failed on ${path}`, error);
     return reply.code(503).send(HOST_UNAVAILABLE);
   }
+}
+
+/**
+ * A host that predates a route answers its generic route miss: 404 `THREAD_NOT_FOUND` "No route
+ * for …" (`server/http-server.ts`) — never a refusal of the thread itself.
+ */
+function isHostRouteMiss(response: HostJsonResponse<unknown>): boolean {
+  if (response.status !== 404 || !isRecord(response.value) || !isRecord(response.value.error)) return false;
+  const { code, message } = response.value.error;
+  return code === "THREAD_NOT_FOUND" && typeof message === "string" && message.startsWith("No route for");
+}
+
+/** A head names the thread's sequence as a snapshot does: noted alike ({@link noteSeqFrom}). */
+function noteHeadSeq(deps: AgentChatRouteDeps, id: string, value: unknown): void {
+  if (isRecord(value) && typeof value.seq === "number") deps.noteSeq(id, value.seq);
 }
 
 /** Remember the sequence a §6.3 read served, so a reconnect resumes from it. */

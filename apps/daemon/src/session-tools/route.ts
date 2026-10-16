@@ -28,8 +28,8 @@ import type { DaemonApi } from "../mcp/daemon-api.ts";
 import { ToolError } from "../mcp/errors.ts";
 import { executeToolCall, type EnabledToolsets } from "../mcp/executor.ts";
 import { isWorkflowOwned } from "../mcp/gate/scope.ts";
-import { runningExchange, runningTurnPlans } from "../mcp/gate/turn-policy.ts";
-import { listSessions, readThread } from "../mcp/reads.ts";
+import { exchangeOfTurn } from "../mcp/gate/turn-policy.ts";
+import { listSessions, readThreadHead } from "../mcp/reads.ts";
 import { toSafeToolError } from "../mcp/result.ts";
 import type { SessionSecretRequests } from "./contract.ts";
 import { chatToolByName } from "./legacy-aliases.ts";
@@ -63,7 +63,7 @@ export interface SessionToolRouteDeps {
 }
 
 /**
- * The calling chat as the gate judges it, read NOW from its tab and its snapshot (§3.2
+ * The calling chat as the gate judges it, read NOW from its tab and its head (§3.2
  * `ToolCaller`): the project canonical when it is one, else "" (no own project — every target is
  * "other"; the contract's `projectPath`).
  */
@@ -74,7 +74,8 @@ export async function buildThreadCaller(
   callId: string,
   delivered?: Promise<boolean>
 ): Promise<ThreadCaller> {
-  const [sessions, snap] = await Promise.all([listSessions(api), readThread(api, threadId)]);
+  // The thread's head, never its whole snapshot: this runs on every session-tool call.
+  const [sessions, ownHead] = await Promise.all([listSessions(api), readThreadHead(api, threadId)]);
   const tab = sessions.find((session) => session.id === threadId);
   if (!tab) throw new ToolError("THREAD_NOT_FOUND", "This chat thread is no longer open.");
   const project = thread.projectPath ? await canonicalProject(api, thread.projectPath) : null;
@@ -88,10 +89,11 @@ export async function buildThreadCaller(
     cwd: thread.cwd,
     agentId: thread.agentId,
     callId,
-    runtimeMode: snap.head.runtimeMode,
-    planning: runningTurnPlans(snap),
+    runtimeMode: ownHead.head.runtimeMode,
+    // `runningTurnPlans` / `runningExchange` of the snapshot, as the head carries them.
+    planning: ownHead.interactionMode === "plan",
     workflowOwned: isWorkflowOwned(sessions, threadId),
-    exchange: runningExchange(snap),
+    exchange: exchangeOfTurn(ownHead.runningTurn),
     ...(delivered ? { delivered } : {})
   };
 }

@@ -32,6 +32,7 @@ import {
 } from "@orquester/api/agent-chat";
 
 import type { DaemonApi, DaemonResponse } from "../mcp/daemon-api.ts";
+import { headFromThreadRead } from "../mcp/testing.ts";
 import { LineageService } from "./lineage.ts";
 import { HISTORY_RETRY_MAX_MS, MAX_REDELIVERY_READS, ReplyError, ReplyRouter, waitResponseOf } from "./replies.ts";
 import { registerWait, waitsOn } from "./waits.ts";
@@ -88,6 +89,7 @@ function fakeHost() {
   const raceOnNextPost = new Set<string>();
   /** Full thread reads (snapshots) per session. */
   const snapshotReads = new Map<string, number>();
+  const headReads = new Map<string, number>();
   /** History pages read, and how the index behaves: `endless` never reaches turn 1. */
   let historyReads = 0;
   const historyMode = { endless: false };
@@ -147,6 +149,13 @@ function fakeHost() {
         }
         snapshotReads.set(id, (snapshotReads.get(id) ?? 0) + 1);
         return { status: 200, body: { kind: "snapshot", thread: snapshotOf(id) } };
+      }
+      const head = /^\/api\/sessions\/([^/]+)\/head$/.exec(path);
+      if (method === "GET" && head) {
+        const id = decodeURIComponent(head[1]!);
+        if (!sessions.has(id)) return { status: 404, body: null };
+        headReads.set(id, (headReads.get(id) ?? 0) + 1);
+        return headFromThreadRead({ status: 200, body: { kind: "snapshot", thread: snapshotOf(id) } }, opts?.query);
       }
       const history = /^\/api\/sessions\/([^/]+)\/history$/.exec(path);
       if (method === "GET" && history) {
@@ -265,6 +274,7 @@ function fakeHost() {
       raceOnNextPost.add(id);
     },
     snapshotReads: (id: string) => snapshotReads.get(id) ?? 0,
+    headReads: (id: string) => headReads.get(id) ?? 0,
     historyReads: () => historyReads,
     endlessHistory(): void {
       historyMode.endless = true;

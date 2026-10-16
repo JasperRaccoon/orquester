@@ -25,11 +25,12 @@ import {
   MAX_EXCHANGE_HOPS,
   nextCausedBy,
   parseCausedBy,
-  SETTLED_TURN_STATES,
+  runningTurnOf,
   type CausedBy,
   RUNTIME_MODES,
   type RuntimeMode,
-  type ThreadSnapshotPayload
+  type ThreadSnapshotPayload,
+  type Turn
 } from "@orquester/api/agent-chat";
 
 import { ToolError } from "../errors.ts";
@@ -107,24 +108,18 @@ export function openedThreadRuntimeMode(caller: TurnPolicyCaller, requested: Run
 export const NEW_SESSION = "(new)";
 
 /**
- * The turn whose `causedBy` the caller's call continues: the active turn, else the latest
- * unsettled one, else the latest — the turn `currentInteractionMode` reads.
- */
-function runningTurn(snap: ThreadSnapshotPayload): ThreadSnapshotPayload["turns"][number] | undefined {
-  const active = snap.head.session.activeTurnId;
-  return (
-    (active !== null ? snap.turns.find((candidate) => candidate.turnId === active) : undefined) ??
-    [...snap.turns].reverse().find((candidate) => !SETTLED_TURN_STATES.has(candidate.state)) ??
-    snap.turns.at(-1)
-  );
-}
-
-/**
  * The caller's exchange, server-side from its own snapshot (never from arguments): its running
- * turn's `causedBy` as `{id, hop}`, or null for a user-authored turn (or an older log without it).
+ * turn's (`runningTurnOf`: the active turn, else the latest unsettled one, else the latest — the
+ * turn `currentInteractionMode` reads) `causedBy` as `{id, hop}`, or null for a user-authored turn
+ * (or an older log without it).
  */
 export function runningExchange(snap: ThreadSnapshotPayload): { id: string; hop: number } | null {
-  const causedBy = parseCausedBy(runningTurn(snap)?.causedBy);
+  return exchangeOfTurn(runningTurnOf(snap));
+}
+
+/** {@link runningExchange} of a running turn already picked (a thread head's `runningTurn`). */
+export function exchangeOfTurn(turn: Pick<Turn, "causedBy"> | null | undefined): { id: string; hop: number } | null {
+  const causedBy = parseCausedBy(turn?.causedBy);
   return causedBy ? { id: causedBy.exchangeId, hop: causedBy.hop } : null;
 }
 

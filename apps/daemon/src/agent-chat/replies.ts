@@ -67,7 +67,11 @@ import {
   WAIT_CYCLE,
   type ReplySubscriptionResponse,
   type ReplyWaitResponse,
+  THREAD_HEAD_LOOKUP_MAX,
   THREAD_HISTORY_MAX_TURNS,
+  threadHeadQueryParams,
+  type ThreadHeadQuery,
+  type ThreadHeadResponse,
   type ThreadHistoryPage,
   type ThreadReadResponse,
   type ThreadSnapshotPayload,
@@ -86,7 +90,7 @@ import {
 
 import type { DaemonApi } from "../mcp/daemon-api.ts";
 import { ToolError } from "../mcp/errors.ts";
-import { assistantTextForTurn } from "../mcp/views.ts";
+import { assistantTextForTurn } from "@orquester/api/agent-chat";
 import { LineageError, type DeliveryListener, type LineageSessions } from "./lineage.ts";
 import { registerWait, waitCycleError, waitsOn } from "./waits.ts";
 
@@ -994,6 +998,10 @@ export class ReplyRouter implements DeliveryListener {
     if (this.isClosed(sub.toThreadId)) return { result: { kind: "closed" }, read: true };
     const api = this.api;
     if (!api) return { result: null, read: false };
+    // The head first: a bound turn still running has no result yet, and that needs no window.
+    const ahead = await this.runningBoundTurns(api, sub.toThreadId, [sub]);
+    if (ahead === "unreadable") return { result: null, read: true };
+    if (ahead !== null) return { result: null, read: true };
     let snap: ThreadSnapshotPayload;
     try {
       snap = await readThread(api, sub.toThreadId);
@@ -1191,6 +1199,26 @@ export class ReplyRouter implements DeliveryListener {
       }
       return;
     }
+    // The head first: while every posted message's turn is found still running, it decides alone —
+    // the same as the loop below decides on a snapshot holding those turns — and the window is not
+    // read. A turn that settled, or one the head cannot place, takes the whole snapshot.
+    const posted = subs.filter((sub) => sub.posted && !sub.posted.steered && (sub.state === "waiting" || sub.state === "notify"));
+    const ahead = await this.runningBoundTurns(api, targetId, posted);
+    if (ahead === "unreadable") return;
+    if (ahead !== null) {
+      let moved = false;
+      for (const sub of posted) {
+        const turn = ahead.turns.get(sub)!;
+        if (turn.turnId !== null && sub.turnId !== turn.turnId) {
+          sub.turnId = turn.turnId;
+          moved = true;
+        }
+        // The turn this message caused asks the target's user something (§8.1).
+        if (ahead.asking) this.waiters.get(sub.id)?.needsInput();
+      }
+      if (moved) await this.persist();
+      return;
+    }
     let snap: ThreadSnapshotPayload;
     try {
       snap = await readThread(api, targetId);
@@ -1268,6 +1296,42 @@ export class ReplyRouter implements DeliveryListener {
       const text = textOf(turn.userMessageId);
       return text !== undefined && hashText(text.trim()) === inputHash;
     });
+  }
+
+  /**
+   * What the target's HEAD alone says of `subs`' bound turns: each one's turn, found by its turn id
+   * or its message (the first two of {@link boundTurn}'s rules, over the whole window through the
+   * head's `matchedTurns`) and still unsettled — with whether the target asks its user something.
+   * Null when any of them settled, is not in the window, or can only be found by its text: then the
+   * whole snapshot decides. `unreadable` when the head could not be read (a snapshot read failing
+   * the same way).
+   */
+  private async runningBoundTurns(
+    api: DaemonApi,
+    targetId: string,
+    subs: readonly Sub[]
+  ): Promise<{ asking: boolean; turns: Map<Sub, Turn> } | null | "unreadable"> {
+    const turnIds = [...new Set(subs.flatMap((sub) => (sub.turnId !== undefined ? [sub.turnId] : [])))];
+    const messageIds = [...new Set(subs.flatMap((sub) => (sub.posted?.messageId !== undefined ? [sub.posted.messageId] : [])))];
+    if (subs.some((sub) => sub.turnId === undefined && sub.posted?.messageId === undefined)) return null;
+    if (turnIds.length > THREAD_HEAD_LOOKUP_MAX || messageIds.length > THREAD_HEAD_LOOKUP_MAX) return null;
+    let head: ThreadHeadResponse;
+    try {
+      head = await readThreadHead(api, targetId, { turnIds, messageIds });
+    } catch {
+      return "unreadable";
+    }
+    const matched = head.matchedTurns;
+    if (subs.length > 0 && matched === undefined) return null;
+    const turns = new Map<Sub, Turn>();
+    for (const sub of subs) {
+      const byId = sub.turnId !== undefined ? matched!.find((turn) => turn.turnId === sub.turnId) : undefined;
+      const messageId = sub.posted?.messageId;
+      const turn = byId ?? (messageId !== undefined ? matched!.find((turn) => turn.userMessageId === messageId) : undefined);
+      if (turn === undefined || SETTLED_TURN_STATES.has(turn.state)) return null;
+      turns.set(sub, turn);
+    }
+    return { asking: head.pending.approvals.length + head.pending.userInputs.length > 0, turns };
   }
 
   /**
@@ -1696,6 +1760,15 @@ export function waitResponseOf(result: ReplyResult): ReplyWaitResponse {
     ...(result.reply.length > 0 ? { reply: result.reply } : result.state === "completed" ? { emptyReply: true as const } : {}),
     ...(result.error ? { error: result.error } : {})
   };
+}
+
+/** The thread's head (`threadHeadOf`), with the turns `query` looks up. */
+async function readThreadHead(api: DaemonApi, sessionId: string, query: ThreadHeadQuery): Promise<ThreadHeadResponse> {
+  const params = threadHeadQueryParams(query);
+  const res = await api.request("GET", agentChatRoutes.threadHead(sessionId), Object.keys(params).length ? { query: params } : undefined);
+  const body = res.body as ThreadHeadResponse | null;
+  if (res.status >= 400 || body === null || typeof body !== "object" || !body.head) throw new Error("thread head unreadable");
+  return body;
 }
 
 async function readThread(api: DaemonApi, sessionId: string): Promise<ThreadSnapshotPayload> {

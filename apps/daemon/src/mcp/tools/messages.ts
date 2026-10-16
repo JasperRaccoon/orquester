@@ -21,7 +21,7 @@ import { assertInsideFsRoot, FsSandboxError } from "@orquester/config/fs";
 import { attachmentInputSchema, MAX_ATTACHMENTS, uploadInlineAttachments, type AttachmentInput } from "../attachments.ts";
 import type { DaemonApi } from "../daemon-api.ts";
 import { expectOk, ToolError } from "../errors.ts";
-import { listSessions, readThread, requireChatSession, sendCommand } from "../reads.ts";
+import { listSessions, readThread, readThreadHead, requireChatSession, sendCommand } from "../reads.ts";
 import { clipText, fitJsonBytes, MAX_ECHO_CHARS, MAX_RESULT_BYTES, resultBytes, toSafeToolError } from "../result.ts";
 import { proposedPlan } from "../transcript.ts";
 import { buildViewContext, chatDetail, fitDetail, SETTLED_TURN_STATES, type SessionDetail } from "../views.ts";
@@ -1037,7 +1037,7 @@ async function createFromChat(args: CreateArgs, ctx: CallContext, caller: Thread
     throw new ToolError("PERMISSION_DENIED", `You are planning and ${refId} has no plan mode, so it cannot be given work from here. Propose it in your plan instead.`);
   }
   const sameAgent = refId === tab.refId;
-  const current = sameAgent ? (await readThread(api, caller.threadId)).head.modelSelection : undefined;
+  const current = sameAgent ? (await readThreadHead(api, caller.threadId)).head.modelSelection : undefined;
   const model = launchModel(agent, args.model, current?.model);
   const selection = resolveModelSelection(agent, { model: model.slug, ...(args.options !== undefined ? { options: args.options } : {}), ...(current ? { current } : {}) });
   const account = launchAccount(agent, args.accountId, sameAgent && tab.accountId ? tab.accountId : undefined, resume);
