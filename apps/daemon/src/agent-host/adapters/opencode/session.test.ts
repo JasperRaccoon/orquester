@@ -4553,6 +4553,31 @@ test("session tools: a denial by disconnect alone (an overlapping name) is re-as
   harness.dispose();
 });
 
+test("session tools: a rule whose send failed is not taken as sent — the next turn start sends it again", async () => {
+  const harness = makeHarness();
+  type Rule = { permission: string; pattern: string; action: string };
+  const ruledOut = (rules: Rule[] | undefined) => (rules ?? []).some((rule) => rule.permission === "remote_*" && rule.action === "deny");
+  const instance = (disconnect: () => Response) => {
+    harness.fake.overrides.set("GET /mcp", () => json({ remote: { status: "connected" }, remote_api: { status: "connected" } }));
+    harness.fake.overrides.set("POST /mcp/remote/disconnect", disconnect);
+  };
+  instance(() => json(true));
+  const session = await startSession(harness, { isolateSessionTools: true, deniedMcpServers: ["remote"] });
+  const patches = () => harness.fake.requests.filter((request) => request.method === "PATCH" && request.path === `/session/${session.sessionId}`);
+  // The disconnect fails, and so does sending the rule: the turn fails, nothing is recorded.
+  instance(() => json({ name: "UnknownError" }, 500));
+  harness.fake.overrides.set(`PATCH /session/${session.sessionId}`, () => json({ name: "UnknownError" }, 500));
+  await assert.rejects(session.sendTurn({ threadId: "thread-1", input: "hello", attachments: [], interactionMode: "default" }));
+  assert.equal(harness.fake.find("POST", "/prompt_async"), undefined, "never run undenied");
+  // Still undisconnectable at the next turn start: the rule is sent again, and this time it lands.
+  instance(() => json({ name: "UnknownError" }, 500));
+  await session.sendTurn({ threadId: "thread-1", input: "again", attachments: [], interactionMode: "default" });
+  assert.equal(patches().length, 2);
+  assert.ok(ruledOut((patches().at(-1)?.body as { permission: Rule[] }).permission));
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
 test("session tools: a relaunch registers only after the stopped session's disconnect", async () => {
   const harness = makeHarness();
   harness.fake.overrides.set("POST /mcp", () => json({}));

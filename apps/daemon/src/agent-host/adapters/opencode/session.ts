@@ -1784,17 +1784,19 @@ export class OpenCodeThreadSession {
     const ruled = await resolveOpenCodeDenials(this.client, this.deniedServers, this.deps.ctx.logger);
     const added = ruled.filter((name) => !this.deniedRules.includes(name));
     if (added.length === 0) return;
-    this.deniedRules = [...this.deniedRules, ...added];
+    const deniedRules = [...this.deniedRules, ...added];
     await this.client.patch<unknown>(openCodeRoutes.session(this.state.openCodeSessionId), {
       timeoutMs: AGENT_HOST_DEADLINES.sessionOpenMs,
       body: {
         permission: withSessionToolRules(buildOpenCodePermissionRules(this.state.runtimeMode), {
           isolate: this.isolateSessionTools,
           ...(this.sessionTools !== undefined ? { own: this.sessionTools } : {}),
-          deny: this.deniedRules
+          deny: deniedRules
         })
       } satisfies UpdateSessionBody
     });
+    // Recorded only once OpenCode has it: a failed send is tried again at the next turn start.
+    this.deniedRules = deniedRules;
   }
 
   async sendTurn(input: SendTurnInput): Promise<SendTurnResult> {
