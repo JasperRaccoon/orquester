@@ -169,7 +169,7 @@ The `dev` scripts run against `./.stage`, a committed sandbox appdir, so experim
 | `pnpm dev` | Desktop app (Electron + in-process daemon), staged |
 | `pnpm dev:daemon` | Daemon only, `tsx watch`, staged |
 | `pnpm dev:web` | Web SPA pointed at the local daemon |
-| `pnpm build` | Builds the web SPA + desktop bundles, then re-checks that the daemon's native modules still load under Node (electron-builder rebuilds them for Electron in place; `scripts/ensure-node-native.mjs` rebuilds them back) |
+| `pnpm build` | Builds the web SPA + desktop bundles; electron-builder rebuilds `better-sqlite3`/`node-pty` for Electron in place, so `scripts/ensure-node-native.mjs` then rebuilds them back for the daemon's Node (run it by hand if a desktop build fails midway) |
 | `pnpm check` | Typecheck across the monorepo — **the pre-commit gate** |
 
 ---

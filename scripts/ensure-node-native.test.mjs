@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import { chmodSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
-import { NATIVE_MODULES, ensureNodeNative, main, probeInChild } from "./ensure-node-native.mjs";
+import { NATIVE_MODULES, detachBuildFiles, ensureNodeNative, main, probeInChild } from "./ensure-node-native.mjs";
 
 const sqlite = { name: "better-sqlite3", probe: "" };
 const pty = { name: "node-pty", probe: "" };
@@ -79,4 +82,31 @@ test("the real child probe reports load success and failure", () => {
   assert.equal(probeInChild({ name: "fs", probe: "require('node:fs');" }), null);
   const error = probeInChild({ name: "missing", probe: "require('orquester-no-such-native-module');" });
   assert.match(error ?? "", /Cannot find module/);
+});
+
+test("detachBuildFiles gives hard-linked build files their own inode, content and mode intact", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "ensure-node-native-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const store = join(root, "store-file");
+  writeFileSync(store, "node-abi-binary");
+  chmodSync(store, 0o755);
+  const pkg = join(root, "pkg");
+  mkdirSync(join(pkg, "build", "Release"), { recursive: true });
+  const binary = join(pkg, "build", "Release", "addon.node");
+  linkSync(store, binary);
+  const own = join(pkg, "build", "Release", "own.txt");
+  writeFileSync(own, "private");
+  const outside = join(pkg, "index.js");
+  linkSync(store, outside);
+
+  assert.equal(detachBuildFiles(pkg), 1, "only the linked file under build/ is copied");
+  assert.equal(statSync(binary).nlink, 1);
+  assert.notEqual(statSync(binary).ino, statSync(store).ino);
+  assert.equal(readFileSync(binary, "utf8"), "node-abi-binary");
+  assert.equal(statSync(binary).mode & 0o777, 0o755);
+  writeFileSync(binary, "electron-abi-binary");
+  assert.equal(readFileSync(store, "utf8"), "node-abi-binary", "a later in-place write no longer reaches the store");
+  assert.equal(statSync(outside).ino, statSync(store).ino, "files outside build/ stay linked");
+  assert.equal(detachBuildFiles(pkg), 0, "idempotent");
+  assert.equal(detachBuildFiles(join(root, "missing")), 0, "no build/ is fine");
 });

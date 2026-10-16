@@ -13,9 +13,18 @@
  * module is still broken. Nothing is rebuilt (and nothing touches the network)
  * when every probe passes.
  *
- * Usage: node scripts/ensure-node-native.mjs
+ * `--detach` only gives each module's build/ files their own inode, so the
+ * Electron rebuild that follows cannot write through pnpm's store hard links
+ * into other checkouts (see detachBuildFiles). apps/desktop's build:electron
+ * runs `--detach`, then electron-builder, then the guard. The packaged app
+ * keeps its Electron binaries: electron-builder copies node_modules into
+ * release/ before the guard rebuilds them here.
+ *
+ * Usage: node scripts/ensure-node-native.mjs [--detach]
  */
 import { spawnSync } from "node:child_process";
+import { copyFileSync, existsSync, lstatSync, readdirSync, renameSync } from "node:fs";
+import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -32,6 +41,39 @@ export const NATIVE_MODULES = [
   { name: "node-pty", probe: "require('node-pty');" }
 ];
 
+/** The installed package directory the daemon resolves for `name`. */
+export function packageDir(name) {
+  return dirname(createRequire(join(daemonDir, "package.json")).resolve(`${name}/package.json`));
+}
+
+/**
+ * Replace every hard-linked file under `<dir>/build` with a private copy.
+ *
+ * pnpm hard-links installed files to its global content-addressed store, and
+ * prebuild-install (better-sqlite3's installer, which electron-builder's
+ * rebuild runs) overwrites build/Release/*.node in place, through the link.
+ * Without this, a desktop build would write Electron's binary into the store
+ * and into every checkout linked to it. Returns the number of files copied.
+ */
+export function detachBuildFiles(dir) {
+  let detached = 0;
+  const walk = (current) => {
+    for (const entry of readdirSync(current, { withFileTypes: true })) {
+      const path = join(current, entry.name);
+      if (entry.isDirectory()) walk(path);
+      else if (entry.isFile() && lstatSync(path).nlink > 1) {
+        const temp = `${path}.detach-${process.pid}`;
+        copyFileSync(path, temp); // keeps the mode bits
+        renameSync(temp, path);
+        detached++;
+      }
+    }
+  };
+  const build = join(dir, "build");
+  if (existsSync(build)) walk(build);
+  return detached;
+}
+
 /** Load-and-exercise one module in a child node. Returns null or an error line. */
 export function probeInChild(mod) {
   const result = spawnSync(process.execPath, ["-e", mod.probe], {
@@ -42,8 +84,10 @@ export function probeInChild(mod) {
   if (result.status === 0) return null;
   if (result.error) return result.error.message;
   const lines = `${result.stderr ?? ""}`.split("\n").map((line) => line.trim()).filter(Boolean);
-  const errorLine = lines.find((line) => /error/i.test(line)) ?? lines[0];
-  return errorLine ?? `exited with ${result.signal ?? `code ${result.status}`}`;
+  // An ABI mismatch spreads its cause over the lines after "Error: ...".
+  const at = Math.max(0, lines.findIndex((line) => /error/i.test(line)));
+  const message = lines.slice(at, at + 4).filter((line) => !line.startsWith("at ")).join(" ");
+  return message || `exited with ${result.signal ?? `code ${result.status}`}`;
 }
 
 /** `pnpm rebuild` the named packages for the running Node. Returns true on success. */
@@ -105,5 +149,12 @@ export function main(options) {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  process.exitCode = main();
+  if (process.argv.includes("--detach")) {
+    for (const mod of NATIVE_MODULES) {
+      const count = detachBuildFiles(packageDir(mod.name));
+      if (count > 0) console.log(`${TAG} ${mod.name}: gave ${count} store-linked build file(s) their own copy`);
+    }
+  } else {
+    process.exitCode = main();
+  }
 }
