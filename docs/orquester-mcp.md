@@ -137,8 +137,10 @@ Replace `<URL>` with your endpoint and `<CREDENTIAL>` with the `base64(...)` val
 > it another name than `orquester` — `orquester_remote` (underscore): a server of yours named
 > exactly `orquester` is always denied in Claude chats and replaced by Orquester's own in Grok
 > chats; in Codex chats Orquester's own takes the name `orquester_session` instead, and yours is
-> switched off only when it points at Orquester. Avoid names starting with `orquester-` (hyphen):
-> OpenCode chats hide the per-thread servers by that prefix.
+> switched off only when it points at Orquester. Reserved spellings — avoid them for your own
+> servers: names starting with `orquester-` (hyphen: OpenCode chats hide the per-thread servers by
+> that prefix) and `orquester_session`, `orquester_session_2`, … (Codex chats' name for Orquester's
+> own server when yours is named `orquester`).
 
 ### Claude Code (CLI)
 

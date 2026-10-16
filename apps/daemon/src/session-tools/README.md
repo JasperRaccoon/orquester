@@ -386,6 +386,15 @@ session tools. See `agent-host/adapters/opencode/session-tools.ts`.
   on asking for it; a refused chat stays remembered until a push actually reached the host.
   Exception: a daemon that predates the manifest route (a handover to an older daemon) gets the
   legacy definitions, and those chats start without per-chat denials.
+- **Detection reads and containment.** Detection only READS agent configs and returns flagged
+  servers' names, reasons and directories — never a value. Every file it opens is lstat'd after
+  realpath, a regular file, at most 8 MiB. Two deliberate exceptions to realpath containment, for
+  these reads only: the all-projects scan follows ONE level of project symlinks (a project that is
+  a link to a directory is read through its link path; a workspace link is not followed), and a
+  Codex read takes `.codex/config.toml` from every ancestor of a project — its real path's and its
+  link path's — up to the filesystem root, since Codex starts at its own project root. A scoped
+  read (`?projectPath=&cwd=`) still refuses a path whose real path leaves the workspaces root
+  (`PATH_NOT_CONTAINED`). Every other file operation stays contained.
 - **Ordering across daemons.** Manifests carry `{seq, epoch}`; the host orders epochs by when it
   first saw them, so an old daemon's late push never retires the new one. An epoch the host has
   never seen counts as the newest: a host that first hears from a new daemon and only then from
@@ -404,7 +413,13 @@ session tools. See `agent-host/adapters/opencode/session-tools.ts`.
   every daemon-pointing Codex server whatever Codex's trust (`loadedByHomes` is display only), and
   reads `.codex/config.toml` in every ancestor of a chat's project up to the filesystem root (Codex
   starts at its project root — the git root, or what `project_root_markers` names). Without the
-  read, `enabled = false` is sent, and a refusal names the server and what to check. Where the
+  read, `enabled = false` is sent, and a refusal names the server and what to check. `config/read`
+  with `cwd` is in the bindings captured from 0.154.0 and on 0.159.0 (probed); Orquester sets no
+  minimum Codex version (`MINIMUM_CLI_VERSIONS.codex` is null), so an older Codex that lacks it
+  answers -32601 and fails closed: ours keeps the name `orquester`, every denial is sent as
+  `enabled = false`, and a denial Codex cannot apply fails the start with that message — never a
+  launch without it. A fork's short-lived app-server switches every server its config defines off
+  (`fork.ts`; the override is not persisted, probed), so none starts there. Where the
   config already has an `orquester` of the user's, ours is registered as `orquester_session`
   (`_2`, … while taken), the user's is denied by name only when it points at this daemon (a
   Codex `orquester` is not flagged by name alone), rows say which server is ours
