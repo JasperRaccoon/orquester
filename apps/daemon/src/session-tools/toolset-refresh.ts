@@ -77,11 +77,19 @@ export const TOOLSET_APPLY_WAIT_MS = SESSION_TOOLS_REFRESH_TIMEOUT_MS + 1_000;
 /** Chats refreshed at once after a settings change. */
 export const REFRESH_CONCURRENCY = 4;
 
-/** How long the daemon-pointing read may take before the last good list (or "unavailable") answers. */
-export const DAEMON_POINTING_READ_TIMEOUT_MS = 5_000;
+/**
+ * How long the daemon-pointing read may take before the last good list (or "unavailable") answers.
+ * With {@link MANIFEST_SESSIONS_READ_TIMEOUT_MS} it bounds a manifest well below the host's own
+ * bound on asking for it (`MANIFEST_TIMEOUT_MS`, 10 s), so the host never gives up on an answer
+ * the daemon is about to give.
+ */
+export const DAEMON_POINTING_READ_TIMEOUT_MS = 4_000;
 
 /** How long the session list read for the workflow-owned trait may take before it counts as owned. */
-export const MANIFEST_SESSIONS_READ_TIMEOUT_MS = 5_000;
+export const MANIFEST_SESSIONS_READ_TIMEOUT_MS = 3_000;
+
+/** At most this many per-chat-cwd reads are cached (the all-projects read is always kept). */
+export const MAX_POINTING_SCOPES = 32;
 
 /**
  * How long after a refused launch manifest (503) the chat's manifest is pushed to the host once a
@@ -119,7 +127,7 @@ interface PointingScope {
   cwd: string;
 }
 
-type PointingRead = { servers: readonly DaemonPointingServer[] } | { failed: string };
+type PointingRead = { servers: readonly DaemonPointingServer[] } | { failed: string } | { uncontained: true };
 
 export interface ToolsetRefreshDeps {
   /** The open chat thread, or null (closed, unknown, not a chat, no known adapter). */
@@ -197,7 +205,10 @@ export class SessionToolsRefresher {
   private readonly pointing = new Map<string, { at: number; servers: readonly DaemonPointingServer[]; stale: boolean }>();
   /** The read in flight per scope: concurrent manifests share it, and it outlives their timeouts. */
   private readonly pointingReads = new Map<string, Promise<PointingRead>>();
-  /** Chats whose launch manifest was refused (503), and since when: pushed once a read succeeds. */
+  /**
+   * Chats whose launch manifest was refused (503), and since when: pushed once a read succeeds, and
+   * kept until a push really reached the host (or {@link REFUSED_PUSH_WINDOW_MS} passed).
+   */
   private readonly refused = new Map<string, number>();
   /** The manifest sequence clock: monotonic within this daemon process. */
   private seqClock = 0;
@@ -247,7 +258,10 @@ export class SessionToolsRefresher {
    * of the detection itself that is not a 200 list — its own 404 or 400 (e.g. a `projectPath`
    * outside the workspaces root) in any envelope — is a failed read.
    */
-  async daemonPointing(scope?: PointingScope): Promise<readonly DaemonPointingServer[] | null> {
+  daemonPointing(): Promise<readonly DaemonPointingServer[] | null>;
+  /** `"uncontained"`: the detection refuses that scope for good (no per-cwd scan possible). */
+  daemonPointing(scope: PointingScope): Promise<readonly DaemonPointingServer[] | null | "uncontained">;
+  async daemonPointing(scope?: PointingScope): Promise<readonly DaemonPointingServer[] | null | "uncontained"> {
     const key = scope ? `${scope.projectPath}\u0000${scope.cwd}` : "";
     const cached = this.pointing.get(key);
     if (cached && !cached.stale && this.now() - cached.at < DAEMON_POINTING_CACHE_MS) return cached.servers;
@@ -274,6 +288,7 @@ export class SessionToolsRefresher {
       })
     ]).finally(() => clearTimeout(timer));
     if (answer === "timeout") return failed("timed out");
+    if ("uncontained" in answer) return "uncontained";
     return "failed" in answer ? failed(answer.failed) : answer.servers;
   }
 
@@ -281,6 +296,9 @@ export class SessionToolsRefresher {
   private async readPointing(api: DaemonApi, key: string, scope: PointingScope | undefined): Promise<PointingRead> {
     try {
       const res = await api.request("GET", AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, scope ? { query: { projectPath: scope.projectPath, cwd: scope.cwd } } : undefined);
+      // A chat-cwd read the detection refuses outright (its project's or cwd's real path is not
+      // inside the workspaces root): no per-cwd scan is possible — never a failure that lasts.
+      if (scope && res.status === 400) return { uncontained: true };
       let servers: DaemonPointingServer[];
       if (res.status === 404 && isFastifyRouteMiss(res.body)) servers = [];
       else {
@@ -291,7 +309,11 @@ export class SessionToolsRefresher {
             server !== null && typeof server === "object" && typeof server.name === "string" && typeof server.agent === "string" && typeof server.home === "string"
         );
       }
+      this.pointing.delete(key);
       this.pointing.set(key, { at: this.now(), servers, stale: false });
+      // Bounded: the oldest chat-cwd read goes first (the all-projects one, "", always stays).
+      const scoped = [...this.pointing.keys()].filter((entry) => entry !== "");
+      for (const old of scoped.slice(0, Math.max(0, scoped.length - MAX_POINTING_SCOPES))) this.pointing.delete(old);
       this.releaseRefused();
       return { servers };
     } catch (error) {
@@ -307,7 +329,7 @@ export class SessionToolsRefresher {
     if (this.stopped) return;
     const now = this.now();
     for (const [threadId, at] of [...this.refused]) {
-      // The entry goes when the chat's manifest is built; a push that is refused again keeps it.
+      // The entry goes once a push reached the host (`push`), or when the host stopped waiting.
       if (now - at > REFUSED_PUSH_WINDOW_MS) this.refused.delete(threadId);
       else this.pushLogged(threadId);
     }
@@ -339,17 +361,34 @@ export class SessionToolsRefresher {
     const thread = this.deps.thread(threadId);
     if (!thread) return null;
     const projectPaths = [thread.projectPath, thread.canonicalProjectPath ?? ""].filter((path) => path !== "");
-    // A chat started in a directory inside its project also loads the configs on the way down to it.
-    const cwdPaths = [thread.cwd ?? "", thread.canonicalCwd ?? ""].filter((path) => path !== "" && !projectPaths.some((root) => resolvePath(root) === resolvePath(path)));
-    const inside = thread.cwd !== undefined && cwdPaths.includes(thread.cwd) && isWithinDir(thread.cwd, thread.projectPath);
+    // A chat started in a directory inside its project also loads the configs on the way down to
+    // it — decided on REAL paths: a cwd that resolves outside its project (a symlink out) gets the
+    // project root's denials only, as one lexically outside does.
+    const realProject = thread.canonicalProjectPath || thread.projectPath;
+    const realCwd = thread.canonicalCwd || thread.cwd || "";
+    const inside =
+      thread.projectPath !== "" &&
+      thread.cwd !== undefined &&
+      realCwd !== "" &&
+      resolvePath(realCwd) !== resolvePath(realProject) &&
+      isWithinDir(realCwd, realProject);
     // Its own read holds what a CLI loads at its cwd (Codex's trust is decided for that cwd); the
     // all-projects read reads each project root as its own cwd.
-    const daemonPointing = inside ? await this.daemonPointing({ projectPath: thread.projectPath, cwd: thread.cwd! }) : await this.daemonPointing();
+    const scopedRead = inside ? await this.daemonPointing({ projectPath: thread.projectPath, cwd: thread.cwd! }) : "uncontained";
+    // The detection refuses that scope for good (the project's real path is not inside the
+    // workspaces root): the all-projects read, as before per-cwd reads — never "unavailable" forever.
+    const scanned = inside && scopedRead !== "uncontained";
+    const daemonPointing = scopedRead === "uncontained" ? await this.daemonPointing() : scopedRead;
     if (daemonPointing === null) {
       if (!this.refused.has(threadId)) this.refused.set(threadId, this.now());
       return "unavailable";
     }
-    this.refused.delete(threadId);
+    const refusedAt = this.refused.get(threadId);
+    if (refusedAt !== undefined && this.now() - refusedAt > REFUSED_PUSH_WINDOW_MS) this.refused.delete(threadId);
+    // Refused before (and maybe still waited for — the host may have given up on an earlier
+    // answer): a push follows, and only its delivery clears the chat.
+    else if (refusedAt !== undefined && purpose === "launch") this.pushLogged(threadId);
+    const cwdPaths = scanned ? [thread.cwd ?? "", thread.canonicalCwd ?? ""].filter((path) => path !== "" && !projectPaths.some((root) => resolvePath(root) === resolvePath(path))) : [];
     const api = this.deps.api();
     // The workflow-owned trait walks lineage through closed tabs (the gate's own walk): fail
     // closed — an unreadable (or unanswered, bounded) list counts as owned, so no Admin tool is
@@ -443,6 +482,8 @@ export class SessionToolsRefresher {
         handle.stamp = { seq, epoch: this.epoch };
         markStarted();
         const answer = await this.deps.pushToHost(threadId, manifest);
+        // It reached the host: a launch that waited for this chat's denials has them now.
+        if (answer !== null) this.refused.delete(threadId);
         const applied: RefreshAnswer = answer?.applied ?? "no-host";
         // A newer push decided already: this answer changes nothing.
         if (applied === "superseded" || seq < (this.advertisedSeq.get(threadId) ?? -Infinity)) return applied;

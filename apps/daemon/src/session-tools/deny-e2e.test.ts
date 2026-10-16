@@ -7,7 +7,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -193,4 +193,75 @@ test("Codex: a project-level server is denied only where that home's Codex trust
   // The panel still lists the server, saying which homes load it.
   const listed = (await app.inject({ method: "GET", url: "/api/agent-profile/daemon-mcp-servers" })).json() as { servers: Array<{ name: string; loadedByHomes?: string[] }> };
   assert.deepEqual(listed.servers.find((server) => server.name === "proj_orq")?.loadedByHomes, ["acct-t"]);
+});
+
+test("a chat whose cwd resolves outside its project, or whose project's real path is outside the workspaces root, still launches with denials", async (t) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "orq-deny-escape-")));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const homes: AgentHomes = {
+    home, claudeDir: join(home, ".claude"), claudeJson: join(home, ".claude.json"), codexHome: join(home, ".codex"),
+    grokHome: join(home, ".grok"), opencodeDir: join(home, ".config", "opencode"), agentsSkillsDir: join(home, ".agents", "skills")
+  };
+  const workspaces = join(root, "workspaces");
+  const project = join(workspaces, "acme", "api");
+  const outside = join(root, "outside");
+  await mkdir(join(outside, "ext", "sub"), { recursive: true });
+  await mkdir(project, { recursive: true });
+  const url = `http://127.0.0.1:${PORT}/mcp`;
+  await write(homes.claudeJson, JSON.stringify({ mcpServers: { user_orq: { type: "http", url } } }));
+  await write(join(project, ".mcp.json"), JSON.stringify({ mcpServers: { root_orq: { type: "http", url } } }));
+  // A cwd inside the project by name, a symlink out by its real path.
+  await symlink(outside, join(project, "link"));
+  // A project whose real path is outside the workspaces root.
+  await symlink(join(outside, "ext"), join(workspaces, "acme", "ext"));
+
+  const detector = new DaemonMcpDetector(
+    { verifyBearer: () => false, httpPort: () => PORT, publicOrigins: () => [], env: () => undefined },
+    { homes, accountHomes: async () => [], projects: () => listProjectDirs(workspaces), workspacesRoot: () => workspaces }
+  );
+  const app = Fastify();
+  registerDaemonMcpServersRoutes(app, { detector, mode: "local" });
+  await app.ready();
+  t.after(() => app.close());
+  const reads: string[] = [];
+  const api = {
+    fsRoot: root,
+    workspacesDir: workspaces,
+    async request(method: string, path: string, opts?: { query?: Record<string, string> }) {
+      const query = opts?.query ? `?${new URLSearchParams(opts.query).toString()}` : "";
+      reads.push(query);
+      const res = await app.inject({ method: method as "GET", url: `${path}${query}` });
+      return { status: res.statusCode, body: res.body ? res.json() : null };
+    }
+  } as unknown as DaemonApi;
+  const threads: Record<string, { projectPath: string; canonicalProjectPath: string; cwd: string; canonicalCwd: string }> = {
+    "symlinked-cwd": { projectPath: project, canonicalProjectPath: project, cwd: join(project, "link"), canonicalCwd: outside },
+    "uncontained-project": {
+      projectPath: join(workspaces, "acme", "ext"),
+      canonicalProjectPath: join(outside, "ext"),
+      cwd: join(workspaces, "acme", "ext", "sub"),
+      canonicalCwd: join(outside, "ext", "sub")
+    }
+  };
+  const refresher = new SessionToolsRefresher({
+    thread: (id) => (threads[id] ? { agentId: "claude", home: "system", ...threads[id]! } : null),
+    openThreads: () => Object.keys(threads),
+    resolvedToolsets: () => ["core"],
+    agentToolsEnabled: () => true,
+    catalog: () => catalogFor("chat"),
+    api: () => api,
+    pushToHost: async () => null
+  });
+  const deny = async (threadId: string): Promise<string[]> => {
+    const manifest = await refresher.manifest(threadId);
+    assert.ok(manifest !== null && manifest !== "unavailable", `${threadId}: a manifest, never "unavailable"`);
+    return [...manifest.deny];
+  };
+  // Decided on real paths: no per-cwd scan, the project root's denials.
+  assert.deepEqual(await deny("symlinked-cwd"), ["root_orq", "user_orq"]);
+  assert.ok(!reads.some((query) => query.includes("cwd=")), "never a per-cwd read for a cwd that resolves outside");
+  // The detection refuses the per-cwd read (400): the all-projects read answers instead — again and again.
+  assert.deepEqual(await deny("uncontained-project"), ["user_orq"]);
+  assert.deepEqual(await deny("uncontained-project"), ["user_orq"]);
 });

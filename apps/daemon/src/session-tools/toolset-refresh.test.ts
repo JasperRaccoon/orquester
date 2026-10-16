@@ -17,7 +17,13 @@ import { daemonRoutesForHost, type SessionToolsManifest, type SessionToolsRefres
 import { defineTool, READ_ONLY, type AnyOrquesterTool, type ThreadCaller, type ToolsetId } from "../mcp/catalog/contract.ts";
 import { chatSummary, message, snapshot, stamp, turn } from "../mcp/fixtures.ts";
 import { FakeDaemonApi } from "../mcp/testing.ts";
-import { isFastifyRouteMiss, REFRESH_CONCURRENCY, registerSessionToolsManifestRoute, SessionToolsRefresher, userMessageIds, type ToolsetRefreshDeps } from "./toolset-refresh.ts";
+import { MANIFEST_TIMEOUT_MS } from "../agent-host/session-tools/forwarder.ts";
+import {
+  DAEMON_POINTING_READ_TIMEOUT_MS,
+  MANIFEST_SESSIONS_READ_TIMEOUT_MS,
+  MAX_POINTING_SCOPES,
+  isFastifyRouteMiss,
+  REFRESH_CONCURRENCY, registerSessionToolsManifestRoute, SessionToolsRefresher, userMessageIds, type ToolsetRefreshDeps } from "./toolset-refresh.ts";
 
 const tool = (name: string, toolset: ToolsetId, tier: "read" | "admin" = "read"): AnyOrquesterTool =>
   defineTool({
@@ -579,4 +585,55 @@ test("a chat started in a directory inside its project is denied the servers con
   assert.deepEqual(manifest.deny, ["cwd_remote", "root_remote", "sub_remote"], "never a sibling directory's (Codex refuses a name its config lacks)");
   // Only its own read: what loads at ITS cwd (Codex's trust and layers are decided for it).
   assert.deepEqual(queries, [{ projectPath: "/w/acme/api", cwd: "/w/acme/api/packages/app" }]);
+});
+
+test("a refused chat stays remembered until a push actually reached the host", async () => {
+  let delivered = false;
+  const pushes: string[] = [];
+  const r = rig({
+    pushToHost: async (threadId) => {
+      pushes.push(threadId);
+      return delivered ? { applied: "unchanged" } : null;
+    }
+  });
+  /** The push in flight for a chat, run to its end (the refresher's own handle). */
+  const pushSettled = async (threadId: string) => {
+    await (r.refresher as unknown as { pushes: Map<string, { done: Promise<unknown> }> }).pushes.get(threadId)?.done;
+  };
+  r.api.on("GET", AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, { status: 500, body: {} });
+  assert.equal(await r.refresher.manifest("codex-1"), "unavailable");
+  // A read lands, but the push reaches no host (it timed out, or restarts): still remembered.
+  r.api.on("GET", AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, { status: 200, body: { servers: [] } });
+  assert.deepEqual(await r.refresher.daemonPointing(), []);
+  await pushSettled("codex-1");
+  assert.deepEqual(pushes, ["codex-1"]);
+  // The chat's own later launch manifest (one the host may have given up on) pushes again; this one lands.
+  delivered = true;
+  assert.notEqual(await r.refresher.manifest("codex-1"), "unavailable");
+  await pushSettled("codex-1");
+  assert.deepEqual(pushes, ["codex-1", "codex-1"]);
+  // Delivered: nothing more is owed to it.
+  r.refresher.invalidateDaemonPointing();
+  await r.refresher.daemonPointing();
+  await r.refresher.manifest("codex-1");
+  await pushSettled("codex-1");
+  assert.deepEqual(pushes, ["codex-1", "codex-1"]);
+});
+
+test("per-cwd reads are cached for at most MAX_POINTING_SCOPES scopes (the all-projects read always stays)", async () => {
+  const r = rig();
+  r.api.on("GET", AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, { status: 200, body: { servers: [] } });
+  await r.refresher.daemonPointing();
+  for (let i = 0; i <= MAX_POINTING_SCOPES + 5; i += 1) await r.refresher.daemonPointing({ projectPath: "/w/acme/api", cwd: `/w/acme/api/d${i}` });
+  const reads = () => r.api.calls.filter((call) => call.path === AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE).length;
+  const count = reads();
+  await r.refresher.daemonPointing();
+  await r.refresher.daemonPointing({ projectPath: "/w/acme/api", cwd: `/w/acme/api/d${MAX_POINTING_SCOPES + 5}` });
+  assert.equal(reads(), count, "the newest scopes and the all-projects read are cached");
+  await r.refresher.daemonPointing({ projectPath: "/w/acme/api", cwd: "/w/acme/api/d0" });
+  assert.equal(reads(), count + 1, "the oldest scope was evicted");
+});
+
+test("a manifest's own bounds stay below the host's bound on asking for it", () => {
+  assert.ok(DAEMON_POINTING_READ_TIMEOUT_MS + MANIFEST_SESSIONS_READ_TIMEOUT_MS + 2_000 <= MANIFEST_TIMEOUT_MS);
 });
