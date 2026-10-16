@@ -365,6 +365,11 @@ function projectMcpToolCallData(data: Record<string, unknown>): Record<string, u
   if ("kind" in data) {
     projected.kind = data.kind;
   }
+  // The adapter's word on whose server the call went to (Codex): the slim row's app decision
+  // (`mcp-app.ts`) reads it, as the full row's did.
+  if (typeof data.sessionToolsServer === "boolean") {
+    projected.sessionToolsServer = data.sessionToolsServer;
+  }
   // A session tool's name and the reference fields its UI renders from
   // (`session-tools.ts`, design 2026-10-14 §1.5), in one place for every
   // provider's result layout — and a row slimmed before keeps what it kept.

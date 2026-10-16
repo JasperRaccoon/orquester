@@ -252,6 +252,23 @@ test("a session tool's row is never an app: the ingestion's marker or a session-
   assert.deepEqual(mcpAppReferenceOfActivityPayload(codexRow(reference)), reference);
 });
 
+test("a user's own `orquester` MCP App renders where the adapter says it is not Orquester's", () => {
+  const app = { ...reference, server: "orquester", tool: "show" };
+  const row = codexRow(app, "orquester", "show");
+  // The adapter's word wins over the spelling.
+  assert.deepEqual(mcpAppReferenceOfActivityPayload({ ...row, data: { ...row.data, sessionToolsServer: false } }), app);
+  assert.equal(mcpAppReferenceOfActivityPayload({ ...row, data: { ...row.data, sessionToolsServer: true } }), undefined);
+  // An old row without it: the spelling decides, as before.
+  assert.equal(mcpAppReferenceOfActivityPayload(row), undefined);
+  // Slimming keeps the adapter's word: the slim row still renders the user's app.
+  const slim = slimActivityPayload({ ...row, data: { ...row.data, sessionToolsServer: false } }) as { data: Record<string, unknown> };
+  assert.equal(slim.data.sessionToolsServer, false);
+  assert.deepEqual(mcpAppReferenceOfActivityPayload(slim), app);
+  // Codex's alternate name for ours, said to be ours.
+  const alt = codexRow({ ...reference, server: "orquester_session", tool: "show" }, "orquester_session", "show");
+  assert.equal(mcpAppReferenceOfActivityPayload({ ...alt, data: { ...alt.data, sessionToolsServer: true } }), undefined);
+});
+
 test("the original call is read in each provider's layout", () => {
   assert.deepEqual(mcpAppToolCallOfActivityPayload(codexRow(reference)), {
     arguments: { range: "7d" },

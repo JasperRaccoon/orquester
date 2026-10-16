@@ -30,7 +30,7 @@
 
 import {
   MCP_APP_RESOURCE_SCHEME,
-  isSessionToolsServerName,
+  SESSION_TOOLS_SERVER_NAME,
   readMcpAppResourceUri,
   type McpAppCallToolResult,
   type McpAppReference,
@@ -105,7 +105,9 @@ export function grokMcpAppCallOf(notification: SessionNotification): GrokMcpAppC
   if (
     server === undefined ||
     tool === undefined ||
-    isSessionToolsServerName(server) ||
+    // Ours in a Grok chat is exactly `orquester` (its ACP entry replaces a user's same-named one,
+    // probed): any other name — `orquester_session` included — is a user's server and may be an app.
+    server === SESSION_TOOLS_SERVER_NAME ||
     !resourceUri.startsWith(MCP_APP_RESOURCE_SCHEME)
   ) {
     return null;
