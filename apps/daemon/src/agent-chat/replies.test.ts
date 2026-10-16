@@ -1808,3 +1808,27 @@ describe("final fix wave follow-up: deferred releases and closed-after-reply ans
     assert.deepEqual(waitResponseOf({ kind: "closed" }), { outcome: "closed" });
   });
 });
+
+describe("head-only re-checks (follow-up: head reads)", () => {
+  it("while the bound turn runs, the router's re-check and a wait's attach read the target's head, never its snapshot", async () => {
+    const w = await world();
+    const res = await w.router.subscribe("tgt", request("wait"));
+    const waiting = w.router.wait("tgt", res.subscriptionId, { timeoutSeconds: 60 });
+    await idle(w);
+    const snapshots = w.host.snapshotReads("tgt");
+    const heads = w.host.headReads("tgt");
+    // The summary moves (a question opens): the router looks, and the head alone decides.
+    w.host.ask("tgt");
+    assert.deepEqual(await waiting, { outcome: "notify", reason: "needs-input", willNotify: true });
+    await idle(w);
+    assert.ok(w.host.headReads("tgt") > heads, "the head was read");
+    assert.equal(w.host.snapshotReads("tgt"), snapshots, "no snapshot while the bound turn runs");
+    // Once the turn settles, its reply is read whole from the snapshot and delivered once.
+    w.host.thread("tgt").asking = false;
+    w.host.settle("tgt", { reply: "Answered." });
+    await idle(w);
+    assert.equal(w.router.deliveries().length, 1);
+    assert.ok(w.host.snapshotReads("tgt") > snapshots);
+    await w.cleanup();
+  });
+});

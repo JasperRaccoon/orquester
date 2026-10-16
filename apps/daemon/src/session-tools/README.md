@@ -26,7 +26,7 @@ provider ──► agent host ──► daemon unix socket ──► route ─�
   (`agent-host/session-tools/endpoint.ts`). Each provider session gets its own credential; the
   thread a call acts as is the credential's thread.
 - **The daemon** (`route.ts`, socket-only, agent-host bearer required) builds the caller
-  (`ToolCaller` of kind `thread`) from the thread's own tab and snapshot — title, canonical project
+  (`ToolCaller` of kind `thread`) from the thread's own tab and head (`GET …/head`, never the whole snapshot) — title, canonical project
   and workspace, permission mode, whether its running turn plans, the workflow-owned trait (owner +
   lineage walk), the exchange (`causedBy` of its running turn) — never from the arguments, and
   hands the call to the executor: strict parse of the chat schema, toolset check

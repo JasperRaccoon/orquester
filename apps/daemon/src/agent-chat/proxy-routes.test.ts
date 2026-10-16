@@ -9,11 +9,13 @@ import Fastify, { type FastifyInstance } from "fastify";
 import type { SessionSummary } from "@orquester/api";
 import {
   agentChatRoutes,
+  threadHeadOf,
   type AgentChatErrorCode,
   type ThreadHistoryPage,
   type ThreadPromptsResponse,
   type ThreadPromptTextResponse,
-  type ThreadSearchResponse
+  type ThreadSearchResponse,
+  type ThreadSnapshotPayload
 } from "@orquester/api/agent-chat";
 import { AGENT_HOST_AUTH_HEADER } from "../agent-host/host-protocol.ts";
 import { AgentHostClient } from "./host-client.ts";
@@ -923,5 +925,99 @@ test("an MCP App's request is forwarded to the host with its row, and refused be
   const down = await h.app.inject({ method: "POST", url: agentChatRoutes.mcpApp("t1", "i", "tool-info"), payload: {} });
   assert.equal(down.statusCode, 503);
   assert.equal(h.host.requests.length, before, "none of them reached the host");
+  await h.close();
+});
+
+// --- the thread's head (follow-up: head-only per-call reads) -----------------
+
+/** A snapshot an older host answers `…/thread` with: two settled turns and a reply. */
+const headSnapshot = {
+  head: {
+    id: "t1", projectPath: "/w/p", cwd: "/w/p", title: "t1", adapter: "claude", refId: "claude", accountId: "", home: "system",
+    modelSelection: { model: "m" }, runtimeMode: "auto", session: { status: "ready", activeTurnId: null }, turnCount: 2, seq: 31,
+    createdAt: "t", updatedAt: "t"
+  },
+  items: [
+    { kind: "message", id: "u1", role: "user", text: "first", turnId: "turn-1", streaming: false, createdAt: "t", updatedAt: "t" },
+    { kind: "message", id: "a2", role: "assistant", text: "The answer.", turnId: "turn-2", streaming: false, createdAt: "t", updatedAt: "t" }
+  ],
+  turns: [
+    { turnId: "turn-1", state: "completed", turnCount: 1, requestedAt: "t", startedAt: "t", completedAt: "t", assistantMessageId: null, userMessageId: "u1" },
+    { turnId: "turn-2", state: "completed", turnCount: 2, requestedAt: "t", startedAt: "t", completedAt: "t2", assistantMessageId: null }
+  ],
+  checkpoints: [],
+  pending: { approvals: [], userInputs: [] },
+  roster: [],
+  seq: 31,
+  goal: null
+} as unknown as ThreadSnapshotPayload;
+
+/** The host answers `/head` with `head` (or its route miss when `head` is null) and `/thread` with the snapshot. */
+function headHost(h: Harness, head: unknown): void {
+  h.host.handler = (req, res) => {
+    const path = (req.url ?? "").split("?")[0];
+    if (path === "/threads/t1/head") {
+      if (head === null) {
+        res.writeHead(404, json).end(JSON.stringify({ error: { code: "THREAD_NOT_FOUND", message: `No route for GET ${path}.` } }));
+      } else {
+        res.writeHead(200, json).end(JSON.stringify(head));
+      }
+      return;
+    }
+    res.writeHead(200, json).end(JSON.stringify({ kind: "snapshot", thread: headSnapshot }));
+  };
+}
+
+test("a head read is the host's own head, its query forwarded, its seq noted", async () => {
+  const h = await makeHarness({ t1: tab("t1") }, { hostInstanceId: () => "host-1" });
+  const hostHead = threadHeadOf(headSnapshot, { replyChars: 100 });
+  headHost(h, hostHead);
+  const response = await h.app.inject({ method: "GET", url: `${agentChatRoutes.threadHead("t1")}?replyChars=100&turnIds=turn-1&messageIds=u%252C1&bogus=1` });
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(response.json(), hostHead);
+  assert.equal(h.host.requests.length, 1, "no snapshot read");
+  assert.equal(h.host.requests[0].url, "/threads/t1/head?replyChars=100&turnIds=turn-1&messageIds=u%252C1");
+  assert.deepEqual(h.seqs, [["t1", 31]]);
+  await h.close();
+});
+
+test("an older host's route miss: the head is derived from its snapshot, and that host instance is not asked again", async () => {
+  let instance = "host-old";
+  const h = await makeHarness({ t1: tab("t1") }, { hostInstanceId: () => instance });
+  headHost(h, null);
+  const query = { replyChars: 5, turnIds: ["turn-1"] };
+  const url = `${agentChatRoutes.threadHead("t1")}?replyChars=5&turnIds=turn-1`;
+  const first = await h.app.inject({ method: "GET", url });
+  assert.equal(first.statusCode, 200);
+  assert.deepEqual(first.json(), threadHeadOf(headSnapshot, query), "the same head the host would serve");
+  assert.equal(first.json().lastReply.text, "The a");
+  assert.deepEqual(h.host.requests.map((r) => r.url.split("?")[0]), ["/threads/t1/head", "/threads/t1/thread"]);
+  // Remembered for this host instance: straight to the snapshot.
+  const second = await h.app.inject({ method: "GET", url });
+  assert.deepEqual(second.json(), first.json());
+  assert.deepEqual(h.host.requests.map((r) => r.url.split("?")[0]).slice(2), ["/threads/t1/thread"]);
+  // A restart or a handover brings another instance: asked afresh, and now it serves the route.
+  instance = "host-new";
+  const hostHead = threadHeadOf(headSnapshot);
+  headHost(h, hostHead);
+  const third = await h.app.inject({ method: "GET", url: agentChatRoutes.threadHead("t1") });
+  assert.deepEqual(third.json(), hostHead);
+  assert.deepEqual(h.host.requests.map((r) => r.url.split("?")[0]).slice(3), ["/threads/t1/head"]);
+  await h.close();
+});
+
+test("a head the host refuses for its own reason passes through, never falling back; an unknown tab never reaches the host", async () => {
+  const h = await makeHarness({ t1: tab("t1") }, { hostInstanceId: () => "host-1" });
+  h.host.handler = (_req, res) =>
+    res.writeHead(404, json).end(JSON.stringify({ error: { code: "THREAD_NOT_FOUND", message: "Thread 't1' was not found." } }));
+  const gone = await h.app.inject({ method: "GET", url: agentChatRoutes.threadHead("t1") });
+  assert.equal(gone.statusCode, 404);
+  assert.equal(gone.json().error.message, "Thread 't1' was not found.");
+  assert.equal(h.host.requests.length, 1);
+  const ghost = await h.app.inject({ method: "GET", url: agentChatRoutes.threadHead("ghost") });
+  assert.equal(ghost.statusCode, 404);
+  assert.equal(h.host.requests.length, 1);
+  h.healthy = false;
+  assert.equal((await h.app.inject({ method: "GET", url: agentChatRoutes.threadHead("t1") })).statusCode, 503);
   await h.close();
 });

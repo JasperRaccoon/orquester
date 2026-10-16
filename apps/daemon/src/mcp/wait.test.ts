@@ -1,8 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { busEvent,FakeDaemonApi } from "./testing.ts";
-import { chatSummary,shellSummary,stamp } from "./fixtures.ts";
-import { turnBaseline,waitForAttention,waitForTurn } from "./wait.ts";
+import { chatSummary,head,message,shellSummary,snapshot,stamp,turn } from "./fixtures.ts";
+import { turnBaseline,waitForAttention,waitForTurn,waitWhileWorking } from "./wait.ts";
 
 const now = () => Date.now();
 const running = (over = {}) => chatSummary({ chatSessionStatus: "running", activity: { state: "working", attention: null, lastOutputAt: null, needsAttentionAt: null }, latestTurn: { turnId: "t2", state: "running", startedAt: stamp(2), completedAt: null }, ...over });
@@ -229,4 +229,28 @@ test("waitForTurn: an errored session whose goal the host still reports continui
   const r = await p;
   assert.equal(r.outcome, "failed");
   assert.equal(r.summary?.goal?.continuing, false);
+});
+
+test("waitWhileWorking re-reads each chat's HEAD on every bus event, never its whole snapshot", async () => {
+  // The summary says idle (so the thread is what decides); the thread works for three reads, then replies.
+  let reads = 0;
+  const working = snapshot({ head: head({ session: { status: "running", activeTurnId: "t2" } }), turns: [turn(), turn({ turnId: "t2", state: "running", completedAt: null })] });
+  const finished = snapshot({ turns: [turn(), turn({ turnId: "t2", state: "completed", completedAt: stamp(3) })], items: [message("assistant", "All done.", { turnId: "t2" })] });
+  const api = new FakeDaemonApi()
+    .on("GET", "/api/sessions", { status: 200, body: [chatSummary()] })
+    .on("GET", "/api/sessions/c1/thread", () => {
+      reads += 1;
+      // Each "still working" read is followed by a bus event about the chat: the loop's only wake-up.
+      if (reads <= 3) setImmediate(() => api.emit(busEvent("session.updated", chatSummary())));
+      return { status: 200, body: { kind: "snapshot", thread: reads <= 3 ? working : finished } };
+    });
+  const { reports, timedOut } = await waitWhileWorking(api, ["c1"], { timeoutMs: 30_000, signal: new AbortController().signal, now });
+  assert.equal(timedOut, false);
+  const report = reports.get("c1")!;
+  assert.equal(report.state, "idle");
+  assert.equal(report.reply, "All done.");
+  assert.deepEqual(report.lastTurn, { turn: 2, turnId: "t2", state: "completed" });
+  const threadCalls = api.calls.filter((call) => call.path.startsWith("/api/sessions/c1/"));
+  assert.equal(threadCalls.length, 4);
+  assert.ok(threadCalls.every((call) => call.path === "/api/sessions/c1/head" && call.query?.replyChars === "40000"), "the head only, never /thread");
 });

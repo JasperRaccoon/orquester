@@ -34,7 +34,7 @@ import {
   agentChatRoutes,
   type ApprovalPreviewSection,
   type RuntimeMode,
-  type ThreadReadResponse,
+  type ThreadHeadResponse,
   type ToolApprovalAnswer
 } from "@orquester/api/agent-chat";
 
@@ -331,7 +331,7 @@ export function workflowOwnedFromTabs(threadId: string, tab: (id: string) => Tab
 
 /**
  * The trait reader the daemon wires: the tab (does it exist, its agent, its owner and lineage) and
- * the thread's permission mode from its snapshot, read through the daemon's own API. A failed read
+ * the thread's permission mode from its head, read through the daemon's own API. A failed read
  * leaves the mode unknown (`null`: no grant is offered or made).
  */
 export function callerTraitsFromDaemon(deps: {
@@ -345,9 +345,10 @@ export function callerTraitsFromDaemon(deps: {
     const api = deps.api();
     if (api) {
       try {
-        const res = await api.request("GET", agentChatRoutes.thread(threadId));
-        const body = res.body as ThreadReadResponse | null;
-        if (res.status === 200 && body?.kind === "snapshot") runtimeMode = body.thread.head.runtimeMode;
+        // The thread's head (`threadHeadOf`): its permission mode is all this reads.
+        const res = await api.request("GET", agentChatRoutes.threadHead(threadId));
+        const body = res.body as ThreadHeadResponse | null;
+        if (res.status === 200 && body?.head) runtimeMode = body.head.runtimeMode;
       } catch {
         runtimeMode = null;
       }

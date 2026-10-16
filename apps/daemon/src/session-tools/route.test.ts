@@ -19,13 +19,13 @@ import { agentHostAuthValue } from "../agent-host/host-protocol.ts";
 import { createDaemonForwarder } from "../agent-host/session-tools/forwarder.ts";
 import { agentChatRoutes } from "@orquester/api/agent-chat";
 import type { DaemonApi } from "../mcp/daemon-api.ts";
-import { chatSummary, head, snapshot, turn } from "../mcp/fixtures.ts";
+import { chatSummary, head, message, snapshot, turn } from "../mcp/fixtures.ts";
 import { defineTool, READ_ONLY, type AnyOrquesterTool } from "../mcp/catalog/contract.ts";
 import { toolByName } from "../mcp/catalog/index.ts";
 import { z } from "zod";
 import { FakeDaemonApi } from "../mcp/testing.ts";
 import { DAEMON_UNAVAILABLE_MESSAGE, jsonResult } from "./results.ts";
-import { registerSessionToolsRoute, type SessionToolThread } from "./route.ts";
+import { buildThreadCaller, registerSessionToolsRoute, type SessionToolThread } from "./route.ts";
 import { TEST_CHAT_TOOLS, TEST_PNG_BASE64, testChatTool } from "./testing.ts";
 import { SecretRequestRegistry } from "../agent-chat/secret-requests.ts";
 import type { AgentChatSecretRequestEventPayload } from "@orquester/api/agent-chat";
@@ -327,4 +327,32 @@ test("the caller is built from the thread's tab and snapshot: title, mode, plann
   const off = await forward({ threadId: "thread-a", callId: "c", name: "notes_only", arguments: {} }, new AbortController().signal);
   assert.equal(off.isError, true);
   assert.match(textOf(off), /^TOOL_NOT_ENABLED: .*request_toolset/);
+});
+
+test("a session-tool call builds its caller from the thread's HEAD, never its snapshot", async () => {
+  // A running default-mode turn a steer switched to plan, caused by another chat's exchange at hop 2.
+  const running = turn({ turnId: "t2", state: "running", completedAt: null, interactionMode: "default", causedBy: { threadId: "other", exchangeId: "ex-1", hop: 2 } });
+  const api = new FakeDaemonApi()
+    .on("GET", "/api/sessions", { status: 200, body: [chatSummary({ id: "thread-a", projectPath: PROJECT, cwd: join(PROJECT, "sub") })] })
+    .on("GET", agentChatRoutes.thread("thread-a"), {
+      status: 200,
+      body: {
+        kind: "snapshot",
+        thread: snapshot({
+          head: head({ id: "thread-a", runtimeMode: "auto-accept-edits", session: { status: "running", activeTurnId: "t2" } }),
+          turns: [turn(), running],
+          items: [message("user", "plan it instead", { turnId: "t2", interactionMode: "plan" })]
+        })
+      }
+    });
+  api.fsRoot = ROOT;
+  api.workspacesDir = WS;
+  const caller = await buildThreadCaller(api, "thread-a", THREADS["thread-a"]!, "call-1");
+  assert.equal(caller.runtimeMode, "auto-accept-edits");
+  assert.equal(caller.planning, true);
+  assert.deepEqual(caller.exchange, { id: "ex-1", hop: 2 });
+  assert.deepEqual(
+    api.calls.filter((call) => call.path.startsWith("/api/sessions/thread-a/")).map((call) => call.path),
+    [agentChatRoutes.threadHead("thread-a")]
+  );
 });

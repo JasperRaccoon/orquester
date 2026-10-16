@@ -14,12 +14,16 @@ import Database from "better-sqlite3";
 import {
   isDeadlineRefusal,
   isThreadGoneStreamError,
+  threadHeadOf,
+  threadHeadQueryParams,
   type AgentChatStreamErrorLine,
   type AgentChatStreamFrame,
   type RuntimeEvent,
+  type ThreadHeadResponse,
   type ThreadPromptsResponse,
   type ThreadPromptTextResponse,
-  type ThreadSearchResponse
+  type ThreadSearchResponse,
+  type ThreadSnapshotPayload
 } from "@orquester/api/agent-chat";
 
 import {
@@ -1396,6 +1400,37 @@ describe("agent host server — thread lineage's fork route (spec 2026-10-14 §6
     assert.equal(result.head.id, "fork-child-3");
     assert.equal(result.lineage.parentThreadId, parentId);
     assert.equal(result.strategy, "empty");
+    await h.stop();
+  });
+});
+
+describe("agent host server — the thread's head (follow-up: head reads)", () => {
+  it("answers the head the daemon would derive from the snapshot at the same seq, with its reply and lookups", async () => {
+    const h = await harness();
+    const threadId = await h.host.createThread();
+    await h.call("POST", agentHostRoutes.turn(threadId), { commandId: "c-head-1", input: "hello" });
+    await h.host.settle();
+    const read = await h.call("GET", agentHostRoutes.read(threadId));
+    const snap = (read.body as { thread: ThreadSnapshotPayload }).thread;
+    const messageId = snap.turns.at(-1)?.userMessageId ?? "none";
+    const query = { replyChars: 50, turnIds: ["nope"], messageIds: [messageId] };
+    const params = new URLSearchParams(threadHeadQueryParams(query)).toString();
+    const head = await h.call("GET", `${agentHostRoutes.head(threadId)}?${params}`);
+    assert.equal(head.status, 200);
+    assert.deepEqual(head.body, JSON.parse(JSON.stringify(threadHeadOf(snap, query))));
+    const body = head.body as ThreadHeadResponse;
+    assert.equal(body.seq, snap.seq);
+    assert.equal(body.matchedTurns?.length, snap.turns.some((t) => t.userMessageId === messageId) ? 1 : 0);
+    await h.stop();
+  });
+
+  it("a thread it does not hold is its own THREAD_NOT_FOUND, never the route miss an older host answers", async () => {
+    const h = await harness();
+    const gone = await h.call("GET", agentHostRoutes.head("nope"));
+    assert.equal(gone.status, 404);
+    const error = (gone.body as { error: { code: string; message: string } }).error;
+    assert.equal(error.code, "THREAD_NOT_FOUND");
+    assert.ok(!error.message.startsWith("No route for"), error.message);
     await h.stop();
   });
 });

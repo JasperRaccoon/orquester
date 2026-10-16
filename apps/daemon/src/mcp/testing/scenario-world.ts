@@ -39,6 +39,8 @@ import {
 } from "@orquester/api";
 import {
   agentChatRoutes,
+  threadHeadOf,
+  threadHeadQueryOf,
   TOOL_APPROVAL_EVENT_TYPE,
   type AgentChatToolApprovalEventPayload,
   type CausedBy,
@@ -349,6 +351,11 @@ export class FakeHost {
       if (!t) return notFound(reply);
       if (request.query.after !== undefined) return { kind: "events", seq: t.seq, events: t.events.filter((event) => event.seq > Number(request.query.after)) };
       return { kind: "snapshot", thread: this.snapshot(request.params.id) };
+    });
+    // The head, as the daemon derives it from a snapshot (`threadHeadOf`, its fallback for a host without `/head`).
+    app.get<{ Params: { id: string }; Querystring: Record<string, string> }>(decodeURIComponent(agentChatRoutes.threadHead(":id")), async (request, reply) => {
+      if (!this.threads.get(request.params.id)) return notFound(reply);
+      return threadHeadOf(this.snapshot(request.params.id), threadHeadQueryOf(request.query));
     });
     app.post<{ Params: { id: string } }>(decodeURIComponent(agentChatRoutes.turn(":id")), async (request, reply) => {
       const id = request.params.id;

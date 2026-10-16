@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 
 import type { AgentChatToolApprovalEventPayload, RuntimeMode } from "@orquester/api/agent-chat";
+import { agentChatRoutes } from "@orquester/api/agent-chat";
 
 import { ToolApprovalRegistry, type ToolApprovalClock } from "../agent-chat/tool-approvals.ts";
 import type { ApprovalRequest } from "../mcp/catalog/contract.ts";
@@ -378,7 +379,7 @@ test("cancellation reaches the card: the call's signal and the 30-min deadline",
   assert.equal((await expiring).outcome, "timed_out");
 });
 
-test("traits from the daemon: tab presence, workflow ownership along lineage, the snapshot's mode (unknown on a failed read)", async () => {
+test("traits from the daemon: tab presence, workflow ownership along lineage, the thread head's mode (unknown on a failed read)", async () => {
   const tabs = new Map<string, { owner?: { kind: "workflow"; workflowId: string; runId: string; nodeId: string }; lineage?: { parentThreadId: string; workflowOwned?: true } }>([
     ["root", { owner: { kind: "workflow", workflowId: "w", runId: "r", nodeId: "n" } }],
     ["marked", { lineage: { parentThreadId: "closed-creator", workflowOwned: true } }],
@@ -394,10 +395,13 @@ test("traits from the daemon: tab presence, workflow ownership along lineage, th
   assert.equal(workflowOwnedFromTabs("loop-a", tab), false);
   assert.equal(workflowOwnedFromTabs("marked", tab), true, "the inheritable lineage marker survives its creator's tab closing");
   let fail = false;
+  const paths: string[] = [];
   const api = {
-    request: async () => {
+    request: async (_method: string, path: string) => {
+      paths.push(path);
       if (fail) throw new Error("down");
-      return { status: 200, body: { kind: "snapshot", thread: { head: { runtimeMode: "full-access" } } } };
+      // The thread's head (`GET …/head`): its mode is all the traits read, never the snapshot.
+      return { status: 200, body: { head: { runtimeMode: "full-access" } } };
     }
   } as unknown as DaemonApi;
   const read = callerTraitsFromDaemon({ tab, agentOf: () => "codex", api: () => api });
@@ -405,6 +409,7 @@ test("traits from the daemon: tab presence, workflow ownership along lineage, th
   assert.equal(await read("missing"), null);
   fail = true;
   assert.deepEqual(await read("child"), { runtimeMode: null, workflowOwned: true, agent: "codex" });
+  assert.deepEqual(paths, [agentChatRoutes.threadHead("free"), agentChatRoutes.threadHead("child")]);
 });
 
 test("threadInfo reports the CANONICAL project path, so a symlinked project's grants match the executor's", async (t) => {
