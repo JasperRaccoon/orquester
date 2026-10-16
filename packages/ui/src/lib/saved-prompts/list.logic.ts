@@ -20,7 +20,11 @@ export function normalizeProjectPath(path: string): string {
   return stripped.length > 0 || path.length === 0 ? stripped : path.charAt(0);
 }
 
-/** Repository identity wins over folder identity; folder-only prompts still match their original path. */
+/**
+ * A prompt belongs to its own folder, and — shared by its repository — to every checkout whose key
+ * is its key. Its own folder lists it even when its stored key no longer matches (the origin
+ * changed, or it was keyed by an older rule): the daemon's list rule, so nothing is orphaned.
+ */
 export function belongsToProject(
   prompt: Pick<SavedPrompt, "projectPath" | "repoKey">,
   projectPath: string,
@@ -28,9 +32,8 @@ export function belongsToProject(
 ): boolean {
   if (prompt.projectPath === null) return false;
   const wanted = normalizeProjectPath(projectPath);
-  return wanted.length > 0 && (prompt.repoKey
-    ? prompt.repoKey === projectRepoKey
-    : normalizeProjectPath(prompt.projectPath) === wanted);
+  return wanted.length > 0 && (normalizeProjectPath(prompt.projectPath) === wanted
+    || (!!prompt.repoKey && prompt.repoKey === projectRepoKey));
 }
 
 /** Everything the open project can use: every global prompt and the project's own. */

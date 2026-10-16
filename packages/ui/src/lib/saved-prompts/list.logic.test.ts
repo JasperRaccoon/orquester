@@ -63,7 +63,10 @@ describe("scopes", () => {
     assert.deepEqual(ids(promptsForProject(list, "", repoKey)), ["global"]);
     assert.deepEqual(ids(promptsForProject([
       prompt({ id: "old-repo", projectPath: PROJECT, repoKey: "github.com/old/site" })
-    ], PROJECT, repoKey)), [], "a reused path cannot override repository scope");
+    ], PROJECT, repoKey)), ["old-repo"], "a stale key never orphans a prompt in its own folder");
+    assert.deepEqual(ids(promptsForProject([
+      prompt({ id: "old-repo", projectPath: "/w/other/site", repoKey: "github.com/old/site" })
+    ], PROJECT, repoKey)), [], "a foreign key shares nothing with this checkout");
   });
 });
 

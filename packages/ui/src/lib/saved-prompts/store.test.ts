@@ -85,8 +85,8 @@ class FakeApi implements SavedPromptsApi {
     }
     const projectRepoKey = projectPath === null ? undefined : this.repoKeys.get(projectPath);
     const prompts = [...this.server.values()].filter(
-      (entry) => entry.projectPath === null || (entry.repoKey
-        ? entry.repoKey === projectRepoKey : entry.projectPath === projectPath)
+      (entry) => entry.projectPath === null || entry.projectPath === projectPath
+        || (!!entry.repoKey && entry.repoKey === projectRepoKey)
     );
     return Promise.resolve({ prompts, ...(projectRepoKey ? { projectRepoKey } : {}) });
   }

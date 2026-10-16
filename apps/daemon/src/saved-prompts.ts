@@ -9,6 +9,8 @@ import {
   type SavedPromptCreatedBy,
   type SavedPromptDeletedPayload,
   type SavedPromptEventType,
+  type GetSavedPromptResponse,
+  type SavedPromptListQuery,
   type SavedPromptListResponse,
   type SavedPromptWorkflowUse,
   type UpdateSavedPromptRequest,
@@ -222,16 +224,22 @@ export class SavedPromptsService {
     await this.bindRepositories();
   }
 
-  /** Global prompts plus this repository's prompts, falling back to folder scope without an origin. */
-  async list(projectPath: string | null): Promise<SavedPromptListResponse> {
+  /**
+   * Global prompts plus this repository's prompts, falling back to folder scope without an origin.
+   * A prompt is always listed in its own folder, also when its stored key no longer matches the
+   * folder's (the origin changed, or it was keyed before a key needed the repository's top level):
+   * nothing is orphaned and nothing rewritten. `readOnly`: no record is upgraded with a key on the
+   * way (no write, no event) — for a caller that only needs to look, before any approval.
+   */
+  async list(projectPath: string | null, options: { readOnly?: boolean } = {}): Promise<SavedPromptListResponse> {
     const project = projectPath === null ? null : await this.resolveProjectPath(projectPath);
     const projectRepoKey = await this.repositoryKey(project);
     // Also picks up a remote added since startup, or an old record whose
     // directory was temporarily unavailable when the library loaded.
-    if (projectRepoKey !== null) await this.bindRepositories();
+    if (projectRepoKey !== null && options.readOnly !== true) await this.bindRepositories();
     const prompts = [...this.prompts.values()].filter(
       (prompt) => prompt.projectPath === null || (project !== null && (
-        prompt.repoKey ? prompt.repoKey === projectRepoKey : prompt.projectPath === project
+        prompt.projectPath === project || (!!prompt.repoKey && prompt.repoKey === projectRepoKey)
       ))
     );
     return { prompts, ...(projectRepoKey === null ? {} : { projectRepoKey }) };
@@ -691,12 +699,12 @@ export function registerSavedPromptRoutes(app: FastifyInstance, deps: SavedPromp
   const { service } = deps;
   const uses = (): Map<string, SavedPromptWorkflowUse[]> => savedPromptWorkflowUses(deps.workflows?.() ?? [], deps.workspacesDir?.());
 
-  app.get<{ Querystring: { projectPath?: string } }>(
+  app.get<{ Querystring: SavedPromptListQuery }>(
     "/api/saved-prompts",
     async (request, reply): Promise<SavedPromptListResponse | void> => {
-      const { projectPath } = request.query;
+      const { projectPath, readOnly } = request.query;
       try {
-        const listed = await service.list(projectPath ? projectPath : null);
+        const listed = await service.list(projectPath ? projectPath : null, { readOnly: readOnly === "1" });
         const byPrompt = uses();
         return { ...listed, prompts: listed.prompts.map((prompt) => listRow(prompt, byPrompt)) };
       } catch (error) {
@@ -710,7 +718,7 @@ export function registerSavedPromptRoutes(app: FastifyInstance, deps: SavedPromp
   // a repository prompt no current checkout lists included.
   app.get<{ Params: { id: string } }>(
     "/api/saved-prompts/:id",
-    async (request, reply): Promise<SavedPrompt | void> => {
+    async (request, reply): Promise<GetSavedPromptResponse | void> => {
       const prompt = service.get(request.params.id);
       if (!prompt) {
         return savedPromptError(reply, new SavedPromptError(404, "SAVED_PROMPT_NOT_FOUND", `No saved prompt with id ${excerpt(request.params.id)}.`));

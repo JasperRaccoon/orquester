@@ -57,6 +57,7 @@ import type {
   RepoSummary,
   SavedPrompt,
   SavedPromptListResponse,
+  GetSavedPromptResponse,
   ServerInfoResponse,
   SessionSummary,
   SessionUploadRequest,
@@ -725,6 +726,11 @@ export class ApiClient {
       query: projectPath ? { projectPath } : undefined,
       signal
     });
+  }
+
+  /** One prompt by id, whatever its scope (404 `SAVED_PROMPT_NOT_FOUND`). */
+  getSavedPrompt(id: string, signal?: AbortSignal): Promise<GetSavedPromptResponse> {
+    return this.send("GET", `/api/saved-prompts/${encodeURIComponent(id)}`, { signal });
   }
 
   createSavedPrompt(req: CreateSavedPromptRequest): Promise<SavedPrompt> {

@@ -98,6 +98,11 @@ export interface SavedPromptWorkflowUse {
  */
 export interface SavedPromptListQuery {
   projectPath?: string;
+  /**
+   * `"1"`: look only — no stored record is upgraded with a repository key on the way (no write,
+   * no event). The daemon's agent tools read so before an approval.
+   */
+  readOnly?: "1";
 }
 
 export interface SavedPromptListResponse {
@@ -105,6 +110,13 @@ export interface SavedPromptListResponse {
   /** The queried project's canonical Git origin identity, when available. */
   projectRepoKey?: string;
 }
+
+/**
+ * `GET /api/saved-prompts/:id` → that prompt as a list row (with `usedByWorkflows`), whatever its
+ * scope — also a repository prompt no current checkout lists. 404 `SAVED_PROMPT_NOT_FOUND`. The
+ * lookup a workflow run renders an agent block's saved prompt with, for the workflow tools' cards.
+ */
+export type GetSavedPromptResponse = SavedPrompt;
 
 /** `POST /api/saved-prompts` → the created {@link SavedPrompt}. */
 export interface CreateSavedPromptRequest {
@@ -133,9 +145,6 @@ export interface UpdateSavedPromptRequest {
   pinned?: boolean;
 }
 
-// `GET /api/saved-prompts/:id` → that {@link SavedPrompt} (a list row, with `usedByWorkflows`),
-// whatever its scope — also a repository prompt no current checkout lists. 404
-// `SAVED_PROMPT_NOT_FOUND`. The lookup a workflow run uses, for the workflow tools' cards.
 // `DELETE /api/saved-prompts/:id` → 204.
 // `POST /api/saved-prompts/:id/used` → the updated {@link SavedPrompt}
 // (`lastUsedAt` now, `useCount` + 1): an Insert or a Send happened.

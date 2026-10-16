@@ -804,7 +804,8 @@ test("a remote added after saving shares the prompt; moving scope resets reposit
   assert.equal(events[0]?.type, "upserted", "clients hear the repository binding");
 
   await exec("git", ["-C", site, "remote", "set-url", "origin", "https://github.com/acme/other.git"]);
-  assert.deepEqual((await service.list(site)).prompts, [], "a different repository at the same path cannot inherit the prompt");
+  // Its own folder still lists it (a stale key never orphans a prompt); the key itself is not rewritten.
+  assert.deepEqual((await service.list(site)).prompts.map((p) => [p.id, p.repoKey]), [[saved.id, "github.com/acme/site"]]);
   assert.deepEqual((await service.list(clone)).prompts.map((p) => p.id), [saved.id]);
   const moved = await service.update(saved.id, { projectPath: other });
   assert.equal(moved.repoKey, "github.com/acme/other");
@@ -879,6 +880,46 @@ test("only a project that is its repository's top level has a repository key: a 
   await service.create({ title: "Sibling", body: "B", projectPath: sibling });
   assert.deepEqual((await service.list(plain)).prompts.map((prompt) => prompt.projectPath), [plain]);
   assert.equal((await service.create({ title: "R", body: "B", projectPath: site })).repoKey, "github.com/acme/site");
+});
+
+test("a stale stored key never orphans a prompt: its own folder lists it, other checkouts of the folder's repository do not, nothing is rewritten", async (t) => {
+  const s = await scratch();
+  t.after(s.cleanup);
+  const site = await s.project("acme", "site");
+  const clone = await s.project("other", "site2");
+  await repository(site, "git@github.com:acme/site.git");
+  await repository(clone, "https://github.com/acme/site.git");
+  const stale = storedRecord({ id: "stale", projectPath: site, repoKey: "github.com/acme/old-name" });
+  await writeLibrary(s, { version: 1, prompts: [stale] });
+  const service = s.service();
+  await service.load();
+  const listed = await service.list(site);
+  assert.equal(listed.projectRepoKey, "github.com/acme/site");
+  assert.deepEqual(listed.prompts.map((prompt) => prompt.id), ["stale"]);
+  assert.deepEqual((await service.list(clone)).prompts, [], "the key is not the clone's: nothing shared");
+  assert.deepEqual((await onDisk(s)).prompts, [stale], "no data rewrite");
+});
+
+test("a read-only list upgrades no record (no write, no event); a normal list then binds it", async (t) => {
+  const s = await scratch();
+  t.after(s.cleanup);
+  const late = join(s.workspacesDir, "acme", "late");
+  // Saved while the folder existed; missing at load, so the library could not key it then.
+  const legacy = storedRecord({ id: "legacy", projectPath: late });
+  await writeLibrary(s, { version: 1, prompts: [legacy] });
+  const service = s.service();
+  await service.load();
+  await s.project("acme", "late");
+  await repository(late, "git@github.com:acme/late.git");
+  const events = recordEvents(service);
+  const looked = await service.list(late, { readOnly: true });
+  assert.equal(looked.projectRepoKey, "github.com/acme/late");
+  assert.deepEqual(looked.prompts.map((prompt) => [prompt.id, prompt.repoKey]), [["legacy", undefined]]);
+  assert.deepEqual(events, []);
+  assert.deepEqual((await onDisk(s)).prompts, [legacy]);
+  await service.list(late);
+  assert.equal(service.get("legacy")?.repoKey, "github.com/acme/late");
+  assert.equal(events.length, 1);
 });
 
 test("deleting a project or a workspace takes its folder prompts along, announcing each one", async (t) => {
