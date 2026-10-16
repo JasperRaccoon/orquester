@@ -118,8 +118,9 @@ Replace `<URL>` with your endpoint and `<CREDENTIAL>` with the `base64(...)` val
 > config — for a chat started in a subdirectory, those of every directory from the project down to
 > it): a server whose headers carry a bearer this daemon accepts, or whose URL is this daemon's
 > `/mcp`, is denied in every Orquester chat — Claude: `disallowedTools` and `deniedMcpServers` (it
-> never connects); Codex: `mcp_servers.<name>.enabled = false` in the thread's config (a project's
-> `.codex/config.toml` only where Codex trusts the project — it loads it nowhere else); Grok: a
+> never connects); Codex: switched off in the thread's config (a project's `.codex/config.toml`
+> whether Codex trusts the project or not — a server it does not load gets a harmless disabled
+> stub); Grok: a
 > same-named inert entry that shadows it; OpenCode: the server is disconnected and a
 > session-ruleset rule denies its tools — so a chat can never reach full trust around its cards. A
 > chat never starts without these denials: if Orquester cannot read your MCP configs when a chat's
@@ -128,12 +129,15 @@ Replace `<URL>` with your endpoint and `<CREDENTIAL>` with the `base64(...)` val
 > with "Orquester could not check your MCP servers yet…" — send the message again in a moment;
 > if it keeps happening, the daemon's log says why the check fails. One exception: while a
 > deploy hands chats over to an older daemon that has no per-chat manifest route, chats started
-> in that window run the older catalog without per-chat denials, until the new daemon is up. The
+> in that window run the older catalog without per-chat denials, until the new daemon is up. A
+> chat whose working directory is a symlink out of its project (or whose project is a symlink out
+> of the workspaces folder) is denied every Orquester-pointing server name Orquester knows of for
+> that agent — a server of yours that merely shares such a name is switched off there too. The
 > agent-profile panel marks such a server "Disabled inside Orquester chats". Still give
 > it another name than `orquester` — `orquester_remote` (underscore): a server of yours named
 > exactly `orquester` is always denied in Claude chats and replaced by Orquester's own in Grok
-> chats; in Codex chats an HTTP one is replaced, while a command (stdio) one makes the chat fail to
-> start (Codex merges the two definitions). Avoid names starting with `orquester-` (hyphen):
+> chats; in Codex chats Orquester's own takes the name `orquester_session` instead, and yours is
+> switched off only when it points at Orquester. Avoid names starting with `orquester-` (hyphen):
 > OpenCode chats hide the per-thread servers by that prefix.
 
 ### Claude Code (CLI)

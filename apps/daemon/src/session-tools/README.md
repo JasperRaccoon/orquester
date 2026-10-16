@@ -376,8 +376,12 @@ session tools. See `agent-host/adapters/opencode/session-tools.ts`.
   lands, and another launch of the same key may read one. Still none: the session is not started;
   the turn fails with the row "Orquester could not check your MCP servers yet…" (send again; the
   daemon's log names a check that keeps failing), and the next message tries again. A chat whose
-  cwd resolves outside its project (a symlink out), or whose project's real path is outside the
-  workspaces root, gets its project root's denials (the all-projects read), never a refusal. The
+  cwd's real path leaves its project (a symlink out), or whose project's real path leaves the
+  workspaces root (the detection refuses it: 400 `PATH_NOT_CONTAINED`; any other 400 is a failed
+  read), cannot be told what its CLI loads: it is denied EVERY daemon-pointing server of its
+  agent known in any scope or home, by name, plus what its real cwd's own location configures
+  when that is inside the workspaces root — over-denying a same-named unrelated server, never a
+  refusal. The
   daemon's manifest is bounded (4 s pointing read + 3 s session list) below the host's 10 s bound
   on asking for it; a refused chat stays remembered until a push actually reached the host.
   Exception: a daemon that predates the manifest route (a handover to an older daemon) gets the
@@ -388,15 +392,25 @@ session tools. See `agent-host/adapters/opencode/session-tools.ts`.
   an old one it never saw (a host started mid-handover) takes the old one's push as newer — the
   epochs are opaque ids, and nothing else orders them. The next relaunch puts it right: a
   manifest the host ASKS for comes from the daemon its socket reaches now, so its epoch counts as
-  the newest again.
+  the newest again — only when that socket is still the one the host names when the answer
+  arrives; an answer from a socket the host moved away from meanwhile is used for that launch, its
+  stamp never recorded.
 - **Denials per provider.** Claude: `disallowedTools` `mcp__<name>` and flag-settings
-  `deniedMcpServers: [{serverName}]` — and always `orquester`. Codex: thread config
-  `mcp_servers.<name>.enabled = false` (only names its config has: a project-level server only
-  in a home whose Codex trusts that directory — `[projects."<dir>"] trust_level`, else the git
-  root's — since Codex loads nothing else and fails a thread that denies a server it did not load,
-  `DaemonPointingServer.loadedByHomes`; probed on 0.159.0); a name containing `.` cannot
-  be a dotted key, so the override is then sent as one `mcp_servers` table (merged into the config,
-  probed). Grok: a same-named ACP entry on the host's inert `/mcp/denied`. OpenCode: each denied
+  `deniedMcpServers: [{serverName}]` — and always `orquester`. Codex: denials are harmless by construction (probes below). The session reads the
+  thread's effective config first (`config/read` with its cwd: the account home and every
+  trusted project layer); a defined server gets `mcp_servers.<name>.enabled = false` (merged:
+  keeps its transport), one the config does not define a complete disabled stub `{url:
+  http://127.0.0.1:9/orquester-denied, enabled: false}` (never contacted). So the daemon denies
+  every daemon-pointing Codex server whatever Codex's trust (`loadedByHomes` is display only), and
+  reads `.codex/config.toml` in every ancestor of a chat's project up to the filesystem root (Codex
+  starts at its project root — the git root, or what `project_root_markers` names). Without the
+  read, `enabled = false` is sent, and a refusal names the server and what to check. Where the
+  config already has an `orquester` of the user's, ours is registered as `orquester_session`
+  (`_2`, … while taken), the user's is denied by name only when it points at this daemon (a
+  Codex `orquester` is not flagged by name alone), rows say which server is ours
+  (`data.sessionToolsServer`) and the instruction block names ours. A name containing `.` cannot
+  be a dotted key, so the override is then sent as one `mcp_servers` table (merged into the
+  config, probed). Grok: a same-named ACP entry on the host's inert `/mcp/denied`. OpenCode: each denied
   server is disconnected on the shared instance and gets a last ruleset rule `<name>_*` deny —
   except where that rule would also hide another server whose name extends it; there the
   disconnect alone denies it, and it is disconnected again at every turn start (the rule is added
@@ -409,11 +423,28 @@ session tools. See `agent-host/adapters/opencode/session-tools.ts`.
 - **Tool rows.** The executor attaches the `toolApproval` reference (card or grant, outcome, deny
   reason, grant scope) to every gated call's result.
 
+### Codex denial probes (fix wave A, codex-cli 0.159.0 `app-server`; scratch 0700 `CODEX_HOME`, no auth needed, no prompts, `rm -rf` after)
+
+| Thread override for server X | X not defined | X a user URL server | X a user stdio server |
+|---|---|---|---|
+| `mcp_servers.X.enabled = false` | fails: "invalid transport in `mcp_servers.X`" | disabled | disabled |
+| `{command: "false", enabled: false}` | disabled | fails: "url is not supported for stdio" | disabled |
+| `{url: <stub>, enabled: false}` | disabled | disabled | fails: "url is not supported for stdio" |
+| `{command, url: null}` / `{url, command: null}` / both | fails | fails | fails |
+
+No single form fits all three, so the session matches the form to the thread's effective config
+(`config/read {cwd}` lists every server of the home and of each trusted project layer); the
+generated configs (ours as `orquester_session` beside a user stdio `orquester`, denials of a
+defined URL server, a defined stdio one, an undefined one, `orquester` and a dotted name) started
+and showed every denied server `disabled`, other servers untouched. Codex trust: in a git repo
+each directory from the root down to the cwd loads by its own `[projects."<dir>"] trust_level`,
+else the root's (an explicit `untrusted` wins, keys match exactly); outside a repo the cwd alone.
+
 ### Probe evidence (Task 6, 2026-10-15; scratch HOME/config dirs, stub MCP servers, no prompts)
 
 | Probe | Claude Code 2.1.285 (SDK 0.3.278) | Codex 0.159.0 (`app-server`) | Grok 1.0.46 (ACP) | OpenCode 1.18.34 (`serve`) |
 |---|---|---|---|---|
 | `tools/list_changed` | re-lists at once, in-process SDK server and HTTP server alike | delivered on the session's stream, no `tools/list` follows; `config/mcpServer/reload` does not reconnect the thread's server | delivered, no `tools/list` follows | re-lists at once (the host's stateless endpoint cannot push it) |
 | Deny a user server | `disallowedTools: ["mcp__ext"]` (and `mcp__ext__*`) remove its tools from the context; `deniedMcpServers: [{serverName}]` keeps it from connecting at all | `mcp_servers.ext.enabled = false` (thread config): never contacted; for a name the config lacks `thread/start` fails "invalid transport" | overlay `disabled_mcp_servers` / `enabled = false`: ignored; `--deny MCPTool(ext__*)`: still connects; a same-named ACP entry replaces it (never contacted) | `<name>_*` deny rule (OpenCode's own `Permission.disabled`) |
-| A user server named `orquester` | RACES ours: in 2 of 6 runs its tools merged into `mcp__orquester__*`; `deniedMcpServers` stops it (3/3) | the thread entry is merged into it field by field: an HTTP one is replaced; a stdio one (`command`) fails `thread/start` ("url is not supported for stdio", fix wave A probe) | the ACP entry replaces it (2/2) | distinct name (`orquester-<16 hex>` is ours) |
+| A user server named `orquester` | RACES ours: in 2 of 6 runs its tools merged into `mcp__orquester__*`; `deniedMcpServers` stops it (3/3) | the thread entry is merged into it field by field: an HTTP one is replaced; a stdio one (`command`) fails `thread/start` ("url is not supported for stdio") — so ours takes `orquester_session` there (fix wave A: both start, `config/read {cwd}` lists theirs) | the ACP entry replaces it (2/2) | distinct name (`orquester-<16 hex>` is ours) |
 | MCP tool search | every MCP tool deferred (`isLoaded: false`), the in-process server's too | — | — | — |
