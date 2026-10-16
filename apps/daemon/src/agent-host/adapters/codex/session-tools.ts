@@ -184,6 +184,10 @@ export function codexSessionToolsContext(
   const value =
     name === SESSION_TOOLS_SERVER_NAME
       ? launch.instructions
-      : `${launch.instructions}\n\nIn this chat Orquester's MCP server is named \`${name}\`: the tools above are that server's. Your Codex config has another server named \`orquester\`, which is not Orquester's.`;
+      : `${launch.instructions}\n\nIn this chat Orquester's MCP server is named \`${name}\`: the tools above are that server's. ${
+          (launch.deny ?? []).includes(SESSION_TOOLS_SERVER_NAME)
+            ? "The Codex config also has a server named `orquester` that points at Orquester; it is switched off in this chat."
+            : "The Codex config also has a server named `orquester`: that one is the user's own, not Orquester's."
+        }`;
   return { [CODEX_SESSION_TOOLS_CONTEXT_KEY]: { kind: "application", value } };
 }

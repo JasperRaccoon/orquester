@@ -319,7 +319,7 @@ export class CodexSession {
   /** `/goal` commands waiting for {@link CodexGoalTracker.settled} (fix round 1). */
   private readonly goalSettleWaiters = new Set<() => void>();
   private readonly normaliser: CodexNormaliser;
-  /** The name our server has in this thread, once `start` read the config (none without a grant). */
+  /** The name our server has in this thread once `start` read the config; "" without a grant. */
   private sessionToolsServerName: string | undefined;
   /** The MCP servers this thread's effective config defines (`config/read`); undefined when unread. */
   private effectiveMcpServers: ReadonlySet<string> | undefined;
@@ -1498,8 +1498,8 @@ export class CodexSession {
    * The name our server takes in this thread (`session-tools.ts`): `orquester`, unless the
    * thread's effective config — the account home and every trusted project layer down to the cwd,
    * as `config/read` with the cwd answers — already has one (a user's own, which an override of
-   * the same name would be merged into). Without a grant nothing is registered, and rows are read
-   * by their spelling as before. A read that fails keeps `orquester` (logged).
+   * the same name would be merged into). Without a grant nothing of ours is registered: "" (no
+   * row is ours). A read that fails keeps `orquester` (logged).
    */
   private async resolveSessionToolsServerName(): Promise<void> {
     const deny = this.options.sessionTools?.deny ?? this.options.deniedMcpServers ?? [];
@@ -1524,6 +1524,12 @@ export class CodexSession {
         this.sessionToolsServerName = codexSessionToolsServerName(configured);
         this.normaliser.sessionToolsServerName = this.sessionToolsServerName;
       }
+    }
+    if (this.options.sessionTools === undefined) {
+      // No grant: nothing of ours is registered, so no live row is ours — a user's `orquester`
+      // (or `orquester_session`) server is never taken for Orquester's.
+      this.sessionToolsServerName = "";
+      this.normaliser.sessionToolsServerName = "";
     }
   }
 

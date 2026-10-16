@@ -348,7 +348,9 @@ describe("codex session tools — a config that has its own `orquester`", () => 
       await adapter.sendTurn({ threadId: "thread-o", input: "hello", attachments: [], interactionMode: "default" });
       await events.waitForType("turn.completed");
       const turn = server.received().find((frame) => frame.method === "turn/start")?.params as { additionalContext?: Record<string, { value: string }> };
-      assert.match(turn.additionalContext?.[CODEX_SESSION_TOOLS_CONTEXT_KEY]?.value ?? "", /named `orquester_session`/);
+      const block = turn.additionalContext?.[CODEX_SESSION_TOOLS_CONTEXT_KEY]?.value ?? "";
+      assert.match(block, /named `orquester_session`/);
+      assert.match(block, pointsAtUs ? /points at Orquester; it is switched off in this chat/ : /the user's own, not Orquester's/);
     });
   }
 
