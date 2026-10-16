@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Runs ON the VPS (delivered by ./deploy.sh via scp — never `bash -s`).
-# Routine update cycle: fetch/reset -> pnpm install -> SPA build -> chown ->
-# restart -> health. Inputs via env:
-#   SUDO       "" or "sudo" — prefix for privileged commands (git/pnpm/chown/systemctl)
+# Routine update cycle: fetch/reset -> pnpm install -> SPA build -> native-module
+# guard -> chown -> restart -> health. Inputs via env:
+#   SUDO       "" or "sudo" — prefix for privileged commands (git/pnpm/node/chown/systemctl)
 #   BRANCH     branch to deploy (default main)
 #   RESET_REF  ref to reset to (default origin/$BRANCH; rollback passes a sha)
 #   REPO_DIR   for local testing only (default /opt/orquester)
@@ -36,6 +36,14 @@ echo "[remote-update] HEAD: ${old_head:0:7} -> ${new_head:0:7}"
 # </dev/null: pnpm must never read stdin. Build runs bare: set -e catches failures.
 $SUDO env CI=1 ELECTRON_SKIP_BINARY_DOWNLOAD=1 pnpm install --frozen-lockfile </dev/null
 $SUDO env ELECTRON_SKIP_BINARY_DOWNLOAD=1 pnpm --filter @orquester/web build </dev/null
+# The daemon loads better-sqlite3 and node-pty under this host's Node: prove they
+# load (rebuilding any that don't) BEFORE the restart, so a deploy never restarts
+# into a daemon that cannot start.
+if ! $SUDO env CI=1 node scripts/ensure-node-native.mjs </dev/null; then
+  echo "[remote-update] native modules do not load under node $(node -v) — NOT restarting." >&2
+  echo "[remote-update] The running daemon keeps its current process; fix the rebuild and re-deploy." >&2
+  exit 1
+fi
 $SUDO chown -R root:root "$REPO_DIR"
 
 if ! $SUDO git diff --quiet "$drift_base" "$new_head" -- deploy/Caddyfile; then

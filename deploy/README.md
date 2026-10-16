@@ -26,6 +26,13 @@ Use the repository-root `./deploy.sh` for provisioning and deployment commands.
 `./deploy.sh provision <target>` installs the templates above onto a fresh VPS; the rest of this
 file documents what those templates are for.
 
+Native modules: the daemon loads `better-sqlite3` and `node-pty` under the host's Node. After the
+install and SPA build, `remote-update.sh` and `remote-provision.sh` run
+`scripts/ensure-node-native.mjs`, which loads each one in a child `node`, runs `pnpm rebuild` for
+any that fail (a Node upgrade, or binaries rebuilt for Electron), and fails the deploy *before* the
+service (re)starts if they still do not load. Run it by hand from the repo root the same way:
+`node scripts/ensure-node-native.mjs`.
+
 Archive previews want `p7zip-full` or `libarchive-tools` (`bsdtar`) on PATH; `provision-devtools.sh`
 installs `libarchive-tools`. Without either, archives degrade to a download card.
 
