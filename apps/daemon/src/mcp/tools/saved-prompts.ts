@@ -11,18 +11,24 @@
 // The prompt's kind is read in `scope()`, which resolves the call's tier and family on the claim
 // (`ScopeClaim.resolved`, read by `tier(args, scope)`); `approval()` reads it again and pins what it
 // showed; `run` re-reads it before writing — a prompt that became referenced meanwhile is refused
-// (`PERMISSION_DENIED`, call again) or `PREVIEW_STALE` after a card. Pinning is external-only, and
-// the daemon refuses pinning an agent-created prompt from anyone but the user.
+// (`PERMISSION_DENIED`, call again), and one whose claimed project changed, or that changed after
+// its card, is `PREVIEW_STALE`. Pinning is external-only, and the daemon refuses pinning an
+// agent-created prompt from anyone but the user.
 //
-// Project prompts are shared by every checkout of one Git repository (`repoKey`, the daemon's
-// canonical origin identity; a folder without an origin keeps a folder-only prompt). Which project
-// a call claims is the project the prompt belongs to AS ADDRESSED — never the stored `projectPath`,
-// which is only the checkout that first saved it (and may be gone): a chat's own checkout claims its
-// own project for its repository's prompts, so the user's checkouts use their shared prompts like
-// their own, and naming a sibling checkout of the same repository is the caller's own project too
-// (it lists the very same prompts). Everything else stays as the matrix says: the user's prompts are
-// Admin in every mode, a workflow-referenced one is Admin `workflows`, and a project that is not a
-// checkout of the caller's repository is cross-project.
+// Which project a prompt belongs to, for the gate: the project of its stored `projectPath` — the
+// checkout that first saved it, validated by the daemon when the prompt was created (a create
+// stamps the project it is made in: by default the chat's own). NEVER its repository key: the key
+// comes from the checkout's Git origin, which an agent can rewrite. The daemon still shares a
+// project prompt with every checkout of its repository (the right rail lists it there), but that
+// sharing never widens what the gate treats as the caller's own: a sibling checkout's prompt is
+// that sibling's (same workspace, or another), classified as §5.2 says (S13). A prompt whose first
+// checkout is no project any more cannot be classified: `unknownProjects`, a boundary card naming it
+// in every mode, never grantable. `list_saved_prompts` shows a shared prompt only as that first
+// checkout's prompts would be shown; one from another workspace reaches a chat below Full access
+// only as a count.
+//
+// Every read before an approval (scope, the card) is read-only: `?readOnly=1` lists upgrade no
+// stored record.
 
 import { basename, join } from "node:path";
 import { z } from "zod";
@@ -36,11 +42,14 @@ import {
   type ApprovalPreviewSection,
   type CreateSavedPromptRequest,
   type SavedPrompt,
+  type SavedPromptListQuery,
+  type SavedPromptListResponse,
   type UpdateSavedPromptRequest
 } from "@orquester/api";
-import { projectNamesFor, resolveProject } from "../addressing.ts";
+import { canonicalProject, projectNamesFor, resolveProject } from "../addressing.ts";
 import type { DaemonApi } from "../daemon-api.ts";
 import { daemonError, ToolError } from "../errors.ts";
+import { classifyTarget, callerProject } from "../gate/scope.ts";
 import { clipText, fitJsonBytes, MAX_ECHO_CHARS, MAX_RESULT_BYTES, resultBytes } from "../result.ts";
 import {
   closedWorld,
@@ -67,55 +76,34 @@ interface Place {
   projectPath: string | null;
   /** `ws/p`, or "" for the global prompts. */
   label: string;
-  /** The project's Git repository identity: its prompts are shared by every checkout of it. */
-  repoKey?: string;
-  /** The list read while resolving the place (one read per resolution: a later resolution reads again). */
-  prompts?: SavedPrompt[];
 }
 
 const GLOBAL: Place = { projectPath: null, label: "" };
 
-/** A project named `ws/p` as a {@link Place}, with its repository identity (read from the library's list). */
-async function projectPlace(api: DaemonApi, workspace: string, name: string): Promise<Place> {
-  const place: Place = { projectPath: join(api.workspacesDir, workspace, name), label: `${workspace}/${name}` };
-  const { prompts, projectRepoKey } = await listing(api, place);
-  return { ...place, prompts, ...(projectRepoKey ? { repoKey: projectRepoKey } : {}) };
-}
-
-/**
- * `project` resolved; a chat caller naming none means its own project (none: the global prompts).
- * A chat naming another checkout of its own project's repository gets its own project: both list
- * the same shared prompts, so the call is one in the chat's own project (see the header).
- */
+/** `project` resolved; a chat caller naming none means its own project (none: the global prompts). */
 async function placeOf(project: string | undefined, ctx: ScopeContext): Promise<Place> {
-  const caller = ctx.caller;
-  const ownNames = caller.kind === "thread" && caller.projectPath && caller.workspace ? { workspace: caller.workspace, name: basename(caller.projectPath) } : null;
-  const ownPlace = () => projectPlace(ctx.api, ownNames!.workspace, ownNames!.name);
-  if (project === undefined) return ownNames ? ownPlace() : GLOBAL;
-  const names = await resolveProject(ctx.api, project);
+  let ref: string | undefined = project;
+  if (ref === undefined && ctx.caller.kind === "thread" && ctx.caller.projectPath && ctx.caller.workspace) {
+    ref = `${ctx.caller.workspace}/${basename(ctx.caller.projectPath)}`;
+  }
+  if (ref === undefined) return GLOBAL;
+  const names = await resolveProject(ctx.api, ref);
   if (!names.workspace || !names.name) throw new ToolError("PROJECT_NOT_FOUND", "Saved prompts belong to a project inside a workspace.");
-  const place = await projectPlace(ctx.api, names.workspace, names.name);
-  if (ownNames === null || place.repoKey === undefined || (names.workspace === ownNames.workspace && names.name === ownNames.name)) return place;
-  const own = await ownPlace();
-  return own.repoKey === place.repoKey ? own : place;
+  return { projectPath: join(ctx.api.workspacesDir, names.workspace, names.name), label: `${names.workspace}/${names.name}` };
 }
 
-/** Every global prompt, plus `place`'s project prompts (the route's list rows: `createdBy`, `usedByWorkflows`), and its repository. */
-async function listing(api: DaemonApi, place: Place): Promise<{ prompts: SavedPrompt[]; projectRepoKey?: string }> {
-  const res = await api.request("GET", ROUTE, place.projectPath ? { query: { projectPath: place.projectPath } } : undefined);
+/** Every global prompt plus `place`'s (its folder's, and its repository's): the route's list rows. `readOnly`: no record upgraded on the way. */
+async function listing(api: DaemonApi, place: Place, opts: { readOnly: boolean }): Promise<SavedPromptListResponse> {
+  const query: SavedPromptListQuery = { ...(place.projectPath ? { projectPath: place.projectPath } : {}), ...(opts.readOnly ? { readOnly: "1" as const } : {}) };
+  const res = await api.request("GET", ROUTE, Object.keys(query).length > 0 ? { query: query as Record<string, string> } : undefined);
   if (res.status >= 400) throw daemonError(res);
-  const body = res.body as { prompts?: unknown; projectRepoKey?: unknown } | null;
-  const prompts = Array.isArray(body?.prompts) ? (body.prompts as SavedPrompt[]) : [];
-  return typeof body?.projectRepoKey === "string" && body.projectRepoKey ? { prompts, projectRepoKey: body.projectRepoKey } : { prompts };
+  const body = res.body as Partial<SavedPromptListResponse> | null;
+  return { prompts: Array.isArray(body?.prompts) ? body.prompts : [], ...(typeof body?.projectRepoKey === "string" && body.projectRepoKey ? { projectRepoKey: body.projectRepoKey } : {}) };
 }
 
-async function listPrompts(api: DaemonApi, place: Place): Promise<SavedPrompt[]> {
-  return place.prompts ?? (await listing(api, place)).prompts;
-}
-
-/** The prompt `id` among the global prompts and `place`'s own. */
+/** The prompt `id` among the global prompts and `place`'s (read-only: scope and the card read through it). */
 async function findPrompt(api: DaemonApi, place: Place, id: string): Promise<SavedPrompt> {
-  const prompt = (await listPrompts(api, place)).find((row) => row.id === id);
+  const prompt = (await listing(api, place, { readOnly: true })).prompts.find((row) => row.id === id);
   if (!prompt) {
     const where = place.projectPath ? `the global prompts or ${place.label}'s` : "the global prompts";
     throw new ToolError(
@@ -125,6 +113,33 @@ async function findPrompt(api: DaemonApi, place: Place, id: string): Promise<Sav
   }
   return prompt;
 }
+
+/**
+ * The project a stored prompt belongs to for the gate: none (global), its first checkout's project
+ * (canonical), or `unknown` — that path is no project any more. Never derived from `repoKey`.
+ */
+type Origin =
+  | { kind: "global" }
+  | { kind: "project"; canonical: string; workspace: string; label: string }
+  | { kind: "unknown"; path: string; label: string };
+
+async function originOf(api: DaemonApi, prompt: Pick<SavedPrompt, "projectPath">): Promise<Origin> {
+  if (prompt.projectPath === null) return { kind: "global" };
+  const names = projectNamesFor(prompt.projectPath, api.workspacesDir);
+  const label = names.workspace && names.name ? `${names.workspace}/${names.name}` : prompt.projectPath;
+  const project = await canonicalProject(api, prompt.projectPath);
+  return project ? { kind: "project", canonical: project.canonical, workspace: project.workspace, label } : { kind: "unknown", path: prompt.projectPath, label };
+}
+
+/** The projects a claim reaches for `origin` (the gate's input; also what `run` compares). */
+function claimedOf(origin: Origin): Pick<ScopeClaim, "projects" | "unknownProjects"> {
+  if (origin.kind === "project") return { projects: [origin.canonical] };
+  if (origin.kind === "unknown") return { projects: [], unknownProjects: [origin.path] };
+  return { projects: [] };
+}
+
+const sameClaim = (a: Pick<ScopeClaim, "projects" | "unknownProjects">, b: Pick<ScopeClaim, "projects" | "unknownProjects">): boolean =>
+  JSON.stringify([a.projects, a.unknownProjects ?? []]) === JSON.stringify([b.projects, b.unknownProjects ?? []]);
 
 const isAgentCreated = (prompt: SavedPrompt): boolean => prompt.createdBy?.kind === "agent";
 const workflowsOf = (prompt: SavedPrompt) => prompt.usedByWorkflows ?? [];
@@ -139,12 +154,13 @@ function editKind(prompt: SavedPrompt): { tier: Tier; family?: AdminFamily } {
 // list_saved_prompts
 // ---------------------------------------------------------------------------
 
-type PromptRow = Omit<SavedPrompt, "body" | "projectPath"> & {
+type PromptRow = Omit<SavedPrompt, "body" | "projectPath" | "createdBy"> & {
   /**
-   * `null`: global. Else the checkout that first saved it; left out for a repository prompt saved
-   * in a checkout of another workspace, for a chat below Full access (ruling S13, as for workflows).
+   * `null`: global. Else the checkout that first saved it; left out (and `createdBy` reduced to its
+   * `kind`) for a prompt first saved in another workspace, for a chat below Full access (S13).
    */
   projectPath?: string | null;
+  createdBy?: SavedPrompt["createdBy"];
   scope: "global" | "project";
   bodyChars: number;
   body?: string;
@@ -167,24 +183,45 @@ function visibleUses(prompt: SavedPrompt, caller: ScopeContext["caller"]): { use
   return { ...(shown.length > 0 ? { usedByWorkflows: shown } : {}), ...(hidden > 0 ? { usedByWorkflowsElsewhere: hidden } : {}) };
 }
 
-/** Whether `caller` may see the path of the checkout that first saved a repository prompt (ruling S13). */
-function seesOrigin(prompt: SavedPrompt, caller: ScopeContext["caller"], workspacesDir: string): boolean {
-  if (prompt.projectPath === null || !prompt.repoKey) return true;
+/**
+ * Whether `caller` may see where a prompt was first saved and who made it (ruling S13): always for
+ * external callers, Full-access chats, global prompts and the place the call claimed (the gate
+ * judged it); else only when that first checkout lies in the caller's own workspace (the stored
+ * path's workspace, as the daemon validated it at create).
+ */
+function seesOrigin(prompt: SavedPrompt, caller: ScopeContext["caller"], workspacesDir: string, place: Place): boolean {
+  if (prompt.projectPath === null || prompt.projectPath === place.projectPath) return true;
   if (caller.kind !== "thread" || caller.runtimeMode === "full-access") return true;
   const origin = projectNamesFor(prompt.projectPath, workspacesDir).workspace;
   return origin !== null && origin === caller.workspace;
 }
 
-function rowOf(prompt: SavedPrompt, includeBody: boolean, caller: ScopeContext["caller"], workspacesDir: string): PromptRow {
-  const { body, usedByWorkflows: _uses, projectPath, ...rest } = prompt;
+function rowOf(prompt: SavedPrompt, includeBody: boolean, caller: ScopeContext["caller"], workspacesDir: string, place: Place): PromptRow {
+  const { body, usedByWorkflows: _uses, projectPath, createdBy, ...rest } = prompt;
+  const sees = seesOrigin(prompt, caller, workspacesDir, place);
   return {
     ...rest,
-    ...(seesOrigin(prompt, caller, workspacesDir) ? { projectPath } : {}),
+    ...(sees ? { projectPath } : {}),
+    ...(createdBy ? { createdBy: sees ? createdBy : { kind: createdBy.kind } } : {}),
     scope: prompt.projectPath === null ? "global" : "project",
     ...visibleUses(prompt, caller),
     bodyChars: body.length,
     ...(includeBody ? { body } : {})
   };
+}
+
+/**
+ * Whether a listed row reaches the caller at all. A prompt the place lists only because its
+ * repository key matches belongs to its FIRST checkout: it is shown exactly as that project's own
+ * prompts would be — card-free in the caller's project and workspace, from another workspace (or a
+ * first checkout that is gone, which could be anywhere) only to Full access; else counted.
+ */
+async function reachesCaller(api: DaemonApi, prompt: SavedPrompt, caller: ScopeContext["caller"], place: Place, own: Awaited<ReturnType<typeof callerProject>>): Promise<boolean> {
+  if (prompt.projectPath === null || prompt.projectPath === place.projectPath) return true;
+  if (caller.kind !== "thread" || caller.runtimeMode === "full-access") return true;
+  const origin = await originOf(api, prompt);
+  if (origin.kind !== "project") return false;
+  return classifyTarget(own, { canonical: origin.canonical, workspace: origin.workspace }) !== "other-workspace";
 }
 
 function matches(prompt: SavedPrompt, query: string): boolean {
@@ -219,8 +256,8 @@ const listSavedPrompts = defineTool({
   name: "list_saved_prompts",
   title: "List saved prompts",
   description:
-    "The user's saved prompts: global plus one project's (shared by every checkout of its Git repository: repoKey). Rows: id, title, description, tags, scope, projectPath, repoKey, pinned, createdBy (absent: the user's), usedByWorkflows, bodyChars; body with includeBody.",
-  chatNote: "Default: this chat's project.",
+    "The user's saved prompts: global plus one project's (a project prompt is shared by every checkout of its Git repository: repoKey; projectPath is where it was first saved). Rows: id, title, description, tags, scope, projectPath, repoKey, pinned, createdBy (absent: the user's), usedByWorkflows, bodyChars; body with includeBody.",
+  chatNote: "Default: this chat's project. Prompts shared from another workspace's checkout are only counted (sharedElsewhere) below Full access.",
   externalNote: "Default: global only.",
   input: {
     project: z.string().min(1).optional().describe("Path or \"ws/project\"."),
@@ -237,11 +274,19 @@ const listSavedPrompts = defineTool({
   annotations: READ_ONLY,
   resultKind: "json",
   async run(args, ctx) {
-    const prompts = (await listPrompts(ctx.api, await placeOf(args.project, ctx)))
-      .filter((prompt) => args.query === undefined || matches(prompt, args.query))
-      // The project's own first, then the global ones; pinned first within each; then by title.
-      .sort((a, b) => Number(a.projectPath === null) - Number(b.projectPath === null) || Number(b.pinned) - Number(a.pinned) || a.title.localeCompare(b.title));
-    return fitRows(prompts.map((prompt) => rowOf(prompt, args.includeBody === true, ctx.caller, ctx.api.workspacesDir)));
+    const place = await placeOf(args.project, ctx);
+    const own = ctx.caller.kind === "thread" ? await callerProject(ctx.api, ctx.caller) : null;
+    const listed = (await listing(ctx.api, place, { readOnly: false })).prompts.filter((prompt) => args.query === undefined || matches(prompt, args.query));
+    const shown: SavedPrompt[] = [];
+    let elsewhere = 0;
+    for (const prompt of listed) {
+      if (await reachesCaller(ctx.api, prompt, ctx.caller, place, own)) shown.push(prompt);
+      else elsewhere += 1;
+    }
+    // The project's own first, then the global ones; pinned first within each; then by title.
+    shown.sort((a, b) => Number(a.projectPath === null) - Number(b.projectPath === null) || Number(b.pinned) - Number(a.pinned) || a.title.localeCompare(b.title));
+    const rows = fitRows(shown.map((prompt) => rowOf(prompt, args.includeBody === true, ctx.caller, ctx.api.workspacesDir, place)));
+    return elsewhere > 0 ? { ...rows, sharedElsewhere: elsewhere } : rows;
   }
 });
 
@@ -300,6 +345,13 @@ async function targetOf(args: UpdateArgs, ctx: ScopeContext): Promise<{ place: P
   return { place, prompt: await findPrompt(ctx.api, place, args.id!) };
 }
 
+/** What the call claims: a create, the project it is made in; an edit, the prompt's first checkout. */
+async function claimOf(api: DaemonApi, place: Place, prompt: SavedPrompt | null): Promise<{ claimed: Pick<ScopeClaim, "projects" | "unknownProjects">; origin: Origin | null }> {
+  if (prompt === null) return { claimed: { projects: place.projectPath ? [place.projectPath] : [] }, origin: null };
+  const origin = await originOf(api, prompt);
+  return { claimed: claimedOf(origin), origin };
+}
+
 const createdByText = (prompt: SavedPrompt): string =>
   isAgentCreated(prompt)
     ? `Created by ${agentLabel(prompt.createdBy?.agent)}${prompt.createdBy?.title ? ` in the chat "${prompt.createdBy.title}"` : ""}.`
@@ -317,21 +369,25 @@ function pinsOf(prompt: SavedPrompt): Record<string, string> {
 async function preview(args: UpdateArgs, ctx: ScopeContext): Promise<ApprovalPreview> {
   const agent = ctx.caller.kind === "thread" ? agentLabel(ctx.caller.agentId) : "An agent";
   const { place, prompt } = await targetOf(args, ctx);
-  const scopeLabel = scopeLabelOf(place, prompt);
   if (prompt === null) {
+    const repoKey = place.projectPath ? (await listing(ctx.api, place, { readOnly: true })).projectRepoKey : undefined;
     return {
       title: `${agent} wants to save the prompt "${args.title}"${place.projectPath ? ` in ${place.label}` : " for every project"}`,
-      scopeLabel,
+      scopeLabel: place.projectPath ? `Project ${place.label}${repoKey ? ` — shared by every checkout of ${repoKey}` : ""}` : "Global — every project",
       sections: [
         { kind: "fields", rows: promptFields({ title: args.title!, description: args.description ?? "", tags: args.tags ?? [] }) },
         { kind: "code", title: "Body", text: args.body! }
       ]
     };
   }
+  const origin = await originOf(ctx.api, prompt);
   const uses = workflowsOf(prompt);
   const kind = editKind(prompt);
   const verb = args.action === "delete" ? "delete" : "edit";
   const sections: ApprovalPreviewSection[] = [];
+  if (origin.kind === "unknown") {
+    sections.push({ kind: "warning", level: "caution", text: `This prompt was first saved in ${origin.label}, which is no longer a project: where it belongs cannot be checked.` });
+  }
   if (uses.length > 0) {
     sections.push({
       kind: "warning",
@@ -358,18 +414,19 @@ async function preview(args: UpdateArgs, ctx: ScopeContext): Promise<ApprovalPre
   return {
     title: `${agent} wants to ${verb} the saved prompt "${prompt.title}"`,
     ...(kind.family ? { family: kind.family } : {}),
-    scopeLabel,
+    scopeLabel: scopeLabelOf(origin, prompt),
     sections,
     pins: pinsOf(prompt),
-    ...(uses.length > 0 ? { workflowReferencedPrompt: true } : {})
+    ...(uses.length > 0 ? { workflowReferencedPrompt: true } : {}),
+    ...(origin.kind === "unknown" ? { ungrantable: true as const } : {})
   };
 }
 
-/** The card's scope: global, the project, and — for a repository prompt — that every checkout of it shares the change. */
-function scopeLabelOf(place: Place, prompt: SavedPrompt | null): string {
-  if (place.projectPath === null || (prompt !== null && prompt.projectPath === null)) return "Global — every project";
-  const repoKey = prompt === null ? place.repoKey : prompt.repoKey ?? undefined;
-  return repoKey ? `Project ${place.label} — shared by every checkout of ${repoKey}` : `Project ${place.label}`;
+/** The card's scope: the prompt's first checkout (or global), and — for a repository prompt — that every checkout shares it. */
+function scopeLabelOf(origin: Origin, prompt: SavedPrompt): string {
+  if (origin.kind === "global") return "Global — every project";
+  const where = origin.kind === "unknown" ? `${origin.label} (no longer a project)` : origin.label;
+  return `Project ${where}${prompt.repoKey ? ` — shared by every checkout of ${prompt.repoKey}` : ""}`;
 }
 
 function promptFields(prompt: { title: string; description: string; tags: readonly string[] }): { label: string; value: string }[] {
@@ -381,13 +438,17 @@ function promptFields(prompt: { title: string; description: string; tags: readon
 }
 
 /**
- * Before writing, the prompt as it is NOW: a chat call that passed no card must still be an Act
- * (a workflow may have started using the prompt since `scope()`); a carded or granted one must
- * match what the card showed (§7.2).
+ * Before writing, the prompt as it is NOW: the project it belongs to must still be the one `scope`
+ * claimed (the gate judged that one) — else `PREVIEW_STALE`; a chat call that passed no card must
+ * still be an Act (a workflow may have started using the prompt since `scope()`); a carded or
+ * granted one must match what the card showed (§7.2).
  */
 async function recheck(args: UpdateArgs, ctx: CallContext): Promise<void> {
   if (ctx.caller.kind !== "thread") return;
-  const { prompt } = await targetOf(args, ctx);
+  const { place, prompt } = await targetOf(args, ctx);
+  if (ctx.scope && !sameClaim((await claimOf(ctx.api, place, prompt)).claimed, ctx.scope)) {
+    throw new ToolError("PREVIEW_STALE", `The project ${prompt ? `the saved prompt "${clipText(prompt.title, 80)}" belongs to` : "of the new prompt"} changed after the check; nothing was done. Call update_saved_prompts again.`);
+  }
   if (prompt === null) return;
   if (ctx.approval) {
     const pins = ctx.approval.pins ?? {};
@@ -408,7 +469,7 @@ const updateSavedPrompts = defineTool({
   description:
     "Create, edit or delete a saved prompt in the user's library (the right rail), global or for one project. create: title and body (+ description, tags), in a project or global. update: change title, body, description or tags of the prompt `id`. delete: remove it.",
   chatNote:
-    "A prompt you create is marked as made by an agent; you cannot pin prompts. Without project: this chat's project. Editing or deleting a prompt no agent created, or one a workflow uses (usedByWorkflows), asks the user to approve in the chat (up to 30 min); if denied, don't retry — ask the user.",
+    "A prompt you create is marked as made by an agent; you cannot pin prompts. Without project: this chat's project. A project prompt belongs to the project it was first saved in (projectPath), also when another checkout of its repository lists it. Editing or deleting a prompt no agent created, one a workflow uses (usedByWorkflows), or one of another project asks the user to approve in the chat (up to 30 min); if denied, don't retry — ask the user.",
   externalNote:
     "update and delete look for a project prompt in `project` (else among the global ones). _meta tier admin is the widest: in Orquester chats create and edits of agent-made prompts are act.",
   input: updateInput,
@@ -422,10 +483,8 @@ const updateSavedPrompts = defineTool({
   async scope(args, ctx) {
     checkAction(args, ctx.caller.kind === "external");
     const { place, prompt } = await targetOf(args, ctx);
-    // A project prompt belongs to the project it was found through (its folder, or a checkout of its
-    // repository) — never claimed through its stored path, the first checkout's, which may be gone.
-    const projectPath = prompt && prompt.projectPath === null ? null : place.projectPath;
-    const claim: ScopeClaim = { projects: projectPath ? [projectPath] : [], sessions: [], reads: "none", writes: true, causesTurnIn: [] };
+    const { claimed } = await claimOf(ctx.api, place, prompt);
+    const claim: ScopeClaim = { ...claimed, sessions: [], reads: "none", writes: true, causesTurnIn: [] };
     if (prompt) {
       const kind = editKind(prompt);
       claim.resolved = { tier: kind.tier, ...(kind.family ? { adminFamily: kind.family } : {}) };
@@ -450,7 +509,7 @@ const updateSavedPrompts = defineTool({
       };
       const res = await ctx.api.request("POST", ROUTE, { body });
       if (res.status >= 400) throw daemonError(res);
-      return { prompt: rowOf(res.body as SavedPrompt, true, ctx.caller, ctx.api.workspacesDir) };
+      return { prompt: rowOf(res.body as SavedPrompt, true, ctx.caller, ctx.api.workspacesDir, place) };
     }
     const id = prompt!.id;
     if (args.action === "delete") {
@@ -467,7 +526,7 @@ const updateSavedPrompts = defineTool({
     };
     const res = await ctx.api.request("PUT", `${ROUTE}/${encodeURIComponent(id)}`, { body: patch });
     if (res.status >= 400) throw daemonError(res);
-    return { prompt: rowOf({ ...(res.body as SavedPrompt), ...(prompt!.usedByWorkflows ? { usedByWorkflows: prompt!.usedByWorkflows } : {}) }, true, ctx.caller, ctx.api.workspacesDir) };
+    return { prompt: rowOf({ ...(res.body as SavedPrompt), ...(prompt!.usedByWorkflows ? { usedByWorkflows: prompt!.usedByWorkflows } : {}) }, true, ctx.caller, ctx.api.workspacesDir, place) };
   }
 });
 
