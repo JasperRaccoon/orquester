@@ -12,11 +12,11 @@ import test from "node:test";
 
 import type { SessionSummary } from "@orquester/api";
 
-import { canonicalProject, classifyPath } from "../addressing.ts";
+import { canonicalProject, classifyPath, classifyTarget } from "../addressing.ts";
 import type { ScopeClaim, ThreadCaller } from "../catalog/contract.ts";
 import { chatSummary } from "../fixtures.ts";
 import { FakeDaemonApi } from "../testing.ts";
-import { classifyTarget, gateFacts, isWorkflowOwned, ownChildren, workflowProjectUnion } from "./scope.ts";
+import { gateFacts, isWorkflowOwned, ownChildren, workflowProjectUnion } from "./scope.ts";
 
 async function tree(t: { after(fn: () => Promise<void>): void }) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "umcp-scope-")));

@@ -1142,3 +1142,34 @@ test("expectWorkflowUses race: a workflow saved while the write awaits is seen i
   assert.equal(res.json().code, "WORKFLOW_USES_CHANGED");
   assert.deepEqual([service.get(prompt.id)?.title, service.get(prompt.id)?.projectPath], ["T", null], "nothing saved");
 });
+
+test("expectWorkflowUses with no workflow index: refused 409, never read as no uses; a write without it goes through", async (t) => {
+  const s = await scratch();
+  t.after(s.cleanup);
+  const service = await emptyService(s);
+  const app = Fastify();
+  registerSavedPromptRoutes(app, { service });
+  await app.ready();
+  t.after(() => app.close());
+  const prompt = await service.create({ title: "T", body: "B", projectPath: null });
+  const refused = await app.inject({ method: "PUT", url: `/api/saved-prompts/${prompt.id}`, payload: { title: "x", expectWorkflowUses: [] } });
+  assert.equal(refused.statusCode, 409, refused.body);
+  assert.equal(refused.json().code, "WORKFLOW_USES_CHANGED");
+  assert.equal((await app.inject({ method: "DELETE", url: `/api/saved-prompts/${prompt.id}?expectWorkflowUses=` })).statusCode, 409);
+  assert.equal(service.get(prompt.id)?.title, "T");
+  assert.equal((await app.inject({ method: "PUT", url: `/api/saved-prompts/${prompt.id}`, payload: { title: "UI" } })).statusCode, 200);
+});
+
+test("list rows carry usesUnknown when the index cannot tell which workflows use a prompt, and only then", async (t) => {
+  const { index, app, prompt, service } = await usesRoutes(t);
+  const other = await service.create({ title: "Other", body: "B", projectPath: null });
+  index.rebuild({ workflows: [usingWorkflow("wf_1", prompt.id)], unreadable: [{ id: "wf_x", nodes: [{ config: { prompt: { promptId: prompt.id } } }] }] });
+  const rows = (await app.inject({ method: "GET", url: "/api/saved-prompts" })).json().prompts as SavedPrompt[];
+  const row = rows.find((entry) => entry.id === prompt.id)!;
+  assert.equal(row.usesUnknown, true);
+  assert.deepEqual(row.usedByWorkflows?.map((use) => use.workflowId), ["wf_1"]);
+  assert.equal("usesUnknown" in rows.find((entry) => entry.id === other.id)!, false);
+  assert.equal((await app.inject({ method: "GET", url: `/api/saved-prompts/${prompt.id}` })).json().usesUnknown, true);
+  const omitted = (await app.inject({ method: "GET", url: "/api/saved-prompts?usedByWorkflows=omit" })).json().prompts as SavedPrompt[];
+  assert.equal(omitted.some((entry) => "usesUnknown" in entry), false, "omit: the caller reads the index itself");
+});

@@ -75,6 +75,17 @@ export interface CanonicalProject {
 }
 
 /**
+ * Where `target` lies relative to the caller's own project (null: the caller has none — every
+ * target is "other"): the gate's target classes (§5.2). Pure, so catalog tools that must show
+ * data as the gate would classify it use this one rule too.
+ */
+export function classifyTarget(own: CanonicalProject | null, target: { canonical: string; workspace: string }): "own" | "same-workspace" | "other-workspace" {
+  if (own === null) return "other-workspace";
+  if (target.canonical === own.canonical) return "own";
+  return target.workspace === own.workspace ? "same-workspace" : "other-workspace";
+}
+
+/**
  * A path as the daemon COMPARES it: realpath inside the sandbox, else resolved. A comparison key
  * only — never a containment check (its fallback is lexical): use {@link realPathInSandbox}.
  */

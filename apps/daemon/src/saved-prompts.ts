@@ -677,10 +677,16 @@ function workflowWorkspace(project: Workflow["project"] | undefined, workspacesD
 }
 
 /** A prompt as a list row: `usedByWorkflows` from `uses`, never a stored value; absent when none. */
-function listRow(prompt: SavedPrompt, uses: (promptId: string) => SavedPromptWorkflowUse[]): SavedPrompt {
-  const { usedByWorkflows: _stored, ...row } = prompt;
-  const used = uses(prompt.id);
-  return used.length > 0 ? { ...row, usedByWorkflows: used } : row;
+/** A prompt's workflow uses for a list row: the uses, and whether the index could tell at all. */
+type UsesLookup = (promptId: string) => { workflows: SavedPromptWorkflowUse[]; unknown: boolean };
+
+const NO_USES: UsesLookup = () => ({ workflows: [], unknown: false });
+
+/** A prompt as a list row: `usedByWorkflows` / `usesUnknown` from `uses`, never stored values; absent when none / known. */
+function listRow(prompt: SavedPrompt, uses: UsesLookup): SavedPrompt {
+  const { usedByWorkflows: _stored, usesUnknown: _storedUnknown, ...row } = prompt;
+  const { workflows, unknown } = uses(prompt.id);
+  return { ...row, ...(workflows.length > 0 ? { usedByWorkflows: workflows } : {}), ...(unknown ? { usesUnknown: true as const } : {}) };
 }
 
 export interface SavedPromptRoutesDeps {
@@ -707,10 +713,12 @@ export interface SavedPromptRoutesDeps {
  */
 export function registerSavedPromptRoutes(app: FastifyInstance, deps: SavedPromptRoutesDeps): void {
   const { service } = deps;
-  const uses = (): ((promptId: string) => SavedPromptWorkflowUse[]) => {
+  const uses = (): UsesLookup => {
     const index = deps.workflowReferences?.();
     const workspacesDir = deps.workspacesDir?.();
-    return index ? (promptId) => savedPromptWorkflowUses(index, promptId, workspacesDir) : () => [];
+    return index
+      ? (promptId) => ({ workflows: savedPromptWorkflowUses(index, promptId, workspacesDir), unknown: index.promptUses(promptId).unknownReason !== undefined })
+      : NO_USES;
   };
 
   app.get<{ Querystring: SavedPromptListQuery }>(
@@ -720,7 +728,7 @@ export function registerSavedPromptRoutes(app: FastifyInstance, deps: SavedPromp
       try {
         const listed = await service.list(projectPath ? projectPath : null, { readOnly: readOnly === "1" });
         // `?usedByWorkflows=omit`: the caller reads the reference index itself — no lookup here.
-        const byPrompt = request.query.usedByWorkflows === "omit" ? () => [] : uses();
+        const byPrompt = request.query.usedByWorkflows === "omit" ? NO_USES : uses();
         return { ...listed, prompts: listed.prompts.map((prompt) => listRow(prompt, byPrompt)) };
       } catch (error) {
         return savedPromptError(reply, error);
@@ -763,8 +771,12 @@ export function registerSavedPromptRoutes(app: FastifyInstance, deps: SavedPromp
     const wanted = usesKey(expected);
     return () => {
       const index = deps.workflowReferences?.();
-      const now = index ? index.promptUses(id) : { workflows: [] };
-      if ("unknownReason" in now && now.unknownReason) {
+      // A precondition with no index to check it against cannot hold: refused, never read as "no uses".
+      if (!index) {
+        throw new SavedPromptError(409, SAVED_PROMPT_WORKFLOW_USES_CHANGED, "Orquester cannot check which workflows use this prompt (no workflow index); nothing was saved.");
+      }
+      const now = index.promptUses(id);
+      if (now.unknownReason) {
         throw new SavedPromptError(409, SAVED_PROMPT_WORKFLOW_USES_CHANGED, `Orquester cannot tell which workflows use this prompt (${now.unknownReason}); nothing was saved.`);
       }
       if (usesKey(now.workflows.map((use) => use.workflowId)) !== wanted) {

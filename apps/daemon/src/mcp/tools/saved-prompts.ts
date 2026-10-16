@@ -48,7 +48,7 @@ import {
   type SavedPromptListResponse,
   type UpdateSavedPromptRequest
 } from "@orquester/api";
-import { canonicalProject, projectNamesFor, resolveProject, type CanonicalProject } from "../addressing.ts";
+import { canonicalProject, classifyTarget, projectNamesFor, resolveProject, type CanonicalProject } from "../addressing.ts";
 import type { DaemonApi } from "../daemon-api.ts";
 import { daemonError, ToolError } from "../errors.ts";
 import { listSessions } from "../reads.ts";
@@ -211,7 +211,8 @@ function seesOrigin(prompt: SavedPrompt, caller: ScopeContext["caller"], workspa
  * Who may be named as a GLOBAL prompt's creator (`createdBy` beyond its `kind`): for external
  * callers and Full-access chats, anyone; for other chats, the caller itself and chats of its own
  * workspace — the creating thread's workspace read from the open tabs through `DaemonApi`. A thread
- * no tab names (closed, or unknown) counts as another workspace's: its details stay out.
+ * no tab names (closed, or unknown), or an agent record naming no thread, counts as another
+ * workspace's: its details stay out. A non-agent `createdBy` names no chat and is shown as it is.
  */
 type CreatorFilter = (prompt: SavedPrompt) => boolean;
 
@@ -225,8 +226,11 @@ async function creatorFilter(api: DaemonApi, caller: ScopeContext["caller"], pro
     }
   }
   return (prompt) => {
-    const threadId = prompt.createdBy?.threadId;
-    if (threadId === undefined || threadId === caller.threadId) return true;
+    // Only an agent record names a chat; one without its thread cannot be placed: hidden.
+    if (prompt.createdBy?.kind !== "agent") return true;
+    const threadId = prompt.createdBy.threadId;
+    if (threadId === undefined) return false;
+    if (threadId === caller.threadId) return true;
     const workspace = workspaceOf.get(threadId);
     return workspace !== undefined && workspace !== null && workspace !== "" && workspace === caller.workspace;
   };
@@ -258,8 +262,7 @@ async function reachesCaller(api: DaemonApi, prompt: SavedPrompt, caller: ScopeC
   if (caller.kind !== "thread" || caller.runtimeMode === "full-access") return true;
   const origin = await originOf(api, prompt);
   if (origin.kind !== "project") return false;
-  // The gate's classification (§5.2): the caller's own project, or another of its workspace, reads card-free.
-  return own !== null && origin.workspace === own.workspace;
+  return classifyTarget(own, { canonical: origin.canonical, workspace: origin.workspace }) !== "other-workspace";
 }
 
 function matches(prompt: SavedPrompt, query: string): boolean {
@@ -294,7 +297,7 @@ const listSavedPrompts = defineTool({
   name: "list_saved_prompts",
   title: "List saved prompts",
   description:
-    "The user's saved prompts: global plus one project's (a project prompt is shared by every checkout of its Git repository: repoKey; projectPath is where it was first saved). Rows: id, title, description, tags, scope, projectPath, repoKey, pinned, createdBy (absent: the user's), usedByWorkflows, bodyChars; body with includeBody.",
+    "The user's saved prompts: global plus one project's (a project prompt is shared by every checkout of its Git repository: repoKey; projectPath is where it was first saved). Rows: id, title, description, tags, scope, projectPath, repoKey, pinned, createdBy (absent: the user's), usedByWorkflows (usesUnknown: can't tell), bodyChars; body with includeBody.",
   chatNote: "Default: this chat's project. Prompts shared from another workspace's checkout are only counted (sharedElsewhere) below Full access.",
   externalNote: "Default: global only.",
   input: {
@@ -598,7 +601,11 @@ const updateSavedPrompts = defineTool({
     const res = await ctx.api.request("PUT", `${ROUTE}/${encodeURIComponent(id)}`, { body: patch });
     usesStale(res);
     if (res.status >= 400) throw daemonError(res);
-    const updated: SavedPrompt = { ...(res.body as SavedPrompt), ...(prompt!.usedByWorkflows ? { usedByWorkflows: prompt!.usedByWorkflows } : {}) };
+    const updated: SavedPrompt = {
+      ...(res.body as SavedPrompt),
+      ...(prompt!.usedByWorkflows ? { usedByWorkflows: prompt!.usedByWorkflows } : {}),
+      ...(target.usesUnknown ? { usesUnknown: true as const } : {})
+    };
     return { prompt: rowOf(updated, true, ctx.caller, ctx.api.workspacesDir, place, await creatorFilter(ctx.api, ctx.caller, [updated])) };
   }
 });

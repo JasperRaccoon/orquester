@@ -8,7 +8,7 @@
 
 import type { SessionSummary } from "@orquester/api";
 
-import { canonicalProject, classifyPath, resolveProject, type CanonicalProject } from "../addressing.ts";
+import { canonicalProject, classifyPath, classifyTarget, resolveProject, type CanonicalProject } from "../addressing.ts";
 import type { DaemonApi } from "../daemon-api.ts";
 import { ToolError } from "../errors.ts";
 import { listSessions } from "../reads.ts";
@@ -17,13 +17,6 @@ import type { ScopeClaim, ThreadCaller } from "../catalog/contract.ts";
 import type { GateInput, GateTarget, TargetClass } from "./policy.ts";
 
 type Paths = Pick<DaemonApi, "fsRoot" | "workspacesDir">;
-
-/** Where `target` lies relative to the caller's own project (null: the caller has none — every target is "other"). */
-export function classifyTarget(own: CanonicalProject | null, target: { canonical: string; workspace: string }): TargetClass {
-  if (own === null) return "other-workspace";
-  if (target.canonical === own.canonical) return "own";
-  return target.workspace === own.workspace ? "same-workspace" : "other-workspace";
-}
 
 /** The caller's own project, canonical, or null when it is bound to none. */
 export async function callerProject(api: Paths, caller: Pick<ThreadCaller, "projectPath">): Promise<CanonicalProject | null> {

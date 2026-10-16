@@ -63,6 +63,12 @@ export interface SavedPrompt {
    * it needs a `workflows` approval card naming them. Absent when none does.
    */
   usedByWorkflows?: SavedPromptWorkflowUse[];
+  /**
+   * List rows only: `true` when the workflow reference index cannot tell which workflows use this
+   * prompt (a definition this build cannot read may) — `usedByWorkflows` is then incomplete, and an
+   * agent's edit is treated as one of a workflow-referenced prompt. Absent when the uses are known.
+   */
+  usesUnknown?: true;
 }
 
 /** `SavedPrompt.createdBy`. */

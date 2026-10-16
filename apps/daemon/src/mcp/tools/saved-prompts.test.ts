@@ -437,3 +437,24 @@ test("expectWorkflowUses: a workflow that starts using the prompt between the to
   h.library.delete = remove;
   assert.equal((await h.library.update(created.id, { body: "from the rail" })).body, "from the rail");
 });
+
+test("list_saved_prompts rows say usesUnknown when the index cannot tell; a global prompt's agent record without a thread is reduced below Full access", async (t) => {
+  const h = await harness(t);
+  const mentioned = await h.userPrompt({ title: "Mentioned" });
+  const plain = await h.userPrompt({ title: "Plain" });
+  h.unreadable.push({ id: "wf_x", nodes: [{ config: { prompt: { promptId: mentioned.id } } }] });
+  const rows = (await h.value("list_saved_prompts", {}, h.chat({ runtimeMode: "auto" }))).prompts as (Row & { usesUnknown?: true })[];
+  assert.equal(rows.find((row) => row.id === mentioned.id)?.usesUnknown, true);
+  assert.equal("usesUnknown" in rows.find((row) => row.id === plain.id)!, false);
+  h.unreadable.length = 0;
+  // Records another build wrote: an agent one naming no thread, and a newer kind naming no chat.
+  const prompts = (h.library as unknown as { prompts: Map<string, SavedPrompt> }).prompts;
+  const threadless = await h.library.create({ title: "Threadless", body: "b", projectPath: null }, { kind: "agent", threadId: "t-0", projectPath: "", agent: "codex", title: "Somewhere" });
+  prompts.set(threadless.id, { ...prompts.get(threadless.id)!, createdBy: { kind: "agent", agent: "codex", title: "Somewhere" } });
+  const newer = await h.userPrompt({ title: "Newer" });
+  prompts.set(newer.id, { ...prompts.get(newer.id)!, createdBy: { kind: "workflow", title: "Nightly" } });
+  const creator = async (mode: ThreadCaller["runtimeMode"], id: string) => ((await h.value("list_saved_prompts", {}, h.chat({ runtimeMode: mode }))).prompts as Row[]).find((row) => row.id === id)?.createdBy;
+  assert.deepEqual(await creator("auto", threadless.id), { kind: "agent" });
+  assert.deepEqual(await creator("full-access", threadless.id), { kind: "agent", agent: "codex", title: "Somewhere" });
+  assert.deepEqual(await creator("auto", newer.id), { kind: "workflow", title: "Nightly" }, "a non-agent record names no chat: shown as it is");
+});

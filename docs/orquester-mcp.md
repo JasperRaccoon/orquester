@@ -1370,7 +1370,7 @@ are capped and say so.
 |---|---|---|---|
 | `list_todos` | `workspace?` or `project?` (exactly one) | `{todos: Todo[], truncated?, omittedLists?}` | The Todo tab |
 | `update_todos` | `action` (`"create"` \| `"update"` \| `"toggle"` \| `"delete"`), `workspace?` or `project?`, `id?`, `name?`, `body?`, `item?`, `checked?` | create / update: `{todo: Todo}`; toggle: `{id, item, checked, body, bodyTruncated?}`; delete: `{deleted: true, id}` | Adding, renaming, editing, ticking, deleting a list |
-| `list_saved_prompts` | `project?`, `query?`, `includeBody? = false` | `{prompts: [{id, title, description, tags, scope, projectPath?, repoKey?, pinned, createdBy?, usedByWorkflows?, usedByWorkflowsElsewhere?, bodyChars, body?}], truncated?, omittedPrompts?, sharedElsewhere?}` | The right rail's Saved prompts |
+| `list_saved_prompts` | `project?`, `query?`, `includeBody? = false` | `{prompts: [{id, title, description, tags, scope, projectPath?, repoKey?, pinned, createdBy?, usedByWorkflows?, usedByWorkflowsElsewhere?, usesUnknown?, bodyChars, body?}], truncated?, omittedPrompts?, sharedElsewhere?}` | The right rail's Saved prompts |
 | `update_saved_prompts` | `action` (`"create"` \| `"update"` \| `"delete"`), `id?`, `title?`, `body?`, `description?`, `tags?`, `project?` or `global?`, `pinned?`, `reason?` | `{prompt}` (its row, with its body), or `{deleted: true, id}` | Saving, editing, pinning, deleting a prompt |
 
 `Todo = {id, name, scope: "workspace" | "project", body, createdAt, updatedAt, bodyTruncated?}`. A
