@@ -229,8 +229,8 @@ export const agentHostRoutes = {
 
   /**
    * Unified MCP design 2026-10-15 §9.3/§9.4: `POST` {@link SessionToolsRefreshRequest} →
-   * {@link SessionToolsRefreshResponse}. The daemon hands the thread's NEW manifest (its toolsets
-   * changed): a provider that re-lists on `notifications/tools/list_changed` (Claude, probed) gets
+   * {@link SessionToolsRefreshResponse}. The daemon hands the thread's NEW manifest (its denials
+   * became known, or the tool list changed): a provider that re-lists on `notifications/tools/list_changed` (Claude, probed) gets
    * the new list at once; any other live session is restarted with resume at its next idle point
    * (the next turn's send — never under a running turn); a thread with no live session takes it at
    * its next start. Additive: a host that predates it answers its generic route-miss 404, and the
@@ -279,8 +279,8 @@ export const daemonRoutesForHost = {
 export interface SessionToolsManifestRequest {
   threadId: string;
   /**
-   * `launch` (default): a provider session is starting with it — the daemon records its toolsets as
-   * what the thread advertises. `check`: a look only.
+   * `launch` (default): a provider session is starting with it. `check`: a look only (the
+   * daemon's own pushes).
    */
   purpose?: "launch" | "check";
 }
@@ -302,7 +302,10 @@ export interface SessionToolsManifest {
    * daemon's full-trust `/mcp` (spec §12.1). Empty when none is known.
    */
   deny: string[];
-  /** The resolved toolsets (for the daemon's own bookkeeping and tests; the host ignores it). */
+  /**
+   * LEGACY: older daemons sent the thread's resolved toolsets (their own bookkeeping); the host
+   * ignores it, and this daemon no longer sends it. Kept so either side of a handover still reads.
+   */
   toolsets?: string[];
   /**
    * Monotonic per daemon and increasing across daemon restarts (milliseconds-based): the host
@@ -322,12 +325,12 @@ export interface SessionToolsManifest {
 /**
  * The longest the host takes to answer a refresh: a launch's manifest read it waits for (the
  * host's own manifest timeout, 10 s) plus Claude's bounded re-list wait (5 s). The daemon's push
- * and `request_toolset`'s wait are set above it ({@link SESSION_TOOLS_REFRESH_TIMEOUT_MS}), so an
- * answer is never lost to a timeout and "now" / "after-restart" stay truthful.
+ * is bounded above it ({@link SESSION_TOOLS_REFRESH_TIMEOUT_MS}), so an answer is never lost to a
+ * timeout.
  */
 export const SESSION_TOOLS_REFRESH_HOST_MAX_MS = 15_000;
 
-/** The daemon's bound on a refresh push (and `request_toolset`'s wait for it). */
+/** The daemon's bound on a refresh push. */
 export const SESSION_TOOLS_REFRESH_TIMEOUT_MS = SESSION_TOOLS_REFRESH_HOST_MAX_MS + 5_000;
 
 /** Body of `POST /threads/:id/session-tools/refresh`. */

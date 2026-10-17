@@ -1,6 +1,7 @@
 /**
  * Agent tools in the client (unified MCP design 2026-10-15 §7, §9): the pending Orquester
- * approval cards of each chat, Settings › Agent tools, and each chat's toolsets (the Tools chip).
+ * approval cards of each chat, Settings › Agent tools' grants, and each chat's grants (the Tools
+ * chip). Every chat tool is on in every chat: there are no toolset switches to show or change.
  *
  * The daemon owns all of it; these copies converge on it the way the secret cards do
  * (`lib/agent-chat/secret-requests.ts`): a **load** when a view mounts or the connection comes
@@ -11,31 +12,22 @@
  *
  * Every payload is read through a parser before it reaches state (AGENTS.md): cards through
  * `parseToolApprovalSummary` (sanitised text, unknown kinds kept as "unknown"), settings and chat
- * toolsets field-wise here. No React import (the hooks are `hooks.ts` and the dock's
+ * views field-wise here — an older daemon's toolset fields (`revision`, `enabled`, `toolsets`,
+ * `resolved`, …) are ignored. No React import (the hooks are `hooks.ts` and the dock's
  * `use-tool-approvals.ts`).
  */
 
 import { createStore } from "zustand/vanilla";
 
 import {
-  AGENT_TOOLS_AGENTS,
   AGENT_TOOLS_CHANGED_EVENT,
   AGENT_TOOLS_CHANNEL,
-  isToolsetId,
-  TOOL_TIERS,
-  TOOLSETS,
   type AgentAdapterId,
   type AgentToolGrant,
   type AgentToolsChangedPayload,
-  type AgentToolsetView,
   type AgentToolsResponse,
   type RevokeAgentToolGrantsResponse,
-  type ThreadAgentToolsResponse,
-  type ToolsetId,
-  type ToolsetToolSpec,
-  type ToolTier,
-  type UpdateAgentToolsSettingsRequest,
-  type UpdateThreadAgentToolsRequest
+  type ThreadAgentToolsResponse
 } from "@orquester/api";
 import {
   parseToolApprovalSummary,
@@ -60,12 +52,10 @@ function asRecord(value: unknown): JsonRecord | null {
 
 const nonEmpty = (value: unknown): value is string => typeof value === "string" && value.length > 0;
 
-function isAgentId(value: unknown): value is AgentAdapterId {
-  return typeof value === "string" && (AGENT_TOOLS_AGENTS as readonly string[]).includes(value);
-}
+const AGENT_IDS: readonly AgentAdapterId[] = ["claude", "codex", "grok", "opencode"];
 
-function isTier(value: unknown): value is ToolTier {
-  return typeof value === "string" && (TOOL_TIERS as readonly string[]).includes(value);
+function isAgentId(value: unknown): value is AgentAdapterId {
+  return typeof value === "string" && (AGENT_IDS as readonly string[]).includes(value);
 }
 
 /** A grant as the wire shows it, or null. Family and scope a newer daemon names are kept as text. */
@@ -94,98 +84,31 @@ function parseGrants(value: unknown): AgentToolGrant[] {
   return Array.isArray(value) ? value.map(parseAgentToolGrant).filter((grant): grant is AgentToolGrant => grant !== null) : [];
 }
 
-/** `{claude: bool, …}` for every matrix agent; a missing or malformed cell takes `fallback`'s. */
-function parseAgentBooleans(value: unknown, fallback: Readonly<Record<AgentAdapterId, boolean>>): Record<AgentAdapterId, boolean> {
-  const record = asRecord(value) ?? {};
-  const out = { ...fallback } as Record<AgentAdapterId, boolean>;
-  for (const agent of AGENT_TOOLS_AGENTS) {
-    const cell = record[agent];
-    if (typeof cell === "boolean") out[agent] = cell;
-  }
-  return out;
-}
-
-function parseToolsetTools(value: unknown, fallback: readonly ToolsetToolSpec[]): ToolsetToolSpec[] {
-  if (!Array.isArray(value)) return [...fallback];
-  return value.flatMap((entry): ToolsetToolSpec[] => {
-    const tool = asRecord(entry);
-    return tool && nonEmpty(tool.name) && isTier(tool.tier) ? [{ name: sanitizeApprovalLabel(tool.name, 64), tier: tool.tier }] : [];
-  });
-}
-
-function parseToolsetView(value: unknown): AgentToolsetView | null {
-  const record = asRecord(value);
-  // A toolset this build does not know cannot be labelled or set: left out.
-  if (!record || !isToolsetId(record.id)) return null;
-  const spec = TOOLSETS.find((toolset) => toolset.id === record.id)!;
-  const bytes = record.bytes;
-  const catalogDefaults = parseAgentBooleans(record.catalogDefaults, spec.defaults);
-  return {
-    id: spec.id,
-    label: typeof record.label === "string" && record.label.trim() ? sanitizeApprovalLabel(record.label, 120) : spec.label,
-    // The catalogue's lock wins: a locked toolset is never offered as a switch.
-    locked: spec.locked || record.locked === true,
-    tools: parseToolsetTools(record.tools, spec.tools),
-    ...(typeof bytes === "number" && Number.isFinite(bytes) && bytes >= 0 ? { bytes: Math.round(bytes) } : {}),
-    catalogDefaults,
-    defaults: parseAgentBooleans(record.defaults, catalogDefaults)
-  };
-}
-
-/** `GET /api/agent-tools` (and the settings `PUT`'s answer), or null when it is not one. */
+/** `GET /api/agent-tools`, or null when it is not one. An older daemon's toolset fields are ignored. */
 export function parseAgentToolsResponse(value: unknown): AgentToolsResponse | null {
   const record = asRecord(value);
-  if (!record || typeof record.revision !== "number" || !Number.isFinite(record.revision) || !Array.isArray(record.toolsets)) return null;
-  const seen = new Set<ToolsetId>();
-  const toolsets = record.toolsets
-    .map(parseToolsetView)
-    .filter((view): view is AgentToolsetView => view !== null && !seen.has(view.id) && (seen.add(view.id), true));
-  return {
-    revision: record.revision,
-    // Fail closed on a malformed switch: read as off only when it says so.
-    enabled: record.enabled !== false,
-    toolsets,
-    grants: parseGrants(record.grants)
-  };
+  if (!record || !Array.isArray(record.grants)) return null;
+  return { grants: parseGrants(record.grants) };
 }
 
-function parseToolsetBooleans(value: unknown): Partial<Record<ToolsetId, boolean>> {
-  const out: Partial<Record<ToolsetId, boolean>> = {};
-  for (const [key, cell] of Object.entries(asRecord(value) ?? {})) {
-    if (isToolsetId(key) && typeof cell === "boolean") out[key] = cell;
-  }
-  return out;
-}
-
-/** A chat's toolsets (`GET`/`PUT agentChatRoutes.agentTools`), or null — also when it is another chat's. */
+/** A chat's view (`GET agentChatRoutes.agentTools`), or null — also when it is another chat's. */
 export function parseThreadAgentToolsResponse(value: unknown, threadId?: string): ThreadAgentToolsResponse | null {
   const record = asRecord(value);
-  if (!record || !nonEmpty(record.threadId) || !isAgentId(record.agent) || !Array.isArray(record.resolved)) return null;
+  if (!record || !nonEmpty(record.threadId) || !isAgentId(record.agent)) return null;
   if (threadId !== undefined && record.threadId !== threadId) return null;
-  const resolved = TOOLSETS.map((toolset) => toolset.id).filter((id) => (record.resolved as unknown[]).includes(id));
-  // `core` is on in every chat whatever the answer says.
-  if (!resolved.includes("core")) resolved.unshift("core");
-  const declines: Partial<Record<ToolsetId, string>> = {};
-  for (const [key, until] of Object.entries(asRecord(record.declines) ?? {})) {
-    if (isToolsetId(key) && typeof until === "string") declines[key] = until;
-  }
   return {
     threadId: record.threadId,
     agent: record.agent,
-    overrides: parseToolsetBooleans(record.overrides),
-    resolved,
     workflowOwned: record.workflowOwned === true,
-    appliesAtNextIdle: record.appliesAtNextIdle === true,
-    declines,
     grants: parseGrants(record.grants)
   };
 }
 
-/** `agentTools.changed`'s payload, or null. */
+/** `agentTools.changed`'s payload, or null (an older daemon's `revision` is ignored). */
 export function parseAgentToolsChangedPayload(value: unknown): AgentToolsChangedPayload | null {
   const record = asRecord(value);
-  if (!record || typeof record.revision !== "number") return null;
-  return { revision: record.revision, ...(nonEmpty(record.threadId) ? { threadId: record.threadId } : {}) };
+  if (!record) return null;
+  return nonEmpty(record.threadId) ? { threadId: record.threadId } : {};
 }
 
 // ---------------------------------------------------------------------------
@@ -200,11 +123,9 @@ export interface ToolApprovalsApi {
 
 export interface AgentToolsApi {
   getAgentTools(signal?: AbortSignal): Promise<AgentToolsResponse>;
-  updateAgentToolsSettings(request: UpdateAgentToolsSettingsRequest): Promise<AgentToolsResponse>;
   revokeAgentToolGrant(grantId: string): Promise<void>;
   revokeAgentToolGrants(threadId?: string): Promise<RevokeAgentToolGrantsResponse>;
   getThreadAgentTools(sessionId: string, signal?: AbortSignal): Promise<ThreadAgentToolsResponse>;
-  updateThreadAgentTools(sessionId: string, request: UpdateThreadAgentToolsRequest): Promise<ThreadAgentToolsResponse>;
 }
 
 /** The HTTP status of a failed request (`ApiError.status`), or null when none came back. */
@@ -365,7 +286,7 @@ export function resetToolApprovals(): void {
 }
 
 // ---------------------------------------------------------------------------
-// Settings › Agent tools and each chat's toolsets
+// Settings › Agent tools and each chat's grants
 // ---------------------------------------------------------------------------
 
 export interface ThreadToolsEntry {
@@ -448,7 +369,7 @@ export async function loadAgentToolsSettings(api: AgentToolsApi, signal?: AbortS
   }
 }
 
-/** Read one chat's toolsets (the Tools chip). */
+/** Read one chat's grants (the Tools chip). */
 export async function loadThreadAgentTools(api: AgentToolsApi, threadId: string, signal?: AbortSignal): Promise<void> {
   boundApi = api;
   const generation = toolsGeneration;
@@ -468,37 +389,6 @@ export async function loadThreadAgentTools(api: AgentToolsApi, threadId: string,
     if (failureStatus(error) === 404 && failureCode(error) === null) setThread(threadId, { unsupported: true, error: null });
     else setThread(threadId, { error: loadFailureText(error) });
   }
-}
-
-/**
- * Change the settings. `revision` is the one the user saw; a stale one is refused (409
- * `REVISION_MISMATCH`) and the settings are read again — the caller says so. Resolves with the
- * daemon's answer; rejects with its refusal.
- */
-export async function updateAgentToolsSettings(api: AgentToolsApi, request: UpdateAgentToolsSettingsRequest): Promise<void> {
-  boundApi = api;
-  const generation = toolsGeneration;
-  const seq = nextSeq("settings");
-  try {
-    const parsed = parseAgentToolsResponse(await api.updateAgentToolsSettings(request));
-    if (parsed !== null && isLatest("settings", seq, generation)) {
-      agentToolsStore.setState({ settings: parsed, settingsError: null });
-    }
-  } catch (error) {
-    if (failureStatus(error) === 409) void loadAgentToolsSettings(api);
-    throw error;
-  }
-  reloadWatchedThreads(api);
-}
-
-/** Set (`true`/`false`) or clear (`null` = inherit) a chat's overrides. */
-export async function updateThreadAgentTools(api: AgentToolsApi, threadId: string, request: UpdateThreadAgentToolsRequest): Promise<void> {
-  boundApi = api;
-  const generation = toolsGeneration;
-  const key = `thread:${threadId}`;
-  const seq = nextSeq(key);
-  const parsed = parseThreadAgentToolsResponse(await api.updateThreadAgentTools(threadId, request), threadId);
-  if (parsed !== null && isLatest(key, seq, generation)) setThread(threadId, { data: parsed, error: null });
 }
 
 /** Revoke one grant (Settings, the Tools chip), then read again what shows grants. */
@@ -535,8 +425,8 @@ function reloadWatchedThreads(api: AgentToolsApi, only?: string): void {
 
 /**
  * Apply one `/events` message on `agent-tools`: `agentTools.changed` re-reads what is shown — the
- * settings when a view shows them, and the chat it names (else every watched chat: a settings or
- * project-grant change moves every chat's resolution).
+ * settings when a view shows them, and the chat it names (else every watched chat: a project-grant
+ * change or a revoke-all moves every chat's grants).
  */
 export function applyAgentToolsEvent(event: { channel?: string; type: string; payload: unknown }): void {
   if (event.channel !== undefined && event.channel !== AGENT_TOOLS_CHANNEL) return;
@@ -544,14 +434,7 @@ export function applyAgentToolsEvent(event: { channel?: string; type: string; pa
   const payload = parseAgentToolsChangedPayload(event.payload);
   if (payload === null || boundApi === null) return;
   const api = boundApi;
-  if (settingsWatchers > 0) {
-    // A settings change this client already holds (its own `PUT`'s answer) needs no second read;
-    // a chat's change can still move the grants list, so it always does.
-    const current = agentToolsStore.getState().settings;
-    if (payload.threadId !== undefined || current === null || current.revision !== payload.revision) {
-      void loadAgentToolsSettings(api);
-    }
-  }
+  if (settingsWatchers > 0) void loadAgentToolsSettings(api);
   reloadWatchedThreads(api, payload.threadId);
 }
 
@@ -566,7 +449,7 @@ export function watchAgentToolsSettings(): () => void {
   };
 }
 
-/** A view shows a chat's toolsets. Returns the unwatch; the last one forgets the chat. */
+/** A view shows a chat's grants. Returns the unwatch; the last one forgets the chat. */
 export function watchThreadAgentTools(threadId: string): () => void {
   threadWatchers.set(threadId, (threadWatchers.get(threadId) ?? 0) + 1);
   let done = false;

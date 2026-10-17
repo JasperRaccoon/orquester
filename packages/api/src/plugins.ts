@@ -22,6 +22,26 @@ export interface PluginSource {
   url: string;
 }
 
+/**
+ * Which native TypeScript 7 port "Better TS Typecheck" runs in place of `tsc`:
+ * tsrs (oxc-project/tsrs) or tsc-rs (pingdotgg/ts-rust). One is active at a time.
+ */
+export type TsCheckerEngine = "tsrs" | "tsc-rs";
+export const TS_CHECKER_ENGINES: readonly TsCheckerEngine[] = ["tsrs", "tsc-rs"];
+
+export function isTsCheckerEngine(value: unknown): value is TsCheckerEngine {
+  return typeof value === "string" && (TS_CHECKER_ENGINES as readonly string[]).includes(value);
+}
+
+/** One engine the plugin can run, and whether the daemon's OS/CPU has a build of it. */
+export interface PluginEngineInfo {
+  id: TsCheckerEngine;
+  label: string;
+  description: string;
+  source: PluginSource;
+  platform: PluginPlatformSupport;
+}
+
 export interface PluginInstalledVersionInfo {
   version: string;
   integrity: string;
@@ -35,8 +55,9 @@ export interface PluginLastErrorInfo {
 }
 
 /**
- * Where a plugin is turned on: per workspace (`enabledWorkspaces`), or once for
- * the whole server (`enabled`).
+ * Where a plugin is turned on. Every built-in plugin is `"global"`: on or off
+ * once for the whole server (`enabled`). `"workspace"` is what older daemons
+ * sent for tsc-rs, when it was turned on per workspace.
  */
 export type PluginScope = "workspace" | "global";
 
@@ -54,10 +75,14 @@ export interface PluginInfo {
    * routes refuse it.
    */
   updates: boolean;
+  /** For a plugin with engines: supported when any engine has a build here. */
   platform: PluginPlatformSupport;
-  /** On for the whole server (`scope: "global"`); for a workspace plugin, on in any existing workspace. */
+  /** On for the whole server. */
   enabled: boolean;
-  /** Names of existing workspaces the plugin is on for (stale names are hidden); empty for a global plugin. */
+  /**
+   * Always empty. Kept only so clients from before plugins were global still
+   * parse the record (they require the array).
+   */
   enabledWorkspaces: string[];
   current: PluginInstalledVersionInfo | null;
   previous: PluginInstalledVersionInfo | null;
@@ -65,20 +90,27 @@ export interface PluginInfo {
   lastCheckAt: string | null;
   lastError: PluginLastErrorInfo | null;
   job: PluginJobState;
+  /**
+   * ts-rust only: the engine in use. `current`, `previous`, `skippedVersion`,
+   * `lastCheckAt`, `lastError` and `source` are this engine's. Absent from
+   * daemons from before the engine choice (they ran tsc-rs).
+   */
+  engine?: TsCheckerEngine;
+  /** ts-rust only: the engines to choose from, in display order. */
+  engines?: PluginEngineInfo[];
 }
 
 export interface PluginsResponse {
   plugins: PluginInfo[];
 }
 
-/** Body for PUT /api/plugins/:id/workspaces/:workspace. */
-export interface SetPluginWorkspaceRequest {
-  enabled: boolean;
-}
-
-/** Body for PUT /api/plugins/:id (a `scope: "global"` plugin). */
+/**
+ * Body for PUT /api/plugins/:id: at least one field. `engine` is for ts-rust
+ * only, and must have a build on the daemon's platform.
+ */
 export interface SetPluginEnabledRequest {
-  enabled: boolean;
+  enabled?: boolean;
+  engine?: TsCheckerEngine;
 }
 
 const pluginPath = (id: string): string => `/api/plugins/${encodeURIComponent(id)}`;
@@ -86,8 +118,6 @@ const pluginPath = (id: string): string => `/api/plugins/${encodeURIComponent(id
 export const pluginRoutes = {
   list: "/api/plugins",
   plugin: (id: string): string => pluginPath(id),
-  workspace: (id: string, workspace: string): string =>
-    `${pluginPath(id)}/workspaces/${encodeURIComponent(workspace)}`,
   check: (id: string): string => `${pluginPath(id)}/check`,
   rollback: (id: string): string => `${pluginPath(id)}/rollback`,
   downloads: (id: string): string => `${pluginPath(id)}/downloads`

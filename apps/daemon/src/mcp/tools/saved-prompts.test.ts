@@ -13,7 +13,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { TOOLSETS, type SavedPrompt } from "@orquester/api";
+import type { SavedPrompt } from "@orquester/api";
 import { createDefaultClientConfig, createDefaultDaemonConfig } from "@orquester/config";
 import { createServer } from "../../index.ts";
 import { SavedPromptsService } from "../../saved-prompts.ts";
@@ -28,7 +28,6 @@ type CreateServerArgs = Parameters<typeof createServer>;
 type Outcome = { ok: true; value: Record<string, unknown> } | { ok: false; code: string; message: string };
 type Row = SavedPrompt & { scope: string; bodyChars: number };
 
-const ALL = new Set(TOOLSETS.map((toolset) => toolset.id));
 
 /**
  * Workspaces `acme` (`api`, `api-2`, `web`) and `beta` (`app`); a real library behind the daemon's
@@ -83,7 +82,7 @@ async function harness(t: TestContext, options: { remotes?: Record<string, strin
   });
   const call = async (name: string, args: Record<string, unknown>, caller?: ThreadCaller, port = new FakeApprovalPort()): Promise<Outcome> => {
     const result: CallToolResult = await executeToolCall(
-      { approvals: port, enabledToolsets: async () => ALL },
+      { approvals: port },
       { name, arguments: args },
       { caller: caller ?? { kind: "external" }, api, signal: new AbortController().signal }
     );

@@ -2,13 +2,13 @@
  * Agent tools routes (unified MCP design 2026-10-15 §9.6), both transports — remote HTTP's bearer
  * hook guards them like every `/api` route:
  *
- * - `GET /api/agent-tools` → `AgentToolsResponse` (Settings › Agent tools);
- * - `PUT /api/agent-tools/settings` `UpdateAgentToolsSettingsRequest` → `AgentToolsResponse`
- *   (409 `REVISION_MISMATCH` on a stale revision);
+ * - `GET /api/agent-tools` → `AgentToolsResponse` (Settings › Agent tools: the grants);
  * - `DELETE /api/agent-tools/grants[?threadId=]` → `RevokeAgentToolGrantsResponse` (Revoke all);
  * - `DELETE /api/agent-tools/grants/:id` → 204 (404 `GRANT_NOT_FOUND`);
- * - `GET` / `PUT agentChatRoutes.agentTools(id)` → `ThreadAgentToolsResponse` (the Tools chip).
+ * - `GET agentChatRoutes.agentTools(id)` → `ThreadAgentToolsResponse` (the Tools chip).
  *
+ * There are no toolset settings to write: every chat tool is on in every chat (older builds'
+ * `PUT /api/agent-tools/settings` and `PUT agentChatRoutes.agentTools(id)` are gone — 404).
  * Every write is the user's: a request carrying an agent or external principal is refused 403
  * `PERMISSION_DENIED`. Refusals answer `{error: {code, message}}`.
  */
@@ -40,19 +40,10 @@ function fail(reply: FastifyReply, error: unknown) {
   throw error;
 }
 
-const NOT_A_PERSON = "Only a person changes agent tool settings and grants.";
+const NOT_A_PERSON = "Only a person revokes agent tool grants.";
 
 export function registerAgentToolsRoutes(app: FastifyInstance, deps: AgentToolsRouteDeps): void {
   app.get(agentToolsRoutes.settings, async () => deps.tools.settingsView());
-
-  app.put(agentToolsRoutes.updateSettings, async (request, reply) => {
-    if (requestPrincipal(request).kind !== "user") return refuse(reply, 403, "PERMISSION_DENIED", NOT_A_PERSON);
-    try {
-      return deps.tools.updateSettings(request.body);
-    } catch (error) {
-      return fail(reply, error);
-    }
-  });
 
   app.delete<{ Querystring: { threadId?: string } }>(agentToolsRoutes.grants, async (request, reply) => {
     if (requestPrincipal(request).kind !== "user") return refuse(reply, 403, "PERMISSION_DENIED", NOT_A_PERSON);
@@ -79,17 +70,6 @@ export function registerAgentToolsRoutes(app: FastifyInstance, deps: AgentToolsR
     const info = deps.thread(request.params.id);
     if (!info) return refuse(reply, 404, "THREAD_NOT_FOUND", "No chat session with that id.");
     return deps.tools.threadView(request.params.id, info);
-  });
-
-  app.put<{ Params: { id: string } }>(pattern(agentChatRoutes.agentTools(":id")), async (request, reply) => {
-    if (requestPrincipal(request).kind !== "user") return refuse(reply, 403, "PERMISSION_DENIED", NOT_A_PERSON);
-    const info = deps.thread(request.params.id);
-    if (!info) return refuse(reply, 404, "THREAD_NOT_FOUND", "No chat session with that id.");
-    try {
-      return deps.tools.updateThreadToolsets(request.params.id, request.body, info);
-    } catch (error) {
-      return fail(reply, error);
-    }
   });
 }
 

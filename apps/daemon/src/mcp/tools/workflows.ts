@@ -15,7 +15,7 @@
 // External callers are full trust (no card); their behaviour is the pre-catalog tools' except where §4/§11 changed it.
 
 import { z } from "zod";
-import { WORKFLOW_NODE_TYPES, WORKFLOW_SECRET_MAX_VALUE_BYTES, WORKFLOW_SECRET_NAME_PATTERN } from "@orquester/config";
+import { WORKFLOW_SECRET_MAX_VALUE_BYTES, WORKFLOW_SECRET_NAME_PATTERN } from "@orquester/config";
 import {
   applyWorkflowPatch,
   savedPromptIdsOf,
@@ -120,8 +120,13 @@ const OUTPUT_WINDOW_BYTES = 48_000;
 /** The longest wait a call may ask for (spec §5.6). */
 const MAX_WAIT_SECONDS = 600;
 
-/** Every Admin tool's chat note (spec §7.2). */
-const ADMIN_NOTE = "Asks the user to approve in the chat (up to 30 min); batch related changes into one call; if denied, don't retry — ask the user.";
+/**
+ * Every Admin tool's chat note (spec §7.2). Short: the chat's instruction block already says to batch related changes
+ * and not to retry a denial.
+ */
+const ADMIN_NOTE = "Needs the user's approval.";
+/** create/update: a dry run is a read (no card). */
+const ADMIN_DRY_RUN_NOTE = "Needs the user's approval, except with dryRun.";
 
 // ---------------------------------------------------------------------------
 // Scope helpers
@@ -507,23 +512,26 @@ async function waitForRunEnd(api: DaemonApi, tap: RunEndTap, runId: string, opts
 // ---------------------------------------------------------------------------
 
 const workflowIdArg = z.string().min(1).describe("The workflow's id (list_workflows).");
-const reasonArg = z.string().max(300).optional().describe("Why, in a sentence: shown to the user on the approval card.");
-const dryRunArg = z.boolean().default(false).describe("Only validate: nothing is saved (returns the problems).");
-const nodeRef = z.string().min(1);
-const positionSchema = z.object({ x: z.number().finite(), y: z.number().finite() }).strict();
-const retrySchema = z.object({ maxTries: z.number().int().min(1).max(10), delaySeconds: z.number().min(0).max(3600) }).strict();
-const nodeTypeSchema = z.enum(WORKFLOW_NODE_TYPES);
-const nodeNameSchema = z.string().regex(WORKFLOW_NODE_NAME_PATTERN, "a block name is a letter, then letters, digits or _ (at most 40)");
+const reasonArg = z.string().max(300).optional().describe("Why, in a sentence: shown on the approval card.");
+const dryRunArg = z.boolean().default(false).describe("Only validate (returns the problems); nothing is saved.");
+/** A block by id or name. A fresh schema per use: a shared one is advertised as a long `$ref` path. */
+const nodeRef = () => z.string().min(1);
+const nodeName = () => z.string().regex(WORKFLOW_NODE_NAME_PATTERN, "a block name is a letter, then letters, digits or _ (at most 40)");
 
+// A block as an author sends it. Its keys are checked here (a typo is refused), but the values of `type`, `position`
+// and `retry` are left to the daemon's own add (`Patcher.addNode` in packages/api/src/workflows/patch.ts, which the
+// create and patch routes and this tool's local replay all run): it refuses an unknown type by listing the types and
+// checks the rest against the stored block schema. Advertising them in full would repeat list_workflow_block_types'
+// contract in every create and edit.
 const nodeInputSchema = z.object({
   id: z.string().min(1).optional(),
-  type: nodeTypeSchema,
-  name: nodeNameSchema.optional(),
-  config: z.record(z.unknown()).optional(),
-  position: positionSchema.optional(),
+  type: z.string().min(1).describe("A type from list_workflow_block_types."),
+  name: nodeName().optional().describe("Minted when omitted."),
+  config: z.record(z.unknown()).optional().describe("Merged over the type's defaults."),
+  position: z.unknown().optional().describe("{x, y}; omit to auto-layout."),
   disabled: z.boolean().optional(),
   notes: z.string().optional(),
-  retry: retrySchema.optional(),
+  retry: z.unknown().optional().describe("{maxTries 1–10, delaySeconds 0–3600}"),
   timeoutMinutes: z.number().positive().optional(),
   projectOverride: z.string().min(1).optional()
 }).strict();
@@ -553,16 +561,16 @@ const settingsSchema = z.object({
 
 const opSchema = z.discriminatedUnion("op", [
   z.object({ op: z.literal("add_node"), node: nodeInputSchema }).strict(),
-  z.object({ op: z.literal("update_node"), node: nodeRef, set: z.record(z.unknown()) }).strict(),
-  z.object({ op: z.literal("remove_node"), node: nodeRef }).strict(),
-  z.object({ op: z.literal("rename_node"), node: nodeRef, to: nodeNameSchema }).strict(),
-  z.object({ op: z.literal("connect"), source: nodeRef, sourceHandle: z.string().min(1).optional(), target: nodeRef }).strict(),
-  z.object({ op: z.literal("disconnect"), edgeId: z.string().min(1).optional(), source: nodeRef.optional(), sourceHandle: z.string().min(1).optional(), target: nodeRef.optional() }).strict(),
+  z.object({ op: z.literal("update_node"), node: nodeRef(), set: z.record(z.unknown()) }).strict(),
+  z.object({ op: z.literal("remove_node"), node: nodeRef() }).strict(),
+  z.object({ op: z.literal("rename_node"), node: nodeRef(), to: nodeName() }).strict(),
+  z.object({ op: z.literal("connect"), source: nodeRef(), sourceHandle: z.string().min(1).optional(), target: nodeRef() }).strict(),
+  z.object({ op: z.literal("disconnect"), edgeId: z.string().min(1).optional(), source: nodeRef().optional(), sourceHandle: z.string().min(1).optional(), target: nodeRef().optional() }).strict(),
   z.object({ op: z.literal("set_settings"), settings: settingsSchema }).strict(),
   z.object({ op: z.literal("set_project"), project: projectArgSchema }).strict(),
   z.object({ op: z.literal("set_enabled"), enabled: z.boolean() }).strict(),
   z.object({ op: z.literal("set_name"), name: z.string().min(1).max(WORKFLOW_LIMITS.maxNameLength), description: z.string().nullable().optional() }).strict(),
-  z.object({ op: z.literal("set_pinned"), node: nodeRef, output: z.unknown() }).strict()
+  z.object({ op: z.literal("set_pinned"), node: nodeRef(), output: z.unknown() }).strict()
 ]);
 type OpArg = z.infer<typeof opSchema>;
 
@@ -753,8 +761,8 @@ function blockTypeView(t: WorkflowBlockTypeInfo, withSchema: boolean): Record<st
 const listBlockTypes = defineTool({
   name: "list_workflow_block_types",
   title: "List workflow block types",
-  description: "Read this before authoring a workflow: every block type (config JSON schema, example, output shape, output handles), the {{ }} expression guide and an authoring guide with a worked example (the Jira fixer). Pass `type` for that block's full contract: its whole config schema (even when the list omits schemas: configSchemasOmitted) and its guide sections (arguments, result, limits…).",
-  input: { type: nodeTypeSchema.optional().describe("Only this block type, with its full contract: the whole config schema and its guide sections.") },
+  description: "Read this before authoring a workflow: every block type (config schema, example, output shape and handles), the {{ }} expression guide and an authoring guide with a worked example. `type` returns one block's full contract: its whole config schema (even one the list omitted: configSchemasOmitted) and its guide sections.",
+  input: { type: z.string().min(1).optional().describe("Only this block type.") },
   audiences: ["external", "chat"],
   toolset: "workflow-authoring",
   tier: "read",
@@ -766,7 +774,7 @@ const listBlockTypes = defineTool({
     const types = Array.isArray(body.types) ? body.types : [];
     if (args.type !== undefined) {
       const one = types.find((t) => t.type === args.type);
-      if (!one) throw new ToolError("NOT_FOUND", `The daemon lists no block type "${args.type}".`);
+      if (!one) throw new ToolError("NOT_FOUND", `The daemon lists no block type "${clipText(args.type, MAX_ECHO_CHARS)}" (types: ${types.map((t) => t.type).join(", ")}).`);
       // Its contract (arguments, result, limits…) too: the full listing carries every contract in the
       // authoring guide already. An older daemon sends none.
       const guide = Array.isArray(one.guide) && one.guide.length > 0 ? { guide: one.guide } : {};
@@ -799,7 +807,7 @@ async function listProject(ctx: ScopeContext, project: string | undefined): Prom
 const listWorkflows = defineTool({
   name: "list_workflows",
   title: "List automated workflows",
-  description: "A project's automated workflows: id, name, enabled, revision, project, trigger texts, last run, active runs and validation error count.",
+  description: "A project's automated workflows: id, name, enabled, revision, triggers, last run, active runs and error count.",
   chatNote: "Default: this chat's project.",
   externalNote: "Without project: every workflow.",
   input: { project: z.string().optional().describe("An absolute path or \"<workspace>/<project>\".") },
@@ -834,10 +842,10 @@ const listWorkflows = defineTool({
 const getWorkflow = defineTool({
   name: "get_workflow",
   title: "Get a workflow",
-  description: "One workflow's definition (blocks with ids, names and configs; edges; settings), its revision (update_workflow and run_workflow need it) and its validation problems. `connections` names every edge by block name. Long texts are cut to fit (truncatedFields); `node` reads one block with more room.",
+  description: "A workflow's definition (blocks, edges, settings), its revision (update_workflow and run_workflow need it) and validation problems. `connections` lists edges by block name. Long texts are cut to fit (truncatedFields); `node` reads one block with more room.",
   input: {
     workflowId: workflowIdArg,
-    node: z.string().min(1).optional().describe("Only this block (id or name), its long texts cut later.")
+    node: z.string().min(1).optional().describe("Only this block (id or name).")
   },
   audiences: ["external", "chat"],
   toolset: "reads",
@@ -885,13 +893,13 @@ function dryRunResult(problems: readonly WorkflowProblem[], union: WorkflowUnion
 }
 
 const createInput = {
-  name: z.string().min(1).max(WORKFLOW_LIMITS.maxNameLength).describe("The workflow's name."),
+  name: z.string().min(1).max(WORKFLOW_LIMITS.maxNameLength),
   description: z.string().optional().describe("What it does, in a sentence."),
-  project: projectArgSchema.describe("Where it runs: {kind:\"existing\", project} or {kind:\"temp\", workspace, source:{kind:\"empty\"}|{kind:\"clone\", url, ref?}} (fresh per run)."),
-  settings: settingsSchema.optional().describe("overlap (skip|queue|parallel), maxConcurrent, timezone (IANA; default the host's), runTimeoutMinutes, notify, keepFailedTempDays."),
-  nodes: z.array(nodeInputSchema).max(WORKFLOW_LIMITS.maxNodes).describe("Blocks {type, name?, config?, position?, disabled?, notes?, retry?, timeoutMinutes?, projectOverride?}; config merges over the type's defaults."),
-  edges: z.array(z.object({ source: nodeRef, sourceHandle: z.string().min(1).optional(), target: nodeRef }).strict()).max(WORKFLOW_LIMITS.maxEdges).default([]).describe("Connections {source, sourceHandle?, target} by block name or id; sourceHandle defaults to success."),
-  enabled: z.boolean().default(false).describe("Enable its triggers at once (refused while it has errors). Default false."),
+  project: projectArgSchema.describe("Where it runs: an existing project (\"<workspace>/<project>\"), or temp: a fresh project per run."),
+  settings: settingsSchema.optional().describe("Defaults: overlap skip, maxConcurrent 2, timezone the host's (IANA)."),
+  nodes: z.array(nodeInputSchema).max(WORKFLOW_LIMITS.maxNodes),
+  edges: z.array(z.object({ source: nodeRef(), sourceHandle: z.string().min(1).optional(), target: nodeRef() }).strict()).max(WORKFLOW_LIMITS.maxEdges).default([]).describe("By block name or id; sourceHandle defaults to success."),
+  enabled: z.boolean().default(false).describe("Enable its triggers at once (refused while it has errors)."),
   dryRun: dryRunArg,
   reason: reasonArg
 };
@@ -899,8 +907,8 @@ const createInput = {
 const createWorkflow = defineTool({
   name: "create_workflow",
   title: "Create a workflow",
-  description: "Create an automated workflow from named blocks and edges (call list_workflow_block_types first). Edges and {{ nodes.<Name>.output… }} use block names; positions are optional (auto-layout); a name is minted for a block without one. Created disabled unless enabled:true. dryRun:true only validates. Returns the definition, its revision and validation problems.",
-  chatNote: ADMIN_NOTE,
+  description: "Create an automated workflow from blocks and edges (read list_workflow_block_types first). Edges and {{ nodes.<Name>.output… }} use block names. Created disabled unless enabled:true. dryRun:true only validates. Returns the definition, its revision and validation problems.",
+  chatNote: ADMIN_DRY_RUN_NOTE,
   input: createInput,
   chatOnlyInput: ["reason"],
   audiences: ["external", "chat"],
@@ -960,12 +968,12 @@ const createWorkflow = defineTool({
 const updateWorkflow = defineTool({
   name: "update_workflow",
   title: "Edit a workflow",
-  description: "Edit a workflow with atomic patch ops, in order (prefer this to recreating it). `revision` must be get_workflow's current one (else REVISION_CONFLICT: re-read). Blocks are named by id or name. Ops: add_node {node}; update_node {node, set:{name?, config?, disabled?, notes?, retry?, timeoutMinutes?, projectOverride?, position?}} (config merged one level deep, null clears); remove_node {node}; rename_node {node, to} (rewrites references); connect {source, sourceHandle?, target}; disconnect {edgeId} or {source, sourceHandle?, target}; set_settings {settings}; set_project {project}; set_enabled {enabled}; set_name {name, description?}; set_pinned {node, output|null}. dryRun:true only validates the result. A failing op is named by index; then nothing is saved.",
-  chatNote: ADMIN_NOTE,
+  description: "Edit a workflow with patch ops, applied in order and atomically (prefer this to recreating it). `revision` must be the current one (else REVISION_CONFLICT: re-read with get_workflow). Blocks are named by id or name. update_node's `set` takes name, config, disabled, notes, retry, timeoutMinutes, projectOverride, position; config merges one level deep; null clears a key. rename_node rewrites references to the block. disconnect takes edgeId, or source and target. set_pinned with output null unpins. dryRun:true only validates. A failing op is named by index and nothing is saved.",
+  chatNote: ADMIN_DRY_RUN_NOTE,
   input: {
     workflowId: workflowIdArg,
-    revision: z.number().int().nonnegative().describe("The revision get_workflow (or the last write) returned."),
-    ops: z.array(opSchema).min(1).max(500).describe("The patch ops, applied in order (see the description)."),
+    revision: z.number().int().nonnegative().describe("From get_workflow or the last write."),
+    ops: z.array(opSchema).min(1).max(500),
     dryRun: dryRunArg,
     reason: reasonArg
   },
@@ -1083,11 +1091,11 @@ async function countRuns(api: DaemonApi, workflowId: string): Promise<{ total: n
 const deleteWorkflow = defineTool({
   name: "delete_workflow",
   title: "Delete a workflow",
-  description: "Delete a workflow for good: cancels its active runs and deletes its run history and its own secrets. Requires confirm: true. To pause one instead, update_workflow [{op:\"set_enabled\", enabled:false}].",
+  description: "Delete a workflow for good, with its run history and own secrets; its active runs are cancelled. To pause it instead: update_workflow op set_enabled false.",
   chatNote: ADMIN_NOTE,
   input: {
     workflowId: workflowIdArg,
-    confirm: z.literal(true).describe("Must be true: deleting cannot be undone."),
+    confirm: z.literal(true).describe("Must be true: this cannot be undone."),
     reason: reasonArg
   },
   chatOnlyInput: ["reason"],
@@ -1152,15 +1160,15 @@ const PREVIEW_TRUNCATION_NOTE = "Results listed in truncatedFields were cut to f
 const previewExpression = defineTool({
   name: "preview_expression",
   title: "Preview a {{ }} template",
-  description: "Render {{ … }} templates against a workflow's recorded data without running anything: returns each rendered text (or raw value), the warnings a run would record (a path that read nothing, a filter that failed) and parse errors. `node` is the block the template belongs to — it decides `input` and hides that block and its downstream. Data: a past run (runId; default the latest run that reached `node`) and/or pinned outputs (usePinned). `available` outlines what the context holds (input, trigger, every readable block's output keys, secret names) for discovering paths. Secret values never appear: {{ secrets.X }} renders as «secret:X».",
+  description: "Render {{ }} templates against a workflow's recorded data (a past run and/or pinned outputs) without running anything. Returns each result, the warnings a run would record, parse errors, and `available`: what the context holds (input, trigger, readable blocks' output keys, secret names) for finding paths. Secrets render as «secret:NAME».",
   input: {
     workflowId: workflowIdArg,
-    template: z.string().max(EXPRESSION_PREVIEW_LIMITS.maxTemplateLength).optional().describe("One template, e.g. \"{{ nodes.Claude.output.text }}\". Or pass templates."),
-    templates: z.array(z.string().max(EXPRESSION_PREVIEW_LIMITS.maxTemplateLength)).min(1).max(EXPRESSION_PREVIEW_LIMITS.maxTemplates).optional().describe(`Several templates at once (at most ${EXPRESSION_PREVIEW_LIMITS.maxTemplates}), rendered against the same data.`),
-    node: z.string().min(1).optional().describe("The block (id or name) whose field holds the template: it decides `input`. Omit and `input` reads nothing."),
-    runId: z.string().min(1).optional().describe("Read this run's recorded outputs. Default: the latest run that reached `node`, else the latest run."),
-    usePinned: z.boolean().default(false).describe("Pinned outputs (set_pinned) replace recorded ones, as a test run uses them. Works with no run on record."),
-    mode: z.enum(["text", "value"]).default("text").describe("\"text\": as a text field renders it. \"value\": a lone {{ … }} keeps its raw value (rule sides, Stop values, sub-workflow input).")
+    template: z.string().max(EXPRESSION_PREVIEW_LIMITS.maxTemplateLength).optional().describe("One template, e.g. \"{{ nodes.Claude.output.text }}\"; or pass templates."),
+    templates: z.array(z.string().max(EXPRESSION_PREVIEW_LIMITS.maxTemplateLength)).min(1).max(EXPRESSION_PREVIEW_LIMITS.maxTemplates).optional(),
+    node: z.string().min(1).optional().describe("The block (id or name) holding the template: it sets `input` and hides itself and its downstream. Omitted: `input` is empty."),
+    runId: z.string().min(1).optional().describe("Default: the latest run that reached `node`, else the latest run."),
+    usePinned: z.boolean().default(false).describe("Pinned outputs (set_pinned) replace recorded ones, as in a test run; works with no run."),
+    mode: z.enum(["text", "value"]).default("text").describe("text: as a text field renders. value: a lone {{ }} keeps its raw value (rule sides, Stop values, sub-workflow input).")
   },
   audiences: ["external", "chat"],
   toolset: "workflow-authoring",
@@ -1279,15 +1287,15 @@ function revisionConflict(current: number, asked: number): ToolError {
 const runWorkflow = defineTool({
   name: "run_workflow",
   title: "Run a workflow",
-  description: "Start a run of the workflow at `revision` (get_workflow's; refused if it changed since) now — manual, and it works while disabled. Returns runId; wait:true waits (≤ timeoutSeconds, bus-driven) for the run to end and returns each block's status, error and output (capped). The overlap policy may skip it (skipped: \"overlap\"); force:true runs anyway. Agent blocks can take hours: prefer get_workflow_runs {runId, waitSeconds} later.",
+  description: "Run the workflow now (works while disabled). Returns runId; wait:true waits up to timeoutSeconds for the end and returns each block's status, error and output (capped). The overlap policy may skip it (skipped: \"overlap\"); force:true runs anyway. Agent blocks can take hours: prefer get_workflow_runs {runId, waitSeconds} later.",
   chatNote: ADMIN_NOTE,
   input: {
     workflowId: workflowIdArg,
-    revision: z.number().int().nonnegative().describe("The revision you read (get_workflow): the run is refused if the workflow changed since."),
-    input: z.unknown().optional().describe("JSON handed to the trigger: {{ trigger.input }} in the blocks."),
-    wait: z.boolean().default(false).describe("Wait for the run to end (default false)."),
-    timeoutSeconds: z.number().int().min(1).max(MAX_WAIT_SECONDS).default(300).describe("How long wait:true waits (max 600)."),
-    force: z.boolean().default(false).describe("Run even when the overlap policy would skip it."),
+    revision: z.number().int().nonnegative().describe("From get_workflow: refused if the workflow changed since."),
+    input: z.unknown().optional().describe("JSON for the trigger: {{ trigger.input }}."),
+    wait: z.boolean().default(false),
+    timeoutSeconds: z.number().int().min(1).max(MAX_WAIT_SECONDS).default(300),
+    force: z.boolean().default(false),
     reason: reasonArg
   },
   chatOnlyInput: ["reason"],
@@ -1531,7 +1539,7 @@ const cancelRun = defineTool({
 const listSecrets = defineTool({
   name: "list_workflow_secrets",
   title: "List workflow secret names",
-  description: "Workflow secret NAMES, never values: the global ones, plus one workflow's own with workflowId. Blocks read a secret as {{ secrets.NAME }} (HTTP fields, shell env values) or secrets.NAME in code.",
+  description: "Workflow secret NAMES (never values): the global ones, plus a workflow's own with workflowId. Blocks read one as {{ secrets.NAME }} (HTTP fields, shell env values) or secrets.NAME in code.",
   input: { workflowId: z.string().min(1).optional().describe("Also list this workflow's own secrets.") },
   audiences: ["external", "chat"],
   toolset: "workflow-authoring",
@@ -1557,14 +1565,14 @@ const SECRET_FIELD = "value";
 const setSecret = defineTool({
   name: "set_workflow_secret",
   title: "Set a workflow secret",
-  description: "Create or replace a workflow secret, or delete it (delete:true): with workflowId that workflow's own, else global. Write-only: a value is never shown again. Names: A-Z, 0-9 and _, starting with a letter.",
-  chatNote: `You never see or send the value: the user types it into the approval card. ${ADMIN_NOTE}`,
+  description: "Create, replace or delete (delete:true) a workflow secret: a workflow's own with workflowId, else global. Write-only: the value is never shown again.",
+  chatNote: "You never see or send the value: the user types it into the approval card.",
   externalNote: "The value you pass stays in your transcript and tool logs: prefer asking the user to set it in Orquester.",
   input: {
-    name: z.string().regex(WORKFLOW_SECRET_NAME_PATTERN, "a secret name is A-Z, 0-9 and _, starting with a letter (at most 64)").describe("The secret's name, e.g. JIRA_TOKEN."),
+    name: z.string().regex(WORKFLOW_SECRET_NAME_PATTERN, "a secret name is A-Z, 0-9 and _, starting with a letter (at most 64)").describe("e.g. JIRA_TOKEN"),
     workflowId: z.string().min(1).optional().describe("Scope it to this workflow; omit for a global secret."),
-    delete: z.boolean().default(false).describe("Delete the secret instead of setting it."),
-    value: z.string().min(1).refine((v) => Buffer.byteLength(v, "utf8") <= WORKFLOW_SECRET_MAX_VALUE_BYTES, "a secret value is at most 64 KiB").optional().describe("The value (never shown again). Required unless delete."),
+    delete: z.boolean().default(false),
+    value: z.string().min(1).refine((v) => Buffer.byteLength(v, "utf8") <= WORKFLOW_SECRET_MAX_VALUE_BYTES, "a secret value is at most 64 KiB").optional().describe("Required unless delete."),
     reason: reasonArg
   },
   chatOnlyInput: ["reason"],

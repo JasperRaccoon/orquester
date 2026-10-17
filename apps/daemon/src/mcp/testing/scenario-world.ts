@@ -85,7 +85,7 @@ import { Broadcaster } from "../../broadcaster.ts";
 import { GitService } from "../../git.ts";
 import { registerSavedPromptRoutes, SavedPromptsService } from "../../saved-prompts.ts";
 import { registerSessionToolsRoute } from "../../session-tools/route.ts";
-import { registerSessionToolsManifestRoute, SessionToolsRefresher } from "../../session-tools/toolset-refresh.ts";
+import { registerSessionToolsManifestRoute, SessionToolsRefresher } from "../../session-tools/session-tools-refresh.ts";
 import { ChatThreadUsageScanner } from "../../usage-chat-threads.ts";
 import { UsageTokensScanner } from "../../usage-tokens.ts";
 import { createWorkflowDaemon, type WorkflowDaemon } from "../../workflows/daemon-wiring.ts";
@@ -178,7 +178,7 @@ export class FakeHost {
   readonly threads = new Map<string, FakeThread>();
   /** Every accepted turn post, in order. */
   readonly posts: { sessionId: string; body: Record<string, any> }[] = [];
-  /** Manifests pushed to the host (an in-session toolset refresh). */
+  /** Manifests pushed to the host (applied in-session). */
   readonly pushes: { threadId: string; tools: string[]; deny: string[] }[] = [];
   private readonly receipts = new Map<string, { status: number; body: unknown }>();
   private readonly postWaiters = new Map<string, (() => void)[]>();
@@ -549,7 +549,7 @@ export async function scenarioWorld(seed: WorkspaceSeed): Promise<ScenarioWorld>
   const remote = Fastify({ logger: false });
   let internalApi!: InjectDaemonApi;
 
-  // Agent tools: cards, grants, toolsets (index.ts umcp:t3).
+  // Agent tools: cards and grants (index.ts umcp:t3).
   const runtime = createAgentToolsRuntime({
     baseDir: appdir,
     publish: (channel, type, payload) => broadcaster.publish(channel, type, payload),
@@ -621,7 +621,7 @@ export async function scenarioWorld(seed: WorkspaceSeed): Promise<ScenarioWorld>
     { homes, accountHomes: async () => [], projects: () => listProjectDirs(workspacesDir), workspacesRoot: () => workspacesDir, logger: quiet }
   );
 
-  // The chat manifest and toolset pushes (umcp:t6); the fake host applies every push live.
+  // The chat manifest and its pushes (umcp:t6); the fake host applies every push live.
   const refresher = new SessionToolsRefresher({
     thread: (id) => {
       const tab = host.tabs.get(id);
@@ -629,8 +629,6 @@ export async function scenarioWorld(seed: WorkspaceSeed): Promise<ScenarioWorld>
       return { agentId: tab.refId as ScenarioAgent, home: "system", projectPath: tab.projectPath, canonicalProjectPath: tab.projectPath ? canonicalProjectPath(tab.projectPath) : "" };
     },
     openThreads: () => [...host.tabs.keys()],
-    resolvedToolsets: (id, agent) => runtime.tools.resolvedToolsets(id, agent),
-    agentToolsEnabled: () => runtime.tools.snapshot().enabled,
     catalog: () => catalogFor("chat"),
     api: () => internalApi,
     pushToHost: async (threadId, manifest) => {
@@ -639,10 +637,6 @@ export async function scenarioWorld(seed: WorkspaceSeed): Promise<ScenarioWorld>
     },
     logger: quiet
   });
-  runtime.tools.setAdvertisedToolsets((id) => refresher.advertisedToolsets(id));
-  const offToolsetsChanged = runtime.tools.onToolsetsChanged((id) => refresher.toolsetsChanged(id));
-  const previousToolsetApproved = executorPorts.onToolsetApproved;
-  executorPorts.onToolsetApproved = (caller, toolset, signal) => refresher.toolsetApproved(caller, toolset, signal);
 
   // Token usage (the Cost tab's scanner over this world's home) and the quota snapshot.
   const usageTokens = new UsageTokensScanner({ userhome: home, cacheFile: usageTokensCacheFile(appdir), now: () => Date.now() });
@@ -811,8 +805,6 @@ export async function scenarioWorld(seed: WorkspaceSeed): Promise<ScenarioWorld>
     async close() {
       if (closed) return;
       closed = true;
-      offToolsetsChanged();
-      executorPorts.onToolsetApproved = previousToolsetApproved;
       refresher.stop();
       disconnectExecutor();
       await runtime.shutdown();

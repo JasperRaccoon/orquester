@@ -5,8 +5,8 @@
  * (the agent host loads it statically); only the executor runs a tool; and the byte budgets,
  * measured on `tools/list` exactly as an MCP client receives it — for every tool, no exemption.
  *
- * Counts (spec §1.4, §9.1): 41 external tools, 45 chat tools (41 shared + 4 chat-only), 22 on by
- * default (core 17 + reads 5) for every agent.
+ * Counts (spec §1.4, §9.1): 41 external tools, 44 chat tools (41 shared + 3 chat-only), every one
+ * of them advertised to every chat (toolsets only group them).
  */
 
 import assert from "node:assert/strict";
@@ -19,8 +19,9 @@ import type { z } from "zod";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { ADMIN_FAMILIES, chatToolNames, isToolsetId, TOOLSETS, toolsetById, toolsetOfTool } from "@orquester/api";
+import { ADMIN_FAMILIES, chatToolNames, isToolsetId, toolsetById, toolsetOfTool } from "@orquester/api";
 
+import { compactToolEntry } from "../../agent-host/session-tools/definitions.ts";
 import { externalMcpToolNames } from "../server.ts";
 import { audienceDescription, audienceSchema, audienceShape } from "../executor.ts";
 import type { AnyOrquesterTool, Audience } from "./contract.ts";
@@ -28,8 +29,8 @@ import { buildCatalog, CATALOG, catalogFor, TOOL_NAME_PATTERN, toolByName } from
 
 const SRC = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
-/** The chat-only tools (spec §4 rows 42–45). */
-const CHAT_ONLY = ["html_preview", "html_render", "request_secret", "request_toolset"];
+/** The chat-only tools (spec §4 rows 42–44; `request_toolset` is gone). */
+const CHAT_ONLY = ["html_preview", "html_render", "request_secret"];
 
 test("names, audiences, toolsets, tiers: well-formed and unique; Admin-capable tools carry a family and a preview", () => {
   const names = new Set<string>();
@@ -78,20 +79,17 @@ test("TOOLSETS agree with the catalog: every chat tool sits in the toolset TOOLS
   assert.deepEqual([...chatToolNames()].sort(), catalogFor("chat").map((tool) => tool.name).sort());
 });
 
-test("counts: 41 external, 45 chat (the 41 plus 4 chat-only), 22 on by default for every agent, 17 in core", () => {
+test("counts: 41 external, 44 chat (the 41 plus 3 chat-only), 16 in core", () => {
   const external = catalogFor("external").map((tool) => tool.name);
   const chat = catalogFor("chat").map((tool) => tool.name);
   assert.equal(external.length, 41);
-  assert.equal(chat.length, 45);
+  assert.equal(chat.length, 44);
   assert.deepEqual(externalMcpToolNames(), external);
   assert.deepEqual(chat.filter((name) => !external.includes(name)), CHAT_ONLY);
   assert.deepEqual(external.filter((name) => !chat.includes(name)), [], "every external tool is a chat tool too");
-  assert.equal(CATALOG.length, 45);
-  for (const agent of ["claude", "codex", "grok", "opencode"] as const) {
-    const on = new Set(TOOLSETS.filter((toolset) => toolset.locked || toolset.defaults[agent]).map((toolset) => toolset.id));
-    assert.equal(catalogFor("chat").filter((tool) => on.has(tool.toolset)).length, 22, agent);
-  }
-  assert.equal(catalogFor("chat").filter((tool) => tool.toolset === "core").length, 17);
+  assert.equal(CATALOG.length, 44);
+  assert.equal(toolByName("request_toolset", "chat"), undefined);
+  assert.equal(catalogFor("chat").filter((tool) => tool.toolset === "core").length, 16);
 });
 
 // ---------------------------------------------------------------------------
@@ -168,7 +166,6 @@ const PURE_MODULES = new Set([
   "mcp/tools/session-access.ts",
   "mcp/tools/sessions.ts",
   "mcp/tools/todos.ts",
-  "mcp/tools/toolsets.ts",
   "mcp/tools/usage.ts",
   "mcp/tools/visuals.ts",
   "mcp/tools/watch.ts",
@@ -267,7 +264,9 @@ async function listTools(tools: readonly AnyOrquesterTool[], audience: Audience)
   const client = new Client({ name: "budget", version: "test" });
   await Promise.all([server.connect(serverSide), client.connect(clientSide)]);
   try {
-    const { tools: listed } = await client.listTools();
+    const { tools: raw } = await client.listTools();
+    // The chat list as the agent host serves it (`definitions.ts` compacts every entry).
+    const listed = audience === "chat" ? raw.map(compactToolEntry) : raw;
     return listed.map((entry) => ({ name: entry.name, bytes: Buffer.byteLength(JSON.stringify(entry), "utf8"), description: entry.description ?? "", listed: entry }));
   } finally {
     await client.close();
@@ -296,7 +295,7 @@ function describeTexts(schema: z.ZodTypeAny | undefined, out: string[] = []): st
   return out;
 }
 
-test("byte budgets (§9.5): every tool, every description and field text; the external set, the default chat set and core", async () => {
+test("byte budgets (§9.5): every tool, every description and field text; the external set and the whole chat set", async () => {
   for (const audience of ["external", "chat"] as Audience[]) {
     const tools = catalogFor(audience);
     const rows = await listTools(tools, audience);
@@ -315,14 +314,9 @@ test("byte budgets (§9.5): every tool, every description and field text; the ex
         assert.deepEqual(Object.keys(meta ?? {}).sort(), ["orquester/tier", "orquester/toolset"], row.name);
       }
     } else {
-      // Spec §9.5: the default set (core + reads) ≤ 32 768, core alone ≤ 25 600 — for every agent.
-      for (const agent of ["claude", "codex", "grok", "opencode"] as const) {
-        const on = new Set(TOOLSETS.filter((toolset) => toolset.locked || toolset.defaults[agent]).map((toolset) => toolset.id));
-        const defaults = rows.filter((row) => on.has(toolByName(row.name)!.toolset));
-        assert.ok(total(defaults) <= 32_768, `${agent}: default chat tools/list is ${total(defaults)} bytes`);
-      }
-      const core = rows.filter((row) => toolByName(row.name)!.toolset === "core");
-      assert.ok(total(core) <= 25_600, `core alone is ${total(core)} bytes`);
+      // Every chat gets every chat tool: the whole chat set, as the host serves it (compacted), is the one budget (≤ 56 KiB).
+      assert.equal(rows.length, catalogFor("chat").length);
+      assert.ok(total(rows) <= 57_344, `chat tools/list is ${total(rows)} bytes`);
       for (const row of rows) assert.equal((row.listed as { _meta?: unknown })._meta, undefined, "chat entries carry no _meta");
     }
   }

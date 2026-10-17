@@ -1,6 +1,6 @@
 /**
  * The Orquester tool contract (unified MCP design 2026-10-15 §3.2): every tool is defined once,
- * declares its audiences, chat tier, toolset and scope claim, and is run only by the executor
+ * declares its audiences, chat tier, toolset (a grouping tag) and scope claim, and is run only by the executor
  * (`../executor.ts`) — for the external `/mcp` server and the in-chat `orquester` server alike.
  *
  * Types and the identity helper only. This module is reachable from `catalog/index.ts`, which the
@@ -36,8 +36,6 @@ export type Tier = ToolTier;
  * `ToolError(code, message)`.
  */
 export const ORQUESTER_TOOL_ERROR_CODES = {
-  /** The tool exists but its toolset is off in this chat; the message names the toolset and suggests `request_toolset`. */
-  TOOL_NOT_ENABLED: "TOOL_NOT_ENABLED",
   /** No tool of that name for this audience. */
   TOOL_NOT_FOUND: "TOOL_NOT_FOUND",
   /** The user denied the card; the message quotes their reason. */
@@ -54,8 +52,6 @@ export const ORQUESTER_TOOL_ERROR_CODES = {
   PROJECT_NOT_FOUND: "PROJECT_NOT_FOUND",
   /** An Admin call from a workflow-owned chat (§5.4): never a card. */
   ADMIN_NOT_AVAILABLE: "ADMIN_NOT_AVAILABLE",
-  /** `request_toolset` for a toolset the user denied in the last 30 minutes. */
-  TOOLSET_DECLINED: "TOOLSET_DECLINED",
   /** `MAX_PENDING_TOOL_APPROVALS_PER_THREAD` cards already wait in this chat: wait for answers, batch changes. */
   APPROVAL_LIMIT: "APPROVAL_LIMIT"
 } as const satisfies Record<string, string> & { APPROVAL_LIMIT: typeof TOOL_APPROVAL_LIMIT };
@@ -227,8 +223,6 @@ export interface ApprovalRequest {
   workflowId?: string;
   /** `cross-project` grants: the target project. */
   targetProjectPath?: string;
-  /** Kind `toolset` (`request_toolset`): the toolset the card turns on for the chat. Required for that kind. */
-  toolset?: ToolsetId;
   /** `workflows` family raised by a saved-prompt edit a workflow references (`ApprovalPreview`): never grantable. */
   workflowReferencedPrompt?: boolean;
   /** `ScopeClaim.pendingProjects`: workflow temp projects not created yet, by workspace — never grantable. */
@@ -291,29 +285,6 @@ export interface ApprovalPort {
 // The call context
 // ---------------------------------------------------------------------------
 
-/**
- * After an APPROVED toolset card, what the chat transport did with the change (Task 6's refresh
- * answer, awaited before the call resumes): `now` — the live session has the tools; `after-restart`
- * — a restart at the next idle point is pending and the automatic continue turn is scheduled;
- * `pending` — the change waits for the session's next start (no host answer, a superseded push, no
- * live session): nothing restarts or continues on its own.
- */
-export type ToolsetApplyOutcome = "now" | "after-restart" | "pending";
-
-/** A toolset card's outcome; `applied` only on an approved real card the transport answered for. */
-export type ToolsetCardOutcome = ApprovalOutcome & { applied?: ToolsetApplyOutcome };
-
-/** What `request_toolset` asks the executor to show (`CallContext.requestToolsetCard`). */
-export interface ToolsetCardInput {
-  toolset: ToolsetId;
-  /** One line, composed by the tool from structured data ("Claude asks to enable Workflow authoring for this chat"). */
-  title: string;
-  /** The toolset label, its tools with tiers. */
-  sections: ApprovalPreviewSection[];
-  /** The agent's reason, shown labelled as its words. */
-  reason?: string;
-}
-
 export interface CallContext {
   /** The daemon's own REST API, in-process: every gate the GUI meets applies by construction. */
   api: DaemonApi;
@@ -340,13 +311,6 @@ export interface CallContext {
   };
   /** `request_secret`'s port; absent where none is wired (tests). */
   secretRequests?: SessionSecretRequests;
-  /**
-   * Chat callers only (absent for external ones): the ONE way a tool raises a toolset card
-   * (`request_toolset`, spec §9.3). The executor owns the `ApprovalPort`, so it opens the card for
-   * the calling chat — kind and family `toolset`, `ApprovalRequest.toolset` set, no grant options —
-   * and refuses a workflow-owned caller before any card (§5.4).
-   */
-  requestToolsetCard?(input: ToolsetCardInput): Promise<ToolsetCardOutcome>;
   /**
    * Set when an OLD agent host called a legacy chat name that the daemon aliases onto this tool
    * (`session-tools/legacy-aliases.ts`, spec §14.1) and the alias keeps the old semantics a mapped
@@ -397,6 +361,7 @@ export interface OrquesterTool<Shape extends z.ZodRawShape = z.ZodRawShape> {
   /** Keys stripped from the chat schema. */
   externalOnlyInput?: readonly (keyof Shape)[];
   audiences: readonly Audience[];
+  /** The group it is filed under (`TOOLSETS`; external `_meta["orquester/toolset"]`). Never a switch: every chat tool is on in every chat. */
   toolset: ToolsetId;
   /**
    * The chat tier, fixed or per call: from the arguments (e.g. `dryRun` → read) and the resolved

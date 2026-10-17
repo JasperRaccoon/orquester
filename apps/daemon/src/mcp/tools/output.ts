@@ -228,12 +228,12 @@ async function toolOutput(api: DaemonApi, args: { sessionId: string; itemId: str
 const readToolOutput = defineTool({
   name: "read_tool_output",
   title: "Read a tool's full output",
-  description: "A tool call's whole output, as the GUI's \"Load full output\": itemId = a tool row's outputItemId from read_transcript. kind: command-output (so far if running; only part if truncated), message or payload (JSON). Read in UTF-8 byte windows: while nextOffset is present, call again with offset = nextOffset.",
+  description: "A tool call's whole output. kind: command-output (so far if running; partial if truncated), message or payload (JSON). Read in UTF-8 byte windows: while nextOffset is present, call again with offset = nextOffset.",
   input: {
     sessionId: sessionIdField,
     itemId: z.string().min(1).describe("A tool row's outputItemId from read_transcript."),
-    offset: z.number().int().min(0).default(0).describe("UTF-8 byte offset: 0, or the last result's nextOffset."),
-    maxBytes: z.number().int().min(1).max(MAX_OUTPUT_BYTES).default(DEFAULT_OUTPUT_BYTES).describe(`Most bytes of text (max ${MAX_OUTPUT_BYTES}); fewer when one result cannot hold them.`)
+    offset: z.number().int().min(0).default(0),
+    maxBytes: z.number().int().min(1).max(MAX_OUTPUT_BYTES).default(DEFAULT_OUTPUT_BYTES).describe("Fewer when one result cannot hold them.")
   },
   audiences: ["external", "chat"],
   toolset: "chat-extras",

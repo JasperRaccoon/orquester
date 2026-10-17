@@ -27,7 +27,7 @@ import {
 } from "../agent-host/host-protocol.ts";
 import { AgentChatService, FORK_CONFIRM_MAX_BACKOFF_MS, FORK_CONFIRM_MAX_REFUSALS, forkIdFor } from "./service.ts";
 import { realpath as realpathOf } from "node:fs/promises";
-import { TOOLSET_IDS, type ForkSessionRequest } from "@orquester/api";
+import type { ForkSessionRequest } from "@orquester/api";
 import type { CallerPrincipal } from "@orquester/api/agent-chat";
 import type { DaemonApi } from "../mcp/daemon-api.ts";
 import { FakeApprovalPort } from "../mcp/catalog/approval-double.ts";
@@ -2059,7 +2059,7 @@ test("fork_session through the fork route's real principal gate and this service
   };
   const fork = async (callerId: string, args: Record<string, unknown>, workflowOwned = false) => {
     const result = await executeToolCall(
-      { approvals: new FakeApprovalPort(), enabledToolsets: async () => new Set(TOOLSET_IDS), lookup: (name, audience) => toolByName(name, audience) },
+      { approvals: new FakeApprovalPort(), lookup: (name, audience) => toolByName(name, audience) },
       { name: "fork_session", arguments: args },
       { caller: { kind: "thread", threadId: callerId, title: "Chat", projectPath: project, workspace: "acme", cwd: project, agentId: "opencode", callId: `c-${order}`, runtimeMode: "full-access", planning: false, workflowOwned, exchange: null }, api, signal: new AbortController().signal }
     );

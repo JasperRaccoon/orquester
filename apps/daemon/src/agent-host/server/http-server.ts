@@ -866,7 +866,7 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
       return;
     }
 
-    // Unified MCP §9.3: the daemon's new manifest for this thread (its toolsets changed). Applied
+    // Unified MCP §9.3: the daemon's new manifest for this thread. Applied
     // in-session where the provider re-lists, else at the session's next idle point; never a turn.
     if (rest === "/session-tools/refresh" && method === "POST" && options.sessionToolsRefresh) {
       const body = (await readJsonBody(request)) as Partial<SessionToolsRefreshRequest> | null;

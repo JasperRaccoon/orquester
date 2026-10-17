@@ -140,9 +140,14 @@ export function pluginsDir(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "plugins");
 }
 
-/** `<appdir>/daemon/plugins/ts-rust`: holds preload.cjs, versions/<version>/ and .tmp/. */
+/** `<appdir>/daemon/plugins/ts-rust`: holds preload.cjs, and tsc-rs's versions/<version>/ and .tmp/. */
 export function tsRustPluginDir(baseDir: string): string {
   return joinPath(pluginsDir(baseDir), "ts-rust");
+}
+
+/** `<appdir>/daemon/plugins/ts-rust/tsrs`: the tsrs engine's versions/<version>/ and .tmp/. */
+export function tsrsEngineDir(baseDir: string): string {
+  return joinPath(tsRustPluginDir(baseDir), "tsrs");
 }
 
 /** The tsc-rs preload every Orquester session loads through NODE_OPTIONS while the plugin is on. */
@@ -891,18 +896,44 @@ export const pluginLastErrorSchema = z
   })
   .passthrough();
 
+/** One engine's installed versions and update-check record. */
+const pluginEngineVersionsShape = {
+  current: pluginInstalledVersionSchema.optional(),
+  previous: pluginInstalledVersionSchema.optional(),
+  /** Set by rollback; a check stops at this version until `latest` moves past it. */
+  skippedVersion: z.string().optional(),
+  lastCheckAt: z.string().optional(),
+  lastError: pluginLastErrorSchema.optional()
+};
+
+export const pluginEngineVersionsSchema = z.object(pluginEngineVersionsShape).passthrough();
+
+/** The engines "Better TS Typecheck" can run (`TsCheckerEngine` in `@orquester/api`). */
+export const TS_CHECKER_ENGINE_IDS = ["tsrs", "tsc-rs"] as const;
+export type StoredTsCheckerEngine = (typeof TS_CHECKER_ENGINE_IDS)[number];
+
+/**
+ * The plugin's own record. For ts-rust the top-level version fields are
+ * tsc-rs's (as every older build wrote them) and `tsrs` holds tsrs's.
+ */
 export const pluginStateSchema = z
   .object({
-    /** A global plugin's on/off; absent is off. Workspace plugins use `enabledWorkspaces`. */
+    /** The plugin's on/off for the whole server; absent is off. */
     enabled: z.boolean().optional(),
-    /** Workspace names the plugin is on for. Unknown names are kept and ignored at runtime. */
-    enabledWorkspaces: z.array(z.string()).default([]),
-    current: pluginInstalledVersionSchema.optional(),
-    previous: pluginInstalledVersionSchema.optional(),
-    /** Set by rollback; a check stops at this version until `latest` moves past it. */
-    skippedVersion: z.string().optional(),
-    lastCheckAt: z.string().optional(),
-    lastError: pluginLastErrorSchema.optional()
+    /**
+     * Legacy: the workspaces an older build turned tsc-rs on for. Read only to
+     * turn such a record on (`enabled`) once; kept in the file for those builds.
+     */
+    enabledWorkspaces: z.array(z.string()).optional(),
+    ...pluginEngineVersionsShape,
+    /**
+     * ts-rust: the engine chosen, "tsrs" or "tsc-rs"; absent is the platform's
+     * default. Any other value (a newer build's engine) is kept as it is and
+     * read as absent ({@link storedTsCheckerEngine}), never as a malformed record.
+     */
+    engine: z.unknown().optional(),
+    /** ts-rust: the tsrs engine's versions and checks. */
+    tsrs: pluginEngineVersionsSchema.optional()
   })
   .passthrough();
 
@@ -921,6 +952,7 @@ export const pluginsConfigSchema = z
 
 export type PluginInstalledVersion = z.infer<typeof pluginInstalledVersionSchema>;
 export type PluginLastError = z.infer<typeof pluginLastErrorSchema>;
+export type PluginEngineVersions = z.infer<typeof pluginEngineVersionsSchema>;
 export type PluginState = z.infer<typeof pluginStateSchema>;
 export type PluginsConfig = z.infer<typeof pluginsConfigSchema>;
 
@@ -940,6 +972,13 @@ export function parsePluginsConfig(value: unknown): PluginsConfig {
  */
 export function pluginStateOf(config: PluginsConfig, id: string): PluginState {
   return pluginStateSchema.parse(config.plugins[id] ?? {});
+}
+
+/** The engine a ts-rust record names, or undefined when it names none this build knows. */
+export function storedTsCheckerEngine(state: PluginState): StoredTsCheckerEngine | undefined {
+  return (TS_CHECKER_ENGINE_IDS as readonly unknown[]).includes(state.engine)
+    ? (state.engine as StoredTsCheckerEngine)
+    : undefined;
 }
 
 // sessions.json — the daemon's index of live tmux-backed sessions, used to

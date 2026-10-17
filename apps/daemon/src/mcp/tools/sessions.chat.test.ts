@@ -13,7 +13,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { TOOLSET_IDS, type SessionSummary } from "@orquester/api";
+import type { SessionSummary } from "@orquester/api";
 import { agentChatRoutes, UNTRUSTED_NOTICE, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
 
 import { FakeApprovalPort } from "../catalog/approval-double.ts";
@@ -83,7 +83,7 @@ function rig(threads: Record<string, ThreadSnapshotPayload> = {}, extra: Session
   const port = new FakeApprovalPort({ outcome: "approved", approvalId: "" });
   const call = (name: string, args: Record<string, unknown>, over: Partial<ThreadCaller> = {}) =>
     executeToolCall(
-      { approvals: port, enabledToolsets: async () => new Set(TOOLSET_IDS), lookup: (n, audience) => toolByName(n, audience) },
+      { approvals: port, lookup: (n, audience) => toolByName(n, audience) },
       { name, arguments: args },
       { caller: { kind: "thread", threadId: "me", title: "Implement auth", projectPath: OWN, workspace: "acme", cwd: OWN, agentId: "claude", callId: "c", runtimeMode: "approval-required", planning: false, workflowOwned: false, exchange: null, ...over }, api, signal: new AbortController().signal }
     );

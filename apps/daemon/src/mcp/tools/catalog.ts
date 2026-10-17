@@ -55,12 +55,12 @@ function seesWorkspace(caller: ToolCaller, workspace: string, named: string | un
 const listProjects = defineTool({
   name: "list_projects",
   title: "List projects",
-  description: "Projects (workspace/name, path), recent first, with open-session counts. Clones of one repository share `repoId`; `workspaces` gives each one's git account. Pass workspace/name as other tools' `project`.",
-  chatNote: "`current`: this chat's project; `sameRepo`: its clones. Below Full access, other workspaces are only counted.",
+  description: "Projects (workspace/name, path), recent first, with open-session counts. Clones of one repo share `repoId`; `workspaces` gives each workspace's git account. workspace/name is other tools' `project`.",
+  chatNote: "`current`: this chat's project; `sameRepo`: its clones. Below Full access other workspaces are only counted.",
   input: {
     workspace: z.string().min(1).optional().describe("Only this workspace."),
     query: z.string().trim().min(1).max(200).optional().describe("Filter on workspace/name."),
-    includeArchived: z.boolean().default(false).describe("Include archived ones.")
+    includeArchived: z.boolean().default(false)
   },
   audiences: ["external", "chat"],
   toolset: "core",
@@ -172,13 +172,13 @@ async function thisThread(api: DaemonApi, caller: Extract<ToolCaller, { kind: "t
 const listAgents = defineTool({
   name: "list_agents",
   title: "List launchable agents",
-  description: "The composer's model picker per chat agent (claude, codex, opencode, grok): enabled, installed, status, models (shortName: chip label if not name; isDefault = what a launch naming none gets; options with values and default), permission modes, capabilities, accounts. Only enabled agents open. Legacy models only with includeLegacy, marked isLegacy. A cut catalogue (optionsOmitted, modelsTruncated): ask {agent, model}.",
-  chatNote: "`thisThread`: this chat's settings (same-agent chats you open inherit them); `allowedRuntimeModes`: modes they may take.",
+  description: "Per chat agent: enabled, installed, status, models (isDefault: used when a launch names none; options with values and default), permission modes, capabilities, accounts. Only enabled agents open. Legacy models (isLegacy) only with includeLegacy. Cut catalogue (optionsOmitted, modelsTruncated): ask {agent, model}.",
+  chatNote: "`thisThread`: this chat's settings, inherited by same-agent chats you open; `allowedRuntimeModes`: modes those may take.",
   input: {
     agent: z.string().min(1).max(64).optional().describe("Only this agent."),
     model: z.string().min(1).max(200).optional().describe("With agent: this model only, options whole."),
-    query: z.string().trim().min(1).max(200).optional().describe("Filter models on slug, name, shortName, subProvider."),
-    includeLegacy: z.boolean().default(false).describe("List legacy models too."),
+    query: z.string().trim().min(1).max(200).optional().describe("Filter models by slug, name, shortName, subProvider."),
+    includeLegacy: z.boolean().default(false),
     includeLegacyModels: z.boolean().optional().describe("Old includeLegacy.")
   },
   externalOnlyInput: ["includeLegacyModels"],
@@ -250,12 +250,11 @@ async function conversationsProject(project: string | undefined, ctx: Pick<Scope
 const listConversations = defineTool({
   name: "list_conversations",
   title: "List past conversations",
-  description: "Provider conversations recorded for a project, newest first. A `resumable` row resumes with create_session.resume.conversationId = its `id` (with its `agent`). Rows past the result cap are left out, oldest first (truncated, omitted).",
-  chatNote: "`project` defaults to this chat's.",
+  description: "A project's provider conversations, newest first. Resume a `resumable` row: create_session {agent: its `agent`, resume: {conversationId: its `id`}}. Over the size cap the oldest rows are left out (truncated, omitted).",
   input: {
-    project: z.string().min(1).optional().describe("Absolute project path or \"<workspace>/<project>\"."),
-    agent: z.string().min(1).optional().describe("Only rows whose `agent` is this agent id (an unknown one is refused)."),
-    limit: z.number().int().min(1).max(200).default(20).describe("Maximum rows; fewer when they would pass the result size cap.")
+    project: z.string().min(1).optional().describe("Path or \"workspace/project\"."),
+    agent: z.string().min(1).optional().describe("Only this agent's rows."),
+    limit: z.number().int().min(1).max(200).default(20)
   },
   audiences: ["external", "chat"],
   toolset: "chat-extras",

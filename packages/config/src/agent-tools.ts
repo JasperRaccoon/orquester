@@ -1,18 +1,21 @@
-// agent-tools.json — the in-chat Orquester tools' settings, chat toolset overrides, toolset
-// declines and approval grants (unified MCP design 2026-10-15 §9.6, §7.6).
+// agent-tools.json — the in-chat Orquester tools' approval grants (unified MCP design 2026-10-15
+// §7.6, §9.6).
 //
 //   <appdir>/daemon/agent-tools.json   (`agentToolsFile`, index.ts)
 //
 // This module imports only zod: the path helper lives in index.ts, which re-exports this file.
-// The toolset catalogue (ids, labels, tools, per-agent defaults) lives in `@orquester/api`
-// (`TOOLSETS`, `agent-tools.ts`); the resolver below takes it as an argument because this package
-// cannot import that one.
 //
-// Tolerance (AGENTS.md): unknown top-level keys, unknown toolset ids, unknown agents and grants of
-// unknown families or scopes are all kept and written back unchanged; a grant entry that does not
-// read is kept verbatim (`unreadableGrants`) and never honoured. Anything that is not a version-1
-// file THROWS, so the daemon moves it aside and starts from the defaults — with no grants (fail
-// closed).
+// Every chat tool is on in every chat: this build reads only `grants`. Older builds also kept
+// toolset switches here (`revision`, `enabled`, `toolsets.defaults` / `toolsets.threads`,
+// `toolsetDeclines`); this build no longer interprets them but keeps them VERBATIM with every
+// other key it does not know (`extra`), so an older build reading the file finds its data intact.
+// A deleted chat's rows of those legacy keys still go with it ({@link removeThreadFromAgentTools}).
+// No `version` bump: no field changed its type or meaning — this build only stopped reading some.
+//
+// Tolerance (AGENTS.md): unknown top-level keys and grants of unknown families or scopes are all
+// kept and written back unchanged; a grant entry that does not read is kept verbatim
+// (`unreadableGrants`) and never honoured. Anything that is not a version-1 file THROWS, so the
+// daemon moves it aside and starts from the defaults — with no grants (fail closed).
 //
 // **Any change to an existing field's TYPE or MEANING must bump the file `version`** (the
 // saved-prompts rule).
@@ -29,7 +32,7 @@ export type AgentToolGrantScope = "chat" | "project";
 /**
  * Per approval family, the grant scopes a `full-access` caller may be offered (spec §7.6). Every
  * family absent here, or mapped to `[]`, is never grantable: `agent-profile`, `workflow-secrets`,
- * the read boundaries and toolset cards.
+ * the read boundaries and older builds' toolset cards.
  */
 export const AGENT_TOOL_GRANT_SCOPES: Readonly<Record<string, readonly AgentToolGrantScope[]>> = {
   workflows: ["chat"],
@@ -76,49 +79,23 @@ export const agentToolGrantRecordSchema = z
   .passthrough();
 export type AgentToolGrantRecord = z.infer<typeof agentToolGrantRecordSchema>;
 
-/** `toolsetId -> agentId -> on` (settings defaults) or `threadId -> toolsetId -> on` (chat overrides). */
-export type AgentToolsBooleanMatrix = Record<string, Record<string, boolean>>;
-
 export interface AgentToolsFile {
   version: 1;
-  /** Bumped by every settings write; `PUT /api/agent-tools/settings` must name the current one. */
-  revision: number;
-  /** The master switch: off = only locked toolsets (`core`) in every chat. */
-  enabled: boolean;
-  toolsets: {
-    /** Settings › Agent tools: `toolsetId -> agentId -> on`. Absent cells use the catalogue default. */
-    defaults: AgentToolsBooleanMatrix;
-    /** The chat's Tools chip / an approved `request_toolset`: `threadId -> toolsetId -> on`. */
-    threads: AgentToolsBooleanMatrix;
-    /** Every other key of `toolsets`, exactly as found. */
-    extra?: Record<string, unknown>;
-  };
-  /** `threadId -> toolsetId -> ISO time the user denied the toolset card`. */
-  toolsetDeclines: Record<string, Record<string, string>>;
-  /**
-   * Rows and cells of the three matrices this build cannot read (a non-object row, a non-boolean
-   * or non-string cell — a newer build's value), kept VERBATIM and merged back on rewrite; never
-   * honoured. A row's entry is the raw row when the row itself is unreadable, else an object of
-   * its unreadable cells. Delete a thread with {@link removeThreadFromAgentTools}, which drops its
-   * leftovers here too.
-   */
-  unreadableCells?: {
-    defaults?: Record<string, unknown>;
-    threads?: Record<string, unknown>;
-    toolsetDeclines?: Record<string, unknown>;
-  };
   grants: AgentToolGrantRecord[];
   /** Grant entries this build cannot read, kept verbatim and never honoured. */
   unreadableGrants: unknown[];
-  /** Every top-level key this build does not know, exactly as found. */
+  /**
+   * Every top-level key this build does not know, exactly as found — older builds' toolset
+   * switches (`revision`, `enabled`, `toolsets`, `toolsetDeclines`) among them.
+   */
   extra?: Record<string, unknown>;
 }
 
 export function createDefaultAgentToolsFile(): AgentToolsFile {
-  return { version: 1, revision: 0, enabled: true, toolsets: { defaults: {}, threads: {} }, toolsetDeclines: {}, grants: [], unreadableGrants: [] };
+  return { version: 1, grants: [], unreadableGrants: [] };
 }
 
-const KNOWN_KEYS = new Set(["version", "revision", "enabled", "toolsets", "toolsetDeclines", "grants"]);
+const KNOWN_KEYS = new Set(["version", "grants"]);
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -129,50 +106,10 @@ function entriesOf(value: unknown): [string, unknown][] {
   return isPlainRecord(value) ? Object.entries(value) : [];
 }
 
-/** A matrix split into the cells this build reads and the rest, kept verbatim ({@link mergeMatrix} reverses it). */
-function readMatrix<T>(
-  value: unknown,
-  where: string,
-  isCell: (cell: unknown) => cell is T
-): { rows: Record<string, Record<string, T>>; unreadable: Record<string, unknown> } {
-  if (value === undefined) return { rows: {}, unreadable: {} };
-  if (!isPlainRecord(value)) throw new Error(`Not an agent-tools file (${where} is not an object)`);
-  const rows: [string, Record<string, T>][] = [];
-  const unreadable: [string, unknown][] = [];
-  for (const [key, row] of entriesOf(value)) {
-    if (!isPlainRecord(row)) {
-      unreadable.push([key, row]);
-      continue;
-    }
-    const good = entriesOf(row).filter((cell): cell is [string, T] => isCell(cell[1]));
-    const bad = entriesOf(row).filter(([, cell]) => !isCell(cell));
-    rows.push([key, Object.fromEntries(good)]);
-    if (bad.length > 0) unreadable.push([key, Object.fromEntries(bad)]);
-  }
-  return { rows: Object.fromEntries(rows), unreadable: Object.fromEntries(unreadable) };
-}
-
-/** The matrix as written: every readable row with its unreadable cells put back; unreadable rows as found. */
-function mergeMatrix(rows: Record<string, Record<string, unknown>>, unreadable: Record<string, unknown> | undefined): Record<string, unknown> {
-  const out: [string, unknown][] = [];
-  for (const [key, row] of entriesOf(rows)) {
-    const leftover = unreadable && Object.prototype.hasOwnProperty.call(unreadable, key) ? unreadable[key] : undefined;
-    out.push([key, isPlainRecord(leftover) ? { ...leftover, ...(row as Record<string, unknown>) } : row]);
-  }
-  for (const [key, leftover] of entriesOf(unreadable)) {
-    if (!Object.prototype.hasOwnProperty.call(rows, key)) out.push([key, leftover]);
-  }
-  return Object.fromEntries(out);
-}
-
-const isBoolean = (cell: unknown): cell is boolean => typeof cell === "boolean";
-const isString = (cell: unknown): cell is string => typeof cell === "string";
-
 /**
- * Read `agent-tools.json`. Tolerant of what a newer build of the same version wrote; THROWS on
- * anything that is not a version-1 file (not an object, another `version`, `grants` not a list, a
- * `toolsets` matrix that is not an object) so the caller moves it aside and applies the defaults —
- * grants then read as none.
+ * Read `agent-tools.json`. Tolerant of what another build of the same version wrote; THROWS on
+ * anything that is not a version-1 file (not an object, another `version`, `grants` not a list)
+ * so the caller moves it aside and applies the defaults — grants then read as none.
  */
 export function parseAgentToolsFile(raw: unknown): AgentToolsFile {
   if (!isPlainRecord(raw)) throw new Error("Not an agent-tools file (not an object)");
@@ -180,8 +117,6 @@ export function parseAgentToolsFile(raw: unknown): AgentToolsFile {
     throw new Error(`Not a version-1 agent-tools file (version ${JSON.stringify(raw.version)})`);
   }
   if (raw.grants !== undefined && !Array.isArray(raw.grants)) throw new Error("Not an agent-tools file (grants is not a list)");
-  if (raw.toolsets !== undefined && !isPlainRecord(raw.toolsets)) throw new Error("Not an agent-tools file (toolsets is not an object)");
-  const toolsetsRaw = isPlainRecord(raw.toolsets) ? raw.toolsets : {};
   const grants: AgentToolGrantRecord[] = [];
   const unreadableGrants: unknown[] = [];
   const ids = new Set<string>();
@@ -194,32 +129,9 @@ export function parseAgentToolsFile(raw: unknown): AgentToolsFile {
       unreadableGrants.push(entry);
     }
   }
-  const toolsetsExtra = Object.fromEntries(entriesOf(toolsetsRaw).filter(([key]) => key !== "defaults" && key !== "threads"));
   const extra = Object.fromEntries(entriesOf(raw).filter(([key]) => !KNOWN_KEYS.has(key)));
-  const revision = typeof raw.revision === "number" && Number.isSafeInteger(raw.revision) && raw.revision >= 0 ? raw.revision : 0;
-  const defaults = readMatrix(toolsetsRaw.defaults, "toolsets.defaults", isBoolean);
-  const threads = readMatrix(toolsetsRaw.threads, "toolsets.threads", isBoolean);
-  const declines = readMatrix(raw.toolsetDeclines, "toolsetDeclines", isString);
-  const unreadableCells = Object.fromEntries(
-    (
-      [
-        ["defaults", defaults.unreadable],
-        ["threads", threads.unreadable],
-        ["toolsetDeclines", declines.unreadable]
-      ] as const
-    ).filter(([, cells]) => Object.keys(cells).length > 0)
-  );
   return {
     version: 1,
-    revision,
-    enabled: typeof raw.enabled === "boolean" ? raw.enabled : true,
-    toolsets: {
-      defaults: defaults.rows,
-      threads: threads.rows,
-      ...(Object.keys(toolsetsExtra).length > 0 ? { extra: toolsetsExtra } : {})
-    },
-    toolsetDeclines: declines.rows,
-    ...(Object.keys(unreadableCells).length > 0 ? { unreadableCells } : {}),
     grants,
     unreadableGrants,
     ...(Object.keys(extra).length > 0 ? { extra } : {})
@@ -232,78 +144,11 @@ export function serializeAgentToolsFile(file: AgentToolsFile): string {
     {
       ...(file.extra ?? {}),
       version: 1,
-      revision: file.revision,
-      enabled: file.enabled,
-      toolsets: {
-        ...(file.toolsets.extra ?? {}),
-        defaults: mergeMatrix(file.toolsets.defaults, file.unreadableCells?.defaults),
-        threads: mergeMatrix(file.toolsets.threads, file.unreadableCells?.threads)
-      },
-      toolsetDeclines: mergeMatrix(file.toolsetDeclines, file.unreadableCells?.toolsetDeclines),
       grants: [...file.grants, ...file.unreadableGrants]
     },
     null,
     2
   );
-}
-
-// ---------------------------------------------------------------------------
-// Toolset resolution (§9.2)
-// ---------------------------------------------------------------------------
-
-/** What the resolver needs of a toolset (`@orquester/api`'s `TOOLSETS` entries satisfy it). */
-export interface AgentToolsetDefaults {
-  id: string;
-  /** Always on (`core`): no setting, override or master switch turns it off. */
-  locked: boolean;
-  /** The catalogue default per agent; an agent absent here is off. */
-  defaults: Readonly<Partial<Record<string, boolean>>>;
-}
-
-/**
- * The toolsets on in one chat, in catalogue order: locked toolsets always; with the master switch
- * off nothing else; otherwise the chat's override, else the Settings default for its agent, else
- * the catalogue default. Unknown ids in the file are ignored (and kept by the file).
- */
-export function resolveThreadToolsets(
-  file: AgentToolsFile,
-  input: { threadId: string; agent: string; toolsets: readonly AgentToolsetDefaults[] }
-): string[] {
-  const overrides = ownRow(file.toolsets.threads, input.threadId);
-  return input.toolsets
-    .filter((toolset) => {
-      if (toolset.locked) return true;
-      if (!file.enabled) return false;
-      const override = ownCell(overrides, toolset.id);
-      if (override !== undefined) return override;
-      const setting = ownCell(ownRow(file.toolsets.defaults, toolset.id), input.agent);
-      if (setting !== undefined) return setting;
-      return ownCell(toolset.defaults, input.agent) === true;
-    })
-    .map((toolset) => toolset.id);
-}
-
-function ownRow<T>(matrix: Record<string, T>, key: string): T | undefined {
-  return Object.prototype.hasOwnProperty.call(matrix, key) ? matrix[key] : undefined;
-}
-
-function ownCell(row: Readonly<Partial<Record<string, boolean>>> | undefined, key: string): boolean | undefined {
-  if (!row || !Object.prototype.hasOwnProperty.call(row, key)) return undefined;
-  const value = row[key];
-  return typeof value === "boolean" ? value : undefined;
-}
-
-/** How long a denied toolset card blocks asking for that toolset again (spec §5.6, `TOOLSET_DECLINED`). */
-export const AGENT_TOOLSET_DECLINE_MS = 30 * 60 * 1000;
-
-/** The time (ms) until which `toolset` is declined in `threadId`, or null when it may be asked for. */
-export function toolsetDeclinedUntil(file: AgentToolsFile, threadId: string, toolset: string, nowMs: number): number | null {
-  const at = ownRow(ownRow(file.toolsetDeclines, threadId) ?? {}, toolset);
-  if (typeof at !== "string") return null;
-  const declinedAt = Date.parse(at);
-  if (!Number.isFinite(declinedAt)) return null;
-  const until = declinedAt + AGENT_TOOLSET_DECLINE_MS;
-  return until > nowMs ? until : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -381,26 +226,28 @@ export function findGrant(file: AgentToolsFile, query: AgentToolGrantQuery): Age
   return null;
 }
 
+/** `record` without its own key `key`, or `record` itself when it has none (or is not an object). */
+function withoutKey(record: unknown, key: string): unknown {
+  if (!isPlainRecord(record) || !Object.prototype.hasOwnProperty.call(record, key)) return record;
+  return Object.fromEntries(entriesOf(record).filter(([k]) => k !== key));
+}
+
 /**
  * `file` without anything of `threadId` (spec §9.6: "thread entries and chat grants are deleted
- * with their thread"): its toolset overrides, its declines, their unreadable leftovers and its chat
- * grants. Project grants stay. A new object; `file` is not changed.
+ * with their thread"): its chat grants, and its rows of older builds' legacy keys
+ * (`toolsets.threads`, `toolsetDeclines`). Project grants stay. A new object, or `file` itself
+ * when nothing of the thread is in it; `file` is not changed.
  */
 export function removeThreadFromAgentTools(file: AgentToolsFile, threadId: string): AgentToolsFile {
-  const without = <T>(record: Record<string, T> | undefined): Record<string, T> =>
-    Object.fromEntries(entriesOf(record).filter(([key]) => key !== threadId)) as Record<string, T>;
-  const unreadableCells = file.unreadableCells
-    ? {
-        ...(file.unreadableCells.defaults ? { defaults: file.unreadableCells.defaults } : {}),
-        threads: without(file.unreadableCells.threads),
-        toolsetDeclines: without(file.unreadableCells.toolsetDeclines)
-      }
-    : undefined;
-  return {
-    ...file,
-    toolsets: { ...file.toolsets, threads: without(file.toolsets.threads) },
-    toolsetDeclines: without(file.toolsetDeclines),
-    ...(unreadableCells ? { unreadableCells } : {}),
-    grants: file.grants.filter((grant) => !(grant.scope === "chat" && grant.threadId === threadId))
-  };
+  const grants = file.grants.filter((grant) => !(grant.scope === "chat" && grant.threadId === threadId));
+  let extra = file.extra;
+  if (extra) {
+    const toolsets = extra.toolsets;
+    const threads = isPlainRecord(toolsets) ? withoutKey(toolsets.threads, threadId) : undefined;
+    const declines = withoutKey(extra.toolsetDeclines, threadId);
+    if (isPlainRecord(toolsets) && threads !== toolsets.threads) extra = { ...extra, toolsets: { ...toolsets, threads } };
+    if (declines !== extra.toolsetDeclines) extra = { ...extra, toolsetDeclines: declines };
+  }
+  if (grants.length === file.grants.length && extra === file.extra) return file;
+  return { ...file, grants, ...(extra ? { extra } : {}) };
 }

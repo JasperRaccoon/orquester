@@ -1,46 +1,27 @@
 /**
- * Toolsets, tiers and the grant table (unified MCP design 2026-10-15 §7.6, §9.1), and the
- * catalogue defaults through `@orquester/config`'s resolver.
+ * Toolsets (grouping only), tiers and the grant table (unified MCP design 2026-10-15 §7.6, §9.1).
  */
 
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createDefaultAgentToolsFile, resolveThreadToolsets } from "@orquester/config";
-
 import { ADMIN_FAMILIES, APPROVAL_FAMILIES } from "./agent-chat/tool-approvals.ts";
 import { SESSION_TOOL_NAME_PATTERN } from "./agent-chat/session-tools.ts";
-import {
-  agentToolsRoutes,
-  AGENT_TOOLS_AGENTS,
-  chatToolNames,
-  defaultToolsetsFor,
-  GRANT_TABLE,
-  grantOptionsFor,
-  TOOLSET_IDS,
-  TOOLSETS,
-  toolsetOfTool
-} from "./agent-tools.ts";
+import { agentToolsRoutes, chatToolNames, GRANT_TABLE, grantOptionsFor, TOOLSET_IDS, TOOLSETS, toolsetOfTool } from "./agent-tools.ts";
 
-test("the catalogue is the spec's: 45 chat tools, unique valid names, 22 on by default, core locked", () => {
+test("the catalogue: 44 chat tools in their groups, unique valid names; no switch, no request_toolset", () => {
   const names = chatToolNames();
-  assert.equal(names.length, 45);
-  assert.equal(new Set(names).size, 45);
+  assert.equal(names.length, 44);
+  assert.equal(new Set(names).size, 44);
   for (const name of names) assert.match(name, SESSION_TOOL_NAME_PATTERN);
   assert.deepEqual(TOOLSETS.map((toolset) => toolset.id), [...TOOLSET_IDS]);
   assert.deepEqual(
     TOOLSETS.map((toolset) => [toolset.id, toolset.tools.length]),
-    [["core", 17], ["reads", 5], ["notes", 3], ["chat-extras", 6], ["files-git", 2], ["workflow-authoring", 9], ["agent-profile-editing", 1], ["desktops", 2]]
+    [["core", 16], ["reads", 5], ["notes", 3], ["chat-extras", 6], ["files-git", 2], ["workflow-authoring", 9], ["agent-profile-editing", 1], ["desktops", 2]]
   );
-  assert.deepEqual(TOOLSETS.filter((toolset) => toolset.locked).map((toolset) => toolset.id), ["core"]);
-  for (const agent of AGENT_TOOLS_AGENTS) {
-    const on = defaultToolsetsFor(agent);
-    assert.deepEqual(on, ["core", "reads"], agent);
-    assert.equal(TOOLSETS.filter((toolset) => on.includes(toolset.id)).reduce((n, toolset) => n + toolset.tools.length, 0), 22);
-    // The config resolver gives the same answer from an empty file.
-    assert.deepEqual(resolveThreadToolsets(createDefaultAgentToolsFile(), { threadId: "t", agent, toolsets: TOOLSETS }), on);
-  }
-  assert.equal(toolsetOfTool("request_toolset"), "core");
+  // A group is a label: nothing on it turns its tools on or off.
+  for (const toolset of TOOLSETS) assert.deepEqual(Object.keys(toolset).sort(), ["id", "label", "tools"], toolset.id);
+  assert.equal(toolsetOfTool("request_toolset"), undefined);
   assert.equal(toolsetOfTool("edit_agent_profile"), "agent-profile-editing");
   assert.equal(toolsetOfTool("thread_send"), undefined);
 });
@@ -67,6 +48,7 @@ test("the grant table: only workflows, desktops, saved prompts and cross-project
   assert.deepEqual(GRANT_TABLE["saved-prompts"], ["chat"]);
   assert.deepEqual(GRANT_TABLE["cross-project"], ["chat"]);
   for (const family of ["agent-profile", "workflow-secrets", "cross-project-read", "cross-workspace-read", "toolset"] as const) {
+    // `toolset`: the legacy card family of older builds — never grantable.
     assert.deepEqual(GRANT_TABLE[family], [], family);
   }
   assert.equal(ADMIN_FAMILIES.length, 5);
@@ -88,6 +70,7 @@ test("grant options: full-access only, never workflow-owned, never cross-project
 
 test("routes", () => {
   assert.equal(agentToolsRoutes.settings, "/api/agent-tools");
-  assert.equal(agentToolsRoutes.updateSettings, "/api/agent-tools/settings");
+  assert.equal(agentToolsRoutes.grants, "/api/agent-tools/grants");
+  assert.deepEqual(Object.keys(agentToolsRoutes).sort(), ["grant", "grants", "settings"]);
   assert.equal(agentToolsRoutes.grant("g/1"), "/api/agent-tools/grants/g%2F1");
 });

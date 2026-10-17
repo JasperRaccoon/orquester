@@ -10,8 +10,8 @@ const caller = (over: Partial<ThreadCaller> = {}): ThreadCaller => ({
   runtimeMode: "approval-required", planning: false, workflowOwned: false, exchange: null, ...over
 });
 
-async function notify(api: FakeDaemonApi, who: ToolCaller, args: Record<string, unknown>, toolsets = ["core", "chat-extras"]): Promise<CallToolResult> {
-  return executeToolCall({ approvals: null, enabledToolsets: async () => new Set(toolsets) }, { name: "notify_user", arguments: args }, { caller: who, api, signal: new AbortController().signal });
+async function notify(api: FakeDaemonApi, who: ToolCaller, args: Record<string, unknown>): Promise<CallToolResult> {
+  return executeToolCall({ approvals: null }, { name: "notify_user", arguments: args }, { caller: who, api, signal: new AbortController().signal });
 }
 const answer = (r: CallToolResult) => r.structuredContent as Record<string, unknown>;
 
@@ -28,7 +28,7 @@ test("notify_user posts the push for the calling chat (its own session), in ever
   assert.deepEqual(api.calls.at(-1)!.body, { title: "Done" });
 });
 
-test("notify_user: caps are the contract's, the daemon's RATE_LIMITED passes through, and it is in chat-extras (off by default)", async () => {
+test("notify_user: caps are the contract's, and the daemon's RATE_LIMITED passes through", async () => {
   const api = new FakeDaemonApi().on("POST", "/api/push/notify", { status: 429, body: { code: "RATE_LIMITED", message: "Too many notifications: try again in 300 s.", retryAfterSeconds: 300 } });
   const limited = await notify(api, caller(), { title: "Again" });
   assert.equal(limited.isError, true);
@@ -37,7 +37,6 @@ test("notify_user: caps are the contract's, the daemon's RATE_LIMITED passes thr
   for (const args of [{ title: "" }, { title: "x".repeat(121) }, { title: "ok", body: "y".repeat(301) }, { title: "ok", sessionId: "other" }]) {
     assert.equal(answer(await notify(api, caller(), args)).code, "INVALID_ARGUMENT", JSON.stringify(args).slice(0, 60));
   }
-  assert.equal(answer(await notify(api, caller(), { title: "x" }, ["core", "reads"])).code, "TOOL_NOT_ENABLED");
   // A title with nothing visible once flattened is refused before the daemon is asked (no rate slot taken).
   const before = api.calls.length;
   assert.equal(answer(await notify(api, caller(), { title: "\u202e\u200b\u0007" })).code, "INVALID_ARGUMENT");

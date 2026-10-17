@@ -18,11 +18,11 @@ function plugin(overrides: Partial<PluginInfo> = {}): PluginInfo {
     description: "Runs tsc-rs instead of tsc.",
     source: { label: "pingdotgg/ts-rust", url: "https://github.com/pingdotgg/ts-rust" },
     provider: "Community",
-    scope: "workspace",
+    scope: "global",
     updates: true,
     platform: "supported",
     enabled: true,
-    enabledWorkspaces: ["acme"],
+    enabledWorkspaces: [],
     current: { version: "0.7.0", integrity: "sha512-a", installedAt: "2026-10-14T10:00:00.000Z" },
     previous: null,
     skippedVersion: null,
@@ -59,12 +59,23 @@ test("absent nullable fields read as null and unknown fields are dropped", () =>
 });
 
 test("a daemon from before global plugins: a workspace plugin with updates, enabled while on anywhere", () => {
-  const sent: Record<string, unknown> = { ...plugin() };
+  const sent: Record<string, unknown> = { ...plugin({ enabledWorkspaces: ["acme"] }) };
   delete sent.scope;
   delete sent.updates;
   delete sent.enabled;
-  assert.deepEqual(parsePluginInfo(sent), plugin());
+  assert.deepEqual(parsePluginInfo(sent), plugin({ scope: "workspace", enabledWorkspaces: ["acme"] }));
   assert.equal(parsePluginInfo({ ...sent, enabledWorkspaces: [] })?.enabled, false);
+  // A daemon whose tsc-rs was per workspace but already sent `enabled` and `scope`.
+  const scoped = plugin({ scope: "workspace", enabled: false, enabledWorkspaces: [] });
+  assert.deepEqual(parsePluginInfo(scoped), scoped);
+});
+
+test("a missing enabledWorkspaces reads as empty", () => {
+  const sent: Record<string, unknown> = { ...plugin() };
+  delete sent.enabledWorkspaces;
+  assert.deepEqual(parsePluginInfo(sent), plugin());
+  delete sent.enabled;
+  assert.equal(parsePluginInfo(sent)?.enabled, false);
 });
 
 test("a global plugin parses, and reads as enabled only when it is on", () => {
@@ -81,7 +92,12 @@ test("a global plugin parses, and reads as enabled only when it is on", () => {
   assert.deepEqual(parsePluginInfo(global), global);
   assert.equal(isGlobalPluginEnabled([plugin(), global], "excalidraw"), true);
   assert.equal(isGlobalPluginEnabled([plugin(), { ...global, enabled: false }], "excalidraw"), false);
-  assert.equal(isGlobalPluginEnabled([plugin()], "ts-rust"), false, "a workspace plugin is not global");
+  assert.equal(isGlobalPluginEnabled([plugin()], "ts-rust"), true);
+  assert.equal(
+    isGlobalPluginEnabled([plugin({ scope: "workspace" })], "ts-rust"),
+    false,
+    "an older daemon's workspace plugin is not global"
+  );
   assert.equal(isGlobalPluginEnabled(null, "excalidraw"), false);
 });
 
@@ -130,7 +146,7 @@ test("a plugins response with a malformed known plugin, or not a list, is reject
 });
 
 test("a route's answer yields the plugin whether it is the plugin or the whole list", () => {
-  const value = plugin({ enabledWorkspaces: [] });
+  const value = plugin({ enabled: false });
   assert.deepEqual(parsePluginActionResult(value, "ts-rust"), value);
   assert.deepEqual(parsePluginActionResult({ plugins: [value] }, "ts-rust"), value);
   assert.equal(parsePluginActionResult(undefined, "ts-rust"), null);
@@ -140,8 +156,60 @@ test("a route's answer yields the plugin whether it is the plugin or the whole l
 
 test("upserting replaces a plugin by id or appends it", () => {
   const before = plugin();
-  const after = plugin({ enabledWorkspaces: [] });
+  const after = plugin({ enabled: false });
   assert.deepEqual(upsertPluginIn([before], after), [after]);
   assert.deepEqual(upsertPluginIn([], after), [after]);
   assert.deepEqual(upsertPluginIn(null, after), [after]);
+});
+
+const ENGINES: NonNullable<PluginInfo["engines"]> = [
+  {
+    id: "tsrs",
+    label: "tsrs",
+    description: "The fastest.",
+    source: { label: "oxc-project/tsrs", url: "https://github.com/oxc-project/tsrs" },
+    platform: "supported"
+  },
+  {
+    id: "tsc-rs",
+    label: "tsc-rs",
+    description: "Also runs on Windows.",
+    source: { label: "pingdotgg/ts-rust", url: "https://github.com/pingdotgg/ts-rust" },
+    platform: "unsupported"
+  }
+];
+
+test("the active engine and the engines to choose from parse as sent", () => {
+  const value = plugin({ engine: "tsrs", engines: ENGINES });
+  assert.deepEqual(parsePluginInfo(value), value);
+});
+
+test("a daemon from before the engine choice: no engine fields, and the plugin still parses", () => {
+  const parsed = parsePluginInfo(plugin());
+  assert.ok(parsed);
+  assert.equal("engine" in parsed, false);
+  assert.equal("engines" in parsed, false);
+});
+
+test("an unknown engine reads as absent; unknown or malformed engine entries are left out", () => {
+  const parsed = parsePluginInfo({
+    ...plugin(),
+    engine: "tsgo",
+    engines: [
+      ENGINES[0],
+      { ...ENGINES[1], id: "tsgo" },
+      { ...ENGINES[1], platform: "maybe" },
+      { ...ENGINES[1], source: "github" },
+      "tsc-rs",
+      { ...ENGINES[1], description: undefined }
+    ]
+  });
+  assert.ok(parsed);
+  assert.equal(parsed.engine, undefined);
+  assert.deepEqual(parsed.engines, [ENGINES[0], { ...ENGINES[1], description: "" }]);
+  // Nothing usable: no list at all.
+  const none = parsePluginInfo({ ...plugin(), engines: [{ id: "tsgo" }] });
+  assert.equal(none && "engines" in none, false);
+  const notList = parsePluginInfo({ ...plugin(), engines: "tsrs" });
+  assert.equal(notList && "engines" in notList, false);
 });

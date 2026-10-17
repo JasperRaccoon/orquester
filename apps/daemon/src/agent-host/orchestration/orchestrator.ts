@@ -326,7 +326,7 @@ export interface OrchestratorOptions {
   onTurnInterrupt?: (threadId: string) => void;
   /**
    * Unified MCP design 2026-10-15 §9.3: true when the thread's live provider session advertises
-   * another session-tool list than the thread's toolsets now call for, and its provider cannot take
+   * another session-tool list than the daemon last pushed for the thread, and its provider cannot take
    * it in-session (`session-tools/index.ts` `needsRestart`). The ensure step then restarts it with
    * resume — only when no turn is running (a steer never restarts), so the change lands at the
    * thread's next idle point. Optional; must not throw.

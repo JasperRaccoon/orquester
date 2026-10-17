@@ -5,10 +5,11 @@ import type { PluginInfo } from "@orquester/api";
 
 import {
   FIRST_ENABLE_MESSAGE,
-  defaultPluginScope,
   filterPlugins,
   pluginControls,
-  pluginEnabledIn,
+  pluginEngineChange,
+  pluginEngineLabel,
+  pluginEngineOptions,
   pluginErrorText,
   pluginJobLabel,
   pluginSourceHref,
@@ -23,7 +24,7 @@ function plugin(overrides: Partial<PluginInfo> = {}): PluginInfo {
     description: "Runs tsc-rs instead of tsc.",
     source: { label: "pingdotgg/ts-rust", url: "https://github.com/pingdotgg/ts-rust" },
     provider: "Community",
-    scope: "workspace",
+    scope: "global",
     updates: true,
     platform: "supported",
     enabled: false,
@@ -40,17 +41,6 @@ function plugin(overrides: Partial<PluginInfo> = {}): PluginInfo {
 
 const installed = { version: "0.7.0", integrity: "sha512-a", installedAt: "2026-10-14T10:00:00.000Z" };
 const older = { version: "0.6.0", integrity: "sha512-b", installedAt: "2026-10-01T10:00:00.000Z" };
-
-test("the scope is the picked workspace, else the active one, else the first", () => {
-  const workspaces = ["acme", "jaspersito", "lab"];
-  assert.equal(defaultPluginScope(workspaces, "jaspersito", "lab"), "lab");
-  assert.equal(defaultPluginScope(workspaces, "jaspersito", null), "jaspersito");
-  assert.equal(defaultPluginScope(workspaces, null, null), "acme");
-  // A picked or active workspace that no longer exists falls through.
-  assert.equal(defaultPluginScope(workspaces, "jaspersito", "deleted"), "jaspersito");
-  assert.equal(defaultPluginScope(workspaces, "deleted", null), "acme");
-  assert.equal(defaultPluginScope([], "jaspersito", "lab"), null);
-});
 
 test("search matches name and description, case-insensitively", () => {
   const ts = plugin();
@@ -69,50 +59,37 @@ test("the detail panel shows the selected plugin while listed, else the first", 
   assert.equal(selectedPlugin([], "ts-rust"), null);
 });
 
-test("a plugin is on for the scope only when the scope is in its enabled workspaces", () => {
-  const ts = plugin({ enabledWorkspaces: ["acme"] });
-  assert.equal(pluginEnabledIn(ts, "acme"), true);
-  assert.equal(pluginEnabledIn(ts, "lab"), false);
-  assert.equal(pluginEnabledIn(ts, null), false);
+test("turning tsc-rs on asks first; turning it off, or another plugin on, goes ahead", () => {
+  assert.equal(pluginToggleDecision(plugin(), true), "confirm");
+  assert.equal(pluginToggleDecision(plugin({ enabled: true }), false), "apply");
+  assert.equal(pluginToggleDecision(plugin({ platform: "unsupported" }), true), "blocked");
+  // On where there is no build (a carried-over plugins.json): it can still be turned off.
+  assert.equal(pluginToggleDecision(plugin({ platform: "unsupported", enabled: true }), false), "apply");
 });
 
-test("turning a plugin on where it is on nowhere asks first; other flips go ahead", () => {
-  assert.equal(pluginToggleDecision(plugin(), "acme", true), "confirm");
-  assert.equal(pluginToggleDecision(plugin({ enabledWorkspaces: ["lab"] }), "acme", true), "apply");
-  assert.equal(pluginToggleDecision(plugin({ enabledWorkspaces: ["acme"] }), "acme", false), "apply");
-  assert.equal(pluginToggleDecision(plugin(), null, true), "blocked");
-  assert.equal(pluginToggleDecision(plugin({ platform: "unsupported" }), "acme", true), "blocked");
-  assert.equal(
-    pluginToggleDecision(plugin({ platform: "unsupported", enabledWorkspaces: ["acme"] }), "acme", false),
-    "blocked"
-  );
-});
-
-test("a global plugin: its own switch, no scope needed, no confirmation, no version actions", () => {
-  const whiteboard = plugin({ id: "excalidraw", scope: "global", updates: false, enabled: true });
-  assert.equal(pluginEnabledIn(whiteboard, null), true);
-  assert.equal(pluginEnabledIn({ ...whiteboard, enabled: false }, "acme"), false);
-  assert.equal(pluginToggleDecision({ ...whiteboard, enabled: false }, null, true), "apply");
-  assert.equal(pluginToggleDecision(whiteboard, "acme", false), "apply");
-  assert.deepEqual(pluginControls(whiteboard, null, false), {
+test("a bundled plugin: no confirmation, no version actions", () => {
+  const whiteboard = plugin({ id: "excalidraw", updates: false, enabled: true });
+  assert.equal(pluginToggleDecision({ ...whiteboard, enabled: false }, true), "apply");
+  assert.equal(pluginToggleDecision(whiteboard, false), "apply");
+  assert.deepEqual(pluginControls(whiteboard, false), {
     toggle: true,
     checkForUpdates: false,
     showRollback: false,
     rollback: false,
     removeDownloads: false
   });
-  assert.equal(pluginControls(whiteboard, null, true).toggle, false);
+  assert.equal(pluginControls(whiteboard, true).toggle, false);
 });
 
 test("the first-enable confirmation says what the owner approved", () => {
   assert.equal(
     FIRST_ENABLE_MESSAGE,
-    "tsc-rs runs TypeScript 7. Projects whose tsconfig or code isn't TS 7-ready will fail their typecheck while this is on. Tabs, chats and workflow runs already open keep the normal tsc until reopened."
+    "Both engines, tsrs and tsc-rs, run TypeScript 7. Projects whose tsconfig or code isn't TS 7-ready will fail their typecheck while this is on. Tabs, chats and workflow runs already open keep the normal tsc until reopened."
   );
 });
 
 test("an idle, installed, unused plugin allows every action", () => {
-  assert.deepEqual(pluginControls(plugin({ current: installed, previous: older }), "acme", false), {
+  assert.deepEqual(pluginControls(plugin({ current: installed, previous: older }), false), {
     toggle: true,
     checkForUpdates: true,
     showRollback: true,
@@ -122,23 +99,20 @@ test("an idle, installed, unused plugin allows every action", () => {
 });
 
 test("roll back is shown only with a previous version", () => {
-  const controls = pluginControls(plugin({ current: installed }), "acme", false);
+  const controls = pluginControls(plugin({ current: installed }), false);
   assert.equal(controls.showRollback, false);
   assert.equal(controls.rollback, false);
 });
 
-test("remove downloads needs a download and no enabled workspace", () => {
-  assert.equal(pluginControls(plugin(), "acme", false).removeDownloads, false);
-  assert.equal(
-    pluginControls(plugin({ current: installed, enabledWorkspaces: ["lab"] }), "acme", false).removeDownloads,
-    false
-  );
-  assert.equal(pluginControls(plugin({ current: installed }), "acme", false).removeDownloads, true);
+test("remove downloads needs a download and the plugin off", () => {
+  assert.equal(pluginControls(plugin(), false).removeDownloads, false);
+  assert.equal(pluginControls(plugin({ current: installed, enabled: true }), false).removeDownloads, false);
+  assert.equal(pluginControls(plugin({ current: installed }), false).removeDownloads, true);
 });
 
 test("a running job blocks the version actions but not the toggle", () => {
   for (const job of ["checking", "installing"] as const) {
-    const controls = pluginControls(plugin({ current: installed, previous: older, job }), "acme", false);
+    const controls = pluginControls(plugin({ current: installed, previous: older, job }), false);
     assert.deepEqual(controls, {
       toggle: true,
       checkForUpdates: false,
@@ -150,7 +124,7 @@ test("a running job blocks the version actions but not the toggle", () => {
 });
 
 test("a request in flight blocks every control", () => {
-  assert.deepEqual(pluginControls(plugin({ current: installed, previous: older }), "acme", true), {
+  assert.deepEqual(pluginControls(plugin({ current: installed, previous: older }), true), {
     toggle: false,
     checkForUpdates: false,
     showRollback: true,
@@ -159,14 +133,12 @@ test("a request in flight blocks every control", () => {
   });
 });
 
-test("an unsupported platform or a missing workspace disables the toggle", () => {
-  const unsupported = pluginControls(plugin({ platform: "unsupported" }), "acme", false);
+test("an unsupported platform disables the toggle unless the plugin is on", () => {
+  const unsupported = pluginControls(plugin({ platform: "unsupported" }), false);
   assert.equal(unsupported.toggle, false);
   assert.equal(unsupported.checkForUpdates, false);
   assert.equal(unsupported.rollback, false);
-  assert.equal(pluginControls(plugin(), null, false).toggle, false);
-  // The version actions do not depend on a workspace.
-  assert.equal(pluginControls(plugin(), null, false).checkForUpdates, true);
+  assert.equal(pluginControls(plugin({ platform: "unsupported", enabled: true }), false).toggle, true);
 });
 
 test("job labels and the last error read as the panel shows them", () => {
@@ -185,4 +157,56 @@ test("the source link renders only for a web address", () => {
   assert.equal(pluginSourceHref("javascript:alert(1)"), null);
   assert.equal(pluginSourceHref("file:///etc/passwd"), null);
   assert.equal(pluginSourceHref("not a url"), null);
+});
+
+const engines: NonNullable<PluginInfo["engines"]> = [
+  {
+    id: "tsrs",
+    label: "tsrs",
+    description: "The fastest.",
+    source: { label: "oxc-project/tsrs", url: "https://github.com/oxc-project/tsrs" },
+    platform: "supported"
+  },
+  {
+    id: "tsc-rs",
+    label: "tsc-rs",
+    description: "Also runs on Windows.",
+    source: { label: "pingdotgg/ts-rust", url: "https://github.com/pingdotgg/ts-rust" },
+    platform: "supported"
+  }
+];
+
+test("the engine control lists each engine, the active one selected, and switches only to another usable one", () => {
+  const ts = plugin({ engine: "tsrs", engines });
+  assert.deepEqual(
+    pluginEngineOptions(ts, false).map((o) => [o.id, o.selected, o.disabled, o.hint]),
+    [
+      ["tsrs", true, false, null],
+      ["tsc-rs", false, false, null]
+    ]
+  );
+  assert.equal(pluginEngineLabel(ts), "tsrs");
+  assert.equal(pluginEngineChange(ts, "tsc-rs", false), true);
+  assert.equal(pluginEngineChange(ts, "tsrs", false), false, "the active engine is no change");
+  assert.equal(pluginEngineChange(ts, "tsc-rs", true), false, "not while a request is in flight");
+  assert.ok(pluginEngineOptions(ts, true).every((o) => o.disabled));
+});
+
+test("an engine with no build here is disabled with a hint", () => {
+  const intelMac = plugin({
+    engine: "tsc-rs",
+    engines: [{ ...engines[0]!, platform: "unsupported" }, engines[1]!]
+  });
+  const [tsrs, tscRs] = pluginEngineOptions(intelMac, false);
+  assert.equal(tsrs?.disabled, true);
+  assert.match(tsrs?.hint ?? "", /No build for this server/);
+  assert.equal(tscRs?.selected, true);
+  assert.equal(pluginEngineChange(intelMac, "tsrs", false), false);
+});
+
+test("a plugin without engines, or from a daemon before the choice, has no engine control", () => {
+  assert.deepEqual(pluginEngineOptions(plugin(), false), []);
+  assert.deepEqual(pluginEngineOptions(plugin({ engines }), false), [], "no active engine named");
+  assert.equal(pluginEngineLabel(plugin()), null);
+  assert.equal(pluginEngineChange(plugin(), "tsrs", false), false);
 });

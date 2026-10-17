@@ -7,7 +7,7 @@
  * each scenario asserts what was persisted.
  *
  * Expected outcomes come from the spec: §5.2 (the gate matrix, S13), §5.3 (turn policy), §5.4
- * (workflow-owned), §6 (tiers), §7 (cards, grants), §8 (conversation), §9.3 (toolsets), §12.1
+ * (workflow-owned), §6 (tiers), §7 (cards, grants), §8 (conversation), §9.4 (every chat tool in every chat), §12.1
  * (daemon-pointing servers), and the ledger's rulings.
  */
 
@@ -48,7 +48,7 @@ const SEED = {
 };
 
 /** The chat manifest the agent host reads at launch (socket-only route, the host's bearer). */
-async function manifestOf(w: ScenarioWorld, threadId: string): Promise<{ tools: string[]; deny: string[]; toolsets: string[]; instructions: string }> {
+async function manifestOf(w: ScenarioWorld, threadId: string): Promise<{ tools: string[]; deny: string[]; toolsets?: string[]; instructions: string }> {
   const res = await w.local.inject({ method: "POST", url: daemonRoutesForHost.sessionToolsManifest, headers: { authorization: HOST_BEARER }, payload: { threadId } });
   assert.equal(res.statusCode, 200, res.body);
   return res.json();
@@ -313,11 +313,11 @@ describe("§14.2.11: reads across projects and workspaces", () => {
 });
 
 // ---------------------------------------------------------------------------
-// (b) A skill through the agent profile (§6 Admin, §7.1, §7.6 never grantable, §9.3 toolsets)
+// (b) A skill through the agent profile (§6 Admin, §7.1, §7.6 never grantable)
 // ---------------------------------------------------------------------------
 
 describe("acceptance (b) / §14.2.11 'add a skill': edit_agent_profile is an Admin card in every mode, never grantable, and writes exactly what the card showed", () => {
-  test("toolset off → request_toolset card → Admin card (no grant even at Full access) → SKILL.md equals the card; Supervised cards too; planning and workflow-owned refused; external writes without a card", async () => {
+  test("advertised to a fresh chat → Admin card (no grant even at Full access) → SKILL.md equals the card; Supervised cards too; planning and workflow-owned refused; external writes without a card", async () => {
     await withWorld(async (w) => {
       const orq = w.project("jaspersito/orquester");
       w.host.addChat("claude", { project: orq, title: "Release prep", runtimeMode: "full-access" });
@@ -325,16 +325,11 @@ describe("acceptance (b) / §14.2.11 'add a skill': edit_agent_profile is an Adm
       const skill = { name: "release-notes", frontmatter: { description: "Draft release notes from merged PRs" }, body: "# Release notes\n\n1. List merged PRs.\n2. Group them by area.\n" };
       const args = { agent: "claude", reason: "The user asked for a release-notes skill.", changes: [{ action: "create", skill }] };
 
-      // The toolset is off by default: the call says how to ask for it.
-      const off = refused(await w.uncarded("claude", "edit_agent_profile", args), "TOOL_NOT_ENABLED");
-      assert.match(off.message, /request_toolset/);
-      const asked = await w.carded("claude", "request_toolset", { toolset: "agent-profile-editing", reason: "To add the skill you asked for." }, { decision: "approve" });
-      assert.equal(asked.card.kind, "toolset");
-      assert.deepEqual(asked.card.grantOptions, []);
-      const enabled = ok(asked.result);
-      assert.equal(enabled.enabled, true);
-      assert.equal(enabled.available, "now", "the host applied the new tool list in-session");
-      assert.ok(w.host.pushes.some((push) => push.threadId === "claude" && push.tools.includes("edit_agent_profile")), "the manifest pushed to the host now lists the tool");
+      // Nothing to turn on: a fresh chat is advertised every chat tool, and there is no request_toolset.
+      const launched = await manifestOf(w, "claude");
+      assert.deepEqual(launched.tools, catalogFor("chat").map((tool) => tool.name));
+      assert.equal(launched.tools.includes("request_toolset"), false);
+      refused(await w.uncarded("claude", "request_toolset", { toolset: "agent-profile-editing", reason: "x" }), "TOOL_NOT_FOUND");
 
       // A person may not grant it: an approve naming a grant is refused 400, the card stays pending.
       const pending = w.chat("claude", "edit_agent_profile", args);
@@ -359,7 +354,6 @@ describe("acceptance (b) / §14.2.11 'add a skill': edit_agent_profile is an Adm
 
       // A Supervised chat gets the same Admin card (ruling S1: no mode gate); denying writes nothing.
       w.host.addChat("sup", { project: orq, title: "Supervised", runtimeMode: "approval-required" });
-      assert.equal((await w.user({ method: "PUT", url: "/api/sessions/sup/agent-tools", payload: { toolsets: { "agent-profile-editing": true } } })).status, 200);
       w.host.userTurn("sup", "Add another skill.");
       const other = { agent: "claude", changes: [{ action: "create", skill: { name: "triage", frontmatter: { description: "Triage issues" }, body: "Triage.\n" } }] };
       const supDenied = await w.carded("sup", "edit_agent_profile", other, { decision: "deny", reason: "Not this one" });
@@ -368,24 +362,13 @@ describe("acceptance (b) / §14.2.11 'add a skill': edit_agent_profile is an Adm
       refused(supDenied.result, "APPROVAL_DENIED");
       assert.equal((await w.agentProfile.snapshot("claude")).items.some((item) => item.id === "skill:triage"), false, "nothing written on a deny");
 
-      // A declined toolset is not asked for again for 30 minutes (§5.6).
-      const declined = await w.carded("sup", "request_toolset", { toolset: "files-git", reason: "To read the diff." }, { decision: "deny" });
-      assert.equal(declined.card.kind, "toolset");
-      assert.deepEqual({ enabled: ok(declined.result).enabled, outcome: ok(declined.result).outcome }, { enabled: false, outcome: "declined" });
-      refused(await w.uncarded("sup", "request_toolset", { toolset: "files-git", reason: "Please." }), "TOOLSET_DECLINED");
-      // Already on: answered without a card (§13).
-      assert.equal(ok(await w.uncarded("sup", "request_toolset", { toolset: "agent-profile-editing", reason: "x" })).enabled, true);
-
       // Planning: Admin is refused outright (no card); a workflow-owned chat gets ADMIN_NOT_AVAILABLE.
       w.host.userTurn("claude", "Plan more skills.", { plan: true });
       const planning = refused(await w.uncarded("claude", "edit_agent_profile", other), "PERMISSION_DENIED");
       assert.match(planning.message, /planning/);
       w.host.addChat("wf", { project: orq, title: "Nightly", runtimeMode: "full-access", owner: { kind: "workflow", workflowId: "wf-1", runId: "r-1", nodeId: "a" } });
       w.host.userTurn("wf", "go");
-      refused(await w.uncarded("wf", "edit_agent_profile", other), "TOOL_NOT_ENABLED");
-      assert.equal((await w.user({ method: "PUT", url: "/api/sessions/wf/agent-tools", payload: { toolsets: { "agent-profile-editing": true } } })).status, 200);
       refused(await w.uncarded("wf", "edit_agent_profile", other), "ADMIN_NOT_AVAILABLE");
-      refused(await w.uncarded("wf", "request_toolset", { toolset: "workflow-authoring", reason: "x" }), "PERMISSION_DENIED");
 
       // External: full trust — no card, written at once.
       const before = w.cards.opened.length;
@@ -406,10 +389,8 @@ describe("acceptance (c) / §14.2.11 saved prompts: global and per project; the 
       const orq = w.project("jaspersito/orquester");
       w.host.addChat("claude", { project: orq, title: "Prompt librarian", runtimeMode: "full-access" });
       w.host.userTurn("claude", "Save two prompts for me.");
-      refused(await w.uncarded("claude", "update_saved_prompts", { action: "create", title: "x", body: "y", global: true }), "TOOL_NOT_ENABLED");
-      // The user turns the toolset on in the chat's Tools chip; an agent may not (only a person).
-      assert.equal((await w.internalApi.request("PUT", "/api/sessions/claude/agent-tools", { body: { toolsets: { notes: true } }, principal: { kind: "agent", threadId: "claude", projectPath: orq, agent: "claude", title: "x" } })).status, 403);
-      assert.equal((await w.user({ method: "PUT", url: "/api/sessions/claude/agent-tools", payload: { toolsets: { notes: true } } })).status, 200);
+      // Nothing to turn on first: the chat's Tools chip has no toolset switch (the route is gone).
+      assert.equal((await w.user({ method: "PUT", url: "/api/sessions/claude/agent-tools", payload: { toolsets: { notes: true } } })).status, 404);
 
       const global = ok(await w.uncarded("claude", "update_saved_prompts", { action: "create", global: true, title: "Release checklist", body: "Check {project} on {branch}.", tags: ["release"] })).prompt;
       assert.equal(global.scope, "global");
@@ -448,7 +429,6 @@ describe("acceptance (c) / §14.2.11 saved prompts: global and per project; the 
       assert.equal(w.savedPrompts.get(mine.body.id)!.title, "Standup");
       // An Auto chat gets the card without a grant option; denying leaves the prompt as it was.
       w.host.addChat("auto", { project: orq, title: "Auto", runtimeMode: "auto" });
-      await w.user({ method: "PUT", url: "/api/sessions/auto/agent-tools", payload: { toolsets: { notes: true } } });
       w.host.userTurn("auto", "edit");
       const autoEdit = await w.carded("auto", "update_saved_prompts", { action: "delete", id: mine.body.id }, { decision: "deny" });
       assert.deepEqual(autoEdit.card.grantOptions, []);
@@ -489,7 +469,6 @@ describe("a global prompt's creator below Full access", () => {
       w.host.addChat("stranger", { project: orq, title: "Stranger", runtimeMode: "auto" });
       w.host.addChat("wide", { project: orq, title: "Wide", runtimeMode: "full-access" });
       for (const id of ["maker", "neighbour", "stranger", "wide"]) {
-        assert.equal((await w.user({ method: "PUT", url: `/api/sessions/${id}/agent-tools`, payload: { toolsets: { notes: true } } })).status, 200);
         w.host.userTurn(id, "Look at the prompts.");
       }
       const made = ok(await w.uncarded("maker", "update_saved_prompts", { action: "create", global: true, title: "Shared checklist", body: "Check it." })).prompt;
@@ -529,7 +508,6 @@ describe("saved prompts shared by a repository's checkouts, on workflow cards", 
       assert.equal(w.savedPrompts.get(created.body.id)?.body, "Review {diff} for the release.");
 
       w.host.addChat("claude", { project: orq, title: "Automate", runtimeMode: "full-access" });
-      assert.equal((await w.user({ method: "PUT", url: "/api/sessions/claude/agent-tools", payload: { toolsets: { "workflow-authoring": true } } })).status, 200);
       w.host.userTurn("claude", "Automate the release review.");
       const card = await w.carded("claude", "create_workflow", {
         name: "Release review",
@@ -556,7 +534,6 @@ describe("acceptance (d) / §14.2.11 workflows: create → modify → enable →
     await withWorld(async (w) => {
       const orq = w.project("jaspersito/orquester");
       w.host.addChat("claude", { project: orq, title: "Automate", runtimeMode: "full-access" });
-      assert.equal((await w.user({ method: "PUT", url: "/api/sessions/claude/agent-tools", payload: { toolsets: { "workflow-authoring": true } } })).status, 200);
       w.host.userTurn("claude", "Automate the build check.");
 
       // A dry run validates (Read): no card, nothing saved.
@@ -660,7 +637,6 @@ describe("acceptance (d) / §14.2.11 workflows: create → modify → enable →
 
       // Another chat, even at Full access, holds no grant: its first call on a workflow cards.
       w.host.addChat("other", { project: orq, title: "Other", runtimeMode: "full-access" });
-      await w.user({ method: "PUT", url: "/api/sessions/other/agent-tools", payload: { toolsets: { "workflow-authoring": true } } });
       w.host.userTurn("other", "run it");
       refused((await w.carded("other", "run_workflow", { workflowId: childId, revision: w.workflows.service.get(childId)!.revision }, { decision: "deny" })).result, "APPROVAL_DENIED");
       // Closing the chat drops its grant.
@@ -675,7 +651,6 @@ describe("§12.5 / §7.6 secrets and workspaces: a workflow secret is typed into
     await withWorld(async (w) => {
       const orq = w.project("jaspersito/orquester");
       w.host.addChat("claude", { project: orq, title: "Jira bot", runtimeMode: "full-access" });
-      await w.user({ method: "PUT", url: "/api/sessions/claude/agent-tools", payload: { toolsets: { "workflow-authoring": true } } });
       w.host.userTurn("claude", "Wire Jira.");
       const created = await w.carded("claude", "create_workflow", {
         name: "Jira sync", project: { kind: "existing", project: "jaspersito/orquester" },
@@ -714,7 +689,6 @@ describe("§12.5 / §7.6 secrets and workspaces: a workflow secret is typed into
   test("a workflow whose project is in another workspace: a card naming that workspace's identity, never a grant", async () => {
     await withWorld(async (w) => {
       w.host.addChat("claude", { project: w.project("jaspersito/orquester"), title: "Automate", runtimeMode: "full-access" });
-      await w.user({ method: "PUT", url: "/api/sessions/claude/agent-tools", payload: { toolsets: { "workflow-authoring": true } } });
       w.host.userTurn("claude", "Automate the site.");
       const { card, result } = await w.carded("claude", "create_workflow", {
         name: "Site check", project: { kind: "existing", project: "acme/site" },
@@ -1009,12 +983,11 @@ describe("acceptance (h): a workflow-owned chat gets no Admin tools and asks for
     await withWorld(async (w) => {
       const orq = w.project("jaspersito/orquester");
       w.host.addChat("wf", { project: orq, title: "Nightly agent", runtimeMode: "full-access", owner: { kind: "workflow", workflowId: "wf-1", runId: "run-1", nodeId: "agent" } });
-      // The user turns every toolset on in its Tools chip: still no Admin tool.
-      const on = Object.fromEntries(["notes", "chat-extras", "files-git", "workflow-authoring", "agent-profile-editing", "desktops"].map((id) => [id, true]));
-      assert.equal((await w.user({ method: "PUT", url: "/api/sessions/wf/agent-tools", payload: { toolsets: on } })).status, 200);
+      // Every chat tool but the always-Admin ones.
       const manifest = await manifestOf(w, "wf");
       const admin = catalogFor("chat").filter((tool) => tool.tier === "admin").map((tool) => tool.name);
       assert.deepEqual(manifest.tools.filter((name) => admin.includes(name)), [], "no Admin tool advertised");
+      assert.deepEqual(manifest.tools, catalogFor("chat").filter((tool) => tool.tier !== "admin").map((tool) => tool.name));
       assert.equal(manifest.tools.includes("request_toolset"), false);
       assert.ok(manifest.tools.includes("create_session"));
       w.host.userTurn("wf", "Do the nightly work.");
@@ -1026,7 +999,6 @@ describe("acceptance (h): a workflow-owned chat gets no Admin tools and asks for
       assert.match(createWf.message, /automated workflow/);
       const userPrompt = await w.user({ method: "POST", url: "/api/saved-prompts", payload: { title: "Mine", body: "b", projectPath: null } });
       refused(await w.uncarded("wf", "update_saved_prompts", { action: "update", id: userPrompt.body.id, body: "changed" }), "ADMIN_NOT_AVAILABLE");
-      refused(await w.uncarded("wf", "request_toolset", { toolset: "workflow-authoring", reason: "x" }), "PERMISSION_DENIED");
       // A boundary card becomes a denial too (another workspace's content, below Full access).
       w.host.addChat("site", { project: w.project("acme/site"), title: "Site", runtimeMode: "auto" });
       w.host.setMode("wf", "auto");
@@ -1039,7 +1011,6 @@ describe("acceptance (h): a workflow-owned chat gets no Admin tools and asks for
       const child = ok(await w.uncarded("wf", "create_session", { prompt: "Help with the nightly work.", reply: "none" })).sessionId as string;
       assert.equal(w.host.tabs.get(child)!.lineage?.workflowOwned, true);
       assert.equal((await w.user({ method: "DELETE", url: "/api/sessions/wf" })).status, 204);
-      await w.user({ method: "PUT", url: `/api/sessions/${child}/agent-tools`, payload: { toolsets: on } });
       assert.deepEqual((await manifestOf(w, child)).tools.filter((name) => admin.includes(name)), []);
       refused(await w.uncarded(child, "run_workflow", { workflowId: userWf.id, revision: userWf.revision }), "ADMIN_NOT_AVAILABLE");
       refused(await w.uncarded(child, "create_session", { project: "jaspersito/orquester-3", prompt: "x", reply: "none" }), "PERMISSION_DENIED");
@@ -1051,7 +1022,6 @@ describe("acceptance (h): a workflow-owned chat gets no Admin tools and asks for
     await withWorld(async (w) => {
       const orq = w.project("jaspersito/orquester");
       w.host.addChat("planner", { project: orq, title: "Planner", runtimeMode: "full-access" });
-      await w.user({ method: "PUT", url: "/api/sessions/planner/agent-tools", payload: { toolsets: { notes: true, "workflow-authoring": true, "agent-profile-editing": true } } });
       w.host.addChat("sibling", { project: w.project("jaspersito/orquester-3"), title: "Sibling", agent: "claude", runtimeMode: "auto" });
       w.host.addChat("codex", { project: w.project("jaspersito/orquester-3"), title: "Codex", agent: "codex", runtimeMode: "auto" });
       w.host.userTurn("planner", "Plan the migration.", { plan: true });
@@ -1140,7 +1110,6 @@ describe("acceptance (i) / §14.2.11: a user-installed server reaching this daem
 
       // An agent adding one through edit_agent_profile: the Admin card flags it in red; denied, nothing written.
       w.host.userTurn("c-claude", "Add an Orquester MCP server.");
-      await w.user({ method: "PUT", url: "/api/sessions/c-claude/agent-tools", payload: { toolsets: { "agent-profile-editing": true } } });
       const add = await w.carded("c-claude", "edit_agent_profile", { agent: "claude", changes: [{ action: "create", mcp: { name: "orq_remote", transport: "http", url } }] }, { decision: "deny" });
       assert.ok(add.card.sections.some((section) => section.kind === "warning" && section.level === "danger" && /full control of Orquester without approvals/.test(section.text)));
       refused(add.result, "APPROVAL_DENIED");
@@ -1164,8 +1133,7 @@ describe("§12.1 / §7.3: an Orquester card is answered only by a person, on its
       // The external MCP: no request by that id (cards are not provider requests).
       const viaMcp = await w.external("respond_to_request", { sessionId: "auto", requestId: card.approvalId, decision: "accept" });
       assert.equal(viaMcp.isError, true);
-      // Another chat's agent, even holding chat-extras: no request by that id either.
-      await w.user({ method: "PUT", url: "/api/sessions/orq3/agent-tools", payload: { toolsets: { "chat-extras": true } } });
+      // Another chat's agent: no request by that id either.
       assert.equal((await w.uncarded("orq3", "respond_to_request", { sessionId: "auto", requestId: card.approvalId, answers: { "1": "yes" } })).isError, true);
       // The card route itself refuses any principal but the user's.
       const route = agentChatRoutes.toolApproval(card.threadId, card.approvalId);

@@ -43,8 +43,8 @@
  * - the pin refusal for agent-created prompts (only `user` may pin one; `agent` and `external` get
  *   403 `AGENT_PROMPT_PIN_REFUSED`);
  * - push-notify rate-limit keys (agent → its chat; external → its credential; user → none);
- * - refusals of `agent` principals on card answers, agent-tools settings, chat toolsets and grant
- *   revocation (403): only a person answers cards or changes tool settings.
+ * - refusals of `agent` principals on card answers and grant revocation (403): only a person
+ *   answers cards or revokes grants.
  *
  * **Socket-trusted** — honoured from ANY unix-socket / in-process caller (trusted local control,
  * AGENTS.md; the daemon's own workers post through the internal `DaemonApi` with no principal) and

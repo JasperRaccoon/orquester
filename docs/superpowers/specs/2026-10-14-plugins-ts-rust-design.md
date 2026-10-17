@@ -6,6 +6,28 @@ redirect-everywhere over per-project verification, an hourly background update c
 plugins only, and asked to include the orquester-3 `types` fix. This document is the written spec
 awaiting the owner's review.
 
+> **Superseded in part (2026-10-17):** the owner found per-workspace enabling tedious, so
+> Better TS Typecheck is now turned on once for the whole server, like Excalidraw Whiteboard:
+> `PUT /api/plugins/ts-rust` sets `plugins.json` `ts-rust.enabled`, the per-workspace route and
+> the scope picker are gone, and the preload redirects every `tsc` run inside any workspace while
+> `enabled` is true. A record with a non-empty legacy `enabledWorkspaces` and no `enabled` is
+> turned on at daemon start. Where this document says "enabled workspace", read "while enabled".
+
+> **Engine choice (2026-10-17):** the plugin runs one of two TypeScript 7 engines in place of
+> `tsc`: **tsrs** (oxc-project/tsrs, npm `tsrs` + `@tsrs/{darwin-arm64,linux-<cpu>-<gnu|musl>}`;
+> no Windows or Intel Mac build) or **tsc-rs**. The default is tsrs where it has a build, else
+> tsc-rs; `PUT /api/plugins/ts-rust` takes `{ enabled?, engine? }` (409 for an engine with no
+> build here). `plugins.json` keeps tsc-rs's versions in the record's own fields and adds
+> `engine` (unknown values read as absent) and `tsrs: { current, previous, skippedVersion,
+> lastCheckAt, lastError }`; tsrs installs its whole package (binary beside its lib `.d.ts`
+> files) under `plugins/ts-rust/tsrs/versions/<version>/`. Checks, installs, rollback and the
+> skip apply to the active engine; switching while on installs the new one if it has nothing;
+> removing downloads clears both. The preload picks the engine by the same rule (supported
+> engines and the default are baked in) and appends `--checkers 4` for tsrs unless the
+> arguments set `--checkers`/`--singleThreaded` or start build mode (`-b`/`--build`), since tsrs
+> otherwise runs one checker per core up to 16. Where this document says "tsc-rs", read "the
+> active engine".
+
 Research inputs (2026-10-14, this host): a benchmark of `tsc-rs` 0.7.0 against each project's own
 `tsc` (5.8/5.9/6.0) and the TypeScript 7 build it ports (`typescript@7.1.0-dev.20261008.1`) on 50
 tsconfigs across 12 projects (§1.2); two throwaway probes of how `tsc` can be intercepted (§3.1);

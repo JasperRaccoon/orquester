@@ -10,7 +10,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { TOOLSETS, type DesktopAppSummary, type DesktopSummary } from "@orquester/api";
+import type { DesktopAppSummary, DesktopSummary } from "@orquester/api";
 import { FakeApprovalPort } from "../catalog/approval-double.ts";
 import type { ThreadCaller } from "../catalog/contract.ts";
 import { audienceSchema, executeToolCall } from "../executor.ts";
@@ -26,7 +26,6 @@ for (const dir of [GAME, WEB, OTHER]) mkdirSync(dir, { recursive: true });
 test.after(() => rmSync(ROOT, { recursive: true, force: true }));
 
 const stamp = "2026-09-30T12:00:00.000Z";
-const ALL = new Set(TOOLSETS.map((toolset) => toolset.id));
 
 function app(overrides: Partial<DesktopAppSummary> = {}): DesktopAppSummary {
   return { id: "app-1", desktopId: "dt-1", command: "xterm", cwd: GAME, env: {}, status: "running", exitCode: null, startedAt: stamp, exitedAt: null, ...overrides };
@@ -58,7 +57,7 @@ type Outcome = { ok: true; value: Record<string, unknown> } | { ok: false; code:
 
 async function call(api: FakeDaemonApi, name: string, args: Record<string, unknown>, caller?: ThreadCaller, port = new FakeApprovalPort()): Promise<Outcome> {
   const result: CallToolResult = await executeToolCall(
-    { approvals: port, enabledToolsets: async () => ALL },
+    { approvals: port },
     { name, arguments: args },
     { caller: caller ?? { kind: "external" }, api, signal: new AbortController().signal }
   );

@@ -15,15 +15,18 @@ import {
 } from "@orquester/api";
 import { readFile } from "node:fs/promises";
 import { createDefaultClientConfig, createDefaultDaemonConfig, pluginsConfigPath } from "@orquester/config";
-import type { InjectOptions } from "fastify";
+import Fastify, { type InjectOptions } from "fastify";
 import { Broadcaster } from "../broadcaster.ts";
 import { createServer } from "../index.ts";
 import { PluginsService, publishPluginEvents } from "./plugins-service.ts";
-import { fakeRegistry, publish, tempRoot } from "./testing.ts";
+import { registerPluginRoutes } from "./routes.ts";
+import { combinedRegistryDeps, fakeRegistry, publish, tempRoot } from "./testing.ts";
+import { TSC_RS_ENGINE, TSRS_ENGINE } from "./ts-rust/installer.ts";
 
 // Route-level coverage for /api/plugins (spec §5.3) through the daemon's own
 // router — the real createServer and a real PluginsService over a temp appdir,
-// an in-memory registry and a stub preload writer: validation (404/400/409),
+// in-memory registries of both engines (tsrs is the default on the linux-x64
+// glibc host it fakes) and a stub preload writer: validation (404/400/409),
 // enabling triggering the first install, the broadcast payload, and auth on
 // the remote transport. Nothing listens.
 
@@ -44,9 +47,12 @@ async function harness(t: TestContext, options: { mode?: "local" | "remote"; see
     await writeFile(pluginsConfigPath(baseDir), options.seed, "utf8");
   }
   const sessionPreload: Array<string | null> = [];
-  const registry = fakeRegistry();
+  const registry = fakeRegistry(undefined, TSRS_ENGINE);
   await publish(registry, root, "0.7.0");
   registry.latest = "0.7.0";
+  const tscRsRegistry = fakeRegistry(undefined, TSC_RS_ENGINE);
+  await publish(tscRsRegistry, root, "0.6.0");
+  tscRsRegistry.latest = "0.6.0";
 
   const plugins = new PluginsService({
     baseDir,
@@ -55,10 +61,11 @@ async function harness(t: TestContext, options: { mode?: "local" | "remote"; see
       await mkdir(join(path, ".."), { recursive: true });
       await writeFile(path, JSON.stringify(value), "utf8");
     },
-    installer: registry.deps,
+    installer: combinedRegistryDeps([registry, tscRsRegistry]),
     env: {},
     platform: "linux",
     arch: "x64",
+    libc: "glibc",
     writePreload: async (path) => {
       await mkdir(join(path, ".."), { recursive: true });
       await writeFile(path, "// preload\n", "utf8");
@@ -114,6 +121,7 @@ async function harness(t: TestContext, options: { mode?: "local" | "remote"; see
     plugins,
     published,
     registry,
+    tscRsRegistry,
     inject: (request: InjectOptions) => app.inject({ ...request, headers: { ...headers, ...request.headers } }),
     rawInject: app.inject.bind(app)
   };
@@ -127,11 +135,13 @@ test("GET lists the built-in plugins", async (t) => {
   assert.deepEqual(
     body.plugins.map((plugin) => [plugin.id, plugin.name, plugin.scope, plugin.updates, plugin.platform, plugin.job]),
     [
-      [ID, "Better TS Typecheck", "workspace", true, "supported", "idle"],
+      [ID, "Better TS Typecheck", "global", true, "supported", "idle"],
       [EXCALIDRAW_PLUGIN_ID, "Excalidraw Whiteboard", "global", false, "supported", "idle"]
     ]
   );
+  assert.equal(body.plugins[0]?.enabled, false);
   assert.equal(body.plugins[1]?.enabled, false);
+  assert.deepEqual(body.plugins[0]?.enabledWorkspaces, []);
 });
 
 test("a global plugin is switched for the whole server, persists, and broadcasts", async (t) => {
@@ -156,7 +166,7 @@ test("a global plugin is switched for the whole server, persists, and broadcasts
   assert.equal((off.json() as PluginInfo).enabled, false);
 });
 
-test("scope and version refusals: the wrong toggle route 409, a bundled plugin's version routes 409", async (t) => {
+test("version refusals: a bundled plugin's version routes 409; the per-workspace route is gone", async (t) => {
   const h = await harness(t);
   const expect = async (request: InjectOptions, status: number, code: string) => {
     const res = await h.inject(request);
@@ -164,17 +174,18 @@ test("scope and version refusals: the wrong toggle route 409, a bundled plugin's
     assert.equal((res.json() as { code: string }).code, code);
   };
   const X = EXCALIDRAW_PLUGIN_ID;
-  await expect({ method: "PUT", url: pluginRoutes.workspace(X, "acme"), payload: { enabled: true } }, 409, "PLUGIN_SCOPE");
-  await expect({ method: "PUT", url: pluginRoutes.plugin(ID), payload: { enabled: true } }, 409, "PLUGIN_SCOPE");
   await expect({ method: "PUT", url: pluginRoutes.plugin(X), payload: { enabled: 1 } }, 400, "INVALID_REQUEST");
+  await expect({ method: "PUT", url: pluginRoutes.plugin(ID), payload: { enabled: "yes" } }, 400, "INVALID_REQUEST");
   await expect({ method: "PUT", url: pluginRoutes.plugin("nope"), payload: { enabled: true } }, 404, "PLUGIN_NOT_FOUND");
   await expect({ method: "POST", url: pluginRoutes.check(X) }, 409, "PLUGIN_BUNDLED");
   await expect({ method: "POST", url: pluginRoutes.rollback(X) }, 409, "PLUGIN_BUNDLED");
   await expect({ method: "DELETE", url: pluginRoutes.downloads(X) }, 409, "PLUGIN_BUNDLED");
+  const legacy = await h.inject({ method: "PUT", url: `${pluginRoutes.plugin(ID)}/workspaces/acme`, payload: { enabled: true } });
+  assert.equal(legacy.statusCode, 404);
   assert.equal(h.registry.calls.latest, 0);
 });
 
-test("refusals: unknown plugin 404, bad workspace name 400, unknown workspace 404, bad body 400", async (t) => {
+test("refusals: unknown plugin 404, no previous version 409", async (t) => {
   const h = await harness(t);
   const expect = async (request: InjectOptions, status: number, code: string) => {
     const res = await h.inject(request);
@@ -182,26 +193,22 @@ test("refusals: unknown plugin 404, bad workspace name 400, unknown workspace 40
     assert.equal((res.json() as { code: string }).code, code);
     assert.equal(typeof (res.json() as { message: string }).message, "string");
   };
-  await expect({ method: "PUT", url: pluginRoutes.workspace("nope", "acme"), payload: { enabled: true } }, 404, "PLUGIN_NOT_FOUND");
+  await expect({ method: "PUT", url: pluginRoutes.plugin("nope"), payload: { enabled: true } }, 404, "PLUGIN_NOT_FOUND");
   await expect({ method: "POST", url: pluginRoutes.check("nope") }, 404, "PLUGIN_NOT_FOUND");
   await expect({ method: "POST", url: pluginRoutes.rollback("nope") }, 404, "PLUGIN_NOT_FOUND");
   await expect({ method: "DELETE", url: pluginRoutes.downloads("nope") }, 404, "PLUGIN_NOT_FOUND");
-  await expect({ method: "PUT", url: pluginRoutes.workspace(ID, ".hidden"), payload: { enabled: true } }, 400, "INVALID_NAME");
-  await expect({ method: "PUT", url: pluginRoutes.workspace(ID, "a\\b"), payload: { enabled: true } }, 400, "INVALID_NAME");
-  await expect({ method: "PUT", url: pluginRoutes.workspace(ID, "ghost"), payload: { enabled: true } }, 404, "WORKSPACE_NOT_FOUND");
-  // A file directly under the workspaces root is not a workspace.
-  await expect({ method: "PUT", url: pluginRoutes.workspace(ID, "notes.txt"), payload: { enabled: true } }, 404, "WORKSPACE_NOT_FOUND");
-  await expect({ method: "PUT", url: pluginRoutes.workspace(ID, "acme"), payload: { enabled: "yes" } }, 400, "INVALID_REQUEST");
   await expect({ method: "POST", url: pluginRoutes.rollback(ID) }, 409, "NO_PREVIOUS_VERSION");
   assert.equal(h.registry.calls.latest, 0);
 });
 
-test("enabling a workspace answers its state, installs tsc-rs, and broadcasts every step", async (t) => {
+test("turning tsc-rs on answers its state, installs it, turns on the session preload, and broadcasts every step", async (t) => {
   const h = await harness(t);
-  const res = await h.inject({ method: "PUT", url: pluginRoutes.workspace(ID, "acme"), payload: { enabled: true } });
+  const res = await h.inject({ method: "PUT", url: pluginRoutes.plugin(ID), payload: { enabled: true } });
   assert.equal(res.statusCode, 200);
-  assert.deepEqual((res.json() as PluginInfo).enabledWorkspaces, ["acme"]);
+  assert.equal((res.json() as PluginInfo).enabled, true);
+  assert.deepEqual((res.json() as PluginInfo).enabledWorkspaces, []);
   await h.plugins.settled();
+  assert.equal(typeof h.sessionPreload.at(-1), "string");
 
   assert.ok(h.published.length > 0);
   for (const event of h.published) {
@@ -218,10 +225,14 @@ test("enabling a workspace answers its state, installs tsc-rs, and broadcasts ev
   const listed = (await h.inject({ method: "GET", url: pluginRoutes.list })).json() as PluginsResponse;
   assert.deepEqual(listed, last);
 
-  // Remove downloads is refused while a workspace is enabled.
+  // Remove downloads is refused while the plugin is on.
   const removed = await h.inject({ method: "DELETE", url: pluginRoutes.downloads(ID) });
   assert.equal(removed.statusCode, 409);
   assert.equal((removed.json() as { code: string }).code, "PLUGIN_ENABLED");
+
+  const off = await h.inject({ method: "PUT", url: pluginRoutes.plugin(ID), payload: { enabled: false } });
+  assert.equal((off.json() as PluginInfo).enabled, false);
+  assert.equal(h.sessionPreload.at(-1), null);
 });
 
 test("POST check is 202 with no body; rollback and DELETE downloads answer the updated PluginInfo", async (t) => {
@@ -263,7 +274,7 @@ test("a corrupt plugins.json is reported, not overwritten", async (t) => {
   const res = await h.inject({ method: "GET", url: pluginRoutes.list });
   assert.equal(res.statusCode, 500);
   assert.equal((res.json() as { code: string }).code, "PLUGINS_UNREADABLE");
-  const put = await h.inject({ method: "PUT", url: pluginRoutes.workspace(ID, "acme"), payload: { enabled: true } });
+  const put = await h.inject({ method: "PUT", url: pluginRoutes.plugin(ID), payload: { enabled: true } });
   assert.equal(put.statusCode, 500);
   assert.equal((put.json() as { code: string }).code, "PLUGINS_UNREADABLE");
 });
@@ -272,58 +283,119 @@ test("the remote transport serves the routes to authenticated clients only", asy
   const h = await harness(t, { mode: "remote" });
   assert.equal((await h.rawInject({ method: "GET", url: pluginRoutes.list })).statusCode, 401);
   assert.equal(
-    (await h.rawInject({ method: "PUT", url: pluginRoutes.workspace(ID, "acme"), payload: { enabled: true } })).statusCode,
+    (await h.rawInject({ method: "PUT", url: pluginRoutes.plugin(ID), payload: { enabled: true } })).statusCode,
     401
   );
   assert.equal((await h.inject({ method: "GET", url: pluginRoutes.list })).statusCode, 200);
-  const put = await h.inject({ method: "PUT", url: pluginRoutes.workspace(ID, "acme"), payload: { enabled: false } });
+  const put = await h.inject({ method: "PUT", url: pluginRoutes.plugin(ID), payload: { enabled: false } });
   assert.equal(put.statusCode, 200);
 });
 
-test("creating, renaming and deleting workspaces re-decides the session preload and broadcasts", async (t) => {
+test("creating, renaming and deleting workspaces leaves an enabled plugin on", async (t) => {
   const h = await harness(t);
-  const enabled = await h.inject({ method: "PUT", url: pluginRoutes.workspace(ID, "acme"), payload: { enabled: true } });
+  const enabled = await h.inject({ method: "PUT", url: pluginRoutes.plugin(ID), payload: { enabled: true } });
   assert.equal(enabled.statusCode, 200);
   await h.plugins.settled();
   const preload = h.sessionPreload.at(-1);
   assert.equal(typeof preload, "string");
-  const lastEnabled = () => (h.published.at(-1)?.payload as PluginsResponse).plugins[0]?.enabledWorkspaces;
+  const lastEnabled = () => (h.published.at(-1)?.payload as PluginsResponse).plugins[0]?.enabled;
 
   assert.equal((await h.inject({ method: "DELETE", url: "/api/workspaces/acme" })).statusCode, 204);
   await h.plugins.settled();
-  assert.equal(h.sessionPreload.at(-1), null);
-  assert.deepEqual(lastEnabled(), []);
+  assert.equal(h.sessionPreload.at(-1), preload);
+  assert.equal(lastEnabled(), true);
 
-  assert.equal((await h.inject({ method: "POST", url: "/api/workspaces", payload: { name: "acme" } })).statusCode, 200);
+  assert.equal((await h.inject({ method: "POST", url: "/api/workspaces", payload: { name: "beta" } })).statusCode, 200);
   await h.plugins.settled();
   assert.equal(h.sessionPreload.at(-1), preload);
-  assert.deepEqual(lastEnabled(), ["acme"]);
 
-  // A rename in the file browser moves the workspace away and back.
   const rename = (path: string, newName: string) =>
     h.inject({ method: "POST", url: "/api/fs/rename", payload: { path, newName } });
-  assert.equal((await rename(join(h.workspacesDir, "acme"), "renamed")).statusCode, 200);
-  await h.plugins.settled();
-  assert.equal(h.sessionPreload.at(-1), null);
-  assert.equal((await rename(join(h.workspacesDir, "renamed"), "acme")).statusCode, 200);
+  assert.equal((await rename(join(h.workspacesDir, "beta"), "renamed")).statusCode, 200);
   await h.plugins.settled();
   assert.equal(h.sessionPreload.at(-1), preload);
+  assert.equal(lastEnabled(), true);
+});
 
-  // So do a folder deleted and created at the workspaces root through the file browser.
-  const deleted = await h.inject({
-    method: "DELETE",
-    url: "/api/fs",
-    query: { path: join(h.workspacesDir, "acme") }
-  });
-  assert.equal(deleted.statusCode, 200);
+test("PUT chooses the engine: it answers the plugin on the new engine, persists it, and installs it while on", async (t) => {
+  const h = await harness(t);
+  const listed = (await h.inject({ method: "GET", url: pluginRoutes.list })).json() as PluginsResponse;
+  assert.equal(listed.plugins[0]?.engine, "tsrs");
+  assert.deepEqual(
+    listed.plugins[0]?.engines?.map((engine) => [engine.id, engine.platform]),
+    [
+      ["tsrs", "supported"],
+      ["tsc-rs", "supported"]
+    ]
+  );
+  assert.equal(listed.plugins[1]?.engine, undefined, "a bundled plugin has no engines");
+
+  const on = await h.inject({ method: "PUT", url: pluginRoutes.plugin(ID), payload: { enabled: true, engine: "tsc-rs" } });
+  assert.equal(on.statusCode, 200, on.body);
+  assert.equal((on.json() as PluginInfo).engine, "tsc-rs");
+  assert.equal((on.json() as PluginInfo).enabled, true);
   await h.plugins.settled();
-  assert.equal(h.sessionPreload.at(-1), null);
-  const created = await h.inject({
-    method: "POST",
-    url: "/api/fs/create",
-    payload: { path: join(h.workspacesDir, "acme"), kind: "dir" }
-  });
-  assert.equal(created.statusCode, 200);
+  const after = ((await h.inject({ method: "GET", url: pluginRoutes.list })).json() as PluginsResponse).plugins[0];
+  assert.equal(after?.current?.version, "0.6.0");
+  assert.equal(h.registry.calls.latest, 0);
+
+  const back = await h.inject({ method: "PUT", url: pluginRoutes.plugin(ID), payload: { engine: "tsrs" } });
+  assert.equal(back.statusCode, 200);
+  assert.equal((back.json() as PluginInfo).enabled, true, "choosing an engine leaves the plugin on");
   await h.plugins.settled();
-  assert.equal(h.sessionPreload.at(-1), preload);
+  assert.equal(h.registry.calls.latest, 1, "tsrs was installed");
+  const saved = JSON.parse(await readFile(pluginsConfigPath(join(h.root, "appdir")), "utf8")) as {
+    plugins: Record<string, { engine?: string; current?: { version: string }; tsrs?: { current?: { version: string } } }>;
+  };
+  assert.equal(saved.plugins[ID]?.engine, "tsrs");
+  assert.equal(saved.plugins[ID]?.current?.version, "0.6.0");
+  assert.equal(saved.plugins[ID]?.tsrs?.current?.version, "0.7.0");
+});
+
+test("PUT refuses an unknown engine, an empty body and an engine for a bundled plugin (400)", async (t) => {
+  const h = await harness(t);
+  const expect = async (id: string, payload: unknown, status: number, code: string) => {
+    const res = await h.inject({ method: "PUT", url: pluginRoutes.plugin(id), payload: payload as Record<string, unknown> });
+    assert.equal(res.statusCode, status, `${JSON.stringify(payload)}: ${res.body}`);
+    assert.equal((res.json() as { code: string }).code, code);
+  };
+  await expect(ID, { engine: "tsgo" }, 400, "INVALID_REQUEST");
+  await expect(ID, { engine: 7 }, 400, "INVALID_REQUEST");
+  await expect(ID, { enabled: true, engine: "TSRS" }, 400, "INVALID_REQUEST");
+  await expect(ID, {}, 400, "INVALID_REQUEST");
+  await expect(EXCALIDRAW_PLUGIN_ID, { engine: "tsrs" }, 400, "INVALID_REQUEST");
+  assert.equal(h.registry.calls.latest + h.tscRsRegistry.calls.latest, 0);
+});
+
+test("PUT refuses an engine with no build on the daemon's platform (409)", async (t) => {
+  const root = await tempRoot("orq-plugins-routes-unsupported-");
+  const baseDir = join(root, "appdir");
+  const plugins = new PluginsService({
+    baseDir,
+    workspacesDir: () => join(root, "workspaces"),
+    writeJson: async (path, value) => {
+      await mkdir(join(path, ".."), { recursive: true });
+      await writeFile(path, JSON.stringify(value), "utf8");
+    },
+    installer: fakeRegistry().deps,
+    env: {},
+    platform: "win32",
+    arch: "x64",
+    writePreload: async () => {},
+    setSessionPreload: () => {},
+    logger: { warn: () => {}, error: () => {} }
+  });
+  const app = Fastify();
+  registerPluginRoutes(app, { plugins });
+  t.after(async () => {
+    await app.close();
+    await plugins.stop();
+    await rm(root, { recursive: true, force: true });
+  });
+  const res = await app.inject({ method: "PUT", url: pluginRoutes.plugin(ID), payload: { engine: "tsrs" } });
+  assert.equal(res.statusCode, 409);
+  assert.equal((res.json() as { code: string }).code, "PLUGIN_UNSUPPORTED");
+  assert.match((res.json() as { message: string }).message, /tsrs has no build for win32\/x64/);
+  const ok = await app.inject({ method: "PUT", url: pluginRoutes.plugin(ID), payload: { engine: "tsc-rs" } });
+  assert.equal(ok.statusCode, 200);
 });

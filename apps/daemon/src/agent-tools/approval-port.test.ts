@@ -81,7 +81,7 @@ async function harness(t: TestContext) {
     await tools.flush();
     await rm(dir, { recursive: true, force: true });
   });
-  const traits = new Map<string, CallerTraits>([["t1", { runtimeMode: "full-access", workflowOwned: false, agent: "claude" }]]);
+  const traits = new Map<string, CallerTraits>([["t1", { runtimeMode: "full-access", workflowOwned: false }]]);
   const owned = new Set<string>();
   const port = new AgentToolsApprovalPort({
     registry,
@@ -219,7 +219,7 @@ test("a caller that left full-access while the card was open cannot attach a gra
   assert.equal(h.tools.settingsView().grants.length, 0);
 });
 
-test("workflow-owned callers never get a card: Admin → ADMIN_NOT_AVAILABLE, boundary/toolset → PERMISSION_DENIED", async (t) => {
+test("workflow-owned callers never get a card: Admin → ADMIN_NOT_AVAILABLE, boundary → PERMISSION_DENIED", async (t) => {
   const h = await harness(t);
   h.owned.add("t1");
   await assert.rejects(h.port.request(card(), new AbortController().signal), (e: Error & { code?: string }) => e.code === "ADMIN_NOT_AVAILABLE");
@@ -228,44 +228,17 @@ test("workflow-owned callers never get a card: Admin → ADMIN_NOT_AVAILABLE, bo
     (e: Error & { code?: string }) => e.code === "PERMISSION_DENIED"
   );
   h.owned.delete("t1");
-  h.traits.set("t1", { runtimeMode: "full-access", workflowOwned: true, agent: "claude" });
+  h.traits.set("t1", { runtimeMode: "full-access", workflowOwned: true });
   await assert.rejects(h.port.request(card(), new AbortController().signal), (e: Error & { code?: string }) => e.code === "ADMIN_NOT_AVAILABLE");
   assert.equal(h.events.length, 0, "no card was ever shown");
   await assert.rejects(h.port.request(card({ threadId: "gone" }), new AbortController().signal), (e: Error & { code?: string }) => e.code === "THREAD_NOT_FOUND");
 });
 
-test("toolset cards: approval turns the toolset on for the chat (persisted, toolsetsChanged); a denial blocks asking for 30 min", async (t) => {
+test("an older build's toolset card is never opened: every tool is on already", async (t) => {
   const h = await harness(t);
-  const changed: (string | null)[] = [];
-  h.tools.onToolsetsChanged((id) => {
-    changed.push(`${id}:${h.registry.list("t1").length === 0 ? "settled" : "pending"}`);
-    throw new Error("a listener that throws changes nothing");
-  });
-  const toolsetCard = card({ tool: "request_toolset", kind: "toolset", family: "toolset", grantOptions: [], title: "Claude asks to enable Workflow authoring for this chat", toolset: "workflow-authoring" });
-  const waiting = h.port.request(toolsetCard, new AbortController().signal);
-  const id = await h.opened();
-  await assert.rejects(h.port.request(toolsetCard, new AbortController().signal), (e: Error & { code?: string }) => e.code === "PERMISSION_DENIED", "one pending per toolset per chat");
-  assert.ok((await h.registry.answer("t1", id, { decision: "approve" })).ok);
-  assert.equal((await waiting).outcome, "approved");
-  assert.deepEqual(h.tools.resolvedToolsets("t1", "claude"), ["core", "reads", "workflow-authoring"]);
-  assert.deepEqual(changed, ["t1:settled"], "the listener ran after the card settled, never inside the answer");
-  // Already on: no card.
-  const before = h.events.length;
-  assert.deepEqual(await h.port.request(toolsetCard, new AbortController().signal), { outcome: "approved", approvalId: "" });
-  assert.equal(h.events.length, before);
-
-  const desktops: ApprovalRequest = { ...toolsetCard, toolset: "desktops", title: "Claude asks to enable Desktops for this chat" };
-  const denied = h.port.request(desktops, new AbortController().signal);
-  const deniedId = await h.opened();
-  assert.ok((await h.registry.answer("t1", deniedId, { decision: "deny", reason: "no" })).ok);
-  assert.deepEqual(await denied, { outcome: "denied", approvalId: deniedId, reason: "no" });
-  await assert.rejects(h.port.request(desktops, new AbortController().signal), (e: Error & { code?: string; detail?: { toolset: string } }) => e.code === "TOOLSET_DECLINED" && e.detail?.toolset === "desktops");
-  h.clock.advance(30 * 60 * 1000);
-  void h.port.request(desktops, new AbortController().signal);
-  await h.opened();
-  const unnamed: ApprovalRequest = { ...toolsetCard };
-  delete (unnamed as { toolset?: string }).toolset;
-  await assert.rejects(h.port.request(unnamed, new AbortController().signal), (e: Error & { code?: string }) => e.code === "INVALID_ARGUMENT");
+  const legacy = card({ tool: "request_toolset", kind: "toolset", family: "toolset", grantOptions: [], title: "Claude asks to enable Desktops for this chat" });
+  await assert.rejects(h.port.request(legacy, new AbortController().signal), (e: Error & { code?: string }) => e.code === "INVALID_ARGUMENT");
+  assert.equal(h.events.length, 0, "no card was shown");
 });
 
 test("workflows grants (ruling): a create joins the chat's grant and the card says so; approving a run once never widens it", async (t) => {
@@ -330,25 +303,7 @@ test("workflows grants (ruling): a create joins the chat's grant and the card sa
   assert.equal(await h.port.findGrant({ ...query, workflowId: "wf3" }), null);
 });
 
-test("master switch off: a toolset card is refused up front, and an approval after it was switched off is refused", async (t) => {
-  const h = await harness(t);
-  const toolsetCard = card({ tool: "request_toolset", kind: "toolset", family: "toolset", grantOptions: [], title: "Claude asks to enable Desktops for this chat", toolset: "desktops" });
-  h.tools.updateSettings({ revision: 0, enabled: false });
-  await assert.rejects(h.port.request(toolsetCard, new AbortController().signal), (e: Error & { code?: string; message: string }) => e.code === "PERMISSION_DENIED" && e.message.includes("switched off"));
-  assert.equal(h.events.length, 0, "no card");
-  h.tools.updateSettings({ revision: 1, enabled: true });
-  const waiting = h.port.request(toolsetCard, new AbortController().signal);
-  const id = await h.opened();
-  h.tools.updateSettings({ revision: 2, enabled: false });
-  const refused = await h.registry.answer("t1", id, { decision: "approve" });
-  assert.deepEqual(refused.ok ? null : [refused.status, refused.code], [409, "AGENT_TOOLS_DISABLED"]);
-  assert.match(refused.ok ? "" : refused.message, /"Extra toolsets for agent chats" is switched off.*Deny this card, or turn that switch on first/, "names the switch as Settings shows it");
-  assert.equal(h.registry.list("t1").length, 1, "the card stays; deny still works");
-  assert.ok((await h.registry.answer("t1", id, { decision: "deny" })).ok);
-  assert.equal((await waiting).outcome, "denied");
-});
-
-test("a read-only store: a grant or a toolset approval answers 503 AGENT_TOOLS_UNAVAILABLE; approving without a grant works", async (t) => {
+test("a read-only store: a grant answers 503 AGENT_TOOLS_UNAVAILABLE; approving without a grant works", async (t) => {
   const h = await harness(t);
   (h.tools as unknown as { blockedReason: string }).blockedReason = "test: read-only";
   const waiting = h.port.request(card(), new AbortController().signal);
@@ -358,12 +313,6 @@ test("a read-only store: a grant or a toolset approval answers 503 AGENT_TOOLS_U
   assert.match(refused.ok ? "" : refused.message, /read-only/);
   assert.ok((await h.registry.answer("t1", id, { decision: "approve" })).ok);
   assert.equal((await waiting).outcome, "approved");
-  const toolset = h.port.request(card({ tool: "request_toolset", kind: "toolset", family: "toolset", grantOptions: [], toolset: "notes" }), new AbortController().signal);
-  const toolsetId = await h.opened();
-  const refusedToolset = await h.registry.answer("t1", toolsetId, { decision: "approve" });
-  assert.deepEqual(refusedToolset.ok ? null : [refusedToolset.status, refusedToolset.code], [503, "AGENT_TOOLS_UNAVAILABLE"]);
-  h.registry.cancelThread("t1");
-  assert.equal((await toolset).outcome, "cancelled");
 });
 
 test("cancellation reaches the card: the call's signal and the 30-min deadline", async (t) => {
@@ -404,11 +353,11 @@ test("traits from the daemon: tab presence, workflow ownership along lineage, th
       return { status: 200, body: { head: { runtimeMode: "full-access" } } };
     }
   } as unknown as DaemonApi;
-  const read = callerTraitsFromDaemon({ tab, agentOf: () => "codex", api: () => api });
-  assert.deepEqual(await read("free"), { runtimeMode: "full-access", workflowOwned: false, agent: "codex" });
+  const read = callerTraitsFromDaemon({ tab, api: () => api });
+  assert.deepEqual(await read("free"), { runtimeMode: "full-access", workflowOwned: false });
   assert.equal(await read("missing"), null);
   fail = true;
-  assert.deepEqual(await read("child"), { runtimeMode: null, workflowOwned: true, agent: "codex" });
+  assert.deepEqual(await read("child"), { runtimeMode: null, workflowOwned: true });
   assert.deepEqual(paths, [agentChatRoutes.threadHead("free"), agentChatRoutes.threadHead("child")]);
 });
 

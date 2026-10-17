@@ -1,6 +1,6 @@
 /**
  * Catalog family `visuals` (unified MCP design 2026-10-15 §4 rows 42–43): `html_preview` and
- * `html_render`, chat-only, in the locked `core` toolset. Ported from the session toolkit
+ * `html_render`, chat-only, in the `core` group. Ported from the session toolkit
  * `session-tools/html/` (design 2026-10-14 §2.1; itself ported from T3 Code, MIT) with behaviour
  * unchanged and the descriptions trimmed to the §9.5 targets: the page rules are stated once (in
  * `html_render`) and the theme tokens compacted to one line of names.
@@ -45,12 +45,12 @@ export const HTML_RENDER_TOKEN_LINE = (() => {
 })();
 
 const PAGE_RULES =
-  'Write one self-contained document with inline <style> and <script>. Local images by absolute path (src="/abs/a.png", CSS url() or a JS string) are inlined when inside this chat\'s project (≤ 10 MiB each, 25 MiB a page); remote http(s) URLs, such as a CDN chart library, load as-is.';
+  'One self-contained document, inline <style> and <script>. Local images by absolute path (src="/abs/a.png", CSS url() or a JS string) inside this chat\'s project are inlined (≤ 10 MiB each, 25 MiB a page); remote http(s) URLs (e.g. a CDN chart library) load as-is.';
 
 const LAYOUT =
-  `Layout: a borderless frame on the thread's background, as wide as the reply column (${HTML_RENDER_COLUMN_WIDTH}px on desktop, wider if the reader widens it, ~360px on phones), aligned with your text. Keep html, body and the outermost element transparent (this overrides style preferences such as a fixed black page), fluid-width, with no horizontal padding, outer card, border or banner title. A box with its own background gets ≥ 16px padding and var(--radius) corners. Charts get fixed px heights. Content sets the height: no 100vh or height:100% on html or body.`;
+  `Layout: a borderless frame on the thread's background, as wide as the reply column (${HTML_RENDER_COLUMN_WIDTH}px desktop, wider if widened, ~360px phones). Keep html, body and the outermost element transparent (even over style preferences like a black page), fluid-width, no horizontal padding, outer card, border or banner title. A box with its own background: ≥ 16px padding, var(--radius) corners. Charts: fixed px heights. Content sets the height: no 100vh or height:100% on html/body.`;
 
-const THEME = `Theme: CSS variables on :root (hex) that follow the user's theme and light/dark live: ${HTML_RENDER_TOKEN_LINE}. The base stylesheet sets html background, color and font from them, body margin 0 and no scrollbar; your CSS wins.`;
+const THEME = `Theme: :root CSS variables (hex), following the user's theme and light/dark live: ${HTML_RENDER_TOKEN_LINE}. The base stylesheet sets html background, color and font from them, body margin 0, no scrollbar; your CSS wins.`;
 
 const html = z.string().min(1).max(HTML_RENDER_MAX_HTML_CHARS).describe("A complete, self-contained HTML document.");
 
@@ -86,7 +86,7 @@ export const visualsFamily: readonly AnyOrquesterTool[] = [
   defineTool({
     name: HTML_PREVIEW_TOOL_NAME,
     title: "Preview HTML",
-    description: `Render an HTML page in Orquester's headless browser and get a screenshot of its top (at most 4000px; PNG, or JPEG scaled down when a PNG would pass 3 MiB — its size is in screenshot), contentHeight (the height the page needs at this width) and its console output: log, info, warning, error and uncaught exceptions, with stack traces pointing into page.html (console.log is a fine way to report your own checks). Check and iterate on a page with it before ${HTML_RENDER_TOOL_NAME}. The preview cannot reach this machine or its local network, only public addresses. If the machine has no browser to render with, the call says so; ${HTML_RENDER_TOOL_NAME} still works without a preview. The page rules, layout and theme variables are ${HTML_RENDER_TOOL_NAME}'s.`,
+    description: `Render an HTML page in a headless browser: a screenshot of its top (≤ 4000px; PNG, or scaled-down JPEG past 3 MiB), contentHeight (the height it needs at this width) and console output (logs, errors, uncaught exceptions; stack traces point into page.html; console.log can report your own checks). Iterate with it before ${HTML_RENDER_TOOL_NAME}. It reaches only public addresses, not this machine or its network. Without a browser on the machine it says so; ${HTML_RENDER_TOOL_NAME} still works. Page rules, layout and theme: ${HTML_RENDER_TOOL_NAME}'s.`,
     input: {
       html,
       width: z
@@ -95,8 +95,8 @@ export const visualsFamily: readonly AnyOrquesterTool[] = [
         .min(HTML_PREVIEW_MIN_WIDTH)
         .max(HTML_PREVIEW_MAX_WIDTH)
         .optional()
-        .describe(`Viewport width in CSS px. Default ${HTML_RENDER_COLUMN_WIDTH}, the reply column; about 390 checks phones.`),
-      appearance: z.enum(["dark", "light"]).optional().describe("Theme to preview. Default dark.")
+        .describe(`CSS px. Default ${HTML_RENDER_COLUMN_WIDTH}, the reply column; ~390 checks phones.`),
+      appearance: z.enum(["dark", "light"]).optional().describe("Default dark.")
     },
     audiences: ["chat"],
     toolset: "core",
@@ -124,7 +124,7 @@ export const visualsFamily: readonly AnyOrquesterTool[] = [
   defineTool({
     name: HTML_RENDER_TOOL_NAME,
     title: "Render HTML",
-    description: `Show a finished HTML page (chart, table, diagram, collage, mockup) inline in this chat, above your final text reply; call it before writing that reply. The reader already sees the page, so the reply should not announce it, point to it, or restate it. Preview with ${HTML_PREVIEW_TOOL_NAME} first. Orquester fits the frame to the page's height at each reader's width; a height below contentHeight caps it and the rest scrolls inside. ${PAGE_RULES} ${LAYOUT} ${THEME}`,
+    description: `Show a finished HTML page (chart, table, diagram, mockup) inline in this chat above your final text reply; call it before writing that reply, which should not announce or restate the page. The frame fits the page's height at each reader's width; a height below contentHeight caps it and the rest scrolls inside. ${PAGE_RULES} ${LAYOUT} ${THEME}`,
     input: {
       html,
       title: z.string().min(1).max(HTML_RENDER_MAX_TITLE_LENGTH).describe("Short name for the page."),
@@ -133,7 +133,7 @@ export const visualsFamily: readonly AnyOrquesterTool[] = [
         .int()
         .min(HTML_RENDER_MIN_HEIGHT)
         .max(HTML_RENDER_MAX_HEIGHT)
-        .describe(`Frame height in CSS px: ${HTML_PREVIEW_TOOL_NAME}'s contentHeight, or less to scroll long content inside the frame.`)
+        .describe(`CSS px: ${HTML_PREVIEW_TOOL_NAME}'s contentHeight, or less to scroll inside.`)
     },
     audiences: ["chat"],
     toolset: "core",

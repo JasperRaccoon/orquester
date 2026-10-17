@@ -27,8 +27,8 @@ import { closedWorld, defineTool, READ_ONLY, type AnyOrquesterTool, type ScopeCl
 // min(1), and `!== undefined` below: an empty field is a field given, never read as omitted — beside the other one
 // it would put the list in the other scope.
 const scopeFields = {
-  workspace: z.string().min(1).optional().describe("Workspace name, for that workspace's own lists. Pass this or `project`."),
-  project: z.string().min(1).optional().describe("Absolute project path or \"<workspace>/<project>\", for that project's lists.")
+  workspace: z.string().min(1).optional().describe("A workspace's own lists. Pass this or project."),
+  project: z.string().min(1).optional().describe("A project's lists: \"<workspace>/<project>\" or a path.")
 };
 
 const CHAT_DEFAULT_NOTE = "Without workspace or project: this chat's project.";
@@ -116,7 +116,7 @@ const listTodos = defineTool({
   name: "list_todos",
   title: "List todo lists",
   description:
-    "The shared todo lists of a workspace or of one project, oldest first, each with its id and markdown body. When they do not all fit one result the oldest are left out (truncated:true, omittedLists counts them). A newest list too big on its own keeps the head of its body: a list marked bodyTruncated is incomplete — never write it back whole. The user sees and edits the same lists live in the Todo tab.",
+    "A workspace's or project's shared todo lists (the user edits them live in the Todo tab), oldest first, with id and markdown body. If not all fit, the oldest are left out (truncated, omittedLists). A list marked bodyTruncated holds only its body's head: never write it back.",
   chatNote: CHAT_DEFAULT_NOTE,
   input: scopeFields,
   audiences: ["external", "chat"],
@@ -136,14 +136,14 @@ type UpdateAction = (typeof UPDATE_ACTIONS)[number];
 const updateInput = {
   action: z.enum(UPDATE_ACTIONS),
   ...scopeFields,
-  id: z.string().min(1).optional().describe("The list's id (list_todos), for update, toggle and delete."),
-  name: z.string().min(1).optional().describe("create: the new list's name. update: its new name."),
+  id: z.string().min(1).optional().describe("From list_todos; update, toggle, delete."),
+  name: z.string().min(1).optional().describe("create, or update to rename."),
   body: z
     .string()
     .optional()
-    .describe("update: the whole new markdown body ('- [ ] item' lines), replacing the old one. Never a body marked bodyTruncated."),
-  item: z.union([z.string(), z.number().int().min(1)]).optional().describe("toggle: the item's 1-based index among the list's items, or its exact text."),
-  checked: z.boolean().optional().describe("toggle: the state to set; omit to flip the item.")
+    .describe("update: the whole new markdown body ('- [ ] item' lines). Never a bodyTruncated one."),
+  item: z.union([z.string(), z.number().int().min(1)]).optional().describe("toggle: 1-based item index, or its exact text."),
+  checked: z.boolean().optional().describe("toggle: state to set; omit to flip.")
 };
 type UpdateArgs = z.infer<z.ZodObject<typeof updateInput>>;
 
@@ -174,7 +174,7 @@ const updateTodos = defineTool({
   name: "update_todos",
   title: "Change todo lists",
   description:
-    "Change the shared todo lists of a workspace or a project; the user sees them live in the Todo tab. action create: a new empty list named `name`. update: rename it (`name`) and/or replace its whole markdown body (`body`). toggle: check or uncheck one `item` in the stored body (atomic, keeps edits made meanwhile) — prefer it to rewriting the body. delete: remove the list. update, toggle and delete name the list by `id` with its workspace or project. On a list too big for one result, the result's body is only its head (bodyTruncated:true); the write itself is whole.",
+    "Change a workspace's or project's shared todo lists (live in the user's Todo tab). create: a new EMPTY list `name` (add items with update). update `id`: rename and/or replace the whole `body`. toggle `id`: check/uncheck one `item` atomically, keeping concurrent edits — prefer it to rewriting the body. delete `id`. A result body marked bodyTruncated is only its head; the write was whole.",
   chatNote: CHAT_DEFAULT_NOTE,
   input: updateInput,
   audiences: ["external", "chat"],

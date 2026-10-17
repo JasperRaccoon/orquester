@@ -517,7 +517,6 @@ export const SESSION_TOOL_LABELS: Readonly<Record<string, string>> = {
   html_render: "Rendered HTML",
   // Secrets (design 2026-10-14 §5).
   request_secret: "Requested a secret",
-  request_toolset: "Asked for more tools",
   // reads
   list_workflows: "Listed workflows",
   get_workflow: "Read a workflow",
@@ -555,6 +554,8 @@ export const SESSION_TOOL_LABELS: Readonly<Record<string, string>> = {
   control_desktop: "Controlled a desktop",
 
   // --- Legacy in-chat names (design 2026-10-14 §5, §6) ----------------------
+  // Older builds' toolset request (every chat tool is on now).
+  request_toolset: "Asked for more tools",
   thread_list: "Listed this project's chats",
   thread_read: "Read a chat",
   thread_create: "Opened a chat",

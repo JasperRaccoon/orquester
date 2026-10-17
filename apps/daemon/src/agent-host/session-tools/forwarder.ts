@@ -159,6 +159,7 @@ export type FetchSessionToolsManifest = (threadId: string) => Promise<ManifestAn
 /** The longest a session start waits for its manifest before it uses the fallback set. */
 export const MANIFEST_TIMEOUT_MS = 10_000;
 
+/** A manifest from the daemon; an older daemon's legacy `toolsets` field is kept as it came (and ignored). */
 function parseManifest(value: unknown): SessionToolsManifest | null {
   if (value === null || typeof value !== "object") return null;
   const { tools, instructions, deny, toolsets, seq, epoch } = value as Record<string, unknown>;

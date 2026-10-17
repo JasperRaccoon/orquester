@@ -20,7 +20,7 @@ import { DaemonMcpDetector, listProjectDirs, registerDaemonMcpServersRoutes } fr
 import { CODEX_DENIED_STUB_URL, codexDenyConfig } from "../agent-host/adapters/codex/session-tools.ts";
 import { catalogFor } from "../mcp/catalog/index.ts";
 import type { DaemonApi } from "../mcp/daemon-api.ts";
-import { SessionToolsRefresher } from "./toolset-refresh.ts";
+import { SessionToolsRefresher } from "./session-tools-refresh.ts";
 
 const BEARER = "dXNlcjokMmEkMTIkZTJlLWhhc2g="; // base64("user:$2a$12$e2e-hash"): the daemon's own bearer in this test
 const PORT = 47899;
@@ -99,8 +99,6 @@ test("a user MCP server carrying this daemon's bearer is denied in the chat mani
   const refresher = new SessionToolsRefresher({
     thread: (id) => (threads[id] ? { ...threads[id]!, projectPath: project } : null),
     openThreads: () => Object.keys(threads),
-    resolvedToolsets: () => ["core"],
-    agentToolsEnabled: () => true,
     catalog: () => catalogFor("chat"),
     api: () => api,
     pushToHost: async () => null
@@ -169,8 +167,6 @@ test("Codex: a project-level server is denied in every home, trusted or not; tru
   const refresher = new SessionToolsRefresher({
     thread: (id) => ({ agentId: "codex", home: id, projectPath: project }),
     openThreads: () => [],
-    resolvedToolsets: () => ["core"],
-    agentToolsEnabled: () => true,
     catalog: () => catalogFor("chat"),
     api: () => api,
     pushToHost: async () => null
@@ -249,8 +245,6 @@ test("a chat whose cwd resolves outside its project, or whose project's real pat
   const refresher = new SessionToolsRefresher({
     thread: (id) => (threads[id] ? { agentId: "claude", home: "system", ...threads[id]! } : null),
     openThreads: () => Object.keys(threads),
-    resolvedToolsets: () => ["core"],
-    agentToolsEnabled: () => true,
     catalog: () => catalogFor("chat"),
     api: () => api,
     pushToHost: async () => null
@@ -274,8 +268,6 @@ test("a chat whose cwd resolves outside its project, or whose project's real pat
   const other = new SessionToolsRefresher({
     thread: () => ({ agentId: "claude", home: "system", ...threads["uncontained-project"]! }),
     openThreads: () => [],
-    resolvedToolsets: () => ["core"],
-    agentToolsEnabled: () => true,
     catalog: () => catalogFor("chat"),
     api: () => ({ request: async () => ({ status: 400, body: { error: { code: "INVALID_REQUEST", message: "x" } } }) }) as unknown as DaemonApi,
     pushToHost: async () => null

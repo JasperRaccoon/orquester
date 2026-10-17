@@ -20,7 +20,7 @@ import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { TOOLSETS, type Workflow, type WorkflowPatchOp } from "@orquester/api";
+import type { Workflow, WorkflowPatchOp } from "@orquester/api";
 import { agentChatRoutes, TOOL_APPROVAL_EVENT_TYPE, type AgentChatToolApprovalEventPayload } from "@orquester/api/agent-chat";
 import { applyWorkflowPatch, createWorkflowFromRequest, type CreateWorkflowRequest } from "@orquester/api";
 
@@ -147,10 +147,9 @@ async function rig(t: TestContext) {
     kind: "thread", threadId: "me", title: "Automate", projectPath: OWN, workspace: "acme", cwd: OWN, agentId: "claude", callId: "c",
     runtimeMode: "full-access", planning: false, workflowOwned: false, exchange: null, ...over
   });
-  const all = new Set(TOOLSETS.map((toolset) => toolset.id));
   // The REAL catalog lookup; the ports are the ones `connectExecutor` set.
   const call = (name: string, args: Record<string, unknown>, who = caller()) =>
-    executeToolCall({ enabledToolsets: async () => all }, { name, arguments: args }, { caller: who, api, signal: new AbortController().signal });
+    executeToolCall({}, { name, arguments: args }, { caller: who, api, signal: new AbortController().signal });
   /** Call, answer the card it opens with `answer`, and return the result and the card. */
   const carded = async (name: string, args: Record<string, unknown>, answer: { decision: "approve" | "deny"; grant?: "chat" }, who = caller()) => {
     const pending = call(name, args, who);

@@ -23,10 +23,10 @@ from the 72-tool 2.x surface).
 
 **One catalog, two audiences.** The same tool definitions also serve the agents chatting *inside*
 Orquester (the in-chat `orquester` server, `apps/daemon/src/session-tools/README.md`), which get
-these 41 tools plus four chat-only ones (`html_preview`, `html_render`, `request_secret`,
-`request_toolset`). Every tool has a **tier** — Read, Act or Admin — and a **toolset**; in a chat
-they decide what runs without asking, what needs the user's approval card and what is advertised at
-all. **An external client is full trust:** for you the tier is information only (`_meta` on every
+these 41 tools plus three chat-only ones (`html_preview`, `html_render`, `request_secret`). Every
+tool has a **tier** — Read, Act or Admin — and a **toolset** (a group label only: every chat gets
+every tool, and nothing switches one on or off); in a chat the tier decides what runs without
+asking and what needs the user's approval card. **An external client is full trust:** for you the tier is information only (`_meta` on every
 `tools/list` entry, §6), no card is ever raised, and no tool is hidden. A few arguments exist for
 one audience only: the chat-only ones (`create_session.delegate`, `reply: "notify"`, the workflow
 tools' `reason`) are refused here with `INVALID_ARGUMENT`.
@@ -111,7 +111,7 @@ node compute-bearer.mjs https://your-domain.com admin 'your-password'
 Replace `<URL>` with your endpoint and `<CREDENTIAL>` with the `base64(...)` value from §3.
 
 > **For agents outside Orquester.** Every agent chatting inside Orquester already gets its own
-> thread-scoped server, also named `orquester`, with this catalog under tiers, toolsets and approval
+> thread-scoped server, also named `orquester`, with this whole catalog under tiers and approval
 > cards (`apps/daemon/src/session-tools/README.md`). **Orquester disables this server inside the
 > chats it launches**, whatever you name it and wherever you install it (user scope, a managed
 > account's home, a project's `.mcp.json`, `.codex/config.toml`, `opencode.json` or Grok's project
@@ -284,8 +284,8 @@ the account it got with `accountSource`.
 ### The 41 tools
 
 `tools/list` gives every tool a title, annotations, a description of every parameter and
-`_meta: {"orquester/tier", "orquester/toolset"}`. The tier and toolset are what an in-chat agent
-meets (§1): **Read** runs freely; **Act** runs freely within the chat's own project and permission
+`_meta: {"orquester/tier", "orquester/toolset"}`. The toolset is the tool's group; the tier is what
+an in-chat agent meets (§1): **Read** runs freely; **Act** runs freely within the chat's own project and permission
 mode; **Admin** always waits for the user's approval card in a chat. A tier that depends on the
 call is listed by its widest (`admin` in `_meta`). For you, every tool simply runs.
 
@@ -365,7 +365,7 @@ fixes the problem. The codes include:
   `INTERNAL`. `INTERNAL` never carries a path or a stack (the detail is logged on the daemon).
   `read_tool_output` answers `NOT_FOUND` for an item the host does not have, whatever code the host
   gave. The approval codes (`APPROVAL_DENIED`, `APPROVAL_TIMEOUT`, `PREVIEW_STALE`,
-  `TOOL_NOT_ENABLED`, `EXCHANGE_LIMIT`, …) are the in-chat audience's: an external call never meets
+  `EXCHANGE_LIMIT`, …) are the in-chat audience's: an external call never meets
   a card.
 - **The stores' codes**: the todo store's `NOT_FOUND` (`No todo list with id "<id>"; list_todos
   shows the ids.`) and `CONFLICT`; the workflow, agent-profile and desktop codes of §12–§14.
@@ -1254,7 +1254,7 @@ read_tool_output { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "itemId"
 
 These are the **agent's own** requests — the provider's questions and tool approvals `get_session`
 lists. The approval cards Orquester shows inside a chat for an in-chat agent's tool call (and its
-boundary, toolset and secret cards) are not requests: only the user answers them, in the GUI, and
+boundary and secret cards) are not requests: only the user answers them, in the GUI, and
 no tool can.
 
 - `requestId` may be omitted when exactly one request of that kind is pending; otherwise the error

@@ -12,7 +12,7 @@
  * its thread, forwards it to the daemon (`forwarder.ts`) and aborts it when the provider cancels it,
  * the turn is interrupted, or the credential it came in on is revoked. Handlers never run here.
  *
- * A changed manifest (the thread's toolsets changed, `agentHostRoutes.sessionToolsRefresh`) is
+ * A changed manifest the daemon pushes (`agentHostRoutes.sessionToolsRefresh`) is
  * applied in-session where the provider re-lists on `tools/list_changed` (Claude's in-process
  * server, {@link SessionToolsHost.launchInProcess}); any other live session is marked stale and the
  * orchestrator restarts it with resume at its next idle point ({@link SessionToolsHost.needsRestart}).
@@ -424,8 +424,8 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
   const lastKnown = (threadId: string, launchKey: string): PreparedSessionTools | null => {
     // The thread's own last manifest first — only for the same launch (an account switch moved it).
     const own = lastByThread.get(threadId);
-    // A newer list the daemon pushed for this thread's session of the same key (a toolset change
-    // pending its restart) comes first: launching with an older one would lose the change.
+    // A newer list the daemon pushed for this thread's session of the same key (a change pending
+    // its restart) comes first: launching with an older one would lose the change.
     const pending = desiredLaunchKey.get(threadId) === launchKey ? desired.get(threadId) : undefined;
     if (pending !== undefined) {
       // Adopted: it is this key's last list from now on, so a second fallback keeps it too.

@@ -19,7 +19,7 @@ function plugin(overrides: Partial<PluginInfo> = {}): PluginInfo {
     description: "Runs tsc-rs instead of tsc.",
     source: { label: "pingdotgg/ts-rust", url: "https://github.com/pingdotgg/ts-rust" },
     provider: "Community",
-    scope: "workspace",
+    scope: "global",
     updates: true,
     platform: "supported",
     enabled: false,
@@ -52,8 +52,8 @@ describe("plugins channel events", () => {
   it("a change replaces the whole list", () => {
     store().applyEvent(event(PLUGINS_CHANGED_EVENT, { plugins: [plugin({ job: "installing" })] }));
     assert.equal(store().plugins?.[0]?.job, "installing");
-    store().applyEvent(event(PLUGINS_CHANGED_EVENT, { plugins: [plugin({ enabledWorkspaces: ["acme"] })] }));
-    assert.deepEqual(store().plugins, [plugin({ enabledWorkspaces: ["acme"] })]);
+    store().applyEvent(event(PLUGINS_CHANGED_EVENT, { plugins: [plugin({ enabled: true })] }));
+    assert.deepEqual(store().plugins, [plugin({ enabled: true })]);
   });
 
   it("malformed payloads and other event types never reach state", () => {
@@ -68,10 +68,10 @@ describe("plugins channel events", () => {
 
 describe("loadPlugins", () => {
   it("stores the daemon's list", async () => {
-    const api = { getPlugins: async () => ({ plugins: [plugin({ enabledWorkspaces: ["acme"] })] }) };
+    const api = { getPlugins: async () => ({ plugins: [plugin({ enabled: true })] }) };
     useAppStore.setState({ api: api as unknown as ApiClient });
     await store().loadPlugins();
-    assert.deepEqual(store().plugins, [plugin({ enabledWorkspaces: ["acme"] })]);
+    assert.deepEqual(store().plugins, [plugin({ enabled: true })]);
   });
 
   it("rejects with the request's error and keeps the last list", async () => {
@@ -103,7 +103,7 @@ describe("loadPlugins", () => {
 describe("upsertPlugin", () => {
   it("applies one plugin's state from a route's answer", () => {
     useAppStore.setState({ plugins: [plugin()] });
-    store().upsertPlugin(plugin({ enabledWorkspaces: ["acme"] }));
-    assert.deepEqual(store().plugins, [plugin({ enabledWorkspaces: ["acme"] })]);
+    store().upsertPlugin(plugin({ enabled: true }));
+    assert.deepEqual(store().plugins, [plugin({ enabled: true })]);
   });
 });

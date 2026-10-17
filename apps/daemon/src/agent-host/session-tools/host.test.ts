@@ -549,7 +549,7 @@ test("a fallback launch takes a pending pushed list of the same launch key over 
   });
   t.after(() => service.stop());
   await service.issue("thread-a", CODEX);
-  // A toolset change waits for the session's restart…
+  // A pushed list change waits for the session's restart…
   assert.equal(await service.applyManifest("thread-a", { tools: ["echo"], instructions: "## changed", deny: ["remote"], seq: 2, epoch: "e1" }), "next-idle");
   up = false;
   // …and the restart cannot ask the daemon: it launches with the pending list, not the older one.

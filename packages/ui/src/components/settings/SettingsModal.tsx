@@ -95,13 +95,13 @@ const SECTIONS: SectionDef[] = [
     render: () => <ChatSettings />
   },
   {
-    // Unified MCP §9.2: between Agent chat and the agent CLIs.
+    // Unified MCP §7.6: between Agent chat and the agent CLIs.
     id: "agent-tools",
     group: "agents",
     label: "Agent tools",
     icon: <Wrench size={15} />,
-    desc: "Orquester tools for agent chats, per agent; grants",
-    keywords: ["mcp", "orquester", "toolsets", "tools", "grants", "revoke", "approval", "workflow", "desktops", "admin", "permissions"],
+    desc: "Approval grants for Orquester tools in agent chats",
+    keywords: ["mcp", "orquester", "tools", "grants", "revoke", "approval", "workflow", "desktops", "admin", "permissions"],
     render: () => <AgentToolsSettings />
   },
   {
@@ -146,7 +146,7 @@ const SECTIONS: SectionDef[] = [
     label: "Plugins",
     icon: <Puzzle size={15} />,
     desc: "Optional built-in features",
-    keywords: ["plugin", "plugins", "typescript", "tsc", "ts-rust", "tsc-rs", "typecheck"],
+    keywords: ["plugin", "plugins", "typescript", "tsc", "ts-rust", "tsc-rs", "tsrs", "typecheck"],
     render: () => <PluginsSettings />
   },
   {

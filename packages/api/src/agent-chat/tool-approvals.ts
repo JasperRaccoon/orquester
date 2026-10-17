@@ -2,7 +2,7 @@
  * Agent chat — Orquester approval cards (unified MCP design 2026-10-15 §7).
  *
  * A chat agent's Admin tool call, a call that crosses a project boundary its permission mode does
- * not cover, and `request_toolset` each raise a CARD in the chat's banner dock: provider-agnostic,
+ * not cover each raise a CARD in the chat's banner dock: provider-agnostic,
  * composed by the daemon from the call's structured arguments, with a complete preview of what
  * will run. The daemon holds pending cards in memory only (`apps/daemon/src/agent-chat/
  * tool-approvals.ts`); they are answered ONLY on their own route
@@ -28,7 +28,11 @@ import { sessionToolNameOfData, sessionToolReferences } from "./session-tools.ts
 // Vocabulary
 // ---------------------------------------------------------------------------
 
-/** What raised the card: an Admin call, a project boundary, or `request_toolset`. */
+/**
+ * What raised the card: an Admin call or a project boundary. `toolset` is LEGACY: older builds'
+ * `request_toolset` raised it, and their cards and tool-row references still read; no current
+ * build raises one.
+ */
 export type ApprovalKind = "admin" | "boundary" | "toolset";
 export const APPROVAL_KINDS: readonly ApprovalKind[] = ["admin", "boundary", "toolset"];
 
@@ -44,7 +48,7 @@ export type AdminFamily = (typeof ADMIN_FAMILIES)[number];
 export const BOUNDARY_FAMILIES = ["cross-project", "cross-project-read", "cross-workspace-read"] as const;
 export type BoundaryFamily = (typeof BOUNDARY_FAMILIES)[number];
 
-/** Every card family. */
+/** Every card family (`toolset`: legacy, see {@link ApprovalKind}). */
 export type ApprovalFamily = AdminFamily | BoundaryFamily | "toolset";
 export const APPROVAL_FAMILIES: readonly ApprovalFamily[] = [...ADMIN_FAMILIES, ...BOUNDARY_FAMILIES, "toolset"];
 
@@ -200,12 +204,10 @@ export type ToolApprovalErrorCode =
   /** 403: the answer came from an agent or external principal — only a person answers a card. */
   | "PERMISSION_DENIED"
   /**
-   * 503: the approval needs a write (a grant, a toolset override) the read-only agent-tools store
-   * refuses; the card stays pending (approve without a grant, or deny).
+   * 503: the approval needs a write (a grant) the read-only agent-tools store refuses; the card
+   * stays pending (approve without a grant, or deny).
    */
-  | "AGENT_TOOLS_UNAVAILABLE"
-  /** 409: approving a toolset card while agent tools are switched off in Settings; the card stays pending. */
-  | "AGENT_TOOLS_DISABLED";
+  | "AGENT_TOOLS_UNAVAILABLE";
 
 export interface ToolApprovalErrorEnvelope {
   error: { code: ToolApprovalErrorCode; message: string };

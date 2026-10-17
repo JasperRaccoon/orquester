@@ -1,12 +1,16 @@
 /**
- * Verified install of one tsc-rs release from the npm registry (spec §4.1–4.2),
- * the removed `cliproxy-install.ts` pattern revived: every network access goes
- * through injected deps so the tests install local fixture tarballs.
+ * Verified install of one release of a TypeScript 7 engine — tsc-rs
+ * (pingdotgg/ts-rust) or tsrs (oxc-project/tsrs) — from the npm registry
+ * (spec §4.1–4.2), the removed `cliproxy-install.ts` pattern revived: every
+ * network access goes through injected deps so the tests install local
+ * fixture tarballs. An {@link TsCheckerEngineSpec} names what differs.
  *
- * Layout under `<appdir>/daemon/plugins/ts-rust/`:
- *   versions/<version>/   the platform package's whole `lib/` dir — the native
- *                         `tsc` (`tsc.exe` on win32) needs the lib .d.ts files
- *                         shipped beside it
+ * Layout under an engine's dir (`<appdir>/daemon/plugins/ts-rust/` for tsc-rs,
+ * its `tsrs/` subdir for tsrs):
+ *   versions/<version>/   tsc-rs: the platform package's whole `lib/` dir — the
+ *                         native `tsc` (`tsc.exe` on win32) needs the lib .d.ts
+ *                         files shipped beside it; tsrs: the whole package, its
+ *                         `tsrs` binary beside the lib .d.ts files it reads
  *   .tmp/                 download and extract staging; emptied on start
  *
  * A release is downloaded into `.tmp/`, its sha512 checked against the
@@ -22,11 +26,12 @@ import { chmod, mkdir, readdir, rename, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import type { TsCheckerEngine } from "@orquester/api";
 import type { PluginInstalledVersion } from "@orquester/config";
 
 export const NPM_REGISTRY = "https://registry.npmjs.org";
 const REGISTRY_TIMEOUT_MS = 30_000;
-/** The platform tarball is ~50 MB; a stalled download must not hold the job queue forever. */
+/** The platform tarballs are ~15–50 MB; a stalled download must not hold the job queue forever. */
 const DOWNLOAD_TIMEOUT_MS = 10 * 60_000;
 const EXTRACT_TIMEOUT_MS = 2 * 60_000;
 export const SMOKE_TEST_TIMEOUT_MS = 30_000;
@@ -78,32 +83,77 @@ export interface TsRustInstallerDeps {
   now(): Date;
 }
 
-/** `@tsc-rs/<os>-<cpu>` for the daemon's platform, or null where tsc-rs ships no build. */
-export function tsRustPlatformPackage(platform: string = process.platform, arch: string = process.arch): string | null {
-  const os = platform === "linux" || platform === "darwin" || platform === "win32" ? platform : null;
-  const cpu = arch === "x64" || arch === "arm64" ? arch : null;
-  return os && cpu ? `@tsc-rs/${os}-${cpu}` : null;
+/** The C library of a Linux host, which picks tsrs's platform package. */
+export type HostLibc = "glibc" | "musl";
+
+/** What differs between the engines' npm packages. */
+export interface TsCheckerEngineSpec {
+  id: TsCheckerEngine;
+  /** The npm package whose `latest` names the release. */
+  mainPackage: string;
+  /** The platform package with the native binary for this host, or null where the engine ships no build. */
+  platformPackage(platform: string, arch: string, libc: HostLibc): string | null;
+  binaryName(platform: string): string;
+  /** The dir of the platform tarball installed as `versions/<version>/` (holds the binary). */
+  packageDir: "package" | "package/lib";
 }
 
-export function tsRustBinaryName(platform: string = process.platform): string {
-  return platform === "win32" ? "tsc.exe" : "tsc";
+export const TSC_RS_ENGINE: TsCheckerEngineSpec = {
+  id: "tsc-rs",
+  mainPackage: "tsc-rs",
+  platformPackage: (platform, arch) => {
+    const os = platform === "linux" || platform === "darwin" || platform === "win32" ? platform : null;
+    const cpu = arch === "x64" || arch === "arm64" ? arch : null;
+    return os && cpu ? `@tsc-rs/${os}-${cpu}` : null;
+  },
+  binaryName: (platform) => (platform === "win32" ? "tsc.exe" : "tsc"),
+  packageDir: "package/lib"
+};
+
+/** tsrs ships Linux (glibc and musl) on x64 and arm64, and Apple Silicon macOS; no Windows, no Intel Mac. */
+export const TSRS_ENGINE: TsCheckerEngineSpec = {
+  id: "tsrs",
+  mainPackage: "tsrs",
+  platformPackage: (platform, arch, libc) => {
+    if (platform === "darwin") return arch === "arm64" ? "@tsrs/darwin-arm64" : null;
+    if (platform !== "linux" || (arch !== "x64" && arch !== "arm64")) return null;
+    return `@tsrs/linux-${arch}-${libc === "musl" ? "musl" : "gnu"}`;
+  },
+  binaryName: (platform) => (platform === "win32" ? "tsrs.exe" : "tsrs"),
+  packageDir: "package"
+};
+
+export const TS_CHECKER_ENGINE_SPECS: Readonly<Record<TsCheckerEngine, TsCheckerEngineSpec>> = {
+  tsrs: TSRS_ENGINE,
+  "tsc-rs": TSC_RS_ENGINE
+};
+
+/** glibc when Node reports a glibc runtime, else musl. */
+export function detectHostLibc(): HostLibc {
+  const report = process.report?.getReport() as { header?: { glibcVersionRuntime?: unknown } } | undefined;
+  return report?.header?.glibcVersionRuntime ? "glibc" : "musl";
 }
 
-export function tsRustVersionsDir(pluginDir: string): string {
-  return join(pluginDir, "versions");
+export function tsRustVersionsDir(engineDir: string): string {
+  return join(engineDir, "versions");
 }
 
-export function tsRustBinaryPath(pluginDir: string, version: string, platform: string = process.platform): string {
-  return join(tsRustVersionsDir(pluginDir), version, tsRustBinaryName(platform));
+export function tsRustBinaryPath(
+  engine: TsCheckerEngineSpec,
+  engineDir: string,
+  version: string,
+  platform: string = process.platform
+): string {
+  return join(tsRustVersionsDir(engineDir), version, engine.binaryName(platform));
 }
 
-export function tsRustStagingDir(pluginDir: string): string {
-  return join(pluginDir, ".tmp");
+export function tsRustStagingDir(engineDir: string): string {
+  return join(engineDir, ".tmp");
 }
 
 /**
  * The env the smoke test runs with: the daemon's own, minus every `ORQUESTER_*`
- * key (the appdir, the HTTP password and the like are none of tsc-rs's business).
+ * key (the appdir, the HTTP password and the like are none of the engine's business).
  */
 export function smokeTestEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return Object.fromEntries(Object.entries(env).filter(([key]) => !key.startsWith("ORQUESTER_")));
@@ -114,18 +164,20 @@ const VERSION_PATTERN = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?
 
 /**
  * Ask the registry for the platform package's tarball of `pinned`, or by
- * default of the latest tsc-rs (`tsc-rs/latest`).
+ * default of the engine's latest release (`<mainPackage>/latest`).
  */
 export async function resolveTsRustRelease(
+  engine: TsCheckerEngineSpec,
   platformPackage: string,
   deps: Pick<TsRustInstallerDeps, "fetchJson">,
   signal: AbortSignal,
   pinned?: string
 ): Promise<TsRustRelease> {
   return step("registry", REGISTRY_TIMEOUT_MS, signal, async (bounded) => {
-    const version = pinned ?? field(await deps.fetchJson(`${NPM_REGISTRY}/tsc-rs/latest`, bounded), "version");
+    const version =
+      pinned ?? field(await deps.fetchJson(`${NPM_REGISTRY}/${engine.mainPackage}/latest`, bounded), "version");
     if (typeof version !== "string" || !VERSION_PATTERN.test(version)) {
-      throw new Error("the registry returned no valid tsc-rs version");
+      throw new Error(`the registry returned no valid ${engine.mainPackage} version`);
     }
     const name = platformPackage.replace("/", "%2f");
     const meta = await deps.fetchJson(`${NPM_REGISTRY}/${name}/${encodeURIComponent(version)}`, bounded);
@@ -160,16 +212,18 @@ export interface InstallTsRustOptions {
  * `current`; throws a {@link TsRustInstallError} naming the failed step.
  */
 export async function installTsRustRelease(
-  pluginDir: string,
+  engine: TsCheckerEngineSpec,
+  engineDir: string,
   release: TsRustRelease,
   deps: TsRustInstallerDeps,
   options: InstallTsRustOptions
 ): Promise<PluginInstalledVersion> {
   if (!VERSION_PATTERN.test(release.version)) {
-    throw new TsRustInstallError("install", `invalid tsc-rs version "${release.version}"`);
+    throw new TsRustInstallError("install", `invalid ${engine.id} version "${release.version}"`);
   }
   const platform = options.platform ?? process.platform;
-  const staging = join(tsRustStagingDir(pluginDir), `${release.version}-${randomUUID()}`);
+  const binaryName = engine.binaryName(platform);
+  const staging = join(tsRustStagingDir(engineDir), `${release.version}-${randomUUID()}`);
   try {
     await step("download", DOWNLOAD_TIMEOUT_MS, options.signal, async (bounded) => {
       await mkdir(staging, { recursive: true, mode: 0o700 });
@@ -183,45 +237,46 @@ export async function installTsRustRelease(
       }
     });
 
-    const libDir = join(staging, "extract", "package", "lib");
-    const binary = join(libDir, tsRustBinaryName(platform));
+    const installDir = join(staging, "extract", ...engine.packageDir.split("/"));
+    const binary = join(installDir, binaryName);
     await step("extract", EXTRACT_TIMEOUT_MS, options.signal, async (bounded) => {
       await mkdir(join(staging, "extract"), { mode: 0o700 });
       // Relative archive path with cwd: GNU tar would read a `C:`-style path as a remote host.
       await run("tar", ["-xzf", "package.tgz", "-C", "extract"], staging, bounded);
       const info = await stat(binary).catch(() => null);
       if (!info?.isFile()) {
-        throw new Error(`the package has no lib/${tsRustBinaryName(platform)}`);
+        // The path inside the package: `lib/tsc` (tsc-rs), `tsrs`.
+        throw new Error(`the package has no ${[...engine.packageDir.split("/").slice(1), binaryName].join("/")}`);
       }
-      await chmod(libDir, 0o755);
+      await chmod(installDir, 0o755);
       await chmod(binary, 0o755);
     });
 
     await step("smoke-test", 0, options.signal, async () => {
       const timeoutMs = options.smokeTestTimeoutMs ?? SMOKE_TEST_TIMEOUT_MS;
       const result = await deps.runSmokeTest(binary, {
-        cwd: libDir,
+        cwd: installDir,
         env: smokeTestEnv(options.env),
         timeoutMs,
         signal: options.signal
       });
       if (result.spawnError) {
-        throw new Error(`tsc-rs --version failed to start (${result.spawnError})`);
+        throw new Error(`${engine.id} --version failed to start (${result.spawnError})`);
       }
       if (result.timedOut) {
-        throw new Error(`tsc-rs --version did not finish within ${Math.round(timeoutMs / 1000)}s`);
+        throw new Error(`${engine.id} --version did not finish within ${Math.round(timeoutMs / 1000)}s`);
       }
       if (result.exitCode !== 0) {
-        throw new Error(`tsc-rs --version exited with ${result.exitCode === null ? "a signal" : `code ${result.exitCode}`}`);
+        throw new Error(`${engine.id} --version exited with ${result.exitCode === null ? "a signal" : `code ${result.exitCode}`}`);
       }
       if (!result.stdout.split(/\r?\n/).some((line) => line.startsWith("Version "))) {
-        throw new Error("tsc-rs --version printed no version line");
+        throw new Error(`${engine.id} --version printed no version line`);
       }
     });
 
     await step("install", 0, options.signal, async () => {
-      const target = join(tsRustVersionsDir(pluginDir), release.version);
-      await mkdir(tsRustVersionsDir(pluginDir), { recursive: true });
+      const target = join(tsRustVersionsDir(engineDir), release.version);
+      await mkdir(tsRustVersionsDir(engineDir), { recursive: true });
       const replaced = join(staging, "replaced");
       const hadTarget = await rename(target, replaced).then(
         () => true,
@@ -231,7 +286,7 @@ export async function installTsRustRelease(
         }
       );
       try {
-        await rename(libDir, target);
+        await rename(installDir, target);
       } catch (error) {
         if (hadTarget) await rename(replaced, target).catch(() => undefined);
         throw error;
@@ -243,9 +298,9 @@ export async function installTsRustRelease(
   }
 }
 
-/** Delete every `versions/*` dir not named in `keep`. */
-export async function pruneTsRustVersions(pluginDir: string, keep: readonly string[]): Promise<void> {
-  const dir = tsRustVersionsDir(pluginDir);
+/** Delete every `versions/*` dir of the engine not named in `keep`. */
+export async function pruneTsRustVersions(engineDir: string, keep: readonly string[]): Promise<void> {
+  const dir = tsRustVersionsDir(engineDir);
   const names = await readdir(dir).catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return [] as string[];
     throw error;
@@ -257,14 +312,14 @@ export async function pruneTsRustVersions(pluginDir: string, keep: readonly stri
   }
 }
 
-/** Delete `versions/` entirely ("Remove downloads"). */
-export async function removeTsRustVersions(pluginDir: string): Promise<void> {
-  await rm(tsRustVersionsDir(pluginDir), { recursive: true, force: true });
+/** Delete the engine's `versions/` entirely ("Remove downloads"). */
+export async function removeTsRustVersions(engineDir: string): Promise<void> {
+  await rm(tsRustVersionsDir(engineDir), { recursive: true, force: true });
 }
 
-/** Empty the staging dir: whatever is in it was left by a daemon that stopped mid-install. */
-export async function clearTsRustStaging(pluginDir: string): Promise<void> {
-  await rm(tsRustStagingDir(pluginDir), { recursive: true, force: true });
+/** Empty the engine's staging dir: whatever is in it was left by a daemon that stopped mid-install. */
+export async function clearTsRustStaging(engineDir: string): Promise<void> {
+  await rm(tsRustStagingDir(engineDir), { recursive: true, force: true });
 }
 
 /** Real registry access over the global `fetch`. Used by the daemon, never by the tests. */

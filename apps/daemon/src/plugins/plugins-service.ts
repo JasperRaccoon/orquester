@@ -1,9 +1,11 @@
 /**
  * The built-in plugins behind Settings → Plugins (spec §3.3, §4.3–4.4, §5).
- * "Better TS Typecheck" is per workspace: tsc-rs installed and kept up to
- * date under `<appdir>/daemon/plugins/ts-rust/`, and redirected to from every
- * `tsc` an Orquester session in an enabled workspace runs. "Excalidraw
- * Whiteboard" is global and ships with the app: its state is only `enabled`,
+ * Both are turned on once for the whole server (`enabled`). "Better TS
+ * Typecheck" is one engine — tsrs or tsc-rs, native ports of TypeScript 7 —
+ * installed and kept up to date under `<appdir>/daemon/plugins/ts-rust/`, and
+ * redirected to from every `tsc` an Orquester session runs inside a workspace
+ * while the plugin is on.
+ * "Excalidraw Whiteboard" ships with the app: its state is only `enabled`,
  * which the clients read to offer the whiteboard tab; it has no jobs.
  *
  * - **plugins.json** is the durable state. Every change is a read-modify-write
@@ -11,36 +13,46 @@
  *   stale copy in memory, and memory changes only after the write landed. A file
  *   that does not read or parse is never written over: every operation fails
  *   with `PLUGINS_UNREADABLE` (the preload then runs the real tsc).
+ * - **The active engine** is the one plugins.json names (`engine`) when it has
+ *   a build here, else the platform's default: tsrs where it has one, else
+ *   tsc-rs. Checks, installs, rollback, the skip and the last error are the
+ *   active engine's; tsc-rs's live in the record's own fields (as older builds
+ *   wrote them), tsrs's under `tsrs`. Switching engine installs the new one
+ *   (while on) when it has nothing usable; the other keeps its versions.
  * - **Jobs** (update checks and installs, rollback, removing downloads) run one
  *   at a time on the plugin's job queue. A check already queued is not queued
- *   again. Checks run at start, hourly, on demand, and when a workspace is
- *   enabled with nothing installed yet; scheduled ones only while the plugin is
- *   on in at least one existing workspace.
+ *   again. Checks run at start, hourly, on demand, and when the plugin is
+ *   turned on with nothing installed yet; scheduled ones only while it is on.
  * - **The preload** (`preload.cjs`) is rewritten at start and whenever the
- *   workspaces dir moves, while the plugin is on anywhere or once one exists.
- *   It is never deleted: running sessions reference it through NODE_OPTIONS.
- *   New sessions load it while the plugin is on in at least one workspace and
- *   the write succeeded (`setSessionNodePreload`).
+ *   workspaces dir moves, while the plugin is on or once one exists. It is
+ *   never deleted: running sessions reference it through NODE_OPTIONS. New
+ *   sessions load it while the plugin is on and the write succeeded
+ *   (`setSessionNodePreload`).
  *
- * Workspace names stay in `enabledWorkspaces` when the workspace is renamed or
- * deleted; a name with no workspace dir is ignored and hidden from clients.
+ * An older build turned tsc-rs on per workspace (`enabledWorkspaces`). A record
+ * with that list non-empty and no `enabled` is turned on at start; the list is
+ * left in the file for those builds until the plugin is turned off.
  *
  * `events` emits `"changed"` with the whole {@link PluginsResponse} after every
  * state or job change, in order.
  */
 import { EventEmitter } from "node:events";
-import { readFile, readdir, realpath, stat } from "node:fs/promises";
+import { readFile, realpath, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import {
   type PluginId,
   type PluginInfo,
   type PluginJobState,
   type PluginsResponse,
+  type SetPluginEnabledRequest,
+  type TsCheckerEngine,
   PLUGINS_CHANGED_EVENT,
   PLUGINS_CHANNEL,
+  TS_CHECKER_ENGINES,
   TS_RUST_PLUGIN_ID
 } from "@orquester/api";
 import {
+  type PluginEngineVersions,
   type PluginInstalledVersion,
   type PluginState,
   type PluginsConfig,
@@ -48,43 +60,46 @@ import {
   parsePluginsConfig,
   pluginStateOf,
   pluginsConfigPath,
+  storedTsCheckerEngine,
   tsRustPluginDir,
-  tsRustPreloadPath
+  tsRustPreloadPath,
+  tsrsEngineDir
 } from "@orquester/config";
 import type { Broadcaster } from "../broadcaster.ts";
-import { BUILT_IN_PLUGINS, pluginCatalogEntry } from "./catalog.ts";
+import { BUILT_IN_PLUGINS, TS_CHECKER_ENGINE_CATALOG, pluginCatalogEntry, tsCheckerEngineEntry } from "./catalog.ts";
 import { setSessionNodePreload } from "./session-env.ts";
 import {
+  type HostLibc,
   type TsRustInstallerDeps,
+  TS_CHECKER_ENGINE_SPECS,
   TsRustInstallError,
   clearTsRustStaging,
   defaultTsRustInstallerDeps,
+  detectHostLibc,
   installTsRustRelease,
   pruneTsRustVersions,
   removeTsRustVersions,
   resolveTsRustRelease,
-  tsRustBinaryPath,
-  tsRustPlatformPackage
+  tsRustBinaryPath
 } from "./ts-rust/installer.ts";
 import { type TsRustPreloadOptions, writeTsRustPreload } from "./ts-rust/preload.ts";
 
-/** How often a scheduled update check runs while the plugin is on somewhere. */
+/** How often a scheduled update check runs while the plugin is on. */
 export const PLUGIN_CHECK_INTERVAL_MS = 60 * 60_000;
 
 type PluginsErrorCode =
+  | "INVALID_REQUEST"
   | "PLUGINS_UNREADABLE"
   | "PLUGIN_UNSUPPORTED"
   | "PLUGIN_BUSY"
   | "PLUGIN_ENABLED"
   | "NO_PREVIOUS_VERSION"
-  | "WORKSPACE_NOT_FOUND"
-  | "PLUGIN_SCOPE"
   | "PLUGIN_BUNDLED";
 
 /** A refusal the routes answer verbatim: `status` with `{ code, message }`. */
 export class PluginsError extends Error {
   constructor(
-    readonly status: 404 | 409 | 500,
+    readonly status: 400 | 404 | 409 | 500,
     readonly code: PluginsErrorCode,
     message: string
   ) {
@@ -106,13 +121,15 @@ export interface PluginsServiceOptions {
   env?: NodeJS.ProcessEnv;
   platform?: string;
   arch?: string;
+  /** A Linux host's C library (picks tsrs's build); detected from Node's report by default. */
+  libc?: HostLibc;
   writePreload?: (path: string, options: TsRustPreloadOptions) => Promise<void>;
   setSessionPreload?: (path: string | null) => void;
   logger?: Pick<Console, "warn" | "error">;
 }
 
 interface QueuedCheck {
-  /** A manual check runs even while the plugin is on nowhere. */
+  /** A manual check runs even while the plugin is off. */
   force: boolean;
 }
 
@@ -120,10 +137,15 @@ export class PluginsService {
   readonly events = new EventEmitter();
 
   private readonly configFile: string;
-  private readonly pluginDir: string;
+  /** Each engine's dir: its versions/ and .tmp/. */
+  private readonly engineDirs: Record<TsCheckerEngine, string>;
   private readonly preloadPath: string;
   private readonly platform: string;
-  private readonly platformPackage: string | null;
+  private readonly arch: string;
+  /** Each engine's platform package for this host, or null where it has no build. */
+  private readonly platformPackages: Record<TsCheckerEngine, string | null>;
+  /** The engine used when plugins.json names none with a build here. */
+  private readonly defaultEngine: TsCheckerEngine;
   private readonly installer: TsRustInstallerDeps;
   private readonly env: NodeJS.ProcessEnv;
   private readonly writePreload: (path: string, options: TsRustPreloadOptions) => Promise<void>;
@@ -144,21 +166,26 @@ export class PluginsService {
   private runtimeQueue: Promise<unknown> = Promise.resolve();
   /** The real and configured workspaces roots the preload on disk was written with by this process; null if not (yet). */
   private preloadRoot: string | null = null;
-  /** The enabled existing workspaces at the last runtime refresh, as JSON; null before the first. */
-  private activeKey: string | null = null;
+  /** Whether the plugin was on at the last runtime refresh; null before the first. */
+  private enabledAtRefresh: boolean | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
 
   private emitQueue: Promise<unknown> = Promise.resolve();
-  /** Background refreshes in flight (`workspacesChanged`), for `settled()`. */
+  /** Background refreshes in flight (`workspacesChanged`, the timer), for `settled()`. */
   private readonly inflight = new Set<Promise<void>>();
   private stopped = false;
 
   constructor(private readonly options: PluginsServiceOptions) {
     this.configFile = pluginsConfigPath(options.baseDir);
-    this.pluginDir = tsRustPluginDir(options.baseDir);
+    this.engineDirs = { "tsc-rs": tsRustPluginDir(options.baseDir), tsrs: tsrsEngineDir(options.baseDir) };
     this.preloadPath = tsRustPreloadPath(options.baseDir);
     this.platform = options.platform ?? process.platform;
-    this.platformPackage = tsRustPlatformPackage(this.platform, options.arch ?? process.arch);
+    this.arch = options.arch ?? process.arch;
+    const libc = this.platform === "linux" ? (options.libc ?? detectHostLibc()) : "glibc";
+    const packageFor = (engine: TsCheckerEngine) =>
+      TS_CHECKER_ENGINE_SPECS[engine].platformPackage(this.platform, this.arch, libc);
+    this.platformPackages = { tsrs: packageFor("tsrs"), "tsc-rs": packageFor("tsc-rs") };
+    this.defaultEngine = this.platformPackages.tsrs !== null ? "tsrs" : "tsc-rs";
     this.installer = options.installer ?? defaultTsRustInstallerDeps;
     this.env = options.env ?? process.env;
     this.writePreload = options.writePreload ?? writeTsRustPreload;
@@ -167,14 +194,18 @@ export class PluginsService {
   }
 
   /**
-   * Empty the staging dir, read plugins.json, write the preload, and queue the
-   * start-up check. Never throws: a bad plugins.json is reported by the routes.
+   * Empty the staging dir, read plugins.json (turning a per-workspace record
+   * on), write the preload, and queue the start-up check. Never throws: a bad
+   * plugins.json is reported by the routes.
    */
   async start(): Promise<void> {
-    await clearTsRustStaging(this.pluginDir).catch((error) =>
-      this.logger.warn("Failed to empty the tsc-rs staging dir", error)
-    );
+    for (const engine of TS_CHECKER_ENGINES) {
+      await clearTsRustStaging(this.engineDirs[engine]).catch((error) =>
+        this.logger.warn(`Failed to empty the ${engine} staging dir`, error)
+      );
+    }
     await this.reload().catch((error) => this.logger.error("Failed to read plugins.json", error));
+    await this.migrateWorkspaceRecord();
     await this.refreshRuntime();
     this.requestCheck(false);
   }
@@ -188,15 +219,13 @@ export class PluginsService {
   }
 
   /**
-   * A workspace was created, renamed or deleted, or the workspaces dir moved:
-   * rewrite the preload for a new root, re-decide the session preload and the
-   * timer, broadcast when the visible enabled workspaces changed, and queue an
-   * install when a re-appeared enabled workspace has nothing usable installed.
+   * The workspaces dir moved, or a workspace under it came or went: rewrite the
+   * preload when the root it has baked in is no longer the configured one.
+   * Only a root move changes anything; the plugin is on for every workspace.
    */
   workspacesChanged(): Promise<void> {
     return this.track(async () => {
       if (await this.refreshRuntime()) this.emitChanged();
-      await this.requestInstallIfMissing();
     });
   }
 
@@ -227,67 +256,55 @@ export class PluginsService {
   async get(id: PluginId): Promise<PluginInfo> {
     await this.ensureReadable();
     const [config, job] = [this.config, this.job];
-    return this.info(id, config, job, await this.workspaceNames());
-  }
-
-  /** Whether `name` is an existing workspace directory. */
-  async hasWorkspace(name: string): Promise<boolean> {
-    return (await this.workspaceNames()).includes(name);
+    return this.info(id, config, job);
   }
 
   /**
-   * Turn the plugin on or off for one workspace. Turning it on where nothing is
-   * installed yet queues the first install.
+   * Turn a plugin on or off for the whole server, and/or choose ts-rust's
+   * engine. Turning ts-rust on is refused where no engine has a build, and
+   * choosing an engine where it has none; while on, an active engine with
+   * nothing usable installed gets its install queued, and new sessions follow
+   * at once. Turning a plugin off drops an older build's per-workspace list
+   * too, so no build reads it as on.
    */
-  async setWorkspaceEnabled(id: PluginId, workspace: string, enabled: boolean): Promise<PluginInfo> {
-    if (pluginCatalogEntry(id).scope !== "workspace") {
-      throw new PluginsError(409, "PLUGIN_SCOPE", "This plugin is turned on for the whole server, not per workspace.");
+  async update(id: PluginId, change: SetPluginEnabledRequest): Promise<PluginInfo> {
+    const { updates } = pluginCatalogEntry(id);
+    const { enabled, engine } = change;
+    if (engine !== undefined) {
+      if (id !== TS_RUST_PLUGIN_ID) {
+        throw new PluginsError(400, "INVALID_REQUEST", "This plugin has no engine to choose.");
+      }
+      if (this.platformPackages[engine] === null) throw this.unsupported(engine);
     }
-    if (enabled && this.platformPackage === null) {
+    if (enabled === true && updates && !this.supported()) {
       throw this.unsupported();
     }
-    if (!(await this.hasWorkspace(workspace))) {
-      throw new PluginsError(404, "WORKSPACE_NOT_FOUND", `Workspace "${workspace}" does not exist.`);
-    }
-    await this.mutate((config) => {
-      const state = stateIn(config, id);
-      const listed = state.enabledWorkspaces.includes(workspace);
-      if (enabled && !listed) {
-        state.enabledWorkspaces = [...state.enabledWorkspaces, workspace];
-      } else if (!enabled && listed) {
-        state.enabledWorkspaces = state.enabledWorkspaces.filter((name) => name !== workspace);
-      }
-    });
-    this.emitChanged();
-    await this.refreshRuntime();
-    if (enabled) {
-      await this.requestInstallIfMissing();
-    }
-    return this.get(id);
-  }
-
-  /** Turn a global plugin on or off for the whole server. */
-  async setEnabled(id: PluginId, enabled: boolean): Promise<PluginInfo> {
-    if (pluginCatalogEntry(id).scope !== "global") {
-      throw new PluginsError(409, "PLUGIN_SCOPE", "This plugin is turned on per workspace.");
-    }
     await this.ensureReadable();
-    await this.mutate((config) => {
+    const on = await this.mutate((config) => {
       const state = stateIn(config, id);
-      if (enabled) {
+      if (engine !== undefined) state.engine = engine;
+      if (enabled === true) {
         state.enabled = true;
-      } else {
+      } else if (enabled === false) {
         delete state.enabled;
+        delete state.enabledWorkspaces;
       }
+      return state.enabled === true;
     });
     this.emitChanged();
+    if (updates) {
+      await this.refreshRuntime();
+      if (on) {
+        await this.requestInstallIfMissing();
+      }
+    }
     return this.get(id);
   }
 
-  /** `POST /check`: queue a check now, whether or not the plugin is on anywhere. */
+  /** `POST /check`: queue a check now, whether or not the plugin is on. */
   async checkNow(id: PluginId): Promise<void> {
     this.assertUpdatable(id);
-    if (this.platformPackage === null) {
+    if (!this.supported()) {
       throw this.unsupported();
     }
     await this.ensureReadable();
@@ -295,24 +312,24 @@ export class PluginsService {
   }
 
   /**
-   * Swap current and previous, and skip the version rolled back from until the
-   * registry's latest moves past it. Prunes nothing.
+   * The active engine: swap current and previous, and skip the version rolled
+   * back from until the registry's latest moves past it. Prunes nothing.
    */
   async rollback(id: PluginId): Promise<PluginInfo> {
     this.assertUpdatable(id);
     await this.ensureReadable();
     this.assertIdle();
     await this.onJobQueue(async () => {
-      const previous = this.state(id).previous;
+      const engine = this.activeEngine();
+      const previous = engineVersions(this.state(id), engine).previous;
       if (!previous) {
         throw new PluginsError(409, "NO_PREVIOUS_VERSION", "There is no previous version to roll back to.");
       }
-      const binary = tsRustBinaryPath(this.pluginDir, previous.version, this.platform);
-      if (!(await isFile(binary))) {
+      if (!(await this.binaryExists(engine, previous.version))) {
         throw new PluginsError(409, "NO_PREVIOUS_VERSION", `The files of version ${previous.version} are missing.`);
       }
       await this.mutate((config) => {
-        const state = stateIn(config, id);
+        const state = engineVersionsIn(stateIn(config, id), engine);
         if (!state.previous || state.previous.version !== previous.version || !state.current) {
           throw new PluginsError(409, "NO_PREVIOUS_VERSION", "There is no previous version to roll back to.");
         }
@@ -326,24 +343,29 @@ export class PluginsService {
     return this.get(id);
   }
 
-  /** Delete every downloaded version. Refused while the plugin is on in any existing workspace. */
+  /** Delete every downloaded version of every engine. Refused while the plugin is on. */
   async removeDownloads(id: PluginId): Promise<PluginInfo> {
     this.assertUpdatable(id);
     await this.ensureReadable();
     this.assertIdle();
     await this.onJobQueue(async () => {
-      if ((await this.activeWorkspaces(this.state(id))).length > 0) {
-        throw new PluginsError(409, "PLUGIN_ENABLED", "Turn the plugin off in every workspace before removing its downloads.");
+      if (this.state(id).enabled === true) {
+        throw new PluginsError(409, "PLUGIN_ENABLED", "Turn the plugin off before removing its downloads.");
       }
       await this.mutate((config) => {
         const state = stateIn(config, id);
-        delete state.current;
-        delete state.previous;
-        delete state.skippedVersion;
+        for (const versions of [state, state.tsrs]) {
+          if (!versions) continue;
+          delete versions.current;
+          delete versions.previous;
+          delete versions.skippedVersion;
+        }
       });
       this.emitChanged();
       // preload.cjs stays: sessions started while the plugin was on still require it.
-      await removeTsRustVersions(this.pluginDir);
+      for (const engine of TS_CHECKER_ENGINES) {
+        await removeTsRustVersions(this.engineDirs[engine]);
+      }
     });
     return this.get(id);
   }
@@ -351,7 +373,7 @@ export class PluginsService {
   // ---- update checks and installs ------------------------------------------------------------
 
   private requestCheck(force: boolean): void {
-    if (this.stopped || this.platformPackage === null) return;
+    if (this.stopped || !this.supported()) return;
     if (this.queuedCheck) {
       this.queuedCheck.force ||= force;
       return;
@@ -359,31 +381,38 @@ export class PluginsService {
     const queued: QueuedCheck = { force };
     this.queuedCheck = queued;
     void this.onJobQueue(() => this.runCheck(queued)).catch((error) =>
-      this.logger.error("tsc-rs update check failed", error)
+      this.logger.error("TypeScript engine update check failed", error)
     );
   }
 
   /**
-   * Queue a check when nothing usable is installed: no current version, or its
-   * binary is gone. The check itself runs only while a workspace is enabled.
+   * Queue a check when the active engine has nothing usable installed: no
+   * current version, or its binary is gone. The check itself runs only while
+   * the plugin is on.
    */
   private async requestInstallIfMissing(): Promise<void> {
     if (this.config === null || this.readError !== null) return;
-    const current = this.state(TS_RUST_PLUGIN_ID).current;
-    if (!current || !(await this.binaryExists(current.version))) {
+    const engine = this.activeEngine();
+    const current = engineVersions(this.state(TS_RUST_PLUGIN_ID), engine).current;
+    if (!current || !(await this.binaryExists(engine, current.version))) {
       this.requestCheck(false);
     }
   }
 
-  private binaryExists(version: string): Promise<boolean> {
-    return isFile(tsRustBinaryPath(this.pluginDir, version, this.platform));
+  private binaryExists(engine: TsCheckerEngine, version: string): Promise<boolean> {
+    return isFile(tsRustBinaryPath(TS_CHECKER_ENGINE_SPECS[engine], this.engineDirs[engine], version, this.platform));
   }
 
+  /** A check and install of the engine active when it starts; its outcome is recorded for that engine. */
   private async runCheck(queued: QueuedCheck): Promise<void> {
     if (this.queuedCheck === queued) this.queuedCheck = null;
-    const platformPackage = this.platformPackage;
-    if (this.stopped || platformPackage === null || this.config === null || this.readError !== null) return;
-    if (!queued.force && (await this.activeWorkspaces(this.state(TS_RUST_PLUGIN_ID))).length === 0) return;
+    if (this.stopped || this.config === null || this.readError !== null) return;
+    if (!queued.force && this.state(TS_RUST_PLUGIN_ID).enabled !== true) return;
+    const engine = this.activeEngine();
+    const platformPackage = this.platformPackages[engine];
+    if (platformPackage === null) return;
+    const spec = TS_CHECKER_ENGINE_SPECS[engine];
+    const engineDir = this.engineDirs[engine];
 
     const abort = new AbortController();
     this.jobAbort = abort;
@@ -391,37 +420,38 @@ export class PluginsService {
     try {
       let installed: PluginInstalledVersion;
       try {
-        const state = this.state(TS_RUST_PLUGIN_ID);
+        const state = engineVersions(this.state(TS_RUST_PLUGIN_ID), engine);
         // A current version whose binary is gone (deleted from outside) is repaired: every tsc
-        // would otherwise print "tsc-rs failed to start" until the downloads were removed.
-        const currentMissing = state.current !== undefined && !(await this.binaryExists(state.current.version));
-        let release = await resolveTsRustRelease(platformPackage, this.installer, abort.signal);
+        // would otherwise print "<engine> failed to start" until the downloads were removed.
+        const currentMissing =
+          state.current !== undefined && !(await this.binaryExists(engine, state.current.version));
+        let release = await resolveTsRustRelease(spec, platformPackage, this.installer, abort.signal);
         if (release.version === state.skippedVersion && currentMissing && state.current) {
           // Latest is the version rolled back from: reinstall the one rolled back to instead.
-          release = await resolveTsRustRelease(platformPackage, this.installer, abort.signal, state.current.version);
+          release = await resolveTsRustRelease(spec, platformPackage, this.installer, abort.signal, state.current.version);
         } else if (
           !currentMissing &&
           (release.version === state.current?.version || release.version === state.skippedVersion)
         ) {
-          await this.recordCheck(null);
+          await this.recordCheck(engine, null);
           return;
         }
         this.setJob("installing");
-        installed = await installTsRustRelease(this.pluginDir, release, this.installer, {
+        installed = await installTsRustRelease(spec, engineDir, release, this.installer, {
           platform: this.platform,
           env: this.env,
           signal: abort.signal
         });
       } catch (error) {
-        await this.recordCheck(error);
+        await this.recordCheck(engine, error);
         return;
       }
       const at = this.installer.now().toISOString();
       const state = await this.mutate(async (config) => {
-        const next = stateIn(config, TS_RUST_PLUGIN_ID);
+        const next = engineVersionsIn(stateIn(config, TS_RUST_PLUGIN_ID), engine);
         if (next.current?.version !== installed.version) {
           // A current version whose files are gone is no rollback target: the old previous stays.
-          if (next.current && (await this.binaryExists(next.current.version))) next.previous = next.current;
+          if (next.current && (await this.binaryExists(engine, next.current.version))) next.previous = next.current;
           // Only a version other than the skipped one gets here.
           delete next.skippedVersion;
         }
@@ -432,8 +462,8 @@ export class PluginsService {
         return next;
       });
       const keep = [state.current?.version, state.previous?.version].filter((v): v is string => Boolean(v));
-      await pruneTsRustVersions(this.pluginDir, keep).catch((error) =>
-        this.logger.warn("Failed to prune old tsc-rs versions", error)
+      await pruneTsRustVersions(engineDir, keep).catch((error) =>
+        this.logger.warn(`Failed to prune old ${engine} versions`, error)
       );
     } finally {
       this.jobAbort = null;
@@ -441,15 +471,15 @@ export class PluginsService {
     }
   }
 
-  /** Note a finished check: its time, and its error or none. Nothing is written after `stop()`. */
-  private async recordCheck(error: unknown): Promise<void> {
+  /** Note a finished check of `engine`: its time, and its error or none. Nothing is written after `stop()`. */
+  private async recordCheck(engine: TsCheckerEngine, error: unknown): Promise<void> {
     if (this.stopped) return;
     const at = this.installer.now().toISOString();
     if (error) {
-      this.logger.warn("tsc-rs update check failed", error);
+      this.logger.warn(`${engine} update check failed`, error);
     }
     await this.mutate((config) => {
-      const state = stateIn(config, TS_RUST_PLUGIN_ID);
+      const state = engineVersionsIn(stateIn(config, TS_RUST_PLUGIN_ID), engine);
       state.lastCheckAt = at;
       if (error) {
         state.lastError =
@@ -459,7 +489,7 @@ export class PluginsService {
       } else {
         delete state.lastError;
       }
-    }).catch((writeError) => this.logger.error("Failed to record the tsc-rs check", writeError));
+    }).catch((writeError) => this.logger.error(`Failed to record the ${engine} check`, writeError));
   }
 
   private onJobQueue<T>(task: () => Promise<T>): Promise<T> {
@@ -492,45 +522,42 @@ export class PluginsService {
   /**
    * Bring the runtime in line with the state: the preload written for the
    * current workspaces root, new sessions told whether to load it, and the
-   * hourly timer armed while any workspace is enabled. Serialized. Resolves
-   * whether the enabled existing workspaces changed since the last refresh.
+   * hourly timer armed while the plugin is on. Serialized. Resolves whether
+   * the plugin's on/off changed since the last refresh.
    */
   private refreshRuntime(): Promise<boolean> {
     const run = this.runtimeQueue.then(async (): Promise<boolean> => {
-      if (this.platformPackage === null || this.stopped) {
+      if (!this.supported() || this.stopped) {
         this.setSessionPreload(null);
         this.disarm();
         return false;
       }
-      const state = this.config === null ? null : this.state(TS_RUST_PLUGIN_ID);
-      const active = state === null ? [] : await this.activeWorkspaces(state);
-      const activeKey = JSON.stringify(active);
-      const changed = activeKey !== this.activeKey;
-      this.activeKey = activeKey;
+      const enabled = this.config !== null && this.state(TS_RUST_PLUGIN_ID).enabled === true;
+      const changed = enabled !== this.enabledAtRefresh;
+      this.enabledAtRefresh = enabled;
       const workspacesDir = this.options.workspacesDir();
       const root = await realpath(workspacesDir).catch(() => resolve(workspacesDir));
       // Both spellings of a symlinked root: a `tsc` path can go through either, so a
       // move to another symlink of the same directory rewrites the preload too.
       const configured = resolve(workspacesDir);
       const roots = `${root}\0${configured}`;
-      if (this.preloadRoot !== roots && (active.length > 0 || (await isFile(this.preloadPath)))) {
+      if (this.preloadRoot !== roots && (enabled || (await isFile(this.preloadPath)))) {
         try {
           await this.writePreload(this.preloadPath, {
             statePath: this.configFile,
             workspacesRoot: root,
-            ...(configured !== root ? { configuredWorkspacesRoot: configured } : {})
+            ...(configured !== root ? { configuredWorkspacesRoot: configured } : {}),
+            supportedEngines: TS_CHECKER_ENGINES.filter((engine) => this.platformPackages[engine] !== null),
+            defaultEngine: this.defaultEngine
           });
           this.preloadRoot = roots;
         } catch (error) {
           this.preloadRoot = null;
-          this.logger.error("Failed to write the tsc-rs preload", error);
+          this.logger.error("Failed to write the TypeScript engine preload", error);
         }
       }
-      this.setSessionPreload(active.length > 0 && this.preloadRoot === roots ? this.preloadPath : null);
-      // Armed for any listed name, existing or not. The daemon's workspace routes call
-      // `workspacesChanged`; each tick re-reads the workspaces too, so a workspace re-created
-      // behind the daemon's back picks the plugin up again within the hour.
-      if (state !== null && state.enabledWorkspaces.length > 0) {
+      this.setSessionPreload(enabled && this.preloadRoot === roots ? this.preloadPath : null);
+      if (enabled) {
         this.arm();
       } else {
         this.disarm();
@@ -546,7 +573,8 @@ export class PluginsService {
     this.timer = setInterval(() => {
       void this.track(async () => {
         if (await this.refreshRuntime()) this.emitChanged();
-        // The check repairs a missing binary too, and runs only while a workspace is enabled.
+        // Each tick retries a preload write that failed. The check repairs a missing binary
+        // too, and runs only while the plugin is on.
         this.requestCheck(false);
       });
     }, PLUGIN_CHECK_INTERVAL_MS);
@@ -569,9 +597,26 @@ export class PluginsService {
   private async ensureReadable(): Promise<void> {
     if (this.config !== null && this.readError === null) return;
     await this.reload();
+    await this.migrateWorkspaceRecord();
     await this.refreshRuntime();
     this.emitChanged();
     await this.requestInstallIfMissing();
+  }
+
+  /**
+   * An older build's per-workspace tsc-rs record: on in some workspace
+   * (`enabledWorkspaces` non-empty) and no `enabled` of its own. It is turned
+   * on for the whole server; the list stays for those builds. Never throws: a
+   * failed write leaves the record as it was, to be turned on at the next start.
+   */
+  private async migrateWorkspaceRecord(): Promise<void> {
+    if (this.config === null || this.readError !== null) return;
+    const legacy = (state: PluginState) => state.enabled === undefined && (state.enabledWorkspaces?.length ?? 0) > 0;
+    if (!legacy(this.state(TS_RUST_PLUGIN_ID))) return;
+    await this.mutate((config) => {
+      const state = stateIn(config, TS_RUST_PLUGIN_ID);
+      if (legacy(state)) state.enabled = true;
+    }).catch((error) => this.logger.error("Failed to turn on the per-workspace tsc-rs record", error));
   }
 
   /** Re-read plugins.json in the file queue; throws `PLUGINS_UNREADABLE` when it does not read. */
@@ -648,25 +693,31 @@ export class PluginsService {
     return pluginStateOf(this.config ?? createDefaultPluginsConfig(), id);
   }
 
-  /** `config` and `job` as they were when the view was asked for; the workspaces as they are. */
-  private async response(config: PluginsConfig | null, job: PluginJobState): Promise<PluginsResponse> {
-    const names = await this.workspaceNames();
-    return { plugins: BUILT_IN_PLUGINS.map((entry) => this.info(entry.id, config, job, names)) };
+  /** Whether any engine has a build here. */
+  private supported(): boolean {
+    return TS_CHECKER_ENGINES.some((engine) => this.platformPackages[engine] !== null);
   }
 
-  private info(
-    id: PluginId,
-    config: PluginsConfig | null,
-    job: PluginJobState,
-    workspaceNames: readonly string[]
-  ): PluginInfo {
+  /** The engine `state` names when it has a build here, else the platform's default. */
+  private activeEngine(state: PluginState = this.state(TS_RUST_PLUGIN_ID)): TsCheckerEngine {
+    const stored = storedTsCheckerEngine(state);
+    return stored !== undefined && this.platformPackages[stored] !== null ? stored : this.defaultEngine;
+  }
+
+  /** `config` and `job` as they were when the view was asked for. */
+  private response(config: PluginsConfig | null, job: PluginJobState): PluginsResponse {
+    return { plugins: BUILT_IN_PLUGINS.map((entry) => this.info(entry.id, config, job)) };
+  }
+
+  private info(id: PluginId, config: PluginsConfig | null, job: PluginJobState): PluginInfo {
     const entry = pluginCatalogEntry(id);
     const state = pluginStateOf(config ?? createDefaultPluginsConfig(), id);
-    if (entry.scope === "global") {
+    const enabled = state.enabled === true;
+    if (!entry.updates) {
       return {
         ...entry,
         platform: "supported",
-        enabled: state.enabled === true,
+        enabled,
         enabledWorkspaces: [],
         current: null,
         previous: null,
@@ -676,42 +727,29 @@ export class PluginsService {
         job: "idle"
       };
     }
-    const existing = new Set(workspaceNames);
-    const enabledWorkspaces = state.enabledWorkspaces.filter((name) => existing.has(name));
+    const engine = this.activeEngine(state);
+    const versions = engineVersions(state, engine);
     return {
       ...entry,
-      platform: this.platformPackage === null ? "unsupported" : "supported",
-      enabled: enabledWorkspaces.length > 0,
-      enabledWorkspaces,
-      current: installedInfo(state.current),
-      previous: installedInfo(state.previous),
-      skippedVersion: state.skippedVersion ?? null,
-      lastCheckAt: state.lastCheckAt ?? null,
-      lastError: state.lastError
-        ? { at: state.lastError.at, step: state.lastError.step, message: state.lastError.message }
+      source: { ...tsCheckerEngineEntry(engine).source },
+      platform: this.supported() ? "supported" : "unsupported",
+      enabled,
+      enabledWorkspaces: [],
+      current: installedInfo(versions.current),
+      previous: installedInfo(versions.previous),
+      skippedVersion: versions.skippedVersion ?? null,
+      lastCheckAt: versions.lastCheckAt ?? null,
+      lastError: versions.lastError
+        ? { at: versions.lastError.at, step: versions.lastError.step, message: versions.lastError.message }
         : null,
-      job
+      job,
+      engine,
+      engines: TS_CHECKER_ENGINE_CATALOG.map((option) => ({
+        ...option,
+        source: { ...option.source },
+        platform: this.platformPackages[option.id] === null ? "unsupported" : "supported"
+      }))
     };
-  }
-
-  /** Workspace directories, as the workspace listing reads them. */
-  private async workspaceNames(): Promise<string[]> {
-    try {
-      const entries = await readdir(this.options.workspacesDir(), { withFileTypes: true });
-      return entries.filter((entry) => entry.isDirectory() && !entry.name.startsWith(".")).map((entry) => entry.name);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-        this.logger.warn("Failed to list workspaces for plugins", error);
-      }
-      return [];
-    }
-  }
-
-  /** The enabled names that are existing workspaces. */
-  private async activeWorkspaces(state: PluginState): Promise<string[]> {
-    if (state.enabledWorkspaces.length === 0) return [];
-    const existing = new Set(await this.workspaceNames());
-    return state.enabledWorkspaces.filter((name) => existing.has(name));
   }
 
   /**
@@ -723,12 +761,17 @@ export class PluginsService {
     if (this.config === null || this.readError !== null) return;
     const [config, job] = [this.config, this.job];
     this.emitQueue = this.emitQueue
-      .then(async () => this.events.emit("changed", await this.response(config, job)))
+      .then(() => this.events.emit("changed", this.response(config, job)))
       .catch((error) => this.logger.error("Failed to publish plugin state", error));
   }
 
-  private unsupported(): PluginsError {
-    return new PluginsError(409, "PLUGIN_UNSUPPORTED", `tsc-rs has no build for ${this.platform}/${this.options.arch ?? process.arch}.`);
+  private unsupported(engine?: TsCheckerEngine): PluginsError {
+    const where = `${this.platform}/${this.arch}`;
+    return new PluginsError(
+      409,
+      "PLUGIN_UNSUPPORTED",
+      engine ? `${engine} has no build for ${where}.` : `Neither tsrs nor tsc-rs has a build for ${where}.`
+    );
   }
 }
 
@@ -747,6 +790,18 @@ function stateIn(config: PluginsConfig, id: PluginId): PluginState {
   const state = pluginStateOf(config, id);
   config.plugins[id] = state;
   return state;
+}
+
+/** An engine's versions in a ts-rust record: tsc-rs's are the record's own fields, tsrs's under `tsrs`. */
+function engineVersions(state: PluginState, engine: TsCheckerEngine): PluginEngineVersions {
+  return engine === "tsrs" ? (state.tsrs ?? {}) : state;
+}
+
+/** {@link engineVersions} to write to: tsrs's sub-record is created when the record has none yet. */
+function engineVersionsIn(state: PluginState, engine: TsCheckerEngine): PluginEngineVersions {
+  if (engine !== "tsrs") return state;
+  state.tsrs ??= {};
+  return state.tsrs;
 }
 
 function installedInfo(version: PluginInstalledVersion | undefined): PluginInfo["current"] {

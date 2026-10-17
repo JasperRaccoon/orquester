@@ -3,9 +3,11 @@
 Every agent-chat agent (Claude, Codex, Grok, OpenCode) gets an MCP server named `orquester`,
 scoped to its own thread. Its tools are the **Orquester catalog's** chat audience — the same tool
 definitions the external `/mcp` serves (`../mcp/catalog/`, one module per family in
-`../mcp/tools/`), run by the same executor (`../mcp/executor.ts`) — under **tiers, toolsets and
-approval cards**. This directory is the transport only: the socket route, the per-thread manifest
-(tools, instruction block, denials), the toolset refresh and the legacy-name aliases. Design:
+`../mcp/tools/`), run by the same executor (`../mcp/executor.ts`) — under **tiers and approval
+cards**. Every chat gets every chat tool (no always-Admin one for a workflow-owned chat); there is
+no per-agent or per-chat tool switch. This directory is the transport only: the socket route, the
+per-thread manifest (tools, instruction block, denials), the manifest pushes and the legacy-name
+aliases. Design:
 `docs/superpowers/specs/2026-10-15-unified-orquester-mcp-design.md` (cited as §n); the external
 side: `docs/orquester-mcp.md`.
 
@@ -29,8 +31,7 @@ provider ──► agent host ──► daemon unix socket ──► route ─�
   (`ToolCaller` of kind `thread`) from the thread's own tab and head (`GET …/head`, never the whole snapshot) — title, canonical project
   and workspace, permission mode, whether its running turn plans, the workflow-owned trait (owner +
   lineage walk), the exchange (`causedBy` of its running turn) — never from the arguments, and
-  hands the call to the executor: strict parse of the chat schema, toolset check
-  (`TOOL_NOT_ENABLED`), the tool's scope claim, the gate (allow / card / deny), the turn policy and
+  hands the call to the executor: strict parse of the chat schema, the tool's scope claim, the gate (allow / card / deny), the turn policy and
   exchange, then the tool's `run`. A daemon that cannot be reached is the error result "Orquester
   is restarting; retry in a few seconds." — never a throw or a hang.
 
@@ -41,8 +42,8 @@ provider ──► agent host ──► daemon unix socket ──► route ─�
 | `contract.ts` | both | `SessionSecretRequests` (the one port besides `DaemonApi`), `SESSION_TOOL_CALL_TIMEOUT_MS`, the result type |
 | `results.ts` | both | `jsonResult`, `textResult`, `imageResult`, `errorResult`, `ToolError`, the daemon-down and cancelled results |
 | `instructions.ts` | both | the per-thread "Orquester" instruction block (§10) |
-| `manifest.ts` | daemon (+ `request_toolset`) | the manifest of one thread: advertised tools, block, denials; which providers re-list in-session |
-| `toolset-refresh.ts` | daemon | the manifest route and the refresh pushed to the host when a chat's toolsets change; the automatic continue turn |
+| `manifest.ts` | daemon | the manifest of one thread: advertised tools, block, denials |
+| `session-tools-refresh.ts` | daemon | the manifest route, the daemon-pointing reads behind its denials, and the manifests pushed to the host |
 | `route.ts` | daemon | the socket-only call route; builds the thread caller |
 | `legacy-aliases.ts` | daemon | an old agent host's 13 legacy names mapped onto their catalog tools (below) |
 | `testing.ts` | tests | test-only chat tools (`echo`, `wait_for_cancel`, `pixel`, `fail`) and `executeTestChatCall` |
@@ -53,31 +54,30 @@ reaches the daemon through `ctx.api` (the daemon's own REST API in-process, `../
 `mcp/catalog/registry.test.ts` walks the import graph from `catalog/index.ts` against an allow-list.
 No dynamic `import()` either.
 
-## Toolsets and the default set (§9.1, §9.5)
+## Toolsets: groups, never switches (§9.1, §9.5)
 
-| Toolset | Tools | Default |
-|---|---|---|
-| `core` | `list_projects`, `list_agents`, `list_sessions`, `get_session`, `read_transcript`, `search_sessions`, `create_session`, `send_message`, `wait_for_session`, `control_session`, `fork_session`, `merge_back_session`, `get_usage`, `html_preview`, `html_render`, `request_secret`, `request_toolset` (17) | on, locked |
-| `reads` | `list_workflows`, `get_workflow`, `get_workflow_runs`, `get_agent_profile`, `list_saved_prompts` (5) | on |
-| `notes` | `list_todos`, `update_todos`, `update_saved_prompts` (3) | off |
-| `chat-extras` | `update_session`, `respond_to_request`, `get_turn_diff`, `read_tool_output`, `list_conversations`, `notify_user` (6) | off |
-| `files-git` | `read_file`, `get_git_state` (2) | off |
-| `workflow-authoring` | `list_workflow_block_types`, `create_workflow`, `update_workflow`, `delete_workflow`, `preview_expression`, `run_workflow`, `cancel_workflow_run`, `list_workflow_secrets`, `set_workflow_secret` (9) | off |
-| `agent-profile-editing` | `edit_agent_profile` (1) | off |
-| `desktops` | `get_desktops`, `control_desktop` (2) | off |
+| Toolset | Tools |
+|---|---|
+| `core` | `list_projects`, `list_agents`, `list_sessions`, `get_session`, `read_transcript`, `search_sessions`, `create_session`, `send_message`, `wait_for_session`, `control_session`, `fork_session`, `merge_back_session`, `get_usage`, `html_preview`, `html_render`, `request_secret` (16) |
+| `reads` | `list_workflows`, `get_workflow`, `get_workflow_runs`, `get_agent_profile`, `list_saved_prompts` (5) |
+| `notes` | `list_todos`, `update_todos`, `update_saved_prompts` (3) |
+| `chat-extras` | `update_session`, `respond_to_request`, `get_turn_diff`, `read_tool_output`, `list_conversations`, `notify_user` (6) |
+| `files-git` | `read_file`, `get_git_state` (2) |
+| `workflow-authoring` | `list_workflow_block_types`, `create_workflow`, `update_workflow`, `delete_workflow`, `preview_expression`, `run_workflow`, `cancel_workflow_run`, `list_workflow_secrets`, `set_workflow_secret` (9) |
+| `agent-profile-editing` | `edit_agent_profile` (1) |
+| `desktops` | `get_desktops`, `control_desktop` (2) |
 
-45 chat tools (the 41 external ones plus `html_preview`, `html_render`, `request_secret`,
-`request_toolset`), 22 on by default for every agent. The defaults per agent, the master switch
-and each chat's overrides live in `agent-tools.json` (`../agent-tools/service.ts`; Settings › Agent
-tools, the chat's Tools chip). `request_toolset {toolset, reason}` lets the agent ask the user with
-a one-click card; the answer says `available: "now"` (Claude re-lists in-session) or
-`"after-restart"` (the session restarts with resume at its next idle point and the daemon posts an
-automatic continue turn — skipped when the user spoke first). A toolset declined is refused for 30
-minutes (`TOOLSET_DECLINED`).
+44 chat tools (the 41 external ones plus `html_preview`, `html_render`, `request_secret`), **all
+advertised to every chat** of every agent. A toolset is only a group: a label in `@orquester/api`
+`TOOLSETS` and the `orquester/toolset` tag external clients see. There is no master switch, no
+per-agent default and no per-chat override, and no `request_toolset`. Older builds kept such
+switches in `agent-tools.json`; this build keeps those keys verbatim and never reads them
+(`@orquester/config` `agent-tools.ts`), and still renders their `toolset` cards and automatic
+continue turns in old transcripts.
 
 **Measured** (`mcp/catalog/registry.test.ts` serialises `tools/list` as the host does, and asserts
-§9.5): the default chat set is 26 863 bytes for every agent (≤ 32 768), `core` alone 21 979
-(≤ 25 600), all 45 chat tools 69 601; the external set 62 976 bytes for 41 tools (≤ 81 920). Every
+the budgets): all 44 chat tools are 69 072 bytes (≤ 73 728, the one chat budget); the external set
+63 180 bytes for 41 tools (≤ 81 920). Every
 tool is ≤ 3 000 bytes but `html_render` (2 755, ≤ 3 100) and `create_workflow`, `update_workflow`,
 `edit_agent_profile` (≤ 6 500); every description ≤ 1 000 bytes (`html_*` ≤ 2 000), every field
 text ≤ 160.
@@ -101,7 +101,8 @@ none of this.
   is an **Admin card in every permission mode**: never while planning ("propose it in your plan"),
   never for a **workflow-owned** chat (`ADMIN_NOT_AVAILABLE` at once; a chat a workflow runs, or
   any chat descending from one, where nobody watches).
-- **Cards** (`../agent-chat/tool-approvals.ts`; kinds `admin`, `boundary`, `toolset`) show the
+- **Cards** (`../agent-chat/tool-approvals.ts`; kinds `admin`, `boundary`; `toolset` only from
+  older builds) show the
   complete preview the tool composes (`approval()`), freeze the arguments, and pin what the preview
   read (revisions, hashes, commits): `run` re-verifies and refuses `PREVIEW_STALE`. A card waits 30
   minutes (`APPROVAL_TIMEOUT`), at most 5 per chat (`APPROVAL_LIMIT`); a denial is
@@ -111,26 +112,21 @@ none of this.
   `@orquester/config`) let a Full-access chat skip later cards of one family: `workflows`,
   `saved-prompts` and `cross-project` for this chat, `desktops` for this chat or its project. They
   are offered and honoured only while the chat is Full access and not workflow-owned; agent-profile,
-  workflow-secret, toolset and cross-project/cross-workspace read cards are never grantable, nor is
+  workflow-secret, (legacy) toolset and cross-project/cross-workspace read cards are never grantable, nor is
   an edit of a workflow-referenced prompt. An Admin grant never covers another project (a card
   reaching one offers none); a cross-project grant names its one target project. A `workflows`
   grant covers only the workflows that chat created or was approved for.
 - **Plan mode**: Reads run; turn-causing Acts run in plan mode too (plan carries on); data-changing
-  Acts are refused; `planSafe` tools (`html_*`, `request_secret`, `notify_user`, `request_toolset`)
-  run.
+  Acts are refused; `planSafe` tools (`html_*`, `request_secret`, `notify_user`) run.
 
 The executor attaches the `toolApproval` reference (card or grant, outcome, deny reason, grant
 scope) to every gated call's result, which the tool row shows.
 
 ## The instruction block (§10)
 
-Composed per thread by the manifest (`instructions.ts`): the fixed part (§10, 1 445 bytes), then
-— when toolsets are off — "Off at chat start: <labels and ids>. If a task needs one, call
-request_toolset with its id; its result says what is on now." (without the request hint where no
-card can be asked: a workflow-owned chat, Agent tools switched off), then the workflow-owned line.
-Worst case ≤ 2 048 bytes (`instructions.test.ts`). The toolset line is worded **as of the chat's
-start**: Claude's SDK keeps the system prompt it launched with until compaction, so a toolset
-turned on later is not reflected there — `request_toolset`'s answer is authoritative. Every tool
+Composed per thread by the manifest (`instructions.ts`): the fixed part (§10, 1 445 bytes), then,
+for a workflow-owned chat, the workflow-owned line. Every tool is on, so the block never lists tools
+that are off. Worst case ≤ 2 048 bytes (`instructions.test.ts`). Every tool
 name the block, the descriptions and the daemon's answers mention exists for the chat audience
 (`mcp/catalog/names.test.ts`).
 
@@ -190,7 +186,7 @@ or background work runs), so for a while a new daemon can drive an **old host**:
 
 | Peers | What keeps them working |
 |---|---|
-| **Old host, new daemon** — a host that booted before the catalog still advertises `thread_*`, `task_*`, `delegate_task`, `agent_catalog` until its drain-restart | `legacy-aliases.ts`: each name runs its catalog tool with the **old semantics** — `thread_send` without `wait` → `send_message {reply: "none"}` (steer), with `wait` → `send_message {reply: "wait"}` without the queue rule's notify conversion (`CallContext.legacyAlias`: the old steer-and-await path, a timeout just returns); `thread_create` → `create_session {reply: "none"}`; `delegate_task` → `create_session {delegate: true, reply: "none"}`; `task_status` → `get_session`; `thread_wait`/`task_wait` → `wait_for_session`; `thread_interrupt`/`task_cancel` → `control_session {action: "interrupt"}`; `thread_list`, `thread_read`, `thread_fork`, `thread_merge_back`, `agent_catalog` → `list_sessions`, `read_transcript`, `fork_session`, `merge_back_session`, `list_agents`. `html_preview`, `html_render`, `request_secret` keep their names. The gate, cards and toolsets judge an alias as its target. |
+| **Old host, new daemon** — a host that booted before the catalog still advertises `thread_*`, `task_*`, `delegate_task`, `agent_catalog` until its drain-restart | `legacy-aliases.ts`: each name runs its catalog tool with the **old semantics** — `thread_send` without `wait` → `send_message {reply: "none"}` (steer), with `wait` → `send_message {reply: "wait"}` without the queue rule's notify conversion (`CallContext.legacyAlias`: the old steer-and-await path, a timeout just returns); `thread_create` → `create_session {reply: "none"}`; `delegate_task` → `create_session {delegate: true, reply: "none"}`; `task_status` → `get_session`; `thread_wait`/`task_wait` → `wait_for_session`; `thread_interrupt`/`task_cancel` → `control_session {action: "interrupt"}`; `thread_list`, `thread_read`, `thread_fork`, `thread_merge_back`, `agent_catalog` → `list_sessions`, `read_transcript`, `fork_session`, `merge_back_session`, `list_agents`. `html_preview`, `html_render`, `request_secret` keep their names. The gate and cards judge an alias as its target. |
 | **New host, old daemon** — a rollback | the manifest route answers its route-miss 404, and the host advertises the **frozen legacy definitions** (`agent-host/session-tools/legacy-definitions.ts`: the old server's 16 `tools/list` entries and instruction block, pinned by hash in its test) so the old daemon's handlers match every name and argument |
 
 `session-tools/legacy-aliases.test.ts` proves every name an old host can send resolves here.
@@ -353,12 +349,12 @@ last matching rule is a `*` deny) and allows its own; the deny is sent whenever 
 tools, even for a thread whose own grant failed. Subagents inherit only the deny, so they get no
 session tools. See `agent-host/adapters/opencode/session-tools.ts`.
 
-## Per-thread lists, denials, refresh (§9.3, §9.4, §12.1)
+## Per-thread lists, denials, pushes (§9.3, §9.4, §12.1)
 
 - **Manifest.** At every provider-session start the host asks the daemon (`POST
-  /api/agent-host/session-tools/manifest`, socket-only, host bearer; `toolset-refresh.ts`) for
-  `{tools, instructions, deny}`: the thread's resolved toolsets over `catalogFor("chat")`, no
-  always-Admin tool for a workflow-owned chat, the per-thread instruction block (`instructions.ts`,
+  /api/agent-host/session-tools/manifest`, socket-only, host bearer; `session-tools-refresh.ts`) for
+  `{tools, instructions, deny}`: every tool of `catalogFor("chat")`, no always-Admin tool for a
+  workflow-owned chat (older daemons also sent a `toolsets` field; the host ignores it), the per-thread instruction block (`instructions.ts`,
   worst case ≤ 2 048 bytes) and the daemon-pointing MCP servers of the thread's agent in its own
   account home or project — the project root's configs and, for a chat started in a directory
   inside it, every directory's on the way down to its cwd (`GET
@@ -430,11 +426,12 @@ session tools. See `agent-host/adapters/opencode/session-tools.ts`.
   except where that rule would also hide another server whose name extends it; there the
   disconnect alone denies it, and it is disconnected again at every turn start (the rule is added
   once a disconnect fails).
-- **Refresh.** A toolset change (`onToolsetsChanged`) pushes the new manifest to the host
-  (`POST /threads/:id/session-tools/refresh`): Claude takes it in-session (`list_changed`); any
-  other live session restarts with resume at its next idle point (the orchestrator's ensure step,
-  never under a running turn). After an approved `request_toolset` card in such a chat, the daemon
-  posts the automatic continue turn once the asking turn completed, unless the user spoke first.
+- **Pushes.** The daemon pushes a chat's manifest to the host (`POST
+  /threads/:id/session-tools/refresh`) once a refused launch's denials become known, and every
+  open chat's once at boot (a session the host kept across a daemon restart may have been launched
+  with an older list). Claude takes a new list in-session (`list_changed`); any other live session
+  restarts with resume at its next idle point (the orchestrator's ensure step, never under a
+  running turn); an equal list is `unchanged`.
 - **Tool rows.** The executor attaches the `toolApproval` reference (card or grant, outcome, deny
   reason, grant scope) to every gated call's result.
 

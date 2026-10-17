@@ -19,7 +19,6 @@ import { fileURLToPath } from "node:url";
 
 import ts from "typescript";
 import type { z } from "zod";
-import { TOOLSETS, toolsetById } from "@orquester/api";
 
 import { audienceDescription, audienceShape } from "../executor.ts";
 import { SERVER_INSTRUCTIONS, SERVER_VERSION } from "../server.ts";
@@ -88,19 +87,13 @@ test("the external server: version 3.0.0, instructions ≤ 2 KB, and every tool 
 
 test("the in-chat server: the instruction block (every variant) and every chat tool's texts name only chat tools", () => {
   const chat = new Set(catalogFor("chat").map((tool) => tool.name));
-  for (const enabled of [new Set(["core"]), new Set(TOOLSETS.map((toolset) => toolset.id))]) {
-    for (const workflowOwned of [false, true]) {
-      for (const canRequestToolsets of [false, true]) {
-        const block = composeOrquesterInstructions({ enabledToolsets: enabled, workflowOwned, canRequestToolsets });
-        assert.deepEqual(strays(block, chat), [], "instruction block");
-      }
-    }
+  for (const workflowOwned of [false, true]) {
+    const block = composeOrquesterInstructions({ workflowOwned });
+    assert.deepEqual(strays(block, chat), [], "instruction block");
   }
   for (const tool of catalogFor("chat")) {
     for (const text of toolTexts(tool, "chat")) assert.deepEqual(strays(text, chat), [], `${tool.name}: ${text.slice(0, 80)}`);
   }
-  // The toolset labels the block and request_toolset's card read exist (no stale toolset id).
-  for (const toolset of TOOLSETS) assert.equal(toolsetById(toolset.id)?.label, toolset.label);
 });
 
 /** Non-test TypeScript files under `dir`. */

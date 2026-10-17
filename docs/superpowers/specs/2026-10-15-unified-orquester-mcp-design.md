@@ -728,6 +728,12 @@ caps §5.6.
 
 ## 9. Toolsets, the default set, budget, settings
 
+> **Superseded by the current source:** toolset gating was removed. Every chat gets every chat tool
+> (no always-Admin one for a workflow-owned chat); toolsets are group labels only; there is no
+> master switch, per-agent default, per-chat override, `request_toolset`, toolset card or automatic
+> continue turn. The whole chat set has one byte budget (≤ 73 728). Read §9 as history; see
+> `apps/daemon/src/session-tools/README.md`.
+
 ### 9.1 Toolsets
 
 | Toolset | Label | Tools | Default |

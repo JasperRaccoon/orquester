@@ -297,8 +297,8 @@ const listSavedPrompts = defineTool({
   name: "list_saved_prompts",
   title: "List saved prompts",
   description:
-    "The user's saved prompts: global plus one project's (a project prompt is shared by every checkout of its Git repository: repoKey; projectPath is where it was first saved). Rows: id, title, description, tags, scope, projectPath, repoKey, pinned, createdBy (absent: the user's), usedByWorkflows (usesUnknown: can't tell), bodyChars; body with includeBody.",
-  chatNote: "Default: this chat's project. Prompts shared from another workspace's checkout are only counted (sharedElsewhere) below Full access.",
+    "The user's saved prompts, global plus one project's (shared by every checkout of its Git repo: repoKey; projectPath: where first saved). Rows: id, title, description, tags, scope, pinned, createdBy (absent: the user's), usedByWorkflows (usesUnknown: can't tell), bodyChars; body with includeBody.",
+  chatNote: "Below Full access, prompts shared from another workspace's checkout are only counted (sharedElsewhere).",
   externalNote: "Default: global only.",
   input: {
     project: z.string().min(1).optional().describe("Path or \"ws/project\"."),
@@ -349,10 +349,10 @@ const updateInput = {
     .string()
     .min(1)
     .optional()
-    .describe("create: the project it belongs to. update/delete: the project of a project prompt. Absolute path or \"<workspace>/<project>\"."),
-  global: z.boolean().optional().describe("create: a global prompt, offered in every project."),
+    .describe("create: its project. update/delete: a project prompt's project. \"<workspace>/<project>\" or a path."),
+  global: z.boolean().optional().describe("create: global, offered in every project."),
   pinned: z.boolean().optional().describe("Pin it to the top of the library. An agent-created prompt can be pinned only by the user."),
-  reason: z.string().max(TOOL_APPROVAL_REASON_MAX_CHARS).optional().describe("Why, shown to the user when the change needs approval.")
+  reason: z.string().max(TOOL_APPROVAL_REASON_MAX_CHARS).optional().describe("Why, shown on the approval card.")
 };
 type UpdateArgs = z.infer<z.ZodObject<typeof updateInput>>;
 
@@ -527,9 +527,9 @@ const updateSavedPrompts = defineTool({
   name: "update_saved_prompts",
   title: "Change saved prompts",
   description:
-    "Create, edit or delete a saved prompt in the user's library (the right rail), global or for one project. create: title and body (+ description, tags), in a project or global. update: change title, body, description or tags of the prompt `id`. delete: remove it.",
+    "Create, update or delete a prompt in the user's saved-prompt library (right rail). create: title + body (+ description, tags), in `project` or `global`. update `id`: any of title, body, description, tags. delete `id`.",
   chatNote:
-    "A prompt you create is marked as made by an agent; you cannot pin prompts. Without project: this chat's project. A project prompt belongs to the project it was first saved in (projectPath), also when another checkout of its repository lists it. Editing or deleting a prompt no agent created, one a workflow uses (usedByWorkflows), or one of another project asks the user to approve in the chat (up to 30 min); if denied, don't retry — ask the user.",
+    "Prompts you create are marked agent-made; you can't pin. A project prompt belongs to its projectPath, even when another checkout lists it. Editing or deleting a prompt no agent made, one in usedByWorkflows, or another project's needs the user's approval.",
   externalNote:
     "update and delete look for a project prompt in `project` (else among the global ones). _meta tier admin is the widest: in Orquester chats create and edits of agent-made prompts are act.",
   input: updateInput,

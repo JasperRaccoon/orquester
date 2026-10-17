@@ -26,7 +26,7 @@ import { canonicalProject } from "../mcp/addressing.ts";
 import type { AnyOrquesterTool, ApprovalPort, ThreadCaller } from "../mcp/catalog/contract.ts";
 import type { DaemonApi } from "../mcp/daemon-api.ts";
 import { ToolError } from "../mcp/errors.ts";
-import { executeToolCall, type EnabledToolsets } from "../mcp/executor.ts";
+import { executeToolCall } from "../mcp/executor.ts";
 import { isWorkflowOwned } from "../mcp/gate/scope.ts";
 import { exchangeOfTurn } from "../mcp/gate/turn-policy.ts";
 import { listSessions, readThreadHead } from "../mcp/reads.ts";
@@ -55,8 +55,6 @@ export interface SessionToolRouteDeps {
   lookup?: (name: string) => AnyOrquesterTool | undefined;
   /** Cards and grants (default: the daemon's wiring, `executorPorts`). */
   approvals?: ApprovalPort | null;
-  /** The chat's toolsets (default: the daemon's wiring, else the catalogue defaults). */
-  enabledToolsets?: EnabledToolsets | null;
   /** The daemon's secret requests (`request_secret`); absent where none is wired. */
   secretRequests?: SessionSecretRequests;
   now?: () => number;
@@ -152,7 +150,6 @@ export function registerSessionToolsRoute(app: FastifyInstance, deps: SessionToo
         {
           lookup: (name, audience) => (audience === "chat" ? (deps.lookup ? deps.lookup(name) : chatToolByName(name)) : undefined),
           ...(deps.approvals !== undefined ? { approvals: deps.approvals } : {}),
-          ...(deps.enabledToolsets !== undefined ? { enabledToolsets: deps.enabledToolsets } : {}),
           refreshCaller: (before) => buildThreadCaller(api, before.threadId, thread, before.callId, delivered),
           ...(deps.secretRequests !== undefined ? { secretRequests: deps.secretRequests } : {}),
           now

@@ -23,7 +23,7 @@ import { tmpdir } from "node:os";
 import test from "node:test";
 
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { TOOLSET_IDS, type EventMessage, type SessionSummary } from "@orquester/api";
+import type { EventMessage, SessionSummary } from "@orquester/api";
 import {
   agentChatRoutes,
   parseThreadMessage,
@@ -216,7 +216,7 @@ function world() {
     const tab = sessions.get(threadId)!;
     const caller = await buildThreadCaller(api, threadId, { projectPath: tab.projectPath, cwd: tab.cwd, agentId: tab.refId as "claude" | "codex" }, `call-${(calls += 1)}`);
     return executeToolCall(
-      { approvals: port, enabledToolsets: async () => new Set(TOOLSET_IDS), lookup: (tool, audience) => toolByName(tool, audience), newId: () => "ex-1" },
+      { approvals: port, lookup: (tool, audience) => toolByName(tool, audience), newId: () => "ex-1" },
       { name, arguments: args },
       { caller, api, signal: new AbortController().signal }
     );

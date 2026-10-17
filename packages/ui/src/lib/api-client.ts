@@ -103,16 +103,14 @@ import type {
   AgentToolsResponse,
   DaemonMcpServersResponse,
   RevokeAgentToolGrantsResponse,
-  ThreadAgentToolsResponse,
-  UpdateAgentToolsSettingsRequest,
-  UpdateThreadAgentToolsRequest
+  ThreadAgentToolsResponse
 } from "@orquester/api";
 import type {
   PluginId,
   PluginInfo,
   PluginsResponse,
   SetPluginEnabledRequest,
-  SetPluginWorkspaceRequest
+  TsCheckerEngine
 } from "@orquester/api";
 import type {
   CreateDesktopRequest,
@@ -367,21 +365,24 @@ export class ApiClient {
   }
 
   /**
-   * Turn a plugin on or off for one workspace. Resolves to the plugin's new
+   * Turn a plugin on or off for the whole server. Resolves to the plugin's new
    * state, or null when the answer carries none (the `plugins.changed`
    * broadcast brings it then).
    */
-  async setPluginWorkspace(id: PluginId, workspace: string, enabled: boolean): Promise<PluginInfo | null> {
-    const data = await this.send<unknown>("PUT", pluginRoutes.workspace(id, workspace), {
-      body: { enabled } satisfies SetPluginWorkspaceRequest
+  async setPluginEnabled(id: PluginId, enabled: boolean): Promise<PluginInfo | null> {
+    const data = await this.send<unknown>("PUT", pluginRoutes.plugin(id), {
+      body: { enabled } satisfies SetPluginEnabledRequest
     });
     return parsePluginActionResult(data, id);
   }
 
-  /** Turn a global plugin on or off for the whole server. Resolves like {@link setPluginWorkspace}. */
-  async setPluginEnabled(id: PluginId, enabled: boolean): Promise<PluginInfo | null> {
+  /**
+   * Choose the engine of a plugin that has several (ts-rust). Resolves like
+   * {@link setPluginEnabled}; 409 where the engine has no build.
+   */
+  async setPluginEngine(id: PluginId, engine: TsCheckerEngine): Promise<PluginInfo | null> {
     const data = await this.send<unknown>("PUT", pluginRoutes.plugin(id), {
-      body: { enabled } satisfies SetPluginEnabledRequest
+      body: { engine } satisfies SetPluginEnabledRequest
     });
     return parsePluginActionResult(data, id);
   }
@@ -391,12 +392,12 @@ export class ApiClient {
     await this.send<unknown>("POST", pluginRoutes.check(id));
   }
 
-  /** Switch back to the previous version (409 without one). Resolves like {@link setPluginWorkspace}. */
+  /** Switch back to the previous version (409 without one). Resolves like {@link setPluginEnabled}. */
   async rollbackPlugin(id: PluginId): Promise<PluginInfo | null> {
     return parsePluginActionResult(await this.send<unknown>("POST", pluginRoutes.rollback(id)), id);
   }
 
-  /** Delete the downloaded versions (409 while a workspace has the plugin on). Resolves like {@link setPluginWorkspace}. */
+  /** Delete the downloaded versions (409 while the plugin is on). Resolves like {@link setPluginEnabled}. */
   async removePluginDownloads(id: PluginId): Promise<PluginInfo | null> {
     return parsePluginActionResult(await this.send<unknown>("DELETE", pluginRoutes.downloads(id)), id);
   }
@@ -1442,14 +1443,9 @@ export class ApiClient {
     return this.send("POST", agentChatRoutes.toolApproval(id, approvalId), { body });
   }
 
-  /** Settings › Agent tools: master switch, toolsets × agents, grants (§9.2). */
+  /** Settings › Agent tools: every grant (§7.6). */
   getAgentTools(signal?: AbortSignal): Promise<AgentToolsResponse> {
     return this.send("GET", agentToolsRoutes.settings, { signal });
-  }
-
-  /** Change the settings; a stale `revision` is 409 `REVISION_MISMATCH`. */
-  updateAgentToolsSettings(body: UpdateAgentToolsSettingsRequest): Promise<AgentToolsResponse> {
-    return this.send("PUT", agentToolsRoutes.updateSettings, { body });
   }
 
   /** Revoke one grant (204; 404 `GRANT_NOT_FOUND` once it is gone). */
@@ -1462,14 +1458,9 @@ export class ApiClient {
     return this.send("DELETE", agentToolsRoutes.grants, threadId ? { query: { threadId } } : {});
   }
 
-  /** One chat's toolsets and grants (the Tools chip). */
+  /** One chat's grants (the Tools chip). */
   getThreadAgentTools(id: string, signal?: AbortSignal): Promise<ThreadAgentToolsResponse> {
     return this.send("GET", agentChatRoutes.agentTools(id), { signal });
-  }
-
-  /** Set or clear (`null` = inherit) a chat's toolset overrides. */
-  updateThreadAgentTools(id: string, body: UpdateThreadAgentToolsRequest): Promise<ThreadAgentToolsResponse> {
-    return this.send("PUT", agentChatRoutes.agentTools(id), { body });
   }
 
   sendSessionInput(id: string, data: string): Promise<void> {

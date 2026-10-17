@@ -1,7 +1,7 @@
 /**
- * The per-thread manifest (unified MCP design 2026-10-15 §9.4, §12.1, spec §14.2.5): tools per
- * toolset and workflow-owned trait, the instruction block, and the deny list per thread (agent,
- * account home, project) — and `request_toolset`'s availability per provider (Task 6 probes).
+ * The per-thread manifest (unified MCP design 2026-10-15 §9.4, §12.1, spec §14.2.5): every chat
+ * tool (none always-Admin for a workflow-owned chat), the instruction block, and the deny list per
+ * thread (agent, account home, project).
  */
 
 import assert from "node:assert/strict";
@@ -13,14 +13,7 @@ import { z } from "zod";
 import { defineTool, READ_ONLY, type AnyOrquesterTool, type Tier, type ToolsetId } from "../mcp/catalog/contract.ts";
 import { catalogFor } from "../mcp/catalog/index.ts";
 import { composeOrquesterInstructions } from "./instructions.ts";
-import {
-  advertisedChatTools,
-  buildSessionToolsManifest,
-  denyFor,
-  SESSION_TOOLS_LIVE_REFRESH,
-  toolsetAvailability,
-  type ManifestThread
-} from "./manifest.ts";
+import { advertisedChatTools, buildSessionToolsManifest, denyFor, type ManifestThread } from "./manifest.ts";
 
 const tool = (name: string, toolset: ToolsetId, tier: Tier | ((args: Record<string, unknown>) => Tier)): AnyOrquesterTool =>
   defineTool({
@@ -65,24 +58,12 @@ const server = (over: Partial<DaemonPointingServer>): DaemonPointingServer => ({
   ...over
 });
 
-test("the advertised tools are the resolved toolsets', in catalog order", () => {
-  assert.deepEqual(advertisedChatTools(CATALOG, new Set(["core", "reads"]), false), ["list_sessions", "list_workflows"]);
-  assert.deepEqual(advertisedChatTools(CATALOG, new Set(["core", "notes", "workflow-authoring"]), false), [
-    "list_sessions",
-    "update_todos",
-    "create_workflow",
-    "update_saved_prompts"
-  ]);
+test("every chat is advertised every chat tool, in catalog order, whatever its group", () => {
+  assert.deepEqual(advertisedChatTools(CATALOG, false), ["list_sessions", "list_workflows", "update_todos", "create_workflow", "update_saved_prompts"]);
 });
 
 test("a workflow-owned chat is advertised no always-Admin tool; per-call tiers stay (the gate refuses their Admin calls)", () => {
-  assert.deepEqual(advertisedChatTools(CATALOG, new Set(["core", "notes", "workflow-authoring"]), true), ["list_sessions", "update_todos", "update_saved_prompts"]);
-});
-
-test("request_toolset is never advertised to a workflow-owned chat (nobody can approve its card there, §5.4)", () => {
-  const chat = catalogFor("chat");
-  assert.ok(advertisedChatTools(chat, new Set(["core"]), false).includes("request_toolset"));
-  assert.ok(!advertisedChatTools(chat, new Set(["core"]), true).includes("request_toolset"));
+  assert.deepEqual(advertisedChatTools(CATALOG, true), ["list_sessions", "list_workflows", "update_todos", "update_saved_prompts"]);
 });
 
 test("deny: the thread's agent, in its own account home or its project — exactly what its CLI loads", () => {
@@ -143,33 +124,26 @@ test("deny: a server every home of the agent loads (Grok's inherited ~/.claude.j
   assert.deepEqual(denyFor(thread({ agentId: "claude", home: "acct-g" }), [inherited]), [], "only the agent it is reported under");
 });
 
-test("the manifest: tools, the composed block, the deny list and the toolsets", () => {
-  const manifest = buildSessionToolsManifest({
-    thread: thread({ workflowOwned: true }),
-    toolsets: ["core", "reads"],
-    agentToolsEnabled: true,
-    catalog: CATALOG,
-    daemonPointing: [server({})]
-  });
-  assert.deepEqual(manifest.tools, ["list_sessions", "list_workflows"]);
+test("the manifest: tools, the composed block and the deny list; no legacy toolsets field", () => {
+  const manifest = buildSessionToolsManifest({ thread: thread({ workflowOwned: true }), catalog: CATALOG, daemonPointing: [server({})] });
+  assert.deepEqual(manifest.tools, ["list_sessions", "list_workflows", "update_todos", "update_saved_prompts"]);
   assert.deepEqual(manifest.deny, ["orquester_remote"]);
-  assert.deepEqual(manifest.toolsets, ["core", "reads"]);
-  // Workflow-owned: the line, and no request_toolset hint (it is refused there, §5.4).
-  assert.equal(manifest.instructions, composeOrquesterInstructions({ enabledToolsets: new Set(["core", "reads"]), workflowOwned: true, canRequestToolsets: false }));
-  assert.doesNotMatch(manifest.instructions, /request_toolset with its id/);
+  assert.equal(manifest.toolsets, undefined);
+  assert.equal(manifest.instructions, composeOrquesterInstructions({ workflowOwned: true }));
 });
 
-test("the production catalog's default chat set is advertised to a fresh chat", () => {
-  const manifest = buildSessionToolsManifest({ thread: thread(), toolsets: ["core", "reads"], agentToolsEnabled: true, catalog: catalogFor("chat"), daemonPointing: [] });
-  assert.deepEqual(
-    manifest.tools,
-    catalogFor("chat").filter((t) => t.toolset === "core" || t.toolset === "reads").map((t) => t.name)
-  );
-  assert.ok(manifest.tools.length > 0);
-});
-
-test("request_toolset's availability: in-session only where the provider re-lists (Claude, probed)", () => {
-  assert.equal(toolsetAvailability("claude"), "now");
-  for (const agent of ["codex", "grok", "opencode", "unknown"]) assert.equal(toolsetAvailability(agent), "after-restart", agent);
-  assert.deepEqual(Object.keys(SESSION_TOOLS_LIVE_REFRESH).sort(), ["claude", "codex", "grok", "opencode"]);
+test("the production catalog: a fresh chat of any agent, with nothing configured, is advertised every chat tool", () => {
+  const chat = catalogFor("chat");
+  for (const agentId of ["claude", "codex", "grok", "opencode"] as const) {
+    const manifest = buildSessionToolsManifest({ thread: thread({ agentId }), catalog: chat, daemonPointing: [] });
+    assert.deepEqual(manifest.tools, chat.map((t) => t.name), agentId);
+  }
+  // Formerly off-by-default groups are in it, and request_toolset is gone.
+  const tools = buildSessionToolsManifest({ thread: thread(), catalog: chat, daemonPointing: [] }).tools;
+  for (const name of ["update_todos", "control_desktop", "create_workflow", "edit_agent_profile", "read_file", "notify_user"]) assert.ok(tools.includes(name), name);
+  assert.ok(!tools.includes("request_toolset"));
+  // A workflow-owned chat: everything but the always-Admin tools.
+  const owned = buildSessionToolsManifest({ thread: thread({ workflowOwned: true }), catalog: chat, daemonPointing: [] }).tools;
+  assert.deepEqual(owned, chat.filter((t) => t.tier !== "admin").map((t) => t.name));
+  assert.ok(owned.includes("update_todos") && !owned.includes("edit_agent_profile"));
 });

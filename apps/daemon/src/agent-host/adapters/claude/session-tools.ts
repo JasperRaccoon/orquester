@@ -18,7 +18,7 @@
  *
  * **The list is the thread's** (its manifest), and it changes IN-SESSION: Claude Code 2.1.285
  * re-lists on `notifications/tools/list_changed` from an in-process server (Task 6 probe), so a
- * toolset turned on mid-chat reaches the model's next request ({@link ClaudeSessionToolsLaunch.names}
+ * new list the daemon pushes mid-chat reaches the model's next request ({@link ClaudeSessionToolsLaunch.names}
  * follows it, for `canUseTool`).
  *
  * Pre-approved in every permission mode: `allowedTools` names each launched

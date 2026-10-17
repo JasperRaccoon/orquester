@@ -50,50 +50,27 @@ async function harness(t: TestContext, contents?: string, opts: { projectExists?
 
 const fullAccess = { callerRuntimeMode: "full-access", workflowOwned: false, threadId: "t1", projectPath: "/w/ws/p", projects: ["/w/ws/p"] };
 
-test("a missing file is the defaults (nothing written); settings view lists every toolset with core locked on", async (t) => {
+const info = { agent: "codex" as const, projectPath: "/w/ws/p", workflowOwned: false };
+
+test("a missing file is the defaults (nothing written); the settings view is the grants alone", async (t) => {
   const h = await harness(t);
-  const view = h.service.settingsView();
-  assert.equal(view.revision, 0);
-  assert.equal(view.enabled, true);
-  assert.deepEqual(view.toolsets.map((ts) => ts.id), ["core", "reads", "notes", "chat-extras", "files-git", "workflow-authoring", "agent-profile-editing", "desktops"]);
-  assert.equal(view.toolsets[0]!.locked, true);
-  assert.deepEqual(view.grants, []);
+  assert.deepEqual(h.service.settingsView(), { grants: [] });
+  assert.deepEqual(h.service.threadView("t1", info), { threadId: "t1", agent: "codex", workflowOwned: false, grants: [] });
   assert.deepEqual(await readdir(h.dir), []);
-  assert.deepEqual(h.service.resolvedToolsets("t1", "claude"), ["core", "reads"]);
 });
 
-test("settings: revision guards the write (409 on a stale one); cells merge and null clears; locked/unknown refused", async (t) => {
-  const h = await harness(t);
-  const next = h.service.updateSettings({ revision: 0, defaults: { notes: { claude: true, codex: true } } });
-  assert.equal(next.revision, 1);
-  assert.equal(next.toolsets.find((ts) => ts.id === "notes")!.defaults.claude, true);
-  assert.deepEqual(h.published.at(-1), { revision: 1 });
-  assert.throws(() => h.service.updateSettings({ revision: 0, enabled: false }), (e: AgentToolsError) => e.status === 409 && e.code === "REVISION_MISMATCH");
-  assert.throws(() => h.service.updateSettings({ revision: 1, defaults: { core: { claude: false } } }), (e: AgentToolsError) => e.code === "TOOLSET_LOCKED");
-  assert.throws(() => h.service.updateSettings({ revision: 1, defaults: { nope: { claude: false } } }), (e: AgentToolsError) => e.code === "INVALID_ARGUMENT");
-  assert.throws(() => h.service.updateSettings({ revision: 1, defaults: { notes: { robot: true } } }), (e: AgentToolsError) => e.code === "INVALID_ARGUMENT");
-  assert.throws(() => h.service.updateSettings({ revision: 1, defaults: { notes: { claude: "yes" } } }), (e: AgentToolsError) => e.code === "INVALID_ARGUMENT");
-  assert.throws(() => h.service.updateSettings({ revision: 1, extra: 1 }), (e: AgentToolsError) => e.code === "INVALID_ARGUMENT");
-  const cleared = h.service.updateSettings({ revision: 1, enabled: false, defaults: { notes: { codex: null } } });
-  assert.equal(cleared.enabled, false);
-  assert.deepEqual(h.service.resolvedToolsets("t1", "claude"), ["core"], "master switch off: only core");
-  const disk = await h.disk();
-  assert.deepEqual((disk.toolsets as { defaults: unknown }).defaults, { notes: { claude: true } });
-  assert.equal(disk.revision, 2);
-});
-
-test("store tolerance: unknown keys, toolsets, agents and grant families survive a rewrite; unreadable grants are kept but never honoured", async (t) => {
+test("an older build's file: its toolset switches are never read and survive every rewrite untouched; grants work beside them", async (t) => {
   const raw = {
     version: 1,
     revision: 7,
-    enabled: true,
+    enabled: false,
     futureTopLevel: { keep: true },
     toolsets: {
       defaults: { notes: { claude: true, robot: true }, "future-toolset": { claude: true } },
-      threads: { t1: { "workflow-authoring": true, "future-toolset": false } },
+      threads: { t1: { "workflow-authoring": true, "future-toolset": false }, t2: { notes: false } },
       futureMatrix: 1
     },
-    toolsetDeclines: {},
+    toolsetDeclines: { t1: { desktops: "2026-10-15T09:50:00.000Z" } },
     grants: [
       { id: "g-old", family: "desktops", scope: "project", projectPath: "/w/ws/p", createdAt: "2026-10-01T00:00:00.000Z", futureField: "x" },
       { id: "g-new", family: "future-family", scope: "chat", projectPath: "/w/ws/p", threadId: "t1", createdAt: "2026-10-01T00:00:00.000Z" },
@@ -101,26 +78,28 @@ test("store tolerance: unknown keys, toolsets, agents and grant families survive
     ]
   };
   const h = await harness(t, JSON.stringify(raw));
-  h.service.updateThreadToolsets("t1", { toolsets: { notes: true } }, { agent: "claude", projectPath: "/w/ws/p", workflowOwned: false });
-  const disk = await h.disk();
-  assert.deepEqual(disk.futureTopLevel, { keep: true });
-  assert.deepEqual((disk.toolsets as Record<string, unknown>).futureMatrix, 1);
-  assert.deepEqual((disk.toolsets as { defaults: unknown }).defaults, raw.toolsets.defaults);
-  assert.deepEqual((disk.toolsets as { threads: unknown }).threads, { t1: { "workflow-authoring": true, "future-toolset": false, notes: true } });
-  assert.deepEqual(disk.grants, raw.grants);
-  assert.equal(h.service.findGrant({ ...fullAccess, family: "future-family" }), null);
+  // The view shows grants only — no revision, switch or matrix — and the master switch being off changes nothing.
+  assert.deepEqual(Object.keys(h.service.settingsView()), ["grants"]);
   assert.equal(h.service.findGrant({ ...fullAccess, family: "desktops" })?.id, "g-old");
+  assert.equal(h.service.findGrant({ ...fullAccess, family: "future-family" }), null);
+  const added = h.service.addGrant({ family: "desktops", scope: "chat", projectPath: "/w/ws/p", threadId: "t3" });
+  assert.deepEqual(h.published.at(-1), { threadId: "t3" });
+  const disk = await h.disk();
+  for (const key of ["revision", "enabled", "futureTopLevel", "toolsets", "toolsetDeclines"] as const) assert.deepEqual(disk[key], raw[key], key);
+  assert.deepEqual((disk.grants as { id: unknown }[]).map((g) => g.id), ["g-old", "g-new", added, 42]);
+  // A grant's unknown field is kept (its use above stamped `lastUsedAt`).
+  assert.deepEqual((disk.grants as unknown[])[0], { ...raw.grants[0], lastUsedAt: new Date(NOW).toISOString() });
 });
 
 test("a corrupt file is moved aside: defaults apply and no grant is honoured (fail closed)", async (t) => {
-  const h = await harness(t, '{"version": 1, "grants": [{"id":"g1","family":"desktops","scope":"project","projectPath":"/w/ws/p","createdAt":"x"}], "toolsets": [] }');
+  const h = await harness(t, '{"version": 1, "grants": {"id":"g1"} }');
   const files = await readdir(h.dir);
   assert.ok(files.some((f) => f.startsWith("agent-tools.json.corrupt-")), files.join());
   assert.equal(h.service.findGrant({ ...fullAccess, family: "desktops" }), null);
   assert.ok(h.warnings.length > 0);
   // The store works from the defaults on.
-  h.service.updateSettings({ revision: 0, enabled: true });
-  assert.equal((await h.disk()).revision, 1);
+  h.service.addGrant({ family: "desktops", scope: "chat", projectPath: "/w/ws/p", threadId: "t1" });
+  assert.equal(((await h.disk()).grants as unknown[]).length, 1);
   // Bad JSON and another version too.
   const bad = await harness(t, "{nope");
   assert.ok((await readdir(bad.dir)).some((f) => f.includes(".corrupt-")));
@@ -136,41 +115,9 @@ test("an unreadable file makes the store read-only: no grants, every mutation 50
   await service.load();
   assert.equal(service.isReadOnly(), true);
   assert.equal(service.findGrant({ ...fullAccess, family: "desktops" }), null);
-  assert.throws(() => service.updateSettings({ revision: 0, enabled: false }), (e: AgentToolsError) => e.status === 503);
+  assert.throws(() => service.addGrant({ family: "desktops", scope: "chat", projectPath: "/w/ws/p", threadId: "t1" }), (e: AgentToolsError) => e.status === 503);
   await chmod(h0.file, 0o600);
   assert.equal(JSON.parse(await readFile(h0.file, "utf8")).grants.length, 1, "untouched");
-});
-
-test("chat toolsets: overrides set and cleared, locked/unknown refused, toolsetsChanged fired, view resolves and reports declines", async (t) => {
-  const h = await harness(t);
-  const info = { agent: "codex" as const, projectPath: "/w/ws/p", workflowOwned: false };
-  const changed: (string | null)[] = [];
-  h.service.onToolsetsChanged((id) => changed.push(id));
-  let view = h.service.updateThreadToolsets("t1", { toolsets: { "workflow-authoring": true, reads: false } }, info);
-  assert.deepEqual(view.overrides, { "workflow-authoring": true, reads: false });
-  assert.deepEqual(view.resolved, ["core", "workflow-authoring"]);
-  assert.deepEqual(changed, [], "listeners run asynchronously, never inside the write");
-  await Promise.resolve();
-  assert.deepEqual(changed, ["t1"]);
-  assert.deepEqual(h.published.at(-1), { revision: 0, threadId: "t1" });
-  assert.throws(() => h.service.updateThreadToolsets("t1", { toolsets: { core: false } }, info), (e: AgentToolsError) => e.code === "TOOLSET_LOCKED");
-  assert.throws(() => h.service.updateThreadToolsets("t1", { toolsets: { bogus: true } }, info), (e: AgentToolsError) => e.code === "INVALID_ARGUMENT");
-  assert.throws(() => h.service.updateThreadToolsets("t1", { toolsets: { notes: 1 } }, info), (e: AgentToolsError) => e.code === "INVALID_ARGUMENT");
-  view = h.service.updateThreadToolsets("t1", { toolsets: { reads: null } }, info);
-  assert.deepEqual(view.overrides, { "workflow-authoring": true });
-  assert.equal(view.appliesAtNextIdle, false, "nothing reported as advertised");
-  h.service.setAdvertisedToolsets(() => ["core", "reads"]);
-  assert.equal(h.service.threadView("t1", info).appliesAtNextIdle, true);
-  // Declines: 30 minutes.
-  const until = h.service.recordToolsetDecline("t1", "desktops");
-  assert.equal(until, new Date(NOW + 30 * 60 * 1000).toISOString());
-  assert.deepEqual(h.service.threadView("t1", info).declines, { desktops: until });
-  h.advance(30 * 60 * 1000);
-  assert.equal(h.service.toolsetDeclinedUntil("t1", "desktops"), null);
-  // A settings change reaches every chat.
-  h.service.updateSettings({ revision: 0, defaults: { notes: { codex: true } } });
-  await Promise.resolve();
-  assert.deepEqual(changed, ["t1", "t1", null]);
 });
 
 test("grants: full-access only; lastUsedAt stamped; revocation effective for the next call; workflows ids appended", async (t) => {
@@ -206,18 +153,27 @@ test("grants: full-access only; lastUsedAt stamped; revocation effective for the
   assert.equal(h.service.revokeGrants(), 1, "Revoke all");
 });
 
-test("a closed chat's overrides, declines and chat grants are deleted; project grants stay", async (t) => {
-  let exists = true;
-  const h = await harness(t, undefined, { projectExists: () => exists });
-  h.service.updateThreadToolsets("t1", { toolsets: { notes: true } }, { agent: "claude", projectPath: "/w/ws/p", workflowOwned: false });
-  h.service.recordToolsetDecline("t1", "desktops");
+test("a closed chat's chat grants and legacy rows are deleted; project grants and other chats' rows stay", async (t) => {
+  const h = await harness(
+    t,
+    JSON.stringify({
+      version: 1,
+      toolsets: { threads: { t1: { notes: true }, t2: { notes: false } } },
+      toolsetDeclines: { t1: { desktops: "2026-10-15T09:50:00.000Z" } },
+      grants: []
+    })
+  );
   h.service.addGrant({ family: "desktops", scope: "chat", projectPath: "/w/ws/p", threadId: "t1" });
   const project = h.service.addGrant({ family: "desktops", scope: "project", projectPath: "/w/ws/p", threadId: "t1" });
   h.service.removeThread("t1");
   const disk = await h.disk();
-  assert.deepEqual((disk.toolsets as { threads: unknown }).threads, {});
+  assert.deepEqual((disk.toolsets as { threads: unknown }).threads, { t2: { notes: false } });
   assert.deepEqual(disk.toolsetDeclines, {});
   assert.deepEqual((disk.grants as { id: string }[]).map((g) => g.id), [project]);
+  // Nothing of the chat left: no write, no event.
+  const published = h.published.length;
+  h.service.removeThread("t1");
+  assert.equal(h.published.length, published);
 });
 
 test("a missing project's grants are pruned only after repeated misses over time, never by a read", async (t) => {
@@ -247,8 +203,7 @@ test("a missing project's grants are pruned only after repeated misses over time
 
 test("writes are serialized: the last write carries the last state", async (t) => {
   const h = await harness(t);
-  for (let i = 0; i < 20; i += 1) h.service.updateSettings({ revision: i, enabled: i % 2 === 0 });
+  for (let i = 0; i < 20; i += 1) h.service.addGrant({ family: "desktops", scope: "chat", projectPath: "/w/ws/p", threadId: `t${i}` });
   const disk = await h.disk();
-  assert.equal(disk.revision, 20);
-  assert.equal(disk.enabled, false);
+  assert.equal((disk.grants as unknown[]).length, 20);
 });

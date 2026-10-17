@@ -1,6 +1,6 @@
 /**
- * An Orquester approval card in the banner dock (unified MCP §7.1, §9.3): an agent's Admin call,
- * a call across a project boundary, or `request_toolset`. Provider-agnostic: the daemon composed
+ * An Orquester approval card in the banner dock (unified MCP §7.1): an agent's Admin call or a
+ * call across a project boundary (or, from an older daemon, its `request_toolset`). Provider-agnostic: the daemon composed
  * everything on it from the call's structured arguments, and `parseToolApprovalSummary` sanitised
  * it before it reached state — every agent-derived string renders as plain text.
  *

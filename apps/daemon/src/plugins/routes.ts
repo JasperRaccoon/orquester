@@ -4,26 +4,26 @@ import {
   type PluginInfo,
   type PluginsResponse,
   type SetPluginEnabledRequest,
-  type SetPluginWorkspaceRequest,
+  TS_RUST_PLUGIN_ID,
   isPluginId,
+  isTsCheckerEngine,
   pluginRoutes
 } from "@orquester/api";
-import { isValidName } from "@orquester/config";
 import { PluginsError, type PluginsService } from "./plugins-service.ts";
 
 /** The service surface the routes use. */
 export type PluginRoutesService = Pick<
   PluginsService,
-  "list" | "hasWorkspace" | "setWorkspaceEnabled" | "setEnabled" | "checkNow" | "rollback" | "removeDownloads"
+  "list" | "update" | "checkNow" | "rollback" | "removeDownloads"
 >;
 
 /**
  * Settings → Plugins (spec §5.3), on both transports: the bearer hook gates the
  * remote one, and nothing here returns a secret. `:id` must be a built-in
- * plugin (404), `:workspace` a valid name (400) of an existing workspace
- * directory (404). A global plugin is switched by `PUT /:id`, a workspace one
- * by `PUT /:id/workspaces/:workspace` (the other answers 409 `PLUGIN_SCOPE`);
- * the version routes answer 409 `PLUGIN_BUNDLED` for a plugin with no updates. Refusals are `{ code, message }`. Progress of a check goes
+ * plugin (404). Every plugin is switched for the whole server by `PUT /:id`,
+ * which also chooses ts-rust's engine (`{ enabled?, engine? }`, at least one);
+ * the version routes answer 409 `PLUGIN_BUNDLED` for a plugin with no updates.
+ * Refusals are `{ code, message }`. Progress of a check goes
  * out as `plugins.changed` events (a check answers 202 with no body); the other
  * mutating routes answer the plugin's `PluginInfo` as it stands. The paths are
  * `pluginRoutes`' with fastify params in place of its encoded segments.
@@ -39,38 +39,23 @@ export function registerPluginRoutes(app: FastifyInstance, deps: { plugins: Plug
     }
   });
 
-  app.put<{ Params: { id: string; workspace: string }; Body: SetPluginWorkspaceRequest }>(
-    `${pluginRoutes.list}/:id/workspaces/:workspace`,
-    async (request, reply): Promise<PluginInfo | FastifyReply> => {
-      const { id, workspace } = request.params;
-      if (!isPluginId(id)) return notFound(reply, id);
-      if (!isValidName(workspace)) {
-        return reply.code(400).send({ code: "INVALID_NAME", message: "Invalid workspace name." });
-      }
-      if (typeof request.body?.enabled !== "boolean") {
-        return reply.code(400).send({ code: "INVALID_REQUEST", message: "`enabled` must be a boolean." });
-      }
-      try {
-        if (!(await plugins.hasWorkspace(workspace))) {
-          return reply.code(404).send({ code: "WORKSPACE_NOT_FOUND", message: `Workspace "${workspace}" does not exist.` });
-        }
-        return await plugins.setWorkspaceEnabled(id, workspace, request.body.enabled);
-      } catch (error) {
-        return sendError(reply, error);
-      }
-    }
-  );
-
   app.put<{ Params: { id: string }; Body: SetPluginEnabledRequest }>(
     `${pluginRoutes.list}/:id`,
     async (request, reply): Promise<PluginInfo | FastifyReply> => {
       const { id } = request.params;
       if (!isPluginId(id)) return notFound(reply, id);
-      if (typeof request.body?.enabled !== "boolean") {
-        return reply.code(400).send({ code: "INVALID_REQUEST", message: "`enabled` must be a boolean." });
-      }
+      const body = (typeof request.body === "object" && request.body !== null ? request.body : {}) as Record<string, unknown>;
+      const { enabled, engine } = body;
+      const invalid = (message: string) => reply.code(400).send({ code: "INVALID_REQUEST", message });
+      if (enabled !== undefined && typeof enabled !== "boolean") return invalid("`enabled` must be a boolean.");
+      if (engine !== undefined && !isTsCheckerEngine(engine)) return invalid('`engine` must be "tsrs" or "tsc-rs".');
+      if (enabled === undefined && engine === undefined) return invalid("Send `enabled`, `engine` or both.");
+      if (engine !== undefined && id !== TS_RUST_PLUGIN_ID) return invalid("This plugin has no engine to choose.");
+      const change: SetPluginEnabledRequest = {};
+      if (typeof enabled === "boolean") change.enabled = enabled;
+      if (isTsCheckerEngine(engine)) change.engine = engine;
       try {
-        return await plugins.setEnabled(id, request.body.enabled);
+        return await plugins.update(id, change);
       } catch (error) {
         return sendError(reply, error);
       }

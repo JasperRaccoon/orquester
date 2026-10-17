@@ -141,7 +141,7 @@ export const LEGACY_CHAT_TOOL_NAMES: readonly string[] = Object.keys(LEGACY_CHAT
 
 /**
  * The legacy name as a catalog tool running `target` with the mapped arguments: tier, family,
- * scope, preview and run are the target's — so the gate, cards, turn policy and toolset check judge
+ * scope, preview and run are the target's — so the gate, cards and turn policy judge
  * the call exactly as they judge the target.
  */
 export function aliasTool(name: string, alias: LegacyChatToolAlias, target: AnyOrquesterTool): AnyOrquesterTool {

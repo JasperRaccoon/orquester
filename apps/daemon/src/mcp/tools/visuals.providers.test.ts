@@ -93,7 +93,7 @@ async function toolResults(): Promise<{ render: CallToolResult; preview: CallToo
     runtimeMode: "approval-required", planning: false, workflowOwned: false, exchange: null
   };
   const env = { caller, api, signal: new AbortController().signal };
-  const deps = { approvals: null, enabledToolsets: async () => new Set(["core"]) };
+  const deps = { approvals: null };
   const render = await executeToolCall(deps, { name: "html_render", arguments: RENDER_ARGS }, env);
   const preview = await executeToolCall(deps, { name: "html_preview", arguments: PREVIEW_ARGS }, env);
   assert.equal(render.isError, undefined);

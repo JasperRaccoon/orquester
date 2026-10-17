@@ -429,7 +429,7 @@ export class ClaudeSession {
     }
     const sessionTools = this.options.context.sessionTools;
     // The thread's manifest (unified MCP §9.4): its tools, instruction block and MCP denials; a
-    // toolset turned on later reaches this session in-session (`session-tools.ts`).
+    // new list the daemon pushes later reaches this session in-session (`session-tools.ts`).
     const toolsLaunch =
       sessionTools !== undefined
         ? await createClaudeSessionToolsLaunch({

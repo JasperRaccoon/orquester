@@ -1044,7 +1044,7 @@ describe("orchestrator — session restart policy (§3.4)", () => {
     await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
     await host.settle();
     assert.notEqual(host.orchestrator.threadContext(threadId)?.session?.activeTurnId ?? null, null, "the turn runs");
-    // The toolsets changed while the turn runs (request_toolset): a steer must not kill the turn.
+    // The daemon pushed a new tool list while the turn runs: a steer must not kill the turn.
     stale = true;
     await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "steer" });
     await host.settle();

@@ -257,7 +257,7 @@ test("request_secret over the socket: the answer reaches the call; the host's ca
   assert.deepEqual(secretRequests.list("thread-a"), []);
 });
 
-test("the caller is built from the thread's tab and snapshot: title, mode, planning, exchange, workflow-owned; toolsets gate the call", async (t) => {
+test("the caller is built from the thread's tab and snapshot: title, mode, planning, exchange, workflow-owned; a tool of any group runs", async (t) => {
   const whoami = defineTool({
     name: "whoami", title: "Who am I", description: "d", input: {}, audiences: ["chat"], toolset: "core", tier: "read",
     scope: async () => ({ projects: [], sessions: [], reads: "none", writes: false, causesTurnIn: [] }),
@@ -270,7 +270,7 @@ test("the caller is built from the thread's tab and snapshot: title, mode, plann
   const notes = defineTool({
     name: "notes_only", title: "Notes", description: "d", input: { x: z.string().optional() }, audiences: ["chat"], toolset: "notes", tier: "read",
     scope: async () => ({ projects: [], sessions: [], reads: "none", writes: false, causesTurnIn: [] }),
-    annotations: READ_ONLY, resultKind: "json", run: async () => ({})
+    annotations: READ_ONLY, resultKind: "json", run: async () => ({ ran: true })
   });
   const api = new FakeDaemonApi()
     .on("GET", "/api/sessions", {
@@ -300,8 +300,7 @@ test("the caller is built from the thread's tab and snapshot: title, mode, plann
     authorizeHost: (authorization) => authorization === agentHostAuthValue(TOKEN),
     resolveThread: (threadId) => THREADS[threadId] ?? null,
     api: () => api,
-    lookup: (name) => tools.get(name),
-    enabledToolsets: async () => new Set(["core"])
+    lookup: (name) => tools.get(name)
   });
   await app.listen({ path: socketPath });
   t.after(async () => {
@@ -324,9 +323,10 @@ test("the caller is built from the thread's tab and snapshot: title, mode, plann
     workflowOwned: true,
     exchange: { id: "ex-9", hop: 2 }
   });
-  const off = await forward({ threadId: "thread-a", callId: "c", name: "notes_only", arguments: {} }, new AbortController().signal);
-  assert.equal(off.isError, true);
-  assert.match(textOf(off), /^TOOL_NOT_ENABLED: .*request_toolset/);
+  // A `notes` tool (a group once off by default) runs: no per-chat tool switch exists.
+  const notesCall = await forward({ threadId: "thread-a", callId: "c", name: "notes_only", arguments: {} }, new AbortController().signal);
+  assert.notEqual(notesCall.isError, true, textOf(notesCall));
+  assert.deepEqual(notesCall.structuredContent, { ran: true });
 });
 
 test("a session-tool call builds its caller from the thread's HEAD, never its snapshot", async () => {

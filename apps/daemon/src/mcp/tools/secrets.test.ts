@@ -46,7 +46,7 @@ const call = (
   opts: { secretRequests?: SessionSecretRequests; signal?: AbortSignal; caller?: ToolCaller } = {}
 ): Promise<CallToolResult> =>
   executeToolCall(
-    { approvals: null, enabledToolsets: async () => new Set(["core"]), ...(opts.secretRequests ? { secretRequests: opts.secretRequests } : {}) },
+    { approvals: null, ...(opts.secretRequests ? { secretRequests: opts.secretRequests } : {}) },
     { name: "request_secret", arguments: args },
     { caller: opts.caller ?? chatCaller(), api: {} as DaemonApi, signal: opts.signal ?? new AbortController().signal }
   );

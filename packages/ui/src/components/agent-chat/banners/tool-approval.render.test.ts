@@ -155,7 +155,7 @@ test("the footer counts down to expiry; an expired card cannot be approved", () 
   assert.match(expired, /<button\b[^>]*disabled=""[^>]*data-approve=""/);
 });
 
-test("a toolset card offers Enable for this chat / Deny", () => {
+test("an older daemon's toolset card still renders: Enable for this chat / Deny", () => {
   const html = render({
     card: card({
       tool: "request_toolset",

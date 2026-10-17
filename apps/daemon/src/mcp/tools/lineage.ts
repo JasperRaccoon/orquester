@@ -73,7 +73,7 @@ export const forkSessionTool = defineTool({
   name: "fork_session",
   title: "Fork a chat session",
   description:
-    "Fork a chat (the GUI's 'Fork from here'): a new tab, same project, agent and settings, whose conversation is the original's through turn `throughTurn` (transcript numbers; default: the latest finished turn) or up to `messageId`. Grok's fork is handed the transcript (`strategy`). The fork starts idle: send_message it work; it returns its result with merge_back_session.",
+    "Fork a chat into a new idle tab (same project, agent, settings) holding its conversation through `throughTurn` (transcript numbers; default: the latest finished turn) or up to `messageId`. Grok forks are handed the transcript (`strategy`). send_message the fork work; it returns its result with merge_back_session.",
   chatNote: "Default: this chat (your running turn is not included).",
   input: {
     sessionId: catalogSessionId.optional(),
@@ -157,7 +157,7 @@ export const mergeBackSessionTool = defineTool({
   name: "merge_back_session",
   title: "Merge a fork back",
   description:
-    "A fork's result to the chat it was forked from, marked as the fork's: `text` (from outside the fork, default: its final reply), sent at once to an idle chat, else queued (`delivery: \"queued\"`). Forks only: delegated and opened chats' final replies go back by themselves. `mergeId` + `action` deliver now or discard a queued delivery (get_session's pendingDeliveries), as its receiver or sender.",
+    "Send a fork's result to the chat it was forked from, marked as the fork's: `text` (called from outside the fork, default: its final reply); queued (`delivery: \"queued\"`) unless that chat is idle. Forks only: delegated and opened chats report back by themselves. `mergeId` + `action`: deliver now or discard a queued delivery (get_session pendingDeliveries), as receiver or sender.",
   chatNote: "Default: this chat, the fork; put your whole result in `text`.",
   input: {
     sessionId: catalogSessionId.optional(),

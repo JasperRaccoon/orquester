@@ -96,6 +96,7 @@
 - Run `pnpm check` before committing; it typechecks every workspace and is the pre-commit gate.
 - Run `pnpm test` for code behavior changes; it runs each package's tests and check scripts.
 - During development, use `pnpm --filter @orquester/daemon test` or the relevant package filter for focused tests.
+- Test scripts run one package at a time and at most 4 test files at once; set `ORQUESTER_TEST_CONCURRENCY` to change the per-package cap.
 - Run `pnpm build` when a change affects emitted web, desktop, or public assets.
 - Run a targeted manual or browser check only when it can use an existing safe surface.
 - Record any verification that cannot run and the reason in the final report.

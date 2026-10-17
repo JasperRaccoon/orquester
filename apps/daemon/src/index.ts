@@ -124,7 +124,7 @@ import { executorPorts } from "./mcp/executor.ts";
 import { agentHostRoutes, SESSION_TOOLS_REFRESH_TIMEOUT_MS, type SessionToolsRefreshResponse } from "./agent-host/host-protocol.ts";
 import { catalogFor } from "./mcp/catalog/index.ts";
 import { canonicalProjectPath } from "./agent-tools/approval-port.ts";
-import { registerSessionToolsManifestRoute, SessionToolsRefresher } from "./session-tools/toolset-refresh.ts";
+import { registerSessionToolsManifestRoute, SessionToolsRefresher } from "./session-tools/session-tools-refresh.ts";
 import { AGENT_PROFILE_CHANNEL } from "@orquester/api";
 // umcp:t6 end
 // umcp:t9 begin
@@ -687,7 +687,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     logger: console
   });
   await savedPrompts.load();
-  // Built-in plugins (Settings → Plugins; plugins spec §4–5): plugins.json, the tsc-rs install and
+  // Built-in plugins (Settings → Plugins; plugins spec §4–5): plugins.json, the TypeScript engine install and
   // its hourly update check, and the preload new sessions load through NODE_OPTIONS. Started before
   // any transport serves or any chat or workflow run starts, so new sessions already see the
   // preload; its update checks run in the background.
@@ -1188,8 +1188,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   };
   // umcp:t3 begin
   // Orquester approval cards (memory only; a journal of open ids resolves a crash's leftovers as
-  // cancelled) and `agent-tools.json` (settings, chat toolsets, declines, grants). A pending card
-  // is pending user input like a secret card; a closed chat's cards, overrides and chat grants go.
+  // cancelled) and `agent-tools.json` (the grants). A pending card is pending user input like a
+  // secret card; a closed chat's cards and chat grants go.
   const agentToolsRuntime = createAgentToolsRuntime({
     baseDir: paths.baseDir,
     publish: (channel, type, payload) => broadcaster.publish(channel, type, payload),
@@ -1209,20 +1209,16 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     if (!rolledBack) agentToolsRuntime.threadClosed(id);
   });
   services.agentToolsRuntime = agentToolsRuntime;
-  // The catalog executor (both transports) asks THIS port for cards and grants, and resolves a
-  // chat's toolsets from the same store. Before this runs no transport serves yet; after the
-  // disconnect at stop, cards are refused and chats get the locked toolsets only. `onToolsetsChanged`
-  // listeners run after a toolset card settles but BEFORE the awaiting call resumes: schedule
-  // restarts for the next idle point (Task 6).
+  // The catalog executor (both transports) asks THIS port for cards and grants. Before this runs
+  // no transport serves yet; after the disconnect at stop, cards are refused. Every chat tool is on
+  // in every chat: there are no toolsets to resolve.
   const disconnectExecutor = connectExecutor(agentToolsRuntime, executorPorts);
   // umcp:t3 end
   // umcp:t6 begin
-  // The chat transport (unified MCP design 2026-10-15 §9.3, §9.4, §12.1): per-thread manifests for
-  // the agent host, toolset changes pushed to it (applied in-session where the provider re-lists,
-  // else at the chat's next idle point), and the automatic continue turn after an approved
-  // `request_toolset` card. `onToolsetsChanged` runs before the awaiting call resumes: the listener
-  // only STARTS the push; the call awaits the host's answer (bounded) through
-  // `executorPorts.onToolsetApproved`, so it reports "now" / "after-restart" truthfully.
+  // The chat transport (unified MCP design 2026-10-15 §9.4, §12.1): per-thread manifests for the
+  // agent host (every chat tool; no always-Admin one for a workflow-owned chat), pushed to it when a
+  // refused launch's denials become known (applied in-session where the provider re-lists, else at
+  // the chat's next idle point).
   const sessionToolsRefresher = new SessionToolsRefresher({
     thread: (id) => {
       const tab = agentChat.chat.get(id);
@@ -1238,8 +1234,6 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
       };
     },
     openThreads: () => agentChat.chat.list().map((tab) => tab.id),
-    resolvedToolsets: (id, agent) => agentToolsRuntime.tools.resolvedToolsets(id, agent),
-    agentToolsEnabled: () => agentToolsRuntime.tools.snapshot().enabled,
     catalog: () => catalogFor("chat"),
     api: () => services.internalApi,
     pushToHost: async (id, manifest): Promise<SessionToolsRefreshResponse | null> => {
@@ -1255,9 +1249,6 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     },
     logger: console
   });
-  agentToolsRuntime.tools.setAdvertisedToolsets((id) => sessionToolsRefresher.advertisedToolsets(id));
-  const offToolsetsChanged = agentToolsRuntime.tools.onToolsetsChanged((id) => sessionToolsRefresher.toolsetsChanged(id));
-  executorPorts.onToolsetApproved = (caller, toolset, signal) => sessionToolsRefresher.toolsetApproved(caller, toolset, signal);
   agentChat.chat.lifecycle.on("closed", ({ id }: { id: string }) => sessionToolsRefresher.forget(id));
   // A changed MCP server config (agent profile) is read afresh by the next manifest.
   const agentProfileSink = {
@@ -1331,6 +1322,11 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   });
 
   lineage.attachApi(services.internalApi);
+  // umcp:t6 — every chat tool is on in every chat: a provider session the host kept across this
+  // boot (launched by an older build, with fewer tools) is handed the current manifest once. The
+  // host answers `unchanged` for an equal list, else applies it in-session or at the chat's next
+  // idle point (never under a running turn). Best effort.
+  void sessionToolsRefresher.refresh(null).catch((error) => console.warn("session-tools: boot refresh failed", error instanceof Error ? error.message : String(error)));
 
   /**
    * Attach the workflow engine: after `agentChat.init()` (above — a resumed agent block re-enters
@@ -1424,15 +1420,13 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     await lineage.stop();
     // umcp:t3 begin
     // Disconnect FIRST, while the transports may still serve: new calls get no card or grant
-    // (PERMISSION_DENIED) and the locked toolsets only. Then pending cards end `cancelled`
+    // (PERMISSION_DENIED). Then pending cards end `cancelled`
     // ("restarting"), and a call already past the port lookup is cancelled the same way.
     disconnectExecutor();
     await agentToolsRuntime.shutdown().catch((error) => console.error("Agent tools stop failed", error));
     // umcp:t3 end
     // umcp:t6 begin
-    offToolsetsChanged();
     broadcaster.remove(agentProfileSink);
-    executorPorts.onToolsetApproved = null;
     sessionToolsRefresher.stop();
     // umcp:t6 end
     await htmlPreview.stop();
@@ -1503,7 +1497,7 @@ interface Services {
   recentProjects: RecentProjectsService;
   /** Daemon-owned saved-prompt library (the right rail), shared by every client. */
   savedPrompts: SavedPromptsService;
-  /** Built-in plugins (Settings → Plugins): plugins.json, the tsc-rs install, the session preload. */
+  /** Built-in plugins (Settings → Plugins): plugins.json, the TypeScript engine (tsrs or tsc-rs) install, the session preload. */
   plugins: PluginsService;
   /** Each agent CLI's own global config (agent profile spec §4): the right rail's Agent profile. */
   agentProfile: AgentProfileService;
@@ -1532,11 +1526,11 @@ interface Services {
   /** Pending `request_secret` cards, memory only (optional: route-level tests build a partial `services`). */
   secretRequests?: SecretRequestRegistry;
   // umcp:t3 begin
-  /** Approval cards, agent-tools settings, chat toolsets and grants (unified MCP §7, §9). Optional: route tests build a partial `services`. */
+  /** Approval cards and their grants (unified MCP §7, §9.6). Optional: route tests build a partial `services`. */
   agentToolsRuntime?: AgentToolsRuntime;
   // umcp:t3 end
   // umcp:t6 begin
-  /** The chat transport's manifests, toolset refreshes and automatic continue turns (unified MCP §9.3, §9.4). Optional: route tests build a partial `services`. */
+  /** The chat transport's manifests and manifest pushes (unified MCP §9.4). Optional: route tests build a partial `services`. */
   sessionToolsRefresher?: SessionToolsRefresher;
   // umcp:t6 end
   usage: UsageService;
@@ -1805,7 +1799,7 @@ export function createServer(
       : resolved.workspacesDir;
     resolved.logsDir = expandVars(merged.logsDir, resolved.vars);
     await mkdir(resolved.workspacesDir, { recursive: true }).catch(() => undefined);
-    // The tsc-rs preload has the workspaces root baked in: rewrite it for the new one.
+    // The TypeScript engine preload has the workspaces root baked in: rewrite it for the new one.
     void services.plugins.workspacesChanged();
     void services.reloadHttp?.();
 
@@ -1880,9 +1874,9 @@ export function createServer(
   }
 
   // A directory created, renamed or deleted directly under the workspaces root is a workspace
-  // change: the plugins service re-decides which of its enabled workspaces exist (the session
-  // preload, its timer, a first install, a broadcast). `parentDir` is a realpath. Optional
-  // chaining here and in the workspace routes: their route tests stub `services` without plugins.
+  // change: the plugins service re-checks the workspaces root its preload has baked in (only a
+  // root move changes anything; plugins are on for the whole server). `parentDir` is a realpath.
+  // Optional chaining here and in the workspace routes: their route tests stub `services` without plugins.
   const notifyWorkspacesChanged = async (parentDir: string): Promise<void> => {
     const root = await realpath(resolved.workspacesDir).catch(() => resolve(resolved.workspacesDir));
     if (parentDir === root) {
@@ -4674,7 +4668,7 @@ export function createServer(
   // umcp:t6 end
 
   // umcp:t2 begin — both transports of the unified catalog (design 2026-10-15 §3.3), through ONE
-  // executor whose ports (`executorPorts`: approvals, toolsets) the umcp:t3 block wires.
+  // executor whose port (`executorPorts.approvals`) the umcp:t3 block wires.
   // Session tools (design 2026-10-14 §1.1) — the agent host's call-back
   // route, SOCKET-ONLY: never on remote HTTP. It also requires the host's
   // own bearer, and derives the caller from the thread's tab record and

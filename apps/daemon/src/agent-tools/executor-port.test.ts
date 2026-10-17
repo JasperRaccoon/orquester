@@ -1,7 +1,6 @@
 /**
  * The production wiring of approvals (unified MCP design 2026-10-15 §3.3, §7, §9.3), end to end:
- * the catalog executor reaches the REAL `AgentToolsApprovalPort` and toolsets through
- * `connectExecutor` (what `index.ts` calls), the card opens in the real registry, a person answers
+ * the catalog executor reaches the REAL `AgentToolsApprovalPort` through `connectExecutor` (what `index.ts` calls), the card opens in the real registry, a person answers
  * it there, and the call runs, is refused, or is covered by the grant the answer made. Event-driven
  * (the registry's `opened` publish), no sleeps.
  */
@@ -19,7 +18,7 @@ import { defineTool, MUTATING, type AnyOrquesterTool, type CallContext, type Sco
 import { executeToolCall, executorPorts } from "../mcp/executor.ts";
 import { head, snapshot } from "../mcp/fixtures.ts";
 import { FakeDaemonApi } from "../mcp/testing.ts";
-import { connectExecutor, createAgentToolsRuntime, lockedToolsetsOnly } from "./approval-port.ts";
+import { connectExecutor, createAgentToolsRuntime } from "./approval-port.ts";
 
 const ROOT = realpathSync(mkdtempSync(join(tmpdir(), "umcp-exec-port-")));
 const WS = join(ROOT, "w");
@@ -34,7 +33,6 @@ async function rig(t: TestContext) {
   // Each opened card's id, in order; a waiter for the next one.
   const opened: string[] = [];
   const waiters: ((id: string) => void)[] = [];
-  const order: string[] = [];
   const api = new FakeDaemonApi().on("GET", agentChatRoutes.thread("me"), {
     status: 200,
     body: { kind: "snapshot", thread: snapshot({ head: head({ id: "me", runtimeMode: "full-access" }) }) }
@@ -113,16 +111,6 @@ async function rig(t: TestContext) {
       name: "add_todo", title: "Add a todo", description: "d", input: {},
       audiences: ["chat"], toolset: "notes", tier: "act", scope: async () => claim({ projects: [] }),
       annotations: MUTATING, resultKind: "json", run: async () => ({ added: true })
-    }),
-    defineTool({
-      name: "request_toolset", title: "Request a toolset", description: "d", input: {},
-      audiences: ["chat"], toolset: "core", tier: "act", planSafe: true, scope: async () => claim({ projects: [], writes: false }),
-      annotations: MUTATING, resultKind: "json",
-      run: async (_args, ctx) => {
-        const outcome = await ctx.requestToolsetCard!({ toolset: "notes", title: "Claude asks to enable Notes for this chat", sections: [{ kind: "text", text: "Notes" }], reason: "a todo list" });
-        order.push("tool resumed");
-        return { outcome: outcome.outcome };
-      }
     })
   ];
   const byName = new Map(tools.map((tool) => [tool.name, tool]));
@@ -142,7 +130,7 @@ async function rig(t: TestContext) {
   const setRefresh = (fn: ((who: ThreadCaller) => ThreadCaller) | undefined) => {
     refresh = fn;
   };
-  return { runtime, disconnect, call, nextCard, runs, order, opened, setRefresh };
+  return { runtime, disconnect, call, nextCard, runs, opened, setRefresh };
 }
 
 const errorCode = (result: { structuredContent?: unknown }) => (result.structuredContent as { code?: string } | undefined)?.code;
@@ -266,24 +254,17 @@ test("workflows: a create approved with a chat grant joins its new id to that gr
   assert.equal(errorCode(await asks), "APPROVAL_DENIED");
 });
 
-test("toolsets: off → TOOL_NOT_ENABLED; request_toolset's card through the port turns it on (listener before the call resumes)", async (t) => {
+test("every tool runs from any chat with nothing configured: no TOOL_NOT_ENABLED, whatever its group", async (t) => {
   const r = await rig(t);
-  assert.equal(errorCode(await r.call("add_todo")), "TOOL_NOT_ENABLED");
-  r.runtime.tools.onToolsetsChanged((threadId) => r.order.push(`toolsets changed: ${threadId}`));
-  const asking = r.call("request_toolset");
-  const id = await r.nextCard();
-  const card = r.runtime.approvals.list("me")[0]!;
-  assert.deepEqual([card.kind, card.family, card.grantOptions], ["toolset", "toolset", []]);
-  assert.ok((await r.runtime.approvals.answer("me", id, { decision: "approve" })).ok);
-  assert.deepEqual(payload(await asking), { outcome: "approved" });
-  assert.deepEqual(reference(await asking), { approvalId: id, kind: "toolset", family: "toolset", title: card.title, outcome: "approved" });
-  assert.deepEqual(r.order, ["toolsets changed: me", "tool resumed"], "the listener runs after the card settled, before the call resumed");
+  // `notes` and `reads` were off-by-default / on-by-default groups once: both just run now.
   assert.deepEqual((await r.call("add_todo")).structuredContent, { added: true });
+  assert.deepEqual((await r.call("read_more")).structuredContent, { read: true });
+  assert.equal(r.opened.length, 0, "no card for a Read or Act call");
 });
 
-test("shutdown: disconnected first — no card, no grant, locked toolsets only (never the catalogue defaults); a late card is cancelled", async (t) => {
+test("shutdown: disconnected first — no card, no grant (non-Admin tools still run); a late card is cancelled", async (t) => {
   const r = await rig(t);
-  // A chat grant exists, and `reads` (on by default for Claude) works before the disconnect.
+  // A chat grant exists, and a Read tool works before the disconnect.
   const first = r.call("control_desktop");
   const answer = await r.runtime.approvals.answer("me", await r.nextCard(), { decision: "approve", grant: "chat" });
   assert.ok(answer.ok);
@@ -297,8 +278,7 @@ test("shutdown: disconnected first — no card, no grant, locked toolsets only (
   assert.equal(errorCode(await r.call("control_desktop")), "PERMISSION_DENIED", "the grant is not honoured once disconnected");
   assert.equal(r.opened.length, 0, "no card opened");
   assert.equal(r.runs.length, runsBefore);
-  assert.equal(errorCode(await r.call("read_more")), "TOOL_NOT_ENABLED", "locked toolsets only, not the catalogue defaults");
-  assert.equal((await r.call("request_toolset")).isError, true, "no toolset card either");
+  assert.equal((await r.call("read_more")).isError, undefined, "a call that needs no card still runs");
 
   // A call already past the port lookup when the runtime stops: cancelled, never a card.
   await r.runtime.shutdown();
@@ -313,11 +293,9 @@ test("shutdown: disconnected first — no card, no grant, locked toolsets only (
 test("a disconnect clears only the ports that are still its own", async (t) => {
   const r = await rig(t);
   const other = await rig(t);
-  // `other` connected last: `r`'s disconnect leaves its ports alone.
+  // `other` connected last: `r`'s disconnect leaves its port alone.
   r.disconnect();
   assert.equal(executorPorts.approvals, other.runtime.port);
-  assert.notEqual(executorPorts.enabledToolsets, lockedToolsetsOnly);
   other.disconnect();
   assert.equal(executorPorts.approvals, null);
-  assert.equal(executorPorts.enabledToolsets, lockedToolsetsOnly);
 });

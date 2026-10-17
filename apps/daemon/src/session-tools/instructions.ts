@@ -1,15 +1,13 @@
 /**
  * The "Orquester" instruction block of the in-chat `orquester` server (unified MCP design
- * 2026-10-15 §10, D-13): composed PER THREAD by the manifest (`manifest.ts`) — a fixed part, the
- * toolsets that are off in the chat (so the agent knows what `request_toolset` can ask for) and,
- * for a chat inside an automated workflow, the line saying approvals are not available. Detail
- * stays in tool descriptions. The worst case stays under {@link ORQUESTER_INSTRUCTIONS_MAX_BYTES}
- * (asserted by `instructions.test.ts`).
+ * 2026-10-15 §10, D-13): composed PER THREAD by the manifest (`manifest.ts`) — a fixed part and,
+ * for a chat inside an automated workflow, the line saying approvals are not available. Every
+ * chat tool is on in every chat, so nothing here names tools that are off. Detail stays in tool
+ * descriptions. The worst case stays under {@link ORQUESTER_INSTRUCTIONS_MAX_BYTES} (asserted by
+ * `instructions.test.ts`).
  *
  * Pure: the daemon composes it; the agent host only passes it on.
  */
-
-import { TOOLSETS } from "@orquester/api";
 
 /** Spec §9.5 / D-13: the whole block, worst case. */
 export const ORQUESTER_INSTRUCTIONS_MAX_BYTES = 2048;
@@ -32,40 +30,13 @@ Changes outside your sandbox (workflows, agent profiles, desktops, other project
 export const WORKFLOW_OWNED_LINE = "This chat runs inside an automated workflow: changes that need approval are not available.";
 
 export interface OrquesterInstructionsInput {
-  /** The toolsets on in this chat (the manifest's resolution). */
-  enabledToolsets: ReadonlySet<string>;
   /** The chat is workflow-owned (spec §5.4). */
   workflowOwned: boolean;
-  /**
-   * Whether the agent may ask for a toolset (`request_toolset`): false for a workflow-owned chat
-   * (refused, §5.4) and while Agent tools are switched off in Settings (every card is refused).
-   */
-  canRequestToolsets: boolean;
 }
 
-/** The toolsets that are off, as the line names them: label and the id `request_toolset` takes. */
-export function offToolsetsText(enabled: ReadonlySet<string>): string {
-  return TOOLSETS.filter((toolset) => !toolset.locked && !enabled.has(toolset.id))
-    .map((toolset) => `${toolset.label} (\`${toolset.id}\`)`)
-    .join(", ");
-}
-
-/**
- * Compose the block for one thread. The toolset line is worded as of the chat's start: Claude's SDK
- * keeps the system prompt it launched with until compaction, so a toolset enabled later (a
- * `request_toolset` card, Settings, the Tools chip) is not reflected here — `request_toolset`'s
- * result is authoritative (Task 6 ruling).
- */
+/** Compose the block for one thread. */
 export function composeOrquesterInstructions(input: OrquesterInstructionsInput): string {
   const lines: string[] = [ORQUESTER_INSTRUCTIONS_FIXED];
-  const off = offToolsetsText(input.enabledToolsets);
-  if (off) {
-    lines.push(
-      input.canRequestToolsets
-        ? `Off at chat start: ${off}. If a task needs one, call request_toolset with its id; its result says what is on now.`
-        : `Off at chat start: ${off}.`
-    );
-  }
   if (input.workflowOwned) lines.push(WORKFLOW_OWNED_LINE);
   return lines.join("\n");
 }

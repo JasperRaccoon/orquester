@@ -513,7 +513,7 @@ test("list_projects below Full access (ruling S13): its own workspace whole, the
   // Naming another workspace: its projects are the call's targets, so the gate cards it (approved → listed); own: no card.
   const port = new FakeApprovalPort({ outcome: "approved", approvalId: "a1" });
   const call = (args: Record<string, unknown>, caller: ThreadCaller = me) =>
-    executeToolCall({ approvals: port, enabledToolsets: async () => new Set(["core"]) }, { name: "list_projects", arguments: args }, { caller, api, signal: new AbortController().signal });
+    executeToolCall({ approvals: port }, { name: "list_projects", arguments: args }, { caller, api, signal: new AbortController().signal });
   const named = await call({ workspace: "beta" });
   assert.equal(named.isError, undefined, JSON.stringify(named.content));
   assert.equal(port.cards.length, 1);

@@ -173,7 +173,7 @@ test("chat: add a skill to Claude Code through edit_agent_profile with a card, t
     runtimeMode: "full-access", planning: false, workflowOwned: false, exchange: null
   };
   const run = async (port: FakeApprovalPort, changes: unknown[]) => executeToolCall(
-    { approvals: port, enabledToolsets: async () => new Set(["core", "reads", "agent-profile-editing"]) },
+    { approvals: port },
     { name: "edit_agent_profile", arguments: { agent: "claude", reason: "The user asked for a release-notes skill.", changes } },
     { caller, api, signal: new AbortController().signal }
   );
@@ -255,7 +255,7 @@ test("chat: one batch writing the same name twice — two picks, two creates —
     runtimeMode: "full-access", planning: false, workflowOwned: false, exchange: null
   };
   const run = (port: FakeApprovalPort, changes: unknown[]) => executeToolCall(
-    { approvals: port, enabledToolsets: async () => new Set(["core", "reads", "agent-profile-editing"]) },
+    { approvals: port },
     { name: "edit_agent_profile", arguments: { agent: "claude", changes } },
     { caller, api, signal: new AbortController().signal }
   );

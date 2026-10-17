@@ -11,7 +11,6 @@ import { slimActivityPayload } from "./slim.ts";
 import { buildMergeBackMessage, parseThreadLineage } from "./lineage.ts";
 import {
   buildThreadMessage,
-  buildToolsetContinueMessage,
   exceedsExchangeLimit,
   isMergeBackMessage,
   isThreadAuthoredMessage,
@@ -26,7 +25,7 @@ import {
   replyNoticeText,
   stripThreadProvenance,
   threadMessageContext,
-  toolsetContinueContext,
+  TOOLSET_CONTINUE_CONTEXT_KIND,
   UNTRUSTED_NOTICE,
   THREAD_MESSAGE_OVERHEAD_CHARS,
   readThreadToolReference,
@@ -207,16 +206,15 @@ test("the v2 overhead stays within THREAD_MESSAGE_OVERHEAD_CHARS at every field'
   }
 });
 
-test("a reply delivery reads as another chat's by its chip; the continue turn is Orquester's, never another chat's", () => {
+test("a reply delivery reads as another chat's by its chip; an older build's continue turn is Orquester's, never another chat's", () => {
   assert.equal(isThreadAuthoredMessage({ context: [replyDeliveryContext("codex")] }), true);
   assert.equal(isThreadReplyMessage({ context: [replyDeliveryContext("codex")] }), true);
   assert.equal(isThreadReplyMessage({ context: [threadMessageContext("codex")] }), false);
-  assert.equal(isThreadAuthoredMessage({ context: [toolsetContinueContext("notes")] }), false);
-  assert.equal(isToolsetContinueMessage({ context: [toolsetContinueContext("notes")] }), true);
-  assert.equal(
-    buildToolsetContinueMessage("Workflow authoring"),
-    "[Orquester] The Workflow authoring tools are now available. Continue the task you were doing."
-  );
+  // The legacy chip older builds wrote on their automatic continue turn (as it reads in old logs).
+  const legacyContinue = { kind: TOOLSET_CONTINUE_CONTEXT_KIND, label: "Orquester", ref: "notes" };
+  assert.equal(TOOLSET_CONTINUE_CONTEXT_KIND, "toolset-continue");
+  assert.equal(isThreadAuthoredMessage({ context: [legacyContinue] }), false);
+  assert.equal(isToolsetContinueMessage({ context: [legacyContinue] }), true);
   const reply = buildThreadMessage({ origin: "reply", fromTitle: "Codex review", fromSessionId: "s-9", text: "LGTM" });
   assert.equal(stripThreadProvenance(reply), "LGTM");
 });

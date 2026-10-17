@@ -596,13 +596,13 @@ export const sendMessageTool = defineTool({
   name: "send_message",
   title: "Send a message",
   description:
-    "Message a chat. `reply` \"wait\" (default): returns the final reply of the turn this message causes (a working chat gets it as its next turn, never a steer), or early when that turn asks its user something, or at timeoutSeconds. \"none\": returns at once; a working chat's running turn is steered (refused while it waits for its user: PENDING_REQUEST). `implementPlan: true` sends its latest proposed plan to implement.",
+    "Message a chat. reply \"wait\" (default): returns the final reply of the turn this message causes (a busy chat runs it as its next turn, no steer), early if that turn asks its user something, or at timeoutSeconds. \"none\": returns at once; steers a busy chat's running turn (PENDING_REQUEST while it awaits its user).",
   chatNote:
-    "\"notify\": returns at once and delivers that turn's final reply to you later as a new message; use it when you want an answer to long work, never poll. A \"wait\" cut short goes on as notify (`willNotify`). Never message yourself; answer a [Sent by …] message in your final reply.",
+    "\"notify\": returns at once; that turn's final reply reaches you later as a message. A \"wait\" cut short goes on as notify (`willNotify`). Never message yourself.",
   externalNote: "On Codex the host runs `/goal …` itself: no turn starts, and outcome \"goal\" carries its answer.",
   input: {
     sessionId: z.string().min(1).describe("From list_sessions."),
-    text: z.string().optional().describe("The message."),
+    text: z.string().optional(),
     attachments: z.array(attachmentInputSchema).max(MAX_ATTACHMENTS).optional().describe("{path} inside a project, or {name, base64}."),
     planMode: z.boolean().optional().describe("Send in plan mode."),
     implementPlan: z.boolean().optional().describe("Send its latest proposed plan to implement."),
@@ -864,22 +864,22 @@ export const createSessionTool = defineTool({
   name: "create_session",
   title: "Open a chat session",
   description:
-    "Open a chat tab for an agent in a project, or resume a conversation (list_conversations); list_agents lists agents, models, options, modes and accounts. With `prompt` it starts at once: `reply` \"wait\" returns that turn's final reply (or at timeoutSeconds), \"none\" returns at once. The result says what the session got: model (`isLegacy` if legacy), mode, account and `accountSource` (requested, inherited or family-default).",
+    "Open an agent chat tab in a project, or resume a conversation (list_conversations). Agents, models, options, modes, accounts: list_agents. With `prompt` it starts at once: reply \"wait\" returns that turn's final reply (or at timeoutSeconds), \"none\" returns at once. The result says the model (isLegacy), mode, account and accountSource (requested, inherited, family-default) it got.",
   chatNote:
-    "Defaults: this chat's project, agent, mode (only narrower) and, same agent, its model, options and account. `prompt` (self-contained) is required unless resuming. Want its answer back? reply \"notify\" (delivered later as a message). `delegate: true` makes it your task: its final reply is the result (reply default \"notify\", else \"none\"). Limits: 6 unfinished chats you opened, 2 levels deep.",
+    "Defaults: this chat's project, agent, mode (only narrower) and, same agent, model, options, account. `prompt` (self-contained) required unless resuming. reply \"notify\": its final reply reaches you later as a message. `delegate: true`: your task, its final reply the result (reply default \"notify\", else \"none\"). Max 6 unfinished chats you opened, 2 levels deep.",
   externalNote: "`project` is required; runtimeMode defaults to full-access, reply to \"none\".",
   input: {
     project: z.string().min(1).optional().describe("Path or \"workspace/project\"."),
     agent: z.string().min(1).max(64).optional().describe("From list_agents."),
     // min(1): an empty model would read as none, so the default model would launch in its place.
     model: z.string().min(1).max(200).optional(),
-    options: optionsSchema.optional().describe("By id, e.g. {\"effort\":\"high\"}."),
+    options: optionsSchema.optional(),
     runtimeMode: runtimeModeSchema.optional(),
     accountId: z.string().min(1).max(200).optional().describe("From list_agents, or \"system\"."),
     title: z.string().trim().min(1).max(300).optional(),
     cwd: z.string().min(1).optional().describe("Inside the project; default: the project."),
     resume: z.object({ conversationId: z.string().min(1) }).optional().describe("From list_conversations."),
-    prompt: z.string().trim().min(1).max(CHAT_TEXT_MAX_CHARS).optional().describe("The first message."),
+    prompt: z.string().trim().min(1).max(CHAT_TEXT_MAX_CHARS).optional(),
     reply: replyField.optional(),
     timeoutSeconds: timeoutSecondsField,
     delegate: z.boolean().optional()

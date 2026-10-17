@@ -1,6 +1,6 @@
 /**
  * Catalog family `secrets` (unified MCP design 2026-10-15 §4 row 44, §12.5): `request_secret`,
- * chat-only, in the locked `core` toolset. Ported from the session toolkit `session-tools/secrets/`
+ * chat-only, in the `core` group. Ported from the session toolkit `session-tools/secrets/`
  * (design 2026-10-14 §5 "Secrets"; adapted from T3 Code, MIT) with behaviour unchanged and the
  * description trimmed to the §9.5 target.
  *
@@ -50,7 +50,7 @@ export const secretsFamily: readonly AnyOrquesterTool[] = [
   defineTool({
     name: SECRET_REQUEST_TOOL_NAME,
     title: "Request a secret",
-    description: `Ask the user for a secret (API key, token, password, signing secret) through a private card in this chat, and wait up to ${WAIT} for the answer (Orquester's own deadline; the call ends with an outcome, not a transport error). The value is never shown in the chat and is kept out of its saved history. When provided, the result's \`value\` is the secret: use it directly where needed (an env var for one command, the file the user asked for); never print, echo, log or commit it, or repeat it in a message. \`secretRequest.outcome\`: \`provided\`, \`declined\` (don't ask again unprompted), \`cancelled\` (the turn or session ended) or \`timed_out\` (ask again only if still needed). Never ask for a secret in chat and never invent one.`,
+    description: `Ask the user for a secret (API key, token, password) through a private card in this chat; waits up to ${WAIT} and always ends with an outcome, not a transport error. The value never appears in the chat or its saved history. \`secretRequest.outcome\`: \`provided\` (\`value\` is the secret: use it directly where needed, e.g. an env var for one command; never print, echo, log or commit it, or repeat it), \`declined\` (don't ask again unprompted), \`cancelled\` (turn or session ended), \`timed_out\` (ask again only if still needed). Never ask for a secret in chat or invent one.`,
     input: {
       name: z
         .string()
@@ -63,7 +63,7 @@ export const secretsFamily: readonly AnyOrquesterTool[] = [
         .trim()
         .min(1)
         .max(SECRET_REQUEST_PROMPT_MAX_CHARS)
-        .describe("To the user: what to enter and where to find or create it."),
+        .describe("To the user: what to enter, where to find or create it."),
       purpose: z
         .string()
         .trim()

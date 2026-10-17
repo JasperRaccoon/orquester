@@ -360,7 +360,10 @@ export const THREAD_MESSAGE_CONTEXT_KIND = "thread-message";
 export const THREAD_REPLY_CONTEXT_KIND = "thread-reply";
 /** The chip a merge back's `/turn` carries (`LineageService.deliver`). */
 export const MERGE_BACK_CONTEXT_KIND = "merge-back";
-/** The chip on Orquester's automatic continue turn after an approved `request_toolset` (§9.3). */
+/**
+ * LEGACY: the chip on the automatic continue turn older builds posted after an approved
+ * `request_toolset`. Nothing posts it now; old transcripts still render it as Orquester's.
+ */
 export const TOOLSET_CONTINUE_CONTEXT_KIND = "toolset-continue";
 
 /** The chip for a turn the thread `fromThreadId` caused. */
@@ -376,20 +379,6 @@ export function replyDeliveryContext(fromThreadId: string): ComposerContextRecor
 /** The chip for a merge back (`mergeId`). */
 export function mergeBackContext(mergeId: string): ComposerContextRecord {
   return { kind: MERGE_BACK_CONTEXT_KIND, label: "Merged back", ref: mergeId };
-}
-
-/** The chip for the automatic continue turn after `toolset` was enabled. */
-export function toolsetContinueContext(toolset: string): ComposerContextRecord {
-  return { kind: TOOLSET_CONTINUE_CONTEXT_KIND, label: "Orquester", ref: toolset };
-}
-
-/**
- * The automatic continue turn's text (§9.3): Orquester-authored, in the chat's interaction mode,
- * no `causedBy`, never a slash command.
- */
-export function buildToolsetContinueMessage(toolsetLabel: string): string {
-  const label = toolsetLabel.replace(/\s+/g, " ").trim().slice(0, 120) || "requested";
-  return `[Orquester] The ${label} tools are now available. Continue the task you were doing.`;
 }
 
 function hasContext(message: { context?: readonly { kind: string }[] | undefined }, kind: string): boolean {
@@ -411,7 +400,7 @@ export function isMergeBackMessage(message: { context?: readonly { kind: string 
   return hasContext(message, MERGE_BACK_CONTEXT_KIND);
 }
 
-/** Whether a user message is Orquester's automatic continue turn, never by its text alone. */
+/** Whether a user message is an older build's automatic continue turn (legacy chip), never by its text alone. */
 export function isToolsetContinueMessage(message: { context?: readonly { kind: string }[] | undefined }): boolean {
   return hasContext(message, TOOLSET_CONTINUE_CONTEXT_KIND);
 }

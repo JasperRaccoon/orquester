@@ -51,8 +51,8 @@ export interface SessionToolsListSource {
   /** The tools to list now. */
   list(): readonly Tool[];
   /**
-   * Whether a call by `name` is forwarded: every name the host knows (the daemon refuses a tool that
-   * is off in the chat with TOOL_NOT_ENABLED, in its own words), not only the listed ones.
+   * Whether a call by `name` is forwarded: every name the host knows (the daemon refuses one it does
+   * not serve to the chat, in its own words), not only the listed ones.
    */
   accepts(name: string): boolean;
 }

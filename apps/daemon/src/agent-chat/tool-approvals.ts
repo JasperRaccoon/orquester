@@ -2,8 +2,8 @@
  * Agent chat — Orquester approval cards (unified MCP design 2026-10-15 §7): the registry of
  * pending cards and their routes. Modelled on `secret-requests.ts`.
  *
- * A chat agent's Admin call, a call across a project boundary its permission mode does not cover,
- * and `request_toolset` each open a CARD (`admin` | `boundary` | `toolset`) in the chat. The call
+ * A chat agent's Admin call and a call across a project boundary its permission mode does not
+ * cover each open a CARD (`admin` | `boundary`; `toolset` only from older builds) in the chat. The call
  * waits here — for the user's answer on the card route, the card's deadline
  * (`ADMIN_APPROVAL_TIMEOUT_MS`, injected clock), or its `signal` (tool-call abort, Stop, the
  * session ending, the host's connection dropping) — and nothing else ever settles it: never
@@ -103,7 +103,7 @@ function isUnavailable(error: unknown): boolean {
   return (error as { status?: unknown; code?: unknown })?.status === 503 || (error as { code?: unknown })?.code === "AGENT_TOOLS_UNAVAILABLE";
 }
 
-/** What the opener does around an answer (the approval port: grants, toolset overrides, declines). */
+/** What the opener does around an answer (the approval port: grants). */
 export interface ToolApprovalHooks {
   /** Resolves true once the call's result reached the host; false when dropped (→ `not_delivered`). */
   delivered?: Promise<boolean>;
@@ -114,10 +114,10 @@ export interface ToolApprovalHooks {
   prepareApproval?(answer: ToolApprovalAnswer): Promise<void>;
   /**
    * The approval's side effects, synchronous and run only once the card is known to be settling
-   * (a grant recorded, a toolset turned on). Returns the grant the answer created, if any.
+   * (a grant planned). Returns the grant the answer created, if any.
    */
   commitApproval?(answer: ToolApprovalAnswer): { grantId?: string; grantScope?: "chat" | "project" };
-  /** A denial's side effects (a toolset decline). */
+  /** A denial's side effects, if any. */
   onDenied?(answer: ToolApprovalAnswer): void;
 }
 

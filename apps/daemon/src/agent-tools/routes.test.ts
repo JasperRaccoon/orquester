@@ -66,11 +66,9 @@ function server(rt: AgentToolsRuntime, mode: "local" | "remote") {
 
 const ROUTES = [
   { method: "GET", url: "/api/agent-tools" },
-  { method: "PUT", url: "/api/agent-tools/settings", payload: { revision: 0, enabled: true } },
   { method: "DELETE", url: "/api/agent-tools/grants" },
   { method: "DELETE", url: "/api/agent-tools/grants/g1" },
   { method: "GET", url: "/api/sessions/t1/agent-tools" },
-  { method: "PUT", url: "/api/sessions/t1/agent-tools", payload: { toolsets: { notes: true } } },
   { method: "GET", url: "/api/sessions/t1/tool-approvals" },
   { method: "GET", url: "/api/sessions/t1/tool-approvals/a1" },
   { method: "POST", url: "/api/sessions/t1/tool-approvals/a1", payload: { decision: "approve" } }
@@ -86,9 +84,9 @@ test("remote HTTP: every route is behind the bearer; with it they answer", async
     }
     const settings = await app.inject({ method: "GET", url: "/api/agent-tools", headers: { authorization: BEARER } });
     assert.equal(settings.statusCode, 200);
-    assert.equal((settings.json() as { revision: number }).revision, 0);
+    assert.deepEqual(settings.json(), { grants: [] });
     const chat = await app.inject({ method: "GET", url: "/api/sessions/t1/agent-tools", headers: { authorization: BEARER } });
-    assert.deepEqual((chat.json() as { resolved: string[] }).resolved, ["core", "reads"]);
+    assert.deepEqual(chat.json(), { threadId: "t1", agent: "claude", workflowOwned: false, grants: [] });
     assert.equal((await app.inject({ method: "GET", url: "/api/sessions/zz/agent-tools", headers: { authorization: BEARER } })).statusCode, 404);
     assert.equal((await app.inject({ method: "GET", url: "/api/sessions/t1/tool-approvals", headers: { authorization: BEARER } })).statusCode, 200);
   } finally {
@@ -102,15 +100,12 @@ test("both transports: a card answered over the socket or HTTP; secrets never in
   const remote = server(rt, "remote");
   const secret = "ghp_SECRET_VALUE_NEVER_SHOWN_123";
   try {
-    // Over the socket (no bearer): settings, the chat's toolsets.
-    const put = await local.inject({ method: "PUT", url: "/api/agent-tools/settings", payload: { revision: 0, defaults: { notes: { claude: true } } } });
-    assert.equal(put.statusCode, 200);
-    const stale = await local.inject({ method: "PUT", url: "/api/agent-tools/settings", payload: { revision: 0 } });
-    assert.equal(stale.statusCode, 409);
-    assert.equal((stale.json() as { error: { code: string } }).error.code, "REVISION_MISMATCH");
-    const chat = await local.inject({ method: "PUT", url: "/api/sessions/t1/agent-tools", payload: { toolsets: { desktops: true } } });
-    assert.deepEqual((chat.json() as { resolved: string[] }).resolved, ["core", "reads", "notes", "desktops"]);
-    assert.equal((await local.inject({ method: "PUT", url: "/api/sessions/t1/agent-tools", payload: { toolsets: { core: false } } })).statusCode, 400);
+    // The removed toolset writes are gone on both transports (every tool is on in every chat).
+    for (const app of [local, remote]) {
+      const headers = app === remote ? { authorization: BEARER } : {};
+      assert.equal((await app.inject({ method: "PUT", url: "/api/agent-tools/settings", headers, payload: { revision: 0, enabled: false } })).statusCode, 404);
+      assert.equal((await app.inject({ method: "PUT", url: "/api/sessions/t1/agent-tools", headers, payload: { toolsets: { notes: false } } })).statusCode, 404);
+    }
 
     // A card with a secret field, answered over HTTP.
     const waiting = rt.approvals.open(
@@ -138,7 +133,6 @@ test("both transports: a card answered over the socket or HTTP; secrets never in
     const everything = JSON.stringify([answered.body, twice.body, published, logged]);
     assert.ok(!everything.includes(secret), "never in a response, an event or a log line");
     assert.ok(published.some((e) => e.type === "agentChat.toolApproval"));
-    assert.ok(published.some((e) => e.channel === "agent-tools" && e.type === "agentTools.changed"));
     assert.equal(logged.filter((line) => line.includes("[tool-approvals]")).length, 1, "one line per decision");
 
     // Grants: revoke one, revoke all.
@@ -146,6 +140,7 @@ test("both transports: a card answered over the socket or HTTP; secrets never in
     const query = { family: "desktops", callerRuntimeMode: "full-access", workflowOwned: false, threadId: "t1", projectPath: "/w/ws/p", projects: ["/w/ws/p"] };
     assert.ok(rt.tools.findGrant(query));
     assert.equal((await remote.inject({ method: "DELETE", url: `/api/agent-tools/grants/${grantId}`, headers: { authorization: BEARER } })).statusCode, 204);
+    assert.ok(published.some((e) => e.channel === "agent-tools" && e.type === "agentTools.changed"));
     assert.equal(rt.tools.findGrant(query), null, "revoked: the next call cards again");
     assert.equal((await remote.inject({ method: "DELETE", url: `/api/agent-tools/grants/${grantId}`, headers: { authorization: BEARER } })).statusCode, 404);
     rt.tools.addGrant({ family: "desktops", scope: "chat", projectPath: "/w/ws/p", threadId: "t1" });
@@ -174,7 +169,7 @@ test("agent principals are refused on every write and on card answers (403); rea
         assert.equal((res.json() as { error: { code: string } }).error.code, "PERMISSION_DENIED");
       }
     }
-    assert.equal(rt.tools.snapshot().revision, 0, "nothing changed");
+    assert.deepEqual(rt.tools.snapshot().grants, [], "nothing changed");
   } finally {
     await app.close();
   }

@@ -1,7 +1,8 @@
-// The tsc-rs preload (spec §3.2, §9), run for real: child Node processes with
-// NODE_OPTIONS=--require <preload> against a fake appdir and workspaces root, a
-// shell-script stand-in for tsc-rs, and fake `typescript` packages whose `tsc`
-// prints "real tsc".
+// The engine preload (spec §3.2, §9), run for real: child Node processes with
+// NODE_OPTIONS=--require <preload> against a fake appdir and workspaces root,
+// shell-script stand-ins for tsc-rs and tsrs, and fake `typescript` packages
+// whose `tsc` prints "real tsc". Most tests run tsc-rs (the preload's default
+// engine when the daemon names none); "engine choice" covers tsrs.
 
 import assert from "node:assert/strict";
 import { spawn, spawnSync, type SpawnSyncReturns } from "node:child_process";
@@ -12,11 +13,18 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, before, describe, test } from "node:test";
 
-import { appendNodeRequireOption, pluginsConfigPath, tsRustPluginDir, tsRustPreloadPath } from "@orquester/config";
+import {
+  appendNodeRequireOption,
+  pluginsConfigPath,
+  tsRustPluginDir,
+  tsRustPreloadPath,
+  tsrsEngineDir
+} from "@orquester/config";
 
 import { renderTsRustPreload, writeTsRustPreload } from "./preload.ts";
 
 const VERSION = "0.7.0";
+const TSRS_VERSION = "0.16.0-ts7.1.0-dev.20260929";
 const posix = process.platform !== "win32";
 
 let root = "";
@@ -25,8 +33,8 @@ let workspaces = "";
 let preload = "";
 /** `<ws>/enabled/app`: a project with an npm-style node_modules. */
 let enabledProject = "";
-/** `<ws>/disabled/app`: the same layout in a workspace the plugin is off for. */
-let disabledProject = "";
+/** `<ws>/other/app`: the same layout in another workspace. */
+let otherProject = "";
 /** `<ws>/enabled/pnpm-app`: node_modules/typescript links into a store outside the root. */
 let pnpmProject = "";
 /** A typescript package outside the workspaces root (an npx cache). */
@@ -49,6 +57,11 @@ if [ -n "$STUB_BLOCK" ]; then
   printf 'ready %s\\n' "$$"
   wait "$sleeper"
 fi
+exit "\${STUB_EXIT:-0}"
+`;
+
+const STUB_TSRS = `#!/bin/sh
+printf 'tsrs %s\\n' "$*"
 exit "\${STUB_EXIT:-0}"
 `;
 
@@ -95,7 +108,7 @@ function enabledState(overrides: Record<string, unknown> = {}): unknown {
     version: 1,
     plugins: {
       "ts-rust": {
-        enabledWorkspaces: ["enabled"],
+        enabled: true,
         current: { version: VERSION, integrity: "sha512-x", installedAt: "2026-10-14T00:00:00.000Z" },
         ...overrides
       }
@@ -143,7 +156,7 @@ describe("tsc-rs preload", { skip: posix ? false : "the stand-in tsc-rs is a she
     workspaces = join(root, "workspaces");
     preload = tsRustPreloadPath(appdir);
     enabledProject = join(workspaces, "enabled", "app");
-    disabledProject = join(workspaces, "disabled", "app");
+    otherProject = join(workspaces, "other", "app");
     pnpmProject = join(workspaces, "enabled", "pnpm-app");
     outsideTypescript = join(root, "npx-cache", "node_modules", "typescript");
     ts7Project = join(workspaces, "enabled", "ts7-app");
@@ -155,7 +168,7 @@ describe("tsc-rs preload", { skip: posix ? false : "the stand-in tsc-rs is a she
     await writeFile(binary, STUB_TSC_RS, { mode: 0o755 });
 
     await writeNpmProject(enabledProject);
-    await writeNpmProject(disabledProject);
+    await writeNpmProject(otherProject);
     // pnpm: the project's node_modules/typescript is a symlink into a store
     // OUTSIDE the workspaces root (its global virtual store), as is .bin's target.
     const store = join(root, "pnpm-store", "typescript@5.9.3", "node_modules", "typescript");
@@ -182,33 +195,44 @@ describe("tsc-rs preload", { skip: posix ? false : "the stand-in tsc-rs is a she
     assert.equal((await stat(preload)).mode & 0o777, 0o644);
   });
 
-  test("tsc through node_modules/.bin, bin/tsc and lib/tsc.js runs tsc-rs in an enabled workspace", () => {
-    const modules = join(enabledProject, "node_modules");
-    for (const script of [join(modules, ".bin", "tsc"), join(modules, "typescript", "bin", "tsc"), join(modules, "typescript", "lib", "tsc.js")]) {
-      const result = runNode(script, ["-p", "tsconfig.json", "--noEmit"], { cwd: enabledProject });
-      assertRedirected(result, "-p tsconfig.json --noEmit");
-      assert.match(result.stdout, new RegExp(`\\ncwd ${enabledProject}\\n`), "tsc-rs ran in the same cwd");
+  test("tsc through node_modules/.bin, bin/tsc and lib/tsc.js runs tsc-rs in every workspace while the plugin is on", () => {
+    for (const project of [enabledProject, otherProject]) {
+      const modules = join(project, "node_modules");
+      for (const script of [join(modules, ".bin", "tsc"), join(modules, "typescript", "bin", "tsc"), join(modules, "typescript", "lib", "tsc.js")]) {
+        const result = runNode(script, ["-p", "tsconfig.json", "--noEmit"], { cwd: project });
+        assertRedirected(result, "-p tsconfig.json --noEmit");
+        assert.match(result.stdout, new RegExp(`\\ncwd ${project}\\n`), "tsc-rs ran in the same cwd");
+      }
     }
   });
 
-  test("tsc in a workspace the plugin is off for runs the real tsc", () => {
-    const modules = join(disabledProject, "node_modules");
-    for (const script of [join(modules, ".bin", "tsc"), join(modules, "typescript", "bin", "tsc"), join(modules, "typescript", "lib", "tsc.js")]) {
-      assertRealTsc(runNode(script, ["--noEmit"], { cwd: disabledProject }), "--noEmit");
+  test("tsc runs the real tsc while the plugin is off, including a per-workspace record not yet turned on", async () => {
+    const current = { version: VERSION, integrity: "sha512-x", installedAt: "x" };
+    const modules = join(enabledProject, "node_modules");
+    try {
+      for (const record of [{ current }, { enabled: false, current }, { enabledWorkspaces: ["enabled"], current }]) {
+        await writeState({ version: 1, plugins: { "ts-rust": record } });
+        for (const script of [join(modules, ".bin", "tsc"), join(modules, "typescript", "bin", "tsc"), join(modules, "typescript", "lib", "tsc.js")]) {
+          assertRealTsc(runNode(script, ["--noEmit"], { cwd: enabledProject }), "--noEmit");
+        }
+      }
+    } finally {
+      await writeState(enabledState());
     }
   });
 
   test("a pnpm layout whose real path leaves the root resolves the workspace from the unresolved path", () => {
     const script = join(pnpmProject, "node_modules", "typescript", "bin", "tsc");
-    // cwd in the disabled workspace: only argv[1] can name "enabled".
-    assertRedirected(runNode(script, ["--noEmit"], { cwd: disabledProject }), "--noEmit");
+    // cwd outside every workspace: only argv[1] is inside one.
+    assertRedirected(runNode(script, ["--noEmit"], { cwd: root }), "--noEmit");
   });
 
-  test("a tsc outside the root uses the working directory's workspace", () => {
+  test("a tsc outside the root uses the working directory, and runs the real tsc outside every workspace", () => {
     const script = join(outsideTypescript, "bin", "tsc");
     assertRedirected(runNode(script, ["--version"], { cwd: enabledProject }), "--version");
-    assertRealTsc(runNode(script, ["--version"], { cwd: disabledProject }), "--version");
+    assertRedirected(runNode(script, ["--version"], { cwd: otherProject }), "--version");
     assertRealTsc(runNode(script, ["--version"], { cwd: root }), "--version");
+    assertRealTsc(runNode(script, ["--version"], { cwd: workspaces }), "--version");
   });
 
   test("non-tsc scripts and the typescript API are untouched", () => {
@@ -331,10 +355,10 @@ describe("tsc-rs preload", { skip: posix ? false : "the stand-in tsc-rs is a she
       workspacesRoot: workspaces,
       configuredWorkspacesRoot: linkedWorkspaces
     });
-    // The real path is in the pnpm store, outside both roots; the cwd is in the disabled workspace.
+    // The real path is in the pnpm store, outside both roots; the cwd is outside every workspace.
     const script = join(linkedWorkspaces, "enabled", "pnpm-app", "node_modules", "typescript", "bin", "tsc");
-    assertRedirected(runNode(script, ["--noEmit"], { cwd: disabledProject, preload: aliased }), "--noEmit");
-    assertRealTsc(runNode(script, ["--noEmit"], { cwd: disabledProject }), "--noEmit");
+    assertRedirected(runNode(script, ["--noEmit"], { cwd: root, preload: aliased }), "--noEmit");
+    assertRealTsc(runNode(script, ["--noEmit"], { cwd: root }), "--noEmit");
     // The same root twice is baked once.
     assert.equal(
       renderTsRustPreload({ statePath: pluginsConfigPath(appdir), workspacesRoot: workspaces, configuredWorkspacesRoot: workspaces }),
@@ -353,6 +377,109 @@ describe("tsc-rs preload", { skip: posix ? false : "the stand-in tsc-rs is a she
     assert.equal(tsc.stderr, "other preload\n");
     assert.match(tsc.stdout, /^tsc-rs \n/);
     assert.match(tsc.stdout, new RegExp(`\\nnode-options ${appendNodeRequireOption(nodeOptions, preload).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\n`));
+  });
+
+  describe("engine choice", () => {
+    const script = (): string => join(enabledProject, "node_modules", "typescript", "bin", "tsc");
+    /** A preload of a host where tsrs is the default (both engines have builds). */
+    let tsrsDefault = "";
+    /** A preload of a host where only tsc-rs has a build. */
+    let tscRsOnly = "";
+    const tsrsCurrent = { version: TSRS_VERSION, integrity: "sha512-y", installedAt: "x" };
+
+    before(async () => {
+      const binary = join(tsrsEngineDir(appdir), "versions", TSRS_VERSION, "tsrs");
+      await mkdir(dirname(binary), { recursive: true });
+      await writeFile(binary, STUB_TSRS, { mode: 0o755 });
+      tsrsDefault = join(root, "tsrs-default-preload.cjs");
+      await writeTsRustPreload(tsrsDefault, {
+        statePath: pluginsConfigPath(appdir),
+        workspacesRoot: workspaces,
+        supportedEngines: ["tsrs", "tsc-rs"],
+        defaultEngine: "tsrs"
+      });
+      tscRsOnly = join(root, "tsc-rs-only-preload.cjs");
+      await writeTsRustPreload(tscRsOnly, {
+        statePath: pluginsConfigPath(appdir),
+        workspacesRoot: workspaces,
+        supportedEngines: ["tsc-rs"],
+        defaultEngine: "tsc-rs"
+      });
+    });
+
+    after(async () => {
+      await writeState(enabledState());
+    });
+
+    test("no engine named: the host's default, tsrs with its own versions, given 4 checker threads", async () => {
+      await writeState(enabledState({ tsrs: { current: tsrsCurrent } }));
+      const result = runNode(script(), ["-p", "tsconfig.json", "--noEmit"], { cwd: enabledProject, preload: tsrsDefault });
+      assert.equal(result.stderr, "");
+      assert.equal(result.stdout, "tsrs -p tsconfig.json --noEmit --checkers 4\n");
+      assert.equal(result.status, 0);
+      // The tsc-rs default runs tsc-rs's own version, unchanged arguments.
+      assertRedirected(runNode(script(), ["--noEmit"], { cwd: enabledProject }), "--noEmit");
+    });
+
+    test("the named engine runs when this host has it; tsc-rs gets no extra arguments", async () => {
+      await writeState(enabledState({ engine: "tsc-rs", tsrs: { current: tsrsCurrent } }));
+      assertRedirected(runNode(script(), ["--noEmit"], { cwd: enabledProject, preload: tsrsDefault }), "--noEmit");
+      await writeState(enabledState({ engine: "tsrs", tsrs: { current: tsrsCurrent } }));
+      const tsrs = runNode(script(), ["--noEmit"], { cwd: enabledProject });
+      assert.equal(tsrs.stdout, "tsrs --noEmit --checkers 4\n");
+      // lib/tsc.js (the CommonJS path) passes the same arguments.
+      const lib = runNode(join(enabledProject, "node_modules", "typescript", "lib", "tsc.js"), ["-w"], { cwd: enabledProject });
+      assert.equal(lib.stdout, "tsrs -w --checkers 4\n");
+      const exit = runNode(script(), [], { cwd: enabledProject, env: { STUB_EXIT: "2" } });
+      assert.equal(exit.status, 2);
+    });
+
+    test("a named engine this host has no build of, or one this build does not know, is the default", async () => {
+      await writeState(enabledState({ engine: "tsrs", tsrs: { current: tsrsCurrent } }));
+      assertRedirected(runNode(script(), ["--noEmit"], { cwd: enabledProject, preload: tscRsOnly }), "--noEmit");
+      for (const engine of ["tsgo", 7, null, { id: "tsrs" }]) {
+        await writeState(enabledState({ engine, tsrs: { current: tsrsCurrent } }));
+        const result = runNode(script(), ["--noEmit"], { cwd: enabledProject, preload: tsrsDefault });
+        assert.equal(result.stdout, "tsrs --noEmit --checkers 4\n", JSON.stringify(engine));
+      }
+    });
+
+    test("arguments that choose the checkers, and build mode, are passed as they are", async () => {
+      await writeState(enabledState({ engine: "tsrs", tsrs: { current: tsrsCurrent } }));
+      for (const args of [
+        ["-p", "tsconfig.json", "--checkers", "2"],
+        ["--Checkers", "8"],
+        ["--singleThreaded"],
+        ["--noEmit", "--SINGLETHREADED"],
+        ["-b"],
+        ["-b", "tsconfig.json", "--verbose"],
+        ["--build", "packages/a"],
+        ["-B", "tsconfig.json"]
+      ]) {
+        const result = runNode(script(), args, { cwd: enabledProject });
+        assert.equal(result.stdout, `tsrs ${args.join(" ")}\n`, args.join(" "));
+      }
+      // Not build mode when -b is not the first argument (tsc requires it first).
+      const later = runNode(script(), ["--noEmit", "-b"], { cwd: enabledProject });
+      assert.equal(later.stdout, "tsrs --noEmit -b --checkers 4\n");
+    });
+
+    test("tsrs with nothing installed runs the real tsc silently; a missing binary says so once", async () => {
+      await writeState(enabledState({ engine: "tsrs" }));
+      const none = runNode(script(), ["--noEmit"], { cwd: enabledProject });
+      assert.equal(none.stderr, "");
+      assertRealTsc(none, "--noEmit");
+      await writeState(enabledState({ engine: "tsrs", tsrs: { current: { ...tsrsCurrent, version: "0.99.0" } } }));
+      const missing = runNode(script(), ["--noEmit"], { cwd: enabledProject });
+      assert.equal(missing.stderr, "orquester: tsrs failed to start (ENOENT); running tsc\n");
+      assertRealTsc(missing, "--noEmit");
+      for (const tsrs of ["on", [], { current: "x" }, { current: { version: "../0.7.0" } }]) {
+        await writeState(enabledState({ engine: "tsrs", tsrs }));
+        const result = runNode(script(), [], { cwd: enabledProject });
+        assert.equal(result.stderr, "", JSON.stringify(tsrs));
+        assertRealTsc(result, "");
+      }
+    });
   });
 
   describe("falls back to the real tsc", () => {
@@ -413,8 +540,9 @@ describe("tsc-rs preload", { skip: posix ? false : "the stand-in tsc-rs is a she
 
     test("when plugins.json has the wrong shapes", async () => {
       for (const state of [
-        { plugins: { "ts-rust": { enabledWorkspaces: "enabled", current: { version: VERSION } } } },
-        { plugins: { "ts-rust": { enabledWorkspaces: ["enabled"], current: { version: 7 } } } },
+        { plugins: { "ts-rust": { enabled: "true", current: { version: VERSION } } } },
+        { plugins: { "ts-rust": { enabled: 1, current: { version: VERSION } } } },
+        { plugins: { "ts-rust": { enabled: true, current: { version: 7 } } } },
         { plugins: { "ts-rust": "on" } },
         { plugins: null },
         []

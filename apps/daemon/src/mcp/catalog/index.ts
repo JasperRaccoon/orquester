@@ -25,7 +25,6 @@ import { searchFamily } from "../tools/search.ts";
 import { secretsFamily } from "../tools/secrets.ts";
 import { sessionsFamily } from "../tools/sessions.ts";
 import { todosFamily } from "../tools/todos.ts";
-import { toolsetsFamily } from "../tools/toolsets.ts";
 import { usageFamily } from "../tools/usage.ts";
 import { visualsFamily } from "../tools/visuals.ts";
 import { watchFamily } from "../tools/watch.ts";
@@ -73,8 +72,7 @@ export const CATALOG: readonly AnyOrquesterTool[] = buildCatalog([
   agentProfileFamily,
   desktopsFamily,
   visualsFamily,
-  secretsFamily,
-  toolsetsFamily
+  secretsFamily
 ]);
 
 const byAudience = new Map<Audience, readonly AnyOrquesterTool[]>();

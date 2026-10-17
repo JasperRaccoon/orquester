@@ -1,7 +1,7 @@
 /**
  * The agent-tools client store (unified MCP §7, §9): cards converge on the daemon through loads
- * and bus events, a closed card never comes back, every payload is parsed before it reaches state,
- * and `agentTools.changed` re-reads what is shown.
+ * and bus events, a closed card never comes back, every payload is parsed before it reaches state
+ * (an older daemon's toolset fields ignored), and `agentTools.changed` re-reads what is shown.
  */
 
 import assert from "node:assert/strict";
@@ -26,7 +26,6 @@ import {
   revokeAgentToolGrant,
   toolApprovalsFor,
   toolApprovalsStore,
-  updateAgentToolsSettings,
   watchAgentToolsSettings,
   watchThreadAgentTools,
   type AgentToolsApi,
@@ -134,51 +133,35 @@ describe("approval cards", () => {
   });
 });
 
-const view = {
-  id: "notes",
-  label: "Todos & saved-prompt editing",
-  locked: false,
-  tools: [{ name: "list_todos", tier: "read" }],
-  bytes: 1234,
-  catalogDefaults: { claude: false, codex: false, grok: false, opencode: false },
-  defaults: { claude: true, codex: false, grok: false, opencode: false }
-};
-
 describe("parsers", () => {
-  it("reads the settings field-wise; drops unknown toolsets; keeps core locked", () => {
-    const parsed = parseAgentToolsResponse({
-      revision: 3,
-      enabled: true,
-      toolsets: [view, { ...view, id: "from-the-future" }, { id: "core", locked: false, tools: "nope", defaults: { claude: "yes" } }, view],
-      grants: [{ id: "g1", family: "workflows", scope: "chat", projectPath: "/p", threadId: "t", workflowIds: ["w", 3], createdAt: "c" }, { id: 5 }]
-    });
-    assert.ok(parsed);
-    assert.deepEqual(parsed.toolsets.map((toolset) => toolset.id), ["notes", "core"]);
-    const core = parsed.toolsets[1]!;
-    assert.equal(core.locked, true);
-    assert.equal(core.tools.length, 17, "malformed tools fall back to the catalogue's");
-    assert.equal(core.defaults.claude, true);
-    assert.deepEqual(parsed.grants.map((grant) => grant.workflowIds), [["w"]]);
-    assert.equal(parseAgentToolsResponse({ revision: "3", toolsets: [] }), null);
-    // A malformed master switch is read as on: off only when the daemon says so.
-    assert.equal(parseAgentToolsResponse({ revision: 1, enabled: "off", toolsets: [] })?.enabled, true);
+  it("reads the settings' grants field-wise; an older daemon's toolset fields are ignored", () => {
+    const grants = [{ id: "g1", family: "workflows", scope: "chat", projectPath: "/p", threadId: "t", workflowIds: ["w", 3], createdAt: "c" }, { id: 5 }];
+    const parsed = parseAgentToolsResponse({ grants });
+    assert.deepEqual(parsed?.grants.map((grant) => grant.workflowIds), [["w"]]);
+    // What an older daemon sent (revision, master switch, toolsets matrix) still reads — as grants only.
+    const older = parseAgentToolsResponse({ revision: 3, enabled: false, toolsets: [{ id: "notes", locked: false }], grants });
+    assert.deepEqual(older, parsed);
+    assert.deepEqual(Object.keys(older ?? {}), ["grants"]);
+    assert.equal(parseAgentToolsResponse({ revision: 1, toolsets: [] }), null);
+    assert.equal(parseAgentToolsResponse("nope"), null);
   });
 
-  it("reads a chat's toolsets for that chat only; core is always resolved", () => {
+  it("reads a chat's view for that chat only; an older daemon's toolset fields are ignored", () => {
     const raw = {
       threadId: "t1",
       agent: "codex",
-      overrides: { notes: true, bogus: true, reads: "no" },
-      resolved: ["reads", "bogus"],
+      overrides: { notes: true },
+      resolved: ["reads"],
       workflowOwned: true,
       appliesAtNextIdle: true,
-      declines: { "workflow-authoring": "2026-10-15T11:00:00.000Z", x: "y" },
-      grants: []
+      declines: { "workflow-authoring": "2026-10-15T11:00:00.000Z" },
+      grants: [{ id: "g1", family: "desktops", scope: "chat", projectPath: "/p", threadId: "t1", createdAt: "c" }]
     };
     const parsed = parseThreadAgentToolsResponse(raw, "t1");
-    assert.deepEqual(parsed?.resolved, ["core", "reads"]);
-    assert.deepEqual(parsed?.overrides, { notes: true });
-    assert.deepEqual(parsed?.declines, { "workflow-authoring": "2026-10-15T11:00:00.000Z" });
+    assert.deepEqual(parsed && Object.keys(parsed).sort(), ["agent", "grants", "threadId", "workflowOwned"]);
+    assert.equal(parsed?.workflowOwned, true);
+    assert.deepEqual(parsed?.grants.map((grant) => grant.id), ["g1"]);
+    assert.deepEqual(parseThreadAgentToolsResponse({ threadId: "t1", agent: "grok", workflowOwned: false, grants: [] }), { threadId: "t1", agent: "grok", workflowOwned: false, grants: [] });
     assert.equal(parseThreadAgentToolsResponse(raw, "t2"), null);
     assert.equal(parseThreadAgentToolsResponse({ ...raw, agent: "someone" }), null);
   });
@@ -188,40 +171,24 @@ describe("parsers", () => {
   });
 });
 
-describe("settings and chat toolsets", () => {
+describe("settings and chat grants", () => {
   beforeEach(() => resetAgentTools());
 
   function fakeApi(): AgentToolsApi & { calls: string[]; settings: AgentToolsResponse; thread: ThreadAgentToolsResponse } {
     const calls: string[] = [];
-    const settings: AgentToolsResponse = { revision: 1, enabled: true, toolsets: [view as never], grants: [] };
-    const thread: ThreadAgentToolsResponse = {
-      threadId: "t1",
-      agent: "claude",
-      overrides: {},
-      resolved: ["core", "reads"],
-      workflowOwned: false,
-      appliesAtNextIdle: false,
-      declines: {},
-      grants: []
-    };
+    const settings: AgentToolsResponse = { grants: [] };
+    const thread: ThreadAgentToolsResponse = { threadId: "t1", agent: "claude", workflowOwned: false, grants: [] };
     return {
       calls,
       settings,
       thread,
       getAgentTools: async () => (calls.push("get"), settings),
-      updateAgentToolsSettings: async (request) => {
-        calls.push(`put:${request.revision}`);
-        if (request.revision !== settings.revision) throw new HttpError(409, { error: { code: "REVISION_MISMATCH" } });
-        settings.revision += 1;
-        return settings;
-      },
       revokeAgentToolGrant: async (id) => {
         calls.push(`revoke:${id}`);
         throw new HttpError(404, { error: { code: "GRANT_NOT_FOUND" } });
       },
       revokeAgentToolGrants: async () => ({ revoked: 2 }),
-      getThreadAgentTools: async (id) => (calls.push(`thread:${id}`), thread),
-      updateThreadAgentTools: async () => thread
+      getThreadAgentTools: async (id) => (calls.push(`thread:${id}`), thread)
     };
   }
 
@@ -232,18 +199,9 @@ describe("settings and chat toolsets", () => {
   it("loads settings; an older daemon's bare 404 marks them unsupported", async () => {
     const api = fakeApi();
     await loadAgentToolsSettings(api);
-    assert.equal(agentToolsStore.getState().settings?.revision, 1);
+    assert.deepEqual(agentToolsStore.getState().settings, { grants: [] });
     await loadAgentToolsSettings({ ...api, getAgentTools: async () => Promise.reject(new HttpError(404)) });
     assert.equal(agentToolsStore.getState().settingsUnsupported, true);
-  });
-
-  it("a stale revision is refused and the settings are read again", async () => {
-    const api = fakeApi();
-    await loadAgentToolsSettings(api);
-    api.settings.revision = 7;
-    await assert.rejects(updateAgentToolsSettings(api, { revision: 1, enabled: false }));
-    await settle();
-    assert.equal(agentToolsStore.getState().settings?.revision, 7);
   });
 
   it("agentTools.changed re-reads the watched chat and the shown settings", async () => {
@@ -253,15 +211,18 @@ describe("settings and chat toolsets", () => {
     await loadAgentToolsSettings(api);
     await loadThreadAgentTools(api, "t1");
     api.calls.length = 0;
-    applyAgentToolsEvent({ channel: "agent-tools", type: "agentTools.changed", payload: { revision: 1, threadId: "t1" } });
+    applyAgentToolsEvent({ channel: "agent-tools", type: "agentTools.changed", payload: { threadId: "t1" } });
     await settle();
     assert.deepEqual(api.calls.sort(), ["get", "thread:t1"]);
     api.calls.length = 0;
-    // Its own revision, no chat: nothing new for the settings, but chats may resolve differently.
+    // No chat named (an older daemon's `revision` too): the settings and every watched chat; junk is ignored.
     applyAgentToolsEvent({ channel: "agent-tools", type: "agentTools.changed", payload: { revision: 1 } });
+    await settle();
+    assert.deepEqual(api.calls.sort(), ["get", "thread:t1"]);
+    api.calls.length = 0;
     applyAgentToolsEvent({ channel: "agent-tools", type: "agentTools.changed", payload: "junk" });
     await settle();
-    assert.deepEqual(api.calls, ["thread:t1"]);
+    assert.deepEqual(api.calls, []);
     unwatch();
     unwatchSettings();
     assert.equal(agentToolsStore.getState().threads.t1, undefined, "an unwatched chat is forgotten");

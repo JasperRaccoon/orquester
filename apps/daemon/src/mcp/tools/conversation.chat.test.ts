@@ -18,7 +18,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { TOOLSET_IDS, type SessionSummary } from "@orquester/api";
+import type { SessionSummary } from "@orquester/api";
 import { agentChatRoutes, parseThreadMessage, replyNoticeText, THREAD_MESSAGE_CONTEXT_KIND, UNTRUSTED_NOTICE, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
 
 import { registerWait, waitsOn } from "../../agent-chat/waits.ts";
@@ -99,7 +99,7 @@ function rig(options: RigOptions = {}) {
     kind: "thread", threadId: "me", title: "Implement auth", projectPath: OWN, workspace: "jaspersito", cwd: OWN, agentId: "claude",
     callId: `call-${Math.random()}`, runtimeMode: "full-access", planning: false, workflowOwned: false, exchange: null, ...over
   });
-  const deps = { approvals: port, enabledToolsets: async () => new Set(TOOLSET_IDS), lookup: (n: string, audience: "external" | "chat") => toolByName(n, audience), newId: () => "ex-new", ...(options.now ? { now: options.now } : {}) };
+  const deps = { approvals: port, lookup: (n: string, audience: "external" | "chat") => toolByName(n, audience), newId: () => "ex-new", ...(options.now ? { now: options.now } : {}) };
   const call = (name: string, args: Record<string, unknown>, over: Partial<ThreadCaller> = {}, signal = new AbortController().signal) =>
     executeToolCall(deps, { name, arguments: args }, { caller: caller(over), api, signal });
   const external = (name: string, args: Record<string, unknown>, signal = new AbortController().signal) =>
@@ -304,7 +304,7 @@ test("an old host's thread_send {wait} (Task 6's real alias onto send_message): 
   const release = registerWait("peer", "me");
   try {
     // The production alias lookup: thread_send {wait: true} → send_message {reply: "wait"} with ctx.legacyAlias "thread_send".
-    const deps = { approvals: r.port, enabledToolsets: async () => new Set(TOOLSET_IDS), lookup: (name: string) => chatToolByName(name) };
+    const deps = { approvals: r.port, lookup: (name: string) => chatToolByName(name) };
     const cycle = await executeToolCall(deps, { name: "thread_send", arguments: { threadId: "peer", text: "hi", wait: true } }, {
       caller: { kind: "thread", threadId: "me", title: "Implement auth", projectPath: OWN, workspace: "jaspersito", cwd: OWN, agentId: "claude", callId: "c1", runtimeMode: "full-access", planning: false, workflowOwned: false, exchange: null },
       api: r.api, signal: new AbortController().signal

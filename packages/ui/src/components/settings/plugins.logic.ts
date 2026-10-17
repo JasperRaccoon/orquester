@@ -1,29 +1,14 @@
 /**
- * Pure decisions behind Settings → Plugins (spec §6): which workspace the
- * section scopes to, what the search shows, when turning a plugin on needs a
- * confirmation, and which controls are usable. No React import.
+ * Pure decisions behind Settings → Plugins (spec §6): what the search shows,
+ * when turning a plugin on needs a confirmation, and which controls are
+ * usable. Every plugin is turned on once for the whole server. No React import.
  */
 
-import { type PluginInfo, TS_RUST_PLUGIN_ID } from "@orquester/api";
+import { type PluginEngineInfo, type PluginInfo, TS_RUST_PLUGIN_ID, type TsCheckerEngine } from "@orquester/api";
 
-/** Shown before the first workspace turns a plugin on (spec §6, first-enable confirmation). */
+/** Shown before Better TS Typecheck is turned on (spec §6, first-enable confirmation). */
 export const FIRST_ENABLE_MESSAGE =
-  "tsc-rs runs TypeScript 7. Projects whose tsconfig or code isn't TS 7-ready will fail their typecheck while this is on. Tabs, chats and workflow runs already open keep the normal tsc until reopened.";
-
-/**
- * The workspace the section acts on: the one the user picked while it still
- * exists, else the active workspace (the open project's), else the first
- * workspace. Null when there are no workspaces.
- */
-export function defaultPluginScope(
-  workspaces: readonly string[],
-  active: string | null,
-  picked: string | null
-): string | null {
-  if (picked !== null && workspaces.includes(picked)) return picked;
-  if (active !== null && workspaces.includes(active)) return active;
-  return workspaces[0] ?? null;
-}
+  "Both engines, tsrs and tsc-rs, run TypeScript 7. Projects whose tsconfig or code isn't TS 7-ready will fail their typecheck while this is on. Tabs, chats and workflow runs already open keep the normal tsc until reopened.";
 
 /** Plugins whose name or description contains the query (case-insensitive). */
 export function filterPlugins(plugins: readonly PluginInfo[], query: string): PluginInfo[] {
@@ -37,34 +22,23 @@ export function selectedPlugin(listed: readonly PluginInfo[], selectedId: string
   return listed.find((p) => p.id === selectedId) ?? listed[0] ?? null;
 }
 
-/** Whether the plugin's toggle reads on: a global plugin's own switch, else the scope's. */
-export function pluginEnabledIn(plugin: PluginInfo, scope: string | null): boolean {
-  if (plugin.scope === "global") return plugin.enabled;
-  return scope !== null && plugin.enabledWorkspaces.includes(scope);
-}
-
 /**
- * What flipping a plugin's toggle for `scope` to `enable` does: nothing
- * (`blocked`: unsupported platform, or no workspace for a workspace plugin),
- * ask first (`confirm`: turning tsc-rs on while it is on nowhere), or go ahead
- * (`apply`). A global plugin ignores `scope`.
+ * What flipping a plugin's toggle to `enable` does: nothing (`blocked`:
+ * turning it on where the server has no build of it), ask first (`confirm`:
+ * turning Better TS Typecheck on while it is off), or go ahead (`apply`). Turning a plugin
+ * off is always allowed.
  */
 export type PluginToggleDecision = "blocked" | "confirm" | "apply";
 
-export function pluginToggleDecision(
-  plugin: PluginInfo,
-  scope: string | null,
-  enable: boolean
-): PluginToggleDecision {
+export function pluginToggleDecision(plugin: PluginInfo, enable: boolean): PluginToggleDecision {
+  if (!enable) return "apply";
   if (plugin.platform !== "supported") return "blocked";
-  if (plugin.scope === "global") return "apply";
-  if (scope === null) return "blocked";
-  if (enable && plugin.id === TS_RUST_PLUGIN_ID && plugin.enabledWorkspaces.length === 0) return "confirm";
+  if (plugin.id === TS_RUST_PLUGIN_ID && !plugin.enabled) return "confirm";
   return "apply";
 }
 
 export interface PluginControls {
-  /** The per-workspace on/off toggle (row and detail panel). */
+  /** The server-wide on/off toggle (row and detail panel). */
   toggle: boolean;
   checkForUpdates: boolean;
   /** Rendered only when a previous version exists. */
@@ -79,17 +53,55 @@ export interface PluginControls {
  * blocks the version actions but not the toggle. A plugin with no updates
  * (it ships with the app) has no version actions at all.
  */
-export function pluginControls(plugin: PluginInfo, scope: string | null, pending: boolean): PluginControls {
+export function pluginControls(plugin: PluginInfo, pending: boolean): PluginControls {
   const supported = plugin.platform === "supported";
   const idle = plugin.job === "idle" && !pending;
   const versions = plugin.updates;
   return {
-    toggle: supported && (plugin.scope === "global" || scope !== null) && !pending,
+    // On where there is no build only through a plugins.json carried over: it can still be turned off.
+    toggle: (supported || plugin.enabled) && !pending,
     checkForUpdates: versions && supported && idle,
     showRollback: versions && plugin.previous !== null,
     rollback: versions && supported && idle && plugin.previous !== null,
-    removeDownloads: versions && idle && plugin.current !== null && plugin.enabledWorkspaces.length === 0
+    removeDownloads: versions && idle && plugin.current !== null && !plugin.enabled
   };
+}
+
+/** One choice in the Engine control. */
+export interface PluginEngineOption extends PluginEngineInfo {
+  selected: boolean;
+  /** Not choosable: no build here, or one of this section's requests is in flight. */
+  disabled: boolean;
+  /** Why it can't be chosen here, or null. */
+  hint: string | null;
+}
+
+/**
+ * The Engine control's choices, or none for a plugin without engines (or a
+ * daemon from before the choice). Choosing the selected one does nothing.
+ */
+export function pluginEngineOptions(plugin: PluginInfo, pending: boolean): PluginEngineOption[] {
+  if (!plugin.engine || !plugin.engines) return [];
+  return plugin.engines.map((engine) => {
+    const supported = engine.platform === "supported";
+    return {
+      ...engine,
+      selected: engine.id === plugin.engine,
+      disabled: pending || !supported,
+      hint: supported ? null : "No build for this server's operating system and processor."
+    };
+  });
+}
+
+/** The active engine's display name, or null when the plugin has no engines. */
+export function pluginEngineLabel(plugin: PluginInfo): string | null {
+  return plugin.engines?.find((engine) => engine.id === plugin.engine)?.label ?? null;
+}
+
+/** Whether choosing `engine` sends anything: another engine than the active one, choosable here. */
+export function pluginEngineChange(plugin: PluginInfo, engine: TsCheckerEngine, pending: boolean): boolean {
+  const option = pluginEngineOptions(plugin, pending).find((candidate) => candidate.id === engine);
+  return option !== undefined && !option.selected && !option.disabled;
 }
 
 /** The running job as a status label, or null when idle. */

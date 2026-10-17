@@ -120,7 +120,7 @@ const chatCaller = (sandbox: string, over: Partial<ThreadCaller> = {}): ThreadCa
 
 /** One read_file call through the executor (the gate, then run), files-git on, no approval port. */
 async function chatRead(api: FsApi, caller: ThreadCaller, args: Record<string, unknown>): Promise<CallToolResult> {
-  return executeToolCall({ approvals: null, enabledToolsets: async () => new Set(["core", "files-git"]) }, { name: "read_file", arguments: args }, { caller, api, signal: new AbortController().signal });
+  return executeToolCall({ approvals: null }, { name: "read_file", arguments: args }, { caller, api, signal: new AbortController().signal });
 }
 const answer = (r: CallToolResult) => r.structuredContent as Record<string, any>;
 

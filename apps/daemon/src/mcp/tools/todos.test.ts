@@ -1,7 +1,7 @@
 /**
  * list_todos / update_todos (unified MCP design 2026-10-15 §4 rows 22–23): the ported external
  * behaviour (scopes, results that always fit, whole writes) and the chat rules (own project by
- * default, the gate's matrix, plan mode, the `notes` toolset) — through the executor, the
+ * default, the gate's matrix, plan mode, no toolset to turn on) — through the executor, the
  * in-process client and the daemon's real `/api/todos` routes over a real store.
  */
 import { test, type TestContext } from "node:test";
@@ -11,7 +11,6 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { TOOLSETS } from "@orquester/api";
 import { createDefaultClientConfig, createDefaultDaemonConfig } from "@orquester/config";
 import { createServer } from "../../index.ts";
 import { TodoListManager } from "../../todos.ts";
@@ -23,8 +22,6 @@ import { executeToolCall } from "../executor.ts";
 type CreateServerArgs = Parameters<typeof createServer>;
 type Outcome = { ok: true; value: Record<string, unknown> } | { ok: false; code: string; message: string };
 type Listed = { id: string; name: string; body: string; bodyTruncated?: true };
-
-const ALL_TOOLSETS = new Set(TOOLSETS.map((toolset) => toolset.id));
 
 /** Workspaces `acme` (projects `api`, `web`) and `beta` (project `app`); the daemon's todo routes over a real store. */
 async function harness(t: TestContext) {
@@ -53,9 +50,9 @@ async function harness(t: TestContext) {
     runtimeMode: "approval-required", planning: false, workflowOwned: false, exchange: null, ...over
   });
   /** One call through the executor: external by default, or as `caller`. */
-  const call = async (name: string, args: Record<string, unknown>, caller?: ThreadCaller, toolsets: ReadonlySet<string> = ALL_TOOLSETS): Promise<Outcome> => {
+  const call = async (name: string, args: Record<string, unknown>, caller?: ThreadCaller): Promise<Outcome> => {
     const result: CallToolResult = await executeToolCall(
-      { approvals: port, enabledToolsets: async () => toolsets },
+      { approvals: port },
       { name, arguments: args },
       { caller: caller ?? { kind: "external" }, api, signal: new AbortController().signal }
     );
@@ -264,10 +261,13 @@ test("chat: another workspace's own lists (S13 workspace target) — a read belo
   await h.refused("update_todos", { action: "update", workspace: "beta", id, name: "x" }, "PERMISSION_DENIED", h.chat({ workflowOwned: true, runtimeMode: "full-access" }));
 });
 
-test("chat: writes are refused while planning, and the tools are off until the notes toolset is on", async (t) => {
+test("chat: writes are refused while planning; otherwise any chat may use them, nothing to turn on first", async (t) => {
   const h = await harness(t);
   assert.match(await h.refused("update_todos", { action: "create", name: "x" }, "PERMISSION_DENIED", h.chat({ planning: true })), /planning/);
   await h.value("list_todos", {}, h.chat({ planning: true }));
-  const outcome = await h.call("update_todos", { action: "create", name: "x" }, h.chat(), new Set(["core", "reads"]));
-  assert.ok(!outcome.ok && outcome.code === "TOOL_NOT_ENABLED" && /request_toolset/.test(outcome.message));
+  // A chat of any agent, with no settings anywhere: update_todos (once in an off-by-default toolset) just runs.
+  for (const agentId of ["claude", "codex"] as const) {
+    const outcome = await h.call("update_todos", { action: "create", name: `from ${agentId}` }, h.chat({ agentId }));
+    assert.ok(outcome.ok, outcome.ok ? "" : `${outcome.code} ${outcome.message}`);
+  }
 });

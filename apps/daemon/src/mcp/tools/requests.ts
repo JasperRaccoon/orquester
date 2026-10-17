@@ -1,6 +1,6 @@
 // Catalog family module `requests` (Provider requests: respond_to_request) — owned by plan Task 7 (unified MCP, Wave 3;
 // design 2026-10-15 §4 row 17, §4.1, D-21). It answers PROVIDER requests only — the questions and tool approvals in the
-// thread snapshot. Orquester cards (tool approvals, boundary, toolset and secret cards) have their own ids, are never in
+// thread snapshot. Orquester cards (tool approvals, boundary and secret cards, an older build's toolset cards) have their own ids, are never in
 // that snapshot, and are answered only on their card route (§7.3, §12.1): an id of one is not found here.
 import { resolve } from "node:path";
 import { z } from "zod";
@@ -215,7 +215,7 @@ const respondToRequest = defineTool({
   name: "respond_to_request",
   title: "Respond to a request",
   description:
-    "Answer or dismiss an agent's pending question, or decide a provider tool approval (get_session lists them with ids and options). answers: question id or 1-based index → an option's label/value, a custom answer where allowCustomAnswer, or an array on multiSelect; attachments per question are optional. dismiss: true closes a dismissible question. Approval cards Orquester shows in a chat are not requests: the user answers those.",
+    "Answer or dismiss an agent's pending question, or decide a provider tool approval (ids, options: get_session). answers: question id or 1-based index → an option's label/value, custom text where allowCustomAnswer, or an array on multiSelect. Orquester's approval cards in a chat are not requests: the user answers those.",
   chatNote: "Only questions of chats you created; never approvals or secret questions.",
   externalNote: "decision quirks: on Claude acceptAlways denies; on OpenCode acceptForSession/acceptAlways mean 'always' for the directory.",
   input: {

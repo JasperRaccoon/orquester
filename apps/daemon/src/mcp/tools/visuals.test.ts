@@ -24,7 +24,6 @@ import { catalogFor, toolByName } from "../catalog/index.ts";
 import { audienceDescription, audienceSchema, audienceShape, executeToolCall } from "../executor.ts";
 import { FakeDaemonApi } from "../testing.ts";
 import { secretsFamily } from "./secrets.ts";
-import { toolsetsFamily } from "./toolsets.ts";
 import { HTML_RENDER_SHOWN_MESSAGE, HTML_RENDER_TOKEN_LINE, visualsFamily } from "./visuals.ts";
 
 const THREAD = "thread-1";
@@ -47,7 +46,7 @@ function chatCaller(over: Partial<ThreadCaller> = {}): ThreadCaller {
 
 const call = (api: FakeDaemonApi, name: string, args: unknown, opts: { signal?: AbortSignal; caller?: ToolCaller } = {}): Promise<CallToolResult> =>
   executeToolCall(
-    { approvals: null, enabledToolsets: async () => new Set(["core"]) },
+    { approvals: null },
     { name, arguments: args },
     { caller: opts.caller ?? chatCaller(), api, signal: opts.signal ?? new AbortController().signal }
   );
@@ -78,24 +77,23 @@ describe("visuals definitions", () => {
   it("keep the guidance with Orquester's widths and theme tokens, stated once", () => {
     for (const fragment of [
       "headless browser",
-      "screenshot of its top (at most 4000px; PNG, or JPEG scaled down when a PNG would pass 3 MiB",
+      "screenshot of its top (≤ 4000px; PNG, or scaled-down JPEG past 3 MiB",
       "contentHeight",
-      "stack traces pointing into page.html",
+      "stack traces point into page.html",
       "before html_render",
-      "cannot reach this machine or its local network",
-      "html_render still works without a preview",
-      "page rules, layout and theme variables are html_render's"
+      "only public addresses, not this machine or its network",
+      "html_render still works",
+      "Page rules, layout and theme: html_render's"
     ]) {
       assert.ok(preview.description.includes(fragment), fragment);
     }
     for (const fragment of [
       "above your final text reply",
-      "should not announce it",
-      "Preview with html_preview first",
-      "fits the frame to the page's height at each reader's width",
+      "should not announce or restate the page",
+      "frame fits the page's height at each reader's width",
       "inside this chat's project",
       "transparent",
-      "overrides style preferences such as a fixed black page",
+      "even over style preferences like a black page",
       "var(--radius)",
       "100vh",
       `${HTML_RENDER_COLUMN_WIDTH}px`,
@@ -302,15 +300,13 @@ async function listed(tools: readonly AnyOrquesterTool[]): Promise<Map<string, {
 }
 
 describe("§9.5 byte budgets", () => {
-  it("each Task 13 tool meets its per-tool target (request_toolset: the fixed schema overhead, see the report)", async () => {
-    const rows = await listed([...visualsFamily, ...secretsFamily, ...toolsetsFamily]);
-    // Targets (baselines): html_preview 1 700 (1 849), html_render 3 000 (3 669), request_secret 1 500 (1 792);
-    // request_toolset 700 is under its own schema + annotations overhead (~670 bytes): held to 1 000.
+  it("each Task 13 tool meets its per-tool target", async () => {
+    const rows = await listed([...visualsFamily, ...secretsFamily]);
+    // Targets (baselines): html_preview 1 700 (1 849), html_render 3 000 (3 669), request_secret 1 500 (1 792).
     const targets: Record<string, { bytes: number; description: number }> = {
       html_preview: { bytes: 1_700, description: 2_000 },
       html_render: { bytes: 3_000, description: 2_000 },
-      request_secret: { bytes: 1_500, description: 1_000 },
-      request_toolset: { bytes: 1_000, description: 1_000 }
+      request_secret: { bytes: 1_500, description: 1_000 }
     };
     assert.deepEqual([...rows.keys()].sort(), Object.keys(targets).sort());
     for (const [name, target] of Object.entries(targets)) {
@@ -318,13 +314,13 @@ describe("§9.5 byte budgets", () => {
       assert.ok(row.bytes <= target.bytes, `${name}: ${row.bytes} bytes > ${target.bytes}`);
       assert.ok(row.description <= target.description, `${name}: description ${row.description} bytes > ${target.description}`);
     }
-    // Together they stay inside the sum of the §9.5 targets (6 900).
+    // Together they stay inside the sum of their §9.5 targets (6 200; request_toolset's 700 is gone).
     const sum = [...rows.values()].reduce((total, row) => total + row.bytes, 0);
-    assert.ok(sum <= 6_900, `Task 13's tools are ${sum} bytes together`);
+    assert.ok(sum <= 6_200, `Task 13's tools are ${sum} bytes together`);
   });
 
-  it("every .describe() text is ≤ 160 bytes, and the chat catalog serves all four", () => {
-    for (const entry of [...visualsFamily, ...secretsFamily, ...toolsetsFamily]) {
+  it("every .describe() text is ≤ 160 bytes, and the chat catalog serves all three", () => {
+    for (const entry of [...visualsFamily, ...secretsFamily]) {
       assert.ok(catalogFor("chat").includes(entry), entry.name);
       for (const [key, field] of Object.entries(entry.input as Record<string, { description?: string }>)) {
         assert.ok(Buffer.byteLength(field.description ?? "", "utf8") <= 160, `${entry.name}.${key}`);

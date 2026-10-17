@@ -234,6 +234,7 @@ type CardFacts = Pick<ParsedToolApprovalSummary, "kind" | "family" | "scope">;
  * card's kind and family (never from agent text); the scope badge names where.
  */
 export function toolApprovalChangeSentence(card: CardFacts): string {
+  // `toolset`: only an older daemon raises one (its `request_toolset`); this build has no toolset switches.
   if (card.kind === "toolset") {
     return "Enabling adds these tools to this chat only (the agent cannot enable anything itself). If the agent's session has to restart to see them, it does so at its next idle point and keeps the conversation.";
   }
@@ -272,7 +273,7 @@ export function toolApprovalKindBadge(card: Pick<ParsedToolApprovalSummary, "kin
   }
 }
 
-/** The primary button: "Enable for this chat" on a toolset card (§9.3), else "Approve once". */
+/** The primary button: "Enable for this chat" on an older daemon's toolset card (§9.3), else "Approve once". */
 export function toolApprovalPrimaryLabel(card: Pick<ParsedToolApprovalSummary, "kind">): string {
   return card.kind === "toolset" ? "Enable for this chat" : "Approve once";
 }

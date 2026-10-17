@@ -58,11 +58,44 @@ export async function serializeChatTools(tools: readonly AnyOrquesterTool[]): Pr
   const client = new Client({ name: "orquester-host", version: "catalog" });
   await Promise.all([server.connect(serverSide), client.connect(clientSide)]);
   try {
-    return (await client.listTools()).tools;
+    return (await client.listTools()).tools.map(compactToolEntry);
   } finally {
     await client.close();
     await server.close();
   }
+}
+
+/**
+ * A `tools/list` entry without the bytes that tell a model nothing: the SDK's `execution`
+ * (`taskSupport: "forbidden"` is the absent default) and, in the input schema, `$schema`,
+ * `additionalProperties: false` / `{}`, `minLength: 1` and a `maxLength` of 1024 or more (a cap no
+ * sensible argument reaches). Validation is untouched: the daemon's
+ * strict parse of the raw arguments (`mcp-server.ts`) still refuses unknown keys and empty strings.
+ */
+export function compactToolEntry(entry: Tool): Tool {
+  const { execution: _execution, ...rest } = entry;
+  return { ...rest, inputSchema: compactSchema(entry.inputSchema) as Tool["inputSchema"] };
+}
+
+/** `names`: `value` is a `properties` map, whose keys are field names, not schema keywords. */
+function compactSchema(value: unknown, names = false): unknown {
+  if (Array.isArray(value)) return value.map((item) => compactSchema(item));
+  if (value === null || typeof value !== "object") return value;
+  const out: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(value)) {
+    if (!names) {
+      if (key === "$schema") continue;
+      if (key === "additionalProperties" && (child === false || isEmptyObject(child))) continue;
+      if (key === "minLength" && child === 1) continue;
+      if (key === "maxLength" && typeof child === "number" && child >= 1024) continue;
+    }
+    out[key] = compactSchema(child, !names && key === "properties");
+  }
+  return out;
+}
+
+function isEmptyObject(value: unknown): boolean {
+  return value !== null && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === 0;
 }
 
 /** Every tool the host can advertise: the catalog's chat tools, then the legacy names it lacks. */

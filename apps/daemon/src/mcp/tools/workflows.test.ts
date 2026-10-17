@@ -12,7 +12,7 @@ import { mkdtemp, mkdir, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { TOOLSETS, type ApprovalPreviewSection, type Workflow, type WorkflowRun } from "@orquester/api";
+import type { ApprovalPreviewSection, Workflow, WorkflowRun } from "@orquester/api";
 import { FakeApprovalPort } from "../catalog/approval-double.ts";
 import type { ThreadCaller } from "../catalog/contract.ts";
 import { ToolError } from "../errors.ts";
@@ -80,11 +80,10 @@ function chat(api: Sandbox, over: Partial<ThreadCaller> = {}): ThreadCaller {
   };
 }
 
-const ALL_TOOLSETS = new Set(TOOLSETS.map((toolset) => toolset.id));
 
 /** The tool through the executor: an external caller (parity) unless `who` is a chat. */
 async function exec(api: FakeDaemonApi, name: string, args: Record<string, unknown>, opts: { who?: ThreadCaller; port?: FakeApprovalPort; signal?: AbortSignal } = {}): Promise<CallToolResult> {
-  const deps: ExecutorDeps = { approvals: opts.port ?? null, enabledToolsets: async () => ALL_TOOLSETS, now: () => Date.parse(stamp) };
+  const deps: ExecutorDeps = { approvals: opts.port ?? null, now: () => Date.parse(stamp) };
   return executeToolCall(deps, { name, arguments: args }, { caller: opts.who ?? { kind: "external" }, api, signal: opts.signal ?? new AbortController().signal });
 }
 
@@ -173,9 +172,25 @@ test("create_workflow passes temp targets through and refuses unknown projects o
   await call(api, "create_workflow", { ...draft(), project });
   assert.deepEqual((api.calls.at(-1)!.body as { project: unknown }).project, project);
   await rejects(call(api, "create_workflow", { ...draft(), project: { kind: "existing", project: "acme/nope" } }), "PROJECT_NOT_FOUND");
-  for (const args of [{ ...draft(), bogus: 1 }, { ...draft(), nodes: [{ type: "code", nme: "Typo" }] }, { ...draft(), nodes: [{ type: "code", name: "1bad" }] }, { ...draft(), nodes: [{ type: "teleport" }] }, { ...draft(), reason: "chat only" }]) {
+  for (const args of [{ ...draft(), bogus: 1 }, { ...draft(), nodes: [{ type: "code", nme: "Typo" }] }, { ...draft(), nodes: [{ type: "code", name: "1bad" }] }, { ...draft(), reason: "chat only" }]) {
     await rejects(call(api, "create_workflow", args), "INVALID_ARGUMENT");
   }
+});
+
+test("a block's type, position and retry values are left to the daemon's add, which refuses them clearly (create and update)", async (t) => {
+  const api = await sandbox(t);
+  serveDefinition(api);
+  // Not in the advertised schema (list_workflow_block_types carries the contract): the same add the create and patch
+  // routes run (Patcher.addNode) refuses them, naming the entry.
+  const nodes = (node: Record<string, unknown>) => ({ ...draft(), nodes: [{ type: "trigger.manual", name: "Start" }, node], edges: [], dryRun: true });
+  await rejects(call(api, "create_workflow", nodes({ type: "teleport" })), "INVALID_WORKFLOW", /nodes\[1\]: Unknown block type "teleport" \(types: trigger\.manual, .*code/);
+  await rejects(call(api, "create_workflow", nodes({ type: "code", name: "Work", retry: { maxTries: 11, delaySeconds: 1 } })), "INVALID_WORKFLOW", /nodes\[1\]: Work: retry\.maxTries/);
+  await rejects(call(api, "create_workflow", nodes({ type: "code", name: "Work", position: { x: "left" } })), "INVALID_WORKFLOW", /nodes\[1\]: Work: position/);
+  const edit = (node: Record<string, unknown>) => ({ workflowId: "wf-1", revision: 7, ops: [{ op: "add_node", node }], dryRun: true });
+  await rejects(call(api, "update_workflow", edit({ type: "teleport" })), "INVALID_WORKFLOW", /ops\[0\] \(add_node\) failed: Unknown block type "teleport"/);
+  await rejects(call(api, "update_workflow", edit({ type: "code", name: "Extra", retry: "twice" })), "INVALID_WORKFLOW", /ops\[0\] \(add_node\) failed: Extra: retry/);
+  api.on("GET", "/api/workflows/block-types", { status: 200, body: { types: [{ type: "agent" }, { type: "code" }], expressionGuide: "guide" } });
+  await rejects(call(api, "list_workflow_block_types", { type: "teleport" }), "NOT_FOUND", /\(types: agent, code\)/);
 });
 
 test("create_workflow identifies refused edges and exposes daemon validation problems", async (t) => {

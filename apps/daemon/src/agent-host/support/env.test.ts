@@ -130,27 +130,29 @@ test("the plugins' preload is appended after a launcher NODE_OPTIONS, and absent
   );
 });
 
-test("providerNodePreload: only an existing preload with tsc-rs enabled somewhere", async (t) => {
+test("providerNodePreload: only an existing preload with tsc-rs turned on", async (t) => {
   const appdir = await mkdtemp(join(tmpdir(), "orq-provider-preload-"));
   t.after(() => rm(appdir, { recursive: true, force: true }));
   const preload = tsRustPreloadPath(appdir);
-  const state = (enabledWorkspaces: unknown): string =>
-    JSON.stringify({ version: 1, plugins: { "ts-rust": { enabledWorkspaces }, other: { kept: true } } });
+  const state = (record: Record<string, unknown>): string =>
+    JSON.stringify({ version: 1, plugins: { "ts-rust": record, other: { kept: true } } });
 
   assert.equal(providerNodePreload(appdir), undefined, "nothing on disk");
   await mkdir(dirname(pluginsConfigPath(appdir)), { recursive: true });
-  await writeFile(pluginsConfigPath(appdir), state(["jaso"]));
+  await writeFile(pluginsConfigPath(appdir), state({ enabled: true }));
   assert.equal(providerNodePreload(appdir), undefined, "enabled, but no preload file yet");
 
   await mkdir(dirname(preload), { recursive: true });
   await writeFile(preload, "// preload\n");
   assert.equal(providerNodePreload(appdir), preload);
 
-  await writeFile(pluginsConfigPath(appdir), state([]));
-  assert.equal(providerNodePreload(appdir), undefined, "enabled nowhere");
+  await writeFile(pluginsConfigPath(appdir), state({}));
+  assert.equal(providerNodePreload(appdir), undefined, "off");
+  await writeFile(pluginsConfigPath(appdir), state({ enabled: false, enabledWorkspaces: ["jaso"] }));
+  assert.equal(providerNodePreload(appdir), undefined, "off, with an older build's per-workspace list");
   await writeFile(pluginsConfigPath(appdir), JSON.stringify({ version: 1, plugins: {} }));
   assert.equal(providerNodePreload(appdir), undefined, "no ts-rust record");
-  await writeFile(pluginsConfigPath(appdir), state("jaso"));
+  await writeFile(pluginsConfigPath(appdir), state({ enabled: "yes" }));
   assert.equal(providerNodePreload(appdir), undefined, "a malformed record");
   await writeFile(pluginsConfigPath(appdir), "{ not json");
   assert.equal(providerNodePreload(appdir), undefined, "a corrupt file");

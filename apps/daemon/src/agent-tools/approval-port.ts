@@ -1,35 +1,24 @@
 /**
  * The {@link ApprovalPort} the catalog executor asks for cards and grants (unified MCP design
- * 2026-10-15 §3.2, §7, §9.3). It joins the card registry (`agent-chat/tool-approvals.ts`) and the
+ * 2026-10-15 §3.2, §7). It joins the card registry (`agent-chat/tool-approvals.ts`) and the
  * agent-tools store (`./service.ts`):
  *
  * - `request(card, signal)` opens the card and waits. An approval with a grant choice is accepted
  *   only for a caller that is `full-access` and not workflow-owned at ANSWER time (the choice
  *   re-validated against the card's `grantOptions`); the grant itself is recorded only when the
  *   executor calls the outcome's `commitGrant`, after the call passed the post-card gate re-run —
- *   re-checking Full access then too. An approved toolset card turns the
- *   toolset on for the chat (persisted, then `onToolsetsChanged`); a denied one blocks asking again
- *   for 30 min.
+ *   re-checking Full access then too.
  * - `findGrant(query)` answers from `agent-tools.json` (`lastUsedAt` stamped).
  * - `recordWorkflowInGrant(...)` adds a created workflow to the chat's `workflows` grant.
  *
  * **Defence in depth.** The executor's gate decides card / deny / allow; this port re-checks what it
  * can know itself, reading the caller's tab and thread: a workflow-owned caller never gets a card
  * (`ADMIN_NOT_AVAILABLE` for Admin, `PERMISSION_DENIED` otherwise) or a grant; grant options are
- * narrowed to what `grantOptionsFor` allows for the caller's CURRENT mode; a toolset card for a
- * toolset already on opens no card, one declined in the last 30 min is `TOOLSET_DECLINED`, and
- * only one per toolset per chat may be pending.
+ * narrowed to what `grantOptionsFor` allows for the caller's CURRENT mode. Older builds' `toolset`
+ * cards (`request_toolset`) are never opened: every chat tool is on in every chat.
  */
 
-import {
-  grantOptionsFor,
-  isToolsetId,
-  TOOLSETS,
-  toolsetById,
-  type GrantScope,
-  type SessionSummary,
-  type ToolsetId
-} from "@orquester/api";
+import { grantOptionsFor, type GrantScope, type SessionSummary } from "@orquester/api";
 import {
   agentChatRoutes,
   type ApprovalPreviewSection,
@@ -60,8 +49,6 @@ export interface CallerTraits {
   /** The chat's permission mode now; null when it could not be read (no grant then — fail closed). */
   runtimeMode: RuntimeMode | null;
   workflowOwned: boolean;
-  /** The chat's agent (resolving toolsets); null when unknown. */
-  agent: string | null;
 }
 
 export interface ApprovalPortDeps {
@@ -77,17 +64,10 @@ export interface ApprovalPortDeps {
 export const WORKFLOW_GRANT_NOTICE =
   "This chat's 'Allow workflows' grant will cover the new workflow: its later changes, runs and deletion from this chat won't ask again until you revoke the grant.";
 
-const AGENT_TOOLS_OFF = (label: string): string =>
-  `"Extra toolsets for agent chats" is switched off in Settings › Agent tools, so ${label} cannot be turned on for this chat (it would have no effect). Ask the user to turn that switch on.`;
-const READ_ONLY_TOOLSET =
-  "Agent tool settings are read-only until agent-tools.json is fixed and Orquester restarts, so this toolset cannot be turned on. Deny this card for now.";
 const READ_ONLY_GRANT =
   "Agent tool settings are read-only until agent-tools.json is fixed and Orquester restarts, so the grant cannot be saved. Approve without a grant, or deny.";
 
 export class AgentToolsApprovalPort implements ApprovalPort {
-  /** `<threadId>\u0000<toolset>` of toolset cards pending now (one per toolset per chat). */
-  private readonly pendingToolsets = new Set<string>();
-
   constructor(private readonly deps: ApprovalPortDeps) {}
 
   async findGrant(query: GrantQuery): Promise<Grant | null> {
@@ -103,36 +83,9 @@ export class AgentToolsApprovalPort implements ApprovalPort {
         ? new ToolError("ADMIN_NOT_AVAILABLE", "This chat runs inside an automated workflow: changes that need the user's approval are not available.")
         : new ToolError("PERMISSION_DENIED", "This chat runs inside an automated workflow: nothing here can ask the user for approval.");
     }
-    const toolset = card.kind === "toolset" ? this.toolsetOf(card) : null;
-    if (toolset !== null) {
-      const until = this.deps.tools.toolsetDeclinedUntil(card.threadId, toolset);
-      if (until !== null) {
-        throw new ToolError(
-          "TOOLSET_DECLINED",
-          `The user declined ${toolsetById(toolset).label} in this chat; don't ask again before ${until}. Carry on without it or ask the user in your reply.`,
-          { toolset, declinedUntil: until }
-        );
-      }
-      if (traits.agent !== null && this.deps.tools.isToolsetOn(card.threadId, traits.agent, toolset)) {
-        // Already on: nothing to ask (spec §13). No card was shown.
-        return { outcome: "approved", approvalId: "" };
-      }
-      if (!this.deps.tools.snapshot().enabled) {
-        // An override has no effect while the master switch is off: never a card that "approves" nothing.
-        throw new ToolError("PERMISSION_DENIED", AGENT_TOOLS_OFF(toolsetById(toolset).label));
-      }
-      const key = `${card.threadId}\u0000${toolset}`;
-      if (this.pendingToolsets.has(key)) {
-        throw new ToolError("PERMISSION_DENIED", `A request for ${toolsetById(toolset).label} is already waiting for the user in this chat.`);
-      }
-      this.pendingToolsets.add(key);
-      try {
-        return await this.open(card, signal, traits, toolset);
-      } finally {
-        this.pendingToolsets.delete(key);
-      }
-    }
-    return this.open(card, signal, traits, null);
+    // The legacy kind: every tool is on already, so such a card would approve nothing.
+    if (card.kind === "toolset") throw new ToolError("INVALID_ARGUMENT", "Toolset cards are no longer used: every Orquester tool is on in every chat.");
+    return this.open(card, signal, traits);
   }
 
   /**
@@ -150,13 +103,7 @@ export class AgentToolsApprovalPort implements ApprovalPort {
 
   // -------------------------------------------------------------------------
 
-  /** A toolset card names its toolset (`ApprovalRequest.toolset`); one without is refused rather than guessed. */
-  private toolsetOf(card: ApprovalRequest): ToolsetId {
-    if (!isToolsetId(card.toolset)) throw new ToolError("INVALID_ARGUMENT", "A toolset card must name its toolset.");
-    return card.toolset;
-  }
-
-  private open(card: ApprovalRequest, signal: AbortSignal, traits: CallerTraits, toolset: ToolsetId | null): Promise<ApprovalOutcome> {
+  private open(card: ApprovalRequest, signal: AbortSignal, traits: CallerTraits): Promise<ApprovalOutcome> {
     const grantOptions = this.allowedGrantOptions(card, traits);
     // A create in a chat that holds a `workflows` grant: the new workflow joins it (§7.6, ruling) —
     // and the card says so. Re-decided with the caller's traits when the answer arrives.
@@ -186,17 +133,6 @@ export class AgentToolsApprovalPort implements ApprovalPort {
         ...(card.delivered !== undefined ? { delivered: card.delivered } : {}),
         prepareApproval: async (answer) => {
           joinGrantId = undefined;
-          if (toolset !== null) {
-            if (!this.deps.tools.snapshot().enabled) {
-              // Shown to the user who answered: names the switch as Settings shows it.
-              throw new ToolApprovalAnswerRefusal(
-                "AGENT_TOOLS_DISABLED",
-                `"Extra toolsets for agent chats" is switched off in Settings › Agent tools, so ${toolsetById(toolset).label} would have no effect in this chat. Deny this card, or turn that switch on first.`,
-                409
-              );
-            }
-            if (this.deps.tools.isReadOnly()) throw new ToolApprovalAnswerRefusal("AGENT_TOOLS_UNAVAILABLE", READ_ONLY_TOOLSET, 503);
-          }
           if (answer.grant === undefined && !joinable) return;
           // The caller must still be `full-access` (and not workflow-owned) when a grant is made or joined.
           const now = await this.deps.callerTraits(card.threadId);
@@ -213,12 +149,9 @@ export class AgentToolsApprovalPort implements ApprovalPort {
           if (this.deps.tools.isReadOnly()) throw new ToolApprovalAnswerRefusal("AGENT_TOOLS_UNAVAILABLE", READ_ONLY_GRANT, 503);
         },
         commitApproval: (answer) => {
-          const committed = this.commit(card, answer, toolset, joinGrantId);
+          const committed = this.commit(card, answer, joinGrantId);
           chosen = committed.chosen;
           return committed.result;
-        },
-        onDenied: () => {
-          if (toolset !== null) this.deps.tools.recordToolsetDecline(card.threadId, toolset);
         }
       }
     );
@@ -278,10 +211,8 @@ export class AgentToolsApprovalPort implements ApprovalPort {
   private commit(
     card: ApprovalRequest,
     answer: ToolApprovalAnswer,
-    toolset: ToolsetId | null,
     joinGrantId: string | undefined
   ): { result: { grantId?: string; grantScope?: "chat" | "project" }; chosen?: { input: NewAgentToolGrant; id: string } } {
-    if (toolset !== null) this.deps.tools.enableToolsetForThread(card.threadId, toolset);
     if (answer.grant !== undefined) {
       // Planned, not recorded: the outcome's `commitGrant` records it once the call passed its re-gate.
       const input: NewAgentToolGrant = {
@@ -330,13 +261,12 @@ export function workflowOwnedFromTabs(threadId: string, tab: (id: string) => Tab
 }
 
 /**
- * The trait reader the daemon wires: the tab (does it exist, its agent, its owner and lineage) and
+ * The trait reader the daemon wires: the tab (does it exist, its owner and lineage) and
  * the thread's permission mode from its head, read through the daemon's own API. A failed read
  * leaves the mode unknown (`null`: no grant is offered or made).
  */
 export function callerTraitsFromDaemon(deps: {
   tab(id: string): TabLike | undefined;
-  agentOf(id: string): string | null;
   api(): DaemonApi | null;
 }): (threadId: string) => Promise<CallerTraits | null> {
   return async (threadId) => {
@@ -353,7 +283,7 @@ export function callerTraitsFromDaemon(deps: {
         runtimeMode = null;
       }
     }
-    return { runtimeMode, workflowOwned: workflowOwnedFromTabs(threadId, deps.tab), agent: deps.agentOf(threadId) };
+    return { runtimeMode, workflowOwned: workflowOwnedFromTabs(threadId, deps.tab) };
   };
 }
 
@@ -373,7 +303,7 @@ export interface AgentToolsRuntime {
   threadInfo(id: string): AgentToolsThreadInfo | null;
   /** Boot: read `agent-tools.json`, resolve cards left open by a previous run as `cancelled`. */
   load(): Promise<void>;
-  /** A chat tab closed: its pending cards are cancelled, its overrides, declines and chat grants deleted. */
+  /** A chat tab closed: its pending cards are cancelled, its chat grants deleted. */
   threadClosed(threadId: string): void;
   /** Shutdown: pending cards cancelled, queued writes flushed. */
   shutdown(): Promise<void>;
@@ -417,7 +347,7 @@ export function createAgentToolsRuntime(deps: AgentToolsRuntimeDeps): AgentTools
   const port = new AgentToolsApprovalPort({
     registry: approvals,
     tools,
-    callerTraits: callerTraitsFromDaemon({ tab: deps.tab, agentOf: deps.agentOf, api: deps.api }),
+    callerTraits: callerTraitsFromDaemon({ tab: deps.tab, api: deps.api }),
     workflowOwned
   });
   return {
@@ -451,30 +381,16 @@ export function createAgentToolsRuntime(deps: AgentToolsRuntimeDeps): AgentTools
   };
 }
 
-/** The toolsets a chat has while no store answers (shutdown): the locked ones only. */
-export const lockedToolsetsOnly = async (): Promise<ReadonlySet<string>> =>
-  new Set(TOOLSETS.filter((toolset) => toolset.locked).map((toolset) => toolset.id));
-
 /**
- * Point the catalog executor (both transports) at this runtime: cards and grants through its port,
- * a chat's toolsets resolved from its store (overrides, settings, master switch). Returns the
- * disconnect, called at shutdown BEFORE the runtime stops: from then on no card opens and no grant
- * is honoured (the executor refuses `PERMISSION_DENIED`), and every chat has the locked toolsets
- * only — never the catalogue defaults, which would ignore the master switch and chat overrides
- * while the transports still serve. Each port is cleared only while it is still this runtime's.
- *
- * An approved toolset card fires `tools.onToolsetsChanged` listeners in a microtask after the card
- * settles but BEFORE the awaiting `request()` resumes in the executor (the tool result is not sent
- * yet): a listener only schedules its re-list/restart for the chat's next idle point.
+ * Point the catalog executor (both transports) at this runtime: cards and grants through its port.
+ * Returns the disconnect, called at shutdown BEFORE the runtime stops: from then on no card opens
+ * and no grant is honoured (the executor refuses `PERMISSION_DENIED`) while the transports still
+ * serve. The port is cleared only while it is still this runtime's.
  */
-export function connectExecutor(runtime: Pick<AgentToolsRuntime, "port" | "tools">, ports: ExecutorPorts): () => void {
-  const enabledToolsets: NonNullable<ExecutorPorts["enabledToolsets"]> = async (caller) =>
-    new Set(runtime.tools.resolvedToolsets(caller.threadId, caller.agentId));
+export function connectExecutor(runtime: Pick<AgentToolsRuntime, "port">, ports: ExecutorPorts): () => void {
   ports.approvals = runtime.port;
-  ports.enabledToolsets = enabledToolsets;
   return () => {
     if (ports.approvals === runtime.port) ports.approvals = null;
-    if (ports.enabledToolsets === enabledToolsets) ports.enabledToolsets = lockedToolsetsOnly;
   };
 }
 

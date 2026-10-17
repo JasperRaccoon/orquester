@@ -1,80 +1,44 @@
 /**
- * The chat transport's daemon half of toolsets (unified MCP design 2026-10-15 §9.3, §9.4):
+ * The chat transport's daemon half of session-tool manifests (unified MCP design 2026-10-15 §9.4,
+ * §12.1):
  *
  * - **The manifest route** (`daemonRoutesForHost.sessionToolsManifest`, socket-only, the agent
  *   host's bearer): `{tools, instructions, deny}` for one provider session of a thread, built from
- *   the thread's tab, its resolved toolsets, the workflow-owned trait (owner + lineage walk) and the
- *   daemon-pointing MCP servers (`GET /api/agent-profile/daemon-mcp-servers`, Task 11's read; none
- *   until it answers). What a `launch` hands out is what the thread advertises
- *   (`AgentToolsService.setAdvertisedToolsets` → the Tools chip's `appliesAtNextIdle`).
- * - **Refresh**: on `onToolsetsChanged` (a chat's toolsets, or every chat's on a settings change,
- *   {@link REFRESH_CONCURRENCY} chats at a time) the new manifest is pushed to the host
- *   (`agentHostRoutes.sessionToolsRefresh`). The host applies it in-session where the provider
- *   re-lists on `tools/list_changed` (Claude: answered `live` once the CLI re-listed, bounded) and
- *   otherwise marks the live session stale (`next-idle`: restart with resume at its next idle point,
- *   never under a running turn). The advertised set moves only on `live`/`unchanged`; any other
- *   answer leaves the change PENDING, so `appliesAtNextIdle` (what `request_toolset` answers
- *   from) never claims "now" falsely. An approved `request_toolset` card awaits that answer
- *   ({@link SessionToolsRefresher.toolsetApproved}) before the call resumes.
- * - **The automatic continue turn** (§9.3): after an approved `request_toolset` card whose push the
- *   host answered `next-idle` (a restart really is pending), wait for the turn that asked to settle; then, unless
- *   the user spoke first (a user message since, or another turn ran), post `[Orquester] The <label>
- *   tools are now available. Continue the task you were doing.` with the `toolset-continue` chip, in
- *   the chat's interaction mode at request time, `ifIdle` (a racing user turn wins), no `causedBy`.
- *   Its send is what restarts the session with the new tools.
+ *   the thread's tab, the workflow-owned trait (owner + lineage walk) and the daemon-pointing MCP
+ *   servers (`GET /api/agent-profile/daemon-mcp-servers`, Task 11's read; none until it answers).
+ *   Every chat tool is advertised to every chat (no always-Admin one to a workflow-owned chat).
+ * - **Push** (`agentHostRoutes.sessionToolsRefresh`): a chat whose launch manifest was refused
+ *   (503, its denials unknown) gets its manifest pushed once a daemon-pointing read succeeds — the
+ *   host's launch waiting for its denials takes it — and {@link SessionToolsRefresher.refresh}
+ *   pushes one chat's, or every open chat's ({@link REFRESH_CONCURRENCY} at a time), manifest. The
+ *   host applies it in-session where the provider re-lists on `tools/list_changed` (Claude) and
+ *   otherwise marks the live session stale (restart with resume at its next idle point, never
+ *   under a running turn); an equal list is `unchanged`.
  */
 
 import { randomUUID } from "node:crypto";
 import { resolve as resolvePath } from "node:path";
 
 import type { FastifyInstance } from "fastify";
-import {
-  AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE,
-  isToolsetId,
-  toolsetById,
-  type DaemonMcpServersResponse,
-  type DaemonPointingServer,
-  type SessionSummary
-} from "@orquester/api";
-import {
-  buildToolsetContinueMessage,
-  isThreadAuthoredMessage,
-  isMergeBackMessage,
-  isToolsetContinueMessage,
-  toolsetContinueContext,
-  type AgentAdapterId,
-  type InteractionMode,
-  type ThreadSnapshotPayload
-} from "@orquester/api/agent-chat";
+import { AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, type DaemonMcpServersResponse, type DaemonPointingServer } from "@orquester/api";
+import type { AgentAdapterId } from "@orquester/api/agent-chat";
 
 import {
   daemonRoutesForHost,
-  SESSION_TOOLS_REFRESH_TIMEOUT_MS,
   type SessionToolsManifest,
   type SessionToolsManifestRequest,
   type SessionToolsRefreshResponse
 } from "../agent-host/host-protocol.ts";
-import type { AnyOrquesterTool, ThreadCaller, ToolsetApplyOutcome } from "../mcp/catalog/contract.ts";
+import type { AnyOrquesterTool } from "../mcp/catalog/contract.ts";
 import type { DaemonApi } from "../mcp/daemon-api.ts";
 import { isWorkflowOwned } from "../mcp/gate/scope.ts";
-import { listSessions, readThread, sendCommand } from "../mcp/reads.ts";
-import { turnBaseline, waitForTurn } from "../mcp/wait.ts";
+import { listSessions } from "../mcp/reads.ts";
 import { buildSessionToolsManifest, isWithinDir, type ManifestThread } from "./manifest.ts";
-
-/** How long a scheduled continue waits for the asking turn to settle; past it nothing is posted. */
-export const TOOLSET_CONTINUE_WAIT_MS = 60 * 60 * 1000;
 
 /** How long a read of the daemon-pointing servers is reused (the read walks every account home). */
 export const DAEMON_POINTING_CACHE_MS = 30_000;
 
-/**
- * How long `request_toolset` waits for the host to apply its toolset: just above the push's own
- * bound, which is above the host's worst case (a launch read it waits for + Claude's re-list), so
- * an answer the host gives is never lost to this wait — the result stays truthful.
- */
-export const TOOLSET_APPLY_WAIT_MS = SESSION_TOOLS_REFRESH_TIMEOUT_MS + 1_000;
-
-/** Chats refreshed at once after a settings change. */
+/** Chats refreshed at once by {@link SessionToolsRefresher.refresh} of every open chat. */
 export const REFRESH_CONCURRENCY = 4;
 
 /**
@@ -97,17 +61,10 @@ export const MAX_POINTING_SCOPES = 32;
  */
 export const REFUSED_PUSH_WINDOW_MS = 20_000;
 
-/** One push in flight: its outcome, its stamp once its manifest is built, and when the host was asked. */
-export interface PushHandle {
-  done: Promise<RefreshAnswer>;
-  stamp: { seq: number; epoch: string } | undefined;
-  hostStarted: Promise<void>;
-}
-
 /** What the host did with a pushed manifest; `no-host` — nothing reached a live session. */
 export type RefreshAnswer = SessionToolsRefreshResponse["applied"] | "no-host";
 
-export interface ToolsetRefreshThread {
+export interface SessionToolsRefreshThread {
   agentId: AgentAdapterId;
   /** `"system"` or the managed account id the thread runs as. */
   home: string;
@@ -129,14 +86,11 @@ interface PointingScope {
 
 type PointingRead = { servers: readonly DaemonPointingServer[] } | { failed: string } | { uncontained: true };
 
-export interface ToolsetRefreshDeps {
+export interface SessionToolsRefreshDeps {
   /** The open chat thread, or null (closed, unknown, not a chat, no known adapter). */
-  thread(threadId: string): ToolsetRefreshThread | null;
-  /** Every open chat thread (a settings change refreshes them all). */
+  thread(threadId: string): SessionToolsRefreshThread | null;
+  /** Every open chat thread ({@link SessionToolsRefresher.refresh} of them all). */
   openThreads(): string[];
-  resolvedToolsets(threadId: string, agent: AgentAdapterId): readonly string[];
-  /** Settings › Agent tools' master switch. */
-  agentToolsEnabled(): boolean;
   /** The chat audience of the catalog. */
   catalog(): readonly AnyOrquesterTool[];
   /** The daemon's in-process API (null while it does not exist yet). */
@@ -147,31 +101,11 @@ export interface ToolsetRefreshDeps {
    */
   pushToHost(threadId: string, manifest: SessionToolsManifest): Promise<SessionToolsRefreshResponse | null>;
   now?: () => number;
-  /** Overrides {@link TOOLSET_APPLY_WAIT_MS} (tests). */
-  applyWaitMs?: number;
   /** Overrides {@link DAEMON_POINTING_READ_TIMEOUT_MS} (tests). */
   pointingReadTimeoutMs?: number;
   /** Overrides {@link MANIFEST_SESSIONS_READ_TIMEOUT_MS} (tests). */
   sessionsReadTimeoutMs?: number;
   logger?: { log?(message: string): void; warn?(message: string, detail?: unknown): void };
-}
-
-/** One scheduled continue. */
-interface PendingContinue {
-  controller: AbortController;
-  toolset: string;
-}
-
-const isUserAuthored = (item: ThreadSnapshotPayload["items"][number]): boolean =>
-  item.kind === "message" &&
-  item.role === "user" &&
-  !isThreadAuthoredMessage(item) &&
-  !isMergeBackMessage(item) &&
-  !isToolsetContinueMessage(item);
-
-/** The ids of the user's own messages in a snapshot (chips from other chats or Orquester excluded). */
-export function userMessageIds(snapshot: ThreadSnapshotPayload): Set<string> {
-  return new Set(snapshot.items.filter(isUserAuthored).map((item) => item.id));
 }
 
 /**
@@ -194,10 +128,6 @@ export function isFastifyRouteMiss(body: unknown): boolean {
 }
 
 export class SessionToolsRefresher {
-  private readonly advertised = new Map<string, readonly string[]>();
-  private readonly continues = new Map<string, PendingContinue>();
-  /** The push in flight per chat (a `request_toolset` call awaits its answer). */
-  private readonly pushes = new Map<string, PushHandle>();
   /**
    * The last GOOD read of the daemon-pointing servers per scope (`""`: every project's; else a
    * chat's project and cwd); `stale` once invalidated (re-read, but kept).
@@ -214,35 +144,21 @@ export class SessionToolsRefresher {
   private seqClock = 0;
   /** This daemon process's epoch: the host compares sequences only within one epoch. */
   private readonly epoch = randomUUID();
-  /** The newest push each chat got an answer for, with its stamp (a superseded `request_toolset` reads it). */
-  private readonly latestAnswer = new Map<string, { seq: number; epoch: string; answer: RefreshAnswer }>();
-  /** The newest sequence each chat's advertised set was taken from: an older answer never overwrites it. */
-  private readonly advertisedSeq = new Map<string, number>();
   private stopped = false;
 
-  constructor(private readonly deps: ToolsetRefreshDeps) {}
+  constructor(private readonly deps: SessionToolsRefreshDeps) {}
 
   private now(): number {
     return (this.deps.now ?? Date.now)();
   }
 
-  /** What each chat's provider session was last handed (`AgentToolsService.setAdvertisedToolsets`). */
-  advertisedToolsets(threadId: string): readonly string[] | null {
-    return this.advertised.get(threadId) ?? null;
-  }
-
-  /** A closed chat: forget it, and drop its scheduled continue. */
+  /** A closed chat: forget it. */
   forget(threadId: string): void {
     this.refused.delete(threadId);
-    this.advertised.delete(threadId);
-    this.advertisedSeq.delete(threadId);
-    this.latestAnswer.delete(threadId);
-    this.cancelContinue(threadId);
   }
 
   stop(): void {
     this.stopped = true;
-    for (const threadId of [...this.continues.keys()]) this.cancelContinue(threadId);
   }
 
   /**
@@ -332,7 +248,7 @@ export class SessionToolsRefresher {
     for (const [threadId, at] of [...this.refused]) {
       // The entry goes once a push reached the host (`push`), or when the host stopped waiting.
       if (now - at > REFUSED_PUSH_WINDOW_MS) this.refused.delete(threadId);
-      else this.pushLogged(threadId);
+      else void this.pushLogged(threadId);
     }
   }
 
@@ -345,13 +261,6 @@ export class SessionToolsRefresher {
   private nextSeq(): number {
     this.seqClock += 1;
     return this.seqClock;
-  }
-
-  /** Take `toolsets` as what a chat advertises, unless a newer manifest already set it. */
-  private setAdvertised(threadId: string, toolsets: readonly string[], seq: number): void {
-    if (seq < (this.advertisedSeq.get(threadId) ?? -Infinity)) return;
-    this.advertisedSeq.set(threadId, seq);
-    this.advertised.set(threadId, [...toolsets]);
   }
 
   /**
@@ -401,7 +310,7 @@ export class SessionToolsRefresher {
     if (refusedAt !== undefined && this.now() - refusedAt > REFUSED_PUSH_WINDOW_MS) this.refused.delete(threadId);
     // Refused before (and maybe still waited for — the host may have given up on an earlier
     // answer): a push follows, and only its delivery clears the chat.
-    else if (refusedAt !== undefined && purpose === "launch") this.pushLogged(threadId);
+    else if (refusedAt !== undefined && purpose === "launch") void this.pushLogged(threadId);
     const cwdPaths = scanned ? [thread.cwd ?? "", thread.canonicalCwd ?? ""].filter((path) => path !== "" && !projectPaths.some((root) => resolvePath(root) === resolvePath(path))) : [];
     const api = this.deps.api();
     // The workflow-owned trait walks lineage through closed tabs (the gate's own walk): fail
@@ -433,95 +342,25 @@ export class SessionToolsRefresher {
       ...(denyEveryKnown ? { denyEveryKnown: true } : {}),
       workflowOwned
     };
-    const toolsets = this.deps.resolvedToolsets(threadId, thread.agentId);
-    const manifest = buildSessionToolsManifest({
-      thread: manifestThread,
-      toolsets,
-      agentToolsEnabled: this.deps.agentToolsEnabled(),
-      catalog: this.deps.catalog(),
-      daemonPointing
-    });
-    const seq = this.nextSeq();
-    if (purpose === "launch") this.setAdvertised(threadId, toolsets, seq);
-    return { ...manifest, seq, epoch: this.epoch };
+    const manifest = buildSessionToolsManifest({ thread: manifestThread, catalog: this.deps.catalog(), daemonPointing });
+    return { ...manifest, seq: this.nextSeq(), epoch: this.epoch };
   }
 
-  /**
-   * `onToolsetsChanged`: a chat's (`threadId`) or every chat's (`null`) toolsets changed. It runs
-   * after a toolset card settled and BEFORE the awaiting `request_toolset` call resumes; the push
-   * only starts here — the host applies it in-session where the provider re-lists (Claude) or marks
-   * the live session stale for a restart at its next idle point, never under the running call —
-   * and the call itself awaits the host's answer through {@link toolsetApproved} before it reads
-   * `appliesAtNextIdle`.
-   */
-  toolsetsChanged(threadId: string | null): void {
-    if (this.stopped) return;
-    if (threadId !== null) {
-      this.pushLogged(threadId);
-      return;
-    }
-    void this.refresh(null).catch((error: unknown) =>
-      this.deps.logger?.warn?.("session-tools: refresh failed", error instanceof Error ? error.message : String(error))
-    );
-  }
-
-  private pushLogged(threadId: string): PushHandle {
-    const handle = this.push(threadId);
-    // The same handle (its stamp is filled in later), its outcome never a rejection.
-    handle.done = handle.done.catch((error: unknown) => {
+  private pushLogged(threadId: string): Promise<RefreshAnswer> {
+    return this.push(threadId).catch((error: unknown) => {
       this.deps.logger?.warn?.("session-tools: refresh failed", error instanceof Error ? error.message : String(error));
       return "no-host" as const;
     });
-    return handle;
   }
 
-  /**
-   * Push one chat's manifest and record what its live session advertises now: the new set only
-   * when the host applied it (`live`, `unchanged`); otherwise PENDING — the old set, or none — so
-   * `appliesAtNextIdle` never claims "now" falsely. The handle names the push's stamp once its
-   * manifest is built, and `hostStarted` resolves when the host is asked (or the push ends first).
-   */
-  push(threadId: string): PushHandle {
-    let markStarted!: () => void;
-    const hostStarted = new Promise<void>((resolve) => (markStarted = resolve));
-    const handle: PushHandle = { done: Promise.resolve("no-host"), stamp: undefined, hostStarted };
-    handle.done = (async (): Promise<RefreshAnswer> => {
-      try {
-        const manifest = await this.manifest(threadId, "check");
-        if (manifest === null) return "no-host";
-        if (manifest === "unavailable") {
-          this.markPending(threadId);
-          return "no-host";
-        }
-        const seq = manifest.seq ?? this.nextSeq();
-        handle.stamp = { seq, epoch: this.epoch };
-        markStarted();
-        const answer = await this.deps.pushToHost(threadId, manifest);
-        // It reached the host: a launch that waited for this chat's denials has them now.
-        if (answer !== null) this.refused.delete(threadId);
-        const applied: RefreshAnswer = answer?.applied ?? "no-host";
-        // A newer push decided already: this answer changes nothing.
-        if (applied === "superseded" || seq < (this.advertisedSeq.get(threadId) ?? -Infinity)) return applied;
-        if (seq > (this.latestAnswer.get(threadId)?.seq ?? -Infinity)) this.latestAnswer.set(threadId, { seq, epoch: this.epoch, answer: applied });
-        if (applied === "live" || applied === "unchanged") this.setAdvertised(threadId, manifest.toolsets ?? [], seq);
-        else this.markPending(threadId);
-        return applied;
-      } finally {
-        markStarted();
-      }
-    })();
-    this.pushes.set(threadId, handle);
-    void handle.done
-      .finally(() => {
-        if (this.pushes.get(threadId) === handle) this.pushes.delete(threadId);
-      })
-      .catch(() => undefined);
-    return handle;
-  }
-
-  /** The live session keeps what it launched with (or, unknown, nothing): the change is pending. */
-  private markPending(threadId: string): void {
-    if (!this.advertised.has(threadId)) this.advertised.set(threadId, []);
+  /** Push one chat's manifest to the host; what the host did with it (`no-host` when nothing reached one). */
+  async push(threadId: string): Promise<RefreshAnswer> {
+    const manifest = await this.manifest(threadId, "check");
+    if (manifest === null || manifest === "unavailable") return "no-host";
+    const answer = await this.deps.pushToHost(threadId, manifest);
+    // It reached the host: a launch that waited for this chat's denials has them now.
+    if (answer !== null) this.refused.delete(threadId);
+    return answer?.applied ?? "no-host";
   }
 
   /** Push the new manifest of one chat, or of every open chat ({@link REFRESH_CONCURRENCY} at a time). */
@@ -532,136 +371,11 @@ export class SessionToolsRefresher {
     const worker = async (): Promise<void> => {
       while (next < ids.length && !this.stopped) {
         const id = ids[next++]!;
-        answers.set(id, await this.pushLogged(id).done);
+        answers.set(id, await this.pushLogged(id));
       }
     };
     await Promise.all(Array.from({ length: Math.min(REFRESH_CONCURRENCY, ids.length) }, worker));
     return answers;
-  }
-
-  /**
-   * `executorPorts.onToolsetApproved`, awaited by the executor before `request_toolset` resumes:
-   * wait (bounded) for the host's answer to the push the change started. `live` / `unchanged` —
-   * the advertised set is the new one ("now"); `next-idle` — a restart really is pending: the
-   * automatic continue is scheduled ("after-restart"); anything else (no host, no live session, no
-   * answer in time, a superseded push) — `pending`: the change waits for the session's next start,
-   * and NO continue (nothing would restart). The answer is `request_toolset`'s (`ToolsetApplyOutcome`);
-   * none for a call that went away.
-   */
-  async toolsetApproved(caller: ThreadCaller, toolset: string, signal?: AbortSignal): Promise<ToolsetApplyOutcome | undefined> {
-    if (this.stopped || signal?.aborted) return undefined;
-    let timer: NodeJS.Timeout | undefined;
-    let onAbort: (() => void) | undefined;
-    const aborted = new Promise<"aborted">((resolve) => {
-      onAbort = () => resolve("aborted");
-      signal?.addEventListener("abort", onAbort, { once: true });
-    });
-    let push = this.pushes.get(caller.threadId) ?? this.pushLogged(caller.threadId);
-    const own = push;
-    let answer: RefreshAnswer | "timeout" | "aborted";
-    try {
-      // The bound covers the HOST (its worst case is below it): it starts when the host is asked,
-      // after the manifest was built (that build has its own bounds, `DAEMON_POINTING_READ_TIMEOUT_MS`).
-      const started = await Promise.race([own.hostStarted, aborted]);
-      if (started === "aborted") return undefined;
-      const deadline = new Promise<"timeout">((resolve) => {
-        timer = setTimeout(() => resolve("timeout"), this.deps.applyWaitMs ?? TOOLSET_APPLY_WAIT_MS);
-      });
-      // A push another one overtook answers `superseded`: the newest one decides.
-      for (;;) {
-        answer = await Promise.race([push.done.catch(() => "no-host" as const), deadline, aborted]);
-        if (answer !== "superseded") break;
-        const newer = this.pushes.get(caller.threadId);
-        if (newer !== undefined && newer !== push) {
-          push = newer;
-          continue;
-        }
-        // The newer push that overtook this one finished already: ITS outcome is the change's —
-        // only when it really is newer than this call's own push (a relaunch that superseded it
-        // owes nothing, and an older recorded answer is no answer to this change).
-        const latest = this.latestAnswer.get(caller.threadId);
-        const ownStamp = own.stamp;
-        answer = latest !== undefined && ownStamp !== undefined && latest.epoch === ownStamp.epoch && latest.seq > ownStamp.seq ? latest.answer : "superseded";
-        break;
-      }
-    } finally {
-      clearTimeout(timer);
-      if (onAbort) signal?.removeEventListener("abort", onAbort);
-    }
-    // The call went away (Stop, the provider cancelled it): nothing is scheduled for it.
-    if (answer === "aborted" || signal?.aborted) return undefined;
-    if (answer === "timeout") {
-      this.markPending(caller.threadId);
-      return "pending";
-    }
-    if (answer === "live" || answer === "unchanged") return "now";
-    if (answer !== "next-idle") return "pending";
-    void this.scheduleContinue(caller.threadId, toolset, caller.planning ? "plan" : "default").catch((error: unknown) =>
-      this.deps.logger?.warn?.("session-tools: the automatic continue failed", error instanceof Error ? error.message : String(error))
-    );
-    return "after-restart";
-  }
-
-  private cancelContinue(threadId: string): void {
-    const pending = this.continues.get(threadId);
-    if (!pending) return;
-    this.continues.delete(threadId);
-    pending.controller.abort();
-  }
-
-  /**
-   * Wait for the asking turn to settle, then post the continue unless the user spoke first. Returns
-   * what happened (for the log and the tests).
-   */
-  async scheduleContinue(threadId: string, toolset: string, interactionMode: InteractionMode): Promise<"posted" | "skipped" | "cancelled"> {
-    const api = this.deps.api();
-    if (!api) return "skipped";
-    // One continue per chat: a later approval supersedes the earlier one (it names the newest toolset).
-    this.cancelContinue(threadId);
-    const controller = new AbortController();
-    this.continues.set(threadId, { controller, toolset });
-    const done = (result: "posted" | "skipped" | "cancelled") => {
-      if (this.continues.get(threadId)?.controller === controller) this.continues.delete(threadId);
-      return result;
-    };
-    try {
-      const [sessions, before] = await Promise.all([listSessions(api), readThread(api, threadId)]);
-      const summary = sessions.find((session: SessionSummary) => session.id === threadId);
-      if (!summary) return done("skipped");
-      const baseline = turnBaseline(summary);
-      const seen = userMessageIds(before);
-      const { outcome, summary: after } = await waitForTurn(api, threadId, baseline, {
-        timeoutMs: TOOLSET_CONTINUE_WAIT_MS,
-        signal: controller.signal,
-        now: this.deps.now ?? Date.now
-      });
-      if (controller.signal.aborted) return done("cancelled");
-      // Only a turn that finished on its own: a Stop, a failure, a plan or a question is the user's.
-      if (outcome !== "completed" || !after || after.latestTurn?.turnId !== baseline.turnId) return done("skipped");
-      const settled = await readThread(api, threadId);
-      // The user spoke first, or stopped the turn (its own record says so, whatever the summary read).
-      if ([...userMessageIds(settled)].some((id) => !seen.has(id))) return done("skipped");
-      const asked = settled.turns.find((turn) => turn.turnId === baseline.turnId);
-      if (asked !== undefined && asked.state !== "completed") return done("skipped");
-      if (controller.signal.aborted) return done("cancelled");
-      const label = (isToolsetId(toolset) ? toolsetById(toolset)?.label : undefined) ?? toolset;
-      try {
-        await sendCommand(api, threadId, "turn", {
-          input: buildToolsetContinueMessage(label),
-          interactionMode,
-          context: [toolsetContinueContext(toolset)],
-          // A user turn that raced in wins: no steer into it (TURN_NOT_IDLE, never a receipt).
-          ifIdle: true
-        }, { commandId: `toolset-continue-${randomUUID()}` });
-      } catch (error) {
-        this.deps.logger?.log?.(`session-tools: no continue for ${threadId}: ${error instanceof Error ? error.message : String(error)}`);
-        return done("skipped");
-      }
-      return done("posted");
-    } catch (error) {
-      if (controller.signal.aborted) return done("cancelled");
-      throw error;
-    }
   }
 }
 

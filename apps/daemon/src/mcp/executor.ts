@@ -6,7 +6,6 @@
  * ```
  * look up (audience)                     → TOOL_NOT_FOUND
  * parse (strict, audience schema)        → INVALID_ARGUMENT (stripped keys refused too)
- * toolset on in this chat (chat only)    → TOOL_NOT_ENABLED (names the toolset; suggests request_toolset)
  * scope = tool.scope(args)               → THREAD_NOT_FOUND | PROJECT_NOT_FOUND | PERMISSION_DENIED
  * gate (chat only; external = allow)     → deny: PERMISSION_DENIED | ADMIN_NOT_AVAILABLE
  *   card → grant? else preview (> 1 MiB → PREVIEW_TOO_LARGE), arguments frozen, port.request
@@ -34,15 +33,12 @@ import {
   TOOL_APPROVAL_FULL_PREVIEW_MAX_BYTES,
   TOOL_APPROVAL_DENY_REASON_MAX_CHARS,
   TOOL_APPROVAL_REASON_MAX_CHARS,
-  TOOLSETS,
-  toolsetById,
   TOOL_APPROVAL_REFERENCE_KEY,
   type AccountSummary,
   type AdminFamily,
   type ApprovalFamily,
   type ApprovalPreviewSection,
   type ToolApprovalReference,
-  type ToolsetId,
   type WorkspaceSummary
 } from "@orquester/api";
 import type { CallerPrincipal } from "@orquester/api/agent-chat";
@@ -62,10 +58,7 @@ import type {
   ScopeContext,
   ThreadCaller,
   Tier,
-  ToolCaller,
-  ToolsetApplyOutcome,
-  ToolsetCardInput,
-  ToolsetCardOutcome
+  ToolCaller
 } from "./catalog/contract.ts";
 import { withPrincipal, type DaemonApi } from "./daemon-api.ts";
 import { ToolError } from "./errors.ts";
@@ -80,40 +73,24 @@ import type { SessionSecretRequests } from "../session-tools/contract.ts";
 /** Re-exported for daemon-side callers; tool modules import it from `./gate/turn-policy.ts`. */
 export { NEW_SESSION };
 
-/** The toolsets on in one chat, by id. */
-export type EnabledToolsets = (caller: ThreadCaller) => Promise<ReadonlySet<string>>;
-
 /**
- * Production wiring, set by the daemon's `index.ts` blocks (Task 3 sets `approvals` and
- * `enabledToolsets`): read at call time, so the order the blocks run in does not matter. Tests pass
- * their own through {@link ExecutorDeps}.
+ * Production wiring, set by the daemon's `index.ts` blocks (Task 3 sets `approvals`): read at call
+ * time, so the order the blocks run in does not matter. Tests pass their own through
+ * {@link ExecutorDeps}. Every chat tool is on in every chat: there is no per-chat tool switch.
  */
 export interface ExecutorPorts {
   /** Cards and grants; null → every card is refused (fail closed). */
   approvals: ApprovalPort | null;
-  /** The chat's resolved toolsets; null → the catalogue defaults for its agent ({@link defaultEnabledToolsets}). */
-  enabledToolsets: EnabledToolsets | null;
-  /**
-   * A toolset card a chat raised (`request_toolset`) was APPROVED by the user — a real card, not
-   * "already on" — while the call still runs. AWAITED before the call resumes: the chat transport
-   * waits (bounded) for the host to apply the toolset, so the tool answers "now" / "after-restart"
-   * truthfully, and schedules the automatic continue turn (spec §9.3). Its errors are logged,
-   * never thrown into the call; null → nothing waited for or scheduled.
-   */
-  onToolsetApproved?: ((caller: ThreadCaller, toolset: ToolsetId, signal: AbortSignal) => ToolsetApplyOutcome | void | Promise<ToolsetApplyOutcome | void>) | null;
 }
 
-export const executorPorts: ExecutorPorts = { approvals: null, enabledToolsets: null, onToolsetApproved: null };
+export const executorPorts: ExecutorPorts = { approvals: null };
 
 export interface ExecutorDeps {
   /** The tools by name for an audience (default: the catalog). */
   lookup?: (name: string, audience: Audience) => AnyOrquesterTool | undefined;
   approvals?: ApprovalPort | null;
-  enabledToolsets?: EnabledToolsets | null;
   /** The caller as it is NOW (mode, planning) — the gate re-runs on it after a card (§13). */
   refreshCaller?: (caller: ThreadCaller) => Promise<ThreadCaller>;
-  /** See {@link ExecutorPorts.onToolsetApproved} (default: the daemon's wiring). */
-  onToolsetApproved?: ((caller: ThreadCaller, toolset: ToolsetId, signal: AbortSignal) => ToolsetApplyOutcome | void | Promise<ToolsetApplyOutcome | void>) | null;
   secretRequests?: SessionSecretRequests;
   now?: () => number;
   newId?: () => string;
@@ -127,10 +104,6 @@ export interface CallEnv {
   /** External callers: the principal the transport minted (`{kind: "external", credentialId}`). */
   principal?: CallerPrincipal;
 }
-
-/** The catalogue defaults for a chat's agent: locked toolsets plus those on by default. */
-export const defaultEnabledToolsets: EnabledToolsets = async (caller) =>
-  new Set(TOOLSETS.filter((toolset) => toolset.locked || toolset.defaults[caller.agentId] === true).map((toolset) => toolset.id));
 
 // ---------------------------------------------------------------------------
 // Schemas per audience
@@ -326,17 +299,6 @@ async function execute(deps: ExecutorDeps, call: { name: string; arguments: unkn
   const now = deps.now ?? Date.now;
   const scopeCtx: ScopeContext = { api, signal, now, caller };
 
-  if (caller.kind === "thread") {
-    const enabled = await (deps.enabledToolsets ?? executorPorts.enabledToolsets ?? defaultEnabledToolsets)(caller);
-    if (!enabled.has(tool.toolset)) {
-      const label = toolsetById(tool.toolset)?.label ?? tool.toolset;
-      throw new ToolError(
-        "TOOL_NOT_ENABLED",
-        `${tool.name} is in the "${label}" toolset, which is off in this chat. To ask the user to turn it on, call request_toolset with toolset "${tool.toolset}" and your reason.`
-      );
-    }
-  }
-
   const scope: ScopeClaim = await tool.scope(args, scopeCtx);
   let approval: CallContext["approval"];
   let card: { preview: ApprovalPreview | null; family: string } | null = null;
@@ -404,7 +366,6 @@ async function execute(deps: ExecutorDeps, call: { name: string; arguments: unkn
     scope,
     turn,
     ...(deps.secretRequests ? { secretRequests: deps.secretRequests } : {}),
-    ...(who.kind === "thread" ? { requestToolsetCard: (input: ToolsetCardInput) => requestToolsetCard(deps, who, input, signal, record) } : {}),
     ...(approval ? { approval } : {})
   };
   if (signal.aborted) return cancelled();
@@ -697,66 +658,6 @@ async function recordChildrenInGrant(
       .recordWorkflowInGrant({ threadId: caller.threadId, callerProjectPath: caller.projectPath, workflowId, grantId: approval.grantId })
       .catch((error) => console.error("[mcp] could not record a sub-workflow in its grant", error instanceof Error ? error.message : "unknown error"));
   }
-}
-
-/**
- * `request_toolset`'s card (spec §9.3): kind/family `toolset`, never a grant; refused for
- * workflow-owned callers. The outcome is the call's `toolApproval` reference; an approved real card
- * (not "already on", which opens none) is reported to the chat transport, which schedules the
- * automatic continue turn where the provider cannot take the tools in-session.
- */
-async function requestToolsetCard(deps: ExecutorDeps, caller: ThreadCaller, input: ToolsetCardInput, signal: AbortSignal, record: CallRecord): Promise<ToolsetCardOutcome> {
-  if (caller.workflowOwned) {
-    throw new ToolError("PERMISSION_DENIED", "This chat runs inside an automated workflow, where nobody can approve a toolset.");
-  }
-  const port = deps.approvals === undefined ? executorPorts.approvals : deps.approvals;
-  if (!port) throw new ToolError("PERMISSION_DENIED", "Approval cards are not available right now.");
-  if (approvalPreviewBytes(input.sections) > TOOL_APPROVAL_FULL_PREVIEW_MAX_BYTES) {
-    throw new ToolError("PREVIEW_TOO_LARGE", "The toolset card is too large to show.");
-  }
-  const label = toolsetById(input.toolset)?.label ?? input.toolset;
-  const title = sanitizeApprovalLabel(input.title);
-  const outcome = await port.request(
-    {
-      threadId: caller.threadId,
-      callerProjectPath: caller.projectPath,
-      tool: "request_toolset",
-      kind: "toolset",
-      family: "toolset",
-      toolset: input.toolset,
-      title,
-      scope: { label: sanitizeApprovalLabel(`This chat · ${label}`) },
-      ...(input.reason ? { reason: clipText(input.reason, TOOL_APPROVAL_REASON_MAX_CHARS) } : {}),
-      sections: input.sections,
-      secretFields: [],
-      grantOptions: [],
-      ...(caller.delivered ? { delivered: caller.delivered } : {})
-    },
-    signal
-  );
-  // "Already on" opens no card (`approvalId: ""`): nothing to record, nothing changed.
-  if (outcome.approvalId) {
-    record.reference = {
-      approvalId: outcome.approvalId,
-      kind: "toolset",
-      family: "toolset",
-      title,
-      outcome: outcome.outcome,
-      ...(outcome.outcome === "denied" && outcome.reason ? { reason: clipText(outcome.reason, TOOL_APPROVAL_DENY_REASON_MAX_CHARS) } : {})
-    };
-    if (outcome.outcome === "approved") {
-      const hook = deps.onToolsetApproved === undefined ? executorPorts.onToolsetApproved : deps.onToolsetApproved;
-      try {
-        // The call's own signal: a Stop or a provider cancel ends the wait at once. What the
-        // transport did with the change is the tool's answer ("now" / "after-restart" / pending).
-        const applied = await hook?.(caller, input.toolset, signal);
-        if (applied) return { ...outcome, applied };
-      } catch (error) {
-        console.error("[mcp] toolset approval hook failed", error instanceof Error ? error.message : "unknown error");
-      }
-    }
-  }
-  return outcome;
 }
 
 // ---------------------------------------------------------------------------

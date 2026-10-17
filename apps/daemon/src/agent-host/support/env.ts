@@ -107,11 +107,11 @@ interface BuildProviderEnvInput {
 }
 
 /**
- * The tsc-rs preload a provider child loads through NODE_OPTIONS, or
+ * The TypeScript engine preload (tsrs or tsc-rs) a provider child loads through NODE_OPTIONS, or
  * `undefined` (plugins spec §3.3). Read from disk at every spawn — the host
  * has no plugin state of its own: the preload must exist (Node refuses to
- * start on a missing `--require`) and plugins.json must turn the plugin on in
- * at least one workspace. Any read or parse failure means no preload; the
+ * start on a missing `--require`) and plugins.json must turn the plugin on
+ * (`enabled`). Any read or parse failure means no preload; the
  * preload itself decides per `tsc` call whether to redirect.
  */
 export function providerNodePreload(appdir: string): string | undefined {
@@ -119,7 +119,7 @@ export function providerNodePreload(appdir: string): string | undefined {
     const preload = tsRustPreloadPath(appdir);
     if (!statSync(preload).isFile()) return undefined;
     const config = parsePluginsConfig(JSON.parse(readFileSync(pluginsConfigPath(appdir), "utf8")));
-    return pluginStateOf(config, TS_RUST_PLUGIN_ID).enabledWorkspaces.length > 0 ? preload : undefined;
+    return pluginStateOf(config, TS_RUST_PLUGIN_ID).enabled === true ? preload : undefined;
   } catch {
     return undefined;
   }

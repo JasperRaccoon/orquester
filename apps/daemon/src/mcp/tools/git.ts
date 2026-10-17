@@ -56,8 +56,7 @@ function assertArgs(args: { view: (typeof VIEWS)[number]; path?: string; staged:
 const getGitState = defineTool({
   name: "get_git_state",
   title: "Get git state",
-  description: "A project's git state, read only. status: branch, upstream, ahead/behind, changed files. branches. log: newest commits. diff: uncommitted changes vs HEAD plus untracked files, or one file's (`path`, `staged`). Cut to fit (truncated flags).",
-  chatNote: "`project` defaults to this chat's.",
+  description: "A project's git state. status: branch, upstream, ahead/behind, changed files. branches. log: newest commits. diff: uncommitted changes vs HEAD plus untracked files, or one file's (`path`, `staged`). Cut to fit (truncated flags).",
   input: {
     project: z.string().min(1).optional().describe("Path or workspace/project."),
     view: z.enum(VIEWS),

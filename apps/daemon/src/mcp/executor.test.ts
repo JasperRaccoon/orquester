@@ -1,6 +1,6 @@
 /**
  * THE executor (unified MCP design 2026-10-15 §3.3, §14.2.2–3): strict parse per audience and its
- * stripped keys, TOOL_NOT_FOUND / TOOL_NOT_ENABLED, deny / card / allow through the ApprovalPort
+ * stripped keys, TOOL_NOT_FOUND (no per-chat tool switch), deny / card / allow through the ApprovalPort
  * double, grants, frozen arguments and pins, PREVIEW_TOO_LARGE, the re-run gate after a card, the
  * turn policy and the exchange, the principal on every daemon request.
  */
@@ -126,7 +126,6 @@ function rig(over: { tools?: AnyOrquesterTool[]; port?: FakeApprovalPort | null;
       return tool && tool.audiences.includes(audience) ? tool : undefined;
     },
     approvals: port,
-    enabledToolsets: async () => new Set(["core"]),
     newId: () => "ex-new",
     ...over.deps
   };
@@ -156,23 +155,19 @@ test("strict parse per audience: each audience's only-inputs are stripped from t
   assert.equal((await r.call("both_ways", { text: "a", value: "v" }, { kind: "external" })).isError, undefined);
 });
 
-test("TOOL_NOT_FOUND for another audience's tool or an unknown name; TOOL_NOT_ENABLED names the toolset and request_toolset", async () => {
+test("TOOL_NOT_FOUND for another audience's tool or an unknown name; a tool of any group runs for any chat (no switch)", async () => {
   const r = rig();
   assert.equal(code(await r.call("chat_only", {}, { kind: "external" })), "TOOL_NOT_FOUND");
   const unknown = await r.call("x".repeat(5_000), {});
   assert.equal(code(unknown), "TOOL_NOT_FOUND");
   assert.ok(message(unknown).length < 200, "the name is quoted capped");
-  const off = await r.call("notes_tool", {});
-  assert.equal(code(off), "TOOL_NOT_ENABLED");
-  assert.match(message(off), /request_toolset/);
-  assert.match(message(off), /"notes"/);
-  assert.match(message(off), /Todos & saved-prompt editing/);
-  // The catalogue defaults when nothing is wired: reads on, notes off.
-  const defaults = rig({ deps: { enabledToolsets: null } });
-  assert.equal(code(await defaults.call("notes_tool", {})), "TOOL_NOT_ENABLED");
-  assert.equal((await defaults.call("chat_only", {})).isError, undefined);
   assert.equal(r.runs.length, 0);
-  assert.equal(defaults.runs.length, 1);
+  // `notes` was an off-by-default toolset: its tools now run like any other, for every agent.
+  for (const agentId of ["claude", "codex", "grok", "opencode"] as const) {
+    const ran = await r.call("notes_tool", {}, caller({ agentId }));
+    assert.equal(ran.isError, undefined, message(ran));
+  }
+  assert.equal(r.runs.length, 4);
 });
 
 test("Admin from a workflow-owned chat is ADMIN_NOT_AVAILABLE at once: no preview, no card, no run", async () => {
@@ -389,56 +384,6 @@ test("results: a record is ok()-wrapped, a CallToolResult passes through, an une
   const controller = new AbortController();
   controller.abort();
   assert.equal(code(await r.call("chat_only", {}, caller(), controller.signal)), "CANCELLED");
-});
-
-test("request_toolset's card goes through the executor's port: kind toolset, never a grant; refused for a workflow-owned chat", async () => {
-  let seen: Awaited<ReturnType<NonNullable<CallContext["requestToolsetCard"]>>> | null = null;
-  let externalCtx: CallContext | null = null;
-  const asks = defineTool({
-    name: "asks", title: "Asks", description: "d", input: {}, audiences: ["chat"], toolset: "core", tier: "act", planSafe: true,
-    scope: async () => claim(), annotations: MUTATING, resultKind: "json",
-    run: async (_args, ctx) => {
-      seen = await ctx.requestToolsetCard!({ toolset: "notes", title: "Claude asks to enable notes", sections: [{ kind: "text", text: "x" }], reason: "todo list" });
-      return { outcome: seen.outcome };
-    }
-  });
-  const external = defineTool({
-    name: "external_ctx", title: "External", description: "d", input: {}, audiences: ["external"], toolset: "core", tier: "read",
-    scope: async () => claim(), annotations: READ_ONLY, resultKind: "json",
-    run: async (_args, ctx) => {
-      externalCtx = ctx;
-      return {};
-    }
-  });
-  const r = rig({ tools: [asks, external] });
-  const result = await r.call("asks", {});
-  assert.equal(result.isError, undefined, message(result));
-  const card = r.port!.cards[0]!;
-  assert.deepEqual([card.kind, card.family, card.toolset, card.grantOptions, card.reason], ["toolset", "toolset", "notes", [], "todo list"]);
-  assert.equal(code(await r.call("asks", {}, caller({ workflowOwned: true }))), "PERMISSION_DENIED");
-  assert.equal(r.port!.cards.length, 1);
-  await r.call("external_ctx", {}, { kind: "external" });
-  assert.ok(externalCtx);
-  assert.equal((externalCtx as CallContext).requestToolsetCard, undefined, "external callers cannot raise a toolset card");
-});
-
-test("an approved toolset card is reported to the chat transport (automatic continue) and is the row's reference; a denied one is not reported", async () => {
-  const approved: [string, string][] = [];
-  const asks = defineTool({
-    name: "asks", title: "Asks", description: "d", input: {}, audiences: ["chat"], toolset: "core", tier: "act", planSafe: true,
-    scope: async () => claim(), annotations: MUTATING, resultKind: "json",
-    run: async (_args, ctx) => ({ outcome: (await ctx.requestToolsetCard!({ toolset: "notes", title: "Claude asks to enable notes", sections: [{ kind: "text", text: "x" }] })).outcome })
-  });
-  const r = rig({ tools: [asks], deps: { onToolsetApproved: (who, toolset) => void approved.push([who.threadId, toolset]) } });
-  const result = await r.call("asks", {});
-  assert.deepEqual(approved, [["me", "notes"]]);
-  assert.deepEqual((result.structuredContent as { toolApproval?: unknown }).toolApproval, {
-    approvalId: "a_1", kind: "toolset", family: "toolset", title: "Claude asks to enable notes", outcome: "approved"
-  });
-  r.port!.answerWith({ outcome: "denied", approvalId: "", reason: "not today" });
-  const denied = await r.call("asks", {});
-  assert.deepEqual(approved, [["me", "notes"]], "a denial schedules nothing");
-  assert.deepEqual((denied.structuredContent as { toolApproval?: { outcome: string; reason?: string } }).toolApproval?.reason, "not today");
 });
 
 test("every gated outcome carries the row's reference: granted (with the grant's scope), timed out, cancelled", async () => {

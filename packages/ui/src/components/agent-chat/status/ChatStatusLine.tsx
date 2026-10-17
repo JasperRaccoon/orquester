@@ -141,8 +141,8 @@ export function ChatStatusLine({
           </span>
         ) : null}
 
-        {/* Unified MCP §9.2: this chat's Orquester toolsets and grants, before
-            the token count; it renders nothing until the daemon answered. */}
+        {/* Unified MCP §7.6: this chat's Orquester tool grants, before the
+            token count; it renders nothing until the daemon answered. */}
         <ToolsChip sessionId={sessionId} />
 
         {meter ? (

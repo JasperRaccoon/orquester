@@ -974,7 +974,7 @@ describe("CodexProfileAdapter", () => {
         const enable = async () => {
           const port = new FakeApprovalPort({ outcome: "denied", approvalId: "" });
           await executeToolCall(
-            { approvals: port, enabledToolsets: async () => new Set(["core", "reads", "agent-profile-editing"]) },
+            { approvals: port },
             { name: "edit_agent_profile", arguments: { agent: "codex", changes: [{ action: "enable", id: other.id }] } },
             { caller, api, signal: new AbortController().signal }
           );

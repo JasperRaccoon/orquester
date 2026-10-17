@@ -1,7 +1,8 @@
-// The tsc-rs preload (spec §3.2): a dependency-free CommonJS file every Orquester
-// session loads into each Node process through `NODE_OPTIONS=--require`. In a
-// process running TypeScript's `tsc` from a workspace where the plugin is on, it
-// runs the installed tsc-rs with the same arguments and leaves with its status;
+// The "Better TS Typecheck" preload (spec §3.2): a dependency-free CommonJS file
+// every Orquester session loads into each Node process through
+// `NODE_OPTIONS=--require`. While the plugin is on, in a process running
+// TypeScript's `tsc` inside a workspace, it runs the active engine's installed
+// binary (tsrs or tsc-rs) with the same arguments and leaves with its status;
 // everywhere else it returns at once and the process runs unchanged.
 //
 // The file runs inside arbitrary user processes on any Node >= 18, so it is
@@ -10,8 +11,8 @@
 
 import { dirname, join, resolve } from "node:path";
 
-import { TS_RUST_PLUGIN_ID } from "@orquester/api";
-import { tsRustPluginDir } from "@orquester/config";
+import { TS_RUST_PLUGIN_ID, type TsCheckerEngine } from "@orquester/api";
+import { tsRustPluginDir, tsrsEngineDir } from "@orquester/config";
 
 import { writeFileAtomic } from "../../agent-hooks.ts";
 
@@ -25,14 +26,25 @@ export interface TsRustPreloadOptions {
    * a different path to `workspacesRoot`: a `tsc` reached through it matches too.
    */
   configuredWorkspacesRoot?: string;
+  /**
+   * The engines with a build on this host, and the one used when plugins.json
+   * names none of them: the plugins service's own rule, so both pick the same
+   * engine. Default: both supported, tsc-rs the default.
+   */
+  supportedEngines?: readonly TsCheckerEngine[];
+  defaultEngine?: TsCheckerEngine;
 }
 
 /**
- * `versions/` of the tsc-rs plugin dir. `statePath` is `pluginsConfigPath(appdir)`
+ * The engines' `versions/` dirs. `statePath` is `pluginsConfigPath(appdir)`
  * (`<appdir>/daemon/plugins.json`), so the appdir is two levels up.
  */
-function tsRustVersionsDir(statePath: string): string {
-  return resolve(join(tsRustPluginDir(dirname(dirname(resolve(statePath)))), "versions"));
+function versionsDirs(statePath: string): Record<TsCheckerEngine, string> {
+  const appdir = dirname(dirname(resolve(statePath)));
+  return {
+    "tsc-rs": resolve(join(tsRustPluginDir(appdir), "versions")),
+    tsrs: resolve(join(tsrsEngineDir(appdir), "versions"))
+  };
 }
 
 // The preload's code after its baked constants. Raw, so its regexes and string
@@ -40,10 +52,15 @@ function tsRustVersionsDir(statePath: string): string {
 const PRELOAD_BODY = String.raw`
   // Ends in typescript/bin/tsc or typescript/lib/tsc.js, with either separator.
   var TSC_SCRIPT = /[\\/]typescript[\\/](?:bin[\\/]tsc|lib[\\/]tsc\.js)$/;
-  // A version names a directory under VERSIONS_DIR: no separators, no "..".
+  // A version names a directory under VERSIONS_DIRS: no separators, no "..".
   var SAFE_VERSION = /^[0-9A-Za-z][0-9A-Za-z.+_-]*$/;
-  // Passed on to tsc-rs while this process waits for it (those this OS has).
+  // Passed on to the engine while this process waits for it (those this OS has).
   var FORWARDED_SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT", "SIGBREAK"];
+  // Arguments that already set tsrs's checker threads (tsc options ignore case).
+  var CHECKERS_SET = /^--(?:checkers|singlethreaded)(?:=|$)/i;
+  // tsrs's checker threads when the arguments set none: its default is one per
+  // core up to 16, which starves the rest of a busy host.
+  var TSRS_CHECKERS = "4";
 
   try {
     var script = process.argv[1];
@@ -60,9 +77,9 @@ const PRELOAD_BODY = String.raw`
     if (!TSC_SCRIPT.test(unresolved) && !TSC_SCRIPT.test(real)) return;
     if (!require("worker_threads").isMainThread) return;
 
-    // 2. The workspace: the first segment under a root of the UNRESOLVED script
-    //    path (pnpm's global virtual store can put the real one elsewhere), else
-    //    of the working directory.
+    // 2. Inside a workspace: a first segment under a root of the UNRESOLVED
+    //    script path (pnpm's global virtual store can put the real one
+    //    elsewhere), else of the working directory.
     var workspaceOf = function (candidate) {
       for (var i = 0; i < WORKSPACES_ROOTS.length; i++) {
         var relative = path.relative(WORKSPACES_ROOTS[i], candidate);
@@ -75,18 +92,24 @@ const PRELOAD_BODY = String.raw`
     var workspace = workspaceOf(unresolved) || workspaceOf(process.cwd());
     if (!workspace) return;
 
-    // 3. The plugin is on here and a current version is installed.
+    // 3. The plugin is on and the active engine has a current version installed.
+    //    The engine is the one plugins.json names when it has a build here, else
+    //    this host's default; tsc-rs's versions are the record's own fields
+    //    (as older builds wrote them), tsrs's are under "tsrs".
     var state = JSON.parse(fs.readFileSync(STATE_PATH, "utf8"));
     var plugin = state && state.plugins ? state.plugins[PLUGIN_ID] : null;
     if (!plugin || typeof plugin !== "object") return;
-    var enabled = plugin.enabledWorkspaces;
-    if (!Array.isArray(enabled) || enabled.indexOf(workspace) === -1) return;
-    var version = plugin.current && typeof plugin.current === "object" ? plugin.current.version : null;
+    if (plugin.enabled !== true) return;
+    var engine = SUPPORTED_ENGINES.indexOf(plugin.engine) !== -1 ? plugin.engine : DEFAULT_ENGINE;
+    var record = engine === "tsrs" ? plugin.tsrs : plugin;
+    var current = record && typeof record === "object" ? record.current : null;
+    var version = current && typeof current === "object" ? current.version : null;
     if (typeof version !== "string" || !SAFE_VERSION.test(version) || version.indexOf("..") !== -1) return;
-    var binary = path.join(VERSIONS_DIR, version, process.platform === "win32" ? "tsc.exe" : "tsc");
+    var binaryName = engine === "tsrs" ? "tsrs" : "tsc";
+    var binary = path.join(VERSIONS_DIRS[engine], version, process.platform === "win32" ? binaryName + ".exe" : binaryName);
     var failed = function (error) {
       var code = error && (error.code || error.message);
-      process.stderr.write("orquester: tsc-rs failed to start (" + (code || String(error)) + "); running tsc\n");
+      process.stderr.write("orquester: " + engine + " failed to start (" + (code || String(error)) + "); running tsc\n");
     };
     try {
       fs.accessSync(binary, process.platform === "win32" ? fs.constants.F_OK : fs.constants.X_OK);
@@ -95,8 +118,17 @@ const PRELOAD_BODY = String.raw`
       return;
     }
     var args = process.argv.slice(2);
+    // tsrs gets 4 checker threads unless the arguments choose (or build mode,
+    // which runs its own per-project checkers, is on).
+    if (engine === "tsrs") {
+      var first = args.length > 0 ? String(args[0]).toLowerCase() : "";
+      var chosen = args.some(function (arg) {
+        return CHECKERS_SET.test(arg);
+      });
+      if (!chosen && first !== "-b" && first !== "--build") args = args.concat(["--checkers", TSRS_CHECKERS]);
+    }
 
-    // 4a. Become tsc-rs (Node >= 22.15): the same pid, so every signal sent to
+    // 4a. Become the engine (Node >= 22.15): the same pid, so every signal sent to
     //     this process reaches it, as TypeScript 7's own bin/tsc does. Only for
     //     a native executable: a failed execve ends the process (Node 24 aborts
     //     rather than throwing), and the common causes besides those the access
@@ -124,8 +156,8 @@ const PRELOAD_BODY = String.raw`
     }
 
     // 4b. A CommonJS tsc (the typescript package below 7): skip its main module
-    //     and wait for tsc-rs asynchronously, passing signals on, so it never
-    //     outlives this process. The real tsc runs only if tsc-rs fails to start.
+    //     and wait for the engine asynchronously, passing signals on, so it never
+    //     outlives this process. The real tsc runs only if the engine fails to start.
     var entry = TSC_SCRIPT.test(real) ? real : unresolved;
     var packageDir = path.dirname(path.dirname(entry));
     var commonJs = false;
@@ -198,7 +230,7 @@ const PRELOAD_BODY = String.raw`
     }
 
     // 4c. Any other tsc (TypeScript 7's is an ES module, which cannot be skipped
-    //     from here): run tsc-rs to completion, then leave the way it did.
+    //     from here): run the engine to completion, then leave the way it did.
     var result = require("child_process").spawnSync(binary, args, { stdio: "inherit" });
     if (result.error) {
       failed(result.error);
@@ -224,13 +256,15 @@ export function renderTsRustPreload(options: TsRustPreloadOptions): string {
   const constants = [
     `var STATE_PATH = ${JSON.stringify(resolve(options.statePath))};`,
     `var WORKSPACES_ROOTS = ${JSON.stringify(roots)};`,
-    `var VERSIONS_DIR = ${JSON.stringify(tsRustVersionsDir(options.statePath))};`,
+    `var VERSIONS_DIRS = ${JSON.stringify(versionsDirs(options.statePath))};`,
+    `var SUPPORTED_ENGINES = ${JSON.stringify(options.supportedEngines ?? ["tsrs", "tsc-rs"])};`,
+    `var DEFAULT_ENGINE = ${JSON.stringify(options.defaultEngine ?? "tsc-rs")};`,
     `var PLUGIN_ID = ${JSON.stringify(TS_RUST_PLUGIN_ID)};`
   ];
   return `// Generated by Orquester (Settings → Plugins → Better TS Typecheck); rewritten on
 // every daemon start, so do not edit. Loaded through NODE_OPTIONS=--require into
-// Node processes started from Orquester sessions: a TypeScript \`tsc\` run in a
-// workspace where the plugin is on runs tsc-rs instead; anything else is untouched.
+// Node processes started from Orquester sessions: while the plugin is on, a
+// TypeScript \`tsc\` run inside a workspace runs tsrs or tsc-rs instead; anything else is untouched.
 "use strict";
 (function () {
   ${constants.join("\n  ")}

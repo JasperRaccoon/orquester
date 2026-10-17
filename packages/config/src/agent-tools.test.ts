@@ -1,133 +1,110 @@
 /**
- * `agent-tools.json` (unified MCP design 2026-10-15 §9.6): tolerant read and rewrite, version
- * refusal, the toolset resolver's precedence and `findGrant`'s rules (§7.6, MUST 8).
+ * `agent-tools.json` (unified MCP design 2026-10-15 §9.6): tolerant read and rewrite — older
+ * builds' toolset switches kept verbatim but never read — version refusal and `findGrant`'s rules
+ * (§7.6, MUST 8).
  */
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  AGENT_TOOLSET_DECLINE_MS,
   createDefaultAgentToolsFile,
   findGrant,
   parseAgentToolsFile,
   removeThreadFromAgentTools,
-  resolveThreadToolsets,
   serializeAgentToolsFile,
-  toolsetDeclinedUntil,
-  type AgentToolGrantQuery,
-  type AgentToolsetDefaults
+  type AgentToolGrantQuery
 } from "./index.ts";
-
-const TOOLSETS: AgentToolsetDefaults[] = [
-  { id: "core", locked: true, defaults: { claude: true, codex: true } },
-  { id: "reads", locked: false, defaults: { claude: true, codex: true } },
-  { id: "notes", locked: false, defaults: { claude: false, codex: false } },
-  { id: "desktops", locked: false, defaults: {} }
-];
 
 const P = "/w/ws/app";
 
-test("a file round-trips; unknown keys, toolset ids, agents and grant families survive a rewrite", () => {
-  const raw = {
-    version: 1,
-    revision: 4,
-    enabled: true,
-    futureSetting: { a: 1 },
-    toolsets: {
-      defaults: { notes: { claude: true, "future-agent": false }, "future-toolset": { codex: true } },
-      threads: { t1: { desktops: true } },
-      perProject: { "/x": {} }
-    },
-    toolsetDeclines: { t1: { notes: "2026-10-15T10:00:00.000Z" } },
-    grants: [
-      { id: "g1", family: "desktops", scope: "project", projectPath: P, createdAt: "x", note: "kept" },
-      { id: "g2", family: "telepathy", scope: "galaxy", projectPath: P, createdAt: "x" },
-      { id: "", family: "desktops" },
-      "garbage"
-    ]
-  };
-  const file = parseAgentToolsFile(raw);
-  assert.equal(file.revision, 4);
-  assert.equal(file.grants.length, 2);
+/** A file as an older build (with toolset switches) wrote it. */
+const LEGACY = {
+  version: 1,
+  revision: 4,
+  enabled: false,
+  futureSetting: { a: 1 },
+  toolsets: {
+    defaults: { notes: { claude: true, "future-agent": false }, reads: { codex: "on" }, "future-toolset": { codex: true } },
+    threads: { t1: { desktops: true }, t2: { notes: false } },
+    perProject: { "/x": {} }
+  },
+  toolsetDeclines: { t1: { notes: "2026-10-15T10:00:00.000Z" }, t3: 17 },
+  grants: [
+    { id: "g1", family: "desktops", scope: "project", projectPath: P, createdAt: "x", note: "kept" },
+    { id: "g2", family: "telepathy", scope: "galaxy", projectPath: P, createdAt: "x" },
+    { id: "g3", family: "desktops", scope: "chat", threadId: "t1", projectPath: P, createdAt: "y" },
+    { id: "", family: "desktops" },
+    "garbage"
+  ]
+};
+
+test("an older build's file round-trips: its toolset switches, unknown keys and grant families survive a rewrite untouched", () => {
+  const file = parseAgentToolsFile(structuredClone(LEGACY));
+  assert.deepEqual(file.grants.map((grant) => grant.id), ["g1", "g2", "g3"]);
   assert.equal(file.grants[0]?.note, "kept");
   assert.deepEqual(file.unreadableGrants, [{ id: "", family: "desktops" }, "garbage"]);
-  assert.deepEqual(JSON.parse(serializeAgentToolsFile(file)), raw);
+  // Never interpreted: kept as found, whatever they hold (a newer or older build's values alike).
+  assert.deepEqual(file.extra, {
+    revision: LEGACY.revision,
+    enabled: LEGACY.enabled,
+    futureSetting: LEGACY.futureSetting,
+    toolsets: LEGACY.toolsets,
+    toolsetDeclines: LEGACY.toolsetDeclines
+  });
+  assert.deepEqual(JSON.parse(serializeAgentToolsFile(file)), LEGACY);
   assert.deepEqual(parseAgentToolsFile(JSON.parse(serializeAgentToolsFile(file))), file);
 });
 
-test("missing fields read as defaults; unreadable rows and cells are never honoured but come back verbatim on rewrite", () => {
-  assert.deepEqual(parseAgentToolsFile({}), createDefaultAgentToolsFile());
-  const raw = {
-    toolsets: {
-      defaults: { notes: { claude: "on", codex: true }, reads: 5 },
-      threads: { t1: { notes: { until: "x" }, reads: true } }
-    },
-    toolsetDeclines: { t1: { notes: 17, reads: "2026-10-15T10:00:00.000Z" }, t2: "x" }
+test("grants keep working beside the legacy switches: a grant added and one revoked leave them untouched", () => {
+  const file = parseAgentToolsFile(structuredClone(LEGACY));
+  const changed = {
+    ...file,
+    grants: [
+      ...file.grants.filter((grant) => grant.id !== "g1"),
+      { id: "g4", family: "desktops", scope: "chat", threadId: "t9", projectPath: P, createdAt: "z" }
+    ]
   };
-  const file = parseAgentToolsFile({ enabled: "yes", revision: -1, ...raw });
-  assert.equal(file.enabled, true);
-  assert.equal(file.revision, 0);
-  assert.deepEqual(file.toolsets.defaults, { notes: { codex: true } });
-  assert.deepEqual(file.toolsets.threads, { t1: { reads: true } });
-  assert.deepEqual(file.toolsetDeclines, { t1: { reads: "2026-10-15T10:00:00.000Z" } });
-  const written = JSON.parse(serializeAgentToolsFile(file));
-  assert.deepEqual(written.toolsets.defaults, raw.toolsets.defaults);
-  assert.deepEqual(written.toolsets.threads, raw.toolsets.threads);
-  assert.deepEqual(written.toolsetDeclines, raw.toolsetDeclines);
-  // A write of a readable cell keeps its row's unreadable neighbours.
-  const defaults: Record<string, Record<string, boolean>> = file.toolsets.defaults;
-  defaults.notes!.claude = false;
-  assert.deepEqual(JSON.parse(serializeAgentToolsFile(file)).toolsets.defaults.notes, { claude: false, codex: true });
+  const written = JSON.parse(serializeAgentToolsFile(changed));
+  assert.deepEqual(written.toolsets, LEGACY.toolsets);
+  assert.deepEqual(written.toolsetDeclines, LEGACY.toolsetDeclines);
+  assert.equal(written.enabled, false);
+  assert.equal(written.revision, 4);
+  const q: AgentToolGrantQuery = { family: "desktops", callerRuntimeMode: "full-access", workflowOwned: false, threadId: "t9", projectPath: P, projects: [P] };
+  assert.equal(findGrant(parseAgentToolsFile(written), q)?.id, "g4");
+  // `enabled: false` (an older build's master switch) changes nothing for grants.
+  assert.equal(findGrant(file, { ...q, threadId: "other" })?.id, "g1");
 });
 
-test("removing a thread drops its overrides, declines, leftovers and chat grants — nothing else", () => {
-  const file = parseAgentToolsFile({
-    toolsets: { threads: { t1: { notes: true, x: "?" }, t2: { notes: false } } },
-    toolsetDeclines: { t1: { notes: "2026-10-15T10:00:00.000Z" } },
-    grants: [
-      { id: "a", family: "desktops", scope: "chat", threadId: "t1", projectPath: P, createdAt: "1" },
-      { id: "b", family: "desktops", scope: "project", threadId: "t1", projectPath: P, createdAt: "2" },
-      { id: "c", family: "desktops", scope: "chat", threadId: "t2", projectPath: P, createdAt: "3" }
-    ]
-  });
+test("missing fields read as defaults; a fresh file holds grants only", () => {
+  assert.deepEqual(parseAgentToolsFile({}), createDefaultAgentToolsFile());
+  assert.deepEqual(JSON.parse(serializeAgentToolsFile(createDefaultAgentToolsFile())), { version: 1, grants: [] });
+});
+
+test("removing a thread drops its chat grants and its legacy rows — nothing else", () => {
+  const file = parseAgentToolsFile(structuredClone(LEGACY));
   const after = removeThreadFromAgentTools(file, "t1");
-  assert.deepEqual(after.toolsets.threads, { t2: { notes: false } });
-  assert.deepEqual(after.toolsetDeclines, {});
-  assert.deepEqual(after.grants.map((grant) => grant.id), ["b", "c"]);
-  assert.deepEqual(JSON.parse(serializeAgentToolsFile(after)).toolsets.threads, { t2: { notes: false } });
-  assert.deepEqual(file.toolsets.threads.t1, { notes: true }, "the input is not changed");
+  assert.deepEqual(after.grants.map((grant) => grant.id), ["g1", "g2"]);
+  const written = JSON.parse(serializeAgentToolsFile(after));
+  assert.deepEqual(written.toolsets, { ...LEGACY.toolsets, threads: { t2: { notes: false } } });
+  assert.deepEqual(written.toolsetDeclines, { t3: 17 });
+  assert.deepEqual(written.futureSetting, LEGACY.futureSetting);
+  assert.deepEqual(file.extra?.toolsets, LEGACY.toolsets, "the input is not changed");
+  // Nothing of the thread in the file: the same object (the store writes nothing).
+  assert.equal(removeThreadFromAgentTools(after, "t1"), after);
+  assert.equal(removeThreadFromAgentTools(createDefaultAgentToolsFile(), "t1").grants.length, 0);
+  // Unreadable legacy shapes are left alone.
+  const odd = parseAgentToolsFile({ toolsets: "x", toolsetDeclines: [1] });
+  assert.equal(removeThreadFromAgentTools(odd, "t1"), odd);
 });
 
 test("anything that is not a version-1 file throws, so the daemon moves it aside and grants read as none", () => {
-  for (const bad of [null, [], "x", { version: 2 }, { grants: {} }, { toolsets: [] }, { toolsets: { defaults: [] } }]) {
+  for (const bad of [null, [], "x", { version: 2 }, { grants: {} }]) {
     assert.throws(() => parseAgentToolsFile(bad), /agent-tools/, JSON.stringify(bad));
   }
+  // Legacy keys are no longer read, so their shape no longer matters.
+  assert.deepEqual(parseAgentToolsFile({ toolsets: [] }).extra, { toolsets: [] });
   assert.deepEqual(createDefaultAgentToolsFile().grants, []);
-});
-
-test("toolset resolution: locked always; master switch off → locked only; chat override → setting → catalogue default", () => {
-  const file = createDefaultAgentToolsFile();
-  const resolve = (threadId: string, agent: string) => resolveThreadToolsets(file, { threadId, agent, toolsets: TOOLSETS });
-  assert.deepEqual(resolve("t", "claude"), ["core", "reads"]);
-  assert.deepEqual(resolve("t", "grok"), ["core"], "an agent the catalogue does not list is off");
-  file.toolsets.defaults = { reads: { claude: false }, notes: { claude: true }, core: { claude: false } };
-  assert.deepEqual(resolve("t", "claude"), ["core", "notes"], "settings override the catalogue; core stays");
-  file.toolsets.threads = { t: { reads: true, notes: false, core: false, desktops: true, unknown: true } };
-  assert.deepEqual(resolve("t", "claude"), ["core", "reads", "desktops"], "the chat override wins");
-  assert.deepEqual(resolve("other", "claude"), ["core", "notes"]);
-  file.enabled = false;
-  assert.deepEqual(resolve("t", "claude"), ["core"]);
-});
-
-test("a declined toolset stays declined for 30 minutes", () => {
-  const file = createDefaultAgentToolsFile();
-  const at = Date.parse("2026-10-15T10:00:00.000Z");
-  file.toolsetDeclines = { t: { notes: new Date(at).toISOString(), reads: "not a date" } };
-  assert.equal(toolsetDeclinedUntil(file, "t", "notes", at + 1_000), at + AGENT_TOOLSET_DECLINE_MS);
-  assert.equal(toolsetDeclinedUntil(file, "t", "notes", at + AGENT_TOOLSET_DECLINE_MS), null);
-  assert.equal(toolsetDeclinedUntil(file, "t", "reads", at), null);
-  assert.equal(toolsetDeclinedUntil(file, "u", "notes", at), null);
 });
 
 test("findGrant: only full-access, non workflow-owned callers; chat grants of that chat; project grants of that project", () => {

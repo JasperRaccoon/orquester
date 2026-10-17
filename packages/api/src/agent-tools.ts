@@ -1,19 +1,20 @@
 /**
- * Agent tools — the in-chat Orquester tools' toolsets, tiers, grants and settings (unified MCP
- * design 2026-10-15 §6, §7.6, §9).
+ * Agent tools — the in-chat Orquester tools' tiers, toolsets and grants (unified MCP design
+ * 2026-10-15 §6, §7.6).
  *
- * One catalog serves external MCP clients and in-chat agents; for chats it is cut into TOOLSETS
- * the user turns on per agent (Settings › Agent tools) or per chat (the Tools chip, or an approved
- * `request_toolset` card). `core` is locked on. The daemon persists the choices and the grants in
- * `agent-tools.json` (`@orquester/config`'s `parseAgentToolsFile`, `resolveThreadToolsets`,
- * `findGrant`).
+ * One catalog serves external MCP clients and in-chat agents. Every chat tool is advertised to
+ * every chat (a workflow-owned chat gets no always-Admin tool, §5.4); there is no per-agent or
+ * per-chat switch. TOOLSETS only GROUP the tools (a label, and the `orquester/toolset` `_meta` tag
+ * external clients see). Admin calls and project boundaries raise approval cards; the daemon
+ * persists the grants a card makes in `agent-tools.json` (`@orquester/config`'s
+ * `parseAgentToolsFile`, `findGrant`).
  *
  * Routes (both transports, bearer on HTTP): {@link agentToolsRoutes} and
  * `agentChatRoutes.agentTools(sessionId)`. Bus: channel {@link AGENT_TOOLS_CHANNEL}, event
  * {@link AGENT_TOOLS_CHANGED_EVENT}.
  */
 
-import { AGENT_TOOL_GRANT_SCOPES, AGENT_TOOLSET_DECLINE_MS } from "@orquester/config";
+import { AGENT_TOOL_GRANT_SCOPES } from "@orquester/config";
 
 import type { AgentAdapterId, RuntimeMode } from "./agent-chat/adapter-types.ts";
 import type { ApprovalFamily, ToolApprovalGrantScope } from "./agent-chat/tool-approvals.ts";
@@ -30,6 +31,7 @@ import type { ApprovalFamily, ToolApprovalGrantScope } from "./agent-chat/tool-a
 export type ToolTier = "read" | "act" | "admin";
 export const TOOL_TIERS: readonly ToolTier[] = ["read", "act", "admin"];
 
+/** The groups chat tools are filed under (a label and the `orquester/toolset` tag; never a switch). */
 export const TOOLSET_IDS = [
   "core",
   "reads",
@@ -46,49 +48,33 @@ export function isToolsetId(value: unknown): value is ToolsetId {
   return typeof value === "string" && (TOOLSET_IDS as readonly string[]).includes(value);
 }
 
-/** The agents the Settings matrix has a column for, in its order. */
-export const AGENT_TOOLS_AGENTS: readonly AgentAdapterId[] = ["claude", "codex", "grok", "opencode"];
-
 /**
  * One tool of a toolset with its tier badge: the HIGHEST tier the tool reaches for a chat caller
  * (`control_desktop` is Admin for `open`/`launch_app` and Act otherwise → `admin`; `create_workflow`
- * is Read with `dryRun` → `admin`). `request_toolset` reads `act`: it raises a toolset card, never
- * an Admin one. The catalog's own tiers (daemon `mcp/catalog`) must agree (its registry test).
+ * is Read with `dryRun` → `admin`). The catalog's own tiers (daemon `mcp/catalog`) must agree (its
+ * registry test).
  */
 export interface ToolsetToolSpec {
   name: string;
   tier: ToolTier;
 }
 
+/** A group of chat tools: a label only — every toolset is on in every chat. */
 export interface ToolsetSpec {
   id: ToolsetId;
-  /** The Settings matrix row and the toolset card's name for it. */
   label: string;
   tools: readonly ToolsetToolSpec[];
-  /** Always on; no setting, override or master switch turns it off. */
-  locked: boolean;
-  /** The catalogue default per agent (before Settings and chat overrides). */
-  defaults: Readonly<Record<AgentAdapterId, boolean>>;
 }
-
-const ALL_ON: Readonly<Record<AgentAdapterId, boolean>> = { claude: true, codex: true, grok: true, opencode: true };
-const ALL_OFF: Readonly<Record<AgentAdapterId, boolean>> = { claude: false, codex: false, grok: false, opencode: false };
 
 const read = (name: string): ToolsetToolSpec => ({ name, tier: "read" });
 const act = (name: string): ToolsetToolSpec => ({ name, tier: "act" });
 const admin = (name: string): ToolsetToolSpec => ({ name, tier: "admin" });
 
-/**
- * Every toolset, in Settings order, with its tools in catalog order (spec §9.1): 45 chat tools,
- * 22 on by default (`core` + `reads`). If the measured default set exceeds its byte budget, `reads`
- * defaults off for Codex and OpenCode (spec §9.5 fallback) — a change to `defaults` here only.
- */
+/** Every toolset, with its tools in catalog order (spec §9.1): 44 chat tools, all advertised to every chat. */
 export const TOOLSETS: readonly ToolsetSpec[] = [
   {
     id: "core",
     label: "Chats & delegation",
-    locked: true,
-    defaults: ALL_ON,
     tools: [
       read("list_projects"),
       read("list_agents"),
@@ -105,29 +91,22 @@ export const TOOLSETS: readonly ToolsetSpec[] = [
       read("get_usage"),
       read("html_preview"),
       act("html_render"),
-      act("request_secret"),
-      act("request_toolset")
+      act("request_secret")
     ]
   },
   {
     id: "reads",
     label: "Workflows, profiles & prompts (read)",
-    locked: false,
-    defaults: ALL_ON,
     tools: [read("list_workflows"), read("get_workflow"), read("get_workflow_runs"), read("get_agent_profile"), read("list_saved_prompts")]
   },
   {
     id: "notes",
     label: "Todos & saved-prompt editing",
-    locked: false,
-    defaults: ALL_OFF,
     tools: [read("list_todos"), act("update_todos"), admin("update_saved_prompts")]
   },
   {
     id: "chat-extras",
     label: "More chat control",
-    locked: false,
-    defaults: ALL_OFF,
     tools: [
       act("update_session"),
       act("respond_to_request"),
@@ -140,15 +119,11 @@ export const TOOLSETS: readonly ToolsetSpec[] = [
   {
     id: "files-git",
     label: "Files & git (read)",
-    locked: false,
-    defaults: ALL_OFF,
     tools: [read("read_file"), read("get_git_state")]
   },
   {
     id: "workflow-authoring",
     label: "Workflow authoring (changes need your approval)",
-    locked: false,
-    defaults: ALL_OFF,
     tools: [
       read("list_workflow_block_types"),
       admin("create_workflow"),
@@ -164,15 +139,11 @@ export const TOOLSETS: readonly ToolsetSpec[] = [
   {
     id: "agent-profile-editing",
     label: "Agent-profile changes (need your approval)",
-    locked: false,
-    defaults: ALL_OFF,
     tools: [admin("edit_agent_profile")]
   },
   {
     id: "desktops",
     label: "Desktops (opening needs your approval)",
-    locked: false,
-    defaults: ALL_OFF,
     tools: [read("get_desktops"), admin("control_desktop")]
   }
 ];
@@ -190,11 +161,6 @@ export function toolsetOfTool(name: string): ToolsetId | undefined {
 /** Every chat tool name, in toolset then catalog order. */
 export function chatToolNames(): string[] {
   return TOOLSETS.flatMap((toolset) => toolset.tools.map((tool) => tool.name));
-}
-
-/** The toolsets on for an agent when nothing is configured (the catalogue defaults). */
-export function defaultToolsetsFor(agent: AgentAdapterId): ToolsetId[] {
-  return TOOLSETS.filter((toolset) => toolset.locked || toolset.defaults[agent]).map((toolset) => toolset.id);
 }
 
 // ---------------------------------------------------------------------------
@@ -255,73 +221,26 @@ export interface AgentToolGrant {
 }
 
 // ---------------------------------------------------------------------------
-// Settings and chat toolsets — wire
+// Settings and the chat's Tools chip — wire
 // ---------------------------------------------------------------------------
 
-/** One toolset as Settings › Agent tools shows it. */
-export interface AgentToolsetView {
-  id: ToolsetId;
-  label: string;
-  locked: boolean;
-  tools: ToolsetToolSpec[];
-  /** The toolset's `tools/list` bytes as the host serialises them (spec §9.5), when measured. */
-  bytes?: number;
-  /** The catalogue default per agent. */
-  catalogDefaults: Record<AgentAdapterId, boolean>;
-  /** The effective default per agent: the Settings cell, else the catalogue default. */
-  defaults: Record<AgentAdapterId, boolean>;
-}
-
-/** `GET /api/agent-tools` — Settings › Agent tools. */
+/**
+ * `GET /api/agent-tools` — Settings › Agent tools. Older daemons also sent `revision`, `enabled`
+ * and `toolsets` (the removed toolset switches); clients ignore them.
+ */
 export interface AgentToolsResponse {
-  /** Pass it back on `PUT /api/agent-tools/settings`. */
-  revision: number;
-  /** The master switch: off = only locked toolsets in every chat. */
-  enabled: boolean;
-  toolsets: AgentToolsetView[];
   /** Every grant, newest first. */
   grants: AgentToolGrant[];
 }
 
-/**
- * `PUT /api/agent-tools/settings` → {@link AgentToolsResponse}. `defaults` cells are merged
- * (`null` clears one back to the catalogue default); a locked toolset's cells are refused. A stale
- * `revision` is 409 `REVISION_MISMATCH`.
- */
-export interface UpdateAgentToolsSettingsRequest {
-  revision: number;
-  enabled?: boolean;
-  defaults?: Partial<Record<ToolsetId, Partial<Record<AgentAdapterId, boolean | null>>>>;
-}
-
-/** `GET agentChatRoutes.agentTools(sessionId)` — the chat's Tools chip. */
+/** `GET agentChatRoutes.agentTools(sessionId)` — the chat's Tools chip (older daemons also sent toolset fields; ignored). */
 export interface ThreadAgentToolsResponse {
   threadId: string;
   agent: AgentAdapterId;
-  /** The chat's own overrides (absent toolset = inherit the agent default). */
-  overrides: Partial<Record<ToolsetId, boolean>>;
-  /** The toolsets on in this chat now, in catalog order. */
-  resolved: ToolsetId[];
   /** Workflow-owned chats get no Admin tools and no cards (spec §5.4). */
   workflowOwned: boolean;
-  /**
-   * True when `resolved` differs from what the chat's running provider session advertises: the
-   * change applies at the chat's next idle point (the session restarts with resume).
-   */
-  appliesAtNextIdle: boolean;
-  /** Toolsets the user denied on a toolset card in this chat, with the ISO time asking is allowed again (30 min). */
-  declines: Partial<Record<ToolsetId, string>>;
   /** This chat's grants and its project's project grants. */
   grants: AgentToolGrant[];
-}
-
-/**
- * `PUT agentChatRoutes.agentTools(sessionId)` → {@link ThreadAgentToolsResponse}: set (`true` /
- * `false`) or clear (`null` = inherit) this chat's overrides. Locked toolsets are refused. Takes
- * effect at the chat's next idle point.
- */
-export interface UpdateThreadAgentToolsRequest {
-  toolsets: Partial<Record<ToolsetId, boolean | null>>;
 }
 
 /** `DELETE /api/agent-tools/grants?threadId=` (Revoke all, or all of one chat) → this. */
@@ -331,10 +250,8 @@ export interface RevokeAgentToolGrantsResponse {
 
 /** The routes' own refusals (besides `INVALID_ARGUMENT`, `THREAD_NOT_FOUND`). */
 export type AgentToolsErrorCode =
-  | "REVISION_MISMATCH"
   | "GRANT_NOT_FOUND"
-  | "TOOLSET_LOCKED"
-  /** 403: a write (settings, a chat's toolsets, a grant revocation) from an agent or external principal — only a person changes these. */
+  /** 403: a grant revocation from an agent or external principal — only a person changes these. */
   | "PERMISSION_DENIED"
   /** 503: `agent-tools.json` is unreadable or corrupt and could not be moved aside — the store is read-only for this run. */
   | "AGENT_TOOLS_UNAVAILABLE";
@@ -343,8 +260,6 @@ export type AgentToolsErrorCode =
 export const agentToolsRoutes = {
   /** `GET` → {@link AgentToolsResponse}. */
   settings: "/api/agent-tools",
-  /** `PUT` {@link UpdateAgentToolsSettingsRequest} → {@link AgentToolsResponse}. */
-  updateSettings: "/api/agent-tools/settings",
   /** `DELETE` (optional `?threadId=`) → {@link RevokeAgentToolGrantsResponse}. */
   grants: "/api/agent-tools/grants",
   /** `DELETE` one grant → 204; 404 `GRANT_NOT_FOUND`. */
@@ -356,42 +271,10 @@ export const AGENT_TOOLS_CHANNEL = "agent-tools";
 export const AGENT_TOOLS_CHANGED_EVENT = "agentTools.changed";
 
 /**
- * `agentTools.changed` — coarse; the client re-reads. `threadId` when only one chat's overrides or
- * grants changed (its Tools chip re-reads); absent for a settings or project-grant change.
+ * `agentTools.changed` — coarse; the client re-reads. `threadId` when only one chat's grants
+ * changed (its Tools chip re-reads); absent for a project-grant change or a revoke-all. (Older
+ * daemons also sent a `revision`.)
  */
 export interface AgentToolsChangedPayload {
-  revision: number;
   threadId?: string;
-}
-
-// ---------------------------------------------------------------------------
-// request_toolset (§9.3)
-// ---------------------------------------------------------------------------
-
-/** A denied toolset card blocks asking for that toolset again in that chat this long (`TOOLSET_DECLINED`). */
-export const TOOLSET_DECLINE_MS = AGENT_TOOLSET_DECLINE_MS;
-
-/**
- * `request_toolset`'s result (spec §9.3):
- * - enabled (also at once, without a card, when the toolset is already on): `available: "now"` —
- *   the provider re-listed its tools and they can be called in this turn; `"after-restart"` — end
- *   the turn, the provider session restarts with resume and Orquester posts an automatic continue
- *   turn;
- * - not enabled: the user denied the card (`declined`, with the time asking is allowed again and
- *   their reason), the card expired (`timed_out`) or the call was cancelled (`cancelled`).
- * Asking again for a toolset declined in the last 30 minutes is refused before any card with
- * `TOOLSET_DECLINED` ({@link RequestToolsetDeclinedDetail}); a workflow-owned chat gets
- * `PERMISSION_DENIED`.
- */
-export type RequestToolsetResult =
-  | { enabled: true; toolset: ToolsetId; available: "now" | "after-restart" }
-  | { enabled: false; toolset: ToolsetId; outcome: "declined"; declinedUntil: string; reason?: string }
-  | { enabled: false; toolset: ToolsetId; outcome: "timed_out" | "cancelled" };
-
-/** The error code (and its `detail`) of a request for a recently declined toolset. */
-export const TOOLSET_DECLINED = "TOOLSET_DECLINED";
-export interface RequestToolsetDeclinedDetail {
-  toolset: ToolsetId;
-  /** ISO time from which the toolset may be requested again. */
-  declinedUntil: string;
 }

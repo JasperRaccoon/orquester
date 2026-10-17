@@ -47,7 +47,7 @@ export const MAX_RUNNING_SESSIONS_PER_PROJECT = 24;
 /** A permission mode, as create_session and update_session take it (also the session tools' thread_create / delegate_task). */
 export const runtimeModeSchema = z.enum(RUNTIME_MODES as unknown as [RuntimeMode, ...RuntimeMode[]]);
 /** Model options by id, as create_session and update_session take them (also the session tools' thread_create / delegate_task). */
-export const optionsSchema = z.record(z.union([z.string(), z.boolean()])).describe("Model options by id, e.g. {\"effort\":\"high\",\"thinking\":true}. `effort` works for every agent.");
+export const optionsSchema = z.record(z.union([z.string(), z.boolean()])).describe("By id, e.g. {\"effort\":\"high\"}; `effort` works for every agent.");
 /** The session a call names (§9.5: shared field texts stay short). */
 export const sessionIdField = z.string().min(1).describe("The session id (list_sessions).");
 
@@ -121,11 +121,10 @@ function detailFields(detail: unknown): Record<string, unknown> {
 const listSessionsTool = defineTool({
   name: "list_sessions",
   title: "List sessions",
-  description: "Open tabs (chats and terminals): status, attention and why, lineage. attention: true lists only tabs needing the user.",
-  chatNote: "Default: this chat's project; \"all\": every project you may see.",
+  description: "Open tabs (chats, terminals): status, attention and why, lineage. attention:true: only tabs needing the user.",
   externalNote: "Default: every project.",
   input: {
-    project: z.string().optional().describe("\"ws/project\", a path, or \"all\"."),
+    project: z.string().optional().describe("\"ws/project\", a path, or \"all\" (every project you may see)."),
     kind: z.enum(["chat", "terminal", "all"]).default("all"),
     attention: z.boolean().default(false),
     limit: z.number().int().min(1).max(500).optional()
@@ -406,8 +405,8 @@ async function turnDiff(api: DaemonApi, sessionId: string, turn: number | undefi
 const getTurnDiff = defineTool({
   name: "get_turn_diff",
   title: "Get a turn's diff",
-  description: "The unified diff of the files a turn changed (the GUI's changed-files card); default: the latest turn with a checkpoint. A diff too large is cut at the end (truncated:true); a long file list too (filesTruncated, omittedFiles).",
-  input: { sessionId: sessionIdField, turn: z.number().int().min(1).optional().describe("Turn number (1-based); default: the latest checkpointed turn.") },
+  description: "Unified diff of the files a turn changed. Too large: cut at the end (truncated:true); a long file list too (filesTruncated, omittedFiles).",
+  input: { sessionId: sessionIdField, turn: z.number().int().min(1).optional().describe("1-based; default: the latest checkpointed turn.") },
   audiences: ["external", "chat"],
   toolset: "chat-extras",
   tier: "read",
@@ -433,17 +432,17 @@ const OWN_CHILDREN_UPDATE = "update_session changes only this chat's own title, 
 const updateSession = defineTool({
   name: "update_session",
   title: "Update session settings",
-  description: "Change a chat's model, options (effort…), permission mode or account, and/or rename it. Model/mode changes restart a live agent and are refused mid-turn unless force:true; an account switch applies on the next message and needs an idle session.",
-  chatNote: "Only chats you created (create_session, fork_session); never a broader mode than yours. This chat: title only.",
+  description: "Change a chat's model, options, permission mode, account and/or title. Model/mode changes restart a live agent; refused mid-turn unless force. Account switch: idle session only; applies on the next message.",
+  chatNote: "Only chats you created (incl. forks); never a broader mode than yours. This chat: title only.",
   input: {
     sessionId: sessionIdField,
-    title: z.string().min(1).max(300).optional().describe("New tab title."),
+    title: z.string().min(1).max(300).optional(),
     // min(1): an empty model would read as the session's current one, a silent no-op.
-    model: z.string().min(1).optional().describe("Model slug from list_agents."),
+    model: z.string().min(1).optional().describe("From list_agents."),
     options: optionsSchema.optional(),
-    runtimeMode: runtimeModeSchema.optional().describe("Permission mode."),
-    accountId: z.string().optional().describe("Managed account id or \"system\"; applied on the next message."),
-    force: z.boolean().default(false).describe("Apply model/mode changes even mid-turn (cuts the turn).")
+    runtimeMode: runtimeModeSchema.optional(),
+    accountId: z.string().optional().describe("From list_agents, or \"system\"."),
+    force: z.boolean().default(false).describe("Apply mid-turn, cutting the turn.")
   },
   audiences: ["external", "chat"],
   toolset: "chat-extras",
@@ -733,9 +732,9 @@ const controlSession = defineTool({
   name: "control_session",
   title: "Control a session",
   description:
-    "The GUI's controls. interrupt: Stop the turn (none running: background work; pauses a goal). stop_task: one background task (taskId: subagents[].id). " +
-    "stop_process: stop the agent, keep the tab. compact: compact the context. rewind: keep the first keepTurns turns (conversation only). close: close the tab.",
-  chatNote: "Not this chat. stop_process, compact, rewind, close: only chats you created.",
+    "interrupt: stop the turn (none running: background work; pauses a goal). stop_task: one background task (taskId: get_session subagents[].id). " +
+    "stop_process: stop the agent, keep the tab. compact: the context. rewind: keep the first keepTurns turns (conversation only). close: the tab.",
+  chatNote: "Not this chat. Beyond interrupt/stop_task: only chats you created.",
   input: {
     sessionId: sessionIdField,
     action: z.enum(CONTROL_ACTIONS),

@@ -128,11 +128,10 @@ const getDesktops = defineTool({
   name: "get_desktops",
   title: "Get desktops",
   description:
-    "Desktop tabs: virtual X displays on the daemon's host that GUI apps run in, shown to the user live. Without desktopId: a project's desktops — id, title, status (starting, running, stopped, error), size, audio, apps (id, command, status, exit code) and open windows (id, title, appId). With desktopId: that desktop. With desktopId and appId: the app's recent stdout/stderr (its last 64 KiB, newest at the end; a long one keeps its tail, truncated: true). host: true adds whether this host can run desktops: the tools found, GPU, warnings and installHint, the apt-get line for what is missing — installing is for the host's owner, tell the user.",
-  chatNote: "Without project: this chat's project.",
+    "Desktop tabs: virtual X displays on the daemon's host running GUI apps, shown to the user live. No desktopId: a project's desktops (id, title, status, size, audio, apps, open windows). desktopId: that one. desktopId + appId: the app's last 64 KiB of stdout/stderr (truncated: true when cut). host: true adds whether this host can run desktops (tools found, GPU, warnings, installHint: the apt-get line for what's missing — installing is for the host's owner; tell the user).",
   externalNote: "Without project: every project's desktops.",
   input: {
-    project: z.string().min(1).optional().describe("Absolute project path or \"<workspace>/<project>\"."),
+    project: z.string().min(1).optional().describe("\"<workspace>/<project>\" or a path."),
     desktopId: desktopIdArg.optional(),
     appId: z.string().min(1).optional().describe("With desktopId: that app's output."),
     host: z.boolean().optional().describe("Add the host's desktop support status.")
@@ -184,7 +183,7 @@ type Action = (typeof ACTIONS)[number];
 
 const controlInput = {
   action: z.enum(ACTIONS),
-  project: z.string().min(1).optional().describe("open: the project, an absolute path or \"<workspace>/<project>\"."),
+  project: z.string().min(1).optional().describe("open: \"<workspace>/<project>\" or a path."),
   desktopId: desktopIdArg.optional(),
   appId: z.string().min(1).optional().describe("stop_app: the app's id."),
   windowId: z.string().min(1).optional().describe("close_window: the window's id (0x… hex)."),
@@ -195,11 +194,11 @@ const controlInput = {
     .refine((command) => !/[\r\n]/.test(command), "must be a single line")
     .optional()
     .describe("One shell command line, run as `sh -c 'exec <command>'` with DISPLAY and audio wired to the desktop, e.g. \"xterm\"."),
-  cwd: z.string().min(1).optional().describe("The app's working directory: absolute, or relative to the project (default)."),
+  cwd: z.string().min(1).optional().describe("Absolute, or relative to the project (default)."),
   env: z
     .record(z.string().regex(DESKTOP_ENV_KEY_PATTERN, "is not an environment variable name"), z.string())
     .optional()
-    .describe("Extra environment variables for the app, applied last."),
+    .describe("Extra env vars for the app, applied last."),
   title: z.string().min(1).max(200).optional().describe("open: the tab's title (default \"Desktop\")."),
   size: z
     .object({
@@ -208,10 +207,10 @@ const controlInput = {
     })
     .strict()
     .optional()
-    .describe(`open: pixels, ${DESKTOP_MIN_WIDTH}×${DESKTOP_MIN_HEIGHT} to ${DESKTOP_MAX_WIDTH}×${DESKTOP_MAX_HEIGHT} (default 1280×800).`),
+    .describe("open: pixels (default 1280×800)."),
   renderThreads: z.number().int().min(1).max(256).optional().describe("open: software-OpenGL threads per app (LP_NUM_THREADS, default 4)."),
-  force: z.boolean().optional().describe("stop_app: SIGKILL at once instead of SIGTERM, then SIGKILL after 5 s."),
-  reason: z.string().max(TOOL_APPROVAL_REASON_MAX_CHARS).optional().describe("Why, shown to the user when the action needs approval.")
+  force: z.boolean().optional().describe("stop_app: SIGKILL at once."),
+  reason: z.string().max(TOOL_APPROVAL_REASON_MAX_CHARS).optional().describe("Why, shown on the approval card.")
 };
 type ControlArgs = z.infer<z.ZodObject<typeof controlInput>>;
 
@@ -265,9 +264,9 @@ const controlDesktop = defineTool({
   name: "control_desktop",
   title: "Control desktops",
   description:
-    "Open and drive desktop tabs (see get_desktops). open: a new desktop in a project — a virtual display with a window manager and audio the user sees live — optionally launching a first app (command). launch_app: start another GUI app in a running desktop. stop_app: SIGTERM the app's process group, SIGKILL after 5 s (or at once with force); unsaved work is lost. close_window: ask a window to close (the app may ask to save). close: stop every app and remove the desktop tab. Without the host packages, open answers DESKTOP_UNAVAILABLE with the install line.",
+    "Open and drive desktop tabs (see get_desktops). open: a new desktop (virtual display, window manager, audio; the user sees it live), optionally launching a first app (command). launch_app: another GUI app in a running desktop. stop_app: SIGTERM its process group, SIGKILL after 5 s (force: at once); unsaved work is lost. close_window: ask a window to close (the app may prompt to save). close: stop every app, remove the tab. Missing host packages: open answers DESKTOP_UNAVAILABLE with the install line, for the host's owner.",
   chatNote:
-    "open and launch_app run commands on the host: they ask the user to approve in the chat (up to 30 min); if denied, don't retry — ask the user. Without project, open uses this chat's project.",
+    "open and launch_app run host commands: they need the user's approval.",
   input: controlInput,
   audiences: ["external", "chat"],
   toolset: "desktops",

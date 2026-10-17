@@ -16,7 +16,7 @@ import {
   mergeBackContext,
   replyDeliveryContext,
   threadMessageContext,
-  toolsetContinueContext
+  TOOLSET_CONTINUE_CONTEXT_KIND
 } from "@orquester/api/agent-chat";
 
 import type { AgentChatTimelineRow } from "../../lib/agent-chat/contracts";
@@ -217,10 +217,15 @@ test("sent, opened and delegated captions keep their words; an unmarked header i
   assert.doesNotMatch(typed, /data-from-thread/);
 });
 
-test("an opened chat's merge back says so; Orquester's automatic continue is Orquester's", () => {
+test("an opened chat's merge back says so; an older build's automatic continue is Orquester's", () => {
   const merged = marked(buildMergeBackMessage({ childTitle: "Codex review", relation: "opened", text: "Done." }), mergeBackContext("m2"));
   assert.match(merged, /Merged back from opened chat “Codex review”/);
-  const continued = marked("[Orquester] The Workflow authoring tools are now available. Continue the task you were doing.", toolsetContinueContext("workflow-authoring"));
+  // As older builds wrote it after an approved request_toolset: old transcripts still render it as Orquester's.
+  const continued = marked("[Orquester] The Workflow authoring tools are now available. Continue the task you were doing.", {
+    kind: TOOLSET_CONTINUE_CONTEXT_KIND,
+    label: "Orquester",
+    ref: "workflow-authoring"
+  });
   assert.match(continued, />Orquester</);
   assert.doesNotMatch(continued, />You</);
 });

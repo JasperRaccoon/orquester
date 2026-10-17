@@ -11,10 +11,10 @@ import { ToolError, daemonError } from "./errors.ts";
 export const MAX_ATTACHMENTS = MAX_TURN_ATTACHMENTS;
 
 export const attachmentInputSchema = z.union([
-  z.object({ path: z.string().min(1).describe("Path of a file inside the workspaces sandbox (absolute, or relative to the sandbox root).") }).strict(),
+  z.object({ path: z.string().min(1).describe("A file in the workspaces sandbox: absolute, or relative to its root.") }).strict(),
   z.object({
-    name: z.string().min(1).describe("File name; the extension decides the type unless mimeType is given."),
-    base64: z.string().min(1).describe("The file bytes, base64-encoded."),
+    name: z.string().min(1).describe("Its extension sets the type unless mimeType is given."),
+    base64: z.string().min(1).describe("File bytes, base64."),
     mimeType: z.string().optional().describe("MIME type override.")
   }).strict()
 ]);

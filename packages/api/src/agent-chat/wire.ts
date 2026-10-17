@@ -176,8 +176,8 @@ export const agentChatRoutes = {
   toolApproval: (sessionId: string, approvalId: string): string =>
     `${sessionBase(sessionId)}/tool-approvals/${encodeURIComponent(approvalId)}`,
   /**
-   * The chat's toolsets and grants for its Tools chip: `GET` → `ThreadAgentToolsResponse`, `PUT`
-   * `UpdateThreadAgentToolsRequest` (both in `@orquester/api`'s `agent-tools.ts`). Daemon-owned.
+   * The chat's grants for its Tools chip: `GET` → `ThreadAgentToolsResponse` (`@orquester/api`'s
+   * `agent-tools.ts`). Daemon-owned.
    */
   agentTools: (sessionId: string): string => `${sessionBase(sessionId)}/agent-tools`,
   /**

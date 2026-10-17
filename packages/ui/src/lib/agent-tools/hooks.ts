@@ -44,7 +44,7 @@ export function useAgentToolsSettings(): Pick<AgentToolsState, "settings" | "set
 
 const NO_THREAD: ThreadToolsEntry = { data: null, error: null, unsupported: false };
 
-/** A chat's toolsets and grants (the Tools chip): loads and watches the chat while mounted. */
+/** A chat's grants (the Tools chip): loads and watches the chat while mounted. */
 export function useThreadAgentTools(threadId: string, enabled = true): ThreadToolsEntry {
   const api = useAppStore((state) => state.api);
   const connected = useAppStore((state) => state.connectionStatus === "connected");

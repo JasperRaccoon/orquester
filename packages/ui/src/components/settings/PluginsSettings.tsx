@@ -1,7 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Check,
-  ChevronDown,
   ChevronRight,
   ExternalLink,
   Loader2,
@@ -13,17 +11,18 @@ import {
   Trash2,
   X
 } from "lucide-react";
-import type { PluginId, PluginInfo } from "@orquester/api";
+import type { PluginId, PluginInfo, TsCheckerEngine } from "@orquester/api";
 import { cn } from "../../lib/cn";
 import { relativeTime } from "../../lib/relative-time";
-import { AdaptiveMenu, Button, ConfirmDialog, DropdownItem, DropdownLabel, Switch } from "../ui";
+import { Button, ConfirmDialog, Switch } from "../ui";
 import { useAppStore } from "../../store/app";
 import {
   FIRST_ENABLE_MESSAGE,
-  defaultPluginScope,
   filterPlugins,
   pluginControls,
-  pluginEnabledIn,
+  pluginEngineChange,
+  pluginEngineLabel,
+  pluginEngineOptions,
   pluginErrorText,
   pluginJobLabel,
   pluginSourceHref,
@@ -42,7 +41,7 @@ const errorText = (err: unknown): string => {
   return err instanceof Error && err.message ? err.message : "The request failed.";
 };
 
-type PluginAction = "toggle" | "check" | "rollback" | "remove";
+type PluginAction = "toggle" | "engine" | "check" | "rollback" | "remove";
 
 /** A failed action, shown on the plugin it was for. */
 interface ActionError {
@@ -53,6 +52,7 @@ interface ActionError {
 
 const ACTION_FAILED: Record<PluginAction, string> = {
   toggle: "Could not change the plugin",
+  engine: "Could not change the engine",
   check: "Could not start an update check",
   rollback: "Could not roll back",
   remove: "Could not remove the downloads"
@@ -72,10 +72,9 @@ const PluginTile: React.FC<{ plugin: PluginInfo; large?: boolean }> = ({ plugin,
 );
 
 /**
- * Settings → Plugins (spec §6): the built-in plugins, each turned on per
- * workspace or, for a global plugin, once for the server. A workspace
- * plugin's toggles act on the workspace in the scope picker; the daemon owns
- * the state, and every change comes back through `plugins.changed`.
+ * Settings → Plugins (spec §6): the built-in plugins, each turned on once for
+ * the whole server. The daemon owns the state, and every change comes back
+ * through `plugins.changed`.
  */
 export const PluginsSettings: React.FC = () => {
   const api = useAppStore((s) => s.api);
@@ -83,16 +82,13 @@ export const PluginsSettings: React.FC = () => {
   const plugins = useAppStore((s) => s.plugins);
   const loadPlugins = useAppStore((s) => s.loadPlugins);
   const upsertPlugin = useAppStore((s) => s.upsertPlugin);
-  const workspaceList = useAppStore((s) => s.workspaces);
-  const activeWorkspace = useAppStore((s) => s.currentProject?.workspace ?? s.currentWorkspace);
 
   const [loadError, setLoadError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
-  const [pickedScope, setPickedScope] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<PluginId | null>(null);
   const [pending, setPending] = useState<{ pluginId: PluginId; action: PluginAction } | null>(null);
   const [actionError, setActionError] = useState<ActionError | null>(null);
-  const [confirmEnable, setConfirmEnable] = useState<{ plugin: PluginInfo; workspace: string } | null>(null);
+  const [confirmEnable, setConfirmEnable] = useState<PluginInfo | null>(null);
 
   const load = useCallback(() => {
     setLoadError(null);
@@ -106,8 +102,6 @@ export const PluginsSettings: React.FC = () => {
     if (api && connected) load();
   }, [api, connected, load]);
 
-  const workspaces = useMemo(() => workspaceList.map((w) => w.name), [workspaceList]);
-  const scope = defaultPluginScope(workspaces, activeWorkspace, pickedScope);
   const listed = useMemo(() => filterPlugins(plugins ?? [], query), [plugins, query]);
   const selected = selectedPlugin(listed, selectedId);
 
@@ -127,38 +121,38 @@ export const PluginsSettings: React.FC = () => {
     }
   };
 
-  const setEnabled = (plugin: PluginInfo, workspace: string, enabled: boolean) => {
+  const setEnabled = (plugin: PluginInfo, enabled: boolean) => {
     if (!api) return;
-    void run(plugin, "toggle", () => api.setPluginWorkspace(plugin.id, workspace, enabled));
+    void run(plugin, "toggle", () => api.setPluginEnabled(plugin.id, enabled));
+  };
+
+  const chooseEngine = (plugin: PluginInfo, engine: TsCheckerEngine) => {
+    if (!api || !pluginEngineChange(plugin, engine, pending?.pluginId === plugin.id)) return;
+    void run(plugin, "engine", () => api.setPluginEngine(plugin.id, engine));
   };
 
   const toggle = (plugin: PluginInfo, enabled: boolean) => {
     setSelectedId(plugin.id);
-    const decision = pluginToggleDecision(plugin, scope, enabled);
+    const decision = pluginToggleDecision(plugin, enabled);
     if (decision === "blocked") return;
-    if (plugin.scope === "global") {
-      if (api) void run(plugin, "toggle", () => api.setPluginEnabled(plugin.id, enabled));
-      return;
-    }
-    if (scope === null) return;
     if (decision === "confirm") {
-      setConfirmEnable({ plugin, workspace: scope });
+      setConfirmEnable(plugin);
       return;
     }
-    setEnabled(plugin, scope, enabled);
+    setEnabled(plugin, enabled);
   };
 
   const pendingFor = (plugin: PluginInfo) => (pending?.pluginId === plugin.id ? pending.action : null);
 
   return (
-    <SettingsPage title="Plugins" description="Enable optional features for your Orquester workspaces." wide>
+    <SettingsPage title="Plugins" description="Enable optional features for this Orquester server." wide>
       <div className="flex flex-wrap items-center gap-2">
         <div className="relative min-w-0 flex-1 basis-56">
           <Search size={13} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-neutral-500" />
           <input
             type="search"
-            aria-label="Search workspace plugins"
-            placeholder="Search workspace plugins…"
+            aria-label="Search plugins"
+            placeholder="Search plugins…"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => {
@@ -186,14 +180,7 @@ export const PluginsSettings: React.FC = () => {
             </button>
           )}
         </div>
-        <ScopePicker workspaces={workspaces} scope={scope} onPick={setPickedScope} />
       </div>
-
-      {workspaces.length === 0 && (
-        <Notice tone="info" title="No workspaces yet">
-          Workspace plugins are turned on per workspace. Create a workspace to turn one on.
-        </Notice>
-      )}
 
       {loadError && (
         <Notice
@@ -232,7 +219,6 @@ export const PluginsSettings: React.FC = () => {
                   <PluginRow
                     key={plugin.id}
                     plugin={plugin}
-                    scope={scope}
                     selected={selected?.id === plugin.id}
                     pending={pendingFor(plugin)}
                     onSelect={() => setSelectedId(plugin.id)}
@@ -246,10 +232,10 @@ export const PluginsSettings: React.FC = () => {
           {selected && (
             <PluginDetail
               plugin={selected}
-              scope={scope}
               pending={pendingFor(selected)}
               error={actionError?.pluginId === selected.id ? actionError : null}
               onToggle={(enabled) => toggle(selected, enabled)}
+              onEngine={(engine) => chooseEngine(selected, engine)}
               onCheck={() => api && void run(selected, "check", () => api.checkPluginUpdates(selected.id))}
               onRollback={() => api && void run(selected, "rollback", () => api.rollbackPlugin(selected.id))}
               onRemove={() => api && void run(selected, "remove", () => api.removePluginDownloads(selected.id))}
@@ -260,13 +246,13 @@ export const PluginsSettings: React.FC = () => {
 
       <ConfirmDialog
         open={confirmEnable !== null}
-        title={confirmEnable ? `Turn on ${confirmEnable.plugin.name}?` : ""}
+        title={confirmEnable ? `Turn on ${confirmEnable.name}?` : ""}
         message={FIRST_ENABLE_MESSAGE}
         confirmLabel="Confirm"
         danger={false}
         onCancel={() => setConfirmEnable(null)}
         onConfirm={() => {
-          if (confirmEnable) setEnabled(confirmEnable.plugin, confirmEnable.workspace, true);
+          if (confirmEnable) setEnabled(confirmEnable, true);
           setConfirmEnable(null);
         }}
       />
@@ -274,57 +260,15 @@ export const PluginsSettings: React.FC = () => {
   );
 };
 
-/** The switch's accessible name: the scope's workspace for a workspace plugin. */
-const toggleLabel = (plugin: PluginInfo, scope: string | null): string =>
-  plugin.scope === "workspace" && scope ? `Enable ${plugin.name} for ${scope}` : `Enable ${plugin.name}`;
-
-/** "Scope: <workspace>" — the workspace the toggles act on. */
-const ScopePicker: React.FC<{
-  workspaces: string[];
-  scope: string | null;
-  onPick: (workspace: string) => void;
-}> = ({ workspaces, scope, onPick }) => {
-  const trigger = (
-    <span
-      className={cn(
-        "flex h-8 max-w-64 items-center gap-1.5 rounded-md border border-neutral-800 bg-neutral-900 px-2.5 text-sm",
-        scope === null ? "text-neutral-500" : "text-neutral-200"
-      )}
-    >
-      <span className="text-neutral-500">Scope:</span>
-      <span className="truncate">{scope ?? "no workspace"}</span>
-      <ChevronDown size={13} className="shrink-0 text-neutral-500" />
-    </span>
-  );
-  if (workspaces.length === 0) {
-    return trigger;
-  }
-  return (
-    <AdaptiveMenu trigger={trigger} align="right" width="w-56" title="Scope">
-      <DropdownLabel>Workspace</DropdownLabel>
-      {workspaces.map((name) => (
-        <DropdownItem
-          key={name}
-          icon={name === scope ? <Check size={14} /> : <span className="h-2 w-2" />}
-          onClick={() => onPick(name)}
-        >
-          {name}
-        </DropdownItem>
-      ))}
-    </AdaptiveMenu>
-  );
-};
-
-/** One list entry: identity, status badge, the toggle for the scope; clicking selects it. */
+/** One list entry: identity, status badge, the toggle; clicking selects it. */
 const PluginRow: React.FC<{
   plugin: PluginInfo;
-  scope: string | null;
   selected: boolean;
   pending: PluginAction | null;
   onSelect: () => void;
   onToggle: (enabled: boolean) => void;
-}> = ({ plugin, scope, selected, pending, onSelect, onToggle }) => {
-  const controls = pluginControls(plugin, scope, pending !== null);
+}> = ({ plugin, selected, pending, onSelect, onToggle }) => {
+  const controls = pluginControls(plugin, pending !== null);
   return (
     <li
       onClick={onSelect}
@@ -363,8 +307,8 @@ const PluginRow: React.FC<{
       </button>
       {pending === "toggle" && <Loader2 size={13} className="shrink-0 animate-spin text-neutral-500" />}
       <Switch
-        label={toggleLabel(plugin, scope)}
-        checked={pluginEnabledIn(plugin, scope)}
+        label={`Enable ${plugin.name}`}
+        checked={plugin.enabled}
         disabled={!controls.toggle}
         onChange={onToggle}
       />
@@ -373,18 +317,20 @@ const PluginRow: React.FC<{
   );
 };
 
-/** The selected plugin: what it is, its installed version and jobs, and its settings for the scope. */
+/** The selected plugin: what it is, its installed version and jobs, and its settings. */
 const PluginDetail: React.FC<{
   plugin: PluginInfo;
-  scope: string | null;
   pending: PluginAction | null;
   error: ActionError | null;
   onToggle: (enabled: boolean) => void;
+  onEngine: (engine: TsCheckerEngine) => void;
   onCheck: () => void;
   onRollback: () => void;
   onRemove: () => void;
-}> = ({ plugin, scope, pending, error, onToggle, onCheck, onRollback, onRemove }) => {
-  const controls = pluginControls(plugin, scope, pending !== null);
+}> = ({ plugin, pending, error, onToggle, onEngine, onCheck, onRollback, onRemove }) => {
+  const controls = pluginControls(plugin, pending !== null);
+  const engineOptions = pluginEngineOptions(plugin, pending !== null);
+  const engineLabel = pluginEngineLabel(plugin);
   const jobLabel = pluginJobLabel(plugin.job);
   const sourceHref = pluginSourceHref(plugin.source.url);
   const unsupported = plugin.platform === "unsupported";
@@ -442,6 +388,7 @@ const PluginDetail: React.FC<{
             value={
               plugin.current ? (
                 <span className="font-mono text-xs">
+                  {engineLabel && <span className="font-sans text-neutral-400">{engineLabel} </span>}
                   v{plugin.current.version}
                   {relativeTime(plugin.current.installedAt) && (
                     <span className="font-sans text-neutral-500"> · installed {relativeTime(plugin.current.installedAt)}</span>
@@ -488,9 +435,7 @@ const PluginDetail: React.FC<{
               size="sm"
               variant="outline"
               disabled={!controls.removeDownloads}
-              title={
-                plugin.enabledWorkspaces.length > 0 ? "Turn the plugin off in every workspace first." : undefined
-              }
+              title={plugin.enabled ? "Turn the plugin off first." : undefined}
               onClick={onRemove}
             >
               {spinner("remove") ?? <Trash2 size={13} />} Remove downloads
@@ -501,27 +446,57 @@ const PluginDetail: React.FC<{
 
       <SettingsSection title="Settings">
         <SettingRow
-          label={plugin.scope === "global" ? "Enable on this server" : "Enable for this workspace"}
+          label="Enable on this server"
           description={
-            plugin.scope === "global" ? (
-              "Turn this plugin on for every workspace and project. It ships with Orquester, so there is nothing to download."
-            ) : scope ? (
-              <>
-                Allow this plugin to be used in the <span className="text-neutral-300">{scope}</span> workspace.
-              </>
-            ) : (
-              "Create a workspace to turn this plugin on."
-            )
+            plugin.updates
+              ? "Turn this plugin on for every workspace and project. The server downloads it and keeps it up to date."
+              : "Turn this plugin on for every workspace and project. It ships with Orquester, so there is nothing to download."
           }
         >
           {pending === "toggle" && <Loader2 size={13} className="animate-spin text-neutral-500" />}
           <Switch
-            label={toggleLabel(plugin, scope)}
-            checked={pluginEnabledIn(plugin, scope)}
+            label={`Enable ${plugin.name}`}
+            checked={plugin.enabled}
             disabled={!controls.toggle}
             onChange={onToggle}
           />
         </SettingRow>
+        {engineOptions.length > 0 && (
+          <SettingRow
+            label="Engine"
+            description="The TypeScript 7 port that runs in place of tsc. Only one is used at a time; switching downloads it if needed."
+            stacked
+          >
+            <div role="radiogroup" aria-label="Engine" className="grid gap-2 sm:grid-cols-2">
+              {engineOptions.map((option) => (
+                <button
+                  key={option.id}
+                  type="button"
+                  role="radio"
+                  aria-checked={option.selected}
+                  disabled={option.disabled}
+                  title={option.hint ?? undefined}
+                  onClick={() => onEngine(option.id)}
+                  className={cn(
+                    "flex min-w-0 flex-col items-start gap-0.5 rounded-lg border px-3 py-2 text-left transition-colors",
+                    "focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500",
+                    option.selected
+                      ? "border-info/60 bg-info-soft/20"
+                      : "border-neutral-800 bg-neutral-900 enabled:hover:border-neutral-600",
+                    option.disabled && !option.selected && "cursor-not-allowed opacity-60"
+                  )}
+                >
+                  <span className="flex items-center gap-1.5 text-sm font-medium text-neutral-100">
+                    {option.label}
+                    {pending === "engine" && option.selected && <Loader2 size={12} className="animate-spin text-neutral-500" />}
+                  </span>
+                  <span className="text-xs leading-relaxed text-neutral-500">{option.description}</span>
+                  {option.hint && <span className="text-xs leading-relaxed text-warn">{option.hint}</span>}
+                </button>
+              ))}
+            </div>
+          </SettingRow>
+        )}
       </SettingsSection>
     </div>
   );

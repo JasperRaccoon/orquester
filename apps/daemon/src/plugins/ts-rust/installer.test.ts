@@ -5,23 +5,28 @@ import { test } from "node:test";
 import { fakeRegistry, publish, tempRoot } from "../testing.ts";
 import {
   type SmokeTestOptions,
+  TSC_RS_ENGINE,
+  TSRS_ENGINE,
   TsRustInstallError,
+  detectHostLibc,
   installTsRustRelease,
   pruneTsRustVersions,
   resolveTsRustRelease,
   runVersionCommand,
   smokeTestEnv,
-  tsRustBinaryName,
   tsRustBinaryPath,
-  tsRustPlatformPackage,
   tsRustStagingDir,
   tsRustVersionsDir
 } from "./installer.ts";
 
-// The tsc-rs installer against an in-memory registry and tarballs built on the
+// The engine installer against an in-memory registry and tarballs built on the
 // spot (../testing.ts): resolve, verify, extract, smoke-test, switch, prune.
+// tsc-rs unless a test says otherwise.
 
 const PKG = "@tsc-rs/linux-x64";
+const TSRS_PKG = "@tsrs/linux-x64-gnu";
+/** tsrs's version scheme: its own semver, then the TypeScript build it ports. */
+const TSRS_VERSION = "0.16.0-ts7.1.0-dev.20260929";
 const live = () => new AbortController().signal;
 
 async function setup(t: { after: (fn: () => Promise<void>) => void }) {
@@ -33,8 +38,9 @@ async function setup(t: { after: (fn: () => Promise<void>) => void }) {
 }
 
 async function install(pluginDir: string, registry: ReturnType<typeof fakeRegistry>, env: NodeJS.ProcessEnv = {}) {
-  const release = await resolveTsRustRelease(PKG, registry.deps, live());
-  return installTsRustRelease(pluginDir, release, registry.deps, { platform: "linux", env, signal: live() });
+  const engine = registry.engine;
+  const release = await resolveTsRustRelease(engine, engine === TSRS_ENGINE ? TSRS_PKG : PKG, registry.deps, live());
+  return installTsRustRelease(engine, pluginDir, release, registry.deps, { platform: "linux", env, signal: live() });
 }
 
 async function rejectsAt(promise: Promise<unknown>, step: string, message: RegExp): Promise<void> {
@@ -53,26 +59,45 @@ async function listing(dir: string): Promise<string[]> {
   );
 }
 
-test("platform packages: linux, darwin and win32 on x64 and arm64; nothing else", () => {
-  assert.equal(tsRustPlatformPackage("linux", "x64"), "@tsc-rs/linux-x64");
-  assert.equal(tsRustPlatformPackage("linux", "arm64"), "@tsc-rs/linux-arm64");
-  assert.equal(tsRustPlatformPackage("darwin", "arm64"), "@tsc-rs/darwin-arm64");
-  assert.equal(tsRustPlatformPackage("darwin", "x64"), "@tsc-rs/darwin-x64");
-  assert.equal(tsRustPlatformPackage("win32", "x64"), "@tsc-rs/win32-x64");
-  assert.equal(tsRustPlatformPackage("win32", "arm64"), "@tsc-rs/win32-arm64");
-  assert.equal(tsRustPlatformPackage("freebsd", "x64"), null);
-  assert.equal(tsRustPlatformPackage("linux", "ia32"), null);
-  assert.equal(tsRustPlatformPackage("linux", "riscv64"), null);
-  assert.equal(tsRustBinaryName("win32"), "tsc.exe");
-  assert.equal(tsRustBinaryName("linux"), "tsc");
-  assert.equal(tsRustBinaryPath("/p", "0.7.0", "win32"), join("/p", "versions", "0.7.0", "tsc.exe"));
+test("tsc-rs platform packages: linux, darwin and win32 on x64 and arm64; nothing else", () => {
+  const pkg = (platform: string, arch: string) => TSC_RS_ENGINE.platformPackage(platform, arch, "glibc");
+  assert.equal(pkg("linux", "x64"), "@tsc-rs/linux-x64");
+  assert.equal(TSC_RS_ENGINE.platformPackage("linux", "x64", "musl"), "@tsc-rs/linux-x64");
+  assert.equal(pkg("linux", "arm64"), "@tsc-rs/linux-arm64");
+  assert.equal(pkg("darwin", "arm64"), "@tsc-rs/darwin-arm64");
+  assert.equal(pkg("darwin", "x64"), "@tsc-rs/darwin-x64");
+  assert.equal(pkg("win32", "x64"), "@tsc-rs/win32-x64");
+  assert.equal(pkg("win32", "arm64"), "@tsc-rs/win32-arm64");
+  assert.equal(pkg("freebsd", "x64"), null);
+  assert.equal(pkg("linux", "ia32"), null);
+  assert.equal(pkg("linux", "riscv64"), null);
+  assert.equal(TSC_RS_ENGINE.binaryName("win32"), "tsc.exe");
+  assert.equal(TSC_RS_ENGINE.binaryName("linux"), "tsc");
+  assert.equal(tsRustBinaryPath(TSC_RS_ENGINE, "/p", "0.7.0", "win32"), join("/p", "versions", "0.7.0", "tsc.exe"));
+});
+
+test("tsrs platform packages: linux by libc on x64 and arm64, and Apple Silicon; no Windows, no Intel Mac", () => {
+  assert.equal(TSRS_ENGINE.platformPackage("linux", "x64", "glibc"), "@tsrs/linux-x64-gnu");
+  assert.equal(TSRS_ENGINE.platformPackage("linux", "x64", "musl"), "@tsrs/linux-x64-musl");
+  assert.equal(TSRS_ENGINE.platformPackage("linux", "arm64", "glibc"), "@tsrs/linux-arm64-gnu");
+  assert.equal(TSRS_ENGINE.platformPackage("linux", "arm64", "musl"), "@tsrs/linux-arm64-musl");
+  assert.equal(TSRS_ENGINE.platformPackage("darwin", "arm64", "glibc"), "@tsrs/darwin-arm64");
+  assert.equal(TSRS_ENGINE.platformPackage("darwin", "x64", "glibc"), null);
+  assert.equal(TSRS_ENGINE.platformPackage("win32", "x64", "glibc"), null);
+  assert.equal(TSRS_ENGINE.platformPackage("win32", "arm64", "glibc"), null);
+  assert.equal(TSRS_ENGINE.platformPackage("linux", "ia32", "glibc"), null);
+  assert.equal(TSRS_ENGINE.platformPackage("freebsd", "x64", "glibc"), null);
+  assert.equal(TSRS_ENGINE.binaryName("linux"), "tsrs");
+  assert.equal(tsRustBinaryPath(TSRS_ENGINE, "/p/tsrs", TSRS_VERSION, "linux"), join("/p/tsrs", "versions", TSRS_VERSION, "tsrs"));
+  // The host's own C library reads as one of the two (this test host's Node reports it).
+  assert.ok(["glibc", "musl"].includes(detectHostLibc()));
 });
 
 test("the release comes from tsc-rs/latest and the platform package's dist", async (t) => {
   const { root, registry } = await setup(t);
   await publish(registry, root, "0.7.0");
   registry.latest = "0.7.0";
-  const release = await resolveTsRustRelease(PKG, registry.deps, live());
+  const release = await resolveTsRustRelease(TSC_RS_ENGINE, PKG, registry.deps, live());
   assert.deepEqual(release, {
     version: "0.7.0",
     tarball: "https://registry.npmjs.org/@tsc-rs/linux-x64/-/linux-x64-0.7.0.tgz",
@@ -84,7 +109,7 @@ test("the release comes from tsc-rs/latest and the platform package's dist", asy
 test("a registry answer that is not a plain version, or has no sha512, is refused at the registry step", async (t) => {
   const { registry } = await setup(t);
   registry.latest = "../../evil";
-  await rejectsAt(resolveTsRustRelease(PKG, registry.deps, live()), "registry", /no valid tsc-rs version/);
+  await rejectsAt(resolveTsRustRelease(TSC_RS_ENGINE, PKG, registry.deps, live()), "registry", /no valid tsc-rs version/);
 
   const sha1Only = {
     ...registry.deps,
@@ -93,7 +118,7 @@ test("a registry answer that is not a plain version, or has no sha512, is refuse
         ? { version: "0.7.0" }
         : { version: "0.7.0", dist: { tarball: "https://registry.npmjs.org/x.tgz", integrity: "sha1-abc=" } }
   };
-  await rejectsAt(resolveTsRustRelease(PKG, sha1Only, live()), "registry", /no sha512 integrity/);
+  await rejectsAt(resolveTsRustRelease(TSC_RS_ENGINE, PKG, sha1Only, live()), "registry", /no sha512 integrity/);
 
   const plainHttp = {
     ...registry.deps,
@@ -102,10 +127,10 @@ test("a registry answer that is not a plain version, or has no sha512, is refuse
         ? { version: "0.7.0" }
         : { version: "0.7.0", dist: { tarball: "http://registry.npmjs.org/x.tgz", integrity: "sha512-abc=" } }
   };
-  await rejectsAt(resolveTsRustRelease(PKG, plainHttp, live()), "registry", /no https tarball/);
+  await rejectsAt(resolveTsRustRelease(TSC_RS_ENGINE, PKG, plainHttp, live()), "registry", /no https tarball/);
 
   registry.failWith = "getaddrinfo ENOTFOUND registry.npmjs.org";
-  await rejectsAt(resolveTsRustRelease(PKG, registry.deps, live()), "registry", /ENOTFOUND/);
+  await rejectsAt(resolveTsRustRelease(TSC_RS_ENGINE, PKG, registry.deps, live()), "registry", /ENOTFOUND/);
 });
 
 test("an install puts the whole lib dir at versions/<version>, the binary executable, and leaves no staging", async (t) => {
@@ -119,10 +144,73 @@ test("an install puts the whole lib dir at versions/<version>, the binary execut
     integrity: registry.releases.get("0.7.0")?.integrity,
     installedAt: "2026-10-14T12:00:00.000Z"
   });
-  const binary = tsRustBinaryPath(pluginDir, "0.7.0", "linux");
+  const binary = tsRustBinaryPath(TSC_RS_ENGINE, pluginDir, "0.7.0", "linux");
   assert.equal((await stat(binary)).mode & 0o777, 0o755);
   assert.equal(await readFile(join(tsRustVersionsDir(pluginDir), "0.7.0", "lib.d.ts"), "utf8"), "// lib for 0.7.0\n");
   assert.deepEqual(await listing(tsRustStagingDir(pluginDir)), []);
+});
+
+test("tsrs: the release comes from tsrs/latest and its libc's platform package, with its version scheme", async (t) => {
+  const { root } = await setup(t);
+  const registry = fakeRegistry(undefined, TSRS_ENGINE);
+  await publish(registry, root, TSRS_VERSION);
+  registry.latest = TSRS_VERSION;
+  const release = await resolveTsRustRelease(TSRS_ENGINE, TSRS_PKG, registry.deps, live());
+  assert.deepEqual(release, {
+    version: TSRS_VERSION,
+    tarball: `https://registry.npmjs.org/@tsrs/linux-x64-gnu/-/linux-x64-gnu-${TSRS_VERSION}.tgz`,
+    integrity: registry.releases.get(TSRS_VERSION)?.integrity
+  });
+  assert.equal(registry.calls.latest, 1);
+});
+
+test("tsrs: an install puts the whole package at versions/<version>, the binary beside its lib .d.ts files", async (t) => {
+  const { root } = await setup(t);
+  const engineDir = join(root, "plugins", "ts-rust", "tsrs");
+  const registry = fakeRegistry(undefined, TSRS_ENGINE);
+  await publish(registry, root, TSRS_VERSION);
+  registry.latest = TSRS_VERSION;
+  const smoked: string[] = [];
+  const smoke = registry.deps.runSmokeTest;
+  registry.deps.runSmokeTest = (binary, options) => {
+    smoked.push(binary);
+    return smoke(binary, options);
+  };
+
+  const installed = await install(engineDir, registry);
+  assert.deepEqual(installed, {
+    version: TSRS_VERSION,
+    integrity: registry.releases.get(TSRS_VERSION)?.integrity,
+    installedAt: "2026-10-14T12:00:00.000Z"
+  });
+  const dir = join(tsRustVersionsDir(engineDir), TSRS_VERSION);
+  assert.deepEqual(await listing(dir), ["LICENSE", "lib.d.ts", "package.json", "tsrs"]);
+  const binary = tsRustBinaryPath(TSRS_ENGINE, engineDir, TSRS_VERSION, "linux");
+  assert.equal((await stat(binary)).mode & 0o777, 0o755);
+  assert.equal(await readFile(join(dir, "lib.d.ts"), "utf8"), `// lib for ${TSRS_VERSION}\n`);
+  assert.equal(smoked.length, 1, "the binary was smoke-tested before the switch");
+  assert.deepEqual(await listing(tsRustStagingDir(engineDir)), []);
+});
+
+test("tsrs: bad integrity, a missing binary and a failing smoke test leave versions/ as it was", async (t) => {
+  const { root } = await setup(t);
+  const engineDir = join(root, "plugins", "ts-rust", "tsrs");
+  const registry = fakeRegistry(undefined, TSRS_ENGINE);
+  await publish(registry, root, "0.15.0-ts7.1.0-dev.20260901");
+  await publish(registry, root, "0.16.0-ts7.1.0-dev.1", { claimedIntegrity: `sha512-${Buffer.alloc(64).toString("base64")}` });
+  await publish(registry, root, "0.16.0-ts7.1.0-dev.2", { noBinary: true });
+  await publish(registry, root, "0.16.0-ts7.1.0-dev.3", { script: "#!/bin/sh\nexit 1\n" });
+  registry.latest = "0.15.0-ts7.1.0-dev.20260901";
+  await install(engineDir, registry);
+
+  registry.latest = "0.16.0-ts7.1.0-dev.1";
+  await rejectsAt(install(engineDir, registry), "integrity", /does not match/);
+  registry.latest = "0.16.0-ts7.1.0-dev.2";
+  await rejectsAt(install(engineDir, registry), "extract", /the package has no tsrs$/);
+  registry.latest = "0.16.0-ts7.1.0-dev.3";
+  await rejectsAt(install(engineDir, registry), "smoke-test", /tsrs --version exited with code 1/);
+  assert.deepEqual(await listing(tsRustVersionsDir(engineDir)), ["0.15.0-ts7.1.0-dev.20260901"]);
+  assert.deepEqual(await listing(tsRustStagingDir(engineDir)), []);
 });
 
 test("bad integrity stops before extracting: versions/ untouched, staging removed", async (t) => {
@@ -142,7 +230,7 @@ test("a failing download is reported at the download step", async (t) => {
   const { pluginDir, registry } = await setup(t);
   const release = { version: "0.7.0", tarball: "https://registry.npmjs.org/gone.tgz", integrity: "sha512-AAAA" };
   await rejectsAt(
-    installTsRustRelease(pluginDir, release, registry.deps, { platform: "linux", env: {}, signal: live() }),
+    installTsRustRelease(TSC_RS_ENGINE, pluginDir, release, registry.deps, { platform: "linux", env: {}, signal: live() }),
     "download",
     /HTTP 404/
   );
@@ -221,14 +309,14 @@ test("a cancelled install reports cancelled and leaves nothing behind", async (t
   const { root, pluginDir, registry } = await setup(t);
   await publish(registry, root, "0.7.0");
   registry.latest = "0.7.0";
-  const release = await resolveTsRustRelease(PKG, registry.deps, live());
+  const release = await resolveTsRustRelease(TSC_RS_ENGINE, PKG, registry.deps, live());
   const abort = new AbortController();
   registry.deps.fetchTarball = async () => {
     abort.abort();
     throw new Error("aborted");
   };
   await rejectsAt(
-    installTsRustRelease(pluginDir, release, registry.deps, { platform: "linux", env: {}, signal: abort.signal }),
+    installTsRustRelease(TSC_RS_ENGINE, pluginDir, release, registry.deps, { platform: "linux", env: {}, signal: abort.signal }),
     "download",
     /^cancelled$/
   );

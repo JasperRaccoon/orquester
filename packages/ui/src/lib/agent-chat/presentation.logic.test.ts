@@ -39,7 +39,7 @@ describe("the output heuristic never judges a call still in progress", () => {
 describe("session tool labels (unified MCP §4)", () => {
   it("every chat tool of the catalogue has its own label, read from TOOLSETS", () => {
     const names = TOOLSETS.flatMap((toolset) => toolset.tools.map((tool) => tool.name));
-    assert.equal(names.length, 45);
+    assert.equal(names.length, 44);
     assert.deepEqual(names, chatToolNames());
     for (const name of names) {
       assert.ok(Object.hasOwn(SESSION_TOOL_LABELS, name), `${name} has no label`);
@@ -49,7 +49,7 @@ describe("session tool labels (unified MCP §4)", () => {
 
   it("every legacy name keeps a label: the old in-chat tools and the external names the catalogue replaced", () => {
     const legacy = [
-      "thread_list", "thread_read", "thread_create", "agent_catalog", "thread_send", "thread_wait", "thread_interrupt",
+      "request_toolset", "thread_list", "thread_read", "thread_create", "agent_catalog", "thread_send", "thread_wait", "thread_interrupt",
       "thread_fork", "thread_merge_back", "delegate_task", "task_status", "task_wait", "task_cancel",
       "get_session_lineage", "interrupt_session", "stop_task", "stop_session", "close_session", "revert_session",
       "compact_session", "implement_plan", "resolve_merge_back", "answer_question", "dismiss_question", "resolve_approval",

@@ -319,7 +319,7 @@ export const UserMessageRow = React.memo(function UserMessageRow({
   // another chat's reply to this one's message (unified MCP §8.2): the provenance header the agent
   // read becomes a caption; the bubble holds the message alone.
   const fromThread = React.useMemo(() => (merged || !markedThread ? null : parseThreadMessage(text)), [merged, markedThread, text]);
-  // Orquester's own automatic "continue" after an approved toolset card (unified MCP §9.3).
+  // An older build's automatic "continue" after an approved toolset card (legacy chip): Orquester's own.
   const fromOrquester = !merged && !markedThread && isToolsetContinueMessage(row.message);
 
   return (

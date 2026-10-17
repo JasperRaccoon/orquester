@@ -581,7 +581,7 @@ export async function startAgentHost(
     index: threadIndex,
     // An interrupted turn ends the session-tool calls it was waiting on.
     onTurnInterrupt: (threadId: string) => sessionTools.abortThreadCalls(threadId),
-    // A toolset change the live session could not take in-session (unified MCP §9.3): restart it
+    // A pushed manifest the live session could not take in-session (unified MCP §9.3): restart it
     // with resume at its next idle point.
     sessionToolsStale: (threadId: string) => sessionTools.needsRestart(threadId),
     onThreadDeleted: (threadId: string) => sessionTools.forgetThread(threadId),
@@ -599,7 +599,7 @@ export async function startAgentHost(
   const server = createAgentHostServer({
     orchestrator: host,
     store,
-    // Unified MCP §9.3: the daemon's new manifest for a thread whose toolsets changed.
+    // Unified MCP §9.3: the daemon's new manifest for a thread.
     sessionToolsRefresh: async (threadId, body) => ({ applied: await sessionTools.applyManifest(threadId, body.manifest) }),
     logger,
     hostInstanceId,

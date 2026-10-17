@@ -8,7 +8,6 @@
 
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { AgentAdapterId } from "@orquester/api/agent-chat";
-import { TOOLSETS } from "@orquester/api";
 import { z } from "zod";
 
 import {
@@ -138,7 +137,7 @@ export interface TestCallContext {
 
 /**
  * One chat call against `tools` through THE executor, as the daemon's route would run it — with
- * every toolset on, no approval port (a card would be refused) and the caller as given: what a
+ * no approval port (a card would be refused) and the caller as given: what a
  * provider's test needs of "the daemon's answer".
  */
 export function executeTestChatCall(
@@ -166,7 +165,6 @@ export function executeTestChatCall(
     {
       lookup: (name, audience) => (audience === "chat" ? byName.get(name) : undefined),
       approvals: null,
-      enabledToolsets: async () => new Set(TOOLSETS.map((toolset) => toolset.id)),
       ...(ctx.secretRequests ? { secretRequests: ctx.secretRequests } : {}),
       now: () => ctx.now()
     },

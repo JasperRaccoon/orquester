@@ -7,6 +7,8 @@
 
 import {
   isPluginId,
+  isTsCheckerEngine,
+  type PluginEngineInfo,
   type PluginInfo,
   type PluginInstalledVersionInfo,
   type PluginLastErrorInfo,
@@ -54,11 +56,44 @@ function parseLastError(value: unknown): PluginLastErrorInfo | null | undefined 
   return { at: value.at, step: value.step, message: value.message };
 }
 
+function parseSource(value: unknown): PluginInfo["source"] | null {
+  return isRecord(value) && typeof value.label === "string" && typeof value.url === "string"
+    ? { label: value.label, url: value.url }
+    : null;
+}
+
+/**
+ * The engines a plugin offers, or undefined when it offers none (a daemon from
+ * before the engine choice). An entry for an engine this client does not know,
+ * or a malformed one, is left out rather than failing the plugin.
+ */
+function parseEngines(value: unknown): PluginEngineInfo[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const engines: PluginEngineInfo[] = [];
+  for (const entry of value) {
+    if (!isRecord(entry) || !isTsCheckerEngine(entry.id) || typeof entry.label !== "string") continue;
+    const source = parseSource(entry.source);
+    if (!source || typeof entry.platform !== "string" || !PLATFORMS.has(entry.platform)) continue;
+    engines.push({
+      id: entry.id,
+      label: entry.label,
+      description: typeof entry.description === "string" ? entry.description : "",
+      source,
+      platform: entry.platform as PluginEngineInfo["platform"]
+    });
+  }
+  return engines.length > 0 ? engines : undefined;
+}
+
 /**
  * A `PluginInfo` the Plugins section can render, or null. Every field the
  * section reads is checked; nullable fields may also be absent. `scope`,
  * `updates` and `enabled` may be absent too (a daemon from before global
- * plugins): such a plugin is a per-workspace one the daemon keeps up to date.
+ * plugins): such a plugin is a per-workspace one the daemon keeps up to date,
+ * on while its `enabledWorkspaces` list any. `enabledWorkspaces` may be
+ * absent (a daemon that no longer sends the always-empty list). `engine` and
+ * `engines` are optional: absent from older daemons, and an engine this client
+ * does not know reads as absent.
  */
 export function parsePluginInfo(value: unknown): PluginInfo | null {
   if (
@@ -72,8 +107,8 @@ export function parsePluginInfo(value: unknown): PluginInfo | null {
     typeof value.provider !== "string" ||
     typeof value.platform !== "string" ||
     !PLATFORMS.has(value.platform) ||
-    !Array.isArray(value.enabledWorkspaces) ||
-    !value.enabledWorkspaces.every((w) => typeof w === "string") ||
+    (value.enabledWorkspaces !== undefined &&
+      (!Array.isArray(value.enabledWorkspaces) || !value.enabledWorkspaces.every((w) => typeof w === "string"))) ||
     typeof value.job !== "string" ||
     !JOBS.has(value.job) ||
     (value.scope !== undefined && (typeof value.scope !== "string" || !SCOPES.has(value.scope))) ||
@@ -82,12 +117,13 @@ export function parsePluginInfo(value: unknown): PluginInfo | null {
   ) {
     return null;
   }
-  const enabledWorkspaces = value.enabledWorkspaces as string[];
+  const enabledWorkspaces = (value.enabledWorkspaces as string[] | undefined) ?? [];
   const current = parseInstalledVersion(value.current);
   const previous = parseInstalledVersion(value.previous);
   const skippedVersion = optionalString(value.skippedVersion);
   const lastCheckAt = optionalString(value.lastCheckAt);
   const lastError = parseLastError(value.lastError);
+  const engines = parseEngines(value.engines);
   if (
     current === undefined ||
     previous === undefined ||
@@ -113,7 +149,9 @@ export function parsePluginInfo(value: unknown): PluginInfo | null {
     skippedVersion,
     lastCheckAt,
     lastError,
-    job: value.job as PluginInfo["job"]
+    job: value.job as PluginInfo["job"],
+    ...(isTsCheckerEngine(value.engine) ? { engine: value.engine } : {}),
+    ...(engines ? { engines } : {})
   };
 }
 

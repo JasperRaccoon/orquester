@@ -1,7 +1,7 @@
 /**
  * Legacy chat-tool aliases (unified MCP design 2026-10-15 §14.1, spec §14.2.5): an old agent host's
  * names reach the catalog tools that replaced them WITH THE OLD SEMANTICS, through the one executor
- * (gate, toolset check, turn policy as the target's), and only once the catalog no longer serves
+ * (gate and turn policy as the target's), and only once the catalog no longer serves
  * the old name itself.
  */
 
@@ -55,7 +55,7 @@ function targets() {
 
 async function call(name: string, args: Record<string, unknown>, rig = targets()) {
   const result = await executeToolCall(
-    { lookup: (n) => chatToolByName(n, rig.lookup), approvals: null, enabledToolsets: async () => new Set(["core"]) },
+    { lookup: (n) => chatToolByName(n, rig.lookup), approvals: null },
     { name, arguments: args },
     { caller, api: new FakeDaemonApi(), signal: new AbortController().signal }
   );
@@ -148,7 +148,7 @@ test("a name the catalog still serves is its own tool; an alias without its targ
   assert.equal(chatToolByName("thread_send", (n) => (n === "thread_send" ? own : rig.lookup(n))), own);
   assert.equal(chatToolByName("thread_send", (n) => (n === "send_message" ? undefined : rig.lookup(n))), undefined);
   assert.equal(chatToolByName("no_such_tool", rig.lookup), undefined);
-  // The alias carries the target's toolset and tier: the gate and TOOL_NOT_ENABLED judge it as the target.
+  // The alias carries the target's group and tier: the gate judges it as the target.
   const alias = chatToolByName("task_status", rig.lookup)!;
   assert.deepEqual([alias.name, alias.toolset, alias.tier, alias.audiences], ["task_status", "core", "read", ["chat"]]);
 });

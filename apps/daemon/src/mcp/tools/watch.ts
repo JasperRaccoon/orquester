@@ -157,8 +157,8 @@ export const waitForSessionTool = defineTool({
   name: "wait_for_session",
   title: "Wait for a session",
   description:
-    "Block until a session (sessionId, any of sessionIds, a project's, or any) needs attention — a question, approval, plan, finished turn or error — after `after` (default now); pass the result's `cursor` back as `after`. Never poll. One session's result adds its `state` and latest `reply`.",
-  chatNote: "Without `after`, sessionId(s) return once one is not working (at once if one already is) with its final reply. Default: this chat's project.",
+    "Block until a session (sessionId, any of sessionIds, a project's, or any) needs attention (question, approval, plan, finished turn, error) after `after` (default now); pass the result's `cursor` back as `after`. Never poll. A one-session result adds its `state` and latest `reply`.",
+  chatNote: "Without `after`, sessionId(s) return once one is not working (at once if one already is), with its final reply. Default: this chat's project.",
   input: {
     sessionId: sessionIdField.optional(),
     sessionIds: z.array(sessionIdField).min(1).max(MAX_WAIT_SESSIONS).optional(),

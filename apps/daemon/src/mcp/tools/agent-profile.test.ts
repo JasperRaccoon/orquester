@@ -52,10 +52,10 @@ function thread(over: Partial<ThreadCaller> = {}): ThreadCaller {
   return { kind: "thread", threadId: "t1", title: "Chat", projectPath: "", workspace: "", cwd: "/tmp", agentId: "claude", callId: "c1",
     runtimeMode: "full-access", planning: false, workflowOwned: false, exchange: null, ...over };
 }
-/** A chat caller with the editing toolset on and an approval port double. */
+/** A chat caller and an approval port double. */
 async function chat(api: FakeDaemonApi, port: FakeApprovalPort, args: Record<string, unknown>, over: Partial<ThreadCaller> = {}) {
   return unwrap(await executeToolCall(
-    { approvals: port, enabledToolsets: async () => new Set(["core", "reads", "agent-profile-editing"]) },
+    { approvals: port },
     { name: "edit_agent_profile", arguments: args },
     { caller: thread(over), api, signal: new AbortController().signal }
   ));
