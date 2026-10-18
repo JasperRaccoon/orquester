@@ -248,9 +248,17 @@ only the profile's skills/commands/MCP tools plus built-ins. Measured request si
 built-ins: hide built-ins + keep Workflow ≈ −1.45k tokens; hide built-ins + Workflow off ≈ −3.0k.
 `disallowedTools: Skill(x)` does **not** hide skills; `--disable-slash-commands` hides the profile's
 too. Not verifiable here: claude.ai-synced *plugins* (no account has any yet; the setting is in place).
-Known gaps: a project's own `enabledPlugins` could turn on a globally installed plugin (builder:
-verify and, if so, override `enabledPlugins` at the flag tier). Runtime user settings carry over
-per §6.0.
+Project `enabledPlugins` (verified by the builder, no model call): a project's
+`.claude/settings.json` `enabledPlugins` DOES turn on a globally installed plugin under
+`settingSources: ["project", "local"]`; the launch sets `enabledPlugins: {<id>: false}` at the flag
+tier for every plugin in the account's `installed_plugins.json` and every id the project's settings
+name (the profile's own plugins load by path as `<name>@inline` and are unaffected). Also found:
+the `skills` allow-list hides the project's own `.claude/` skills and commands, and
+`strictMcpConfig` drops the project's `.mcp.json` and plugin MCP servers, so the launch adds the
+project's names to the list and passes project servers (minus `disabledMcpjsonServers`) and the
+profile plugins' servers (lifted at preparation) explicitly. Settings and MCP servers go through
+0600 files (`--settings <file>`, `--mcp-config <file>`): the SDK puts both in argv otherwise.
+Runtime user settings carry over per §6.0.
 
 ### 6.2 Codex — one prepared `CODEX_HOME` per (account, profile)
 
@@ -428,7 +436,8 @@ Tests for every behavior, parsing, persistence and protocol change (AGENTS.md). 
 - Relies on undocumented/experimental knobs that a CLI update could change: Grok `GROK_AUTH_PATH`;
   Codex `skills.bundled`, `features.apps/remote_plugin`; Claude's `skills` option interplay with
   the Workflow tool. Preparation's validation step (§6.5) must catch a regression and fail loudly.
-- Claude: claude.ai-synced plugins unverified (none exist yet); project `enabledPlugins` (§6.1).
+- Claude: claude.ai-synced plugins unverified (none exist yet). Project `enabledPlugins` is
+  verified and overridden (§6.1).
 - Codex: refresh writes `auth.json` in place (non-atomic) — same as today's shared homes.
 - Grok: deny list must track every globally discovered plugin by exact name, and the skills
   ignore list every global skill entry incl. symlinks (both rebuilt per spawn). A global skill

@@ -1,0 +1,229 @@
+/**
+ * Claude adapter — what a profile thread launches with (Agent Profiles spec §6.0, §6.1).
+ *
+ * Claude keeps the account's `CLAUDE_CONFIG_DIR`; a profile chat differs from a Global one only in
+ * its SDK options (`launch.ts`). {@link loadClaudeProfileLaunch} gathers their inputs at every
+ * session start:
+ * - the prepared section (`loadProfileManifest(input, "claude")`; a missing or mismatched one
+ *   FAILS the start — never a Global launch) and the files it names: the generated and copied
+ *   plugins, the instructions, the MCP servers (with secrets);
+ * - the account's user `settings.json` (`<CLAUDE_CONFIG_DIR>/settings.json`), filtered by
+ *   `claudeRuntimeSettings` — the runtime settings a profile chat carries over (§6.0). Missing or
+ *   invalid reads as `{}`;
+ * - what keeps the PROJECT's own files loading as in a Global chat although the recipe would drop
+ *   them: its `.claude/` skills and commands are added to the `skills` allow-list, and its
+ *   `.mcp.json` servers (minus `disabledMcpjsonServers`) are passed explicitly, since
+ *   `strictMcpConfig` ignores them;
+ * - every plugin id the account has installed or the project's settings enable, to switch off at
+ *   the flag tier: probed on 2.1.285, a project's `.claude/settings.json` `enabledPlugins` DOES
+ *   turn on a globally installed plugin under `settingSources: ["project", "local"]`, and
+ *   `enabledPlugins: {id: false}` in `--settings` turns it off again. The profile's own plugins load
+ *   by path (`<name>@inline`), so the override never touches them.
+ *
+ * Secrets: the MCP servers and the carried settings (`env`, auth helpers) never reach argv — the
+ * launch writes them to 0600 files in a 0700 per-thread directory ({@link writeClaudeProfileLaunchFiles})
+ * and passes the paths; the session removes the directory when it ends.
+ *
+ * Static imports only (AGENTS.md: no dynamic `import()` under `agent-host`).
+ */
+
+import { randomUUID } from "node:crypto";
+import { chmod, mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { join, resolve, sep } from "node:path";
+
+import type { SdkPluginConfig } from "@anthropic-ai/claude-agent-sdk";
+
+import {
+  claudeInstalledPluginIds,
+  claudeProjectEntryNames,
+  claudeProjectMcpServers,
+  isPlainObject,
+  mcpServersOf,
+  readJsonObject
+} from "../../../agent-isolation/claude-names.ts";
+import { claudeRuntimeSettings } from "../../../agent-isolation/runtime-settings.ts";
+import type { ClaudePreparedHooks, ClaudePreparedSection } from "../../../session-profiles/manifest/claude.ts";
+import type { HostThreadProfile } from "../../host-protocol.ts";
+import { loadProfileManifest, ProfileLaunchError } from "../profile-manifest.ts";
+
+type Doc = Record<string, unknown>;
+
+/** Env a profile chat adds (spec §6.1): no claude.ai connectors, no auto-memory. */
+export const CLAUDE_PROFILE_ENV: Readonly<Record<string, string>> = {
+  ENABLE_CLAUDEAI_MCP_SERVERS: "false",
+  CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1"
+};
+
+/** Everything `buildClaudeQueryOptions` needs for a profile chat. Holds SECRETS (`mcpServers`, `carriedSettings`). */
+export interface ClaudeProfileLaunch {
+  /** The generated plugin, then each copied plugin (MCP lifted by the preparer, so `skipMcpDiscovery`). Absolute. */
+  plugins: SdkPluginConfig[];
+  /** The SDK `skills` allow-list (prepared list + the project's own names); absent = omit the option. */
+  skills?: string[];
+  /** The profile's instructions; `""` when it has none. */
+  instructions: string;
+  hooks: ClaudePreparedHooks;
+  disableWorkflows: boolean;
+  /** The account's user settings minus the item keys (`claudeRuntimeSettings`). */
+  carriedSettings: Doc;
+  /** Installed or project-enabled plugin ids to switch off at the flag tier. */
+  disabledPluginIds: string[];
+  /** The project's `.mcp.json` servers (not disabled), then the profile's — the profile wins a name. */
+  mcpServers: Record<string, Doc>;
+}
+
+/** Where a profile chat's launch files go, and what they are called. */
+export interface ClaudeProfileLaunchFiles {
+  dir: string;
+  settings: string;
+  mcpConfig: string;
+}
+
+export function claudeProfileLaunchFiles(tmpDir: string, threadId: string): ClaudeProfileLaunchFiles {
+  const dir = join(tmpDir, "claude-profile-launch", threadId);
+  return { dir, settings: join(dir, "settings.json"), mcpConfig: join(dir, "mcp.json") };
+}
+
+/** A manifest path resolved inside the prepared dir; throws for one that escapes it. */
+function inside(preparedDir: string, relative: string): string {
+  const root = resolve(preparedDir);
+  const path = resolve(root, relative);
+  if (!path.startsWith(root + sep)) {
+    throw new ProfileLaunchError(`This chat's Agent Profile could not be loaded, so the agent was not started: the prepared path "${relative}" is outside its directory.`);
+  }
+  return path;
+}
+
+async function readPrepared(path: string, what: string): Promise<string> {
+  try {
+    return await readFile(path, "utf8");
+  } catch {
+    throw new ProfileLaunchError(`This chat's Agent Profile could not be loaded, so the agent was not started: its ${what} is missing from the prepared directory.`);
+  }
+}
+
+function stringList(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+}
+
+/**
+ * The thread's profile launch, or `null` for a Global thread. Throws `ProfileLaunchError` (the
+ * start fails with its message) when the prepared directory cannot be launched from.
+ */
+export async function loadClaudeProfileLaunch(
+  input: { profile?: HostThreadProfile; cwd: string },
+  where: {
+    /** The account's `CLAUDE_CONFIG_DIR` (`claudeConfigDir(env)`). */
+    configDir: string;
+    /** `.claude.json` of that account (`<CLAUDE_CONFIG_DIR>/.claude.json`, else `~/.claude.json`). */
+    claudeJson: string;
+    /** The child's `HOME`: where the project walk for `.claude/` skills stops. */
+    home: string;
+  }
+): Promise<ClaudeProfileLaunch | null> {
+  const section: ClaudePreparedSection | null = await loadProfileManifest(input, "claude");
+  if (section === null || input.profile === undefined) {
+    return null;
+  }
+  const preparedDir = input.profile.preparedDir;
+
+  const plugins: SdkPluginConfig[] = [];
+  if (section.localPlugin !== undefined) {
+    plugins.push({ type: "local", path: inside(preparedDir, section.localPlugin.path) });
+  }
+  for (const plugin of section.plugins) {
+    plugins.push({ type: "local", path: inside(preparedDir, plugin.path), skipMcpDiscovery: true });
+  }
+
+  const instructions =
+    section.instructionsFile !== undefined
+      ? (await readPrepared(inside(preparedDir, section.instructionsFile), "instructions file")).trim()
+      : "";
+
+  let profileServers: Record<string, Doc> = {};
+  if (section.mcpConfig !== undefined) {
+    const text = await readPrepared(inside(preparedDir, section.mcpConfig), "MCP server file");
+    try {
+      profileServers = mcpServersOf(JSON.parse(text) as Doc);
+    } catch {
+      throw new ProfileLaunchError("This chat's Agent Profile could not be loaded, so the agent was not started: its MCP server file does not read.");
+    }
+  }
+
+  const userSettings = (await readJsonObject(join(where.configDir, "settings.json"))) ?? {};
+  const carriedSettings = claudeRuntimeSettings(userSettings);
+
+  const projectSettings = await Promise.all(
+    [join(input.cwd, ".claude", "settings.json"), join(input.cwd, ".claude", "settings.local.json")].map(readJsonObject)
+  );
+  const claudeJson = await readJsonObject(where.claudeJson);
+  const projectEntry = isPlainObject(claudeJson?.projects) ? claudeJson.projects[resolve(input.cwd)] : undefined;
+
+  const disabledMcp = new Set([
+    ...stringList(carriedSettings.disabledMcpjsonServers),
+    ...projectSettings.flatMap((doc) => stringList(doc?.disabledMcpjsonServers)),
+    ...(isPlainObject(projectEntry) ? stringList(projectEntry.disabledMcpjsonServers) : [])
+  ]);
+  const mcpServers: Record<string, Doc> = {};
+  for (const [name, def] of Object.entries(await claudeProjectMcpServers(input.cwd))) {
+    if (!disabledMcp.has(name)) mcpServers[name] = def;
+  }
+  Object.assign(mcpServers, profileServers);
+
+  const disabledPluginIds = [
+    ...new Set([
+      ...(await claudeInstalledPluginIds(where.configDir)),
+      ...projectSettings.flatMap((doc) => (isPlainObject(doc?.enabledPlugins) ? Object.keys(doc.enabledPlugins) : []))
+    ])
+  ];
+
+  const skills =
+    section.skills !== undefined
+      ? [...new Set([...section.skills, ...(await claudeProjectEntryNames(input.cwd, where.home))])]
+      : undefined;
+
+  return {
+    plugins,
+    ...(skills !== undefined ? { skills } : {}),
+    instructions,
+    hooks: section.hooks,
+    disableWorkflows: section.disableWorkflows,
+    carriedSettings,
+    disabledPluginIds,
+    mcpServers
+  };
+}
+
+/** Writes `value` as JSON to `path` (0600) via a temp file and a rename. */
+async function writeSecretJson(path: string, value: unknown): Promise<void> {
+  const tmp = `${path}.${randomUUID()}.tmp`;
+  const handle = await open(tmp, "w", 0o600);
+  try {
+    await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`);
+  } finally {
+    await handle.close();
+  }
+  await chmod(tmp, 0o600);
+  await rename(tmp, path);
+}
+
+/** Writes the launch's files (`buildClaudeQueryOptions`' `profileFiles`) into a fresh 0700 dir. */
+export async function writeClaudeProfileLaunchFiles(
+  files: ClaudeProfileLaunchFiles,
+  contents: { settings: Doc; mcpConfig?: Doc }
+): Promise<void> {
+  await mkdir(join(files.dir, ".."), { recursive: true, mode: 0o700 });
+  await mkdir(files.dir, { recursive: true, mode: 0o700 });
+  await chmod(files.dir, 0o700);
+  await writeSecretJson(files.settings, contents.settings);
+  if (contents.mcpConfig !== undefined) {
+    await writeSecretJson(files.mcpConfig, contents.mcpConfig);
+  } else {
+    await rm(files.mcpConfig, { force: true });
+  }
+}
+
+/** Removes the launch's files; never throws. */
+export async function removeClaudeProfileLaunchFiles(files: ClaudeProfileLaunchFiles): Promise<void> {
+  await rm(files.dir, { recursive: true, force: true }).catch(() => undefined);
+}
