@@ -1190,6 +1190,16 @@ function closedIdsFrom(
   return { ids, at };
 }
 
+/**
+ * A logged `profileId` as the fold reads it (Agent Profiles): a non-empty string names a profile,
+ * `""` is Global (`null` here — on `thread.meta-updated`, an explicit switch back to it), anything
+ * else (absent, or a value no build writes) says nothing.
+ */
+export function profileIdOf(value: unknown): string | null | undefined {
+  if (value === "") return null;
+  return typeof value === "string" ? value : undefined;
+}
+
 function reduce(state: ThreadFoldState, event: DomainEvent): Mutation {
   switch (event.type) {
     case "thread.created": {
@@ -1215,39 +1225,38 @@ function reduce(state: ThreadFoldState, event: DomainEvent): Mutation {
       // no lineage, never an unreadable thread.
       const lineage = parseThreadLineage(payload.lineage);
       if (lineage !== undefined) head.lineage = lineage;
-      if (typeof payload.profileId === "string" && payload.profileId !== "") head.profileId = payload.profileId;
+      // Agent Profiles: additive too — anything but a non-empty string is Global.
+      const profileId = profileIdOf(payload.profileId);
+      if (typeof profileId === "string") head.profileId = profileId;
       return { head };
     }
 
     case "thread.meta-updated": {
       if (state.head === null) return {};
-      const { title, modelSelection, accountId, home, profileId } = event.payload;
+      const { title, modelSelection, accountId, home } = event.payload;
+      const profileId = profileIdOf(event.payload.profileId);
       if (
         title === undefined &&
         modelSelection === undefined &&
         accountId === undefined &&
         home === undefined &&
-        typeof profileId !== "string"
+        profileId === undefined
       ) {
         return {};
       }
-      // The profile switch: `""` is Global, which a head says by having no `profileId`.
-      const base =
-        typeof profileId === "string"
-          ? (({ profileId: _previous, ...rest }) => rest)(state.head)
-          : state.head;
-      return {
-        head: {
-          ...base,
-          ...(typeof profileId === "string" && profileId !== "" ? { profileId } : {}),
-          ...(title !== undefined ? { title } : {}),
-          ...(modelSelection !== undefined ? { modelSelection } : {}),
-          // §3.4's account switch. Field-wise: a rename must not clear the
-          // identity, and an identity change must not clear the title.
-          ...(accountId !== undefined ? { accountId } : {}),
-          ...(home !== undefined ? { home } : {})
-        }
+      const head: ThreadHead = {
+        ...state.head,
+        ...(title !== undefined ? { title } : {}),
+        ...(modelSelection !== undefined ? { modelSelection } : {}),
+        // §3.4's account switch. Field-wise: a rename must not clear the
+        // identity, and an identity change must not clear the title.
+        ...(accountId !== undefined ? { accountId } : {}),
+        ...(home !== undefined ? { home } : {}),
+        // Agent Profiles' switch: a profile, or `""` — back to Global.
+        ...(typeof profileId === "string" ? { profileId } : {})
       };
+      if (profileId === null) delete head.profileId;
+      return { head };
     }
 
     case "thread.runtime-mode-set": {

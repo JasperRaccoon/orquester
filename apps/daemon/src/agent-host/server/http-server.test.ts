@@ -29,6 +29,7 @@ import {
 
 import {
   agentHostRoutes,
+  agentHostSupports,
   type AgentHostHealthResponse,
   type AgentHostHoldGoalsResponse,
   type AgentHostRecycleOpenCodeResponse,
@@ -235,6 +236,9 @@ describe("agent host server — readiness (§3.1, §8)", () => {
     assert.equal(body.protocolVersion, 1);
     assert.equal(body.hostInstanceId, "host-test");
     assert.equal(body.pid, 4242);
+    // Agent Profiles: a daemon refuses to send a profile thread to a host without this.
+    assert.deepEqual(body.capabilities, { sessionProfiles: 1 });
+    assert.equal(agentHostSupports(body, "sessionProfiles"), true);
     await h.stop();
   });
 

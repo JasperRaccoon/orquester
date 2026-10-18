@@ -431,6 +431,42 @@ test("meta.json is checkpointed every 50 events", async (t) => {
   assert.equal(written.seq, 50, "the checkpoint fires ON the 50th event");
 });
 
+test("the Agent Profile is rebuilt from the log alone: meta.json and state.json are caches", async (t) => {
+  const rootDir = await tempRoot();
+  const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => store.close());
+  const withProfile = created();
+  (withProfile.payload as { profileId?: string; profileRevision?: string }).profileId = "p1";
+  (withProfile.payload as { profileId?: string; profileRevision?: string }).profileRevision = "3";
+  const meta = (payload: Record<string, unknown>, id: string): AppendableDomainEvent =>
+    ({
+      eventId: id,
+      threadId: "t1",
+      type: "thread.meta-updated",
+      payload,
+      occurredAt: "2026-01-01T00:00:02.000Z",
+      commandId: null,
+      causationEventId: null,
+      metadata: {}
+    }) as AppendableDomainEvent;
+  await store.append({ threadId: "t1", events: [withProfile, meta({ title: "Renamed" }, "e-rename")] });
+  assert.equal((await headOf(store, "t1")).profileId, "p1", "the store's own projection");
+  await store.append({ threadId: "t1", events: [meta({ profileId: "p2", profileRevision: "1" }, "e-switch")] });
+  assert.equal((await headOf(store, "t1")).profileId, "p2");
+  await store.drain();
+  await store.close();
+
+  // Every cache gone: the next store has only `events.ndjson`.
+  await fs.rm(metaPath(rootDir, "t1"), { force: true });
+  await fs.rm(path.join(path.dirname(metaPath(rootDir, "t1")), "state.json"), { force: true });
+  const reopened = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => reopened.close());
+  assert.equal(foldThread((await reopened.readAll("t1")).events).head?.profileId, "p2");
+
+  await reopened.append({ threadId: "t1", events: [meta({ profileId: "" }, "e-global")] });
+  assert.equal("profileId" in foldThread((await reopened.readAll("t1")).events).head!, false, "\"\" is Global");
+});
+
 test("saveHead wins over the store's own projection and survives a reopen", async (t) => {
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });

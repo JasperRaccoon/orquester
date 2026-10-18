@@ -809,6 +809,27 @@ test("a switch recomputes the launch env, calls the host, THEN moves the tab rec
   await f.cleanup();
 });
 
+test("a switch carries the recomposed serverPool: the host replaces launch.json's with it", async () => {
+  const f = await switchableFixture();
+  f.launchFor = (ctx) => ({
+    env: { CLAUDE_CONFIG_DIR: `/homes/${ctx.accountId}` },
+    accountId: ctx.accountId!,
+    serverPool: { key: "keyed", env: { A: "1" } }
+  });
+  await f.service.switchAccount(f.sessionId, { commandId: "c1", accountId: "acc-2" });
+  assert.deepEqual(f.identities[0]!.body.serverPool, { key: "keyed", env: { A: "1" } });
+  await f.cleanup();
+});
+
+test("hostSupportsSessionProfiles follows the adopted host's advertised capability", async () => {
+  const older = await makeFixture(CLAUDE, null);
+  assert.equal(older.service.hostSupportsSessionProfiles(), false, "a host that advertises nothing");
+  await older.cleanup();
+  const current = await makeFixture(CLAUDE, null, { health: { capabilities: { sessionProfiles: 1 } } });
+  assert.equal(current.service.hostSupportsSessionProfiles(), true);
+  await current.cleanup();
+});
+
 test("switching to System clears the account and never falls back to the family default", async () => {
   const f = await switchableFixture();
   await f.service.switchAccount(f.sessionId, { commandId: "c1", accountId: "system" });

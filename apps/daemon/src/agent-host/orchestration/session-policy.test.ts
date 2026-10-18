@@ -5,6 +5,7 @@ import type { AdapterCapabilities, ProviderSession } from "@orquester/api/agent-
 
 import {
   decideSessionRestart,
+  profileKeyOf,
   type BoundSessionShape,
   type DesiredSessionShape
 } from "./session-policy.ts";
@@ -30,6 +31,7 @@ const shape = (overrides: Partial<DesiredSessionShape> = {}): DesiredSessionShap
   cwd: "/work/p",
   accountKey: "account:acc1",
   modelSelection: { model: "m1" },
+  profileKey: "",
   ...overrides
 });
 
@@ -43,6 +45,25 @@ describe("session restart policy (§3.4)", () => {
   it("is a no-op when nothing changed", () => {
     const decision = decideSessionRestart({ desired: shape(), bound: bound(), capabilities });
     assert.equal(decision.restart, false);
+  });
+
+  it("a profile change restarts as a PROFILE change, carrying the cursor — never an account switch", () => {
+    const profile = { profileId: "p1", revision: "3", preparedDir: "/prepared/p1/codex/acc1" };
+    for (const [from, to] of [
+      [undefined, profile],
+      [profile, undefined],
+      [profile, { ...profile, revision: "4" }]
+    ] as const) {
+      const decision = decideSessionRestart({
+        desired: shape({ profileKey: profileKeyOf(to) }),
+        bound: bound({ profileKey: profileKeyOf(from) }),
+        capabilities
+      });
+      assert.equal(decision.restart, true);
+      assert.deepEqual(decision.reasons, ["profile"]);
+      assert.equal(decision.carryResumeCursor, true);
+    }
+    assert.equal(profileKeyOf(undefined), "", "Global");
   });
 
   it("a cwd change restarts with the resume cursor", () => {

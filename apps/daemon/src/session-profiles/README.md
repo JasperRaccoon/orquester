@@ -89,8 +89,13 @@ preparer (System = `system`, its account home is the agent's system home), else 
 - **Launch plumbing**: `profileId` exists on `CreateSessionRequest`, `CreateAgentChatSessionFields`,
   `SessionChatRecord` (`sessionChatRecordSchema`), `ThreadHead`/`agentThreadHeadSchema`, and the
   host's `CreateHostThreadRequest`/`SetThreadIdentityRequest` together with
-  `profile?: HostThreadProfile {profileId, revision, preparedDir}`. Not yet read or persisted by
-  anyone (see the follow-ups in the T1 report).
+  `profile?: HostThreadProfile {profileId, revision, preparedDir}`. The agent host persists
+  `profile` in the thread's `launch.json`, records `profileId` in the log, hands it to every
+  session start as `StartSessionInput.profile` and switches it through `SetThreadIdentityRequest`
+  (absent = unchanged, `null` = Global); adapters read their section with
+  `agent-host/adapters/profile-manifest.ts`'s `loadProfileManifest(input, agent)` (see the
+  agent-host README). The daemon must check `AgentChatService.hostSupportsSessionProfiles()`
+  before sending a profile — an older host would run it as Global.
 - **Imports** (Global / git / zip / md / copy-from-profile / marketplace plugins): add routes under
   the paths reserved in `sessionProfileRoutes`' doc comment, and write through new store methods
   that take the profile queue and revision like `createItem` does.

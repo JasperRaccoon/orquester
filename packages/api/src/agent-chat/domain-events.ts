@@ -91,10 +91,14 @@ export interface ThreadCreatedPayload {
    */
   lineage?: ThreadLineage;
   /**
-   * The Agent Profile (`session-profiles.ts`) the thread launches with; absent = Global.
-   * Additive, like `lineage`: an older build ignores it.
+   * The Agent Profile (`session-profiles.ts`) the thread launches with; the fold puts it on
+   * `ThreadHead.profileId`. Absent (or `""`) = Global, as on every log an older build wrote.
+   * Additive, like `lineage`: an older build ignores it. What a launch actually reads is the
+   * thread's `launch.json` (`HostThreadProfile`); this is the durable record of WHICH profile.
    */
   profileId?: string;
+  /** The profile revision the thread was created with. Informational: no fold reads it. */
+  profileRevision?: string;
 }
 
 /**
@@ -119,12 +123,15 @@ export interface ThreadMetaUpdatedPayload {
   /** The home KIND for that account. */
   home?: AccountHomeKind;
   /**
-   * The Agent Profile the thread now runs with, written beside the profile switch
-   * (`POST /api/sessions/:id/profile`, `ProfileCommandBody` in `wire.ts`). The empty string is
-   * Global (no profile), as `accountId: ""` is the system identity. Additive: an older
-   * build ignores it.
+   * The Agent Profile the thread now runs with, written beside the profile switch (the host's
+   * identity switch, which the daemon's `POST /api/sessions/:id/profile` — `ProfileCommandBody`
+   * in `wire.ts` — and its account route call). The empty string is Global (no profile), as
+   * `accountId: ""` is the system identity; absent leaves the profile as it was. Additive: an
+   * older build ignores it.
    */
   profileId?: string;
+  /** The revision of the profile switched to (absent for Global). Informational: no fold reads it. */
+  profileRevision?: string;
 }
 
 export interface ThreadRuntimeModeSetPayload {

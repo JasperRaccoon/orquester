@@ -785,6 +785,14 @@ export interface ProfileCommandBody extends AgentChatCommandBase {
  */
 export const IDENTITY_CHANGED_ACTIVITY_KIND = "session.identity-changed";
 
+/**
+ * The activity kind the host appends beside an Agent Profile switch (spec 2026-10-18 §5.3), the
+ * profile counterpart of {@link IDENTITY_CHANGED_ACTIVITY_KIND} — a switch of both writes one of
+ * each. `payload` is `{profileId, previousProfileId}`, each a profile id or `null` for Global;
+ * the client resolves the id to the profile's current name at render time.
+ */
+export const PROFILE_CHANGED_ACTIVITY_KIND = "session.profile-changed";
+
 export type AgentChatCommandBody =
   | TurnCommandBody
   | InterruptCommandBody
