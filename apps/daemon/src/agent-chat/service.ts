@@ -491,6 +491,16 @@ export class AgentChatService {
     return this.supervisor.protectedPids();
   }
 
+  /**
+   * Agent Profiles (spec 2026-10-18): true when the adopted host launches a profile thread with
+   * its profile (`AgentHostCapabilities.sessionProfiles`). A host without it would quietly run
+   * one as Global, so a launch or switch that names a profile must be refused (or wait for the
+   * deploy's host restart) while this is false.
+   */
+  hostSupportsSessionProfiles(): boolean {
+    return this.supervisor.hostSupports("sessionProfiles");
+  }
+
   // --- §3.2 the registry moved a CLI under the host ------------------------
 
   /** The version each chat-capable registry entry was last seen at. */
@@ -1436,7 +1446,10 @@ export class AgentChatService {
       home,
       launchEnv,
       ...(launch?.unset?.length ? { unsetEnv: launch.unset } : {}),
-      ...(homePath ? { homePath } : {})
+      ...(homePath ? { homePath } : {}),
+      // A launch field like the others: the host REPLACES `launch.json`'s with
+      // it, so leaving it out would move a keyed thread to the global server.
+      ...(launch?.serverPool ? { serverPool: launch.serverPool } : {})
     };
     let receipt: { seq: number };
     try {

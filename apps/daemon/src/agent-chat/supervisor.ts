@@ -23,6 +23,8 @@ import {
   AGENT_HOST_PREPARED_TIMEOUT_MS,
   AGENT_HOST_PROTOCOL_VERSION,
   AGENT_HOST_SERVICE_SESSION,
+  agentHostSupports,
+  type AgentHostCapabilities,
   type AgentHostHealthResponse
 } from "../agent-host/host-protocol.ts";
 
@@ -353,6 +355,16 @@ export class AgentHostSupervisor {
   /** True only when the host can take work right now. */
   isHealthy(): boolean {
     return this.state === "healthy";
+  }
+
+  /**
+   * True when the ADOPTED host advertises `capability` at `level` or above
+   * (`AgentHostHealthResponse.capabilities`). False with no host, and for a host
+   * that predates the capability — including the old host a deploy's
+   * drain-restart is still waiting on, until the new one is adopted.
+   */
+  hostSupports(capability: keyof AgentHostCapabilities, level = 1): boolean {
+    return this.state === "healthy" && agentHostSupports(this.health, capability, level);
   }
 
   /**

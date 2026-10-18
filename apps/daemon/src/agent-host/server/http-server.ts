@@ -53,6 +53,7 @@ import {
 import type { AdapterLogger } from "../adapter.ts";
 import {
   AGENT_HOST_AUTH_HEADER,
+  AGENT_HOST_CAPABILITIES,
   AGENT_HOST_PROTOCOL_VERSION,
   agentHostRoutes,
   type AgentHostHealthResponse,
@@ -444,7 +445,8 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
         pid: options.pid ?? process.pid,
         startedAt: options.startedAt,
         codeStamp: options.codeStamp ?? null,
-        providersRevision: orchestrator.providersChangeCount()
+        providersRevision: orchestrator.providersChangeCount(),
+        capabilities: { ...AGENT_HOST_CAPABILITIES }
       };
       sendJson(response, 200, body);
       return;
