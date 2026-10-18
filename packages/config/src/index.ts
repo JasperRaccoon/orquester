@@ -230,6 +230,72 @@ export function agentProfileImportsDir(baseDir: string): string {
   return joinPath(baseDir, "tmp", "agent-profile-imports");
 }
 
+// Agent Profiles (docs/superpowers/specs/2026-10-18-agent-profiles-design.md §4.4, §6.5). Every
+// directory below is daemon-owned and 0700; nothing here is ever a symlink target or merge source
+// of an account home. Every id-derived segment passes `assertSessionProfileSegment`.
+//
+//   <appdir>/daemon/session-profiles/
+//     profiles/<profileId>/                       one profile's sources (`session-profile-store`)
+//     prepared/<profileId>/<agent>/<accountKey>/  agent-native files generated from it
+//     staging/                                    preparations being built, swapped into `prepared/`
+
+/** The Agent Profiles root. */
+export function sessionProfilesDir(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "session-profiles");
+}
+
+/** Parent of every profile's source directory. */
+export function sessionProfileSourcesDir(baseDir: string): string {
+  return joinPath(sessionProfilesDir(baseDir), "profiles");
+}
+
+/** One profile's source directory (manifest, instructions, items, secrets). */
+export function sessionProfileDir(baseDir: string, profileId: string): string {
+  return joinPath(sessionProfileSourcesDir(baseDir), assertSessionProfileSegment(profileId));
+}
+
+/** Parent of every prepared directory. */
+export function sessionProfilePreparedRootDir(baseDir: string): string {
+  return joinPath(sessionProfilesDir(baseDir), "prepared");
+}
+
+/**
+ * The prepared directory of `(profileId, agent, accountKey)` — what a profile chat of that agent
+ * launches from (spec §6). `accountKey` comes from {@link sessionProfileAccountKey}; an agent
+ * whose prepared files do not depend on the account uses {@link SESSION_PROFILE_SHARED_ACCOUNT_KEY}.
+ */
+export function sessionProfilePreparedDir(baseDir: string, profileId: string, agent: string, accountKey: string): string {
+  return joinPath(
+    sessionProfilePreparedRootDir(baseDir),
+    assertSessionProfileSegment(profileId),
+    assertSessionProfileSegment(agent),
+    assertSessionProfileSegment(accountKey)
+  );
+}
+
+/** Where preparations are built before the atomic swap into `prepared/` (same filesystem). */
+export function sessionProfileStagingDir(baseDir: string): string {
+  return joinPath(sessionProfilesDir(baseDir), "staging");
+}
+
+/** The account key of the daemon user's own login (no managed account; spec §6.2 "System account"). */
+export const SESSION_PROFILE_SYSTEM_ACCOUNT_KEY = "system";
+/** The account key of a prepared directory that is the same for every account of its agent. */
+export const SESSION_PROFILE_SHARED_ACCOUNT_KEY = "shared";
+
+/** A managed account id as-is; the system identity (`""`, `"system"`, absent) as {@link SESSION_PROFILE_SYSTEM_ACCOUNT_KEY}. */
+export function sessionProfileAccountKey(accountId: string | null | undefined): string {
+  return accountId && accountId !== SESSION_PROFILE_SYSTEM_ACCOUNT_KEY ? assertSessionProfileSegment(accountId) : SESSION_PROFILE_SYSTEM_ACCOUNT_KEY;
+}
+
+/** `segment` when it is safe as ONE path segment (letters, digits, `_`, `-`, `.` inside; ≤ 128); otherwise throws. */
+export function assertSessionProfileSegment(segment: string): string {
+  if (!/^[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$/.test(segment) || segment.includes("..")) {
+    throw new Error(`"${segment.slice(0, 40)}" is not a valid Agent Profiles path segment.`);
+  }
+  return segment;
+}
+
 /** Web Push state (VAPID keypair + browser subscriptions); 0600 — holds the private key. */
 export function pushConfigPath(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "push.json");
@@ -1028,7 +1094,13 @@ export const sessionChatRecordSchema = z.object({
    * confirmed when the host holds the thread, taken back when it never got it. Anything else
    * reads as absent.
    */
-  createUnconfirmed: z.literal(true).optional().catch(undefined)
+  createUnconfirmed: z.literal(true).optional().catch(undefined),
+  /**
+   * The Agent Profile the chat launches with (`session-profiles.ts`). Absent = Global, as on
+   * every record an older build wrote; a value that does not read is dropped (Global), never
+   * the record. An older daemon strips the key on rollback, which relaunches the chat Global.
+   */
+  profileId: z.string().min(1).max(128).optional().catch(undefined)
 });
 export type SessionChatRecord = z.infer<typeof sessionChatRecordSchema>;
 
@@ -1234,6 +1306,9 @@ export const agentThreadHeadSchema = z.object({
   // How a fork was carried over; head-only. Unreadable reads as none: the host then falls
   // back to the `thread.forked` row the fold still holds.
   forkStrategy: z.enum(["native", "transcript", "empty", "unavailable"]).optional().catch(undefined),
+  // The Agent Profile the thread launches with (`ThreadHead.profileId`). Must be listed (zod
+  // strips unknown keys); absent or unreadable = Global, never a head nothing can read.
+  profileId: z.string().min(1).max(128).optional().catch(undefined),
   createdAt: z.string(),
   updatedAt: z.string()
 });
@@ -2228,3 +2303,4 @@ export function isValidName(name: string | undefined): name is string {
 
 export * from "./workflows.ts";
 export * from "./agent-tools.ts";
+export * from "./session-profiles.ts";

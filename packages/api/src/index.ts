@@ -34,10 +34,26 @@ import type {
   LaunchAppRequest
 } from "./desktops.ts";
 import { desktopRoutes } from "./desktops.ts";
+import {
+  sessionProfileRoutes,
+  type CreateSessionProfileItemRequest,
+  type CreateSessionProfileRequest,
+  type DeleteSessionProfileResponse,
+  type DuplicateSessionProfileRequest,
+  type SessionProfileDetail,
+  type SessionProfileInstructionsResponse,
+  type SessionProfileItemDetail,
+  type SessionProfileListResponse,
+  type SessionProfileMutationResponse,
+  type SessionProfilePrepareStatusResponse,
+  type UpdateSessionProfileItemRequest,
+  type UpdateSessionProfileRequest
+} from "./session-profiles.ts";
 import type { AgentProfileAgentId } from "./agent-profile.ts";
 export * from "./agent-chat/index.ts";
 export * from "./saved-prompts.ts";
 export * from "./agent-profile.ts";
+export * from "./session-profiles.ts";
 export * from "./prompt-variables.ts";
 export * from "./workflows/index.ts";
 export * from "./desktops.ts";
@@ -1450,6 +1466,13 @@ export interface CreateSessionRequest {
    * may leave it unset.
    */
   chat?: CreateAgentChatSessionFields;
+  /**
+   * The Agent Profile (`session-profiles.ts`) an agent-chat session launches with. Absent =
+   * Global (the agent's own setup), as for every client that predates profiles. Carried at the
+   * top level like `accountId`; `chat.profileId` exists on the field type for host-side callers.
+   * Ignored for every kind but `agent-chat`.
+   */
+  profileId?: string;
   /** The workflow run that starts this session (workflows spec §5.10). Persisted on the tab record. */
   owner?: WorkflowSessionOwner;
 }
@@ -2029,6 +2052,74 @@ export class HttpOrquesterApiClient implements OrquesterApi {
     return this.post("/api/fs/rename", { path, newName });
   }
 
+  // Agent Profiles (`session-profiles.ts`). Every mutation carries the profile's revision; a
+  // stale one is a 409 `PROFILE_CONFLICT`, thrown like any other failed request.
+
+  listSessionProfiles(): Promise<SessionProfileListResponse> {
+    return this.get(sessionProfileRoutes.list);
+  }
+
+  getSessionProfile(profileId: string): Promise<SessionProfileDetail> {
+    return this.get(sessionProfileRoutes.profile(profileId));
+  }
+
+  createSessionProfile(request: CreateSessionProfileRequest): Promise<SessionProfileDetail> {
+    return this.post(sessionProfileRoutes.list, request);
+  }
+
+  updateSessionProfile(profileId: string, request: UpdateSessionProfileRequest): Promise<SessionProfileDetail> {
+    return this.put(sessionProfileRoutes.profile(profileId), request);
+  }
+
+  deleteSessionProfile(profileId: string, revision: string): Promise<DeleteSessionProfileResponse> {
+    return this.delete(`${sessionProfileRoutes.profile(profileId)}?revision=${encodeURIComponent(revision)}`);
+  }
+
+  duplicateSessionProfile(profileId: string, request: DuplicateSessionProfileRequest = {}): Promise<SessionProfileDetail> {
+    return this.post(sessionProfileRoutes.duplicate(profileId), request);
+  }
+
+  getSessionProfileItem(profileId: string, itemId: string): Promise<SessionProfileItemDetail> {
+    return this.get(sessionProfileRoutes.item(profileId, itemId));
+  }
+
+  createSessionProfileItem(profileId: string, request: CreateSessionProfileItemRequest): Promise<SessionProfileMutationResponse> {
+    return this.post(sessionProfileRoutes.items(profileId), request);
+  }
+
+  updateSessionProfileItem(
+    profileId: string,
+    itemId: string,
+    request: UpdateSessionProfileItemRequest
+  ): Promise<SessionProfileMutationResponse> {
+    return this.put(sessionProfileRoutes.item(profileId, itemId), request);
+  }
+
+  deleteSessionProfileItem(profileId: string, itemId: string, revision: string): Promise<SessionProfileMutationResponse> {
+    return this.delete(`${sessionProfileRoutes.item(profileId, itemId)}?revision=${encodeURIComponent(revision)}`);
+  }
+
+  setSessionProfileItemEnabled(
+    profileId: string,
+    itemId: string,
+    revision: string,
+    enabled: boolean
+  ): Promise<SessionProfileMutationResponse> {
+    return this.post(sessionProfileRoutes.itemEnabled(profileId, itemId), { revision, enabled });
+  }
+
+  readSessionProfileInstructions(profileId: string): Promise<SessionProfileInstructionsResponse> {
+    return this.get(sessionProfileRoutes.instructions(profileId));
+  }
+
+  writeSessionProfileInstructions(profileId: string, revision: string, text: string): Promise<SessionProfileDetail> {
+    return this.put(sessionProfileRoutes.instructions(profileId), { revision, text });
+  }
+
+  getSessionProfilePrepareStatus(profileId: string): Promise<SessionProfilePrepareStatusResponse> {
+    return this.get(sessionProfileRoutes.prepareStatus(profileId));
+  }
+
   eventsUrl(): string {
     const url = new URL(this.baseUrl);
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
@@ -2065,9 +2156,17 @@ export class HttpOrquesterApiClient implements OrquesterApi {
     return response.json() as Promise<T>;
   }
 
-  private async post<T>(path: string, body?: unknown): Promise<T> {
+  private post<T>(path: string, body?: unknown): Promise<T> {
+    return this.send("POST", path, body);
+  }
+
+  private put<T>(path: string, body: unknown): Promise<T> {
+    return this.send("PUT", path, body);
+  }
+
+  private async send<T>(method: "POST" | "PUT", path: string, body?: unknown): Promise<T> {
     const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
-      method: "POST",
+      method,
       headers: {
         ...this.authHeaders(),
         ...(body === undefined ? {} : { "Content-Type": "application/json" })

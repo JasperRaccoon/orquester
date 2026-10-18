@@ -559,6 +559,11 @@ export function agentChatCommandPath(sessionId: string, name: AgentChatCommandNa
  */
 export interface CreateAgentChatSessionFields {
   accountId?: string;
+  /**
+   * The Agent Profile the thread launches with (`@orquester/api` `session-profiles.ts`). Absent =
+   * Global. Clients may leave it unset and send `CreateSessionRequest.profileId` instead.
+   */
+  profileId?: string;
   modelSelection: ModelSelection;
   runtimeMode?: RuntimeMode;
   /**

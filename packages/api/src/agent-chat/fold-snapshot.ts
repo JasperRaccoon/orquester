@@ -425,6 +425,7 @@ const isThreadHead = shaped<ThreadHead>({
   lineage: optional(isRecord),
   // Head-only too (a fork's strategy): a fold's own head never holds it.
   forkStrategy: optional(isString),
+  profileId: optional(isString),
   createdAt: isString,
   updatedAt: isString
 });

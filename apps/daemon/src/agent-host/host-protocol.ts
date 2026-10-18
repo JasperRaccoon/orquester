@@ -515,6 +515,26 @@ export interface CreateHostThreadRequest {
    * carries the lineage.
    */
   lineage?: ThreadLineage;
+  /**
+   * The Agent Profile the thread launches with (`@orquester/api` `session-profiles.ts`). Absent =
+   * Global. Additive: an older host ignores it (and then launches Global — the daemon must not
+   * send a profile thread to a host whose protocol predates profiles).
+   */
+  profileId?: string;
+  /** Where the profile was prepared for this thread's agent and account; see {@link HostThreadProfile}. */
+  profile?: HostThreadProfile;
+}
+
+/**
+ * A profile thread's prepared directory, resolved daemon-side (never on a client wire). The
+ * host's adapters read `<preparedDir>/manifest.json` (`session-profiles/manifest.ts`,
+ * `readPreparedManifest`) and launch from it; `profileId` and `revision` must match the
+ * manifest's, else the launch fails — never falls back to Global (spec §2 anti-goals).
+ */
+export interface HostThreadProfile {
+  profileId: string;
+  revision: string;
+  preparedDir: string;
 }
 
 /**
@@ -570,6 +590,14 @@ export interface SetThreadIdentityRequest {
   launchEnv?: Record<string, string>;
   unsetEnv?: string[];
   homePath?: string;
+  /**
+   * The profile the thread runs with from now on, with {@link profile} (spec §5.3 "switching in a
+   * running chat"). Like the launch fields it REPLACES what create wrote: the daemon sends the
+   * thread's profile on every identity switch, an account switch included; both absent = Global.
+   * Additive: an older host ignores them.
+   */
+  profileId?: string;
+  profile?: HostThreadProfile;
 }
 
 /**

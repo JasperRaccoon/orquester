@@ -13,7 +13,7 @@
 import assert from "node:assert/strict";
 import { createWriteStream } from "node:fs";
 import { test } from "node:test";
-import { agentProfileRoutes } from "@orquester/api";
+import { agentProfileRoutes, sessionProfileRoutes } from "@orquester/api";
 import { agentChatRoutes } from "@orquester/api/agent-chat";
 import { createDefaultClientConfig, createDefaultDaemonConfig } from "@orquester/config";
 import { createVisualUrlSigner } from "./agent-chat/visual-urls.ts";
@@ -25,7 +25,7 @@ const USERNAME = "admin";
 const PASSWORD_HASH = "$2a$12$0123456789012345678901uFAKEfakeFAKEfakeFAKEfa";
 const BEARER = `Bearer ${Buffer.from(`${USERNAME}:${PASSWORD_HASH}`).toString("base64")}`;
 
-function remoteApp(services: Record<string, unknown>) {
+function remoteApp(services: Record<string, unknown>, mode: "local" | "remote" = "remote") {
   const config = createDefaultDaemonConfig({ env: {} });
   config.transports.http.username = USERNAME;
   config.transports.http.passwordHash = PASSWORD_HASH;
@@ -37,7 +37,7 @@ function remoteApp(services: Record<string, unknown>) {
     createDefaultClientConfig(`${root}/daemon.sock`),
     createWriteStream("/dev/null"),
     services as unknown as CreateServerArgs[4],
-    { authRequired: true, mode: "remote" }
+    { authRequired: mode === "remote", mode }
   );
 }
 
@@ -72,6 +72,35 @@ test("the bearer hook refuses percent-encoded spellings of a gated path", async 
     assert.equal((await app.inject({ method: "GET", url: "/api/auth/info" })).statusCode, 200);
   } finally {
     await app.close();
+  }
+});
+
+test("the Agent Profiles routes are on both transports, bearer-gated on the remote one", async () => {
+  let reads = 0;
+  const services = {
+    sessionProfiles: {
+      list: async () => {
+        reads += 1;
+        return { profiles: [], errors: [] };
+      }
+    }
+  };
+  const remote = remoteApp(services);
+  const local = remoteApp(services, "local");
+  try {
+    for (const url of [sessionProfileRoutes.list, "/%61pi/session-profiles", sessionProfileRoutes.profile("p1")]) {
+      assert.equal((await remote.inject({ method: "GET", url })).statusCode, 401, url);
+    }
+    assert.equal(reads, 0);
+    const authorized = await remote.inject({ method: "GET", url: sessionProfileRoutes.list, headers: { authorization: BEARER } });
+    assert.equal(authorized.statusCode, 200, authorized.body);
+    // The unix socket is trusted local control: no bearer.
+    const socket = await local.inject({ method: "GET", url: sessionProfileRoutes.list });
+    assert.equal(socket.statusCode, 200, socket.body);
+    assert.equal(reads, 2);
+  } finally {
+    await remote.close();
+    await local.close();
   }
 });
 
