@@ -151,6 +151,11 @@ export interface ThreadHead {
    * it. Absent on a thread that is no fork and from an older build.
    */
   forkStrategy?: ThreadForkStrategy;
+  /**
+   * The Agent Profile (`session-profiles.ts`) the thread's provider child launches with. Absent =
+   * Global, and on every head an older build wrote.
+   */
+  profileId?: string;
   createdAt: string;
   updatedAt: string;
 }

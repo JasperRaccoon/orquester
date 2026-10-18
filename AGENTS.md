@@ -25,6 +25,7 @@
 - **Workflow:** a daemon-owned graph of triggers and blocks that automates tasks within a project; a run is one execution of that graph.
 - **Right rail:** the side panel for saved prompts, chat history and checkpoints, automated workflows, and the agent profile.
 - **Agent profile:** the right-rail section that edits each agent CLI's own global config files (MCP servers, skills, plugins, marketplaces, hooks, commands, instruction file); the CLIs' files stay the only source of truth.
+- **Agent Profiles (code: session profiles):** Orquester-owned kits of instructions, skills, MCP servers, plugins, hooks and commands that a chat launches with instead of the agent's global setup; code uses the `SessionProfile` prefix and `apps/daemon/src/session-profiles/`, and a chat without `profileId` is Global.
 
 ## Repository map
 
