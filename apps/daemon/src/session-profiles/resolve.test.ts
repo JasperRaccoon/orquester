@@ -120,5 +120,11 @@ describe("resolveForAgent", () => {
     const resolved = resolveForAgent(source([], { settings: { hideBuiltinSkills: { codex: false }, claudeWorkflowTool: false } }), "codex");
     assert.deepEqual(resolved.settings, { hideBuiltinSkills: false, claudeWorkflowTool: false });
     assert.equal(resolveForAgent(source([], { settings: { hideBuiltinSkills: { codex: false } } }), "grok").settings.hideBuiltinSkills, true);
+    // Values a newer build wrote (kept in the file) read as the defaults here.
+    assert.deepEqual(resolveSessionProfileSettings({ hideBuiltinSkills: { claude: "auto", codex: false }, claudeWorkflowTool: "ask" }), {
+      hideBuiltinSkills: { claude: true, codex: false, grok: true, opencode: true },
+      claudeWorkflowTool: true
+    });
+    assert.deepEqual(resolveSessionProfileSettings({ hideBuiltinSkills: "all" }).hideBuiltinSkills, { claude: true, codex: true, grok: true, opencode: true });
   });
 });

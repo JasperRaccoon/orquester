@@ -1316,7 +1316,9 @@ function mergeSettings(record: SessionProfileSettingsRecord, draft: SessionProfi
   if (!draft) return record;
   const next: SessionProfileSettingsRecord = { ...record };
   if (draft.hideBuiltinSkills !== undefined) {
-    const hide: Record<string, unknown> = { ...(record.hideBuiltinSkills ?? {}) };
+    // Raw in the record (a newer build's shape is kept); one that is not an object is replaced.
+    const current = record.hideBuiltinSkills;
+    const hide: Record<string, unknown> = typeof current === "object" && current !== null && !Array.isArray(current) ? { ...current } : {};
     for (const [agent, value] of Object.entries(draft.hideBuiltinSkills)) {
       if (!isSessionProfileAgentId(agent)) throw errors.invalid(`settings.hideBuiltinSkills names an unknown agent "${agent.slice(0, 40)}".`);
       if (value !== undefined) hide[agent] = value;

@@ -128,11 +128,15 @@ export interface ResolvedAgentProfile {
   skipped: ResolvedSkippedItem[];
 }
 
-/** The profile's settings with every default filled in (spec §4.3). */
+/**
+ * The profile's settings with every default filled in (spec §4.3). The record keeps values raw
+ * (a newer build's shape survives a rewrite); one that does not read is the default here.
+ */
 export function resolveSessionProfileSettings(record: SessionProfileSettingsRecord | undefined): SessionProfileSettings {
   const hide = { ...SESSION_PROFILE_DEFAULT_SETTINGS.hideBuiltinSkills };
+  const perAgent = record?.hideBuiltinSkills;
   for (const agent of SESSION_PROFILE_AGENTS) {
-    const value = record?.hideBuiltinSkills?.[agent];
+    const value = typeof perAgent === "object" && perAgent !== null ? (perAgent as Record<string, unknown>)[agent] : undefined;
     if (typeof value === "boolean") hide[agent] = value;
   }
   const workflow = record?.claudeWorkflowTool;

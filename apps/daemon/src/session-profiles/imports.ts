@@ -48,6 +48,7 @@ import {
   type SessionProfilePluginSourceRequest,
   type TakeSessionProfileImportRequest
 } from "@orquester/api";
+import { readSessionProfilePluginSource } from "@orquester/config";
 import type { PluginFetchSource, PluginSourceLocation, PortableItem } from "../agent-profile/adapters/types.ts";
 import { catalogPluginSource } from "../agent-profile/adapters/claude/plugins.ts";
 import { createProfileConverter, droppedKeysNote, mapFrontmatter, type ProfileConverter } from "../agent-profile/convert.ts";
@@ -378,7 +379,7 @@ export class SessionProfileImports {
         case "plugin": {
           if (single === null) throw errors.invalidItem(`The plugin "${record.name}" names no agent.`);
           if (source.missingContent.has(itemId)) throw errors.invalidItem(`The plugin "${record.name}" has no files in ${source.name}.`);
-          const sourceRecord = record.plugin.source;
+          const sourceRecord = readSessionProfilePluginSource(record.plugin.source);
           entries.push({
             kind: "plugin",
             agent: single,
