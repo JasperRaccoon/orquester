@@ -1100,7 +1100,14 @@ export const sessionChatRecordSchema = z.object({
    * every record an older build wrote; a value that does not read is dropped (Global), never
    * the record. An older daemon strips the key on rollback, which relaunches the chat Global.
    */
-  profileId: z.string().min(1).max(128).optional().catch(undefined)
+  profileId: z.string().min(1).max(128).optional().catch(undefined),
+  /**
+   * An unattended chat (an MCP `create_session` or a workflow run, `CreateAgentChatSessionFields
+   * .unattended`): a profile that is missing or not ready FAILS its agent's (re)start — it never
+   * falls back to Global with a notice, because nobody is there to read it (spec 2026-10-18
+   * §5.5). Anything else reads as absent (interactive).
+   */
+  unattended: z.literal(true).optional().catch(undefined)
 });
 export type SessionChatRecord = z.infer<typeof sessionChatRecordSchema>;
 

@@ -1386,6 +1386,13 @@ export interface SessionSummary {
    * `session.updated` once the host has the thread (a client merges summaries field-wise).
    */
   chatPending?: boolean;
+  /**
+   * Agent-chat tabs only: the Agent Profile the chat launches with (spec 2026-10-18), or `null`
+   * for Global. Always present on a chat tab's summary — `null` rather than absent, because a
+   * client merges summaries field-wise and a switch back to Global must clear what it held.
+   * Read it through a sanitizer: an older daemon omits it (= unknown, treat as Global).
+   */
+  profileId?: string | null;
 }
 
 // --- Thread lineage (spec 2026-10-14 §6) ------------------------------------
