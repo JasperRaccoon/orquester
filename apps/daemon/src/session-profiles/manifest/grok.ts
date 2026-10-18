@@ -6,8 +6,9 @@
  * agent host: zod only, no dynamic `import()`, no daemon services.
  *
  * Paths are RELATIVE to the prepared (version) directory, plain `a/b` segments only — the adapter
- * resolves them against `HostThreadProfile.preparedDir` and refuses anything else. `configBase` is
- * required (a home without it cannot launch); the rest is defaulted; unknown keys are kept.
+ * resolves them against `HostThreadProfile.preparedDir` and refuses anything else. Every field is
+ * optional or defaulted so an older/emptier section still reads (a launch without `configBase` fails
+ * in the adapter); unknown keys are kept.
  *
  *   {
  *     configBase: "profile/config.base.toml",   the carried-over Global runtime config + the
@@ -27,7 +28,7 @@ const pluginRefSchema = z.object({ name: z.string().min(1), path: preparedRelati
 
 export const grokPreparedSectionSchema = z
   .object({
-    configBase: preparedRelativePath,
+    configBase: preparedRelativePath.optional(),
     hideBundledSkills: z.boolean().default(true),
     plugins: z.array(pluginRefSchema.extend({ itemId: z.string().min(1) }).passthrough()).default([]),
     hooksPlugin: pluginRefSchema.optional(),

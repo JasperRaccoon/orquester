@@ -143,6 +143,10 @@ async function renderConfig(home: string, section: GrokPreparedSection, input: G
     throw new ProfileLaunchError(`This chat's Agent Profile could not be loaded, so the agent was not started: ${reason}`, { cause });
   };
 
+  if (section.configBase === undefined) {
+    fail("its prepared Grok home has no base config (prepare the profile again).");
+    return;
+  }
   let base: Doc = {};
   try {
     const parsed: unknown = parseToml(await readFile(join(home, section.configBase), "utf8"));

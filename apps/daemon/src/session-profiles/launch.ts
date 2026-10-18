@@ -28,6 +28,7 @@ import { ACCOUNT_HOME_ENV_VAR } from "../agent-host/support/env.ts";
 import { SessionProfileError, sessionProfileErrors } from "./errors.ts";
 import { PreparedManifestError, readPreparedManifest, type PreparedSectionFor } from "./manifest.ts";
 import type { SessionProfileReady } from "./lifecycle.ts";
+import { grokProfileLaunchContribution } from "./contributions/grok.ts";
 
 /** What one agent's contributor is given. */
 export interface ProfileLaunchContext<A extends SessionProfileAgentId = SessionProfileAgentId> {
@@ -82,7 +83,7 @@ const contributesNothing = (): ProfileLaunchContribution => ({});
 export const profileLaunchContributors: ProfileLaunchContributors = {
   claude: contributesNothing,
   codex: contributesNothing,
-  grok: contributesNothing,
+  grok: grokProfileLaunchContribution,
   opencode: contributesNothing
 };
 

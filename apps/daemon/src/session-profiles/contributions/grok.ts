@@ -17,7 +17,7 @@
 import { isAbsolute, join, relative } from "node:path";
 import { GROK_AUTH_PATH_ENV, GROK_PROFILE_ENV } from "../../agent-isolation/grok.ts";
 
-/** The part of the launch context (`../launch.ts` `ProfileLaunchContext`) Grok reads. */
+/** The part of the launch context (`../launch.ts` `ProfileLaunchContext`) Grok reads; registered in `profileLaunchContributors`. */
 export interface GrokLaunchContributionContext {
   profile: { preparedDir: string };
   /** The account's Grok home (System: the Global `~/.grok`); `null` when unknown. */

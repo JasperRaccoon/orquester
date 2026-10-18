@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { GROK_PROFILE_ENV } from "../../agent-isolation/grok.ts";
+import { applyProfileContribution, profileLaunchContributors } from "../launch.ts";
 import { grokProfileLaunchContribution } from "./grok.ts";
 
 const profile = { preparedDir: "/appdir/daemon/session-profiles/prepared/p1/grok/shared/v-1" };
@@ -34,5 +35,17 @@ describe("Grok launch contribution", () => {
     assert.throws(() => grokProfileLaunchContribution({ profile, accountHome: "relative/home" }), /not known/);
     assert.throws(() => grokProfileLaunchContribution({ profile, accountHome: profile.preparedDir }), /inside the prepared profile/);
     assert.throws(() => grokProfileLaunchContribution({ profile, accountHome: `${profile.preparedDir}/x` }), /inside the prepared profile/);
+  });
+
+  it("is the registered Grok contributor, and composes over a managed account's launch", () => {
+    assert.equal(profileLaunchContributors.grok, grokProfileLaunchContribution);
+    const accountHome = "/appdir/daemon/agent-accounts/grok/a1/home";
+    const base = { launchEnv: { GROK_HOME: accountHome, KEEP: "1" }, unsetEnv: ["XAI_API_KEY"], homePath: accountHome };
+    const fields = applyProfileContribution(base, grokProfileLaunchContribution({ profile, accountHome }), "GROK_HOME");
+    assert.deepEqual(fields, {
+      launchEnv: { GROK_HOME: profile.preparedDir, KEEP: "1", GROK_AUTH_PATH: `${accountHome}/auth.json`, ...GROK_PROFILE_ENV },
+      unsetEnv: ["XAI_API_KEY"],
+      homePath: profile.preparedDir
+    });
   });
 });
