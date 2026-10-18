@@ -1925,6 +1925,15 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         throw new Error(unavailable);
       }
       logger.warn(`agent-host: could not refresh ${runtime.id}'s Agent Profile (${answer.reason}); launching the version it has`);
+      // Visible in the chat too: an edit made since that version does not apply to this start.
+      await appendActivity(runtime, {
+        kind: "runtime.warning",
+        tone: "info",
+        turnId: null,
+        summary:
+          "Orquester could not be reached in time to refresh this chat's Agent Profile, so the agent started with the version it last launched with. Recent changes to the profile apply at its next start.",
+        payload: { profileId: persisted.profileId, reason: "profile-refresh-unavailable" }
+      });
       return;
     }
     const next = launchConfigFromRequest(answer.launch, answer.launch.profile ?? undefined);

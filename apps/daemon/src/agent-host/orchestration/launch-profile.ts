@@ -10,7 +10,8 @@
  * {@link createDaemonLaunchProfileClient} never throws and never hangs: an unreachable daemon, a
  * 5xx, a timeout, an unreadable answer or a daemon that predates the route (its generic 404) is
  * `unavailable`, and the orchestrator then launches from the persisted profile only if its
- * manifest still validates.
+ * manifest still validates — and appends a `runtime.warning` row saying so (an edit made since that
+ * version does not apply to this start) — never Global.
  */
 
 import { request as httpRequest } from "node:http";

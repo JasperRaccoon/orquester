@@ -151,6 +151,11 @@ describe("the refresh before a profile thread's session start", () => {
     await turn(host, threadId);
     assert.deepEqual(starts(host, threadId)[0]?.profile, persisted);
     assert.ok(host.logger.entries.some((entry) => /could not refresh/.test(entry.message)), "said so in the log");
+    // …and in the chat: a recent profile edit may not apply to this start.
+    const warning = activitiesOf(host, threadId).find((row) => row.activityKind === "runtime.warning");
+    assert.match(warning?.summary ?? "", /could not be reached.*last launched with/);
+    assert.deepEqual(warning?.payload, { profileId: "p1", reason: "profile-refresh-unavailable" });
+    assert.equal(host.store.heads.get(threadId)?.profileId, "p1", "still the profile, never Global");
     await host.stop();
   });
 

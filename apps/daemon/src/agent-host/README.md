@@ -201,7 +201,8 @@ hands it over (`POST /goals/resume-sessions` → `resumeGoalSessionsAfterHandove
   bearer) for the profile's current prepared version and launch fields and rewrites `launch.json`
   from them first; the session is bound to the refreshed `profileKey`, so a new version restarts
   nothing twice. A refusal fails the start with its reason; an unreachable daemon (or one without
-  the route) leaves the persisted profile only while its manifest validates, else the start fails.
+  the route, or no answer in time) leaves the persisted profile only while its manifest validates —
+  with a `runtime.warning` row saying the latest profile edits did not apply — else the start fails.
   A deleted profile's answer (`profile: null`, `fallback`) is recorded as `thread.meta-updated
   {profileId: ""}` plus a `runtime.warning` notice row. `GET /profiles/leases` answers the
   `preparedDir`s of live provider sessions — the one each STARTED on (`runtime.bound.preparedDir`,

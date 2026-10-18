@@ -280,8 +280,11 @@ the answer (`ThreadLaunchProfileResponse`: the current `profile` and launch fiel
 starts — so an edited profile applies at the next start and a GC'd version never fails one. A
 refusal (409 `PROFILE_NOT_READY` / `PROFILE_UNSUPPORTED_AGENT` / `PROFILE_NOT_FOUND` for an
 unattended chat / `LAUNCH_UNAVAILABLE`) fails the start with its message. Daemon unreachable, 5xx,
-or an older daemon's route miss: the host launches the persisted `launch.json` profile only if its
-manifest still validates (`loadProfileManifest`), else the start fails — never Global. (It is a
+or an older daemon's route miss (or no answer within `LAUNCH_PROFILE_TIMEOUT_MS`, 120 s — e.g. a
+refresh queued behind slow preparations): the host launches the persisted `launch.json` profile
+only if its manifest still validates (`loadProfileManifest`), and says so in the chat (a
+`runtime.warning` row, `reason: "profile-refresh-unavailable"`: recent profile edits apply at the
+next start); else the start fails — never Global. (It is a
 separate route, not the session-tools manifest fetch: that one runs inside the adapter's start,
 after the env and home are already built.)
 
