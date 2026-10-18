@@ -456,9 +456,12 @@ Tests for every behavior, parsing, persistence and protocol change (AGENTS.md). 
   verified and overridden (§6.1).
 - Codex: refresh writes `auth.json` in place (non-atomic) — same as today's shared homes.
 - Grok: deny list must track every globally discovered plugin by exact name, and the skills
-  ignore list every global skill entry incl. symlinks (both rebuilt per spawn). A global skill
-  symlink added while a Grok chat runs could appear if Grok reloads skills mid-chat; the isolation
-  test must include a symlinked global skill.
+  ignore list every global skill and command entry incl. symlinks (both rebuilt per spawn). A
+  global skill or command linked in while a Grok chat runs could appear if Grok reloads skills
+  mid-chat (accepted: the list is fixed for the process, see §12); the isolation test includes
+  symlinked global skills and commands.
+- Codex: user skills are switched off per thread from a `skills/list` at session start; one added
+  to `$HOME/.agents/skills` mid-session may be offered until the next start (accepted, §12).
 - OpenCode: one extra server (and its MCP processes) per project × profile in use.
 
 ## 10. Left to the builder
@@ -547,6 +550,12 @@ Decisions made while building, each checked against the code. Code names use the
   nested `skills.config` at every `thread/start` and `thread/resume`.
 - No opt-in live check against the real CLI exists for Codex; seeding is tested against a fake
   `codex app-server`.
+- Known limit: the `skills.config` disables come from the `skills/list` of each session start.
+  Re-listing before every turn was considered and rejected: codex-cli 0.159.0 accepts thread
+  `config` only on `thread/start`/`thread/resume` (`turn/start` and `thread/settings/update` have
+  no `config`), so a fresh list could not be applied without restarting the thread. Codex watches
+  skill files (`skills/changed`), so a user skill added under `$HOME/.agents/skills` while a profile
+  thread runs may be offered to it until its next start.
 
 **Grok (§6.3)**
 - **One shared `GROK_HOME` per prepared version**, not per thread. `config.toml` is rendered from
@@ -555,6 +564,8 @@ Decisions made while building, each checked against the code. Code names use the
   home and swapped in by rename; the render does not depend on the thread, project or account.
 - Profile plugins are copied under `profile/plugins/` (so Grok's own plugin scan never sees them
   twice) and passed with `--plugin-dir`, as is a generated plugin carrying the profile's hooks.
+- Known limit: the `[skills] ignore` list (user skills and commands) is fixed when the process
+  spawns; an entry linked in mid-session is only listed at the next spawn.
 
 **OpenCode (§6.4)**
 - Built-in skills are hidden with a last `permission.skill` rule denying `customize-opencode`, not

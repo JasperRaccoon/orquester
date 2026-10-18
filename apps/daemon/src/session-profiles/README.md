@@ -126,6 +126,12 @@ The contribution sets `CODEX_HOME` and `homePath` to the prepared dir and refuse
 one. The adapter (`agent-host/adapters/codex/profile.ts`) forces that home, fails a start whose
 `initialize` reports another, and switches off `$HOME/.agents/skills` (and any user skill outside
 the home) per thread with nested `skills.config` at every `thread/start` and `thread/resume`.
+**Known limit:** that list is taken at each session start. Codex 0.159.0 takes thread `config` only
+on `thread/start`/`thread/resume` (`turn/start` and `thread/settings/update` carry none), and it
+watches skill files (`skills/changed`), so a user skill added under `$HOME/.agents/skills` while a
+profile thread runs may be offered to it until the thread's next start, which switches it off.
+Grok has the same limit: its `[skills] ignore` list is computed at every spawn and fixed for the
+process, so a user skill or command linked in mid-session is only listed at the next spawn.
 
 ## OpenCode (`preparers/opencode.ts`, spec §6.4)
 
