@@ -52,7 +52,8 @@ false except `compat.claude.skills`: without it the repo's `.claude/skills` is
 lost. It also writes `[skills] ignore`, `[plugins] disabled` and
 `[mcp_servers]`. Grok rewrites its config itself, so render it at every spawn.
 `GROK_PROFILE_ENV` turns off the same compat cells through the environment, but
-never `GROK_CLAUDE_SKILLS_ENABLED`. Grok 1.0.46 also has `compat.codex.*` cells.
+never `GROK_CLAUDE_SKILLS_ENABLED`. `GROK_AUTH_PATH_ENV` names the variable
+that points Grok at an `auth.json` outside its home (the account's). Grok 1.0.46 also has `compat.codex.*` cells.
 They are documented as inert and are not written.
 
 **OpenCode XDG shadow (`xdg-shadow.ts`, §6.4).** `OPENCODE_CONFIG_DIR` adds to
