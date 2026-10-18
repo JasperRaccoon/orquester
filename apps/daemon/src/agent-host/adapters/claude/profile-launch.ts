@@ -22,14 +22,17 @@
  *
  * Secrets: the MCP servers and the carried settings (`env`, auth helpers) never reach argv — the
  * launch writes them to 0600 files in a 0700 per-thread directory ({@link writeClaudeProfileLaunchFiles})
- * and passes the paths; the session removes the directory when it ends.
+ * and passes the paths; the session removes the directory when it ends. The host's tmp dir may be a
+ * shared `TMPDIR`, so the `claude-profile-launch` parent and the per-thread dir must each be a real
+ * directory (not a symlink) owned by this user with no group/other bits — created that way, else
+ * the start is refused rather than writing secrets where someone else can read or swap them.
  *
  * Static imports only (AGENTS.md: no dynamic `import()` under `agent-host`).
  */
 
 import { randomUUID } from "node:crypto";
-import { chmod, mkdir, open, readFile, rename, rm } from "node:fs/promises";
-import { join, resolve, sep } from "node:path";
+import { chmod, lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { dirname, join, resolve, sep } from "node:path";
 
 import type { SdkPluginConfig } from "@anthropic-ai/claude-agent-sdk";
 
@@ -197,7 +200,7 @@ export async function loadClaudeProfileLaunch(
 /** Writes `value` as JSON to `path` (0600) via a temp file and a rename. */
 async function writeSecretJson(path: string, value: unknown): Promise<void> {
   const tmp = `${path}.${randomUUID()}.tmp`;
-  const handle = await open(tmp, "w", 0o600);
+  const handle = await open(tmp, "wx", 0o600);
   try {
     await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`);
   } finally {
@@ -207,14 +210,44 @@ async function writeSecretJson(path: string, value: unknown): Promise<void> {
   await rename(tmp, path);
 }
 
-/** Writes the launch's files (`buildClaudeQueryOptions`' `profileFiles`) into a fresh 0700 dir. */
+/**
+ * `path` as a private directory: created 0700 when missing, else it must already be a real
+ * directory (not a symlink) owned by this process's user with no group/other permission bits.
+ * Throws `ProfileLaunchError` otherwise.
+ */
+async function privateDir(path: string): Promise<void> {
+  try {
+    await mkdir(path, { mode: 0o700 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+  }
+  const info = await lstat(path);
+  const uid = process.getuid?.();
+  const problem = info.isSymbolicLink()
+    ? "is a symlink"
+    : !info.isDirectory()
+      ? "is not a directory"
+      : uid !== undefined && info.uid !== uid
+        ? `belongs to uid ${info.uid}, not ${uid}`
+        : (info.mode & 0o077) !== 0
+          ? `has mode ${(info.mode & 0o777).toString(8).padStart(4, "0")}, not 0700`
+          : null;
+  if (problem !== null) {
+    throw new ProfileLaunchError(
+      `This chat's Agent Profile launch files were not written, so the agent was not started: ${path} ${problem}.`
+    );
+  }
+}
+
+/** Writes the launch's files (`buildClaudeQueryOptions`' `profileFiles`) into a private 0700 per-thread dir. */
 export async function writeClaudeProfileLaunchFiles(
   files: ClaudeProfileLaunchFiles,
   contents: { settings: Doc; mcpConfig?: Doc }
 ): Promise<void> {
-  await mkdir(join(files.dir, ".."), { recursive: true, mode: 0o700 });
-  await mkdir(files.dir, { recursive: true, mode: 0o700 });
-  await chmod(files.dir, 0o700);
+  const parent = dirname(files.dir);
+  await mkdir(dirname(parent), { recursive: true });
+  await privateDir(parent);
+  await privateDir(files.dir);
   await writeSecretJson(files.settings, contents.settings);
   if (contents.mcpConfig !== undefined) {
     await writeSecretJson(files.mcpConfig, contents.mcpConfig);
@@ -223,7 +256,9 @@ export async function writeClaudeProfileLaunchFiles(
   }
 }
 
-/** Removes the launch's files; never throws. */
+/** Removes the launch's files; never throws. Nothing is removed through a parent that is not a real directory. */
 export async function removeClaudeProfileLaunchFiles(files: ClaudeProfileLaunchFiles): Promise<void> {
+  const parent = await lstat(dirname(files.dir)).catch(() => null);
+  if (parent === null || !parent.isDirectory()) return;
   await rm(files.dir, { recursive: true, force: true }).catch(() => undefined);
 }

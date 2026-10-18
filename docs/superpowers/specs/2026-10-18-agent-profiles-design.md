@@ -530,7 +530,10 @@ Decisions made while building, each checked against the code. Code names use the
 - `enabledPlugins: {<id>: false}` at the flag tier for every plugin in the account's
   `installed_plugins.json` and every id the project's settings enable.
 - Flag-tier settings and MCP servers go through 0600 files under
-  `<appdir>/tmp/claude-profile-launch/<threadId>/` (`--settings`, `--mcp-config`), never argv.
+  `<host tmp dir>/claude-profile-launch/<threadId>/` (`--settings`, `--mcp-config`), never argv.
+  The host's tmp dir is `TMPDIR` when set (else `<appdir>/tmp`), so both directories are created
+  0700 and an existing one must be a real directory of the daemon's uid with no group/other bits,
+  else the start is refused (never written into a dir another user could read or swap).
 
 **Codex (§6.2)**
 - Seeding runs **inside `prepare`, in the staging dir** (the state DB records no path of its home,
