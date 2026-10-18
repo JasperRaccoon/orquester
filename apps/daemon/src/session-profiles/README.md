@@ -88,9 +88,9 @@ credentials, deadline); `.git` is removed before the copy. Sources that are not 
 - Exports never carry secret values: `profile.json` keeps env/header KEYS; a profile imported from
   a file has those servers skipped at launch until the values are entered again (and says so).
 
-## How later tasks plug in
+## How an agent plugs in
 
-- **Per-agent preparers** (one task per agent): implement `SessionProfilePreparer<"agent">` in
+- **Per-agent preparers**: implement `SessionProfilePreparer<"agent">` in
   `preparers/<agent>.ts` (`prepare(ctx) → agentSection`, optional `validate(ctx)`, `perAccount`)
   and extend `manifest/<agent>.ts` with the section it writes. Input is `ctx.resolved`
   (`ResolvedAgentProfile`: instructions, enabled in-scope items with source paths, settings,
@@ -229,8 +229,7 @@ restarts (spec §5.6). Status, staleness and fingerprints read the current versi
 **Per-agent launch contributions.** `profileLaunchContributors: { [agent]: (ctx) =>
 ProfileLaunchContribution }`, read through `profileLaunchContribution(agent)`. Codex's, Grok's and
 OpenCode's are in `contributions/codex.ts`, `contributions/grok.ts` and `preparers/opencode.ts`;
-Claude contributes nothing. Each per-agent task replaces ITS entry
-(and nothing else):
+Claude contributes nothing. A change to one agent's launch touches ITS entry only:
 
 ```ts
 ctx: { agent, profile: {profileId, revision, preparedDir}, manifestSection /* manifest/<agent>.ts */,

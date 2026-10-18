@@ -3,11 +3,10 @@
  * to its account's launch environment once its profile is prepared.
  *
  * - {@link profileLaunchContributors}: ONE contributor per agent, keyed by agent, each turning
- *   the prepared directory's manifest section into env / unset / home / keyed-server fields. All
- *   of them contribute nothing today; each per-agent task fills its own in (Codex: `CODEX_HOME`
- *   = the prepared home; Grok: `GROK_HOME`, `GROK_AUTH_PATH`, compat env; OpenCode: a
- *   `serverPool` key and its env). Claude's isolation is SDK options read by the host from the
- *   manifest, so its contributor may stay empty.
+ *   the prepared directory's manifest section into env / unset / home / keyed-server fields
+ *   (Codex: `CODEX_HOME` = the prepared home; Grok: `GROK_HOME`, `GROK_AUTH_PATH`, compat env;
+ *   OpenCode: a `serverPool` key and its env). Claude's isolation is SDK options read by the host
+ *   from the manifest, so its contributor is empty.
  * - {@link applyProfileContribution}: the contribution laid OVER the account's launch fields —
  *   the one composition rule every launch path (create, fork, fork reconcile, account switch,
  *   profile switch, the refresh at every session start) shares.
