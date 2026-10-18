@@ -456,3 +456,13 @@ test("pending merges ride the summary, announced only on a change and never pers
   chat.setPendingMerges("q", []);
   assert.equal(updates.length, 2);
 });
+
+test("a chat running through an Agent Profile home still pins its account for the idle-account refresher", () => {
+  // A Codex profile chat runs with CODEX_HOME = its prepared home, whose auth.json links to the
+  // account's: the tab keeps the ACCOUNT id, so the refresher never refreshes that login under it.
+  const chat = chatManager();
+  chat.create({ id: "p1", refId: "codex", title: "profile chat", projectPath: "/w/p", cwd: "/w/p", order: 0, accountId: "acc-9", home: "account", profileId: "editor" });
+  assert.deepEqual([...chat.liveAccountIds()], ["acc-9"]);
+  chat.setProfile("p1", "research");
+  assert.deepEqual([...chat.liveAccountIds()], ["acc-9"], "a profile switch is not an account switch");
+});
