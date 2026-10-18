@@ -23,6 +23,7 @@ per-agent GLOBAL config editor, user-facing "Agent config"). A chat without `pro
 | `files.ts` | `measureTree` (no symlinks, caps), `normalizeProfileModes`, the in-memory zip writer. |
 | `routes.ts` | REST surface (`sessionProfileRoutes`), both transports. |
 | `errors.ts` | `SessionProfileError` → `{error: {code, message}}`. |
+| `integration.test.ts` | End to end across the daemon / agent-host seam with fake CLIs: store → lifecycle with the real preparers → launch resolver → `AgentChatService` → agent-host server → each adapter's profile launch inputs, against a temp HOME with symlinked Global items. |
 
 Contracts: `@orquester/api` `session-profiles.ts` (wire types, `sessionProfileRoutes`,
 `SESSION_PROFILES_CHANNEL`, scope helpers) and `@orquester/config` `session-profiles.ts`
