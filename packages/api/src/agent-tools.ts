@@ -96,7 +96,7 @@ export const TOOLSETS: readonly ToolsetSpec[] = [
   },
   {
     id: "reads",
-    label: "Workflows, profiles & prompts (read)",
+    label: "Workflows, agent config & prompts (read)",
     tools: [read("list_workflows"), read("get_workflow"), read("get_workflow_runs"), read("get_agent_profile"), read("list_saved_prompts")]
   },
   {
@@ -138,7 +138,7 @@ export const TOOLSETS: readonly ToolsetSpec[] = [
   },
   {
     id: "agent-profile-editing",
-    label: "Agent-profile changes (need your approval)",
+    label: "Agent-config changes (need your approval)",
     tools: [admin("edit_agent_profile")]
   },
   {

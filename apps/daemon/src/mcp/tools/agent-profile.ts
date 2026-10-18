@@ -303,7 +303,7 @@ async function marketplacePlugins(client: ProfileClient, agent: Agent, marketpla
 
 const getAgentProfile = defineTool({
   name: "get_agent_profile",
-  title: "Get agent profiles",
+  title: "Get agent config",
   description:
     "Agent CLIs' global config (Claude Code, Codex, Grok, OpenCode). {} → each CLI: installed, version, counts. {agent} → its items (id, source, revision), instruction file, `authoring`. {agent, itemId} → one item (MCP env/header values never shown). {agent, instructions: true} → the instruction file, paged by offset. {agent, marketplace} → its plugins.",
   input: {
@@ -654,7 +654,7 @@ async function applyChange(agent: Agent, change: ProfileChange, index: number, c
 
 const editAgentProfile = defineTool({
   name: "edit_agent_profile",
-  title: "Edit agent profiles",
+  title: "Edit agent config",
   description:
     "Change an agent CLI's global config: ≤ 10 changes per call, run in order, stopping at the first failure (the error's detail.completed lists what was done). Ids and revisions come from get_agent_profile. action: create (with one of mcp, skill, command, hook, plugin, marketplace), update {id + that kind's object, only what changes}, enable/disable/delete/trust_hook (Codex) {id}, copy {id, toAgent}, write_instructions {text}, import_scan {url} → importId, candidates; import_pick {importId, picks}.",
   chatNote:
