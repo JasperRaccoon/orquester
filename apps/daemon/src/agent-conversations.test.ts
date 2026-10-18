@@ -229,3 +229,35 @@ test("grok rows a managed home reaches through its sessions symlink are listed o
 
   await rm(root, { recursive: true, force: true });
 });
+
+test("codex rows an Agent Profile home writes through its sessions link are listed once, under the system home", async () => {
+  // A prepared profile CODEX_HOME (`session-profiles/preparers/codex.ts`) links `sessions` to the
+  // account home's, which links to the system one: its rollouts land in the shared dir, and the
+  // prepared home itself is never a root of its own.
+  const root = await scratch();
+  const daemonDir = join(root, "daemon");
+  const projectPath = join(root, "workspaces", "acme", "api");
+  const systemSessions = join(process.env.CODEX_HOME as string, "sessions");
+  await mkdir(systemSessions, { recursive: true });
+  const accountHome = join(daemonDir, "agent-accounts", "codex", "acc1", "home");
+  await mkdir(accountHome, { recursive: true });
+  await symlink(systemSessions, join(accountHome, "sessions"));
+  const profileHome = join(daemonDir, "session-profiles", "prepared", "editor", "codex", "acc1", "v-1");
+  await mkdir(profileHome, { recursive: true });
+  await symlink(join(accountHome, "sessions"), join(profileHome, "sessions"));
+  const day = join(profileHome, "sessions", "2026", "10", "18");
+  await mkdir(day, { recursive: true });
+  await writeFile(
+    join(day, "rollout-2026-10-18T03-04-05-profile.jsonl"),
+    `${JSON.stringify({ type: "session_meta", payload: { cwd: projectPath, session_id: "codex-profile" } })}\n`,
+    "utf8"
+  );
+
+  const rows = await listAgentConversations(projectPath, { daemonDir });
+  assert.deepEqual(
+    rows.map((row) => [row.id, row.agentRefId, row.home, row.accountId]),
+    [["codex-profile", "codex", "system", undefined]]
+  );
+
+  await rm(root, { recursive: true, force: true });
+});
