@@ -25,6 +25,10 @@ import test from "node:test";
 import type { RuntimeEvent } from "@orquester/api/agent-chat";
 
 import type { AgentAdapter, AdapterContext, StartSessionInput } from "../../adapter.ts";
+import { opencodeProfilePoolKey } from "../../../session-profiles/manifest/opencode.ts";
+import { writePreparedManifest } from "../../../session-profiles/manifest.ts";
+import type { HostThreadProfile } from "../../host-protocol.ts";
+import { ProfileLaunchError } from "../profile-manifest.ts";
 import { createOpenCodeAdapter } from "./index.ts";
 import { createHostIngestion, HOST_THREAD_ID } from "./testing/host.ts";
 import { makePeer, type Peer } from "./testing/peer.ts";
@@ -642,5 +646,54 @@ test("a profile switch moves the thread to the new key's server on the same upst
     assert.equal(h.adapter.hasSession(HOST_THREAD_ID), true);
   } finally {
     await h.dispose();
+  }
+});
+
+test("a profile thread runs only on its prepared version's keyed server: a start or fork without that key is refused", async (t) => {
+  const h = await makeHarness(t);
+  const preparedDir = await mkdtemp(join(tmpdir(), "orq-oc-profile-"));
+  try {
+    const profile: HostThreadProfile = { profileId: "p1", revision: "2", preparedDir };
+    await writePreparedManifest(preparedDir, {
+      schema: 1,
+      profileId: "p1",
+      revision: "2",
+      agent: "opencode",
+      accountKey: "shared",
+      preparedAt: "2026-10-18T00:00:00.000Z",
+      agentSection: { configDir: "opencode", xdgConfigHome: "xdg", realConfigHome: "/home/u/.config", skills: [], commands: [], mcpServerNames: [], plugins: [], hiddenSkills: [] }
+    });
+    const refused = (error: unknown): boolean => error instanceof ProfileLaunchError && /Agent Profile/.test(error.message);
+    // No pool (the account's global server), and another version's key: never started.
+    await assert.rejects(h.start({ threadId: "p", profile }), refused);
+    await assert.rejects(h.start({ threadId: "p", profile, serverPool: { key: "profile:p1:v-other" } }), refused);
+    // A manifest that does not load fails as well, whatever the key.
+    await assert.rejects(
+      h.start({ threadId: "p", profile: { ...profile, revision: "1" }, serverPool: { key: opencodeProfilePoolKey("p1", preparedDir) } }),
+      refused
+    );
+    assert.equal(h.servers.length, 0, "no server was started for a refused profile thread");
+    await assert.rejects(
+      h.adapter.forkConversation!({
+        sourceThreadId: HOST_THREAD_ID,
+        sourceResumeCursor: { sessionId: "ses_parent" },
+        threadId: "child",
+        projectPath: "/work/project",
+        cwd: "/work/project",
+        home: { kind: "system" } as never,
+        profile,
+        cut: { retainedTurnIds: ["t1"], firstRemovedTurnId: null }
+      } as never),
+      refused
+    );
+    assert.equal(h.servers.length, 0);
+
+    const from = h.events.length;
+    await h.start({ threadId: "p", profile, serverPool: { key: opencodeProfilePoolKey("p1", preparedDir) } });
+    await h.waitFor("session.state.changed", from);
+    assert.ok(h.servers.length > 0, "started on its own keyed server");
+  } finally {
+    await h.dispose();
+    await rm(preparedDir, { recursive: true, force: true });
   }
 });

@@ -17,6 +17,20 @@
  * at launch ("The value of KEY is missing") until its values are entered again, and the import's
  * notes name them. Items the daemon cannot read are left out of an export.
  *
+ * **Credential-looking values are redacted** ({@link redactExportManifest}) — fields the profile
+ * keeps verbatim, where users put tokens anyway: an MCP server's `url`, `command`, `args` and
+ * `advanced` settings, and a hook's `command`. Heuristics (each value becomes `REDACTED`):
+ *   - a URL's userinfo (`https://user:pw@host` → `https://REDACTED@host`) and the value of every
+ *     query parameter with a credential name (`?api_key=…&team=eng` keeps `team`);
+ *   - a credential-named flag's value: `--token=…`, `--token …` (the next argument / word);
+ *   - a credential-named variable assignment: `GITHUB_TOKEN=…`;
+ *   - `Bearer …` / `Basic …` / `Token …`, and a credential-named header `X-Api-Key: …`;
+ *   - in `advanced`, the string value of every credential-named key.
+ * A credential name contains token, secret, password/passwd/pwd, api-key/apikey, access-key,
+ * private-key, auth (not "author"), credential or signature, or is `key`/`sig` or ends in `-key`/
+ * `_key`/`.key`. The marker lists what was redacted (`redacted`), and an import says so in its
+ * notes: those values must be entered again.
+ *
  * ## Reading one back — strictly
  * The upload is extracted with the importer's zip rules (`agent-profile/import/zip.ts`: no
  * absolute paths, `..`, symlinks or encrypted entries; ≤ 5 000 entries, ≤ 100 MB). Then anything
@@ -44,6 +58,7 @@ import {
 import {
   parseSessionProfileManifest,
   serializeSessionProfileManifest,
+  type SessionProfileItemEntry,
   type SessionProfileItemRecord,
   type SessionProfileManifestFile
 } from "@orquester/config";
@@ -77,17 +92,141 @@ export function exportFileName(name: string): string {
   return `${slug || "profile"}.agent-profile.zip`;
 }
 
+// ---------------------------------------------------------------------------
+// Redaction of credential-looking values (see the module header)
+// ---------------------------------------------------------------------------
+
+/** What replaces a redacted value. */
+export const EXPORT_REDACTED = "REDACTED";
+
+const CREDENTIAL_NAME =
+  /token|secret|passw(?:or)?d|pwd|api[-_]?key|access[-_]?key|private[-_]?key|auth(?!or(?:s|ed)?$)|credential|signature|^key$|^sig$|[-_.]key$/i;
+
+function credentialName(name: string): boolean {
+  return CREDENTIAL_NAME.test(name.replace(/^-+/, ""));
+}
+
+const URL_IN_TEXT = /\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+/gi;
+/** A quoted or bare shell word. */
+const WORD = String.raw`(?:"[^"]*"|'[^']*'|[^\s"']+)`;
+
+function redactUrl(url: string): string {
+  return url
+    .replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/?#@\s]+@/i, `$1${EXPORT_REDACTED}@`)
+    .replace(/([?&;])([^=&#;\s]+)=([^&#;\s]*)/g, (whole, sep: string, name: string) =>
+      credentialName(decodeURIComponentSafe(name)) ? `${sep}${name}=${EXPORT_REDACTED}` : whole
+    );
+}
+
+function decodeURIComponentSafe(text: string): string {
+  try {
+    return decodeURIComponent(text);
+  } catch {
+    return text;
+  }
+}
+
+/** The text rules of the module header, over one argument or one shell command line. */
+function redactText(text: string): string {
+  return text
+    .replace(URL_IN_TEXT, (url) => redactUrl(url))
+    .replace(/\b(Bearer|Basic|Token)[ \t]+(?!REDACTED\b)[^\s"']+/g, `$1 ${EXPORT_REDACTED}`)
+    .replace(/(^|[\s"'])([\w-]+):[ \t]*(?!(?:Bearer|Basic|Token|REDACTED)\b)(?!\/)([^\s"']+)/g, (whole, lead: string, name: string) =>
+      credentialName(name) ? `${lead}${name}: ${EXPORT_REDACTED}` : whole
+    )
+    .replace(new RegExp(String.raw`(^|\s)(--?[\w.-]+)=${WORD}`, "g"), (whole, lead: string, flag: string) =>
+      credentialName(flag) ? `${lead}${flag}=${EXPORT_REDACTED}` : whole
+    )
+    .replace(new RegExp(String.raw`(^|\s)(--?[\w.-]+)([ \t]+)(?!-)${WORD}`, "g"), (whole, lead: string, flag: string, gap: string) =>
+      credentialName(flag) ? `${lead}${flag}${gap}${EXPORT_REDACTED}` : whole
+    )
+    .replace(new RegExp(String.raw`(^|\s)([A-Za-z_][A-Za-z0-9_]*)=${WORD}`, "g"), (whole, lead: string, name: string) =>
+      credentialName(name) ? `${lead}${name}=${EXPORT_REDACTED}` : whole
+    );
+}
+
+/** An argument list: each argument's text rules, and the argument after a credential-named flag. */
+function redactArgs(args: readonly unknown[]): unknown[] {
+  return args.map((arg, index) => {
+    if (typeof arg !== "string") return arg;
+    const previous = index > 0 ? args[index - 1] : undefined;
+    if (typeof previous === "string" && /^--?[\w.-]+$/.test(previous) && credentialName(previous) && !arg.startsWith("-")) {
+      return EXPORT_REDACTED;
+    }
+    return redactText(arg);
+  });
+}
+
+/** `advanced` settings: credential-named keys' strings, and the text rules on every string. */
+function redactValue(value: unknown, key: string | null): unknown {
+  if (typeof value === "string") return key !== null && credentialName(key) ? EXPORT_REDACTED : redactText(value);
+  if (Array.isArray(value)) return value.map((entry) => redactValue(entry, null));
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([name, entry]) => [name, redactValue(entry, name)]));
+  }
+  return value;
+}
+
+/**
+ * The manifest an export carries: every readable item with its credential-looking values
+ * replaced (see the module header), and one line per redacted field (`MCP server "x": its URL`).
+ * The stored profile is not touched.
+ */
+export function redactExportManifest(file: SessionProfileManifestFile): { manifest: SessionProfileManifestFile; redacted: string[] } {
+  const redacted: string[] = [];
+  const items = file.items.map((entry): SessionProfileItemEntry => {
+    if (!entry.ok) return entry;
+    const record = entry.record;
+    if (record.kind === "mcp") {
+      const mcp: Record<string, unknown> = { ...record.mcp };
+      const fields: [string, string][] = [];
+      if (typeof mcp.url === "string") {
+        const next = redactText(mcp.url);
+        if (next !== mcp.url) fields.push(["url", "its URL"]);
+        mcp.url = next;
+      }
+      if (typeof mcp.command === "string") {
+        const next = redactText(mcp.command);
+        if (next !== mcp.command) fields.push(["command", "its command"]);
+        mcp.command = next;
+      }
+      if (Array.isArray(mcp.args)) {
+        const next = redactArgs(mcp.args);
+        if (JSON.stringify(next) !== JSON.stringify(mcp.args)) fields.push(["args", "its arguments"]);
+        mcp.args = next;
+      }
+      if (mcp.advanced !== undefined) {
+        const next = redactValue(mcp.advanced, null);
+        if (JSON.stringify(next) !== JSON.stringify(mcp.advanced)) fields.push(["advanced", "its advanced settings"]);
+        mcp.advanced = next;
+      }
+      for (const [, label] of fields) redacted.push(`MCP server "${record.name}": ${label}`);
+      return fields.length === 0 ? entry : { ok: true, record: { ...record, mcp: mcp as typeof record.mcp } };
+    }
+    if (record.kind === "hook" && typeof record.hook.command === "string") {
+      const command = redactText(record.hook.command);
+      if (command === record.hook.command) return entry;
+      redacted.push(`hook "${record.name}": its command`);
+      return { ok: true, record: { ...record, hook: { ...record.hook, command } } };
+    }
+    return entry;
+  });
+  return { manifest: { manifest: file.manifest, items }, redacted };
+}
+
 /** The export `.zip` of `content` (see the module header). */
 export function buildProfileExport(content: SessionProfileExportContent, now: Date): Buffer {
+  const { manifest, redacted } = redactExportManifest(content.manifest);
   const marker = {
     format: SESSION_PROFILE_EXPORT_FORMAT,
     version: SESSION_PROFILE_EXPORT_VERSION,
     exportedAt: now.toISOString(),
-    secrets: "MCP env and header values are not exported: enter them again after importing."
+    secrets: "MCP env and header values are not exported: enter them again after importing.",
+    ...(redacted.length > 0 ? { redacted } : {})
   };
   const entries: ZipEntry[] = [
     { path: EXPORT_MARKER_FILE, data: Buffer.from(`${JSON.stringify(marker, null, 2)}\n`, "utf8"), mode: 0o644 },
-    { path: PROFILE_MANIFEST_FILE, data: Buffer.from(serializeSessionProfileManifest(content.manifest), "utf8"), mode: 0o644 },
+    { path: PROFILE_MANIFEST_FILE, data: Buffer.from(serializeSessionProfileManifest(manifest), "utf8"), mode: 0o644 },
     ...content.files
   ];
   if (entries.length > 65_535) throw profileErrors.importFailed("The profile holds too many files to export.");
@@ -111,8 +250,11 @@ export async function readProfileExport(zipPath: string, workDir: string): Promi
     const dir = join(root, "tree");
     await mkdir(dir, { mode: 0o700 });
     await extractZip(zipPath, dir, ZIP_LIMITS);
-    const manifest = await validateExport(dir);
+    const { manifest, redacted } = await validateExport(dir);
     const notes: string[] = [];
+    if (redacted.length > 0) {
+      notes.push(`Credential-looking values were replaced with ${EXPORT_REDACTED} in this export: ${redacted.join("; ")}. Enter the real values again.`);
+    }
     const needSecrets = manifest.items
       .flatMap((entry) => (entry.ok && entry.record.kind === "mcp" ? [entry.record] : []))
       .filter((record) => record.kind === "mcp" && ((record.mcp.envKeys?.length ?? 0) > 0 || (record.mcp.headerKeys?.length ?? 0) > 0))
@@ -146,7 +288,7 @@ async function readText(path: string, shown: string): Promise<string> {
   return readFile(path, "utf8");
 }
 
-async function validateExport(dir: string): Promise<SessionProfileManifestFile> {
+async function validateExport(dir: string): Promise<{ manifest: SessionProfileManifestFile; redacted: string[] }> {
   for (const name of await readdir(dir)) {
     if (!TOP_LEVEL.has(name)) refuse(`"${name.slice(0, 80)}" is not part of an Agent Profile export.`);
   }
@@ -160,6 +302,9 @@ async function validateExport(dir: string): Promise<SessionProfileManifestFile> 
   const record = marker !== null && typeof marker === "object" ? (marker as Record<string, unknown>) : {};
   if (record.format !== SESSION_PROFILE_EXPORT_FORMAT) refuse("it is not an Agent Profile export.");
   if (record.version !== SESSION_PROFILE_EXPORT_VERSION) refuse(`it is a version ${String(record.version).slice(0, 20)} export; this build reads version ${SESSION_PROFILE_EXPORT_VERSION}.`);
+  const redacted = Array.isArray(record.redacted)
+    ? record.redacted.filter((line): line is string => typeof line === "string").slice(0, 200).map((line) => line.slice(0, 200))
+    : [];
 
   let manifest: SessionProfileManifestFile;
   try {
@@ -235,7 +380,7 @@ async function validateExport(dir: string): Promise<SessionProfileManifestFile> 
     }
   }
   if ((await kindAt(join(dir, PROFILE_INSTRUCTIONS_FILE))) !== null) await readText(join(dir, PROFILE_INSTRUCTIONS_FILE), PROFILE_INSTRUCTIONS_FILE);
-  return manifest;
+  return { manifest, redacted };
 }
 
 function parseDocument(text: string, shown: string): void {

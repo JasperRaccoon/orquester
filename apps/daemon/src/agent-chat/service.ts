@@ -39,6 +39,7 @@ import {
   type HostThreadProfile,
   type HostThreadServerPool,
   type SetThreadIdentityRequest,
+  type SetThreadIdentityResponse,
   type ThreadLaunchProfileResponse
 } from "../agent-host/host-protocol.ts";
 import { SessionProfileError } from "../session-profiles/errors.ts";
@@ -1198,10 +1199,10 @@ export class AgentChatService {
     // (`null` = Global). A fork of an unattended chat is unattended too.
     const requestedProfile = requestedProfileId(body.profileId, true);
     const unattended = body.unattended === true || this.chat.isUnattended(parentId);
-    const childProfileId = requestedProfile === undefined ? (this.chat.profileOf(parentId) ?? null) : requestedProfile;
+    let childProfileId = requestedProfile === undefined ? (this.chat.profileOf(parentId) ?? null) : requestedProfile;
     let launchFields = this.accountLaunchFields(entry, adapter, launch);
     // Absent: the host gives the child the parent's own (its `launch.json`).
-    let profileFields: Pick<ForkHostThreadRequest, "profile" | "profileId"> =
+    let profileFields: Pick<ForkHostThreadRequest, "profile" | "profileId" | "profileFallback"> =
       requestedProfile === null ? { profile: null, profileId: null } : {};
     if (childProfileId !== null) {
       try {
@@ -1215,16 +1216,25 @@ export class AgentChatService {
         launchFields = resolved.fields;
         profileFields = { profile: resolved.profile, profileId: resolved.profile.profileId };
       } catch (error) {
-        // The parent's profile was deleted: an interactive fork goes ahead under the account's
-        // launch, naming no profile — the child inherits the parent's on the host, and its first
-        // session start falls back to Global with the notice, as the parent's next start does
-        // (§5.6). A profile the request named, an unattended fork, or any other refusal fails.
+        // The parent's profile was deleted: an interactive fork goes ahead as Global under the
+        // account's launch, SAID explicitly (inheriting would hand the child the parent's
+        // `launch.json` version, which the delete may have collected — a native fork reads it),
+        // with the §5.6 notice on the child. A profile the request named, an unattended fork, or
+        // any other refusal fails.
         const inheritedAndGone =
           error instanceof ChatSessionError &&
           error.code === "PROFILE_NOT_FOUND" &&
           requestedProfile === undefined &&
           !unattended;
         if (!inheritedAndGone) throw error;
+        const profiles = this.sessionProfiles ?? this.opts.sessionProfiles ?? null;
+        const name = await Promise.resolve(profiles?.profileName?.(childProfileId)).catch(() => undefined);
+        profileFields = {
+          profile: null,
+          profileId: null,
+          profileFallback: { previousProfileId: childProfileId, notice: deletedProfileNotice(name) }
+        };
+        childProfileId = null;
       }
     }
     const { launchEnv } = launchFields;
@@ -1407,6 +1417,9 @@ export class AgentChatService {
             const resolved = await this.profileLaunch({ profileId, adapter, accountId, projectPath: tab.projectPath, base: fields });
             fields = resolved.fields;
             profileFields = { profile: resolved.profile, profileId: resolved.profile.profileId };
+          } else if (this.hostSupportsSessionProfiles()) {
+            // A Global child (asked for, or a deleted profile's fallback): never the parent's.
+            profileFields = { profile: null, profileId: null };
           }
           await this.prepareHome(adapter, fields.launchEnv, tab.projectPath);
           launchFields = fields;
@@ -1642,14 +1655,15 @@ export class AgentChatService {
     // Only after the host accepted: `sessions.json`, the tab badge and
     // `liveAccountIds()` must never name an identity the thread does not have.
     this.chat.setAccount(id, { accountId, home });
-    return receipt;
+    return { seq: receipt.seq };
   }
 
   /** `POST /threads/:id/identity` on the host, its refusals as `ChatSessionError`s. */
-  private async postIdentity(id: string, body: SetThreadIdentityRequest, refused: string): Promise<{ seq: number }> {
+  private async postIdentity(id: string, body: SetThreadIdentityRequest, refused: string): Promise<SetThreadIdentityResponse> {
     try {
       const response = await this.client.json<{
         seq?: number;
+        profileId?: unknown;
         error?: { code: string; message: string };
       }>("POST", agentHostRoutes.setThreadIdentity(id), body);
       if (response.status === 404 && response.value?.error?.code === undefined) {
@@ -1667,7 +1681,12 @@ export class AgentChatService {
           response.value?.error?.code ?? "SESSION_UNAVAILABLE"
         );
       }
-      return { seq: typeof response.value?.seq === "number" ? response.value.seq : 0 };
+      const profileId = response.value?.profileId;
+      return {
+        seq: typeof response.value?.seq === "number" ? response.value.seq : 0,
+        // What the host's thread names now (`SetThreadIdentityResponse.profileId`); an older host omits it.
+        ...(profileId === null || typeof profileId === "string" ? { profileId } : {})
+      };
     } catch (error) {
       if (error instanceof ChatSessionError) throw error;
       if (error instanceof HostUnavailableError) {
@@ -1780,9 +1799,18 @@ export class AgentChatService {
       },
       "The agent host refused the profile switch."
     );
-    // Only after the host accepted, as the account switch.
+    // Only after the host accepted, as the account switch — and only the profile it applied: a
+    // `commandId` this daemon forgot (a restart) may be answered by the host's receipt of an earlier
+    // command, which left the thread on another profile. Mirror the host's then, and refuse.
+    if (receipt.profileId !== undefined && receipt.profileId !== profileId) {
+      this.chat.setProfile(id, receipt.profileId);
+      throw new ChatSessionError(
+        "That commandId already switched this chat to another profile: send a new commandId.",
+        "COMMAND_ID_CONFLICT"
+      );
+    }
     this.chat.setProfile(id, profileId);
-    return receipt;
+    return { seq: receipt.seq };
   }
 
   /**
@@ -1799,7 +1827,7 @@ export class AgentChatService {
    * `PROFILES_UNAVAILABLE` while the daemon is still wiring profiles, `LAUNCH_UNAVAILABLE`,
    * `PROFILE_*`).
    */
-  async threadLaunchProfile(threadId: string, profileId: string): Promise<ThreadLaunchProfileResponse> {
+  async threadLaunchProfile(threadId: string, profileId: string, hostAccountId?: string): Promise<ThreadLaunchProfileResponse> {
     const summary = this.chat.get(threadId);
     if (!summary) throw new ChatSessionError("No chat session with that id.", "THREAD_NOT_FOUND");
     const profiles = this.sessionProfiles ?? this.opts.sessionProfiles ?? null;
@@ -1811,7 +1839,11 @@ export class AgentChatService {
     if (!entry || !adapter) {
       throw new ChatSessionError(`Registry entry "${summary.refId}" is not available.`, "LAUNCH_UNAVAILABLE");
     }
-    const accountId = summary.accountId ?? "";
+    // The host's thread is the record of the account (its log): a tab that lags it — the host
+    // accepted an account switch and the daemon died before recording it — would hand every
+    // start the OLD account's credentials. Launch with the host's, and realign the tab.
+    const tabAccountId = summary.accountId ?? "";
+    const accountId = hostAccountId ?? tabAccountId;
     let launch: ChatLaunchEnv | null;
     try {
       launch = await this.opts.resolveLaunchEnv(entry, { accountId: accountId || SYSTEM_ACCOUNT_ID });
@@ -1820,6 +1852,10 @@ export class AgentChatService {
     }
     if ((launch?.accountId ?? "") !== accountId) {
       throw new ChatSessionError("The account this chat runs under is no longer available.", "LAUNCH_UNAVAILABLE");
+    }
+    if (accountId !== tabAccountId) {
+      this.opts.logger?.log?.(`agent chat: ${threadId} runs under account "${accountId}" on the host; realigning its tab (was "${tabAccountId}")`);
+      this.chat.setAccount(threadId, { accountId, home: resolveHomeKind(accountId) });
     }
     const base = this.accountLaunchFields(entry, adapter, launch);
     try {
@@ -1846,6 +1882,24 @@ export class AgentChatService {
         fallback: { previousProfileId: profileId, notice: deletedProfileNotice(name) }
       };
     }
+  }
+
+  /**
+   * `PreparedDirLeases.onAvailable` (spec §6.5): `listener` runs each time a host BECOMES healthy
+   * — adopted at boot, back after a respawn, or another instance took over — so a GC pass that
+   * could not read {@link profileLeases} runs again. Not on every health tick (each one re-adopts
+   * the same healthy host). Answers the unsubscribe.
+   */
+  onHostHealthy(listener: () => void): () => void {
+    const healthyInstance = (status: { state: string; hostInstanceId: string | null }): string | null =>
+      status.state === "healthy" ? (status.hostInstanceId ?? "") : null;
+    let last = healthyInstance(this.supervisor.status());
+    return this.supervisor.onChange((status) => {
+      const now = healthyInstance(status);
+      const edge = now !== null && now !== last;
+      last = now;
+      if (edge) listener();
+    });
   }
 
   /**

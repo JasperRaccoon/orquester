@@ -10,7 +10,8 @@
  * {@link createDaemonLaunchProfileClient} never throws and never hangs: an unreachable daemon, a
  * 5xx, a timeout, an unreadable answer or a daemon that predates the route (its generic 404) is
  * `unavailable`, and the orchestrator then launches from the persisted profile only if its
- * manifest still validates.
+ * manifest still validates — and appends a `runtime.warning` row saying so (an edit made since that
+ * version does not apply to this start) — never Global.
  */
 
 import { request as httpRequest } from "node:http";
@@ -31,7 +32,12 @@ export type LaunchProfileAnswer =
   /** The daemon could not be asked; `reason` is for the log. */
   | { kind: "unavailable"; reason: string };
 
-export type FetchLaunchProfile = (threadId: string, profileId: string) => Promise<LaunchProfileAnswer>;
+/** `context.accountId`: the account the thread's head names (`ThreadLaunchProfileRequest.accountId`). */
+export type FetchLaunchProfile = (
+  threadId: string,
+  profileId: string,
+  context?: { accountId: string }
+) => Promise<LaunchProfileAnswer>;
 
 /** The longest a session start waits for the daemon's answer (a preparation may run first). */
 export const LAUNCH_PROFILE_TIMEOUT_MS = 120_000;
@@ -81,9 +87,13 @@ export function createDaemonLaunchProfileClient(options: {
   token: string;
   timeoutMs?: number;
 }): FetchLaunchProfile {
-  return (threadId, profileId) =>
+  return (threadId, profileId, context) =>
     new Promise<LaunchProfileAnswer>((resolve) => {
-      const payload = JSON.stringify({ threadId, profileId } satisfies ThreadLaunchProfileRequest);
+      const payload = JSON.stringify({
+        threadId,
+        profileId,
+        ...(context !== undefined ? { accountId: context.accountId } : {})
+      } satisfies ThreadLaunchProfileRequest);
       let settled = false;
       const settle = (answer: LaunchProfileAnswer): void => {
         if (settled) return;

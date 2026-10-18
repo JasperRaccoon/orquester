@@ -141,3 +141,20 @@ test("initialCommand is rejected when it is over-long or carries control bytes",
   const ok = await create("npm create vite@latest . -- --template react-ts");
   assert.equal(ok.statusCode, 200, ok.body);
 });
+
+test("a terminal launch naming an Agent Profile is refused, never silently Global", async (t) => {
+  const h = await harness();
+  t.after(() => h.close());
+
+  for (const kind of ["shell", "agent"]) {
+    const res = await h.inject({ method: "POST", url: "/api/sessions", payload: { kind, refId: "sh", profileId: "prof-1" } });
+    assert.equal(res.statusCode, 400, kind);
+    assert.equal(res.json().code, "INVALID_PROFILE");
+    assert.match(res.json().message, /agent-chat/);
+  }
+  // Absent or null: a plain terminal launch.
+  for (const payload of [{ kind: "shell", refId: "sh" }, { kind: "shell", refId: "sh", profileId: null }]) {
+    const res = await h.inject({ method: "POST", url: "/api/sessions", payload });
+    assert.equal(res.statusCode, 200, JSON.stringify(payload));
+  }
+});

@@ -19,17 +19,18 @@ import {
 export interface ThreadLaunchProfileRouteDeps {
   /** True only for the agent host's own bearer. */
   authorizeHost(authorization: string | undefined): boolean;
-  /** `AgentChatService.threadLaunchProfile`. Throws errors carrying a `code`. */
-  resolve(threadId: string, profileId: string): Promise<ThreadLaunchProfileResponse>;
+  /** `AgentChatService.threadLaunchProfile` (`accountId`: the host's thread's, when sent). Throws errors carrying a `code`. */
+  resolve(threadId: string, profileId: string, accountId?: string): Promise<ThreadLaunchProfileResponse>;
   logger?: { warn?: (...a: unknown[]) => void };
 }
 
 function parseRequest(body: unknown): ThreadLaunchProfileRequest | null {
   if (body === null || typeof body !== "object") return null;
-  const { threadId, profileId } = body as Record<string, unknown>;
+  const { threadId, profileId, accountId } = body as Record<string, unknown>;
   if (typeof threadId !== "string" || threadId.length === 0 || threadId.length > 256) return null;
   if (typeof profileId !== "string" || profileId.length === 0 || profileId.length > 128) return null;
-  return { threadId, profileId };
+  if (accountId !== undefined && (typeof accountId !== "string" || accountId.length > 256)) return null;
+  return { threadId, profileId, ...(accountId !== undefined ? { accountId } : {}) };
 }
 
 export function registerThreadLaunchProfileRoute(app: FastifyInstance, deps: ThreadLaunchProfileRouteDeps): void {
@@ -42,7 +43,7 @@ export function registerThreadLaunchProfileRoute(app: FastifyInstance, deps: Thr
       return reply.code(400).send({ code: "INVALID_ARGUMENT", message: "threadId and profileId are required." });
     }
     try {
-      return await deps.resolve(body.threadId, body.profileId);
+      return await deps.resolve(body.threadId, body.profileId, body.accountId);
     } catch (error) {
       const code = (error as { code?: unknown } | null)?.code;
       const message = error instanceof Error ? error.message : "The thread's Agent Profile could not be resolved.";

@@ -594,6 +594,7 @@ export class SessionProfileStore {
   /** `""` removes the instructions. */
   async writeInstructions(profileId: string, revision: string, text: string): Promise<StoredSessionProfile> {
     const { profile } = await this.mutate(profileId, revision, async (state) => {
+      await this.keepForRollback(state, state.layout.instructions);
       if (text === "") {
         await rm(state.layout.instructions, { force: true });
       } else {
@@ -744,17 +745,13 @@ export class SessionProfileStore {
   /** The instructions brought by an import: replace them, or append below the profile's own. Undone on a failed mutation. */
   private async importInstructions(state: MutationState, input: { text: string; mode: SessionProfileInstructionsMode }): Promise<void> {
     const path = state.layout.instructions;
-    const current = await readTextIfExists(path);
+    const current = await this.keepForRollback(state, path);
     const next =
       input.mode === "replace" || current === null || current.trim() === ""
         ? input.text
         : input.text.trim() === ""
           ? current
           : `${current.replace(/\s+$/, "")}\n\n${input.text}`;
-    state.rollback.push(async () => {
-      if (current === null) await rm(path, { force: true });
-      else await writeProfileFile(path, current, WRITE);
-    });
     if (next === "") await rm(path, { force: true });
     else await writeProfileFile(path, next, WRITE);
   }
@@ -1024,7 +1021,25 @@ export class SessionProfileStore {
     }
   }
 
-  /** Runs one mutation of a profile under its queue: revision check, change, secrets, manifest (the commit). */
+  /**
+   * Reads `path`'s text now and registers its restore on the mutation's rollback: a file written
+   * before the manifest (the commit) must not keep the new text when the commit fails. Answers the
+   * text (`null` = no file; the rollback then removes what the mutation wrote).
+   */
+  private async keepForRollback(state: MutationState, path: string): Promise<string | null> {
+    const previous = await readTextIfExists(path);
+    state.rollback.push(async () => {
+      if (previous === null) await rm(path, { force: true });
+      else await writeProfileFile(path, previous, WRITE);
+    });
+    return previous;
+  }
+
+  /**
+   * Runs one mutation of a profile under its queue: revision check, change, secrets, manifest (the
+   * commit). Every file the change rewrites before the commit is restored when it fails
+   * ({@link keepForRollback}; new files and dirs are removed by their own rollback entries).
+   */
   private mutate<T>(
     profileId: string,
     revision: string,
@@ -1047,7 +1062,10 @@ export class SessionProfileStore {
       let result: T;
       try {
         result = await change(state);
-        if (state.secretsDirty && secrets !== null) await this.writeSecrets(layout, secrets);
+        if (state.secretsDirty && secrets !== null) {
+          await this.keepForRollback(state, layout.secrets);
+          await this.writeSecrets(layout, secrets);
+        }
         file.manifest.revision += 1;
         file.manifest.updatedAt = state.now;
         await this.writeManifest(layout, file);
@@ -1138,6 +1156,7 @@ export class SessionProfileStore {
         }
         await mkdir(draft.kind === "skill" ? layout.skillDir(id) : layout.commandsDir, { recursive: true, mode: PROFILE_DIR_MODE });
         if (!existing) state.rollback.push(() => rm(draft.kind === "skill" ? layout.skillDir(id) : path, { recursive: true, force: true }));
+        else await this.keepForRollback(state, path);
         await writeProfileFileVerified(path, text, { ...WRITE, verify: (written) => parseMarkdownDocument(written) });
         return { ...base, kind: draft.kind, name, ...(description ? { description } : {}) };
       }

@@ -88,6 +88,12 @@ credentials, deadline); `.git` is removed before the copy. Sources that are not 
   byte). MCP secret values land in `secrets.json` only.
 - Exports never carry secret values: `profile.json` keeps env/header KEYS; a profile imported from
   a file has those servers skipped at launch until the values are entered again (and says so).
+  Credential-looking values in fields kept verbatim (an MCP server's `url`, `command`, `args`,
+  `advanced`; a hook's `command`) are replaced with `REDACTED` by `redactExportManifest` (URL
+  userinfo and credential-named query values, `--token=…`/`--token …`, `NAME_TOKEN=…`,
+  `Bearer …`, credential-named headers; heuristics in `export.ts`'s header); the marker's
+  `redacted` lists them and the import's notes say so. Import from Global needs none of this: the
+  values stay on this machine, in the profile.
 
 ## How an agent plugs in
 
@@ -168,7 +174,10 @@ server's `XDG_CONFIG_HOME`: `buildXdgConfigShadow` of the real `~/.config` minus
 - **Launch.** `serverPool {key: "profile:<profileId>:<version dir>", env: {XDG_CONFIG_HOME,
   OPENCODE_CONFIG_DIR, OPENCODE_DISABLE_EXTERNAL_SKILLS: "1", OPENCODE_DISABLE_CLAUDE_CODE_SKILLS: "1",
   OPENCODE_TEST_HOME},
-  unsetEnv: ["OPENCODE_CONFIG"]}`; the thread's `launchEnv`/`homePath` stay the account's (OpenCode's
+  unsetEnv: ["OPENCODE_CONFIG"]}` (`opencodeProfilePoolKey`, in `manifest/opencode.ts`: the
+  adapter refuses a profile start or fork whose `serverPool.key` is not its version's — OpenCode
+  reads no per-thread profile, so any other server would run the Global setup); the thread's
+  `launchEnv`/`homePath` stay the account's (OpenCode's
   shared servers read the project's launcher env). `XDG_DATA_HOME` and `OPENCODE_CONFIG_CONTENT`
   are untouched (OpenCode merges the latter last). A new version is a new key: the thread moves at
   its next start and the old server closes once idle.
@@ -210,8 +219,13 @@ restarts (spec §5.6). Status, staleness and fingerprints read the current versi
   the gap between a launch getting it and the host registering the session.
 - Triggers: after each publish (that key), profile delete (its pointers go at once; unleased
   versions go now, leased ones at a later pass; empty dirs up to `prepared/` are removed),
-  `start()` (after boot, in the background) and `gc()` on demand. A key's pass runs in the key's
-  job chain, so never during its preparation; the leases are read before any key is locked.
+  `start()` (after boot, in the background — usually before the host is adopted, so it removes
+  nothing), `leases.onAvailable` (wired to `AgentChatService.onHostHealthy`: a host became
+  healthy), every `SESSION_PROFILE_GC_INTERVAL_MS` (1 h, unref'd timer from `start()` to `stop()`;
+  it collects a deleted profile's leftovers that no publish will trigger) and `gc()` on demand. A key's pass runs in the key's
+  job chain, so never during its preparation; the leases are read before any key is locked, and
+  again for a key reached once that read is older than the handout grace (it waited behind a slow
+  preparation; a failed re-read keeps that key's versions).
 - Legacy layout (the key dir itself held the files, `manifest.json` at its top): not a current
   version, so the key re-prepares; its content is collected like a version, leased by the key
   dir's own path.
@@ -286,18 +300,26 @@ record (`sessionChatRecordSchema.profileId`; `SessionSummary.profileId`, `null` 
 the account route's auth, refusals and receipts): `ProfileCommandBody {commandId, profileId |
 null}` → the host's identity switch with `profile` (`null` = Global); a profile-only switch keeps
 the resume cursor. Idempotent by `commandId` (a repeat shares the first's answer; the same id with
-another profile is `COMMAND_ID_CONFLICT`; a refusal is forgotten so it may be retried).
+another profile is `COMMAND_ID_CONFLICT`; a refusal is forgotten so it may be retried). The host's
+answer names the profile its thread has after the command (`SetThreadIdentityResponse.profileId`,
+a replayed receipt's too): when it is not the one asked — a `commandId` this daemon forgot across a
+restart — the tab mirrors the host's and the switch is `COMMAND_ID_CONFLICT`.
 
 **Refresh at every session start.** Before ANY provider session of a profile thread starts (the
 first, a resume, a crash restart, a host restart's rehydrate, a switch), the agent host calls the
 daemon's socket-only `POST /api/agent-host/threads/launch-profile` (`daemonRoutesForHost
-.threadLaunchProfile`, host bearer) with `{threadId, profileId}` and rewrites `launch.json` from
+.threadLaunchProfile`, host bearer) with `{threadId, profileId, accountId}` (`accountId`: the
+host head's — the daemon launches with it and realigns a tab that lags it, e.g. after a crash
+between the host accepting an account switch and the daemon recording it) and rewrites `launch.json` from
 the answer (`ThreadLaunchProfileResponse`: the current `profile` and launch fields) before it
 starts — so an edited profile applies at the next start and a GC'd version never fails one. A
 refusal (409 `PROFILE_NOT_READY` / `PROFILE_UNSUPPORTED_AGENT` / `PROFILE_NOT_FOUND` for an
 unattended chat / `LAUNCH_UNAVAILABLE`) fails the start with its message. Daemon unreachable, 5xx,
-or an older daemon's route miss: the host launches the persisted `launch.json` profile only if its
-manifest still validates (`loadProfileManifest`), else the start fails — never Global. (It is a
+or an older daemon's route miss (or no answer within `LAUNCH_PROFILE_TIMEOUT_MS`, 120 s — e.g. a
+refresh queued behind slow preparations): the host launches the persisted `launch.json` profile
+only if its manifest still validates (`loadProfileManifest`), and says so in the chat (a
+`runtime.warning` row, `reason: "profile-refresh-unavailable"`: recent profile edits apply at the
+next start); else the start fails — never Global. (It is a
 separate route, not the session-tools manifest fetch: that one runs inside the adapter's start,
 after the env and home are already built.)
 
@@ -308,8 +330,11 @@ notice (`Agent Profile "X" was deleted; this chat now uses Global.` — the name
 `store.deletedName`: `store.delete` records the profile's last name in
 `<appdir>/daemon/session-profiles/deleted.json` (`sessionProfileDeletedFile`) before removing it,
 so the notice names it after a restart too), and the tab mirrors Global.
-An account switch or a fork of such a chat goes ahead without naming the profile and leaves the
-fallback to the next start's refresh. **Unattended** launches never fall back:
+An account switch of such a chat goes ahead without naming the profile and leaves the fallback to
+the next start's refresh. A fork of one is made Global explicitly (`profile: null` — inheriting
+would hand the child the parent's `launch.json` version, which the delete may have collected) with
+`ForkHostThreadRequest.profileFallback`, which the host appends to the child as the same notice
+row; an unattended fork is refused. **Unattended** launches never fall back:
 `CreateAgentChatSessionFields.unattended` / `ForkSessionRequest.unattended` (persisted as
 `sessionChatRecordSchema.unattended`; a fork of an unattended chat is unattended) make every later
 refresh refuse `PROFILE_NOT_FOUND`. A create naming a missing or failed profile fails either way.
@@ -325,6 +350,8 @@ the agent (Codex: commands as skills) plus `/compact` (source `profile`). A Glob
 
 **Leases.** `PreparedDirLeases` (above) is `AgentChatService.profileLeases()`, passed as the
 lifecycle's `leases` in `index.ts`. The refresh at every session start always launches the
-CURRENT version, so an old one is leased only while a session that started on it lives.
+CURRENT version, so an old one is leased only while a session that started on it lives (the
+host leases the dir a live session started on, not only `launch.json`'s: a profile switch rewrites
+that at once while the old process runs on until its next start).
 - **UI**: everything through `sessionProfileRoutes` / `HttpOrquesterApiClient` methods
   (`listSessionProfiles`, `createSessionProfileItem`, …) and `/events` on `SESSION_PROFILES_CHANNEL`.

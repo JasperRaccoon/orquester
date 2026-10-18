@@ -83,7 +83,7 @@ import type { PortableMcpServer } from "../../agent-profile/adapters/types.ts";
 import { parseMarkdownDocument } from "../../agent-profile/infra/frontmatter.ts";
 import { copyEntry } from "../../agent-profile/infra/tree.ts";
 import type { ProfileLaunchContext, ProfileLaunchContribution } from "../launch.ts";
-import type { OpenCodePreparedSection } from "../manifest/opencode.ts";
+import { opencodeProfilePoolKey, type OpenCodePreparedSection } from "../manifest/opencode.ts";
 import type { SessionProfilePrepareContext, SessionProfilePreparer } from "../preparer.ts";
 import type { ResolvedMcpServer } from "../resolve.ts";
 
@@ -119,10 +119,8 @@ const INSTRUCTIONS_FILE = "AGENTS.md";
 const PLUGIN_EXTENSIONS = new Set([".js", ".ts", ".mjs"]);
 const SCHEMA_URL = "https://opencode.ai/config.json";
 
-/** The pool key of a prepared version: the profile and the version dir's (never reused) name. */
-export function opencodeProfilePoolKey(profileId: string, preparedDir: string): string {
-  return `profile:${profileId}:${basename(preparedDir)}`;
-}
+/** The pool key of a prepared version (lives with the manifest section: the agent host reads it too). */
+export { opencodeProfilePoolKey };
 
 /** `{file:./x}` resolves against the config file's dir: make it absolute before the config moves. */
 function absolutizeFileRefs(value: unknown, baseDir: string): unknown {

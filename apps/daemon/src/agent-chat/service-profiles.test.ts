@@ -58,6 +58,10 @@ interface Fixture {
   /** Drop the next fork's answer after the host took it (a lost answer), once. */
   dropForkAnswer: boolean;
   leasesAnswer: { status: number; body: unknown };
+  /** Set: the identity answer's `profileId` (what the host's thread names, e.g. a replayed receipt's). */
+  identityProfileId: string | null | undefined;
+  /** What `/health` reports as the host's instance (a change = another host took over). */
+  hostInstanceId: string;
   cleanup(): Promise<void>;
 }
 
@@ -83,6 +87,8 @@ async function makeFixture(options: { capability?: boolean; profiles?: false } =
     refuseIdentity: null,
     dropForkAnswer: false,
     leasesAnswer: { status: 200, body: { preparedDirs: ["/prepared/p1/v3"] } },
+    hostInstanceId: "host-1",
+    identityProfileId: undefined,
     cleanup: async () => {
       await state.service.stop();
       host.closeAllConnections();
@@ -103,7 +109,7 @@ async function makeFixture(options: { capability?: boolean; profiles?: false } =
         return send(res, 200, {
           ok: true,
           protocolVersion: 1,
-          hostInstanceId: "host-1",
+          hostInstanceId: state.hostInstanceId,
           liveThreadIds: [],
           activeTurnThreadIds: [],
           pid: 111,
@@ -131,7 +137,7 @@ async function makeFixture(options: { capability?: boolean; profiles?: false } =
       if (identity && req.method === "POST") {
         state.identities.push({ threadId: decodeURIComponent(identity[1]!), body: JSON.parse(body) as SetThreadIdentityRequest });
         if (state.refuseIdentity) return send(res, state.refuseIdentity.status, state.refuseIdentity.body);
-        return send(res, 200, { seq: 42 });
+        return send(res, 200, { seq: 42, ...(state.identityProfileId !== undefined ? { profileId: state.identityProfileId } : {}) });
       }
       if (url === "/profiles/leases" && req.method === "GET") {
         return send(res, state.leasesAnswer.status, state.leasesAnswer.body);
@@ -303,15 +309,19 @@ test("a fork inherits the parent's profile under the parent's account unless the
   await f.cleanup();
 });
 
-test("a fork of a chat whose profile was deleted goes ahead interactively (the child falls back at its start), never unattended", async () => {
+test("a fork of a chat whose profile was deleted goes ahead interactively as Global with the notice, never unattended", async () => {
   const f = await makeFixture();
   f.profiles.set("doomed", "ready");
   const parent = await create(f, { profileId: "doomed" });
   f.profiles.set("doomed", "deleted");
-  await f.service.forkSession(parent.id, {}, 1);
+  const child = await f.service.forkSession(parent.id, {}, 1);
   const body = f.forks[0]!.body;
-  assert.equal("profile" in body, false, "the host gives the child the parent's; its refresh falls back with the notice");
+  // Global now, said explicitly: the parent's launch.json names a version the delete may have collected.
+  assert.equal(body.profile, null);
+  assert.equal(body.profileId, null);
+  assert.deepEqual(body.profileFallback, { previousProfileId: "doomed", notice: "This chat's Agent Profile was deleted; it now uses Global." });
   assert.equal(body.launchEnv?.CODEX_HOME, "/homes/acc-1");
+  assert.equal(child.session.profileId, null, "the tab mirrors Global");
   await assert.rejects(
     f.service.forkSession(parent.id, { unattended: true }, 2),
     (e: unknown) => e instanceof ChatSessionError && e.code === "PROFILE_NOT_FOUND"
@@ -430,6 +440,27 @@ test("a profile switch is idempotent by commandId; a reused id with another prof
   await f.cleanup();
 });
 
+test("a reused commandId the host answers with another profile (a receipt this daemon forgot) conflicts, and the tab mirrors the host", async (t) => {
+  const f = await makeFixture();
+  t.after(() => f.cleanup());
+  const summary = await create(f, { profileId: "p1" });
+  // As after a daemon restart: the host replays an earlier receipt of this commandId, whose
+  // command left the thread on p1 — not the p2 asked now.
+  f.identityProfileId = "p1";
+  await assert.rejects(
+    f.service.switchProfile(summary.id, { commandId: "c-old", profileId: "p2" }),
+    (e: unknown) => e instanceof ChatSessionError && e.code === "COMMAND_ID_CONFLICT"
+  );
+  assert.equal(f.service.chat.get(summary.id)?.profileId, "p1", "never a profile the host did not apply");
+  // An answer that matches records it; an older host's answer (no profileId) records the request.
+  f.identityProfileId = "p2";
+  await f.service.switchProfile(summary.id, { commandId: "c-new", profileId: "p2" });
+  assert.equal(f.service.chat.get(summary.id)?.profileId, "p2");
+  f.identityProfileId = undefined;
+  await f.service.switchProfile(summary.id, { commandId: "c-newer", profileId: null });
+  assert.equal(f.service.chat.get(summary.id)?.profileId, null);
+});
+
 test("the refresh at a session start answers the current version, or the deleted profile's fallback with its notice", async () => {
   const f = await makeFixture();
   const summary = await create(f, { profileId: "p1" });
@@ -483,6 +514,41 @@ test("the leases are the host's live prepared dirs, and unknown (a rejection) wh
   await f.cleanup();
 });
 
+test("the refresh realigns the tab with the account the host's thread names (an account switch whose answer was lost)", async (t) => {
+  const f = await makeFixture();
+  t.after(() => f.cleanup());
+  const summary = await create(f, { profileId: "p1" });
+  assert.equal(f.service.chat.get(summary.id)?.accountId, "acc-1");
+  // The host accepted a switch to acc-2, the daemon died before `setAccount`: the host says so.
+  const answer = await f.service.threadLaunchProfile(summary.id, "p1", "acc-2");
+  assert.equal(f.resolves.at(-1)?.accountId, "acc-2", "the profile prepared for the host's account");
+  assert.equal(answer.launchEnv?.FROM_ENV_FILE, "1");
+  assert.equal(f.resolves.at(-1)?.base.launchEnv.CODEX_HOME, "/homes/acc-2", "that account's credentials, never the stale tab's");
+  assert.equal(f.service.chat.get(summary.id)?.accountId, "acc-2", "the tab mirrors the host again");
+  // An older host (no account in the request): the tab's.
+  await f.service.threadLaunchProfile(summary.id, "p1");
+  assert.equal(f.resolves.at(-1)?.accountId, "acc-2");
+});
+
+test("onHostHealthy fires when a host becomes healthy (the leases are knowable again), not on every health tick", async () => {
+  const f = await makeFixture();
+  let fired = 0;
+  const unsubscribe = f.service.onHostHealthy(() => void (fired += 1));
+  const supervisor = (f.service as unknown as { supervisor: { checkHealth(): Promise<void> } }).supervisor;
+  await supervisor.checkHealth();
+  assert.equal(fired, 0, "the same healthy host: no edge");
+  f.hostInstanceId = "host-2";
+  await supervisor.checkHealth();
+  assert.equal(fired, 1, "another host took over");
+  await supervisor.checkHealth();
+  assert.equal(fired, 1);
+  unsubscribe();
+  f.hostInstanceId = "host-3";
+  await supervisor.checkHealth();
+  assert.equal(fired, 1, "unsubscribed");
+  await f.cleanup();
+});
+
 test("the host's refresh route is the host's alone, and maps each answer to the status the host reads", async () => {
   const app = Fastify({ logger: false });
   const answers: Record<string, () => Promise<unknown>> = {
@@ -492,9 +558,13 @@ test("the host's refresh route is the host's alone, and maps each answer to the 
     starting: async () => { throw new ChatSessionError("Orquester is still starting.", "PROFILES_UNAVAILABLE"); },
     broken: async () => { throw new Error("boom"); }
   };
+  const accounts: Array<string | undefined> = [];
   registerThreadLaunchProfileRoute(app, {
     authorizeHost: (authorization) => authorization === "Bearer host",
-    resolve: (threadId) => answers[threadId]!() as never
+    resolve: (threadId, _profileId, accountId) => {
+      accounts.push(accountId);
+      return answers[threadId]!() as never;
+    }
   });
   await app.ready();
   const post = (threadId: string, authorization = "Bearer host", profileId: unknown = "p1") =>
@@ -502,6 +572,14 @@ test("the host's refresh route is the host's alone, and maps each answer to the 
   assert.equal((await post("ok", "Bearer nope")).statusCode, 401);
   assert.equal((await post("ok", "Bearer host", 3)).statusCode, 400);
   assert.equal((await post("ok")).statusCode, 200);
+  const withAccount = await app.inject({
+    method: "POST",
+    url: daemonRoutesForHost.threadLaunchProfile,
+    headers: { authorization: "Bearer host" },
+    payload: { threadId: "ok", profileId: "p1", accountId: "acc-2" }
+  });
+  assert.equal(withAccount.statusCode, 200);
+  assert.deepEqual(accounts.slice(-2), [undefined, "acc-2"], "the host's account passes through; absent from an older host");
   assert.deepEqual((await post("missing")).json(), { code: "THREAD_NOT_FOUND", message: "No chat session with that id." });
   assert.equal((await post("missing")).statusCode, 404);
   const refused = await post("refused");

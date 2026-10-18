@@ -66,10 +66,13 @@ async function completeTurn(host: TestHost, threadId: string): Promise<void> {
 /** A daemon whose answers a test scripts, recording what it was asked. */
 function scriptedDaemon(answer: (threadId: string, profileId: string) => LaunchProfileAnswer) {
   const asked: Array<[string, string]> = [];
+  const accounts: Array<string | undefined> = [];
   return {
     asked,
-    launchProfile: async (threadId: string, profileId: string): Promise<LaunchProfileAnswer> => {
+    accounts,
+    launchProfile: async (threadId: string, profileId: string, context?: { accountId: string }): Promise<LaunchProfileAnswer> => {
       asked.push([threadId, profileId]);
+      accounts.push(context?.accountId);
       return answer(threadId, profileId);
     }
   };
@@ -103,6 +106,7 @@ describe("the refresh before a profile thread's session start", () => {
     const threadId = await host.createThread({ profile: V3, launchEnv: { CODEX_HOME: "/homes/acc1" }, homePath: "/homes/acc1" });
     await turn(host, threadId);
     assert.deepEqual(daemon.asked, [[threadId, "p1"]]);
+    assert.deepEqual(daemon.accounts, ["acc1"], "the host's own account: the daemon's tab may lag it");
     const first = starts(host, threadId)[0]!;
     assert.deepEqual(first.profile, V4);
     assert.deepEqual(first.serverPool, { key: "profile:p1" });
@@ -151,6 +155,11 @@ describe("the refresh before a profile thread's session start", () => {
     await turn(host, threadId);
     assert.deepEqual(starts(host, threadId)[0]?.profile, persisted);
     assert.ok(host.logger.entries.some((entry) => /could not refresh/.test(entry.message)), "said so in the log");
+    // …and in the chat: a recent profile edit may not apply to this start.
+    const warning = activitiesOf(host, threadId).find((row) => row.activityKind === "runtime.warning");
+    assert.match(warning?.summary ?? "", /could not be reached.*last launched with/);
+    assert.deepEqual(warning?.payload, { profileId: "p1", reason: "profile-refresh-unavailable" });
+    assert.equal(host.store.heads.get(threadId)?.profileId, "p1", "still the profile, never Global");
     await host.stop();
   });
 
@@ -242,6 +251,46 @@ describe("the prepared-dir leases", () => {
     assert.deepEqual(host.orchestrator.profileLeases(), [V4.preparedDir]);
     await host.stop();
   });
+
+  it("keep the dir a live session STARTED on after a switch rewrote launch.json, until it restarts", async () => {
+    const host = createTestHost();
+    void host.orchestrator.consume(host.adapter);
+    const a = await host.createThread({ threadId: "a", profile: V3 });
+    await turn(host, a);
+    await completeTurn(host, a);
+    assert.deepEqual(host.orchestrator.profileLeases(), [V3.preparedDir]);
+
+    // A profile switch to v4: launch.json moves now, the provider process on v3 keeps running.
+    await host.orchestrator.setIdentity(a, { commandId: cmd(), accountId: "acc1", home: "account", profile: V4, profileId: "p1" });
+    assert.equal(starts(host, a).length, 1, "no restart yet");
+    assert.deepEqual(host.orchestrator.profileLeases().sort(), [V3.preparedDir, V4.preparedDir].sort(), "the running v3 and the pending v4");
+
+    // A switch to Global: the running session still uses v3.
+    await host.orchestrator.setIdentity(a, { commandId: cmd(), accountId: "acc1", home: "account", profile: null, profileId: null });
+    assert.deepEqual(host.orchestrator.profileLeases(), [V3.preparedDir]);
+
+    // The next message restarts it Global: nothing is leased any more.
+    await turn(host, a, "again");
+    assert.equal(starts(host, a).length, 2);
+    assert.deepEqual(host.orchestrator.profileLeases(), []);
+    await host.stop();
+  });
+});
+
+describe("the identity switch's answer", () => {
+  it("names the profile the thread has after the command — for a replayed receipt too", async () => {
+    const host = createTestHost();
+    const threadId = await host.createThread({ profile: V3 });
+    const toV4 = { commandId: "switch-1", accountId: "acc1", home: "account" as const, profile: V4, profileId: "p1" };
+    assert.deepEqual(await host.orchestrator.setIdentity(threadId, toV4), { seq: (await host.orchestrator.setIdentity(threadId, toV4)).seq, profileId: "p1" });
+    const toGlobal = { commandId: "switch-2", accountId: "acc1", home: "account" as const, profile: null, profileId: null };
+    assert.equal((await host.orchestrator.setIdentity(threadId, toGlobal)).profileId, null);
+    // The first command's receipt, replayed with another profile (a daemon that forgot it): the
+    // answer says what the thread names, so the daemon never records a profile the host did not apply.
+    const replay = await host.orchestrator.setIdentity(threadId, { ...toV4, profile: { ...V4, profileId: "p9" }, profileId: "p9" });
+    assert.equal(replay.profileId, null);
+    await host.stop();
+  });
 });
 
 describe("parseLaunchProfileResponse", () => {
@@ -283,6 +332,9 @@ describe("createDaemonLaunchProfileClient", () => {
       const fetch = createDaemonLaunchProfileClient({ socketPath: () => socketPath, token: "tok" });
       assert.deepEqual(await fetch("t1", "p1"), { kind: "launch", launch: { profile: V3 } });
       assert.deepEqual(seen[0], { url: daemonRoutesForHost.threadLaunchProfile, auth: agentHostAuthValue("tok"), body: { threadId: "t1", profileId: "p1" } });
+      await fetch("t1", "p1", { accountId: "" });
+      assert.deepEqual(seen[1]?.body, { threadId: "t1", profileId: "p1", accountId: "" }, "the thread's account (\"\" = System)");
+      seen.length = 1;
       answer = { status: 409, body: { code: "PROFILE_NOT_READY", message: "Preparing failed." } };
       assert.deepEqual(await fetch("t1", "p1"), { kind: "refused", code: "PROFILE_NOT_READY", message: "Preparing failed." });
       answer = { status: 404, body: { code: "THREAD_NOT_FOUND", message: "No chat." } };

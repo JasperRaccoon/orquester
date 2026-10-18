@@ -11,7 +11,13 @@ import {
 } from "@orquester/config";
 import type { AgentHomes } from "../agent-profile/adapters/types.ts";
 import { SessionProfileError } from "./errors.ts";
-import { SESSION_PROFILE_HANDOUT_GRACE_MS, SessionProfileLifecycle, readCurrentVersion, type SessionProfileLifecycleOptions } from "./lifecycle.ts";
+import {
+  SESSION_PROFILE_GC_INTERVAL_MS,
+  SESSION_PROFILE_HANDOUT_GRACE_MS,
+  SessionProfileLifecycle,
+  readCurrentVersion,
+  type SessionProfileLifecycleOptions
+} from "./lifecycle.ts";
 import { readPreparedManifest } from "./manifest.ts";
 import type { SessionProfilePrepareContext, SessionProfilePreparer, SessionProfilePreparers } from "./preparer.ts";
 import { SessionProfileService } from "./service.ts";
@@ -588,6 +594,48 @@ describe("SessionProfileLifecycle versions and GC", () => {
     assert.ok(h.logs.some((line) => line.includes(`removed unused prepared dir ${v1.preparedDir}`)));
   });
 
+  it("re-reads the leases for a key reached after the handout grace (a snapshot that old is stale)", async () => {
+    const time = clock();
+    let gate: Promise<void> | null = null;
+    const entered = deferred();
+    const claude = fakePreparer("claude", {
+      during: async () => {
+        if (gate === null) return;
+        entered.resolve();
+        await gate;
+      }
+    });
+    const read = deferred();
+    const leases = leasesOf();
+    const inUse = leases.inUse;
+    leases.inUse = async () => {
+      const answer = await inUse();
+      read.resolve();
+      return answer;
+    };
+    const h = await setup({ claude }, { leases, now: time.now });
+    const profile = await h.service.create({ name: "Dev" });
+    const v1 = await h.lifecycle.ensureReady(profile.id, "claude", null);
+    await h.service.update(profile.id, { revision: profile.revision, description: "x" });
+    await h.lifecycle.ensureReady(profile.id, "claude", null);
+    await h.lifecycle.idle();
+
+    // A slow preparation holds the key; a GC pass reads the leases (none) and waits behind it.
+    const release = deferred();
+    gate = release.promise;
+    h.lifecycle.markStale(profile.id, "claude", null);
+    await entered.promise;
+    const pass = h.lifecycle.gc();
+    await read.promise;
+    // Meanwhile, past the handout grace, a session started on v1 (it is leased now).
+    time.advance(SESSION_PROFILE_HANDOUT_GRACE_MS + 1);
+    leases.set.add(v1.preparedDir);
+    release.resolve();
+    await pass;
+    await h.lifecycle.idle();
+    assert.ok(await exists(v1.preparedDir), "the stale snapshot must not remove a dir leased since");
+  });
+
   it("removes an unleased old version right after publishing", async () => {
     const leases = leasesOf();
     const h = await setup({ claude: fakePreparer("claude") }, { leases, handoutGraceMs: 0 });
@@ -624,6 +672,64 @@ describe("SessionProfileLifecycle versions and GC", () => {
     assert.equal(await exists(join(dirname(o1.preparedDir), "current.json")), false);
     assert.ok(await exists(o1.preparedDir));
     plain.stop();
+  });
+
+  it("collects again once the leases become knowable (the host turned healthy after boot)", async () => {
+    const leases = Object.assign(leasesOf(), {
+      listeners: new Set<() => void>(),
+      onAvailable(listener: () => void) {
+        leases.listeners.add(listener);
+        return () => void leases.listeners.delete(listener);
+      }
+    });
+    leases.fail = true; // boot: the agent host is not adopted yet
+    const h = await setup({ claude: fakePreparer("claude") }, { leases, handoutGraceMs: 0 });
+    const profile = await h.service.create({ name: "Dev" });
+    const v1 = await h.lifecycle.ensureReady(profile.id, "claude", null);
+    await h.service.update(profile.id, { revision: profile.revision, description: "x" });
+    await h.lifecycle.ensureReady(profile.id, "claude", null);
+    await h.lifecycle.start();
+    await h.lifecycle.idle();
+    assert.ok(await exists(v1.preparedDir), "nothing is known yet: kept");
+    assert.equal(leases.listeners.size, 1);
+
+    leases.fail = false;
+    for (const listener of leases.listeners) listener();
+    await h.lifecycle.idle();
+    assert.equal(await exists(v1.preparedDir), false, "collected as soon as the leases can be read");
+
+    h.lifecycle.stop();
+    assert.equal(leases.listeners.size, 0, "stop() unsubscribes");
+  });
+
+  it("runs a slow periodic pass that collects what no trigger would (a deleted profile's leftovers)", async (t) => {
+    t.mock.timers.enable({ apis: ["setInterval"] });
+    const leases = leasesOf();
+    const h = await setup({ claude: fakePreparer("claude") }, { leases, handoutGraceMs: 0 });
+    h.lifecycle.attach(h.service.events);
+    await h.lifecycle.start();
+    const profile = await h.service.create({ name: "Dev" });
+    const v1 = await h.lifecycle.ensureReady(profile.id, "claude", null);
+    await h.lifecycle.idle();
+    leases.set.add(v1.preparedDir);
+    await h.service.remove(profile.id, profile.revision);
+    await h.lifecycle.idle();
+    assert.ok(await exists(v1.preparedDir), "leased at the delete");
+
+    leases.set.clear();
+    const calls = leases.calls;
+    t.mock.timers.tick(SESSION_PROFILE_GC_INTERVAL_MS - 1);
+    await h.lifecycle.idle();
+    assert.equal(leases.calls, calls, "not before the interval");
+    t.mock.timers.tick(1);
+    await h.lifecycle.idle();
+    assert.equal(await exists(join(sessionProfilePreparedRootDir(h.appdir), profile.id)), false);
+
+    h.lifecycle.stop();
+    const before = leases.calls;
+    t.mock.timers.tick(SESSION_PROFILE_GC_INTERVAL_MS);
+    await h.lifecycle.idle();
+    assert.equal(leases.calls, before, "stop() ends the periodic pass");
   });
 
   it("on delete removes pointers and unleased versions; a leased one stays until a later GC", async () => {
