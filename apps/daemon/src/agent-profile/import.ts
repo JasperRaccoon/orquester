@@ -32,6 +32,13 @@
  * import. An import is single-use: once taken it cannot be taken again, and
  * `release()` (idempotent) ends it. The sweep leaves a taken import alone for
  * one more TTL, then removes it anyway.
+ *
+ * ## The `portable` target (Agent Profiles)
+ * A scan for an Agent Profile (`session-profiles/imports.ts`) targets no agent: its candidates
+ * are what was found — commands stay commands, names keep their one folder level — and `take`
+ * answers them unconverted (a skill's directory as found; a command's frontmatter as written).
+ * `existing("portable")` is the caller's to answer (the daemon answers none: the profile layer
+ * marks `exists` against the profile itself).
  */
 
 import { createHash, randomUUID } from "node:crypto";
@@ -95,6 +102,12 @@ interface ProfileImportTake {
   release(): Promise<void>;
 }
 
+/**
+ * Who a scan is for: an agent (its candidates converted for it), or `portable` — an Agent
+ * Profile, whose items keep the shape they were found in (see the module header).
+ */
+export type ImportTarget = AgentProfileAgentId | "portable";
+
 /** The seam the service calls (spec §6). */
 export interface ProfileImports {
   scanGit(agent: AgentProfileAgentId, url: string): Promise<ProfileImportScanResponse>;
@@ -111,8 +124,8 @@ export interface ProfileImports {
 export interface ProfileImportStoreOptions {
   /** `agentProfileImportsDir(appdir)` — owned by the store: `stop()` removes it. */
   dir: string;
-  /** `"<kind>:<name>"` of every item `agent` already has (the candidates' `exists`). */
-  existing: (agent: AgentProfileAgentId) => Promise<Set<string>>;
+  /** `"<kind>:<name>"` of every item `target` already has (the candidates' `exists`). */
+  existing: (target: ImportTarget) => Promise<Set<string>>;
   /** Defaults to {@link gitClone} (`https`/`ssh` only). */
   clone?: GitCloneFn;
   now?: () => Date;
@@ -132,7 +145,7 @@ interface StoredCandidate {
 
 interface ImportRecord {
   id: string;
-  agent: AgentProfileAgentId;
+  agent: ImportTarget;
   root: string;
   /** Where the scan came from (a git scan's commit is read before `.git` is deleted). */
   origin: ProfileImportDetailResponse["source"];
@@ -165,7 +178,7 @@ export class ProfileImportStore implements ProfileImports {
     this.logger = options.logger;
   }
 
-  async scanGit(agent: AgentProfileAgentId, url: string): Promise<ProfileImportScanResponse> {
+  async scanGit(agent: ImportTarget, url: string): Promise<ProfileImportScanResponse> {
     await this.sweep();
     const source = parseGitImportUrl(url);
     const origin: ProfileImportDetailResponse["source"] = {
@@ -193,7 +206,7 @@ export class ProfileImportStore implements ProfileImports {
     });
   }
 
-  async scanUpload(agent: AgentProfileAgentId, name: string, filePath: string): Promise<ProfileImportScanResponse> {
+  async scanUpload(agent: ImportTarget, name: string, filePath: string): Promise<ProfileImportScanResponse> {
     await this.sweep();
     const fileName = basename(String(name).replaceAll("\\", "/"));
     if (fileName.length === 0 || fileName.includes("\0")) {
@@ -240,7 +253,7 @@ export class ProfileImportStore implements ProfileImports {
     throw profileErrors.importFailed("Upload a .zip archive or a .md file.");
   }
 
-  async take(agent: AgentProfileAgentId, importId: string, picks: string[]): Promise<ProfileImportTake> {
+  async take(agent: ImportTarget, importId: string, picks: string[]): Promise<ProfileImportTake> {
     await this.sweep();
     const record = this.imports.get(importId);
     if (record === undefined || record.agent !== agent || record.takenAt !== undefined) {
@@ -274,7 +287,7 @@ export class ProfileImportStore implements ProfileImports {
     }
   }
 
-  async inspect(agent: AgentProfileAgentId, importId: string): Promise<ProfileImportDetailResponse> {
+  async inspect(agent: ImportTarget, importId: string): Promise<ProfileImportDetailResponse> {
     await this.sweep();
     const record = this.imports.get(importId);
     if (record === undefined || record.agent !== agent || record.takenAt !== undefined) {
@@ -298,10 +311,11 @@ export class ProfileImportStore implements ProfileImports {
    */
   private async asImported(
     record: ImportRecord,
-    agent: AgentProfileAgentId,
+    agent: ImportTarget,
     candidate: StoredCandidate,
     tree: ProfilePreviewTree
   ): Promise<ProfilePreviewTree & { notes?: string[] }> {
+    if (agent === "portable") return tree;
     const path = await assertInside(record.root, candidate.found.path);
     let main: string;
     let text: string;
@@ -351,7 +365,7 @@ export class ProfileImportStore implements ProfileImports {
   // -------------------------------------------------------------------------
 
   private async openImport(
-    agent: AgentProfileAgentId,
+    agent: ImportTarget,
     origin: ProfileImportDetailResponse["source"],
     fetch: (root: string) => Promise<{ candidates: ScannedImportCandidate[]; notes: string[] }>
   ): Promise<ProfileImportScanResponse> {
@@ -374,7 +388,9 @@ export class ProfileImportStore implements ProfileImports {
       for (const found of scan.candidates) {
         let kind = found.kind;
         let name = found.name;
-        if (found.kind === "command" && agent === "codex") {
+        if (agent === "portable") {
+          // Kept as found: the profile stores commands as commands (spec §4.1).
+        } else if (found.kind === "command" && agent === "codex") {
           kind = "skill";
           name = commandSkillName(found.name);
           codexCommands += 1;
@@ -413,10 +429,15 @@ export class ProfileImportStore implements ProfileImports {
 
   private async buildItem(
     record: ImportRecord,
-    agent: AgentProfileAgentId,
+    agent: ImportTarget,
     candidate: StoredCandidate
   ): Promise<{ item: PortableItem; notes: string[] }> {
     const path = await assertInside(record.root, candidate.found.path);
+    if (agent === "portable") {
+      if (candidate.found.kind === "skill") return { item: { kind: "skill", name: candidate.name, dir: path }, notes: [] };
+      const document = parseMarkdownDocument(await readFile(path, "utf8"));
+      return { item: { kind: "command", name: candidate.name, frontmatter: document.frontmatter, body: document.body }, notes: [] };
+    }
     if (candidate.found.kind === "skill") {
       const file = join(path, SKILL_FILE);
       const document = parseMarkdownDocument(await readFile(file, "utf8"));

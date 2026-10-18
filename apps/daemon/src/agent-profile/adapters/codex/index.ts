@@ -1804,7 +1804,15 @@ export function codexPluginLocation(
     if (isAbsolute(sourcePath)) return { ...base, source: { type: "local", dir: resolve(sourcePath) } };
     if (root !== null) return { ...base, source: { type: "local", dir: resolve(root, sourcePath) } };
   }
-  return { ...base, source: { type: "remote", description: [summary.source.type, summary.source.url ?? sourcePath].filter(Boolean).join(" ") } };
+  const url = summary.source.url;
+  return {
+    ...base,
+    source: {
+      type: "remote",
+      description: [summary.source.type, url ?? sourcePath].filter(Boolean).join(" "),
+      ...(typeof url === "string" && url !== "" ? { fetch: { url } } : {})
+    }
+  };
 }
 
 /**

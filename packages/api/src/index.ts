@@ -36,8 +36,16 @@ import type {
 import { desktopRoutes } from "./desktops.ts";
 import {
   sessionProfileRoutes,
+  type AddSessionProfilePluginRequest,
+  type CopySessionProfileItemsRequest,
   type CreateSessionProfileItemRequest,
   type CreateSessionProfileRequest,
+  type ImportSessionProfileFromGlobalRequest,
+  type ImportSessionProfileResponse,
+  type SessionProfileGlobalSourceResponse,
+  type SessionProfileImportGitRequest,
+  type SessionProfileImportResponse,
+  type TakeSessionProfileImportRequest,
   type DeleteSessionProfileResponse,
   type DuplicateSessionProfileRequest,
   type SessionProfileDetail,
@@ -49,7 +57,7 @@ import {
   type UpdateSessionProfileItemRequest,
   type UpdateSessionProfileRequest
 } from "./session-profiles.ts";
-import type { AgentProfileAgentId } from "./agent-profile.ts";
+import type { AgentProfileAgentId, ProfileImportScanResponse } from "./agent-profile.ts";
 export * from "./agent-chat/index.ts";
 export * from "./saved-prompts.ts";
 export * from "./agent-profile.ts";
@@ -2118,6 +2126,51 @@ export class HttpOrquesterApiClient implements OrquesterApi {
 
   getSessionProfilePrepareStatus(profileId: string): Promise<SessionProfilePrepareStatusResponse> {
     return this.get(sessionProfileRoutes.prepareStatus(profileId));
+  }
+
+  getSessionProfileGlobalSource(profileId: string, agent: AgentProfileAgentId): Promise<SessionProfileGlobalSourceResponse> {
+    return this.get(`${sessionProfileRoutes.importGlobal(profileId)}?agent=${encodeURIComponent(agent)}`);
+  }
+
+  importSessionProfileFromGlobal(profileId: string, request: ImportSessionProfileFromGlobalRequest): Promise<SessionProfileImportResponse> {
+    return this.post(sessionProfileRoutes.importGlobal(profileId), request);
+  }
+
+  scanSessionProfileGitImport(profileId: string, request: SessionProfileImportGitRequest): Promise<ProfileImportScanResponse> {
+    return this.post(sessionProfileRoutes.importGit(profileId), request);
+  }
+
+  /** Streams a `.zip` or `.md` file as the raw body (never base64); the daemon extracts and scans it. */
+  scanSessionProfileUpload(profileId: string, name: string, data: UploadData): Promise<ProfileImportScanResponse> {
+    return this.postBytes(sessionProfileRoutes.importUpload(profileId), { name }, data);
+  }
+
+  takeSessionProfileImport(profileId: string, importId: string, request: TakeSessionProfileImportRequest): Promise<SessionProfileImportResponse> {
+    return this.post(sessionProfileRoutes.importScan(profileId, importId), request);
+  }
+
+  copySessionProfileItems(profileId: string, request: CopySessionProfileItemsRequest): Promise<SessionProfileImportResponse> {
+    return this.post(sessionProfileRoutes.copyFrom(profileId), request);
+  }
+
+  addSessionProfilePlugin(profileId: string, request: AddSessionProfilePluginRequest): Promise<SessionProfileImportResponse> {
+    return this.post(sessionProfileRoutes.plugins(profileId), request);
+  }
+
+  /** The profile as a portable `.zip` (no secret values). */
+  async exportSessionProfile(profileId: string): Promise<ArrayBuffer> {
+    const response = await this.fetchImpl(`${this.baseUrl}${sessionProfileRoutes.exportProfile(profileId)}`, {
+      headers: this.authHeaders()
+    });
+    if (!response.ok) {
+      throw new Error(`Orquester API request failed: ${response.status} ${response.statusText}`);
+    }
+    return response.arrayBuffer();
+  }
+
+  /** A new profile from an export `.zip`, streamed as the raw body. */
+  importSessionProfile(name: string, data: UploadData): Promise<ImportSessionProfileResponse> {
+    return this.postBytes(sessionProfileRoutes.importProfile, { name }, data);
   }
 
   eventsUrl(): string {

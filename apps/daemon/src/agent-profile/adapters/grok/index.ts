@@ -112,11 +112,13 @@ import type {
   KeepBothTaken,
   AdapterMutationResult,
   AdapterSnapshot,
+  PluginSourceLocation,
   PortableItem,
   PortableMcpServer,
   ProfileAdapter,
   ProfileAdapterContext
 } from "../types.ts";
+import { catalogPluginSource } from "../claude/plugins.ts";
 import {
   type HookLocation,
   type JsonObject,
@@ -2125,6 +2127,35 @@ export class GrokProfileAdapter implements ProfileAdapter {
       });
     }
     return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  /**
+   * Where a marketplace plugin's files are before it is installed. A local (`path`) marketplace's
+   * catalogue (Claude's format: `.claude-plugin/` or `.grok-plugin/marketplace.json`) is read in
+   * place; a git or GitHub one is a remote source whose clone's catalogue names the plugin
+   * (`fetch.catalogPlugin`) — Grok's own marketplace checkouts are not read.
+   */
+  async pluginSource(marketplace: string, plugin: string): Promise<PluginSourceLocation> {
+    const model = await this.load();
+    const entry = model.entries.find((candidate) => candidate.ref.type === "marketplace" && candidate.ref.name === marketplace);
+    if (entry === undefined || entry.ref.type !== "marketplace") throw profileErrors.notFound(itemId("marketplace", marketplace));
+    const source = entry.ref.source;
+    if (source.type === "path") {
+      try {
+        return { marketplaceDir: source.path, ...(await catalogPluginSource(source.path, plugin)) };
+      } catch (error) {
+        throw profileErrors.unreadable(source.path, message(error));
+      }
+    }
+    const url = source.type === "github" ? `https://github.com/${source.repo}.git` : source.url;
+    return {
+      marketplaceDir: null,
+      source: {
+        type: "remote",
+        description: `marketplace ${url}`,
+        fetch: { url, ...(source.ref !== undefined ? { ref: source.ref } : {}), catalogPlugin: plugin }
+      }
+    };
   }
 
   async exportItem(id: string): Promise<PortableItem> {

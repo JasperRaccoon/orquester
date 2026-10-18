@@ -8,6 +8,7 @@
 import { readdir, readFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import type { MarketplaceSource } from "@orquester/api";
+import type { PluginFetchSource } from "../types.ts";
 import { readTextIfExists } from "../../infra/index.ts";
 import { isRecord, parseJsonText } from "./settings.ts";
 
@@ -229,9 +230,10 @@ export async function pluginProvides(
  */
 export async function claudePluginSource(
   installLocation: string,
-  plugin: string
-): Promise<{ version?: string; source: { type: "local"; dir: string } | { type: "remote"; description: string } }> {
-  const doc: unknown = JSON.parse(await readFile(join(installLocation, ".claude-plugin", "marketplace.json"), "utf8"));
+  plugin: string,
+  catalogFile = join(".claude-plugin", "marketplace.json")
+): Promise<{ version?: string; source: { type: "local"; dir: string } | { type: "remote"; description: string; fetch?: PluginFetchSource } }> {
+  const doc: unknown = JSON.parse(await readFile(join(installLocation, catalogFile), "utf8"));
   if (!isRecord(doc) || !Array.isArray(doc.plugins)) throw new Error("marketplace.json has no plugins list");
   const entry = doc.plugins.find((candidate) => isRecord(candidate) && candidate.name === plugin);
   if (!isRecord(entry)) throw new Error(`the marketplace does not list ${plugin}`);
@@ -248,7 +250,52 @@ export async function claudePluginSource(
   if (isRecord(source)) {
     const kind = typeof source.source === "string" ? source.source : "unknown";
     const where = [source.repo, source.url, source.path, source.ref].filter((part): part is string => typeof part === "string").join(" ");
-    return { ...version, source: { type: "remote", description: `${kind}${where ? ` ${where}` : ""}` } };
+    const fetch = claudePluginFetch(source);
+    return { ...version, source: { type: "remote", description: `${kind}${where ? ` ${where}` : ""}`, ...(fetch ? { fetch } : {}) } };
   }
   throw new Error("the plugin has no source");
+}
+
+/**
+ * A catalogue entry's object `source` as something a git clone fetches: `github` (`repo`),
+ * `url` / `git` (a repository URL), `git-subdir` (`url` + `path`), each with an optional `ref`.
+ * Anything else (`npm`, `pip`, …) is not a repository: `undefined`. The URL is checked by the
+ * clone's own URL rules, not here.
+ */
+export function claudePluginFetch(source: Record<string, unknown>): PluginFetchSource | undefined {
+  const ref = typeof source.ref === "string" && source.ref !== "" ? { ref: source.ref } : {};
+  const path = typeof source.path === "string" && source.path !== "" ? { path: source.path.replace(/^\.\/+/, "").replace(/\/+$/, "") } : {};
+  switch (source.source) {
+    case "github":
+      return typeof source.repo === "string" && /^[A-Za-z0-9_][A-Za-z0-9_.-]*\/[A-Za-z0-9_][A-Za-z0-9_.-]*$/.test(source.repo)
+        ? { url: `https://github.com/${source.repo}.git`, ...ref }
+        : undefined;
+    case "url":
+    case "git":
+      return typeof source.url === "string" ? { url: source.url, ...ref } : undefined;
+    case "git-subdir":
+      return typeof source.url === "string" ? { url: source.url, ...ref, ...path } : undefined;
+    default:
+      return undefined;
+  }
+}
+
+/** The catalogue files a marketplace checkout may carry, in the order they are tried (Claude's, then Grok's). */
+const CATALOG_FILES = [join(".claude-plugin", "marketplace.json"), join(".grok-plugin", "marketplace.json")];
+
+/**
+ * {@link claudePluginSource} over whichever catalogue the checkout carries
+ * (`.claude-plugin/marketplace.json`, else `.grok-plugin/marketplace.json`, same format). Throws
+ * an `Error` when there is none or it does not list the plugin.
+ */
+export async function catalogPluginSource(
+  root: string,
+  plugin: string
+): Promise<Awaited<ReturnType<typeof claudePluginSource>>> {
+  for (const file of CATALOG_FILES) {
+    const text = await readTextIfExists(join(root, file)).catch(() => null);
+    if (text === null) continue;
+    return claudePluginSource(root, plugin, file);
+  }
+  throw new Error("the marketplace has no catalogue (.claude-plugin/marketplace.json)");
 }

@@ -157,6 +157,7 @@ import { SessionProfileService, publishSessionProfileEvents } from "./session-pr
 import { SessionProfileLifecycle, publishSessionProfilePrepareEvents } from "./session-profiles/lifecycle.ts";
 import { SessionProfileStore } from "./session-profiles/store.ts";
 import { registerSessionProfileRoutes } from "./session-profiles/routes.ts";
+import { SessionProfileImports } from "./session-profiles/imports.ts";
 import { createAgentProfileAdapters } from "./agent-profile/adapters/index.ts";
 import { createProfileConverter } from "./agent-profile/convert.ts";
 import { ProfileImportStore } from "./agent-profile/import.ts";
@@ -1035,6 +1036,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   const agentProfileImports: ProfileImportStore = new ProfileImportStore({
     dir: agentProfileImportsDir(paths.baseDir),
     existing: async (agent): Promise<Set<string>> => {
+      // An Agent Profile scan (`portable`) marks `exists` against the profile itself.
+      if (agent === "portable") return new Set();
       const snapshot = await agentProfile.snapshot(agent);
       return new Set(snapshot.items.map((item) => `${item.kind}:${item.name}`));
     },
@@ -1091,7 +1094,20 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // No `leases` yet (launch plumbing): old prepared versions are kept until it is wired.
     logger: console
   });
-  const sessionProfiles = new SessionProfileService({ store: sessionProfileStore, prepareStatus: sessionProfileLifecycle.prepareStatusSource });
+  // Filling profiles (spec §4.5): Import from Global through Agent config (copies; Global is never
+  // written), git / zip / md scans through Agent config's import store, copies between profiles,
+  // marketplace plugins into each profile's own plugin cache, export and import of a profile.
+  const sessionProfileImports = new SessionProfileImports({
+    store: sessionProfileStore,
+    global: agentProfile,
+    scanner: agentProfileImports,
+    workDir: agentProfileImportsDir(paths.baseDir)
+  });
+  const sessionProfiles = new SessionProfileService({
+    store: sessionProfileStore,
+    prepareStatus: sessionProfileLifecycle.prepareStatusSource,
+    imports: sessionProfileImports
+  });
   await sessionProfiles.init().catch((error) => console.error("Agent Profiles: preparing the store failed", error));
   publishSessionProfileEvents(sessionProfiles, broadcaster);
   publishSessionProfilePrepareEvents(sessionProfileLifecycle, broadcaster);
@@ -4204,7 +4220,7 @@ export function createServer(
 
   // Agent Profiles (spec 2026-10-18 §4): Orquester-owned per-session profiles. Both transports;
   // the bearer hook above gates HTTP. MCP secret values never leave the daemon.
-  registerSessionProfileRoutes(app, { service: services.sessionProfiles });
+  registerSessionProfileRoutes(app, { service: services.sessionProfiles, importsDir: agentProfileImportsDir(resolved.baseDir) });
 
   // umcp:t11 begin — daemon-pointing MCP servers (unified MCP design 2026-10-15 §12.1): every MCP
   // server in a CLI's user config (system home and every managed account home) or a project-level

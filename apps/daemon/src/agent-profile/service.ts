@@ -70,6 +70,7 @@ import type {
   AdapterSnapshot,
   AgentHomes,
   KeepBothRequest,
+  PluginSourceLocation,
   PortableItem,
   ProfileAdapter
 } from "./adapters/types.ts";
@@ -442,6 +443,27 @@ export class AgentProfileService {
       throw profileErrors.unreadable(location.source.dir, describe(error));
     }
     return { ...head, source: { type: "local", ...tree }, provides: pluginProvidesOf(tree) };
+  }
+
+  /**
+   * A copyable item lifted out of `agent` WITH real secret values (Agent Profiles' Import from
+   * Global copies it into a profile; Global is not changed). Runs in the agent's queue like a
+   * copy's export. A skill's `dir` is a temp copy the CALLER removes. Never serialize the result.
+   */
+  async exportItem(agent: AgentProfileAgentId, id: string): Promise<PortableItem> {
+    const idKind = kindOfId(id);
+    if (idKind && !PROFILE_COPYABLE_KINDS.includes(idKind)) throw notCopyable(idKind);
+    const adapter = this.installedAdapter(agent);
+    return this.enqueue(agent, () => adapter.exportItem(id));
+  }
+
+  /** Where a marketplace plugin's files are before it is installed (read-only; `ProfileAdapter.pluginSource`). */
+  async pluginSource(agent: AgentProfileAgentId, marketplace: string, plugin: string): Promise<PluginSourceLocation> {
+    const adapter = this.installedAdapter(agent);
+    if (!AGENT_PROFILE_KINDS[agent].includes("marketplace") || !adapter.pluginSource) {
+      throw profileErrors.kindNotSupported(AGENT_PROFILE_AGENT_LABELS[agent], "marketplace");
+    }
+    return adapter.pluginSource(marketplace, plugin);
   }
 
   /**

@@ -1,12 +1,12 @@
 /**
  * The profile editor's quick actions (agent profiles spec §4.5, §5.2):
  * Import from Global, Git, .zip, Copy from profile — and the Plugins tab's
- * "Add plugin" from a marketplace. Their routes are reserved in
- * `sessionProfileRoutes` (`…/imports/*`, `…/copy-from`, `…/plugins`) and
- * belong to the imports work, so this is the ONE place they plug in:
+ * "Add plugin" from a marketplace (routes `sessionProfileRoutes.importGlobal`,
+ * `importGit`, `importUpload`, `importScan`, `copyFrom`, `plugins`).
  *
- * `ProfileEditorView` renders this component only when its container passes
- * `importActions` (it does not yet). Each handler given becomes a button; a
+ * `ProfileEditorView` renders this component when its container passes
+ * `importActions` (`SessionProfilesPanel` does; each opens a
+ * `SessionProfileImportDialog`). Each handler given becomes a button; a
  * handler left out is not drawn at all. `addPlugin` is the Plugins tab's
  * "+ Add plugin". Handlers receive the profile and the kind tab shown.
  */

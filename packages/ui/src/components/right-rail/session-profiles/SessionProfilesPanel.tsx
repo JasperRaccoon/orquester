@@ -15,6 +15,7 @@ import type { SessionProfileItem, SessionProfileItemKind } from "@orquester/api"
 
 import { useApi } from "../../../context/orquester-context";
 import { useSessionProfileDetail, useSessionProfileList, useSessionProfilesState } from "../../../lib/session-profiles/hooks";
+import { downloadBlob } from "../../../lib/files";
 import { filterProfiles, PROFILE_KIND_LABELS } from "../../../lib/session-profiles/logic";
 import {
   createSessionProfile,
@@ -33,6 +34,8 @@ import { useAppStore } from "../../../store/app";
 import { ConfirmDialog } from "../../ui/confirm-dialog";
 import type { RightRailPanelProps } from "../types";
 import { ProfileEditorView, type ProfileEditorActions } from "./ProfileEditorView";
+import type { ProfileImportActionHandlers } from "./ProfileImportActions";
+import { exportFileName, SessionProfileImportDialog, type SessionProfileImportRequest } from "./ProfileImportDialog";
 import { SessionProfileItemEditor, type SessionProfileEditorRequest } from "./ProfileItemEditor";
 import { ProfileLibrary } from "./ProfileLibrary";
 import { createRequestFromForm, ProfileSettingsDialog, updatePatchFromForm, type ProfileSettingsForm } from "./ProfileSettingsDialog";
@@ -64,6 +67,7 @@ export const SessionProfilesPanel: React.FC<RightRailPanelProps> = ({ variant })
   const [deletingProfile, setDeletingProfile] = useState(false);
   const [deletingItem, setDeletingItem] = useState<SessionProfileItem | null>(null);
   const [editor, setEditor] = useState<{ key: number; request: SessionProfileEditorRequest } | null>(null);
+  const [importing, setImporting] = useState<{ key: number; request: SessionProfileImportRequest } | null>(null);
   const [highlightId, setHighlightId] = useState<string | null>(null);
 
   useEffect(() => {
@@ -88,6 +92,20 @@ export const SessionProfilesPanel: React.FC<RightRailPanelProps> = ({ variant })
   const openEditor = useCallback((request: SessionProfileEditorRequest) => {
     setEditor((current) => ({ key: (current?.key ?? 0) + 1, request }));
   }, []);
+  const openImport = useCallback((request: SessionProfileImportRequest) => {
+    setImporting((current) => ({ key: (current?.key ?? 0) + 1, request }));
+  }, []);
+
+  const importActions = useMemo<ProfileImportActionHandlers>(
+    () => ({
+      importFromGlobal: (target, itemKind) => openImport({ mode: "global", profileId: target.id, kind: itemKind }),
+      importFromGit: (target, itemKind) => openImport({ mode: "git", profileId: target.id, kind: itemKind }),
+      importFromZip: (target, itemKind) => openImport({ mode: "zip", profileId: target.id, kind: itemKind }),
+      copyFromProfile: (target, itemKind) => openImport({ mode: "copy", profileId: target.id, kind: itemKind }),
+      addPlugin: (target) => openImport({ mode: "plugin", profileId: target.id })
+    }),
+    [openImport]
+  );
 
   const submitSettings = useCallback(
     async (form: ProfileSettingsForm): Promise<string | null> => {
@@ -133,6 +151,18 @@ export const SessionProfilesPanel: React.FC<RightRailPanelProps> = ({ variant })
           }
         });
       },
+      exportProfile: () => {
+        if (openProfileId === null) return;
+        const name = profile?.name ?? summary?.name ?? "profile";
+        void api.exportSessionProfile(openProfileId).then(
+          (bytes) => {
+            downloadBlob(exportFileName(name), new Blob([bytes], { type: "application/zip" }));
+            setSessionProfilesNotice({ tone: "ok", text: `Exported ${name}. MCP secret values are not in the file.` });
+          },
+          (error: unknown) =>
+            setSessionProfilesNotice({ tone: "error", text: `Export failed: ${error instanceof Error ? error.message : String(error)}` })
+        );
+      },
       remove: () => setDeletingProfile(true),
       openInstructions: () => {
         if (openProfileId !== null) openEditor({ mode: "instructions", profileId: openProfileId });
@@ -152,7 +182,7 @@ export const SessionProfilesPanel: React.FC<RightRailPanelProps> = ({ variant })
       },
       dismissNotice: dismissSessionProfilesNotice
     }),
-    [api, openEditor, openProfileId]
+    [api, openEditor, openProfileId, profile?.name, summary?.name]
   );
 
   return (
@@ -169,6 +199,7 @@ export const SessionProfilesPanel: React.FC<RightRailPanelProps> = ({ variant })
           notice={notice}
           onDismissNotice={dismissSessionProfilesNotice}
           onNew={() => setSettings({ mode: "create" })}
+          onImportFile={() => openImport({ mode: "import-profile" })}
           onOpen={(id) => openSessionProfile(id)}
           onOpenAgentConfig={() => openSettingsPage("agent-config")}
           onRetry={() => void loadSessionProfiles(api, { force: true })}
@@ -185,6 +216,7 @@ export const SessionProfilesPanel: React.FC<RightRailPanelProps> = ({ variant })
           highlightId={highlightId}
           notice={notice}
           actions={actions}
+          importActions={importActions}
         />
       )}
 
@@ -232,6 +264,22 @@ export const SessionProfilesPanel: React.FC<RightRailPanelProps> = ({ variant })
           if (item !== null && openProfileId !== null) void deleteSessionProfileItem(api, openProfileId, item);
         }}
       />
+
+      {importing !== null ? (
+        <SessionProfileImportDialog
+          key={importing.key}
+          request={importing.request}
+          profileName={profile?.name ?? summary?.name ?? "Profile"}
+          onClose={() => setImporting((current) => (current?.key === importing.key ? null : current))}
+          onImported={(itemIds) => {
+            const first = itemIds[0];
+            if (first === undefined) return;
+            const added = profile?.items.find((item) => item.id === first) ?? null;
+            if (added !== null) pickKind(added.kind);
+            setHighlightId(first);
+          }}
+        />
+      ) : null}
 
       {editor !== null ? (
         <SessionProfileItemEditor

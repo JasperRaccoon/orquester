@@ -31,6 +31,9 @@ import {
   type SessionProfileListError,
   type SessionProfileListResponse,
   type SessionProfileMutationResponse,
+  type SessionProfileGlobalItem,
+  type SessionProfileGlobalSourceResponse,
+  type SessionProfilePluginSource,
   type SessionProfilePluginView,
   type SessionProfilePrepareState,
   type SessionProfilePrepareStatus,
@@ -186,7 +189,19 @@ function sanitizePluginView(value: unknown): SessionProfilePluginView | null {
   if (marketplace !== undefined) plugin.marketplace = marketplace;
   const version = nonEmpty(value.version);
   if (version !== undefined) plugin.version = version;
+  const source = sanitizePluginSource(value.source);
+  if (source !== null) plugin.source = source;
   return plugin;
+}
+
+function sanitizePluginSource(value: unknown): SessionProfilePluginSource | null {
+  if (!isRecord(value) || (value.type !== "marketplace" && value.type !== "global")) return null;
+  const source: SessionProfilePluginSource = { type: value.type, copiedAt: str(value.copiedAt) ?? "" };
+  for (const key of ["marketplace", "commit", "url", "ref"] as const) {
+    const field = nonEmpty(value[key]);
+    if (field !== undefined) source[key] = field;
+  }
+  return source;
 }
 
 export function sanitizeSessionProfileItem(value: unknown): SessionProfileItem | null {
@@ -319,4 +334,36 @@ export function sanitizeSessionProfileItemDetail(value: unknown): SessionProfile
     case "plugin":
       return { kind: "plugin", item, plugin: sanitizePluginView(value.plugin) ?? item.plugin };
   }
+}
+
+/** An import, copy or plugin add's answer: the fresh profile (or `null`), the items it made, its notes. */
+export function sanitizeSessionProfileImport(value: unknown): { profile: SessionProfileDetail | null; itemIds: string[]; notes: string[] } {
+  if (!isRecord(value)) return { profile: null, itemIds: [], notes: [] };
+  const strings = (list: unknown): string[] => (Array.isArray(list) ? list.filter((entry): entry is string => typeof entry === "string") : []);
+  return { profile: sanitizeSessionProfileDetail(value.profile), itemIds: strings(value.itemIds), notes: strings(value.notes) };
+}
+
+/** What Import from Global offers; `null` when it does not read. */
+export function sanitizeGlobalSource(value: unknown): SessionProfileGlobalSourceResponse | null {
+  if (!isRecord(value) || !isSessionProfileAgentId(value.agent)) return null;
+  const items: SessionProfileGlobalItem[] = [];
+  for (const raw of Array.isArray(value.items) ? value.items : []) {
+    if (!isRecord(raw) || !isSessionProfileItemKind(raw.kind)) continue;
+    const id = nonEmpty(raw.id);
+    const name = nonEmpty(raw.name);
+    if (id === undefined || name === undefined) continue;
+    const item: SessionProfileGlobalItem = { id, kind: raw.kind, name, exists: raw.exists === true };
+    const description = nonEmpty(raw.description);
+    if (description !== undefined) item.description = description;
+    const unavailable = nonEmpty(raw.unavailable);
+    if (unavailable !== undefined) item.unavailable = unavailable;
+    items.push(item);
+  }
+  const instructions = isRecord(value.instructions) ? value.instructions : {};
+  return {
+    agent: value.agent,
+    installed: value.installed === true,
+    instructions: { exists: instructions.exists === true, bytes: typeof instructions.bytes === "number" ? instructions.bytes : 0 },
+    items
+  };
 }
