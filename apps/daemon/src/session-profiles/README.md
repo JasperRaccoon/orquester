@@ -18,7 +18,7 @@ per-agent GLOBAL config editor, user-facing "Agent config"). A chat without `pro
 | `lifecycle.ts` | `SessionProfileLifecycle`: builds and publishes immutable prepared versions, tracks and refreshes them, collects unleased old ones; `ensureReady` for launches. |
 | `launch.ts` | The launch side: per-agent launch contributions (`profileLaunchContributors`), `applyProfileContribution`, `createProfileLaunchResolver` (what `AgentChatService` launches with), `SessionProfileNames` + the deleted-profile notice. |
 | `service.ts` | `SessionProfileService`: wire mapping (secrets masked), events, prepare status, `resolveForAgent(profileId, agent)`; the import entry points delegate to `imports.ts`. |
-| `imports.ts` | `SessionProfileImports`: Import from Global (via Agent config), git / zip / md scans, copy from profile, plugins into the profile's cache, export / import of a profile. Gathers outside the queue, writes with ONE `store.importItems`. |
+| `imports.ts` | `SessionProfileImports`: Import from Global (via Agent config), git / zip / md scans, copy from profile, plugins into the profile's cache, export / import of a profile. Gathers outside the queue, writes with ONE `store.importItems`; copy from profile reads the source as one `store.snapshotSource` (its queue, then released). |
 | `export.ts` | The export `.zip` format, its builder, and the strict reader behind "Import profile from file". |
 | `files.ts` | `measureTree` (no symlinks, caps), `normalizeProfileModes`, the in-memory zip writer. |
 | `routes.ts` | REST surface (`sessionProfileRoutes`), both transports. |
