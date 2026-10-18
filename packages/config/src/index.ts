@@ -236,8 +236,10 @@ export function agentProfileImportsDir(baseDir: string): string {
 //
 //   <appdir>/daemon/session-profiles/
 //     profiles/<profileId>/                       one profile's sources (`session-profile-store`)
-//     prepared/<profileId>/<agent>/<accountKey>/  agent-native files generated from it
-//     staging/                                    preparations being built, swapped into `prepared/`
+//     prepared/<profileId>/<agent>/<accountKey>/  one KEY's preparations (daemon `session-profiles/lifecycle.ts`)
+//       current.json                              the key's current version, replaced atomically (temp + rename)
+//       <version>/                                one immutable preparation: what a profile chat launches from
+//     staging/                                    preparations being built, renamed into `prepared/` when published
 
 /** The Agent Profiles root. */
 export function sessionProfilesDir(baseDir: string): string {
@@ -259,21 +261,44 @@ export function sessionProfilePreparedRootDir(baseDir: string): string {
   return joinPath(sessionProfilesDir(baseDir), "prepared");
 }
 
+/** Every prepared version of one profile, for every agent and account. */
+export function sessionProfilePreparedProfileDir(baseDir: string, profileId: string): string {
+  return joinPath(sessionProfilePreparedRootDir(baseDir), assertSessionProfileSegment(profileId));
+}
+
 /**
- * The prepared directory of `(profileId, agent, accountKey)` — what a profile chat of that agent
- * launches from (spec §6). `accountKey` comes from {@link sessionProfileAccountKey}; an agent
- * whose prepared files do not depend on the account uses {@link SESSION_PROFILE_SHARED_ACCOUNT_KEY}.
+ * The directory of the KEY `(profileId, agent, accountKey)`: its {@link SESSION_PROFILE_PREPARED_CURRENT_FILE}
+ * pointer and its immutable version directories ({@link sessionProfilePreparedDir}). `accountKey`
+ * comes from {@link sessionProfileAccountKey}; an agent whose prepared files do not depend on the
+ * account uses {@link SESSION_PROFILE_SHARED_ACCOUNT_KEY}. Never launch from it.
  */
-export function sessionProfilePreparedDir(baseDir: string, profileId: string, agent: string, accountKey: string): string {
+export function sessionProfilePreparedKeyDir(baseDir: string, profileId: string, agent: string, accountKey: string): string {
   return joinPath(
-    sessionProfilePreparedRootDir(baseDir),
-    assertSessionProfileSegment(profileId),
+    sessionProfilePreparedProfileDir(baseDir, profileId),
     assertSessionProfileSegment(agent),
     assertSessionProfileSegment(accountKey)
   );
 }
 
-/** Where preparations are built before the atomic swap into `prepared/` (same filesystem). */
+/** The key's pointer file inside {@link sessionProfilePreparedKeyDir}: `{"schema": 1, "version": "<version>"}`. */
+export const SESSION_PROFILE_PREPARED_CURRENT_FILE = "current.json";
+
+/**
+ * One published preparation of the key — what a profile chat of that agent launches from (spec §6)
+ * and keeps using until its agent restarts. Never modified after it is published; a version name
+ * is never reused.
+ */
+export function sessionProfilePreparedDir(
+  baseDir: string,
+  profileId: string,
+  agent: string,
+  accountKey: string,
+  version: string
+): string {
+  return joinPath(sessionProfilePreparedKeyDir(baseDir, profileId, agent, accountKey), assertSessionProfileSegment(version));
+}
+
+/** Where preparations are built before they are renamed into `prepared/` (same filesystem). */
 export function sessionProfileStagingDir(baseDir: string): string {
   return joinPath(sessionProfilesDir(baseDir), "staging");
 }

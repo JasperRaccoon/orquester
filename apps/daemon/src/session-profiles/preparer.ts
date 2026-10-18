@@ -12,22 +12,25 @@
  *     debug). Either throwing → state `failed` with the error's message (secret values are
  *     redacted from it, but never quote one on purpose).
  *  4. `writePreparedManifest(stagingDir, {schema: 1, profileId, revision, agent, accountKey,
- *     preparedAt, fingerprint, agentSection: section})` LAST, then the staging dir is renamed onto
- *     `sessionProfilePreparedDir(appdir, profileId, agent, accountKey)` (the previous dir is moved
- *     aside first and removed only once the new one is in place).
+ *     preparedAt, fingerprint, agentSection: section})` LAST, then the staging dir is renamed to a
+ *     NEW version dir `sessionProfilePreparedDir(appdir, profileId, agent, accountKey, version)`
+ *     and the key's `current.json` pointer flips to it. Older versions stay untouched until no
+ *     live session uses them (leased GC, `lifecycle.ts`).
  *  5. `sessionProfile.prepareStatus` is published; a launch's `ensureReady` waits for a
  *     preparation in flight and fails with a failed one's reason (no fallback to Global).
  *
  * PATH CONTRACT. Files are written into `ctx.stagingDir`, but the directory is launched from
- * `ctx.preparedDir`: anything that names the directory's own location (Codex hook trust keyed by
- * `CODEX_HOME`, absolute paths inside configs) must use `ctx.preparedDir`, never `stagingDir`.
- * Relative symlinks inside the dir survive the rename; absolute links must point outside it.
- * While `prepare` runs, `ctx.preparedDir` may still hold the PREVIOUS ready preparation (a
- * running chat may be using it): read from it if useful (e.g. carry Codex's seeded state DB over)
- * but never modify it. A step that only works AT the final path (a CLI that records its own
- * home's location while running there) cannot run in `prepare`; run it in staging only when the
- * result is location-independent, else at launch. When a launch finds the dir unusable (Codex:
- * its state DB is missing, spec §6.2), `lifecycle.markStale(...)` re-prepares it.
+ * `ctx.preparedDir`, the final VERSIONED path it is renamed to: anything that names the
+ * directory's own location (Codex hook trust keyed by `CODEX_HOME`, absolute paths inside
+ * configs) must use `ctx.preparedDir`, never `stagingDir`. Relative symlinks inside the dir
+ * survive the rename; absolute links must point outside it. A published version is immutable:
+ * nothing (preparer or lifecycle) writes into it again; only the CLI running in it does.
+ * `ctx.previousPreparedDir` is the key's current version while `prepare` runs (`null` when there
+ * is none) — a running chat may be using it: read from it if useful (e.g. carry Codex's seeded
+ * state DB over) but never modify it. A step that only works AT the final path (a CLI that records
+ * its own home's location while running there) cannot run in `prepare`; run it in staging only
+ * when the result is location-independent, else at launch. When a launch finds the dir unusable
+ * (Codex: its state DB is missing, spec §6.2), `lifecycle.markStale(...)` prepares a new version.
  *
  * STALENESS. A prepared dir is current while its fingerprint matches: profile revision +
  * {@link SessionProfilePreparer.version} + the agent CLI's version + the content of every file
@@ -69,10 +72,15 @@ export interface SessionProfilePrepareContext<A extends SessionProfileAgentId = 
   accountHome: string | null;
   /** The daemon user's own agent homes (`resolveAgentHomes`): read-only inputs (runtime settings, §6.0). */
   systemHomes: AgentHomes;
-  /** An empty 0700 directory to build in; it becomes {@link preparedDir} after validation. */
+  /** An empty 0700 directory to build in; it is renamed to {@link preparedDir} after validation. */
   stagingDir: string;
-  /** Where the staging dir will live once swapped in — for config that must name its own home (e.g. Codex hook trust). */
+  /**
+   * The new version dir the staging dir will be renamed to (never existed before) — for config
+   * that must name its own home (e.g. Codex hook trust).
+   */
   preparedDir: string;
+  /** The key's current version (may be in use by a running chat): read-only, never modify it. `null` = none. */
+  previousPreparedDir: string | null;
   appdir: string;
   logger: SessionProfilePrepareLogger;
   signal?: AbortSignal;

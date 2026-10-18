@@ -9,12 +9,26 @@
  * agent's system home) and `SESSION_PROFILE_SHARED_ACCOUNT_KEY` otherwise (the accountId is then
  * ignored and `ctx.accountHome` is `null`).
  *
+ * Layout (`@orquester/config`): a key's dir `sessionProfilePreparedKeyDir(...)` holds immutable
+ * VERSION dirs `sessionProfilePreparedDir(..., version)` and the pointer `current.json`
+ * (`{"schema": 1, "version"}`) naming the current one. A version name (`v-<fingerprint>-<time>-<random>`)
+ * is never reused, and nothing modifies a version dir once it is published: for Codex and Grok it
+ * IS a running chat's config home, and OpenCode servers read it. Running chats keep the version
+ * they launched with; new launches get the current one (spec §5.6).
+ *
  * Invariants:
- * - **Atomic.** readSource → `resolveForAgent` → a fresh 0700 dir under
- *   `sessionProfileStagingDir` → `prepare` → `validate?` → `writePreparedManifest` LAST → the old
- *   ready dir is renamed aside, the staging dir renamed onto `sessionProfilePreparedDir(...)`, and
- *   only then is the old one removed. A failure anywhere removes the staging dir and leaves the
- *   previous ready dir untouched. Launches read only dirs whose manifest was written last.
+ * - **Atomic publish.** readSource → `resolveForAgent` → a fresh 0700 dir under
+ *   `sessionProfileStagingDir` → `prepare` → `validate?` → `writePreparedManifest` LAST → the
+ *   staging dir is renamed to a NEW version dir → `current.json` is replaced (temp + rename). The
+ *   pointer always names a complete dir; a reader sees the old or the new version, never none. A
+ *   failure anywhere removes the staging dir (and an unpointed new version) and leaves the current
+ *   version untouched.
+ * - **Leased GC.** A non-current version (or a legacy unversioned key dir) is removed only when
+ *   {@link PreparedDirLeases.inUse} does not list it and it was not handed out by `ensureReady`
+ *   within {@link SESSION_PROFILE_HANDOUT_GRACE_MS} (a launch between `ensureReady` and the host
+ *   registering its session). Without a leases source, or when `inUse()` fails, nothing
+ *   non-current is removed. GC runs after each publish, on profile delete, after `start()` and on
+ *   `gc()`; per key it runs in the key's job chain (never during that key's preparation).
  * - **Per-key serialization, global cap.** Jobs of one key run one at a time (a promise chain);
  *   at most one more waits behind the running one and every request in the meantime joins it.
  *   Different keys run concurrently, at most `concurrency` (default 2) preparations at once.
@@ -29,9 +43,10 @@
  *
  * Triggers: `attach(service.events)` — `changed` re-prepares every known key of the profile and
  * seeds its default keys (the shared key, or the family's default account for a `perAccount`
- * preparer); `deleted` waits for the profile's jobs to settle, then removes `prepared/<profileId>/`.
- * `start()` (daemon boot) empties the staging root, forgets prepared dirs of deleted profiles and
- * checks every profile's keys in the background. `globalConfigChanged(agent)` (the agent-profile
+ * preparer); `deleted` waits for the profile's jobs to settle, removes every key's pointer and
+ * collects the profile's versions (leased ones stay until a later GC finds them unleased).
+ * `start()` (daemon boot) empties the staging root, drops the pointers of deleted profiles, checks
+ * every profile's keys in the background and then collects garbage. `globalConfigChanged(agent)` (the agent-profile
  * service's file watcher) re-checks that agent's keys; only those whose inputs changed re-prepare.
  *
  * Status per agent (`status`, `prepareStatusSource`, the `prepareStatus` event): no preparer →
@@ -41,10 +56,11 @@
  * for an older revision). `updatedAt` is the latest change among the keys.
  */
 
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { mkdir, readFile, readdir, rename, rm } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import type { Dirent } from "node:fs";
+import { lstat, mkdir, open, readFile, readdir, rename, rm, rmdir } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import {
   AGENT_PROFILE_AGENT_LABELS,
   SESSION_PROFILES_CHANNEL,
@@ -56,10 +72,12 @@ import {
   type SessionProfilePrepareStatusResponse
 } from "@orquester/api";
 import {
+  SESSION_PROFILE_PREPARED_CURRENT_FILE,
   SESSION_PROFILE_SHARED_ACCOUNT_KEY,
   SESSION_PROFILE_SYSTEM_ACCOUNT_KEY,
   sessionProfileAccountKey,
-  sessionProfilePreparedDir,
+  sessionProfilePreparedKeyDir,
+  sessionProfilePreparedProfileDir,
   sessionProfilePreparedRootDir,
   sessionProfileStagingDir
 } from "@orquester/config";
@@ -81,8 +99,13 @@ import type { SessionProfileServiceEvents, SessionProfilePrepareStatusSource } f
 import type { SessionProfileStore } from "./store.ts";
 
 export const SESSION_PROFILE_PREPARE_CONCURRENCY = 2;
+/** How long a dir handed out by `ensureReady` is protected from GC without a lease (launch in progress). */
+export const SESSION_PROFILE_HANDOUT_GRACE_MS = 10 * 60_000;
 const DIR_MODE = 0o700;
 const MAX_REASON_LENGTH = 600;
+/** `v-<12 hex of the fingerprint>-<base36 ms time>-<8 hex random>`. */
+const VERSION_RE = /^v-[0-9a-f]{12}-[0-9a-z]+-[0-9a-f]{8}$/;
+const CURRENT_TMP_PREFIX = `.${SESSION_PROFILE_PREPARED_CURRENT_FILE}.`;
 
 /** What a launch gets from {@link SessionProfileLifecycle.ensureReady}. */
 export interface SessionProfileReady {
@@ -91,8 +114,18 @@ export interface SessionProfileReady {
   accountKey: string;
   /** The profile revision the dir was prepared from (= `HostThreadProfile.revision`). */
   revision: string;
-  /** `sessionProfilePreparedDir(...)` (= `HostThreadProfile.preparedDir`). */
+  /** The current VERSION dir, `sessionProfilePreparedDir(..., version)` (= `HostThreadProfile.preparedDir`). */
   preparedDir: string;
+}
+
+/**
+ * Which prepared version dirs live provider sessions use right now. Implemented by the launch
+ * plumbing (the agent host reports `HostThreadProfile.preparedDir` of every live provider session);
+ * until it is wired the lifecycle never removes a non-current version.
+ */
+export interface PreparedDirLeases {
+  /** Absolute versioned prepared dirs in use. Rejecting = unknown: GC removes nothing. */
+  inUse(): Promise<ReadonlySet<string>>;
 }
 
 export interface SessionProfileLifecycleOptions {
@@ -111,6 +144,10 @@ export interface SessionProfileLifecycleOptions {
   concurrency?: number;
   logger?: SessionProfilePrepareLogger;
   now?: () => Date;
+  /** Leases on prepared version dirs; absent = never remove a non-current version. */
+  leases?: PreparedDirLeases;
+  /** Overrides {@link SESSION_PROFILE_HANDOUT_GRACE_MS}. */
+  handoutGraceMs?: number;
 }
 
 export interface SessionProfileLifecycleEvents {
@@ -132,7 +169,8 @@ interface KeyState {
   accountKey: string;
   /** The managed account (`perAccount` only); `null` = System or a shared key. */
   accountId: string | null;
-  preparedDir: string;
+  /** `sessionProfilePreparedKeyDir(...)`: the pointer and the versions. */
+  keyDir: string;
   state: SessionProfilePrepareState;
   reason?: string;
   updatedAt: string;
@@ -141,7 +179,7 @@ interface KeyState {
   failure?: { fingerprint: string; error: SessionProfileError };
   /** `markStale`: the next job prepares even if the fingerprint matches. */
   forceStale: boolean;
-  /** Tail of this key's job chain; never rejects. */
+  /** Tail of this key's chain of jobs and GC passes; never rejects. */
   tail: Promise<void>;
   /** Jobs queued or running. */
   pending: number;
@@ -168,6 +206,9 @@ export class SessionProfileLifecycle {
   private readonly deleted = new Set<string>();
   /** Every job and removal in flight, for {@link idle}. */
   private readonly background = new Set<Promise<unknown>>();
+  /** Version dirs answered by `ensureReady` → when their grace ends (ms). */
+  private readonly handedOut = new Map<string, number>();
+  private readonly graceMs: number;
   private readonly abort = new AbortController();
   private detach: () => void = noop;
   private stopped = false;
@@ -179,6 +220,7 @@ export class SessionProfileLifecycle {
     this.logger = options.logger ?? console;
     this.now = options.now ?? (() => new Date());
     this.slots = new Slots(Math.max(1, options.concurrency ?? SESSION_PROFILE_PREPARE_CONCURRENCY));
+    this.graceMs = options.handoutGraceMs ?? SESSION_PROFILE_HANDOUT_GRACE_MS;
   }
 
   // -------------------------------------------------------------------------
@@ -260,8 +302,9 @@ export class SessionProfileLifecycle {
 
   /**
    * Daemon boot: empties the staging root (leftovers of an interrupted preparation), registers
-   * the prepared dirs on disk (removing those of deleted profiles), then checks every profile's
-   * keys and seeds its default ones in the background (stale or missing → re-prepared).
+   * the current versions on disk (dropping the pointers of deleted profiles), checks every
+   * profile's keys and seeds its default ones in the background (stale or missing → re-prepared),
+   * then collects garbage in the background (a legacy unversioned key dir counts as stale).
    */
   async start(): Promise<void> {
     const staging = sessionProfileStagingDir(this.appdir);
@@ -274,6 +317,16 @@ export class SessionProfileLifecycle {
     }
     await this.scanPrepared(existing);
     for (const profileId of existing) this.refreshProfile(profileId);
+    void this.gc();
+  }
+
+  /**
+   * One GC pass over every key on disk: removes each non-current version (and legacy key-dir
+   * content) that no live session leases, then empty dirs. See the module header for the rule.
+   */
+  gc(): Promise<void> {
+    if (this.stopped) return Promise.resolve();
+    return this.track(this.collect());
   }
 
   /** Stops scheduling, aborts preparations in flight (`ctx.signal`) and detaches from the service. */
@@ -326,23 +379,17 @@ export class SessionProfileLifecycle {
         await Promise.all(states.map((state) => state.tail));
         for (const state of states) this.keys.delete(state.id);
         this.profiles.delete(profileId);
-        try {
-          await rm(join(sessionProfilePreparedRootDir(this.appdir), profileId), { recursive: true, force: true });
-        } catch (error) {
-          this.logger.warn(`Agent Profiles: removing the prepared dirs of deleted profile ${profileId} failed: ${describe(error)}`);
-        }
+        await this.dropProfile(profileId);
       })()
     );
   }
 
-  /** Registers every `prepared/<profileId>/<agent>/<accountKey>/` on disk; removes those of deleted profiles. */
+  /** Registers the current version of every key on disk; drops the pointers of deleted profiles. */
   private async scanPrepared(existing: Set<string>): Promise<void> {
     const root = sessionProfilePreparedRootDir(this.appdir);
     for (const profileId of await listDirs(root)) {
       if (!existing.has(profileId)) {
-        await rm(join(root, profileId), { recursive: true, force: true }).catch((error) =>
-          this.logger.warn(`Agent Profiles: removing the prepared dirs of deleted profile ${profileId} failed: ${describe(error)}`)
-        );
+        await this.dropProfile(profileId, false);
         continue;
       }
       for (const agent of await listDirs(join(root, profileId))) {
@@ -357,7 +404,8 @@ export class SessionProfileLifecycle {
           } catch {
             continue;
           }
-          const manifest = await readManifestIfAny(state.preparedDir);
+          const current = await readCurrentVersion(state.keyDir);
+          const manifest = current ? await readManifestIfAny(join(state.keyDir, current)) : null;
           if (manifest && manifest.profileId === profileId && manifest.agent === agent && manifest.accountKey === accountKey) {
             state.state = "ready";
             state.readyRevision = manifest.revision;
@@ -366,6 +414,22 @@ export class SessionProfileLifecycle {
         }
       }
     }
+  }
+
+  /**
+   * A deleted profile: removes every key's pointer (no launch can pick a version any more), then
+   * collects its versions (`collect = false` at boot: `start()` runs a full pass afterwards).
+   */
+  private async dropProfile(profileId: string, collect = true): Promise<void> {
+    let keyDirs: string[];
+    try {
+      keyDirs = await listKeyDirs(sessionProfilePreparedProfileDir(this.appdir, profileId));
+      for (const keyDir of keyDirs) await rm(join(keyDir, SESSION_PROFILE_PREPARED_CURRENT_FILE), { force: true });
+    } catch (error) {
+      this.logger.warn(`Agent Profiles: removing the prepared dirs of deleted profile ${profileId} failed: ${describe(error)}`);
+      return;
+    }
+    if (collect) await this.collect(keyDirs);
   }
 
   // -------------------------------------------------------------------------
@@ -432,12 +496,14 @@ export class SessionProfileLifecycle {
       appdir: this.appdir
     };
     const fingerprint = await this.fingerprint(preparer, inputsCtx, revision);
+    const current = await readCurrentVersion(state.keyDir);
+    const currentDir = current ? join(state.keyDir, current) : null;
     if (!state.forceStale) {
-      const manifest = await readManifestIfAny(state.preparedDir);
-      if (manifest && this.matches(manifest, state, revision, fingerprint)) {
+      const manifest = currentDir ? await readManifestIfAny(currentDir) : null;
+      if (currentDir && manifest && this.matches(manifest, state, revision, fingerprint)) {
         state.failure = undefined;
         this.setState(state, "ready", undefined, revision);
-        return { ok: true, ready: this.ready(state, revision) };
+        return { ok: true, ready: this.ready(state, revision, currentDir) };
       }
       if (!retryFailed && state.failure?.fingerprint === fingerprint) return { ok: false, error: state.failure.error };
     }
@@ -445,7 +511,7 @@ export class SessionProfileLifecycle {
     const release = await this.slots.acquire();
     try {
       if (this.stopped) return { ok: false, error: stopping() };
-      return await this.prepare(state, preparer, inputsCtx, fingerprint);
+      return await this.prepare(state, preparer, inputsCtx, fingerprint, currentDir);
     } finally {
       release();
     }
@@ -455,7 +521,8 @@ export class SessionProfileLifecycle {
     state: KeyState,
     preparer: SessionProfilePreparer,
     inputsCtx: SessionProfilePrepareInputsContext,
-    expectedFingerprint: string
+    expectedFingerprint: string,
+    previousPreparedDir: string | null
   ): Promise<Outcome> {
     // A `markStale` from now on asks for another preparation after this one.
     const forced = state.forceStale;
@@ -473,13 +540,15 @@ export class SessionProfileLifecycle {
         this.noteProfile(state.profileId, source.revision, this.now().toISOString());
       }
       fingerprint = await this.fingerprint(preparer, inputsCtx, source.revision);
+      const version = newVersionName(fingerprint, this.now());
       await mkdir(stagingRoot, { recursive: true, mode: DIR_MODE });
       await mkdir(stagingDir, { mode: DIR_MODE });
       const ctx: SessionProfilePrepareContext = {
         ...inputsCtx,
         resolved,
         stagingDir,
-        preparedDir: state.preparedDir,
+        preparedDir: join(state.keyDir, version),
+        previousPreparedDir,
         logger: this.logger,
         signal: this.abort.signal
       };
@@ -497,14 +566,16 @@ export class SessionProfileLifecycle {
         agentSection
       } as PreparedManifest;
       await writePreparedManifest(stagingDir, manifest);
-      await this.swap(stagingDir, state.preparedDir);
+      await publish(stagingDir, state.keyDir, version);
       state.finished += 1;
       state.failure = undefined;
       this.setState(state, "ready", undefined, source.revision);
       this.logger.info(
-        `Agent Profiles: prepared profile ${state.profileId} r${source.revision} for ${state.agent} (${state.accountKey}).`
+        `Agent Profiles: prepared profile ${state.profileId} r${source.revision} for ${state.agent} (${state.accountKey}) as ${version}.`
       );
-      return { ok: true, ready: this.ready(state, source.revision) };
+      // The previous version (or legacy content) goes once no session leases it — after this job.
+      void this.track(this.collect([state.keyDir]));
+      return { ok: true, ready: this.ready(state, source.revision, ctx.preparedDir) };
     } catch (error) {
       await rm(stagingDir, { recursive: true, force: true }).catch(noop);
       state.forceStale ||= forced;
@@ -523,36 +594,103 @@ export class SessionProfileLifecycle {
     return { ok: false, error: failure };
   }
 
-  /** Renames `stagingDir` onto `preparedDir`; the previous dir is moved aside first and removed after. */
-  private async swap(stagingDir: string, preparedDir: string): Promise<void> {
-    await mkdir(dirname(preparedDir), { recursive: true, mode: DIR_MODE });
-    const aside = join(sessionProfileStagingDir(this.appdir), `${randomUUID()}.previous`);
-    let moved = false;
-    try {
-      await rename(preparedDir, aside);
-      moved = true;
-    } catch (error) {
-      if (!isMissing(error)) throw error;
-    }
-    try {
-      await rename(stagingDir, preparedDir);
-    } catch (error) {
-      if (moved) await rename(aside, preparedDir).catch(noop);
-      throw error;
-    }
-    if (moved) {
-      await rm(aside, { recursive: true, force: true }).catch((error) =>
-        this.logger.warn(`Agent Profiles: removing a replaced prepared dir failed: ${describe(error)}`)
-      );
-    }
-  }
-
-  /** Drops a key whose account or profile is gone, with its prepared dir (only when nothing else is queued on it). */
+  /**
+   * Drops a key whose account or profile is gone (only when nothing else is queued on it): its
+   * pointer now, its versions once no session leases them. Runs inside the key's job.
+   */
   private async forget(state: KeyState): Promise<void> {
     if (state.pending > 1 || state.queued) return;
     if (this.keys.get(state.id) === state) this.keys.delete(state.id);
-    await rm(state.preparedDir, { recursive: true, force: true }).catch(noop);
+    await rm(join(state.keyDir, SESSION_PROFILE_PREPARED_CURRENT_FILE), { force: true }).catch(noop);
+    void this.track(this.collect([state.keyDir]));
     this.emitStatus(state.profileId);
+  }
+
+  // -------------------------------------------------------------------------
+  // Garbage collection
+  // -------------------------------------------------------------------------
+
+  /**
+   * One GC pass over `keyDirs` (every key dir on disk when omitted). The leases are read once,
+   * before any key is locked (a slow host never holds up a launch); dirs handed out since are
+   * protected by their grace. Each key is collected inside its job chain when it has one.
+   */
+  private async collect(keyDirs?: string[]): Promise<void> {
+    try {
+      await this.collectPass(keyDirs);
+    } catch (error) {
+      this.logger.warn(`Agent Profiles: collecting unused prepared dirs failed: ${describe(error)}`);
+    }
+  }
+
+  private async collectPass(keyDirs?: string[]): Promise<void> {
+    const leases = this.options.leases;
+    if (!leases) return;
+    let leased: Set<string>;
+    try {
+      leased = new Set([...(await leases.inUse())].map((path) => resolve(path)));
+    } catch (error) {
+      this.logger.warn(`Agent Profiles: cannot tell which prepared dirs are in use, keeping them all: ${describe(error)}`);
+      return;
+    }
+    const dirs = keyDirs ?? (await listKeyDirs(sessionProfilePreparedRootDir(this.appdir), 2));
+    for (const keyDir of dirs) {
+      if (this.stopped) return;
+      const run = (): Promise<void> => this.collectKey(keyDir, leased);
+      const state = [...this.keys.values()].find((candidate) => candidate.keyDir === keyDir);
+      if (!state) {
+        // No job can publish here: the profile is gone, or the agent/key kind has no preparer.
+        await run();
+        continue;
+      }
+      const job = state.tail.then(run);
+      state.tail = job.then(noop, noop);
+      await job;
+    }
+  }
+
+  /** Removes the key's unleased non-current versions, stale pointer temp files and unleased legacy content. */
+  private async collectKey(keyDir: string, leased: ReadonlySet<string>): Promise<void> {
+    let entries: Dirent[];
+    try {
+      entries = await readdir(keyDir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    const current = await readCurrentVersion(keyDir);
+    const kept = (dir: string): boolean => leased.has(dir) || (this.handedOut.get(dir) ?? 0) > this.now().getTime();
+    const legacy: string[] = [];
+    for (const entry of entries) {
+      const path = join(keyDir, entry.name);
+      if (entry.name === SESSION_PROFILE_PREPARED_CURRENT_FILE) continue;
+      if (entry.name.startsWith(CURRENT_TMP_PREFIX)) {
+        await rm(path, { force: true }).catch(noop);
+      } else if (VERSION_RE.test(entry.name) && entry.isDirectory()) {
+        if (entry.name === current || kept(path)) continue;
+        await this.remove(path);
+      } else {
+        legacy.push(entry.name);
+      }
+    }
+    // The pre-versioning layout: the key dir itself was the prepared dir (a chat may run in it).
+    if (legacy.length > 0 && !kept(keyDir)) {
+      legacy.sort((a, b) => Number(a === PREPARED_MANIFEST_FILE) - Number(b === PREPARED_MANIFEST_FILE));
+      for (const name of legacy) await this.remove(join(keyDir, name));
+    }
+    // Empty dirs up to (not including) the prepared root; `rmdir` refuses a non-empty one.
+    const root = sessionProfilePreparedRootDir(this.appdir);
+    for (let dir = keyDir; dir !== root && dir.startsWith(`${root}/`); dir = dirname(dir)) {
+      if (!(await rmdir(dir).then(() => true, () => false))) break;
+    }
+  }
+
+  private async remove(path: string): Promise<void> {
+    try {
+      await rm(path, { recursive: true, force: true });
+      this.logger.info(`Agent Profiles: removed unused prepared dir ${path}.`);
+    } catch (error) {
+      this.logger.warn(`Agent Profiles: removing the unused prepared dir ${path} failed: ${describe(error)}`);
+    }
   }
 
   private matches(manifest: PreparedManifest, state: KeyState, revision: string, fingerprint: string): boolean {
@@ -589,14 +727,14 @@ export class SessionProfileLifecycle {
   /** The key's state, created on first use. Throws `PROFILE_NOT_FOUND`/`INVALID_REQUEST` for ids that cannot be path segments. */
   private keyState(profileId: string, agent: SessionProfileAgentId, accountId: string | null, perAccount: boolean): KeyState {
     let accountKey: string;
-    let preparedDir: string;
+    let keyDir: string;
     try {
       accountKey = perAccount ? sessionProfileAccountKey(accountId) : SESSION_PROFILE_SHARED_ACCOUNT_KEY;
     } catch {
       throw sessionProfileErrors.invalid(`"${String(accountId).slice(0, 80)}" is not a valid account id.`);
     }
     try {
-      preparedDir = sessionProfilePreparedDir(this.appdir, profileId, agent, accountKey);
+      keyDir = sessionProfilePreparedKeyDir(this.appdir, profileId, agent, accountKey);
     } catch {
       throw sessionProfileErrors.notFound(profileId);
     }
@@ -609,7 +747,7 @@ export class SessionProfileLifecycle {
         agent,
         accountKey,
         accountId: perAccount && accountKey !== SESSION_PROFILE_SYSTEM_ACCOUNT_KEY ? accountKey : null,
-        preparedDir,
+        keyDir,
         state: "not-prepared",
         updatedAt: this.now().toISOString(),
         forceStale: false,
@@ -676,8 +814,12 @@ export class SessionProfileLifecycle {
     this.profiles.set(profileId, { revision, updatedAt });
   }
 
-  private ready(state: KeyState, revision: string): SessionProfileReady {
-    return { profileId: state.profileId, agent: state.agent, accountKey: state.accountKey, revision, preparedDir: state.preparedDir };
+  /** The launch's answer; the dir is protected from GC for the handout grace (until its session holds a lease). */
+  private ready(state: KeyState, revision: string, preparedDir: string): SessionProfileReady {
+    const now = this.now().getTime();
+    for (const [dir, until] of this.handedOut) if (until <= now) this.handedOut.delete(dir);
+    this.handedOut.set(preparedDir, now + this.graceMs);
+    return { profileId: state.profileId, agent: state.agent, accountKey: state.accountKey, revision, preparedDir };
   }
 
   private track<T>(promise: Promise<T>): Promise<T> {
@@ -741,6 +883,67 @@ async function readManifestIfAny(dir: string): Promise<PreparedManifest | null> 
   } catch {
     return null;
   }
+}
+
+/** A fresh, never-reused version name: the fingerprint's head, the time and randomness. */
+function newVersionName(fingerprint: string, now: Date): string {
+  return `v-${fingerprint.slice(0, 12)}-${now.getTime().toString(36)}-${randomBytes(4).toString("hex")}`;
+}
+
+/** The key's current version name, or `null` (no pointer, unreadable, or not a version name). */
+export async function readCurrentVersion(keyDir: string): Promise<string | null> {
+  try {
+    const value = JSON.parse(await readFile(join(keyDir, SESSION_PROFILE_PREPARED_CURRENT_FILE), "utf8")) as { version?: unknown };
+    return typeof value.version === "string" && VERSION_RE.test(value.version) ? value.version : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Replaces the key's pointer atomically (temp + rename in the key dir). */
+async function writeCurrentVersion(keyDir: string, version: string): Promise<void> {
+  const tmp = join(keyDir, `${CURRENT_TMP_PREFIX}${randomUUID()}.tmp`);
+  try {
+    const handle = await open(tmp, "wx", 0o600);
+    try {
+      await handle.writeFile(`${JSON.stringify({ schema: 1, version })}\n`);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await rename(tmp, join(keyDir, SESSION_PROFILE_PREPARED_CURRENT_FILE));
+  } catch (error) {
+    await rm(tmp, { force: true }).catch(noop);
+    throw error;
+  }
+}
+
+/**
+ * Publishes a complete staging dir as the key's new version: renamed to a fresh version dir, then
+ * the pointer flips to it. A version nobody was told about is removed again if the flip fails.
+ */
+async function publish(stagingDir: string, keyDir: string, version: string): Promise<void> {
+  await mkdir(keyDir, { recursive: true, mode: DIR_MODE });
+  const target = join(keyDir, version);
+  if (await lstat(target).then(() => true, (error: unknown) => !isMissing(error))) {
+    throw new Error("A prepared version with that name already exists.");
+  }
+  await rename(stagingDir, target);
+  try {
+    await writeCurrentVersion(keyDir, version);
+  } catch (error) {
+    await rm(target, { recursive: true, force: true }).catch(noop);
+    throw error;
+  }
+}
+
+/** The dirs `depth + 1` levels below `root` (`prepared/` → key dirs at depth 2; a profile dir → depth 1). */
+async function listKeyDirs(root: string, depth = 1): Promise<string[]> {
+  let dirs = [root];
+  for (let level = 0; level <= depth; level += 1) {
+    dirs = (await Promise.all(dirs.map(async (dir) => (await listDirs(dir)).map((name) => join(dir, name))))).flat();
+  }
+  return dirs;
 }
 
 async function listDirs(dir: string): Promise<string[]> {
