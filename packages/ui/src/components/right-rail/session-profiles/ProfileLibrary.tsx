@@ -10,14 +10,16 @@
  */
 
 import React from "react";
-import { AlertTriangle, ArrowUpRight, ChevronRight, Loader2, Plus } from "lucide-react";
+import { AlertTriangle, ArrowUpRight, ChevronRight, FileUp, Loader2, Plus } from "lucide-react";
 
 import type { SessionProfileListError, SessionProfileSummary } from "@orquester/api";
 
 import { cn } from "../../../lib/cn";
 import { profileStatusPill } from "../../../lib/session-profiles/logic";
 import type { SessionProfilesNotice } from "../../../lib/session-profiles/store";
+import { AdaptiveMenu } from "../../ui/adaptive-menu";
 import { Button } from "../../ui/button";
+import { DropdownItem } from "../../ui/dropdown";
 import { RailChip, RailEmptyState, RailSearchInput, railCardClass } from "../primitives";
 import { NoticeLine } from "./NoticeLine";
 import { ProfileIcon } from "./ProfileIcon";
@@ -37,6 +39,8 @@ export interface ProfileLibraryProps {
   notice: SessionProfilesNotice | null;
   onDismissNotice: () => void;
   onNew: () => void;
+  /** "+ New" → "Import profile from file" (an export `.zip`); absent: "+ New" makes a new profile directly. */
+  onImportFile?: () => void;
   onOpen: (profileId: string) => void;
   onOpenAgentConfig: () => void;
   onRetry: () => void;
@@ -52,14 +56,14 @@ export const ProfileLibrary: React.FC<ProfileLibraryProps> = (props) => {
         {sheet ? (
           <div className="flex items-center gap-2">
             <h3 className="min-w-0 flex-1 truncate text-[13px] font-semibold text-neutral-100">Agent Profiles</h3>
-            <NewButton sheet onNew={props.onNew} />
+            <NewButton sheet onNew={props.onNew} onImportFile={props.onImportFile} />
           </div>
         ) : null}
         <div className="flex items-center gap-2">
           <div className="min-w-0 flex-1">
             <RailSearchInput value={props.query} onChange={props.onQueryChange} placeholder="Search profiles…" />
           </div>
-          {sheet ? null : <NewButton sheet={false} onNew={props.onNew} />}
+          {sheet ? null : <NewButton sheet={false} onNew={props.onNew} onImportFile={props.onImportFile} />}
         </div>
       </div>
 
@@ -132,12 +136,41 @@ export const ProfileLibrary: React.FC<ProfileLibraryProps> = (props) => {
   );
 };
 
-const NewButton: React.FC<{ sheet: boolean; onNew: () => void }> = ({ sheet, onNew }) => (
-  <Button type="button" size="sm" onClick={onNew} title="New Agent Profile" className={cn("shrink-0 gap-1", sheet ? "h-10" : "h-9")}>
-    <Plus size={13} aria-hidden />
-    New
-  </Button>
-);
+const NewButton: React.FC<{ sheet: boolean; onNew: () => void; onImportFile?: () => void }> = ({ sheet, onNew, onImportFile }) =>
+  onImportFile === undefined ? (
+    <Button type="button" size="sm" onClick={onNew} title="New Agent Profile" className={cn("shrink-0 gap-1", sheet ? "h-10" : "h-9")}>
+      <Plus size={13} aria-hidden />
+      New
+    </Button>
+  ) : (
+    <AdaptiveMenu
+      align="right"
+      width="w-60"
+      title="New Agent Profile"
+      focusOnOpen
+      triggerClassName={cn("shrink-0 rounded-md", FOCUS_RING)}
+      trigger={
+        <span
+          title="New Agent Profile"
+          data-profile-new=""
+          className={cn(
+            "inline-flex items-center gap-1 rounded-md bg-neutral-200 px-2.5 text-xs font-medium text-neutral-900 hover:bg-neutral-50",
+            sheet ? "h-10" : "h-9"
+          )}
+        >
+          <Plus size={13} aria-hidden />
+          New
+        </span>
+      }
+    >
+      <DropdownItem icon={<Plus size={14} />} onClick={onNew} className={cn(sheet && "py-3")}>
+        New profile
+      </DropdownItem>
+      <DropdownItem icon={<FileUp size={14} />} onClick={onImportFile} className={cn(sheet && "py-3")}>
+        Import profile from file
+      </DropdownItem>
+    </AdaptiveMenu>
+  );
 
 const GlobalCard: React.FC<{ sheet: boolean; onOpenAgentConfig: () => void }> = ({ sheet, onOpenAgentConfig }) => (
   <div
