@@ -418,6 +418,38 @@ describe("forkThread", () => {
     await host.stop();
   });
 
+  it("native: the CHILD's keyed server travels with the fork and reaches the child's session start", async () => {
+    const forks: ForkConversationInput[] = [];
+    const opencode = createScriptedAdapter({
+      id: "opencode",
+      forkConversation: async (input) => {
+        forks.push(input);
+        return { resumeCursor: { schemaVersion: 1, sessionId: "ses_fork" } };
+      },
+      history: { threadId: "child", turns: [{ id: "turn-1", items: [] }] },
+      projectHistory: () => replayOf("child")
+    });
+    const host = createTestHost({ adapters: { opencode } });
+    const parentId = await host.createThread({ threadId: "parent", refId: "opencode", home: "system" });
+    const first = await runTurn(host, opencode, parentId, "first", "one");
+    await runTurn(host, opencode, parentId, "second", "two");
+    const serverPool = { key: "profile-a", env: { XDG_CONFIG_HOME: "/profiles/a/xdg" } };
+
+    const result = await host.orchestrator.forkThread(parentId, {
+      ...forkRequest("child", "opencode", { messageId: first.replyId }),
+      home: "system",
+      serverPool
+    });
+    await host.settle();
+
+    assert.equal(result.strategy, "native");
+    assert.deepEqual(forks[0]?.serverPool, serverPool);
+    assert.deepEqual(host.orchestrator.launchConfig("child")?.serverPool, serverPool);
+    const start = opencode.calls.find((call) => call.kind === "startSession" && call.threadId === "child");
+    assert.deepEqual((start?.detail as { serverPool?: unknown }).serverPool, serverPool);
+    await host.stop();
+  });
+
   it("links the child to its parent's secrets before its first event, native or transcript — never more", async () => {
     const links: Array<{ threadId: string; parentThreadId: string; childEventsBefore: number }> = [];
     let host: TestHost | undefined;

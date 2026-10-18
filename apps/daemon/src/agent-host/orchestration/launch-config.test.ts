@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
-import { createFileLaunchConfigStore } from "./launch-config.ts";
+import { createFileLaunchConfigStore, launchConfigFromRequest } from "./launch-config.ts";
 
 describe("thread launch config (§3.1, §6.1)", () => {
   it("keeps only well-formed persisted fields and drops the empty ones", async (t) => {
@@ -72,5 +72,45 @@ describe("thread launch config (§3.1, §6.1)", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("thread launch config — the keyed provider server", () => {
+  it("round-trips serverPool through a reread, so a restarted host restores the thread's key and env", async (t) => {
+    const dir = await mkdtemp(join(tmpdir(), "launch-config-"));
+    t.after(() => rm(dir, { recursive: true, force: true }));
+    const serverPool = {
+      key: "profile-a",
+      env: { XDG_CONFIG_HOME: "/profiles/a/xdg", OPENCODE_CONFIG_DIR: "/profiles/a/opencode" },
+      unsetEnv: ["OPENCODE_DISABLE_CLAUDE_CODE"]
+    };
+    await createFileLaunchConfigStore({ rootDir: dir }).save("t1", { launchEnv: { A: "1" }, serverPool });
+    assert.deepEqual(await createFileLaunchConfigStore({ rootDir: dir }).load("t1"), { launchEnv: { A: "1" }, serverPool });
+  });
+
+  it("keeps a well-formed spec's valid entries and drops a spec without a key", async (t) => {
+    const dir = await mkdtemp(join(tmpdir(), "launch-config-"));
+    t.after(() => rm(dir, { recursive: true, force: true }));
+    await mkdir(join(dir, "threads", "t1"), { recursive: true });
+    const file = join(dir, "threads", "t1", "launch.json");
+    const store = createFileLaunchConfigStore({ rootDir: dir });
+    await writeFile(file, JSON.stringify({
+      serverPool: { key: "k", env: { GOOD: "v", BAD: 1, "": "x" }, unsetEnv: ["U", 3, ""], extra: true }
+    }));
+    assert.deepEqual(await store.load("t1"), { serverPool: { key: "k", env: { GOOD: "v" }, unsetEnv: ["U"] } });
+    await writeFile(file, JSON.stringify({ serverPool: { key: "k", env: {}, unsetEnv: [] } }));
+    assert.deepEqual(await store.load("t1"), { serverPool: { key: "k" } });
+    for (const malformed of [{ env: { A: "1" } }, { key: "" }, { key: 7 }, "k", null]) {
+      await writeFile(file, JSON.stringify({ homePath: "/h", serverPool: malformed }));
+      assert.deepEqual(await store.load("t1"), { homePath: "/h" }, JSON.stringify(malformed));
+    }
+  });
+
+  it("is picked off a create request with the other launch fields", () => {
+    assert.deepEqual(
+      launchConfigFromRequest({ launchEnv: { A: "1" }, serverPool: { key: "k", env: { B: "2" } } }),
+      { launchEnv: { A: "1" }, serverPool: { key: "k", env: { B: "2" } } }
+    );
+    assert.deepEqual(launchConfigFromRequest({}), {});
   });
 });

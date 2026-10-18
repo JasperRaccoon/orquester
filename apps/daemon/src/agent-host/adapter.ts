@@ -32,6 +32,7 @@ import type {
   ThreadSnapshot
 } from "@orquester/api/agent-chat";
 
+import type { HostThreadServerPool } from "./host-protocol.ts";
 import type { SessionToolsHost } from "./session-tools/index.ts";
 
 // ---------------------------------------------------------------------------
@@ -56,6 +57,15 @@ export interface StartSessionInput {
    */
   projectPath?: string;
   home: AccountHome;
+  /**
+   * The keyed provider server this thread runs on, from its `launch.json`
+   * (`CreateHostThreadRequest.serverPool`). Read only by an adapter that
+   * shares one server between threads (OpenCode: the server for
+   * `(projectPath, serverPool.key)`, started with `serverPool`'s env on top of
+   * the launcher env); every other adapter ignores it. Omitted: the project's
+   * global server.
+   */
+  serverPool?: HostThreadServerPool;
   title?: string;
   modelSelection: ModelSelection;
   runtimeMode: RuntimeMode;
@@ -267,6 +277,12 @@ export interface ForkConversationInput {
    * that created it, so the fork is written there and the child runs there.
    */
   home: AccountHome;
+  /**
+   * The CHILD's keyed server ({@link StartSessionInput.serverPool}), for an
+   * adapter that forks on a shared server: the fork is made where the child
+   * will run. Omitted: the global server.
+   */
+  serverPool?: HostThreadServerPool;
   cut: ForkCut;
 }
 

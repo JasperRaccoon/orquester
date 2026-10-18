@@ -6,7 +6,8 @@
  * **exactly** what a terminal launch of the same registry entry gets today,
  * composed by the daemon because only the daemon has the sources (the entry's
  * own env, `<appdir>/daemon/env/<id>.env`, and every `resolveExtraEnv`
- * contributor).
+ * contributor) — and `serverPool`, the keyed provider server an OpenCode
+ * thread runs on.
  *
  * It has to be **persisted**, and that is the whole reason this module exists.
  * The daemon sends it once, at create. A session is started long afterwards —
@@ -25,6 +26,8 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
+import type { HostThreadServerPool } from "../host-protocol.ts";
+
 export interface ThreadLaunchConfig {
   /** Layered over the adapter's own extras; the daemon's values win. */
   launchEnv?: Record<string, string>;
@@ -32,6 +35,11 @@ export interface ThreadLaunchConfig {
   unsetEnv?: string[];
   /** The daemon's resolved absolute home dir. Never on a client wire. */
   homePath?: string;
+  /**
+   * The keyed provider server the thread runs on (OpenCode), handed to the
+   * adapter as `StartSessionInput.serverPool`. Omitted: the global server.
+   */
+  serverPool?: HostThreadServerPool;
 }
 
 export interface LaunchConfigStore {
@@ -76,20 +84,59 @@ function parseThreadLaunchConfig(value: unknown): ThreadLaunchConfig | null {
   if (typeof value.homePath === "string" && value.homePath.length > 0) {
     config.homePath = value.homePath;
   }
+  const serverPool = parseServerPool(value.serverPool);
+  if (serverPool !== undefined) {
+    config.serverPool = serverPool;
+  }
   // Any other field — an older build's `proxyRefId` among them — is ignored.
   return config;
 }
 
-/** Pick the three launch fields off a create request, dropping empty ones. */
+/**
+ * The shape only: a key and string-valued env entries. Whether the pool can
+ * APPLY the spec (a reserved key or variable) is the adapter's to decide —
+ * it refuses the session rather than quietly running the thread on another
+ * server, and dropping the spec here would do exactly that.
+ */
+function parseServerPool(value: unknown): HostThreadServerPool | undefined {
+  if (!isRecord(value) || typeof value.key !== "string" || value.key.length === 0) {
+    return undefined;
+  }
+  const pool: HostThreadServerPool = { key: value.key };
+  if (isRecord(value.env)) {
+    const env: Record<string, string> = {};
+    for (const [key, entry] of Object.entries(value.env)) {
+      if (key.length > 0 && typeof entry === "string") {
+        env[key] = entry;
+      }
+    }
+    if (Object.keys(env).length > 0) {
+      pool.env = env;
+    }
+  }
+  if (Array.isArray(value.unsetEnv)) {
+    const names = value.unsetEnv.filter(
+      (name): name is string => typeof name === "string" && name.length > 0
+    );
+    if (names.length > 0) {
+      pool.unsetEnv = names;
+    }
+  }
+  return pool;
+}
+
+/** Pick the launch fields off a create request, dropping empty ones. */
 export function launchConfigFromRequest(request: {
   launchEnv?: Record<string, string>;
   unsetEnv?: string[];
   homePath?: string;
+  serverPool?: HostThreadServerPool;
 }): ThreadLaunchConfig {
   return parseThreadLaunchConfig({
     launchEnv: request.launchEnv,
     unsetEnv: request.unsetEnv,
-    homePath: request.homePath
+    homePath: request.homePath,
+    serverPool: request.serverPool
   }) ?? {};
 }
 

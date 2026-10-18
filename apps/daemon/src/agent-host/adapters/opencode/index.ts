@@ -743,11 +743,12 @@ class OpenCodeAdapterImpl implements AgentAdapter {
       );
     }
     const cwd = resolvePath(input.cwd);
-    // The SERVER is keyed by the project; the thread's own `cwd` still travels
-    // per request as the client-level `directory` (§4.5 "there is no cwd on
-    // the process"), so a subdirectory thread shares the project's server
-    // while still scoping every call to itself.
-    const server = await this.pool.acquire(projectDirFor(input));
+    // The SERVER is keyed by the project and the thread's pool key (global
+    // unless its launch config names one); the thread's own `cwd` still
+    // travels per request as the client-level `directory` (§4.5 "there is no
+    // cwd on the process"), so a subdirectory thread shares the project's
+    // server while still scoping every call to itself.
+    const server = await this.pool.acquire(projectDirFor(input), input.serverPool);
     this.servers.set(input.threadId, server);
     let sessionToolsGrant: { revoke(): void } | undefined;
     try {
@@ -969,7 +970,8 @@ class OpenCodeAdapterImpl implements AgentAdapter {
 
   /**
    * Thread lineage (spec 2026-10-14 §6): `POST /session/:id/fork` on the
-   * project's own server (`fork.ts`), which the source shares with the child.
+   * child's server (`fork.ts`) — the source's too unless their pool keys
+   * differ, and either way the session store behind it is the same.
    * A live source session is only read — its current upstream session and
    * its rewinds' id map — never re-pointed.
    */
@@ -988,7 +990,9 @@ class OpenCodeAdapterImpl implements AgentAdapter {
       throw new Error(OPENCODE_FORK_NO_SESSION);
     }
     const directory = resolvePath(input.cwd);
-    const server = await this.pool.acquire(projectDirFor(input));
+    // On the CHILD's server: the session store is shared by every key's
+    // server, so the fork is visible wherever the child then resumes it.
+    const server = await this.pool.acquire(projectDirFor(input), input.serverPool);
     try {
       const sessionId = await forkOpenCodeSession({
         client: server.client(directory),

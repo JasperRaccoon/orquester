@@ -2320,6 +2320,32 @@ describe("orchestrator — the §6.1 launch config (§3.1)", () => {
     assert.equal(next.adapter.lastStart?.home.kind, "account");
     await next.stop();
   });
+
+  it("hands a thread's keyed server to every session start, across a host restart", async () => {
+    const serverPool = { key: "profile-a", env: { XDG_CONFIG_HOME: "/profiles/a/xdg" }, unsetEnv: ["X"] };
+    const opencode = createScriptedAdapter({ id: "opencode" });
+    const first = createTestHost({ adapters: { opencode } });
+    const keyed = await first.createThread({ threadId: "keyed", refId: "opencode", home: "system", serverPool });
+    const plain = await first.createThread({ threadId: "plain", refId: "opencode", home: "system" });
+    await first.orchestrator.command(keyed, "turn", { commandId: cmd(), input: "go" });
+    await first.settle();
+    assert.deepEqual(opencode.lastStart?.serverPool, serverPool);
+    assert.deepEqual(first.orchestrator.launchConfig(keyed)?.serverPool, serverPool);
+    await first.orchestrator.command(plain, "turn", { commandId: cmd(), input: "go" });
+    await first.settle();
+    assert.equal(opencode.lastStart?.threadId, plain);
+    assert.equal("serverPool" in (opencode.lastStart ?? {}), false, "no spec: the global server");
+    await first.stop();
+
+    // A host started after a restart only has `launch.json` to go on.
+    const reopened = createScriptedAdapter({ id: "opencode" });
+    const next = createTestHost({ adapters: { opencode: reopened }, store: first.store, launchConfigs: first.launchConfigs });
+    await next.orchestrator.command(keyed, "turn", { commandId: cmd(), input: "again" });
+    await next.settle();
+    assert.equal(reopened.lastStart?.threadId, keyed);
+    assert.deepEqual(reopened.lastStart?.serverPool, serverPool);
+    await next.stop();
+  });
 });
 
 describe("orchestrator — runtime events", () => {

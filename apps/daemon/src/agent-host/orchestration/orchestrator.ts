@@ -778,7 +778,7 @@ export interface Orchestrator {
    * Agent profile §4.8, `POST /opencode/recycle-idle`: the OpenCode adapter's
    * `recycleIdleServers`, or nothing recycled when no adapter serves it.
    */
-  recycleIdleOpenCodeServers(): Promise<{ recycled: number; deferred: number }>;
+  recycleIdleOpenCodeServers(input?: { poolKey?: string }): Promise<{ recycled: number; deferred: number }>;
   /**
    * Unified MCP §12.1: a thread's provider session started with its MCP denials degraded (the
    * daemon could not be asked and nothing is known for its launch): one `runtime.warning` row, so
@@ -1852,6 +1852,10 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       projectPath: head.projectPath,
       cwd: head.cwd,
       home,
+      // The keyed server the daemon named at create, from `launch.json`, so a
+      // resumed thread lands on a server with the same key and env after a
+      // restart or a handover.
+      ...(runtime.launch?.serverPool !== undefined ? { serverPool: runtime.launch.serverPool } : {}),
       title: head.title,
       modelSelection: head.modelSelection,
       runtimeMode: head.runtimeMode,
@@ -4207,6 +4211,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
             accountId: parentHead.accountId,
             home: parentHead.home
           });
+          const childServerPool = launchConfigFromRequest(request).serverPool;
           const forked = await adapter.forkConversation({
             sourceThreadId: parentThreadId,
             sourceResumeCursor: sourceCursor,
@@ -4214,6 +4219,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
             projectPath: request.projectPath,
             cwd: request.cwd,
             home,
+            ...(childServerPool !== undefined ? { serverPool: childServerPool } : {}),
             cut: {
               retainedTurnIds: cut.retained.map((turn) => turn.turnId),
               firstRemovedTurnId: cut.firstRemovedTurnId
@@ -7420,8 +7426,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     backgroundWorkThreadIds,
     holdContinuingGoals,
     resumeGoalSessionsAfterHandover,
-    recycleIdleOpenCodeServers: async () =>
-      (await options.adapters.get("opencode")?.recycleIdleServers?.()) ?? { recycled: 0, deferred: 0 },
+    recycleIdleOpenCodeServers: async (input) =>
+      (await options.adapters.get("opencode")?.recycleIdleServers?.(input)) ?? { recycled: 0, deferred: 0 },
     noteSessionToolsWarning: (threadId, detail) => {
       const runtime = runtimes.get(threadId);
       if (!runtime || !runtime.state.head) return;

@@ -365,6 +365,16 @@ export interface SessionToolCallRequest {
   arguments: unknown;
 }
 
+/**
+ * Body of `POST /opencode/recycle-idle` (agent profile §4.8). Empty recycles
+ * every OpenCode server; `poolKey` only the servers of that
+ * {@link HostThreadServerPool} key. Additive: an older host ignores the body
+ * and recycles every server, which is a safe superset.
+ */
+export interface AgentHostRecycleOpenCodeRequest {
+  poolKey?: string;
+}
+
 /** `POST /opencode/recycle-idle` (agent profile §4.8). */
 export interface AgentHostRecycleOpenCodeResponse {
   /** OpenCode servers stopped by this request. */
@@ -429,6 +439,33 @@ export interface AgentHostHealthResponse {
   providersRevision?: number;
 }
 
+/**
+ * Which long-lived provider server a thread runs on, for an adapter that
+ * shares one server between threads (OpenCode: one `opencode serve` per
+ * project, spec §3.2). Without it the thread uses the project's GLOBAL server,
+ * started with the launcher env alone — exactly as before this field existed.
+ *
+ * - `key` — opaque, non-empty, never `"global"` (reserved). Threads of one
+ *   project naming the same key share one server, so a key must always stand
+ *   for the same `env` / `unsetEnv` (the daemon derives both from what the key
+ *   names, e.g. an agent profile's prepared directories).
+ * - `env` — layered over that server's launcher env, after `unsetEnv` is
+ *   removed from it. Never `PATH`, `HOME`, `TMPDIR` or
+ *   `OPENCODE_SERVER_PASSWORD`. Absolute values, like every launch env value.
+ *
+ * Applied to the SERVER, not to `launchEnv`: the global server's env is
+ * composed from a project's threads' `launchEnv`, so anything placed there
+ * would leak into it. Persisted in the thread's `launch.json`, so a resumed
+ * thread is put back on a server with the same key and env after a host
+ * restart or handover. Additive: an older host ignores it, and its threads
+ * run on the global server.
+ */
+export interface HostThreadServerPool {
+  key: string;
+  env?: Record<string, string>;
+  unsetEnv?: string[];
+}
+
 /** Body of `POST /threads`. */
 export interface CreateHostThreadRequest {
   threadId: string;
@@ -470,6 +507,8 @@ export interface CreateHostThreadRequest {
   unsetEnv?: string[];
   /** Absolute home dir for `home`, resolved daemon-side. Never on a client wire. */
   homePath?: string;
+  /** The thread's keyed provider server ({@link HostThreadServerPool}); omitted for the global one. */
+  serverPool?: HostThreadServerPool;
   /**
    * The thread's parent (spec 2026-10-14 §6), recorded on `thread.created`.
    * Additive: an older host ignores it, and the daemon's tab record still

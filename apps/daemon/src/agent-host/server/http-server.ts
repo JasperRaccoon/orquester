@@ -57,6 +57,7 @@ import {
   agentHostRoutes,
   type AgentHostHealthResponse,
   type AgentHostHoldGoalsResponse,
+  type AgentHostRecycleOpenCodeRequest,
   type AgentHostRecycleOpenCodeResponse,
   type AgentHostResumeGoalSessionsResponse,
   type CreateHostThreadRequest,
@@ -505,9 +506,15 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
     }
 
     // Agent profile §4.8: OpenCode config changed; restart its idle servers so
-    // the next turn reads it (busy ones once they go idle). No body is read.
+    // the next turn reads it (busy ones once they go idle). An optional
+    // `poolKey` narrows it to that key's servers; anything else recycles all.
     if (path === agentHostRoutes.recycleIdleOpenCode && method === "POST") {
-      const body: AgentHostRecycleOpenCodeResponse = await orchestrator.recycleIdleOpenCodeServers();
+      const requestBody = (await readJsonBody(request)) as AgentHostRecycleOpenCodeRequest | null;
+      const poolKey =
+        typeof requestBody?.poolKey === "string" && requestBody.poolKey.length > 0 ? requestBody.poolKey : undefined;
+      const body: AgentHostRecycleOpenCodeResponse = await orchestrator.recycleIdleOpenCodeServers(
+        poolKey !== undefined ? { poolKey } : undefined
+      );
       sendJson(response, 200, body);
       return;
     }
