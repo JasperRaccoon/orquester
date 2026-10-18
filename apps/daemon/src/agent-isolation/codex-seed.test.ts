@@ -134,7 +134,9 @@ describe("seedCodexHome", () => {
   });
 
   it("kills a Codex that never answers initialize and reports the deadline", async () => {
-    await assert.rejects(seedCodexHome(options({ FAKE_SEED_HANG: "1" }, { timeoutMs: 300 })), /timed out/);
+    // A deadline long enough for the fake to be running (and log its exit) on a loaded host: a
+    // SIGTERM that lands before Node has loaded the script kills it without an `exit` line.
+    await assert.rejects(seedCodexHome(options({ FAKE_SEED_HANG: "1" }, { timeoutMs: 5_000 })), /timed out/);
     const log = await events();
     assert.ok(log.some((line) => line.event === "exit"), "the child is gone");
     assert.ok((await lstat(join(codexHome, "sessions"))).isDirectory());
