@@ -478,11 +478,6 @@ export class AgentHooks {
   }
 }
 
-/** The managed hook script every agent's hook config calls. */
-function agentHookScriptPath(daemonDir: string): string {
-  return join(daemonDir, "hooks", "agent-hook.sh");
-}
-
 /**
  * The managed Grok hooks for a home Orquester builds itself (an Agent Profile's prepared
  * `GROK_HOME`, which no launch installs into): writes the shared hook script and answers the
@@ -490,9 +485,8 @@ function agentHookScriptPath(daemonDir: string): string {
  * writes the file into its own staging directory; throws on a failed script write.
  */
 export async function prepareGrokManagedHooks(daemonDir: string): Promise<string> {
-  const scriptPath = agentHookScriptPath(daemonDir);
-  await writeFileAtomic(scriptPath, hookScript(), 0o755, false);
-  return grokHookDocument(scriptPath);
+  await ensureAgentHookScript(daemonDir);
+  return grokHookDocument(agentHookScriptPath(daemonDir));
 }
 
 /** Events Grok emits that map onto an activity class (see classifyGrok). */
