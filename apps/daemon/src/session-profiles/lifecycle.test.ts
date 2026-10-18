@@ -455,6 +455,25 @@ describe("SessionProfileLifecycle", () => {
     assert.equal(codex.calls.length, 2);
   });
 
+  it("re-prepares a current version its preparer calls unusable (Codex: state DB gone) and hands preparers the CLI binary", async () => {
+    const codex = fakePreparer("codex", { perAccount: true });
+    let broken: string | null = null;
+    const preparer = { ...codex, unusableReason: (dir: string) => Promise.resolve(dir === broken ? "its state DB is missing" : null) };
+    const h = await setup({ codex: preparer }, { cliBin: (agent) => `/opt/bin/${agent}` });
+    const profile = await h.service.create({ name: "Dev" });
+    const first = await h.lifecycle.ensureReady(profile.id, "codex", "acc-1");
+    assert.equal(codex.calls[0]!.cliBin, "/opt/bin/codex");
+    // Usable: answered as is.
+    assert.equal((await h.lifecycle.ensureReady(profile.id, "codex", "acc-1")).preparedDir, first.preparedDir);
+    assert.equal(codex.calls.length, 1);
+    // Unusable: a NEW version, never the broken one.
+    broken = first.preparedDir;
+    const second = await h.lifecycle.ensureReady(profile.id, "codex", "acc-1");
+    assert.notEqual(second.preparedDir, first.preparedDir);
+    assert.equal(codex.calls.length, 2);
+    assert.ok(h.logs.some((line) => line.includes("cannot be used (its state DB is missing)")));
+  });
+
   it("cleans staging at boot, drops prepared dirs of deleted profiles and re-prepares stale ones", async () => {
     const h = await setup({ claude: fakePreparer("claude") }, { leases: leasesOf() });
     const profile = await h.service.create({ name: "Dev" });

@@ -316,3 +316,34 @@ test("a trailing context tag is dropped before the lookup: claude-opus-4-8[1m] b
   assert.ok(Math.abs(parts.input + parts.output + parts.cache - 0.21547) < 1e-9);
   assert.notEqual(estimateCostParts("claude-fable-5[1m]", { input: 1, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0 }), null);
 });
+
+test("codex rollouts an Agent Profile home writes through its sessions link are counted once", async () => {
+  // A prepared profile CODEX_HOME links `sessions` to the account's, which links to the system one;
+  // the scanner walks the system and account dirs (deduped by realpath), never prepared homes.
+  delete process.env.CODEX_HOME;
+  const home = await mkdtemp(join(tmpdir(), "orq-utok-profile-"));
+  const systemSessions = join(home, ".codex", "sessions");
+  await mkdir(systemSessions, { recursive: true });
+  const fs = await import("node:fs/promises");
+  const acctHome = join(home, "agent-accounts", "codex", "a1", "home");
+  await mkdir(acctHome, { recursive: true });
+  await fs.symlink(systemSessions, join(acctHome, "sessions"));
+  const profileHome = join(home, "session-profiles", "prepared", "editor", "codex", "a1", "v-1");
+  await mkdir(profileHome, { recursive: true });
+  await fs.symlink(join(acctHome, "sessions"), join(profileHome, "sessions"));
+  await writeFile(
+    join(profileHome, "sessions", "p.jsonl"),
+    JSON.stringify({ timestamp: "2026-07-07T00:00:00Z", type: "event_msg", payload: { type: "token_count", info: { total_token_usage: { total_tokens: 12 }, last_token_usage: { input_tokens: 10, output_tokens: 2, cached_input_tokens: 0, total_tokens: 12 } } } }),
+    "utf8"
+  );
+  const scanner = new UsageTokensScanner({
+    userhome: home,
+    cacheFile: join(home, "c.json"),
+    now: T0,
+    accountHomes: () => [{ agent: "codex", home: acctHome }]
+  });
+  await scanner.init();
+  const codex = (await scanner.snapshot(true)).rows.filter((r) => r.agent === "codex");
+  assert.equal(codex.reduce((a, r) => a + r.inputTokens, 0), 10);
+  assert.equal(codex.reduce((a, r) => a + r.outputTokens, 0), 2);
+});

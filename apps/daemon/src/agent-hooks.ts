@@ -78,6 +78,44 @@ exit 0
 `;
 }
 
+/** The managed hook script every agent's managed hooks run (`<daemonDir>/hooks/agent-hook.sh`). */
+export function agentHookScriptPath(daemonDir: string): string {
+  return join(daemonDir, "hooks", "agent-hook.sh");
+}
+
+/** Writes (or rewrites) the managed hook script; idempotent. */
+export async function ensureAgentHookScript(daemonDir: string): Promise<void> {
+  await writeFileAtomic(agentHookScriptPath(daemonDir), hookScript(), 0o755, false);
+}
+
+/** One Codex event the managed hooks listen to: its `hooks.json` name, its state-key label, its matcher. */
+export interface CodexManagedHookEvent {
+  name: string;
+  label: string;
+  matcher?: string;
+}
+
+/** The Codex events Orquester's managed hooks are installed for. */
+export const CODEX_MANAGED_HOOK_EVENTS: readonly CodexManagedHookEvent[] = [
+  { name: "SessionStart", label: "session_start" },
+  { name: "UserPromptSubmit", label: "user_prompt_submit" },
+  { name: "PreToolUse", label: "pre_tool_use", matcher: "*" },
+  { name: "PermissionRequest", label: "permission_request", matcher: "*" },
+  { name: "PostToolUse", label: "post_tool_use", matcher: "*" },
+  { name: "Stop", label: "stop" }
+];
+
+/** The managed `hooks.json` group of one event (what account homes and prepared profile homes carry). */
+export function codexManagedHookGroup(
+  scriptPath: string,
+  event: CodexManagedHookEvent
+): { matcher?: string; hooks: Array<{ type: "command"; command: string; timeout: number }> } {
+  return {
+    ...(event.matcher !== undefined ? { matcher: event.matcher } : {}),
+    hooks: [{ type: "command", command: `${shellQuotePosix(scriptPath)} codex ${event.name}`, timeout: 10 }]
+  };
+}
+
 /**
  * Atomic write that PRESERVES an existing target's permission bits by default —
  * user configs (Claude settings.json, Codex config.toml) can be 0600 and hold
@@ -204,7 +242,7 @@ export class AgentHooks {
   }
 
   private async install(entryId: string, targetDir: string): Promise<void> {
-    await writeFileAtomic(this.scriptPath, hookScript(), 0o755, false);
+    await ensureAgentHookScript(this.daemonDir);
     switch (entryId) {
       case "claude":
         await this.installClaude(targetDir);
@@ -317,15 +355,6 @@ export class AgentHooks {
       );
     }
 
-    const CODEX_EVENTS: Array<{ name: string; label: string; matcher?: string }> = [
-      { name: "SessionStart", label: "session_start" },
-      { name: "UserPromptSubmit", label: "user_prompt_submit" },
-      { name: "PreToolUse", label: "pre_tool_use", matcher: "*" },
-      { name: "PermissionRequest", label: "permission_request", matcher: "*" },
-      { name: "PostToolUse", label: "post_tool_use", matcher: "*" },
-      { name: "Stop", label: "stop" }
-    ];
-
     // 1) hooks.json — Claude-shaped { hooks: { Event: [group…] } }. Preserve
     // the user's whole document (Codex documents top-level metadata like
     // `description`); we only mutate the `hooks` member. Deep-validate before
@@ -349,28 +378,19 @@ export class AgentHooks {
       }
     }
     const docHooks = (doc.hooks as Record<string, unknown> | undefined) ?? {};
-    for (const event of CODEX_EVENTS) {
+    for (const event of CODEX_MANAGED_HOOK_EVENTS) {
       if (docHooks[event.name] !== undefined && !Array.isArray(docHooks[event.name])) {
         throw new Error(`hooks.json hooks.${event.name} is not an array; leaving it untouched`);
       }
     }
     const hooksDoc = { hooks: docHooks as Record<string, unknown[]> };
 
-    const managedFor = (event: { name: string; matcher?: string }) => ({
-      ...(event.matcher !== undefined ? { matcher: event.matcher } : {}),
-      hooks: [
-        {
-          type: "command",
-          command: `${shellQuotePosix(this.scriptPath)} codex ${event.name}`,
-          timeout: 10
-        }
-      ]
-    });
+    const managedFor = (event: CodexManagedHookEvent) => codexManagedHookGroup(this.scriptPath, event);
     let changed = false;
     // Trust identity depends on the group index — compute AFTER the final
     // array shape is known.
     const trustTargets: Array<{ label: string; matcher?: string; groupIndex: number; command: string }> = [];
-    for (const event of CODEX_EVENTS) {
+    for (const event of CODEX_MANAGED_HOOK_EVENTS) {
       const managed = managedFor(event);
       const groups = Array.isArray(hooksDoc.hooks[event.name])
         ? hooksDoc.hooks[event.name]
@@ -458,11 +478,6 @@ export class AgentHooks {
   }
 }
 
-/** The managed hook script every agent's hook config calls. */
-function agentHookScriptPath(daemonDir: string): string {
-  return join(daemonDir, "hooks", "agent-hook.sh");
-}
-
 /**
  * The managed Grok hooks for a home Orquester builds itself (an Agent Profile's prepared
  * `GROK_HOME`, which no launch installs into): writes the shared hook script and answers the
@@ -470,9 +485,8 @@ function agentHookScriptPath(daemonDir: string): string {
  * writes the file into its own staging directory; throws on a failed script write.
  */
 export async function prepareGrokManagedHooks(daemonDir: string): Promise<string> {
-  const scriptPath = agentHookScriptPath(daemonDir);
-  await writeFileAtomic(scriptPath, hookScript(), 0o755, false);
-  return grokHookDocument(scriptPath);
+  await ensureAgentHookScript(daemonDir);
+  return grokHookDocument(agentHookScriptPath(daemonDir));
 }
 
 /** Events Grok emits that map onto an activity class (see classifyGrok). */

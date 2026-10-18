@@ -13,8 +13,8 @@ per-agent GLOBAL config editor, user-facing "Agent config"). A chat without `pro
 | `store.ts` | `SessionProfileStore`: the only writer. CRUD of profiles and items, revisions, per-profile queue, secrets, `readSource`. |
 | `resolve.ts` | `resolveForAgent(source, agent)` → `ResolvedAgentProfile` (pure). Settings defaults, scope/support rules. |
 | `manifest.ts` + `manifest/<agent>.ts` | Prepared-dir `manifest.json` envelope + per-agent section schemas; read by the agent host. |
-| `preparer.ts` + `preparers/<agent>.ts` | Per-agent preparer contract and registry (`null` for an agent not done yet). Grok's (`preparers/grok.ts`) builds a whole `GROK_HOME`; its header lists the layout. |
-| `contributions/<agent>.ts` | Per-agent launch contribution (what a profile chat adds to its account's launch env). Grok: `GROK_HOME`/`homePath` = the prepared dir, `GROK_AUTH_PATH` = the account's `auth.json`, `GROK_PROFILE_ENV`. |
+| `preparer.ts` + `preparers/<agent>.ts` | Per-agent preparer contract and registry (`null` = not supported yet). `preparers/codex.ts`: the prepared `CODEX_HOME` (see "Codex" below); Grok's (`preparers/grok.ts`) builds a whole `GROK_HOME`; its header lists the layout. |
+| `contributions/<agent>.ts` | Per-agent launch contribution (what a profile chat adds to its account's launch env). Grok: `GROK_HOME`/`homePath` = the prepared dir, `GROK_AUTH_PATH` = the account's `auth.json`, `GROK_PROFILE_ENV`. Codex (`contributions/codex.ts`): `CODEX_HOME` and `homePath` = the prepared home. |
 | `lifecycle.ts` | `SessionProfileLifecycle`: builds and publishes immutable prepared versions, tracks and refreshes them, collects unleased old ones; `ensureReady` for launches. |
 | `launch.ts` | The launch side: per-agent launch contributions (`profileLaunchContributors`), `applyProfileContribution`, `createProfileLaunchResolver` (what `AgentChatService` launches with), the deleted-profile notice. |
 | `service.ts` | `SessionProfileService`: wire mapping (secrets masked), events, prepare status, `resolveForAgent(profileId, agent)`; the import entry points delegate to `imports.ts`. |
@@ -102,6 +102,29 @@ credentials, deadline); `.git` is removed before the copy. Sources that are not 
   the PATH CONTRACT in `preparer.ts`: write in `ctx.stagingDir`, name the dir's own location as
   `ctx.preparedDir` (the new VERSION dir it is renamed to; e.g. Codex hook trust), and only read
   `ctx.previousPreparedDir` (the current version, maybe in use by a running chat).
+
+- **Preparers that run the CLI** get it as `ctx.cliBin` (the lifecycle's `cliBin(agent)` option,
+  the registry's resolved binary; `null` = not installed). A preparer whose published dir can stop
+  being launchable declares `unusableReason(preparedDir)`: every job that would answer the current
+  version (so every `ensureReady`) asks it first, and a reason prepares a new version instead.
+
+## Codex (`preparers/codex.ts`, `contributions/codex.ts`, spec §6.2)
+
+One prepared `CODEX_HOME` per (profile, account) — `perAccount`, System = the system home.
+`auth.json` and `sessions/` are symlinks to the account home's (never copies); `config.toml` is
+Global's runtime settings (`codexRuntimeConfig`) plus `[features] apps/remote_plugin = false`
+(`plugins = false` without a Codex plugin), `[skills.bundled] enabled = false` when built-ins are
+hidden, the profile's MCP servers and plugins, and `[hooks.state]` trust keyed by
+`<ctx.preparedDir>/hooks.json`; `AGENTS.md`, `skills/` (commands become skills, `git/pr` →
+`git-pr`), `hooks.json` (profile hooks, then Orquester's managed ones), `plugins/cache/…`.
+**Seeding** runs inside `prepare`, in the staging dir: the state DB holds no path of its home, so
+it survives the rename to the version dir, and nothing can start on the home before its first
+`initialize` (it is not published yet). `auth.json` is linked after the seed. `inputs()` = the
+Global `config.toml`; `unusableReason` = the state DB file is missing (re-seed = a new version).
+The contribution sets `CODEX_HOME` and `homePath` to the prepared dir and refuses an unseeded
+one. The adapter (`agent-host/adapters/codex/profile.ts`) forces that home, fails a start whose
+`initialize` reports another, and switches off `$HOME/.agents/skills` (and any user skill outside
+the home) per thread with nested `skills.config` at every `thread/start` and `thread/resume`.
 
 ## OpenCode (`preparers/opencode.ts`, spec §6.4)
 
@@ -204,8 +227,9 @@ restarts (spec §5.6). Status, staleness and fingerprints read the current versi
 ## Launching a chat with a profile (`launch.ts`, `agent-chat/service.ts`)
 
 **Per-agent launch contributions.** `profileLaunchContributors: { [agent]: (ctx) =>
-ProfileLaunchContribution }`, read through `profileLaunchContribution(agent)`. Grok's is
-`contributions/grok.ts`; the others contribute nothing yet. Each per-agent task replaces ITS entry
+ProfileLaunchContribution }`, read through `profileLaunchContribution(agent)`. Codex's, Grok's and
+OpenCode's are in `contributions/codex.ts`, `contributions/grok.ts` and `preparers/opencode.ts`;
+Claude contributes nothing. Each per-agent task replaces ITS entry
 (and nothing else):
 
 ```ts

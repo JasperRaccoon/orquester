@@ -6,7 +6,8 @@
 //
 // Env: CODEX_HOME (set by the seeder);
 //   FAKE_SEED_LOG — append one JSON line per event (start, initialize with the
-//     kind of `$CODEX_HOME/sessions` at that moment, exit);
+//     kind of `$CODEX_HOME/sessions` and whether `auth.json` exists at that
+//     moment, exit);
 //   FAKE_SEED_DB — the file name to create (default state_5.sqlite; "" = none);
 //   FAKE_SEED_HANG=1 — never answer `initialize`;
 //   FAKE_SEED_IGNORE_EOF=1 — keep running after stdin closes (until killed).
@@ -37,6 +38,15 @@ function sessionsKind() {
   }
 }
 
+function authPresent() {
+  try {
+    lstatSync(join(HOME, "auth.json"));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 log({ event: "start" });
 process.on("exit", () => log({ event: "exit" }));
 process.on("SIGTERM", () => process.exit(143));
@@ -59,7 +69,7 @@ process.stdin.on("data", (chunk) => {
       process.stdout.write(`${JSON.stringify({ id: frame.id, error: { code: -32600, message: "unexpected" } })}\n`);
       continue;
     }
-    log({ event: "initialize", sessions: sessionsKind() });
+    log({ event: "initialize", sessions: sessionsKind(), auth: authPresent() });
     if (process.env.FAKE_SEED_HANG === "1") continue;
     if (DB !== "") writeFileSync(join(HOME, DB), "");
     process.stdout.write(
