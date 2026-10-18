@@ -167,7 +167,7 @@ interface MarkdownWriteViewProps {
   onSave?: () => void;
 }
 
-const MarkdownWriteView: React.FC<MarkdownWriteViewProps> = ({
+export const MarkdownWriteView: React.FC<MarkdownWriteViewProps> = ({
   kind,
   mode,
   model,

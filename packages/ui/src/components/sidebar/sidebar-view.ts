@@ -1,20 +1,21 @@
 /**
  * Which panel the desktop sidebar shows, picked on its activity bar: the
- * projects tree or the workflows panel. A per-device viewing preference, so
- * it lives in localStorage under `orquester:sidebar-view` as the bare id,
- * validated on load: anything else (a payload from another bundle, a storage
- * error, the retired "profile" — now Settings → Agent config) is the projects
- * tree. The "Agent Profiles" panel adds its id here (see `right-rail/panels.ts`).
+ * projects tree, the workflows panel or Agent Profiles. A per-device viewing
+ * preference, so it lives in localStorage under `orquester:sidebar-view` as
+ * the bare id, validated on load: anything else (a payload from another
+ * bundle, a storage error) is the projects tree. "profile" once named the
+ * per-agent config editor (now Settings → Agent config); a stored "profile"
+ * opens Agent Profiles, its successor in the slot.
  */
 
 import React from "react";
 
-export type SidebarView = "projects" | "workflows";
+export type SidebarView = "projects" | "workflows" | "profile";
 
 const STORAGE_KEY = "orquester:sidebar-view";
 
 export function parseSidebarView(raw: unknown): SidebarView {
-  return raw === "workflows" ? raw : "projects";
+  return raw === "workflows" || raw === "profile" ? raw : "projects";
 }
 
 function loadSidebarView(): SidebarView {

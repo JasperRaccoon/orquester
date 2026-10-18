@@ -6,10 +6,11 @@
  */
 
 import type React from "react";
-import { Bookmark, History, Workflow, type LucideIcon } from "lucide-react";
+import { Bookmark, History, Layers, Workflow, type LucideIcon } from "lucide-react";
 
 import { PromptHistoryPanel } from "./history/PromptHistoryPanel";
 import { SavedPromptsPanel } from "./saved-prompts/SavedPromptsPanel";
+import { SessionProfilesPanel } from "./session-profiles/SessionProfilesPanel";
 import { WorkflowsPanel } from "./workflows/WorkflowsPanel";
 import type { DockPanelId, RightRailPanelId, RightRailPanelProps } from "./types";
 
@@ -58,16 +59,22 @@ export const RIGHT_RAIL_PANEL_REGISTRY: RightRailPanelRegistry = {
     get Component() {
       return WorkflowsPanel;
     }
-  }
+  },
   /*
-   * Reserved: the "Agent Profiles" library (agent profiles spec §5.1) goes
-   * here, in the slot the old "Agent profile" panel held — that per-agent
-   * global config editor moved to Settings → Agent config. To add it: its id
-   * in `RightRailPanelId` (`types.ts`), its entry here, after "workflows" in
-   * `MOBILE_SECTION_ORDER` below, and on desktop in the left sidebar —
-   * `SidebarView` (`sidebar/sidebar-view.ts`) and the activity bar's `ITEMS`
-   * (`sidebar/ActivityBar.tsx`).
+   * The Agent Profiles library and editor (agent profiles spec §5.1), in the
+   * slot the old "Agent profile" panel held — that per-agent global config
+   * editor is Settings → Agent config. On desktop it lives in the left
+   * sidebar (`sidebar/sidebar-view.ts`, `sidebar/ActivityBar.tsx`).
    */
+  profile: {
+    id: "profile",
+    title: "Agent Profiles",
+    shortTitle: "Profiles",
+    Icon: Layers,
+    get Component() {
+      return SessionProfilesPanel;
+    }
+  }
 };
 
 /** The desktop rail's order, top to bottom. */
@@ -75,9 +82,9 @@ export const RIGHT_RAIL_PANEL_ORDER: readonly DockPanelId[] = ["prompts", "histo
 
 /**
  * A phone's section bar, left to right: every panel, since a phone has no left
- * sidebar panels to host workflows. (Agent Profiles takes the next slot, see the registry.)
+ * sidebar panels to host workflows and Agent Profiles.
  */
-export const MOBILE_SECTION_ORDER: readonly RightRailPanelId[] = ["prompts", "history", "workflows"];
+export const MOBILE_SECTION_ORDER: readonly RightRailPanelId[] = ["prompts", "history", "workflows", "profile"];
 
 /** The dock's element id — what the active rail button `aria-controls`. */
 export const RIGHT_RAIL_DOCK_ID = "right-rail-dock";
