@@ -36,9 +36,12 @@ non-empty real `sessions/` is never replaced. Concurrent calls for the same home
 share one run, so two processes never start before the first `initialize`.
 
 **Grok exclusions (`grok.ts`, §6.3).** Grok's `[skills] ignore` skips real
-subdirectories of an ignored directory but follows symlinked ones. So
+entries of an ignored directory but follows symlinked ones, and
+`compat.claude.skills` also loads `~/.claude/commands/*.md` as user skills. So
 `grokSkillIgnoreList` lists the `~` roots, then every entry of
-`~/.claude/skills` and `~/.agents/skills` by absolute path. A symlinked entry
+`~/.claude/skills`, `~/.agents/skills`, `~/.claude/commands` and
+`~/.agents/commands` by absolute path. The repo's `.claude/commands` still load,
+as in a Global chat. A symlinked entry
 also adds its realpath; a dangling one adds only its own path. It adds
 `<grokHome>/bundled/skills` when built-ins are hidden. Grok enables
 Claude-installed plugins on its own, and only exact names in `[plugins]
@@ -64,6 +67,19 @@ Tools such as `gh` and git keep their config. The function is idempotent. Every
 symlink in the shadow belongs to it, so it removes stale links and retargets
 wrong ones. It leaves real files that a tool created in the shadow alone, never
 writes into the real directory, and refuses overlapping paths.
+
+**OpenCode home (`opencode-home.ts`, §6.4).** OpenCode always reads
+`<home>/.opencode` as a config dir, with `<home>` = `OPENCODE_TEST_HOME ??
+os.homedir()`; neither `XDG_CONFIG_HOME` nor `OPENCODE_CONFIG_DIR` changes
+that. The variable is an undocumented test hook that moves nothing else a server
+uses (auth, DB, `{file:~/…}`, `permission` paths keep the real HOME).
+`opencodeHomeConfigItems` lists what a home's `.opencode` would load
+(`opencode.json[c]`, non-empty `agent(s)/`, `command(s)/`, `mode(s)/`,
+`plugin(s)/`, `skill(s)/`, `tool(s)/`), not `bin/` or OpenCode's own
+`package.json`/`node_modules/`. `probeOpencodeTestHome` proves the variable
+against a binary: a canary command in a fake `~/.opencode` must show in a
+sandboxed `opencode debug config` without it and not with it (temp XDG dirs, no
+sign-in, a closed npm registry; ~3 s). It never throws and removes its scratch.
 
 **Claude local plugin (`claude-plugin.ts`, §6.1).** A profile chat drops the
 user setting source, so its skills and commands arrive as one generated local

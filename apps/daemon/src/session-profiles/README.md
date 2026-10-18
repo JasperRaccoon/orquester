@@ -126,6 +126,12 @@ The contribution sets `CODEX_HOME` and `homePath` to the prepared dir and refuse
 one. The adapter (`agent-host/adapters/codex/profile.ts`) forces that home, fails a start whose
 `initialize` reports another, and switches off `$HOME/.agents/skills` (and any user skill outside
 the home) per thread with nested `skills.config` at every `thread/start` and `thread/resume`.
+**Known limit:** that list is taken at each session start. Codex 0.159.0 takes thread `config` only
+on `thread/start`/`thread/resume` (`turn/start` and `thread/settings/update` carry none), and it
+watches skill files (`skills/changed`), so a user skill added under `$HOME/.agents/skills` while a
+profile thread runs may be offered to it until the thread's next start, which switches it off.
+Grok has the same limit: its `[skills] ignore` list is computed at every spawn and fixed for the
+process, so a user skill or command linked in mid-session is only listed at the next spawn.
 
 ## OpenCode (`preparers/opencode.ts`, spec §6.4)
 
@@ -134,10 +140,23 @@ Shared by every account (`perAccount: false`); `inputs` = the Global `config.jso
 `OPENCODE_CONFIG_DIR`: `opencode.json` 0600 = the Global files merged as OpenCode merges them minus
 the item keys, relative `{file:}` refs made absolute, plus the profile's `mcp`, `skills.paths`
 `[".claude/skills", ".agents/skills"]` and, when built-ins are hidden, a last `permission.skill`
-rule denying `customize-opencode`; `AGENTS.md`; `skills/`; `commands/` — a command OpenCode could
+rule denying `customize-opencode`; `AGENTS.md`, always written — empty without instructions —
+because OpenCode takes the first existing of it and `~/.claude/CLAUDE.md` (an empty file adds
+nothing), and the launch refuses a version without it; `skills/`; `commands/` — a command OpenCode could
 not decode is left out with a warning, it would fail the whole config —; `plugin/` with each
-plugin's top-level `*.js`/`*.ts`/`*.mjs` and Orquester's `orquester-status.js`) and `xdg/` (the
-server's `XDG_CONFIG_HOME`: `buildXdgConfigShadow` of the real `~/.config` minus `opencode`).
+plugin's top-level `*.js`/`*.ts`/`*.mjs` and Orquester's `orquester-status.js`), `xdg/` (the
+server's `XDG_CONFIG_HOME`: `buildXdgConfigShadow` of the real `~/.config` minus `opencode`) and
+`home/` (empty: the server's `OPENCODE_TEST_HOME`, below).
+- **`$HOME/.opencode`.** OpenCode 1.18.34 always reads `<home>/.opencode` as a config dir, whatever
+  `XDG_CONFIG_HOME`/`OPENCODE_CONFIG_DIR` say, and HOME is the host's. `<home>` is
+  `OPENCODE_TEST_HOME ?? os.homedir()` (an undocumented test hook that moves nothing else a server
+  uses: auth and the DB under `XDG_DATA_HOME`, `{file:~/…}` and `permission` `~` paths keep the real
+  HOME), so the server gets `OPENCODE_TEST_HOME=<version>/home`. Being undocumented, preparation
+  probes the registry's binary (`probeOpencodeTestHome`: a canary command in a fake
+  `~/.opencode` must load in a sandboxed `opencode debug config` without the variable and not with
+  it; ~3 s, once per binary) and records `testHome.verified`. When it is not verified and the
+  user's `~/.opencode` holds config (`opencode.json[c]` or a non-empty item dir), preparation and
+  every launch refuse (`PROFILE_NOT_READY`, "~/.opencode would leak into profile chats: …").
 - **Writable config dirs.** OpenCode writes `.gitignore`, `package.json`, `bun.lock` and
   `node_modules/` into `opencode/` and into the shadow's own `xdg/opencode/` (which it creates).
   Both stay inside the version: the PATH CONTRACT lets the running CLI write there, nothing hashes
@@ -147,7 +166,8 @@ server's `XDG_CONFIG_HOME`: `buildXdgConfigShadow` of the real `~/.config` minus
   launch (the real `~/.config` changes without a profile edit). The refresh only manages the
   shadow's symlinks — the one launch-time write into a published version.
 - **Launch.** `serverPool {key: "profile:<profileId>:<version dir>", env: {XDG_CONFIG_HOME,
-  OPENCODE_CONFIG_DIR, OPENCODE_DISABLE_EXTERNAL_SKILLS: "1", OPENCODE_DISABLE_CLAUDE_CODE: "1"},
+  OPENCODE_CONFIG_DIR, OPENCODE_DISABLE_EXTERNAL_SKILLS: "1", OPENCODE_DISABLE_CLAUDE_CODE_SKILLS: "1",
+  OPENCODE_TEST_HOME},
   unsetEnv: ["OPENCODE_CONFIG"]}`; the thread's `launchEnv`/`homePath` stay the account's (OpenCode's
   shared servers read the project's launcher env). `XDG_DATA_HOME` and `OPENCODE_CONFIG_CONTENT`
   are untouched (OpenCode merges the latter last). A new version is a new key: the thread moves at
@@ -155,11 +175,15 @@ server's `XDG_CONFIG_HOME`: `buildXdgConfigShadow` of the real `~/.config` minus
 - **Status plugin.** The profile server's only copy is `opencode/plugin/orquester-status.js`
   (a profile plugin file of that name is skipped): the shadow never links `opencode`, so the real
   `~/.config/opencode/plugin/` is never read nor written through.
-- **Known limits (1.18.34).** `OPENCODE_DISABLE_CLAUDE_CODE` also drops a repo's `CLAUDE.md`
-  fallback (no `AGENTS.md` → no project instructions); `$HOME/.opencode` is still a config dir
-  OpenCode reads (HOME is the host's). OpenCode reads no project `.mcp.json`, in Global or here.
+- **Instructions.** Not `OPENCODE_DISABLE_CLAUDE_CODE` (it also drops a repo's own `CLAUDE.md`):
+  the repo's `AGENTS.md`, else its `CLAUDE.md`, loads as in Global, never `~/.claude/CLAUDE.md`
+  (checked live against the system prompt OpenCode sends a local fake provider).
+- **Known limits (1.18.34).** `$HOME/.opencode` is kept out only through
+  the undocumented `OPENCODE_TEST_HOME` (refused when that is not proven and it holds config).
+  OpenCode reads no project `.mcp.json`, in Global or here.
 - Live check (opt-in, real CLI, no login): `ORQUESTER_OPENCODE_LIVE=1` runs
-  `preparers/opencode-isolation.live.test.ts` (`opencode debug skill|config|agent build`).
+  `preparers/opencode-isolation.live.test.ts` (`opencode debug skill|config|agent build`, and
+  `opencode run` against an in-test fake OpenAI-compatible provider for the instructions).
 
 ## Preparation lifecycle (`lifecycle.ts`)
 

@@ -11,8 +11,11 @@
  *                             = the REPO's `.claude/skills` and `.agents/skills` (the two disable
  *                             flags drop them with the user ones) and, when built-ins are hidden,
  *                             `permission.skill` denying `customize-opencode`. SECRETS: 0600.
- *     AGENTS.md               the profile's instructions (OpenCode reads `<config dir>/AGENTS.md`
- *                             as THE global instruction file once OPENCODE_CONFIG_DIR is set)
+ *     AGENTS.md               the profile's instructions, ALWAYS written (empty without any):
+ *                             OpenCode takes the first existing of `<config dir>/AGENTS.md` and
+ *                             `~/.claude/CLAUDE.md` as THE global instruction file and skips an
+ *                             empty one, so the user's CLAUDE.md never loads; the launch refuses a
+ *                             version without it
  *     skills/<name>/          the profile's skills
  *     commands/<name>.md      the profile's commands (`git/pr` → `commands/git/pr.md`)
  *     plugin/                 every top-level `*.js`/`*.ts`/`*.mjs` of each profile plugin's cache,
@@ -21,6 +24,13 @@
  *   xdg/                      XDG_CONFIG_HOME: a symlink to every entry of the real `~/.config`
  *                             EXCEPT `opencode` (`buildXdgConfigShadow`), so `gh`, git and the
  *                             like keep their config while the global OpenCode dir is never read
+ *   home/                     OPENCODE_TEST_HOME: empty. OpenCode reads `<home>/.opencode` as a
+ *                             config dir whatever the two dirs above say; `<home>` is this variable
+ *                             or else the real HOME (`agent-isolation/opencode-home.ts`)
+ *
+ * `$HOME/.opencode`. The variable is undocumented, so preparation probes the CLI binary
+ * (`probeOpencodeTestHome`, once per binary) and records `testHome.verified`. Unproven, a user
+ * `~/.opencode` holding config refuses preparation AND every launch (it may appear later).
  *
  * WRITABLE CONFIG DIR. OpenCode writes `.gitignore`, `package.json`, `bun.lock` and `node_modules/`
  * (its `@opencode-ai/plugin` dependency) into every config dir it loads — here `opencode/` and the
@@ -37,25 +47,33 @@
  * touches `opencode/`, a real entry a tool created in the shadow, or the real `~/.config`.
  *
  * LAUNCH. `serverPool { key: "profile:<profileId>:<version dir>", env: {XDG_CONFIG_HOME,
- * OPENCODE_CONFIG_DIR, OPENCODE_DISABLE_EXTERNAL_SKILLS=1, OPENCODE_DISABLE_CLAUDE_CODE=1},
+ * OPENCODE_CONFIG_DIR, OPENCODE_DISABLE_EXTERNAL_SKILLS=1, OPENCODE_DISABLE_CLAUDE_CODE_SKILLS=1,
+ * OPENCODE_TEST_HOME},
  * unsetEnv: [OPENCODE_CONFIG] }` — a new version is a new key, so an edited profile starts a new
  * server at the thread's next start and the old one closes once idle (the pool's idle close).
  * `XDG_DATA_HOME` (auth and the session DB, shared with Global) and Orquester's
  * `OPENCODE_CONFIG_CONTENT` (loaded LAST by OpenCode, so it still wins) are left as they are;
  * nothing goes into the thread's own `launchEnv`, which OpenCode's shared servers do not read.
  *
- * Known limits (OpenCode 1.18.34): `OPENCODE_DISABLE_CLAUDE_CODE` also stops the repo-`CLAUDE.md`
- * fallback (a repo with `CLAUDE.md` and no `AGENTS.md` loads no project instructions), and
- * `$HOME/.opencode` — a config dir OpenCode reads below HOME — is not shadowed (HOME is the host's).
+ * Project instructions load as in Global (verified on 1.18.34 with the real system prompt): the
+ * repo's `AGENTS.md`, else its `CLAUDE.md`. Known limits (OpenCode 1.18.34): `$HOME/.opencode` is
+ * kept out only through the undocumented `OPENCODE_TEST_HOME` (above).
  * OpenCode 1.18.34 reads no project `.mcp.json` in Global or here.
  */
 
 import { createHash } from "node:crypto";
-import { chmod, copyFile, lstat, mkdir, open, readdir, readFile } from "node:fs/promises";
+import { chmod, copyFile, lstat, mkdir, open, readdir, readFile, stat } from "node:fs/promises";
+import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import { OPENCODE_SESSION_TOOLS_SERVER_PATTERN, SESSION_TOOLS_SERVER_NAME } from "@orquester/api/agent-chat";
 import { OPENCODE_STATUS_PLUGIN_FILE, openCodeStatusPluginSource } from "../../agent-hooks.ts";
 import { opencodeRuntimeConfig } from "../../agent-isolation/runtime-settings.ts";
+import {
+  OPENCODE_TEST_HOME_ENV,
+  type OpencodeTestHomeProbe,
+  opencodeHomeConfigItems,
+  probeOpencodeTestHome
+} from "../../agent-isolation/opencode-home.ts";
 import { buildXdgConfigShadow } from "../../agent-isolation/xdg-shadow.ts";
 import { CONFIG_FILE_NAMES, mergeConfigValues, readConfigState } from "../../agent-profile/adapters/opencode/config.ts";
 import { isJsonObject, type JsonObject } from "../../agent-profile/adapters/opencode/jsonc.ts";
@@ -73,7 +91,7 @@ import type { ResolvedMcpServer } from "../resolve.ts";
  * Bump the leading number when the prepared output changes for the same inputs. The suffix follows
  * the status plugin's source, so a new plugin re-prepares every OpenCode profile.
  */
-export const OPENCODE_PREPARER_VERSION = `1.${createHash("sha256").update(openCodeStatusPluginSource()).digest("hex").slice(0, 8)}`;
+export const OPENCODE_PREPARER_VERSION = `3.${createHash("sha256").update(openCodeStatusPluginSource()).digest("hex").slice(0, 8)}`;
 
 /** OpenCode's one built-in skill (1.18.34); denied when the profile hides built-ins. */
 export const OPENCODE_BUILTIN_SKILLS = ["customize-opencode"] as const;
@@ -81,14 +99,21 @@ export const OPENCODE_BUILTIN_SKILLS = ["customize-opencode"] as const;
 /** The repo's own skill folders, brought back by `skills.paths` (relative to the session's directory). */
 export const OPENCODE_PROJECT_SKILL_PATHS = [".claude/skills", ".agents/skills"] as const;
 
-/** The variables a profile server starts with (besides the two dirs). */
-export const OPENCODE_PROFILE_FLAGS = { OPENCODE_DISABLE_EXTERNAL_SKILLS: "1", OPENCODE_DISABLE_CLAUDE_CODE: "1" } as const;
+/**
+ * The variables a profile server starts with (besides the dirs): the user's `~/.claude/skills` and
+ * `~/.agents/skills` off. Not `OPENCODE_DISABLE_CLAUDE_CODE`: it also drops a repo's own
+ * `CLAUDE.md`; the `~/.claude/CLAUDE.md` fallback is stopped by the always-present `AGENTS.md`.
+ */
+export const OPENCODE_PROFILE_FLAGS = { OPENCODE_DISABLE_EXTERNAL_SKILLS: "1", OPENCODE_DISABLE_CLAUDE_CODE_SKILLS: "1" } as const;
 
 /** Removed from a profile server's env: an extra config FILE the launcher env may name (user items). */
 export const OPENCODE_PROFILE_UNSET = ["OPENCODE_CONFIG"] as const;
 
 const CONFIG_DIR = "opencode";
 const XDG_DIR = "xdg";
+const TEST_HOME_DIR = "home";
+/** The probe's scratch, inside the staging dir and removed before it is published. */
+const PROBE_DIR = ".probe-test-home";
 const CONFIG_FILE = "opencode.json";
 const INSTRUCTIONS_FILE = "AGENTS.md";
 const PLUGIN_EXTENSIONS = new Set([".js", ".ts", ".mjs"]);
@@ -180,6 +205,39 @@ async function pluginFiles(cacheDir: string): Promise<string[]> {
   return out;
 }
 
+/**
+ * The refusal when `<home>/.opencode` holds config a profile server would load: OpenCode reads it
+ * whatever XDG_CONFIG_HOME / OPENCODE_CONFIG_DIR say, and the override is not proven.
+ */
+export function opencodeHomeLeakMessage(home: string, items: readonly string[], reason: string): string {
+  return (
+    `~/.opencode would leak into profile chats: ${join(home, ".opencode")} holds ${items.join(", ")}, which OpenCode loads ` +
+    `in every chat, and ${OPENCODE_TEST_HOME_ENV} cannot be relied on to keep it out (${reason}). ` +
+    "Move those into ~/.config/opencode or remove them, then try again."
+  );
+}
+
+/** Probes that proved the override, per CLI binary (path, size, mtime): one probe per installed OpenCode. */
+const provenTestHome = new Map<string, Promise<OpencodeTestHomeProbe>>();
+
+async function verifyTestHome(cliBin: string | null | undefined, scratchDir: string): Promise<OpencodeTestHomeProbe> {
+  if (!cliBin) return { effective: false, reason: "no OpenCode binary was found to check it" };
+  let key: string;
+  try {
+    const info = await stat(cliBin);
+    key = `${cliBin}\0${info.size}\0${info.mtimeMs}`;
+  } catch {
+    return { effective: false, reason: `the OpenCode binary ${cliBin} could not be read` };
+  }
+  const known = provenTestHome.get(key);
+  if (known !== undefined) return await known;
+  const probe = probeOpencodeTestHome({ opencodeBin: cliBin, scratchDir });
+  provenTestHome.set(key, probe);
+  const result = await probe;
+  if (!result.effective) provenTestHome.delete(key);
+  return result;
+}
+
 async function prepareOpenCode(ctx: SessionProfilePrepareContext<"opencode">): Promise<OpenCodePreparedSection> {
   const { resolved } = ctx;
   const configDir = join(ctx.stagingDir, CONFIG_DIR);
@@ -206,10 +264,10 @@ async function prepareOpenCode(ctx: SessionProfilePrepareContext<"opencode">): P
   };
   await writeNew(join(configDir, CONFIG_FILE), `${JSON.stringify(config, null, 2)}\n`, 0o600);
 
+  // ALWAYS written, empty without instructions: OpenCode takes the first of `<config dir>/AGENTS.md`
+  // and `~/.claude/CLAUDE.md` that exists as the global instructions, and skips an empty file.
   const instructions = resolved.instructions.trim();
-  if (instructions.length > 0) {
-    await writeNew(join(configDir, INSTRUCTIONS_FILE), `${instructions}\n`, 0o600);
-  }
+  await writeNew(join(configDir, INSTRUCTIONS_FILE), instructions.length > 0 ? `${instructions}\n` : "", 0o600);
 
   const skills: string[] = [];
   for (const skill of resolved.skills) {
@@ -259,6 +317,16 @@ async function prepareOpenCode(ctx: SessionProfilePrepareContext<"opencode">): P
   const realConfigHome = dirname(ctx.systemHomes.opencodeDir);
   await buildXdgConfigShadow({ realConfigHome, shadowDir: join(ctx.stagingDir, XDG_DIR), exclude: ["opencode"] });
 
+  // `$HOME/.opencode`: OPENCODE_TEST_HOME points OpenCode at an empty dir instead, when the CLI is
+  // proven to honour it; otherwise a home whose `.opencode` holds config refuses the profile.
+  await mkdir(join(ctx.stagingDir, TEST_HOME_DIR), { mode: 0o700 });
+  const probe = await verifyTestHome(ctx.cliBin, join(ctx.stagingDir, PROBE_DIR));
+  const userHome = ctx.systemHomes.home;
+  if (!probe.effective) {
+    const leaks = await opencodeHomeConfigItems(userHome);
+    if (leaks.length > 0) throw new Error(opencodeHomeLeakMessage(userHome, leaks, probe.reason));
+  }
+
   return {
     configDir: CONFIG_DIR,
     xdgConfigHome: XDG_DIR,
@@ -267,7 +335,9 @@ async function prepareOpenCode(ctx: SessionProfilePrepareContext<"opencode">): P
     commands,
     mcpServerNames: Object.keys(mcp),
     plugins,
-    hiddenSkills
+    hiddenSkills,
+    userHome,
+    testHome: probe.effective ? { dir: TEST_HOME_DIR, verified: true } : { dir: TEST_HOME_DIR, verified: false, reason: probe.reason }
   };
 }
 
@@ -305,11 +375,28 @@ export async function opencodeLaunchContribution(ctx: ProfileLaunchContext<"open
   const configDir = join(preparedDir, section.configDir);
   const launcherConfigHome = ctx.launchEnv.XDG_CONFIG_HOME;
   const realConfigHome = launcherConfigHome !== undefined && isAbsolute(launcherConfigHome) ? launcherConfigHome : section.realConfigHome;
+  if (!(await lstat(join(configDir, INSTRUCTIONS_FILE)).then((info) => info.isFile(), () => false))) {
+    // Without it OpenCode would read the user's ~/.claude/CLAUDE.md as the global instructions.
+    throw new Error(`The prepared OpenCode config's ${INSTRUCTIONS_FILE} is missing (an older or damaged preparation); prepare the profile again.`);
+  }
+  const testHome = section.testHome;
+  if (testHome?.verified !== true) {
+    const userHome = section.userHome ?? homedir();
+    const leaks = await opencodeHomeConfigItems(userHome);
+    if (leaks.length > 0) {
+      throw new Error(opencodeHomeLeakMessage(userHome, leaks, testHome?.reason ?? "this prepared version predates the check"));
+    }
+  }
   await refreshShadow(realConfigHome, shadowDir);
   return {
     serverPool: {
       key: opencodeProfilePoolKey(profileId, preparedDir),
-      env: { XDG_CONFIG_HOME: shadowDir, OPENCODE_CONFIG_DIR: configDir, ...OPENCODE_PROFILE_FLAGS },
+      env: {
+        XDG_CONFIG_HOME: shadowDir,
+        OPENCODE_CONFIG_DIR: configDir,
+        ...OPENCODE_PROFILE_FLAGS,
+        ...(testHome !== undefined ? { [OPENCODE_TEST_HOME_ENV]: join(preparedDir, testHome.dir) } : {})
+      },
       unsetEnv: [...OPENCODE_PROFILE_UNSET]
     }
   };

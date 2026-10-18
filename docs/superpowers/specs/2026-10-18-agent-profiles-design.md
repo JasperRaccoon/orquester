@@ -324,10 +324,13 @@ Home contents (real files): `AGENTS.md`/`rules/` (instructions), `skills/`, `com
 `config.toml` (§6.0 carry-over plus) `[cli] auto_update = false, use_leader = false`; every
 `[compat.claude.*]` and `[compat.cursor.*]` cell `false` **except `compat.claude.skills = true`**;
 `[skills] ignore = ["~/.claude/skills", "~/.agents/skills", "~/.agents/commands",
-"<home>/bundled/skills"]` (the last only when hiding built-ins) **plus, computed at every spawn,
-every entry of `~/.claude/skills` (and `~/.agents/skills`) by absolute path, and for each symlinked
-entry its resolved target too** — Grok's directory ignore skips real subdirectories but follows
-symlinked ones (verified live: 9 symlinked global skills leaked into the model's context until each
+"~/.claude/commands", "<home>/bundled/skills"]` (the last only when hiding built-ins) **plus,
+computed at every spawn, every entry of `~/.claude/skills`, `~/.agents/skills`,
+`~/.claude/commands` and `~/.agents/commands` by absolute path, and for each symlinked entry its
+resolved target too** — Grok's directory ignore skips real entries but follows symlinked ones, and
+`compat.claude.skills` also loads `~/.claude/commands/*.md` as user skills (verified with `grok
+inspect`: a real and a symlinked user command both listed as `vendor: claude, enabled` until listed;
+the repo's `.claude/commands` still load, as in Global) (verified live: 9 symlinked global skills leaked into the model's context until each
 was listed; with them listed the model saw only the repo's and the profile's skills); the profile's `[mcp_servers]` (or
 send them as ACP `mcpServers`); and `[plugins] disabled = [<exact name of every discovered plugin
 that isn't the profile's>]`, built from `grok inspect --json` `.plugins[].name` under the profile
@@ -360,7 +363,16 @@ read once per server, so per-chat config is impossible on a shared server. The p
   `plugin/` (profile plugins **plus a copy of Orquester's `orquester-status.js`**), `commands/`,
   `agents/`. OpenCode writes `package.json`/`node_modules`/`.gitignore` there; it must be writable
   and Orquester-owned.
-- `OPENCODE_DISABLE_EXTERNAL_SKILLS=1`, `OPENCODE_DISABLE_CLAUDE_CODE=1`; keep `XDG_DATA_HOME`
+- `OPENCODE_TEST_HOME=<profile>/home` (an empty dir): OpenCode reads `<home>/.opencode` as a config
+  dir whatever `XDG_CONFIG_HOME`/`OPENCODE_CONFIG_DIR` say, with `<home>` =
+  `OPENCODE_TEST_HOME ?? os.homedir()` (verified on 1.18.34: MCP servers and commands of a temp
+  `~/.opencode` leaked until it was set). Undocumented, so preparation probes the installed binary
+  and records whether it honours it; while unproven, a `~/.opencode` holding config refuses the
+  profile at preparation and at every launch.
+- `OPENCODE_DISABLE_EXTERNAL_SKILLS=1`, `OPENCODE_DISABLE_CLAUDE_CODE_SKILLS=1` (not the broad
+  `OPENCODE_DISABLE_CLAUDE_CODE`, which also drops a repo's own `CLAUDE.md`); the config dir's
+  `AGENTS.md` is always written (empty without instructions — OpenCode skips an empty file), since
+  OpenCode reads the first existing of `<config dir>/AGENTS.md` and `~/.claude/CLAUDE.md`; keep `XDG_DATA_HOME`
   (auth.json and the session DB stay shared — verified concurrent servers on one data dir) and
   `OPENCODE_CONFIG_CONTENT` as today.
 - `opencode.json` (§6.0 carry-over plus) `"skills": { "paths": [".claude/skills", ".agents/skills"] }`
@@ -437,15 +449,19 @@ Tests for every behavior, parsing, persistence and protocol change (AGENTS.md). 
 ## 9. Risks and unverified points
 
 - Relies on undocumented/experimental knobs that a CLI update could change: Grok `GROK_AUTH_PATH`;
+  OpenCode `OPENCODE_TEST_HOME` (probed at preparation, refused when unproven and needed);
   Codex `skills.bundled`, `features.apps/remote_plugin`; Claude's `skills` option interplay with
   the Workflow tool. Preparation's validation step (§6.5) must catch a regression and fail loudly.
 - Claude: claude.ai-synced plugins unverified (none exist yet). Project `enabledPlugins` is
   verified and overridden (§6.1).
 - Codex: refresh writes `auth.json` in place (non-atomic) — same as today's shared homes.
 - Grok: deny list must track every globally discovered plugin by exact name, and the skills
-  ignore list every global skill entry incl. symlinks (both rebuilt per spawn). A global skill
-  symlink added while a Grok chat runs could appear if Grok reloads skills mid-chat; the isolation
-  test must include a symlinked global skill.
+  ignore list every global skill and command entry incl. symlinks (both rebuilt per spawn). A
+  global skill or command linked in while a Grok chat runs could appear if Grok reloads skills
+  mid-chat (accepted: the list is fixed for the process, see §12); the isolation test includes
+  symlinked global skills and commands.
+- Codex: user skills are switched off per thread from a `skills/list` at session start; one added
+  to `$HOME/.agents/skills` mid-session may be offered until the next start (accepted, §12).
 - OpenCode: one extra server (and its MCP processes) per project × profile in use.
 
 ## 10. Left to the builder
@@ -517,7 +533,10 @@ Decisions made while building, each checked against the code. Code names use the
 - `enabledPlugins: {<id>: false}` at the flag tier for every plugin in the account's
   `installed_plugins.json` and every id the project's settings enable.
 - Flag-tier settings and MCP servers go through 0600 files under
-  `<appdir>/tmp/claude-profile-launch/<threadId>/` (`--settings`, `--mcp-config`), never argv.
+  `<host tmp dir>/claude-profile-launch/<threadId>/` (`--settings`, `--mcp-config`), never argv.
+  The host's tmp dir is `TMPDIR` when set (else `<appdir>/tmp`), so both directories are created
+  0700 and an existing one must be a real directory of the daemon's uid with no group/other bits,
+  else the start is refused (never written into a dir another user could read or swap).
 
 **Codex (§6.2)**
 - Seeding runs **inside `prepare`, in the staging dir** (the state DB records no path of its home,
@@ -531,6 +550,12 @@ Decisions made while building, each checked against the code. Code names use the
   nested `skills.config` at every `thread/start` and `thread/resume`.
 - No opt-in live check against the real CLI exists for Codex; seeding is tested against a fake
   `codex app-server`.
+- Known limit: the `skills.config` disables come from the `skills/list` of each session start.
+  Re-listing before every turn was considered and rejected: codex-cli 0.159.0 accepts thread
+  `config` only on `thread/start`/`thread/resume` (`turn/start` and `thread/settings/update` have
+  no `config`), so a fresh list could not be applied without restarting the thread. Codex watches
+  skill files (`skills/changed`), so a user skill added under `$HOME/.agents/skills` while a profile
+  thread runs may be offered to it until its next start.
 
 **Grok (§6.3)**
 - **One shared `GROK_HOME` per prepared version**, not per thread. `config.toml` is rendered from
@@ -539,6 +564,8 @@ Decisions made while building, each checked against the code. Code names use the
   home and swapped in by rename; the render does not depend on the thread, project or account.
 - Profile plugins are copied under `profile/plugins/` (so Grok's own plugin scan never sees them
   twice) and passed with `--plugin-dir`, as is a generated plugin carrying the profile's hooks.
+- Known limit: the `[skills] ignore` list (user skills and commands) is fixed when the process
+  spawns; an entry linked in mid-session is only listed at the next spawn.
 
 **OpenCode (§6.4)**
 - Built-in skills are hidden with a last `permission.skill` rule denying `customize-opencode`, not
@@ -549,8 +576,20 @@ Decisions made while building, each checked against the code. Code names use the
 - The `XDG_CONFIG_HOME` shadow is built at preparation and refreshed by the launch contribution at
   every launch (the real `~/.config` changes without a profile edit); OpenCode's own writes
   (`package.json`, `node_modules/`, …) stay inside the version dir.
-- Known limits (1.18.34): `OPENCODE_DISABLE_CLAUDE_CODE` also drops a repo's `CLAUDE.md` fallback
-  (a repo without `AGENTS.md` gets no project instructions); `$HOME/.opencode` is still read;
+- `$HOME/.opencode` (always a config dir for OpenCode) is kept out with the undocumented
+  `OPENCODE_TEST_HOME` pointed at an empty `<version>/home`. Verified on 1.18.34 that it moves only
+  that lookup (plus the `~/.claude` fallbacks a profile turns off anyway): auth and the session DB
+  under `XDG_DATA_HOME`, `{file:~/…}` and `permission` `~` paths keep the real HOME. Preparation
+  probes the registry's binary (a canary command in a sandboxed fake `~/.opencode`, loaded without
+  the variable and not with it, ~3 s once per binary); when unproven, a `~/.opencode` with config
+  files or item dirs refuses preparation and every launch with `PROFILE_NOT_READY`.
+- Instructions (verified on 1.18.34 by reading the system prompt OpenCode sends a local fake
+  provider): `OPENCODE_DISABLE_CLAUDE_CODE_SKILLS=1` replaces `OPENCODE_DISABLE_CLAUDE_CODE=1`, and
+  `<version>/opencode/AGENTS.md` is always written (empty without instructions), so the user's
+  `~/.claude/CLAUDE.md` never loads (it would as the fallback when that file is missing;
+  `OPENCODE_TEST_HOME` also moves that lookup) while the repo's `AGENTS.md`, else its `CLAUDE.md`,
+  loads exactly as in Global. The launch refuses a version without the file.
+- Known limits (1.18.34): `$HOME/.opencode` relies on an undocumented variable (above);
   OpenCode reads no project `.mcp.json` in Global or in a profile; npm plugins are not copyable.
 
 **Verification (§8)** — per-agent preparer and launch unit tests; opt-in live checks

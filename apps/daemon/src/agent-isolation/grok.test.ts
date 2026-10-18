@@ -37,18 +37,28 @@ describe("grokSkillIgnoreList", () => {
     await writeFile(join(root, "agents-skills-real", "README.md"), "x");
     await mkdir(join(home, ".agents"), { recursive: true });
     await symlink(join(root, "agents-skills-real"), join(home, ".agents", "skills"));
+    // ~/.claude/commands: a real command file and a symlinked one; ~/.agents/commands: a symlinked one.
+    await mkdir(join(shared, "cmds"), { recursive: true });
+    await writeFile(join(shared, "cmds", "linked-cmd.md"), "x");
+    await writeFile(join(shared, "cmds", "agents-cmd.md"), "x");
+    await mkdir(join(home, ".claude", "commands"), { recursive: true });
+    await writeFile(join(home, ".claude", "commands", "plain.md"), "x");
+    await symlink(join(shared, "cmds", "linked-cmd.md"), join(home, ".claude", "commands", "linked-cmd.md"));
+    await mkdir(join(home, ".agents", "commands"), { recursive: true });
+    await symlink(join(shared, "cmds", "agents-cmd.md"), join(home, ".agents", "commands", "agents-cmd.md"));
   });
 
   after(async () => {
     await rm(root, { recursive: true, force: true });
   });
 
-  it("lists the user roots, every entry by absolute path, and each symlinked entry's target", async () => {
+  it("lists the user skill and command roots, every entry by absolute path, and each symlinked entry's target", async () => {
     const list = await grokSkillIgnoreList({ home, grokHome: join(root, "grok-home"), hideBundled: false });
     assert.deepEqual(list, [
       "~/.claude/skills",
       "~/.agents/skills",
       "~/.agents/commands",
+      "~/.claude/commands",
       join(home, ".claude", "skills", "dangling"),
       join(home, ".claude", "skills", "linked-a"),
       join(shared, "linked-a"),
@@ -56,7 +66,12 @@ describe("grokSkillIgnoreList", () => {
       join(root, "agents-skills-real"),
       join(home, ".agents", "skills", "README.md"),
       join(home, ".agents", "skills", "linked-b"),
-      join(shared, "linked-b")
+      join(shared, "linked-b"),
+      join(home, ".claude", "commands", "linked-cmd.md"),
+      join(shared, "cmds", "linked-cmd.md"),
+      join(home, ".claude", "commands", "plain.md"),
+      join(home, ".agents", "commands", "agents-cmd.md"),
+      join(shared, "cmds", "agents-cmd.md")
     ]);
   });
 
@@ -69,7 +84,8 @@ describe("grokSkillIgnoreList", () => {
     assert.deepEqual(await grokSkillIgnoreList({ home: join(root, "empty-home"), grokHome: "/g", hideBundled: false }), [
       "~/.claude/skills",
       "~/.agents/skills",
-      "~/.agents/commands"
+      "~/.agents/commands",
+      "~/.claude/commands"
     ]);
   });
 });

@@ -17,7 +17,10 @@
  *     realConfigHome: "/home/u/.config",
  *     skills: [...], commands: [...], mcpServerNames: [...],   names only (no values)
  *     plugins: [{ itemId, name, files: ["notify.js"] }],        the files copied into plugin/
- *     hiddenSkills: ["customize-opencode"]                       denied by `permission.skill`
+ *     hiddenSkills: ["customize-opencode"],                      denied by `permission.skill`
+ *     userHome: "/home/u",            the HOME whose `.opencode` OpenCode reads unless overridden
+ *     testHome: { dir: "home", verified: true }                  OPENCODE_TEST_HOME (an empty dir);
+ *                                     `verified` = the CLI was probed to honour it (else `reason`)
  *   }
  */
 
@@ -35,7 +38,15 @@ export const opencodePreparedSectionSchema = z
     plugins: z
       .array(z.object({ itemId: z.string().min(1), name: z.string(), files: z.array(z.string()) }).passthrough())
       .default([]),
-    hiddenSkills: z.array(z.string()).default([])
+    hiddenSkills: z.array(z.string()).default([]),
+    /** The daemon user's HOME at preparation: the launch re-checks its `.opencode` (absent in older sections). */
+    userHome: z
+      .string()
+      .min(1)
+      .refine((value) => value.startsWith("/"), "must be an absolute path")
+      .optional(),
+    /** `OPENCODE_TEST_HOME`'s empty dir, and whether the CLI was proven to honour it (absent in older sections). */
+    testHome: z.object({ dir: preparedRelativePath, verified: z.boolean(), reason: z.string().optional() }).passthrough().optional()
   })
   .passthrough();
 export type OpenCodePreparedSection = z.infer<typeof opencodePreparedSectionSchema>;

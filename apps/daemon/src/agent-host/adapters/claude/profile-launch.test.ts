@@ -5,7 +5,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
@@ -164,5 +164,42 @@ describe("Claude profile launch files", () => {
     await removeClaudeProfileLaunchFiles(files);
     await assert.rejects(stat(files.dir));
     await removeClaudeProfileLaunchFiles(files);
+  });
+
+  it("create their 0700 parent and refuse one that is not a private, real directory of this user", async () => {
+    const root = await mkdtemp(join(tmpdir(), "orq-claude-profile-files-"));
+    roots.push(root);
+    // A fresh tmp dir: the shared `claude-profile-launch` parent is created 0700.
+    const files = claudeProfileLaunchFiles(root, "thread-1");
+    await writeClaudeProfileLaunchFiles(files, { settings: { a: 1 } });
+    assert.equal((await lstat(join(root, "claude-profile-launch"))).mode & 0o777, 0o700);
+
+    // A parent someone else could read or plant in (a shared TMPDIR): refused, nothing written.
+    const loose = await mkdtemp(join(tmpdir(), "orq-claude-profile-files-"));
+    roots.push(loose);
+    await mkdir(join(loose, "claude-profile-launch"), { mode: 0o755 });
+    await chmod(join(loose, "claude-profile-launch"), 0o755);
+    const looseFiles = claudeProfileLaunchFiles(loose, "thread-1");
+    await assert.rejects(writeClaudeProfileLaunchFiles(looseFiles, { settings: { secret: 1 } }), ProfileLaunchError);
+    await assert.rejects(lstat(looseFiles.dir), "no per-thread dir in a loose parent");
+
+    // A parent that is a symlink (to a dir the attacker reads): refused, the target stays empty.
+    const linked = await mkdtemp(join(tmpdir(), "orq-claude-profile-files-"));
+    roots.push(linked);
+    const target = join(linked, "elsewhere");
+    await mkdir(target, { mode: 0o700 });
+    await symlink(target, join(linked, "claude-profile-launch"));
+    await assert.rejects(writeClaudeProfileLaunchFiles(claudeProfileLaunchFiles(linked, "thread-1"), { settings: { secret: 1 } }), ProfileLaunchError);
+    assert.deepEqual(await readdir(target), []);
+
+    // A per-thread dir planted as a symlink inside a private parent: refused too.
+    const planted = await mkdtemp(join(tmpdir(), "orq-claude-profile-files-"));
+    roots.push(planted);
+    await mkdir(join(planted, "claude-profile-launch"), { mode: 0o700 });
+    const plantedTarget = join(planted, "target");
+    await mkdir(plantedTarget, { mode: 0o700 });
+    await symlink(plantedTarget, join(planted, "claude-profile-launch", "thread-1"));
+    await assert.rejects(writeClaudeProfileLaunchFiles(claudeProfileLaunchFiles(planted, "thread-1"), { settings: { secret: 1 } }), ProfileLaunchError);
+    assert.deepEqual(await readdir(plantedTarget), []);
   });
 });

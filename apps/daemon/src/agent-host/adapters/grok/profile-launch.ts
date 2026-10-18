@@ -7,9 +7,10 @@
  * the rest before EVERY spawn of `grok agent stdio`:
  * - reads the prepared section (`loadProfileManifest(input, "grok")`; a missing or mismatched one
  *   FAILS the start — never a Global launch);
- * - computes `[skills] ignore` afresh (`grokSkillIgnoreList`: every entry of `~/.claude/skills`
- *   and `~/.agents/skills` by path, plus each symlinked entry's target — Grok follows symlinked
- *   skill dirs, so a skill linked in since the last spawn must be listed);
+ * - computes `[skills] ignore` afresh (`grokSkillIgnoreList`: every entry of `~/.claude/skills`,
+ *   `~/.agents/skills`, `~/.claude/commands` and `~/.agents/commands` by path, plus each symlinked
+ *   entry's target — Grok follows symlinked entries, so one linked in since the last spawn must be
+ *   listed);
  * - runs `grok inspect --json` under the profile home (cwd = the home, so no project layer joins
  *   in and the project's own plugins stay as in Global) and denies every discovered plugin by
  *   exact name (`[plugins] disabled`) except the profile's own: Grok enables Claude-installed
