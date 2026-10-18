@@ -344,6 +344,26 @@ function providerSnapshot(id: string, status: ProviderSnapshot["status"], slugs:
   } as unknown as ProviderSnapshot;
 }
 
+describe("editor-store: Agent Profiles (spec 2026-10-18 §5.5)", () => {
+  it("a block naming a profile the loaded list does not hold is flagged as the daemon flags it; none is checked before the list loads", async () => {
+    const chain = [{ agent: "claude", model: "opus", accounts: { strategy: "least-used" } }];
+    const { timers, editor } = await setup(
+      workflow(
+        [node("t", "trigger.manual", {}, { name: "Start" }), node("a", "agent", { prompt: { kind: "text", text: "Tidy" }, chain, profileId: "prof-gone" }, { name: "Nightly" })],
+        [edge("t", "a")]
+      )
+    );
+    editor.validateNow();
+    assert.equal(editor.state.problems.filter((problem) => problem.code === "unknown_profile").length, 0, "no list, no check");
+    editor.setValidationContext({ sessionProfileIds: ["prof-1"] });
+    timers.advance(600);
+    assert.deepEqual(editor.state.problems.filter((problem) => problem.code === "unknown_profile").map((problem) => [problem.severity, problem.nodeId, problem.field]), [["warning", "a", "config.profileId"]]);
+    editor.setValidationContext({ sessionProfileIds: ["prof-1", "prof-gone"] });
+    timers.advance(600);
+    assert.equal(editor.state.problems.filter((problem) => problem.code === "unknown_profile").length, 0);
+  });
+});
+
 describe("editor-store: the agent catalogue", () => {
   const opusChain = [{ agent: "claude", model: "opus", accounts: { strategy: "least-used" } }];
   const nightly = () =>

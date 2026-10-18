@@ -367,3 +367,33 @@ export function sanitizeGlobalSource(value: unknown): SessionProfileGlobalSource
     items
   };
 }
+
+/** One workflow the delete confirmation lists (`ProfileReferencesResponse.workflows`, read field-wise). */
+export interface ProfileWorkflowUse {
+  workflowId: string;
+  name: string;
+  enabled: boolean;
+  workspace?: string;
+}
+
+/**
+ * The workflows whose agent blocks launch with a profile (`workflowRoutes.profileReferences`):
+ * `unknown` when the daemon cannot tell (it may be more), or when the answer does not read — the
+ * confirmation then says so, and the delete sends no `expectWorkflowUses`. Never "none" by default.
+ */
+export function sanitizeProfileWorkflowUses(value: unknown): { workflows: ProfileWorkflowUse[]; unknown: boolean } {
+  if (!isRecord(value) || !Array.isArray(value.workflows)) return { workflows: [], unknown: true };
+  const workflows: ProfileWorkflowUse[] = [];
+  let unreadable = false;
+  for (const raw of value.workflows) {
+    const workflowId = isRecord(raw) ? nonEmpty(raw.workflowId) : undefined;
+    if (!isRecord(raw) || workflowId === undefined) {
+      unreadable = true;
+      continue;
+    }
+    if (workflows.some((use) => use.workflowId === workflowId)) continue;
+    const workspace = nonEmpty(raw.workspace);
+    workflows.push({ workflowId, name: nonEmpty(raw.name) ?? workflowId, enabled: raw.enabled === true, ...(workspace !== undefined ? { workspace } : {}) });
+  }
+  return { workflows, unknown: unreadable || nonEmpty(value.unknownReason) !== undefined };
+}

@@ -30,6 +30,7 @@ import { KEYBOARD_SURFACE_PROPS } from "../../lib/keyboard-surfaces";
 import { useProviderSnapshots } from "../../lib/agent-chat/hooks";
 import { providerForRefId } from "../../lib/agent-chat/providers";
 import { useSavedPrompts } from "../../lib/saved-prompts/hooks";
+import { useSessionProfileList } from "../../lib/session-profiles/hooks";
 import { canvasFitOptions } from "../../lib/workflows/canvas-fit";
 import { defaultAgentLabel, defaultModelLabel, type NodeSummaryContext } from "../../lib/workflows/catalog-ui";
 import { triggerErrorsOf } from "../../lib/workflows/format";
@@ -191,6 +192,12 @@ const EditorTab: React.FC<WorkflowEditorTabProps> = ({ workflowId, title, runId 
   const secrets = useWorkflowSecrets(workflowId);
   const secretNames = useMemo(() => [...new Set(secrets.secrets.map((secret) => secret.name))].sort(), [secrets.secrets]);
   const savedPrompts = useSavedPrompts(workflowProject);
+  // Agent Profiles (spec 2026-10-18 §5.5): a block naming one that is gone is flagged, as the daemon flags it.
+  const sessionProfiles = useSessionProfileList();
+  const sessionProfileIds = useMemo(
+    () => (sessionProfiles.status === "ready" && sessionProfiles.profiles !== null ? [...sessionProfiles.profiles.map((profile) => profile.id), ...sessionProfiles.errors.map((error) => error.profileId)] : null),
+    [sessionProfiles.status, sessionProfiles.profiles, sessionProfiles.errors]
+  );
 
   const registryAgents = useAppStore((s) => s.registry.agents);
   const providers = useProviderSnapshots();
@@ -202,10 +209,11 @@ const EditorTab: React.FC<WorkflowEditorTabProps> = ({ workflowId, title, runId 
     editor.setValidationContext({
       ...(secrets.status === "loaded" ? { secretNames } : {}),
       ...(savedPrompts.status === "loaded" ? { savedPromptIds: savedPrompts.prompts.map((prompt) => prompt.id) } : {}),
+      ...(sessionProfileIds !== null ? { sessionProfileIds } : {}),
       ...(workflows.load.status === "loaded" ? { knownWorkflowIds: [...workflows.summaries.keys()] } : {}),
       ...(agentCatalog ? { catalog: agentCatalog } : {})
     });
-  }, [editor, secrets.status, secretNames, savedPrompts.status, savedPrompts.prompts, workflows.load.status, workflows.summaries, agentCatalog]);
+  }, [editor, secrets.status, secretNames, savedPrompts.status, savedPrompts.prompts, sessionProfileIds, workflows.load.status, workflows.summaries, agentCatalog]);
 
   const summaryContext = useMemo<NodeSummaryContext>(() => {
     const projectName = workflowProject.replace(/\/+$/, "").split("/").pop() || undefined;

@@ -12,6 +12,7 @@ import type { SessionProfileDetail, SessionProfileSummary } from "@orquester/api
 import {
   applySessionProfileEvent,
   deleteSessionProfile,
+  loadProfileWorkflowUses,
   loadSessionProfile,
   loadSessionProfiles,
   openSessionProfile,
@@ -92,6 +93,7 @@ function fakeApi(overrides: Partial<SessionProfilesApi> = {}): { api: SessionPro
       return { profile: detail(profileId, server.revision, enabled), itemId };
     },
     deleteSessionProfileItem: async (profileId) => ({ profile: detail(profileId, server.revision) }),
+    getProfileWorkflowReferences: async (profileId) => ({ version: 1, profileId, workflows: [] }),
     ...overrides
   };
   return { api, calls, server };
@@ -205,6 +207,46 @@ describe("session profiles store", () => {
     const result = await deleteSessionProfile(api, "p1");
     assert.equal(result.ok, true);
     assert.deepEqual(seen, ["p1@1"]);
+    assert.equal(state().list.profiles?.length, 0);
+  });
+
+  it("the delete guard: the workflows using a profile, read field-wise; unknown when the daemon cannot tell or the answer does not read", async () => {
+    const answer = (body: unknown) => fakeApi({ getProfileWorkflowReferences: async () => body }).api;
+    const use = { workflowId: "wf_1", name: "Nightly", enabled: true, revision: 2, project: { kind: "existing", projectPath: "/w/a/b" }, workspace: "a", nodes: [] };
+    assert.deepEqual(await loadProfileWorkflowUses(answer({ version: 1, profileId: "p1", workflows: [use, use, { name: "no id" }] }), "p1"), {
+      ok: true, workflows: [{ workflowId: "wf_1", name: "Nightly", enabled: true, workspace: "a" }], unknown: true
+    }, "a row that does not read makes the list incomplete");
+    assert.deepEqual(await loadProfileWorkflowUses(answer({ version: 1, profileId: "p1", workflows: [], unknownReason: "not loaded" }), "p1"), { ok: true, workflows: [], unknown: true });
+    assert.deepEqual(await loadProfileWorkflowUses(answer("nonsense"), "p1"), { ok: true, workflows: [], unknown: true });
+    assert.deepEqual(await loadProfileWorkflowUses(answer({ version: 1, profileId: "p1", workflows: [] }), "p1"), { ok: true, workflows: [], unknown: false });
+    const failing = fakeApi({ getProfileWorkflowReferences: async () => { throw Object.assign(new Error("boom"), { status: 500, body: { error: { code: "X", message: "boom" } } }); } }).api;
+    assert.equal((await loadProfileWorkflowUses(failing, "p1")).ok, false);
+  });
+
+  it("the delete guard: the confirmed workflow ids ride the delete; a 409 WORKFLOW_USES_CHANGED keeps the profile and says why", async () => {
+    const seen: unknown[] = [];
+    let refuse = true;
+    const { api } = fakeApi({
+      deleteSessionProfile: async (profileId, revision, options) => {
+        seen.push([revision, options]);
+        if (refuse) {
+          throw Object.assign(new Error("changed"), {
+            status: 409,
+            body: { error: { code: "WORKFLOW_USES_CHANGED", message: 'The workflows that use this profile changed (now: "Nightly"); nothing was deleted.' } }
+          });
+        }
+        return { profileId, deleted: true };
+      }
+    });
+    await loadSessionProfiles(api);
+    await loadSessionProfile(api, "p1");
+    const refused = await deleteSessionProfile(api, "p1", { expectWorkflowUses: [] });
+    assert.deepEqual(refused, { ok: false, error: 'The workflows that use this profile changed (now: "Nightly"); nothing was deleted.', code: "WORKFLOW_USES_CHANGED" });
+    assert.equal(state().list.profiles?.length, 1, "still there");
+    assert.match(state().notice?.text ?? "", /now: "Nightly"/);
+    refuse = false;
+    assert.equal((await deleteSessionProfile(api, "p1", { expectWorkflowUses: ["wf_1"] })).ok, true);
+    assert.deepEqual(seen, [["1", { expectWorkflowUses: [] }], ["1", { expectWorkflowUses: ["wf_1"] }]]);
     assert.equal(state().list.profiles?.length, 0);
   });
 

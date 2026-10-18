@@ -106,6 +106,11 @@ function detail(revision: string, codex: "ready" | "preparing" | "failed" = "pre
 }
 
 interface Server {
+  /** The workflows the delete guard lists, per answer (the last one repeats). */
+  uses: { workflowId: string; name: string; workspace?: string }[][];
+  deletes: { revision: string; options: unknown }[];
+  /** Refuse the next delete with 409 WORKFLOW_USES_CHANGED. */
+  usesChangedNext: boolean;
   revision: string;
   toggles: { itemId: string; revision: string; enabled: boolean }[];
   updates: { itemId: string; body: unknown }[];
@@ -141,6 +146,21 @@ function fakeApi(server: Server): ApiClient {
       const item = items.find((candidate) => candidate.id === itemId)!;
       return item.kind === "mcp" ? { kind: "mcp", item, mcp: item.mcp } : { kind: item.kind, item, document: { frontmatter: {}, body: "x" } };
     },
+    getProfileWorkflowReferences: async (profileId: string) => {
+      const workflows = (server.uses.length > 1 ? server.uses.shift() : server.uses[0]) ?? [];
+      return { version: 1, profileId, workflows: workflows.map((use) => ({ ...use, enabled: true, revision: 1, project: { kind: "existing", projectPath: "/w/a/b" }, nodes: [] })) };
+    },
+    deleteSessionProfile: async (profileId: string, revision: string, options?: unknown) => {
+      server.deletes.push({ revision, options });
+      if (server.usesChangedNext) {
+        server.usesChangedNext = false;
+        throw Object.assign(new Error("changed"), {
+          status: 409,
+          body: { error: { code: "WORKFLOW_USES_CHANGED", message: 'The workflows that use this profile changed (now: "Nightly", "Weekly"); nothing was deleted.' } }
+        });
+      }
+      return { profileId, deleted: true };
+    },
     updateSessionProfileItem: async (_profileId: string, itemId: string, body: unknown) => {
       server.updates.push({ itemId, body });
       return { profile: detail(server.revision), itemId };
@@ -156,7 +176,7 @@ describe("Agent Profiles panel", () => {
   beforeEach(() => {
     mock.timers.enable({ apis: ["setTimeout"] });
     resetSessionProfiles();
-    server = { revision: "1", toggles: [], updates: [], gets: 0, conflictNext: false };
+    server = { uses: [[]], deletes: [], usesChangedNext: false, revision: "1", toggles: [], updates: [], gets: 0, conflictNext: false };
     const mount = document.createElement("div");
     document.body.replaceChildren(mount);
     root = createRoot(mount);
@@ -311,5 +331,37 @@ describe("Agent Profiles panel", () => {
     assert.equal(body.draft.kind, "mcp");
     assert.equal(body.draft.agents, "all");
     assert.deepEqual(body.draft.mcp.env, [{ key: "JIRA_TOKEN", keep: true }]);
+  });
+
+  const openDeleteDialog = async () => {
+    await openDeveloper();
+    await click([...document.querySelectorAll("button")].find((button) => button.textContent?.includes("More actions for Developer")));
+    await click([...document.querySelectorAll('[role="menuitem"]')].find((item) => item.textContent?.trim() === "Delete…"));
+  };
+
+  it("delete guard (§5.5): the confirmation lists the workflows using the profile, and their ids ride the delete", async () => {
+    server.uses = [[{ workflowId: "wf_1", name: "Nightly", workspace: "acme" }]];
+    await openDeleteDialog();
+    const line = document.querySelector("[data-profile-delete-workflows]");
+    assert.equal(line?.getAttribute("data-profile-delete-workflows"), "used");
+    assert.match(line?.textContent ?? "", /1 workflow launches agents with it; its runs fail/);
+    assert.match(document.querySelector('[data-profile-delete-workflow="wf_1"]')?.textContent ?? "", /Nightly · acme/);
+    await click(buttonByText("Delete anyway"));
+    assert.deepEqual(server.deletes, [{ revision: "1", options: { expectWorkflowUses: ["wf_1"] } }]);
+    assert.equal(document.querySelector("[data-profile-delete-workflows]"), null, "the dialog closed");
+  });
+
+  it("delete guard: no workflow says so and sends an empty expectation; a change meanwhile reopens the confirmation with the new list", async () => {
+    server.uses = [[], [{ workflowId: "wf_1", name: "Nightly" }, { workflowId: "wf_2", name: "Weekly" }]];
+    server.usesChangedNext = true;
+    await openDeleteDialog();
+    assert.equal(document.querySelector("[data-profile-delete-workflows]")?.getAttribute("data-profile-delete-workflows"), "none");
+    await click(buttonByText("Delete"));
+    assert.deepEqual(server.deletes[0], { revision: "1", options: { expectWorkflowUses: [] } });
+    assert.equal(document.querySelector("[data-profile-delete-workflows]")?.getAttribute("data-profile-delete-workflows"), "used", "reopened with the uses read again");
+    assert.ok(document.querySelector('[data-profile-delete-workflow="wf_2"]'));
+    assert.match(document.querySelector('[data-session-profiles-notice="error"]')?.textContent ?? "", /now: "Nightly", "Weekly"/);
+    await click(buttonByText("Delete anyway"));
+    assert.deepEqual(server.deletes[1], { revision: "1", options: { expectWorkflowUses: ["wf_1", "wf_2"] } });
   });
 });

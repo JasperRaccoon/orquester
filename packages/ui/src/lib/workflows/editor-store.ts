@@ -97,6 +97,8 @@ export interface ChangeOptions {
 export interface ValidationContext {
   secretNames?: readonly string[];
   savedPromptIds?: readonly string[];
+  /** Agent Profile ids (absent until the list is loaded: then no block's profile is checked). */
+  sessionProfileIds?: readonly string[];
   knownWorkflowIds?: readonly string[];
   /**
    * The host's agent catalogue (`workflowAgentCatalogFromSnapshots` over the registry and the
@@ -431,6 +433,7 @@ export class WorkflowEditor {
     const { problems } = validateWorkflow(draft, {
       ...(this.validation.secretNames ? { secretNames: this.validation.secretNames } : {}),
       ...(this.validation.savedPromptIds ? { savedPromptIds: this.validation.savedPromptIds } : {}),
+      ...(this.validation.sessionProfileIds ? { sessionProfileIds: this.validation.sessionProfileIds } : {}),
       ...(this.validation.knownWorkflowIds ? { knownWorkflowIds: this.validation.knownWorkflowIds } : {}),
       ...(this.validation.catalog ? { catalog: this.validation.catalog } : {})
     });

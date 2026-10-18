@@ -11,7 +11,7 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 
-import type { SessionProfileItem, SessionProfileItemKind } from "@orquester/api";
+import { SESSION_PROFILE_WORKFLOW_USES_CHANGED, type SessionProfileItem, type SessionProfileItemKind } from "@orquester/api";
 
 import { useApi } from "../../../context/orquester-context";
 import { useSessionProfileDetail, useSessionProfileList, useSessionProfilesState } from "../../../lib/session-profiles/hooks";
@@ -24,12 +24,14 @@ import {
   deleteSessionProfileItem,
   dismissSessionProfilesNotice,
   duplicateSessionProfile,
+  loadProfileWorkflowUses,
   loadSessionProfile,
   loadSessionProfiles,
   openSessionProfile,
   setSessionProfileItemEnabled,
   setSessionProfilesNotice,
-  updateSessionProfile
+  updateSessionProfile,
+  type ProfileWorkflowUsesResult
 } from "../../../lib/session-profiles/store";
 import { useAppStore } from "../../../store/app";
 import { ConfirmDialog } from "../../ui/confirm-dialog";
@@ -68,6 +70,22 @@ export const SessionProfilesPanel: React.FC<RightRailPanelProps> = ({ variant })
   const [kinds, setKinds] = useState<ReadonlyMap<string, SessionProfileItemKind>>(() => new Map(remembered.kinds));
   const [settings, setSettings] = useState<SettingsDialog>(null);
   const [deletingProfile, setDeletingProfile] = useState(false);
+  // The delete guard (spec 2026-10-18 §5.5): the workflows using the profile, read when the
+  // confirmation opens (null: still reading); their ids ride the delete as `expectWorkflowUses`.
+  const [deleteUses, setDeleteUses] = useState<ProfileWorkflowUsesResult | null>(null);
+  const profileIdToDelete = deletingProfile ? (profile?.id ?? null) : null;
+  const [usesRead, setUsesRead] = useState(0);
+  useEffect(() => {
+    if (profileIdToDelete === null) return undefined;
+    let live = true;
+    setDeleteUses(null);
+    void loadProfileWorkflowUses(api, profileIdToDelete).then((result) => {
+      if (live) setDeleteUses(result);
+    });
+    return () => {
+      live = false;
+    };
+  }, [api, profileIdToDelete, usesRead]);
   const [deletingItem, setDeletingItem] = useState<SessionProfileItem | null>(null);
   const [editor, setEditor] = useState<{ key: number; request: SessionProfileEditorRequest } | null>(null);
   const [importing, setImporting] = useState<{ key: number; request: SessionProfileImportRequest } | null>(null);
@@ -166,7 +184,10 @@ export const SessionProfilesPanel: React.FC<RightRailPanelProps> = ({ variant })
             setSessionProfilesNotice({ tone: "error", text: `Export failed: ${error instanceof Error ? error.message : String(error)}` })
         );
       },
-      remove: () => setDeletingProfile(true),
+      remove: () => {
+        setDeleteUses(null);
+        setDeletingProfile(true);
+      },
       openInstructions: () => {
         if (openProfileId !== null) openEditor({ mode: "instructions", profileId: openProfileId });
       },
@@ -240,13 +261,28 @@ export const SessionProfilesPanel: React.FC<RightRailPanelProps> = ({ variant })
           <>
             Delete <span className="font-medium text-neutral-200">{profile?.name}</span> and everything in it?{" "}
             {profileDeleteChatsLine(profile !== null ? openChatsUsingProfile(sessions, profile.id) : 0)}
+            <ProfileDeleteWorkflows uses={deleteUses} />
           </>
         }
-        confirmLabel="Delete"
+        confirmLabel={deleteUses?.ok === true && deleteUses.workflows.length > 0 ? "Delete anyway" : "Delete"}
+        confirmDisabled={deleteUses === null}
         onCancel={() => setDeletingProfile(false)}
         onConfirm={() => {
+          const target = profile;
+          const uses = deleteUses;
+          if (target === null || uses === null) return;
+          // Known uses ride the delete: should they change before it lands, the daemon refuses and
+          // the confirmation comes back with the new list. Unknown ones (or a failed read) are not
+          // a precondition anyone could meet: the user confirmed without the list.
+          const expectWorkflowUses = uses.ok && !uses.unknown ? uses.workflows.map((use) => use.workflowId) : undefined;
           setDeletingProfile(false);
-          if (profile !== null) void deleteSessionProfile(api, profile.id);
+          void deleteSessionProfile(api, target.id, expectWorkflowUses !== undefined ? { expectWorkflowUses } : {}).then((result) => {
+            if (!result.ok && result.code === SESSION_PROFILE_WORKFLOW_USES_CHANGED) {
+              setDeleteUses(null);
+              setUsesRead((n) => n + 1);
+              setDeletingProfile(true);
+            }
+          });
         }}
       />
 
@@ -300,5 +336,49 @@ export const SessionProfilesPanel: React.FC<RightRailPanelProps> = ({ variant })
         />
       ) : null}
     </>
+  );
+};
+
+/** The delete confirmation's workflows line: which workflows' agent blocks launch with the profile. */
+const ProfileDeleteWorkflows: React.FC<{ uses: ProfileWorkflowUsesResult | null }> = ({ uses }) => {
+  if (uses === null) {
+    return (
+      <span className="mt-2 block" data-profile-delete-workflows="loading">
+        Checking which workflows use it…
+      </span>
+    );
+  }
+  if (!uses.ok) {
+    return (
+      <span className="mt-2 block text-warn" data-profile-delete-workflows="error">
+        Could not check which workflows use it ({uses.error}). Workflows that do will fail until another profile is picked.
+      </span>
+    );
+  }
+  if (uses.workflows.length === 0) {
+    return uses.unknown ? (
+      <span className="mt-2 block text-warn" data-profile-delete-workflows="unknown">
+        Orquester cannot tell which workflows use it. Workflows that do will fail until another profile is picked.
+      </span>
+    ) : (
+      <span className="mt-2 block" data-profile-delete-workflows="none">
+        No workflow uses it.
+      </span>
+    );
+  }
+  const count = uses.workflows.length;
+  return (
+    <span className="mt-2 block text-warn" data-profile-delete-workflows="used">
+      {count === 1 ? "1 workflow launches" : `${count} workflows launch`} agents with it; {count === 1 ? "its runs fail" : "their runs fail"} until
+      another profile is picked{uses.unknown ? " (there may be more)" : ""}:
+      <span className="mt-1 block">
+        {uses.workflows.map((use) => (
+          <span key={use.workflowId} className="block font-medium text-neutral-200" data-profile-delete-workflow={use.workflowId}>
+            {use.name}
+            {use.workspace ? <span className="font-normal text-neutral-500"> · {use.workspace}</span> : null}
+          </span>
+        ))}
+      </span>
+    </span>
   );
 };
