@@ -79,6 +79,7 @@ import type {
   UsageTokensResponse,
   WorkspaceSummary
 } from "@orquester/api";
+import type { ProfileReferencesResponse } from "@orquester/api";
 import type { AppConfig, DaemonConfig, RemoteConnectionConfig } from "@orquester/config";
 import type { UiConnection } from "../types";
 import type {
@@ -98,7 +99,29 @@ import {
 import { fsPathQuery } from "./fs-path-query";
 import { parsePluginActionResult, parsePluginsResponse } from "./plugins-state";
 import { buildQueryString } from "./transporter";
-import { AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, agentProfileRoutes, agentToolsRoutes, desktopRoutes, pluginRoutes, workflowRoutes } from "@orquester/api";
+import { AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, agentProfileRoutes, agentToolsRoutes, desktopRoutes, pluginRoutes, sessionProfileRoutes, workflowRoutes } from "@orquester/api";
+import type {
+  AddSessionProfilePluginRequest,
+  CopySessionProfileItemsRequest,
+  CreateSessionProfileItemRequest,
+  CreateSessionProfileRequest,
+  ImportSessionProfileFromGlobalRequest,
+  ImportSessionProfileResponse,
+  SessionProfileGlobalSourceResponse,
+  SessionProfileImportGitRequest,
+  SessionProfileImportResponse,
+  TakeSessionProfileImportRequest,
+  DeleteSessionProfileResponse,
+  DuplicateSessionProfileRequest,
+  SessionProfileDetail,
+  SessionProfileInstructionsResponse,
+  SessionProfileItemDetail,
+  SessionProfileListResponse,
+  SessionProfileMutationResponse,
+  SessionProfilePrepareStatusResponse,
+  UpdateSessionProfileItemRequest,
+  UpdateSessionProfileRequest
+} from "@orquester/api";
 import type {
   AgentToolsResponse,
   DaemonMcpServersResponse,
@@ -811,6 +834,157 @@ export class ApiClient {
     return this.send("POST", agentProfileRoutes.itemCopy(agent, id), { body: req });
   }
 
+  // Agent Profiles (`sessionProfileRoutes`, the same routes as `HttpOrquesterApiClient`'s).
+
+  listSessionProfiles(signal?: AbortSignal): Promise<SessionProfileListResponse> {
+    return this.send("GET", sessionProfileRoutes.list, { signal });
+  }
+
+  getSessionProfile(profileId: string, signal?: AbortSignal): Promise<SessionProfileDetail> {
+    return this.send("GET", sessionProfileRoutes.profile(profileId), { signal });
+  }
+
+  createSessionProfile(req: CreateSessionProfileRequest): Promise<SessionProfileDetail> {
+    return this.send("POST", sessionProfileRoutes.list, { body: req });
+  }
+
+  updateSessionProfile(profileId: string, req: UpdateSessionProfileRequest): Promise<SessionProfileDetail> {
+    return this.send("PUT", sessionProfileRoutes.profile(profileId), { body: req });
+  }
+
+  /**
+   * `expectWorkflowUses`: the delete guard (`DeleteSessionProfileQuery`) — the ids of the workflows
+   * the confirmation showed as using the profile (`[]`: none); a mismatch is 409 `WORKFLOW_USES_CHANGED`.
+   */
+  deleteSessionProfile(
+    profileId: string,
+    revision: string,
+    options: { expectWorkflowUses?: readonly string[] } = {}
+  ): Promise<DeleteSessionProfileResponse> {
+    const expect = options.expectWorkflowUses === undefined ? {} : { expectWorkflowUses: options.expectWorkflowUses.join(",") };
+    return this.send("DELETE", sessionProfileRoutes.profile(profileId), { query: { revision, ...expect } });
+  }
+
+  /** The workflows whose agent blocks launch with the profile (the delete confirmation lists them). */
+  getProfileWorkflowReferences(profileId: string, signal?: AbortSignal): Promise<ProfileReferencesResponse> {
+    return this.send("GET", workflowRoutes.profileReferences(profileId), { signal });
+  }
+
+  duplicateSessionProfile(profileId: string, req: DuplicateSessionProfileRequest = {}): Promise<SessionProfileDetail> {
+    return this.send("POST", sessionProfileRoutes.duplicate(profileId), { body: req });
+  }
+
+  getSessionProfileItem(profileId: string, itemId: string, signal?: AbortSignal): Promise<SessionProfileItemDetail> {
+    return this.send("GET", sessionProfileRoutes.item(profileId, itemId), { signal });
+  }
+
+  createSessionProfileItem(profileId: string, req: CreateSessionProfileItemRequest): Promise<SessionProfileMutationResponse> {
+    return this.send("POST", sessionProfileRoutes.items(profileId), { body: req });
+  }
+
+  updateSessionProfileItem(
+    profileId: string,
+    itemId: string,
+    req: UpdateSessionProfileItemRequest
+  ): Promise<SessionProfileMutationResponse> {
+    return this.send("PUT", sessionProfileRoutes.item(profileId, itemId), { body: req });
+  }
+
+  deleteSessionProfileItem(profileId: string, itemId: string, revision: string): Promise<SessionProfileMutationResponse> {
+    return this.send("DELETE", sessionProfileRoutes.item(profileId, itemId), { query: { revision } });
+  }
+
+  setSessionProfileItemEnabled(
+    profileId: string,
+    itemId: string,
+    revision: string,
+    enabled: boolean
+  ): Promise<SessionProfileMutationResponse> {
+    return this.send("POST", sessionProfileRoutes.itemEnabled(profileId, itemId), { body: { revision, enabled } });
+  }
+
+  readSessionProfileInstructions(profileId: string, signal?: AbortSignal): Promise<SessionProfileInstructionsResponse> {
+    return this.send("GET", sessionProfileRoutes.instructions(profileId), { signal });
+  }
+
+  writeSessionProfileInstructions(profileId: string, revision: string, text: string): Promise<SessionProfileDetail> {
+    return this.send("PUT", sessionProfileRoutes.instructions(profileId), { body: { revision, text } });
+  }
+
+  getSessionProfilePrepareStatus(profileId: string, signal?: AbortSignal): Promise<SessionProfilePrepareStatusResponse> {
+    return this.send("GET", sessionProfileRoutes.prepareStatus(profileId), { signal });
+  }
+
+  /** What Import from Global offers of `agent`'s own setup (`exists` checked against the profile). */
+  getSessionProfileGlobalSource(
+    profileId: string,
+    agent: AgentProfileAgentId,
+    signal?: AbortSignal
+  ): Promise<SessionProfileGlobalSourceResponse> {
+    return this.send("GET", sessionProfileRoutes.importGlobal(profileId), { query: { agent }, signal });
+  }
+
+  importSessionProfileFromGlobal(profileId: string, req: ImportSessionProfileFromGlobalRequest): Promise<SessionProfileImportResponse> {
+    return this.send("POST", sessionProfileRoutes.importGlobal(profileId), { body: req });
+  }
+
+  scanSessionProfileGitImport(profileId: string, req: SessionProfileImportGitRequest): Promise<ProfileImportScanResponse> {
+    return this.send("POST", sessionProfileRoutes.importGit(profileId), { body: req });
+  }
+
+  /** Streams a `.zip` or `.md` file (never base64): the daemon extracts and scans it for the profile. */
+  scanSessionProfileUpload(
+    profileId: string,
+    name: string,
+    data: BinaryBody,
+    onProgress?: (sent: number, total: number) => void
+  ): Promise<ProfileImportScanResponse> {
+    return this.send("POST", sessionProfileRoutes.importUpload(profileId), {
+      query: { name },
+      binaryBody: data,
+      onUploadProgress: onProgress
+    });
+  }
+
+  takeSessionProfileImport(profileId: string, importId: string, req: TakeSessionProfileImportRequest): Promise<SessionProfileImportResponse> {
+    return this.send("POST", sessionProfileRoutes.importScan(profileId, importId), { body: req });
+  }
+
+  copySessionProfileItems(profileId: string, req: CopySessionProfileItemsRequest): Promise<SessionProfileImportResponse> {
+    return this.send("POST", sessionProfileRoutes.copyFrom(profileId), { body: req });
+  }
+
+  addSessionProfilePlugin(profileId: string, req: AddSessionProfilePluginRequest): Promise<SessionProfileImportResponse> {
+    return this.send("POST", sessionProfileRoutes.plugins(profileId), { body: req });
+  }
+
+  /** The profile's portable `.zip` (no secret values), over the transport's byte channel. */
+  async exportSessionProfile(profileId: string, signal?: AbortSignal): Promise<ArrayBuffer> {
+    if (!this.transporter.requestBytes) throw new Error("Export is not supported on this connection.");
+    const path = sessionProfileRoutes.exportProfile(profileId);
+    const response = await this.transporter.requestBytes({ method: "GET", path, signal });
+    if (!response.ok) {
+      // The refusal's JSON body arrives as bytes: decode it so the reason reaches the UI.
+      let body: unknown;
+      try {
+        body = JSON.parse(new TextDecoder().decode(response.data));
+      } catch {
+        body = undefined;
+      }
+      throw new ApiError(response.status, "GET", path, response.headers, body);
+    }
+    return response.data;
+  }
+
+  /** A NEW profile from an export `.zip`, streamed as the raw body. */
+  importSessionProfile(
+    name: string,
+    data: BinaryBody,
+    onProgress?: (sent: number, total: number) => void
+  ): Promise<ImportSessionProfileResponse> {
+    return this.send("POST", sessionProfileRoutes.importProfile, { query: { name }, binaryBody: data, onUploadProgress: onProgress });
+  }
+
   getAgentProfileInstructions(agent: AgentProfileAgentId, signal?: AbortSignal): Promise<ProfileInstructionsResponse> {
     return this.send("GET", agentProfileRoutes.instructions(agent), { signal });
   }
@@ -1461,6 +1635,11 @@ export class ApiClient {
   /** One chat's grants (the Tools chip). */
   getThreadAgentTools(id: string, signal?: AbortSignal): Promise<ThreadAgentToolsResponse> {
     return this.send("GET", agentChatRoutes.agentTools(id), { signal });
+  }
+
+  /** An Agent Profile chat's own `/` and `$` catalog (unvalidated: read it with `parseThreadCatalogResponse`). */
+  getThreadCatalog(id: string, signal?: AbortSignal): Promise<unknown> {
+    return this.send("GET", agentChatRoutes.catalog(id), { signal });
   }
 
   sendSessionInput(id: string, data: string): Promise<void> {

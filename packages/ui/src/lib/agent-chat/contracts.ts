@@ -378,6 +378,14 @@ export interface WorkLogEntry {
     previousAccountId?: string;
   };
   /**
+   * Present on an Agent Profile switch marker (`session.profile-changed`, agent profiles §5.3).
+   * Ids only, `null` for Global: the name resolves from the live profile list at render time.
+   */
+  profileSwitch?: {
+    profileId: string | null;
+    previousProfileId?: string | null;
+  };
+  /**
    * Present on a COMPLETED session-tool `html_render` call (spec 2026-10-14
    * §2.5) — a row the host's ingestion marked as its own (`sessionTool`):
    * the page the agent published, read by the shared reader
@@ -737,6 +745,12 @@ export interface AgentChatActions {
    * (`canSwitchChatAccount`); the daemon refuses anything else with a 409.
    */
   setAccount(input: { accountId: string }): Promise<void>;
+  /**
+   * `POST /api/sessions/:id/profile` — the Agent Profile switch (agent profiles spec §5.3):
+   * restarts the agent with the profile (`null` = Global) and keeps the conversation. Same
+   * idle gate and refusals as {@link setAccount}.
+   */
+  setProfile(input: { profileId: string | null }): Promise<void>;
   stopSession(): Promise<void>;
   /** The existing `POST /api/sessions/:id/upload`; returns the attachment reference. */
   uploadAttachment(file: File | Blob, meta: { name: string; type?: string }): Promise<AttachmentRef>;

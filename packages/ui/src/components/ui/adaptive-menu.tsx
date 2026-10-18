@@ -20,7 +20,7 @@ export interface AdaptiveMenuProps {
   focusOnOpen?: boolean;
   /**
    * Extra classes for the trigger's own `<button>` on both viewports — `flex
-   * w-full` for a full-width trigger (the Agent profile's "+ Add").
+   * w-full` for a full-width trigger (Agent config's "+ Add").
    */
   triggerClassName?: string;
 }

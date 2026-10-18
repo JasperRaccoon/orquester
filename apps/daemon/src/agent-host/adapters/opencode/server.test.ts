@@ -15,7 +15,12 @@ import { join } from "node:path";
 import test from "node:test";
 
 import type { AdapterLogger } from "../../adapter.ts";
-import { OpenCodeServerPool } from "./server.ts";
+import {
+  OPENCODE_GLOBAL_POOL_KEY,
+  OpenCodeServerPool,
+  type OpenCodeServerHandle,
+  type OpenCodeServerPoolSpec
+} from "./server.ts";
 import { makePeer, type Peer } from "./testing/peer.ts";
 
 const silentLogger: AdapterLogger = {
@@ -386,4 +391,196 @@ test("a second stopAll waits for the first's kills: the host's two teardown call
   await first;
   controller.abort();
   peer.cleanup();
+});
+
+// ---------------------------------------------------------------------------
+// Keyed servers: one `opencode serve` per (project, pool key)
+// ---------------------------------------------------------------------------
+
+const REPORTED = ["XDG_CONFIG_HOME", "OPENCODE_CONFIG_DIR", "SHARED_VAR", "DROP_ME"] as const;
+
+function makeKeyedPool(
+  peer: Peer,
+  controller: AbortController,
+  seen: { projectDir: string; poolKey: string }[] = [],
+  logger: AdapterLogger = silentLogger
+): OpenCodeServerPool {
+  return new OpenCodeServerPool({
+    logger,
+    resolveBin: async () => peer.bin,
+    buildEnv: (input) => {
+      seen.push(input);
+      return {
+        PATH: process.env.PATH ?? "",
+        HOME: peer.dir,
+        TMPDIR: peer.dir,
+        MOCK_MODE: "ok",
+        MOCK_REPORT_ENV: REPORTED.join(","),
+        SHARED_VAR: "launcher",
+        DROP_ME: "launcher"
+      };
+    },
+    signal: controller.signal
+  });
+}
+
+async function envOf(handle: OpenCodeServerHandle, directory: string): Promise<Record<string, string | null>> {
+  return await handle.client(directory).get<Record<string, string | null>>("/__peer/env", { timeoutMs: 2_000 });
+}
+
+const PROFILE_SPEC: OpenCodeServerPoolSpec = {
+  key: "profile-a",
+  env: { XDG_CONFIG_HOME: "/profiles/a/xdg", OPENCODE_CONFIG_DIR: "/profiles/a/opencode", SHARED_VAR: "profile" },
+  unsetEnv: ["DROP_ME"]
+};
+
+test("two keys of one project are two servers, one key is shared, and a key's env reaches only its own server", async () => {
+  const peer = makePeer();
+  const controller = new AbortController();
+  const seen: { projectDir: string; poolKey: string }[] = [];
+  const pool = makeKeyedPool(peer, controller, seen);
+  try {
+    const global = await pool.acquire(peer.dir);
+    const keyed = await pool.acquire(peer.dir, PROFILE_SPEC);
+    const keyedAgain = await pool.acquire(peer.dir, { ...PROFILE_SPEC, env: { ...PROFILE_SPEC.env } });
+
+    assert.equal(global.poolKey, OPENCODE_GLOBAL_POOL_KEY);
+    assert.equal(keyed.poolKey, "profile-a");
+    assert.notEqual(global.pid, keyed.pid, "another key is another `opencode serve`");
+    assert.notEqual(global.url, keyed.url);
+    assert.equal(keyed.pid, keyedAgain.pid, "the same key is shared");
+    assert.deepEqual(
+      pool.list().map((server) => server.poolKey).sort(),
+      [OPENCODE_GLOBAL_POOL_KEY, "profile-a"]
+    );
+    assert.deepEqual(seen.map((input) => input.poolKey).sort(), [OPENCODE_GLOBAL_POOL_KEY, "profile-a"]);
+    assert.equal(pool.refCount(peer.dir), 1);
+    assert.equal(pool.refCount(peer.dir, "profile-a"), 2);
+
+    // The global server's env is the launcher env, untouched.
+    assert.deepEqual(await envOf(global, peer.dir), {
+      XDG_CONFIG_HOME: null,
+      OPENCODE_CONFIG_DIR: null,
+      SHARED_VAR: "launcher",
+      DROP_ME: "launcher"
+    });
+    // The keyed one: unsets removed, overrides layered over the launcher env.
+    assert.deepEqual(await envOf(keyed, peer.dir), {
+      XDG_CONFIG_HOME: "/profiles/a/xdg",
+      OPENCODE_CONFIG_DIR: "/profiles/a/opencode",
+      SHARED_VAR: "profile",
+      DROP_ME: null
+    });
+
+    keyed.release();
+    keyedAgain.release();
+    global.release();
+  } finally {
+    await pool.stopAll();
+    controller.abort();
+    peer.cleanup();
+  }
+});
+
+test("recycle and the idle close act per (project, key): the project's other server is untouched", async (t) => {
+  const peer = makePeer();
+  const controller = new AbortController();
+  const pool = makeKeyedPool(peer, controller);
+  try {
+    const global = await pool.acquire(peer.dir);
+    const keyed = await pool.acquire(peer.dir, PROFILE_SPEC);
+    assert.equal(pool.recycle(peer.dir, "profile-a"), null, "a held keyed server is never recycled");
+    keyed.release();
+
+    const stopped = pool.recycle(peer.dir, "profile-a");
+    assert.ok(stopped !== null);
+    await stopped;
+    assert.equal(keyed.hasExited(), true);
+    assert.equal(global.hasExited(), false, "the global server kept running");
+    assert.equal(pool.isWarm(peer.dir), true);
+    assert.equal(pool.isWarm(peer.dir, "profile-a"), false);
+    assert.deepEqual(pool.servers(), [{ projectDir: peer.dir, poolKey: OPENCODE_GLOBAL_POOL_KEY }]);
+
+    const fresh = await pool.acquire(peer.dir, PROFILE_SPEC);
+    assert.notEqual(fresh.pid, keyed.pid, "the key's next acquire starts a fresh server");
+    assert.equal((await envOf(fresh, peer.dir)).XDG_CONFIG_HOME, "/profiles/a/xdg", "with the same env");
+
+    // The idle close too: the released keyed server goes, the held global one stays.
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const exited = fresh.exited;
+    fresh.release();
+    t.mock.timers.tick(30_000);
+    await exited;
+    assert.equal(global.hasExited(), false);
+    assert.deepEqual(pool.list().map((server) => server.poolKey), [OPENCODE_GLOBAL_POOL_KEY]);
+    global.release();
+  } finally {
+    await pool.stopAll();
+    controller.abort();
+    peer.cleanup();
+  }
+});
+
+test("a keyed server whose child crashed is restarted on the next acquire of that key only", async () => {
+  const peer = makePeer();
+  const controller = new AbortController();
+  const pool = makeKeyedPool(peer, controller);
+  try {
+    const global = await pool.acquire(peer.dir);
+    const keyed = await pool.acquire(peer.dir, PROFILE_SPEC);
+    process.kill(-keyed.pid!, "SIGKILL");
+    await keyed.exited;
+    assert.equal(pool.isWarm(peer.dir, "profile-a"), false);
+    const again = await pool.acquire(peer.dir, PROFILE_SPEC);
+    assert.notEqual(again.pid, keyed.pid);
+    assert.equal(global.hasExited(), false);
+    assert.equal((await envOf(again, peer.dir)).SHARED_VAR, "profile");
+    keyed.release();
+    again.release();
+    global.release();
+  } finally {
+    await pool.stopAll();
+    controller.abort();
+    peer.cleanup();
+  }
+});
+
+test("a spec the pool cannot apply as written is refused, and leaves no server behind", async () => {
+  const peer = makePeer();
+  const controller = new AbortController();
+  const pool = makeKeyedPool(peer, controller);
+  try {
+    await assert.rejects(pool.acquire(peer.dir, { key: OPENCODE_GLOBAL_POOL_KEY }), /reserved/);
+    await assert.rejects(pool.acquire(peer.dir, { key: "" }), /non-empty/);
+    for (const name of ["PATH", "HOME", "TMPDIR", "OPENCODE_SERVER_PASSWORD"]) {
+      await assert.rejects(pool.acquire(peer.dir, { key: "p", env: { [name]: "/x" } }), new RegExp(name));
+      await assert.rejects(pool.acquire(peer.dir, { key: "p", unsetEnv: [name] }), new RegExp(name));
+    }
+    assert.deepEqual(pool.servers(), []);
+    assert.equal(pool.refCount(peer.dir, "p"), 0);
+  } finally {
+    await pool.stopAll();
+    controller.abort();
+    peer.cleanup();
+  }
+});
+
+test("a key reused with a different env keeps the running server and warns", async () => {
+  const peer = makePeer();
+  const controller = new AbortController();
+  const warnings: string[] = [];
+  const pool = makeKeyedPool(peer, controller, [], { ...silentLogger, warn: (message) => warnings.push(message) });
+  try {
+    const first = await pool.acquire(peer.dir, PROFILE_SPEC);
+    const second = await pool.acquire(peer.dir, { key: "profile-a", env: { SHARED_VAR: "other" } });
+    assert.equal(second.pid, first.pid);
+    assert.equal((await envOf(second, peer.dir)).SHARED_VAR, "profile");
+    assert.deepEqual(warnings, ["opencode server pool key reused with a different env"]);
+    first.release();
+    second.release();
+  } finally {
+    await pool.stopAll();
+    controller.abort();
+    peer.cleanup();
+  }
 });

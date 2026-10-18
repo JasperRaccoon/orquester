@@ -80,7 +80,7 @@ describe("secret requests — the wait", () => {
     assert.deepEqual(await answer, { outcome: "cancelled" });
   });
 
-  it("declining, the call ending and the deadline each close the card", async () => {
+  it("declining and the call ending each close the card", async () => {
     const { registry: requests, events, next } = registry();
     // Declined.
     let opened = next();
@@ -104,9 +104,18 @@ describe("secret requests — the wait", () => {
       events.filter((event) => !event.open).map((event) => event.outcome),
       ["declined", "cancelled"]
     );
-    // Timed out: the registry's own deadline (5 ms here) ends a card nobody answers.
+  });
+
+  it("the deadline closes a card nobody answers", async (t) => {
+    // Mocked timers: the registry's deadline timer is unref'd (it must never hold the daemon
+    // open), so with real timers it is the only thing left in this test's event loop and Node
+    // may end the loop before it fires — the test then fails "event loop already resolved".
+    t.mock.timers.enable({ apis: ["setTimeout"] });
     const short = registry({ timeoutMs: 5 });
-    assert.deepEqual(await short.registry.request("t1", INPUT, new AbortController().signal), { outcome: "timed_out" });
+    const waiting = short.registry.request("t1", INPUT, new AbortController().signal);
+    assert.equal(short.registry.list("t1").length, 1);
+    t.mock.timers.tick(5);
+    assert.deepEqual(await waiting, { outcome: "timed_out" });
     assert.deepEqual(short.registry.list("t1"), []);
     assert.deepEqual(short.events.map((event) => [event.open, event.outcome]), [[true, undefined], [false, "timed_out"]]);
   });

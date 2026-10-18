@@ -10,7 +10,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { agentChatRoutes } from "./wire.ts";
+import { AGENT_CHAT_COMMAND_NAMES, agentChatRoutes } from "./wire.ts";
 import { foldThread } from "./fold.ts";
 import type { DomainEvent } from "./domain-events.ts";
 import { created, ev, resetActivityIds, resetSeq } from "./test-helpers.ts";
@@ -54,4 +54,38 @@ test("switching to the system identity clears the account id through the same ev
   ] as DomainEvent[]);
   assert.equal(state.head!.accountId, "");
   assert.equal(state.head!.home, "system");
+});
+
+test("the profile route is daemon-owned like the account route", () => {
+  assert.equal(agentChatRoutes.profile("s1"), "/api/sessions/s1/profile");
+  assert.equal(agentChatRoutes.profile("a/b"), "/api/sessions/a%2Fb/profile");
+  assert.equal((AGENT_CHAT_COMMAND_NAMES as readonly string[]).includes("profile"), false);
+});
+
+test("the head carries the profile from thread.created and a profile switch through thread.meta-updated", () => {
+  reset();
+  const launched = foldThread([created({ profileId: "p-dev" })] as DomainEvent[]);
+  assert.equal(launched.head!.profileId, "p-dev");
+
+  reset();
+  const switched = foldThread([
+    created({ profileId: "p-dev" }),
+    ev("thread.meta-updated", { profileId: "p-edit" })
+  ] as DomainEvent[]);
+  assert.equal(switched.head!.profileId, "p-edit");
+  assert.equal(switched.head!.accountId, "acc-1", "a profile switch keeps the identity");
+
+  reset();
+  const global = foldThread([
+    created({ profileId: "p-dev" }),
+    ev("thread.meta-updated", { profileId: "" })
+  ] as DomainEvent[]);
+  assert.equal("profileId" in global.head!, false, "the empty string is Global");
+
+  reset();
+  const renamed = foldThread([
+    created({ profileId: "p-dev" }),
+    ev("thread.meta-updated", { title: "Renamed" })
+  ] as DomainEvent[]);
+  assert.equal(renamed.head!.profileId, "p-dev", "a rename keeps the profile");
 });

@@ -4,6 +4,7 @@ import {
   Boxes,
   ChevronLeft,
   ChevronRight,
+  FileCog,
   Gauge,
   Github,
   MessageSquare,
@@ -21,6 +22,7 @@ import { Modal, ModalCloseButton } from "../ui";
 import { useIsDesktop } from "../../hooks";
 import { useAppStore } from "../../store/app";
 import { AgentAccountsSettings } from "./AgentAccountsSettings";
+import { AgentConfigSettings } from "./AgentConfigSettings";
 import { AgentsSettings } from "./AgentsSettings";
 import { AgentToolsSettings } from "./AgentToolsSettings";
 import { AppearanceSettings } from "./AppearanceSettings";
@@ -39,6 +41,7 @@ type SectionId =
   | "chat"
   | "agent-tools"
   | "agents"
+  | "agent-config"
   | "accounts"
   | "usage"
   | "git-hosting"
@@ -56,6 +59,11 @@ interface SectionDef {
   desc: string;
   /** Extra search terms: the settings a page holds, so search finds them. */
   keywords: string[];
+  /**
+   * The page fills the content area and scrolls inside itself (its
+   * `SettingsPage` is `fill`), rather than scrolling with the content area.
+   */
+  fill?: boolean;
   render: () => React.ReactNode;
 }
 
@@ -112,6 +120,20 @@ const SECTIONS: SectionDef[] = [
     desc: "Install and update agent CLIs, harness options",
     keywords: ["agents", "install", "update", "version", "claude", "codex", "grok", "timeout", "stream", "cli"],
     render: () => <AgentsSettings />
+  },
+  {
+    // Agent profiles spec §5.4: the per-agent global config editor, moved here from the rail.
+    id: "agent-config",
+    group: "agents",
+    label: "Agent config",
+    icon: <FileCog size={15} />,
+    desc: "Each agent's own global setup, used by Global chats",
+    keywords: [
+      "profile", "global", "mcp", "servers", "skills", "plugins", "marketplaces", "hooks", "commands",
+      "instructions", "claude.md", "agents.md", "claude", "codex", "grok", "opencode", "import", "copy"
+    ],
+    fill: true,
+    render: () => <AgentConfigSettings />
   },
   {
     id: "accounts",
@@ -171,9 +193,15 @@ const SECTIONS: SectionDef[] = [
 
 /**
  * Old section ids other code (or an older bookmark of the store) may still ask
- * for, mapped onto their new home.
+ * for, mapped onto their new home. The agent profile (the per-agent global
+ * config editor) was a rail panel before it became Agent config.
  */
-const SECTION_ALIASES: Record<string, SectionId> = { app: "general", daemon: "server" };
+const SECTION_ALIASES: Record<string, SectionId> = {
+  app: "general",
+  daemon: "server",
+  profile: "agent-config",
+  "agent-profile": "agent-config"
+};
 
 const findSection = (id: string | null | undefined): SectionDef | undefined => {
   if (!id) return undefined;
@@ -339,7 +367,10 @@ export const SettingsModal: React.FC = () => {
           <div className="absolute right-3 top-3 z-10">
             <ModalCloseButton onClose={close} />
           </div>
-          <div ref={contentRef} className="min-h-0 flex-1 overflow-y-auto px-8 pb-6 pt-7">
+          <div
+            ref={contentRef}
+            className={cn("min-h-0 flex-1 overflow-y-auto px-8 pb-6 pt-7", current.fill && "flex flex-col")}
+          >
             {current.render()}
           </div>
         </div>
@@ -373,7 +404,7 @@ export const SettingsModal: React.FC = () => {
 
         <div ref={contentRef} className="min-h-0 flex-1 overflow-y-auto">
           {currentMobile ? (
-            <div className="p-4">
+            <div className={cn("p-4", currentMobile.fill && "flex h-full flex-col")}>
               <SettingsPageTitleContext.Provider value={false}>{currentMobile.render()}</SettingsPageTitleContext.Provider>
             </div>
           ) : (

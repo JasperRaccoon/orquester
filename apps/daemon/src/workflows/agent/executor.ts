@@ -64,7 +64,7 @@ import type {
   WorkflowLogger
 } from "../contracts.ts";
 import { parseBaseline, takeBaseline, type AgentBaseline } from "./classify.ts";
-import { AgentCatalog, buildCreateBody, createSession, findOwnedSession, renderSessionTitle, sessionTitle } from "./create.ts";
+import { AgentCatalog, buildCreateBody, createSession, findOwnedSession, profileRefusalMessage, renderSessionTitle, sessionTitle } from "./create.ts";
 import {
   candidateKey,
   coolDown,
@@ -464,7 +464,8 @@ class AgentBlockRun {
     const owner: WorkflowSessionOwner = { kind: "workflow", workflowId: this.ctx.workflow.id, runId: this.ctx.runId, nodeId: this.ctx.node.id };
     const since = this.st.creatingSince ?? this.st.startedAt;
     const title = sessionTitle(this.ctx.workflow.name, this.ctx.node.name, this.config.session.kind === "new" ? renderSessionTitle(this.config.session.title, this.ctx) : undefined);
-    const body = buildCreateBody({ candidate: c, projectPath: this.ctx.project.path, title, owner });
+    const profileId = this.config.profileId;
+    const body = buildCreateBody({ candidate: c, projectPath: this.ctx.project.path, title, owner, ...(profileId !== undefined ? { profileId } : {}) });
     let summary: SessionSummary | null = null;
     while (!summary) {
       // A create whose answer was lost (a restart, a dropped response) left its session behind: adopt it.
@@ -478,6 +479,9 @@ class AgentBlockRun {
           await this.pause();
           continue;
         }
+        // The block's Agent Profile is gone or cannot be prepared: an unattended run fails, never Global.
+        const profileRefused = profileRefusalMessage(error.code, error.message, profileId);
+        if (profileRefused !== null) return this.fail(error.code === "PROFILE_NOT_FOUND" ? "validation" : "agent_error", profileRefused, { code: error.code, profileId });
         // The daemon refused this launch (a gate, a missing account): the candidate is unusable.
         this.st.memory.unusable.push(candidateKey(c));
         this.st.memory.extraSkips.push({ agent: c.agent, accountId: c.accountId, ...(c.accountLabel ? { label: c.accountLabel } : {}), why: "unavailable", detail: `the session could not be created: ${error.message}` });

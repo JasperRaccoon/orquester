@@ -25,6 +25,10 @@ import test from "node:test";
 import type { RuntimeEvent } from "@orquester/api/agent-chat";
 
 import type { AgentAdapter, AdapterContext, StartSessionInput } from "../../adapter.ts";
+import { opencodeProfilePoolKey } from "../../../session-profiles/manifest/opencode.ts";
+import { writePreparedManifest } from "../../../session-profiles/manifest.ts";
+import type { HostThreadProfile } from "../../host-protocol.ts";
+import { ProfileLaunchError } from "../profile-manifest.ts";
 import { createOpenCodeAdapter } from "./index.ts";
 import { createHostIngestion, HOST_THREAD_ID } from "./testing/host.ts";
 import { makePeer, type Peer } from "./testing/peer.ts";
@@ -45,6 +49,8 @@ interface RecordedRequest {
 interface PeerServer {
   url: string;
   pid: number;
+  /** The harness's `MOCK_REPORT_ENV` variables as the server process saw them. */
+  env: Record<string, string | null>;
 }
 
 /** Whether the server's process is gone (the pool's kill resolves once it is reaped). */
@@ -81,7 +87,7 @@ class FakeOpenCode {
     const path = url.pathname;
     if (path === "/__peer/up") {
       const announced = JSON.parse(text) as PeerServer & { origin: string };
-      this.servers.push({ url: announced.origin, pid: announced.pid });
+      this.servers.push({ url: announced.origin, pid: announced.pid, env: announced.env ?? {} });
       json(res, {});
       return;
     }
@@ -195,7 +201,10 @@ async function makeHarness(t: test.TestContext): Promise<Harness> {
       HOME: peer.dir,
       TMPDIR: peer.dir,
       MOCK_VERSION: "1.18.32",
-      MOCK_UPSTREAM: upstream
+      MOCK_UPSTREAM: upstream,
+      MOCK_REPORT_ENV: "XDG_CONFIG_HOME,SHARED_VAR,DROP_ME",
+      SHARED_VAR: "launcher",
+      DROP_ME: "launcher"
     }),
     resolveBin: async () => peer.bin,
     sessionPath: () => "/usr/bin",
@@ -509,5 +518,182 @@ test("threads share a resolved project server, falling back to cwd for malformed
     assert.deepEqual(creates.map((request) => request.url.searchParams.get("directory")), [project, nested, project, project, project, project, project]);
   } finally {
     await h.dispose();
+  }
+});
+
+test("a keyed thread's own catalog is its server's, never the global server's (Agent Profiles composer)", async (t) => {
+  const h = await makeHarness(t);
+  try {
+    assert.equal(await h.adapter.sessionCatalog!(HOST_THREAD_ID), null, "no session");
+    await h.start();
+    await h.waitFor("session.state.changed");
+    const from = h.events.length;
+    await h.start({
+      threadId: "keyed",
+      serverPool: {
+        key: "profile-a",
+        env: {
+          MOCK_COMMANDS: JSON.stringify([{ name: "profile-cmd", description: "The profile's", hints: ["<x>"] }]),
+          MOCK_SKILLS: JSON.stringify([{ name: "profile-skill", description: "Mine", location: "/profiles/a/skills/s/SKILL.md" }])
+        }
+      }
+    });
+    await h.waitFor("session.state.changed", from);
+    assert.deepEqual(await h.adapter.sessionCatalog!("keyed"), {
+      slashCommands: [
+        { name: "compact", description: "Compact this conversation's context" },
+        { name: "profile-cmd", description: "The profile's", input: { hint: "<x>" } }
+      ],
+      skills: [{ name: "profile-skill", path: "/profiles/a/skills/s/SKILL.md", enabled: true, description: "Mine", shortDescription: "Mine" }]
+    });
+    // The global thread reads the global server's catalogue.
+    const global = await h.adapter.sessionCatalog!(HOST_THREAD_ID);
+    assert.deepEqual(global?.slashCommands.map((command) => command.name), ["compact", "init"]);
+    assert.deepEqual(global?.skills.map((skill) => skill.name), ["review"]);
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("a keyed thread runs on its own server of the project with its env, and a keyed recycle leaves the global server alone", async (t) => {
+  const h = await makeHarness(t);
+  try {
+    await h.start();
+    await h.waitFor("session.state.changed");
+    const keyedInput: Partial<StartSessionInput> = {
+      threadId: "keyed",
+      serverPool: { key: "profile-a", env: { XDG_CONFIG_HOME: "/profiles/a/xdg", SHARED_VAR: "profile" }, unsetEnv: ["DROP_ME"] }
+    };
+    const from = h.events.length;
+    const keyed = await h.start(keyedInput);
+    await h.waitFor("session.state.changed", from);
+
+    assert.equal(h.servers.length, 2, "one global and one keyed server for the same project");
+    const globalServer = h.servers.find((server) => server.env.SHARED_VAR === "launcher");
+    const keyedServer = h.servers.find((server) => server.env.SHARED_VAR === "profile");
+    assert.ok(globalServer !== undefined && keyedServer !== undefined);
+    assert.deepEqual(globalServer.env, { XDG_CONFIG_HOME: null, SHARED_VAR: "launcher", DROP_ME: "launcher" });
+    assert.deepEqual(keyedServer.env, { XDG_CONFIG_HOME: "/profiles/a/xdg", SHARED_VAR: "profile", DROP_ME: null });
+
+    // Each thread's session, its event stream and its turn are on its OWN server.
+    const creates = h.fake.requests.filter((request) => request.method === "POST" && request.url.pathname === "/session");
+    assert.deepEqual(creates.map((request) => request.url.origin), [globalServer.url, keyedServer.url]);
+    const streams = h.fake.requests.filter((request) => request.url.pathname === "/event");
+    assert.deepEqual(new Set(streams.map((request) => request.url.origin)), new Set([globalServer.url, keyedServer.url]));
+    const keyedSessionId = (keyed.resumeCursor as { sessionId: string }).sessionId;
+    const turnStart = h.events.length;
+    await h.adapter.sendTurn({ threadId: "keyed", input: "hi", attachments: [], interactionMode: "default" });
+    const submit = h.fake.requests.filter((request) => request.url.pathname.endsWith("/prompt_async")).at(-1);
+    assert.equal(submit?.url.origin, keyedServer.url);
+    assert.equal(submit?.url.pathname, `/session/${keyedSessionId}/prompt_async`);
+    runTurnToIdle(h.fake, keyedSessionId, sessionPromptId(h));
+    const completed = await h.waitFor("turn.completed", turnStart);
+    assert.equal(completed.threadId, "keyed");
+
+    // A recycle narrowed to the key stops only that key's server.
+    assert.deepEqual(await h.recycleIdleServers({ poolKey: "profile-a" }), { recycled: 1, deferred: 0 });
+    assert.equal(gone(keyedServer), true);
+    assert.equal(gone(globalServer), false, "the project's global server kept running");
+    assert.equal(h.adapter.hasSession(HOST_THREAD_ID), true);
+    assert.equal(h.adapter.hasSession("keyed"), false);
+
+    // The keyed thread's next start: a fresh server of ITS key, same env, same upstream session.
+    await h.start({ ...keyedInput, resumeCursor: keyed.resumeCursor });
+    assert.equal(h.servers.length, 3);
+    assert.deepEqual(h.servers[2]!.env, keyedServer.env);
+    const resumed = h.fake.requests.filter((request) => request.method === "GET" && request.url.pathname === `/session/${keyedSessionId}`).at(-1);
+    assert.equal(resumed?.url.origin, h.servers[2]!.url);
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("a profile switch moves the thread to the new key's server on the same upstream session; a superseded version's server is left idle", async (t) => {
+  const h = await makeHarness(t);
+  try {
+    const spec = (version: string): StartSessionInput["serverPool"] => ({
+      key: `profile:p1:${version}`,
+      env: { XDG_CONFIG_HOME: `/prepared/${version}/xdg`, SHARED_VAR: "profile" }
+    });
+    const serverOf = (xdg: string | null): PeerServer => {
+      const found = h.servers.find((server) => server.env.XDG_CONFIG_HOME === xdg);
+      assert.ok(found !== undefined, `a server with XDG_CONFIG_HOME=${String(xdg)}`);
+      return found;
+    };
+    const first = await h.start();
+    await h.waitFor("session.state.changed");
+    const sessionId = (first.resumeCursor as { sessionId: string }).sessionId;
+
+    // Global → profile version 1 (the host restarts the session with the switched launch config).
+    await h.start({ serverPool: spec("v-1"), resumeCursor: first.resumeCursor });
+    const v1 = serverOf("/prepared/v-1/xdg");
+    const resumedOn = (url: string) =>
+      h.fake.requests.some((request) => request.method === "GET" && request.url.pathname === `/session/${sessionId}` && request.url.origin === url);
+    assert.ok(resumedOn(v1.url), "the same upstream session resumed on the profile's server");
+    // Nobody holds the project's global server any more: it is idle, so a recycle stops it now.
+    assert.deepEqual(await h.recycleIdleServers({ poolKey: "global" }), { recycled: 1, deferred: 0 });
+    assert.equal(gone(serverOf(null)), true);
+    assert.equal(h.adapter.hasSession(HOST_THREAD_ID), true, "the thread is on the profile's server");
+
+    // An edited profile is a new version, so a new key: the next start moves again, and the old
+    // version's server is idle (its idle close or a recycle stops it).
+    await h.start({ serverPool: spec("v-2"), resumeCursor: first.resumeCursor });
+    const v2 = serverOf("/prepared/v-2/xdg");
+    assert.ok(resumedOn(v2.url));
+    assert.deepEqual(await h.recycleIdleServers({ poolKey: "profile:p1:v-1" }), { recycled: 1, deferred: 0 });
+    assert.equal(gone(v1), true);
+    assert.equal(gone(v2), false);
+    assert.equal(h.adapter.hasSession(HOST_THREAD_ID), true);
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("a profile thread runs only on its prepared version's keyed server: a start or fork without that key is refused", async (t) => {
+  const h = await makeHarness(t);
+  const preparedDir = await mkdtemp(join(tmpdir(), "orq-oc-profile-"));
+  try {
+    const profile: HostThreadProfile = { profileId: "p1", revision: "2", preparedDir };
+    await writePreparedManifest(preparedDir, {
+      schema: 1,
+      profileId: "p1",
+      revision: "2",
+      agent: "opencode",
+      accountKey: "shared",
+      preparedAt: "2026-10-18T00:00:00.000Z",
+      agentSection: { configDir: "opencode", xdgConfigHome: "xdg", realConfigHome: "/home/u/.config", skills: [], commands: [], mcpServerNames: [], plugins: [], hiddenSkills: [] }
+    });
+    const refused = (error: unknown): boolean => error instanceof ProfileLaunchError && /Agent Profile/.test(error.message);
+    // No pool (the account's global server), and another version's key: never started.
+    await assert.rejects(h.start({ threadId: "p", profile }), refused);
+    await assert.rejects(h.start({ threadId: "p", profile, serverPool: { key: "profile:p1:v-other" } }), refused);
+    // A manifest that does not load fails as well, whatever the key.
+    await assert.rejects(
+      h.start({ threadId: "p", profile: { ...profile, revision: "1" }, serverPool: { key: opencodeProfilePoolKey("p1", preparedDir) } }),
+      refused
+    );
+    assert.equal(h.servers.length, 0, "no server was started for a refused profile thread");
+    await assert.rejects(
+      h.adapter.forkConversation!({
+        sourceThreadId: HOST_THREAD_ID,
+        sourceResumeCursor: { sessionId: "ses_parent" },
+        threadId: "child",
+        projectPath: "/work/project",
+        cwd: "/work/project",
+        home: { kind: "system" } as never,
+        profile,
+        cut: { retainedTurnIds: ["t1"], firstRemovedTurnId: null }
+      } as never),
+      refused
+    );
+    assert.equal(h.servers.length, 0);
+
+    const from = h.events.length;
+    await h.start({ threadId: "p", profile, serverPool: { key: opencodeProfilePoolKey("p1", preparedDir) } });
+    await h.waitFor("session.state.changed", from);
+    assert.ok(h.servers.length > 0, "started on its own keyed server");
+  } finally {
+    await h.dispose();
+    await rm(preparedDir, { recursive: true, force: true });
   }
 });

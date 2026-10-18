@@ -31,6 +31,7 @@ import {
   htmlRenderReferenceOfActivityPayload,
   mcpAppReferenceOfActivityPayload,
   IDENTITY_CHANGED_ACTIVITY_KIND,
+  PROFILE_CHANGED_ACTIVITY_KIND,
   isAgentOwnedActivity,
   isCompactionActivity,
   isPlanImplementationMessage,
@@ -416,6 +417,19 @@ function derivedWorkLogEntry(activity: ThreadActivityItem): DerivedWorkLogEntry 
       entry.accountSwitch = {
         accountId: identity.accountId,
         ...(previousAccountId ? { previousAccountId } : {})
+      };
+    }
+  }
+
+  // Agent profiles §5.3: the profile switch, ids only (null = Global); the name resolves at render.
+  if (activity.activityKind === PROFILE_CHANGED_ACTIVITY_KIND) {
+    const change = asRecord(activity.payload);
+    const profileId = change?.profileId;
+    if (typeof profileId === "string" || profileId === null) {
+      const previous = change?.previousProfileId;
+      entry.profileSwitch = {
+        profileId,
+        ...(typeof previous === "string" || previous === null ? { previousProfileId: previous } : {})
       };
     }
   }

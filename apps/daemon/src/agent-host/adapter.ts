@@ -29,9 +29,12 @@ import type {
   ProviderSnapshot,
   RuntimeEvent,
   RuntimeMode,
+  Skill,
+  SlashCommand,
   ThreadSnapshot
 } from "@orquester/api/agent-chat";
 
+import type { HostThreadProfile, HostThreadServerPool } from "./host-protocol.ts";
 import type { SessionToolsHost } from "./session-tools/index.ts";
 
 // ---------------------------------------------------------------------------
@@ -56,6 +59,28 @@ export interface StartSessionInput {
    */
   projectPath?: string;
   home: AccountHome;
+  /**
+   * The keyed provider server this thread runs on, from its `launch.json`
+   * (`CreateHostThreadRequest.serverPool`). Read only by an adapter that
+   * shares one server between threads (OpenCode: the server for
+   * `(projectPath, serverPool.key)`, started with `serverPool`'s env on top of
+   * the launcher env); every other adapter ignores it. Omitted: the project's
+   * global server.
+   */
+  serverPool?: HostThreadServerPool;
+  /**
+   * The Agent Profile this thread launches with (spec 2026-10-18), from its
+   * `launch.json` (`CreateHostThreadRequest.profile`, or the latest
+   * `SetThreadIdentityRequest.profile`). Present on EVERY start of a profile
+   * thread: create, resume, a crash restart, a host restart's rehydrate, an
+   * identity switch's restart and a fork's child. Omitted: Global.
+   *
+   * An adapter that supports profiles reads its section with
+   * `loadProfileManifest(input, agent)` (`adapters/profile-manifest.ts`),
+   * which throws when the prepared directory cannot be launched from — the
+   * start must then FAIL, never fall back to Global.
+   */
+  profile?: HostThreadProfile;
   title?: string;
   modelSelection: ModelSelection;
   runtimeMode: RuntimeMode;
@@ -251,6 +276,12 @@ export interface ForkCut {
   firstRemovedTurnId: string | null;
 }
 
+/** {@link AgentAdapter.sessionCatalog}'s answer. */
+export interface SessionCatalog {
+  slashCommands: SlashCommand[];
+  skills: Skill[];
+}
+
 /** {@link AgentAdapter.forkConversation}'s input. */
 export interface ForkConversationInput {
   /** The thread whose conversation is copied. Its live session, if any, is never touched. */
@@ -267,6 +298,17 @@ export interface ForkConversationInput {
    * that created it, so the fork is written there and the child runs there.
    */
   home: AccountHome;
+  /**
+   * The CHILD's keyed server ({@link StartSessionInput.serverPool}), for an
+   * adapter that forks on a shared server: the fork is made where the child
+   * will run. Omitted: the global server.
+   */
+  serverPool?: HostThreadServerPool;
+  /**
+   * The CHILD's Agent Profile ({@link StartSessionInput.profile}): the
+   * parent's unless the fork request named another. Omitted: Global.
+   */
+  profile?: HostThreadProfile;
   cut: ForkCut;
 }
 
@@ -318,6 +360,13 @@ export interface AgentAdapter {
    * the stop; the task's own `task.completed` (`stopped`) closes its row.
    */
   stopTask?(threadId: string, taskId: string): Promise<void>;
+  /**
+   * The commands and skills the thread's LIVE session loaded — what an Agent Profile chat's
+   * composer offers instead of the provider's Global catalog (`GET /threads/:id/catalog`).
+   * `null`: no live session, or it has not reported one yet. Never starts a session; bounded
+   * reads only; never rejects for a provider that cannot answer (it answers `null`).
+   */
+  sessionCatalog?(threadId: string): Promise<SessionCatalog | null>;
   /**
    * Run a host-parsed `/goal …` (goals §4.6, §5.1). Present exactly when
    * `capabilities.goals?.command === "host"`. The goal itself moves only
@@ -435,8 +484,10 @@ export interface AgentAdapter {
    * work running when it next goes idle; running turns are never disturbed and
    * no thread's session binding or cursor moves. `recycled` counts servers
    * stopped by the call, `deferred` the ones left to recycle when idle.
+   * `poolKey` narrows it to the servers started for that key (see
+   * {@link StartSessionInput.serverPool}); omitted, every server is recycled.
    */
-  recycleIdleServers?(): Promise<{ recycled: number; deferred: number }>;
+  recycleIdleServers?(input?: { poolKey?: string }): Promise<{ recycled: number; deferred: number }>;
   /**
    * The host's teardown: never the user ending a session (see {@link
    * stopSession}). Called twice by it — by the adapter's own listener on the

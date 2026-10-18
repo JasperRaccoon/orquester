@@ -336,6 +336,35 @@ export async function readInstalledPlugin(
   }
 }
 
+/**
+ * The ONE directory holding an installed plugin's files (Agent Profiles copy it into a profile):
+ * `path` itself when it is a plugin root or has no version directories, else — Codex's unversioned
+ * `plugins/cache/<marketplace>/<name>` — the version the agent reports, else its only version.
+ * A realpath; a version reached through a symlink must stay inside the plugin cache. Throws an
+ * `Error` saying why there is no single directory.
+ */
+export async function installedPluginRoot(path: string, version: string | undefined): Promise<string> {
+  const real = await realpath(path);
+  if (!(await lstat(real)).isDirectory() || (await isPluginRoot(real))) return real;
+  // Only an agent's plugin cache (`…/plugins/cache/…`) holds version directories.
+  if (pluginCacheRoot(resolve(path)) === resolve(path)) return real;
+  const cacheRoot = await realpath(pluginCacheRoot(resolve(path))).catch(() => real);
+  const children = new Map<string, string>();
+  for (const entry of await readdir(real, { withFileTypes: true })) {
+    if (entry.name.startsWith(".")) continue;
+    if (entry.isDirectory()) children.set(entry.name, join(real, entry.name));
+    else if (entry.isSymbolicLink()) {
+      const target = await realpath(join(real, entry.name)).catch(() => null);
+      if (target !== null && (await lstat(target)).isDirectory() && insideDir(cacheRoot, target)) children.set(entry.name, target);
+    }
+  }
+  if (version !== undefined && children.has(version)) return children.get(version)!;
+  const versions = [...children.values()];
+  if (versions.length === 1) return versions[0]!;
+  if (versions.length === 0) return real;
+  throw new Error(`it has ${versions.length} installed versions and none is reported`);
+}
+
 /** Several versions and none reported: every one, each under `<version>/`. */
 async function readVersions(
   children: ReadonlyMap<string, string>,

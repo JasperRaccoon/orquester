@@ -40,6 +40,7 @@ import type {
   ProviderSession,
   ProviderSnapshot,
   RuntimeEvent,
+  Skill,
   ThreadSnapshot,
   WorkspaceSnapshot
 } from "@orquester/api/agent-chat";
@@ -53,6 +54,7 @@ import {
   type RollbackTarget,
   type SendTurnInput,
   type SendTurnResult,
+  type SessionCatalog,
   type StartSessionInput
 } from "../../adapter.ts";
 import { join } from "node:path";
@@ -60,6 +62,7 @@ import { join } from "node:path";
 import { MAX_TURN_INPUT_CHARS } from "@orquester/api/agent-chat";
 import { projectGrokHistory } from "./history.ts";
 import { GROK_EXTRA_ENV } from "./launch.ts";
+import { prepareGrokProfileSpawn } from "./profile-launch.ts";
 import { pendingStatusMessage } from "../pending.ts";
 import {
   COMPACT_SLASH_COMMAND,
@@ -160,6 +163,8 @@ class GrokAdapter implements AgentAdapter {
 
   private readonly context: AdapterContext;
   private readonly sessions = new Map<string, GrokSession>();
+  /** {@link sessionCatalog}'s skills, read once per live session. */
+  private readonly sessionSkills = new WeakMap<GrokSession, Promise<Skill[]>>();
   /** Every session's stored MCP App snapshots, so an unchanged document is stored once per thread. */
   private readonly mcpAppSnapshots = new McpAppSnapshotStore();
   /**
@@ -281,6 +286,11 @@ class GrokAdapter implements AgentAdapter {
       extraEnv: GROK_EXTRA_ENV
     });
 
+    // Agent Profiles (spec §6.3): a profile thread renders its home's `config.toml` and gets
+    // `--no-leader` / `--plugin-dir` before every spawn; a home it cannot launch from fails the
+    // start (`profile-launch.ts`). `null` for a Global thread — nothing below changes for it.
+    const profileSpawn = await prepareGrokProfileSpawn({ profile: input.profile, env, command });
+
     // Design 2026-10-14 §1.2: a fresh credential per `grok agent stdio`
     // launch, carried by the ACP `mcpServers` entry (`session-tools.ts`); this
     // issue revokes the thread's previous one, and `onClosed` revokes this.
@@ -318,6 +328,7 @@ class GrokAdapter implements AgentAdapter {
       threadId: input.threadId,
       cwd: input.cwd,
       home: input.home,
+      ...(profileSpawn === null ? {} : { profileSpawn }),
       runtimeMode: input.runtimeMode,
       modelSelection: input.modelSelection,
       ...(input.resumeCursor === undefined ? {} : { resumeCursor: input.resumeCursor }),
@@ -364,7 +375,11 @@ class GrokAdapter implements AgentAdapter {
       )
     });
 
-    this.probeHome = input.home;
+    if (profileSpawn === null) {
+      // A profile home is no account home: the probe keeps reading the last Global one (a
+      // profile's `GROK_HOME` has no credential of its own and a profile's own config).
+      this.probeHome = input.home;
+    }
     this.sessions.set(input.threadId, session);
     try {
       await session.start();
@@ -552,6 +567,35 @@ class GrokAdapter implements AgentAdapter {
     callTool: async (threadId, input) => await this.appSession(threadId).mcpCallTool(input),
     readResource: async (threadId, input) => await this.appSession(threadId).mcpReadResource(input)
   };
+
+  /**
+   * The live session's own catalog (an Agent Profile chat's composer): the commands of its last
+   * `available_commands_update` (skills and plugin commands included, the two refused names left
+   * out) and the skills `grok inspect` lists under the session's own home and profile. `null`
+   * until the session reported its commands.
+   */
+  async sessionCatalog(threadId: string): Promise<SessionCatalog | null> {
+    const session = this.sessions.get(threadId);
+    if (session === undefined || session.isStopped || session.slashCommands.length === 0) return null;
+    let skills = this.sessionSkills.get(session);
+    if (skills === undefined) {
+      skills = this.inspectSessionSkills(session);
+      this.sessionSkills.set(session, skills);
+    }
+    return { slashCommands: mergeCommands([COMPACT_SLASH_COMMAND], session.slashCommands), skills: await skills };
+  }
+
+  /** One `grok inspect` per session; a failed one is not kept, so the next read tries again. */
+  private async inspectSessionSkills(session: GrokSession): Promise<Skill[]> {
+    const command = await this.context.resolveBin("grok");
+    const { env, cwd } = session.inspectTarget;
+    const skills = command === null ? null : await probeSkills(command, env, cwd);
+    if (skills === null) {
+      this.sessionSkills.delete(session);
+      return [];
+    }
+    return skills;
+  }
 
   private appSession(threadId: string): GrokSession {
     const session = this.sessions.get(threadId);

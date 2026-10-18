@@ -18,6 +18,7 @@ import { chatDetail } from "../views.ts";
 import { defineTool, MUTATING, type AnyOrquesterTool, type ScopeClaim } from "../catalog/contract.ts";
 import { chatThreadRef, sessionCard, sessionClaim, threadCaller } from "./session-access.ts";
 import { MAX_RUNNING_SESSIONS_PER_PROJECT } from "./sessions.ts";
+import { profileNames, profileRef, resolveProfileArg } from "../profiles.ts";
 
 // Every call goes through the daemon's own routes (agentChatRoutes.fork, .mergeBack, .mergeBackItem), so the GUI's
 // checks and the host's refusals apply unchanged.
@@ -69,17 +70,35 @@ async function assertRoomInProject(api: Parameters<typeof canonicalProject>[0], 
   }
 }
 
+/** The daemon's refusals of a launch's Agent Profile. */
+const PROFILE_REFUSALS: ReadonlySet<string> = new Set(["PROFILE_NOT_FOUND", "PROFILE_NOT_READY", "PROFILE_UNSUPPORTED_AGENT"]);
+
+/** The fork route, its profile refusal naming the profile (`profile`: the one asked for or inherited, id or `{id, name}`). */
+async function forkWithProfile(api: Parameters<typeof readThread>[0], target: string, body: ForkSessionRequest, profile: { id: string; name: string } | string | null): Promise<ForkSessionResponse> {
+  try {
+    // A fresh commandId, re-sent unchanged on a 503: a retry lands on the same fork, never a second one.
+    return await postIdempotent<ForkSessionResponse>(api, agentChatRoutes.fork(target), { ...body });
+  } catch (error) {
+    if (profile !== null && error instanceof ToolError && PROFILE_REFUSALS.has(error.code)) {
+      const named = typeof profile === "string" ? (await profileNames(api)).get(profile) ?? profile : profile.name;
+      throw new ToolError(error.code, `Agent Profile "${named}" could not be used, so nothing was forked: ${error.message} Fork with another \`profile\`, or \"global\".`, error.detail);
+    }
+    throw error;
+  }
+}
+
 export const forkSessionTool = defineTool({
   name: "fork_session",
   title: "Fork a chat session",
   description:
-    "Fork a chat into a new idle tab (same project, agent, settings) holding its conversation through `throughTurn` (transcript numbers; default: the latest finished turn) or up to `messageId`. Grok forks are handed the transcript (`strategy`). send_message the fork work; it returns its result with merge_back_session.",
+    "Fork a chat into a new idle tab (same project, agent, settings, Agent Profile) holding its conversation through `throughTurn` (transcript numbers; default: the latest finished turn) or up to `messageId`. Grok forks are handed the transcript (`strategy`). A bad profile fails it. send_message the fork work; it returns its result with merge_back_session.",
   chatNote: "Default: this chat (your running turn is not included).",
   input: {
     sessionId: catalogSessionId.optional(),
     throughTurn: z.number().int().min(0).optional().describe("Keep turns 1..N (0: none)."),
     messageId: z.string().min(1).max(200).optional().describe("Fork at this message (a user message: just before it)."),
-    title: z.string().trim().min(1).max(200).optional()
+    title: z.string().trim().min(1).max(200).optional(),
+    profile: z.string().trim().min(1).max(200).nullable().optional().describe("Agent Profile id/name; null: Global.")
   },
   audiences: ["external", "chat"],
   toolset: "core",
@@ -96,7 +115,8 @@ export const forkSessionTool = defineTool({
     sessionCard(ctx, args.sessionId ?? threadCaller(ctx.caller)?.threadId ?? "", "fork", [
       ...(args.throughTurn !== undefined ? [{ label: "Through turn", value: String(args.throughTurn) }] : []),
       ...(args.messageId !== undefined ? [{ label: "At message", value: args.messageId }] : []),
-      ...(args.title !== undefined ? [{ label: "Fork title", value: args.title }] : [])
+      ...(args.title !== undefined ? [{ label: "Fork title", value: args.title }] : []),
+      ...(args.profile !== undefined ? [{ label: "Agent Profile", value: args.profile ?? "Global" }] : [])
     ]),
   annotations: MUTATING,
   resultKind: "json",
@@ -107,19 +127,21 @@ export const forkSessionTool = defineTool({
     const summary = await requireChatSession(api, target);
     const sessions = await listSessions(api);
     await assertRoomInProject(api, sessions, summary.projectPath);
-    const body: ForkSessionRequest = {};
+    // The fork's profile (spec 2026-10-18 §5.5): named (null = Global), else the original's. A tool's fork is unattended.
+    const profile = args.profile === undefined ? undefined : args.profile === null ? null : await resolveProfileArg(api, args.profile);
+    const body: ForkSessionRequest = { unattended: true, ...(profile !== undefined ? { profileId: profile?.id ?? null } : {}) };
     if (args.title !== undefined) body.title = args.title;
     if (args.messageId !== undefined) body.messageId = args.messageId;
     if (args.throughTurn !== undefined) Object.assign(body, await forkCut(api, target, args.throughTurn, caller !== null && target === caller.threadId));
     // A chat's fork is its own child (§13 c): the route keeps the flag only from the forked chat's own agent.
     if (caller !== null) body.agentCreated = true;
-    // A fresh commandId, re-sent unchanged on a 503: a retry lands on the same fork, never a second one.
-    const result = await postIdempotent<ForkSessionResponse>(api, agentChatRoutes.fork(target), { ...body });
+    const result = await forkWithProfile(api, target, body, profile === undefined ? (summary.profileId ?? null) : profile);
     if (caller !== null) {
       return {
         sessionId: result.session.id,
         title: result.session.title,
         strategy: result.strategy,
+        profile: profileRef(result.session.profileId, await profileNames(api)),
         ...(result.lineage.forkedFrom ? { forkedFrom: result.lineage.forkedFrom } : {}),
         ...chatThreadRef(caller, sessions, result.session, target === caller.threadId ? "fork" : "thread")
       };

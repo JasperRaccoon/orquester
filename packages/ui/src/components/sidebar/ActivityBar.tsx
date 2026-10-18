@@ -50,7 +50,7 @@ const ActivityButton: React.FC<{
 
 /**
  * The desktop sidebar's leftmost column: one button per sidebar view — the
- * projects tree, workflows, the agent profile — and settings at the bottom.
+ * projects tree, workflows, Agent Profiles — and settings at the bottom.
  * A view that is not showing carries a dot when it holds something that wants
  * the user: an agent blocked on them, a failed workflow run.
  */

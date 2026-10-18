@@ -352,6 +352,10 @@ export function registerAgentProfileRoutes(app: FastifyInstance, deps: AgentProf
           }
           return await service.scanUpload(agent, name, tmp);
         } catch (error) {
+          // Deleted BEFORE the error answer is sent (a `finally` would run after `sendError`
+          // already answered): a client acting on the answer never finds the temp file.
+          if (tmp) await discardUpload(tmp);
+          tmp = undefined;
           return sendError(request, reply, error);
         } finally {
           if (tmp) await discardUpload(tmp);
@@ -405,7 +409,7 @@ function sendError(request: FastifyRequest, reply: FastifyReply, error: unknown)
   request.log.error({ err: error }, "agent profile route failed");
   return reply
     .code(500)
-    .send(errorBody("AGENT_PROFILE_ERROR", "The agent profile request failed; see the daemon log."));
+    .send(errorBody("AGENT_PROFILE_ERROR", "The agent config request failed; see the daemon log."));
 }
 
 /** A refusal while the upload body may still be unread: `Connection: close` (see `refuseUpload`). */

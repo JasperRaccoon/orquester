@@ -518,6 +518,8 @@ test("watching: changes are debounced for 500 ms and unchanged snapshots are not
   const h = harness({ watch: fake.watch, realpath: fake.realpath });
   h.installed.delete("grok");
   h.installed.delete("opencode");
+  const filesChanged: string[] = [];
+  h.service.lifecycle.on("filesChanged", ({ agent }: { agent: string }) => filesChanged.push(agent));
 
   h.service.start();
   await drain();
@@ -545,6 +547,8 @@ test("watching: changes are debounced for 500 ms and unchanged snapshots are not
   await again;
   await drain();
   assert.equal(h.events.length, 1);
+  // `filesChanged` follows every debounced check, moved or not (runtime settings are not in the snapshot).
+  assert.deepEqual(filesChanged, ["claude", "claude"]);
 
   await h.service.stop();
 });

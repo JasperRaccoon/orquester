@@ -17,6 +17,7 @@ import {
 import { consentActivity, mcpAppConsents } from "../lib/agent-chat/mcp-app-consent";
 import { SECRET_REQUEST_EVENT_TYPE, TOOL_APPROVAL_EVENT_TYPE } from "@orquester/api/agent-chat";
 import { applyAgentProfileEvent, resetAgentProfile } from "../lib/agent-profile/store";
+import { applySessionProfileEvent, resetSessionProfiles, sessionProfilesStore } from "../lib/session-profiles/store";
 import { applyWorkflowsEvent, resetWorkflows, workflowsStore } from "../lib/workflows/store";
 import { observeWorkflowRunEvent, resetWorkflowNotifications } from "../lib/workflows/notifications";
 import { clearDesktopPrefs } from "../lib/desktop-prefs";
@@ -50,6 +51,13 @@ import {
 } from "../lib/auth";
 import { loadViewModes, saveViewModes, type ViewMode } from "../lib/view-mode";
 import { loadPreferredAccounts, savePreferredAccounts } from "../lib/preferred-account";
+import {
+  keepKnownPreferredProfiles,
+  loadPreferredProfiles,
+  savePreferredProfiles,
+  withPreferredProfile,
+  withoutPreferredProfile
+} from "../lib/preferred-profile";
 import {
   launchModelSelection,
   loadPreferredModelSelections,
@@ -161,6 +169,7 @@ import {
   PLUGINS_CHANGED_EVENT,
   PLUGINS_CHANNEL,
   SAVED_PROMPTS_CHANNEL,
+  SESSION_PROFILES_CHANNEL,
   WORKFLOWS_CHANNEL
 } from "@orquester/api";
 import type { PluginInfo } from "@orquester/api";
@@ -913,6 +922,13 @@ export interface AppState {
   /** The last full model selection (model + options) per agent, from the composer's pickers too. */
   preferredModelSelectionByAgent: Record<string, ModelSelection>;
   /**
+   * The Agent Profile last picked per agent (agent profiles spec §5.3), from the composer's
+   * profile chip; an agent with no entry is Global. A new chat and a resume launch with it.
+   * Per daemon connection (loaded on a switch); pruned to the ids the daemon's profile list
+   * has, and an agent's pick is forgotten when a launch with it is refused as gone.
+   */
+  preferredProfileByAgent: Record<string, string>;
+  /**
    * Agent-chat composer + launcher preferences, per device (chat spec §7.4,
    * §4.6.7): steer-vs-queue, skills under `/`, and the last permission mode
    * picked per agent. Persisted client-side through a validating loader.
@@ -1133,6 +1149,8 @@ export interface AppState {
   markTabUnread: (id: string) => void;
   setViewMode: (mode: ViewMode) => void;
   setPreferredAccount: (agent: string, accountId: string) => void;
+  /** Remember `agent`'s profile; `null` is Global. */
+  setPreferredProfile: (agent: string, profileId: string | null) => void;
   setPreferredModel: (agent: string, model: string) => void;
   /** Remember model AND options; also updates `preferredModelByAgent`. */
   setPreferredModelSelection: (agent: string, selection: ModelSelection) => void;
@@ -1259,6 +1277,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   preferredAccountByAgent: loadPreferredAccounts(),
   preferredModelByAgent: loadPreferredModels(),
   preferredModelSelectionByAgent: loadPreferredModelSelections(),
+  preferredProfileByAgent: {},
   chatPrefs: loadChatPrefs(),
   threadVisits: loadThreadVisits(),
   terminalFontSize: loadTerminalFontSize(),
@@ -1626,6 +1645,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({
       connections: [nextSetup.localConnection],
       activeConnectionId: nextSetup.localConnection.id,
+      preferredProfileByAgent: loadPreferredProfiles(nextSetup.localConnection.id),
       appConfig: {
         useTitlebar: nextSetup.defaultUseTitlebar,
         runInBackground: false,
@@ -1782,12 +1802,15 @@ export const useAppStore = create<AppState>((set, get) => ({
     resetToolApprovals();
     resetAgentTools();
     resetAgentProfile();
+    resetSessionProfiles();
     resetWorkflows();
     resetWorkflowNotifications();
     // Reset all daemon-scoped state: a different server has its own data.
     set({
       api: new ApiClient(connection, buildTransporter(connection)),
       activeConnectionId: id,
+      // Profile ids belong to one daemon: this one's remembered picks.
+      preferredProfileByAgent: loadPreferredProfiles(id),
       currentWorkspace: null,
       currentProject: null,
       workspaces: [],
@@ -2435,7 +2458,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   openTab: async (request) => {
-    const { kind, refId, title, accountId, resumeConversationId, initialCommand, chat } = request;
+    const { kind, refId, title, accountId, resumeConversationId, initialCommand } = request;
+    // Agent profiles §5.3: a new chat and a resumed conversation launch with the
+    // agent's remembered profile (none = Global) unless the caller named one.
+    const profileId = kind === "agent-chat" ? (request.chat?.profileId ?? get().preferredProfileByAgent[refId]) : undefined;
+    const chat = request.chat && profileId !== undefined ? { ...request.chat, profileId } : request.chat;
     const api = get().api;
     if (!api) {
       return;
@@ -2471,7 +2498,8 @@ export const useAppStore = create<AppState>((set, get) => ({
           accountId,
           resumeConversationId,
           initialCommand,
-          chat
+          chat,
+          ...(profileId !== undefined ? { profileId } : {})
         });
       } catch (error) {
         // A refused RESUME is the one create failure with a useful recovery ("open
@@ -2517,6 +2545,34 @@ export const useAppStore = create<AppState>((set, get) => ({
           // says nothing about the transcript, so it keeps the list.)
           if (project?.path && code === "RESUME_UNAVAILABLE") {
             void get().loadAgentConversations(project.path, true);
+          }
+          return;
+        }
+        // Agent profiles §5.3: the launch carried the agent's REMEMBERED profile and the daemon
+        // refused it. Gone: forget the pick (the next chat is Global) and say so — this launch is
+        // not retried as Global behind the user's back. Not ready: keep it, say why and how to
+        // pick another. A profile the caller named itself stays a plain failure.
+        if (
+          (code === "PROFILE_NOT_FOUND" || code === "PROFILE_NOT_READY") &&
+          profileId !== undefined &&
+          request.chat?.profileId === undefined &&
+          get().preferredProfileByAgent[refId] === profileId
+        ) {
+          const agentName = get().registry.agents.find((entry) => entry.id === refId)?.name ?? refId;
+          const profileName = sessionProfilesStore.getState().list.profiles?.find((entry) => entry.id === profileId)?.name;
+          const named = profileName !== undefined ? `"${profileName}"` : "the Agent Profile remembered for it";
+          if (code === "PROFILE_NOT_FOUND") {
+            get().setPreferredProfile(refId, null);
+            get().setNotice({
+              title: `Could not start ${agentName}`,
+              message: `${profileName !== undefined ? `Profile "${profileName}"` : "The Agent Profile remembered for it"} no longer exists; new chats for ${agentName} now use Global. Start the chat again.`
+            });
+          } else {
+            const reason = (error as ApiError).serverMessage ?? "Its preparation failed.";
+            get().setNotice({
+              title: `Could not start ${agentName} with ${named}`,
+              message: `${reason} New ${agentName} chats keep using it until it is fixed in Agent Profiles, or until you pick another profile (or Global) on the profile chip of an open ${agentName} chat.`
+            });
           }
           return;
         }
@@ -3034,6 +3090,14 @@ export const useAppStore = create<AppState>((set, get) => ({
       return { preferredAccountByAgent };
     }),
 
+  setPreferredProfile: (agent, profileId) =>
+    set((state) => {
+      const preferredProfileByAgent = withPreferredProfile(state.preferredProfileByAgent, agent, profileId);
+      if (preferredProfileByAgent === state.preferredProfileByAgent) return {};
+      savePreferredProfiles(state.activeConnectionId, preferredProfileByAgent);
+      return { preferredProfileByAgent };
+    }),
+
   setChatPrefs: (patch) =>
     set((state) => {
       const chatPrefs = { ...state.chatPrefs, ...patch };
@@ -3429,10 +3493,29 @@ export const useAppStore = create<AppState>((set, get) => ({
       return;
     }
     if (event.channel === AGENT_PROFILE_CHANNEL) {
-      // The right rail's agent profiles live in their own module store: a
+      // Agent config (Settings) keeps each agent's snapshot in its own module store: a
       // change refetches that agent when it was loaded and its revision moved
       // (a malformed payload is ignored).
       applyAgentProfileEvent(event);
+      return;
+    }
+    if (event.channel === SESSION_PROFILES_CHANNEL) {
+      // Agent Profiles live in their own module store (the rail's panel, the
+      // composer chips). A deleted profile also stops being any agent's
+      // remembered pick: the next chat of that agent is Global again.
+      applySessionProfileEvent(event);
+      const deleted =
+        event.type === "sessionProfile.deleted" && typeof event.payload === "object" && event.payload !== null
+          ? (event.payload as { profileId?: unknown }).profileId
+          : undefined;
+      if (typeof deleted === "string" && deleted.length > 0) {
+        set((state) => {
+          const preferredProfileByAgent = withoutPreferredProfile(state.preferredProfileByAgent, deleted);
+          if (preferredProfileByAgent === state.preferredProfileByAgent) return {};
+          savePreferredProfiles(state.activeConnectionId, preferredProfileByAgent);
+          return { preferredProfileByAgent };
+        });
+      }
       return;
     }
     if (event.channel === AGENT_TOOLS_CHANNEL) {
@@ -3522,6 +3605,23 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   }
 }));
+
+// Agent profiles §5.3: a remembered pick the connected daemon does not have (deleted while this
+// client was away, or another daemon's id) would make every new chat of that agent fail. Each
+// time its profile list loads cleanly, the picks it does not know are forgotten (an unreadable
+// profile still counts: it exists). The session-profiles store is per connection: it resets on
+// a switch, before this connection's list arrives.
+sessionProfilesStore.subscribe((state, previous) => {
+  const { list } = state;
+  if (list === previous.list || list.status !== "ready" || list.stale || list.error !== null || list.profiles === null) return;
+  const known = new Set([...list.profiles.map((profile) => profile.id), ...list.errors.map((entry) => entry.profileId)]);
+  useAppStore.setState((app) => {
+    const preferredProfileByAgent = keepKnownPreferredProfiles(app.preferredProfileByAgent, known);
+    if (preferredProfileByAgent === app.preferredProfileByAgent) return {};
+    savePreferredProfiles(app.activeConnectionId, preferredProfileByAgent);
+    return { preferredProfileByAgent };
+  });
+});
 
 /**
  * The provider snapshot's two ambient facts reach this store here (§7.7).

@@ -41,6 +41,14 @@ import { MINIMUM_OPENCODE_VERSION } from "../semver.ts";
  * catalogue, which is how a catalogue failure is told apart from a start
  * failure. Every other catalogue route always answers.
  *
+ * `MOCK_COMMANDS` / `MOCK_SKILLS` (JSON arrays) replace the `/command` / `/skill` answers — a
+ * keyed server started with them in its pool env serves another catalogue than the global one.
+ *
+ * `MOCK_REPORT_ENV` (comma-separated names) makes `GET /__peer/env` answer
+ * those variables as the peer process sees them (`null` when unset), and adds
+ * them as `env` to the `MOCK_UPSTREAM` announcement — so a test can tell which
+ * env a server was started with.
+ *
  * `MOCK_UPSTREAM` (an `http://` origin the test listens on) makes the peer a
  * real server process in front of the test's own OpenCode fake: it announces
  * itself there (`POST /__peer/up` with its pid and origin) before printing the
@@ -53,6 +61,13 @@ const PEER_SOURCE = `
 import { createServer, request } from "node:http";
 
 const upstream = process.env.MOCK_UPSTREAM;
+const reportedEnv = () =>
+  Object.fromEntries(
+    (process.env.MOCK_REPORT_ENV ?? "")
+      .split(",")
+      .filter((name) => name.length > 0)
+      .map((name) => [name, process.env[name] ?? null])
+  );
 const mode = process.env.MOCK_MODE ?? "ok";
 const version = process.env.MOCK_VERSION ?? "${MINIMUM_OPENCODE_VERSION}";
 const providerStatus = Number(process.env.MOCK_PROVIDER_STATUS ?? "200");
@@ -69,8 +84,8 @@ const CATALOGUE = {
     default: { openrouter: "google/gemini-3.1-flash-lite" }
   },
   "/agent": [{ name: "build", description: "Build agent", mode: "primary" }],
-  "/command": [{ name: "init", description: "Initialise AGENTS.md" }],
-  "/skill": [{ name: "review", description: "Review a diff", location: "/skills/review/SKILL.md" }]
+  "/command": process.env.MOCK_COMMANDS ? JSON.parse(process.env.MOCK_COMMANDS) : [{ name: "init", description: "Initialise AGENTS.md" }],
+  "/skill": process.env.MOCK_SKILLS ? JSON.parse(process.env.MOCK_SKILLS) : [{ name: "review", description: "Review a diff", location: "/skills/review/SKILL.md" }]
 };
 
 let origin = "";
@@ -101,7 +116,7 @@ function announceUpstream() {
       answer.on("end", resolve);
     });
     out.on("error", reject);
-    out.end(JSON.stringify({ pid: process.pid, origin }));
+    out.end(JSON.stringify({ pid: process.pid, origin, env: reportedEnv() }));
   });
 }
 
@@ -127,6 +142,10 @@ if (mode === "silent") {
       return;
     }
     const route = (req.url ?? "").split("?")[0];
+    if (route === "/__peer/env") {
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(reportedEnv()));
+      return;
+    }
     if (route === "/provider" && providerStatus !== 200) {
       res.writeHead(providerStatus, { "content-type": "application/json" }).end('{"error":"provider catalogue unavailable"}');
       return;

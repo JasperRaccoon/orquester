@@ -35,6 +35,9 @@ import { AsyncEventQueue, createDeferred } from "./async-queue.ts";
 import type { ClaudeAdapterDeps } from "./deps.ts";
 import { countingIds, readClaudeFixture } from "./fixtures.ts";
 import { createClaudeAdapterWith } from "./index.ts";
+import { writePreparedManifest } from "../../../session-profiles/manifest.ts";
+import { claudePreparer } from "../../../session-profiles/preparers/claude.ts";
+import { FIXTURE_SECRETS, makeClaudeProfileFixture } from "../../../session-profiles/preparers/claude.testing.ts";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { recordingSessionTools } from "../../session-tools/testing.ts";
@@ -43,6 +46,10 @@ import { recordingSessionTools } from "../../session-tools/testing.ts";
 // still uses the real file and returns its actual result.
 let pendingFileIO = 0;
 let activeAdapters: AgentAdapter[] = [];
+const profileRoots: string[] = [];
+after(async () => {
+  await Promise.all(profileRoots.map((root) => rm(root, { recursive: true, force: true })));
+});
 let ioGates: Array<{ path: string; operation: "open" | "close"; count: number; nth: number; signal(): void; release(): void; held: Promise<void> }> = [];
 async function trackedIO<T>(read: () => Promise<T>): Promise<T> {
   pendingFileIO += 1;
@@ -142,14 +149,18 @@ class ScriptedQuery {
   private initResolves: boolean;
   interruptReceipt: { still_queued: string[] } = { still_queued: [] };
   closed = false;
+  /** What the handshake's `commands` carries. */
+  readonly initCommands: unknown[];
 
   constructor(params: {
     prompt: string | AsyncIterable<SDKUserMessage>;
     options?: ClaudeQueryOptions;
     initResolves?: boolean;
     contextUsage?: ContextUsageBehaviour;
+    initCommands?: unknown[];
   }) {
     this.options = params.options;
+    this.initCommands = params.initCommands ?? [];
     this.canUseTool = params.options?.canUseTool;
     this.initResolves = params.initResolves !== false;
     this.contextUsage = params.contextUsage ?? "ok";
@@ -197,7 +208,7 @@ class ScriptedQuery {
           // this wait.
           return new Promise(() => {});
         }
-        return { commands: [], models: [], account: {} };
+        return { commands: self.initCommands, models: [], account: {} };
       },
       async interrupt() {
         self.calls.push({ op: "interrupt" });
@@ -350,11 +361,15 @@ interface HarnessOptions {
   historyStdout?: (method: string, args: readonly string[]) => string;
   /** How the scripted peer answers `getContextUsage` (§7.6). */
   contextUsage?: ContextUsageBehaviour;
+  /** The session handshake's `commands`. */
+  initCommands?: unknown[];
   signal?: AbortSignal;
   /** Where an attachment id lives, for a test that needs the bytes read for real. */
   resolveAttachmentPath?: AdapterContext["resolveAttachmentPath"];
   /** The host's session-tool service (design 2026-10-14 §1); absent = none registered. */
   sessionTools?: AdapterContext["sessionTools"];
+  /** `<appdir>/tmp` (a profile chat writes its launch files there); default `/tmp`. */
+  tmpDir?: string;
 }
 
 async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
@@ -397,7 +412,7 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
     resolveBin: async () =>
       options.binaryPath === undefined ? "/usr/local/bin/claude" : options.binaryPath,
     sessionPath: () => "/usr/bin",
-    tmpDir: () => "/tmp",
+    tmpDir: () => options.tmpDir ?? "/tmp",
     signal: options.signal ?? new AbortController().signal,
     ...(options.sessionTools !== undefined ? { sessionTools: options.sessionTools } : {})
   };
@@ -414,7 +429,8 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
       const peer = new ScriptedQuery({
         ...params,
         ...(options.initResolves !== undefined ? { initResolves: options.initResolves } : {}),
-        ...(options.contextUsage !== undefined ? { contextUsage: options.contextUsage } : {})
+        ...(options.contextUsage !== undefined ? { contextUsage: options.contextUsage } : {}),
+        ...(options.initCommands !== undefined ? { initCommands: options.initCommands } : {})
       });
       peers.push(peer);
       firstPeer.resolve(peer);
@@ -631,6 +647,79 @@ describe("claude adapter — start failures", () => {
     assert.equal(exited.payload.exitKind, "error");
     assert.equal(harness.peers[0]?.closed, true, "the query must be closed on an expired deadline");
     assert.equal(harness.adapter.hasSession(START.threadId), false);
+  });
+});
+
+describe("claude adapter — Agent Profile threads (spec 2026-10-18 §6.1)", () => {
+  async function prepared(): Promise<{ root: string; profile: { profileId: string; revision: string; preparedDir: string } }> {
+    const root = await mkdtemp(nodePath.join(tmpdir(), "orq-claude-profile-start-"));
+    profileRoots.push(root);
+    const fixture = await makeClaudeProfileFixture(root);
+    const preparedDir = nodePath.join(root, "prepared", "v-1");
+    await mkdir(preparedDir, { recursive: true, mode: 0o700 });
+    const agentSection = await claudePreparer.prepare(fixture.context({ stagingDir: preparedDir, preparedDir }));
+    await writePreparedManifest(preparedDir, {
+      schema: 1,
+      profileId: "p1",
+      revision: "3",
+      agent: "claude",
+      accountKey: "shared",
+      preparedAt: "2026-10-18T00:00:00.000Z",
+      agentSection
+    });
+    return { root, profile: { profileId: "p1", revision: "3", preparedDir } };
+  }
+
+  it("a profile whose prepared dir cannot be read fails the start: no CLI, no session, never Global", async () => {
+    const harness = await makeHarness();
+    await assert.rejects(
+      () =>
+        harness.adapter.startSession({
+          ...START,
+          profile: { profileId: "p1", revision: "3", preparedDir: "/nonexistent/prepared/v-1" }
+        }),
+      /Agent Profile could not be loaded.*manifest is missing/
+    );
+    assert.equal(harness.adapter.hasSession(START.threadId), false);
+    assert.equal(harness.queryOptions.filter((options) => options.persistSession !== false).length, 0);
+  });
+
+  it("launches from the prepared dir with its 0600 launch files, removed when the session ends", async () => {
+    const { root, profile } = await prepared();
+    const harness = await makeHarness({ tmpDir: nodePath.join(root, "appdir-tmp") });
+    await harness.adapter.startSession({ ...START, profile });
+    const options = harness.queryOptions.filter((entry) => entry.persistSession !== false).at(-1)!;
+    assert.deepEqual(options.settingSources, ["project", "local"]);
+    assert.equal(options.strictMcpConfig, true);
+    assert.equal(options.plugins?.length, 2);
+    assert.ok(options.skills?.includes("workflow-authoring"));
+    const settingsPath = options.settings as string;
+    assert.equal(typeof settingsPath, "string");
+    assert.equal((await fs.stat(settingsPath)).mode & 0o777, 0o600);
+    const settings = JSON.parse(await fs.readFile(settingsPath, "utf8")) as Record<string, unknown>;
+    assert.equal(settings.autoMemoryEnabled, false);
+    assert.deepEqual(Object.keys(settings.hooks as object), ["PreToolUse", "Stop"]);
+    const mcpPath = options.extraArgs?.["mcp-config"];
+    assert.equal(typeof mcpPath, "string");
+    assert.equal((await fs.stat(mcpPath!)).mode & 0o777, 0o600);
+    assert.equal(JSON.stringify(options.extraArgs).includes(FIXTURE_SECRETS.env), false);
+
+    await harness.adapter.stopSession(START.threadId);
+    await assert.rejects(fs.stat(settingsPath), "the launch files go with the session");
+  });
+
+  it("never dispatches one of the user's skills, which a profile chat does not load", async () => {
+    const { root, profile } = await prepared();
+    const accountHome = nodePath.join(root, "account-home");
+    await mkdir(nodePath.join(accountHome, "skills", "review"), { recursive: true });
+    await writeFile(nodePath.join(accountHome, "skills", "review", "SKILL.md"), "---\ndescription: Review\n---\nReview it.\n");
+    const harness = await makeHarness({ tmpDir: nodePath.join(root, "appdir-tmp") });
+    await harness.adapter.startSession({ ...START, home: { ...START.home, path: accountHome }, profile });
+    const peer = harness.peers[0]!;
+    await harness.adapter.sendTurn({ threadId: START.threadId, input: "please $review", attachments: [], interactionMode: "default" });
+    await peer.nextTurn();
+    const content = peer.received[0]?.message.content as Array<{ type: string; text?: string }>;
+    assert.equal(content.at(-1)?.text, "please $review");
   });
 });
 
@@ -1130,6 +1219,27 @@ describe("claude adapter — stopping one task", () => {
   it("rejects stopping a task without a live session", async () => {
     const harness = await makeHarness();
     await assert.rejects(harness.adapter.stopTask!(START.threadId, "wvg2ao9ra"), /No live Claude session/);
+  });
+});
+
+describe("claude adapter — the session's own catalog (Agent Profiles composer)", () => {
+  it("answers the commands the session's handshake reported, not the probe's; null without a live session", async () => {
+    const harness = await makeHarness({
+      initCommands: [
+        { name: "profile-skill", description: "From the profile's plugin", argumentHint: "<file>" },
+        { name: "init", description: "Initialize" }
+      ]
+    });
+    assert.equal(await harness.adapter.sessionCatalog!(START.threadId), null, "no session yet");
+    await harness.adapter.startSession(START);
+    const catalog = await harness.adapter.sessionCatalog!(START.threadId);
+    assert.deepEqual(
+      catalog?.slashCommands.map((command) => command.name),
+      ["profile-skill", "init", "compact"]
+    );
+    assert.deepEqual(catalog?.slashCommands[0], { name: "profile-skill", description: "From the profile's plugin", input: { hint: "<file>" } });
+    assert.ok(!catalog?.slashCommands.some((command) => command.name === "review"), "never the probe's Global list");
+    assert.deepEqual(catalog?.skills, []);
   });
 });
 

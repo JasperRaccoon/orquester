@@ -40,11 +40,13 @@ import type {
   RuntimeEvent,
   RuntimeMode,
   Skill,
+  SlashCommand,
   ThreadSnapshot
 } from "@orquester/api/agent-chat";
 import { SUPPORTED_ATTACHMENT_IMAGE_MIME_TYPES, isUnfinishedGoal } from "@orquester/api/agent-chat";
 
-import type { AdapterContext, RollbackTarget } from "../../adapter.ts";
+import type { AdapterContext, RollbackTarget, SessionCatalog } from "../../adapter.ts";
+import { parseInitializationCommands, withSynthesisedCommands } from "./probe.ts";
 import { AGENT_HOST_DEADLINES, TURN_LIVENESS_WINDOWS, withDeadline } from "../../support/deadline.ts";
 import { StderrCapture } from "../../support/stderr.ts";
 import {
@@ -69,6 +71,13 @@ import { claudeConfigDir } from "./config-dir.ts";
 import { ClaudeGoalTranscript, locateClaudeTranscript } from "./goal-transcript.ts";
 import { createClaudeHistoryReader, type ClaudeHistoryReader } from "./history.ts";
 import { buildClaudeQueryOptions } from "./launch.ts";
+import {
+  claudeProfileLaunchFiles,
+  removeClaudeProfileLaunchFiles,
+  writeClaudeProfileLaunchFiles,
+  type ClaudeProfileLaunch,
+  type ClaudeProfileLaunchFiles
+} from "./profile-launch.ts";
 import { createClaudeSessionToolsLaunch, isClaudeSessionTool } from "./session-tools.ts";
 import { launchHomeKey } from "../../session-tools/index.ts";
 import { CLAUDE_OPTION_IDS, findModel, resolveEffortLevel, selectionStringOption } from "./models.ts";
@@ -258,6 +267,8 @@ interface ClaudeSessionOptions {
   knownGoal?: AgentGoal | null;
   /** Begin the resumed transcript's read during `start` (`StartSessionInput.prefetchHistory`). */
   prefetchHistory?: boolean;
+  /** An Agent Profile thread's launch (`profile-launch.ts`); absent = Global. */
+  profileLaunch?: ClaudeProfileLaunch;
 }
 
 export class ClaudeSession {
@@ -271,6 +282,8 @@ export class ClaudeSession {
   private readonly stderr: StderrCapture;
 
   private query: Query | undefined;
+  /** The handshake's `commands` (`catalog()`); unset until it answered. */
+  private initCommands: SlashCommand[] | undefined;
   private record: ProviderSession;
   private closed = false;
   /**
@@ -327,6 +340,8 @@ export class ClaudeSession {
   private goalOutputOpen = true;
   /** The one teardown, once it has begun (see {@link teardown}). */
   private teardownDone: Promise<void> | undefined;
+  /** A profile chat's launch files (secrets), removed by the teardown. */
+  private profileFiles: ClaudeProfileLaunchFiles | undefined;
   /** A transcript walk is under way; the ones asked for behind it wait here. */
   private transcriptWalking = false;
   private readonly transcriptWalksWaiting: TranscriptWalk[] = [];
@@ -440,8 +455,16 @@ export class ClaudeSession {
           })
         : undefined;
     this.sessionToolNames = toolsLaunch !== undefined ? () => toolsLaunch.names() : () => new Set();
+    const profileLaunch = this.options.profileLaunch;
+    const profileFiles =
+      profileLaunch !== undefined
+        ? claudeProfileLaunchFiles(this.options.context.tmpDir(), this.threadId)
+        : undefined;
     const built = buildClaudeQueryOptions({
       ...(toolsLaunch !== undefined ? { sessionTools: toolsLaunch } : {}),
+      ...(profileLaunch !== undefined && profileFiles !== undefined
+        ? { profile: { launch: profileLaunch, files: profileFiles } }
+        : {}),
       cwd: this.options.cwd,
       executablePath: this.options.executablePath,
       env: this.options.env,
@@ -467,6 +490,18 @@ export class ClaudeSession {
       // cursor exists before the CLI has said anything (fixtures README
       // observation 8).
       this.resumeSessionId = built.options.sessionId;
+    }
+
+    if (profileFiles !== undefined && built.profileFiles !== undefined) {
+      // Before anything is emitted: a failure here fails the start like a bad manifest does.
+      try {
+        await writeClaudeProfileLaunchFiles(profileFiles, built.profileFiles);
+      } catch (error) {
+        toolsLaunch?.release();
+        await removeClaudeProfileLaunchFiles(profileFiles);
+        throw new Error(`Could not write the Agent Profile's launch files: ${errorMessage(error)}`);
+      }
+      this.profileFiles = profileFiles;
     }
 
     this.emit([this.normalizer.sessionStarted(this.options.resumeCursor)]);
@@ -496,6 +531,9 @@ export class ClaudeSession {
         })
       ]);
       this.options.onClosed(this);
+      if (this.profileFiles !== undefined) {
+        await removeClaudeProfileLaunchFiles(this.profileFiles);
+      }
       throw error instanceof Error ? error : new Error(errorMessage(error));
     }
 
@@ -514,7 +552,7 @@ export class ClaudeSession {
     });
 
     try {
-      await withDeadline(this.query.initializationResult(), {
+      const init = await withDeadline(this.query.initializationResult(), {
         label: "claude/handshake",
         timeoutMs: AGENT_HOST_DEADLINES.handshakeMs,
         onTimeout: () => {
@@ -523,6 +561,9 @@ export class ClaudeSession {
           this.closeQuery();
         }
       });
+      // The commands THIS session loaded (its own settings sources, plugins and skills): an
+      // Agent Profile chat's composer offers these, never the probe's Global list.
+      this.initCommands = parseInitializationCommands((init as { commands?: unknown }).commands);
     } catch (error) {
       await this.teardown({
         reason: `Claude did not finish starting: ${errorMessage(error)}`,
@@ -1493,6 +1534,11 @@ export class ClaudeSession {
       // (goals §6): both go out now, still before `session.exited`.
       step("the goal", () => this.emit(this.normalizer.goalAtSessionEnd()));
       this.goalOutputOpen = false;
+
+      // The CLI is gone: its launch files (secrets) go with it, before the next start may write them.
+      if (this.profileFiles !== undefined) {
+        await removeClaudeProfileLaunchFiles(this.profileFiles);
+      }
 
       step("session.exited", () => {
         if (input.emitExit !== false) {
@@ -2520,6 +2566,16 @@ export class ClaudeSession {
     }
   }
 
+  /**
+   * What this session loaded, for the composer (`AgentAdapter.sessionCatalog`): its
+   * initialization commands (plus the host's `/compact`) and the skills a send dispatches.
+   * `null` before the handshake answered or once the session is gone.
+   */
+  async catalog(): Promise<SessionCatalog | null> {
+    if (!this.isAlive || this.initCommands === undefined) return null;
+    return { slashCommands: withSynthesisedCommands(this.initCommands), skills: await this.discoverSkills() };
+  }
+
   private async discoverSkills(): Promise<Skill[]> {
     // The same directory the CLI reads its user-scope skills from. A system
     // home carries no CLAUDE_CONFIG_DIR, and its `home.path` is the daemon
@@ -2528,7 +2584,10 @@ export class ClaudeSession {
     // than `<home>/.claude/skills` and found none.
     const configDir = claudeConfigDir(this.options.env);
     try {
-      return await discoverClaudeSkills({ configDir, cwd: this.options.cwd });
+      const skills = await discoverClaudeSkills({ configDir, cwd: this.options.cwd });
+      // An Agent Profile chat never loads the user's skills (`settingSources` drops that source):
+      // dispatching `/name` for one would only answer "Unknown command".
+      return this.options.profileLaunch !== undefined ? skills.filter((skill) => skill.scope !== "user") : skills;
     } catch {
       // Discovery is best-effort: a broken skills dir must never fail a turn.
       return [];

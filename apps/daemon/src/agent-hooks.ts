@@ -78,6 +78,44 @@ exit 0
 `;
 }
 
+/** The managed hook script every agent's managed hooks run (`<daemonDir>/hooks/agent-hook.sh`). */
+export function agentHookScriptPath(daemonDir: string): string {
+  return join(daemonDir, "hooks", "agent-hook.sh");
+}
+
+/** Writes (or rewrites) the managed hook script; idempotent. */
+export async function ensureAgentHookScript(daemonDir: string): Promise<void> {
+  await writeFileAtomic(agentHookScriptPath(daemonDir), hookScript(), 0o755, false);
+}
+
+/** One Codex event the managed hooks listen to: its `hooks.json` name, its state-key label, its matcher. */
+export interface CodexManagedHookEvent {
+  name: string;
+  label: string;
+  matcher?: string;
+}
+
+/** The Codex events Orquester's managed hooks are installed for. */
+export const CODEX_MANAGED_HOOK_EVENTS: readonly CodexManagedHookEvent[] = [
+  { name: "SessionStart", label: "session_start" },
+  { name: "UserPromptSubmit", label: "user_prompt_submit" },
+  { name: "PreToolUse", label: "pre_tool_use", matcher: "*" },
+  { name: "PermissionRequest", label: "permission_request", matcher: "*" },
+  { name: "PostToolUse", label: "post_tool_use", matcher: "*" },
+  { name: "Stop", label: "stop" }
+];
+
+/** The managed `hooks.json` group of one event (what account homes and prepared profile homes carry). */
+export function codexManagedHookGroup(
+  scriptPath: string,
+  event: CodexManagedHookEvent
+): { matcher?: string; hooks: Array<{ type: "command"; command: string; timeout: number }> } {
+  return {
+    ...(event.matcher !== undefined ? { matcher: event.matcher } : {}),
+    hooks: [{ type: "command", command: `${shellQuotePosix(scriptPath)} codex ${event.name}`, timeout: 10 }]
+  };
+}
+
 /**
  * Atomic write that PRESERVES an existing target's permission bits by default —
  * user configs (Claude settings.json, Codex config.toml) can be 0600 and hold
@@ -140,7 +178,7 @@ export class AgentHooks {
   ) {}
 
   private get scriptPath(): string {
-    return join(this.daemonDir, "hooks", "agent-hook.sh");
+    return agentHookScriptPath(this.daemonDir);
   }
 
   /**
@@ -189,7 +227,13 @@ export class AgentHooks {
       case "codex":
         return launchEnv.CODEX_HOME || join(this.homeDir, ".codex");
       case "opencode":
-        return launchEnv.OPENCODE_CONFIG_DIR || join(this.homeDir, ".config", "opencode");
+        // OpenCode's GLOBAL config dir, `$XDG_CONFIG_HOME/opencode`, which it
+        // always loads. `OPENCODE_CONFIG_DIR` does NOT replace it: OpenCode
+        // loads that directory IN ADDITION (1.18 `config/paths.ts`), and loads
+        // every `plugin/*.js` of each directory it reads — so installing into
+        // it as well would load the plugin twice. A launch that moves
+        // `XDG_CONFIG_HOME` moves the global dir, so the plugin follows it.
+        return join(launchEnv.XDG_CONFIG_HOME || join(this.homeDir, ".config"), "opencode");
       case "grok":
         return launchEnv.GROK_HOME || join(this.homeDir, ".grok");
       default:
@@ -198,7 +242,7 @@ export class AgentHooks {
   }
 
   private async install(entryId: string, targetDir: string): Promise<void> {
-    await writeFileAtomic(this.scriptPath, hookScript(), 0o755, false);
+    await ensureAgentHookScript(this.daemonDir);
     switch (entryId) {
       case "claude":
         await this.installClaude(targetDir);
@@ -311,15 +355,6 @@ export class AgentHooks {
       );
     }
 
-    const CODEX_EVENTS: Array<{ name: string; label: string; matcher?: string }> = [
-      { name: "SessionStart", label: "session_start" },
-      { name: "UserPromptSubmit", label: "user_prompt_submit" },
-      { name: "PreToolUse", label: "pre_tool_use", matcher: "*" },
-      { name: "PermissionRequest", label: "permission_request", matcher: "*" },
-      { name: "PostToolUse", label: "post_tool_use", matcher: "*" },
-      { name: "Stop", label: "stop" }
-    ];
-
     // 1) hooks.json — Claude-shaped { hooks: { Event: [group…] } }. Preserve
     // the user's whole document (Codex documents top-level metadata like
     // `description`); we only mutate the `hooks` member. Deep-validate before
@@ -343,28 +378,19 @@ export class AgentHooks {
       }
     }
     const docHooks = (doc.hooks as Record<string, unknown> | undefined) ?? {};
-    for (const event of CODEX_EVENTS) {
+    for (const event of CODEX_MANAGED_HOOK_EVENTS) {
       if (docHooks[event.name] !== undefined && !Array.isArray(docHooks[event.name])) {
         throw new Error(`hooks.json hooks.${event.name} is not an array; leaving it untouched`);
       }
     }
     const hooksDoc = { hooks: docHooks as Record<string, unknown[]> };
 
-    const managedFor = (event: { name: string; matcher?: string }) => ({
-      ...(event.matcher !== undefined ? { matcher: event.matcher } : {}),
-      hooks: [
-        {
-          type: "command",
-          command: `${shellQuotePosix(this.scriptPath)} codex ${event.name}`,
-          timeout: 10
-        }
-      ]
-    });
+    const managedFor = (event: CodexManagedHookEvent) => codexManagedHookGroup(this.scriptPath, event);
     let changed = false;
     // Trust identity depends on the group index — compute AFTER the final
     // array shape is known.
     const trustTargets: Array<{ label: string; matcher?: string; groupIndex: number; command: string }> = [];
-    for (const event of CODEX_EVENTS) {
+    for (const event of CODEX_MANAGED_HOOK_EVENTS) {
       const managed = managedFor(event);
       const groups = Array.isArray(hooksDoc.hooks[event.name])
         ? hooksDoc.hooks[event.name]
@@ -412,8 +438,8 @@ export class AgentHooks {
   // --- opencode: status plugin in the global plugin dir ---------------------
 
   private async installOpenCode(configDir: string): Promise<void> {
-    const pluginPath = join(configDir, "plugin", "orquester-status.js");
-    const source = openCodePluginSource();
+    const pluginPath = join(configDir, "plugin", OPENCODE_STATUS_PLUGIN_FILE);
+    const source = openCodeStatusPluginSource();
     let current = "";
     try {
       current = await readFile(pluginPath, "utf8");
@@ -450,6 +476,17 @@ export class AgentHooks {
       await writeFileAtomic(hookPath, content, 0o644);
     }
   }
+}
+
+/**
+ * The managed Grok hooks for a home Orquester builds itself (an Agent Profile's prepared
+ * `GROK_HOME`, which no launch installs into): writes the shared hook script and answers the
+ * `hooks/orquester.json` content {@link AgentHooks} would install there. Awaited, so the caller
+ * writes the file into its own staging directory; throws on a failed script write.
+ */
+export async function prepareGrokManagedHooks(daemonDir: string): Promise<string> {
+  await ensureAgentHookScript(daemonDir);
+  return grokHookDocument(agentHookScriptPath(daemonDir));
 }
 
 /** Events Grok emits that map onto an activity class (see classifyGrok). */
@@ -557,6 +594,13 @@ function upsertCodexTrustBlock(content: string, key: string, hash: string): stri
 }
 
 /**
+ * The status plugin's file name in a `plugin/` dir. An Agent Profile's OpenCode config dir carries
+ * its own copy (`session-profiles/preparers/opencode.ts`): a profile server never reads
+ * `$XDG_CONFIG_HOME/opencode` of the real config home.
+ */
+export const OPENCODE_STATUS_PLUGIN_FILE = "orquester-status.js";
+
+/**
  * OpenCode status plugin. Runs inside OpenCode's own runtime, so transport is
  * node:http over the daemon's unix socket (no curl). Design notes:
  *  - no-ops without ORQUESTER_SESSION_ID/ORQUESTER_DAEMON_SOCK (runs outside
@@ -567,7 +611,7 @@ function upsertCodexTrustBlock(content: string, key: string, hash: string): stri
  *    flip the pane; parent lookup fails CLOSED (assume child);
  *  - no message-part subscription at all (state transitions only).
  */
-function openCodePluginSource(): string {
+export function openCodeStatusPluginSource(): string {
   return `// orquester-managed status plugin v${SCRIPT_VERSION} — do not edit (rewritten by the daemon)
 import http from "node:http";
 

@@ -92,7 +92,7 @@ function mergeDeep(target: JsonObject, source: JsonObject): JsonObject {
 }
 
 /** Merges already-parsed file values in load order (each decoded first). */
-function mergeConfigValues(values: readonly JsonObject[]): JsonObject {
+export function mergeConfigValues(values: readonly JsonObject[]): JsonObject {
   let merged: JsonObject = {};
   for (const value of values) {
     merged = mergeDeep(merged, decodeConfigFile(value));

@@ -240,12 +240,22 @@ export function canSwitchChatAccount(state: ChatAccountSwitchState): boolean {
  * back (goals §5.7) — then a continuing goal, which only a pause ends
  * (§5.5); between its turns idle never comes, so both outrank a running
  * turn. `null` otherwise, where the chip's own "available when the agent is
- * idle" is the truth.
+ * idle" is the truth. `subject` "profiles": the Agent Profile chip's words.
  */
-export function chatAccountSwitchRefusal(state: ChatAccountSwitchState): string | null {
-  if (state.compacting === true) return COMPACTION_SWITCH_REFUSAL;
-  if (state.goalHeldForUpdate === true) return GOAL_HELD_SWITCH_REFUSAL;
-  return state.goalContinuing === true ? GOAL_CONTINUING_SWITCH_REFUSAL : null;
+export function chatAccountSwitchRefusal(
+  state: ChatAccountSwitchState,
+  subject: "accounts" | "profiles" = "accounts"
+): string | null {
+  const refusal =
+    state.compacting === true
+      ? COMPACTION_SWITCH_REFUSAL
+      : state.goalHeldForUpdate === true
+        ? GOAL_HELD_SWITCH_REFUSAL
+        : state.goalContinuing === true
+          ? GOAL_CONTINUING_SWITCH_REFUSAL
+          : null;
+  // The profile chip shares the gate; the host words a profile switch's refusal the same way.
+  return refusal === null || subject === "accounts" ? refusal : refusal.replace(/\b(switch|switching) accounts\b/g, `$1 ${subject}`);
 }
 
 /**

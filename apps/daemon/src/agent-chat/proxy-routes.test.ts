@@ -495,6 +495,43 @@ test("a daemon-side refusal answers the §6.2 status of its code, INDEX_UNAVAILA
   await h.close();
 });
 
+// --- Agent Profiles: the profile switch -------------------------------------
+
+test("the profile route is daemon-owned like the account's: 404, 503, the receipt, and refusals mapped", async () => {
+  const switches: Array<[string, { commandId: string; profileId: string | null }]> = [];
+  const h = await makeHarness(
+    { t1: tab("t1") },
+    {
+      switchProfile: async (id, body) => {
+        switches.push([id, body]);
+        if (body.profileId === "not-ready") {
+          throw Object.assign(new Error("Preparing Codex failed."), { code: "PROFILE_NOT_READY" });
+        }
+        if (body.profileId === "conflict") {
+          throw Object.assign(new Error("Send a new commandId."), { code: "COMMAND_ID_CONFLICT" });
+        }
+        return { seq: 9 };
+      }
+    }
+  );
+  const post = (id: string, payload: unknown) => h.app.inject({ method: "POST", url: agentChatRoutes.profile(id), payload: payload as object });
+  const ok = await post("t1", { commandId: "c1", profileId: "p1" });
+  assert.equal(ok.statusCode, 200);
+  assert.deepEqual(ok.json(), { seq: 9 });
+  assert.equal((await post("t1", { commandId: "c2", profileId: null })).statusCode, 200);
+  assert.deepEqual(switches, [["t1", { commandId: "c1", profileId: "p1" }], ["t1", { commandId: "c2", profileId: null }]]);
+  assert.equal(h.host.requests.length, 0, "never proxied to the host as is");
+
+  const refused = await post("t1", { commandId: "c3", profileId: "not-ready" });
+  assert.equal(refused.statusCode, 409);
+  assert.deepEqual(refused.json(), { error: { code: "COMMAND_REJECTED", message: "Preparing Codex failed." } });
+  assert.equal((await post("t1", { commandId: "c4", profileId: "conflict" })).json().error.code, "COMMAND_ID_CONFLICT");
+  assert.equal((await post("nope", { commandId: "c5", profileId: "p1" })).statusCode, 404);
+  h.healthy = false;
+  assert.equal((await post("t1", { commandId: "c6", profileId: "p1" })).statusCode, 503);
+  await h.close();
+});
+
 // --- indexed history and search (design 2026-09-23) ------------------------
 
 const historyPage = {
@@ -1052,5 +1089,78 @@ test("a head lookup past the cap is refused 400 INVALID_COMMAND, before the host
   assert.equal(refused.statusCode, 400);
   assert.equal(refused.json().error.code, "INVALID_COMMAND");
   assert.equal(h.host.requests.length, 0);
+  await h.close();
+});
+
+// --- an Agent Profile chat's composer catalog ----------------------------------
+
+test("a profile chat's catalog is its live session's report, else the profile's own items — a Global chat's is none, without asking the host", async () => {
+  const profileTab = { ...tab("p1"), profileId: "editor" };
+  const asked: string[] = [];
+  const h = await makeHarness(
+    { t1: tab("t1"), p1: profileTab },
+    {
+      profileCatalog: async (summary) => {
+        asked.push(summary.id);
+        return { slashCommands: [{ name: "compact" }, { name: "ship" }], skills: [{ name: "cut", path: "/profile/cut/SKILL.md", enabled: true, scope: "profile" }] };
+      }
+    }
+  );
+  // Global: none, and the host is never asked.
+  const global = await h.app.inject({ method: "GET", url: agentChatRoutes.catalog("t1") });
+  assert.equal(global.statusCode, 200);
+  assert.deepEqual(global.json(), { threadId: "t1", source: "none", slashCommands: [], skills: [] });
+  assert.equal(h.host.requests.length, 0);
+
+  // A live report wins.
+  const live = { live: true, slashCommands: [{ name: "profile-skill", description: "Mine" }], skills: [] };
+  h.host.handler = (_req, res) => res.writeHead(200, json).end(JSON.stringify(live));
+  const session = await h.app.inject({ method: "GET", url: agentChatRoutes.catalog("p1") });
+  assert.deepEqual(session.json(), { threadId: "p1", source: "session", slashCommands: live.slashCommands, skills: [] });
+  assert.equal(h.host.requests.at(-1)?.url, "/threads/p1/catalog");
+  assert.deepEqual(asked, []);
+
+  // No live session, an older host's route miss, an unhealthy host: the profile's own items.
+  const fallback = {
+    threadId: "p1",
+    source: "profile",
+    slashCommands: [{ name: "compact" }, { name: "ship" }],
+    skills: [{ name: "cut", path: "/profile/cut/SKILL.md", enabled: true, scope: "profile" }]
+  };
+  h.host.handler = (_req, res) => res.writeHead(200, json).end(JSON.stringify({ live: false, slashCommands: [], skills: [] }));
+  assert.deepEqual((await h.app.inject({ method: "GET", url: agentChatRoutes.catalog("p1") })).json(), fallback);
+  h.host.handler = (_req, res) =>
+    res.writeHead(404, json).end(JSON.stringify({ error: { code: "THREAD_NOT_FOUND", message: "No route for GET /threads/p1/catalog" } }));
+  assert.deepEqual((await h.app.inject({ method: "GET", url: agentChatRoutes.catalog("p1") })).json(), fallback);
+  h.healthy = false;
+  const before = h.host.requests.length;
+  assert.deepEqual((await h.app.inject({ method: "GET", url: agentChatRoutes.catalog("p1") })).json(), fallback);
+  assert.equal(h.host.requests.length, before, "an unhealthy host is not asked");
+  assert.deepEqual(asked, ["p1", "p1", "p1"]);
+
+  assert.equal((await h.app.inject({ method: "GET", url: agentChatRoutes.catalog("nope") })).statusCode, 404);
+  await h.close();
+});
+
+test("a profile chat with no profile catalog to offer — or one that fails — answers its profile's, empty: never none (the provider's Global)", async () => {
+  let fail = false;
+  const h = await makeHarness(
+    { p1: { ...tab("p1"), profileId: "gone" } },
+    {
+      profileCatalog: async () => {
+        if (fail) throw new Error("profile store unreadable");
+        return null;
+      }
+    }
+  );
+  h.host.handler = (_req, res) => res.writeHead(200, json).end(JSON.stringify({ live: false, slashCommands: [], skills: [] }));
+  const empty = { threadId: "p1", source: "profile", slashCommands: [], skills: [] };
+  const first = await h.app.inject({ method: "GET", url: agentChatRoutes.catalog("p1") });
+  assert.equal(first.statusCode, 200);
+  assert.deepEqual(first.json(), empty);
+  fail = true;
+  const failed = await h.app.inject({ method: "GET", url: agentChatRoutes.catalog("p1") });
+  assert.equal(failed.statusCode, 200);
+  assert.deepEqual(failed.json(), empty);
   await h.close();
 });

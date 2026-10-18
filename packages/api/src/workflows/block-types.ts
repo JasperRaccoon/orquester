@@ -79,7 +79,7 @@ export const WORKFLOW_BLOCK_CATALOG: Record<WorkflowNodeType, WorkflowBlockCatal
     type: "agent",
     title: "Agent",
     description:
-      "Runs a coding agent (Claude, Codex, Grok, OpenCode…) in the project with a prompt, fully autonomous. Picks the account by usage and fails over across accounts and agents on usage limits.",
+      "Runs a coding agent (Claude, Codex, Grok, OpenCode…) in the project with a prompt, fully autonomous. Picks the account by usage and fails over across accounts and agents on usage limits. Optional `profileId`: the Agent Profile its new chat launches with (default Global); a missing or failed profile fails the block.",
     category: WORKFLOW_NODE_CATEGORY.agent,
     output:
       "{ text, sessionId, agent, model, accountId, durationMs, hops } — `text` is the agent's final message, always a string: ask for JSON in the prompt and parse it in a Code block.",

@@ -13,6 +13,8 @@ export interface ConfirmDialogProps {
   confirmText?: string;
   /** Styles the confirm button + header icon as destructive (default true). */
   danger?: boolean;
+  /** Disables the confirm button (e.g. while what the message lists is still loading). */
+  confirmDisabled?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 }
@@ -29,6 +31,7 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
   confirmLabel = "Delete",
   confirmText,
   danger = true,
+  confirmDisabled = false,
   onConfirm,
   onCancel
 }) => {
@@ -41,7 +44,7 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
     }
   }, [open]);
 
-  const gateOk = !confirmText || typed === confirmText;
+  const gateOk = (!confirmText || typed === confirmText) && !confirmDisabled;
 
   const confirm = () => {
     if (gateOk) {

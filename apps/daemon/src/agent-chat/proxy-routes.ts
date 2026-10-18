@@ -33,10 +33,13 @@ import {
   type AgentChatErrorCode,
   type AgentChatErrorEnvelope,
   type McpAppOperation,
+  type Skill,
+  type SlashCommand,
+  type ThreadCatalogResponse,
   type ThreadSearchResponse,
   type ThreadSnapshotPayload
 } from "@orquester/api/agent-chat";
-import { agentHostRoutes } from "../agent-host/host-protocol.ts";
+import { agentHostRoutes, type HostThreadCatalogResponse } from "../agent-host/host-protocol.ts";
 import { agentHostExtraRoutes } from "../agent-host/server/extra-routes.ts";
 import { AgentHostClient, HostUnavailableError, type HostJsonResponse } from "./host-client.ts";
 import { VISUAL_PAGE_HEADERS, type VisualUrlSigner } from "./visual-urls.ts";
@@ -77,6 +80,18 @@ export interface AgentChatRouteDeps {
    * this route exists here rather than in {@link AGENT_CHAT_COMMAND_NAMES}.
    */
   switchAccount(id: string, body: { commandId: string; accountId: string }): Promise<{ seq: number }>;
+  /**
+   * The Agent Profile switch (spec 2026-10-18 §5.3), daemon-owned like {@link switchAccount}:
+   * only the daemon resolves the profile's prepared directory and recomposes the launch.
+   * `profileId: null` is Global. Optional: route tests build partial deps (the route then 404s).
+   */
+  switchProfile?(id: string, body: { commandId: string; profileId: string | null }): Promise<{ seq: number }>;
+  /**
+   * A profile chat's composer catalog when its live session reported none: the profile's own
+   * items (`AgentChatService.profileCatalog`); `null` when there is none to offer. Optional: route
+   * tests build partial deps (the route then answers `none`).
+   */
+  profileCatalog?(summary: SessionSummary): Promise<{ slashCommands: SlashCommand[]; skills: Skill[] } | null>;
   /**
    * §6.3 `POST /api/agent-host/stop`: the host writes every continuation
    * marker for a running thread with a usable cursor, then drains and stops,
@@ -249,6 +264,37 @@ export function registerAgentChatRoutes(app: FastifyInstance, deps: AgentChatRou
       }
     }
   );
+
+  // --- Agent Profiles: the profile switch (daemon-owned, as the account's) --
+  if (deps.switchProfile) {
+    const switchProfile = deps.switchProfile;
+    app.post<{ Params: { id: string }; Body: { commandId?: unknown; profileId?: unknown } }>(
+      pattern(agentChatRoutes.profile(":id")),
+      async (request, reply) => {
+        const { id } = request.params;
+        if (!deps.chatSession(id)) {
+          return reply.code(404).send(THREAD_NOT_FOUND);
+        }
+        if (!deps.isHostHealthy()) {
+          return reply.code(503).send(HOST_UNAVAILABLE);
+        }
+        const body = request.body ?? {};
+        try {
+          return await switchProfile(id, {
+            commandId: String(body.commandId ?? ""),
+            // Validated by the service: an id, or null for Global; anything else is INVALID_COMMAND.
+            profileId: body.profileId as string | null
+          });
+        } catch (error) {
+          // A profile refusal (PROFILE_NOT_READY, …) is a COMMAND_REJECTED with its reason.
+          const code = accountSwitchErrorCode(error);
+          return reply
+            .code(CHAT_ERROR_STATUS[code])
+            .send(chatError(code, error instanceof Error ? error.message : "Could not switch the profile."));
+        }
+      }
+    );
+  }
 
   // --- §6.3 reads ----------------------------------------------------------
 
@@ -440,6 +486,43 @@ export function registerAgentChatRoutes(app: FastifyInstance, deps: AgentChatRou
       return forwardJson(deps, reply, "GET", agentHostRoutes.promptText(id, messageId));
     }
   );
+
+  // An Agent Profile chat's composer catalog (`ThreadCatalogResponse`): what its live session
+  // loaded (the host's `/catalog`), else the profile's own items — never the provider's Global
+  // catalog. A Global chat answers `none` without asking the host (its composer is unchanged);
+  // ONLY a Global chat does. A host that cannot answer (unhealthy, an older host's route miss, a
+  // failure) is "no live report", never an error: the fallback still answers. A profile catalog
+  // that cannot be offered (gone, unreadable, a failure) is the profile's, empty.
+  app.get<{ Params: { id: string } }>(pattern(agentChatRoutes.catalog(":id")), async (request, reply) => {
+    const { id } = request.params;
+    const summary = deps.chatSession(id);
+    if (!summary) return reply.code(404).send(THREAD_NOT_FOUND);
+    const none: ThreadCatalogResponse = { threadId: id, source: "none", slashCommands: [], skills: [] };
+    if (!summary.profileId) return none;
+    if (deps.isHostHealthy()) {
+      try {
+        const answer = await deps.client.json<HostThreadCatalogResponse>("GET", agentHostRoutes.catalog(id));
+        const value = answer.status === 200 ? answer.value : null;
+        if (value !== null && value.live === true && Array.isArray(value.slashCommands) && Array.isArray(value.skills)) {
+          return { threadId: id, source: "session", slashCommands: value.slashCommands, skills: value.skills } satisfies ThreadCatalogResponse;
+        }
+      } catch (error) {
+        if (!(error instanceof HostUnavailableError)) deps.logger?.warn?.(`agent chat: the catalog of ${id} could not be read from the host`, error);
+      }
+    }
+    let fallback: { slashCommands: SlashCommand[]; skills: Skill[] } | null = null;
+    try {
+      fallback = (await deps.profileCatalog?.(summary)) ?? null;
+    } catch (error) {
+      deps.logger?.warn?.(`agent chat: the profile catalog of ${id} could not be read`, error);
+    }
+    return {
+      threadId: id,
+      source: "profile",
+      slashCommands: fallback?.slashCommands ?? [],
+      skills: fallback?.skills ?? []
+    } satisfies ThreadCatalogResponse;
+  });
 
   // The long-lived §6.3 subscription. Hijacked so Fastify's serializer never
   // sees it: the response is raw chunked NDJSON, piped from the host with

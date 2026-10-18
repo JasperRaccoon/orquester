@@ -38,6 +38,7 @@ import {
   type ListWorkflowsResponse,
   type PatchWorkflowRequest,
   type PreviewWorkflowExpressionResponse,
+  type ProfileReferencesResponse,
   type PromptReferencesResponse,
   type ReplaceWorkflowRequest,
   type RunWorkflowRequest,
@@ -400,9 +401,11 @@ export function registerWorkflowRoutes(app: FastifyInstance, deps: WorkflowRoute
       const id = isRecord(candidate) && typeof candidate.id === "string" ? candidate.id : undefined;
       await catalogReady();
       const catalog = service.catalog();
+      const profileIds = service.profileIds();
       const { problems } = validateWorkflow(candidate, {
         secretNames: secrets.names(id),
         savedPromptIds: deps.savedPromptIds(),
+        ...(profileIds ? { sessionProfileIds: profileIds } : {}),
         knownWorkflowIds: service.list().map((workflow) => workflow.id),
         strictScheduleIntervals: true,
         ...(catalog ? { catalog } : {})
@@ -543,6 +546,20 @@ export function registerWorkflowRoutes(app: FastifyInstance, deps: WorkflowRoute
       return {
         version: answer.version,
         promptId,
+        workflows: answer.workflows.map(named),
+        ...(answer.unknownReason ? { unknownReason: answer.unknownReason } : {})
+      };
+    })
+  );
+
+  app.get(
+    "/api/workflow-references/profiles/:profileId",
+    guarded(async (request): Promise<ProfileReferencesResponse> => {
+      const profileId = request.params.profileId!;
+      const answer = service.references.profileUses(profileId);
+      return {
+        version: answer.version,
+        profileId,
         workflows: answer.workflows.map(named),
         ...(answer.unknownReason ? { unknownReason: answer.unknownReason } : {})
       };

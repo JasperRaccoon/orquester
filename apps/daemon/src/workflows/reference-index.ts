@@ -3,8 +3,10 @@
 // What it maps, for every stored definition:
 // - workflow → the sub-workflows its `workflow` blocks run, and the reverse (who runs it, directly or
 //   through others) — what a chat grant must also cover before it covers an edit or delete;
-// - saved prompt → the workflows whose agent blocks use it (and those blocks).
-// The rules are the shared ones in `@orquester/api` (`membersOf`, `savedPromptIdOfNode`), which the
+// - saved prompt → the workflows whose agent blocks use it (and those blocks);
+// - Agent Profile → the workflows whose agent blocks launch with it (and those blocks).
+// The rules are the shared ones in `@orquester/api` (`membersOf`, `savedPromptIdOfNode`,
+// `sessionProfileIdOfNode`), which the
 // MCP's previews use too: one source for "calls" and "uses". The index is global, not per project — a workflow in one project may run, or use a prompt
 // of, another — and each answer names every workflow's own project (and workspace).
 //
@@ -17,7 +19,7 @@
 // uses — UNKNOWN (null / `unknownReason`), never "none". Before the first rebuild, and while the
 // file cannot be read at all, every answer is unknown.
 
-import { membersOf, savedPromptIdOfNode, type Workflow, type WorkflowProject, type WorkflowReference } from "@orquester/api";
+import { membersOf, savedPromptIdOfNode, sessionProfileIdOfNode, type Workflow, type WorkflowProject, type WorkflowReference } from "@orquester/api";
 
 interface Entry {
   info: Omit<WorkflowReference, "workspace">;
@@ -26,6 +28,8 @@ interface Entry {
   calls: string[];
   /** promptId → the agent blocks using it. */
   prompts: Map<string, { id: string; name: string }[]>;
+  /** Agent Profile id → the agent blocks launching with it. */
+  profiles: Map<string, { id: string; name: string }[]>;
 }
 
 export type CallersAnswer =
@@ -37,6 +41,9 @@ export interface PromptUsesAnswer {
   workflows: (Omit<WorkflowReference, "workspace"> & { nodes: { id: string; name: string }[] })[];
   unknownReason?: string;
 }
+
+/** The workflows whose agent blocks launch with an Agent Profile — the shape of {@link PromptUsesAnswer}. */
+export type ProfileUsesAnswer = PromptUsesAnswer;
 
 const NOT_LOADED = "the workflow definitions are not loaded yet";
 const UNREADABLE_RECORD = "a workflow definition this Orquester build cannot read mentions it";
@@ -61,6 +68,8 @@ export class WorkflowReferenceIndex {
   private readonly callersOf = new Map<string, Set<string>>();
   /** prompt id → the workflows whose agent blocks use it. */
   private readonly promptUsers = new Map<string, Set<string>>();
+  /** Agent Profile id → the workflows whose agent blocks launch with it. */
+  private readonly profileUsers = new Map<string, Set<string>>();
   /** The strings of each record the store keeps but cannot read. */
   private opaque: string[][] = [];
   /** Why every answer is unknown, or null. */
@@ -80,6 +89,7 @@ export class WorkflowReferenceIndex {
     this.entries.clear();
     this.callersOf.clear();
     this.promptUsers.clear();
+    this.profileUsers.clear();
     this.opaque = (input.unreadable ?? []).map((record) => stringsOf(record));
     this.unavailable = input.unavailable ?? null;
     for (const workflow of input.workflows) this.index(workflow);
@@ -139,13 +149,22 @@ export class WorkflowReferenceIndex {
 
   /** Every stored workflow whose agent blocks use `promptId`, with those blocks; `unknownReason` when it may be more. */
   promptUses(promptId: string): PromptUsesAnswer {
+    return this.uses(promptId, this.promptUsers, (entry) => entry.prompts);
+  }
+
+  /** Every stored workflow whose agent blocks launch with Agent Profile `profileId`, with those blocks; `unknownReason` when it may be more. */
+  profileUses(profileId: string): ProfileUsesAnswer {
+    return this.uses(profileId, this.profileUsers, (entry) => entry.profiles);
+  }
+
+  private uses(id: string, users: ReadonlyMap<string, Set<string>>, blocks: (entry: Entry) => ReadonlyMap<string, { id: string; name: string }[]>): PromptUsesAnswer {
     const version = this.versionCounter;
-    const entries = [...(this.promptUsers.get(promptId) ?? [])]
-      .map((id) => this.entries.get(id))
+    const entries = [...(users.get(id) ?? [])]
+      .map((workflowId) => this.entries.get(workflowId))
       .filter((entry): entry is Entry => entry !== undefined)
       .sort((a, b) => a.seq - b.seq);
-    const workflows = entries.map((entry) => ({ ...entry.info, nodes: (entry.prompts.get(promptId) ?? []).map((node) => ({ ...node })) }));
-    const unknownReason = this.unavailable ?? (this.mentionedByOpaque(new Set([promptId])) ? UNREADABLE_RECORD : undefined);
+    const workflows = entries.map((entry) => ({ ...entry.info, nodes: (blocks(entry).get(id) ?? []).map((node) => ({ ...node })) }));
+    const unknownReason = this.unavailable ?? (this.mentionedByOpaque(new Set([id])) ? UNREADABLE_RECORD : undefined);
     return { version, workflows, ...(unknownReason ? { unknownReason } : {}) };
   }
 
@@ -163,19 +182,24 @@ export class WorkflowReferenceIndex {
     const calls: string[] = [];
     for (const child of membersOf(workflow).childIds) if (!calls.includes(child)) calls.push(child);
     const prompts = new Map<string, { id: string; name: string }[]>();
-    for (const node of workflow.nodes ?? []) {
-      const promptId = savedPromptIdOfNode(node);
-      if (promptId === null) continue;
-      const nodes = prompts.get(promptId) ?? [];
+    const profiles = new Map<string, { id: string; name: string }[]>();
+    const add = (map: Map<string, { id: string; name: string }[]>, key: string | null, node: { id: string; name: string }) => {
+      if (key === null) return;
+      const nodes = map.get(key) ?? [];
       nodes.push({ id: node.id, name: node.name });
-      prompts.set(promptId, nodes);
+      map.set(key, nodes);
+    };
+    for (const node of workflow.nodes ?? []) {
+      add(prompts, savedPromptIdOfNode(node), node);
+      add(profiles, sessionProfileIdOfNode(node), node);
     }
     const previous = this.entries.get(workflow.id);
     const entry: Entry = {
       info: { workflowId: workflow.id, name: workflow.name, enabled: workflow.enabled, revision: workflow.revision, project: workflow.project as WorkflowProject },
       seq: previous?.seq ?? (this.seq += 1),
       calls,
-      prompts
+      prompts,
+      profiles
     };
     this.entries.set(workflow.id, entry);
     for (const child of calls) {
@@ -183,10 +207,12 @@ export class WorkflowReferenceIndex {
       set.add(workflow.id);
       this.callersOf.set(child, set);
     }
-    for (const promptId of prompts.keys()) {
-      const set = this.promptUsers.get(promptId) ?? new Set<string>();
-      set.add(workflow.id);
-      this.promptUsers.set(promptId, set);
+    for (const [users, keys] of [[this.promptUsers, prompts.keys()], [this.profileUsers, profiles.keys()]] as const) {
+      for (const key of keys) {
+        const set = users.get(key) ?? new Set<string>();
+        set.add(workflow.id);
+        users.set(key, set);
+      }
     }
   }
 
@@ -199,10 +225,12 @@ export class WorkflowReferenceIndex {
       set?.delete(id);
       if (set?.size === 0) this.callersOf.delete(child);
     }
-    for (const promptId of entry.prompts.keys()) {
-      const set = this.promptUsers.get(promptId);
-      set?.delete(id);
-      if (set?.size === 0) this.promptUsers.delete(promptId);
+    for (const [users, keys] of [[this.promptUsers, entry.prompts.keys()], [this.profileUsers, entry.profiles.keys()]] as const) {
+      for (const key of keys) {
+        const set = users.get(key);
+        set?.delete(id);
+        if (set?.size === 0) users.delete(key);
+      }
     }
   }
 }

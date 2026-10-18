@@ -14,6 +14,7 @@ import type { CallContext } from "../catalog/contract.ts";
 import { catalogFor } from "../catalog/index.ts";
 import { createSessionTool } from "./messages.ts";
 import { sessionsFamily } from "./sessions.ts";
+import { catalogFamily } from "./catalog.ts";
 
 /** What these tests hand a tool: the daemon API, the call's signal and clock. */
 type ToolContext = Pick<CallContext, "api" | "signal" | "now">;
@@ -31,6 +32,11 @@ const tool = (name: string) => {
     input: unified.input,
     run: (args: Record<string, unknown>, ctx: ToolContext) => unified.run({ ...args, ...(action ? { action } : {}) } as never, external(ctx)) as Promise<Record<string, unknown>>
   };
+};
+/** A catalog-family tool (list_agents) for an external caller. */
+const sessionsFamilyTool = (name: string) => {
+  const found = catalogFamily.find((t) => t.name === name)!;
+  return { run: (args: Record<string, unknown>, ctx: ToolContext) => found.run(args as never, external(ctx)) as Promise<Record<string, unknown>> };
 };
 const registry = { shells: [], ides: [], fileExplorers: [], browsers: [], agents: [
   { id: "claude", kind: "agent", name: "Claude Code", bin: ["claude"], enabled: true, installState: "idle", chat: { adapter: "claude" } },
@@ -116,13 +122,70 @@ test("create_session validates everything up front and posts the GUI's body (cla
   assert.equal((r.session as { id: string }).id, "c1");
   const created = h.api.calls.find((c) => c.method === "POST" && c.path === "/api/sessions")!.body;
   assert.deepEqual(created, { kind: "agent-chat", refId: "claude", projectPath: h.projectPath, cwd: h.projectPath, title: "Fixer", accountId: "acc-1",
-    chat: { accountId: "acc-1", modelSelection: { model: "default", options: [{ id: "effort", value: "high" }] }, runtimeMode: "approval-required" } });
+    chat: { accountId: "acc-1", modelSelection: { model: "default", options: [{ id: "effort", value: "high" }] }, runtimeMode: "approval-required", unattended: true } });
   h.api.on("GET", "/api/agents/conversations", { status: 200, body: { conversations: [{ id: "conv-1", agentRefId: "claude", title: "Earlier", updatedAt: stamp(1), home: "account", accountId: "acc-1" }] } });
   h.api.calls.length = 0;
   await tool("create_session").run({ project: "acme/api", resume: { conversationId: "conv-1" }, runtimeMode: "full-access" }, h.ctx);
   const resumed = h.api.calls.find((c) => c.method === "POST" && c.path === "/api/sessions")!.body as Record<string, unknown>;
   assert.equal(resumed.refId, "claude"); assert.equal(resumed.title, "Earlier"); assert.equal(resumed.accountId, "acc-1");
   assert.deepEqual((resumed.chat as { resume: unknown }).resume, { home: "account", conversationId: "conv-1" });
+});
+
+/** `GET /api/session-profiles`: two profiles, one ready for Claude, one whose Claude preparation failed. */
+const PROFILES = { profiles: [
+  { id: "prof-1", name: "Video", description: "Editing kit", revision: "2", preparation: [{ agent: "claude", state: "ready", updatedAt: stamp(0) }, { agent: "codex", state: "not-prepared", reason: "Agent Profiles are not supported for Codex yet.", updatedAt: stamp(0) }] },
+  { id: "prof-2", name: "Ops", description: "", revision: "1", preparation: [{ agent: "claude", state: "failed", reason: "The MCP server \"pager\" has no command.", updatedAt: stamp(0) }] }
+], errors: [] };
+
+test("create_session profile (Agent Profiles §5.5): by id or case-insensitive name, sent as profileId on an unattended launch; omitted = Global", async (t) => {
+  const h = await harness(); t.after(h.close);
+  h.api.on("GET", "/api/session-profiles", { status: 200, body: PROFILES });
+  h.api.on("POST", "/api/sessions", ({ body }) => ({ status: 200, body: chatSummary({ id: "c1", profileId: (body as { profileId?: string }).profileId ?? null }) }));
+  const byName = await tool("create_session").run({ project: "acme/api", agent: "claude", profile: "VIDEO", runtimeMode: "full-access" }, h.ctx);
+  assert.equal(lastCreate(h.api).profileId, "prof-1");
+  assert.equal(lastCreate(h.api).chat.unattended, true);
+  assert.deepEqual(byName.profile, { id: "prof-1", name: "Video" });
+  await tool("create_session").run({ project: "acme/api", agent: "claude", profile: "prof-2", runtimeMode: "full-access" }, h.ctx);
+  assert.equal(lastCreate(h.api).profileId, "prof-2");
+  const global = await tool("create_session").run({ project: "acme/api", agent: "claude", runtimeMode: "full-access" }, h.ctx);
+  assert.equal("profileId" in lastCreate(h.api), false, "omitted: Global");
+  assert.equal(lastCreate(h.api).chat.unattended, true, "every tool launch is unattended");
+  assert.equal(global.profile, null);
+});
+
+test("create_session profile refusals: unknown → PROFILE_NOT_FOUND before any create; not ready / unsupported → the daemon's refusal naming the profile, never Global", async (t) => {
+  const h = await harness(); t.after(h.close);
+  h.api.on("GET", "/api/session-profiles", { status: 200, body: PROFILES });
+  await assert.rejects(tool("create_session").run({ project: "acme/api", agent: "claude", profile: "Nope", runtimeMode: "full-access" }, h.ctx),
+    (e: ToolError) => e.code === "PROFILE_NOT_FOUND" && /No Agent Profile "Nope"\. Profiles: "Video", "Ops"/.test(e.message));
+  assert.ok(!h.api.calls.some((c) => c.method === "POST"), "nothing created");
+  h.api.on("POST", "/api/sessions", { status: 400, body: { code: "PROFILE_NOT_READY", message: "The MCP server \"pager\" has no command." } });
+  await assert.rejects(tool("create_session").run({ project: "acme/api", agent: "claude", profile: "Ops", runtimeMode: "full-access" }, h.ctx),
+    (e: ToolError) => e.code === "PROFILE_NOT_READY" && /^Agent Profile "Ops" could not be used, so no chat was opened: The MCP server "pager" has no command\./.test(e.message));
+  h.api.on("POST", "/api/sessions", { status: 400, body: { code: "PROFILE_UNSUPPORTED_AGENT", message: "Agent Profiles are not supported for Claude yet." } });
+  await assert.rejects(tool("create_session").run({ project: "acme/api", agent: "claude", profile: "Video", runtimeMode: "full-access" }, h.ctx), (e: ToolError) => e.code === "PROFILE_UNSUPPORTED_AGENT");
+  // A daemon that cannot list profiles: a named profile is refused, never launched as Global.
+  h.api.on("GET", "/api/session-profiles", { status: 404, body: { code: "NOT_FOUND", message: "no route" } });
+  await assert.rejects(tool("create_session").run({ project: "acme/api", agent: "claude", profile: "Video", runtimeMode: "full-access" }, h.ctx), (e: ToolError) => e.code === "UNAVAILABLE");
+});
+
+test("get_session and list_sessions report each chat's Agent Profile ({id, name}, or null for Global); list_agents lists the profiles with per-agent readiness", async (t) => {
+  const h = await harness([chatSummary({ profileId: "prof-1" }), chatSummary({ id: "c2", order: 3, profileId: null }), shellSummary()]); t.after(h.close);
+  h.api.on("GET", "/api/session-profiles", { status: 200, body: PROFILES });
+  const one = await tool("get_session").run({ sessionId: "c1" }, h.ctx);
+  assert.deepEqual((one.session as { chat: { profile: unknown } }).chat.profile, { id: "prof-1", name: "Video" });
+  const list = await tool("list_sessions").run({ kind: "all", attention: false }, h.ctx);
+  assert.deepEqual((list.sessions as { id: string; chat?: { profile: unknown } }[]).map((s) => [s.id, s.chat?.profile]), [["c1", { id: "prof-1", name: "Video" }], ["t1", undefined], ["c2", null]]);
+  const agents = await sessionsFamilyTool("list_agents").run({ includeLegacy: false }, h.ctx);
+  assert.deepEqual(agents.profiles, [
+    { id: "prof-1", name: "Video", description: "Editing kit", agents: { claude: "ready", codex: "not-prepared" }, reasons: { codex: "Agent Profiles are not supported for Codex yet." } },
+    { id: "prof-2", name: "Ops", agents: { claude: "failed" }, reasons: { claude: "The MCP server \"pager\" has no command." } }
+  ]);
+  const claudeOnly = await sessionsFamilyTool("list_agents").run({ agent: "claude", includeLegacy: false }, h.ctx);
+  assert.deepEqual((claudeOnly.profiles as { agents: unknown }[]).map((p) => p.agents), [{ claude: "ready" }, { claude: "failed" }], "narrowed to the agent asked about");
+  h.api.on("GET", "/api/session-profiles", { status: 404, body: { code: "NOT_FOUND", message: "no route" } });
+  assert.equal("profiles" in (await sessionsFamilyTool("list_agents").run({ includeLegacy: false }, h.ctx)), false, "an older daemon: no profiles field");
+  assert.deepEqual(((await tool("get_session").run({ sessionId: "c1" }, h.ctx)).session as { chat: { profile: unknown } }).chat.profile, { id: "prof-1" }, "names unknown: by id alone");
 });
 
 test("create_session resume: a system-home row never forces System, a mismatched agent is refused", async (t) => {

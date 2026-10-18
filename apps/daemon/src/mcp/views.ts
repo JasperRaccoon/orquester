@@ -3,6 +3,7 @@ import { agentChatRoutes, assistantTextForTurn, isUnfinishedGoal, lastReplyOf, p
 import type { AccountHomeKind, AdapterCapabilities, AgentAdapterId, AgentGoalStatus, ApprovalDecision, ApprovalOption, LatestTurnSummary, ProviderOptionSelection, ProviderRequestKind, RuntimeMode, RuntimeSubagent, ThreadActivityItem, ThreadItem, ThreadSessionStatus, ThreadSnapshotPayload, ThreadTokenUsage, UserInputQuestion } from "@orquester/api/agent-chat";
 import { resolveChatActivity, type ChatActivityRung } from "../agent-chat/activity-ladder.ts";
 import { projectNamesFor, type ProjectRef } from "./addressing.ts";
+import { profileNames, profileRef, type ProfileRef } from "./profiles.ts";
 import { providerRows, supportsFrom, type AgentSupports } from "./agents.ts";
 import type { DaemonApi } from "./daemon-api.ts";
 import { readThread, requireChatSession } from "./reads.ts";
@@ -54,7 +55,8 @@ export interface SessionView { id: string; kind: "chat" | "terminal"; agent: str
   status: "working" | "waiting" | "idle"; attention: "needs-input" | "finished" | "bell" | null; needsAttentionAt: string | null; reason: SessionReason | null;
   /** The chat session this one was forked from, delegated by or opened by (spec 2026-10-14 §6); get_session lists children. */
   lineage?: { parentSessionId: string; relation: "fork" | "delegate" | "opened"; forkedFromTurnId?: string };
-  chat?: { sessionStatus: ThreadSessionStatus; accountId: string; latestTurn: LatestTurnSummary | null; pending: { approvals: boolean; questions: boolean }; planReady: boolean; backgroundLiveness: "working" | "monitoring" | null; goal: GoalView | null };
+  /** `profile`: the chat's Agent Profile (spec 2026-10-18), `null` = Global; `name` absent once the profile is gone. */
+  chat?: { sessionStatus: ThreadSessionStatus; accountId: string; profile: ProfileRef; latestTurn: LatestTurnSummary | null; pending: { approvals: boolean; questions: boolean }; planReady: boolean; backgroundLiveness: "working" | "monitoring" | null; goal: GoalView | null };
   terminal?: { status: "running" | "exited"; exitCode?: number; legacyAgent?: boolean } }
 interface PendingApprovalView { requestId: string; kind: ProviderRequestKind; createdAt: string; detail?: string; appName?: string; tool?: { name: string; input: unknown }; decisions: { decision: ApprovalDecision; label: string; warning?: string }[] }
 export interface PendingQuestionView { requestId: string; createdAt: string; turnId?: string; responseMode: "blocking" | "message"; dismissible: boolean;
@@ -72,7 +74,9 @@ interface PlanView { planId: string; markdown: string; truncated: boolean; actio
 export interface SessionDetail extends SessionView { chat: Omit<NonNullable<SessionView["chat"]>, "goal"> & { goal: GoalDetailView | null; model: string; options: Record<string, string | boolean>; runtimeMode: RuntimeMode; home: AccountHomeKind; accountLabel?: string; activeTurnId: string | null; turnCount: number; lastError?: string; continueAfterRestart: boolean;
     contextWindow?: { usedTokens: number; maxTokens?: number; percentUsed?: number; compactsAutomatically?: boolean }; supports: AgentSupports };
   pending: { approvals: PendingApprovalView[]; questions: PendingQuestionView[] }; plan?: PlanView; subagents: SubagentView[]; subagentsTruncated?: true; lastReply?: { turnId: string; text: string; truncated: boolean; completedAt: string | null } }
-export interface ViewContext { workspacesDir: string; adapterByRefId: ReadonlyMap<string, AgentAdapterId>; accountLabelById: ReadonlyMap<string, string>; capabilitiesByAdapter: ReadonlyMap<string, AdapterCapabilities> }
+export interface ViewContext { workspacesDir: string; adapterByRefId: ReadonlyMap<string, AgentAdapterId>; accountLabelById: ReadonlyMap<string, string>; capabilitiesByAdapter: ReadonlyMap<string, AdapterCapabilities>;
+  /** Agent Profile names by id (empty when they cannot be read: a chat's profile is then reported by id alone). Optional for hand-built contexts. */
+  profileNameById?: ReadonlyMap<string, string> }
 
 export async function buildViewContext(api: DaemonApi): Promise<ViewContext> {
   const adapterByRefId = new Map<string, AgentAdapterId>();
@@ -92,7 +96,7 @@ export async function buildViewContext(api: DaemonApi): Promise<ViewContext> {
   if (providers.status < 400) {
     for (const [id, row] of providerRows(providers.body)) if (row.capabilities) capabilitiesByAdapter.set(id, row.capabilities);
   }
-  return { workspacesDir: api.workspacesDir, adapterByRefId, accountLabelById, capabilitiesByAdapter };
+  return { workspacesDir: api.workspacesDir, adapterByRefId, accountLabelById, capabilitiesByAdapter, profileNameById: await profileNames(api) };
 }
 
 function sessionReason(s: SessionSummary): SessionReason | null {
@@ -154,7 +158,7 @@ export function sessionView(s: SessionSummary, ctx: ViewContext): SessionView {
     const adapter = ctx.adapterByRefId.get(s.refId);
     if (adapter) view.adapter = adapter;
     view.chat = {
-      sessionStatus: s.chatSessionStatus ?? "idle", accountId: s.accountId ?? SYSTEM_ACCOUNT_ID, latestTurn: s.latestTurn ?? null,
+      sessionStatus: s.chatSessionStatus ?? "idle", accountId: s.accountId ?? SYSTEM_ACCOUNT_ID, profile: profileRef(s.profileId, ctx.profileNameById ?? new Map()), latestTurn: s.latestTurn ?? null,
       pending: { approvals: s.hasPendingApprovals === true, questions: s.hasPendingUserInput === true },
       planReady: s.hasActionableProposedPlan === true, backgroundLiveness: s.backgroundLiveness ?? null, goal: goalView(s)
     };

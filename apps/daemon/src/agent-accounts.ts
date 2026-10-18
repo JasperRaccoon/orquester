@@ -26,6 +26,7 @@ import {
   type AgentAccountsIndex
 } from "@orquester/config";
 import { assertOwnedAccountHome, AgentAccountError, ACCOUNT_MARKER } from "./agent-account-paths.ts";
+import { writeFileAtomic } from "./agent-hooks.ts";
 import {
   detectAgentFromBlob,
   claudePlanFromBlob,
@@ -105,6 +106,13 @@ export class AgentAccountsService {
   /** Account ids with an in-flight refresh, so the hourly loop and the usage
    *  path never double-spend one account's single-use refresh token. */
   private refreshing = new Set<string>();
+  /**
+   * The accounts a live session pins right now (`startRefresher`'s source), re-read just before a
+   * refresh spends an account's single-use refresh token: a chat — Global or Agent Profile, whose
+   * Grok CLI refreshes the same `auth.json` through `GROK_AUTH_PATH` — may have started since the
+   * caller's snapshot.
+   */
+  private liveAccountIds?: () => Set<string>;
   /** Per agent: the tail of its account-home syncs. Two launches (of one account or of two)
    *  merge into the same shared dirs, so their syncs never interleave. Never rejects. */
   private syncChains = new Map<ManagedAgent, Promise<void>>();
@@ -761,6 +769,7 @@ export class AgentAccountsService {
 
   startRefresher(getLiveAccountIds: () => Set<string>): void {
     if (this.refreshTimer) return;
+    this.liveAccountIds = getLiveAccountIds;
     const run = () => void this.refreshIdleAccounts(getLiveAccountIds()).catch((e) => this.opts.logger?.warn?.(`account refresh failed: ${String(e)}`));
     this.refreshTimer = setInterval(run, REFRESH_INTERVAL_MS);
     this.refreshTimer.unref?.();
@@ -813,6 +822,7 @@ export class AgentAccountsService {
       } catch {
         return;
       }
+      if (this.liveAccountIds?.().has(id)) return; // a session took the account since the snapshot
       if (agent === "claude") {
         const refreshToken = creds?.claudeAiOauth?.refreshToken;
         if (typeof refreshToken !== "string") return;
@@ -828,7 +838,9 @@ export class AgentAccountsService {
         if (typeof refreshToken !== "string" || !refreshToken) return;
         const out = await refreshGrokToken(refreshToken);
         if (out.ok) {
-          await writeFile(credsPath, JSON.stringify(mergeGrokRefreshedAuth(creds, out, this.opts.now())), { mode: 0o600 });
+          // Replaced by rename, as the Grok CLI writes it: a CLI reading it through
+          // `GROK_AUTH_PATH` (an Agent Profile chat) or its home never sees a torn file.
+          await writeFileAtomic(credsPath, JSON.stringify(mergeGrokRefreshedAuth(creds, out, this.opts.now())), 0o600);
           if (record.needsReauth) await this.markNeedsReauth(id, false);
         } else if (out.invalidGrant) {
           await this.markNeedsReauth(id, true);

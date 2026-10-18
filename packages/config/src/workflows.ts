@@ -184,6 +184,12 @@ export const agentSessionModeSchema = z.discriminatedUnion("kind", [
 export const agentConfigSchema = looseObject({
   prompt: agentPromptSchema,
   session: agentSessionModeSchema.default({ kind: "new" }),
+  /**
+   * The Agent Profile (spec 2026-10-18 §5.5) a NEW chat of this block launches with, by id;
+   * absent = Global. A run is unattended: a missing, deleted or failed profile fails the block,
+   * never Global. Ignored by `session.kind: "continue"` (that chat keeps its own).
+   */
+  profileId: z.string().min(1).max(128).optional(),
   chain: z.array(agentChainEntrySchema).min(1),
   autonomyNote: z.boolean().default(true),
   whenOnlyWatchLoopsRemain: z.enum(["finish", "wait"]).default("finish"),

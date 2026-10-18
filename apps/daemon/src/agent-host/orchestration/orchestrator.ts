@@ -31,6 +31,7 @@ import {
   IDENTITY_CHANGED_ACTIVITY_KIND,
   MAX_TURN_FILE_BYTES,
   MAX_TURN_IMAGE_BYTES,
+  PROFILE_CHANGED_ACTIVITY_KIND,
   THREAD_HISTORY_DEFAULT_TURNS,
   THREAD_HISTORY_MAX_TURNS,
   THREAD_PROMPTS_DEFAULT_LIMIT,
@@ -120,7 +121,10 @@ import {
   type CreateHostThreadRequest,
   type ForkHostThreadRequest,
   type ForkHostThreadResponse,
-  type SetThreadIdentityRequest
+  type HostThreadCatalogResponse,
+  type HostThreadProfile,
+  type SetThreadIdentityRequest,
+  type SetThreadIdentityResponse
 } from "../host-protocol.ts";
 import type {
   AppendableDomainEvent,
@@ -153,6 +157,9 @@ import {
   withDeadline
 } from "../support/deadline.ts";
 import { attachedFileLine } from "../adapters/attachment-lines.ts";
+import { loadProfileManifest } from "../adapters/profile-manifest.ts";
+import { isSessionProfileAgentId } from "@orquester/api";
+import type { FetchLaunchProfile } from "./launch-profile.ts";
 import {
   cancelledRequestActivity,
   createEventBuilder,
@@ -173,6 +180,7 @@ import { applyEventsChunked } from "./fold-ops.ts";
 import { legacyLaunchStarts, leftoverWorkClosings } from "./leftover-work.ts";
 import {
   launchConfigFromRequest,
+  parseHostThreadProfile,
   type LaunchConfigStore,
   type ThreadLaunchConfig
 } from "./launch-config.ts";
@@ -190,6 +198,7 @@ import {
   decideSessionRestart,
   identitySwitchRefusal,
   modelSelectionEquals,
+  profileKeyOf,
   type BoundSessionShape,
   type DesiredSessionShape
 } from "./session-policy.ts";
@@ -334,6 +343,13 @@ export interface OrchestratorOptions {
   sessionToolsStale?: (threadId: string) => boolean;
   /** A thread was deleted (after everything of it is freed): per-thread state elsewhere goes too. Must not throw. */
   onThreadDeleted?: (threadId: string) => void;
+  /**
+   * Agent Profiles (spec 2026-10-18 §5.6, §6.5): the daemon's current launch for a profile
+   * thread, asked before every provider-session start (`launch-profile.ts`). Never throws.
+   * Absent (tests, a host built without it): every start reads as "daemon unavailable" and
+   * launches from the persisted profile only if its manifest still validates.
+   */
+  launchProfile?: FetchLaunchProfile;
   /**
    * Session-tool secrets (design 2026-10-14 §5, `session-tools/secret-redaction.ts`)
    * beyond ingestion's: `link` — a fork's child is masked with its parent's
@@ -647,14 +663,16 @@ export interface Orchestrator {
    */
   updateThread(threadId: string, input: { title?: string; seed?: boolean }): Promise<{ seq: number }>;
   /**
-   * §3.4's account switch, applied on the thread's next message.
+   * §3.4's account switch — and the Agent Profile switch (spec 2026-10-18
+   * §5.3) — applied on the thread's next message.
    *
    * Serialised on the thread's own command queue and receipt-tracked by
    * `commandId`, exactly like a §6.2 command, but it starts **no** session: the
-   * `ensureSession` step on the next `/turn` sees the changed `accountKey`,
-   * restarts with reason `"account"` and carries the resume cursor.
+   * `ensureSession` step on the next `/turn` sees the changed `accountKey`
+   * (reason `"account"`) or `profileKey` (reason `"profile"`), restarts and
+   * carries the resume cursor.
    */
-  setIdentity(threadId: string, request: SetThreadIdentityRequest): Promise<{ seq: number }>;
+  setIdentity(threadId: string, request: SetThreadIdentityRequest): Promise<SetThreadIdentityResponse>;
   deleteThread(threadId: string): Promise<void>;
 
   command(
@@ -693,6 +711,12 @@ export interface Orchestrator {
     threadId: string,
     query: { before?: string; limit?: number }
   ): Promise<ThreadPromptsResponse>;
+  /**
+   * What the thread's LIVE session loaded (`AgentAdapter.sessionCatalog`): `live: false` when
+   * there is no live session, its adapter has no such read, or the read failed or timed out.
+   * Throws `THREAD_NOT_FOUND` for a thread that does not exist. Never starts a session.
+   */
+  readCatalog(threadId: string): Promise<HostThreadCatalogResponse>;
   /**
    * One of those prompts' whole normalised text; null when the index holds
    * the whole thread and this is not one of its prompts. Throws
@@ -778,7 +802,7 @@ export interface Orchestrator {
    * Agent profile §4.8, `POST /opencode/recycle-idle`: the OpenCode adapter's
    * `recycleIdleServers`, or nothing recycled when no adapter serves it.
    */
-  recycleIdleOpenCodeServers(): Promise<{ recycled: number; deferred: number }>;
+  recycleIdleOpenCodeServers(input?: { poolKey?: string }): Promise<{ recycled: number; deferred: number }>;
   /**
    * Unified MCP §12.1: a thread's provider session started with its MCP denials degraded (the
    * daemon could not be asked and nothing is known for its launch): one `runtime.warning` row, so
@@ -825,6 +849,12 @@ export interface Orchestrator {
    * builds a provider child's environment (§3.1).
    */
   launchConfig(threadId: string): ThreadLaunchConfig | null;
+  /**
+   * Agent Profiles, `GET /profiles/leases`: the prepared directories of every live provider
+   * session and every session start in flight (spec 2026-10-18 §6.5) — what the daemon's GC
+   * must never delete. Deduplicated.
+   */
+  profileLeases(): string[];
   /**
    * The launcher env of a loaded thread in this project or working directory.
    *
@@ -1647,12 +1677,15 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   // Session lifecycle (§3.4 + §4.1 lazy recovery)
   // -------------------------------------------------------------------------
 
-  const desiredShapeFor = (head: ThreadHead): DesiredSessionShape => ({
+  const desiredShapeFor = (runtime: ThreadRuntime, head: ThreadHead): DesiredSessionShape => ({
     adapter: head.adapter,
     runtimeMode: head.runtimeMode,
     cwd: head.cwd,
     accountKey: `${head.home}:${head.accountId}`,
-    modelSelection: head.modelSelection
+    modelSelection: head.modelSelection,
+    // The profile comes off `launch.json`, the daemon's resolved answer, as the
+    // launch env and home do.
+    profileKey: profileKeyOf(runtime.launch?.profile)
   });
 
   const mapSessionStatus = (
@@ -1689,7 +1722,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   ): Promise<ProviderSession> => {
     const head = requireHead(runtime);
     const adapter = adapterFor(head.adapter);
-    const desired = desiredShapeFor(head);
+    const desired = desiredShapeFor(runtime, head);
     const pendingTurnStart = opts.pendingTurnStart === true;
 
     // A session the thread reads as `error` is never reused: a message sent
@@ -1793,6 +1826,28 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     return known;
   };
 
+  /**
+   * The Agent Profile a session start launches with: `launch.json`'s. A thread
+   * whose log names a profile (`head.profileId`) but whose launch config has
+   * none — the file lost or unreadable — is REFUSED rather than started as
+   * Global (spec 2026-10-18 §2 anti-goals); switching its profile rewrites the
+   * file and lets it start again.
+   */
+  const launchProfileOf = (runtime: ThreadRuntime, head: ThreadHead): HostThreadProfile | undefined => {
+    const profile = runtime.launch?.profile;
+    if (runtime.launch?.profileUnreadable === true && profile === undefined) {
+      throw new Error(
+        "This chat's Agent Profile record could not be read, so the agent was not started. Choose the chat's profile again to continue."
+      );
+    }
+    if (profile === undefined && head.profileId !== undefined) {
+      throw new Error(
+        "This chat's Agent Profile is not known to the agent host, so the agent was not started. Choose the chat's profile again to continue."
+      );
+    }
+    return profile;
+  };
+
   const startSession = async (
     runtime: ThreadRuntime,
     head: ThreadHead,
@@ -1817,6 +1872,125 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     }
   };
 
+  /**
+   * Prepared dirs of the session starts in flight, by thread: leased from the refresh until the
+   * session is live (then `adapter.hasSession` covers it) or the start failed.
+   */
+  const startingProfileDirs = new Map<string, string>();
+
+  /**
+   * Every live session's dir: the one it STARTED on (`runtime.bound.preparedDir` — a switch
+   * rewrites `launch.json` at once while the old provider process runs on until the next start)
+   * and the pending one in `launch.json`.
+   */
+  const profileLeases = (): string[] => {
+    const dirs = new Set<string>(startingProfileDirs.values());
+    for (const runtime of runtimes.values()) {
+      const adapterId = runtime.state.head?.adapter;
+      if (adapterId === undefined || options.adapters.get(adapterId)?.hasSession(runtime.id) !== true) continue;
+      if (runtime.bound?.preparedDir !== undefined) dirs.add(runtime.bound.preparedDir);
+      const pending = runtime.launch?.profile;
+      if (pending !== undefined) dirs.add(pending.preparedDir);
+    }
+    return [...dirs];
+  };
+
+  /**
+   * Agent Profiles (spec 2026-10-18 §5.6, §6.5): before a profile thread's session starts, ask the
+   * daemon for the profile's current prepared version and launch fields and rewrite
+   * `launch.json` with them, so an edited profile applies now and a removed version never fails
+   * the start. A deleted profile's fallback (interactive chats only — the daemon decides) is
+   * recorded here: `thread.meta-updated {profileId: ""}` and the notice. A refusal fails the
+   * start with its reason; a daemon that cannot be asked leaves the persisted profile — only if
+   * its manifest still validates (never Global). A Global thread asks nothing.
+   */
+  const refreshLaunchProfile = async (runtime: ThreadRuntime, head: ThreadHead): Promise<void> => {
+    const profileId = runtime.launch?.profile?.profileId ?? head.profileId;
+    if (profileId === undefined) return;
+    const answer = options.launchProfile
+      ? await options.launchProfile(runtime.id, profileId, { accountId: head.accountId })
+      : ({ kind: "unavailable", reason: "no daemon to ask" } as const);
+    if (answer.kind === "refused") {
+      throw new Error(answer.message);
+    }
+    if (answer.kind === "unavailable") {
+      const persisted = runtime.launch?.profile;
+      const unavailable =
+        "Orquester could not be reached to prepare this chat's Agent Profile, and the version it last launched with is no longer available, so the agent was not started. Try again in a moment.";
+      // No profile persisted: `launchProfileOf` refuses the start in its own words.
+      if (persisted === undefined) return;
+      if (!isSessionProfileAgentId(head.adapter)) throw new Error(unavailable);
+      try {
+        await loadProfileManifest({ profile: persisted }, head.adapter);
+      } catch {
+        throw new Error(unavailable);
+      }
+      logger.warn(`agent-host: could not refresh ${runtime.id}'s Agent Profile (${answer.reason}); launching the version it has`);
+      // Visible in the chat too: an edit made since that version does not apply to this start.
+      await appendActivity(runtime, {
+        kind: "runtime.warning",
+        tone: "info",
+        turnId: null,
+        summary:
+          "Orquester could not be reached in time to refresh this chat's Agent Profile, so the agent started with the version it last launched with. Recent changes to the profile apply at its next start.",
+        payload: { profileId: persisted.profileId, reason: "profile-refresh-unavailable" }
+      });
+      return;
+    }
+    const next = launchConfigFromRequest(answer.launch, answer.launch.profile ?? undefined);
+    if (JSON.stringify(next) !== JSON.stringify(runtime.launch ?? {})) {
+      try {
+        await launchConfigs.save(runtime.id, next);
+      } catch (error) {
+        // Never launch from an environment `launch.json` does not hold: a host restart would
+        // relaunch the thread under another one.
+        throw new Error(`Could not record this chat's Agent Profile launch: ${describeFailure(error)}`);
+      }
+      runtime.launch = next;
+    }
+    const nextProfileId = answer.launch.profile?.profileId ?? null;
+    if (nextProfileId === (head.profileId ?? null)) return;
+    const occurredAt = clock.nowIso();
+    const events: AppendableDomainEvent[] = [
+      buildEvent(
+        runtime.id,
+        "thread.meta-updated",
+        {
+          // `""` is Global on the log (`ThreadMetaUpdatedPayload`).
+          profileId: nextProfileId ?? "",
+          ...(answer.launch.profile ? { profileRevision: answer.launch.profile.revision } : {})
+        },
+        { occurredAt }
+      )
+    ];
+    if (nextProfileId === null) {
+      events.push(
+        buildEvent(
+          runtime.id,
+          "thread.activity-appended",
+          {
+            activity: makeActivity({
+              id: ids.eventId(),
+              tone: "info",
+              activityKind: "runtime.warning",
+              summary: answer.launch.fallback?.notice ?? "This chat's Agent Profile is no longer available; it now uses Global.",
+              payload: {
+                profileId: null,
+                previousProfileId: answer.launch.fallback?.previousProfileId ?? head.profileId ?? null,
+                reason: "profile-deleted"
+              },
+              turnId: null,
+              createdAt: occurredAt
+            })
+          },
+          { occurredAt }
+        )
+      );
+    }
+    await commit(runtime, events);
+    await saveHeadNow(runtime);
+  };
+
   const startSessionNow = async (
     runtime: ThreadRuntime,
     head: ThreadHead,
@@ -1835,6 +2009,30 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     if (!gateResult.ok) {
       throw new Error(gateResult.message);
     }
+    await refreshLaunchProfile(runtime, head);
+    // The refresh may have moved the profile (a new version, the deleted one's fallback): the
+    // session is bound to what it actually starts with, so the next ensure sees no change.
+    desired = { ...desired, profileKey: profileKeyOf(runtime.launch?.profile) };
+    head = requireHead(runtime);
+    const profile = launchProfileOf(runtime, head);
+    if (profile !== undefined) startingProfileDirs.set(runtime.id, profile.preparedDir);
+    try {
+      return await startProfiledSession(runtime, head, desired, resumeCursor, pendingTurnStart, goal, profile);
+    } finally {
+      startingProfileDirs.delete(runtime.id);
+    }
+  };
+
+  const startProfiledSession = async (
+    runtime: ThreadRuntime,
+    head: ThreadHead,
+    desired: DesiredSessionShape,
+    resumeCursor: unknown,
+    pendingTurnStart: boolean,
+    goal: { carryGoal: boolean },
+    profile: HostThreadProfile | undefined
+  ): Promise<ProviderSession> => {
+    const adapter = adapterFor(head.adapter);
     const home = await options.resolveHome({
       threadId: runtime.id,
       adapter: head.adapter,
@@ -1852,6 +2050,13 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       projectPath: head.projectPath,
       cwd: head.cwd,
       home,
+      // The keyed server the daemon named at create, from `launch.json`, so a
+      // resumed thread lands on a server with the same key and env after a
+      // restart or a handover.
+      ...(runtime.launch?.serverPool !== undefined ? { serverPool: runtime.launch.serverPool } : {}),
+      // The Agent Profile, also from `launch.json`: on every start — create,
+      // resume, a crash restart, a host restart's rehydrate, a switch.
+      ...(profile !== undefined ? { profile } : {}),
       title: head.title,
       modelSelection: head.modelSelection,
       runtimeMode: head.runtimeMode,
@@ -1864,7 +2069,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       // let the adapter overlap that read with its own start-up.
       ...(resumeCursor !== undefined && runtime.historyPending ? { prefetchHistory: true } : {})
     });
-    runtime.bound = { ...desired, session };
+    runtime.bound = { ...desired, session, ...(profile !== undefined ? { preparedDir: profile.preparedDir } : {}) };
     runtime.sessionStartedAt = clock.now().getTime();
     // The binding is written BEFORE the session is announced and before any
     // history replay: a host that dies between the provider handing back a
@@ -3902,6 +4107,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       if (!adapterId) {
         throw invalidCommand(`Registry entry '${request.refId}' has no chat adapter.`);
       }
+      const profile = requestedProfile(request, { allowGlobal: false }) ?? undefined;
       const runtime = await loadRuntime(threadId);
       if (runtime.state.head) {
         return requireHead(runtime);
@@ -3960,9 +4166,58 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         home,
         resumeCursor,
         // A delegate's parent, as the daemon checked it (spec 2026-10-14 §6).
-        lineage: parseThreadLineage(request.lineage)
+        lineage: parseThreadLineage(request.lineage),
+        profile
       });
     });
+
+  /**
+   * The Agent Profile a create, fork or identity request names: `undefined`
+   * when it names none (create: Global; fork: the parent's; identity: the
+   * thread's own), `null` for an explicit Global (fork and identity only), else
+   * the profile. `profileId` is a mirror of `profile.profileId` and may only
+   * agree with it: a `profileId` alone — or a profile that does not read —
+   * would otherwise launch the thread as Global, so it is refused.
+   */
+  /** `ForkHostThreadRequest.profileFallback`, field-wise; undefined when it does not read. */
+  const parseProfileFallback = (raw: unknown): { previousProfileId: string; notice: string } | undefined => {
+    if (typeof raw !== "object" || raw === null) return undefined;
+    const { previousProfileId, notice } = raw as Record<string, unknown>;
+    if (typeof previousProfileId !== "string" || typeof notice !== "string" || notice.trim() === "") return undefined;
+    return { previousProfileId: previousProfileId.slice(0, 128), notice: notice.slice(0, 500) };
+  };
+
+  const requestedProfile = (
+    request: { profile?: unknown; profileId?: unknown },
+    opts: { allowGlobal: boolean }
+  ): HostThreadProfile | null | undefined => {
+    const { profile: raw, profileId } = request;
+    if (raw === undefined) {
+      if (profileId !== undefined) {
+        throw invalidCommand("profileId needs the prepared profile (profile) beside it.");
+      }
+      return undefined;
+    }
+    if (raw === null) {
+      if (!opts.allowGlobal) {
+        throw invalidCommand("profile must be an object; omit it for Global.");
+      }
+      if (profileId !== undefined && profileId !== null) {
+        throw invalidCommand("profileId does not match profile.");
+      }
+      return null;
+    }
+    const profile = parseHostThreadProfile(raw);
+    if (profile === undefined) {
+      throw invalidCommand(
+        "profile must carry a profileId, a revision and an absolute preparedDir."
+      );
+    }
+    if (profileId !== undefined && profileId !== profile.profileId) {
+      throw invalidCommand("profileId does not match profile.");
+    }
+    return profile;
+  };
 
   /**
    * The create itself, once everything that can refuse has run (§6.1): the
@@ -3973,7 +4228,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
    */
   const createThreadNow = async (
     runtime: ThreadRuntime,
-    request: CreateHostThreadRequest,
+    request: Omit<CreateHostThreadRequest, "profile" | "profileId">,
     input: {
       adapterId: AgentAdapterId;
       modelSelection: ModelSelection;
@@ -3981,6 +4236,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       home: "system" | "account";
       resumeCursor: unknown;
       lineage: ThreadLineage | undefined;
+      /** The thread's Agent Profile, resolved and validated by the caller; omitted, Global. */
+      profile: HostThreadProfile | undefined;
       /** Runs after the create commits and before the eager session starts. */
       afterCreate?: () => Promise<void>;
     }
@@ -4002,7 +4259,12 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
           home,
           modelSelection,
           runtimeMode,
-          ...(input.lineage !== undefined ? { lineage: input.lineage } : {})
+          ...(input.lineage !== undefined ? { lineage: input.lineage } : {}),
+          // The durable record of the profile (the fold's `head.profileId`);
+          // `launch.json` below is what a launch reads.
+          ...(input.profile !== undefined
+            ? { profileId: input.profile.profileId, profileRevision: input.profile.revision }
+            : {})
         },
         { occurredAt }
       )
@@ -4019,7 +4281,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     }
     // Persisted BEFORE the thread exists on the wire: the very first turn
     // may start a session, and it must already see the launcher env.
-    const launch = launchConfigFromRequest(request);
+    const launch = launchConfigFromRequest(request, input.profile);
     runtime.launch = launch;
     await launchConfigs.save(threadId, launch).catch((error: unknown) => {
       logger.warn(`agent-host: failed to persist the launch config for ${threadId}`, error);
@@ -4185,6 +4447,20 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       request.runtimeMode === undefined
         ? parentHead.runtimeMode
         : parseRuntimeMode(request.runtimeMode);
+    // The child's Agent Profile: the parent's own (`launch.json`) unless the
+    // request names one — `null` for Global. The account is the parent's too,
+    // so the parent's prepared directory is the child's.
+    const requested = requestedProfile(request, { allowGlobal: true });
+    const childProfile =
+      requested === undefined ? parent.launch?.profile : (requested ?? undefined);
+    if (requested === undefined && childProfile === undefined && parentHead.profileId !== undefined) {
+      // The parent names a profile its launch config lost: never fork it as Global.
+      throw commandRejected(
+        "The parent chat's Agent Profile is not known to the agent host; choose a profile for the fork."
+      );
+    }
+    // The daemon made the child Global because the parent's profile was deleted: its notice.
+    const fallback = requested === null ? parseProfileFallback(request.profileFallback) : undefined;
     const lineage: ThreadLineage = {
       parentThreadId,
       relation: "fork",
@@ -4207,6 +4483,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
             accountId: parentHead.accountId,
             home: parentHead.home
           });
+          const childServerPool = launchConfigFromRequest(request).serverPool;
           const forked = await adapter.forkConversation({
             sourceThreadId: parentThreadId,
             sourceResumeCursor: sourceCursor,
@@ -4214,6 +4491,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
             projectPath: request.projectPath,
             cwd: request.cwd,
             home,
+            ...(childServerPool !== undefined ? { serverPool: childServerPool } : {}),
+            ...(childProfile !== undefined ? { profile: childProfile } : {}),
             cut: {
               retainedTurnIds: cut.retained.map((turn) => turn.turnId),
               firstRemovedTurnId: cut.firstRemovedTurnId
@@ -4254,7 +4533,17 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       home: parentHead.home,
       resumeCursor,
       lineage,
+      profile: childProfile,
       afterCreate: async () => {
+        if (fallback !== undefined) {
+          await appendActivity(runtime, {
+            kind: "runtime.warning",
+            tone: "info",
+            turnId: null,
+            summary: fallback.notice,
+            payload: { profileId: null, previousProfileId: fallback.previousProfileId, reason: "profile-deleted" }
+          });
+        }
         if (strategy === "native") {
           await copyRetainedPages(parentThreadId, threadId, parent.state.activities, cut.retained);
         }
@@ -4399,6 +4688,14 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
    * the changed `accountKey`, restarts with reason `"account"` and carries the
    * resume cursor. A thread with no live session simply starts under the new
    * identity — the same rule `/mode` follows.
+   *
+   * The same request switches the Agent Profile (spec 2026-10-18 §5.3):
+   * `profile` absent keeps the thread's, `null` is Global, a profile is that
+   * one. A profile-only switch is NOT an account switch: the head's account and
+   * the binding's `providerInstanceId` stay, so the restart (reason
+   * `"profile"`, from the changed `profileKey`) carries the cursor and no goal.
+   * OpenCode takes a profile switch — `serverPool` moves it to the new
+   * profile's server — but still never an account switch.
    */
   const applyIdentity = async (
     runtime: ThreadRuntime,
@@ -4417,13 +4714,24 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     if (home === "account" && accountId.length === 0) {
       throw invalidCommand("An account home needs an account id.");
     }
+    const requested = requestedProfile(request, { allowGlobal: true });
+    const accountChanged = accountId !== head.accountId || home !== head.home;
     // One live session per thread, and OpenCode's is shared by every thread of
     // the project and runs under the server's own identity (§3.2) — there is
-    // no per-thread account to move.
-    if (head.adapter === "opencode") {
+    // no per-thread account to move. Its profile can move: that is a server key.
+    if (head.adapter === "opencode" && accountChanged) {
       throw invalidCommand("OpenCode threads always run under the server's own identity.");
     }
-    if (accountId === head.accountId && home === head.home) {
+    const previousProfile = runtime.launch?.profile;
+    const nextProfile = requested === undefined ? previousProfile : (requested ?? undefined);
+    // A launch config that lost or garbled the profile the log names is
+    // repaired by naming it again, so that counts as a change too.
+    const profileChanged =
+      requested !== undefined &&
+      (profileKeyOf(nextProfile) !== profileKeyOf(previousProfile) ||
+        runtime.launch?.profileUnreadable === true ||
+        (nextProfile?.profileId ?? null) !== (head.profileId ?? null));
+    if (!accountChanged && !profileChanged) {
       // Unchanged: still a receipt and still a `{seq}`, so a retry of the same
       // `commandId` is free — but no event, no activity and no restart.
       const unchanged = await commit(runtime, [], { commandId, status: "accepted" });
@@ -4453,59 +4761,94 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       // takes it back. One the host has just set going again
       // ({@link goalJustResumed}) is not held: it gets the pause advice.
       goalHeldForUpdate: goalHeld(runtime, adapter)
-    });
+    }, accountChanged ? "accounts" : "profiles");
     if (refusal !== null) {
       throw commandRejected(refusal);
     }
 
     const previousLaunch = runtime.launch;
-    const launch = launchConfigFromRequest(request);
+    // Every launch field the request carries replaces the old one, `serverPool`
+    // included; the profile is the one resolved above.
+    const launch = launchConfigFromRequest(request, nextProfile);
     try {
       await launchConfigs.save(runtime.id, launch);
     } catch (error) {
       // Refused, not warned: an unwritten launch config means the next child
       // launches under the OLD credentials while the user is told otherwise.
       throw commandRejected(
-        `Could not record the new account for this thread: ${describeFailure(error)}`
+        `Could not record the new ${accountChanged ? "account" : "profile"} for this thread: ${describeFailure(error)}`
       );
     }
     runtime.launch = launch;
 
     const occurredAt = clock.nowIso();
     const previousAccountId = head.accountId;
-    try {
-      const result = await commit(
-        runtime,
-        [
-          buildEvent(
-            runtime.id,
-            "thread.meta-updated",
-            { accountId, home },
-            { commandId, occurredAt }
-          ),
-          buildEvent(
-            runtime.id,
-            "thread.activity-appended",
-            {
-              activity: makeActivity({
-                id: ids.eventId(),
-                tone: "info",
-                activityKind: IDENTITY_CHANGED_ACTIVITY_KIND,
-                summary: "Switched account",
-                payload: {
-                  accountId,
-                  home,
-                  ...(previousAccountId.length > 0 ? { previousAccountId } : {})
-                },
-                turnId: null,
-                createdAt: occurredAt
-              })
-            },
-            { occurredAt }
-          )
-        ],
-        { commandId, status: "accepted" }
+    const events: AppendableDomainEvent[] = [
+      buildEvent(
+        runtime.id,
+        "thread.meta-updated",
+        {
+          ...(accountChanged ? { accountId, home } : {}),
+          ...(profileChanged
+            ? {
+                // `""` is Global on the log (`ThreadMetaUpdatedPayload`).
+                profileId: nextProfile?.profileId ?? "",
+                ...(nextProfile !== undefined ? { profileRevision: nextProfile.revision } : {})
+              }
+            : {})
+        },
+        { commandId, occurredAt }
+      )
+    ];
+    if (accountChanged) {
+      events.push(
+        buildEvent(
+          runtime.id,
+          "thread.activity-appended",
+          {
+            activity: makeActivity({
+              id: ids.eventId(),
+              tone: "info",
+              activityKind: IDENTITY_CHANGED_ACTIVITY_KIND,
+              summary: "Switched account",
+              payload: {
+                accountId,
+                home,
+                ...(previousAccountId.length > 0 ? { previousAccountId } : {})
+              },
+              turnId: null,
+              createdAt: occurredAt
+            })
+          },
+          { occurredAt }
+        )
       );
+    }
+    if (profileChanged) {
+      events.push(
+        buildEvent(
+          runtime.id,
+          "thread.activity-appended",
+          {
+            activity: makeActivity({
+              id: ids.eventId(),
+              tone: "info",
+              activityKind: PROFILE_CHANGED_ACTIVITY_KIND,
+              summary: nextProfile !== undefined ? "Switched Agent Profile" : "Switched to Global",
+              payload: {
+                profileId: nextProfile?.profileId ?? null,
+                previousProfileId: head.profileId ?? null
+              },
+              turnId: null,
+              createdAt: occurredAt
+            })
+          },
+          { occurredAt }
+        )
+      );
+    }
+    try {
+      const result = await commit(runtime, events, { commandId, status: "accepted" });
       await saveHeadNow(runtime);
       return { seq: result.seq };
     } catch (error) {
@@ -4525,9 +4868,11 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   const setIdentity = async (
     threadId: string,
     request: SetThreadIdentityRequest
-  ): Promise<{ seq: number }> =>
+  ): Promise<SetThreadIdentityResponse> =>
     whenReady(async () => {
       const runtime = await loadRuntime(threadId);
+      // Every acceptance — a replayed receipt too — names the profile the thread has now.
+      const answer = (seq: number): SetThreadIdentityResponse => ({ seq, profileId: headOf(runtime)?.profileId ?? null });
       return runtime.commands.run(async () => {
         const body = requireBody(request);
         const commandId = requireCommandId(body);
@@ -4543,14 +4888,14 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
             );
           }
           if (receipt.status === "accepted") {
-            return { seq: receipt.seq };
+            return answer(receipt.seq);
           }
           throw replayRecordedRejection(
             receipt.error ?? { code: "COMMAND_REJECTED", message: "Previously rejected." }
           );
         }
         try {
-          return await applyIdentity(runtime, request, commandId);
+          return answer((await applyIdentity(runtime, request, commandId)).seq);
         } catch (error) {
           if (isAgentChatCommandError(error) && error.recorded) {
             await store
@@ -5155,6 +5500,25 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       return null;
     }
   };
+
+  const readCatalog = async (threadId: string): Promise<HostThreadCatalogResponse> =>
+    whenReady(async () => {
+      const runtime = await loadRuntime(threadId);
+      const head = requireHead(runtime);
+      const none: HostThreadCatalogResponse = { live: false, slashCommands: [], skills: [] };
+      const adapter = adapterFor(head.adapter);
+      if (adapter.sessionCatalog === undefined) return none;
+      try {
+        const catalog = await withDeadline(() => adapter.sessionCatalog!(runtime.id), {
+          timeoutMs: AGENT_HOST_DEADLINES.authProbeMs,
+          label: "agent-host/session-catalog"
+        });
+        return catalog === null ? none : { live: true, slashCommands: catalog.slashCommands, skills: catalog.skills };
+      } catch (error) {
+        logger.warn(`agent-host: the session catalog of ${threadId} could not be read`, error);
+        return none;
+      }
+    });
 
   const readThreadHead = async (threadId: string, query: ThreadHeadQuery): Promise<ThreadHeadResponse> =>
     whenReady(async () => {
@@ -7381,6 +7745,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     searchThreads,
     readPrompts,
     readPromptText,
+    readCatalog,
     readItem,
     mcpAppRequest,
     readToolOutput,
@@ -7391,6 +7756,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     threadContext,
     launchConfig,
     launchConfigForCwd,
+    profileLeases,
     placeholderCheckpoint,
     onAccountEvent,
     adapterForThread,
@@ -7420,8 +7786,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     backgroundWorkThreadIds,
     holdContinuingGoals,
     resumeGoalSessionsAfterHandover,
-    recycleIdleOpenCodeServers: async () =>
-      (await options.adapters.get("opencode")?.recycleIdleServers?.()) ?? { recycled: 0, deferred: 0 },
+    recycleIdleOpenCodeServers: async (input) =>
+      (await options.adapters.get("opencode")?.recycleIdleServers?.(input)) ?? { recycled: 0, deferred: 0 },
     noteSessionToolsWarning: (threadId, detail) => {
       const runtime = runtimes.get(threadId);
       if (!runtime || !runtime.state.head) return;

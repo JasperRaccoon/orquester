@@ -21,3 +21,13 @@ import * as nodePath from "node:path";
 export function claudeConfigDir(env: Readonly<Record<string, string | undefined>>): string {
   return env.CLAUDE_CONFIG_DIR ?? nodePath.join(nodeOs.homedir(), ".claude");
 }
+
+/**
+ * The account's `.claude.json` (user/local MCP servers, per-project state): inside
+ * `CLAUDE_CONFIG_DIR` when one is bound, else `~/.claude.json` beside the host user's `~/.claude`.
+ */
+export function claudeJsonPath(env: Readonly<Record<string, string | undefined>>): string {
+  return env.CLAUDE_CONFIG_DIR !== undefined
+    ? nodePath.join(env.CLAUDE_CONFIG_DIR, ".claude.json")
+    : nodePath.join(nodeOs.homedir(), ".claude.json");
+}

@@ -123,7 +123,7 @@ const CollisionPrompt: React.FC<{
   </Banner>
 );
 
-const CandidateChecklist: React.FC<{
+export const CandidateChecklist: React.FC<{
   candidates: readonly ProfileImportCandidate[];
   picks: readonly string[];
   notes: readonly string[];
@@ -556,9 +556,9 @@ export const CopySource: React.FC<{
           }}
         />
       </Field>
-      {load.status === "loading" ? <Progress label={`Reading ${agentLabel(from)}'s profile…`} /> : null}
+      {load.status === "loading" ? <Progress label={`Reading ${agentLabel(from)}'s config…`} /> : null}
       {load.status === "error" ? (
-        <Banner tone="error" title={`Couldn't read ${agentLabel(from)}'s profile`} actions={<SmallButton onClick={() => setAttempt((n) => n + 1)}>Retry</SmallButton>}>
+        <Banner tone="error" title={`Couldn't read ${agentLabel(from)}'s config`} actions={<SmallButton onClick={() => setAttempt((n) => n + 1)}>Retry</SmallButton>}>
           {load.message}
         </Banner>
       ) : null}

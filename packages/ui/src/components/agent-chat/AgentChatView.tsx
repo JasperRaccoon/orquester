@@ -23,8 +23,10 @@ import {
   useAgentChatRoster,
   useAgentChatStatus,
   useAgentChatThread,
-  useProviderSnapshot
+  useProviderSnapshot,
+  useThreadCatalog
 } from "../../lib/agent-chat/hooks";
+import { withThreadCatalog } from "../../lib/agent-chat/thread-catalog";
 import {
   clearComposerInbox,
   composerTextForDelivery,
@@ -77,6 +79,10 @@ import {
 } from "./drill-in-navigation";
 import { proposedPlanTitle, shouldShowPlanFollowUpPrompt } from "../../lib/agent-chat/plan.logic";
 import { useAppStore } from "../../store/app";
+import { REGISTRY, type RegistryEntryDef } from "@orquester/registry";
+import { isSessionProfileAgentId } from "@orquester/api";
+import { useSessionProfileList } from "../../lib/session-profiles/hooks";
+import { agentForRefId } from "../right-rail/agent-profile/default-agent";
 import { AgentDrillIn } from "./roster/AgentDrillIn";
 import { DrillInErrorBoundary } from "./roster/DrillInErrorBoundary";
 import {
@@ -226,14 +232,27 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   const rosterCounts = React.useMemo(() => rosterKindCounts(roster.agents), [roster.agents]);
   const status = useAgentChatStatus(sessionId);
   const provider = useProviderSnapshot(session.refId);
+  // An Agent Profile chat offers what ITS session loaded (else its profile's items), never the
+  // provider's Global commands and skills; re-read as its session starts and turns end.
+  const threadProfileId = slice.head?.profileId ?? null;
+  const threadCatalog = useThreadCatalog(
+    sessionId,
+    threadProfileId,
+    `${slice.sessionStatus ?? ""}:${slice.turnStatus ?? ""}`
+  );
+  const catalogProvider = React.useMemo(
+    () => withThreadCatalog(provider, threadProfileId, threadCatalog),
+    [provider, threadProfileId, threadCatalog]
+  );
   const registry = useRegistry();
   // The skills a sent `$mention` re-chips against (§4.6.7): the ones the
   // composer offers for this thread's cwd — in the thread and in a drill-in.
-  const skills = React.useMemo(() => timelineSkillNames(provider, session.cwd), [provider, session.cwd]);
+  const skills = React.useMemo(() => timelineSkillNames(catalogProvider, session.cwd), [catalogProvider, session.cwd]);
   const agentAccounts = useAppStore((s) => s.agentAccounts);
   const setPreferredModelSelection = useAppStore((s) => s.setPreferredModelSelection);
   const setPreferredRuntimeMode = useAppStore((s) => s.setPreferredRuntimeMode);
   const setPreferredAccount = useAppStore((s) => s.setPreferredAccount);
+  const setPreferredProfile = useAppStore((s) => s.setPreferredProfile);
   // What the composer's pickers change becomes this device's preference for
   // the agent, so the next chat opens the same way (model, effort, thinking,
   // fast mode, permission mode). The thread itself still gets the command.
@@ -251,12 +270,26 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
       setAccount: async (input: Parameters<typeof actions.setAccount>[0]) => {
         await actions.setAccount(input);
         setPreferredAccount(session.refId, input.accountId);
+      },
+      // Agent profiles §5.3: the profile picked here is remembered for the
+      // agent like the account — once the switch was accepted. Picking what the
+      // chat already runs (Global in a Global chat) switches nothing, but is
+      // still the pick: it clears a remembered profile that no longer applies.
+      setProfile: async (input: Parameters<typeof actions.setProfile>[0]) => {
+        if (input.profileId === threadProfileId) {
+          setPreferredProfile(session.refId, input.profileId);
+          return;
+        }
+        await actions.setProfile(input);
+        setPreferredProfile(session.refId, input.profileId);
       }
     }),
     [
       actions,
+      threadProfileId,
       session.refId,
       setPreferredAccount,
+      setPreferredProfile,
       setPreferredModelSelection,
       setPreferredRuntimeMode
     ]
@@ -885,6 +918,25 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   const accountSwitchEnabled = !paintOnly && canSwitchChatAccount(accountSwitchState);
   const accountSwitchRefusal = paintOnly ? null : chatAccountSwitchRefusal(accountSwitchState);
 
+  // The Agent Profile chip (agent profiles §5.3): the head says which profile
+  // the thread runs with; switching restarts the agent, so it shares the
+  // account switch's idle gate and refusals.
+  const profileList = useSessionProfileList();
+  const providerAdapter = provider?.id;
+  const profileAgent = isSessionProfileAgentId(providerAdapter)
+    ? providerAdapter
+    : agentForRefId(session.refId, [], REGISTRY.agents as readonly RegistryEntryDef[]);
+  const profileChip =
+    profileAgent === null
+      ? undefined
+      : {
+          agent: profileAgent,
+          profiles: profileList.profiles,
+          selectedId: slice.head?.profileId ?? null,
+          canSwitch: accountSwitchEnabled,
+          disabledReason: paintOnly ? null : chatAccountSwitchRefusal(accountSwitchState, "profiles")
+        };
+
   // --- the goal chip (goals §8.2) -------------------------------------------
   // The chip shows whatever unfinished goal the fold holds; which actions its
   // popover offers is the §8.2 matrix over the adapter's own goal block (none
@@ -1254,7 +1306,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
             <div className="pointer-events-auto relative z-10 mx-auto w-full min-w-0 max-w-3xl px-3 sm:px-5">
               <ChatComposer
                 sessionId={sessionId}
-                provider={provider}
+                provider={catalogProvider}
                 modelSelection={slice.head?.modelSelection ?? null}
                 runtimeMode={slice.head?.runtimeMode ?? DEFAULT_RUNTIME_MODE}
                 interactionMode={slice.interactionMode}
@@ -1264,6 +1316,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 accountId={chatAccountSelectionId(threadAccountId)}
                 accountSwitchEnabled={accountSwitchEnabled}
                 accountSwitchRefusal={accountSwitchRefusal}
+                profileChip={profileChip}
                 isTurnActive={!paintOnly && turnActive}
                 hasPendingRequest={!paintOnly && pending.totalCount > 0}
                 queue={slice.queue}

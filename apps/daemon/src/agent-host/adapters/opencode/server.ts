@@ -7,9 +7,14 @@
  * close), translated from Effect into plain promises.
  *
  * **This is where Orquester deliberately differs from T3** (§3.2): T3 runs one
- * chat server *per thread*; this pool runs **one per project**, shared by that
- * project's threads. The divergence holds on exactly two invariants, and both
- * are enforced elsewhere in this directory:
+ * chat server *per thread*; this pool runs **one per (project, pool key)**,
+ * shared by the threads that name that pair. The key is
+ * {@link OPENCODE_GLOBAL_POOL_KEY} unless a thread's launch config names
+ * another one ({@link OpenCodeServerPoolSpec}): an opaque string plus env
+ * overrides applied only to that server — `opencode serve` reads its config
+ * once, at start, so a different config needs a different process (agent
+ * profiles design §6.4). The divergence from T3 holds on exactly two
+ * invariants, and both are enforced elsewhere in this directory:
  *   1. a thread-scoped registration never lets one thread act as another.
  *      The only one is the session-tool server (design 2026-10-14 §1.2,
  *      `session-tools.ts`): each thread registers its OWN `orquester-<key>`
@@ -46,6 +51,85 @@ import {
 } from "../../support/spawn.ts";
 import { OpenCodeClient } from "./http.ts";
 import { meetsMinimumOpenCodeVersion, tooOldMessage } from "./semver.ts";
+
+/**
+ * The pool key of the server every thread without a pool spec shares: the
+ * project's launcher env exactly as before keyed pools existed. Reserved — a
+ * spec may not name it.
+ */
+export const OPENCODE_GLOBAL_POOL_KEY = "global";
+
+/**
+ * Variables a pool spec may neither set nor unset: the host decides PATH,
+ * TMPDIR and HOME for every provider child (`support/env.ts`), and the server
+ * password is minted per start.
+ */
+const POOL_RESERVED_ENV = new Set(["PATH", "TMPDIR", "HOME", "OPENCODE_SERVER_PASSWORD"]);
+
+/**
+ * A keyed server: which `opencode serve` of a project a thread runs on, and
+ * the env that server starts with on top of the project's launcher env.
+ *
+ * `key` is opaque to the pool — two threads naming the same key in the same
+ * project share one server, so a key must always stand for the same `env` /
+ * `unsetEnv` (the acquire that STARTS the server decides them; a later acquire
+ * with a different env gets the running server and a warning). `unsetEnv` is
+ * removed first, then `env` is layered over what is left.
+ */
+export interface OpenCodeServerPoolSpec {
+  key: string;
+  env?: Readonly<Record<string, string>>;
+  unsetEnv?: readonly string[];
+}
+
+interface ResolvedPoolSpec {
+  key: string;
+  env: Readonly<Record<string, string>>;
+  unsetEnv: readonly string[];
+  /** Order-independent identity of `env` + `unsetEnv`, to spot a key reused with another env. */
+  fingerprint: string;
+}
+
+const GLOBAL_POOL: ResolvedPoolSpec = {
+  key: OPENCODE_GLOBAL_POOL_KEY,
+  env: {},
+  unsetEnv: [],
+  fingerprint: "[[],[]]"
+};
+
+/**
+ * Validate a caller's spec. Refused rather than repaired: a spec the pool
+ * cannot apply as written would run the thread on a server with a different
+ * config than its owner asked for, silently.
+ */
+function resolvePoolSpec(spec: OpenCodeServerPoolSpec | undefined): ResolvedPoolSpec {
+  if (spec === undefined) {
+    return GLOBAL_POOL;
+  }
+  if (typeof spec.key !== "string" || spec.key.length === 0) {
+    throw new Error("An OpenCode server pool key must be a non-empty string.");
+  }
+  if (spec.key === OPENCODE_GLOBAL_POOL_KEY) {
+    throw new Error(`The OpenCode server pool key '${OPENCODE_GLOBAL_POOL_KEY}' is reserved.`);
+  }
+  const env = { ...spec.env };
+  const unsetEnv = [...new Set(spec.unsetEnv ?? [])];
+  for (const name of [...Object.keys(env), ...unsetEnv]) {
+    if (name.length === 0 || POOL_RESERVED_ENV.has(name)) {
+      throw new Error(`An OpenCode server pool may not override '${name}'.`);
+    }
+  }
+  const fingerprint = JSON.stringify([
+    Object.entries(env).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+    [...unsetEnv].sort()
+  ]);
+  return { key: spec.key, env, unsetEnv, fingerprint };
+}
+
+/** The pool's map key for one server. NUL cannot occur in a path. */
+function serverKey(projectDir: string, poolKey: string): string {
+  return `${projectDir}\u0000${poolKey}`;
+}
 
 /** T3's ready prefix; the scrape stays **line-oriented** (observation 1). */
 const OPENCODE_SERVER_READY_PREFIX = "opencode server listening";
@@ -118,6 +202,8 @@ export interface OpenCodeServerHandle {
   readonly url: string;
   readonly version: string;
   readonly projectDir: string;
+  /** {@link OPENCODE_GLOBAL_POOL_KEY} or the spec's key this server was acquired under. */
+  readonly poolKey: string;
   readonly pid: number | undefined;
   /** A client for this server scoped to `directory`. */
   client(directory: string, signal?: AbortSignal): OpenCodeClient;
@@ -132,22 +218,29 @@ interface OpenCodeServerPoolOptions {
   logger: AdapterLogger;
   /** Absolute path to the resolved `opencode` binary. */
   resolveBin: () => Promise<string>;
-  /** `support/env.ts`'s output, per project. */
-  buildEnv: (input: { projectDir: string }) => Record<string, string>;
+  /**
+   * `support/env.ts`'s output, per project: the launcher env every server of
+   * the project starts from. A keyed server's spec is applied on top by the
+   * pool, so this never needs to know about keys.
+   */
+  buildEnv: (input: { projectDir: string; poolKey: string }) => Record<string, string>;
   /** Host shutdown. */
   signal: AbortSignal;
   /** Surfaced as `runtime.warning` / `runtime.error` on the owning thread. */
-  onStderr?: (projectDir: string, line: ClassifiedStderrLine) => void;
+  onStderr?: (projectDir: string, line: ClassifiedStderrLine, poolKey: string) => void;
   /**
-   * A reference to this project's server was dropped. The adapter re-checks a
-   * recycle it had to defer (agent profile §4.8): a snapshot probe holding the
-   * server is in-flight work too.
+   * A reference to this server was dropped. The adapter re-checks a recycle
+   * it had to defer (agent profile §4.8): a snapshot probe holding the server
+   * is in-flight work too.
    */
-  onRelease?: (projectDir: string) => void;
+  onRelease?: (projectDir: string, poolKey: string) => void;
 }
 
 interface PoolEntry {
   projectDir: string;
+  /** `serverKey(projectDir, spec.key)`: this entry's key in `entries`. */
+  id: string;
+  spec: ResolvedPoolSpec;
   refs: number;
   idleTimer?: ReturnType<typeof setTimeout>;
   starting?: Promise<Started>;
@@ -163,9 +256,13 @@ interface Started {
 }
 
 /**
- * One `opencode serve` per project directory, ref-counted by its threads and
- * torn down shortly after the last one closes — so a project nobody is working
- * in holds no process (§3.2).
+ * One `opencode serve` per (project directory, pool key), ref-counted by its
+ * threads and torn down shortly after the last one closes — so a project
+ * nobody is working in holds no process (§3.2). Two keys of one project are
+ * two independent servers: their own refcount, idle close, crash handling,
+ * recycle and retirement. Every query below takes the key and defaults to
+ * {@link OPENCODE_GLOBAL_POOL_KEY}, so a caller that knows nothing of keys
+ * sees exactly the per-project pool it always did.
  */
 export class OpenCodeServerPool {
   private readonly entries = new Map<string, PoolEntry>();
@@ -180,11 +277,11 @@ export class OpenCodeServerPool {
    */
   private readonly stopping = new Set<Promise<void>>();
   /**
-   * Agent profile §4.8: a recycled server's stop, per project, until its child
-   * is gone. The project's next start waits for it, so one project never has
-   * two `opencode serve` opening the same data directory at once (a server and
-   * the CLI inventory doing exactly that fail with `database is locked`, see
-   * `index.ts`).
+   * Agent profile §4.8: a recycled server's stop, per (project, key), until
+   * its child is gone. That server's next start waits for it, so one key never
+   * has two `opencode serve` of its own config running at once. (Servers of
+   * DIFFERENT keys do share the data directory concurrently, by design: that
+   * is what lets a session move between them, verified on 1.18.34.)
    */
   private readonly retiring = new Map<string, Promise<void>>();
   private readonly options: OpenCodeServerPoolOptions;
@@ -195,17 +292,27 @@ export class OpenCodeServerPool {
   }
 
   /**
-   * Take a reference to this project's server, starting it if nobody holds
-   * one. Concurrent acquires for the same project collapse onto one start.
+   * Take a reference to this project's server for `pool`'s key (the global
+   * server when omitted), starting it if nobody holds one. Concurrent acquires
+   * for the same (project, key) collapse onto one start.
    */
-  async acquire(projectDir: string): Promise<OpenCodeServerHandle> {
+  async acquire(projectDir: string, pool?: OpenCodeServerPoolSpec): Promise<OpenCodeServerHandle> {
     if (this.options.signal.aborted) {
       throw new Error("agent host is shutting down");
     }
-    let entry = this.entries.get(projectDir);
+    const spec = resolvePoolSpec(pool);
+    const id = serverKey(projectDir, spec.key);
+    let entry = this.entries.get(id);
     if (entry === undefined) {
-      entry = { projectDir, refs: 0 };
-      this.entries.set(projectDir, entry);
+      entry = { projectDir, id, spec, refs: 0 };
+      this.entries.set(id, entry);
+    } else if (entry.spec.fingerprint !== spec.fingerprint) {
+      // Keys are the caller's promise of one env; keep the running server
+      // (its threads depend on it) and say so rather than guess.
+      this.options.logger.warn("opencode server pool key reused with a different env", {
+        projectDir,
+        poolKey: spec.key
+      });
     }
     if (entry.idleTimer !== undefined) {
       clearTimeout(entry.idleTimer);
@@ -219,8 +326,8 @@ export class OpenCodeServerPool {
     entry.refs += 1;
     try {
       if (entry.started === undefined) {
-        entry.starting ??= this.start(projectDir).finally(() => {
-          if (this.entries.get(projectDir) === entry) {
+        entry.starting ??= this.start(entry).finally(() => {
+          if (this.entries.get(id) === entry) {
             entry.starting = undefined;
           }
         });
@@ -229,8 +336,8 @@ export class OpenCodeServerPool {
       return this.handle(entry, entry.started);
     } catch (error) {
       entry.refs -= 1;
-      if (entry.refs <= 0 && entry.started === undefined) {
-        this.entries.delete(projectDir);
+      if (entry.refs <= 0 && entry.started === undefined && this.entries.get(id) === entry) {
+        this.entries.delete(id);
       }
       throw error;
     }
@@ -243,43 +350,44 @@ export class OpenCodeServerPool {
    * start plus the ~4.3 MB catalogue read cannot finish in 10 s, while the
    * same read against a warm server takes ~474 ms.
    */
-  isWarm(projectDir: string): boolean {
-    const entry = this.entries.get(projectDir);
+  isWarm(projectDir: string, poolKey: string = OPENCODE_GLOBAL_POOL_KEY): boolean {
+    const entry = this.entries.get(serverKey(projectDir, poolKey));
     return entry?.started !== undefined && !entry.started.child.hasExited();
   }
 
-  /** Whether this project's server is still being started. */
-  isStarting(projectDir: string): boolean {
-    return this.entries.get(projectDir)?.starting !== undefined;
+  /** Whether this server is still being started. */
+  isStarting(projectDir: string, poolKey: string = OPENCODE_GLOBAL_POOL_KEY): boolean {
+    return this.entries.get(serverKey(projectDir, poolKey))?.starting !== undefined;
   }
 
-  /** References held on this project's server: its threads' sessions and any probe in flight. */
-  refCount(projectDir: string): number {
-    return this.entries.get(projectDir)?.refs ?? 0;
+  /** References held on this server: its threads' sessions and any probe in flight. */
+  refCount(projectDir: string, poolKey: string = OPENCODE_GLOBAL_POOL_KEY): number {
+    return this.entries.get(serverKey(projectDir, poolKey))?.refs ?? 0;
   }
 
-  /** Every project with a server started or starting. */
-  projects(): string[] {
+  /** Every (project, key) with a server started or starting. */
+  servers(): { projectDir: string; poolKey: string }[] {
     return [...this.entries.values()]
       .filter((entry) => entry.started !== undefined || entry.starting !== undefined)
-      .map((entry) => entry.projectDir);
+      .map((entry) => ({ projectDir: entry.projectDir, poolKey: entry.spec.key }));
   }
 
   /**
-   * Agent profile §4.8: stop this project's server now, so the next acquire
-   * starts a fresh one — `opencode serve` reads its global config once, at
+   * Agent profile §4.8: stop this (project, key)'s server now, so the next
+   * acquire starts a fresh one — `opencode serve` reads its config once, at
    * start, and keeps it for its whole life. Only a server nobody holds is
    * stopped: null when a reference is held, a start is under way, or nothing
-   * runs (a dead child's entry is dropped). Resolves once the child is gone;
-   * the project's next start waits for that (`retiring`), and so does
-   * `stopAll`.
+   * runs (a dead child's entry is dropped). Other keys of the project are
+   * untouched. Resolves once the child is gone; that server's next start
+   * waits for it (`retiring`), and so does `stopAll`.
    */
-  recycle(projectDir: string): Promise<void> | null {
-    const entry = this.entries.get(projectDir);
+  recycle(projectDir: string, poolKey: string = OPENCODE_GLOBAL_POOL_KEY): Promise<void> | null {
+    const id = serverKey(projectDir, poolKey);
+    const entry = this.entries.get(id);
     if (entry === undefined || entry.refs > 0 || entry.starting !== undefined) {
       return null;
     }
-    this.entries.delete(projectDir);
+    this.entries.delete(id);
     if (entry.idleTimer !== undefined) {
       clearTimeout(entry.idleTimer);
       entry.idleTimer = undefined;
@@ -293,24 +401,25 @@ export class OpenCodeServerPool {
       () => undefined,
       () => undefined
     );
-    this.retiring.set(projectDir, stop);
+    this.retiring.set(id, stop);
     this.stopping.add(stop);
     void stop.then(() => {
       this.stopping.delete(stop);
-      if (this.retiring.get(projectDir) === stop) {
-        this.retiring.delete(projectDir);
+      if (this.retiring.get(id) === stop) {
+        this.retiring.delete(id);
       }
     });
     return stop;
   }
 
   /** Every live server, for the host's own diagnostics. */
-  list(): { projectDir: string; url: string; version: string; pid: number | undefined }[] {
-    const out: { projectDir: string; url: string; version: string; pid: number | undefined }[] = [];
+  list(): { projectDir: string; poolKey: string; url: string; version: string; pid: number | undefined }[] {
+    const out: { projectDir: string; poolKey: string; url: string; version: string; pid: number | undefined }[] = [];
     for (const entry of this.entries.values()) {
       if (entry.started !== undefined) {
         out.push({
           projectDir: entry.projectDir,
+          poolKey: entry.spec.key,
           url: entry.started.url,
           version: entry.started.version,
           pid: entry.started.child.pid
@@ -358,6 +467,7 @@ export class OpenCodeServerPool {
       url: started.url,
       version: started.version,
       projectDir: entry.projectDir,
+      poolKey: entry.spec.key,
       pid: started.child.pid,
       exited: started.child.exited,
       hasExited: () => started.child.hasExited(),
@@ -381,16 +491,16 @@ export class OpenCodeServerPool {
 
   private release(entry: PoolEntry): void {
     entry.refs = Math.max(0, entry.refs - 1);
-    this.options.onRelease?.(entry.projectDir);
+    this.options.onRelease?.(entry.projectDir, entry.spec.key);
     if (entry.refs > 0 || entry.idleTimer !== undefined) {
       return;
     }
     entry.idleTimer = setTimeout(() => {
       entry.idleTimer = undefined;
-      if (entry.refs > 0 || this.entries.get(entry.projectDir) !== entry) {
+      if (entry.refs > 0 || this.entries.get(entry.id) !== entry) {
         return;
       }
-      this.entries.delete(entry.projectDir);
+      this.entries.delete(entry.id);
       const started = entry.started;
       entry.started = undefined;
       if (started !== undefined) {
@@ -402,13 +512,20 @@ export class OpenCodeServerPool {
     entry.idleTimer.unref?.();
   }
 
-  private async start(projectDir: string): Promise<Started> {
-    await this.retiring.get(projectDir);
+  private async start(entry: PoolEntry): Promise<Started> {
+    const { projectDir, spec } = entry;
+    await this.retiring.get(entry.id);
     const bin = await this.options.resolveBin();
     const port = await probeFreePort(this.hostname);
     const password = randomBytes(24).toString("base64url");
 
-    const env = this.options.buildEnv({ projectDir });
+    // The global server's env is exactly `buildEnv`'s, as it always was; a
+    // keyed server's spec is layered on top — its unsets first, then its env.
+    const env = { ...this.options.buildEnv({ projectDir, poolKey: spec.key }) };
+    for (const name of spec.unsetEnv) {
+      delete env[name];
+    }
+    Object.assign(env, spec.env);
     // `extendEnv` has no analogue here — `buildProviderEnv` never spreads
     // `process.env` — so both variables are set explicitly. `{}` is only a
     // fallback: setting `OPENCODE_CONFIG_CONTENT` unconditionally clobbers the
@@ -464,7 +581,7 @@ export class OpenCodeServerPool {
     child.stderr.on("data", (chunk: string) => {
       for (const line of stderr.push(chunk)) {
         if (line.class !== "drop") {
-          this.options.onStderr?.(projectDir, line);
+          this.options.onStderr?.(projectDir, line, spec.key);
         }
       }
     });
@@ -473,8 +590,7 @@ export class OpenCodeServerPool {
       // Diagnostics must never report a dead pid as live: `list()` reads
       // `entry.started`, and without this it stays populated until the next
       // `acquire` happens to notice.
-      const entry = this.entries.get(projectDir);
-      if (entry?.started?.child === child) {
+      if (entry.started?.child === child) {
         entry.started = undefined;
       }
       if (readyUrl === null) {
@@ -523,6 +639,7 @@ export class OpenCodeServerPool {
 
     this.options.logger.info("opencode server ready", {
       projectDir,
+      poolKey: spec.key,
       url,
       version,
       pid: child.pid

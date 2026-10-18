@@ -52,6 +52,7 @@ function validationKey(workflow: Workflow, options: ValidateWorkflowOptions): st
     workflow.updatedAt,
     list(options.secretNames),
     list(options.savedPromptIds),
+    list(options.sessionProfileIds),
     list(options.knownWorkflowIds),
     options.strictScheduleIntervals === true ? "strict" : "-",
     workflowAgentCatalogKey(options.catalog)

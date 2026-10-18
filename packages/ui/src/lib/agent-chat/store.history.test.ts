@@ -102,6 +102,9 @@ function fakeTransport() {
     async switchAccount() {
       return { seq: 0 };
     },
+    async switchProfile() {
+      return { seq: 0 };
+    },
     async read() {
       reads += 1;
       return readAnswer();

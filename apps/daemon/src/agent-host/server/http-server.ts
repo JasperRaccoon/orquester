@@ -53,15 +53,19 @@ import {
 import type { AdapterLogger } from "../adapter.ts";
 import {
   AGENT_HOST_AUTH_HEADER,
+  AGENT_HOST_CAPABILITIES,
   AGENT_HOST_PROTOCOL_VERSION,
   agentHostRoutes,
   type AgentHostHealthResponse,
   type AgentHostHoldGoalsResponse,
+  type AgentHostRecycleOpenCodeRequest,
+  type AgentHostProfileLeasesResponse,
   type AgentHostRecycleOpenCodeResponse,
   type AgentHostResumeGoalSessionsResponse,
   type CreateHostThreadRequest,
   type ForkHostThreadRequest,
   type ForkHostThreadResponse,
+  type HostThreadCatalogResponse,
   type SessionToolsRefreshRequest,
   type SessionToolsRefreshResponse,
   type SetThreadIdentityRequest
@@ -443,7 +447,8 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
         pid: options.pid ?? process.pid,
         startedAt: options.startedAt,
         codeStamp: options.codeStamp ?? null,
-        providersRevision: orchestrator.providersChangeCount()
+        providersRevision: orchestrator.providersChangeCount(),
+        capabilities: { ...AGENT_HOST_CAPABILITIES }
       };
       sendJson(response, 200, body);
       return;
@@ -504,10 +509,24 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
       return;
     }
 
+    // Agent Profiles (spec 2026-10-18 §6.5): the prepared dirs live sessions launched from, which
+    // the daemon's preparation GC must keep. In memory only; no body.
+    if (path === agentHostRoutes.profileLeases && method === "GET") {
+      const body: AgentHostProfileLeasesResponse = { preparedDirs: orchestrator.profileLeases() };
+      sendJson(response, 200, body);
+      return;
+    }
+
     // Agent profile §4.8: OpenCode config changed; restart its idle servers so
-    // the next turn reads it (busy ones once they go idle). No body is read.
+    // the next turn reads it (busy ones once they go idle). An optional
+    // `poolKey` narrows it to that key's servers; anything else recycles all.
     if (path === agentHostRoutes.recycleIdleOpenCode && method === "POST") {
-      const body: AgentHostRecycleOpenCodeResponse = await orchestrator.recycleIdleOpenCodeServers();
+      const requestBody = (await readJsonBody(request)) as AgentHostRecycleOpenCodeRequest | null;
+      const poolKey =
+        typeof requestBody?.poolKey === "string" && requestBody.poolKey.length > 0 ? requestBody.poolKey : undefined;
+      const body: AgentHostRecycleOpenCodeResponse = await orchestrator.recycleIdleOpenCodeServers(
+        poolKey !== undefined ? { poolKey } : undefined
+      );
       sendJson(response, 200, body);
       return;
     }
@@ -733,6 +752,14 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
         });
         return;
       }
+      sendJson(response, 200, body);
+      return;
+    }
+
+    // What the thread's live session loaded (an Agent Profile chat's composer catalog);
+    // `live: false` without one. Never starts a session.
+    if (rest === "/catalog" && method === "GET") {
+      const body: HostThreadCatalogResponse = await orchestrator.readCatalog(threadId);
       sendJson(response, 200, body);
       return;
     }

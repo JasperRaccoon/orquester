@@ -106,7 +106,7 @@ async function project(threadId: string, messages: OpenCodeMessageWithParts[]): 
   const session = await OpenCodeThreadSession.start({ ctx, emit() {}, onClosed() {} }, {
     threadId, cwd: "/repo", modelSelection: { model: "provider/model" }, runtimeMode: "approval-required",
     server: {
-      url: "http://opencode.test", version: "1.18.32", projectDir: "/repo", pid: undefined,
+      url: "http://opencode.test", version: "1.18.32", projectDir: "/repo", poolKey: "global", pid: undefined,
       client: (directory) => new OpenCodeClient({ baseUrl: "http://opencode.test", directory, fetchImpl }),
       exited: new Promise(() => undefined), hasExited: () => false, release() {}
     }

@@ -1,5 +1,5 @@
 import type { ClientConfig, DaemonConfig } from "@orquester/config";
-import type { WorkflowSessionOwner } from "./workflows/types.ts";
+import { workflowRoutes, type ProfileReferencesResponse, type WorkflowSessionOwner } from "./workflows/types.ts";
 import type {
   AgentAdapterId,
   AgentChatGoalSummary,
@@ -34,10 +34,34 @@ import type {
   LaunchAppRequest
 } from "./desktops.ts";
 import { desktopRoutes } from "./desktops.ts";
-import type { AgentProfileAgentId } from "./agent-profile.ts";
+import {
+  sessionProfileRoutes,
+  type AddSessionProfilePluginRequest,
+  type CopySessionProfileItemsRequest,
+  type CreateSessionProfileItemRequest,
+  type CreateSessionProfileRequest,
+  type ImportSessionProfileFromGlobalRequest,
+  type ImportSessionProfileResponse,
+  type SessionProfileGlobalSourceResponse,
+  type SessionProfileImportGitRequest,
+  type SessionProfileImportResponse,
+  type TakeSessionProfileImportRequest,
+  type DeleteSessionProfileResponse,
+  type DuplicateSessionProfileRequest,
+  type SessionProfileDetail,
+  type SessionProfileInstructionsResponse,
+  type SessionProfileItemDetail,
+  type SessionProfileListResponse,
+  type SessionProfileMutationResponse,
+  type SessionProfilePrepareStatusResponse,
+  type UpdateSessionProfileItemRequest,
+  type UpdateSessionProfileRequest
+} from "./session-profiles.ts";
+import type { AgentProfileAgentId, ProfileImportScanResponse } from "./agent-profile.ts";
 export * from "./agent-chat/index.ts";
 export * from "./saved-prompts.ts";
 export * from "./agent-profile.ts";
+export * from "./session-profiles.ts";
 export * from "./prompt-variables.ts";
 export * from "./workflows/index.ts";
 export * from "./desktops.ts";
@@ -1370,6 +1394,13 @@ export interface SessionSummary {
    * `session.updated` once the host has the thread (a client merges summaries field-wise).
    */
   chatPending?: boolean;
+  /**
+   * Agent-chat tabs only: the Agent Profile the chat launches with (spec 2026-10-18), or `null`
+   * for Global. Always present on a chat tab's summary — `null` rather than absent, because a
+   * client merges summaries field-wise and a switch back to Global must clear what it held.
+   * Read it through a sanitizer: an older daemon omits it (= unknown, treat as Global).
+   */
+  profileId?: string | null;
 }
 
 // --- Thread lineage (spec 2026-10-14 §6) ------------------------------------
@@ -1450,6 +1481,14 @@ export interface CreateSessionRequest {
    * may leave it unset.
    */
   chat?: CreateAgentChatSessionFields;
+  /**
+   * The Agent Profile (`session-profiles.ts`) an agent-chat session launches with. Absent =
+   * Global (the agent's own setup), as for every client that predates profiles. Carried at the
+   * top level like `accountId`; `chat.profileId` exists on the field type for host-side callers.
+   * Any other kind naming one (non-null) is refused with 400 `INVALID_PROFILE`: a terminal launch
+   * always uses the agent's Global setup.
+   */
+  profileId?: string;
   /** The workflow run that starts this session (workflows spec §5.10). Persisted on the tab record. */
   owner?: WorkflowSessionOwner;
 }
@@ -2029,6 +2068,129 @@ export class HttpOrquesterApiClient implements OrquesterApi {
     return this.post("/api/fs/rename", { path, newName });
   }
 
+  // Agent Profiles (`session-profiles.ts`). Every mutation carries the profile's revision; a
+  // stale one is a 409 `PROFILE_CONFLICT`, thrown like any other failed request.
+
+  listSessionProfiles(): Promise<SessionProfileListResponse> {
+    return this.get(sessionProfileRoutes.list);
+  }
+
+  getSessionProfile(profileId: string): Promise<SessionProfileDetail> {
+    return this.get(sessionProfileRoutes.profile(profileId));
+  }
+
+  createSessionProfile(request: CreateSessionProfileRequest): Promise<SessionProfileDetail> {
+    return this.post(sessionProfileRoutes.list, request);
+  }
+
+  updateSessionProfile(profileId: string, request: UpdateSessionProfileRequest): Promise<SessionProfileDetail> {
+    return this.put(sessionProfileRoutes.profile(profileId), request);
+  }
+
+  /**
+   * `expectWorkflowUses`: the delete guard's precondition — the ids of the workflows the caller
+   * showed as using the profile (`[]`: none); a mismatch is a 409 `WORKFLOW_USES_CHANGED`.
+   */
+  deleteSessionProfile(profileId: string, revision: string, options: { expectWorkflowUses?: readonly string[] } = {}): Promise<DeleteSessionProfileResponse> {
+    const expect = options.expectWorkflowUses === undefined ? "" : `&expectWorkflowUses=${encodeURIComponent(options.expectWorkflowUses.join(","))}`;
+    return this.delete(`${sessionProfileRoutes.profile(profileId)}?revision=${encodeURIComponent(revision)}${expect}`);
+  }
+
+  /** The workflows whose agent blocks launch with the profile (the delete guard's list). */
+  getProfileWorkflowReferences(profileId: string): Promise<ProfileReferencesResponse> {
+    return this.get(workflowRoutes.profileReferences(profileId));
+  }
+
+  duplicateSessionProfile(profileId: string, request: DuplicateSessionProfileRequest = {}): Promise<SessionProfileDetail> {
+    return this.post(sessionProfileRoutes.duplicate(profileId), request);
+  }
+
+  getSessionProfileItem(profileId: string, itemId: string): Promise<SessionProfileItemDetail> {
+    return this.get(sessionProfileRoutes.item(profileId, itemId));
+  }
+
+  createSessionProfileItem(profileId: string, request: CreateSessionProfileItemRequest): Promise<SessionProfileMutationResponse> {
+    return this.post(sessionProfileRoutes.items(profileId), request);
+  }
+
+  updateSessionProfileItem(
+    profileId: string,
+    itemId: string,
+    request: UpdateSessionProfileItemRequest
+  ): Promise<SessionProfileMutationResponse> {
+    return this.put(sessionProfileRoutes.item(profileId, itemId), request);
+  }
+
+  deleteSessionProfileItem(profileId: string, itemId: string, revision: string): Promise<SessionProfileMutationResponse> {
+    return this.delete(`${sessionProfileRoutes.item(profileId, itemId)}?revision=${encodeURIComponent(revision)}`);
+  }
+
+  setSessionProfileItemEnabled(
+    profileId: string,
+    itemId: string,
+    revision: string,
+    enabled: boolean
+  ): Promise<SessionProfileMutationResponse> {
+    return this.post(sessionProfileRoutes.itemEnabled(profileId, itemId), { revision, enabled });
+  }
+
+  readSessionProfileInstructions(profileId: string): Promise<SessionProfileInstructionsResponse> {
+    return this.get(sessionProfileRoutes.instructions(profileId));
+  }
+
+  writeSessionProfileInstructions(profileId: string, revision: string, text: string): Promise<SessionProfileDetail> {
+    return this.put(sessionProfileRoutes.instructions(profileId), { revision, text });
+  }
+
+  getSessionProfilePrepareStatus(profileId: string): Promise<SessionProfilePrepareStatusResponse> {
+    return this.get(sessionProfileRoutes.prepareStatus(profileId));
+  }
+
+  getSessionProfileGlobalSource(profileId: string, agent: AgentProfileAgentId): Promise<SessionProfileGlobalSourceResponse> {
+    return this.get(`${sessionProfileRoutes.importGlobal(profileId)}?agent=${encodeURIComponent(agent)}`);
+  }
+
+  importSessionProfileFromGlobal(profileId: string, request: ImportSessionProfileFromGlobalRequest): Promise<SessionProfileImportResponse> {
+    return this.post(sessionProfileRoutes.importGlobal(profileId), request);
+  }
+
+  scanSessionProfileGitImport(profileId: string, request: SessionProfileImportGitRequest): Promise<ProfileImportScanResponse> {
+    return this.post(sessionProfileRoutes.importGit(profileId), request);
+  }
+
+  /** Streams a `.zip` or `.md` file as the raw body (never base64); the daemon extracts and scans it. */
+  scanSessionProfileUpload(profileId: string, name: string, data: UploadData): Promise<ProfileImportScanResponse> {
+    return this.postBytes(sessionProfileRoutes.importUpload(profileId), { name }, data);
+  }
+
+  takeSessionProfileImport(profileId: string, importId: string, request: TakeSessionProfileImportRequest): Promise<SessionProfileImportResponse> {
+    return this.post(sessionProfileRoutes.importScan(profileId, importId), request);
+  }
+
+  copySessionProfileItems(profileId: string, request: CopySessionProfileItemsRequest): Promise<SessionProfileImportResponse> {
+    return this.post(sessionProfileRoutes.copyFrom(profileId), request);
+  }
+
+  addSessionProfilePlugin(profileId: string, request: AddSessionProfilePluginRequest): Promise<SessionProfileImportResponse> {
+    return this.post(sessionProfileRoutes.plugins(profileId), request);
+  }
+
+  /** The profile as a portable `.zip` (no secret values). */
+  async exportSessionProfile(profileId: string): Promise<ArrayBuffer> {
+    const response = await this.fetchImpl(`${this.baseUrl}${sessionProfileRoutes.exportProfile(profileId)}`, {
+      headers: this.authHeaders()
+    });
+    if (!response.ok) {
+      throw new Error(`Orquester API request failed: ${response.status} ${response.statusText}`);
+    }
+    return response.arrayBuffer();
+  }
+
+  /** A new profile from an export `.zip`, streamed as the raw body. */
+  importSessionProfile(name: string, data: UploadData): Promise<ImportSessionProfileResponse> {
+    return this.postBytes(sessionProfileRoutes.importProfile, { name }, data);
+  }
+
   eventsUrl(): string {
     const url = new URL(this.baseUrl);
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
@@ -2065,9 +2227,17 @@ export class HttpOrquesterApiClient implements OrquesterApi {
     return response.json() as Promise<T>;
   }
 
-  private async post<T>(path: string, body?: unknown): Promise<T> {
+  private post<T>(path: string, body?: unknown): Promise<T> {
+    return this.send("POST", path, body);
+  }
+
+  private put<T>(path: string, body: unknown): Promise<T> {
+    return this.send("PUT", path, body);
+  }
+
+  private async send<T>(method: "POST" | "PUT", path: string, body?: unknown): Promise<T> {
     const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
-      method: "POST",
+      method,
       headers: {
         ...this.authHeaders(),
         ...(body === undefined ? {} : { "Content-Type": "application/json" })

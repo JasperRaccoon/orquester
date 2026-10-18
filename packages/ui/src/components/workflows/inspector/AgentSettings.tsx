@@ -28,6 +28,8 @@ import { cn } from "../../../lib/cn";
 import { useProviderSnapshots } from "../../../lib/agent-chat/hooks";
 import { providerForRefId } from "../../../lib/agent-chat/providers";
 import { useSavedPrompts } from "../../../lib/saved-prompts/hooks";
+import { useSessionProfileList } from "../../../lib/session-profiles/hooks";
+import { blockProfileChoices, blockProfileLabel } from "../../../lib/session-profiles/logic";
 import { defaultAgentLabel, defaultModelLabel } from "../../../lib/workflows/catalog-ui";
 import { formatMinutes } from "../../../lib/workflows/durations";
 import { guideItemText } from "../../../lib/workflows/guide-text";
@@ -153,6 +155,12 @@ function withPromptText(config: AgentBlockConfig, text: string): AgentBlockConfi
 function withChatTitle(config: AgentBlockConfig, title: string): AgentBlockConfig {
   const { title: _old, ...rest } = config.session.kind === "new" ? config.session : { kind: "new" as const };
   return { ...config, session: title ? { ...rest, kind: "new", title } : { ...rest, kind: "new" } };
+}
+
+/** Launch the block's new chats with Agent Profile `profileId` ("" = Global: the field is removed). */
+function withProfile(config: AgentBlockConfig, profileId: string): AgentBlockConfig {
+  const { profileId: _old, ...rest } = config;
+  return profileId ? { ...rest, profileId } : rest;
 }
 
 /** Continue the chat of the block named `fromNode`. */
@@ -404,17 +412,18 @@ const ChatSection: React.FC<{ config: AgentBlockConfig }> = ({ config }) => {
   const defaultTitle = `${workflow.name} · ${node.name}`;
   const fromKnown = session.kind === "continue" && upstreamAgents.some((agent) => agent.name === session.fromNode);
 
+  const profiles = useSessionProfileList().profiles;
+  const profileChoices = blockProfileChoices(profiles, config.profileId);
+  const profileLabel = blockProfileLabel(profiles, config.profileId);
   const summary =
     session.kind === "new"
-      ? session.title
-        ? `New chat · “${session.title}”`
-        : "New chat"
+      ? `${session.title ? `New chat · “${session.title}”` : "New chat"}${config.profileId ? ` · ${profileLabel}` : ""}`
       : session.fromNode
         ? `Continues ${session.fromNode}'s chat`
         : "Continues an earlier chat";
 
   return (
-    <InspectorSection title="Chat" anchors={["config.session"]} summary={summary} sticky>
+    <InspectorSection title="Chat" anchors={["config.session", "config.profileId"]} summary={summary} sticky>
       <RootMessages field="config.session" />
       <RadioCards<"new" | "continue">
         ariaLabel="Chat"
@@ -429,23 +438,40 @@ const ChatSection: React.FC<{ config: AgentBlockConfig }> = ({ config }) => {
             label: "Start a new chat",
             description: "Opens a fresh agent chat for this run.",
             children: (
-              <ConfigField
-                path="config.session.title"
-                label="Chat title"
-                optional
-                hint="Shown on the chat's tab. Data from earlier blocks works here; a secret shows as «secret:NAME», never its value."
-                defaultNote={defaultTitle}
-                aside={<InsertDataButton editor={titleEditor} />}
-              >
-                <TemplateEditor
-                  ref={titleEditor}
-                  value={session.kind === "new" ? (session.title ?? "") : ""}
-                  onChange={(title) => setConfig((current) => withChatTitle(current, title), "session-title")}
-                  scope={promptScope}
-                  placeholder={defaultTitle}
-                  ariaLabel="Chat title"
-                />
-              </ConfigField>
+              <>
+                <ConfigField
+                  path="config.session.title"
+                  label="Chat title"
+                  optional
+                  hint="Shown on the chat's tab. Data from earlier blocks works here; a secret shows as «secret:NAME», never its value."
+                  defaultNote={defaultTitle}
+                  aside={<InsertDataButton editor={titleEditor} />}
+                >
+                  <TemplateEditor
+                    ref={titleEditor}
+                    value={session.kind === "new" ? (session.title ?? "") : ""}
+                    onChange={(title) => setConfig((current) => withChatTitle(current, title), "session-title")}
+                    scope={promptScope}
+                    placeholder={defaultTitle}
+                    ariaLabel="Chat title"
+                  />
+                </ConfigField>
+                <ConfigField
+                  path="config.profileId"
+                  label="Agent Profile"
+                  optional
+                  hint="The instructions, skills, MCP servers and plugins the new chat loads (right rail → Agent Profiles). If the profile is deleted or can't be prepared, the block fails — it never falls back to Global."
+                  defaultNote="Global"
+                >
+                  <SelectInput value={config.profileId ?? ""} onValue={(profileId) => setConfig((current) => withProfile(current, profileId), "profile")}>
+                    {profileChoices.map((choice) => (
+                      <option key={choice.value} value={choice.value}>
+                        {choice.label}
+                      </option>
+                    ))}
+                  </SelectInput>
+                </ConfigField>
+              </>
             )
           },
           {

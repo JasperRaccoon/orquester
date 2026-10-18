@@ -125,7 +125,7 @@ import { agentHostRoutes, SESSION_TOOLS_REFRESH_TIMEOUT_MS, type SessionToolsRef
 import { catalogFor } from "./mcp/catalog/index.ts";
 import { canonicalProjectPath } from "./agent-tools/approval-port.ts";
 import { registerSessionToolsManifestRoute, SessionToolsRefresher } from "./session-tools/session-tools-refresh.ts";
-import { AGENT_PROFILE_CHANNEL } from "@orquester/api";
+import { AGENT_PROFILE_CHANNEL, type AgentProfileAgentId } from "@orquester/api";
 // umcp:t6 end
 // umcp:t9 begin
 import { registerPushNotifyRoute } from "./push.ts";
@@ -153,6 +153,13 @@ import { WorkflowStateStore } from "./workflows/state-store.ts";
 import { registerWorkflowRoutes } from "./workflows/routes.ts";
 import { AgentProfileService, publishAgentProfileEvents } from "./agent-profile/service.ts";
 import { registerAgentProfileRoutes } from "./agent-profile/routes.ts";
+import { SessionProfileService, publishSessionProfileEvents } from "./session-profiles/service.ts";
+import { SessionProfileLifecycle, publishSessionProfilePrepareEvents } from "./session-profiles/lifecycle.ts";
+import { SessionProfileStore } from "./session-profiles/store.ts";
+import { registerSessionProfileRoutes } from "./session-profiles/routes.ts";
+import { SessionProfileImports } from "./session-profiles/imports.ts";
+import { createProfileLaunchResolver, SessionProfileNames } from "./session-profiles/launch.ts";
+import { registerThreadLaunchProfileRoute } from "./agent-chat/profile-launch-route.ts";
 import { createAgentProfileAdapters } from "./agent-profile/adapters/index.ts";
 import { createProfileConverter } from "./agent-profile/convert.ts";
 import { ProfileImportStore } from "./agent-profile/import.ts";
@@ -711,11 +718,15 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // The agent catalogue validation checks chains against lives in the workflow daemon (built
   // below, fed the daemon's own client at start): late-bound, nothing is checked before it.
   let workflowValidationCatalog: ValidationCatalog | null = null;
+  // The Agent Profiles that exist (an agent block naming a missing one warns): late-bound too,
+  // nothing is checked until the profiles have been listed (below).
+  let workflowProfileIds: (() => string[] | undefined) | null = null;
   const workflows = new WorkflowService({
     file: resolved.workflowsFile,
     logger: console,
     secretNames: (workflowId) => workflowSecrets.names(workflowId),
     savedPromptIds: () => savedPrompts.allIds(),
+    sessionProfileIds: () => workflowProfileIds?.(),
     agentCatalog: () => workflowValidationCatalog?.current()
   });
   await workflows.load();
@@ -1022,7 +1033,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   publishSavedPromptEvents(savedPrompts, broadcaster);
 
   // ---- Agent profile (agent profile spec §4.2) ------------------------------------------------
-  // The right rail's manager of each agent CLI's own global config. Built here, after
+  // Settings → Agent config: the manager of each agent CLI's own global config. Built here, after
   // `registry.init()` (an adapter takes its CLI's resolved bin) and `agentAccounts.init()` (Codex
   // writes hook trust for every managed home). Its watchers are armed once the transports serve
   // (`agentProfile.start()` below) and closed in `stop()`; changes go out on "agent-profile".
@@ -1031,6 +1042,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   const agentProfileImports: ProfileImportStore = new ProfileImportStore({
     dir: agentProfileImportsDir(paths.baseDir),
     existing: async (agent): Promise<Set<string>> => {
+      // An Agent Profile scan (`portable`) marks `exists` against the profile itself.
+      if (agent === "portable") return new Set();
       const snapshot = await agentProfile.snapshot(agent);
       return new Set(snapshot.items.map((item) => `${item.kind}:${item.name}`));
     },
@@ -1068,6 +1081,74 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   });
   publishAgentProfileEvents(agentProfile, broadcaster);
   // ---- end agent profile ----------------------------------------------------------------------
+
+  // ---- Agent Profiles (spec 2026-10-18) ------------------------------------------------------
+  // Orquester-owned per-session profiles under `<appdir>/daemon/session-profiles/`; changes go out
+  // on "session-profiles". The preparation lifecycle builds each profile's prepared dirs (per agent,
+  // per account for Codex) in the background and answers launches through `ensureReady`; it
+  // re-prepares on profile changes and on Global config changes seen by Agent config's watcher.
+  const sessionProfileStore = new SessionProfileStore({ appdir: paths.baseDir });
+  const sessionProfileLifecycle = new SessionProfileLifecycle({
+    appdir: paths.baseDir,
+    store: sessionProfileStore,
+    systemHomes: agentProfileHomes,
+    accountHome: (agent, accountId) =>
+      agentAccounts.getRecord(accountId)?.agent === agent ? agentAccounts.homePath(agent, accountId) : null,
+    defaultAccountId: (agent) => (agent === "opencode" ? null : (agentAccounts.list().defaults[agent] ?? null)),
+    // Read per call: an install or update from Settings > Agents patches the entry in place.
+    cliVersion: (agent) => registry.get(agent)?.version ?? null,
+    // Preparers that run the CLI (Codex seeds its profile home's state DB).
+    cliBin: (agent) => registry.get(agent)?.resolvedBin ?? null,
+    // The prepared versions the agent host's live sessions (and starts in flight) launched from
+    // (`GET /profiles/leases`): the GC never removes one. It rejects when the host cannot say
+    // (down, restarting, an older host), and that GC pass then removes nothing.
+    // `start()` below runs before the host is adopted: its pass removes nothing, so the lifecycle
+    // collects again whenever a host becomes healthy (and on its own slow periodic pass).
+    leases: { inUse: () => agentChat.profileLeases(), onAvailable: (listener) => agentChat.onHostHealthy(listener) },
+    logger: console
+  });
+  // Filling profiles (spec §4.5): Import from Global through Agent config (copies; Global is never
+  // written), git / zip / md scans through Agent config's import store, copies between profiles,
+  // marketplace plugins into each profile's own plugin cache, export and import of a profile.
+  const sessionProfileImports = new SessionProfileImports({
+    store: sessionProfileStore,
+    global: agentProfile,
+    scanner: agentProfileImports,
+    workDir: agentProfileImportsDir(paths.baseDir)
+  });
+  const sessionProfiles = new SessionProfileService({
+    store: sessionProfileStore,
+    prepareStatus: sessionProfileLifecycle.prepareStatusSource,
+    imports: sessionProfileImports
+  });
+  await sessionProfiles.init().catch((error) => console.error("Agent Profiles: preparing the store failed", error));
+  publishSessionProfileEvents(sessionProfiles, broadcaster);
+  publishSessionProfilePrepareEvents(sessionProfileLifecycle, broadcaster);
+  sessionProfileLifecycle.attach(sessionProfiles.events);
+  agentProfile.lifecycle.on("filesChanged", ({ agent }: { agent: AgentProfileAgentId }) => sessionProfileLifecycle.globalConfigChanged(agent));
+  // Staging cleanup and the scan of prepared dirs; stale ones re-prepare in the background.
+  await sessionProfileLifecycle.start().catch((error) => console.error("Agent Profiles: starting preparation failed", error));
+  // Chat launches with a profile (create, fork, its reconcile, account and profile switches, and
+  // the host's refresh before every session start): the current prepared version through
+  // `ensureReady`, its manifest section, and the agent's launch contribution over the account's
+  // launch (`session-profiles/launch.ts`). A deleted profile's fallback notice names it from the
+  // store's `deleted.json` (durable across restarts); the live ids feed workflow validation.
+  const sessionProfileNames = new SessionProfileNames();
+  void sessionProfileNames.track(sessionProfiles);
+  workflowProfileIds = () => sessionProfileNames.liveIds();
+  agentChat.setSessionProfiles({
+    resolve: createProfileLaunchResolver({
+      lifecycle: sessionProfileLifecycle,
+      accountHome: (agent, accountId) =>
+        accountId === null
+          ? { claude: agentProfileHomes.claudeDir, codex: agentProfileHomes.codexHome, grok: agentProfileHomes.grokHome, opencode: agentProfileHomes.opencodeDir }[agent]
+          : agentAccounts.getRecord(accountId)?.agent === agent
+            ? agentAccounts.homePath(agent, accountId)
+            : null
+    }),
+    profileName: (profileId) => sessionProfiles.deletedName(profileId),
+    catalog: (profileId, agent) => sessionProfiles.composerCatalog(profileId, agent)
+  });
 
   // Workflows → event bus (channel "workflows"): `workflow.upserted` (the rail summary — the
   // engine's, with live trigger state, once attached), `workflow.deleted`, `workflowSecrets.changed`
@@ -1181,6 +1262,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     plugins,
     desktops, desktopAudio,
     agentProfile,
+    sessionProfiles,
+    sessionProfileLifecycle,
     workflows, workflowSecrets, workflowRuns, workflowState, workflowEngine: null, internalApi: null,
     lineage,
     workflowProjects: workflowDaemon.runtime.projects,
@@ -1410,6 +1493,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
       agentProfileImports.stop().catch((error) => console.error("Agent profile imports stop failed", error))
     ]);
     agentAccounts.stopRefresher();
+    // Aborts preparations in flight (their staging dirs are emptied at the next start).
+    sessionProfileLifecycle.stop();
     gitWatcher.stop();
     // Detach (don't kill) sessions: the tmux backend leaves its server running so
     // the next boot reattaches; the local backend has no server, so its shutdown()
@@ -1499,8 +1584,12 @@ interface Services {
   savedPrompts: SavedPromptsService;
   /** Built-in plugins (Settings → Plugins): plugins.json, the TypeScript engine (tsrs or tsc-rs) install, the session preload. */
   plugins: PluginsService;
-  /** Each agent CLI's own global config (agent profile spec §4): the right rail's Agent profile. */
+  /** Each agent CLI's own global config (agent profile spec §4): Settings → Agent config. */
   agentProfile: AgentProfileService;
+  /** Orquester-owned per-session Agent Profiles (spec 2026-10-18). */
+  sessionProfiles: SessionProfileService;
+  /** Agent Profiles' prepared dirs: `ensureReady(profileId, agent, accountId)` for launches, `status`, `markStale`. */
+  sessionProfileLifecycle: SessionProfileLifecycle;
   /** Automated workflow definitions (workflows spec §3.1). */
   workflows: WorkflowService;
   /** Workflow secrets — names out, values only to the engine (§5.7). */
@@ -3695,6 +3784,14 @@ export function createServer(
       }
       body.owner = owner.owner;
     }
+    // Agent Profiles run in chat tabs only: a terminal launch naming one would silently start
+    // with the agent's Global setup, so it is refused (absent or null = Global, as ever).
+    if (body.kind !== "agent-chat" && body.profileId !== undefined && body.profileId !== null) {
+      return reply.code(400).send({
+        code: "INVALID_PROFILE",
+        message: "profileId is only accepted for agent-chat sessions: a terminal launch always uses the agent's own (Global) setup."
+      });
+    }
     // A chat tab takes the §6.1 path: the tab record, then the host thread. It
     // shares nothing with the PTY branch below.
     if (body.kind === "agent-chat") {
@@ -4161,6 +4258,16 @@ export function createServer(
   registerAgentProfileRoutes(app, {
     service: services.agentProfile,
     importsDir: agentProfileImportsDir(resolved.baseDir)
+  });
+
+  // Agent Profiles (spec 2026-10-18 §4): Orquester-owned per-session profiles. Both transports;
+  // the bearer hook above gates HTTP. MCP secret values never leave the daemon.
+  // A delete's `expectWorkflowUses` (the delete guard, §5.5) is checked against the workflow
+  // store's reference index in the delete's own step.
+  registerSessionProfileRoutes(app, {
+    service: services.sessionProfiles,
+    importsDir: agentProfileImportsDir(resolved.baseDir),
+    workflowReferences: () => services.workflows.references
   });
 
   // umcp:t11 begin — daemon-pointing MCP servers (unified MCP design 2026-10-15 §12.1): every MCP
@@ -4666,6 +4773,18 @@ export function createServer(
     });
   }
   // umcp:t6 end
+
+  // Agent Profiles (spec 2026-10-18 §6.5): the agent host's refresh before every session start
+  // of a profile thread. SOCKET-ONLY, and the agent host's bearer besides (it answers a thread's
+  // launch environment).
+  if (options.mode === "local" && services.agentChat) {
+    const agentChat = services.agentChat;
+    registerThreadLaunchProfileRoute(app, {
+      authorizeHost: (authorization) => agentChat.authorizeHostRequest(authorization),
+      resolve: (threadId, profileId, accountId) => agentChat.threadLaunchProfile(threadId, profileId, accountId),
+      logger: console
+    });
+  }
 
   // umcp:t2 begin — both transports of the unified catalog (design 2026-10-15 §3.3), through ONE
   // executor whose port (`executorPorts.approvals`) the umcp:t3 block wires.

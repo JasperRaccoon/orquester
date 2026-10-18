@@ -566,7 +566,9 @@ export const workflowRoutes = {
   /** The reference index: what a workflow runs as sub-workflows, and every workflow that runs it. */
   workflowReferences: (id: string): string => `/api/workflow-references/workflows/${encodeURIComponent(id)}`,
   /** The reference index: every workflow whose agent blocks use a saved prompt. */
-  promptReferences: (promptId: string): string => `/api/workflow-references/prompts/${encodeURIComponent(promptId)}`
+  promptReferences: (promptId: string): string => `/api/workflow-references/prompts/${encodeURIComponent(promptId)}`,
+  /** The reference index: every workflow whose agent blocks launch with an Agent Profile (`config.profileId`). */
+  profileReferences: (profileId: string): string => `/api/workflow-references/profiles/${encodeURIComponent(profileId)}`
 } as const;
 
 export type WorkflowErrorCode =
@@ -734,6 +736,20 @@ export interface PromptReferencesResponse {
    * Set when the list may be incomplete — a definition this build cannot read may use the prompt, or
    * the definitions could not be read: a caller must treat the prompt as used (fail closed).
    */
+  unknownReason?: string;
+}
+
+/**
+ * GET /api/workflow-references/profiles/:profileId — what the Agent Profile delete guard lists
+ * (`DeleteSessionProfileQuery.expectWorkflowUses`). Same shape and fail-closed rule as
+ * {@link PromptReferencesResponse}.
+ */
+export interface ProfileReferencesResponse {
+  version: number;
+  profileId: string;
+  /** Every stored workflow with an agent block whose `config.profileId` is this profile, with those blocks. */
+  workflows: (WorkflowReference & { nodes: { id: string; name: string }[] })[];
+  /** Set when the list may be incomplete: a caller must treat the profile as used (fail closed). */
   unknownReason?: string;
 }
 

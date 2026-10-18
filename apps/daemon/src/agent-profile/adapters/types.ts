@@ -36,7 +36,10 @@ export interface AgentHomes {
   codexHome: string;
   /** `~/.grok` (or `$GROK_HOME`). */
   grokHome: string;
-  /** `~/.config/opencode` (or `$OPENCODE_CONFIG_DIR`). */
+  /**
+   * `~/.config/opencode` (or `$XDG_CONFIG_HOME/opencode`) — the global dir.
+   * `$OPENCODE_CONFIG_DIR` is loaded in addition to it, never instead.
+   */
   opencodeDir: string;
   /** `~/.agents/skills` — the shared skills root Codex, Grok and OpenCode read. */
   agentsSkillsDir: string;
@@ -117,12 +120,25 @@ export interface KeepBothRequest {
 /** Names already claimed, by kind. */
 export type KeepBothTaken = Partial<Record<KeepBothRequest["kind"], Iterable<string>>>;
 
+/**
+ * A remote plugin source a git clone can fetch (Agent Profiles copy a plugin into a profile's own
+ * cache): the repository, its branch or tag, the plugin's folder inside it, or — `catalogPlugin`
+ * — the clone is a MARKETPLACE whose catalogue names the plugin's folder.
+ */
+export interface PluginFetchSource {
+  url: string;
+  ref?: string;
+  /** `/`-separated, inside the clone. */
+  path?: string;
+  catalogPlugin?: string;
+}
+
 /** {@link ProfileAdapter.pluginSource}'s answer. */
 export interface PluginSourceLocation {
   /** The marketplace's checkout (its commit is pinned on the card); null for a remote-only catalog. */
   marketplaceDir: string | null;
   version?: string;
-  source: { type: "local"; dir: string } | { type: "remote"; description: string };
+  source: { type: "local"; dir: string } | { type: "remote"; description: string; fetch?: PluginFetchSource };
 }
 
 export interface ProfileAdapter {

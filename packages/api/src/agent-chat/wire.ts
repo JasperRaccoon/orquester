@@ -18,7 +18,9 @@ import type {
   InteractionMode,
   ModelSelection,
   ProviderSnapshot,
-  RuntimeMode
+  RuntimeMode,
+  Skill,
+  SlashCommand
 } from "./adapter-types.ts";
 import type { DomainEvent } from "./domain-events.ts";
 import type { AgentGoalStatus } from "./goal.ts";
@@ -151,6 +153,13 @@ export const agentChatRoutes = {
    * owns the route and calls the host itself.
    */
   account: (sessionId: string): string => `${sessionBase(sessionId)}/account`,
+  /**
+   * Switch the Agent Profile an existing thread runs with ({@link ProfileCommandBody}) — the
+   * composer's profile chip. Daemon-owned exactly like {@link agentChatRoutes.account} and for
+   * the same reason: only the daemon can resolve the profile's prepared directory and recompose
+   * the launch environment, so it is absent from {@link AGENT_CHAT_COMMAND_NAMES}.
+   */
+  profile: (sessionId: string): string => `${sessionBase(sessionId)}/profile`,
   /**
    * The thread's pending `request_secret` cards (`GET`,
    * `SecretRequestListResponse`) — daemon-owned like `account`: the
@@ -293,6 +302,13 @@ export const agentChatRoutes = {
    */
   promptText: (sessionId: string, messageId: string): string =>
     `${sessionBase(sessionId)}/prompts/${encodeURIComponent(messageId)}`,
+  /**
+   * `GET` → {@link ThreadCatalogResponse}: an Agent Profile chat's own command and skill catalog
+   * for the composer — what its live provider session loaded, else the profile's own items. A
+   * Global chat answers `source: "none"` (the composer keeps the provider's catalog).
+   * Daemon-owned (it asks the host and falls back to the profile), both transports.
+   */
+  catalog: (sessionId: string): string => `${sessionBase(sessionId)}/catalog`,
 
   // Thread lineage (spec 2026-10-14 §6). Daemon-owned, like `account`: none is
   // a proxied §6.2 command.
@@ -473,6 +489,24 @@ export interface ThreadPromptEntry {
   seq: number;
 }
 
+/**
+ * `GET …/catalog` ({@link agentChatRoutes.catalog}) — the composer's `/` and `$` catalog for ONE
+ * chat. An Agent Profile chat must never offer the agent's Global commands and skills:
+ * - `session`: the chat's live provider session reported what it loaded (Claude's
+ *   initialization commands, Grok's `available_commands_update`, the thread's OpenCode server,
+ *   Codex's `skills/list` minus the switched-off ones);
+ * - `profile`: no live report yet — the profile's own enabled skills and commands for the agent
+ *   (the composer adds its host commands, as always);
+ * - `none`: a Global chat (no `profileId`): use the provider's catalog. Never for a profile chat:
+ *   a profile catalog that cannot be read (gone, a failure) answers `profile` with empty lists.
+ */
+export interface ThreadCatalogResponse {
+  threadId: string;
+  source: "session" | "profile" | "none";
+  slashCommands: SlashCommand[];
+  skills: Skill[];
+}
+
 /** `GET …/prompts` — newest first. */
 export interface ThreadPromptsResponse {
   threadId: string;
@@ -559,6 +593,19 @@ export function agentChatCommandPath(sessionId: string, name: AgentChatCommandNa
  */
 export interface CreateAgentChatSessionFields {
   accountId?: string;
+  /**
+   * The Agent Profile the thread launches with (`@orquester/api` `session-profiles.ts`). Absent =
+   * Global. Clients may leave it unset and send `CreateSessionRequest.profileId` instead.
+   */
+  profileId?: string;
+  /**
+   * An unattended launch (an MCP `create_session`, a workflow run): the chat's Agent Profile
+   * must apply or the launch FAILS — at create and at every later agent (re)start. Without it an
+   * interactive chat whose profile was deleted falls back to Global with a visible notice at its
+   * next agent start (spec 2026-10-18 §5.5, §5.6). A create naming a profile that does not exist
+   * or is not ready fails either way. Persisted on the tab record.
+   */
+  unattended?: boolean;
   modelSelection: ModelSelection;
   runtimeMode?: RuntimeMode;
   /**
@@ -750,6 +797,21 @@ export interface AccountCommandBody extends AgentChatCommandBase {
 }
 
 /**
+ * `POST /api/sessions/:id/profile` — the composer's profile chip (agent profiles spec §5.3).
+ *
+ * Shaped and answered like {@link AccountCommandBody}: a client-minted `commandId` makes a
+ * retry idempotent (the same {@link CommandReceiptResponse} for a repeat), refusals use the
+ * same {@link AgentChatErrorCode}s, and it is offered only while the thread is idle. The daemon
+ * records the new profile on the thread (`thread.meta-updated {profileId}`, `""` = Global) and
+ * restarts the provider child with it, keeping the conversation and its resume cursor.
+ *
+ * `profileId` is an Agent Profile's id, or `null` for Global (the agent's own setup).
+ */
+export interface ProfileCommandBody extends AgentChatCommandBase {
+  profileId: string | null;
+}
+
+/**
  * The activity kind the host appends beside the switch, so the timeline shows
  * where the identity changed. `payload` is
  * `{accountId, home, previousAccountId?}`; the client resolves the id to a
@@ -757,6 +819,14 @@ export interface AccountCommandBody extends AgentChatCommandBase {
  * freeze.
  */
 export const IDENTITY_CHANGED_ACTIVITY_KIND = "session.identity-changed";
+
+/**
+ * The activity kind the host appends beside an Agent Profile switch (spec 2026-10-18 §5.3), the
+ * profile counterpart of {@link IDENTITY_CHANGED_ACTIVITY_KIND} — a switch of both writes one of
+ * each. `payload` is `{profileId, previousProfileId}`, each a profile id or `null` for Global;
+ * the client resolves the id to the profile's current name at render time.
+ */
+export const PROFILE_CHANGED_ACTIVITY_KIND = "session.profile-changed";
 
 export type AgentChatCommandBody =
   | TurnCommandBody

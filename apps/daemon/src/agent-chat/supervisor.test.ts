@@ -3,7 +3,13 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { AGENT_HOST_PROTOCOL_VERSION, AGENT_HOST_SERVICE_SESSION } from "../agent-host/host-protocol.ts";
+import {
+  AGENT_HOST_CAPABILITIES,
+  AGENT_HOST_PROTOCOL_VERSION,
+  AGENT_HOST_SERVICE_SESSION,
+  agentHostSupports,
+  type AgentHostHealthResponse
+} from "../agent-host/host-protocol.ts";
 import {
   AgentHostSupervisor,
   buildAgentHostEnv,
@@ -78,6 +84,8 @@ const healthy = (
     codeStamp: string | null;
     /** Threads with live background work (a subagent fleet, a background shell). */
     background: string[];
+    /** `AgentHostHealthResponse.capabilities`; omitted, as an older host does. */
+    capabilities: AgentHostHealthResponse["capabilities"];
   }> = {}
 ): ProbeOutcome => ({
   ok: true,
@@ -95,7 +103,8 @@ const healthy = (
     ...(overrides.codeStamp === undefined ? {} : { codeStamp: overrides.codeStamp }),
     ...(overrides.providersRevision === undefined
       ? {}
-      : { providersRevision: overrides.providersRevision })
+      : { providersRevision: overrides.providersRevision }),
+    ...(overrides.capabilities === undefined ? {} : { capabilities: overrides.capabilities })
   }
 });
 
@@ -1259,6 +1268,31 @@ test("an older host with no providersRevision never raises the event", async () 
   await h.supervisor.checkHealth();
   assert.equal(h.providerRevisions, 0);
   await h.cleanup();
+});
+
+test("hostSupports reads the ADOPTED host's capabilities: an older host has none (Agent Profiles)", async () => {
+  const h = await makeHarness([healthy()], { seedToken: "tok", tmux: true });
+  assert.equal(h.supervisor.hostSupports("sessionProfiles"), false, "no host adopted yet");
+  await h.supervisor.init();
+  assert.equal(h.supervisor.isHealthy(), true);
+  assert.equal(h.supervisor.hostSupports("sessionProfiles"), false, "a host that predates profiles");
+  h.probes = [healthy({ capabilities: { sessionProfiles: 1 } })];
+  await h.supervisor.checkHealth();
+  assert.equal(h.supervisor.hostSupports("sessionProfiles"), true);
+  assert.equal(h.supervisor.hostSupports("sessionProfiles", 2), false, "a later level is not implied");
+  await h.cleanup();
+});
+
+test("agentHostSupports tolerates every shape an older or odd host answers", () => {
+  assert.equal(agentHostSupports(null, "sessionProfiles"), false);
+  assert.equal(agentHostSupports({}, "sessionProfiles"), false);
+  assert.equal(agentHostSupports({ capabilities: {} }, "sessionProfiles"), false);
+  assert.equal(
+    agentHostSupports({ capabilities: { sessionProfiles: "1" as unknown as number } }, "sessionProfiles"),
+    false
+  );
+  assert.equal(agentHostSupports({ capabilities: { sessionProfiles: 1 } }, "sessionProfiles"), true);
+  assert.equal(agentHostSupports({ capabilities: AGENT_HOST_CAPABILITIES }, "sessionProfiles"), true);
 });
 
 test("the launch environment is built explicitly, never from process.env", (t) => {

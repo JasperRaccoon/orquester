@@ -1,5 +1,5 @@
 // Automated workflows — what a definition references: THE rules for "a workflow runs another as a
-// sub-workflow" and "a workflow uses a saved prompt". One source for the daemon's reference index
+// sub-workflow", "a workflow uses a saved prompt" and "a workflow uses an Agent Profile". One source for the daemon's reference index
 // (`apps/daemon/src/workflows/reference-index.ts`), the MCP's previews and the saved-prompt rows.
 
 import type { WorkflowNode, WorkflowProject } from "./types.ts";
@@ -51,4 +51,15 @@ export function savedPromptIdsOf(workflow: { nodes?: readonly { type: string; co
     if (id !== null && !ids.includes(id)) ids.push(id);
   }
   return ids;
+}
+
+/**
+ * THE rule for "a workflow uses an Agent Profile" (spec 2026-10-18 §5.5; one source for the
+ * reference index and the profile delete guard): an agent block — a disabled one too — whose
+ * `config.profileId` names one. The id, or null for any other block.
+ */
+export function sessionProfileIdOfNode(node: { type: string; config?: unknown }): string | null {
+  if (node.type !== "agent" || !isRecord(node.config)) return null;
+  const id = node.config.profileId;
+  return typeof id === "string" && id !== "" ? id : null;
 }

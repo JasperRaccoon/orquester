@@ -21,10 +21,16 @@ test("sessionView projects a chat summary and a terminal summary", () => {
   assert.equal(chat.kind, "chat"); assert.equal(chat.adapter, "claude"); assert.equal(chat.agent, "claude");
   assert.deepEqual(chat.project, { workspace: "acme", name: "api", path: "/w/acme/api" });
   assert.equal(chat.status, "idle"); assert.equal(chat.attention, "finished"); assert.equal(chat.needsAttentionAt, stamp(1)); assert.equal(chat.reason, "completed");
-  assert.deepEqual(chat.chat, { sessionStatus: "ready", accountId: "acc-1", latestTurn: { turnId: "t1", state: "completed", startedAt: stamp(0), completedAt: stamp(1) }, pending: { approvals: false, questions: false }, planReady: false, backgroundLiveness: null, goal: null });
+  assert.deepEqual(chat.chat, { sessionStatus: "ready", accountId: "acc-1", profile: null, latestTurn: { turnId: "t1", state: "completed", startedAt: stamp(0), completedAt: stamp(1) }, pending: { approvals: false, questions: false }, planReady: false, backgroundLiveness: null, goal: null });
   assert.equal(chat.terminal, undefined);
   const system = sessionView(chatSummary(), ctx);
   assert.equal(system.chat?.accountId, "system");
+  // Agent Profiles: a chat's profile by id and name; one the daemon no longer lists by id alone; null and absent = Global.
+  const named = { ...ctx, profileNameById: new Map([["prof-1", "Video"]]) };
+  assert.deepEqual(sessionView(chatSummary({ profileId: "prof-1" }), named).chat?.profile, { id: "prof-1", name: "Video" });
+  assert.deepEqual(sessionView(chatSummary({ profileId: "prof-gone" }), named).chat?.profile, { id: "prof-gone" });
+  assert.equal(sessionView(chatSummary({ profileId: null }), named).chat?.profile, null);
+  assert.equal(sessionView(chatSummary(), ctx).chat?.profile, null);
   const term = sessionView(shellSummary({ kind: "agent", status: "exited", exitCode: 1 }), ctx);
   assert.equal(term.kind, "terminal"); assert.deepEqual(term.terminal, { status: "exited", exitCode: 1, legacyAgent: true }); assert.equal(term.chat, undefined);
 });

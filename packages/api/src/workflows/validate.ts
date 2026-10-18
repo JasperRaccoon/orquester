@@ -60,6 +60,11 @@ export interface ValidateWorkflowOptions {
   secretNames?: readonly string[];
   /** Saved prompt ids; an unknown one warns only when given. */
   savedPromptIds?: readonly string[];
+  /**
+   * Agent Profile ids (spec 2026-10-18 §5.5); an agent block naming one not among them warns
+   * (`unknown_profile`: its runs would fail) — only when given.
+   */
+  sessionProfileIds?: readonly string[];
   /** Workflow ids; an unknown sub-workflow warns only when given. */
   knownWorkflowIds?: readonly string[];
   /**
@@ -627,6 +632,15 @@ export function validateWorkflow(input: unknown, opts: ValidateWorkflowOptions =
             message: `${node.name}: the saved prompt it uses no longer exists`,
             nodeId: node.id,
             field: "config.prompt.promptId"
+          });
+        }
+        if (config.profileId !== undefined && opts.sessionProfileIds && !opts.sessionProfileIds.includes(config.profileId)) {
+          push({
+            severity: "warning",
+            code: "unknown_profile",
+            message: `${node.name}: the Agent Profile it launches with no longer exists — its runs fail until another is picked`,
+            nodeId: node.id,
+            field: "config.profileId"
           });
         }
         if (config.session.kind === "continue") {

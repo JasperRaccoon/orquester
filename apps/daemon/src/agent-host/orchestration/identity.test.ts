@@ -333,4 +333,17 @@ describe("the identity gate (§3.4, mirrored by the composer chip §7.4)", () =>
       assert.ok(identitySwitchRefusal(state), `refused: ${JSON.stringify(state)}`);
     }
   });
+
+  it("a profile switch's refusal speaks of profiles throughout", () => {
+    for (const state of [
+      { ...idle, goalHeldForUpdate: true },
+      { ...idle, goalContinuing: true },
+      { ...idle, compacting: true },
+      { ...idle, queuedTurnCount: 1 }
+    ]) {
+      const words = identitySwitchRefusal(state, "profiles") ?? "";
+      assert.match(words, /profiles/, words);
+      assert.doesNotMatch(words, /accounts/, words);
+    }
+  });
 });

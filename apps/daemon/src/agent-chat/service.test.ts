@@ -25,7 +25,7 @@ import {
   type ForkHostThreadRequest,
   type SetThreadIdentityRequest
 } from "../agent-host/host-protocol.ts";
-import { AgentChatService, FORK_CONFIRM_MAX_BACKOFF_MS, FORK_CONFIRM_MAX_REFUSALS, forkIdFor } from "./service.ts";
+import { AgentChatService, FORK_CONFIRM_MAX_BACKOFF_MS, FORK_CONFIRM_MAX_REFUSALS, forkIdFor, type ChatLaunchEnv } from "./service.ts";
 import { realpath as realpathOf } from "node:fs/promises";
 import type { ForkSessionRequest } from "@orquester/api";
 import type { CallerPrincipal } from "@orquester/api/agent-chat";
@@ -105,6 +105,8 @@ interface Fixture {
   resumeAnswer: { status: number; body: unknown };
   /** Agent profile §4.8: how many `POST /opencode/recycle-idle` reached the fake host. */
   recycleRequests: number;
+  /** Their bodies, parsed. */
+  recycleBodies: unknown[];
   /** Its answer; `"drop"` tears the connection down unanswered. */
   recycleAnswer: { status: number; body: unknown } | "drop";
   /** Thread lineage: every `POST /threads/:parentId/fork` the fake host received. */
@@ -155,7 +157,7 @@ const OPENCODE: RegistryEntry = {
 
 async function makeFixture(
   entry: RegistryEntry,
-  launch: { env: Record<string, string>; unset?: string[]; accountId?: string } | null,
+  launch: ChatLaunchEnv | null,
   options: {
     adopt?: boolean;
     /** Set before boot adoption, which is the first thing to read `/health`. */
@@ -195,6 +197,7 @@ async function makeFixture(
     resumeRequests: [],
     resumeAnswer: { status: 200, body: { threadIds: [] } },
     recycleRequests: 0,
+    recycleBodies: [],
     recycleAnswer: { status: 200, body: { recycled: 0, deferred: 0 } },
     forks: [],
     forkAnswer: null,
@@ -271,6 +274,7 @@ async function makeFixture(
       }
       if (req.url === "/opencode/recycle-idle" && req.method === "POST") {
         state.recycleRequests += 1;
+        state.recycleBodies.push(body.length > 0 ? (JSON.parse(body) as unknown) : null);
         const answer = state.recycleAnswer;
         if (answer === "drop") {
           req.socket.destroy();
@@ -455,6 +459,24 @@ test("an OpenCode thread carries its per-launcher env file and the PROJECT ROOT"
   assert.equal(body.cwd, "/w/p");
   assert.equal(body.home, "system");
   assert.equal(body.homePath, undefined);
+  assert.equal("serverPool" in body, false, "no keyed server named: the project's global one");
+  await f.cleanup();
+});
+
+test("a keyed OpenCode server named by the launch env reaches the host on create, fork and a fork's reconcile", async () => {
+  const serverPool = { key: "profile-a", env: { XDG_CONFIG_HOME: "/profiles/a/xdg" }, unsetEnv: ["X"] };
+  const f = await makeFixture(OPENCODE, { env: {}, serverPool });
+  const parent = await f.service.createSession({ kind: "agent-chat", refId: "opencode", projectPath: "/w/p" }, 0);
+  assert.deepEqual(f.created[0]?.serverPool, serverPool);
+  assert.equal(f.created[0]?.launchEnv?.XDG_CONFIG_HOME, undefined, "the server's env, never the launcher env");
+
+  f.dropForkAnswer = true;
+  await assert.rejects(f.service.forkSession(parent.id, { commandId: "k", turnId: "t3", role: "user" }, 1));
+  assert.deepEqual(f.forks.at(-1)?.body.serverPool, serverPool);
+  await f.service.reconcileForks();
+  const confirm = f.forks.at(-1)!.body;
+  assert.equal(confirm.confirmOnly, true);
+  assert.deepEqual(confirm.serverPool, serverPool);
   await f.cleanup();
 });
 
@@ -787,6 +809,27 @@ test("a switch recomputes the launch env, calls the host, THEN moves the tab rec
   await f.cleanup();
 });
 
+test("a switch carries the recomposed serverPool: the host replaces launch.json's with it", async () => {
+  const f = await switchableFixture();
+  f.launchFor = (ctx) => ({
+    env: { CLAUDE_CONFIG_DIR: `/homes/${ctx.accountId}` },
+    accountId: ctx.accountId!,
+    serverPool: { key: "keyed", env: { A: "1" } }
+  });
+  await f.service.switchAccount(f.sessionId, { commandId: "c1", accountId: "acc-2" });
+  assert.deepEqual(f.identities[0]!.body.serverPool, { key: "keyed", env: { A: "1" } });
+  await f.cleanup();
+});
+
+test("hostSupportsSessionProfiles follows the adopted host's advertised capability", async () => {
+  const older = await makeFixture(CLAUDE, null);
+  assert.equal(older.service.hostSupportsSessionProfiles(), false, "a host that advertises nothing");
+  await older.cleanup();
+  const current = await makeFixture(CLAUDE, null, { health: { capabilities: { sessionProfiles: 1 } } });
+  assert.equal(current.service.hostSupportsSessionProfiles(), true);
+  await current.cleanup();
+});
+
 test("switching to System clears the account and never falls back to the family default", async () => {
   const f = await switchableFixture();
   await f.service.switchAccount(f.sessionId, { commandId: "c1", accountId: "system" });
@@ -991,6 +1034,11 @@ test("agent profile §4.8: the OpenCode recycle reaches the host, and no answer 
       await f.service.recycleIdleOpenCodeServers();
       assert.equal(f.recycleRequests, index + 1);
     }
+    // Narrowed to one keyed pool, or not: the body says which.
+    f.recycleAnswer = { status: 200, body: { recycled: 1, deferred: 0 } };
+    await f.service.recycleIdleOpenCodeServers("profile-a");
+    assert.deepEqual(f.recycleBodies.at(-1), { poolKey: "profile-a" });
+    assert.deepEqual(f.recycleBodies[0], {});
   } finally {
     await f.cleanup();
   }

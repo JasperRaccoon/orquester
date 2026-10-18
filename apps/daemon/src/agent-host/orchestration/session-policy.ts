@@ -22,13 +22,20 @@ import type {
   ThreadSessionStatus
 } from "@orquester/api/agent-chat";
 
-/** What the thread now wants, as the head records it. */
+/** What the thread now wants, as the head (and its `launch.json`) records it. */
 export interface DesiredSessionShape {
   adapter: AgentAdapterId;
   runtimeMode: RuntimeMode;
   cwd: string;
   accountKey: string;
   modelSelection: ModelSelection;
+  /**
+   * The Agent Profile the thread launches with, as {@link profileKeyOf} spells it: `""` for
+   * Global. Kept apart from `accountKey` on purpose — a profile change restarts the session
+   * with reason `"profile"` and carries the cursor, and is never an account switch (transcripts
+   * and session stores are shared across profiles, spec 2026-10-18 §7 "Resume identity").
+   */
+  profileKey: string;
 }
 
 /** What the live session was started with. */
@@ -38,7 +45,26 @@ export interface BoundSessionShape {
   cwd: string;
   accountKey: string;
   modelSelection: ModelSelection;
+  profileKey: string;
   session: ProviderSession;
+  /**
+   * The prepared profile dir the live provider session STARTED on (absent = Global). It outlives
+   * a switch that rewrites `launch.json` until the session restarts, so it is what the
+   * prepared-dir leases name.
+   */
+  preparedDir?: string;
+}
+
+/**
+ * A launch profile as one comparable string: `""` without one (Global), else its id, revision
+ * and prepared directory — so switching to another revision of the same profile restarts too.
+ */
+export function profileKeyOf(
+  profile: { profileId: string; revision: string; preparedDir: string } | undefined
+): string {
+  return profile === undefined
+    ? ""
+    : JSON.stringify([profile.profileId, profile.revision, profile.preparedDir]);
 }
 
 interface RestartDecision {
@@ -89,6 +115,7 @@ export function decideSessionRestart(input: {
   if (desired.runtimeMode !== bound.runtimeMode) reasons.push("runtimeMode");
   if (desired.cwd !== bound.cwd) reasons.push("cwd");
   if (desired.accountKey !== bound.accountKey) reasons.push("account");
+  if (desired.profileKey !== bound.profileKey) reasons.push("profile");
 
   const modelChanged = desired.modelSelection.model !== bound.modelSelection.model;
   const modelRestart = modelChanged && capabilities.sessionModelSwitch === "unsupported";
@@ -175,8 +202,22 @@ const GOAL_HELD_SWITCH_REFUSAL =
  * The refusal message for an account switch, or `null` when the thread is idle
  * enough to take one. One expression, so the host's 409 and the composer's
  * disabled chip can never disagree about what "idle" means.
+ *
+ * `subject` names what is being switched in the words: an Agent Profile
+ * switch restarts the session exactly as an account switch does, so it is
+ * gated by the same rule and only says `"profiles"` instead.
  */
-export function identitySwitchRefusal(state: IdentitySwitchState): string | null {
+export function identitySwitchRefusal(
+  state: IdentitySwitchState,
+  subject: "accounts" | "profiles" = "accounts"
+): string | null {
+  const words = (message: string): string =>
+    subject === "accounts" ? message : message.replace(/\b(switch|switching) accounts\b/g, `$1 ${subject}`);
+  const refusal = identitySwitchRefusalWords(state);
+  return refusal === null ? null : words(refusal);
+}
+
+function identitySwitchRefusalWords(state: IdentitySwitchState): string | null {
   if (state.compacting) {
     return "Wait for the context compaction to finish before switching accounts.";
   }
