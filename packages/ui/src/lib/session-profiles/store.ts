@@ -8,7 +8,8 @@
  * - a **load** replaces the list or one profile's detail (single-flight per
  *   key; a forced load asked while one is in flight runs once more after it);
  * - a **mutation** replaces the profile with the detail the daemon answered;
- *   a stale revision (409 `PROFILE_CONFLICT`) reloads the profile and says
+ *   mutations of one profile run one after another, each reading the
+ *   revision the previous one left (rapid toggles all land); a stale revision (409 `PROFILE_CONFLICT`) reloads the profile and says
  *   so in the notice — nothing is retried behind the user's back;
  * - `/events` on `SESSION_PROFILES_CHANNEL` (routed here by the app store's
  *   `applyEvent`): `changed` refetches what is loaded when its revision
@@ -126,6 +127,8 @@ let boundConnection: string | null = null;
 let generation = 0;
 const inFlight = new Map<string, Promise<void>>();
 const queued = new Set<string>();
+/** Per profile: the tail of its mutations — the next one sends after it settles (`mutate`). */
+const mutationTails = new Map<string, Promise<void>>();
 
 const LIST_KEY = "list";
 const detailKey = (profileId: string) => `detail:${profileId}`;
@@ -145,6 +148,7 @@ export function resetSessionProfiles(): void {
   boundConnection = null;
   inFlight.clear();
   queued.clear();
+  mutationTails.clear();
   sessionProfilesStore.setState(initialState(), true);
 }
 
@@ -383,11 +387,13 @@ function setPending(key: string, on: boolean): void {
 
 /**
  * Run one mutation of `profileId` carrying the revision held, and fold its
- * answer in. A 409 `PROFILE_CONFLICT` reloads the profile and says so;
- * any other refusal is the notice. `answer` reads the daemon's response:
- * a mutation response (`{profile, itemId}`) or a bare detail.
+ * answer in. Mutations of one profile are serialized: this one waits for the
+ * one before it and reads the revision when it sends, so two quick toggles do
+ * not both carry the same revision. A 409 `PROFILE_CONFLICT` reloads the
+ * profile and says so; any other refusal is the notice. `answer` reads the
+ * daemon's response: a mutation response (`{profile, itemId}`) or a bare detail.
  */
-async function mutate(
+function mutate(
   api: SessionProfilesApi,
   profileId: string,
   pendingKey: string,
@@ -395,11 +401,36 @@ async function mutate(
   answer: "mutation" | "detail" | "none"
 ): Promise<SessionProfileMutationResult> {
   bind(api);
+  const at = generation;
+  const previous = mutationTails.get(profileId) ?? Promise.resolve();
+  setPending(pendingKey, true);
+  const run = previous.then(() => mutateNow(api, profileId, pendingKey, send, answer, at));
+  const tail = run.then(() => undefined);
+  mutationTails.set(profileId, tail);
+  void tail.then(() => {
+    if (mutationTails.get(profileId) === tail) mutationTails.delete(profileId);
+  });
+  return run;
+}
+
+async function mutateNow(
+  api: SessionProfilesApi,
+  profileId: string,
+  pendingKey: string,
+  send: (revision: string) => Promise<unknown>,
+  answer: "mutation" | "detail" | "none",
+  at: number
+): Promise<SessionProfileMutationResult> {
+  if (at !== generation) {
+    setPending(pendingKey, false);
+    return { ok: false, error: "The connection changed before the change was sent.", code: null };
+  }
   const detail = sessionProfileDetailEntry(profileId).detail;
   const revision = detail?.revision ?? getState().list.profiles?.find((profile) => profile.id === profileId)?.revision;
-  if (revision === undefined) return { ok: false, error: "The profile is not loaded yet.", code: null };
-  const at = generation;
-  setPending(pendingKey, true);
+  if (revision === undefined) {
+    setPending(pendingKey, false);
+    return { ok: false, error: "The profile is not loaded yet.", code: null };
+  }
   try {
     const raw = await send(revision);
     if (at !== generation) return { ok: false, error: "The connection changed before the daemon answered.", code: null };
@@ -417,7 +448,8 @@ async function mutate(
     if (at === generation) {
       if (code === "PROFILE_CONFLICT") {
         setSessionProfilesNotice({ tone: "error", text: CONFLICT_NOTICE });
-        void loadSessionProfile(api, profileId, { force: true });
+        // Awaited: a mutation queued behind this one sends with the reloaded revision.
+        await loadSessionProfile(api, profileId, { force: true });
       } else if (code === "PROFILE_NOT_FOUND") {
         removeProfile(profileId);
         setSessionProfilesNotice({ tone: "error", text });
