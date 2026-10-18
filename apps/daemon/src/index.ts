@@ -1088,6 +1088,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     defaultAccountId: (agent) => (agent === "opencode" ? null : (agentAccounts.list().defaults[agent] ?? null)),
     // Read per call: an install or update from Settings > Agents patches the entry in place.
     cliVersion: (agent) => registry.get(agent)?.version ?? null,
+    // No `leases` yet (launch plumbing): old prepared versions are kept until it is wired.
     logger: console
   });
   const sessionProfiles = new SessionProfileService({ store: sessionProfileStore, prepareStatus: sessionProfileLifecycle.prepareStatusSource });
