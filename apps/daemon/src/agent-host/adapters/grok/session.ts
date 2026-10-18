@@ -82,6 +82,7 @@ import {
   versionGateMessage,
   writeGrokOverlayConfig
 } from "./launch.ts";
+import { type GrokProfileSpawn, withAgentOptions } from "./profile-launch.ts";
 import { GrokNormalizer, XAI_RAW_SOURCE, ACP_RAW_SOURCE, type GrokTurnOutcome } from "./normalize.ts";
 import {
   approvalGrantKey,
@@ -158,6 +159,11 @@ interface GrokSessionOptions {
   cwd: string;
   home: AccountHome;
   runtimeMode: RuntimeMode;
+  /**
+   * An Agent Profile thread's spawn additions (`profile-launch.ts`): env over the Global one and
+   * the `agent` subcommand's options. Absent for a Global thread.
+   */
+  profileSpawn?: GrokProfileSpawn;
   modelSelection: ModelSelection;
   resumeCursor?: unknown;
   /**
@@ -612,10 +618,11 @@ export class GrokSession {
 
     const connection = AcpConnection.spawn({
       command: this.options.command,
-      args: grokSpawnArgs(this.options.runtimeMode),
+      args: withAgentOptions(grokSpawnArgs(this.options.runtimeMode), this.options.profileSpawn?.agentArgs ?? []),
       env: {
         ...this.options.env,
         ...GROK_EXTRA_ENV,
+        ...this.options.profileSpawn?.env,
         ...(overlay === null ? {} : { [GROK_CONFIG_PATH_ENV]: overlay }),
         [AGENT_LAUNCH_ENV_VAR]: this.launchId
       },

@@ -60,6 +60,7 @@ import { join } from "node:path";
 import { MAX_TURN_INPUT_CHARS } from "@orquester/api/agent-chat";
 import { projectGrokHistory } from "./history.ts";
 import { GROK_EXTRA_ENV } from "./launch.ts";
+import { prepareGrokProfileSpawn } from "./profile-launch.ts";
 import { pendingStatusMessage } from "../pending.ts";
 import {
   COMPACT_SLASH_COMMAND,
@@ -281,6 +282,11 @@ class GrokAdapter implements AgentAdapter {
       extraEnv: GROK_EXTRA_ENV
     });
 
+    // Agent Profiles (spec §6.3): a profile thread renders its home's `config.toml` and gets
+    // `--no-leader` / `--plugin-dir` before every spawn; a home it cannot launch from fails the
+    // start (`profile-launch.ts`). `null` for a Global thread — nothing below changes for it.
+    const profileSpawn = await prepareGrokProfileSpawn({ profile: input.profile, env, command });
+
     // Design 2026-10-14 §1.2: a fresh credential per `grok agent stdio`
     // launch, carried by the ACP `mcpServers` entry (`session-tools.ts`); this
     // issue revokes the thread's previous one, and `onClosed` revokes this.
@@ -318,6 +324,7 @@ class GrokAdapter implements AgentAdapter {
       threadId: input.threadId,
       cwd: input.cwd,
       home: input.home,
+      ...(profileSpawn === null ? {} : { profileSpawn }),
       runtimeMode: input.runtimeMode,
       modelSelection: input.modelSelection,
       ...(input.resumeCursor === undefined ? {} : { resumeCursor: input.resumeCursor }),
@@ -364,7 +371,11 @@ class GrokAdapter implements AgentAdapter {
       )
     });
 
-    this.probeHome = input.home;
+    if (profileSpawn === null) {
+      // A profile home is no account home: the probe keeps reading the last Global one (a
+      // profile's `GROK_HOME` has no credential of its own and a profile's own config).
+      this.probeHome = input.home;
+    }
     this.sessions.set(input.threadId, session);
     try {
       await session.start();
