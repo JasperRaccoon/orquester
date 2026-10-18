@@ -67,7 +67,7 @@ export const HookEditor: React.FC<{ detail?: HookDetail; onReload?: () => void }
   );
 };
 
-const HookFormView: React.FC<{
+export const HookFormView: React.FC<{
   form: HookForm;
   onChange: (patch: Partial<HookForm>) => void;
   validation: HookValidation;

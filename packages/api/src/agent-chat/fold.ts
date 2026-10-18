@@ -1215,23 +1215,31 @@ function reduce(state: ThreadFoldState, event: DomainEvent): Mutation {
       // no lineage, never an unreadable thread.
       const lineage = parseThreadLineage(payload.lineage);
       if (lineage !== undefined) head.lineage = lineage;
+      if (typeof payload.profileId === "string" && payload.profileId !== "") head.profileId = payload.profileId;
       return { head };
     }
 
     case "thread.meta-updated": {
       if (state.head === null) return {};
-      const { title, modelSelection, accountId, home } = event.payload;
+      const { title, modelSelection, accountId, home, profileId } = event.payload;
       if (
         title === undefined &&
         modelSelection === undefined &&
         accountId === undefined &&
-        home === undefined
+        home === undefined &&
+        typeof profileId !== "string"
       ) {
         return {};
       }
+      // The profile switch: `""` is Global, which a head says by having no `profileId`.
+      const base =
+        typeof profileId === "string"
+          ? (({ profileId: _previous, ...rest }) => rest)(state.head)
+          : state.head;
       return {
         head: {
-          ...state.head,
+          ...base,
+          ...(typeof profileId === "string" && profileId !== "" ? { profileId } : {}),
           ...(title !== undefined ? { title } : {}),
           ...(modelSelection !== undefined ? { modelSelection } : {}),
           // §3.4's account switch. Field-wise: a rename must not clear the

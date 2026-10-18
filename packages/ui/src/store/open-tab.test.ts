@@ -41,7 +41,8 @@ beforeEach(() => {
     activeTabByProject: {},
     openingChat: null,
     resumeError: null,
-    agentConversationsByProject: {}
+    agentConversationsByProject: {},
+    preferredProfileByAgent: {}
   });
 });
 
@@ -107,5 +108,63 @@ describe("openTab — resuming a conversation", () => {
     );
     assert.equal(await store().openTab(RESUME), undefined);
     assert.equal(store().resumeError?.message, "already open elsewhere");
+  });
+});
+
+describe("openTab — the agent's remembered Agent Profile (agent profiles §5.3)", () => {
+  function recordCreates(): Record<string, unknown>[] {
+    const requests: Record<string, unknown>[] = [];
+    useAppStore.setState({
+      api: {
+        createSession: async (request: Record<string, unknown>) => {
+          requests.push(request);
+          return session(`s${requests.length}`);
+        }
+      } as unknown as ApiClient
+    });
+    return requests;
+  }
+  const NEW_CHAT = { kind: "agent-chat" as const, refId: "claude", title: "Claude", chat: { modelSelection: { model: "sonnet" } } };
+
+  it("a new chat and a resumed conversation launch with the agent's remembered profile", async () => {
+    const requests = recordCreates();
+    store().setPreferredProfile("claude", "p-dev");
+    await store().openTab(NEW_CHAT);
+    await store().openTab(RESUME);
+    for (const request of requests) {
+      assert.equal(request.profileId, "p-dev");
+      assert.equal((request.chat as { profileId?: string }).profileId, "p-dev");
+    }
+    assert.equal(
+      (requests[1]!.chat as { resume?: { conversationId: string } }).resume?.conversationId,
+      "conv-1",
+      "the resume keeps its cursor"
+    );
+  });
+
+  it("Global (nothing remembered, or another agent's pick) sends no profile", async () => {
+    const requests = recordCreates();
+    store().setPreferredProfile("codex", "p-dev");
+    await store().openTab(NEW_CHAT);
+    assert.equal("profileId" in requests[0]!, false);
+    assert.equal("profileId" in (requests[0]!.chat as object), false);
+
+    store().setPreferredProfile("claude", "p-dev");
+    store().setPreferredProfile("claude", null);
+    await store().openTab({ ...NEW_CHAT });
+    assert.equal("profileId" in requests[1]!, false, "picking Global forgets the profile");
+  });
+
+  it("a deleted profile is no agent's pick any more", () => {
+    store().setPreferredProfile("claude", "p-dev");
+    store().applyEvent({ channel: "session-profiles", type: "sessionProfile.deleted", payload: { profileId: "p-dev" } } as never);
+    assert.deepEqual(store().preferredProfileByAgent, {});
+  });
+
+  it("a terminal launch never carries one", async () => {
+    const requests = recordCreates();
+    store().setPreferredProfile("bash", "p-dev");
+    await store().openTab({ kind: "shell" as never, refId: "bash", title: "bash" });
+    assert.equal("profileId" in requests[0]!, false);
   });
 });

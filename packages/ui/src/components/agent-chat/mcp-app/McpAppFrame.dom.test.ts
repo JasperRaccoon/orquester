@@ -30,6 +30,7 @@ const transport: AgentChatTransport = {
   stream: () => ({ lastSeq: 0, hostInstanceId: null, resetCursor() {}, retry() {}, close() {} }),
   command: unused,
   switchAccount: unused,
+  switchProfile: unused,
   read: unused,
   readItem: unused,
   readHistory: unused,

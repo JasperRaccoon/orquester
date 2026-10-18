@@ -21,6 +21,7 @@ import { useAgentChatDraft } from "../../../lib/agent-chat/hooks";
 import { createEscapeSequence, type EscapeSequence } from "../../../lib/agent-chat/rewind.logic";
 import type { ChatComposerProps } from "../contracts";
 import { AccountChip, ModelChip, OptionChip, PlanChip, RuntimeModeChip } from "./ComposerChips";
+import { ProfileChip, type ProfileChipProps } from "./ProfileChip";
 import { removeFilePath, textNamesPath } from "./composer-files";
 import {
   imageOrdinal,
@@ -192,6 +193,12 @@ export interface ChatComposerExtraProps {
    * the shell owns the drill-in, and this composer is its direct child.
    */
   onLeaveDrillIn?: (() => void) | undefined;
+  /**
+   * The Agent Profile chip (agent profiles spec §5.3), drawn between the
+   * permission / plan controls and the account chip. Absent: no chip (a chat
+   * whose agent no profile serves). Picking one calls `actions.setProfile`.
+   */
+  profileChip?: Omit<ProfileChipProps, "onChange" | "returnFocusTo"> | undefined;
 }
 
 /**
@@ -242,7 +249,8 @@ export function ChatComposer({
   threadHasContent = true,
   searchRoot,
   active,
-  onLeaveDrillIn
+  onLeaveDrillIn,
+  profileChip
 }: ChatComposerProps & ChatComposerExtraProps): React.ReactElement {
   const isMobile = !useMediaQuery("(min-width: 640px)");
   const sessionCwd = useAppStore(
@@ -1999,6 +2007,18 @@ export function ChatComposer({
                   interactionMode={interactionMode}
                   disabled={reverting}
                   onChange={setPlanMode}
+                />
+              ) : null}
+              {profileChip ? (
+                <ProfileChip
+                  {...profileChip}
+                  canSwitch={profileChip.canSwitch && !reverting}
+                  onChange={(next) => {
+                    void actions.setProfile({ profileId: next }).catch((error: unknown) => {
+                      setNotice(error instanceof Error ? error.message : "Could not switch the profile.");
+                    });
+                  }}
+                  returnFocusTo={() => textareaRef.current}
                 />
               ) : null}
               {accountLabel ? (

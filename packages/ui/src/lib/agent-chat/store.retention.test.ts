@@ -53,6 +53,9 @@ function fakeTransport(): {
     async switchAccount() {
       return { seq: 0 };
     },
+    async switchProfile() {
+      return { seq: 0 };
+    },
     async read() {
       counters.reads += 1;
       return { kind: "snapshot", thread: snapshot() };

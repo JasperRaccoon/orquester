@@ -77,6 +77,10 @@ import {
 } from "./drill-in-navigation";
 import { proposedPlanTitle, shouldShowPlanFollowUpPrompt } from "../../lib/agent-chat/plan.logic";
 import { useAppStore } from "../../store/app";
+import { REGISTRY, type RegistryEntryDef } from "@orquester/registry";
+import { isSessionProfileAgentId } from "@orquester/api";
+import { useSessionProfileList } from "../../lib/session-profiles/hooks";
+import { agentForRefId } from "../right-rail/agent-profile/default-agent";
 import { AgentDrillIn } from "./roster/AgentDrillIn";
 import { DrillInErrorBoundary } from "./roster/DrillInErrorBoundary";
 import {
@@ -234,6 +238,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   const setPreferredModelSelection = useAppStore((s) => s.setPreferredModelSelection);
   const setPreferredRuntimeMode = useAppStore((s) => s.setPreferredRuntimeMode);
   const setPreferredAccount = useAppStore((s) => s.setPreferredAccount);
+  const setPreferredProfile = useAppStore((s) => s.setPreferredProfile);
   // What the composer's pickers change becomes this device's preference for
   // the agent, so the next chat opens the same way (model, effort, thinking,
   // fast mode, permission mode). The thread itself still gets the command.
@@ -251,12 +256,19 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
       setAccount: async (input: Parameters<typeof actions.setAccount>[0]) => {
         await actions.setAccount(input);
         setPreferredAccount(session.refId, input.accountId);
+      },
+      // Agent profiles §5.3: the profile picked here is remembered for the
+      // agent like the account — once the switch was accepted.
+      setProfile: async (input: Parameters<typeof actions.setProfile>[0]) => {
+        await actions.setProfile(input);
+        setPreferredProfile(session.refId, input.profileId);
       }
     }),
     [
       actions,
       session.refId,
       setPreferredAccount,
+      setPreferredProfile,
       setPreferredModelSelection,
       setPreferredRuntimeMode
     ]
@@ -885,6 +897,25 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   const accountSwitchEnabled = !paintOnly && canSwitchChatAccount(accountSwitchState);
   const accountSwitchRefusal = paintOnly ? null : chatAccountSwitchRefusal(accountSwitchState);
 
+  // The Agent Profile chip (agent profiles §5.3): the head says which profile
+  // the thread runs with; switching restarts the agent, so it shares the
+  // account switch's idle gate and refusals.
+  const profileList = useSessionProfileList();
+  const providerAdapter = provider?.id;
+  const profileAgent = isSessionProfileAgentId(providerAdapter)
+    ? providerAdapter
+    : agentForRefId(session.refId, [], REGISTRY.agents as readonly RegistryEntryDef[]);
+  const profileChip =
+    profileAgent === null
+      ? undefined
+      : {
+          agent: profileAgent,
+          profiles: profileList.profiles,
+          selectedId: slice.head?.profileId ?? null,
+          canSwitch: accountSwitchEnabled,
+          disabledReason: accountSwitchRefusal
+        };
+
   // --- the goal chip (goals §8.2) -------------------------------------------
   // The chip shows whatever unfinished goal the fold holds; which actions its
   // popover offers is the §8.2 matrix over the adapter's own goal block (none
@@ -1264,6 +1295,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 accountId={chatAccountSelectionId(threadAccountId)}
                 accountSwitchEnabled={accountSwitchEnabled}
                 accountSwitchRefusal={accountSwitchRefusal}
+                profileChip={profileChip}
                 isTurnActive={!paintOnly && turnActive}
                 hasPendingRequest={!paintOnly && pending.totalCount > 0}
                 queue={slice.queue}
