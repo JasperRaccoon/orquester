@@ -569,3 +569,44 @@ test("a keyed thread runs on its own server of the project with its env, and a k
     await h.dispose();
   }
 });
+
+test("a profile switch moves the thread to the new key's server on the same upstream session; a superseded version's server is left idle", async (t) => {
+  const h = await makeHarness(t);
+  try {
+    const spec = (version: string): StartSessionInput["serverPool"] => ({
+      key: `profile:p1:${version}`,
+      env: { XDG_CONFIG_HOME: `/prepared/${version}/xdg`, SHARED_VAR: "profile" }
+    });
+    const serverOf = (xdg: string | null): PeerServer => {
+      const found = h.servers.find((server) => server.env.XDG_CONFIG_HOME === xdg);
+      assert.ok(found !== undefined, `a server with XDG_CONFIG_HOME=${String(xdg)}`);
+      return found;
+    };
+    const first = await h.start();
+    await h.waitFor("session.state.changed");
+    const sessionId = (first.resumeCursor as { sessionId: string }).sessionId;
+
+    // Global → profile version 1 (the host restarts the session with the switched launch config).
+    await h.start({ serverPool: spec("v-1"), resumeCursor: first.resumeCursor });
+    const v1 = serverOf("/prepared/v-1/xdg");
+    const resumedOn = (url: string) =>
+      h.fake.requests.some((request) => request.method === "GET" && request.url.pathname === `/session/${sessionId}` && request.url.origin === url);
+    assert.ok(resumedOn(v1.url), "the same upstream session resumed on the profile's server");
+    // Nobody holds the project's global server any more: it is idle, so a recycle stops it now.
+    assert.deepEqual(await h.recycleIdleServers({ poolKey: "global" }), { recycled: 1, deferred: 0 });
+    assert.equal(gone(serverOf(null)), true);
+    assert.equal(h.adapter.hasSession(HOST_THREAD_ID), true, "the thread is on the profile's server");
+
+    // An edited profile is a new version, so a new key: the next start moves again, and the old
+    // version's server is idle (its idle close or a recycle stops it).
+    await h.start({ serverPool: spec("v-2"), resumeCursor: first.resumeCursor });
+    const v2 = serverOf("/prepared/v-2/xdg");
+    assert.ok(resumedOn(v2.url));
+    assert.deepEqual(await h.recycleIdleServers({ poolKey: "profile:p1:v-1" }), { recycled: 1, deferred: 0 });
+    assert.equal(gone(v1), true);
+    assert.equal(gone(v2), false);
+    assert.equal(h.adapter.hasSession(HOST_THREAD_ID), true);
+  } finally {
+    await h.dispose();
+  }
+});

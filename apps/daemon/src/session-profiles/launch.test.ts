@@ -63,8 +63,8 @@ const contributors = (codex: ProfileLaunchContributors["codex"]): ProfileLaunchC
 });
 
 describe("the per-agent launch contributions", () => {
-  it("contribute nothing for every agent until the per-agent tasks fill them in", async () => {
-    for (const agent of ["claude", "codex", "grok", "opencode"] as const) {
+  it("contribute nothing for the agents whose tasks have not filled them in", async () => {
+    for (const agent of ["claude", "codex", "grok"] as const) {
       assert.equal(profileLaunchContribution(agent), profileLaunchContributors[agent]);
       assert.deepEqual(await profileLaunchContribution(agent)({} as ProfileLaunchContext<typeof agent>), {});
     }

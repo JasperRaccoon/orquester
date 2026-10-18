@@ -418,8 +418,8 @@ export class AgentHooks {
   // --- opencode: status plugin in the global plugin dir ---------------------
 
   private async installOpenCode(configDir: string): Promise<void> {
-    const pluginPath = join(configDir, "plugin", "orquester-status.js");
-    const source = openCodePluginSource();
+    const pluginPath = join(configDir, "plugin", OPENCODE_STATUS_PLUGIN_FILE);
+    const source = openCodeStatusPluginSource();
     let current = "";
     try {
       current = await readFile(pluginPath, "utf8");
@@ -563,6 +563,13 @@ function upsertCodexTrustBlock(content: string, key: string, hash: string): stri
 }
 
 /**
+ * The status plugin's file name in a `plugin/` dir. An Agent Profile's OpenCode config dir carries
+ * its own copy (`session-profiles/preparers/opencode.ts`): a profile server never reads
+ * `$XDG_CONFIG_HOME/opencode` of the real config home.
+ */
+export const OPENCODE_STATUS_PLUGIN_FILE = "orquester-status.js";
+
+/**
  * OpenCode status plugin. Runs inside OpenCode's own runtime, so transport is
  * node:http over the daemon's unix socket (no curl). Design notes:
  *  - no-ops without ORQUESTER_SESSION_ID/ORQUESTER_DAEMON_SOCK (runs outside
@@ -573,7 +580,7 @@ function upsertCodexTrustBlock(content: string, key: string, hash: string): stri
  *    flip the pane; parent lookup fails CLOSED (assume child);
  *  - no message-part subscription at all (state transitions only).
  */
-function openCodePluginSource(): string {
+export function openCodeStatusPluginSource(): string {
   return `// orquester-managed status plugin v${SCRIPT_VERSION} — do not edit (rewritten by the daemon)
 import http from "node:http";
 
