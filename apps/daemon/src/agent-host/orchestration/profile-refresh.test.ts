@@ -87,7 +87,7 @@ async function realPreparedDir(profile: Omit<HostThreadProfile, "preparedDir">):
     agent: "claude",
     accountKey: "shared",
     preparedAt: "2026-10-18T00:00:00.000Z",
-    agentSection: {}
+    agentSection: { plugins: [], mcpServerNames: [], hooks: {}, disableWorkflows: false }
   });
   return dir;
 }
