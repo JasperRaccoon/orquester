@@ -594,6 +594,48 @@ describe("SessionProfileLifecycle versions and GC", () => {
     assert.ok(h.logs.some((line) => line.includes(`removed unused prepared dir ${v1.preparedDir}`)));
   });
 
+  it("re-reads the leases for a key reached after the handout grace (a snapshot that old is stale)", async () => {
+    const time = clock();
+    let gate: Promise<void> | null = null;
+    const entered = deferred();
+    const claude = fakePreparer("claude", {
+      during: async () => {
+        if (gate === null) return;
+        entered.resolve();
+        await gate;
+      }
+    });
+    const read = deferred();
+    const leases = leasesOf();
+    const inUse = leases.inUse;
+    leases.inUse = async () => {
+      const answer = await inUse();
+      read.resolve();
+      return answer;
+    };
+    const h = await setup({ claude }, { leases, now: time.now });
+    const profile = await h.service.create({ name: "Dev" });
+    const v1 = await h.lifecycle.ensureReady(profile.id, "claude", null);
+    await h.service.update(profile.id, { revision: profile.revision, description: "x" });
+    await h.lifecycle.ensureReady(profile.id, "claude", null);
+    await h.lifecycle.idle();
+
+    // A slow preparation holds the key; a GC pass reads the leases (none) and waits behind it.
+    const release = deferred();
+    gate = release.promise;
+    h.lifecycle.markStale(profile.id, "claude", null);
+    await entered.promise;
+    const pass = h.lifecycle.gc();
+    await read.promise;
+    // Meanwhile, past the handout grace, a session started on v1 (it is leased now).
+    time.advance(SESSION_PROFILE_HANDOUT_GRACE_MS + 1);
+    leases.set.add(v1.preparedDir);
+    release.resolve();
+    await pass;
+    await h.lifecycle.idle();
+    assert.ok(await exists(v1.preparedDir), "the stale snapshot must not remove a dir leased since");
+  });
+
   it("removes an unleased old version right after publishing", async () => {
     const leases = leasesOf();
     const h = await setup({ claude: fakePreparer("claude") }, { leases, handoutGraceMs: 0 });
@@ -684,9 +726,10 @@ describe("SessionProfileLifecycle versions and GC", () => {
     assert.equal(await exists(join(sessionProfilePreparedRootDir(h.appdir), profile.id)), false);
 
     h.lifecycle.stop();
+    const before = leases.calls;
     t.mock.timers.tick(SESSION_PROFILE_GC_INTERVAL_MS);
     await h.lifecycle.idle();
-    assert.equal(leases.calls, calls + 1, "stop() ends the periodic pass");
+    assert.equal(leases.calls, before, "stop() ends the periodic pass");
   });
 
   it("on delete removes pointers and unleased versions; a leased one stays until a later GC", async () => {

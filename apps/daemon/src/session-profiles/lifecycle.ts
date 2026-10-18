@@ -654,7 +654,10 @@ export class SessionProfileLifecycle {
   /**
    * One GC pass over `keyDirs` (every key dir on disk when omitted). The leases are read once,
    * before any key is locked (a slow host never holds up a launch); dirs handed out since are
-   * protected by their grace. Each key is collected inside its job chain when it has one.
+   * protected by their grace. Each key is collected inside its job chain when it has one — and a
+   * key reached once the snapshot is older than the handout grace (it waited behind a slow
+   * preparation) reads the leases again first: a dir handed out after the snapshot may have lost
+   * its grace by then while a session holds it. A failed re-read leaves that key alone.
    */
   private async collect(keyDirs?: string[]): Promise<void> {
     try {
@@ -667,9 +670,13 @@ export class SessionProfileLifecycle {
   private async collectPass(keyDirs?: string[]): Promise<void> {
     const leases = this.options.leases;
     if (!leases) return;
-    let leased: Set<string>;
+    const read = async (): Promise<{ dirs: Set<string>; at: number }> => {
+      const at = this.now().getTime();
+      return { dirs: new Set([...(await leases.inUse())].map((path) => resolve(path))), at };
+    };
+    let snapshot: { dirs: Set<string>; at: number };
     try {
-      leased = new Set([...(await leases.inUse())].map((path) => resolve(path)));
+      snapshot = await read();
     } catch (error) {
       this.logger.warn(`Agent Profiles: cannot tell which prepared dirs are in use, keeping them all: ${describe(error)}`);
       return;
@@ -677,7 +684,17 @@ export class SessionProfileLifecycle {
     const dirs = keyDirs ?? (await listKeyDirs(sessionProfilePreparedRootDir(this.appdir), 2));
     for (const keyDir of dirs) {
       if (this.stopped) return;
-      const run = (): Promise<void> => this.collectKey(keyDir, leased);
+      const run = async (): Promise<void> => {
+        if (this.now().getTime() - snapshot.at > this.graceMs) {
+          try {
+            snapshot = await read();
+          } catch (error) {
+            this.logger.warn(`Agent Profiles: cannot tell which prepared dirs are in use, keeping ${keyDir}: ${describe(error)}`);
+            return;
+          }
+        }
+        await this.collectKey(keyDir, snapshot.dirs);
+      };
       const state = [...this.keys.values()].find((candidate) => candidate.keyDir === keyDir);
       if (!state) {
         // No job can publish here: the profile is gone, or the agent/key kind has no preparer.

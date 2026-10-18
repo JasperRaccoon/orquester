@@ -190,7 +190,9 @@ restarts (spec §5.6). Status, staleness and fingerprints read the current versi
   nothing), `leases.onAvailable` (wired to `AgentChatService.onHostHealthy`: a host became
   healthy), every `SESSION_PROFILE_GC_INTERVAL_MS` (1 h, unref'd timer from `start()` to `stop()`;
   it collects a deleted profile's leftovers that no publish will trigger) and `gc()` on demand. A key's pass runs in the key's
-  job chain, so never during its preparation; the leases are read before any key is locked.
+  job chain, so never during its preparation; the leases are read before any key is locked, and
+  again for a key reached once that read is older than the handout grace (it waited behind a slow
+  preparation; a failed re-read keeps that key's versions).
 - Legacy layout (the key dir itself held the files, `manifest.json` at its top): not a current
   version, so the key re-prepares; its content is collected like a version, leased by the key
   dir's own path.
