@@ -97,6 +97,8 @@ import { openCodeRoutes, type ProviderListResponse } from "./routes.ts";
 import { issueSessionToolsGrant, launchHomeKey } from "../../session-tools/index.ts";
 import { openCodeSessionToolsServerName } from "./session-tools.ts";
 import { Mutex } from "./util.ts";
+import { opencodeProfilePoolKey } from "../../../session-profiles/manifest/opencode.ts";
+import { loadProfileManifest, ProfileLaunchError } from "../profile-manifest.ts";
 
 const ADAPTER_ID: AgentAdapterId = "opencode";
 const OPENCODE_REF_ID = "opencode";
@@ -744,6 +746,7 @@ class OpenCodeAdapterImpl implements AgentAdapter {
         `OpenCode runs one server per project under the system identity, so it cannot bind the '${input.home.kind}' account home. Use the system identity for OpenCode threads.`
       );
     }
+    await assertProfileServerPool(input);
     const cwd = resolvePath(input.cwd);
     // The SERVER is keyed by the project and the thread's pool key (global
     // unless its launch config names one); the thread's own `cwd` still
@@ -995,6 +998,7 @@ class OpenCodeAdapterImpl implements AgentAdapter {
         `OpenCode runs one server per project under the system identity, so it cannot bind the '${input.home.kind}' account home.`
       );
     }
+    await assertProfileServerPool(input);
     const live = this.sessions.get(input.sourceThreadId);
     const source = live?.forkSource(input.cut.firstRemovedTurnId) ?? {
       sessionId: parseOpenCodeResume(input.sourceResumeCursor)?.sessionId ?? null,
@@ -1089,6 +1093,24 @@ interface ServerRef {
 /** A server's identity as one string, for the recycle bookkeeping. NUL cannot occur in a path. */
 function serverIdOf(server: ServerRef): string {
   return `${server.projectDir}\u0000${server.poolKey}`;
+}
+
+/**
+ * Agent Profiles: OpenCode reads no per-thread profile — a profile thread is isolated ONLY by
+ * running on its prepared version's keyed server (`serverPool.key` =
+ * {@link opencodeProfilePoolKey}, its env pointing the server at the version's config). A
+ * profile start or fork without that key (the account's global server, another version's key)
+ * would run with the GLOBAL setup, so it is refused — as is one whose manifest does not load.
+ */
+async function assertProfileServerPool(input: Pick<StartSessionInput, "profile" | "serverPool">): Promise<void> {
+  if (input.profile === undefined) return;
+  await loadProfileManifest(input, "opencode");
+  const expected = opencodeProfilePoolKey(input.profile.profileId, input.profile.preparedDir);
+  if (input.serverPool?.key !== expected) {
+    throw new ProfileLaunchError(
+      "This chat's Agent Profile was not handed its own OpenCode server, so the agent was not started (it would have run with the Global setup). Try again in a moment."
+    );
+  }
 }
 
 /**

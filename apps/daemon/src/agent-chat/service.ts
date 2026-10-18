@@ -1198,10 +1198,10 @@ export class AgentChatService {
     // (`null` = Global). A fork of an unattended chat is unattended too.
     const requestedProfile = requestedProfileId(body.profileId, true);
     const unattended = body.unattended === true || this.chat.isUnattended(parentId);
-    const childProfileId = requestedProfile === undefined ? (this.chat.profileOf(parentId) ?? null) : requestedProfile;
+    let childProfileId = requestedProfile === undefined ? (this.chat.profileOf(parentId) ?? null) : requestedProfile;
     let launchFields = this.accountLaunchFields(entry, adapter, launch);
     // Absent: the host gives the child the parent's own (its `launch.json`).
-    let profileFields: Pick<ForkHostThreadRequest, "profile" | "profileId"> =
+    let profileFields: Pick<ForkHostThreadRequest, "profile" | "profileId" | "profileFallback"> =
       requestedProfile === null ? { profile: null, profileId: null } : {};
     if (childProfileId !== null) {
       try {
@@ -1215,16 +1215,25 @@ export class AgentChatService {
         launchFields = resolved.fields;
         profileFields = { profile: resolved.profile, profileId: resolved.profile.profileId };
       } catch (error) {
-        // The parent's profile was deleted: an interactive fork goes ahead under the account's
-        // launch, naming no profile — the child inherits the parent's on the host, and its first
-        // session start falls back to Global with the notice, as the parent's next start does
-        // (§5.6). A profile the request named, an unattended fork, or any other refusal fails.
+        // The parent's profile was deleted: an interactive fork goes ahead as Global under the
+        // account's launch, SAID explicitly (inheriting would hand the child the parent's
+        // `launch.json` version, which the delete may have collected — a native fork reads it),
+        // with the §5.6 notice on the child. A profile the request named, an unattended fork, or
+        // any other refusal fails.
         const inheritedAndGone =
           error instanceof ChatSessionError &&
           error.code === "PROFILE_NOT_FOUND" &&
           requestedProfile === undefined &&
           !unattended;
         if (!inheritedAndGone) throw error;
+        const profiles = this.sessionProfiles ?? this.opts.sessionProfiles ?? null;
+        const name = await Promise.resolve(profiles?.profileName?.(childProfileId)).catch(() => undefined);
+        profileFields = {
+          profile: null,
+          profileId: null,
+          profileFallback: { previousProfileId: childProfileId, notice: deletedProfileNotice(name) }
+        };
+        childProfileId = null;
       }
     }
     const { launchEnv } = launchFields;
@@ -1407,6 +1416,9 @@ export class AgentChatService {
             const resolved = await this.profileLaunch({ profileId, adapter, accountId, projectPath: tab.projectPath, base: fields });
             fields = resolved.fields;
             profileFields = { profile: resolved.profile, profileId: resolved.profile.profileId };
+          } else if (this.hostSupportsSessionProfiles()) {
+            // A Global child (asked for, or a deleted profile's fallback): never the parent's.
+            profileFields = { profile: null, profileId: null };
           }
           await this.prepareHome(adapter, fields.launchEnv, tab.projectPath);
           launchFields = fields;

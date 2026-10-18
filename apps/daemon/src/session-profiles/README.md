@@ -148,7 +148,10 @@ server's `XDG_CONFIG_HOME`: `buildXdgConfigShadow` of the real `~/.config` minus
   shadow's symlinks — the one launch-time write into a published version.
 - **Launch.** `serverPool {key: "profile:<profileId>:<version dir>", env: {XDG_CONFIG_HOME,
   OPENCODE_CONFIG_DIR, OPENCODE_DISABLE_EXTERNAL_SKILLS: "1", OPENCODE_DISABLE_CLAUDE_CODE: "1"},
-  unsetEnv: ["OPENCODE_CONFIG"]}`; the thread's `launchEnv`/`homePath` stay the account's (OpenCode's
+  unsetEnv: ["OPENCODE_CONFIG"]}` (`opencodeProfilePoolKey`, in `manifest/opencode.ts`: the
+  adapter refuses a profile start or fork whose `serverPool.key` is not its version's — OpenCode
+  reads no per-thread profile, so any other server would run the Global setup); the thread's
+  `launchEnv`/`homePath` stay the account's (OpenCode's
   shared servers read the project's launcher env). `XDG_DATA_HOME` and `OPENCODE_CONFIG_CONTENT`
   are untouched (OpenCode merges the latter last). A new version is a new key: the thread moves at
   its next start and the old server closes once idle.
@@ -289,8 +292,11 @@ notice (`Agent Profile "X" was deleted; this chat now uses Global.` — the name
 `store.deletedName`: `store.delete` records the profile's last name in
 `<appdir>/daemon/session-profiles/deleted.json` (`sessionProfileDeletedFile`) before removing it,
 so the notice names it after a restart too), and the tab mirrors Global.
-An account switch or a fork of such a chat goes ahead without naming the profile and leaves the
-fallback to the next start's refresh. **Unattended** launches never fall back:
+An account switch of such a chat goes ahead without naming the profile and leaves the fallback to
+the next start's refresh. A fork of one is made Global explicitly (`profile: null` — inheriting
+would hand the child the parent's `launch.json` version, which the delete may have collected) with
+`ForkHostThreadRequest.profileFallback`, which the host appends to the child as the same notice
+row; an unattended fork is refused. **Unattended** launches never fall back:
 `CreateAgentChatSessionFields.unattended` / `ForkSessionRequest.unattended` (persisted as
 `sessionChatRecordSchema.unattended`; a fork of an unattended chat is unattended) make every later
 refresh refuse `PROFILE_NOT_FOUND`. A create naming a missing or failed profile fails either way.

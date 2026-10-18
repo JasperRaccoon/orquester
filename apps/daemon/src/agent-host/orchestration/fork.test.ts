@@ -505,6 +505,38 @@ describe("forkThread", () => {
     await host.stop();
   });
 
+  it("a Global fork of a deleted profile's chat carries the daemon's fallback notice onto the child", async () => {
+    const parentProfile = { profileId: "p1", revision: "3", preparedDir: "/prepared/p1/claude/shared" };
+    const claude = createScriptedAdapter({ id: "claude" });
+    const host = createTestHost({ adapters: { claude } });
+    const parentId = await host.createThread({ threadId: "parent", refId: "claude", profile: parentProfile });
+    const first = await runTurn(host, claude, parentId, "first", "one");
+    const notice = 'Agent Profile "Video" was deleted; this chat now uses Global.';
+    const child = await host.orchestrator.forkThread(parentId, {
+      ...forkRequest("child", "claude", { messageId: first.replyId }),
+      profile: null,
+      profileId: null,
+      profileFallback: { previousProfileId: "p1", notice }
+    });
+    await host.settle();
+    assert.equal(child.head.profileId, undefined, "Global");
+    const row = activitiesOf(host, "child").find((activity) => activity.activityKind === "runtime.warning");
+    assert.equal(row?.summary, notice);
+    assert.deepEqual(
+      { profileId: (row?.payload as Record<string, unknown>).profileId, previousProfileId: (row?.payload as Record<string, unknown>).previousProfileId },
+      { profileId: null, previousProfileId: "p1" }
+    );
+
+    // A fallback beside a profile is not one: no notice.
+    await host.orchestrator.forkThread(parentId, {
+      ...forkRequest("child-2", "claude", { messageId: first.replyId }),
+      profileFallback: { previousProfileId: "p1", notice }
+    });
+    await host.settle();
+    assert.equal(activitiesOf(host, "child-2").some((activity) => activity.activityKind === "runtime.warning"), false);
+    await host.stop();
+  });
+
   it("links the child to its parent's secrets before its first event, native or transcript — never more", async () => {
     const links: Array<{ threadId: string; parentThreadId: string; childEventsBefore: number }> = [];
     let host: TestHost | undefined;

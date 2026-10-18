@@ -306,15 +306,19 @@ test("a fork inherits the parent's profile under the parent's account unless the
   await f.cleanup();
 });
 
-test("a fork of a chat whose profile was deleted goes ahead interactively (the child falls back at its start), never unattended", async () => {
+test("a fork of a chat whose profile was deleted goes ahead interactively as Global with the notice, never unattended", async () => {
   const f = await makeFixture();
   f.profiles.set("doomed", "ready");
   const parent = await create(f, { profileId: "doomed" });
   f.profiles.set("doomed", "deleted");
-  await f.service.forkSession(parent.id, {}, 1);
+  const child = await f.service.forkSession(parent.id, {}, 1);
   const body = f.forks[0]!.body;
-  assert.equal("profile" in body, false, "the host gives the child the parent's; its refresh falls back with the notice");
+  // Global now, said explicitly: the parent's launch.json names a version the delete may have collected.
+  assert.equal(body.profile, null);
+  assert.equal(body.profileId, null);
+  assert.deepEqual(body.profileFallback, { previousProfileId: "doomed", notice: "This chat's Agent Profile was deleted; it now uses Global." });
   assert.equal(body.launchEnv?.CODEX_HOME, "/homes/acc-1");
+  assert.equal(child.session.profileId, null, "the tab mirrors Global");
   await assert.rejects(
     f.service.forkSession(parent.id, { unattended: true }, 2),
     (e: unknown) => e instanceof ChatSessionError && e.code === "PROFILE_NOT_FOUND"

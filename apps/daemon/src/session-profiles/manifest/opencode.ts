@@ -21,8 +21,17 @@
  *   }
  */
 
+import { basename } from "node:path";
 import { z } from "zod";
 import { preparedRelativePath } from "./claude.ts";
+
+/**
+ * The pool key of a prepared version: the profile and the version dir's (never reused) name. The
+ * launch contribution sets it; the agent host's adapter refuses a profile start without it.
+ */
+export function opencodeProfilePoolKey(profileId: string, preparedDir: string): string {
+  return `profile:${profileId}:${basename(preparedDir)}`;
+}
 
 export const opencodePreparedSectionSchema = z
   .object({

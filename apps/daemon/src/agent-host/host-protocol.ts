@@ -674,6 +674,13 @@ export interface ForkHostThreadRequest extends Omit<CreateHostThreadRequest, "pr
   /** A mirror of `profile`'s id (`null` for Global), checked like create's. */
   profileId?: string | null;
   /**
+   * With `profile: null` only: the child is Global because the parent's profile was deleted (an
+   * interactive fork — spec §5.6). The host appends `notice` to the child as the same
+   * `runtime.warning` row a session start's fallback writes. Additive: an older host ignores it
+   * (the child is Global all the same, without the row).
+   */
+  profileFallback?: { previousProfileId: string; notice: string };
+  /**
    * The daemon's reconcile of a fork whose answer it lost: answer the child
    * `threadId` names if this host holds it (or once the fork creating it is
    * done), and never create one — 404 `THREAD_NOT_FOUND` when there is none.

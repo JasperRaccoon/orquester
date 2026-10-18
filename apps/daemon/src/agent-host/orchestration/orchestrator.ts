@@ -4169,6 +4169,14 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
    * agree with it: a `profileId` alone — or a profile that does not read —
    * would otherwise launch the thread as Global, so it is refused.
    */
+  /** `ForkHostThreadRequest.profileFallback`, field-wise; undefined when it does not read. */
+  const parseProfileFallback = (raw: unknown): { previousProfileId: string; notice: string } | undefined => {
+    if (typeof raw !== "object" || raw === null) return undefined;
+    const { previousProfileId, notice } = raw as Record<string, unknown>;
+    if (typeof previousProfileId !== "string" || typeof notice !== "string" || notice.trim() === "") return undefined;
+    return { previousProfileId: previousProfileId.slice(0, 128), notice: notice.slice(0, 500) };
+  };
+
   const requestedProfile = (
     request: { profile?: unknown; profileId?: unknown },
     opts: { allowGlobal: boolean }
@@ -4441,6 +4449,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         "The parent chat's Agent Profile is not known to the agent host; choose a profile for the fork."
       );
     }
+    // The daemon made the child Global because the parent's profile was deleted: its notice.
+    const fallback = requested === null ? parseProfileFallback(request.profileFallback) : undefined;
     const lineage: ThreadLineage = {
       parentThreadId,
       relation: "fork",
@@ -4515,6 +4525,15 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       lineage,
       profile: childProfile,
       afterCreate: async () => {
+        if (fallback !== undefined) {
+          await appendActivity(runtime, {
+            kind: "runtime.warning",
+            tone: "info",
+            turnId: null,
+            summary: fallback.notice,
+            payload: { profileId: null, previousProfileId: fallback.previousProfileId, reason: "profile-deleted" }
+          });
+        }
         if (strategy === "native") {
           await copyRetainedPages(parentThreadId, threadId, parent.state.activities, cut.retained);
         }
