@@ -11,8 +11,11 @@
  *                             = the REPO's `.claude/skills` and `.agents/skills` (the two disable
  *                             flags drop them with the user ones) and, when built-ins are hidden,
  *                             `permission.skill` denying `customize-opencode`. SECRETS: 0600.
- *     AGENTS.md               the profile's instructions (OpenCode reads `<config dir>/AGENTS.md`
- *                             as THE global instruction file once OPENCODE_CONFIG_DIR is set)
+ *     AGENTS.md               the profile's instructions, ALWAYS written (empty without any):
+ *                             OpenCode takes the first existing of `<config dir>/AGENTS.md` and
+ *                             `~/.claude/CLAUDE.md` as THE global instruction file and skips an
+ *                             empty one, so the user's CLAUDE.md never loads; the launch refuses a
+ *                             version without it
  *     skills/<name>/          the profile's skills
  *     commands/<name>.md      the profile's commands (`git/pr` → `commands/git/pr.md`)
  *     plugin/                 every top-level `*.js`/`*.ts`/`*.mjs` of each profile plugin's cache,
@@ -44,7 +47,7 @@
  * touches `opencode/`, a real entry a tool created in the shadow, or the real `~/.config`.
  *
  * LAUNCH. `serverPool { key: "profile:<profileId>:<version dir>", env: {XDG_CONFIG_HOME,
- * OPENCODE_CONFIG_DIR, OPENCODE_DISABLE_EXTERNAL_SKILLS=1, OPENCODE_DISABLE_CLAUDE_CODE=1,
+ * OPENCODE_CONFIG_DIR, OPENCODE_DISABLE_EXTERNAL_SKILLS=1, OPENCODE_DISABLE_CLAUDE_CODE_SKILLS=1,
  * OPENCODE_TEST_HOME},
  * unsetEnv: [OPENCODE_CONFIG] }` — a new version is a new key, so an edited profile starts a new
  * server at the thread's next start and the old one closes once idle (the pool's idle close).
@@ -52,9 +55,9 @@
  * `OPENCODE_CONFIG_CONTENT` (loaded LAST by OpenCode, so it still wins) are left as they are;
  * nothing goes into the thread's own `launchEnv`, which OpenCode's shared servers do not read.
  *
- * Known limits (OpenCode 1.18.34): `OPENCODE_DISABLE_CLAUDE_CODE` also stops the repo-`CLAUDE.md`
- * fallback (a repo with `CLAUDE.md` and no `AGENTS.md` loads no project instructions), and
- * `$HOME/.opencode` is kept out only through the undocumented `OPENCODE_TEST_HOME` (above).
+ * Project instructions load as in Global (verified on 1.18.34 with the real system prompt): the
+ * repo's `AGENTS.md`, else its `CLAUDE.md`. Known limits (OpenCode 1.18.34): `$HOME/.opencode` is
+ * kept out only through the undocumented `OPENCODE_TEST_HOME` (above).
  * OpenCode 1.18.34 reads no project `.mcp.json` in Global or here.
  */
 
@@ -88,7 +91,7 @@ import type { ResolvedMcpServer } from "../resolve.ts";
  * Bump the leading number when the prepared output changes for the same inputs. The suffix follows
  * the status plugin's source, so a new plugin re-prepares every OpenCode profile.
  */
-export const OPENCODE_PREPARER_VERSION = `2.${createHash("sha256").update(openCodeStatusPluginSource()).digest("hex").slice(0, 8)}`;
+export const OPENCODE_PREPARER_VERSION = `3.${createHash("sha256").update(openCodeStatusPluginSource()).digest("hex").slice(0, 8)}`;
 
 /** OpenCode's one built-in skill (1.18.34); denied when the profile hides built-ins. */
 export const OPENCODE_BUILTIN_SKILLS = ["customize-opencode"] as const;
@@ -96,8 +99,12 @@ export const OPENCODE_BUILTIN_SKILLS = ["customize-opencode"] as const;
 /** The repo's own skill folders, brought back by `skills.paths` (relative to the session's directory). */
 export const OPENCODE_PROJECT_SKILL_PATHS = [".claude/skills", ".agents/skills"] as const;
 
-/** The variables a profile server starts with (besides the two dirs). */
-export const OPENCODE_PROFILE_FLAGS = { OPENCODE_DISABLE_EXTERNAL_SKILLS: "1", OPENCODE_DISABLE_CLAUDE_CODE: "1" } as const;
+/**
+ * The variables a profile server starts with (besides the dirs): the user's `~/.claude/skills` and
+ * `~/.agents/skills` off. Not `OPENCODE_DISABLE_CLAUDE_CODE`: it also drops a repo's own
+ * `CLAUDE.md`; the `~/.claude/CLAUDE.md` fallback is stopped by the always-present `AGENTS.md`.
+ */
+export const OPENCODE_PROFILE_FLAGS = { OPENCODE_DISABLE_EXTERNAL_SKILLS: "1", OPENCODE_DISABLE_CLAUDE_CODE_SKILLS: "1" } as const;
 
 /** Removed from a profile server's env: an extra config FILE the launcher env may name (user items). */
 export const OPENCODE_PROFILE_UNSET = ["OPENCODE_CONFIG"] as const;
@@ -257,10 +264,10 @@ async function prepareOpenCode(ctx: SessionProfilePrepareContext<"opencode">): P
   };
   await writeNew(join(configDir, CONFIG_FILE), `${JSON.stringify(config, null, 2)}\n`, 0o600);
 
+  // ALWAYS written, empty without instructions: OpenCode takes the first of `<config dir>/AGENTS.md`
+  // and `~/.claude/CLAUDE.md` that exists as the global instructions, and skips an empty file.
   const instructions = resolved.instructions.trim();
-  if (instructions.length > 0) {
-    await writeNew(join(configDir, INSTRUCTIONS_FILE), `${instructions}\n`, 0o600);
-  }
+  await writeNew(join(configDir, INSTRUCTIONS_FILE), instructions.length > 0 ? `${instructions}\n` : "", 0o600);
 
   const skills: string[] = [];
   for (const skill of resolved.skills) {
@@ -368,6 +375,10 @@ export async function opencodeLaunchContribution(ctx: ProfileLaunchContext<"open
   const configDir = join(preparedDir, section.configDir);
   const launcherConfigHome = ctx.launchEnv.XDG_CONFIG_HOME;
   const realConfigHome = launcherConfigHome !== undefined && isAbsolute(launcherConfigHome) ? launcherConfigHome : section.realConfigHome;
+  if (!(await lstat(join(configDir, INSTRUCTIONS_FILE)).then((info) => info.isFile(), () => false))) {
+    // Without it OpenCode would read the user's ~/.claude/CLAUDE.md as the global instructions.
+    throw new Error(`The prepared OpenCode config's ${INSTRUCTIONS_FILE} is missing (an older or damaged preparation); prepare the profile again.`);
+  }
   const testHome = section.testHome;
   if (testHome?.verified !== true) {
     const userHome = section.userHome ?? homedir();

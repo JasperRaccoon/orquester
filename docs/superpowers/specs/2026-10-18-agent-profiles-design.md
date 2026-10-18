@@ -369,7 +369,10 @@ read once per server, so per-chat config is impossible on a shared server. The p
   `~/.opencode` leaked until it was set). Undocumented, so preparation probes the installed binary
   and records whether it honours it; while unproven, a `~/.opencode` holding config refuses the
   profile at preparation and at every launch.
-- `OPENCODE_DISABLE_EXTERNAL_SKILLS=1`, `OPENCODE_DISABLE_CLAUDE_CODE=1`; keep `XDG_DATA_HOME`
+- `OPENCODE_DISABLE_EXTERNAL_SKILLS=1`, `OPENCODE_DISABLE_CLAUDE_CODE_SKILLS=1` (not the broad
+  `OPENCODE_DISABLE_CLAUDE_CODE`, which also drops a repo's own `CLAUDE.md`); the config dir's
+  `AGENTS.md` is always written (empty without instructions — OpenCode skips an empty file), since
+  OpenCode reads the first existing of `<config dir>/AGENTS.md` and `~/.claude/CLAUDE.md`; keep `XDG_DATA_HOME`
   (auth.json and the session DB stay shared — verified concurrent servers on one data dir) and
   `OPENCODE_CONFIG_CONTENT` as today.
 - `opencode.json` (§6.0 carry-over plus) `"skills": { "paths": [".claude/skills", ".agents/skills"] }`
@@ -566,9 +569,13 @@ Decisions made while building, each checked against the code. Code names use the
   probes the registry's binary (a canary command in a sandboxed fake `~/.opencode`, loaded without
   the variable and not with it, ~3 s once per binary); when unproven, a `~/.opencode` with config
   files or item dirs refuses preparation and every launch with `PROFILE_NOT_READY`.
-- Known limits (1.18.34): `OPENCODE_DISABLE_CLAUDE_CODE` also drops a repo's `CLAUDE.md` fallback
-  (a repo without `AGENTS.md` gets no project instructions); `$HOME/.opencode` relies on an
-  undocumented variable (above);
+- Instructions (verified on 1.18.34 by reading the system prompt OpenCode sends a local fake
+  provider): `OPENCODE_DISABLE_CLAUDE_CODE_SKILLS=1` replaces `OPENCODE_DISABLE_CLAUDE_CODE=1`, and
+  `<version>/opencode/AGENTS.md` is always written (empty without instructions), so the user's
+  `~/.claude/CLAUDE.md` never loads (it would as the fallback when that file is missing;
+  `OPENCODE_TEST_HOME` also moves that lookup) while the repo's `AGENTS.md`, else its `CLAUDE.md`,
+  loads exactly as in Global. The launch refuses a version without the file.
+- Known limits (1.18.34): `$HOME/.opencode` relies on an undocumented variable (above);
   OpenCode reads no project `.mcp.json` in Global or in a profile; npm plugins are not copyable.
 
 **Verification (§8)** — per-agent preparer and launch unit tests; opt-in live checks

@@ -37,6 +37,8 @@ interface FixtureOptions {
   cliBin?: (root: string) => Promise<string>;
   /** Files written under the fake user's `~/.opencode` before preparing. */
   opencodeHome?: Record<string, string>;
+  /** The profile's instructions ("Be brief.\n" by default). */
+  instructions?: string;
 }
 
 const SECRETS = { env: "sekret-env-value-1", header: "Bearer sekret-header-value-2" };
@@ -122,7 +124,7 @@ async function fixture(settings: Partial<ResolvedAgentProfile["settings"]> = {},
     name: "Dev Kit",
     agent: "opencode",
     settings: { hideBuiltinSkills: true, claudeWorkflowTool: true, ...settings },
-    instructions: "Be brief.\n",
+    instructions: options.instructions ?? "Be brief.\n",
     skills: [{ id: "sk1", name: "review", description: "Review code", dir: skillDir, skillFile: join(skillDir, "SKILL.md") }],
     commands: [
       { id: "c1", name: "git/pr", description: "Open a PR", file: prFile },
@@ -220,7 +222,7 @@ describe("OpenCode preparer", () => {
     assert.equal(preparerFor("opencode"), opencodePreparer);
     assert.equal(opencodePreparer.perAccount, false);
     assert.equal(opencodePreparer.version, OPENCODE_PREPARER_VERSION);
-    assert.match(OPENCODE_PREPARER_VERSION, /^2\.[0-9a-f]{8}$/);
+    assert.match(OPENCODE_PREPARER_VERSION, /^3\.[0-9a-f]{8}$/);
     const homes = { opencodeDir: "/h/.config/opencode" } as AgentHomes;
     assert.deepEqual(opencodePreparer.inputs?.({ agent: "opencode", accountKey: "shared", accountHome: null, systemHomes: homes, appdir: "/a" }), [
       "/h/.config/opencode/config.json",
@@ -357,6 +359,12 @@ describe("OpenCode preparer", () => {
     assert.equal(g.section.testHome?.verified, false);
   });
 
+  it("always writes AGENTS.md — empty without instructions — so OpenCode never falls back to ~/.claude/CLAUDE.md", async () => {
+    const f = await fixture({}, undefined, { instructions: "  \n" });
+    assert.equal(await readFile(join(f.preparedDir, "opencode", "AGENTS.md"), "utf8"), "");
+    assert.equal((await stat(join(f.preparedDir, "opencode", "AGENTS.md"))).mode & 0o777, 0o600);
+  });
+
   it("fails with the reason when a Global config file does not parse", async () => {
     await assert.rejects(fixture({}, "{ not json"), /The Global OpenCode config .*opencode\.jsonc could not be read/);
   });
@@ -376,7 +384,7 @@ describe("OpenCode launch contribution", () => {
           XDG_CONFIG_HOME: join(f.preparedDir, "xdg"),
           OPENCODE_CONFIG_DIR: join(f.preparedDir, "opencode"),
           OPENCODE_DISABLE_EXTERNAL_SKILLS: "1",
-          OPENCODE_DISABLE_CLAUDE_CODE: "1",
+          OPENCODE_DISABLE_CLAUDE_CODE_SKILLS: "1",
           OPENCODE_TEST_HOME: join(f.preparedDir, "home")
         },
         unsetEnv: ["OPENCODE_CONFIG"]
@@ -412,6 +420,12 @@ describe("OpenCode launch contribution", () => {
     await write(join(verified.home, ".opencode", "agents", "a.md"), "a");
     const contribution = await opencodeLaunchContribution(contributionContext(verified));
     assert.equal(contribution.serverPool?.env?.OPENCODE_TEST_HOME, join(verified.preparedDir, "home"));
+  });
+
+  it("refuses a version without AGENTS.md (an older preparation) instead of letting ~/.claude/CLAUDE.md in", async () => {
+    const f = await fixture();
+    await rm(join(f.preparedDir, "opencode", "AGENTS.md"));
+    await assert.rejects(opencodeLaunchContribution(contributionContext(f)), /AGENTS\.md is missing/);
   });
 
   it("refreshes the shadow at every launch: new entries linked, gone ones and a stray `opencode` link removed", async () => {
@@ -478,6 +492,7 @@ describe("a profile's keyed OpenCode server", () => {
     "OPENCODE_CONFIG_DIR",
     "OPENCODE_DISABLE_EXTERNAL_SKILLS",
     "OPENCODE_DISABLE_CLAUDE_CODE",
+    "OPENCODE_DISABLE_CLAUDE_CODE_SKILLS",
     "OPENCODE_TEST_HOME",
     "OPENCODE_CONFIG",
     "OPENCODE_CONFIG_CONTENT",
@@ -519,6 +534,7 @@ describe("a profile's keyed OpenCode server", () => {
         OPENCODE_CONFIG_DIR: null,
         OPENCODE_DISABLE_EXTERNAL_SKILLS: null,
         OPENCODE_DISABLE_CLAUDE_CODE: null,
+        OPENCODE_DISABLE_CLAUDE_CODE_SKILLS: null,
         OPENCODE_TEST_HOME: null,
         OPENCODE_CONFIG: "/user/extra.json",
         OPENCODE_CONFIG_CONTENT: '{"orquester":true}',
@@ -528,7 +544,9 @@ describe("a profile's keyed OpenCode server", () => {
         XDG_CONFIG_HOME: join(f.preparedDir, "xdg"),
         OPENCODE_CONFIG_DIR: join(f.preparedDir, "opencode"),
         OPENCODE_DISABLE_EXTERNAL_SKILLS: "1",
-        OPENCODE_DISABLE_CLAUDE_CODE: "1",
+        // Not the broad flag: it would drop a repo's own CLAUDE.md too.
+        OPENCODE_DISABLE_CLAUDE_CODE: null,
+        OPENCODE_DISABLE_CLAUDE_CODE_SKILLS: "1",
         OPENCODE_TEST_HOME: join(f.preparedDir, "home"),
         OPENCODE_CONFIG: null,
         // Orquester's injected settings still reach it (OpenCode merges them last), and the data dir is shared.

@@ -14,10 +14,16 @@
  *
  * The profile run uses exactly the env the launch contribution gives the keyed server; a Global
  * run of the same fixture is checked too, so every "absent" below is a real absence.
+ *
+ * Instructions are only assembled for a model request, so the second check runs `opencode run`
+ * against a local fake OpenAI-compatible provider (an in-test HTTP server, no key, no network)
+ * and reads the system prompt OpenCode sent it.
  */
 
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { accessSync, constants } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, readlink, rm, symlink, writeFile } from "node:fs/promises";
 import { delimiter, join, relative } from "node:path";
@@ -106,6 +112,12 @@ async function world(root: string) {
 
   const repo = join(root, "work", "repo");
   await write(join(repo, "AGENTS.md"), "REPO INSTRUCTIONS\n");
+  // Shadowed by AGENTS.md in Global; the same in a profile.
+  await write(join(repo, "CLAUDE.md"), "REPO CLAUDE SHADOWED\n");
+  // A repo with only CLAUDE.md: OpenCode's project-instruction fallback.
+  const claudeOnlyRepo = join(root, "work", "claude-only");
+  await write(join(claudeOnlyRepo, "CLAUDE.md"), "REPO CLAUDE ONLY\n");
+  await mkdir(join(claudeOnlyRepo, ".git"), { recursive: true });
   await write(join(repo, ".claude", "skills", "repo-skill", "SKILL.md"), skill("repo-skill"));
   await write(join(repo, ".agents", "skills", "repo-agents-skill", "SKILL.md"), skill("repo-agents-skill"));
   await write(join(repo, ".opencode", "skills", "repo-oc-skill", "SKILL.md"), skill("repo-oc-skill"));
@@ -172,12 +184,19 @@ async function world(root: string) {
     launchEnv: {}
   });
   assert.ok(contribution.serverPool?.env !== undefined);
-  return { home, xdg, globalDir, repo, preparedDir, section, serverPool: contribution.serverPool };
+  return { home, xdg, globalDir, repo, claudeOnlyRepo, preparedDir, section, serverPool: contribution.serverPool };
 }
 
 type World = Awaited<ReturnType<typeof world>>;
 
-function run(w: World, mode: string, args: string[], extra: Record<string, string>, unset: readonly string[] = []): Promise<string> {
+function run(
+  w: World,
+  mode: string,
+  args: string[],
+  extra: Record<string, string>,
+  unset: readonly string[] = [],
+  cwd: string = w.repo
+): Promise<string> {
   const state = join(w.home, "..", `state-${mode}`);
   const env: Record<string, string> = {
     PATH: process.env.PATH ?? "",
@@ -196,11 +215,62 @@ function run(w: World, mode: string, args: string[], extra: Record<string, strin
   };
   for (const name of unset) delete env[name];
   return new Promise((resolve, reject) => {
-    execFile(BIN!, args, { cwd: w.repo, env, timeout: CLI_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024 }, (error, stdout, stderr) => {
+    const child = execFile(BIN!, args, { cwd, env, timeout: CLI_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024 }, (error, stdout, stderr) => {
       if (error) reject(new Error(`opencode ${args.join(" ")} failed: ${error.message}\n${stderr}`));
       else resolve(stdout);
     });
+    // `opencode run` reads a piped stdin to its end.
+    child.stdin?.end();
   });
+}
+
+/** A local OpenAI-compatible endpoint that records the system prompt of every chat request. */
+async function fakeProvider(): Promise<{ config: string; systems: string[]; close(): Promise<void> }> {
+  const systems: string[] = [];
+  const server = createServer((req, res) => {
+    let body = "";
+    req.on("data", (chunk: Buffer) => (body += chunk.toString("utf8")));
+    req.on("end", () => {
+      const request = JSON.parse(body || "{}") as { stream?: boolean; messages?: Array<{ role: string; content: unknown }> };
+      for (const message of request.messages ?? []) {
+        if (message.role !== "system") continue;
+        systems.push(typeof message.content === "string" ? message.content : JSON.stringify(message.content));
+      }
+      const base = { id: "c1", created: 1, model: "m" };
+      if (request.stream === true) {
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        const chunk = (choice: object): string => `data: ${JSON.stringify({ ...base, object: "chat.completion.chunk", choices: [choice] })}\n\n`;
+        res.write(chunk({ index: 0, delta: { role: "assistant", content: "ok" }, finish_reason: null }));
+        res.write(chunk({ index: 0, delta: {}, finish_reason: "stop" }));
+        res.end("data: [DONE]\n\n");
+      } else {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ...base, object: "chat.completion", choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }] }));
+      }
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+  const config = JSON.stringify({
+    provider: { fake: { npm: "@ai-sdk/openai-compatible", name: "Fake", options: { baseURL: `http://127.0.0.1:${port}/v1`, apiKey: "none" }, models: { m: { name: "m" } } } },
+    model: "fake/m",
+    small_model: "fake/m"
+  });
+  return { config, systems, close: () => new Promise<void>((resolve) => server.close(() => resolve())) };
+}
+
+/** The `Instructions from: <path>` files and the full system prompt of one `opencode run`. */
+async function instructions(w: World, mode: string, cwd: string, extra: Record<string, string>, unset: readonly string[] = []) {
+  const provider = await fakeProvider();
+  try {
+    await run(w, mode, ["run", "hello", "-m", "fake/m"], { ...extra, OPENCODE_CONFIG_CONTENT: provider.config }, unset, cwd);
+  } finally {
+    await provider.close();
+  }
+  // The main agent's request is the one with the environment block; the title agent's has none.
+  const system = provider.systems.find((text) => text.includes("<env>")) ?? "";
+  assert.notEqual(system, "", "the main agent's request reached the fake provider");
+  return { files: [...system.matchAll(/Instructions from: (\S+)/g)].map((match) => match[1]).sort(), system };
 }
 
 interface Observed {
@@ -274,5 +344,44 @@ describe("OpenCode profile isolation (real CLI)", { skip, timeout: 4 * CLI_TIMEO
       added.every((path) => /^(node_modules|package\.json|package-lock\.json|bun\.lock|\.gitignore)(\/|$)/.test(path)),
       added.join(", ")
     );
+  });
+
+  it("instructions: the profile's and the repo's own (AGENTS.md, else CLAUDE.md) as in Global; never the user's", async () => {
+    const root = await mkdtemp(join(TMP, "orq-opencode-live-"));
+    roots.push(root);
+    const w = await world(root);
+    const profileEnv = w.serverPool.env!;
+    const profileUnset = w.serverPool.unsetEnv ?? [];
+    const profileAgents = join(w.preparedDir, "opencode", "AGENTS.md");
+
+    const [globalAgents, globalClaude, profileAgentsRepo, profileClaude] = await Promise.all([
+      instructions(w, "i-global-a", w.repo, {}),
+      instructions(w, "i-global-c", w.claudeOnlyRepo, {}),
+      instructions(w, "i-profile-a", w.repo, profileEnv, profileUnset),
+      instructions(w, "i-profile-c", w.claudeOnlyRepo, profileEnv, profileUnset)
+    ]);
+    // Global baseline: its AGENTS.md and the repo's AGENTS.md (a shadowed CLAUDE.md does not load).
+    assert.deepEqual(globalAgents.files, [join(w.globalDir, "AGENTS.md"), join(w.repo, "AGENTS.md")].sort());
+    assert.deepEqual(globalClaude.files, [join(w.globalDir, "AGENTS.md"), join(w.claudeOnlyRepo, "CLAUDE.md")].sort());
+    // The profile: its AGENTS.md, and the repo's files exactly as in Global.
+    assert.deepEqual(profileAgentsRepo.files, [profileAgents, join(w.repo, "AGENTS.md")].sort());
+    assert.deepEqual(profileClaude.files, [profileAgents, join(w.claudeOnlyRepo, "CLAUDE.md")].sort());
+    for (const { system } of [profileAgentsRepo, profileClaude]) {
+      assert.match(system, /PROFILE INSTRUCTIONS/);
+      for (const absent of ["USER CLAUDE MEMORY", "GLOBAL INSTRUCTIONS", "claude-user-skill", "linked-skill", "agents-user-skill", "global-oc-skill"]) {
+        assert.ok(!system.includes(absent), `the profile's prompt has no ${absent}`);
+      }
+    }
+
+    // A profile without instructions: an empty AGENTS.md, so ~/.claude/CLAUDE.md never steps in.
+    await writeFile(profileAgents, "");
+    const empty = await instructions(w, "i-profile-empty", w.claudeOnlyRepo, profileEnv, profileUnset);
+    assert.deepEqual(empty.files, [join(w.claudeOnlyRepo, "CLAUDE.md")]);
+    assert.ok(!empty.system.includes("USER CLAUDE MEMORY"));
+    // Control: without that file (and without OPENCODE_TEST_HOME, which moves that lookup too)
+    // OpenCode does fall back to the user's CLAUDE.md — why the file is always written.
+    await rm(profileAgents);
+    const none = await instructions(w, "i-profile-none", w.claudeOnlyRepo, profileEnv, [...profileUnset, "OPENCODE_TEST_HOME"]);
+    assert.deepEqual(none.files, [join(w.home, ".claude", "CLAUDE.md"), join(w.claudeOnlyRepo, "CLAUDE.md")].sort());
   });
 });

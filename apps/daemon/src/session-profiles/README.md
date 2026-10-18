@@ -134,7 +134,9 @@ Shared by every account (`perAccount: false`); `inputs` = the Global `config.jso
 `OPENCODE_CONFIG_DIR`: `opencode.json` 0600 = the Global files merged as OpenCode merges them minus
 the item keys, relative `{file:}` refs made absolute, plus the profile's `mcp`, `skills.paths`
 `[".claude/skills", ".agents/skills"]` and, when built-ins are hidden, a last `permission.skill`
-rule denying `customize-opencode`; `AGENTS.md`; `skills/`; `commands/` — a command OpenCode could
+rule denying `customize-opencode`; `AGENTS.md`, always written — empty without instructions —
+because OpenCode takes the first existing of it and `~/.claude/CLAUDE.md` (an empty file adds
+nothing), and the launch refuses a version without it; `skills/`; `commands/` — a command OpenCode could
 not decode is left out with a warning, it would fail the whole config —; `plugin/` with each
 plugin's top-level `*.js`/`*.ts`/`*.mjs` and Orquester's `orquester-status.js`), `xdg/` (the
 server's `XDG_CONFIG_HOME`: `buildXdgConfigShadow` of the real `~/.config` minus `opencode`) and
@@ -158,7 +160,7 @@ server's `XDG_CONFIG_HOME`: `buildXdgConfigShadow` of the real `~/.config` minus
   launch (the real `~/.config` changes without a profile edit). The refresh only manages the
   shadow's symlinks — the one launch-time write into a published version.
 - **Launch.** `serverPool {key: "profile:<profileId>:<version dir>", env: {XDG_CONFIG_HOME,
-  OPENCODE_CONFIG_DIR, OPENCODE_DISABLE_EXTERNAL_SKILLS: "1", OPENCODE_DISABLE_CLAUDE_CODE: "1",
+  OPENCODE_CONFIG_DIR, OPENCODE_DISABLE_EXTERNAL_SKILLS: "1", OPENCODE_DISABLE_CLAUDE_CODE_SKILLS: "1",
   OPENCODE_TEST_HOME},
   unsetEnv: ["OPENCODE_CONFIG"]}`; the thread's `launchEnv`/`homePath` stay the account's (OpenCode's
   shared servers read the project's launcher env). `XDG_DATA_HOME` and `OPENCODE_CONFIG_CONTENT`
@@ -167,12 +169,15 @@ server's `XDG_CONFIG_HOME`: `buildXdgConfigShadow` of the real `~/.config` minus
 - **Status plugin.** The profile server's only copy is `opencode/plugin/orquester-status.js`
   (a profile plugin file of that name is skipped): the shadow never links `opencode`, so the real
   `~/.config/opencode/plugin/` is never read nor written through.
-- **Known limits (1.18.34).** `OPENCODE_DISABLE_CLAUDE_CODE` also drops a repo's `CLAUDE.md`
-  fallback (no `AGENTS.md` → no project instructions); `$HOME/.opencode` is kept out only through
+- **Instructions.** Not `OPENCODE_DISABLE_CLAUDE_CODE` (it also drops a repo's own `CLAUDE.md`):
+  the repo's `AGENTS.md`, else its `CLAUDE.md`, loads as in Global, never `~/.claude/CLAUDE.md`
+  (checked live against the system prompt OpenCode sends a local fake provider).
+- **Known limits (1.18.34).** `$HOME/.opencode` is kept out only through
   the undocumented `OPENCODE_TEST_HOME` (refused when that is not proven and it holds config).
   OpenCode reads no project `.mcp.json`, in Global or here.
 - Live check (opt-in, real CLI, no login): `ORQUESTER_OPENCODE_LIVE=1` runs
-  `preparers/opencode-isolation.live.test.ts` (`opencode debug skill|config|agent build`).
+  `preparers/opencode-isolation.live.test.ts` (`opencode debug skill|config|agent build`, and
+  `opencode run` against an in-test fake OpenAI-compatible provider for the instructions).
 
 ## Preparation lifecycle (`lifecycle.ts`)
 
