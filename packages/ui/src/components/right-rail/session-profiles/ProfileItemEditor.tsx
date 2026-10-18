@@ -12,9 +12,14 @@
  * agent when its scope names one, else Claude's (the widest MCP transports).
  * An item an agent cannot load is skipped for that agent and the row says so.
  *
- * A save that lands folds the fresh profile into the store and closes; a
- * stale revision (409) reloads the profile and offers Reload here; a refusal
- * after the editor closed lands in the panel's notice.
+ * A save reads the profile's revision when it is sent (queued behind the
+ * profile's other changes), so a change to another item meanwhile does not
+ * void the draft; only a change to the item being edited sends the revision
+ * it was read at (`itemSaveRevision`). A save that lands folds the fresh
+ * profile into the store and closes; a stale revision (409) reloads the
+ * profile, then keeps the draft to save again when what it edits did not
+ * change, else offers Reload here; a refusal after the editor closed lands in
+ * the panel's notice.
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -31,10 +36,17 @@ import {
 import { useApi } from "../../../context/orquester-context";
 import { useMediaQuery } from "../../../hooks/use-media-query";
 import type { ApiClient } from "../../../lib/api-client";
-import { PROFILE_KIND_LABELS, scopeLabel } from "../../../lib/session-profiles/logic";
+import {
+  itemSaveRevision,
+  itemUnchanged,
+  PROFILE_KIND_LABELS,
+  scopeLabel,
+  type ItemSaveBase
+} from "../../../lib/session-profiles/logic";
 import { sanitizeSessionProfileItemDetail } from "../../../lib/session-profiles/sanitize";
 import {
   applySessionProfileWrite,
+  queueSessionProfileWrite,
   reloadAfterConflict,
   sessionProfileDetailEntry,
   setSessionProfilesNotice
@@ -102,6 +114,7 @@ export function sessionProfileErrorPlacement(info: ProfileErrorInfo): ProfileErr
 }
 
 const SAVED_NOTICE = "Saved — new chats with this profile use it.";
+const KEPT_AFTER_CONFLICT = "The profile changed elsewhere and has been reloaded; your draft is kept — save again to apply it.";
 
 interface SessionEditorContext {
   profileId: string;
@@ -126,7 +139,13 @@ interface SubmitState {
   placement: ProfileErrorPlacement | null;
 }
 
-/** One save at a time; its refusal placed (`sessionProfileErrorPlacement`); a 409 reloads the profile. */
+/**
+ * One save at a time; its refusal placed (`sessionProfileErrorPlacement`).
+ * `send` runs queued behind the profile's other changes and its answer is
+ * folded in there. A 409 reloads the profile; `draftStillApplies` (after the
+ * reload) says whether what the draft edits is unchanged — then the draft is
+ * kept to save again, else "Changed" offers Reload.
+ */
 function useSessionSubmit() {
   const env = useEditorEnv();
   const session = useSessionEditor();
@@ -134,27 +153,31 @@ function useSessionSubmit() {
   const inFlight = useRef(false);
 
   const run = useCallback(
-    async (send: () => Promise<unknown>, answer: "mutation" | "detail") => {
+    async (send: () => Promise<unknown>, answer: "mutation" | "detail", draftStillApplies: () => boolean | Promise<boolean>) => {
       if (inFlight.current) return;
       inFlight.current = true;
       setState({ busy: true, error: null, placement: null });
       env.setSaving(true);
       try {
-        const raw = await send();
+        const itemId = await queueSessionProfileWrite(session.profileId, async () => applySessionProfileWrite(await send(), answer));
         inFlight.current = false;
         env.setSaving(false);
-        const itemId = applySessionProfileWrite(raw, answer);
         session.done(itemId);
       } catch (error) {
+        const info = profileError(error);
+        let kept = false;
+        if (info.code === "PROFILE_CONFLICT") {
+          await reloadAfterConflict(env.api, session.profileId);
+          kept = await Promise.resolve(draftStillApplies()).catch(() => false);
+        }
         inFlight.current = false;
         env.setSaving(false);
-        const info = profileError(error);
-        if (info.code === "PROFILE_CONFLICT") reloadAfterConflict(env.api, session.profileId);
         if (!session.alive()) {
           setSessionProfilesNotice({ tone: "error", text: `Your change was not saved: ${info.message}` });
           return;
         }
-        setState({ busy: false, error: info, placement: sessionProfileErrorPlacement(info) });
+        if (kept) setState({ busy: false, error: { code: null, message: KEPT_AFTER_CONFLICT }, placement: "general" });
+        else setState({ busy: false, error: info, placement: sessionProfileErrorPlacement(info) });
       }
     },
     [env, session]
@@ -274,10 +297,28 @@ function currentRevision(profileId: string): string | null {
   return sessionProfileDetailEntry(profileId).detail?.revision ?? null;
 }
 
+/** An item save: sent with the revision read when it goes out (`itemSaveRevision`); `base` null for a new item. */
+function useItemSave(base: ItemSaveBase | null) {
+  const { api } = useEditorEnv();
+  const { profileId } = useSessionEditor();
+  const submit = useSessionSubmit();
+  const save = (draft: SessionProfileItemDraft) =>
+    void submit.run(
+      () => {
+        const revision = itemSaveRevision(sessionProfileDetailEntry(profileId).detail, base);
+        if (revision === null) return Promise.reject(new Error("The profile is not loaded — close this and try again."));
+        return sendItem(api as ApiClient, profileId, revision, base?.item.id ?? null, draft);
+      },
+      "mutation",
+      () => base === null || itemUnchanged(sessionProfileDetailEntry(profileId).detail, base)
+    );
+  return { submit, save };
+}
+
 const CreateBody: React.FC<{ kind: Exclude<SessionProfileItemKind, "plugin"> }> = ({ kind }) => {
   const { profileId } = useSessionEditor();
-  const [revision] = useState(() => currentRevision(profileId));
-  if (revision === null) {
+  const [loaded] = useState(() => currentRevision(profileId) !== null);
+  if (!loaded) {
     return (
       <EditorShell title={`New ${PROFILE_KIND_LABELS[kind].one}`} primary={null} cancelLabel="Close">
         <Banner tone="error">The profile is not loaded — close this and try again.</Banner>
@@ -286,11 +327,11 @@ const CreateBody: React.FC<{ kind: Exclude<SessionProfileItemKind, "plugin"> }> 
   }
   switch (kind) {
     case "mcp":
-      return <McpBody revision={revision} />;
+      return <McpBody />;
     case "hook":
-      return <HookBody revision={revision} />;
+      return <HookBody />;
     default:
-      return <MarkdownBody kind={kind} revision={revision} />;
+      return <MarkdownBody kind={kind} />;
   }
 };
 
@@ -348,15 +389,16 @@ const EditLoader: React.FC<{ itemId: string }> = ({ itemId }) => {
     );
   }
   const { detail, revision } = load;
+  const base: ItemSaveBase = { revision, item: detail.item };
   switch (detail.kind) {
     case "mcp":
-      return <McpBody key={load.seq} revision={revision} detail={detail} onReload={reload} />;
+      return <McpBody key={load.seq} base={base} detail={detail} onReload={reload} />;
     case "hook":
-      return <HookBody key={load.seq} revision={revision} detail={detail} onReload={reload} />;
+      return <HookBody key={load.seq} base={base} detail={detail} onReload={reload} />;
     case "plugin":
       return <PluginDetails detail={detail} />;
     default:
-      return <MarkdownBody key={load.seq} kind={detail.kind} revision={revision} detail={detail} onReload={reload} />;
+      return <MarkdownBody key={load.seq} kind={detail.kind} base={base} detail={detail} onReload={reload} />;
   }
 };
 
@@ -387,9 +429,8 @@ const scopeKey = (scope: SessionProfileAgentScope) => (scope === "all" ? "all" :
 
 type McpDetail = Extract<SessionProfileItemDetail, { kind: "mcp" }>;
 
-const McpBody: React.FC<{ revision: string; detail?: McpDetail; onReload?: () => void }> = ({ revision, detail, onReload }) => {
-  const { api } = useEditorEnv();
-  const { profileId, profileName } = useSessionEditor();
+const McpBody: React.FC<{ base?: ItemSaveBase; detail?: McpDetail; onReload?: () => void }> = ({ base, detail, onReload }) => {
+  const { profileName } = useSessionEditor();
   const touch = useTouch();
   const [initialScope] = useState<SessionProfileAgentScope>(() => detail?.item.agents ?? defaultScopeFor("mcp"));
   const [scope, setScope] = useState(initialScope);
@@ -398,7 +439,7 @@ const McpBody: React.FC<{ revision: string; detail?: McpDetail; onReload?: () =>
   const [initial] = useState(() => initialMcpForm(formAgentFor(initialScope), detail?.mcp));
   const [form, setForm] = useState<McpForm>(initial);
   const [showErrors, setShowErrors] = useState(false);
-  const submit = useSessionSubmit();
+  const { submit, save: saveItem } = useItemSave(base ?? null);
   const validation = validateMcpForm(agent, form);
   const scopeProblem = sessionProfileScopeProblem("mcp", scope);
   useReportDirty(mcpFormSignature(form) !== mcpFormSignature(initial) || scopeKey(scope) !== scopeKey(initialScope));
@@ -416,8 +457,7 @@ const McpBody: React.FC<{ revision: string; detail?: McpDetail; onReload?: () =>
       setShowErrors(true);
       return;
     }
-    const draft: SessionProfileItemDraft = { kind: "mcp", agents: scope, mcp: mcpDraftFromForm(agent, form, origin) };
-    void submit.run(() => sendItem(api, profileId, revision, detail?.item.id ?? null, draft), "mutation");
+    saveItem({ kind: "mcp", agents: scope, mcp: mcpDraftFromForm(agent, form, origin) });
   };
 
   return (
@@ -457,14 +497,13 @@ const McpBody: React.FC<{ revision: string; detail?: McpDetail; onReload?: () =>
 
 type MarkdownDetail = Extract<SessionProfileItemDetail, { kind: "skill" | "command" }>;
 
-const MarkdownBody: React.FC<{ kind: MarkdownKind; revision: string; detail?: MarkdownDetail; onReload?: () => void }> = ({
+const MarkdownBody: React.FC<{ kind: MarkdownKind; base?: ItemSaveBase; detail?: MarkdownDetail; onReload?: () => void }> = ({
   kind,
-  revision,
+  base,
   detail,
   onReload
 }) => {
-  const { api } = useEditorEnv();
-  const { profileId, profileName } = useSessionEditor();
+  const { profileName } = useSessionEditor();
   const touch = useTouch();
   const [initialScope] = useState<SessionProfileAgentScope>(() => detail?.item.agents ?? defaultScopeFor(kind));
   const [scope, setScope] = useState(initialScope);
@@ -473,7 +512,7 @@ const MarkdownBody: React.FC<{ kind: MarkdownKind; revision: string; detail?: Ma
   const [initial] = useState<MarkdownForm>(() => initialMarkdownForm(model, detail?.item.name ?? "", detail?.document.body ?? ""));
   const [form, setForm] = useState<MarkdownForm>(initial);
   const [showErrors, setShowErrors] = useState(false);
-  const submit = useSessionSubmit();
+  const { submit, save: saveItem } = useItemSave(base ?? null);
   const validation = validateMarkdownForm(kind, model, form);
   const scopeProblem = sessionProfileScopeProblem(kind, scope);
   useReportDirty(JSON.stringify(form) !== JSON.stringify(initial) || scopeKey(scope) !== scopeKey(initialScope));
@@ -492,9 +531,7 @@ const MarkdownBody: React.FC<{ kind: MarkdownKind; revision: string; detail?: Ma
       return;
     }
     const document = markdownDraftFromForm(kind, model, form);
-    const draft: SessionProfileItemDraft =
-      kind === "skill" ? { kind: "skill", agents: scope, document } : { kind: "command", agents: scope, document };
-    void submit.run(() => sendItem(api, profileId, revision, detail?.item.id ?? null, draft), "mutation");
+    saveItem(kind === "skill" ? { kind: "skill", agents: scope, document } : { kind: "command", agents: scope, document });
   };
 
   return (
@@ -544,9 +581,8 @@ const MarkdownBody: React.FC<{ kind: MarkdownKind; revision: string; detail?: Ma
 
 type HookDetail = Extract<SessionProfileItemDetail, { kind: "hook" }>;
 
-const HookBody: React.FC<{ revision: string; detail?: HookDetail; onReload?: () => void }> = ({ revision, detail, onReload }) => {
-  const { api } = useEditorEnv();
-  const { profileId, profileName } = useSessionEditor();
+const HookBody: React.FC<{ base?: ItemSaveBase; detail?: HookDetail; onReload?: () => void }> = ({ base, detail, onReload }) => {
+  const { profileName } = useSessionEditor();
   const touch = useTouch();
   const [initialScope] = useState<SessionProfileAgentScope>(() => detail?.item.agents ?? defaultScopeFor("hook"));
   const [scope, setScope] = useState(initialScope);
@@ -554,7 +590,7 @@ const HookBody: React.FC<{ revision: string; detail?: HookDetail; onReload?: () 
   const [initial] = useState<HookForm>(() => initialHookForm(formAgentFor(initialScope), detail?.hook));
   const [form, setForm] = useState<HookForm>(initial);
   const [showErrors, setShowErrors] = useState(false);
-  const submit = useSessionSubmit();
+  const { submit, save: saveItem } = useItemSave(base ?? null);
   const originalEvent = agent === formAgentFor(initialScope) ? detail?.hook.event : undefined;
   const validation = validateHookForm(agent, form, originalEvent);
   const scopeProblem = sessionProfileScopeProblem("hook", scope);
@@ -581,8 +617,7 @@ const HookBody: React.FC<{ revision: string; detail?: HookDetail; onReload?: () 
       setShowErrors(true);
       return;
     }
-    const draft: SessionProfileItemDraft = { kind: "hook", agents: scope, hook: hookDraftFromForm(form) };
-    void submit.run(() => sendItem(api, profileId, revision, detail?.item.id ?? null, draft), "mutation");
+    saveItem({ kind: "hook", agents: scope, hook: hookDraftFromForm(form) });
   };
 
   return (
@@ -675,7 +710,17 @@ const InstructionsBody: React.FC = () => {
 
   const save = () => {
     if (!loaded) return;
-    void submit.run(() => api.writeSessionProfileInstructions(profileId, loaded.revision, text), "detail");
+    // The revision the instructions were read at; after a 409 they are read again, and when
+    // only something else changed the draft is kept with the new revision.
+    void submit.run(() => api.writeSessionProfileInstructions(profileId, loaded.revision, text), "detail", async () => {
+      const raw = await (api as ApiClient).readSessionProfileInstructions(profileId);
+      const record = typeof raw === "object" && raw !== null ? (raw as unknown as Record<string, unknown>) : {};
+      const fresh = typeof record.text === "string" ? record.text : "";
+      const revision = typeof record.revision === "string" ? record.revision : null;
+      if (revision === null || fresh !== loaded.text) return false;
+      setLoad({ status: "loaded", text: fresh, revision });
+      return true;
+    });
   };
 
   return (

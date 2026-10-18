@@ -96,11 +96,11 @@ function summary(revision: string, codex: "ready" | "preparing" | "failed" = "pr
   };
 }
 
-function detail(revision: string, codex: "ready" | "preparing" | "failed" = "preparing"): SessionProfileDetail {
+function detail(revision: string, codex: "ready" | "preparing" | "failed" = "preparing", shown: SessionProfileItem[] = items): SessionProfileDetail {
   return {
     ...summary(revision, codex),
     settings: { hideBuiltinSkills: { claude: true, codex: true, grok: true, opencode: true }, claudeWorkflowTool: true },
-    items,
+    items: shown,
     itemErrors: []
   };
 }
@@ -116,6 +116,23 @@ interface Server {
   updates: { itemId: string; body: unknown }[];
   gets: number;
   conflictNext: boolean;
+  creates: { body: unknown }[];
+  /** Refuse the next item create / update with 409 PROFILE_CONFLICT, the profile moved to this revision. */
+  writeConflictNext: string | null;
+  /** What the profile's items read as (another client's change). */
+  items: SessionProfileItem[];
+}
+
+/** A write carrying another revision than the server's is refused, as the daemon does. */
+function writeCheck(server: Server, body: unknown): void {
+  if (server.writeConflictNext !== null) {
+    server.revision = server.writeConflictNext;
+    server.writeConflictNext = null;
+  }
+  if ((body as { revision: string }).revision !== server.revision) {
+    throw Object.assign(new Error("conflict"), { status: 409, body: { error: { code: "PROFILE_CONFLICT", message: "The profile changed." } } });
+  }
+  server.revision = String(Number(server.revision) + 1);
 }
 
 function fakeApi(server: Server): ApiClient {
@@ -127,7 +144,7 @@ function fakeApi(server: Server): ApiClient {
     }),
     getSessionProfile: async () => {
       server.gets += 1;
-      return detail(server.revision);
+      return detail(server.revision, "preparing", server.items);
     },
     setSessionProfileItemEnabled: async (_profileId: string, itemId: string, revision: string, enabled: boolean) => {
       if (server.conflictNext) {
@@ -163,7 +180,13 @@ function fakeApi(server: Server): ApiClient {
     },
     updateSessionProfileItem: async (_profileId: string, itemId: string, body: unknown) => {
       server.updates.push({ itemId, body });
-      return { profile: detail(server.revision), itemId };
+      writeCheck(server, body);
+      return { profile: detail(server.revision, "preparing", server.items), itemId };
+    },
+    createSessionProfileItem: async (_profileId: string, body: unknown) => {
+      server.creates.push({ body });
+      writeCheck(server, body);
+      return { profile: detail(server.revision, "preparing", server.items), itemId: "new" };
     }
   } as unknown as ApiClient;
 }
@@ -176,7 +199,7 @@ describe("Agent Profiles panel", () => {
   beforeEach(() => {
     mock.timers.enable({ apis: ["setTimeout"] });
     resetSessionProfiles();
-    server = { uses: [[]], deletes: [], usesChangedNext: false, revision: "1", toggles: [], updates: [], gets: 0, conflictNext: false };
+    server = { uses: [[]], deletes: [], usesChangedNext: false, revision: "1", toggles: [], updates: [], gets: 0, conflictNext: false, creates: [], writeConflictNext: null, items };
     const mount = document.createElement("div");
     document.body.replaceChildren(mount);
     root = createRoot(mount);
@@ -331,6 +354,79 @@ describe("Agent Profiles panel", () => {
     assert.equal(body.draft.kind, "mcp");
     assert.equal(body.draft.agents, "all");
     assert.deepEqual(body.draft.mcp.env, [{ key: "JIRA_TOKEN", keep: true }]);
+  });
+
+  const type = async (selector: string, value: string) => {
+    const input = document.querySelector<HTMLInputElement>(selector);
+    assert.ok(input, `${selector} exists`);
+    const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, "value")!.set!;
+    await act(async () => {
+      setter.call(input, value);
+      input!.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+    });
+    await flush();
+  };
+
+  const moveProfile = async (revision: string, shown: SessionProfileItem[] = items) => {
+    server.revision = revision;
+    server.items = shown;
+    await act(async () => {
+      applySessionProfileEvent({ type: "sessionProfile.changed", payload: { profileId: "p1", revision } });
+    });
+    await flush();
+  };
+
+  const openJiraEditor = async () => {
+    await click([...document.querySelectorAll("button")].find((button) => button.textContent?.includes("More actions for jira")));
+    await click([...document.querySelectorAll('[role="menuitem"]')].find((item) => item.textContent?.trim() === "Edit"));
+    assert.ok(document.querySelector('[role="dialog"]'), "the editor opened");
+  };
+
+  it("a new item carries the revision held when it is sent; after a 409 the draft stays and the next save carries the reloaded one", async () => {
+    await openDeveloper();
+    await click([...document.querySelectorAll("button")].find((button) => /Add MCP/.test(button.textContent ?? "")));
+    await type('[role="dialog"] input[placeholder="jira-cloud"]', "linear");
+    await type('[role="dialog"] input[placeholder="npx"]', "linear-mcp");
+    // Another change lands while the editor is open.
+    await moveProfile("2");
+    await click(buttonByText("Add server"));
+    assert.deepEqual(server.creates.map((create) => (create.body as { revision: string }).revision), ["2"]);
+    assert.equal(document.querySelector('[role="dialog"]'), null, "saved and closed");
+
+    // The store missed a change: refused, reloaded, the draft kept, and saving again lands.
+    await click([...document.querySelectorAll("button")].find((button) => /Add MCP/.test(button.textContent ?? "")));
+    await type('[role="dialog"] input[placeholder="jira-cloud"]', "sentry");
+    await type('[role="dialog"] input[placeholder="npx"]', "sentry-mcp");
+    server.writeConflictNext = "7";
+    await click(buttonByText("Add server"));
+    assert.ok(document.querySelector('[role="dialog"]'), "still open");
+    assert.match(document.querySelector('[role="dialog"]')?.textContent ?? "", /save again/i);
+    assert.equal(document.querySelector<HTMLInputElement>('[role="dialog"] input[placeholder="jira-cloud"]')?.value, "sentry");
+    await click(buttonByText("Add server"));
+    assert.deepEqual(server.creates.map((create) => (create.body as { revision: string }).revision), ["2", "3", "7"]);
+    assert.equal(document.querySelector('[role="dialog"]'), null, "saved and closed");
+  });
+
+  it("an edit survives a change to another item, but not a change to the item it edits", async () => {
+    await openDeveloper();
+    await openJiraEditor();
+    await moveProfile("2", items.map((item) => (item.id === "s1" ? { ...item, enabled: false } : item)));
+    await click(buttonByText("Save"));
+    assert.equal((server.updates.at(-1)?.body as { revision: string }).revision, "2", "another item moved the revision: the draft applies");
+
+    await openJiraEditor();
+    server.writeConflictNext = "8";
+    await click(buttonByText("Save"));
+    assert.match(document.querySelector('[role="dialog"]')?.textContent ?? "", /save again/i, "another item's change: the draft stays");
+    await click(buttonByText("Save"));
+    assert.equal((server.updates.at(-1)?.body as { revision: string }).revision, "8");
+
+    await openJiraEditor();
+    await moveProfile("12", items.map((item) => (item.id === "m1" ? { ...item, name: "jira-2" } : item)));
+    await click(buttonByText("Save"));
+    assert.equal((server.updates.at(-1)?.body as { revision: string }).revision, "9", "this item changed: sent at the revision it was read at");
+    assert.match(document.querySelector('[role="dialog"]')?.textContent ?? "", /Changed on disk/);
+    assert.ok(buttonByText("Reload (discard my changes)"));
   });
 
   const openDeleteDialog = async () => {

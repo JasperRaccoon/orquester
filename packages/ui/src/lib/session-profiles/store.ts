@@ -402,15 +402,27 @@ function mutate(
 ): Promise<SessionProfileMutationResult> {
   bind(api);
   const at = generation;
-  const previous = mutationTails.get(profileId) ?? Promise.resolve();
   setPending(pendingKey, true);
-  const run = previous.then(() => mutateNow(api, profileId, pendingKey, send, answer, at));
-  const tail = run.then(() => undefined);
+  return queueSessionProfileWrite(profileId, () => mutateNow(api, profileId, pendingKey, send, answer, at));
+}
+
+/**
+ * Run `write` after every change of `profileId` already queued (the store's
+ * mutations and the editors' saves): it reads the revision when it runs, and
+ * folds its answer in before the next one starts.
+ */
+export function queueSessionProfileWrite<T>(profileId: string, write: () => Promise<T>): Promise<T> {
+  const previous = mutationTails.get(profileId) ?? Promise.resolve();
+  const result = previous.then(write);
+  const tail = result.then(
+    () => undefined,
+    () => undefined
+  );
   mutationTails.set(profileId, tail);
   void tail.then(() => {
     if (mutationTails.get(profileId) === tail) mutationTails.delete(profileId);
   });
-  return run;
+  return result;
 }
 
 async function mutateNow(
@@ -593,6 +605,6 @@ export function applySessionProfileWrite(raw: unknown, answer: "mutation" | "det
 }
 
 /** A 409 an editor got: reload the profile (the editor keeps its own copy and says so). */
-export function reloadAfterConflict(api: SessionProfilesApi, profileId: string): void {
-  void loadSessionProfile(api, profileId, { force: true });
+export function reloadAfterConflict(api: SessionProfilesApi, profileId: string): Promise<void> {
+  return loadSessionProfile(api, profileId, { force: true });
 }
