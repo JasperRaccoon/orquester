@@ -1,6 +1,9 @@
 # Agent Profiles (Orquester-managed, per-session) — design
 
-Status: draft for owner review. Supersedes the user-facing placement of
+Status: implemented (Orquester `feat/agent-profiles`, 2026-10-18). Where the build differs from
+the text below, §12 "Implementation notes and deviations" is authoritative; module docs live in
+`apps/daemon/src/session-profiles/README.md`, `apps/daemon/src/agent-isolation/README.md` and the
+agent-host README. Supersedes the user-facing placement of
 `2026-09-28-agent-profile-design.md`: the per-agent global-config editor described there keeps its
 behavior but moves from the right rail to **Settings → Agent config** (§5.4). Everything else in that
 spec stays valid for that editor.
@@ -465,3 +468,95 @@ staleness is tracked (hash of profile revision + CLI version is a reasonable key
   profile warns about workflows that use it (§5.5).
 - Profile chats work on the System account too, linking to the system home's login and history
   (§6.2).
+
+## 12. Implementation notes and deviations
+
+Decisions made while building, each checked against the code. Code names use the
+`SessionProfile…` prefix (`apps/daemon/src/session-profiles/`) so nothing collides with
+`agent-profile/`, which is now the Global editor (Settings → Agent config).
+
+**Storage and preparation (§4.4, §6.5)**
+- Profiles live under `<appdir>/daemon/session-profiles/` (`profiles/<id>/`, `prepared/`, `staging/`;
+  `packages/config` path helpers), not `agent-profiles/`.
+- Prepared directories are **versioned and immutable**: one key per (profile, agent, account key)
+  — per account for Codex only, `shared` for the others — holding `current.json` and
+  `v-<fingerprint>-<time>-<random>/` version dirs. A preparation builds in `staging/`, writes
+  `manifest.json` last, is renamed to a new version and flips `current.json`; a published version
+  is never modified (a running Codex/Grok/OpenCode process may be using it). The fingerprint is
+  the profile revision + the preparer's `version` + the CLI version + the content of the Global
+  files the preparer reads (`inputs`), so a Global config change re-prepares.
+- Old versions are garbage-collected only when unleased: the agent host reports the prepared dirs
+  of live sessions and starts in flight (`GET /profiles/leases`), plus a 10-minute grace after
+  `ensureReady` hands one out; when the host cannot answer, the pass removes nothing. At most two
+  preparations run at once.
+- **Refresh at every session start** (beyond §5.6/§7): before any provider start of a profile
+  thread (first start, resume, crash restart, host-restart rehydrate, switch) the host asks the
+  daemon's socket-only `threadLaunchProfile` route for the current version and launch fields and
+  rewrites `launch.json`. An edited profile therefore applies at the next start, and a GC'd
+  version never fails one. If the daemon cannot be asked, the persisted profile is used only while
+  its manifest still validates; otherwise the start fails (never Global).
+- Validation (§6.5) is per agent rather than a uniform CLI run at preparation: Codex validates the
+  seeded, linked home; Grok's `grok inspect --json` runs at every spawn (an inspect failure fails
+  the start); Claude and OpenCode are covered by their opt-in live checks
+  (`*.live.test.ts`) and the launch-time manifest read.
+- The daemon refuses profile launches while the agent host lacks the `sessionProfiles`
+  capability (an older host would run them as Global).
+- Deleted profile (§5.6): an interactive chat's next start answers the account's own launch with a
+  `runtime.warning` notice naming the profile; unattended chats (`unattended` persisted on the tab,
+  inherited by forks) are refused instead. `PROFILE_NOT_READY` / `PROFILE_UNSUPPORTED_AGENT` never
+  fall back.
+
+**Claude (§6.1)**
+- A prepared dir is shared by every account: the generated local plugin (profile skills and
+  commands), copied plugins, `instructions.md`, and an MCP file with the profile's servers and its
+  plugins' servers lifted at preparation (plugins then load with `skipMcpDiscovery`).
+- The profile's instructions are **appended to the system prompt**, not written as a CLAUDE.md.
+- `strictMcpConfig` would drop the project's `.mcp.json`, so the launch passes the project's
+  servers (minus `disabledMcpjsonServers`) explicitly; the `skills` allow-list would hide the
+  project's `.claude/` skills and commands, so their names are added to it.
+- `enabledPlugins: {<id>: false}` at the flag tier for every plugin in the account's
+  `installed_plugins.json` and every id the project's settings enable.
+- Flag-tier settings and MCP servers go through 0600 files under
+  `<appdir>/tmp/claude-profile-launch/<threadId>/` (`--settings`, `--mcp-config`), never argv.
+
+**Codex (§6.2)**
+- Seeding runs **inside `prepare`, in the staging dir** (the state DB records no path of its home,
+  so it survives the rename, and nothing can start on an unpublished home); `auth.json` is linked
+  only after the seed.
+- A preparer's `unusableReason` (state DB missing, e.g. after a Codex upgrade) makes every
+  `ensureReady` prepare a new version instead of answering the current one; the launch
+  contribution and the adapter also refuse an unseeded home.
+- The adapter forces `CODEX_HOME` to the prepared dir, fails a start whose `initialize` reports
+  another home, and switches off `$HOME/.agents/skills` (and any user skill outside the home) with
+  nested `skills.config` at every `thread/start` and `thread/resume`.
+- No opt-in live check against the real CLI exists for Codex; seeding is tested against a fake
+  `codex app-server`.
+
+**Grok (§6.3)**
+- **One shared `GROK_HOME` per prepared version**, not per thread. `config.toml` is rendered from
+  `profile/config.base.toml` **at every spawn** (fresh `[skills] ignore` incl. symlink targets, a
+  `[plugins] disabled` list from `grok inspect --json` run with cwd = the home), serialized per
+  home and swapped in by rename; the render does not depend on the thread, project or account.
+- Profile plugins are copied under `profile/plugins/` (so Grok's own plugin scan never sees them
+  twice) and passed with `--plugin-dir`, as is a generated plugin carrying the profile's hooks.
+
+**OpenCode (§6.4)**
+- Built-in skills are hidden with a last `permission.skill` rule denying `customize-opencode`, not
+  with an allow-list profile agent.
+- The server key is `profile:<profileId>:<version dir>`: an edit (a new version) moves a thread to
+  a new server at its next start and the old one closes once idle, instead of recycling the
+  profile's servers.
+- The `XDG_CONFIG_HOME` shadow is built at preparation and refreshed by the launch contribution at
+  every launch (the real `~/.config` changes without a profile edit); OpenCode's own writes
+  (`package.json`, `node_modules/`, …) stay inside the version dir.
+- Known limits (1.18.34): `OPENCODE_DISABLE_CLAUDE_CODE` also drops a repo's `CLAUDE.md` fallback
+  (a repo without `AGENTS.md` gets no project instructions); `$HOME/.opencode` is still read;
+  OpenCode reads no project `.mcp.json` in Global or in a profile; npm plugins are not copyable.
+
+**Verification (§8)** — per-agent preparer and launch unit tests; opt-in live checks
+(`ORQUESTER_CLAUDE_LIVE=1`, `ORQUESTER_GROK_LIVE=1` with `ORQUESTER_GROK_LIVE_AUTH`,
+`ORQUESTER_OPENCODE_LIVE=1`); and `apps/daemon/src/session-profiles/integration.test.ts`, which
+drives the real store, lifecycle, preparers, launch resolver, `AgentChatService`, agent-host
+server and each adapter's profile launch code against a temp HOME with symlinked Global skills:
+concurrent profiles per agent, Global unchanged, restart + edit, switch, delete, failed
+preparation.
