@@ -73,3 +73,17 @@ whole. Claude names a plugin skill `<plugin>:<dir>`. It names a plugin command
 allow-list matches an exact name or a `:<entry>` suffix.
 `generateClaudeLocalPlugin` returns the qualified ids as `allowlist`. Plugin
 commands must be on that list, or they vanish from the model's listing.
+
+**Claude names (`claude-names.ts`, §6.1).** A profile chat's `skills`
+allow-list hides every skill or command not on it, and `strictMcpConfig`
+drops the project's `.mcp.json` and plugin MCP servers, so the launcher names
+what must stay. Observed on 2.1.285 without a model call: a skill is its
+`SKILL.md` frontmatter `name`, else its directory; a command is its path with
+`:` between folders; a plugin's entries are prefixed `<plugin>:`, its
+`plugin.json` `skills` paths add to `skills/` and its `commands` paths replace
+`commands/`. Project skills and commands come from `.claude/` of the cwd and
+each ancestor below `$HOME`; project `.mcp.json` files from the cwd up to `/`,
+the nearest winning, loaded without approval in an SDK session minus
+`disabledMcpjsonServers`. `claudeInstalledPluginIds` reads
+`plugins/installed_plugins.json`: a project's `enabledPlugins` turns those on
+even without the user source, so the launcher switches them off.
