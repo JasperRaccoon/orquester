@@ -17,6 +17,8 @@ import {
   buildClaudeProbeOptions,
   buildClaudeQueryOptions
 } from "./launch.ts";
+import { claudeProfileLaunchFiles, type ClaudeProfileLaunch } from "./profile-launch.ts";
+import type { ClaudeSessionToolsLaunch } from "./session-tools.ts";
 import {
   compareVersions,
   meetsMinimumClaudeVersion,
@@ -345,5 +347,172 @@ describe("claude models and the version gate", () => {
     const model = MODELS.find((entry) => entry.slug === "default")!;
     assert.equal(model.subProvider, "claude-opus-4-8[1m]");
     assert.equal(model.isDefault, true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Agent Profiles (spec 2026-10-18 §6.0, §6.1)
+// ---------------------------------------------------------------------------
+
+const SESSION_TOOLS: ClaudeSessionToolsLaunch = {
+  server: { type: "sdk", name: "orquester", instance: {} as never },
+  instructions: "ORQUESTER BLOCK",
+  allowedTools: ["mcp__orquester__send_message"],
+  deny: ["orquester-daemon"],
+  names: () => new Set(["send_message"]),
+  release: () => {}
+};
+
+function profileLaunch(overrides: Partial<ClaudeProfileLaunch> = {}): ClaudeProfileLaunch {
+  return {
+    plugins: [
+      { type: "local", path: "/prepared/v-1/plugin" },
+      { type: "local", path: "/prepared/v-1/plugins/pl1", skipMcpDiscovery: true }
+    ],
+    skills: ["dev:review", "toolbox:fmt", "workflow-authoring", "proj-skill"],
+    instructions: "Be brief.",
+    hooks: { Stop: [{ hooks: [{ type: "command", command: "echo stop" }] }] },
+    disableWorkflows: false,
+    carriedSettings: {
+      model: "opus",
+      permissions: { allow: ["Bash(ls:*)"] },
+      env: { TOKEN: "carried-secret" },
+      alwaysThinkingEnabled: false,
+      autoMemoryEnabled: true,
+      deniedMcpServers: [{ serverCommand: ["evil"] }]
+    },
+    disabledPluginIds: ["gplug@mkt", "projplug@mkt"],
+    mcpServers: { search: { type: "stdio", command: "s", env: { API_KEY: "mcp-secret" } } },
+    ...overrides
+  };
+}
+
+const FILES = claudeProfileLaunchFiles("/appdir/tmp", "t1");
+
+function buildWith(profile: ClaudeProfileLaunch | undefined, modelSelection?: ModelSelection) {
+  return buildClaudeQueryOptions({
+    cwd: "/work/project",
+    executablePath: "/usr/local/bin/claude",
+    env: { PATH: "/usr/bin", HOME: "/home/orq", CLAUDE_CONFIG_DIR: "/homes/acc/home" },
+    runtimeMode: "approval-required",
+    models: MODELS,
+    ...(modelSelection !== undefined ? { modelSelection } : {}),
+    attachmentsDir: "/appdir/threads/t1/attachments",
+    canUseTool: noopCanUseTool,
+    sessionId: "11111111-2222-3333-4444-555555555555",
+    sessionTools: SESSION_TOOLS,
+    ...(profile !== undefined ? { profile: { launch: profile, files: FILES } } : {})
+  });
+}
+
+describe("claude launch — Agent Profile chats (spec 2026-10-18 §6.1)", () => {
+  it("a Global chat is untouched: user source, no strict MCP, no plugins, no skills, no launch files", () => {
+    const built = buildWith(undefined, { model: "default", options: [{ id: "thinking", value: true }] });
+    const { options } = built;
+    assert.deepEqual(options.settingSources, ["user", "project", "local"]);
+    assert.equal(options.strictMcpConfig, undefined);
+    assert.equal(options.plugins, undefined);
+    assert.equal(options.skills, undefined);
+    assert.equal(built.profileFiles, undefined);
+    assert.equal(typeof options.settings, "object");
+    assert.deepEqual(options.settings, {
+      alwaysThinkingEnabled: true,
+      showThinkingSummaries: true,
+      deniedMcpServers: [{ serverName: "orquester" }, { serverName: "orquester-daemon" }]
+    });
+    assert.equal(options.env?.ENABLE_CLAUDEAI_MCP_SERVERS, undefined);
+    assert.equal(options.env?.CLAUDE_CODE_DISABLE_AUTO_MEMORY, undefined);
+    assert.deepEqual(options.extraArgs, { "thinking-display": "summarized" });
+    assert.equal((options.systemPrompt as { append: string }).append.endsWith("ORQUESTER BLOCK"), true);
+    assert.deepEqual(Object.keys(options).sort(), [
+      "additionalDirectories",
+      "agentProgressSummaries",
+      "allowedTools",
+      "canUseTool",
+      "cwd",
+      "disallowedTools",
+      "env",
+      "extraArgs",
+      "includePartialMessages",
+      "mcpServers",
+      "model",
+      "pathToClaudeCodeExecutable",
+      "sessionId",
+      "settingSources",
+      "settings",
+      "systemPrompt",
+      "thinking"
+    ]);
+  });
+
+  it("a profile chat gets the §6.1 recipe", () => {
+    const { options } = buildWith(profileLaunch());
+    assert.deepEqual(options.settingSources, ["project", "local"]);
+    assert.equal(options.strictMcpConfig, true);
+    // Only Orquester's in-process server rides `mcpServers` (argv); the profile's are in the file.
+    assert.deepEqual(Object.keys(options.mcpServers ?? {}), ["orquester"]);
+    assert.deepEqual(options.allowedTools, ["mcp__orquester__send_message"]);
+    assert.deepEqual(options.disallowedTools, ["mcp__orquester-daemon"]);
+    assert.deepEqual(options.plugins, [
+      { type: "local", path: "/prepared/v-1/plugin" },
+      { type: "local", path: "/prepared/v-1/plugins/pl1", skipMcpDiscovery: true }
+    ]);
+    assert.deepEqual(options.skills, ["dev:review", "toolbox:fmt", "workflow-authoring", "proj-skill"]);
+    assert.equal(
+      (options.systemPrompt as { append: string }).append.endsWith("ORQUESTER BLOCK\n\nBe brief."),
+      true,
+      "the profile's instructions follow the runtime and Orquester blocks"
+    );
+    assert.equal(options.settings, FILES.settings, "settings ride a 0600 file, never argv");
+    assert.equal(options.extraArgs?.["mcp-config"], FILES.mcpConfig);
+    assert.equal(options.env?.CLAUDE_CONFIG_DIR, "/homes/acc/home", "the account's config dir stays");
+    assert.equal(options.env?.ENABLE_CLAUDEAI_MCP_SERVERS, "false");
+    assert.equal(options.env?.CLAUDE_CODE_DISABLE_AUTO_MEMORY, "1");
+  });
+
+  it("no secret reaches the options themselves (argv)", () => {
+    const serialized = JSON.stringify(buildWith(profileLaunch()).options, (_key, value) =>
+      typeof value === "function" ? undefined : value
+    );
+    assert.equal(serialized.includes("mcp-secret"), false);
+    assert.equal(serialized.includes("carried-secret"), false);
+  });
+
+  it("merges the settings: carried < chat keys < recipe; denials concatenated; plugins switched off", () => {
+    const built = buildWith(profileLaunch(), { model: "default", options: [{ id: "thinking", value: true }] });
+    assert.deepEqual(built.profileFiles?.settings, {
+      model: "opus",
+      permissions: { allow: ["Bash(ls:*)"] },
+      env: { TOKEN: "carried-secret" },
+      // The chat's chip beats the carried user setting.
+      alwaysThinkingEnabled: true,
+      showThinkingSummaries: true,
+      deniedMcpServers: [{ serverCommand: ["evil"] }, { serverName: "orquester" }, { serverName: "orquester-daemon" }],
+      enabledPlugins: { "gplug@mkt": false, "projplug@mkt": false },
+      hooks: { Stop: [{ hooks: [{ type: "command", command: "echo stop" }] }] },
+      // The recipe beats the carried `autoMemoryEnabled: true`.
+      autoMemoryEnabled: false,
+      syncClaudeAiSkills: false,
+      syncClaudeAiPlugins: false,
+      disableClaudeAiConnectors: true
+    });
+    assert.deepEqual(built.profileFiles?.mcpConfig, {
+      mcpServers: { search: { type: "stdio", command: "s", env: { API_KEY: "mcp-secret" } } }
+    });
+  });
+
+  it("the Workflow tool off adds disableWorkflows; no MCP server means no --mcp-config", () => {
+    const built = buildWith(profileLaunch({ disableWorkflows: true, mcpServers: {}, disabledPluginIds: [] }));
+    assert.equal(built.profileFiles?.settings.disableWorkflows, true);
+    assert.equal("enabledPlugins" in (built.profileFiles?.settings ?? {}), false);
+    assert.equal(built.profileFiles?.mcpConfig, undefined);
+    assert.equal(built.options.extraArgs?.["mcp-config"], undefined);
+  });
+
+  it("built-in skills shown: no `skills` option; no instructions: the append is unchanged", () => {
+    const { skills: _skills, ...rest } = profileLaunch();
+    const { options } = buildWith({ ...rest, instructions: "" });
+    assert.equal("skills" in options, false);
+    assert.equal((options.systemPrompt as { append: string }).append.endsWith("ORQUESTER BLOCK"), true);
   });
 });

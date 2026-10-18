@@ -35,7 +35,7 @@ import type {
   StartSessionInput
 } from "../../adapter.ts";
 import { AsyncEventQueue } from "./async-queue.ts";
-import { claudeConfigDir } from "./config-dir.ts";
+import { claudeConfigDir, claudeJsonPath } from "./config-dir.ts";
 import { readClaudeResumeCursor, type ClaudeResumeCursor } from "./cursor.ts";
 import { defaultClaudeAdapterDeps, type ClaudeAdapterDeps } from "./deps.ts";
 import { CLAUDE_FORK_EMPTY_HISTORY, forkClaudeConversation } from "./fork.ts";
@@ -57,6 +57,7 @@ import {
   probeClaudeVersion,
   type ClaudeProbeResult
 } from "./probe.ts";
+import { loadClaudeProfileLaunch } from "./profile-launch.ts";
 import { projectClaudeHistory } from "./project-history.ts";
 import { ClaudeSession } from "./session.ts";
 import type { ClaudeScopedLimitNames } from "./usage.ts";
@@ -259,6 +260,14 @@ export async function createClaudeAdapterWith(
     const env = context.buildEnv({ threadId: input.threadId, home: input.home });
     const cursor = readClaudeResumeCursor(input.resumeCursor, input.threadId);
 
+    // An Agent Profile thread launches from its prepared directory; one that cannot be read
+    // fails the start here — never a Global launch (spec 2026-10-18 §2).
+    const profileLaunch = await loadClaudeProfileLaunch(input, {
+      configDir: claudeConfigDir(env),
+      claudeJson: claudeJsonPath(env),
+      home: env.HOME ?? nodeOs.homedir()
+    });
+
     if (snapshot === undefined) {
       // A first session should not wait on a full probe, but it must not run
       // with an empty model catalogue either; the probe is cheap and cached.
@@ -279,6 +288,7 @@ export async function createClaudeAdapterWith(
       ...(cursor !== undefined ? { resumeCursor: cursor } : {}),
       ...(input.knownGoal !== undefined ? { knownGoal: input.knownGoal } : {}),
       ...(input.prefetchHistory === true ? { prefetchHistory: true } : {}),
+      ...(profileLaunch !== null ? { profileLaunch } : {}),
       scopedLimitNames,
       emit,
       onClosed: (closed) => {

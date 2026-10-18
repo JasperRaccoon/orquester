@@ -16,6 +16,7 @@
 import type { CanUseTool, Options as ClaudeQueryOptions } from "@anthropic-ai/claude-agent-sdk";
 import type { ModelSelection, ProviderModel, RuntimeMode } from "@orquester/api/agent-chat";
 
+import { CLAUDE_PROFILE_ENV, type ClaudeProfileLaunch, type ClaudeProfileLaunchFiles } from "./profile-launch.ts";
 import { claudeDeniedMcpServers, claudeDisallowedTools, type ClaudeSessionToolsLaunch } from "./session-tools.ts";
 import {
   CLAUDE_OPTION_IDS,
@@ -83,6 +84,11 @@ interface BuildClaudeQueryOptionsInput {
    * registered. `session-tools.ts`.
    */
   sessionTools?: ClaudeSessionToolsLaunch;
+  /**
+   * An Agent Profile chat (spec 2026-10-18 §6.1, `profile-launch.ts`) and where its launch files
+   * go. Absent = Global: the options are exactly what they were before profiles existed.
+   */
+  profile?: { launch: ClaudeProfileLaunch; files: ClaudeProfileLaunchFiles };
 }
 
 interface BuiltClaudeQueryOptions {
@@ -95,6 +101,12 @@ interface BuiltClaudeQueryOptions {
   basePermissionMode: NonNullable<ClaudeQueryOptions["permissionMode"]>;
   effort: "low" | "medium" | "high" | "xhigh" | "max" | undefined;
   model: string | undefined;
+  /**
+   * A profile chat's launch files, to be written (0600) at `input.profile.files` BEFORE the query
+   * starts: the flag-tier settings and, when there are servers, the `--mcp-config` file. They hold
+   * secrets, which is why `options` names their paths instead of carrying them in argv.
+   */
+  profileFiles?: { settings: Record<string, unknown>; mcpConfig?: { mcpServers: Record<string, unknown> } };
 }
 
 export function buildClaudeQueryOptions(
@@ -150,6 +162,12 @@ export function buildClaudeQueryOptions(
       ? `${CLAUDE_RUNTIME_INSTRUCTIONS}\n\n${input.sessionTools.instructions}`
       : CLAUDE_RUNTIME_INSTRUCTIONS;
 
+  const profile = input.profile;
+  const profileFiles = profile !== undefined ? buildProfileFiles(profile.launch, settings) : undefined;
+  if (profile !== undefined && profileFiles?.mcpConfig !== undefined) {
+    extraArgs["mcp-config"] = profile.files.mcpConfig;
+  }
+
   const options: ClaudeQueryOptions = {
     cwd: input.cwd,
     ...(modelSlug !== undefined && modelSlug.length > 0 ? { model: modelSlug } : {}),
@@ -157,16 +175,25 @@ export function buildClaudeQueryOptions(
     systemPrompt: {
       type: "preset",
       preset: "claude_code",
-      append
+      append:
+        profile !== undefined && profile.launch.instructions.length > 0
+          ? `${append}\n\n${profile.launch.instructions}`
+          : append
     },
-    settingSources: ["user", "project", "local"],
+    // A profile chat drops the user source: no user CLAUDE.md, rules, skills, commands, agents,
+    // MCP servers, hooks or settings (its runtime settings come back through `settings`, §6.0).
+    settingSources: profile !== undefined ? ["project", "local"] : ["user", "project", "local"],
     ...(effectiveEffort !== undefined ? { effort: effectiveEffort } : {}),
     ...(wantsThinkingSummaries
       ? { thinking: { type: "adaptive" as const, display: "summarized" as const } }
       : {}),
     ...(permissionMode !== undefined ? { permissionMode } : {}),
     ...(permissionMode === "bypassPermissions" ? { allowDangerouslySkipPermissions: true } : {}),
-    ...(Object.keys(settings).length > 0 ? { settings } : {}),
+    ...(profile !== undefined
+      ? { settings: profile.files.settings }
+      : Object.keys(settings).length > 0
+        ? { settings }
+        : {}),
     // §4.5: `resume` (cursor uuid) **or** `sessionId` (a fresh v4 uuid), never
     // both — the CLI's behaviour with both is undefined. Enforced here, in the
     // pure module the rows are tested against, rather than only in the caller.
@@ -184,7 +211,7 @@ export function buildClaudeQueryOptions(
     ...(input.onUserDialog !== undefined
       ? { onUserDialog: input.onUserDialog, supportedDialogKinds: ["resume_return"] }
       : {}),
-    env: input.env,
+    env: profile !== undefined ? { ...input.env, ...CLAUDE_PROFILE_ENV } : input.env,
     // The attachments grant lets the agent read every attachment it does not
     // get inline — a PDF, a CSV, a pasted-text file — at the absolute path the
     // turn text names (§4.1), without an approval prompt. It is a leaf
@@ -195,8 +222,16 @@ export function buildClaudeQueryOptions(
     // a registered toolkit. The daemon's terminal-shaped `/mcp` server stays
     // out of scope (§2). `strictMcpConfig` stays unset so the user's own
     // `.mcp.json` and user-scope servers keep loading as before.
+    //
+    // A profile chat sets `strictMcpConfig`: only `mcpServers` and the `--mcp-config` file (the
+    // profile's servers, its plugins' lifted ones and the project's `.mcp.json`) load — no user,
+    // local, plugin or claude.ai server. The in-process `orquester` server rides `mcpServers` as
+    // ever, so the session tools and their `allowedTools`/`disallowedTools` work unchanged.
     mcpServers:
       input.sessionTools !== undefined ? { [input.sessionTools.server.name]: input.sessionTools.server } : {},
+    ...(profile !== undefined ? { strictMcpConfig: true } : {}),
+    ...(profile !== undefined && profile.launch.plugins.length > 0 ? { plugins: [...profile.launch.plugins] } : {}),
+    ...(profile?.launch.skills !== undefined ? { skills: [...profile.launch.skills] } : {}),
     // Session tools never raise an approval card (§1.3): each one is
     // pre-approved by name in every permission mode (`session-tools.ts`).
     ...(input.sessionTools !== undefined ? { allowedTools: [...input.sessionTools.allowedTools] } : {}),
@@ -212,7 +247,44 @@ export function buildClaudeQueryOptions(
     options,
     basePermissionMode: permissionMode ?? "default",
     effort: effectiveEffort,
-    model: modelSlug
+    model: modelSlug,
+    ...(profileFiles !== undefined ? { profileFiles } : {})
+  };
+}
+
+/**
+ * A profile chat's flag-tier settings (spec §6.0, §6.1): the account's carried runtime settings,
+ * then the chat's own keys (thinking, fast mode, …), then the recipe's — the recipe wins.
+ * `deniedMcpServers` is the one list merged rather than replaced: the user's server-command/URL
+ * denials (policy) and the session tools' denials both stay. Every plugin the account installed
+ * or the project enables is switched off; the profile's own load by path and are unaffected.
+ */
+function buildProfileFiles(
+  launch: ClaudeProfileLaunch,
+  chatSettings: Readonly<Record<string, unknown>>
+): NonNullable<BuiltClaudeQueryOptions["profileFiles"]> {
+  const carried = launch.carriedSettings;
+  const denied = [
+    ...(Array.isArray(carried.deniedMcpServers) ? carried.deniedMcpServers : []),
+    ...(Array.isArray(chatSettings.deniedMcpServers) ? chatSettings.deniedMcpServers : [])
+  ];
+  const settings: Record<string, unknown> = {
+    ...carried,
+    ...chatSettings,
+    ...(denied.length > 0 ? { deniedMcpServers: denied } : {}),
+    ...(launch.disabledPluginIds.length > 0
+      ? { enabledPlugins: Object.fromEntries(launch.disabledPluginIds.map((id) => [id, false])) }
+      : {}),
+    hooks: launch.hooks,
+    autoMemoryEnabled: false,
+    syncClaudeAiSkills: false,
+    syncClaudeAiPlugins: false,
+    disableClaudeAiConnectors: true,
+    ...(launch.disableWorkflows ? { disableWorkflows: true } : {})
+  };
+  return {
+    settings,
+    ...(Object.keys(launch.mcpServers).length > 0 ? { mcpConfig: { mcpServers: { ...launch.mcpServers } } } : {})
   };
 }
 
