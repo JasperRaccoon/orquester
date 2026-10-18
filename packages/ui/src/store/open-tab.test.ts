@@ -11,7 +11,15 @@ import { beforeEach, describe, it } from "node:test";
 import type { ProjectSummary, SessionSummary } from "@orquester/api";
 
 import { ApiError, type ApiClient } from "../lib/api-client.ts";
+import { loadSessionProfiles, resetSessionProfiles } from "../lib/session-profiles/store.ts";
 import { useAppStore } from "./app.ts";
+
+const storage = new Map<string, string>();
+(globalThis as { localStorage?: unknown }).localStorage = {
+  getItem: (key: string) => storage.get(key) ?? null,
+  setItem: (key: string, value: string) => void storage.set(key, value),
+  removeItem: (key: string) => void storage.delete(key)
+};
 
 const P = "/w/acme/app";
 const store = () => useAppStore.getState();
@@ -42,8 +50,10 @@ beforeEach(() => {
     openingChat: null,
     resumeError: null,
     agentConversationsByProject: {},
-    preferredProfileByAgent: {}
+    preferredProfileByAgent: {},
+    notice: null
   });
+  resetSessionProfiles();
 });
 
 describe("openTab — resuming a conversation", () => {
@@ -159,6 +169,70 @@ describe("openTab — the agent's remembered Agent Profile (agent profiles §5.3
     store().setPreferredProfile("claude", "p-dev");
     store().applyEvent({ channel: "session-profiles", type: "sessionProfile.deleted", payload: { profileId: "p-dev" } } as never);
     assert.deepEqual(store().preferredProfileByAgent, {});
+  });
+
+  const refuse = (code: string, message: string) => {
+    useAppStore.setState({
+      api: { createSession: async () => Promise.reject(new ApiError(400, "POST", "/api/sessions", undefined, { code, message })) } as unknown as ApiClient,
+      registry: { shells: [], agents: [{ id: "claude", name: "Claude Code" }], ides: [], fileExplorers: [], browsers: [] } as never
+    });
+  };
+
+  it("a remembered profile the daemon no longer has: the pick is forgotten and the notice says so — nothing launches as Global", async () => {
+    store().setPreferredProfile("claude", "p-gone");
+    refuse("PROFILE_NOT_FOUND", 'No Agent Profile "p-gone".');
+    assert.equal(await store().openTab(NEW_CHAT), undefined);
+    assert.deepEqual(store().preferredProfileByAgent, {}, "new chats of that agent are Global again");
+    assert.match(store().notice?.message ?? "", /no longer exists; new chats for Claude Code now use Global/);
+    assert.equal(store().sessions.length, 0, "no automatic Global relaunch");
+  });
+
+  it("a remembered profile that is not ready keeps the pick and says why and how to pick another", async () => {
+    store().setPreferredProfile("claude", "p-dev");
+    refuse("PROFILE_NOT_READY", "Preparing Claude failed: the MCP file does not parse.");
+    assert.equal(await store().openTab(NEW_CHAT), undefined);
+    assert.deepEqual(store().preferredProfileByAgent, { claude: "p-dev" });
+    const message = store().notice?.message ?? "";
+    assert.match(message, /the MCP file does not parse/);
+    assert.match(message, /Global/);
+    assert.match(message, /Agent Profiles/);
+  });
+
+  it("another refusal of a launch that named its own profile still throws", async () => {
+    refuse("PROFILE_NOT_FOUND", 'No Agent Profile "p-x".');
+    await assert.rejects(() => store().openTab({ ...NEW_CHAT, chat: { ...NEW_CHAT.chat, profileId: "p-x" } }), /p-x/);
+  });
+
+  it("the daemon's profile list prunes remembered picks it does not have (an unreadable one is kept)", async () => {
+    store().setPreferredProfile("claude", "p-gone");
+    store().setPreferredProfile("codex", "p-dev");
+    store().setPreferredProfile("grok", "p-broken");
+    await loadSessionProfiles({
+      connection: { id: "c1" },
+      listSessionProfiles: async () => ({
+        profiles: [
+          {
+            id: "p-dev",
+            name: "Dev",
+            description: "",
+            revision: "1",
+            createdAt: "t",
+            updatedAt: "t",
+            counts: {},
+            hasInstructions: false,
+            preparation: []
+          }
+        ],
+        errors: [{ profileId: "p-broken", message: "unreadable" }]
+      })
+    } as never);
+    assert.deepEqual(store().preferredProfileByAgent, { codex: "p-dev", grok: "p-broken" });
+  });
+
+  it("picks are kept per daemon connection", () => {
+    useAppStore.setState({ activeConnectionId: "remote-1" });
+    store().setPreferredProfile("claude", "p-remote");
+    assert.deepEqual(JSON.parse(localStorage.getItem("orquester:preferred-profile-by-connection") ?? "{}")["remote-1"], { claude: "p-remote" });
   });
 
   it("a terminal launch never carries one", async () => {
