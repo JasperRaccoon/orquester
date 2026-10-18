@@ -14,6 +14,7 @@ per-agent GLOBAL config editor, user-facing "Agent config"). A chat without `pro
 | `resolve.ts` | `resolveForAgent(source, agent)` → `ResolvedAgentProfile` (pure). Settings defaults, scope/support rules. |
 | `manifest.ts` + `manifest/<agent>.ts` | Prepared-dir `manifest.json` envelope + per-agent section schemas; read by the agent host. |
 | `preparer.ts` + `preparers/<agent>.ts` | Per-agent preparer contract and registry (all `null` for now). |
+| `lifecycle.ts` | `SessionProfileLifecycle`: builds, swaps, tracks and refreshes prepared dirs; `ensureReady` for launches. |
 | `service.ts` | `SessionProfileService`: wire mapping (secrets masked), events, prepare status, `resolveForAgent(profileId, agent)`. |
 | `routes.ts` | REST surface (`sessionProfileRoutes`), both transports. |
 | `errors.ts` | `SessionProfileError` → `{error: {code, message}}`. |
@@ -53,12 +54,38 @@ Contracts: `@orquester/api` `session-profiles.ts` (wire types, `sessionProfileRo
   real secrets; Codex converts commands to skills itself). Build only inside `ctx.stagingDir`.
   The agent host's adapter reads `readPreparedManifest(preparedDir, {profileId, revision, agent})`
   and fails the launch on `PreparedManifestError`.
-- **Preparation lifecycle**: follows the flow in `preparer.ts`'s header (readSource → resolve →
-  stage → prepare → validate → `writePreparedManifest` last → atomic swap). Supply
-  `SessionProfileServiceOptions.prepareStatus` and publish `sessionProfile.prepareStatus` on
-  `SESSION_PROFILES_CHANNEL`. Subscribe to `service.events` (`changed`/`deleted`) to re-prepare
-  and to remove `prepared/<profileId>/` of a deleted profile. Keyed by
-  `sessionProfileAccountKey(accountId)` or `SESSION_PROFILE_SHARED_ACCOUNT_KEY`.
+- **Preparers** also declare `version` (bump when the output changes for the same inputs) and
+  `inputs(ctx)` (absolute paths of the Global files they read, §6.0); both feed staleness. Follow
+  the PATH CONTRACT in `preparer.ts`: write in `ctx.stagingDir`, name the dir's own location as
+  `ctx.preparedDir` (the dir is renamed there; e.g. Codex hook trust).
+
+## Preparation lifecycle (`lifecycle.ts`)
+
+Wired in `index.ts` as `services.sessionProfileLifecycle`. One prepared dir per key
+`(profileId, agent, accountKey)`: `sessionProfileAccountKey(accountId)` for a `perAccount`
+preparer (System = `system`, its account home is the agent's system home), else `shared`.
+
+- `ensureReady(profileId, agent, accountId | null) → Promise<{profileId, agent, accountKey,
+  revision, preparedDir}>` — what a launch calls (→ `HostThreadProfile {profileId, revision,
+  preparedDir}`). Waits for a preparation in flight; prepares now when missing or stale. Throws
+  `SessionProfileError`: `PROFILE_UNSUPPORTED_AGENT` (no preparer), `PROFILE_NOT_FOUND` (deleted
+  profile → the launch falls back to Global with a notice, spec §5.6), `PROFILE_NOT_READY`
+  (preparation failed — the message is the reason —, account gone, daemon stopping). Never fall
+  back to Global on the other codes.
+- `status(profileId)` / `prepareStatusSource` (the service's `prepareStatus` option) and the
+  `sessionProfile.prepareStatus` event (`publishSessionProfilePrepareEvents`): per agent, no
+  preparer → `not-prepared` + reason; else across its keys failed > preparing > ready (a key
+  ready for the current revision) > not-prepared.
+- `markStale(profileId, agent, accountId)` — forces a re-preparation (Codex: state DB missing).
+- `globalConfigChanged(agent)` — fed by Agent config's watcher (`agentProfile.lifecycle`
+  `filesChanged`); keys whose `inputs` content moved re-prepare.
+- `attach(service.events)` (`changed` → re-prepare known keys and seed the default ones;
+  `deleted` → remove `prepared/<profileId>/` once its jobs settle), `start()` (boot: empty
+  `staging/`, drop dirs of deleted profiles, re-check the rest in the background), `stop()`,
+  `idle()` (drain for tests).
+- Staleness fingerprint (in `manifest.json` `fingerprint`): revision + preparer `version` + CLI
+  version (registry) + content hashes of `inputs`. Per-key serialization, at most 2 preparations
+  at once. Failure reasons have the profile's MCP secret values redacted.
 - **Launch plumbing**: `profileId` exists on `CreateSessionRequest`, `CreateAgentChatSessionFields`,
   `SessionChatRecord` (`sessionChatRecordSchema`), `ThreadHead`/`agentThreadHeadSchema`, and the
   host's `CreateHostThreadRequest`/`SetThreadIdentityRequest` together with
