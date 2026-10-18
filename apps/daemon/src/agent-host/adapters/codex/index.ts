@@ -56,6 +56,8 @@ import {
 import { issueSessionToolsGrant, launchHomeKey } from "../../session-tools/index.ts";
 import { CODEX_SESSION_TOOLS_TOKEN_ENV } from "./session-tools.ts";
 import { CodexSession } from "./session.ts";
+import { codexProfileLaunch, type CodexProfileLaunch } from "./profile.ts";
+import { loadProfileManifest } from "../profile-manifest.ts";
 import { McpAppSnapshotStore } from "../mcp-app-capture.ts";
 import type { RuntimeEventDraft } from "./normalise.ts";
 import type { RuntimeEvent } from "@orquester/api/agent-chat";
@@ -353,7 +355,11 @@ export const createCodexAdapter: AdapterFactory = async (
     }
     await assertVersionSupported();
 
-    const codexHome = resolveCodexHome(input.home.path);
+    // An Agent Profile thread (spec 2026-10-18 §6.2) runs in its prepared home, whatever home the
+    // launch names; a manifest that does not read fails the start (`ProfileLaunchError`).
+    const profileSection = await loadProfileManifest(input, "codex");
+    const profileHome = profileSection !== null ? input.profile?.preparedDir : undefined;
+    const codexHome = profileHome ?? resolveCodexHome(input.home.path);
     // Design 2026-10-14 §1.2: a fresh credential per `codex app-server`
     // launch, in the child's env only (`session-tools.ts`); this issue revokes
     // the thread's previous one, and the session revokes this one when its
@@ -365,17 +371,29 @@ export const createCodexAdapter: AdapterFactory = async (
       project: input.projectPath ?? input.cwd
     });
     const grant = tools.grant;
+    const env = context.buildEnv({
+      threadId: input.threadId,
+      home: codexHome !== null ? { ...input.home, path: codexHome } : input.home,
+      ...(grant !== undefined ? { extraEnv: { [CODEX_SESSION_TOOLS_TOKEN_ENV]: grant.token } } : {})
+    });
+    let profile: CodexProfileLaunch | undefined;
+    if (profileSection !== null && profileHome !== undefined) {
+      env.CODEX_HOME = profileHome;
+      try {
+        profile = await codexProfileLaunch(profileHome, profileSection, env.HOME);
+      } catch (error) {
+        grant?.revoke();
+        throw error;
+      }
+    }
     const session = new CodexSession({
       context,
       threadId: input.threadId,
       cwd: input.cwd,
       ...(codexHome !== null ? { codexHome } : {}),
       bin,
-      env: context.buildEnv({
-        threadId: input.threadId,
-        home: codexHome !== null ? { ...input.home, path: codexHome } : input.home,
-        ...(grant !== undefined ? { extraEnv: { [CODEX_SESSION_TOOLS_TOKEN_ENV]: grant.token } } : {})
-      }),
+      env,
+      ...(profile !== undefined ? { profile } : {}),
       ...(grant !== undefined
         ? {
             sessionTools: {
@@ -517,13 +535,18 @@ export const createCodexAdapter: AdapterFactory = async (
       if (sourceCodexThreadId === null || lastTurnId === undefined) {
         throw new Error(CODEX_FORK_NO_THREAD);
       }
-      const codexHome = resolveCodexHome(input.home.path);
+      // A profile child is forked in its prepared home, where it will run (spec 2026-10-18 §6.2);
+      // the shared `sessions/` lets that home read the source's rollout.
+      const profileHome = (await loadProfileManifest(input, "codex")) !== null ? input.profile?.preparedDir : undefined;
+      const codexHome = profileHome ?? resolveCodexHome(input.home.path);
+      const env = context.buildEnv({
+        threadId: input.sourceThreadId,
+        home: codexHome !== null ? { ...input.home, path: codexHome } : input.home
+      });
+      if (profileHome !== undefined) env.CODEX_HOME = profileHome;
       const forkedId = await forkCodexThread({
         bin: requireBin(),
-        env: context.buildEnv({
-          threadId: input.sourceThreadId,
-          home: codexHome !== null ? { ...input.home, path: codexHome } : input.home
-        }),
+        env,
         cwd: input.cwd,
         sourceCodexThreadId,
         lastTurnId,

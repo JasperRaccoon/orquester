@@ -176,6 +176,8 @@ interface MockGoal {
 export interface MockConfig {
   emptyCatalog?: boolean;
   skillName?: string;
+  /** `skills/list`'s skills (`SkillMetadata`), instead of the one demo skill. */
+  skills?: unknown[];
   stderr?: string;
   /** Never answer `initialize`, to exercise the handshake deadline. */
   hangOnInitialize?: boolean;
@@ -860,7 +862,7 @@ function handle(frame) {
       send({ id, result: { data: config.emptyCatalog ? [] : [{ id: "gpt-5.5", model: "gpt-5.5", upgrade: null, upgradeInfo: null, availabilityNux: null, displayName: "GPT-5.5", description: "", modelSpecialty: null, hidden: false, supportedReasoningEfforts: [{ reasoningEffort: "low", description: "fast" }, { reasoningEffort: "medium", description: "balanced" }], defaultReasoningEffort: "medium", inputModalities: ["text"], supportsPersonality: false, multiAgentVersion: null, additionalSpeedTiers: [], serviceTiers: [], defaultServiceTier: null, isDefault: true }], nextCursor: null } });
       return;
     case "skills/list":
-      send({ id, result: { data: [{ cwd: process.cwd(), skills: config.emptyCatalog ? [] : [{ name: config.skillName ?? "demo", description: "a demo skill", path: "/skills/demo/SKILL.md", scope: "repo", enabled: true, pluginId: null }], errors: [] }] } });
+      send({ id, result: { data: [{ cwd: process.cwd(), skills: config.skills ?? (config.emptyCatalog ? [] : [{ name: config.skillName ?? "demo", description: "a demo skill", path: "/skills/demo/SKILL.md", scope: "repo", enabled: true, pluginId: null }]), errors: [] }] } });
       return;
     case "account/rateLimits/read":
       send({ id, result: { ordinaryUsageAllowed: true, rateLimits: { limitId: "codex", limitName: null, normalModelSlug: null, primary: { usedPercent: 30, windowDurationMins: 10080, resetsAt: 1790220221 }, secondary: null, credits: null, individualLimit: null, spendControlReached: false, planType: "pro", rateLimitReachedType: null }, rateLimitsByLimitId: null, rateLimitResetCredits: null, accountId: null, rateLimitUpsell: null } });

@@ -147,6 +147,7 @@ import {
   type CodexServerRequest
 } from "./protocol.ts";
 import { CodexUsageTracker } from "./usage.ts";
+import { codexProfileSkillDisables, codexProfileSkillsConfig, type CodexProfileLaunch } from "./profile.ts";
 import {
   codexDenyConfig,
   codexSessionToolsConfig,
@@ -242,6 +243,13 @@ export interface CodexSessionOptions {
   appContext?: () => ReadonlyMap<string, string>;
   /** The adapter's stored MCP App snapshots, so an unchanged document is stored once per thread. */
   mcpAppSnapshots?: McpAppSnapshotStore;
+  /**
+   * An Agent Profile thread (spec 2026-10-18 §6.2, `profile.ts`): `codexHome` is its prepared
+   * home. The child MUST report that home on `initialize` (else the start fails — never a Global
+   * launch), and every `thread/start`/`thread/resume` switches off the skills that are not the
+   * profile's, from a fresh `skills/list`.
+   */
+  profile?: CodexProfileLaunch;
 }
 
 /** What every parked server→client request carries, approval or question. */
@@ -323,6 +331,8 @@ export class CodexSession {
   private sessionToolsServerName: string | undefined;
   /** The MCP servers this thread's effective config defines (`config/read`); undefined when unread. */
   private effectiveMcpServers: ReadonlySet<string> | undefined;
+  /** A profile thread's skill switch-offs (`profile.ts`), read by `start` before the thread opens. */
+  private profileSkillsConfig: NonNullable<CodexProtocol.v2.ThreadStartParams["config"]> = {};
   /**
    * §3.1 requires the excerpt to be redacted before it leaves the host — home
    * paths collapsed to `~` as well as token masking. `redactStderr` only
@@ -569,6 +579,14 @@ export class CodexSession {
     // `initialized` takes no params; the server rejects an explicit null.
     peer.notify("initialized");
 
+    const profile = this.options.profile;
+    if (profile !== undefined && initialize.codexHome !== profile.codexHome && initialize.codexHome !== profile.codexHomeReal) {
+      // A profile thread that is not running in its prepared home would load the account's
+      // global setup: refuse it (spec §2 anti-goals) rather than warn.
+      throw new Error(
+        "This chat's Agent Profile could not be applied: Codex did not start in the profile's prepared home, so the agent was not started."
+      );
+    }
     if (
       this.options.codexHome !== undefined &&
       initialize.codexHome !== this.options.codexHome
@@ -585,6 +603,7 @@ export class CodexSession {
     }
 
     await this.resolveSessionToolsServerName();
+    if (profile !== undefined) await this.resolveProfileSkills(profile);
     await this.openThread();
     this.setStatus("ready");
     return this.summary();
@@ -1544,13 +1563,42 @@ export class CodexSession {
     };
   }
 
-  /** `{config}` attaching the `orquester` server to the thread, or nothing. */
+  /**
+   * A profile thread: which skills of this cwd are not the profile's (`profile.ts`), from a fresh
+   * `skills/list`. Run at every session start, so `thread/resume` re-sends them too (thread config
+   * is not persisted). A list that fails fails the start: the thread would load global skills.
+   */
+  private async resolveProfileSkills(profile: CodexProfileLaunch): Promise<void> {
+    let listed: CodexProtocol.v2.SkillsListResponse;
+    try {
+      listed = await this.bounded(
+        () => this.requirePeer().request("skills/list", { cwds: [this.options.cwd] }),
+        AGENT_HOST_DEADLINES.sessionOpenMs,
+        "skills/list"
+      );
+    } catch (error) {
+      throw new Error(
+        `This chat's Agent Profile could not be applied: Codex did not list its skills (${describeError(error)}), so the agent was not started.`
+      );
+    }
+    this.profileSkillsConfig = codexProfileSkillsConfig(codexProfileSkillDisables(listed.data, profile));
+  }
+
+  /**
+   * `{config}` for `thread/start`/`thread/resume`: the `orquester` server (or the denials), plus a
+   * profile thread's skill switch-offs — or nothing.
+   */
   private sessionToolsThreadConfig(): { config?: NonNullable<CodexProtocol.v2.ThreadStartParams["config"]> } {
     const tools = this.sessionToolsLaunch();
-    if (tools !== undefined) return { config: codexSessionToolsConfig(tools) };
     // Every denied name is addressed, whatever its characters, and harmlessly where this
     // thread's config does not have it (`session-tools.ts`).
-    const config = codexDenyConfig(this.options.deniedMcpServers ?? [], "", this.effectiveMcpServers);
+    const config = {
+      ...(tools !== undefined
+        ? codexSessionToolsConfig(tools)
+        : codexDenyConfig(this.options.deniedMcpServers ?? [], "", this.effectiveMcpServers)),
+      // Its own top-level key (`skills`), never one of the `mcp_servers` ones above.
+      ...this.profileSkillsConfig
+    };
     return Object.keys(config).length > 0 ? { config } : {};
   }
 
