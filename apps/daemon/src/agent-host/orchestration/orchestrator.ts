@@ -155,6 +155,9 @@ import {
   withDeadline
 } from "../support/deadline.ts";
 import { attachedFileLine } from "../adapters/attachment-lines.ts";
+import { loadProfileManifest } from "../adapters/profile-manifest.ts";
+import { isSessionProfileAgentId } from "@orquester/api";
+import type { FetchLaunchProfile } from "./launch-profile.ts";
 import {
   cancelledRequestActivity,
   createEventBuilder,
@@ -338,6 +341,13 @@ export interface OrchestratorOptions {
   sessionToolsStale?: (threadId: string) => boolean;
   /** A thread was deleted (after everything of it is freed): per-thread state elsewhere goes too. Must not throw. */
   onThreadDeleted?: (threadId: string) => void;
+  /**
+   * Agent Profiles (spec 2026-10-18 §5.6, §6.5): the daemon's current launch for a profile
+   * thread, asked before every provider-session start (`launch-profile.ts`). Never throws.
+   * Absent (tests, a host built without it): every start reads as "daemon unavailable" and
+   * launches from the persisted profile only if its manifest still validates.
+   */
+  launchProfile?: FetchLaunchProfile;
   /**
    * Session-tool secrets (design 2026-10-14 §5, `session-tools/secret-redaction.ts`)
    * beyond ingestion's: `link` — a fork's child is masked with its parent's
@@ -831,6 +841,12 @@ export interface Orchestrator {
    * builds a provider child's environment (§3.1).
    */
   launchConfig(threadId: string): ThreadLaunchConfig | null;
+  /**
+   * Agent Profiles, `GET /profiles/leases`: the prepared directories of every live provider
+   * session and every session start in flight (spec 2026-10-18 §6.5) — what the daemon's GC
+   * must never delete. Deduplicated.
+   */
+  profileLeases(): string[];
   /**
    * The launcher env of a loaded thread in this project or working directory.
    *
@@ -1848,6 +1864,110 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     }
   };
 
+  /**
+   * Prepared dirs of the session starts in flight, by thread: leased from the refresh until the
+   * session is live (then `adapter.hasSession` covers it) or the start failed.
+   */
+  const startingProfileDirs = new Map<string, string>();
+
+  const profileLeases = (): string[] => {
+    const dirs = new Set<string>(startingProfileDirs.values());
+    for (const runtime of runtimes.values()) {
+      const profile = runtime.launch?.profile;
+      const adapterId = runtime.state.head?.adapter;
+      if (profile === undefined || adapterId === undefined) continue;
+      if (options.adapters.get(adapterId)?.hasSession(runtime.id) === true) dirs.add(profile.preparedDir);
+    }
+    return [...dirs];
+  };
+
+  /**
+   * Agent Profiles (spec 2026-10-18 §5.6, §6.5): before a profile thread's session starts, ask the
+   * daemon for the profile's current prepared version and launch fields and rewrite
+   * `launch.json` with them, so an edited profile applies now and a removed version never fails
+   * the start. A deleted profile's fallback (interactive chats only — the daemon decides) is
+   * recorded here: `thread.meta-updated {profileId: ""}` and the notice. A refusal fails the
+   * start with its reason; a daemon that cannot be asked leaves the persisted profile — only if
+   * its manifest still validates (never Global). A Global thread asks nothing.
+   */
+  const refreshLaunchProfile = async (runtime: ThreadRuntime, head: ThreadHead): Promise<void> => {
+    const profileId = runtime.launch?.profile?.profileId ?? head.profileId;
+    if (profileId === undefined) return;
+    const answer = options.launchProfile
+      ? await options.launchProfile(runtime.id, profileId)
+      : ({ kind: "unavailable", reason: "no daemon to ask" } as const);
+    if (answer.kind === "refused") {
+      throw new Error(answer.message);
+    }
+    if (answer.kind === "unavailable") {
+      const persisted = runtime.launch?.profile;
+      const unavailable =
+        "Orquester could not be reached to prepare this chat's Agent Profile, and the version it last launched with is no longer available, so the agent was not started. Try again in a moment.";
+      // No profile persisted: `launchProfileOf` refuses the start in its own words.
+      if (persisted === undefined) return;
+      if (!isSessionProfileAgentId(head.adapter)) throw new Error(unavailable);
+      try {
+        await loadProfileManifest({ profile: persisted }, head.adapter);
+      } catch {
+        throw new Error(unavailable);
+      }
+      logger.warn(`agent-host: could not refresh ${runtime.id}'s Agent Profile (${answer.reason}); launching the version it has`);
+      return;
+    }
+    const next = launchConfigFromRequest(answer.launch, answer.launch.profile ?? undefined);
+    if (JSON.stringify(next) !== JSON.stringify(runtime.launch ?? {})) {
+      try {
+        await launchConfigs.save(runtime.id, next);
+      } catch (error) {
+        // Never launch from an environment `launch.json` does not hold: a host restart would
+        // relaunch the thread under another one.
+        throw new Error(`Could not record this chat's Agent Profile launch: ${describeFailure(error)}`);
+      }
+      runtime.launch = next;
+    }
+    const nextProfileId = answer.launch.profile?.profileId ?? null;
+    if (nextProfileId === (head.profileId ?? null)) return;
+    const occurredAt = clock.nowIso();
+    const events: AppendableDomainEvent[] = [
+      buildEvent(
+        runtime.id,
+        "thread.meta-updated",
+        {
+          // `""` is Global on the log (`ThreadMetaUpdatedPayload`).
+          profileId: nextProfileId ?? "",
+          ...(answer.launch.profile ? { profileRevision: answer.launch.profile.revision } : {})
+        },
+        { occurredAt }
+      )
+    ];
+    if (nextProfileId === null) {
+      events.push(
+        buildEvent(
+          runtime.id,
+          "thread.activity-appended",
+          {
+            activity: makeActivity({
+              id: ids.eventId(),
+              tone: "info",
+              activityKind: "runtime.warning",
+              summary: answer.launch.fallback?.notice ?? "This chat's Agent Profile is no longer available; it now uses Global.",
+              payload: {
+                profileId: null,
+                previousProfileId: answer.launch.fallback?.previousProfileId ?? head.profileId ?? null,
+                reason: "profile-deleted"
+              },
+              turnId: null,
+              createdAt: occurredAt
+            })
+          },
+          { occurredAt }
+        )
+      );
+    }
+    await commit(runtime, events);
+    await saveHeadNow(runtime);
+  };
+
   const startSessionNow = async (
     runtime: ThreadRuntime,
     head: ThreadHead,
@@ -1866,7 +1986,30 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     if (!gateResult.ok) {
       throw new Error(gateResult.message);
     }
+    await refreshLaunchProfile(runtime, head);
+    // The refresh may have moved the profile (a new version, the deleted one's fallback): the
+    // session is bound to what it actually starts with, so the next ensure sees no change.
+    desired = { ...desired, profileKey: profileKeyOf(runtime.launch?.profile) };
+    head = requireHead(runtime);
     const profile = launchProfileOf(runtime, head);
+    if (profile !== undefined) startingProfileDirs.set(runtime.id, profile.preparedDir);
+    try {
+      return await startProfiledSession(runtime, head, desired, resumeCursor, pendingTurnStart, goal, profile);
+    } finally {
+      startingProfileDirs.delete(runtime.id);
+    }
+  };
+
+  const startProfiledSession = async (
+    runtime: ThreadRuntime,
+    head: ThreadHead,
+    desired: DesiredSessionShape,
+    resumeCursor: unknown,
+    pendingTurnStart: boolean,
+    goal: { carryGoal: boolean },
+    profile: HostThreadProfile | undefined
+  ): Promise<ProviderSession> => {
+    const adapter = adapterFor(head.adapter);
     const home = await options.resolveHome({
       threadId: runtime.id,
       adapter: head.adapter,
@@ -7549,6 +7692,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     threadContext,
     launchConfig,
     launchConfigForCwd,
+    profileLeases,
     placeholderCheckpoint,
     onAccountEvent,
     adapterForThread,

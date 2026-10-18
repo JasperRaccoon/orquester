@@ -65,6 +65,7 @@ import {
   type ThreadIndex
 } from "./index/index.ts";
 import { createIngestion } from "./ingestion/index.ts";
+import { createDaemonLaunchProfileClient } from "./orchestration/launch-profile.ts";
 import { createFileLaunchConfigStore } from "./orchestration/launch-config.ts";
 import { createFileForkHandoffStore } from "./orchestration/fork.ts";
 import { createLivenessRegistry } from "./orchestration/liveness.ts";
@@ -585,6 +586,8 @@ export async function startAgentHost(
     // with resume at its next idle point.
     sessionToolsStale: (threadId: string) => sessionTools.needsRestart(threadId),
     onThreadDeleted: (threadId: string) => sessionTools.forgetThread(threadId),
+    // Agent Profiles: the daemon's current launch for a profile thread, before each session start.
+    launchProfile: createDaemonLaunchProfileClient({ socketPath: () => daemonSocketPath, token }),
     // A fork's child masked with its parent's secrets; an MCP App's answers masked (§5).
     secrets: {
       link: (threadId, parentThreadId) => secretRedactor.link(threadId, parentThreadId),

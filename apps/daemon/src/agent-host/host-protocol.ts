@@ -228,6 +228,15 @@ export const agentHostRoutes = {
   recycleIdleOpenCode: "/opencode/recycle-idle",
 
   /**
+   * Agent Profiles (spec 2026-10-18 §6.5): `GET` → {@link AgentHostProfileLeasesResponse}, the
+   * prepared directories this host's live provider sessions (and the session starts in flight)
+   * launched from. The daemon's preparation lifecycle never deletes a prepared version named here
+   * (`PreparedDirLeases.inUse()`, `session-profiles/lifecycle.ts`). Additive: a host that predates
+   * it answers its generic route-miss 404, and the daemon then treats every lease as unknown.
+   */
+  profileLeases: "/profiles/leases",
+
+  /**
    * Unified MCP design 2026-10-15 §9.3/§9.4: `POST` {@link SessionToolsRefreshRequest} →
    * {@link SessionToolsRefreshResponse}. The daemon hands the thread's NEW manifest (its denials
    * became known, or the tool list changed): a provider that re-lists on `notifications/tools/list_changed` (Claude, probed) gets
@@ -272,8 +281,45 @@ export const daemonRoutesForHost = {
    * generic 404 too — the host then advertises the frozen legacy definitions
    * (`session-tools/legacy-definitions.ts`) its old handlers match (spec §14.1).
    */
-  sessionToolsManifest: "/api/agent-host/session-tools/manifest"
+  sessionToolsManifest: "/api/agent-host/session-tools/manifest",
+  /**
+   * Agent Profiles (spec 2026-10-18 §5.6, §6.5): `POST` {@link ThreadLaunchProfileRequest} → 200
+   * {@link ThreadLaunchProfileResponse}. Asked before EVERY provider-session start of a thread
+   * that names a profile (create's first start, resume, crash restart, a host restart's
+   * rehydrate, a switch), so the start launches from the profile's CURRENT prepared version and
+   * the launch environment its agent's contribution derives from it; the host rewrites
+   * `launch.json` with the answer before it starts. A refusal (409 `{code, message}`:
+   * `PROFILE_NOT_READY`, `PROFILE_UNSUPPORTED_AGENT`, `PROFILE_NOT_FOUND` for an unattended chat,
+   * `LAUNCH_UNAVAILABLE`) fails the start with its message. 401 without the host's bearer; 404
+   * `THREAD_NOT_FOUND` for a thread with no chat tab. Unreachable, 5xx, or a daemon that predates
+   * the route (its generic 404): the host launches from the persisted profile only if its
+   * manifest still validates, else the start fails — never Global.
+   */
+  threadLaunchProfile: "/api/agent-host/threads/launch-profile"
 } as const;
+
+/** Body of `POST /api/agent-host/threads/launch-profile`. */
+export interface ThreadLaunchProfileRequest {
+  threadId: string;
+  /** The profile the thread's launch config (else its head) names. */
+  profileId: string;
+}
+
+/**
+ * The launch a profile thread's next session start uses: the launch fields REPLACE
+ * `launch.json`'s (as {@link SetThreadIdentityRequest}'s do), and `profile` is the prepared
+ * version to launch from — `null` when the profile was deleted and the interactive chat falls
+ * back to Global, in which case `fallback` names the notice the host appends beside the
+ * `thread.meta-updated {profileId: ""}` it writes.
+ */
+export interface ThreadLaunchProfileResponse {
+  profile: HostThreadProfile | null;
+  launchEnv?: Record<string, string>;
+  unsetEnv?: string[];
+  homePath?: string;
+  serverPool?: HostThreadServerPool;
+  fallback?: { previousProfileId: string; notice: string };
+}
 
 /** Body of `POST /api/agent-host/session-tools/manifest`. */
 export interface SessionToolsManifestRequest {
@@ -365,6 +411,12 @@ export interface SessionToolCallRequest {
   arguments: unknown;
 }
 
+/** `GET /profiles/leases` (Agent Profiles). */
+export interface AgentHostProfileLeasesResponse {
+  /** Absolute prepared directories (`HostThreadProfile.preparedDir`) in use, deduplicated. */
+  preparedDirs: string[];
+}
+
 /**
  * Body of `POST /opencode/recycle-idle` (agent profile §4.8). Empty recycles
  * every OpenCode server; `poolKey` only the servers of that
@@ -454,8 +506,9 @@ export interface AgentHostCapabilities {
    * Agent Profiles (spec 2026-10-18): `1` = the host persists `profile` in the thread's
    * `launch.json`, records `profileId` in the log, hands `StartSessionInput.profile` to every
    * session start (create, resume, crash restart, a host restart's rehydrate, an identity switch,
-   * a fork's child) and takes a profile switch on `setThreadIdentity`. A host without it would
-   * run a profile thread as Global — the daemon must not send it one.
+   * a fork's child) and takes a profile switch on `setThreadIdentity`; it asks the daemon's
+   * `threadLaunchProfile` before each such start and answers `profileLeases`. A host without it
+   * would run a profile thread as Global — the daemon must not send it one.
    */
   sessionProfiles?: number;
 }
