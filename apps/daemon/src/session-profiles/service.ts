@@ -14,7 +14,16 @@ import {
   SESSION_PROFILES_CHANNEL,
   SESSION_PROFILE_AGENTS,
   SESSION_PROFILE_ITEM_KINDS,
+  type AddSessionProfilePluginRequest,
+  type CopySessionProfileItemsRequest,
   type CreateSessionProfileRequest,
+  type ImportSessionProfileFromGlobalRequest,
+  type ImportSessionProfileResponse,
+  type ProfileImportScanResponse,
+  type SessionProfileGlobalSourceResponse,
+  type SessionProfileImportResponse,
+  type SessionProfilePluginSource,
+  type TakeSessionProfileImportRequest,
   type DeleteSessionProfileResponse,
   type McpServerView,
   type SessionProfileAgentId,
@@ -37,7 +46,8 @@ import {
 } from "@orquester/api";
 import type { SessionProfileItemRecord } from "@orquester/config";
 import type { Broadcaster } from "../broadcaster.ts";
-import { sessionProfileErrors } from "./errors.ts";
+import { SessionProfileError, sessionProfileErrors } from "./errors.ts";
+import type { SessionProfileImports, StoredImportResult } from "./imports.ts";
 import { itemUnsupportedReason, resolveForAgent, resolveSessionProfileSettings, wireScope, type ResolvedAgentProfile } from "./resolve.ts";
 import type { SessionProfileStore, StoredSessionProfile } from "./store.ts";
 
@@ -51,6 +61,8 @@ export type SessionProfilePrepareStatusSource = (profile: {
 export interface SessionProfileServiceOptions {
   store: SessionProfileStore;
   prepareStatus?: SessionProfilePrepareStatusSource;
+  /** Import from Global, git / zip / md, copy, plugins, export and import (`imports.ts`); absent → those routes answer 503. */
+  imports?: SessionProfileImports;
 }
 
 export interface SessionProfileServiceEvents {
@@ -65,10 +77,12 @@ export class SessionProfileService {
   readonly events = new EventEmitter<SessionProfileServiceEvents>();
   private readonly store: SessionProfileStore;
   private readonly prepareStatusSource: SessionProfilePrepareStatusSource;
+  private readonly imports: SessionProfileImports | undefined;
 
   constructor(options: SessionProfileServiceOptions) {
     this.store = options.store;
     this.prepareStatusSource = options.prepareStatus ?? notPrepared;
+    this.imports = options.imports;
   }
 
   /** Prepares the store's root and sweeps leftovers of an interrupted write. */
@@ -163,6 +177,67 @@ export class SessionProfileService {
     const { manifest } = await this.store.read(profileId);
     const revision = String(manifest.revision);
     return { profileId, revision, agents: this.prepareStatusSource({ profileId, revision, updatedAt: manifest.updatedAt }) };
+  }
+
+  // --- Filling a profile (spec §4.5; `imports.ts`) -----------------------------------------------
+
+  globalSource(profileId: string, agent: SessionProfileAgentId): Promise<SessionProfileGlobalSourceResponse> {
+    return this.requireImports().globalSource(profileId, agent);
+  }
+
+  async importFromGlobal(profileId: string, request: ImportSessionProfileFromGlobalRequest): Promise<SessionProfileImportResponse> {
+    return this.imported(await this.requireImports().importFromGlobal(profileId, request));
+  }
+
+  scanGit(profileId: string, url: string): Promise<ProfileImportScanResponse> {
+    return this.requireImports().scanGit(profileId, url);
+  }
+
+  /** `filePath` stays the caller's. */
+  scanUpload(profileId: string, name: string, filePath: string): Promise<ProfileImportScanResponse> {
+    return this.requireImports().scanUpload(profileId, name, filePath);
+  }
+
+  /** The refusals an upload gets before its body is read (no imports, no such profile). */
+  async assertCanScanUpload(profileId: string): Promise<void> {
+    await this.requireImports().assertCanScan(profileId);
+  }
+
+  /** The refusals a profile import gets before its body is read. */
+  assertCanImportProfile(): void {
+    this.requireImports();
+  }
+
+  async takeScan(profileId: string, importId: string, request: TakeSessionProfileImportRequest): Promise<SessionProfileImportResponse> {
+    return this.imported(await this.requireImports().takeScan(profileId, importId, request));
+  }
+
+  async copyFrom(profileId: string, request: CopySessionProfileItemsRequest): Promise<SessionProfileImportResponse> {
+    return this.imported(await this.requireImports().copyFrom(profileId, request));
+  }
+
+  async addPlugin(profileId: string, request: AddSessionProfilePluginRequest): Promise<SessionProfileImportResponse> {
+    return this.imported(await this.requireImports().addPlugin(profileId, request));
+  }
+
+  /** The profile's portable `.zip` — no secret values (`export.ts`). */
+  exportProfile(profileId: string): Promise<{ fileName: string; data: Buffer }> {
+    return this.requireImports().exportProfile(profileId);
+  }
+
+  /** A NEW profile from an export `.zip` at `filePath` (the caller's file). */
+  async importProfile(name: string, filePath: string): Promise<ImportSessionProfileResponse> {
+    const { profile, notes } = await this.requireImports().importProfile(name, filePath);
+    return { profile: this.changed(profile), notes };
+  }
+
+  private imported(result: StoredImportResult): SessionProfileImportResponse {
+    return { profile: this.changed(result.profile), itemIds: result.itemIds, notes: result.notes };
+  }
+
+  private requireImports(): SessionProfileImports {
+    if (this.imports === undefined) throw new SessionProfileError(503, "IMPORTS_UNAVAILABLE", "Imports are not available in this daemon.");
+    return this.imports;
   }
 
   /**
@@ -270,10 +345,23 @@ function toWireItem(record: SessionProfileItemRecord, cached: boolean): SessionP
           name: record.name,
           ...(record.plugin.marketplace !== undefined ? { marketplace: record.plugin.marketplace } : {}),
           ...(record.plugin.version !== undefined ? { version: record.plugin.version } : {}),
-          cached
+          cached,
+          ...(record.plugin.source !== undefined ? { source: pluginSourceView(record.plugin.source) } : {})
         }
       };
   }
+}
+
+/** A stored plugin provenance with only its known fields. */
+function pluginSourceView(source: NonNullable<Extract<SessionProfileItemRecord, { kind: "plugin" }>["plugin"]["source"]>): SessionProfilePluginSource {
+  return {
+    type: source.type,
+    ...(source.marketplace !== undefined ? { marketplace: source.marketplace } : {}),
+    ...(source.commit !== undefined ? { commit: source.commit } : {}),
+    ...(source.url !== undefined ? { url: source.url } : {}),
+    ...(source.ref !== undefined ? { ref: source.ref } : {}),
+    copiedAt: source.copiedAt
+  };
 }
 
 /** The MCP server with its env and header KEYS only (`{key, set: true}`): values never leave the store. */

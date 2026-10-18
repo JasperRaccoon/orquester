@@ -136,6 +136,23 @@ interface SessionProfileItemBase {
   updatedAt?: string;
 }
 
+/**
+ * Where a plugin item's files were copied from (provenance; spec §4.5). Recorded when the files
+ * land in the profile's plugin cache; never a secret.
+ */
+export interface SessionProfilePluginSource {
+  /** `marketplace`: one of the agent's known marketplaces; `global`: the agent's own installed plugin (or OpenCode plugin file). */
+  type: "marketplace" | "global";
+  marketplace?: string;
+  /** The commit of the marketplace checkout or of the repository fetched for it, when known. */
+  commit?: string;
+  /** A remote source that was cloned (credential-free URL) and its branch or tag. */
+  url?: string;
+  ref?: string;
+  /** ISO time the files were copied. */
+  copiedAt: string;
+}
+
 /** What a plugin item records. Its files live in the profile's own plugin cache (spec §4.5). */
 export interface SessionProfilePluginView {
   /** The plugin's name as its agent knows it. */
@@ -144,6 +161,8 @@ export interface SessionProfilePluginView {
   version?: string;
   /** Whether the profile's plugin cache holds the plugin's files yet. */
   cached: boolean;
+  /** Where the files came from (absent on records made before it was recorded). */
+  source?: SessionProfilePluginSource;
 }
 
 /** A plugin's record. Creating one with files is the marketplace flow's job (a later route). */
@@ -366,6 +385,145 @@ export interface WriteSessionProfileInstructionsRequest {
 }
 
 // ---------------------------------------------------------------------------
+// Filling a profile (spec §4.5): Import from Global, Git / .zip / .md, copy from another
+// profile, marketplace plugins, export and import of a whole profile
+// ---------------------------------------------------------------------------
+
+/**
+ * What an import does with an item whose kind and name the profile already has (for an
+ * overlapping agent scope): refuse the whole import (409 `ITEM_EXISTS`), replace the profile's
+ * item, keep both (the new one gets a `-2` style suffix; a plugin or an identical hook cannot be kept twice and is
+ * skipped instead), or skip the new one. Every outcome other than a plain add is listed in the
+ * response's `notes`.
+ */
+export type SessionProfileImportConflictPolicy = "fail" | "replace" | "keep-both" | "skip";
+
+/** What instructions brought into a profile do to the profile's own. */
+export type SessionProfileInstructionsMode = "replace" | "append";
+
+/**
+ * Every import, copy and plugin add answers the fresh profile, the ids of the items it created,
+ * and what the owner should know (renamed, replaced, skipped, frontmatter keys dropped, an MCP
+ * server whose secret values must be entered again).
+ */
+export interface SessionProfileImportResponse {
+  profile: SessionProfileDetail;
+  itemIds: string[];
+  notes: string[];
+}
+
+/** One item of an agent's Global setup, as Import from Global offers it. */
+export interface SessionProfileGlobalItem {
+  /** The Agent config item id (`skill:review`, `hook:Stop:…`): what the import request names. */
+  id: string;
+  kind: SessionProfileItemKind;
+  name: string;
+  description?: string;
+  /** The profile already has an item of this kind and name (the import's conflict policy applies). */
+  exists: boolean;
+  /** Why it cannot be imported (it comes from a plugin, another agent owns it, an npm plugin…); absent when it can. */
+  unavailable?: string;
+}
+
+/** `GET sessionProfileRoutes.importGlobal(id)?agent=` */
+export interface SessionProfileGlobalSourceResponse {
+  agent: SessionProfileAgentId;
+  installed: boolean;
+  instructions: { exists: boolean; bytes: number };
+  items: SessionProfileGlobalItem[];
+}
+
+/**
+ * `POST sessionProfileRoutes.importGlobal(id)` → {@link SessionProfileImportResponse}. Items are
+ * COPIED (Global is never changed). Skills, commands and MCP servers get `agents` (default
+ * `"all"`); when that names one agent other than the source, frontmatter and MCP settings are
+ * converted for it (the Agent config copy rules). Hooks and plugins keep their agent. MCP secret
+ * values are copied into the profile's secrets file (never returned). `instructions` copies the
+ * agent's global instruction file too.
+ */
+export interface ImportSessionProfileFromGlobalRequest {
+  revision: string;
+  agent: SessionProfileAgentId;
+  itemIds: string[];
+  agents?: SessionProfileAgentScope;
+  instructions?: SessionProfileInstructionsMode;
+  onConflict?: SessionProfileImportConflictPolicy;
+}
+
+/**
+ * `POST sessionProfileRoutes.importGit(id) {url}` and `POST sessionProfileRoutes.importUpload(id)?name=`
+ * (a `.zip` or `.md` as an `application/octet-stream` body) scan into candidates — the Agent
+ * config scan's shape (`ProfileImportScanResponse`), whose `kind` and `name` are what the profile
+ * will get (commands stay commands) and whose `exists` is checked against the profile.
+ */
+export interface SessionProfileImportGitRequest {
+  url: string;
+}
+
+/** `POST sessionProfileRoutes.importScan(id, importId)` → {@link SessionProfileImportResponse}: takes the picks of a scan. */
+export interface TakeSessionProfileImportRequest {
+  revision: string;
+  picks: string[];
+  agents?: SessionProfileAgentScope;
+  onConflict?: SessionProfileImportConflictPolicy;
+}
+
+/**
+ * `POST sessionProfileRoutes.copyFrom(id)` → {@link SessionProfileImportResponse}: copies items
+ * of another profile — their files, plugin caches and secret values — keeping their scope.
+ */
+export interface CopySessionProfileItemsRequest {
+  revision: string;
+  fromProfileId: string;
+  itemIds: string[];
+  instructions?: SessionProfileInstructionsMode;
+  onConflict?: SessionProfileImportConflictPolicy;
+}
+
+/**
+ * Where a plugin added to a profile comes from: a plugin of one of the agent's known
+ * marketplaces (browsed with the Agent config routes `marketplacePlugins` / `pluginPreview`), or
+ * one of the agent's installed Global plugins — for OpenCode, a plugin file — by Agent config id.
+ */
+export type SessionProfilePluginSourceRequest =
+  | { type: "marketplace"; marketplace: string; plugin: string }
+  | { type: "global"; itemId: string };
+
+/**
+ * `POST sessionProfileRoutes.plugins(id)` → {@link SessionProfileImportResponse}: copies the
+ * plugin's files into the profile's own plugin cache (never into an agent's plugin dirs). A
+ * remote marketplace source is cloned first. The item applies to `agent` only.
+ */
+export interface AddSessionProfilePluginRequest {
+  revision: string;
+  agent: SessionProfileAgentId;
+  source: SessionProfilePluginSourceRequest;
+  /** `keep-both` is refused for a plugin. */
+  onConflict?: Exclude<SessionProfileImportConflictPolicy, "keep-both">;
+}
+
+/**
+ * `GET sessionProfileRoutes.exportProfile(id)` → `application/zip`: a portable copy of the
+ * profile — `orquester-export.json` (format marker), `profile.json` (the manifest: items, scopes,
+ * settings; MCP env/header KEYS only — secret VALUES are never exported), `instructions.md`,
+ * `skills/<itemId>/…`, `commands/<itemId>.md`, `plugins/<itemId>/…`. Items the daemon cannot
+ * read are left out.
+ */
+export const SESSION_PROFILE_EXPORT_FORMAT = "orquester-agent-profile";
+export const SESSION_PROFILE_EXPORT_VERSION = 1;
+
+/**
+ * `POST sessionProfileRoutes.importProfile?name=` (an export `.zip` as an
+ * `application/octet-stream` body) → 201: a NEW profile built from it (its name made unique).
+ * Validated strictly: anything unexpected refuses the whole file. MCP servers that need secret
+ * values are listed in `notes`: enter them again (until then they are skipped at launch).
+ */
+export interface ImportSessionProfileResponse {
+  profile: SessionProfileDetail;
+  notes: string[];
+}
+
+// ---------------------------------------------------------------------------
 // Routes, events, errors
 // ---------------------------------------------------------------------------
 
@@ -375,11 +533,8 @@ const profilePath = (profileId: string): string => `${SESSION_PROFILES_BASE}/${e
 /**
  * Every Agent Profiles route. Both transports (the unix socket and the bearer-gated HTTP app).
  *
- * Reserved for later tasks (do not reuse these paths for anything else):
- * `…/:id/imports/global`, `…/:id/imports/git`, `…/:id/imports/upload`, `…/:id/imports/:importId`
- * (import from Global / git / zip / md), `…/:id/copy-from` (copy items from another profile),
- * `…/:id/plugins` (add a marketplace plugin into the profile's plugin cache), `…/:id/export`,
- * and `…/:id/prepare` (re-run preparation).
+ * Reserved for later tasks (do not reuse this path for anything else): `…/:id/prepare` (re-run
+ * preparation).
  */
 export const sessionProfileRoutes = {
   /** `GET` → {@link SessionProfileListResponse}; `POST` {@link CreateSessionProfileRequest} → 201 detail. */
@@ -398,7 +553,23 @@ export const sessionProfileRoutes = {
   /** `GET` → {@link SessionProfileInstructionsResponse}; `PUT` {@link WriteSessionProfileInstructionsRequest} → detail. */
   instructions: (profileId: string): string => `${profilePath(profileId)}/instructions`,
   /** `GET` → {@link SessionProfilePrepareStatusResponse}. */
-  prepareStatus: (profileId: string): string => `${profilePath(profileId)}/prepare-status`
+  prepareStatus: (profileId: string): string => `${profilePath(profileId)}/prepare-status`,
+  /** `GET ?agent=` → {@link SessionProfileGlobalSourceResponse}; `POST` {@link ImportSessionProfileFromGlobalRequest} → {@link SessionProfileImportResponse}. */
+  importGlobal: (profileId: string): string => `${profilePath(profileId)}/imports/global`,
+  /** `POST` {@link SessionProfileImportGitRequest} → `ProfileImportScanResponse`. */
+  importGit: (profileId: string): string => `${profilePath(profileId)}/imports/git`,
+  /** `POST ?name=` (`application/octet-stream`: a `.zip` or `.md`) → `ProfileImportScanResponse`. */
+  importUpload: (profileId: string): string => `${profilePath(profileId)}/imports/upload`,
+  /** `POST` {@link TakeSessionProfileImportRequest} → {@link SessionProfileImportResponse}. */
+  importScan: (profileId: string, importId: string): string => `${profilePath(profileId)}/imports/${encodeURIComponent(importId)}`,
+  /** `POST` {@link CopySessionProfileItemsRequest} → {@link SessionProfileImportResponse}. */
+  copyFrom: (profileId: string): string => `${profilePath(profileId)}/copy-from`,
+  /** `POST` {@link AddSessionProfilePluginRequest} → {@link SessionProfileImportResponse}. */
+  plugins: (profileId: string): string => `${profilePath(profileId)}/plugins`,
+  /** `GET` → `application/zip` (see {@link SESSION_PROFILE_EXPORT_FORMAT}). */
+  exportProfile: (profileId: string): string => `${profilePath(profileId)}/export`,
+  /** `POST ?name=` (`application/octet-stream`: an export `.zip`) → 201 {@link ImportSessionProfileResponse}. */
+  importProfile: `${SESSION_PROFILES_BASE}/import`
 } as const;
 
 /** The `/events` channel every Agent Profiles change is broadcast on. */
@@ -438,6 +609,15 @@ export type SessionProfileErrorCode =
   | "PROFILE_UNSUPPORTED_AGENT"
   | "CONFIG_UNREADABLE"
   | "WRITE_VERIFY_FAILED"
+  /** An import's source could not be fetched or read (a refused URL or zip, no candidates). */
+  | "IMPORT_FAILED"
+  /** The scan is gone (taken, expired) or belongs to another profile. */
+  | "IMPORT_NOT_FOUND"
+  | "UPLOAD_TOO_LARGE"
+  /** Agent config cannot read that agent (its CLI is not installed). */
+  | "AGENT_NOT_INSTALLED"
+  /** Imports are not wired in this daemon. */
+  | "IMPORTS_UNAVAILABLE"
   | "SESSION_PROFILE_ERROR";
 
 /** Every refusal: `{error: {code, message}}` (the agent-profile and workflow routes' shape). */

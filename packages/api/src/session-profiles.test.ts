@@ -92,6 +92,48 @@ describe("HttpOrquesterApiClient — Agent Profiles", () => {
     assert.deepEqual(seen[12]!.body, { revision: "6", text: "hi" });
   });
 
+  it("sends the import, copy, plugin and export calls to their routes; uploads as raw octet-stream bodies", async () => {
+    const seen: { method: string; url: string; type: string | undefined; body: unknown; auth: string | undefined }[] = [];
+    const api = new HttpOrquesterApiClient({
+      baseUrl: "http://d",
+      password: "tok",
+      fetch: (async (url: string, init?: RequestInit) => {
+        const headers = (init?.headers ?? {}) as Record<string, string>;
+        seen.push({ method: init?.method ?? "GET", url, type: headers["Content-Type"], body: init?.body, auth: headers.Authorization });
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }) as typeof fetch
+    });
+    const bytes = new Uint8Array([80, 75, 3, 4]);
+    await api.getSessionProfileGlobalSource("p1", "codex");
+    await api.importSessionProfileFromGlobal("p1", { revision: "1", agent: "claude", itemIds: ["skill:a"], instructions: "append" });
+    await api.scanSessionProfileGitImport("p1", { url: "https://github.com/o/r" });
+    await api.scanSessionProfileUpload("p1", "skills.zip", bytes);
+    await api.takeSessionProfileImport("p1", "imp 1", { revision: "2", picks: ["."] });
+    await api.copySessionProfileItems("p1", { revision: "3", fromProfileId: "p2", itemIds: ["i"] });
+    await api.addSessionProfilePlugin("p1", { revision: "4", agent: "claude", source: { type: "marketplace", marketplace: "m", plugin: "x" } });
+    await api.exportSessionProfile("p1");
+    await api.importSessionProfile("dev.zip", bytes);
+    assert.deepEqual(
+      seen.map((call) => `${call.method} ${call.url.replace("http://d", "")}`),
+      [
+        "GET /api/session-profiles/p1/imports/global?agent=codex",
+        "POST /api/session-profiles/p1/imports/global",
+        "POST /api/session-profiles/p1/imports/git",
+        "POST /api/session-profiles/p1/imports/upload?name=skills.zip",
+        "POST /api/session-profiles/p1/imports/imp%201",
+        "POST /api/session-profiles/p1/copy-from",
+        "POST /api/session-profiles/p1/plugins",
+        "GET /api/session-profiles/p1/export",
+        "POST /api/session-profiles/import?name=dev.zip"
+      ]
+    );
+    assert.ok(seen.every((call) => call.auth === "Bearer tok"));
+    assert.equal(seen[3]!.type, "application/octet-stream");
+    assert.equal(seen[3]!.body, bytes);
+    assert.equal(seen[8]!.type, "application/octet-stream");
+    assert.deepEqual(JSON.parse(seen[1]!.body as string), { revision: "1", agent: "claude", itemIds: ["skill:a"], instructions: "append" });
+  });
+
   it("throws on a refusal (a 409 conflict included)", async () => {
     const api = new HttpOrquesterApiClient({
       baseUrl: "http://d",

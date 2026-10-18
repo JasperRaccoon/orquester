@@ -1,7 +1,7 @@
 /**
  * One Agent Profile, drilled into from the library (agent profiles spec
  * §5.2, "Option A"): a header with the back arrow, the icon and name, the
- * gear (profile settings) and a "⋯" menu (Rename · Duplicate · Delete); the
+ * gear (profile settings) and a "⋯" menu (Rename · Duplicate · Export · Delete); the
  * per-agent readiness line; the Instructions row; the icon segmented bar of
  * the five kinds; then "N of M on" with "+ Add <kind>" and the shown kind's
  * rows. The library and the editor are never side by side.
@@ -16,6 +16,7 @@ import {
   ArrowLeft,
   ChevronRight,
   Copy,
+  Download,
   FileText,
   Loader2,
   MoreHorizontal,
@@ -60,6 +61,8 @@ export interface ProfileEditorActions {
   openSettings: () => void;
   rename: () => void;
   duplicate: () => void;
+  /** "⋯ → Export": a portable `.zip` (no secret values). Absent: not offered. */
+  exportProfile?: () => void;
   remove: () => void;
   openInstructions: () => void;
   add: (kind: Exclude<SessionProfileItemKind, "plugin">) => void;
@@ -148,6 +151,11 @@ export const ProfileEditorView: React.FC<ProfileEditorViewProps> = (props) => {
             <DropdownItem icon={<Copy size={14} />} onClick={actions.duplicate} className={cn(sheet && "py-3")}>
               Duplicate
             </DropdownItem>
+            {actions.exportProfile ? (
+              <DropdownItem icon={<Download size={14} />} onClick={actions.exportProfile} className={cn(sheet && "py-3")}>
+                Export…
+              </DropdownItem>
+            ) : null}
             <DropdownSeparator />
             <DropdownItem
               icon={<Trash2 size={14} />}

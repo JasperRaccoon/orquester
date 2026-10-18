@@ -15,7 +15,10 @@ per-agent GLOBAL config editor, user-facing "Agent config"). A chat without `pro
 | `manifest.ts` + `manifest/<agent>.ts` | Prepared-dir `manifest.json` envelope + per-agent section schemas; read by the agent host. |
 | `preparer.ts` + `preparers/<agent>.ts` | Per-agent preparer contract and registry (all `null` for now). |
 | `lifecycle.ts` | `SessionProfileLifecycle`: builds and publishes immutable prepared versions, tracks and refreshes them, collects unleased old ones; `ensureReady` for launches. |
-| `service.ts` | `SessionProfileService`: wire mapping (secrets masked), events, prepare status, `resolveForAgent(profileId, agent)`. |
+| `service.ts` | `SessionProfileService`: wire mapping (secrets masked), events, prepare status, `resolveForAgent(profileId, agent)`; the import entry points delegate to `imports.ts`. |
+| `imports.ts` | `SessionProfileImports`: Import from Global (via Agent config), git / zip / md scans, copy from profile, plugins into the profile's cache, export / import of a profile. Gathers outside the queue, writes with ONE `store.importItems`. |
+| `export.ts` | The export `.zip` format, its builder, and the strict reader behind "Import profile from file". |
+| `files.ts` | `measureTree` (no symlinks, caps), `normalizeProfileModes`, the in-memory zip writer. |
 | `routes.ts` | REST surface (`sessionProfileRoutes`), both transports. |
 | `errors.ts` | `SessionProfileError` → `{error: {code, message}}`. |
 
@@ -44,9 +47,43 @@ Contracts: `@orquester/api` `session-profiles.ts` (wire types, `sessionProfileRo
   `{key, value}` / `{key, keep: true}` / absent = removed. Only `store.readSource` (and so
   `resolveForAgent`) returns real values — never log them, never return them from a route.
 - Unreadable items are kept verbatim and reported (`itemErrors`); unknown fields survive rewrites.
-- Plugins: the store keeps the record and an empty `plugins/<itemId>/` slot
-  (`store.pluginCacheDir`). The HTTP create route refuses `kind: "plugin"`; the marketplace flow
-  fills the slot and creates the record through the store.
+- Plugins: the store keeps the record and `plugins/<itemId>/` (`store.pluginCacheDir`). The HTTP
+  create route refuses `kind: "plugin"`; plugins arrive only through `…/plugins`, Import from
+  Global, copy from profile and profile import (see "Plugin cache" below).
+
+## Plugin cache (what the per-agent preparers consume)
+
+A plugin item is single-agent (`agents: [agent]`). `plugins/<itemId>/` holds the plugin's files
+copied WHOLE (no symlinks; dirs 0700, files 0600, 0700 when executable) — never installed into
+an account's or Global's plugin dirs. The record (`ResolvedPlugin`: `name`, `marketplace?`,
+`version?`, `cacheDir`) plus provenance `record.plugin.source` (`SessionProfilePluginSource`:
+`type` `marketplace`|`global`, `marketplace?`, `commit?`, `url?`, `ref?`, `copiedAt`).
+
+| Agent | `cacheDir` holds | Record | Preparer does |
+|---|---|---|---|
+| Claude | the plugin ROOT, always with `.claude-plugin/plugin.json` (a catalogue-only `strict: false` plugin gets a minimal `{name, version?}` one) | `name` = plugin name (not `name@marketplace`), `marketplace`, `version` (catalogue → manifest → commit[0..12]) | pass `cacheDir` as a local SDK plugin (`plugins: [{type: "local", path: cacheDir}]`); `${CLAUDE_PLUGIN_ROOT}` resolves to it |
+| Codex | the plugin ROOT of ONE version (`.codex-plugin/plugin.json` or `.claude-plugin/plugin.json`; from Global: the reported version's directory of `plugins/cache/<mp>/<name>/`) | `name`, `marketplace` (needed for the id), `version` (may be absent: use `"local"`) | copy to `<CODEX_HOME>/plugins/cache/<marketplace>/<name>/<version>` and write `[plugins."<name>@<marketplace>"] enabled = true` |
+| Grok | the plugin directory (`.grok-plugin/`, `.claude-plugin/` or `plugin.json` manifest, as found) | `name`, `marketplace?`, `version?` | `--plugin-dir <cacheDir>` (or copy to `<GROK_HOME>/plugins/<name>/`); keep its name out of the `[plugins] disabled` deny list |
+| OpenCode | the plugin file(s) at the TOP level (`notify.js`, …), copied from a Global plugin file; npm plugins are not copyable | `name` = the file name | copy every top-level `*.js`/`*.ts`/`*.mjs` into `<OPENCODE_CONFIG_DIR>/plugin/` |
+
+Remote marketplace sources (Claude catalogue `github` / `url` / `git` / `git-subdir`, Codex
+`source.url`, Grok git/GitHub marketplaces resolved through the clone's catalogue) are fetched
+with Agent config's safe `git clone` (`agent-profile/import/git-clone.ts`: https/ssh only, no
+credentials, deadline); `.git` is removed before the copy. Sources that are not repositories
+(npm, pip, Codex's remote-only catalogues) are refused with a pointer to Agent config.
+
+## Imports, copies, export (`imports.ts`, `export.ts`)
+
+- Routes: `…/:id/imports/global` (GET list, POST import), `…/:id/imports/git`, `…/:id/imports/upload`
+  (octet-stream), `…/:id/imports/:importId` (take a scan), `…/:id/copy-from`, `…/:id/plugins`,
+  `…/:id/export` (GET zip), `/api/session-profiles/import` (octet-stream, 201 new profile).
+- Every import is ONE store mutation (`importItems`: revision checked, all-or-nothing). Conflicts:
+  `fail` (409 `ITEM_EXISTS`) / `replace` / `keep-both` (`name-2`; plugins are skipped) / `skip`;
+  every rename, replacement or skip is a `notes` line.
+- Import from Global never writes Global (exports are temp copies; tests compare Global byte for
+  byte). MCP secret values land in `secrets.json` only.
+- Exports never carry secret values: `profile.json` keeps env/header KEYS; a profile imported from
+  a file has those servers skipped at launch until the values are entered again (and says so).
 
 ## How later tasks plug in
 
@@ -126,8 +163,5 @@ restarts (spec §5.6). Status, staleness and fingerprints read the current versi
   `agent-host/adapters/profile-manifest.ts`'s `loadProfileManifest(input, agent)` (see the
   agent-host README). The daemon must check `AgentChatService.hostSupportsSessionProfiles()`
   before sending a profile — an older host would run it as Global.
-- **Imports** (Global / git / zip / md / copy-from-profile / marketplace plugins): add routes under
-  the paths reserved in `sessionProfileRoutes`' doc comment, and write through new store methods
-  that take the profile queue and revision like `createItem` does.
 - **UI**: everything through `sessionProfileRoutes` / `HttpOrquesterApiClient` methods
   (`listSessionProfiles`, `createSessionProfileItem`, …) and `/events` on `SESSION_PROFILES_CHANNEL`.

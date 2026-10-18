@@ -123,7 +123,7 @@ const CollisionPrompt: React.FC<{
   </Banner>
 );
 
-const CandidateChecklist: React.FC<{
+export const CandidateChecklist: React.FC<{
   candidates: readonly ProfileImportCandidate[];
   picks: readonly string[];
   notes: readonly string[];
