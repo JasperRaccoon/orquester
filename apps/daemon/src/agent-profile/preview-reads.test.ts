@@ -123,7 +123,9 @@ test("pluginProvidesOf and claudePluginSource: what a plugin ships, and where it
   assert.ok(!JSON.stringify(provides).includes("t0ken"), "env values are never part of what a plugin provides");
   assert.deepEqual(await claudePluginSource(market, "deploy"), { version: "1.2.0", source: { type: "local", dir: plugin } });
   assert.deepEqual(await claudePluginSource(market, "bare"), { source: { type: "local", dir: join(market, "plugins", "bare") } });
-  assert.deepEqual(await claudePluginSource(market, "far"), { source: { type: "remote", description: "github acme/far" } });
+  assert.deepEqual(await claudePluginSource(market, "far"), {
+    source: { type: "remote", description: "github acme/far", fetch: { url: "https://github.com/acme/far.git" } }
+  });
   await assert.rejects(claudePluginSource(market, "escape"), /outside the marketplace/);
   await assert.rejects(claudePluginSource(market, "ghost"), /does not list/);
 });
@@ -258,7 +260,7 @@ test("codexPluginLocation: the checkout is the manifest's root (either layout); 
   assert.deepEqual(codexPluginLocation(manifest, summary("../../etc")).source, { type: "local", dir: "/etc" });
   assert.equal(codexMarketplaceRoot("/m/claude-layout/.claude-plugin/marketplace.json"), "/m/claude-layout");
   assert.deepEqual(codexPluginLocation(null, { version: "2", localVersion: null, source: { type: "git", url: "https://g.example/p.git" } }),
-    { marketplaceDir: null, version: "2", source: { type: "remote", description: "git https://g.example/p.git" } });
+    { marketplaceDir: null, version: "2", source: { type: "remote", description: "git https://g.example/p.git", fetch: { url: "https://g.example/p.git" } } });
 });
 
 test("pluginPreview: a plugin directory outside the marketplace checkout (on realpaths, a symlink included) is marked: its commit does not pin it", async (t) => {

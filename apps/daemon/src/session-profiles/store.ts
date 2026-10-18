@@ -20,10 +20,14 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { chmod, mkdir, readdir, rename, rm, stat } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, readdir, rename, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import {
   PROFILE_HOOK_EVENTS,
+  type SessionProfileImportConflictPolicy,
+  type SessionProfileInstructionsMode,
+  type SessionProfilePluginDraft,
+  type SessionProfilePluginSource,
   SESSION_PROFILE_DESCRIPTION_MAX,
   SESSION_PROFILE_ICON_MAX,
   SESSION_PROFILE_NAME_MAX,
@@ -36,6 +40,7 @@ import {
   type McpServerDraft,
   type SecretEntryDraft,
   type SessionProfileAgentId,
+  type SessionProfileAgentScope,
   type SessionProfileItemDraft,
   type SessionProfileSettingsDraft
 } from "@orquester/api";
@@ -61,8 +66,10 @@ import { ProfileBackups } from "../agent-profile/infra/backups.ts";
 import { mergeFrontmatter, parseMarkdownDocument, serializeMarkdownDocument } from "../agent-profile/infra/frontmatter.ts";
 import { readTextIfExists, writeProfileFile, writeProfileFileVerified } from "../agent-profile/infra/fs-write.ts";
 import { readSkillFiles } from "../agent-profile/infra/markdown-items.ts";
-import { copyEntry, isMissing } from "../agent-profile/infra/tree.ts";
+import { copyEntry, copyTree, isMissing } from "../agent-profile/infra/tree.ts";
+import type { PortableMcpServer } from "../agent-profile/adapters/types.ts";
 import { sessionProfileErrors as errors } from "./errors.ts";
+import { PLUGIN_TREE_CAPS, SKILL_TREE_CAPS, measureTree, normalizeProfileModes, type ZipEntry } from "./files.ts";
 import { PROFILE_DIR_MODE, PROFILE_FILE_MODE, profileLayout, type ProfileLayout } from "./layout.ts";
 import type { SessionProfileSource } from "./resolve.ts";
 
@@ -99,6 +106,50 @@ export interface UpdateStoredProfileInput {
   description?: string;
   settings?: SessionProfileSettingsDraft;
 }
+
+/**
+ * One item an import, a copy or the plugin flow adds (`importItems`). Daemon-internal: an MCP
+ * server carries REAL secret values — never serialize, log or return one.
+ */
+export type SessionProfileImportEntry =
+  | {
+      kind: "skill";
+      name: string;
+      agents: SessionProfileAgentScope;
+      enabled?: boolean;
+      /** `SKILL.md`'s frontmatter and body as the profile will store them (`name` is set to the item's). */
+      frontmatter: Record<string, unknown>;
+      body: string;
+      /** The skill's directory: its other files are copied too (no symlinks, capped). */
+      dir?: string;
+    }
+  | { kind: "command"; name: string; agents: SessionProfileAgentScope; enabled?: boolean; frontmatter: Record<string, unknown>; body: string }
+  | { kind: "mcp"; agents: SessionProfileAgentScope; enabled?: boolean; server: PortableMcpServer }
+  | { kind: "hook"; agent: SessionProfileAgentId; enabled?: boolean; name?: string; hook: HookDraft }
+  | {
+      kind: "plugin";
+      agent: SessionProfileAgentId;
+      enabled?: boolean;
+      plugin: SessionProfilePluginDraft & { source?: SessionProfilePluginSource };
+      /** The plugin's root directory (or, OpenCode, a directory holding its file): copied whole into the plugin cache. */
+      dir: string;
+    };
+
+export interface SessionProfileImportOptions {
+  onConflict: SessionProfileImportConflictPolicy;
+  /** Instructions brought in with the items (`""` text with `replace` removes them). */
+  instructions?: { text: string; mode: SessionProfileInstructionsMode };
+}
+
+/** A profile's portable copy (`readExport`): its manifest — no secret values anywhere — and its files. */
+export interface SessionProfileExportContent {
+  name: string;
+  manifest: SessionProfileManifestFile;
+  files: ZipEntry[];
+}
+
+/** Largest export, in bytes of file content. */
+const EXPORT_MAX_BYTES = 200 * 1024 * 1024;
 
 export interface SessionProfileStoreOptions {
   appdir: string;
@@ -494,6 +545,301 @@ export class SessionProfileStore {
   }
 
   // -------------------------------------------------------------------------
+  // Imports, copies, plugins, export (spec §4.5)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Adds `entries` (and the instructions) to the profile in ONE mutation: one revision bump, all
+   * or nothing. A name the profile already has for an overlapping scope follows
+   * `options.onConflict` (`fail` refuses the whole import); every rename, replace or skip is a
+   * note. Skill and plugin directories are copied without symlinks, capped, with the profile's
+   * modes; MCP secret values go to the secrets file.
+   */
+  async importItems(
+    profileId: string,
+    revision: string,
+    entries: readonly SessionProfileImportEntry[],
+    options: SessionProfileImportOptions
+  ): Promise<{ profile: StoredSessionProfile; itemIds: string[]; notes: string[] }> {
+    const { profile, result } = await this.mutate(profileId, revision, async (state) => {
+      const itemIds: string[] = [];
+      const notes: string[] = [];
+      if (options.instructions !== undefined) await this.importInstructions(state, options.instructions);
+      for (const entry of entries) {
+        const kind = entry.kind;
+        const agents = importScope(entry);
+        let name = importName(entry);
+        const clashes = this.clashing(state.file, entry, name, agents);
+        if (clashes.length > 0) {
+          const label = `${KIND_WORD[kind]} "${name}"`;
+          const policy = options.onConflict === "keep-both" && kind === "plugin" ? "skip" : options.onConflict;
+          if (policy === "fail") throw errors.itemExists(KIND_WORD[kind], name);
+          if (policy === "skip") {
+            notes.push(`Skipped the ${label}: the profile already has it.`);
+            continue;
+          }
+          if (policy === "replace") {
+            for (const clash of clashes) this.dropItem(state, clash);
+            notes.push(`Replaced the profile's ${label}.`);
+          } else if (kind !== "hook" && kind !== "plugin") {
+            const free = this.freeName(state.file, kind, name, agents);
+            notes.push(`Added the ${label} as "${free}": the profile already has one.`);
+            name = free;
+          }
+        }
+        const id = this.newId();
+        const record = await this.applyImport(state, id, entry, name, agents);
+        state.file.items.push({ ok: true, record });
+        itemIds.push(id);
+      }
+      return { itemIds, notes };
+    });
+    return { profile, ...result };
+  }
+
+  /**
+   * The profile as its export holds it, read under its queue: the manifest (unreadable items left
+   * out) and every file of its readable items and instructions. Never `secrets.json`.
+   */
+  async readExport(profileId: string): Promise<SessionProfileExportContent> {
+    return this.queue.run(profileId, async () => {
+      const layout = this.layout(profileId);
+      const file = await this.readManifest(profileId, layout);
+      const items = file.items.filter((entry): entry is Extract<SessionProfileItemEntry, { ok: true }> => entry.ok);
+      const files: ZipEntry[] = [];
+      let bytes = 0;
+      const add = async (path: string, rel: string): Promise<void> => {
+        let st;
+        try {
+          st = await lstat(path);
+        } catch (error) {
+          if (isMissing(error)) return;
+          throw error;
+        }
+        if (st.isDirectory()) {
+          for (const name of (await readdir(path)).sort()) await add(join(path, name), `${rel}/${name}`);
+        } else if (st.isFile()) {
+          bytes += st.size;
+          if (bytes > EXPORT_MAX_BYTES) throw errors.invalid(`The profile is larger than ${EXPORT_MAX_BYTES / 1024 / 1024} MB and cannot be exported.`);
+          files.push({ path: rel, data: await readFile(path), mode: st.mode & 0o777 });
+        }
+        // Symlinks and special files are never part of a profile (see `files.ts`): left out.
+      };
+      await add(layout.instructions, "instructions.md");
+      for (const { record } of items) {
+        if (record.kind === "skill") await add(layout.skillDir(record.id), `skills/${record.id}`);
+        else if (record.kind === "command") await add(layout.commandFile(record.id), `commands/${record.id}.md`);
+        else if (record.kind === "plugin") await add(layout.pluginCacheDir(record.id), `plugins/${record.id}`);
+      }
+      return { name: file.manifest.name, manifest: { manifest: { ...file.manifest }, items }, files };
+    });
+  }
+
+  /**
+   * A NEW profile from an export already extracted to `dir` and validated (`export.ts`): its
+   * items and files, a fresh id, revision 1, its name made unique. No secrets file: MCP secret
+   * values are never in an export.
+   */
+  async createFromExport(dir: string, source: SessionProfileManifestFile): Promise<StoredSessionProfile> {
+    return this.queue.run(CATALOG, async () => {
+      const wanted = profileName(source.manifest.name);
+      const { profiles } = await this.list();
+      const taken = profiles.some((profile) => profile.manifest.name.toLowerCase() === wanted.toLowerCase());
+      const name = taken ? await this.copyName(wanted) : wanted;
+      const id = this.newId();
+      const now = this.now().toISOString();
+      await this.materialize(id, async (tmp) => {
+        const target = profileLayout(tmp);
+        const from = profileLayout(dir);
+        const copy = async (src: string, dest: string): Promise<void> => {
+          if ((await lstat(src).catch(() => null)) === null) return;
+          await mkdir(join(dest, ".."), { recursive: true, mode: PROFILE_DIR_MODE });
+          await copyTree(src, dest, { refuseSymlinks: true });
+        };
+        await copy(from.instructions, target.instructions);
+        for (const entry of source.items) {
+          if (!entry.ok) continue;
+          const { record } = entry;
+          if (record.kind === "skill") await copy(from.skillDir(record.id), target.skillDir(record.id));
+          else if (record.kind === "command") await copy(from.commandFile(record.id), target.commandFile(record.id));
+          else if (record.kind === "plugin") await copy(from.pluginCacheDir(record.id), target.pluginCacheDir(record.id));
+        }
+        await normalizeProfileModes(tmp);
+        const manifest: SessionProfileManifestRecord = {
+          ...source.manifest,
+          version: SESSION_PROFILE_MANIFEST_VERSION,
+          id,
+          name,
+          revision: 1,
+          createdAt: now,
+          updatedAt: now
+        };
+        await this.writeManifest(target, { manifest, items: source.items });
+      });
+      return this.read(id);
+    });
+  }
+
+  /** The instructions brought by an import: replace them, or append below the profile's own. Undone on a failed mutation. */
+  private async importInstructions(state: MutationState, input: { text: string; mode: SessionProfileInstructionsMode }): Promise<void> {
+    const path = state.layout.instructions;
+    const current = await readTextIfExists(path);
+    const next =
+      input.mode === "replace" || current === null || current.trim() === ""
+        ? input.text
+        : input.text.trim() === ""
+          ? current
+          : `${current.replace(/\s+$/, "")}\n\n${input.text}`;
+    state.rollback.push(async () => {
+      if (current === null) await rm(path, { force: true });
+      else await writeProfileFile(path, current, WRITE);
+    });
+    if (next === "") await rm(path, { force: true });
+    else await writeProfileFile(path, next, WRITE);
+  }
+
+  /** The profile's readable items an imported one clashes with (see {@link SessionProfileImportConflictPolicy}). */
+  private clashing(
+    file: SessionProfileManifestFile,
+    entry: SessionProfileImportEntry,
+    name: string,
+    agents: SessionProfileItemRecord["agents"]
+  ): string[] {
+    const ids: string[] = [];
+    for (const candidate of file.items) {
+      if (!candidate.ok) continue;
+      const { record } = candidate;
+      if (record.kind !== entry.kind || !scopesOverlap(record.agents, agents)) continue;
+      const same =
+        entry.kind === "hook" && record.kind === "hook"
+          ? record.hook.event === entry.hook.event &&
+            (record.hook.matcher ?? "") === (entry.hook.matcher ?? "") &&
+            record.hook.command === entry.hook.command
+          : record.name === name;
+      if (same) ids.push(record.id);
+    }
+    return ids;
+  }
+
+  /** Removes an item inside a mutation; its files and secrets go after the commit (as `deleteItem`). */
+  private dropItem(state: MutationState, itemId: string): void {
+    const index = state.file.items.findIndex((entry) => entryId(entry) === itemId);
+    if (index < 0) return;
+    const [entry] = state.file.items.splice(index, 1);
+    const kind = entry?.ok ? entry.record.kind : undefined;
+    const { layout } = state;
+    state.afterCommit.push(async () => {
+      if (kind === "skill") await rm(layout.skillDir(itemId), { recursive: true, force: true });
+      if (kind === "command") await rm(layout.commandFile(itemId), { force: true });
+      if (kind === "plugin") await rm(layout.pluginCacheDir(itemId), { recursive: true, force: true });
+      const secrets = await state.secrets();
+      if (itemId in secrets.items) {
+        delete secrets.items[itemId];
+        await this.writeSecrets(layout, secrets);
+      }
+    });
+  }
+
+  /** `name-2`, `name-3`… — the first the kind's name rule accepts and no overlapping item has. */
+  private freeName(
+    file: SessionProfileManifestFile,
+    kind: "mcp" | "skill" | "command",
+    name: string,
+    agents: SessionProfileItemRecord["agents"]
+  ): string {
+    const valid = kind === "mcp" ? isValidMcpServerName : kind === "skill" ? isValidSkillName : isValidCommandName;
+    const taken = (candidate: string) =>
+      file.items.some((entry) => entry.ok && entry.record.kind === kind && entry.record.name === candidate && scopesOverlap(entry.record.agents, agents));
+    for (let n = 2; n < 10_000; n += 1) {
+      const suffix = `-${n}`;
+      const candidate = `${name.slice(0, Math.max(1, 64 - suffix.length))}${suffix}`;
+      if (valid(candidate) && !taken(candidate)) return candidate;
+    }
+    throw errors.itemExists(KIND_WORD[kind], name);
+  }
+
+  /** Writes one imported item's content through {@link applyDraft} (its validation, its rollback) and answers its record. */
+  private async applyImport(
+    state: MutationState,
+    id: string,
+    entry: SessionProfileImportEntry,
+    name: string,
+    agents: SessionProfileItemRecord["agents"]
+  ): Promise<SessionProfileItemRecord> {
+    const { layout } = state;
+    const enabled = entry.enabled !== undefined ? { enabled: entry.enabled } : {};
+    const scope = agents as SessionProfileAgentScope;
+    switch (entry.kind) {
+      case "skill": {
+        if (entry.dir !== undefined) {
+          await measureTree(entry.dir, SKILL_TREE_CAPS, `The skill "${name}"`);
+          await mkdir(layout.skillsDir, { recursive: true, mode: PROFILE_DIR_MODE });
+          state.rollback.push(() => rm(layout.skillDir(id), { recursive: true, force: true }));
+          await copyTree(entry.dir, layout.skillDir(id), { refuseSymlinks: true });
+          await normalizeProfileModes(layout.skillDir(id));
+        }
+        return this.applyDraft(state, id, null, {
+          kind: "skill",
+          agents: scope,
+          ...enabled,
+          document: { name, frontmatter: entry.frontmatter, body: entry.body }
+        });
+      }
+      case "command":
+        return this.applyDraft(state, id, null, {
+          kind: "command",
+          agents: scope,
+          ...enabled,
+          document: { name, frontmatter: entry.frontmatter, body: entry.body }
+        });
+      case "mcp": {
+        const server = entry.server;
+        const secrets = (values: Record<string, string> | undefined) =>
+          values === undefined ? undefined : Object.entries(values).map(([key, value]) => ({ key, value }));
+        const mcp: McpServerDraft =
+          server.transport === "stdio"
+            ? {
+                name,
+                transport: "stdio",
+                ...(server.command !== undefined ? { command: server.command } : {}),
+                ...(server.args !== undefined ? { args: [...server.args] } : {}),
+                ...(server.cwd !== undefined ? { cwd: server.cwd } : {}),
+                ...(server.env !== undefined ? { env: secrets(server.env) } : {}),
+                ...(server.advanced !== undefined ? { advanced: { ...server.advanced } } : {})
+              }
+            : {
+                name,
+                transport: server.transport,
+                ...(server.url !== undefined ? { url: server.url } : {}),
+                ...(server.headers !== undefined ? { headers: secrets(server.headers) } : {}),
+                ...(server.advanced !== undefined ? { advanced: { ...server.advanced } } : {})
+              };
+        return this.applyDraft(state, id, null, { kind: "mcp", agents: scope, ...enabled, mcp });
+      }
+      case "hook":
+        return this.applyDraft(state, id, null, {
+          kind: "hook",
+          agents: [entry.agent],
+          ...enabled,
+          ...(entry.name !== undefined ? { name: entry.name } : {}),
+          hook: entry.hook
+        });
+      case "plugin": {
+        await measureTree(entry.dir, PLUGIN_TREE_CAPS, `The plugin "${name}"`);
+        const { source, ...draft } = entry.plugin;
+        const record = await this.applyDraft(state, id, null, { kind: "plugin", agents: [entry.agent], ...enabled, plugin: { ...draft, name } });
+        // `applyDraft` made the empty cache slot (and its rollback); the plugin's files take its place.
+        const cacheDir = layout.pluginCacheDir(id);
+        await rm(cacheDir, { recursive: true, force: true });
+        await copyTree(entry.dir, cacheDir, { refuseSymlinks: true });
+        await normalizeProfileModes(cacheDir);
+        if (record.kind !== "plugin") return record;
+        return { ...record, plugin: { ...record.plugin, ...(source !== undefined ? { source: { ...source } } : {}) } };
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
   // Internals
   // -------------------------------------------------------------------------
 
@@ -836,6 +1182,31 @@ export class SessionProfileStore {
 // ---------------------------------------------------------------------------
 // Field validation
 // ---------------------------------------------------------------------------
+
+const KIND_WORD: Record<SessionProfileImportEntry["kind"], string> = {
+  skill: "skill",
+  command: "command",
+  mcp: "MCP server",
+  hook: "hook",
+  plugin: "plugin"
+};
+
+function importScope(entry: SessionProfileImportEntry): SessionProfileItemRecord["agents"] {
+  return entry.kind === "hook" || entry.kind === "plugin" ? [entry.agent] : entry.agents;
+}
+
+function importName(entry: SessionProfileImportEntry): string {
+  switch (entry.kind) {
+    case "mcp":
+      return entry.server.name;
+    case "hook":
+      return entry.name?.trim() || entry.hook.event;
+    case "plugin":
+      return entry.plugin.name;
+    default:
+      return entry.name;
+  }
+}
 
 function profileName(raw: string): string {
   const name = raw.trim();

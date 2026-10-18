@@ -1,0 +1,247 @@
+/**
+ * Agent Profiles — a profile's portable `.zip` (spec §5.2 "⋯ → Export") and a new profile made
+ * from one (the library's "Import profile from file").
+ *
+ * ## The format (`SESSION_PROFILE_EXPORT_FORMAT`, version 1)
+ *
+ *   orquester-export.json   {format, version, exportedAt, secrets}: the marker an import requires
+ *   profile.json            the profile's manifest as stored — fields, settings, items with their
+ *                           scopes; an MCP server's env / header KEYS only (`envKeys`, `headerKeys`)
+ *   instructions.md         when the profile has instructions
+ *   skills/<itemId>/…       each skill's directory
+ *   commands/<itemId>.md    each command
+ *   plugins/<itemId>/…      each plugin's cached files
+ *
+ * **Secrets are never exported**: `secrets.json` is not in the zip and the manifest never holds a
+ * value. A profile made from an export keeps its MCP servers' keys without values: each is skipped
+ * at launch ("The value of KEY is missing") until its values are entered again, and the import's
+ * notes name them. Items the daemon cannot read are left out of an export.
+ *
+ * ## Reading one back — strictly
+ * The upload is extracted with the importer's zip rules (`agent-profile/import/zip.ts`: no
+ * absolute paths, `..`, symlinks or encrypted entries; ≤ 5 000 entries, ≤ 100 MB). Then anything
+ * unexpected refuses the WHOLE file (400 `IMPORT_FAILED`): another top-level entry (a
+ * `secrets.json` included), a missing or foreign marker, a manifest that is not version 1 or has
+ * an item that does not read, an invalid scope or name, two items clashing, a skill without a
+ * readable `SKILL.md`, a command file that does not parse, an empty plugin, or a file under
+ * `skills/`, `commands/` or `plugins/` that belongs to no item.
+ */
+
+import { lstat, mkdir, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { join } from "node:path";
+import {
+  PROFILE_HOOK_EVENTS,
+  SESSION_PROFILE_DESCRIPTION_MAX,
+  SESSION_PROFILE_EXPORT_FORMAT,
+  SESSION_PROFILE_EXPORT_VERSION,
+  SESSION_PROFILE_ICON_MAX,
+  SESSION_PROFILE_NAME_MAX,
+  isValidCommandName,
+  isValidMcpServerName,
+  isValidSkillName,
+  sessionProfileScopeProblem
+} from "@orquester/api";
+import {
+  parseSessionProfileManifest,
+  serializeSessionProfileManifest,
+  type SessionProfileItemRecord,
+  type SessionProfileManifestFile
+} from "@orquester/config";
+import { profileErrors } from "../agent-profile/errors.ts";
+import { parseMarkdownDocument } from "../agent-profile/infra/frontmatter.ts";
+import { extractZip } from "../agent-profile/import/zip.ts";
+import { buildZip, type ZipEntry } from "./files.ts";
+import { profileLayout, PROFILE_INSTRUCTIONS_FILE, PROFILE_MANIFEST_FILE, PROFILE_SKILL_FILE } from "./layout.ts";
+import { wireScope } from "./resolve.ts";
+import type { SessionProfileExportContent } from "./store.ts";
+
+export const EXPORT_MARKER_FILE = "orquester-export.json";
+
+const ZIP_LIMITS = { maxEntries: 5000, maxBytes: 100 * 1024 * 1024 };
+const MAX_TEXT_BYTES = 4 * 1024 * 1024;
+const TOP_LEVEL = new Set([EXPORT_MARKER_FILE, PROFILE_MANIFEST_FILE, PROFILE_INSTRUCTIONS_FILE, "skills", "commands", "plugins"]);
+
+function refuse(message: string): never {
+  throw profileErrors.importFailed(`The profile file was refused: ${message}`);
+}
+
+/** `Agent Profile name` → `agent-profile-name.agent-profile.zip`. */
+export function exportFileName(name: string): string {
+  const slug = name
+    .normalize("NFKD")
+    .replace(/[̀-ͯ]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 60);
+  return `${slug || "profile"}.agent-profile.zip`;
+}
+
+/** The export `.zip` of `content` (see the module header). */
+export function buildProfileExport(content: SessionProfileExportContent, now: Date): Buffer {
+  const marker = {
+    format: SESSION_PROFILE_EXPORT_FORMAT,
+    version: SESSION_PROFILE_EXPORT_VERSION,
+    exportedAt: now.toISOString(),
+    secrets: "MCP env and header values are not exported: enter them again after importing."
+  };
+  const entries: ZipEntry[] = [
+    { path: EXPORT_MARKER_FILE, data: Buffer.from(`${JSON.stringify(marker, null, 2)}\n`, "utf8"), mode: 0o644 },
+    { path: PROFILE_MANIFEST_FILE, data: Buffer.from(serializeSessionProfileManifest(content.manifest), "utf8"), mode: 0o644 },
+    ...content.files
+  ];
+  if (entries.length > 65_535) throw profileErrors.importFailed("The profile holds too many files to export.");
+  return buildZip(entries, now);
+}
+
+/** What {@link readProfileExport} answers; `dispose()` removes the extracted tree (idempotent). */
+export interface ReadProfileExport {
+  dir: string;
+  manifest: SessionProfileManifestFile;
+  notes: string[];
+  dispose(): Promise<void>;
+}
+
+/** Extracts and validates an export `.zip` (see the module header) under `workDir`. */
+export async function readProfileExport(zipPath: string, workDir: string): Promise<ReadProfileExport> {
+  await mkdir(workDir, { recursive: true, mode: 0o700 });
+  const root = await mkdtemp(join(workDir, "profile-import-"));
+  const dispose = () => rm(root, { recursive: true, force: true }).catch(() => undefined);
+  try {
+    const dir = join(root, "tree");
+    await mkdir(dir, { mode: 0o700 });
+    await extractZip(zipPath, dir, ZIP_LIMITS);
+    const manifest = await validateExport(dir);
+    const notes: string[] = [];
+    const needSecrets = manifest.items
+      .flatMap((entry) => (entry.ok && entry.record.kind === "mcp" ? [entry.record] : []))
+      .filter((record) => record.kind === "mcp" && ((record.mcp.envKeys?.length ?? 0) > 0 || (record.mcp.headerKeys?.length ?? 0) > 0))
+      .map((record) => record.name);
+    if (needSecrets.length > 0) {
+      notes.push(
+        `Secret values are never exported: enter them again for ${needSecrets.map((name) => `"${name}"`).join(", ")} (until then ${
+          needSecrets.length === 1 ? "it is" : "they are"
+        } skipped).`
+      );
+    }
+    return { dir, manifest, notes, dispose };
+  } catch (error) {
+    await dispose();
+    throw error;
+  }
+}
+
+async function kindAt(path: string): Promise<"file" | "dir" | null> {
+  const st = await lstat(path).catch(() => null);
+  if (st === null) return null;
+  if (st.isDirectory()) return "dir";
+  if (st.isFile()) return "file";
+  return refuse("it holds something that is not a file or folder.");
+}
+
+async function readText(path: string, shown: string): Promise<string> {
+  if ((await kindAt(path)) !== "file") refuse(`${shown} is missing.`);
+  const st = await lstat(path);
+  if (st.size > MAX_TEXT_BYTES) refuse(`${shown} is too large.`);
+  return readFile(path, "utf8");
+}
+
+async function validateExport(dir: string): Promise<SessionProfileManifestFile> {
+  for (const name of await readdir(dir)) {
+    if (!TOP_LEVEL.has(name)) refuse(`"${name.slice(0, 80)}" is not part of an Agent Profile export.`);
+  }
+  let marker: unknown;
+  try {
+    marker = JSON.parse(await readText(join(dir, EXPORT_MARKER_FILE), EXPORT_MARKER_FILE));
+  } catch (error) {
+    if (error instanceof SyntaxError) refuse(`${EXPORT_MARKER_FILE} is not JSON.`);
+    throw error;
+  }
+  const record = marker !== null && typeof marker === "object" ? (marker as Record<string, unknown>) : {};
+  if (record.format !== SESSION_PROFILE_EXPORT_FORMAT) refuse("it is not an Agent Profile export.");
+  if (record.version !== SESSION_PROFILE_EXPORT_VERSION) refuse(`it is a version ${String(record.version).slice(0, 20)} export; this build reads version ${SESSION_PROFILE_EXPORT_VERSION}.`);
+
+  let manifest: SessionProfileManifestFile;
+  try {
+    manifest = parseSessionProfileManifest(JSON.parse(await readText(join(dir, PROFILE_MANIFEST_FILE), PROFILE_MANIFEST_FILE)));
+  } catch (error) {
+    if (error instanceof Error && !(error instanceof SyntaxError) && "code" in error) throw error;
+    refuse(`${PROFILE_MANIFEST_FILE} does not read (${error instanceof Error ? error.message.slice(0, 200) : "unknown"}).`);
+  }
+  const { name, description, icon } = manifest.manifest;
+  if (name.trim() === "" || name.length > SESSION_PROFILE_NAME_MAX) refuse("its profile name is empty or too long.");
+  if (description.length > SESSION_PROFILE_DESCRIPTION_MAX) refuse("its description is too long.");
+  if (icon !== undefined && icon.length > SESSION_PROFILE_ICON_MAX) refuse("its icon is too long.");
+  const layout = profileLayout(dir);
+  const records: SessionProfileItemRecord[] = [];
+  for (const [index, entry] of manifest.items.entries()) {
+    if (!entry.ok) refuse(`item ${index + 1} does not read (${entry.error.slice(0, 200)}).`);
+    records.push(entry.record);
+  }
+  for (const record of records) {
+    const scope = wireScope(record.agents);
+    const problem = sessionProfileScopeProblem(record.kind, scope);
+    if (scope === null || problem !== null) refuse(`the ${record.kind} "${record.name}" has an invalid agent scope${problem ? `: ${problem}` : "."}`);
+    const clash = records.find(
+      (other) =>
+        other !== record &&
+        other.kind === record.kind &&
+        record.kind !== "hook" &&
+        other.name === record.name &&
+        (other.agents === "all" || record.agents === "all" || other.agents.some((agent) => (record.agents as string[]).includes(agent)))
+    );
+    if (clash) refuse(`two ${record.kind} items are named "${record.name}".`);
+    switch (record.kind) {
+      case "skill": {
+        if (!isValidSkillName(record.name)) refuse(`"${record.name}" is not a valid skill name.`);
+        const text = await readText(layout.skillFile(record.id), `skills/${record.id}/${PROFILE_SKILL_FILE}`);
+        parseDocument(text, `the skill "${record.name}"`);
+        break;
+      }
+      case "command":
+        if (!isValidCommandName(record.name)) refuse(`"${record.name}" is not a valid command name.`);
+        parseDocument(await readText(layout.commandFile(record.id), `commands/${record.id}.md`), `the command "${record.name}"`);
+        break;
+      case "mcp":
+        if (!isValidMcpServerName(record.name)) refuse(`"${record.name}" is not a valid MCP server name.`);
+        break;
+      case "hook": {
+        const agent = (scope as string[])[0] as keyof typeof PROFILE_HOOK_EVENTS;
+        if (!(PROFILE_HOOK_EVENTS[agent] ?? []).includes(record.hook.event)) refuse(`"${record.hook.event}" is not a hook event of ${agent}.`);
+        break;
+      }
+      case "plugin": {
+        const cache = layout.pluginCacheDir(record.id);
+        if ((await kindAt(cache)) !== "dir" || (await readdir(cache)).length === 0) refuse(`the plugin "${record.name}" has no files.`);
+        break;
+      }
+    }
+  }
+  const owned = (kind: SessionProfileItemRecord["kind"], name: string) =>
+    records.some((record) => record.kind === kind && (kind === "command" ? `${record.id}.md` === name : record.id === name));
+  for (const [folder, kind] of [
+    ["skills", "skill"],
+    ["commands", "command"],
+    ["plugins", "plugin"]
+  ] as const) {
+    const where = join(dir, folder);
+    const found = await kindAt(where);
+    if (found === null) continue;
+    if (found !== "dir") refuse(`${folder} is not a folder.`);
+    for (const name of await readdir(where)) {
+      if (!owned(kind, name)) refuse(`${folder}/${name.slice(0, 80)} belongs to no ${kind} of the profile.`);
+      const expected = kind === "command" ? "file" : "dir";
+      if ((await kindAt(join(where, name))) !== expected) refuse(`${folder}/${name.slice(0, 80)} is not a ${expected === "dir" ? "folder" : "file"}.`);
+    }
+  }
+  if ((await kindAt(join(dir, PROFILE_INSTRUCTIONS_FILE))) !== null) await readText(join(dir, PROFILE_INSTRUCTIONS_FILE), PROFILE_INSTRUCTIONS_FILE);
+  return manifest;
+}
+
+function parseDocument(text: string, shown: string): void {
+  try {
+    parseMarkdownDocument(text);
+  } catch (error) {
+    refuse(`${shown} does not parse (${error instanceof Error ? error.message.slice(0, 200) : "unknown"}).`);
+  }
+}

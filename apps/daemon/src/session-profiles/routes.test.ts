@@ -7,13 +7,20 @@ import Fastify, { type FastifyInstance, type InjectOptions } from "fastify";
 import {
   SESSION_PROFILES_CHANNEL,
   sessionProfileRoutes,
+  type ImportSessionProfileResponse,
+  type ProfileImportScanResponse,
   type SessionProfileDetail,
   type SessionProfileErrorBody,
+  type SessionProfileGlobalSourceResponse,
+  type SessionProfileImportResponse,
   type SessionProfileItemDetail,
   type SessionProfileListResponse,
   type SessionProfileMutationResponse,
   type SessionProfilePrepareStatusResponse
 } from "@orquester/api";
+import { ProfileImportStore } from "../agent-profile/import.ts";
+import { buildZip } from "./files.ts";
+import { SessionProfileImports, type SessionProfileGlobalConfig } from "./imports.ts";
 import { registerSessionProfileRoutes } from "./routes.ts";
 import { SessionProfileService, publishSessionProfileEvents } from "./service.ts";
 import { SessionProfileStore } from "./store.ts";
@@ -36,7 +43,7 @@ async function harness(): Promise<{ app: FastifyInstance; events: { channel: str
   const events: { channel: string; type: string; payload: unknown }[] = [];
   publishSessionProfileEvents(service, { publish: (channel, type, payload) => events.push({ channel, type, payload }) });
   const app = Fastify();
-  registerSessionProfileRoutes(app, { service });
+  registerSessionProfileRoutes(app, { service, importsDir: join(appdir, "imports") });
   await app.ready();
   apps.push(app);
   return { app, events };
@@ -182,5 +189,149 @@ describe("session profile routes", () => {
     });
     assert.equal(res.statusCode, 400);
     assert.ok(!res.body.includes(SECRET));
+  });
+});
+
+describe("session profile routes — imports, export, import", () => {
+  async function importsHarness(): Promise<{ app: FastifyInstance; root: string }> {
+    const root = await mkdtemp(join(tmpdir(), "orq-session-profile-import-routes-"));
+    roots.push(root);
+    const store = new SessionProfileStore({ appdir: root });
+    const workDir = join(root, "imports");
+    const scanner = new ProfileImportStore({ dir: workDir, existing: async () => new Set(), logger: { info: () => undefined, warn: () => undefined } });
+    const unused = async (): Promise<never> => {
+      throw new Error("not used");
+    };
+    const global: SessionProfileGlobalConfig = {
+      snapshot: async (agent) => ({
+        agent,
+        installed: true,
+        revision: "r",
+        instructions: { path: "", exists: true, bytes: 4, lines: 1, revision: "x", warnings: [] },
+        items: [
+          {
+            id: "mcp:tok",
+            kind: "mcp",
+            name: "tok",
+            enabled: true,
+            toggleable: true,
+            editable: true,
+            deletable: true,
+            locked: false,
+            source: { type: "user", label: "User" },
+            revision: "r",
+            warnings: []
+          }
+        ],
+        fileErrors: [],
+        readAt: "t"
+      }),
+      readItem: unused,
+      readInstructions: async () => ({ text: "Hi.\n", info: { path: "", exists: true, bytes: 4, lines: 1, revision: "x", warnings: [] } }),
+      exportItem: async () => ({ kind: "mcp", server: { name: "tok", transport: "http", url: "https://x.example", headers: { Authorization: SECRET } } }),
+      pluginSource: unused
+    };
+    const imports = new SessionProfileImports({ store, global, scanner, workDir });
+    const service = new SessionProfileService({ store, imports });
+    await service.init();
+    const app = Fastify();
+    registerSessionProfileRoutes(app, { service, importsDir: workDir });
+    await app.ready();
+    apps.push(app);
+    return { app, root };
+  }
+
+  it("imports from Global, streams uploads, exports a zip without secrets and imports it as a new profile", async () => {
+    const { app } = await importsHarness();
+    const profile = (await app.inject({ method: "POST", url: sessionProfileRoutes.list, payload: { name: "Routes" } })).json() as SessionProfileDetail;
+
+    const listed = await app.inject({ method: "GET", url: `${sessionProfileRoutes.importGlobal(profile.id)}?agent=claude` });
+    assert.equal(listed.statusCode, 200, listed.body);
+    assert.equal((listed.json() as SessionProfileGlobalSourceResponse).items[0]!.id, "mcp:tok");
+
+    const imported = await app.inject({
+      method: "POST",
+      url: sessionProfileRoutes.importGlobal(profile.id),
+      payload: { revision: "1", agent: "claude", itemIds: ["mcp:tok"], instructions: "replace" }
+    });
+    assert.equal(imported.statusCode, 200, imported.body);
+    assert.ok(!imported.body.includes(SECRET));
+    const result = imported.json() as SessionProfileImportResponse;
+    assert.equal(result.itemIds.length, 1);
+    assert.equal(result.profile.hasInstructions, true);
+
+    const zip = buildZip([{ path: "pack/SKILL.md", data: Buffer.from("---\nname: pack\ndescription: P\n---\n"), mode: 0o644 }]);
+    const scan = await app.inject({
+      method: "POST",
+      url: `${sessionProfileRoutes.importUpload(profile.id)}?name=pack.zip`,
+      headers: { "content-type": "application/octet-stream" },
+      payload: zip
+    });
+    assert.equal(scan.statusCode, 200, scan.body);
+    const { importId, candidates } = scan.json() as ProfileImportScanResponse;
+    const taken = await app.inject({
+      method: "POST",
+      url: sessionProfileRoutes.importScan(profile.id, importId),
+      payload: { revision: "2", picks: candidates.map((candidate) => candidate.ref) }
+    });
+    assert.equal(taken.statusCode, 200, taken.body);
+
+    const exported = await app.inject({ method: "GET", url: sessionProfileRoutes.exportProfile(profile.id) });
+    assert.equal(exported.statusCode, 200);
+    assert.equal(exported.headers["content-type"], "application/zip");
+    assert.match(String(exported.headers["content-disposition"]), /attachment; filename="routes\.agent-profile\.zip"/);
+    assert.ok(!exported.rawPayload.toString("latin1").includes(SECRET));
+
+    const created = await app.inject({
+      method: "POST",
+      url: `${sessionProfileRoutes.importProfile}?name=routes.agent-profile.zip`,
+      headers: { "content-type": "application/octet-stream" },
+      payload: exported.rawPayload
+    });
+    assert.equal(created.statusCode, 201, created.body);
+    const answer = created.json() as ImportSessionProfileResponse;
+    assert.equal(answer.profile.name, "Routes copy");
+    assert.deepEqual(answer.profile.items.map((item) => item.name).sort(), ["pack", "tok"]);
+    assert.match(answer.notes.join(" "), /"tok"/);
+  });
+
+  it("refuses an upload before reading it, and answers 503 when imports are not wired", async () => {
+    const { app } = await importsHarness();
+    const cases: [string, InjectOptions, number, string][] = [
+      ["json body", { method: "POST", url: `${sessionProfileRoutes.importUpload("nope")}?name=a.zip`, payload: { a: 1 } }, 415, "INVALID_REQUEST"],
+      [
+        "unknown profile",
+        { method: "POST", url: `${sessionProfileRoutes.importUpload("nope")}?name=a.zip`, headers: { "content-type": "application/octet-stream" }, payload: Buffer.from("x") },
+        404,
+        "PROFILE_NOT_FOUND"
+      ],
+      [
+        "path as name",
+        { method: "POST", url: `${sessionProfileRoutes.importProfile}?name=../a.zip`, headers: { "content-type": "application/octet-stream" }, payload: Buffer.from("x") },
+        400,
+        "INVALID_REQUEST"
+      ],
+      [
+        "not a zip",
+        { method: "POST", url: `${sessionProfileRoutes.importProfile}?name=a.zip`, headers: { "content-type": "application/octet-stream" }, payload: Buffer.from("x") },
+        400,
+        "IMPORT_FAILED"
+      ],
+      [
+        "keep-both plugin",
+        { method: "POST", url: sessionProfileRoutes.plugins("p"), payload: { revision: "1", agent: "claude", source: { type: "global", itemId: "x" }, onConflict: "keep-both" } },
+        400,
+        "INVALID_REQUEST"
+      ]
+    ];
+    for (const [label, request, status, code] of cases) {
+      const res = await app.inject(request);
+      assert.equal(res.statusCode, status, `${label}: ${res.body}`);
+      assert.equal((res.json() as SessionProfileErrorBody).error.code, code, label);
+    }
+    const { app: bare } = await harness();
+    const res = await bare.inject({ method: "GET", url: sessionProfileRoutes.exportProfile("p") });
+    assert.equal(res.statusCode, 503);
+    assert.equal((res.json() as SessionProfileErrorBody).error.code, "IMPORTS_UNAVAILABLE");
   });
 });

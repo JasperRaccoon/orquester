@@ -8,15 +8,32 @@
  * `{error: {code, message}}`; an unexpected error is logged and answered 500
  * `SESSION_PROFILE_ERROR` with a generic message. No message quotes a secret value, and a body
  * Fastify cannot parse is refused without quoting it.
+ *
+ * The two uploads (`…/imports/upload?name=` — a `.zip` or `.md` to scan — and `import?name=` — a
+ * profile export) take the file as a raw `application/octet-stream` body (never base64 in JSON)
+ * in their own encapsulated scope, exactly like Agent config's upload: every refusal decidable
+ * before the body is read is answered with `Connection: close` before a byte is read; the body
+ * streams to a temp file under `importsDir`, capped at `MAX_UPLOAD_BYTES`, deleted as soon as the
+ * service returns. `…/export` answers the `.zip` bytes as an attachment.
  */
 
+import { mkdir } from "node:fs/promises";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
+  MAX_UPLOAD_BYTES,
   SESSION_PROFILE_AGENTS,
   SESSION_PROFILE_ITEM_KINDS,
   isSessionProfileAgentId,
   sessionProfileRoutes,
+  sessionProfileScopeProblem,
+  type AddSessionProfilePluginRequest,
+  type CopySessionProfileItemsRequest,
   type CreateSessionProfileRequest,
+  type ImportSessionProfileFromGlobalRequest,
+  type SessionProfileAgentId,
+  type SessionProfileImportConflictPolicy,
+  type SessionProfileInstructionsMode,
+  type TakeSessionProfileImportRequest,
   type HookDraft,
   type MarkdownDocumentDraft,
   type McpServerDraft,
@@ -29,7 +46,15 @@ import {
   type SessionProfileSettingsDraft,
   type UpdateSessionProfileRequest
 } from "@orquester/api";
-import { AgentProfileError } from "../agent-profile/errors.ts";
+import { AgentProfileError, profileErrors } from "../agent-profile/errors.ts";
+import {
+  acceptRawBody,
+  declaredLengthExceedsCap,
+  discardUpload,
+  isUploadTooLarge,
+  receiveUpload,
+  uploadTempPath
+} from "../upload-stream.ts";
 import { SessionProfileError, sessionProfileErrors } from "./errors.ts";
 import type { SessionProfileService } from "./service.ts";
 
@@ -50,7 +75,20 @@ export interface SessionProfileRouteDeps {
     | "readInstructions"
     | "writeInstructions"
     | "prepareStatus"
+    | "globalSource"
+    | "importFromGlobal"
+    | "scanGit"
+    | "scanUpload"
+    | "assertCanScanUpload"
+    | "takeScan"
+    | "copyFrom"
+    | "addPlugin"
+    | "exportProfile"
+    | "importProfile"
+    | "assertCanImportProfile"
   >;
+  /** Where an upload is streamed before the service reads it (`agentProfileImportsDir(appdir)`). */
+  importsDir: string;
 }
 
 /** A JSON body carrying a skill, a command or the instructions: room for large markdown. */
@@ -71,12 +109,22 @@ const P = {
   item: pattern(sessionProfileRoutes.item("PID", "IID")),
   itemEnabled: pattern(sessionProfileRoutes.itemEnabled("PID", "IID")),
   instructions: pattern(sessionProfileRoutes.instructions("PID")),
-  prepareStatus: pattern(sessionProfileRoutes.prepareStatus("PID"))
+  prepareStatus: pattern(sessionProfileRoutes.prepareStatus("PID")),
+  importGlobal: pattern(sessionProfileRoutes.importGlobal("PID")),
+  importGit: pattern(sessionProfileRoutes.importGit("PID")),
+  importUpload: pattern(sessionProfileRoutes.importUpload("PID")),
+  importScan: pattern(sessionProfileRoutes.importScan("PID", "IMPORT")),
+  copyFrom: pattern(sessionProfileRoutes.copyFrom("PID")),
+  plugins: pattern(sessionProfileRoutes.plugins("PID")),
+  exportProfile: pattern(sessionProfileRoutes.exportProfile("PID")),
+  importProfile: sessionProfileRoutes.importProfile
 };
 
 function pattern(path: string): string {
-  return path.replace("/PID", "/:profileId").replace("/IID", "/:itemId");
+  return path.replace("/PID", "/:profileId").replace("/IID", "/:itemId").replace("/imports/IMPORT", "/imports/:importId");
 }
+
+const CONFLICT_POLICIES: readonly SessionProfileImportConflictPolicy[] = ["fail", "replace", "keep-both", "skip"];
 
 type ProfileParams = { profileId: string };
 type ItemParams = { profileId: string; itemId: string };
@@ -188,7 +236,137 @@ export function registerSessionProfileRoutes(app: FastifyInstance, deps: Session
     scope.get<{ Params: ProfileParams }>(P.prepareStatus, async (request, reply) =>
       run(request, reply, () => service.prepareStatus(profileParam(request.params)))
     );
+
+    // --- Filling a profile (spec §4.5) ------------------------------------------------------
+
+    scope.get<{ Params: ProfileParams; Querystring: Record<string, unknown> }>(P.importGlobal, async (request, reply) =>
+      run(request, reply, () => service.globalSource(profileParam(request.params), agentField(request.query?.agent, "agent query parameter")))
+    );
+
+    scope.post<{ Params: ProfileParams; Body: unknown }>(P.importGlobal, async (request, reply) =>
+      run(request, reply, () => service.importFromGlobal(profileParam(request.params), parseGlobalImport(request.body)))
+    );
+
+    scope.post<{ Params: ProfileParams; Body: unknown }>(P.importGit, async (request, reply) =>
+      run(request, reply, () => {
+        const body = objectBody(request.body);
+        return service.scanGit(profileParam(request.params), stringField(body.url, "url", { max: URL_MAX }));
+      })
+    );
+
+    scope.post<{ Params: ProfileParams & { importId: string }; Body: unknown }>(P.importScan, async (request, reply) =>
+      run(request, reply, () =>
+        service.takeScan(
+          profileParam(request.params),
+          stringField(request.params.importId, "import id", { max: ID_MAX }),
+          parseTakeScan(request.body)
+        )
+      )
+    );
+
+    scope.post<{ Params: ProfileParams; Body: unknown }>(P.copyFrom, async (request, reply) =>
+      run(request, reply, () => service.copyFrom(profileParam(request.params), parseCopyFrom(request.body)))
+    );
+
+    scope.post<{ Params: ProfileParams; Body: unknown }>(P.plugins, async (request, reply) =>
+      run(request, reply, () => service.addPlugin(profileParam(request.params), parseAddPlugin(request.body)))
+    );
+
+    scope.get<{ Params: ProfileParams }>(P.exportProfile, async (request, reply) => {
+      try {
+        const { fileName, data } = await service.exportProfile(profileParam(request.params));
+        return reply
+          .code(200)
+          .header("content-type", "application/zip")
+          .header("content-disposition", `attachment; filename="${fileName}"`)
+          .header("cache-control", "no-store")
+          .send(data);
+      } catch (error) {
+        return sendError(request, reply, error);
+      }
+    });
+
+    // The uploads, in their own scope: only they accept a raw octet-stream body.
+    scope.register(async (upload) => {
+      acceptRawBody(upload);
+
+      upload.post<{ Params: ProfileParams; Querystring: Record<string, unknown> }>(P.importUpload, async (request, reply) => {
+        let profileId: string;
+        let name: string;
+        try {
+          profileId = profileParam(request.params);
+          name = uploadName(request.query?.name);
+          assertOctetStream(request.headers["content-type"]);
+          await service.assertCanScanUpload(profileId);
+          if (declaredLengthExceedsCap(request.headers)) throw tooLarge();
+        } catch (error) {
+          return refuseUnread(request, reply, error);
+        }
+        return receiveThen(request, reply, deps.importsDir, (path) => service.scanUpload(profileId, name, path), 200);
+      });
+
+      upload.post<{ Querystring: Record<string, unknown> }>(P.importProfile, async (request, reply) => {
+        let name: string;
+        try {
+          name = uploadName(request.query?.name);
+          assertOctetStream(request.headers["content-type"]);
+          service.assertCanImportProfile();
+          if (declaredLengthExceedsCap(request.headers)) throw tooLarge();
+        } catch (error) {
+          return refuseUnread(request, reply, error);
+        }
+        return receiveThen(request, reply, deps.importsDir, (path) => service.importProfile(name, path), 201);
+      });
+    });
   });
+}
+
+/** Streams the body to a temp file, hands it to `handle`, and deletes it whatever happens. */
+async function receiveThen<T>(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  dir: string,
+  handle: (path: string) => Promise<T>,
+  status: number
+): Promise<FastifyReply> {
+  let tmp: string | undefined;
+  try {
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    tmp = uploadTempPath(dir);
+    try {
+      await receiveUpload(request.raw, tmp, 0o600);
+    } catch (error) {
+      // receiveUpload already removed the partial file; the body may be partly unread.
+      tmp = undefined;
+      return refuseUnread(request, reply, isUploadTooLarge(error) ? tooLarge() : error);
+    }
+    return reply.code(status).send(await handle(tmp));
+  } catch (error) {
+    return sendError(request, reply, error);
+  } finally {
+    if (tmp) await discardUpload(tmp);
+  }
+}
+
+function tooLarge(): SessionProfileError {
+  return new SessionProfileError(413, "UPLOAD_TOO_LARGE", `The file is larger than ${Math.floor(MAX_UPLOAD_BYTES / 1024 / 1024)} MB.`);
+}
+
+function refuseUnread(request: FastifyRequest, reply: FastifyReply, error: unknown): FastifyReply {
+  reply.header("connection", "close");
+  return sendError(request, reply, error);
+}
+
+function assertOctetStream(contentType: string | undefined): void {
+  if ((contentType ?? "").split(";")[0]!.trim().toLowerCase() !== "application/octet-stream") {
+    throw new SessionProfileError(415, "INVALID_REQUEST", "Send the file as an application/octet-stream body.");
+  }
+}
+
+function uploadName(value: unknown): string {
+  const name = stringField(value, "name query parameter", { max: NAME_MAX });
+  if (/[\\/]/.test(name) || name === "." || name === "..") throw invalid("name must be a file name, not a path.");
+  return name;
 }
 
 // ---------------------------------------------------------------------------
@@ -340,6 +518,110 @@ function parseUpdateProfile(raw: unknown): UpdateSessionProfileRequest {
   const description = optionalString(body.description, "description", { allowEmpty: true, max: TEXT_MAX, multiline: true });
   if (description !== undefined) request.description = description;
   if (body.settings !== undefined) request.settings = parseSettings(body.settings, "settings");
+  return request;
+}
+
+function agentField(value: unknown, field: string): SessionProfileAgentId {
+  if (!isSessionProfileAgentId(value)) throw invalid(`${field} must be one of ${SESSION_PROFILE_AGENTS.join(", ")}.`);
+  return value;
+}
+
+function conflictField(value: unknown, field: string): SessionProfileImportConflictPolicy | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !(CONFLICT_POLICIES as readonly string[]).includes(value)) {
+    throw invalid(`${field} must be one of ${CONFLICT_POLICIES.join(", ")}.`);
+  }
+  return value as SessionProfileImportConflictPolicy;
+}
+
+function instructionsField(value: unknown, field: string): SessionProfileInstructionsMode | undefined {
+  if (value === undefined) return undefined;
+  if (value !== "replace" && value !== "append") throw invalid(`${field} must be "replace" or "append".`);
+  return value;
+}
+
+/** A target scope for skills, commands and MCP servers (any non-empty agent list, or "all"). */
+function importScopeField(value: unknown, field: string): SessionProfileAgentScope | undefined {
+  if (value === undefined) return undefined;
+  const scope = parseScope(value, field);
+  const problem = sessionProfileScopeProblem("skill", scope);
+  if (problem !== null) throw invalid(`${field}: ${problem}`);
+  return scope;
+}
+
+function idList(value: unknown, field: string, allowEmpty: boolean): string[] {
+  return stringList(value, field, { allowEmptyList: allowEmpty }).map((entry, index) => {
+    if (entry === "" || entry.length > NAME_MAX * 4) throw invalid(`${field}[${index}] is not an id.`);
+    return entry;
+  });
+}
+
+function parseGlobalImport(raw: unknown): ImportSessionProfileFromGlobalRequest {
+  const body = objectBody(raw);
+  const instructions = instructionsField(body.instructions, "instructions");
+  const request: ImportSessionProfileFromGlobalRequest = {
+    revision: revisionField(body.revision, "revision"),
+    agent: agentField(body.agent, "agent"),
+    itemIds: idList(body.itemIds ?? [], "itemIds", instructions !== undefined)
+  };
+  const agents = importScopeField(body.agents, "agents");
+  if (agents !== undefined) request.agents = agents;
+  if (instructions !== undefined) request.instructions = instructions;
+  const onConflict = conflictField(body.onConflict, "onConflict");
+  if (onConflict !== undefined) request.onConflict = onConflict;
+  return request;
+}
+
+function parseTakeScan(raw: unknown): TakeSessionProfileImportRequest {
+  const body = objectBody(raw);
+  const request: TakeSessionProfileImportRequest = {
+    revision: revisionField(body.revision, "revision"),
+    picks: stringList(body.picks, "picks", { allowEmptyList: false })
+  };
+  const agents = importScopeField(body.agents, "agents");
+  if (agents !== undefined) request.agents = agents;
+  const onConflict = conflictField(body.onConflict, "onConflict");
+  if (onConflict !== undefined) request.onConflict = onConflict;
+  return request;
+}
+
+function parseCopyFrom(raw: unknown): CopySessionProfileItemsRequest {
+  const body = objectBody(raw);
+  const instructions = instructionsField(body.instructions, "instructions");
+  const request: CopySessionProfileItemsRequest = {
+    revision: revisionField(body.revision, "revision"),
+    fromProfileId: stringField(body.fromProfileId, "fromProfileId", { max: ID_MAX }),
+    itemIds: idList(body.itemIds ?? [], "itemIds", instructions !== undefined)
+  };
+  if (instructions !== undefined) request.instructions = instructions;
+  const onConflict = conflictField(body.onConflict, "onConflict");
+  if (onConflict !== undefined) request.onConflict = onConflict;
+  return request;
+}
+
+function parseAddPlugin(raw: unknown): AddSessionProfilePluginRequest {
+  const body = objectBody(raw);
+  if (!isRecord(body.source)) throw invalid("source must be an object.");
+  const source: AddSessionProfilePluginRequest["source"] =
+    body.source.type === "marketplace"
+      ? {
+          type: "marketplace",
+          marketplace: stringField(body.source.marketplace, "source.marketplace"),
+          plugin: stringField(body.source.plugin, "source.plugin")
+        }
+      : body.source.type === "global"
+        ? { type: "global", itemId: stringField(body.source.itemId, "source.itemId", { max: NAME_MAX * 4 }) }
+        : (() => {
+            throw invalid('source.type must be "marketplace" or "global".');
+          })();
+  const request: AddSessionProfilePluginRequest = {
+    revision: revisionField(body.revision, "revision"),
+    agent: agentField(body.agent, "agent"),
+    source
+  };
+  const onConflict = conflictField(body.onConflict, "onConflict");
+  if (onConflict === "keep-both") throw invalid("A plugin cannot be kept twice: use fail, replace or skip.");
+  if (onConflict !== undefined) request.onConflict = onConflict;
   return request;
 }
 
