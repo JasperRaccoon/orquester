@@ -216,10 +216,19 @@ export function deletedProfileNotice(name: string | undefined): string {
  * The names of the profiles this daemon has seen, kept after a delete so the fallback notice can
  * name the profile that went (spec §5.6). In memory: after a daemon restart a profile deleted
  * before it is no longer known, and the notice says "This chat's Agent Profile".
+ *
+ * It also follows which profiles EXIST now ({@link liveIds}): what workflow validation checks an
+ * agent block's `profileId` against (§5.5), synchronously.
  */
 export class SessionProfileNames {
   private readonly names = new Map<string, string>();
   private readonly reads = new Set<Promise<void>>();
+  /** Created or changed since tracking began (live unless deleted after). */
+  private readonly seen = new Set<string>();
+  /** Deleted since tracking began: a list read that started before the delete must not revive them. */
+  private readonly gone = new Set<string>();
+  /** The ids the first list read answered (unreadable profile directories too); null until it landed. */
+  private listed: Set<string> | null = null;
 
   /** Resolves once every name read started so far has landed (tests). */
   async idle(): Promise<void> {
@@ -234,16 +243,27 @@ export class SessionProfileNames {
     return this.names.get(profileId);
   }
 
+  /** The ids of the profiles that exist now, or undefined until the first list read landed (unknown). */
+  liveIds(): string[] | undefined {
+    if (this.listed === null) return undefined;
+    return [...new Set([...this.listed, ...this.seen])].filter((id) => !this.gone.has(id));
+  }
+
   /**
    * Fill from the service's list now and follow its changes (a deleted profile's name is kept).
-   * Never throws; a read that fails leaves the name unknown.
+   * Never throws; a read that fails leaves the name unknown (and, for the first list, the live ids).
    */
   track(service: {
-    list(): Promise<{ profiles: Array<{ id: string; name: string }> }>;
+    list(): Promise<{ profiles: Array<{ id: string; name: string }>; errors?: Array<{ profileId: string }> }>;
     get(profileId: string): Promise<{ name: string }>;
-    events: { on(event: "changed", listener: (payload: { profileId: string }) => void): unknown };
+    events: {
+      on(event: "changed", listener: (payload: { profileId: string }) => void): unknown;
+      on(event: "deleted", listener: (payload: { profileId: string }) => void): unknown;
+    };
   }): Promise<void> {
     service.events.on("changed", ({ profileId }) => {
+      this.seen.add(profileId);
+      this.gone.delete(profileId);
       const read = service.get(profileId).then(
         ({ name }) => this.note(profileId, name),
         () => undefined
@@ -251,9 +271,15 @@ export class SessionProfileNames {
       this.reads.add(read);
       void read.finally(() => this.reads.delete(read));
     });
+    service.events.on("deleted", ({ profileId }) => {
+      this.seen.delete(profileId);
+      this.gone.add(profileId);
+    });
     return service.list().then(
-      ({ profiles }) => {
+      ({ profiles, errors }) => {
         for (const profile of profiles) if (!this.names.has(profile.id)) this.note(profile.id, profile.name);
+        // An unreadable profile directory still exists: a block naming it is not "missing".
+        this.listed = new Set([...profiles.map((profile) => profile.id), ...(errors ?? []).map((error) => error.profileId)]);
       },
       () => undefined
     );

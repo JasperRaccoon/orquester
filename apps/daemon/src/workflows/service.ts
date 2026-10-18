@@ -71,6 +71,8 @@ export interface WorkflowServiceOptions {
   secretNames?: (workflowId: string | undefined) => readonly string[];
   /** Saved prompt ids — validation context. */
   savedPromptIds?: () => readonly string[];
+  /** Agent Profile ids — validation context; undefined while not known (nothing is checked then). */
+  sessionProfileIds?: () => readonly string[] | undefined;
   /** The host's agent catalogue (agent/validation-catalog.ts), when read — validation context. */
   agentCatalog?: () => WorkflowAgentCatalog | undefined;
 }
@@ -101,6 +103,7 @@ export class WorkflowService implements WorkflowStore {
   private readonly logger: Pick<Console, "warn" | "error">;
   private readonly secretNames: (workflowId: string | undefined) => readonly string[];
   private readonly savedPromptIds: () => readonly string[];
+  private readonly sessionProfileIds: () => readonly string[] | undefined;
   private readonly agentCatalog: () => WorkflowAgentCatalog | undefined;
 
   constructor(options: WorkflowServiceOptions) {
@@ -108,6 +111,7 @@ export class WorkflowService implements WorkflowStore {
     this.logger = options.logger ?? console;
     this.secretNames = options.secretNames ?? (() => []);
     this.savedPromptIds = options.savedPromptIds ?? (() => []);
+    this.sessionProfileIds = options.sessionProfileIds ?? (() => undefined);
     this.agentCatalog = options.agentCatalog ?? (() => undefined);
     this.lifecycle.setMaxListeners(50);
   }
@@ -197,12 +201,24 @@ export class WorkflowService implements WorkflowStore {
    */
   validationOptions(workflowId?: string): ValidateWorkflowOptions {
     const catalog = this.catalog();
+    const profileIds = this.profileIds();
     return {
       secretNames: [...this.secretNames(workflowId)],
       savedPromptIds: [...this.savedPromptIds()],
+      ...(profileIds ? { sessionProfileIds: profileIds } : {}),
       knownWorkflowIds: [...this.workflows.keys()],
       ...(catalog ? { catalog } : {})
     };
+  }
+
+  /** The Agent Profile ids validation checks agent blocks against, or undefined while not known. */
+  profileIds(): string[] | undefined {
+    try {
+      const ids = this.sessionProfileIds();
+      return ids ? [...ids] : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   /** The host's agent catalogue as validation last read it, or undefined. */

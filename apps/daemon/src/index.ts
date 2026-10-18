@@ -718,11 +718,15 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // The agent catalogue validation checks chains against lives in the workflow daemon (built
   // below, fed the daemon's own client at start): late-bound, nothing is checked before it.
   let workflowValidationCatalog: ValidationCatalog | null = null;
+  // The Agent Profiles that exist (an agent block naming a missing one warns): late-bound too,
+  // nothing is checked until the profiles have been listed (below).
+  let workflowProfileIds: (() => string[] | undefined) | null = null;
   const workflows = new WorkflowService({
     file: resolved.workflowsFile,
     logger: console,
     secretNames: (workflowId) => workflowSecrets.names(workflowId),
     savedPromptIds: () => savedPrompts.allIds(),
+    sessionProfileIds: () => workflowProfileIds?.(),
     agentCatalog: () => workflowValidationCatalog?.current()
   });
   await workflows.load();
@@ -1126,6 +1130,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // launch (`session-profiles/launch.ts`). The names feed a deleted profile's fallback notice.
   const sessionProfileNames = new SessionProfileNames();
   void sessionProfileNames.track(sessionProfiles);
+  workflowProfileIds = () => sessionProfileNames.liveIds();
   agentChat.setSessionProfiles({
     resolve: createProfileLaunchResolver({
       lifecycle: sessionProfileLifecycle,
@@ -4243,7 +4248,13 @@ export function createServer(
 
   // Agent Profiles (spec 2026-10-18 §4): Orquester-owned per-session profiles. Both transports;
   // the bearer hook above gates HTTP. MCP secret values never leave the daemon.
-  registerSessionProfileRoutes(app, { service: services.sessionProfiles, importsDir: agentProfileImportsDir(resolved.baseDir) });
+  // A delete's `expectWorkflowUses` (the delete guard, §5.5) is checked against the workflow
+  // store's reference index in the delete's own step.
+  registerSessionProfileRoutes(app, {
+    service: services.sessionProfiles,
+    importsDir: agentProfileImportsDir(resolved.baseDir),
+    workflowReferences: () => services.workflows.references
+  });
 
   // umcp:t11 begin — daemon-pointing MCP servers (unified MCP design 2026-10-15 §12.1): every MCP
   // server in a CLI's user config (system home and every managed account home) or a project-level

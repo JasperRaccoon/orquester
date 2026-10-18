@@ -3,8 +3,9 @@
 // The create is the MCP's `create_session`, spelled for an unattended run: `kind: "agent-chat"`,
 // the registry refId, the project as `projectPath` and `cwd`, a title, `accountId` ALWAYS explicit
 // ("system" included — an omitted one would silently become the family default),
-// `chat: {accountId, modelSelection, runtimeMode: "full-access"}` and the `owner` that ties the
-// tab to the run. The model is validated against the provider catalogue first (the host only
+// `chat: {accountId, modelSelection, runtimeMode: "full-access", unattended: true}` and the `owner`
+// that ties the tab to the run. A block's Agent Profile rides as `profileId` (spec 2026-10-18
+// §5.5): the launch is unattended, so a missing or failed profile fails it — never Global. The model is validated against the provider catalogue first (the host only
 // shape-checks), and the account's family is re-checked here: the daemon's create silently degrades a
 // wrong-family id to the system login.
 //
@@ -147,12 +148,15 @@ export function buildCreateBody(input: {
   projectPath: string;
   title: string;
   owner: WorkflowSessionOwner;
+  /** The block's Agent Profile; absent = Global. */
+  profileId?: string;
 }): CreateSessionRequest {
   const { candidate } = input;
   const chat: CreateAgentChatSessionFields = {
     accountId: candidate.accountId,
     modelSelection: { model: candidate.model, options: candidate.options },
-    runtimeMode: "full-access"
+    runtimeMode: "full-access",
+    unattended: true
   };
   return {
     kind: "agent-chat",
@@ -161,9 +165,24 @@ export function buildCreateBody(input: {
     cwd: input.projectPath,
     title: input.title,
     accountId: candidate.accountId,
+    ...(input.profileId !== undefined ? { profileId: input.profileId } : {}),
     chat,
     owner: input.owner
   };
+}
+
+/** The daemon's refusals of a launch's Agent Profile (`SessionProfileError` codes through the create route). */
+const PROFILE_REFUSALS: ReadonlySet<string> = new Set(["PROFILE_NOT_FOUND", "PROFILE_NOT_READY", "PROFILE_UNSUPPORTED_AGENT"]);
+
+/**
+ * A create refused over the block's Agent Profile: the run's error message, or null for any other
+ * refusal. Not a candidate's problem — another account or agent would launch without the profile
+ * the block names, or hit the same refusal — so the block fails at once (§5.5: never Global).
+ */
+export function profileRefusalMessage(code: string, message: string, profileId: string | undefined): string | null {
+  if (profileId === undefined || !PROFILE_REFUSALS.has(code)) return null;
+  if (code === "PROFILE_NOT_FOUND") return `The Agent Profile this block launches with (${profileId}) no longer exists. Pick another profile, or Global, in the block's settings.`;
+  return `The Agent Profile this block launches with could not be used: ${message}`;
 }
 
 function sameOwner(a: WorkflowSessionOwner | undefined, b: WorkflowSessionOwner): boolean {

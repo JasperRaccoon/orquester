@@ -16,7 +16,8 @@ import {
   type SessionProfileItemDetail,
   type SessionProfileListResponse,
   type SessionProfileMutationResponse,
-  type SessionProfilePrepareStatusResponse
+  type SessionProfilePrepareStatusResponse,
+  type Workflow
 } from "@orquester/api";
 import { ProfileImportStore } from "../agent-profile/import.ts";
 import { buildZip } from "./files.ts";
@@ -24,6 +25,7 @@ import { SessionProfileImports, type SessionProfileGlobalConfig } from "./import
 import { registerSessionProfileRoutes } from "./routes.ts";
 import { SessionProfileService, publishSessionProfileEvents } from "./service.ts";
 import { SessionProfileStore } from "./store.ts";
+import { WorkflowReferenceIndex } from "../workflows/reference-index.ts";
 
 const roots: string[] = [];
 const apps: FastifyInstance[] = [];
@@ -34,7 +36,9 @@ after(async () => {
 
 const SECRET = "xoxb-THE-SECRET-VALUE";
 
-async function harness(): Promise<{ app: FastifyInstance; events: { channel: string; type: string; payload: unknown }[] }> {
+async function harness(
+  options: { workflowReferences?: () => Pick<WorkflowReferenceIndex, "profileUses"> | null } = {}
+): Promise<{ app: FastifyInstance; events: { channel: string; type: string; payload: unknown }[] }> {
   const appdir = await mkdtemp(join(tmpdir(), "orq-session-profile-routes-"));
   roots.push(appdir);
   const store = new SessionProfileStore({ appdir });
@@ -43,11 +47,70 @@ async function harness(): Promise<{ app: FastifyInstance; events: { channel: str
   const events: { channel: string; type: string; payload: unknown }[] = [];
   publishSessionProfileEvents(service, { publish: (channel, type, payload) => events.push({ channel, type, payload }) });
   const app = Fastify();
-  registerSessionProfileRoutes(app, { service, importsDir: join(appdir, "imports") });
+  registerSessionProfileRoutes(app, { service, importsDir: join(appdir, "imports"), ...options });
   await app.ready();
   apps.push(app);
   return { app, events };
 }
+
+/** A stored workflow whose agent block launches with `profileId`. */
+function usingWorkflow(id: string, profileId: string): Workflow {
+  const STAMP = "2026-10-18T00:00:00.000Z";
+  return {
+    id, name: `WF ${id}`, enabled: true, revision: 1, project: { kind: "existing", projectPath: "/w/acme/api" },
+    settings: { overlap: "skip", maxConcurrent: 2, timezone: "UTC", notify: { onFailure: true, onSuccess: false }, keepFailedTempDays: 3 },
+    nodes: [{ id: "a", name: "Fix", type: "agent", position: { x: 0, y: 0 }, config: { prompt: { kind: "text", text: "x" }, chain: [{ agent: "claude", model: "default" }], profileId } }],
+    edges: [], createdAt: STAMP, updatedAt: STAMP
+  } as unknown as Workflow;
+}
+
+describe("session profile delete guard (spec §5.5, the saved-prompt expectWorkflowUses pattern)", () => {
+  async function withProfile(index: WorkflowReferenceIndex | null) {
+    const { app } = await harness({ workflowReferences: () => index });
+    const created = (await app.inject({ method: "POST", url: sessionProfileRoutes.list, payload: { name: "Ops" } })).json() as SessionProfileDetail;
+    const del = (expect?: string) =>
+      app.inject({ method: "DELETE", url: `${sessionProfileRoutes.profile(created.id)}?revision=${created.revision}${expect === undefined ? "" : `&expectWorkflowUses=${expect}`}` });
+    const exists = async () => (await app.inject({ method: "GET", url: sessionProfileRoutes.profile(created.id) })).statusCode === 200;
+    return { app, profile: created, del, exists };
+  }
+
+  it("refuses 409 WORKFLOW_USES_CHANGED, nothing deleted, unless the uses are exactly the ones confirmed; any order", async () => {
+    const index = new WorkflowReferenceIndex();
+    const h = await withProfile(index);
+    index.rebuild({ workflows: [usingWorkflow("wf_1", h.profile.id), usingWorkflow("wf_2", h.profile.id), usingWorkflow("wf_3", "other")] });
+    const stale = await h.del("");
+    assert.equal(stale.statusCode, 409);
+    const body = stale.json() as SessionProfileErrorBody;
+    assert.equal(body.error.code, "WORKFLOW_USES_CHANGED");
+    assert.match(body.error.message, /"WF wf_1", "WF wf_2"/, "names the workflows that use it now");
+    assert.equal((await h.del("wf_1")).statusCode, 409, "one of two is not the set");
+    assert.equal(await h.exists(), true, "nothing was deleted");
+    assert.equal((await h.del("wf_2,wf_1")).statusCode, 200);
+    assert.equal(await h.exists(), false);
+  });
+
+  it("an empty expectation deletes an unused profile; without one (an older client) nothing is checked", async () => {
+    const index = new WorkflowReferenceIndex();
+    index.rebuild({ workflows: [] });
+    const unused = await withProfile(index);
+    assert.equal((await unused.del("")).statusCode, 200);
+    const used = await withProfile(index);
+    index.rebuild({ workflows: [usingWorkflow("wf_1", used.profile.id)] });
+    assert.equal((await used.del()).statusCode, 200, "no precondition: the delete goes through");
+  });
+
+  it("fails closed: unknown uses, or no index, refuse a delete that names the precondition; a malformed one is 400", async () => {
+    const unloaded = await withProfile(new WorkflowReferenceIndex());
+    const refused = await unloaded.del("");
+    assert.equal(refused.statusCode, 409);
+    assert.match((refused.json() as SessionProfileErrorBody).error.message, /cannot tell/);
+    const noIndex = await withProfile(null);
+    assert.equal((await noIndex.del("")).statusCode, 409);
+    assert.equal(await noIndex.exists(), true);
+    const bad = await noIndex.app.inject({ method: "DELETE", url: `${sessionProfileRoutes.profile(noIndex.profile.id)}?revision=1&expectWorkflowUses=a&expectWorkflowUses=b` });
+    assert.equal(bad.statusCode, 400);
+  });
+});
 
 describe("session profile routes", () => {
   it("runs the CRUD flow and never answers a secret value", async () => {

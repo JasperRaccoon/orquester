@@ -323,10 +323,25 @@ export interface UpdateSessionProfileRequest {
   settings?: SessionProfileSettingsDraft;
 }
 
-/** `DELETE sessionProfileRoutes.profile(id)?revision=` → {@link DeleteSessionProfileResponse}. */
+/**
+ * `DELETE sessionProfileRoutes.profile(id)?revision=[&expectWorkflowUses=a,b]` →
+ * {@link DeleteSessionProfileResponse}.
+ */
 export interface DeleteSessionProfileQuery {
   revision: string;
+  /**
+   * The delete guard (spec 2026-10-18 §5.5, the saved-prompt `expectWorkflowUses` pattern): a
+   * precondition, comma-separated workflow ids (empty: none). Refused with 409
+   * {@link SESSION_PROFILE_WORKFLOW_USES_CHANGED}, nothing deleted, unless the workflows whose agent
+   * blocks launch with this profile (the workflow reference index, read in the delete's own step —
+   * `workflowRoutes.profileReferences`) are exactly these, in any order — and known. The right
+   * rail lists those workflows in its confirmation and sends the ids it showed; absent: unchecked.
+   */
+  expectWorkflowUses?: string;
 }
+
+/** 409 code: the workflows using a profile are not (or no longer) the ones `expectWorkflowUses` named. */
+export const SESSION_PROFILE_WORKFLOW_USES_CHANGED = "WORKFLOW_USES_CHANGED";
 
 export interface DeleteSessionProfileResponse {
   profileId: string;
@@ -618,6 +633,8 @@ export type SessionProfileErrorCode =
   | "AGENT_NOT_INSTALLED"
   /** Imports are not wired in this daemon. */
   | "IMPORTS_UNAVAILABLE"
+  /** A delete's `expectWorkflowUses` no longer matches the workflows that use the profile. */
+  | "WORKFLOW_USES_CHANGED"
   | "SESSION_PROFILE_ERROR";
 
 /** Every refusal: `{error: {code, message}}` (the agent-profile and workflow routes' shape). */

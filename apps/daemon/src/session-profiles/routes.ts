@@ -57,6 +57,7 @@ import {
 } from "../upload-stream.ts";
 import { SessionProfileError, sessionProfileErrors } from "./errors.ts";
 import type { SessionProfileService } from "./service.ts";
+import type { WorkflowReferenceIndex } from "../workflows/reference-index.ts";
 
 export interface SessionProfileRouteDeps {
   service: Pick<
@@ -89,6 +90,12 @@ export interface SessionProfileRouteDeps {
   >;
   /** Where an upload is streamed before the service reads it (`agentProfileImportsDir(appdir)`). */
   importsDir: string;
+  /**
+   * The workflow store's reference index, read per delete: a delete's `expectWorkflowUses` (the
+   * delete guard, spec §5.5) is checked against its `profileUses` in the delete's own step. Absent
+   * or null: no index — a delete that names the precondition is refused (never read as "no uses").
+   */
+  workflowReferences?: () => Pick<WorkflowReferenceIndex, "profileUses"> | null | undefined;
 }
 
 /** A JSON body carrying a skill, a command or the instructions: room for large markdown. */
@@ -120,6 +127,41 @@ const P = {
   importProfile: sessionProfileRoutes.importProfile
 };
 
+/**
+ * The delete guard's precondition (spec §5.5; the saved-prompt `expectWorkflowUses` pattern):
+ * `?expectWorkflowUses=a,b` (empty: none) — the workflows the caller showed as using the profile.
+ * Re-read from the reference index when the delete runs; unknown uses, or no index, refuse.
+ */
+function workflowUsesPrecondition(
+  profileId: string,
+  value: unknown,
+  references: SessionProfileRouteDeps["workflowReferences"]
+): (() => void) | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || value.length > LIST_MAX * (ID_MAX + 1)) {
+    throw sessionProfileErrors.invalid("expectWorkflowUses must be a comma-separated list of workflow ids.");
+  }
+  const wanted = usesKey(value.split(",").filter((id) => id !== ""));
+  return () => {
+    const index = references?.();
+    if (!index) throw sessionProfileErrors.workflowUsesChanged("Orquester cannot check which workflows use this profile (no workflow index); nothing was deleted.");
+    const now = index.profileUses(profileId);
+    if (now.unknownReason) {
+      throw sessionProfileErrors.workflowUsesChanged(`Orquester cannot tell which workflows use this profile (${now.unknownReason}); nothing was deleted.`);
+    }
+    if (usesKey(now.workflows.map((use) => use.workflowId)) !== wanted) {
+      const names = now.workflows.map((use) => `"${use.name}"`).join(", ");
+      throw sessionProfileErrors.workflowUsesChanged(
+        `The workflows that use this profile changed${names ? ` (now: ${names})` : " (now: none)"}; nothing was deleted. Review them and delete again.`
+      );
+    }
+  };
+}
+
+function usesKey(ids: readonly string[]): string {
+  return [...new Set(ids)].sort().join(",");
+}
+
 function pattern(path: string): string {
   return path.replace("/PID", "/:profileId").replace("/IID", "/:itemId").replace("/imports/IMPORT", "/imports/:importId");
 }
@@ -150,9 +192,12 @@ export function registerSessionProfileRoutes(app: FastifyInstance, deps: Session
     );
 
     scope.delete<{ Params: ProfileParams; Querystring: Record<string, unknown> }>(P.profile, async (request, reply) =>
-      run(request, reply, () =>
-        service.remove(profileParam(request.params), revisionField(request.query?.revision, "revision query parameter"))
-      )
+      run(request, reply, () => {
+        const profileId = profileParam(request.params);
+        const revision = revisionField(request.query?.revision, "revision query parameter");
+        const precondition = workflowUsesPrecondition(profileId, request.query?.expectWorkflowUses, deps.workflowReferences);
+        return service.remove(profileId, revision, precondition ? { precondition } : {});
+      })
     );
 
     scope.post<{ Params: ProfileParams; Body: unknown }>(P.duplicate, async (request, reply) =>

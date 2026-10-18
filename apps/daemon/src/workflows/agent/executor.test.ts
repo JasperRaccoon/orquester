@@ -36,7 +36,8 @@ test("happy path: creates the session like the MCP, sends the prompt with the au
   assert.equal(body.projectPath, "/w/ws/app");
   assert.equal(body.cwd, "/w/ws/app");
   assert.equal("model" in body, false, "the model rides the chat selection only");
-  assert.deepEqual(body.chat, { accountId: "a1", modelSelection: { model: "opus", options: [] }, runtimeMode: "full-access" });
+  assert.deepEqual(body.chat, { accountId: "a1", modelSelection: { model: "opus", options: [] }, runtimeMode: "full-access", unattended: true });
+  assert.equal("profileId" in body, false, "no profile: Global");
   assert.deepEqual(body.owner, { kind: "workflow", workflowId: "wf-1", runId: "run-1", nodeId: "n1" });
 
   const session = sc.host.sessionsOwnedBy("n1")[0]!;
@@ -276,4 +277,38 @@ test("a stored chain naming an agent this host does not offer (a removed launche
   const creates = sc.host.calls.filter((c) => c.method === "POST" && c.path === "/api/sessions");
   assert.deepEqual(creates.map((c) => (c.body as { refId: string }).refId), ["claude"]);
   assert.ok(fc.live().selection!.skipped.some((s) => s.agent === "claudex" && s.why === "catalog"));
+});
+
+test("Agent Profiles §5.5: a block's profileId rides the create as an unattended launch", async () => {
+  const sc = new Scenario({ accounts: CLAUDE });
+  const out = outputOf((await sc.run(testWorkflow([agentNode("n1", { profileId: "prof-1" })]), "n1")).result);
+  assert.equal(out.text, "Done.");
+  const body = sc.host.calls.find((c) => c.method === "POST" && c.path === "/api/sessions")!.body as { profileId?: string; chat: { unattended?: boolean } };
+  assert.equal(body.profileId, "prof-1");
+  assert.equal(body.chat.unattended, true);
+});
+
+test("Agent Profiles §5.5: a missing profile fails the run at once with a clear error — no other account or agent is tried, never Global", async () => {
+  const sc = new Scenario({ accounts: CLAUDE });
+  sc.host.profileRefusal = () => ({ code: "PROFILE_NOT_FOUND", message: 'No Agent Profile "prof-gone".' });
+  const { result } = await sc.run(testWorkflow([agentNode("n1", { profileId: "prof-gone" })]), "n1");
+  assert.equal(result.status, "failed");
+  const error = (result as { error: { kind: string; message: string; detail: unknown } }).error;
+  assert.equal(error.kind, "validation");
+  assert.match(error.message, /Agent Profile this block launches with \(prof-gone\) no longer exists/);
+  assert.deepEqual(error.detail, { code: "PROFILE_NOT_FOUND", profileId: "prof-gone" });
+  const creates = sc.host.calls.filter((c) => c.method === "POST" && c.path === "/api/sessions");
+  assert.equal(creates.length, 1, "one try: the next account would hit the same refusal");
+  assert.equal(sc.host.sessions.size, 0);
+});
+
+test("Agent Profiles §5.5: a profile that failed to prepare fails the run with the preparation's reason", async () => {
+  const sc = new Scenario({ accounts: CLAUDE });
+  sc.host.profileRefusal = () => ({ code: "PROFILE_NOT_READY", message: "The MCP server \"slack\" has no command." });
+  const { result } = await sc.run(testWorkflow([agentNode("n1", { profileId: "prof-1" })]), "n1");
+  assert.equal(result.status, "failed");
+  const error = (result as { error: { kind: string; message: string } }).error;
+  assert.equal(error.kind, "agent_error");
+  assert.equal(error.message, 'The Agent Profile this block launches with could not be used: The MCP server "slack" has no command.');
+  assert.equal(sc.host.sessions.size, 0);
 });

@@ -199,6 +199,8 @@ export class FakeChatHost implements DaemonApi {
   refuseAccountSwitches = 0;
   /** Session creates still to refuse with 503 HOST_UNAVAILABLE. */
   unavailableCreates = 0;
+  /** The daemon's answer to a create naming an Agent Profile: a refusal (400 `{code, message}`), or null to launch. */
+  profileRefusal: ((profileId: string, refId: string) => { code: string; message: string } | null) | null = null;
   private listeners = new Set<{ listener: (event: EventMessage) => void }>();
   private nextSession = 0;
   private nextItem = 0;
@@ -326,6 +328,10 @@ export class FakeChatHost implements DaemonApi {
     const refId = String(body.refId ?? "");
     const agent = this.agents.find((a) => a.id === refId);
     if (!agent || agent.enabled === false) return fail(400, "INVALID_ARGUMENT", `Registry entry "${refId}" is not available.`);
+    if (typeof body.profileId === "string") {
+      const refused = this.profileRefusal?.(body.profileId, refId) ?? null;
+      if (refused) return fail(400, refused.code, refused.message);
+    }
     const chat = (body.chat ?? {}) as { accountId?: string; modelSelection?: { model: string; options?: { id: string; value: string | boolean }[] }; runtimeMode?: string };
     let accountId = typeof body.accountId === "string" && body.accountId ? body.accountId : "system";
     // The daemon's silent degrade: a wrong-family id launches the system login.

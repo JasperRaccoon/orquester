@@ -333,6 +333,19 @@ describe("blocks", () => {
     assert.equal(only(problemsOf(wf), "unknown_saved_prompt").length, 0);
   });
 
+  it("agent: a profileId no Agent Profile has is flagged (only when the ids are given); a Global block never is", () => {
+    const wf = testWorkflow(
+      [manual(), agent("Gone", "x", { profileId: "prof-gone" }), agent("Kept", "x", { profileId: "prof-1" }), agent("Global", "x")],
+      [testEdge("t", "Gone"), testEdge("t", "Kept"), testEdge("t", "Global")]
+    );
+    const flagged = only(problemsOf(wf, { sessionProfileIds: ["prof-1"] }), "unknown_profile");
+    assert.equal(flagged.length, 1);
+    assert.equal(flagged[0]!.severity, "warning");
+    assert.equal(flagged[0]!.field, "config.profileId");
+    assert.match(flagged[0]!.message, /^Gone: the Agent Profile/);
+    assert.equal(only(problemsOf(wf), "unknown_profile").length, 0, "no ids: nothing checked");
+  });
+
   it("agent: the chain is checked against the host catalogue when one is given", () => {
     const chain = [
       { agent: "claude", model: "opus", accounts: {} },
