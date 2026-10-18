@@ -11,7 +11,9 @@
  * profile (instructions, a skill, a command, a Grok plugin with a skill, a hook) prepared by the
  * real preparer; then the real adapter's spawn-time render.
  *
- * Part 1 (no sign-in): `grok inspect --json` in the repo under the profile home.
+ * Part 1 (no sign-in): `grok inspect --json` in the repo under the profile home — once with the
+ * real HOME, once with a seeded temp HOME holding user skills and commands (real and symlinked
+ * entries under `~/.claude/{skills,commands}` and `~/.agents/{skills,commands}`).
  * Part 2 (`ORQUESTER_GROK_LIVE_AUTH` = an account's `auth.json`, used in place through
  * `GROK_AUTH_PATH` exactly as a chat would — never copied): the real adapter starts a session
  * (`session/new`, no prompt); the last `available_commands_update` is the model's catalog, and the
@@ -21,7 +23,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { accessSync, constants } from "node:fs";
-import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
 import { after, describe, it } from "node:test";
@@ -67,10 +69,17 @@ async function write(path: string, text: string): Promise<void> {
 
 const md = (name: string): string => `---\nname: ${name}\ndescription: ${name} description\n---\n${name} body\n`;
 
-/** Every entry of the Global user skill roots, and each symlinked entry's target (what must stay out). */
-async function globalSkillPaths(): Promise<string[]> {
+const USER_ROOTS = [
+  [".claude", "skills"],
+  [".agents", "skills"],
+  [".claude", "commands"],
+  [".agents", "commands"]
+] as const;
+
+/** Every entry of the Global user skill and command roots, and each symlinked entry's target (what must stay out). */
+async function globalSkillPaths(home = HOME): Promise<string[]> {
   const out: string[] = [];
-  for (const root of [join(HOME, ".claude", "skills"), join(HOME, ".agents", "skills")]) {
+  for (const root of USER_ROOTS.map((segments) => join(home, ...segments))) {
     let names: string[] = [];
     try {
       names = await readdir(root);
@@ -89,9 +98,30 @@ async function globalSkillPaths(): Promise<string[]> {
   return out;
 }
 
-async function world() {
+/** A temp HOME with a real and a symlinked entry in every user skill and command root. */
+async function seededHome(root: string): Promise<string> {
+  const home = join(root, "seeded-home");
+  const shared = join(root, "seeded-shared");
+  for (const [dir, kind] of USER_ROOTS) {
+    const tag = `${dir.slice(1)}-${kind}`;
+    const base = join(home, dir, kind);
+    if (kind === "skills") {
+      await write(join(base, `leak-${tag}`, "SKILL.md"), md(`leak-${tag}`));
+      await write(join(shared, `linked-${tag}`, "SKILL.md"), md(`linked-${tag}`));
+      await symlink(join(shared, `linked-${tag}`), join(base, `linked-${tag}`));
+    } else {
+      await write(join(base, `leak-${tag}.md`), `---\ndescription: leak-${tag}\n---\nleak\n`);
+      await write(join(shared, `linked-${tag}.md`), `---\ndescription: linked-${tag}\n---\nleak\n`);
+      await symlink(join(shared, `linked-${tag}.md`), join(base, `linked-${tag}.md`));
+    }
+  }
+  return home;
+}
+
+async function world(options: { seedHome?: boolean } = {}) {
   const root = await realpath(await mkdtemp("/tmp/orq-grok-live-"));
   roots.push(root);
+  const home = options.seedHome === true ? await seededHome(root) : HOME;
   const globalGrok = join(root, "global-grok");
   const repo = join(root, "repo");
   await write(join(globalGrok, "config.toml"), "[marketplace]\nofficial_marketplace_auto_installed = true\ndefault_skills_installs_purged = true\n");
@@ -100,6 +130,7 @@ async function world() {
   await write(join(repo, "AGENTS.md"), "REPO-AGENTS-MARKER\n");
   await write(join(repo, "CLAUDE.md"), "REPO-CLAUDE-MARKER\n");
   await write(join(repo, ".claude", "skills", "repo-skill", "SKILL.md"), md("repo-skill"));
+  await write(join(repo, ".claude", "commands", "repo-cmd.md"), "---\ndescription: repo command\n---\nrepo\n");
 
   const source = join(root, "profile-source");
   await write(join(source, "skills", "s1", "SKILL.md"), md("profile-skill"));
@@ -123,13 +154,13 @@ async function world() {
     skipped: []
   };
   const systemHomes: AgentHomes = {
-    home: HOME,
-    claudeDir: join(HOME, ".claude"),
-    claudeJson: join(HOME, ".claude.json"),
-    codexHome: join(HOME, ".codex"),
+    home,
+    claudeDir: join(home, ".claude"),
+    claudeJson: join(home, ".claude.json"),
+    codexHome: join(home, ".codex"),
     grokHome: globalGrok,
-    opencodeDir: join(HOME, ".config", "opencode"),
-    agentsSkillsDir: join(HOME, ".agents", "skills")
+    opencodeDir: join(home, ".config", "opencode"),
+    agentsSkillsDir: join(home, ".agents", "skills")
   };
   const preparedDir = join(root, "appdir", "prepared", "live", "grok", "shared", "v-1");
   await mkdir(preparedDir, { recursive: true, mode: 0o700 });
@@ -156,12 +187,12 @@ async function world() {
   });
   const profile: HostThreadProfile = { profileId: "live", revision: "1", preparedDir };
   const env: Record<string, string> = {
-    HOME,
+    HOME: home,
     PATH: process.env.PATH ?? "",
     GROK_HOME: preparedDir,
     GROK_AUTH_PATH: AUTH ?? join(root, "no-sign-in", "auth.json")
   };
-  return { root, repo, preparedDir, profile, env, hookMark, globalGrok };
+  return { root, home, repo, preparedDir, profile, env, hookMark, globalGrok };
 }
 
 function inspectIn(cwd: string, env: Record<string, string>): Record<string, any> {
@@ -185,7 +216,7 @@ describe("Grok profile isolation (live)", { skip }, () => {
     const skills: Array<{ name: string; source: { type: string; path?: string; plugin_name?: string } }> = report.skills ?? [];
     console.log("inspect skills:", skills.map((skill) => `${skill.name}<${skill.source.type}${skill.source.plugin_name ? `:${skill.source.plugin_name}` : ""}>`).join(", "));
     const names = new Set(skills.map((skill) => skill.name));
-    for (const expected of ["profile-skill", "repo-skill"]) assert.ok(names.has(expected), `${expected} is listed`);
+    for (const expected of ["profile-skill", "repo-skill", "repo-cmd"]) assert.ok(names.has(expected), `${expected} is listed`);
     const global = await globalSkillPaths();
     for (const skill of skills) {
       const path = skill.source.path ?? "";
@@ -205,6 +236,28 @@ describe("Grok profile isolation (live)", { skip }, () => {
     const instructions: Array<{ path: string; disabled?: boolean }> = report.projectInstructions ?? [];
     const active = instructions.filter((entry) => entry.disabled !== true).map((entry) => entry.path);
     assert.deepEqual(active.sort(), [join(preparedDir, "AGENTS.md"), join(repo, "AGENTS.md"), join(repo, "CLAUDE.md")].sort());
+  });
+
+  it("inspect with a seeded HOME: no user skill or command (real or symlinked) loads; the repo's do", async () => {
+    const { home, repo, preparedDir, profile, env } = await world({ seedHome: true });
+    const spawn = await prepareGrokProfileSpawn({ profile, env, command: BIN! });
+    assert.ok(spawn);
+    const report = inspectIn(repo, { ...env, ...spawn.env });
+    const skills: Array<{ name: string; source: { type: string; path?: string } }> = report.skills ?? [];
+    console.log("seeded-home inspect skills:", skills.map((skill) => `${skill.name}<${skill.source.type}:${skill.source.path ?? ""}>`).join(", "));
+    const names = new Set(skills.map((skill) => skill.name));
+    for (const expected of ["profile-skill", "repo-skill", "repo-cmd"]) assert.ok(names.has(expected), `${expected} is listed`);
+    for (const skill of skills) {
+      assert.ok(!/^(leak|linked)-/.test(skill.name), `no user skill or command: ${skill.name} (${skill.source.path ?? ""})`);
+      assert.ok(!(skill.source.path ?? "").startsWith(`${home}/`), `nothing from the seeded HOME: ${skill.name}`);
+    }
+    // Control: the same HOME under a Global-shaped home (no ignore list) does list the seeded items,
+    // so the assertion above is not vacuous.
+    const globalReport = inspectIn(repo, { HOME: home, PATH: env.PATH ?? "", GROK_HOME: join(preparedDir, "..", "global-control") });
+    const globalNames: string[] = (globalReport.skills ?? []).map((skill: { name: string }) => skill.name);
+    for (const leaked of ["leak-claude-commands", "linked-claude-commands", "linked-agents-commands", "leak-claude-skills", "linked-claude-skills"]) {
+      assert.ok(globalNames.includes(leaked), `${leaked} loads in a Global-shaped home (control)`);
+    }
   });
 
   it("a real session (no prompt): the catalog holds the profile's and the repo's items only; Claude plugins stay off", { skip: skipSession }, async () => {

@@ -324,10 +324,13 @@ Home contents (real files): `AGENTS.md`/`rules/` (instructions), `skills/`, `com
 `config.toml` (§6.0 carry-over plus) `[cli] auto_update = false, use_leader = false`; every
 `[compat.claude.*]` and `[compat.cursor.*]` cell `false` **except `compat.claude.skills = true`**;
 `[skills] ignore = ["~/.claude/skills", "~/.agents/skills", "~/.agents/commands",
-"<home>/bundled/skills"]` (the last only when hiding built-ins) **plus, computed at every spawn,
-every entry of `~/.claude/skills` (and `~/.agents/skills`) by absolute path, and for each symlinked
-entry its resolved target too** — Grok's directory ignore skips real subdirectories but follows
-symlinked ones (verified live: 9 symlinked global skills leaked into the model's context until each
+"~/.claude/commands", "<home>/bundled/skills"]` (the last only when hiding built-ins) **plus,
+computed at every spawn, every entry of `~/.claude/skills`, `~/.agents/skills`,
+`~/.claude/commands` and `~/.agents/commands` by absolute path, and for each symlinked entry its
+resolved target too** — Grok's directory ignore skips real entries but follows symlinked ones, and
+`compat.claude.skills` also loads `~/.claude/commands/*.md` as user skills (verified with `grok
+inspect`: a real and a symlinked user command both listed as `vendor: claude, enabled` until listed;
+the repo's `.claude/commands` still load, as in Global) (verified live: 9 symlinked global skills leaked into the model's context until each
 was listed; with them listed the model saw only the repo's and the profile's skills); the profile's `[mcp_servers]` (or
 send them as ACP `mcpServers`); and `[plugins] disabled = [<exact name of every discovered plugin
 that isn't the profile's>]`, built from `grok inspect --json` `.plugins[].name` under the profile

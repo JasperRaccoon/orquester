@@ -3,10 +3,12 @@
  * (spec §6.3).
  *
  * Verified with Grok 1.0.46:
- * - `[skills] ignore` skips a listed directory's REAL subdirectories but
- *   follows SYMLINKED ones, so every entry of `~/.claude/skills` and
- *   `~/.agents/skills` is listed by absolute path, and each symlinked entry's
- *   resolved target too ({@link grokSkillIgnoreList}).
+ * - `[skills] ignore` skips a listed directory's REAL entries but follows
+ *   SYMLINKED ones, so every entry of `~/.claude/skills`, `~/.agents/skills`,
+ *   `~/.claude/commands` and `~/.agents/commands` is listed by absolute path,
+ *   and each symlinked entry's resolved target too ({@link grokSkillIgnoreList}).
+ *   `compat.claude.skills` also loads `~/.claude/commands/*.md` as user skills;
+ *   the repo's `.claude/commands` load as in a Global chat.
  * - Grok enables Claude-installed plugins on its own; `compat.claude.hooks =
  *   false` does not stop their hooks and `["*"]` does not work — only exact
  *   names in `[plugins] disabled` ({@link grokDiscoveredPluginNames}). Note
@@ -61,18 +63,21 @@ export const GROK_AUTH_PATH_ENV = "GROK_AUTH_PATH";
 // [skills] ignore
 // ---------------------------------------------------------------------------
 
-/** The user-level skill roots, as Grok's own `~` spelling. */
-export const GROK_USER_SKILL_ROOTS = ["~/.claude/skills", "~/.agents/skills", "~/.agents/commands"] as const;
+/** The user-level skill and command roots, as Grok's own `~` spelling. */
+export const GROK_USER_SKILL_ROOTS = ["~/.claude/skills", "~/.agents/skills", "~/.agents/commands", "~/.claude/commands"] as const;
 
 /** The directories whose entries are listed one by one (relative to HOME). */
 const LISTED_ROOTS = [
   [".claude", "skills"],
-  [".agents", "skills"]
+  [".agents", "skills"],
+  [".claude", "commands"],
+  [".agents", "commands"]
 ] as const;
 
 /**
  * The `[skills] ignore` list for a profile Grok: {@link GROK_USER_SKILL_ROOTS},
- * then for `<home>/.claude/skills` and `<home>/.agents/skills` every entry by
+ * then for each of `<home>/.claude/skills`, `<home>/.agents/skills`,
+ * `<home>/.claude/commands` and `<home>/.agents/commands` every entry by
  * absolute path and, for a symlinked entry, its realpath as well (a dangling
  * link contributes only its own path); a root that is itself a symlink adds
  * its realpath too. Plus `<grokHome>/bundled/skills` when `hideBundled`.
