@@ -13,6 +13,7 @@ import {
   sessionProfileAccountKey,
   sessionProfileDir,
   sessionProfilePreparedDir,
+  sessionProfilePreparedKeyDir,
   sessionProfileStagingDir,
   sessionProfilesDir
 } from "./index.ts";
@@ -122,13 +123,14 @@ describe("session profile paths", () => {
     assert.equal(sessionProfilesDir("/app"), "/app/daemon/session-profiles");
     assert.equal(sessionProfileDir("/app", "p1"), "/app/daemon/session-profiles/profiles/p1");
     assert.equal(
-      sessionProfilePreparedDir("/app", "p1", "codex", "acc-1"),
-      "/app/daemon/session-profiles/prepared/p1/codex/acc-1"
-    );
-    assert.equal(
-      sessionProfilePreparedDir("/app", "p1", "grok", SESSION_PROFILE_SHARED_ACCOUNT_KEY),
+      sessionProfilePreparedKeyDir("/app", "p1", "grok", SESSION_PROFILE_SHARED_ACCOUNT_KEY),
       "/app/daemon/session-profiles/prepared/p1/grok/shared"
     );
+    assert.equal(
+      sessionProfilePreparedDir("/app", "p1", "codex", "acc-1", "v-0123456789ab-k1-deadbeef"),
+      "/app/daemon/session-profiles/prepared/p1/codex/acc-1/v-0123456789ab-k1-deadbeef"
+    );
+    assert.throws(() => sessionProfilePreparedDir("/app", "p1", "codex", "acc-1", ".."));
     assert.equal(sessionProfileStagingDir("/app"), "/app/daemon/session-profiles/staging");
   });
 

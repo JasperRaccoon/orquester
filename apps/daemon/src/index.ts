@@ -1082,10 +1082,6 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // re-prepares on profile changes and on Global config changes seen by Agent config's watcher.
   const sessionProfileStore = new SessionProfileStore({ appdir: paths.baseDir });
   const sessionProfileLifecycle = new SessionProfileLifecycle({
-    // LEASES WIRING POINT (task T6b): once the lifecycle takes `leases?: PreparedDirLeases`, pass
-    // `leases: { inUse: () => agentChat.profileLeases() }` here — the agent host's live sessions'
-    // prepared dirs (`GET /profiles/leases`); it rejects when the host cannot say, and the GC
-    // then deletes nothing.
     appdir: paths.baseDir,
     store: sessionProfileStore,
     systemHomes: agentProfileHomes,
@@ -1094,6 +1090,10 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     defaultAccountId: (agent) => (agent === "opencode" ? null : (agentAccounts.list().defaults[agent] ?? null)),
     // Read per call: an install or update from Settings > Agents patches the entry in place.
     cliVersion: (agent) => registry.get(agent)?.version ?? null,
+    // The prepared versions the agent host's live sessions (and starts in flight) launched from
+    // (`GET /profiles/leases`): the GC never removes one. It rejects when the host cannot say
+    // (down, restarting, an older host), and that GC pass then removes nothing.
+    leases: { inUse: () => agentChat.profileLeases() },
     logger: console
   });
   const sessionProfiles = new SessionProfileService({ store: sessionProfileStore, prepareStatus: sessionProfileLifecycle.prepareStatusSource });

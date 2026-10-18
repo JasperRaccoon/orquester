@@ -231,7 +231,7 @@ export const agentHostRoutes = {
    * Agent Profiles (spec 2026-10-18 §6.5): `GET` → {@link AgentHostProfileLeasesResponse}, the
    * prepared directories this host's live provider sessions (and the session starts in flight)
    * launched from. The daemon's preparation lifecycle never deletes a prepared version named here
-   * (`PreparedDirLeases.inUse()`, `session-profiles/launch.ts`). Additive: a host that predates
+   * (`PreparedDirLeases.inUse()`, `session-profiles/lifecycle.ts`). Additive: a host that predates
    * it answers its generic route-miss 404, and the daemon then treats every lease as unknown.
    */
   profileLeases: "/profiles/leases",

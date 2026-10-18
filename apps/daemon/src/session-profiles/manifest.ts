@@ -1,6 +1,6 @@
 /**
  * Agent Profiles — a prepared directory's `manifest.json`: the contract between the daemon's
- * preparation (which writes it LAST into the staging directory, before the atomic swap) and the
+ * preparation (which writes it LAST into the staging directory, before it is published) and the
  * agent host's adapters (which read it from `HostThreadProfile.preparedDir` at every launch).
  *
  *   { schema: 1, profileId, revision, agent, accountKey, preparedAt, fingerprint?, agentSection }

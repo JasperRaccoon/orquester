@@ -14,8 +14,8 @@ per-agent GLOBAL config editor, user-facing "Agent config"). A chat without `pro
 | `resolve.ts` | `resolveForAgent(source, agent)` → `ResolvedAgentProfile` (pure). Settings defaults, scope/support rules. |
 | `manifest.ts` + `manifest/<agent>.ts` | Prepared-dir `manifest.json` envelope + per-agent section schemas; read by the agent host. |
 | `preparer.ts` + `preparers/<agent>.ts` | Per-agent preparer contract and registry (all `null` for now). |
-| `lifecycle.ts` | `SessionProfileLifecycle`: builds, swaps, tracks and refreshes prepared dirs; `ensureReady` for launches. |
-| `launch.ts` | The launch side: per-agent launch contributions (`profileLaunchContributors`), `applyProfileContribution`, `createProfileLaunchResolver` (what `AgentChatService` launches with), `PreparedDirLeases`, `SessionProfileNames` + the deleted-profile notice. |
+| `lifecycle.ts` | `SessionProfileLifecycle`: builds and publishes immutable prepared versions, tracks and refreshes them, collects unleased old ones; `ensureReady` for launches. |
+| `launch.ts` | The launch side: per-agent launch contributions (`profileLaunchContributors`), `applyProfileContribution`, `createProfileLaunchResolver` (what `AgentChatService` launches with), `SessionProfileNames` + the deleted-profile notice. |
 | `service.ts` | `SessionProfileService`: wire mapping (secrets masked), events, prepare status, `resolveForAgent(profileId, agent)`. |
 | `routes.ts` | REST surface (`sessionProfileRoutes`), both transports. |
 | `errors.ts` | `SessionProfileError` → `{error: {code, message}}`. |
@@ -30,7 +30,10 @@ Contracts: `@orquester/api` `session-profiles.ts` (wire types, `sessionProfileRo
 <appdir>/daemon/session-profiles/                 sessionProfilesDir(appdir)          0700
   profiles/<profileId>/                           sessionProfileDir(appdir, id)       0700
     profile.json   secrets.json   instructions.md   skills/<itemId>/   commands/<itemId>.md   plugins/<itemId>/
-  prepared/<profileId>/<agent>/<accountKey>/      sessionProfilePreparedDir(...)
+  prepared/<profileId>/                           sessionProfilePreparedProfileDir(appdir, id)
+    <agent>/<accountKey>/                         sessionProfilePreparedKeyDir(...)          one KEY
+      current.json                                SESSION_PROFILE_PREPARED_CURRENT_FILE      {"schema":1,"version":"<version>"}
+      <version>/                                  sessionProfilePreparedDir(..., version)    one immutable preparation
   staging/                                        sessionProfileStagingDir(appdir)
 ```
 
@@ -58,13 +61,39 @@ Contracts: `@orquester/api` `session-profiles.ts` (wire types, `sessionProfileRo
 - **Preparers** also declare `version` (bump when the output changes for the same inputs) and
   `inputs(ctx)` (absolute paths of the Global files they read, §6.0); both feed staleness. Follow
   the PATH CONTRACT in `preparer.ts`: write in `ctx.stagingDir`, name the dir's own location as
-  `ctx.preparedDir` (the dir is renamed there; e.g. Codex hook trust).
+  `ctx.preparedDir` (the new VERSION dir it is renamed to; e.g. Codex hook trust), and only read
+  `ctx.previousPreparedDir` (the current version, maybe in use by a running chat).
 
 ## Preparation lifecycle (`lifecycle.ts`)
 
-Wired in `index.ts` as `services.sessionProfileLifecycle`. One prepared dir per key
+Wired in `index.ts` as `services.sessionProfileLifecycle`. Prepared dirs are per key
 `(profileId, agent, accountKey)`: `sessionProfileAccountKey(accountId)` for a `perAccount`
 preparer (System = `system`, its account home is the agent's system home), else `shared`.
+
+**Versions.** For Codex and Grok a prepared dir IS a running chat's config home (state DBs, logs,
+config the CLI rewrites) and OpenCode servers read theirs, so a published dir is never modified,
+moved or replaced. Each preparation builds in `staging/`, writes `manifest.json` last, is renamed
+to a NEW version dir `v-<fingerprint head>-<time>-<random>` (a name is never reused) and then the
+key's `current.json` is replaced via temp + rename — a reader sees the old or the new version,
+never none. New launches get the current version; running chats keep theirs until their agent
+restarts (spec §5.6). Status, staleness and fingerprints read the current version only.
+
+**Leases and GC.** A non-current version is removed only when no live session uses it:
+- `SessionProfileLifecycleOptions.leases?: PreparedDirLeases` —
+  `inUse(): Promise<ReadonlySet<string>>`, the absolute versioned `preparedDir`s of every live
+  provider session. Wired in `index.ts` as `AgentChatService.profileLeases()`: the agent host's
+  `GET /profiles/leases` (the `HostThreadProfile.preparedDir` of every live provider session and
+  every session start in flight). Option absent: GC removes no non-current version; if `inUse()`
+  rejects (no healthy host, an older host's route miss), that pass removes nothing.
+- A dir answered by `ensureReady` is also kept for `SESSION_PROFILE_HANDOUT_GRACE_MS` (10 min):
+  the gap between a launch getting it and the host registering the session.
+- Triggers: after each publish (that key), profile delete (its pointers go at once; unleased
+  versions go now, leased ones at a later pass; empty dirs up to `prepared/` are removed),
+  `start()` (after boot, in the background) and `gc()` on demand. A key's pass runs in the key's
+  job chain, so never during its preparation; the leases are read before any key is locked.
+- Legacy layout (the key dir itself held the files, `manifest.json` at its top): not a current
+  version, so the key re-prepares; its content is collected like a version, leased by the key
+  dir's own path.
 
 - `ensureReady(profileId, agent, accountId | null) → Promise<{profileId, agent, accountKey,
   revision, preparedDir}>` — what a launch calls (→ `HostThreadProfile {profileId, revision,
@@ -81,16 +110,17 @@ preparer (System = `system`, its account home is the agent's system home), else 
 - `globalConfigChanged(agent)` — fed by Agent config's watcher (`agentProfile.lifecycle`
   `filesChanged`); keys whose `inputs` content moved re-prepare.
 - `attach(service.events)` (`changed` → re-prepare known keys and seed the default ones;
-  `deleted` → remove `prepared/<profileId>/` once its jobs settle), `start()` (boot: empty
-  `staging/`, drop dirs of deleted profiles, re-check the rest in the background), `stop()`,
-  `idle()` (drain for tests).
+  `deleted` → once its jobs settle, drop its pointers and collect its versions), `start()` (boot:
+  empty `staging/`, drop pointers of deleted profiles, re-check the rest in the background, then
+  GC), `gc()`, `stop()`, `idle()` (drain for tests).
 - Staleness fingerprint (in `manifest.json` `fingerprint`): revision + preparer `version` + CLI
   version (registry) + content hashes of `inputs`. Per-key serialization, at most 2 preparations
   at once. Failure reasons have the profile's MCP secret values redacted.
 - **Launch plumbing**: `profileId` exists on `CreateSessionRequest`, `CreateAgentChatSessionFields`,
   `SessionChatRecord` (`sessionChatRecordSchema`), `ThreadHead`/`agentThreadHeadSchema`, and the
   host's `CreateHostThreadRequest`/`SetThreadIdentityRequest` together with
-  `profile?: HostThreadProfile {profileId, revision, preparedDir}`. The agent host persists
+  `profile?: HostThreadProfile {profileId, revision, preparedDir}` (`preparedDir` is a version dir:
+  pass `ensureReady`'s answer as-is and report it back through the leases above). The agent host persists
   `profile` in the thread's `launch.json`, records `profileId` in the log, hands it to every
   session start as `StartSessionInput.profile` and switches it through `SetThreadIdentityRequest`
   (absent = unchanged, `null` = Global); adapters read their section with
@@ -161,12 +191,9 @@ fallback to the next start's refresh. **Unattended** launches never fall back:
 refresh refuse `PROFILE_NOT_FOUND`. A create naming a missing or failed profile fails either way.
 `PROFILE_NOT_READY` / `PROFILE_UNSUPPORTED_AGENT` always fail with the reason.
 
-**Leases.** `PreparedDirLeases { inUse(): Promise<ReadonlySet<string>> }` — implemented by
-`AgentChatService.profileLeases()` over the host's `GET /profiles/leases` (the `preparedDir` of
-every live provider session and every start in flight); it REJECTS when the host cannot say (down,
-an older host's 404), and the GC must then delete nothing. Wiring point: the lifecycle's
-construction in `index.ts` (`leases: { inUse: () => agentChat.profileLeases() }`, once the
-lifecycle takes it).
+**Leases.** `PreparedDirLeases` (above) is `AgentChatService.profileLeases()`, passed as the
+lifecycle's `leases` in `index.ts`. The refresh at every session start always launches the
+CURRENT version, so an old one is leased only while a session that started on it lives.
 
 - **Imports** (Global / git / zip / md / copy-from-profile / marketplace plugins): add routes under
   the paths reserved in `sessionProfileRoutes`' doc comment, and write through new store methods

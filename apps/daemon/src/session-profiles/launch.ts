@@ -14,8 +14,9 @@
  * - {@link createProfileLaunchResolver}: `ensureReady` → manifest section → contributor, for
  *   `AgentChatService`. Throws `SessionProfileError` (`PROFILE_NOT_FOUND`, `PROFILE_NOT_READY`,
  *   `PROFILE_UNSUPPORTED_AGENT`); never answers Global for a profile it could not apply.
- * - {@link PreparedDirLeases}: what the lifecycle's GC asks before it deletes a prepared version
- *   (the agent host's live sessions, `GET /profiles/leases`).
+ * - `PreparedDirLeases` (the lifecycle's, re-exported): what its GC asks before it deletes a
+ *   prepared version — implemented by `AgentChatService.profileLeases()` over the agent host's
+ *   `GET /profiles/leases`.
  *
  * Never log a contribution: an env value may be a secret (a profile MCP server's token is not,
  * but a contributor is free to pass one through).
@@ -200,16 +201,8 @@ export function createProfileLaunchResolver(options: ProfileLaunchResolverOption
   };
 }
 
-/**
- * The prepared versions live provider sessions launched from (spec §6.5): the preparation
- * lifecycle's GC never deletes one of them. `inUse()` REJECTS when it cannot know (the agent host
- * is down, restarting, or predates the leases route) — the GC must then delete nothing.
- *
- * Reconcile with the lifecycle's own declaration (task T6b) by re-exporting that one here.
- */
-export interface PreparedDirLeases {
-  inUse(): Promise<ReadonlySet<string>>;
-}
+/** The lifecycle's lease source (`lifecycle.ts`); `AgentChatService.profileLeases()` implements it. */
+export type { PreparedDirLeases } from "./lifecycle.ts";
 
 /** The user-facing notice of a deleted profile's fallback (spec §5.6). */
 export function deletedProfileNotice(name: string | undefined): string {
