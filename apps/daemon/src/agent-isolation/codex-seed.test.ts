@@ -135,8 +135,13 @@ describe("seedCodexHome", () => {
 
   it("kills a Codex that never answers initialize and reports the deadline", async () => {
     await assert.rejects(seedCodexHome(options({ FAKE_SEED_HANG: "1" }, { timeoutMs: 300 })), /timed out/);
-    const log = await events();
-    assert.ok(log.some((line) => line.event === "exit"), "the child is gone");
+    // Under load the deadline can fire before the fake has even installed its
+    // handlers (no "exit" line then), so check the process itself: every child
+    // that started must be gone once seeding has rejected.
+    const started = (await events()).filter((line) => line.event === "start").map((line) => Number(line.pid));
+    for (const pid of started) {
+      assert.throws(() => process.kill(pid, 0), { code: "ESRCH" }, `child ${pid} is gone`);
+    }
     assert.ok((await lstat(join(codexHome, "sessions"))).isDirectory());
   });
 
