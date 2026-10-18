@@ -30,6 +30,7 @@ import {
   RUNTIME_MODE_LABELS,
   type ProviderModel
 } from "@orquester/api/agent-chat";
+import { sessionProfileRoutes, workflowRoutes } from "@orquester/api";
 import { agentChatThreadsDir, agentToolApprovalsJournalFile, agentToolsFile } from "@orquester/config";
 
 import { claudeDeniedMcpServers, claudeDisallowedTools } from "../agent-host/adapters/claude/session-tools.ts";
@@ -1155,6 +1156,85 @@ describe("§12.1 / §7.3: an Orquester card is answered only by a person, on its
       const cancelled = refused(await waiting, "CANCELLED");
       assert.match(cancelled.message, /closed/);
       assert.equal((await w.answer(orphan, { decision: "approve" })).status, 404);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Agent Profiles (spec 2026-10-18 §5.5): the MCP tools and workflows over the real profile store
+// ---------------------------------------------------------------------------
+
+describe("Agent Profiles §5.5: create_session, the session reads, list_agents and the workflow delete guard", () => {
+  test("an external and an in-chat create launch with a profile named by name (unattended), the reads report it, an unknown or unprepared one fails — never Global", async () => {
+    await withWorld(async (w) => {
+      const orq = w.project("jaspersito/orquester");
+      const made = await w.user({ method: "POST", url: sessionProfileRoutes.list, payload: { name: "Reviewer", description: "Code review kit" } });
+      assert.equal(made.status, 201, JSON.stringify(made.body));
+      const profileId: string = made.body.id;
+
+      const listed = ok(await w.external("list_agents", {}));
+      assert.deepEqual(listed.profiles.map((p: { id: string; name: string; description: string }) => [p.id, p.name, p.description]), [[profileId, "Reviewer", "Code review kit"]]);
+
+      const created = ok(await w.external("create_session", { project: "jaspersito/orquester", agent: "claude", profile: "reviewer" }));
+      assert.deepEqual(created.profile, { id: profileId, name: "Reviewer" });
+      const tab = w.host.tabs.get(created.sessionId)! as { profileId?: string | null; unattended?: boolean };
+      assert.equal(tab.profileId, profileId);
+      assert.equal(tab.unattended, true, "a tool's launch is unattended");
+      assert.deepEqual(ok(await w.external("get_session", { sessionId: created.sessionId })).session.chat.profile, { id: profileId, name: "Reviewer" });
+      const rows = ok(await w.external("list_sessions", { project: "jaspersito/orquester" })).sessions;
+      assert.deepEqual(rows.find((row: { id: string }) => row.id === created.sessionId).chat.profile, { id: profileId, name: "Reviewer" });
+
+      w.host.addChat("lead", { project: orq, title: "Lead", runtimeMode: "full-access" });
+      w.host.userTurn("lead", "Open a reviewer chat.");
+      const opened = ok(await w.uncarded("lead", "create_session", { prompt: "Review the diff.", reply: "none", profile: profileId }));
+      assert.deepEqual(opened.profile, { id: profileId, name: "Reviewer" });
+      assert.equal((w.host.tabs.get(opened.sessionId)! as { profileId?: string }).profileId, profileId);
+
+      const before = w.host.tabs.size;
+      refused(await w.external("create_session", { project: "jaspersito/orquester", agent: "claude", profile: "Nobody" }), "PROFILE_NOT_FOUND");
+      w.host.profiles!.notReady.set(profileId, "The MCP server \"pager\" has no command.");
+      const notReady = refused(await w.external("create_session", { project: "jaspersito/orquester", agent: "claude", profile: "Reviewer" }), "PROFILE_NOT_READY");
+      assert.match(notReady.message, /Agent Profile "Reviewer" could not be used, so no chat was opened: The MCP server "pager" has no command\./);
+      assert.equal(w.host.tabs.size, before, "nothing was opened, as Global or otherwise");
+    });
+  });
+
+  test("a workflow agent block names a profile; validation flags a missing one; deleting a used profile is refused until the user confirms the workflows that use it", async () => {
+    await withWorld(async (w) => {
+      const orq = w.project("jaspersito/orquester");
+      const profile = (await w.user({ method: "POST", url: sessionProfileRoutes.list, payload: { name: "Nightly" } })).body as { id: string; revision: string };
+      const chain = [{ agent: "claude", model: "default" }];
+      const workflow = await w.user({
+        method: "POST", url: "/api/workflows",
+        payload: {
+          name: "Nightly fix", project: { kind: "existing", projectPath: orq },
+          nodes: [{ type: "trigger.manual", name: "Go" }, { type: "agent", name: "Fix", config: { prompt: { kind: "text", text: "Fix it." }, chain, profileId: profile.id } }],
+          edges: [{ source: "Go", target: "Fix" }]
+        }
+      });
+      assert.ok(workflow.status < 300, JSON.stringify(workflow.body));
+      const workflowId: string = workflow.body.workflow?.id ?? workflow.body.id;
+      assert.equal(w.workflows.service.require(workflowId).nodes.find((node) => node.type === "agent")!.config.profileId, profile.id, "stored by id");
+
+      const missing = await w.user({
+        method: "POST", url: workflowRoutes.validate,
+        payload: { workflow: { name: "Other", project: { kind: "existing", projectPath: orq }, nodes: [{ id: "t", type: "trigger.manual", name: "Go", position: { x: 0, y: 0 }, config: {} }, { id: "a", type: "agent", name: "Fix", position: { x: 0, y: 0 }, config: { prompt: { kind: "text", text: "x" }, chain, profileId: "prof-gone" } }], edges: [] } }
+      });
+      assert.deepEqual(missing.body.problems.filter((p: { code: string }) => p.code === "unknown_profile").map((p: { nodeId: string; severity: string }) => [p.nodeId, p.severity]), [["a", "warning"]]);
+
+      const uses = await w.user({ method: "GET", url: workflowRoutes.profileReferences(profile.id) });
+      assert.deepEqual(uses.body.workflows.map((use: { workflowId: string; name: string }) => [use.workflowId, use.name]), [[workflowId, "Nightly fix"]]);
+      const url = (expect: string) => `${sessionProfileRoutes.profile(profile.id)}?revision=${profile.revision}&expectWorkflowUses=${expect}`;
+      const stale = await w.user({ method: "DELETE", url: url("") });
+      assert.equal(stale.status, 409);
+      assert.equal(stale.body.error.code, "WORKFLOW_USES_CHANGED");
+      assert.match(stale.body.error.message, /"Nightly fix"/);
+      assert.equal((await w.user({ method: "GET", url: sessionProfileRoutes.profile(profile.id) })).status, 200, "nothing deleted");
+      assert.equal((await w.user({ method: "DELETE", url: url(workflowId) })).status, 200);
+      assert.equal((await w.user({ method: "GET", url: sessionProfileRoutes.profile(profile.id) })).status, 404);
+      // Now the block names a profile that is gone: its own validation says so.
+      const after = await w.user({ method: "POST", url: workflowRoutes.validate, payload: { workflow: w.workflows.service.require(workflowId) } });
+      assert.ok(after.body.problems.some((p: { code: string }) => p.code === "unknown_profile"));
     });
   });
 });

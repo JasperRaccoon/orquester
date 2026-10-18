@@ -146,6 +146,7 @@ const PURE_MODULES = new Set([
   "mcp/fs-tools.ts",
   "mcp/gate/turn-policy.ts",
   "mcp/history.ts",
+  "mcp/profiles.ts",
   "mcp/reads.ts",
   "mcp/result.ts",
   "mcp/tools/agent-profile.ts",

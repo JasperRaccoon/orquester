@@ -392,6 +392,24 @@ test("create_session from a chat: an opened child of this chat with its mode, mo
   assert.ok(JSON.stringify(out).indexOf("me@example.com") === -1, "no account email in a chat result");
 });
 
+test("create_session from a chat with an Agent Profile (§5.5): named by name, sent by id as an unattended launch; the result and the card name it; an unknown one is refused before any create", async () => {
+  const r = rig();
+  r.api.on("GET", "/api/session-profiles", { status: 200, body: { profiles: [{ id: "prof-1", name: "Reviewer", description: "", revision: "1", preparation: [] }], errors: [] } });
+  const creates = createRoutes(r.api, r.sessions);
+  const result = await r.call("create_session", { prompt: "Review it", profile: "REVIEWER" });
+  assert.equal(result.isError, undefined, JSON.stringify(body(result)));
+  const [req] = creates;
+  assert.equal(req!.profileId, "prof-1");
+  assert.equal(req!.chat.unattended, true);
+  assert.deepEqual(body(result).profile, { id: "prof-1", name: "Reviewer" });
+  const global = await r.call("create_session", { prompt: "Again" });
+  assert.equal(creates[1]!.profileId, undefined, "omitted: Global");
+  assert.equal(creates[1]!.chat.unattended, true);
+  assert.equal(body(global).profile, null);
+  assert.equal(code(await r.call("create_session", { prompt: "x", profile: "Nope" })), "PROFILE_NOT_FOUND");
+  assert.equal(creates.length, 2, "nothing created for an unknown profile");
+});
+
 test("create_session delegate: notify by default, a \"Task:\" title, origin delegated; another agent gets its own defaults (never a legacy model)", async () => {
   const r = rig();
   const creates = createRoutes(r.api, r.sessions);

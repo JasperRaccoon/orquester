@@ -59,12 +59,12 @@ test("fork_session forks through a transcript turn number and returns the new se
   assert.equal(result.strategy, "native");
   assert.equal((result.session as { id: string }).id, "f1");
   const post = api.calls.find((c) => c.method === "POST")!;
-  assert.deepEqual(withoutId(post.body), { title: "B", turnId: "t1", role: "assistant" });
+  assert.deepEqual(withoutId(post.body), { unattended: true, title: "B", turnId: "t1", role: "assistant" }, "a tool's fork is unattended (Agent Profiles §5.5); no profileId: the original's");
 
   await tool("fork_session").run({ sessionId: "c1", throughTurn: 0 }, api);
-  assert.deepEqual(withoutId(api.calls.filter((c) => c.method === "POST").at(-1)!.body), { turnId: "t1", role: "user" });
+  assert.deepEqual(withoutId(api.calls.filter((c) => c.method === "POST").at(-1)!.body), { unattended: true, turnId: "t1", role: "user" });
   await tool("fork_session").run({ sessionId: "c1" }, api);
-  assert.deepEqual(withoutId(api.calls.filter((c) => c.method === "POST").at(-1)!.body), {}, "default: the host picks the latest finished turn");
+  assert.deepEqual(withoutId(api.calls.filter((c) => c.method === "POST").at(-1)!.body), { unattended: true }, "default: the host picks the latest finished turn");
 });
 
 test("fork_session refuses a turn past the end, and passes the host's refusal through", async () => {
@@ -72,6 +72,53 @@ test("fork_session refuses a turn past the end, and passes the host's refusal th
   await assert.rejects(tool("fork_session").run({ sessionId: "c1", throughTurn: 3 }, api), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && /between 0 and 2/.test(e.message));
   api.on("POST", agentChatRoutes.fork("c1"), { status: 409, body: { error: { code: "COMMAND_REJECTED", message: "That reply is still being written." } } });
   await assert.rejects(tool("fork_session").run({ sessionId: "c1" }, api), (e: { code: string; message: string }) => e.code === "COMMAND_REJECTED" && /still being written/.test(e.message));
+});
+
+/** `GET /api/session-profiles` as the daemon lists two profiles. */
+const PROFILES = { profiles: [
+  { id: "prof-1", name: "Video", description: "", revision: "3", preparation: [{ agent: "claude", state: "ready", updatedAt: "x" }] },
+  { id: "prof-2", name: "Ops", description: "", revision: "1", preparation: [] }
+], errors: [] };
+
+test("fork_session profile (Agent Profiles §5.5): by name or id, null or \"global\" for Global, omitted inherits; the result reports it", async () => {
+  const { api } = harness();
+  api.on("GET", "/api/session-profiles", { status: 200, body: PROFILES });
+  // The fork tab as the daemon then lists it: the named profile, else the parent's (prof-2).
+  let forked: string | null = null;
+  api.on("GET", "/api/sessions", () => ({ status: 200, body: [chatSummary({ profileId: "prof-2" }), chatSummary({ id: "f1", profileId: forked, lineage: { parentThreadId: "c1", relation: "fork", createdAt: stamp(1) } })] }));
+  api.on("POST", agentChatRoutes.fork("c1"), ({ body }) => {
+    const profileId = (body as { profileId?: string | null }).profileId;
+    forked = profileId === undefined ? "prof-2" : profileId;
+    return { status: 200, body: { session: chatSummary({ id: "f1", profileId: forked }), strategy: "native", lineage: { parentThreadId: "c1", relation: "fork", createdAt: "x" } } };
+  });
+  const lastBody = () => withoutId(api.calls.filter((c) => c.method === "POST").at(-1)!.body);
+  const byName = await tool("fork_session").run({ sessionId: "c1", profile: "video" }, api);
+  assert.deepEqual(lastBody(), { unattended: true, profileId: "prof-1" }, "a name is matched case-insensitively and sent as its id");
+  assert.deepEqual((byName.session as { chat: { profile: unknown } }).chat.profile, { id: "prof-1", name: "Video" });
+  await tool("fork_session").run({ sessionId: "c1", profile: "prof-2" }, api);
+  assert.deepEqual(lastBody(), { unattended: true, profileId: "prof-2" });
+  await tool("fork_session").run({ sessionId: "c1", profile: null }, api);
+  assert.deepEqual(lastBody(), { unattended: true, profileId: null });
+  await tool("fork_session").run({ sessionId: "c1", profile: "Global" }, api);
+  assert.deepEqual(lastBody(), { unattended: true, profileId: null }, "\"global\" is Global");
+  const inherited = await tool("fork_session").run({ sessionId: "c1" }, api);
+  assert.deepEqual(lastBody(), { unattended: true }, "omitted: the original's, chosen by the daemon");
+  assert.deepEqual((inherited.session as { chat: { profile: unknown } }).chat.profile, { id: "prof-2", name: "Ops" });
+});
+
+test("fork_session profile refusals: an unknown one is refused before anything is forked; a profile the daemon cannot prepare fails naming it", async () => {
+  const { api } = harness();
+  api.on("GET", "/api/session-profiles", { status: 200, body: PROFILES });
+  await assert.rejects(tool("fork_session").run({ sessionId: "c1", profile: "Nope" }, api),
+    (e: { code: string; message: string }) => e.code === "PROFILE_NOT_FOUND" && /No Agent Profile "Nope"/.test(e.message) && /"Video", "Ops"/.test(e.message));
+  assert.equal(api.calls.some((c) => c.method === "POST"), false, "nothing forked");
+  api.on("POST", agentChatRoutes.fork("c1"), { status: 409, body: { error: { code: "PROFILE_NOT_READY", message: "The MCP server \"slack\" has no command." } } });
+  await assert.rejects(tool("fork_session").run({ sessionId: "c1", profile: "Video" }, api),
+    (e: { code: string; message: string }) => e.code === "PROFILE_NOT_READY" && /Agent Profile "Video" could not be used, so nothing was forked: The MCP server "slack" has no command\./.test(e.message));
+  // Inherited: a parent whose profile is gone fails the (unattended) fork too, naming the profile by id when no name is known.
+  api.on("GET", "/api/sessions", { status: 200, body: [chatSummary({ profileId: "prof-gone" })] });
+  api.on("POST", agentChatRoutes.fork("c1"), { status: 400, body: { code: "PROFILE_NOT_FOUND", message: "No Agent Profile \"prof-gone\"." } });
+  await assert.rejects(tool("fork_session").run({ sessionId: "c1" }, api), (e: { code: string; message: string }) => e.code === "PROFILE_NOT_FOUND" && /Agent Profile "prof-gone"/.test(e.message));
 });
 
 test("merge_back_session sends the fork's text and reports the delivery; a session that is no fork is refused", async () => {

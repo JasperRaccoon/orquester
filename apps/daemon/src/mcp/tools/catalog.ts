@@ -12,6 +12,7 @@ import { ToolError, expectOk } from "../errors.ts";
 import { runtimeModesUpTo } from "../gate/turn-policy.ts";
 import { listSessions, readThreadHead } from "../reads.ts";
 import { MAX_RESULT_BYTES, resultBytes } from "../result.ts";
+import { loadProfiles, profileListing } from "../profiles.ts";
 
 /**
  * One workspace's projects, or the warning that stands in for them: a workspace that cannot be read is left out
@@ -172,7 +173,7 @@ async function thisThread(api: DaemonApi, caller: Extract<ToolCaller, { kind: "t
 const listAgents = defineTool({
   name: "list_agents",
   title: "List launchable agents",
-  description: "Per chat agent: enabled, installed, status, models (isDefault: used when a launch names none; options with values and default), permission modes, capabilities, accounts. Only enabled agents open. Legacy models (isLegacy) only with includeLegacy. Cut catalogue (optionsOmitted, modelsTruncated): ask {agent, model}.",
+  description: "Per chat agent: enabled, installed, status, models (isDefault: used when a launch names none; options with values and default), permission modes, capabilities, accounts. Only enabled agents open. Legacy models (isLegacy) only with includeLegacy. Cut catalogue (optionsOmitted, modelsTruncated): ask {agent, model}. `profiles`: the Agent Profiles create_session and fork_session take (`profile`), each agent's readiness.",
   chatNote: "`thisThread`: this chat's settings, inherited by same-agent chats you open; `allowedRuntimeModes`: modes those may take.",
   input: {
     agent: z.string().min(1).max(64).optional().describe("Only this agent."),
@@ -191,15 +192,39 @@ const listAgents = defineTool({
   async run(args, { api, caller }) {
     if (args.model !== undefined && args.agent === undefined) throw new ToolError("INVALID_ARGUMENT", "model needs agent: a model is looked up in one agent's catalogue — list_agents {agent, model}.");
     const includeLegacy = args.includeLegacy || args.includeLegacyModels === true;
+    const profiles = await profilesFrame(api);
     if (caller.kind === "external") {
-      const frame = { permissionModes: PERMISSION_MODES };
-      return { agents: await agentCatalog(api, { ...args, includeLegacyModels: includeLegacy }, MAX_RESULT_BYTES - resultBytes(frame) - 12), ...frame };
+      const frame = { permissionModes: PERMISSION_MODES, ...profiles.frame };
+      const agents = await agentCatalog(api, { ...args, includeLegacyModels: includeLegacy }, MAX_RESULT_BYTES - resultBytes(frame) - 12);
+      return { agents, ...frame, ...profiles.narrowed(args.agent, agents) };
     }
-    const frame = { thisThread: await thisThread(api, caller), allowedRuntimeModes: runtimeModesUpTo(caller.runtimeMode), permissionModes: PERMISSION_MODES };
+    const frame = { thisThread: await thisThread(api, caller), allowedRuntimeModes: runtimeModesUpTo(caller.runtimeMode), permissionModes: PERMISSION_MODES, ...profiles.frame };
     const agents = await agentCatalog(api, { ...args, includeLegacyModels: includeLegacy }, MAX_RESULT_BYTES - resultBytes(frame) - 12, chatAgentView);
-    return { agents, ...frame };
+    return { agents, ...frame, ...profiles.narrowed(args.agent, agents) };
   }
 });
+
+/** The most Agent Profiles list_agents lists; `profilesOmitted` counts the rest. */
+const MAX_LISTED_PROFILES = 50;
+
+/**
+ * list_agents' `profiles` (spec 2026-10-18 §5.5): every Agent Profile with each agent's readiness — sized
+ * before the agents (the catalogue fits what is left), and narrowed to the one agent `{agent}` asks
+ * about (never larger, so the budget holds). Absent when the daemon cannot list them.
+ */
+async function profilesFrame(api: DaemonApi): Promise<{ frame: Record<string, unknown>; narrowed: (agent: string | undefined, agents: readonly object[]) => Record<string, unknown> }> {
+  const rows = await loadProfiles(api).catch(() => null);
+  if (rows === null) return { frame: {}, narrowed: () => ({}) };
+  const listed = rows.slice(0, MAX_LISTED_PROFILES);
+  const omitted = rows.length > listed.length ? { profilesOmitted: rows.length - listed.length } : {};
+  return {
+    frame: { profiles: profileListing(listed), ...omitted },
+    narrowed: (agent, agents) => {
+      const adapter = agent !== undefined ? (agents[0] as { adapter?: unknown } | undefined)?.adapter : undefined;
+      return typeof adapter === "string" ? { profiles: profileListing(listed, new Set([adapter])), ...omitted } : {};
+    }
+  };
+}
 
 /**
  * list_agents' listing (also the legacy session tools' `agent_catalog`): every agent, one agent, or one agent's model

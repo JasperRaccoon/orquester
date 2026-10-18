@@ -16,6 +16,7 @@ import { z } from "zod";
 import type { AgentConversationsResponse, ApprovalPreviewSection, CreateSessionRequest, SessionSummary } from "@orquester/api";
 import { agentChatRoutes, buildPlanImplementationPrompt, GOAL_ACTIVITY_KIND, GOAL_COMMAND_FAILED_ACTIVITY_KIND, GOAL_STATUS_ACTIVITY_KIND, isGoalCommandText, isHiddenGoalChange, MAX_TURN_INPUT_CHARS, parseGoalSupport, parseGoalUpdatedPayload, parseThreadGoal, replyNoticeText, resolveLaunchModel, THREAD_MESSAGE_OVERHEAD_CHARS, threadMessageContext, TURN_NOT_IDLE, UNTRUSTED_NOTICE, WAIT_CYCLE, type AttachmentRef, type CausedBy, type ComposerContextRecord, type CreateAgentChatSessionFields, type ProviderModel, type ReplySubscriptionResponse, type ReplyWaitResponse, type RuntimeMode, type ThreadGoal, type ThreadItem, type ThreadItemResponse, type ThreadMessageOrigin, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
 import { findAgent, findModel, loadAgents, resolveModelSelection, supportsFrom, validateAccountId, type AgentView } from "../agents.ts";
+import { resolveProfileArg } from "../profiles.ts";
 import { canonicalProject, realPathInSandbox, resolveProject } from "../addressing.ts";
 import { assertInsideFsRoot, FsSandboxError } from "@orquester/config/fs";
 import { attachmentInputSchema, MAX_ATTACHMENTS, uploadInlineAttachments, type AttachmentInput } from "../attachments.ts";
@@ -835,6 +836,27 @@ interface CreateArgs {
   reply?: ReplyMode;
   timeoutSeconds?: number;
   delegate?: boolean;
+  profile?: string;
+}
+
+/** The daemon's refusals of a launch's Agent Profile (`SessionProfileError` codes through the create route). */
+const PROFILE_REFUSALS: ReadonlySet<string> = new Set(["PROFILE_NOT_FOUND", "PROFILE_NOT_READY", "PROFILE_UNSUPPORTED_AGENT"]);
+
+/**
+ * `POST /api/sessions` for a tool's create. Every tool launch is unattended (spec 2026-10-18 §5.5):
+ * `chat.unattended`, and the profile, when one is named, as `profileId` — a profile that is gone or
+ * cannot be prepared fails the call, never Global, and its refusal names the profile.
+ */
+async function postCreate(api: ScopeContext["api"], body: CreateSessionRequest, profile: { id: string; name: string } | null): Promise<SessionSummary> {
+  const launch: CreateSessionRequest = { ...body, ...(profile ? { profileId: profile.id } : {}), chat: { ...body.chat!, unattended: true } };
+  try {
+    return expectOk<SessionSummary>(await api.request("POST", "/api/sessions", { body: launch }));
+  } catch (error) {
+    if (profile && error instanceof ToolError && PROFILE_REFUSALS.has(error.code)) {
+      throw new ToolError(error.code, `Agent Profile "${profile.name}" could not be used, so no chat was opened: ${error.message} Fix the profile (Agent Profiles in the right rail), pick another, or leave \`profile\` out for Global.`, error.detail);
+    }
+    throw error;
+  }
 }
 
 /** The project a create opens in: the named one, else (chat) the caller's own. */
@@ -864,7 +886,7 @@ export const createSessionTool = defineTool({
   name: "create_session",
   title: "Open a chat session",
   description:
-    "Open an agent chat tab in a project, or resume a conversation (list_conversations). Agents, models, options, modes, accounts: list_agents. With `prompt` it starts at once: reply \"wait\" returns that turn's final reply (or at timeoutSeconds), \"none\" returns at once. The result says the model (isLegacy), mode, account and accountSource (requested, inherited, family-default) it got.",
+    "Open an agent chat tab in a project, or resume a conversation (list_conversations). Agents, models, options, modes, accounts: list_agents. With `prompt` it starts at once: reply \"wait\" returns that turn's final reply (or at timeoutSeconds), \"none\" returns at once. The result says the model (isLegacy), mode, account and accountSource (requested, inherited, family-default) and Agent Profile it got. A `profile` that is missing or cannot be prepared fails the call, never Global.",
   chatNote:
     "Defaults: this chat's project, agent, mode (only narrower) and, same agent, model, options, account. `prompt` (self-contained) required unless resuming. reply \"notify\": its final reply reaches you later as a message. `delegate: true`: your task, its final reply the result (reply default \"notify\", else \"none\"). Max 6 unfinished chats you opened, 2 levels deep.",
   externalNote: "`project` is required; runtimeMode defaults to full-access, reply to \"none\".",
@@ -882,7 +904,8 @@ export const createSessionTool = defineTool({
     prompt: z.string().trim().min(1).max(CHAT_TEXT_MAX_CHARS).optional(),
     reply: replyField.optional(),
     timeoutSeconds: timeoutSecondsField,
-    delegate: z.boolean().optional()
+    delegate: z.boolean().optional(),
+    profile: z.string().trim().min(1).max(200).optional().describe("Agent Profile id or name (list_agents profiles). Default: Global.")
   },
   chatOnlyInput: ["delegate"],
   audiences: ["external", "chat"],
@@ -926,6 +949,7 @@ export const createSessionTool = defineTool({
       // The mode the chat will really get (an unknown caller mode opens the narrowest): what is approved is what runs.
       { label: "Permission mode", value: caller ? openedThreadRuntimeMode(caller, args.runtimeMode) : (args.runtimeMode ?? "full-access") },
       ...(args.accountId ? [{ label: "Account", value: args.accountId }] : []),
+      { label: "Agent Profile", value: args.profile ?? "Global" },
       ...(args.cwd ? [{ label: "Working directory", value: args.cwd }] : []),
       ...(args.resume ? [{ label: "Resume", value: args.resume.conversationId }] : []),
       ...(args.prompt !== undefined ? [{ label: "Reply", value: args.reply ?? (args.delegate ? "notify" : "none") }] : [])
@@ -959,6 +983,7 @@ async function createExternal(args: CreateArgs, ctx: CallContext): Promise<Recor
   const selection = resolveModelSelection(agent, { model: model.slug, ...(args.options !== undefined ? { options: args.options } : {}) });
   const account = launchAccount(agent, args.accountId, undefined, resume);
   const cwd = args.cwd === undefined ? projectPath : await cwdInProject(api, projectPath, args.cwd);
+  const profile = args.profile === undefined ? null : await resolveProfileArg(api, args.profile);
   const running = (await listSessions(api, projectPath)).filter((s) => s.status === "running").length;
   if (running >= MAX_RUNNING_SESSIONS_PER_PROJECT) throw new ToolError("SESSION_BUSY", `${running} sessions are open in this project (limit ${MAX_RUNNING_SESSIONS_PER_PROJECT}); close some first.`);
   const chat: CreateAgentChatSessionFields = {
@@ -968,8 +993,8 @@ async function createExternal(args: CreateArgs, ctx: CallContext): Promise<Recor
     ...(resume ? { resume: { home: resume.home, conversationId: resume.id } } : {})
   };
   const body: CreateSessionRequest = { kind: "agent-chat", refId, projectPath, cwd, title: args.title ?? (resume?.title || agent.name), ...(account.accountId ? { accountId: account.accountId } : {}), chat };
-  const summary = expectOk<SessionSummary>(await api.request("POST", "/api/sessions", { body }));
-  const created = { sessionId: summary.id, accountId: summary.accountId || account.accountId || "system", accountSource: account.source, ...(account.note ? { accountNote: account.note } : {}), ...(model.isLegacy ? { isLegacy: true } : {}) };
+  const summary = await postCreate(api, body, profile);
+  const created = { sessionId: summary.id, accountId: summary.accountId || account.accountId || "system", accountSource: account.source, ...(account.note ? { accountNote: account.note } : {}), ...(model.isLegacy ? { isLegacy: true } : {}), profile };
   let first: FirstTurn = {};
   if (args.prompt !== undefined) {
     try {
@@ -1043,6 +1068,7 @@ async function createFromChat(args: CreateArgs, ctx: CallContext, caller: Thread
   const account = launchAccount(agent, args.accountId, sameAgent && tab.accountId ? tab.accountId : undefined, resume);
   const ownProject = canonical !== null && canonical.canonical === caller.projectPath;
   const cwd = args.cwd !== undefined ? await cwdInProject(api, projectPath, args.cwd) : ownProject && caller.cwd ? caller.cwd : projectPath;
+  const profile = args.profile === undefined ? null : await resolveProfileArg(api, args.profile);
   const chat: CreateAgentChatSessionFields = {
     ...(account.accountId ? { accountId: account.accountId } : {}),
     modelSelection: { model: selection.model, options: selection.options },
@@ -1053,7 +1079,7 @@ async function createFromChat(args: CreateArgs, ctx: CallContext, caller: Thread
   };
   const title = args.title ?? (resume?.title || (delegate && args.prompt !== undefined ? delegateTitle(args.prompt) : agent.name));
   const body: CreateSessionRequest = { kind: "agent-chat", refId, projectPath, cwd, title, ...(account.accountId ? { accountId: account.accountId } : {}), chat };
-  const summary = expectOk<SessionSummary>(await api.request("POST", "/api/sessions", { body }));
+  const summary = await postCreate(api, body, profile);
   const relation = delegate ? "delegate" : "opened";
   const created = {
     sessionId: summary.id,
@@ -1066,6 +1092,7 @@ async function createFromChat(args: CreateArgs, ctx: CallContext, caller: Thread
     accountId: summary.accountId || account.accountId || "system",
     accountSource: account.source,
     ...(account.note ? { accountNote: account.note } : {}),
+    profile,
     relation,
     ...(args.prompt !== undefined && interactionMode === "plan" ? { planMode: true } : {})
   };
