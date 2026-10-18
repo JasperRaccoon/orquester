@@ -435,8 +435,10 @@ export interface AgentAdapter {
    * work running when it next goes idle; running turns are never disturbed and
    * no thread's session binding or cursor moves. `recycled` counts servers
    * stopped by the call, `deferred` the ones left to recycle when idle.
+   * `poolKey` narrows it to the servers started for that key (see
+   * {@link StartSessionInput.serverPool}); omitted, every server is recycled.
    */
-  recycleIdleServers?(): Promise<{ recycled: number; deferred: number }>;
+  recycleIdleServers?(input?: { poolKey?: string }): Promise<{ recycled: number; deferred: number }>;
   /**
    * The host's teardown: never the user ending a session (see {@link
    * stopSession}). Called twice by it — by the adapter's own listener on the
