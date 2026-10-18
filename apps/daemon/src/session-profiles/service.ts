@@ -117,6 +117,11 @@ export class SessionProfileService {
     return { profileId, deleted: true };
   }
 
+  /** The name a deleted profile had (durable across restarts); `undefined` when unknown. Never rejects. */
+  deletedName(profileId: string): Promise<string | undefined> {
+    return this.store.deletedName(profileId);
+  }
+
   async duplicate(profileId: string, name?: string): Promise<SessionProfileDetail> {
     return this.changed(await this.store.duplicate(profileId, name));
   }

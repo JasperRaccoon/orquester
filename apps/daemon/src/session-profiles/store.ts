@@ -46,14 +46,19 @@ import {
 } from "@orquester/api";
 import {
   SESSION_PROFILE_MANIFEST_VERSION,
+  emptySessionProfileDeleted,
   emptySessionProfileSecrets,
+  parseSessionProfileDeleted,
   parseSessionProfileManifest,
   parseSessionProfileSecrets,
+  serializeSessionProfileDeleted,
   serializeSessionProfileManifest,
   serializeSessionProfileSecrets,
+  sessionProfileDeletedFile,
   sessionProfileDir,
   sessionProfileIdSchema,
   sessionProfileSourcesDir,
+  type SessionProfileDeletedFile,
   type SessionProfileItemEntry,
   type SessionProfileItemRecord,
   type SessionProfileItemSecrets,
@@ -160,6 +165,9 @@ export interface SessionProfileStoreOptions {
 
 /** The queue key of the catalog-wide slot (never a valid profile id). */
 const CATALOG = "*catalog*";
+
+/** The queue key of `deleted.json` (never a valid profile id); taken inside a profile's slot, never around one. */
+const DELETED = "*deleted*";
 
 /** The store never keeps backups of its own files: the profile itself is the owner's data, and a backup would copy secrets around. */
 class NoBackups extends ProfileBackups {
@@ -421,6 +429,12 @@ export class SessionProfileStore {
     };
   }
 
+  /** The name a deleted profile had when it was deleted (`deleted.json`); `undefined` when unknown. Never throws. */
+  async deletedName(profileId: string): Promise<string | undefined> {
+    const file = await this.readDeleted().catch(() => null);
+    return file !== null && Object.hasOwn(file.profiles, profileId) ? file.profiles[profileId]!.name : undefined;
+  }
+
   /** A plugin item's cache slot: where the plugin flow puts its files (spec §4.5). */
   pluginCacheDir(profileId: string, itemId: string): string {
     return this.layout(profileId).pluginCacheDir(itemId);
@@ -479,6 +493,9 @@ export class SessionProfileStore {
       const layout = this.layout(profileId);
       const file = await this.readManifest(profileId, layout);
       if (String(file.manifest.revision) !== revision) throw errors.conflict();
+      // Its name first (kept for good): a chat of this profile falls back to Global at its next
+      // start, maybe after a restart, with a notice that names the profile (spec §5.6).
+      await this.queue.run(DELETED, () => this.recordDeleted(profileId, file.manifest.name));
       const trash = join(this.root, `.trash-${profileId}-${randomUUID()}`);
       await rename(layout.dir, trash);
       await rm(trash, { recursive: true, force: true });
@@ -960,6 +977,25 @@ export class SessionProfileStore {
       // Never the parser's message: it could quote a value.
       throw errors.unreadable(profileId, "its secrets.json does not read.");
     }
+  }
+
+  /** `deleted.json`: empty when missing; throws when it does not read (another version's, damaged). */
+  private async readDeleted(): Promise<SessionProfileDeletedFile> {
+    const text = await readTextIfExists(sessionProfileDeletedFile(this.appdir));
+    return text === null ? emptySessionProfileDeleted() : parseSessionProfileDeleted(JSON.parse(text));
+  }
+
+  /** Adds a deleted profile's name to `deleted.json`. A file that does not read is left alone (the notice then names no profile). */
+  private async recordDeleted(profileId: string, name: string): Promise<void> {
+    let file: SessionProfileDeletedFile;
+    try {
+      file = await this.readDeleted();
+    } catch {
+      return;
+    }
+    delete file.unreadable[profileId];
+    file.profiles[profileId] = { ...file.profiles[profileId], name, deletedAt: this.now().toISOString() };
+    await writeProfileFile(sessionProfileDeletedFile(this.appdir), serializeSessionProfileDeleted(file), WRITE);
   }
 
   private async writeManifest(layout: ProfileLayout, file: SessionProfileManifestFile): Promise<void> {

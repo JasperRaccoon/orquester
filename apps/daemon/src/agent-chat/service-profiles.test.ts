@@ -185,7 +185,8 @@ async function makeFixture(options: { capability?: boolean; profiles?: false } =
                 fields: applyProfileContribution(request.base, contributionFor(request.profileId), "CODEX_HOME")
               };
             },
-            profileName: (profileId) => (profileId === "gone" ? "Video" : undefined)
+            // As `index.ts` wires it: the store's durable `deleted.json`, read on demand.
+            profileName: async (profileId) => (profileId === "gone" ? "Video" : undefined)
           }
         })
   });

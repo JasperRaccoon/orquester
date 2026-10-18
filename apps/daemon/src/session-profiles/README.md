@@ -16,7 +16,7 @@ per-agent GLOBAL config editor, user-facing "Agent config"). A chat without `pro
 | `preparer.ts` + `preparers/<agent>.ts` | Per-agent preparer contract and registry (`null` for an agent not done yet). Grok's (`preparers/grok.ts`) builds a whole `GROK_HOME`; its header lists the layout. |
 | `contributions/<agent>.ts` | Per-agent launch contribution (what a profile chat adds to its account's launch env). Grok: `GROK_HOME`/`homePath` = the prepared dir, `GROK_AUTH_PATH` = the account's `auth.json`, `GROK_PROFILE_ENV`. |
 | `lifecycle.ts` | `SessionProfileLifecycle`: builds and publishes immutable prepared versions, tracks and refreshes them, collects unleased old ones; `ensureReady` for launches. |
-| `launch.ts` | The launch side: per-agent launch contributions (`profileLaunchContributors`), `applyProfileContribution`, `createProfileLaunchResolver` (what `AgentChatService` launches with), `SessionProfileNames` + the deleted-profile notice. |
+| `launch.ts` | The launch side: per-agent launch contributions (`profileLaunchContributors`), `applyProfileContribution`, `createProfileLaunchResolver` (what `AgentChatService` launches with), the deleted-profile notice. |
 | `service.ts` | `SessionProfileService`: wire mapping (secrets masked), events, prepare status, `resolveForAgent(profileId, agent)`; the import entry points delegate to `imports.ts`. |
 | `imports.ts` | `SessionProfileImports`: Import from Global (via Agent config), git / zip / md scans, copy from profile, plugins into the profile's cache, export / import of a profile. Gathers outside the queue, writes with ONE `store.importItems`; copy from profile reads the source as one `store.snapshotSource` (its queue, then released). |
 | `export.ts` | The export `.zip` format, its builder, and the strict reader behind "Import profile from file". |
@@ -39,6 +39,7 @@ Contracts: `@orquester/api` `session-profiles.ts` (wire types, `sessionProfileRo
       current.json                                SESSION_PROFILE_PREPARED_CURRENT_FILE      {"schema":1,"version":"<version>"}
       <version>/                                  sessionProfilePreparedDir(..., version)    one immutable preparation
   staging/                                        sessionProfileStagingDir(appdir)
+  deleted.json                                    sessionProfileDeletedFile(appdir)   the names of deleted profiles
 ```
 
 - Item directories are keyed by item ID (stable across renames); the item's name is in the
@@ -256,7 +257,9 @@ after the env and home are already built.)
 account's own launch with `profile: null` and `fallback {previousProfileId, notice}`; the host
 writes `thread.meta-updated {profileId: ""}` and a `runtime.warning` row whose summary is the
 notice (`Agent Profile "X" was deleted; this chat now uses Global.` — the name from
-`SessionProfileNames`, kept after the delete while the daemon runs), and the tab mirrors Global.
+`store.deletedName`: `store.delete` records the profile's last name in
+`<appdir>/daemon/session-profiles/deleted.json` (`sessionProfileDeletedFile`) before removing it,
+so the notice names it after a restart too), and the tab mirrors Global.
 An account switch or a fork of such a chat goes ahead without naming the profile and leaves the
 fallback to the next start's refresh. **Unattended** launches never fall back:
 `CreateAgentChatSessionFields.unattended` / `ForkSessionRequest.unattended` (persisted as

@@ -158,7 +158,7 @@ import { SessionProfileLifecycle, publishSessionProfilePrepareEvents } from "./s
 import { SessionProfileStore } from "./session-profiles/store.ts";
 import { registerSessionProfileRoutes } from "./session-profiles/routes.ts";
 import { SessionProfileImports } from "./session-profiles/imports.ts";
-import { createProfileLaunchResolver, SessionProfileNames } from "./session-profiles/launch.ts";
+import { createProfileLaunchResolver } from "./session-profiles/launch.ts";
 import { registerThreadLaunchProfileRoute } from "./agent-chat/profile-launch-route.ts";
 import { createAgentProfileAdapters } from "./agent-profile/adapters/index.ts";
 import { createProfileConverter } from "./agent-profile/convert.ts";
@@ -1123,9 +1123,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // Chat launches with a profile (create, fork, its reconcile, account and profile switches, and
   // the host's refresh before every session start): the current prepared version through
   // `ensureReady`, its manifest section, and the agent's launch contribution over the account's
-  // launch (`session-profiles/launch.ts`). The names feed a deleted profile's fallback notice.
-  const sessionProfileNames = new SessionProfileNames();
-  void sessionProfileNames.track(sessionProfiles);
+  // launch (`session-profiles/launch.ts`). A deleted profile's fallback notice names it from the
+  // store's `deleted.json` (durable across restarts).
   agentChat.setSessionProfiles({
     resolve: createProfileLaunchResolver({
       lifecycle: sessionProfileLifecycle,
@@ -1136,7 +1135,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
             ? agentAccounts.homePath(agent, accountId)
             : null
     }),
-    profileName: (profileId) => sessionProfileNames.get(profileId)
+    profileName: (profileId) => sessionProfiles.deletedName(profileId)
   });
 
   // Workflows → event bus (channel "workflows"): `workflow.upserted` (the rail summary — the

@@ -213,8 +213,8 @@ export interface AgentChatServiceOptions {
 export interface ChatSessionProfiles {
   /** `ensureReady` → manifest → the agent's contribution. Throws `SessionProfileError`. */
   resolve: ResolveProfileLaunch;
-  /** A profile's name, also after its delete — for the fallback notice. */
-  profileName?(profileId: string): string | undefined;
+  /** A deleted profile's name (durable, read at the fallback) — for the fallback notice. Should not reject. */
+  profileName?(profileId: string): Promise<string | undefined> | string | undefined;
 }
 
 /** A profile id off a request: absent, `null` (Global, where allowed), or a non-blank id ≤ 128. */
@@ -1821,10 +1821,11 @@ export class AgentChatService {
       }
       this.opts.logger?.log?.(`agent chat: ${threadId}'s Agent Profile ${profileId} was deleted; it falls back to Global`);
       this.chat.setProfile(threadId, null);
+      const name = await Promise.resolve(profiles.profileName?.(profileId)).catch(() => undefined);
       return {
         profile: null,
         ...base,
-        fallback: { previousProfileId: profileId, notice: deletedProfileNotice(profiles.profileName?.(profileId)) }
+        fallback: { previousProfileId: profileId, notice: deletedProfileNotice(name) }
       };
     }
   }

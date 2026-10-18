@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
 import type { SessionProfileItemDraft } from "@orquester/api";
-import { sessionProfileDir, sessionProfileSourcesDir } from "@orquester/config";
+import { sessionProfileDeletedFile, sessionProfileDir, sessionProfileSourcesDir } from "@orquester/config";
 import { SessionProfileError } from "./errors.ts";
 import { profileLayout } from "./layout.ts";
 import { SessionProfileService } from "./service.ts";
@@ -80,6 +80,33 @@ describe("SessionProfileStore — profiles", () => {
     await store.delete("id-1", "2");
     await rejects(store.read("id-1"), "PROFILE_NOT_FOUND");
     assert.deepEqual(await readdir(sessionProfileSourcesDir(appdir)), []);
+  });
+
+  it("keeps a deleted profile's last name on disk, read by a later store (a daemon restart)", async () => {
+    const { appdir, store } = await setup();
+    await store.create({ name: "Developer" });
+    await store.create({ name: "Video" });
+    await store.update("id-1", "1", { name: "Dev" });
+    assert.equal(await store.deletedName("id-1"), undefined, "a live profile is not deleted");
+    await store.delete("id-1", "2");
+    await store.delete("id-2", "1");
+    const later = new SessionProfileStore({ appdir, newId: () => "id-3" });
+    await later.init();
+    assert.equal(await later.deletedName("id-1"), "Dev");
+    assert.equal(await later.deletedName("id-2"), "Video");
+    assert.equal(await later.deletedName("id-3"), undefined);
+    // Unknown fields and entries of the file survive the next delete's rewrite.
+    const file = sessionProfileDeletedFile(appdir);
+    assert.equal((await stat(file)).mode & 0o777, 0o600);
+    const value = JSON.parse(await readFile(file, "utf8"));
+    await writeFile(file, JSON.stringify({ ...value, future: 1, profiles: { ...value.profiles, odd: { name: 5 } } }));
+    await later.create({ name: "Third" });
+    await later.delete("id-3", "1");
+    const after = JSON.parse(await readFile(file, "utf8"));
+    assert.equal(after.future, 1);
+    assert.deepEqual(after.profiles.odd, { name: 5 });
+    assert.equal(after.profiles["id-3"].name, "Third");
+    assert.equal(after.profiles["id-1"].name, "Dev");
   });
 
   it("refuses ids that are not one safe path segment as not found", async () => {

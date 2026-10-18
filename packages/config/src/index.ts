@@ -240,6 +240,7 @@ export function agentProfileImportsDir(baseDir: string): string {
 //       current.json                              the key's current version, replaced atomically (temp + rename)
 //       <version>/                                one immutable preparation: what a profile chat launches from
 //     staging/                                    preparations being built, renamed into `prepared/` when published
+//     deleted.json                                the names of deleted profiles, by id (a chat's fallback notice)
 
 /** The Agent Profiles root. */
 export function sessionProfilesDir(baseDir: string): string {
@@ -296,6 +297,11 @@ export function sessionProfilePreparedDir(
   version: string
 ): string {
   return joinPath(sessionProfilePreparedKeyDir(baseDir, profileId, agent, accountKey), assertSessionProfileSegment(version));
+}
+
+/** The names of deleted profiles, by id (`deleted.json`): what a chat's fallback notice names (spec §5.6). */
+export function sessionProfileDeletedFile(baseDir: string): string {
+  return joinPath(sessionProfilesDir(baseDir), "deleted.json");
 }
 
 /** Where preparations are built before they are renamed into `prepared/` (same filesystem). */

@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,7 +13,6 @@ import {
   deletedProfileNotice,
   profileLaunchContribution,
   profileLaunchContributors,
-  SessionProfileNames,
   type ProfileLaunchContext,
   type ProfileLaunchContributors
 } from "./launch.ts";
@@ -176,25 +174,9 @@ describe("createProfileLaunchResolver", () => {
   });
 });
 
-describe("SessionProfileNames", () => {
-  it("knows every listed profile, follows changes, and keeps a deleted one's name for the notice", async () => {
-    const events = new EventEmitter<{ changed: [{ profileId: string }] }>();
-    const names = new SessionProfileNames();
-    let current = "Editing";
-    await names.track({
-      list: async () => ({ profiles: [{ id: "p1", name: "Developer" }, { id: "p2", name: current }] }),
-      get: async (profileId) => (profileId === "p2" ? { name: current } : Promise.reject(new Error("gone"))),
-      events
-    });
-    assert.equal(names.get("p1"), "Developer");
-    current = "Video";
-    events.emit("changed", { profileId: "p2" });
-    await names.idle();
-    assert.equal(names.get("p2"), "Video");
-    events.emit("changed", { profileId: "p1" });
-    await names.idle();
-    assert.equal(names.get("p1"), "Developer", "a failed read keeps what was known");
-    assert.equal(deletedProfileNotice(names.get("p1")), 'Agent Profile "Developer" was deleted; this chat now uses Global.');
+describe("deletedProfileNotice", () => {
+  it("names the profile when its name is known", () => {
+    assert.equal(deletedProfileNotice("Developer"), 'Agent Profile "Developer" was deleted; this chat now uses Global.');
     assert.equal(deletedProfileNotice(undefined), "This chat's Agent Profile was deleted; it now uses Global.");
   });
 });
