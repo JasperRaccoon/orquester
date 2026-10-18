@@ -153,6 +153,9 @@ import { WorkflowStateStore } from "./workflows/state-store.ts";
 import { registerWorkflowRoutes } from "./workflows/routes.ts";
 import { AgentProfileService, publishAgentProfileEvents } from "./agent-profile/service.ts";
 import { registerAgentProfileRoutes } from "./agent-profile/routes.ts";
+import { SessionProfileService, publishSessionProfileEvents } from "./session-profiles/service.ts";
+import { SessionProfileStore } from "./session-profiles/store.ts";
+import { registerSessionProfileRoutes } from "./session-profiles/routes.ts";
 import { createAgentProfileAdapters } from "./agent-profile/adapters/index.ts";
 import { createProfileConverter } from "./agent-profile/convert.ts";
 import { ProfileImportStore } from "./agent-profile/import.ts";
@@ -1069,6 +1072,13 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   publishAgentProfileEvents(agentProfile, broadcaster);
   // ---- end agent profile ----------------------------------------------------------------------
 
+  // ---- Agent Profiles (spec 2026-10-18) ------------------------------------------------------
+  // Orquester-owned per-session profiles under `<appdir>/daemon/session-profiles/`; changes go out
+  // on "session-profiles". Preparation (prepared dirs, status) is wired in by its own lifecycle.
+  const sessionProfiles = new SessionProfileService({ store: new SessionProfileStore({ appdir: paths.baseDir }) });
+  await sessionProfiles.init().catch((error) => console.error("Agent Profiles: preparing the store failed", error));
+  publishSessionProfileEvents(sessionProfiles, broadcaster);
+
   // Workflows → event bus (channel "workflows"): `workflow.upserted` (the rail summary — the
   // engine's, with live trigger state, once attached), `workflow.deleted`, `workflowSecrets.changed`
   // (no names, no values). Run events are published by the engine itself.
@@ -1181,6 +1191,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     plugins,
     desktops, desktopAudio,
     agentProfile,
+    sessionProfiles,
     workflows, workflowSecrets, workflowRuns, workflowState, workflowEngine: null, internalApi: null,
     lineage,
     workflowProjects: workflowDaemon.runtime.projects,
@@ -1501,6 +1512,8 @@ interface Services {
   plugins: PluginsService;
   /** Each agent CLI's own global config (agent profile spec §4): the right rail's Agent profile. */
   agentProfile: AgentProfileService;
+  /** Orquester-owned per-session Agent Profiles (spec 2026-10-18). */
+  sessionProfiles: SessionProfileService;
   /** Automated workflow definitions (workflows spec §3.1). */
   workflows: WorkflowService;
   /** Workflow secrets — names out, values only to the engine (§5.7). */
@@ -4162,6 +4175,10 @@ export function createServer(
     service: services.agentProfile,
     importsDir: agentProfileImportsDir(resolved.baseDir)
   });
+
+  // Agent Profiles (spec 2026-10-18 §4): Orquester-owned per-session profiles. Both transports;
+  // the bearer hook above gates HTTP. MCP secret values never leave the daemon.
+  registerSessionProfileRoutes(app, { service: services.sessionProfiles });
 
   // umcp:t11 begin — daemon-pointing MCP servers (unified MCP design 2026-10-15 §12.1): every MCP
   // server in a CLI's user config (system home and every managed account home) or a project-level
