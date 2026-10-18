@@ -3,7 +3,7 @@
  * preparation (which writes it LAST into the staging directory, before the atomic swap) and the
  * agent host's adapters (which read it from `HostThreadProfile.preparedDir` at every launch).
  *
- *   { schema: 1, profileId, revision, agent, accountKey, preparedAt, agentSection }
+ *   { schema: 1, profileId, revision, agent, accountKey, preparedAt, fingerprint?, agentSection }
  *
  * The envelope is shared; `agentSection` is per agent (`manifest/<agent>.ts`, each owned by that
  * agent's preparer). A launch whose manifest is missing, does not read, or names another profile,
@@ -34,7 +34,13 @@ const envelope = {
   /** `sessionProfileAccountKey(accountId)` or `SESSION_PROFILE_SHARED_ACCOUNT_KEY` (`@orquester/config`). */
   accountKey: z.string().min(1),
   /** ISO time the preparation finished. */
-  preparedAt: z.string()
+  preparedAt: z.string(),
+  /**
+   * The preparation lifecycle's staleness key (`lifecycle.ts`): an opaque hash of the revision,
+   * the preparer's version, the agent CLI's version and the Global inputs the preparer read.
+   * Optional so a manifest without it still reads (it is then simply stale).
+   */
+  fingerprint: z.string().optional()
 };
 
 export const preparedManifestSchema = z.discriminatedUnion("agent", [

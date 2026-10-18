@@ -161,7 +161,11 @@ const defaultWatch: ProfileWatchFn = (path, onChange, onError) => {
 const noop = (): void => undefined;
 
 export class AgentProfileService {
-  /** Emits `"changed"` with an {@link AgentProfileChangedPayload}. */
+  /**
+   * Emits `"changed"` with an {@link AgentProfileChangedPayload}, and `"filesChanged"` with
+   * `{agent}` after every debounced watcher check, whether or not the snapshot moved (a runtime
+   * setting such as the model is not in the snapshot; Agent Profiles re-prepare on it, spec §6.0).
+   */
   readonly lifecycle = new EventEmitter();
 
   private readonly adapters: Partial<Record<AgentProfileAgentId, ProfileAdapter>>;
@@ -920,6 +924,7 @@ export class AgentProfileService {
     } catch (error) {
       this.logger.warn(`agent profile: re-reading ${AGENT_PROFILE_AGENT_LABELS[agent]} after a change failed: ${describe(error)}`);
     }
+    this.lifecycle.emit("filesChanged", { agent });
   }
 }
 

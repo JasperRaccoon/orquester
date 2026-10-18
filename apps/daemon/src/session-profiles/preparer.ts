@@ -3,19 +3,35 @@
  * {@link ResolvedAgentProfile} into the agent-native files a profile chat launches from, inside a
  * staging directory, and answers its `agentSection` for `manifest.json` (`manifest.ts`).
  *
- * Expected flow (the preparation lifecycle — a later task — owns it; nothing here runs it):
- *  1. On profile create/save, first use for a new account, and daemon start for missing/stale
- *     dirs: `store.readSource(profileId)` → `resolveForAgent(source, agent)`.
+ * The flow (run by `lifecycle.ts`, `SessionProfileLifecycle` — see its header for triggers,
+ * staleness and status):
+ *  1. `store.readSource(profileId)` → `resolveForAgent(source, agent)`.
  *  2. Make an empty 0700 staging dir under `sessionProfileStagingDir(appdir)`.
  *  3. `section = await preparer.prepare(ctx)`; then `await preparer.validate?.(ctx)` (Codex:
  *     `initialize` OK; Grok: `grok inspect --json` shows only profile items; OpenCode: config
- *     debug). Either throwing → state `failed` with the error's message (never quoting a secret).
+ *     debug). Either throwing → state `failed` with the error's message (secret values are
+ *     redacted from it, but never quote one on purpose).
  *  4. `writePreparedManifest(stagingDir, {schema: 1, profileId, revision, agent, accountKey,
- *     preparedAt, agentSection: section})` LAST, then swap the staging dir into
- *     `sessionProfilePreparedDir(appdir, profileId, agent, accountKey)` atomically.
- *  5. Publish `sessionProfile.prepareStatus` and answer it from `SessionProfileService`'s
- *     `prepareStatus` option. A launch waits for a preparation in flight; a failed one fails the
- *     launch with its reason (no fallback to Global).
+ *     preparedAt, fingerprint, agentSection: section})` LAST, then the staging dir is renamed onto
+ *     `sessionProfilePreparedDir(appdir, profileId, agent, accountKey)` (the previous dir is moved
+ *     aside first and removed only once the new one is in place).
+ *  5. `sessionProfile.prepareStatus` is published; a launch's `ensureReady` waits for a
+ *     preparation in flight and fails with a failed one's reason (no fallback to Global).
+ *
+ * PATH CONTRACT. Files are written into `ctx.stagingDir`, but the directory is launched from
+ * `ctx.preparedDir`: anything that names the directory's own location (Codex hook trust keyed by
+ * `CODEX_HOME`, absolute paths inside configs) must use `ctx.preparedDir`, never `stagingDir`.
+ * Relative symlinks inside the dir survive the rename; absolute links must point outside it.
+ * While `prepare` runs, `ctx.preparedDir` may still hold the PREVIOUS ready preparation (a
+ * running chat may be using it): read from it if useful (e.g. carry Codex's seeded state DB over)
+ * but never modify it. A step that only works AT the final path (a CLI that records its own
+ * home's location while running there) cannot run in `prepare`; run it in staging only when the
+ * result is location-independent, else at launch. When a launch finds the dir unusable (Codex:
+ * its state DB is missing, spec §6.2), `lifecycle.markStale(...)` re-prepares it.
+ *
+ * STALENESS. A prepared dir is current while its fingerprint matches: profile revision +
+ * {@link SessionProfilePreparer.version} + the agent CLI's version + the content of every file
+ * {@link SessionProfilePreparer.inputs} names (the Global runtime config it carries over, §6.0).
  *
  * `accountKey`: `sessionProfileAccountKey(accountId)` when `perAccount` (Codex: one `CODEX_HOME`
  * per account, spec §6.2), else `SESSION_PROFILE_SHARED_ACCOUNT_KEY` (`@orquester/config`).
@@ -62,10 +78,29 @@ export interface SessionProfilePrepareContext<A extends SessionProfileAgentId = 
   signal?: AbortSignal;
 }
 
+/** What {@link SessionProfilePreparer.inputs} may look at: no profile content, no secrets. */
+export type SessionProfilePrepareInputsContext<A extends SessionProfileAgentId = SessionProfileAgentId> = Pick<
+  SessionProfilePrepareContext<A>,
+  "agent" | "accountKey" | "accountHome" | "systemHomes" | "appdir"
+>;
+
 export interface SessionProfilePreparer<A extends SessionProfileAgentId = SessionProfileAgentId> {
   agent: A;
   /** One prepared dir per account (Codex) rather than one shared by every account of the agent. */
   perAccount: boolean;
+  /**
+   * Bump it whenever the preparer's output changes for the same inputs (a new recipe key, a fixed
+   * bug): every prepared dir built by another version is stale. Absent = `"0"`. Export it as a
+   * constant next to the preparer.
+   */
+  version?: string;
+  /**
+   * The absolute paths of the Global files the preparer reads (e.g. `~/.codex/config.toml`,
+   * `~/.grok/config.toml`, `~/.config/opencode/opencode.json(c)`, an account's `settings.json`):
+   * their content (or absence) is part of the staleness fingerprint, so a Global change
+   * re-prepares. Must be cheap and pure (no I/O).
+   */
+  inputs?(ctx: SessionProfilePrepareInputsContext<A>): string[];
   /** Writes the agent-native files into `ctx.stagingDir`; answers the manifest's `agentSection`. */
   prepare(ctx: SessionProfilePrepareContext<A>): Promise<PreparedSectionFor<A>>;
   /** Proves the staged files isolate as intended; throws with a user-facing reason when not. */
@@ -82,7 +117,11 @@ export const sessionProfilePreparers: SessionProfilePreparers = {
   opencode: opencodePreparer
 };
 
-/** The agent's preparer, or `null` when it has none yet (the lifecycle then reports `failed`). */
+/**
+ * The agent's preparer, or `null` when it has none yet: the lifecycle reports the agent as
+ * `not-prepared` with a "not supported yet" reason and `ensureReady` throws
+ * `PROFILE_UNSUPPORTED_AGENT`.
+ */
 export function preparerFor<A extends SessionProfileAgentId>(
   agent: A,
   preparers: SessionProfilePreparers = sessionProfilePreparers
