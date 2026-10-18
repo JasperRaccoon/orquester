@@ -312,6 +312,13 @@ export interface ThreadLaunchProfileRequest {
   threadId: string;
   /** The profile the thread's launch config (else its head) names. */
   profileId: string;
+  /**
+   * The account the thread's HEAD names (`""` = System). The log is the record: after a crash
+   * between the host accepting an account switch and the daemon recording it, the daemon's tab
+   * lags; it realigns the tab with this and launches with this account's credentials. Additive:
+   * absent from an older host (the daemon then uses its tab's).
+   */
+  accountId?: string;
 }
 
 /** `GET /threads/:id/catalog` ({@link agentHostRoutes.catalog}). `live: false`: no live session reported one (both lists empty). */
@@ -746,6 +753,17 @@ export interface SetThreadIdentityRequest {
    */
   profile?: HostThreadProfile | null;
   /** A mirror of `profile`'s id (`null` for Global); refused when it disagrees with `profile`. */
+  profileId?: string | null;
+}
+
+/**
+ * The answer of `POST /threads/:id/identity`. `profileId` (additive; an older host omits it) is
+ * the Agent Profile the thread names AFTER the command (`null` = Global) — for a replayed receipt
+ * too, so a daemon that forgot a `commandId` (a restart) can tell the profile the host actually
+ * has from the one it asked for now, and never records one the host did not apply.
+ */
+export interface SetThreadIdentityResponse {
+  seq: number;
   profileId?: string | null;
 }
 

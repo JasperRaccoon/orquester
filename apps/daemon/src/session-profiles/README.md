@@ -276,12 +276,17 @@ record (`sessionChatRecordSchema.profileId`; `SessionSummary.profileId`, `null` 
 the account route's auth, refusals and receipts): `ProfileCommandBody {commandId, profileId |
 null}` → the host's identity switch with `profile` (`null` = Global); a profile-only switch keeps
 the resume cursor. Idempotent by `commandId` (a repeat shares the first's answer; the same id with
-another profile is `COMMAND_ID_CONFLICT`; a refusal is forgotten so it may be retried).
+another profile is `COMMAND_ID_CONFLICT`; a refusal is forgotten so it may be retried). The host's
+answer names the profile its thread has after the command (`SetThreadIdentityResponse.profileId`,
+a replayed receipt's too): when it is not the one asked — a `commandId` this daemon forgot across a
+restart — the tab mirrors the host's and the switch is `COMMAND_ID_CONFLICT`.
 
 **Refresh at every session start.** Before ANY provider session of a profile thread starts (the
 first, a resume, a crash restart, a host restart's rehydrate, a switch), the agent host calls the
 daemon's socket-only `POST /api/agent-host/threads/launch-profile` (`daemonRoutesForHost
-.threadLaunchProfile`, host bearer) with `{threadId, profileId}` and rewrites `launch.json` from
+.threadLaunchProfile`, host bearer) with `{threadId, profileId, accountId}` (`accountId`: the
+host head's — the daemon launches with it and realigns a tab that lags it, e.g. after a crash
+between the host accepting an account switch and the daemon recording it) and rewrites `launch.json` from
 the answer (`ThreadLaunchProfileResponse`: the current `profile` and launch fields) before it
 starts — so an edited profile applies at the next start and a GC'd version never fails one. A
 refusal (409 `PROFILE_NOT_READY` / `PROFILE_UNSUPPORTED_AGENT` / `PROFILE_NOT_FOUND` for an

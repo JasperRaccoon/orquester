@@ -123,7 +123,8 @@ import {
   type ForkHostThreadResponse,
   type HostThreadCatalogResponse,
   type HostThreadProfile,
-  type SetThreadIdentityRequest
+  type SetThreadIdentityRequest,
+  type SetThreadIdentityResponse
 } from "../host-protocol.ts";
 import type {
   AppendableDomainEvent,
@@ -671,7 +672,7 @@ export interface Orchestrator {
    * (reason `"account"`) or `profileKey` (reason `"profile"`), restarts and
    * carries the resume cursor.
    */
-  setIdentity(threadId: string, request: SetThreadIdentityRequest): Promise<{ seq: number }>;
+  setIdentity(threadId: string, request: SetThreadIdentityRequest): Promise<SetThreadIdentityResponse>;
   deleteThread(threadId: string): Promise<void>;
 
   command(
@@ -1907,7 +1908,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     const profileId = runtime.launch?.profile?.profileId ?? head.profileId;
     if (profileId === undefined) return;
     const answer = options.launchProfile
-      ? await options.launchProfile(runtime.id, profileId)
+      ? await options.launchProfile(runtime.id, profileId, { accountId: head.accountId })
       : ({ kind: "unavailable", reason: "no daemon to ask" } as const);
     if (answer.kind === "refused") {
       throw new Error(answer.message);
@@ -4867,9 +4868,11 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   const setIdentity = async (
     threadId: string,
     request: SetThreadIdentityRequest
-  ): Promise<{ seq: number }> =>
+  ): Promise<SetThreadIdentityResponse> =>
     whenReady(async () => {
       const runtime = await loadRuntime(threadId);
+      // Every acceptance — a replayed receipt too — names the profile the thread has now.
+      const answer = (seq: number): SetThreadIdentityResponse => ({ seq, profileId: headOf(runtime)?.profileId ?? null });
       return runtime.commands.run(async () => {
         const body = requireBody(request);
         const commandId = requireCommandId(body);
@@ -4885,14 +4888,14 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
             );
           }
           if (receipt.status === "accepted") {
-            return { seq: receipt.seq };
+            return answer(receipt.seq);
           }
           throw replayRecordedRejection(
             receipt.error ?? { code: "COMMAND_REJECTED", message: "Previously rejected." }
           );
         }
         try {
-          return await applyIdentity(runtime, request, commandId);
+          return answer((await applyIdentity(runtime, request, commandId)).seq);
         } catch (error) {
           if (isAgentChatCommandError(error) && error.recorded) {
             await store

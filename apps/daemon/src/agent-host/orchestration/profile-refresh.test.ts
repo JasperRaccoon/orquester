@@ -66,10 +66,13 @@ async function completeTurn(host: TestHost, threadId: string): Promise<void> {
 /** A daemon whose answers a test scripts, recording what it was asked. */
 function scriptedDaemon(answer: (threadId: string, profileId: string) => LaunchProfileAnswer) {
   const asked: Array<[string, string]> = [];
+  const accounts: Array<string | undefined> = [];
   return {
     asked,
-    launchProfile: async (threadId: string, profileId: string): Promise<LaunchProfileAnswer> => {
+    accounts,
+    launchProfile: async (threadId: string, profileId: string, context?: { accountId: string }): Promise<LaunchProfileAnswer> => {
       asked.push([threadId, profileId]);
+      accounts.push(context?.accountId);
       return answer(threadId, profileId);
     }
   };
@@ -103,6 +106,7 @@ describe("the refresh before a profile thread's session start", () => {
     const threadId = await host.createThread({ profile: V3, launchEnv: { CODEX_HOME: "/homes/acc1" }, homePath: "/homes/acc1" });
     await turn(host, threadId);
     assert.deepEqual(daemon.asked, [[threadId, "p1"]]);
+    assert.deepEqual(daemon.accounts, ["acc1"], "the host's own account: the daemon's tab may lag it");
     const first = starts(host, threadId)[0]!;
     assert.deepEqual(first.profile, V4);
     assert.deepEqual(first.serverPool, { key: "profile:p1" });
@@ -273,6 +277,22 @@ describe("the prepared-dir leases", () => {
   });
 });
 
+describe("the identity switch's answer", () => {
+  it("names the profile the thread has after the command — for a replayed receipt too", async () => {
+    const host = createTestHost();
+    const threadId = await host.createThread({ profile: V3 });
+    const toV4 = { commandId: "switch-1", accountId: "acc1", home: "account" as const, profile: V4, profileId: "p1" };
+    assert.deepEqual(await host.orchestrator.setIdentity(threadId, toV4), { seq: (await host.orchestrator.setIdentity(threadId, toV4)).seq, profileId: "p1" });
+    const toGlobal = { commandId: "switch-2", accountId: "acc1", home: "account" as const, profile: null, profileId: null };
+    assert.equal((await host.orchestrator.setIdentity(threadId, toGlobal)).profileId, null);
+    // The first command's receipt, replayed with another profile (a daemon that forgot it): the
+    // answer says what the thread names, so the daemon never records a profile the host did not apply.
+    const replay = await host.orchestrator.setIdentity(threadId, { ...toV4, profile: { ...V4, profileId: "p9" }, profileId: "p9" });
+    assert.equal(replay.profileId, null);
+    await host.stop();
+  });
+});
+
 describe("parseLaunchProfileResponse", () => {
   it("reads the daemon's answer field-wise and refuses one that does not read", () => {
     assert.deepEqual(parseLaunchProfileResponse({ profile: V3, launchEnv: { A: "1", B: 2 }, unsetEnv: ["X", 3], homePath: "/h", serverPool: { key: "k" }, extra: true }), {
@@ -312,6 +332,9 @@ describe("createDaemonLaunchProfileClient", () => {
       const fetch = createDaemonLaunchProfileClient({ socketPath: () => socketPath, token: "tok" });
       assert.deepEqual(await fetch("t1", "p1"), { kind: "launch", launch: { profile: V3 } });
       assert.deepEqual(seen[0], { url: daemonRoutesForHost.threadLaunchProfile, auth: agentHostAuthValue("tok"), body: { threadId: "t1", profileId: "p1" } });
+      await fetch("t1", "p1", { accountId: "" });
+      assert.deepEqual(seen[1]?.body, { threadId: "t1", profileId: "p1", accountId: "" }, "the thread's account (\"\" = System)");
+      seen.length = 1;
       answer = { status: 409, body: { code: "PROFILE_NOT_READY", message: "Preparing failed." } };
       assert.deepEqual(await fetch("t1", "p1"), { kind: "refused", code: "PROFILE_NOT_READY", message: "Preparing failed." });
       answer = { status: 404, body: { code: "THREAD_NOT_FOUND", message: "No chat." } };

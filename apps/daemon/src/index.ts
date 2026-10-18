@@ -4781,7 +4781,7 @@ export function createServer(
     const agentChat = services.agentChat;
     registerThreadLaunchProfileRoute(app, {
       authorizeHost: (authorization) => agentChat.authorizeHostRequest(authorization),
-      resolve: (threadId, profileId) => agentChat.threadLaunchProfile(threadId, profileId),
+      resolve: (threadId, profileId, accountId) => agentChat.threadLaunchProfile(threadId, profileId, accountId),
       logger: console
     });
   }

@@ -39,6 +39,7 @@ import {
   type HostThreadProfile,
   type HostThreadServerPool,
   type SetThreadIdentityRequest,
+  type SetThreadIdentityResponse,
   type ThreadLaunchProfileResponse
 } from "../agent-host/host-protocol.ts";
 import { SessionProfileError } from "../session-profiles/errors.ts";
@@ -1654,14 +1655,15 @@ export class AgentChatService {
     // Only after the host accepted: `sessions.json`, the tab badge and
     // `liveAccountIds()` must never name an identity the thread does not have.
     this.chat.setAccount(id, { accountId, home });
-    return receipt;
+    return { seq: receipt.seq };
   }
 
   /** `POST /threads/:id/identity` on the host, its refusals as `ChatSessionError`s. */
-  private async postIdentity(id: string, body: SetThreadIdentityRequest, refused: string): Promise<{ seq: number }> {
+  private async postIdentity(id: string, body: SetThreadIdentityRequest, refused: string): Promise<SetThreadIdentityResponse> {
     try {
       const response = await this.client.json<{
         seq?: number;
+        profileId?: unknown;
         error?: { code: string; message: string };
       }>("POST", agentHostRoutes.setThreadIdentity(id), body);
       if (response.status === 404 && response.value?.error?.code === undefined) {
@@ -1679,7 +1681,12 @@ export class AgentChatService {
           response.value?.error?.code ?? "SESSION_UNAVAILABLE"
         );
       }
-      return { seq: typeof response.value?.seq === "number" ? response.value.seq : 0 };
+      const profileId = response.value?.profileId;
+      return {
+        seq: typeof response.value?.seq === "number" ? response.value.seq : 0,
+        // What the host's thread names now (`SetThreadIdentityResponse.profileId`); an older host omits it.
+        ...(profileId === null || typeof profileId === "string" ? { profileId } : {})
+      };
     } catch (error) {
       if (error instanceof ChatSessionError) throw error;
       if (error instanceof HostUnavailableError) {
@@ -1792,9 +1799,18 @@ export class AgentChatService {
       },
       "The agent host refused the profile switch."
     );
-    // Only after the host accepted, as the account switch.
+    // Only after the host accepted, as the account switch — and only the profile it applied: a
+    // `commandId` this daemon forgot (a restart) may be answered by the host's receipt of an earlier
+    // command, which left the thread on another profile. Mirror the host's then, and refuse.
+    if (receipt.profileId !== undefined && receipt.profileId !== profileId) {
+      this.chat.setProfile(id, receipt.profileId);
+      throw new ChatSessionError(
+        "That commandId already switched this chat to another profile: send a new commandId.",
+        "COMMAND_ID_CONFLICT"
+      );
+    }
     this.chat.setProfile(id, profileId);
-    return receipt;
+    return { seq: receipt.seq };
   }
 
   /**
@@ -1811,7 +1827,7 @@ export class AgentChatService {
    * `PROFILES_UNAVAILABLE` while the daemon is still wiring profiles, `LAUNCH_UNAVAILABLE`,
    * `PROFILE_*`).
    */
-  async threadLaunchProfile(threadId: string, profileId: string): Promise<ThreadLaunchProfileResponse> {
+  async threadLaunchProfile(threadId: string, profileId: string, hostAccountId?: string): Promise<ThreadLaunchProfileResponse> {
     const summary = this.chat.get(threadId);
     if (!summary) throw new ChatSessionError("No chat session with that id.", "THREAD_NOT_FOUND");
     const profiles = this.sessionProfiles ?? this.opts.sessionProfiles ?? null;
@@ -1823,7 +1839,11 @@ export class AgentChatService {
     if (!entry || !adapter) {
       throw new ChatSessionError(`Registry entry "${summary.refId}" is not available.`, "LAUNCH_UNAVAILABLE");
     }
-    const accountId = summary.accountId ?? "";
+    // The host's thread is the record of the account (its log): a tab that lags it — the host
+    // accepted an account switch and the daemon died before recording it — would hand every
+    // start the OLD account's credentials. Launch with the host's, and realign the tab.
+    const tabAccountId = summary.accountId ?? "";
+    const accountId = hostAccountId ?? tabAccountId;
     let launch: ChatLaunchEnv | null;
     try {
       launch = await this.opts.resolveLaunchEnv(entry, { accountId: accountId || SYSTEM_ACCOUNT_ID });
@@ -1832,6 +1852,10 @@ export class AgentChatService {
     }
     if ((launch?.accountId ?? "") !== accountId) {
       throw new ChatSessionError("The account this chat runs under is no longer available.", "LAUNCH_UNAVAILABLE");
+    }
+    if (accountId !== tabAccountId) {
+      this.opts.logger?.log?.(`agent chat: ${threadId} runs under account "${accountId}" on the host; realigning its tab (was "${tabAccountId}")`);
+      this.chat.setAccount(threadId, { accountId, home: resolveHomeKind(accountId) });
     }
     const base = this.accountLaunchFields(entry, adapter, launch);
     try {
