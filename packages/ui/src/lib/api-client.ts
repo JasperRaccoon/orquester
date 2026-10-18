@@ -98,7 +98,21 @@ import {
 import { fsPathQuery } from "./fs-path-query";
 import { parsePluginActionResult, parsePluginsResponse } from "./plugins-state";
 import { buildQueryString } from "./transporter";
-import { AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, agentProfileRoutes, agentToolsRoutes, desktopRoutes, pluginRoutes, workflowRoutes } from "@orquester/api";
+import { AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, agentProfileRoutes, agentToolsRoutes, desktopRoutes, pluginRoutes, sessionProfileRoutes, workflowRoutes } from "@orquester/api";
+import type {
+  CreateSessionProfileItemRequest,
+  CreateSessionProfileRequest,
+  DeleteSessionProfileResponse,
+  DuplicateSessionProfileRequest,
+  SessionProfileDetail,
+  SessionProfileInstructionsResponse,
+  SessionProfileItemDetail,
+  SessionProfileListResponse,
+  SessionProfileMutationResponse,
+  SessionProfilePrepareStatusResponse,
+  UpdateSessionProfileItemRequest,
+  UpdateSessionProfileRequest
+} from "@orquester/api";
 import type {
   AgentToolsResponse,
   DaemonMcpServersResponse,
@@ -809,6 +823,73 @@ export class ApiClient {
     req: CopyProfileItemRequest
   ): Promise<ProfileMutationResponse> {
     return this.send("POST", agentProfileRoutes.itemCopy(agent, id), { body: req });
+  }
+
+  // Agent Profiles (`sessionProfileRoutes`, the same routes as `HttpOrquesterApiClient`'s).
+
+  listSessionProfiles(signal?: AbortSignal): Promise<SessionProfileListResponse> {
+    return this.send("GET", sessionProfileRoutes.list, { signal });
+  }
+
+  getSessionProfile(profileId: string, signal?: AbortSignal): Promise<SessionProfileDetail> {
+    return this.send("GET", sessionProfileRoutes.profile(profileId), { signal });
+  }
+
+  createSessionProfile(req: CreateSessionProfileRequest): Promise<SessionProfileDetail> {
+    return this.send("POST", sessionProfileRoutes.list, { body: req });
+  }
+
+  updateSessionProfile(profileId: string, req: UpdateSessionProfileRequest): Promise<SessionProfileDetail> {
+    return this.send("PUT", sessionProfileRoutes.profile(profileId), { body: req });
+  }
+
+  deleteSessionProfile(profileId: string, revision: string): Promise<DeleteSessionProfileResponse> {
+    return this.send("DELETE", sessionProfileRoutes.profile(profileId), { query: { revision } });
+  }
+
+  duplicateSessionProfile(profileId: string, req: DuplicateSessionProfileRequest = {}): Promise<SessionProfileDetail> {
+    return this.send("POST", sessionProfileRoutes.duplicate(profileId), { body: req });
+  }
+
+  getSessionProfileItem(profileId: string, itemId: string, signal?: AbortSignal): Promise<SessionProfileItemDetail> {
+    return this.send("GET", sessionProfileRoutes.item(profileId, itemId), { signal });
+  }
+
+  createSessionProfileItem(profileId: string, req: CreateSessionProfileItemRequest): Promise<SessionProfileMutationResponse> {
+    return this.send("POST", sessionProfileRoutes.items(profileId), { body: req });
+  }
+
+  updateSessionProfileItem(
+    profileId: string,
+    itemId: string,
+    req: UpdateSessionProfileItemRequest
+  ): Promise<SessionProfileMutationResponse> {
+    return this.send("PUT", sessionProfileRoutes.item(profileId, itemId), { body: req });
+  }
+
+  deleteSessionProfileItem(profileId: string, itemId: string, revision: string): Promise<SessionProfileMutationResponse> {
+    return this.send("DELETE", sessionProfileRoutes.item(profileId, itemId), { query: { revision } });
+  }
+
+  setSessionProfileItemEnabled(
+    profileId: string,
+    itemId: string,
+    revision: string,
+    enabled: boolean
+  ): Promise<SessionProfileMutationResponse> {
+    return this.send("POST", sessionProfileRoutes.itemEnabled(profileId, itemId), { body: { revision, enabled } });
+  }
+
+  readSessionProfileInstructions(profileId: string, signal?: AbortSignal): Promise<SessionProfileInstructionsResponse> {
+    return this.send("GET", sessionProfileRoutes.instructions(profileId), { signal });
+  }
+
+  writeSessionProfileInstructions(profileId: string, revision: string, text: string): Promise<SessionProfileDetail> {
+    return this.send("PUT", sessionProfileRoutes.instructions(profileId), { body: { revision, text } });
+  }
+
+  getSessionProfilePrepareStatus(profileId: string, signal?: AbortSignal): Promise<SessionProfilePrepareStatusResponse> {
+    return this.send("GET", sessionProfileRoutes.prepareStatus(profileId), { signal });
   }
 
   getAgentProfileInstructions(agent: AgentProfileAgentId, signal?: AbortSignal): Promise<ProfileInstructionsResponse> {

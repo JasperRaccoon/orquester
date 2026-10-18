@@ -17,6 +17,7 @@ import {
 import { consentActivity, mcpAppConsents } from "../lib/agent-chat/mcp-app-consent";
 import { SECRET_REQUEST_EVENT_TYPE, TOOL_APPROVAL_EVENT_TYPE } from "@orquester/api/agent-chat";
 import { applyAgentProfileEvent, resetAgentProfile } from "../lib/agent-profile/store";
+import { applySessionProfileEvent, resetSessionProfiles } from "../lib/session-profiles/store";
 import { applyWorkflowsEvent, resetWorkflows, workflowsStore } from "../lib/workflows/store";
 import { observeWorkflowRunEvent, resetWorkflowNotifications } from "../lib/workflows/notifications";
 import { clearDesktopPrefs } from "../lib/desktop-prefs";
@@ -50,6 +51,12 @@ import {
 } from "../lib/auth";
 import { loadViewModes, saveViewModes, type ViewMode } from "../lib/view-mode";
 import { loadPreferredAccounts, savePreferredAccounts } from "../lib/preferred-account";
+import {
+  loadPreferredProfiles,
+  savePreferredProfiles,
+  withPreferredProfile,
+  withoutPreferredProfile
+} from "../lib/preferred-profile";
 import {
   launchModelSelection,
   loadPreferredModelSelections,
@@ -161,6 +168,7 @@ import {
   PLUGINS_CHANGED_EVENT,
   PLUGINS_CHANNEL,
   SAVED_PROMPTS_CHANNEL,
+  SESSION_PROFILES_CHANNEL,
   WORKFLOWS_CHANNEL
 } from "@orquester/api";
 import type { PluginInfo } from "@orquester/api";
@@ -913,6 +921,11 @@ export interface AppState {
   /** The last full model selection (model + options) per agent, from the composer's pickers too. */
   preferredModelSelectionByAgent: Record<string, ModelSelection>;
   /**
+   * The Agent Profile last picked per agent (agent profiles spec §5.3), from the composer's
+   * profile chip; an agent with no entry is Global. A new chat and a resume launch with it.
+   */
+  preferredProfileByAgent: Record<string, string>;
+  /**
    * Agent-chat composer + launcher preferences, per device (chat spec §7.4,
    * §4.6.7): steer-vs-queue, skills under `/`, and the last permission mode
    * picked per agent. Persisted client-side through a validating loader.
@@ -1133,6 +1146,8 @@ export interface AppState {
   markTabUnread: (id: string) => void;
   setViewMode: (mode: ViewMode) => void;
   setPreferredAccount: (agent: string, accountId: string) => void;
+  /** Remember `agent`'s profile; `null` is Global. */
+  setPreferredProfile: (agent: string, profileId: string | null) => void;
   setPreferredModel: (agent: string, model: string) => void;
   /** Remember model AND options; also updates `preferredModelByAgent`. */
   setPreferredModelSelection: (agent: string, selection: ModelSelection) => void;
@@ -1259,6 +1274,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   preferredAccountByAgent: loadPreferredAccounts(),
   preferredModelByAgent: loadPreferredModels(),
   preferredModelSelectionByAgent: loadPreferredModelSelections(),
+  preferredProfileByAgent: loadPreferredProfiles(),
   chatPrefs: loadChatPrefs(),
   threadVisits: loadThreadVisits(),
   terminalFontSize: loadTerminalFontSize(),
@@ -1782,6 +1798,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     resetToolApprovals();
     resetAgentTools();
     resetAgentProfile();
+    resetSessionProfiles();
     resetWorkflows();
     resetWorkflowNotifications();
     // Reset all daemon-scoped state: a different server has its own data.
@@ -2435,7 +2452,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   openTab: async (request) => {
-    const { kind, refId, title, accountId, resumeConversationId, initialCommand, chat } = request;
+    const { kind, refId, title, accountId, resumeConversationId, initialCommand } = request;
+    // Agent profiles §5.3: a new chat and a resumed conversation launch with the
+    // agent's remembered profile (none = Global) unless the caller named one.
+    const profileId = kind === "agent-chat" ? (request.chat?.profileId ?? get().preferredProfileByAgent[refId]) : undefined;
+    const chat = request.chat && profileId !== undefined ? { ...request.chat, profileId } : request.chat;
     const api = get().api;
     if (!api) {
       return;
@@ -2471,7 +2492,8 @@ export const useAppStore = create<AppState>((set, get) => ({
           accountId,
           resumeConversationId,
           initialCommand,
-          chat
+          chat,
+          ...(profileId !== undefined ? { profileId } : {})
         });
       } catch (error) {
         // A refused RESUME is the one create failure with a useful recovery ("open
@@ -3034,6 +3056,14 @@ export const useAppStore = create<AppState>((set, get) => ({
       return { preferredAccountByAgent };
     }),
 
+  setPreferredProfile: (agent, profileId) =>
+    set((state) => {
+      const preferredProfileByAgent = withPreferredProfile(state.preferredProfileByAgent, agent, profileId);
+      if (preferredProfileByAgent === state.preferredProfileByAgent) return {};
+      savePreferredProfiles(preferredProfileByAgent);
+      return { preferredProfileByAgent };
+    }),
+
   setChatPrefs: (patch) =>
     set((state) => {
       const chatPrefs = { ...state.chatPrefs, ...patch };
@@ -3433,6 +3463,25 @@ export const useAppStore = create<AppState>((set, get) => ({
       // change refetches that agent when it was loaded and its revision moved
       // (a malformed payload is ignored).
       applyAgentProfileEvent(event);
+      return;
+    }
+    if (event.channel === SESSION_PROFILES_CHANNEL) {
+      // Agent Profiles live in their own module store (the rail's panel, the
+      // composer chips). A deleted profile also stops being any agent's
+      // remembered pick: the next chat of that agent is Global again.
+      applySessionProfileEvent(event);
+      const deleted =
+        event.type === "sessionProfile.deleted" && typeof event.payload === "object" && event.payload !== null
+          ? (event.payload as { profileId?: unknown }).profileId
+          : undefined;
+      if (typeof deleted === "string" && deleted.length > 0) {
+        set((state) => {
+          const preferredProfileByAgent = withoutPreferredProfile(state.preferredProfileByAgent, deleted);
+          if (preferredProfileByAgent === state.preferredProfileByAgent) return {};
+          savePreferredProfiles(preferredProfileByAgent);
+          return { preferredProfileByAgent };
+        });
+      }
       return;
     }
     if (event.channel === AGENT_TOOLS_CHANNEL) {
