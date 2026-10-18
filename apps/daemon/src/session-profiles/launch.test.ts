@@ -63,9 +63,9 @@ const contributors = (codex: ProfileLaunchContributors["codex"]): ProfileLaunchC
 });
 
 describe("the per-agent launch contributions", () => {
-  it("contribute nothing for every agent until the per-agent tasks fill them in (Grok's is in contributions/grok.test.ts)", async () => {
+  it("contribute nothing for the agents whose tasks have not filled them in (Grok's and OpenCode's have their own tests)", async () => {
     assert.notDeepEqual(await profileLaunchContribution("grok")({ profile: { preparedDir: "/p/v-1" }, accountHome: "/a" } as ProfileLaunchContext<"grok">), {});
-    for (const agent of ["claude", "codex", "opencode"] as const) {
+    for (const agent of ["claude", "codex"] as const) {
       assert.equal(profileLaunchContribution(agent), profileLaunchContributors[agent]);
       assert.deepEqual(await profileLaunchContribution(agent)({} as ProfileLaunchContext<typeof agent>), {});
     }

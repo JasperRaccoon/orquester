@@ -27,6 +27,7 @@ import type { HostThreadProfile, HostThreadServerPool } from "../agent-host/host
 import { ACCOUNT_HOME_ENV_VAR } from "../agent-host/support/env.ts";
 import { SessionProfileError, sessionProfileErrors } from "./errors.ts";
 import { PreparedManifestError, readPreparedManifest, type PreparedSectionFor } from "./manifest.ts";
+import { opencodeLaunchContribution } from "./preparers/opencode.ts";
 import type { SessionProfileReady } from "./lifecycle.ts";
 import { grokProfileLaunchContribution } from "./contributions/grok.ts";
 
@@ -84,7 +85,7 @@ export const profileLaunchContributors: ProfileLaunchContributors = {
   claude: contributesNothing,
   codex: contributesNothing,
   grok: grokProfileLaunchContribution,
-  opencode: contributesNothing
+  opencode: opencodeLaunchContribution
 };
 
 /** The contributor for `agent` (the registry's unless another one is given — tests). */
