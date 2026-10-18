@@ -58,6 +58,8 @@ interface Fixture {
   /** Drop the next fork's answer after the host took it (a lost answer), once. */
   dropForkAnswer: boolean;
   leasesAnswer: { status: number; body: unknown };
+  /** What `/health` reports as the host's instance (a change = another host took over). */
+  hostInstanceId: string;
   cleanup(): Promise<void>;
 }
 
@@ -83,6 +85,7 @@ async function makeFixture(options: { capability?: boolean; profiles?: false } =
     refuseIdentity: null,
     dropForkAnswer: false,
     leasesAnswer: { status: 200, body: { preparedDirs: ["/prepared/p1/v3"] } },
+    hostInstanceId: "host-1",
     cleanup: async () => {
       await state.service.stop();
       host.closeAllConnections();
@@ -103,7 +106,7 @@ async function makeFixture(options: { capability?: boolean; profiles?: false } =
         return send(res, 200, {
           ok: true,
           protocolVersion: 1,
-          hostInstanceId: "host-1",
+          hostInstanceId: state.hostInstanceId,
           liveThreadIds: [],
           activeTurnThreadIds: [],
           pid: 111,
@@ -480,6 +483,25 @@ test("the leases are the host's live prepared dirs, and unknown (a rejection) wh
   await assert.rejects(f.service.profileLeases(), /did not report/);
   f.leasesAnswer = { status: 200, body: { preparedDirs: [7] } };
   await assert.rejects(f.service.profileLeases());
+  await f.cleanup();
+});
+
+test("onHostHealthy fires when a host becomes healthy (the leases are knowable again), not on every health tick", async () => {
+  const f = await makeFixture();
+  let fired = 0;
+  const unsubscribe = f.service.onHostHealthy(() => void (fired += 1));
+  const supervisor = (f.service as unknown as { supervisor: { checkHealth(): Promise<void> } }).supervisor;
+  await supervisor.checkHealth();
+  assert.equal(fired, 0, "the same healthy host: no edge");
+  f.hostInstanceId = "host-2";
+  await supervisor.checkHealth();
+  assert.equal(fired, 1, "another host took over");
+  await supervisor.checkHealth();
+  assert.equal(fired, 1);
+  unsubscribe();
+  f.hostInstanceId = "host-3";
+  await supervisor.checkHealth();
+  assert.equal(fired, 1, "unsubscribed");
   await f.cleanup();
 });
 

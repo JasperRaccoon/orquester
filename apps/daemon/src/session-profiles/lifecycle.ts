@@ -27,8 +27,10 @@
  *   {@link PreparedDirLeases.inUse} does not list it and it was not handed out by `ensureReady`
  *   within {@link SESSION_PROFILE_HANDOUT_GRACE_MS} (a launch between `ensureReady` and the host
  *   registering its session). Without a leases source, or when `inUse()` fails, nothing
- *   non-current is removed. GC runs after each publish, on profile delete, after `start()` and on
- *   `gc()`; per key it runs in the key's job chain (never during that key's preparation).
+ *   non-current is removed. GC runs after each publish, on profile delete, after `start()`, when
+ *   the leases become available again ({@link PreparedDirLeases.onAvailable}), every
+ *   {@link SESSION_PROFILE_GC_INTERVAL_MS} after `start()` and on `gc()`; per key it runs in the
+ *   key's job chain (never during that key's preparation).
  * - **Per-key serialization, global cap.** Jobs of one key run one at a time (a promise chain);
  *   at most one more waits behind the running one and every request in the meantime joins it.
  *   Different keys run concurrently, at most `concurrency` (default 2) preparations at once.
@@ -101,6 +103,11 @@ import type { SessionProfileStore } from "./store.ts";
 export const SESSION_PROFILE_PREPARE_CONCURRENCY = 2;
 /** How long a dir handed out by `ensureReady` is protected from GC without a lease (launch in progress). */
 export const SESSION_PROFILE_HANDOUT_GRACE_MS = 10 * 60_000;
+/**
+ * The slow periodic GC pass after `start()`: collects what no trigger would — the leased versions
+ * of a deleted profile (no publish ever runs for it again) once their sessions end.
+ */
+export const SESSION_PROFILE_GC_INTERVAL_MS = 60 * 60_000;
 const DIR_MODE = 0o700;
 const MAX_REASON_LENGTH = 600;
 /** `v-<12 hex of the fingerprint>-<base36 ms time>-<8 hex random>`. */
@@ -126,6 +133,12 @@ export interface SessionProfileReady {
 export interface PreparedDirLeases {
   /** Absolute versioned prepared dirs in use. Rejecting = unknown: GC removes nothing. */
   inUse(): Promise<ReadonlySet<string>>;
+  /**
+   * Calls `listener` whenever `inUse()` may answer again after it could not (the agent host became
+   * healthy, or another host instance took over); answers the unsubscribe. The lifecycle runs a
+   * GC pass then — the boot pass runs before the host is adopted and so removes nothing.
+   */
+  onAvailable?(listener: () => void): () => void;
 }
 
 export interface SessionProfileLifecycleOptions {
@@ -150,6 +163,8 @@ export interface SessionProfileLifecycleOptions {
   leases?: PreparedDirLeases;
   /** Overrides {@link SESSION_PROFILE_HANDOUT_GRACE_MS}. */
   handoutGraceMs?: number;
+  /** Overrides {@link SESSION_PROFILE_GC_INTERVAL_MS}. */
+  gcIntervalMs?: number;
 }
 
 export interface SessionProfileLifecycleEvents {
@@ -213,6 +228,9 @@ export class SessionProfileLifecycle {
   private readonly graceMs: number;
   private readonly abort = new AbortController();
   private detach: () => void = noop;
+  /** `start()`'s periodic GC timer and leases subscription, undone by `stop()`. */
+  private gcTimer: ReturnType<typeof setInterval> | null = null;
+  private unsubscribeLeases: () => void = noop;
   private stopped = false;
 
   constructor(private readonly options: SessionProfileLifecycleOptions) {
@@ -319,6 +337,15 @@ export class SessionProfileLifecycle {
     }
     await this.scanPrepared(existing);
     for (const profileId of existing) this.refreshProfile(profileId);
+    if (this.stopped) return;
+    // The boot pass usually finds no host to ask (it is adopted later): collect again once it can
+    // answer, and every hour for what no publish or delete will trigger again.
+    this.unsubscribeLeases();
+    this.unsubscribeLeases = this.options.leases?.onAvailable?.(() => void this.gc()) ?? noop;
+    if (this.gcTimer === null) {
+      this.gcTimer = setInterval(() => void this.gc(), this.options.gcIntervalMs ?? SESSION_PROFILE_GC_INTERVAL_MS);
+      this.gcTimer.unref?.();
+    }
     void this.gc();
   }
 
@@ -336,6 +363,10 @@ export class SessionProfileLifecycle {
     if (this.stopped) return;
     this.stopped = true;
     this.detach();
+    this.unsubscribeLeases();
+    this.unsubscribeLeases = noop;
+    if (this.gcTimer !== null) clearInterval(this.gcTimer);
+    this.gcTimer = null;
     this.abort.abort();
   }
 

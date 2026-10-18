@@ -186,7 +186,10 @@ restarts (spec §5.6). Status, staleness and fingerprints read the current versi
   the gap between a launch getting it and the host registering the session.
 - Triggers: after each publish (that key), profile delete (its pointers go at once; unleased
   versions go now, leased ones at a later pass; empty dirs up to `prepared/` are removed),
-  `start()` (after boot, in the background) and `gc()` on demand. A key's pass runs in the key's
+  `start()` (after boot, in the background — usually before the host is adopted, so it removes
+  nothing), `leases.onAvailable` (wired to `AgentChatService.onHostHealthy`: a host became
+  healthy), every `SESSION_PROFILE_GC_INTERVAL_MS` (1 h, unref'd timer from `start()` to `stop()`;
+  it collects a deleted profile's leftovers that no publish will trigger) and `gc()` on demand. A key's pass runs in the key's
   job chain, so never during its preparation; the leases are read before any key is locked.
 - Legacy layout (the key dir itself held the files, `manifest.json` at its top): not a current
   version, so the key re-prepares; its content is collected like a version, leased by the key

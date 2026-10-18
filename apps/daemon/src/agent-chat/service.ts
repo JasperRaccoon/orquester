@@ -1849,6 +1849,24 @@ export class AgentChatService {
   }
 
   /**
+   * `PreparedDirLeases.onAvailable` (spec §6.5): `listener` runs each time a host BECOMES healthy
+   * — adopted at boot, back after a respawn, or another instance took over — so a GC pass that
+   * could not read {@link profileLeases} runs again. Not on every health tick (each one re-adopts
+   * the same healthy host). Answers the unsubscribe.
+   */
+  onHostHealthy(listener: () => void): () => void {
+    const healthyInstance = (status: { state: string; hostInstanceId: string | null }): string | null =>
+      status.state === "healthy" ? (status.hostInstanceId ?? "") : null;
+    let last = healthyInstance(this.supervisor.status());
+    return this.supervisor.onChange((status) => {
+      const now = healthyInstance(status);
+      const edge = now !== null && now !== last;
+      last = now;
+      if (edge) listener();
+    });
+  }
+
+  /**
    * `PreparedDirLeases.inUse()` (spec §6.5): the prepared directories the agent host's live
    * provider sessions launched from (`GET /profiles/leases`). REJECTS whenever that is not known
    * — no healthy host, a host that predates the route, an unreadable answer — so the GC deletes

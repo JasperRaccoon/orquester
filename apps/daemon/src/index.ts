@@ -1102,7 +1102,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // The prepared versions the agent host's live sessions (and starts in flight) launched from
     // (`GET /profiles/leases`): the GC never removes one. It rejects when the host cannot say
     // (down, restarting, an older host), and that GC pass then removes nothing.
-    leases: { inUse: () => agentChat.profileLeases() },
+    // `start()` below runs before the host is adopted: its pass removes nothing, so the lifecycle
+    // collects again whenever a host becomes healthy (and on its own slow periodic pass).
+    leases: { inUse: () => agentChat.profileLeases(), onAvailable: (listener) => agentChat.onHostHealthy(listener) },
     logger: console
   });
   // Filling profiles (spec §4.5): Import from Global through Agent config (copies; Global is never
