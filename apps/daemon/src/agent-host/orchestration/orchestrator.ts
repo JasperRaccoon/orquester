@@ -1877,13 +1877,19 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
    */
   const startingProfileDirs = new Map<string, string>();
 
+  /**
+   * Every live session's dir: the one it STARTED on (`runtime.bound.preparedDir` — a switch
+   * rewrites `launch.json` at once while the old provider process runs on until the next start)
+   * and the pending one in `launch.json`.
+   */
   const profileLeases = (): string[] => {
     const dirs = new Set<string>(startingProfileDirs.values());
     for (const runtime of runtimes.values()) {
-      const profile = runtime.launch?.profile;
       const adapterId = runtime.state.head?.adapter;
-      if (profile === undefined || adapterId === undefined) continue;
-      if (options.adapters.get(adapterId)?.hasSession(runtime.id) === true) dirs.add(profile.preparedDir);
+      if (adapterId === undefined || options.adapters.get(adapterId)?.hasSession(runtime.id) !== true) continue;
+      if (runtime.bound?.preparedDir !== undefined) dirs.add(runtime.bound.preparedDir);
+      const pending = runtime.launch?.profile;
+      if (pending !== undefined) dirs.add(pending.preparedDir);
     }
     return [...dirs];
   };
@@ -2053,7 +2059,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       // let the adapter overlap that read with its own start-up.
       ...(resumeCursor !== undefined && runtime.historyPending ? { prefetchHistory: true } : {})
     });
-    runtime.bound = { ...desired, session };
+    runtime.bound = { ...desired, session, ...(profile !== undefined ? { preparedDir: profile.preparedDir } : {}) };
     runtime.sessionStartedAt = clock.now().getTime();
     // The binding is written BEFORE the session is announced and before any
     // history replay: a host that dies between the provider handing back a

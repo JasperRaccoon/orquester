@@ -47,6 +47,12 @@ export interface BoundSessionShape {
   modelSelection: ModelSelection;
   profileKey: string;
   session: ProviderSession;
+  /**
+   * The prepared profile dir the live provider session STARTED on (absent = Global). It outlives
+   * a switch that rewrites `launch.json` until the session restarts, so it is what the
+   * prepared-dir leases name.
+   */
+  preparedDir?: string;
 }
 
 /**

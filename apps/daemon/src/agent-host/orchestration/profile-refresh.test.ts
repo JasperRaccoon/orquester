@@ -242,6 +242,30 @@ describe("the prepared-dir leases", () => {
     assert.deepEqual(host.orchestrator.profileLeases(), [V4.preparedDir]);
     await host.stop();
   });
+
+  it("keep the dir a live session STARTED on after a switch rewrote launch.json, until it restarts", async () => {
+    const host = createTestHost();
+    void host.orchestrator.consume(host.adapter);
+    const a = await host.createThread({ threadId: "a", profile: V3 });
+    await turn(host, a);
+    await completeTurn(host, a);
+    assert.deepEqual(host.orchestrator.profileLeases(), [V3.preparedDir]);
+
+    // A profile switch to v4: launch.json moves now, the provider process on v3 keeps running.
+    await host.orchestrator.setIdentity(a, { commandId: cmd(), accountId: "acc1", home: "account", profile: V4, profileId: "p1" });
+    assert.equal(starts(host, a).length, 1, "no restart yet");
+    assert.deepEqual(host.orchestrator.profileLeases().sort(), [V3.preparedDir, V4.preparedDir].sort(), "the running v3 and the pending v4");
+
+    // A switch to Global: the running session still uses v3.
+    await host.orchestrator.setIdentity(a, { commandId: cmd(), accountId: "acc1", home: "account", profile: null, profileId: null });
+    assert.deepEqual(host.orchestrator.profileLeases(), [V3.preparedDir]);
+
+    // The next message restarts it Global: nothing is leased any more.
+    await turn(host, a, "again");
+    assert.equal(starts(host, a).length, 2);
+    assert.deepEqual(host.orchestrator.profileLeases(), []);
+    await host.stop();
+  });
 });
 
 describe("parseLaunchProfileResponse", () => {

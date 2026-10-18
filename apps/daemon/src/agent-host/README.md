@@ -204,8 +204,10 @@ hands it over (`POST /goals/resume-sessions` → `resumeGoalSessionsAfterHandove
   the route) leaves the persisted profile only while its manifest validates, else the start fails.
   A deleted profile's answer (`profile: null`, `fallback`) is recorded as `thread.meta-updated
   {profileId: ""}` plus a `runtime.warning` notice row. `GET /profiles/leases` answers the
-  `preparedDir`s of live provider sessions and starts in flight (`orchestrator.profileLeases()`),
-  which the daemon's preparation GC keeps. `GET /threads/:id/catalog` (`orchestrator.readCatalog`,
+  `preparedDir`s of live provider sessions — the one each STARTED on (`runtime.bound.preparedDir`,
+  which a switch rewriting `launch.json` does not move until the restart) and the pending one in
+  `launch.json` — and of starts in flight (`orchestrator.profileLeases()`), which the daemon's
+  preparation GC keeps. `GET /threads/:id/catalog` (`orchestrator.readCatalog`,
   `AgentAdapter.sessionCatalog`) answers the commands and skills the thread's LIVE session loaded
   — Claude's handshake `commands` + its dispatchable skills, Grok's last
   `available_commands_update` + `grok inspect` under the session's env, OpenCode's `/command` and

@@ -304,6 +304,8 @@ the agent (Codex: commands as skills) plus `/compact` (source `profile`). A Glob
 
 **Leases.** `PreparedDirLeases` (above) is `AgentChatService.profileLeases()`, passed as the
 lifecycle's `leases` in `index.ts`. The refresh at every session start always launches the
-CURRENT version, so an old one is leased only while a session that started on it lives.
+CURRENT version, so an old one is leased only while a session that started on it lives (the
+host leases the dir a live session started on, not only `launch.json`'s: a profile switch rewrites
+that at once while the old process runs on until its next start).
 - **UI**: everything through `sessionProfileRoutes` / `HttpOrquesterApiClient` methods
   (`listSessionProfiles`, `createSessionProfileItem`, …) and `/events` on `SESSION_PROFILES_CHANNEL`.
