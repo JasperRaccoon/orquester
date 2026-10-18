@@ -3784,6 +3784,14 @@ export function createServer(
       }
       body.owner = owner.owner;
     }
+    // Agent Profiles run in chat tabs only: a terminal launch naming one would silently start
+    // with the agent's Global setup, so it is refused (absent or null = Global, as ever).
+    if (body.kind !== "agent-chat" && body.profileId !== undefined && body.profileId !== null) {
+      return reply.code(400).send({
+        code: "INVALID_PROFILE",
+        message: "profileId is only accepted for agent-chat sessions: a terminal launch always uses the agent's own (Global) setup."
+      });
+    }
     // A chat tab takes the §6.1 path: the tab record, then the host thread. It
     // shares nothing with the PTY branch below.
     if (body.kind === "agent-chat") {

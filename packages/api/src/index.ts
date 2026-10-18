@@ -1485,7 +1485,8 @@ export interface CreateSessionRequest {
    * The Agent Profile (`session-profiles.ts`) an agent-chat session launches with. Absent =
    * Global (the agent's own setup), as for every client that predates profiles. Carried at the
    * top level like `accountId`; `chat.profileId` exists on the field type for host-side callers.
-   * Ignored for every kind but `agent-chat`.
+   * Any other kind naming one (non-null) is refused with 400 `INVALID_PROFILE`: a terminal launch
+   * always uses the agent's Global setup.
    */
   profileId?: string;
   /** The workflow run that starts this session (workflows spec §5.10). Persisted on the tab record. */
