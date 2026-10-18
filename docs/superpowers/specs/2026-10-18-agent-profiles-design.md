@@ -363,6 +363,12 @@ read once per server, so per-chat config is impossible on a shared server. The p
   `plugin/` (profile plugins **plus a copy of Orquester's `orquester-status.js`**), `commands/`,
   `agents/`. OpenCode writes `package.json`/`node_modules`/`.gitignore` there; it must be writable
   and Orquester-owned.
+- `OPENCODE_TEST_HOME=<profile>/home` (an empty dir): OpenCode reads `<home>/.opencode` as a config
+  dir whatever `XDG_CONFIG_HOME`/`OPENCODE_CONFIG_DIR` say, with `<home>` =
+  `OPENCODE_TEST_HOME ?? os.homedir()` (verified on 1.18.34: MCP servers and commands of a temp
+  `~/.opencode` leaked until it was set). Undocumented, so preparation probes the installed binary
+  and records whether it honours it; while unproven, a `~/.opencode` holding config refuses the
+  profile at preparation and at every launch.
 - `OPENCODE_DISABLE_EXTERNAL_SKILLS=1`, `OPENCODE_DISABLE_CLAUDE_CODE=1`; keep `XDG_DATA_HOME`
   (auth.json and the session DB stay shared — verified concurrent servers on one data dir) and
   `OPENCODE_CONFIG_CONTENT` as today.
@@ -440,6 +446,7 @@ Tests for every behavior, parsing, persistence and protocol change (AGENTS.md). 
 ## 9. Risks and unverified points
 
 - Relies on undocumented/experimental knobs that a CLI update could change: Grok `GROK_AUTH_PATH`;
+  OpenCode `OPENCODE_TEST_HOME` (probed at preparation, refused when unproven and needed);
   Codex `skills.bundled`, `features.apps/remote_plugin`; Claude's `skills` option interplay with
   the Workflow tool. Preparation's validation step (§6.5) must catch a regression and fail loudly.
 - Claude: claude.ai-synced plugins unverified (none exist yet). Project `enabledPlugins` is
@@ -552,8 +559,16 @@ Decisions made while building, each checked against the code. Code names use the
 - The `XDG_CONFIG_HOME` shadow is built at preparation and refreshed by the launch contribution at
   every launch (the real `~/.config` changes without a profile edit); OpenCode's own writes
   (`package.json`, `node_modules/`, …) stay inside the version dir.
+- `$HOME/.opencode` (always a config dir for OpenCode) is kept out with the undocumented
+  `OPENCODE_TEST_HOME` pointed at an empty `<version>/home`. Verified on 1.18.34 that it moves only
+  that lookup (plus the `~/.claude` fallbacks a profile turns off anyway): auth and the session DB
+  under `XDG_DATA_HOME`, `{file:~/…}` and `permission` `~` paths keep the real HOME. Preparation
+  probes the registry's binary (a canary command in a sandboxed fake `~/.opencode`, loaded without
+  the variable and not with it, ~3 s once per binary); when unproven, a `~/.opencode` with config
+  files or item dirs refuses preparation and every launch with `PROFILE_NOT_READY`.
 - Known limits (1.18.34): `OPENCODE_DISABLE_CLAUDE_CODE` also drops a repo's `CLAUDE.md` fallback
-  (a repo without `AGENTS.md` gets no project instructions); `$HOME/.opencode` is still read;
+  (a repo without `AGENTS.md` gets no project instructions); `$HOME/.opencode` relies on an
+  undocumented variable (above);
   OpenCode reads no project `.mcp.json` in Global or in a profile; npm plugins are not copyable.
 
 **Verification (§8)** — per-agent preparer and launch unit tests; opt-in live checks

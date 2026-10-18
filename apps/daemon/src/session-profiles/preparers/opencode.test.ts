@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { lstat, mkdir, mkdtemp, readdir, readFile, readlink, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, readlink, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { after, describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { AgentHooks, OPENCODE_STATUS_PLUGIN_FILE, openCodeStatusPluginSource } from "../../agent-hooks.ts";
 import type { AgentHomes } from "../../agent-profile/adapters/types.ts";
@@ -20,6 +21,23 @@ import {
   opencodeProfilePoolKey,
   withSkillsDenied
 } from "./opencode.ts";
+
+const FAKE_OPENCODE = fileURLToPath(new URL("../../agent-isolation/testing/fake-opencode-debug-config.mjs", import.meta.url));
+
+/** An executable `opencode` (the fake `debug config`, with `flags`) for a preparer's `cliBin`. */
+async function fakeOpencodeBin(dir: string, flags: string[] = []): Promise<string> {
+  const bin = join(dir, `opencode-${flags.join("").replace(/[^a-z]/g, "") || "honours"}`);
+  await writeFile(bin, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(FAKE_OPENCODE)} ${flags.join(" ")} "$@"\n`);
+  await chmod(bin, 0o755);
+  return bin;
+}
+
+interface FixtureOptions {
+  /** `(root) => cliBin` for the preparer; none by default (the probe does not run). */
+  cliBin?: (root: string) => Promise<string>;
+  /** Files written under the fake user's `~/.opencode` before preparing. */
+  opencodeHome?: Record<string, string>;
+}
 
 const SECRETS = { env: "sekret-env-value-1", header: "Bearer sekret-header-value-2" };
 
@@ -47,7 +65,7 @@ async function tree(dir: string): Promise<string[]> {
 }
 
 /** A fake daemon user (Global OpenCode config with items, other XDG config) and a profile on disk. */
-async function fixture(settings: Partial<ResolvedAgentProfile["settings"]> = {}, globalJsonc?: string) {
+async function fixture(settings: Partial<ResolvedAgentProfile["settings"]> = {}, globalJsonc?: string, options: FixtureOptions = {}) {
   const root = await mkdtemp(join(tmpdir(), "orq-opencode-preparer-"));
   roots.push(root);
   const home = join(root, "home");
@@ -78,6 +96,9 @@ async function fixture(settings: Partial<ResolvedAgentProfile["settings"]> = {},
   await write(join(xdg, "gh", "hosts.yml"), "github.com: {}\n");
   await write(join(xdg, "git", "config"), "[user]\n");
   await write(join(xdg, "mimeapps.list"), "\n");
+  for (const [path, text] of Object.entries(options.opencodeHome ?? {})) {
+    await write(join(home, ".opencode", path), text);
+  }
 
   const profileDir = join(root, "profile");
   const skillDir = join(profileDir, "skills", "sk1");
@@ -152,6 +173,7 @@ async function fixture(settings: Partial<ResolvedAgentProfile["settings"]> = {},
     preparedDir,
     previousPreparedDir: null,
     appdir: join(root, "appdir"),
+    cliBin: options.cliBin ? await options.cliBin(root) : null,
     logger: { info: () => {}, warn: (message) => warnings.push(message) }
   });
   await writePreparedManifest(preparedDir, {
@@ -198,7 +220,7 @@ describe("OpenCode preparer", () => {
     assert.equal(preparerFor("opencode"), opencodePreparer);
     assert.equal(opencodePreparer.perAccount, false);
     assert.equal(opencodePreparer.version, OPENCODE_PREPARER_VERSION);
-    assert.match(OPENCODE_PREPARER_VERSION, /^1\.[0-9a-f]{8}$/);
+    assert.match(OPENCODE_PREPARER_VERSION, /^2\.[0-9a-f]{8}$/);
     const homes = { opencodeDir: "/h/.config/opencode" } as AgentHomes;
     assert.deepEqual(opencodePreparer.inputs?.({ agent: "opencode", accountKey: "shared", accountHome: null, systemHomes: homes, appdir: "/a" }), [
       "/h/.config/opencode/config.json",
@@ -220,10 +242,13 @@ describe("OpenCode preparer", () => {
         { itemId: "pl1", name: "notify.js", files: ["helper.mjs", "notify.js"] },
         { itemId: "pl2", name: "notify-2.js", files: [] }
       ],
-      hiddenSkills: ["customize-opencode"]
+      hiddenSkills: ["customize-opencode"],
+      userHome: f.home,
+      testHome: { dir: "home", verified: false, reason: "no OpenCode binary was found to check it" }
     });
     assert.deepEqual(opencodePreparedSectionSchema.parse(f.section), f.section, "the section reads back as written");
     assert.deepEqual(await tree(f.preparedDir), [
+      "home/",
       "manifest.json",
       "opencode/",
       "opencode/AGENTS.md",
@@ -310,6 +335,28 @@ describe("OpenCode preparer", () => {
     );
   });
 
+  it("verifies OPENCODE_TEST_HOME against the CLI binary; the probe leaves nothing behind", async () => {
+    const f = await fixture({}, undefined, { cliBin: (root) => fakeOpencodeBin(root) });
+    assert.deepEqual(f.section.testHome, { dir: "home", verified: true });
+    assert.deepEqual(await readdir(join(f.preparedDir, "home")), [], "the override home is empty");
+    assert.ok(!(await tree(f.preparedDir)).some((path) => path.includes("probe")), "no probe scratch is published");
+  });
+
+  it("refuses when ~/.opencode holds config and the override is not verified (no binary, or one that ignores it)", async () => {
+    const opencodeHome = { "opencode.json": "{}", "command/leak.md": "leak" };
+    await assert.rejects(fixture({}, undefined, { opencodeHome }), /~\/\.opencode would leak into profile chats: .*command\/, opencode\.json/);
+    await assert.rejects(
+      fixture({}, undefined, { opencodeHome, cliBin: (root) => fakeOpencodeBin(root, ["--ignore-test-home"]) }),
+      /~\/\.opencode would leak into profile chats: .*still loads ~\/\.opencode/
+    );
+    // Verified: the same home prepares.
+    const f = await fixture({}, undefined, { opencodeHome, cliBin: (root) => fakeOpencodeBin(root) });
+    assert.equal(f.section.testHome?.verified, true);
+    // Only OpenCode's own files in ~/.opencode (an installer's bin/, its package.json): nothing to leak.
+    const g = await fixture({}, undefined, { opencodeHome: { "bin/opencode": "x", "package.json": "{}" } });
+    assert.equal(g.section.testHome?.verified, false);
+  });
+
   it("fails with the reason when a Global config file does not parse", async () => {
     await assert.rejects(fixture({}, "{ not json"), /The Global OpenCode config .*opencode\.jsonc could not be read/);
   });
@@ -329,7 +376,8 @@ describe("OpenCode launch contribution", () => {
           XDG_CONFIG_HOME: join(f.preparedDir, "xdg"),
           OPENCODE_CONFIG_DIR: join(f.preparedDir, "opencode"),
           OPENCODE_DISABLE_EXTERNAL_SKILLS: "1",
-          OPENCODE_DISABLE_CLAUDE_CODE: "1"
+          OPENCODE_DISABLE_CLAUDE_CODE: "1",
+          OPENCODE_TEST_HOME: join(f.preparedDir, "home")
         },
         unsetEnv: ["OPENCODE_CONFIG"]
       }
@@ -340,6 +388,30 @@ describe("OpenCode launch contribution", () => {
     for (const reserved of ["PATH", "HOME", "TMPDIR", "OPENCODE_SERVER_PASSWORD", "OPENCODE_CONFIG_CONTENT", "XDG_DATA_HOME"]) {
       assert.ok(!(reserved in env), `${reserved} is left to the host / Global`);
     }
+  });
+
+  it("refuses at every launch while ~/.opencode holds config and the override is not verified", async () => {
+    const f = await fixture();
+    await opencodeLaunchContribution(contributionContext(f));
+    await write(join(f.home, ".opencode", "agents", "a.md"), "a");
+    await assert.rejects(opencodeLaunchContribution(contributionContext(f)), /~\/\.opencode would leak into profile chats: .*agents\//);
+    // Through the resolver it is PROFILE_NOT_READY with that reason.
+    const resolve = createProfileLaunchResolver({
+      lifecycle: {
+        ensureReady: async () => ({ profileId: "p1", agent: "opencode", accountKey: "shared", revision: "4", preparedDir: f.preparedDir })
+      }
+    });
+    await assert.rejects(
+      resolve({ profileId: "p1", agent: "opencode", accountId: "", projectPath: "/w/p", base: { launchEnv: {}, unsetEnv: [] } }),
+      (error: unknown) => (error as { code?: string }).code === "PROFILE_NOT_READY" && /~\/\.opencode would leak/.test(String((error as Error).message))
+    );
+    await rm(join(f.home, ".opencode"), { recursive: true });
+    await opencodeLaunchContribution(contributionContext(f));
+
+    const verified = await fixture({}, undefined, { cliBin: (root) => fakeOpencodeBin(root) });
+    await write(join(verified.home, ".opencode", "agents", "a.md"), "a");
+    const contribution = await opencodeLaunchContribution(contributionContext(verified));
+    assert.equal(contribution.serverPool?.env?.OPENCODE_TEST_HOME, join(verified.preparedDir, "home"));
   });
 
   it("refreshes the shadow at every launch: new entries linked, gone ones and a stray `opencode` link removed", async () => {
@@ -406,6 +478,7 @@ describe("a profile's keyed OpenCode server", () => {
     "OPENCODE_CONFIG_DIR",
     "OPENCODE_DISABLE_EXTERNAL_SKILLS",
     "OPENCODE_DISABLE_CLAUDE_CODE",
+    "OPENCODE_TEST_HOME",
     "OPENCODE_CONFIG",
     "OPENCODE_CONFIG_CONTENT",
     "XDG_DATA_HOME"
@@ -446,6 +519,7 @@ describe("a profile's keyed OpenCode server", () => {
         OPENCODE_CONFIG_DIR: null,
         OPENCODE_DISABLE_EXTERNAL_SKILLS: null,
         OPENCODE_DISABLE_CLAUDE_CODE: null,
+        OPENCODE_TEST_HOME: null,
         OPENCODE_CONFIG: "/user/extra.json",
         OPENCODE_CONFIG_CONTENT: '{"orquester":true}',
         XDG_DATA_HOME: "/shared/data"
@@ -455,6 +529,7 @@ describe("a profile's keyed OpenCode server", () => {
         OPENCODE_CONFIG_DIR: join(f.preparedDir, "opencode"),
         OPENCODE_DISABLE_EXTERNAL_SKILLS: "1",
         OPENCODE_DISABLE_CLAUDE_CODE: "1",
+        OPENCODE_TEST_HOME: join(f.preparedDir, "home"),
         OPENCODE_CONFIG: null,
         // Orquester's injected settings still reach it (OpenCode merges them last), and the data dir is shared.
         OPENCODE_CONFIG_CONTENT: '{"orquester":true}',

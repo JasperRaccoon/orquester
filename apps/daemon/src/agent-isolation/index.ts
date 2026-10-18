@@ -34,6 +34,14 @@ export {
 } from "./grok.ts";
 export { type XdgShadowResult, buildXdgConfigShadow } from "./xdg-shadow.ts";
 export {
+  OPENCODE_HOME_CONFIG_FILES,
+  OPENCODE_HOME_ITEM_DIRS,
+  OPENCODE_TEST_HOME_ENV,
+  type OpencodeTestHomeProbe,
+  opencodeHomeConfigItems,
+  probeOpencodeTestHome
+} from "./opencode-home.ts";
+export {
   type ClaudeLocalPlugin,
   type ClaudeLocalPluginInput,
   generateClaudeLocalPlugin

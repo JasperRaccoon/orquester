@@ -7,7 +7,8 @@
  *
  * A fake HOME under the OS temp dir — a global `~/.config/opencode` with an MCP server, a plugin
  * file, a skill, a command, an agent and AGENTS.md; `~/.claude/skills` with a real and a
- * SYMLINKED skill; `~/.agents/skills`; `~/.claude/CLAUDE.md`; `~/.config/gh` — and a git repo
+ * SYMLINKED skill; `~/.agents/skills`; `~/.claude/CLAUDE.md`; `~/.config/gh`; `~/.opencode` with an
+ * MCP server, a command and an agent (a config dir OpenCode reads below HOME) — and a git repo
  * with AGENTS.md, `.claude/skills`, `.agents/skills` and `.opencode/{skills,commands}`. Temp
  * `XDG_DATA_HOME`/`XDG_CACHE_HOME`/`XDG_STATE_HOME`, so nothing real is read or written.
  *
@@ -95,6 +96,13 @@ async function world(root: string) {
   await symlink(join(root, "shared-skills", "linked-skill"), join(home, ".claude", "skills", "linked-skill"));
   await write(join(home, ".agents", "skills", "agents-user-skill", "SKILL.md"), skill("agents-user-skill"));
   await write(join(xdg, "gh", "hosts.yml"), "github.com: {}\n");
+  const dotOpencode = join(home, ".opencode");
+  await write(
+    join(dotOpencode, "opencode.json"),
+    JSON.stringify({ $schema: "https://opencode.ai/config.json", mcp: { "home-mcp": { type: "local", command: ["true"], enabled: false } } })
+  );
+  await write(join(dotOpencode, "command", "home-cmd.md"), "---\ndescription: home\n---\nx\n");
+  await write(join(dotOpencode, "agent", "home-agent.md"), "---\ndescription: a home agent\nmode: subagent\n---\nYou are.\n");
 
   const repo = join(root, "work", "repo");
   await write(join(repo, "AGENTS.md"), "REPO INSTRUCTIONS\n");
@@ -150,6 +158,8 @@ async function world(root: string) {
     preparedDir,
     previousPreparedDir: null,
     appdir: join(root, "appdir"),
+    // The real binary: preparation probes it for OPENCODE_TEST_HOME (else this home refuses).
+    cliBin: BIN,
     logger: { info: () => {}, warn: () => {} }
   });
   const contribution = await opencodeLaunchContribution({
@@ -162,7 +172,7 @@ async function world(root: string) {
     launchEnv: {}
   });
   assert.ok(contribution.serverPool?.env !== undefined);
-  return { home, xdg, globalDir, repo, preparedDir, serverPool: contribution.serverPool };
+  return { home, xdg, globalDir, repo, preparedDir, section, serverPool: contribution.serverPool };
 }
 
 type World = Awaited<ReturnType<typeof world>>;
@@ -230,6 +240,9 @@ describe("OpenCode profile isolation (real CLI)", { skip, timeout: 4 * CLI_TIMEO
     assert.ok(keys(global.config.command).includes("global-cmd"));
     assert.ok(keys(global.config.agent).includes("global-agent"));
     assert.ok(pluginFiles(global.config).some((spec) => spec.endsWith("/global-plugin.js")));
+    assert.ok(keys(global.config.mcp).includes("home-mcp"), "Global reads ~/.opencode");
+    assert.ok(keys(global.config.command).includes("home-cmd"));
+    assert.ok(keys(global.config.agent).includes("home-agent"));
 
     // The profile: its own items plus the repo's, nothing of the user's.
     assert.deepEqual(profile.skills, ["customize-opencode", "profile-skill", "repo-agents-skill", "repo-oc-skill", "repo-skill"]);
@@ -238,6 +251,10 @@ describe("OpenCode profile isolation (real CLI)", { skip, timeout: 4 * CLI_TIMEO
     assert.ok(keys(profile.config.command).includes("repo-cmd"));
     assert.ok(!keys(profile.config.command).includes("global-cmd"));
     assert.ok(!keys(profile.config.agent).includes("global-agent"));
+    // ~/.opencode stays out (OPENCODE_TEST_HOME, proven against this binary at preparation).
+    assert.equal(w.section.testHome?.verified, true, w.section.testHome?.reason);
+    assert.ok(!keys(profile.config.command).includes("home-cmd"));
+    assert.ok(!keys(profile.config.agent).includes("home-agent"));
     const plugins = pluginFiles(profile.config);
     assert.ok(plugins.some((spec) => spec === `file://${join(w.preparedDir, "opencode", "plugin", "profile-plugin.js")}`), plugins.join(", "));
     assert.equal(plugins.filter((spec) => spec.endsWith(`/${OPENCODE_STATUS_PLUGIN_FILE}`)).length, 1, "the status plugin loads once");
