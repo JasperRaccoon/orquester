@@ -637,6 +637,65 @@ describe("Export and import of a profile", () => {
     await assert.rejects(stat(layout.secrets));
   });
 
+  it("redacts credential-looking URL parts, args and hook command values in an export, and says which", async () => {
+    const h = await harness();
+    const profile = await h.service.create({ name: "Leaky" });
+    let revision = profile.revision;
+    for (const draft of [
+      {
+        kind: "mcp",
+        agents: "all",
+        mcp: {
+          name: "local",
+          transport: "stdio",
+          command: "mcp-server",
+          args: ["--token", "tok_ARG_SECRET", "--api-key=key_SECRET", "-e", "GITHUB_TOKEN=ghp_ENV_SECRET", "--verbose", "plain", "--port", "8080"]
+        }
+      },
+      {
+        kind: "mcp",
+        agents: "all",
+        mcp: { name: "web", transport: "http", url: "https://user:pw_SECRET@mcp.example.com/sse?api_key=q_SECRET&team=eng" }
+      },
+      {
+        kind: "hook",
+        agents: ["claude"],
+        name: "notify",
+        hook: { event: "Stop", command: 'curl -H "Authorization: Bearer bearer_SECRET" "https://hooks.example.com/x?token=hook_SECRET" --password=pw2_SECRET --retry 2' }
+      }
+    ] as const) {
+      revision = (await h.service.createItem(profile.id, revision, draft as never)).profile.revision;
+    }
+    const { fileName, data } = await h.service.exportProfile(profile.id);
+    const zipPath = join(h.root, fileName);
+    await writeFile(zipPath, data);
+    const entries = await readZipEntries(zipPath);
+    const text = entries.map((entry) => entry.data.toString("utf8")).join("\n");
+    for (const secret of ["tok_ARG_SECRET", "key_SECRET", "ghp_ENV_SECRET", "pw_SECRET", "q_SECRET", "bearer_SECRET", "hook_SECRET", "pw2_SECRET"]) {
+      assert.ok(!text.includes(secret), secret);
+    }
+    const manifest = JSON.parse(entries.find((entry) => entry.path === "profile.json")!.data.toString("utf8"));
+    const record = (name: string) => manifest.items.find((item: { name: string }) => item.name === name);
+    assert.deepEqual(record("local").mcp.args, ["--token", "REDACTED", "--api-key=REDACTED", "-e", "GITHUB_TOKEN=REDACTED", "--verbose", "plain", "--port", "8080"]);
+    assert.equal(record("web").mcp.url, "https://REDACTED@mcp.example.com/sse?api_key=REDACTED&team=eng");
+    assert.equal(
+      record("notify").hook.command,
+      'curl -H "Authorization: Bearer REDACTED" "https://hooks.example.com/x?token=REDACTED" --password=REDACTED --retry 2'
+    );
+    const marker = JSON.parse(entries.find((entry) => entry.path === "orquester-export.json")!.data.toString("utf8"));
+    assert.deepEqual(marker.redacted, [
+      'MCP server "local": its arguments',
+      'MCP server "web": its URL',
+      'hook "notify": its command'
+    ]);
+    // The profile itself is untouched.
+    const kept = await h.service.readItem(profile.id, (await h.service.get(profile.id)).items.find((item) => item.name === "web")!.id);
+    assert.ok(kept.kind === "mcp" && kept.item.kind === "mcp" && kept.item.mcp.url?.includes("q_SECRET"));
+
+    const imported = await h.service.importProfile(fileName, zipPath);
+    assert.match(imported.notes.join(" "), /replaced with REDACTED.*MCP server "local": its arguments.*hook "notify": its command/);
+  });
+
   it("refuses an export that is not exactly one", async () => {
     const h = await harness();
     const profile = await h.service.create({ name: "Strict" });

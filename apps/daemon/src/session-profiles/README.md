@@ -88,6 +88,12 @@ credentials, deadline); `.git` is removed before the copy. Sources that are not 
   byte). MCP secret values land in `secrets.json` only.
 - Exports never carry secret values: `profile.json` keeps env/header KEYS; a profile imported from
   a file has those servers skipped at launch until the values are entered again (and says so).
+  Credential-looking values in fields kept verbatim (an MCP server's `url`, `command`, `args`,
+  `advanced`; a hook's `command`) are replaced with `REDACTED` by `redactExportManifest` (URL
+  userinfo and credential-named query values, `--token=…`/`--token …`, `NAME_TOKEN=…`,
+  `Bearer …`, credential-named headers; heuristics in `export.ts`'s header); the marker's
+  `redacted` lists them and the import's notes say so. Import from Global needs none of this: the
+  values stay on this machine, in the profile.
 
 ## How an agent plugs in
 
