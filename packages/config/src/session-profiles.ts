@@ -10,7 +10,10 @@
 // `@orquester/api` `session-profiles.ts` owns the wire shapes; these carry the validation.
 //
 // Tolerance (AGENTS.md): every object is `passthrough`, so a field a newer build added survives
-// this build's rewrite. An item that does not read — a hand edit, a kind a newer build added, an
+// this build's rewrite. A known field whose value may come in a shape this build cannot read
+// (the settings, a plugin's source) is kept RAW in the record and read only where it is used
+// (`readSessionProfilePluginSource`, the daemon's `resolveSessionProfileSettings`): a rewrite
+// never replaces it. An item that does not read — a hand edit, a kind a newer build added, an
 // id an earlier item already has — is kept VERBATIM in its place and reported, never loaded and
 // never dropped. Anything that is not a version-1 manifest THROWS: the profile is listed as
 // unreadable and never rewritten.
@@ -88,7 +91,7 @@ export const sessionProfileHookRecordSchema = z
 
 /**
  * Where a plugin's files were copied from (`SessionProfilePluginSource` in `@orquester/api`).
- * A value that does not read is dropped on read, never fatal for the item.
+ * The record keeps the value raw (see {@link readSessionProfilePluginSource}).
  */
 export const sessionProfilePluginSourceRecordSchema = z
   .object({
@@ -115,12 +118,21 @@ export const sessionProfilePluginRecordSchema = z
       .object({
         marketplace: z.string().optional(),
         version: z.string().optional(),
-        source: sessionProfilePluginSourceRecordSchema.optional().catch(undefined)
+        /** Raw: read it with {@link readSessionProfilePluginSource}; a value that does not read is kept as it is. */
+        source: z.unknown().optional()
       })
       .passthrough()
       .default({})
   })
   .passthrough();
+
+export type SessionProfilePluginSourceRecord = z.infer<typeof sessionProfilePluginSourceRecordSchema>;
+
+/** A plugin record's `source`, or `undefined` when it is absent or does not read (a newer build's shape). */
+export function readSessionProfilePluginSource(value: unknown): SessionProfilePluginSourceRecord | undefined {
+  const parsed = sessionProfilePluginSourceRecordSchema.safeParse(value);
+  return parsed.success ? parsed.data : undefined;
+}
 
 export const sessionProfileItemRecordSchema = z.discriminatedUnion("kind", [
   sessionProfileSkillRecordSchema,
@@ -131,20 +143,16 @@ export const sessionProfileItemRecordSchema = z.discriminatedUnion("kind", [
 ]);
 export type SessionProfileItemRecord = z.infer<typeof sessionProfileItemRecordSchema>;
 
-/** Spec §4.3. Absent = the default (`SESSION_PROFILE_DEFAULT_SETTINGS` in `@orquester/api`); a value that does not read is absent. */
+/**
+ * Spec §4.3. Values are kept RAW: absent — or a value this build cannot read, kept as it is for
+ * the rewrite — means the default (`SESSION_PROFILE_DEFAULT_SETTINGS` in `@orquester/api`),
+ * applied where the settings are used. `hideBuiltinSkills` is normally an object of agent →
+ * boolean; `claudeWorkflowTool` a boolean.
+ */
 export const sessionProfileSettingsRecordSchema = z
   .object({
-    hideBuiltinSkills: z
-      .object({
-        claude: z.boolean().optional().catch(undefined),
-        codex: z.boolean().optional().catch(undefined),
-        grok: z.boolean().optional().catch(undefined),
-        opencode: z.boolean().optional().catch(undefined)
-      })
-      .passthrough()
-      .optional()
-      .catch(undefined),
-    claudeWorkflowTool: z.boolean().optional().catch(undefined)
+    hideBuiltinSkills: z.unknown().optional(),
+    claudeWorkflowTool: z.unknown().optional()
   })
   .passthrough();
 export type SessionProfileSettingsRecord = z.infer<typeof sessionProfileSettingsRecordSchema>;

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import type { SessionProfilePrepareStatus, SessionProfileSummary } from "@orquester/api";
+import type { SessionProfileItem, SessionProfilePrepareStatus, SessionProfileSummary } from "@orquester/api";
 
 import {
   blockProfileChoices,
@@ -9,6 +9,9 @@ import {
   countsLine,
   enabledLine,
   filterProfiles,
+  itemSaveRevision,
+  itemUnchanged,
+  profileChangeSummary,
   profileChipEntries,
   profileChipLabel,
   profileStatusPill,
@@ -102,5 +105,36 @@ describe("the workflow agent block's Agent Profile picker (§5.5)", () => {
     assert.equal(blockProfileLabel(profiles, "p2"), "Editor");
     assert.equal(blockProfileLabel(profiles, "gone"), "a deleted Agent Profile");
     assert.equal(blockProfileLabel(null, "p1"), "an Agent Profile");
+  });
+
+  it("an item save carries the profile's current revision unless the item itself changed", () => {
+    const item = { id: "i1", kind: "skill" as const, name: "review", enabled: true, agents: "all" as const, updatedAt: "t1" };
+    const other = { id: "i2", kind: "skill" as const, name: "other", enabled: true, agents: "all" as const, updatedAt: "t1" };
+    const held = (revision: string, items: SessionProfileItem[]) => ({ revision, items });
+    // Create: whatever the store holds now.
+    assert.equal(itemSaveRevision(held("5", [item]), null), "5");
+    assert.equal(itemSaveRevision(null, null), null);
+    // Edit: another item moved the revision — the draft still applies.
+    const base = { revision: "3", item };
+    assert.equal(itemSaveRevision(held("4", [item, { ...other, enabled: false, updatedAt: "t2" }]), base), "4");
+    assert.equal(itemUnchanged(held("4", [item, other]), base), true);
+    // Edit: this item changed (or is gone) — the revision it was read at, so the daemon refuses.
+    assert.equal(itemSaveRevision(held("4", [{ ...item, name: "renamed", updatedAt: "t2" }]), base), "3");
+    assert.equal(itemUnchanged(held("4", [{ ...item, updatedAt: "t2" }]), base), false);
+    assert.equal(itemSaveRevision(held("4", [other]), base), "3");
+    assert.equal(itemSaveRevision(null, base), "3");
+    // No timestamps: the whole row is compared.
+    const bare = { id: "i1", kind: "skill" as const, name: "review", enabled: true, agents: "all" as const };
+    assert.equal(itemSaveRevision(held("4", [bare]), { revision: "3", item: bare }), "4");
+    assert.equal(itemSaveRevision(held("4", [{ ...bare, enabled: false }]), { revision: "3", item: bare }), "3");
+  });
+
+  it("names the profile a chat switched to, resolved now (Global, a deleted one, the list still loading)", () => {
+    const profiles = [profile("p-dev", "Developer")];
+    assert.equal(profileChangeSummary({ profileId: "p-dev" }, profiles), 'Switched to Agent Profile "Developer"');
+    assert.equal(profileChangeSummary({ profileId: null }, profiles), "Switched to Global");
+    assert.equal(profileChangeSummary({ profileId: null }, null), "Switched to Global");
+    assert.equal(profileChangeSummary({ profileId: "p-gone" }, profiles), "Switched to a deleted Agent Profile");
+    assert.equal(profileChangeSummary({ profileId: "p-dev" }, null), "Switched Agent Profile");
   });
 });

@@ -1142,14 +1142,25 @@ test("a profile chat's catalog is its live session's report, else the profile's 
   await h.close();
 });
 
-test("a profile chat with no profile catalog to offer answers none, never the provider's", async () => {
-  const h = await makeHarness({ p1: { ...tab("p1"), profileId: "gone" } }, { profileCatalog: async () => null });
+test("a profile chat with no profile catalog to offer — or one that fails — answers its profile's, empty: never none (the provider's Global)", async () => {
+  let fail = false;
+  const h = await makeHarness(
+    { p1: { ...tab("p1"), profileId: "gone" } },
+    {
+      profileCatalog: async () => {
+        if (fail) throw new Error("profile store unreadable");
+        return null;
+      }
+    }
+  );
   h.host.handler = (_req, res) => res.writeHead(200, json).end(JSON.stringify({ live: false, slashCommands: [], skills: [] }));
-  assert.deepEqual((await h.app.inject({ method: "GET", url: agentChatRoutes.catalog("p1") })).json(), {
-    threadId: "p1",
-    source: "none",
-    slashCommands: [],
-    skills: []
-  });
+  const empty = { threadId: "p1", source: "profile", slashCommands: [], skills: [] };
+  const first = await h.app.inject({ method: "GET", url: agentChatRoutes.catalog("p1") });
+  assert.equal(first.statusCode, 200);
+  assert.deepEqual(first.json(), empty);
+  fail = true;
+  const failed = await h.app.inject({ method: "GET", url: agentChatRoutes.catalog("p1") });
+  assert.equal(failed.statusCode, 200);
+  assert.deepEqual(failed.json(), empty);
   await h.close();
 });

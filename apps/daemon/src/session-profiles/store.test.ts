@@ -291,6 +291,26 @@ describe("SessionProfileStore — items", () => {
     assert.equal(JSON.parse(await readFile(layout.manifest, "utf8")).items.length, 1);
   });
 
+  it("keeps settings and a plugin source this build cannot read through a rewrite", async () => {
+    const { appdir, store } = await setup();
+    await store.create({ name: "P" });
+    const layout = profileLayout(sessionProfileDir(appdir, "id-1"));
+    const raw = JSON.parse(await readFile(layout.manifest, "utf8"));
+    raw.settings = { hideBuiltinSkills: { claude: "auto", codex: false }, claudeWorkflowTool: "ask" };
+    raw.items.push({ id: "pl-1", kind: "plugin", name: "fut", agents: ["claude"], plugin: { source: { type: "npm", copiedAt: "t" } } });
+    await writeFile(layout.manifest, JSON.stringify(raw));
+
+    await store.setItemEnabled("id-1", "pl-1", "1", false);
+    let rewritten = JSON.parse(await readFile(layout.manifest, "utf8"));
+    assert.deepEqual(rewritten.settings, raw.settings);
+    assert.deepEqual(rewritten.items[0].plugin.source, { type: "npm", copiedAt: "t" });
+
+    // Changing one setting keeps the others as they were.
+    await store.update("id-1", "2", { settings: { hideBuiltinSkills: { grok: false } } });
+    rewritten = JSON.parse(await readFile(layout.manifest, "utf8"));
+    assert.deepEqual(rewritten.settings, { hideBuiltinSkills: { claude: "auto", codex: false, grok: false }, claudeWorkflowTool: "ask" });
+  });
+
   it("writes and removes instructions under the profile's revision", async () => {
     const { store } = await setup();
     await store.create({ name: "P" });

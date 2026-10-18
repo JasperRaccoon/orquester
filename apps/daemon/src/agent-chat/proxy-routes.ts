@@ -489,9 +489,10 @@ export function registerAgentChatRoutes(app: FastifyInstance, deps: AgentChatRou
 
   // An Agent Profile chat's composer catalog (`ThreadCatalogResponse`): what its live session
   // loaded (the host's `/catalog`), else the profile's own items — never the provider's Global
-  // catalog. A Global chat answers `none` without asking the host (its composer is unchanged).
-  // A host that cannot answer (unhealthy, an older host's route miss, a failure) is "no live
-  // report", never an error: the fallback still answers.
+  // catalog. A Global chat answers `none` without asking the host (its composer is unchanged);
+  // ONLY a Global chat does. A host that cannot answer (unhealthy, an older host's route miss, a
+  // failure) is "no live report", never an error: the fallback still answers. A profile catalog
+  // that cannot be offered (gone, unreadable, a failure) is the profile's, empty.
   app.get<{ Params: { id: string } }>(pattern(agentChatRoutes.catalog(":id")), async (request, reply) => {
     const { id } = request.params;
     const summary = deps.chatSession(id);
@@ -509,8 +510,18 @@ export function registerAgentChatRoutes(app: FastifyInstance, deps: AgentChatRou
         if (!(error instanceof HostUnavailableError)) deps.logger?.warn?.(`agent chat: the catalog of ${id} could not be read from the host`, error);
       }
     }
-    const fallback = (await deps.profileCatalog?.(summary)) ?? null;
-    return fallback === null ? none : ({ threadId: id, source: "profile", ...fallback } satisfies ThreadCatalogResponse);
+    let fallback: { slashCommands: SlashCommand[]; skills: Skill[] } | null = null;
+    try {
+      fallback = (await deps.profileCatalog?.(summary)) ?? null;
+    } catch (error) {
+      deps.logger?.warn?.(`agent chat: the profile catalog of ${id} could not be read`, error);
+    }
+    return {
+      threadId: id,
+      source: "profile",
+      slashCommands: fallback?.slashCommands ?? [],
+      skills: fallback?.skills ?? []
+    } satisfies ThreadCatalogResponse;
   });
 
   // The long-lived §6.3 subscription. Hijacked so Fastify's serializer never

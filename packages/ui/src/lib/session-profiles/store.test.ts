@@ -12,6 +12,7 @@ import type { SessionProfileDetail, SessionProfileSummary } from "@orquester/api
 import {
   applySessionProfileEvent,
   deleteSessionProfile,
+  deleteSessionProfileItem,
   loadProfileWorkflowUses,
   loadSessionProfile,
   loadSessionProfiles,
@@ -149,6 +150,60 @@ describe("session profiles store", () => {
     assert.equal(state().details.p1?.detail?.revision, "7");
     assert.match(state().notice?.text ?? "", /changed elsewhere/);
     assert.equal(state().notice?.tone, "error");
+  });
+
+  it("rapid mutations of one profile are serialized: each carries the revision the previous one answered", async () => {
+    const conflict = () =>
+      Object.assign(new Error("conflict"), { status: 409, body: { error: { code: "PROFILE_CONFLICT", message: "stale" } } });
+    const { api, calls, server } = fakeApi({
+      setSessionProfileItemEnabled: async (profileId, itemId, revision, enabled) => {
+        calls.toggles.push({ profileId, itemId, revision, enabled });
+        if (revision !== server.revision) throw conflict();
+        server.revision = String(Number(server.revision) + 1);
+        return { profile: detail(profileId, server.revision, enabled), itemId };
+      },
+      deleteSessionProfileItem: async (profileId, _itemId, revision) => {
+        if (revision !== server.revision) throw conflict();
+        server.revision = String(Number(server.revision) + 1);
+        return { profile: detail(profileId, server.revision) };
+      }
+    });
+    await loadSessionProfiles(api);
+    await loadSessionProfile(api, "p1");
+    const item = state().details.p1!.detail!.items[0]!;
+    const results = await Promise.all([
+      setSessionProfileItemEnabled(api, "p1", item, false),
+      setSessionProfileItemEnabled(api, "p1", item, true),
+      deleteSessionProfileItem(api, "p1", item)
+    ]);
+    assert.deepEqual(results.map((result) => result.ok), [true, true, true]);
+    assert.deepEqual(calls.toggles.map((toggle) => toggle.revision), ["1", "2"]);
+    assert.equal(state().details.p1?.detail?.revision, "4");
+    assert.equal(state().notice?.tone, "ok", "no conflict notice");
+    assert.equal(state().pending.size, 0);
+  });
+
+  it("a failed mutation does not block the next one of the same profile", async () => {
+    let fail = true;
+    const { api, server } = fakeApi({
+      setSessionProfileItemEnabled: async (profileId, itemId, _revision, enabled) => {
+        if (fail) {
+          fail = false;
+          throw Object.assign(new Error("boom"), { status: 500, body: { error: { code: "X", message: "boom" } } });
+        }
+        server.revision = String(Number(server.revision) + 1);
+        return { profile: detail(profileId, server.revision, enabled), itemId };
+      }
+    });
+    await loadSessionProfile(api, "p1");
+    const item = state().details.p1!.detail!.items[0]!;
+    const [first, second] = await Promise.all([
+      setSessionProfileItemEnabled(api, "p1", item, false),
+      setSessionProfileItemEnabled(api, "p1", item, false)
+    ]);
+    assert.equal(first.ok, false);
+    assert.equal(second.ok, true);
+    assert.equal(state().details.p1?.detail?.revision, "2");
   });
 
   it("events: a moved revision refetches, prepare status moves readiness, a delete drops the profile", async () => {

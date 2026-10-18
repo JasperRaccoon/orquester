@@ -497,7 +497,8 @@ export interface ThreadPromptEntry {
  *   Codex's `skills/list` minus the switched-off ones);
  * - `profile`: no live report yet — the profile's own enabled skills and commands for the agent
  *   (the composer adds its host commands, as always);
- * - `none`: a Global chat (or a profile that is gone): use the provider's catalog.
+ * - `none`: a Global chat (no `profileId`): use the provider's catalog. Never for a profile chat:
+ *   a profile catalog that cannot be read (gone, a failure) answers `profile` with empty lists.
  */
 export interface ThreadCatalogResponse {
   threadId: string;

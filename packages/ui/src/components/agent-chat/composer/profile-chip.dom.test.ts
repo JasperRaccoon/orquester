@@ -146,6 +146,14 @@ describe("composer profile chip", () => {
     assert.deepEqual(picked, [null]);
   });
 
+  it("Global in a Global chat still reports the pick (it forgets a remembered profile; the chat itself does not switch)", async () => {
+    const picked: (string | null)[] = [];
+    await render({ selectedId: null, onChange: (id) => picked.push(id) });
+    await click(trigger());
+    await click([...document.querySelectorAll('[role="menuitem"]')].find((row) => row.textContent?.startsWith("Global")));
+    assert.deepEqual(picked, [null]);
+  });
+
   it("is closed while the thread is busy, saying why", async () => {
     await render({ canSwitch: false, disabledReason: "Compacting…", onChange: () => undefined });
     assert.equal(trigger().disabled, true);

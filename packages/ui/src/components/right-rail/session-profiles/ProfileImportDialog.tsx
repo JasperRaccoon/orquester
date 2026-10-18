@@ -232,7 +232,7 @@ function useImportSend() {
       } catch (caught) {
         const info = profileError(caught);
         if (info.code === "PROFILE_CONFLICT") {
-          reloadAfterConflict(env.api, dialog.profileId);
+          void reloadAfterConflict(env.api, dialog.profileId);
           setError({ code: info.code, message: "The profile changed elsewhere and has been reloaded — check, then import again." });
         } else {
           setError(info);

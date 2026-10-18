@@ -46,7 +46,7 @@ import {
   type UpdateSessionProfileRequest
 } from "@orquester/api";
 import type { Skill, SlashCommand } from "@orquester/api/agent-chat";
-import type { SessionProfileItemRecord } from "@orquester/config";
+import { readSessionProfilePluginSource, type SessionProfileItemRecord, type SessionProfilePluginSourceRecord } from "@orquester/config";
 import { parseMarkdownDocument } from "../agent-profile/infra/frontmatter.ts";
 import type { Broadcaster } from "../broadcaster.ts";
 import { SessionProfileError, sessionProfileErrors } from "./errors.ts";
@@ -384,21 +384,24 @@ function toWireItem(record: SessionProfileItemRecord, cached: boolean): SessionP
           ...(record.plugin.marketplace !== undefined ? { marketplace: record.plugin.marketplace } : {}),
           ...(record.plugin.version !== undefined ? { version: record.plugin.version } : {}),
           cached,
-          ...(record.plugin.source !== undefined ? { source: pluginSourceView(record.plugin.source) } : {})
+          ...pluginSourceView(readSessionProfilePluginSource(record.plugin.source))
         }
       };
   }
 }
 
-/** A stored plugin provenance with only its known fields. */
-function pluginSourceView(source: NonNullable<Extract<SessionProfileItemRecord, { kind: "plugin" }>["plugin"]["source"]>): SessionProfilePluginSource {
+/** A stored plugin provenance with only its known fields; none when it does not read. */
+function pluginSourceView(source: SessionProfilePluginSourceRecord | undefined): { source?: SessionProfilePluginSource } {
+  if (source === undefined) return {};
   return {
-    type: source.type,
-    ...(source.marketplace !== undefined ? { marketplace: source.marketplace } : {}),
-    ...(source.commit !== undefined ? { commit: source.commit } : {}),
-    ...(source.url !== undefined ? { url: source.url } : {}),
-    ...(source.ref !== undefined ? { ref: source.ref } : {}),
-    copiedAt: source.copiedAt
+    source: {
+      type: source.type,
+      ...(source.marketplace !== undefined ? { marketplace: source.marketplace } : {}),
+      ...(source.commit !== undefined ? { commit: source.commit } : {}),
+      ...(source.url !== undefined ? { url: source.url } : {}),
+      ...(source.ref !== undefined ? { ref: source.ref } : {}),
+      copiedAt: source.copiedAt
+    }
   };
 }
 

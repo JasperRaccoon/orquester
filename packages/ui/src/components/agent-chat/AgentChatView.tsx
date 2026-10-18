@@ -272,14 +272,21 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
         setPreferredAccount(session.refId, input.accountId);
       },
       // Agent profiles §5.3: the profile picked here is remembered for the
-      // agent like the account — once the switch was accepted.
+      // agent like the account — once the switch was accepted. Picking what the
+      // chat already runs (Global in a Global chat) switches nothing, but is
+      // still the pick: it clears a remembered profile that no longer applies.
       setProfile: async (input: Parameters<typeof actions.setProfile>[0]) => {
+        if (input.profileId === threadProfileId) {
+          setPreferredProfile(session.refId, input.profileId);
+          return;
+        }
         await actions.setProfile(input);
         setPreferredProfile(session.refId, input.profileId);
       }
     }),
     [
       actions,
+      threadProfileId,
       session.refId,
       setPreferredAccount,
       setPreferredProfile,
@@ -927,7 +934,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
           profiles: profileList.profiles,
           selectedId: slice.head?.profileId ?? null,
           canSwitch: accountSwitchEnabled,
-          disabledReason: accountSwitchRefusal
+          disabledReason: paintOnly ? null : chatAccountSwitchRefusal(accountSwitchState, "profiles")
         };
 
   // --- the goal chip (goals §8.2) -------------------------------------------

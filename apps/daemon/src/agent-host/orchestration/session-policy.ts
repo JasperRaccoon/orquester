@@ -206,7 +206,7 @@ export function identitySwitchRefusal(
   subject: "accounts" | "profiles" = "accounts"
 ): string | null {
   const words = (message: string): string =>
-    subject === "accounts" ? message : message.replaceAll("switching accounts", `switching ${subject}`);
+    subject === "accounts" ? message : message.replace(/\b(switch|switching) accounts\b/g, `$1 ${subject}`);
   const refusal = identitySwitchRefusalWords(state);
   return refusal === null ? null : words(refusal);
 }

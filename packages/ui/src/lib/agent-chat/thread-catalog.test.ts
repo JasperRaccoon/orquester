@@ -36,8 +36,9 @@ describe("an Agent Profile chat's composer catalog", () => {
     assert.deepEqual([loading?.slashCommands, loading?.skills, loading?.workspaceSnapshots], [[], [], undefined]);
   });
 
-  it("source none (the profile is gone: the chat falls back to Global) keeps the provider's", () => {
-    assert.equal(withThreadCatalog(GLOBAL, "gone", { threadId: "t1", source: "none", slashCommands: [], skills: [] }), GLOBAL);
+  it("source none on a profile chat (a daemon that could not read the profile) is empty, never the Global catalog", () => {
+    const shown = withThreadCatalog(GLOBAL, "gone", { threadId: "t1", source: "none", slashCommands: [{ name: "global-cmd" }], skills: [] });
+    assert.deepEqual([shown?.slashCommands, shown?.skills, shown?.workspaceSnapshots], [[], [], undefined]);
   });
 
   it("parses only a well-formed answer for the asked thread, dropping malformed rows", () => {

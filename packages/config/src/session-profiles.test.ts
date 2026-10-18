@@ -9,6 +9,7 @@ import {
   parseSessionProfileDeleted,
   parseSessionProfileManifest,
   parseSessionProfileSecrets,
+  readSessionProfilePluginSource,
   serializeSessionProfileDeleted,
   serializeSessionProfileManifest,
   serializeSessionProfileSecrets,
@@ -87,9 +88,33 @@ describe("session profile manifest", () => {
     assert.equal(item.record.agents, "all");
   });
 
-  it("reads an unreadable setting as absent, never the profile", () => {
-    const file = parseSessionProfileManifest({ ...MANIFEST, settings: { hideBuiltinSkills: { claude: "yes", codex: false } } });
-    assert.deepEqual(file.manifest.settings.hideBuiltinSkills, { claude: undefined, codex: false });
+  it("keeps a setting it cannot read verbatim through a rewrite, never failing the profile", () => {
+    for (const settings of [
+      { hideBuiltinSkills: { claude: "auto", codex: false, future: 1 }, claudeWorkflowTool: "ask" },
+      { hideBuiltinSkills: "all", claudeWorkflowTool: { mode: "on" } }
+    ]) {
+      const file = parseSessionProfileManifest({ ...MANIFEST, settings });
+      assert.deepEqual(file.manifest.settings, settings);
+      assert.deepEqual(JSON.parse(serializeSessionProfileManifest(file)).settings, settings);
+    }
+  });
+
+  it("keeps a plugin source it cannot read verbatim through a rewrite; reads it only at use", () => {
+    const future = { type: "npm", package: "@x/y", copiedAt: "t" };
+    const good = { type: "marketplace", marketplace: "official", copiedAt: "t", futureField: 1 };
+    const file = parseSessionProfileManifest({
+      ...MANIFEST,
+      items: [
+        { id: "p1", kind: "plugin", name: "a", agents: ["claude"], plugin: { source: future } },
+        { id: "p2", kind: "plugin", name: "b", agents: ["claude"], plugin: { source: good } },
+        { id: "p3", kind: "plugin", name: "c", agents: ["claude"], plugin: { source: "a string" } }
+      ]
+    });
+    assert.deepEqual(file.items.map((entry) => entry.ok), [true, true, true]);
+    const rewritten = JSON.parse(serializeSessionProfileManifest(file));
+    assert.deepEqual(rewritten.items.map((item: { plugin: { source: unknown } }) => item.plugin.source), [future, good, "a string"]);
+    const sources = file.items.map((entry) => (entry.ok && entry.record.kind === "plugin" ? readSessionProfilePluginSource(entry.record.plugin.source) : null));
+    assert.deepEqual(sources, [undefined, good, undefined]);
   });
 
   it("throws on anything that is not a version-1 manifest", () => {

@@ -219,3 +219,63 @@ export function blockProfileLabel(profiles: readonly Pick<SessionProfileSummary,
   if (found) return found.name;
   return profiles === null ? "an Agent Profile" : "a deleted Agent Profile";
 }
+
+/**
+ * The timeline row of an Agent Profile switch (`session.profile-changed`): the profile's CURRENT
+ * name (the log keeps ids only), Global, or a deleted one; `profiles` `null` while the list loads.
+ */
+export function profileChangeSummary(
+  change: { profileId: string | null },
+  profiles: readonly Pick<SessionProfileSummary, "id" | "name">[] | null
+): string {
+  if (change.profileId === null) return "Switched to Global";
+  if (profiles === null) return "Switched Agent Profile";
+  const profile = profiles.find((candidate) => candidate.id === change.profileId);
+  return profile ? `Switched to Agent Profile "${profile.name}"` : "Switched to a deleted Agent Profile";
+}
+
+/** What an item editor read: the item, and the profile's revision then. */
+export interface ItemSaveBase {
+  revision: string;
+  item: SessionProfileItem;
+}
+
+/** A stable rendering of a row: key order does not matter. */
+function rowKey(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(rowKey).join(",")}]`;
+  if (typeof value === "object" && value !== null) {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .filter((key) => record[key] !== undefined)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${rowKey(record[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "undefined";
+}
+
+/** Whether the profile held still has the item as the editor read it (its `updatedAt`, else the whole row). */
+export function itemUnchanged(
+  profile: { readonly items: readonly SessionProfileItem[] } | null,
+  base: ItemSaveBase
+): boolean {
+  const held = profile?.items.find((item) => item.id === base.item.id);
+  if (held === undefined) return false;
+  if (held.updatedAt !== undefined && base.item.updatedAt !== undefined) return held.updatedAt === base.item.updatedAt;
+  return rowKey(held) === rowKey(base.item);
+}
+
+/**
+ * The revision an item save carries, read when it is sent: the profile's
+ * current one — a change to ANOTHER item does not void the draft — unless the
+ * item itself changed (or is gone) since the editor read it; then the revision
+ * it was read at, so the daemon refuses it (409) rather than overwrite that
+ * change. A new item (`base` null) always takes the current one.
+ */
+export function itemSaveRevision(
+  profile: { readonly revision: string; readonly items: readonly SessionProfileItem[] } | null,
+  base: ItemSaveBase | null
+): string | null {
+  if (base === null) return profile?.revision ?? null;
+  return profile !== null && itemUnchanged(profile, base) ? profile.revision : base.revision;
+}

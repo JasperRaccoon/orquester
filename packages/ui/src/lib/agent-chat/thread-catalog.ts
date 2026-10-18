@@ -5,8 +5,8 @@
  * The provider snapshot's commands and skills are the agent's GLOBAL ones (its machine probe and
  * per-cwd overlays). A profile chat must offer what ITS session loaded instead — the daemon
  * answers the live session's report, else the profile's own items — and never the Global list,
- * not even while that answer loads. A Global chat (and a profile that is gone: `source: "none"`)
- * keeps the provider's catalog exactly as before. No React import (the hook is
+ * not even while that answer loads, nor when the daemon cannot offer one (an empty catalog then).
+ * A Global chat keeps the provider's catalog exactly as before. No React import (the hook is
  * `use-thread-catalog.ts`).
  */
 
@@ -59,13 +59,15 @@ export function parseThreadCatalogResponse(value: unknown, threadId: string): Th
 
 /**
  * The provider snapshot the composer reads, with a profile chat's catalog in place of the Global
- * one: its own commands and skills (empty until they load), no per-cwd overlay. Unchanged — the
- * same object — for a Global chat, or when the daemon answered `none`.
+ * one: its own commands and skills (empty until they load, or when the daemon could not offer
+ * them — a `none` answer for a profile chat), no per-cwd overlay. Unchanged — the same object —
+ * for a Global chat.
  */
 export function withThreadCatalog<
   T extends Pick<ProviderSnapshot, "slashCommands" | "skills" | "workspaceSnapshots"> | null | undefined
 >(provider: T, profileId: string | null | undefined, catalog: ThreadCatalogResponse | null): T {
-  if (!profileId || provider === null || provider === undefined || catalog?.source === "none") return provider;
+  if (!profileId || provider === null || provider === undefined) return provider;
   const { workspaceSnapshots: _globalOverlays, ...rest } = provider;
-  return { ...rest, slashCommands: catalog?.slashCommands ?? [], skills: catalog?.skills ?? [] } as T;
+  const own = catalog !== null && catalog.source !== "none" ? catalog : null;
+  return { ...rest, slashCommands: own?.slashCommands ?? [], skills: own?.skills ?? [] } as T;
 }

@@ -378,6 +378,14 @@ export interface WorkLogEntry {
     previousAccountId?: string;
   };
   /**
+   * Present on an Agent Profile switch marker (`session.profile-changed`, agent profiles §5.3).
+   * Ids only, `null` for Global: the name resolves from the live profile list at render time.
+   */
+  profileSwitch?: {
+    profileId: string | null;
+    previousProfileId?: string | null;
+  };
+  /**
    * Present on a COMPLETED session-tool `html_render` call (spec 2026-10-14
    * §2.5) — a row the host's ingestion marked as its own (`sessionTool`):
    * the page the agent published, read by the shared reader

@@ -6,6 +6,8 @@
  * (preparing, or preparing it failed) is disabled with the reason as its
  * second line. Picking one switches the running chat — the agent restarts
  * with it and the conversation is kept — and the menu says so in one line.
+ * Global is reported even when the chat is already Global: it still clears
+ * the agent's remembered profile (the caller does not switch the chat then).
  *
  * Gated like the account chip: only while the thread is idle.
  */
@@ -91,7 +93,9 @@ export function ProfileChip({
             trailing={!selectedId ? <Check size={13} className="text-info" aria-hidden /> : undefined}
             onClick={() => {
               close();
-              if (selectedId) onChange(null);
+              // Always reported, even in a Global chat: picking Global is also this device's
+              // choice for the agent's next chats (the caller switches only what differs).
+              onChange(null);
             }}
           >
             Global
