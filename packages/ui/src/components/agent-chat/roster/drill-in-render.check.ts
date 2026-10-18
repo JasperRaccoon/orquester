@@ -51,6 +51,7 @@ const transport: AgentChatTransport = {
   },
   command: unused,
   switchAccount: unused,
+  switchProfile: unused,
   read: unused,
   readItem: unused,
   readHistory: unused,

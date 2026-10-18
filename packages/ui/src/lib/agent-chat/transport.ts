@@ -21,6 +21,7 @@ import {
   THREAD_ITEM_OUTPUT_MAX_BYTES,
   THREAD_ITEM_OUTPUT_WINDOW_MAX_BYTES,
   type AccountCommandBody,
+  type ProfileCommandBody,
   type AgentChatCommandBodies,
   type AgentChatCommandName,
   type AgentChatErrorCode,
@@ -143,6 +144,12 @@ export interface AgentChatTransport {
   switchAccount(
     sessionId: string,
     body: AccountCommandBody,
+    signal?: AbortSignal
+  ): Promise<CommandReceiptResponse>;
+  /** The Agent Profile switch (`agentChatRoutes.profile`): daemon-owned like {@link switchAccount}. */
+  switchProfile(
+    sessionId: string,
+    body: ProfileCommandBody,
     signal?: AbortSignal
   ): Promise<CommandReceiptResponse>;
   read(
@@ -328,6 +335,13 @@ export function createAgentChatTransport(transporter: Transporter): AgentChatTra
 
     switchAccount(sessionId, body, signal) {
       return send<CommandReceiptResponse>("POST", agentChatRoutes.account(sessionId), {
+        body,
+        ...(signal === undefined ? {} : { signal })
+      });
+    },
+
+    switchProfile(sessionId, body, signal) {
+      return send<CommandReceiptResponse>("POST", agentChatRoutes.profile(sessionId), {
         body,
         ...(signal === undefined ? {} : { signal })
       });

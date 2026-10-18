@@ -1898,6 +1898,15 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
         );
       },
 
+      async setProfile(input) {
+        // Like the account switch: one minted id for every retry, nothing optimistic — the
+        // head's `profileId` arrives as `thread.meta-updated` on the stream.
+        const commandId = newId();
+        await withCommandRetries((signal) =>
+          deps.transport.switchProfile(sessionId, { commandId, profileId: input.profileId }, signal)
+        );
+      },
+
       async stopSession() {
         await command("session/stop", {});
       },

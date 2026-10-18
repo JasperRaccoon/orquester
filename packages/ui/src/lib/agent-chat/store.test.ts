@@ -33,8 +33,8 @@ import type { AgentChatTimelineRow } from "./contracts";
 import { activity, CLAUDE_WORKFLOW_ID, claudeWorkflow, ev, foldTurn, head, message, resetBuilders, snapshot, stamp } from "./test-helpers";
 
 interface Posted {
-  /** `"account"` is the daemon-owned §3.4 route, not a §6.2 command name. */
-  name: AgentChatCommandName | "account";
+  /** `"account"` and `"profile"` are daemon-owned routes, not §6.2 command names. */
+  name: AgentChatCommandName | "account" | "profile";
   body: Record<string, unknown>;
 }
 
@@ -84,6 +84,15 @@ function fakeTransport(): {
         throw failures.error;
       }
       posted.push({ name: "account", body: body as unknown as Record<string, unknown> });
+      return { seq: posted.length };
+    },
+    async switchProfile(_sessionId, body) {
+      attempts.push({ name: "profile", body: body as unknown as Record<string, unknown> });
+      if (failures && failures.times > 0) {
+        failures.times -= 1;
+        throw failures.error;
+      }
+      posted.push({ name: "profile", body: body as unknown as Record<string, unknown> });
       return { seq: posted.length };
     },
     async read() {
@@ -316,6 +325,31 @@ describe("commands", () => {
     // Applied on the next message: nothing optimistic, no row, no head edit.
     assert.equal(state().slice.entries.length, 0);
     assert.equal(state().slice.errorBanner, null);
+  });
+
+  it("setProfile posts the daemon-owned profile route with a minted commandId (agent profiles §5.3)", async () => {
+    const { api, fake, state } = await store();
+    await api.getState().actions.setProfile({ profileId: "p-dev" });
+    await api.getState().actions.setProfile({ profileId: null });
+    assert.equal(fake.posted.length, 2);
+    assert.equal(fake.posted[0]?.name, "profile", "never a §6.2 command");
+    assert.equal(fake.posted[0]?.body.profileId, "p-dev");
+    assert.equal(fake.posted[1]?.body.profileId, null, "null is Global");
+    assert.ok(fake.posted[0]?.body.commandId);
+    assert.notEqual(fake.posted[0]?.body.commandId, fake.posted[1]?.body.commandId);
+    assert.equal(state().slice.entries.length, 0, "nothing optimistic");
+  });
+
+  it("setProfile retries HOST_UNAVAILABLE with the same id", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const retrying = await store();
+    retrying.fake.fail(new AgentChatCommandError(503, "HOST_UNAVAILABLE", "restarting"), 1);
+    const changing = retrying.api.getState().actions.setProfile({ profileId: "p-dev" });
+    await settle();
+    t.mock.timers.tick(250);
+    await changing;
+    assert.equal(retrying.fake.posted.length, 1);
+    assert.equal(new Set(retrying.fake.attempts.map((attempt) => attempt.body.commandId)).size, 1);
   });
 
   it("setAccount retries HOST_UNAVAILABLE with the same id and banners a refusal", async (t) => {

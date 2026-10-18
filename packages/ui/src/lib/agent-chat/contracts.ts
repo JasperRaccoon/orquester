@@ -737,6 +737,12 @@ export interface AgentChatActions {
    * (`canSwitchChatAccount`); the daemon refuses anything else with a 409.
    */
   setAccount(input: { accountId: string }): Promise<void>;
+  /**
+   * `POST /api/sessions/:id/profile` — the Agent Profile switch (agent profiles spec §5.3):
+   * restarts the agent with the profile (`null` = Global) and keeps the conversation. Same
+   * idle gate and refusals as {@link setAccount}.
+   */
+  setProfile(input: { profileId: string | null }): Promise<void>;
   stopSession(): Promise<void>;
   /** The existing `POST /api/sessions/:id/upload`; returns the attachment reference. */
   uploadAttachment(file: File | Blob, meta: { name: string; type?: string }): Promise<AttachmentRef>;

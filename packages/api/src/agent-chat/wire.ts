@@ -152,6 +152,13 @@ export const agentChatRoutes = {
    */
   account: (sessionId: string): string => `${sessionBase(sessionId)}/account`,
   /**
+   * Switch the Agent Profile an existing thread runs with ({@link ProfileCommandBody}) — the
+   * composer's profile chip. Daemon-owned exactly like {@link agentChatRoutes.account} and for
+   * the same reason: only the daemon can resolve the profile's prepared directory and recompose
+   * the launch environment, so it is absent from {@link AGENT_CHAT_COMMAND_NAMES}.
+   */
+  profile: (sessionId: string): string => `${sessionBase(sessionId)}/profile`,
+  /**
    * The thread's pending `request_secret` cards (`GET`,
    * `SecretRequestListResponse`) — daemon-owned like `account`: the
    * daemon holds the requests, in memory, and never forwards them to the host.
@@ -752,6 +759,21 @@ export type SessionStopCommandBody = AgentChatCommandBase;
  */
 export interface AccountCommandBody extends AgentChatCommandBase {
   accountId: string;
+}
+
+/**
+ * `POST /api/sessions/:id/profile` — the composer's profile chip (agent profiles spec §5.3).
+ *
+ * Shaped and answered like {@link AccountCommandBody}: a client-minted `commandId` makes a
+ * retry idempotent (the same {@link CommandReceiptResponse} for a repeat), refusals use the
+ * same {@link AgentChatErrorCode}s, and it is offered only while the thread is idle. The daemon
+ * records the new profile on the thread (`thread.meta-updated {profileId}`, `""` = Global) and
+ * restarts the provider child with it, keeping the conversation and its resume cursor.
+ *
+ * `profileId` is an Agent Profile's id, or `null` for Global (the agent's own setup).
+ */
+export interface ProfileCommandBody extends AgentChatCommandBase {
+  profileId: string | null;
 }
 
 /**

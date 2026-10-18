@@ -90,6 +90,11 @@ export interface ThreadCreatedPayload {
    * that does not read ({@link parseThreadLineage}) is no lineage.
    */
   lineage?: ThreadLineage;
+  /**
+   * The Agent Profile (`session-profiles.ts`) the thread launches with; absent = Global.
+   * Additive, like `lineage`: an older build ignores it.
+   */
+  profileId?: string;
 }
 
 /**
@@ -113,6 +118,13 @@ export interface ThreadMetaUpdatedPayload {
   accountId?: string;
   /** The home KIND for that account. */
   home?: AccountHomeKind;
+  /**
+   * The Agent Profile the thread now runs with, written beside the profile switch
+   * (`POST /api/sessions/:id/profile`, `ProfileCommandBody` in `wire.ts`). The empty string is
+   * Global (no profile), as `accountId: ""` is the system identity. Additive: an older
+   * build ignores it.
+   */
+  profileId?: string;
 }
 
 export interface ThreadRuntimeModeSetPayload {
