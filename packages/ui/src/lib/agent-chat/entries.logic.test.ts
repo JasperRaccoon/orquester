@@ -39,6 +39,19 @@ describe("workLogEntryFromActivity", () => {
     assert.equal(entry.taskId, undefined, "taskId belongs to task rows only");
   });
 
+  it("promotes an Agent Profile switch as IDS (null = Global), never a name", () => {
+    assert.deepEqual(
+      workLogEntryFromActivity(activity("session.profile-changed", { profileId: "p-dev", previousProfileId: null })).profileSwitch,
+      { profileId: "p-dev", previousProfileId: null }
+    );
+    assert.deepEqual(
+      workLogEntryFromActivity(activity("session.profile-changed", { profileId: null, previousProfileId: "p-dev" })).profileSwitch,
+      { profileId: null, previousProfileId: "p-dev" }
+    );
+    assert.equal(workLogEntryFromActivity(activity("session.profile-changed", { profileId: 5 })).profileSwitch, undefined);
+    assert.equal(workLogEntryFromActivity(activity("tool.completed", { profileId: "p-dev" })).profileSwitch, undefined);
+  });
+
   it("promotes the §3.4 account switch as IDS, never a label", () => {
     assert.deepEqual(
       workLogEntryFromActivity(

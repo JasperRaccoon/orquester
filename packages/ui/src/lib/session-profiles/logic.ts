@@ -220,6 +220,20 @@ export function blockProfileLabel(profiles: readonly Pick<SessionProfileSummary,
   return profiles === null ? "an Agent Profile" : "a deleted Agent Profile";
 }
 
+/**
+ * The timeline row of an Agent Profile switch (`session.profile-changed`): the profile's CURRENT
+ * name (the log keeps ids only), Global, or a deleted one; `profiles` `null` while the list loads.
+ */
+export function profileChangeSummary(
+  change: { profileId: string | null },
+  profiles: readonly Pick<SessionProfileSummary, "id" | "name">[] | null
+): string {
+  if (change.profileId === null) return "Switched to Global";
+  if (profiles === null) return "Switched Agent Profile";
+  const profile = profiles.find((candidate) => candidate.id === change.profileId);
+  return profile ? `Switched to Agent Profile "${profile.name}"` : "Switched to a deleted Agent Profile";
+}
+
 /** What an item editor read: the item, and the profile's revision then. */
 export interface ItemSaveBase {
   revision: string;

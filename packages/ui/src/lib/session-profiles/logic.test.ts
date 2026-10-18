@@ -11,6 +11,7 @@ import {
   filterProfiles,
   itemSaveRevision,
   itemUnchanged,
+  profileChangeSummary,
   profileChipEntries,
   profileChipLabel,
   profileStatusPill,
@@ -126,5 +127,14 @@ describe("the workflow agent block's Agent Profile picker (§5.5)", () => {
     const bare = { id: "i1", kind: "skill" as const, name: "review", enabled: true, agents: "all" as const };
     assert.equal(itemSaveRevision(held("4", [bare]), { revision: "3", item: bare }), "4");
     assert.equal(itemSaveRevision(held("4", [{ ...bare, enabled: false }]), { revision: "3", item: bare }), "3");
+  });
+
+  it("names the profile a chat switched to, resolved now (Global, a deleted one, the list still loading)", () => {
+    const profiles = [profile("p-dev", "Developer")];
+    assert.equal(profileChangeSummary({ profileId: "p-dev" }, profiles), 'Switched to Agent Profile "Developer"');
+    assert.equal(profileChangeSummary({ profileId: null }, profiles), "Switched to Global");
+    assert.equal(profileChangeSummary({ profileId: null }, null), "Switched to Global");
+    assert.equal(profileChangeSummary({ profileId: "p-gone" }, profiles), "Switched to a deleted Agent Profile");
+    assert.equal(profileChangeSummary({ profileId: "p-dev" }, null), "Switched Agent Profile");
   });
 });

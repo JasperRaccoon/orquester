@@ -1,11 +1,13 @@
 import React from "react";
-import { ArrowDownToLine, ArrowUpRight, UserRound, X } from "lucide-react";
+import { ArrowDownToLine, ArrowUpRight, Layers, UserRound, X } from "lucide-react";
 
 import type { RuntimeSubagent } from "@orquester/api";
 
 import { cn } from "../../../../lib/cn";
 import { shortAccountLabel } from "../../../../lib/account-label";
 import { identityChangeSummary } from "../../../../lib/agent-chat/account-switch";
+import { profileChangeSummary } from "../../../../lib/session-profiles/logic";
+import { sessionProfilesStore } from "../../../../lib/session-profiles/store";
 import { useAppStore } from "../../../../store/app";
 import type { AgentChatTimelineRow, WorkLogEntry } from "../../../../lib/agent-chat/contracts";
 import { fullOutputSourceOf } from "../../../../lib/agent-chat/full-output";
@@ -33,6 +35,7 @@ import {
 import {
   joinLifecycleDetails,
   workEntryIsIdentityChange,
+  workEntryIsProfileChange,
   workEntryIsRerouteNotice,
   type RowGlyphName
 } from "../row-chrome";
@@ -288,6 +291,34 @@ function IdentityNoticeRow({ entry }: { entry: WorkLogEntry }): React.ReactEleme
   );
 }
 
+const profilesSnapshot = () => sessionProfilesStore.getState().list.profiles;
+
+/**
+ * "From here on, another Agent Profile" (agent profiles §5.3), named from the LIVE profile list
+ * (the composer's chip loads it) like the identity row: the log keeps ids only, and a profile
+ * renamed later reads under its current name.
+ */
+function ProfileNoticeRow({ entry }: { entry: WorkLogEntry }): React.ReactElement {
+  const profiles = React.useSyncExternalStore(sessionProfilesStore.subscribe, profilesSnapshot, profilesSnapshot);
+  const label = entry.profileSwitch ? profileChangeSummary(entry.profileSwitch, profiles) : entry.label;
+  return (
+    <div
+      data-activity-id={entry.id}
+      data-profile-change=""
+      className={cn(
+        "my-0.5 flex min-w-0 items-start gap-1.5 rounded-md border px-2 py-1 text-xs leading-4",
+        TONE_BAND.info,
+        TONE_BAND_TEXT.info
+      )}
+    >
+      <span className="flex h-4 w-4 shrink-0 items-center justify-center">
+        <Layers size={12} aria-hidden />
+      </span>
+      <span className="min-w-0 flex-1 break-words">{label}</span>
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // The tool row
 // ---------------------------------------------------------------------------
@@ -364,6 +395,7 @@ const ToolEntryRow = React.memo(function ToolEntryRow({
   if (reroute) return <RerouteNoticeRow entry={entry} />;
   // The §3.4 account switch is the same kind of statement.
   if (workEntryIsIdentityChange(entry)) return <IdentityNoticeRow entry={entry} />;
+  if (workEntryIsProfileChange(entry)) return <ProfileNoticeRow entry={entry} />;
 
   const iconName: RowGlyphName = warning || destructive ? "circle-alert" : workEntryIconName(entry);
   const label = displayLabel ?? workEntryDisplayLabel(entry, ctx.workspaceRoot);
