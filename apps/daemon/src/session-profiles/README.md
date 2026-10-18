@@ -101,6 +101,40 @@ credentials, deadline); `.git` is removed before the copy. Sources that are not 
   `ctx.preparedDir` (the new VERSION dir it is renamed to; e.g. Codex hook trust), and only read
   `ctx.previousPreparedDir` (the current version, maybe in use by a running chat).
 
+## OpenCode (`preparers/opencode.ts`, spec §6.4)
+
+Shared by every account (`perAccount: false`); `inputs` = the Global `config.json`,
+`opencode.json`, `opencode.jsonc`. A version dir holds `opencode/` (the server's
+`OPENCODE_CONFIG_DIR`: `opencode.json` 0600 = the Global files merged as OpenCode merges them minus
+the item keys, relative `{file:}` refs made absolute, plus the profile's `mcp`, `skills.paths`
+`[".claude/skills", ".agents/skills"]` and, when built-ins are hidden, a last `permission.skill`
+rule denying `customize-opencode`; `AGENTS.md`; `skills/`; `commands/` — a command OpenCode could
+not decode is left out with a warning, it would fail the whole config —; `plugin/` with each
+plugin's top-level `*.js`/`*.ts`/`*.mjs` and Orquester's `orquester-status.js`) and `xdg/` (the
+server's `XDG_CONFIG_HOME`: `buildXdgConfigShadow` of the real `~/.config` minus `opencode`).
+- **Writable config dirs.** OpenCode writes `.gitignore`, `package.json`, `bun.lock` and
+  `node_modules/` into `opencode/` and into the shadow's own `xdg/opencode/` (which it creates).
+  Both stay inside the version: the PATH CONTRACT lets the running CLI write there, nothing hashes
+  a version's content, and the GC removes them with it.
+- **Shadow timing.** Built at preparation (a version launches on its own, e.g. from a persisted
+  `launch.json` when the daemon cannot be asked) and refreshed by the launch contribution at every
+  launch (the real `~/.config` changes without a profile edit). The refresh only manages the
+  shadow's symlinks — the one launch-time write into a published version.
+- **Launch.** `serverPool {key: "profile:<profileId>:<version dir>", env: {XDG_CONFIG_HOME,
+  OPENCODE_CONFIG_DIR, OPENCODE_DISABLE_EXTERNAL_SKILLS: "1", OPENCODE_DISABLE_CLAUDE_CODE: "1"},
+  unsetEnv: ["OPENCODE_CONFIG"]}`; the thread's `launchEnv`/`homePath` stay the account's (OpenCode's
+  shared servers read the project's launcher env). `XDG_DATA_HOME` and `OPENCODE_CONFIG_CONTENT`
+  are untouched (OpenCode merges the latter last). A new version is a new key: the thread moves at
+  its next start and the old server closes once idle.
+- **Status plugin.** The profile server's only copy is `opencode/plugin/orquester-status.js`
+  (a profile plugin file of that name is skipped): the shadow never links `opencode`, so the real
+  `~/.config/opencode/plugin/` is never read nor written through.
+- **Known limits (1.18.34).** `OPENCODE_DISABLE_CLAUDE_CODE` also drops a repo's `CLAUDE.md`
+  fallback (no `AGENTS.md` → no project instructions); `$HOME/.opencode` is still a config dir
+  OpenCode reads (HOME is the host's). OpenCode reads no project `.mcp.json`, in Global or here.
+- Live check (opt-in, real CLI, no login): `ORQUESTER_OPENCODE_LIVE=1` runs
+  `preparers/opencode-isolation.live.test.ts` (`opencode debug skill|config|agent build`).
+
 ## Preparation lifecycle (`lifecycle.ts`)
 
 Wired in `index.ts` as `services.sessionProfileLifecycle`. Prepared dirs are per key
