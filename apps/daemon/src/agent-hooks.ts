@@ -189,7 +189,13 @@ export class AgentHooks {
       case "codex":
         return launchEnv.CODEX_HOME || join(this.homeDir, ".codex");
       case "opencode":
-        return launchEnv.OPENCODE_CONFIG_DIR || join(this.homeDir, ".config", "opencode");
+        // OpenCode's GLOBAL config dir, `$XDG_CONFIG_HOME/opencode`, which it
+        // always loads. `OPENCODE_CONFIG_DIR` does NOT replace it: OpenCode
+        // loads that directory IN ADDITION (1.18 `config/paths.ts`), and loads
+        // every `plugin/*.js` of each directory it reads — so installing into
+        // it as well would load the plugin twice. A launch that moves
+        // `XDG_CONFIG_HOME` moves the global dir, so the plugin follows it.
+        return join(launchEnv.XDG_CONFIG_HOME || join(this.homeDir, ".config"), "opencode");
       case "grok":
         return launchEnv.GROK_HOME || join(this.homeDir, ".grok");
       default:

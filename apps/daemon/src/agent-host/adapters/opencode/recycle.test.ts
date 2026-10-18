@@ -45,6 +45,8 @@ interface RecordedRequest {
 interface PeerServer {
   url: string;
   pid: number;
+  /** The harness's `MOCK_REPORT_ENV` variables as the server process saw them. */
+  env: Record<string, string | null>;
 }
 
 /** Whether the server's process is gone (the pool's kill resolves once it is reaped). */
@@ -81,7 +83,7 @@ class FakeOpenCode {
     const path = url.pathname;
     if (path === "/__peer/up") {
       const announced = JSON.parse(text) as PeerServer & { origin: string };
-      this.servers.push({ url: announced.origin, pid: announced.pid });
+      this.servers.push({ url: announced.origin, pid: announced.pid, env: announced.env ?? {} });
       json(res, {});
       return;
     }
@@ -195,7 +197,10 @@ async function makeHarness(t: test.TestContext): Promise<Harness> {
       HOME: peer.dir,
       TMPDIR: peer.dir,
       MOCK_VERSION: "1.18.32",
-      MOCK_UPSTREAM: upstream
+      MOCK_UPSTREAM: upstream,
+      MOCK_REPORT_ENV: "XDG_CONFIG_HOME,SHARED_VAR,DROP_ME",
+      SHARED_VAR: "launcher",
+      DROP_ME: "launcher"
     }),
     resolveBin: async () => peer.bin,
     sessionPath: () => "/usr/bin",
@@ -507,6 +512,59 @@ test("threads share a resolved project server, falling back to cwd for malformed
     assert.equal(creates.length, 7);
     assert.deepEqual([...new Set(creates.map((request) => request.url.origin))], [h.servers[0]!.url]);
     assert.deepEqual(creates.map((request) => request.url.searchParams.get("directory")), [project, nested, project, project, project, project, project]);
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("a keyed thread runs on its own server of the project with its env, and a keyed recycle leaves the global server alone", async (t) => {
+  const h = await makeHarness(t);
+  try {
+    await h.start();
+    await h.waitFor("session.state.changed");
+    const keyedInput: Partial<StartSessionInput> = {
+      threadId: "keyed",
+      serverPool: { key: "profile-a", env: { XDG_CONFIG_HOME: "/profiles/a/xdg", SHARED_VAR: "profile" }, unsetEnv: ["DROP_ME"] }
+    };
+    const from = h.events.length;
+    const keyed = await h.start(keyedInput);
+    await h.waitFor("session.state.changed", from);
+
+    assert.equal(h.servers.length, 2, "one global and one keyed server for the same project");
+    const globalServer = h.servers.find((server) => server.env.SHARED_VAR === "launcher");
+    const keyedServer = h.servers.find((server) => server.env.SHARED_VAR === "profile");
+    assert.ok(globalServer !== undefined && keyedServer !== undefined);
+    assert.deepEqual(globalServer.env, { XDG_CONFIG_HOME: null, SHARED_VAR: "launcher", DROP_ME: "launcher" });
+    assert.deepEqual(keyedServer.env, { XDG_CONFIG_HOME: "/profiles/a/xdg", SHARED_VAR: "profile", DROP_ME: null });
+
+    // Each thread's session, its event stream and its turn are on its OWN server.
+    const creates = h.fake.requests.filter((request) => request.method === "POST" && request.url.pathname === "/session");
+    assert.deepEqual(creates.map((request) => request.url.origin), [globalServer.url, keyedServer.url]);
+    const streams = h.fake.requests.filter((request) => request.url.pathname === "/event");
+    assert.deepEqual(new Set(streams.map((request) => request.url.origin)), new Set([globalServer.url, keyedServer.url]));
+    const keyedSessionId = (keyed.resumeCursor as { sessionId: string }).sessionId;
+    const turnStart = h.events.length;
+    await h.adapter.sendTurn({ threadId: "keyed", input: "hi", attachments: [], interactionMode: "default" });
+    const submit = h.fake.requests.filter((request) => request.url.pathname.endsWith("/prompt_async")).at(-1);
+    assert.equal(submit?.url.origin, keyedServer.url);
+    assert.equal(submit?.url.pathname, `/session/${keyedSessionId}/prompt_async`);
+    runTurnToIdle(h.fake, keyedSessionId, sessionPromptId(h));
+    const completed = await h.waitFor("turn.completed", turnStart);
+    assert.equal(completed.threadId, "keyed");
+
+    // A recycle narrowed to the key stops only that key's server.
+    assert.deepEqual(await h.recycleIdleServers({ poolKey: "profile-a" }), { recycled: 1, deferred: 0 });
+    assert.equal(gone(keyedServer), true);
+    assert.equal(gone(globalServer), false, "the project's global server kept running");
+    assert.equal(h.adapter.hasSession(HOST_THREAD_ID), true);
+    assert.equal(h.adapter.hasSession("keyed"), false);
+
+    // The keyed thread's next start: a fresh server of ITS key, same env, same upstream session.
+    await h.start({ ...keyedInput, resumeCursor: keyed.resumeCursor });
+    assert.equal(h.servers.length, 3);
+    assert.deepEqual(h.servers[2]!.env, keyedServer.env);
+    const resumed = h.fake.requests.filter((request) => request.method === "GET" && request.url.pathname === `/session/${keyedSessionId}`).at(-1);
+    assert.equal(resumed?.url.origin, h.servers[2]!.url);
   } finally {
     await h.dispose();
   }

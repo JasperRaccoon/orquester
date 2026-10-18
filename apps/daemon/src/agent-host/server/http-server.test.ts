@@ -1219,9 +1219,11 @@ describe("agent host server — unified MCP §9.3, a thread's new session-tool m
 describe("agent host server — agent profile §4.8, OpenCode server recycling", () => {
   it("POST /opencode/recycle-idle answers the OpenCode adapter's counts", async () => {
     let calls = 0;
+    const inputs: unknown[] = [];
     const opencode = Object.assign(createScriptedAdapter({ id: "opencode" }), {
-      recycleIdleServers: async () => {
+      recycleIdleServers: async (input?: { poolKey?: string }) => {
         calls += 1;
+        inputs.push(input);
         return { recycled: 2, deferred: 1 };
       }
     });
@@ -1239,6 +1241,12 @@ describe("agent host server — agent profile §4.8, OpenCode server recycling",
         "behind the host's auth like every route"
       );
       assert.equal(calls, 1);
+
+      // An optional pool key narrows the recycle; an empty or odd one recycles every server.
+      await h.call("POST", agentHostRoutes.recycleIdleOpenCode, { poolKey: "profile-a" });
+      await h.call("POST", agentHostRoutes.recycleIdleOpenCode, { poolKey: "" });
+      await h.call("POST", agentHostRoutes.recycleIdleOpenCode, { poolKey: 7 });
+      assert.deepEqual(inputs, [undefined, { poolKey: "profile-a" }, undefined, undefined]);
     } finally {
       await h.stop();
     }

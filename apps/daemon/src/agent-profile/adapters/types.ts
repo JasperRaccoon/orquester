@@ -36,7 +36,10 @@ export interface AgentHomes {
   codexHome: string;
   /** `~/.grok` (or `$GROK_HOME`). */
   grokHome: string;
-  /** `~/.config/opencode` (or `$OPENCODE_CONFIG_DIR`). */
+  /**
+   * `~/.config/opencode` (or `$XDG_CONFIG_HOME/opencode`) — the global dir.
+   * `$OPENCODE_CONFIG_DIR` is loaded in addition to it, never instead.
+   */
   opencodeDir: string;
   /** `~/.agents/skills` — the shared skills root Codex, Grok and OpenCode read. */
   agentsSkillsDir: string;

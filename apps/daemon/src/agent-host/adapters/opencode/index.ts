@@ -1,10 +1,24 @@
 /**
  * Agent host — the OpenCode adapter (spec §4.5 OpenCode).
  *
- * One `opencode serve` **per project**, shared by that project's threads and
- * ref-counted inside this adapter (§3.2 — a deliberate divergence from T3's
- * per-thread server). HTTP + SSE, every call with a deadline, no cwd on the
- * process: the directory travels per request.
+ * One `opencode serve` **per (project, pool key)**, shared by the threads that
+ * name that pair and ref-counted inside this adapter (§3.2 — a deliberate
+ * divergence from T3's per-thread server). HTTP + SSE, every call with a
+ * deadline, no cwd on the process: the directory travels per request.
+ *
+ * **Keyed servers.** A thread runs on its project's GLOBAL server (key
+ * `"global"`, the project's launcher env unchanged) unless its start input
+ * carries `serverPool: {key, env?, unsetEnv?}` — persisted in the thread's
+ * `launch.json` from `CreateHostThreadRequest.serverPool`, so a host started
+ * after a restart or a handover puts the resumed thread back on a server with
+ * the same key and env. The spec's env is layered over the launcher env of
+ * that server only (`server.ts`). Everything per-server here — the thread →
+ * server map, recycling, the context-window cache (keyed by URL), each
+ * thread's event stream, permission ruleset and session-tool `POST /mcp` —
+ * follows the thread's OWN server handle, never "the project's server".
+ * Sessions live in the shared data dir, so a cursor made on one key's server
+ * resumes on another's. The catalogue probe (`refreshSnapshot`) always reads
+ * the global server.
  *
  * Module map for this directory:
  *
@@ -161,9 +175,12 @@ class OpenCodeAdapterImpl implements AgentAdapter {
    */
   private readonly startInputs = new Map<string, StartSessionInput>();
   private readonly recycled = new Map<string, StartSessionInput>();
-  /** Projects whose server was busy when a recycle was asked for: recycled once, when idle. */
-  private readonly recyclePending = new Set<string>();
-  /** Projects with a re-check scheduled, so a burst of events costs one check. */
+  /**
+   * Servers (`serverIdOf`) that were busy when a recycle was asked for:
+   * recycled once, when idle.
+   */
+  private readonly recyclePending = new Map<string, ServerRef>();
+  /** Servers with a re-check scheduled, so a burst of events costs one check. */
   private readonly recycleScheduled = new Set<string>();
   /**
    * Per thread: client operations running outside the prompt lock (`readThread`,
@@ -175,7 +192,7 @@ class OpenCodeAdapterImpl implements AgentAdapter {
   constructor(ctx: AdapterContext) {
     this.ctx = ctx;
     this.pool = new OpenCodeServerPool({
-      onRelease: (projectDir) => this.scheduleRecycleCheck(projectDir),
+      onRelease: (projectDir, poolKey) => this.scheduleRecycleCheck({ projectDir, poolKey }),
       logger: ctx.logger,
       resolveBin: () => this.resolveBin(),
       buildEnv: ({ projectDir }) =>
@@ -195,14 +212,14 @@ class OpenCodeAdapterImpl implements AgentAdapter {
           home: { kind: "system", path: process.env.HOME ?? "/" }
         }),
       signal: ctx.signal,
-      onStderr: (projectDir, line) => {
+      onStderr: (projectDir, line, poolKey) => {
         // A shared server's stderr belongs to no single thread, so it is
         // logged rather than injected into an arbitrary timeline. It is
         // already ANSI-stripped, classified and REDACTED by `StderrCapture`.
         if (line.class === "error") {
-          ctx.logger.error("opencode server stderr", { projectDir, line: line.text });
+          ctx.logger.error("opencode server stderr", { projectDir, poolKey, line: line.text });
         } else {
-          ctx.logger.warn("opencode server stderr", { projectDir, line: line.text });
+          ctx.logger.warn("opencode server stderr", { projectDir, poolKey, line: line.text });
         }
       }
     });
@@ -243,8 +260,8 @@ class OpenCodeAdapterImpl implements AgentAdapter {
           }
           // The consumer has taken every event: a recycle deferred only
           // because its threads' events were still undelivered can go now.
-          for (const projectDir of self.recyclePending) {
-            self.scheduleRecycleCheck(projectDir);
+          for (const server of self.recyclePending.values()) {
+            self.scheduleRecycleCheck(server);
           }
           await new Promise<void>((resolve) => {
             self.queueWaiters.push(resolve);
@@ -262,7 +279,7 @@ class OpenCodeAdapterImpl implements AgentAdapter {
       waiter();
     }
     if (this.recyclePending.size > 0) {
-      this.scheduleRecycleCheck(this.servers.get(event.threadId)?.projectDir);
+      this.scheduleRecycleCheck(this.servers.get(event.threadId));
     }
   }
 
@@ -283,22 +300,33 @@ class OpenCodeAdapterImpl implements AgentAdapter {
    * never disturbed.
    *
    * `recycled` counts servers stopped by this call, `deferred` the ones marked.
+   *
+   * `input.poolKey` narrows the call to the servers of that key (every
+   * project's) — a keyed server's own config changed, nobody else's. Without
+   * it every server of every key is recycled, as before keys existed.
    */
-  async recycleIdleServers(): Promise<{ recycled: number; deferred: number }> {
+  async recycleIdleServers(input?: { poolKey?: string }): Promise<{ recycled: number; deferred: number }> {
     if (this.stopped || this.ctx.signal.aborted) {
       return { recycled: 0, deferred: 0 };
     }
+    const poolKey = input?.poolKey;
     let recycled = 0;
     let deferred = 0;
     const stops: Promise<void>[] = [];
-    for (const projectDir of new Set([...this.pool.projects(), ...this.recyclePending])) {
-      const outcome = this.tryRecycle(projectDir);
+    const targets = new Map<string, ServerRef>();
+    for (const server of [...this.pool.servers(), ...this.recyclePending.values()]) {
+      if (poolKey === undefined || server.poolKey === poolKey) {
+        targets.set(serverIdOf(server), { projectDir: server.projectDir, poolKey: server.poolKey });
+      }
+    }
+    for (const [id, server] of targets) {
+      const outcome = this.tryRecycle(server);
       if (outcome === "busy") {
         deferred += 1;
-        this.recyclePending.add(projectDir);
+        this.recyclePending.set(id, server);
         continue;
       }
-      this.recyclePending.delete(projectDir);
+      this.recyclePending.delete(id);
       if (outcome !== null) {
         recycled += 1;
         stops.push(outcome);
@@ -312,32 +340,37 @@ class OpenCodeAdapterImpl implements AgentAdapter {
   }
 
   /**
-   * Recycle this project's server if nothing runs on it — synchronously, so no
-   * turn can be admitted between the check and the let-go. The stop it starts,
-   * `"busy"` when something runs, null when no server runs for the project.
+   * Recycle this (project, key)'s server if nothing runs on it —
+   * synchronously, so no turn can be admitted between the check and the
+   * let-go. The stop it starts, `"busy"` when something runs, null when no
+   * such server runs. The project's servers of other keys are not looked at.
    */
-  private tryRecycle(projectDir: string): Promise<void> | "busy" | null {
-    if (this.pool.isStarting(projectDir)) {
+  private tryRecycle(target: ServerRef): Promise<void> | "busy" | null {
+    const { projectDir, poolKey } = target;
+    if (this.pool.isStarting(projectDir, poolKey)) {
       // It may have read the config before the write: recycle it once it is up and idle.
       return "busy";
     }
-    if (!this.pool.isWarm(projectDir)) {
+    if (!this.pool.isWarm(projectDir, poolKey)) {
       return null;
     }
-    const onServer = [...this.sessions].filter(
-      ([threadId]) => this.servers.get(threadId)?.projectDir === projectDir
-    );
+    const onServer = [...this.sessions].filter(([threadId]) => {
+      const server = this.servers.get(threadId);
+      return server?.projectDir === projectDir && server.poolKey === poolKey;
+    });
     const threadIds = new Set(onServer.map(([threadId]) => threadId));
     if (
       // A reference no idle session accounts for: a probe, or a session starting.
-      this.pool.refCount(projectDir) !== onServer.length ||
+      this.pool.refCount(projectDir, poolKey) !== onServer.length ||
       onServer.some(([threadId, session]) => !session.isIdleForRecycle() || this.inFlight.has(threadId)) ||
       // The host has not taken the thread's latest events yet (a turn's end).
       this.queue.some((event) => threadIds.has(event.threadId))
     ) {
       return "busy";
     }
-    const url = this.pool.list().find((server) => server.projectDir === projectDir)?.url;
+    const url = this.pool
+      .list()
+      .find((server) => server.projectDir === projectDir && server.poolKey === poolKey)?.url;
     for (const [threadId, session] of onServer) {
       const input = this.startInputs.get(threadId);
       if (!session.detachForRecycle()) {
@@ -351,39 +384,39 @@ class OpenCodeAdapterImpl implements AgentAdapter {
     if (url !== undefined) {
       this.contextLimits.delete(url);
     }
-    return this.pool.recycle(projectDir) ?? "busy";
+    return this.pool.recycle(projectDir, poolKey) ?? "busy";
   }
 
   /** Re-check a deferred recycle once the current burst of work has run (never a timer). */
-  private scheduleRecycleCheck(projectDir: string | undefined): void {
-    if (
-      projectDir === undefined ||
-      this.stopped ||
-      !this.recyclePending.has(projectDir) ||
-      this.recycleScheduled.has(projectDir)
-    ) {
+  private scheduleRecycleCheck(server: ServerRef | undefined): void {
+    if (server === undefined) {
       return;
     }
-    this.recycleScheduled.add(projectDir);
+    const id = serverIdOf(server);
+    const target: ServerRef = { projectDir: server.projectDir, poolKey: server.poolKey };
+    if (this.stopped || !this.recyclePending.has(id) || this.recycleScheduled.has(id)) {
+      return;
+    }
+    this.recycleScheduled.add(id);
     void new Promise<void>((resolve) => setImmediate(resolve))
       .then(async () => {
-        this.recycleScheduled.delete(projectDir);
-        if (this.stopped || !this.recyclePending.has(projectDir)) {
+        this.recycleScheduled.delete(id);
+        if (this.stopped || !this.recyclePending.has(id)) {
           return;
         }
-        const outcome = this.tryRecycle(projectDir);
+        const outcome = this.tryRecycle(target);
         if (outcome === "busy") {
           return;
         }
-        this.recyclePending.delete(projectDir);
+        this.recyclePending.delete(id);
         if (outcome !== null) {
-          this.ctx.logger.info("opencode server recycled once idle", { projectDir });
+          this.ctx.logger.info("opencode server recycled once idle", target);
           await outcome;
         }
       })
       .catch((error: unknown) => {
         this.ctx.logger.warn("opencode deferred server recycle failed", {
-          projectDir,
+          ...target,
           error: error instanceof Error ? error.message : String(error)
         });
       });
@@ -532,7 +565,9 @@ class OpenCodeAdapterImpl implements AgentAdapter {
       //
       // The pool is keyed on the PROJECT dir, resolved the same way a session
       // keys it (R4 #6) — a probe and a thread in one project must never end up
-      // starting two servers because one spelled the path differently.
+      // starting two servers because one spelled the path differently. The
+      // probe reads the GLOBAL server: the catalogue is the project's, not a
+      // keyed thread's.
       const projectDir = projectDirFor({ cwd });
       const cold = !this.pool.isWarm(projectDir);
       let server: OpenCodeServerHandle | undefined;
@@ -708,11 +743,12 @@ class OpenCodeAdapterImpl implements AgentAdapter {
       );
     }
     const cwd = resolvePath(input.cwd);
-    // The SERVER is keyed by the project; the thread's own `cwd` still travels
-    // per request as the client-level `directory` (§4.5 "there is no cwd on
-    // the process"), so a subdirectory thread shares the project's server
-    // while still scoping every call to itself.
-    const server = await this.pool.acquire(projectDirFor(input));
+    // The SERVER is keyed by the project and the thread's pool key (global
+    // unless its launch config names one); the thread's own `cwd` still
+    // travels per request as the client-level `directory` (§4.5 "there is no
+    // cwd on the process"), so a subdirectory thread shares the project's
+    // server while still scoping every call to itself.
+    const server = await this.pool.acquire(projectDirFor(input), input.serverPool);
     this.servers.set(input.threadId, server);
     let sessionToolsGrant: { revoke(): void } | undefined;
     try {
@@ -856,7 +892,7 @@ class OpenCodeAdapterImpl implements AgentAdapter {
    */
   private noteSettled(threadId: string): void {
     if (this.recyclePending.size > 0) {
-      this.scheduleRecycleCheck(this.servers.get(threadId)?.projectDir);
+      this.scheduleRecycleCheck(this.servers.get(threadId));
     }
   }
 
@@ -934,7 +970,8 @@ class OpenCodeAdapterImpl implements AgentAdapter {
 
   /**
    * Thread lineage (spec 2026-10-14 §6): `POST /session/:id/fork` on the
-   * project's own server (`fork.ts`), which the source shares with the child.
+   * child's server (`fork.ts`) — the source's too unless their pool keys
+   * differ, and either way the session store behind it is the same.
    * A live source session is only read — its current upstream session and
    * its rewinds' id map — never re-pointed.
    */
@@ -953,7 +990,9 @@ class OpenCodeAdapterImpl implements AgentAdapter {
       throw new Error(OPENCODE_FORK_NO_SESSION);
     }
     const directory = resolvePath(input.cwd);
-    const server = await this.pool.acquire(projectDirFor(input));
+    // On the CHILD's server: the session store is shared by every key's
+    // server, so the fork is visible wherever the child then resumes it.
+    const server = await this.pool.acquire(projectDirFor(input), input.serverPool);
     try {
       const sessionId = await forkOpenCodeSession({
         client: server.client(directory),
@@ -1027,8 +1066,19 @@ class OpenCodeAdapterImpl implements AgentAdapter {
   }
 }
 
+/** One server of the pool: a project and the key it was acquired under. */
+interface ServerRef {
+  projectDir: string;
+  poolKey: string;
+}
+
+/** A server's identity as one string, for the recycle bookkeeping. NUL cannot occur in a path. */
+function serverIdOf(server: ServerRef): string {
+  return `${server.projectDir}\u0000${server.poolKey}`;
+}
+
 /**
- * The project directory a thread belongs to — the pool's key, and the whole
+ * The project directory a thread belongs to — half the pool's key, and the whole
  * basis of §3.2's "one `opencode serve` **per project**, shared by its
  * threads".
  *

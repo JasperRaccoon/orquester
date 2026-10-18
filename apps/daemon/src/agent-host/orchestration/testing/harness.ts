@@ -18,6 +18,7 @@ import type {
   RuntimeEvent
 } from "@orquester/api/agent-chat";
 
+import type { HostThreadServerPool } from "../../host-protocol.ts";
 import type { ThreadIndex } from "../../index/index.ts";
 import type { ProviderSnapshotRegistry } from "../../services.ts";
 import { createLivenessRegistry } from "../liveness.ts";
@@ -101,6 +102,7 @@ export interface TestHost<S extends HostThreadStore = FakeThreadStore> {
     launchEnv?: Record<string, string>;
     unsetEnv?: string[];
     homePath?: string;
+    serverPool?: HostThreadServerPool;
   }): Promise<string>;
   settle(): Promise<void>;
   stop(): Promise<void>;
@@ -224,7 +226,8 @@ export function createTestHost<S extends HostThreadStore = FakeThreadStore>(
         ...(input.resume ? { resume: input.resume } : {}),
         ...(input.launchEnv ? { launchEnv: input.launchEnv } : {}),
         ...(input.unsetEnv ? { unsetEnv: input.unsetEnv } : {}),
-        ...(input.homePath ? { homePath: input.homePath } : {})
+        ...(input.homePath ? { homePath: input.homePath } : {}),
+        ...(input.serverPool ? { serverPool: input.serverPool } : {})
       });
       await orchestrator.subscribe(threadId, {
         onEvents: (events) => {

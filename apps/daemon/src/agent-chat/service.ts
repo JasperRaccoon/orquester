@@ -34,6 +34,8 @@ import {
   type CreateHostThreadRequest,
   type ForkHostThreadRequest,
   type ForkHostThreadResponse,
+  type AgentHostRecycleOpenCodeRequest,
+  type HostThreadServerPool,
   type SetThreadIdentityRequest
 } from "../agent-host/host-protocol.ts";
 import { Readable, Transform } from "node:stream";
@@ -127,6 +129,12 @@ export interface ChatLaunchEnv {
   env: Record<string, string>;
   unset?: string[];
   accountId?: string;
+  /**
+   * The keyed provider server a chat thread runs on (OpenCode), sent to the
+   * host as `CreateHostThreadRequest.serverPool` on create and fork. Chat
+   * only: a terminal launch has no shared server. Omitted: the global server.
+   */
+  serverPool?: HostThreadServerPool;
 }
 
 export interface AgentChatServiceOptions {
@@ -604,18 +612,22 @@ export class AgentChatService {
    * mutation). A host that predates the route (404), a host that is down or
    * restarting, and a timeout are logged at info and otherwise ignored: the
    * change then applies once OpenCode's server restarts on its own.
+   *
+   * `poolKey` recycles only the servers started for that keyed pool
+   * (`ChatLaunchEnv.serverPool`); omitted, every OpenCode server.
    */
-  async recycleIdleOpenCodeServers(): Promise<void> {
+  async recycleIdleOpenCodeServers(poolKey?: string): Promise<void> {
     if (!this.supervisor.isHealthy()) {
       this.opts.logger?.log?.("agent host unavailable; OpenCode servers not recycled");
       return;
     }
+    const body: AgentHostRecycleOpenCodeRequest = poolKey !== undefined ? { poolKey } : {};
     try {
       const response = await this.client.json<{
         recycled?: unknown;
         deferred?: unknown;
         error?: { message?: unknown };
-      }>("POST", agentHostRoutes.recycleIdleOpenCode, {}, { timeoutMs: OPENCODE_RECYCLE_DEADLINE_MS });
+      }>("POST", agentHostRoutes.recycleIdleOpenCode, body, { timeoutMs: OPENCODE_RECYCLE_DEADLINE_MS });
       if (response.status === 404) {
         this.opts.logger?.log?.("agent host predates OpenCode server recycling; servers not recycled");
         return;
@@ -830,6 +842,7 @@ export class AgentChatService {
       launchEnv,
       ...(launch?.unset?.length ? { unsetEnv: launch.unset } : {}),
       ...(homePath ? { homePath } : {}),
+      ...(launch?.serverPool ? { serverPool: launch.serverPool } : {}),
       ...(fields.resume ? { resume: fields.resume } : {}),
       ...(lineage ? { lineage } : {})
     };
@@ -1082,6 +1095,7 @@ export class AgentChatService {
       launchEnv,
       ...(launch?.unset?.length ? { unsetEnv: launch.unset } : {}),
       ...(homePath ? { homePath } : {}),
+      ...(launch?.serverPool ? { serverPool: launch.serverPool } : {}),
       fork: {
         ...(messageId !== undefined ? { messageId } : {}),
         ...(turnId !== undefined ? { turnId } : {}),
@@ -1201,7 +1215,7 @@ export class AgentChatService {
     // that does not (only builds of this feature before it) forks exactly as the lost request
     // asked, which converges just as the same key's retry does.
     const accountId = tab.accountId ?? "";
-    let launchFields: Pick<ForkHostThreadRequest, "launchEnv" | "unsetEnv" | "homePath"> = {};
+    let launchFields: Pick<ForkHostThreadRequest, "launchEnv" | "unsetEnv" | "homePath" | "serverPool"> = {};
     try {
       const entry = this.opts.registryEntry(tab.refId);
       const adapter = entry?.chat?.adapter;
@@ -1214,7 +1228,8 @@ export class AgentChatService {
           launchFields = {
             launchEnv,
             ...(launch?.unset?.length ? { unsetEnv: launch.unset } : {}),
-            ...(homePath ? { homePath } : {})
+            ...(homePath ? { homePath } : {}),
+            ...(launch?.serverPool ? { serverPool: launch.serverPool } : {})
           };
         }
       }

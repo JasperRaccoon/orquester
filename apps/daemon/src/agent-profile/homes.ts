@@ -23,7 +23,11 @@ export function resolveAgentHomes(env: NodeJS.ProcessEnv = process.env, home: st
     claudeJson: join(claudeConfigDir ?? home, ".claude.json"),
     codexHome: env.CODEX_HOME || join(home, ".codex"),
     grokHome: env.GROK_HOME || join(home, ".grok"),
-    opencodeDir: env.OPENCODE_CONFIG_DIR || join(home, ".config", "opencode"),
+    // OpenCode's global dir is `$XDG_CONFIG_HOME/opencode` (xdg-basedir: an
+    // empty value counts as unset). `OPENCODE_CONFIG_DIR` is an ADDITIONAL dir
+    // OpenCode loads on top of it, never a replacement, so it is not the
+    // global config this editor owns.
+    opencodeDir: join(env.XDG_CONFIG_HOME || join(home, ".config"), "opencode"),
     agentsSkillsDir: join(home, ".agents", "skills")
   };
 }

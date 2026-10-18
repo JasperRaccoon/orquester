@@ -333,6 +333,7 @@ function makeHarness(): Harness {
     url: "http://127.0.0.1:1",
     version: "1.18.5",
     projectDir: "/repo",
+    poolKey: "global",
     pid: 1234,
     client: (directory: string) =>
       new OpenCodeClient({ baseUrl: "http://127.0.0.1:1", directory, fetchImpl: fake.fetchImpl }),

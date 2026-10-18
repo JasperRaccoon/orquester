@@ -288,3 +288,27 @@ test("per-account env overrides route installs to the account config home", asyn
     await rm(s, { recursive: true, force: true });
   }
 });
+
+test("opencode installs its plugin into the GLOBAL config dir: OPENCODE_CONFIG_DIR is additive, XDG_CONFIG_HOME moves it", async () => {
+  const s = await scratch();
+  try {
+    const hooks = new AgentHooks(join(s, "d"), join(s, "h"), silent);
+    const plugin = (configDir: string) => join(configDir, "plugin", "orquester-status.js");
+
+    await hooks.ensureForEntry("opencode", {});
+    const globalSource = await readFile(plugin(join(s, "h", ".config", "opencode")), "utf8");
+    assert.ok(globalSource.length > 0, "no override: ~/.config/opencode, as before");
+
+    // OpenCode loads OPENCODE_CONFIG_DIR on top of the global dir and loads
+    // each dir's plugins, so a copy there would run the plugin twice.
+    await hooks.ensureForEntry("opencode", { OPENCODE_CONFIG_DIR: join(s, "extra") });
+    await assert.rejects(stat(plugin(join(s, "extra"))), "nothing lands in the additive dir");
+    assert.equal(await readFile(plugin(join(s, "h", ".config", "opencode")), "utf8"), globalSource);
+
+    await hooks.ensureForEntry("opencode", { XDG_CONFIG_HOME: join(s, "xdg"), OPENCODE_CONFIG_DIR: join(s, "extra") });
+    assert.equal(await readFile(plugin(join(s, "xdg", "opencode")), "utf8"), globalSource);
+    await assert.rejects(stat(plugin(join(s, "extra"))));
+  } finally {
+    await rm(s, { recursive: true, force: true });
+  }
+});
