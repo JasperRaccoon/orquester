@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
@@ -195,6 +195,46 @@ describe("SessionProfileStore — items", () => {
     );
     await store.deleteItem("id-1", itemId, "3");
     assert.deepEqual(JSON.parse(await readFile(layout.secrets, "utf8")).items, {});
+  });
+
+  it("rolls a failed mutation back whole: secrets, rewritten documents and instructions keep their previous text", async () => {
+    const { appdir, store } = await setup();
+    await store.create({ name: "P" });
+    const { itemId: mcpId } = await store.createItem("id-1", "1", MCP);
+    const { itemId: skillId } = await store.createItem("id-1", "2", SKILL);
+    await store.writeInstructions("id-1", "3", "Old instructions\n");
+    const layout = profileLayout(sessionProfileDir(appdir, "id-1"));
+    const before = {
+      secrets: await readFile(layout.secrets, "utf8"),
+      skill: await readFile(layout.skillFile(skillId), "utf8"),
+      instructions: await readFile(layout.instructions, "utf8"),
+      manifest: await readFile(layout.manifest, "utf8")
+    };
+    // profile.json still reads, but its write (the commit) fails: it lives in a read-only dir.
+    const locked = join(appdir, "locked");
+    await mkdir(locked);
+    await rename(layout.manifest, join(locked, "profile.json"));
+    await symlink(join(locked, "profile.json"), layout.manifest);
+    await chmod(locked, 0o500);
+    try {
+      await assert.rejects(
+        store.updateItem("id-1", mcpId, "4", {
+          kind: "mcp",
+          mcp: { name: "github", transport: "stdio", command: "gh-mcp", env: [{ key: "GITHUB_TOKEN", value: "ghp_NEW_VALUE" }] }
+        })
+      );
+      await assert.rejects(
+        store.updateItem("id-1", skillId, "4", { kind: "skill", document: { name: "review", frontmatter: {}, body: "Rewritten.\n" } })
+      );
+      await assert.rejects(store.writeInstructions("id-1", "4", "New instructions\n"));
+      await assert.rejects(store.writeInstructions("id-1", "4", ""));
+    } finally {
+      await chmod(locked, 0o700);
+    }
+    assert.equal(await readFile(layout.secrets, "utf8"), before.secrets, "secrets.json is the committed one");
+    assert.equal(await readFile(layout.skillFile(skillId), "utf8"), before.skill, "the skill's SKILL.md is the committed one");
+    assert.equal(await readFile(layout.instructions, "utf8"), before.instructions);
+    assert.equal(await readFile(layout.manifest, "utf8"), before.manifest);
   });
 
   it("writes skills as directories and commands as markdown, by item id", async () => {
