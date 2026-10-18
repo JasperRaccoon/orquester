@@ -1220,6 +1220,21 @@ describe("agent host server — unified MCP §9.3, a thread's new session-tool m
   });
 });
 
+describe("agent host server — Agent Profiles' prepared-dir leases", () => {
+  it("GET /profiles/leases answers the orchestrator's live prepared dirs, behind the host's auth", async () => {
+    const h = await harness();
+    try {
+      const answered = await h.call("GET", agentHostRoutes.profileLeases);
+      assert.equal(answered.status, 200);
+      assert.deepEqual(answered.body, { preparedDirs: [] });
+      assert.equal((await h.call("GET", agentHostRoutes.profileLeases, undefined, "wrong-token")).status, 401);
+      assert.equal((await h.call("POST", agentHostRoutes.profileLeases)).status, 404, "only GET is the route");
+    } finally {
+      await h.stop();
+    }
+  });
+});
+
 describe("agent host server — agent profile §4.8, OpenCode server recycling", () => {
   it("POST /opencode/recycle-idle answers the OpenCode adapter's counts", async () => {
     let calls = 0;

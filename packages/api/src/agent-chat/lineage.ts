@@ -185,6 +185,17 @@ export interface ForkSessionRequest extends ThreadForkTarget {
    * callers included — a fork the user makes in the GUI is never the agent's child.
    */
   agentCreated?: true;
+  /**
+   * The fork's Agent Profile (spec 2026-10-18 §5.5). Absent: the parent's. `null`: Global. An id:
+   * that profile, prepared for the parent's agent and account.
+   */
+  profileId?: string | null;
+  /**
+   * An unattended fork (an MCP tool's): its profile must apply or the fork FAILS, now and at every
+   * later agent start, never falling back to Global. A fork of an unattended chat is unattended
+   * too. See `CreateAgentChatSessionFields.unattended`.
+   */
+  unattended?: boolean;
 }
 
 /** The fork tab's default title. */

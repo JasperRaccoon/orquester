@@ -571,6 +571,14 @@ export interface CreateAgentChatSessionFields {
    * Global. Clients may leave it unset and send `CreateSessionRequest.profileId` instead.
    */
   profileId?: string;
+  /**
+   * An unattended launch (an MCP `create_session`, a workflow run): the chat's Agent Profile
+   * must apply or the launch FAILS — at create and at every later agent (re)start. Without it an
+   * interactive chat whose profile was deleted falls back to Global with a visible notice at its
+   * next agent start (spec 2026-10-18 §5.5, §5.6). A create naming a profile that does not exist
+   * or is not ready fails either way. Persisted on the tab record.
+   */
+  unattended?: boolean;
   modelSelection: ModelSelection;
   runtimeMode?: RuntimeMode;
   /**

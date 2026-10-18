@@ -73,6 +73,11 @@ export interface TestHostOptions<S extends HostThreadStore = FakeThreadStore> {
   secrets?: OrchestratorOptions["secrets"];
   /** Where a transcript fork's handoff waits (default: in memory). */
   forkHandoffs?: OrchestratorOptions["forkHandoffs"];
+  /**
+   * Agent Profiles: the daemon's refresh before a profile thread's session start. Default: a
+   * daemon that answers the thread's launch config as it stands (the same version, nothing moved).
+   */
+  launchProfile?: OrchestratorOptions["launchProfile"];
 }
 
 export interface TestHost<S extends HostThreadStore = FakeThreadStore> {
@@ -189,6 +194,14 @@ export function createTestHost<S extends HostThreadStore = FakeThreadStore>(
     ...(options.sessionToolsStale ? { sessionToolsStale: options.sessionToolsStale } : {}),
     ...(options.secrets ? { secrets: options.secrets } : {}),
     ...(options.forkHandoffs ? { forkHandoffs: options.forkHandoffs } : {}),
+    launchProfile:
+      options.launchProfile ??
+      (async (threadId) => {
+        const { profile, profileUnreadable: _unreadable, ...fields } = launchConfigs.entries.get(threadId) ?? {};
+        // A launch config that lost its profile: a daemon that cannot help (the start refuses).
+        if (profile === undefined) return { kind: "unavailable", reason: "the test daemon knows no profile" };
+        return { kind: "launch", launch: { profile, ...fields } };
+      }),
     launchConfigs,
     clock,
     ids
