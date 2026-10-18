@@ -139,6 +139,8 @@ export interface SessionProfileLifecycleOptions {
   defaultAccountId?(agent: SessionProfileAgentId): string | null;
   /** The installed CLI's version (registry), part of the fingerprint. */
   cliVersion?(agent: SessionProfileAgentId): string | null;
+  /** The installed CLI's absolute binary (registry), handed to preparers that run it (`ctx.cliBin`). */
+  cliBin?(agent: SessionProfileAgentId): string | null;
   preparers?: SessionProfilePreparers;
   /** Preparations running at once across keys. */
   concurrency?: number;
@@ -501,9 +503,16 @@ export class SessionProfileLifecycle {
     if (!state.forceStale) {
       const manifest = currentDir ? await readManifestIfAny(currentDir) : null;
       if (currentDir && manifest && this.matches(manifest, state, revision, fingerprint)) {
-        state.failure = undefined;
-        this.setState(state, "ready", undefined, revision);
-        return { ok: true, ready: this.ready(state, revision, currentDir) };
+        const unusable = await unusableReason(preparer, currentDir);
+        if (unusable === null) {
+          state.failure = undefined;
+          this.setState(state, "ready", undefined, revision);
+          return { ok: true, ready: this.ready(state, revision, currentDir) };
+        }
+        // Current but not launchable (Codex: its state DB is gone): a new version, never this one.
+        this.logger.warn(
+          `Agent Profiles: the prepared ${state.agent} dir of profile ${state.profileId} (${state.accountKey}) cannot be used (${unusable}); preparing it again.`
+        );
       }
       if (!retryFailed && state.failure?.fingerprint === fingerprint) return { ok: false, error: state.failure.error };
     }
@@ -549,6 +558,7 @@ export class SessionProfileLifecycle {
         stagingDir,
         preparedDir: join(state.keyDir, version),
         previousPreparedDir,
+        cliBin: this.options.cliBin?.(state.agent) ?? null,
         logger: this.logger,
         signal: this.abort.signal
       };
@@ -897,6 +907,16 @@ export async function readCurrentVersion(keyDir: string): Promise<string | null>
     return typeof value.version === "string" && VERSION_RE.test(value.version) ? value.version : null;
   } catch {
     return null;
+  }
+}
+
+/** The preparer's {@link SessionProfilePreparer.unusableReason} of a current version; a throw is a reason too. */
+async function unusableReason(preparer: SessionProfilePreparer, dir: string): Promise<string | null> {
+  if (!preparer.unusableReason) return null;
+  try {
+    return await preparer.unusableReason(dir);
+  } catch (error) {
+    return describe(error);
   }
 }
 

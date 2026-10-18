@@ -30,7 +30,8 @@
  * state DB over) but never modify it. A step that only works AT the final path (a CLI that records
  * its own home's location while running there) cannot run in `prepare`; run it in staging only
  * when the result is location-independent, else at launch. When a launch finds the dir unusable
- * (Codex: its state DB is missing, spec §6.2), `lifecycle.markStale(...)` prepares a new version.
+ * (Codex: its state DB is missing, spec §6.2), the preparer's `unusableReason` says so and the
+ * lifecycle prepares a new version (`lifecycle.markStale(...)` forces one from outside).
  *
  * STALENESS. A prepared dir is current while its fingerprint matches: profile revision +
  * {@link SessionProfilePreparer.version} + the agent CLI's version + the content of every file
@@ -82,6 +83,11 @@ export interface SessionProfilePrepareContext<A extends SessionProfileAgentId = 
   /** The key's current version (may be in use by a running chat): read-only, never modify it. `null` = none. */
   previousPreparedDir: string | null;
   appdir: string;
+  /**
+   * The agent's CLI binary as the registry resolved it (absolute), for a preparer that runs it
+   * (Codex: state-DB seeding); `null`/absent when not installed or not known.
+   */
+  cliBin?: string | null;
   logger: SessionProfilePrepareLogger;
   signal?: AbortSignal;
 }
@@ -113,6 +119,14 @@ export interface SessionProfilePreparer<A extends SessionProfileAgentId = Sessio
   prepare(ctx: SessionProfilePrepareContext<A>): Promise<PreparedSectionFor<A>>;
   /** Proves the staged files isolate as intended; throws with a user-facing reason when not. */
   validate?(ctx: SessionProfilePrepareContext<A>): Promise<void>;
+  /**
+   * Whether a published version whose fingerprint is current can still be launched from: `null`
+   * when it can, else why not — the lifecycle then prepares a new version instead of answering it
+   * (Codex: its seeded state DB is missing, spec §6.2). Asked by every job that would answer the
+   * current version, so before every launch (`ensureReady`). Read-only and cheap; a throw counts
+   * as unusable.
+   */
+  unusableReason?(preparedDir: string): Promise<string | null>;
 }
 
 /** Every agent's preparer; `null` until that agent's task implements it (`preparers/<agent>.ts`). */

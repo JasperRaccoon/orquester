@@ -1091,6 +1091,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     defaultAccountId: (agent) => (agent === "opencode" ? null : (agentAccounts.list().defaults[agent] ?? null)),
     // Read per call: an install or update from Settings > Agents patches the entry in place.
     cliVersion: (agent) => registry.get(agent)?.version ?? null,
+    // Preparers that run the CLI (Codex seeds its profile home's state DB).
+    cliBin: (agent) => registry.get(agent)?.resolvedBin ?? null,
     // No `leases` yet (launch plumbing): old prepared versions are kept until it is wired.
     logger: console
   });
