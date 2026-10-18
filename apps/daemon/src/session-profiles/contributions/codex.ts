@@ -12,18 +12,12 @@
  */
 
 import { CODEX_STATE_DB_FILE, codexStateDbPresent } from "../../agent-isolation/index.ts";
+import type { ProfileLaunchContext, ProfileLaunchContribution } from "../launch.ts";
 
-/** What this contribution reads of the launch context. */
-export interface CodexLaunchContributionInput {
-  profile: { preparedDir: string };
-}
-
-export interface CodexLaunchContribution {
-  env: { CODEX_HOME: string };
-  homePath: string;
-}
-
-export async function codexProfileLaunchContribution(ctx: CodexLaunchContributionInput): Promise<CodexLaunchContribution> {
+/** Codex's entry of `profileLaunchContributors` (`../launch.ts`). */
+export async function codexProfileLaunchContribution(
+  ctx: Pick<ProfileLaunchContext<"codex">, "profile">
+): Promise<ProfileLaunchContribution> {
   const home = ctx.profile.preparedDir;
   if (!(await codexStateDbPresent(home))) {
     throw new Error(`its prepared Codex home is not seeded (${CODEX_STATE_DB_FILE} is missing); the next start prepares it anew.`);

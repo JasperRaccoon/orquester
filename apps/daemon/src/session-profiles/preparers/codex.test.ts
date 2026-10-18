@@ -255,10 +255,10 @@ describe("codexPreparer", () => {
 
     // Usable while seeded; not once the DB is gone.
     assert.equal(await codexPreparer.unusableReason?.(home), null);
-    assert.deepEqual(await codexProfileLaunchContribution({ profile: { preparedDir: home } }), { env: { CODEX_HOME: home }, homePath: home });
+    assert.deepEqual(await codexProfileLaunchContribution({ profile: { profileId: "editor", revision: "3", preparedDir: home } }), { env: { CODEX_HOME: home }, homePath: home });
     await unlink(join(home, CODEX_STATE_DB_FILE));
     assert.match((await codexPreparer.unusableReason?.(home)) ?? "", /state DB/);
-    await assert.rejects(codexProfileLaunchContribution({ profile: { preparedDir: home } }), /not seeded/);
+    await assert.rejects(codexProfileLaunchContribution({ profile: { profileId: "editor", revision: "3", preparedDir: home } }), /not seeded/);
   });
 
   it("without Codex plugins: plugins feature off; built-ins shown when the profile says so; no instructions file", async () => {

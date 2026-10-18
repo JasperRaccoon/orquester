@@ -192,8 +192,9 @@ restarts (spec §5.6). Status, staleness and fingerprints read the current versi
 ## Launching a chat with a profile (`launch.ts`, `agent-chat/service.ts`)
 
 **Per-agent launch contributions.** `profileLaunchContributors: { [agent]: (ctx) =>
-ProfileLaunchContribution }`, read through `profileLaunchContribution(agent)`. Every agent
-contributes nothing today; each per-agent task replaces ITS entry (and nothing else):
+ProfileLaunchContribution }`, read through `profileLaunchContribution(agent)`. Codex's is
+`contributions/codex.ts`; the others contribute nothing yet. Each per-agent task replaces ITS
+entry (and nothing else):
 
 ```ts
 ctx: { agent, profile: {profileId, revision, preparedDir}, manifestSection /* manifest/<agent>.ts */,

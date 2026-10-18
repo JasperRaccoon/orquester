@@ -7,6 +7,7 @@ import { after, describe, it } from "node:test";
 
 import type { SessionProfileAgentId } from "@orquester/api";
 
+import { codexProfileLaunchContribution } from "./contributions/codex.ts";
 import { SessionProfileError, sessionProfileErrors } from "./errors.ts";
 import {
   applyProfileContribution,
@@ -63,9 +64,12 @@ const contributors = (codex: ProfileLaunchContributors["codex"]): ProfileLaunchC
 });
 
 describe("the per-agent launch contributions", () => {
-  it("contribute nothing for every agent until the per-agent tasks fill them in", async () => {
+  it("are read from the registry; the agents no task filled in yet contribute nothing", async () => {
     for (const agent of ["claude", "codex", "grok", "opencode"] as const) {
       assert.equal(profileLaunchContribution(agent), profileLaunchContributors[agent]);
+    }
+    assert.equal(profileLaunchContributors.codex, codexProfileLaunchContribution);
+    for (const agent of ["claude", "grok", "opencode"] as const) {
       assert.deepEqual(await profileLaunchContribution(agent)({} as ProfileLaunchContext<typeof agent>), {});
     }
   });
