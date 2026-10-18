@@ -85,7 +85,27 @@ export const sessionProfileHookRecordSchema = z
   })
   .passthrough();
 
-/** A plugin of one agent; `name` is the plugin's name. Its files live in `plugins/<id>/`. */
+/**
+ * Where a plugin's files were copied from (`SessionProfilePluginSource` in `@orquester/api`).
+ * A value that does not read is dropped on read, never fatal for the item.
+ */
+export const sessionProfilePluginSourceRecordSchema = z
+  .object({
+    type: z.enum(["marketplace", "global"]),
+    marketplace: z.string().optional(),
+    commit: z.string().optional(),
+    url: z.string().optional(),
+    ref: z.string().optional(),
+    copiedAt: z.string()
+  })
+  .passthrough();
+
+/**
+ * A plugin of one agent; `name` is the plugin's name. Its files live in `plugins/<id>/` — the
+ * plugin's ROOT directory as its agent lays it out (Claude / Codex: with `.claude-plugin/` or
+ * `.codex-plugin/plugin.json`; Grok: its plugin directory; OpenCode: the plugin's `.js`/`.ts`
+ * file(s) at the top level). See the session-profiles README, "Plugin cache".
+ */
 export const sessionProfilePluginRecordSchema = z
   .object({
     ...itemBase,
@@ -93,7 +113,8 @@ export const sessionProfilePluginRecordSchema = z
     plugin: z
       .object({
         marketplace: z.string().optional(),
-        version: z.string().optional()
+        version: z.string().optional(),
+        source: sessionProfilePluginSourceRecordSchema.optional().catch(undefined)
       })
       .passthrough()
       .default({})
