@@ -13,7 +13,8 @@ per-agent GLOBAL config editor, user-facing "Agent config"). A chat without `pro
 | `store.ts` | `SessionProfileStore`: the only writer. CRUD of profiles and items, revisions, per-profile queue, secrets, `readSource`. |
 | `resolve.ts` | `resolveForAgent(source, agent)` → `ResolvedAgentProfile` (pure). Settings defaults, scope/support rules. |
 | `manifest.ts` + `manifest/<agent>.ts` | Prepared-dir `manifest.json` envelope + per-agent section schemas; read by the agent host. |
-| `preparer.ts` + `preparers/<agent>.ts` | Per-agent preparer contract and registry (all `null` for now). |
+| `preparer.ts` + `preparers/<agent>.ts` | Per-agent preparer contract and registry (`null` = not supported yet). `preparers/codex.ts`: the prepared `CODEX_HOME` (see "Codex" below). |
+| `contributions/<agent>.ts` | Per-agent launch contributions (what a profile chat adds to its account's launch); `contributions/codex.ts`: `CODEX_HOME` and `homePath` = the prepared home. |
 | `lifecycle.ts` | `SessionProfileLifecycle`: builds and publishes immutable prepared versions, tracks and refreshes them, collects unleased old ones; `ensureReady` for launches. |
 | `service.ts` | `SessionProfileService`: wire mapping (secrets masked), events, prepare status, `resolveForAgent(profileId, agent)`; the import entry points delegate to `imports.ts`. |
 | `imports.ts` | `SessionProfileImports`: Import from Global (via Agent config), git / zip / md scans, copy from profile, plugins into the profile's cache, export / import of a profile. Gathers outside the queue, writes with ONE `store.importItems`. |
@@ -99,6 +100,29 @@ credentials, deadline); `.git` is removed before the copy. Sources that are not 
   the PATH CONTRACT in `preparer.ts`: write in `ctx.stagingDir`, name the dir's own location as
   `ctx.preparedDir` (the new VERSION dir it is renamed to; e.g. Codex hook trust), and only read
   `ctx.previousPreparedDir` (the current version, maybe in use by a running chat).
+
+- **Preparers that run the CLI** get it as `ctx.cliBin` (the lifecycle's `cliBin(agent)` option,
+  the registry's resolved binary; `null` = not installed). A preparer whose published dir can stop
+  being launchable declares `unusableReason(preparedDir)`: every job that would answer the current
+  version (so every `ensureReady`) asks it first, and a reason prepares a new version instead.
+
+## Codex (`preparers/codex.ts`, `contributions/codex.ts`, spec §6.2)
+
+One prepared `CODEX_HOME` per (profile, account) — `perAccount`, System = the system home.
+`auth.json` and `sessions/` are symlinks to the account home's (never copies); `config.toml` is
+Global's runtime settings (`codexRuntimeConfig`) plus `[features] apps/remote_plugin = false`
+(`plugins = false` without a Codex plugin), `[skills.bundled] enabled = false` when built-ins are
+hidden, the profile's MCP servers and plugins, and `[hooks.state]` trust keyed by
+`<ctx.preparedDir>/hooks.json`; `AGENTS.md`, `skills/` (commands become skills, `git/pr` →
+`git-pr`), `hooks.json` (profile hooks, then Orquester's managed ones), `plugins/cache/…`.
+**Seeding** runs inside `prepare`, in the staging dir: the state DB holds no path of its home, so
+it survives the rename to the version dir, and nothing can start on the home before its first
+`initialize` (it is not published yet). `auth.json` is linked after the seed. `inputs()` = the
+Global `config.toml`; `unusableReason` = the state DB file is missing (re-seed = a new version).
+The contribution sets `CODEX_HOME` and `homePath` to the prepared dir and refuses an unseeded
+one. The adapter (`agent-host/adapters/codex/profile.ts`) forces that home, fails a start whose
+`initialize` reports another, and switches off `$HOME/.agents/skills` (and any user skill outside
+the home) per thread with nested `skills.config` at every `thread/start` and `thread/resume`.
 
 ## Preparation lifecycle (`lifecycle.ts`)
 
