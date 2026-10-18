@@ -32,7 +32,7 @@ import type {
   ThreadSnapshot
 } from "@orquester/api/agent-chat";
 
-import type { HostThreadServerPool } from "./host-protocol.ts";
+import type { HostThreadProfile, HostThreadServerPool } from "./host-protocol.ts";
 import type { SessionToolsHost } from "./session-tools/index.ts";
 
 // ---------------------------------------------------------------------------
@@ -66,6 +66,19 @@ export interface StartSessionInput {
    * global server.
    */
   serverPool?: HostThreadServerPool;
+  /**
+   * The Agent Profile this thread launches with (spec 2026-10-18), from its
+   * `launch.json` (`CreateHostThreadRequest.profile`, or the latest
+   * `SetThreadIdentityRequest.profile`). Present on EVERY start of a profile
+   * thread: create, resume, a crash restart, a host restart's rehydrate, an
+   * identity switch's restart and a fork's child. Omitted: Global.
+   *
+   * An adapter that supports profiles reads its section with
+   * `loadProfileManifest(input, agent)` (`adapters/profile-manifest.ts`),
+   * which throws when the prepared directory cannot be launched from — the
+   * start must then FAIL, never fall back to Global.
+   */
+  profile?: HostThreadProfile;
   title?: string;
   modelSelection: ModelSelection;
   runtimeMode: RuntimeMode;
@@ -283,6 +296,11 @@ export interface ForkConversationInput {
    * will run. Omitted: the global server.
    */
   serverPool?: HostThreadServerPool;
+  /**
+   * The CHILD's Agent Profile ({@link StartSessionInput.profile}): the
+   * parent's unless the fork request named another. Omitted: Global.
+   */
+  profile?: HostThreadProfile;
   cut: ForkCut;
 }
 

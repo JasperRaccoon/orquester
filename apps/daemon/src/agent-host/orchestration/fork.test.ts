@@ -450,6 +450,61 @@ describe("forkThread", () => {
     await host.stop();
   });
 
+  it("the child inherits the parent's Agent Profile unless the request names one (null = Global)", async () => {
+    const parentProfile = { profileId: "p1", revision: "3", preparedDir: "/prepared/p1/claude/shared" };
+    const otherProfile = { profileId: "p2", revision: "1", preparedDir: "/prepared/p2/claude/shared" };
+    const forks: ForkConversationInput[] = [];
+    const claude = createScriptedAdapter({
+      id: "claude",
+      forkConversation: async (input) => {
+        forks.push(input);
+        return { resumeCursor: { threadId: input.threadId, resume: "forked-session" } };
+      },
+      history: { threadId: "child", turns: [{ id: "turn-1", items: [] }] },
+      projectHistory: () => replayOf("child")
+    });
+    const host = createTestHost({ adapters: { claude } });
+    const parentId = await host.createThread({ threadId: "parent", refId: "claude", profile: parentProfile });
+    const first = await runTurn(host, claude, parentId, "first", "one");
+    const startOf = (threadId: string) =>
+      claude.calls.find((call) => call.kind === "startSession" && call.threadId === threadId)?.detail as
+        | { profile?: unknown }
+        | undefined;
+
+    const inherited = await host.orchestrator.forkThread(
+      parentId,
+      forkRequest("child", "claude", { messageId: first.replyId })
+    );
+    await host.settle();
+    assert.equal(inherited.head.profileId, "p1", "recorded on the child's thread.created");
+    assert.deepEqual(forks[0]?.profile, parentProfile, "the native fork is made with the child's profile");
+    assert.deepEqual(host.orchestrator.launchConfig("child")?.profile, parentProfile);
+    assert.deepEqual(startOf("child")?.profile, parentProfile);
+
+    const overridden = await host.orchestrator.forkThread(parentId, {
+      ...forkRequest("child-2", "claude", { messageId: first.replyId }),
+      profile: otherProfile
+    });
+    await host.settle();
+    assert.equal(overridden.head.profileId, "p2");
+    assert.deepEqual(forks[1]?.profile, otherProfile);
+    assert.deepEqual(startOf("child-2")?.profile, otherProfile);
+
+    const global = await host.orchestrator.forkThread(parentId, {
+      ...forkRequest("child-3", "claude", { messageId: first.replyId }),
+      profile: null
+    });
+    await host.settle();
+    assert.equal(global.head.profileId, undefined);
+    assert.equal("profile" in (forks[2] ?? {}), false);
+    assert.equal("profile" in (host.orchestrator.launchConfig("child-3") ?? {}), false);
+    assert.equal(startOf("child-3") !== undefined && "profile" in startOf("child-3")!, false);
+
+    // The parent is only read: its profile is what it was.
+    assert.deepEqual(host.orchestrator.launchConfig(parentId)?.profile, parentProfile);
+    await host.stop();
+  });
+
   it("links the child to its parent's secrets before its first event, native or transcript — never more", async () => {
     const links: Array<{ threadId: string; parentThreadId: string; childEventsBefore: number }> = [];
     let host: TestHost | undefined;

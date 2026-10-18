@@ -86,12 +86,12 @@ const TOOL_KINDS = new Set(["tool.started", "tool.updated", "tool.completed", "t
 // a completion that failed or was cancelled.
 const SKIPPED_ACTIVITY = new Set(["tool.progress", "turn.proposed.delta", "turn.plan.updated", "hook.started", "hook.progress", "context-window.updated", "checkpoint.captured", "background.requested", "task-stop.requested", "task.progress", "task.updated"]);
 /**
- * A line of its own in the GUI's timeline, read as its summary: an `info` entry. An account switch, a model reroute —
+ * A line of its own in the GUI's timeline, read as its summary: an `info` entry. An account or profile switch, a model reroute —
  * and every goal row the GUI shows (goals §8.4; `isHiddenGoalRow` is the one it does not): the provider's goal updates,
  * set to cleared, and a host `/goal`'s answer. One with the error tone — a goal that can't be met, a `/goal` command
  * that failed — is an error row first, as the GUI draws it.
  */
-const INFO_ACTIVITY = new Set(["session.identity-changed", "model.rerouted", GOAL_ACTIVITY_KIND, GOAL_STATUS_ACTIVITY_KIND, GOAL_COMMAND_FAILED_ACTIVITY_KIND]);
+const INFO_ACTIVITY = new Set(["session.identity-changed", "session.profile-changed", "model.rerouted", GOAL_ACTIVITY_KIND, GOAL_STATUS_ACTIVITY_KIND, GOAL_COMMAND_FAILED_ACTIVITY_KIND]);
 
 /**
  * The goal row the GUI never shows, whatever else it shows (goals §8.4): a `progress` tick, the goal's heartbeat —

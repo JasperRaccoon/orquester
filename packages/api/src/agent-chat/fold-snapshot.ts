@@ -88,7 +88,8 @@ import type {
  * once.
  */
 // 7: `thread.created`'s `lineage` reaches the head (spec 2026-10-14 §6).
-export const FOLD_SNAPSHOT_VERSION = 7;
+// 8: `thread.created`'s and `thread.meta-updated`'s `profileId` reach the head (Agent Profiles).
+export const FOLD_SNAPSHOT_VERSION = 8;
 
 /**
  * {@link ThreadFoldState} as JSON: without `activities` (rebuilt from

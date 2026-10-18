@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
-import { createFileLaunchConfigStore, launchConfigFromRequest } from "./launch-config.ts";
+import { createFileLaunchConfigStore, launchConfigFromRequest, parseHostThreadProfile } from "./launch-config.ts";
 
 describe("thread launch config (§3.1, §6.1)", () => {
   it("keeps only well-formed persisted fields and drops the empty ones", async (t) => {
@@ -112,5 +112,60 @@ describe("thread launch config — the keyed provider server", () => {
       { launchEnv: { A: "1" }, serverPool: { key: "k", env: { B: "2" } } }
     );
     assert.deepEqual(launchConfigFromRequest({}), {});
+  });
+});
+
+describe("thread launch config — the Agent Profile", () => {
+  const profile = { profileId: "p1", revision: "3", preparedDir: "/appdir/session-profiles/prepared/p1/codex/acc1" };
+
+  it("round-trips profile beside launchEnv, homePath and serverPool, so a restarted host launches with it", async (t) => {
+    const dir = await mkdtemp(join(tmpdir(), "launch-config-"));
+    t.after(() => rm(dir, { recursive: true, force: true }));
+    const config = {
+      launchEnv: { CODEX_HOME: profile.preparedDir },
+      homePath: "/homes/acc1",
+      serverPool: { key: "profile-p1" },
+      profile
+    };
+    await createFileLaunchConfigStore({ rootDir: dir }).save("t1", config);
+    assert.deepEqual(await createFileLaunchConfigStore({ rootDir: dir }).load("t1"), config);
+  });
+
+  it("marks a profile that does not read as unreadable — never drops it to Global — and keeps the mark on a rewrite", async (t) => {
+    const dir = await mkdtemp(join(tmpdir(), "launch-config-"));
+    t.after(() => rm(dir, { recursive: true, force: true }));
+    await mkdir(join(dir, "threads", "t1"), { recursive: true });
+    const file = join(dir, "threads", "t1", "launch.json");
+    const store = createFileLaunchConfigStore({ rootDir: dir });
+    for (const malformed of [
+      { ...profile, preparedDir: "relative/dir" },
+      { ...profile, revision: "" },
+      { profileId: "p1" },
+      "p1",
+      7
+    ]) {
+      await writeFile(file, JSON.stringify({ homePath: "/h", profile: malformed }));
+      const loaded = await store.load("t1");
+      assert.deepEqual(loaded, { homePath: "/h", profileUnreadable: true }, JSON.stringify(malformed));
+      // A rolled-back switch writes the loaded config back: the mark survives it.
+      await store.save("t1", loaded!);
+      assert.deepEqual(await store.load("t1"), { homePath: "/h", profileUnreadable: true });
+    }
+    await writeFile(file, JSON.stringify({ homePath: "/h", profile: null }));
+    assert.deepEqual(await store.load("t1"), { homePath: "/h" }, "an explicit null is Global");
+    await writeFile(file, JSON.stringify({ profile: { ...profile, extra: true } }));
+    assert.deepEqual(await store.load("t1"), { profile }, "extra fields are dropped");
+  });
+
+  it("is taken as the caller resolved it, beside the request's launch fields", () => {
+    assert.deepEqual(launchConfigFromRequest({ homePath: "/h" }, profile), { homePath: "/h", profile });
+    assert.deepEqual(launchConfigFromRequest({ homePath: "/h" }), { homePath: "/h" });
+  });
+
+  it("parseHostThreadProfile accepts exactly a profile id, a revision and an absolute directory", () => {
+    assert.deepEqual(parseHostThreadProfile({ ...profile, more: 1 }), profile);
+    for (const bad of [null, [], {}, { ...profile, profileId: "" }, { ...profile, preparedDir: "x" }, { ...profile, revision: 3 }]) {
+      assert.equal(parseHostThreadProfile(bad), undefined, JSON.stringify(bad));
+    }
   });
 });

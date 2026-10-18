@@ -12,7 +12,7 @@
  * and this projection carries the field forward untouched.
  */
 
-import type { DomainEvent, ThreadHead } from "@orquester/api/agent-chat";
+import { profileIdOf, type DomainEvent, type ThreadHead } from "@orquester/api/agent-chat";
 
 /**
  * Advance the head by one event, stamping `seq` and `updatedAt` even when the
@@ -30,6 +30,7 @@ function projectHead(head: ThreadHead | null, event: DomainEvent): ThreadHead | 
   switch (event.type) {
     case "thread.created": {
       const payload = event.payload;
+      const profileId = profileIdOf(payload.profileId);
       return {
         id: event.threadId,
         projectPath: payload.projectPath,
@@ -44,6 +45,8 @@ function projectHead(head: ThreadHead | null, event: DomainEvent): ThreadHead | 
         session: { status: "idle", activeTurnId: null },
         turnCount: 0,
         seq: event.seq,
+        // Agent Profiles, mirrored from the shared fold: absent = Global.
+        ...(typeof profileId === "string" ? { profileId } : {}),
         createdAt: event.occurredAt,
         updatedAt: event.occurredAt
       };
@@ -51,14 +54,19 @@ function projectHead(head: ThreadHead | null, event: DomainEvent): ThreadHead | 
     case "thread.meta-updated": {
       if (head === null) return null;
       const { title, modelSelection, accountId, home } = event.payload;
-      return {
+      const profileId = profileIdOf(event.payload.profileId);
+      const next: ThreadHead = {
         ...head,
         ...(title !== undefined ? { title } : {}),
         ...(modelSelection !== undefined ? { modelSelection } : {}),
         // §3.4's account switch, mirrored from the shared fold.
         ...(accountId !== undefined ? { accountId } : {}),
-        ...(home !== undefined ? { home } : {})
+        ...(home !== undefined ? { home } : {}),
+        // The Agent Profiles switch: a profile, or `null` — back to Global.
+        ...(typeof profileId === "string" ? { profileId } : {})
       };
+      if (profileId === null) delete next.profileId;
+      return next;
     }
     case "thread.runtime-mode-set":
       return head === null ? null : { ...head, runtimeMode: event.payload.runtimeMode };

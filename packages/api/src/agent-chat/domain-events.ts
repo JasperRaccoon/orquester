@@ -90,6 +90,15 @@ export interface ThreadCreatedPayload {
    * that does not read ({@link parseThreadLineage}) is no lineage.
    */
   lineage?: ThreadLineage;
+  /**
+   * The Agent Profile (`session-profiles.ts`) the thread was created with; the fold puts it on
+   * `ThreadHead.profileId`. Absent = Global (and on every log an older build wrote). Additive (§8
+   * rollback boundary): an older build ignores it. What a launch actually reads is the thread's
+   * `launch.json` (`HostThreadProfile`); this is the durable record of WHICH profile it is.
+   */
+  profileId?: string;
+  /** The profile revision the thread was created with. Informational: no fold reads it. */
+  profileRevision?: string;
 }
 
 /**
@@ -113,6 +122,14 @@ export interface ThreadMetaUpdatedPayload {
   accountId?: string;
   /** The home KIND for that account. */
   home?: AccountHomeKind;
+  /**
+   * The Agent Profile the thread runs with from now on (spec 2026-10-18 §5.3, "switching in a
+   * running chat"), written by the host's identity switch. A string switches to that profile,
+   * `null` back to Global; absent leaves the profile as it was. Additive like `accountId`.
+   */
+  profileId?: string | null;
+  /** The revision of the profile switched to. Informational: no fold reads it. */
+  profileRevision?: string;
 }
 
 export interface ThreadRuntimeModeSetPayload {

@@ -437,6 +437,45 @@ export interface AgentHostHealthResponse {
    * the daemon simply never raises the event from this path.
    */
   providersRevision?: number;
+  /**
+   * What this host build can do beyond {@link AGENT_HOST_PROTOCOL_VERSION}, for features added
+   * without a version bump. Optional: an older host omits it, which means "none of them" — read
+   * it through {@link agentHostSupports}, never as `capabilities.x !== undefined`.
+   */
+  capabilities?: AgentHostCapabilities;
+}
+
+/**
+ * {@link AgentHostHealthResponse.capabilities}. Each entry is the level the host implements, a
+ * positive integer, so a feature can grow a second level without a new name.
+ */
+export interface AgentHostCapabilities {
+  /**
+   * Agent Profiles (spec 2026-10-18): `1` = the host persists `profile` in the thread's
+   * `launch.json`, records `profileId` in the log, hands `StartSessionInput.profile` to every
+   * session start (create, resume, crash restart, a host restart's rehydrate, an identity switch,
+   * a fork's child) and takes a profile switch on `setThreadIdentity`. A host without it would
+   * run a profile thread as Global — the daemon must not send it one.
+   */
+  sessionProfiles?: number;
+}
+
+/** The capabilities this host build advertises on `/health`. */
+export const AGENT_HOST_CAPABILITIES: Readonly<Required<AgentHostCapabilities>> = Object.freeze({
+  sessionProfiles: 1
+});
+
+/**
+ * True when a host's `/health` advertises `capability` at `level` or above. `null` (no host
+ * adopted) and a host that predates capabilities both answer false.
+ */
+export function agentHostSupports(
+  health: Pick<AgentHostHealthResponse, "capabilities"> | null | undefined,
+  capability: keyof AgentHostCapabilities,
+  level = 1
+): boolean {
+  const value = health?.capabilities?.[capability];
+  return typeof value === "number" && Number.isFinite(value) && value >= level;
 }
 
 /**
@@ -518,10 +557,19 @@ export interface CreateHostThreadRequest {
   /**
    * The Agent Profile the thread launches with (`@orquester/api` `session-profiles.ts`). Absent =
    * Global. Additive: an older host ignores it (and then launches Global — the daemon must not
-   * send a profile thread to a host whose protocol predates profiles).
+   * send a profile thread to a host that does not advertise
+   * {@link AgentHostCapabilities.sessionProfiles}).
+   *
+   * A mirror of `profile.profileId`: `profile` is what the host reads. A `profileId` without a
+   * `profile`, or one naming another profile, is refused (`INVALID_COMMAND`) — the thread would
+   * otherwise launch as Global.
    */
   profileId?: string;
-  /** Where the profile was prepared for this thread's agent and account; see {@link HostThreadProfile}. */
+  /**
+   * Where the profile was prepared for this thread's agent and account; see
+   * {@link HostThreadProfile}. Persisted in the thread's `launch.json`, handed to every session
+   * start as `StartSessionInput.profile`, and its `profileId` recorded on `thread.created`.
+   */
   profile?: HostThreadProfile;
 }
 
@@ -546,8 +594,16 @@ export interface HostThreadProfile {
  * in the home that created it. `resume` and `lineage` are ignored: the host
  * builds both.
  */
-export interface ForkHostThreadRequest extends CreateHostThreadRequest {
+export interface ForkHostThreadRequest extends Omit<CreateHostThreadRequest, "profileId" | "profile"> {
   fork: ThreadForkTarget;
+  /**
+   * The child's Agent Profile. Absent: the PARENT's, as its `launch.json` holds it (a fork runs
+   * "with the same agent/model/options", and the account — so the prepared directory — is the
+   * parent's too). `null`: Global. A {@link HostThreadProfile}: that one.
+   */
+  profile?: HostThreadProfile | null;
+  /** A mirror of `profile`'s id (`null` for Global), checked like create's. */
+  profileId?: string | null;
   /**
    * The daemon's reconcile of a fork whose answer it lost: answer the child
    * `threadId` names if this host holds it (or once the fork creating it is
@@ -572,8 +628,9 @@ export interface ForkHostThreadResponse {
  * Body of `POST /threads/:id/identity` — §3.4's account switch, applied on the
  * thread's next message.
  *
- * The three launch fields are the SAME shapes {@link CreateHostThreadRequest}
- * carries, because they replace exactly what create wrote: the host rewrites
+ * The launch fields (`launchEnv`, `unsetEnv`, `homePath`, `serverPool`) are the
+ * SAME shapes {@link CreateHostThreadRequest} carries, because they replace
+ * exactly what create wrote: the host rewrites
  * `launch.json` from them **before** it records the new identity on the head,
  * so a host that dies in between relaunches under the environment the head
  * still names rather than under a half-applied one. `main.ts`'s `buildEnv` and
@@ -591,13 +648,29 @@ export interface SetThreadIdentityRequest {
   unsetEnv?: string[];
   homePath?: string;
   /**
-   * The profile the thread runs with from now on, with {@link profile} (spec §5.3 "switching in a
-   * running chat"). Like the launch fields it REPLACES what create wrote: the daemon sends the
-   * thread's profile on every identity switch, an account switch included; both absent = Global.
-   * Additive: an older host ignores them.
+   * The thread's keyed provider server from now on ({@link HostThreadServerPool}). A launch
+   * field like the three above: it REPLACES what `launch.json` held, so absent = the global
+   * server. Only OpenCode reads it, and OpenCode only takes a profile switch, which moves the
+   * thread to the server keyed by the new profile. Additive: an older host ignores it.
    */
-  profileId?: string;
-  profile?: HostThreadProfile;
+  serverPool?: HostThreadServerPool;
+  /**
+   * The Agent Profile switch (spec 2026-10-18 §5.3, "switching in a running chat"):
+   *
+   * - absent — the thread keeps the profile it has (an account-only switch);
+   * - `null` — the thread switches to Global;
+   * - a {@link HostThreadProfile} — the thread switches to it.
+   *
+   * A switch may change the profile only, the account only, or both. A profile-only switch keeps
+   * the account's resume identity (transcripts and session stores are shared across profiles),
+   * so the restart it causes carries the resume cursor and is not an account switch. An
+   * account-only switch of a thread whose profile is prepared per account (Codex) must still
+   * send the profile prepared for the NEW account. Additive: an older host ignores it — the
+   * daemon must check {@link AgentHostCapabilities.sessionProfiles} before it sends one.
+   */
+  profile?: HostThreadProfile | null;
+  /** A mirror of `profile`'s id (`null` for Global); refused when it disagrees with `profile`. */
+  profileId?: string | null;
 }
 
 /**
