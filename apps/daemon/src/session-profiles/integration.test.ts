@@ -525,6 +525,8 @@ async function effective(m: Machine, agent: SessionProfileAgentId, threadId: str
   assert.ok(profile, "a profile chat starts with its profile");
   assert.deepEqual(config.profile, profile, "launch.json holds the profile the start got");
   assert.ok(profile.preparedDir.startsWith(join(m.world.appdir, "daemon", "session-profiles", "prepared", profile.profileId)));
+  // MCP secret values live in the prepared 0600 files only: never in launch.json or the start input.
+  assert.ok(!JSON.stringify(config).includes("secret-") && !JSON.stringify(start).includes("secret-"), "no secret on the wire");
 
   if (agent === "claude") {
     const configDir = env.CLAUDE_CONFIG_DIR;
@@ -548,6 +550,7 @@ async function effective(m: Machine, agent: SessionProfileAgentId, threadId: str
     assert.deepEqual(options.settingSources, ["project", "local"], "no user setting source");
     assert.equal(options.strictMcpConfig, true);
     assert.equal(typeof options.settings, "string", "settings ride a 0600 file, not argv");
+    assert.ok(!JSON.stringify(options).includes("secret-"), "MCP secrets ride the --mcp-config file, not the options");
     const settings = profileFiles?.settings ?? {};
     assert.equal(settings.model, "opus", "runtime settings carry over");
     assert.deepEqual(settings.enabledPlugins, { "global-plugin@mkt": false }, "the installed Global plugin is switched off");
