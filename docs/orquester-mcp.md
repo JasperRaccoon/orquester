@@ -1917,7 +1917,8 @@ routes, like every other tool; everything a tool changes shows up live in the ed
   switched on usage limits. An optional `profileId` (an Agent Profile's id from `list_agents`
   `profiles`) launches the block's new chat with that profile; absent, it is Global. A profile that
   is gone or cannot be prepared fails the block at once (never Global, no failover), and validation
-  warns (`unknown_profile`) about a block naming a profile that no longer exists.
+  warns (`unknown_profile`) about a block naming a profile that no longer exists. Deleting a profile
+  in the right rail lists the workflows whose agent blocks use it and asks before going ahead.
 - **`rename_node` rewrites every `{{ }}` reference** (and an agent's `session.fromNode`), **not a
   name inside a code block's JavaScript** — update that source yourself.
 - **Edit with `update_workflow` ops, never by recreating a workflow**, and call `get_workflow` first
