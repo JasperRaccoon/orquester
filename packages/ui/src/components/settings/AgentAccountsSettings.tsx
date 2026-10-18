@@ -7,7 +7,8 @@ import { cn } from "../../lib/cn";
 import { useApi } from "../../context/orquester-context";
 import { ApiError } from "../../lib/api-client";
 import { useAppStore } from "../../store/app";
-import { GrokDeviceLink } from "./GrokDeviceLink";
+import { DeviceCodeLink } from "./DeviceCodeLink";
+import { ClaudeOAuthLink } from "./ClaudeOAuthLink";
 import { Badge, EmptyState, FormField, Notice, SettingRow, SettingsPage, SettingsSection } from "./primitives";
 import { LoginExpiryWarning } from "../auth/LoginExpiryWarning";
 import { useUsageNow } from "../../hooks/use-usage-display";
@@ -121,9 +122,9 @@ export function AgentAccountsSettings() {
                 icon={getRegistryIcon("agent", agent, 18)}
                 title={`No ${name} accounts`}
                 description={
-                  agent === "grok"
-                    ? "Link one with a device code below, or import a Grok auth.json."
-                    : `Import a ${agent === "claude" ? ".credentials.json" : "auth.json"} under “Add an account”.`
+                  agent === "claude"
+                    ? "Sign in below, or import a .credentials.json under “Add an account”."
+                    : `Link one with a code below, or import ${agent === "grok" ? "a Grok" : "a Codex"} auth.json.`
                 }
               />
             ) : (
@@ -138,9 +139,9 @@ export function AgentAccountsSettings() {
                 />
               ))
             )}
-            {/* Grok's second acquisition path: a device-code login (no
-                equivalent exists for Claude/Codex). */}
-            {agent === "grok" ? <GrokDeviceLink /> : null}
+            {/* The second acquisition path: a sign-in the daemon drives —
+                a device code for Grok and Codex, a pasted code for Claude. */}
+            {agent === "claude" ? <ClaudeOAuthLink /> : <DeviceCodeLink agent={agent} />}
           </SettingsSection>
         );
       })}

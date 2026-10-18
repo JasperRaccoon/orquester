@@ -1,18 +1,23 @@
 import type {
   AccountSummary,
   AccountTestResult,
+  AgentAccount,
   AgentConversationsResponse,
   AgentEventRequest,
   AgentUsage,
   BrowserClientMessage,
   BrowserSuggestionsResponse,
   BrowserSummary,
+  ClaudeOAuthLink,
+  ClaudeOAuthLinkStatus,
   CreateAccountRequest,
   CreateBrowserRequest,
   CreateProjectRequest,
   CreateSessionRequest,
   CreateTodoRequest,
   CreateWorkspaceRequest,
+  DeviceLink,
+  DeviceLinkStatus,
   EventMessage,
   FsCapabilitiesResponse,
   FsCreateRequest,
@@ -36,10 +41,9 @@ import type {
   GitStatusChangedPayload,
   GitStatusResponse,
   GitWorkingDiffResponse,
-  GrokDeviceLink,
-  GrokDeviceLinkStatus,
   HealthResponse,
   ImportAgentAccountRequest,
+  SubmitClaudeOAuthCodeRequest,
   KillProcessErrorResponse,
   KillProcessRequest,
   KillProcessResponse,
@@ -140,7 +144,15 @@ import { registerPluginRoutes } from "./plugins/routes.ts";
 import { detectRepoId } from "./repo-id";
 import { Tmux, sessionPath, tmuxAvailable, tmuxVersionOk } from "./tmux";
 import { SystemStatusService } from "./system-status";
-import { GrokDeviceLinkService } from "./grok-device-link.ts";
+import { DeviceLinkService } from "./device-link.ts";
+import { grokAuthJsonFromDeviceTokens, httpGrokDeviceAuth, type GrokDeviceTokens } from "./grok-device-auth.ts";
+import {
+  codexAuthJsonFromDeviceTokens,
+  httpCodexDeviceAuth,
+  type CodexDeviceHandle,
+  type CodexDeviceTokens
+} from "./codex-device-auth.ts";
+import { ClaudeOAuthLinkService } from "./claude-oauth-link.ts";
 import { retireModelProxy } from "./model-proxy-retirement.ts";
 import { Broadcaster } from "./broadcaster";
 import { AccountError, AccountsService } from "./accounts";
@@ -1161,12 +1173,26 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     if (summary?.projectPath) urlWatcher.ingest(summary.projectPath, data);
   });
 
-  // The Grok account's device-code link (Settings → Accounts): a granted link
-  // becomes a managed grok account.
-  const grokDeviceLink = new GrokDeviceLinkService({
+  // The Grok and Codex accounts' device-code links and the Claude account's
+  // sign-in link (Settings → Accounts): a granted link becomes a managed account.
+  const grokDeviceLink = new DeviceLinkService({
+    name: "Grok",
+    auth: httpGrokDeviceAuth,
+    credential: (tokens) => grokAuthJsonFromDeviceTokens(tokens),
     importAccount: (content) => agentAccounts.importAccount({ content })
   });
   grokDeviceLink.events.on("changed", (status) => broadcaster.publish("agent-accounts", "grok-link.changed", status));
+  const codexDeviceLink = new DeviceLinkService({
+    name: "Codex",
+    auth: httpCodexDeviceAuth,
+    credential: (tokens) => codexAuthJsonFromDeviceTokens(tokens),
+    importAccount: (content) => agentAccounts.importAccount({ content })
+  });
+  codexDeviceLink.events.on("changed", (status) => broadcaster.publish("agent-accounts", "codex-link.changed", status));
+  const claudeOAuthLink = new ClaudeOAuthLinkService({
+    importAccount: (content, identity) => agentAccounts.importAccount({ content }, identity)
+  });
+  claudeOAuthLink.events.on("changed", (status) => broadcaster.publish("agent-accounts", "claude-link.changed", status));
   // `request_secret` cards (design 2026-10-14 §5): in memory only, values
   // handed straight to the waiting session-tool call.
   const secretRequests = new SecretRequestRegistry({
@@ -1177,7 +1203,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   agentChat.setSecretRequests(secretRequests);
   const services: Services = {
     secretRequests,
-    registry, sessions, grokDeviceLink, accounts, git, gitWatcher, todos, recentProjects, savedPrompts, usage, usageTokens, chatThreadUsage, subagentCacheTtl, push, broadcaster, agentAccounts, browsers, urlWatcher, agentChat,
+    registry, sessions, grokDeviceLink, codexDeviceLink, claudeOAuthLink, accounts, git, gitWatcher, todos, recentProjects, savedPrompts, usage, usageTokens, chatThreadUsage, subagentCacheTtl, push, broadcaster, agentAccounts, browsers, urlWatcher, agentChat,
     plugins,
     desktops, desktopAudio,
     agentProfile,
@@ -1486,8 +1512,11 @@ const MANAGED_CRED_FILENAME = { claude: ".credentials.json", codex: "auth.json",
 interface Services {
   registry: RegistryService;
   sessions: ISessionManager;
-  /** The Grok account's device-code link (Settings → Accounts). */
-  grokDeviceLink: GrokDeviceLinkService;
+  /** The Grok and Codex accounts' device-code links (Settings → Accounts). */
+  grokDeviceLink: DeviceLinkService<string, GrokDeviceTokens>;
+  codexDeviceLink: DeviceLinkService<CodexDeviceHandle, CodexDeviceTokens>;
+  /** The Claude account's sign-in link (Settings → Accounts). */
+  claudeOAuthLink: ClaudeOAuthLinkService;
   accounts: AccountsService;
   git: GitService;
   /** Refcounted per-project git status poller behind `project.git.changed`. */
@@ -3594,19 +3623,51 @@ export function createServer(
     }
   });
 
-  // The Grok account's device-code link. Start answers the prompt to show the
-  // user and polls auth.x.ai in the background; the state moves on the
-  // agent-accounts channel (`grok-link.changed`), and a granted link becomes a
-  // managed account (`agent-accounts.changed`).
-  app.get("/api/agent-accounts/grok/link", async (): Promise<GrokDeviceLinkStatus> => services.grokDeviceLink.status());
+  // The Grok and Codex accounts' device-code links. Start answers the prompt to
+  // show the user and polls the provider in the background; the state moves on
+  // the agent-accounts channel (`<agent>-link.changed`), and a granted link
+  // becomes a managed account (`agent-accounts.changed`).
+  for (const [agent, link] of [
+    ["grok", services.grokDeviceLink],
+    ["codex", services.codexDeviceLink]
+  ] as const) {
+    app.get(`/api/agent-accounts/${agent}/link`, async (): Promise<DeviceLinkStatus> => link.status());
 
-  app.post("/api/agent-accounts/grok/link", async (_request, reply): Promise<GrokDeviceLink | undefined> => {
-    const res = await services.grokDeviceLink.start();
-    if (!res.ok) return reply.code(res.code === "conflict" ? 409 : 502).send({ error: res.error });
+    app.post(`/api/agent-accounts/${agent}/link`, async (_request, reply): Promise<DeviceLink | undefined> => {
+      const res = await link.start();
+      if (!res.ok) return reply.code(res.code === "conflict" ? 409 : 502).send({ error: res.error });
+      return res.link;
+    });
+
+    app.delete(`/api/agent-accounts/${agent}/link`, async (): Promise<DeviceLinkStatus> => link.cancel());
+  }
+
+  // The Claude account's sign-in link. Start answers the Claude.ai authorize
+  // URL; the code its callback page shows comes back on `/code`, and the
+  // daemon exchanges it for a managed account. State moves on
+  // `claude-link.changed`.
+  app.get("/api/agent-accounts/claude/link", async (): Promise<ClaudeOAuthLinkStatus> => services.claudeOAuthLink.status());
+
+  app.post("/api/agent-accounts/claude/link", async (_request, reply): Promise<ClaudeOAuthLink | undefined> => {
+    const res = services.claudeOAuthLink.start();
+    if (!res.ok) return reply.code(409).send({ error: res.error });
     return res.link;
   });
 
-  app.delete("/api/agent-accounts/grok/link", async (): Promise<GrokDeviceLinkStatus> => services.grokDeviceLink.cancel());
+  app.post("/api/agent-accounts/claude/link/code", async (request, reply): Promise<AgentAccount | undefined> => {
+    const body = (request.body ?? {}) as Partial<SubmitClaudeOAuthCodeRequest>;
+    if (typeof body.code !== "string" || !body.code.trim()) {
+      return reply.code(400).send({ error: "Paste the code from the Claude sign-in page." });
+    }
+    const res = await services.claudeOAuthLink.submit(body.code);
+    if (!res.ok) {
+      const status = { idle: 409, conflict: 409, invalid: 400, upstream: 502 }[res.code];
+      return reply.code(status).send({ error: res.error });
+    }
+    return res.account;
+  });
+
+  app.delete("/api/agent-accounts/claude/link", async (): Promise<ClaudeOAuthLinkStatus> => services.claudeOAuthLink.cancel());
 
   app.put("/api/agent-accounts/defaults", async (request, reply) => {
     const body = (request.body ?? {}) as SetAgentAccountDefaultsRequest;

@@ -5,6 +5,8 @@ import type {
   AgentAccountsResponse,
   AgentConversationsResponse,
   AuthInfoResponse,
+  ClaudeOAuthLink,
+  ClaudeOAuthLinkStatus,
   BrowserSummary,
   BrowserSuggestionsResponse,
   CreateAccountRequest,
@@ -14,6 +16,9 @@ import type {
   CreateSavedPromptRequest,
   CreateTodoRequest,
   CreateWorkspaceRequest,
+  DeviceLink,
+  DeviceLinkAgent,
+  DeviceLinkStatus,
   EventMessage,
   FsArchiveResponse,
   FsCapabilitiesResponse,
@@ -36,8 +41,6 @@ import type {
   GitStashEntry,
   GitStatusResponse,
   GitWorkingDiffResponse,
-  GrokDeviceLink,
-  GrokDeviceLinkStatus,
   HealthResponse,
   ImportAgentAccountRequest,
   KillProcessResponse,
@@ -63,6 +66,7 @@ import type {
   SessionUploadRequest,
   SessionUploadResponse,
   SetAgentAccountDefaultsRequest,
+  SubmitClaudeOAuthCodeRequest,
   SystemPortsResponse,
   SystemProcessDetailsResponse,
   SystemProcessesResponse,
@@ -1210,22 +1214,47 @@ export class ApiClient {
     return this.send("PUT", "/api/agent-accounts/defaults", { body: req });
   }
 
-  // Grok's device-code login: the daemon drives the RFC 8628 flow against
-  // auth.x.ai and broadcasts `grok-link.changed` on the agent-accounts channel
-  // as it advances; a granted link becomes a managed grok account.
+  // Device-code account links for Grok and Codex: the daemon drives the
+  // provider's device flow and broadcasts `<agent>-link.changed` on the
+  // agent-accounts channel as it advances; a granted link becomes a managed
+  // account.
 
-  getGrokDeviceLink(signal?: AbortSignal): Promise<GrokDeviceLinkStatus> {
-    return this.send("GET", "/api/agent-accounts/grok/link", { signal });
+  getDeviceLink(agent: DeviceLinkAgent, signal?: AbortSignal): Promise<DeviceLinkStatus> {
+    return this.send("GET", `/api/agent-accounts/${agent}/link`, { signal });
   }
 
-  /** Start a link. 409 while one is already pending, 502 when auth.x.ai fails. */
-  startGrokDeviceLink(): Promise<GrokDeviceLink> {
-    return this.send("POST", "/api/agent-accounts/grok/link");
+  /** Start a link. 409 while one is already pending, 502 when the provider fails. */
+  startDeviceLink(agent: DeviceLinkAgent): Promise<DeviceLink> {
+    return this.send("POST", `/api/agent-accounts/${agent}/link`);
   }
 
   /** Cancel a pending link; idempotent. */
-  cancelGrokDeviceLink(): Promise<GrokDeviceLinkStatus> {
-    return this.send("DELETE", "/api/agent-accounts/grok/link");
+  cancelDeviceLink(agent: DeviceLinkAgent): Promise<DeviceLinkStatus> {
+    return this.send("DELETE", `/api/agent-accounts/${agent}/link`);
+  }
+
+  // Claude's sign-in link: the daemon hands out the Claude.ai authorize URL and
+  // exchanges the code its callback page shows; `claude-link.changed` carries
+  // the state.
+
+  getClaudeOAuthLink(signal?: AbortSignal): Promise<ClaudeOAuthLinkStatus> {
+    return this.send("GET", "/api/agent-accounts/claude/link", { signal });
+  }
+
+  /** Start a sign-in. 409 while one is already pending. */
+  startClaudeOAuthLink(): Promise<ClaudeOAuthLink> {
+    return this.send("POST", "/api/agent-accounts/claude/link");
+  }
+
+  /** Complete the pending sign-in with the pasted code. 400 for a code that is
+   *  malformed or refused, 409 with nothing pending. */
+  submitClaudeOAuthCode(req: SubmitClaudeOAuthCodeRequest): Promise<AgentAccount> {
+    return this.send("POST", "/api/agent-accounts/claude/link/code", { body: req });
+  }
+
+  /** Cancel a pending sign-in; idempotent. */
+  cancelClaudeOAuthLink(): Promise<ClaudeOAuthLinkStatus> {
+    return this.send("DELETE", "/api/agent-accounts/claude/link");
   }
 
   installRegistryEntry(id: string): Promise<RegistryActionResult> {

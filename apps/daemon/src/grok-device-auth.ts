@@ -1,5 +1,6 @@
 import { GROK_OIDC_ISSUER, GROK_OIDC_CLIENT_ID } from "./agent-account-refresh.ts";
 import { decodeJwtPayload } from "./agent-account-identity.ts";
+import type { DeviceAuth } from "./device-link.ts";
 
 /**
  * Direct RFC 8628 device-code login against xAI's OIDC issuer — the same
@@ -25,36 +26,11 @@ const DEVICE_SCOPE =
   "conversations:read conversations:write workspaces:read workspaces:write";
 const REQUEST_TIMEOUT_MS = 10_000;
 
-interface GrokDevicePrompt {
-  url: string;
-  userCode: string;
-  /** Opaque polling handle — never shown to the user. */
-  deviceCode: string;
-  /** Server-mandated minimum seconds between polls (RFC 8628 `interval`). */
-  intervalSec: number;
-  expiresIn: number;
-}
-
 export interface GrokDeviceTokens {
   access_token: string;
   refresh_token: string;
   expires_in?: number;
   id_token?: string;
-}
-
-type GrokDeviceStart =
-  | { ok: true; value: GrokDevicePrompt }
-  | { ok: false; error: string; status?: number };
-
-type GrokDevicePoll =
-  | { status: "wait"; slowDown?: boolean }
-  | { status: "ok"; tokens: GrokDeviceTokens }
-  | { status: "error"; error: string };
-
-/** The RFC 8628 authorization and token-polling protocol. */
-interface GrokDeviceAuth {
-  start(): Promise<GrokDeviceStart>;
-  poll(deviceCode: string): Promise<GrokDevicePoll>;
 }
 
 async function form(
@@ -75,7 +51,9 @@ async function form(
   }
 }
 
-export const httpGrokDeviceAuth: GrokDeviceAuth = {
+/** The RFC 8628 authorization and token-polling protocol; the polling handle
+ *  is the device code. */
+export const httpGrokDeviceAuth: DeviceAuth<string, GrokDeviceTokens> = {
   async start() {
     const res = await form(DEVICE_CODE_URL, { client_id: GROK_OIDC_CLIENT_ID, scope: DEVICE_SCOPE });
     if ("error" in res) return { ok: false, error: res.error };
@@ -97,7 +75,7 @@ export const httpGrokDeviceAuth: GrokDeviceAuth = {
       value: {
         url,
         userCode,
-        deviceCode,
+        handle: deviceCode,
         intervalSec: typeof b.interval === "number" && b.interval > 0 ? b.interval : 5,
         expiresIn: typeof b.expires_in === "number" && b.expires_in > 0 ? b.expires_in : 1800
       }

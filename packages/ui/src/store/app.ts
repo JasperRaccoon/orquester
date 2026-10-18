@@ -133,14 +133,16 @@ import type {
   AgentAccountsResponse,
   AgentConversationSummary,
   BrowserSummary,
+  ClaudeOAuthLinkStatus,
   CreateAgentChatSessionFields,
   CreateDesktopRequest,
   DesktopAppSummary,
   DesktopHostStatus,
   DesktopSummary,
+  DeviceLinkAgent,
+  DeviceLinkStatus,
   ForkSessionRequest,
   ForkSessionResponse,
-  GrokDeviceLinkStatus,
   LaunchAppRequest,
   ProviderUsageWindow,
   ProviderUsageLimitsUpdate,
@@ -773,10 +775,13 @@ export interface AppState {
   usageTokens: UsageTokensResponse | null;
   agentAccounts: AgentAccountsResponse | null;
   /**
-   * Grok's device-code login as the daemon reports it, or null before first
-   * load; live via `grok-link.changed` on the agent-accounts channel.
+   * The Grok and Codex device-code links as the daemon reports them, each null
+   * before first load; live via `<agent>-link.changed` on the agent-accounts
+   * channel.
    */
-  grokDeviceLink: GrokDeviceLinkStatus | null;
+  deviceLinks: Record<DeviceLinkAgent, DeviceLinkStatus | null>;
+  /** Claude's sign-in link, likewise; live via `claude-link.changed`. */
+  claudeOAuthLink: ClaudeOAuthLinkStatus | null;
   workspaces: WorkspaceSummary[];
   /** "Protect archived data" daemon flag (UI curtain; loaded on connect). */
   protectArchived: boolean;
@@ -1031,8 +1036,10 @@ export interface AppState {
   loadUsage: (force?: boolean) => Promise<void>;
   loadUsageTokens: (force?: boolean) => Promise<void>;
   loadAgentAccounts: () => Promise<void>;
-  /** Fetch Grok's device-code link state into the store. */
-  loadGrokDeviceLink: () => Promise<void>;
+  /** Fetch a device-code link's state into the store. */
+  loadDeviceLink: (agent: DeviceLinkAgent) => Promise<void>;
+  /** Fetch Claude's sign-in link state into the store. */
+  loadClaudeOAuthLink: () => Promise<void>;
   installAgent: (id: string) => Promise<void>;
   updateAgent: (id: string) => Promise<void>;
   /**
@@ -1224,7 +1231,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   usage: null,
   usageTokens: null,
   agentAccounts: null,
-  grokDeviceLink: null,
+  deviceLinks: { grok: null, codex: null },
+  claudeOAuthLink: null,
   workspaces: [],
   protectArchived: false,
   protectArchivedLoaded: false,
@@ -2413,13 +2421,26 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
-  loadGrokDeviceLink: async () => {
+  loadDeviceLink: async (agent) => {
     const api = get().api;
     if (!api) {
       return;
     }
     try {
-      set({ grokDeviceLink: await api.getGrokDeviceLink() });
+      const status = await api.getDeviceLink(agent);
+      set((state) => ({ deviceLinks: { ...state.deviceLinks, [agent]: status } }));
+    } catch {
+      /* keep current */
+    }
+  },
+
+  loadClaudeOAuthLink: async () => {
+    const api = get().api;
+    if (!api) {
+      return;
+    }
+    try {
+      set({ claudeOAuthLink: await api.getClaudeOAuthLink() });
     } catch {
       /* keep current */
     }
@@ -3330,8 +3351,12 @@ export const useAppStore = create<AppState>((set, get) => ({
       return;
     }
     if (event.channel === "agent-accounts") {
-      if (event.type === "grok-link.changed") {
-        set({ grokDeviceLink: event.payload as GrokDeviceLinkStatus });
+      if (event.type === "grok-link.changed" || event.type === "codex-link.changed") {
+        const agent: DeviceLinkAgent = event.type === "grok-link.changed" ? "grok" : "codex";
+        const status = event.payload as DeviceLinkStatus;
+        set((state) => ({ deviceLinks: { ...state.deviceLinks, [agent]: status } }));
+      } else if (event.type === "claude-link.changed") {
+        set({ claudeOAuthLink: event.payload as ClaudeOAuthLinkStatus });
       } else {
         set({ agentAccounts: event.payload as AgentAccountsResponse });
       }
