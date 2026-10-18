@@ -15,6 +15,7 @@ per-agent GLOBAL config editor, user-facing "Agent config"). A chat without `pro
 | `manifest.ts` + `manifest/<agent>.ts` | Prepared-dir `manifest.json` envelope + per-agent section schemas; read by the agent host. |
 | `preparer.ts` + `preparers/<agent>.ts` | Per-agent preparer contract and registry (all `null` for now). |
 | `lifecycle.ts` | `SessionProfileLifecycle`: builds, swaps, tracks and refreshes prepared dirs; `ensureReady` for launches. |
+| `launch.ts` | The launch side: per-agent launch contributions (`profileLaunchContributors`), `applyProfileContribution`, `createProfileLaunchResolver` (what `AgentChatService` launches with), `PreparedDirLeases`, `SessionProfileNames` + the deleted-profile notice. |
 | `service.ts` | `SessionProfileService`: wire mapping (secrets masked), events, prepare status, `resolveForAgent(profileId, agent)`. |
 | `routes.ts` | REST surface (`sessionProfileRoutes`), both transports. |
 | `errors.ts` | `SessionProfileError` → `{error: {code, message}}`. |
@@ -96,6 +97,77 @@ preparer (System = `system`, its account home is the agent's system home), else 
   `agent-host/adapters/profile-manifest.ts`'s `loadProfileManifest(input, agent)` (see the
   agent-host README). The daemon must check `AgentChatService.hostSupportsSessionProfiles()`
   before sending a profile — an older host would run it as Global.
+
+## Launching a chat with a profile (`launch.ts`, `agent-chat/service.ts`)
+
+**Per-agent launch contributions.** `profileLaunchContributors: { [agent]: (ctx) =>
+ProfileLaunchContribution }`, read through `profileLaunchContribution(agent)`. Every agent
+contributes nothing today; each per-agent task replaces ITS entry (and nothing else):
+
+```ts
+ctx: { agent, profile: {profileId, revision, preparedDir}, manifestSection /* manifest/<agent>.ts */,
+       accountId /* null = System */, accountHome /* the launch env's home var, else the System home */,
+       projectPath, launchEnv /* the account's, read-only */ }
+→ { env?, unsetEnv?, homePath?, serverPool? }        // may be async; a throw = PROFILE_NOT_READY
+```
+
+`applyProfileContribution(base, contribution, homeVar)` is the one composition rule: `env` over the
+account's launch env (it wins), `unsetEnv` merged (and removed from the env; a contributed variable
+is never unset by the account's list), `homePath` = the contribution's, else whatever the agent's
+home variable (`ACCOUNT_HOME_ENV_VAR`) names after `env` — so Codex pointing `CODEX_HOME` at the
+prepared home moves the resume identity's home with it —, `serverPool` = the contribution's, else
+the account's. Expected: Codex `CODEX_HOME`; Grok `GROK_HOME`, `GROK_AUTH_PATH`, compat env;
+OpenCode a `serverPool {key, env}` (key derived from the prepared version, never `"global"`).
+
+**The seam.** `createProfileLaunchResolver({lifecycle, contributors?, accountHome?})` =
+`ensureReady(profileId, agent, accountId)` → `readPreparedManifest` → contributor →
+`applyProfileContribution`; it throws `SessionProfileError` only. `index.ts` hands it to
+`AgentChatService.setSessionProfiles({resolve, profileName})`. Every chat launch path goes through
+it: create (`profileId` top-level or `chat.profileId`), fork (the parent's profile unless
+`ForkSessionRequest.profileId` names one, `null` = Global), the fork reconcile (`confirmOnly`
+re-sends the child's), the account switch (the profile prepared for the NEW account), and the
+profile switch. Each refuses (`COMMAND_REJECTED`) while `hostSupportsSessionProfiles()` is false,
+sends `profile` (+ the contributed launch fields) to the host and mirrors `profileId` on the tab
+record (`sessionChatRecordSchema.profileId`; `SessionSummary.profileId`, `null` = Global).
+
+**Profile switch.** `POST /api/sessions/:id/profile` (`agentChatRoutes.profile`, both transports,
+the account route's auth, refusals and receipts): `ProfileCommandBody {commandId, profileId |
+null}` → the host's identity switch with `profile` (`null` = Global); a profile-only switch keeps
+the resume cursor. Idempotent by `commandId` (a repeat shares the first's answer; the same id with
+another profile is `COMMAND_ID_CONFLICT`; a refusal is forgotten so it may be retried).
+
+**Refresh at every session start.** Before ANY provider session of a profile thread starts (the
+first, a resume, a crash restart, a host restart's rehydrate, a switch), the agent host calls the
+daemon's socket-only `POST /api/agent-host/threads/launch-profile` (`daemonRoutesForHost
+.threadLaunchProfile`, host bearer) with `{threadId, profileId}` and rewrites `launch.json` from
+the answer (`ThreadLaunchProfileResponse`: the current `profile` and launch fields) before it
+starts — so an edited profile applies at the next start and a GC'd version never fails one. A
+refusal (409 `PROFILE_NOT_READY` / `PROFILE_UNSUPPORTED_AGENT` / `PROFILE_NOT_FOUND` for an
+unattended chat / `LAUNCH_UNAVAILABLE`) fails the start with its message. Daemon unreachable, 5xx,
+or an older daemon's route miss: the host launches the persisted `launch.json` profile only if its
+manifest still validates (`loadProfileManifest`), else the start fails — never Global. (It is a
+separate route, not the session-tools manifest fetch: that one runs inside the adapter's start,
+after the env and home are already built.)
+
+**Deleted profile (§5.6).** At a refresh, `PROFILE_NOT_FOUND` for an INTERACTIVE chat answers the
+account's own launch with `profile: null` and `fallback {previousProfileId, notice}`; the host
+writes `thread.meta-updated {profileId: ""}` and a `runtime.warning` row whose summary is the
+notice (`Agent Profile "X" was deleted; this chat now uses Global.` — the name from
+`SessionProfileNames`, kept after the delete while the daemon runs), and the tab mirrors Global.
+An account switch or a fork of such a chat goes ahead without naming the profile and leaves the
+fallback to the next start's refresh. **Unattended** launches never fall back:
+`CreateAgentChatSessionFields.unattended` / `ForkSessionRequest.unattended` (persisted as
+`sessionChatRecordSchema.unattended`; a fork of an unattended chat is unattended) make every later
+refresh refuse `PROFILE_NOT_FOUND`. A create naming a missing or failed profile fails either way.
+`PROFILE_NOT_READY` / `PROFILE_UNSUPPORTED_AGENT` always fail with the reason.
+
+**Leases.** `PreparedDirLeases { inUse(): Promise<ReadonlySet<string>> }` — implemented by
+`AgentChatService.profileLeases()` over the host's `GET /profiles/leases` (the `preparedDir` of
+every live provider session and every start in flight); it REJECTS when the host cannot say (down,
+an older host's 404), and the GC must then delete nothing. Wiring point: the lifecycle's
+construction in `index.ts` (`leases: { inUse: () => agentChat.profileLeases() }`, once the
+lifecycle takes it).
+
 - **Imports** (Global / git / zip / md / copy-from-profile / marketplace plugins): add routes under
   the paths reserved in `sessionProfileRoutes`' doc comment, and write through new store methods
   that take the profile queue and revision like `createItem` does.

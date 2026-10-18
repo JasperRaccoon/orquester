@@ -59,6 +59,7 @@ import {
   type AgentHostHealthResponse,
   type AgentHostHoldGoalsResponse,
   type AgentHostRecycleOpenCodeRequest,
+  type AgentHostProfileLeasesResponse,
   type AgentHostRecycleOpenCodeResponse,
   type AgentHostResumeGoalSessionsResponse,
   type CreateHostThreadRequest,
@@ -503,6 +504,14 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
       const body: AgentHostHoldGoalsResponse = {
         heldThreadIds: await orchestrator.holdContinuingGoals()
       };
+      sendJson(response, 200, body);
+      return;
+    }
+
+    // Agent Profiles (spec 2026-10-18 §6.5): the prepared dirs live sessions launched from, which
+    // the daemon's preparation GC must keep. In memory only; no body.
+    if (path === agentHostRoutes.profileLeases && method === "GET") {
+      const body: AgentHostProfileLeasesResponse = { preparedDirs: orchestrator.profileLeases() };
       sendJson(response, 200, body);
       return;
     }

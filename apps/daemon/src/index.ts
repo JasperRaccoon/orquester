@@ -157,6 +157,8 @@ import { SessionProfileService, publishSessionProfileEvents } from "./session-pr
 import { SessionProfileLifecycle, publishSessionProfilePrepareEvents } from "./session-profiles/lifecycle.ts";
 import { SessionProfileStore } from "./session-profiles/store.ts";
 import { registerSessionProfileRoutes } from "./session-profiles/routes.ts";
+import { createProfileLaunchResolver, SessionProfileNames } from "./session-profiles/launch.ts";
+import { registerThreadLaunchProfileRoute } from "./agent-chat/profile-launch-route.ts";
 import { createAgentProfileAdapters } from "./agent-profile/adapters/index.ts";
 import { createProfileConverter } from "./agent-profile/convert.ts";
 import { ProfileImportStore } from "./agent-profile/import.ts";
@@ -1080,6 +1082,10 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // re-prepares on profile changes and on Global config changes seen by Agent config's watcher.
   const sessionProfileStore = new SessionProfileStore({ appdir: paths.baseDir });
   const sessionProfileLifecycle = new SessionProfileLifecycle({
+    // LEASES WIRING POINT (task T6b): once the lifecycle takes `leases?: PreparedDirLeases`, pass
+    // `leases: { inUse: () => agentChat.profileLeases() }` here — the agent host's live sessions'
+    // prepared dirs (`GET /profiles/leases`); it rejects when the host cannot say, and the GC
+    // then deletes nothing.
     appdir: paths.baseDir,
     store: sessionProfileStore,
     systemHomes: agentProfileHomes,
@@ -1098,6 +1104,24 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   agentProfile.lifecycle.on("filesChanged", ({ agent }: { agent: AgentProfileAgentId }) => sessionProfileLifecycle.globalConfigChanged(agent));
   // Staging cleanup and the scan of prepared dirs; stale ones re-prepare in the background.
   await sessionProfileLifecycle.start().catch((error) => console.error("Agent Profiles: starting preparation failed", error));
+  // Chat launches with a profile (create, fork, its reconcile, account and profile switches, and
+  // the host's refresh before every session start): the current prepared version through
+  // `ensureReady`, its manifest section, and the agent's launch contribution over the account's
+  // launch (`session-profiles/launch.ts`). The names feed a deleted profile's fallback notice.
+  const sessionProfileNames = new SessionProfileNames();
+  void sessionProfileNames.track(sessionProfiles);
+  agentChat.setSessionProfiles({
+    resolve: createProfileLaunchResolver({
+      lifecycle: sessionProfileLifecycle,
+      accountHome: (agent, accountId) =>
+        accountId === null
+          ? { claude: agentProfileHomes.claudeDir, codex: agentProfileHomes.codexHome, grok: agentProfileHomes.grokHome, opencode: agentProfileHomes.opencodeDir }[agent]
+          : agentAccounts.getRecord(accountId)?.agent === agent
+            ? agentAccounts.homePath(agent, accountId)
+            : null
+    }),
+    profileName: (profileId) => sessionProfileNames.get(profileId)
+  });
 
   // Workflows → event bus (channel "workflows"): `workflow.upserted` (the rail summary — the
   // engine's, with live trigger state, once attached), `workflow.deleted`, `workflowSecrets.changed`
@@ -4708,6 +4732,18 @@ export function createServer(
     });
   }
   // umcp:t6 end
+
+  // Agent Profiles (spec 2026-10-18 §6.5): the agent host's refresh before every session start
+  // of a profile thread. SOCKET-ONLY, and the agent host's bearer besides (it answers a thread's
+  // launch environment).
+  if (options.mode === "local" && services.agentChat) {
+    const agentChat = services.agentChat;
+    registerThreadLaunchProfileRoute(app, {
+      authorizeHost: (authorization) => agentChat.authorizeHostRequest(authorization),
+      resolve: (threadId, profileId) => agentChat.threadLaunchProfile(threadId, profileId),
+      logger: console
+    });
+  }
 
   // umcp:t2 begin — both transports of the unified catalog (design 2026-10-15 §3.3), through ONE
   // executor whose port (`executorPorts.approvals`) the umcp:t3 block wires.

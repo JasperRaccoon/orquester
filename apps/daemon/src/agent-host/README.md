@@ -195,7 +195,17 @@ hands it over (`POST /goals/resume-sessions` → `resumeGoalSessionsAfterHandove
   the new key's server). `/health` advertises `capabilities: {sessionProfiles: 1}`
   (`AGENT_HOST_CAPABILITIES`); the daemon reads it with `AgentHostSupervisor.hostSupports` /
   `AgentChatService.hostSupportsSessionProfiles()` and must not send a profile to a host without it
-  (an older host ignores the fields and would launch Global).
+  (an older host ignores the fields and would launch Global). **Before every session start of a
+  profile thread** (`refreshLaunchProfile` in `startSessionNow`) the host asks the daemon's
+  socket-only `daemonRoutesForHost.threadLaunchProfile` (`orchestration/launch-profile.ts`, host
+  bearer) for the profile's current prepared version and launch fields and rewrites `launch.json`
+  from them first; the session is bound to the refreshed `profileKey`, so a new version restarts
+  nothing twice. A refusal fails the start with its reason; an unreachable daemon (or one without
+  the route) leaves the persisted profile only while its manifest validates, else the start fails.
+  A deleted profile's answer (`profile: null`, `fallback`) is recorded as `thread.meta-updated
+  {profileId: ""}` plus a `runtime.warning` notice row. `GET /profiles/leases` answers the
+  `preparedDir`s of live provider sessions and starts in flight (`orchestrator.profileLeases()`),
+  which the daemon's preparation GC keeps.
 - **`state.json`, `index.sqlite` and the store's tool-output cache are caches of `events.ndjson`,
   never authorities** (invariant 1). Any doubt — another version, a seq or byte offset that does not
   line up, a file that does not parse — discards the cache and re-derives from the log, never the

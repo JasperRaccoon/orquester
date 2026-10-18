@@ -78,6 +78,12 @@ export interface AgentChatRouteDeps {
    */
   switchAccount(id: string, body: { commandId: string; accountId: string }): Promise<{ seq: number }>;
   /**
+   * The Agent Profile switch (spec 2026-10-18 §5.3), daemon-owned like {@link switchAccount}:
+   * only the daemon resolves the profile's prepared directory and recomposes the launch.
+   * `profileId: null` is Global. Optional: route tests build partial deps (the route then 404s).
+   */
+  switchProfile?(id: string, body: { commandId: string; profileId: string | null }): Promise<{ seq: number }>;
+  /**
    * §6.3 `POST /api/agent-host/stop`: the host writes every continuation
    * marker for a running thread with a usable cursor, then drains and stops,
    * and the supervisor brings a replacement up. Answers the threads that were
@@ -249,6 +255,37 @@ export function registerAgentChatRoutes(app: FastifyInstance, deps: AgentChatRou
       }
     }
   );
+
+  // --- Agent Profiles: the profile switch (daemon-owned, as the account's) --
+  if (deps.switchProfile) {
+    const switchProfile = deps.switchProfile;
+    app.post<{ Params: { id: string }; Body: { commandId?: unknown; profileId?: unknown } }>(
+      pattern(agentChatRoutes.profile(":id")),
+      async (request, reply) => {
+        const { id } = request.params;
+        if (!deps.chatSession(id)) {
+          return reply.code(404).send(THREAD_NOT_FOUND);
+        }
+        if (!deps.isHostHealthy()) {
+          return reply.code(503).send(HOST_UNAVAILABLE);
+        }
+        const body = request.body ?? {};
+        try {
+          return await switchProfile(id, {
+            commandId: String(body.commandId ?? ""),
+            // Validated by the service: an id, or null for Global; anything else is INVALID_COMMAND.
+            profileId: body.profileId as string | null
+          });
+        } catch (error) {
+          // A profile refusal (PROFILE_NOT_READY, …) is a COMMAND_REJECTED with its reason.
+          const code = accountSwitchErrorCode(error);
+          return reply
+            .code(CHAT_ERROR_STATUS[code])
+            .send(chatError(code, error instanceof Error ? error.message : "Could not switch the profile."));
+        }
+      }
+    );
+  }
 
   // --- §6.3 reads ----------------------------------------------------------
 

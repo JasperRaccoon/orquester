@@ -53,6 +53,10 @@ export interface ChatSessionCreateInput {
   forkUnconfirmed?: boolean;
   /** The host has not created the thread yet (`SessionSummary.chatPending`); see {@link confirmCreated}. */
   pending?: boolean;
+  /** The Agent Profile the chat launches with; absent = Global. */
+  profileId?: string;
+  /** An unattended chat (MCP, workflow): its profile never falls back to Global. */
+  unattended?: boolean;
 }
 
 interface ChatSession {
@@ -67,6 +71,10 @@ interface ChatSession {
     forkUnconfirmed?: true;
     /** A plain create the host has not answered yet; persisted ({@link confirmCreated}). */
     createUnconfirmed?: true;
+    /** The Agent Profile (a mirror of the thread head's `profileId`); absent = Global. */
+    profileId?: string;
+    /** `CreateAgentChatSessionFields.unattended`, persisted. */
+    unattended?: true;
   };
 }
 
@@ -165,7 +173,8 @@ export class ChatSessionManager {
       createdAt: input.createdAt ?? new Date().toISOString(),
       ...(input.owner ? { owner: { ...input.owner } } : {}),
       ...(input.lineage ? { lineage: cloneLineage(input.lineage) } : {}),
-      ...(input.pending === true || input.forkUnconfirmed === true ? { chatPending: true } : {})
+      ...(input.pending === true || input.forkUnconfirmed === true ? { chatPending: true } : {}),
+      profileId: input.profileId ?? null
     };
     this.sessions.set(input.id, {
       summary,
@@ -176,7 +185,9 @@ export class ChatSessionManager {
         lastSeq: 0,
         ...(input.forkFingerprint !== undefined ? { forkFingerprint: input.forkFingerprint } : {}),
         ...(input.forkUnconfirmed === true ? { forkUnconfirmed: true as const } : {}),
-        ...(input.pending === true && input.forkUnconfirmed !== true ? { createUnconfirmed: true as const } : {})
+        ...(input.pending === true && input.forkUnconfirmed !== true ? { createUnconfirmed: true as const } : {}),
+        ...(input.profileId !== undefined ? { profileId: input.profileId } : {}),
+        ...(input.unattended === true ? { unattended: true as const } : {})
       }
     });
     this.lifecycle.emit("created", { ...summary });
@@ -266,6 +277,34 @@ export class ChatSessionManager {
     this.lifecycle.emit("updated", { ...session.summary });
     this.options.requestPersist();
     return { ...session.summary };
+  }
+
+  /**
+   * Record the chat's Agent Profile (`null` = Global) once the host has it: a profile switch, or
+   * the refresh at a session start (a deleted profile's fallback). Persisted; "updated" only on a
+   * change, so a client's chip and the delete confirmation's count follow.
+   */
+  setProfile(id: string, profileId: string | null): SessionSummary | null {
+    const session = this.sessions.get(id);
+    if (!session) return null;
+    if ((session.chat.profileId ?? null) === profileId) return null;
+    if (profileId === null) delete session.chat.profileId;
+    else session.chat.profileId = profileId;
+    session.summary.profileId = profileId;
+    this.lifecycle.emit("updated", { ...session.summary });
+    this.options.requestPersist();
+    return { ...session.summary };
+  }
+
+  /** The chat's Agent Profile, or null (Global); undefined for no such tab. */
+  profileOf(id: string): string | null | undefined {
+    const session = this.sessions.get(id);
+    return session ? (session.chat.profileId ?? null) : undefined;
+  }
+
+  /** Whether the chat was launched unattended (`CreateAgentChatSessionFields.unattended`). */
+  isUnattended(id: string): boolean {
+    return this.sessions.get(id)?.chat.unattended === true;
   }
 
   /**
@@ -411,7 +450,8 @@ export class ChatSessionManager {
         // …and a malformed lineage, or a fork point that did not read on its own.
         ...(record.lineage ? { lineage: lineageFromRecord(record.lineage) } : {}),
         // A fork or a create whose host answer never came: still being reconciled.
-        ...(record.chat.forkUnconfirmed === true || record.chat.createUnconfirmed === true ? { chatPending: true } : {})
+        ...(record.chat.forkUnconfirmed === true || record.chat.createUnconfirmed === true ? { chatPending: true } : {}),
+        profileId: record.chat.profileId ?? null
       };
       this.sessions.set(record.id, {
         summary,
@@ -424,7 +464,9 @@ export class ChatSessionManager {
             ? { forkFingerprint: record.chat.forkFingerprint }
             : {}),
           ...(record.chat.forkUnconfirmed === true ? { forkUnconfirmed: true as const } : {}),
-          ...(record.chat.createUnconfirmed === true ? { createUnconfirmed: true as const } : {})
+          ...(record.chat.createUnconfirmed === true ? { createUnconfirmed: true as const } : {}),
+          ...(record.chat.profileId !== undefined ? { profileId: record.chat.profileId } : {}),
+          ...(record.chat.unattended === true ? { unattended: true as const } : {})
         }
       });
     }
