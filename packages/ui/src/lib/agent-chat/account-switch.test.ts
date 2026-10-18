@@ -299,3 +299,16 @@ describe("labels", () => {
     assert.ok(options.some((option) => option.id === chatAccountSelectionId("")));
   });
 });
+
+describe("the profile chip's refusal", () => {
+  it("speaks of profiles, in the host's words for a profile switch", () => {
+    assert.equal(chatAccountSwitchRefusal({ ...idle, goalContinuing: true }, "profiles"), "Pause the goal before switching profiles.");
+    assert.match(chatAccountSwitchRefusal({ ...idle, goalHeldForUpdate: true }, "profiles") ?? "", /then switch profiles\.$/);
+    assert.equal(
+      chatAccountSwitchRefusal({ ...idle, compacting: true }, "profiles"),
+      "Wait for the context compaction to finish before switching profiles."
+    );
+    assert.equal(chatAccountSwitchRefusal({ ...idle, goalContinuing: true }), "Pause the goal before switching accounts.");
+    assert.equal(chatAccountSwitchRefusal(idle, "profiles"), null);
+  });
+});

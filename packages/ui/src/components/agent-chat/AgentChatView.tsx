@@ -934,7 +934,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
           profiles: profileList.profiles,
           selectedId: slice.head?.profileId ?? null,
           canSwitch: accountSwitchEnabled,
-          disabledReason: accountSwitchRefusal
+          disabledReason: paintOnly ? null : chatAccountSwitchRefusal(accountSwitchState, "profiles")
         };
 
   // --- the goal chip (goals §8.2) -------------------------------------------
