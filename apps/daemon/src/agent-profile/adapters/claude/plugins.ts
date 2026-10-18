@@ -267,7 +267,7 @@ export function claudePluginFetch(source: Record<string, unknown>): PluginFetchS
   const path = typeof source.path === "string" && source.path !== "" ? { path: source.path.replace(/^\.\/+/, "").replace(/\/+$/, "") } : {};
   switch (source.source) {
     case "github":
-      return typeof source.repo === "string" && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(source.repo)
+      return typeof source.repo === "string" && /^[A-Za-z0-9_][A-Za-z0-9_.-]*\/[A-Za-z0-9_][A-Za-z0-9_.-]*$/.test(source.repo)
         ? { url: `https://github.com/${source.repo}.git`, ...ref }
         : undefined;
     case "url":

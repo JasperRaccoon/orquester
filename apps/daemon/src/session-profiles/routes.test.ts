@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
@@ -193,11 +193,12 @@ describe("session profile routes", () => {
 });
 
 describe("session profile routes — imports, export, import", () => {
+  let workDir = "";
   async function importsHarness(): Promise<{ app: FastifyInstance; root: string }> {
     const root = await mkdtemp(join(tmpdir(), "orq-session-profile-import-routes-"));
     roots.push(root);
     const store = new SessionProfileStore({ appdir: root });
-    const workDir = join(root, "imports");
+    workDir = join(root, "imports");
     const scanner = new ProfileImportStore({ dir: workDir, existing: async () => new Set(), logger: { info: () => undefined, warn: () => undefined } });
     const unused = async (): Promise<never> => {
       throw new Error("not used");
@@ -268,6 +269,7 @@ describe("session profile routes — imports, export, import", () => {
       payload: zip
     });
     assert.equal(scan.statusCode, 200, scan.body);
+    assert.deepEqual((await readdir(workDir)).filter((name) => name.startsWith(".orq-upload-")), [], "the upload's temp file is gone");
     const { importId, candidates } = scan.json() as ProfileImportScanResponse;
     const taken = await app.inject({
       method: "POST",

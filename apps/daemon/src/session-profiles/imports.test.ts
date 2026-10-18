@@ -295,7 +295,13 @@ describe("Import from Global", () => {
     assert.ok(byName(both.profile, "skill", "review-2"));
     const text2 = await readFile(layout.skillFile(byName(both.profile, "skill", "review-2")!.id), "utf8");
     assert.match(text2, /^---\nname: review-2\n/);
-    const replaced = await h.service.importFromGlobal(profile.id, { revision: both.profile.revision, agent: "claude", itemIds: [skillId], agents: ["codex"], onConflict: "replace" });
+    // An identical hook is never kept twice: keep-both skips it.
+    const hookId = (await h.service.globalSource(profile.id, "claude")).items.find((item) => item.kind === "hook")!.id;
+    const hook1 = await h.service.importFromGlobal(profile.id, { revision: both.profile.revision, agent: "claude", itemIds: [hookId] });
+    const hook2 = await h.service.importFromGlobal(profile.id, { revision: hook1.profile.revision, agent: "claude", itemIds: [hookId], onConflict: "keep-both" });
+    assert.equal(hook2.profile.items.filter((item) => item.kind === "hook").length, 1);
+    assert.match(hook2.notes.join(" "), /Skipped the hook/);
+    const replaced = await h.service.importFromGlobal(profile.id, { revision: hook2.profile.revision, agent: "claude", itemIds: [skillId], agents: ["codex"], onConflict: "replace" });
     assert.equal(replaced.profile.items.filter((item) => item.name === "review").length, 1);
     assert.match(replaced.notes.join(" "), /Replaced the profile's skill "review"/);
 

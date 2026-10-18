@@ -321,7 +321,7 @@ export function registerSessionProfileRoutes(app: FastifyInstance, deps: Session
   });
 }
 
-/** Streams the body to a temp file, hands it to `handle`, and deletes it whatever happens. */
+/** Streams the body to a temp file, hands it to `handle`, and deletes it — BEFORE answering, whatever happens. */
 async function receiveThen<T>(
   request: FastifyRequest,
   reply: FastifyReply,
@@ -330,6 +330,7 @@ async function receiveThen<T>(
   status: number
 ): Promise<FastifyReply> {
   let tmp: string | undefined;
+  let result: T;
   try {
     await mkdir(dir, { recursive: true, mode: 0o700 });
     tmp = uploadTempPath(dir);
@@ -340,12 +341,13 @@ async function receiveThen<T>(
       tmp = undefined;
       return refuseUnread(request, reply, isUploadTooLarge(error) ? tooLarge() : error);
     }
-    return reply.code(status).send(await handle(tmp));
+    result = await handle(tmp);
   } catch (error) {
-    return sendError(request, reply, error);
-  } finally {
     if (tmp) await discardUpload(tmp);
+    return sendError(request, reply, error);
   }
+  await discardUpload(tmp);
+  return reply.code(status).send(result);
 }
 
 function tooLarge(): SessionProfileError {

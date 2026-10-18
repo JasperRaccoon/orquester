@@ -572,7 +572,8 @@ export class SessionProfileStore {
         const clashes = this.clashing(state.file, entry, name, agents);
         if (clashes.length > 0) {
           const label = `${KIND_WORD[kind]} "${name}"`;
-          const policy = options.onConflict === "keep-both" && kind === "plugin" ? "skip" : options.onConflict;
+          // A plugin cannot be kept twice, nor can the same hook: keep-both skips them.
+          const policy = options.onConflict === "keep-both" && (kind === "plugin" || kind === "hook") ? "skip" : options.onConflict;
           if (policy === "fail") throw errors.itemExists(KIND_WORD[kind], name);
           if (policy === "skip") {
             notes.push(`Skipped the ${label}: the profile already has it.`);
@@ -582,6 +583,7 @@ export class SessionProfileStore {
             for (const clash of clashes) this.dropItem(state, clash);
             notes.push(`Replaced the profile's ${label}.`);
           } else if (kind !== "hook" && kind !== "plugin") {
+            // keep-both
             const free = this.freeName(state.file, kind, name, agents);
             notes.push(`Added the ${label} as "${free}": the profile already has one.`);
             name = free;

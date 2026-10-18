@@ -392,7 +392,7 @@ export interface WriteSessionProfileInstructionsRequest {
 /**
  * What an import does with an item whose kind and name the profile already has (for an
  * overlapping agent scope): refuse the whole import (409 `ITEM_EXISTS`), replace the profile's
- * item, keep both (the new one gets a `-2` style suffix; a plugin cannot be kept twice and is
+ * item, keep both (the new one gets a `-2` style suffix; a plugin or an identical hook cannot be kept twice and is
  * skipped instead), or skip the new one. Every outcome other than a plain add is listed in the
  * response's `notes`.
  */

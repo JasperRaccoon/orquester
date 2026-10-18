@@ -12,7 +12,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { createHash } from "node:crypto";
 import Fastify from "fastify";
-import { claudePluginSource } from "./adapters/claude/plugins.ts";
+import { claudePluginFetch, claudePluginSource } from "./adapters/claude/plugins.ts";
 import type { PortableItem } from "./adapters/types.ts";
 import { codexMarketplaceRoot, codexPluginLocation } from "./adapters/codex/index.ts";
 import { ProfileImportStore } from "./import.ts";
@@ -415,4 +415,15 @@ test("readInstalledPlugin: the cache root comes from the path as named — an ac
   const read = await readInstalledPlugin(join(root, "account", ".codex", "plugins", "cache", "mkt", "p"), "2.0.0");
   assert.equal(read.unreadable, undefined);
   assert.match(read.tree.files[0]!.text!, /p-two/);
+});
+
+test("claudePluginFetch: which catalogue sources a git clone can fetch", () => {
+  assert.deepEqual(claudePluginFetch({ source: "github", repo: "acme/x", ref: "v1" }), { url: "https://github.com/acme/x.git", ref: "v1" });
+  assert.equal(claudePluginFetch({ source: "github", repo: "../evil" }), undefined);
+  assert.deepEqual(claudePluginFetch({ source: "url", url: "https://g.example/x.git" }), { url: "https://g.example/x.git" });
+  assert.deepEqual(claudePluginFetch({ source: "git-subdir", url: "https://g.example/m.git", path: "./plugins/p/" }), {
+    url: "https://g.example/m.git",
+    path: "plugins/p"
+  });
+  assert.equal(claudePluginFetch({ source: "npm", package: "x" }), undefined);
 });
