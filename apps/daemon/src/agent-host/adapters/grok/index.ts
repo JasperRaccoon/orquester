@@ -40,6 +40,7 @@ import type {
   ProviderSession,
   ProviderSnapshot,
   RuntimeEvent,
+  Skill,
   ThreadSnapshot,
   WorkspaceSnapshot
 } from "@orquester/api/agent-chat";
@@ -53,6 +54,7 @@ import {
   type RollbackTarget,
   type SendTurnInput,
   type SendTurnResult,
+  type SessionCatalog,
   type StartSessionInput
 } from "../../adapter.ts";
 import { join } from "node:path";
@@ -161,6 +163,8 @@ class GrokAdapter implements AgentAdapter {
 
   private readonly context: AdapterContext;
   private readonly sessions = new Map<string, GrokSession>();
+  /** {@link sessionCatalog}'s skills, read once per live session. */
+  private readonly sessionSkills = new WeakMap<GrokSession, Promise<Skill[]>>();
   /** Every session's stored MCP App snapshots, so an unchanged document is stored once per thread. */
   private readonly mcpAppSnapshots = new McpAppSnapshotStore();
   /**
@@ -563,6 +567,35 @@ class GrokAdapter implements AgentAdapter {
     callTool: async (threadId, input) => await this.appSession(threadId).mcpCallTool(input),
     readResource: async (threadId, input) => await this.appSession(threadId).mcpReadResource(input)
   };
+
+  /**
+   * The live session's own catalog (an Agent Profile chat's composer): the commands of its last
+   * `available_commands_update` (skills and plugin commands included, the two refused names left
+   * out) and the skills `grok inspect` lists under the session's own home and profile. `null`
+   * until the session reported its commands.
+   */
+  async sessionCatalog(threadId: string): Promise<SessionCatalog | null> {
+    const session = this.sessions.get(threadId);
+    if (session === undefined || session.isStopped || session.slashCommands.length === 0) return null;
+    let skills = this.sessionSkills.get(session);
+    if (skills === undefined) {
+      skills = this.inspectSessionSkills(session);
+      this.sessionSkills.set(session, skills);
+    }
+    return { slashCommands: mergeCommands([COMPACT_SLASH_COMMAND], session.slashCommands), skills: await skills };
+  }
+
+  /** One `grok inspect` per session; a failed one is not kept, so the next read tries again. */
+  private async inspectSessionSkills(session: GrokSession): Promise<Skill[]> {
+    const command = await this.context.resolveBin("grok");
+    const { env, cwd } = session.inspectTarget;
+    const skills = command === null ? null : await probeSkills(command, env, cwd);
+    if (skills === null) {
+      this.sessionSkills.delete(session);
+      return [];
+    }
+    return skills;
+  }
 
   private appSession(threadId: string): GrokSession {
     const session = this.sessions.get(threadId);

@@ -64,6 +64,7 @@ import type {
   ProviderSession,
   ProviderSessionStatus,
   RuntimeMode,
+  Skill,
   ThreadSnapshot,
   UserInputQuestion
 } from "@orquester/api/agent-chat";
@@ -75,7 +76,8 @@ import type {
   GoalCommandOptions,
   GoalCommandResult,
   HostGoalCommand,
-  RollbackTarget
+  RollbackTarget,
+  SessionCatalog
 } from "../../adapter.ts";
 import { isUsableConversationId } from "../../orchestration/resume.ts";
 import {
@@ -148,6 +150,7 @@ import {
 } from "./protocol.ts";
 import { CodexUsageTracker } from "./usage.ts";
 import { codexProfileSkillDisables, codexProfileSkillsConfig, type CodexProfileLaunch } from "./profile.ts";
+import { CODEX_SLASH_COMMANDS, skillsFromList } from "./probe.ts";
 import {
   codexDenyConfig,
   codexSessionToolsConfig,
@@ -333,6 +336,8 @@ export class CodexSession {
   private effectiveMcpServers: ReadonlySet<string> | undefined;
   /** A profile thread's skill switch-offs (`profile.ts`), read by `start` before the thread opens. */
   private profileSkillsConfig: NonNullable<CodexProtocol.v2.ThreadStartParams["config"]> = {};
+  /** A profile thread's skills as its last start listed them, minus the switched-off ones. */
+  private profileSkills: Skill[] | undefined;
   /**
    * §3.1 requires the excerpt to be redacted before it leaves the host — home
    * paths collapsed to `~` as well as token masking. `redactStderr` only
@@ -1581,7 +1586,25 @@ export class CodexSession {
         `This chat's Agent Profile could not be applied: Codex did not list its skills (${describeError(error)}), so the agent was not started.`
       );
     }
-    this.profileSkillsConfig = codexProfileSkillsConfig(codexProfileSkillDisables(listed.data, profile));
+    const disabled = codexProfileSkillDisables(listed.data, profile);
+    this.profileSkillsConfig = codexProfileSkillsConfig(disabled);
+    // What this thread loads, for its composer (`catalog()`): the listing minus the switched-off
+    // ones, filtered BEFORE the by-name dedupe so a Global skill never shadows the profile's.
+    const off = new Set(disabled);
+    this.profileSkills = skillsFromList(
+      { data: listed.data.map((entry) => ({ ...entry, skills: entry.skills.filter((skill) => !off.has(skill.path)) })) },
+      this.options.cwd
+    );
+  }
+
+  /**
+   * A profile thread's own catalog (`AgentAdapter.sessionCatalog`): the skills its last start
+   * listed minus the ones it switched off, and the host's own Codex commands (Codex has no command
+   * catalogue). `null` for a Global thread, before the listing, or once the session is gone.
+   */
+  catalog(): SessionCatalog | null {
+    if (this.profileSkills === undefined || !this.isLive) return null;
+    return { slashCommands: [...CODEX_SLASH_COMMANDS], skills: [...this.profileSkills] };
   }
 
   /**

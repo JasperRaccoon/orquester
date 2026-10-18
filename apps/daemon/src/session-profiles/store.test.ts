@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
 import type { SessionProfileItemDraft } from "@orquester/api";
-import { sessionProfileDir, sessionProfileSourcesDir } from "@orquester/config";
+import { sessionProfileDeletedFile, sessionProfileDir, sessionProfileSourcesDir } from "@orquester/config";
 import { SessionProfileError } from "./errors.ts";
 import { profileLayout } from "./layout.ts";
 import { SessionProfileService } from "./service.ts";
@@ -80,6 +80,33 @@ describe("SessionProfileStore — profiles", () => {
     await store.delete("id-1", "2");
     await rejects(store.read("id-1"), "PROFILE_NOT_FOUND");
     assert.deepEqual(await readdir(sessionProfileSourcesDir(appdir)), []);
+  });
+
+  it("keeps a deleted profile's last name on disk, read by a later store (a daemon restart)", async () => {
+    const { appdir, store } = await setup();
+    await store.create({ name: "Developer" });
+    await store.create({ name: "Video" });
+    await store.update("id-1", "1", { name: "Dev" });
+    assert.equal(await store.deletedName("id-1"), undefined, "a live profile is not deleted");
+    await store.delete("id-1", "2");
+    await store.delete("id-2", "1");
+    const later = new SessionProfileStore({ appdir, newId: () => "id-3" });
+    await later.init();
+    assert.equal(await later.deletedName("id-1"), "Dev");
+    assert.equal(await later.deletedName("id-2"), "Video");
+    assert.equal(await later.deletedName("id-3"), undefined);
+    // Unknown fields and entries of the file survive the next delete's rewrite.
+    const file = sessionProfileDeletedFile(appdir);
+    assert.equal((await stat(file)).mode & 0o777, 0o600);
+    const value = JSON.parse(await readFile(file, "utf8"));
+    await writeFile(file, JSON.stringify({ ...value, future: 1, profiles: { ...value.profiles, odd: { name: 5 } } }));
+    await later.create({ name: "Third" });
+    await later.delete("id-3", "1");
+    const after = JSON.parse(await readFile(file, "utf8"));
+    assert.equal(after.future, 1);
+    assert.deepEqual(after.profiles.odd, { name: 5 });
+    assert.equal(after.profiles["id-3"].name, "Third");
+    assert.equal(after.profiles["id-1"].name, "Dev");
   });
 
   it("refuses ids that are not one safe path segment as not found", async () => {
@@ -330,5 +357,38 @@ describe("SessionProfileStore — readSource", () => {
     await rm(profileLayout(sessionProfileDir(appdir, "id-1")).skillDir(itemId), { recursive: true });
     const source = await store.readSource("id-1");
     assert.deepEqual([...source.missingContent].sort(), [itemId, plugin.itemId].sort());
+  });
+});
+
+describe("SessionProfileService — the composer's fallback catalog", () => {
+  it("is the profile's own enabled, in-scope skills and commands (Codex: commands as skills) plus /compact — never anything else", async () => {
+    const { store, service } = await setup();
+    await store.create({ name: "P" });
+    await store.createItem("id-1", "1", SKILL);
+    await store.createItem("id-1", "2", {
+      kind: "command",
+      document: { name: "ship", frontmatter: { description: "Ship it", "argument-hint": "<version>" }, body: "Ship $ARGUMENTS\n" }
+    });
+    await store.createItem("id-1", "3", { kind: "skill", agents: ["grok"], document: { name: "grok-only", frontmatter: { description: "G" }, body: "" } });
+    await store.createItem("id-1", "4", { kind: "skill", enabled: false, document: { name: "off", frontmatter: { description: "Off" }, body: "" } });
+
+    const claude = await service.composerCatalog("id-1", "claude");
+    assert.deepEqual(claude.slashCommands, [
+      { name: "compact", description: "Compact this conversation's context." },
+      { name: "ship", description: "Ship it", input: { hint: "<version>" } }
+    ]);
+    assert.deepEqual(
+      claude.skills.map((skill) => [skill.name, skill.scope, skill.enabled, skill.description]),
+      [["review", "profile", true, "Review the diff"]]
+    );
+    assert.ok(claude.skills[0]!.path.endsWith("/SKILL.md"));
+
+    const codex = await service.composerCatalog("id-1", "codex");
+    assert.deepEqual(codex.slashCommands.map((command) => command.name), ["compact"]);
+    assert.deepEqual(codex.skills.map((skill) => skill.name), ["review", "ship"], "Codex runs a command as a skill");
+
+    const grok = await service.composerCatalog("id-1", "grok");
+    assert.deepEqual(grok.skills.map((skill) => skill.name).sort(), ["grok-only", "review"]);
+    await rejects(service.composerCatalog("nope", "claude"), "PROFILE_NOT_FOUND");
   });
 });

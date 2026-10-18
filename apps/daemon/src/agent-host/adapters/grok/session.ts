@@ -522,6 +522,11 @@ export class GrokSession {
     return this.normalizer.slashCommands;
   }
 
+  /** The env and cwd a `grok inspect` needs to see what THIS session loads (its home, its profile). */
+  get inspectTarget(): { env: Record<string, string>; cwd: string } {
+    return { env: { ...this.options.env, ...GROK_EXTRA_ENV, ...this.options.profileSpawn?.env }, cwd: this.options.cwd };
+  }
+
   // -------------------------------------------------------------- MCP Apps
 
   /**

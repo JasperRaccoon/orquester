@@ -165,7 +165,7 @@ export interface SessionProfilePluginView {
   source?: SessionProfilePluginSource;
 }
 
-/** A plugin's record. Creating one with files is the marketplace flow's job (a later route). */
+/** A plugin's record. Its files arrive only through `…/plugins`, Import from Global, copy from profile and profile import. */
 export interface SessionProfilePluginDraft {
   name: string;
   marketplace?: string;

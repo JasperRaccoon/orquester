@@ -65,6 +65,7 @@ import {
   type CreateHostThreadRequest,
   type ForkHostThreadRequest,
   type ForkHostThreadResponse,
+  type HostThreadCatalogResponse,
   type SessionToolsRefreshRequest,
   type SessionToolsRefreshResponse,
   type SetThreadIdentityRequest
@@ -751,6 +752,14 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
         });
         return;
       }
+      sendJson(response, 200, body);
+      return;
+    }
+
+    // What the thread's live session loaded (an Agent Profile chat's composer catalog);
+    // `live: false` without one. Never starts a session.
+    if (rest === "/catalog" && method === "GET") {
+      const body: HostThreadCatalogResponse = await orchestrator.readCatalog(threadId);
       sendJson(response, 200, body);
       return;
     }

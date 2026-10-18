@@ -205,7 +205,13 @@ hands it over (`POST /goals/resume-sessions` → `resumeGoalSessionsAfterHandove
   A deleted profile's answer (`profile: null`, `fallback`) is recorded as `thread.meta-updated
   {profileId: ""}` plus a `runtime.warning` notice row. `GET /profiles/leases` answers the
   `preparedDir`s of live provider sessions and starts in flight (`orchestrator.profileLeases()`),
-  which the daemon's preparation GC keeps.
+  which the daemon's preparation GC keeps. `GET /threads/:id/catalog` (`orchestrator.readCatalog`,
+  `AgentAdapter.sessionCatalog`) answers the commands and skills the thread's LIVE session loaded
+  — Claude's handshake `commands` + its dispatchable skills, Grok's last
+  `available_commands_update` + `grok inspect` under the session's env, OpenCode's `/command` and
+  `/skill` of the thread's own server, Codex's start-time `skills/list` minus its switch-offs —
+  or `live: false`; it never starts a session. The daemon's `GET /api/sessions/:id/catalog` serves
+  it to a profile chat's composer (else the profile's own items), never the Global catalog.
 - **`state.json`, `index.sqlite` and the store's tool-output cache are caches of `events.ndjson`,
   never authorities** (invariant 1). Any doubt — another version, a seq or byte offset that does not
   line up, a file that does not parse — discards the cache and re-derives from the log, never the

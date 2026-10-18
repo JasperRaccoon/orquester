@@ -33,6 +33,7 @@ import {
   type AgentHostHealthResponse,
   type AgentHostHoldGoalsResponse,
   type AgentHostRecycleOpenCodeResponse,
+  type HostThreadCatalogResponse,
   type AgentHostResumeGoalSessionsResponse
 } from "../host-protocol.ts";
 import { createThreadIndex, createUnavailableThreadIndex, type ThreadIndex } from "../index/index.ts";
@@ -1277,6 +1278,54 @@ describe("agent host server — agent profile §4.8, OpenCode server recycling",
       const answered = await h.call("POST", agentHostRoutes.recycleIdleOpenCode);
       assert.equal(answered.status, 200);
       assert.deepEqual(answered.body, { recycled: 0, deferred: 0 });
+    } finally {
+      await h.stop();
+    }
+  });
+});
+
+describe("agent host server — a thread's session catalog (Agent Profiles composer)", () => {
+  it("GET /threads/:id/catalog answers the live session's report, else live: false — never a start", async () => {
+    let answer: "catalog" | "none" | "throw" = "catalog";
+    const asked: string[] = [];
+    const claude = Object.assign(createScriptedAdapter({ id: "claude" }), {
+      sessionCatalog: async (threadId: string) => {
+        asked.push(threadId);
+        if (answer === "throw") throw new Error("the provider hung up");
+        return answer === "none"
+          ? null
+          : { slashCommands: [{ name: "review", description: "Review" }], skills: [{ name: "lint", path: "/p/lint/SKILL.md", enabled: true }] };
+      }
+    });
+    const h = await harness({ adapters: { claude } });
+    try {
+      const threadId = await h.host.createThread();
+      const live = await h.call("GET", agentHostRoutes.catalog(threadId));
+      assert.equal(live.status, 200);
+      assert.deepEqual(live.body, {
+        live: true,
+        slashCommands: [{ name: "review", description: "Review" }],
+        skills: [{ name: "lint", path: "/p/lint/SKILL.md", enabled: true }]
+      } satisfies HostThreadCatalogResponse);
+      answer = "none";
+      assert.deepEqual((await h.call("GET", agentHostRoutes.catalog(threadId))).body, { live: false, slashCommands: [], skills: [] });
+      answer = "throw";
+      assert.deepEqual((await h.call("GET", agentHostRoutes.catalog(threadId))).body, { live: false, slashCommands: [], skills: [] });
+      assert.deepEqual(asked, [threadId, threadId, threadId]);
+      assert.ok(!claude.calls.some((call) => call.kind === "startSession"), "a read never starts a session");
+      const missing = await h.call("GET", agentHostRoutes.catalog("no-such-thread"));
+      assert.equal(missing.status, 404);
+      assert.equal((missing.body as { error: { code: string } }).error.code, "THREAD_NOT_FOUND");
+    } finally {
+      await h.stop();
+    }
+  });
+
+  it("answers live: false for an adapter without the read", async () => {
+    const h = await harness({ adapters: { claude: createScriptedAdapter({ id: "claude" }) } });
+    try {
+      const threadId = await h.host.createThread();
+      assert.deepEqual((await h.call("GET", agentHostRoutes.catalog(threadId))).body, { live: false, slashCommands: [], skills: [] });
     } finally {
       await h.stop();
     }

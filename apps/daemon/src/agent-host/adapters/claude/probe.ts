@@ -117,7 +117,7 @@ function dedupeSlashCommands(commands: readonly SlashCommand[]): SlashCommand[] 
   return [...byName.values()];
 }
 
-function parseInitializationCommands(commands: unknown): SlashCommand[] {
+export function parseInitializationCommands(commands: unknown): SlashCommand[] {
   if (!Array.isArray(commands)) {
     return [];
   }
@@ -143,7 +143,7 @@ function parseInitializationCommands(commands: unknown): SlashCommand[] {
  * so it is synthesised for every provider that can serve it. It is prepended
  * and deduped, so a CLI that ever advertises its own `/compact` wins.
  */
-function withSynthesisedCommands(commands: readonly SlashCommand[]): SlashCommand[] {
+export function withSynthesisedCommands(commands: readonly SlashCommand[]): SlashCommand[] {
   return dedupeSlashCommands([
     ...commands,
     {

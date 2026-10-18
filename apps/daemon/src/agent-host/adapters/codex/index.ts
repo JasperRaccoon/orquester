@@ -498,6 +498,10 @@ export const createCodexAdapter: AdapterFactory = async (
       await requireSession(threadId).compact();
     },
 
+    async sessionCatalog(threadId: string) {
+      return sessions.get(threadId)?.catalog() ?? null;
+    },
+
     readThread(threadId: string): Promise<ThreadSnapshot> {
       return requireSession(threadId).readThread();
     },

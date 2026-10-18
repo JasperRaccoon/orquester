@@ -1091,3 +1091,65 @@ test("a head lookup past the cap is refused 400 INVALID_COMMAND, before the host
   assert.equal(h.host.requests.length, 0);
   await h.close();
 });
+
+// --- an Agent Profile chat's composer catalog ----------------------------------
+
+test("a profile chat's catalog is its live session's report, else the profile's own items — a Global chat's is none, without asking the host", async () => {
+  const profileTab = { ...tab("p1"), profileId: "editor" };
+  const asked: string[] = [];
+  const h = await makeHarness(
+    { t1: tab("t1"), p1: profileTab },
+    {
+      profileCatalog: async (summary) => {
+        asked.push(summary.id);
+        return { slashCommands: [{ name: "compact" }, { name: "ship" }], skills: [{ name: "cut", path: "/profile/cut/SKILL.md", enabled: true, scope: "profile" }] };
+      }
+    }
+  );
+  // Global: none, and the host is never asked.
+  const global = await h.app.inject({ method: "GET", url: agentChatRoutes.catalog("t1") });
+  assert.equal(global.statusCode, 200);
+  assert.deepEqual(global.json(), { threadId: "t1", source: "none", slashCommands: [], skills: [] });
+  assert.equal(h.host.requests.length, 0);
+
+  // A live report wins.
+  const live = { live: true, slashCommands: [{ name: "profile-skill", description: "Mine" }], skills: [] };
+  h.host.handler = (_req, res) => res.writeHead(200, json).end(JSON.stringify(live));
+  const session = await h.app.inject({ method: "GET", url: agentChatRoutes.catalog("p1") });
+  assert.deepEqual(session.json(), { threadId: "p1", source: "session", slashCommands: live.slashCommands, skills: [] });
+  assert.equal(h.host.requests.at(-1)?.url, "/threads/p1/catalog");
+  assert.deepEqual(asked, []);
+
+  // No live session, an older host's route miss, an unhealthy host: the profile's own items.
+  const fallback = {
+    threadId: "p1",
+    source: "profile",
+    slashCommands: [{ name: "compact" }, { name: "ship" }],
+    skills: [{ name: "cut", path: "/profile/cut/SKILL.md", enabled: true, scope: "profile" }]
+  };
+  h.host.handler = (_req, res) => res.writeHead(200, json).end(JSON.stringify({ live: false, slashCommands: [], skills: [] }));
+  assert.deepEqual((await h.app.inject({ method: "GET", url: agentChatRoutes.catalog("p1") })).json(), fallback);
+  h.host.handler = (_req, res) =>
+    res.writeHead(404, json).end(JSON.stringify({ error: { code: "THREAD_NOT_FOUND", message: "No route for GET /threads/p1/catalog" } }));
+  assert.deepEqual((await h.app.inject({ method: "GET", url: agentChatRoutes.catalog("p1") })).json(), fallback);
+  h.healthy = false;
+  const before = h.host.requests.length;
+  assert.deepEqual((await h.app.inject({ method: "GET", url: agentChatRoutes.catalog("p1") })).json(), fallback);
+  assert.equal(h.host.requests.length, before, "an unhealthy host is not asked");
+  assert.deepEqual(asked, ["p1", "p1", "p1"]);
+
+  assert.equal((await h.app.inject({ method: "GET", url: agentChatRoutes.catalog("nope") })).statusCode, 404);
+  await h.close();
+});
+
+test("a profile chat with no profile catalog to offer answers none, never the provider's", async () => {
+  const h = await makeHarness({ p1: { ...tab("p1"), profileId: "gone" } }, { profileCatalog: async () => null });
+  h.host.handler = (_req, res) => res.writeHead(200, json).end(JSON.stringify({ live: false, slashCommands: [], skills: [] }));
+  assert.deepEqual((await h.app.inject({ method: "GET", url: agentChatRoutes.catalog("p1") })).json(), {
+    threadId: "p1",
+    source: "none",
+    slashCommands: [],
+    skills: []
+  });
+  await h.close();
+});

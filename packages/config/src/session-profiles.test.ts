@@ -4,13 +4,17 @@ import {
   SESSION_PROFILE_SHARED_ACCOUNT_KEY,
   agentThreadHeadSchema,
   assertSessionProfileSegment,
+  emptySessionProfileDeleted,
   emptySessionProfileSecrets,
+  parseSessionProfileDeleted,
   parseSessionProfileManifest,
   parseSessionProfileSecrets,
+  serializeSessionProfileDeleted,
   serializeSessionProfileManifest,
   serializeSessionProfileSecrets,
   sessionChatRecordSchema,
   sessionProfileAccountKey,
+  sessionProfileDeletedFile,
   sessionProfileDir,
   sessionProfilePreparedDir,
   sessionProfilePreparedKeyDir,
@@ -115,6 +119,25 @@ describe("session profile secrets", () => {
       () => parseSessionProfileSecrets({ version: 9, items: { m1: { env: { TOKEN: "s3cret" } } } }),
       (error: Error) => !error.message.includes("s3cret")
     );
+  });
+});
+
+describe("deleted profile names", () => {
+  it("round-trips readable entries, unreadable ones and unknown keys; refuses another version", () => {
+    const file = parseSessionProfileDeleted({
+      version: 1,
+      future: true,
+      profiles: { p1: { name: "Developer", deletedAt: "2026-10-18T00:00:00.000Z", extra: 1 }, p2: { name: "" } }
+    });
+    assert.equal(file.profiles.p1?.name, "Developer");
+    assert.deepEqual(Object.keys(file.unreadable), ["p2"]);
+    const again = JSON.parse(serializeSessionProfileDeleted(file));
+    assert.equal(again.future, true);
+    assert.equal(again.profiles.p1.extra, 1);
+    assert.deepEqual(again.profiles.p2, { name: "" });
+    assert.deepEqual(JSON.parse(serializeSessionProfileDeleted(emptySessionProfileDeleted())), { version: 1, profiles: {} });
+    assert.throws(() => parseSessionProfileDeleted({ version: 2, profiles: {} }));
+    assert.equal(sessionProfileDeletedFile("/app"), "/app/daemon/session-profiles/deleted.json");
   });
 });
 

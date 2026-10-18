@@ -11,6 +11,8 @@
 
 import { agentHostSocketPath, agentHostTokenPath } from "@orquester/config";
 import type {
+  Skill,
+  SlashCommand,
   ThreadForkStrategy,
   ThreadForkTarget,
   ThreadHead,
@@ -184,6 +186,13 @@ export const agentHostRoutes = {
    */
   promptText: (threadId: string, messageId: string): string =>
     `${thread(threadId)}/prompts/${encodeURIComponent(messageId)}`,
+  /**
+   * `GET` → {@link HostThreadCatalogResponse}: the commands and skills the thread's LIVE provider
+   * session loaded (`AgentAdapter.sessionCatalog`) — what an Agent Profile chat's composer offers.
+   * Additive: a host that predates it answers its generic route-miss 404 `THREAD_NOT_FOUND`, which
+   * the daemon reads as "no live report" — `AGENT_HOST_PROTOCOL_VERSION` did not move for it.
+   */
+  catalog: (threadId: string): string => `${thread(threadId)}/catalog`,
 
 
   /**
@@ -303,6 +312,13 @@ export interface ThreadLaunchProfileRequest {
   threadId: string;
   /** The profile the thread's launch config (else its head) names. */
   profileId: string;
+}
+
+/** `GET /threads/:id/catalog` ({@link agentHostRoutes.catalog}). `live: false`: no live session reported one (both lists empty). */
+export interface HostThreadCatalogResponse {
+  live: boolean;
+  slashCommands: SlashCommand[];
+  skills: Skill[];
 }
 
 /**

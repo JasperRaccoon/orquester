@@ -18,7 +18,9 @@ import type {
   InteractionMode,
   ModelSelection,
   ProviderSnapshot,
-  RuntimeMode
+  RuntimeMode,
+  Skill,
+  SlashCommand
 } from "./adapter-types.ts";
 import type { DomainEvent } from "./domain-events.ts";
 import type { AgentGoalStatus } from "./goal.ts";
@@ -300,6 +302,13 @@ export const agentChatRoutes = {
    */
   promptText: (sessionId: string, messageId: string): string =>
     `${sessionBase(sessionId)}/prompts/${encodeURIComponent(messageId)}`,
+  /**
+   * `GET` → {@link ThreadCatalogResponse}: an Agent Profile chat's own command and skill catalog
+   * for the composer — what its live provider session loaded, else the profile's own items. A
+   * Global chat answers `source: "none"` (the composer keeps the provider's catalog).
+   * Daemon-owned (it asks the host and falls back to the profile), both transports.
+   */
+  catalog: (sessionId: string): string => `${sessionBase(sessionId)}/catalog`,
 
   // Thread lineage (spec 2026-10-14 §6). Daemon-owned, like `account`: none is
   // a proxied §6.2 command.
@@ -478,6 +487,23 @@ export interface ThreadPromptEntry {
   createdAt: string;
   /** The log sequence of the message's line. */
   seq: number;
+}
+
+/**
+ * `GET …/catalog` ({@link agentChatRoutes.catalog}) — the composer's `/` and `$` catalog for ONE
+ * chat. An Agent Profile chat must never offer the agent's Global commands and skills:
+ * - `session`: the chat's live provider session reported what it loaded (Claude's
+ *   initialization commands, Grok's `available_commands_update`, the thread's OpenCode server,
+ *   Codex's `skills/list` minus the switched-off ones);
+ * - `profile`: no live report yet — the profile's own enabled skills and commands for the agent
+ *   (the composer adds its host commands, as always);
+ * - `none`: a Global chat (or a profile that is gone): use the provider's catalog.
+ */
+export interface ThreadCatalogResponse {
+  threadId: string;
+  source: "session" | "profile" | "none";
+  slashCommands: SlashCommand[];
+  skills: Skill[];
 }
 
 /** `GET …/prompts` — newest first. */

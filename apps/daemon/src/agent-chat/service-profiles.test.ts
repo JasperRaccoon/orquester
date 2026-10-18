@@ -185,7 +185,12 @@ async function makeFixture(options: { capability?: boolean; profiles?: false } =
                 fields: applyProfileContribution(request.base, contributionFor(request.profileId), "CODEX_HOME")
               };
             },
-            profileName: (profileId) => (profileId === "gone" ? "Video" : undefined)
+            // As `index.ts` wires it: the store's durable `deleted.json`, read on demand.
+            profileName: async (profileId) => (profileId === "gone" ? "Video" : undefined),
+            catalog: async (profileId, agent) => {
+              if (profileId === "gone") throw sessionProfileErrors.notFound(profileId);
+              return { slashCommands: [{ name: "compact" }], skills: [{ name: `${profileId}-${agent}`, path: "/s/SKILL.md", enabled: true }] };
+            }
           }
         })
   });
@@ -213,6 +218,16 @@ test("a create with a profile applies its contribution, sends it to the host and
   const record = f.service.chat.records().find((r) => r.id === summary.id)!;
   assert.equal(record.chat?.profileId, "p1");
   assert.equal(record.chat?.unattended, undefined);
+  await f.cleanup();
+});
+
+test("the composer's fallback catalog is the chat's profile's, for the chat's agent; none for Global or a gone profile", async () => {
+  const f = await makeFixture();
+  const catalog = f.service.routeDeps().profileCatalog!;
+  const profiled = await create(f, { profileId: "p1" });
+  assert.deepEqual(await catalog(profiled), { slashCommands: [{ name: "compact" }], skills: [{ name: "p1-codex", path: "/s/SKILL.md", enabled: true }] });
+  assert.equal(await catalog(await create(f)), null, "a Global chat");
+  assert.equal(await catalog({ ...profiled, profileId: "gone" }), null, "a profile that cannot be read");
   await f.cleanup();
 });
 

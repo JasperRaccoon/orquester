@@ -15,9 +15,9 @@ import {
   deletedProfileNotice,
   profileLaunchContribution,
   profileLaunchContributors,
-  SessionProfileNames,
   type ProfileLaunchContext,
-  type ProfileLaunchContributors
+  type ProfileLaunchContributors,
+  SessionProfileNames
 } from "./launch.ts";
 import { writePreparedManifest } from "./manifest.ts";
 import type { SessionProfileReady } from "./lifecycle.ts";
@@ -196,8 +196,6 @@ describe("SessionProfileNames", () => {
     events.emit("changed", { profileId: "p1" });
     await names.idle();
     assert.equal(names.get("p1"), "Developer", "a failed read keeps what was known");
-    assert.equal(deletedProfileNotice(names.get("p1")), 'Agent Profile "Developer" was deleted; this chat now uses Global.');
-    assert.equal(deletedProfileNotice(undefined), "This chat's Agent Profile was deleted; it now uses Global.");
   });
 
   it("liveIds: unknown until the first list lands, then the existing profiles (unreadable ones too), following creates and deletes", async () => {
@@ -225,5 +223,12 @@ describe("SessionProfileNames", () => {
     const names = new SessionProfileNames();
     await names.track({ list: () => Promise.reject(new Error("EACCES")), get: async () => ({ name: "x" }), events: new EventEmitter<{ changed: [{ profileId: string }]; deleted: [{ profileId: string }] }>() });
     assert.equal(names.liveIds(), undefined);
+  });
+});
+
+describe("deletedProfileNotice", () => {
+  it("names the profile when its name is known", () => {
+    assert.equal(deletedProfileNotice("Developer"), 'Agent Profile "Developer" was deleted; this chat now uses Global.');
+    assert.equal(deletedProfileNotice(undefined), "This chat's Agent Profile was deleted; it now uses Global.");
   });
 });

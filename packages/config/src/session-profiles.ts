@@ -21,6 +21,7 @@ import { z } from "zod";
 
 export const SESSION_PROFILE_MANIFEST_VERSION = 1;
 export const SESSION_PROFILE_SECRETS_VERSION = 1;
+export const SESSION_PROFILE_DELETED_VERSION = 1;
 
 /** A profile or item id: safe as one path segment (it names directories). */
 export const sessionProfileIdSchema = z
@@ -274,5 +275,58 @@ export function emptySessionProfileSecrets(): SessionProfileSecretsFile {
 
 export function serializeSessionProfileSecrets(file: SessionProfileSecretsFile): string {
   const value = { ...file.extra, version: SESSION_PROFILE_SECRETS_VERSION, items: { ...file.unreadable, ...file.items } };
+  return `${JSON.stringify(value, null, 2)}\n`;
+}
+
+// ---------------------------------------------------------------------------
+// deleted.json — the names of deleted profiles (a chat's fallback notice names its profile)
+// ---------------------------------------------------------------------------
+
+/** One deleted profile: its name when it was deleted. */
+export const sessionProfileDeletedEntrySchema = z
+  .object({
+    name: z.string().min(1),
+    deletedAt: z.string().optional()
+  })
+  .passthrough();
+export type SessionProfileDeletedEntry = z.infer<typeof sessionProfileDeletedEntrySchema>;
+
+const sessionProfileDeletedFileSchema = z
+  .object({
+    version: z.literal(SESSION_PROFILE_DELETED_VERSION),
+    profiles: z.record(z.unknown()).default({})
+  })
+  .passthrough();
+
+export interface SessionProfileDeletedFile {
+  /** Every top-level key but `profiles`, as read (`version` included). */
+  extra: Record<string, unknown>;
+  /** Readable entries by profile id. */
+  profiles: Record<string, SessionProfileDeletedEntry>;
+  /** Entries that do not read, kept verbatim by profile id. */
+  unreadable: Record<string, unknown>;
+}
+
+/** Reads a `deleted.json` value. Throws when it is not a version-1 file. */
+export function parseSessionProfileDeleted(value: unknown): SessionProfileDeletedFile {
+  const parsed = sessionProfileDeletedFileSchema.safeParse(value);
+  if (!parsed.success) throw new Error(`Not a version-${SESSION_PROFILE_DELETED_VERSION} deleted-profiles file.`);
+  const { profiles: rawProfiles, ...extra } = parsed.data;
+  const profiles: Record<string, SessionProfileDeletedEntry> = {};
+  const unreadable: Record<string, unknown> = {};
+  for (const [id, raw] of Object.entries(rawProfiles)) {
+    const entry = sessionProfileDeletedEntrySchema.safeParse(raw);
+    if (entry.success) profiles[id] = entry.data;
+    else unreadable[id] = raw;
+  }
+  return { extra, profiles, unreadable };
+}
+
+export function emptySessionProfileDeleted(): SessionProfileDeletedFile {
+  return { extra: { version: SESSION_PROFILE_DELETED_VERSION }, profiles: {}, unreadable: {} };
+}
+
+export function serializeSessionProfileDeleted(file: SessionProfileDeletedFile): string {
+  const value = { ...file.extra, version: SESSION_PROFILE_DELETED_VERSION, profiles: { ...file.unreadable, ...file.profiles } };
   return `${JSON.stringify(value, null, 2)}\n`;
 }

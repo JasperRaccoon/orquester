@@ -16,9 +16,9 @@ per-agent GLOBAL config editor, user-facing "Agent config"). A chat without `pro
 | `preparer.ts` + `preparers/<agent>.ts` | Per-agent preparer contract and registry (`null` = not supported yet). `preparers/codex.ts`: the prepared `CODEX_HOME` (see "Codex" below); Grok's (`preparers/grok.ts`) builds a whole `GROK_HOME`; its header lists the layout. |
 | `contributions/<agent>.ts` | Per-agent launch contribution (what a profile chat adds to its account's launch env). Grok: `GROK_HOME`/`homePath` = the prepared dir, `GROK_AUTH_PATH` = the account's `auth.json`, `GROK_PROFILE_ENV`. Codex (`contributions/codex.ts`): `CODEX_HOME` and `homePath` = the prepared home. |
 | `lifecycle.ts` | `SessionProfileLifecycle`: builds and publishes immutable prepared versions, tracks and refreshes them, collects unleased old ones; `ensureReady` for launches. |
-| `launch.ts` | The launch side: per-agent launch contributions (`profileLaunchContributors`), `applyProfileContribution`, `createProfileLaunchResolver` (what `AgentChatService` launches with), `SessionProfileNames` + the deleted-profile notice. |
+| `launch.ts` | The launch side: per-agent launch contributions (`profileLaunchContributors`), `applyProfileContribution`, `createProfileLaunchResolver` (what `AgentChatService` launches with), the deleted-profile notice. |
 | `service.ts` | `SessionProfileService`: wire mapping (secrets masked), events, prepare status, `resolveForAgent(profileId, agent)`; the import entry points delegate to `imports.ts`. |
-| `imports.ts` | `SessionProfileImports`: Import from Global (via Agent config), git / zip / md scans, copy from profile, plugins into the profile's cache, export / import of a profile. Gathers outside the queue, writes with ONE `store.importItems`. |
+| `imports.ts` | `SessionProfileImports`: Import from Global (via Agent config), git / zip / md scans, copy from profile, plugins into the profile's cache, export / import of a profile. Gathers outside the queue, writes with ONE `store.importItems`; copy from profile reads the source as one `store.snapshotSource` (its queue, then released). |
 | `export.ts` | The export `.zip` format, its builder, and the strict reader behind "Import profile from file". |
 | `files.ts` | `measureTree` (no symlinks, caps), `normalizeProfileModes`, the in-memory zip writer. |
 | `routes.ts` | REST surface (`sessionProfileRoutes`), both transports. |
@@ -39,6 +39,7 @@ Contracts: `@orquester/api` `session-profiles.ts` (wire types, `sessionProfileRo
       current.json                                SESSION_PROFILE_PREPARED_CURRENT_FILE      {"schema":1,"version":"<version>"}
       <version>/                                  sessionProfilePreparedDir(..., version)    one immutable preparation
   staging/                                        sessionProfileStagingDir(appdir)
+  deleted.json                                    sessionProfileDeletedFile(appdir)   the names of deleted profiles
 ```
 
 - Item directories are keyed by item ID (stable across renames); the item's name is in the
@@ -87,9 +88,9 @@ credentials, deadline); `.git` is removed before the copy. Sources that are not 
 - Exports never carry secret values: `profile.json` keeps env/header KEYS; a profile imported from
   a file has those servers skipped at launch until the values are entered again (and says so).
 
-## How later tasks plug in
+## How an agent plugs in
 
-- **Per-agent preparers** (one task per agent): implement `SessionProfilePreparer<"agent">` in
+- **Per-agent preparers**: implement `SessionProfilePreparer<"agent">` in
   `preparers/<agent>.ts` (`prepare(ctx) → agentSection`, optional `validate(ctx)`, `perAccount`)
   and extend `manifest/<agent>.ts` with the section it writes. Input is `ctx.resolved`
   (`ResolvedAgentProfile`: instructions, enabled in-scope items with source paths, settings,
@@ -228,8 +229,7 @@ restarts (spec §5.6). Status, staleness and fingerprints read the current versi
 **Per-agent launch contributions.** `profileLaunchContributors: { [agent]: (ctx) =>
 ProfileLaunchContribution }`, read through `profileLaunchContribution(agent)`. Codex's, Grok's and
 OpenCode's are in `contributions/codex.ts`, `contributions/grok.ts` and `preparers/opencode.ts`;
-Claude contributes nothing. Each per-agent task replaces ITS entry
-(and nothing else):
+Claude contributes nothing. A change to one agent's launch touches ITS entry only:
 
 ```ts
 ctx: { agent, profile: {profileId, revision, preparedDir}, manifestSection /* manifest/<agent>.ts */,
@@ -280,13 +280,23 @@ after the env and home are already built.)
 account's own launch with `profile: null` and `fallback {previousProfileId, notice}`; the host
 writes `thread.meta-updated {profileId: ""}` and a `runtime.warning` row whose summary is the
 notice (`Agent Profile "X" was deleted; this chat now uses Global.` — the name from
-`SessionProfileNames`, kept after the delete while the daemon runs), and the tab mirrors Global.
+`store.deletedName`: `store.delete` records the profile's last name in
+`<appdir>/daemon/session-profiles/deleted.json` (`sessionProfileDeletedFile`) before removing it,
+so the notice names it after a restart too), and the tab mirrors Global.
 An account switch or a fork of such a chat goes ahead without naming the profile and leaves the
 fallback to the next start's refresh. **Unattended** launches never fall back:
 `CreateAgentChatSessionFields.unattended` / `ForkSessionRequest.unattended` (persisted as
 `sessionChatRecordSchema.unattended`; a fork of an unattended chat is unattended) make every later
 refresh refuse `PROFILE_NOT_FOUND`. A create naming a missing or failed profile fails either way.
 `PROFILE_NOT_READY` / `PROFILE_UNSUPPORTED_AGENT` always fail with the reason.
+
+**Composer catalog.** A profile chat's `/` and `$` menus never show the agent's Global commands
+and skills: `GET agentChatRoutes.catalog` (daemon-owned, both transports) answers the live
+session's own report (the host's `/threads/:id/catalog`, source `session`), else
+`SessionProfileService.composerCatalog` — the profile's enabled, in-scope skills and commands for
+the agent (Codex: commands as skills) plus `/compact` (source `profile`). A Global chat answers
+`none` without asking the host, and its composer keeps the provider's catalog
+(`withThreadCatalog` in `packages/ui/src/lib/agent-chat/thread-catalog.ts`).
 
 **Leases.** `PreparedDirLeases` (above) is `AgentChatService.profileLeases()`, passed as the
 lifecycle's `leases` in `index.ts`. The refresh at every session start always launches the

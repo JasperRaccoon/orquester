@@ -431,6 +431,32 @@ describe("Copy from profile", () => {
     assert.ok((await stat(join(resolved.skills[0]!.dir, "references", "checklist.md"))).isFile());
     await assert.rejects(h.service.copyFrom(to.id, { revision: copied.profile.revision, fromProfileId: to.id, itemIds: [] , instructions: "append" }), (error: { code?: string }) => error.code === "INVALID_REQUEST");
   });
+  it("copies one consistent snapshot of the source: an edit of the source during the copy does not tear it", async () => {
+    const h = await harness();
+    const from = await h.service.create({ name: "From" });
+    const filled = await h.service.importFromGlobal(from.id, {
+      revision: "1",
+      agent: "claude",
+      itemIds: [await itemIdOf(h, "skill", "review"), await itemIdOf(h, "plugin", "superpowers")]
+    });
+    const to = await h.service.create({ name: "To" });
+    // The source's skill and plugin are deleted while the target's import runs: the copy must
+    // still carry the files as they were when the copy read the source.
+    const importItems = h.store.importItems.bind(h.store);
+    h.store.importItems = async (...args) => {
+      let revision = filled.profile.revision;
+      for (const itemId of filled.itemIds) revision = (await h.store.deleteItem(from.id, itemId, revision)).manifest.revision.toString();
+      return importItems(...args);
+    };
+    const copied = await h.service.copyFrom(to.id, { revision: "1", fromProfileId: from.id, itemIds: filled.itemIds });
+    assert.equal(copied.itemIds.length, 2);
+    const resolved = await h.service.resolveForAgent(to.id, "claude");
+    assert.equal(await readFile(join(resolved.skills[0]!.dir, "references", "checklist.md"), "utf8"), "- tests\n");
+    assert.match(await readFile(join(resolved.skills[0]!.dir, "SKILL.md"), "utf8"), /Review carefully/);
+    assert.ok((await stat(join(resolved.plugins[0]!.cacheDir, ".claude-plugin", "plugin.json"))).isFile());
+    // The snapshot is temporary: nothing of it is left in the work dir.
+    assert.deepEqual((await readdir(join(h.appdir, "daemon", "agent-profile-imports")).catch(() => [])).filter((name) => name.startsWith("session-profile-copy")), []);
+  });
 });
 
 describe("Plugins into the profile's own cache", () => {

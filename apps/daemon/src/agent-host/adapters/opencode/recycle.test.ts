@@ -517,6 +517,40 @@ test("threads share a resolved project server, falling back to cwd for malformed
   }
 });
 
+test("a keyed thread's own catalog is its server's, never the global server's (Agent Profiles composer)", async (t) => {
+  const h = await makeHarness(t);
+  try {
+    assert.equal(await h.adapter.sessionCatalog!(HOST_THREAD_ID), null, "no session");
+    await h.start();
+    await h.waitFor("session.state.changed");
+    const from = h.events.length;
+    await h.start({
+      threadId: "keyed",
+      serverPool: {
+        key: "profile-a",
+        env: {
+          MOCK_COMMANDS: JSON.stringify([{ name: "profile-cmd", description: "The profile's", hints: ["<x>"] }]),
+          MOCK_SKILLS: JSON.stringify([{ name: "profile-skill", description: "Mine", location: "/profiles/a/skills/s/SKILL.md" }])
+        }
+      }
+    });
+    await h.waitFor("session.state.changed", from);
+    assert.deepEqual(await h.adapter.sessionCatalog!("keyed"), {
+      slashCommands: [
+        { name: "compact", description: "Compact this conversation's context" },
+        { name: "profile-cmd", description: "The profile's", input: { hint: "<x>" } }
+      ],
+      skills: [{ name: "profile-skill", path: "/profiles/a/skills/s/SKILL.md", enabled: true, description: "Mine", shortDescription: "Mine" }]
+    });
+    // The global thread reads the global server's catalogue.
+    const global = await h.adapter.sessionCatalog!(HOST_THREAD_ID);
+    assert.deepEqual(global?.slashCommands.map((command) => command.name), ["compact", "init"]);
+    assert.deepEqual(global?.skills.map((skill) => skill.name), ["review"]);
+  } finally {
+    await h.dispose();
+  }
+});
+
 test("a keyed thread runs on its own server of the project with its env, and a keyed recycle leaves the global server alone", async (t) => {
   const h = await makeHarness(t);
   try {

@@ -14,7 +14,7 @@
  *   `portable` target: candidates are what the profile gets (commands stay commands); `exists` is
  *   checked against the profile; a scan can only be taken by the profile that opened it.
  * - **Copy from profile** — items of another profile with their files, plugin caches and secret
- *   values (`store.readSource`), keeping their scope and on/off state.
+ *   values (one `store.snapshotSource` under the source's queue), keeping their scope and on/off state.
  * - **Plugins** — a marketplace plugin (Agent config's `pluginSource`: a folder of the
  *   marketplace's checkout, or a remote source cloned with the importer's safe `git clone`), or an
  *   installed Global plugin (OpenCode: a plugin file), copied whole into the profile's own cache
@@ -304,7 +304,19 @@ export class SessionProfileImports {
   async copyFrom(profileId: string, request: CopySessionProfileItemsRequest): Promise<StoredImportResult> {
     if (request.fromProfileId === profileId) throw errors.invalid("Pick another profile to copy from.");
     await this.store.read(profileId);
-    const source = await this.store.readSource(request.fromProfileId);
+    // The source is read as ONE snapshot under its own queue (its files copied to a temp dir),
+    // released before the target's import takes the target's queue: an edit of the source cannot
+    // tear the copy, and the two queues are never held together.
+    const snapshotDir = await this.tempDir("copy-");
+    try {
+      return await this.copyFromSnapshot(profileId, request, snapshotDir);
+    } finally {
+      await rm(snapshotDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
+
+  private async copyFromSnapshot(profileId: string, request: CopySessionProfileItemsRequest, snapshotDir: string): Promise<StoredImportResult> {
+    const { source, documents } = await this.store.snapshotSource(request.fromProfileId, request.itemIds, snapshotDir);
     const layout = profileLayout(source.dir);
     const entries: SessionProfileImportEntry[] = [];
     const notes: string[] = [];
@@ -318,8 +330,7 @@ export class SessionProfileImports {
       switch (record.kind) {
         case "skill":
         case "command": {
-          const { document } = await this.store.readItem(request.fromProfileId, itemId);
-          const doc = document ?? { frontmatter: {}, body: "" };
+          const doc = documents.get(itemId) ?? { frontmatter: {}, body: "" };
           entries.push(
             record.kind === "skill"
               ? { kind: "skill", name: record.name, agents: record.agents as SessionProfileAgentScope, enabled, frontmatter: doc.frontmatter, body: doc.body, dir: layout.skillDir(itemId) }

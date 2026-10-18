@@ -46,14 +46,19 @@ import {
 } from "@orquester/api";
 import {
   SESSION_PROFILE_MANIFEST_VERSION,
+  emptySessionProfileDeleted,
   emptySessionProfileSecrets,
+  parseSessionProfileDeleted,
   parseSessionProfileManifest,
   parseSessionProfileSecrets,
+  serializeSessionProfileDeleted,
   serializeSessionProfileManifest,
   serializeSessionProfileSecrets,
+  sessionProfileDeletedFile,
   sessionProfileDir,
   sessionProfileIdSchema,
   sessionProfileSourcesDir,
+  type SessionProfileDeletedFile,
   type SessionProfileItemEntry,
   type SessionProfileItemRecord,
   type SessionProfileItemSecrets,
@@ -160,6 +165,9 @@ export interface SessionProfileStoreOptions {
 
 /** The queue key of the catalog-wide slot (never a valid profile id). */
 const CATALOG = "*catalog*";
+
+/** The queue key of `deleted.json` (never a valid profile id); taken inside a profile's slot, never around one. */
+const DELETED = "*deleted*";
 
 /** The store never keeps backups of its own files: the profile itself is the owner's data, and a backup would copy secrets around. */
 class NoBackups extends ProfileBackups {
@@ -349,36 +357,82 @@ export class SessionProfileStore {
    * profile chat must never launch with an MCP server silently missing its credentials.
    */
   async readSource(profileId: string): Promise<SessionProfileSource> {
+    return this.queue.run(profileId, () => this.readSourceNow(profileId));
+  }
+
+  /**
+   * {@link readSource} plus a private copy of the chosen items' content, all taken in ONE turn of
+   * the profile's queue, so an edit of the profile cannot tear it (copy from profile): the skill
+   * and plugin directories are copied into `into` with the profile's layout (`skills/<id>/`,
+   * `plugins/<id>/`) and the skill and command documents are parsed. The answer's `dir` is
+   * `into`. Ids the profile does not have are skipped (the caller reports them).
+   */
+  async snapshotSource(
+    profileId: string,
+    itemIds: readonly string[],
+    into: string
+  ): Promise<{ source: SessionProfileSource; documents: Map<string, { frontmatter: Record<string, unknown>; body: string }> }> {
     return this.queue.run(profileId, async () => {
+      const source = await this.readSourceNow(profileId);
       const layout = this.layout(profileId);
-      const file = await this.readManifest(profileId, layout);
-      const secrets = await this.readSecrets(profileId, layout);
-      const missingContent = new Set<string>();
-      for (const entry of file.items) {
-        if (!entry.ok) continue;
-        const { id, kind } = entry.record;
-        const present =
-          kind === "skill"
-            ? await fileExists(layout.skillFile(id))
-            : kind === "command"
-              ? await fileExists(layout.commandFile(id))
-              : kind === "plugin"
-                ? await dirHasEntries(layout.pluginCacheDir(id))
-                : true;
-        if (!present) missingContent.add(id);
-      }
-      return {
-        profileId,
-        revision: String(file.manifest.revision),
-        name: file.manifest.name,
-        dir: layout.dir,
-        settings: file.manifest.settings,
-        instructions: (await readTextIfExists(layout.instructions)) ?? "",
-        items: file.items,
-        secrets: secrets.items,
-        missingContent
+      const copy = profileLayout(into);
+      const documents = new Map<string, { frontmatter: Record<string, unknown>; body: string }>();
+      const copyDir = async (src: string, dest: string): Promise<void> => {
+        if ((await lstat(src).catch(() => null)) === null) return;
+        await copyTree(src, dest, { refuseSymlinks: true });
       };
+      for (const itemId of new Set(itemIds)) {
+        const entry = source.items.find((candidate) => entryId(candidate) === itemId);
+        if (entry === undefined || !entry.ok) continue;
+        const { kind } = entry.record;
+        if (kind === "skill") {
+          documents.set(itemId, await this.readDocument(layout.skillFile(itemId)));
+          await copyDir(layout.skillDir(itemId), copy.skillDir(itemId));
+        } else if (kind === "command") {
+          documents.set(itemId, await this.readDocument(layout.commandFile(itemId)));
+        } else if (kind === "plugin") {
+          await copyDir(layout.pluginCacheDir(itemId), copy.pluginCacheDir(itemId));
+        }
+      }
+      return { source: { ...source, dir: into }, documents };
     });
+  }
+
+  private async readSourceNow(profileId: string): Promise<SessionProfileSource> {
+    const layout = this.layout(profileId);
+    const file = await this.readManifest(profileId, layout);
+    const secrets = await this.readSecrets(profileId, layout);
+    const missingContent = new Set<string>();
+    for (const entry of file.items) {
+      if (!entry.ok) continue;
+      const { id, kind } = entry.record;
+      const present =
+        kind === "skill"
+          ? await fileExists(layout.skillFile(id))
+          : kind === "command"
+            ? await fileExists(layout.commandFile(id))
+            : kind === "plugin"
+              ? await dirHasEntries(layout.pluginCacheDir(id))
+              : true;
+      if (!present) missingContent.add(id);
+    }
+    return {
+      profileId,
+      revision: String(file.manifest.revision),
+      name: file.manifest.name,
+      dir: layout.dir,
+      settings: file.manifest.settings,
+      instructions: (await readTextIfExists(layout.instructions)) ?? "",
+      items: file.items,
+      secrets: secrets.items,
+      missingContent
+    };
+  }
+
+  /** The name a deleted profile had when it was deleted (`deleted.json`); `undefined` when unknown. Never throws. */
+  async deletedName(profileId: string): Promise<string | undefined> {
+    const file = await this.readDeleted().catch(() => null);
+    return file !== null && Object.hasOwn(file.profiles, profileId) ? file.profiles[profileId]!.name : undefined;
   }
 
   /** A plugin item's cache slot: where the plugin flow puts its files (spec §4.5). */
@@ -440,6 +494,9 @@ export class SessionProfileStore {
       const layout = this.layout(profileId);
       const file = await this.readManifest(profileId, layout);
       if (String(file.manifest.revision) !== revision) throw errors.conflict();
+      // Its name first (kept for good): a chat of this profile falls back to Global at its next
+      // start, maybe after a restart, with a notice that names the profile (spec §5.6).
+      await this.queue.run(DELETED, () => this.recordDeleted(profileId, file.manifest.name));
       options.precondition?.();
       const trash = join(this.root, `.trash-${profileId}-${randomUUID()}`);
       await rename(layout.dir, trash);
@@ -922,6 +979,25 @@ export class SessionProfileStore {
       // Never the parser's message: it could quote a value.
       throw errors.unreadable(profileId, "its secrets.json does not read.");
     }
+  }
+
+  /** `deleted.json`: empty when missing; throws when it does not read (another version's, damaged). */
+  private async readDeleted(): Promise<SessionProfileDeletedFile> {
+    const text = await readTextIfExists(sessionProfileDeletedFile(this.appdir));
+    return text === null ? emptySessionProfileDeleted() : parseSessionProfileDeleted(JSON.parse(text));
+  }
+
+  /** Adds a deleted profile's name to `deleted.json`. A file that does not read is left alone (the notice then names no profile). */
+  private async recordDeleted(profileId: string, name: string): Promise<void> {
+    let file: SessionProfileDeletedFile;
+    try {
+      file = await this.readDeleted();
+    } catch {
+      return;
+    }
+    delete file.unreadable[profileId];
+    file.profiles[profileId] = { ...file.profiles[profileId], name, deletedAt: this.now().toISOString() };
+    await writeProfileFile(sessionProfileDeletedFile(this.appdir), serializeSessionProfileDeleted(file), WRITE);
   }
 
   private async writeManifest(layout: ProfileLayout, file: SessionProfileManifestFile): Promise<void> {

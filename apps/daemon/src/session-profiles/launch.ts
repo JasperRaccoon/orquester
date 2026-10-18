@@ -3,11 +3,10 @@
  * to its account's launch environment once its profile is prepared.
  *
  * - {@link profileLaunchContributors}: ONE contributor per agent, keyed by agent, each turning
- *   the prepared directory's manifest section into env / unset / home / keyed-server fields. All
- *   of them contribute nothing today; each per-agent task fills its own in (Codex: `CODEX_HOME`
- *   = the prepared home; Grok: `GROK_HOME`, `GROK_AUTH_PATH`, compat env; OpenCode: a
- *   `serverPool` key and its env). Claude's isolation is SDK options read by the host from the
- *   manifest, so its contributor may stay empty.
+ *   the prepared directory's manifest section into env / unset / home / keyed-server fields
+ *   (Codex: `CODEX_HOME` = the prepared home; Grok: `GROK_HOME`, `GROK_AUTH_PATH`, compat env;
+ *   OpenCode: a `serverPool` key and its env). Claude's isolation is SDK options read by the host
+ *   from the manifest, so its contributor is empty.
  * - {@link applyProfileContribution}: the contribution laid OVER the account's launch fields —
  *   the one composition rule every launch path (create, fork, fork reconcile, account switch,
  *   profile switch, the refresh at every session start) shares.
@@ -215,12 +214,9 @@ export function deletedProfileNotice(name: string | undefined): string {
 }
 
 /**
- * The names of the profiles this daemon has seen, kept after a delete so the fallback notice can
- * name the profile that went (spec §5.6). In memory: after a daemon restart a profile deleted
- * before it is no longer known, and the notice says "This chat's Agent Profile".
- *
- * It also follows which profiles EXIST now ({@link liveIds}): what workflow validation checks an
- * agent block's `profileId` against (§5.5), synchronously.
+ * Follows which profiles EXIST now ({@link liveIds}): what workflow validation checks an agent
+ * block's `profileId` against (§5.5), synchronously. It also remembers the names it has seen; the
+ * deleted-profile notice does NOT use them (it reads the store's durable `deleted.json`).
  */
 export class SessionProfileNames {
   private readonly names = new Map<string, string>();
