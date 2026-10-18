@@ -16,6 +16,7 @@ import type { SessionProfileItem, SessionProfileItemKind } from "@orquester/api"
 import { useApi } from "../../../context/orquester-context";
 import { useSessionProfileDetail, useSessionProfileList, useSessionProfilesState } from "../../../lib/session-profiles/hooks";
 import { downloadBlob } from "../../../lib/files";
+import { openChatsUsingProfile, profileDeleteChatsLine } from "../../../lib/session-profiles/chat-usage";
 import { filterProfiles, PROFILE_KIND_LABELS } from "../../../lib/session-profiles/logic";
 import {
   createSessionProfile,
@@ -56,6 +57,8 @@ export const SessionProfilesPanel: React.FC<RightRailPanelProps> = ({ variant })
   const entry = useSessionProfileDetail(openProfileId);
   const profile = entry.detail;
   const openSettingsPage = useAppStore((state) => state.openSettings);
+  // §5.6: the delete confirmation says how many open chats use the profile.
+  const sessions = useAppStore((state) => state.sessions);
 
   const [query, setQueryState] = useState(remembered.query);
   const setQuery = useCallback((next: string) => {
@@ -235,8 +238,8 @@ export const SessionProfilesPanel: React.FC<RightRailPanelProps> = ({ variant })
         title="Delete profile"
         message={
           <>
-            Delete <span className="font-medium text-neutral-200">{profile?.name}</span> and everything in it? Open chats
-            using it keep running, and switch to Global at their next restart.
+            Delete <span className="font-medium text-neutral-200">{profile?.name}</span> and everything in it?{" "}
+            {profileDeleteChatsLine(profile !== null ? openChatsUsingProfile(sessions, profile.id) : 0)}
           </>
         }
         confirmLabel="Delete"

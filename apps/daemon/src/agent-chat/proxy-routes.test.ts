@@ -495,6 +495,43 @@ test("a daemon-side refusal answers the §6.2 status of its code, INDEX_UNAVAILA
   await h.close();
 });
 
+// --- Agent Profiles: the profile switch -------------------------------------
+
+test("the profile route is daemon-owned like the account's: 404, 503, the receipt, and refusals mapped", async () => {
+  const switches: Array<[string, { commandId: string; profileId: string | null }]> = [];
+  const h = await makeHarness(
+    { t1: tab("t1") },
+    {
+      switchProfile: async (id, body) => {
+        switches.push([id, body]);
+        if (body.profileId === "not-ready") {
+          throw Object.assign(new Error("Preparing Codex failed."), { code: "PROFILE_NOT_READY" });
+        }
+        if (body.profileId === "conflict") {
+          throw Object.assign(new Error("Send a new commandId."), { code: "COMMAND_ID_CONFLICT" });
+        }
+        return { seq: 9 };
+      }
+    }
+  );
+  const post = (id: string, payload: unknown) => h.app.inject({ method: "POST", url: agentChatRoutes.profile(id), payload: payload as object });
+  const ok = await post("t1", { commandId: "c1", profileId: "p1" });
+  assert.equal(ok.statusCode, 200);
+  assert.deepEqual(ok.json(), { seq: 9 });
+  assert.equal((await post("t1", { commandId: "c2", profileId: null })).statusCode, 200);
+  assert.deepEqual(switches, [["t1", { commandId: "c1", profileId: "p1" }], ["t1", { commandId: "c2", profileId: null }]]);
+  assert.equal(h.host.requests.length, 0, "never proxied to the host as is");
+
+  const refused = await post("t1", { commandId: "c3", profileId: "not-ready" });
+  assert.equal(refused.statusCode, 409);
+  assert.deepEqual(refused.json(), { error: { code: "COMMAND_REJECTED", message: "Preparing Codex failed." } });
+  assert.equal((await post("t1", { commandId: "c4", profileId: "conflict" })).json().error.code, "COMMAND_ID_CONFLICT");
+  assert.equal((await post("nope", { commandId: "c5", profileId: "p1" })).statusCode, 404);
+  h.healthy = false;
+  assert.equal((await post("t1", { commandId: "c6", profileId: "p1" })).statusCode, 503);
+  await h.close();
+});
+
 // --- indexed history and search (design 2026-09-23) ------------------------
 
 const historyPage = {
