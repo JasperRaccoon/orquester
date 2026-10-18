@@ -239,7 +239,7 @@ function singleFlight(
 
 function loadFailureText(error: unknown): string {
   if (agentProfileErrorStatus(error) === 404 && agentProfileErrorCode(error) === null) {
-    return "This daemon does not support the agent profile yet — update it.";
+    return "This daemon does not support the agent config yet — update it.";
   }
   return agentProfileErrorText(error, "The daemon did not answer.");
 }
@@ -284,7 +284,7 @@ export function loadAgentProfile(
         if (gen !== generation) return;
         const snapshot = sanitizeAgentProfileSnapshot(raw);
         if (snapshot === null || snapshot.agent !== agent) {
-          throw new Error("The daemon answered the profile in an unexpected shape.");
+          throw new Error("The daemon answered the agent config in an unexpected shape.");
         }
         const current = agentProfileEntry(agent);
         // A mutation's snapshot landed while this was in flight: it is at

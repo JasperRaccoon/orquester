@@ -217,7 +217,7 @@ const ReadOnlyDetail: React.FC<{ detail: ProfileItemDetail }> = ({ detail }) => 
     : detail.kind === "plugin" || detail.kind === "marketplace"
       ? "Installed as a whole: remove it and install again to change it."
       : detail.item.source.ownerAgent
-        ? `Edit it from ${agentLabel(detail.item.source.ownerAgent)}'s profile.`
+        ? `Edit it from ${agentLabel(detail.item.source.ownerAgent)}'s config.`
         : "This item is not editable here.";
   return (
     <EditorShell title={detail.item.name} primary={null} cancelLabel="Close">

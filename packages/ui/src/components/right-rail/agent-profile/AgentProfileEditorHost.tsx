@@ -4,7 +4,7 @@ import { subscribeAgentProfileEditor, type AgentProfileEditorRequest } from "./e
 import { AgentProfileEditor } from "./editor/AgentProfileEditor";
 
 /**
- * The one agent-profile editor, mounted once by the rail: it listens on
+ * The one agent-config editor, mounted once by Settings → Agent config: it listens on
  * `editor-bridge.ts` and opens for whichever row or button asked — "+ Add",
  * a row's Edit, the instructions card.
  *

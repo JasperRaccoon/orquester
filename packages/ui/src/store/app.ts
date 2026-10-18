@@ -3429,7 +3429,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       return;
     }
     if (event.channel === AGENT_PROFILE_CHANNEL) {
-      // The right rail's agent profiles live in their own module store: a
+      // Agent config (Settings) keeps each agent's snapshot in its own module store: a
       // change refetches that agent when it was loaded and its revision moved
       // (a malformed payload is ignored).
       applyAgentProfileEvent(event);

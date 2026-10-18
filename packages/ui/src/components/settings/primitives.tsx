@@ -22,15 +22,27 @@ export const SettingsPage: React.FC<{
   actions?: React.ReactNode;
   /** Wider reading width for dashboard-like pages (usage, host status). */
   wide?: boolean;
+  /**
+   * The page fills the content area's height instead of scrolling with it:
+   * its last child stretches and scrolls itself (a list with pinned controls,
+   * like Agent config). Pair with the section's `fill` in `SettingsModal`.
+   */
+  fill?: boolean;
   children: React.ReactNode;
-}> = ({ title, description, actions, wide, children }) => {
+}> = ({ title, description, actions, wide, fill, children }) => {
   const showTitle = React.useContext(SettingsPageTitleContext);
   return (
-    <div className={cn("mx-auto w-full pb-6", showTitle ? "space-y-8" : "space-y-6", wide ? "max-w-5xl" : "max-w-3xl")}>
+    <div
+      className={cn(
+        "mx-auto w-full",
+        fill ? cn("flex h-full flex-col", showTitle ? "gap-6" : "gap-4") : cn("pb-6", showTitle ? "space-y-8" : "space-y-6"),
+        wide ? "max-w-5xl" : "max-w-3xl"
+      )}
+    >
       {(showTitle || description || actions) && (
         <header
           className={cn(
-            "flex flex-wrap items-start justify-between gap-3 sm:flex-nowrap",
+            "flex shrink-0 flex-wrap items-start justify-between gap-3 sm:flex-nowrap",
             // Clear the desktop modal's floating close button.
             showTitle && "pr-8"
           )}
