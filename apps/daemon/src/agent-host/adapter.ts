@@ -29,6 +29,8 @@ import type {
   ProviderSnapshot,
   RuntimeEvent,
   RuntimeMode,
+  Skill,
+  SlashCommand,
   ThreadSnapshot
 } from "@orquester/api/agent-chat";
 
@@ -274,6 +276,12 @@ export interface ForkCut {
   firstRemovedTurnId: string | null;
 }
 
+/** {@link AgentAdapter.sessionCatalog}'s answer. */
+export interface SessionCatalog {
+  slashCommands: SlashCommand[];
+  skills: Skill[];
+}
+
 /** {@link AgentAdapter.forkConversation}'s input. */
 export interface ForkConversationInput {
   /** The thread whose conversation is copied. Its live session, if any, is never touched. */
@@ -352,6 +360,13 @@ export interface AgentAdapter {
    * the stop; the task's own `task.completed` (`stopped`) closes its row.
    */
   stopTask?(threadId: string, taskId: string): Promise<void>;
+  /**
+   * The commands and skills the thread's LIVE session loaded — what an Agent Profile chat's
+   * composer offers instead of the provider's Global catalog (`GET /threads/:id/catalog`).
+   * `null`: no live session, or it has not reported one yet. Never starts a session; bounded
+   * reads only; never rejects for a provider that cannot answer (it answers `null`).
+   */
+  sessionCatalog?(threadId: string): Promise<SessionCatalog | null>;
   /**
    * Run a host-parsed `/goal …` (goals §4.6, §5.1). Present exactly when
    * `capabilities.goals?.command === "host"`. The goal itself moves only

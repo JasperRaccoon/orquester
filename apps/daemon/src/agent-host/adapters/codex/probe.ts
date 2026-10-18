@@ -43,7 +43,7 @@ import { usageWindowsFromRateLimits } from "./usage.ts";
  * *T3: `apps/server/src/provider/Layers/CodexProvider.ts:680-687` — the whole
  * Codex command catalog is these two hard-coded rows.*
  */
-const CODEX_SLASH_COMMANDS: readonly SlashCommand[] = [
+export const CODEX_SLASH_COMMANDS: readonly SlashCommand[] = [
   { name: "compact", description: "Summarise the conversation to free context" },
   { name: "feedback", description: "Send feedback about Codex to OpenAI" }
 ] as const;
@@ -373,6 +373,14 @@ async function readSkills(
   if (response === undefined) {
     return [];
   }
+  return skillsFromList(response, cwd);
+}
+
+/**
+ * A `skills/list` answer as {@link Skill}s, deduplicated by name: the entry for `cwd` when there
+ * is one (else every entry). Shared by the probe and a profile session's own catalog.
+ */
+export function skillsFromList(response: CodexProtocol.v2.SkillsListResponse, cwd: string | undefined): Skill[] {
   // Prefer the entry for the cwd we ASKED about; only fall back to flattening
   // every entry. With `cwds:[cwd]` there is normally exactly one, so this is
   // latent — but a server that answers for more than it was asked would

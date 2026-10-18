@@ -1622,6 +1622,11 @@ export class ApiClient {
     return this.send("GET", agentChatRoutes.agentTools(id), { signal });
   }
 
+  /** An Agent Profile chat's own `/` and `$` catalog (unvalidated: read it with `parseThreadCatalogResponse`). */
+  getThreadCatalog(id: string, signal?: AbortSignal): Promise<unknown> {
+    return this.send("GET", agentChatRoutes.catalog(id), { signal });
+  }
+
   sendSessionInput(id: string, data: string): Promise<void> {
     if (this.channel) {
       this.channel.sendInput(id, data);

@@ -291,6 +291,14 @@ fallback to the next start's refresh. **Unattended** launches never fall back:
 refresh refuse `PROFILE_NOT_FOUND`. A create naming a missing or failed profile fails either way.
 `PROFILE_NOT_READY` / `PROFILE_UNSUPPORTED_AGENT` always fail with the reason.
 
+**Composer catalog.** A profile chat's `/` and `$` menus never show the agent's Global commands
+and skills: `GET agentChatRoutes.catalog` (daemon-owned, both transports) answers the live
+session's own report (the host's `/threads/:id/catalog`, source `session`), else
+`SessionProfileService.composerCatalog` — the profile's enabled, in-scope skills and commands for
+the agent (Codex: commands as skills) plus `/compact` (source `profile`). A Global chat answers
+`none` without asking the host, and its composer keeps the provider's catalog
+(`withThreadCatalog` in `packages/ui/src/lib/agent-chat/thread-catalog.ts`).
+
 **Leases.** `PreparedDirLeases` (above) is `AgentChatService.profileLeases()`, passed as the
 lifecycle's `leases` in `index.ts`. The refresh at every session start always launches the
 CURRENT version, so an old one is leased only while a session that started on it lives.

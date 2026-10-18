@@ -22,7 +22,7 @@ import type {
   RegistryEntry,
   SessionSummary, AgentAccount,
   ThreadLineage } from "@orquester/api";
-import { SYSTEM_ACCOUNT_ID } from "@orquester/api";
+import { SYSTEM_ACCOUNT_ID, isSessionProfileAgentId, type SessionProfileAgentId } from "@orquester/api";
 import { CONVERSATION_ALREADY_OPEN, forkTitle } from "@orquester/api/agent-chat";
 import type { AgentChatHome, RuntimePlatform } from "@orquester/config";
 import { agentHostSocketPath, agentHostTokenPath } from "@orquester/config";
@@ -56,7 +56,7 @@ import { markClaudeProjectTrusted } from "./home-prep.ts";
 import { parseSessionOwner } from "./owner.ts";
 import type { FastifyReply } from "fastify";
 import type { AgentChatRouteDeps } from "./proxy-routes.ts";
-import type { HtmlRenderReference } from "@orquester/api/agent-chat";
+import type { HtmlRenderReference, Skill, SlashCommand } from "@orquester/api/agent-chat";
 import { publishHtmlRender, type PublishHtmlRenderInput } from "./html-render-publish.ts";
 import { HtmlPreviewError, measureHtmlPage, previewHtmlPage, type HtmlPageRenderer, type HtmlPreview, type HtmlPreviewInput } from "../html-preview/index.ts";
 import { createVisualUrlSigner, type VisualUrlSigner } from "./visual-urls.ts";
@@ -215,6 +215,11 @@ export interface ChatSessionProfiles {
   resolve: ResolveProfileLaunch;
   /** A deleted profile's name (durable, read at the fallback) — for the fallback notice. Should not reject. */
   profileName?(profileId: string): Promise<string | undefined> | string | undefined;
+  /**
+   * The composer's catalog for a profile chat whose live session has not reported its own: the
+   * profile's own items for `agent` (`SessionProfileService.composerCatalog`). May reject.
+   */
+  catalog?(profileId: string, agent: SessionProfileAgentId): Promise<{ slashCommands: SlashCommand[]; skills: Skill[] }>;
 }
 
 /** A profile id off a request: absent, `null` (Global, where allowed), or a non-blank id ≤ 128. */
@@ -803,6 +808,7 @@ export class AgentChatService {
       noteSeq: (id, seq) => this.chat.noteSeq(id, seq),
       switchAccount: (id, body) => this.switchAccount(id, body),
       switchProfile: (id, body) => this.switchProfile(id, body),
+      profileCatalog: (summary) => this.profileCatalog(summary),
       restartHost: async () => {
         this.lastMarkedThreadIds = [];
         const hostInstanceId = await this.supervisor.restartNow();
@@ -824,6 +830,18 @@ export class AgentChatService {
 
   /** Threads the OLD host marked for continuation on its way out (§3.3). */
   private lastMarkedThreadIds: string[] = [];
+
+  /**
+   * A profile chat's composer fallback (`GET …/catalog`, source `profile`): the profile's own items
+   * for the chat's agent. `null` for a Global chat, an agent no profile serves, or a profile that
+   * cannot be read (gone: its next start falls back to Global).
+   */
+  private async profileCatalog(summary: SessionSummary): Promise<{ slashCommands: SlashCommand[]; skills: Skill[] } | null> {
+    const profiles = this.sessionProfiles ?? this.opts.sessionProfiles ?? null;
+    const adapter = this.opts.registryEntry(summary.refId)?.chat?.adapter;
+    if (!summary.profileId || profiles?.catalog === undefined || !isSessionProfileAgentId(adapter)) return null;
+    return profiles.catalog(summary.profileId, adapter).catch(() => null);
+  }
 
   /** HOST_UNAVAILABLE, worded for what the supervisor is doing about it. */
   private hostUnavailable(): ChatSessionError {

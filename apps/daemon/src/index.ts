@@ -1137,7 +1137,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
             ? agentAccounts.homePath(agent, accountId)
             : null
     }),
-    profileName: (profileId) => sessionProfiles.deletedName(profileId)
+    profileName: (profileId) => sessionProfiles.deletedName(profileId),
+    catalog: (profileId, agent) => sessionProfiles.composerCatalog(profileId, agent)
   });
 
   // Workflows → event bus (channel "workflows"): `workflow.upserted` (the rail summary — the

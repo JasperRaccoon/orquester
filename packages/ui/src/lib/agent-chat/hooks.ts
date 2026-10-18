@@ -13,12 +13,13 @@
  * none.
  */
 
-import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 
 import type {
   AgentPanelModel,
   ProviderSnapshot,
   RuntimeSubagent,
+  ThreadCatalogResponse,
   ThreadItem,
   ThreadSessionStatus,
   Turn
@@ -51,6 +52,7 @@ import {
   type AgentDrillInProjection
 } from "./drill-in.logic";
 import { loadProviders, providerForRefId, providersStore } from "./providers";
+import { parseThreadCatalogResponse } from "./thread-catalog";
 import { isBackgroundShellItems, isBackgroundShellRow } from "./roster.logic";
 import { resolveActivityLabel } from "./status.logic";
 import {
@@ -404,6 +406,39 @@ export function useProviderSnapshots(): ProviderSnapshot[] {
     () => providersStore.getState().providers,
     () => providersStore.getState().providers
   );
+}
+
+/**
+ * An Agent Profile chat's own `/` and `$` catalog (`GET …/catalog`), read when the chat or its
+ * profile changes and again whenever `refreshKey` does (its session's status, a turn ending: a
+ * live session reports what it loaded once it runs). `null` for a Global chat, while the first
+ * read is in flight, or when it failed — `withThreadCatalog` then shows nothing rather than the
+ * Global catalog. A later failed read keeps the last answer.
+ */
+export function useThreadCatalog(
+  sessionId: string,
+  profileId: string | null | undefined,
+  refreshKey: string
+): ThreadCatalogResponse | null {
+  const api = useApi();
+  const key = profileId ? `${sessionId}\u0000${profileId}` : null;
+  const [answer, setAnswer] = useState<{ key: string; catalog: ThreadCatalogResponse } | null>(null);
+
+  useEffect(() => {
+    if (key === null) return;
+    const controller = new AbortController();
+    void api.getThreadCatalog(sessionId, controller.signal).then(
+      (value) => {
+        if (controller.signal.aborted) return;
+        const catalog = parseThreadCatalogResponse(value, sessionId);
+        if (catalog !== null) setAnswer({ key, catalog });
+      },
+      () => undefined
+    );
+    return () => controller.abort();
+  }, [api, key, sessionId, refreshKey]);
+
+  return answer !== null && answer.key === key ? answer.catalog : null;
 }
 
 /**

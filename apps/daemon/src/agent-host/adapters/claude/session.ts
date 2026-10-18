@@ -40,11 +40,13 @@ import type {
   RuntimeEvent,
   RuntimeMode,
   Skill,
+  SlashCommand,
   ThreadSnapshot
 } from "@orquester/api/agent-chat";
 import { SUPPORTED_ATTACHMENT_IMAGE_MIME_TYPES, isUnfinishedGoal } from "@orquester/api/agent-chat";
 
-import type { AdapterContext, RollbackTarget } from "../../adapter.ts";
+import type { AdapterContext, RollbackTarget, SessionCatalog } from "../../adapter.ts";
+import { parseInitializationCommands, withSynthesisedCommands } from "./probe.ts";
 import { AGENT_HOST_DEADLINES, TURN_LIVENESS_WINDOWS, withDeadline } from "../../support/deadline.ts";
 import { StderrCapture } from "../../support/stderr.ts";
 import {
@@ -280,6 +282,8 @@ export class ClaudeSession {
   private readonly stderr: StderrCapture;
 
   private query: Query | undefined;
+  /** The handshake's `commands` (`catalog()`); unset until it answered. */
+  private initCommands: SlashCommand[] | undefined;
   private record: ProviderSession;
   private closed = false;
   /**
@@ -548,7 +552,7 @@ export class ClaudeSession {
     });
 
     try {
-      await withDeadline(this.query.initializationResult(), {
+      const init = await withDeadline(this.query.initializationResult(), {
         label: "claude/handshake",
         timeoutMs: AGENT_HOST_DEADLINES.handshakeMs,
         onTimeout: () => {
@@ -557,6 +561,9 @@ export class ClaudeSession {
           this.closeQuery();
         }
       });
+      // The commands THIS session loaded (its own settings sources, plugins and skills): an
+      // Agent Profile chat's composer offers these, never the probe's Global list.
+      this.initCommands = parseInitializationCommands((init as { commands?: unknown }).commands);
     } catch (error) {
       await this.teardown({
         reason: `Claude did not finish starting: ${errorMessage(error)}`,
@@ -2557,6 +2564,16 @@ export class ClaudeSession {
         this.normalizer.warning(`Could not set the Claude permission mode: ${errorMessage(error)}`)
       ]);
     }
+  }
+
+  /**
+   * What this session loaded, for the composer (`AgentAdapter.sessionCatalog`): its
+   * initialization commands (plus the host's `/compact`) and the skills a send dispatches.
+   * `null` before the handshake answered or once the session is gone.
+   */
+  async catalog(): Promise<SessionCatalog | null> {
+    if (!this.isAlive || this.initCommands === undefined) return null;
+    return { slashCommands: withSynthesisedCommands(this.initCommands), skills: await this.discoverSkills() };
   }
 
   private async discoverSkills(): Promise<Skill[]> {

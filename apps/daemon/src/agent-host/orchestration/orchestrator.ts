@@ -121,6 +121,7 @@ import {
   type CreateHostThreadRequest,
   type ForkHostThreadRequest,
   type ForkHostThreadResponse,
+  type HostThreadCatalogResponse,
   type HostThreadProfile,
   type SetThreadIdentityRequest
 } from "../host-protocol.ts";
@@ -709,6 +710,12 @@ export interface Orchestrator {
     threadId: string,
     query: { before?: string; limit?: number }
   ): Promise<ThreadPromptsResponse>;
+  /**
+   * What the thread's LIVE session loaded (`AgentAdapter.sessionCatalog`): `live: false` when
+   * there is no live session, its adapter has no such read, or the read failed or timed out.
+   * Throws `THREAD_NOT_FOUND` for a thread that does not exist. Never starts a session.
+   */
+  readCatalog(threadId: string): Promise<HostThreadCatalogResponse>;
   /**
    * One of those prompts' whole normalised text; null when the index holds
    * the whole thread and this is not one of its prompts. Throws
@@ -5457,6 +5464,25 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     }
   };
 
+  const readCatalog = async (threadId: string): Promise<HostThreadCatalogResponse> =>
+    whenReady(async () => {
+      const runtime = await loadRuntime(threadId);
+      const head = requireHead(runtime);
+      const none: HostThreadCatalogResponse = { live: false, slashCommands: [], skills: [] };
+      const adapter = adapterFor(head.adapter);
+      if (adapter.sessionCatalog === undefined) return none;
+      try {
+        const catalog = await withDeadline(() => adapter.sessionCatalog!(runtime.id), {
+          timeoutMs: AGENT_HOST_DEADLINES.authProbeMs,
+          label: "agent-host/session-catalog"
+        });
+        return catalog === null ? none : { live: true, slashCommands: catalog.slashCommands, skills: catalog.skills };
+      } catch (error) {
+        logger.warn(`agent-host: the session catalog of ${threadId} could not be read`, error);
+        return none;
+      }
+    });
+
   const readThreadHead = async (threadId: string, query: ThreadHeadQuery): Promise<ThreadHeadResponse> =>
     whenReady(async () => {
       const runtime = await loadRuntime(threadId);
@@ -7682,6 +7708,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     searchThreads,
     readPrompts,
     readPromptText,
+    readCatalog,
     readItem,
     mcpAppRequest,
     readToolOutput,

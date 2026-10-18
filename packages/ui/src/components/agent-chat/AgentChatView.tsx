@@ -23,8 +23,10 @@ import {
   useAgentChatRoster,
   useAgentChatStatus,
   useAgentChatThread,
-  useProviderSnapshot
+  useProviderSnapshot,
+  useThreadCatalog
 } from "../../lib/agent-chat/hooks";
+import { withThreadCatalog } from "../../lib/agent-chat/thread-catalog";
 import {
   clearComposerInbox,
   composerTextForDelivery,
@@ -230,10 +232,22 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   const rosterCounts = React.useMemo(() => rosterKindCounts(roster.agents), [roster.agents]);
   const status = useAgentChatStatus(sessionId);
   const provider = useProviderSnapshot(session.refId);
+  // An Agent Profile chat offers what ITS session loaded (else its profile's items), never the
+  // provider's Global commands and skills; re-read as its session starts and turns end.
+  const threadProfileId = slice.head?.profileId ?? null;
+  const threadCatalog = useThreadCatalog(
+    sessionId,
+    threadProfileId,
+    `${slice.sessionStatus ?? ""}:${slice.turnStatus ?? ""}`
+  );
+  const catalogProvider = React.useMemo(
+    () => withThreadCatalog(provider, threadProfileId, threadCatalog),
+    [provider, threadProfileId, threadCatalog]
+  );
   const registry = useRegistry();
   // The skills a sent `$mention` re-chips against (§4.6.7): the ones the
   // composer offers for this thread's cwd — in the thread and in a drill-in.
-  const skills = React.useMemo(() => timelineSkillNames(provider, session.cwd), [provider, session.cwd]);
+  const skills = React.useMemo(() => timelineSkillNames(catalogProvider, session.cwd), [catalogProvider, session.cwd]);
   const agentAccounts = useAppStore((s) => s.agentAccounts);
   const setPreferredModelSelection = useAppStore((s) => s.setPreferredModelSelection);
   const setPreferredRuntimeMode = useAppStore((s) => s.setPreferredRuntimeMode);
@@ -1285,7 +1299,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
             <div className="pointer-events-auto relative z-10 mx-auto w-full min-w-0 max-w-3xl px-3 sm:px-5">
               <ChatComposer
                 sessionId={sessionId}
-                provider={provider}
+                provider={catalogProvider}
                 modelSelection={slice.head?.modelSelection ?? null}
                 runtimeMode={slice.head?.runtimeMode ?? DEFAULT_RUNTIME_MODE}
                 interactionMode={slice.interactionMode}

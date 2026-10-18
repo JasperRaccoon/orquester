@@ -10,6 +10,7 @@
  */
 
 import { EventEmitter } from "node:events";
+import { readFile } from "node:fs/promises";
 import {
   SESSION_PROFILES_CHANNEL,
   SESSION_PROFILE_AGENTS,
@@ -44,7 +45,9 @@ import {
   type SessionProfileSummary,
   type UpdateSessionProfileRequest
 } from "@orquester/api";
+import type { Skill, SlashCommand } from "@orquester/api/agent-chat";
 import type { SessionProfileItemRecord } from "@orquester/config";
+import { parseMarkdownDocument } from "../agent-profile/infra/frontmatter.ts";
 import type { Broadcaster } from "../broadcaster.ts";
 import { SessionProfileError, sessionProfileErrors } from "./errors.ts";
 import type { SessionProfileImports, StoredImportResult } from "./imports.ts";
@@ -253,6 +256,35 @@ export class SessionProfileService {
     return resolveForAgent(await this.store.readSource(profileId), agent);
   }
 
+  /**
+   * The composer's catalog for a profile chat of `agent` whose live session has not reported its
+   * own (`GET …/catalog`, source `profile`): the profile's enabled, in-scope skills and commands
+   * as the agent loads them — Codex runs a command as a skill — plus the host's `/compact`.
+   * Never a Global item. Throws as {@link resolveForAgent} does (`PROFILE_NOT_FOUND`, …).
+   */
+  async composerCatalog(profileId: string, agent: SessionProfileAgentId): Promise<{ slashCommands: SlashCommand[]; skills: Skill[] }> {
+    const resolved = await this.resolveForAgent(profileId, agent);
+    const described = (description: string | undefined) =>
+      description !== undefined && description.trim().length > 0 ? { description: description.trim() } : {};
+    const skills: Skill[] = resolved.skills.map((skill) => ({
+      name: skill.name,
+      path: skill.skillFile,
+      enabled: true,
+      scope: "profile",
+      ...described(skill.description)
+    }));
+    const slashCommands: SlashCommand[] = [{ name: "compact", description: "Compact this conversation's context." }];
+    for (const command of resolved.commands) {
+      if (agent === "codex") {
+        skills.push({ name: command.name, path: command.file, enabled: true, scope: "profile", ...described(command.description) });
+        continue;
+      }
+      const hint = await commandArgumentHint(command.file);
+      slashCommands.push({ name: command.name, ...described(command.description), ...(hint !== undefined ? { input: { hint } } : {}) });
+    }
+    return { slashCommands, skills };
+  }
+
   private changed(profile: StoredSessionProfile): SessionProfileDetail {
     const detail = this.detail(profile);
     this.events.emit("changed", { profileId: detail.id, revision: detail.revision });
@@ -383,6 +415,16 @@ function mcpView(record: Extract<SessionProfileItemRecord, { kind: "mcp" }>): Mc
     ...(mcp.headerKeys && mcp.headerKeys.length > 0 ? { headers: mcp.headerKeys.map((key) => ({ key, set: true as const })) } : {}),
     ...(mcp.advanced !== undefined ? { advanced: { ...mcp.advanced } } : {})
   };
+}
+
+/** A command file's `argument-hint`, when it has one that reads. */
+async function commandArgumentHint(file: string): Promise<string | undefined> {
+  try {
+    const hint = parseMarkdownDocument(await readFile(file, "utf8")).frontmatter["argument-hint"];
+    return typeof hint === "string" && hint.trim().length > 0 ? hint.trim() : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**

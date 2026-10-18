@@ -466,6 +466,10 @@ export async function createClaudeAdapterWith(
       return session.backgroundTasks(toolUseId);
     },
 
+    async sessionCatalog(threadId) {
+      return (await sessions.get(threadId)?.catalog()) ?? null;
+    },
+
     async stopTask(threadId, taskId) {
       const session = sessions.get(threadId);
       if (session === undefined) {

@@ -41,6 +41,9 @@ import { MINIMUM_OPENCODE_VERSION } from "../semver.ts";
  * catalogue, which is how a catalogue failure is told apart from a start
  * failure. Every other catalogue route always answers.
  *
+ * `MOCK_COMMANDS` / `MOCK_SKILLS` (JSON arrays) replace the `/command` / `/skill` answers — a
+ * keyed server started with them in its pool env serves another catalogue than the global one.
+ *
  * `MOCK_REPORT_ENV` (comma-separated names) makes `GET /__peer/env` answer
  * those variables as the peer process sees them (`null` when unset), and adds
  * them as `env` to the `MOCK_UPSTREAM` announcement — so a test can tell which
@@ -81,8 +84,8 @@ const CATALOGUE = {
     default: { openrouter: "google/gemini-3.1-flash-lite" }
   },
   "/agent": [{ name: "build", description: "Build agent", mode: "primary" }],
-  "/command": [{ name: "init", description: "Initialise AGENTS.md" }],
-  "/skill": [{ name: "review", description: "Review a diff", location: "/skills/review/SKILL.md" }]
+  "/command": process.env.MOCK_COMMANDS ? JSON.parse(process.env.MOCK_COMMANDS) : [{ name: "init", description: "Initialise AGENTS.md" }],
+  "/skill": process.env.MOCK_SKILLS ? JSON.parse(process.env.MOCK_SKILLS) : [{ name: "review", description: "Review a diff", location: "/skills/review/SKILL.md" }]
 };
 
 let origin = "";

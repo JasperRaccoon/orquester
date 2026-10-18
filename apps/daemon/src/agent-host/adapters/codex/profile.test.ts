@@ -133,6 +133,17 @@ describe("codex profile — a launch", () => {
     });
   }
 
+  it("the thread's own catalog is what it loads: the listing minus the switched-off skills (Agent Profiles composer)", async () => {
+    const p = await prepared();
+    const { adapter, started } = await start(p);
+    assert.equal(await adapter.sessionCatalog!("thread-p"), null, "nothing before the start listed");
+    await started;
+    const catalog = await adapter.sessionCatalog!("thread-p");
+    assert.deepEqual(catalog?.slashCommands.map((command) => command.name), ["compact", "feedback"], "the host's own Codex commands");
+    assert.deepEqual(catalog?.skills.map((entry) => entry.name), ["video-cut", "build", "render"]);
+    assert.ok(!catalog?.skills.some((entry) => entry.path.startsWith(p.home)), "never a Global skill");
+  });
+
   it("without a session-tool grant the switch-offs still go", async () => {
     const p = await prepared();
     const { server, started } = await start(p, { withTools: false });

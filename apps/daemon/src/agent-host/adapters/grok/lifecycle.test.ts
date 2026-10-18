@@ -15,7 +15,7 @@ import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -403,6 +403,42 @@ test("the live command catalog replaces the handshake's, minus the two filtered 
   assert.equal(names.includes("always-approve"), false);
   assert.equal(names.includes("context"), false);
   await r.dispose();
+});
+
+test("the session's own catalog: its live commands and the skills `grok inspect` lists under its env (Agent Profiles composer)", async () => {
+  // A `grok` that answers `inspect` itself (skills under the env's GROK_HOME, so the test sees the
+  // session's own env was used) and hands everything else to the mock ACP peer.
+  const dir = await mkdtemp(join(tmpdir(), "grok-catalog-"));
+  const bin = join(dir, "grok");
+  await writeFile(
+    bin,
+    [
+      "#!/bin/sh",
+      'if [ "$1" = inspect ]; then',
+      `  printf '{"skills":[{"name":"profile-skill","description":"Mine","source":{"type":"user","path":"%s/skills/s1/SKILL.md"}}]}' "$GROK_HOME"`,
+      "  exit 0",
+      "fi",
+      `exec ${JSON.stringify(process.execPath)} ${JSON.stringify(MOCK)} "$@"`,
+      ""
+    ].join("\n")
+  );
+  await chmod(bin, 0o755);
+  const r = await rig({ bin, env: { GROK_HOME: join(dir, "home") } });
+  try {
+    assert.equal(await r.adapter.sessionCatalog!("t1"), null, "no session");
+    await start(r);
+    await r.waitFor((event) => event.type === "session.state.changed", "ready");
+    const catalog = await r.adapter.sessionCatalog!("t1");
+    const names = catalog?.slashCommands.map((command) => command.name) ?? [];
+    assert.ok(names.includes("loop") && names.includes("compact"), names.join(","));
+    assert.equal(names.includes("always-approve") || names.includes("context"), false, "the refused names stay out");
+    assert.deepEqual(catalog?.skills, [
+      { name: "profile-skill", path: join(dir, "home", "skills", "s1", "SKILL.md"), enabled: true, scope: "user", description: "Mine" }
+    ]);
+  } finally {
+    await r.dispose();
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("an approval opens a request, and the decision reaches the agent", async () => {

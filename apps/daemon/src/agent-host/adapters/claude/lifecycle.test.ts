@@ -149,14 +149,18 @@ class ScriptedQuery {
   private initResolves: boolean;
   interruptReceipt: { still_queued: string[] } = { still_queued: [] };
   closed = false;
+  /** What the handshake's `commands` carries. */
+  readonly initCommands: unknown[];
 
   constructor(params: {
     prompt: string | AsyncIterable<SDKUserMessage>;
     options?: ClaudeQueryOptions;
     initResolves?: boolean;
     contextUsage?: ContextUsageBehaviour;
+    initCommands?: unknown[];
   }) {
     this.options = params.options;
+    this.initCommands = params.initCommands ?? [];
     this.canUseTool = params.options?.canUseTool;
     this.initResolves = params.initResolves !== false;
     this.contextUsage = params.contextUsage ?? "ok";
@@ -204,7 +208,7 @@ class ScriptedQuery {
           // this wait.
           return new Promise(() => {});
         }
-        return { commands: [], models: [], account: {} };
+        return { commands: self.initCommands, models: [], account: {} };
       },
       async interrupt() {
         self.calls.push({ op: "interrupt" });
@@ -357,6 +361,8 @@ interface HarnessOptions {
   historyStdout?: (method: string, args: readonly string[]) => string;
   /** How the scripted peer answers `getContextUsage` (§7.6). */
   contextUsage?: ContextUsageBehaviour;
+  /** The session handshake's `commands`. */
+  initCommands?: unknown[];
   signal?: AbortSignal;
   /** Where an attachment id lives, for a test that needs the bytes read for real. */
   resolveAttachmentPath?: AdapterContext["resolveAttachmentPath"];
@@ -423,7 +429,8 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
       const peer = new ScriptedQuery({
         ...params,
         ...(options.initResolves !== undefined ? { initResolves: options.initResolves } : {}),
-        ...(options.contextUsage !== undefined ? { contextUsage: options.contextUsage } : {})
+        ...(options.contextUsage !== undefined ? { contextUsage: options.contextUsage } : {}),
+        ...(options.initCommands !== undefined ? { initCommands: options.initCommands } : {})
       });
       peers.push(peer);
       firstPeer.resolve(peer);
@@ -1212,6 +1219,27 @@ describe("claude adapter — stopping one task", () => {
   it("rejects stopping a task without a live session", async () => {
     const harness = await makeHarness();
     await assert.rejects(harness.adapter.stopTask!(START.threadId, "wvg2ao9ra"), /No live Claude session/);
+  });
+});
+
+describe("claude adapter — the session's own catalog (Agent Profiles composer)", () => {
+  it("answers the commands the session's handshake reported, not the probe's; null without a live session", async () => {
+    const harness = await makeHarness({
+      initCommands: [
+        { name: "profile-skill", description: "From the profile's plugin", argumentHint: "<file>" },
+        { name: "init", description: "Initialize" }
+      ]
+    });
+    assert.equal(await harness.adapter.sessionCatalog!(START.threadId), null, "no session yet");
+    await harness.adapter.startSession(START);
+    const catalog = await harness.adapter.sessionCatalog!(START.threadId);
+    assert.deepEqual(
+      catalog?.slashCommands.map((command) => command.name),
+      ["profile-skill", "init", "compact"]
+    );
+    assert.deepEqual(catalog?.slashCommands[0], { name: "profile-skill", description: "From the profile's plugin", input: { hint: "<file>" } });
+    assert.ok(!catalog?.slashCommands.some((command) => command.name === "review"), "never the probe's Global list");
+    assert.deepEqual(catalog?.skills, []);
   });
 });
 

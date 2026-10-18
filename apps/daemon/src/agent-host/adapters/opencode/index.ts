@@ -69,6 +69,7 @@ import type {
   RollbackTarget,
   SendTurnInput,
   SendTurnResult,
+  SessionCatalog,
   StartSessionInput
 } from "../../adapter.ts";
 import { AGENT_HOST_DEADLINES, withDeadline } from "../../support/deadline.ts";
@@ -84,6 +85,7 @@ import {
   OPENCODE_CAPABILITIES,
   buildSnapshot,
   keepNonEmpty,
+  loadOpenCodeCatalog,
   loadOpenCodeInventory,
   modelContextLimits,
   pendingSnapshot,
@@ -924,6 +926,18 @@ class OpenCodeAdapterImpl implements AgentAdapter {
 
   async compact(threadId: string): Promise<void> {
     await this.withSession(threadId, (session) => session.compact());
+  }
+
+  /**
+   * The live thread's own catalog: `/command` and `/skill` of the server IT runs on (a profile
+   * thread's keyed server reads the profile's config dir), scoped to its cwd — never the global
+   * server the snapshot probe reads. `null` without a live session or when neither read answered.
+   */
+  async sessionCatalog(threadId: string): Promise<SessionCatalog | null> {
+    const server = this.servers.get(threadId);
+    const input = this.startInputs.get(threadId);
+    if (server === undefined || input === undefined || !this.sessions.has(threadId)) return null;
+    return await loadOpenCodeCatalog(server.client(resolvePath(input.cwd)));
   }
 
   async readThread(threadId: string): Promise<ThreadSnapshot> {

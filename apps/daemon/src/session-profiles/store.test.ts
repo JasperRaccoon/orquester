@@ -359,3 +359,36 @@ describe("SessionProfileStore — readSource", () => {
     assert.deepEqual([...source.missingContent].sort(), [itemId, plugin.itemId].sort());
   });
 });
+
+describe("SessionProfileService — the composer's fallback catalog", () => {
+  it("is the profile's own enabled, in-scope skills and commands (Codex: commands as skills) plus /compact — never anything else", async () => {
+    const { store, service } = await setup();
+    await store.create({ name: "P" });
+    await store.createItem("id-1", "1", SKILL);
+    await store.createItem("id-1", "2", {
+      kind: "command",
+      document: { name: "ship", frontmatter: { description: "Ship it", "argument-hint": "<version>" }, body: "Ship $ARGUMENTS\n" }
+    });
+    await store.createItem("id-1", "3", { kind: "skill", agents: ["grok"], document: { name: "grok-only", frontmatter: { description: "G" }, body: "" } });
+    await store.createItem("id-1", "4", { kind: "skill", enabled: false, document: { name: "off", frontmatter: { description: "Off" }, body: "" } });
+
+    const claude = await service.composerCatalog("id-1", "claude");
+    assert.deepEqual(claude.slashCommands, [
+      { name: "compact", description: "Compact this conversation's context." },
+      { name: "ship", description: "Ship it", input: { hint: "<version>" } }
+    ]);
+    assert.deepEqual(
+      claude.skills.map((skill) => [skill.name, skill.scope, skill.enabled, skill.description]),
+      [["review", "profile", true, "Review the diff"]]
+    );
+    assert.ok(claude.skills[0]!.path.endsWith("/SKILL.md"));
+
+    const codex = await service.composerCatalog("id-1", "codex");
+    assert.deepEqual(codex.slashCommands.map((command) => command.name), ["compact"]);
+    assert.deepEqual(codex.skills.map((skill) => skill.name), ["review", "ship"], "Codex runs a command as a skill");
+
+    const grok = await service.composerCatalog("id-1", "grok");
+    assert.deepEqual(grok.skills.map((skill) => skill.name).sort(), ["grok-only", "review"]);
+    await rejects(service.composerCatalog("nope", "claude"), "PROFILE_NOT_FOUND");
+  });
+});

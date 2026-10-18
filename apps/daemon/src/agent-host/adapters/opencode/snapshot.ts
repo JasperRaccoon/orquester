@@ -132,6 +132,24 @@ export async function loadOpenCodeInventory(client: OpenCodeClient): Promise<Ope
 }
 
 /**
+ * The commands and skills ONE server loaded (`/command`, `/skill`, concurrently, each bounded):
+ * a thread's own catalog for the composer (`AgentAdapter.sessionCatalog`) — a profile thread's
+ * keyed server, never the global one. `null` when neither read answered.
+ */
+export async function loadOpenCodeCatalog(client: OpenCodeClient): Promise<{ slashCommands: SlashCommand[]; skills: Skill[] } | null> {
+  const [commands, skills] = await Promise.all([
+    client
+      .get<OpenCodeCommandRow[]>(openCodeRoutes.commands, { timeoutMs: AGENT_HOST_DEADLINES.probeMs })
+      .then((rows) => (Array.isArray(rows) ? rows : []), () => null),
+    client
+      .get<OpenCodeSkillRow[]>(openCodeRoutes.skills, { timeoutMs: AGENT_HOST_DEADLINES.probeMs })
+      .then((rows) => (Array.isArray(rows) ? rows : []), () => null)
+  ]);
+  if (commands === null && skills === null) return null;
+  return { slashCommands: toSlashCommands(commands ?? []), skills: toSkills(skills ?? []) };
+}
+
+/**
  * `GET /provider` → `"<providerID>/<modelID>" → limit.context`, the context
  * meter's denominator (§7.6).
  *
