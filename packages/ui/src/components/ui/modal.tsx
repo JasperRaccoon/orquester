@@ -1,8 +1,8 @@
 import React, { useEffect, useLayoutEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import { X } from "lucide-react";
-import { useOpenLayer } from "../../hooks/use-open-layer";
 import { cn } from "../../lib/cn";
+import { openTrackedLayer } from "../../lib/open-layers";
 
 export interface ModalProps {
   open: boolean;
@@ -21,11 +21,27 @@ const escapeStack: object[] = [];
 
 /**
  * Centered modal dialog rendered in a portal; closes on backdrop click / Escape.
- * An open layer while it is up (`useOpenLayer`), so the app-level key handlers
- * that run before its `document` listener leave its Escape to it.
+ * An open layer while it is up (`openTrackedLayer`), so the app-level key
+ * handlers that run before its `document` listener leave its Escape to it.
+ *
+ * Its Escape is its own only while it is the newest open layer: a menu opened
+ * inside it, or an editor drawn over it that is not a `Modal` (the agent-config
+ * editor over Settings), takes that Escape and the modal stays. Which layer is
+ * newest is read in the capture phase, before any handler runs — a menu that
+ * closes on the same key has already let go of its layer by the time the
+ * bubbling listener here runs.
  */
 export const Modal: React.FC<ModalProps> = ({ open, onClose, children, className }) => {
-  useOpenLayer(open);
+  const layerRef = useRef<{ release: () => void; isTopmost: () => boolean } | null>(null);
+  useEffect(() => {
+    if (!open) return undefined;
+    const layer = openTrackedLayer();
+    layerRef.current = layer;
+    return () => {
+      layer.release();
+      if (layerRef.current === layer) layerRef.current = null;
+    };
+  }, [open]);
   const dialogRef = useRef<HTMLDivElement | null>(null);
   // What had focus when the modal opened. Read while rendering, before the
   // dialog mounts: a field inside it autofocuses before any effect runs.
@@ -71,10 +87,21 @@ export const Modal: React.FC<ModalProps> = ({ open, onClose, children, className
     if (!open) {
       return;
     }
+    let newestAtPress = false;
+    const onCapture = (e: KeyboardEvent) => {
+      if (e.key === "Escape") newestAtPress = layerRef.current?.isTopmost() ?? false;
+    };
     const onKey = (e: KeyboardEvent) =>
-      e.key === "Escape" && escapeStack[escapeStack.length - 1] === escapeToken.current && onClose();
+      e.key === "Escape" &&
+      newestAtPress &&
+      escapeStack[escapeStack.length - 1] === escapeToken.current &&
+      onClose();
+    document.addEventListener("keydown", onCapture, true);
     document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("keydown", onCapture, true);
+      document.removeEventListener("keydown", onKey);
+    };
   }, [open, onClose]);
 
   if (!open) {

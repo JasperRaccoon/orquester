@@ -23,8 +23,9 @@
 - **Agent host:** the separate process that runs chat-provider adapters and owns chat threads and their event logs.
 - **MCP:** the daemon's one Orquester tool catalog, served to external clients at its authenticated endpoint and to in-chat agents through the agent host, to operate chats, workflows, and related data; it does not provide terminal I/O.
 - **Workflow:** a daemon-owned graph of triggers and blocks that automates tasks within a project; a run is one execution of that graph.
-- **Right rail:** the side panel for saved prompts, chat history and checkpoints, automated workflows, and the agent profile.
-- **Agent profile:** the right-rail section that edits each agent CLI's own global config files (MCP servers, skills, plugins, marketplaces, hooks, commands, instruction file); the CLIs' files stay the only source of truth.
+- **Right rail:** the side panel for saved prompts, chat history and checkpoints, and automated workflows.
+- **Agent config:** the Settings section that edits each agent CLI's own global config files (MCP servers, skills, plugins, marketplaces, hooks, commands, instruction file); "Global" chats use it, and the CLIs' files stay the only source of truth.
+- **Agent Profiles:** Orquester-owned per-session kits of instructions, skills, MCP servers, plugins, hooks, and commands; a chat with a profile loads only that profile's items.
 
 ## Repository map
 

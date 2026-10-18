@@ -1,5 +1,6 @@
 /**
- * The right rail's Agent profile panel (agent profile spec §7): each agent
+ * Settings → Agent config (agent profiles spec §5.4; formerly the right rail's
+ * Agent profile panel, agent profile spec §7): each agent
  * CLI's global MCP servers, skills, plugins, marketplaces, hooks, commands and
  * instruction file — listed, turned on and off, copied between agents and
  * deleted here; created and edited in the editor (`AgentProfileEditorHost`,

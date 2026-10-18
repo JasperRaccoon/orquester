@@ -1,9 +1,13 @@
-/** Every panel the rail's registry knows — all of them are a phone's sections. */
-export type RightRailPanelId = "prompts" | "history" | "workflows" | "profile";
+/**
+ * Every panel the rail's registry knows — all of them are a phone's sections.
+ * The old "profile" (the agent profile) is gone: it is Settings → Agent config
+ * now. The "Agent Profiles" panel is added here (see `panels.ts`).
+ */
+export type RightRailPanelId = "prompts" | "history" | "workflows";
 
 /**
  * The panels the desktop dock hosts: the ones about the visible chat. Workflows
- * and the agent profile live in the left sidebar on desktop (`sidebar/ActivityBar.tsx`).
+ * live in the left sidebar on desktop (`sidebar/ActivityBar.tsx`).
  */
 export type DockPanelId = "prompts" | "history";
 

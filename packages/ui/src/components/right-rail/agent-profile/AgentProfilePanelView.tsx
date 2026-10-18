@@ -1,5 +1,5 @@
 /**
- * The Agent profile panel as drawn (spec §7.3): the agent picker, the
+ * The Agent config page's editor as drawn (agent profile spec §7.3): the agent picker, the
  * instructions card, the search and the kind tabs pinned at the top; the
  * notice, the unreadable-files banner and the shown tab's items — or, while
  * searching, the matches of every kind grouped by kind — scrolling between;
@@ -7,7 +7,8 @@
  *
  * Presentational — `AgentProfilePanel` owns the store, the editor bridge and
  * the confirms. The layout follows the panel's own width (`useElementWidth`),
- * never the viewport's: the dock spans 260–560 px on any screen.
+ * never the viewport's: it was built for the rail (260–560 px) and now sits
+ * in a Settings page card.
  */
 
 import React from "react";
@@ -142,8 +143,8 @@ export const AgentProfilePanelView: React.FC<AgentProfilePanelViewProps> = (prop
               value={props.query}
               onChange={props.onQueryChange}
               // Short, so the narrowest dock never clips it; the name says whose.
-              placeholder="Search profile…"
-              label={`Search ${label}'s profile`}
+              placeholder="Search config…"
+              label={`Search ${label}'s config`}
             />
             <KindTabs
               tabs={props.tabs}
@@ -166,7 +167,7 @@ export const AgentProfilePanelView: React.FC<AgentProfilePanelViewProps> = (prop
         role={hasSnapshot && !searching ? "tabpanel" : undefined}
         aria-labelledby={hasSnapshot && !searching ? kindTabId(baseId, props.kind) : undefined}
         aria-label={
-          !hasSnapshot ? `${label}'s profile` : searching ? `Search results in ${label}'s profile` : undefined
+          !hasSnapshot ? `${label}'s config` : searching ? `Search results in ${label}'s config` : undefined
         }
         aria-busy={empty?.kind === "loading" ? true : undefined}
         className="min-h-0 flex-1 space-y-1.5 overflow-y-auto px-3 pb-3 focus:outline-none"
@@ -263,7 +264,7 @@ export const AgentProfilePanelView: React.FC<AgentProfilePanelViewProps> = (prop
               >
                 <Plus size={14} aria-hidden />
                 Add
-                <span className="sr-only"> to {label}'s profile</span>
+                <span className="sr-only"> to {label}'s config</span>
               </span>
             }
           >
@@ -359,7 +360,7 @@ const FileErrorsBanner: React.FC<{ snapshot: AgentProfileSnapshot }> = ({ snapsh
 );
 
 const LoadingRows: React.FC = () => (
-  <div role="status" aria-label="Loading the profile" className="space-y-1.5 pt-1">
+  <div role="status" aria-label="Loading the config" className="space-y-1.5 pt-1">
     <div className="h-2.5 w-20 rounded bg-neutral-800/70" />
     <div className="flex items-center gap-3 rounded-xl border border-neutral-800 bg-neutral-900/40 p-3">
       <span className="h-8 w-8 shrink-0 rounded-lg bg-neutral-800/80 motion-safe:animate-pulse" />
@@ -398,7 +399,7 @@ const EmptyState: React.FC<{
     case "error":
       return (
         <RailEmptyState
-          title={`Couldn't load ${agentLabel}'s profile`}
+          title={`Couldn't load ${agentLabel}'s config`}
           hint={empty.message}
           action={
             <Button type="button" size="sm" variant="outline" onClick={onRetry} className={cn(sheet && "h-10")}>

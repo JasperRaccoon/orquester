@@ -405,7 +405,7 @@ function sendError(request: FastifyRequest, reply: FastifyReply, error: unknown)
   request.log.error({ err: error }, "agent profile route failed");
   return reply
     .code(500)
-    .send(errorBody("AGENT_PROFILE_ERROR", "The agent profile request failed; see the daemon log."));
+    .send(errorBody("AGENT_PROFILE_ERROR", "The agent config request failed; see the daemon log."));
 }
 
 /** A refusal while the upload body may still be unread: `Connection: close` (see `refuseUpload`). */

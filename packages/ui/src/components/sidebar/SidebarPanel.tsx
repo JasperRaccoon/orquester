@@ -8,17 +8,18 @@ import {
   useFocusInside,
   useOpenProjectPath
 } from "../right-rail";
+import type { SidebarView } from "./sidebar-view";
 
 /**
- * A rail panel shown in the desktop sidebar — workflows or the agent profile —
+ * A rail panel shown in the desktop sidebar — workflows —
  * under a header with its icon and title. It keeps the dock's contract
  * (`RightRailDock.tsx`): the panel fills the body and scrolls itself, keys
  * typed in it stay in it, and an Escape nothing in it handled goes back to
  * the visible chat's composer. With no project open the panel gets an empty
  * `projectPath`: the workflows panel then lists every workflow and offers no
- * per-project actions; the agent profile never needs one.
+ * per-project actions.
  */
-export const SidebarPanel: React.FC<{ id: "workflows" | "profile" }> = ({ id }) => {
+export const SidebarPanel: React.FC<{ id: Exclude<SidebarView, "projects"> }> = ({ id }) => {
   const { title, Icon, Component } = RIGHT_RAIL_PANEL_REGISTRY[id];
   const [node, setNode] = React.useState<HTMLElement | null>(null);
   const focusInside = useFocusInside(node);

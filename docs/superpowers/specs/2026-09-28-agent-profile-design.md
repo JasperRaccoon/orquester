@@ -1,5 +1,8 @@
 # Agent profile — manage the agents' skills, MCP servers, plugins, hooks, commands and instructions
 
+> Placement superseded: this editor is now **Settings → Agent config** (not a right-rail panel);
+> see `2026-10-18-agent-profiles-design.md` §5.4. Its behavior below stays valid.
+
 Status: design approved by the owner on 2026-09-28, section by section (approach A, native-first
 adapters; the coverage matrix with its two amendments; the daemon architecture; the panel with the
 responsive addendum; linking, import/copy, errors and testing). This document is the written spec

@@ -1,7 +1,7 @@
 /**
- * Open the agent-profile editor from anywhere in the right rail without holding
- * a ref to it. The editor is mounted ONCE, by the rail
- * (`AgentProfileEditorHost`), the way the saved-prompt editor is.
+ * Open the agent-config editor from anywhere in its page without holding a
+ * ref to it. The editor is mounted ONCE, by Settings → Agent config
+ * (`AgentProfileEditorHost` in `settings/AgentConfigSettings.tsx`).
  */
 
 import type { AgentProfileAgentId, ProfileItemKind } from "@orquester/api";

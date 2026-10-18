@@ -12,10 +12,10 @@ import { SIDEBAR_MIN, SIDEBAR_MAX, PANE_FLEX_RESERVE } from "../../lib/panel-siz
 
 /**
  * Left navigation. Desktop: the activity bar, then the resizable panel it
- * picks — the projects tree (search, opened agents, workspaces), workflows or
- * the agent profile — over the server footer. Mobile: an off-canvas drawer
- * (with backdrop) toggled from the top bar, holding the projects tree only; a
- * phone reaches workflows and the agent profile from its bottom section bar.
+ * picks — the projects tree (search, opened agents, workspaces) or workflows —
+ * over the server footer. Mobile: an off-canvas drawer (with backdrop) toggled
+ * from the top bar, holding the projects tree only; a phone reaches workflows
+ * from its bottom section bar.
  */
 export const Sidebar: React.FC = () => {
   const isDesktop = useIsDesktop();

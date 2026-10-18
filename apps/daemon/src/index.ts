@@ -1022,7 +1022,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   publishSavedPromptEvents(savedPrompts, broadcaster);
 
   // ---- Agent profile (agent profile spec §4.2) ------------------------------------------------
-  // The right rail's manager of each agent CLI's own global config. Built here, after
+  // Settings → Agent config: the manager of each agent CLI's own global config. Built here, after
   // `registry.init()` (an adapter takes its CLI's resolved bin) and `agentAccounts.init()` (Codex
   // writes hook trust for every managed home). Its watchers are armed once the transports serve
   // (`agentProfile.start()` below) and closed in `stop()`; changes go out on "agent-profile".
@@ -1499,7 +1499,7 @@ interface Services {
   savedPrompts: SavedPromptsService;
   /** Built-in plugins (Settings → Plugins): plugins.json, the TypeScript engine (tsrs or tsc-rs) install, the session preload. */
   plugins: PluginsService;
-  /** Each agent CLI's own global config (agent profile spec §4): the right rail's Agent profile. */
+  /** Each agent CLI's own global config (agent profile spec §4): Settings → Agent config. */
   agentProfile: AgentProfileService;
   /** Automated workflow definitions (workflows spec §3.1). */
   workflows: WorkflowService;

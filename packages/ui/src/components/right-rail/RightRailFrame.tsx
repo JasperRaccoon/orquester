@@ -7,7 +7,6 @@ import { RightRail } from "./RightRail";
 import { RightRailDock } from "./RightRailDock";
 import { MobileSectionOverlay } from "./MobileSections";
 import { toggleRightRailPanel, useRightRailState } from "./right-rail-state";
-import { AgentProfileEditorHost } from "./agent-profile/AgentProfileEditorHost";
 import { SavedPromptEditorHost } from "./saved-prompts/SavedPromptEditorHost";
 import type { DockPanelId } from "./types";
 
@@ -116,17 +115,11 @@ export const RightRailFrame: React.FC<{ children: React.ReactNode }> = ({ childr
 
 /**
  * The panels' editors, each mounted once, so every variant of a panel (docked,
- * the left sidebar, or a phone's section) opens them through their bridges
- * (`saved-prompts/editor-bridge.ts`, `agent-profile/editor-bridge.ts`). The
- * saved-prompt editor needs an open project; the agent profile is the CLIs'
- * global config, reachable from the left sidebar with no project open.
+ * or a phone's section) opens them through their bridges
+ * (`saved-prompts/editor-bridge.ts`). The saved-prompt editor needs an open
+ * project. (The agent-config editor is mounted by Settings → Agent config.)
  */
 export const RightRailEditorHost: React.FC = () => {
   const projectPath = useOpenProjectPath();
-  return (
-    <>
-      {projectPath !== null ? <SavedPromptEditorHost /> : null}
-      <AgentProfileEditorHost />
-    </>
-  );
+  return projectPath !== null ? <SavedPromptEditorHost /> : null;
 };
