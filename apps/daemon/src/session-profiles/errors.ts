@@ -38,6 +38,8 @@ export const sessionProfileErrors = {
   /** The agent has no preparer yet: its profile chats cannot launch (never a Global fallback). */
   unsupportedAgent: (agentLabel: string) =>
     new SessionProfileError(400, "PROFILE_UNSUPPORTED_AGENT", `Agent Profiles are not supported for ${agentLabel} yet.`),
+  /** The delete guard (§5.5): the workflows using the profile are not the ones the caller confirmed. */
+  workflowUsesChanged: (message: string) => new SessionProfileError(409, "WORKFLOW_USES_CHANGED", message),
   unreadable: (profileId: string, detail: string) =>
     new SessionProfileError(500, "PROFILE_UNREADABLE", `Agent Profile "${profileId}" could not be read: ${detail}`)
 };

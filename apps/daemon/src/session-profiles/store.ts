@@ -434,11 +434,13 @@ export class SessionProfileStore {
     return profile;
   }
 
-  async delete(profileId: string, revision: string): Promise<void> {
+  /** `precondition` runs in the delete's own step, after the revision check; a throw deletes nothing. */
+  async delete(profileId: string, revision: string, options: { precondition?: () => void } = {}): Promise<void> {
     await this.queue.run(profileId, async () => {
       const layout = this.layout(profileId);
       const file = await this.readManifest(profileId, layout);
       if (String(file.manifest.revision) !== revision) throw errors.conflict();
+      options.precondition?.();
       const trash = join(this.root, `.trash-${profileId}-${randomUUID()}`);
       await rename(layout.dir, trash);
       await rm(trash, { recursive: true, force: true });

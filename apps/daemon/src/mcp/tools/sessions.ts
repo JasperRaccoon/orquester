@@ -121,7 +121,7 @@ function detailFields(detail: unknown): Record<string, unknown> {
 const listSessionsTool = defineTool({
   name: "list_sessions",
   title: "List sessions",
-  description: "Open tabs (chats, terminals): status, attention and why, lineage. attention:true: only tabs needing the user.",
+  description: "Open tabs (chats, terminals): status, attention and why, lineage, a chat's Agent Profile (null: Global). attention:true: only tabs needing the user.",
   externalNote: "Default: every project.",
   input: {
     project: z.string().optional().describe("\"ws/project\", a path, or \"all\" (every project you may see)."),
@@ -215,7 +215,7 @@ const MAX_LINEAGE_CHILDREN = 50;
 const getSession = defineTool({
   name: "get_session",
   title: "Get session",
-  description: "One session: status, settings, pending requests (ids, options), plan, subagents, context meter, last reply (a delegate's: result), lineage, pending deliveries.",
+  description: "One session: status, settings (Agent Profile included), pending requests (ids, options), plan, subagents, context meter, last reply (a delegate's: result), lineage, pending deliveries.",
   chatNote: "Without content access: metadata only.",
   input: { sessionId: sessionIdField },
   audiences: ["external", "chat"],

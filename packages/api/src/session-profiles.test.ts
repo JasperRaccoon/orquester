@@ -92,6 +92,21 @@ describe("HttpOrquesterApiClient — Agent Profiles", () => {
     assert.deepEqual(seen[12]!.body, { revision: "6", text: "hi" });
   });
 
+  it("the delete guard: expectWorkflowUses rides the delete (empty: none); the workflow uses are read from the reference index", async () => {
+    const { api, seen } = client();
+    await api.deleteSessionProfile("p1", "3", { expectWorkflowUses: [] });
+    await api.deleteSessionProfile("p1", "3", { expectWorkflowUses: ["wf_1", "wf 2"] });
+    await api.getProfileWorkflowReferences("p 1");
+    assert.deepEqual(
+      seen.map((call) => `${call.method} ${call.url.replace("http://d", "")}`),
+      [
+        "DELETE /api/session-profiles/p1?revision=3&expectWorkflowUses=",
+        "DELETE /api/session-profiles/p1?revision=3&expectWorkflowUses=wf_1%2Cwf%202",
+        "GET /api/workflow-references/profiles/p%201"
+      ]
+    );
+  });
+
   it("sends the import, copy, plugin and export calls to their routes; uploads as raw octet-stream bodies", async () => {
     const seen: { method: string; url: string; type: string | undefined; body: unknown; auth: string | undefined }[] = [];
     const api = new HttpOrquesterApiClient({

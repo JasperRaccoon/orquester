@@ -79,6 +79,7 @@ import type {
   UsageTokensResponse,
   WorkspaceSummary
 } from "@orquester/api";
+import type { ProfileReferencesResponse } from "@orquester/api";
 import type { AppConfig, DaemonConfig, RemoteConnectionConfig } from "@orquester/config";
 import type { UiConnection } from "../types";
 import type {
@@ -851,8 +852,22 @@ export class ApiClient {
     return this.send("PUT", sessionProfileRoutes.profile(profileId), { body: req });
   }
 
-  deleteSessionProfile(profileId: string, revision: string): Promise<DeleteSessionProfileResponse> {
-    return this.send("DELETE", sessionProfileRoutes.profile(profileId), { query: { revision } });
+  /**
+   * `expectWorkflowUses`: the delete guard (`DeleteSessionProfileQuery`) — the ids of the workflows
+   * the confirmation showed as using the profile (`[]`: none); a mismatch is 409 `WORKFLOW_USES_CHANGED`.
+   */
+  deleteSessionProfile(
+    profileId: string,
+    revision: string,
+    options: { expectWorkflowUses?: readonly string[] } = {}
+  ): Promise<DeleteSessionProfileResponse> {
+    const expect = options.expectWorkflowUses === undefined ? {} : { expectWorkflowUses: options.expectWorkflowUses.join(",") };
+    return this.send("DELETE", sessionProfileRoutes.profile(profileId), { query: { revision, ...expect } });
+  }
+
+  /** The workflows whose agent blocks launch with the profile (the delete confirmation lists them). */
+  getProfileWorkflowReferences(profileId: string, signal?: AbortSignal): Promise<ProfileReferencesResponse> {
+    return this.send("GET", workflowRoutes.profileReferences(profileId), { signal });
   }
 
   duplicateSessionProfile(profileId: string, req: DuplicateSessionProfileRequest = {}): Promise<SessionProfileDetail> {

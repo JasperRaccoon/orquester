@@ -12,6 +12,7 @@ import Fastify from "fastify";
 import {
   workflowRoutes,
   type CreateWorkflowRequest,
+  type ProfileReferencesResponse,
   type PromptReferencesResponse,
   type Workflow,
   type WorkflowPatchOp,
@@ -138,6 +139,30 @@ test("index fails closed: before a rebuild, while the file is unreadable, and fo
   assert.deepEqual(ids(index.callers("lone")), [], "an id no unreadable record mentions stays known");
   assert.ok(index.promptUses("p7").unknownReason);
   assert.equal(index.promptUses("p8").unknownReason, undefined);
+});
+
+test("index: Agent Profile uses — agent blocks with a profileId, a disabled one too; re-targeted, deleted, and unknown when an unreadable record names it", () => {
+  const launch = (id: string, profileId: string, over: Record<string, unknown> = {}) => ({ ...ask(id, "p1"), config: { ...ask(id, "p1").config, profileId }, ...over });
+  const index = new WorkflowReferenceIndex();
+  index.rebuild({
+    workflows: [
+      stored("a", [launch("x", "prof-1"), launch("y", "prof-1", { disabled: true })]),
+      stored("b", [launch("z", "prof-2"), ask("g", "p1"), { id: "c", name: "Code", type: "code", position: { x: 0, y: 0 }, config: { source: "", profileId: "prof-1" } }])
+    ]
+  });
+  assert.deepEqual(index.profileUses("prof-1").workflows.map((use) => [use.workflowId, use.nodes.map((node) => node.id)]), [["a", ["x", "y"]]], "agent blocks only");
+  assert.deepEqual(index.profileUses("prof-2").workflows.map((use) => use.workflowId), ["b"]);
+  assert.deepEqual(index.profileUses("prof-9").workflows, []);
+  assert.deepEqual(index.promptUses("p1").workflows.map((use) => use.workflowId), ["a", "b"], "prompt uses are unchanged beside them");
+  index.set(stored("a", [launch("x", "prof-2")], { revision: 1 }));
+  assert.deepEqual(index.profileUses("prof-1").workflows, [], "re-targeted: the old use is gone");
+  assert.deepEqual(index.profileUses("prof-2").workflows.map((use) => use.workflowId), ["a", "b"]);
+  index.delete("b");
+  assert.deepEqual(index.profileUses("prof-2").workflows.map((use) => use.workflowId), ["a"]);
+  index.rebuild({ workflows: [stored("a")], unreadable: [{ id: "future", nodes: [{ type: "agent", launch: { profile: "prof-7" } }] }] });
+  assert.ok(index.profileUses("prof-7").unknownReason, "an unreadable record mentions it: unknown, never none");
+  assert.equal(index.profileUses("prof-8").unknownReason, undefined);
+  assert.match(new WorkflowReferenceIndex().profileUses("prof-1").unknownReason ?? "", /not loaded/);
 });
 
 // ---- Kept by the definitions store -------------------------------------------------------------
@@ -269,7 +294,7 @@ test("race: an answer never lags a save that landed, and a write whose callers c
 
 // ---- The routes --------------------------------------------------------------------------------
 
-test("routes: GET the references of a workflow and of a saved prompt; DELETE ?expectCallers= is the same precondition", async () => {
+test("routes: GET the references of a workflow, a saved prompt and an Agent Profile; DELETE ?expectCallers= is the same precondition", async () => {
   const dir = await scratch();
   const secrets = new WorkflowSecretsService({ file: join(dir, "workflow-secrets.json"), logger: quiet });
   await secrets.load();
@@ -285,7 +310,7 @@ test("routes: GET the references of a workflow and of a saved prompt; DELETE ?ex
   await app.ready();
   after(() => app.close());
   const child = (await store.create(createRequest("Child"))).workflow;
-  const parent = (await store.create({ ...createRequest("Parent", [{ id: "s", type: "workflow", name: "Call", config: { workflowId: child.id } }, { id: "a", type: "agent", name: "Ask", config: { prompt: { kind: "saved", promptId: "p1" } } }]), project: { kind: "temp", workspace: "beta", source: { kind: "empty" } } })).workflow;
+  const parent = (await store.create({ ...createRequest("Parent", [{ id: "s", type: "workflow", name: "Call", config: { workflowId: child.id } }, { id: "a", type: "agent", name: "Ask", config: { prompt: { kind: "saved", promptId: "p1" }, profileId: "prof-1" } }]), project: { kind: "temp", workspace: "beta", source: { kind: "empty" } } })).workflow;
 
   const refs = (await app.inject({ method: "GET", url: workflowRoutes.workflowReferences(child.id) })).json() as WorkflowReferencesResponse;
   assert.deepEqual({ ...refs, version: 0 }, {
@@ -300,6 +325,9 @@ test("routes: GET the references of a workflow and of a saved prompt; DELETE ?ex
   assert.equal(uses.unknownReason, undefined);
   const childUses = (await app.inject({ method: "GET", url: workflowRoutes.promptReferences("p9") })).json() as PromptReferencesResponse;
   assert.deepEqual(childUses.workflows, []);
+  const profileUses = (await app.inject({ method: "GET", url: workflowRoutes.profileReferences("prof-1") })).json() as ProfileReferencesResponse;
+  assert.deepEqual([profileUses.profileId, profileUses.workflows.map((use) => [use.workflowId, use.workspace, use.nodes])], ["prof-1", [[parent.id, "beta", [{ id: "a", name: "Ask" }]]]]);
+  assert.deepEqual(((await app.inject({ method: "GET", url: workflowRoutes.profileReferences("prof-9") })).json() as ProfileReferencesResponse).workflows, []);
 
   const stale = await app.inject({ method: "DELETE", url: `${workflowRoutes.workflow(child.id)}?expectCallers=` });
   assert.equal(stale.statusCode, 409);

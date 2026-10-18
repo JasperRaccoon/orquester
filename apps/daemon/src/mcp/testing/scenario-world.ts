@@ -10,7 +10,8 @@
  * executor, the catalog); the external `/mcp` server; the approval cards, grants and agent-tools
  * store (`createAgentToolsRuntime`, `connectExecutor`); the lineage gate on `POST /api/sessions`,
  * the delivery queue and the reply router with its socket-only routes; the saved-prompt store and
- * routes; the workflow store, routes, engine and run store; the agent-profile service, its Claude
+ * routes; the workflow store, routes, engine and run store; the Agent Profiles store, service and
+ * routes (a create naming a profile checked against them); the agent-profile service, its Claude
  * adapter and routes; the daemon-pointing detector and its route; the chat-manifest refresher and
  * its route; the token-usage scanner over a temp home. Faked: the agent host (tabs, threads,
  * turns, providers), the workspace/account listings and the quota snapshot.
@@ -78,6 +79,10 @@ import type { AgentHomes } from "../../agent-profile/adapters/types.ts";
 import { createProfileConverter } from "../../agent-profile/convert.ts";
 import { ProfileBackups, ProfileStash } from "../../agent-profile/infra/index.ts";
 import { registerAgentProfileRoutes } from "../../agent-profile/routes.ts";
+import { SessionProfileNames } from "../../session-profiles/launch.ts";
+import { registerSessionProfileRoutes } from "../../session-profiles/routes.ts";
+import { SessionProfileService } from "../../session-profiles/service.ts";
+import { SessionProfileStore } from "../../session-profiles/store.ts";
 import { AgentProfileService } from "../../agent-profile/service.ts";
 import { canonicalProjectPath, connectExecutor, createAgentToolsRuntime, type AgentToolsRuntime } from "../../agent-tools/approval-port.ts";
 import { registerAgentToolsRuntimeRoutes } from "../../agent-tools/routes.ts";
@@ -301,6 +306,13 @@ export class FakeHost {
   }
 
   /** The daemon's session and chat-proxy routes, answered from the host's memory. */
+  /**
+   * `AgentChatService.createSession`'s Agent Profile check (spec 2026-10-18 §5.5): a create naming a
+   * profile the store does not hold is refused `PROFILE_NOT_FOUND`; `notReady` names profiles whose
+   * preparation fails (`PROFILE_NOT_READY`). Set by the world.
+   */
+  profiles: { exists: (profileId: string) => Promise<boolean>; notReady: Map<string, string> } | null = null;
+
   register(app: FastifyInstance, deps: { providers: () => unknown; closed: (id: string) => void }): void {
     const notFound = (reply: FastifyReply) => reply.code(404).send({ error: { code: "THREAD_NOT_FOUND", message: "No chat session with that id." } });
     app.get<{ Querystring: { projectPath?: string } }>("/api/sessions", async (request) =>
@@ -315,6 +327,12 @@ export class FakeHost {
       if (body.kind !== "agent-chat") return reply.code(400).send({ code: "SESSION_UNAVAILABLE", message: "Only chat tabs in scenarios." });
       if (!body.projectPath || !existsSync(body.projectPath)) return reply.code(400).send({ code: "SESSION_UNAVAILABLE", message: "No such project." });
       const fields = body.chat ?? {};
+      const profileId: string | undefined = typeof body.profileId === "string" ? body.profileId : undefined;
+      if (profileId !== undefined) {
+        if (!(await this.profiles?.exists(profileId))) return reply.code(400).send({ code: "PROFILE_NOT_FOUND", message: `No Agent Profile "${profileId}".` });
+        const reason = this.profiles?.notReady.get(profileId);
+        if (reason) return reply.code(400).send({ code: "PROFILE_NOT_READY", message: reason });
+      }
       let lineage: SessionSummary["lineage"] | undefined;
       if (fields.lineage) {
         const parent = this.tabs.get(fields.lineage.parentThreadId);
@@ -328,7 +346,8 @@ export class FakeHost {
         agent: body.refId, project: body.projectPath, title: body.title, runtimeMode: fields.runtimeMode,
         ...(lineage ? { lineage } : {}), ...(body.owner ? { owner: body.owner } : {}), model: fields.modelSelection?.model
       });
-      if (body.cwd) this.tabs.set(id, { ...tab, cwd: body.cwd });
+      // The tab record mirrors the profile (`null` = Global) and an unattended launch.
+      this.tabs.set(id, { ...tab, ...(body.cwd ? { cwd: body.cwd } : {}), profileId: profileId ?? null, ...(fields.unattended === true ? { unattended: true } : {}) } as SessionSummary);
       this.touch(id);
       return this.tabs.get(id);
     });
@@ -438,6 +457,7 @@ export interface ScenarioWorld {
   savedPrompts: SavedPromptsService;
   workflows: { service: WorkflowService; runStore: FileRunStore; secrets: WorkflowSecretsService; daemon: WorkflowDaemon };
   agentProfile: AgentProfileService;
+  sessionProfiles: SessionProfileService;
   lineage: LineageService;
   router: ReplyRouter;
   refresher: SessionToolsRefresher;
@@ -586,9 +606,18 @@ export async function scenarioWorld(seed: WorkspaceSeed): Promise<ScenarioWorld>
   const secrets = new WorkflowSecretsService({ file: workflowSecretsPath(appdir), logger: quiet });
   await secrets.load();
   let catalogRef: WorkflowDaemon["validationCatalog"] | null = null;
+  // Agent Profiles (spec 2026-10-18): the real store, service and routes; the live ids as index.ts feeds workflow validation.
+  const sessionProfiles = new SessionProfileService({ store: new SessionProfileStore({ appdir }) });
+  await sessionProfiles.init();
+  const sessionProfileNames = new SessionProfileNames();
+  await sessionProfileNames.track(sessionProfiles);
+  host.profiles = {
+    exists: (profileId) => sessionProfiles.get(profileId).then(() => true, () => false),
+    notReady: new Map()
+  };
   const service = new WorkflowService({
     file: workflowsPath(appdir), logger: quiet, secretNames: (workflowId) => secrets.names(workflowId),
-    savedPromptIds: () => savedPrompts.allIds(), agentCatalog: () => catalogRef?.current()
+    savedPromptIds: () => savedPrompts.allIds(), sessionProfileIds: () => sessionProfileNames.liveIds(), agentCatalog: () => catalogRef?.current()
   });
   await service.load();
   const runStore = new FileRunStore({ dir: workflowRunsDir(appdir), logger: quiet });
@@ -700,6 +729,7 @@ export async function scenarioWorld(seed: WorkspaceSeed): Promise<ScenarioWorld>
       agentCatalogReady: async () => catalogRef?.ready()
     });
     registerAgentProfileRoutes(app, { service: agentProfile, importsDir: agentProfileImportsDir(appdir) });
+    registerSessionProfileRoutes(app, { service: sessionProfiles, importsDir: agentProfileImportsDir(appdir), workflowReferences: () => service.references });
     registerDaemonMcpServersRoutes(app, { detector, mode, current: (agent, id) => agentProfile.mcpCandidate(agent, id) });
   };
 
@@ -796,7 +826,7 @@ export async function scenarioWorld(seed: WorkspaceSeed): Promise<ScenarioWorld>
   let closed = false;
   return {
     root, workspacesDir, appdir, homes, project, host, local, remote, internalApi, runtime, savedPrompts,
-    workflows: { service, runStore, secrets, daemon }, agentProfile, lineage, router, refresher, usageTokens,
+    workflows: { service, runStore, secrets, daemon }, agentProfile, sessionProfiles, lineage, router, refresher, usageTokens,
     get quota() { return world.quota; },
     set quota(value: UsageResponse) { world.quota = value; },
     get agentAccounts() { return world.agentAccounts; },

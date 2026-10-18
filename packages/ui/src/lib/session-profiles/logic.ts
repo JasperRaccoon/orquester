@@ -188,3 +188,34 @@ export function profileChipLabel(
 /** The one line the chip menu says about switching (spec §5.3). */
 export const PROFILE_SWITCH_NOTE =
   "Switching restarts the agent and keeps the conversation. Claude and Grok may keep the previous instructions until the conversation is compacted.";
+
+/** One choice of the workflow agent block's Agent Profile picker; `value` "" is Global. */
+export interface BlockProfileChoice {
+  value: string;
+  label: string;
+}
+
+/**
+ * The agent block's Agent Profile picker (spec 2026-10-18 §5.5): Global first, then every profile
+ * by name. A block naming a profile the list does not hold keeps it, marked — never shown as
+ * Global (its runs fail until another is picked). While the list is not loaded, the id stands in.
+ */
+export function blockProfileChoices(
+  profiles: readonly Pick<SessionProfileSummary, "id" | "name">[] | null,
+  selected: string | undefined
+): BlockProfileChoice[] {
+  const choices: BlockProfileChoice[] = [{ value: "", label: "Global (the agent's own setup)" }];
+  for (const profile of profiles ?? []) choices.push({ value: profile.id, label: profile.name });
+  if (selected !== undefined && selected !== "" && !choices.some((choice) => choice.value === selected)) {
+    choices.push({ value: selected, label: profiles === null ? selected : "A deleted profile — pick another" });
+  }
+  return choices;
+}
+
+/** The profile a block launches with, for its section summary: "Global", the name, or that it is gone. */
+export function blockProfileLabel(profiles: readonly Pick<SessionProfileSummary, "id" | "name">[] | null, selected: string | undefined): string {
+  if (selected === undefined || selected === "") return "Global";
+  const found = profiles?.find((profile) => profile.id === selected);
+  if (found) return found.name;
+  return profiles === null ? "an Agent Profile" : "a deleted Agent Profile";
+}

@@ -180,7 +180,7 @@ describe("createProfileLaunchResolver", () => {
 
 describe("SessionProfileNames", () => {
   it("knows every listed profile, follows changes, and keeps a deleted one's name for the notice", async () => {
-    const events = new EventEmitter<{ changed: [{ profileId: string }] }>();
+    const events = new EventEmitter<{ changed: [{ profileId: string }]; deleted: [{ profileId: string }] }>();
     const names = new SessionProfileNames();
     let current = "Editing";
     await names.track({
@@ -198,5 +198,32 @@ describe("SessionProfileNames", () => {
     assert.equal(names.get("p1"), "Developer", "a failed read keeps what was known");
     assert.equal(deletedProfileNotice(names.get("p1")), 'Agent Profile "Developer" was deleted; this chat now uses Global.');
     assert.equal(deletedProfileNotice(undefined), "This chat's Agent Profile was deleted; it now uses Global.");
+  });
+
+  it("liveIds: unknown until the first list lands, then the existing profiles (unreadable ones too), following creates and deletes", async () => {
+    const events = new EventEmitter<{ changed: [{ profileId: string }]; deleted: [{ profileId: string }] }>();
+    const names = new SessionProfileNames();
+    let answer!: (value: { profiles: { id: string; name: string }[]; errors: { profileId: string }[] }) => void;
+    const tracked = names.track({
+      list: () => new Promise((resolve) => (answer = resolve)),
+      get: async () => ({ name: "New" }),
+      events
+    });
+    assert.equal(names.liveIds(), undefined, "not listed yet: unknown, never none");
+    events.emit("changed", { profileId: "p3" });
+    events.emit("deleted", { profileId: "p2" });
+    answer({ profiles: [{ id: "p1", name: "A" }, { id: "p2", name: "B" }], errors: [{ profileId: "p-broken" }] });
+    await tracked;
+    await names.idle();
+    assert.deepEqual(names.liveIds()?.sort(), ["p-broken", "p1", "p3"], "a list read older than the delete does not revive p2");
+    events.emit("deleted", { profileId: "p1" });
+    assert.deepEqual(names.liveIds()?.sort(), ["p-broken", "p3"]);
+    assert.equal(names.get("p1"), "A", "the name is kept for the notice");
+  });
+
+  it("liveIds stays unknown when the list cannot be read", async () => {
+    const names = new SessionProfileNames();
+    await names.track({ list: () => Promise.reject(new Error("EACCES")), get: async () => ({ name: "x" }), events: new EventEmitter<{ changed: [{ profileId: string }]; deleted: [{ profileId: string }] }>() });
+    assert.equal(names.liveIds(), undefined);
   });
 });

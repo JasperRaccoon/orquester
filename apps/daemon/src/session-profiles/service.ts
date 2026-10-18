@@ -111,8 +111,9 @@ export class SessionProfileService {
     return this.changed(await this.store.update(profileId, revision, patch));
   }
 
-  async remove(profileId: string, revision: string): Promise<DeleteSessionProfileResponse> {
-    await this.store.delete(profileId, revision);
+  /** `precondition` (the delete guard) runs in the store's delete step; a throw deletes nothing. */
+  async remove(profileId: string, revision: string, options: { precondition?: () => void } = {}): Promise<DeleteSessionProfileResponse> {
+    await this.store.delete(profileId, revision, options);
     this.events.emit("deleted", { profileId });
     return { profileId, deleted: true };
   }

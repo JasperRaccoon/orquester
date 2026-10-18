@@ -35,6 +35,8 @@ import type {
 import { agentProfileErrorCode, agentProfileErrorText } from "../agent-profile/errors";
 import {
   sanitizePrepareStatusResponse,
+  sanitizeProfileWorkflowUses,
+  type ProfileWorkflowUse,
   sanitizeSessionProfileDetail,
   sanitizeSessionProfileList,
   sanitizeSessionProfileMutation
@@ -47,7 +49,9 @@ export interface SessionProfilesApi {
   getSessionProfile(profileId: string, signal?: AbortSignal): Promise<unknown>;
   createSessionProfile(req: CreateSessionProfileRequest): Promise<unknown>;
   updateSessionProfile(profileId: string, req: UpdateSessionProfileRequest): Promise<unknown>;
-  deleteSessionProfile(profileId: string, revision: string): Promise<unknown>;
+  deleteSessionProfile(profileId: string, revision: string, options?: { expectWorkflowUses?: readonly string[] }): Promise<unknown>;
+  /** The workflows using a profile (the delete confirmation's list). */
+  getProfileWorkflowReferences(profileId: string, signal?: AbortSignal): Promise<unknown>;
   duplicateSessionProfile(profileId: string, req?: { name?: string }): Promise<unknown>;
   setSessionProfileItemEnabled(profileId: string, itemId: string, revision: string, enabled: boolean): Promise<unknown>;
   deleteSessionProfileItem(profileId: string, itemId: string, revision: string): Promise<unknown>;
@@ -473,13 +477,25 @@ export function updateSessionProfile(
   );
 }
 
-export async function deleteSessionProfile(api: SessionProfilesApi, profileId: string): Promise<SessionProfileMutationResult> {
+/**
+ * Delete a profile. `expectWorkflowUses` (the delete guard, spec 2026-10-18 §5.5): the ids of the
+ * workflows the confirmation showed as using it — the daemon refuses (409 `WORKFLOW_USES_CHANGED`,
+ * the notice says which use it now) when they are no longer exactly those. Absent: unchecked.
+ */
+export async function deleteSessionProfile(
+  api: SessionProfilesApi,
+  profileId: string,
+  options: { expectWorkflowUses?: readonly string[] } = {}
+): Promise<SessionProfileMutationResult> {
   const name = sessionProfileDetailEntry(profileId).detail?.name;
   const result = await mutate(
     api,
     profileId,
     profilePendingKey(profileId),
-    (revision) => api.deleteSessionProfile(profileId, revision),
+    (revision) =>
+      options.expectWorkflowUses === undefined
+        ? api.deleteSessionProfile(profileId, revision)
+        : api.deleteSessionProfile(profileId, revision, { expectWorkflowUses: options.expectWorkflowUses }),
     "none"
   );
   // The delete answers no profile: drop it here (the event does the same, idempotently).
@@ -488,6 +504,19 @@ export async function deleteSessionProfile(api: SessionProfilesApi, profileId: s
     setSessionProfilesNotice({ tone: "ok", text: `Deleted ${name ?? "the profile"}.` });
   }
   return result;
+}
+
+export type ProfileWorkflowUsesResult =
+  | { ok: true; workflows: ProfileWorkflowUse[]; unknown: boolean }
+  | { ok: false; error: string };
+
+/** The workflows whose agent blocks launch with `profileId` — what the delete confirmation lists. */
+export async function loadProfileWorkflowUses(api: SessionProfilesApi, profileId: string): Promise<ProfileWorkflowUsesResult> {
+  try {
+    return { ok: true, ...sanitizeProfileWorkflowUses(await api.getProfileWorkflowReferences(profileId)) };
+  } catch (error) {
+    return { ok: false, error: agentProfileErrorText(error) };
+  }
 }
 
 /** Create or duplicate: no revision to carry; the answer is the new profile's detail. */
