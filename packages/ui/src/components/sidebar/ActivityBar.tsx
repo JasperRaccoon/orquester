@@ -7,10 +7,10 @@ import { RIGHT_RAIL_PANEL_REGISTRY } from "../right-rail/panels";
 import { useWorkflowAttention } from "../workflows/runs/WorkflowAttention";
 import { setSidebarView, useSidebarView, type SidebarView } from "./sidebar-view";
 
-// The "Agent Profiles" panel takes the slot after workflows (see `right-rail/panels.ts`).
 const ITEMS: ReadonlyArray<{ id: SidebarView; title: string; Icon: LucideIcon }> = [
   { id: "projects", title: "Projects & agents", Icon: Boxes },
-  { id: "workflows", title: RIGHT_RAIL_PANEL_REGISTRY.workflows.title, Icon: RIGHT_RAIL_PANEL_REGISTRY.workflows.Icon }
+  { id: "workflows", title: RIGHT_RAIL_PANEL_REGISTRY.workflows.title, Icon: RIGHT_RAIL_PANEL_REGISTRY.workflows.Icon },
+  { id: "profile", title: RIGHT_RAIL_PANEL_REGISTRY.profile.title, Icon: RIGHT_RAIL_PANEL_REGISTRY.profile.Icon }
 ];
 
 const ActivityButton: React.FC<{
@@ -50,7 +50,7 @@ const ActivityButton: React.FC<{
 
 /**
  * The desktop sidebar's leftmost column: one button per sidebar view — the
- * projects tree, workflows — and settings at the bottom.
+ * projects tree, workflows, Agent Profiles — and settings at the bottom.
  * A view that is not showing carries a dot when it holds something that wants
  * the user: an agent blocked on them, a failed workflow run.
  */

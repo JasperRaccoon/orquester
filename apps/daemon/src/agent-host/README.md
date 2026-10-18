@@ -183,7 +183,7 @@ hands it over (`POST /goals/resume-sessions` → `resumeGoalSessionsAfterHandove
   resume, crash restart, a host restart's rehydrate, a switch — all through `startSessionNow`. A
   fork's child takes the parent's unless `ForkHostThreadRequest.profile` names one (`null` =
   Global), and the native fork gets it as `ForkConversationInput.profile`. `thread.created` records
-  `profileId`/`profileRevision` and `thread.meta-updated` a switch's (`null` = back to Global); the
+  `profileId`/`profileRevision` and `thread.meta-updated` a switch's (`""` = back to Global); the
   fold (and `store/head.ts`) put it on `ThreadHead.profileId`, so a head rebuilt from the log keeps
   it (`FOLD_SNAPSHOT_VERSION` 8). A start whose head names a profile its launch config lost or
   cannot read FAILS rather than running as Global. `setIdentity` switches it: `profile` absent =

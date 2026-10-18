@@ -62,7 +62,7 @@ function projectHead(head: ThreadHead | null, event: DomainEvent): ThreadHead | 
         // §3.4's account switch, mirrored from the shared fold.
         ...(accountId !== undefined ? { accountId } : {}),
         ...(home !== undefined ? { home } : {}),
-        // The Agent Profiles switch: a profile, or `null` — back to Global.
+        // The Agent Profiles switch: a profile, or `""` — back to Global.
         ...(typeof profileId === "string" ? { profileId } : {})
       };
       if (profileId === null) delete next.profileId;

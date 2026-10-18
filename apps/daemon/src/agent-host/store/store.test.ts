@@ -463,8 +463,8 @@ test("the Agent Profile is rebuilt from the log alone: meta.json and state.json 
   t.after(() => reopened.close());
   assert.equal(foldThread((await reopened.readAll("t1")).events).head?.profileId, "p2");
 
-  await reopened.append({ threadId: "t1", events: [meta({ profileId: null }, "e-global")] });
-  assert.equal("profileId" in foldThread((await reopened.readAll("t1")).events).head!, false, "null is Global");
+  await reopened.append({ threadId: "t1", events: [meta({ profileId: "" }, "e-global")] });
+  assert.equal("profileId" in foldThread((await reopened.readAll("t1")).events).head!, false, "\"\" is Global");
 });
 
 test("saveHead wins over the store's own projection and survives a reopen", async (t) => {

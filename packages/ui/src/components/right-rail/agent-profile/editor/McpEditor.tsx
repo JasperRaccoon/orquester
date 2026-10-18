@@ -113,7 +113,7 @@ interface McpFormViewProps {
   nameError?: string;
 }
 
-const McpFormView: React.FC<McpFormViewProps> = ({
+export const McpFormView: React.FC<McpFormViewProps> = ({
   mode,
   form,
   onChange,

@@ -1192,12 +1192,12 @@ function closedIdsFrom(
 
 /**
  * A logged `profileId` as the fold reads it (Agent Profiles): a non-empty string names a profile,
- * `null` is an explicit switch back to Global, anything else (absent, or a value no build writes)
- * says nothing.
+ * `""` is Global (`null` here — on `thread.meta-updated`, an explicit switch back to it), anything
+ * else (absent, or a value no build writes) says nothing.
  */
 export function profileIdOf(value: unknown): string | null | undefined {
-  if (value === null) return null;
-  return typeof value === "string" && value.length > 0 ? value : undefined;
+  if (value === "") return null;
+  return typeof value === "string" ? value : undefined;
 }
 
 function reduce(state: ThreadFoldState, event: DomainEvent): Mutation {
@@ -1252,7 +1252,7 @@ function reduce(state: ThreadFoldState, event: DomainEvent): Mutation {
         // identity, and an identity change must not clear the title.
         ...(accountId !== undefined ? { accountId } : {}),
         ...(home !== undefined ? { home } : {}),
-        // Agent Profiles' switch: a profile, or `null` — back to Global.
+        // Agent Profiles' switch: a profile, or `""` — back to Global.
         ...(typeof profileId === "string" ? { profileId } : {})
       };
       if (profileId === null) delete head.profileId;

@@ -33,6 +33,11 @@ export const sessionProfileErrors = {
     new SessionProfileError(409, "ITEM_EXISTS", `This profile already has a ${kind} named "${name}" for those agents.`),
   conflict: () =>
     new SessionProfileError(409, "PROFILE_CONFLICT", "The profile changed since you loaded it. It has been refreshed."),
+  /** A launch's profile is not prepared for its agent (preparation failed, or the daemon is stopping); `reason` says why. */
+  notReady: (reason: string) => new SessionProfileError(409, "PROFILE_NOT_READY", reason),
+  /** The agent has no preparer yet: its profile chats cannot launch (never a Global fallback). */
+  unsupportedAgent: (agentLabel: string) =>
+    new SessionProfileError(400, "PROFILE_UNSUPPORTED_AGENT", `Agent Profiles are not supported for ${agentLabel} yet.`),
   unreadable: (profileId: string, detail: string) =>
     new SessionProfileError(500, "PROFILE_UNREADABLE", `Agent Profile "${profileId}" could not be read: ${detail}`)
 };

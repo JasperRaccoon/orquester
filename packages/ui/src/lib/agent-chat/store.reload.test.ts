@@ -105,6 +105,7 @@ function fakeHost() {
       });
     },
     switchAccount: unused,
+    switchProfile: unused,
     read: unused,
     readItem: unused,
     readHistory: unused,

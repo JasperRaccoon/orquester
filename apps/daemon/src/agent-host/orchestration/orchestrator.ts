@@ -4606,7 +4606,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
           ...(accountChanged ? { accountId, home } : {}),
           ...(profileChanged
             ? {
-                profileId: nextProfile?.profileId ?? null,
+                // `""` is Global on the log (`ThreadMetaUpdatedPayload`).
+                profileId: nextProfile?.profileId ?? "",
                 ...(nextProfile !== undefined ? { profileRevision: nextProfile.revision } : {})
               }
             : {})

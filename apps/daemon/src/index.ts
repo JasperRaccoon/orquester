@@ -125,7 +125,7 @@ import { agentHostRoutes, SESSION_TOOLS_REFRESH_TIMEOUT_MS, type SessionToolsRef
 import { catalogFor } from "./mcp/catalog/index.ts";
 import { canonicalProjectPath } from "./agent-tools/approval-port.ts";
 import { registerSessionToolsManifestRoute, SessionToolsRefresher } from "./session-tools/session-tools-refresh.ts";
-import { AGENT_PROFILE_CHANNEL } from "@orquester/api";
+import { AGENT_PROFILE_CHANNEL, type AgentProfileAgentId } from "@orquester/api";
 // umcp:t6 end
 // umcp:t9 begin
 import { registerPushNotifyRoute } from "./push.ts";
@@ -154,6 +154,7 @@ import { registerWorkflowRoutes } from "./workflows/routes.ts";
 import { AgentProfileService, publishAgentProfileEvents } from "./agent-profile/service.ts";
 import { registerAgentProfileRoutes } from "./agent-profile/routes.ts";
 import { SessionProfileService, publishSessionProfileEvents } from "./session-profiles/service.ts";
+import { SessionProfileLifecycle, publishSessionProfilePrepareEvents } from "./session-profiles/lifecycle.ts";
 import { SessionProfileStore } from "./session-profiles/store.ts";
 import { registerSessionProfileRoutes } from "./session-profiles/routes.ts";
 import { createAgentProfileAdapters } from "./agent-profile/adapters/index.ts";
@@ -1074,10 +1075,29 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
 
   // ---- Agent Profiles (spec 2026-10-18) ------------------------------------------------------
   // Orquester-owned per-session profiles under `<appdir>/daemon/session-profiles/`; changes go out
-  // on "session-profiles". Preparation (prepared dirs, status) is wired in by its own lifecycle.
-  const sessionProfiles = new SessionProfileService({ store: new SessionProfileStore({ appdir: paths.baseDir }) });
+  // on "session-profiles". The preparation lifecycle builds each profile's prepared dirs (per agent,
+  // per account for Codex) in the background and answers launches through `ensureReady`; it
+  // re-prepares on profile changes and on Global config changes seen by Agent config's watcher.
+  const sessionProfileStore = new SessionProfileStore({ appdir: paths.baseDir });
+  const sessionProfileLifecycle = new SessionProfileLifecycle({
+    appdir: paths.baseDir,
+    store: sessionProfileStore,
+    systemHomes: agentProfileHomes,
+    accountHome: (agent, accountId) =>
+      agentAccounts.getRecord(accountId)?.agent === agent ? agentAccounts.homePath(agent, accountId) : null,
+    defaultAccountId: (agent) => (agent === "opencode" ? null : (agentAccounts.list().defaults[agent] ?? null)),
+    // Read per call: an install or update from Settings > Agents patches the entry in place.
+    cliVersion: (agent) => registry.get(agent)?.version ?? null,
+    logger: console
+  });
+  const sessionProfiles = new SessionProfileService({ store: sessionProfileStore, prepareStatus: sessionProfileLifecycle.prepareStatusSource });
   await sessionProfiles.init().catch((error) => console.error("Agent Profiles: preparing the store failed", error));
   publishSessionProfileEvents(sessionProfiles, broadcaster);
+  publishSessionProfilePrepareEvents(sessionProfileLifecycle, broadcaster);
+  sessionProfileLifecycle.attach(sessionProfiles.events);
+  agentProfile.lifecycle.on("filesChanged", ({ agent }: { agent: AgentProfileAgentId }) => sessionProfileLifecycle.globalConfigChanged(agent));
+  // Staging cleanup and the scan of prepared dirs; stale ones re-prepare in the background.
+  await sessionProfileLifecycle.start().catch((error) => console.error("Agent Profiles: starting preparation failed", error));
 
   // Workflows → event bus (channel "workflows"): `workflow.upserted` (the rail summary — the
   // engine's, with live trigger state, once attached), `workflow.deleted`, `workflowSecrets.changed`
@@ -1192,6 +1212,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     desktops, desktopAudio,
     agentProfile,
     sessionProfiles,
+    sessionProfileLifecycle,
     workflows, workflowSecrets, workflowRuns, workflowState, workflowEngine: null, internalApi: null,
     lineage,
     workflowProjects: workflowDaemon.runtime.projects,
@@ -1421,6 +1442,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
       agentProfileImports.stop().catch((error) => console.error("Agent profile imports stop failed", error))
     ]);
     agentAccounts.stopRefresher();
+    // Aborts preparations in flight (their staging dirs are emptied at the next start).
+    sessionProfileLifecycle.stop();
     gitWatcher.stop();
     // Detach (don't kill) sessions: the tmux backend leaves its server running so
     // the next boot reattaches; the local backend has no server, so its shutdown()
@@ -1514,6 +1537,8 @@ interface Services {
   agentProfile: AgentProfileService;
   /** Orquester-owned per-session Agent Profiles (spec 2026-10-18). */
   sessionProfiles: SessionProfileService;
+  /** Agent Profiles' prepared dirs: `ensureReady(profileId, agent, accountId)` for launches, `status`, `markStale`. */
+  sessionProfileLifecycle: SessionProfileLifecycle;
   /** Automated workflow definitions (workflows spec §3.1). */
   workflows: WorkflowService;
   /** Workflow secrets — names out, values only to the engine (§5.7). */

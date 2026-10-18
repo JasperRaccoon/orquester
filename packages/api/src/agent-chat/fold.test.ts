@@ -69,7 +69,7 @@ test("thread.created builds the head; meta and mode updates patch it", () => {
   assert.equal(head.seq, state.seq);
 });
 
-test("the Agent Profile: created names it, a switch moves it, null is Global, a rename keeps it", () => {
+test("the Agent Profile: created names it, a switch moves it, the empty string is Global, a rename keeps it", () => {
   reset();
   const events: DomainEvent[] = [
     created({ profileId: "p1", profileRevision: "3" }),
@@ -79,18 +79,18 @@ test("the Agent Profile: created names it, a switch moves it, null is Global, a 
   assert.equal(fold(events).head?.profileId, "p1", "a rename or an account-only switch keeps it");
   events.push(ev("thread.meta-updated", { profileId: "p2", profileRevision: "1" }));
   assert.equal(fold(events).head?.profileId, "p2");
-  events.push(ev("thread.meta-updated", { profileId: null }));
+  events.push(ev("thread.meta-updated", { profileId: "" }));
   const global = fold(events).head!;
-  assert.equal("profileId" in global, false, "null switches back to Global");
+  assert.equal("profileId" in global, false, "\"\" switches back to Global");
   assert.equal(global.accountId, "acc-2");
   assert.equal(global.title, "Renamed");
 
   reset();
   assert.equal("profileId" in fold([created()]).head!, false, "an older log is Global");
   reset();
-  // A value no build writes says nothing rather than breaking the thread.
-  assert.equal("profileId" in fold([created({ profileId: "" })]).head!, false);
+  assert.equal("profileId" in fold([created({ profileId: "" })]).head!, false, "\"\" is Global on create too");
   reset();
+  // A value no build writes says nothing rather than breaking the thread.
   const unreadable = fold([
     created({ profileId: "p1" }),
     ev("thread.meta-updated", { profileId: 7 as unknown as string })
