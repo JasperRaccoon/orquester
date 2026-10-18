@@ -352,6 +352,10 @@ export function registerAgentProfileRoutes(app: FastifyInstance, deps: AgentProf
           }
           return await service.scanUpload(agent, name, tmp);
         } catch (error) {
+          // Deleted BEFORE the error answer is sent (a `finally` would run after `sendError`
+          // already answered): a client acting on the answer never finds the temp file.
+          if (tmp) await discardUpload(tmp);
+          tmp = undefined;
           return sendError(request, reply, error);
         } finally {
           if (tmp) await discardUpload(tmp);

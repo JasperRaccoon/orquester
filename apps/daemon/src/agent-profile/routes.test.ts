@@ -43,6 +43,8 @@ interface Harness {
   failWith(error: unknown): void;
   /** What `scanUpload` saw in its file while it ran. */
   uploaded: { path: string; bytes: string }[];
+  /** The imports dir's entries as each response was being sent (an `onSend` hook): a temp file must be gone BEFORE the answer. */
+  importsAtSend: string[][];
 }
 
 async function harness(options: { scanUploadError?: unknown } = {}): Promise<Harness> {
@@ -94,6 +96,10 @@ async function harness(options: { scanUploadError?: unknown } = {}): Promise<Har
     listMarketplacePlugins: record("listMarketplacePlugins", () => [{ name: "p", installed: true }])
   };
   const app = Fastify({ logger: false });
+  const importsAtSend: string[][] = [];
+  app.addHook("onSend", async () => {
+    importsAtSend.push(await readdir(importsDir).catch(() => []));
+  });
   registerAgentProfileRoutes(app, { service, importsDir });
   await app.ready();
   apps.push(app);
@@ -102,6 +108,7 @@ async function harness(options: { scanUploadError?: unknown } = {}): Promise<Har
     calls,
     importsDir,
     uploaded,
+    importsAtSend,
     failWith: (error) => {
       failure = error;
     }
@@ -362,6 +369,7 @@ test("upload: the octet-stream body is streamed to a temp file under the imports
   assert.equal(seen.bytes, "PK fake zip bytes");
   assert.ok(seen.path.startsWith(h.importsDir), "streamed under agentProfileImportsDir");
   assert.deepEqual(await readdir(h.importsDir), [], "the temp file is gone after the scan");
+  assert.deepEqual(h.importsAtSend, [[]], "and before the answer");
 });
 
 test("upload: the temp file is removed when the scan fails too", async () => {
@@ -374,6 +382,9 @@ test("upload: the temp file is removed when the scan fails too", async () => {
   });
   expectError(response, 400, "IMPORT_FAILED");
   assert.equal(h.uploaded[0]?.bytes, "---\nname: x\n---\n", "the scan saw the whole body");
+  // Deleted BEFORE the answer is sent (an `onSend` hook sees the dir), not after: a client acting
+  // on the answer must never find the temp file.
+  assert.deepEqual(h.importsAtSend, [[]]);
   assert.deepEqual(await readdir(h.importsDir), []);
 });
 
