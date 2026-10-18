@@ -424,6 +424,58 @@ test("import a grok auth.json derives identity and resolves GROK_HOME at launch"
   assert.equal(env?.accountId, acct.id);
 });
 
+function expiringGrokBlob(now: number): string {
+  return JSON.stringify({
+    "https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828": {
+      key: "at",
+      refresh_token: "rt",
+      email: "g@x.com",
+      expires_at: new Date(now + 60_000).toISOString()
+    }
+  });
+}
+
+test("a Grok refresh replaces auth.json by rename (as the CLI does), 0600, nothing left behind", async (t) => {
+  const now = Date.parse("2026-10-18T00:00:00Z");
+  let called = 0;
+  const svc = await makeServiceWithFetch(t, now, async () => {
+    called++;
+    return new Response(JSON.stringify({ access_token: "NEW", refresh_token: "NEWR", expires_in: 3600 }), { status: 200 });
+  });
+  const acct = await svc.importAccount({ content: expiringGrokBlob(now) });
+  const home = svc.homePath("grok", acct.id);
+  const before = await stat(join(home, "auth.json"));
+  await svc.ensureFreshForUsage("grok", acct.id, new Set());
+  assert.equal(called, 1);
+  const after = await stat(join(home, "auth.json"));
+  assert.notEqual(after.ino, before.ino, "a new file renamed over the old one");
+  assert.equal(after.mode & 0o777, 0o600);
+  const entry = JSON.parse(await readFile(join(home, "auth.json"), "utf8"))["https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828"];
+  assert.equal(entry.key, "NEW");
+  assert.equal(entry.refresh_token, "NEWR");
+  assert.equal(entry.email, "g@x.com");
+  assert.deepEqual((await readdir(home)).filter((name) => name.endsWith(".tmp")), []);
+});
+
+test("the refresher re-reads the live sessions before spending a refresh token (a chat that just started)", async (t) => {
+  const now = Date.parse("2026-10-18T00:00:00Z");
+  let called = 0;
+  const svc = await makeServiceWithFetch(t, now, async () => {
+    called++;
+    return new Response(JSON.stringify({ access_token: "NEW" }), { status: 200 });
+  });
+  const acct = await svc.importAccount({ content: expiringGrokBlob(now) });
+  // A Grok chat (Global or Agent Profile: both pin the account) starts after the caller's snapshot.
+  const live = new Set<string>([acct.id]);
+  svc.startRefresher(() => live);
+  t.after(() => svc.stopRefresher());
+  await svc.ensureFreshForUsage("grok", acct.id, new Set());
+  assert.equal(called, 0);
+  live.clear();
+  await svc.ensureFreshForUsage("grok", acct.id, new Set());
+  assert.equal(called, 1);
+});
+
 // ---------------------------------------------------------------------------
 // Agent profile §5: the owner's instructions, commands, rules and skills are
 // shared into every managed account home.

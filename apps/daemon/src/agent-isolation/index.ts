@@ -21,6 +21,7 @@ export {
   seedCodexHome
 } from "./codex-seed.ts";
 export {
+  GROK_AUTH_PATH_ENV,
   GROK_PROFILE_ENV,
   GROK_USER_SKILL_ROOTS,
   type GrokPluginNamesResult,

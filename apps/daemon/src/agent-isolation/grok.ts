@@ -50,6 +50,13 @@ export const GROK_PROFILE_ENV: Readonly<Record<string, string>> = Object.freeze(
   GROK_CURSOR_SKILLS_ENABLED: "false"
 });
 
+/**
+ * The variable naming the `auth.json` Grok reads (and refreshes in place, under
+ * `<dir>/auth.json.lock`) instead of `<GROK_HOME>/auth.json`: a profile home
+ * holds no credential, the account's file is used where it is.
+ */
+export const GROK_AUTH_PATH_ENV = "GROK_AUTH_PATH";
+
 // ---------------------------------------------------------------------------
 // [skills] ignore
 // ---------------------------------------------------------------------------
