@@ -81,6 +81,22 @@ function isPlausibleCloneUrl(value: string): boolean {
 }
 
 /**
+ * Why `url` cannot go into the typed `git clone '<url>' .` line, or null. A
+ * repo group's preset URL comes from the daemon (the project's
+ * credential-stripped `origin`), so any form git takes is fine — `host:owner/repo`
+ * included — but the single quoting still has to hold: a quote, whitespace or a
+ * control/format character is refused, never typed.
+ */
+function typedCloneUrlProblem(url: string, preset: boolean): string | null {
+  if (preset) {
+    return url.trim().length === 0 || /[\s'\p{Cc}\p{Cf}]/u.test(url)
+      ? "This repo's clone URL cannot be typed into a terminal safely (it contains a quote, a space or a control character)."
+      : null;
+  }
+  return isPlausibleCloneUrl(url) ? null : "Enter a clone URL (https://…, ssh://… or git@host:owner/repo.git).";
+}
+
+/**
  * Directory-safe name from the last path segment of a git URL. Trailing slashes
  * come off FIRST: `…/repo.git/` must yield `repo`, not `repo.git`.
  */
@@ -258,6 +274,13 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose,
   /** Review gate for the typed (no-account) clone — there is a command to show. */
   const [cloneReview, setCloneReview] = useState(false);
   /**
+   * A preset's server-side clone failed (the account cannot reach that repo,
+   * or it is on another host): offer the typed clone instead.
+   */
+  const [serverCloneFailed, setServerCloneFailed] = useState(false);
+  /** The preset clone goes through the typed path although the account could clone. */
+  const [typedFallback, setTypedFallback] = useState(false);
+  /**
    * Arms the confirm button a beat after a review step appears. The review and
    * its trigger share the footer slot, so without this a double-click on
    * "Review" lands its second click on "Clone" and skips the review entirely.
@@ -296,6 +319,8 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose,
     setRepoQuery("");
     setPicked(null);
     setCloneReview(false);
+    setServerCloneFailed(false);
+    setTypedFallback(false);
     setReviewArmed(false);
     setOwners(null);
     setOwner(null);
@@ -454,6 +479,8 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose,
   /** A step that shows the exact command and asks for a deliberate confirm. */
   const inReview =
     (mode === "clone" && cloneReview) || (mode === "template" && templateStep === "review");
+  /** This clone is typed into a terminal: no account to clone with, or a preset's fallback. */
+  const typedClone = mode === "clone" && (!canServerClone || typedFallback);
 
   // Arm the confirm a beat after a review appears, and move focus onto it. The
   // step that OPENS the review shares the footer slot with the confirm (Review →
@@ -488,8 +515,8 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose,
     return [withProjectName(selectedVariant.command, name), ...flags].join(" ");
   }, [selectedVariant, optionOverrides, name]);
 
-  // Single-quoted so the URL can never break out of the typed line; the field
-  // already refuses `'`, whitespace and control bytes.
+  // Single-quoted so the URL can never break out of the typed line; the submit
+  // refuses `'`, whitespace and control bytes first (`typedCloneUrlProblem`).
   const cloneCommand = `git clone '${url.trim()}' .`;
 
   /**
@@ -578,40 +605,53 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose,
     setVariantId(null);
   };
 
-  const submit = async () => {
+  /** The typed clone: a mandatory review of the exact command, then create & type it. */
+  const submitTypedClone = async () => {
     setError(null);
-
-    if (mode === "clone" && !canServerClone) {
-      // Typed clone: mandatory review of the exact command before it runs.
-      if (!isPlausibleCloneUrl(url)) {
-        setError("Enter a clone URL (https://…, ssh://… or git@host:owner/repo.git).");
-        return;
-      }
-      const dir = (name.trim() || nameFromRepoUrl(url)).trim();
-      if (!dir || dir.startsWith(".") || dir.includes("/") || dir.includes("\\")) {
-        setError("Enter a folder name (no slashes, not starting with a dot).");
-        return;
-      }
-      if (!cloneReview) {
-        setName(dir);
-        setCloneReview(true);
-        return;
-      }
-      setBusy(true);
-      try {
-        await createProjectWithCommand({ source: "empty", name: dir }, cloneCommand);
-        close();
-      } catch (err) {
-        if (err instanceof ProjectSetupError) {
-          reportSetupFailure(err);
-          return;
-        }
-        setError(describeCreateError(err));
-      } finally {
-        setBusy(false);
-      }
+    setServerCloneFailed(false);
+    const urlProblem = typedCloneUrlProblem(url, !!preset);
+    if (urlProblem) {
+      setError(urlProblem);
       return;
     }
+    const dir = (name.trim() || nameFromRepoUrl(url)).trim();
+    if (!dir || dir.startsWith(".") || dir.includes("/") || dir.includes("\\")) {
+      setError("Enter a folder name (no slashes, not starting with a dot).");
+      return;
+    }
+    if (!cloneReview) {
+      setName(dir);
+      setCloneReview(true);
+      return;
+    }
+    setBusy(true);
+    try {
+      await createProjectWithCommand({ source: "empty", name: dir }, cloneCommand, { followClone: true });
+      close();
+    } catch (err) {
+      if (err instanceof ProjectSetupError) {
+        reportSetupFailure(err);
+        return;
+      }
+      setError(describeCreateError(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** A preset's failed server-side clone, retried as a typed clone (same URL, same name). */
+  const cloneInTerminal = () => {
+    setTypedFallback(true);
+    void submitTypedClone();
+  };
+
+  const submit = async () => {
+    if (typedClone) {
+      await submitTypedClone();
+      return;
+    }
+    setError(null);
+    setServerCloneFailed(false);
 
     if (mode === "template") {
       const trimmed = name.trim();
@@ -678,6 +718,12 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose,
       close();
     } catch (err) {
       setError(describeCreateError(err));
+      // A taken name fails the typed clone just the same; anything else (a repo
+      // the account cannot reach, another host) may well clone with the
+      // server's own git credentials.
+      if (preset && mode === "clone" && !(err instanceof ApiError && err.status === 409)) {
+        setServerCloneFailed(true);
+      }
     } finally {
       setBusy(false);
     }
@@ -724,7 +770,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose,
   // In a review step the confirm reads as its own act ("Create & run") rather
   // than repeating the label of the button that opened the review.
   const submitLabel =
-    mode === "clone" && !cloneReview && !canServerClone
+    typedClone && !cloneReview
       ? "Review"
       : inReview
         ? "Create & run"
@@ -832,9 +878,11 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose,
               />
               {collisionNote}
               <p className="text-[11px] text-neutral-500">
-                {canServerClone
-                  ? "A fresh clone of the repo's default branch, in a new folder of this workspace."
-                  : "No git account with repo access is linked to this workspace, so the clone runs in a terminal tab with the server's own git credentials."}
+                {typedFallback
+                  ? "The clone runs in a terminal tab with the server's own git credentials."
+                  : canServerClone
+                    ? "A fresh clone of the repo's default branch, in a new folder of this workspace."
+                    : "No git account with repo access is linked to this workspace, so the clone runs in a terminal tab with the server's own git credentials."}
               </p>
             </div>
           )}
@@ -1190,6 +1238,11 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose,
           )}
 
           {error && <p className="text-xs text-danger">{error}</p>}
+          {serverCloneFailed && !typedFallback && mode === "clone" && preset && (
+            <Button size="sm" variant="outline" className="self-start" disabled={busy} onClick={cloneInTerminal}>
+              Clone in a terminal instead
+            </Button>
+          )}
         </div>
 
         <div className="flex shrink-0 justify-end gap-2 border-t border-neutral-800 px-4 py-3">

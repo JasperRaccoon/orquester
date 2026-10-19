@@ -285,12 +285,13 @@ const conversationScans = new Map<string, Promise<AgentConversationSummary[]>>()
 const forkRetryKeys = new ForkRetryKeys();
 
 /**
- * Setup terminals of `createProjectWithCommand`, by session id. Its project
- * list was loaded while the folder was still empty, so a typed `git clone`
- * only gains its repo (and its sidebar repo group) once the command ran. The
- * project's git status is followed meanwhile (the shell stays open after the
- * clone): every change reloads the list until the project shows a `repoKey`,
- * and the terminal exiting or closing reloads it one last time.
+ * Typed-clone setup terminals of `createProjectWithCommand` (`followClone`),
+ * by session id. Its project list was loaded while the folder was still empty,
+ * so a typed `git clone` only gains its repo (and its sidebar repo group) once
+ * the command ran. The project's git status is followed meanwhile (the shell
+ * stays open after the clone): every change re-lists the project until it
+ * shows a `repoKey`, and the terminal exiting or closing reloads it one last
+ * time. Per connection: `stopSetupFollows()` ends them all on a switch.
  */
 interface SetupWatch {
   workspace: string;
@@ -299,17 +300,46 @@ interface SetupWatch {
 }
 const setupSessions = new Map<string, SetupWatch>();
 
-/** A git change in a setup project: reload while its workspace is open; once it shows its repo, stop following. */
+/**
+ * A git change in a setup project: reload the list while its workspace is
+ * open, else ask the daemon directly (leaving the store alone); once the
+ * project shows its repo, stop following.
+ */
 async function reloadForSetup(id: string): Promise<void> {
   const setup = setupSessions.get(id);
-  if (!setup || useAppStore.getState().currentWorkspace !== setup.workspace) return;
-  await useAppStore.getState().loadProjects();
-  const listed = useAppStore.getState().projects.find((p) => p.path === setup.projectPath);
+  if (!setup) return;
+  const state = useAppStore.getState();
+  let listed: ProjectSummary | undefined;
+  if (state.currentWorkspace === setup.workspace) {
+    await state.loadProjects();
+    listed = useAppStore.getState().projects.find((p) => p.path === setup.projectPath);
+  } else {
+    if (!state.api) return;
+    try {
+      listed = (await state.api.listProjects(setup.workspace)).find((p) => p.path === setup.projectPath);
+    } catch {
+      return; // The next change asks again.
+    }
+  }
   if (listed?.repoKey && setupSessions.get(id) === setup) {
     setupSessions.delete(id);
     setup.stopGit();
   }
 }
+
+/** End every setup follow: their streams belong to the connection being left. */
+function stopSetupFollows(): void {
+  const setups = [...setupSessions.values()];
+  setupSessions.clear();
+  for (const setup of setups) setup.stopGit();
+}
+
+/**
+ * `loadProjects` calls, newest last: only the newest one's answer is applied
+ * (an older listing landing late must not undo a newer one). Bumped as well
+ * where the list is dropped (closing the workspace, switching connection).
+ */
+let projectsLoadSeq = 0;
 
 /**
  * Is this recents row behind the archive curtain? `isArchived` is absent on
@@ -776,6 +806,14 @@ function renameTodoTabs(
   return changed ? next : todoTabsByContext;
 }
 
+export interface CreateProjectWithCommandOptions {
+  /**
+   * The command is a typed `git clone`: follow the project's git status until
+   * it shows its repo, so it moves into its sidebar repo group when it lands.
+   */
+  followClone?: boolean;
+}
+
 export interface AppState {
   api: ApiClient | null;
   connectionStatus: ConnectionStatus;
@@ -1054,7 +1092,11 @@ export interface AppState {
    * its directory. The scaffolder/clone runs in front of the user (interactive
    * prompts included) — the daemon never executes it.
    */
-  createProjectWithCommand: (req: CreateProjectRequest, command: string) => Promise<void>;
+  createProjectWithCommand: (
+    req: CreateProjectRequest,
+    command: string,
+    options?: CreateProjectWithCommandOptions
+  ) => Promise<void>;
   deleteProject: (project: ProjectSummary) => Promise<void>;
   openProject: (project: ProjectSummary) => void;
   /** Fetch the daemon-owned recent-projects list into the store. */
@@ -1841,6 +1883,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     invalidateProjectIndex();
     resetSavedPrompts();
     resetRepoIdentities();
+    stopSetupFollows();
+    projectsLoadSeq += 1;
     resetSecretRequests();
     resetToolApprovals();
     resetAgentTools();
@@ -2066,9 +2110,13 @@ export const useAppStore = create<AppState>((set, get) => ({
     await get().loadProjects();
   },
 
-  closeWorkspace: () => set({ currentWorkspace: null, projects: [] }),
+  closeWorkspace: () => {
+    projectsLoadSeq += 1;
+    set({ currentWorkspace: null, projects: [], projectsLoading: false });
+  },
 
   loadProjects: async () => {
+    const seq = (projectsLoadSeq += 1);
     const api = get().api;
     const workspace = get().currentWorkspace;
     if (!api || !workspace) {
@@ -2077,11 +2125,12 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
     set({ projectsLoading: true });
     try {
-      set({ projects: await api.listProjects(workspace) });
+      const projects = await api.listProjects(workspace);
+      if (seq === projectsLoadSeq) set({ projects });
     } catch (error) {
-      console.error("[orquester] failed to load projects", error);
+      if (seq === projectsLoadSeq) console.error("[orquester] failed to load projects", error);
     } finally {
-      set({ projectsLoading: false });
+      if (seq === projectsLoadSeq) set({ projectsLoading: false });
     }
   },
 
@@ -2095,7 +2144,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     await get().loadProjects();
   },
 
-  createProjectWithCommand: async (req, command) => {
+  createProjectWithCommand: async (req, command, options) => {
     const api = get().api;
     const workspace = get().currentWorkspace;
     if (!api || !workspace) {
@@ -2125,19 +2174,23 @@ export const useAppStore = create<AppState>((set, get) => ({
       // after the spawn — that removes the old client-side race entirely (a
       // fixed sleep guessing when the shell has drawn its prompt, then an input
       // frame the WS channel could drop on a reconnect).
-      // Follow the project's git status from BEFORE the command runs, so the
-      // daemon's watcher takes its baseline on the empty folder and even a
-      // clone that finishes at once is announced as a change.
+      // A typed clone: follow the project's git status from BEFORE the
+      // command runs, so the daemon's watcher takes its baseline on the empty
+      // folder and even a clone that finishes at once is announced as a
+      // change. Other setups (templates) are not followed: one that only
+      // initialises a repo never gains a repoKey to stop on.
       let setupId: string | null = null;
       let pendingChange = false;
-      const stopGit = subscribeProjectGit(api, project.path, {
-        onChange: (payload) => {
-          if (!payload.status.isRepo) return;
-          if (setupId === null) pendingChange = true;
-          else void reloadForSetup(setupId);
-        },
-        onState: () => undefined
-      });
+      const stopGit = options?.followClone
+        ? subscribeProjectGit(api, project.path, {
+            onChange: (payload) => {
+              if (!payload.status.isRepo) return;
+              if (setupId === null) pendingChange = true;
+              else void reloadForSetup(setupId);
+            },
+            onState: () => undefined
+          })
+        : null;
       let session: SessionSummary | undefined;
       try {
         session = await get().openTab({
@@ -2147,14 +2200,21 @@ export const useAppStore = create<AppState>((set, get) => ({
           initialCommand: command
         });
       } finally {
-        if (!session) stopGit();
+        if (!session) stopGit?.();
       }
       if (!session) {
         throw new Error("the setup terminal could not be opened");
       }
-      setupId = session.id;
-      setupSessions.set(session.id, { workspace, projectPath: project.path, stopGit });
-      if (pendingChange) void reloadForSetup(session.id);
+      if (stopGit) {
+        // The connection may have switched while the tab opened: its streams are gone.
+        if (get().api !== api) {
+          stopGit();
+        } else {
+          setupId = session.id;
+          setupSessions.set(session.id, { workspace, projectPath: project.path, stopGit });
+          if (pendingChange) void reloadForSetup(session.id);
+        }
+      }
     } catch (error) {
       const reason =
         (error instanceof ApiError ? error.serverMessage : null) ??

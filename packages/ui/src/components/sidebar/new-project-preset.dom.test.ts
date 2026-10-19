@@ -12,7 +12,8 @@ import type { Root } from "react-dom/client";
 import { JSDOM } from "jsdom";
 import type { CreateProjectRequest } from "@orquester/api";
 
-import { useAppStore } from "../../store/app";
+import { ApiError } from "../../lib/api-client";
+import { useAppStore, type CreateProjectWithCommandOptions } from "../../store/app";
 import type { NewProjectPreset } from "./NewProjectModal";
 
 // Loaded once the DOM globals exist: react-dom decides at load time which DOM events it can use.
@@ -68,7 +69,9 @@ const ACCOUNT = {
 describe("the new-project modal with a clone preset", () => {
   let root: Root;
   let created: CreateProjectRequest[];
-  let typed: Array<[CreateProjectRequest, string]>;
+  let typed: Array<[CreateProjectRequest, string, CreateProjectWithCommandOptions | undefined]>;
+  /** What the server-side clone throws, if anything. */
+  let cloneFails: Error | null;
   let listed: number;
   const initial = { ...useAppStore.getState() };
 
@@ -77,6 +80,7 @@ describe("the new-project modal with a clone preset", () => {
     mock.timers.enable({ apis: ["setTimeout"] });
     created = [];
     typed = [];
+    cloneFails = null;
     listed = 0;
     const mount = document.createElement("div");
     document.body.replaceChildren(mount);
@@ -109,9 +113,14 @@ describe("the new-project modal with a clone preset", () => {
       },
       createProject: async (req: CreateProjectRequest) => {
         created.push(req);
+        if (cloneFails) throw cloneFails;
       },
-      createProjectWithCommand: async (req: CreateProjectRequest, command: string) => {
-        typed.push([req, command]);
+      createProjectWithCommand: async (
+        req: CreateProjectRequest,
+        command: string,
+        options?: CreateProjectWithCommandOptions
+      ) => {
+        typed.push([req, command, options]);
       }
     } as never);
     await act(async () => {
@@ -166,9 +175,65 @@ describe("the new-project modal with a clone preset", () => {
     assert.ok(document.body.textContent?.includes(`git clone '${URL_}' .`));
     await act(async () => mock.timers.tick(400));
     await act(async () => buttonNamed("Create & run")!.click());
-    assert.deepEqual(typed, [[{ source: "empty", name: "Multiplayer" }, `git clone '${URL_}' .`]]);
+    assert.deepEqual(typed, [
+      [{ source: "empty", name: "Multiplayer" }, `git clone '${URL_}' .`, { followClone: true }]
+    ]);
     assert.deepEqual(created, []);
   });
+
+  const text = () => document.body.textContent ?? "";
+
+  it("a server-side clone the account cannot do offers the typed clone, same URL and name", async () => {
+    cloneFails = new ApiError(404, "POST", "/api/workspaces/ws/projects", undefined, { message: "Repository not found" });
+    await open(true, PRESET);
+    await typeName("Multiplayer");
+    await act(async () => buttonNamed("Clone")!.click());
+    assert.match(text(), /Repository not found/);
+    await act(async () => buttonNamed("Clone in a terminal instead")!.click());
+    assert.ok(text().includes(`git clone '${URL_}' .`), "straight to the typed clone's review");
+    assert.equal(buttonNamed("Clone in a terminal instead"), undefined);
+    await act(async () => mock.timers.tick(400));
+    await act(async () => buttonNamed("Create & run")!.click());
+    assert.deepEqual(typed, [
+      [{ source: "empty", name: "Multiplayer" }, `git clone '${URL_}' .`, { followClone: true }]
+    ]);
+    assert.equal(created.length, 1, "the failed server-side attempt only");
+  });
+
+  it("a taken name is not offered the typed clone", async () => {
+    cloneFails = new ApiError(409, "POST", "/api/workspaces/ws/projects", undefined, { message: "Folder exists" });
+    await open(true, PRESET);
+    await typeName("Multiplayer");
+    await act(async () => buttonNamed("Clone")!.click());
+    assert.match(text(), /Folder exists/);
+    assert.equal(buttonNamed("Clone in a terminal instead"), undefined);
+  });
+
+  it("types any daemon-supplied URL form, the scp form without a user included", async () => {
+    const scp = "github.com:JasperRaccoon/JasperEngine.git";
+    await open(false, { ...PRESET, url: scp });
+    await typeName("Multiplayer");
+    await act(async () => buttonNamed("Review")!.click());
+    assert.ok(text().includes(`git clone '${scp}' .`));
+    await act(async () => mock.timers.tick(400));
+    await act(async () => buttonNamed("Create & run")!.click());
+    assert.deepEqual(typed, [[{ source: "empty", name: "Multiplayer" }, `git clone '${scp}' .`, { followClone: true }]]);
+  });
+
+  for (const [what, url] of [
+    ["a quote", "https://github.com/o/it's.git"],
+    ["whitespace", "https://github.com/o/r .git"],
+    ["a control character", "https://github.com/o/r\u001b]0;x\u0007.git"]
+  ] as const) {
+    it(`refuses to type a preset URL with ${what}`, async () => {
+      await open(false, { ...PRESET, url });
+      await typeName("Multiplayer");
+      await act(async () => buttonNamed("Review")!.click());
+      assert.match(text(), /cannot be typed into a terminal safely/);
+      assert.equal(buttonNamed("Create & run"), undefined, "no review");
+      assert.deepEqual(typed, []);
+    });
+  }
 
   it("opens as before without a preset", async () => {
     await open(true, null);
