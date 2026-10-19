@@ -1,0 +1,293 @@
+/**
+ * Where secret-file drift shows (spec §7), as pure rules: the project-row
+ * badge, the repo-header count, the project bar's model, message, confirms and
+ * dismissal key, and the compare summaries.
+ */
+
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+
+import type { SecretFileCloneState, SecretFilesClone, SecretVaultDetail } from "@orquester/api";
+
+import {
+  MAX_BAR_DISMISSALS,
+  addBarDismissal,
+  compareSummaryText,
+  compareTargets,
+  countKeyChanges,
+  differingKeys,
+  parseBarDismissals,
+  projectBarDismissKey,
+  projectBarMessage,
+  projectBarModel,
+  projectSecretBadge,
+  pushConfirmText,
+  repoSecretCount,
+  resetConfirmText,
+  secretFileStateText
+} from "./drift.logic";
+
+const file = (path: string, state: SecretFileCloneState["state"], extra: Partial<SecretFileCloneState> = {}) => ({
+  path,
+  state,
+  ...extra
+});
+
+const clone = (projectName: string, files: SecretFileCloneState[]): SecretFilesClone => ({
+  projectPath: `/w/ws/${projectName}`,
+  projectName,
+  files,
+  needsAttention: files.some((f) => ["modified", "deleted", "missing-dir", "refused"].includes(f.state))
+});
+
+const vault = (clones: SecretFilesClone[], versions: Record<string, string> = {}): SecretVaultDetail => ({
+  workspace: "ws",
+  repoKey: "github.com/o/r",
+  fileCount: Object.keys(versions).length,
+  clonesNeedingAttention: clones.filter((c) => c.needsAttention).length,
+  newCandidates: 0,
+  updatedAt: "2026-10-19T00:00:00Z",
+  files: Object.entries(versions).map(([path, version]) => ({
+    path,
+    version,
+    updatedAt: "2026-10-19T00:00:00Z",
+    updatedBy: { kind: "user" }
+  })),
+  excluded: [],
+  candidates: [],
+  clones
+});
+
+describe("secretFileStateText", () => {
+  it("labels every state, and a refused file with its reason", () => {
+    assert.equal(secretFileStateText({ state: "modified" }), "changed here");
+    assert.equal(secretFileStateText({ state: "deleted" }), "deleted here");
+    assert.equal(secretFileStateText({ state: "missing-dir" }), "its folder is missing here");
+    assert.equal(secretFileStateText({ state: "synced" }), "in sync");
+    assert.equal(secretFileStateText({ state: "refused", refusal: "tracked" }), "can't be synced here: git tracks it here");
+    assert.equal(secretFileStateText({ state: "refused" }), "can't be synced here");
+  });
+});
+
+describe("projectSecretBadge", () => {
+  const flagged = clone("A", [file(".env", "synced"), file("api/.env", "modified"), file("deploy/targets.conf", "refused", { refusal: "symlink" })]);
+
+  it("is hidden while the plugin is off or the project is in no vault", () => {
+    assert.equal(projectSecretBadge(false, flagged), null);
+    assert.equal(projectSecretBadge(true, undefined), null);
+  });
+
+  it("is hidden while every file is synced or being synced", () => {
+    assert.equal(projectSecretBadge(true, clone("A", [file(".env", "synced"), file("b/.env", "outdated"), file("c/.env", "missing")])), null);
+    assert.equal(projectSecretBadge(true, clone("A", [])), null);
+  });
+
+  it("names each file needing attention with its state", () => {
+    assert.deepEqual(projectSecretBadge(true, flagged), {
+      title: [
+        "Secret files need attention:",
+        "api/.env — changed here",
+        "deploy/targets.conf — can't be synced here: it or a folder above it is a symlink"
+      ].join("\n")
+    });
+    assert.deepEqual(projectSecretBadge(true, clone("A", [file(".env", "deleted")])), {
+      title: "A secret file needs attention:\n.env — deleted here"
+    });
+  });
+});
+
+describe("repoSecretCount", () => {
+  it("is null while the plugin is off, without a vault, or with nothing to look at", () => {
+    assert.equal(repoSecretCount(false, { clonesNeedingAttention: 2, newCandidates: 1 }), null);
+    assert.equal(repoSecretCount(true, undefined), null);
+    assert.equal(repoSecretCount(true, { clonesNeedingAttention: 0, newCandidates: 0 }), null);
+  });
+
+  it("adds clones needing attention and new candidates, and explains both", () => {
+    assert.deepEqual(repoSecretCount(true, { clonesNeedingAttention: 2, newCandidates: 0 }), {
+      count: 2,
+      title: '2 clones have secret files that need attention. Open "Secret files…" to review.'
+    });
+    assert.deepEqual(repoSecretCount(true, { clonesNeedingAttention: 0, newCandidates: 1 }), {
+      count: 1,
+      title: '1 new secret file was found and can be added. Open "Secret files…" to review.'
+    });
+    const both = repoSecretCount(true, { clonesNeedingAttention: 1, newCandidates: 3 });
+    assert.equal(both?.count, 4);
+    assert.equal(
+      both?.title,
+      '1 clone has secret files that need attention; 3 new secret files were found and can be added. Open "Secret files…" to review.'
+    );
+  });
+
+  it("ignores a negative or fractional count from a bad payload", () => {
+    assert.equal(repoSecretCount(true, { clonesNeedingAttention: -3, newCandidates: 0 }), null);
+    assert.equal(repoSecretCount(true, { clonesNeedingAttention: 1.7, newCandidates: 0 })?.count, 1);
+  });
+});
+
+describe("compare summaries", () => {
+  const keys = [
+    { key: "A", change: "added" as const },
+    { key: "B", change: "same" as const },
+    { key: "C", change: "changed" as const },
+    { key: "D", change: "changed" as const },
+    { key: "E", change: "removed" as const },
+    { key: "F", change: "same" as const }
+  ];
+
+  it("counts key changes and keeps only the differing names, in order", () => {
+    assert.deepEqual(countKeyChanges(keys), { added: 1, removed: 1, changed: 2, same: 2 });
+    assert.deepEqual(
+      differingKeys(keys).map((k) => k.key),
+      ["A", "C", "D", "E"]
+    );
+  });
+
+  it("summarizes env, line and missing compares", () => {
+    assert.equal(compareSummaryText({ format: "env", keys }), "1 added, 1 removed, 2 changed");
+    assert.equal(compareSummaryText({ format: "env", keys: [{ key: "X", change: "changed" }] }), "1 changed");
+    assert.equal(compareSummaryText({ format: "env", keys: [{ key: "X", change: "same" }] }), null);
+    assert.equal(compareSummaryText({ format: "lines", linesAdded: 3, linesRemoved: 1 }), "3 lines added, 1 removed");
+    assert.equal(compareSummaryText({ format: "lines", linesAdded: 1, linesRemoved: 0 }), "1 line added, 0 removed");
+    assert.equal(compareSummaryText({ format: "lines", linesAdded: 0, linesRemoved: 0 }), null);
+    assert.equal(compareSummaryText({ format: "missing", side: "left" }), "missing in this clone");
+    assert.equal(compareSummaryText({ format: "missing", side: "right" }), "missing in the vault");
+  });
+
+  it("compares the given path, else every file of the clone that isn't synced", () => {
+    const c = clone("A", [file(".env", "synced"), file("a/.env", "modified"), file("b/.env", "outdated")]);
+    assert.deepEqual(compareTargets(c, ".env"), [".env"]);
+    assert.deepEqual(compareTargets(c, undefined), ["a/.env", "b/.env"]);
+    assert.deepEqual(compareTargets(undefined, undefined), []);
+  });
+});
+
+describe("projectBarModel and projectBarMessage", () => {
+  it("has no bar for a project in no vault or with nothing flagged", () => {
+    assert.equal(projectBarModel(undefined), null);
+    assert.equal(projectBarModel(clone("A", [file(".env", "synced"), file("b/.env", "outdated")])), null);
+  });
+
+  it("shows one modified file with its compare summary once loaded", () => {
+    const model = projectBarModel(clone("A", [file(".env", "synced"), file("MatsSmileBack/.env", "modified")]));
+    assert.deepEqual(model, {
+      kind: "drift",
+      files: [file("MatsSmileBack/.env", "modified")],
+      pushPaths: ["MatsSmileBack/.env"],
+      resetPaths: ["MatsSmileBack/.env"],
+      comparePath: "MatsSmileBack/.env"
+    });
+    assert.deepEqual(projectBarMessage(model!), { path: "MatsSmileBack/.env", text: " differs from the vault" });
+    assert.deepEqual(projectBarMessage(model!, "1 added, 2 changed"), {
+      path: "MatsSmileBack/.env",
+      text: " differs from the vault: 1 added, 2 changed"
+    });
+  });
+
+  it("never pushes a deletion, and says the file was deleted", () => {
+    const model = projectBarModel(clone("A", [file(".env", "deleted")]));
+    assert.equal(model?.kind, "drift");
+    if (model?.kind !== "drift") return;
+    assert.deepEqual(model.pushPaths, []);
+    assert.deepEqual(model.resetPaths, [".env"]);
+    assert.equal(model.comparePath, null);
+    assert.deepEqual(projectBarMessage(model), { path: ".env", text: " was deleted in this project; the vault still has it" });
+  });
+
+  it("counts several drifted files and skips the compare", () => {
+    const model = projectBarModel(
+      clone("A", [file("a/.env", "modified"), file("b/.env", "deleted"), file("c/.env", "modified"), file("d/.env", "refused")])
+    );
+    assert.equal(model?.kind, "drift");
+    if (model?.kind !== "drift") return;
+    assert.deepEqual(model.pushPaths, ["a/.env", "c/.env"]);
+    assert.deepEqual(model.resetPaths, ["a/.env", "b/.env", "c/.env"]);
+    assert.equal(model.comparePath, null);
+    assert.deepEqual(projectBarMessage(model, "ignored"), { path: null, text: "3 secret files differ from the vault" });
+  });
+
+  it("falls back to an informational bar for missing-dir and refused files", () => {
+    const one = projectBarModel(clone("A", [file("api/.env", "missing-dir")]));
+    assert.deepEqual(one, { kind: "info", files: [file("api/.env", "missing-dir")] });
+    assert.deepEqual(projectBarMessage(one!), {
+      path: "api/.env",
+      text: " can't be copied here: its folder doesn't exist in this project"
+    });
+    const refused = projectBarModel(clone("A", [file(".env", "refused", { refusal: "tracked" })]));
+    assert.deepEqual(projectBarMessage(refused!), { path: ".env", text: " can't be synced here: git tracks it here" });
+    const several = projectBarModel(clone("A", [file("a/.env", "refused"), file("b/.env", "missing-dir")]));
+    assert.deepEqual(projectBarMessage(several!), { path: null, text: "2 secret files can't be synced to this project" });
+  });
+});
+
+describe("push and reset confirms", () => {
+  const me = clone("Mine", [file(".env", "modified")]);
+  const v = vault([
+    me,
+    clone("Synced", [file(".env", "synced")]),
+    clone("Behind", [file(".env", "outdated")]),
+    clone("Fresh", [file(".env", "missing")]),
+    clone("Diverged", [file(".env", "modified")]),
+    clone("NoDir", [file(".env", "missing-dir")])
+  ]);
+
+  it("names the clones the push overwrites and the ones that stay flagged", () => {
+    assert.equal(
+      pushConfirmText(v, me.projectPath, [".env"]),
+      "This makes this project's .env the vault's version. It overwrites the copy in Synced, Behind, Fresh. Diverged has its own changes and stays flagged."
+    );
+  });
+
+  it("says when no other clone is overwritten", () => {
+    const alone = vault([me, clone("Other1", [file(".env", "modified")]), clone("Other2", [file(".env", "modified")])]);
+    assert.equal(
+      pushConfirmText(alone, me.projectPath, [".env", "b/.env"]),
+      "This makes this project's 2 changed secret files the vault's version. No other clone is overwritten. Other1, Other2 have their own changes and stay flagged."
+    );
+  });
+
+  it("warns that a reset discards this project's changes", () => {
+    assert.equal(
+      resetConfirmText([".env"]),
+      "This replaces .env in this project with the vault's version. This project's changes to it are discarded."
+    );
+    assert.equal(
+      resetConfirmText([".env", "b/.env"]),
+      "This replaces 2 secret files in this project with the vault's version. This project's changes to them are discarded."
+    );
+  });
+});
+
+describe("bar dismissal", () => {
+  const v = vault([], { ".env": "v1", "b/.env": "v7" });
+
+  it("keys on the project, each flagged file's path and state, and the vault version", () => {
+    const key = projectBarDismissKey("/w/ws/A", [file(".env", "modified")], v);
+    assert.equal(key, projectBarDismissKey("/w/ws/A", [file(".env", "modified")], v));
+    assert.notEqual(key, projectBarDismissKey("/w/ws/B", [file(".env", "modified")], v));
+    assert.notEqual(key, projectBarDismissKey("/w/ws/A", [file(".env", "deleted")], v));
+    assert.notEqual(key, projectBarDismissKey("/w/ws/A", [file(".env", "modified")], vault([], { ".env": "v2" })));
+    assert.notEqual(key, projectBarDismissKey("/w/ws/A", [file(".env", "modified"), file("b/.env", "modified")], v));
+  });
+
+  it("does not depend on the files' order", () => {
+    assert.equal(
+      projectBarDismissKey("/p", [file(".env", "modified"), file("b/.env", "deleted")], v),
+      projectBarDismissKey("/p", [file("b/.env", "deleted"), file(".env", "modified")], v)
+    );
+  });
+
+  it("parses stored dismissals tolerantly and keeps them bounded", () => {
+    assert.deepEqual(parseBarDismissals(null), []);
+    assert.deepEqual(parseBarDismissals("not json"), []);
+    assert.deepEqual(parseBarDismissals('{"a":1}'), []);
+    assert.deepEqual(parseBarDismissals('["a", 3, "b"]'), ["a", "b"]);
+    let keys: string[] = [];
+    for (let i = 0; i < MAX_BAR_DISMISSALS + 5; i += 1) keys = addBarDismissal(keys, `k${i}`);
+    assert.equal(keys.length, MAX_BAR_DISMISSALS);
+    assert.equal(keys[0], "k5");
+    assert.deepEqual(addBarDismissal(["a", "b"], "a"), ["b", "a"]);
+    assert.equal(parseBarDismissals(JSON.stringify(keys.concat(["x"]))).length, MAX_BAR_DISMISSALS);
+  });
+});

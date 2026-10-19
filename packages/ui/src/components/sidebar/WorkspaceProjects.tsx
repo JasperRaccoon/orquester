@@ -3,6 +3,7 @@ import {
   Archive,
   Box,
   ClipboardCopy,
+  KeyRound,
   ListTodo,
   Pencil,
   Trash2,
@@ -27,6 +28,8 @@ import { isWorkflowTempProject, looksLikeWorkflowTempProject } from "../../lib/w
 import { groupProjectsByRepo } from "../../lib/repo-groups";
 import { useCollapsedRepoGroups } from "../../lib/collapsed-repo-groups";
 import { useRepoIdentities } from "../../lib/repo-identities/hooks";
+import { useProjectSecretFiles, useSecretFilesEnabled } from "../../lib/secret-files/hooks";
+import { projectSecretBadge } from "../secret-files/drift.logic";
 
 /** What the sidebar is naming inline inside the open workspace, if anything. */
 export type InlineCreate = "folder" | "todo" | null;
@@ -43,44 +46,55 @@ export const ProjectRow: React.FC<{
   onMenu?: (at: { x: number; y: number }) => void;
   /** Stands in for the cube (a search hit's repo icon). */
   icon?: React.ReactNode;
-}> = ({ project, active, tempMarker, onOpen, onMenu, icon }) => (
-  <div
-    onContextMenu={(event) => {
-      if (!onMenu) return;
-      event.preventDefault();
-      onMenu({ x: event.clientX, y: event.clientY });
-    }}
-    className={cn(
-      "group relative flex items-center rounded-lg transition-colors",
-      active
-        ? "bg-neutral-800 text-neutral-50"
-        : "text-neutral-300 hover:bg-neutral-800/60 hover:text-neutral-100"
-    )}
-  >
-    {active && (
-      <span aria-hidden className="absolute -left-1.5 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-full bg-neutral-400" />
-    )}
-    <button
-      type="button"
-      onClick={onOpen}
-      aria-current={active ? "page" : undefined}
-      className="flex min-w-0 flex-1 items-center gap-2.5 rounded-lg px-2 py-1.5 text-left text-[13px] focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500"
+}> = ({ project, active, tempMarker, onOpen, onMenu, icon }) => {
+  // Secret files (spec §7): a key badge only while one of its files needs attention.
+  const secretsOn = useSecretFilesEnabled();
+  const secrets = useProjectSecretFiles(secretsOn ? project.path : undefined);
+  const secretBadge = projectSecretBadge(secretsOn, secrets?.clone);
+  return (
+    <div
+      onContextMenu={(event) => {
+        if (!onMenu) return;
+        event.preventDefault();
+        onMenu({ x: event.clientX, y: event.clientY });
+      }}
+      className={cn(
+        "group relative flex items-center rounded-lg transition-colors",
+        active
+          ? "bg-neutral-800 text-neutral-50"
+          : "text-neutral-300 hover:bg-neutral-800/60 hover:text-neutral-100"
+      )}
     >
-      {icon ?? <Box size={15} className={cn("shrink-0", active ? "text-neutral-300" : "text-neutral-500")} />}
-      <span className="flex-1 truncate">{project.name}</span>
-      {tempMarker ? (
-        <span
-          title="Temporary project of a workflow run"
-          aria-label="Temporary project of a workflow run"
-          className="shrink-0 text-neutral-500"
-        >
-          <WorkflowIcon size={12} aria-hidden />
-        </span>
-      ) : null}
-    </button>
-    {onMenu && <RowActionsButton label={`Actions for ${project.name}`} onOpen={onMenu} />}
-  </div>
-);
+      {active && (
+        <span aria-hidden className="absolute -left-1.5 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-full bg-neutral-400" />
+      )}
+      <button
+        type="button"
+        onClick={onOpen}
+        aria-current={active ? "page" : undefined}
+        className="flex min-w-0 flex-1 items-center gap-2.5 rounded-lg px-2 py-1.5 text-left text-[13px] focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500"
+      >
+        {icon ?? <Box size={15} className={cn("shrink-0", active ? "text-neutral-300" : "text-neutral-500")} />}
+        <span className="flex-1 truncate">{project.name}</span>
+        {tempMarker ? (
+          <span
+            title="Temporary project of a workflow run"
+            aria-label="Temporary project of a workflow run"
+            className="shrink-0 text-neutral-500"
+          >
+            <WorkflowIcon size={12} aria-hidden />
+          </span>
+        ) : null}
+        {secretBadge ? (
+          <span title={secretBadge.title} aria-label={secretBadge.title} role="img" className="shrink-0 text-warn">
+            <KeyRound size={12} aria-hidden />
+          </span>
+        ) : null}
+      </button>
+      {onMenu && <RowActionsButton label={`Actions for ${project.name}`} onOpen={onMenu} />}
+    </div>
+  );
+};
 
 /**
  * The open workspace's contents, under its expanded row: its projects grouped
@@ -218,6 +232,7 @@ export const WorkspaceProjects: React.FC<{
             return (
               <RepoGroupSection
                 key={group.repoKey}
+                workspace={workspace}
                 group={group}
                 onClone={
                   cloneUrl && onCloneRepo
