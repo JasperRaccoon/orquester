@@ -22,6 +22,7 @@ import { outputFamily } from "../tools/output.ts";
 import { requestsFamily } from "../tools/requests.ts";
 import { savedPromptsFamily } from "../tools/saved-prompts.ts";
 import { searchFamily } from "../tools/search.ts";
+import { secretFilesFamily } from "../tools/secret-files.ts";
 import { secretsFamily } from "../tools/secrets.ts";
 import { sessionsFamily } from "../tools/sessions.ts";
 import { todosFamily } from "../tools/todos.ts";
@@ -72,7 +73,8 @@ export const CATALOG: readonly AnyOrquesterTool[] = buildCatalog([
   agentProfileFamily,
   desktopsFamily,
   visualsFamily,
-  secretsFamily
+  secretsFamily,
+  secretFilesFamily
 ]);
 
 const byAudience = new Map<Audience, readonly AnyOrquesterTool[]>();

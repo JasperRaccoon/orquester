@@ -185,7 +185,7 @@ test("docs/orquester-mcp.md: its tool table is catalogFor(\"external\") — name
 
 test("docs/orquester-mcp.md: outside its migration table it names no removed tool", () => {
   const begin = DOC.indexOf("### Migrating from the 72-tool surface");
-  const end = DOC.indexOf("### The 41 tools");
+  const end = DOC.indexOf("### The 42 tools");
   assert.ok(begin >= 0 && end > begin);
   const rest = DOC.slice(0, begin) + DOC.slice(end);
   assert.deepEqual(strays(rest, CATALOG_NAMES), []);
