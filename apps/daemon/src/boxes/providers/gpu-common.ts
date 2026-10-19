@@ -84,6 +84,38 @@ export function isoTime(value: unknown): string | null {
   return null;
 }
 
+/**
+ * Poll `read` with a growing interval (1 s → 10 s) until it returns a value or `deadlineMs` passes
+ * (then null). For provider states that only polling can observe; the caller's signal aborts it.
+ */
+export async function pollUntil<T>(
+  read: () => Promise<T | null>,
+  options: { signal: AbortSignal; deadlineMs: number }
+): Promise<T | null> {
+  const deadline = Date.now() + options.deadlineMs;
+  for (let attempt = 0; ; attempt++) {
+    const value = await read();
+    if (value !== null) return value;
+    const wait = Math.min(1000 * 2 ** attempt, 10_000);
+    if (Date.now() + wait > deadline) return null;
+    await new Promise<void>((resolve, reject) => {
+      if (options.signal.aborted) {
+        reject(options.signal.reason);
+        return;
+      }
+      const timer = setTimeout(() => {
+        options.signal.removeEventListener("abort", onAbort);
+        resolve();
+      }, wait);
+      const onAbort = (): void => {
+        clearTimeout(timer);
+        reject(options.signal.reason);
+      };
+      options.signal.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+}
+
 /** Throws `signal.reason` when aborted (between multi-call steps). */
 export function throwIfAborted(signal: AbortSignal): void {
   if (signal.aborted) throw signal.reason;

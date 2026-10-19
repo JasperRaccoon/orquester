@@ -1,0 +1,39 @@
+{
+  "status": true,
+  "message": "Getting regions successful.",
+  "regions": [
+    {
+      "id": 1,
+      "name": "CANADA-1",
+      "country": "CA",
+      "description": null,
+      "green_status": "GREEN",
+      "features": {
+        "floating_ip": true,
+        "volumes": true
+      }
+    },
+    {
+      "id": 2,
+      "name": "NORWAY-1",
+      "country": "NO",
+      "description": null,
+      "green_status": "GREEN",
+      "features": {
+        "floating_ip": true,
+        "volumes": true
+      }
+    },
+    {
+      "id": 3,
+      "name": "US-1",
+      "country": "US",
+      "description": null,
+      "green_status": "NOT_GREEN",
+      "features": {
+        "floating_ip": true,
+        "volumes": true
+      }
+    }
+  ]
+}

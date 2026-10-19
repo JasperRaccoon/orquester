@@ -1,0 +1,50 @@
+{
+  "status": true,
+  "message": "Getting images successful",
+  "images": [
+    {
+      "region_name": "CANADA-1",
+      "green_status": "GREEN",
+      "type": "Ubuntu",
+      "logo": "",
+      "images": [
+        {
+          "id": 8429,
+          "name": "Ubuntu Server 22.04 LTS R535 CUDA 12.2 with Docker",
+          "region_name": "CANADA-1",
+          "type": "Ubuntu",
+          "version": "Server 22.04 LTS R535 CUDA 12.2 with Docker"
+        },
+        {
+          "id": 8430,
+          "name": "Ubuntu Server 22.04 LTS R550 CUDA 12.4 with Docker",
+          "region_name": "CANADA-1",
+          "type": "Ubuntu",
+          "version": "Server 22.04 LTS R550 CUDA 12.4 with Docker"
+        },
+        {
+          "id": 8431,
+          "name": "Ubuntu Server 24.04 LTS (Noble Numbat)",
+          "region_name": "CANADA-1",
+          "type": "Ubuntu",
+          "version": "Server 24.04 LTS"
+        }
+      ]
+    },
+    {
+      "region_name": "CANADA-1",
+      "green_status": "GREEN",
+      "type": "Windows",
+      "logo": "",
+      "images": [
+        {
+          "id": 9001,
+          "name": "Windows Server 2022",
+          "region_name": "CANADA-1",
+          "type": "Windows",
+          "version": "2022"
+        }
+      ]
+    }
+  ]
+}
