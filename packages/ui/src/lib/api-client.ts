@@ -14,6 +14,12 @@ import type {
   CreateProjectRequest,
   CreateSessionRequest,
   CreateSavedPromptRequest,
+  FetchRepoFaviconRequest,
+  RepoIconUploadType,
+  RepoIdentitiesResponse,
+  RepoIdentityResponse,
+  SetRepoEmojiRequest,
+  SetRepoLabelRequest,
   CreateTodoRequest,
   CreateWorkspaceRequest,
   DeviceLink,
@@ -103,7 +109,7 @@ import {
 import { fsPathQuery } from "./fs-path-query";
 import { parsePluginActionResult, parsePluginsResponse } from "./plugins-state";
 import { buildQueryString } from "./transporter";
-import { AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, agentProfileRoutes, agentToolsRoutes, desktopRoutes, pluginRoutes, sessionProfileRoutes, workflowRoutes } from "@orquester/api";
+import { AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, agentProfileRoutes, agentToolsRoutes, desktopRoutes, pluginRoutes, repoIdentityRoutes, sessionProfileRoutes, workflowRoutes } from "@orquester/api";
 import type {
   AddSessionProfilePluginRequest,
   CopySessionProfileItemsRequest,
@@ -744,6 +750,50 @@ export class ApiClient {
 
   deleteTodo(id: string): Promise<void> {
     return this.send("DELETE", `/api/todos/${encodeURIComponent(id)}`);
+  }
+
+  // --- Repo identities (icon + label per git repo; daemon-persisted, shared) ---
+
+  listRepoIdentities(signal?: AbortSignal): Promise<RepoIdentitiesResponse> {
+    return this.send("GET", repoIdentityRoutes.list, { signal });
+  }
+
+  setRepoLabel(req: SetRepoLabelRequest): Promise<RepoIdentityResponse> {
+    return this.send("PUT", repoIdentityRoutes.label, { body: req });
+  }
+
+  setRepoEmoji(req: SetRepoEmojiRequest): Promise<RepoIdentityResponse> {
+    return this.send("PUT", repoIdentityRoutes.emoji, { body: req });
+  }
+
+  /** An image icon, streamed as the raw body (already shrunk to fit `REPO_ICON_MAX_BYTES`). */
+  uploadRepoIcon(repoKey: string, contentType: RepoIconUploadType, data: BinaryBody): Promise<RepoIdentityResponse> {
+    return this.send("POST", repoIdentityRoutes.icon, { query: { repoKey, contentType }, binaryBody: data });
+  }
+
+  /** Back to the default icon, whatever kind the current one is. */
+  clearRepoIcon(repoKey: string): Promise<RepoIdentityResponse> {
+    return this.send("DELETE", repoIdentityRoutes.icon, { query: { repoKey } });
+  }
+
+  /** The daemon fetches `domain`'s favicon and stores it as the repo's icon. */
+  fetchRepoFavicon(req: FetchRepoFaviconRequest): Promise<RepoIdentityResponse> {
+    return this.send("POST", repoIdentityRoutes.favicon, { body: req });
+  }
+
+  /** An image icon's bytes; `version` (from the identity) keeps a cache from serving stale ones. */
+  async readRepoIcon(repoKey: string, version: string, signal?: AbortSignal): Promise<ArrayBuffer> {
+    if (!this.transporter.requestBytes) throw new Error("Repo icons are not supported on this connection.");
+    const response = await this.transporter.requestBytes({
+      method: "GET",
+      path: repoIdentityRoutes.icon,
+      query: { repoKey, v: version },
+      signal
+    });
+    if (!response.ok) {
+      throw new ApiError(response.status, "GET", repoIdentityRoutes.icon, response.headers, undefined);
+    }
+    return response.data;
   }
 
   // --- Saved prompts (the right rail; daemon-persisted, shared) ------------

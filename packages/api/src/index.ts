@@ -60,6 +60,7 @@ import {
 import type { AgentProfileAgentId, ProfileImportScanResponse } from "./agent-profile.ts";
 export * from "./agent-chat/index.ts";
 export * from "./saved-prompts.ts";
+export * from "./repo-identities.ts";
 export * from "./agent-profile.ts";
 export * from "./session-profiles.ts";
 export * from "./prompt-variables.ts";
@@ -150,6 +151,21 @@ export interface ProjectSummary {
    * detection failed, or the daemon predates the field.
    */
   repoId?: string;
+  /**
+   * Canonical key of the repo behind the checkout's `origin` remote — lowercased
+   * `host/owner/repo`, host aliases folded (`repoKeyOf`). The sidebar groups by
+   * it and repo identities (`repo-identities.ts`) are keyed by it. Absent when
+   * the project has no parseable remote `origin` (not a git checkout, a
+   * local-only repo, or an older daemon).
+   */
+  repoKey?: string;
+  /** The remote's `owner/repo` in its original case — the repo group's default label. Set with `repoKey`. */
+  repoName?: string;
+  /**
+   * The `origin` URL with any credentials removed (`stripUrlCredentials`), for a
+   * fresh clone of the same repo. Set with `repoKey`.
+   */
+  cloneUrl?: string;
 }
 
 /**
