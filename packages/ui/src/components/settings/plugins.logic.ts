@@ -4,7 +4,13 @@
  * usable. Every plugin is turned on once for the whole server. No React import.
  */
 
-import { type PluginEngineInfo, type PluginInfo, TS_RUST_PLUGIN_ID, type TsCheckerEngine } from "@orquester/api";
+import {
+  type PluginEngineInfo,
+  type PluginInfo,
+  type SecretVaultSummary,
+  TS_RUST_PLUGIN_ID,
+  type TsCheckerEngine
+} from "@orquester/api";
 
 /** Shown before Better TS Typecheck is turned on (spec §6, first-enable confirmation). */
 export const FIRST_ENABLE_MESSAGE =
@@ -114,6 +120,40 @@ export function pluginJobLabel(job: PluginInfo["job"]): string | null {
 /** `lastError` as the warning notice shows it. */
 export function pluginErrorText(error: NonNullable<PluginInfo["lastError"]>): string {
   return `${error.step}: ${error.message}`;
+}
+
+/** One vault in the Secret files plugin's detail panel. */
+export interface SecretVaultRow {
+  workspace: string;
+  repoKey: string;
+  /** The repo's custom label, else its key without the host. */
+  label: string;
+  fileCount: number;
+  clonesNeedingAttention: number;
+}
+
+/** `host/owner/repo` → `owner/repo`. */
+const repoKeyWithoutHost = (repoKey: string): string => {
+  const slash = repoKey.indexOf("/");
+  return slash === -1 ? repoKey : repoKey.slice(slash + 1);
+};
+
+const naturally = (a: string, b: string): number => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" });
+
+/** The Secret files plugin's vaults as listed: by workspace, then label. */
+export function secretVaultRows(
+  vaults: Iterable<Pick<SecretVaultSummary, "workspace" | "repoKey" | "fileCount" | "clonesNeedingAttention">>,
+  identities: ReadonlyMap<string, { label?: string }>
+): SecretVaultRow[] {
+  return [...vaults]
+    .map((vault) => ({
+      workspace: vault.workspace,
+      repoKey: vault.repoKey,
+      label: identities.get(vault.repoKey)?.label ?? repoKeyWithoutHost(vault.repoKey),
+      fileCount: vault.fileCount,
+      clonesNeedingAttention: vault.clonesNeedingAttention
+    }))
+    .sort((a, b) => naturally(a.workspace, b.workspace) || naturally(a.label, b.label) || naturally(a.repoKey, b.repoKey));
 }
 
 /** The source link's target when it is a web address; anything else renders as plain text. */
