@@ -47,7 +47,12 @@ function vaultOf(root: string, clones: Clones, version = "v1"): SecretVaultDetai
     excluded: [], candidates: [".env.test"],
     clones: Object.entries(clones).map(([name, files]) => ({
       projectPath: join(root, "acme", name), projectName: name,
-      files: Object.entries(files).map(([path, state]) => ({ path, state, ...(state === "refused" ? { refusal: "tracked" as const } : {}) })),
+      files: Object.entries(files).map(([path, state]) => ({
+        path,
+        state,
+        ...(state === "refused" ? { refusal: "tracked" as const } : {}),
+        ...(["synced", "outdated", "modified"].includes(state) ? { contentToken: `tok-${name}-${path}` } : {})
+      })),
       needsAttention: Object.values(files).some((state) => ["modified", "deleted", "missing-dir", "refused"].includes(state))
     }))
   };
@@ -80,7 +85,13 @@ async function rig(t: TestContext) {
   const row = (workspace: string, name: string, repo = true): ProjectSummary => ({
     workspace, name, path: join(root, workspace, name), ...(repo ? { repoKey: REPO, repoName: "acme/api" } : {})
   });
-  const state = { enabled: true, vault: vaultOf(root, BEFORE), after: vaultOf(root, AFTER, "v2"), envCompare: ENV_COMPARE };
+  // `tokens`: each clone copy's content token as the compare route reports it (default `tok-<clone>-<path>`, as in
+  // the vault detail); `disk`: what the push route checks `expect` against — an edit landing right before the push.
+  const state = {
+    enabled: true, vault: vaultOf(root, BEFORE), after: vaultOf(root, AFTER, "v2"), envCompare: ENV_COMPARE,
+    tokens: {} as Record<string, string>, disk: {} as Record<string, string>
+  };
+  const tokenFor = (projectPath: string, path: string) => state.tokens[path] ?? `tok-${projectPath.split("/").pop()}-${path}`;
   api
     .on("GET", "/api/workspaces/acme/projects", { status: 200, body: [row("acme", "api"), row("acme", "api-2"), row("acme", "api-3"), row("acme", "plain", false)] })
     .on("GET", "/api/workspaces/beta/projects", { status: 200, body: [row("beta", "api")] })
@@ -94,10 +105,19 @@ async function rig(t: TestContext) {
       body: {
         path: query?.path,
         compare: query?.path === ".env" ? state.envCompare : { format: "lines", linesAdded: 3, linesRemoved: 1, text: PLANTED },
+        contentToken: tokenFor(query!.projectPath!, query!.path!),
         content: PLANTED
       }
     }))
-    .on("POST", "/api/secret-files/push", () => ({ status: 200, body: { vault: state.after } }));
+    .on("POST", "/api/secret-files/push", ({ body }) => {
+      const request = body as { projectPath: string; expect?: Record<string, string | null> };
+      for (const [path, token] of Object.entries(request.expect ?? {})) {
+        if ((state.disk[path] ?? tokenFor(request.projectPath, path)) !== token) {
+          return { status: 409, body: { code: "CONTENT_CHANGED", message: `${path} changed in api since it was shown; nothing was written.` } };
+        }
+      }
+      return { status: 200, body: { vault: state.after } };
+    });
   const chat = (name: string | null, over: Partial<ThreadCaller> = {}): ThreadCaller => {
     const projectPath = name === null ? "" : join(root, name.split("/")[0]!, name.split("/")[1]!);
     return {
@@ -235,7 +255,13 @@ test("push_secret_files: the card names the repo, the source clone, each file's 
   // Approved: exactly the previewed files, from the chat's clone, as the chat's agent principal.
   const sent = pushes(api);
   assert.equal(sent.length, 1);
-  assert.deepEqual(sent[0]!.body, { workspace: "acme", repoKey: REPO, projectPath: join(api.workspacesDir, "acme", "api"), files: [".env", "config/creds.json"] });
+  assert.deepEqual(sent[0]!.body, {
+    workspace: "acme", repoKey: REPO, projectPath: join(api.workspacesDir, "acme", "api"), files: [".env", "config/creds.json"],
+    // The content tokens the card pinned: the daemon refuses the push if those bytes changed.
+    expect: { ".env": "tok-api-.env", "config/creds.json": "tok-api-config/creds.json" }
+  });
+  assert.ok(!JSON.stringify(card).includes("tok-api"), "tokens are pins, never shown on the card");
+  assert.ok(!JSON.stringify(r).includes("tok-api"), "nor in the result");
   const principal = api.principals.find((call) => call.method === "POST" && call.path === "/api/secret-files/push")!.principal;
   assert.equal(principal?.kind, "agent");
   assert.equal(principal?.kind === "agent" ? principal.threadId : null, "thread-1");
@@ -275,6 +301,29 @@ test("push_secret_files: a file that changed while the card waited is PREVIEW_ST
   });
   refused(await exec("push_secret_files", {}, { who: chat("acme/api"), port }), "PREVIEW_STALE");
   assert.equal(pushes(api).length, 0);
+});
+
+test("push_secret_files: a copy whose content changed after the card (same variable names) is PREVIEW_STALE", async (t) => {
+  const { api, state, chat, exec } = await rig(t);
+  const port = new FakeApprovalPort(() => {
+    // A value edited under an already-changed key: the compare reads the same, the token does not.
+    state.tokens[".env"] = "tok-api-.env-edited";
+    return { outcome: "approved", approvalId: "" };
+  });
+  refused(await exec("push_secret_files", {}, { who: chat("acme/api"), port }), "PREVIEW_STALE");
+  assert.equal(pushes(api).length, 0);
+  assert.deepEqual(state.envCompare, ENV_COMPARE, "only the token moved: the pin is what caught it");
+});
+
+test("push_secret_files: content changed between the run's re-read and the push is CONTENT_CHANGED, nothing pushed", async (t) => {
+  const { api, state, chat, exec } = await rig(t);
+  const port = new FakeApprovalPort();
+  // The daemon, inside its queue, finds other bytes than the card's (an edit that landed after the re-read).
+  state.disk[".env"] = "tok-api-.env-edited-at-the-last-moment";
+  assert.match(refused(await exec("push_secret_files", {}, { who: chat("acme/api"), port }), "CONTENT_CHANGED"), /nothing was pushed/);
+  const sent = pushes(api);
+  assert.equal(sent.length, 1, "the request went out with expect");
+  assert.deepEqual((sent[0]!.body as { expect?: unknown }).expect, { ".env": "tok-api-.env", "config/creds.json": "tok-api-config/creds.json" });
 });
 
 test("push_secret_files: never while planning, never for a workflow-owned chat", async (t) => {

@@ -69,8 +69,21 @@ test("setup, read, push, reset, compare and delete answer the contract's shapes"
   const got = await inject({ method: "GET", url: `${secretFilesRoutes.vault}${vaultQuery}` });
   assert.deepEqual((got.json() as SecretVaultResponse).vault, vault);
 
+  assert.equal(typeof vault.revision?.boot, "string");
+  assert.equal(typeof vault.revision?.seq, "number");
   const compare = await inject({ method: "GET", url: `${secretFilesRoutes.compare}${q({ workspace: WS, repoKey: REPO, projectPath: b, path: ".env" })}` });
-  assert.deepEqual(compare.json(), { path: ".env", compare: { format: "env", keys: [{ key: "KEY", change: "changed" }] } });
+  const bToken = vault.clones.find((clone) => clone.projectPath === b)?.files[0]?.contentToken;
+  assert.ok(bToken);
+  assert.deepEqual(compare.json(), { path: ".env", contentToken: bToken, compare: { format: "env", keys: [{ key: "KEY", change: "changed" }] } });
+  // A push whose `expect` no longer matches the copy: 409 CONTENT_CHANGED, nothing written.
+  h.fs.put(`${b}/.env`, "KEY=two-edited\n");
+  refused(
+    await inject({ method: "POST", url: secretFilesRoutes.push, payload: { workspace: WS, repoKey: REPO, projectPath: b, expect: { ".env": bToken } } }),
+    409,
+    "CONTENT_CHANGED"
+  );
+  assert.equal(h.fs.read(`${a}/.env`), "KEY=one\n");
+  h.fs.put(`${b}/.env`, "KEY=two\n");
 
   const candidates = await inject({ method: "GET", url: `${secretFilesRoutes.candidates}${vaultQuery}` });
   assert.equal(candidates.statusCode, 200);

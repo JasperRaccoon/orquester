@@ -765,6 +765,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
       return () => void plugins.events.off("changed", onChanged);
     },
     publish: (payload) => broadcaster.publish(SECRET_FILES_CHANNEL, SECRET_FILES_CHANGED, payload),
+    // Every clone write checks the clone root's realpath stays inside the (current) workspaces root.
+    workspacesRoot: () => resolved.workspacesDir,
     logger: console
   });
   // Automated workflows (workflows spec §3, §5.7, §5.8): definitions, secrets, runs and runtime
@@ -1563,8 +1565,10 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // Plugins: the hourly timer, and a running download or smoke test cancelled (its staging dir is
     // emptied at the next start); queued plugins.json writes land.
     await plugins.stop().catch((error) => console.error("Plugins stop failed", error));
-    // Secret files: watchers and timers stop; an operation in flight finishes.
-    await secretFiles.stop().catch((error) => console.error("Secret files stop failed", error instanceof Error ? error.name : error));
+    // Secret files: watchers, timers and git children stop at once (nothing new starts or writes a
+    // clone); an operation already in flight is awaited last, bounded, below.
+    secretFiles.stop();
+    const secretFilesIdle = secretFiles.idle().catch((error) => console.error("Secret files stop failed", error instanceof Error ? error.name : error));
     // Agent profile: its watchers and debounce timers, each adapter's long-lived helpers (a codex
     // app-server may take its whole kill grace to exit) and the import trees. Started here, awaited
     // last: it must not hold up the session and agent-host shutdown below within cli.ts's 3 s backstop.
@@ -1606,6 +1610,16 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     unixServer.server.closeAllConnections?.();
     await unixClosed.catch(() => undefined);
     await agentProfileStopped;
+    // Last, and bounded: a secret-files vault write in flight lands, a stuck one never holds the exit.
+    let secretFilesBound: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      secretFilesIdle,
+      new Promise<void>((resolve) => {
+        secretFilesBound = setTimeout(resolve, 1000);
+        secretFilesBound.unref?.();
+      })
+    ]);
+    clearTimeout(secretFilesBound);
   };
 
   console.log(`Orquester daemon ${daemonId} on unix:${paths.socketPath} (workspaces: ${resolved.workspacesDir})`);

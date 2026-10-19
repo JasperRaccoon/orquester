@@ -6,21 +6,37 @@
  * Invariants:
  *
  * - **Nothing secret leaves this module.** Contents, content hashes and values stay in memory for the
- *   one operation that needs them; the wire carries paths, opaque version ids, timestamps, states and
- *   names-only compares. Errors and log lines name files and projects, never content.
+ *   one operation that needs them; the wire carries paths, opaque version ids, timestamps, states,
+ *   names-only compares and content TOKENS (an HMAC with a per-process random key over the clone, the
+ *   path and the content hash: equal content in one clone gives one token, nothing can be learned
+ *   from it, and it dies with the process). Errors and log lines name files and projects, never content.
+ * - **Revisions.** Every detail the service returns or publishes carries `{ boot, seq }`: `boot` is
+ *   random per process, `seq` grows (across all vaults) each time a vault's detail changes — clone
+ *   states and tokens included — so a client keeps the newest.
+ * - **Expect.** Push / Reset with `expect` compare each named file's token, inside the vault's queue,
+ *   with the copy actually about to be pushed or overwritten: a mismatch is 409 CONTENT_CHANGED and
+ *   nothing is written.
  * - **One queue per vault.** Every operation on a vault — a route, a watcher check, a reconcile —
  *   runs in that vault's promise chain, so writes to its clones and to its record never interleave.
  *   A failing operation does not break the chain.
  * - **Clones** are the non-archived projects of the vault's workspace whose `repoKey` matches
  *   (projects of an archived workspace count as archived). An archived clone keeps its baselines;
- *   a clone that is no longer listed with that repo at all is pruned on the next full pass.
+ *   a clone that is no longer listed with that repo at all is marked unlisted and its baselines are
+ *   pruned only after a grace period (UNLISTED_CLONE_GRACE_MS), so one that comes back in time keeps
+ *   its `deleted` files flagged rather than copied back in.
  * - **Automatic actions only while the plugin is on and the store is writable:** a `missing` file is
- *   copied in, an `outdated` one updated (each re-read right before the write, so an edit made
- *   meanwhile is never overwritten), and a `synced` clone's baseline is stamped. `modified`,
- *   `deleted`, `missing-dir` and `refused` files are never touched.
- * - **Plugin off:** no watcher, no timer, no write. Mutations answer 409 `SECRET_FILES_DISABLED`;
- *   reads (list, vault, candidates, compare) still answer, evaluated fresh without any automatic
- *   action, so Settings can show the vaults that exist.
+ *   copied in (create-only: never over a file that appeared meanwhile), an `outdated` one updated
+ *   (re-read right before the write, so an edit made meanwhile is never overwritten), and a `synced`
+ *   clone's baseline is stamped. `modified`, `deleted`, `missing-dir` and `refused` files are never
+ *   touched. Every clone write also checks the clone root's realpath stays inside the workspaces root.
+ * - **Tracked check fails closed:** when git can't answer, the clone keeps its last answer; a path
+ *   git never answered for is `refused: unreadable` there (never written) until it does.
+ * - **Plugin off:** no watcher, no timer, no write — also checked before each write of a pass already
+ *   running. Mutations answer 409 `SECRET_FILES_DISABLED`; reads (list, vault, candidates, compare)
+ *   still answer, evaluated fresh without any automatic action and without rewriting vaults.json,
+ *   so Settings can show the vaults that exist.
+ * - **Shutdown:** `stop()` returns at once — watchers, timers and git children stop/are killed;
+ *   `idle()` (awaited last, bounded) lets an operation already in flight finish.
  * - **Self-writes settle on their own:** a write the service makes fires the clone's watcher; the
  *   debounced check re-hashes the clone, finds it `synced`, and changes nothing — no event, no write.
  * - **Events** (`SECRET_FILES_CHANGED`) go out only when a vault's serialized detail changed.
@@ -29,11 +45,12 @@
  *   watcher check.
  */
 
-import { createHash } from "node:crypto";
+import { createHash, createHmac, randomBytes } from "node:crypto";
 import { watch as fsWatch } from "node:fs";
-import { realpath as fsRealpath } from "node:fs/promises";
-import { join, posix } from "node:path";
+import { realpath as fsRealpath, stat as fsStat } from "node:fs/promises";
+import { basename, join, posix } from "node:path";
 import {
+  SECRET_FILE_HISTORY_MAX,
   SECRET_FILES_MAX_PER_VAULT,
   isConventionalSecretFileName,
   repoKeyProblem,
@@ -53,19 +70,23 @@ import {
   type SecretFilesClone,
   type SecretFilesErrorCode,
   type SecretVaultDetail,
+  type SecretVaultRevision,
   type SecretVaultSummary,
   type SecretVaultsResponse
 } from "@orquester/api";
 import type { CallerPrincipal } from "@orquester/api/agent-chat";
 import { isValidName } from "@orquester/config";
 import {
+  CloneFileError,
   type CloneFileRead,
   compareContents,
+  defaultGitRunner,
   mergeEnvContents,
   parseEnv,
   readCloneFile,
   scanCandidates,
   trackedPaths,
+  type WriteCloneFileOptions,
   writeCloneFile
 } from "./files.ts";
 import { SecretVaultStoreError, type SecretVaultStore, type VaultFileRecord, type VaultRecord } from "./vault-store.ts";
@@ -90,9 +111,11 @@ export type SecretVaultStoreLike = Pick<SecretVaultStore, "writable" | "list" | 
 /** The on-disk helpers of `files.ts` (injectable for tests). */
 export interface SecretFilesFileOps {
   readCloneFile(cloneRoot: string, relPath: string): Promise<CloneFileRead>;
-  writeCloneFile(cloneRoot: string, relPath: string, content: Uint8Array, mode?: number): Promise<void>;
-  scanCandidates(cloneRoot: string): Promise<string[]>;
-  trackedPaths(cloneRoot: string, relPaths: readonly string[]): Promise<Set<string>>;
+  writeCloneFile(cloneRoot: string, relPath: string, content: Uint8Array, mode?: number, options?: WriteCloneFileOptions): Promise<void>;
+  /** `signal` aborts the git run (shutdown). */
+  scanCandidates(cloneRoot: string, signal?: AbortSignal): Promise<string[]>;
+  /** Rejects when git fails or `signal` aborts: never "nothing tracked" on a guess. */
+  trackedPaths(cloneRoot: string, relPaths: readonly string[], signal?: AbortSignal): Promise<Set<string>>;
   parseEnv(content: Uint8Array): Map<string, string> | null;
   compareContents(left: Uint8Array | null, right: Uint8Array | null): SecretFileCompare;
   mergeEnvContents(primary: Uint8Array, others: readonly Uint8Array[]): Uint8Array | null;
@@ -101,8 +124,8 @@ export interface SecretFilesFileOps {
 const DEFAULT_FILE_OPS: SecretFilesFileOps = {
   readCloneFile,
   writeCloneFile,
-  scanCandidates: (cloneRoot) => scanCandidates(cloneRoot),
-  trackedPaths: (cloneRoot, relPaths) => trackedPaths(cloneRoot, relPaths),
+  scanCandidates: (cloneRoot, signal) => scanCandidates(cloneRoot, defaultGitRunner, signal),
+  trackedPaths: (cloneRoot, relPaths, signal) => trackedPaths(cloneRoot, relPaths, defaultGitRunner, signal),
   parseEnv,
   compareContents,
   mergeEnvContents
@@ -135,6 +158,18 @@ const defaultWatch: SecretFilesWatchFn = (dir, onChange, onError) => {
       }
     }
   };
+};
+
+/** A watched directory's identity (device + inode), or null when it isn't a directory now. */
+export type SecretFilesDirIdentityFn = (dir: string) => Promise<string | null>;
+
+const defaultDirIdentity: SecretFilesDirIdentityFn = async (dir) => {
+  try {
+    const stats = await fsStat(dir);
+    return stats.isDirectory() ? `${stats.dev}:${stats.ino}` : null;
+  } catch {
+    return null;
+  }
 };
 
 /** Timers (injectable: tests fire them by hand). The defaults never keep the daemon alive. */
@@ -177,6 +212,14 @@ export interface SecretFilesServiceOptions {
   publish: (payload: SecretFilesChangedPayload) => void;
   files?: Partial<SecretFilesFileOps>;
   watch?: SecretFilesWatchFn;
+  dirIdentity?: SecretFilesDirIdentityFn;
+  /**
+   * The workspaces root, read per write (it can move): a clone root whose realpath is not inside
+   * it is never written to. Absent: no such check (tests).
+   */
+  workspacesRoot?: () => string;
+  /** How long an unlisted clone keeps its baselines before they are pruned (default 7 days). */
+  unlistedGraceMs?: number;
   timers?: SecretFilesTimers;
   now?: () => Date;
   realpath?: (path: string) => Promise<string>;
@@ -359,6 +402,22 @@ function disjoint(lists: Array<readonly string[] | undefined>): void {
   }
 }
 
+/** `SecretFilesCloneRequest.expect`: path → the content token the caller saw (null: no copy). */
+function expectOf(value: unknown): Map<string, string | null> | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw invalid("expect must map file paths to content tokens.");
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length > LIST_MAX) throw invalid(`expect may name at most ${LIST_MAX} files.`);
+  const out = new Map<string, string | null>();
+  for (const [path, token] of entries) {
+    if (token !== null && (typeof token !== "string" || token.length === 0 || token.length > 200)) {
+      throw invalid("Each expected content token must be a token or null.");
+    }
+    out.set(pathOf(path), token);
+  }
+  return out;
+}
+
 const REFUSAL_TEXT: Record<SecretFileRefusal, string> = {
   tracked: "is tracked by git",
   symlink: "is a symlink or sits under one",
@@ -374,8 +433,20 @@ const REFUSAL_TEXT: Record<SecretFileRefusal, string> = {
 
 interface DirWatch {
   handle: SecretFilesWatchHandle | null;
+  /** The watched directory's identity when it was armed: a different one now means it was replaced. */
+  identity: string | null;
   /** Entry names in this dir that matter (managed names; at the root also every path's first segment). */
   names: Set<string>;
+}
+
+/**
+ * What git last said about a clone's managed paths: `tracked` among `checked`. A path not in
+ * `checked` (git failed before it was ever asked about it) is unknown, and an unknown path is
+ * refused `unreadable` — never written — until git answers. A failing git keeps the last answer.
+ */
+interface TrackedState {
+  tracked: Set<string>;
+  checked: Set<string>;
 }
 
 interface CloneWatch {
@@ -392,12 +463,16 @@ interface VaultRuntime {
   /** clone path → managed path → state; null: not evaluated (or stale: plugin off). */
   evals: Map<string, Map<string, FileEval>> | null;
   /** Per clone: the managed paths git tracks there (refreshed on full passes). */
-  tracked: Map<string, Set<string>>;
+  tracked: Map<string, TrackedState>;
   /** Per clone: its conventional candidates (refreshed on full passes and scans). */
   candidates: Map<string, string[]>;
-  /** The last detail published (serialized), null before any. */
+  /** The last detail published (serialized, without its revision), null before any. */
   lastPublished: string | null;
+  /** The revision of that detail. */
+  revision: SecretVaultRevision | null;
   watches: Map<string, CloneWatch>;
+  /** Operations queued or running; at 0 a runtime whose vault doesn't exist is forgotten. */
+  pending: number;
 }
 
 interface RefreshOptions {
@@ -413,6 +488,17 @@ interface RefreshOptions {
 }
 
 const RESETTABLE: readonly SecretFileState[] = ["modified", "deleted", "outdated", "missing"];
+
+/**
+ * An unlisted clone (no longer a project of the vault's repo in its workspace — moved, renamed,
+ * removed, or a listing that briefly missed it) keeps its baselines this long before they are
+ * pruned. Within it, a clone that comes back still has them: a file it had deleted stays
+ * `deleted` (flagged) instead of reading as `missing` and being copied back in. After it, a clone
+ * at that path counts as new. Clone files are never touched by pruning either way.
+ */
+const UNLISTED_CLONE_GRACE_MS = 7 * 24 * 60 * 60_000;
+
+const noop = (): void => undefined;
 
 function vaultKeyOf(workspace: string, repoKey: string): string {
   return `${workspace}\u0000${repoKey}`;
@@ -432,6 +518,7 @@ export class SecretFilesService {
   private readonly store: SecretVaultStoreLike;
   private readonly files: SecretFilesFileOps;
   private readonly watchFn: SecretFilesWatchFn;
+  private readonly dirIdentity: SecretFilesDirIdentityFn;
   private readonly timers: SecretFilesTimers;
   private readonly now: () => Date;
   private readonly realpath: (path: string) => Promise<string>;
@@ -439,6 +526,15 @@ export class SecretFilesService {
   private readonly debounceMs: number;
   private readonly listDebounceMs: number;
   private readonly intervalMs: number;
+  private readonly unlistedGraceMs: number;
+
+  /** This process's revision `boot`; `seq` counts every detail published, across vaults. */
+  private readonly boot = randomBytes(12).toString("base64url");
+  private seq = 0;
+  /** The per-process key of the clone files' content tokens (never leaves memory). */
+  private readonly tokenKey = randomBytes(32);
+  /** Aborted by `stop()`: kills git runs in flight. */
+  private readonly abort = new AbortController();
 
   private readonly runtimes = new Map<string, VaultRuntime>();
   private readonly inflight = new Set<Promise<unknown>>();
@@ -456,6 +552,7 @@ export class SecretFilesService {
     this.store = options.store;
     this.files = { ...DEFAULT_FILE_OPS, ...options.files };
     this.watchFn = options.watch ?? defaultWatch;
+    this.dirIdentity = options.dirIdentity ?? defaultDirIdentity;
     this.timers = options.timers ?? realTimers;
     this.now = options.now ?? (() => new Date());
     this.realpath = options.realpath ?? fsRealpath;
@@ -463,6 +560,7 @@ export class SecretFilesService {
     this.debounceMs = options.debounceMs ?? 500;
     this.listDebounceMs = options.listDebounceMs ?? 1000;
     this.intervalMs = options.intervalMs ?? 5 * 60_000;
+    this.unlistedGraceMs = options.unlistedGraceMs ?? UNLISTED_CLONE_GRACE_MS;
   }
 
   // -- lifecycle -------------------------------------------------------------
@@ -481,13 +579,19 @@ export class SecretFilesService {
     if (!this.stopped) this.pluginChanged(enabled);
   }
 
-  /** Stop watching and timing; waits for operations in flight. Nothing runs afterwards. */
-  async stop(): Promise<void> {
+  /**
+   * Stop at once, without waiting: the plugin subscription, every watcher and timer, and git runs in
+   * flight (killed). Nothing starts or writes to a clone afterwards; an operation already past its
+   * last check may still be finishing its vault write — `idle()` resolves once it has (shutdown
+   * awaits it last, bounded).
+   */
+  stop(): void {
+    if (this.stopped) return;
     this.stopped = true;
     this.unsubscribe?.();
     this.unsubscribe = null;
     this.deactivate();
-    await this.idle();
+    this.abort.abort();
   }
 
   /** Resolves once no operation, reconcile or check is in flight (tests; shutdown). */
@@ -630,12 +734,14 @@ export class SecretFilesService {
   }
 
   private read(workspace: string, repoKey: string): Promise<SecretVaultDetail> {
+    // No runtime for a vault that doesn't exist (an arbitrary query must not grow the map).
+    this.requireVault(workspace, repoKey);
     const runtime = this.runtime(workspace, repoKey);
     return this.enqueue(runtime, async () => {
       const record = this.store.get(workspace, repoKey);
       if (!record) throw new SecretFilesError("VAULT_NOT_FOUND", "This repo has no secret files vault in this workspace.");
       // While on, watchers and reconciles keep the evaluation fresh.
-      if (this.enabled && runtime.evals) return this.detailOf(runtime, record);
+      if (this.enabled && runtime.evals) return this.publishIfChanged(runtime, this.detailOf(runtime, record));
       const projects = await this.options.listProjects();
       const detail = await this.refreshVault(runtime, { projects, scan: true, git: true, auto: false });
       if (!detail) throw new SecretFilesError("VAULT_NOT_FOUND", "This repo has no secret files vault in this workspace.");
@@ -647,6 +753,7 @@ export class SecretFilesService {
   async compare(query: { workspace?: unknown; repoKey?: unknown; projectPath?: unknown; path?: unknown }): Promise<SecretFileCompareResponse> {
     const { workspace, repoKey } = vaultIdOf(query.workspace, query.repoKey);
     const path = pathOf(query.path);
+    this.requireVault(workspace, repoKey);
     const runtime = this.runtime(workspace, repoKey);
     return this.enqueue(runtime, async () => {
       const record = this.requireVault(workspace, repoKey);
@@ -660,7 +767,11 @@ export class SecretFilesService {
         throw new SecretFilesError("FILE_REFUSED", `${path} ${REFUSAL_TEXT[read.refusal]} in ${clone.name}.`);
       }
       const right = await this.store.readContent(current.sha256);
-      return { path, compare: sanitizeCompare(this.files.compareContents(read.kind === "file" ? read.content : null, right)) };
+      return {
+        path,
+        compare: sanitizeCompare(this.files.compareContents(read.kind === "file" ? read.content : null, right)),
+        ...(read.kind === "file" ? { contentToken: this.tokenOf(clone.path, path, sha256Of(read.content)) } : {})
+      };
     });
   }
 
@@ -683,7 +794,7 @@ export class SecretFilesService {
       if (!single) {
         await Promise.all(
           clones.map(async (clone) => {
-            const found = await this.files.scanCandidates(clone.path).catch(() => [] as string[]);
+            const found = await this.files.scanCandidates(clone.path, this.abort.signal).catch(() => [] as string[]);
             runtime.candidates.set(clone.path, found);
             for (const path of found) conventional.add(path);
           })
@@ -694,9 +805,14 @@ export class SecretFilesService {
       // Per clone: which of `paths` git tracks, and each path's copy.
       const perClone = await Promise.all(
         clones.map(async (clone) => {
-          const tracked = paths.length > 0 ? await this.files.trackedPaths(clone.path, paths).catch(() => new Set<string>()) : new Set<string>();
+          // A git that can't tell what is tracked there: every path refused `unreadable` in that clone.
+          const tracked = paths.length > 0 ? await this.files.trackedPaths(clone.path, paths, this.abort.signal).catch(() => null) : new Set<string>();
           const reads = new Map<string, CloneFileRead | { kind: "tracked" }>();
           for (const path of paths) {
+            if (tracked === null) {
+              reads.set(path, { kind: "refused", refusal: "unreadable" });
+              continue;
+            }
             if (tracked.has(path)) {
               reads.set(path, { kind: "tracked" });
               continue;
@@ -804,7 +920,13 @@ export class SecretFilesService {
     });
   }
 
-  /** Add, exclude, include or stop managing files. */
+  /**
+   * Add, exclude, include or stop managing files. A file that stops being managed (unmanage, or an
+   * exclude of a managed file) is RETIRED: it stops syncing, clones keep their copies, and the vault
+   * keeps its version history (`VaultRecord.retired`, for manual recovery). Adding the path again
+   * starts a new history from its source; the retired one is kept (a later retirement of the same
+   * path merges both, newest first, capped at the history limit).
+   */
   async updateFiles(request: unknown, actor: SecretFilesActor = { kind: "user" }): Promise<SecretVaultDetail> {
     const body = bodyOf(request);
     const { workspace, repoKey } = vaultIdOf(body.workspace, body.repoKey);
@@ -815,6 +937,7 @@ export class SecretFilesService {
     if (!add && !exclude && !include && !unmanage) throw invalid("Nothing to change.");
     disjoint([add?.map((file) => file.path), exclude, include, unmanage]);
     this.requireWritable();
+    this.requireVault(workspace, repoKey);
     const runtime = this.runtime(workspace, repoKey);
     return this.enqueue(runtime, async () => {
       this.requireWritable();
@@ -833,6 +956,8 @@ export class SecretFilesService {
       const stamp = this.now().toISOString();
       await this.store.update(workspace, repoKey, async (current, tx) => {
         if (!current) throw new SecretFilesError("VAULT_NOT_FOUND", "This repo has no secret files vault in this workspace.");
+        const retiring = current.files.filter((file) => removed.has(file.path));
+        if (retiring.length > 0) current.retired = retire(current.retired ?? [], retiring);
         current.files = current.files.filter((file) => !removed.has(file.path));
         for (const clone of Object.values(current.clones)) {
           for (const path of removed) delete clone.baselines[path];
@@ -861,7 +986,9 @@ export class SecretFilesService {
     const body = bodyOf(request);
     const { workspace, repoKey } = vaultIdOf(body.workspace, body.repoKey);
     const selection = pathListOf(body.files, "files");
+    const expect = expectOf(body.expect);
     this.requireWritable();
+    this.requireVault(workspace, repoKey);
     const runtime = this.runtime(workspace, repoKey);
     return this.enqueue(runtime, async () => {
       this.requireWritable();
@@ -869,14 +996,14 @@ export class SecretFilesService {
       const projects = await this.options.listProjects();
       const source = await this.resolveClone(workspace, repoKey, body.projectPath, projects);
       this.requireManaged(record, selection);
+      this.requireManaged(record, expect && [...expect.keys()]);
       const clones = clonesOf(projects, workspace, repoKey);
       runtime.clones = clones;
       // Fresh states for every clone, before the vault moves.
       const evals = new Map<string, Map<string, FileEval>>();
       await Promise.all(
         clones.map(async (clone) => {
-          runtime.tracked.set(clone.path, await this.trackedIn(clone.path, record));
-          evals.set(clone.path, await this.evaluateClone(clone, record, runtime.tracked.get(clone.path)!));
+          evals.set(clone.path, await this.evaluateClone(clone, record, await this.refreshTracked(runtime, clone.path, record)));
         })
       );
       const sourceEvals = evals.get(source.path)!;
@@ -887,6 +1014,12 @@ export class SecretFilesService {
         const read = await this.files.readCloneFile(source.path, path);
         if (read.kind !== "file") continue;
         contents.push({ path, content: read.content });
+      }
+      if (expect) {
+        // Against the very bytes pushed (else this evaluation's read): what the caller saw, or nothing moves.
+        const tokens = this.tokensOf(source.path, sourceEvals);
+        for (const { path, content } of contents) tokens.set(path, this.tokenOf(source.path, path, sha256Of(content)));
+        this.requireExpected(source, expect, tokens);
       }
       if (contents.length === 0) throw new SecretFilesError("NOTHING_TO_PUSH", `No selected file differs from the vault in ${source.name}.`);
 
@@ -920,7 +1053,9 @@ export class SecretFilesService {
     const body = bodyOf(request);
     const { workspace, repoKey } = vaultIdOf(body.workspace, body.repoKey);
     const selection = pathListOf(body.files, "files");
+    const expect = expectOf(body.expect);
     this.requireWritable();
+    this.requireVault(workspace, repoKey);
     const runtime = this.runtime(workspace, repoKey);
     return this.enqueue(runtime, async () => {
       this.requireWritable();
@@ -928,8 +1063,10 @@ export class SecretFilesService {
       const projects = await this.options.listProjects();
       const clone = await this.resolveClone(workspace, repoKey, body.projectPath, projects);
       this.requireManaged(record, selection);
-      runtime.tracked.set(clone.path, await this.trackedIn(clone.path, record));
-      const evals = await this.evaluateClone(clone, record, runtime.tracked.get(clone.path)!);
+      this.requireManaged(record, expect && [...expect.keys()]);
+      const evals = await this.evaluateClone(clone, record, await this.refreshTracked(runtime, clone.path, record));
+      // Against the copies this evaluation just read (the bytes about to be overwritten), before any write.
+      if (expect) this.requireExpected(clone, expect, this.tokensOf(clone.path, evals));
       const wanted = new Set(selection ?? record.files.map((file) => file.path));
       const written: Array<{ path: string; versionId: string }> = [];
       for (const file of record.files) {
@@ -938,7 +1075,7 @@ export class SecretFilesService {
         if (!wanted.has(file.path) || !current || !evaluated || !RESETTABLE.includes(evaluated.state)) continue;
         const content = await this.store.readContent(current.sha256);
         try {
-          await this.files.writeCloneFile(clone.path, file.path, content, evaluated.mode);
+          await this.files.writeCloneFile(clone.path, file.path, content, evaluated.mode, this.writeOptions());
         } catch (error) {
           this.logger.warn(`secret-files: could not reset ${file.path} in ${clone.name} (${errorText(error)})`);
           throw new SecretFilesError("SECRET_FILES_ERROR", `Could not write ${file.path} in ${clone.name}.`);
@@ -954,6 +1091,7 @@ export class SecretFilesService {
   async deleteVault(workspace: unknown, repoKey: unknown): Promise<void> {
     const id = vaultIdOf(workspace, repoKey);
     this.requireWritable();
+    this.requireVault(id.workspace, id.repoKey);
     const runtime = this.runtime(id.workspace, id.repoKey);
     await this.enqueue(runtime, async () => {
       this.requireWritable();
@@ -1017,8 +1155,9 @@ export class SecretFilesService {
         const others: Uint8Array[] = [];
         for (const clone of clonesOf(projects, workspace, repoKey)) {
           if (clone.path === primary.path) continue;
-          const tracked = await this.files.trackedPaths(clone.path, [path]).catch(() => new Set<string>());
-          if (tracked.has(path)) continue;
+          // A clone where git can't tell whether the file is tracked contributes nothing.
+          const tracked = await this.files.trackedPaths(clone.path, [path], this.abort.signal).catch(() => null);
+          if (tracked === null || tracked.has(path)) continue;
           const read = await this.files.readCloneFile(clone.path, path).catch(() => null);
           if (read?.kind === "file") others.push(read.content);
         }
@@ -1034,7 +1173,10 @@ export class SecretFilesService {
   }
 
   private async readSource(clone: SecretFilesProject, path: string): Promise<Uint8Array> {
-    const tracked = await this.files.trackedPaths(clone.path, [path]).catch(() => new Set<string>());
+    const tracked = await this.files.trackedPaths(clone.path, [path], this.abort.signal).catch(() => null);
+    if (tracked === null) {
+      throw new SecretFilesError("FILE_REFUSED", `${path} ${REFUSAL_TEXT.unreadable} in ${clone.name}: git could not tell whether it is tracked.`);
+    }
     if (tracked.has(path)) throw new SecretFilesError("FILE_REFUSED", `${path} ${REFUSAL_TEXT.tracked} in ${clone.name}.`);
     const read = await this.files.readCloneFile(clone.path, path).catch((): CloneFileRead => ({ kind: "refused", refusal: "unreadable" }));
     if (read.kind === "refused") throw new SecretFilesError("FILE_REFUSED", `${path} ${REFUSAL_TEXT[read.refusal]} in ${clone.name}.`);
@@ -1042,17 +1184,36 @@ export class SecretFilesService {
     return read.content;
   }
 
-  private async trackedIn(clonePath: string, record: VaultRecord): Promise<Set<string>> {
+  /** Ask git which of the record's paths it tracks in a clone; on a failure keep what was known. */
+  private async refreshTracked(runtime: VaultRuntime, clonePath: string, record: VaultRecord): Promise<TrackedState> {
     const paths = record.files.map((file) => file.path);
-    if (paths.length === 0) return new Set();
-    return this.files.trackedPaths(clonePath, paths).catch(() => new Set<string>());
+    try {
+      const tracked = await this.files.trackedPaths(clonePath, paths, this.abort.signal);
+      const state: TrackedState = { tracked, checked: new Set(paths) };
+      runtime.tracked.set(clonePath, state);
+      return state;
+    } catch (error) {
+      if (!this.stopped) {
+        this.logger.warn(
+          `secret-files: git could not tell which files are tracked in ${clonePath} (${errorText(error)}); files it was never asked about are not written there`
+        );
+      }
+      const known = runtime.tracked.get(clonePath) ?? { tracked: new Set<string>(), checked: new Set<string>() };
+      runtime.tracked.set(clonePath, known);
+      return known;
+    }
   }
 
-  private async evaluateClone(clone: SecretFilesProject, record: VaultRecord, tracked: Set<string>): Promise<Map<string, FileEval>> {
+  private async evaluateClone(clone: SecretFilesProject, record: VaultRecord, tracked: TrackedState): Promise<Map<string, FileEval>> {
     const out = new Map<string, FileEval>();
     const baselines = record.clones[clone.path]?.baselines ?? {};
     for (const file of record.files) {
-      if (tracked.has(file.path)) {
+      // Fail closed: a path git never answered for may be tracked — refused, never written.
+      if (!tracked.checked.has(file.path)) {
+        out.set(file.path, { path: file.path, state: "refused", refusal: "unreadable" });
+        continue;
+      }
+      if (tracked.tracked.has(file.path)) {
         out.set(file.path, { path: file.path, state: "refused", refusal: "tracked" });
         continue;
       }
@@ -1070,14 +1231,17 @@ export class SecretFilesService {
     return out;
   }
 
-  /** Record baselines (each only while that file's current version is still the one written). */
+  /**
+   * Record baselines (each only while that file's current version is still the one written), and with
+   * `listed` (a full listing's clone paths of this repo) mark unlisted clones / prune them after the
+   * grace period (see UNLISTED_CLONE_GRACE_MS) / unmark listed ones.
+   */
   private async setBaselines(
     workspace: string,
     repoKey: string,
     changes: Array<{ clonePath: string; entries: Array<{ path: string; versionId: string }> }>,
-    prune: readonly string[] = []
+    listed?: ReadonlySet<string>
   ): Promise<void> {
-    if (changes.every((change) => change.entries.length === 0) && prune.length === 0) return;
     await this.store.update(workspace, repoKey, (current) => {
       if (!current) return null;
       for (const { clonePath, entries } of changes) {
@@ -1087,9 +1251,65 @@ export class SecretFilesService {
           (current.clones[clonePath] ??= { baselines: {} }).baselines[path] = versionId;
         }
       }
-      for (const clonePath of prune) delete current.clones[clonePath];
+      if (listed) this.applyListing(current, listed);
       return current;
     });
+  }
+
+  /** Whether `applyListing` would change the record. */
+  private listingChanges(record: VaultRecord, listed: ReadonlySet<string>): boolean {
+    const probe = { clones: structuredClone(record.clones) } as VaultRecord;
+    this.applyListing(probe, listed);
+    return JSON.stringify(probe.clones) !== JSON.stringify(record.clones);
+  }
+
+  private applyListing(record: VaultRecord, listed: ReadonlySet<string>): void {
+    const now = this.now();
+    for (const [clonePath, clone] of Object.entries(record.clones)) {
+      if (listed.has(clonePath)) {
+        delete clone.unlistedAt;
+        continue;
+      }
+      if (clone.unlistedAt === undefined) {
+        clone.unlistedAt = now.toISOString();
+        continue;
+      }
+      const since = Date.parse(clone.unlistedAt);
+      if (!Number.isFinite(since) || now.getTime() - since >= this.unlistedGraceMs) delete record.clones[clonePath];
+    }
+  }
+
+  /** Options for every clone write: the clone root must stay inside the workspaces root. */
+  private writeOptions(extra: WriteCloneFileOptions = {}): WriteCloneFileOptions {
+    const root = this.options.workspacesRoot?.();
+    return { ...extra, ...(root ? { containedIn: root } : {}) };
+  }
+
+  /**
+   * A clone copy's content token: a keyed digest (per-process secret) of the clone, the path and
+   * the content hash — it changes with the content and reveals nothing about it.
+   */
+  private tokenOf(clonePath: string, path: string, sha256: string): string {
+    return createHmac("sha256", this.tokenKey).update(clonePath).update("\u0000").update(path).update("\u0000").update(sha256).digest("base64url").slice(0, 22);
+  }
+
+  /** Per managed path, the token of the clone's copy as evaluated: null when it has none, undefined when it can't be told (refused). */
+  private tokensOf(clonePath: string, evals: Map<string, FileEval>): Map<string, string | null | undefined> {
+    const out = new Map<string, string | null | undefined>();
+    for (const [path, evaluated] of evals) {
+      if (evaluated.sha256) out.set(path, this.tokenOf(clonePath, path, evaluated.sha256));
+      else out.set(path, evaluated.state === "refused" ? undefined : null);
+    }
+    return out;
+  }
+
+  /** CONTENT_CHANGED (nothing written) unless every expected file still has the token the caller saw. */
+  private requireExpected(clone: SecretFilesProject, expect: Map<string, string | null>, tokens: Map<string, string | null | undefined>): void {
+    for (const [path, token] of expect) {
+      if (tokens.get(path) !== token) {
+        throw new SecretFilesError("CONTENT_CHANGED", `${path} changed in ${clone.name} since it was shown; nothing was written.`);
+      }
+    }
   }
 
   /**
@@ -1119,17 +1339,20 @@ export class SecretFilesService {
     const snapshot = record;
     const evaluated = await Promise.all(
       targets.map(async (clone) => {
-        if (options.git || !runtime.tracked.has(clone.path)) runtime.tracked.set(clone.path, await this.trackedIn(clone.path, snapshot));
+        const known = runtime.tracked.get(clone.path);
+        const tracked = options.git || !known ? await this.refreshTracked(runtime, clone.path, snapshot) : known;
         if (options.scan || !runtime.candidates.has(clone.path)) {
-          runtime.candidates.set(clone.path, await this.files.scanCandidates(clone.path).catch(() => [] as string[]));
+          runtime.candidates.set(clone.path, await this.files.scanCandidates(clone.path, this.abort.signal).catch(() => [] as string[]));
         }
-        return { clone, evals: await this.evaluateClone(clone, snapshot, runtime.tracked.get(clone.path)!) };
+        return { clone, evals: await this.evaluateClone(clone, snapshot, tracked) };
       })
     );
 
-    // §4's automatic actions.
+    // §4's automatic actions — only while on; re-checked before every write, so turning the plugin
+    // off (or stopping) during a pass stops it there.
+    const live = () => this.enabled && !this.stopped;
     const changes: Array<{ clonePath: string; entries: Array<{ path: string; versionId: string }> }> = [];
-    if (options.auto && this.enabled && !this.stopped && this.store.writable) {
+    if (options.auto && live() && this.store.writable) {
       const contents = new Map<string, Uint8Array | null>();
       const contentOf = async (sha: string): Promise<Uint8Array | null> => {
         if (!contents.has(sha)) {
@@ -1163,11 +1386,16 @@ export class SecretFilesService {
             evaluatedFile.state === "missing"
               ? again?.kind === "missing" && again.parentExists
               : again?.kind === "file" && sha256Of(again.content) === evaluatedFile.sha256;
-          if (!unchanged) continue;
+          if (!unchanged || !live()) continue;
+          const missing = evaluatedFile.state === "missing";
           try {
-            await this.files.writeCloneFile(clone.path, file.path, content, evaluatedFile.state === "outdated" ? evaluatedFile.mode : undefined);
+            // A missing copy is created, never replaces: a file the user made since the re-read wins.
+            await this.files.writeCloneFile(clone.path, file.path, content, missing ? undefined : evaluatedFile.mode, this.writeOptions(missing ? { createOnly: true } : {}));
           } catch (error) {
-            this.logger.warn(`secret-files: could not write ${file.path} in ${clone.name} (${errorText(error)})`);
+            // `exists`: the clone's own new file — the watcher's check evaluates it.
+            if (!(error instanceof CloneFileError && error.exists)) {
+              this.logger.warn(`secret-files: could not write ${file.path} in ${clone.name} (${errorText(error)})`);
+            }
             continue;
           }
           evals.set(file.path, { path: file.path, state: "synced", sha256: current.sha256, ...(evaluatedFile.mode === undefined ? {} : { mode: evaluatedFile.mode }) });
@@ -1176,11 +1404,13 @@ export class SecretFilesService {
         if (entries.length > 0) changes.push({ clonePath: clone.path, entries });
       }
     }
-    const prune =
-      listedPaths && !only && this.store.writable ? Object.keys(snapshot.clones).filter((path) => !listedPaths!.has(path)) : [];
-    if (changes.length > 0 || prune.length > 0) {
+    // Vault writes too only while on and automatic: a read while the plugin is off never rewrites
+    // vaults.json (no baseline stamp, no unlisted-clone housekeeping).
+    const listing = listedPaths && !only && options.auto && this.store.writable ? listedPaths : undefined;
+    const housekeeping = listing !== undefined && this.listingChanges(snapshot, listing);
+    if (live() && (changes.length > 0 || housekeeping)) {
       try {
-        await this.setBaselines(workspace, repoKey, changes, prune);
+        await this.setBaselines(workspace, repoKey, changes, listing);
       } catch (error) {
         this.logger.warn(`secret-files: could not record ${workspace}/${repoKey}'s clone baselines (${errorText(error)})`);
       }
@@ -1192,9 +1422,8 @@ export class SecretFilesService {
     } else {
       runtime.evals = new Map(evaluated.map(({ clone, evals }) => [clone.path, evals]));
     }
-    const detail = this.detailOf(runtime, record);
-    this.publishIfChanged(runtime, detail);
-    if (this.enabled && !this.stopped) this.syncWatches(runtime, record, only);
+    const detail = this.publishIfChanged(runtime, this.detailOf(runtime, record));
+    if (live()) await this.syncWatches(runtime, record, only);
     return detail;
   }
 
@@ -1215,7 +1444,12 @@ export class SecretFilesService {
       for (const file of record.files) {
         const evaluated = evals?.get(file.path);
         if (!evaluated) continue;
-        files.push({ path: file.path, state: evaluated.state, ...(evaluated.refusal ? { refusal: evaluated.refusal } : {}) });
+        files.push({
+          path: file.path,
+          state: evaluated.state,
+          ...(evaluated.refusal ? { refusal: evaluated.refusal } : {}),
+          ...(evaluated.sha256 ? { contentToken: this.tokenOf(clone.path, file.path, evaluated.sha256) } : {})
+        });
       }
       return {
         projectPath: clone.path,
@@ -1255,11 +1489,19 @@ export class SecretFilesService {
     };
   }
 
-  private publishIfChanged(runtime: VaultRuntime, detail: SecretVaultDetail): void {
+  /**
+   * `detail` with its revision: when it differs from the last one published for this vault (or none
+   * was), it gets the next `seq` and goes out as an event; else it carries the last revision.
+   */
+  private publishIfChanged(runtime: VaultRuntime, detail: SecretVaultDetail): SecretVaultDetail {
     const serialized = JSON.stringify(detail);
-    if (serialized === runtime.lastPublished) return;
-    runtime.lastPublished = serialized;
-    this.emit({ vault: detail });
+    if (serialized !== runtime.lastPublished || runtime.revision === null) {
+      runtime.lastPublished = serialized;
+      this.seq += 1;
+      runtime.revision = { boot: this.boot, seq: this.seq };
+      this.emit({ vault: { ...detail, revision: { ...runtime.revision } } });
+    }
+    return { ...detail, revision: { ...runtime.revision } };
   }
 
   private emit(payload: SecretFilesChangedPayload): void {
@@ -1285,14 +1527,19 @@ export class SecretFilesService {
         tracked: new Map(),
         candidates: new Map(),
         lastPublished: null,
-        watches: new Map()
+        revision: null,
+        watches: new Map(),
+        pending: 0
       };
       this.runtimes.set(key, runtime);
     }
     return runtime;
   }
 
-  /** Forget a vault that no longer exists (its queue stays: later operations still serialize). */
+  /**
+   * Reset a vault that no longer exists. Its runtime stays while operations are queued on it (so they
+   * still serialize) and is forgotten once idle (`release`).
+   */
   private dropRuntime(runtime: VaultRuntime, announce: boolean): void {
     this.closeWatches(runtime);
     runtime.clones = [];
@@ -1300,15 +1547,29 @@ export class SecretFilesService {
     runtime.tracked.clear();
     runtime.candidates.clear();
     runtime.lastPublished = null;
+    runtime.revision = null;
     if (announce) this.emit({ workspace: runtime.workspace, repoKey: runtime.repoKey, deleted: true });
   }
 
+  /** Forget an idle runtime whose vault doesn't exist (a read of an unknown vault, a failed setup, a deleted vault). */
+  private release(runtime: VaultRuntime): void {
+    if (runtime.pending > 0) return;
+    const key = vaultKeyOf(runtime.workspace, runtime.repoKey);
+    if (this.runtimes.get(key) !== runtime || this.store.get(runtime.workspace, runtime.repoKey)) return;
+    this.closeWatches(runtime);
+    this.runtimes.delete(key);
+  }
+
   private enqueue<T>(runtime: VaultRuntime, task: () => Promise<T>): Promise<T> {
+    runtime.pending += 1;
     const result = runtime.queue.then(task);
-    runtime.queue = result.then(
-      () => undefined,
-      () => undefined
-    );
+    runtime.queue = result.then(noop, noop);
+    void result
+      .finally(() => {
+        runtime.pending -= 1;
+        this.release(runtime);
+      })
+      .catch(noop);
     return this.track(result);
   }
 
@@ -1322,17 +1583,12 @@ export class SecretFilesService {
 
   // -- internals: watchers (spec §5) -------------------------------------------
 
-  /** Bring a vault's watches in line with its clones and files (`only`: that clone's alone). */
-  private syncWatches(runtime: VaultRuntime, record: VaultRecord, only?: string): void {
-    const live = new Set(runtime.clones.map((clone) => clone.path));
-    if (!only) {
-      for (const [clonePath, watch] of runtime.watches) {
-        if (!live.has(clonePath)) {
-          this.closeCloneWatch(watch);
-          runtime.watches.delete(clonePath);
-        }
-      }
-    }
+  /**
+   * Bring a vault's watches in line with its clones and files (`only`: that clone's alone). A watch
+   * whose directory is gone or was replaced (deleted and recreated: another inode, which the old
+   * watch never sees) is closed and, when the directory exists again, armed on the new one.
+   */
+  private async syncWatches(runtime: VaultRuntime, record: VaultRecord, only?: string): Promise<void> {
     // relDir → names that matter in it. The root also watches every path's first segment, so a
     // parent directory that appears is noticed.
     const wanted = new Map<string, Set<string>>([["", new Set()]]);
@@ -1343,8 +1599,29 @@ export class SecretFilesService {
       wanted.get(relDir)!.add(posix.basename(file.path));
       wanted.get("")!.add(file.path.split("/")[0]!);
     }
-    for (const clone of runtime.clones) {
-      if (only && clone.path !== only) continue;
+    const targets = runtime.clones.filter((clone) => !only || clone.path === only);
+    // The only awaits: every wanted directory's identity. The arming pass below is synchronous, after
+    // a last check that the plugin is still on.
+    const identities = new Map<string, string | null>();
+    await Promise.all(
+      targets.flatMap((clone) =>
+        [...wanted.keys()].map(async (relDir) => {
+          const dirAbs = relDir === "" ? clone.path : join(clone.path, relDir);
+          identities.set(dirAbs, await this.dirIdentity(dirAbs));
+        })
+      )
+    );
+    if (!this.enabled || this.stopped) return;
+    const live = new Set(runtime.clones.map((clone) => clone.path));
+    if (!only) {
+      for (const [clonePath, watch] of runtime.watches) {
+        if (!live.has(clonePath)) {
+          this.closeCloneWatch(watch);
+          runtime.watches.delete(clonePath);
+        }
+      }
+    }
+    for (const clone of targets) {
       let watch = runtime.watches.get(clone.path);
       if (!watch) {
         watch = { dirs: new Map(), timer: null };
@@ -1359,17 +1636,36 @@ export class SecretFilesService {
       for (const [relDir, names] of wanted) {
         let dirWatch = watch.dirs.get(relDir);
         if (!dirWatch) {
-          dirWatch = { handle: null, names };
+          dirWatch = { handle: null, identity: null, names };
           watch.dirs.set(relDir, dirWatch);
         }
         dirWatch.names = names;
-        if (dirWatch.handle) continue;
+        const dirAbs = relDir === "" ? clone.path : join(clone.path, relDir);
+        const identity = identities.get(dirAbs) ?? null;
+        if (dirWatch.handle) {
+          if (identity !== null && identity === dirWatch.identity) continue;
+          dirWatch.handle.close();
+          dirWatch.handle = null;
+        }
+        // Not there (now): the root watch (or the parent's) and the reconcile cover it.
+        if (identity === null) continue;
         const entry = dirWatch;
+        const selfName = basename(dirAbs);
         try {
+          entry.identity = identity;
           entry.handle = this.watchFn(
-            relDir === "" ? clone.path : join(clone.path, relDir),
+            dirAbs,
             (filename) => {
-              if (filename !== null && !entry.names.has(posix.basename(filename.split("\\").join("/")))) return;
+              const name = filename === null ? null : posix.basename(filename.split("\\").join("/"));
+              if (name === selfName) {
+                // An event naming the watched directory itself: it was deleted, moved or replaced, and
+                // this watch is dead. The check re-arms it on whatever directory is there then.
+                entry.handle?.close();
+                entry.handle = null;
+                this.scheduleCheck(runtime, clone.path);
+                return;
+              }
+              if (name !== null && !entry.names.has(name)) return;
               this.scheduleCheck(runtime, clone.path);
             },
             () => {
@@ -1416,6 +1712,22 @@ export class SecretFilesService {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * `retired` with `files` retired too: each goes to the front, merged with an earlier retirement of
+ * its path (newest versions first, at most SECRET_FILE_HISTORY_MAX), at most
+ * SECRET_FILES_MAX_PER_VAULT retired files (the oldest retirements drop off).
+ */
+function retire(retired: readonly VaultFileRecord[], files: readonly VaultFileRecord[]): VaultFileRecord[] {
+  let out = [...retired];
+  for (const file of files) {
+    const earlier = out.find((candidate) => candidate.path === file.path);
+    const ids = new Set(file.versions.map((version) => version.id));
+    const versions = [...file.versions, ...(earlier?.versions.filter((version) => !ids.has(version.id)) ?? [])].slice(0, SECRET_FILE_HISTORY_MAX);
+    out = [{ ...earlier, ...file, versions }, ...out.filter((candidate) => candidate.path !== file.path)];
+  }
+  return out.slice(0, SECRET_FILES_MAX_PER_VAULT);
+}
 
 /** The vault's clones: non-archived projects of that workspace with that repoKey, by name. */
 function clonesOf(projects: readonly SecretFilesProject[], workspace: string, repoKey: string): SecretFilesProject[] {

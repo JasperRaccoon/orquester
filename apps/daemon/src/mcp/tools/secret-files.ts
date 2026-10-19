@@ -9,8 +9,10 @@
 //
 // `push_secret_files` pushes from the chat's OWN project only. Its card names the repo, the source clone, each file's
 // added/removed/changed variable names (line counts for non-KEY=VALUE files) and the other clones the push overwrites.
-// The card pins each file's vault version and its compare; `run` re-reads both and refuses `PREVIEW_STALE` on a change,
-// then pushes exactly the previewed files with the chat's principal (the daemon records the agent's thread).
+// The card pins each file's vault version, its compare and the opaque `contentToken` of the clone copy it compared;
+// `run` re-reads them and refuses `PREVIEW_STALE` on a change, then pushes exactly the previewed files with the chat's
+// principal (the daemon records the agent's thread) and `expect` = the pinned tokens, so the daemon itself refuses
+// (409 CONTENT_CHANGED, nothing pushed) a copy edited between that re-read and the push.
 
 import { basename } from "node:path";
 import { z } from "zod";
@@ -121,8 +123,19 @@ function compareView(compare: SecretFileCompare): CompareView {
   }
 }
 
-/** The clone's copy of `path` against the vault's (clone = left). A refusal is an answer, never a throw. */
-async function readCompare(api: DaemonApi, vault: SecretVaultDetail, clone: SecretFilesClone, path: string): Promise<{ compare: CompareView } | { error: string }> {
+/** An opaque content token as the daemon sent it (a string of sane length), else undefined. */
+const tokenOf = (value: unknown): string | undefined => (typeof value === "string" && value.length > 0 && value.length <= 200 ? value : undefined);
+
+/**
+ * The clone's copy of `path` against the vault's (clone = left), with the compared copy's content token (host use only:
+ * pins and `expect`, never shown). A refusal is an answer, never a throw.
+ */
+async function readCompare(
+  api: DaemonApi,
+  vault: SecretVaultDetail,
+  clone: SecretFilesClone,
+  path: string
+): Promise<{ compare: CompareView; contentToken?: string } | { error: string }> {
   const res = await api.request("GET", secretFilesRoutes.compare, { query: { workspace: vault.workspace, repoKey: vault.repoKey, projectPath: clone.projectPath, path } });
   if (res.status >= 400) {
     const error = daemonError(res);
@@ -130,7 +143,8 @@ async function readCompare(api: DaemonApi, vault: SecretVaultDetail, clone: Secr
   }
   const body = res.body as SecretFileCompareResponse | null;
   if (!body?.compare) return { error: "The daemon answered no compare." };
-  return { compare: compareView(body.compare) };
+  const contentToken = tokenOf(body.contentToken);
+  return { compare: compareView(body.compare), ...(contentToken ? { contentToken } : {}) };
 }
 
 const cloneLabel = (vault: SecretVaultDetail, clone: { projectName: string }) => `${vault.workspace}/${clone.projectName}`;
@@ -242,7 +256,10 @@ const secretFilesStatus = defineTool({
       result.compare = {
         project: cloneLabel(vault, focusClone),
         against: "the vault's current version (added = only in this clone)",
-        files: files.map((file, i) => ({ path: nameOf(file.path), state: file.state, ...compares[i]! }))
+        files: files.map((file, i) => {
+          const entry = compares[i]!;
+          return { path: nameOf(file.path), state: file.state, ...("error" in entry ? { error: entry.error } : { compare: entry.compare }) };
+        })
       };
     } else if (focusName) {
       result.note = `This chat's project ${focusName} is not a clone of ${summary.repoKey} in workspace ${vault.workspace}.`;
@@ -314,15 +331,28 @@ async function pushPlan(files: readonly string[] | undefined, ctx: Pick<ScopeCon
 }
 
 /** Each pushed file's compare against the vault. */
-async function planCompares(api: DaemonApi, plan: PushPlan): Promise<Array<{ path: string } & ({ compare: CompareView } | { error: string })>> {
+async function planCompares(api: DaemonApi, plan: PushPlan): Promise<Array<{ path: string } & ({ compare: CompareView; contentToken?: string } | { error: string })>> {
   return Promise.all(plan.files.map(async (path) => ({ path, ...(await readCompare(api, plan.vault, plan.clone, path)) })));
 }
 
-/** The pins a card freezes: the pushed list, each file's vault version and its compare. */
+/** Each pushed file's content token: the compared copy's, else the vault detail's (absent from older daemons). */
+function planTokens(plan: PushPlan, compares: Awaited<ReturnType<typeof planCompares>>): Record<string, string> {
+  const tokens: Record<string, string> = {};
+  for (const path of plan.files) {
+    const entry = compares.find((candidate) => candidate.path === path);
+    const token = (entry && "compare" in entry ? entry.contentToken : undefined) ?? tokenOf(plan.clone.files.find((file) => file.path === path)?.contentToken);
+    if (token) tokens[path] = token;
+  }
+  return tokens;
+}
+
+/** The pins a card freezes: the pushed list, each file's vault version, its compare and its clone copy's content token. */
 function planPins(plan: PushPlan, compares: Awaited<ReturnType<typeof planCompares>>): Record<string, string> {
   const pins: Record<string, string> = { files: JSON.stringify(plan.files) };
+  const tokens = planTokens(plan, compares);
   for (const path of plan.files) pins[`vault:${path}`] = plan.vault.files.find((file) => file.path === path)?.version ?? "";
   for (const entry of compares) pins[`compare:${entry.path}`] = JSON.stringify("compare" in entry ? entry.compare : null);
+  for (const path of plan.files) pins[`content:${path}`] = tokens[path] ?? "";
   return pins;
 }
 
@@ -417,16 +447,29 @@ const pushSecretFiles = defineTool({
   async run(args, ctx) {
     const { api } = ctx;
     const plan = await pushPlan(args.files, ctx);
+    const compares = await planCompares(api, plan);
     const pins = ctx.approval?.pins;
     if (pins) {
-      const now = planPins(plan, await planCompares(api, plan));
+      const now = planPins(plan, compares);
       const changed = Object.keys({ ...pins, ...now }).filter((key) => pins[key] !== now[key]);
       if (changed.length > 0) {
         throw new ToolError("PREVIEW_STALE", "The secret files changed after the card opened (a file, its variables or the vault's version); nothing was pushed. Call push_secret_files again.");
       }
     }
-    const body: SecretFilesCloneRequest = { workspace: plan.vault.workspace, repoKey: plan.repoKey, projectPath: plan.clone.projectPath, files: plan.files };
-    const after = expectOk<SecretVaultResponse>(await api.request("POST", secretFilesRoutes.push, { body })).vault;
+    // The tokens the card pinned (equal to these, or the card was stale above): the daemon pushes only those bytes.
+    const expect = planTokens(plan, compares);
+    const body: SecretFilesCloneRequest = {
+      workspace: plan.vault.workspace,
+      repoKey: plan.repoKey,
+      projectPath: plan.clone.projectPath,
+      files: plan.files,
+      ...(Object.keys(expect).length > 0 ? { expect } : {})
+    };
+    const res = await api.request("POST", secretFilesRoutes.push, { body });
+    if (res.status === 409 && (res.body as { code?: unknown } | null)?.code === "CONTENT_CHANGED") {
+      throw new ToolError("CONTENT_CHANGED", "A secret file changed after the card was approved; nothing was pushed. Call push_secret_files again.");
+    }
+    const after = expectOk<SecretVaultResponse>(res).vault;
     const updatedClones: Array<{ project: string; files: string[] }> = [];
     const stillFlagged: Array<{ project: string; files: Array<{ path: string; state: SecretFileState }> }> = [];
     for (const clone of after?.clones ?? []) {

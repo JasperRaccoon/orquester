@@ -31,7 +31,7 @@ import { writeFileAtomic } from "../agent-hooks.ts";
  *   that points at it, and the in-memory index changes only after the index
  *   write landed — a failed write leaves memory and disk on the old record;
  * - after each successful write (and at load) blobs no record references are
- *   deleted, best effort — but never while a moved-aside
+ *   deleted, best effort (a retired file's kept history is a reference too) — but never while a moved-aside
  *   `vaults.json.corrupt-*` exists (restoring it by hand needs its blobs), and
  *   never a blob whose sha256 appears in a record this build could not read;
  * - a corrupt index is moved aside and the store starts empty; an unreadable
@@ -58,12 +58,19 @@ export interface VaultFileRecord {
 /** Per clone, per managed path: the vault version id that clone last received or pushed. */
 export interface VaultCloneRecord {
   baselines: Record<string, string>;
+  /** Since when the clone is no longer listed with the repo (absent: listed); see the service's pruning grace. */
+  unlistedAt?: string;
 }
 
 export interface VaultRecord {
   workspace: string;
   repoKey: string;
   files: VaultFileRecord[];
+  /**
+   * Files no longer managed (unmanaged or excluded), their history kept for manual recovery: these
+   * versions count as blob references and are capped like a managed file's. Absent on older records.
+   */
+  retired?: VaultFileRecord[];
   /** Candidate paths the user turned off. */
   excluded: string[];
   /** Keyed by project directory (as `ProjectSummary.path`). */
@@ -308,11 +315,8 @@ export class SecretVaultStore {
     const stamp = this.now().toISOString();
     const candidate = {
       ...copy,
-      files: Array.isArray(copy.files)
-        ? copy.files.map((file) =>
-            file && Array.isArray(file.versions) ? { ...file, versions: file.versions.slice(0, SECRET_FILE_HISTORY_MAX) } : file
-          )
-        : copy.files,
+      files: Array.isArray(copy.files) ? copy.files.map(trimHistory) : copy.files,
+      ...(Array.isArray(copy.retired) ? { retired: copy.retired.map(trimHistory) } : {}),
       createdAt: current?.createdAt ?? stamp,
       updatedAt: stamp
     };
@@ -331,8 +335,8 @@ export class SecretVaultStore {
    */
   private async requireBlobs(record: VaultRecord, current: VaultRecord | undefined, stored: Set<string>): Promise<void> {
     const known = new Set(stored);
-    if (current) for (const file of current.files) for (const version of file.versions) known.add(version.sha256);
-    for (const file of record.files) {
+    if (current) for (const sha256 of referencedBlobs(current)) known.add(sha256);
+    for (const file of [...record.files, ...(record.retired ?? [])]) {
       for (const version of file.versions) {
         if (known.has(version.sha256)) continue;
         try {
@@ -416,9 +420,7 @@ export class SecretVaultStore {
       }
     }
     const referenced = new Set<string>();
-    for (const record of this.records.values()) {
-      for (const file of record.files) for (const version of file.versions) referenced.add(version.sha256);
-    }
+    for (const record of this.records.values()) for (const sha256 of referencedBlobs(record)) referenced.add(sha256);
     for (const match of JSON.stringify([this.rejected, this.extra]).matchAll(/[0-9a-f]{64}/g)) referenced.add(match[0]);
     const unreferenced = names.filter((name) => isSecretBlobSha256(name) && !referenced.has(name));
     if (unreferenced.length === 0) return;
@@ -463,6 +465,18 @@ export class SecretVaultStore {
     this.blockedReason = reason;
     this.logger.error(`${reason}. Secret files are read-only until it is fixed and the daemon restarts.`);
   }
+}
+
+/** A file's history capped at SECRET_FILE_HISTORY_MAX versions (the newest kept). */
+function trimHistory(file: VaultFileRecord): VaultFileRecord {
+  return file && Array.isArray(file.versions) ? { ...file, versions: file.versions.slice(0, SECRET_FILE_HISTORY_MAX) } : file;
+}
+
+/** Every blob a record points at: its managed files' versions and its retired files' kept history. */
+function referencedBlobs(record: VaultRecord): string[] {
+  const out: string[] = [];
+  for (const file of [...record.files, ...(record.retired ?? [])]) for (const version of file.versions) out.push(version.sha256);
+  return out;
 }
 
 function sha256Hex(content: Uint8Array): string {

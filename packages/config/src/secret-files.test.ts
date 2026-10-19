@@ -87,6 +87,14 @@ test("bad records are set aside one by one, verbatim, and written back after the
     vault({ files: [{ path: "../.env", versions: [version()] }] }),
     vault({ files: [{ path: "/etc/passwd", versions: [version()] }] }),
     vault({ files: [{ path: ".git/config", versions: [version()] }] }),
+    vault({ files: [{ path: "vendor/lib/.git/config", versions: [version()] }] }),
+    vault({ files: [{ path: ".GIT/config", versions: [version()] }] }),
+    vault({ excluded: ["sub/.Git/x"] }),
+    vault({ retired: [{ path: "a/.git/x", versions: [version()] }] }),
+    vault({ retired: [{ path: ".env", versions: [] }] }),
+    vault({ retired: [{ path: ".env", versions: [version()] }, { path: ".env", versions: [version()] }] }),
+    vault({ retired: {} }),
+    vault({ clones: { "/p": { baselines: {}, unlistedAt: "last week" } } }),
     vault({ files: [{ path: "a\\b", versions: [version()] }] }),
     vault({ files: [{ path: ".env", versions: [] }] }),
     vault({ files: [{ path: ".env", versions: [version({ id: "nope" })] }] }),
@@ -113,6 +121,26 @@ test("bad records are set aside one by one, verbatim, and written back after the
   );
   assert.deepEqual(parsed.rejected, raw.vaults.slice(0, bad.length));
   assert.deepEqual(plain(serializeSecretVaultsFile(parsed).vaults), [good, ...raw.vaults.slice(0, bad.length)].map(plain));
+});
+
+test("retired files and unlisted clones round-trip; records without them still parse", () => {
+  const entry = vault({
+    retired: [{ path: "old/.env", versions: [version({ id: "v_retired00" }), version({ id: "v_retired01", sha256: SHA_B })], note: "x" }],
+    clones: { "/srv/ws/acme/site": { baselines: { ".env": "v_AbCdEf12_-" }, unlistedAt: "2026-10-19T11:00:00.000Z" } }
+  });
+  const raw = { version: 1, vaults: [entry] };
+  const parsed = parseSecretVaultsConfig(plain(raw));
+  assert.deepEqual(parsed.rejected, []);
+  assert.equal(parsed.vaults[0]!.retired?.[0]?.versions.length, 2);
+  assert.equal(parsed.vaults[0]!.clones["/srv/ws/acme/site"]?.unlistedAt, "2026-10-19T11:00:00.000Z");
+  assert.deepEqual(plain(serializeSecretVaultsFile(parsed)), raw);
+  // An older record (no retired, no unlistedAt) parses without gaining either.
+  const older = parseSecretVaultsConfig(plain({ version: 1, vaults: [vault()] }));
+  assert.equal(older.vaults.length, 1);
+  assert.equal("retired" in older.vaults[0]!, false);
+  assert.deepEqual(plain(serializeSecretVaultsFile(older)), plain({ version: 1, vaults: [vault()] }));
+  // A retired path may also be managed again (a new history).
+  assert.equal(secretVaultRecordSchema.safeParse(plain(vault({ retired: [{ path: ".env", versions: [version({ id: "v_retired00" })] }] }))).success, true);
 });
 
 test("a repeated (workspace, repoKey) keeps the first and sets the rest aside", () => {
