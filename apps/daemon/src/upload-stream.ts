@@ -20,6 +20,7 @@ import { createWriteStream } from "node:fs";
 import { unlink } from "node:fs/promises";
 import type { IncomingHttpHeaders, IncomingMessage } from "node:http";
 import { join } from "node:path";
+import { Readable } from "node:stream";
 import { finished } from "node:stream/promises";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { MAX_UPLOAD_BYTES } from "@orquester/api";
@@ -136,4 +137,25 @@ export async function receiveUpload(source: IncomingMessage, path: string, mode?
     await discardUpload(path);
     throw error;
   }
+}
+
+/**
+ * boxes: the raw request body as a stream for a writer that is not a local file
+ * (a box project's upload goes straight into the box link, never buffered whole).
+ * Counts what arrives into `counter.bytes` and fails with {@link UploadTooLargeError}
+ * the moment MAX_UPLOAD_BYTES is exceeded. Like {@link receiveUpload}, it never
+ * destroys `source`: the route owns the request and answers a refusal with
+ * {@link refuseUpload}.
+ */
+export function cappedUploadBody(source: IncomingMessage, counter: { bytes: number }): Readable {
+  async function* chunks(): AsyncGenerator<Buffer> {
+    for await (const chunk of source.iterator({ destroyOnReturn: false }) as AsyncIterable<Buffer>) {
+      counter.bytes += chunk.length;
+      if (counter.bytes > MAX_UPLOAD_BYTES) {
+        throw new UploadTooLargeError();
+      }
+      yield chunk;
+    }
+  }
+  return Readable.from(chunks(), { objectMode: false });
 }

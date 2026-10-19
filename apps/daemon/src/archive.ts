@@ -16,9 +16,9 @@ import type { ArchiveEntry, FsArchiveResponse } from "@orquester/api";
 const run = promisify(execFile);
 
 /** Max entries returned; protects the client from a pathological archive. */
-const MAX_ENTRIES = 5000;
+export const MAX_ENTRIES = 5000;
 /** Backstop so an encrypted/corrupt archive that prompts can't hang the daemon. */
-const TOOL_TIMEOUT_MS = 15_000;
+export const TOOL_TIMEOUT_MS = 15_000;
 
 type Tool = { bin: string; kind: "7z" | "bsdtar" };
 let resolvedTool: Tool | null | undefined;
@@ -50,7 +50,7 @@ function resolveTool(): Tool | null {
 }
 
 /** Parse `7z l -slt` technical listing (blocks of "Key = Value" lines). */
-function parse7z(stdout: string): ArchiveEntry[] {
+export function parse7z(stdout: string): ArchiveEntry[] {
   const entries: ArchiveEntry[] = [];
   for (const block of stdout.split(/\r?\n\r?\n/)) {
     const path = /^Path = (.+)$/m.exec(block)?.[1];
@@ -68,7 +68,7 @@ function parse7z(stdout: string): ArchiveEntry[] {
 }
 
 /** Parse `bsdtar -tvf` verbose listing. */
-function parseBsdtar(stdout: string): ArchiveEntry[] {
+export function parseBsdtar(stdout: string): ArchiveEntry[] {
   const entries: ArchiveEntry[] = [];
   for (const line of stdout.split(/\r?\n/)) {
     // e.g. "drwxr-xr-x  0 user group   0 Jun 24 12:00 dir/name/"

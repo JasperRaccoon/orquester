@@ -216,6 +216,9 @@ import { HtmlPreviewBrowser } from "./html-preview/index.ts";
 import { registerMcp } from "./mcp/server.ts";
 import { externalCredentialId, registerPrincipalHook, registerRemoteFieldStripping } from "./mcp/principal.ts";
 import { registerSessionToolsRoute } from "./session-tools/route.ts";
+// boxes: file routes of box projects (spec §8.7).
+import type { BoxRegistry } from "./boxes/contracts.ts";
+import { registerBoxFsRouting } from "./boxes/remote/fs/routes.ts";
 import {
   UploadTooLargeError,
   acceptRawBody,
@@ -1750,6 +1753,9 @@ interface Services {
   lineage?: LineageService;
   /** Restart the HTTP transport (set in main once the lifecycle exists). */
   reloadHttp?: () => Promise<void>;
+  // boxes: which paths live in a box project (boxes/service). Absent while the plugin is off:
+  // every path is a host path. Read per request.
+  boxRegistry?: BoxRegistry;
 }
 
 export function createServer(
@@ -2651,6 +2657,20 @@ export function createServer(
       }
     }
   );
+
+  // boxes: a path inside a box project is answered by the box before the handlers below run
+  // (one preHandler hook, boxes/remote/fs/routes.ts); host paths reach them unchanged.
+  registerBoxFsRouting(app, {
+    boxes: () => services.boxRegistry,
+    fsRoot: () => resolved.fsRoot,
+    rawMaxBytes: RAW_MAX_BYTES,
+    closeUnder: async (safe, raw) => {
+      sessions.closeByProjectPrefix(safe);
+      sessions.closeByProjectPrefix(raw);
+      await services.browsers.closeForProject(safe, raw);
+      await services.desktops.closeForProject(safe);
+    }
+  });
 
   // File browser: list a directory.
   app.get<{ Querystring: { path?: string; p?: string } }>(

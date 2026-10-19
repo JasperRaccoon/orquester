@@ -559,6 +559,11 @@ export interface FsCapabilitiesResponse {
   folderZip: boolean;
   /** Resolved zip tool basename for diagnostics ("bsdtar"|"zip"|"7z"|…), or null. */
   zipTool: string | null;
+  // boxes: answered only for `?path=` inside a box project (the box's own tools, spec §8.7).
+  /** The archive-listing tool the box has ("7z"|"bsdtar"|…), or null. */
+  archiveTool?: string | null;
+  /** Whether regex search works (ripgrep is in the box). */
+  regexSearch?: boolean;
 }
 
 // Git — a project's git repo surfaced as a GitHub-Desktop-style tab. Stateless;

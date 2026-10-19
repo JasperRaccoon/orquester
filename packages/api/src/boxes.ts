@@ -570,4 +570,6 @@ export type BoxErrorCode =
   | "BOX_PROVIDER_ERROR"
   | "BOX_INVALID_REQUEST"
   | "BOX_CONNECTION_NOT_CONFIGURED"
-  | "BOX_UNSUPPORTED";
+  | "BOX_UNSUPPORTED"
+  /** 410: the box is destroyed (or being destroyed); a box project's files, terminals and git are gone. */
+  | "BOX_DESTROYED";
