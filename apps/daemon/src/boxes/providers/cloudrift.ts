@@ -8,10 +8,10 @@
  * Sizes are instance-type variants (`rtx59-16c-nr.1`), regions are data center
  * names (`us-east-nc-nr-1`) or `any`. VMs boot a CloudRift Ubuntu image with the
  * NVIDIA driver the GPU's kernel modules need (open vs proprietary) and run the
- * bootstrap through `cloudinit_commands`: one line that decodes the base64
- * `posixScript` into a root-only file and starts it detached (the command is
- * templated into CloudRift's cloud-init `runcmd`, so it must stay one YAML-safe
- * line). The marker is the instance name `orq-<boxId>` plus the tag
+ * bootstrap through `cloudinit_commands` (`detachedStartCommand`: one line that
+ * decodes the base64 `posixScript` into a private file and starts it detached;
+ * the command is templated into CloudRift's cloud-init `runcmd`, so it must stay
+ * one YAML-safe line). The marker is the instance name `orq-<boxId>` plus the tag
  * `orquester-box=<boxId>`. Prices (`cost_per_hour`) are cents.
  */
 
@@ -28,7 +28,7 @@ import type {
   ProviderManagedInstance,
   ProviderOffers
 } from "../contracts.ts";
-import { gpuSizeLabel, hourly, isoTime, num, requireCredential, str, validateWith } from "./gpu-common.ts";
+import { detachedStartCommand, gpuSizeLabel, hourly, isoTime, num, requireCredential, str, validateWith } from "./gpu-common.ts";
 import { ProviderHttpError, boxIdFromInstanceName, providerRequest } from "./http.ts";
 import type { ProviderRequest, ProviderResponse } from "./http.ts";
 
@@ -113,13 +113,6 @@ async function call<T>(
     }
     throw error;
   }
-}
-
-/** The bootstrap as one cloud-init-safe command line. */
-export function cloudriftStartCommand(posixScript: string): string {
-  const encoded = Buffer.from(posixScript, "utf8").toString("base64");
-  const path = "/root/.orq-bootstrap.sh";
-  return `umask 077 && echo ${encoded} | base64 -d > ${path} && nohup sh ${path} >/var/log/orq-bootstrap.log 2>&1 &`;
 }
 
 /** The newest NVIDIA-driver Ubuntu recipe whose kernel modules this GPU type can load. */
@@ -273,7 +266,7 @@ export const cloudriftAdapter: BoxProviderAdapter = {
         config: {
           VirtualMachine: {
             image_url: imageUrl,
-            cloudinit_commands: cloudriftStartCommand(request.bootstrap.posixScript),
+            cloudinit_commands: detachedStartCommand(request.bootstrap.posixScript),
             ssh_key: { PublicKeys: [request.sshPublicKey] }
           }
         },

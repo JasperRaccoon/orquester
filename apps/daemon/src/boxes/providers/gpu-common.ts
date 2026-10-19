@@ -116,6 +116,17 @@ export async function pollUntil<T>(
   }
 }
 
+/**
+ * The bootstrap as one shell command line, for providers whose "startup command" is a single
+ * string (templated into cloud-init or run by their agent): decode the base64 `posixScript` into a
+ * private temp file (mktemp → 0600) and start it detached, so the command returns at once and the
+ * script survives the provider's shell. Base64 keeps the line free of quotes and newlines.
+ */
+export function detachedStartCommand(posixScript: string): string {
+  const encoded = Buffer.from(posixScript, "utf8").toString("base64");
+  return `f=$(mktemp) && echo ${encoded} | base64 -d > "$f" && nohup sh "$f" > "$f.log" 2>&1 &`;
+}
+
 /** Throws `signal.reason` when aborted (between multi-call steps). */
 export function throwIfAborted(signal: AbortSignal): void {
   if (signal.aborted) throw signal.reason;

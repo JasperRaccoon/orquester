@@ -1,0 +1,85 @@
+{
+  "runningInstances": [
+    {
+      "uuid": "8b52a46b-0f3c-4c1e-9a7e-6d13226908f7",
+      "name": "orq-box-0123abcd",
+      "ip": "198.51.100.77",
+      "username": "Ubuntu",
+      "password": "REDACTED",
+      "status": "rented",
+      "os_booted": 1,
+      "command_startup": "REDACTED",
+      "created": "2026-10-20T08:01:09.000Z",
+      "active": 1,
+      "image": {
+        "id": 7,
+        "name": "Ubuntu 22.04 Base",
+        "description": "Ubuntu 22.04 with NVIDIA drivers"
+      },
+      "product": {
+        "name": "gpu_1x_l40",
+        "description": "1x L40",
+        "gpu_count": 1,
+        "vcpu": 26,
+        "ram": 128,
+        "storage": 625,
+        "price_hr": "0.990000",
+        "final_price_hr": "0.000000"
+      }
+    },
+    {
+      "uuid": "11111111-2222-4333-8444-555555555555",
+      "name": "Halloween Test",
+      "ip": "198.51.100.77",
+      "username": "Ubuntu",
+      "password": "REDACTED",
+      "status": "rented",
+      "os_booted": 1,
+      "command_startup": "REDACTED",
+      "created": "2026-10-20T08:01:09.000Z",
+      "active": 1,
+      "image": {
+        "id": 7,
+        "name": "Ubuntu 22.04 Base",
+        "description": "Ubuntu 22.04 with NVIDIA drivers"
+      },
+      "product": {
+        "name": "gpu_1x_l40",
+        "description": "1x L40",
+        "gpu_count": 1,
+        "vcpu": 26,
+        "ram": 128,
+        "storage": 625,
+        "price_hr": "0.990000",
+        "final_price_hr": "0.000000"
+      }
+    },
+    {
+      "uuid": "66666666-7777-4888-9999-000000000000",
+      "name": "orq-box-99887766",
+      "ip": "198.51.100.77",
+      "username": "Ubuntu",
+      "password": "REDACTED",
+      "status": "booting",
+      "os_booted": 0,
+      "command_startup": "REDACTED",
+      "created": "2026-10-20T08:01:09.000Z",
+      "active": 1,
+      "image": {
+        "id": 7,
+        "name": "Ubuntu 22.04 Base",
+        "description": "Ubuntu 22.04 with NVIDIA drivers"
+      },
+      "product": {
+        "name": "gpu_1x_l40",
+        "description": "1x L40",
+        "gpu_count": 1,
+        "vcpu": 26,
+        "ram": 128,
+        "storage": 625,
+        "price_hr": "0.990000",
+        "final_price_hr": "0.000000"
+      }
+    }
+  ]
+}

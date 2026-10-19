@@ -8,7 +8,8 @@ import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
 import { test } from "node:test";
 
-import { CLOUDRIFT_PROTOCOL, cloudriftAdapter, cloudriftStartCommand, pickCloudriftImage } from "./cloudrift.ts";
+import { CLOUDRIFT_PROTOCOL, cloudriftAdapter, pickCloudriftImage } from "./cloudrift.ts";
+import { detachedStartCommand } from "./gpu-common.ts";
 import { callOptions, fixture, routedFetch, sampleCreateRequest } from "./gpu-testing.ts";
 
 const creds = { apiKey: "rift_secret_key_123" };
@@ -74,7 +75,7 @@ test("cloudrift: create rents once with the right driver image, one-line cloud-i
   const vm = (data.config as { VirtualMachine: Record<string, unknown> }).VirtualMachine;
   // This type loads only proprietary kernel modules.
   assert.equal(vm.image_url, imageOf("Ubuntu 24.04 Server (R580 proprietary, CUDA 12.9)"));
-  assert.equal(vm.cloudinit_commands, cloudriftStartCommand(request.bootstrap.posixScript));
+  assert.equal(vm.cloudinit_commands, detachedStartCommand(request.bootstrap.posixScript));
   assert.deepEqual(vm.ssh_key, { PublicKeys: [request.sshPublicKey] });
   assert.equal(data.with_public_ip, true);
   assert.equal(data.name, "orq-box-0123abcd");
@@ -158,7 +159,7 @@ test("cloudrift: listManaged reads live statuses and keeps tagged or orq- named 
 });
 
 test("cloudrift: the start command is one line that decodes the script; image choice follows the driver rules; 429 retried", async () => {
-  const command = cloudriftStartCommand("#!/bin/sh\necho 'hi'\n");
+  const command = detachedStartCommand("#!/bin/sh\necho 'hi'\n");
   assert.ok(!command.includes("\n"));
   const encoded = /echo (\S+) \| base64 -d/.exec(command)![1]!;
   assert.equal(Buffer.from(encoded, "base64").toString("utf8"), "#!/bin/sh\necho 'hi'\n");

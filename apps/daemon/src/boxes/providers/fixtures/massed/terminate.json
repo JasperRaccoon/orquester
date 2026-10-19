@@ -1,0 +1,22 @@
+{
+  "response": {
+    "data": {
+      "terminated_instances": [
+        {
+          "id": "8b52a46b-0f3c-4c1e-9a7e-6d13226908f7",
+          "name": "orq-box-0123abcd",
+          "ip": "198.51.100.77",
+          "status": "terminated",
+          "ssh_key_names": [
+            "orq-box-0123abcd"
+          ],
+          "file_system_names": [],
+          "region": {
+            "name": "us-central-3",
+            "description": "Des Moines, IA"
+          }
+        }
+      ]
+    }
+  }
+}
