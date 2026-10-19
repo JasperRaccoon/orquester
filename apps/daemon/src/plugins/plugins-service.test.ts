@@ -3,6 +3,7 @@ import { mkdir, readFile, readdir, realpath, rm, stat, symlink, writeFile } from
 import { join } from "node:path";
 import { type TestContext, test } from "node:test";
 import {
+  EPHEMERAL_VMS_PLUGIN_ID,
   EXCALIDRAW_PLUGIN_ID,
   SECRET_FILES_PLUGIN_ID,
   type PluginInfo,
@@ -164,7 +165,7 @@ async function plugin(h: Harness, id: PluginInfo["id"] = ID): Promise<PluginInfo
   const response = await h.service.list();
   assert.deepEqual(
     response.plugins.map((p) => p.id),
-    [ID, EXCALIDRAW_PLUGIN_ID, SECRET_FILES_PLUGIN_ID]
+    [ID, EXCALIDRAW_PLUGIN_ID, SECRET_FILES_PLUGIN_ID, EPHEMERAL_VMS_PLUGIN_ID]
   );
   return response.plugins.find((p) => p.id === id) as PluginInfo;
 }
