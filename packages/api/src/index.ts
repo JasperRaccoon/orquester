@@ -1405,6 +1405,8 @@ export interface SessionSummary {
    * Set only by `reattach()`; a fresh agent launch can no longer produce one.
    */
   legacyAgentTerminal?: boolean;
+  /** boxes: the box this terminal's shell runs in (Ephemeral AI VMs spec §8.8); absent = this host. */
+  boxId?: string;
 
   // --- agent chat (kind "agent-chat") -------------------------------------
   // The seven derived fields of the chat design spec §6.4 / §7.1 (and the
@@ -1555,6 +1557,13 @@ export interface CreateSessionRequest {
   profileId?: string;
   /** The workflow run that starts this session (workflows spec §5.10). Persisted on the tab record. */
   owner?: WorkflowSessionOwner;
+  /**
+   * boxes: run this terminal in that box (Ephemeral AI VMs spec §8.8, §13.3 "Watch"), whatever
+   * `projectPath` is — a temporary box's terminal sits in its chat's project. `cwd` defaults to
+   * the box user's home. Only plain shells; refused for a destroyed box. Without it, a terminal
+   * in a box project runs in that project's box anyway.
+   */
+  boxId?: string;
 }
 
 /** Longest `CreateSessionRequest.initialCommand` the daemon will type. */

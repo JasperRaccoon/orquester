@@ -1288,7 +1288,11 @@ export const sessionRecordSchema = z.object({
   // Agent-chat tabs: the thread this one was forked from or delegated by (spec 2026-10-14 §6).
   // Tolerant like `owner`: a malformed lineage is dropped, never the record; an older daemon
   // strips the key, which only loses the lineage chip.
-  lineage: threadLineageRecordSchema.optional().catch(undefined)
+  lineage: threadLineageRecordSchema.optional().catch(undefined),
+  // boxes: a terminal running in a box (Ephemeral AI VMs spec §8.8): its shell is a detached
+  // `orq-agent` process (procId = the session id) the daemon reattaches to after a restart.
+  // An older daemon strips the key, sees no tmux pane and forgets the tab.
+  boxId: z.string().min(1).optional().catch(undefined)
 });
 
 export const sessionsConfigSchema = z.object({
