@@ -217,6 +217,33 @@ export class ChatAwareSessionManager implements ISessionManager {
     return ids;
   }
 
+  // boxes: refresh scheduling (spec 2026-10-19 boxes §7). A session whose project lives in a box
+  // runs its CLI there with an access token only, so it never refreshes the account: it must not
+  // stop the daemon from refreshing. `liveAccountIds()` keeps meaning "in use" (account removal,
+  // the orphan-home sweep); the refresher and the token broker read `hostLocalAccountIds()`.
+  private isBoxProject: (projectPath: string) => boolean = () => false;
+
+  /** Inject the box locator (`BoxRegistry.locate(path).kind === "box"`) once the plugin is up. */
+  setBoxProjectPredicate(isBoxProject: (projectPath: string) => boolean): void {
+    this.isBoxProject = isBoxProject;
+  }
+
+  /**
+   * The accounts a HOST-LOCAL session pins right now: the ones whose CLI on this machine refreshes
+   * them. Same rules as {@link liveAccountIds} (a running PTY session, any chat tab), minus the
+   * sessions in box projects.
+   */
+  hostLocalAccountIds(): Set<string> {
+    const ids = new Set<string>();
+    for (const summary of this.pty.list()) {
+      if (summary.status === "running" && summary.accountId && !this.isBoxProject(summary.projectPath)) ids.add(summary.accountId);
+    }
+    for (const summary of this.chat.list()) {
+      if (summary.accountId && !this.isBoxProject(summary.projectPath)) ids.add(summary.accountId);
+    }
+    return ids;
+  }
+
   persistIndexNow(): void {
     this.pty.persistIndexNow();
   }

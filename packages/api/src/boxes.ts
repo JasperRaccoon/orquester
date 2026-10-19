@@ -549,8 +549,23 @@ export const boxRoutes = {
    */
   agentBinary: (platform: string): string => `/api/boxes/agent/${encodeURIComponent(platform)}`,
   /** REMOTE WebSocket, box-authenticated by its `hello` message (`box-protocol.ts`). */
-  connect: "/api/boxes/connect"
+  connect: "/api/boxes/connect",
+  /**
+   * SOCKET-ONLY (registered on the unix-socket app alone, never on the remote transport):
+   * `POST` `BoxInternalTokenRequest` → the daemon's `AgentTokenGrant` (an access token, never a
+   * refresh token), for the agent host at spawn time and on Codex refresh requests. Refusals:
+   * `{ code, message }` with 400/403/404/409/503/504.
+   */
+  internalToken: "/api/boxes/internal/token"
 } as const;
+
+/** Body of `boxRoutes.internalToken`. `minValidSeconds` defaults to 45 minutes. */
+export interface BoxInternalTokenRequest {
+  boxId: string;
+  agent: "claude" | "codex" | "grok";
+  accountId: string;
+  minValidSeconds?: number;
+}
 
 /** The `/events` channel box changes go out on. */
 export const BOXES_CHANNEL = "boxes";
