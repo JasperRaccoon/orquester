@@ -5,7 +5,7 @@ import { useAppStore } from "../../store/app";
 import { KEYBOARD_SURFACE_PROPS } from "../../lib/keyboard-surfaces";
 import { OpenedAgents } from "./OpenedAgents";
 import { WorkspaceList, type WorkspaceCreateKind } from "./WorkspaceList";
-import { NewProjectModal } from "./NewProjectModal";
+import { NewProjectModal, type NewProjectPreset } from "./NewProjectModal";
 import { NewWorkspaceModal } from "./NewWorkspaceModal";
 import type { InlineCreate } from "./WorkspaceProjects";
 
@@ -21,6 +21,8 @@ export const ProjectsView: React.FC = () => {
   const [query, setQuery] = useState("");
   const [inlineCreate, setInlineCreate] = useState<InlineCreate>(null);
   const [projectModalOpen, setProjectModalOpen] = useState(false);
+  /** What the project modal opens on: a repo group's fresh clone, or nothing (the plain flow). */
+  const [projectPreset, setProjectPreset] = useState<NewProjectPreset | null>(null);
   const [workspaceModalOpen, setWorkspaceModalOpen] = useState(false);
 
   // An inline name field belongs to the workspace it was opened in.
@@ -34,10 +36,21 @@ export const ProjectsView: React.FC = () => {
     }
     setQuery("");
     if (kind === "project") {
+      setProjectPreset(null);
       setProjectModalOpen(true);
     } else {
       setInlineCreate(kind);
     }
+  };
+
+  // A repo group's "+": the same modal, fixed on a fresh clone of that repo.
+  const cloneRepo = async (workspace: string, preset: NewProjectPreset) => {
+    if (useAppStore.getState().currentWorkspace !== workspace) {
+      await openWorkspace(workspace);
+    }
+    setQuery("");
+    setProjectPreset(preset);
+    setProjectModalOpen(true);
   };
 
   return (
@@ -117,12 +130,20 @@ export const ProjectsView: React.FC = () => {
             inlineCreate={inlineCreate}
             onInlineCreateDone={() => setInlineCreate(null)}
             onCreate={(kind, workspace) => void create(kind, workspace)}
+            onCloneRepo={(workspace, preset) => void cloneRepo(workspace, preset)}
             onNewWorkspace={() => setWorkspaceModalOpen(true)}
           />
         </div>
       </div>
 
-      <NewProjectModal open={projectModalOpen} onClose={() => setProjectModalOpen(false)} />
+      <NewProjectModal
+        open={projectModalOpen}
+        preset={projectPreset}
+        onClose={() => {
+          setProjectModalOpen(false);
+          setProjectPreset(null);
+        }}
+      />
       <NewWorkspaceModal open={workspaceModalOpen} onClose={() => setWorkspaceModalOpen(false)} />
     </div>
   );

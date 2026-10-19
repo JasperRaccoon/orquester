@@ -29,9 +29,23 @@ import { ApiError } from "../../lib/api-client";
 import { ProjectSetupError } from "../../lib/project-setup-error";
 import type { AccountSummary, OwnerSummary, RepoSummary } from "../../types";
 
+/**
+ * Opens the modal on one flow with its subject fixed. `clone-repo`: a fresh
+ * clone of a repo the workspace already has (a repo group's "+"), so only the
+ * new folder's name is asked for.
+ */
+export interface NewProjectPreset {
+  kind: "clone-repo";
+  /** Credential-free clone URL (`ProjectSummary.cloneUrl`). */
+  url: string;
+  /** The repo as its group shows it, for the title. */
+  repoLabel: string;
+}
+
 export interface NewProjectModalProps {
   open: boolean;
   onClose: () => void;
+  preset?: NewProjectPreset | null;
 }
 
 type Mode = "empty" | "clone" | "create" | "template";
@@ -202,7 +216,7 @@ const TemplateCard: React.FC<{
  * owners load lazily when the modal opens; templates load when that tab is first
  * opened. The token is never read here — only `repoAccess` gates the UI.
  */
-export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose }) => {
+export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose, preset }) => {
   const workspaces = useAppStore((s) => s.workspaces);
   const accounts = useAppStore((s) => s.accounts);
   const currentWorkspace = useAppStore((s) => s.currentWorkspace);
@@ -319,9 +333,15 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose 
   };
 
   // Lazily load repos + owners when the modal opens with repo access. Reset to
-  // Empty mode each open (account/access may have changed since last time).
+  // Empty mode each open (account/access may have changed since last time). A
+  // clone preset fixes the repo instead, so there is nothing to pick from.
   useEffect(() => {
     if (!open) {
+      return;
+    }
+    if (preset) {
+      setMode("clone");
+      setUrl(preset.url);
       return;
     }
     setMode("empty");
@@ -351,7 +371,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose 
     return () => {
       active = false;
     };
-  }, [open, account, repoAccess, listRepos, listOwners]);
+  }, [open, preset, account, repoAccess, listRepos, listOwners]);
 
   // Templates are host state (which scaffolders are on PATH), so fetch them the
   // first time the tab is opened rather than on every modal open. A daemon too
@@ -479,11 +499,12 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose 
    * override is knowable here.
    */
   const intendedName = useMemo(() => {
-    if (mode === "clone" && !canServerClone) {
+    // A preset clone never falls back to the repo's name: that folder is the one already here.
+    if (mode === "clone" && !canServerClone && !preset) {
       return (name.trim() || nameFromRepoUrl(url)).trim();
     }
     return name.trim();
-  }, [mode, canServerClone, name, url]);
+  }, [mode, canServerClone, preset, name, url]);
 
   /**
    * Pre-warn on a name the workspace already has. The daemon refuses to
@@ -669,6 +690,10 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose 
     if (mode === "empty") {
       return name.trim().length > 0;
     }
+    if (mode === "clone" && preset) {
+      // The name is the whole point of a fresh clone, and a taken one would 409.
+      return name.trim().length > 0 && !nameCollision;
+    }
     if (mode === "clone") {
       return canServerClone ? picked !== null || url.trim().length > 0 : url.trim().length > 0;
     }
@@ -715,7 +740,9 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose 
     >
       <div className="flex min-h-0 w-full flex-col">
         <div className="flex h-12 shrink-0 items-center justify-between border-b border-neutral-800 px-4">
-          <span className="text-sm font-medium text-neutral-100">New project</span>
+          <span className="min-w-0 truncate text-sm font-medium text-neutral-100">
+            {preset ? `New clone of ${preset.repoLabel}` : "New project"}
+          </span>
           <ModalCloseButton onClose={requestClose} />
         </div>
 
@@ -727,30 +754,33 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose 
             browsing ? "overflow-hidden" : "overflow-y-auto"
           )}
         >
-          {/* Mode switch. Wraps rather than overflowing on a phone-width modal. */}
-          <div className="flex flex-wrap gap-0.5 self-start rounded-lg bg-neutral-800/60 p-0.5 text-xs">
-            {tabs.map((t) => (
-              <button
-                key={t.id}
-                type="button"
-                disabled={t.disabled}
-                aria-pressed={mode === t.id}
-                onClick={() => {
-                  setMode(t.id);
-                  setError(null);
-                  setCloneReview(false);
-                }}
-                className={cn(
-                  "flex items-center gap-1.5 rounded-md px-2.5 py-1 transition-colors",
-                  "disabled:cursor-not-allowed disabled:opacity-40",
-                  mode === t.id ? "bg-neutral-700 text-neutral-100" : "text-neutral-400 hover:text-neutral-200"
-                )}
-              >
-                {t.icon}
-                {t.label}
-              </button>
-            ))}
-          </div>
+          {/* Mode switch. Wraps rather than overflowing on a phone-width modal.
+              A preset fixes the mode. */}
+          {!preset && (
+            <div className="flex flex-wrap gap-0.5 self-start rounded-lg bg-neutral-800/60 p-0.5 text-xs">
+              {tabs.map((t) => (
+                <button
+                  key={t.id}
+                  type="button"
+                  disabled={t.disabled}
+                  aria-pressed={mode === t.id}
+                  onClick={() => {
+                    setMode(t.id);
+                    setError(null);
+                    setCloneReview(false);
+                  }}
+                  className={cn(
+                    "flex items-center gap-1.5 rounded-md px-2.5 py-1 transition-colors",
+                    "disabled:cursor-not-allowed disabled:opacity-40",
+                    mode === t.id ? "bg-neutral-700 text-neutral-100" : "text-neutral-400 hover:text-neutral-200"
+                  )}
+                >
+                  {t.icon}
+                  {t.label}
+                </button>
+              ))}
+            </div>
+          )}
 
           {/* Gating hints for the account-backed repo modes. */}
           {mode === "create" && !account && (
@@ -786,7 +816,30 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose 
             </div>
           )}
 
-          {mode === "clone" && !cloneReview && (
+          {mode === "clone" && !cloneReview && preset && (
+            <div className="space-y-1.5">
+              <label htmlFor="new-clone-name" className="text-xs text-neutral-400">
+                Name
+              </label>
+              <Input
+                id="new-clone-name"
+                autoFocus
+                required
+                placeholder="e.g. Shader optimization"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                onKeyDown={onEnter}
+              />
+              {collisionNote}
+              <p className="text-[11px] text-neutral-500">
+                {canServerClone
+                  ? "A fresh clone of the repo's default branch, in a new folder of this workspace."
+                  : "No git account with repo access is linked to this workspace, so the clone runs in a terminal tab with the server's own git credentials."}
+              </p>
+            </div>
+          )}
+
+          {mode === "clone" && !cloneReview && !preset && (
             <div className="space-y-3">
               {canServerClone && (
                 <div className="space-y-1.5">

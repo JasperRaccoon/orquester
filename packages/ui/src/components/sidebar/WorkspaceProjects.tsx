@@ -13,6 +13,8 @@ import { ConfirmDialog, ContextMenu, type ContextMenuItem } from "../ui";
 import { NewItemInput } from "./NewItemInput";
 import { ArchivedFooter } from "./ArchivedFooter";
 import { RowActionsButton } from "./parts";
+import { RepoGroupSection } from "./RepoGroupSection";
+import type { NewProjectPreset } from "./NewProjectModal";
 import { useAppStore } from "../../store/app";
 import { copyText } from "../../lib/clipboard";
 import { matchesSidebarQuery } from "../../lib/opened-agents";
@@ -22,6 +24,9 @@ import { useApi } from "../../context/orquester-context";
 import { useWorkflowsLoadStatus, useWorkflowTempProjects } from "../../lib/workflows/hooks";
 import { loadWorkflows } from "../../lib/workflows/store";
 import { isWorkflowTempProject, looksLikeWorkflowTempProject } from "../../lib/workflows/temp-projects";
+import { groupProjectsByRepo } from "../../lib/repo-groups";
+import { useCollapsedRepoGroups } from "../../lib/collapsed-repo-groups";
+import { useRepoIdentities } from "../../lib/repo-identities/hooks";
 
 /** What the sidebar is naming inline inside the open workspace, if anything. */
 export type InlineCreate = "folder" | "todo" | null;
@@ -36,7 +41,9 @@ export const ProjectRow: React.FC<{
   tempMarker: boolean;
   onOpen: () => void;
   onMenu?: (at: { x: number; y: number }) => void;
-}> = ({ project, active, tempMarker, onOpen, onMenu }) => (
+  /** Stands in for the cube (a search hit's repo icon). */
+  icon?: React.ReactNode;
+}> = ({ project, active, tempMarker, onOpen, onMenu, icon }) => (
   <div
     onContextMenu={(event) => {
       if (!onMenu) return;
@@ -59,7 +66,7 @@ export const ProjectRow: React.FC<{
       aria-current={active ? "page" : undefined}
       className="flex min-w-0 flex-1 items-center gap-2.5 rounded-lg px-2 py-1.5 text-left text-[13px] focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500"
     >
-      <Box size={15} className={cn("shrink-0", active ? "text-neutral-300" : "text-neutral-500")} />
+      {icon ?? <Box size={15} className={cn("shrink-0", active ? "text-neutral-300" : "text-neutral-500")} />}
       <span className="flex-1 truncate">{project.name}</span>
       {tempMarker ? (
         <span
@@ -76,17 +83,20 @@ export const ProjectRow: React.FC<{
 );
 
 /**
- * The open workspace's contents, under its expanded row: its projects, its
- * to-do lists and its archived projects. `query` narrows the rows to those
- * whose name matches (the sidebar search); `creating` names a new folder or
- * to-do list inline, at the top of its list.
+ * The open workspace's contents, under its expanded row: its projects grouped
+ * by repo, then "Other projects" (no remote repo), its to-do lists and its
+ * archived projects. `query` narrows the rows to those whose name matches (the
+ * sidebar search) — or whole groups whose repo matches; `creating` names a new
+ * folder or to-do list inline, at the top of its list. A group's "+" calls
+ * `onCloneRepo` with a fresh-clone preset for the new-project modal.
  */
 export const WorkspaceProjects: React.FC<{
   workspace: string;
   query: string;
   creating: InlineCreate;
   onCreatingDone: () => void;
-}> = ({ workspace, query, creating, onCreatingDone }) => {
+  onCloneRepo?: (preset: NewProjectPreset) => void;
+}> = ({ workspace, query, creating, onCreatingDone, onCloneRepo }) => {
   const currentProject = useAppStore((s) => s.currentProject);
   const projects = useAppStore((s) => s.projects);
   const loading = useAppStore((s) => s.projectsLoading);
@@ -109,7 +119,15 @@ export const WorkspaceProjects: React.FC<{
 
   // Archived projects live only behind the archived entry at the bottom.
   const visibleProjects = projects.filter((p) => !p.isArchived);
-  const shownProjects = visibleProjects.filter((p) => matchesSidebarQuery(query, p.name));
+  const identities = useRepoIdentities();
+  const collapsedGroups = useCollapsedRepoGroups();
+  const { groups, other } = groupProjectsByRepo({
+    projects: visibleProjects,
+    identities,
+    query,
+    collapsed: collapsedGroups,
+    activePath: currentProject?.path ?? null
+  });
 
   // §5.10: a workflow run's temporary project carries a small marker. The
   // workflows store is the evidence; it is asked for only when a project's
@@ -129,6 +147,17 @@ export const WorkspaceProjects: React.FC<{
     .sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0));
 
   const searching = query.trim().length > 0;
+
+  const renderRow = (project: ProjectSummary) => (
+    <ProjectRow
+      key={project.path}
+      project={project}
+      active={project.path === currentProject?.path}
+      tempMarker={isWorkflowTempProject(project, tempProjects)}
+      onOpen={() => openProject(project)}
+      onMenu={(at) => setMenu({ ...at, project })}
+    />
+  );
 
   const menuItems = (project: ProjectSummary): ContextMenuItem[] => [
     {
@@ -182,16 +211,38 @@ export const WorkspaceProjects: React.FC<{
       {!loading && visibleProjects.length === 0 && creating !== "folder" && (
         <p className="px-2 py-1.5 text-xs text-neutral-600">No projects yet</p>
       )}
-      {shownProjects.map((project) => (
-        <ProjectRow
-          key={project.path}
-          project={project}
-          active={project.path === currentProject?.path}
-          tempMarker={isWorkflowTempProject(project, tempProjects)}
-          onOpen={() => openProject(project)}
-          onMenu={(at) => setMenu({ ...at, project })}
-        />
-      ))}
+      {groups.length > 0 && (
+        <div className="divide-y divide-neutral-800/60">
+          {groups.map((group) => {
+            const cloneUrl = group.cloneUrl;
+            return (
+              <RepoGroupSection
+                key={group.repoKey}
+                group={group}
+                onClone={
+                  cloneUrl && onCloneRepo
+                    ? () => onCloneRepo({ kind: "clone-repo", url: cloneUrl, repoLabel: group.label })
+                    : undefined
+                }
+              >
+                {group.projects.map(renderRow)}
+              </RepoGroupSection>
+            );
+          })}
+        </div>
+      )}
+
+      {other.length > 0 && (
+        <div className={cn(groups.length > 0 && "pt-1")}>
+          <div className="flex items-center gap-2 px-2 pb-1 pt-1.5">
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-neutral-500">
+              Other projects
+            </span>
+            <span aria-hidden className="h-px flex-1 bg-neutral-800/80" />
+          </div>
+          <div className="space-y-px">{other.map(renderRow)}</div>
+        </div>
+      )}
 
       {(creating === "todo" || todoLists.length > 0) && (
         <div className="pt-2">
