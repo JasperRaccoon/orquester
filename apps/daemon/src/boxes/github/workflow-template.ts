@@ -74,7 +74,7 @@ export const DOWNLOAD_STEP_SCRIPT = `set +x
 set -eu
 umask 077
 URL=\${DAEMON_URL%/}
-AUD=$(printf '%s' "$URL" | sed -E 's#^(https://[^/]+).*#\\1#')
+AUD=$(printf '%s' "$URL" | sed -E 's#^(https?://[^/]+).*#\\1#')
 AUD_Q=$(printf '%s' "$AUD" | sed -e 's/:/%3A/g' -e 's#/#%2F#g')
 D="$HOME/.orq-agent/bin"
 mkdir -p "$D"
