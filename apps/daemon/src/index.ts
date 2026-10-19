@@ -138,6 +138,8 @@ import type { ActivityCause } from "./ansi-activity";
 import { TodoError, TodoListManager } from "./todos";
 import { RecentProjectsService, describeProjectPath } from "./recent-projects";
 import { SavedPromptsService, publishSavedPromptEvents, registerSavedPromptRoutes } from "./saved-prompts.ts";
+import { RepoIdentitiesService, publishRepoIdentityEvents } from "./repo-identities/service.ts";
+import { registerRepoIdentityRoutes } from "./repo-identities/routes.ts";
 import { registerTodoToggleRoute } from "./todo-items.ts";
 import { PluginsService, publishPluginEvents } from "./plugins/plugins-service.ts";
 import { registerPluginRoutes } from "./plugins/routes.ts";
@@ -254,6 +256,8 @@ import {
   pushConfigPath,
   recentProjectsPath,
   remotesConfigPath,
+  repoIconsDir,
+  repoIdentitiesPath,
   resolveDaemonPaths,
   savedPromptsPath,
   sessionsIndexPath,
@@ -706,6 +710,14 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     logger: console
   });
   await savedPrompts.load();
+  // Repo identities (a label and icon per git repo, spec 2026-10-18 §2). A file it cannot read
+  // is moved aside, never written over; unreferenced icon files are swept.
+  const repoIdentities = new RepoIdentitiesService({
+    file: repoIdentitiesPath(paths.baseDir),
+    iconsDir: repoIconsDir(paths.baseDir),
+    logger: console
+  });
+  await repoIdentities.load();
   // Built-in plugins (Settings → Plugins; plugins spec §4–5): plugins.json, the TypeScript engine install and
   // its hourly update check, and the preload new sessions load through NODE_OPTIONS. Started before
   // any transport serves or any chat or workflow run starts, so new sessions already see the
@@ -1043,6 +1055,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // Saved prompts → event bus (channel "saved-prompts"): every change, cascades
   // included, as `savedPrompt.upserted` (the whole prompt) / `savedPrompt.deleted`.
   publishSavedPromptEvents(savedPrompts, broadcaster);
+  // Repo identities → event bus (channel "repo-identities"), `repoIdentity.changed`.
+  publishRepoIdentityEvents(repoIdentities, broadcaster);
 
   // ---- Agent profile (agent profile spec §4.2) ------------------------------------------------
   // Settings → Agent config: the manager of each agent CLI's own global config. Built here, after
@@ -1284,7 +1298,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   agentChat.setSecretRequests(secretRequests);
   const services: Services = {
     secretRequests,
-    registry, sessions, grokDeviceLink, codexDeviceLink, claudeOAuthLink, accounts, git, gitWatcher, todos, recentProjects, savedPrompts, usage, usageTokens, chatThreadUsage, subagentCacheTtl, push, broadcaster, agentAccounts, browsers, urlWatcher, agentChat,
+    registry, sessions, grokDeviceLink, codexDeviceLink, claudeOAuthLink, accounts, git, gitWatcher, todos, recentProjects, savedPrompts, repoIdentities, usage, usageTokens, chatThreadUsage, subagentCacheTtl, push, broadcaster, agentAccounts, browsers, urlWatcher, agentChat,
     plugins,
     desktops, desktopAudio,
     agentProfile,
@@ -1611,6 +1625,8 @@ interface Services {
   recentProjects: RecentProjectsService;
   /** Daemon-owned saved-prompt library (the right rail), shared by every client. */
   savedPrompts: SavedPromptsService;
+  /** Daemon-owned repo identities (a label and icon per git repo), shared by every client. */
+  repoIdentities: RepoIdentitiesService;
   /** Built-in plugins (Settings → Plugins): plugins.json, the TypeScript engine (tsrs or tsc-rs) install, the session preload. */
   plugins: PluginsService;
   /** Each agent CLI's own global config (agent profile spec §4): Settings → Agent config. */
@@ -4288,6 +4304,10 @@ export function createServer(
   });
   registerTodoToggleRoute(app, todos);
   // umcp:t12 end
+
+  // Repo identities (spec 2026-10-18 §2). Both transports; the bearer hook gates HTTP like every
+  // /api route — no ?token= exemption (clients fetch icon bytes with auth).
+  registerRepoIdentityRoutes(app, { service: services.repoIdentities });
 
   // Built-in plugins (plugins spec §5.3). Both transports, like the protect-archived toggle:
   // enabling downloads and runs a verified binary, which is no more than a remote user can do

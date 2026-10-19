@@ -190,6 +190,16 @@ export function savedPromptsPath(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "saved-prompts.json");
 }
 
+/** Daemon-owned repo identities: a label and icon per git repository (spec 2026-10-18 §2). */
+export function repoIdentitiesPath(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "repo-identities.json");
+}
+
+/** The repo identities' image icons, each under a generated file name; mode 0700. */
+export function repoIconsDir(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "repo-icons");
+}
+
 /** Automated workflow definitions (docs/superpowers/specs/2026-09-28-automated-workflows-design.md §3.1). */
 export function workflowsPath(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "workflows.json");
@@ -2342,3 +2352,4 @@ export function isValidName(name: string | undefined): name is string {
 export * from "./workflows.ts";
 export * from "./agent-tools.ts";
 export * from "./session-profiles.ts";
+export * from "./repo-identities.ts";
