@@ -1,5 +1,17 @@
 import { readFile, realpath, stat } from "node:fs/promises";
 import { isAbsolute, join, resolve, sep } from "node:path";
+import { repoDisplayName, repoKeyOf, stripUrlCredentials } from "./workflows/git-remote/remote-url";
+
+/** What one read of a checkout's `.git`/config yields: its `repoId` and the raw `origin` URL. */
+export interface RepoInfo {
+  /** The value behind `ProjectSummary.repoId` (see `detectRepoId`). */
+  repoId: string;
+  /**
+   * The `url` of `[remote "origin"]` exactly as configured. It MAY carry credentials, so it
+   * never leaves the daemon as is (`remoteRepoFields` strips them).
+   */
+  originUrl: string | null;
+}
 
 /**
  * Best-effort identity of the git repository a project directory belongs to —
@@ -21,19 +33,69 @@ import { isAbsolute, join, resolve, sep } from "node:path";
  * every project on every workspace listing.
  */
 export async function detectRepoId(projectDir: string): Promise<string | null> {
+  return (await detectRepoInfo(projectDir))?.repoId ?? null;
+}
+
+/**
+ * `detectRepoId` plus the raw `origin` URL it was derived from, off the same single config
+ * read, so a listing fills `repoKey`/`repoName`/`cloneUrl` without spawning git.
+ */
+export async function detectRepoInfo(projectDir: string): Promise<RepoInfo | null> {
   const layout = await resolveGitLayout(projectDir);
   if (layout === null) {
     return null;
   }
-  const origin = parseOriginUrl(await readTextOrNull(join(layout.gitDir, "config")));
-  if (origin !== null) {
-    return normalizeGitUrl(origin);
+  const originUrl = parseOriginUrl(await readTextOrNull(join(layout.gitDir, "config")));
+  if (originUrl !== null) {
+    return { repoId: normalizeGitUrl(originUrl), originUrl };
   }
   try {
-    return await realpath(layout.root);
+    return { repoId: await realpath(layout.root), originUrl: null };
   } catch {
-    return layout.root;
+    return { repoId: layout.root, originUrl: null };
   }
+}
+
+/**
+ * The `ProjectSummary` remote fields for an `origin` URL: `repoKey` (`repoKeyOf`), `repoName`
+ * (`repoDisplayName`) and `cloneUrl` (`stripUrlCredentials`). Null (all three omitted) when the
+ * URL is no parseable remote (a local path, `file://`), or when stripping cannot prove the result
+ * credential-free (a malformed userinfo with an unencoded `@`, `/`, `?` or `#`), so a secret
+ * never reaches a response through any of the three.
+ */
+export function remoteRepoFields(
+  originUrl: string
+): { repoKey: string; repoName: string; cloneUrl: string } | null {
+  const cloneUrl = stripUrlCredentials(originUrl.trim());
+  if (!userinfoFree(cloneUrl)) {
+    return null;
+  }
+  const repoKey = repoKeyOf(cloneUrl);
+  return repoKey === null ? null : { repoKey, repoName: repoDisplayName(cloneUrl), cloneUrl };
+}
+
+/**
+ * Whether a stripped URL is free of secrets: past `scheme://` no `@` may remain, except one
+ * `ssh://` login (`user@`, no `:password`) inside the authority. Scp-like forms (`git@host:o/r`)
+ * pass: their user is an ssh login, and `remoteUrlProblem` refuses one containing `:`.
+ */
+function userinfoFree(url: string): boolean {
+  const scheme = /^([a-z][a-z0-9+.-]*):\/\//i.exec(url);
+  if (!scheme) {
+    return true;
+  }
+  const rest = url.slice(scheme[0].length);
+  const at = rest.indexOf("@");
+  if (at === -1) {
+    return true;
+  }
+  const authorityEnd = rest.search(/[/?#]/);
+  return (
+    /^(ssh|ssh\+git|git\+ssh)$/i.test(scheme[1]) &&
+    rest.indexOf("@", at + 1) === -1 &&
+    (authorityEnd === -1 || at < authorityEnd) &&
+    !rest.slice(0, at).includes(":")
+  );
 }
 
 /**
@@ -78,8 +140,12 @@ async function readTextOrNull(path: string): Promise<string | null> {
   }
 }
 
-/** The `url` of `[remote "origin"]` from a git config, without spawning git. */
-function parseOriginUrl(config: string | null): string | null {
+/**
+ * The first `url` of `[remote "origin"]` in a git config, without spawning git. Values follow
+ * git's syntax: double quotes group (and protect `#`/`;`), backslash escapes, an unquoted `#`/`;`
+ * starts a comment. `insteadOf` rewrites and `pushurl` are not applied: origin `url` only.
+ */
+export function parseOriginUrl(config: string | null): string | null {
   if (config === null) {
     return null;
   }
@@ -87,15 +153,47 @@ function parseOriginUrl(config: string | null): string | null {
   for (const rawLine of config.split("\n")) {
     const line = rawLine.trim();
     if (line.startsWith("[")) {
-      inOrigin = /^\[remote\s+"origin"\]$/i.test(line);
+      // Section names are case-insensitive; subsection names (the remote's name) are not.
+      const header = /^\[\s*([A-Za-z0-9.-]+)\s+"((?:[^"\\]|\\.)*)"\s*\]/.exec(line);
+      inOrigin = header !== null && header[1].toLowerCase() === "remote" && header[2] === "origin";
     } else if (inOrigin) {
-      const url = /^url\s*=\s*(.+)$/.exec(line)?.[1];
+      const raw = /^url\s*=(.*)$/i.exec(line)?.[1];
+      const url = raw === undefined ? "" : parseConfigValue(raw);
       if (url) {
-        return url.trim();
+        return url;
       }
     }
   }
   return null;
+}
+
+/** One git config value as git reads it: quotes, escapes, comments, outer whitespace. */
+function parseConfigValue(raw: string): string {
+  const escapes: Record<string, string> = { n: "\n", t: "\t", b: "\b" };
+  let out = "";
+  let space = "";
+  let quoted = false;
+  for (let i = 0; i < raw.length; i += 1) {
+    const c = raw[i];
+    if (c === "\\" && i + 1 < raw.length) {
+      i += 1;
+      out += space + (escapes[raw[i]] ?? raw[i]);
+      space = "";
+    } else if (c === '"') {
+      quoted = !quoted;
+    } else if (!quoted && (c === "#" || c === ";")) {
+      break;
+    } else if (!quoted && (c === " " || c === "\t")) {
+      // Whitespace inside an unquoted value survives; leading and trailing whitespace does not.
+      if (out.length > 0) {
+        space += c;
+      }
+    } else {
+      out += space + c;
+      space = "";
+    }
+  }
+  return out;
 }
 
 /**
@@ -105,7 +203,7 @@ function parseOriginUrl(config: string | null): string | null {
  * The path keeps its case — hosts differ on sensitivity, and a consistent key
  * is all grouping needs.
  */
-function normalizeGitUrl(url: string): string {
+export function normalizeGitUrl(url: string): string {
   let rest = url.trim();
   const protocol = /^[a-z+]+:\/\//i.exec(rest);
   if (protocol) {
@@ -116,7 +214,8 @@ function normalizeGitUrl(url: string): string {
       rest = `${scp[1]}/${scp[2]}`;
     }
   }
-  rest = rest.replace(/^[^/@]+@/, "");
+  // Through the LAST `@` before the path, so a password holding an unencoded `@` cannot survive.
+  rest = rest.replace(/^[^/]*@/, "");
   const slash = rest.indexOf("/");
   const host = (slash === -1 ? rest : rest.slice(0, slash)).toLowerCase();
   const path = (slash === -1 ? "" : rest.slice(slash)).replace(/\/+$/, "").replace(/\.git$/i, "");
