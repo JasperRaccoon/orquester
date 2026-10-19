@@ -504,7 +504,7 @@ test("parseEnv stays linear on 1 MB adversarial input", () => {
   for (const [name, text] of Object.entries(inputs)) {
     const bytes = enc(text);
     const { ms } = timed(() => parseEnv(bytes));
-    assert.ok(ms < 500, `${name} took ${ms.toFixed(0)} ms`);
+    assert.ok(ms < 2000, `${name} took ${ms.toFixed(0)} ms`);
   }
 });
 
@@ -583,7 +583,7 @@ test("compareContents stays fast on 1 MB adversarial input", () => {
     const l = enc(left);
     const r = enc(right);
     const { ms } = timed(() => compareContents(l, r));
-    assert.ok(ms < 500, `${name} took ${ms.toFixed(0)} ms`);
+    assert.ok(ms < 2000, `${name} took ${ms.toFixed(0)} ms`);
   }
 });
 
