@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { type TestContext, test } from "node:test";
 import {
   EXCALIDRAW_PLUGIN_ID,
+  SECRET_FILES_PLUGIN_ID,
   type PluginInfo,
   type PluginsResponse,
   TS_RUST_PLUGIN_ID,
@@ -163,7 +164,7 @@ async function plugin(h: Harness, id: PluginInfo["id"] = ID): Promise<PluginInfo
   const response = await h.service.list();
   assert.deepEqual(
     response.plugins.map((p) => p.id),
-    [ID, EXCALIDRAW_PLUGIN_ID]
+    [ID, EXCALIDRAW_PLUGIN_ID, SECRET_FILES_PLUGIN_ID]
   );
   return response.plugins.find((p) => p.id === id) as PluginInfo;
 }

@@ -9,6 +9,7 @@ import {
   type PluginsResponse,
   PLUGINS_CHANGED_EVENT,
   EXCALIDRAW_PLUGIN_ID,
+  SECRET_FILES_PLUGIN_ID,
   PLUGINS_CHANNEL,
   TS_RUST_PLUGIN_ID,
   pluginRoutes
@@ -136,11 +137,13 @@ test("GET lists the built-in plugins", async (t) => {
     body.plugins.map((plugin) => [plugin.id, plugin.name, plugin.scope, plugin.updates, plugin.platform, plugin.job]),
     [
       [ID, "Better TS Typecheck", "global", true, "supported", "idle"],
-      [EXCALIDRAW_PLUGIN_ID, "Excalidraw Whiteboard", "global", false, "supported", "idle"]
+      [EXCALIDRAW_PLUGIN_ID, "Excalidraw Whiteboard", "global", false, "supported", "idle"],
+      [SECRET_FILES_PLUGIN_ID, "Secret files", "global", false, "supported", "idle"]
     ]
   );
   assert.equal(body.plugins[0]?.enabled, false);
   assert.equal(body.plugins[1]?.enabled, false);
+  assert.equal(body.plugins[2]?.enabled, false, "Secret files is off by default");
   assert.deepEqual(body.plugins[0]?.enabledWorkspaces, []);
 });
 
