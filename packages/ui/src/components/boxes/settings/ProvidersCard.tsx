@@ -204,93 +204,95 @@ const ProviderForm: React.FC<{ provider: BoxProviderInfo; onDone: () => void }> 
   };
 
   return (
-    <form
-      aria-label={`${provider.label} credentials`}
-      className="space-y-3 border-t border-neutral-800/80 bg-neutral-950/40 px-4 py-3"
-      onSubmit={(e) => {
-        e.preventDefault();
-        void save();
-      }}
-    >
-      {provider.credentialFields.length === 0 && (
-        <p className="text-xs text-neutral-500">This provider needs no credentials here.</p>
-      )}
-      {provider.credentialFields.map((field) => {
-        const id = `box-provider-${provider.id}-${field.id}`;
-        const problem = attempted ? problems[field.id] : undefined;
-        const common = {
-          id,
-          name: field.id,
-          value: values[field.id] ?? "",
-          placeholder: field.placeholder ?? (configured && field.secret ? "Enter a new value" : undefined),
-          disabled: busy !== null,
-          autoComplete: "off",
-          spellCheck: false,
-          "aria-invalid": problem ? true : undefined,
-          onChange: (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) =>
-            setValues((current) => ({ ...current, [field.id]: e.target.value }))
-        } as const;
-        return (
-          <FormField
-            key={field.id}
-            htmlFor={id}
-            label={
-              <>
-                {field.label}
-                {field.optional && <span className="font-normal text-neutral-500"> (optional)</span>}
-              </>
-            }
-            hint={problem ? <span className="text-danger">{problem}</span> : field.help}
-          >
-            {credentialFieldMultiline(field) ? (
-              <textarea
-                {...common}
-                rows={4}
-                className={cn(inputClass, "py-1.5 font-mono text-xs", field.secret && "[-webkit-text-security:disc]")}
-              />
-            ) : (
-              <input
-                {...common}
-                type={field.secret ? "password" : "text"}
-                // Keeps password managers from offering to save a provider key as a login.
-                data-1p-ignore
-                data-lpignore="true"
-                className={cn(inputClass, "h-8")}
-              />
-            )}
-          </FormField>
-        );
-      })}
+    <>
+      <form
+        aria-label={`${provider.label} credentials`}
+        className="space-y-3 border-t border-neutral-800/80 bg-neutral-950/40 px-4 py-3"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void save();
+        }}
+      >
+        {provider.credentialFields.length === 0 && (
+          <p className="text-xs text-neutral-500">This provider needs no credentials here.</p>
+        )}
+        {provider.credentialFields.map((field) => {
+          const id = `box-provider-${provider.id}-${field.id}`;
+          const problem = attempted ? problems[field.id] : undefined;
+          const common = {
+            id,
+            name: field.id,
+            value: values[field.id] ?? "",
+            placeholder: field.placeholder ?? (configured && field.secret ? "Enter a new value" : undefined),
+            disabled: busy !== null,
+            autoComplete: "off",
+            spellCheck: false,
+            "aria-invalid": problem ? true : undefined,
+            onChange: (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) =>
+              setValues((current) => ({ ...current, [field.id]: e.target.value }))
+          } as const;
+          return (
+            <FormField
+              key={field.id}
+              htmlFor={id}
+              label={
+                <>
+                  {field.label}
+                  {field.optional && <span className="font-normal text-neutral-500"> (optional)</span>}
+                </>
+              }
+              hint={problem ? <span className="text-danger">{problem}</span> : field.help}
+            >
+              {credentialFieldMultiline(field) ? (
+                <textarea
+                  {...common}
+                  rows={4}
+                  className={cn(inputClass, "py-1.5 font-mono text-xs", field.secret && "[-webkit-text-security:disc]")}
+                />
+              ) : (
+                <input
+                  {...common}
+                  type={field.secret ? "password" : "text"}
+                  // Keeps password managers from offering to save a provider key as a login.
+                  data-1p-ignore
+                  data-lpignore="true"
+                  className={cn(inputClass, "h-8")}
+                />
+              )}
+            </FormField>
+          );
+        })}
 
-      {error && (
-        <Notice tone="danger" title="Not saved">
-          {error}
-        </Notice>
-      )}
+        {error && (
+          <Notice tone="danger" title="Not saved">
+            {error}
+          </Notice>
+        )}
 
-      <div className="flex flex-wrap items-center gap-2">
-        {provider.credentialFields.length > 0 && (
-          <Button size="sm" type="submit" disabled={busy !== null}>
-            {busy === "save" && <Loader2 size={12} className="animate-spin" />}
-            {busy === "save" ? "Checking…" : "Save"}
-          </Button>
-        )}
-        {configured && (
-          <Button size="sm" variant="outline" type="button" disabled={busy !== null} onClick={() => setConfirmRemove(true)}>
-            {busy === "remove" ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />} Remove
-          </Button>
-        )}
-        {provider.credentialsUrl && (
-          <a
-            href={provider.credentialsUrl}
-            target="_blank"
-            rel="noreferrer"
-            className="ml-auto inline-flex items-center gap-1 text-xs text-neutral-400 underline underline-offset-2 hover:text-neutral-200"
-          >
-            Get a key <ExternalLink size={11} />
-          </a>
-        )}
-      </div>
+        <div className="flex flex-wrap items-center gap-2">
+          {provider.credentialFields.length > 0 && (
+            <Button size="sm" type="submit" disabled={busy !== null}>
+              {busy === "save" && <Loader2 size={12} className="animate-spin" />}
+              {busy === "save" ? "Checking…" : "Save"}
+            </Button>
+          )}
+          {configured && (
+            <Button size="sm" variant="outline" type="button" disabled={busy !== null} onClick={() => setConfirmRemove(true)}>
+              {busy === "remove" ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />} Remove
+            </Button>
+          )}
+          {provider.credentialsUrl && (
+            <a
+              href={provider.credentialsUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="ml-auto inline-flex items-center gap-1 text-xs text-neutral-400 underline underline-offset-2 hover:text-neutral-200"
+            >
+              Get a key <ExternalLink size={11} />
+            </a>
+          )}
+        </div>
+      </form>
 
       <ConfirmDialog
         open={confirmRemove}
@@ -303,6 +305,6 @@ const ProviderForm: React.FC<{ provider: BoxProviderInfo; onDone: () => void }> 
           void remove();
         }}
       />
-    </form>
+    </>
   );
 };
