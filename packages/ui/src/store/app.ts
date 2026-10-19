@@ -7,6 +7,7 @@ import { wakeBrowserChannels } from "../lib/transporters/ws-browser-channel";
 import { toRemoteConfig, toUiConnection } from "../lib/connections";
 import { notifyProvidersChanged, setProviderSideEffects } from "../lib/agent-chat/providers";
 import { applySavedPromptEvent, resetSavedPrompts } from "../lib/saved-prompts/store";
+import { applyRepoIdentityEvent, loadRepoIdentities, resetRepoIdentities } from "../lib/repo-identities/store";
 import { applySecretRequestEvent, resetSecretRequests } from "../lib/agent-chat/secret-requests";
 import {
   applyAgentToolsEvent,
@@ -170,6 +171,7 @@ import {
   DESKTOP_CHANNEL,
   PLUGINS_CHANGED_EVENT,
   PLUGINS_CHANNEL,
+  REPO_IDENTITIES_CHANNEL,
   SAVED_PROMPTS_CHANNEL,
   SESSION_PROFILES_CHANNEL,
   WORKFLOWS_CHANNEL
@@ -1490,7 +1492,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       get().loadRemotes(),
       // Built-in plugins gate tools (the whiteboard) outside Settings too. Fail-soft:
       // an older daemon has no plugin routes.
-      get().loadPlugins().catch(() => undefined)
+      get().loadPlugins().catch(() => undefined),
+      // Repo icons + labels (own module store). Every (re)connect: the event
+      // stream has no replay, so a reconnect reloads them. Fail-soft: an older
+      // daemon has no route, and repos then show their defaults.
+      loadRepoIdentities(active).catch(() => undefined)
     ]);
     // Preempted during the fan-out. A newer establish() tears our stream down
     // via closeEvents(), but stopReconnect()/scheduleLockedReconnect() bump
@@ -1806,6 +1812,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     // prompts (`lib/saved-prompts/store.ts`).
     invalidateProjectIndex();
     resetSavedPrompts();
+    resetRepoIdentities();
     resetSecretRequests();
     resetToolApprovals();
     resetAgentTools();
@@ -3515,6 +3522,12 @@ export const useAppStore = create<AppState>((set, get) => ({
       // client's change lands there (idempotently — a mutation's own answer
       // may already have applied it, and a malformed payload is ignored).
       applySavedPromptEvent(event);
+      return;
+    }
+    if (event.channel === REPO_IDENTITIES_CHANNEL) {
+      // Repo icons + labels live in their own module store (validated, never
+      // going backwards by `updatedAt`).
+      applyRepoIdentityEvent(event);
       return;
     }
     if (event.channel === AGENT_PROFILE_CHANNEL) {

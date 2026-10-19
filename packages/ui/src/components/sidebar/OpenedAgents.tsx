@@ -16,7 +16,9 @@ import {
   refreshProjectIndex,
   useProjectIndex
 } from "../../lib/project-index";
-import { groupAgentSessionsByRepo, matchesSidebarQuery } from "../../lib/opened-agents";
+import { agentRepo, groupAgentSessionsByRepo, matchesAgentQuery } from "../../lib/opened-agents";
+import { useRepoIdentities } from "../../lib/repo-identities/hooks";
+import { RepoIcon } from "../repo/RepoIcon";
 import { useAppStore, useThreadUnread } from "../../store/app";
 import { WorkflowAttention, useWorkflowAttention } from "../workflows/runs/WorkflowAttention";
 import {
@@ -46,10 +48,12 @@ import { LineageMark } from "../agent-chat/LineageMark";
  * still drives the status dot and the Attention Center, and this refines that
  * rather than replacing it.
  */
-const AgentCard: React.FC<{ entry: AgentSessionEntry; parentTitle?: string | undefined }> = ({
-  entry,
-  parentTitle
-}) => {
+const AgentCard: React.FC<{
+  entry: AgentSessionEntry;
+  parentTitle?: string | undefined;
+  /** The project's remote repo (spec 2026-10-18 §5): its icon leads the project line. */
+  repo?: { repoKey: string; label: string | undefined } | null;
+}> = ({ entry, parentTitle, repo }) => {
   const markTabUnread = useAppStore((s) => s.markTabUnread);
   const unread = useThreadUnread(entry.session.id);
   const activeInProject = useAppStore(
@@ -102,9 +106,16 @@ const AgentCard: React.FC<{ entry: AgentSessionEntry; parentTitle?: string | und
             <LineageMark lineage={entry.session.lineage} parentTitle={parentTitle} />
             <span className="truncate text-[13px] text-neutral-100">{entry.session.title}</span>
           </span>
-          <span className="truncate text-xs text-neutral-500">
-            {entry.project.workspace ? `${entry.project.workspace} / ` : ""}
-            {entry.project.name}
+          <span className="flex min-w-0 items-center gap-1.5 text-xs text-neutral-500">
+            {repo && (
+              <span title={repo.label} className="flex shrink-0">
+                <RepoIcon repoKey={repo.repoKey} size={14} />
+              </span>
+            )}
+            <span className="truncate">
+              {entry.project.workspace ? `${entry.project.workspace} / ` : ""}
+              {entry.project.name}
+            </span>
           </span>
         </span>
         {unread && (
@@ -147,7 +158,7 @@ const AgentCard: React.FC<{ entry: AgentSessionEntry; parentTitle?: string | und
  * activity. Status stays on each card's dot.
  *
  * Every agent is shown; a search (`query`) narrows the cards to those whose
- * title, project or workspace matches. `Ctrl+Shift+A` still walks the bucket-derived Needs-Attention
+ * title, project, workspace or repo label matches. `Ctrl+Shift+A` still walks the bucket-derived Needs-Attention
  * list (see GlobalShortcutListener) — display order doesn't change it.
  *
  * "Seen" semantics: an attention episode counts as looked-at only while the
@@ -163,6 +174,7 @@ export const OpenedAgents: React.FC<{ query: string }> = ({ query }) => {
   const workspacesLoading = useAppStore((s) => s.workspacesLoading);
   const derived = useAgentSessions();
   const index = useProjectIndex();
+  const identities = useRepoIdentities();
   // Failed workflow runs: the Attention Center's other source (workflows spec §5.11).
   const workflowFailures = useWorkflowAttention().length;
   const [seenKeys, setSeenKeys] = useState<ReadonlySet<string>>(() => new Set());
@@ -233,11 +245,9 @@ export const OpenedAgents: React.FC<{ query: string }> = ({ query }) => {
   const searching = query.trim().length > 0;
   const ordered = useMemo(() => {
     if (index === null) return [];
-    const matching = entries.filter((entry) =>
-      matchesSidebarQuery(query, entry.session.title, entry.project.name, entry.project.workspace)
-    );
+    const matching = entries.filter((entry) => matchesAgentQuery(query, entry, index, identities));
     return groupAgentSessionsByRepo(matching, index).flatMap((group) => group.items);
-  }, [entries, index, query]);
+  }, [entries, index, query, identities]);
   // A child card's parent title, from every agent the section knows (spec 2026-10-14 §6).
   const titleById = useMemo(
     () => new Map(entries.map((entry) => [entry.session.id, entry.session.title])),
@@ -295,6 +305,7 @@ export const OpenedAgents: React.FC<{ query: string }> = ({ query }) => {
             <AgentCard
               key={entry.session.id}
               entry={entry}
+              repo={agentRepo(entry, index, identities)}
               parentTitle={
                 entry.session.lineage
                   ? titleById.get(entry.session.lineage.parentThreadId)
