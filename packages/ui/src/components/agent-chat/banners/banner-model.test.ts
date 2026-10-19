@@ -18,7 +18,7 @@ import {
   toolApprovalPreviewIsCut,
   TOOL_APPROVAL_POINTER_GUARD_MS
 } from "./banner-model.ts";
-import { parseToolApprovalSummary } from "@orquester/api/agent-chat";
+import { ADMIN_FAMILIES, parseToolApprovalSummary } from "@orquester/api/agent-chat";
 
 test("the default four split into Approve/Decline primary and the rest overflow", () => {
   const { primary, overflow } = splitApprovalOptions();
@@ -143,6 +143,16 @@ test("only ⌘/Ctrl+Enter approves, and never within the guard", () => {
   assert.equal(toolApprovalKeyAction(key({ ctrlKey: true }), { now: 1_500, shownAt: 0 }), "approve");
   assert.equal(toolApprovalKeyAction(key({ ctrlKey: true, repeat: true }), late), "guarded", "a held chord");
   assert.equal(toolApprovalKeyAction(key({ ctrlKey: true }), { ...late, inDenyReason: true }), "deny");
+});
+
+test("every Admin family has its own change sentence; a secret-files push names the vault and the clones", () => {
+  for (const family of ADMIN_FAMILIES) {
+    assert.doesNotMatch(toolApprovalChangeSentence({ kind: "admin", family, scope: { label: "S" } }), /newer Orquester/, family);
+  }
+  const push = toolApprovalChangeSentence({ kind: "admin", family: "secret-files", scope: { label: "S" } });
+  assert.match(push, /this repo's vault/);
+  assert.match(push, /every clone listed/);
+  assert.match(push, /never values/);
 });
 
 test("grant choices are exactly the offered scopes", () => {

@@ -9,15 +9,15 @@ import { ADMIN_FAMILIES, APPROVAL_FAMILIES } from "./agent-chat/tool-approvals.t
 import { SESSION_TOOL_NAME_PATTERN } from "./agent-chat/session-tools.ts";
 import { agentToolsRoutes, chatToolNames, GRANT_TABLE, grantOptionsFor, TOOLSET_IDS, TOOLSETS, toolsetOfTool } from "./agent-tools.ts";
 
-test("the catalogue: 44 chat tools in their groups, unique valid names; no switch, no request_toolset", () => {
+test("the catalogue: 46 chat tools in their groups, unique valid names; no switch, no request_toolset", () => {
   const names = chatToolNames();
-  assert.equal(names.length, 44);
-  assert.equal(new Set(names).size, 44);
+  assert.equal(names.length, 46);
+  assert.equal(new Set(names).size, 46);
   for (const name of names) assert.match(name, SESSION_TOOL_NAME_PATTERN);
   assert.deepEqual(TOOLSETS.map((toolset) => toolset.id), [...TOOLSET_IDS]);
   assert.deepEqual(
     TOOLSETS.map((toolset) => [toolset.id, toolset.tools.length]),
-    [["core", 16], ["reads", 5], ["notes", 3], ["chat-extras", 6], ["files-git", 2], ["workflow-authoring", 9], ["agent-profile-editing", 1], ["desktops", 2]]
+    [["core", 16], ["reads", 5], ["notes", 3], ["chat-extras", 6], ["files-git", 2], ["workflow-authoring", 9], ["agent-profile-editing", 1], ["desktops", 2], ["secret-files", 2]]
   );
   // A group is a label: nothing on it turns its tools on or off.
   for (const toolset of TOOLSETS) assert.deepEqual(Object.keys(toolset).sort(), ["id", "label", "tools"], toolset.id);
@@ -33,6 +33,7 @@ test("tier badges: Admin tools are exactly the ones that can raise an Admin card
     "create_workflow",
     "delete_workflow",
     "edit_agent_profile",
+    "push_secret_files",
     "run_workflow",
     "set_workflow_secret",
     "update_saved_prompts",
@@ -47,11 +48,11 @@ test("the grant table: only workflows, desktops, saved prompts and cross-project
   assert.deepEqual(GRANT_TABLE.desktops, ["chat", "project"]);
   assert.deepEqual(GRANT_TABLE["saved-prompts"], ["chat"]);
   assert.deepEqual(GRANT_TABLE["cross-project"], ["chat"]);
-  for (const family of ["agent-profile", "workflow-secrets", "cross-project-read", "cross-workspace-read", "toolset"] as const) {
+  for (const family of ["agent-profile", "workflow-secrets", "secret-files", "cross-project-read", "cross-workspace-read", "toolset"] as const) {
     // `toolset`: the legacy card family of older builds — never grantable.
     assert.deepEqual(GRANT_TABLE[family], [], family);
   }
-  assert.equal(ADMIN_FAMILIES.length, 5);
+  assert.equal(ADMIN_FAMILIES.length, 6);
 });
 
 test("grant options: full-access only, never workflow-owned, never cross-project Admin or referenced prompts", () => {

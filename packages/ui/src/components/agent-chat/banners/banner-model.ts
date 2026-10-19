@@ -249,6 +249,8 @@ export function toolApprovalChangeSentence(card: CardFacts): string {
       return "Approving starts or changes processes on the host machine as previewed.";
     case "saved-prompts":
       return "Approving changes a saved prompt you wrote, exactly as previewed.";
+    case "secret-files":
+      return "Approving pushes these secret files to this repo's vault and overwrites them in every clone listed. Only variable names are shown here, never values.";
     case "cross-project":
       return "Approving lets the agent act in another project: it sends or changes what the preview shows there.";
     case "cross-project-read":

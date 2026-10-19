@@ -32,7 +32,7 @@ export type AgentToolGrantScope = "chat" | "project";
 /**
  * Per approval family, the grant scopes a `full-access` caller may be offered (spec §7.6). Every
  * family absent here, or mapped to `[]`, is never grantable: `agent-profile`, `workflow-secrets`,
- * the read boundaries and older builds' toolset cards.
+ * `secret-files`, the read boundaries and older builds' toolset cards.
  */
 export const AGENT_TOOL_GRANT_SCOPES: Readonly<Record<string, readonly AgentToolGrantScope[]>> = {
   workflows: ["chat"],
@@ -41,6 +41,7 @@ export const AGENT_TOOL_GRANT_SCOPES: Readonly<Record<string, readonly AgentTool
   "cross-project": ["chat"],
   "agent-profile": [],
   "workflow-secrets": [],
+  "secret-files": [],
   "cross-project-read": [],
   "cross-workspace-read": [],
   toolset: []

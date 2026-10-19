@@ -40,7 +40,8 @@ export const TOOLSET_IDS = [
   "files-git",
   "workflow-authoring",
   "agent-profile-editing",
-  "desktops"
+  "desktops",
+  "secret-files"
 ] as const;
 export type ToolsetId = (typeof TOOLSET_IDS)[number];
 
@@ -70,7 +71,7 @@ const read = (name: string): ToolsetToolSpec => ({ name, tier: "read" });
 const act = (name: string): ToolsetToolSpec => ({ name, tier: "act" });
 const admin = (name: string): ToolsetToolSpec => ({ name, tier: "admin" });
 
-/** Every toolset, with its tools in catalog order (spec §9.1): 44 chat tools, all advertised to every chat. */
+/** Every toolset, with its tools in catalog order (spec §9.1): 46 chat tools, all advertised to every chat. */
 export const TOOLSETS: readonly ToolsetSpec[] = [
   {
     id: "core",
@@ -145,6 +146,11 @@ export const TOOLSETS: readonly ToolsetSpec[] = [
     id: "desktops",
     label: "Desktops (opening needs your approval)",
     tools: [read("get_desktops"), admin("control_desktop")]
+  },
+  {
+    id: "secret-files",
+    label: "Secret files (pushing needs your approval)",
+    tools: [read("secret_files_status"), admin("push_secret_files")]
   }
 ];
 
