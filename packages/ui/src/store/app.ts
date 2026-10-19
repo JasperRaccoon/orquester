@@ -118,6 +118,7 @@ import {
   type AgentAuthNotice
 } from "../lib/agent-auth-notice";
 import { ProjectSetupError } from "../lib/project-setup-error";
+import { subscribeProjectGit } from "../components/git/git-watch";
 import { invalidateProjectIndex } from "../lib/project-index";
 import type { HttpClient } from "../lib/http-client";
 import type { Transporter } from "../lib/transporter";
@@ -284,12 +285,31 @@ const conversationScans = new Map<string, Promise<AgentConversationSummary[]>>()
 const forkRetryKeys = new ForkRetryKeys();
 
 /**
- * Setup terminals of `createProjectWithCommand`, id → workspace. Its project
+ * Setup terminals of `createProjectWithCommand`, by session id. Its project
  * list was loaded while the folder was still empty, so a typed `git clone`
- * only gains its repo (and its sidebar repo group) once the command ran: the
- * list is reloaded once when that terminal exits or is closed.
+ * only gains its repo (and its sidebar repo group) once the command ran. The
+ * project's git status is followed meanwhile (the shell stays open after the
+ * clone): every change reloads the list until the project shows a `repoKey`,
+ * and the terminal exiting or closing reloads it one last time.
  */
-const setupSessionWorkspaces = new Map<string, string>();
+interface SetupWatch {
+  workspace: string;
+  projectPath: string;
+  stopGit: () => void;
+}
+const setupSessions = new Map<string, SetupWatch>();
+
+/** A git change in a setup project: reload while its workspace is open; once it shows its repo, stop following. */
+async function reloadForSetup(id: string): Promise<void> {
+  const setup = setupSessions.get(id);
+  if (!setup || useAppStore.getState().currentWorkspace !== setup.workspace) return;
+  await useAppStore.getState().loadProjects();
+  const listed = useAppStore.getState().projects.find((p) => p.path === setup.projectPath);
+  if (listed?.repoKey && setupSessions.get(id) === setup) {
+    setupSessions.delete(id);
+    setup.stopGit();
+  }
+}
 
 /**
  * Is this recents row behind the archive curtain? `isArchived` is absent on
@@ -2105,16 +2125,36 @@ export const useAppStore = create<AppState>((set, get) => ({
       // after the spawn — that removes the old client-side race entirely (a
       // fixed sleep guessing when the shell has drawn its prompt, then an input
       // frame the WS channel could drop on a reconnect).
-      const session = await get().openTab({
-        kind: "shell",
-        refId: shellId,
-        title: "Setup",
-        initialCommand: command
+      // Follow the project's git status from BEFORE the command runs, so the
+      // daemon's watcher takes its baseline on the empty folder and even a
+      // clone that finishes at once is announced as a change.
+      let setupId: string | null = null;
+      let pendingChange = false;
+      const stopGit = subscribeProjectGit(api, project.path, {
+        onChange: (payload) => {
+          if (!payload.status.isRepo) return;
+          if (setupId === null) pendingChange = true;
+          else void reloadForSetup(setupId);
+        },
+        onState: () => undefined
       });
+      let session: SessionSummary | undefined;
+      try {
+        session = await get().openTab({
+          kind: "shell",
+          refId: shellId,
+          title: "Setup",
+          initialCommand: command
+        });
+      } finally {
+        if (!session) stopGit();
+      }
       if (!session) {
         throw new Error("the setup terminal could not be opened");
       }
-      setupSessionWorkspaces.set(session.id, workspace);
+      setupId = session.id;
+      setupSessions.set(session.id, { workspace, projectPath: project.path, stopGit });
+      if (pendingChange) void reloadForSetup(session.id);
     } catch (error) {
       const reason =
         (error instanceof ApiError ? error.serverMessage : null) ??
@@ -3598,11 +3638,12 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
     if (event.type === "session.exited" || event.type === "session.closed") {
       const id = (event.payload as { id?: unknown } | null)?.id;
-      const setupWorkspace = typeof id === "string" ? setupSessionWorkspaces.get(id) : undefined;
-      if (typeof id === "string" && setupWorkspace !== undefined) {
-        setupSessionWorkspaces.delete(id);
+      const setup = typeof id === "string" ? setupSessions.get(id) : undefined;
+      if (typeof id === "string" && setup !== undefined) {
+        setupSessions.delete(id);
+        setup.stopGit();
         // Another open workspace reloads its own list when it is opened again.
-        if (get().currentWorkspace === setupWorkspace) void get().loadProjects();
+        if (get().currentWorkspace === setup.workspace) void get().loadProjects();
       }
     }
     if (
