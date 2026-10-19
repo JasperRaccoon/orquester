@@ -25,10 +25,12 @@ export interface RepoIdentityRoutesDeps {
 /** Served with every icon: the stored type, never sniffed, and an SVG that can run nothing. */
 const ICON_HEADERS = {
   "x-content-type-options": "nosniff",
-  "content-security-policy": "sandbox; default-src 'none'; style-src 'unsafe-inline'",
-  // The URL carries the icon's `version`, so the bytes behind one URL never change.
-  "cache-control": "private, max-age=31536000, immutable"
+  "content-security-policy": "sandbox; default-src 'none'; style-src 'unsafe-inline'"
 } as const;
+/** When `?v=` names the current version, the bytes behind that URL never change. */
+const ICON_CACHE_IMMUTABLE = "private, max-age=31536000, immutable";
+/** Any other `?v=` (or none) gets the current bytes, which a later version may replace. */
+const ICON_CACHE_NONE = "no-store";
 
 /**
  * `/api/repo-identities` (spec 2026-10-18 §2, contracts in `@orquester/api` `repo-identities.ts`).
@@ -40,8 +42,6 @@ const ICON_HEADERS = {
 export function registerRepoIdentityRoutes(app: FastifyInstance, deps: RepoIdentityRoutesDeps): void {
   const { service } = deps;
   const fetchFavicon = deps.fetchFavicon ?? defaultFetchFavicon;
-  /** The repo keys with a favicon fetch running (spec §3b "Rate"). */
-  const fetching = new Set<string>();
 
   app.get(repoIdentityRoutes.list, async (): Promise<RepoIdentitiesResponse> => ({ identities: service.list() }));
 
@@ -63,12 +63,17 @@ export function registerRepoIdentityRoutes(app: FastifyInstance, deps: RepoIdent
     }
   });
 
-  app.get<{ Querystring: { repoKey?: unknown } }>(repoIdentityRoutes.icon, async (request, reply) => {
+  app.get<{ Querystring: { repoKey?: unknown; v?: unknown } }>(repoIdentityRoutes.icon, async (request, reply) => {
     try {
-      // `?v=` (the icon's version) only busts caches; whatever it says, the current icon is served.
+      // Whatever `?v=` says, the current icon is served; only a matching one may be cached for good.
       const icon = await service.readIcon(request.query.repoKey);
       if (!icon) throw new RepoIdentityError("ICON_NOT_FOUND", "This repo has no image icon.");
-      return reply.code(200).headers(ICON_HEADERS).header("content-type", icon.contentType).send(icon.bytes);
+      return reply
+        .code(200)
+        .headers(ICON_HEADERS)
+        .header("cache-control", request.query.v === icon.version ? ICON_CACHE_IMMUTABLE : ICON_CACHE_NONE)
+        .header("content-type", icon.contentType)
+        .send(icon.bytes);
     } catch (error) {
       return sendError(reply, error);
     }
@@ -132,14 +137,15 @@ export function registerRepoIdentityRoutes(app: FastifyInstance, deps: RepoIdent
         throw new RepoIdentityError("FAVICON_BAD_DOMAIN", "Enter a website domain, like example.com.");
       }
       domain = body.domain.trim();
-      if (fetching.has(repoKey)) {
+      // One fetch per repo (spec §3b "Rate"), held on the service so the socket and HTTP share it.
+      if (service.faviconFetches.has(repoKey)) {
         throw new RepoIdentityError("FAVICON_BUSY", "This repo's website icon is already being fetched.");
       }
     } catch (error) {
       return sendError(reply, error);
     }
 
-    fetching.add(repoKey);
+    service.faviconFetches.add(repoKey);
     // A client that goes away stops the fetch; a reply that went out normally aborts nothing.
     const abort = new AbortController();
     const onClose = (): void => {
@@ -166,7 +172,7 @@ export function registerRepoIdentityRoutes(app: FastifyInstance, deps: RepoIdent
     } catch (error) {
       return sendError(reply, error);
     } finally {
-      fetching.delete(repoKey);
+      service.faviconFetches.delete(repoKey);
       reply.raw.off("close", onClose);
     }
   });

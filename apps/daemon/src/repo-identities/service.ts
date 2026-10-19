@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import {
   type RepoFaviconSource,
   type RepoIcon,
@@ -98,8 +98,8 @@ interface RepoIdentitiesServiceOptions {
  * Image icons are files in `iconsDir` (0700) under a random name (0600), never named from the
  * repo key. A new image's file is written before its record; a replaced or cleared image's file
  * is deleted only after a write that no longer references it succeeded, so the file on disk
- * always names an icon that exists. Files no record (rejected ones included) references are swept
- * at load. A record left with neither label nor icon is removed.
+ * always names an icon that exists. Files no record (rejected ones included) and no moved-aside
+ * file references are swept at load. A record left with neither label nor icon is removed.
  *
  * `lifecycle` emits `"changed"` ({@link RepoIdentityChangedPayload}) once per change, after the
  * write. Records are never mutated in place.
@@ -107,6 +107,11 @@ interface RepoIdentitiesServiceOptions {
 export class RepoIdentitiesService {
   private readonly records = new Map<string, RepoIdentityRecord>();
   readonly lifecycle = new EventEmitter();
+  /**
+   * The repo keys with a favicon fetch running (spec §3b "Rate"). Kept here, not in the routes, so
+   * the lock holds across every server the routes are registered on (the socket and HTTP).
+   */
+  readonly faviconFetches = new Set<string>();
   /** The tail of the write chain (see `persist`). Never rejects. */
   private writes: Promise<boolean> = Promise.resolve(true);
   private blockedReason: string | null = null;
@@ -316,7 +321,10 @@ export class RepoIdentitiesService {
     this.logger.warn(`repo-identities.json is corrupt (${detail}); moved it to ${aside} and started with no repo identities.`);
   }
 
-  /** Best effort: delete the icon files no record, read or rejected, names. Only generated names are touched. */
+  /**
+   * Best effort: delete the icon files no record (read or rejected) and no moved-aside file names.
+   * Only generated names are touched.
+   */
   private async sweepOrphanIcons(): Promise<void> {
     let names: string[];
     try {
@@ -332,8 +340,27 @@ export class RepoIdentitiesService {
       const file = repoIconFileOfEntry(entry);
       if (file !== null) referenced.add(file);
     }
-    for (const name of names) {
-      if (isRepoIconFileName(name) && !referenced.has(name)) await this.deleteIconFile(name);
+    const unreferenced = names.filter((name) => isRepoIconFileName(name) && !referenced.has(name));
+    if (unreferenced.length === 0) return;
+    const asideTexts = await this.readMovedAsideFiles();
+    // A moved-aside file this run cannot read might name any of them: keep them all.
+    if (asideTexts === null) return;
+    for (const name of unreferenced) {
+      // Moved-aside files are kept for restoring by hand (corrupt, or a newer build's version), so
+      // the icons they mention stay. A lenient text match: such a file need not parse.
+      if (!asideTexts.some((text) => text.includes(name))) await this.deleteIconFile(name);
+    }
+  }
+
+  /** The text of every `repo-identities.json.corrupt-*` beside the store, or null if one cannot be read. */
+  private async readMovedAsideFiles(): Promise<string[] | null> {
+    const prefix = `${basename(this.file)}.corrupt-`;
+    try {
+      const names = (await readdir(dirname(this.file))).filter((name) => name.startsWith(prefix));
+      return await Promise.all(names.map((name) => readFile(join(dirname(this.file), name), "utf8")));
+    } catch (error) {
+      this.logger.warn(`Not sweeping unused repo icons: a moved-aside repo-identities.json could not be read (${String(error)}).`);
+      return null;
     }
   }
 

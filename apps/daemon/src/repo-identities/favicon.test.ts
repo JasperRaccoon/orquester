@@ -111,6 +111,42 @@ test("scanIconLinks honours <base href>", () => {
   assert.equal(links[0].url, "https://example.com/static/i.png");
 });
 
+test("scanIconLinks skips <linkfoo>/<basement>, and an unclosed tag ends the scan", () => {
+  const page = "https://example.com/";
+  assert.deepEqual(
+    scanIconLinks('<basement href="/x/"><linkage rel=icon href=/no.png><link rel=icon href=/yes.png>', page).map((l) => l.url),
+    ["https://example.com/yes.png"]
+  );
+  assert.deepEqual(
+    scanIconLinks('<link rel=icon href=/a.png><link rel=icon title="x> <link rel=icon href=/b.png>', page).map((l) => l.url),
+    ["https://example.com/a.png"],
+    "an unclosed quoted value swallows the rest, as in a browser"
+  );
+  assert.deepEqual(scanIconLinks('<base href="/s/"', page), []);
+});
+
+test("scanIconLinks scans a hostile 1 MB page in linear time", () => {
+  const page = "https://example.com/";
+  const MB = 1024 * 1024;
+  // Each of the first three took seconds at 128 KB with the old `<link\b(...)>` / `<base\b(...)>` regexes.
+  const pages = [
+    "<link".repeat(MB / 5),
+    "<base".repeat(MB / 5),
+    "<link href='".repeat(Math.floor(MB / 12)),
+    "<!--".repeat(MB / 4),
+    "<script".repeat(Math.floor(MB / 7)),
+    `<script>${"</script ".repeat(Math.floor(MB / 9))}`,
+    `<link ${'a="'.repeat(Math.floor(MB / 3))}>`,
+    `<link rel=icon href='${"&#x1".repeat(MB / 4)}'>`
+  ];
+  for (const html of pages) {
+    const started = performance.now();
+    scanIconLinks(html, page);
+    const ms = performance.now() - started;
+    assert.ok(ms < 500, `${html.slice(0, 16)}... took ${ms.toFixed(1)} ms`);
+  }
+});
+
 test("rankIconCandidates orders SVG, large sizes, apple, icon, then /favicon.ico, de-duplicated", () => {
   const html = `
     <link rel="icon" href="/small.png" sizes="16x16">

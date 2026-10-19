@@ -125,13 +125,25 @@ test("upload, GET with the security headers, replace removes the old file, DELET
   assert.equal(uploaded.body.includes(".svg"), false, "the stored file name never leaves the daemon");
   const [first] = await h.icons();
 
-  const icon = await h.inject({ method: "GET", url: `${repoIdentityRoutes.icon}?repoKey=${KEY}&v=whatever` });
+  const version = identity?.icon?.kind === "image" ? identity.icon.version : "";
+  assert.ok(version);
+  const icon = await h.inject({ method: "GET", url: `${repoIdentityRoutes.icon}?repoKey=${KEY}&v=${version}` });
   assert.equal(icon.statusCode, 200);
   assert.deepEqual(icon.rawPayload, SVG);
   assert.equal(icon.headers["content-type"], "image/svg+xml");
   assert.equal(icon.headers["x-content-type-options"], "nosniff");
   assert.equal(icon.headers["content-security-policy"], "sandbox; default-src 'none'; style-src 'unsafe-inline'");
-  assert.equal(icon.headers["cache-control"], "private, max-age=31536000, immutable");
+  assert.equal(icon.headers["cache-control"], "private, max-age=31536000, immutable", "the current version is immutable");
+
+  // Any other `?v=` (a stale one, or none) still gets the current bytes, but nothing may keep them.
+  for (const query of ["&v=stale0000000000", "&v=", ""]) {
+    const other = await h.inject({ method: "GET", url: `${repoIdentityRoutes.icon}?repoKey=${KEY}${query}` });
+    assert.equal(other.statusCode, 200);
+    assert.deepEqual(other.rawPayload, SVG);
+    assert.equal(other.headers["cache-control"], "no-store", `v from "${query}"`);
+    assert.equal(other.headers["x-content-type-options"], "nosniff");
+    assert.equal(other.headers["content-security-policy"], "sandbox; default-src 'none'; style-src 'unsafe-inline'");
+  }
 
   const replaced = await h.upload(PNG, "image/png");
   assert.equal(replaced.statusCode, 200);
@@ -141,6 +153,10 @@ test("upload, GET with the security headers, replace removes the old file, DELET
   const png = await h.inject({ method: "GET", url: `${repoIdentityRoutes.icon}?repoKey=${KEY}` });
   assert.equal(png.headers["content-type"], "image/png");
   assert.deepEqual(png.rawPayload, PNG);
+  // The old version's URL now answers the new bytes: never cacheable under that URL.
+  const stale = await h.inject({ method: "GET", url: `${repoIdentityRoutes.icon}?repoKey=${KEY}&v=${version}` });
+  assert.deepEqual(stale.rawPayload, PNG);
+  assert.equal(stale.headers["cache-control"], "no-store");
 
   // An emoji replaces the image and its file.
   await h.inject({ method: "PUT", url: repoIdentityRoutes.emoji, payload: { repoKey: KEY, emoji: "🚀" } });
@@ -275,6 +291,30 @@ test("favicon: one fetch per repo at a time — a second is 409 FAVICON_BUSY", a
   await running;
   release({ domain: "acme.com", contentType: "image/png", bytes: PNG });
   assert.equal((await again).statusCode, 200);
+});
+
+test("favicon: the one-fetch lock holds across every server the routes are registered on", async (t) => {
+  let release: (value: FetchedFavicon) => void = () => {};
+  let started: () => void = () => {};
+  const running = new Promise<void>((resolve) => (started = resolve));
+  const fetchFavicon: RepoIdentityRoutesDeps["fetchFavicon"] = () => {
+    started();
+    return new Promise<FetchedFavicon>((resolve) => (release = resolve));
+  };
+  // The daemon registers the routes twice over one service: the unix socket and HTTP.
+  const h = await harness(t, fetchFavicon);
+  const second = Fastify();
+  registerRepoIdentityRoutes(second, { service: h.service, fetchFavicon });
+  t.after(() => second.close());
+
+  const first = h.inject({ method: "POST", url: repoIdentityRoutes.favicon, payload: { repoKey: KEY, domain: "acme.com" } });
+  await running;
+  const busy = await second.inject({ method: "POST", url: repoIdentityRoutes.favicon, payload: { repoKey: KEY, domain: "acme.com" } });
+  refused(busy, 409, "FAVICON_BUSY");
+
+  release({ domain: "acme.com", contentType: "image/png", bytes: PNG });
+  assert.equal((await first).statusCode, 200);
+  assert.equal(h.service.faviconFetches.size, 0, "the lock is released once the fetch is done");
 });
 
 test("the daemon serves the routes on both transports; the remote one requires the bearer, ?token= included", async (t) => {

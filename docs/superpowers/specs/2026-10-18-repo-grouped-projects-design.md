@@ -237,7 +237,8 @@ builder may align them with existing conventions.
   - the stored `Content-Type`
   - `X-Content-Type-Options: nosniff`
   - `Content-Security-Policy: sandbox; default-src 'none'; style-src 'unsafe-inline'`
-  - `Cache-Control: private, max-age=31536000, immutable` (the URL carries `version`)
+  - `Cache-Control: private, max-age=31536000, immutable` when `?v=` equals the
+    icon's current `version`, otherwise `no-store` (the bytes are still served)
 - The UI fetches image bytes through the shared API client with auth, and shows
   them in an `<img>` from `URL.createObjectURL`, reusing
   `hooks/use-object-url.ts`. Never use `<object>`, `<iframe>` or
