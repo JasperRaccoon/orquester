@@ -1,0 +1,10 @@
+{
+  "startup_script": {
+    "id": "66666666-7777-4888-8999-aaaaaaaaaaaa",
+    "date_created": "2026-10-19T23:09:21+00:00",
+    "date_modified": "2026-10-19T23:09:21+00:00",
+    "name": "orq-0a1b2c3d4e5f",
+    "type": "boot",
+    "script": "QGVjaG8gb2ZmClJFTSByZWRhY3RlZCB0ZXN0IGJvb3Qgc2NyaXB0Cg=="
+  }
+}

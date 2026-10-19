@@ -114,8 +114,14 @@ async function listAll<T>(credentials: ProviderCredentials, path: string, key: s
   return items;
 }
 
-function mapState(instance: Pick<VultrInstance, "status" | "power_status">): ProviderInstanceState {
+/** `server_status` values while Vultr is still installing the OS (power reads "stopped" meanwhile). */
+const INSTALLING_SERVER_STATUSES = new Set(["none", "locked", "installingbooting"]);
+
+function mapState(instance: Pick<VultrInstance, "status" | "power_status" | "server_status">): ProviderInstanceState {
   if (instance.status === "pending") return "pending";
+  if (instance.status === "active" && instance.power_status !== "running" && INSTALLING_SERVER_STATUSES.has(instance.server_status)) {
+    return "pending";
+  }
   if (instance.status === "suspended") return "stopped";
   if (instance.status === "active" || instance.status === "resizing") {
     return instance.power_status === "running" ? "running" : "stopped";
@@ -355,11 +361,18 @@ export const vultrAdapter: BoxProviderAdapter = {
 
   async listManaged(credentials, options): Promise<ProviderManagedInstance[]> {
     // Every instance, filtered here: tags are the marker, the `orq-` label the fallback.
-    const instances = await listAll<VultrInstance>(credentials, "/instances", "instances", options);
+    const [instances, scripts] = await Promise.all([
+      listAll<VultrInstance>(credentials, "/instances", "instances", options),
+      listAll<{ id: string; name: string }>(credentials, "/startup-scripts", "startup_scripts", options)
+    ]);
+    // A Windows box's boot script carries the instance's name; the ref lets destroy delete it too.
+    const scriptByName = new Map(scripts.map((script) => [script.name, script.id]));
     return instances
       .filter((instance) => instance.tags?.includes(BOX_TAG_KEY) || isManagedName(instance.label))
       .map((instance) => ({
-        ref: { instanceId: instance.id },
+        ref: scriptByName.has(instance.label)
+          ? { instanceId: instance.id, startupScriptId: scriptByName.get(instance.label)! }
+          : { instanceId: instance.id },
         name: instance.label,
         boxId: managedBoxId(boxIdFromTags(instance.tags), instance.label),
         createdAt: isoOrNull(instance.date_created),
