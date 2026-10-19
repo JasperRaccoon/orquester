@@ -11,6 +11,7 @@ import { SECRET_FILE_MAX_BYTES } from "@orquester/api";
 import {
   CloneFileError,
   compareContents,
+  defaultGitRunner,
   formatEnvValue,
   type GitRunner,
   lineDiffCounts,
@@ -234,6 +235,59 @@ test("writeCloneFile refuses a directory target and oversized content", async (t
   await assert.rejects(writeCloneFile(root, "../x", enc("A=1\n")), /Invalid secret file path/);
 });
 
+test("a path crossing into a nested repository or worktree is refused as outside, for reads and writes", async (t) => {
+  const root = await tempDir(t);
+  // A nested repo (a .git directory) and a linked worktree / submodule (a .git file).
+  await put(root, "vendor/lib/.git/HEAD", "ref: refs/heads/main\n");
+  await put(root, "vendor/lib/.env", "NESTED=1\n");
+  await put(root, "wt/.git", "gitdir: /elsewhere\n");
+  await put(root, "wt/deep/.env", "WT=1\n");
+  await put(root, "apps/.env", "OK=1\n");
+  assert.deepEqual(await readCloneFile(root, "vendor/lib/.env"), { kind: "refused", refusal: "outside" });
+  assert.deepEqual(await readCloneFile(root, "wt/deep/.env"), { kind: "refused", refusal: "outside" });
+  assert.deepEqual(await readCloneFile(root, "wt/missing/.env"), { kind: "refused", refusal: "outside" });
+  assert.equal((await readCloneFile(root, "apps/.env")).kind, "file", "an ordinary folder is fine");
+  await rejectsWith(writeCloneFile(root, "vendor/lib/.env", enc("X=1\n")), (error) => assert.equal(error.refusal, "outside"));
+  await rejectsWith(writeCloneFile(root, "wt/deep/.env.new", enc("X=1\n")), (error) => assert.equal(error.refusal, "outside"));
+  assert.equal(await readFile(join(root, "vendor/lib/.env"), "utf8"), "NESTED=1\n");
+  assert.deepEqual(await readdir(join(root, "wt/deep")), [".env"]);
+  // `.git` itself is never a managed path segment, in any case.
+  await assert.rejects(readCloneFile(root, "sub/.GIT/config"), /Invalid secret file path/);
+});
+
+test("writeCloneFile createOnly creates a missing file, and never replaces one that appeared", async (t) => {
+  const root = await tempDir(t);
+  await writeCloneFile(root, ".env", enc("A=1\n"), undefined, { createOnly: true });
+  assert.equal(await readFile(join(root, ".env"), "utf8"), "A=1\n");
+  assert.equal((await stat(join(root, ".env"))).mode & 0o777, 0o600);
+  assert.deepEqual(await readdir(root), [".env"], "no temp file left");
+  // A file already there (the user's own, created after the service decided to copy): left alone.
+  await rejectsWith(writeCloneFile(root, ".env", enc("B=2\n"), undefined, { createOnly: true }), (error) => {
+    assert.equal(error.exists, true);
+    assert.equal(error.refusal, undefined);
+  });
+  assert.equal(await readFile(join(root, ".env"), "utf8"), "A=1\n");
+  // Even a dangling symlink at the path is never replaced nor followed.
+  await symlink(join(root, "nowhere"), join(root, ".env.local"));
+  await rejectsWith(writeCloneFile(root, ".env.local", enc("B=2\n"), undefined, { createOnly: true }), (error) => assert.equal(error.refusal, "symlink"));
+  assert.deepEqual((await readdir(root)).sort(), [".env", ".env.local"]);
+});
+
+test("writeCloneFile containedIn refuses a clone root whose realpath leaves the workspaces root", async (t) => {
+  const dir = await tempDir(t);
+  const workspaces = join(dir, "workspaces");
+  await mkdir(join(workspaces, "acme", "inside"), { recursive: true });
+  await mkdir(join(dir, "elsewhere"));
+  // A project directory that is a symlink to somewhere outside the workspaces root.
+  await symlink(join(dir, "elsewhere"), join(workspaces, "acme", "escaped"));
+  await writeCloneFile(join(workspaces, "acme", "inside"), ".env", enc("A=1\n"), undefined, { containedIn: workspaces });
+  assert.equal(await readFile(join(workspaces, "acme", "inside", ".env"), "utf8"), "A=1\n");
+  await rejectsWith(writeCloneFile(join(workspaces, "acme", "escaped"), ".env", enc("A=1\n"), undefined, { containedIn: workspaces }), (error) =>
+    assert.equal(error.refusal, "outside")
+  );
+  assert.deepEqual(await readdir(join(dir, "elsewhere")), []);
+});
+
 // ---------------------------------------------------------------------------
 // scanCandidates / trackedPaths (real git)
 // ---------------------------------------------------------------------------
@@ -311,7 +365,7 @@ test("trackedPaths matches names literally, including glob characters", async (t
   assert.deepEqual([...tracked].sort(), ["[x].env", "a*b/.env", "config/.env"]);
 });
 
-test("trackedPaths skips git for no paths and treats a failing git as nothing tracked", async (t) => {
+test("trackedPaths skips git for no paths and rejects when git fails (never 'nothing tracked' on a guess)", async (t) => {
   let calls = 0;
   const counting: GitRunner = () => {
     calls++;
@@ -320,9 +374,26 @@ test("trackedPaths skips git for no paths and treats a failing git as nothing tr
   assert.equal((await trackedPaths("/clone", [], counting)).size, 0);
   assert.equal(calls, 0);
   const failing: GitRunner = () => Promise.reject(new Error("not a git repository"));
-  assert.equal((await trackedPaths("/clone", [".env"], failing)).size, 0);
+  await assert.rejects(trackedPaths("/clone", [".env"], failing), /not a git repository/);
   const dir = await tempDir(t);
-  assert.equal((await trackedPaths(dir, [".env"])).size, 0);
+  await assert.rejects(trackedPaths(dir, [".env"]));
+});
+
+test("the git runner passes the abort signal: an aborted run rejects (the child is killed)", async (t) => {
+  const dir = await tempDir(t);
+  const controller = new AbortController();
+  let seen: AbortSignal | undefined;
+  const recording: GitRunner = (_cwd, _args, signal) => {
+    seen = signal;
+    return Promise.resolve("");
+  };
+  await trackedPaths(dir, [".env"], recording, controller.signal);
+  assert.equal(seen, controller.signal);
+  await scanCandidates(dir, recording, controller.signal);
+  assert.equal(seen, controller.signal);
+  controller.abort();
+  await assert.rejects(defaultGitRunner(dir, ["--version"], controller.signal), (error: Error) => error.name === "AbortError");
+  await assert.rejects(trackedPaths(dir, [".env"], defaultGitRunner, controller.signal), (error: Error) => error.name === "AbortError");
 });
 
 // ---------------------------------------------------------------------------
@@ -541,6 +612,20 @@ test("mergeEnvContents returns null when any input isn't env", () => {
   assert.equal(mergeEnvContents(enc("A=1"), [enc("B=2"), enc("not env")]), null);
 });
 
+test("formatEnvValue prefers no quotes, then single quotes, and escapes only what a value needs", () => {
+  assert.equal(formatEnvValue("plain-value_1.2"), "plain-value_1.2");
+  // No `'`, no line break: single quotes — literal everywhere, no escape, no $ expansion.
+  assert.equal(formatEnvValue("has space"), "'has space'");
+  assert.equal(formatEnvValue("$HOME ${X}"), "'$HOME ${X}'");
+  assert.equal(formatEnvValue("back\\slash"), "'back\\slash'");
+  assert.equal(formatEnvValue('quote"s'), `'quote"s'`);
+  assert.equal(formatEnvValue("a#b"), "'a#b'");
+  // A `'` or a line break: double quotes, escaping only line breaks unless `\` or `"` force it.
+  assert.equal(formatEnvValue("it's"), `"it's"`);
+  assert.equal(formatEnvValue("multi\nline"), '"multi\\nline"');
+  assert.equal(formatEnvValue("it's \\ \"x\""), '"it\'s \\\\ \\"x\\""');
+});
+
 test("mergeEnvContents quotes values so they read back exactly", () => {
   const values = [
     "",
@@ -558,7 +643,10 @@ test("mergeEnvContents quotes values so they read back exactly", () => {
     "multi\nline\r\nvalue",
     "tab\there",
     "日本語 ✓",
-    "$HOME ${X}"
+    "$HOME ${X}",
+    "it's \\ \"x\"",
+    "can't\nbreak \\n",
+    "cr\ronly"
   ];
   const other = values.map((value, i) => `K${i}=${formatEnvValue(value)}`).join("\n");
   const otherEnv = parseEnv(enc(other));

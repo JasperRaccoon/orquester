@@ -8,7 +8,7 @@
 import { createHash } from "node:crypto";
 import { posix } from "node:path";
 import { SECRET_FILE_HISTORY_MAX, isConventionalSecretFileName, type SecretFileUpdatedBy, type SecretFilesChangedPayload } from "@orquester/api";
-import { type CloneFileRefusal, CloneFileError, compareContents, mergeEnvContents, parseEnv } from "./files.ts";
+import { type CloneFileRefusal, CloneFileError, type WriteCloneFileOptions, compareContents, mergeEnvContents, parseEnv } from "./files.ts";
 import {
   SecretFilesService,
   type SecretFilesFileOps,
@@ -79,7 +79,7 @@ export class FakeVaultStore implements SecretVaultStoreLike {
       return null;
     }
     const record = structuredClone(next);
-    for (const file of record.files) file.versions = file.versions.slice(0, SECRET_FILE_HISTORY_MAX);
+    for (const file of [...record.files, ...(record.retired ?? [])]) file.versions = file.versions.slice(0, SECRET_FILE_HISTORY_MAX);
     if (current && JSON.stringify({ ...current, updatedAt: "" }) === JSON.stringify({ ...record, updatedAt: "" })) return structuredClone(current);
     record.createdAt = current?.createdAt ?? this.stamp();
     record.updatedAt = this.stamp();
@@ -120,17 +120,59 @@ export class FakeFs {
   readonly refusals = new Map<string, CloneFileRefusal>();
   /** Clone root → paths git tracks there. */
   readonly tracked = new Map<string, Set<string>>();
-  readonly writes: Array<{ path: string; mode: number | undefined }> = [];
+  /** Clone roots where every git call fails. */
+  readonly gitFails = new Set<string>();
+  /** When set, git calls hang until their signal aborts (then reject). */
+  gitHangs = false;
+  readonly gitSignals: AbortSignal[] = [];
+  readonly writes: Array<{ path: string; mode: number | undefined; options?: WriteCloneFileOptions }> = [];
   readonly watches: FakeWatch[] = [];
+  /** Called with the absolute path at each readCloneFile / right before each write lands. */
+  onRead: ((abs: string) => void) | null = null;
+  onBeforeWrite: ((abs: string) => void) | null = null;
   gitCalls = 0;
   private mtime = 1_000_000;
+  /** Directory -> identity; a directory removed and made again gets a new one (another inode). */
+  private readonly dirIds = new Map<string, number>();
+  private nextDirId = 1;
 
   mkdir(path: string): void {
     let dir = path;
     while (dir !== "/" && dir !== ".") {
       this.dirs.add(dir);
+      if (!this.dirIds.has(dir)) this.dirIds.set(dir, this.nextDirId++);
       dir = posix.dirname(dir);
     }
+  }
+
+  /** Remove a directory and everything under it (with `notify`, its parent's watches see it). */
+  rmdir(path: string, options: { notify?: boolean } = {}): void {
+    for (const dir of [...this.dirs]) {
+      if (dir === path || dir.startsWith(`${path}/`)) {
+        this.dirs.delete(dir);
+        this.dirIds.delete(dir);
+      }
+    }
+    for (const file of [...this.files.keys()]) if (file.startsWith(`${path}/`)) this.files.delete(file);
+    if (options.notify) this.emit(path);
+  }
+
+  readonly dirIdentity = async (dir: string): Promise<string | null> => {
+    const id = this.dirIds.get(dir);
+    return this.dirs.has(dir) && id !== undefined ? `dir-${id}` : null;
+  };
+
+  private async git(cloneRoot: string, signal?: AbortSignal): Promise<void> {
+    this.gitCalls += 1;
+    if (signal) this.gitSignals.push(signal);
+    if (this.gitHangs) {
+      await new Promise<never>((_resolve, reject) => {
+        const fail = () => reject(Object.assign(new Error("The operation was aborted"), { name: "AbortError", code: "ABORT_ERR" }));
+        if (signal?.aborted) fail();
+        else signal?.addEventListener("abort", fail, { once: true });
+      });
+    }
+    if (this.gitFails.has(cloneRoot)) throw Object.assign(new Error("fatal: failed"), { code: "EGIT" });
   }
 
   /** Put a file (as a user would): no watcher event unless `notify`. */
@@ -176,24 +218,27 @@ export class FakeFs {
   readonly ops: SecretFilesFileOps = {
     readCloneFile: async (cloneRoot, relPath) => {
       const abs = posix.join(cloneRoot, relPath);
+      this.onRead?.(abs);
       const refusal = this.refusals.get(abs);
       if (refusal) return { kind: "refused", refusal };
       const file = this.files.get(abs);
       if (!file) return { kind: "missing", parentExists: this.dirs.has(posix.dirname(abs)) };
       return { kind: "file", content: new Uint8Array(file.content), mode: file.mode, mtimeMs: file.mtimeMs };
     },
-    writeCloneFile: async (cloneRoot, relPath, content, mode) => {
+    writeCloneFile: async (cloneRoot, relPath, content, mode, options) => {
       const abs = posix.join(cloneRoot, relPath);
       if (this.refusals.has(abs)) throw new CloneFileError("refused", { refusal: this.refusals.get(abs)! });
       if (!this.dirs.has(posix.dirname(abs))) throw new CloneFileError("no parent", { parentMissing: true });
+      this.onBeforeWrite?.(abs);
+      if (options?.createOnly && this.files.has(abs)) throw new CloneFileError("exists", { exists: true });
       this.mtime += 1000;
       this.files.set(abs, { content: new Uint8Array(content), mode: mode ?? 0o600, mtimeMs: this.mtime });
-      this.writes.push({ path: abs, mode });
+      this.writes.push({ path: abs, mode, ...(options ? { options } : {}) });
       // The atomic rename shows up on the directory watch, like the real one.
       this.emit(abs);
     },
-    scanCandidates: async (cloneRoot) => {
-      this.gitCalls += 1;
+    scanCandidates: async (cloneRoot, signal) => {
+      await this.git(cloneRoot, signal);
       const tracked = this.tracked.get(cloneRoot) ?? new Set<string>();
       return [...this.files.keys()]
         .filter((path) => path.startsWith(`${cloneRoot}/`))
@@ -201,8 +246,9 @@ export class FakeFs {
         .filter((rel) => isConventionalSecretFileName(posix.basename(rel)) && !tracked.has(rel))
         .sort();
     },
-    trackedPaths: async (cloneRoot, relPaths) => {
-      this.gitCalls += 1;
+    trackedPaths: async (cloneRoot, relPaths, signal) => {
+      if (relPaths.length === 0) return new Set<string>();
+      await this.git(cloneRoot, signal);
       const tracked = this.tracked.get(cloneRoot) ?? new Set<string>();
       return new Set(relPaths.filter((path) => tracked.has(path)));
     },
@@ -308,6 +354,7 @@ export async function makeHarness(options: { enabled?: boolean; overrides?: Part
     store,
     files: fs.ops,
     watch: fs.watch,
+    dirIdentity: fs.dirIdentity,
     timers,
     listProjects: async () => projects.map((project) => ({ ...project })),
     pluginEnabled: () => plugin.enabled,

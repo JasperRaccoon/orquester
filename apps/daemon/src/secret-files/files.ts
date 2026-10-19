@@ -1,10 +1,11 @@
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { constants as fsConstants, type Stats } from "node:fs";
-import { lstat, open, realpath, rename, unlink } from "node:fs/promises";
+import { link, lstat, open, realpath, rename, unlink } from "node:fs/promises";
 import { join, sep } from "node:path";
 import { promisify } from "node:util";
 
+import { assertInsideFsRoot } from "@orquester/config/fs";
 import {
   isConventionalSecretFileName,
   SECRET_FILE_MAX_BYTES,
@@ -23,8 +24,11 @@ import {
  * content itself, host-only) and `parseEnv` (host-only, for compare/merge).
  */
 
-/** Runs git in a clone (injectable for tests). Resolves stdout; rejects on a non-zero exit. */
-export type GitRunner = (cwd: string, args: string[]) => Promise<string>;
+/**
+ * Runs git in a clone (injectable for tests). Resolves stdout; rejects on a non-zero exit, and when
+ * `signal` aborts (the child is killed: the daemon is shutting down).
+ */
+export type GitRunner = (cwd: string, args: string[], signal?: AbortSignal) => Promise<string>;
 
 /** A refusal that can be decided on disk (`tracked` needs git — see `trackedPaths`). */
 export type CloneFileRefusal = Exclude<SecretFileRefusal, "tracked">;
@@ -43,13 +47,30 @@ export type CloneFileRead =
 export class CloneFileError extends Error {
   readonly refusal?: CloneFileRefusal;
   readonly parentMissing?: true;
+  /** A `createOnly` write found a file already there (nothing was written). */
+  readonly exists?: true;
 
-  constructor(message: string, detail: { refusal?: CloneFileRefusal; parentMissing?: true }) {
+  constructor(message: string, detail: { refusal?: CloneFileRefusal; parentMissing?: true; exists?: true }) {
     super(message);
     this.name = "CloneFileError";
     if (detail.refusal) this.refusal = detail.refusal;
     if (detail.parentMissing) this.parentMissing = true;
+    if (detail.exists) this.exists = true;
   }
+}
+
+export interface WriteCloneFileOptions {
+  /**
+   * Never replace anything: the file is created only if nothing is at the path when it lands
+   * (a hard link of the synced temp file, so it appears whole); otherwise a {@link CloneFileError}
+   * with `exists` and nothing written. For automatic copies into a clone that had no file.
+   */
+  createOnly?: boolean;
+  /**
+   * The directory the clone root's realpath must stay inside (the workspaces root), checked as
+   * part of the write; outside → refused `outside`.
+   */
+  containedIn?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -97,6 +118,11 @@ function assertPath(relPath: string): string[] {
  * Resolve `relPath` component by component from the clone's real root with
  * lstat: no symlink anywhere below the root, every parent a real directory,
  * the final entry a regular file (or absent) whose realpath stays inside.
+ *
+ * A parent directory below the root that holds a `.git` entry (a nested
+ * repository, submodule or linked worktree) is another repository's ground:
+ * the path is refused as `outside` — `SecretFileRefusal` has no separate
+ * value for it, and it is outside this clone's repository.
  */
 async function inspect(cloneRoot: string, relPath: string): Promise<Inspected> {
   const segments = assertPath(relPath);
@@ -125,6 +151,13 @@ async function inspect(cloneRoot: string, relPath: string): Promise<Inspected> {
     // A parent that is a regular file (or anything else) can't hold the file.
     if (!stats.isDirectory()) {
       return { kind: "missing", parentExists: false, abs: join(rootReal, ...segments), parentAbs: next, rootReal };
+    }
+    try {
+      await lstat(join(next, ".git"));
+      return { kind: "refused", refusal: "outside" };
+    } catch (error) {
+      const result = classifyPathError(error);
+      if (result !== "missing") return { kind: "refused", refusal: result };
     }
     parentAbs = next;
   }
@@ -230,9 +263,16 @@ const REFUSAL_MESSAGES: Record<CloneFileRefusal, string> = {
  * same directory, then rename), keeping `mode` when given (else 0600). Refuses
  * (throws a {@link CloneFileError}) for the same reasons `readCloneFile` would,
  * and when the parent directory doesn't exist — it never creates directories.
- * An existing symlink at the target is refused, never followed.
+ * An existing symlink at the target is refused, never followed. See
+ * {@link WriteCloneFileOptions} for `createOnly` and `containedIn`.
  */
-export async function writeCloneFile(cloneRoot: string, relPath: string, content: Uint8Array, mode?: number): Promise<void> {
+export async function writeCloneFile(
+  cloneRoot: string,
+  relPath: string,
+  content: Uint8Array,
+  mode?: number,
+  options: WriteCloneFileOptions = {}
+): Promise<void> {
   if (content.byteLength > SECRET_FILE_MAX_BYTES) {
     throw new CloneFileError(REFUSAL_MESSAGES["too-large"], { refusal: "too-large" });
   }
@@ -241,6 +281,15 @@ export async function writeCloneFile(cloneRoot: string, relPath: string, content
   if (found.kind === "missing" && !found.parentExists) {
     throw new CloneFileError("The file's folder doesn't exist in this project.", { parentMissing: true });
   }
+  if (options.containedIn !== undefined) {
+    // The clone root itself (its realpath) must sit inside the workspaces root.
+    try {
+      await assertInsideFsRoot(options.containedIn, found.rootReal);
+    } catch {
+      throw new CloneFileError(REFUSAL_MESSAGES.outside, { refusal: "outside" });
+    }
+  }
+  if (options.createOnly && found.kind === "file") throw new CloneFileError(EXISTS_MESSAGE, { exists: true });
   const { abs, parentAbs } = found;
   const fileMode = (mode ?? 0o600) & 0o777;
   const name = relPath.slice(relPath.lastIndexOf("/") + 1);
@@ -262,6 +311,15 @@ export async function writeCloneFile(cloneRoot: string, relPath: string, content
     if (tmpReal !== tmp || !isInside(found.rootReal, tmpReal)) {
       throw new CloneFileError(REFUSAL_MESSAGES.symlink, { refusal: "symlink" });
     }
+    if (options.createOnly) {
+      // link() never replaces: whatever appeared at the path since the walk (a file the user just
+      // created, a symlink) makes it fail with EEXIST, and the temp file is dropped.
+      await createFrom(tmp, abs, content, fileMode);
+      await unlink(tmp).catch(() => undefined);
+      created = false;
+      await syncDir(parentAbs);
+      return;
+    }
     // Re-check the target right before the rename (rename replaces a link, never follows it).
     const again = await lstat(abs).catch((error: unknown) => {
       if (errorCode(error) === "ENOENT") return null;
@@ -281,9 +339,43 @@ export async function writeCloneFile(cloneRoot: string, relPath: string, content
     }
     throw error;
   }
-  // Durability of the rename itself; best effort (not every platform can fsync a directory).
+  await syncDir(parentAbs);
+}
+
+const EXISTS_MESSAGE = "A file appeared at that path; it was left as it is.";
+/** link() failures that mean the filesystem has no hard links (then an O_EXCL create is the fallback). */
+const NO_LINK_CODES = new Set(["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EXDEV", "EMLINK"]);
+
+/** Create `abs` from the synced temp file without replacing anything (see `createOnly`). */
+async function createFrom(tmp: string, abs: string, content: Uint8Array, fileMode: number): Promise<void> {
   try {
-    const dir = await open(parentAbs, fsConstants.O_RDONLY);
+    await link(tmp, abs);
+    return;
+  } catch (error) {
+    if (errorCode(error) === "EEXIST") throw new CloneFileError(EXISTS_MESSAGE, { exists: true });
+    if (!NO_LINK_CODES.has(errorCode(error) ?? "")) throw error;
+  }
+  // No hard links here: an exclusive create still never replaces (the content lands non-atomically).
+  let handle;
+  try {
+    handle = await open(abs, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | O_NOFOLLOW, fileMode);
+  } catch (error) {
+    if (errorCode(error) === "EEXIST") throw new CloneFileError(EXISTS_MESSAGE, { exists: true });
+    throw error;
+  }
+  try {
+    await handle.chmod(fileMode);
+    await handle.writeFile(content);
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+/** Durability of a rename / link itself; best effort (not every platform can fsync a directory). */
+async function syncDir(dirAbs: string): Promise<void> {
+  try {
+    const dir = await open(dirAbs, fsConstants.O_RDONLY);
     try {
       await dir.sync();
     } finally {
@@ -301,9 +393,10 @@ export async function writeCloneFile(cloneRoot: string, relPath: string, content
 const execFileAsync = promisify(execFile);
 
 /** `git` with an argument array (no shell), bounded output and time. */
-export const defaultGitRunner: GitRunner = async (cwd, args) => {
+export const defaultGitRunner: GitRunner = async (cwd, args, signal) => {
   const { stdout } = await execFileAsync("git", args, {
     cwd,
+    ...(signal ? { signal } : {}),
     encoding: "utf8",
     maxBuffer: 32 * 1024 * 1024,
     timeout: 30_000,
@@ -324,10 +417,10 @@ const CANDIDATE_PATHSPECS = [":(glob)**/.env", ":(glob)**/.env.*"];
  * Git doesn't descend into nested repos/worktrees; `node_modules` is skipped
  * too. Sorted, `/`-separated relative paths. A clone where git fails → [].
  */
-export async function scanCandidates(cloneRoot: string, git: GitRunner = defaultGitRunner): Promise<string[]> {
+export async function scanCandidates(cloneRoot: string, git: GitRunner = defaultGitRunner, signal?: AbortSignal): Promise<string[]> {
   let stdout: string;
   try {
-    stdout = await git(cloneRoot, ["ls-files", "--others", "--ignored", "--exclude-standard", "-z", "--", ...CANDIDATE_PATHSPECS]);
+    stdout = await git(cloneRoot, ["ls-files", "--others", "--ignored", "--exclude-standard", "-z", "--", ...CANDIDATE_PATHSPECS], signal);
   } catch {
     return [];
   }
@@ -349,18 +442,19 @@ export async function scanCandidates(cloneRoot: string, git: GitRunner = default
  * each a `:(literal)` pathspec so glob characters in names stay literal).
  * Output is relative to `cloneRoot` (no `--full-name`), so it matches
  * `relPaths` even when the clone root is below the repo's top level.
- * A failing git → empty set.
+ * A failing (or aborted) git REJECTS: "nothing tracked" can't be told from
+ * "git didn't answer", and a caller must not write on a guess.
  */
-export async function trackedPaths(cloneRoot: string, relPaths: readonly string[], git: GitRunner = defaultGitRunner): Promise<Set<string>> {
+export async function trackedPaths(
+  cloneRoot: string,
+  relPaths: readonly string[],
+  git: GitRunner = defaultGitRunner,
+  signal?: AbortSignal
+): Promise<Set<string>> {
   const tracked = new Set<string>();
   if (relPaths.length === 0) return tracked;
   const wanted = new Set(relPaths);
-  let stdout: string;
-  try {
-    stdout = await git(cloneRoot, ["ls-files", "-z", "--", ...[...wanted].map((path) => `:(literal)${path}`)]);
-  } catch {
-    return tracked;
-  }
+  const stdout = await git(cloneRoot, ["ls-files", "-z", "--", ...[...wanted].map((path) => `:(literal)${path}`)], signal);
   for (const entry of stdout.split("\0")) {
     // A directory path lists the files under it; only exact matches count.
     if (entry && wanted.has(entry)) tracked.add(entry);
@@ -681,11 +775,21 @@ function isPlainValueChar(c: number): boolean {
   );
 }
 
-/** A value in a form `parseEnv` reads back exactly. */
+/**
+ * A value in a form `parseEnv` reads back exactly, as portable as the value allows:
+ * - as-is when every character is plain;
+ * - else `'…'` when it has no `'` and no line break: literal for every dotenv reader and the
+ *   shell (no escapes, no `$` expansion);
+ * - else `"…"`, escaping only what this value needs: line breaks as `\n` / `\r` (widely
+ *   understood), and `\` / `"` as `\\` / `\"` — those two are NOT read alike by every tool
+ *   (some keep the backslash), so they are only used when the value holds a `'` or a line break
+ *   AND a backslash or double quote. Inside `"…"` some tools also expand `$VAR`.
+ */
 export function formatEnvValue(value: string): string {
   let plain = true;
   for (let i = 0; i < value.length && plain; i++) plain = isPlainValueChar(value.charCodeAt(i));
   if (plain) return value;
+  if (!value.includes("'") && !value.includes("\n") && !value.includes("\r")) return `'${value}'`;
   let out = '"';
   for (const ch of value) {
     if (ch === "\\") out += "\\\\";

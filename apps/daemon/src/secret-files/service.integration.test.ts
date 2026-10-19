@@ -101,3 +101,75 @@ test("two clones stay in sync through setup and push; a modified third stays fla
   assert.equal(reread.get(WS, REPO)?.files[0]?.versions.length, 2);
   assert.doesNotMatch(JSON.stringify(events), /fake-/);
 });
+
+test("over the real store: an unmanaged file keeps its history and its content on disk; expect pins the pushed bytes", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "orquester-secret-files-e2e-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const projects: SecretFilesProject[] = [];
+  for (const name of ["a", "b"]) {
+    const path = join(dir, "workspaces", WS, name);
+    await gitClone(path);
+    projects.push({ workspace: WS, name, path, repoKey: REPO });
+  }
+  const [a, b] = projects.map((project) => project.path) as [string, string];
+  await writeFile(join(a, ".env"), "API_KEY=fake-one\n");
+  await writeFile(join(a, ".env.local"), "LOCAL=fake-local\n");
+  const storeDir = join(dir, "appdir", "daemon", "secret-files");
+  const store = new SecretVaultStore({ dir: storeDir, logger: quiet });
+  await store.load();
+  const service = new SecretFilesService({
+    store,
+    listProjects: async () => projects,
+    pluginEnabled: () => true,
+    onPluginChange: () => () => {},
+    publish: () => {},
+    watch: () => ({ close: () => {} }),
+    timers: { setTimeout: () => null, clearTimeout: () => {}, setInterval: () => null, clearInterval: () => {} },
+    workspacesRoot: () => join(dir, "workspaces"),
+    logger: quiet
+  });
+  t.after(() => service.stop());
+  await service.start();
+  await service.idle();
+  await service.setup({
+    workspace: WS,
+    repoKey: REPO,
+    files: [
+      { path: ".env", source: { projectPath: a } },
+      { path: ".env.local", source: { projectPath: a } }
+    ],
+    excluded: []
+  });
+  await writeFile(join(a, ".env"), "API_KEY=fake-two\n");
+  await service.reconcile();
+  await service.push({ workspace: WS, repoKey: REPO, projectPath: a });
+  const history = store.get(WS, REPO)!.files.find((file) => file.path === ".env")!.versions;
+  assert.equal(history.length, 2);
+
+  // Unmanage: the history is retired, and every version's blob survives this write's sweep and the next.
+  await service.updateFiles({ workspace: WS, repoKey: REPO, unmanage: [".env"] });
+  await writeFile(join(a, ".env.local"), "LOCAL=fake-local-2\n");
+  await service.reconcile();
+  await service.push({ workspace: WS, repoKey: REPO, projectPath: a });
+  const reread = new SecretVaultStore({ dir: storeDir, logger: quiet });
+  await reread.load();
+  const retired = reread.get(WS, REPO)?.retired?.find((file) => file.path === ".env");
+  assert.deepEqual(retired?.versions.map((version) => version.id), history.map((version) => version.id));
+  for (const version of history) {
+    assert.ok((await stat(join(storeDir, "blobs", version.sha256))).isFile(), "a retired version's content is kept");
+    assert.ok((await reread.readContent(version.sha256)).byteLength > 0);
+  }
+  assert.equal(await readFile(join(b, ".env"), "utf8"), "API_KEY=fake-two\n", "clones keep the file");
+
+  // expect: the token of the copy the user saw; an edit after it refuses the push, nothing moves.
+  await writeFile(join(b, ".env.local"), "LOCAL=fake-b\n");
+  await service.reconcile();
+  const seen = (await service.compare({ workspace: WS, repoKey: REPO, projectPath: b, path: ".env.local" })).contentToken;
+  assert.ok(seen);
+  await writeFile(join(b, ".env.local"), "LOCAL=fake-b-later\n");
+  await assert.rejects(
+    service.push({ workspace: WS, repoKey: REPO, projectPath: b, expect: { ".env.local": seen } }),
+    (error: Error & { code?: string }) => error.code === "CONTENT_CHANGED"
+  );
+  assert.equal(await readFile(join(a, ".env.local"), "utf8"), "LOCAL=fake-local-2\n");
+});

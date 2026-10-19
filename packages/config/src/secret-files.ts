@@ -65,7 +65,7 @@ function secretFilePathProblem(path: string): string | null {
   if (segments.some((segment) => segment.length === 0 || segment === "." || segment === "..")) {
     return "The path may not contain empty, '.' or '..' parts.";
   }
-  if (segments[0] === ".git") return "Files inside .git can't be managed.";
+  if (segments.some((segment) => segment.toLowerCase() === ".git")) return "Files inside .git can't be managed.";
   return null;
 }
 
@@ -147,7 +147,15 @@ export const secretVaultFileSchema = z
   .passthrough();
 
 export const secretVaultCloneSchema = z
-  .object({ baselines: stringMap(versionId, secretFilePathProblem) })
+  .object({
+    baselines: stringMap(versionId, secretFilePathProblem),
+    /**
+     * Since when this clone is no longer listed with the vault's repo (absent: listed). Its
+     * baselines are kept through a grace period, so a clone that briefly drops out of the listing
+     * keeps its `deleted` files flagged instead of getting them copied back in.
+     */
+    unlistedAt: timestamp.optional()
+  })
   .passthrough();
 
 export const secretVaultRecordSchema = z
@@ -164,6 +172,15 @@ export const secretVaultRecordSchema = z
       .array(secretVaultFileSchema)
       .refine((files) => new Set(files.map((f) => f.path)).size === files.length, "repeated file path"),
     excluded: z.array(managedPath).default([]),
+    /**
+     * Files the vault no longer manages (unmanaged or excluded), with their version history kept
+     * for manual recovery: their content stays in the blob store. Optional (older records have
+     * none); a path appears at most once, and may also be managed again (a new history).
+     */
+    retired: z
+      .array(secretVaultFileSchema)
+      .refine((files) => new Set(files.map((f) => f.path)).size === files.length, "repeated retired file path")
+      .optional(),
     clones: stringMap(secretVaultCloneSchema, (key) =>
       key.length === 0 || /[\u0000-\u001f\u007f]/.test(key) ? "not a project path" : null
     )

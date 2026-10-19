@@ -174,6 +174,43 @@ test("history is trimmed to SECRET_FILE_HISTORY_MAX and the dropped content is s
   }
 });
 
+test("a retired file's history keeps its content: it counts as a reference, is capped, survives a reload", async () => {
+  const h = await harness();
+  try {
+    const total = SECRET_FILE_HISTORY_MAX + 1;
+    for (let i = 0; i < total; i++) await put(h.store, ".env", `${SECRET}_${i}`);
+    await put(h.store, "other/.env", `${SECRET}_other`);
+    // Retire .env (the service's unmanage), with one version too many: the store caps it.
+    const extra = await h.store.update(WS, RK, async (current, tx) => {
+      const file = current!.files.find((candidate) => candidate.path === ".env")!;
+      const older = await tx.putContent(bytes(`${SECRET}_older`), { kind: "user" });
+      return {
+        ...current!,
+        files: current!.files.filter((candidate) => candidate.path !== ".env"),
+        retired: [{ ...file, versions: [...file.versions, older], note: "kept" } as never]
+      };
+    });
+    const retired = extra!.retired![0]!;
+    assert.equal(retired.versions.length, SECRET_FILE_HISTORY_MAX, "capped like a managed file");
+    assert.equal((retired as unknown as { note?: string }).note, "kept", "unknown fields kept");
+    const kept = retired.versions.map((version) => version.sha256);
+    // A later write sweeps unreferenced blobs: the retired ones stay.
+    await put(h.store, "other/.env", `${SECRET}_other_2`);
+    const names = await blobNames(h);
+    for (const sha256 of kept) assert.ok(names.includes(sha256), "a retired version's blob survives the sweep");
+    assert.ok(!names.includes(sha(`${SECRET}_older`)), "the version past the cap is swept");
+    // A reload (and its sweep) keeps them too.
+    const reopened = await h.open();
+    assert.deepEqual(reopened.get(WS, RK)!.retired![0]!.versions.map((version) => version.sha256), kept);
+    for (const sha256 of kept) assert.ok((await reopened.readContent(sha256)).byteLength > 0);
+    // Dropping the retired history lets them go.
+    await h.store.update(WS, RK, (current) => ({ ...current!, retired: [] }));
+    assert.deepEqual(await blobNames(h), [sha(`${SECRET}_other`), sha(`${SECRET}_other_2`)].sort());
+  } finally {
+    await h.cleanup();
+  }
+});
+
 test("the same content is stored once; every put still mints its own version", async () => {
   const h = await harness();
   try {
