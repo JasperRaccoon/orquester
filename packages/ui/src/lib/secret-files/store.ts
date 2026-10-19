@@ -18,6 +18,9 @@
  * newer than what was deleted, and a read's answer never undoes a change that
  * landed while it was in flight. "Older" is by `revision` when both copies
  * carry one (it moves on clone-state-only changes too), else by `updatedAt`.
+ * Across daemon restarts: the newest `boot` seen on this connection is the
+ * current one, and once a boot has been replaced by another, anything still
+ * arriving from it is dropped.
  *
  * Per connection: `resetSecretFiles()` runs on a connection switch and when the
  * plugin turns off (the app store), and a load or mutation through a client of
@@ -108,6 +111,12 @@ let loadsApplied = 0;
 type Rank = Pick<SecretVaultDetail, "updatedAt" | "revision">;
 /** Deleted vault keys → the newest copy held when deleted. An answer no newer stays deleted. */
 const tombstones = new Map<string, Rank>();
+/** The daemon boot this connection last moved to (the first one seen after a reset). */
+let currentBoot: string | null = null;
+/** Boots a newer one replaced on this connection: whatever still arrives from them is stale. */
+const supersededBoots = new Set<string>();
+/** Superseded boots remembered (restarts within one connection are few). */
+const SUPERSEDED_BOOTS_MAX = 32;
 
 // ---------------------------------------------------------------------------
 // Wire validation
@@ -357,14 +366,32 @@ function touch(key: string): void {
 }
 
 /**
+ * Note the boot `vault` comes from; false when it is a superseded one (the
+ * daemon restarted since: drop it). A boot not seen before replaces the
+ * current one.
+ */
+function noteBoot(vault: Rank): boolean {
+  const boot = vault.revision?.boot;
+  if (boot === undefined || boot === currentBoot) return true;
+  if (supersededBoots.has(boot)) return false;
+  if (currentBoot !== null) {
+    supersededBoots.add(currentBoot);
+    if (supersededBoots.size > SUPERSEDED_BOOTS_MAX) supersededBoots.delete(supersededBoots.values().next().value!);
+  }
+  currentBoot = boot;
+  return true;
+}
+
+/**
  * Where `incoming` stands against `held`: 1 newer, 0 the same, -1 older. By
  * `revision` when both carry one (same boot: the higher `seq`; another boot:
- * the daemon restarted, so `incoming` is newer), else by `updatedAt`.
+ * the one superseded is older — else the daemon restarted, so `incoming` is
+ * newer), else by `updatedAt`.
  */
 function order(held: Rank, incoming: Rank): -1 | 0 | 1 {
   const [a, b] = [held.revision, incoming.revision];
   if (a !== undefined && b !== undefined) {
-    if (a.boot !== b.boot) return 1;
+    if (a.boot !== b.boot) return supersededBoots.has(b.boot) ? -1 : 1;
     return b.seq > a.seq ? 1 : b.seq < a.seq ? -1 : 0;
   }
   const [x, y] = [timeOf(held.updatedAt), timeOf(incoming.updatedAt)];
@@ -390,6 +417,7 @@ function accepts(current: SecretVaultDetail | undefined, incoming: SecretVaultDe
 function upsertLocal(vault: SecretVaultDetail, strict = false): void {
   const key = vaultKey(vault.workspace, vault.repoKey);
   touch(key);
+  if (!noteBoot(vault)) return;
   const vaults = secretFilesStore.getState().vaults;
   if (!accepts(vaults.get(key), vault, strict)) return;
   tombstones.delete(key);
@@ -482,6 +510,11 @@ function applyLoaded(list: SecretVaultDetail[], kept: ReadonlySet<string>, touch
   for (const vault of list) {
     const key = vaultKey(vault.workspace, vault.repoKey);
     const current = vaults.get(key);
+    // From a daemon boot replaced since: keeps what is held (a newer copy, or nothing).
+    if (!noteBoot(vault)) {
+      if (current !== undefined) next.set(key, current);
+      continue;
+    }
     // Deleted while the load was in flight: its copy predates the delete (a
     // vault set up again since would have cleared the tombstone).
     if (touched.has(key) && (tombstones.has(key) || !accepts(current, vault, true))) continue;
@@ -584,6 +617,8 @@ export function resetSecretFiles(): void {
   boundConnectionId = null;
   openReads.clear();
   tombstones.clear();
+  currentBoot = null;
+  supersededBoots.clear();
   loadsStarted = 0;
   loadsApplied = 0;
   secretFilesStore.setState(INITIAL, true);

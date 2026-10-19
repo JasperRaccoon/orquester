@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { constants as fsConstants, type Stats } from "node:fs";
-import { link, lstat, open, realpath, rename, unlink } from "node:fs/promises";
+import { type FileHandle, link, lstat, open, realpath, rename, unlink } from "node:fs/promises";
 import { join, sep } from "node:path";
 import { promisify } from "node:util";
 
@@ -346,29 +346,55 @@ const EXISTS_MESSAGE = "A file appeared at that path; it was left as it is.";
 /** link() failures that mean the filesystem has no hard links (then an O_EXCL create is the fallback). */
 const NO_LINK_CODES = new Set(["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EXDEV", "EMLINK"]);
 
-/** Create `abs` from the synced temp file without replacing anything (see `createOnly`). */
-async function createFrom(tmp: string, abs: string, content: Uint8Array, fileMode: number): Promise<void> {
+/** The filesystem calls `createFrom` makes that tests replace (to fail a write). */
+export interface CreateFromIo {
+  link(existingPath: string, newPath: string): Promise<void>;
+  /** Fill a file just created: its mode, its content, synced. */
+  fill(handle: FileHandle, content: Uint8Array, fileMode: number): Promise<void>;
+}
+
+const CREATE_FROM_IO: CreateFromIo = {
+  link,
+  fill: async (handle, content, fileMode) => {
+    await handle.chmod(fileMode);
+    await handle.writeFile(content);
+    await handle.sync();
+  }
+};
+
+/**
+ * Create `abs` from the synced temp file without replacing anything (see `createOnly`). Without
+ * hard links, an exclusive create: if filling it fails, the partial file it created is removed
+ * (that file only — never one that replaced it meanwhile).
+ */
+export async function createFrom(tmp: string, abs: string, content: Uint8Array, fileMode: number, io: CreateFromIo = CREATE_FROM_IO): Promise<void> {
   try {
-    await link(tmp, abs);
+    await io.link(tmp, abs);
     return;
   } catch (error) {
     if (errorCode(error) === "EEXIST") throw new CloneFileError(EXISTS_MESSAGE, { exists: true });
     if (!NO_LINK_CODES.has(errorCode(error) ?? "")) throw error;
   }
   // No hard links here: an exclusive create still never replaces (the content lands non-atomically).
-  let handle;
+  let handle: FileHandle;
   try {
     handle = await open(abs, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | O_NOFOLLOW, fileMode);
   } catch (error) {
     if (errorCode(error) === "EEXIST") throw new CloneFileError(EXISTS_MESSAGE, { exists: true });
     throw error;
   }
+  let created: Stats | null = null;
   try {
-    await handle.chmod(fileMode);
-    await handle.writeFile(content);
-    await handle.sync();
-  } finally {
-    await handle.close();
+    try {
+      created = await handle.stat();
+      await io.fill(handle, content, fileMode);
+    } finally {
+      await handle.close();
+    }
+  } catch (error) {
+    const there = await lstat(abs).catch(() => null);
+    if (created && there && there.dev === created.dev && there.ino === created.ino) await unlink(abs).catch(() => undefined);
+    throw error;
   }
 }
 

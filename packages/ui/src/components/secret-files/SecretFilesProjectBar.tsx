@@ -14,10 +14,12 @@ import { SecretFilesDialog } from "./SecretFilesDialog";
 import {
   CONTENT_CHANGED_TEXT,
   addBarDismissal,
+  type BarDismissal,
   compareSummaryText,
   expectedContent,
+  findBarDismissal,
   parseBarDismissals,
-  projectBarDismissKey,
+  projectBarDismissal,
   projectBarMessage,
   projectBarModel,
   pushConfirmText,
@@ -27,10 +29,10 @@ import {
 const DISMISS_STORAGE_KEY = "orquester:secret-files-bar-dismissed";
 
 /** This tab session's dismissals; memory first, mirrored into sessionStorage when it is there. */
-let dismissals: string[] | null = null;
+let dismissals: BarDismissal[] | null = null;
 const dismissListeners = new Set<() => void>();
 
-function loadDismissals(): string[] {
+function loadDismissals(): BarDismissal[] {
   if (dismissals === null) {
     try {
       dismissals =
@@ -42,8 +44,8 @@ function loadDismissals(): string[] {
   return dismissals;
 }
 
-function dismiss(key: string): void {
-  dismissals = addBarDismissal(loadDismissals(), key);
+function dismiss(dismissal: BarDismissal): void {
+  dismissals = addBarDismissal(loadDismissals(), dismissal);
   try {
     if (typeof sessionStorage !== "undefined") sessionStorage.setItem(DISMISS_STORAGE_KEY, JSON.stringify(dismissals));
   } catch {
@@ -52,7 +54,12 @@ function dismiss(key: string): void {
   for (const listener of dismissListeners) listener();
 }
 
-function useDismissed(key: string | null): boolean {
+/**
+ * Whether `current` is dismissed. A dismissal recorded under another daemon
+ * boot is stamped again with this boot's tokens, so a further edit after the
+ * restart brings the bar back as usual.
+ */
+function useDismissed(current: BarDismissal | null): boolean {
   const [, rerender] = useState(0);
   useEffect(() => {
     const listener = () => rerender((n) => n + 1);
@@ -61,7 +68,12 @@ function useDismissed(key: string | null): boolean {
       dismissListeners.delete(listener);
     };
   }, []);
-  return key !== null && loadDismissals().includes(key);
+  const match = current === null ? undefined : findBarDismissal(loadDismissals(), current);
+  const restamp = current !== null && match !== undefined && match.boot !== current.boot ? current : null;
+  useEffect(() => {
+    if (restamp !== null) dismiss(restamp);
+  }, [restamp]);
+  return match !== undefined;
 }
 
 /** Tests: forget every dismissal. */
@@ -89,7 +101,8 @@ type Busy = "push" | "reset" | null;
  * `deleted`) — Push to vault, Reset to vault, Compare — or, for files it can't
  * get (`missing-dir` / `refused`), an informational variant pointing at the
  * "Secret files…" dialog. Dismissing it hides it until a flagged file's path,
- * state, content or vault version changes. Push / Reset send the content
+ * state, content or vault version changes (a daemon restart alone does not
+ * bring it back). Push / Reset send the content
  * tokens the bar showed (`expect`): a file edited since is refused, not acted on.
  */
 export const SecretFilesProjectBar: React.FC = () => {
@@ -109,8 +122,8 @@ const ProjectBar: React.FC<{
   const repoLabel = useAppStore((s) => s.currentProject?.repoName);
   const customLabel = useRepoIdentity(vault.repoKey)?.label;
   const model = projectBarModel(clone);
-  const dismissKey = model ? projectBarDismissKey(projectPath, model.files, vault) : null;
-  const dismissed = useDismissed(dismissKey);
+  const dismissal = model ? projectBarDismissal(projectPath, model.files, vault) : null;
+  const dismissed = useDismissed(dismissal);
   const [busy, setBusy] = useState<Busy>(null);
   const [error, setError] = useState<string | null>(null);
   // What the confirm was opened on: the paths and the content tokens shown then.
@@ -180,7 +193,7 @@ const ProjectBar: React.FC<{
   );
 
   // Same slots as the bar's tree below, so the modals keep their state when it goes.
-  if (!model || !dismissKey || dismissed) {
+  if (!model || !dismissal || dismissed) {
     return (
       <>
         {null}
@@ -268,7 +281,7 @@ const ProjectBar: React.FC<{
             type="button"
             aria-label="Dismiss"
             title="Hide until this changes again"
-            onClick={() => dismiss(dismissKey)}
+            onClick={() => dismiss(dismissal)}
             className="flex h-7 w-7 items-center justify-center rounded-md text-neutral-500 hover:bg-neutral-800 hover:text-neutral-200 focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500"
           >
             <X size={14} />

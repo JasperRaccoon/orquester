@@ -326,6 +326,47 @@ describe("applying vaults and events", () => {
     assert.equal(getSecretVault(WS, KEY)?.revision?.seq, 6);
   });
 
+  it("once a newer boot is seen, a late answer from an older one is dropped — it never resurrects a deleted vault", () => {
+    const rev = (boot: string, seq: number) => ({ boot, seq });
+    applySecretVault(WS, KEY, vault({ revision: rev("b1", 5), clonesNeedingAttention: 1 }));
+    // The daemon restarted: b2 is the current boot from here on.
+    applySecretFilesEvent(event({ vault: vault({ revision: rev("b2", 1), clonesNeedingAttention: 2 }) }));
+    assert.equal(getSecretVault(WS, KEY)?.clonesNeedingAttention, 2);
+    // A late b1 answer (a mutation or read started before the restart): dropped.
+    applySecretVault(WS, KEY, vault({ revision: rev("b1", 9), clonesNeedingAttention: 3 }));
+    assert.equal(getSecretVault(WS, KEY)?.clonesNeedingAttention, 2);
+    // Deleted at b2: a late b1 copy does not bring it back, by event or by answer.
+    applySecretFilesEvent(event({ workspace: WS, repoKey: KEY, deleted: true }));
+    applySecretFilesEvent(event({ vault: vault({ revision: rev("b1", 10) }) }));
+    applySecretVault(WS, KEY, vault({ revision: rev("b1", 11) }));
+    assert.equal(getSecretVault(WS, KEY), undefined);
+    // Another vault's late b1 copy is dropped too: the whole boot is superseded.
+    applySecretVault(WS, OTHER, vault({ repoKey: OTHER, revision: rev("b1", 12) }));
+    assert.equal(getSecretVault(WS, OTHER), undefined);
+    // A newer boot still lands (set up again after another restart), and b2 is now superseded.
+    applySecretFilesEvent(event({ vault: vault({ revision: rev("b3", 1), clonesNeedingAttention: 4 }) }));
+    assert.equal(getSecretVault(WS, KEY)?.clonesNeedingAttention, 4);
+    applySecretVault(WS, KEY, vault({ revision: rev("b2", 7), clonesNeedingAttention: 5 }));
+    assert.equal(getSecretVault(WS, KEY)?.clonesNeedingAttention, 4);
+    // A reset (connection switch) forgets the boots: the first one seen again is current.
+    resetSecretFiles();
+    applySecretVault(WS, KEY, vault({ revision: rev("b1", 1), clonesNeedingAttention: 6 }));
+    assert.equal(getSecretVault(WS, KEY)?.clonesNeedingAttention, 6);
+  });
+
+  it("a load's answers from a superseded boot keep what is held", async () => {
+    const { api, lists, details } = fakeApi();
+    applySecretFilesEvent(event({ vault: vault({ revision: { boot: "b1", seq: 1 } }) }));
+    applySecretFilesEvent(event({ vault: vault({ revision: { boot: "b2", seq: 1 }, clonesNeedingAttention: 1 }) }));
+    const load = loadSecretVaults(api);
+    lists[0].resolve({ vaults: [{ workspace: WS, repoKey: KEY } as never] });
+    await flush();
+    details[0].answer.resolve({ vault: vault({ revision: { boot: "b1", seq: 8 }, clonesNeedingAttention: 2 }) });
+    await load;
+    assert.equal(getSecretVault(WS, KEY)?.clonesNeedingAttention, 1);
+    assert.equal(getSecretVault(WS, KEY)?.revision?.boot, "b2");
+  });
+
   it("keeps the same map when the same vault arrives again", () => {
     applySecretVault(WS, KEY, vault());
     const before = held();

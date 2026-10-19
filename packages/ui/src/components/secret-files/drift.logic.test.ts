@@ -17,15 +17,17 @@ import {
   countKeyChanges,
   differingKeys,
   expectedContent,
+  findBarDismissal,
   parseBarDismissals,
-  projectBarDismissKey,
+  projectBarDismissal,
   projectBarMessage,
   projectBarModel,
   projectSecretBadge,
   pushConfirmText,
   repoSecretCount,
   resetConfirmText,
-  secretFileStateText
+  secretFileStateText,
+  type BarDismissal
 } from "./drift.logic";
 
 const file = (path: string, state: SecretFileCloneState["state"], extra: Partial<SecretFileCloneState> = {}) => ({
@@ -292,43 +294,77 @@ describe("push and reset confirms", () => {
 describe("bar dismissal", () => {
   const v = vault([], { ".env": "v1", "b/.env": "v7" });
 
-  it("keys on the project, each flagged file's path and state, and the vault version", () => {
-    const key = projectBarDismissKey("/w/ws/A", [file(".env", "modified")], v);
-    assert.equal(key, projectBarDismissKey("/w/ws/A", [file(".env", "modified")], v));
-    assert.notEqual(key, projectBarDismissKey("/w/ws/B", [file(".env", "modified")], v));
-    assert.notEqual(key, projectBarDismissKey("/w/ws/A", [file(".env", "deleted")], v));
-    assert.notEqual(key, projectBarDismissKey("/w/ws/A", [file(".env", "modified")], vault([], { ".env": "v2" })));
-    assert.notEqual(key, projectBarDismissKey("/w/ws/A", [file(".env", "modified"), file("b/.env", "modified")], v));
-  });
+  const at = (boot: string) => ({ ...v, revision: { boot, seq: 1 } });
+  const dismissed = (stored: BarDismissal, current: BarDismissal) => findBarDismissal([stored], current) !== undefined;
 
-  it("keys on each flagged file's content token too: a further edit brings the bar back", () => {
-    const key = projectBarDismissKey("/w/ws/A", [file(".env", "modified", { contentToken: "t1" })], v);
-    assert.equal(key, projectBarDismissKey("/w/ws/A", [file(".env", "modified", { contentToken: "t1" })], v));
-    assert.notEqual(key, projectBarDismissKey("/w/ws/A", [file(".env", "modified", { contentToken: "t2" })], v));
-    // A daemon predating tokens keeps the key it had.
-    assert.equal(
-      projectBarDismissKey("/w/ws/A", [file(".env", "modified")], v),
-      ["/w/ws/A", ".env\u0001modified\u0001v1"].join("\u0000")
+  it("covers the project, each flagged file's path and state, and the vault version", () => {
+    const stored = projectBarDismissal("/w/ws/A", [file(".env", "modified")], v);
+    assert.ok(dismissed(stored, projectBarDismissal("/w/ws/A", [file(".env", "modified")], v)));
+    assert.ok(!dismissed(stored, projectBarDismissal("/w/ws/B", [file(".env", "modified")], v)));
+    assert.ok(!dismissed(stored, projectBarDismissal("/w/ws/A", [file(".env", "deleted")], v)));
+    assert.ok(!dismissed(stored, projectBarDismissal("/w/ws/A", [file(".env", "modified")], vault([], { ".env": "v2" }))));
+    assert.ok(
+      !dismissed(stored, projectBarDismissal("/w/ws/A", [file(".env", "modified"), file("b/.env", "modified")], v))
     );
   });
 
-  it("does not depend on the files' order", () => {
+  it("covers each flagged file's content token within one daemon boot: a further edit brings the bar back", () => {
+    const stored = projectBarDismissal("/w/ws/A", [file(".env", "modified", { contentToken: "t1" })], at("b1"));
+    assert.ok(dismissed(stored, projectBarDismissal("/w/ws/A", [file(".env", "modified", { contentToken: "t1" })], at("b1"))));
+    assert.ok(!dismissed(stored, projectBarDismissal("/w/ws/A", [file(".env", "modified", { contentToken: "t2" })], at("b1"))));
+    // Without revisions (an older daemon) the tokens still count.
+    const plain = projectBarDismissal("/w/ws/A", [file(".env", "modified", { contentToken: "t1" })], v);
+    assert.equal(plain.boot, null);
+    assert.ok(!dismissed(plain, projectBarDismissal("/w/ws/A", [file(".env", "modified", { contentToken: "t2" })], v)));
+  });
+
+  it("survives a daemon restart: under another boot the (re-keyed) tokens are not compared", () => {
+    const stored = projectBarDismissal("/w/ws/A", [file(".env", "modified", { contentToken: "t1" })], at("b1"));
+    const afterRestart = projectBarDismissal("/w/ws/A", [file(".env", "modified", { contentToken: "x9" })], at("b2"));
+    assert.ok(dismissed(stored, afterRestart));
+    // Everything else still counts across the restart.
+    assert.ok(!dismissed(stored, projectBarDismissal("/w/ws/A", [file(".env", "deleted")], at("b2"))));
+    assert.ok(
+      !dismissed(
+        stored,
+        projectBarDismissal("/w/ws/A", [file(".env", "modified", { contentToken: "x9" })], { ...at("b2"), files: vault([], { ".env": "v2" }).files })
+      )
+    );
+    // Stamped again under the new boot (what the bar does), a further edit brings it back.
+    const restamped = addBarDismissal([stored], afterRestart);
+    assert.deepEqual(restamped, [afterRestart]);
     assert.equal(
-      projectBarDismissKey("/p", [file(".env", "modified"), file("b/.env", "deleted")], v),
-      projectBarDismissKey("/p", [file("b/.env", "deleted"), file(".env", "modified")], v)
+      findBarDismissal(restamped, projectBarDismissal("/w/ws/A", [file(".env", "modified", { contentToken: "x10" })], at("b2"))),
+      undefined
+    );
+    // And it survives storage.
+    assert.deepEqual(parseBarDismissals(JSON.stringify(restamped)), restamped);
+  });
+
+  it("does not depend on the files' order", () => {
+    assert.deepEqual(
+      projectBarDismissal("/p", [file(".env", "modified", { contentToken: "a" }), file("b/.env", "deleted")], v),
+      projectBarDismissal("/p", [file("b/.env", "deleted"), file(".env", "modified", { contentToken: "a" })], v)
     );
   });
 
   it("parses stored dismissals tolerantly and keeps them bounded", () => {
+    const d = (key: string): BarDismissal => ({ key, tokens: "", boot: null });
     assert.deepEqual(parseBarDismissals(null), []);
     assert.deepEqual(parseBarDismissals("not json"), []);
     assert.deepEqual(parseBarDismissals('{"a":1}'), []);
-    assert.deepEqual(parseBarDismissals('["a", 3, "b"]'), ["a", "b"]);
-    let keys: string[] = [];
-    for (let i = 0; i < MAX_BAR_DISMISSALS + 5; i += 1) keys = addBarDismissal(keys, `k${i}`);
-    assert.equal(keys.length, MAX_BAR_DISMISSALS);
-    assert.equal(keys[0], "k5");
-    assert.deepEqual(addBarDismissal(["a", "b"], "a"), ["b", "a"]);
-    assert.equal(parseBarDismissals(JSON.stringify(keys.concat(["x"]))).length, MAX_BAR_DISMISSALS);
+    // Plain keys (an older format), and malformed records, are left out; extra fields are dropped.
+    assert.deepEqual(
+      parseBarDismissals(
+        JSON.stringify(["a", 3, { key: "k", tokens: "t", boot: "b1", extra: 1 }, { key: "k2", tokens: 1, boot: null }, { key: "k3", tokens: "", boot: null }])
+      ),
+      [{ key: "k", tokens: "t", boot: "b1" }, d("k3")]
+    );
+    let list: BarDismissal[] = [];
+    for (let i = 0; i < MAX_BAR_DISMISSALS + 5; i += 1) list = addBarDismissal(list, d(`k${i}`));
+    assert.equal(list.length, MAX_BAR_DISMISSALS);
+    assert.equal(list[0]?.key, "k5");
+    assert.deepEqual(addBarDismissal([d("a"), d("b")], { key: "a", tokens: "t", boot: "b1" }), [d("b"), { key: "a", tokens: "t", boot: "b1" }]);
+    assert.equal(parseBarDismissals(JSON.stringify(list.concat([d("x")]))).length, MAX_BAR_DISMISSALS);
   });
 });

@@ -1,6 +1,6 @@
 /**
  * Secret files — where drift shows (spec §7), as pure rules: the project-row
- * badge, the repo-header count, the project bar's message and dismissal key,
+ * badge, the repo-header count, the project bar's message and dismissals,
  * and the compare modal's summaries. Names, states and counts only; nothing
  * here ever sees a secret value.
  */
@@ -324,41 +324,85 @@ export function resetConfirmText(paths: readonly string[]): string {
 // ---------------------------------------------------------------------------
 
 /**
- * What a dismissal of the bar covers: the project and, per flagged file, its
- * path, state, content token (this clone's copy) and the vault version it is
- * compared with. Any of those changing (a push, a reset, another file flagged,
- * a further edit of a flagged file) brings the bar back.
+ * One dismissal of the bar. `key` is what it covers: the project and, per
+ * flagged file, its path, state and the vault version it is compared with.
+ * `tokens` are those files' content tokens (this clone's copies) and `boot`
+ * the daemon boot they came from: the daemon keys its tokens per process, so
+ * they only compare within one boot. Any of those changing (a push, a reset,
+ * another file flagged, a further edit of a flagged file) brings the bar back;
+ * a daemon restart alone does not.
  */
-export function projectBarDismissKey(
+export interface BarDismissal {
+  key: string;
+  tokens: string;
+  /** The vault revision's boot (null: the vault carried none). */
+  boot: string | null;
+}
+
+const byPath = (a: { path: string }, b: { path: string }): number => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+
+/** What a dismissal of the bar now would record for its flagged `files`. */
+export function projectBarDismissal(
   projectPath: string,
   files: ReadonlyArray<Pick<SecretFileCloneState, "path" | "state" | "contentToken">>,
-  vault: Pick<SecretVaultDetail, "files">
-): string {
+  vault: Pick<SecretVaultDetail, "files" | "revision">
+): BarDismissal {
   const versions = new Map(vault.files.map((file) => [file.path, file.version]));
-  const parts = files
-    .map(
-      (file) =>
-        `${file.path}\u0001${file.state}\u0001${versions.get(file.path) ?? ""}` +
-        (file.contentToken ? `\u0001${file.contentToken}` : "")
-    )
-    .sort();
-  return [projectPath, ...parts].join("\u0000");
+  const sorted = [...files].sort(byPath);
+  return {
+    key: [projectPath, ...sorted.map((file) => `${file.path}\u0001${file.state}\u0001${versions.get(file.path) ?? ""}`)].join(
+      "\u0000"
+    ),
+    tokens: sorted.map((file) => `${file.path}\u0001${file.contentToken ?? ""}`).join("\u0000"),
+    boot: vault.revision?.boot ?? null
+  };
+}
+
+/**
+ * The stored dismissal covering `current`, if any: the same key and — when it
+ * was recorded under the same daemon boot — the same content tokens. Under
+ * another boot (the daemon restarted: every token changed) the tokens are not
+ * compared.
+ */
+export function findBarDismissal(
+  dismissals: readonly BarDismissal[],
+  current: BarDismissal
+): BarDismissal | undefined {
+  return dismissals.find(
+    (dismissal) =>
+      dismissal.key === current.key && (dismissal.boot !== current.boot || dismissal.tokens === current.tokens)
+  );
 }
 
 /** Dismissals kept per tab session; the oldest go first past this. */
 export const MAX_BAR_DISMISSALS = 200;
 
-/** The stored dismissals (a JSON list of keys); anything else is none. */
-export function parseBarDismissals(raw: unknown): string[] {
+const isBarDismissal = (value: unknown): value is BarDismissal => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return (
+    typeof record.key === "string" &&
+    typeof record.tokens === "string" &&
+    (record.boot === null || typeof record.boot === "string")
+  );
+};
+
+/** The stored dismissals (a JSON list); anything malformed (or of an older format) is left out. */
+export function parseBarDismissals(raw: unknown): BarDismissal[] {
   if (typeof raw !== "string") return [];
   try {
     const parsed: unknown = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed.filter((key): key is string => typeof key === "string").slice(-MAX_BAR_DISMISSALS) : [];
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter(isBarDismissal)
+      .map(({ key, tokens, boot }) => ({ key, tokens, boot }))
+      .slice(-MAX_BAR_DISMISSALS);
   } catch {
     return [];
   }
 }
 
-export function addBarDismissal(keys: readonly string[], key: string): string[] {
-  return [...keys.filter((existing) => existing !== key), key].slice(-MAX_BAR_DISMISSALS);
+/** `dismissal` recorded, replacing an earlier one with the same key. */
+export function addBarDismissal(dismissals: readonly BarDismissal[], dismissal: BarDismissal): BarDismissal[] {
+  return [...dismissals.filter((existing) => existing.key !== dismissal.key), dismissal].slice(-MAX_BAR_DISMISSALS);
 }

@@ -309,6 +309,27 @@ describe("the secret-files project bar", () => {
     assert.equal(compares.length, 3);
   });
 
+  it("a dismissal survives a daemon restart (new tokens), and a further edit after it still brings the bar back", async () => {
+    const at = (token: string, boot: string, seq: number) => ({
+      ...vault([{ path: "MatsSmileBack/.env", state: "modified", contentToken: token }]),
+      revision: { boot, seq }
+    });
+    applySecretVault("ws", KEY, at("t1", "b1", 1));
+    await render();
+    await click(document.querySelector<HTMLButtonElement>('button[aria-label="Dismiss"]'));
+    assert.equal(bar(), null);
+
+    // The daemon restarted: the same copy has another token under the new boot.
+    await act(async () => applySecretVault("ws", KEY, at("r1", "b2", 1)));
+    await flush();
+    assert.equal(bar(), null, "still dismissed");
+
+    // Edited after the restart: back.
+    await act(async () => applySecretVault("ws", KEY, at("r2", "b2", 2)));
+    await flush();
+    assert.ok(bar(), "the dismissed bar is back");
+  });
+
   const confirmButton = (label: string) =>
     [...(document.querySelector('[role="dialog"]')?.querySelectorAll<HTMLButtonElement>("button") ?? [])].find(
       (b) => b.textContent?.trim() === label
