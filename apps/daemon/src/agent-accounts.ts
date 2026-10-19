@@ -89,6 +89,14 @@ type ManagedAgent = "claude" | "codex" | "grok";
 
 const CRED_FILENAME = { claude: ".credentials.json", codex: "auth.json", grok: "auth.json" } as const;
 
+/**
+ * What one refresh attempt did. `held`: a live session took the account since the caller's
+ * snapshot, so its CLI refreshes and nothing was spent. `unavailable`: no such account, no
+ * readable credential file, or no refresh token in it. `failed`: the token endpoint was
+ * unreachable or refused for another reason than `invalid_grant` (the refresh token is intact).
+ */
+export type AccountRefreshOutcome = "refreshed" | "invalid-grant" | "held" | "unavailable" | "failed";
+
 interface AgentAccountsOptions {
   indexFile: string;
   accountsDir: string;
@@ -103,9 +111,10 @@ export class AgentAccountsService {
   private index: AgentAccountsIndex = createDefaultAgentAccounts();
   private loginStatuses = new Map<string, ReturnType<typeof claudeLoginStatus>>();
   private refreshTimer?: ReturnType<typeof setInterval>;
-  /** Account ids with an in-flight refresh, so the hourly loop and the usage
-   *  path never double-spend one account's single-use refresh token. */
-  private refreshing = new Set<string>();
+  /** Account id → its in-flight refresh, so the hourly loop, the usage path and the box token
+   *  broker never double-spend one account's single-use refresh token: a second caller awaits
+   *  the first one's outcome instead of starting its own. */
+  private refreshing = new Map<string, Promise<AccountRefreshOutcome>>();
   /**
    * The accounts a live session pins right now (`startRefresher`'s source), re-read just before a
    * refresh spends an account's single-use refresh token: a chat — Global or Agent Profile, whose
@@ -814,14 +823,31 @@ export class AgentAccountsService {
     }
   }
 
+  /**
+   * Refresh one managed account now, for the box token broker (spec 2026-10-19 boxes §7), through
+   * the same single refresher, dedupe and `invalid_grant` → `needsReauth` handling as the hourly
+   * loop. `allowHeld` lets the refresh go ahead while a host-local session holds the account; the
+   * broker passes it only for a CLI shown to adopt a daemon-refreshed credential file before it
+   * spends its own copy of the refresh token (docs/superpowers/specs/2026-10-19-ephemeral-ai-vms-spikes.md).
+   */
+  refreshNow(agent: ManagedAgent, id: string, options: { allowHeld?: boolean } = {}): Promise<AccountRefreshOutcome> {
+    return this.refreshAccount(agent, id, options);
+  }
+
   /** Refresh one managed account's OAuth token and persist it in place. De-duped
    *  per account so two callers can't spend the same single-use refresh token. */
-  private async refreshAccount(agent: ManagedAgent, id: string): Promise<void> {
-    if (this.refreshing.has(id)) return;
-    this.refreshing.add(id);
+  private refreshAccount(agent: ManagedAgent, id: string, options: { allowHeld?: boolean } = {}): Promise<AccountRefreshOutcome> {
+    const inFlight = this.refreshing.get(id);
+    if (inFlight) return inFlight;
+    const run = this.runRefresh(agent, id, options).finally(() => this.refreshing.delete(id));
+    this.refreshing.set(id, run);
+    return run;
+  }
+
+  private async runRefresh(agent: ManagedAgent, id: string, options: { allowHeld?: boolean }): Promise<AccountRefreshOutcome> {
     try {
       const record = this.getRecord(id);
-      if (!record || record.agent !== agent) return;
+      if (!record || record.agent !== agent) return "unavailable";
       const home = this.homePath(agent, id);
       await assertOwnedAccountHome(this.opts.accountsDir, agent, id, home);
       const credsPath = join(home, CRED_FILENAME[agent]);
@@ -829,44 +855,47 @@ export class AgentAccountsService {
       try {
         creds = JSON.parse(await readFile(credsPath, "utf8"));
       } catch {
-        return;
+        return "unavailable";
       }
-      if (this.liveAccountIds?.().has(id)) return; // a session took the account since the snapshot
+      // A session took the account since the snapshot.
+      if (!options.allowHeld && this.liveAccountIds?.().has(id)) return "held";
       if (agent === "claude") {
         const refreshToken = creds?.claudeAiOauth?.refreshToken;
-        if (typeof refreshToken !== "string") return;
+        if (typeof refreshToken !== "string") return "unavailable";
         const out = await refreshClaudeToken(refreshToken);
         if (out.ok) {
           await writeFile(credsPath, JSON.stringify(mergeClaudeRefreshedCreds(creds, out, this.opts.now())), { mode: 0o600 });
           if (record.needsReauth) await this.markNeedsReauth(id, false);
-        } else if (out.invalidGrant) {
-          await this.markNeedsReauth(id, true);
+          return "refreshed";
         }
-      } else if (agent === "grok") {
+        if (out.invalidGrant) await this.markNeedsReauth(id, true);
+        return out.invalidGrant ? "invalid-grant" : "failed";
+      }
+      if (agent === "grok") {
         const refreshToken = grokAuthEntry(creds)?.refresh_token;
-        if (typeof refreshToken !== "string" || !refreshToken) return;
+        if (typeof refreshToken !== "string" || !refreshToken) return "unavailable";
         const out = await refreshGrokToken(refreshToken);
         if (out.ok) {
           // Replaced by rename, as the Grok CLI writes it: a CLI reading it through
           // `GROK_AUTH_PATH` (an Agent Profile chat) or its home never sees a torn file.
           await writeFileAtomic(credsPath, JSON.stringify(mergeGrokRefreshedAuth(creds, out, this.opts.now())), 0o600);
           if (record.needsReauth) await this.markNeedsReauth(id, false);
-        } else if (out.invalidGrant) {
-          await this.markNeedsReauth(id, true);
+          return "refreshed";
         }
-      } else {
-        const refreshToken = creds?.tokens?.refresh_token;
-        if (typeof refreshToken !== "string") return;
-        const out = await refreshCodexToken(refreshToken);
-        if (out.ok) {
-          await writeFile(credsPath, JSON.stringify(mergeCodexRefreshedTokens(creds, out)), { mode: 0o600 });
-          if (record.needsReauth) await this.markNeedsReauth(id, false);
-        } else if (out.invalidGrant) {
-          await this.markNeedsReauth(id, true);
-        }
+        if (out.invalidGrant) await this.markNeedsReauth(id, true);
+        return out.invalidGrant ? "invalid-grant" : "failed";
       }
+      const refreshToken = creds?.tokens?.refresh_token;
+      if (typeof refreshToken !== "string") return "unavailable";
+      const out = await refreshCodexToken(refreshToken);
+      if (out.ok) {
+        await writeFile(credsPath, JSON.stringify(mergeCodexRefreshedTokens(creds, out)), { mode: 0o600 });
+        if (record.needsReauth) await this.markNeedsReauth(id, false);
+        return "refreshed";
+      }
+      if (out.invalidGrant) await this.markNeedsReauth(id, true);
+      return out.invalidGrant ? "invalid-grant" : "failed";
     } finally {
-      this.refreshing.delete(id);
       await this.refreshLoginStatus(id);
     }
   }

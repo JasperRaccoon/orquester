@@ -880,7 +880,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     if (managed.length === 0) return base;
     // Otherwise always surface every managed account so the panel can show them all.
     const accounts: UsageAccount[] = [];
-    const live = sessions.liveAccountIds();
+    // boxes: only host-local sessions refresh their account (spec 2026-10-19 boxes §7).
+    const live = sessions.hostLocalAccountIds();
     for (const acct of managed) {
       // Keep an idle account's token warm so its usage never renders stale.
       await agentAccounts.ensureFreshForUsage(agent, acct.id, live).catch(() => undefined);
@@ -1009,7 +1010,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
       for (const dir of removed) console.warn(`Removed orphan account home ${dir}`);
     })
     .catch((error) => console.error("Orphan account home sweep failed", error));
-  agentAccounts.startRefresher(() => sessions.liveAccountIds());
+  // boxes: box sessions never refresh, so they never stop the daemon refresher (spec 2026-10-19 boxes §7).
+  agentAccounts.startRefresher(() => sessions.hostLocalAccountIds());
   // First usage reading only now: managed accounts are loaded and reattached
   // sessions are known (its token-freshness pass consults liveAccountIds()).
   usage.start();
