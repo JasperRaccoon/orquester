@@ -418,7 +418,7 @@ export function subagentCacheTtlStateFile(baseDir: string): string {
 //       meta.json          ThreadHead, rewritten atomically every 50 events
 //       events.ndjson      append-only domain events, per-thread monotonic seq
 //       raw.ndjson         provider frames, rotated (§3.1)
-//       attachments/<id>.<ext>
+//       attachments/<thread>-<uuid>.<ext>   the id `<thread>-<uuid>-<ext>`
 //   <appdir>/daemon/agent-host.sock    the host's HTTP-over-unix-socket API
 //   <appdir>/daemon/agent-host.token   0600 shared secret, daemon <-> host
 //

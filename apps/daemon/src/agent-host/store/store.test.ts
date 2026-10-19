@@ -711,6 +711,7 @@ test("putAttachment copies the file, names the thread in the id and stats the si
   // The reply names the absolute path the composer puts in the prompt (§7.4).
   assert.equal(ref.path, resolved);
   assert.equal(path.dirname(resolved), attachmentsDirOf(rootDir, "t1"));
+  assert.equal(path.basename(resolved), `${ref.id.slice(0, -"-png".length)}.png`, "the extension is not doubled");
 
   // Copied, not linked: editing the delivered file must not touch the source.
   await fs.writeFile(resolved, Buffer.alloc(8, 2));
@@ -726,6 +727,21 @@ test("resolveAttachment reads legacy ids without an extension suffix", async (t)
   const directory = attachmentsDirOf(rootDir, "t1");
   await fs.mkdir(directory, { recursive: true });
   await fs.writeFile(path.join(directory, `${id}.png`), "legacy attachment");
+
+  const resolved = await store.resolveAttachment("t1", id);
+
+  assert.equal(await fs.readFile(resolved, "utf8"), "legacy attachment");
+});
+
+test("resolveAttachment reads files stored under the doubled `<id>.<ext>` name", async (t) => {
+  const rootDir = await tempRoot();
+  const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => store.close());
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  const id = "t1-3f2504e0-4f89-41d3-9a0c-0305e82c3301-txt";
+  const directory = attachmentsDirOf(rootDir, "t1");
+  await fs.mkdir(directory, { recursive: true });
+  await fs.writeFile(path.join(directory, `${id}.txt`), "legacy attachment");
 
   const resolved = await store.resolveAttachment("t1", id);
 
