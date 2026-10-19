@@ -150,6 +150,8 @@ function sizesFor(gpus: RunpodGpuType[], cloud: Cloud): BoxSizeOffer[] {
     // `availability` is the stock for one GPU right now.
     const offered = cloud === "COMMUNITY" ? gpu.community === true : gpu.secure === true;
     if (!offered || !gpu.availability || gpu.availability === "NONE") continue;
+    // The images are CUDA images with a CUDA floor; AMD (ROCm) types would never be placed with them.
+    if (gpu.manufacturer !== "NVIDIA") continue;
     const price = hourly(num(cloud === "COMMUNITY" ? gpu.price?.community : gpu.price?.secure));
     if (price === null) continue;
     const info = { model: gpu.name, count: 1, vramGb: num(gpu.memory) };
