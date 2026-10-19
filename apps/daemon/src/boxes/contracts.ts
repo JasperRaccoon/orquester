@@ -391,6 +391,12 @@ export interface BoxConfigSync {
   watch(boxId: string, scope: BoxSyncScope): () => void;
   /** Mark the end of a turn: box changes collected since the last call become one approval set. */
   turnEnded(boxId: string, threadId: string): Promise<void>;
+  /**
+   * boxes (sync): mark the start of a turn, so box changes made while it runs wait for its
+   * `turnEnded` instead of being grouped by the idle debounce (with `threadId: null`). Optional:
+   * without it every change is grouped by the debounce or by the next `turnEnded`.
+   */
+  turnStarted?(boxId: string, threadId: string): void;
 }
 
 export interface BoxTranscriptSync {

@@ -570,4 +570,7 @@ export type BoxErrorCode =
   | "BOX_PROVIDER_ERROR"
   | "BOX_INVALID_REQUEST"
   | "BOX_CONNECTION_NOT_CONFIGURED"
-  | "BOX_UNSUPPORTED";
+  | "BOX_UNSUPPORTED"
+  // boxes (sync): `POST boxRoutes.configChange(id)` refusals.
+  | "BOX_CONFIG_CHANGE_NOT_FOUND"
+  | "BOX_CONFIG_CHANGE_DECIDED";

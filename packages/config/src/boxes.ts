@@ -180,3 +180,107 @@ export type BoxSecrets = z.infer<typeof boxSecretsSchema>;
 export function emptyBoxSecrets(): BoxSecrets {
   return { version: BOX_SECRETS_VERSION, providers: {} };
 }
+
+// ---------------------------------------------------------------------------
+// boxes (sync): box → host config changes waiting for approval (spec §8.3), and the per-box
+// sync baseline. Path helpers: `boxConfigChangesPath`, `boxSyncBaselinePath`.
+// ---------------------------------------------------------------------------
+
+export const BOX_CONFIG_CHANGES_VERSION = 1;
+export const BOX_SYNC_BASELINE_VERSION = 1;
+
+/**
+ * One file of a change set: the wire `BoxConfigChangeFile` plus what the daemon pins to decide it
+ * (`hostHash`/`boxHash`: SHA-256 hex of the host and box content when the set was made, null when
+ * the file was absent on that side; `root`/`agent`: the sync root the file belongs to).
+ */
+export const storedBoxConfigChangeFileSchema = z
+  .object({
+    path: z.string(),
+    change: z.string(),
+    executable: z.boolean().optional(),
+    diff: z.string().optional(),
+    truncated: z.boolean().optional(),
+    binary: z.boolean().optional(),
+    hostHash: z.string().nullable().optional(),
+    boxHash: z.string().nullable().optional(),
+    root: z.string().optional(),
+    agent: z.string().optional()
+  })
+  .passthrough();
+
+/** A change set; `state` is a plain string so a state from a newer build is kept, not dropped. */
+export const storedBoxConfigChangeSetSchema = z
+  .object({
+    id: z.string().min(1),
+    boxId: z.string(),
+    threadId: z.string().nullable().optional(),
+    createdAt: isoString,
+    decidedAt: isoString.nullable().optional(),
+    state: z.string(),
+    files: z.array(storedBoxConfigChangeFileSchema)
+  })
+  .passthrough();
+
+export type StoredBoxConfigChangeFile = z.infer<typeof storedBoxConfigChangeFileSchema>;
+export type StoredBoxConfigChangeSet = z.infer<typeof storedBoxConfigChangeSetSchema>;
+
+/**
+ * `config-changes.json`. `changes` is read entry by entry: an entry this build cannot read is kept
+ * verbatim on rewrite (see {@link parseBoxConfigChangesStore}).
+ */
+export const boxConfigChangesStoreSchema = z
+  .object({
+    version: z.number().int().optional(),
+    changes: z.array(z.unknown()).default([])
+  })
+  .passthrough();
+
+export interface ParsedBoxConfigChangesStore {
+  /** The envelope's own fields other than `changes` (kept on rewrite). */
+  envelope: Record<string, unknown>;
+  /** Readable sets, in file order. */
+  sets: StoredBoxConfigChangeSet[];
+  /** Entries this build could not read, kept verbatim. */
+  unreadable: unknown[];
+}
+
+/** Tolerant read of `config-changes.json`; a value that is not an envelope at all reads as empty. */
+export function parseBoxConfigChangesStore(value: unknown): ParsedBoxConfigChangesStore {
+  const parsed = boxConfigChangesStoreSchema.safeParse(value);
+  if (!parsed.success) {
+    return { envelope: { version: BOX_CONFIG_CHANGES_VERSION }, sets: [], unreadable: [] };
+  }
+  const { changes, ...envelope } = parsed.data;
+  const sets: StoredBoxConfigChangeSet[] = [];
+  const unreadable: unknown[] = [];
+  for (const entry of changes) {
+    const set = storedBoxConfigChangeSetSchema.safeParse(entry);
+    if (set.success) sets.push(set.data);
+    else unreadable.push(entry);
+  }
+  return { envelope, sets, unreadable };
+}
+
+/**
+ * What config sync last agreed with a box for one host path: `h` = SHA-256 of the file's synced
+ * view (equal on both sides then: the bytes, or the secret-blanked / subset form of a config),
+ * `s`/`m` = the box file's size and mtime then (a box file still at those is unchanged).
+ */
+export const boxSyncBaselineEntrySchema = z
+  .object({
+    h: z.string(),
+    s: z.number(),
+    m: z.number()
+  })
+  .passthrough();
+
+/** `boxes/sync/<boxId>.json`: host path → {@link boxSyncBaselineEntrySchema}. A disposable cache. */
+export const boxSyncBaselineSchema = z
+  .object({
+    version: z.number().int().optional(),
+    entries: z.record(z.unknown()).default({})
+  })
+  .passthrough();
+
+export type BoxSyncBaselineEntry = z.infer<typeof boxSyncBaselineEntrySchema>;
