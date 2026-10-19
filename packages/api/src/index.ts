@@ -1280,30 +1280,63 @@ export interface SetAgentAccountDefaultsRequest {
   grok?: string | null;
 }
 
-export type AgentAccountsEventType = "agent-accounts.changed" | "grok-link.changed";
+export type AgentAccountsEventType =
+  | "agent-accounts.changed"
+  | "grok-link.changed"
+  | "codex-link.changed"
+  | "claude-link.changed";
 
 /**
- * The in-flight RFC 8628 device-code prompt of a Grok account link.
+ * The in-flight device-code prompt of a Grok or Codex account link.
  * `url`/`userCode` are user-facing by design (the user must visit and type
  * them) — not secrets. In-memory on the daemon: it dies with a restart.
  */
-export interface GrokDeviceLink {
+/** The agents whose accounts link with a device code. */
+export type DeviceLinkAgent = "grok" | "codex";
+
+export interface DeviceLink {
   url: string;
   userCode: string;
   expiresAt: string;
 }
 
 /**
- * The Grok device-code link as the daemon reports it (`GET
- * /api/agent-accounts/grok/link`, and the `grok-link.changed` event on the
- * agent-accounts channel). `lastError` is the verdict of the most recent
- * failed or expired attempt, cleared when a new one starts or one succeeds.
- * A granted link becomes a managed grok account (`agent-accounts.changed`).
+ * A device-code account link as the daemon reports it (`GET
+ * /api/agent-accounts/{grok,codex}/link`, and the `grok-link.changed` /
+ * `codex-link.changed` event on the agent-accounts channel). `lastError` is
+ * the verdict of the most recent failed or expired attempt, cleared when a new
+ * one starts or one succeeds. A granted link becomes a managed account
+ * (`agent-accounts.changed`).
  */
-export interface GrokDeviceLinkStatus {
+export interface DeviceLinkStatus {
   state: "idle" | "linking";
-  link: GrokDeviceLink | null;
+  link: DeviceLink | null;
   lastError: string | null;
+}
+
+/**
+ * The in-flight Claude sign-in: the Claude.ai authorize URL to open. The page
+ * it ends on shows a code to paste back. In-memory on the daemon.
+ */
+export interface ClaudeOAuthLink {
+  url: string;
+  expiresAt: string;
+}
+
+/**
+ * The Claude sign-in as the daemon reports it (`GET
+ * /api/agent-accounts/claude/link`, and `claude-link.changed` on the
+ * agent-accounts channel). `lastError` as for `DeviceLinkStatus`.
+ */
+export interface ClaudeOAuthLinkStatus {
+  state: "idle" | "linking";
+  link: ClaudeOAuthLink | null;
+  lastError: string | null;
+}
+
+/** `POST /api/agent-accounts/claude/link/code`: the pasted `code#state`. */
+export interface SubmitClaudeOAuthCodeRequest {
+  code: string;
 }
 
 /**
@@ -2044,20 +2077,41 @@ export class HttpOrquesterApiClient implements OrquesterApi {
     return this.get(`/api/usage${force ? "?refresh=1" : ""}`);
   }
 
-  // The Grok account's device-code link (Settings → Accounts). Start returns the
-  // prompt to show the user; the daemon polls auth.x.ai itself and broadcasts
-  // `grok-link.changed` on the agent-accounts channel as the state moves.
+  // Device-code account links (Settings → Accounts) for Grok and Codex. Start
+  // returns the prompt to show the user; the daemon polls the provider itself
+  // and broadcasts `<agent>-link.changed` on the agent-accounts channel as the
+  // state moves.
 
-  getGrokDeviceLink(): Promise<GrokDeviceLinkStatus> {
-    return this.get("/api/agent-accounts/grok/link");
+  getDeviceLink(agent: DeviceLinkAgent): Promise<DeviceLinkStatus> {
+    return this.get(`/api/agent-accounts/${agent}/link`);
   }
 
-  startGrokDeviceLink(): Promise<GrokDeviceLink> {
-    return this.post("/api/agent-accounts/grok/link");
+  startDeviceLink(agent: DeviceLinkAgent): Promise<DeviceLink> {
+    return this.post(`/api/agent-accounts/${agent}/link`);
   }
 
-  cancelGrokDeviceLink(): Promise<GrokDeviceLinkStatus> {
-    return this.delete("/api/agent-accounts/grok/link");
+  cancelDeviceLink(agent: DeviceLinkAgent): Promise<DeviceLinkStatus> {
+    return this.delete(`/api/agent-accounts/${agent}/link`);
+  }
+
+  // The Claude account's sign-in link: start returns the authorize URL, the
+  // pasted code completes it as a managed account; `claude-link.changed`
+  // carries the state.
+
+  getClaudeOAuthLink(): Promise<ClaudeOAuthLinkStatus> {
+    return this.get("/api/agent-accounts/claude/link");
+  }
+
+  startClaudeOAuthLink(): Promise<ClaudeOAuthLink> {
+    return this.post("/api/agent-accounts/claude/link");
+  }
+
+  submitClaudeOAuthCode(req: SubmitClaudeOAuthCodeRequest): Promise<AgentAccount> {
+    return this.post("/api/agent-accounts/claude/link/code", req);
+  }
+
+  cancelClaudeOAuthLink(): Promise<ClaudeOAuthLinkStatus> {
+    return this.delete("/api/agent-accounts/claude/link");
   }
 
   deleteFsEntry(path: string): Promise<{ ok: true }> {

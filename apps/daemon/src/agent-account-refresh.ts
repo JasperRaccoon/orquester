@@ -3,13 +3,13 @@ import type { AgentAccountRecord } from "@orquester/config";
 export const REFRESH_INTERVAL_MS = 60 * 60_000;
 export const REFRESH_MARGIN_MS = 15 * 60_000;
 
-const CLAUDE_TOKEN_URL = "https://platform.claude.com/v1/oauth/token";
-const CLAUDE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+export const CLAUDE_TOKEN_URL = "https://platform.claude.com/v1/oauth/token";
+export const CLAUDE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 // Codex signs in with a ChatGPT account; the CLI's public OAuth client refreshes
 // against auth.openai.com. A rejected refresh does NOT consume the single-use
 // refresh token, so a wrong/rotated constant fails closed (usage renders stale).
-const CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token";
-const CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
+export const CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token";
+export const CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 // The grok CLI's public OIDC client (the one the device-code link signs in with).
 // A standard-OAuth2 token endpoint: form-encoded refresh grant.
 export const GROK_OIDC_ISSUER = "https://auth.x.ai";

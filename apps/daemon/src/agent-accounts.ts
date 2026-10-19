@@ -170,7 +170,14 @@ export class AgentAccountsService {
     return join(this.opts.accountsDir, agent, id, "home");
   }
 
-  async importAccount(input: { content?: string; from?: string; label?: string }): Promise<AgentAccount> {
+  /**
+   * `identity` is what a daemon-driven sign-in learned about the account beyond
+   * the credential file — a Claude login's email, which its file never carries.
+   */
+  async importAccount(
+    input: { content?: string; from?: string; label?: string },
+    identity: { email?: string | null } = {}
+  ): Promise<AgentAccount> {
     const raw = await this.readBlob(input);
     let parsed: unknown;
     try {
@@ -200,10 +207,12 @@ export class AgentAccountsService {
           'Claude credential file contains no OAuth tokens (probably a stale or logged-out keychain entry). Log in to Claude Code again, or export with `security find-generic-password -s "Claude Code-credentials" -a "$USER" -w`.'
         );
       }
-      if (!input.label?.trim()) {
+      email = identity.email || null;
+      const named = input.label?.trim() || email;
+      if (!named) {
         throw new AgentAccountError("A label is required for Claude accounts (the credentials file has no email).");
       }
-      label = input.label.trim();
+      label = named;
       plan = claudePlanFromBlob(parsed);
     }
 

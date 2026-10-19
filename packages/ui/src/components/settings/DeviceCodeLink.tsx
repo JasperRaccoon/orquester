@@ -1,44 +1,63 @@
 import React, { useCallback, useEffect, useState } from "react";
-import { Check, Copy, Download, ExternalLink, Link2, Loader2 } from "lucide-react";
+import { Check, Copy, Download, Link2, Loader2 } from "lucide-react";
+import type { DeviceLinkAgent } from "@orquester/api";
 import { Button } from "../ui";
 import { useAppStore } from "../../store/app";
-import { ApiError } from "../../lib/api-client";
 import { copyText } from "../../lib/clipboard";
 import { Notice, SettingRow } from "./primitives";
+import { formatStamp, linkErrorMessage, LinkOpenUrl, LinkStep } from "./account-link-parts";
 
-const formatStamp = (iso: string | null): string => {
-  if (!iso) return "unknown";
-  const t = Date.parse(iso);
-  return Number.isNaN(t) ? iso : new Date(t).toLocaleString();
+const COPY: Record<DeviceLinkAgent, { label: string; description: React.ReactNode; linkTitle: string }> = {
+  grok: {
+    label: "Sign in with Grok",
+    description: (
+      <>
+        Link an account with a one-time code on accounts.x.ai, or adopt the login a terminal{" "}
+        <code className="text-neutral-400">grok login</code> left on the server.
+      </>
+    ),
+    linkTitle: "Sign in on accounts.x.ai with a one-time code"
+  },
+  codex: {
+    label: "Sign in with ChatGPT",
+    description: (
+      <>
+        Link an account with a one-time code on auth.openai.com. If ChatGPT refuses the code, turn on device code
+        sign-in in its security settings.
+      </>
+    ),
+    linkTitle: "Sign in on auth.openai.com with a one-time code"
+  }
 };
 
 /**
- * The grok-specific account acquisition path: unlike Claude/Codex there is a
- * device-code login as an alternative to importing `~/.grok/auth.json`. The
- * daemon drives the RFC 8628 flow directly against auth.x.ai; on approval the
- * tokens become a managed grok account (it appears in the list above via
- * `agent-accounts.changed`). Nothing shown here is a secret — the verification
- * URL and user code are meant to be read out loud.
+ * A device-code account link — Grok and Codex both offer one as an alternative
+ * to importing the CLI's `auth.json`. The daemon drives the provider's device
+ * flow directly; on approval the tokens become a managed account (it appears
+ * in the list above via `agent-accounts.changed`). Nothing shown here is a
+ * secret — the verification URL and user code are meant to be read out loud.
  *
- * Renders as one row of the Grok accounts card: the two secondary ways to add
- * an account while idle, the URL + user code while a link is pending.
+ * Renders as one row of the agent's accounts card: the ways to add an account
+ * while idle (Grok also adopts a server-side `grok login`), the URL + user code
+ * while a link is pending.
  */
-export const GrokDeviceLink: React.FC = () => {
+export const DeviceCodeLink: React.FC<{ agent: DeviceLinkAgent }> = ({ agent }) => {
   const api = useAppStore((s) => s.api);
-  const status = useAppStore((s) => s.grokDeviceLink);
-  const loadGrokDeviceLink = useAppStore((s) => s.loadGrokDeviceLink);
+  const status = useAppStore((s) => s.deviceLinks[agent]);
+  const loadDeviceLink = useAppStore((s) => s.loadDeviceLink);
   const loadAgentAccounts = useAppStore((s) => s.loadAgentAccounts);
   // Which action is in flight, so only its button spins; any one disables all.
   const [pending, setPending] = useState<"link" | "import" | "cancel" | null>(null);
   const busy = pending !== null;
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const copy = COPY[agent];
 
   // A link started elsewhere (another client, before a reload) is still
-  // pending on the daemon; `grok-link.changed` keeps it current from here.
+  // pending on the daemon; `<agent>-link.changed` keeps it current from here.
   useEffect(() => {
-    void loadGrokDeviceLink();
-  }, [loadGrokDeviceLink]);
+    void loadDeviceLink(agent);
+  }, [agent, loadDeviceLink]);
 
   const run = useCallback(
     async (action: "link" | "import" | "cancel", fn: () => Promise<unknown>) => {
@@ -47,17 +66,13 @@ export const GrokDeviceLink: React.FC = () => {
       try {
         await fn();
       } catch (e) {
-        // A 409 (a link already pending) or 502 (auth.x.ai failed) carries
-        // the daemon's own reason.
-        const message =
-          e instanceof ApiError ? (e.serverMessage ?? e.message) : e instanceof Error ? e.message : String(e);
-        setError(message);
+        setError(linkErrorMessage(e));
       } finally {
         setPending(null);
-        await loadGrokDeviceLink();
+        await loadDeviceLink(agent);
       }
     },
-    [loadGrokDeviceLink]
+    [agent, loadDeviceLink]
   );
 
   const linking = status?.state === "linking";
@@ -84,45 +99,39 @@ export const GrokDeviceLink: React.FC = () => {
   if (!linking) {
     return (
       <div>
-        <SettingRow
-          icon={<Link2 size={14} />}
-          label="Sign in with Grok"
-          description={
-            <>
-              Link an account with a one-time code on accounts.x.ai, or adopt the login a terminal{" "}
-              <code className="text-neutral-400">grok login</code> left on the server.
-            </>
-          }
-        >
+        <SettingRow icon={<Link2 size={14} />} label={copy.label} description={copy.description}>
           <Button
             size="sm"
             variant="outline"
             disabled={busy}
-            title="Sign in on accounts.x.ai with a one-time code"
+            title={copy.linkTitle}
             onClick={() => {
               void run("link", async () => {
                 if (!api) throw new Error("not connected");
-                await api.startGrokDeviceLink();
+                await api.startDeviceLink(agent);
               });
             }}
           >
             {pending === "link" ? <Loader2 size={13} className="animate-spin" /> : <Link2 size={13} />} Link with code
           </Button>
-          <Button
-            size="sm"
-            variant="ghost"
-            disabled={busy}
-            title="Adopt the login a terminal grok login wrote to ~/.grok/auth.json on the server"
-            onClick={() => {
-              void run("import", async () => {
-                if (!api) throw new Error("not connected");
-                await api.importAgentAccount({ fromSystem: "grok" });
-                await loadAgentAccounts();
-              });
-            }}
-          >
-            {pending === "import" ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />} Import server login
-          </Button>
+          {agent === "grok" && (
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={busy}
+              title="Adopt the login a terminal grok login wrote to ~/.grok/auth.json on the server"
+              onClick={() => {
+                void run("import", async () => {
+                  if (!api) throw new Error("not connected");
+                  await api.importAgentAccount({ fromSystem: "grok" });
+                  await loadAgentAccounts();
+                });
+              }}
+            >
+              {pending === "import" ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}{" "}
+              Import server login
+            </Button>
+          )}
         </SettingRow>
         {(error || status?.lastError) && <div className="space-y-2 px-4 pb-3.5">{feedback}</div>}
       </div>
@@ -138,20 +147,10 @@ export const GrokDeviceLink: React.FC = () => {
 
       {link && (
         <ol className="grid gap-3 sm:grid-cols-2">
-          <li className="space-y-2 rounded-lg border border-neutral-800 bg-neutral-950/60 p-3">
-            <p className="text-[11px] font-medium uppercase tracking-wide text-neutral-500">1 · Open</p>
-            <a
-              href={link.url}
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex max-w-full items-center gap-1.5 text-sm text-info hover:underline"
-            >
-              <ExternalLink size={13} className="shrink-0" />
-              <span className="truncate">{link.url}</span>
-            </a>
-          </li>
-          <li className="space-y-2 rounded-lg border border-neutral-800 bg-neutral-950/60 p-3">
-            <p className="text-[11px] font-medium uppercase tracking-wide text-neutral-500">2 · Enter this code</p>
+          <LinkStep title="1 · Open">
+            <LinkOpenUrl url={link.url} />
+          </LinkStep>
+          <LinkStep title="2 · Enter this code">
             <div className="flex items-center gap-2">
               <span className="select-all font-mono text-xl font-semibold tracking-[0.2em] text-neutral-100">
                 {link.userCode}
@@ -168,7 +167,7 @@ export const GrokDeviceLink: React.FC = () => {
                 {copied ? <Check size={14} className="text-ok" /> : <Copy size={14} />}
               </Button>
             </div>
-          </li>
+          </LinkStep>
         </ol>
       )}
 
@@ -183,7 +182,7 @@ export const GrokDeviceLink: React.FC = () => {
           onClick={() => {
             void run("cancel", async () => {
               if (!api) throw new Error("not connected");
-              await api.cancelGrokDeviceLink();
+              await api.cancelDeviceLink(agent);
             });
           }}
         >

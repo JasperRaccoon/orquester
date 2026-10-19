@@ -19,8 +19,8 @@ const bytes = (text: string) => Buffer.byteLength(text, "utf8");
 test("the worst case — workflow-owned — stays under 2 048 bytes", () => {
   const worst = composeOrquesterInstructions({ workflowOwned: true });
   assert.ok(bytes(worst) <= ORQUESTER_INSTRUCTIONS_MAX_BYTES, `${bytes(worst)} bytes`);
-  // The fixed part: spec §10 measures it at 1 445 bytes.
-  assert.ok(bytes(ORQUESTER_INSTRUCTIONS_FIXED) <= 1_445, `${bytes(ORQUESTER_INSTRUCTIONS_FIXED)} bytes`);
+  // The fixed part: 1 951 bytes since the T3 Code wording (spec §10's original measured 1 445).
+  assert.ok(bytes(ORQUESTER_INSTRUCTIONS_FIXED) <= 1_951, `${bytes(ORQUESTER_INSTRUCTIONS_FIXED)} bytes`);
 });
 
 test("the fixed block alone; workflow-owned adds its line; no toolset is ever named off", () => {
