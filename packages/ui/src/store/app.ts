@@ -8,6 +8,7 @@ import { toRemoteConfig, toUiConnection } from "../lib/connections";
 import { notifyProvidersChanged, setProviderSideEffects } from "../lib/agent-chat/providers";
 import { applySavedPromptEvent, resetSavedPrompts } from "../lib/saved-prompts/store";
 import { applyRepoIdentityEvent, loadRepoIdentities, resetRepoIdentities } from "../lib/repo-identities/store";
+import { applySecretFilesEvent, loadSecretVaults, resetSecretFiles } from "../lib/secret-files/store";
 import { applySecretRequestEvent, resetSecretRequests } from "../lib/agent-chat/secret-requests";
 import {
   applyAgentToolsEvent,
@@ -31,7 +32,7 @@ import {
   upsertDesktopApp,
   upsertDesktopIn
 } from "../lib/desktop-state";
-import { parsePluginsResponse, upsertPluginIn } from "../lib/plugins-state";
+import { isGlobalPluginEnabled, parsePluginsResponse, upsertPluginIn } from "../lib/plugins-state";
 import {
   NEW_WHITEBOARD_NAME,
   WHITEBOARDS_DIR,
@@ -174,6 +175,8 @@ import {
   PLUGINS_CHANNEL,
   REPO_IDENTITIES_CHANNEL,
   SAVED_PROMPTS_CHANNEL,
+  SECRET_FILES_CHANNEL,
+  SECRET_FILES_PLUGIN_ID,
   SESSION_PROFILES_CHANNEL,
   WORKFLOWS_CHANNEL
 } from "@orquester/api";
@@ -1530,6 +1533,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
     );
 
+    const secretFilesWasOn = secretFilesOn(get().plugins);
     await Promise.all([
       get().loadWorkspaces(),
       get().loadRecentProjects(),
@@ -1562,7 +1566,18 @@ export const useAppStore = create<AppState>((set, get) => ({
       get().loadRemotes(),
       // Built-in plugins gate tools (the whiteboard) outside Settings too. Fail-soft:
       // an older daemon has no plugin routes.
-      get().loadPlugins().catch(() => undefined),
+      get()
+        .loadPlugins()
+        .catch(() => undefined)
+        .then(() => {
+          // Secret-file vaults (own module store), only while that plugin is on. Its
+          // turning on (the first list of a connection included) loads them through
+          // the plugins subscription below; a reconnect with it already on reloads
+          // here — the event stream has no replay.
+          if (secretFilesWasOn && secretFilesOn(get().plugins) && get().api === active) {
+            void loadSecretVaults(active).catch(() => undefined);
+          }
+        }),
       // Repo icons + labels (own module store). Every (re)connect: the event
       // stream has no replay, so a reconnect reloads them. Fail-soft: an older
       // daemon has no route, and repos then show their defaults.
@@ -1883,6 +1898,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     invalidateProjectIndex();
     resetSavedPrompts();
     resetRepoIdentities();
+    resetSecretFiles();
     stopSetupFollows();
     projectsLoadSeq += 1;
     resetSecretRequests();
@@ -3639,6 +3655,12 @@ export const useAppStore = create<AppState>((set, get) => ({
       applyRepoIdentityEvent(event);
       return;
     }
+    if (event.channel === SECRET_FILES_CHANNEL) {
+      // Secret-file vaults live in their own module store (validated, never going
+      // backwards by `updatedAt`); held only while the plugin is on.
+      if (secretFilesOn(get().plugins)) applySecretFilesEvent(event);
+      return;
+    }
     if (event.channel === AGENT_PROFILE_CHANNEL) {
       // Agent config (Settings) keeps each agent's snapshot in its own module store: a
       // change refetches that agent when it was loaded and its revision moved
@@ -3762,6 +3784,23 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   }
 }));
+
+/** Whether the "Secret files" plugin is on in a plugins list. */
+function secretFilesOn(plugins: readonly PluginInfo[] | null): boolean {
+  return isGlobalPluginEnabled(plugins, SECRET_FILES_PLUGIN_ID);
+}
+
+// Secret files: the vaults load when the plugin turns on (a connection's first
+// plugins list included; `establish` reloads them on a reconnect with it already
+// on) and are forgotten when it turns off — or the plugins list goes away with a
+// connection switch.
+useAppStore.subscribe((state, previous) => {
+  if (state.plugins === previous.plugins) return;
+  const on = secretFilesOn(state.plugins);
+  if (on === secretFilesOn(previous.plugins)) return;
+  if (!on) resetSecretFiles();
+  else if (state.api) void loadSecretVaults(state.api).catch(() => undefined);
+});
 
 // Agent profiles §5.3: a remembered pick the connected daemon does not have (deleted while this
 // client was away, or another daemon's id) would make every new chat of that agent fail. Each
