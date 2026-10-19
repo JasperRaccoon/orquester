@@ -286,9 +286,14 @@ export interface SecretFilesCloneRequest {
   files?: string[];
   /**
    * Act only if each named file's copy in this clone still has this
-   * `contentToken` (null: the clone must have no copy); otherwise nothing is
-   * written and the answer is 409 CONTENT_CHANGED. The approval card and the UI
-   * pass what they showed.
+   * `contentToken` (null: the clone must have no copy); otherwise the answer is
+   * 409 CONTENT_CHANGED. The approval card and the UI pass what they showed.
+   *
+   * Push writes nothing on CONTENT_CHANGED. Reset re-checks each file again just
+   * before writing it, so an edit landing mid-reset is never overwritten: the
+   * reset stops there, files it already reset stay reset, and the message names
+   * both. Either way the answer carries the clone re-evaluated, so a refetch shows
+   * the new tokens.
    */
   expect?: Record<string, string | null>;
 }
@@ -306,7 +311,7 @@ export type SecretFilesErrorCode =
   | "NOT_ENV_FORMAT" // 400 — merge asked for a file that isn't KEY=VALUE
   | "TOO_MANY_FILES" // 400 — over SECRET_FILES_MAX_PER_VAULT
   | "NOTHING_TO_PUSH" // 409 — no selected file is modified in that clone
-  | "CONTENT_CHANGED" // 409 — a file's content no longer matches `expect`
+  | "CONTENT_CHANGED" // 409 — a file's content no longer matches `expect` (or changed mid-reset; see `expect`)
   | "SECRET_FILES_UNAVAILABLE" // 503 — the vault store could not be read; changes are refused
   | "SECRET_FILES_ERROR"; // 500
 
