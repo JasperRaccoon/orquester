@@ -286,6 +286,11 @@ export interface BoxLocationRequest {
   image?: string;
   /** macOS: the job's lifetime, ≤ the provider's `maxLifetimeMinutes`. Default: the maximum. */
   lifetimeMinutes?: number;
+  /**
+   * Template tab (with `source: "empty"`): the scaffold command to run in the box's first terminal
+   * once the box is ready (≤ 4096 chars, no control characters). Recorded on the box's project.
+   */
+  templateCommand?: string;
 }
 
 export type ProjectLocationRequest = { kind: "host" } | BoxLocationRequest;

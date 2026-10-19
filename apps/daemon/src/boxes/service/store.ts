@@ -127,6 +127,12 @@ export class BoxStore implements BoxRecordStore {
     return this.records.get(boxId);
   }
 
+  /** Every record id in boxes.json, including records this build cannot parse. */
+  ids(): Set<string> {
+    const boxes = this.boxes.data.boxes;
+    return new Set(isObject(boxes) ? Object.keys(boxes) : []);
+  }
+
   /** Add a new record (written before any provider call). Refuses an id that exists. */
   async insert(record: StoredBox): Promise<StoredBox> {
     const parsed = storedBoxSchema.parse(record);
