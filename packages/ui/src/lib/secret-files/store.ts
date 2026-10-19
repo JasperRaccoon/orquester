@@ -13,10 +13,11 @@
  * - `SECRET_FILES_CHANNEL` **events**, routed here by the app store's `applyEvent`.
  *
  * So every write is validated first (a malformed vault is ignored, bad fields
- * are repaired one by one) and never goes backwards: a vault older
- * (`updatedAt`) than the one held is dropped, a deleted vault is not brought
- * back by an answer no newer than what was deleted, and a load's answer never
- * undoes a change that landed while it was in flight.
+ * are repaired one by one) and never goes backwards: a vault older than the
+ * one held is dropped, a deleted vault is not brought back by an answer no
+ * newer than what was deleted, and a read's answer never undoes a change that
+ * landed while it was in flight. "Older" is by `revision` when both copies
+ * carry one (it moves on clone-state-only changes too), else by `updatedAt`.
  *
  * Per connection: `resetSecretFiles()` runs on a connection switch and when the
  * plugin turns off (the app store), and a load or mutation through a client of
@@ -43,6 +44,7 @@ import {
   type SecretVaultDetail,
   type SecretVaultFile,
   type SecretVaultResponse,
+  type SecretVaultRevision,
   type SecretVaultSummary,
   type SecretVaultsResponse,
   type SetupSecretVaultRequest,
@@ -102,8 +104,10 @@ const openReads = new Set<Set<string>>();
 /** Sequence of the newest load started / applied: an older load's late answer is dropped. */
 let loadsStarted = 0;
 let loadsApplied = 0;
-/** Deleted vault keys → the newest `updatedAt` held when deleted. An answer no newer stays deleted. */
-const tombstones = new Map<string, number>();
+/** What a vault's place in the order is read from. */
+type Rank = Pick<SecretVaultDetail, "updatedAt" | "revision">;
+/** Deleted vault keys → the newest copy held when deleted. An answer no newer stays deleted. */
+const tombstones = new Map<string, Rank>();
 
 // ---------------------------------------------------------------------------
 // Wire validation
@@ -161,10 +165,17 @@ function sanitizeVaultFile(value: unknown): SecretVaultFile | null {
 
 function sanitizeCloneState(value: unknown): SecretFileCloneState | null {
   if (!isRecord(value) || !isPath(value.path) || !isState(value.state)) return null;
-  if (value.state === "refused") {
-    return { path: value.path, state: "refused", ...(isRefusal(value.refusal) ? { refusal: value.refusal } : {}) };
-  }
-  return { path: value.path, state: value.state };
+  return {
+    path: value.path,
+    state: value.state,
+    ...(value.state === "refused" && isRefusal(value.refusal) ? { refusal: value.refusal } : {}),
+    ...(nonEmpty(value.contentToken) ? { contentToken: value.contentToken } : {})
+  };
+}
+
+function sanitizeRevision(value: unknown): SecretVaultRevision | null {
+  if (!isRecord(value) || !nonEmpty(value.boot) || !isCount(value.seq)) return null;
+  return { boot: value.boot, seq: value.seq };
 }
 
 function sanitizeClone(value: unknown): SecretFilesClone | null {
@@ -215,9 +226,11 @@ export function sanitizeSecretVault(value: unknown): SecretVaultDetail | null {
   }
   const excluded = pathList(value.excluded);
   const candidates = pathList(value.candidates);
+  const revision = sanitizeRevision(value.revision);
   return {
     workspace,
     repoKey,
+    ...(revision !== null ? { revision } : {}),
     fileCount: isCount(value.fileCount) ? value.fileCount : files.length,
     clonesNeedingAttention: isCount(value.clonesNeedingAttention)
       ? value.clonesNeedingAttention
@@ -343,19 +356,42 @@ function touch(key: string): void {
   for (const touched of openReads) touched.add(key);
 }
 
-/** Whether `incoming` may replace what is held for its vault. */
-function accepts(current: SecretVaultDetail | undefined, incoming: SecretVaultDetail): boolean {
-  const tomb = tombstones.get(vaultKey(incoming.workspace, incoming.repoKey));
-  if (tomb !== undefined && timeOf(incoming.updatedAt) <= tomb) return false;
-  if (current === undefined) return true;
-  return timeOf(current.updatedAt) <= timeOf(incoming.updatedAt) && !sameVault(current, incoming);
+/**
+ * Where `incoming` stands against `held`: 1 newer, 0 the same, -1 older. By
+ * `revision` when both carry one (same boot: the higher `seq`; another boot:
+ * the daemon restarted, so `incoming` is newer), else by `updatedAt`.
+ */
+function order(held: Rank, incoming: Rank): -1 | 0 | 1 {
+  const [a, b] = [held.revision, incoming.revision];
+  if (a !== undefined && b !== undefined) {
+    if (a.boot !== b.boot) return 1;
+    return b.seq > a.seq ? 1 : b.seq < a.seq ? -1 : 0;
+  }
+  const [x, y] = [timeOf(held.updatedAt), timeOf(incoming.updatedAt)];
+  return y > x ? 1 : y < x ? -1 : 0;
 }
 
-function upsertLocal(vault: SecretVaultDetail): void {
+/**
+ * Whether `incoming` may replace what is held for its vault. A copy of the same
+ * rank replaces it only when ordered by `updatedAt` (which a clone-state change
+ * doesn't move) and not `strict` — a read that a change overtook is strict: it
+ * keeps the held copy unless its own is strictly newer.
+ */
+function accepts(current: SecretVaultDetail | undefined, incoming: SecretVaultDetail, strict = false): boolean {
+  const tomb = tombstones.get(vaultKey(incoming.workspace, incoming.repoKey));
+  if (tomb !== undefined && order(tomb, incoming) <= 0) return false;
+  if (current === undefined) return true;
+  if (sameVault(current, incoming)) return false;
+  const rank = order(current, incoming);
+  if (rank !== 0) return rank > 0;
+  return !strict && (current.revision === undefined || incoming.revision === undefined);
+}
+
+function upsertLocal(vault: SecretVaultDetail, strict = false): void {
   const key = vaultKey(vault.workspace, vault.repoKey);
   touch(key);
   const vaults = secretFilesStore.getState().vaults;
-  if (!accepts(vaults.get(key), vault)) return;
+  if (!accepts(vaults.get(key), vault, strict)) return;
   tombstones.delete(key);
   const next = new Map(vaults);
   next.set(key, vault);
@@ -367,8 +403,12 @@ function removeLocal(workspace: string, repoKey: string): void {
   touch(key);
   const vaults = secretFilesStore.getState().vaults;
   const current = vaults.get(key);
-  const held = current ? timeOf(current.updatedAt) : Number.NEGATIVE_INFINITY;
-  tombstones.set(key, Math.max(tombstones.get(key) ?? Number.NEGATIVE_INFINITY, held));
+  const tomb = tombstones.get(key);
+  if (current !== undefined && (tomb === undefined || order(tomb, current) > 0)) {
+    tombstones.set(key, { updatedAt: current.updatedAt, ...(current.revision ? { revision: current.revision } : {}) });
+  } else if (tomb === undefined) {
+    tombstones.set(key, { updatedAt: "" });
+  }
   if (current === undefined) return;
   const next = new Map(vaults);
   next.delete(key);
@@ -429,9 +469,9 @@ const isNotFound = (error: unknown): boolean =>
  * Replace the map with the daemon's vaults — except for vaults a change
  * touched while the load was in flight (an event or answer can overtake the
  * list it is newer than): those keep what they hold unless the load's copy is
- * newer still (a vault deleted meanwhile stays deleted). `kept` are vaults whose detail failed to load: they keep what
- * they hold. Any other vault takes the load as it is, so a reload repairs a
- * held copy whatever its timestamps say.
+ * strictly newer (a vault deleted meanwhile stays deleted). `kept` are vaults
+ * whose detail failed to load: they keep what they hold. Any other vault takes
+ * the load as it is, so a reload repairs a held copy whatever its order says.
  */
 function applyLoaded(list: SecretVaultDetail[], kept: ReadonlySet<string>, touched: ReadonlySet<string>): void {
   const vaults = secretFilesStore.getState().vaults;
@@ -444,7 +484,7 @@ function applyLoaded(list: SecretVaultDetail[], kept: ReadonlySet<string>, touch
     const current = vaults.get(key);
     // Deleted while the load was in flight: its copy predates the delete (a
     // vault set up again since would have cleared the tombstone).
-    if (touched.has(key) && (tombstones.has(key) || !accepts(current, vault))) continue;
+    if (touched.has(key) && (tombstones.has(key) || !accepts(current, vault, true))) continue;
     tombstones.delete(key);
     // The held object when it is the same record — subscribers see no change.
     next.set(key, current !== undefined && sameVault(current, vault) ? current : vault);
@@ -530,7 +570,8 @@ export async function fetchSecretVault(
     if (vault === null || vault.workspace !== workspace || vault.repoKey !== repoKey) {
       throw new Error("The daemon answered the vault in an unexpected shape.");
     }
-    if (!(touched.has(key) && tombstones.has(key))) upsertLocal(vault);
+    // Overtaken by a change: kept only when strictly newer (deleted meanwhile: dropped).
+    if (!(touched.has(key) && tombstones.has(key))) upsertLocal(vault, touched.has(key));
     return getSecretVault(workspace, repoKey) ?? null;
   } finally {
     openReads.delete(touched);
@@ -579,14 +620,46 @@ async function mutate(
   return vault;
 }
 
-/** Push a clone's modified files to the vault (every other in-sync clone then updates). */
-export function pushSecretFiles(api: SecretFilesApi, req: SecretFilesCloneRequest): Promise<SecretVaultDetail> {
-  return mutate(api, req.workspace, req.repoKey, () => api.pushSecretFiles(req));
+/** The daemon refused a push / reset because a file changed since the UI showed it (409 CONTENT_CHANGED). Duck-typed on `ApiError`. */
+export function isContentChangedError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const body = (error as { body?: unknown }).body;
+  return isRecord(body) && body.code === "CONTENT_CHANGED";
 }
 
-/** Overwrite a clone's files with the vault's version (discards that clone's changes). */
+/**
+ * A push / reset: on 409 CONTENT_CHANGED the vault is fetched again (what the
+ * user looked at is stale), then the error is rethrown for the caller to show.
+ */
+async function cloneAction(
+  api: SecretFilesApi,
+  req: SecretFilesCloneRequest,
+  run: () => Promise<SecretVaultResponse>
+): Promise<SecretVaultDetail> {
+  bindConnection(api);
+  const gen = generation;
+  try {
+    return await mutate(api, req.workspace, req.repoKey, run);
+  } catch (error) {
+    if (isContentChangedError(error) && gen === generation) {
+      void fetchSecretVault(api, req.workspace, req.repoKey).catch(() => undefined);
+    }
+    throw error;
+  }
+}
+
+/**
+ * Push a clone's modified files to the vault (every other in-sync clone then
+ * updates). Pass `expect` (the content tokens shown) so a copy that changed
+ * since is refused rather than pushed.
+ */
+export function pushSecretFiles(api: SecretFilesApi, req: SecretFilesCloneRequest): Promise<SecretVaultDetail> {
+  return cloneAction(api, req, () => api.pushSecretFiles(req));
+}
+
+/** Overwrite a clone's files with the vault's version (discards that clone's changes); `expect` as for push. */
 export function resetCloneSecretFiles(api: SecretFilesApi, req: SecretFilesCloneRequest): Promise<SecretVaultDetail> {
-  return mutate(api, req.workspace, req.repoKey, () => api.resetSecretFiles(req));
+  return cloneAction(api, req, () => api.resetSecretFiles(req));
 }
 
 /** Create the vault (or add files to it: re-running setup adds). */

@@ -232,27 +232,45 @@ export function projectBarMessage(
   return { path: first.path, text: reason ? ` can't be synced here: ${reason}` : " can't be synced here" };
 }
 
-/** Another clone's states the daemon updates after a push (spec §4). */
-const OVERWRITTEN_ON_PUSH: readonly SecretFileState[] = ["synced", "outdated", "missing"];
+/** Another clone's states the daemon writes the pushed version into (spec §4); `missing` copies are created. */
+export const RECEIVES_PUSH: readonly SecretFileState[] = ["synced", "outdated", "missing"];
+
+/**
+ * Which other clones a push of `paths` from `projectPath` reaches, judged per
+ * file: a clone receives the new version of each pushed file it holds in sync,
+ * behind or missing, and keeps its own changes to each one it modified — so a
+ * clone can be in both lists, for different files.
+ */
+export function pushReach<C extends Pick<SecretFilesClone, "projectPath" | "files">>(
+  clones: readonly C[],
+  projectPath: string,
+  paths: readonly string[]
+): { receives: C[]; keepsChanges: C[] } {
+  const receives: C[] = [];
+  const keepsChanges: C[] = [];
+  for (const clone of clones) {
+    if (clone.projectPath === projectPath) continue;
+    const states = clone.files.filter((file) => paths.includes(file.path)).map((file) => file.state);
+    if (states.some((state) => RECEIVES_PUSH.includes(state))) receives.push(clone);
+    if (states.includes("modified")) keepsChanges.push(clone);
+  }
+  return { receives, keepsChanges };
+}
 
 /**
  * The Push confirm: which clones the vault's new version reaches. Clones in
  * sync (or only behind, or missing the file) get it; ones with their own
- * changes stay flagged and are compared against the new version.
+ * changes stay flagged and are compared against the new version (per file —
+ * see {@link pushReach}).
  */
 export function pushConfirmText(
   vault: Pick<SecretVaultDetail, "clones">,
   projectPath: string,
   paths: readonly string[]
 ): string {
-  const overwritten: string[] = [];
-  const kept: string[] = [];
-  for (const clone of vault.clones) {
-    if (clone.projectPath === projectPath) continue;
-    const states = clone.files.filter((file) => paths.includes(file.path)).map((file) => file.state);
-    if (states.includes("modified")) kept.push(clone.projectName);
-    else if (states.some((state) => OVERWRITTEN_ON_PUSH.includes(state))) overwritten.push(clone.projectName);
-  }
+  const reach = pushReach(vault.clones, projectPath, paths);
+  const overwritten = reach.receives.map((clone) => clone.projectName);
+  const kept = reach.keepsChanges.map((clone) => clone.projectName);
   const what = paths.length === 1 ? `this project's ${paths[0]}` : `this project's ${paths.length} changed secret files`;
   let text = `This makes ${what} the vault's version.`;
   text +=
@@ -268,6 +286,33 @@ export function pushConfirmText(
   return text;
 }
 
+/** States in which the clone holds no copy of the file. */
+const NO_COPY_STATES: readonly SecretFileState[] = ["deleted", "missing", "missing-dir"];
+
+/**
+ * The `expect` a Push / Reset of `paths` sends: each file's content token as
+ * the UI showed it (null for a copy the clone doesn't have), so the daemon
+ * refuses with 409 CONTENT_CHANGED if it changed since. A file the clone has
+ * but without a token (a daemon predating tokens) is left out; undefined when
+ * nothing is left.
+ */
+export function expectedContent(
+  files: ReadonlyArray<Pick<SecretFileCloneState, "path" | "state" | "contentToken">>,
+  paths: readonly string[]
+): Record<string, string | null> | undefined {
+  const expect: Record<string, string | null> = {};
+  for (const path of paths) {
+    const file = files.find((entry) => entry.path === path);
+    if (!file) continue;
+    if (file.contentToken) expect[path] = file.contentToken;
+    else if (NO_COPY_STATES.includes(file.state)) expect[path] = null;
+  }
+  return Object.keys(expect).length > 0 ? expect : undefined;
+}
+
+/** What a 409 CONTENT_CHANGED is shown as. */
+export const CONTENT_CHANGED_TEXT = "This file changed since you looked — review it again.";
+
 /** The Reset confirm. */
 export function resetConfirmText(paths: readonly string[]): string {
   const what = paths.length === 1 ? paths[0] : `${paths.length} secret files`;
@@ -280,17 +325,22 @@ export function resetConfirmText(paths: readonly string[]): string {
 
 /**
  * What a dismissal of the bar covers: the project and, per flagged file, its
- * path, state and the vault version it is compared with. Any of those
- * changing (a push, a reset, another file flagged) brings the bar back.
+ * path, state, content token (this clone's copy) and the vault version it is
+ * compared with. Any of those changing (a push, a reset, another file flagged,
+ * a further edit of a flagged file) brings the bar back.
  */
 export function projectBarDismissKey(
   projectPath: string,
-  files: ReadonlyArray<Pick<SecretFileCloneState, "path" | "state">>,
+  files: ReadonlyArray<Pick<SecretFileCloneState, "path" | "state" | "contentToken">>,
   vault: Pick<SecretVaultDetail, "files">
 ): string {
   const versions = new Map(vault.files.map((file) => [file.path, file.version]));
   const parts = files
-    .map((file) => `${file.path}\u0001${file.state}\u0001${versions.get(file.path) ?? ""}`)
+    .map(
+      (file) =>
+        `${file.path}\u0001${file.state}\u0001${versions.get(file.path) ?? ""}` +
+        (file.contentToken ? `\u0001${file.contentToken}` : "")
+    )
     .sort();
   return [projectPath, ...parts].join("\u0000");
 }

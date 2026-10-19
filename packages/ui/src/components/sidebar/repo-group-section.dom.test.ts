@@ -85,7 +85,9 @@ describe("a repo group header", () => {
       return {
         identity: req.label === null ? null : { repoKey: req.repoKey, label: req.label, updatedAt: "2026-10-19T00:00:00Z" }
       };
-    }
+    },
+    // The Secret files dialog asks for its vault when it opens; it never answers here.
+    getSecretVault: () => new Promise(() => undefined)
   } as unknown as ApiClient;
 
   const render = async (g: RepoProjectGroup) => {
@@ -272,6 +274,20 @@ describe("a repo group header", () => {
       assert.equal(pill(), null);
       await openMenu();
       assert.deepEqual(menuLabels(), ["Change icon…", "Rename label…", "Copy repo id", "Secret files…"]);
+    });
+
+    it("closes Secret files… when the plugin turns off, and doesn't reopen it when it turns back on", async () => {
+      useAppStore.setState({ plugins: [secretFilesPlugin(true)] });
+      await render(group());
+      const dialog = () => document.querySelector('[role="dialog"]');
+      assert.equal(dialog(), null);
+      await openMenu();
+      await pick("Secret files…");
+      assert.ok(dialog(), "the dialog opened");
+      await act(async () => useAppStore.setState({ plugins: [secretFilesPlugin(false)] }));
+      assert.equal(dialog(), null);
+      await act(async () => useAppStore.setState({ plugins: [secretFilesPlugin(true)] }));
+      assert.equal(dialog(), null);
     });
 
     it("counts clones needing attention plus new candidates, for this workspace's vault only", async () => {

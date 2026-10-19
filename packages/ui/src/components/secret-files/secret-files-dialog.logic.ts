@@ -20,6 +20,8 @@ import {
   type UpdateSecretFilesRequest
 } from "@orquester/api";
 
+import { CONTENT_CHANGED_TEXT, pushReach } from "./drift.logic";
+
 // ---------------------------------------------------------------------------
 // Sources
 // ---------------------------------------------------------------------------
@@ -120,8 +122,9 @@ export type SetupPlan = { ok: true; request: SetupSecretVaultRequest } | { ok: f
 
 /**
  * The setup request: each ticked candidate with its source; every unticked
- * conventional candidate goes to `excluded` (never suggested again). Hand-added
- * files left unticked are simply not sent.
+ * conventional candidate the user could have ticked goes to `excluded` (never
+ * suggested again). Hand-added files left unticked, and candidates no clone
+ * holds a usable copy of (nobody could tick them), are simply not sent.
  */
 export function buildSetupRequest(
   workspace: string,
@@ -133,7 +136,7 @@ export function buildSetupRequest(
   const excluded: string[] = [];
   for (const candidate of candidates) {
     if (!isTicked(candidate, selection)) {
-      if (candidate.conventional && !candidate.managed) excluded.push(candidate.path);
+      if (isSelectable(candidate) && candidate.conventional && !candidate.managed) excluded.push(candidate.path);
       continue;
     }
     const source = sourceFor(candidate, selection.sources[candidate.path]);
@@ -314,24 +317,18 @@ export function canCompare(clone: SecretFilesClone): boolean {
 }
 
 /**
- * What a push from `source` does to the other clones: those whose copy of a
- * pushed file is in sync (or merely behind) get overwritten; those with their
- * own changes stay flagged and are compared against the new version.
+ * What a push of `files` (default: every changed copy) from `source` does to
+ * the other clones, per file: a clone whose copy of a pushed file is in sync,
+ * merely behind or missing gets the new version; one with its own changes to a
+ * pushed file keeps them, still flagged — a clone can be in both lists.
  */
 export function pushImpact(
   vault: SecretVaultDetail,
-  source: SecretFilesClone
+  source: SecretFilesClone,
+  files: readonly string[] = pushableFiles(source)
 ): { overwritten: SecretFilesClone[]; keptFlagged: SecretFilesClone[] } {
-  const pushed = new Set(pushableFiles(source));
-  const overwritten: SecretFilesClone[] = [];
-  const keptFlagged: SecretFilesClone[] = [];
-  for (const clone of vault.clones) {
-    if (clone.projectPath === source.projectPath) continue;
-    const touched = clone.files.filter((file) => pushed.has(file.path));
-    if (touched.some((file) => file.state === "synced" || file.state === "outdated")) overwritten.push(clone);
-    else if (touched.some((file) => file.state === "modified")) keptFlagged.push(clone);
-  }
-  return { overwritten, keptFlagged };
+  const reach = pushReach(vault.clones, source.projectPath, files);
+  return { overwritten: reach.receives, keptFlagged: reach.keepsChanges };
 }
 
 // ---------------------------------------------------------------------------
@@ -369,15 +366,18 @@ function codeText(code: string): string | null {
 
 /**
  * The words a failure is shown with: the daemon's own message when it sent
- * one, else a friendly text for its refusal code, else its status or message.
+ * one (except CONTENT_CHANGED, always "review it again"), else a friendly text
+ * for its refusal code, else its status or message.
  * Duck-typed on `ApiError`.
  */
 export function secretFilesErrorText(error: unknown): string {
   if (typeof error === "object" && error !== null) {
-    const server = (error as { serverMessage?: unknown }).serverMessage;
-    if (typeof server === "string" && server.trim().length > 0) return server.trim();
     const body = (error as { body?: unknown }).body;
     const code = typeof body === "object" && body !== null ? (body as { code?: unknown }).code : undefined;
+    // What to do next matters more than the daemon's wording here.
+    if (code === "CONTENT_CHANGED") return CONTENT_CHANGED_TEXT;
+    const server = (error as { serverMessage?: unknown }).serverMessage;
+    if (typeof server === "string" && server.trim().length > 0) return server.trim();
     const text = typeof code === "string" ? codeText(code) : null;
     if (text !== null) return text;
     const status = (error as { status?: unknown }).status;

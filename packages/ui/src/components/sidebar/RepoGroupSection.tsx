@@ -1,4 +1,4 @@
-import React, { useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { ChevronRight, ClipboardCopy, ImageIcon, KeyRound, Pencil, Plus, RotateCcw } from "lucide-react";
 import { normalizeRepoLabel, repoLabelProblem } from "@orquester/api";
 import { cn } from "../../lib/cn";
@@ -122,6 +122,10 @@ export const RepoGroupSection: React.FC<{
   const [iconOpen, setIconOpen] = useState(false);
   const [secretsOpen, setSecretsOpen] = useState(false);
   const secretsOn = useSecretFilesEnabled();
+  // The plugin turning off closes the dialog for good: turning it back on doesn't reopen it.
+  useEffect(() => {
+    if (!secretsOn) setSecretsOpen(false);
+  }, [secretsOn]);
   const secretCount = repoSecretCount(secretsOn, useSecretVault(workspace, group.repoKey));
   const [error, setError] = useState<string | null>(null);
   const expanded = !group.collapsed;
@@ -236,7 +240,7 @@ export const RepoGroupSection: React.FC<{
       />
       {secretsOn && (
         <SecretFilesDialog
-          open={secretsOpen}
+          open={secretsOn && secretsOpen}
           workspace={workspace}
           repoKey={group.repoKey}
           repoLabel={group.label}
