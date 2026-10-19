@@ -66,8 +66,9 @@ No dynamic `import()` either.
 | `workflow-authoring` | `list_workflow_block_types`, `create_workflow`, `update_workflow`, `delete_workflow`, `preview_expression`, `run_workflow`, `cancel_workflow_run`, `list_workflow_secrets`, `set_workflow_secret` (9) |
 | `agent-profile-editing` | `edit_agent_profile` (1) |
 | `desktops` | `get_desktops`, `control_desktop` (2) |
+| `secret-files` | `secret_files_status`, `push_secret_files` (2) |
 
-44 chat tools (the 41 external ones plus `html_preview`, `html_render`, `request_secret`), **all
+46 chat tools (the 42 external ones plus `html_preview`, `html_render`, `request_secret`, `push_secret_files`), **all
 advertised to every chat** of every agent. A toolset is only a group: a label in `@orquester/api`
 `TOOLSETS` and the `orquester/toolset` tag external clients see. There is no master switch, no
 per-agent default and no per-chat override, and no `request_toolset`. Older builds kept such
@@ -76,8 +77,8 @@ switches in `agent-tools.json`; this build keeps those keys verbatim and never r
 continue turns in old transcripts.
 
 **Measured** (`mcp/catalog/registry.test.ts` serialises `tools/list` as the host does, and asserts
-the budgets): all 44 chat tools are 69 072 bytes (≤ 73 728, the one chat budget); the external set
-63 180 bytes for 41 tools (≤ 81 920). Every
+the budgets): all 46 chat tools are 54 399 bytes (≤ 73 728, the one chat budget); the external set
+59 101 bytes for 42 tools (≤ 81 920). Every
 tool is ≤ 3 000 bytes but `html_render` (2 755, ≤ 3 100) and `create_workflow`, `update_workflow`,
 `edit_agent_profile` (≤ 6 500); every description ≤ 1 000 bytes (`html_*` ≤ 2 000), every field
 text ≤ 160.
