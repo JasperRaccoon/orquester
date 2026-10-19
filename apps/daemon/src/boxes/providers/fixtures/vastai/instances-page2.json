@@ -1,0 +1,17 @@
+{
+  "success": true,
+  "instances_found": 3,
+  "total_instances": 3,
+  "next_token": null,
+  "instances": [
+    {
+      "id": 31002004,
+      "label": "orq-box-99887766",
+      "actual_status": "exited",
+      "intended_status": "running",
+      "start_date": 1760910000.0,
+      "gpu_name": "RTX 3090",
+      "num_gpus": 1
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "success": false,
+  "error": "no_such_ask",
+  "msg": "error 410/3907: no_such_ask Instance type 22001002 is no longer available.",
+  "ask_id": 22001002
+}

@@ -1,0 +1,22 @@
+{
+  "data": {
+    "instances": [
+      {
+        "type": "VM",
+        "id": "5c0ffee0-1234-4abc-9def-00000000beef",
+        "attributes": {
+          "name": "orq-box-0123abcd",
+          "status": "running"
+        }
+      },
+      {
+        "type": "VM",
+        "id": "11111111-2222-4333-8444-555555555555",
+        "attributes": {
+          "name": "my-training-vm",
+          "status": "running"
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "status": false,
+  "message": "VM 7613 is currently being created and cannot be deleted yet. Please try again later.",
+  "error_reason": "bad_request"
+}

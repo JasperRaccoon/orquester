@@ -1,0 +1,8 @@
+{
+  "id": 123456,
+  "key_id": 778899,
+  "email": "owner@example.invalid",
+  "balance": 25.0,
+  "ssh_key": null,
+  "sid": "REDACTED"
+}

@@ -1,0 +1,19 @@
+{
+  "images": [
+    {
+      "vm_image_id": 3,
+      "vm_image_name": "Ubuntu 20.04 Base",
+      "vm_image_description": "Ubuntu 20.04 with NVIDIA drivers"
+    },
+    {
+      "vm_image_id": 7,
+      "vm_image_name": "Ubuntu 22.04 Base",
+      "vm_image_description": "Ubuntu 22.04 with NVIDIA drivers"
+    },
+    {
+      "vm_image_id": 9,
+      "vm_image_name": "Art",
+      "vm_image_description": "Stable Diffusion desktop"
+    }
+  ]
+}

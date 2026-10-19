@@ -1,0 +1,49 @@
+{
+  "0": {
+    "id": "0",
+    "uuid": "c3f1a2b4-5d6e-4f70-8a9b-0c1d2e3f4a5b",
+    "name": "orq-box-0123abcd",
+    "status": "RUNNING",
+    "ip": "203.0.113.5",
+    "storage": 100,
+    "cpuCores": "8",
+    "gpuType": "a100xl",
+    "numGpus": "1",
+    "memory": "64",
+    "template": "base",
+    "createdAt": "2026-10-20T08:01:09Z",
+    "port": 22,
+    "httpPorts": [],
+    "sshPublicKeys": [
+      "ssh-ed25519 AAAA... orq"
+    ]
+  },
+  "1": {
+    "id": "1",
+    "uuid": "11111111-2222-4333-8444-555555555555",
+    "name": "curious-otter",
+    "status": "RUNNING",
+    "ip": null,
+    "storage": 100,
+    "cpuCores": "4",
+    "gpuType": "l40",
+    "numGpus": "1",
+    "memory": "32",
+    "template": "base",
+    "createdAt": "2026-10-19T10:00:00Z"
+  },
+  "2": {
+    "id": "2",
+    "uuid": "66666666-7777-4888-9999-000000000000",
+    "name": "orq-box-99887766",
+    "status": "STARTING",
+    "ip": null,
+    "storage": 100,
+    "cpuCores": "8",
+    "gpuType": "a100xl",
+    "numGpus": "1",
+    "memory": "64",
+    "template": "base",
+    "createdAt": "2026-10-20T09:00:00Z"
+  }
+}

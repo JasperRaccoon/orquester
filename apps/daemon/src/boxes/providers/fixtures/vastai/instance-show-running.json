@@ -1,0 +1,35 @@
+{
+  "instances": {
+    "id": 31002002,
+    "label": "orq-box-0123abcd",
+    "machine_id": 41002,
+    "host_id": 9002,
+    "actual_status": "running",
+    "intended_status": "running",
+    "cur_state": "running",
+    "next_state": "running",
+    "status_msg": "success, running vastai/base-image_cuda-12.8.1-auto/ssh\n",
+    "public_ipaddr": "203.0.113.42\n",
+    "ssh_host": "ssh5.vast.ai",
+    "ssh_port": 12002,
+    "dph_total": 0.2989,
+    "dph_base": 0.29,
+    "start_date": 1760914666.123,
+    "end_date": null,
+    "gpu_name": "RTX 4090",
+    "num_gpus": 1,
+    "disk_space": 64.0,
+    "image_uuid": "vastai/base-image:cuda-12.8.1-auto",
+    "image_runtype": "ssh",
+    "extra_env": [
+      [
+        "ORQUESTER_BOX_ID",
+        "box-0123abcd"
+      ],
+      [
+        "ORQ_BOOTSTRAP_TOKEN",
+        "REDACTED"
+      ]
+    ]
+  }
+}

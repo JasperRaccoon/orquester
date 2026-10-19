@@ -1,0 +1,8 @@
+{
+  "data": {
+    "type": "virtualmachine",
+    "id": "5c0ffee0-1234-4abc-9def-00000000beef",
+    "name": "orq-box-0123abcd",
+    "status": "running"
+  }
+}

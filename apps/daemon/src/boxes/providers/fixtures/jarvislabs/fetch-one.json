@@ -1,0 +1,21 @@
+{
+  "success": true,
+  "instance": {
+    "machine_id": 314159,
+    "name": "orq-box-0123abcd",
+    "status": "Running",
+    "region": "india-noida-01",
+    "template": "pytorch",
+    "gpu_type": "L4",
+    "num_gpus": 1,
+    "ram": "124GB",
+    "cores": 28,
+    "hdd": "100GB",
+    "cost": 0.0123,
+    "duration": "0:12:00",
+    "url": "https://abc123.notebooksn.jarvislabs.net/lab",
+    "ssh_str": "ssh -p 2222 root@sshn.jarvislabs.net",
+    "public_ip": null,
+    "user_id": "REDACTED"
+  }
+}

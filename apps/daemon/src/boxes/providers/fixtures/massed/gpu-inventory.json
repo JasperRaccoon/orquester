@@ -1,0 +1,79 @@
+{
+  "gpu_inventory": {
+    "gpu_1x_l40": {
+      "instance_type": {
+        "name": "gpu_1x_l40",
+        "description": "1x L40",
+        "price_cents_per_hour": 99,
+        "specs": {
+          "vcpu_count": 26,
+          "memory_gib": 128,
+          "storage_gb": 625
+        }
+      },
+      "regions_with_capacity_available": [
+        {
+          "name": "us-central-3",
+          "description": "Des Moines, IA"
+        },
+        {
+          "name": "us-central-1",
+          "description": "Kansas City, MO"
+        }
+      ],
+      "capacity_available": 3
+    },
+    "gpu_1x_a6000": {
+      "instance_type": {
+        "name": "gpu_1x_a6000",
+        "description": "1x RTX A6000",
+        "price_cents_per_hour": 57,
+        "specs": {
+          "vcpu_count": 12,
+          "memory_gib": 48,
+          "storage_gb": 256
+        }
+      },
+      "regions_with_capacity_available": [
+        {
+          "name": "us-central-1",
+          "description": "Kansas City, MO"
+        }
+      ],
+      "capacity_available": 1
+    },
+    "gpu_2x_h100_sxm5": {
+      "instance_type": {
+        "name": "gpu_2x_h100_sxm5",
+        "description": "2x H100 SXM5",
+        "price_cents_per_hour": 558,
+        "specs": {
+          "vcpu_count": 52,
+          "memory_gib": 512,
+          "storage_gb": 2000
+        }
+      },
+      "regions_with_capacity_available": [],
+      "capacity_available": 0
+    },
+    "cpu_8x": {
+      "instance_type": {
+        "name": "cpu_8x",
+        "description": "8 vCPU",
+        "price_cents_per_hour": 12,
+        "specs": {
+          "vcpu_count": 8,
+          "memory_gib": 32,
+          "storage_gb": 100
+        }
+      },
+      "regions_with_capacity_available": [
+        {
+          "name": "us-central-1",
+          "description": "Kansas City, MO"
+        }
+      ],
+      "capacity_available": 4
+    }
+  }
+}

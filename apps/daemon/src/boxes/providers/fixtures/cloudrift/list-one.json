@@ -1,0 +1,42 @@
+{
+  "version": "2026-10-12",
+  "data": {
+    "instances": [
+      {
+        "id": "f8c403e6-3a1b-4c55-9d0e-7b2a1c9e0d11",
+        "instance_name": "orq-box-0123abcd",
+        "tags": [
+          "orquester-box=box-0123abcd"
+        ],
+        "status": "Active",
+        "node_id": "node-1",
+        "node_mode": "VirtualMachine",
+        "node_status": "Ready",
+        "virtual_machines": [
+          {
+            "vmid": 1,
+            "name": "vm-1",
+            "ready": true,
+            "state": "Running",
+            "login_info": {
+              "Username": {
+                "username": "riftuser"
+              }
+            }
+          }
+        ],
+        "containers": [],
+        "created_at": "2026-10-20T08:01:09Z",
+        "ssh_key_auth": true,
+        "host_address": "203.0.113.90",
+        "internal_host_address": "10.1.0.4",
+        "port_mappings": [],
+        "resource_info": {
+          "provider_name": "Provider",
+          "instance_type": "rtx59-16c-nr.1",
+          "cost_per_hour": 62.4
+        }
+      }
+    ]
+  }
+}

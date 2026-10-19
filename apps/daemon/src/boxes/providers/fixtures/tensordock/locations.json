@@ -1,0 +1,138 @@
+{
+  "data": {
+    "locations": [
+      {
+        "id": "1d6a3b52-0c7e-4f5e-9a51-6f1a2b3c4d5e",
+        "city": "Austin",
+        "stateprovince": "Texas",
+        "country": "United States",
+        "tier": 3,
+        "gpus": [
+          {
+            "v0Name": "geforcertx4090-pcie-24gb",
+            "displayName": "GeForce RTX 4090 PCIe 24GB",
+            "max_count": 4,
+            "price_per_hr": 0.35,
+            "resources": {
+              "max_vcpus": 64,
+              "max_ram_gb": 256,
+              "max_storage_gb": 2000
+            },
+            "pricing": {
+              "per_vcpu_hr": 0.003,
+              "per_gb_ram_hr": 0.002,
+              "per_gb_storage_hr": 5e-05
+            },
+            "network_features": {
+              "dedicated_ip_available": true,
+              "port_forwarding_available": true,
+              "network_storage_available": false
+            }
+          },
+          {
+            "v0Name": "h100-sxm5-80gb",
+            "displayName": "H100 SXM5 80GB",
+            "max_count": 8,
+            "price_per_hr": 2.2,
+            "resources": {
+              "max_vcpus": 128,
+              "max_ram_gb": 300,
+              "max_storage_gb": 1000
+            },
+            "pricing": {
+              "per_vcpu_hr": 0.003,
+              "per_gb_ram_hr": 0.002,
+              "per_gb_storage_hr": 5e-05
+            },
+            "network_features": {
+              "dedicated_ip_available": true,
+              "port_forwarding_available": true,
+              "network_storage_available": false
+            }
+          }
+        ]
+      },
+      {
+        "id": "7f3e9c10-2b4d-4a6e-8c1f-0a9b8c7d6e5f",
+        "city": "Frankfurt",
+        "stateprovince": "Hesse",
+        "country": "Germany",
+        "tier": 3,
+        "gpus": [
+          {
+            "v0Name": "geforcertx4090-pcie-24gb",
+            "displayName": "GeForce RTX 4090 PCIe 24GB",
+            "max_count": 4,
+            "price_per_hr": 0.32,
+            "resources": {
+              "max_vcpus": 64,
+              "max_ram_gb": 256,
+              "max_storage_gb": 2000
+            },
+            "pricing": {
+              "per_vcpu_hr": 0.0025,
+              "per_gb_ram_hr": 0.0015,
+              "per_gb_storage_hr": 5e-05
+            },
+            "network_features": {
+              "dedicated_ip_available": true,
+              "port_forwarding_available": true,
+              "network_storage_available": false
+            }
+          },
+          {
+            "v0Name": "rtxa4000-pcie-16gb",
+            "displayName": "RTX A4000 PCIe 16GB",
+            "max_count": 4,
+            "price_per_hr": 0.12,
+            "resources": {
+              "max_vcpus": 4,
+              "max_ram_gb": 16,
+              "max_storage_gb": 2000
+            },
+            "pricing": {
+              "per_vcpu_hr": 0.003,
+              "per_gb_ram_hr": 0.002,
+              "per_gb_storage_hr": 5e-05
+            },
+            "network_features": {
+              "dedicated_ip_available": true,
+              "port_forwarding_available": true,
+              "network_storage_available": false
+            }
+          }
+        ]
+      },
+      {
+        "id": "a0b1c2d3-e4f5-4061-8273-9a8b7c6d5e4f",
+        "city": "Chubbuck",
+        "stateprovince": "Idaho",
+        "country": "United States",
+        "tier": 2,
+        "gpus": [
+          {
+            "v0Name": "rtx3090-pcie-24gb",
+            "displayName": "GeForce RTX 3090 PCIe 24GB",
+            "max_count": 0,
+            "price_per_hr": 0.2,
+            "resources": {
+              "max_vcpus": 64,
+              "max_ram_gb": 256,
+              "max_storage_gb": 2000
+            },
+            "pricing": {
+              "per_vcpu_hr": 0.003,
+              "per_gb_ram_hr": 0.002,
+              "per_gb_storage_hr": 5e-05
+            },
+            "network_features": {
+              "dedicated_ip_available": true,
+              "port_forwarding_available": true,
+              "network_storage_available": false
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

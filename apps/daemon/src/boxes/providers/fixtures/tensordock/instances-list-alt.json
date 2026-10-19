@@ -1,0 +1,19 @@
+{
+  "data": {
+    "type": "list",
+    "id": "instances",
+    "attributes": {
+      "instances": [
+        {
+          "type": "instance",
+          "id": "66666666-7777-4888-9999-000000000000",
+          "attributes": {
+            "name": "orq-box-99887766",
+            "status": "StoppedDisassociated",
+            "region": "Frankfurt"
+          }
+        }
+      ]
+    }
+  }
+}
