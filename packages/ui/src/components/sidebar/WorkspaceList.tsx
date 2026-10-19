@@ -18,6 +18,8 @@ import { useApi } from "../../context/orquester-context";
 import { copyText } from "../../lib/clipboard";
 import { matchesSidebarQuery } from "../../lib/opened-agents";
 import { ensureProjectIndex, useProjectIndex } from "../../lib/project-index";
+import { projectMatchesQuery } from "../../lib/repo-groups";
+import { useRepoIdentities } from "../../lib/repo-identities/hooks";
 import { useWorkflowTempProjects } from "../../lib/workflows/hooks";
 import { isWorkflowTempProject } from "../../lib/workflows/temp-projects";
 import type { ProjectSummary, WorkspaceSummary } from "../../types";
@@ -65,7 +67,7 @@ async function openProjectAnywhere(project: ProjectSummary): Promise<void> {
  * — opening another collapses it, and collapsing it closes it — so the tree
  * never shows a project list the store does not hold.
  *
- * While searching, every workspace whose name or projects match stays listed,
+ * While searching, every workspace whose name or projects (by name or repo label) match stays listed,
  * and one with matching projects shows them even when it is not the open one
  * (from the verified project index, so an archived project never surfaces).
  */
@@ -89,6 +91,7 @@ export const WorkspaceList: React.FC<WorkspaceListProps> = ({
   const setWorkspaceArchived = useAppStore((s) => s.setWorkspaceArchived);
   const index = useProjectIndex();
   const tempProjects = useWorkflowTempProjects();
+  const identities = useRepoIdentities();
 
   const [menu, setMenu] = useState<{ x: number; y: number; workspace: WorkspaceSummary } | null>(null);
   const [pendingDelete, setPendingDelete] = useState<WorkspaceSummary | null>(null);
@@ -111,12 +114,13 @@ export const WorkspaceList: React.FC<WorkspaceListProps> = ({
     return (id?: string | null) => (id ? map.get(id) ?? null : null);
   }, [accounts]);
 
-  // Searching: the index's projects that match, by workspace.
+  // Searching: the index's projects that match — by name or by their repo's
+  // label, as the open workspace's repo groups match — by workspace.
   const matchesByWorkspace = useMemo(() => {
     const byWorkspace = new Map<string, ProjectSummary[]>();
     if (!searching || index === null) return byWorkspace;
     for (const project of index.visible.values()) {
-      if (!matchesSidebarQuery(query, project.name)) continue;
+      if (!projectMatchesQuery(query, project, identities)) continue;
       const list = byWorkspace.get(project.workspace) ?? [];
       list.push(project);
       byWorkspace.set(project.workspace, list);
@@ -125,7 +129,7 @@ export const WorkspaceList: React.FC<WorkspaceListProps> = ({
       list.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
     }
     return byWorkspace;
-  }, [searching, index, query]);
+  }, [searching, index, query, identities]);
 
   const rows = searching
     ? visibleWorkspaces.filter(

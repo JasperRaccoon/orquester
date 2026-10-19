@@ -55,6 +55,35 @@ function withoutHost(repoKey: string): string {
   return slash === -1 ? repoKey : repoKey.slice(slash + 1);
 }
 
+/**
+ * The sidebar search over a repo: its shown label (the custom one, else
+ * `defaultLabel`), `defaultLabel` itself, or its key.
+ */
+export function repoMatchesQuery(
+  query: string,
+  repoKey: string,
+  defaultLabel: string,
+  identities: ReadonlyMap<string, Pick<RepoIdentity, "label">>
+): boolean {
+  return matchesSidebarQuery(query, identities.get(repoKey)?.label ?? defaultLabel, defaultLabel, repoKey);
+}
+
+/**
+ * The sidebar search over one project: its name, or its repo (see
+ * `repoMatchesQuery`) — the rule `groupProjectsByRepo` applies, so a
+ * workspace kept for a match shows that match inside it.
+ */
+export function projectMatchesQuery(
+  query: string,
+  project: Pick<ProjectSummary, "name" | "repoKey" | "repoName">,
+  identities: ReadonlyMap<string, Pick<RepoIdentity, "label">>
+): boolean {
+  if (matchesSidebarQuery(query, project.name)) return true;
+  const { repoKey } = project;
+  if (!repoKey) return false;
+  return repoMatchesQuery(query, repoKey, project.repoName ?? withoutHost(repoKey), identities);
+}
+
 export function groupProjectsByRepo({
   projects,
   identities,
@@ -80,7 +109,7 @@ export function groupProjectsByRepo({
     members.sort(byName);
     const defaultLabel = members.find((p) => p.repoName)?.repoName ?? withoutHost(repoKey);
     const label = identities.get(repoKey)?.label ?? defaultLabel;
-    const shown = matchesSidebarQuery(query, label, defaultLabel, repoKey)
+    const shown = repoMatchesQuery(query, repoKey, defaultLabel, identities)
       ? members
       : members.filter((p) => matchesSidebarQuery(query, p.name));
     if (shown.length === 0) continue;

@@ -170,10 +170,25 @@ export function repoLabelProblem(label: string): string | null {
 
 const EMOJI_MARK = /\p{Extended_Pictographic}|\p{Regional_Indicator}|⃣/u;
 
-/** True when `value` (already trimmed) is exactly one emoji grapheme of bounded size. */
+/**
+ * True when `value` (already trimmed) is exactly one emoji grapheme of bounded
+ * size. Where `Intl.Segmenter` is missing (older browsers) a conservative
+ * shape check stands in — emoji code points only, no whitespace, few of them —
+ * and the daemon (Node has the segmenter) stays authoritative.
+ */
 export function isSingleEmoji(value: string): boolean {
   if (value.length === 0 || new TextEncoder().encode(value).length > REPO_EMOJI_MAX_BYTES) return false;
   if (!EMOJI_MARK.test(value)) return false;
+  if (typeof Intl.Segmenter !== "function") {
+    // Emoji code points and the joiners, selectors, modifiers and tags that
+    // build sequences only, and few of them: the longest within the byte cap
+    // (a family of four, a subdivision flag) run 7 code points.
+    return (
+      !/\s/u.test(value) &&
+      /^[\p{Extended_Pictographic}\p{Emoji_Component}]+$/u.test(value) &&
+      [...value].length <= 10
+    );
+  }
   const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
   let count = 0;
   for (const _ of segmenter.segment(value)) {

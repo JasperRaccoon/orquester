@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import type { ProjectSummary } from "@orquester/api";
 
-import { groupProjectsByRepo, type GroupProjectsInput } from "./repo-groups.ts";
+import { groupProjectsByRepo, projectMatchesQuery, type GroupProjectsInput } from "./repo-groups.ts";
 
 const ENGINE = "github.com/jasperraccoon/jasperengine";
 const EDITOR = "github.com/jasperraccoon/jaspereditor";
@@ -180,4 +180,27 @@ test("the input list is not reordered", () => {
   const before = names(PROJECTS);
   group();
   assert.deepEqual(names(PROJECTS), before);
+});
+
+test("a project matches the search by its name or its repo's shown label, owner or key", () => {
+  const custom = new Map([[ENGINE, { label: "Engine" }]]);
+  const multiplayer = engine("Multiplayer");
+  assert.ok(projectMatchesQuery("multi", multiplayer, new Map()));
+  assert.ok(projectMatchesQuery("jasperraccoon", multiplayer, new Map()), "the owner in the default label");
+  assert.ok(projectMatchesQuery("github.com/jasperraccoon", multiplayer, new Map()), "the key");
+  assert.ok(projectMatchesQuery("engine", multiplayer, custom), "the custom label");
+  assert.ok(!projectMatchesQuery("editor", multiplayer, custom));
+  // No repoName: the key without its host stands in, as for a group's default label.
+  assert.ok(projectMatchesQuery("o/r", project("x", { key: "github.com/o/r" }), new Map()));
+  assert.ok(!projectMatchesQuery("jasperraccoon", project("CRYPTORISK"), new Map()), "no repo: the name only");
+});
+
+test("the projects a search keeps agree with the groups it shows", () => {
+  const identities = new Map([[EDITOR, { label: "Tools" }]]);
+  for (const query of ["jasperraccoon", "tools", "engine", "multi", "crypto", "github.com", "nothing"]) {
+    const { groups, other } = group({ query, identities });
+    const grouped = [...groups.flatMap((g) => names(g.projects)), ...names(other)].sort();
+    const kept = names(PROJECTS.filter((p) => projectMatchesQuery(query, p, identities))).sort();
+    assert.deepEqual(grouped, kept, query);
+  }
 });
