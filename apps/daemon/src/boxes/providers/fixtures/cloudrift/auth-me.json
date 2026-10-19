@@ -1,0 +1,10 @@
+{
+  "version": "2026-10-12",
+  "data": {
+    "id": "u-123",
+    "email": "owner@example.invalid",
+    "name": "Owner",
+    "provider": "Email",
+    "totp_enabled": false
+  }
+}
