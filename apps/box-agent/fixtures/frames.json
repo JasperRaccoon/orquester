@@ -1,0 +1,20 @@
+[
+  {
+    "channel": 2,
+    "stream": 0,
+    "payloadHex": "",
+    "frameHex": "0000000200"
+  },
+  {
+    "channel": 1,
+    "stream": 1,
+    "payloadHex": "68690a",
+    "frameHex": "000000010168690a"
+  },
+  {
+    "channel": 4294967294,
+    "stream": 2,
+    "payloadHex": "00ff8001",
+    "frameHex": "fffffffe0200ff8001"
+  }
+]

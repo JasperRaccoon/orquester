@@ -1,0 +1,380 @@
+{
+  "hello": [
+    {
+      "t": "hello",
+      "protocol": 1,
+      "agentVersion": "0.1.0+abc1234",
+      "auth": {
+        "kind": "bootstrap",
+        "token": "box1.c2VjcmV0"
+      },
+      "sys": {
+        "os": "linux",
+        "arch": "x64",
+        "libc": "glibc",
+        "hostname": "orq-box1",
+        "osRelease": "Ubuntu 24.04.1 LTS",
+        "user": "dev",
+        "isRoot": false,
+        "canElevate": true,
+        "home": "/home/dev",
+        "shell": "/bin/bash",
+        "tmux": true,
+        "docker": false,
+        "cpus": 8,
+        "memBytes": 16777216000,
+        "gpus": [
+          "NVIDIA L4"
+        ],
+        "agentPath": "/usr/local/bin/orq-agent",
+        "dataDir": "/var/lib/orq-agent",
+        "container": false
+      },
+      "procs": []
+    },
+    {
+      "t": "hello",
+      "protocol": 1,
+      "agentVersion": "0.1.0+abc1234",
+      "auth": {
+        "kind": "credential",
+        "boxId": "box1",
+        "credential": "Y3JlZA"
+      },
+      "sys": {
+        "os": "win32",
+        "arch": "x64",
+        "libc": null,
+        "hostname": "orq-box1",
+        "osRelease": "Windows Server 2022 21H2",
+        "user": "Administrator",
+        "isRoot": true,
+        "canElevate": true,
+        "home": "C:\\Users\\Administrator",
+        "shell": "powershell.exe",
+        "tmux": false,
+        "docker": false,
+        "cpus": 8,
+        "memBytes": 16777216000,
+        "gpus": [],
+        "agentPath": "C:\\orq\\bin\\orq-agent.exe",
+        "dataDir": "C:\\orq\\agent",
+        "container": false
+      },
+      "procs": [
+        {
+          "procId": "p1",
+          "pid": 4242,
+          "running": true,
+          "exitCode": null,
+          "signal": null,
+          "outputBytes": 9000,
+          "bufferStart": 0
+        },
+        {
+          "procId": "p2",
+          "pid": null,
+          "running": false,
+          "exitCode": 0,
+          "signal": null,
+          "outputBytes": 5,
+          "bufferStart": 1
+        },
+        {
+          "procId": "p3",
+          "pid": null,
+          "running": false,
+          "exitCode": null,
+          "signal": "SIGKILL",
+          "outputBytes": 0,
+          "bufferStart": 0
+        }
+      ]
+    },
+    {
+      "t": "hello",
+      "protocol": 1,
+      "agentVersion": "0.1.0+abc1234",
+      "auth": {
+        "kind": "github-oidc",
+        "boxId": "box2",
+        "jwt": "eyJ.eyJ.sig"
+      },
+      "sys": {
+        "os": "darwin",
+        "arch": "arm64",
+        "libc": null,
+        "hostname": "orq-box1",
+        "osRelease": "Ubuntu 24.04.1 LTS",
+        "user": "dev",
+        "isRoot": false,
+        "canElevate": true,
+        "home": "/home/dev",
+        "shell": "/bin/bash",
+        "tmux": true,
+        "docker": false,
+        "cpus": 8,
+        "memBytes": 16777216000,
+        "gpus": [
+          "NVIDIA L4"
+        ],
+        "agentPath": "/usr/local/bin/orq-agent",
+        "dataDir": "/var/lib/orq-agent",
+        "container": false
+      },
+      "procs": []
+    }
+  ],
+  "welcome": [
+    {
+      "t": "welcome",
+      "boxId": "box1",
+      "credential": "Y3JlZA",
+      "config": {
+        "paths": {
+          "kind": "identity"
+        },
+        "heartbeatMs": 15000,
+        "forwards": [
+          {
+            "boxPort": 47999,
+            "target": "session-tools"
+          }
+        ]
+      }
+    },
+    {
+      "t": "welcome",
+      "boxId": "box1",
+      "config": {
+        "paths": {
+          "kind": "windows-prefix",
+          "prefix": "C:\\orq"
+        },
+        "heartbeatMs": 15000,
+        "forwards": []
+      }
+    }
+  ],
+  "reject": [
+    {
+      "t": "reject",
+      "code": "AUTH_FAILED",
+      "message": "bad credential"
+    },
+    {
+      "t": "reject",
+      "code": "AGENT_OUTDATED",
+      "message": "update failed",
+      "upgradeUrl": "https://d.example/api/boxes/agent/linux-x64"
+    }
+  ],
+  "ping": [
+    {
+      "t": "ping",
+      "id": 1
+    }
+  ],
+  "pong": [
+    {
+      "t": "pong",
+      "id": 1
+    }
+  ],
+  "req": [
+    {
+      "t": "req",
+      "id": 7,
+      "method": "fs.stat",
+      "params": {
+        "path": "/srv/p"
+      }
+    },
+    {
+      "t": "req",
+      "id": 8,
+      "method": "sys.info",
+      "params": {}
+    }
+  ],
+  "res": [
+    {
+      "t": "res",
+      "id": 7,
+      "ok": true,
+      "result": {
+        "size": 1
+      }
+    },
+    {
+      "t": "res",
+      "id": 9,
+      "ok": true,
+      "result": null
+    },
+    {
+      "t": "res",
+      "id": 10,
+      "ok": true
+    },
+    {
+      "t": "res",
+      "id": 8,
+      "ok": false,
+      "error": {
+        "code": "ENOENT",
+        "message": "no such file"
+      }
+    }
+  ],
+  "event": [
+    {
+      "t": "event",
+      "name": "fs.change",
+      "data": {
+        "watchId": "w-1",
+        "changes": [
+          {
+            "path": "/srv/p/a.ts",
+            "type": "create"
+          },
+          {
+            "path": "/srv/p/b.ts",
+            "type": "update"
+          },
+          {
+            "path": "/srv/p/c.ts",
+            "type": "delete"
+          }
+        ]
+      }
+    }
+  ],
+  "open": [
+    {
+      "t": "open",
+      "ch": 2,
+      "spec": {
+        "kind": "exec",
+        "command": "ls",
+        "args": [
+          "-la"
+        ]
+      }
+    },
+    {
+      "t": "open",
+      "ch": 1,
+      "spec": {
+        "kind": "host-tcp",
+        "target": "session-tools",
+        "boxPort": 47999
+      }
+    }
+  ],
+  "opened": [
+    {
+      "t": "opened",
+      "ch": 2
+    },
+    {
+      "t": "opened",
+      "ch": 4,
+      "info": {
+        "pid": 99
+      }
+    },
+    {
+      "t": "opened",
+      "ch": 6,
+      "info": {
+        "pid": 99,
+        "droppedBytes": 0
+      }
+    },
+    {
+      "t": "opened",
+      "ch": 8,
+      "info": {
+        "size": 123456
+      }
+    }
+  ],
+  "open-failed": [
+    {
+      "t": "open-failed",
+      "ch": 2,
+      "error": {
+        "code": "ENOENT",
+        "message": "command not found: lss"
+      }
+    }
+  ],
+  "eof": [
+    {
+      "t": "eof",
+      "ch": 2,
+      "stream": 0
+    },
+    {
+      "t": "eof",
+      "ch": 2,
+      "stream": 1
+    },
+    {
+      "t": "eof",
+      "ch": 2,
+      "stream": 2
+    }
+  ],
+  "exit": [
+    {
+      "t": "exit",
+      "ch": 2,
+      "code": 0,
+      "signal": null
+    },
+    {
+      "t": "exit",
+      "ch": 4,
+      "code": null,
+      "signal": "SIGTERM"
+    }
+  ],
+  "resize": [
+    {
+      "t": "resize",
+      "ch": 2,
+      "cols": 120,
+      "rows": 40
+    }
+  ],
+  "signal": [
+    {
+      "t": "signal",
+      "ch": 2,
+      "signal": "SIGINT"
+    }
+  ],
+  "credit": [
+    {
+      "t": "credit",
+      "ch": 2,
+      "bytes": 65536
+    }
+  ],
+  "close": [
+    {
+      "t": "close",
+      "ch": 2
+    },
+    {
+      "t": "close",
+      "ch": 4,
+      "error": {
+        "code": "ENOSPC",
+        "message": "no space left on device"
+      }
+    }
+  ]
+}

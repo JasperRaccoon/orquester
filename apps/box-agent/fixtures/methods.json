@@ -1,0 +1,318 @@
+{
+  "hostToBox": {
+    "fs.stat": [
+      {
+        "params": {
+          "path": "/srv/p/a.ts",
+          "followSymlinks": false
+        },
+        "result": {
+          "path": "/srv/p/a.ts",
+          "kind": "file",
+          "size": 12,
+          "mtimeMs": 1729000000123.25,
+          "mode": 33188,
+          "identity": "2049:1234"
+        }
+      },
+      {
+        "params": {
+          "path": "/srv/p/missing"
+        },
+        "result": null
+      }
+    ],
+    "fs.readdir": [
+      {
+        "params": {
+          "path": "/srv/p"
+        },
+        "result": [
+          {
+            "name": "a.ts",
+            "kind": "file",
+            "size": 12,
+            "mtimeMs": 1729000000123.5
+          },
+          {
+            "name": "src",
+            "kind": "dir",
+            "size": 4096,
+            "mtimeMs": 1729000000000
+          },
+          {
+            "name": "link",
+            "kind": "symlink",
+            "size": 4,
+            "mtimeMs": 1
+          },
+          {
+            "name": "fifo",
+            "kind": "other",
+            "size": 0,
+            "mtimeMs": 2
+          }
+        ]
+      }
+    ],
+    "fs.realpath": [
+      {
+        "params": {
+          "path": "/var/x"
+        },
+        "result": "/private/var/x"
+      }
+    ],
+    "fs.mkdir": [
+      {
+        "params": {
+          "path": "/srv/p/new"
+        }
+      },
+      {
+        "params": {
+          "path": "/srv/p/a/b",
+          "recursive": true,
+          "mode": 493
+        }
+      }
+    ],
+    "fs.rename": [
+      {
+        "params": {
+          "from": "/srv/p/a",
+          "to": "/srv/p/b"
+        }
+      }
+    ],
+    "fs.rm": [
+      {
+        "params": {
+          "path": "/srv/p/b",
+          "recursive": true,
+          "force": true
+        }
+      }
+    ],
+    "fs.chmod": [
+      {
+        "params": {
+          "path": "/srv/p/run.sh",
+          "mode": 493
+        }
+      }
+    ],
+    "fs.symlink": [
+      {
+        "params": {
+          "target": "../a",
+          "path": "/srv/p/link"
+        }
+      }
+    ],
+    "fs.watch": [
+      {
+        "params": {
+          "watchId": "w-1",
+          "path": "/srv/p",
+          "recursive": true
+        }
+      },
+      {
+        "params": {
+          "watchId": "w-2",
+          "path": "/srv/p",
+          "recursive": false,
+          "ignore": [
+            ".git",
+            "node_modules"
+          ]
+        }
+      }
+    ],
+    "fs.unwatch": [
+      {
+        "params": {
+          "watchId": "w-1"
+        }
+      }
+    ],
+    "sys.info": [
+      {
+        "params": {},
+        "result": {
+          "os": "linux",
+          "arch": "x64",
+          "libc": "glibc",
+          "hostname": "orq-box1",
+          "osRelease": "Ubuntu 24.04.1 LTS",
+          "user": "dev",
+          "isRoot": false,
+          "canElevate": true,
+          "home": "/home/dev",
+          "shell": "/bin/bash",
+          "tmux": true,
+          "docker": false,
+          "cpus": 8,
+          "memBytes": 16777216000,
+          "gpus": [
+            "NVIDIA L4"
+          ],
+          "agentPath": "/usr/local/bin/orq-agent",
+          "dataDir": "/var/lib/orq-agent",
+          "container": false
+        }
+      }
+    ],
+    "sys.ports": [
+      {
+        "params": {},
+        "result": [
+          {
+            "port": 3000,
+            "address": "127.0.0.1",
+            "pid": 77,
+            "command": "node"
+          },
+          {
+            "port": 22,
+            "address": "0.0.0.0",
+            "pid": null,
+            "command": null
+          }
+        ]
+      }
+    ],
+    "sys.stats": [
+      {
+        "params": {},
+        "result": {
+          "cpuPercent": 12.5,
+          "memUsedBytes": 1024,
+          "memTotalBytes": 4096,
+          "diskUsedBytes": 10,
+          "diskTotalBytes": 100,
+          "uptimeSeconds": 3600.5
+        }
+      }
+    ],
+    "proc.list": [
+      {
+        "params": {},
+        "result": [
+          {
+            "procId": "p1",
+            "pid": 1,
+            "running": true,
+            "exitCode": null,
+            "signal": null,
+            "outputBytes": 10,
+            "bufferStart": 0
+          }
+        ]
+      }
+    ],
+    "proc.signal": [
+      {
+        "params": {
+          "procId": "p1",
+          "signal": "SIGTERM"
+        }
+      }
+    ],
+    "proc.release": [
+      {
+        "params": {
+          "procId": "p1"
+        }
+      }
+    ],
+    "forward.listen": [
+      {
+        "params": {
+          "boxPort": 47999,
+          "target": "session-tools"
+        }
+      }
+    ],
+    "forward.unlisten": [
+      {
+        "params": {
+          "boxPort": 47999
+        }
+      }
+    ],
+    "agent.ensurePaths": [
+      {
+        "params": {
+          "paths": [
+            "/var/lib/orquester/workspaces/w/p"
+          ]
+        }
+      }
+    ],
+    "agent.update": [
+      {
+        "params": {
+          "url": "https://d.example/api/boxes/agent/linux-x64",
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      }
+    ],
+    "agent.shutdown": [
+      {
+        "params": {
+          "reason": "destroyed"
+        }
+      }
+    ]
+  },
+  "boxToHost": {
+    "token.get": [
+      {
+        "params": {
+          "agent": "claude",
+          "accountId": "acc-1"
+        },
+        "result": {
+          "accessToken": "sk-ant-oat-x",
+          "expiresAt": 1729000000000
+        }
+      },
+      {
+        "params": {
+          "agent": "codex",
+          "accountId": "acc-2",
+          "minValidSeconds": 900
+        },
+        "result": {
+          "accessToken": "eyJ",
+          "expiresAt": null,
+          "extra": {
+            "chatgptAccountId": "org-1"
+          }
+        }
+      }
+    ],
+    "git.credential": [
+      {
+        "params": {
+          "operation": "get",
+          "input": "protocol=https\nhost=github.com\n\n"
+        },
+        "result": {
+          "output": "username=x-access-token\npassword=t\n"
+        }
+      },
+      {
+        "params": {
+          "operation": "store",
+          "input": "protocol=https\n"
+        },
+        "result": {
+          "output": ""
+        }
+      }
+    ]
+  }
+}

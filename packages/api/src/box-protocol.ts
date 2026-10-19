@@ -34,6 +34,14 @@
  * and `close` (either side; frees the id). Channel ids: the daemon opens EVEN
  * ids (2, 4, …), the box opens ODD ids (1, 3, …) — no collisions.
  *
+ * `close` is not answered; data arriving for a closed id is dropped, and ids
+ * are never reused within one connection. The side that finishes sends it:
+ * the box after `exit` (exec/attach) or after its last stream-1 `eof`
+ * (file-read, tar-read, tcp). For `file-write` and `tar-write` the box
+ * confirms success with `eof` on stream 1 and then `close`; a `close` that
+ * carries `error` (or arrives without that `eof`) means the write failed and
+ * nothing was replaced.
+ *
  * Streams within a channel ({@link BoxStream}): `0` = data toward the box
  * (stdin, upload bytes, tcp bytes from host), `1` = data from the box (stdout,
  * download bytes, tcp bytes from box), `2` = stderr (exec only).
@@ -450,7 +458,8 @@ export type BoxControlMessage =
   | { t: "resize"; ch: number; cols: number; rows: number }
   | { t: "signal"; ch: number; signal: string }
   | { t: "credit"; ch: number; bytes: number }
-  | { t: "close"; ch: number };
+  /** `error` (optional): why the sender gave up on the channel (a failed write, a broken transfer). */
+  | { t: "close"; ch: number; error?: BoxRpcError };
 
 // ---------------------------------------------------------------------------
 // Binary frames
