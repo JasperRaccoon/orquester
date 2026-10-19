@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { SECRET_BLOBS_DIR_NAME, SECRET_VAULT_INDEX_FILE } from "./secret-files.ts";
 
 export const ORQUESTER_DIR_NAME = ".orquester";
 export const DEFAULT_HTTP_HOST = "127.0.0.1";
@@ -213,6 +214,21 @@ export function workflowStatePath(baseDir: string): string {
 /** Workflow secret values; 0600 — values never leave the daemon (§5.7). */
 export function workflowSecretsPath(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "workflow-secrets.json");
+}
+
+/** The Secret files vaults (spec 2026-10-19 §3): the index and the content blobs; mode 0700. */
+export function secretFilesDir(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "secret-files");
+}
+
+/** The vault index; 0600. */
+export function secretVaultIndexPath(baseDir: string): string {
+  return joinPath(secretFilesDir(baseDir), SECRET_VAULT_INDEX_FILE);
+}
+
+/** Secret file contents, each named by its sha256; files 0600. */
+export function secretBlobsDir(baseDir: string): string {
+  return joinPath(secretFilesDir(baseDir), SECRET_BLOBS_DIR_NAME);
 }
 
 /** Parent of every `<runId>/` run directory (§5.8). */
@@ -2353,3 +2369,4 @@ export * from "./workflows.ts";
 export * from "./agent-tools.ts";
 export * from "./session-profiles.ts";
 export * from "./repo-identities.ts";
+export * from "./secret-files.ts";
