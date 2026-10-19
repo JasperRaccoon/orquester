@@ -120,7 +120,9 @@ export type RepoIdentityErrorCode =
   | "FAVICON_BLOCKED" // 400 — resolves to a loopback/private/link-local/metadata address
   | "FAVICON_UNREACHABLE" // 502 — DNS, TLS, timeout, non-2xx page
   | "FAVICON_NOT_FOUND" // 404 — the site has no usable icon
-  | "FAVICON_BUSY"; // 409 — a fetch for this repo is already running
+  | "FAVICON_BUSY" // 409 — a fetch for this repo is already running
+  | "REPO_IDENTITIES_UNAVAILABLE" // 503 — the store could not be read; changes are refused
+  | "REPO_IDENTITIES_ERROR"; // 500 — an unexpected failure
 
 // ---------------------------------------------------------------------------
 // Events
