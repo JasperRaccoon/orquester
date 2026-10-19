@@ -1555,6 +1555,12 @@ export interface CreateSessionRequest {
   profileId?: string;
   /** The workflow run that starts this session (workflows spec §5.10). Persisted on the tab record. */
   owner?: WorkflowSessionOwner;
+  /**
+   * boxes: `kind: "shell"` only — start the shell in this temporary box (one the
+   * project's chat created, Ephemeral AI VMs spec §13.3 "Watch") instead of on
+   * this host. Absent = the project's own location, as before.
+   */
+  boxId?: string;
 }
 
 /** Longest `CreateSessionRequest.initialCommand` the daemon will type. */

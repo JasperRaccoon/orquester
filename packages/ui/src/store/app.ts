@@ -9,6 +9,8 @@ import { notifyProvidersChanged, setProviderSideEffects } from "../lib/agent-cha
 import { applySavedPromptEvent, resetSavedPrompts } from "../lib/saved-prompts/store";
 import { applyRepoIdentityEvent, loadRepoIdentities, resetRepoIdentities } from "../lib/repo-identities/store";
 import { applySecretFilesEvent, loadSecretVaults, resetSecretFiles } from "../lib/secret-files/store";
+// boxes: the box surfaces' stand-in store (see components/boxes/surfaces/box-data.ts).
+import { applyBoxSurfacesEvent } from "../components/boxes/surfaces/box-store";
 import { applySecretRequestEvent, resetSecretRequests } from "../lib/agent-chat/secret-requests";
 import {
   applyAgentToolsEvent,
@@ -180,6 +182,8 @@ import {
   SESSION_PROFILES_CHANNEL,
   WORKFLOWS_CHANNEL
 } from "@orquester/api";
+// boxes:
+import { BOXES_CHANNEL } from "@orquester/api";
 import type { PluginInfo } from "@orquester/api";
 import type { AgentPrefs, UsagePrefs } from "@orquester/config";
 
@@ -701,6 +705,9 @@ export interface OpenTabRequest {
   initialCommand?: string;
   /** The §6.1 chat block. Required in practice for `kind: "agent-chat"`. */
   chat?: CreateAgentChatSessionFields;
+  // boxes: a shell attached to one of a chat's temporary boxes (its "Watch" button).
+  /** Start the shell in this box instead of on this host (`CreateSessionRequest.boxId`). */
+  boxId?: string;
 }
 
 /** What the tab strip + MainView are showing. A project (full tab set) or a
@@ -2652,7 +2659,9 @@ export const useAppStore = create<AppState>((set, get) => ({
           resumeConversationId,
           initialCommand,
           chat,
-          ...(profileId !== undefined ? { profileId } : {})
+          ...(profileId !== undefined ? { profileId } : {}),
+          // boxes: a temporary box's terminal.
+          ...(request.boxId !== undefined ? { boxId: request.boxId } : {})
         });
       } catch (error) {
         // A refused RESUME is the one create failure with a useful recovery ("open
@@ -3659,6 +3668,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       // Secret-file vaults live in their own module store (validated, never going
       // backwards by `updatedAt`); held only while the plugin is on.
       if (secretFilesOn(get().plugins)) applySecretFilesEvent(event);
+      return;
+    }
+    // boxes: box and config-change lists for the box surfaces (validated there).
+    if (event.channel === BOXES_CHANNEL) {
+      applyBoxSurfacesEvent(event);
       return;
     }
     if (event.channel === AGENT_PROFILE_CHANNEL) {
