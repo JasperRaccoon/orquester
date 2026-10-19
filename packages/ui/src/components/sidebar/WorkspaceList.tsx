@@ -24,6 +24,8 @@ import type { ProjectSummary, WorkspaceSummary } from "../../types";
 import { ArchivedFooter } from "./ArchivedFooter";
 import { CountPill, RowActionsButton, SectionHeader } from "./parts";
 import { ProjectRow, WorkspaceProjects, type InlineCreate } from "./WorkspaceProjects";
+import type { NewProjectPreset } from "./NewProjectModal";
+import { RepoIcon } from "../repo/RepoIcon";
 
 /** Something to create inside a workspace, from its menu or the sidebar's "+". */
 export type WorkspaceCreateKind = "project" | "folder" | "todo";
@@ -36,6 +38,8 @@ export interface WorkspaceListProps {
   onInlineCreateDone: () => void;
   /** Create something in `workspace` (opening it first when it is not the open one). */
   onCreate: (kind: WorkspaceCreateKind, workspace: string) => void;
+  /** A repo group's "+": a fresh clone of that repo into `workspace`. */
+  onCloneRepo?: (workspace: string, preset: NewProjectPreset) => void;
   onNewWorkspace: () => void;
 }
 
@@ -70,6 +74,7 @@ export const WorkspaceList: React.FC<WorkspaceListProps> = ({
   inlineCreate,
   onInlineCreateDone,
   onCreate,
+  onCloneRepo,
   onNewWorkspace
 }) => {
   const api = useApi();
@@ -255,6 +260,7 @@ export const WorkspaceList: React.FC<WorkspaceListProps> = ({
                 query={query}
                 creating={inlineCreate}
                 onCreatingDone={onInlineCreateDone}
+                onCloneRepo={onCloneRepo && ((preset) => onCloneRepo(workspace.name, preset))}
               />
             ) : expanded && matches ? (
               <div className="space-y-px pl-6 pr-1.5">
@@ -265,6 +271,7 @@ export const WorkspaceList: React.FC<WorkspaceListProps> = ({
                     active={project.path === currentProject?.path}
                     tempMarker={isWorkflowTempProject(project, tempProjects)}
                     onOpen={() => void openProjectAnywhere(project)}
+                    icon={project.repoKey ? <RepoIcon repoKey={project.repoKey} size={15} /> : undefined}
                   />
                 ))}
               </div>

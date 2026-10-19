@@ -282,6 +282,14 @@ const conversationScans = new Map<string, Promise<AgentConversationSummary[]>>()
 const forkRetryKeys = new ForkRetryKeys();
 
 /**
+ * Setup terminals of `createProjectWithCommand`, id → workspace. Its project
+ * list was loaded while the folder was still empty, so a typed `git clone`
+ * only gains its repo (and its sidebar repo group) once the command ran: the
+ * list is reloaded once when that terminal exits or is closed.
+ */
+const setupSessionWorkspaces = new Map<string, string>();
+
+/**
  * Is this recents row behind the archive curtain? `isArchived` is absent on
  * daemons predating the field, which means "not archived" (the daemon-side
  * default), so the fallback is deliberately permissive.
@@ -2099,6 +2107,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (!session) {
         throw new Error("the setup terminal could not be opened");
       }
+      setupSessionWorkspaces.set(session.id, workspace);
     } catch (error) {
       const reason =
         (error instanceof ApiError ? error.serverMessage : null) ??
@@ -3573,6 +3582,15 @@ export const useAppStore = create<AppState>((set, get) => ({
       bumpActivityEventSeq(id);
       set((state) => ({ activityById: { ...state.activityById, [id]: activity } }));
       return;
+    }
+    if (event.type === "session.exited" || event.type === "session.closed") {
+      const id = (event.payload as { id?: unknown } | null)?.id;
+      const setupWorkspace = typeof id === "string" ? setupSessionWorkspaces.get(id) : undefined;
+      if (typeof id === "string" && setupWorkspace !== undefined) {
+        setupSessionWorkspaces.delete(id);
+        // Another open workspace reloads its own list when it is opened again.
+        if (get().currentWorkspace === setupWorkspace) void get().loadProjects();
+      }
     }
     if (
       event.type === "session.created" ||
