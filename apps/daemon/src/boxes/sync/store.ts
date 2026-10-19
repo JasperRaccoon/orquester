@@ -47,35 +47,53 @@ async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
   }
 }
 
+/** The parsed file; undefined when it is missing or not JSON (an empty store; the next write replaces it). */
 async function readJson(path: string): Promise<unknown> {
   try {
     return JSON.parse(await readFile(path, "utf8"));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-    // Unreadable JSON: start empty (the next write replaces it).
+  } catch {
     return undefined;
   }
 }
 
 export class BoxConfigChangeStore {
   private readonly path: string;
-  private loaded = false;
   private envelope: Record<string, unknown> = { version: BOX_CONFIG_CHANGES_VERSION };
   private sets: StoredBoxConfigChangeSet[] = [];
   private unreadable: unknown[] = [];
   private writes: Promise<void> = Promise.resolve();
+  private loading: Promise<void> | null = null;
 
   constructor(appdir: string, private readonly now: () => Date = () => new Date()) {
     this.path = boxConfigChangesPath(appdir);
   }
 
-  async load(): Promise<void> {
-    if (this.loaded) return;
-    const parsed = parseBoxConfigChangesStore((await readJson(this.path)) ?? {});
+  /** Read the file once (concurrent callers share the read). */
+  load(): Promise<void> {
+    this.loading ??= this.read();
+    return this.loading;
+  }
+
+  private async read(): Promise<void> {
+    let text: string | null = null;
+    try {
+      text = await readFile(this.path, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    let value: unknown = {};
+    if (text !== null) {
+      try {
+        value = JSON.parse(text);
+      } catch {
+        // Not JSON: keep it aside for the owner instead of overwriting it with the next write.
+        await rename(this.path, `${this.path}.unreadable-${this.now().getTime()}`).catch(() => undefined);
+      }
+    }
+    const parsed = parseBoxConfigChangesStore(value);
     this.envelope = parsed.envelope;
     this.sets = parsed.sets;
     this.unreadable = parsed.unreadable;
-    this.loaded = true;
   }
 
   list(): StoredBoxConfigChangeSet[] {

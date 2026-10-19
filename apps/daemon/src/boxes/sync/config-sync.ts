@@ -99,7 +99,7 @@ export interface BoxConfigSyncOptions {
   /** Box event coalescing delay. */
   boxEventDebounceMs?: number;
   hasher?: BoxHasher;
-  /** Watch host trees with `fs.watch` (tests can turn it off and call {@link BoxConfigSyncService.hostChanged}). */
+  /** Watch host trees with `fs.watch` (off: call {@link BoxConfigSyncService.hostChanged} instead). */
   watchHost?: boolean;
   now?: () => Date;
 }
@@ -376,10 +376,10 @@ export class BoxConfigSyncService implements BoxConfigSync {
     await this.baselines.forget(boxId);
   }
 
-  /** Test seam and manual trigger: a host file under a watched root changed. */
-  hostChanged(boxId: string): void {
+  /** A host file under a box's watched roots changed: push now (what the host watchers trigger, debounced). */
+  async hostChanged(boxId: string): Promise<void> {
     const runtime = this.runtimes.get(boxId);
-    if (runtime) this.scheduleHostPass(runtime);
+    if (runtime) await this.hostPassNow(runtime);
   }
 
   /** Wait for every queued operation of a box (tests, shutdown). */
@@ -644,15 +644,22 @@ export class BoxConfigSyncService implements BoxConfigSync {
     if (this.closed || runtime.hostTimer !== null) return;
     runtime.hostTimer = setTimeout(() => {
       runtime.hostTimer = null;
-      const connection = runtime.connection;
-      if (!connection?.connected) return;
-      this.background(runtime, "host pass", async () => {
-        await this.store.load();
-        for (const root of this.watchedRoots(runtime)) await this.pass(runtime, connection, root, { mode: "host" });
-        await this.refreshWatches(runtime);
+      this.hostPassNow(runtime).catch((error: unknown) => {
+        this.options.logger?.warn?.(`box sync (${runtime.boxId}): host pass failed: ${error instanceof Error ? error.message : String(error)}`);
       });
     }, this.hostDebounceMs);
     runtime.hostTimer.unref?.();
+  }
+
+  /** Queue a host-only pass over the watched roots (pushes host changes, recreates watchers). */
+  private hostPassNow(runtime: Runtime): Promise<void> {
+    return this.enqueue(runtime, async () => {
+      const connection = runtime.connection;
+      if (!connection?.connected || this.closed) return;
+      await this.store.load();
+      for (const root of this.watchedRoots(runtime)) await this.pass(runtime, connection, root, { mode: "host" });
+      await this.refreshWatches(runtime);
+    });
   }
 
   private onBoxEvent(runtime: Runtime, connection: BoxConnection, event: BoxFsChangeEvent): void {
@@ -1067,7 +1074,12 @@ export class BoxConfigSyncService implements BoxConfigSync {
     await this.publish();
     if (decision === "approve") {
       // Every other box with these roots gets the host's new version.
-      for (const other of this.runtimes.values()) if (other !== runtime && other.scopes.size > 0) this.scheduleHostPass(other);
+      for (const other of this.runtimes.values()) {
+        if (other === runtime || other.scopes.size === 0) continue;
+        this.hostPassNow(other).catch((error: unknown) => {
+          this.options.logger?.warn?.(`box sync (${other.boxId}): pushing an approved change failed: ${error instanceof Error ? error.message : String(error)}`);
+        });
+      }
     }
     return set;
   }

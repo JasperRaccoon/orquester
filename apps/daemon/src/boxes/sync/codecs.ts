@@ -54,7 +54,7 @@ const isPlainObject = (value: unknown): value is Doc =>
 
 const SECRET_KEY = /secret|passw(or)?d|passphrase|api[_-]?key|apikey|access[_-]?key|private[_-]?key|credentials?$|authorization|bearer|token$|cookie/i;
 /** Keys that NAME a secret (an env var, a helper command, a file) rather than hold one. */
-const NOT_SECRET_KEY = /(env_?var|env_?key|_env|command|helper|path|file|url|uri|dir|name|_id|Id)$/;
+const NOT_SECRET_KEY = /(env_?var|env_?key|_env|command|helper|path|file|url|uri|dir|name|_?id)$/i;
 const MCP_PARENTS = new Set(["mcpServers", "mcp_servers", "mcp"]);
 const MCP_SECRET_TABLES = new Set(["env", "environment", "headers", "http_headers"]);
 
