@@ -6,8 +6,19 @@ export const TS_RUST_PLUGIN_ID = "ts-rust";
 export const EXCALIDRAW_PLUGIN_ID = "excalidraw";
 /** "Secret files" (docs/superpowers/specs/2026-10-19-secret-files-plugin-design.md; contracts in `secret-files.ts`). */
 export const SECRET_FILES_PLUGIN_ID = "secret-files";
-export type PluginId = typeof TS_RUST_PLUGIN_ID | typeof EXCALIDRAW_PLUGIN_ID | typeof SECRET_FILES_PLUGIN_ID;
-export const PLUGIN_IDS: readonly PluginId[] = [TS_RUST_PLUGIN_ID, EXCALIDRAW_PLUGIN_ID, SECRET_FILES_PLUGIN_ID];
+/** "Ephemeral AI VMs" (docs/superpowers/specs/2026-10-19-ephemeral-ai-vms-design.md; contracts in `boxes.ts`). */
+export const EPHEMERAL_VMS_PLUGIN_ID = "ephemeral-vms";
+export type PluginId =
+  | typeof TS_RUST_PLUGIN_ID
+  | typeof EXCALIDRAW_PLUGIN_ID
+  | typeof SECRET_FILES_PLUGIN_ID
+  | typeof EPHEMERAL_VMS_PLUGIN_ID;
+export const PLUGIN_IDS: readonly PluginId[] = [
+  TS_RUST_PLUGIN_ID,
+  EXCALIDRAW_PLUGIN_ID,
+  SECRET_FILES_PLUGIN_ID,
+  EPHEMERAL_VMS_PLUGIN_ID
+];
 
 export function isPluginId(value: unknown): value is PluginId {
   return typeof value === "string" && (PLUGIN_IDS as readonly string[]).includes(value);

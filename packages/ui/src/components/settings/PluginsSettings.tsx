@@ -9,6 +9,7 @@ import {
   RefreshCw,
   RotateCcw,
   Search,
+  Server,
   Trash2,
   X
 } from "lucide-react";
@@ -41,7 +42,8 @@ import { Badge, EmptyState, InfoRow, Notice, SettingRow, SettingsCard, SettingsP
 const PLUGIN_GLYPH: Record<PluginId, React.ReactNode> = {
   "ts-rust": "TS",
   excalidraw: <PenTool size={15} />,
-  "secret-files": <KeyRound size={15} />
+  "secret-files": <KeyRound size={15} />,
+  "ephemeral-vms": <Server size={15} />
 };
 
 /** The daemon's error text for a failed request, else the error's own. */

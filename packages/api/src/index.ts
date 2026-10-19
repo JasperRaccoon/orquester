@@ -58,6 +58,7 @@ import {
   type UpdateSessionProfileRequest
 } from "./session-profiles.ts";
 import type { AgentProfileAgentId, ProfileImportScanResponse } from "./agent-profile.ts";
+import type { ProjectBoxInfo, ProjectLocationRequest } from "./boxes.ts";
 export * from "./agent-chat/index.ts";
 export * from "./saved-prompts.ts";
 export * from "./repo-identities.ts";
@@ -68,6 +69,8 @@ export * from "./prompt-variables.ts";
 export * from "./workflows/index.ts";
 export * from "./desktops.ts";
 export * from "./plugins.ts";
+export * from "./boxes.ts";
+export * from "./box-protocol.ts";
 export * from "./agent-tools.ts";
 
 export type {
@@ -167,6 +170,12 @@ export interface ProjectSummary {
    * fresh clone of the same repo. Set with `repoKey`.
    */
   cloneUrl?: string;
+  /**
+   * Set when the project runs in a box (Ephemeral AI VMs plugin, spec
+   * 2026-10-19 §8). Absent = this host. For a box project the repo fields above
+   * come from the project's record, since the host directory is only a stub.
+   */
+  box?: ProjectBoxInfo;
 }
 
 /**
@@ -318,7 +327,12 @@ export interface OwnerSummary {
  * "New Folder"/name-only path) keep working unchanged. Repo modes resolve the
  * git account from the workspace's `gitAccountId`.
  */
-export type CreateProjectRequest =
+export type CreateProjectRequest = CreateProjectSource & {
+  /** Where the project runs. Absent or `{ kind: "host" }` = this host (Ephemeral AI VMs spec §8.1). */
+  location?: ProjectLocationRequest;
+};
+
+export type CreateProjectSource =
   | { source?: "empty"; name: string }
   /**
    * `url`: full URL, `git@…`, or `owner/repo`; `name` overrides the dest dir. `ref` (optional)

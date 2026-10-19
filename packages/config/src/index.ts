@@ -168,6 +168,49 @@ export function appendNodeRequireOption(existing: string | undefined, preloadPat
   return current.length > 0 ? `${current} ${option}` : option;
 }
 
+/** Ephemeral AI VMs: box records and plugin settings (`boxes.ts`). */
+export function boxesStorePath(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "boxes.json");
+}
+
+/** Ephemeral AI VMs: provider and Tailscale credentials; mode 0600, never sent to clients. */
+export function boxSecretsPath(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "box-secrets.json");
+}
+
+/** `<appdir>/daemon/boxes`: per-box sockets, setup logs, orq-agent builds; mode 0700. */
+export function boxesDir(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "boxes");
+}
+
+/**
+ * Local relay socket for one connected box: the agent host (and other local
+ * processes) open box channels through it with the same protocol as the box link.
+ */
+export function boxSocketPath(baseDir: string, boxId: string): string {
+  return joinPath(boxesDir(baseDir), "sockets", `${boxId}.sock`);
+}
+
+/** One box's setup log (plain text, no secrets). */
+export function boxSetupLogPath(baseDir: string, boxId: string): string {
+  return joinPath(boxesDir(baseDir), "logs", `${boxId}.log`);
+}
+
+/** Built `orq-agent` executables, one per platform (`<platform>/orq-agent[.exe]`). */
+export function boxAgentBuildsDir(baseDir: string): string {
+  return joinPath(boxesDir(baseDir), "agent-builds");
+}
+
+/** Verified plugin tooling archives for boxes, keyed by (tool, version, platform). */
+export function boxToolingCacheDir(baseDir: string): string {
+  return joinPath(boxesDir(baseDir), "tooling-cache");
+}
+
+/** Box → host config-change sets waiting for approval (spec §8.3). */
+export function boxConfigChangesPath(baseDir: string): string {
+  return joinPath(boxesDir(baseDir), "config-changes.json");
+}
+
 /** Parent of every desktop's runtime dir (sockets, cookies, logs); mode 0700. */
 export function desktopsRuntimeDir(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "desktops");
@@ -2370,3 +2413,4 @@ export * from "./agent-tools.ts";
 export * from "./session-profiles.ts";
 export * from "./repo-identities.ts";
 export * from "./secret-files.ts";
+export * from "./boxes.ts";
