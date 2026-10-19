@@ -235,6 +235,7 @@ export function ChatComposer({
   accountId,
   accountSwitchEnabled,
   accountSwitchRefusal = null,
+  accountNote,
   isTurnActive,
   hasPendingRequest,
   queue,
@@ -2028,6 +2029,7 @@ export function ChatComposer({
                   {...(accountId !== undefined ? { selectedId: accountId } : {})}
                   canSwitch={accountSwitchEnabled === true && !reverting}
                   disabledReason={accountSwitchRefusal}
+                  {...(accountNote ? { note: accountNote } : {})}
                   {...(accountOptions
                     ? {
                         onChange: (next: string) => {

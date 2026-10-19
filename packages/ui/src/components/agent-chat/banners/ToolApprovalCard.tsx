@@ -27,7 +27,7 @@
  */
 
 import React from "react";
-import { ChevronDown, KeyRound, Settings2, ShieldAlert, Wrench } from "lucide-react";
+import { ChevronDown, KeyRound, Server, Settings2, ShieldAlert, Wrench } from "lucide-react";
 import {
   sanitizeApprovalLabel,
   TOOL_APPROVAL_DENY_REASON_MAX_CHARS,
@@ -50,6 +50,7 @@ import {
   toolApprovalExpiryText,
   toolApprovalGrantChoices,
   toolApprovalGuardKey,
+  isBoxApprovalCard,
   toolApprovalKeyAction,
   toolApprovalKindBadge,
   toolApprovalCardKey,
@@ -302,7 +303,16 @@ export function ToolApprovalCard({
     <BannerCard
       variant={card.kind === "unknown" ? "error" : "warning"}
       density="spacious"
-      icon={toolset ? <Wrench size={14} aria-hidden /> : <ShieldAlert size={14} aria-hidden />}
+      icon={
+        // boxes: a temporary-box card spends money; it carries the VM glyph.
+        isBoxApprovalCard(card) ? (
+          <Server size={14} aria-hidden />
+        ) : toolset ? (
+          <Wrench size={14} aria-hidden />
+        ) : (
+          <ShieldAlert size={14} aria-hidden />
+        )
+      }
       title={toolApprovalKindBadge(card)}
       description={card.tool}
       counter={pendingCount > 1 ? `1/${pendingCount}` : undefined}

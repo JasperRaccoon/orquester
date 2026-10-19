@@ -6,6 +6,7 @@ import {
   KeyRound,
   ListTodo,
   Pencil,
+  RotateCcw,
   Trash2,
   Workflow as WorkflowIcon
 } from "lucide-react";
@@ -30,6 +31,12 @@ import { useCollapsedRepoGroups } from "../../lib/collapsed-repo-groups";
 import { useRepoIdentities } from "../../lib/repo-identities/hooks";
 import { useProjectSecretFiles, useSecretFilesEnabled } from "../../lib/secret-files/hooks";
 import { projectSecretBadge } from "../secret-files/drift.logic";
+// boxes:
+import { useProjectBox } from "../boxes/surfaces/box-data";
+import { boxProjectMenu } from "../boxes/surfaces/box-surfaces.logic";
+import { ProjectRowBoxBadge } from "../boxes/surfaces/BoxBadge";
+import { ProjectConfigChanges } from "../boxes/surfaces/ProjectConfigChanges";
+import { ApiError } from "../../lib/api-client";
 
 /** What the sidebar is naming inline inside the open workspace, if anything. */
 export type InlineCreate = "folder" | "todo" | null;
@@ -51,7 +58,11 @@ export const ProjectRow: React.FC<{
   const secretsOn = useSecretFilesEnabled();
   const secrets = useProjectSecretFiles(secretsOn ? project.path : undefined);
   const secretBadge = projectSecretBadge(secretsOn, secrets?.clone);
+  // boxes: a box project's badge, struck-through name once destroyed, and its config changes.
+  const boxView = useProjectBox(project.path, project.box);
+  const boxDestroyed = boxView?.info.state === "destroyed";
   return (
+    <>
     <div
       onContextMenu={(event) => {
         if (!onMenu) return;
@@ -75,7 +86,10 @@ export const ProjectRow: React.FC<{
         className="flex min-w-0 flex-1 items-center gap-2.5 rounded-lg px-2 py-1.5 text-left text-[13px] focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500"
       >
         {icon ?? <Box size={15} className={cn("shrink-0", active ? "text-neutral-300" : "text-neutral-500")} />}
-        <span className="flex-1 truncate">{project.name}</span>
+        <span className={cn("flex-1 truncate", boxView && "min-w-0", boxDestroyed && "text-neutral-500 line-through")}>
+          {project.name}
+        </span>
+        {boxView ? <ProjectRowBoxBadge view={boxView} /> : null}
         {tempMarker ? (
           <span
             title="Temporary project of a workflow run"
@@ -93,6 +107,8 @@ export const ProjectRow: React.FC<{
       </button>
       {onMenu && <RowActionsButton label={`Actions for ${project.name}`} onOpen={onMenu} />}
     </div>
+    {boxView ? <ProjectConfigChanges view={boxView} projectName={project.name} /> : null}
+    </>
   );
 };
 
@@ -173,6 +189,12 @@ export const WorkspaceProjects: React.FC<{
     />
   );
 
+  // boxes: the open menu's and the pending delete's box (§8.11): a failed destroy offers
+  // "Retry destroy" (the same as Delete), and the confirmation says the VM goes too.
+  const menuBox = boxProjectMenu(useProjectBox(menu?.project.path, menu?.project.box)?.info);
+  const deleteBox = boxProjectMenu(useProjectBox(pendingDelete?.path, pendingDelete?.box)?.info);
+  const setNotice = useAppStore((s) => s.setNotice);
+
   const menuItems = (project: ProjectSummary): ContextMenuItem[] => [
     {
       label: "Copy Full Path",
@@ -184,6 +206,17 @@ export const WorkspaceProjects: React.FC<{
       icon: <Archive size={13} />,
       onClick: () => void setProjectArchived(project, true)
     },
+    // boxes:
+    ...(menuBox.retryDestroy
+      ? [
+          {
+            label: "Retry destroy",
+            icon: <RotateCcw size={13} />,
+            danger: true,
+            onClick: () => setPendingDelete(project)
+          }
+        ]
+      : []),
     {
       label: "Delete",
       icon: <Trash2 size={13} />,
@@ -342,13 +375,29 @@ export const WorkspaceProjects: React.FC<{
           <>
             This permanently deletes <span className="font-medium text-neutral-200">{pendingDelete?.name}</span>{" "}
             and its contents from disk. This cannot be undone.
+            {deleteBox.deleteNote ? <span className="mt-2 block">{deleteBox.deleteNote}</span> : null}
           </>
         }
         onCancel={() => setPendingDelete(null)}
         onConfirm={() => {
           const project = pendingDelete;
           setPendingDelete(null);
-          if (project) {
+          if (project?.box) {
+            // boxes: a refused destroy leaves the project in "Destroy failed" (§8.11): say why,
+            // and re-read the list so the row shows it.
+            void deleteProject(project).catch((error: unknown) => {
+              setNotice({
+                title: `Could not delete ${project.name}`,
+                message:
+                  error instanceof ApiError
+                    ? (error.serverMessage ?? `The daemon answered ${error.status}.`)
+                    : error instanceof Error
+                      ? error.message
+                      : String(error)
+              });
+              void useAppStore.getState().loadProjects();
+            });
+          } else if (project) {
             void deleteProject(project);
           }
         }}

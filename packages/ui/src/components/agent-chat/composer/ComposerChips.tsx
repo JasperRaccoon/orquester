@@ -389,6 +389,8 @@ export interface AccountChipProps {
   disabledReason?: string | null;
   onChange?: (accountId: string) => void;
   returnFocusTo?: () => HTMLElement | null;
+  /** boxes: why some accounts are not offered ("Box chats use managed accounts only"). */
+  note?: string;
 }
 
 /** Why the chip is inert, in the one place the copy lives. */
@@ -414,16 +416,19 @@ export function AccountChip({
   canSwitch = true,
   disabledReason = null,
   onChange,
-  returnFocusTo
+  returnFocusTo,
+  note
 }: AccountChipProps): React.ReactElement {
   const now = useUsageNow();
   const selected = options?.find((option) => option.id === selectedId);
   const warning = selected ? <LoginExpiryWarning login={selected} now={now} className="px-2" /> : null;
+  // boxes: the note rides along on every tooltip of the chip.
+  const noteSuffix = note ? ` — ${note}` : "";
   if (!onChange || !options || options.length === 0) {
     return (
       <>
         <span
-          title={`Running as ${label}`}
+          title={`Running as ${label}${noteSuffix}`}
           className="inline-flex h-7 max-w-40 items-center gap-1 px-2 text-xs text-neutral-500"
         >
           <UserRound size={12} aria-hidden className="shrink-0" />
@@ -446,7 +451,8 @@ export function AccountChip({
             disabled={!canSwitch}
             data-composer-shortcut="account"
             title={
-              canSwitch ? `Running as ${label} — click to switch` : (disabledReason ?? ACCOUNT_BUSY_TITLE)
+              (canSwitch ? `Running as ${label} — click to switch` : (disabledReason ?? ACCOUNT_BUSY_TITLE)) +
+              noteSuffix
             }
             className={cn(CHIP, "max-w-40")}
           >
@@ -479,6 +485,15 @@ export function AccountChip({
                 {option.label}
               </ComposerMenuRow>
             ))}
+            {note ? (
+              <p
+                className="px-2 pt-1.5 text-[11px] leading-snug text-neutral-500"
+                title="The System account's login lives on this host and cannot be lent to a VM"
+                data-account-note=""
+              >
+                {note}
+              </p>
+            ) : null}
             <p className="px-2 pb-1 pt-1.5 text-[11px] leading-snug text-neutral-500">
               Applies to your next message. The conversation is kept.
             </p>
