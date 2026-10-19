@@ -73,6 +73,28 @@ export interface HtmlRenderPublishDeps {
    * the thread has none (then no local image is inlined).
    */
   sandboxRoot(threadId: string): Promise<string | null>;
+  /**
+   * boxes: the reader of a project whose files live in a box (`boxes/remote/fs/images.ts`),
+   * undefined for a host project (then this host's disk is read, as always).
+   */
+  images?(sandboxRoot: string): LocalImageReader | undefined;
+}
+
+/**
+ * boxes: local images read from somewhere other than this host's disk (a box
+ * project's files, spec §8.9). Paths in and out are host paths; every answer
+ * carries the same guarantees as the host code below.
+ */
+export interface LocalImageReader {
+  /** The realpath of `path` (an image reference as written), or null when it does not resolve. */
+  realpath(path: string): Promise<string | null>;
+  /** What is at a realpath (following links), or null when nothing is. */
+  stat(real: string): Promise<{ isFile: boolean; size: number } | null>;
+  /**
+   * At most `limit + 1` bytes of `real` — a realpath already checked to sit inside
+   * `root` — or null when it is no longer that regular file inside `root`.
+   */
+  readInside(real: string, root: string, limit: number): Promise<Buffer | null>;
 }
 
 export interface PublishHtmlRenderInput {
@@ -274,16 +296,26 @@ interface InlineResult {
  * file inside `sandboxRoot` with a data URI. Any other path stays as written
  * and is reported, missing or outside.
  */
-export async function inlineLocalImages(html: string, sandboxRoot: string | null): Promise<InlineResult> {
+export async function inlineLocalImages(html: string, sandboxRoot: string | null, images?: LocalImageReader): Promise<InlineResult> {
   const references = findLocalImages(html);
   const unique = [...new Set(references.map((reference) => reference.path))];
   const missing: string[] = [];
   const outside: string[] = [];
   const files: Array<{ path: string; real: string; size: number }> = [];
   for (const reference of unique) {
-    const real = await realpath(filePathFor(reference)).catch(() => null);
-    const info = real === null ? null : await stat(real).catch(() => null);
-    if (real === null || info === null || !info.isFile()) {
+    const real = images
+      ? await images.realpath(filePathFor(reference))
+      : await realpath(filePathFor(reference)).catch(() => null);
+    const info =
+      real === null
+        ? null
+        : images
+          ? await images.stat(real)
+          : await stat(real).then(
+              (found) => ({ isFile: found.isFile(), size: found.size }),
+              () => null
+            );
+    if (real === null || info === null || !info.isFile) {
       missing.push(reference);
       continue;
     }
@@ -314,12 +346,21 @@ export async function inlineLocalImages(html: string, sandboxRoot: string | null
   const dataUris = new Map<string, string>();
   let readBytes = 0;
   for (const file of files) {
-    const handle = sandboxRoot === null ? null : await openInsideRoot(file.real, sandboxRoot);
-    if (handle === null) {
-      outside.push(file.path);
-      continue;
+    let bytes: Buffer | null;
+    if (images && sandboxRoot !== null) {
+      bytes = await images.readInside(file.real, sandboxRoot, HTML_RENDER_MAX_IMAGE_BYTES);
+      if (bytes === null) {
+        outside.push(file.path);
+        continue;
+      }
+    } else {
+      const handle = sandboxRoot === null ? null : await openInsideRoot(file.real, sandboxRoot);
+      if (handle === null) {
+        outside.push(file.path);
+        continue;
+      }
+      bytes = await readBounded(handle, HTML_RENDER_MAX_IMAGE_BYTES).catch(() => null);
     }
-    const bytes = await readBounded(handle, HTML_RENDER_MAX_IMAGE_BYTES).catch(() => null);
     if (bytes === null || !isImageBytes(bytes)) {
       missing.push(file.path);
       continue;
@@ -369,7 +410,7 @@ function pageTooLarge(bytes: number): HtmlRenderPublishError {
  * scan never runs over inlined image data), then local images inlined. A
  * page naming an image it cannot inline is refused, with every such path.
  */
-export async function prepareHtmlRender(html: string, sandboxRoot: string | null): Promise<string> {
+export async function prepareHtmlRender(html: string, sandboxRoot: string | null, images?: LocalImageReader): Promise<string> {
   if (typeof html !== "string" || html.trim().length === 0) {
     throw new HtmlRenderPublishError("invalid-input", "The page is empty.");
   }
@@ -379,7 +420,7 @@ export async function prepareHtmlRender(html: string, sandboxRoot: string | null
       `The page is ${html.length} characters; the limit is ${HTML_RENDER_MAX_HTML_CHARS}.`
     );
   }
-  const inlined = await inlineLocalImages(injectHtmlRenderBootstrap(html), sandboxRoot);
+  const inlined = await inlineLocalImages(injectHtmlRenderBootstrap(html), sandboxRoot, images);
   if (inlined.outside.length > 0) {
     throw new HtmlRenderPublishError(
       "images-outside-project",
@@ -410,9 +451,10 @@ export async function publishHtmlRender(
   }
   const title = input.title.trim().slice(0, HTML_RENDER_MAX_TITLE_LENGTH) || "HTML";
   const root = await deps.sandboxRoot(input.threadId);
-  // Compared against each image's realpath, so it must be one too.
-  const sandboxRoot = root === null ? null : await realpath(root).catch(() => null);
-  const html = await prepareHtmlRender(input.html, sandboxRoot);
+  const images = root === null ? undefined : deps.images?.(root);
+  // Compared against each image's realpath, so it must be one too (taken where the images are).
+  const sandboxRoot = root === null ? null : images ? await images.realpath(root) : await realpath(root).catch(() => null);
+  const html = await prepareHtmlRender(input.html, sandboxRoot, images);
   let heights = input.heights;
   if (heights === undefined && input.measure !== undefined) {
     heights = await input.measure(html).catch(() => undefined);

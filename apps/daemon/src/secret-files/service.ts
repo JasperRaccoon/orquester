@@ -153,7 +153,7 @@ export type SecretFilesWatchFn = (
   onError: (error: Error) => void
 ) => SecretFilesWatchHandle;
 
-const defaultWatch: SecretFilesWatchFn = (dir, onChange, onError) => {
+export const defaultWatch: SecretFilesWatchFn = (dir, onChange, onError) => {
   const watcher = fsWatch(dir, { persistent: false }, (_event, filename) => onChange(filename === null ? null : String(filename)));
   watcher.on("error", onError);
   return {
@@ -170,7 +170,7 @@ const defaultWatch: SecretFilesWatchFn = (dir, onChange, onError) => {
 /** A watched directory's identity (device + inode), or null when it isn't a directory now. */
 export type SecretFilesDirIdentityFn = (dir: string) => Promise<string | null>;
 
-const defaultDirIdentity: SecretFilesDirIdentityFn = async (dir) => {
+export const defaultDirIdentity: SecretFilesDirIdentityFn = async (dir) => {
   try {
     const stats = await fsStat(dir);
     return stats.isDirectory() ? `${stats.dev}:${stats.ino}` : null;

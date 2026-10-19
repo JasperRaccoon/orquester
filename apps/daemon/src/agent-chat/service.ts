@@ -58,7 +58,7 @@ import { parseSessionOwner } from "./owner.ts";
 import type { FastifyReply } from "fastify";
 import type { AgentChatRouteDeps } from "./proxy-routes.ts";
 import type { HtmlRenderReference, Skill, SlashCommand } from "@orquester/api/agent-chat";
-import { publishHtmlRender, type PublishHtmlRenderInput } from "./html-render-publish.ts";
+import { publishHtmlRender, type LocalImageReader, type PublishHtmlRenderInput } from "./html-render-publish.ts";
 import { HtmlPreviewError, measureHtmlPage, previewHtmlPage, type HtmlPageRenderer, type HtmlPreview, type HtmlPreviewInput } from "../html-preview/index.ts";
 import { createVisualUrlSigner, type VisualUrlSigner } from "./visual-urls.ts";
 import {
@@ -183,6 +183,11 @@ export interface AgentChatServiceOptions {
    * grant Claude project trust for — see `prepareHome`.
    */
   resolveTrustedProjectDir(projectPath: string): Promise<string | null>;
+  /**
+   * boxes: the image reader of a project that lives in a box (its page's local images are read
+   * there, spec §8.9); undefined for a host project. Absent: every project is a host project.
+   */
+  localImages?(projectDir: string): LocalImageReader | undefined;
   /**
    * Stream a host-resolved attachment to the client. `index.ts` owns it
    * because the `Content-Disposition` / streaming conventions live there with
@@ -2068,7 +2073,8 @@ export class AgentChatService {
           }
           return id;
         },
-        sandboxRoot: (threadId) => this.htmlRenderSandboxRoot(threadId)
+        sandboxRoot: (threadId) => this.htmlRenderSandboxRoot(threadId),
+        images: (root) => this.opts.localImages?.(root)
       },
       {
         ...page,
@@ -2095,7 +2101,13 @@ export class AgentChatService {
       throw new HtmlPreviewError("browser-unavailable", "This Orquester cannot render pages.");
     }
     const { threadId, ...rest } = input;
-    return previewHtmlPage(browser, { ...rest, sandboxRoot: await this.htmlRenderSandboxRoot(threadId) });
+    const root = await this.htmlRenderSandboxRoot(threadId);
+    // boxes: a box project's images are read in its box, against the root's realpath there.
+    const images = root === null ? undefined : this.opts.localImages?.(root);
+    if (images && root !== null) {
+      return previewHtmlPage(browser, { ...rest, sandboxRoot: await images.realpath(root), images });
+    }
+    return previewHtmlPage(browser, { ...rest, sandboxRoot: root });
   }
 
   /**

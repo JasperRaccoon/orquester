@@ -219,6 +219,8 @@ import { registerSessionToolsRoute } from "./session-tools/route.ts";
 // boxes: file routes of box projects (spec §8.7).
 import type { BoxRegistry } from "./boxes/contracts.ts";
 import { registerBoxFsRouting } from "./boxes/remote/fs/routes.ts";
+import { boxAwareSecretFileIo } from "./boxes/remote/fs/secret-files.ts";
+import { boxImageReader } from "./boxes/remote/fs/images.ts";
 import {
   UploadTooLargeError,
   acceptRawBody,
@@ -644,6 +646,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
         return null;
       }
     },
+    // boxes: html_render / html_preview read a box project's images in its box (spec §8.9).
+    // `services` is read per call: no page is published before it exists.
+    localImages: (projectDir) => boxImageReader(services.boxRegistry, projectDir),
     logger: console
   });
 
@@ -770,7 +775,10 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     publish: (payload) => broadcaster.publish(SECRET_FILES_CHANNEL, SECRET_FILES_CHANGED, payload),
     // Every clone write checks the clone root's realpath stays inside the (current) workspaces root.
     workspacesRoot: () => resolved.workspacesDir,
-    logger: console
+    logger: console,
+    // boxes: a clone in a box project is read, written and watched in its box (spec §8.7).
+    // `services` is read per call: the service starts only after it exists.
+    ...boxAwareSecretFileIo(() => services.boxRegistry)
   });
   // Automated workflows (workflows spec §3, §5.7, §5.8): definitions, secrets, runs and runtime
   // state. Each store is tolerant at load — a file it cannot parse is moved aside, one it cannot
@@ -1482,7 +1490,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     agentChat,
     // Getters: the client lives as long as the daemon, and PUT /api/config/daemon moves both.
     fsRoot: () => resolved.fsRoot,
-    workspacesDir: () => resolved.workspacesDir
+    workspacesDir: () => resolved.workspacesDir,
+    // boxes: read_file / directory reads of box projects go to the box.
+    boxes: () => services.boxRegistry
   });
 
   lineage.attachApi(services.internalApi);
@@ -4981,7 +4991,9 @@ export function createServer(
           agentChat: services.agentChat ?? null,
           broadcaster: services.broadcaster,
           fsRoot: resolved.fsRoot,
-          workspacesDir: resolved.workspacesDir
+          workspacesDir: resolved.workspacesDir,
+          // boxes: read_file / directory reads of box projects go to the box.
+          boxes: () => services.boxRegistry
         }),
       credentialId: () => externalCredentialId(config.transports.http.username)
     });

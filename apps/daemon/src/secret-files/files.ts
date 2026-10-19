@@ -93,7 +93,7 @@ function errorCode(error: unknown): string | undefined {
   return typeof code === "string" ? code : undefined;
 }
 
-const UNREADABLE_CODES = new Set(["EACCES", "EPERM", "EIO", "ENAMETOOLONG", "EOVERFLOW", "ENXIO"]);
+export const UNREADABLE_CODES = new Set(["EACCES", "EPERM", "EIO", "ENAMETOOLONG", "EOVERFLOW", "ENXIO"]);
 
 /** Map an fs error met while resolving a path to a result, or rethrow it. */
 function classifyPathError(error: unknown): "missing" | CloneFileRefusal {
@@ -251,7 +251,7 @@ async function readOpened(abs: string, expected: Stats): Promise<CloneFileRead |
   }
 }
 
-const REFUSAL_MESSAGES: Record<CloneFileRefusal, string> = {
+export const REFUSAL_MESSAGES: Record<CloneFileRefusal, string> = {
   symlink: "The file or one of its folders is a symbolic link.",
   outside: "The file resolves outside the project folder.",
   "not-a-file": "The path is not a regular file.",
@@ -343,7 +343,7 @@ export async function writeCloneFile(
   await syncDir(parentAbs);
 }
 
-const EXISTS_MESSAGE = "A file appeared at that path; it was left as it is.";
+export const EXISTS_MESSAGE = "A file appeared at that path; it was left as it is.";
 /** link() failures that mean the filesystem has no hard links (then an O_EXCL create is the fallback). */
 const NO_LINK_CODES = new Set(["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EXDEV", "EMLINK"]);
 

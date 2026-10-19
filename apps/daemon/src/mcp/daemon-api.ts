@@ -8,6 +8,7 @@ import { HtmlRenderPublishError } from "../agent-chat/html-render-publish.ts";
 import { HtmlPreviewError, type HtmlPreview } from "../html-preview/index.ts";
 import { isUploadTooLarge, UploadTooLargeError } from "../upload-stream.ts";
 import { FsTools, type ListFilesResult, type ReadFileWindowResult } from "./fs-tools.ts";
+import type { BoxRegistry } from "../boxes/contracts.ts";
 import { mintPrincipalToken } from "./principal.ts";
 
 export type DaemonMethod = "GET" | "POST" | "PUT" | "DELETE";
@@ -100,7 +101,8 @@ function visualRefusal(error: unknown): DaemonOutcome<never> {
 export type LivePath = string | (() => string);
 
 export class InjectDaemonApi implements DaemonApi {
-  constructor(private readonly opts: { app: FastifyInstance; authorization: string | undefined; agentChat: ChatUploads | null; broadcaster: Broadcaster; fsRoot: LivePath; workspacesDir: LivePath }) {}
+  // boxes: `boxes` tells the file reads which paths live in a box project (absent: all host).
+  constructor(private readonly opts: { app: FastifyInstance; authorization: string | undefined; agentChat: ChatUploads | null; broadcaster: Broadcaster; fsRoot: LivePath; workspacesDir: LivePath; boxes?: () => BoxRegistry | undefined }) {}
 
   get fsRoot(): string {
     return typeof this.opts.fsRoot === "function" ? this.opts.fsRoot() : this.opts.fsRoot;
@@ -181,11 +183,11 @@ export class InjectDaemonApi implements DaemonApi {
 
   /** Read at every call: `fsRoot` follows `PUT /api/config/daemon`. */
   listDirectory(path: string): Promise<ListFilesResult> {
-    return new FsTools({ fsRoot: this.fsRoot }).listFiles(path);
+    return new FsTools({ fsRoot: this.fsRoot, ...(this.opts.boxes ? { boxes: this.opts.boxes } : {}) }).listFiles(path);
   }
 
   readFileRange(path: string, opts: { offset?: number; maxBytes?: number }): Promise<ReadFileWindowResult> {
-    return new FsTools({ fsRoot: this.fsRoot }).readFileWindow(path, opts);
+    return new FsTools({ fsRoot: this.fsRoot, ...(this.opts.boxes ? { boxes: this.opts.boxes } : {}) }).readFileWindow(path, opts);
   }
 
   subscribe(listener: (event: EventMessage) => void): () => void {

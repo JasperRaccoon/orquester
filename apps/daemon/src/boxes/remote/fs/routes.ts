@@ -390,8 +390,9 @@ function routes(deps: BoxFsRoutingDeps): Record<string, BoxRoute> {
         const name = posix.basename(safe);
 
         if (info.kind === "file") {
+          // The response closing (done, or the client gone) ends the box read; after a full transfer it is a no-op.
           const abort = new AbortController();
-          request.raw.on("close", () => abort.abort());
+          reply.raw.on("close", () => abort.abort());
           let stream;
           try {
             stream = await fs.readStream(safe, { signal: abort.signal });
@@ -434,7 +435,7 @@ function routes(deps: BoxFsRoutingDeps): Record<string, BoxRoute> {
           child.on("exit", (code) => {
             if (code !== 0) reply.raw.destroy();
           });
-          request.raw.on("close", () => child.kill());
+          reply.raw.on("close", () => child.kill());
           return;
         }
 
