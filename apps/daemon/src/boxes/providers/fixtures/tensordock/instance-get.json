@@ -1,0 +1,25 @@
+{
+  "type": "instance",
+  "id": "5c0ffee0-1234-4abc-9def-00000000beef",
+  "name": "orq-box-0123abcd",
+  "status": "Running",
+  "ipAddress": "198.51.100.23",
+  "portForwards": [
+    {
+      "internal_port": 22,
+      "external_port": 20022
+    }
+  ],
+  "resources": {
+    "vcpu_count": 8,
+    "ram_gb": 32,
+    "storage_gb": 100,
+    "gpus": {
+      "geforcertx4090-pcie-24gb": {
+        "count": 1,
+        "v0Name": "geforcertx4090-pcie-24gb"
+      }
+    }
+  },
+  "rateHourly": 0.4245
+}
