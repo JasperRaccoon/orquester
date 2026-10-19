@@ -8,10 +8,15 @@
 // The file runs inside arbitrary user processes on any Node >= 18, so it is
 // plain ES5-style CommonJS, swallows every error, prints nothing outside a
 // redirect, and does no file I/O unless `argv[1]` looks like tsc.
+//
+// Two renderings: the host's (`renderTsRustPreload`), which reads plugins.json
+// and the daemon's own install dirs, and a box's (`renderTsRustBoxPreload`,
+// Ephemeral AI VMs spec §10), which bakes in only box paths — in the box's
+// path syntax — and reads the small state file the daemon pushes to the box.
 
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, posix, resolve, win32 } from "node:path";
 
-import { TS_RUST_PLUGIN_ID, type TsCheckerEngine } from "@orquester/api";
+import { type BoxOs, TS_RUST_PLUGIN_ID, type TsCheckerEngine } from "@orquester/api";
 import { tsRustPluginDir, tsrsEngineDir } from "@orquester/config";
 
 import { writeFileAtomic } from "../../agent-hooks.ts";
@@ -47,9 +52,11 @@ function versionsDirs(statePath: string): Record<TsCheckerEngine, string> {
   };
 }
 
-// The preload's code after its baked constants. Raw, so its regexes and string
+// The preload's code after its baked constants, in three parts: steps 1–2,
+// step 3 (where the state comes from: plugins.json on the host, the daemon's
+// state file in a box), and the redirect. Raw, so its regexes and string
 // escapes are written exactly as they appear in preload.cjs.
-const PRELOAD_BODY = String.raw`
+const PRELOAD_HEAD = String.raw`
   // Ends in typescript/bin/tsc or typescript/lib/tsc.js, with either separator.
   var TSC_SCRIPT = /[\\/]typescript[\\/](?:bin[\\/]tsc|lib[\\/]tsc\.js)$/;
   // A version names a directory under VERSIONS_DIRS: no separators, no "..".
@@ -92,7 +99,9 @@ const PRELOAD_BODY = String.raw`
     var workspace = workspaceOf(unresolved) || workspaceOf(process.cwd());
     if (!workspace) return;
 
-    // 3. The plugin is on and the active engine has a current version installed.
+`;
+
+const HOST_STATE = String.raw`    // 3. The plugin is on and the active engine has a current version installed.
     //    The engine is the one plugins.json names when it has a build here, else
     //    this host's default; tsc-rs's versions are the record's own fields
     //    (as older builds wrote them), tsrs's are under "tsrs".
@@ -105,7 +114,22 @@ const PRELOAD_BODY = String.raw`
     var current = record && typeof record === "object" ? record.current : null;
     var version = current && typeof current === "object" ? current.version : null;
     if (typeof version !== "string" || !SAFE_VERSION.test(version) || version.indexOf("..") !== -1) return;
-    var binaryName = engine === "tsrs" ? "tsrs" : "tsc";
+`;
+
+// A box has no plugins.json: the daemon pushes {"enabled", "engine", "version"}
+// (written by the box tooling provisioner on every change) and the engine is
+// already this box's own choice.
+const BOX_STATE = String.raw`    // 3. The plugin is on in this box and its engine has a version installed:
+    //    the state file the daemon pushes names both.
+    var state = JSON.parse(fs.readFileSync(STATE_PATH, "utf8"));
+    if (!state || typeof state !== "object" || state.enabled !== true) return;
+    var engine = state.engine;
+    if (SUPPORTED_ENGINES.indexOf(engine) === -1) return;
+    var version = state.version;
+    if (typeof version !== "string" || !SAFE_VERSION.test(version) || version.indexOf("..") !== -1) return;
+`;
+
+const PRELOAD_TAIL = String.raw`    var binaryName = engine === "tsrs" ? "tsrs" : "tsc";
     var binary = path.join(VERSIONS_DIRS[engine], version, process.platform === "win32" ? binaryName + ".exe" : binaryName);
     var failed = function (error) {
       var code = error && (error.code || error.message);
@@ -247,7 +271,10 @@ const PRELOAD_BODY = String.raw`
 })();
 `;
 
-/** The preload.cjs source with `options` baked in. */
+const PRELOAD_BODY = `${PRELOAD_HEAD}${HOST_STATE}${PRELOAD_TAIL}`;
+const BOX_PRELOAD_BODY = `${PRELOAD_HEAD}${BOX_STATE}${PRELOAD_TAIL}`;
+
+/** The host's preload.cjs source with `options` baked in. */
 export function renderTsRustPreload(options: TsRustPreloadOptions): string {
   const roots = [resolve(options.workspacesRoot)];
   if (options.configuredWorkspacesRoot !== undefined && !roots.includes(resolve(options.configuredWorkspacesRoot))) {
@@ -269,6 +296,55 @@ export function renderTsRustPreload(options: TsRustPreloadOptions): string {
 (function () {
   ${constants.join("\n  ")}
 ${PRELOAD_BODY}`;
+}
+
+export interface TsRustBoxPreloadOptions {
+  /** The box's OS: its path rules apply to every path below. */
+  os: BoxOs;
+  /** The box path of the state file the daemon pushes (`{ enabled, engine, version }`). */
+  statePath: string;
+  /** The workspaces root(s) as box paths: real and configured, when they differ. */
+  workspacesRoots: readonly string[];
+  /** Each engine's `versions/` dir in the box. */
+  versionsDirs: Readonly<Record<TsCheckerEngine, string>>;
+  /** The engines with a build for the box; a state file naming another is ignored. */
+  supportedEngines: readonly TsCheckerEngine[];
+}
+
+/**
+ * A box's preload.cjs source. Every path is checked to be absolute and
+ * normalised with the box's path rules — never resolved against this
+ * machine — so a Windows box gets `C:\…` paths from a Linux daemon.
+ */
+export function renderTsRustBoxPreload(options: TsRustBoxPreloadOptions): string {
+  const rules = options.os === "win32" ? win32 : posix;
+  const boxPath = (value: string): string => {
+    if (!rules.isAbsolute(value)) throw new Error(`Not an absolute ${options.os} path: ${value}`);
+    return rules.normalize(value);
+  };
+  const roots: string[] = [];
+  for (const root of options.workspacesRoots.map(boxPath)) {
+    if (!roots.includes(root)) roots.push(root);
+  }
+  if (roots.length === 0) throw new Error("A box preload needs a workspaces root");
+  const constants = [
+    `var STATE_PATH = ${JSON.stringify(boxPath(options.statePath))};`,
+    `var WORKSPACES_ROOTS = ${JSON.stringify(roots)};`,
+    `var VERSIONS_DIRS = ${JSON.stringify({
+      "tsc-rs": boxPath(options.versionsDirs["tsc-rs"]),
+      tsrs: boxPath(options.versionsDirs.tsrs)
+    })};`,
+    `var SUPPORTED_ENGINES = ${JSON.stringify(options.supportedEngines)};`
+  ];
+  return `// Generated by Orquester (Settings → Plugins → Better TS Typecheck) for this box;
+// the daemon rewrites it whenever the plugin changes, so do not edit. Loaded through
+// NODE_OPTIONS=--require into Node processes started from Orquester sessions in the
+// box: while the plugin is on, a TypeScript \`tsc\` run inside a workspace runs tsrs or
+// tsc-rs instead; anything else is untouched.
+"use strict";
+(function () {
+  ${constants.join("\n  ")}
+${BOX_PRELOAD_BODY}`;
 }
 
 /** Atomically write the rendered preload to `path` (mode 0644), creating parent dirs. */

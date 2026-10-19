@@ -156,17 +156,7 @@ export function tsRustPreloadPath(baseDir: string): string {
   return joinPath(tsRustPluginDir(baseDir), "preload.cjs");
 }
 
-/**
- * Append `--require "<preloadPath>"` to an existing NODE_OPTIONS value, keeping
- * whatever the user already set. Idempotent: a value that already requires the
- * preload is returned unchanged.
- */
-export function appendNodeRequireOption(existing: string | undefined, preloadPath: string): string {
-  const option = `--require ${JSON.stringify(preloadPath)}`;
-  const current = (existing ?? "").trim();
-  if (current.includes(option)) return current;
-  return current.length > 0 ? `${current} ${option}` : option;
-}
+// appendNodeRequireOption lives in ./tooling.ts (re-exported below) beside the per-target env helpers.
 
 /** Ephemeral AI VMs: box records and plugin settings (`boxes.ts`). */
 export function boxesStorePath(baseDir: string): string {
@@ -204,6 +194,19 @@ export function boxAgentBuildsDir(baseDir: string): string {
 /** Verified plugin tooling archives for boxes, keyed by (tool, version, platform). */
 export function boxToolingCacheDir(baseDir: string): string {
   return joinPath(boxesDir(baseDir), "tooling-cache");
+}
+
+/**
+ * One verified archive in the box tooling cache:
+ * `<boxToolingCacheDir>/<tool>/<version>/<os>-<arch>[-<libc>].tgz`. Callers pass
+ * plain names (no separators, no `..`); the daemon checks them before use.
+ */
+export function boxToolingArchivePath(
+  baseDir: string,
+  key: { tool: string; version: string; os: string; arch: string; libc: string | null }
+): string {
+  const platform = key.libc ? `${key.os}-${key.arch}-${key.libc}` : `${key.os}-${key.arch}`;
+  return joinPath(boxToolingCacheDir(baseDir), key.tool, key.version, `${platform}.tgz`);
 }
 
 /** Box → host config-change sets waiting for approval (spec §8.3). */
@@ -2414,3 +2417,4 @@ export * from "./session-profiles.ts";
 export * from "./repo-identities.ts";
 export * from "./secret-files.ts";
 export * from "./boxes.ts";
+export * from "./tooling.ts";
