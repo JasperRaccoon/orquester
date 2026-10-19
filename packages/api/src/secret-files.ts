@@ -95,6 +95,14 @@ export interface SecretFileCloneState {
   state: SecretFileState;
   /** Set with `state: "refused"`. */
   refusal?: SecretFileRefusal;
+  /**
+   * Opaque token of this clone's current copy (absent when it has none): it
+   * changes whenever the content does, and is NOT a content hash (a keyed
+   * digest with a per-daemon-process secret), so it reveals nothing. Pass it
+   * back in {@link SecretFilesCloneRequest.expect} to act only on the content
+   * the user or the approval card saw.
+   */
+  contentToken?: string;
 }
 
 export interface SecretFilesClone {
@@ -117,7 +125,20 @@ export interface SecretVaultSummary {
   updatedAt: string;
 }
 
+/**
+ * Orders every detail the daemon publishes for one vault: `boot` identifies the
+ * daemon process, `seq` grows with every published change (vault or clone
+ * state). A client keeps the detail with the higher `seq` of the same `boot`,
+ * and accepts any detail of a different `boot` (the daemon restarted).
+ */
+export interface SecretVaultRevision {
+  boot: string;
+  seq: number;
+}
+
 export interface SecretVaultDetail extends SecretVaultSummary {
+  /** Absent from daemons predating it: order those by `updatedAt`. */
+  revision?: SecretVaultRevision;
   files: SecretVaultFile[];
   /** Candidate paths the user turned off; never suggested again. */
   excluded: string[];
@@ -221,6 +242,8 @@ export interface SecretVaultResponse {
 export interface SecretFileCompareResponse {
   path: string;
   compare: SecretFileCompare;
+  /** The compared clone copy's `contentToken` (absent when the clone has none). */
+  contentToken?: string;
 }
 
 export type SecretFileSource =
@@ -247,7 +270,11 @@ export interface UpdateSecretFilesRequest {
   exclude?: string[];
   /** Un-exclude these candidates (they show as new candidates again). */
   include?: string[];
-  /** Stop managing these paths; the vault keeps their history, clones keep their files. */
+  /**
+   * Stop managing these paths: they stop syncing, clones keep their files, and
+   * the vault keeps the file's version history (kept as a retired file; adding
+   * the path again starts a new history).
+   */
   unmanage?: string[];
 }
 
@@ -257,6 +284,13 @@ export interface SecretFilesCloneRequest {
   projectPath: string;
   /** Default: every file of that clone in a state the action applies to. */
   files?: string[];
+  /**
+   * Act only if each named file's copy in this clone still has this
+   * `contentToken` (null: the clone must have no copy); otherwise nothing is
+   * written and the answer is 409 CONTENT_CHANGED. The approval card and the UI
+   * pass what they showed.
+   */
+  expect?: Record<string, string | null>;
 }
 
 /** Refusal codes (`{ code, message }` bodies). A message never quotes file content. */
@@ -272,6 +306,7 @@ export type SecretFilesErrorCode =
   | "NOT_ENV_FORMAT" // 400 — merge asked for a file that isn't KEY=VALUE
   | "TOO_MANY_FILES" // 400 — over SECRET_FILES_MAX_PER_VAULT
   | "NOTHING_TO_PUSH" // 409 — no selected file is modified in that clone
+  | "CONTENT_CHANGED" // 409 — a file's content no longer matches `expect`
   | "SECRET_FILES_UNAVAILABLE" // 503 — the vault store could not be read; changes are refused
   | "SECRET_FILES_ERROR"; // 500
 
@@ -295,7 +330,7 @@ export type SecretFilesChangedPayload =
 /**
  * Why `path` is not a managed-file path, or null when it is one: relative to
  * the clone root, `/`-separated, no empty / `.` / `..` segments, no backslash,
- * no control characters, not under `.git/`, at most {@link SECRET_FILE_PATH_MAX}.
+ * no control characters, no `.git` segment (any case), at most {@link SECRET_FILE_PATH_MAX}.
  * (Symlinks and containment are checked on disk by the daemon.)
  */
 export function secretFilePathProblem(path: unknown): string | null {
@@ -308,7 +343,7 @@ export function secretFilePathProblem(path: unknown): string | null {
   if (segments.some((segment) => segment.length === 0 || segment === "." || segment === "..")) {
     return "The path may not contain empty, '.' or '..' parts.";
   }
-  if (segments[0] === ".git") return "Files inside .git can't be managed.";
+  if (segments.some((segment) => segment.toLowerCase() === ".git")) return "Files inside .git can't be managed.";
   return null;
 }
 
