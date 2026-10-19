@@ -147,6 +147,8 @@ import { registerSecretFilesRoutes } from "./secret-files/routes.ts";
 import { registerTodoToggleRoute } from "./todo-items.ts";
 import { PluginsService, publishPluginEvents } from "./plugins/plugins-service.ts";
 import { registerPluginRoutes } from "./plugins/routes.ts";
+// boxes: Ephemeral AI VMs — the box service (projects in boxes, the plugin's routes).
+import { isBoxLocation, sendBoxError, type BoxService } from "./boxes/service/index.ts";
 import { detectRepoInfo, remoteRepoFields } from "./repo-id";
 import { Tmux, sessionPath, tmuxAvailable, tmuxVersionOk } from "./tmux";
 import { SystemStatusService } from "./system-status";
@@ -1685,6 +1687,8 @@ interface Services {
   plugins: PluginsService;
   /** The "Secret files" plugin's vaults and sync engine: ONE instance both transports share. Optional: route tests build a partial `services`. */
   secretFiles?: SecretFilesService;
+  // boxes: the Ephemeral AI VMs box service (spec 2026-10-19). Optional: route tests build a partial `services`.
+  boxes?: BoxService;
   /** Each agent CLI's own global config (agent profile spec §4): Settings → Agent config. */
   agentProfile: AgentProfileService;
   /** Orquester-owned per-session Agent Profiles (spec 2026-10-18). */
@@ -2185,7 +2189,9 @@ export function createServer(
       }
       // The UI re-lists after a clone lands: a (debounced) secret-files reconcile picks up new clones.
       services.secretFiles?.notifyProjectsListed();
-      return listProjects(resolved.workspacesDir, workspace, resolved.workspacesMetaFile);
+      // boxes: a box project's stub dir has no .git; its repo fields and box come from its record.
+      const projects = await listProjects(resolved.workspacesDir, workspace, resolved.workspacesMetaFile);
+      return services.boxes ? services.boxes.projects.decorate(projects) : projects;
     }
   );
 
@@ -2280,6 +2286,27 @@ export function createServer(
       }
       const body = request.body ?? ({ name: "" } as CreateProjectRequest);
       const workspaceDir = join(resolved.workspacesDir, workspace);
+
+      // boxes: a project in a new box (Ephemeral AI VMs §8.1) — validated, stubbed on the host and
+      // set up in the background by the box service; this answers at once with the project.
+      if (body.location !== undefined && body.location.kind !== "host") {
+        if (!isBoxLocation(body.location)) {
+          return reply.code(400).send({ code: "BOX_INVALID_REQUEST", message: "Unknown project location." });
+        }
+        if (!services.boxes) {
+          return reply.code(409).send({ code: "BOXES_DISABLED", message: "Ephemeral AI VMs is not available on this daemon." });
+        }
+        try {
+          const gitAccountId =
+            (await readWorkspacesMeta(resolved.workspacesMetaFile)).workspaces.find((w) => w.name === workspace)?.gitAccountId ?? null;
+          await mkdir(workspaceDir, { recursive: true });
+          const created = await services.boxes.projects.create({ workspace, workspaceDir, body, gitAccountId });
+          await pruneArchivedProject(resolved.workspacesMetaFile, workspace, created.name);
+          return created;
+        } catch (error) {
+          return sendBoxError(reply, error);
+        }
+      }
 
       // Empty (or absent source): today's behavior — mkdir the validated name.
       if (body.source === undefined || body.source === "empty") {
@@ -2423,6 +2450,14 @@ export function createServer(
         return reply.code(404).send();
       }
 
+      // boxes: a box project's box is destroyed (and confirmed gone) before anything is removed;
+      // a failed destroy keeps the project ("Destroy failed — retry" is this DELETE again).
+      try {
+        await services.boxes?.projects.beforeDelete(target);
+      } catch (error) {
+        return sendBoxError(reply, error);
+      }
+
       // Cascade against `target` (the non-realpath join), not `safe`: sessions
       // store projectPath as the raw client-sent join path (sessions.ts:122/552
       // ← listProjects index.ts), so closeByProjectPrefix must match that form,
@@ -2441,6 +2476,8 @@ export function createServer(
       // leave the project on disk with its data deleted.
       await todos.deleteByProjectPath(target);
       await services.savedPrompts.deleteForProject(target);
+      // boxes: the destroyed box's record stays (month totals) but no longer owns the path.
+      await services.boxes?.projects.afterDelete(target).catch((error) => console.error("Failed to unlink the project's box record", error));
 
       // Prune the archive flag so a recreated same-name project starts fresh
       // (mirrors the workspace delete pruning its whole meta entry). Non-fatal:
@@ -2470,6 +2507,13 @@ export function createServer(
         return reply.code(404).send();
       }
 
+      // boxes: every box project's box in it is destroyed (and confirmed gone) first; any failure keeps the workspace.
+      try {
+        await services.boxes?.projects.beforeWorkspaceDelete(target);
+      } catch (error) {
+        return sendBoxError(reply, error);
+      }
+
       // Kill every session under the workspace, remove the tree, then prune the
       // metadata entry (keyed by name). Cascade against `target` (non-realpath
       // join), not `safe`: stored projectPaths use the raw join form, so matching
@@ -2493,6 +2537,8 @@ export function createServer(
       // disk with their data deleted.
       await todos.deleteByWorkspace(workspace, target);
       await services.savedPrompts.deleteForWorkspace(target);
+      // boxes: unlink the destroyed boxes' records from the removed projects.
+      await services.boxes?.projects.afterWorkspaceDelete(target).catch((error) => console.error("Failed to unlink the workspace's box records", error));
       // Non-fatal, same as the project delete above: the tree is already gone,
       // so a corrupt workspaces.json must not report a 500 for a delete that
       // actually succeeded.
@@ -4377,6 +4423,8 @@ export function createServer(
   // enabling downloads and runs a verified binary, which is no more than a remote user can do
   // already (installing agent CLIs, running shells), and nothing here is secret.
   registerPluginRoutes(app, { plugins: services.plugins });
+  // boxes: the Ephemeral AI VMs routes (boxRoutes), on both transports like the plugin routes above.
+  services.boxes?.registerRoutes(app);
 
   // Automated workflows (workflows spec §8.1) — definitions, runs, logs, secrets. Both
   // transports; the bearer hook above gates HTTP. Secret values are write-only.
