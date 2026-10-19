@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import { assertInsideFsRoot } from "@orquester/config/fs";
 import {
   isConventionalSecretFileName,
+  isInSecretFileToolFolder,
   SECRET_FILE_MAX_BYTES,
   secretFilePathProblem,
   type SecretFileCompare,
@@ -440,8 +441,9 @@ const CANDIDATE_PATHSPECS = [":(glob)**/.env", ":(glob)**/.env.*"];
  * Conventional candidates in one clone: gitignored files named `.env` / `.env.*`
  * (not templates — `isConventionalSecretFileName`), at any depth, via
  * `git ls-files --others --ignored --exclude-standard -z` with glob pathspecs.
- * Git doesn't descend into nested repos/worktrees; `node_modules` is skipped
- * too. Sorted, `/`-separated relative paths. A clone where git fails → [].
+ * Git doesn't descend into nested repos/worktrees; anything inside an agent-tool
+ * folder or `node_modules` (`isInSecretFileToolFolder`) is skipped too — a
+ * removed worktree's leftover files have no `.git` to stop git. Sorted, `/`-separated relative paths. A clone where git fails → [].
  */
 export async function scanCandidates(cloneRoot: string, git: GitRunner = defaultGitRunner, signal?: AbortSignal): Promise<string[]> {
   let stdout: string;
@@ -455,8 +457,10 @@ export async function scanCandidates(cloneRoot: string, git: GitRunner = default
     // Nested repositories come back as `dir/`; they are not files.
     if (!entry || entry.endsWith("/")) continue;
     if (secretFilePathProblem(entry) !== null) continue;
+    // Agent-tool folders (`.claude/worktrees/…`, even a leftover with no `.git`
+    // that git walks like any ignored folder) and node_modules.
+    if (isInSecretFileToolFolder(entry)) continue;
     const segments = entry.split("/");
-    if (segments.includes("node_modules")) continue;
     if (!isConventionalSecretFileName(segments[segments.length - 1]!)) continue;
     found.add(entry);
   }

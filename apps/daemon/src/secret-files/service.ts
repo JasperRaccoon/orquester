@@ -61,6 +61,7 @@ import {
   isConventionalSecretFileName,
   repoKeyProblem,
   secretFileNeedsAttention,
+  isInSecretFileToolFolder,
   secretFilePathProblem,
   type SecretFileCandidate,
   type SecretFileCandidatesResponse,
@@ -363,6 +364,15 @@ function pathOf(path: unknown): string {
   return path as string;
 }
 
+/** A path being ADDED (setup, add, a hand-typed scan): also never inside an agent-tool folder. Removing such a path still works (`pathOf`). */
+function newPathOf(path: unknown): string {
+  const valid = pathOf(path);
+  if (isInSecretFileToolFolder(valid)) {
+    throw new SecretFilesError("INVALID_PATH", "Files inside agent tool folders (like .claude/worktrees) or node_modules can't be synced.");
+  }
+  return valid;
+}
+
 function pathListOf(value: unknown, field: string): string[] | undefined {
   if (value === undefined) return undefined;
   if (!Array.isArray(value) || value.length > LIST_MAX) throw invalid(`${field} must be a list of at most ${LIST_MAX} paths.`);
@@ -387,7 +397,7 @@ function fileSourcesOf(value: unknown, field: string, required: boolean): Array<
   return value.map((entry: unknown) => {
     if (typeof entry !== "object" || entry === null || Array.isArray(entry)) throw invalid(`Each entry of ${field} needs a path and a source.`);
     const record = entry as Record<string, unknown>;
-    const path = pathOf(record.path);
+    const path = newPathOf(record.path);
     if (seen.has(path)) throw invalid(`${path} is listed twice.`);
     seen.add(path);
     return { path, source: sourceOf(record.source) };
@@ -801,7 +811,7 @@ export class SecretFilesService {
    */
   async candidates(query: { workspace?: unknown; repoKey?: unknown; path?: unknown }): Promise<SecretFileCandidatesResponse> {
     const { workspace, repoKey } = vaultIdOf(query.workspace, query.repoKey);
-    const single = query.path === undefined || query.path === "" ? null : pathOf(query.path);
+    const single = query.path === undefined || query.path === "" ? null : newPathOf(query.path);
     const runtime = this.runtime(workspace, repoKey);
     return this.enqueue(runtime, async () => {
       const projects = await this.options.listProjects();

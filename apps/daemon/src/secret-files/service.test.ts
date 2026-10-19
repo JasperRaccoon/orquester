@@ -293,6 +293,27 @@ test("setup: merge takes the union of keys, the primary's values winning; bad so
   assert.deepEqual(detail.files[0]!.updatedBy, { kind: "user", projectName: "a" });
 });
 
+test("files inside agent-tool folders can't be added, scanned or set up, but can still be removed", async () => {
+  const h = await makeHarness();
+  const a = h.clone("a");
+  h.fs.put(`${a}/.env`, "KEY=one\n");
+  h.fs.put(`${a}/.claude/worktrees/wf_1/app/.env`, "KEY=leftover\n");
+  const leftover = ".claude/worktrees/wf_1/app/.env";
+  await refused(
+    h.service.setup({ workspace: WS, repoKey: REPO, files: [{ path: leftover, source: { projectPath: a } }], excluded: [] }),
+    "INVALID_PATH"
+  );
+  await refused(h.service.candidates({ workspace: WS, repoKey: REPO, path: leftover }), "INVALID_PATH");
+  await refused(h.service.candidates({ workspace: WS, repoKey: REPO, path: "web/node_modules/x/.env" }), "INVALID_PATH");
+  await setupEnv(h, "a");
+  await refused(
+    h.service.updateFiles({ workspace: WS, repoKey: REPO, add: [{ path: leftover, source: { projectPath: a } }] }),
+    "INVALID_PATH"
+  );
+  // Removing still validates as a path (an older build may have added one): not managed here, so FILE_NOT_MANAGED.
+  await refused(h.service.updateFiles({ workspace: WS, repoKey: REPO, unmanage: [leftover] }), "FILE_NOT_MANAGED");
+});
+
 test("files: add, exclude (stops managing), include and unmanage; the per-vault limit holds", async () => {
   const h = await makeHarness();
   const a = h.clone("a");

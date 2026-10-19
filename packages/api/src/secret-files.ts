@@ -352,6 +352,21 @@ export function secretFilePathProblem(path: unknown): string | null {
   return null;
 }
 
+/**
+ * Folders agent tools keep their own checkouts and state in — Claude Code's
+ * `.claude/worktrees/…` (including leftovers whose worktree was removed but
+ * whose files weren't), Codex, Cursor, OpenCode, Grok — plus `node_modules`. A
+ * secret file inside one is never suggested and can't be added: it belongs to
+ * that tool's copy, not to the project.
+ */
+export const SECRET_FILE_TOOL_FOLDERS = [".claude", ".codex", ".cursor", ".opencode", ".grok", "node_modules"] as const;
+
+/** Whether `path` (a valid managed-file path) sits inside one of {@link SECRET_FILE_TOOL_FOLDERS}, at any depth. */
+export function isInSecretFileToolFolder(path: string): boolean {
+  const folders = path.split("/").slice(0, -1);
+  return folders.some((folder) => (SECRET_FILE_TOOL_FOLDERS as readonly string[]).includes(folder.toLowerCase()));
+}
+
 /** Whether a file NAME (last path segment) is a conventional secret file: `.env` or `.env.*`, not a template. */
 export function isConventionalSecretFileName(name: string): boolean {
   if (name !== ".env" && !name.startsWith(".env.")) return false;

@@ -371,6 +371,12 @@ test("scanCandidates lists ignored .env files at any depth and nothing else", as
   await mkdir(join(root, "vendor/lib"), { recursive: true });
   await git(join(root, "vendor/lib"), "init", "-q");
   await put(root, "vendor/lib/.env");
+  // A removed worktree's leftover files (no .git): git walks it like any ignored folder.
+  await put(root, ".claude/worktrees/wf_leftover/MatsSmileFront/.env");
+  await put(root, ".claude/worktrees/wf_leftover/MatsSmileFront/.env.test");
+  // Other agent-tool folders, at any depth and any case.
+  await put(root, ".codex/.env");
+  await put(root, "apps/web/.Cursor/.env");
 
   assert.deepEqual(await scanCandidates(root), [".env", ".env.local", ".env.we ird", "apps/web/.env.production"]);
 });
