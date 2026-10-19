@@ -41,7 +41,9 @@ export const TOOLSET_IDS = [
   "workflow-authoring",
   "agent-profile-editing",
   "desktops",
-  "secret-files"
+  "secret-files",
+  // boxes: temporary boxes for agent chats (Ephemeral AI VMs spec §13).
+  "boxes"
 ] as const;
 export type ToolsetId = (typeof TOOLSET_IDS)[number];
 
@@ -71,7 +73,7 @@ const read = (name: string): ToolsetToolSpec => ({ name, tier: "read" });
 const act = (name: string): ToolsetToolSpec => ({ name, tier: "act" });
 const admin = (name: string): ToolsetToolSpec => ({ name, tier: "admin" });
 
-/** Every toolset, with its tools in catalog order (spec §9.1): 46 chat tools, all advertised to every chat. */
+/** Every toolset, with its tools in catalog order (spec §9.1): 54 chat tools, all advertised to every chat (the `boxes` ones while boxes can be rented). */
 export const TOOLSETS: readonly ToolsetSpec[] = [
   {
     id: "core",
@@ -151,6 +153,22 @@ export const TOOLSETS: readonly ToolsetSpec[] = [
     id: "secret-files",
     label: "Secret files (pushing needs your approval)",
     tools: [read("secret_files_status"), admin("push_secret_files")]
+  },
+  // boxes: advertised only while the Ephemeral AI VMs plugin can rent a box (`session-tools/manifest.ts`).
+  // `create_box` is Act: its card is a `spend` card, raised in every permission mode.
+  {
+    id: "boxes",
+    label: "Temporary boxes (renting needs your approval)",
+    tools: [
+      act("create_box"),
+      read("list_boxes"),
+      act("box_exec"),
+      read("box_exec_output"),
+      act("box_upload"),
+      act("box_download"),
+      act("box_forward_port"),
+      act("destroy_box")
+    ]
   }
 ];
 

@@ -10,6 +10,7 @@
  * gate (chat only; external = allow)     → deny: PERMISSION_DENIED | ADMIN_NOT_AVAILABLE
  *   card → grant? else preview (> 1 MiB → PREVIEW_TOO_LARGE), arguments frozen, port.request
  *          → APPROVAL_DENIED | APPROVAL_TIMEOUT | cancelled; the gate re-runs on the caller as it is now
+ *          (a `spend` card — boxes — never looks for or offers a grant)
  * turn policy + exchange (scope.causesTurnIn) → PERMISSION_DENIED | EXCHANGE_LIMIT
  * run(frozen args, ctx) → ok() / the tool's CallToolResult / toSafeToolError()
  * ```
@@ -309,7 +310,17 @@ async function execute(deps: ExecutorDeps, call: { name: string; arguments: unkn
     const tier: Tier = typeof tool.tier === "function" ? tool.tier(args, scope) : tool.tier;
     const adminFamily: AdminFamily | undefined = typeof tool.adminFamily === "function" ? tool.adminFamily(args, scope) : tool.adminFamily;
     const facts = await gateFacts(api, caller, scope);
-    const gateInput = (who: ThreadCaller): GateInput => ({ tool: tool.name, tier, ...(adminFamily ? { adminFamily } : {}), planSafe: tool.planSafe === true, caller: who, scope, ...facts });
+    const gateInput = (who: ThreadCaller): GateInput => ({
+      tool: tool.name,
+      tier,
+      ...(adminFamily ? { adminFamily } : {}),
+      planSafe: tool.planSafe === true,
+      // boxes: a tool that spends money cards in every mode.
+      ...(tool.spendFamily ? { spendFamily: tool.spendFamily } : {}),
+      caller: who,
+      scope,
+      ...facts
+    });
     const decision = gate(gateInput(caller));
     if (decision.kind === "deny") throw new ToolError(decision.code, decision.message);
     if (decision.kind === "card") {
@@ -416,7 +427,9 @@ async function passCard(
 
   let preview: ApprovalPreview | null = null;
   if (tool.approval) preview = await tool.approval(frozenArgs, ctx);
-  else if (decision.approvalKind === "admin") throw new ToolError("PERMISSION_DENIED", `${tool.name} is not available: it has no approval preview.`);
+  else if (decision.approvalKind === "admin" || decision.approvalKind === "spend") throw new ToolError("PERMISSION_DENIED", `${tool.name} is not available: it has no approval preview.`);
+  // boxes: a spend card is never covered by, nor offers, a grant (the owner approves every one).
+  const spend = decision.approvalKind === "spend";
   // The computed family (`adminFamily(args, scope)`, the gate's) is the call's: a preview may only make
   // it STRICTER — a family offering a strict subset of its grant scopes (e.g. desktops → one never
   // granted) — never a different or more grantable one. (A preview that finds the call less safe than
@@ -425,7 +438,7 @@ async function passCard(
 
   // A grant covers the call without a card (full-access, non workflow-owned callers only; §7.6).
   // Grants are recorded for the caller's canonical project: without one, none can match (skip the read).
-  if (port && ownProject !== null && preview?.ungrantable !== true) {
+  if (port && ownProject !== null && preview?.ungrantable !== true && !spend) {
     const query: GrantQuery = {
       family,
       callerRuntimeMode: caller.runtimeMode,
@@ -489,7 +502,7 @@ async function passCard(
   const grantOptions =
     // A grant is recorded for the caller's canonical project: none without one (findGrant never
     // honours projectPath ""); a cross-project grant needs its single target.
-    ownProject === null || preview?.ungrantable === true || !callersCovered || (decision.approvalKind === "boundary" && decision.family === "cross-project" && !decision.targetProjectPath)
+    spend || ownProject === null || preview?.ungrantable === true || !callersCovered || (decision.approvalKind === "boundary" && decision.family === "cross-project" && !decision.targetProjectPath)
       ? []
       : grantOptionsFor({
           family,

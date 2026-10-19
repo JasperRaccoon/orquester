@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import type { Readable } from "node:stream";
-import type { EventMessage } from "@orquester/api";
+import type { BoxSummary, EventMessage } from "@orquester/api";
 import { PRINCIPAL_TOKEN_HEADER, type CallerPrincipal, type HtmlRenderAppearance, type HtmlRenderReference } from "@orquester/api/agent-chat";
 import type { Broadcaster } from "../broadcaster.ts";
 import type { AgentChatService } from "../agent-chat/service.ts";
@@ -9,6 +9,9 @@ import { HtmlPreviewError, type HtmlPreview } from "../html-preview/index.ts";
 import { isUploadTooLarge, UploadTooLargeError } from "../upload-stream.ts";
 import { FsTools, type ListFilesResult, type ReadFileWindowResult } from "./fs-tools.ts";
 import { mintPrincipalToken } from "./principal.ts";
+// boxes: the temporary-box operations (Ephemeral AI VMs spec §13), types only.
+import type { BoxExecRequest, BoxExecResult, BoxForwardResult, BoxJobOutput, BoxTransferResult } from "../boxes/temporary/contract.ts";
+import type { TemporaryBoxTools } from "../boxes/temporary/tools.ts";
 
 export type DaemonMethod = "GET" | "POST" | "PUT" | "DELETE";
 export interface DaemonResponse { status: number; body: unknown }
@@ -44,6 +47,18 @@ export interface HtmlPreviewRequest {
 
 export type { HtmlPreview };
 
+// boxes: begin
+/**
+ * One temporary-box operation's options: who acts (`withPrincipal` forces the caller's, as for
+ * `request`) and the call's abort. The daemon enforces ownership with that principal: an agent
+ * reaches only its own chat's boxes.
+ */
+export interface DaemonBoxCallOptions {
+  principal?: CallerPrincipal;
+  signal?: AbortSignal;
+}
+// boxes: end
+
 /**
  * The one seam between the MCP tools and the daemon (spec §4.2). Production
  * runs the daemon's own routes in-process with the caller's bearer, so every
@@ -66,6 +81,23 @@ export interface DaemonApi {
   listDirectory?(path: string): Promise<ListFilesResult>;
   /** A text file's byte window inside the sandbox (`FsTools.readFileWindow`); a directory throws `FsDirectoryError`. */
   readFileRange?(path: string, opts: { offset?: number; maxBytes?: number }): Promise<ReadFileWindowResult>;
+  // boxes: begin
+  // The temporary-box operations (Ephemeral AI VMs spec §13): streamed or abortable, so not routes
+  // (the box records are: `temporaryBoxRoutes`). Optional so the many test doubles of this seam
+  // need not grow them; the box tools answer BOXES_DISABLED without them.
+  /** Until the box is ready (event-driven), it fails, `timeoutMs` passes or the call aborts. */
+  boxWaitReady?(boxId: string, timeoutMs: number, opts?: DaemonBoxCallOptions): Promise<DaemonOutcome<BoxSummary>>;
+  /** Run a command in the box: foreground (output tails) or a background job. */
+  boxExec?(boxId: string, request: BoxExecRequest, opts?: DaemonBoxCallOptions): Promise<DaemonOutcome<BoxExecResult>>;
+  /** A background job's state and output tail; `waitMs` > 0 waits for its exit (bounded). */
+  boxJobOutput?(boxId: string, jobId: string, waitMs: number, opts?: DaemonBoxCallOptions): Promise<DaemonOutcome<BoxJobOutput>>;
+  /** A file or directory from the calling chat's project into the box, streamed. */
+  boxUpload?(boxId: string, request: { localPath: string; remotePath: string }, opts?: DaemonBoxCallOptions): Promise<DaemonOutcome<BoxTransferResult>>;
+  /** A file or directory from the box into the calling chat's project, streamed. */
+  boxDownload?(boxId: string, request: { remotePath: string; localPath: string }, opts?: DaemonBoxCallOptions): Promise<DaemonOutcome<BoxTransferResult>>;
+  /** A box port on a host loopback port, until the box is destroyed. */
+  boxForwardPort?(boxId: string, port: number, opts?: DaemonBoxCallOptions): Promise<DaemonOutcome<BoxForwardResult>>;
+  // boxes: end
   readonly fsRoot: string;
   readonly workspacesDir: string;
 }
@@ -99,8 +131,22 @@ function visualRefusal(error: unknown): DaemonOutcome<never> {
 /** A path the client reads: fixed, or read at every use (a long-lived client follows `PUT /api/config/daemon`). */
 export type LivePath = string | (() => string);
 
+// boxes: the answer while no box backend is wired (the external transport's clients, tests).
+const BOXES_UNWIRED: DaemonOutcome<never> = { ok: false, code: "BOXES_DISABLED", message: "Temporary boxes are not available here." };
+
 export class InjectDaemonApi implements DaemonApi {
-  constructor(private readonly opts: { app: FastifyInstance; authorization: string | undefined; agentChat: ChatUploads | null; broadcaster: Broadcaster; fsRoot: LivePath; workspacesDir: LivePath }) {}
+  constructor(
+    private readonly opts: {
+      app: FastifyInstance;
+      authorization: string | undefined;
+      agentChat: ChatUploads | null;
+      broadcaster: Broadcaster;
+      fsRoot: LivePath;
+      workspacesDir: LivePath;
+      // boxes: the temporary-box backend (the daemon's own client of itself has it).
+      boxes?: TemporaryBoxTools | null;
+    }
+  ) {}
 
   get fsRoot(): string {
     return typeof this.opts.fsRoot === "function" ? this.opts.fsRoot() : this.opts.fsRoot;
@@ -188,6 +234,32 @@ export class InjectDaemonApi implements DaemonApi {
     return new FsTools({ fsRoot: this.fsRoot }).readFileWindow(path, opts);
   }
 
+  // boxes: begin
+  async boxWaitReady(boxId: string, timeoutMs: number, opts?: DaemonBoxCallOptions): Promise<DaemonOutcome<BoxSummary>> {
+    return this.opts.boxes ? this.opts.boxes.waitReady(boxId, timeoutMs, opts) : BOXES_UNWIRED;
+  }
+
+  async boxExec(boxId: string, request: BoxExecRequest, opts?: DaemonBoxCallOptions): Promise<DaemonOutcome<BoxExecResult>> {
+    return this.opts.boxes ? this.opts.boxes.exec(boxId, request, opts) : BOXES_UNWIRED;
+  }
+
+  async boxJobOutput(boxId: string, jobId: string, waitMs: number, opts?: DaemonBoxCallOptions): Promise<DaemonOutcome<BoxJobOutput>> {
+    return this.opts.boxes ? this.opts.boxes.jobOutput(boxId, jobId, waitMs, opts) : BOXES_UNWIRED;
+  }
+
+  async boxUpload(boxId: string, request: { localPath: string; remotePath: string }, opts?: DaemonBoxCallOptions): Promise<DaemonOutcome<BoxTransferResult>> {
+    return this.opts.boxes ? this.opts.boxes.upload(boxId, request, opts) : BOXES_UNWIRED;
+  }
+
+  async boxDownload(boxId: string, request: { remotePath: string; localPath: string }, opts?: DaemonBoxCallOptions): Promise<DaemonOutcome<BoxTransferResult>> {
+    return this.opts.boxes ? this.opts.boxes.download(boxId, request, opts) : BOXES_UNWIRED;
+  }
+
+  async boxForwardPort(boxId: string, port: number, opts?: DaemonBoxCallOptions): Promise<DaemonOutcome<BoxForwardResult>> {
+    return this.opts.boxes ? this.opts.boxes.forwardPort(boxId, port, opts) : BOXES_UNWIRED;
+  }
+  // boxes: end
+
   subscribe(listener: (event: EventMessage) => void): () => void {
     // `Broadcaster.publish` drops a sink whose `send` throws — never throw here.
     const sink = { send: (data: string) => { try { listener(JSON.parse(data) as EventMessage); } catch { /* ignore */ } } };
@@ -210,6 +282,13 @@ export function withPrincipal(api: DaemonApi, principal: CallerPrincipal): Daemo
     previewHtmlRender: (request) => api.previewHtmlRender(request),
     ...(api.listDirectory ? { listDirectory: (path: string) => api.listDirectory!(path) } : {}),
     ...(api.readFileRange ? { readFileRange: (path: string, opts: { offset?: number; maxBytes?: number }) => api.readFileRange!(path, opts) } : {}),
+    // boxes: each box operation acts for the bound principal too (a tool cannot choose another).
+    ...(api.boxWaitReady ? { boxWaitReady: (boxId: string, timeoutMs: number, opts?: DaemonBoxCallOptions) => api.boxWaitReady!(boxId, timeoutMs, { ...opts, principal }) } : {}),
+    ...(api.boxExec ? { boxExec: (boxId: string, request: BoxExecRequest, opts?: DaemonBoxCallOptions) => api.boxExec!(boxId, request, { ...opts, principal }) } : {}),
+    ...(api.boxJobOutput ? { boxJobOutput: (boxId: string, jobId: string, waitMs: number, opts?: DaemonBoxCallOptions) => api.boxJobOutput!(boxId, jobId, waitMs, { ...opts, principal }) } : {}),
+    ...(api.boxUpload ? { boxUpload: (boxId: string, request: { localPath: string; remotePath: string }, opts?: DaemonBoxCallOptions) => api.boxUpload!(boxId, request, { ...opts, principal }) } : {}),
+    ...(api.boxDownload ? { boxDownload: (boxId: string, request: { remotePath: string; localPath: string }, opts?: DaemonBoxCallOptions) => api.boxDownload!(boxId, request, { ...opts, principal }) } : {}),
+    ...(api.boxForwardPort ? { boxForwardPort: (boxId: string, port: number, opts?: DaemonBoxCallOptions) => api.boxForwardPort!(boxId, port, { ...opts, principal }) } : {}),
     get fsRoot() { return api.fsRoot; },
     get workspacesDir() { return api.workspacesDir; }
   };

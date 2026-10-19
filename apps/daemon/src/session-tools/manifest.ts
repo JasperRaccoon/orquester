@@ -47,6 +47,8 @@ export interface ManifestInput {
   catalog: readonly AnyOrquesterTool[];
   /** The daemon-pointing MCP servers the agent-profile service found (Task 11's read; [] until known). */
   daemonPointing: readonly DaemonPointingServer[];
+  /** boxes: whether temporary boxes can be rented now (the Ephemeral AI VMs plugin is wired); absent = no. */
+  boxesAvailable?: boolean;
 }
 
 /** True when a tool is Admin whatever its arguments — never advertised to a workflow-owned chat (§5.4). */
@@ -54,9 +56,13 @@ export function alwaysAdmin(tool: AnyOrquesterTool): boolean {
   return tool.tier === "admin";
 }
 
-/** The chat tools a thread advertises, in catalog order: all of them, less the always-Admin ones for a workflow-owned chat. */
-export function advertisedChatTools(catalog: readonly AnyOrquesterTool[], workflowOwned: boolean): string[] {
-  return catalog.filter((tool) => !(workflowOwned && alwaysAdmin(tool))).map((tool) => tool.name);
+/**
+ * The chat tools a thread advertises, in catalog order: all of them, less the always-Admin ones for
+ * a workflow-owned chat — and (boxes) less the `boxes` toolset while no box can be rented, so no
+ * chat pays for tools it cannot use.
+ */
+export function advertisedChatTools(catalog: readonly AnyOrquesterTool[], workflowOwned: boolean, boxesAvailable = false): string[] {
+  return catalog.filter((tool) => !(workflowOwned && alwaysAdmin(tool)) && (boxesAvailable || tool.toolset !== "boxes")).map((tool) => tool.name);
 }
 
 const samePath = (a: string, b: string): boolean => a !== "" && b !== "" && resolve(a) === resolve(b);
@@ -113,7 +119,7 @@ export function denyFor(thread: ManifestThread, servers: readonly DaemonPointing
 /** The manifest of one thread. */
 export function buildSessionToolsManifest(input: ManifestInput): SessionToolsManifest {
   return {
-    tools: advertisedChatTools(input.catalog, input.thread.workflowOwned),
+    tools: advertisedChatTools(input.catalog, input.thread.workflowOwned, input.boxesAvailable === true),
     instructions: composeOrquesterInstructions({ workflowOwned: input.thread.workflowOwned }),
     deny: denyFor(input.thread, input.daemonPointing)
   };

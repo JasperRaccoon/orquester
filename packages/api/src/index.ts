@@ -71,6 +71,8 @@ export * from "./desktops.ts";
 export * from "./plugins.ts";
 export * from "./boxes.ts";
 export * from "./box-protocol.ts";
+// boxes: temporary boxes for agent chats (routes behind the box MCP tools).
+export * from "./box-tools.ts";
 export * from "./agent-tools.ts";
 
 export type {
