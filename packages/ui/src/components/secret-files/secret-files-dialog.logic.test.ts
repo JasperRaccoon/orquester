@@ -150,6 +150,18 @@ describe("setup selection", () => {
     assert.deepEqual(plan.request.excluded, ["MatsSmileBack/.env"]);
   });
 
+  it("does not exclude a conventional candidate nobody could tick (no clone holds a usable copy)", () => {
+    const unusable = candidate({ path: "api/.env", variants: [], defaultVariantId: null, refused: [{ projectPath: A, refusal: "tracked" }] });
+    const managed = candidate({ path: "web/.env", managed: true, variants: single().variants, defaultVariantId: "only" });
+    const plan = buildSetupRequest(WS, KEY, [single(), unusable, managed], {
+      ticked: { "web/.env": false },
+      sources: {}
+    });
+    assert.ok(plan.ok);
+    assert.deepEqual(plan.request.files.map((file) => file.path), ["MatsSmileFront/.env"]);
+    assert.deepEqual(plan.request.excluded, []);
+  });
+
   it("refuses an empty selection, an invalid source and too many files", () => {
     assert.deepEqual(buildSetupRequest(WS, KEY, [candidate()], { ticked: { "MatsSmileBack/.env": false }, sources: {} }), {
       ok: false,
@@ -291,6 +303,25 @@ describe("clone actions", () => {
     assert.deepEqual(impact.overwritten.map((entry) => entry.projectName), ["MatsSmile2", "MatsSmile4"]);
     assert.deepEqual(impact.keptFlagged.map((entry) => entry.projectName), ["MatsSmile3"]);
   });
+
+  it("judges a push per file: a clone missing a file receives it, a mixed one is in both lists", () => {
+    const source = clone(A, { ".env": "modified", "b/.env": "modified" });
+    const vault = {
+      clones: [
+        source,
+        clone(B, { ".env": "modified", "b/.env": "synced" }),
+        clone(C, { ".env": "missing", "b/.env": "missing-dir" }),
+        clone("/ws/jaspersito/MatsSmile4", { ".env": "deleted" })
+      ]
+    } as SecretVaultDetail;
+    const impact = pushImpact(vault, source);
+    assert.deepEqual(impact.overwritten.map((entry) => entry.projectName), ["MatsSmile2", "MatsSmile3"]);
+    assert.deepEqual(impact.keptFlagged.map((entry) => entry.projectName), ["MatsSmile2"]);
+    // Only the files actually pushed count.
+    const onlyFirst = pushImpact(vault, source, [".env"]);
+    assert.deepEqual(onlyFirst.overwritten.map((entry) => entry.projectName), ["MatsSmile3"]);
+    assert.deepEqual(onlyFirst.keptFlagged.map((entry) => entry.projectName), ["MatsSmile2"]);
+  });
 });
 
 describe("words", () => {
@@ -301,6 +332,12 @@ describe("words", () => {
     assert.equal(secretFilesErrorText({ status: 500, body: { code: "ELSE" } }), "The daemon refused the request (500).");
     assert.equal(secretFilesErrorText(new Error("plain")), "plain");
     assert.equal(secretFilesErrorText(undefined), "Something went wrong.");
+  });
+
+  it("a CONTENT_CHANGED refusal always asks to review again", () => {
+    const text = "This file changed since you looked — review it again.";
+    assert.equal(secretFilesErrorText({ serverMessage: "content mismatch", status: 409, body: { code: "CONTENT_CHANGED" } }), text);
+    assert.equal(secretFilesErrorText({ status: 409, body: { code: "CONTENT_CHANGED" } }), text);
   });
 
   it("names clones and lists", () => {

@@ -16,6 +16,7 @@ import {
   compareTargets,
   countKeyChanges,
   differingKeys,
+  expectedContent,
   parseBarDismissals,
   projectBarDismissKey,
   projectBarMessage,
@@ -247,6 +248,35 @@ describe("push and reset confirms", () => {
     );
   });
 
+  it("judges each pushed file on its own: a clone with mixed states is named in both, a missing copy receives it", () => {
+    const mine = clone("Mine", [file(".env", "modified"), file("b/.env", "modified")]);
+    const mixed = vault([
+      mine,
+      clone("Mixed", [file(".env", "modified"), file("b/.env", "synced")]),
+      clone("Missing", [file(".env", "missing"), file("b/.env", "missing-dir")]),
+      clone("Gone", [file(".env", "deleted")])
+    ]);
+    assert.equal(
+      pushConfirmText(mixed, mine.projectPath, [".env", "b/.env"]),
+      "This makes this project's 2 changed secret files the vault's version. It overwrites the copy in Mixed, Missing. Mixed has its own changes and stays flagged."
+    );
+    assert.equal(
+      pushConfirmText(mixed, mine.projectPath, ["b/.env"]),
+      "This makes this project's b/.env the vault's version. It overwrites the copy in Mixed."
+    );
+  });
+
+  it("expects the content tokens shown, null for a copy the clone doesn't have", () => {
+    const files = [
+      file(".env", "modified", { contentToken: "t1" }),
+      file("b/.env", "deleted"),
+      file("c/.env", "modified"),
+      file("d/.env", "synced", { contentToken: "t4" })
+    ];
+    assert.deepEqual(expectedContent(files, [".env", "b/.env", "c/.env"]), { ".env": "t1", "b/.env": null });
+    assert.deepEqual(expectedContent(files, ["c/.env", "nope"]), undefined);
+  });
+
   it("warns that a reset discards this project's changes", () => {
     assert.equal(
       resetConfirmText([".env"]),
@@ -269,6 +299,17 @@ describe("bar dismissal", () => {
     assert.notEqual(key, projectBarDismissKey("/w/ws/A", [file(".env", "deleted")], v));
     assert.notEqual(key, projectBarDismissKey("/w/ws/A", [file(".env", "modified")], vault([], { ".env": "v2" })));
     assert.notEqual(key, projectBarDismissKey("/w/ws/A", [file(".env", "modified"), file("b/.env", "modified")], v));
+  });
+
+  it("keys on each flagged file's content token too: a further edit brings the bar back", () => {
+    const key = projectBarDismissKey("/w/ws/A", [file(".env", "modified", { contentToken: "t1" })], v);
+    assert.equal(key, projectBarDismissKey("/w/ws/A", [file(".env", "modified", { contentToken: "t1" })], v));
+    assert.notEqual(key, projectBarDismissKey("/w/ws/A", [file(".env", "modified", { contentToken: "t2" })], v));
+    // A daemon predating tokens keeps the key it had.
+    assert.equal(
+      projectBarDismissKey("/w/ws/A", [file(".env", "modified")], v),
+      ["/w/ws/A", ".env\u0001modified\u0001v1"].join("\u0000")
+    );
   });
 
   it("does not depend on the files' order", () => {

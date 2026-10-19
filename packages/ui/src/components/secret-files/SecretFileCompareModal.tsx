@@ -64,10 +64,12 @@ const CompareBody: React.FC<{
   const vault = useSecretVault(workspace, repoKey);
   const clone = vault?.clones.find((entry) => entry.projectPath === projectPath);
   const targets = useMemo(() => compareTargets(clone, path), [clone, path]);
-  // Compare again whenever a target's state or the vault's version of it moves.
+  // Compare again whenever a target's state, its content here or the vault's version of it moves.
   const versionOf = (p: string) => vault?.files.find((file) => file.path === p)?.version ?? "";
   const stateOf = (p: string) => clone?.files.find((file) => file.path === p);
-  const fetchKey = targets.map((p) => `${p}\u0001${stateOf(p)?.state ?? ""}\u0001${versionOf(p)}`).join("\u0000");
+  const fetchKey = targets
+    .map((p) => `${p}\u0001${stateOf(p)?.state ?? ""}\u0001${versionOf(p)}\u0001${stateOf(p)?.contentToken ?? ""}`)
+    .join("\u0000");
 
   const [results, setResults] = useState<ReadonlyMap<string, FileCompare>>(new Map());
   useEffect(() => {

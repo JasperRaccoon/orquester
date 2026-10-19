@@ -1,9 +1,10 @@
 /**
  * The secret-files project bar and compare modal in a DOM (spec §7): the bar
  * shows the open project's drift with the compare summary, Push asks first
- * naming the clones it overwrites, a dismissal holds until something changes,
- * files it can't get show an informational variant, and Compare lists
- * variable names only.
+ * naming the clones it overwrites, a dismissal holds until something changes
+ * (a further edit included), Push / Reset send the content tokens shown and a
+ * CONTENT_CHANGED refusal asks to review again, files it can't get show an
+ * informational variant, and Compare lists variable names only.
  */
 
 import assert from "node:assert/strict";
@@ -142,15 +143,38 @@ describe("the secret-files project bar", () => {
   let root: Root;
   let compares: string[];
   let pushes: SecretFilesCloneRequest[];
+  let resets: SecretFilesCloneRequest[];
+  let fetches: number;
+  /** The token the next compare answers with (the copy the daemon compared). */
+  let comparedToken: string | undefined;
+  /** Set: Push / Reset answer 409 CONTENT_CHANGED and a refetch answers this vault. */
+  let changedTo: SecretVaultDetail | null;
+
+  const contentChanged = () =>
+    Object.assign(new Error("changed"), {
+      status: 409,
+      body: { code: "CONTENT_CHANGED", message: "A file's content no longer matches." }
+    });
 
   const fakeApi = {
     compareSecretFile: async (_ws: string, _repo: string, _project: string, path: string) => {
       compares.push(path);
-      return { path, compare: ENV_COMPARE };
+      return { path, compare: ENV_COMPARE, ...(comparedToken ? { contentToken: comparedToken } : {}) };
     },
     pushSecretFiles: async (req: SecretFilesCloneRequest) => {
       pushes.push(req);
+      if (changedTo) throw contentChanged();
       return { vault: vault([{ path: "MatsSmileBack/.env", state: "synced" }], "v2") };
+    },
+    resetSecretFiles: async (req: SecretFilesCloneRequest) => {
+      resets.push(req);
+      if (changedTo) throw contentChanged();
+      return { vault: vault([{ path: "MatsSmileBack/.env", state: "synced" }]) };
+    },
+    getSecretVault: async () => {
+      fetches += 1;
+      if (!changedTo) throw new Error("unexpected fetch");
+      return { vault: changedTo };
     }
   } as unknown as ApiClient;
 
@@ -184,6 +208,10 @@ describe("the secret-files project bar", () => {
   beforeEach(() => {
     compares = [];
     pushes = [];
+    resets = [];
+    fetches = 0;
+    comparedToken = undefined;
+    changedTo = null;
     resetSecretFiles();
     resetSecretFilesBarDismissals();
     useAppStore.setState(
@@ -260,6 +288,86 @@ describe("the secret-files project bar", () => {
     await act(async () => applySecretVault("ws", KEY, vault([{ path: "MatsSmileBack/.env", state: "modified" }], "v3")));
     await flush();
     assert.ok(bar());
+  });
+
+  it("a further edit of the flagged file refreshes the counts and brings a dismissed bar back", async () => {
+    const edited = (token: string) => vault([{ path: "MatsSmileBack/.env", state: "modified", contentToken: token }]);
+    applySecretVault("ws", KEY, edited("t1"));
+    await render();
+    assert.equal(compares.length, 1);
+
+    // Edited again (still `modified`, same vault version): the counts are fetched again.
+    await act(async () => applySecretVault("ws", KEY, edited("t2")));
+    await flush();
+    assert.equal(compares.length, 2);
+
+    await click(document.querySelector<HTMLButtonElement>('button[aria-label="Dismiss"]'));
+    assert.equal(bar(), null);
+    await act(async () => applySecretVault("ws", KEY, edited("t3")));
+    await flush();
+    assert.ok(bar(), "the dismissed bar is back");
+    assert.equal(compares.length, 3);
+  });
+
+  const confirmButton = (label: string) =>
+    [...(document.querySelector('[role="dialog"]')?.querySelectorAll<HTMLButtonElement>("button") ?? [])].find(
+      (b) => b.textContent?.trim() === label
+    );
+
+  it("Push and Reset send the content tokens the bar showed", async () => {
+    comparedToken = "t1";
+    applySecretVault("ws", KEY, vault([{ path: "MatsSmileBack/.env", state: "modified", contentToken: "t1" }]));
+    await render();
+    await click(button("Push to vault"));
+    await click(confirmButton("Push to vault"));
+    assert.deepEqual(pushes, [
+      {
+        workspace: "ws",
+        repoKey: KEY,
+        projectPath: MINE,
+        files: ["MatsSmileBack/.env"],
+        expect: { "MatsSmileBack/.env": "t1" }
+      }
+    ]);
+
+    await act(async () =>
+      applySecretVault(
+        "ws",
+        KEY,
+        vault([
+          { path: "MatsSmileBack/.env", state: "modified", contentToken: "t5" },
+          { path: "web/.env", state: "deleted" }
+        ])
+      )
+    );
+    await flush();
+    await click(button("Reset to vault"));
+    await click(confirmButton("Reset to vault"));
+    assert.deepEqual(resets, [
+      {
+        workspace: "ws",
+        repoKey: KEY,
+        projectPath: MINE,
+        files: ["MatsSmileBack/.env", "web/.env"],
+        expect: { "MatsSmileBack/.env": "t5", "web/.env": null }
+      }
+    ]);
+  });
+
+  it("a push refused because the file changed says so and refreshes the vault", async () => {
+    applySecretVault("ws", KEY, vault([{ path: "MatsSmileBack/.env", state: "modified", contentToken: "t1" }]));
+    await render();
+    changedTo = vault([{ path: "MatsSmileBack/.env", state: "modified", contentToken: "t2" }]);
+    await click(button("Push to vault"));
+    await click(confirmButton("Push to vault"));
+    assert.equal(pushes.length, 1);
+    assert.equal(fetches, 1);
+    assert.equal(
+      document.querySelector('[role="alert"]')?.textContent,
+      "This file changed since you looked \u2014 review it again."
+    );
+    // The refreshed copy is the one shown (and compared) now.
+    assert.equal(compares.length, 2);
   });
 
   it("counts several files, without Push when only deletions are flagged", async () => {

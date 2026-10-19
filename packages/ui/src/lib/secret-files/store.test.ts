@@ -14,6 +14,7 @@ import {
   deleteSecretVault,
   fetchSecretVault,
   getSecretVault,
+  isContentChangedError,
   loadSecretVaults,
   pushSecretFiles,
   resetCloneSecretFiles,
@@ -183,6 +184,41 @@ describe("wire validation", () => {
     });
   });
 
+  it("keeps the revision and content tokens, leaving out malformed ones field-wise", () => {
+    const withTokens = vault({
+      revision: { boot: "b1", seq: 4 },
+      clones: [
+        {
+          projectPath: "/ws/jaspersito/MatsSmile",
+          projectName: "MatsSmile",
+          files: [
+            { path: "MatsSmileBack/.env", state: "modified", contentToken: "t1" },
+            { path: "a/.env", state: "refused", refusal: "tracked", contentToken: "t2" }
+          ],
+          needsAttention: true
+        }
+      ]
+    });
+    assert.deepEqual(sanitizeSecretVault(withTokens), withTokens);
+    const bad = (revision: unknown, contentToken: unknown) =>
+      sanitizeSecretVault({
+        ...vault(),
+        revision,
+        clones: [{ projectPath: "/p", projectName: "P", files: [{ path: ".env", state: "synced", contentToken }] }]
+      });
+    for (const [revision, token] of [
+      [{ boot: "", seq: 1 }, ""],
+      [{ boot: "b", seq: -1 }, 7],
+      [{ boot: "b", seq: 1.5 }, null],
+      ["b:1", { t: 1 }]
+    ] as const) {
+      const clean = bad(revision, token);
+      assert.ok(clean);
+      assert.equal("revision" in clean, false);
+      assert.deepEqual(clean.clones[0].files, [{ path: ".env", state: "synced" }]);
+    }
+  });
+
   it("validates a setup scan, dropping malformed candidates and variants", () => {
     const scan = sanitizeSecretFileCandidates({
       workspace: WS,
@@ -252,6 +288,42 @@ describe("applying vaults and events", () => {
     assert.equal(getSecretVault(WS, KEY)?.fileCount, 1);
     applySecretVault(WS, KEY, vault({ updatedAt: at(5), clonesNeedingAttention: 1 }));
     assert.equal(getSecretVault(WS, KEY)?.clonesNeedingAttention, 1);
+  });
+
+  it("orders by revision when both copies carry one, whatever updatedAt says", () => {
+    const rev = (boot: string, seq: number) => ({ boot, seq });
+    applySecretVault(WS, KEY, vault({ revision: rev("b1", 5), clonesNeedingAttention: 1 }));
+    // A clone-state change: same updatedAt, higher seq.
+    applySecretVault(WS, KEY, vault({ revision: rev("b1", 6), clonesNeedingAttention: 2 }));
+    assert.equal(getSecretVault(WS, KEY)?.clonesNeedingAttention, 2);
+    // Older seq, even with a newer updatedAt: dropped.
+    applySecretVault(WS, KEY, vault({ revision: rev("b1", 4), updatedAt: at(9), clonesNeedingAttention: 3 }));
+    assert.equal(getSecretVault(WS, KEY)?.clonesNeedingAttention, 2);
+    // Same seq: the held copy stays.
+    applySecretVault(WS, KEY, vault({ revision: rev("b1", 6), clonesNeedingAttention: 4 }));
+    assert.equal(getSecretVault(WS, KEY)?.clonesNeedingAttention, 2);
+    // Another boot (the daemon restarted): taken, even with a lower seq and an older updatedAt.
+    applySecretVault(WS, KEY, vault({ revision: rev("b2", 1), updatedAt: at(0), clonesNeedingAttention: 5 }));
+    assert.equal(getSecretVault(WS, KEY)?.clonesNeedingAttention, 5);
+  });
+
+  it("falls back to updatedAt when either copy lacks a revision", () => {
+    applySecretVault(WS, KEY, vault({ revision: { boot: "b1", seq: 9 }, updatedAt: at(5) }));
+    applySecretVault(WS, KEY, vault({ updatedAt: at(4), fileCount: 4 }));
+    assert.equal(getSecretVault(WS, KEY)?.fileCount, 1);
+    applySecretVault(WS, KEY, vault({ updatedAt: at(5), fileCount: 5 }));
+    assert.equal(getSecretVault(WS, KEY)?.fileCount, 5);
+    applySecretVault(WS, KEY, vault({ revision: { boot: "b1", seq: 1 }, updatedAt: at(6), fileCount: 6 }));
+    assert.equal(getSecretVault(WS, KEY)?.fileCount, 6);
+  });
+
+  it("a deleted vault is not brought back by a copy of no newer revision", () => {
+    applySecretVault(WS, KEY, vault({ revision: { boot: "b1", seq: 5 } }));
+    applySecretFilesEvent(event({ workspace: WS, repoKey: KEY, deleted: true }));
+    applySecretFilesEvent(event({ vault: vault({ revision: { boot: "b1", seq: 5 }, updatedAt: at(9) }) }));
+    assert.equal(getSecretVault(WS, KEY), undefined);
+    applySecretFilesEvent(event({ vault: vault({ revision: { boot: "b1", seq: 6 } }) }));
+    assert.equal(getSecretVault(WS, KEY)?.revision?.seq, 6);
   });
 
   it("keeps the same map when the same vault arrives again", () => {
@@ -341,6 +413,70 @@ describe("loading", () => {
     details[0].answer.resolve({ vault: vault({ updatedAt: at(2), fileCount: 2 }) });
     await load;
     assert.equal(getSecretVault(WS, KEY)?.fileCount, 3);
+  });
+
+  it("a load's older answer does not undo a clone-state event that landed while it was in flight", async () => {
+    // updatedAt doesn't move on a clone-state-only change: only the revision orders these.
+    const state = (s: "synced" | "modified", seq: number) =>
+      vault({
+        revision: { boot: "b1", seq },
+        clonesNeedingAttention: s === "modified" ? 1 : 0,
+        clones: [
+          {
+            projectPath: "/ws/jaspersito/MatsSmile",
+            projectName: "MatsSmile",
+            files: [{ path: "MatsSmileBack/.env", state: s }],
+            needsAttention: s === "modified"
+          }
+        ]
+      });
+    applySecretVault(WS, KEY, state("synced", 1));
+    const { api, lists, details } = fakeApi();
+    const load = loadSecretVaults(api);
+    lists[0].resolve({ vaults: [{ workspace: WS, repoKey: KEY } as never] });
+    await flush();
+    applySecretFilesEvent(event({ vault: state("modified", 2) }));
+    details[0].answer.resolve({ vault: state("synced", 1) });
+    await load;
+    assert.equal(getSecretVault(WS, KEY)?.clones[0].files[0].state, "modified");
+    assert.equal(getSecretVault(WS, KEY)?.clonesNeedingAttention, 1);
+  });
+
+  it("without revisions, a load's same-time answer does not undo an event that landed while it was in flight", async () => {
+    applySecretVault(WS, KEY, vault());
+    const { api, lists, details } = fakeApi();
+    const load = loadSecretVaults(api);
+    lists[0].resolve({ vaults: [{ workspace: WS, repoKey: KEY } as never] });
+    await flush();
+    applySecretFilesEvent(event({ vault: vault({ clonesNeedingAttention: 1 }) }));
+    details[0].answer.resolve({ vault: vault() });
+    await load;
+    assert.equal(getSecretVault(WS, KEY)?.clonesNeedingAttention, 1);
+  });
+
+  it("a load's strictly newer answer replaces an event that landed while it was in flight", async () => {
+    const { api, lists, details } = fakeApi();
+    const load = loadSecretVaults(api);
+    lists[0].resolve({ vaults: [{ workspace: WS, repoKey: KEY } as never] });
+    await flush();
+    applySecretFilesEvent(event({ vault: vault({ revision: { boot: "b1", seq: 2 }, fileCount: 2 }) }));
+    details[0].answer.resolve({ vault: vault({ revision: { boot: "b1", seq: 3 }, fileCount: 3 }) });
+    await load;
+    assert.equal(getSecretVault(WS, KEY)?.fileCount, 3);
+  });
+
+  it("a fetch's older answer does not undo an event that landed while it was in flight", async () => {
+    const { api, details } = fakeApi();
+    const fetching = fetchSecretVault(api, WS, KEY);
+    applySecretFilesEvent(event({ vault: vault({ revision: { boot: "b1", seq: 2 }, clonesNeedingAttention: 1 }) }));
+    details[0].answer.resolve({ vault: vault({ revision: { boot: "b1", seq: 1 } }) });
+    assert.equal((await fetching)?.clonesNeedingAttention, 1);
+    // Without revisions too: a same-time answer that a change overtook keeps the change.
+    resetSecretFiles();
+    const again = fetchSecretVault(api, WS, KEY);
+    applySecretFilesEvent(event({ vault: vault({ clonesNeedingAttention: 1 }) }));
+    details[1].answer.resolve({ vault: vault() });
+    assert.equal((await again)?.clonesNeedingAttention, 1);
   });
 
   it("a load's answer does not bring back a vault deleted while it was in flight", async () => {
@@ -474,6 +610,31 @@ describe("mutations", () => {
     mutations[0].answer.reject(failure);
     await assert.rejects(push, (error) => error === failure);
     assert.equal(getSecretVault(WS, KEY)?.updatedAt, at(0));
+  });
+
+  it("passes expect through, and on CONTENT_CHANGED fetches the vault again and rejects", async () => {
+    applySecretVault(WS, KEY, vault({ revision: { boot: "b1", seq: 1 } }));
+    const { api, mutations, details } = fakeApi();
+    const req = { workspace: WS, repoKey: KEY, projectPath: "/p", files: [".env"], expect: { ".env": "t1" } };
+    const push = pushSecretFiles(api, req);
+    assert.deepEqual(mutations[0].args, [req]);
+    const failure = Object.assign(new Error("changed"), { status: 409, body: { code: "CONTENT_CHANGED" } });
+    assert.equal(isContentChangedError(failure), true);
+    assert.equal(isContentChangedError(new Error("x")), false);
+    mutations[0].answer.reject(failure);
+    await assert.rejects(push, (error) => error === failure);
+    await flush();
+    assert.equal(details.length, 1);
+    assert.deepEqual(details[0].args.slice(0, 2), [WS, KEY]);
+    details[0].answer.resolve({ vault: vault({ revision: { boot: "b1", seq: 2 }, clonesNeedingAttention: 1 }) });
+    await flush();
+    assert.equal(getSecretVault(WS, KEY)?.clonesNeedingAttention, 1);
+
+    const reset = resetCloneSecretFiles(api, { ...req, expect: { ".env": null } });
+    mutations[1].answer.reject(Object.assign(new Error("nothing"), { status: 409, body: { code: "NOTHING_TO_PUSH" } }));
+    await assert.rejects(reset);
+    await flush();
+    assert.equal(details.length, 1);
   });
 
   it("an answer that does not parse reloads, and resolves with what is held", async () => {

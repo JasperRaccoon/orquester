@@ -6,14 +6,16 @@ import { ApiError } from "../../lib/api-client";
 import { cn } from "../../lib/cn";
 import { useRepoIdentity } from "../../lib/repo-identities/hooks";
 import { useProjectSecretFiles, useSecretFilesEnabled } from "../../lib/secret-files/hooks";
-import { pushSecretFiles, resetCloneSecretFiles } from "../../lib/secret-files/store";
+import { isContentChangedError, pushSecretFiles, resetCloneSecretFiles } from "../../lib/secret-files/store";
 import { useAppStore } from "../../store/app";
 import { Button, ConfirmDialog } from "../ui";
 import { SecretFileCompareModal } from "./SecretFileCompareModal";
 import { SecretFilesDialog } from "./SecretFilesDialog";
 import {
+  CONTENT_CHANGED_TEXT,
   addBarDismissal,
   compareSummaryText,
+  expectedContent,
   parseBarDismissals,
   projectBarDismissKey,
   projectBarMessage,
@@ -74,6 +76,7 @@ export function resetSecretFilesBarDismissals(): void {
 }
 
 const errorText = (err: unknown, fallback: string): string => {
+  if (isContentChangedError(err)) return CONTENT_CHANGED_TEXT;
   if (err instanceof ApiError) return err.serverMessage ?? fallback;
   return err instanceof Error && err.message ? err.message : fallback;
 };
@@ -86,7 +89,8 @@ type Busy = "push" | "reset" | null;
  * `deleted`) — Push to vault, Reset to vault, Compare — or, for files it can't
  * get (`missing-dir` / `refused`), an informational variant pointing at the
  * "Secret files…" dialog. Dismissing it hides it until a flagged file's path,
- * state or vault version changes.
+ * state, content or vault version changes. Push / Reset send the content
+ * tokens the bar showed (`expect`): a file edited since is refused, not acted on.
  */
 export const SecretFilesProjectBar: React.FC = () => {
   const enabled = useSecretFilesEnabled();
@@ -109,22 +113,40 @@ const ProjectBar: React.FC<{
   const dismissed = useDismissed(dismissKey);
   const [busy, setBusy] = useState<Busy>(null);
   const [error, setError] = useState<string | null>(null);
-  const [confirm, setConfirm] = useState<"push" | "reset" | null>(null);
+  // What the confirm was opened on: the paths and the content tokens shown then.
+  const [confirm, setConfirm] = useState<{
+    kind: "push" | "reset";
+    files: string[];
+    expect: Record<string, string | null> | undefined;
+  } | null>(null);
   // What Compare was opened on (one path, or every file not in sync).
   const [comparing, setComparing] = useState<{ path?: string } | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
 
   // The one modified file's compare summary completes the message; refetched
-  // when its state or the vault's version of it moves.
+  // when its content, its state or the vault's version of it moves.
   const comparePath = model?.kind === "drift" ? model.comparePath : null;
   const compareVersion = comparePath ? vault.files.find((file) => file.path === comparePath)?.version ?? "" : "";
-  const [summary, setSummary] = useState<{ path: string; text: string | null } | null>(null);
+  const compareToken = comparePath ? clone.files.find((file) => file.path === comparePath)?.contentToken ?? "" : "";
+  const [summary, setSummary] = useState<{
+    path: string;
+    /** The store's token it was fetched for, and the one the daemon compared. */
+    token: string;
+    comparedToken: string | undefined;
+    text: string | null;
+  } | null>(null);
   useEffect(() => {
     if (!comparePath || dismissed) return undefined;
     const controller = new AbortController();
     api.compareSecretFile(vault.workspace, vault.repoKey, projectPath, comparePath, controller.signal).then(
-      ({ compare }) => {
-        if (!controller.signal.aborted) setSummary({ path: comparePath, text: compareSummaryText(compare) });
+      ({ compare, contentToken }) => {
+        if (controller.signal.aborted) return;
+        setSummary({
+          path: comparePath,
+          token: compareToken,
+          comparedToken: typeof contentToken === "string" && contentToken ? contentToken : undefined,
+          text: compareSummaryText(compare)
+        });
       },
       () => {
         // The message reads fine without the counts; Compare shows the error.
@@ -132,7 +154,9 @@ const ProjectBar: React.FC<{
       }
     );
     return () => controller.abort();
-  }, [api, vault.workspace, vault.repoKey, projectPath, comparePath, compareVersion, dismissed]);
+  }, [api, vault.workspace, vault.repoKey, projectPath, comparePath, compareVersion, compareToken, dismissed]);
+  // A summary of another copy of the file than the one shown now is not shown.
+  const shownSummary = summary !== null && summary.path === comparePath && summary.token === compareToken ? summary : null;
 
   // The modals outlive the bar: an action taken in them can settle the state the bar shows.
   const modals = (
@@ -165,13 +189,22 @@ const ProjectBar: React.FC<{
     );
   }
 
-  const message = projectBarMessage(model, summary?.path === comparePath ? summary?.text : null);
+  const message = projectBarMessage(model, shownSummary?.text);
   const drift = model.kind === "drift";
 
-  const run = async (kind: "push" | "reset") => {
+  /** Ask first, remembering what the bar shows now (the counts' compared copy for the one file, when known). */
+  const ask = (kind: "push" | "reset") => {
     if (model.kind !== "drift") return;
     const files = kind === "push" ? model.pushPaths : model.resetPaths;
-    const req = { workspace: vault.workspace, repoKey: vault.repoKey, projectPath, files };
+    let expect = expectedContent(model.files, files);
+    if (shownSummary?.comparedToken && files.includes(shownSummary.path)) {
+      expect = { ...expect, [shownSummary.path]: shownSummary.comparedToken };
+    }
+    setConfirm({ kind, files, expect });
+  };
+
+  const run = async ({ kind, files, expect }: NonNullable<typeof confirm>) => {
+    const req = { workspace: vault.workspace, repoKey: vault.repoKey, projectPath, files, ...(expect ? { expect } : {}) };
     setBusy(kind);
     setError(null);
     try {
@@ -211,11 +244,11 @@ const ProjectBar: React.FC<{
           {drift ? (
             <>
               {model.pushPaths.length > 0 && (
-                <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => setConfirm("push")}>
+                <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => ask("push")}>
                   {spinner("push") ?? <Upload size={13} />} Push to vault
                 </Button>
               )}
-              <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => setConfirm("reset")}>
+              <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => ask("reset")}>
                 {spinner("reset") ?? <RotateCcw size={13} />} Reset to vault
               </Button>
               <Button
@@ -245,19 +278,21 @@ const ProjectBar: React.FC<{
         {model.kind === "drift" && (
           <ConfirmDialog
             open={confirm !== null}
-            title={confirm === "push" ? "Push to vault?" : "Reset to vault?"}
+            title={confirm?.kind === "push" ? "Push to vault?" : "Reset to vault?"}
             message={
-              confirm === "push"
-                ? pushConfirmText(vault, projectPath, model.pushPaths)
-                : resetConfirmText(model.resetPaths)
+              confirm === null
+                ? null
+                : confirm.kind === "push"
+                  ? pushConfirmText(vault, projectPath, confirm.files)
+                  : resetConfirmText(confirm.files)
             }
-            confirmLabel={confirm === "push" ? "Push to vault" : "Reset to vault"}
-            danger={confirm === "reset"}
+            confirmLabel={confirm?.kind === "push" ? "Push to vault" : "Reset to vault"}
+            danger={confirm?.kind === "reset"}
             onCancel={() => setConfirm(null)}
             onConfirm={() => {
-              const kind = confirm;
+              const action = confirm;
               setConfirm(null);
-              if (kind) void run(kind);
+              if (action) void run(action);
             }}
           />
         )}

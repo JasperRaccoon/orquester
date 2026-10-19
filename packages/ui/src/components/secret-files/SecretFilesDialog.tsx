@@ -27,6 +27,7 @@ import {
 } from "../../lib/secret-files/store";
 import { Button, ConfirmDialog, Input, Modal, ModalCloseButton } from "../ui";
 import { SecretFileCompareModal } from "./SecretFileCompareModal";
+import { expectedContent } from "./drift.logic";
 import {
   buildAddRequest,
   buildSetupRequest,
@@ -596,10 +597,23 @@ const SetupView: React.FC<{ api: SecretFilesAdminApi; workspace: string; repoKey
 // Manage
 // ---------------------------------------------------------------------------
 
+/** A Push / Reset remembers the clone as shown when asked, so `expect` carries the content the user saw. */
 type Confirm =
   | { kind: "push"; clone: SecretFilesClone; files: string[] }
   | { kind: "reset"; clone: SecretFilesClone; files: string[] }
   | { kind: "delete" };
+
+/** The Push / Reset request for a confirmed action, with the content tokens it was shown with. */
+function cloneRequest(workspace: string, repoKey: string, action: { clone: SecretFilesClone; files: string[] }) {
+  const expect = expectedContent(action.clone.files, action.files);
+  return {
+    workspace,
+    repoKey,
+    projectPath: action.clone.projectPath,
+    files: action.files,
+    ...(expect ? { expect } : {})
+  };
+}
 
 interface PendingAdd {
   candidate: SecretFileCandidate;
@@ -663,11 +677,11 @@ const ManageView: React.FC<{ api: SecretFilesAdminApi; vault: SecretVaultDetail;
       void run("delete", () => deleteSecretVault(api, workspace, repoKey));
     } else if (action.kind === "push") {
       void run(`push:${action.clone.projectPath}`, async () => {
-        await pushSecretFiles(api, { workspace, repoKey, projectPath: action.clone.projectPath, files: action.files });
+        await pushSecretFiles(api, cloneRequest(workspace, repoKey, action));
       });
     } else {
       void run(`reset:${action.clone.projectPath}`, async () => {
-        await resetCloneSecretFiles(api, { workspace, repoKey, projectPath: action.clone.projectPath, files: action.files });
+        await resetCloneSecretFiles(api, cloneRequest(workspace, repoKey, action));
       });
     }
   };
@@ -689,7 +703,7 @@ const ManageView: React.FC<{ api: SecretFilesAdminApi; vault: SecretVaultDetail;
         </>
       );
     }
-    const impact = pushImpact(vault, action.clone);
+    const impact = pushImpact(vault, action.clone, action.files);
     return (
       <span className="space-y-2">
         <span className="block">

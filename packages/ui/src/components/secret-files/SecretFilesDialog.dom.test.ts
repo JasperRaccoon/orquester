@@ -345,4 +345,43 @@ describe("secret files dialog", () => {
       files: ["MatsSmileBack/.env"]
     });
   });
+
+  it("manages: Push sends the content token shown; a CONTENT_CHANGED refusal asks to review again and refreshes", async () => {
+    const withToken: SecretVaultDetail = {
+      ...VAULT,
+      clones: VAULT.clones.map((clone) =>
+        clone.projectPath === B
+          ? { ...clone, files: [{ path: "MatsSmileBack/.env", state: "modified", contentToken: "tB" }] }
+          : clone
+      )
+    };
+    store.applySecretVault(WS, KEY, withToken);
+    await render();
+    const gets = () => api.calls.filter((entry) => entry.name === "get").length;
+    const before = gets();
+    await click(button("Push to vault"));
+    const confirm = Array.from(document.querySelectorAll('[role="dialog"]')).pop()!;
+    await click(Array.from(confirm.querySelectorAll("button")).find((b) => b.textContent?.trim() === "Push to vault"));
+    assert.deepEqual(api.last("push").args[0], {
+      workspace: WS,
+      repoKey: KEY,
+      projectPath: B,
+      files: ["MatsSmileBack/.env"],
+      expect: { "MatsSmileBack/.env": "tB" }
+    });
+    await settle(
+      "push",
+      Object.assign(new Error("x"), {
+        status: 409,
+        serverMessage: "A file's content no longer matches.",
+        body: { code: "CONTENT_CHANGED" }
+      }),
+      true
+    );
+    assert.equal(
+      document.querySelector('[role="alert"]')?.textContent,
+      "This file changed since you looked \u2014 review it again."
+    );
+    assert.equal(gets(), before + 1, "the vault is fetched again");
+  });
 });
