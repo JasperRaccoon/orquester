@@ -15,7 +15,10 @@
  *   states and tokens included — so a client keeps the newest.
  * - **Expect.** Push / Reset with `expect` compare each named file's token, inside the vault's queue,
  *   with the copy actually about to be pushed or overwritten: a mismatch is 409 CONTENT_CHANGED and
- *   nothing is written.
+ *   nothing is written. The evaluation an action makes becomes the vault's current one (published
+ *   when it changed) before the action may refuse, so a refetch after a 409 shows the new tokens.
+ *   Reset also re-reads each copy right before overwriting it (a missing one is created, never
+ *   replaced): a copy that changed since the evaluation is left as it is (CONTENT_CHANGED).
  * - **One queue per vault.** Every operation on a vault — a route, a watcher check, a reconcile —
  *   runs in that vault's promise chain, so writes to its clones and to its record never interleave.
  *   A failing operation does not break the chain.
@@ -30,7 +33,9 @@
  *   clone's baseline is stamped. `modified`, `deleted`, `missing-dir` and `refused` files are never
  *   touched. Every clone write also checks the clone root's realpath stays inside the workspaces root.
  * - **Tracked check fails closed:** when git can't answer, the clone keeps its last answer; a path
- *   git never answered for is `refused: unreadable` there (never written) until it does.
+ *   git never answered for is `refused: unreadable` there (never written) until it does. Such a
+ *   clone is asked again by its next check once TRACKED_RETRY_MS has passed (not only by the next
+ *   full pass).
  * - **Plugin off:** no watcher, no timer, no write — also checked before each write of a pass already
  *   running. Mutations answer 409 `SECRET_FILES_DISABLED`; reads (list, vault, candidates, compare)
  *   still answer, evaluated fresh without any automatic action and without rewriting vaults.json,
@@ -41,11 +46,12 @@
  *   debounced check re-hashes the clone, finds it `synced`, and changes nothing — no event, no write.
  * - **Events** (`SECRET_FILES_CHANGED`) go out only when a vault's serialized detail changed.
  * - **No git on the hot path:** `trackedPaths` and `scanCandidates` run on full reconcile passes,
- *   operations and reads that need them, and for a clone seen for the first time — never on a
- *   watcher check.
+ *   operations and reads that need them, and for a clone git hasn't answered for yet (first seen,
+ *   or failed: then at most once per TRACKED_RETRY_MS) — never otherwise on a watcher check.
  */
 
 import { createHash, createHmac, randomBytes } from "node:crypto";
+import { setMaxListeners } from "node:events";
 import { watch as fsWatch } from "node:fs";
 import { realpath as fsRealpath, stat as fsStat } from "node:fs/promises";
 import { basename, join, posix } from "node:path";
@@ -449,6 +455,9 @@ interface TrackedState {
   checked: Set<string>;
 }
 
+/** What a clone git never answered for (no known paths) is treated as: every path unknown. */
+const NOTHING_KNOWN: TrackedState = { tracked: new Set(), checked: new Set() };
+
 interface CloneWatch {
   dirs: Map<string, DirWatch>;
   timer: unknown;
@@ -464,6 +473,8 @@ interface VaultRuntime {
   evals: Map<string, Map<string, FileEval>> | null;
   /** Per clone: the managed paths git tracks there (refreshed on full passes). */
   tracked: Map<string, TrackedState>;
+  /** Per clone: when git last failed to tell what is tracked there (ms; cleared when it answers). */
+  trackedFailedAt: Map<string, number>;
   /** Per clone: its conventional candidates (refreshed on full passes and scans). */
   candidates: Map<string, string[]>;
   /** The last detail published (serialized, without its revision), null before any. */
@@ -497,6 +508,13 @@ const RESETTABLE: readonly SecretFileState[] = ["modified", "deleted", "outdated
  * at that path counts as new. Clone files are never touched by pruning either way.
  */
 const UNLISTED_CLONE_GRACE_MS = 7 * 24 * 60 * 60_000;
+
+/**
+ * A clone where git hasn't answered for every managed path (it failed): a light check (a watcher's,
+ * a listing's) asks git again once this long has passed since its last failure, instead of
+ * leaving those paths refused until the next full pass.
+ */
+export const TRACKED_RETRY_MS = 30_000;
 
 const noop = (): void => undefined;
 
@@ -561,6 +579,8 @@ export class SecretFilesService {
     this.listDebounceMs = options.listDebounceMs ?? 1000;
     this.intervalMs = options.intervalMs ?? 5 * 60_000;
     this.unlistedGraceMs = options.unlistedGraceMs ?? UNLISTED_CLONE_GRACE_MS;
+    // Every git child of every vault listens on this one signal: no listener cap (and no warning).
+    setMaxListeners(0, this.abort.signal);
   }
 
   // -- lifecycle -------------------------------------------------------------
@@ -1010,17 +1030,29 @@ export class SecretFilesService {
       const wanted = selection ?? record.files.map((file) => file.path);
       const contents: Array<{ path: string; content: Uint8Array }> = [];
       for (const path of wanted) {
-        if (sourceEvals.get(path)?.state !== "modified") continue;
-        const read = await this.files.readCloneFile(source.path, path);
-        if (read.kind !== "file") continue;
-        contents.push({ path, content: read.content });
+        const evaluated = sourceEvals.get(path);
+        if (evaluated?.state !== "modified") continue;
+        const read = await this.files.readCloneFile(source.path, path).catch((): CloneFileRead => ({ kind: "refused", refusal: "unreadable" }));
+        const sha = read.kind === "file" ? sha256Of(read.content) : undefined;
+        if (sha === undefined || sha !== evaluated.sha256) {
+          // Changed since the evaluation: these bytes are what the source has now.
+          const file = record.files.find((candidate) => candidate.path === path)!;
+          const { state, refusal } = cloneFileState(file, read, record.clones[source.path]?.baselines[path], sha);
+          sourceEvals.set(path, {
+            path,
+            state,
+            ...(refusal ? { refusal } : {}),
+            ...(sha ? { sha256: sha } : {}),
+            ...(read.kind === "file" ? { mode: read.mode } : {})
+          });
+          if (state !== "modified") continue;
+        }
+        if (read.kind === "file") contents.push({ path, content: read.content });
       }
-      if (expect) {
-        // Against the very bytes pushed (else this evaluation's read): what the caller saw, or nothing moves.
-        const tokens = this.tokensOf(source.path, sourceEvals);
-        for (const { path, content } of contents) tokens.set(path, this.tokenOf(source.path, path, sha256Of(content)));
-        this.requireExpected(source, expect, tokens);
-      }
+      // This evaluation is the vault's current one from here on — also when the push is refused below.
+      this.keepEvaluation(runtime, record, evals, true);
+      // Against the very bytes pushed (else this evaluation's read): what the caller saw, or nothing moves.
+      if (expect) this.requireExpected(source, expect, this.tokensOf(source.path, sourceEvals));
       if (contents.length === 0) throw new SecretFilesError("NOTHING_TO_PUSH", `No selected file differs from the vault in ${source.name}.`);
 
       const stamp = this.now().toISOString();
@@ -1065,6 +1097,8 @@ export class SecretFilesService {
       this.requireManaged(record, selection);
       this.requireManaged(record, expect && [...expect.keys()]);
       const evals = await this.evaluateClone(clone, record, await this.refreshTracked(runtime, clone.path, record));
+      // This evaluation is the clone's current one from here on — also when the reset is refused below.
+      this.keepEvaluation(runtime, record, new Map([[clone.path, evals]]), false);
       // Against the copies this evaluation just read (the bytes about to be overwritten), before any write.
       if (expect) this.requireExpected(clone, expect, this.tokensOf(clone.path, evals));
       const wanted = new Set(selection ?? record.files.map((file) => file.path));
@@ -1074,11 +1108,31 @@ export class SecretFilesService {
         const evaluated = evals.get(file.path);
         if (!wanted.has(file.path) || !current || !evaluated || !RESETTABLE.includes(evaluated.state)) continue;
         const content = await this.store.readContent(current.sha256);
-        try {
-          await this.files.writeCloneFile(clone.path, file.path, content, evaluated.mode, this.writeOptions());
-        } catch (error) {
-          this.logger.warn(`secret-files: could not reset ${file.path} in ${clone.name} (${errorText(error)})`);
-          throw new SecretFilesError("SECRET_FILES_ERROR", `Could not write ${file.path} in ${clone.name}.`);
+        // Re-read right before the write: the copy must still be the one evaluated (and so the one
+        // `expect` named). A copy that wasn't there is created, never replaces one made meanwhile.
+        const missing = evaluated.sha256 === undefined;
+        const again = await this.files.readCloneFile(clone.path, file.path).catch(() => null);
+        let unchanged = missing
+          ? again?.kind === "missing" && again.parentExists
+          : again?.kind === "file" && sha256Of(again.content) === evaluated.sha256;
+        if (unchanged) {
+          try {
+            await this.files.writeCloneFile(clone.path, file.path, content, missing ? undefined : evaluated.mode, this.writeOptions(missing ? { createOnly: true } : {}));
+          } catch (error) {
+            if (!(error instanceof CloneFileError && error.exists)) {
+              this.logger.warn(`secret-files: could not reset ${file.path} in ${clone.name} (${errorText(error)})`);
+              throw new SecretFilesError("SECRET_FILES_ERROR", `Could not write ${file.path} in ${clone.name}.`);
+            }
+            unchanged = false;
+          }
+        }
+        if (!unchanged) {
+          // Edited meanwhile: left as it is. What was already reset keeps its baseline; the clone is
+          // evaluated again (and published) so the caller sees the copy it now has.
+          if (written.length > 0) await this.setBaselines(workspace, repoKey, [{ clonePath: clone.path, entries: written }]);
+          await this.refreshVault(runtime, { projects, only: clone.path, scan: false, git: false, auto: true });
+          const done = written.length > 0 ? ` (${written.map((entry) => entry.path).join(", ")} ${written.length === 1 ? "was" : "were"} reset)` : "";
+          throw new SecretFilesError("CONTENT_CHANGED", `${file.path} changed in ${clone.name} while it was being reset; it was left as it is${done}.`);
         }
         written.push({ path: file.path, versionId: current.id });
       }
@@ -1184,13 +1238,17 @@ export class SecretFilesService {
     return read.content;
   }
 
-  /** Ask git which of the record's paths it tracks in a clone; on a failure keep what was known. */
+  /**
+   * Ask git which of the record's paths it tracks in a clone. On a failure keep what was known
+   * (nothing is stored when nothing was: a later check asks again, see TRACKED_RETRY_MS).
+   */
   private async refreshTracked(runtime: VaultRuntime, clonePath: string, record: VaultRecord): Promise<TrackedState> {
     const paths = record.files.map((file) => file.path);
     try {
       const tracked = await this.files.trackedPaths(clonePath, paths, this.abort.signal);
       const state: TrackedState = { tracked, checked: new Set(paths) };
       runtime.tracked.set(clonePath, state);
+      runtime.trackedFailedAt.delete(clonePath);
       return state;
     } catch (error) {
       if (!this.stopped) {
@@ -1198,10 +1256,29 @@ export class SecretFilesService {
           `secret-files: git could not tell which files are tracked in ${clonePath} (${errorText(error)}); files it was never asked about are not written there`
         );
       }
-      const known = runtime.tracked.get(clonePath) ?? { tracked: new Set<string>(), checked: new Set<string>() };
-      runtime.tracked.set(clonePath, known);
-      return known;
+      runtime.trackedFailedAt.set(clonePath, this.now().getTime());
+      return runtime.tracked.get(clonePath) ?? NOTHING_KNOWN;
     }
+  }
+
+  /** Whether a light check should ask git about a clone: it never answered for every managed path, and its last failure (if any) is TRACKED_RETRY_MS old. */
+  private trackedRetryDue(runtime: VaultRuntime, clonePath: string, record: VaultRecord): boolean {
+    const known = runtime.tracked.get(clonePath);
+    if (known && record.files.every((file) => known.checked.has(file.path))) return false;
+    const failedAt = runtime.trackedFailedAt.get(clonePath);
+    return failedAt === undefined || this.now().getTime() - failedAt >= TRACKED_RETRY_MS;
+  }
+
+  /**
+   * An action's fresh evaluation (`all`: of every clone; else of some) as the vault's current one,
+   * published when the detail changed. Without a current evaluation, a partial one is not kept
+   * (the next read evaluates everything).
+   */
+  private keepEvaluation(runtime: VaultRuntime, record: VaultRecord, evals: Map<string, Map<string, FileEval>>, all: boolean): void {
+    if (all) runtime.evals = new Map(evals);
+    else if (runtime.evals) for (const [clonePath, cloneEvals] of evals) runtime.evals.set(clonePath, cloneEvals);
+    else return;
+    this.publishIfChanged(runtime, this.detailOf(runtime, record));
   }
 
   private async evaluateClone(clone: SecretFilesProject, record: VaultRecord, tracked: TrackedState): Promise<Map<string, FileEval>> {
@@ -1331,6 +1408,7 @@ export class SecretFilesService {
       );
       const live = new Set(runtime.clones.map((clone) => clone.path));
       for (const path of [...runtime.tracked.keys()]) if (!live.has(path)) runtime.tracked.delete(path);
+      for (const path of [...runtime.trackedFailedAt.keys()]) if (!live.has(path)) runtime.trackedFailedAt.delete(path);
       for (const path of [...runtime.candidates.keys()]) if (!live.has(path)) runtime.candidates.delete(path);
     }
     // A one-clone check needs the others' states already: without them it is a full refresh.
@@ -1339,8 +1417,11 @@ export class SecretFilesService {
     const snapshot = record;
     const evaluated = await Promise.all(
       targets.map(async (clone) => {
-        const known = runtime.tracked.get(clone.path);
-        const tracked = options.git || !known ? await this.refreshTracked(runtime, clone.path, snapshot) : known;
+        // A light check asks git only for a clone it never fully answered for (backed off after a failure).
+        const tracked =
+          options.git || this.trackedRetryDue(runtime, clone.path, snapshot)
+            ? await this.refreshTracked(runtime, clone.path, snapshot)
+            : (runtime.tracked.get(clone.path) ?? NOTHING_KNOWN);
         if (options.scan || !runtime.candidates.has(clone.path)) {
           runtime.candidates.set(clone.path, await this.files.scanCandidates(clone.path, this.abort.signal).catch(() => [] as string[]));
         }
@@ -1525,6 +1606,7 @@ export class SecretFilesService {
         clones: [],
         evals: null,
         tracked: new Map(),
+        trackedFailedAt: new Map(),
         candidates: new Map(),
         lastPublished: null,
         revision: null,
@@ -1545,6 +1627,7 @@ export class SecretFilesService {
     runtime.clones = [];
     runtime.evals = null;
     runtime.tracked.clear();
+    runtime.trackedFailedAt.clear();
     runtime.candidates.clear();
     runtime.lastPublished = null;
     runtime.revision = null;

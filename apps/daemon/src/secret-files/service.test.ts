@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { SECRET_FILES_MAX_PER_VAULT, type SecretFilesErrorCode, type SecretVaultDetail } from "@orquester/api";
-import { SecretFilesError, cloneFileState } from "./service.ts";
+import { SecretFilesError, TRACKED_RETRY_MS, cloneFileState } from "./service.ts";
 import { REPO, WS, bytes, makeHarness, root, sha, text, type Harness } from "./test-fakes.ts";
 import type { VaultFileRecord } from "./vault-store.ts";
 
@@ -1058,4 +1058,155 @@ test("with a workspaces root, every clone write is confined to it", async () => 
   await h.service.reset({ workspace: WS, repoKey: REPO, projectPath: b });
   assert.ok(h.fs.writes.length >= 2);
   for (const write of h.fs.writes) assert.equal(write.options?.containedIn, "/ws");
+});
+
+// ---------------------------------------------------------------------------
+// Re-review fixes: fresh evaluations on 409, tracked retry, abort listeners, reset re-check
+// ---------------------------------------------------------------------------
+
+const tokenIn = (vault: SecretVaultDetail, cloneName: string, path = ".env"): string | undefined =>
+  vault.clones.find((clone) => clone.projectName === cloneName)?.files.find((file) => file.path === path)?.contentToken;
+
+test("a 409 CONTENT_CHANGED keeps the evaluation it made: a refetch shows the new token and a retry with it succeeds", async () => {
+  // Watchers that never fire: only the actions themselves can notice the edits.
+  const h = await makeHarness({ overrides: { watch: () => ({ close: () => undefined }) } });
+  const a = h.clone("a");
+  const b = h.clone("b");
+  h.fs.put(`${a}/.env`, "KEY=one\n");
+  await setupEnv(h, "a");
+  const stale = tokenIn(await h.service.getVault(WS, REPO), "a");
+  assert.ok(stale);
+  h.fs.put(`${a}/.env`, "KEY=two\n");
+  assert.equal(tokenIn(await h.service.getVault(WS, REPO), "a"), stale, "the cached evaluation is stale");
+
+  // Push: refused, and the evaluation it made is now what reads (and events) show.
+  await refused(h.service.push({ workspace: WS, repoKey: REPO, projectPath: a, files: [".env"], expect: { ".env": stale } }), "CONTENT_CHANGED");
+  const refetched = await h.service.getVault(WS, REPO);
+  const fresh = tokenIn(refetched, "a");
+  assert.ok(fresh && fresh !== stale);
+  assert.equal(stateOf(refetched, "a", ".env"), "modified");
+  assert.equal(tokenIn(lastVault(h), "a"), fresh, "published");
+  const pushed = await h.service.push({ workspace: WS, repoKey: REPO, projectPath: a, files: [".env"], expect: { ".env": fresh } });
+  assert.equal(h.fs.read(`${b}/.env`), "KEY=two\n");
+
+  // Reset: likewise.
+  const bStale = tokenIn(pushed, "b");
+  assert.ok(bStale);
+  h.fs.put(`${b}/.env`, "KEY=b-edit\n");
+  await refused(h.service.reset({ workspace: WS, repoKey: REPO, projectPath: b, expect: { ".env": bStale } }), "CONTENT_CHANGED");
+  assert.equal(h.fs.read(`${b}/.env`), "KEY=b-edit\n");
+  const bFresh = tokenIn(await h.service.getVault(WS, REPO), "b");
+  assert.ok(bFresh && bFresh !== bStale);
+  await h.service.reset({ workspace: WS, repoKey: REPO, projectPath: b, expect: { ".env": bFresh } });
+  assert.equal(h.fs.read(`${b}/.env`), "KEY=two\n");
+});
+
+test("git failing where it never answered: a later light check asks again after a backoff (not only the full pass)", async () => {
+  let clock = Date.UTC(2026, 9, 19, 12, 0, 0);
+  const h = await makeHarness({ overrides: { now: () => new Date(clock) } });
+  const a = h.clone("a");
+  const b = h.clone("b");
+  h.fs.put(`${a}/.env`, "KEY=one\n");
+  h.fs.gitFails.add(b);
+  await setupEnv(h, "a");
+  assert.equal(stateOf(lastVault(h), "b", ".env"), "refused:unreadable");
+  h.fs.gitFails.delete(b);
+
+  // Right after the failure (inside the backoff): a check doesn't run git again.
+  const calls = h.fs.gitCalls;
+  h.fs.emit(`${b}/.env`);
+  await drain(h);
+  assert.equal(h.fs.gitCalls, calls);
+  assert.equal(stateOf(lastVault(h), "b", ".env"), "refused:unreadable");
+
+  // Once the backoff has passed: the next check asks git, which answers — the file is copied in.
+  clock += TRACKED_RETRY_MS;
+  h.fs.emit(`${b}/.env`);
+  await drain(h);
+  assert.equal(stateOf(lastVault(h), "b", ".env"), "synced");
+  assert.equal(h.fs.read(`${b}/.env`), "KEY=one\n");
+  // Known now: checks are back to no git at all.
+  const after = h.fs.gitCalls;
+  clock += TRACKED_RETRY_MS;
+  h.fs.emit(`${b}/.env`);
+  await drain(h);
+  assert.equal(h.fs.gitCalls, after);
+});
+
+test("twenty git runs at once on the shared abort signal emit no MaxListenersExceededWarning", async () => {
+  const h = await makeHarness();
+  const names = Array.from({ length: 20 }, (_, index) => `c${String(index).padStart(2, "0")}`);
+  const paths = names.map((name) => h.clone(name));
+  h.fs.put(`${paths[0]}/.env`, "KEY=one\n");
+  await setupEnv(h, names[0]!);
+  const warnings: Error[] = [];
+  const onWarning = (warning: Error) => void warnings.push(warning);
+  process.on("warning", onWarning);
+  try {
+    h.fs.gitHangs = true;
+    h.fs.gitSignals.length = 0;
+    const pass = h.service.reconcile(true);
+    for (let spins = 0; h.fs.gitSignals.length < names.length; spins++) {
+      assert.ok(spins < 10_000, "the pass never reached git in every clone");
+      await Promise.resolve();
+    }
+    // process.emitWarning delivers on a later tick.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    h.service.stop();
+    await pass;
+    await h.service.idle();
+  } finally {
+    process.off("warning", onWarning);
+  }
+  assert.deepEqual(
+    warnings.filter((warning) => warning.name === "MaxListenersExceededWarning").map((warning) => warning.message),
+    []
+  );
+});
+
+test("reset re-reads each copy right before overwriting it: an edit after the evaluation is never overwritten", async () => {
+  const h = await makeHarness();
+  const a = h.clone("a");
+  const b = h.clone("b");
+  h.fs.put(`${a}/.env`, "KEY=one\n");
+  await setupEnv(h, "a");
+  h.fs.put(`${b}/.env`, "KEY=b-edit\n", { notify: true });
+  await drain(h);
+  const shown = tokenIn(lastVault(h), "b");
+  assert.ok(shown);
+
+  // The user edits again between the reset's evaluation and its write (as it reads the vault's copy).
+  const readContent = h.store.readContent.bind(h.store);
+  let edit: (() => void) | null = () => h.fs.put(`${b}/.env`, "KEY=b-edit-2\n");
+  h.store.readContent = async (hash) => {
+    edit?.();
+    edit = null;
+    return readContent(hash);
+  };
+  await refused(h.service.reset({ workspace: WS, repoKey: REPO, projectPath: b, expect: { ".env": shown } }), "CONTENT_CHANGED");
+  assert.equal(h.fs.read(`${b}/.env`), "KEY=b-edit-2\n");
+  const now = tokenIn(lastVault(h), "b");
+  assert.ok(now && now !== shown, "the copy it has now is published");
+  // Without `expect` too.
+  edit = () => h.fs.put(`${b}/.env`, "KEY=b-edit-3\n");
+  await refused(h.service.reset({ workspace: WS, repoKey: REPO, projectPath: b }), "CONTENT_CHANGED");
+  assert.equal(h.fs.read(`${b}/.env`), "KEY=b-edit-3\n");
+
+  // A deleted copy is restored create-only: a file made right before the write is kept.
+  h.fs.remove(`${b}/.env`, { notify: true });
+  await drain(h);
+  assert.equal(stateOf(lastVault(h), "b", ".env"), "deleted");
+  h.fs.onBeforeWrite = (abs) => {
+    if (abs === `${b}/.env`) h.fs.put(abs, "KEY=users-own\n");
+  };
+  await refused(h.service.reset({ workspace: WS, repoKey: REPO, projectPath: b, expect: { ".env": null } }), "CONTENT_CHANGED");
+  assert.equal(h.fs.read(`${b}/.env`), "KEY=users-own\n");
+  assert.equal(stateOf(lastVault(h), "b", ".env"), "modified");
+  h.fs.onBeforeWrite = null;
+  h.fs.remove(`${b}/.env`, { notify: true });
+  await drain(h);
+  await h.service.reset({ workspace: WS, repoKey: REPO, projectPath: b, expect: { ".env": null } });
+  assert.equal(h.fs.read(`${b}/.env`), "KEY=one\n");
+  assert.equal(h.fs.writes.at(-1)?.path, `${b}/.env`);
+  assert.equal(h.fs.writes.at(-1)?.options?.createOnly, true);
 });

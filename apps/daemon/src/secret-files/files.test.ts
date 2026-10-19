@@ -11,6 +11,7 @@ import { SECRET_FILE_MAX_BYTES } from "@orquester/api";
 import {
   CloneFileError,
   compareContents,
+  createFrom,
   defaultGitRunner,
   formatEnvValue,
   type GitRunner,
@@ -271,6 +272,47 @@ test("writeCloneFile createOnly creates a missing file, and never replaces one t
   await symlink(join(root, "nowhere"), join(root, ".env.local"));
   await rejectsWith(writeCloneFile(root, ".env.local", enc("B=2\n"), undefined, { createOnly: true }), (error) => assert.equal(error.refusal, "symlink"));
   assert.deepEqual((await readdir(root)).sort(), [".env", ".env.local"]);
+});
+
+test("createFrom without hard links: a create whose write fails leaves no partial file, and never removes another one", async (t) => {
+  const root = await tempDir(t);
+  const tmp = join(root, ".env.tmp");
+  await writeFile(tmp, "A=1\n");
+  const noLinks = async () => {
+    throw Object.assign(new Error("no hard links"), { code: "EPERM" });
+  };
+  const failingWrite = async () => {
+    throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
+  };
+  await assert.rejects(createFrom(tmp, join(root, ".env"), enc("A=1\n"), 0o600, { link: noLinks, fill: failingWrite }), { code: "ENOSPC" });
+  assert.deepEqual(await readdir(root), [".env.tmp"], "the truncated target this call created is gone");
+
+  // A file already there: left alone (EEXIST), whatever the write would have done.
+  await writeFile(join(root, ".env"), "USER=own\n");
+  await rejectsWith(createFrom(tmp, join(root, ".env"), enc("A=1\n"), 0o600, { link: noLinks, fill: failingWrite }), (error) =>
+    assert.equal(error.exists, true)
+  );
+  assert.equal(await readFile(join(root, ".env"), "utf8"), "USER=own\n");
+
+  // A file that replaced the one just created (another inode) before the failure: not removed.
+  await rm(join(root, ".env"));
+  const swapped = async () => {
+    await rm(join(root, ".env"));
+    await writeFile(join(root, ".env"), "USER=raced\n");
+    throw Object.assign(new Error("I/O error"), { code: "EIO" });
+  };
+  await assert.rejects(createFrom(tmp, join(root, ".env"), enc("A=1\n"), 0o600, { link: noLinks, fill: swapped }), { code: "EIO" });
+  assert.equal(await readFile(join(root, ".env"), "utf8"), "USER=raced\n");
+
+  // Without a failure the fallback creates the file whole.
+  await rm(join(root, ".env"));
+  await createFrom(tmp, join(root, ".env"), enc("A=1\n"), 0o600, {
+    link: noLinks,
+    fill: async (handle, content) => {
+      await handle.writeFile(content);
+    }
+  });
+  assert.equal(await readFile(join(root, ".env"), "utf8"), "A=1\n");
 });
 
 test("writeCloneFile containedIn refuses a clone root whose realpath leaves the workspaces root", async (t) => {
