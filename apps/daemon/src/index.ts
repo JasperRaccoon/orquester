@@ -141,7 +141,7 @@ import { SavedPromptsService, publishSavedPromptEvents, registerSavedPromptRoute
 import { registerTodoToggleRoute } from "./todo-items.ts";
 import { PluginsService, publishPluginEvents } from "./plugins/plugins-service.ts";
 import { registerPluginRoutes } from "./plugins/routes.ts";
-import { detectRepoId } from "./repo-id";
+import { detectRepoInfo, remoteRepoFields } from "./repo-id";
 import { Tmux, sessionPath, tmuxAvailable, tmuxVersionOk } from "./tmux";
 import { SystemStatusService } from "./system-status";
 import { DeviceLinkService } from "./device-link.ts";
@@ -5110,13 +5110,16 @@ async function listProjects(
   return Promise.all(
     names.map(async (name) => {
       const path = join(workspacesDir, workspace, name);
-      const repoId = await detectRepoId(path);
+      const repo = await detectRepoInfo(path);
+      // repoKey/repoName/cloneUrl come together off a parseable origin, credentials stripped.
+      const remote = repo?.originUrl ? remoteRepoFields(repo.originUrl) : null;
       return {
         name,
         workspace,
         path,
         isArchived: archived.has(name),
-        ...(repoId === null ? {} : { repoId })
+        ...(repo === null ? {} : { repoId: repo.repoId }),
+        ...(remote ?? {})
       };
     })
   );
