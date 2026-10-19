@@ -117,6 +117,26 @@ import { fsPathQuery } from "./fs-path-query";
 import { parsePluginActionResult, parsePluginsResponse } from "./plugins-state";
 import { buildQueryString } from "./transporter";
 import { AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, agentProfileRoutes, agentToolsRoutes, desktopRoutes, pluginRoutes, repoIdentityRoutes, secretFilesRoutes, sessionProfileRoutes, workflowRoutes } from "@orquester/api";
+// boxes: the Ephemeral AI VMs plugin's routes and payloads.
+import { boxRoutes } from "@orquester/api";
+import type {
+  BlacksmithSetupResponse,
+  BoxConfigChangeSet,
+  BoxConfigChangesResponse,
+  BoxConnectionSettings,
+  BoxesResponse,
+  BoxKind,
+  BoxKindsResponse,
+  BoxOffersResponse,
+  BoxProviderId,
+  BoxProviderInfo,
+  BoxProvidersResponse,
+  BoxResponse,
+  DecideBoxConfigChangeRequest,
+  SetBlacksmithSetupRequest,
+  SetBoxConnectionRequest,
+  SetBoxProviderCredentialsRequest
+} from "@orquester/api";
 import type {
   AddSessionProfilePluginRequest,
   CopySessionProfileItemsRequest,
@@ -810,6 +830,95 @@ export class ApiClient {
     signal?: AbortSignal
   ): Promise<SecretFileCompareResponse> {
     return this.send("GET", secretFilesRoutes.compare, { query: { workspace, repoKey, projectPath, path }, signal });
+  }
+
+  // boxes: --- Ephemeral AI VMs (`boxRoutes`; answers are validated by `lib/boxes/store.ts`) ---
+
+  listBoxes(signal?: AbortSignal): Promise<BoxesResponse> {
+    return this.send("GET", boxRoutes.list, { signal });
+  }
+
+  getBox(id: string, signal?: AbortSignal): Promise<BoxResponse> {
+    return this.send("GET", boxRoutes.box(id), { signal });
+  }
+
+  /** Destroy a temporary box (a project box answers 409 `BOX_IS_PROJECT`: delete its project instead). */
+  destroyBox(id: string): Promise<BoxResponse | undefined> {
+    return this.send("DELETE", boxRoutes.box(id));
+  }
+
+  /** A box's setup log. The daemon serves text/plain, so this reads bytes rather than JSON. */
+  async boxSetupLog(id: string, signal?: AbortSignal): Promise<string> {
+    const path = boxRoutes.setupLog(id);
+    if (!this.transporter.requestBytes) throw new Error("Logs are not supported on this connection.");
+    const response = await this.transporter.requestBytes({ method: "GET", path, signal });
+    if (!response.ok) {
+      throw new ApiError(response.status, "GET", path, response.headers, undefined);
+    }
+    return new TextDecoder().decode(response.data);
+  }
+
+  listBoxKinds(signal?: AbortSignal): Promise<BoxKindsResponse> {
+    return this.send("GET", boxRoutes.kinds, { signal });
+  }
+
+  listBoxProviders(signal?: AbortSignal): Promise<BoxProvidersResponse> {
+    return this.send("GET", boxRoutes.providers, { signal });
+  }
+
+  /** Save a provider's credentials (write-only; the daemon validates them with a read call first). */
+  setBoxProviderCredentials(id: BoxProviderId, req: SetBoxProviderCredentialsRequest): Promise<BoxProviderInfo> {
+    return this.send("PUT", boxRoutes.provider(id), { body: req });
+  }
+
+  /** Forget a provider's credentials. */
+  removeBoxProviderCredentials(id: BoxProviderId): Promise<BoxProviderInfo | undefined> {
+    return this.send("DELETE", boxRoutes.provider(id));
+  }
+
+  getBoxOffers(id: BoxProviderId, kind: BoxKind, signal?: AbortSignal): Promise<BoxOffersResponse> {
+    return this.send("GET", boxRoutes.offers(id, kind), { signal });
+  }
+
+  /** Start building the provider's prepared Windows image (202; progress arrives as provider changes). */
+  prepareBoxWindowsImage(id: BoxProviderId): Promise<unknown> {
+    return this.send("POST", boxRoutes.windowsImage(id));
+  }
+
+  getBoxConnection(signal?: AbortSignal): Promise<BoxConnectionSettings> {
+    return this.send("GET", boxRoutes.connection, { signal });
+  }
+
+  /** Secret fields of `req` are write-only: the answer carries only `keyHint`. */
+  setBoxConnection(req: SetBoxConnectionRequest): Promise<BoxConnectionSettings> {
+    return this.send("PUT", boxRoutes.connection, { body: req });
+  }
+
+  /** Check that a box could reach this daemon; resolves to the settings with `reachable` set. */
+  testBoxConnection(): Promise<BoxConnectionSettings> {
+    return this.send("POST", boxRoutes.connectionTest);
+  }
+
+  getBlacksmithSetup(signal?: AbortSignal): Promise<BlacksmithSetupResponse> {
+    return this.send("GET", boxRoutes.blacksmith, { signal });
+  }
+
+  /** Pick the account / org; the daemon then runs the automatic steps (an empty body re-runs them). */
+  setBlacksmithSetup(req: SetBlacksmithSetupRequest): Promise<BlacksmithSetupResponse> {
+    return this.send("PUT", boxRoutes.blacksmith, { body: req });
+  }
+
+  /** Start the macOS test run (202): a box is started, connects, and is destroyed. */
+  startBlacksmithTest(): Promise<unknown> {
+    return this.send("POST", boxRoutes.blacksmithTest);
+  }
+
+  listBoxConfigChanges(signal?: AbortSignal): Promise<BoxConfigChangesResponse> {
+    return this.send("GET", boxRoutes.configChanges, { signal });
+  }
+
+  decideBoxConfigChange(id: string, req: DecideBoxConfigChangeRequest): Promise<{ change: BoxConfigChangeSet }> {
+    return this.send("POST", boxRoutes.configChange(id), { body: req });
   }
 
   // --- Repo identities (icon + label per git repo; daemon-persisted, shared) ---

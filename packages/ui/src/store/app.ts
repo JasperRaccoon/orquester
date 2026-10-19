@@ -181,6 +181,9 @@ import {
   WORKFLOWS_CHANNEL
 } from "@orquester/api";
 import type { PluginInfo } from "@orquester/api";
+// boxes: the Ephemeral AI VMs plugin's module store (own channel, loaded while the plugin is on).
+import { BOXES_CHANNEL, EPHEMERAL_VMS_PLUGIN_ID } from "@orquester/api";
+import { applyBoxesEvent, loadBoxes, resetBoxes } from "../lib/boxes/store";
 import type { AgentPrefs, UsagePrefs } from "@orquester/config";
 
 const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -1534,6 +1537,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     );
 
     const secretFilesWasOn = secretFilesOn(get().plugins);
+    // boxes: same rule as the secret files — a reconnect with the plugin on reloads.
+    const boxesWasOn = boxesOn(get().plugins);
     await Promise.all([
       get().loadWorkspaces(),
       get().loadRecentProjects(),
@@ -1576,6 +1581,10 @@ export const useAppStore = create<AppState>((set, get) => ({
           // here — the event stream has no replay.
           if (secretFilesWasOn && secretFilesOn(get().plugins) && get().api === active) {
             void loadSecretVaults(active).catch(() => undefined);
+          }
+          // boxes: the plugin's boxes, providers, kinds and config changes, likewise.
+          if (boxesWasOn && boxesOn(get().plugins) && get().api === active) {
+            void loadBoxes(active).catch(() => undefined);
           }
         }),
       // Repo icons + labels (own module store). Every (re)connect: the event
@@ -1899,6 +1908,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     resetSavedPrompts();
     resetRepoIdentities();
     resetSecretFiles();
+    // boxes: another daemon's boxes.
+    resetBoxes();
     stopSetupFollows();
     projectsLoadSeq += 1;
     resetSecretRequests();
@@ -3661,6 +3672,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (secretFilesOn(get().plugins)) applySecretFilesEvent(event);
       return;
     }
+    // boxes: box, provider and config-change snapshots (validated in their module store).
+    if (event.channel === BOXES_CHANNEL) {
+      if (boxesOn(get().plugins)) applyBoxesEvent(event);
+      return;
+    }
     if (event.channel === AGENT_PROFILE_CHANNEL) {
       // Agent config (Settings) keeps each agent's snapshot in its own module store: a
       // change refetches that agent when it was loaded and its revision moved
@@ -3800,6 +3816,20 @@ useAppStore.subscribe((state, previous) => {
   if (on === secretFilesOn(previous.plugins)) return;
   if (!on) resetSecretFiles();
   else if (state.api) void loadSecretVaults(state.api).catch(() => undefined);
+});
+
+// boxes: the Ephemeral AI VMs plugin, wired like the secret files above — its
+// state loads when the plugin turns on and is forgotten when it turns off.
+function boxesOn(plugins: readonly PluginInfo[] | null): boolean {
+  return isGlobalPluginEnabled(plugins, EPHEMERAL_VMS_PLUGIN_ID);
+}
+
+useAppStore.subscribe((state, previous) => {
+  if (state.plugins === previous.plugins) return;
+  const on = boxesOn(state.plugins);
+  if (on === boxesOn(previous.plugins)) return;
+  if (!on) resetBoxes();
+  else if (state.api) void loadBoxes(state.api).catch(() => undefined);
 });
 
 // Agent profiles §5.3: a remembered pick the connected daemon does not have (deleted while this
