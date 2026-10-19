@@ -37,6 +37,10 @@ import { useRepoIdentities } from "../../lib/repo-identities/hooks";
 import { useSecretVaults } from "../../lib/secret-files/hooks";
 import { SecretFilesDialog } from "../secret-files/SecretFilesDialog";
 import { Badge, EmptyState, InfoRow, Notice, SettingRow, SettingsCard, SettingsPage, SettingsSection } from "./primitives";
+// boxes: the Ephemeral AI VMs plugin's section, and "Set up more…" asking for it.
+import { EPHEMERAL_VMS_PLUGIN_ID } from "@orquester/api";
+import { BoxesPluginSection } from "../boxes/settings/BoxesPluginSection";
+import { takeBoxesSettingsFocus, useBoxesSettingsFocus } from "../../lib/boxes/hooks";
 
 /** What each built-in plugin's icon tile shows. */
 const PLUGIN_GLYPH: Record<PluginId, React.ReactNode> = {
@@ -101,6 +105,15 @@ export const PluginsSettings: React.FC = () => {
   const [pending, setPending] = useState<{ pluginId: PluginId; action: PluginAction } | null>(null);
   const [actionError, setActionError] = useState<ActionError | null>(null);
   const [confirmEnable, setConfirmEnable] = useState<PluginInfo | null>(null);
+
+  // boxes: the New project dialog's "Set up more…" opens this page on the plugin.
+  const boxesFocus = useBoxesSettingsFocus();
+  useEffect(() => {
+    if (!boxesFocus) return;
+    setQuery("");
+    setSelectedId(EPHEMERAL_VMS_PLUGIN_ID);
+    takeBoxesSettingsFocus();
+  }, [boxesFocus]);
 
   const load = useCallback(() => {
     setLoadError(null);
@@ -457,6 +470,7 @@ const PluginDetail: React.FC<{
       )}
 
       {plugin.id === SECRET_FILES_PLUGIN_ID && <SecretFilesPluginSection enabled={plugin.enabled} />}
+      {plugin.id === EPHEMERAL_VMS_PLUGIN_ID && <BoxesPluginSection enabled={plugin.enabled} />}
 
       <SettingsSection title="Settings">
         <SettingRow

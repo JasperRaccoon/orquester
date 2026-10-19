@@ -7,6 +7,7 @@ import { useAppStore } from "../../../store/app";
 import { loadBoxKinds, loadBoxOffers, loadBoxProviders, useBoxKinds, useBoxProviders } from "../../../lib/boxes/store";
 import { useBoxesEnabled } from "../../../lib/boxes/hooks";
 import { formatLifetime } from "../../../lib/boxes/format";
+import { boxesErrorText } from "../../../lib/boxes/errors";
 import {
   RUNS_ON_INITIAL,
   imageOptions,
@@ -36,11 +37,7 @@ const KIND_ICON: Record<BoxKind, React.ReactNode> = {
   macos: <Apple size={14} />
 };
 
-const errorText = (err: unknown): string => {
-  const server = (err as { serverMessage?: unknown } | null)?.serverMessage;
-  if (typeof server === "string" && server) return server;
-  return err instanceof Error && err.message ? err.message : "Could not load the offers.";
-};
+const errorText = (err: unknown): string => boxesErrorText(err, "Could not load the offers.");
 
 export interface RunsOn {
   /** The plugin is on: the row shows. */

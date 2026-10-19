@@ -3,7 +3,7 @@
  * which the app store itself imports).
  */
 
-import { useCallback, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import { createStore } from "zustand/vanilla";
 
 import { EPHEMERAL_VMS_PLUGIN_ID } from "@orquester/api";
@@ -33,6 +33,21 @@ export function useBoxesSettingsFocus(): boolean {
 /** The plugins page showed the plugin: the request is done. */
 export function takeBoxesSettingsFocus(): void {
   if (focusStore.getState().pending) focusStore.setState({ pending: false });
+}
+
+/**
+ * The clock countdowns and "so far" costs render from, moving every
+ * `intervalMs` while `active` (a display tick, not a wait).
+ */
+export function useNow(intervalMs: number, active = true): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), intervalMs);
+    return () => clearInterval(timer);
+  }, [intervalMs, active]);
+  return now;
 }
 
 /** Open Settings → Plugins on the Ephemeral AI VMs plugin. */
