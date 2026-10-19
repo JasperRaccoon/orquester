@@ -216,8 +216,8 @@ const FETCHABLE_TYPES = new Set([
 export function scanIconLinks(html: string, pageUrl: string): IconLink[] {
   const text = html.replace(/<!--[\s\S]*?(?:-->|$)/g, " ").replace(/<(script|style)\b[\s\S]*?(?:<\/\1\s*>|$)/gi, " ");
   let baseUrl = pageUrl;
-  const baseTag = /<base\b((?:[^>"']|"[^"]*"|'[^']*')*)>/i.exec(text);
-  const baseHref = baseTag ? readAttributes(baseTag[1]).get("href") : undefined;
+  const baseTag = tagsNamed(text, "base").next();
+  const baseHref = baseTag.done ? undefined : readAttributes(baseTag.value).get("href");
   if (baseHref) {
     try {
       const resolved = new URL(decodeEntities(baseHref).trim(), pageUrl);
@@ -228,8 +228,8 @@ export function scanIconLinks(html: string, pageUrl: string): IconLink[] {
   }
 
   const links: IconLink[] = [];
-  for (const match of text.matchAll(/<link\b((?:[^>"']|"[^"]*"|'[^']*')*)>/gi)) {
-    const attributes = readAttributes(match[1]);
+  for (const source of tagsNamed(text, "link")) {
+    const attributes = readAttributes(source);
     const rel = (attributes.get("rel") ?? "").toLowerCase().split(/\s+/).filter(Boolean);
     if (rel.includes("mask-icon")) continue;
     const apple = rel.includes("apple-touch-icon") || rel.includes("apple-touch-icon-precomposed");
@@ -248,6 +248,47 @@ export function scanIconLinks(html: string, pageUrl: string): IconLink[] {
     links.push({ url: url.href, apple, size: largestSize(attributes.get("sizes")), type });
   }
   return links;
+}
+
+/**
+ * The attribute source of each `<name ...>` tag (name matched case-insensitively, as a whole
+ * word), in document order. A single forward pass instead of a regex: the `>` that closes a tag is
+ * found honoring quoted attribute values, and a tag that never closes ends the scan — as in a
+ * browser, an unclosed tag (or quoted value) swallows the rest of the document. Linear in `text`.
+ */
+function* tagsNamed(text: string, name: string): Generator<string> {
+  let from = 0;
+  for (;;) {
+    const open = text.indexOf("<", from);
+    if (open === -1) return;
+    const nameEnd = open + 1 + name.length;
+    if (text.slice(open + 1, nameEnd).toLowerCase() !== name || isWordChar(text.charCodeAt(nameEnd))) {
+      from = open + 1;
+      continue;
+    }
+    const close = tagEnd(text, nameEnd);
+    if (close === -1) return;
+    yield text.slice(nameEnd, close);
+    from = close + 1;
+  }
+}
+
+/** The index of the `>` closing a tag whose attributes start at `from`, or -1 when none does. */
+function tagEnd(text: string, from: number): number {
+  for (let i = from; i < text.length; i += 1) {
+    const char = text[i];
+    if (char === ">") return i;
+    if (char === '"' || char === "'") {
+      i = text.indexOf(char, i + 1);
+      if (i === -1) return -1;
+    }
+  }
+  return -1;
+}
+
+/** `[A-Za-z0-9_]`, what a regex `\b` treats as a word character (NaN past the end is not). */
+function isWordChar(code: number): boolean {
+  return (code >= 0x30 && code <= 0x39) || (code >= 0x41 && code <= 0x5a) || (code >= 0x61 && code <= 0x7a) || code === 0x5f;
 }
 
 /**

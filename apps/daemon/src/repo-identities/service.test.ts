@@ -236,6 +236,34 @@ test("a corrupt file is moved aside byte for byte, its icons kept; the store sta
   }
 });
 
+test("later loads keep the icons a moved-aside file names, and still sweep true orphans", async (t) => {
+  const s = await scratch(t);
+  const newerIcon = "eeee-1111.png";
+  const truncatedIcon = "ffff-2222.svg";
+  const orphan = "gggg-3333.ico";
+  await mkdir(s.iconsDir, { recursive: true });
+  for (const name of [newerIcon, orphan]) await writeFile(join(s.iconsDir, name), PNG);
+  t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-10-18T10:11:12.345Z") });
+
+  // A newer build's file (a downgrade) reads as corrupt and is moved aside.
+  const newer = { version: 2, identities: [{ repoKey: KEY, icon: { kind: "image", file: newerIcon }, updatedAt: "2026-10-18T10:00:00.000Z" }] };
+  await writeFile(s.file, JSON.stringify(newer));
+  await s.service().load();
+  await s.service().load(); // no file now: the sweep runs
+  assert.deepEqual(await s.icons(), [newerIcon], "the moved-aside file's icon stays; the orphan goes");
+
+  // A file that does not even parse still protects the names it mentions.
+  await writeFile(join(s.iconsDir, truncatedIcon), SVG);
+  t.mock.timers.tick(60_000);
+  await writeFile(s.file, `{"version":1,"identities":[{"repoKey":"${KEY}","icon":{"kind":"image","file":"${truncatedIcon}"`);
+  await s.service().load();
+  const service = s.service();
+  await service.load();
+  await service.setLabel(KEY, "fresh");
+  await s.service().load(); // a valid file now: the sweep runs again
+  assert.deepEqual(await s.icons(), [newerIcon, truncatedIcon].sort());
+});
+
 test("an unreadable file makes the store read-only: every mutation 503, nothing written", async (t) => {
   const s = await scratch(t);
   await mkdir(s.file); // a directory where the file should be: the read fails with EISDIR

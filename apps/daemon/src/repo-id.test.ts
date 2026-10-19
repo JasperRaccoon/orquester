@@ -48,6 +48,25 @@ test("normalizeGitUrl drops a userinfo whose password holds an unencoded @", () 
   assert.equal(normalizeGitUrl("https://user:p@ss@github.com/o/r.git"), "github.com/o/r");
 });
 
+test("normalizeGitUrl refuses a scheme URL whose authority is ambiguous (an unencoded / in the password)", () => {
+  assert.equal(normalizeGitUrl("https://u:p/ss@github.com/o/r.git"), null);
+  assert.equal(normalizeGitUrl("ssh://git@host/o/r@x"), null, "an @ left anywhere after the userinfo");
+  // Normal URLs keep their ids.
+  assert.equal(normalizeGitUrl("https://u:p%2Fss@github.com/o/r.git"), "github.com/o/r");
+  assert.equal(normalizeGitUrl("ssh://git@github.com/o/r.git"), "github.com/o/r");
+  assert.equal(normalizeGitUrl("git@github.com:o/r.git"), "github.com/o/r");
+});
+
+test("detectRepoInfo: an ambiguous origin URL falls back to the realpathed root, and no remote fields", async (t) => {
+  const dir = await tempDir(t);
+  const url = "https://u:p/ss@github.com/o/r.git";
+  await gitRepo(dir, ORIGIN(url));
+  const info = await detectRepoInfo(dir);
+  assert.deepEqual(info, { repoId: await realpath(dir), originUrl: url });
+  assert.equal(info?.repoId.includes("ss@"), false);
+  assert.equal(remoteRepoFields(url), null);
+});
+
 test("parseOriginUrl reads the first url of [remote \"origin\"] only", () => {
   const config = [
     "[core]",

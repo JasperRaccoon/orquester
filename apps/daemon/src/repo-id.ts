@@ -8,7 +8,8 @@ export interface RepoInfo {
   repoId: string;
   /**
    * The `url` of `[remote "origin"]` exactly as configured. It MAY carry credentials, so it
-   * never leaves the daemon as is (`remoteRepoFields` strips them).
+   * never leaves the daemon as is (`remoteRepoFields` strips them). Present even when `repoId`
+   * fell back to the checkout's path because the URL's authority is ambiguous.
    */
   originUrl: string | null;
 }
@@ -23,7 +24,7 @@ export interface RepoInfo {
  * 1. the `origin` remote URL, normalized (`git@github.com:o/r.git`,
  *    `ssh://git@github.com/o/r.git` and `https://github.com/o/r.git` all
  *    become `github.com/o/r`) — sibling clones of one repo share it no matter
- *    where they live on disk;
+ *    where they live on disk (skipped when `normalizeGitUrl` finds the URL ambiguous);
  * 2. the realpathed root of the main checkout (a linked worktree's `gitdir:`
  *    resolves through `<repo>/.git/worktrees/<name>`) — local-only repos;
  * 3. null — not a git checkout, or unreadable: the caller omits the field and
@@ -46,13 +47,15 @@ export async function detectRepoInfo(projectDir: string): Promise<RepoInfo | nul
     return null;
   }
   const originUrl = parseOriginUrl(await readTextOrNull(join(layout.gitDir, "config")));
-  if (originUrl !== null) {
-    return { repoId: normalizeGitUrl(originUrl), originUrl };
+  const fromUrl = originUrl === null ? null : normalizeGitUrl(originUrl);
+  if (fromUrl !== null) {
+    return { repoId: fromUrl, originUrl };
   }
+  // No origin, or one whose authority is ambiguous: identify the repo by where it lives.
   try {
-    return { repoId: await realpath(layout.root), originUrl: null };
+    return { repoId: await realpath(layout.root), originUrl };
   } catch {
-    return { repoId: layout.root, originUrl: null };
+    return { repoId: layout.root, originUrl };
   }
 }
 
@@ -202,8 +205,12 @@ function parseConfigValue(raw: string): string {
  * `host:path` colon becomes a slash, and a trailing `.git`/slash is stripped.
  * The path keeps its case — hosts differ on sensitivity, and a consistent key
  * is all grouping needs.
+ *
+ * Null for a `scheme://` URL whose authority is ambiguous — an `@` still left after the userinfo
+ * is dropped (e.g. a password holding an unencoded `/`: `https://u:p/ss@host/o/r`) — since any
+ * key derived from it could carry part of a secret.
  */
-export function normalizeGitUrl(url: string): string {
+export function normalizeGitUrl(url: string): string | null {
   let rest = url.trim();
   const protocol = /^[a-z+]+:\/\//i.exec(rest);
   if (protocol) {
@@ -216,6 +223,9 @@ export function normalizeGitUrl(url: string): string {
   }
   // Through the LAST `@` before the path, so a password holding an unencoded `@` cannot survive.
   rest = rest.replace(/^[^/]*@/, "");
+  if (protocol && rest.includes("@")) {
+    return null;
+  }
   const slash = rest.indexOf("/");
   const host = (slash === -1 ? rest : rest.slice(0, slash)).toLowerCase();
   const path = (slash === -1 ? "" : rest.slice(slash)).replace(/\/+$/, "").replace(/\.git$/i, "");

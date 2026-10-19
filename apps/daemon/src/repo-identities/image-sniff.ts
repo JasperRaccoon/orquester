@@ -32,6 +32,10 @@ function ascii(bytes: Uint8Array, from: number, to: number): string {
   return String.fromCharCode(...bytes.subarray(from, to));
 }
 
+/**
+ * A hand scan rather than regexes: the bytes are untrusted (uploads, favicon responses, `data:`
+ * URLs), and every step here is an `indexOf` or a single pass, so the check stays linear.
+ */
 function isSvgDocument(bytes: Uint8Array): boolean {
   let text: string;
   try {
@@ -39,16 +43,84 @@ function isSvgDocument(bytes: Uint8Array): boolean {
   } catch {
     return false;
   }
-  let rest = text.replace(/^﻿/, "");
+  let at = text.charCodeAt(0) === 0xfeff ? 1 : 0;
   // Prolog: XML declaration, comments, processing instructions, a doctype — any order, any count.
   for (;;) {
-    rest = rest.trimStart();
-    const prolog = /^(<\?[\s\S]*?\?>|<!--[\s\S]*?-->|<!DOCTYPE[^>[]*(\[[\s\S]*?\])?\s*>)/i.exec(rest);
-    if (!prolog) break;
-    rest = rest.slice(prolog[0].length);
+    at = skipSpaceForward(text, at);
+    let next: number;
+    if (text.startsWith("<?", at)) {
+      const close = text.indexOf("?>", at + 2);
+      next = close === -1 ? -1 : close + 2;
+    } else if (text.startsWith("<!--", at)) {
+      const close = text.indexOf("-->", at + 4);
+      next = close === -1 ? -1 : close + 3;
+    } else if (text.slice(at, at + 9).toUpperCase() === "<!DOCTYPE") {
+      next = doctypeEnd(text, at + 9);
+    } else {
+      break;
+    }
+    if (next === -1) return false;
+    at = next;
   }
-  if (!/^<svg[\s>/]/i.test(rest)) return false;
-  // A self-closing root, or a closing tag at the end (trailing comments/whitespace allowed).
-  if (/^<svg\b[^>]*\/>\s*(<!--[\s\S]*?-->\s*)*$/i.test(rest)) return true;
-  return /<\/svg\s*>\s*(<!--[\s\S]*?-->\s*)*$/i.test(rest);
+  if (!/^<svg[\s>/]/i.test(text.slice(at, at + 5))) return false;
+  // The document without its trailing whitespace and comments.
+  const end = trailingStart(text, at);
+  // A self-closing root: the root tag's own `/>` ends it.
+  const rootEnd = text.indexOf(">", at);
+  if (rootEnd !== -1 && rootEnd + 1 === end && text[rootEnd - 1] === "/") return true;
+  // Otherwise a closing `</svg\s*>` ends it.
+  if (text[end - 1] !== ">") return false;
+  const close = skipSpaceBackward(text, end - 1, at);
+  return close - 5 > at && text.slice(close - 5, close).toLowerCase() === "</svg";
+}
+
+/** Past `<!DOCTYPE`: the index after its `>` (an internal `[...]` subset may hold `>`), or -1. */
+function doctypeEnd(text: string, from: number): number {
+  for (let i = from; i < text.length; i += 1) {
+    if (text[i] === ">") return i + 1;
+    if (text[i] !== "[") continue;
+    // The subset closes at the first `]` followed by optional whitespace and `>`.
+    for (let close = text.indexOf("]", i + 1); close !== -1; close = text.indexOf("]", close + 1)) {
+      const after = skipSpaceForward(text, close + 1);
+      if (text[after] === ">") return after + 1;
+    }
+    return -1;
+  }
+  return -1;
+}
+
+/**
+ * Where the trailing run of whitespace and `<!-- ... -->` comments starts (never before `floor`).
+ * Walks back one comment at a time; a comment's body never holds `-->`.
+ */
+function trailingStart(text: string, floor: number): number {
+  let end = skipSpaceBackward(text, text.length, floor);
+  while (end - floor >= 7 && text.endsWith("-->", end)) {
+    const closeAt = end - 3;
+    const previousClose = text.lastIndexOf("-->", closeAt - 1);
+    // The earliest `<!--` whose body does not reach back over the previous `-->`.
+    const open = text.indexOf("<!--", Math.max(floor, previousClose - 3));
+    if (open === -1 || open + 4 > closeAt) break;
+    end = skipSpaceBackward(text, open, floor);
+  }
+  return end;
+}
+
+/** `\s` as a regex reads it, for one UTF-16 code unit. */
+function isSpace(code: number): boolean {
+  if (code === 0x20 || (code >= 0x09 && code <= 0x0d)) return true;
+  return code > 0x7f && /\s/.test(String.fromCharCode(code));
+}
+
+function skipSpaceForward(text: string, from: number): number {
+  let i = from;
+  while (i < text.length && isSpace(text.charCodeAt(i))) i += 1;
+  return i;
+}
+
+/** The index after the last non-space character before `end`, not below `floor`. */
+function skipSpaceBackward(text: string, end: number, floor: number): number {
+  let i = end;
+  while (i > floor && isSpace(text.charCodeAt(i - 1))) i -= 1;
+  return i;
 }
