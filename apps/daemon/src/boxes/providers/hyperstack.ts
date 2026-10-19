@@ -181,6 +181,15 @@ async function ensureEnvironment(credentials: ProviderCredentials, region: strin
   return name;
 }
 
+async function keypairIdByName(credentials: ProviderCredentials, name: string, options: ProviderCallOptions): Promise<number | null> {
+  const { data } = await providerRequest<{ keypairs?: Array<{ id?: number; name?: string }> }>(
+    PROVIDER,
+    { url: `${API}/core/keypairs?search=${encodeURIComponent(name)}`, headers: headers(credentials) },
+    options
+  );
+  return num(data?.keypairs?.find((keypair) => keypair.name === name)?.id);
+}
+
 async function deleteKeypair(credentials: ProviderCredentials, id: number, options: ProviderCallOptions): Promise<void> {
   await providerRequest(
     PROVIDER,
@@ -278,19 +287,21 @@ export const hyperstackAdapter: BoxProviderAdapter = {
 
     const environment = await ensureEnvironment(credentials, request.region, options);
     throwIfAborted(options.signal);
-    const { data: keyData } = await providerRequest<{ keypair?: { id?: number; name?: string } }>(
+    const { status: keyStatus, data: keyData } = await providerRequest<{ keypair?: { id?: number; name?: string } }>(
       PROVIDER,
       {
         method: "POST",
         url: `${API}/core/keypairs`,
         headers: headers(credentials),
         body: { name: hsName(request.name), environment_name: environment, public_key: request.sshPublicKey },
+        okStatuses: [409],
         attempts: 1
       },
       options
     );
-    const keypairId = num(keyData?.keypair?.id);
-    const keyName = str(keyData?.keypair?.name) ?? hsName(request.name);
+    const keyName = (keyStatus !== 409 && str(keyData?.keypair?.name)) || hsName(request.name);
+    // 409: an earlier attempt for this box imported it already (nobody uses its private half); reuse it.
+    const keypairId = keyStatus === 409 ? await keypairIdByName(credentials, keyName, options) : num(keyData?.keypair?.id);
 
     let vm: HsInstance | undefined;
     try {
@@ -367,15 +378,8 @@ export const hyperstackAdapter: BoxProviderAdapter = {
     }
     let keypairId = num(ref.keypairId);
     const keyName = str(ref.keyName);
-    if (keypairId === null && keyName?.startsWith("orq-")) {
-      // Refs from listManaged know the key pair only by name.
-      const { data } = await providerRequest<{ keypairs?: Array<{ id?: number; name?: string }> }>(
-        PROVIDER,
-        { url: `${API}/core/keypairs?search=${encodeURIComponent(keyName)}`, headers: headers(credentials) },
-        options
-      );
-      keypairId = num(data?.keypairs?.find((keypair) => keypair.name === keyName)?.id);
-    }
+    // Refs from listManaged know the key pair only by name.
+    if (keypairId === null && keyName?.startsWith("orq-")) keypairId = await keypairIdByName(credentials, keyName, options);
     if (keypairId !== null) await deleteKeypair(credentials, keypairId, options);
   },
 

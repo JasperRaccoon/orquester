@@ -32,8 +32,8 @@ import type {
   ProviderManagedInstance,
   ProviderOffers
 } from "../contracts.ts";
-import { gpuSizeLabel, hourly, isoTime, num, requireCredential, str, throwIfAborted, validateWith } from "./gpu-common.ts";
-import { ProviderHttpError, boxIdFromInstanceName, providerRequest } from "./http.ts";
+import { gpuSizeLabel, hourly, isoTime, num, providerRequestWorded, requireCredential, str, throwIfAborted, validateWith } from "./gpu-common.ts";
+import { ProviderHttpError, boxIdFromInstanceName } from "./http.ts";
 import type { ProviderRequest, ProviderResponse } from "./http.ts";
 
 const PROVIDER = "vast.ai";
@@ -86,20 +86,9 @@ function headers(credentials: ProviderCredentials): Record<string, string> {
   return { Authorization: `Bearer ${requireCredential(credentials, "apiKey", PROVIDER)}` };
 }
 
-/**
- * `providerRequest` with vast.ai's error wording: its bodies are `{success, error, msg}` where `error`
- * is a code (`auth_error`, `no_such_ask`) and `msg` the sentence worth showing.
- */
-async function vastRequest<T>(request: ProviderRequest, options: ProviderCallOptions): Promise<ProviderResponse<T>> {
-  try {
-    return await providerRequest<T>(PROVIDER, request, options);
-  } catch (error) {
-    const body = error instanceof ProviderHttpError ? (error.body as { msg?: unknown } | null) : null;
-    if (error instanceof ProviderHttpError && body && typeof body.msg === "string" && body.msg.trim()) {
-      throw new ProviderHttpError(PROVIDER, error.status, `${PROVIDER}: ${body.msg.trim().slice(0, 300)}`, error.body);
-    }
-    throw error;
-  }
+/** vast.ai error bodies are `{success, error, msg}`: `error` is a code (`auth_error`, `no_such_ask`), `msg` the sentence. */
+function vastRequest<T>(request: ProviderRequest, options: ProviderCallOptions): Promise<ProviderResponse<T>> {
+  return providerRequestWorded<T>(PROVIDER, request, options);
 }
 
 /** `"Oregon, US"` → `US`. */

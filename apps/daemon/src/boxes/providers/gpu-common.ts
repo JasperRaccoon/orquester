@@ -6,8 +6,9 @@
 
 import type { BoxGpuInfo } from "@orquester/api";
 
-import type { ProviderCredentials } from "../contracts.ts";
-import { ProviderHttpError, isAuthError } from "./http.ts";
+import type { ProviderCallOptions, ProviderCredentials } from "../contracts.ts";
+import { ProviderHttpError, isAuthError, providerRequest } from "./http.ts";
+import type { ProviderRequest, ProviderResponse } from "./http.ts";
 
 /** A required credential field, trimmed; throws a plain message (never the value) when it is missing. */
 export function requireCredential(credentials: ProviderCredentials, field: string, provider: string): string {
@@ -34,6 +35,24 @@ export async function validateWith(
       return { ok: false, message: `${provider} rejected the API key: ${(error as Error).message.replace(`${provider}: `, "")}` };
     }
     return { ok: false, message: (error as Error).message || `${provider}: validation failed` };
+  }
+}
+
+/**
+ * `providerRequest` for providers whose error bodies pair a short code with a sentence
+ * (`{"error":"auth_error","msg":"Invalid user key"}`, `{"error":"unauthorized","message":"…"}`): the
+ * generic helper would show the code, this shows the sentence.
+ */
+export async function providerRequestWorded<T>(provider: string, request: ProviderRequest, options: ProviderCallOptions): Promise<ProviderResponse<T>> {
+  try {
+    return await providerRequest<T>(provider, request, options);
+  } catch (error) {
+    const body = error instanceof ProviderHttpError ? (error.body as Record<string, unknown> | null) : null;
+    const sentence = body && typeof body === "object" ? [body.msg, body.message].find((value) => typeof value === "string" && value.trim()) : undefined;
+    if (error instanceof ProviderHttpError && typeof body?.error === "string" && !/\s/.test(body.error) && typeof sentence === "string") {
+      throw new ProviderHttpError(provider, error.status, `${provider}: ${sentence.trim().slice(0, 300)}`, error.body);
+    }
+    throw error;
   }
 }
 

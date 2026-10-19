@@ -96,6 +96,25 @@ test("hyperstack: create ensures the region environment, imports the box key pai
   });
 });
 
+test("hyperstack: a key pair left by an earlier attempt (409) is reused", async () => {
+  const { fetch, seen } = routedFetch([
+    { path: "/v1/core/flavors?region=CANADA-1", replies: [{ body: f("flavors.json") }] },
+    { path: "/v1/pricebook", replies: [{ body: f("pricebook.json") }] },
+    { path: "/v1/core/images?region=CANADA-1", replies: [{ body: f("images.json") }] },
+    { method: "POST", path: "/v1/core/environments", replies: [{ body: f("environment-created.json") }] },
+    {
+      method: "POST",
+      path: "/v1/core/keypairs",
+      replies: [{ status: 409, body: '{"status":false,"message":"Keypair orq-box-0123abcd already exists","error_reason":"already_exist"}' }]
+    },
+    { path: "/v1/core/keypairs?search=orq-box-0123abcd", replies: [{ body: f("keypairs-search.json") }] },
+    { method: "POST", path: "/v1/core/virtual-machines", replies: [{ body: f("vm-create.json") }] }
+  ]);
+  const result = await hyperstackAdapter.create(creds, sampleCreateRequest({ size: "n3-RTX-A6000x1", region: "CANADA-1" }), callOptions(fetch));
+  assert.equal(result.ref.keypairId, 5521);
+  assert.equal((seen.at(-1)!.body as { key_name: string }).key_name, "orq-box-0123abcd");
+});
+
 test("hyperstack: a rejected VM create removes the key pair it imported; unknown flavors fail early", async () => {
   const { fetch, seen } = routedFetch([
     { path: "/v1/core/flavors?region=CANADA-1", replies: [{ body: f("flavors.json") }] },
