@@ -261,8 +261,18 @@ export function toolApprovalChangeSentence(card: CardFacts): string {
   }
 }
 
+/**
+ * boxes: a temporary-box card — `create_box` asking to rent a VM (Ephemeral AI VMs spec §13.2).
+ * Read by its kind `"box"`, or by the tool's name while this build's parser does not know that
+ * kind yet (it then reads `"unknown"`, with its caution, and is still named for what it is).
+ */
+export function isBoxApprovalCard(card: Pick<ParsedToolApprovalSummary, "kind"> & { tool?: string }): boolean {
+  return (card.kind as string) === "box" || card.tool === "create_box";
+}
+
 /** The card's badge: what kind of decision it is. */
-export function toolApprovalKindBadge(card: Pick<ParsedToolApprovalSummary, "kind">): string {
+export function toolApprovalKindBadge(card: Pick<ParsedToolApprovalSummary, "kind"> & { tool?: string }): string {
+  if (isBoxApprovalCard(card)) return "Rent a VM";
   switch (card.kind) {
     case "admin":
       return "Admin";

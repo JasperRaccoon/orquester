@@ -9,6 +9,8 @@ import {
   PasswordVerify
 } from "../ui";
 import { useAppStore } from "../../store/app";
+// boxes:
+import { ArchivedBoxNote } from "../boxes/surfaces/BoxBadge";
 
 /** Which archived items an entry lists. */
 export type ArchivedScope = "workspaces" | "projects";
@@ -105,6 +107,8 @@ const ArchivedList: React.FC<{ scope: ArchivedScope }> = ({ scope }) => {
           .map((p) => ({
             key: p.path,
             name: p.name,
+            // boxes: an archived box project's VM keeps running (§8.11).
+            note: p.box ? <ArchivedBoxNote projectPath={p.path} listed={p.box} /> : null,
             unarchive: () => void setProjectArchived(p, false)
           }))
       : workspaces
@@ -112,6 +116,7 @@ const ArchivedList: React.FC<{ scope: ArchivedScope }> = ({ scope }) => {
           .map((w) => ({
             key: w.path,
             name: w.name,
+            note: null,
             unarchive: () => void setWorkspaceArchived(w.name, false)
           }));
 
@@ -129,6 +134,7 @@ const ArchivedList: React.FC<{ scope: ArchivedScope }> = ({ scope }) => {
           onClick={row.unarchive}
         >
           {row.name}
+          {row.note}
         </DropdownItem>
       ))}
     </>

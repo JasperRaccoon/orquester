@@ -97,6 +97,10 @@ import { rosterKindCounts } from "./roster/roster-summary";
 import { EmptyThreadPanel } from "./EmptyThreadPanel";
 import { ChatLoadingScreen } from "./ChatLoadingScreen";
 import { useRegistry } from "../../hooks";
+// boxes:
+import { useProjectBox } from "../boxes/surfaces/box-data";
+import { BOX_MANAGED_ACCOUNTS_NOTE, boxAccountOptions, boxChatGate } from "../boxes/surfaces/box-surfaces.logic";
+import { BoxChatPanel, BoxComposerLock } from "../boxes/surfaces/BoxChatSurfaces";
 
 /** Per-device: the roster folded to its summary line. */
 const ROSTER_COLLAPSED_KEY = "orquester.chat.roster-collapsed";
@@ -225,6 +229,10 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   const sessionId = session.id;
   const { slice, actions, rows, activePlan, actionableProposedPlan, reverting, reveal } =
     useAgentChatThread(sessionId);
+  // boxes: a chat of a box project (spec 2026-10-19 §9.3): its box's state can make the
+  // transcript read-only (destroyed) or hold sends until setup is done (provisioning).
+  const boxView = useProjectBox(projectPath || null);
+  const boxBlockedReason = boxChatGate(boxView?.info, boxView?.setupStep ?? null).blockedReason;
   const pending = useAgentChatPending(sessionId);
   const roster = useAgentChatRoster(sessionId);
   // The banner counts by kind, as the roster's footer does: the panel's
@@ -377,7 +385,8 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   // The composer publishes its own height too (§7.4's contract). It is the
   // floor rather than the value: a mid-layout measurement can read the overlay
   // before the banner above the composer has laid out.
-  const bottomInset = Math.max(overlayHeight, composerHeight);
+  // boxes: while a box holds sends the composer is not mounted, so its last height is stale.
+  const bottomInset = Math.max(overlayHeight, boxBlockedReason === null ? composerHeight : 0);
 
   // --- the subagent drill-in (§7.6) ----------------------------------------
   const [drillInAgentId, setDrillInAgentId] = React.useState<string | null>(null);
@@ -855,11 +864,15 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
     refId: session.refId,
     adapterId: provider?.id
   })
-    ? buildChatAccountOptions({
-        refId: session.refId,
-        accounts: agentAccounts?.accounts,
-        shortLabel: shortAccountLabel
-      })
+    ? // boxes: a box chat runs under a managed account only (spec 2026-10-19 §17.16).
+      boxAccountOptions(
+        buildChatAccountOptions({
+          refId: session.refId,
+          accounts: agentAccounts?.accounts,
+          shortLabel: shortAccountLabel
+        }),
+        boxView !== null
+      )
     : undefined;
   // A thread on the system identity showed no chip before the picker existed;
   // it shows one now, because "System" is a choice the user can move off.
@@ -1115,6 +1128,9 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
       <ChatErrorBoundary sessionId={sessionId} onReset={closeDrillIn}>
         {/* Main area — the one thing the drill-in swaps. */}
         <div className="relative flex min-h-0 min-w-0 flex-1 flex-col bg-neutral-950">
+          {/* boxes: the box chip and its state's banner, this chat's temporary boxes and its
+              config changes to approve — above the transcript and a drill-in alike. */}
+          {paintOnly ? null : <BoxChatPanel sessionId={sessionId} view={boxView} />}
           {drillInAgentId ? (
             // One mount per agent — each opens from its own memory — inside a
             // boundary of its own: a child row that throws takes down the
@@ -1190,7 +1206,9 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                   />
                 ) : undefined
               }
-              onSendQueuedNow={paintOnly ? noop : (id) => dispatch(() => actions.sendQueuedNow(id))}
+              onSendQueuedNow={
+                paintOnly || boxBlockedReason !== null ? noop : (id) => dispatch(() => actions.sendQueuedNow(id))
+              }
               // The user's Ctrl+B (§4.5): offered on a running command only
               // where the provider can honour it.
               canBackgroundTasks={
@@ -1258,7 +1276,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 goalHeldForUpdate={goalHeldForUpdate}
                 goalActions={goalActionList}
                 goalActionsNote={goalNote}
-                onGoalAction={paintOnly ? noop : sendGoalAction}
+                onGoalAction={paintOnly || boxBlockedReason !== null ? noop : sendGoalAction}
               />
             </div>
             {/* The dock overlaps the composer by 17px so the two read as ONE
@@ -1304,6 +1322,10 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
               />
             </div>
             <div className="pointer-events-auto relative z-10 mx-auto w-full min-w-0 max-w-3xl px-3 sm:px-5">
+              {/* boxes: no composer while the box cannot take a message; the draft keeps. */}
+              {boxBlockedReason !== null ? (
+                <BoxComposerLock reason={boxBlockedReason} />
+              ) : (
               <ChatComposer
                 sessionId={sessionId}
                 provider={catalogProvider}
@@ -1341,7 +1363,10 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 // `/compact` is offered only where there is something to
                 // compact (§4.6.7): an empty thread would earn a refusal.
                 threadHasContent={slice.entries.length > 0}
+                // boxes: why the account picker offers no System account.
+                accountNote={boxView !== null ? BOX_MANAGED_ACCOUNTS_NOTE : undefined}
               />
+              )}
             </div>
             {/*
               The roster docks BELOW the composer, inside the same overlay, so

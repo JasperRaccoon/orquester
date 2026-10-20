@@ -33,6 +33,9 @@ import {
 } from "../attention";
 import { CountPill, SectionHeader } from "./parts";
 import { LineageMark } from "../agent-chat/LineageMark";
+// boxes:
+import { useProjectBox } from "../boxes/surfaces/box-data";
+import { AgentCardBoxBadge, AgentCardBoxBanner } from "../boxes/surfaces/BoxBadge";
 
 /**
  * One agent, as a card: its icon, title and `workspace / project`, with the
@@ -62,6 +65,8 @@ const AgentCard: React.FC<{
   const inOpenProject = useAppStore((s) => s.currentProject?.path === entry.session.projectPath);
   const onScreen = activeInProject && inOpenProject;
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  // boxes: the project's box badge, and the destroyed banner (§8.10, §9.3).
+  const boxView = useProjectBox(entry.project.path, entry.project.box);
 
   const recede =
     entry.session.kind === "agent-chat" &&
@@ -116,7 +121,9 @@ const AgentCard: React.FC<{
               {entry.project.workspace ? `${entry.project.workspace} / ` : ""}
               {entry.project.name}
             </span>
+            {boxView ? <AgentCardBoxBadge view={boxView} /> : null}
           </span>
+          {boxView ? <AgentCardBoxBanner view={boxView} /> : null}
         </span>
         {unread && (
           <span
