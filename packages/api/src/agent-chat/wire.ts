@@ -702,7 +702,7 @@ export const REMOTE_STRIPPED_TURN_FIELDS = ["causedBy"] as const satisfies reado
 export const REMOTE_STRIPPED_MERGE_BACK_FIELDS = ["causedBy"] as const satisfies readonly (keyof MergeBackRequest)[];
 
 /** The {@link InterruptCommandBody} fields only the daemon may set: removed from every remote body. */
-export const REMOTE_STRIPPED_INTERRUPT_FIELDS = ["cause"] as const satisfies readonly (keyof InterruptCommandBody)[];
+export const REMOTE_STRIPPED_INTERRUPT_FIELDS = ["cause", "cascade"] as const satisfies readonly (keyof InterruptCommandBody)[];
 
 function stripFields<T extends object>(body: T, fields: readonly string[]): T {
   if (!fields.some((field) => Object.prototype.hasOwnProperty.call(body, field))) return body;
@@ -741,6 +741,13 @@ export interface InterruptCommandBody extends AgentChatCommandBase {
    * parse is dropped, never a refusal. Additive: an older host ignores it (the interrupt still runs).
    */
   cause?: InterruptCause;
+  /**
+   * `false` when the interrupt is Orquester's own housekeeping rather than a stop — usage-limit
+   * recovery clearing a parked turn before it resumes (`agent-chat/limit-recovery.ts`): the chats
+   * this one delegated keep running (`agent-chat/delegates.ts`). SOCKET-TRUSTED and stripped from
+   * remote bodies like `cause`; the host ignores it.
+   */
+  cascade?: false;
 }
 
 export interface ApprovalCommandBody extends AgentChatCommandBase {

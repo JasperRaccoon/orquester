@@ -777,7 +777,9 @@ export class ChatLimitRecovery {
     if (!state.parked && !isBusy(tab)) return true;
     if (state.parked) {
       try {
-        await sendCommand(api, id, "interrupt", state.turnId ? { turnId: state.turnId } : {}, {
+        // `cascade: false`: clearing the parked turn is not a stop, so the chats this one
+        // delegated keep running (`delegates.ts`).
+        await sendCommand(api, id, "interrupt", { ...(state.turnId ? { turnId: state.turnId } : {}), cascade: false }, {
           commandId: `${commandId}:interrupt`,
           retryDelayMs: () => 0
         });

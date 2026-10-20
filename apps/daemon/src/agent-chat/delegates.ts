@@ -118,11 +118,12 @@ export class DelegateStopCascade {
 
   /**
    * The command route accepted `command` for `sessionId` (any transport, any caller). An
-   * interrupt carrying a cause is the cascade's own: it starts nothing.
+   * interrupt carrying a cause is the cascade's own, and one marked `cascade: false` is
+   * housekeeping (usage-limit recovery clearing a parked turn): neither starts anything.
    */
   commandAccepted(sessionId: string, command: DelegateStopCommand, body: unknown): void {
     const record = body !== null && typeof body === "object" && !Array.isArray(body) ? (body as Record<string, unknown>) : {};
-    if (command === "interrupt" && parseInterruptCause(record.cause) !== undefined) return;
+    if (command === "interrupt" && (parseInterruptCause(record.cause) !== undefined || record.cascade === false)) return;
     const commandId = typeof record.commandId === "string" && record.commandId.length > 0 ? record.commandId : randomUUID();
     this.start(sessionId, command === "interrupt" ? "interrupted" : "stopped", `${sessionId}\u0000${command}\u0000${commandId}`);
   }

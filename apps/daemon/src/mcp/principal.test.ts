@@ -136,7 +136,7 @@ test("the remote transport strips causedBy from turn and merge-back bodies and a
     await app.inject({ method: "POST", url: "/api/sessions/s1/turn", payload: { commandId: "c", input: "hi", causedBy } });
     await app.inject({ method: "POST", url: "/api/sessions/s1/merge-back", payload: { text: "r", causedBy } });
     const cause = { kind: "parent-stopped", parentSessionId: "p", parentTitle: "P", action: "interrupted" };
-    await app.inject({ method: "POST", url: "/api/sessions/s1/interrupt", payload: { commandId: "c", causedBy, cause } });
+    await app.inject({ method: "POST", url: "/api/sessions/s1/interrupt", payload: { commandId: "c", causedBy, cause, cascade: false } });
     await app.inject({ method: "POST", url: "/api/sessions/s1/turn", payload: ["not", "an", "object"] });
     assert.deepEqual(bodies, [{ commandId: "c", input: "hi" }, { text: "r" }, { commandId: "c", causedBy }, ["not", "an", "object"]]);
   } finally {

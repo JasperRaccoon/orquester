@@ -165,6 +165,17 @@ describe("the delegate stop cascade", () => {
     assert.equal(w.interrupts.length, first * 2);
   });
 
+  it("starts nothing for a housekeeping interrupt (cascade: false — usage-limit recovery clearing a parked turn)", async () => {
+    const w = world(tree());
+    w.cascade.commandAccepted("root", "interrupt", { commandId: "limit-resume:root:3:1:interrupt", cascade: false });
+    await w.cascade.whenIdle();
+    assert.equal(w.interrupts.length, 0, "the delegates keep running");
+    // A stop is still a stop, and only an explicit `false` exempts an interrupt.
+    w.cascade.commandAccepted("root", "interrupt", { commandId: "stop-1", cascade: true });
+    await w.cascade.whenIdle();
+    assert.ok(w.interrupts.length > 0);
+  });
+
   it("skips delegates that already finished, and does nothing for a chat with no delegates", async () => {
     const w = world([tab("root", null, RUNNING), tab("a", { parentThreadId: "root" }, DONE), tab("solo", null, RUNNING)]);
     w.cascade.commandAccepted("root", "interrupt", { commandId: "s" });
