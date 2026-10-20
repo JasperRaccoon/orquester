@@ -737,6 +737,11 @@ function parseMcp(raw: unknown, field: string): McpServerDraft {
     if (!isRecord(raw.advanced)) throw invalid(`${field}.advanced must be an object.`);
     draft.advanced = { ...raw.advanced };
   }
+  // boxes: "Run in box" (absent: unchanged on update, off on create).
+  if (raw.runInBox !== undefined) {
+    if (typeof raw.runInBox !== "boolean") throw invalid(`${field}.runInBox must be true or false.`);
+    draft.runInBox = raw.runInBox;
+  }
   return draft;
 }
 
