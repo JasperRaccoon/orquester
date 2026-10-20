@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
+import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, test } from "node:test";
 
 import { boxRoutes, type BoxControlMessage } from "@orquester/api";
+import { boxSocketPath } from "@orquester/config";
 
 import { bootstrapSecondStage } from "../bootstrap/bootstrap.ts";
+import { connectBoxRelay } from "../client/index.ts";
+import { RELAY_PROTOCOL_VERSION, RelayFrameDecoder, encodeRelayText, parseRelayJson } from "../client/relay-codec.ts";
 import type { VerifyGithubOidc } from "../contracts.ts";
 import { hashSecret } from "./auth.ts";
 import type { BoxAgentBuilds } from "./builds.ts";
@@ -33,9 +37,27 @@ describe("box hub authentication", () => {
   let url: string;
   let close: () => Promise<void>;
   const oidcCalls: { jwt: string; repository: string; runId: string; audience: string }[] = [];
+  /** When set, OIDC verdicts wait for it (a slow GitHub). */
+  let oidcGate: Promise<void> | null = null;
   const verifyGithubOidc: VerifyGithubOidc = async (jwt, expectation) => {
     oidcCalls.push({ jwt, ...expectation });
+    await oidcGate;
     return jwt.endsWith(".c2ln") && expectation.repository === "org/control" ? { ok: true } : { ok: false, message: "bad signature" };
+  };
+  const gateOidc = (): { release: () => void; reached: () => Promise<void> } => {
+    let release!: () => void;
+    oidcGate = new Promise<void>((resolve) => (release = resolve));
+    const calls = oidcCalls.length;
+    return {
+      release: () => {
+        oidcGate = null;
+        release();
+      },
+      // The verifier was called (the hello is being authenticated).
+      reached: async () => {
+        while (oidcCalls.length === calls) await new Promise((resolve) => setImmediate(resolve));
+      }
+    };
   };
   const builds: BoxAgentBuilds = {
     current: async () => ({ version: "test" }),
@@ -266,8 +288,167 @@ describe("box hub authentication", () => {
     await box.closed;
   });
 
+  test("a box revoked while its GitHub OIDC check is pending is refused, not linked", async () => {
+    records.add("box-oidc-rev01", { provider: "blacksmith", providerRef: { repository: "org/control", runId: 77 } });
+    const gate = gateOidc();
+    const box = await FakeBox.connect(url);
+    box.hello({ kind: "github-oidc", boxId: "box-oidc-rev01", jwt: fakeJwt({ aud: "https://orq.example:8443", repository: "org/control" }) });
+    await gate.reached();
+    await hub.revoke("box-oidc-rev01");
+    gate.release();
+    assert.equal(expectT(await box.next(), "reject").code, "BOX_DESTROYED");
+    assert.notEqual(hub.get("box-oidc-rev01")?.connected, true);
+  });
+
+  test("before its hello is authenticated a box can send only small frames, and only a little", async () => {
+    // One frame over the pre-auth limit: refused by ws before it is buffered.
+    const big = await FakeBox.connect(url);
+    big.send({ t: "hello", padding: "x".repeat(100 * 1024) });
+    assert.equal(await big.closed, 1009);
+
+    // Small frames piling up while the hello is being checked.
+    records.add("box-oidc-early", { provider: "blacksmith", providerRef: { repository: "org/control", runId: 78 } });
+    const gate = gateOidc();
+    const chatty = await FakeBox.connect(url);
+    chatty.hello({ kind: "github-oidc", boxId: "box-oidc-early", jwt: fakeJwt({ aud: "https://orq.example:8443", repository: "org/control" }) });
+    await gate.reached();
+    for (let i = 0; i < 3; i += 1) chatty.send({ t: "event", name: "noise", data: "y".repeat(40 * 1024) });
+    assert.equal(await chatty.closed, 1008);
+    gate.release();
+
+    // Once authenticated, large control frames are fine.
+    records.add("box-big-frame1");
+    const token = await hub.issueBootstrapToken("box-big-frame1", 60_000);
+    const linked = await FakeBox.connect(url);
+    linked.hello({ kind: "bootstrap", token });
+    expectT(await linked.next(), "welcome");
+    linked.send({ t: "event", name: "big", data: "z".repeat(1024 * 1024) });
+    linked.send({ t: "req", id: 1, method: "nope.nothing", params: {} });
+    assert.equal(expectT(await linked.next(), "res").id, 1);
+    linked.close();
+    await linked.closed;
+  });
+
   test("the user-auth exemption names exactly the box routes", () => {
     assert.deepEqual([...BOX_HUB_PUBLIC_ROUTES].sort(), ["/api/boxes/agent/:platform", "/api/boxes/bootstrap/:variant", "/api/boxes/connect"]);
     assert.equal(boxRoutes.bootstrapScript("container"), "/api/boxes/bootstrap/container");
+  });
+});
+
+describe("box hub relay across a dropped link", () => {
+  let appdir: string;
+  let records: MemoryRecords;
+  let hub: BoxHubServer;
+  let url: string;
+  let close: () => Promise<void>;
+
+  before(async () => {
+    appdir = await mkdtemp(join(tmpdir(), "orq-hub-relay-"));
+    records = new MemoryRecords();
+    hub = createBoxHub({
+      appdir,
+      records,
+      verifyGithubOidc: async () => ({ ok: false, message: "unused" }),
+      daemonUrls: () => [],
+      builds: null
+    });
+    const server = await startHubServer(hub);
+    url = server.url;
+    close = async () => {
+      await hub.close();
+      await server.app.close();
+    };
+  });
+
+  after(async () => {
+    await close();
+    await rm(appdir, { recursive: true, force: true });
+  });
+
+  /** A fake box linked to the hub; returns it and its credential (for a reconnect). */
+  const link = async (boxId: string, credential?: string): Promise<{ box: FakeBox; credential: string }> => {
+    const box = await FakeBox.connect(url);
+    if (credential) box.hello({ kind: "credential", boxId, credential });
+    else box.hello({ kind: "bootstrap", token: await hub.issueBootstrapToken(boxId, 60_000) });
+    const welcome = expectT(await box.next(), "welcome");
+    await hub.waitConnected(boxId, { timeoutMs: 5_000 });
+    return { box, credential: credential ?? welcome.credential! };
+  };
+
+  test("relay clients learn the box is away before their channels close, so a viewer waits to reattach", { timeout: 30_000 }, async () => {
+    records.add("box-relay-0001");
+    const first = await link("box-relay-0001");
+    // The hub's relay socket appears once the box has connected.
+    const relay = await connectBoxRelay(boxSocketPath(appdir, "box-relay-0001"), { boxId: "box-relay-0001" });
+    try {
+      const viewer = relay.attach("agent-1", 0);
+      const open = expectT(await first.box.next(), "open");
+      first.box.send({ t: "opened", ch: open.ch, info: { pid: 42, droppedBytes: 0 } });
+      await new Promise<void>((resolve) => viewer.once("spawn", () => resolve()));
+      const connectedAtDetach = new Promise<boolean>((resolve) => viewer.on("detached", () => resolve(relay.connected)));
+      first.box.socket.terminate();
+      assert.equal(await connectedAtDetach, false, "the relay reported the drop before the channel closed");
+    } finally {
+      relay.close();
+    }
+  });
+
+  test("an open relayed while the box is away waits for the link instead of failing", { timeout: 30_000 }, async () => {
+    records.add("box-relay-0002");
+    const first = await link("box-relay-0002");
+    // The relay socket is up once a client gets through it.
+    (await connectBoxRelay(boxSocketPath(appdir, "box-relay-0002"), { boxId: "box-relay-0002" })).close();
+    const away = new Promise<void>((resolve) => {
+      const off = hub.onConnectionChange((id, connected) => {
+        if (id === "box-relay-0002" && !connected) {
+          off();
+          resolve();
+        }
+      });
+    });
+    first.box.socket.terminate();
+    await away;
+
+    // A raw relay client: hello, then an open while the box is not connected.
+    const socket = createConnection(boxSocketPath(appdir, "box-relay-0002"));
+    const decoder = new RelayFrameDecoder();
+    const frames: Record<string, unknown>[] = [];
+    const waiters: (() => void)[] = [];
+    socket.on("data", (chunk: Buffer) => {
+      for (const frame of decoder.push(chunk)) {
+        if (frame.kind !== "text") continue;
+        const message = parseRelayJson(frame.text);
+        if (message) frames.push(message);
+        for (const wake of waiters.splice(0)) wake();
+      }
+    });
+    const waitFrame = async (match: (frame: Record<string, unknown>) => boolean): Promise<Record<string, unknown>> => {
+      for (;;) {
+        const found = frames.find(match);
+        if (found) return found;
+        await new Promise<void>((resolve) => waiters.push(resolve));
+      }
+    };
+    try {
+      socket.write(encodeRelayText(JSON.stringify({ t: "relay-hello", protocol: RELAY_PROTOCOL_VERSION, boxId: "box-relay-0002" })));
+      const welcome = await waitFrame((f) => f.t === "relay-welcome");
+      assert.equal(welcome.connected, false);
+      socket.write(encodeRelayText(JSON.stringify({ t: "open", ch: 2, spec: { kind: "attach", procId: "agent-2", fromOffset: 7 } })));
+      // Input written before the open went out is delivered after it, in order.
+      socket.write(encodeRelayText(JSON.stringify({ t: "resize", ch: 2, cols: 90, rows: 30 })));
+
+      const again = await link("box-relay-0002", first.credential);
+      const open = expectT(await again.box.next(), "open");
+      assert.deepEqual(open.spec, { kind: "attach", procId: "agent-2", fromOffset: 7 });
+      const resize = expectT(await again.box.next(), "resize");
+      assert.deepEqual([resize.ch, resize.cols, resize.rows], [open.ch, 90, 30]);
+      again.box.send({ t: "opened", ch: open.ch, info: { pid: 9, droppedBytes: 0 } });
+      const opened = await waitFrame((f) => f.t === "opened" || f.t === "open-failed");
+      assert.deepEqual(opened, { t: "opened", ch: 2, info: { pid: 9, droppedBytes: 0 } });
+      again.box.close();
+      await again.box.closed;
+    } finally {
+      socket.destroy();
+    }
   });
 });

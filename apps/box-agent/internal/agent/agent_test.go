@@ -29,15 +29,19 @@ func TestRingKeepsNewestBytesAndReportsStart(t *testing.T) {
 	if start != 1 || total != 11 {
 		t.Fatalf("bounds = %d,%d; want 1,11", start, total)
 	}
-	stream, data, next, _, _ := r.read(0, 100)
+	// Offset 0 was overwritten: reported, never skipped silently.
+	if _, data, _, _, _, overrun := r.read(0, 100); !overrun || data != nil {
+		t.Fatalf("a read before the buffer start must report an overrun")
+	}
+	stream, data, next, _, _, _ := r.read(start, 100)
 	if stream != 1 || string(data) != "ello" || next != 5 {
 		t.Fatalf("first read = %d %q %d", stream, data, next)
 	}
-	stream, data, next, _, _ = r.read(next, 3)
+	stream, data, next, _, _, _ = r.read(next, 3)
 	if stream != 2 || string(data) != "wor" || next != 8 {
 		t.Fatalf("second read = %d %q %d", stream, data, next)
 	}
-	_, data, _, finished, wait := r.read(11, 100)
+	_, data, _, finished, wait, _ := r.read(11, 100)
 	if data != nil || finished || wait == nil {
 		t.Fatalf("read at the end should wait")
 	}
@@ -47,7 +51,7 @@ func TestRingKeepsNewestBytesAndReportsStart(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("finish did not wake the reader")
 	}
-	if _, _, _, finished, _ := r.read(11, 100); !finished {
+	if _, _, _, finished, _, _ := r.read(11, 100); !finished {
 		t.Fatal("finished not reported")
 	}
 }

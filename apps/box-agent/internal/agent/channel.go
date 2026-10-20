@@ -15,6 +15,10 @@ const creditBatch = 64 * 1024
 // errChannelClosed is returned by Read/Write once the channel is gone.
 var errChannelClosed = errors.New("channel closed")
 
+// errStreamEnded is returned by Write on a stream we already sent `eof` for:
+// the daemon has finished that stream, so a late byte must never follow it.
+var errStreamEnded = errors.New("stream already ended")
+
 // Channel is one multiplexed byte stream (box-protocol.ts "Channels"). Inbound
 // bytes are stream 0 (toward the box); outbound writes choose stream 1 or 2.
 // Both directions honour the BOX_CHANNEL_WINDOW_BYTES credit window.
@@ -23,12 +27,14 @@ type Channel struct {
 	id   uint32
 
 	mu      sync.Mutex
+	sendMu  sync.Mutex    // orders data frames against our `eof` frames
 	changed chan struct{} // closed and replaced on every state change
 	done    chan struct{} // closed once the channel is dead (either side)
 	dead    bool
 	sentEnd bool // we sent `close`
 
-	credit int64 // outbound window left
+	credit int64   // outbound window left
+	ended  [3]bool // outbound streams we sent `eof` for (guarded by sendMu)
 
 	inbound   [][]byte
 	inEOF     bool
@@ -217,7 +223,16 @@ func (c *Channel) Write(stream byte, p []byte) error {
 		}
 		c.credit -= n
 		c.mu.Unlock()
-		if err := c.link.sendData(c.id, stream, p[:n]); err != nil {
+		// Waiting for credit happens above, outside sendMu: only the
+		// check-and-send is ordered against EOF.
+		c.sendMu.Lock()
+		if int(stream) < len(c.ended) && c.ended[stream] {
+			c.sendMu.Unlock()
+			return errStreamEnded
+		}
+		err := c.link.sendData(c.id, stream, p[:n])
+		c.sendMu.Unlock()
+		if err != nil {
 			return err
 		}
 		p = p[n:]
@@ -275,8 +290,18 @@ func (c *Channel) OpenFailed(err error) {
 	_ = c.link.sendJSON(wire.OpenFailed{T: "open-failed", Ch: c.id, Error: *rpcErr})
 }
 
-// EOF half-closes one outbound stream.
+// EOF half-closes one outbound stream. Writes on it fail from then on, so no
+// data frame ever follows the eof (a pump still blocked in a read cannot add a
+// late tail the daemon would treat as a protocol error).
 func (c *Channel) EOF(stream byte) {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	if int(stream) < len(c.ended) {
+		if c.ended[stream] {
+			return
+		}
+		c.ended[stream] = true
+	}
 	if c.alive() {
 		_ = c.link.sendJSON(wire.Eof{T: "eof", Ch: c.id, Stream: stream})
 	}

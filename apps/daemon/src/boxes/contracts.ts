@@ -73,6 +73,12 @@ export interface BoxProcess {
   readonly exitCode: number | null;
   readonly signalCode: NodeJS.Signals | null;
   readonly killed: boolean;
+  /**
+   * Detached processes: the output offset reached (stdout + stderr bytes, emission order),
+   * including any `droppedBytes` an attach reported — the `fromOffset` for the next attach.
+   * After `spawn`, an attach whose offset is past the one asked for lost output.
+   */
+  readonly outputOffset?: number;
   /** Sends the signal to the process in the box. Returns false once it has exited. */
   kill(signal?: NodeJS.Signals): boolean;
   resize(cols: number, rows: number): void;

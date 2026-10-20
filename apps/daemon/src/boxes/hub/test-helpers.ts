@@ -37,10 +37,28 @@ export async function buildTestAgent(outPath: string, version: string): Promise<
   });
 }
 
-/** A TCP proxy whose connections can all be cut at once (simulates a dropped link). */
-export async function startCuttableProxy(targetPort: number): Promise<{ port: number; cutAll(): void; close(): Promise<void> }> {
+/**
+ * A TCP proxy whose connections can all be cut at once (simulates a dropped link). While
+ * `hold()` is in effect, new connections wait (unconnected upstream) until its release: the
+ * box stays away for exactly as long as a test needs, then reconnects at once.
+ */
+export async function startCuttableProxy(targetPort: number): Promise<{ port: number; cutAll(): void; hold(): () => void; close(): Promise<void> }> {
   const sockets = new Set<Socket>();
+  let held: (() => void)[] | null = null;
   const server = createServer((client) => {
+    if (held) {
+      client.pause();
+      client.on("error", () => undefined);
+      sockets.add(client);
+      held.push(() => {
+        sockets.delete(client);
+        if (!client.destroyed) pipe(client);
+      });
+      return;
+    }
+    pipe(client);
+  });
+  const pipe = (client: Socket): void => {
     const upstream = createConnection({ port: targetPort, host: "127.0.0.1" });
     sockets.add(client);
     sockets.add(upstream);
@@ -53,13 +71,22 @@ export async function startCuttableProxy(targetPort: number): Promise<{ port: nu
     client.on("error", drop).on("close", drop);
     upstream.on("error", drop).on("close", drop);
     client.pipe(upstream).pipe(client);
-  });
+    client.resume();
+  };
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   return {
     port: (server.address() as AddressInfo).port,
     cutAll() {
       for (const socket of sockets) socket.destroy();
       sockets.clear();
+    },
+    hold() {
+      const queue: (() => void)[] = [];
+      held = queue;
+      return () => {
+        if (held === queue) held = null;
+        for (const start of queue.splice(0)) start();
+      };
     },
     close: () =>
       new Promise<void>((resolve) => {
