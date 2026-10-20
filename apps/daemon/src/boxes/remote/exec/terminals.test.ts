@@ -150,9 +150,12 @@ test("a box project's terminal runs a detached login shell in the box; input, ou
     const control = r.connection.proc(summary.id)!;
     assert.deepEqual(control.input, ["npm run dev\n"], "initialCommand is typed into the shell");
 
+    const sniffed: string[] = [];
+    r.sessions.lifecycle.on("output", ({ data }: { data: string }) => sniffed.push(data));
     const output = nextOutput(r.sessions, summary.id, /echo:ls\n/);
     r.sessions.input(summary.id, "ls\n");
     assert.match(await output, /echo:ls\n/);
+    assert.ok(sniffed.join("").includes("echo:ls"), "the project's URL watcher hears its box terminals");
     assert.match(r.sessions.buffer(summary.id), /echo:npm run dev\n.*echo:ls\n/s);
 
     r.sessions.resize(summary.id, 120, 40);
@@ -219,6 +222,14 @@ test("an explicit boxId opens a temporary box's terminal in the box user's home;
     assert.equal(summary.cwd, "/home/box");
     assert.equal(summary.projectPath, "/srv/workspaces/acme/chat-project");
     assert.equal(r.connection.execs.find((e) => e.detach)?.cwd, "/home/box");
+
+    // Its output is not taken for the (host) project's dev servers.
+    const sniffed: string[] = [];
+    r.sessions.lifecycle.on("output", ({ data }: { data: string }) => sniffed.push(data));
+    const seen = nextOutput(r.sessions, summary.id, /localhost:5173/);
+    r.connection.proc(summary.id)!.write("http://localhost:5173\n");
+    await seen;
+    assert.deepEqual(sniffed, []);
 
     r.boxes.update("tmp-1", { state: "destroyed" });
     assert.equal(r.sessions.get(summary.id)?.status, "exited", "a destroyed box ends its terminals");

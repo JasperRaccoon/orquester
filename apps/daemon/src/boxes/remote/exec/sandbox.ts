@@ -662,8 +662,11 @@ export function createBoxAwareSandboxRunner(host: DetailedSandboxRunner, deps: B
     );
     state.stdoutWritten = stdoutSize ?? 0;
     state.stderrWritten = stderrSize ?? 0;
-    // On disk BEFORE the process exists: a restart in between finds the attempt by its procId.
+    // On disk BEFORE the process exists: a restart in between finds the attempt by its procId
+    // (`handle.json` too, which a resume in the `spawning` window reads; its pid is a placeholder
+    // until the box reports one — a box attempt is never identified by a host pid).
     await writeJsonAtomic(join(attemptDir, STATE_FILE), state);
+    await writeJsonAtomic(join(attemptDir, "handle.json"), { pid: 1, starttime: BOX_SANDBOX_STARTTIME, attemptDir });
 
     const cwd = hostToBoxPath(connection.paths, request.cwd);
     let command: string;
@@ -695,7 +698,7 @@ export function createBoxAwareSandboxRunner(host: DetailedSandboxRunner, deps: B
       await waitSpawned(proc);
     } catch (error) {
       attempts.delete(attemptDir);
-      await rm(join(attemptDir, STATE_FILE), { force: true });
+      await Promise.all([STATE_FILE, "handle.json"].map((name) => rm(join(attemptDir, name), { force: true })));
       const code = (error as { code?: unknown }).code;
       if (code === "ENOENT" && request.kind === "code") throw new Error("Node.js is not installed in the box (code blocks run with `node` there).");
       if (code === "ENOENT") throw new Error(`\`${command}\` is not installed in the box.`);

@@ -237,7 +237,9 @@ export class BoxTerminalManager {
       session.buffer = (session.buffer + data).slice(-MAX_BUFFER);
       session.tracker.noteOutput(data);
       session.emitter.emit("output", data);
-      this.lifecycle.emit("output", { id, data });
+      // The merged "output" feeds the project's dev-server URL suggestions: only a shell in the
+      // project's OWN box speaks for it (a temporary box's "Watch" tab sits in a host project).
+      if (this.isProjectBox(session)) this.lifecycle.emit("output", { id, data });
     };
     proc.stdout.on("data", onData);
     proc.stderr.on("data", onData);
@@ -261,6 +263,12 @@ export class BoxTerminalManager {
       }
       void this.reattach(session);
     });
+  }
+
+  private isProjectBox(session: BoxTerminal): boolean {
+    if (!session.summary.projectPath) return false;
+    const location = this.deps.registry.locate(session.summary.projectPath);
+    return location.kind === "box" && location.boxId === session.summary.boxId;
   }
 
   private async onProcessExit(session: BoxTerminal, proc: BoxProcess, code: number | null): Promise<void> {
