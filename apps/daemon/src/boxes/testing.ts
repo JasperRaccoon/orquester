@@ -231,7 +231,15 @@ export function localBoxConnection(options: LocalBoxConnectionOptions = {}): Loc
         upstream.on("error", () => client.destroy());
         client.on("error", () => upstream.destroy());
       });
-      await new Promise<void>((resolve) => server.listen(forwardOptions?.hostPort ?? 0, "127.0.0.1", resolve));
+      // A taken host port (EADDRINUSE) rejects, as the hub's forward does.
+      await new Promise<void>((resolve, reject) => {
+        const onError = (error: Error) => reject(error);
+        server.once("error", onError);
+        server.listen(forwardOptions?.hostPort ?? 0, "127.0.0.1", () => {
+          server.off("error", onError);
+          resolve();
+        });
+      });
       return {
         hostPort: (server.address() as AddressInfo).port,
         boxPort,
