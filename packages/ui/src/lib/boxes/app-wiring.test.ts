@@ -68,12 +68,20 @@ describe("the app store wires the boxes store to the plugin", () => {
     resetBoxes();
   });
 
-  it("ignores boxes events while the plugin is off", () => {
+  it("ignores boxes events until the plugins list is known", () => {
     useAppStore.getState().applyEvent(event(BOXES_CHANNEL, BOXES_CHANGED_EVENT, { boxes: [box()], totals: TOTALS }));
     assert.equal(boxesStore.getState().boxes, null);
   });
 
-  it("loads when the plugin turns on, routes events, and forgets everything when it turns off", async () => {
+  it("with the plugin off, holds the boxes events report still running, and only those", () => {
+    useAppStore.setState({ plugins: [plugin(false)] });
+    useAppStore.getState().applyEvent(event(BOXES_CHANNEL, BOXES_CHANGED_EVENT, { boxes: [box({ state: "destroyed" })], totals: TOTALS }));
+    assert.equal(boxesStore.getState().boxes, null);
+    useAppStore.getState().applyEvent(event(BOXES_CHANNEL, BOXES_CHANGED_EVENT, { boxes: [box()], totals: TOTALS }));
+    assert.deepEqual(boxesStore.getState().boxes?.map((entry) => entry.id), ["b1"]);
+  });
+
+  it("loads when the plugin turns on, routes events, and keeps only the running boxes when it turns off", async () => {
     const fake = fakeApi();
     useAppStore.setState({ api: fake.api, plugins: [plugin(true)] });
     await flush();
@@ -92,6 +100,22 @@ describe("the app store wires the boxes store to the plugin", () => {
     await flush();
     assert.equal(fake.calls.length, before);
 
+    // Off: b2 still runs (and bills) — it stays; nothing else does.
+    useAppStore.setState({ plugins: [plugin(false)] });
+    assert.deepEqual(boxesStore.getState().boxes?.map((entry) => entry.id), ["b2"]);
+    assert.equal(boxesStore.getState().providers, null);
+    assert.equal(boxesStore.getState().kinds, null);
+    // Destroyed: nothing is left running, so nothing is held.
+    useAppStore.getState().applyEvent(event(BOXES_CHANNEL, BOXES_CHANGED_EVENT, { boxes: [box({ id: "b2", state: "destroyed" })], totals: TOTALS }));
+    assert.equal(boxesStore.getState().boxes, null);
+  });
+
+  it("turning off with nothing running forgets everything", async () => {
+    const fake = fakeApi();
+    (fake.api as { listBoxes: unknown }).listBoxes = async () => ({ boxes: [box({ state: "destroyed" })], totals: TOTALS });
+    useAppStore.setState({ api: fake.api, plugins: [plugin(true)] });
+    await flush();
+    assert.equal(boxesStore.getState().boxes?.length, 1);
     useAppStore.setState({ plugins: [plugin(false)] });
     assert.equal(boxesStore.getState().boxes, null);
     assert.equal(boxesStore.getState().providers, null);

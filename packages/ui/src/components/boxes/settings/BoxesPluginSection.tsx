@@ -3,7 +3,7 @@ import { RefreshCw } from "lucide-react";
 
 import { useAppStore } from "../../../store/app";
 import { boxesErrorText } from "../../../lib/boxes/errors";
-import { loadBlacksmithSetup, loadBoxConnection, loadBoxes } from "../../../lib/boxes/store";
+import { loadBlacksmithSetup, loadBoxConnection, loadBoxes, loadBoxesList, useActiveBoxes } from "../../../lib/boxes/store";
 import { Button } from "../../ui";
 import { Notice, SettingsSection } from "../../settings/primitives";
 import { BoxesList } from "./BoxesList";
@@ -14,6 +14,8 @@ import { ProvidersCard } from "./ProvidersCard";
  * The Ephemeral AI VMs plugin's part of its detail panel (spec §2 goal 1, §6,
  * §8.10, §11.3): what it does and, while it is on, the providers (Blacksmith's
  * macOS checklist among them), how boxes reach this server, and every box.
+ * While it is off, it still lists the boxes that are running (they bill until
+ * destroyed), so the temporary ones can be destroyed from here.
  */
 export const BoxesPluginSection: React.FC<{ enabled: boolean }> = ({ enabled }) => {
   const api = useAppStore((s) => s.api);
@@ -33,6 +35,14 @@ export const BoxesPluginSection: React.FC<{ enabled: boolean }> = ({ enabled }) 
   useEffect(() => {
     if (enabled && connected) load();
   }, [enabled, connected, load]);
+
+  // Off: re-read the list for boxes still running (the store keeps it only while
+  // one is). An older daemon refuses the route while the plugin is off — then
+  // there is nothing to show.
+  const running = useActiveBoxes();
+  useEffect(() => {
+    if (!enabled && connected && api) void loadBoxesList(api).catch(() => undefined);
+  }, [enabled, connected, api]);
 
   return (
     <>
@@ -69,6 +79,15 @@ export const BoxesPluginSection: React.FC<{ enabled: boolean }> = ({ enabled }) 
           <ProvidersCard />
           <ConnectionCard />
           <BoxesList />
+        </>
+      )}
+
+      {!enabled && running.length > 0 && (
+        <>
+          <Notice tone="warn">
+            Ephemeral AI VMs is off, but these boxes are still running and billing.
+          </Notice>
+          <BoxesList runningOnly />
         </>
       )}
     </>

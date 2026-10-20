@@ -381,7 +381,7 @@ const PluginDetail: React.FC<{
   const jobLabel = pluginJobLabel(plugin.job);
   const sourceHref = pluginSourceHref(plugin.source.url);
   const unsupported = plugin.platform === "unsupported";
-  // boxes: labelled from the boxes store (empty while the Ephemeral AI VMs plugin is off).
+  // boxes: labelled from the boxes store (only the boxes still running while the Ephemeral AI VMs plugin is off).
   const boxes = useBoxes();
   const boxIssues = useMemo(() => pluginBoxIssues(plugin, boxes), [plugin, boxes]);
   const spinner = (action: PluginAction) =>

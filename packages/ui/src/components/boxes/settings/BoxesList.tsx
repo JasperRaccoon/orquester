@@ -43,12 +43,12 @@ const STEP_ICON: Record<BoxSetupStepState, React.ReactNode> = {
 /** Countdowns and costs move once a minute (a display tick). */
 const TICK_MS = 60_000;
 
-/** Every live box and the recently destroyed ones. */
-export const BoxesList: React.FC = () => {
+/** Every live box and the recently destroyed ones; `runningOnly` (the plugin is off) leaves the destroyed ones out. */
+export const BoxesList: React.FC<{ runningOnly?: boolean }> = ({ runningOnly = false }) => {
   const boxes = useBoxes();
   const loaded = useBoxesLoaded();
   const now = useNow(TICK_MS);
-  const listed = listedBoxes(boxes, now);
+  const listed = listedBoxes(boxes, now, runningOnly);
   const [logFor, setLogFor] = useState<BoxSummary | null>(null);
   const [confirmDestroy, setConfirmDestroy] = useState<BoxSummary | null>(null);
   const [destroying, setDestroying] = useState<string | null>(null);

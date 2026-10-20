@@ -181,9 +181,10 @@ import {
   WORKFLOWS_CHANNEL
 } from "@orquester/api";
 import type { PluginInfo } from "@orquester/api";
-// boxes: the Ephemeral AI VMs plugin's module store (own channel, loaded while the plugin is on).
+// boxes: the Ephemeral AI VMs plugin's module store (own channel, loaded while the plugin is on;
+// with it off, only the boxes still running).
 import { BOXES_CHANNEL, EPHEMERAL_VMS_PLUGIN_ID } from "@orquester/api";
-import { applyBoxesEvent, loadBoxes, resetBoxes } from "../lib/boxes/store";
+import { applyBoxesEvent, loadBoxes, loadBoxesList, resetBoxes, setBoxesPluginOn } from "../lib/boxes/store";
 import type { AgentPrefs, UsagePrefs } from "@orquester/config";
 
 const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -1588,6 +1589,12 @@ export const useAppStore = create<AppState>((set, get) => ({
           // boxes: the plugin's boxes, providers, kinds and config changes, likewise.
           if (boxesWasOn && boxesOn(get().plugins) && get().api === active) {
             void loadBoxes(active).catch(() => undefined);
+          }
+          // boxes: with the plugin off, boxes may still be running (and billing): the list
+          // is read to find them (the store keeps it only while one is). An older daemon
+          // refuses the route while the plugin is off — nothing to show then.
+          if (get().plugins !== null && !boxesOn(get().plugins) && get().api === active) {
+            void loadBoxesList(active).catch(() => undefined);
           }
         }),
       // Repo icons + labels (own module store). Every (re)connect: the event
@@ -3677,9 +3684,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (secretFilesOn(get().plugins)) applySecretFilesEvent(event);
       return;
     }
-    // boxes: box, provider and config-change snapshots (validated in their module store).
+    // boxes: box, provider and config-change snapshots (validated in their module store,
+    // which holds only the boxes still running while the plugin is off).
     if (event.channel === BOXES_CHANNEL) {
-      if (boxesOn(get().plugins)) applyBoxesEvent(event);
+      if (get().plugins !== null) applyBoxesEvent(event);
       return;
     }
     if (event.channel === AGENT_PROFILE_CHANNEL) {
@@ -3824,7 +3832,9 @@ useAppStore.subscribe((state, previous) => {
 });
 
 // boxes: the Ephemeral AI VMs plugin, wired like the secret files above — its
-// state loads when the plugin turns on and is forgotten when it turns off.
+// state loads when the plugin turns on. When it turns off the store keeps only
+// the boxes still running (they bill until destroyed), and a connection switch's
+// empty plugins list forgets everything.
 function boxesOn(plugins: readonly PluginInfo[] | null): boolean {
   return isGlobalPluginEnabled(plugins, EPHEMERAL_VMS_PLUGIN_ID);
 }
@@ -3832,9 +3842,10 @@ function boxesOn(plugins: readonly PluginInfo[] | null): boolean {
 useAppStore.subscribe((state, previous) => {
   if (state.plugins === previous.plugins) return;
   const on = boxesOn(state.plugins);
+  setBoxesPluginOn(on);
+  if (state.plugins === null) resetBoxes();
   if (on === boxesOn(previous.plugins)) return;
-  if (!on) resetBoxes();
-  else if (state.api) void loadBoxes(state.api).catch(() => undefined);
+  if (on && state.api) void loadBoxes(state.api).catch(() => undefined);
 });
 
 // Agent profiles §5.3: a remembered pick the connected daemon does not have (deleted while this
