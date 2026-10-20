@@ -90,7 +90,7 @@ test("Codex in a box: app-server spawned there, logged in with chatgptAuthTokens
       projectPath: cwd,
       home: { kind: "account", accountId: "acct-1", path: join(appdir, "accounts", "codex", "acct-1", "home") },
       box,
-      modelSelection: { provider: "codex", model: "gpt-5.5" },
+      modelSelection: { model: "gpt-5.5" },
       runtimeMode: "approval-required"
     });
     await adapter.sendTurn({ threadId: "t1", input: "What is 17*23? Reply with just the number.", attachments: [], interactionMode: "default" });

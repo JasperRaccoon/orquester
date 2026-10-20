@@ -63,7 +63,7 @@ test("Grok in a box: signed in through grok.com's auth provider, its config over
       projectPath: cwd,
       home: { kind: "account", accountId: "acct-7", path: join(appdir, "grok-home") },
       box,
-      modelSelection: { provider: "grok", model: "grok-4.6" },
+      modelSelection: { model: "grok-4.6" },
       runtimeMode: "approval-required"
     });
     await adapter.sendTurn({ threadId: "t1", input: "Say hi.", attachments: [], interactionMode: "default" });
