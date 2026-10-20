@@ -420,6 +420,8 @@ export interface AgentHostBoxesOptions {
   logger: AdapterLogger;
   now?: () => number;
   connectTimeoutMs?: number;
+  /** Install commands by agent instead of the registry's (tests: a stand-in CLI, no network). */
+  installCommands?: Partial<Record<AgentAdapterId, string>>;
 }
 
 /** The session ref a resume cursor names, per adapter (Claude `resume`, Codex `threadId`, Grok/OpenCode `sessionId`). */
@@ -451,6 +453,7 @@ class AgentHostBoxesImpl implements AgentHostBoxes {
   readonly now: () => number;
   private readonly pool: BoxConnectionPool;
   private readonly connectTimeoutMs: number | undefined;
+  private readonly installCommands: Partial<Record<AgentAdapterId, string>> | undefined;
   /** One install (or lookup) of a CLI per box at a time. */
   private readonly cliLookups = new Map<string, Promise<{ bin: string; path: string }>>();
   private readonly versions = new Map<string, Promise<string | null>>();
@@ -468,6 +471,7 @@ class AgentHostBoxesImpl implements AgentHostBoxes {
     this.tracker = new BoxTokenTracker(this.now);
     this.pool = new BoxConnectionPool(options.connector);
     this.connectTimeoutMs = options.connectTimeoutMs;
+    this.installCommands = options.installCommands;
   }
 
   /** A detached process id: unique per launch, readable in the box's process list. */
@@ -541,9 +545,11 @@ class AgentHostBoxesImpl implements AgentHostBoxes {
     if (entry === undefined) {
       entry = (async () => {
         const path = await boxLoginPath(connection);
+        const installCommand = this.installCommands?.[input.agent];
         const found = await ensureBoxAgentCli(connection, input.agent, {
           path,
-          ...(input.onProgress !== undefined ? { onProgress: input.onProgress } : {})
+          ...(input.onProgress !== undefined ? { onProgress: input.onProgress } : {}),
+          ...(installCommand !== undefined ? { installCommand } : {})
         });
         if (found.installed) this.versions.clear();
         return { bin: found.bin, path: found.path };

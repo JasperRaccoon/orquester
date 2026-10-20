@@ -78,12 +78,19 @@ export interface ReattachableBoxConnection extends LocalBoxConnection {
   restoreLink(): void;
   /** `attach` calls made, for assertions. */
   readonly attaches: { procId: string; fromOffset: number }[];
+  /** Resolves once a detached process's whole output so far satisfies `predicate` (attached or not). */
+  outputSeen(procId: string, predicate: (text: string) => boolean): Promise<void>;
+  /** SIGKILL every process this double started (a test's cleanup). */
+  killAll(): Promise<void>;
 }
 
 export function reattachableBoxConnection(options: LocalBoxConnectionOptions = {}): ReattachableBoxConnection {
   const base = localBoxConnection(options);
   const detached = new Map<string, DetachedRecord>();
+  const started: BoxProcess[] = [];
   const attaches: { procId: string; fromOffset: number }[] = [];
+  const output = new EventEmitter();
+  const textOf = (record: DetachedRecord): string => Buffer.concat(record.chunks.map((chunk) => chunk.data)).toString("utf8");
 
   const feed = (record: DetachedRecord, proxy: ProxyProcess, fromOffset: number): void => {
     let offset = 0;
@@ -106,6 +113,7 @@ export function reattachableBoxConnection(options: LocalBoxConnectionOptions = {
     attaches,
     exec(execOptions: BoxExecOptions): BoxProcess {
       const real = base.exec(execOptions);
+      started.push(real);
       const procId = execOptions.detach?.procId;
       if (procId === undefined) return real;
       const record: DetachedRecord = { real, chunks: [], exit: null, proxy: null };
@@ -115,10 +123,12 @@ export function reattachableBoxConnection(options: LocalBoxConnectionOptions = {
       real.stdout.on("data", (data: Buffer) => {
         record.chunks.push({ stream: "out", data });
         if (record.proxy !== null) record.proxy.stdout.write(data);
+        output.emit(procId, textOf(record));
       });
       real.stderr.on("data", (data: Buffer) => {
         record.chunks.push({ stream: "err", data });
         if (record.proxy !== null) record.proxy.stderr.write(data);
+        output.emit(procId, textOf(record));
       });
       real.on("spawn", () => record.proxy?.emit("spawn"));
       real.on("error", (error: Error) => record.proxy?.emit("error", error));
@@ -184,6 +194,28 @@ export function reattachableBoxConnection(options: LocalBoxConnectionOptions = {
     },
     restoreLink(): void {
       base.setConnected(true);
+    },
+    outputSeen(procId: string, predicate: (text: string) => boolean): Promise<void> {
+      const record = detached.get(procId);
+      if (record !== undefined && predicate(textOf(record))) return Promise.resolve();
+      return new Promise<void>((resolve) => {
+        const listener = (text: string): void => {
+          if (!predicate(text)) return;
+          output.off(procId, listener);
+          resolve();
+        };
+        output.on(procId, listener);
+      });
+    },
+    async killAll(): Promise<void> {
+      await Promise.all(
+        started.map(async (proc) => {
+          if (proc.exitCode !== null || proc.signalCode !== null) return;
+          const exited = new Promise<void>((resolve) => proc.once("exit", () => resolve()));
+          proc.kill("SIGKILL");
+          await exited;
+        })
+      );
     }
   }) as ReattachableBoxConnection;
   return connection;

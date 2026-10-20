@@ -187,7 +187,13 @@ const AGENT_LABELS: Record<AgentAdapterId, string> = {
 export async function ensureBoxAgentCli(
   connection: BoxConnection,
   adapter: AgentAdapterId,
-  input: { path: string; env?: Record<string, string>; onProgress?: (message: string) => void }
+  input: {
+    path: string;
+    env?: Record<string, string>;
+    onProgress?: (message: string) => void;
+    /** Overrides the registry's install command (tests). */
+    installCommand?: string;
+  }
 ): Promise<{ bin: string; path: string; installed: boolean }> {
   const entry = registryEntry(adapter);
   const label = AGENT_LABELS[adapter];
@@ -197,7 +203,7 @@ export async function ensureBoxAgentCli(
     if (found !== null) return { bin: found, path: input.path, installed: false };
   }
   const os = connection.sys.os;
-  const command = os === "win32" ? (entry?.installCmdWin32 ?? entry?.installCmd) : entry?.installCmd;
+  const command = input.installCommand ?? (os === "win32" ? (entry?.installCmdWin32 ?? entry?.installCmd) : entry?.installCmd);
   if (command === undefined) {
     throw new BoxLaunchError("BOX_CLI_INSTALL_FAILED", `${label} is not installed in the box, and Orquester has no installer for it.`);
   }
