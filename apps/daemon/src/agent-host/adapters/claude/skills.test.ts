@@ -16,7 +16,11 @@ import {
   readSkillOverridesFromSettings
 } from "./skills.ts";
 import { planClaudeSkillDispatch } from "./skill-dispatch.ts";
-import { buildAskUserQuestionReply, parseAskUserQuestionInput } from "./questions.ts";
+import {
+  buildAskUserQuestionReply,
+  CLAUDE_QUESTION_PREVIEW_FORMAT,
+  parseAskUserQuestionInput
+} from "./questions.ts";
 
 let root: string;
 let configDir: string;
@@ -279,5 +283,85 @@ describe("claude AskUserQuestion — the id is the question text", () => {
     const reply = buildAskUserQuestionReply(input, { "Which file should I read?": "a.txt" });
     assert.deepEqual(reply.questions, input.questions);
     assert.deepEqual(reply.answers, { "Which file should I read?": "a.txt" });
+    assert.equal("annotations" in reply, false, "no option had a preview: nothing to annotate");
+  });
+});
+
+describe("claude AskUserQuestion — option previews (SDK 0.3.278 `preview`, `annotations`)", () => {
+  // The SDK's own shape: `preview` on an option, single-select only.
+  const input = {
+    questions: [
+      {
+        question: "Which layout?",
+        header: "Layout",
+        options: [
+          { label: "Sidebar (Recommended)", description: "Nav on the left", preview: "┌──┬──────┐\n│ ▤│ main │\n└──┴──────┘" },
+          { label: "Top bar", description: "Nav on top", preview: "┌─────────┐\n│ ▤ ▤ ▤   │\n└─────────┘" },
+          { label: "None", description: "No navigation" }
+        ],
+        multiSelect: false
+      },
+      {
+        question: "Which features?",
+        header: "Features",
+        options: [
+          { label: "Search", description: "", preview: "[ search… ]" },
+          { label: "Export", description: "" }
+        ],
+        multiSelect: true
+      }
+    ]
+  };
+
+  it("carries an option's preview, tagged with the format the session asked for", () => {
+    const parsed = parseAskUserQuestionInput(input);
+    const [sidebar, top, none] = parsed.questions[0]!.options;
+    assert.deepEqual(sidebar, {
+      label: "Sidebar (Recommended)",
+      description: "Nav on the left",
+      preview: "┌──┬──────┐\n│ ▤│ main │\n└──┴──────┘",
+      previewFormat: CLAUDE_QUESTION_PREVIEW_FORMAT
+    });
+    assert.equal(CLAUDE_QUESTION_PREVIEW_FORMAT, "markdown");
+    assert.equal(top!.preview, "┌─────────┐\n│ ▤ ▤ ▤   │\n└─────────┘");
+    assert.deepEqual(none, { label: "None", description: "No navigation" }, "no preview, no format");
+  });
+
+  it("drops a preview of any other shape, and an empty one, but keeps the option", () => {
+    const parsed = parseAskUserQuestionInput({
+      questions: [
+        {
+          question: "Pick?",
+          options: [
+            { label: "A", description: "", preview: { html: "<b>A</b>" } },
+            { label: "B", description: "", preview: "" },
+            { label: "C", description: "", preview: 3 }
+          ]
+        }
+      ]
+    });
+    assert.deepEqual(parsed.questions[0]!.options, [
+      { label: "A", description: "" },
+      { label: "B", description: "" },
+      { label: "C", description: "" }
+    ]);
+  });
+
+  it("sends the chosen option's preview back as `annotations`, keyed by question text", () => {
+    const reply = buildAskUserQuestionReply(input, {
+      "Which layout?": "Sidebar (Recommended)",
+      "Which features?": ["Search"]
+    });
+    assert.deepEqual(reply.answers, { "Which layout?": "Sidebar (Recommended)", "Which features?": ["Search"] });
+    assert.deepEqual(reply.annotations, {
+      "Which layout?": { preview: "┌──┬──────┐\n│ ▤│ main │\n└──┴──────┘" }
+    }, "single-select only: the tool supports previews on single-select questions alone");
+    assert.deepEqual(reply.questions, input.questions, "the original questions ride back untouched");
+  });
+
+  it("annotates nothing for a typed answer or an option without a preview", () => {
+    assert.equal("annotations" in buildAskUserQuestionReply(input, { "Which layout?": "Something else" }), false);
+    assert.equal("annotations" in buildAskUserQuestionReply(input, { "Which layout?": "None" }), false);
+    assert.equal("annotations" in buildAskUserQuestionReply(input, {}), false);
   });
 });

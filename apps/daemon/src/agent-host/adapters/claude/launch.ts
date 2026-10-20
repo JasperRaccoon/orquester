@@ -17,6 +17,7 @@ import type { CanUseTool, Options as ClaudeQueryOptions } from "@anthropic-ai/cl
 import type { ModelSelection, ProviderModel, RuntimeMode } from "@orquester/api/agent-chat";
 
 import { isPlainObject } from "../../../agent-isolation/claude-names.ts";
+import { CLAUDE_QUESTION_PREVIEW_FORMAT } from "./questions.ts";
 import { CLAUDE_PROFILE_ENV, type ClaudeProfileLaunch, type ClaudeProfileLaunchFiles } from "./profile-launch.ts";
 import { claudeDeniedMcpServers, claudeDisallowedTools, type ClaudeSessionToolsLaunch } from "./session-tools.ts";
 import {
@@ -224,6 +225,10 @@ export function buildClaudeQueryOptions(
     // module…") for the roster's activity line; forks the subagent's cache,
     // so the cost is small. SDK 0.3.278 `agentProgressSummaries`.
     agentProgressSummaries: true,
+    // Said explicitly rather than left to the CLI's default: the question card
+    // renders option previews in this format (`questions.ts`), and a default
+    // that moved would hand it fragments it shows as the wrong thing.
+    toolConfig: { askUserQuestion: { previewFormat: CLAUDE_QUESTION_PREVIEW_FORMAT } },
     canUseTool: input.canUseTool,
     ...(input.onUserDialog !== undefined
       ? { onUserDialog: input.onUserDialog, supportedDialogKinds: ["resume_return"] }

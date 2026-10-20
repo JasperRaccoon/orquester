@@ -1301,6 +1301,10 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 notices={paintOnly ? undefined : secretNotices}
                 secretRequests={paintOnly ? undefined : secretRequests}
                 onAnswerSecret={paintOnly ? undefined : answerSecret}
+                // A question's markdown resolves images and opens file links
+                // as the timeline's messages do.
+                projectPath={projectPath}
+                onOpenFile={paintOnly ? noop : openFile}
               />
             </div>
             <div className="pointer-events-auto relative z-10 mx-auto w-full min-w-0 max-w-3xl px-3 sm:px-5">

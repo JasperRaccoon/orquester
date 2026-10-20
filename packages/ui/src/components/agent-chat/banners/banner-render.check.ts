@@ -42,7 +42,7 @@ try {
   const answerButtons = (questionHtml.match(/<button\b[^>]*>/g) ?? []).filter((button) => !/\saria-expanded=/.test(button));
   assert.ok(answerButtons.length > 0);
   for (const button of answerButtons) assert.match(button, /\sdisabled=""/);
-  assert.match(questionHtml, /<input\b[^>]*type="text"[^>]*disabled=""/);
+  assert.match(questionHtml, /<textarea\b[^>]*disabled=""/, "the custom answer is a multi-line field");
 
   // Provider warning text is data the user needs before granting approval.
   const warning = "This operation sends data to an external service";

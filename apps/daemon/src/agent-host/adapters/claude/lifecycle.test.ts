@@ -1317,6 +1317,57 @@ describe("claude adapter — questions", () => {
     assert.deepEqual(result.updatedInput.answers, { "Which file?": "a.txt" });
     await harness.waitFor("user-input.resolved");
   });
+
+  it("an option's preview reaches the card, and the chosen one rides back as an annotation", async () => {
+    const harness = await makeHarness();
+    await harness.adapter.startSession(START);
+    const peer = harness.peers[0]!;
+    await harness.adapter.sendTurn({
+      threadId: START.threadId,
+      input: "ask me with previews",
+      attachments: [],
+      interactionMode: "default"
+    });
+    await peer.nextTurn();
+
+    const abort = new AbortController();
+    const preview = "```ts\nexport const a = 1;\n```";
+    const reply = peer.canUseTool!(
+      "AskUserQuestion",
+      {
+        questions: [
+          {
+            question: "Which style?",
+            header: "Style",
+            options: [
+              { label: "Const", description: "", preview },
+              { label: "Let", description: "" }
+            ],
+            multiSelect: false
+          }
+        ]
+      },
+      {
+        signal: abort.signal,
+        toolUseID: "toolu_p",
+        requestId: "req-p"
+      } as unknown as Parameters<CanUseTool>[2]
+    );
+    const requested = await harness.waitFor("user-input.requested");
+    assert.deepEqual(requested.payload.questions[0]!.options, [
+      { label: "Const", description: "", preview, previewFormat: "markdown" },
+      { label: "Let", description: "" }
+    ]);
+
+    harness.adapter.respondToUserInput(START.threadId, "req-p", { "Which style?": "Const" });
+    const result = (await reply) as {
+      behavior: string;
+      updatedInput: { answers: unknown; annotations?: unknown };
+    };
+    assert.equal(result.behavior, "allow");
+    assert.deepEqual(result.updatedInput.answers, { "Which style?": "Const" });
+    assert.deepEqual(result.updatedInput.annotations, { "Which style?": { preview } });
+  });
 });
 
 describe("claude adapter — a card nobody answered is withdrawn (final fix wave)", () => {

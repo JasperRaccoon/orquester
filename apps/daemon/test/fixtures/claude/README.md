@@ -511,6 +511,18 @@ is the option **`label`**, not an id. Because the key is free text, two question
 text in one request are indistinguishable — the adapter should reject or disambiguate that case
 rather than silently answering one.
 
+**Option previews are not in any capture.** Capture 06's options carry no `preview`; what the
+adapter does with one comes from the SDK 0.3.278 typings and the CLI 2.1.285 tool description, not
+from an observed frame, and its tests (`skills.test.ts`, `lifecycle.test.ts`) say so rather than
+replaying a fixture. `sdk-tools.d.ts` gives each option an optional `preview?: string` and
+`AskUserQuestionInput` an optional `annotations: {[questionText]: {preview?, notes?}}` — "the
+preview content of the selected option"; `sdk.d.ts` gives `Options.toolConfig.askUserQuestion.
+previewFormat: 'markdown' | 'html'` (default `markdown`, which the CLI describes to the model as
+"rendered as markdown in a monospace box", single-select questions only). The adapter sets
+`previewFormat: "markdown"` explicitly, tags each parsed preview with it, and answers a
+single-select question whose answer is an option with a preview with that preview in
+`annotations`. A capture that shows a real `preview` should replace this paragraph.
+
 ### 13. `result` is not one shape — three variants in the capture, and `terminal_reason` is optional
 
 | fixture | `subtype` | `is_error` | `stop_reason` | `terminal_reason` | note |

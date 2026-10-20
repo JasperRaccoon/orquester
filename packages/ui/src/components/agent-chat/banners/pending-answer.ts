@@ -270,3 +270,55 @@ export function questionShortcutOption(input: QuestionShortcutInput): number | n
   const index = Number(input.key) - 1;
   return index < input.optionCount ? index : null;
 }
+
+/** What the card's free-text field knows about one keydown. */
+export interface CustomAnswerKeyInput {
+  /** `KeyboardEvent.key`. */
+  key: string;
+  shiftKey: boolean;
+  /** `event.nativeEvent.isComposing` — an IME candidate window is open. */
+  isComposing: boolean;
+  /** The pre-`isComposing` fallback some engines still report (229). */
+  keyCode: number;
+  /** The field is the multi-line answer, not the masked single-line secret. */
+  multiline: boolean;
+  /** The phone layout, where the on-screen Return is a newline. */
+  isMobile: boolean;
+}
+
+/**
+ * Whether a keydown in the free-text answer submits it (or moves on to the
+ * next question). The composer's convention (`composerSubmissionIntentForEnter`):
+ * Enter sends, Shift+Enter is a newline, an IME composition never sends — its
+ * Enter commits the candidate — and on a phone the multi-line field's Return
+ * is a newline, the button being the only send. The masked secret field is
+ * one line, so its Enter always submits.
+ */
+export function customAnswerSubmitsOnEnter(input: CustomAnswerKeyInput): boolean {
+  if (input.key !== "Enter") return false;
+  if (input.isComposing || input.keyCode === 229) return false;
+  if (!input.multiline) return true;
+  return !input.shiftKey && !input.isMobile;
+}
+
+export function questionHasPreviews(question: UserInputQuestion): boolean {
+  return question.options.some((option) => typeof option.preview === "string" && option.preview.length > 0);
+}
+
+/**
+ * The option whose preview the card shows: the one the user is looking at
+ * (focused or hovered, `inspectedValue`), else the one they picked, else the
+ * first — so the pane is never blank while it is up. `null` when no option of
+ * the question has a preview: then there is no pane at all. The option it
+ * returns may itself have none; the pane says so rather than keep showing
+ * another option's.
+ */
+export function previewOptionFor(
+  question: UserInputQuestion,
+  input: { inspectedValue: string | null; selectedValues: readonly string[] }
+): UserInputQuestionOption | null {
+  if (!questionHasPreviews(question)) return null;
+  const byValue = (value: string | null | undefined) =>
+    value == null ? undefined : question.options.find((option) => questionOptionValue(option) === value);
+  return byValue(input.inspectedValue) ?? byValue(input.selectedValues[0]) ?? question.options[0] ?? null;
+}

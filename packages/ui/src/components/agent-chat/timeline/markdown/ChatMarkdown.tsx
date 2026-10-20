@@ -291,4 +291,52 @@ export const ChatMarkdown = React.memo(function ChatMarkdown({
   );
 });
 
+// ---------------------------------------------------------------------------
+// Inline markdown, for text that lives inside a control
+// ---------------------------------------------------------------------------
+
+/**
+ * Emphasis, code and links only; everything else is unwrapped to its text. A
+ * question option's description sits inside the option's `<button>`, where a
+ * block (`<div>`, `<p>`, `<pre>`) or a second interactive element is invalid
+ * markup — and a link that navigated would swallow the click that picks the
+ * option — so a link reads as one and nothing more.
+ */
+const INLINE_ELEMENTS = ["p", "strong", "em", "del", "code", "a", "br"];
+
+const INLINE_COMPONENTS: Components = {
+  // A `<span>`, not a `<p>`: phrasing content only inside a button.
+  p: ({ children }) => <span className="block [&:not(:first-child)]:mt-1">{children}</span>,
+  code: ({ children }) => (
+    <code className="rounded-[0.3rem] border border-neutral-800 bg-neutral-900/70 px-1 font-mono text-[0.92em] text-neutral-300">
+      {children}
+    </code>
+  ),
+  a: ({ children }) => <span className="text-info-300">{children}</span>
+};
+
+export interface ChatInlineMarkdownProps {
+  text: string;
+  className?: string;
+}
+
+/** {@link ChatMarkdown}'s inline subset, as phrasing content (see `INLINE_ELEMENTS`). */
+export const ChatInlineMarkdown = React.memo(function ChatInlineMarkdown({
+  text,
+  className
+}: ChatInlineMarkdownProps): React.ReactElement {
+  return (
+    <span className={cn("min-w-0 [overflow-wrap:anywhere]", className)}>
+      <Markdown
+        remarkPlugins={STATIC_PLUGINS}
+        allowedElements={INLINE_ELEMENTS}
+        unwrapDisallowed
+        components={INLINE_COMPONENTS}
+      >
+        {text}
+      </Markdown>
+    </span>
+  );
+});
+
 export default ChatMarkdown;

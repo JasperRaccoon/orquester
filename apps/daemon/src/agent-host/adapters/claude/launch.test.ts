@@ -132,6 +132,8 @@ describe("claude launch — the options object (§4.5)", () => {
     assert.deepEqual(options.thinking, { type: "adaptive", display: "summarized" });
     assert.equal(options.sessionId, "11111111-2222-3333-4444-555555555555");
     assert.equal(options.resume, undefined);
+    // The question card renders option previews as markdown: asked for explicitly.
+    assert.deepEqual(options.toolConfig, { askUserQuestion: { previewFormat: "markdown" } });
   });
 
   it("sends resume OR sessionId, never both", () => {
@@ -484,7 +486,8 @@ describe("claude launch — Agent Profile chats (spec 2026-10-18 §6.1)", () => 
       "settingSources",
       "settings",
       "systemPrompt",
-      "thinking"
+      "thinking",
+      "toolConfig"
     ]);
   });
 
