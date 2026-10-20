@@ -176,6 +176,7 @@ test("status: maps Machine states, 404 is gone, 429 is retried", async () => {
     { method: "GET", url, body: { ...started, state: "starting" } },
     { method: "GET", url, body: { ...started, state: "stopped" } },
     { method: "GET", url, body: { ...started, state: "failed" } },
+    { method: "GET", url, body: { ...started, state: "something-new" } },
     { method: "GET", url, body: { ...started, state: "destroyed" } },
     { method: "GET", url, status: 404, body: fixture("fly", "error-not-found") }
   ]);
@@ -186,6 +187,8 @@ test("status: maps Machine states, 404 is gone, 429 is retried", async () => {
   assert.equal(stopped.state, "stopped");
   assert.equal(stopped.detail, "Fly.io reports the Machine stopped");
   assert.equal((await flyAdapter.status(credentials, ref, replayOptions(replay))).state, "error");
+  // A state the adapter does not know is transient (pending), never a failure that destroys the box.
+  assert.equal((await flyAdapter.status(credentials, ref, replayOptions(replay))).state, "pending");
   assert.equal((await flyAdapter.status(credentials, ref, replayOptions(replay))).state, "gone");
   assert.equal((await flyAdapter.status(credentials, ref, replayOptions(replay))).state, "gone");
   assert.equal(replay.pending().length, 0);

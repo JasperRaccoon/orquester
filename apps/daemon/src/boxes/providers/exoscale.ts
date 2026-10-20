@@ -269,8 +269,11 @@ function mapState(state: string): ProviderInstanceState {
     case "destroyed":
     case "expunging":
       return "gone";
-    default:
+    case "error":
       return "error";
+    default:
+      // A state this adapter does not know is taken as transient: only a failure state destroys a box.
+      return "pending";
   }
 }
 

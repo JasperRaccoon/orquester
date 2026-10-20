@@ -406,7 +406,23 @@ export const ionosAdapter: BoxProviderAdapter = {
 
   async status(credentials, ref, options): Promise<ProviderInstanceStatus> {
     const datacenterId = refString(PROVIDER, ref, "datacenterId");
-    const serverId = refString(PROVIDER, ref, "serverId");
+    const gone: ProviderInstanceStatus = { state: "gone", detail: "The server no longer exists in IONOS Cloud", publicIp: null, hourlyUsd: null };
+    // A ref from listManaged for a data center whose server never got created (or whose id was
+    // never recorded) has the data center only: it is gone with the data center, else its server
+    // (if any) tells; an empty data center is a failed box, to be destroyed.
+    let serverId = typeof ref.serverId === "string" && ref.serverId.length > 0 ? ref.serverId : null;
+    if (serverId === null) {
+      let servers: IonosServer[];
+      try {
+        servers = await listAll<IonosServer>(credentials, `/datacenters/${encodeURIComponent(datacenterId)}/servers?depth=1`, options);
+      } catch (error) {
+        if (isNotFound(error)) return gone;
+        throw error;
+      }
+      const server = servers[0];
+      if (!server) return { state: "error", detail: "The IONOS Cloud data center has no server", publicIp: null, hourlyUsd: null };
+      serverId = server.id;
+    }
     try {
       const { data } = await ionos<IonosServer>(
         credentials,
@@ -422,9 +438,12 @@ export const ionosAdapter: BoxProviderAdapter = {
         hourlyUsd: null
       };
     } catch (error) {
-      if (isNotFound(error)) return { state: "gone", detail: "The server no longer exists in IONOS Cloud", publicIp: null, hourlyUsd: null };
-      throw error;
+      if (!isNotFound(error)) throw error;
     }
+    // The server is gone; the box is only once its data center is (its volumes bill until then).
+    const { status } = await ionos(credentials, { url: `${API}/datacenters/${encodeURIComponent(datacenterId)}?depth=0`, okStatuses: [404] }, options);
+    if (status === 404) return gone;
+    return { state: "error", detail: "The server is gone but its IONOS Cloud data center remains", publicIp: null, hourlyUsd: null };
   },
 
   async destroy(credentials, ref, options): Promise<void> {

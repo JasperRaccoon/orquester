@@ -616,7 +616,8 @@ function mapState(state: string): ProviderInstanceState {
     case "TERMINATED":
       return "gone";
     default:
-      return "error";
+      // A state this adapter does not know is taken as transient: only a failure state destroys a box.
+      return "pending";
   }
 }
 
@@ -851,8 +852,16 @@ export const oracleAdapter: BoxProviderAdapter = {
     try {
       instance = await getInstance(ctx, instanceId, options);
     } catch (error) {
-      if (isNotFound(error)) return { state: "gone", detail: "The instance no longer exists in Oracle Cloud", publicIp: null, hourlyUsd: null };
-      throw error;
+      if (!isNotFound(error)) throw error;
+      // Oracle answers 404 `NotAuthorizedOrNotFound` for a missing instance and for one this key
+      // may not read alike: gone only when the compartment's listing (which must work) lacks it.
+      const listed = (
+        await listAll<OciInstance>(ctx, `${coreUrl(ctx.region)}/instances${query({ compartmentId: ctx.compartmentId, limit: PAGE_SIZE })}`, options)
+      ).find((candidate) => candidate.id === instanceId);
+      if (!listed || mapState(listed.lifecycleState) === "gone") {
+        return { state: "gone", detail: "The instance no longer exists in Oracle Cloud", publicIp: null, hourlyUsd: null };
+      }
+      instance = listed;
     }
     const state = mapState(instance.lifecycleState);
     return {

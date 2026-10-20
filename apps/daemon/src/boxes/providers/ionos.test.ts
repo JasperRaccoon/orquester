@@ -189,7 +189,8 @@ test("status: maps vmState and metadata.state, 404 is gone, 429 is retried", asy
     { method: "GET", url, body: fixture("ionos", "server-deploying") },
     { method: "GET", url, body: { ...running, properties: { ...running.properties, vmState: "SHUTOFF" } } },
     { method: "GET", url, body: { ...running, properties: { ...running.properties, vmState: "CRASHED" } } },
-    { method: "GET", url, status: 404, body: fixture("ionos", "error-not-found") }
+    { method: "GET", url, status: 404, body: fixture("ionos", "error-not-found") },
+    { method: "GET", url: `${API}/datacenters/${DC}?depth=0`, status: 404, body: fixture("ionos", "error-not-found") }
   ]);
   assert.deepEqual(await ionosAdapter.status(credentials, ref, replayOptions(replay)), {
     state: "running",
@@ -208,6 +209,32 @@ test("status: maps vmState and metadata.state, 404 is gone, 429 is retried", asy
     publicIp: null,
     hourlyUsd: null
   });
+  assert.equal(replay.pending().length, 0);
+});
+
+test("status: a data-center-only ref (from listManaged) is read through the data center; gone only with it", async () => {
+  const servers = `${API}/datacenters/${DC}/servers?depth=1&offset=0&limit=100`;
+  const server = `${API}/datacenters/${DC}/servers/${SERVER}?depth=2`;
+  const datacenter = `${API}/datacenters/${DC}?depth=0`;
+  const replay = replayFetch([
+    { method: "GET", url: servers, body: fixture("ionos", "servers-in-datacenter") },
+    { method: "GET", url: server, body: fixture("ionos", "server-running") },
+    { method: "GET", url: servers, body: fixture("ionos", "servers-empty") },
+    { method: "GET", url: servers, status: 404, body: fixture("ionos", "error-not-found") },
+    // The server was deleted but its data center (and so its volume) is still there.
+    { method: "GET", url: server, status: 404, body: fixture("ionos", "error-not-found") },
+    { method: "GET", url: datacenter, body: fixture("ionos", "datacenter-created") }
+  ]);
+  const dcOnly = { datacenterId: DC, location: "de/fra" };
+  assert.equal((await ionosAdapter.status(credentials, dcOnly, replayOptions(replay))).state, "running");
+  assert.deepEqual(await ionosAdapter.status(credentials, dcOnly, replayOptions(replay)), {
+    state: "error",
+    detail: "The IONOS Cloud data center has no server",
+    publicIp: null,
+    hourlyUsd: null
+  });
+  assert.equal((await ionosAdapter.status(credentials, dcOnly, replayOptions(replay))).state, "gone");
+  assert.equal((await ionosAdapter.status(credentials, ref, replayOptions(replay))).state, "error");
   assert.equal(replay.pending().length, 0);
 });
 

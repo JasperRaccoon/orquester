@@ -150,11 +150,9 @@ function instanceState(instance: VastInstance): ProviderInstanceState {
     case "exited":
       // A container that exited on its own never comes back to running (vast.ai docs); one the owner stopped did stop.
       return instance.intended_status === "stopped" ? "stopped" : "error";
-    case "offline":
-    case "unknown":
-      return "error";
     default:
-      // null (still being placed), created, loading, rebooting.
+      // null (still being placed), created, loading, rebooting; `offline`/`unknown` (the host lost
+      // touch with vast.ai for a while) are transient too.
       return "pending";
   }
 }

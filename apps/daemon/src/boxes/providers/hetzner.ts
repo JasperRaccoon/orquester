@@ -139,7 +139,8 @@ function mapState(status: string): ProviderInstanceState {
     case "deleting":
       return "gone";
     default:
-      return "error";
+      // `unknown` and states this adapter does not know are transient: Hetzner has no failure state.
+      return "pending";
   }
 }
 

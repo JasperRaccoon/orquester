@@ -376,8 +376,11 @@ function mapState(status: string): ProviderInstanceState {
     case "DELETED":
     case "SOFT_DELETED":
       return "gone";
-    default:
+    case "ERROR":
       return "error";
+    default:
+      // UNKNOWN and states this adapter does not know are transient: only ERROR destroys a box.
+      return "pending";
   }
 }
 

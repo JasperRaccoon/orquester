@@ -172,6 +172,22 @@ test("jarvislabs: destroy on the region host, tolerating gone instances, then de
   await assert.rejects(jarvislabsAdapter.destroy(creds, { machineId: 314159, region: "india-noida-01" }, callOptions(busy.fetch)), /Machine is busy/);
 });
 
+test("jarvislabs: an HTTP-200 error reply is an error, not a gone instance or an empty account", async () => {
+  const busy = JSON.stringify({ success: false, message: "Something went wrong, please try again" });
+  const status = routedFetch([{ path: "/users/fetch/314159", replies: [{ body: busy }] }]);
+  await assert.rejects(jarvislabsAdapter.status(creds, { machineId: 314159 }, callOptions(status.fetch)), /Something went wrong/);
+  const notFound = routedFetch([{ path: "/users/fetch/314159", replies: [{ status: 404, body: '{"detail":"Not Found"}' }] }]);
+  assert.equal((await jarvislabsAdapter.status(creds, { machineId: 314159 }, callOptions(notFound.fetch))).state, "gone");
+  const list = routedFetch([{ path: "/users/fetch", replies: [{ body: busy }] }]);
+  await assert.rejects(jarvislabsAdapter.listManaged(creds, callOptions(list.fetch)), /Something went wrong/);
+  // A destroy that cannot tell whether the instance is gone fails rather than calling it done.
+  const unsure = routedFetch([
+    { method: "POST", path: "/misc/destroy", replies: [{ body: f("destroy-error.json") }] },
+    { path: "/users/fetch/314159", replies: [{ body: busy }] }
+  ]);
+  await assert.rejects(jarvislabsAdapter.destroy(creds, { machineId: 314159, region: "india-noida-01" }, callOptions(unsure.fetch)));
+});
+
 test("jarvislabs: listManaged keeps orq- names with their region", async () => {
   const { fetch } = routedFetch([{ path: "/users/fetch", replies: [{ body: f("fetch-all.json") }] }]);
   assert.deepEqual(

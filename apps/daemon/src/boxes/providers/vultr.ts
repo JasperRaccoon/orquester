@@ -126,7 +126,8 @@ function mapState(instance: Pick<VultrInstance, "status" | "power_status" | "ser
   if (instance.status === "active" || instance.status === "resizing") {
     return instance.power_status === "running" ? "running" : "stopped";
   }
-  return "error";
+  // A status this adapter does not know is transient: Vultr has no failure status.
+  return "pending";
 }
 
 function planHourly(plan: VultrPlan, windows: boolean): number {

@@ -134,6 +134,7 @@ test("status: maps instance states, not found is gone, 429 is retried", async ()
     { method: "GET", url: instanceUrl, body: fixture("civo", "instance-created") },
     { method: "GET", url: instanceUrl, body: { ...active, status: "SHUTOFF" } },
     { method: "GET", url: instanceUrl, body: { ...active, status: "FAILED" } },
+    { method: "GET", url: instanceUrl, body: { ...active, status: "SOMETHING_NEW" } },
     { method: "GET", url: instanceUrl, status: 404, body: fixture("civo", "error-not-found") },
     // Civo's not-found code counts as gone whatever the status.
     { method: "GET", url: instanceUrl, status: 400, body: fixture("civo", "error-not-found") }
@@ -153,6 +154,8 @@ test("status: maps instance states, not found is gone, 429 is retried", async ()
   });
   assert.equal((await civoAdapter.status(credentials, ref, replayOptions(replay))).state, "stopped");
   assert.equal((await civoAdapter.status(credentials, ref, replayOptions(replay))).state, "error");
+  // A state the adapter does not know is transient (pending), never a failure that destroys the box.
+  assert.equal((await civoAdapter.status(credentials, ref, replayOptions(replay))).state, "pending");
   const gone = { state: "gone", detail: "The instance no longer exists in Civo", publicIp: null, hourlyUsd: null };
   assert.deepEqual(await civoAdapter.status(credentials, ref, replayOptions(replay)), gone);
   assert.deepEqual(await civoAdapter.status(credentials, ref, replayOptions(replay)), gone);
