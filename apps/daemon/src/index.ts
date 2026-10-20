@@ -220,6 +220,11 @@ import { HtmlPreviewBrowser } from "./html-preview/index.ts";
 import { registerMcp } from "./mcp/server.ts";
 import { externalCredentialId, registerPrincipalHook, registerRemoteFieldStripping } from "./mcp/principal.ts";
 import { registerSessionToolsRoute } from "./session-tools/route.ts";
+// boxes: file routes of box projects (spec §8.7).
+import type { BoxRegistry } from "./boxes/contracts.ts";
+import { registerBoxFsRouting } from "./boxes/remote/fs/routes.ts";
+import { boxAwareSecretFileIo } from "./boxes/remote/fs/secret-files.ts";
+import { boxImageReader } from "./boxes/remote/fs/images.ts";
 import {
   UploadTooLargeError,
   acceptRawBody,
@@ -647,6 +652,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
         return null;
       }
     },
+    // boxes: html_render / html_preview read a box project's images in its box (spec §8.9).
+    // `services` is read per call: no page is published before it exists.
+    localImages: (projectDir) => boxImageReader(services.boxRegistry, projectDir),
     logger: console
   });
 
@@ -773,7 +781,10 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     publish: (payload) => broadcaster.publish(SECRET_FILES_CHANNEL, SECRET_FILES_CHANGED, payload),
     // Every clone write checks the clone root's realpath stays inside the (current) workspaces root.
     workspacesRoot: () => resolved.workspacesDir,
-    logger: console
+    logger: console,
+    // boxes: a clone in a box project is read, written and watched in its box (spec §8.7).
+    // `services` is read per call: the service starts only after it exists.
+    ...boxAwareSecretFileIo(() => services.boxRegistry)
   });
   // Automated workflows (workflows spec §3, §5.7, §5.8): definitions, secrets, runs and runtime
   // state. Each store is tolerant at load — a file it cannot parse is moved aside, one it cannot
@@ -1506,7 +1517,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     fsRoot: () => resolved.fsRoot,
     workspacesDir: () => resolved.workspacesDir,
     // boxes: the box MCP tools' streamed operations.
-    boxes: temporaryBoxTools
+    boxes: temporaryBoxTools,
+    // boxes: read_file / directory reads of box projects go to the box.
+    boxRegistry: () => services.boxRegistry
   });
 
   lineage.attachApi(services.internalApi);
@@ -1783,6 +1796,9 @@ interface Services {
   lineage?: LineageService;
   /** Restart the HTTP transport (set in main once the lifecycle exists). */
   reloadHttp?: () => Promise<void>;
+  // boxes: which paths live in a box project (boxes/service). Absent while the plugin is off:
+  // every path is a host path. Read per request.
+  boxRegistry?: BoxRegistry;
 }
 
 export function createServer(
@@ -2733,6 +2749,20 @@ export function createServer(
       }
     }
   );
+
+  // boxes: a path inside a box project is answered by the box before the handlers below run
+  // (one preHandler hook, boxes/remote/fs/routes.ts); host paths reach them unchanged.
+  registerBoxFsRouting(app, {
+    boxes: () => services.boxRegistry,
+    fsRoot: () => resolved.fsRoot,
+    rawMaxBytes: RAW_MAX_BYTES,
+    closeUnder: async (safe, raw) => {
+      sessions.closeByProjectPrefix(safe);
+      sessions.closeByProjectPrefix(raw);
+      await services.browsers.closeForProject(safe, raw);
+      await services.desktops.closeForProject(safe);
+    }
+  });
 
   // File browser: list a directory.
   app.get<{ Querystring: { path?: string; p?: string } }>(
@@ -5049,7 +5079,9 @@ export function createServer(
           agentChat: services.agentChat ?? null,
           broadcaster: services.broadcaster,
           fsRoot: resolved.fsRoot,
-          workspacesDir: resolved.workspacesDir
+          workspacesDir: resolved.workspacesDir,
+          // boxes: read_file / directory reads of box projects go to the box.
+          boxRegistry: () => services.boxRegistry
         }),
       credentialId: () => externalCredentialId(config.transports.http.username)
     });

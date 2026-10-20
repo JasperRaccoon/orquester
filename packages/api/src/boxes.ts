@@ -595,4 +595,6 @@ export type BoxErrorCode =
   | "BOX_UNSUPPORTED"
   // boxes (sync): `POST boxRoutes.configChange(id)` refusals.
   | "BOX_CONFIG_CHANGE_NOT_FOUND"
-  | "BOX_CONFIG_CHANGE_DECIDED";
+  | "BOX_CONFIG_CHANGE_DECIDED"
+  /** 410: the box is destroyed (or being destroyed); a box project's files, terminals and git are gone. */
+  | "BOX_DESTROYED";

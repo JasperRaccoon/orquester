@@ -17,7 +17,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { basename, dirname } from "node:path";
 import { onPath } from "./archive";
 
-type ZipTool = { bin: string; kind: "bsdtar" | "zip" | "7z" };
+export type ZipTool = { bin: string; kind: "bsdtar" | "zip" | "7z" };
 
 let resolvedZip: ZipTool | null | undefined;
 
@@ -42,17 +42,21 @@ export function resolveZipTool(): ZipTool | null {
 export function spawnDirZip(absDir: string): ChildProcessWithoutNullStreams | null {
   const tool = resolveZipTool();
   if (!tool) return null;
-  const cwd = dirname(absDir);
-  const base = basename(absDir);
-  const argv =
-    tool.kind === "bsdtar"
-      ? ["-c", "--format", "zip", "-f", "-", base] // -f - : write to stdout
-      : tool.kind === "zip"
-        ? ["-r", "-y", "-q", "-", "--", base] // -y store symlinks; "-" archive == stdout; -- ends switches
-        : // 7z: -so writes to stdout, but its parser still consumes the first
-          // non-switch token as the (ignored) archive name. Pass a dummy archive
-          // name so `base` stays a FILE arg; without it 7z archives the whole cwd
-          // (the folder's parent) and leaks sibling files. -snl stores symlinks.
-          ["a", "-tzip", "-snl", "-so", "dummy.zip", "--", base];
-  return spawn(tool.bin, argv, { cwd });
+  return spawn(tool.bin, zipArgv(tool.kind, basename(absDir)), { cwd: dirname(absDir) });
+}
+
+/**
+ * The argv that writes a zip of `base` (an entry of the cwd) to stdout. Shared
+ * with box projects (`boxes/remote/fs/archive.ts`), which run the tool in the box.
+ */
+export function zipArgv(kind: ZipTool["kind"], base: string): string[] {
+  return kind === "bsdtar"
+    ? ["-c", "--format", "zip", "-f", "-", base] // -f - : write to stdout
+    : kind === "zip"
+      ? ["-r", "-y", "-q", "-", "--", base] // -y store symlinks; "-" archive == stdout; -- ends switches
+      : // 7z: -so writes to stdout, but its parser still consumes the first
+        // non-switch token as the (ignored) archive name. Pass a dummy archive
+        // name so `base` stays a FILE arg; without it 7z archives the whole cwd
+        // (the folder's parent) and leaks sibling files. -snl stores symlinks.
+        ["a", "-tzip", "-snl", "-so", "dummy.zip", "--", base];
 }

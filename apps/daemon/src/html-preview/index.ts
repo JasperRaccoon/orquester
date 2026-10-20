@@ -22,7 +22,7 @@ import {
   type HtmlRenderAppearance
 } from "@orquester/api/agent-chat";
 
-import { inlineLocalImages, type HtmlRenderHeights } from "../agent-chat/html-render-publish.ts";
+import { inlineLocalImages, type HtmlRenderHeights, type LocalImageReader } from "../agent-chat/html-render-publish.ts";
 import type { HtmlConsoleMessage, HtmlPageRenderer, HtmlScreenshot } from "./browser.ts";
 
 export { HtmlPreviewBrowser, HtmlPreviewError } from "./browser.ts";
@@ -36,6 +36,8 @@ export interface HtmlPreviewInput {
   appearance?: HtmlRenderAppearance;
   /** The realpath local images must sit inside (the thread's project), or null for none. */
   sandboxRoot: string | null;
+  /** boxes: where the images are read when the project lives in a box (absent: this host). */
+  images?: LocalImageReader;
   signal?: AbortSignal;
 }
 
@@ -71,7 +73,7 @@ export async function previewHtmlPage(browser: HtmlPageRenderer, input: HtmlPrev
     // no inlined pages. The bootstrap goes in first, so its head scan never
     // runs over inlined image data.
     html: async () => {
-      const inlined = await inlineLocalImages(injectHtmlRenderBootstrap(input.html), input.sandboxRoot);
+      const inlined = await inlineLocalImages(injectHtmlRenderBootstrap(input.html), input.sandboxRoot, input.images);
       ({ missing, outside } = inlined);
       return inlined.html;
     },

@@ -16,33 +16,34 @@ import {
 } from "@orquester/config/glob";
 import { spawn } from "node:child_process";
 import { lstatSync, type Dirent } from "node:fs";
+import type { Readable } from "node:stream";
 import { lstat, open, readdir, stat } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import { onPath } from "./archive";
 
-const FILE_LIST_LIMIT = 20_000;
+export const FILE_LIST_LIMIT = 20_000;
 // Upper bound on candidate paths gathered before the listing is selected, so a
 // pathological tree (or `includeIgnored` over a huge build output) stays bounded.
-const FILE_LIST_SCAN_CEILING = 200_000;
+export const FILE_LIST_SCAN_CEILING = 200_000;
 // Paths sized per synchronous lstat batch before yielding to the event loop. A sync
 // lstat is several times cheaper than a threadpool round trip; batching keeps each
 // event-loop stall to a few milliseconds.
 const FILE_STAT_BATCH = 512;
 // Concurrent readdir calls per BFS level of the fallback walker.
-const WALK_READDIR_CONCURRENCY = 32;
-const SEARCH_MATCH_DEFAULT_LIMIT = 200;
-const SEARCH_MATCH_MAX_LIMIT = 1000;
+export const WALK_READDIR_CONCURRENCY = 32;
+export const SEARCH_MATCH_DEFAULT_LIMIT = 200;
+export const SEARCH_MATCH_MAX_LIMIT = 1000;
 const SEARCH_MATCHES_PER_FILE_LIMIT = 20;
-const SEARCH_FILE_SIZE_LIMIT = 1024 * 1024;
+export const SEARCH_FILE_SIZE_LIMIT = 1024 * 1024;
 const SEARCH_LINE_TEXT_LIMIT = 300;
-const SEARCH_QUERY_LIMIT = 256;
+export const SEARCH_QUERY_LIMIT = 256;
 // Bound the concurrent per-file scans of the node engine: enough to hide read
 // latency without swamping the fd table on a large tree.
 const SEARCH_CONCURRENCY = 8;
 // Wall-clock backstop for a single search, composed with the request's own signal
 // so a pathological tree can't pin the daemon indefinitely.
 const SEARCH_TIMEOUT_MS = 10_000;
-const SKIP_DIRS = new Set([".git", "node_modules"]);
+export const SKIP_DIRS = new Set([".git", "node_modules"]);
 
 export class FsSearchError extends Error {
   constructor(
@@ -54,6 +55,35 @@ export class FsSearchError extends Error {
   ) {
     super(message);
   }
+}
+
+// boxes: the seams below let `boxes/remote/fs/search.ts` run the same listers, ripgrep
+// argument building, output parsing and node engine against a box project (spec §8.7).
+// Every one is optional and defaults to this host's own spawn and node:fs, unchanged.
+
+/** The parts of a spawned rg/git process the listers and the rg engine use (a ChildProcess fits). */
+export interface SearchProcess {
+  readonly stdout: Readable;
+  readonly stderr: Readable;
+  kill(): boolean;
+  on(event: "error", listener: (error: Error) => void): this;
+  on(event: "close", listener: (code: number | null) => void): this;
+}
+
+/** Start `command` in `cwd` (rg prints paths relative to it). */
+export type SearchSpawn = (command: string, args: string[], cwd: string) => SearchProcess;
+
+/** One regular file offered to the node engine, in discovery order. */
+export interface NodeFileEntry {
+  relPosix: string;
+  safePath: string;
+  size: number;
+}
+
+/** Where the node engine finds and reads files (the host's walk / git listing and node:fs by default). */
+export interface NodeSearchSource {
+  entries(checkAbort: () => void): Promise<{ entries: AsyncIterable<NodeFileEntry>; partial: boolean }>;
+  scan(entry: NodeFileEntry, matcher: Matcher, checkAbort: () => void): Promise<FsSearchFileResult | null>;
 }
 
 /**
@@ -207,7 +237,7 @@ export async function searchProjectFiles(
  * Compose the 10s search backstop with the caller's signal. AbortSignal.timeout's
  * timer is unref'd, so a fast search doesn't keep the process alive waiting on it.
  */
-function searchDeadline(signal?: AbortSignal): { signal: AbortSignal; makeAbortError: () => FsSearchError } {
+export function searchDeadline(signal?: AbortSignal): { signal: AbortSignal; makeAbortError: () => FsSearchError } {
   const timeoutSignal = AbortSignal.timeout(SEARCH_TIMEOUT_MS);
   return {
     signal: AbortSignal.any(signal ? [signal, timeoutSignal] : [timeoutSignal]),
@@ -219,7 +249,7 @@ function searchDeadline(signal?: AbortSignal): { signal: AbortSignal; makeAbortE
 }
 
 /** Parse the raw include/exclude fields into one matchable list (null when both empty). */
-function parseGlobs(include?: string, exclude?: string): CompiledGlobList | null {
+export function parseGlobs(include?: string, exclude?: string): CompiledGlobList | null {
   const includeRaw = include?.trim();
   const excludeRaw = exclude?.trim();
   if (!includeRaw && !excludeRaw) return null;
@@ -239,20 +269,15 @@ function parseGlobs(include?: string, exclude?: string): CompiledGlobList | null
 
 // --- node engine ---------------------------------------------------------------
 
-interface NodeSearchOpts {
+export interface NodeSearchOpts {
   matcher: Matcher;
   maxResults: number;
   globs: CompiledGlobList | null;
   includeIgnored: boolean;
   signal: AbortSignal;
   makeAbortError: () => FsSearchError;
-}
-
-/** One regular file offered to the node engine, in discovery order. */
-interface NodeFileEntry {
-  relPosix: string;
-  safePath: string;
-  size: number;
+  /** boxes: files from somewhere other than this host's disk. */
+  source?: NodeSearchSource;
 }
 
 /**
@@ -268,7 +293,7 @@ interface NodeFileEntry {
  * clamp, `limitHit`) is consumed in a fixed path order, so two identical searches that
  * truncate at the same boundary always return the same files — no completion-order race.
  */
-async function searchWithNode(root: string, opts: NodeSearchOpts): Promise<FsSearchResponse> {
+export async function searchWithNode(root: string, opts: NodeSearchOpts): Promise<FsSearchResponse> {
   const results: FsSearchFileResult[] = [];
   let totalMatches = 0;
   let limitHit = false;
@@ -349,7 +374,9 @@ async function searchWithNode(root: string, opts: NodeSearchOpts): Promise<FsSea
     try {
       if (!stop) {
         checkAbort();
-        result = await scanOneFile(safePath, relPath, size, opts.matcher, checkAbort);
+        result = opts.source
+          ? await opts.source.scan({ relPosix: relPath, safePath, size }, opts.matcher, checkAbort)
+          : await scanOneFile(safePath, relPath, size, opts.matcher, checkAbort);
         // A request aborted/timed-out during the read must not fold into a success payload.
         checkAbort();
       }
@@ -370,7 +397,9 @@ async function searchWithNode(root: string, opts: NodeSearchOpts): Promise<FsSea
 
   const discover = async (): Promise<void> => {
     checkAbort();
-    const source = await nodeFileEntries(root, opts.includeIgnored, opts.signal, checkAbort);
+    const source = opts.source
+      ? await opts.source.entries(checkAbort)
+      : await nodeFileEntries(root, opts.includeIgnored, opts.signal, checkAbort);
     // A listing cut at its ceiling leaves files unsearched: report the limit.
     if (source.partial) sourcePartial = true;
     for await (const entry of source.entries) {
@@ -491,7 +520,7 @@ interface RgMatchData {
   submatches: Array<{ start: number; end: number }>;
 }
 
-interface RipgrepOpts {
+export interface RipgrepOpts {
   query: string;
   caseSensitive: boolean;
   wholeWord: boolean;
@@ -584,11 +613,12 @@ async function searchWithRipgrep(fsRoot: string, root: string, opts: RipgrepOpts
   return { files: collected.files, totalMatches: collected.totalMatches, limitHit: collected.limitHit, tool: "rg" };
 }
 
-function runRipgrep(
+export function runRipgrep(
   root: string,
   opts: RipgrepOpts,
   visible: Set<string> | null,
-  includesInNode: boolean
+  includesInNode: boolean,
+  spawnIn?: SearchSpawn
 ): Promise<{ files: FsSearchFileResult[]; totalMatches: number; limitHit: boolean }> {
   return new Promise((resolveResult, rejectResult) => {
     if (opts.signal.aborted) {
@@ -660,7 +690,7 @@ function runRipgrep(
     else args.push("--fixed-strings", "--", opts.query);
     args.push(".");
 
-    const child = spawn("rg", args, { cwd: root });
+    const child = spawnIn ? spawnIn("rg", args, root) : spawn("rg", args, { cwd: root });
     const files: FsSearchFileResult[] = [];
     let current: FsSearchFileResult | null = null;
     let totalMatches = 0;
@@ -897,7 +927,7 @@ async function* walkFileEntries(root: string, dir: string, checkAbort: () => voi
 // --- file listing sources --------------------------------------------------------
 
 /** Root-relative POSIX paths gathered for the listing, before selection and sizing. */
-interface CandidatePaths {
+export interface CandidatePaths {
   paths: string[];
   /** True when gathering stopped at FILE_LIST_SCAN_CEILING. */
   truncated: boolean;
@@ -906,7 +936,7 @@ interface CandidatePaths {
 /** Resolves true when a listed path's parent directory has no symlink below the root. */
 type ParentCheck = (relPosix: string) => Promise<boolean>;
 
-function compareBytes(a: string, b: string): number {
+export function compareBytes(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
@@ -933,19 +963,22 @@ function normalizeListedPath(raw: string): string | null {
  * FILE_LIST_SCAN_CEILING with `truncated`. An abort kills the child and resolves with
  * `code: null`; callers re-check their signal. A spawn failure (missing binary) rejects.
  */
-function runPathLister(
+export function runPathLister(
   command: string,
   args: string[],
   root: string,
   signal: AbortSignal,
-  dedupe: boolean
+  dedupe: boolean,
+  spawnIn?: SearchSpawn
 ): Promise<{ paths: string[]; truncated: boolean; code: number | null; stderr: string }> {
   return new Promise((resolveRun, rejectRun) => {
     if (signal.aborted) {
       resolveRun({ paths: [], truncated: false, code: null, stderr: "" });
       return;
     }
-    const child = spawn(command, args, { cwd: root, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawnIn
+      ? spawnIn(command, args, root)
+      : spawn(command, args, { cwd: root, stdio: ["ignore", "pipe", "pipe"] });
     const paths: string[] = [];
     const seen = dedupe ? new Set<string>() : null;
     let pending: Buffer = Buffer.alloc(0);
@@ -1009,11 +1042,16 @@ function runPathLister(
  * symlinks. Exit 2 with some output means a subtree was unreadable — kept, like the
  * walker skipping it. Any other failure is a plain Error so the caller falls back.
  */
-async function listWithRipgrep(root: string, includeIgnored: boolean, signal: AbortSignal): Promise<CandidatePaths> {
+export async function listWithRipgrep(
+  root: string,
+  includeIgnored: boolean,
+  signal: AbortSignal,
+  spawnIn?: SearchSpawn
+): Promise<CandidatePaths> {
   const args = ["--files", "--null", "--hidden", "--no-config"];
   if (includeIgnored) args.push("--no-ignore");
   args.push("-g", "!.git", "-g", "!node_modules", ".");
-  const run = await runPathLister("rg", args, root, signal, false);
+  const run = await runPathLister("rg", args, root, signal, false, spawnIn);
   // A null code is our own abort (callers re-check the signal) or an outside kill.
   if (run.code === null && !signal.aborted) throw new Error("ripgrep was terminated.");
   if (run.code === null || run.code === 0 || run.code === 1 || (run.code === 2 && run.paths.length > 0)) {
@@ -1027,14 +1065,15 @@ async function listWithRipgrep(root: string, includeIgnored: boolean, signal: Ab
  * itself to the working directory and prints paths relative to it). Null when git is
  * missing, `root` is not in a work tree, or nothing is listed — the caller then walks.
  */
-async function listGitVisible(root: string, signal: AbortSignal): Promise<CandidatePaths | null> {
+export async function listGitVisible(root: string, signal: AbortSignal, spawnIn?: SearchSpawn): Promise<CandidatePaths | null> {
   try {
     const run = await runPathLister(
       "git",
       ["ls-files", "-z", "--cached", "--others", "--exclude-standard"],
       root,
       signal,
-      true
+      true,
+      spawnIn
     );
     if (run.code !== 0 || run.paths.length === 0) return null;
     return { paths: run.paths, truncated: run.truncated };
@@ -1087,7 +1126,7 @@ async function walkCandidates(root: string, maxFiles: number, checkAbort: () => 
  * Keep every path when they fit. Otherwise keep `preferred` paths first, then fill
  * the remaining room shallowest-first (byte order within the boundary depth).
  */
-function selectListing(paths: string[], maxFiles: number, preferred: Set<string> | null): string[] {
+export function selectListing(paths: string[], maxFiles: number, preferred: Set<string> | null): string[] {
   if (paths.length <= maxFiles) return paths;
   let tiers = [paths];
   if (preferred) {
@@ -1192,7 +1231,7 @@ async function statCandidates(
   return files;
 }
 
-interface Matcher {
+export interface Matcher {
   find(line: string): Array<{ start: number; end: number }>;
 }
 
@@ -1274,7 +1313,7 @@ function foldLine(line: string): { folded: string; start: number[]; end: number[
 // Literal (non-regex) matcher only. Regex mode is served exclusively by ripgrep's
 // non-backtracking engine (see searchProjectFiles); a JS RegExp is never built from
 // user input here, so this path cannot be driven into catastrophic backtracking.
-function createMatcher(query: string, caseSensitive: boolean, wholeWord: boolean): Matcher {
+export function createMatcher(query: string, caseSensitive: boolean, wholeWord: boolean): Matcher {
   if (caseSensitive) {
     return {
       find(line) {
@@ -1315,7 +1354,7 @@ function createMatcher(query: string, caseSensitive: boolean, wholeWord: boolean
   };
 }
 
-function searchTextFile(
+export function searchTextFile(
   content: string,
   path: string,
   size: number,
@@ -1357,7 +1396,7 @@ function formatLineMatch(line: string, start: number, end: number): Omit<FsSearc
   };
 }
 
-function clampInt(value: unknown, min: number, max: number, fallback: number): number {
+export function clampInt(value: unknown, min: number, max: number, fallback: number): number {
   const parsed = typeof value === "number" ? value : typeof value === "string" ? Number.parseInt(value, 10) : NaN;
   if (!Number.isFinite(parsed)) return fallback;
   return Math.min(max, Math.max(min, parsed));

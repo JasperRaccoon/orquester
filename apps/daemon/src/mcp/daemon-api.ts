@@ -8,6 +8,7 @@ import { HtmlRenderPublishError } from "../agent-chat/html-render-publish.ts";
 import { HtmlPreviewError, type HtmlPreview } from "../html-preview/index.ts";
 import { isUploadTooLarge, UploadTooLargeError } from "../upload-stream.ts";
 import { FsTools, type ListFilesResult, type ReadFileWindowResult } from "./fs-tools.ts";
+import type { BoxRegistry } from "../boxes/contracts.ts";
 import { mintPrincipalToken } from "./principal.ts";
 // boxes: the temporary-box operations (Ephemeral AI VMs spec §13), types only.
 import type { BoxExecRequest, BoxExecResult, BoxForwardResult, BoxJobOutput, BoxTransferResult } from "../boxes/temporary/contract.ts";
@@ -145,6 +146,8 @@ export class InjectDaemonApi implements DaemonApi {
       workspacesDir: LivePath;
       // boxes: the temporary-box backend (the daemon's own client of itself has it).
       boxes?: TemporaryBoxTools | null;
+      // boxes: which paths live in a box project, for the file reads (absent: all host).
+      boxRegistry?: () => BoxRegistry | undefined;
     }
   ) {}
 
@@ -227,11 +230,11 @@ export class InjectDaemonApi implements DaemonApi {
 
   /** Read at every call: `fsRoot` follows `PUT /api/config/daemon`. */
   listDirectory(path: string): Promise<ListFilesResult> {
-    return new FsTools({ fsRoot: this.fsRoot }).listFiles(path);
+    return new FsTools({ fsRoot: this.fsRoot, ...(this.opts.boxRegistry ? { boxes: this.opts.boxRegistry } : {}) }).listFiles(path);
   }
 
   readFileRange(path: string, opts: { offset?: number; maxBytes?: number }): Promise<ReadFileWindowResult> {
-    return new FsTools({ fsRoot: this.fsRoot }).readFileWindow(path, opts);
+    return new FsTools({ fsRoot: this.fsRoot, ...(this.opts.boxRegistry ? { boxes: this.opts.boxRegistry } : {}) }).readFileWindow(path, opts);
   }
 
   // boxes: begin
