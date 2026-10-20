@@ -216,7 +216,7 @@ describe("orq-agent ↔ hub", { concurrency: false }, () => {
     assert.equal(error.code, "ENOENT");
 
     const killed = connection.exec({ command: "sleep", args: ["60"] });
-    await new Promise((resolve) => killed.once("spawn", resolve));
+    await new Promise((resolve) => killed.once("spawn", () => resolve(undefined)));
     assert.ok(killed.pid);
     assert.equal(killed.kill("SIGTERM"), true);
     const ended = await new Promise<[number | null, string | null]>((resolve) => killed.once("exit", (code, signal) => resolve([code, signal])));
@@ -244,7 +244,7 @@ describe("orq-agent ↔ hub", { concurrency: false }, () => {
     if (!haveGo) return t.skip("Go toolchain not installed");
     const proc = connection.exec({ command: "sh", args: ["-c", 'echo one; read x; echo "two:$x"'], detach: { procId: "p1" } });
     await waitForText(proc.stdout, "one\n");
-    const detached = new Promise<void>((resolve) => proc.once("detached", () => resolve()));
+    const detached = new Promise<void>((resolve) => proc.on("detached", () => resolve()));
     const down = waitStatus(connection, false);
     const up = (async () => {
       await down;
