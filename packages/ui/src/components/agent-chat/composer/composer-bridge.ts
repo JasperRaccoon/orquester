@@ -105,7 +105,18 @@ export interface ComposerHandle {
    * either, so the caller writes the thread's persisted draft instead.
    */
   restoreFailedSend: (restore: FailedSendRestore<StagedAttachment>) => boolean;
+  /**
+   * Add a passage of the agent's reply to the draft as a quote (the
+   * timeline's selection toolbar), then focus the textarea so the user can
+   * write about it right away. Refused, with the reason the composer also
+   * shows, when the draft holds as many quotes as it may or the passage is
+   * empty or too long. Absent on a handle that takes no quotes.
+   */
+  addQuote?: (text: string) => ComposerQuoteResult;
 }
+
+/** What quoting into a composer did: added, or why not. */
+export type ComposerQuoteResult = { ok: true } | { ok: false; reason: string };
 
 const handles = new Map<string, ComposerHandle>();
 
@@ -121,6 +132,21 @@ export function registerComposerHandle(sessionId: string, handle: ComposerHandle
 
 export function composerHandle(sessionId: string): ComposerHandle | null {
   return handles.get(sessionId) ?? null;
+}
+
+/**
+ * Quote a passage into a session's composer. Refused with
+ * {@link COMPOSER_NOT_MOUNTED_REASON} when no composer that takes quotes is
+ * mounted for that session.
+ */
+export function quoteIntoComposer(sessionId: string, text: string): ComposerQuoteResult {
+  const addQuote = composerHandle(sessionId)?.addQuote;
+  return addQuote ? addQuote(text) : { ok: false, reason: COMPOSER_NOT_MOUNTED_REASON };
+}
+
+/** Whether a composer that takes quotes is mounted for a session. */
+export function composerTakesQuotes(sessionId: string): boolean {
+  return composerHandle(sessionId)?.addQuote !== undefined;
 }
 
 /** Insert text into a session's composer draft. No-op when it is not mounted. */

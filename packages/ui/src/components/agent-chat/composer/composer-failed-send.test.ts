@@ -215,6 +215,31 @@ describe("a send that did not go out comes back to the thread it was sent from",
     }
   });
 
+  it("a quoted send comes back with its quotes as quotes, ahead of any quoted meanwhile", () => {
+    backing = {
+      [DRAFTS_KEY]: JSON.stringify({
+        A: { text: "", attachments: [], context: [], quotes: [{ id: "q-later", text: "quoted meanwhile" }] }
+      })
+    };
+    const quoted: FailedSendRestore<StagedAttachment> = {
+      outcome: { kind: "failed", text: "is this right?", notice: "Could not send the message." },
+      sent: [],
+      quotes: [{ id: "q-sent", text: "the passage it asked about" }]
+    };
+    const target = restoreFailedSendDraft({ sentFrom: "A", liveThread: null, restore: quoted, restoreLive });
+
+    assert.equal(target, "persisted");
+    assert.deepEqual(persisted().A, {
+      text: "is this right?",
+      attachments: [],
+      context: [],
+      quotes: [
+        { id: "q-sent", text: "the passage it asked about" },
+        { id: "q-later", text: "quoted meanwhile" }
+      ]
+    });
+  });
+
   it("a send that gives nothing back writes no draft: a refusal, a failed Implement", () => {
     const stored = backing[DRAFTS_KEY];
     const refused: FailedSendRestore<StagedAttachment> = {

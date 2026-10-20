@@ -17,6 +17,7 @@ import { cn } from "../../../../lib/cn";
 import { PROMPT_CUT_AT_REST_NOTE, type AgentPrompt } from "../../../../lib/agent-chat/agent-prompt.logic";
 import type { AgentChatTimelineRow } from "../../../../lib/agent-chat/contracts";
 import { ComposerPopover } from "../../composer/ComposerPopover";
+import { splitLeadingQuotes } from "../../composer/composer-quotes";
 import {
   REWIND_BUSY_TITLE,
   REWIND_DISABLED_EXPLAINS_ITSELF,
@@ -26,6 +27,7 @@ import {
 import { ChatIconButton, CopyButton, DisclosureChevron, ShimmerText } from "../../primitives";
 import { useTimelineRowContext } from "../context";
 import { ChatMarkdown } from "../markdown/ChatMarkdown";
+import { QUOTE_SOURCE_ATTR } from "../quote-selection";
 import { queuedStatusLabel, shouldClampUserMessage } from "../row-format";
 import { splitSkillMentions } from "../row-chrome";
 import { formatRowTimestamp, formatRowTimestampTooltip } from "../timestamp";
@@ -241,6 +243,36 @@ function ForkFromHereButton({
 }
 
 /**
+ * A user message that opens with blockquotes — the passages quoted from the
+ * agent's replies, which a send puts ahead of the user's words
+ * (`composeQuotedPrompt`) — shows them as quotes: each its own block, rendered
+ * as the markdown it is (a quoted code block stays a code block), and the
+ * user's own text under them as the bubble always shows it. A message that
+ * does not open that way is the bubble's plain text.
+ */
+function QuotedBodyText({ text }: { text: string }): React.ReactElement {
+  const { onOpenFile } = useTimelineRowContext();
+  const split = React.useMemo(() => splitLeadingQuotes(text), [text]);
+  if (split.quotes.length === 0) return <MessageBodyText text={text} />;
+  return (
+    <>
+      {split.quotes.map((quote, index) => (
+        <blockquote
+          // A message's quotes never reorder.
+          // eslint-disable-next-line react/no-array-index-key
+          key={index}
+          data-user-quote="true"
+          className="mb-2 whitespace-normal border-l-2 border-neutral-600 pl-3 last:mb-0"
+        >
+          <ChatMarkdown text={quote} onOpenFile={onOpenFile} className="text-[13px] text-neutral-300" />
+        </blockquote>
+      ))}
+      {split.body.length > 0 ? <MessageBodyText text={split.body} /> : null}
+    </>
+  );
+}
+
+/**
  * The text of a bubble, clamped past a few lines with a mask fade and a toggle
  * that names what it reveals (`shouldClampUserMessage`). With `onShowFull` the
  * text it holds is not the whole of it (a prompt the wire cut): it stays
@@ -251,13 +283,16 @@ function ClampedBubbleText({
   text,
   showLabel,
   onShowFull,
-  mono = false
+  mono = false,
+  quotes = false
 }: {
   text: string;
   showLabel: string;
   onShowFull?: (() => void) | undefined;
   /** Code, not prose: a workflow's script. */
   mono?: boolean;
+  /** The user's own message: blockquotes it opens with show as quotes (`QuotedBodyText`). */
+  quotes?: boolean;
 }): React.ReactElement {
   const [expanded, setExpanded] = React.useState(false);
   const clampable = onShowFull !== undefined || shouldClampUserMessage(text);
@@ -272,7 +307,7 @@ function ClampedBubbleText({
             "max-h-44 overflow-hidden [mask-image:linear-gradient(to_bottom,black_calc(100%-1.75rem),transparent)]"
         )}
       >
-        <MessageBodyText text={text} />
+        {quotes && !mono ? <QuotedBodyText text={text} /> : <MessageBodyText text={text} />}
       </div>
       {clampable ? (
         <button
@@ -340,7 +375,11 @@ export const UserMessageRow = React.memo(function UserMessageRow({
             longer reads (an agent's scheduled task from before scheduling was removed). */}
         <AuthorHeading>{fromThread || markedThread ? "Another chat" : fromOrquester ? "Orquester" : "You"}</AuthorHeading>
         {attachments.length > 0 ? <AttachmentChips attachments={attachments} /> : null}
-        <ClampedBubbleText text={merged ? merged.body : fromThread ? fromThread.body : text} showLabel="Show full message" />
+        <ClampedBubbleText
+          text={merged ? merged.body : fromThread ? fromThread.body : text}
+          showLabel="Show full message"
+          quotes
+        />
       </div>
       <div
         className="ac-reveal ac-tabular flex w-full max-w-[80%] items-center justify-end gap-2 pe-1 text-xs"
@@ -462,11 +501,15 @@ export const AssistantMessageRow = React.memo(function AssistantMessageRow({
   return (
     <div className="group/assistant relative min-w-0 px-1 py-0.5">
       <AuthorHeading>Agent</AuthorHeading>
-      <ChatMarkdown
-        text={text}
-        streaming={streaming}
-        onOpenFile={ctx.onOpenFile}
-      />
+      {/* The body a selection may be quoted from (`QuoteSelectionToolbar`) —
+          the reply's own text, never the placeholder for an empty one. */}
+      <div {...(row.message.text ? { [QUOTE_SOURCE_ATTR]: row.message.id } : {})}>
+        <ChatMarkdown
+          text={text}
+          streaming={streaming}
+          onOpenFile={ctx.onOpenFile}
+        />
+      </div>
     </div>
   );
 });
@@ -600,7 +643,7 @@ export const QueuedMessageRow = React.memo(function QueuedMessageRow({
       <div className="max-w-[80%] rounded-2xl border border-dashed border-neutral-700 p-3 text-neutral-300">
         {text.length > 0 ? (
           <div className="whitespace-pre-wrap text-sm leading-relaxed [overflow-wrap:anywhere]">
-            <MessageBodyText text={text} />
+            <QuotedBodyText text={text} />
           </div>
         ) : null}
         {attachmentCount > 0 || contextCount > 0 ? (
