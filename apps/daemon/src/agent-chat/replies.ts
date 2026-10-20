@@ -46,9 +46,12 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname } from "node:path";
 
+import type { SessionSummary } from "@orquester/api";
 import {
   agentChatRoutes,
   buildThreadMessage,
+  delegateAttentionContext,
+  delegateAttentionNoticeText,
   exceedsExchangeLimit,
   MAX_EXCHANGE_HOPS,
   MAX_PENDING_REPLY_SUBSCRIPTIONS,
@@ -59,9 +62,13 @@ import {
   SETTLED_TURN_STATES,
   THREAD_MESSAGE_OVERHEAD_CHARS,
   threadMessageContext,
+  type AgentChatPendingEventPayload,
   type CallerPrincipal,
   type CausedBy,
   type ComposerContextRecord,
+  type DelegateAttentionKind,
+  type SecretRequestListResponse,
+  type ToolApprovalListResponse,
   REPLY_SUBSCRIPTION_LIMIT,
   TARGET_BUSY,
   WAIT_CYCLE,
@@ -82,6 +89,7 @@ import {
   parseReplyOutbox,
   serializeReplyOutbox,
   type MergeOutboxEntry,
+  type ReplyAttentionNoticeRecord,
   type ReplyDeliveryOutcome,
   type ReplyDeliveryRecord,
   type ReplyOutbox,
@@ -92,6 +100,7 @@ import type { DaemonApi } from "../mcp/daemon-api.ts";
 import { ToolError } from "../mcp/errors.ts";
 import { assistantTextForTurn } from "@orquester/api/agent-chat";
 import { LineageError, type DeliveryListener, type LineageSessions } from "./lineage.ts";
+import { approvalPendingRequestId, secretPendingRequestId } from "./summary.ts";
 import { registerWait, waitCycleError, waitsOn } from "./waits.ts";
 
 // ---------------------------------------------------------------------------
@@ -304,6 +313,9 @@ export class ReplyRouter implements DeliveryListener {
   private readonly handedOut = new Map<string, ReplyResult>();
   /** Steps started without a caller awaiting them (deliveries, a wait attaching): {@link whenIdle} waits for them. */
   private readonly inFlight = new Set<Promise<unknown>>();
+  /** Per delegated child: the attention scan chain, and whether one more pass is already queued on it. */
+  private readonly attentionTail = new Map<string, Promise<void>>();
+  private readonly attentionQueued = new Set<string>();
 
   constructor(private readonly opts: ReplyRouterOptions) {}
 
@@ -367,8 +379,18 @@ export class ReplyRouter implements DeliveryListener {
       if (event.channel !== "sessions") return;
       const id = (event.payload as { id?: unknown } | null)?.id;
       if (typeof id !== "string") return;
+      if (event.type === "agentChat.pending") {
+        // A request opened or closed on a chat: a delegated child blocked on its user wakes its parent.
+        const pending = event.payload as Partial<AgentChatPendingEventPayload>;
+        if (pending.open === true) this.track(this.scanAttention(id));
+        else if (typeof pending.requestId === "string") this.track(this.attentionClosed(id, pending.requestId));
+      }
       if (this.openSubs().some((sub) => sub.toThreadId === id) && this.summaryMoved(id)) void this.evaluate(id);
-      if (this.isClosed(id)) this.track(this.requesterClosed(id));
+      if (this.isClosed(id)) {
+        this.track(this.requesterClosed(id));
+        // A closed child's requests closed with it.
+        if (this.notices().some((notice) => notice.fromThreadId === id)) this.track(this.scanAttention(id));
+      }
     });
     this.ready = this.track(
       this.reconcile().catch((error: unknown) => {
@@ -858,6 +880,15 @@ export class ReplyRouter implements DeliveryListener {
   /** A queued entry's turn landed: bind a message's subscription, or mark a reply delivered. */
   async posted(entry: MergeOutboxEntry, commandId: string, seq: number): Promise<void> {
     if (entry.kind === "reply") {
+      const notice = this.notices().find((n) => n.commandId === entry.mergeId);
+      if (notice) {
+        if (notice.state !== "delivered") {
+          notice.state = "delivered";
+          notice.updatedAt = this.stamp();
+          await this.persist();
+        }
+        return;
+      }
       const delivery = this.outbox.deliveries.find((d) => (d.queueEntryId ?? d.id) === entry.mergeId);
       if (delivery && delivery.state !== "delivered") {
         delivery.state = "delivered";
@@ -895,6 +926,15 @@ export class ReplyRouter implements DeliveryListener {
   /** A pending entry was discarded (Deliver now / Discard): a reply dropped, or a message that never ran. */
   async discarded(entry: MergeOutboxEntry, bySessionId: string): Promise<void> {
     if (entry.kind === "reply") {
+      const notice = this.notices().find((n) => n.commandId === entry.mergeId);
+      if (notice) {
+        if (notice.state !== "dropped" && notice.state !== "delivered") {
+          notice.state = "dropped";
+          notice.updatedAt = this.stamp();
+          await this.persist();
+        }
+        return;
+      }
       const delivery = this.outbox.deliveries.find((d) => (d.queueEntryId ?? d.id) === entry.mergeId);
       if (delivery && delivery.state !== "dropped" && delivery.state !== "delivered") {
         delivery.state = "dropped";
@@ -917,6 +957,266 @@ export class ReplyRouter implements DeliveryListener {
     // target's lane (it goes into the requester's).
     const deliver = await this.claim(sub, { kind: "notice", text: this.noticeText("discarded", sub) });
     this.track(deliver());
+  }
+
+  // --- attention: a delegated child blocked on its user ------------------------------
+
+  /**
+   * A delegated child (lineage `delegate`, its parent waiting for its reply: an open `notify` or
+   * `waiting` subscription) opened a question, approval or secret request and is blocked on it: one
+   * short notice turn goes to the parent — per request id, ever — through the delivery queue (kind
+   * `reply`, a fixed command id, queued while the parent is busy). Each notice is persisted BEFORE
+   * it is handed, so a restart neither loses nor repeats it; one whose request closes before it is
+   * posted is taken back. Serialized per child, one pass queued at most.
+   */
+  private scanAttention(childId: string): Promise<void> {
+    if (this.attentionQueued.has(childId)) return this.attentionTail.get(childId) ?? Promise.resolve();
+    this.attentionQueued.add(childId);
+    const before = this.attentionTail.get(childId) ?? Promise.resolve();
+    const run = before
+      .then(async () => {
+        this.attentionQueued.delete(childId);
+        await this.scanAttentionNow(childId);
+      })
+      .catch((error: unknown) => {
+        this.opts.logger?.warn?.("[replies] could not look at a delegated chat's open requests", error);
+      });
+    this.attentionTail.set(childId, run);
+    void run.then(() => {
+      if (this.attentionTail.get(childId) === run) this.attentionTail.delete(childId);
+    });
+    return run;
+  }
+
+  /** The parent's open subscription to its delegated child `childId` the notice rides (its newest), or undefined. */
+  private attentionSubscription(childId: string): { sub: Sub; child: SessionSummary } | undefined {
+    const child = this.opts.sessions.get(childId);
+    const lineage = child?.lineage;
+    if (!child || lineage?.relation !== "delegate" || this.isClosed(lineage.parentThreadId)) return undefined;
+    const subs = this.openSubs().filter(
+      (sub) =>
+        sub.toThreadId === childId &&
+        sub.fromThreadId === lineage.parentThreadId &&
+        (sub.state === "notify" || sub.state === "waiting")
+    );
+    const sub = subs.sort((a, b) => a.createdAt.localeCompare(b.createdAt)).at(-1);
+    return sub ? { sub, child } : undefined;
+  }
+
+  private async scanAttentionNow(childId: string): Promise<void> {
+    const api = this.api;
+    if (!api || this.stopped || this.readOnly !== null) return;
+    if (this.isClosed(childId)) {
+      // Its requests closed with it: nothing unposted about it is worth a turn any more.
+      await this.retractNotices((notice) => notice.fromThreadId === childId);
+      return;
+    }
+    const found = this.attentionSubscription(childId);
+    const unposted = this.notices().some((notice) => notice.fromThreadId === childId && (notice.state === "pending" || notice.state === "queued"));
+    if (!found && !unposted) return;
+    const { requests, head } = await this.openRequestsOf(api, childId);
+    // Requests that closed meanwhile (answered, dismissed, timed out) take their unposted notices with them.
+    const open = new Set(requests.map((request) => request.requestId));
+    await this.retractNotices((notice) => notice.fromThreadId === childId && !open.has(notice.requestId));
+    if (!found) return;
+    const { sub, child } = found;
+    const known = new Set(this.notices().filter((notice) => notice.fromThreadId === childId).map((notice) => notice.requestId));
+    const fresh = requests.filter((request) => !known.has(request.requestId));
+    if (fresh.length === 0) return;
+    const created = fresh.map((request) => this.makeNotice(sub, child, request, head));
+    this.notices().push(...created);
+    // Persisted BEFORE anything is handed: a crash after this re-hands them under the same ids.
+    if (!(await this.persist())) {
+      this.outbox.attentionNotices = this.notices().filter((notice) => !created.includes(notice));
+      return;
+    }
+    for (const notice of created) await this.handNotice(notice);
+  }
+
+  /**
+   * The child's open requests, in the ids `agentChat.pending` announces them under: the host's
+   * questions and approvals (its head), the daemon's secret cards and Orquester approval cards.
+   * A list that cannot be read contributes nothing this pass.
+   */
+  private async openRequestsOf(
+    api: DaemonApi,
+    childId: string
+  ): Promise<{ requests: Array<{ requestId: string; kind: DelegateAttentionKind; quote: string }>; head: ThreadHeadResponse | null }> {
+    const requests: Array<{ requestId: string; kind: DelegateAttentionKind; quote: string }> = [];
+    let head: ThreadHeadResponse | null = null;
+    try {
+      head = await readThreadHead(api, childId, {});
+      for (const question of head.pending.userInputs) {
+        const quote = (question.questions ?? [])
+          .map((entry) => (typeof entry.question === "string" ? entry.question.trim() : ""))
+          .filter(Boolean)
+          .join(" / ");
+        requests.push({ requestId: question.requestId, kind: "question", quote });
+      }
+      for (const approval of head.pending.approvals) {
+        requests.push({ requestId: approval.requestId, kind: "approval", quote: approval.detail?.trim() || approval.requestKind });
+      }
+    } catch {
+      // The head could not be read: the next pass looks again.
+    }
+    const secrets = await api.request("GET", agentChatRoutes.secretRequests(childId)).catch(() => null);
+    if (secrets && secrets.status < 400) {
+      for (const request of (secrets.body as SecretRequestListResponse | null)?.requests ?? []) {
+        requests.push({ requestId: secretPendingRequestId(request.requestId), kind: "secret", quote: request.name });
+      }
+    }
+    const cards = await api.request("GET", agentChatRoutes.toolApprovals(childId)).catch(() => null);
+    if (cards && cards.status < 400) {
+      for (const card of (cards.body as ToolApprovalListResponse | null)?.approvals ?? []) {
+        requests.push({ requestId: approvalPendingRequestId(card.approvalId), kind: "approval", quote: card.title });
+      }
+    }
+    return { requests, head };
+  }
+
+  /** One notice: the hop after the child's running turn (§8.4), past the cap marked as such. */
+  private makeNotice(
+    sub: Sub,
+    child: SessionSummary,
+    request: { requestId: string; kind: DelegateAttentionKind; quote: string },
+    head: ThreadHeadResponse | null
+  ): ReplyAttentionNoticeRecord {
+    const running = head?.recentTurns.at(-1)?.causedBy;
+    const replying = running !== undefined && running.exchangeId === sub.exchange.id ? running.hop : sub.exchange.hop;
+    const hop = replying + 1;
+    const causedBy: CausedBy = { threadId: child.id, exchangeId: sub.exchange.id, hop: Math.min(hop, MAX_EXCHANGE_HOPS + 1) };
+    let text = delegateAttentionNoticeText({ title: child.title, sessionId: child.id, requestId: request.requestId, kind: request.kind, quote: request.quote });
+    if (exceedsExchangeLimit({ hop })) {
+      text = `${text}\n\n${replyNoticeText("exchange-limit", { title: child.title, sessionId: child.id })}`;
+    }
+    const id = this.newId();
+    return {
+      id,
+      subscriptionId: sub.id,
+      toThreadId: sub.fromThreadId,
+      fromThreadId: child.id,
+      requestId: request.requestId,
+      kind: request.kind,
+      commandId: id,
+      input: buildThreadMessage({
+        origin: "attention",
+        fromTitle: child.title,
+        fromSessionId: child.id,
+        ...(child.projectPath ? { fromProject: projectLabel(child.projectPath) } : {}),
+        text
+      }),
+      interactionMode: sub.interactionMode,
+      causedBy,
+      state: "pending",
+      createdAt: this.stamp()
+    };
+  }
+
+  /** Into the parent's delivery queue (kind `reply`, its fixed id): only a `pending` notice, never twice at once. */
+  private async handNotice(notice: ReplyAttentionNoticeRecord): Promise<void> {
+    if (notice.state !== "pending" || this.handing.has(notice.id)) return;
+    this.handing.add(notice.id);
+    try {
+      if (this.isClosed(notice.toThreadId) || this.isClosed(notice.fromThreadId)) {
+        notice.state = "dropped";
+        notice.updatedAt = this.stamp();
+        await this.persist();
+        return;
+      }
+      const entry: MergeOutboxEntry = {
+        mergeId: notice.commandId,
+        parentSessionId: notice.toThreadId,
+        childSessionId: notice.fromThreadId,
+        input: notice.input,
+        queuedAt: notice.createdAt,
+        state: "queued",
+        attempts: 0,
+        kind: "reply",
+        causedBy: notice.causedBy,
+        // Bound to the subscription: posted only as a new turn, at the parent's next idle point.
+        subscriptionId: notice.subscriptionId,
+        context: queueContext([delegateAttentionContext(notice.fromThreadId)]),
+        ...(notice.interactionMode === "plan" ? { interactionMode: "plan" as const } : {})
+      };
+      try {
+        const result = await this.opts.queue.enqueue(entry);
+        // An immediate post already marked it delivered (`posted`).
+        if (notice.state === "pending") notice.state = result.delivery === "sent" ? "delivered" : "queued";
+      } catch (error) {
+        // Stays `pending`: the safety re-check (or the next boot) hands it again under the same id.
+        this.opts.logger?.warn?.("[replies] an attention notice could not be queued yet", { noticeId: notice.id, error: (error as Error)?.message });
+      }
+      notice.updatedAt = this.stamp();
+      await this.persist();
+    } finally {
+      this.handing.delete(notice.id);
+    }
+  }
+
+  /**
+   * The notices `which` selects that have not been posted: taken back from the queue and dropped,
+   * so a parent is never woken for a request that closed (answered, or its chat closed) first. A
+   * notice being handed right now, or one whose post already started, is left to land.
+   */
+  private async retractNotices(which: (notice: ReplyAttentionNoticeRecord) => boolean): Promise<void> {
+    let changed = false;
+    for (const notice of this.notices()) {
+      if (!which(notice) || this.handing.has(notice.id)) continue;
+      const taken =
+        notice.state === "pending" || (notice.state === "queued" && (await this.opts.queue.retract(notice.commandId)));
+      if (!taken) continue;
+      notice.state = "dropped";
+      notice.updatedAt = this.stamp();
+      changed = true;
+    }
+    if (changed) await this.persist();
+  }
+
+  /** `agentChat.pending` closed `requestId` on `childId`: its notice, if not posted yet, is taken back. */
+  private attentionClosed(childId: string, requestId: string): Promise<void> {
+    return this.retractNotices((notice) => notice.fromThreadId === childId && notice.requestId === requestId);
+  }
+
+  /** Every notice addressed to `requesterId` and not yet posted: dropped (the requester closed). */
+  private async dropNoticesTo(requesterId: string): Promise<boolean> {
+    let changed = false;
+    for (const notice of this.notices()) {
+      if (notice.toThreadId !== requesterId || (notice.state !== "pending" && notice.state !== "queued")) continue;
+      if (notice.state === "queued") await this.opts.queue.drop(notice.commandId);
+      notice.state = "dropped";
+      notice.updatedAt = this.stamp();
+      changed = true;
+    }
+    return changed;
+  }
+
+  /** The children worth a look for open requests: a delegate with an open subscription from its parent, asking now. */
+  private attentionCandidates(): string[] {
+    const ids = new Set<string>();
+    for (const sub of this.openSubs()) {
+      if (sub.state !== "notify" && sub.state !== "waiting") continue;
+      const child = this.opts.sessions.get(sub.toThreadId);
+      if (child?.lineage?.relation !== "delegate" || child.lineage.parentThreadId !== sub.fromThreadId) continue;
+      if (child.hasPendingApprovals || child.hasPendingUserInput) ids.add(child.id);
+    }
+    return [...ids];
+  }
+
+  /** Notices persisted and never handed, or handed and missing from the queue (a write that did not land): handed again. */
+  private async resumeNotices(): Promise<void> {
+    for (const notice of this.notices()) {
+      if (notice.state === "queued" && !this.opts.queue.has(notice.commandId)) {
+        // Every post and discard is recorded here first, so this is a queue write that did not
+        // land: handed again under the same id (the host's receipt dedupes a re-post).
+        notice.state = "pending";
+      }
+      if (notice.state === "pending") await this.handNotice(notice);
+    }
+  }
+
+  private notices(): ReplyAttentionNoticeRecord[] {
+    this.outbox.attentionNotices ??= [];
+    return this.outbox.attentionNotices;
   }
 
   // --- reconciliation and evaluation ------------------------------------------------
@@ -948,6 +1248,12 @@ export class ReplyRouter implements DeliveryListener {
     }
     // A released reply whose re-delivery was not recorded yet (its read failed): tried again.
     for (const sub of this.pendingRedeliveries()) await this.redeliver(sub);
+    // Attention notices persisted and not yet in the queue are handed (again, under their ids);
+    // every child with one unposted, or asking its user now, is looked at afresh — a request that
+    // opened or closed while the daemon was down is found here, never only by a bus event.
+    await this.resumeNotices();
+    const unposted = this.notices().filter((notice) => notice.state === "pending" || notice.state === "queued").map((notice) => notice.fromThreadId);
+    await Promise.all([...new Set([...unposted, ...this.attentionCandidates()])].map((id) => this.scanAttention(id)));
     for (const requester of new Set(this.openSubs().map((sub) => sub.fromThreadId))) {
       if (this.isClosed(requester)) await this.requesterClosed(requester);
     }
@@ -1140,12 +1446,12 @@ export class ReplyRouter implements DeliveryListener {
    * a handed delivery afterwards is the queue's (`LineageService.whenIdle`).
    */
   async whenIdle(): Promise<void> {
-    while (this.hasWorkInFlight()) await Promise.all([...this.evalTail.values(), ...this.inFlight, this.writes]);
+    while (this.hasWorkInFlight()) await Promise.all([...this.evalTail.values(), ...this.attentionTail.values(), ...this.inFlight, this.writes]);
   }
 
   /** True while a step is in flight (see {@link whenIdle}). */
   hasWorkInFlight(): boolean {
-    return this.evalTail.size > 0 || this.inFlight.size > 0 || this.pendingWrites > 0;
+    return this.evalTail.size > 0 || this.attentionTail.size > 0 || this.inFlight.size > 0 || this.pendingWrites > 0;
   }
 
   /** Count a step nobody awaits as in flight until it settles ({@link whenIdle}); never rejects. */
@@ -1567,6 +1873,7 @@ export class ReplyRouter implements DeliveryListener {
       delivery.state = "dropped";
       changed = true;
     }
+    if (await this.dropNoticesTo(requesterId)) changed = true;
     if (changed) {
       this.opts.logger?.warn?.("[replies] a requester closed: its pending replies were dropped", { requesterId });
       await this.persist();
@@ -1651,6 +1958,8 @@ export class ReplyRouter implements DeliveryListener {
     for (const delivery of this.outbox.deliveries) if (delivery.state === "pending") work.push(this.hand(delivery));
     for (const sub of this.openSubs()) if (sub.state === "claimed-by-router") work.push(this.resumeClaimed(sub));
     for (const sub of this.pendingRedeliveries()) work.push(this.redeliver(sub));
+    for (const notice of this.notices()) if (notice.state === "pending") work.push(this.handNotice(notice));
+    for (const id of this.attentionCandidates()) work.push(this.scanAttention(id));
     // Closures no bus event reported (tabs closed before the records loaded) are found here too.
     for (const id of new Set(this.openSubs().map((sub) => sub.fromThreadId))) work.push(this.requesterClosed(id));
     for (const id of new Set(this.openSubs().map((sub) => sub.toThreadId))) work.push(this.evaluate(id));
@@ -1668,6 +1977,11 @@ export class ReplyRouter implements DeliveryListener {
     if (final.length > DONE_MEMORY) {
       const drop = new Set(final.slice(0, final.length - DONE_MEMORY));
       this.outbox.deliveries = this.outbox.deliveries.filter((d) => !drop.has(d));
+    }
+    const settledNotices = this.notices().filter((notice) => notice.state === "delivered" || notice.state === "dropped");
+    if (settledNotices.length > DONE_MEMORY) {
+      const drop = new Set(settledNotices.slice(0, settledNotices.length - DONE_MEMORY));
+      this.outbox.attentionNotices = this.notices().filter((notice) => !drop.has(notice));
     }
   }
 

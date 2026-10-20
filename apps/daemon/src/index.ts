@@ -112,6 +112,7 @@ import { INVALID_OWNER, parseSessionOwner } from "./agent-chat/owner.ts";
 import { ChatAwareSessionManager } from "./agent-chat/session-router.ts";
 import { AGENT_VISUAL_ROUTE_PATTERN, registerAgentChatRoutes } from "./agent-chat/proxy-routes.ts";
 import { LineageService } from "./agent-chat/lineage.ts";
+import { DelegateStopCascade } from "./agent-chat/delegates.ts";
 import { registerLineageRoutes } from "./agent-chat/lineage-routes.ts";
 import { ChatLimitRecovery } from "./agent-chat/limit-recovery.ts";
 import { registerUsageLimitRoutes } from "./agent-chat/limit-recovery-routes.ts";
@@ -666,6 +667,11 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   });
   agentChat.setPersist(() => ptySessions.persistIndexNow());
 
+  // The delegate stop cascade: a chat stopped, interrupted or closed stops the chats it delegated
+  // tasks to (`delegates.ts`). Its interrupts go through the daemon's own API (`attachApi` below);
+  // a close is heard here, while the closing tab's record is still readable.
+  const delegateStops = new DelegateStopCascade({ sessions: agentChat.chat, logger: console });
+
   // One session list over both backends, so every existing surface (tab strip,
   // Attention Center, palette, upload sweep, delete cascade, kill guard) treats
   // `agent-chat` as the agent kind without learning a second service (§7.1).
@@ -678,7 +684,10 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
           req as CreateAgentChatRequest,
           sessions.nextOrder(req.projectPath ?? "")
         ),
-      onClose: (id) => agentChat.deleteThread(id),
+      onClose: (id) => {
+        delegateStops.closing(id);
+        agentChat.deleteThread(id);
+      },
       onRename: (id, title, opts) => agentChat.renameThread(id, title, opts)
     }
   );
@@ -1386,6 +1395,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     workflows, workflowSecrets, workflowRuns, workflowState, workflowEngine: null, internalApi: null,
     lineage,
     limitRecovery,
+    delegateStops,
     workflowProjects: workflowDaemon.runtime.projects,
     workflowCatalogReady: () => workflowDaemon.validationCatalog.ready()
   };
@@ -1526,6 +1536,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
 
   lineage.attachApi(services.internalApi);
   limitRecovery.attachApi(services.internalApi);
+  delegateStops.attachApi(services.internalApi);
   // umcp:t6 — every chat tool is on in every chat: a provider session the host kept across this
   // boot (launched by an older build, with fewer tools) is handed the current manifest once. The
   // host answers `unchanged` for an equal list, else applies it in-session or at the chat's next
@@ -1629,6 +1640,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     sessions.shutdown();
     // Stops supervising only: under tmux the agent host is deliberately left
     // running so in-flight turns survive the deploy (chat spec §3.1).
+    delegateStops.stop();
     await lineage.stop();
     limitRecovery.stop();
     // umcp:t3 begin
@@ -1796,6 +1808,11 @@ interface Services {
   lineage?: LineageService;
   /** Usage-limit recovery of interactive chats. Optional: route-level tests build a partial `services`. */
   limitRecovery?: ChatLimitRecovery;
+  /**
+   * The delegate stop cascade (`agent-chat/delegates.ts`): the command routes report every
+   * accepted interrupt and stop to it. Optional: route-level tests build a partial `services`.
+   */
+  delegateStops?: DelegateStopCascade;
   /** Restart the HTTP transport (set in main once the lifecycle exists). */
   reloadHttp?: () => Promise<void>;
 }
@@ -3931,7 +3948,10 @@ export function createServer(
   // (Optional-chained: route-level tests build a partial `services`.)
   const agentChatDeps = services.agentChat?.routeDeps();
   if (agentChatDeps) {
-    registerAgentChatRoutes(app, agentChatDeps);
+    registerAgentChatRoutes(app, {
+      ...agentChatDeps,
+      onStopCommand: (id, command, body) => services.delegateStops?.commandAccepted(id, command, body)
+    });
     // Thread lineage (spec 2026-10-14 §6): fork, merge back, the lineage read.
     registerLineageRoutes(app, {
       lineage: () => services.lineage ?? null,

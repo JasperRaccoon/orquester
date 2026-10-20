@@ -31,6 +31,7 @@ import {
   PRINCIPAL_TOKEN_INVALID,
   PRINCIPAL_TOKEN_MIN_BYTES,
   PRINCIPAL_TOKEN_TTL_MS,
+  stripRemoteInterruptFields,
   stripRemoteMergeBackFields,
   stripRemoteTurnFields,
   USER_PRINCIPAL,
@@ -128,12 +129,14 @@ export function externalCredentialId(username: string | undefined | null): strin
 /** The route patterns whose socket-trusted body fields the remote transport strips. */
 const TURN_ROUTE = decodeURIComponent(agentChatCommandPath(":id", "turn"));
 const MERGE_BACK_ROUTE = decodeURIComponent(agentChatRoutes.mergeBack(":id"));
+const INTERRUPT_ROUTE = decodeURIComponent(agentChatCommandPath(":id", "interrupt"));
 
 const isObjectBody = (body: unknown): body is object => body !== null && typeof body === "object" && !Array.isArray(body);
 
 /**
- * Remote transport only: remove the socket-trusted fields (`causedBy`) from turn and merge-back
- * bodies before any route sees them (`stripRemoteTurnFields`, `stripRemoteMergeBackFields`).
+ * Remote transport only: remove the socket-trusted fields (`causedBy`, an interrupt's `cause`) from
+ * turn, merge-back and interrupt bodies before any route sees them (`stripRemoteTurnFields`,
+ * `stripRemoteMergeBackFields`, `stripRemoteInterruptFields`).
  * Applies to every request on the remote app — the GUI, a direct REST client, and the external
  * `/mcp`'s own in-process calls (external turns start a fresh exchange, spec §13).
  */
@@ -143,5 +146,6 @@ export function registerRemoteFieldStripping(app: FastifyInstance): void {
     const route = request.routeOptions.url;
     if (route === TURN_ROUTE) request.body = stripRemoteTurnFields(request.body);
     else if (route === MERGE_BACK_ROUTE) request.body = stripRemoteMergeBackFields(request.body);
+    else if (route === INTERRUPT_ROUTE) request.body = stripRemoteInterruptFields(request.body);
   });
 }

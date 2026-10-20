@@ -162,6 +162,26 @@ test("documented commands preserve their path, body, authentication and acknowle
   await h.close();
 });
 
+test("an accepted interrupt or stop is reported to the delegate stop cascade; a refused one, or any other command, is not", async () => {
+  const heard: Array<[string, string, unknown]> = [];
+  const h = await makeHarness({ t1: tab("t1") }, { onStopCommand: (id, command, body) => heard.push([id, command, body]) });
+  h.host.handler = (_req, res) => res.writeHead(200, { "content-type": "application/json" }).end('{"seq":5}');
+  for (const suffix of ["interrupt", "session/stop", "turn", "compact"]) {
+    const response = await h.app.inject({ method: "POST", url: `/api/sessions/t1/${suffix}`, payload: { commandId: `c-${suffix}` } });
+    assert.equal(response.statusCode, 200, suffix);
+  }
+  assert.deepEqual(heard, [
+    ["t1", "interrupt", { commandId: "c-interrupt" }],
+    ["t1", "session/stop", { commandId: "c-session/stop" }]
+  ]);
+  h.host.handler = (_req, res) =>
+    res.writeHead(409, { "content-type": "application/json" }).end(JSON.stringify({ error: { code: "COMMAND_REJECTED", message: "no" } }));
+  const refused = await h.app.inject({ method: "POST", url: "/api/sessions/t1/interrupt", payload: { commandId: "c-2" } });
+  assert.equal(refused.statusCode, 409);
+  assert.equal(heard.length, 2, "a refused interrupt cascades nothing");
+  await h.close();
+});
+
 test("the host's error envelope is passed through verbatim, status included", async () => {
   // Exactly one surface describes a failure, whichever layer produced it.
   const h = await makeHarness({ t1: tab("t1") });

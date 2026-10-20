@@ -269,3 +269,29 @@ test("a subscription's posted / ended / toTitle round-trip; a newer ending is ke
   assert.equal(bad.subscriptions.length, 0);
   assert.equal(bad.unreadableSubscriptions.length, 1);
 });
+
+test("the reply outbox's attention notices round-trip, an unreadable one kept verbatim; an outbox without them writes none", () => {
+  const notice = {
+    id: "n1",
+    subscriptionId: "s1",
+    toThreadId: "req",
+    fromThreadId: "codex",
+    requestId: "secret:r1",
+    kind: "secret",
+    commandId: "n1",
+    input: "[Needs input in thread \"Codex review\" · session codex]\n…\n\nBlocked.",
+    causedBy: { threadId: "codex", exchangeId: "x1", hop: 2 },
+    state: "queued",
+    createdAt: "2026-10-20T10:00:00.000Z",
+    fromNewerBuild: true
+  };
+  const raw = { version: 1, subscriptions: [], deliveries: [], attentionNotices: [notice, { ...notice, id: "n2", kind: "telepathy" }] };
+  const outbox = parseReplyOutbox(raw);
+  assert.deepEqual(outbox.attentionNotices?.map((n) => [n.id, n.kind, n.state, n.interactionMode]), [["n1", "secret", "queued", "default"]]);
+  assert.equal((outbox.attentionNotices?.[0] as Record<string, unknown>).fromNewerBuild, true);
+  assert.equal(outbox.unreadableAttentionNotices?.length, 1);
+  const rewritten = JSON.parse(serializeReplyOutbox(outbox)) as { attentionNotices: Array<Record<string, unknown>> };
+  assert.deepEqual(rewritten.attentionNotices.map((n) => n.id), ["n1", "n2"], "a rewrite puts every notice back");
+  assert.equal("attentionNotices" in JSON.parse(serializeReplyOutbox(parseReplyOutbox({}))), false);
+  assert.throws(() => parseReplyOutbox({ attentionNotices: {} }), /reply outbox/);
+});

@@ -38,8 +38,8 @@ type Row<K extends AgentChatTimelineRow["kind"]> = Extract<AgentChatTimelineRow,
 
 /**
  * The caption over a message another chat sent (unified MCP §8.2): how it came — sent, opened,
- * delegated, or a reply to this chat's own message — and from which chat (and project, when the
- * v2 header names one).
+ * delegated, a reply to this chat's own message, or Orquester's notice that a task it delegated
+ * needs input — and from which chat (and project, when the v2 header names one).
  */
 export function threadMessageCaption(message: Pick<ParsedThreadMessage, "origin" | "fromTitle" | "fromProject">): string {
   const verb =
@@ -49,7 +49,9 @@ export function threadMessageCaption(message: Pick<ParsedThreadMessage, "origin"
         ? "Opened by"
         : message.origin === "reply"
           ? "Reply from"
-          : "Sent by";
+          : message.origin === "attention"
+            ? "Needs input in"
+            : "Sent by";
   return `${verb} “${message.fromTitle}”${message.fromProject ? ` · ${message.fromProject}` : ""}`;
 }
 

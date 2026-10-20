@@ -39,6 +39,8 @@ import type {
   ThreadToolReference,
   ToolApprovalReference
 } from "@orquester/api/agent-chat";
+import type { InterruptCause } from "@orquester/api/agent-chat";
+import type { DelegateChildRef } from "./delegates.logic";
 import type { ComposerDraft } from "./composer.logic";
 
 // ---------------------------------------------------------------------------
@@ -386,6 +388,12 @@ export interface WorkLogEntry {
     previousProfileId?: string | null;
   };
   /**
+   * Present on the delegate stop cascade's marker (`STOP_CASCADED_ACTIVITY_KIND`): this chat was
+   * interrupted because the chat that delegated it stopped. The parent's title resolves live at
+   * render time; `parentTitle` names it once its tab is gone.
+   */
+  stopCascade?: InterruptCause;
+  /**
    * Present on a COMPLETED session-tool `html_render` call (spec 2026-10-14
    * §2.5) — a row the host's ingestion marked as its own (`sessionTool`):
    * the page the agent published, read by the shared reader
@@ -440,6 +448,20 @@ export type ToolGroupSummaryKind = "read" | "edit" | "command" | "search" | "oth
  * visuals, `visual` for a published page (spec 2026-10-14 §2.5).
  */
 export type AgentChatTimelineRow =
+  | {
+      /**
+       * The subagent strip: consecutive calls of one turn that delegated a task to another chat
+       * (`create_session` with `delegate: true`), as one card. Ids only — each child's status,
+       * preview and model resolve from its tab's live summary at render time (`delegates.logic`).
+       */
+      kind: "delegate-group";
+      id: string;
+      createdAt: string;
+      turnId: string | null;
+      /** Its expansion key (`TimelineRowContextValue.isExpanded`). */
+      groupId: string;
+      children: DelegateChildRef[];
+    }
   | {
       kind: "activity-group";
       id: string;

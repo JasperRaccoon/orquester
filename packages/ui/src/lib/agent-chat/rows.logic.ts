@@ -58,6 +58,7 @@ import type {
   WorkLogEntry
 } from "./contracts";
 import { agentPromptOf } from "./agent-prompt.logic";
+import { delegateCallOf, mergeDelegateRefs } from "./delegates.logic";
 import { isStreamingMessageTextUpdate, type TimelineEntry } from "./entries.logic";
 import {
   omitSupersededLifecycleMarkers,
@@ -235,6 +236,7 @@ function isGroupingEntry(entry: TimelineEntry): boolean {
   }
   return (
     entry.entry.agentSpawn === undefined &&
+    delegateCallOf(entry.entry) === null &&
     entry.entry.questionAnswer === undefined &&
     entry.entry.sourceActivityKind !== "context-compaction" &&
     entry.entry.sourceActivityKind !== "thread.state.changed" &&
@@ -734,11 +736,13 @@ function deriveTurnFolds(input: {
       // User input and subagent batches stay visible after their turn settles,
       // and so do a goal's markers (goals §8.4): the story of the goal — set,
       // checked, achieved — outlives the work it drove. So does a published
-      // page (spec 2026-10-14 §2.5): it is what the reply shows.
+      // page (spec 2026-10-14 §2.5): it is what the reply shows. And so do the
+      // chats it delegated: they go on working after the turn that opened them.
       if (
         entry.kind === "work" &&
         (entry.entry.questionAnswer !== undefined ||
           entry.entry.agentSpawn !== undefined ||
+          delegateCallOf(entry.entry) !== null ||
           entry.entry.goal !== undefined ||
           isVisualEntry(entry))
       ) {
@@ -1125,6 +1129,8 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
       !entryBelongsToActiveTurn(entry, index) ||
       entry.kind !== "work" ||
       entry.entry.questionAnswer !== undefined ||
+      // A delegating call is its own row, the subagent strip, live by its children.
+      delegateCallOf(entry.entry) !== null ||
       isCompactionEntry(entry) ||
       isGoalEntry(entry) ||
       isVisualEntry(entry) ||
@@ -1393,6 +1399,39 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
         turnId: timelineEntry.entry.turnId,
         htmlRender
       });
+      continue;
+    }
+
+    // ── Delegated chats: the subagent strip ────────────────────────────────
+    // Consecutive delegating calls of one turn are one group, live by the
+    // children's own tabs at render time (never by a count frozen here).
+    const delegated = timelineEntry.kind === "work" ? delegateCallOf(timelineEntry.entry) : null;
+    if (delegated !== null && timelineEntry.kind === "work") {
+      const turnId = timelineEntry.entry.turnId;
+      const refs = [delegated];
+      let cursor = index + 1;
+      while (cursor < entries.length) {
+        const next = entries[cursor]!;
+        if (next.kind !== "work" || next.entry.turnId !== turnId || foldsByAnchorEntryId.has(next.id)) break;
+        if (collapsedEntryIds.has(next.id)) {
+          cursor += 1;
+          continue;
+        }
+        const ref = delegateCallOf(next.entry);
+        if (ref === null) break;
+        refs.push(ref);
+        cursor += 1;
+      }
+      const groupId = `delegate-group:${timelineEntry.id}`;
+      rows.push({
+        kind: "delegate-group",
+        id: groupId,
+        createdAt: timelineEntry.createdAt,
+        turnId,
+        groupId,
+        children: mergeDelegateRefs(refs)
+      });
+      index = cursor - 1;
       continue;
     }
 
@@ -1963,6 +2002,19 @@ function isRowUnchanged(a: AgentChatTimelineRow, b: AgentChatTimelineRow): boole
     return false;
   }
   switch (a.kind) {
+    case "delegate-group": {
+      const other = b as typeof a;
+      return (
+        a.createdAt === other.createdAt &&
+        a.turnId === other.turnId &&
+        a.groupId === other.groupId &&
+        a.children.length === other.children.length &&
+        a.children.every((child, index) => {
+          const twin = other.children[index]!;
+          return child.callId === twin.callId && child.threadId === twin.threadId && child.title === twin.title;
+        })
+      );
+    }
     case "activity-group": {
       const other = b as typeof a;
       return (

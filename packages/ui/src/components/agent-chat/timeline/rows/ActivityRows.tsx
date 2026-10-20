@@ -1,5 +1,6 @@
 import React from "react";
-import { ArrowDownToLine, ArrowUpRight, Layers, UserRound, X } from "lucide-react";
+import { ArrowDownToLine, ArrowUpRight, CircleStop, Layers, UserRound, X } from "lucide-react";
+import { stopCascadedSummary } from "@orquester/api/agent-chat";
 
 import type { RuntimeSubagent } from "@orquester/api";
 
@@ -36,6 +37,7 @@ import {
   joinLifecycleDetails,
   workEntryIsIdentityChange,
   workEntryIsProfileChange,
+  workEntryIsStopCascade,
   workEntryIsRerouteNotice,
   type RowGlyphName
 } from "../row-chrome";
@@ -319,6 +321,46 @@ function ProfileNoticeRow({ entry }: { entry: WorkLogEntry }): React.ReactElemen
   );
 }
 
+/**
+ * "Stopped because “<parent>” was interrupted": the delegate stop cascade's marker. The parent is
+ * named by its LIVE tab title (and opens it), else by the title the marker recorded.
+ */
+function StopCascadeNoticeRow({ entry }: { entry: WorkLogEntry }): React.ReactElement {
+  const cause = entry.stopCascade!;
+  const liveTitle = useAppStore(
+    (state) => state.sessions.find((session) => session.id === cause.parentSessionId && session.kind === "agent-chat")?.title
+  );
+  const activateTab = useAppStore((state) => state.activateTab);
+  const label = stopCascadedSummary(cause.action, liveTitle ?? cause.parentTitle);
+  return (
+    <div
+      data-activity-id={entry.id}
+      data-stop-cascade={cause.parentSessionId}
+      className={cn(
+        "my-0.5 flex min-w-0 items-start gap-1.5 rounded-md border px-2 py-1 text-xs leading-4",
+        TONE_BAND.info,
+        TONE_BAND_TEXT.info
+      )}
+    >
+      <span className="flex h-4 w-4 shrink-0 items-center justify-center">
+        <CircleStop size={12} aria-hidden />
+      </span>
+      <span className="min-w-0 flex-1 break-words">{label}</span>
+      {liveTitle !== undefined ? (
+        <button
+          type="button"
+          onClick={() => activateTab(cause.parentSessionId)}
+          title={`Open “${liveTitle}”`}
+          className="inline-flex shrink-0 items-center gap-0.5 rounded px-1 text-[11px] underline-offset-2 hover:underline focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500"
+        >
+          Open
+          <ArrowUpRight size={11} strokeWidth={1.8} aria-hidden />
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // The tool row
 // ---------------------------------------------------------------------------
@@ -396,6 +438,7 @@ const ToolEntryRow = React.memo(function ToolEntryRow({
   // The §3.4 account switch is the same kind of statement.
   if (workEntryIsIdentityChange(entry)) return <IdentityNoticeRow entry={entry} />;
   if (workEntryIsProfileChange(entry)) return <ProfileNoticeRow entry={entry} />;
+  if (workEntryIsStopCascade(entry)) return <StopCascadeNoticeRow entry={entry} />;
 
   const iconName: RowGlyphName = warning || destructive ? "circle-alert" : workEntryIconName(entry);
   const label = displayLabel ?? workEntryDisplayLabel(entry, ctx.workspaceRoot);

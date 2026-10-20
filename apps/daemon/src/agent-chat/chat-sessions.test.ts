@@ -177,6 +177,28 @@ test("the derived §6.4 fields publish only when one actually moved", () => {
   assert.equal(updates[1].hasPendingApprovals, true);
 });
 
+test("a delegated child's view rides the tab: republished when its model or preview text moves, cleared with null", () => {
+  const chat = chatManager();
+  seed(chat, "t1", 0);
+  const updates: SessionSummary[] = [];
+  chat.lifecycle.on("updated", (s: SessionSummary) => updates.push(s));
+  const view = { model: "gpt-5", preview: { kind: "progress" as const, text: "Reading the parser", at: "2026-10-20T10:00:00.000Z" } };
+  assert.ok(chat.applyFields("t1", { chatSessionStatus: "running", delegateView: view }));
+  assert.deepEqual(chat.get("t1")?.delegateView, view);
+  // The same words written later (a streaming message moves `at` alone): no broadcast.
+  assert.equal(
+    chat.applyFields("t1", { chatSessionStatus: "running", delegateView: { ...view, preview: { ...view.preview, at: "2026-10-20T10:00:05.000Z" } } }),
+    null
+  );
+  assert.ok(chat.applyFields("t1", { chatSessionStatus: "running", delegateView: { ...view, preview: { ...view.preview, text: "Ran the tests" } } }));
+  assert.ok(chat.applyFields("t1", { chatSessionStatus: "running", delegateView: { ...view, model: "gpt-5-mini" } }));
+  // A host that stops sending it: cleared with an explicit null (clients merge field-wise).
+  assert.ok(chat.applyFields("t1", { chatSessionStatus: "running" }));
+  assert.equal(chat.get("t1")?.delegateView, null);
+  assert.equal(chat.applyFields("t1", { chatSessionStatus: "running" }), null, "null and absent are one fact");
+  assert.equal(updates.length, 4);
+});
+
 test("the goal rides the tab and republishes only when it moves (goals §4.7)", () => {
   const chat = chatManager();
   seed(chat, "t1", 0);

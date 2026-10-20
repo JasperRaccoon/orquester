@@ -1,5 +1,6 @@
 import React, { useState } from "react";
-import { Dot, FolderTree, GitBranch, Globe, ListTodo, Monitor, Pencil, PenTool, Trash2, Workflow, X } from "lucide-react";
+import { Dot, FolderTree, GitBranch, Globe, ListTodo, MessageCircleQuestion, Monitor, Pencil, PenTool, Trash2, Workflow, X } from "lucide-react";
+import { useShallow } from "zustand/react/shallow";
 import { cn } from "../../lib/cn";
 import { shortAccountLabel } from "../../lib/account-label";
 import { getRegistryIcon } from "../../icons";
@@ -11,6 +12,7 @@ import { isLegacyAgentTerminal } from "../../lib/session-kind";
 import { WorkflowChip } from "../workflows/WorkflowChip";
 import { LineageMark } from "../agent-chat/LineageMark";
 import { desktopTabTitle } from "../../lib/desktop-state";
+import { delegatesNeedingInput } from "../../lib/agent-chat/delegates.logic";
 import {
   isSessionTab,
   tabSession,
@@ -32,6 +34,27 @@ const TabLineageMark: React.FC<{ session: ReturnType<typeof tabSession> }> = ({ 
     lineage ? s.sessions.find((candidate) => candidate.id === lineage.parentThreadId)?.title : undefined
   );
   return <LineageMark lineage={lineage} parentTitle={parentTitle} className="mr-0.5" />;
+};
+
+/**
+ * A chat whose delegated task waits for its user: the parent's tab says so, so a user looking at
+ * the parent sees "needs input" (its subagent strip and roster name which). The child's own tab
+ * keeps its own status dot. Its own component, so only this tab re-renders.
+ */
+const TabDelegateAttentionMark: React.FC<{ sessionId: string }> = ({ sessionId }) => {
+  const waiting = useAppStore(useShallow((s) => delegatesNeedingInput(s.sessions, sessionId).map((child) => child.title)));
+  if (waiting.length === 0) {
+    return null;
+  }
+  const label =
+    waiting.length === 1
+      ? `Delegated task “${waiting[0]}” needs input`
+      : `${waiting.length} delegated tasks need input: ${waiting.map((title) => `“${title}”`).join(", ")}`;
+  return (
+    <span role="img" aria-label={label} title={label} data-delegate-attention={waiting.length} className="inline-flex shrink-0 text-warn">
+      <MessageCircleQuestion size={11} strokeWidth={2} aria-hidden />
+    </span>
+  );
 };
 
 /**
@@ -281,6 +304,7 @@ export const TabStrip: React.FC = () => {
               </span>
             ) : null}
             <LimitedMarker session={session} className="ml-1" />
+            {tab.type === "agent-chat" ? <TabDelegateAttentionMark sessionId={tab.id} /> : null}
             {session ? (
               <SessionStatusDot
                 sessionId={tab.id}

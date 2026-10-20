@@ -1,6 +1,6 @@
 /** Timeline-specific notices, lifecycle detail joining and message formatting. */
 
-import { IDENTITY_CHANGED_ACTIVITY_KIND, PROFILE_CHANGED_ACTIVITY_KIND } from "@orquester/api/agent-chat";
+import { IDENTITY_CHANGED_ACTIVITY_KIND, PROFILE_CHANGED_ACTIVITY_KIND, STOP_CASCADED_ACTIVITY_KIND } from "@orquester/api/agent-chat";
 
 import type { WorkLogEntry } from "../../../lib/agent-chat/contracts";
 import { skillMentionsInText } from "../composer/composer-menu";
@@ -31,6 +31,11 @@ export function workEntryIsRerouteNotice(entry: WorkLogEntry): boolean {
  */
 export function workEntryIsIdentityChange(entry: WorkLogEntry): boolean {
   return entry.sourceActivityKind === IDENTITY_CHANGED_ACTIVITY_KIND;
+}
+
+/** The delegate stop cascade's marker: this chat stopped because the chat that delegated it did. */
+export function workEntryIsStopCascade(entry: WorkLogEntry): boolean {
+  return entry.sourceActivityKind === STOP_CASCADED_ACTIVITY_KIND && entry.stopCascade !== undefined;
 }
 
 /** The Agent Profile switch marker (agent profiles §5.3): the same kind of statement. */

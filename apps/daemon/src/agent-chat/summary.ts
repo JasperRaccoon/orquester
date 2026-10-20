@@ -37,7 +37,7 @@ import type {
   ThreadUsageLimitNotice,
   TurnState
 } from "@orquester/api/agent-chat";
-import { AGENT_GOAL_STATUSES, SETTLED_TURN_STATES } from "@orquester/api/agent-chat";
+import { AGENT_GOAL_STATUSES, parseDelegateView, SETTLED_TURN_STATES } from "@orquester/api/agent-chat";
 import {
   agentHostExtraRoutes,
   type AgentHostPendingRequest,
@@ -737,6 +737,13 @@ function sanitizeFields(value: unknown): AgentChatSessionSummaryFields {
   } else {
     const goal = sanitizeGoal(row.goal);
     if (goal !== null) fields.goal = goal;
+  }
+  // A delegated child's model and latest word (`delegation.ts`), read field-wise like the rest.
+  if (row.delegateView === null) {
+    fields.delegateView = null;
+  } else {
+    const view = parseDelegateView(row.delegateView);
+    if (view !== undefined) fields.delegateView = view;
   }
   return fields;
 }
