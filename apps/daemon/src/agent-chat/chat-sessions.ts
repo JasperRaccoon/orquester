@@ -385,7 +385,11 @@ export class ChatSessionManager {
       backgroundLiveness: fields.backgroundLiveness,
       latestTurn: fields.latestTurn,
       chatSessionStatus: fields.chatSessionStatus,
-      goal: fields.goal
+      goal: fields.goal,
+      // Replaced like the rest; one the host stopped sending is cleared with an explicit null,
+      // since a client merges summaries field-wise.
+      delegateView:
+        fields.delegateView !== undefined ? fields.delegateView : session.summary.delegateView ? null : session.summary.delegateView
     };
     if (sameDerivedFields(session.summary, next)) return null;
     session.summary = next;
@@ -508,8 +512,24 @@ function sameDerivedFields(a: SessionSummary, b: SessionSummary): boolean {
     (a.backgroundLiveness ?? null) === (b.backgroundLiveness ?? null) &&
     a.chatSessionStatus === b.chatSessionStatus &&
     sameLatestTurn(a.latestTurn ?? null, b.latestTurn ?? null) &&
-    sameGoal(a.goal ?? null, b.goal ?? null)
+    sameGoal(a.goal ?? null, b.goal ?? null) &&
+    sameDelegateView(a.delegateView ?? null, b.delegateView ?? null)
   );
+}
+
+/**
+ * A delegated child's model and preview, as its parent's strip renders them. The preview's `at`
+ * is not compared: a streaming message moves it on every write while its cut text stays the same,
+ * and that alone is no reason to broadcast.
+ */
+function sameDelegateView(
+  a: SessionSummary["delegateView"] | null,
+  b: SessionSummary["delegateView"] | null
+): boolean {
+  if (!a || !b) return !a && !b;
+  const pa = a.preview;
+  const pb = b.preview;
+  return a.model === b.model && (pa === null || pb === null ? pa === pb : pa.kind === pb.kind && pa.text === pb.text);
 }
 
 /** goals §4.7: every field of the goal summary is what a surface renders. */

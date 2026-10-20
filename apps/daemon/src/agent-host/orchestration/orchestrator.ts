@@ -102,6 +102,7 @@ import {
 import type { AccountHome, HistoryImportProgress, McpAppOperation, McpAppReference } from "@orquester/api/agent-chat";
 import { htmlRenderReferenceOfActivityPayload, mcpAppReferenceOfActivityPayload } from "@orquester/api/agent-chat";
 import { parseCausedBy } from "@orquester/api/agent-chat";
+import { delegatePreviewOf, parseInterruptCause, STOP_CASCADED_ACTIVITY_KIND, stopCascadedSummary } from "@orquester/api/agent-chat";
 import { runMcpAppRequest } from "../mcp-apps.ts";
 
 import { stat } from "node:fs/promises";
@@ -3552,15 +3553,41 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
 
       case "interrupt": {
         const turnId = parseOptionalTurnId(body.turnId);
-        return {
-          events: [
+        // The daemon's stop cascade says why it interrupts a delegated chat (socket-trusted; the
+        // remote transport strips it): the timeline shows the chat stopped because its parent did.
+        // A cause that does not parse is dropped, never a refusal.
+        const cause = parseInterruptCause(body.cause);
+        const occurredAt = clock.nowIso();
+        const events: AppendableDomainEvent[] = [
+          buildEvent(
+            runtime.id,
+            "thread.turn-interrupt-requested",
+            { turnId: turnId ?? null },
+            { commandId, occurredAt }
+          )
+        ];
+        if (cause !== undefined) {
+          events.push(
             buildEvent(
               runtime.id,
-              "thread.turn-interrupt-requested",
-              { turnId: turnId ?? null },
-              { commandId }
+              "thread.activity-appended",
+              {
+                activity: makeActivity({
+                  id: ids.eventId(),
+                  tone: "info",
+                  activityKind: STOP_CASCADED_ACTIVITY_KIND,
+                  summary: stopCascadedSummary(cause.action, cause.parentTitle),
+                  payload: cause,
+                  turnId: turnId ?? null,
+                  createdAt: occurredAt
+                })
+              },
+              { commandId, occurredAt }
             )
-          ],
+          );
+        }
+        return {
+          events,
           effect: () => interruptEffect(runtime, turnId)
         };
       }
@@ -5771,6 +5798,16 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         : null,
       chatSessionStatus: head.session.status,
       goal: goalSummaryOf(runtime, head),
+      // A delegated child's model and latest word, for its parent's strip: only a delegate's,
+      // so an ordinary chat's streaming text never moves its summary.
+      ...(head.lineage?.relation === "delegate"
+        ? {
+            delegateView: {
+              model: head.modelSelection?.model ?? null,
+              preview: delegatePreviewOf(runtime.state.items ?? [], turns)
+            }
+          }
+        : {}),
       usageLimits: liveUsageLimits.get(threadId) ?? null
     };
   };

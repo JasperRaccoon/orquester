@@ -770,6 +770,26 @@ describe("orchestrator — interrupt (§4.1, §6.2)", () => {
     await host.stop();
   });
 
+  it("marks the timeline when the delegate stop cascade interrupts (a cause), and only then; a malformed cause is dropped", async () => {
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
+    await host.settle();
+    const cause = { kind: "parent-stopped", parentSessionId: "parent-1", parentTitle: "Plan the release", action: "interrupted" };
+    await host.orchestrator.command(threadId, "interrupt", { commandId: cmd(), turnId: host.adapter.turnIds[0], cause });
+    await host.settle();
+    assert.ok(host.adapter.calls.some((call) => call.kind === "interruptTurn"), "it still interrupts");
+    const marks = activityEvents(host, threadId).filter((row) => row.activityKind === "session.stop-cascaded");
+    assert.equal(marks.length, 1);
+    assert.equal(marks[0]!.summary, "Stopped because “Plan the release” was interrupted");
+    assert.deepEqual(marks[0]!.payload, cause);
+    await host.orchestrator.command(threadId, "interrupt", { commandId: cmd() });
+    await host.orchestrator.command(threadId, "interrupt", { commandId: cmd(), cause: { kind: "parent-stopped", action: "nuked" } });
+    await host.settle();
+    assert.equal(activityEvents(host, threadId).filter((row) => row.activityKind === "session.stop-cascaded").length, 1, "no cause, no mark");
+    await host.stop();
+  });
+
   it("settles every pending request as cancel BEFORE interrupting", async () => {
     const host = createTestHost();
     const threadId = await host.createThread();

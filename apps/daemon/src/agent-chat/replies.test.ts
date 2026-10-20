@@ -47,6 +47,8 @@ interface FakeThread {
   items: ThreadItem[];
   events: Array<{ seq: number; type: string; commandId: string | null; payload: Record<string, unknown> }>;
   asking: boolean;
+  /** Questions the thread asks its user, by request id (what `agentChat.pending` announces). */
+  questions: Array<{ requestId: string; question: string }>;
   /** Turns below the snapshot's retained window, served by `GET …/history` only. */
   archived: Turn[];
 }
@@ -97,7 +99,7 @@ function fakeHost() {
   const thread = (id: string): FakeThread => {
     let t = threads.get(id);
     if (!t) {
-      t = { seq: 1, turns: [], items: [], events: [], asking: false, archived: [] };
+      t = { seq: 1, turns: [], items: [], events: [], asking: false, questions: [], archived: [] };
       threads.set(id, t);
     }
     return t;
@@ -111,7 +113,18 @@ function fakeHost() {
       items: t.items,
       turns: t.turns,
       checkpoints: [],
-      pending: { approvals: [], userInputs: t.asking ? [{ requestId: "q1" }] : [] },
+      pending: {
+        approvals: [],
+        userInputs: [
+          ...(t.asking ? [{ requestId: "q1" }] : []),
+          ...t.questions.map((q) => ({
+            requestId: q.requestId,
+            createdAt: "t",
+            dismissible: false,
+            questions: [{ id: "answer", header: "Question", question: q.question, options: [] }]
+          }))
+        ]
+      },
       roster: [],
       seq: t.seq,
       ...(t.archived.length > 0
@@ -128,7 +141,7 @@ function fakeHost() {
       sessions.set(id, {
         ...tab,
         ...(last ? { latestTurn: { turnId: last.turnId, state: last.state } } : {}),
-        hasPendingUserInput: t.asking
+        hasPendingUserInput: t.asking || t.questions.length > 0
       } as SessionSummary);
     }
     for (const listener of listeners) listener({ channel: "sessions", type, payload: { id } } as unknown as EventMessage);
@@ -319,8 +332,31 @@ function fakeHost() {
     ask(id: string): void {
       thread(id).asking = true;
       touch(id);
+    },
+    /** `id` asks its user `question` (request `requestId`): the summary moves, then `agentChat.pending` opens it. */
+    openQuestion(id: string, requestId: string, question: string): void {
+      thread(id).questions.push({ requestId, question });
+      touch(id);
+      emitPending(id, requestId, question, true);
+    },
+    /** The user answered: the request closes. */
+    answerQuestion(id: string, requestId: string): void {
+      const t = thread(id);
+      t.questions = t.questions.filter((q) => q.requestId !== requestId);
+      touch(id);
+      emitPending(id, requestId, "", false);
+    },
+    /** `agentChat.pending` for a request again (a restarted summary service announces what is open). */
+    announce(id: string, requestId: string, open = true): void {
+      emitPending(id, requestId, "", open);
     }
   };
+
+  function emitPending(id: string, requestId: string, title: string, open: boolean): void {
+    for (const listener of listeners) {
+      listener({ channel: "sessions", type: "agentChat.pending", payload: { id, requestId, kind: "question", title, open } } as unknown as EventMessage);
+    }
+  }
 }
 
 type Host = ReturnType<typeof fakeHost>;
@@ -1845,6 +1881,143 @@ describe("head-only re-checks (follow-up: head reads)", () => {
     await idle(w);
     assert.equal(w.router.deliveries().length, 1);
     assert.ok(w.host.snapshotReads("tgt") > snapshots);
+    await w.cleanup();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A delegated child blocked on its user wakes its parent
+// ---------------------------------------------------------------------------
+
+describe("attention: a delegated child's question wakes its parent", () => {
+  /** `tgt` is a task `req` delegated (lineage `delegate`), sent with reply "notify". */
+  async function delegated(options: { hop?: number } = {}) {
+    const w = await world();
+    w.host.sessions.set("tgt", summary("tgt", { lineage: { parentThreadId: "req", relation: "delegate", createdAt: "t", agentCreated: true } }));
+    await w.router.subscribe("tgt", request("notify", { origin: "delegated", causedBy: exchange(options.hop ?? 1) }));
+    await idle(w);
+    assert.equal(postsTo(w.host, "tgt").length, 1, "the task is running");
+    return w;
+  }
+  const notices = (host: Host) => postsTo(host, "req").filter((post) => parseThreadMessage(post.body.input as string)?.origin === "attention");
+
+  it("delivers one short notice naming the child, quoting the question and saying how to answer — once per request id", async () => {
+    const w = await delegated();
+    w.host.openQuestion("tgt", "q-7", "Which database should the cache use?");
+    await idle(w);
+    const sent = notices(w.host);
+    assert.equal(sent.length, 1);
+    const parsed = parseThreadMessage(sent[0]!.body.input as string)!;
+    assert.equal(parsed.fromTitle, "Codex review");
+    assert.equal(parsed.fromSessionId, "tgt");
+    assert.match(parsed.body, /"Codex review" is blocked: it asked its user "Which database should the cache use\?"/);
+    assert.match(parsed.body, /respond_to_request \{sessionId: "tgt", requestId: "q-7"/);
+    assert.match(parsed.body, /ask your user/);
+    assert.equal((sent[0]!.body.context as Array<{ kind: string; ref?: string }>)[0]!.kind, THREAD_MESSAGE_CONTEXT_KIND);
+    assert.deepEqual(sent[0]!.body.causedBy, { threadId: "tgt", exchangeId: "ex-1", hop: 2 }, "the hop after the child's turn");
+    assert.equal(sent[0]!.body.ifIdle, true, "a turn of its own, never a steer");
+
+    // The same request announced again (another poll, a re-check): nothing more.
+    w.host.announce("tgt", "q-7");
+    await w.router.recheckNow();
+    await idle(w);
+    assert.equal(notices(w.host).length, 1);
+
+    // The user answers; a new question is a new notice. (The parent finishes the turn the first
+    // notice started, as it would.)
+    w.host.settle("req", { reply: "Asked my user." });
+    w.host.answerQuestion("tgt", "q-7");
+    w.host.openQuestion("tgt", "q-8", "May I drop the old table?");
+    await idle(w);
+    assert.equal(notices(w.host).length, 2);
+    assert.match(parseThreadMessage(notices(w.host)[1]!.body.input as string)!.body, /May I drop the old table\?/);
+    await w.cleanup();
+  });
+
+  it("queues the notice while the parent is mid-turn (never lost, never steered), and takes it back if the user answers first", async () => {
+    const w = await delegated();
+    w.host.userTurn("req", "parent-turn");
+    w.host.openQuestion("tgt", "q-1", "Proceed?");
+    await idle(w);
+    assert.equal(notices(w.host).length, 0, "not steered into the running turn");
+    assert.deepEqual(
+      w.queue.pending().map((p) => [p.kind, p.parentSessionId, p.childSessionId]),
+      [["reply", "req", "tgt"]]
+    );
+    w.host.settle("req", { reply: "done" });
+    await idle(w);
+    assert.equal(notices(w.host).length, 1, "delivered at the parent's next idle point");
+
+    // Busy again; a question the user answers before the parent is free never wakes it.
+    w.host.settle("req", { reply: "ok" });
+    w.host.userTurn("req", "parent-turn-2");
+    w.host.openQuestion("tgt", "q-2", "And this?");
+    await idle(w);
+    assert.equal(w.queue.pending().length, 1);
+    w.host.answerQuestion("tgt", "q-2");
+    await idle(w);
+    assert.equal(w.queue.pending().length, 0, "taken back from the queue");
+    w.host.settle("req", { reply: "ok" });
+    await idle(w);
+    assert.equal(notices(w.host).length, 1, "the answered question's notice never posted");
+    await w.cleanup();
+  });
+
+  it("survives a restart through the outbox: a queued notice is delivered once, and an announced request is not noticed twice", async () => {
+    const w = await delegated();
+    w.host.userTurn("req", "parent-turn");
+    w.host.openQuestion("tgt", "q-1", "Proceed?");
+    await idle(w);
+    await w.cleanup(false);
+    const disk = JSON.parse(await readFile(w.replyFile, "utf8")) as { attentionNotices?: Array<{ requestId: string; state: string }> };
+    assert.deepEqual(disk.attentionNotices?.map((n) => [n.requestId, n.state]), [["q-1", "queued"]]);
+
+    const again = await world({ host: w.host, dir: w.dir });
+    // A restarted summary service announces every open request afresh.
+    w.host.announce("tgt", "q-1");
+    await idle(again);
+    w.host.settle("req", { reply: "done" });
+    await idle(again);
+    assert.equal(notices(w.host).length, 1);
+    await again.cleanup();
+  });
+
+  it("re-hands a notice whose queue write never landed (a crash between the two writes), under the same id", async () => {
+    const w = await delegated();
+    w.host.userTurn("req", "parent-turn");
+    w.host.openQuestion("tgt", "q-1", "Proceed?");
+    await idle(w);
+    await w.cleanup(false);
+    // The delivery queue lost its entry; the reply outbox still says `queued`.
+    const merge = JSON.parse(await readFile(w.mergeFile, "utf8")) as { entries: unknown[] };
+    await writeFile(w.mergeFile, JSON.stringify({ ...merge, entries: [] }));
+    const again = await world({ host: w.host, dir: w.dir });
+    await idle(again);
+    assert.equal(again.queue.pending().length, 1, "handed to the queue again");
+    w.host.settle("req", { reply: "done" });
+    await idle(again);
+    assert.equal(notices(w.host).length, 1);
+    await again.cleanup();
+  });
+
+  it("respects the exchange-hop cap: past it the notice says so and causes nothing further", async () => {
+    const w = await delegated({ hop: 8 });
+    w.host.openQuestion("tgt", "q-1", "Proceed?");
+    await idle(w);
+    const sent = notices(w.host);
+    assert.equal(sent.length, 1);
+    assert.deepEqual(sent[0]!.body.causedBy, { threadId: "tgt", exchangeId: "ex-1", hop: 9 });
+    assert.match(parseThreadMessage(sent[0]!.body.input as string)!.body, /reached its limit of 8 agent-caused turns/);
+    await w.cleanup();
+  });
+
+  it("wakes nobody for a chat that is no delegated task", async () => {
+    const w = await world();
+    await w.router.subscribe("tgt", request("notify"));
+    await idle(w);
+    w.host.openQuestion("tgt", "q-1", "Proceed?");
+    await idle(w);
+    assert.equal(notices(w.host).length, 0);
     await w.cleanup();
   });
 });

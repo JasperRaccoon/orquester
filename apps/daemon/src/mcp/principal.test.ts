@@ -121,7 +121,7 @@ test("the external credential id names the identity, never the secret, and is st
   assert.doesNotMatch(id, /admin/);
 });
 
-test("the remote transport strips causedBy from turn and merge-back bodies; other routes and clean bodies are untouched", async () => {
+test("the remote transport strips causedBy from turn and merge-back bodies and an interrupt's cause; other fields and clean bodies are untouched", async () => {
   const app = Fastify();
   registerRemoteFieldStripping(app);
   const bodies: unknown[] = [];
@@ -135,7 +135,8 @@ test("the remote transport strips causedBy from turn and merge-back bodies; othe
   try {
     await app.inject({ method: "POST", url: "/api/sessions/s1/turn", payload: { commandId: "c", input: "hi", causedBy } });
     await app.inject({ method: "POST", url: "/api/sessions/s1/merge-back", payload: { text: "r", causedBy } });
-    await app.inject({ method: "POST", url: "/api/sessions/s1/interrupt", payload: { commandId: "c", causedBy } });
+    const cause = { kind: "parent-stopped", parentSessionId: "p", parentTitle: "P", action: "interrupted" };
+    await app.inject({ method: "POST", url: "/api/sessions/s1/interrupt", payload: { commandId: "c", causedBy, cause } });
     await app.inject({ method: "POST", url: "/api/sessions/s1/turn", payload: ["not", "an", "object"] });
     assert.deepEqual(bodies, [{ commandId: "c", input: "hi" }, { text: "r" }, { commandId: "c", causedBy }, ["not", "an", "object"]]);
   } finally {

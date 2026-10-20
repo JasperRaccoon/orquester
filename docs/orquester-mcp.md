@@ -578,6 +578,15 @@ Profiles; the tools only launch with one.
 - **`result`** — a delegated task's final reply once its turn settled (it is then left out of
   `session.lastReply`).
 
+A delegated task (`relation: "delegate"`) follows the chat that delegated it: when that chat's turn
+is interrupted, its agent stopped or its tab closed — from the GUI, `control_session` or any other
+client — every unfinished task it delegated, and theirs in turn, is interrupted, and the task's
+timeline says why ("Stopped because “…” was interrupted"). Forks and opened chats are never
+touched. While a task delegated with `reply: "notify"` is blocked on its user — a question, an
+approval or a secret — its parent gets one short notice turn per request (queued while the parent
+is busy, taken back if the user answers first) naming the task and quoting the request: a question
+it can answer with `respond_to_request`; anything else it asks its user about.
+
 ### Catalogue
 
 | Tool | Input | Returns | GUI equivalent |
