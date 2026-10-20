@@ -322,29 +322,40 @@ export async function clearTsRustStaging(engineDir: string): Promise<void> {
   await rm(tsRustStagingDir(engineDir), { recursive: true, force: true });
 }
 
+/**
+ * Registry access over `fetchImpl` (the global `fetch` by default), with the
+ * real smoke-test runner and clock. The box tooling provisioner takes an
+ * injected `fetch` through this.
+ */
+export function tsRustInstallerDepsWithFetch(
+  fetchImpl: typeof fetch = (input, init) => fetch(input, init)
+): TsRustInstallerDeps {
+  return {
+    fetchJson: async (url, signal) => {
+      const response = await fetchImpl(url, { signal, headers: { accept: "application/json" } });
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status} from ${url}`);
+      }
+      return response.json();
+    },
+    fetchTarball: async (url, dest, signal) => {
+      const response = await fetchImpl(url, { signal });
+      if (!response.ok || !response.body) {
+        throw new Error(`HTTP ${response.status} from ${url}`);
+      }
+      await pipeline(
+        Readable.fromWeb(response.body as Parameters<typeof Readable.fromWeb>[0]),
+        createWriteStream(dest, { mode: 0o600 }),
+        { signal }
+      );
+    },
+    runSmokeTest: runVersionCommand,
+    now: () => new Date()
+  };
+}
+
 /** Real registry access over the global `fetch`. Used by the daemon, never by the tests. */
-export const defaultTsRustInstallerDeps: TsRustInstallerDeps = {
-  fetchJson: async (url, signal) => {
-    const response = await fetch(url, { signal, headers: { accept: "application/json" } });
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status} from ${url}`);
-    }
-    return response.json();
-  },
-  fetchTarball: async (url, dest, signal) => {
-    const response = await fetch(url, { signal });
-    if (!response.ok || !response.body) {
-      throw new Error(`HTTP ${response.status} from ${url}`);
-    }
-    await pipeline(
-      Readable.fromWeb(response.body as Parameters<typeof Readable.fromWeb>[0]),
-      createWriteStream(dest, { mode: 0o600 }),
-      { signal }
-    );
-  },
-  runSmokeTest: runVersionCommand,
-  now: () => new Date()
-};
+export const defaultTsRustInstallerDeps: TsRustInstallerDeps = tsRustInstallerDepsWithFetch();
 
 /** `<binary> --version` through execFile: no shell, exactly the given env, SIGKILL on timeout. */
 export function runVersionCommand(binary: string, options: SmokeTestOptions): Promise<SmokeTestResult> {
@@ -421,7 +432,7 @@ function run(command: string, args: string[], cwd: string, signal: AbortSignal):
 }
 
 /** The base64 sha512 digests an SRI string names (other algorithms are ignored). */
-function sha512Digests(integrity: string): string[] {
+export function sha512Digests(integrity: string): string[] {
   return integrity
     .split(/\s+/)
     .filter((token) => token.startsWith("sha512-"))
@@ -429,7 +440,8 @@ function sha512Digests(integrity: string): string[] {
     .filter((digest) => digest.length > 0);
 }
 
-async function sha512Base64(file: string): Promise<string> {
+/** The base64 sha512 of a file's bytes, as an SRI digest names it. */
+export async function sha512Base64(file: string): Promise<string> {
   const hash = createHash("sha512");
   for await (const chunk of createReadStream(file)) {
     hash.update(chunk as Buffer);

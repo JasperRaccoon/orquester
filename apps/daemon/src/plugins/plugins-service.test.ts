@@ -3,6 +3,7 @@ import { mkdir, readFile, readdir, realpath, rm, stat, symlink, writeFile } from
 import { join } from "node:path";
 import { type TestContext, test } from "node:test";
 import {
+  EPHEMERAL_VMS_PLUGIN_ID,
   EXCALIDRAW_PLUGIN_ID,
   SECRET_FILES_PLUGIN_ID,
   type PluginInfo,
@@ -15,6 +16,7 @@ import { PLUGIN_CHECK_INTERVAL_MS, PluginsError, PluginsService } from "./plugin
 import { type FakeRegistry, combinedRegistryDeps, fakeRegistry, publish, tempRoot } from "./testing.ts";
 import { type HostLibc, TS_CHECKER_ENGINE_SPECS } from "./ts-rust/installer.ts";
 import type { TsRustPreloadOptions } from "./ts-rust/preload.ts";
+import { createTsRustToolingPlugin } from "./ts-rust/box-tooling.ts";
 
 // The plugins service over a temp appdir and workspaces root, in-memory npm
 // registries of both engines with fixture tarballs (./testing.ts) and stubbed
@@ -164,7 +166,7 @@ async function plugin(h: Harness, id: PluginInfo["id"] = ID): Promise<PluginInfo
   const response = await h.service.list();
   assert.deepEqual(
     response.plugins.map((p) => p.id),
-    [ID, EXCALIDRAW_PLUGIN_ID, SECRET_FILES_PLUGIN_ID]
+    [ID, EXCALIDRAW_PLUGIN_ID, SECRET_FILES_PLUGIN_ID, EPHEMERAL_VMS_PLUGIN_ID]
   );
   return response.plugins.find((p) => p.id === id) as PluginInfo;
 }
@@ -1060,4 +1062,41 @@ test("start empties both engines' staging dirs", async (t) => {
   await h.service.start();
   await h.service.settled();
   for (const engine of ENGINES) assert.equal(await exists(join(h.engineDirs[engine], ".tmp", "left-over")), false);
+});
+
+test("boxes: the tooling state follows on/off, the engine and installs; a box's status shows in PluginInfo.boxes", async (t) => {
+  const h = await harness(t);
+  await publish(h.registry, h.root, "0.16.0");
+  h.registry.latest = "0.16.0";
+  assert.deepEqual(h.service.tsRustToolingState(), { enabled: false, engine: undefined, current: { tsrs: null, "tsc-rs": null } });
+
+  // The box plugin hears only about what boxes get, not about job progress.
+  const tooling = createTsRustToolingPlugin({ source: h.service, registry: h.registry.deps });
+  let changes = 0;
+  const unsubscribe = tooling.onChange(() => (changes += 1));
+  await enable(h);
+  assert.deepEqual(h.service.tsRustToolingState(), { enabled: true, engine: undefined, current: { tsrs: "0.16.0", "tsc-rs": null } });
+  assert.equal(changes, 2, "turned on, then installed");
+  // tsc-rs's registry has no release: the switch is a change, its failed install is not.
+  await h.service.update(ID, { engine: "tsc-rs" });
+  await h.service.settled();
+  assert.equal(h.service.tsRustToolingState()?.engine, "tsc-rs");
+  assert.equal(changes, 3);
+  unsubscribe();
+  await h.service.update(ID, { enabled: false });
+  await h.service.settled();
+  assert.equal(changes, 3, "unsubscribed");
+
+  assert.equal("boxes" in (await plugin(h)), false, "no box, no field");
+  const statuses = [
+    { boxId: "b1", state: "failed" as const, message: "smoke-test: tsc-rs --version exited with code 1", updatedAt: "2026-10-20T00:00:00.000Z" }
+  ];
+  h.service.setBoxToolingStatusSource((id) => (id === ID ? statuses : []));
+  const before = h.events.length;
+  h.service.boxToolingChanged();
+  await h.service.settled();
+  assert.equal(h.events.length, before + 1, "a box status change is broadcast");
+  assert.deepEqual(h.events.at(-1)?.plugins[0]?.boxes, statuses);
+  assert.deepEqual((await plugin(h)).boxes, statuses);
+  assert.equal("boxes" in (await plugin(h, EXCALIDRAW_PLUGIN_ID)), false);
 });

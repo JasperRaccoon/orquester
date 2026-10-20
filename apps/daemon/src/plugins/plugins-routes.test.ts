@@ -8,6 +8,7 @@ import {
   type PluginInfo,
   type PluginsResponse,
   PLUGINS_CHANGED_EVENT,
+  EPHEMERAL_VMS_PLUGIN_ID,
   EXCALIDRAW_PLUGIN_ID,
   SECRET_FILES_PLUGIN_ID,
   PLUGINS_CHANNEL,
@@ -138,7 +139,8 @@ test("GET lists the built-in plugins", async (t) => {
     [
       [ID, "Better TS Typecheck", "global", true, "supported", "idle"],
       [EXCALIDRAW_PLUGIN_ID, "Excalidraw Whiteboard", "global", false, "supported", "idle"],
-      [SECRET_FILES_PLUGIN_ID, "Secret files", "global", false, "supported", "idle"]
+      [SECRET_FILES_PLUGIN_ID, "Secret files", "global", false, "supported", "idle"],
+      [EPHEMERAL_VMS_PLUGIN_ID, "Ephemeral AI VMs", "global", false, "supported", "idle"]
     ]
   );
   assert.equal(body.plugins[0]?.enabled, false);
