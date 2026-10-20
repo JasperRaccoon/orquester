@@ -189,6 +189,27 @@ func TestProcessesNeverInheritTheTailscaleAuthKey(t *testing.T) {
 	}
 }
 
+// orq-agent started by a service manager has no HOME or USER: its processes get the box user's.
+func TestProcessesGetHomeAndUserWhenOrqAgentHasNone(t *testing.T) {
+	t.Setenv("HOME", "")
+	t.Setenv("USER", "")
+	t.Setenv("LOGNAME", "")
+	d := newTestDaemon(t)
+	// As `Run` does at start: the box user comes from the account database, not the env.
+	info := d.agent.refreshSysInfo()
+	if info.Home == "" || info.User == "" {
+		t.Skip("this machine's account has no home or name to fall back to")
+	}
+	d.openExec(1, shellSpec(`echo "home=${HOME:-none} user=${USER:-none}"`, false))
+	var out strings.Builder
+	for !strings.Contains(out.String(), "\n") {
+		out.Write(d.nextData(1))
+	}
+	if want := "home=" + info.Home + " user=" + info.User + "\n"; out.String() != want {
+		t.Fatalf("output = %q, want %q", out.String(), want)
+	}
+}
+
 // The daemon client answers a redirect as is: the credential it carries is
 // never replayed to another URL.
 func TestDaemonClientNeverFollowsRedirects(t *testing.T) {
