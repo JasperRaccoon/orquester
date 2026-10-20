@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import type { PluginInfo } from "@orquester/api";
+import { BOX_KIND_LABELS, type BoxSummary } from "@orquester/api";
 
 import {
   FIRST_ENABLE_MESSAGE,
@@ -10,6 +11,7 @@ import {
   pluginEngineChange,
   pluginEngineLabel,
   pluginEngineOptions,
+  pluginBoxIssues,
   pluginErrorText,
   pluginJobLabel,
   pluginSourceHref,
@@ -243,4 +245,38 @@ test("secretVaultRows: labels each vault by its custom label or key, ordered by 
     secretVaultRows([vault("w", "nohost")], new Map()).map((r) => r.label),
     ["nohost"]
   );
+});
+
+// boxes: per-box tooling installs in the Status section.
+test("pluginBoxIssues lists the failed and unsupported boxes, labelled from the boxes held", () => {
+  const held = {
+    id: "b1",
+    kind: "linux",
+    providerLabel: "Hetzner",
+    purpose: "project",
+    purposeNote: null,
+    project: { workspace: "ws", name: "app", path: "/w/ws/app" }
+  } as unknown as BoxSummary;
+  const at = "2026-10-20T10:00:00.000Z";
+  const issues = pluginBoxIssues(
+    plugin({
+      boxes: [
+        { boxId: "b1", state: "failed", message: "smoke test: tsrs exited 1", updatedAt: at },
+        { boxId: "b2", state: "unsupported", message: null, updatedAt: at },
+        { boxId: "b3", state: "ready", message: "tsrs 0.16.0", updatedAt: at },
+        { boxId: "b4", state: "installing", message: null, updatedAt: at }
+      ]
+    }),
+    [held]
+  );
+  assert.deepEqual(issues, [
+    { boxId: "b1", label: `ws / app · ${BOX_KIND_LABELS.linux} on Hetzner`, state: "failed", message: "smoke test: tsrs exited 1" },
+    {
+      boxId: "b2",
+      label: "Box b2",
+      state: "unsupported",
+      message: "There is no build of this plugin for the box's operating system and processor."
+    }
+  ]);
+  assert.deepEqual(pluginBoxIssues(plugin(), [held]), [], "a plugin without per-box tooling has none");
 });

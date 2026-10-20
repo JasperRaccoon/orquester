@@ -10,7 +10,9 @@ export const ArchiveViewer: React.FC<{
   size: number;
   mime: string;
   fetchBytes: (path: string, signal?: AbortSignal) => Promise<ArrayBuffer>;
-}> = ({ path, name, size, mime, fetchBytes }) => {
+  /** boxes: false when the archive's box has no listing tool (7z/bsdtar): no listing is asked for. */
+  previewable?: boolean;
+}> = ({ path, name, size, mime, fetchBytes, previewable = true }) => {
   const api = useApi();
   const [state, setState] = useState<{ data: FsArchiveResponse | null; loading: boolean; error: boolean }>({
     data: null,
@@ -19,6 +21,7 @@ export const ArchiveViewer: React.FC<{
   });
 
   useEffect(() => {
+    if (!previewable) return;
     let active = true;
     const controller = new AbortController();
     setState({ data: null, loading: true, error: false });
@@ -30,8 +33,13 @@ export const ArchiveViewer: React.FC<{
       active = false;
       controller.abort();
     };
-  }, [api, path]);
+  }, [api, path, previewable]);
 
+  if (!previewable) {
+    return (
+      <BinaryCard path={path} name={name} size={size} mime={mime} downloadable={size <= 50 * 1024 * 1024} title="Archive (no 7z or bsdtar in this VM)" fetchBytes={fetchBytes} />
+    );
+  }
   if (state.loading) return <p className="p-3 text-xs text-neutral-600">Reading archive…</p>;
   if (state.error || !state.data) return <p className="p-3 text-xs text-danger">Could not read archive.</p>;
   if (!state.data.supported) {

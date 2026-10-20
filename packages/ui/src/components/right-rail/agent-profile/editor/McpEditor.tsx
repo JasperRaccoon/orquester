@@ -6,12 +6,16 @@
  * agent's own extra fields. The rules are `mcp.logic.ts`.
  */
 
-import React, { useCallback, useId, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useId, useMemo, useState } from "react";
 import { ChevronDown, ChevronRight, Plus } from "lucide-react";
 
-import type { ProfileItemDetail } from "@orquester/api";
+import type { BoxMcpRunInBoxResponse, ProfileItemDetail } from "@orquester/api";
 
+import type { ApiClient } from "../../../../lib/api-client";
+import { useBoxesEnabled } from "../../../../lib/boxes/hooks";
+import { runsInBox, sanitizeBoxMcpRunInBoxResponse } from "../../../../lib/boxes/validate";
 import { cn } from "../../../../lib/cn";
+import { profileError } from "./errors";
 import { useEditorEnv, useEditorWide, useReportDirty, useTouch } from "./env";
 import { EditorShell } from "./EditorShell";
 import {
@@ -23,6 +27,7 @@ import {
   Segmented,
   SmallButton,
   SpecInput,
+  SwitchRow,
   TextInput,
   describedBy
 } from "./fields";
@@ -37,6 +42,7 @@ import {
   mcpTransports,
   newSecretRow,
   parsePastedCommandLine,
+  saveGlobalRunInBox,
   validateMcpForm,
   type McpForm,
   type McpValidation,
@@ -59,7 +65,14 @@ export const McpEditor: React.FC<{ detail?: McpDetail; onReload?: () => void }> 
   const [showErrors, setShowErrors] = useState(false);
   const submit = useProfileSubmit();
   const validation = validateMcpForm(agent, form);
-  useReportDirty(mcpFormSignature(form) !== mcpFormSignature(initial));
+  // boxes: the Global "Run in box" switch lives in the daemon's box-mcp.json, not in the agent's files.
+  const boxesOn = useBoxesEnabled();
+  const runInBox = useGlobalRunInBox(api, boxesOn);
+  const savedName = detail?.mcp.name ?? null;
+  const runInBoxInitial = runInBox.settings !== null && savedName !== null && runsInBox(runInBox.settings, agent, savedName);
+  const [runInBoxChoice, setRunInBoxChoice] = useState<boolean | null>(null);
+  const runInBoxChecked = runInBoxChoice ?? runInBoxInitial;
+  useReportDirty(mcpFormSignature(form) !== mcpFormSignature(initial) || runInBoxChecked !== runInBoxInitial);
 
   const change = useCallback(
     (patch: Partial<McpForm>) => {
@@ -75,11 +88,15 @@ export const McpEditor: React.FC<{ detail?: McpDetail; onReload?: () => void }> 
       return;
     }
     const mcp = mcpDraftFromForm(agent, form, origin);
-    void submit.run((onConflict) =>
-      detail
-        ? api.updateAgentProfileItem(agent, detail.item.id, { revision: detail.item.revision, draft: { kind: "mcp", mcp } })
-        : api.createAgentProfileItem(agent, { draft: { kind: "mcp", mcp }, onConflict })
-    );
+    // Only a switch that was read and shown is written.
+    const settings = boxesOn ? runInBox.settings : null;
+    void submit.run(async (onConflict) => {
+      const response = detail
+        ? await api.updateAgentProfileItem(agent, detail.item.id, { revision: detail.item.revision, draft: { kind: "mcp", mcp } })
+        : await api.createAgentProfileItem(agent, { draft: { kind: "mcp", mcp }, onConflict });
+      if (settings === null) return response;
+      return saveGlobalRunInBox(api, agent, response, { settings, previousName: savedName, name: mcp.name, wanted: runInBoxChecked });
+    });
   };
 
   return (
@@ -97,10 +114,45 @@ export const McpEditor: React.FC<{ detail?: McpDetail; onReload?: () => void }> 
         validation={validation}
         showErrors={showErrors}
         nameError={submit.nameError}
+        runInBox={
+          boxesOn
+            ? {
+                checked: runInBoxChecked,
+                onChange: (checked) => {
+                  setRunInBoxChoice(checked);
+                  submit.clear();
+                },
+                disabled: runInBox.settings === null,
+                note: runInBox.error ?? (runInBox.settings === null ? "Reading the setting…" : undefined)
+              }
+            : undefined
+        }
       />
     </EditorShell>
   );
 };
+
+/** boxes: every Global server's "Run in box" setting, read once while the plugin is on. */
+function useGlobalRunInBox(api: ApiClient, enabled: boolean): { settings: BoxMcpRunInBoxResponse | null; error: string | null } {
+  const [state, setState] = useState<{ settings: BoxMcpRunInBoxResponse | null; error: string | null }>({ settings: null, error: null });
+  useEffect(() => {
+    if (!enabled) return;
+    const controller = new AbortController();
+    setState({ settings: null, error: null });
+    api
+      .getBoxMcpRunInBox(controller.signal)
+      .then((raw: unknown) => {
+        if (controller.signal.aborted) return;
+        const settings = sanitizeBoxMcpRunInBoxResponse(raw);
+        setState(settings ? { settings, error: null } : { settings: null, error: "Couldn't read this setting: the daemon answered in an unexpected shape." });
+      })
+      .catch((error: unknown) => {
+        if (!controller.signal.aborted) setState({ settings: null, error: `Couldn't read this setting: ${profileError(error).message}` });
+      });
+    return () => controller.abort();
+  }, [api, enabled]);
+  return state;
+}
 
 interface McpFormViewProps {
   mode: "create" | "edit";
@@ -111,7 +163,22 @@ interface McpFormViewProps {
   showErrors: boolean;
   /** The daemon refused the name. */
   nameError?: string;
+  /** boxes: the "Run in box" switch, shown only while the Ephemeral AI VMs plugin is on. */
+  runInBox?: RunInBoxSwitch;
 }
+
+/** boxes: what the MCP form's "Run in box" switch shows and does. */
+export interface RunInBoxSwitch {
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+  /** Still reading the setting, or it could not be read. */
+  disabled?: boolean;
+  /** Why it is disabled, under the switch. */
+  note?: string;
+}
+
+/** boxes: the switch's help text (spec 2026-10-19 §8.4). */
+export const RUN_IN_BOX_HELP = "Runs this server inside the VM for box chats; its secrets will be present in the VM while it runs.";
 
 export const McpFormView: React.FC<McpFormViewProps> = ({
   mode,
@@ -119,7 +186,8 @@ export const McpFormView: React.FC<McpFormViewProps> = ({
   onChange,
   validation,
   showErrors,
-  nameError
+  nameError,
+  runInBox
 }) => {
   const { agent } = useEditorEnv();
   const touch = useTouch();
@@ -248,6 +316,20 @@ export const McpFormView: React.FC<McpFormViewProps> = ({
           />
         </>
       )}
+
+      {runInBox ? (
+        <div data-mcp-run-in-box>
+          <SwitchRow
+            id={`${ids}-run-in-box`}
+            label="Run in box"
+            help={RUN_IN_BOX_HELP}
+            checked={runInBox.checked}
+            disabled={runInBox.disabled}
+            onChange={runInBox.onChange}
+          />
+          {runInBox.note ? <p className="mt-1 text-[11px] text-neutral-500">{runInBox.note}</p> : null}
+        </div>
+      ) : null}
 
       {advancedFields.length > 0 ? (
         <div className="rounded-md border border-neutral-800">

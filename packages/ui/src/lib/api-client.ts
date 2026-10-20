@@ -137,6 +137,8 @@ import type {
   SetBoxConnectionRequest,
   SetBoxProviderCredentialsRequest
 } from "@orquester/api";
+// boxes: Global MCP servers' "Run in box" switch.
+import type { BoxMcpRunInBoxResponse, SetBoxMcpRunInBoxRequest } from "@orquester/api";
 import type {
   AddSessionProfilePluginRequest,
   CopySessionProfileItemsRequest,
@@ -662,8 +664,10 @@ export class ApiClient {
     });
   }
 
-  getFsCapabilities(signal?: AbortSignal): Promise<FsCapabilitiesResponse> {
-    return this.send("GET", "/api/fs/capabilities", { signal });
+  // boxes: `path` asks for the capabilities where that path lives — a box project's own
+  // tools (archive listing, regex search); without it, or for a host path, the host answers.
+  getFsCapabilities(signal?: AbortSignal, path?: string): Promise<FsCapabilitiesResponse> {
+    return this.send("GET", "/api/fs/capabilities", { query: path ? { path } : undefined, signal });
   }
 
   /**
@@ -919,6 +923,16 @@ export class ApiClient {
 
   decideBoxConfigChange(id: string, req: DecideBoxConfigChangeRequest): Promise<{ change: BoxConfigChangeSet }> {
     return this.send("POST", boxRoutes.configChange(id), { body: req });
+  }
+
+  /** Every Global MCP server's "Run in box" setting (`box-mcp.json`). */
+  getBoxMcpRunInBox(signal?: AbortSignal): Promise<BoxMcpRunInBoxResponse> {
+    return this.send("GET", boxRoutes.mcpRunInBox, { signal });
+  }
+
+  /** Switch one Global MCP server's "Run in box"; answers with every server's setting. */
+  setBoxMcpRunInBox(req: SetBoxMcpRunInBoxRequest): Promise<BoxMcpRunInBoxResponse> {
+    return this.send("PUT", boxRoutes.mcpRunInBox, { body: req });
   }
 
   // --- Repo identities (icon + label per git repo; daemon-persisted, shared) ---
