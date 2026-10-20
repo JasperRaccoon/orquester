@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"slices"
 	"sync"
 	"syscall"
 
@@ -155,13 +156,37 @@ func (p *unixProcess) wait() (*int, *string) {
 	return p.code, p.sigName
 }
 
-// targets: the process group, plus a PTY's foreground group (a job a shell started).
-func (p *unixProcess) targets() []int {
+// targets: the process group, plus a PTY's foreground group (a job a shell
+// started). With `session`, also every other group in a PTY's session: the
+// background jobs of a job-control shell.
+func (p *unixProcess) targets(session bool) []int {
 	pid := p.cmd.Process.Pid
 	groups := []int{pid}
-	if p.ptmx != nil {
-		if fg, err := unix.IoctlGetInt(int(p.ptmx.Fd()), unix.TIOCGPGRP); err == nil && fg > 0 && fg != pid {
-			groups = append([]int{fg}, groups...)
+	if p.ptmx == nil {
+		return groups
+	}
+	if fg, err := unix.IoctlGetInt(int(p.ptmx.Fd()), unix.TIOCGPGRP); err == nil && fg > 0 && fg != pid {
+		groups = append([]int{fg}, groups...)
+	}
+	if session {
+		for _, group := range sessionGroups(pid) {
+			if !slices.Contains(groups, group) {
+				groups = append(groups, group)
+			}
+		}
+	}
+	return groups
+}
+
+// sessionGroups lists the process groups of the processes in session `sid`.
+func sessionGroups(sid int) []int {
+	var groups []int
+	for _, pid := range listPids() {
+		if s, err := unix.Getsid(pid); err != nil || s != sid {
+			continue
+		}
+		if group, err := unix.Getpgid(pid); err == nil && group > 0 && !slices.Contains(groups, group) {
+			groups = append(groups, group)
 		}
 	}
 	return groups
@@ -174,12 +199,23 @@ func (p *unixProcess) signal(name string) error {
 	}
 	if p.ptmx != nil && sig == unix.SIGINT {
 		// Like ^C at a terminal: only the foreground job.
-		groups := p.targets()
+		groups := p.targets(false)
 		return ignoreESRCH(unix.Kill(-groups[0], sig))
 	}
+	// Ending signals reach a terminal's background jobs too.
+	session := sig == unix.SIGTERM || sig == unix.SIGKILL
 	var firstErr error
-	for _, group := range p.targets() {
-		if err := unix.Kill(-group, sig); err != nil && !errors.Is(err, unix.ESRCH) {
+	for _, group := range p.targets(session) {
+		err := unix.Kill(-group, sig)
+		if errors.Is(err, unix.ESRCH) && group == p.cmd.Process.Pid {
+			// The group is gone, but the child may have left it (a setpgid or
+			// setsid of its own); os.Process knows whether the pid is still ours.
+			err = p.cmd.Process.Signal(sig)
+			if errors.Is(err, os.ErrProcessDone) {
+				err = nil
+			}
+		}
+		if err != nil && !errors.Is(err, unix.ESRCH) && firstErr == nil {
 			firstErr = err
 		}
 	}
@@ -202,7 +238,7 @@ func (p *unixProcess) resize(cols, rows int) error {
 }
 
 func (p *unixProcess) kill() {
-	for _, group := range p.targets() {
+	for _, group := range p.targets(true) {
 		_ = unix.Kill(-group, unix.SIGKILL)
 	}
 	_ = p.cmd.Process.Kill()
