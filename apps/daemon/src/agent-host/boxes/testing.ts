@@ -304,6 +304,10 @@ export interface ReplayPeerExtras {
   results?: Record<string, unknown>;
   /** Frames to send right after answering `method` (server requests or notifications). */
   after?: Record<string, unknown[]>;
+  /** What `<peer> --version` prints (a launch's version probe). */
+  version?: string;
+  /** What `<peer> inspect --json` prints (Grok's own inventory). */
+  inspect?: unknown;
 }
 
 const REPLAY_PEER_SOURCE = `#!/usr/bin/env node
@@ -311,6 +315,14 @@ const REPLAY_PEER_SOURCE = `#!/usr/bin/env node
 // fixture shows after the same request; logs everything it receives.
 import { appendFileSync, readFileSync } from "node:fs";
 const config = JSON.parse(readFileSync(new URL("./config.json", import.meta.url), "utf8"));
+if (process.argv.includes("--version")) {
+  process.stdout.write((config.version ?? "replay-peer 0.0.0") + "\\n");
+  process.exit(0);
+}
+if (process.argv[2] === "inspect") {
+  process.stdout.write(JSON.stringify(config.inspect ?? {}) + "\\n");
+  process.exit(0);
+}
 const frames = readFileSync(config.fixture, "utf8").split("\\n").filter((l) => l.trim().length > 0).map((l) => JSON.parse(l));
 const log = (record) => { try { appendFileSync(config.logPath, JSON.stringify(record) + "\\n"); } catch {} };
 const send = (frame) => process.stdout.write(JSON.stringify(frame) + "\\n");

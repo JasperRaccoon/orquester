@@ -45,7 +45,7 @@ export function createBoxGitRunner(input: {
       }),
     files: {
       rm: async (path) => {
-        await connection.request("fs.rm", { path: boxPath(paths, path), force: true });
+        await connection.request("fs.rm", { path: boxPath(paths, path), recursive: false, force: true });
       },
       exists: async (path) => (await connection.request("fs.stat", { path: boxPath(paths, path) })) !== null
     }
