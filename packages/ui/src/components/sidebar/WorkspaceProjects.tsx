@@ -86,7 +86,8 @@ export const ProjectRow: React.FC<{
         className="flex min-w-0 flex-1 items-center gap-2.5 rounded-lg px-2 py-1.5 text-left text-[13px] focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500"
       >
         {icon ?? <Box size={15} className={cn("shrink-0", active ? "text-neutral-300" : "text-neutral-500")} />}
-        <span className={cn("flex-1 truncate", boxView && "min-w-0", boxDestroyed && "text-neutral-500 line-through")}>
+        {/* boxes: the name keeps at least 40% of the row; the badge's detail truncates first. */}
+        <span className={cn("flex-1 truncate", boxView && "min-w-[40%]", boxDestroyed && "text-neutral-500 line-through")}>
           {project.name}
         </span>
         {boxView ? <ProjectRowBoxBadge view={boxView} /> : null}

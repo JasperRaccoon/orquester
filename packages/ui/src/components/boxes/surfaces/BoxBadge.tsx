@@ -44,7 +44,7 @@ export const BoxBadge: React.FC<{ model: BoxBadgeModel; className?: string }> = 
     title={model.title}
     data-box-badge={model.tone}
     className={cn(
-      "inline-flex h-[18px] min-w-0 max-w-[60%] shrink items-center gap-1 rounded-full px-1.5 text-[10px] font-medium tabular-nums",
+      "inline-flex h-[18px] min-w-0 max-w-[60%] shrink items-center gap-1 overflow-hidden rounded-full px-1.5 text-[10px] font-medium tabular-nums",
       BOX_PILL_TONE[model.tone],
       className
     )}
@@ -91,16 +91,22 @@ export const AgentCardBoxBadge: React.FC<{ view: ProjectBoxView }> = ({ view }) 
   );
 };
 
-/** The destroyed banner inside an "Opened agents" card (§9.3). Text only: the card is a button. */
+/**
+ * The destroyed banner inside an "Opened agents" card (§9.3). Text only: the card is a button.
+ * Two lines at most — a box with several chats would otherwise fill the sidebar with the same
+ * paragraph; the whole message is the tooltip, and the chat itself shows it in full.
+ */
 export const AgentCardBoxBanner: React.FC<{ view: ProjectBoxView }> = ({ view }) => {
   if (view.info.state !== "destroyed") return null;
+  const message = boxDestroyedMessage(view.info);
   return (
     <span
       role="note"
+      title={message}
       className="mt-1.5 flex items-start gap-1.5 rounded-lg border border-danger-900/50 bg-danger-soft/40 px-2 py-1.5 text-[11px] leading-snug text-danger-300"
     >
       <TriangleAlert size={12} aria-hidden className="mt-px shrink-0" />
-      <span>{boxDestroyedMessage(view.info)}</span>
+      <span className="line-clamp-2 min-w-0">{message}</span>
     </span>
   );
 };
