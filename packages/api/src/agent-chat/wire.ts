@@ -25,6 +25,7 @@ import type {
 import type { DomainEvent } from "./domain-events.ts";
 import type { AgentGoalStatus } from "./goal.ts";
 import type { McpAppCallToolResult } from "./mcp-app.ts";
+import type { DelegateView, InterruptCause } from "./delegation.ts";
 import type { ForkSessionRequest, MergeBackRequest, MergeBackResponse } from "./lineage.ts";
 import type { ApprovalDecision, TurnTokenUsage } from "./runtime-events.ts";
 import type {
@@ -688,6 +689,9 @@ export const REMOTE_STRIPPED_TURN_FIELDS = ["causedBy"] as const satisfies reado
 /** The {@link MergeBackRequest} fields only socket / in-process callers may set: removed from every remote body. */
 export const REMOTE_STRIPPED_MERGE_BACK_FIELDS = ["causedBy"] as const satisfies readonly (keyof MergeBackRequest)[];
 
+/** The {@link InterruptCommandBody} fields only the daemon may set: removed from every remote body. */
+export const REMOTE_STRIPPED_INTERRUPT_FIELDS = ["cause"] as const satisfies readonly (keyof InterruptCommandBody)[];
+
 function stripFields<T extends object>(body: T, fields: readonly string[]): T {
   if (!fields.some((field) => Object.prototype.hasOwnProperty.call(body, field))) return body;
   const copy = { ...body } as Record<string, unknown>;
@@ -705,6 +709,11 @@ export function stripRemoteMergeBackFields<T extends object>(body: T): T {
   return stripFields(body, REMOTE_STRIPPED_MERGE_BACK_FIELDS);
 }
 
+/** An interrupt body without its socket-trusted fields — what the remote transport forwards. Same reference when none was present. */
+export function stripRemoteInterruptFields<T extends object>(body: T): T {
+  return stripFields(body, REMOTE_STRIPPED_INTERRUPT_FIELDS);
+}
+
 /**
  * Settle pending requests, then interrupt. With no running turn it stops the
  * thread's live background work — the client omits `turnId` whenever the
@@ -712,6 +721,14 @@ export function stripRemoteMergeBackFields<T extends object>(body: T): T {
  */
 export interface InterruptCommandBody extends AgentChatCommandBase {
   turnId?: string;
+  /**
+   * Why Orquester interrupts this chat: the chat that delegated it stopped (the daemon's stop
+   * cascade, `agent-chat/delegates.ts`). SOCKET-TRUSTED like `TurnCommandBody.causedBy`: only the
+   * daemon sets it, and the remote transport strips it ({@link REMOTE_STRIPPED_INTERRUPT_FIELDS}).
+   * The host writes it into the timeline as a `STOP_CASCADED_ACTIVITY_KIND` row; one that does not
+   * parse is dropped, never a refusal. Additive: an older host ignores it (the interrupt still runs).
+   */
+  cause?: InterruptCause;
 }
 
 export interface ApprovalCommandBody extends AgentChatCommandBase {
@@ -1466,4 +1483,10 @@ export interface AgentChatSessionSummaryFields {
   chatSessionStatus?: ThreadSessionStatus;
   /** The thread's unfinished goal, `null` when it has none (goals §4.7). */
   goal?: AgentChatGoalSummary | null;
+  /**
+   * A delegated child's model and latest word, for its parent's subagent strip and roster
+   * (`delegation.ts`). Only on a thread whose lineage is a `delegate`; `null` once it has none, to
+   * clear what a client merged. Additive: an older host never sends it.
+   */
+  delegateView?: DelegateView | null;
 }

@@ -1605,13 +1605,54 @@ export const replyDeliverySchema = z
   .passthrough();
 export type ReplyDeliveryRecord = z.infer<typeof replyDeliverySchema>;
 
+/** What a blocked delegated child waits for (`DelegateAttentionKind`). */
+export const REPLY_ATTENTION_KINDS = ["question", "approval", "secret"] as const;
+
+/**
+ * One "your delegated task is blocked on its user" notice to the parent (the agent conversation
+ * protocol's attention half, `apps/daemon/src/agent-chat/replies.ts`): one per child request id,
+ * persisted before it is handed to the delivery queue (kind `reply`, a fixed command id) so a
+ * restart neither loses nor repeats it. `dropped`: it did not go out (the request was answered
+ * first, or a side closed).
+ */
+export const replyAttentionNoticeSchema = z
+  .object({
+    id: z.string().min(1).max(200),
+    /** The parent's open subscription to the child this notice rides (its exchange, its plan mode). */
+    subscriptionId: z.string().min(1).max(200),
+    /** The parent, who receives it. */
+    toThreadId: z.string().min(1).max(200),
+    /** The blocked child. */
+    fromThreadId: z.string().min(1).max(200),
+    /** The child's pending request (the summary's id: a host request, `secret:…` or `approval:…`). */
+    requestId: z.string().min(1).max(400),
+    kind: z.enum(REPLY_ATTENTION_KINDS),
+    /** The fixed `/turn` command id of its first post; also its delivery-queue entry id. */
+    commandId: z.string().min(1).max(200),
+    /** The whole `/turn` input, header included. */
+    input: z.string().min(1),
+    interactionMode: z.enum(["default", "plan"]).catch("default").default("default"),
+    causedBy: z.object({ threadId: z.string().min(1), exchangeId: z.string().min(1).max(200), hop: z.number().int().min(1) }),
+    state: z.enum(["pending", "queued", "delivered", "dropped"]),
+    createdAt: z.string(),
+    updatedAt: z.string().optional().catch(undefined)
+  })
+  .passthrough();
+export type ReplyAttentionNoticeRecord = z.infer<typeof replyAttentionNoticeSchema>;
+
 export interface ReplyOutbox {
   subscriptions: ReplySubscriptionRecord[];
   deliveries: ReplyDeliveryRecord[];
   /** Entries this build cannot read, kept verbatim for the next rewrite. */
   unreadableSubscriptions: unknown[];
   unreadableDeliveries: unknown[];
-  /** Every top-level key but `version`, `subscriptions` and `deliveries`, exactly as found. */
+  /**
+   * The attention notices ({@link replyAttentionNoticeSchema}); absent from an outbox that never
+   * held one. An older build keeps the list verbatim among its `extra` keys.
+   */
+  attentionNotices?: ReplyAttentionNoticeRecord[];
+  unreadableAttentionNotices?: unknown[];
+  /** Every top-level key but `version`, `subscriptions`, `deliveries` and `attentionNotices`, exactly as found. */
   extra?: Record<string, unknown>;
 }
 
@@ -1633,7 +1674,7 @@ export function parseReplyOutbox(value: unknown): ReplyOutbox {
   if (record.version !== undefined && record.version !== 1) {
     throw new Error(`Not a version-1 reply outbox (version ${JSON.stringify(record.version)})`);
   }
-  for (const key of ["subscriptions", "deliveries"] as const) {
+  for (const key of ["subscriptions", "deliveries", "attentionNotices"] as const) {
     if (record[key] !== undefined && !Array.isArray(record[key])) {
       throw new Error(`Not a reply outbox (${key} is not a list)`);
     }
@@ -1656,26 +1697,32 @@ export function parseReplyOutbox(value: unknown): ReplyOutbox {
   };
   const subscriptions = read(record.subscriptions, replySubscriptionSchema);
   const deliveries = read(record.deliveries, replyDeliverySchema);
+  const notices = record.attentionNotices === undefined ? null : read(record.attentionNotices, replyAttentionNoticeSchema);
   const extra = Object.fromEntries(
-    Object.entries(record).filter(([key]) => key !== "version" && key !== "subscriptions" && key !== "deliveries")
+    Object.entries(record).filter(
+      ([key]) => key !== "version" && key !== "subscriptions" && key !== "deliveries" && key !== "attentionNotices"
+    )
   );
   return {
     subscriptions: subscriptions.good,
     deliveries: deliveries.good,
     unreadableSubscriptions: subscriptions.bad,
     unreadableDeliveries: deliveries.bad,
+    ...(notices !== null ? { attentionNotices: notices.good, unreadableAttentionNotices: notices.bad } : {}),
     ...(Object.keys(extra).length > 0 ? { extra } : {})
   };
 }
 
 /** The outbox as written: unknown top-level keys, then the readable entries, then the unreadable ones as they came. */
 export function serializeReplyOutbox(outbox: ReplyOutbox): string {
+  const notices = [...(outbox.attentionNotices ?? []), ...(outbox.unreadableAttentionNotices ?? [])];
   return JSON.stringify(
     {
       ...(outbox.extra ?? {}),
       version: 1,
       subscriptions: [...outbox.subscriptions, ...outbox.unreadableSubscriptions],
-      deliveries: [...outbox.deliveries, ...outbox.unreadableDeliveries]
+      deliveries: [...outbox.deliveries, ...outbox.unreadableDeliveries],
+      ...(notices.length > 0 ? { attentionNotices: notices } : {})
     },
     null,
     2

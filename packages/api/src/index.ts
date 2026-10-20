@@ -5,6 +5,7 @@ import type {
   AgentChatGoalSummary,
   BackgroundLiveness as AgentChatBackgroundLiveness,
   CreateAgentChatSessionFields,
+  DelegateView as AgentChatDelegateView,
   LatestTurnSummary as AgentChatLatestTurnSummary,
   PendingMergeBack,
   ThreadForkStrategy,
@@ -1421,6 +1422,12 @@ export interface SessionSummary {
    * keeps starting turns for it — or null when it has none (goals §4.7).
    */
   goal?: AgentChatGoalSummary | null;
+  /**
+   * Delegated children only (lineage relation `delegate`): the model the child runs and its
+   * latest progress or result, cut short, for the parent's subagent strip and roster. `null`
+   * when it has none — a client merges summaries field-wise — and absent from an older daemon.
+   */
+  delegateView?: AgentChatDelegateView | null;
   /**
    * Set when an automated workflow started this session (workflows spec §5.10): the tab shows a
    * Workflow chip linking to the run, and the workflow tab sweeper may close it.
