@@ -64,6 +64,11 @@ interface AcpConnectionOptions {
   defaultTimeoutMs?: number;
   /** Passed to the peer: see {@link AcpPeerOptions.agentOwnReplyIds}. */
   agentOwnReplyIds?: ReadonlySet<string>;
+  /**
+   * boxes (spec 2026-10-19 §8.5): start the child elsewhere — in a box, through `orq-agent`
+   * (`boxes/remote-child.ts`), with the same `ProviderChild` shape. Absent: `spawnProviderChild`.
+   */
+  spawnChild?: (input: { command: string; args: readonly string[]; env: Record<string, string>; cwd: string }) => ProviderChild;
 }
 
 export class AcpConnection {
@@ -82,7 +87,7 @@ export class AcpConnection {
 
   /** Spawn the child and wire its pipes. Does NOT perform the handshake. */
   static spawn(options: AcpConnectionOptions): AcpConnection {
-    const child = spawnProviderChild({
+    const child = (options.spawnChild ?? spawnProviderChild)({
       command: options.command,
       args: options.args,
       env: options.env,
@@ -142,7 +147,14 @@ export class AcpConnection {
    * (unconditional authenticate); `GrokAcpSupport.ts:14-18, 65-69`
    * (`resolveGrokAuthMethodId` — differs, see above).*
    */
-  async handshake(input: { authMethodId?: string; skipAuthenticate?: boolean } = {}): Promise<InitializeResponse> {
+  async handshake(
+    input: {
+      authMethodId?: string;
+      skipAuthenticate?: boolean;
+      /** boxes: a box's `grok.com` sign-in runs `orq-agent token grok`, which may wait on the broker. */
+      authTimeoutMs?: number;
+    } = {}
+  ): Promise<InitializeResponse> {
     const timeoutMs = this.options.handshakeTimeoutMs ?? AGENT_HOST_DEADLINES.handshakeMs;
     const initialize = (await this.peer.request<InitializeResponse>(
       "initialize",
@@ -157,7 +169,7 @@ export class AcpConnection {
     if (input.skipAuthenticate !== true) {
       const methodId = input.authMethodId ?? resolveAuthMethodId(initialize);
       if (methodId !== null) {
-        await this.peer.request("authenticate", { methodId }, { timeoutMs: AGENT_HOST_DEADLINES.authProbeMs });
+        await this.peer.request("authenticate", { methodId }, { timeoutMs: input.authTimeoutMs ?? AGENT_HOST_DEADLINES.authProbeMs });
       }
     }
     return initialize;

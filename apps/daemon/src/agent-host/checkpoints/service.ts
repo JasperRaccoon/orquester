@@ -20,7 +20,7 @@ import {
   resolveCheckpointCommit
 } from "./capture.ts";
 import { redactStderr } from "../support/stderr.ts";
-import { createGitRunner, type GitRunnerOptions } from "./git.ts";
+import { createGitRunner, type GitRunner, type GitRunnerOptions } from "./git.ts";
 import { parseTurnDiffFilesFromNumstat } from "./numstat.ts";
 import {
   checkpointRefForThreadTurn,
@@ -103,6 +103,12 @@ export class CheckpointRefDeleteError extends Error {
 }
 
 interface CheckpointServiceOptions extends GitRunnerOptions {
+  /**
+   * boxes: the git runner for a repository that is not on this machine (a box project's), by the
+   * command's `cwd`; null (or absent) runs git here. A box's runner fails the step when the box
+   * cannot be reached, which reports as any capture failure does (§5.4).
+   */
+  runnerFor?: (cwd: string) => Promise<GitRunner | null>;
   clock?: Clock;
   /** Best-effort diagnostics; never throws into a turn. */
   log?: (message: string, detail?: Record<string, unknown>) => void;
@@ -131,9 +137,20 @@ const defaultClock: Clock = {
 export function createCheckpointService(options: CheckpointServiceOptions): CheckpointService {
   const clock = options.clock ?? defaultClock;
   const log = options.log ?? (() => {});
-  const runner = createGitRunner({
+  const localRunner = createGitRunner({
     gitEnv: options.gitEnv
   });
+  // boxes (spec 2026-10-19 §8.5): a box project's git runs in its box, and its refs live in the
+  // box's repository. Picked per command by its `cwd`, so every step below is unchanged.
+  const runnerFor = async (cwd: string): Promise<GitRunner> =>
+    (options.runnerFor !== undefined ? await options.runnerFor(cwd).catch(() => null) : null) ?? localRunner;
+  const runner: GitRunner = {
+    run: async (input) => (await runnerFor(input.cwd)).run(input),
+    filesFor: async (cwd) => {
+      const picked = await runnerFor(cwd);
+      return picked === localRunner ? null : ((await picked.filesFor?.(cwd)) ?? null);
+    }
+  };
 
   /**
    * Collapsed to `~` in any detail that reaches a timeline row. The git env is

@@ -211,6 +211,11 @@ export function boxConfigChangesPath(baseDir: string): string {
   return joinPath(boxesDir(baseDir), "config-changes.json");
 }
 
+// boxes: the Agent config servers that run inside a box chat's box (`box-mcp.ts`, spec §8.4).
+export function boxMcpSettingsPath(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "box-mcp.json");
+}
+
 /** Parent of every desktop's runtime dir (sockets, cookies, logs); mode 0700. */
 export function desktopsRuntimeDir(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "desktops");
@@ -2414,3 +2419,5 @@ export * from "./session-profiles.ts";
 export * from "./repo-identities.ts";
 export * from "./secret-files.ts";
 export * from "./boxes.ts";
+// boxes:
+export * from "./box-mcp.ts";

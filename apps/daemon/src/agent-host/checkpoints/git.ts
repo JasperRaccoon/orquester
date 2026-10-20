@@ -25,7 +25,7 @@ const GIT_TRANSIENT_RETRIES = 2;
 const GIT_TRANSIENT_RETRY_DELAY_MS = 75;
 const OUTPUT_TRUNCATED_MARKER = "\n\n[truncated]";
 
-interface GitRunInput {
+export interface GitRunInput {
   /** Names the step in an error message. Never a path, never user text. */
   operation: string;
   cwd: string;
@@ -51,7 +51,7 @@ interface GitRunInput {
   signal?: AbortSignal;
 }
 
-interface GitRunResult {
+export interface GitRunResult {
   exitCode: number;
   stdout: string;
   stderr: string;
@@ -173,13 +173,42 @@ class Semaphore {
   }
 }
 
+/**
+ * boxes: how one git child is started. Absent: `spawnProviderChild` on this machine with the
+ * binary resolved against `gitEnv.PATH`. A box runner (`checkpoints/box-git.ts`) starts it in the
+ * box instead; `unset` names variables to remove from the box's own environment.
+ */
+export type GitSpawn = (input: {
+  args: readonly string[];
+  env: Record<string, string>;
+  unset: readonly string[];
+  cwd: string;
+}) => ProviderChild;
+
+/** boxes: the few file operations a capture makes beside git, for a repository in a box. */
+export interface GitRunnerFiles {
+  rm(path: string): Promise<void>;
+  exists(path: string): Promise<boolean>;
+}
+
 export interface GitRunnerOptions {
   /** The complete environment for every git child (§3.1). */
   gitEnv: Record<string, string>;
+  /** boxes: start each git child elsewhere (see {@link GitSpawn}). */
+  spawn?: GitSpawn;
+  /** boxes: with `spawn`, the repository's files are not on this machine. */
+  files?: GitRunnerFiles;
 }
 
 export interface GitRunner {
   run(input: GitRunInput): Promise<GitRunResult>;
+  /**
+   * boxes: the file operations for the repository at `cwd` when it is NOT on this machine
+   * (`null`/absent: use node:fs here). A capture then skips the live-index reuse, which needs
+   * timestamp writes the box protocol does not carry, and builds a fresh index — slower, same
+   * checkpoint.
+   */
+  filesFor?(cwd: string): Promise<GitRunnerFiles | null>;
 }
 
 /**
@@ -209,6 +238,9 @@ export function createGitRunner(options: GitRunnerOptions): GitRunner {
     const release = await permits.acquire();
     try {
       throwIfAborted(input);
+      if (options.spawn !== undefined) {
+        return await runGit("git", env, input, options.spawn);
+      }
       binary ??= resolveGitBinary(env);
       return await runGit(binary, env, input);
     } finally {
@@ -239,7 +271,8 @@ export function createGitRunner(options: GitRunnerOptions): GitRunner {
     }
   };
 
-  return { run };
+  const files = options.files;
+  return files !== undefined ? { run, filesFor: () => Promise.resolve(files) } : { run };
 }
 
 /** An already-aborted signal never fires `abort` again, so it is checked, not listened for. */
@@ -261,16 +294,19 @@ function delay(ms: number): Promise<void> {
 async function runGit(
   binary: string,
   baseEnv: Record<string, string>,
-  input: GitRunInput
+  input: GitRunInput,
+  spawnChild?: GitSpawn
 ): Promise<GitRunResult> {
   const timeoutMs = input.timeoutMs ?? GIT_DEFAULT_TIMEOUT_MS;
   const maxOutputBytes = input.maxOutputBytes ?? GIT_DEFAULT_MAX_OUTPUT_BYTES;
   const outputMode = input.outputMode ?? "truncate";
 
   const childEnv: Record<string, string> = { ...baseEnv };
+  const unset: string[] = [];
   for (const [key, value] of Object.entries(input.env ?? {})) {
     if (value === undefined) {
       delete childEnv[key];
+      unset.push(key);
     } else {
       childEnv[key] = value;
     }
@@ -278,12 +314,15 @@ async function runGit(
 
   let child: ProviderChild;
   try {
-    child = spawnProviderChild({
-      command: binary,
-      args: input.args,
-      env: childEnv,
-      cwd: input.cwd
-    });
+    child =
+      spawnChild !== undefined
+        ? spawnChild({ args: input.args, env: childEnv, unset, cwd: input.cwd })
+        : spawnProviderChild({
+            command: binary,
+            args: input.args,
+            env: childEnv,
+            cwd: input.cwd
+          });
   } catch (error) {
     throw new GitSpawnError(input.operation, error as Error);
   }

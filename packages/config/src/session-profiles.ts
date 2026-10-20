@@ -67,7 +67,13 @@ export const sessionProfileMcpRecordSchema = z
         envKeys: z.array(z.string()).optional(),
         url: z.string().optional(),
         headerKeys: z.array(z.string()).optional(),
-        advanced: z.record(z.unknown()).optional()
+        advanced: z.record(z.unknown()).optional(),
+        /**
+         * boxes (spec 2026-10-19 §8.4): run this server INSIDE a box chat's box instead of on the
+         * host behind `orq-agent mcp-bridge`. Its secrets then reach the box, in process env only.
+         * Absent/false: the host runs it.
+         */
+        runInBox: z.boolean().optional()
       })
       .passthrough()
   })

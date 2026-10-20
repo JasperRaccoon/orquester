@@ -341,6 +341,18 @@ export interface OrchestratorOptions {
    * thread's next idle point. Optional; must not throw.
    */
   sessionToolsStale?: (threadId: string) => boolean;
+  /**
+   * boxes (spec 2026-10-19 §8.3, §8.5): a live (not replayed) turn of a thread ended. A box
+   * thread mirrors its provider transcript back and closes the turn's config-change set. Called
+   * after the turn-end capture is queued; fire-and-forget, must not throw.
+   */
+  onTurnEnded?: (input: {
+    threadId: string;
+    adapter: AgentAdapterId;
+    cwd: string;
+    launch: ThreadLaunchConfig | null;
+    resumeCursor: unknown;
+  }) => void;
   /** A thread was deleted (after everything of it is freed): per-thread state elsewhere goes too. Must not throw. */
   onThreadDeleted?: (threadId: string) => void;
   /**
@@ -1938,6 +1950,9 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       return;
     }
     const next = launchConfigFromRequest(answer.launch, answer.launch.profile ?? undefined);
+    // boxes: the profile answer carries no location; a project never leaves its box.
+    if (runtime.launch?.box !== undefined) next.box = runtime.launch.box;
+    if (runtime.launch?.boxUnreadable === true) next.boxUnreadable = true;
     if (JSON.stringify(next) !== JSON.stringify(runtime.launch ?? {})) {
       try {
         await launchConfigs.save(runtime.id, next);
@@ -2002,7 +2017,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     const adapter = adapterFor(head.adapter);
     // §3.2: an out-of-range CLI is refused with the required version in the
     // message rather than started and allowed to fail on the first frame.
-    const gateResult = checkMinimumVersion({
+    // boxes: a box thread's CLI is the box's, gated by the adapter against the box's own version.
+    const gateResult = runtime.launch?.box !== undefined ? { ok: true as const, message: undefined } : checkMinimumVersion({
       adapter: head.adapter,
       version: snapshots.get(head.adapter)?.version ?? null
     });
@@ -2033,6 +2049,12 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     profile: HostThreadProfile | undefined
   ): Promise<ProviderSession> => {
     const adapter = adapterFor(head.adapter);
+    // boxes: a box thread whose `launch.json` lost its box must never run its CLI here instead.
+    if (runtime.launch?.boxUnreadable === true) {
+      throw new Error(
+        "This chat's project runs in a box, but the box this chat was launched with could not be read. Close the tab and open a new chat in the project."
+      );
+    }
     const home = await options.resolveHome({
       threadId: runtime.id,
       adapter: head.adapter,
@@ -2057,6 +2079,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       // The Agent Profile, also from `launch.json`: on every start — create,
       // resume, a crash restart, a host restart's rehydrate, a switch.
       ...(profile !== undefined ? { profile } : {}),
+      // boxes: the box the CLI runs in, from `launch.json` (spec 2026-10-19 §8.5).
+      ...(runtime.launch?.box !== undefined ? { box: runtime.launch.box } : {}),
       title: head.title,
       modelSelection: head.modelSelection,
       runtimeMode: head.runtimeMode,
@@ -4483,7 +4507,10 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
             accountId: parentHead.accountId,
             home: parentHead.home
           });
-          const childServerPool = launchConfigFromRequest(request).serverPool;
+          const childLaunch = launchConfigFromRequest(request);
+          const childServerPool = childLaunch.serverPool;
+          // boxes: a box parent's conversation lives in its box; the fork is made there.
+          const childBox = childLaunch.box ?? parent.launch?.box;
           const forked = await adapter.forkConversation({
             sourceThreadId: parentThreadId,
             sourceResumeCursor: sourceCursor,
@@ -4493,6 +4520,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
             home,
             ...(childServerPool !== undefined ? { serverPool: childServerPool } : {}),
             ...(childProfile !== undefined ? { profile: childProfile } : {}),
+            ...(childBox !== undefined ? { box: childBox } : {}),
             cut: {
               retainedTurnIds: cut.retained.map((turn) => turn.turnId),
               firstRemovedTurnId: cut.firstRemovedTurnId
@@ -4526,7 +4554,11 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     // On the head from its first save, so a repeated request answers it
     // however long the child's timeline grows (`recordedForkStrategy`).
     runtime.forkStrategy = strategy;
-    const head = await createThreadNow(runtime, request, {
+    // boxes: the child runs where its parent's conversation lives — in the parent's box when the
+    // request (from a daemon that predates boxes) does not name one.
+    const childRequest =
+      request.box === undefined && parent.launch?.box !== undefined ? { ...request, box: parent.launch.box } : request;
+    const head = await createThreadNow(runtime, childRequest, {
       adapterId,
       modelSelection,
       runtimeMode,
@@ -6163,6 +6195,23 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
             } else if (event.type === "turn.completed" || event.type === "turn.aborted") {
               persistCursorAtTurnEnd(runtime);
               captureTurnEnd(runtime, turnId, turnOrdinalOf(runtime, turnId));
+              // boxes: a live turn's end mirrors a box thread's transcript and config changes.
+              if (!isHistoricalRuntimeEvent(event) && options.onTurnEnded !== undefined) {
+                const ended = headOf(runtime);
+                if (ended !== null) {
+                  try {
+                    options.onTurnEnded({
+                      threadId: runtime.id,
+                      adapter: ended.adapter,
+                      cwd: ended.cwd,
+                      launch: runtime.launch,
+                      resumeCursor: runtime.bound?.session.resumeCursor ?? persistedResumeCursor(runtime, ended)
+                    });
+                  } catch (error) {
+                    logger.warn(`agent-host: the turn-end hook failed for ${runtime.id}`, error);
+                  }
+                }
+              }
               // A replayed turn is the past: its questions were settled when it
               // happened, and there is no live provider to strand.
               if (!isHistoricalRuntimeEvent(event)) {

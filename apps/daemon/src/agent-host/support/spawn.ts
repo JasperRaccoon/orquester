@@ -70,13 +70,23 @@ export type ChildExitReason =
   | { kind: "spawn-error"; code: null; signal: null; error: Error };
 
 export interface ProviderChild {
-  /** The recorded pid. `undefined` only when the spawn itself failed. */
+  /**
+   * The recorded LOCAL pid. `undefined` when the spawn itself failed — and
+   * always for a child running in a box (`box` below): a box pid means nothing
+   * on this machine, so nothing may signal it or read its `/proc`.
+   */
   readonly pid: number | undefined;
   readonly stdin: ChildProcessWithoutNullStreams["stdin"];
   readonly stdout: ChildProcessWithoutNullStreams["stdout"];
   readonly stderr: ChildProcessWithoutNullStreams["stderr"];
-  /** The underlying handle, for callers that need `once`/`ref`. */
-  readonly process: ChildProcessWithoutNullStreams;
+  /** The underlying handle, for callers that need `once`/`ref`; `null` for a box child. */
+  readonly process: ChildProcessWithoutNullStreams | null;
+  /**
+   * boxes: set when the child runs in a box (`agent-host/boxes/remote-child.ts`, spec 2026-10-19
+   * §8.5): `kill()` goes to `orq-agent`, and the leftover-process sweep, the nice wrapper and
+   * every `/proc` read skip it.
+   */
+  readonly box?: { readonly boxId: string; readonly procId: string };
   /**
    * Resolves exactly once with how the child ended. Never rejects — a spawn
    * failure is an outcome, not an exception, because the caller has to settle

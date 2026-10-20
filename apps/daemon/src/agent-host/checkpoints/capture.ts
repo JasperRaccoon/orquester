@@ -154,6 +154,8 @@ export async function captureCheckpoint(runner: GitRunner, input: CaptureInput):
   const operation = CHECKPOINT_CAPTURE_OPERATION;
   const { cwd, ref } = input;
 
+  // boxes: a repository in a box has its files there (`GitRunner.filesFor`).
+  const remoteFiles = (await runner.filesFor?.(cwd)) ?? null;
   const gitCommonDir = await resolveGitCommonDir(runner, cwd);
   const tempIndexPath = path.join(gitCommonDir, `orq-checkpoint-index-${randomUUID()}`);
   const captureEnv: Record<string, string | undefined> = {
@@ -164,9 +166,11 @@ export async function captureCheckpoint(runner: GitRunner, input: CaptureInput):
   // Forced process termination can leave git's private index lock behind, and
   // a stale lock poisons every later capture.
   const cleanupTempIndex = async (): Promise<void> => {
+    const remove = (target: string): Promise<void> =>
+      remoteFiles !== null ? remoteFiles.rm(target) : rm(target, { force: true });
     await Promise.all([
-      rm(tempIndexPath, { force: true }).catch(() => {}),
-      rm(`${tempIndexPath}.lock`, { force: true }).catch(() => {})
+      remove(tempIndexPath).catch(() => {}),
+      remove(`${tempIndexPath}.lock`).catch(() => {})
     ]);
   };
 
@@ -188,7 +192,8 @@ export async function captureCheckpoint(runner: GitRunner, input: CaptureInput):
     }
 
     if (headExists) {
-      const reusedIndex = await reuseLiveIndex(runner, {
+      // boxes: the reuse writes the copied index's timestamps, which only a local file allows.
+      const reusedIndex = remoteFiles === null && await reuseLiveIndex(runner, {
         cwd,
         tempIndexPath,
         captureEnv,
@@ -515,7 +520,10 @@ async function findUnstageableNestedRepos(
       return [];
     }
     const nestedCwd = path.join(cwd, entry);
-    const hasGitDir = await pathExists(path.join(nestedCwd, ".git"));
+    // boxes: the nested checkout lives where the repository does.
+    const remoteFiles = (await runner.filesFor?.(cwd)) ?? null;
+    const gitDir = path.join(nestedCwd, ".git");
+    const hasGitDir = remoteFiles !== null ? await remoteFiles.exists(gitDir).catch(() => false) : await pathExists(gitDir);
     if (!hasGitDir) {
       continue;
     }

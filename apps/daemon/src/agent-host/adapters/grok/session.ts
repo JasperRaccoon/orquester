@@ -80,9 +80,15 @@ import {
   meetsMinimumGrokVersion,
   resolveGrokModelUpdate,
   versionGateMessage,
-  writeGrokOverlayConfig
+  writeGrokOverlayConfig,
+  // boxes:
+  GROK_AUTH_PROVIDER_COMMAND_ENV,
+  renderGrokOverlayConfig
 } from "./launch.ts";
 import { type GrokProfileSpawn, withAgentOptions } from "./profile-launch.ts";
+// boxes:
+import { join } from "node:path";
+import type { GrokBoxLaunch } from "./box-launch.ts";
 import { GrokNormalizer, XAI_RAW_SOURCE, ACP_RAW_SOURCE, type GrokTurnOutcome } from "./normalize.ts";
 import {
   approvalGrantKey,
@@ -214,10 +220,22 @@ interface GrokSessionOptions {
   resolveAttachmentPath?: AdapterContext["resolveAttachmentPath"];
   /** The adapter's stored MCP App snapshots, so an unchanged document is stored once per thread. */
   mcpAppSnapshots?: McpAppSnapshotStore;
+  /**
+   * boxes (spec 2026-10-19 §8.5, `box-launch.ts`): the CLI runs in this box. `command`, `cwd`
+   * and `env` above are then the BOX's; the overlay is written into the box; the session tools
+   * and the host-run MCP servers ride the bridge. Its child has no local pid, so the leftover
+   * sweeps below find nothing of it on this machine and skip it.
+   */
+  box?: GrokBoxLaunch;
 }
 
 /** An app's tool call or resource read: as long as a tool may take, never unbounded. */
 const MCP_APP_REQUEST_MS = 120_000;
+
+/** boxes: the ACP auth method that runs the auth provider command (spikes doc (c), grok 1.0.46). */
+export const GROK_BOX_AUTH_METHOD_ID = "grok.com";
+/** boxes: the sign-in asks the broker, which may refresh the account first. */
+const GROK_BOX_AUTH_TIMEOUT_MS = 90_000;
 
 /** Why a session ended without the user: what the closing row of work left running names. */
 type GrokSessionEndCause = "restart" | "host";
@@ -514,6 +532,11 @@ export class GrokSession {
     return this.acpSessionId;
   }
 
+  /** boxes: the box launch this session's CLI runs under; undefined on this machine. */
+  get boxLaunch(): GrokBoxLaunch["launch"] | undefined {
+    return this.options.box?.launch;
+  }
+
   get version(): string | null {
     return this.agentVersion;
   }
@@ -616,21 +639,37 @@ export class GrokSession {
     // as a `GROK_CONFIG_PATH` **overlay** the host owns outright — never as a
     // key patched into the account home, whose `config.toml` is a symlink to
     // the user's global config on this host (R4 #4).
-    const overlay = await writeGrokOverlayConfig(this.options.overlayDir);
+    const box = this.options.box;
+    // boxes: the overlay goes into the box (with the `[auth]` login command), at the host path mapped.
+    const overlay = box !== undefined ? await this.writeBoxOverlay(box) : await writeGrokOverlayConfig(this.options.overlayDir);
     if (overlay === null) {
       this.emitEvent(this.normalizer.event("runtime.warning", { message: grokConfigAdvisory() }));
     }
+    const profileEnv = this.options.profileSpawn?.env ?? {};
+    const agentArgs = this.options.profileSpawn?.agentArgs ?? [];
 
     const connection = AcpConnection.spawn({
       command: this.options.command,
-      args: withAgentOptions(grokSpawnArgs(this.options.runtimeMode), this.options.profileSpawn?.agentArgs ?? []),
+      args: withAgentOptions(
+        grokSpawnArgs(this.options.runtimeMode),
+        box !== undefined ? agentArgs.map((arg) => box.launch.toBox(arg)) : agentArgs
+      ),
       env: {
         ...this.options.env,
         ...GROK_EXTRA_ENV,
-        ...this.options.profileSpawn?.env,
+        ...(box !== undefined
+          ? Object.fromEntries(Object.entries(profileEnv).map(([key, value]) => [key, box.launch.toBox(value)]))
+          : profileEnv),
         ...(overlay === null ? {} : { [GROK_CONFIG_PATH_ENV]: overlay }),
+        ...(box !== undefined ? { [GROK_AUTH_PROVIDER_COMMAND_ENV]: box.launch.grokAuthCommand() } : {}),
         [AGENT_LAUNCH_ENV_VAR]: this.launchId
       },
+      ...(box !== undefined
+        ? {
+            spawnChild: (input: { command: string; args: readonly string[]; env: Record<string, string>; cwd: string }) =>
+              box.launch.spawn({ ...input, envUnset: box.envUnset, detached: true })
+          }
+        : {}),
       cwd: this.options.cwd,
       clientInfo: this.options.clientInfo,
       homeDirs: this.options.homeDirs,
@@ -648,7 +687,12 @@ export class GrokSession {
     let initialize: InitializeResponse;
     let setup: NewSessionResponse | LoadSessionResponse;
     try {
-      initialize = await connection.handshake();
+      // boxes (spikes doc (c)): a box's Grok holds no credential yet — `authenticate` with
+      // `grok.com` runs the auth provider command (`orq-agent token grok`) before `session/new`,
+      // which otherwise fails `-32000 Authentication required`.
+      initialize = await connection.handshake(
+        box !== undefined ? { authMethodId: GROK_BOX_AUTH_METHOD_ID, authTimeoutMs: GROK_BOX_AUTH_TIMEOUT_MS } : {}
+      );
       // Read on EVERY handshake, never cached per host: the CLI auto-updates
       // and can change version between two spawns of one thread.
       this.agentVersion = agentVersionOf(initialize._meta) ?? null;
@@ -719,6 +763,23 @@ export class GrokSession {
     this.emitAll(this.normalizer.reconcileGoal(cursor === null ? "new" : "load"));
   }
 
+  /**
+   * boxes: the overlay a box CLI reads — the managed `[features]` plus `[auth]
+   * auth_provider_command` (`launch.ts`) — written into the box at the host overlay's mapped
+   * path. Null (with the usual advisory row) when the box refused the write.
+   */
+  private async writeBoxOverlay(box: GrokBoxLaunch): Promise<string | null> {
+    try {
+      return await box.launch.writeFile(
+        join(this.options.overlayDir, "orquester-grok.toml"),
+        renderGrokOverlayConfig({ authProviderCommand: box.launch.grokAuthCommand() })
+      );
+    } catch (error) {
+      this.options.logger.warn("grok: could not write the config overlay into the box", error);
+      return null;
+    }
+  }
+
   private async openNewSession(): Promise<NewSessionResponse> {
     const response = await this.peer().request<NewSessionResponse>(
       "session/new",
@@ -764,7 +825,8 @@ export class GrokSession {
     const meta = grokSessionMeta(this.options.sessionTools);
     return {
       ...base,
-      mcpServers: grokSessionMcpServers(this.options.sessionTools),
+      // boxes: ours and the host-run servers through the bridge.
+      mcpServers: grokSessionMcpServers(this.options.sessionTools, this.options.box?.mcp),
       ...(meta !== undefined ? { _meta: meta } : {})
     };
   }

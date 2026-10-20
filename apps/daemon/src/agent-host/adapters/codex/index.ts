@@ -56,6 +56,9 @@ import {
 import { issueSessionToolsGrant, launchHomeKey } from "../../session-tools/index.ts";
 import { CODEX_SESSION_TOOLS_TOKEN_ENV } from "./session-tools.ts";
 import { CodexSession } from "./session.ts";
+// boxes:
+import { codexBoxSessionPieces, launchCodexInBox } from "./box-launch.ts";
+import { requireBoxes } from "../../boxes/index.ts";
 import { codexProfileLaunch, type CodexProfileLaunch } from "./profile.ts";
 import { loadProfileManifest } from "../profile-manifest.ts";
 import { McpAppSnapshotStore } from "../mcp-app-capture.ts";
@@ -353,18 +356,24 @@ export const createCodexAdapter: AdapterFactory = async (
       await track(existing.stop());
       sessions.delete(input.threadId);
     }
-    await assertVersionSupported();
+    // boxes: a box thread's CLI is the box's, gated there (`box-launch.ts`).
+    if (input.box === undefined) await assertVersionSupported();
 
     // An Agent Profile thread (spec 2026-10-18 §6.2) runs in its prepared home, whatever home the
     // launch names; a manifest that does not read fails the start (`ProfileLaunchError`).
     const profileSection = await loadProfileManifest(input, "codex");
     const profileHome = profileSection !== null ? input.profile?.preparedDir : undefined;
     const codexHome = profileHome ?? resolveCodexHome(input.home.path);
+    // boxes (spec 2026-10-19 §8.5): sync, then the box's codex — before any credential is issued.
+    const boxLaunch =
+      input.box !== undefined
+        ? await launchCodexInBox(context, { ...input, box: input.box }, codexHome)
+        : undefined;
     // Design 2026-10-14 §1.2: a fresh credential per `codex app-server`
     // launch, in the child's env only (`session-tools.ts`); this issue revokes
     // the thread's previous one, and the session revokes this one when its
     // child exits.
-    const bin = requireBin();
+    const bin = boxLaunch?.bin ?? requireBin();
     const tools = await issueSessionToolsGrant(context, input.threadId, {
       agent: "codex",
       home: launchHomeKey(input.home),
@@ -383,24 +392,52 @@ export const createCodexAdapter: AdapterFactory = async (
         profile = await codexProfileLaunch(profileHome, profileSection, env.HOME);
       } catch (error) {
         grant?.revoke();
+        await boxLaunch?.close();
+        throw error;
+      }
+    }
+    // boxes: the box env, cwd, home and profile, and the session tools behind the bridge.
+    let box: Awaited<ReturnType<typeof codexBoxSessionPieces>> | undefined;
+    if (boxLaunch !== undefined) {
+      try {
+        box = await codexBoxSessionPieces({
+          launch: boxLaunch,
+          hostEnv: env,
+          cwd: input.cwd,
+          codexHome,
+          profile,
+          grant: grant !== undefined ? { url: grant.url, token: grant.token } : undefined
+        });
+      } catch (error) {
+        grant?.revoke();
+        await boxLaunch.close();
         throw error;
       }
     }
     const session = new CodexSession({
-      context,
+      // boxes: attachments are copied into the box and named by their box path.
+      context: boxLaunch !== undefined ? boxLaunch.adapterContext(context) : context,
       threadId: input.threadId,
-      cwd: input.cwd,
-      ...(codexHome !== null ? { codexHome } : {}),
+      cwd: box?.cwd ?? input.cwd,
+      ...(box !== undefined
+        ? box.codexHome !== undefined
+          ? { codexHome: box.codexHome }
+          : {}
+        : codexHome !== null
+          ? { codexHome }
+          : {}),
       bin,
-      env,
-      ...(profile !== undefined ? { profile } : {}),
+      env: box?.env ?? env,
+      ...((box !== undefined ? box.profile : profile) !== undefined ? { profile: (box !== undefined ? box.profile : profile)! } : {}),
+      ...(boxLaunch !== undefined && box !== undefined ? { box: { launch: boxLaunch, envUnset: box.envUnset } } : {}),
       ...(grant !== undefined
         ? {
             sessionTools: {
               url: grant.url,
               instructions: grant.prepared.instructions,
               deny: grant.prepared.deny,
-              revoke: grant.revoke
+              revoke: grant.revoke,
+              ...(box?.bridge !== undefined ? { bridge: box.bridge } : {})
             }
           }
         : // No grant: no tools, but the thread's MCP denials still apply (§12.1).
@@ -419,6 +456,8 @@ export const createCodexAdapter: AdapterFactory = async (
         if (sessions.get(input.threadId) === session) {
           sessions.delete(input.threadId);
         }
+        // boxes: the session's bridge registrations go with it.
+        void boxLaunch?.close();
       }
     });
     sessions.set(input.threadId, session);
@@ -426,12 +465,13 @@ export const createCodexAdapter: AdapterFactory = async (
       const summary = await session.start();
       // §4.6.4: refresh the per-cwd overlay off the session start, forked so it
       // never delays the turn.
-      void getSnapshot({ cwd: input.cwd }).catch(() => {});
+      if (boxLaunch === undefined) void getSnapshot({ cwd: input.cwd }).catch(() => {});
       return summary;
     } catch (error) {
       await session.stop().catch(() => {});
       grant?.revoke();
       sessions.delete(input.threadId);
+      await boxLaunch?.close();
       throw error;
     }
   };
@@ -531,7 +571,7 @@ export const createCodexAdapter: AdapterFactory = async (
      * provider thread wins over the persisted cursor — never stopped.
      */
     async forkConversation(input) {
-      await assertVersionSupported();
+      if (input.box === undefined) await assertVersionSupported();
       const sourceCodexThreadId =
         codexThreadIdOf(sessions.get(input.sourceThreadId)?.summary().resumeCursor) ??
         codexThreadIdOf(input.sourceResumeCursor);
@@ -548,6 +588,35 @@ export const createCodexAdapter: AdapterFactory = async (
         home: codexHome !== null ? { ...input.home, path: codexHome } : input.home
       });
       if (profileHome !== undefined) env.CODEX_HOME = profileHome;
+      if (input.box !== undefined) {
+        // boxes: the source's rollout lives in its box — the short-lived app-server runs there.
+        const launch = await requireBoxes(context).launch({
+          threadId: input.threadId,
+          agent: "codex",
+          box: input.box,
+          home: input.home,
+          cwd: input.cwd,
+          ...(input.profile !== undefined ? { profile: input.profile } : {}),
+          sync: false,
+          signal: context.signal
+        });
+        try {
+          const boxEnv = launch.env(env);
+          if (codexHome !== null) boxEnv.env.CODEX_HOME = launch.toBox(codexHome);
+          const forkedId = await forkCodexThread({
+            bin: launch.bin,
+            env: boxEnv.env,
+            cwd: launch.toBox(input.cwd),
+            sourceCodexThreadId,
+            lastTurnId,
+            logger: context.logger,
+            spawn: launch.spawnFn(boxEnv.unset)
+          });
+          return { resumeCursor: { threadId: forkedId } };
+        } finally {
+          await launch.close();
+        }
+      }
       const forkedId = await forkCodexThread({
         bin: requireBin(),
         env,

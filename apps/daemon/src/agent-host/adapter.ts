@@ -34,8 +34,9 @@ import type {
   ThreadSnapshot
 } from "@orquester/api/agent-chat";
 
-import type { HostThreadProfile, HostThreadServerPool } from "./host-protocol.ts";
+import type { HostThreadBox, HostThreadProfile, HostThreadServerPool } from "./host-protocol.ts";
 import type { SessionToolsHost } from "./session-tools/index.ts";
+import type { AgentHostBoxes } from "./boxes/index.ts";
 
 // ---------------------------------------------------------------------------
 // Operation inputs
@@ -81,6 +82,12 @@ export interface StartSessionInput {
    * start must then FAIL, never fall back to Global.
    */
   profile?: HostThreadProfile;
+  /**
+   * boxes: the project lives in a box (spec 2026-10-19 §8.5), from `launch.json` on EVERY start:
+   * the CLI runs there — `AdapterContext.boxes.launch(...)` prepares it. Omitted: this machine.
+   * An adapter must never start a box thread's CLI here instead.
+   */
+  box?: HostThreadBox;
   title?: string;
   modelSelection: ModelSelection;
   runtimeMode: RuntimeMode;
@@ -309,6 +316,8 @@ export interface ForkConversationInput {
    * parent's unless the fork request named another. Omitted: Global.
    */
   profile?: HostThreadProfile;
+  /** boxes: the box the SOURCE's conversation lives in; the fork is made there. */
+  box?: HostThreadBox;
   cut: ForkCut;
 }
 
@@ -688,6 +697,11 @@ export interface AdapterContext {
    * changes nothing it sends. `session-tools/index.ts`.
    */
   sessionTools?: SessionToolsHost;
+  /**
+   * boxes: agent CLIs in boxes (spec 2026-10-19 §8.5, `boxes/index.ts`). A start whose input
+   * names `box` launches through it; absent, such a start fails (never runs here instead).
+   */
+  boxes?: AgentHostBoxes;
 }
 
 /**

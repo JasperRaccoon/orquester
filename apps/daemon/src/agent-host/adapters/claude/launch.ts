@@ -89,6 +89,17 @@ interface BuildClaudeQueryOptionsInput {
    * go. Absent = Global: the options are exactly what they were before profiles existed.
    */
   profile?: { launch: ClaudeProfileLaunch; files: ClaudeProfileLaunchFiles };
+  /**
+   * boxes (spec 2026-10-19 §8.5): the CLI runs in a box — the SDK's spawn hook starts the command
+   * it built there (`boxes/claude-process.ts`), and `cwd`, `executablePath`, `env`,
+   * `attachmentsDir` and the profile files above are already the BOX's.
+   */
+  spawnClaudeCodeProcess?: NonNullable<ClaudeQueryOptions["spawnClaudeCodeProcess"]>;
+  /**
+   * boxes (spec 2026-10-19 §8.4): the account's own stdio servers bridged to the host, under their
+   * own names — a dynamic server replaces a same-named one of another scope.
+   */
+  bridgedMcpServers?: Record<string, Record<string, unknown>>;
 }
 
 interface BuiltClaudeQueryOptions {
@@ -227,8 +238,11 @@ export function buildClaudeQueryOptions(
     // profile's servers, its plugins' lifted ones and the project's `.mcp.json`) load — no user,
     // local, plugin or claude.ai server. The in-process `orquester` server rides `mcpServers` as
     // ever, so the session tools and their `allowedTools`/`disallowedTools` work unchanged.
-    mcpServers:
-      input.sessionTools !== undefined ? { [input.sessionTools.server.name]: input.sessionTools.server } : {},
+    mcpServers: {
+      // boxes: first, so the session tools' own entry can never be replaced by one.
+      ...((input.bridgedMcpServers ?? {}) as NonNullable<ClaudeQueryOptions["mcpServers"]>),
+      ...(input.sessionTools !== undefined ? { [input.sessionTools.server.name]: input.sessionTools.server } : {})
+    },
     ...(profile !== undefined ? { strictMcpConfig: true } : {}),
     ...(profile !== undefined && profile.launch.plugins.length > 0 ? { plugins: [...profile.launch.plugins] } : {}),
     ...(profile?.launch.skills !== undefined ? { skills: [...profile.launch.skills] } : {}),
@@ -240,7 +254,9 @@ export function buildClaudeQueryOptions(
       ? { disallowedTools: claudeDisallowedTools(input.sessionTools.deny) }
       : {}),
     ...(Object.keys(extraArgs).length > 0 ? { extraArgs } : {}),
-    ...(input.stderr !== undefined ? { stderr: input.stderr } : {})
+    ...(input.stderr !== undefined ? { stderr: input.stderr } : {}),
+    // boxes:
+    ...(input.spawnClaudeCodeProcess !== undefined ? { spawnClaudeCodeProcess: input.spawnClaudeCodeProcess } : {})
   };
 
   return {

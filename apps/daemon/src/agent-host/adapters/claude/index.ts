@@ -58,6 +58,8 @@ import {
   type ClaudeProbeResult
 } from "./probe.ts";
 import { loadClaudeProfileLaunch } from "./profile-launch.ts";
+// boxes:
+import { prepareClaudeBoxSession } from "./box-launch.ts";
 import { projectClaudeHistory } from "./project-history.ts";
 import { ClaudeSession } from "./session.ts";
 import type { ClaudeScopedLimitNames } from "./usage.ts";
@@ -254,7 +256,8 @@ export async function createClaudeAdapterWith(
       await existing.stop("Replaced by a new session for this thread.");
     }
 
-    const executablePath = await ensureVersionGate();
+    // boxes: a box thread's CLI is the box's, gated in the box (`box-launch.ts`).
+    const executablePath = input.box !== undefined ? null : await ensureVersionGate();
     // The host attaches the launcher's extra env (the daemon-composed
     // `launchEnv`); the adapter passes it through untouched (§4.5).
     const env = context.buildEnv({ threadId: input.threadId, home: input.home });
@@ -268,6 +271,18 @@ export async function createClaudeAdapterWith(
       home: env.HOME ?? nodeOs.homedir()
     });
 
+    // boxes (spec 2026-10-19 §8.5): sync, the box's CLI, a brokered token, bridged MCP servers.
+    const box =
+      input.box !== undefined
+        ? await prepareClaudeBoxSession({
+            context,
+            start: { ...input, box: input.box },
+            hostEnv: env,
+            resumeSessionId: cursor?.resume,
+            profileLaunch
+          })
+        : undefined;
+
     if (snapshot === undefined) {
       // A first session should not wait on a full probe, but it must not run
       // with an empty model catalogue either; the probe is cheap and cached.
@@ -275,7 +290,8 @@ export async function createClaudeAdapterWith(
     }
 
     const session = new ClaudeSession({
-      context,
+      // boxes: attachments are copied into the box and named by their box path.
+      context: box !== undefined ? box.launch.adapterContext(context) : context,
       deps,
       threadId: input.threadId,
       cwd: input.cwd,
@@ -283,8 +299,9 @@ export async function createClaudeAdapterWith(
       runtimeMode: input.runtimeMode,
       modelSelection: input.modelSelection,
       models: models(),
-      executablePath,
+      executablePath: box?.executablePath ?? executablePath ?? "",
       env,
+      ...(box !== undefined ? { box } : {}),
       ...(cursor !== undefined ? { resumeCursor: cursor } : {}),
       ...(input.knownGoal !== undefined ? { knownGoal: input.knownGoal } : {}),
       ...(input.prefetchHistory === true ? { prefetchHistory: true } : {}),
@@ -334,6 +351,8 @@ export async function createClaudeAdapterWith(
       return record;
     } catch (error) {
       sessions.delete(input.threadId);
+      // boxes: a start that failed early releases its bridge registrations (idempotent).
+      await box?.launch.close();
       throw error;
     }
   }
@@ -405,6 +424,9 @@ export async function createClaudeAdapterWith(
       );
     }
     const session = await ensureSession(input.threadId);
+    // boxes (spec 2026-10-19 §7): a box CLI's login file is rewritten before it runs short — the
+    // running CLI re-reads it on its next request, so no restart is needed.
+    await session.boxLaunch?.refreshCredentials();
     const result = await session.sendTurn({
       text: input.input,
       attachments: input.attachments,

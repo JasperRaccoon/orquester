@@ -205,6 +205,12 @@ export interface McpServerView {
   headers?: SecretEntryView[];
   /** Per-agent, non-secret extras ({@link MCP_ADVANCED_FIELDS}). */
   advanced?: Record<string, unknown>;
+  /**
+   * boxes (spec 2026-10-19 §8.4): in a chat whose project runs in a box, run this server INSIDE
+   * the box rather than on the host behind `orq-agent mcp-bridge` — for a server that must act on
+   * the box. Its env and header secrets then reach the box, in process env only. Absent = false.
+   */
+  runInBox?: boolean;
 }
 
 export interface McpServerDraft {
@@ -217,6 +223,8 @@ export interface McpServerDraft {
   url?: string;
   headers?: SecretEntryDraft[];
   advanced?: Record<string, unknown>;
+  /** boxes: see {@link McpServerView.runInBox}. Absent: unchanged on update, false on create. */
+  runInBox?: boolean;
 }
 
 /**
