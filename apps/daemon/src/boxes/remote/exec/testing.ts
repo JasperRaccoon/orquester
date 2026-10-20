@@ -378,7 +378,9 @@ export function fakeAgentConnection(
       }
       if (method === "proc.release") {
         const { procId } = params as { procId: string };
-        if (!procs.get(procId)?.running) procs.delete(procId);
+        // As orq-agent: a running process is not released (BUSY); an unknown one is a no-op.
+        if (procs.get(procId)?.running) throw Object.assign(new Error("the process is still running; signal it first"), { code: "BUSY" });
+        procs.delete(procId);
         return undefined;
       }
       return localRequest(method, params);

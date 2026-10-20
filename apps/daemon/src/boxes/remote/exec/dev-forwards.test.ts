@@ -75,7 +75,7 @@ test("a sniffed box dev server is suggested at its host forward, which really re
   try {
     // The local double rejects a taken host port, as a real hub's forward does.
     await assert.rejects(r.connection.forwardToHost(port, { hostPort: port }), { code: "EADDRINUSE" });
-    // The "box" is this machine, so the same port number is taken on the host: any free one is used.
+    // A port the box names gets a host port the host picks (here the same number is taken anyway).
     const [url, ...rest] = await r.forwards.suggestions(PROJECT, [`http://localhost:${port}`]);
     assert.deepEqual(rest, []);
     const target = loopbackTarget(url!);
@@ -98,7 +98,7 @@ test("a sniffed box dev server is suggested at its host forward, which really re
   }
 });
 
-test("box listening ports are offered (system daemons and privileged ports left out), same port preferred", async () => {
+test("box listening ports are offered (system daemons and privileged ports left out), each on a host port the host picks", async () => {
   const r = rig({
     fakeForward: true,
     ports: [
@@ -111,11 +111,13 @@ test("box listening ports are offered (system daemons and privileged ports left 
   });
   try {
     const urls = await r.forwards.suggestions(PROJECT, ["https://0.0.0.0:5173", "http://localhost:3000"]);
-    assert.deepEqual(urls, ["https://localhost:5173", "http://localhost:3000", "http://localhost:8000"]);
-    assert.deepEqual(r.forwardCalls, [
-      { boxPort: 5173, hostPort: 5173 },
-      { boxPort: 3000, hostPort: 3000 },
-      { boxPort: 8000, hostPort: 8000 }
+    // The suggestions point at the forwards; the box never chose a host port (no `hostPort` asked).
+    assert.deepEqual(urls, ["https://localhost:50000", "http://localhost:50001", "http://localhost:50002"]);
+    assert.deepEqual(r.forwardCalls, [{ boxPort: 5173 }, { boxPort: 3000 }, { boxPort: 8000 }]);
+    assert.deepEqual(r.forwards.list().map((forward) => [forward.boxPort, forward.hostPort]), [
+      [5173, 50000],
+      [3000, 50001],
+      [8000, 50002]
     ]);
   } finally {
     await r.forwards.dispose();
@@ -125,19 +127,20 @@ test("box listening ports are offered (system daemons and privileged ports left 
 test("forwards live while the project has sessions or a tab uses them; a destroyed box closes them", async () => {
   const r = rig({ fakeForward: true, ports: [] });
   try {
-    await r.forwards.suggestions(PROJECT, ["http://localhost:5173", "http://localhost:6006"]);
-    r.setTabs([{ projectPath: PROJECT, url: "http://localhost:5173/app" }]);
+    const [app] = await r.forwards.suggestions(PROJECT, ["http://localhost:5173", "http://localhost:6006"]);
+    assert.equal(app, "http://localhost:50000");
+    r.setTabs([{ projectPath: PROJECT, url: `${app}/app` }]);
     await r.forwards.sweep();
     assert.equal(r.forwards.list().length, 2, "an open session keeps every forward");
 
     r.setSessions([session("exited")]);
     await r.forwards.sweep();
-    assert.deepEqual(r.closed, [6006]);
+    assert.deepEqual(r.closed, [50001]);
     assert.deepEqual(r.forwards.list().map((f) => f.boxPort), [5173], "the tab's forward stays");
 
     r.boxes.update("box-1", { state: "destroyed" });
     await r.forwards.dispose();
-    assert.deepEqual(r.closed.sort(), [5173, 6006]);
+    assert.deepEqual(r.closed.sort(), [50000, 50001]);
   } finally {
     await r.forwards.dispose();
   }

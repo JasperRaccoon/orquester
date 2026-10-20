@@ -8,12 +8,13 @@
  * - `suggestions()` turns every sniffed `http(s)://localhost:<port>` (the URL
  *   watcher reads box terminal output like any other) and every listening
  *   port the box reports (`sys.ports`) into a forward, and suggests the
- *   FORWARDED address. A forward takes the same port number on the host when
- *   it is free — absolute URLs and redirects the dev server emits then keep
- *   working, and a tab persisted across a daemon restart finds its forward
- *   again — else any free port.
+ *   FORWARDED address. Those ports are named by the box, so their forwards
+ *   take a free host port the host picks: a box never gets to bind a host
+ *   port of its choosing (one a host service or an OAuth callback would use
+ *   later).
  * - A Browser tab of a box project opened or navigated to `localhost:<port>`
- *   gets a same-port forward if none serves that port yet.
+ *   that no forward serves gets a same-port forward (the port the tab already
+ *   points at), if the host has it free.
  * - Forwards stay up while the project has open sessions or a Browser tab
  *   points at them; once the project's sessions have all ended, the forwards
  *   no tab uses are closed. A destroyed box's forwards are closed.
@@ -174,7 +175,13 @@ export class BoxDevForwards {
     return this.ensure(target.boxId, target.connection, projectPath, boxPort);
   }
 
-  private ensure(boxId: string, connection: BoxConnection, projectPath: string, boxPort: number, sameOnly = false): Promise<number> {
+  /**
+   * The forward of `boxPort` (made on first use). `hostPort: "any"` — every port the box names
+   * (sniffed from its output, reported as listening) — takes a free port the host picks: the box
+   * never chooses which host loopback port gets bound. `"same"` is only for a port a Browser tab
+   * already points at.
+   */
+  private ensure(boxId: string, connection: BoxConnection, projectPath: string, boxPort: number, hostPort: "any" | "same" = "any"): Promise<number> {
     let byPort = this.forwards.get(boxId);
     if (!byPort) {
       byPort = new Map();
@@ -186,11 +193,7 @@ export class BoxDevForwards {
       boxPort,
       projectPath,
       hostPort: null,
-      // The same port number when the host has it free, else any.
-      forward: connection.forwardToHost(boxPort, { hostPort: boxPort }).catch((error: unknown) => {
-        if (sameOnly) throw error;
-        return connection.forwardToHost(boxPort);
-      })
+      forward: hostPort === "same" ? connection.forwardToHost(boxPort, { hostPort: boxPort }) : connection.forwardToHost(boxPort)
     };
     byPort.set(boxPort, entry);
     const ports = byPort;
@@ -214,7 +217,7 @@ export class BoxDevForwards {
     if (!target) return;
     const byPort = this.forwards.get(target.boxId);
     if (byPort && [...byPort.values()].some((entry) => entry.hostPort === loop.port || entry.boxPort === loop.port)) return;
-    await this.ensure(target.boxId, target.connection, projectPath, loop.port, true).catch(() => undefined);
+    await this.ensure(target.boxId, target.connection, projectPath, loop.port, "same").catch(() => undefined);
   }
 
   /** Re-create the same-port forwards persisted Browser tabs of box projects point at (after a restart or reconnect). */

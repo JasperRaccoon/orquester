@@ -501,6 +501,62 @@ test("containment: `..` and symlinks out of the box project are refused", async 
   assert.equal(dotdot.statusCode, 403);
 });
 
+test("a box listing's names that are no single segment (`..`, separators, NUL) are dropped, never joined into paths", async (t) => {
+  const h = await harness(t);
+  await h.put("ok.txt", "ok");
+  const request = h.connection.request.bind(h.connection);
+  h.connection.request = (async (method: string, params: unknown, options?: unknown) => {
+    const result = await (request as (m: string, p: unknown, o?: unknown) => Promise<unknown>)(method, params, options);
+    if (method !== "fs.readdir") return result;
+    const fake = (name: string) => ({ name, kind: "file", size: 1, mtimeMs: 0 });
+    return [...(result as unknown[]), fake("../../../../etc/passwd"), fake(".."), fake("."), fake(""), fake("a\\b"), fake("nul\0x"), fake("sub/dir")];
+  }) as typeof h.connection.request;
+  const res = await h.inject({ method: "GET", url: `/api/fs?path=${q(h.projectPath)}` });
+  assert.equal(res.statusCode, 200, res.body);
+  const body = res.json() as FsListResponse;
+  assert.deepEqual(body.entries.map((entry) => entry.name), ["ok.txt"]);
+  assert.ok(body.entries.every((entry) => entry.path.startsWith(`${h.projectPath}/`)));
+});
+
+test("uploads route on where the file lands, and a host link into a box project is refused (never the host stub)", async (t) => {
+  const h = await harness(t);
+  const upload = (destDir: string, relativePath: string) =>
+    h.inject({
+      method: "POST",
+      url: `/api/fs/upload?destDir=${q(destDir)}&relativePath=${q(relativePath)}`,
+      headers: { "content-type": "application/octet-stream" },
+      payload: Buffer.from("x")
+    });
+  // A folder upload into the workspace whose first segment is the box project's folder.
+  const intoWorkspace = await upload(join(h.workspacesDir, "acme"), "engine/a.txt");
+  assert.equal(intoWorkspace.statusCode, 400, intoWorkspace.body);
+  assert.equal(intoWorkspace.json().code, "INVALID_REQUEST");
+  await hostStubIsEmpty(h);
+  await assert.rejects(h.get("a.txt"));
+  // Next to the box project, a host upload still goes to the host.
+  const beside = await upload(join(h.workspacesDir, "acme"), "notes/b.txt");
+  assert.equal(beside.statusCode, 200, beside.body);
+  assert.equal(await readFile(join(h.workspacesDir, "acme", "notes", "b.txt"), "utf8"), "x");
+
+  // A host symlink to the box project's folder: every route refuses it.
+  const alias = join(h.workspacesDir, "acme", "alias");
+  await symlink(h.projectPath, alias);
+  await h.put("kept.txt", "box");
+  const viaAlias = [
+    await h.inject({ method: "GET", url: `/api/fs?path=${q(alias)}` }),
+    await h.inject({ method: "GET", url: `/api/fs/read?path=${q(join(alias, "kept.txt"))}` }),
+    await h.inject({ method: "PUT", url: "/api/fs/write", payload: { path: join(alias, "x.txt"), content: "x" } }),
+    await h.inject({ method: "POST", url: "/api/fs/create", payload: { path: join(alias, "d"), kind: "dir" } }),
+    await upload(alias, "y.txt"),
+    await upload(join(h.workspacesDir, "acme"), "alias/z.txt")
+  ];
+  for (const res of viaAlias) {
+    assert.equal(res.statusCode, 403, res.body);
+    assert.equal(res.json().code, "FS_FORBIDDEN");
+  }
+  await hostStubIsEmpty(h);
+});
+
 test("a box that is not connected answers 409 BOX_NOT_READY; a destroyed one 410", async (t) => {
   const h = await harness(t);
   const path = await h.put("a.txt", "a");

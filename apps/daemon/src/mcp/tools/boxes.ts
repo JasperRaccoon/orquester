@@ -106,6 +106,17 @@ function ownBoxScope(ctx: ScopeContext, reads: ScopeClaim["reads"], writes: bool
   return { projects: [], sessions: ctx.caller.kind === "thread" ? [ctx.caller.threadId] : [], self: "allow", reads, writes, causesTurnIn: [] };
 }
 
+/**
+ * The claim of a transfer: the box call's, plus the host path it reads (upload) or writes
+ * (download). The gate classifies that path like any other tool's — outside every project is
+ * refused; another project's is a card below Full access — before the daemon's own check that it
+ * lies in this chat's project (`boxes/temporary/tools.ts`).
+ */
+function transferScope(args: { local_path: string }, ctx: ScopeContext, reads: ScopeClaim["reads"], writes: boolean): ScopeClaim {
+  const scope = ownBoxScope(ctx, reads, writes);
+  return ctx.caller.kind === "thread" ? { ...scope, paths: [hostPath(ctx.caller, args.local_path)] } : scope;
+}
+
 /** A host path the agent gave: relative ones are taken from its cwd (else its project root). */
 function hostPath(caller: ThreadCaller, path: string): string {
   if (caller.projectPath === "") throw new ToolError("NO_PROJECT", "This chat has no project, so there is nowhere on the host to move files from or to.");
@@ -504,7 +515,7 @@ const boxUpload = defineTool({
   audiences: ["chat"],
   toolset: "boxes",
   tier: "act",
-  scope: async (_args, ctx) => ownBoxScope(ctx, "content", true),
+  scope: async (args, ctx) => transferScope(args, ctx, "content", true),
   annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
   resultKind: "json",
   async run(args, { api, caller, signal }) {
@@ -518,12 +529,13 @@ const boxUpload = defineTool({
 const boxDownload = defineTool({
   name: "box_download",
   title: "Copy out of a box",
-  description: "Copy a file or directory from one of this chat's boxes into its project, streamed. local_path becomes the copy: an existing file is replaced, an existing directory is refused.",
+  description:
+    "Copy a file or directory from one of this chat's boxes into its project, streamed. local_path becomes the copy: an existing file is replaced, an existing directory is refused. Never into git metadata (.git), and never a directory that carries any.",
   input: transferInput,
   audiences: ["chat"],
   toolset: "boxes",
   tier: "act",
-  scope: async (_args, ctx) => ownBoxScope(ctx, "content", true),
+  scope: async (args, ctx) => transferScope(args, ctx, "content", true),
   annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
   resultKind: "json",
   async run(args, { api, caller, signal }) {

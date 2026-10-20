@@ -8,10 +8,10 @@
  * URL from the host.
  *
  * Env: never the host's. git gets the box user's HOME (so the box's own
- * `~/.gitconfig` — the workspace identity the box setup writes — applies) and
- * {@link boxGitEnv}: HTTPS credentials come from the host's `git.credential`
- * handler, SSH signatures from the host's ssh-agent channel (`../git-auth.ts`);
- * no key or token is ever in the box.
+ * `~/.gitconfig` — the workspace identity, HTTPS → SSH rewrites and pinned
+ * host keys the box setup writes — applies). Remote access is SSH only, signed
+ * by the host's restricted ssh-agent channel (`../git-auth.ts`); no key or
+ * token is ever in the box.
  */
 
 import { posix } from "node:path";
@@ -21,7 +21,6 @@ import { hostToBoxPath } from "@orquester/api";
 
 import type { GitExecRoute, GitRouteResolver, GitRunner, UntrackedFs } from "../../../git.ts";
 import type { BoxConnection, BoxRegistry } from "../../contracts.ts";
-import { boxGitEnv } from "./env.ts";
 import { runInBox } from "./run.ts";
 
 const routes = new WeakMap<BoxConnection, GitExecRoute>();
@@ -51,7 +50,7 @@ export function boxGitRoute(connection: BoxConnection): GitExecRoute {
   const runner: GitRunner = (file, args, options) =>
     runInBox(connection, file, args, {
       cwd: options.cwd,
-      env: { HOME: connection.sys.home, ...boxGitEnv(connection.sys), ...(options.env as Record<string, string>) },
+      env: { HOME: connection.sys.home, ...(options.env as Record<string, string>) },
       maxBuffer: options.maxBuffer,
       ...(options.timeout !== undefined ? { timeout: options.timeout } : {})
     });

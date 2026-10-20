@@ -274,8 +274,10 @@ export function localBoxConnection(options: LocalBoxConnectionOptions = {}): Loc
       requireConnected();
       await mkdir(path, { recursive: true });
       const child = spawn("tar", ["-xf", "-", "-C", path], { stdio: ["pipe", "ignore", "ignore"] });
+      // Listened for before the pipeline: a tar that exits as soon as its input ends is not missed.
+      const exited = new Promise<void>((resolve, reject) => child.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`tar exited ${code}`)))));
       await pipeline(tar, child.stdin);
-      await new Promise<void>((resolve, reject) => child.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`tar exited ${code}`)))));
+      await exited;
     },
     onEvent(name: string, listener: (data: unknown) => void): () => void {
       events.on(name, listener);
