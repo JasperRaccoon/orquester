@@ -477,8 +477,7 @@ class AgentHostBoxesImpl implements AgentHostBoxes {
   /** A detached process id: unique per launch, readable in the box's process list. */
   newProcId(input: Pick<BoxLaunchInput, "threadId" | "agent">): string {
     this.procSeq += 1;
-    const thread = input.threadId.replace(/[^A-Za-z0-9-]/g, "").slice(0, 36);
-    return `agent-${input.agent}-${thread}-${this.now().toString(36)}-${this.procSeq.toString(36)}`;
+    return `${this.procIdPrefix(input)}${this.now().toString(36)}-${this.procSeq.toString(36)}`;
   }
 
   cachedVersion(connection: BoxConnection, bin: string, probe: () => Promise<string | null>): Promise<string | null> {
@@ -535,8 +534,35 @@ class AgentHostBoxesImpl implements AgentHostBoxes {
       }
     }
 
+    if (input.sync !== false && input.agent !== "opencode") await this.sweepThreadProcs(connection, input);
     const cli = await this.resolveCli(connection, input);
     return new BoxLaunch(this, input, connection, box, cli.bin, cli.path, accountId);
+  }
+
+  /**
+   * A thread starts its CLI only once its previous session is gone (one live session per
+   * thread), so a detached process of the thread still running in the box is a leftover: a host
+   * that died without its teardown never stopped it, and nothing would ever reattach to it. It
+   * is stopped here, before the new one starts (never OpenCode's, whose server a project's
+   * threads share). Best-effort: a box that cannot list its processes keeps them.
+   */
+  private async sweepThreadProcs(connection: BoxConnection, input: BoxLaunchInput): Promise<void> {
+    const prefix = this.procIdPrefix(input);
+    const procs = await connection.request("proc.list", {}).catch(() => []);
+    for (const proc of procs) {
+      if (!proc.procId.startsWith(prefix)) continue;
+      if (proc.running) {
+        this.logger.warn(`box ${connection.boxId}: stopping a ${input.agent} process an earlier host left running for ${input.threadId}`);
+        await connection.request("proc.signal", { procId: proc.procId, signal: "SIGKILL" }).catch(() => undefined);
+      }
+      await connection.request("proc.release", { procId: proc.procId }).catch(() => undefined);
+    }
+  }
+
+  /** Every detached process id of a thread's agent starts with this. */
+  private procIdPrefix(input: Pick<BoxLaunchInput, "threadId" | "agent">): string {
+    const thread = input.threadId.replace(/[^A-Za-z0-9-]/g, "").slice(0, 36);
+    return `agent-${input.agent}-${thread}-`;
   }
 
   private resolveCli(connection: BoxConnection, input: BoxLaunchInput): Promise<{ bin: string; path: string }> {

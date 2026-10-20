@@ -12,7 +12,7 @@ import { renderGrokOverlayConfig } from "../adapters/grok/launch.ts";
 import { createAgentHostBoxes, BoxLaunchError } from "./index.ts";
 import { readMcpBridgeEntry } from "./mcp-bridge-registry.ts";
 import { BOX_TOKEN_RESTART_MARGIN_MS } from "./token-policy.ts";
-import { recordingSync, recordingTokens, redirectedBoxConnection } from "./testing.ts";
+import { reattachableBoxConnection, recordingSync, recordingTokens, redirectedBoxConnection } from "./testing.ts";
 
 const quiet: AdapterLogger = { debug: () => undefined, info: () => undefined, warn: () => undefined, error: () => undefined };
 
@@ -295,4 +295,42 @@ test("Grok's box overlay carries the login command; the command is quoted for th
   assert.match(overlay, /\[auth\]\nauth_provider_command = "'\/var\/lib\/orq agent\/orq-agent' token grok --account acct-7"/);
   // A host launch's overlay has no [auth] table.
   assert.doesNotMatch(renderGrokOverlayConfig(), /\[auth\]/);
+});
+
+test("a thread's process an earlier host left running in the box is stopped before its CLI starts again", async () => {
+  const home = await boxHome(["claude"]);
+  const connection = reattachableBoxConnection({ sys: { home, shell: join(home, "sh"), agentPath: "/opt/orq-agent" } });
+  const leftover = connection.exec({
+    command: process.execPath,
+    args: ["-e", "setInterval(() => {}, 1000)"],
+    detach: { procId: "agent-claude-t9-old-1" }
+  });
+  const other = connection.exec({
+    command: process.execPath,
+    args: ["-e", "setInterval(() => {}, 1000)"],
+    detach: { procId: "agent-claude-t10-old-1" }
+  });
+  const leftoverExit = new Promise<string | null>((resolve) => leftover.once("exit", (_code, signal) => resolve(signal)));
+  const boxes = createAgentHostBoxes({
+    appdir: join(home, "appdir"),
+    connector: () => connection,
+    tokens: recordingTokens({ accessToken: "t", expiresAt: null }),
+    sync: recordingSync(),
+    logger: quiet
+  });
+  try {
+    await boxes.launch({
+      threadId: "t9",
+      agent: "claude",
+      box: launchBox(connection),
+      home: { kind: "account", accountId: "a", path: "/accounts/claude/a/home" },
+      cwd: "/w/p"
+    });
+    assert.equal(await leftoverExit, "SIGKILL");
+    // Another thread's process is not this launch's to stop.
+    assert.equal(other.exitCode, null);
+    assert.equal(other.signalCode, null);
+  } finally {
+    await connection.killAll();
+  }
 });
