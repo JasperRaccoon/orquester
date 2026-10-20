@@ -505,6 +505,29 @@ test("box_upload / box_download: relative host paths from the chat's cwd; refusa
   assert.ok(!homeless.ok && homeless.code === "NO_PROJECT");
 });
 
+test("box_upload / box_download claim local_path: outside every project refused, another project a card below Full access", async () => {
+  mkdirSync(join(ROOT, "acme", "other"), { recursive: true });
+  for (const tool of ["box_download", "box_upload"] as const) {
+    const { api, ops } = fakeApi();
+    const outside = await call(api, tool, { box_id: "tmp-1", remote_path: "out", local_path: join(ROOT, "loose.txt") });
+    assert.ok(!outside.ok && outside.code === "PERMISSION_DENIED", tool);
+    assert.equal(ops.length, 0, "refused before the daemon is asked");
+
+    const port = new FakeApprovalPort({ outcome: "denied", approvalId: "", reason: "no" });
+    const elsewhere = await call(api, tool, { box_id: "tmp-1", remote_path: "out", local_path: join(ROOT, "acme", "other", ".git", "config") }, { caller: chat({ runtimeMode: "auto" }), port });
+    assert.equal(port.cards.length, 1, `${tool}: a card for another project's path`);
+    assert.equal(port.cards[0]!.family, "cross-project");
+    assert.ok(!elsewhere.ok, tool);
+    assert.equal(ops.length, 0);
+
+    // In its own project the call goes on to the daemon (which owns the .git refusal).
+    const own = new FakeApprovalPort();
+    await call(api, tool, { box_id: "tmp-1", remote_path: "out", local_path: "artifact.bin" }, { caller: chat({ runtimeMode: "approval-required" }), port: own });
+    assert.equal(own.cards.length, 0);
+    assert.equal(ops.length, 1);
+  }
+});
+
 test("box_forward_port returns the host loopback URL; without the box backend every operation is BOXES_DISABLED", async () => {
   const { api } = fakeApi();
   const forward = await call(api, "box_forward_port", { box_id: "tmp-1", port: 5173 });

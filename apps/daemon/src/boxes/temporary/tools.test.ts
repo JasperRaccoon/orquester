@@ -443,6 +443,58 @@ test("download: a directory whose only entry has its own name keeps its shape", 
   assert.equal(readFileSync(join(PROJECT, "same-copy", "same", "f"), "utf8"), "f");
 });
 
+test("download: never into git metadata — a .git path (any spelling), through a symlink, inside a git directory, or a directory carrying one", async () => {
+  const { tools } = world();
+  const repo = join(PROJECT, "repo");
+  mkdirSync(join(repo, ".git", "hooks"), { recursive: true });
+  writeFileSync(join(repo, ".git", "HEAD"), "ref: refs/heads/main\n");
+  mkdirSync(join(repo, ".git", "objects"), { recursive: true });
+  mkdirSync(join(repo, ".git", "refs"), { recursive: true });
+  writeFileSync(join(repo, ".git", "config"), "[core]\n");
+  // A bare repository elsewhere in the project, and a link that leads into a .git.
+  mkdirSync(join(PROJECT, "mirror.git", "objects"), { recursive: true });
+  mkdirSync(join(PROJECT, "mirror.git", "refs"), { recursive: true });
+  writeFileSync(join(PROJECT, "mirror.git", "HEAD"), "ref: refs/heads/main\n");
+  symlinkSync(join(repo, ".git"), join(PROJECT, "meta-link"));
+  mkdirSync(join(BOX, "evil"), { recursive: true });
+  writeFileSync(join(BOX, "evil", "pre-commit"), "#!/bin/sh\ntouch /tmp/pwned\n", { mode: 0o755 });
+  writeFileSync(join(BOX, "evil", "config"), "[core]\n\tfsmonitor = /tmp/x\n");
+
+  for (const localPath of [
+    join(repo, ".git", "config"),
+    join(repo, ".git", "hooks", "pre-commit"),
+    join(repo, ".GIT", "hooks", "post-checkout"),
+    join(repo, ".git. ", "config"),
+    join(repo, ".git"),
+    "repo/.git/hooks/pre-push",
+    join(PROJECT, "meta-link", "hooks", "pre-commit"),
+    join(PROJECT, "mirror.git", "config"),
+    join(PROJECT, "mirror.git", "hooks", "post-update")
+  ]) {
+    const result = await tools.download("box-a", { remotePath: join(BOX, "evil", "pre-commit"), localPath: localPath.startsWith("/") ? localPath : join(PROJECT, localPath) }, { principal: agent() });
+    assert.ok(!result.ok && result.code === "PERMISSION_DENIED", `${localPath} is refused`);
+  }
+  assert.equal(readFileSync(join(repo, ".git", "config"), "utf8"), "[core]\n", "nothing was written");
+  assert.deepEqual(readdirSync(join(repo, ".git", "hooks")), []);
+
+  // A directory download that carries a .git (a nested repo), or is itself a git directory.
+  mkdirSync(join(BOX, "nested", "pkg", ".git", "hooks"), { recursive: true });
+  writeFileSync(join(BOX, "nested", "pkg", ".git", "config"), "[core]\n\tfsmonitor = /tmp/x\n");
+  writeFileSync(join(BOX, "nested", "pkg", "index.js"), "1");
+  mkdirSync(join(BOX, "bare", "objects"), { recursive: true });
+  mkdirSync(join(BOX, "bare", "refs"), { recursive: true });
+  writeFileSync(join(BOX, "bare", "HEAD"), "ref: refs/heads/main\n");
+  for (const remote of ["nested", "bare"]) {
+    const result = await tools.download("box-a", { remotePath: join(BOX, remote), localPath: join(PROJECT, "downloads", remote) }, { principal: agent() });
+    assert.ok(!result.ok && result.code === "PERMISSION_DENIED", `${remote} is refused`);
+  }
+  assert.deepEqual(readdirSync(join(PROJECT, "downloads")), [], "nothing was moved in, no staging left");
+
+  // Ordinary files next to a repo still download.
+  const ok = await tools.download("box-a", { remotePath: join(BOX, "evil", "config"), localPath: join(repo, "config.example") }, { principal: agent() });
+  assert.ok(ok.ok, ok.ok ? "" : ok.message);
+});
+
 // ---------------------------------------------------------------------------
 // Port forwards
 // ---------------------------------------------------------------------------

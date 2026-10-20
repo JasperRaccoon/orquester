@@ -124,7 +124,9 @@ test("status, diff, stage, commit, log and push run in the box with the box's HO
       assert.equal(e.env?.GIT_SSH_COMMAND, undefined);
       assert.equal(e.env?.PATH, undefined, "the host env is never passed");
     }
-    const pushExec = gitExecs.find((e) => e.args?.[0] === "push");
+    // In the box too, git never asks a repo-configured fsmonitor (its hooks are the box's own business).
+    for (const e of gitExecs) assert.deepEqual(e.args?.slice(0, 2), ["-c", "core.fsmonitor=false"]);
+    const pushExec = gitExecs.find((e) => e.args?.[2] === "push");
     assert.equal(pushExec?.env?.GIT_TERMINAL_PROMPT, "0");
   } finally {
     await rm(f.root, { recursive: true, force: true });
@@ -163,7 +165,7 @@ test("a box that is not connected is a 409 BOX_NOT_READY GitError; host projects
       route: createBoxGitRouteResolver(f.boxes.registry)
     });
     assert.equal(await host.isRepo(join(f.root, "elsewhere")), true);
-    assert.deepEqual(hostCalls, [["rev-parse", "--is-inside-work-tree"]]);
+    assert.deepEqual(hostCalls, [["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "rev-parse", "--is-inside-work-tree"]]);
   } finally {
     await rm(f.root, { recursive: true, force: true });
   }
@@ -194,7 +196,7 @@ test("the watcher's polling reads status in the box and announces a change", asy
     try {
       const status = await changed;
       assert.ok(status.files.some((file) => file.path === "later.txt"));
-      assert.ok(f.execs.some((e) => e.command === "git" && e.args?.[0] === "status"));
+      assert.ok(f.execs.some((e) => e.command === "git" && e.args?.[2] === "status"));
     } finally {
       clearInterval(keepAlive);
       watcher.stop();
