@@ -4,19 +4,23 @@ import { Check, ChevronLeft, MessageCircleQuestion, Paperclip, X } from "lucide-
 import type { AttachmentRef, PendingUserInput, UserInputQuestion } from "@orquester/api/agent-chat";
 import { MAX_TURN_ATTACHMENTS } from "@orquester/api/agent-chat";
 
+import { useElementWidth } from "../../../hooks/use-element-width";
 import { cn } from "../../../lib/cn";
 import { anotherLayerOwnsTheKeyboard } from "../../attention/GlobalShortcutListener";
 import { insideKeyboardOwner } from "../../../lib/keyboard-surfaces";
 import { BannerCard, ChatIconButton, DisclosureChevron, DisclosurePanel, Kbd } from "../primitives";
 import { isChatTabListenerActive } from "../composer/tab-visibility";
+import { ChatInlineMarkdown, ChatMarkdown } from "../timeline/markdown/ChatMarkdown";
 import {
   allowsAnswerAttachments,
   allowsCustomAnswer,
   buildPendingUserInputAnswers,
   carryDisplacedCustomAnswerIntoPrompt,
+  customAnswerSubmitsOnEnter,
   derivePendingUserInputProgress,
   isOtherOption,
   isSecretQuestion,
+  previewOptionFor,
   questionAttachmentKey,
   questionOptionValue,
   questionShortcutOption,
@@ -24,6 +28,7 @@ import {
   togglePendingUserInputOptionSelection,
   type PendingAnswerDraft
 } from "./pending-answer";
+import { QuestionOptionPreview } from "./QuestionOptionPreview";
 import { CARD_INPUT_CLASS, SECRET_INPUT_ATTRIBUTES } from "./secret-input";
 
 /** A file staged against one question, with the upload's own state. */
@@ -53,10 +58,41 @@ export interface QuestionCardProps {
   compact?: boolean;
   /** `false` while this tab is open but not visible — gates the digit keys. */
   active?: boolean;
+  /**
+   * Opens a workspace-relative link of the question's markdown in an editor
+   * tab, as the timeline's messages do. Without it such a link navigates.
+   */
+  onOpenFile?: ((path: string) => void) | undefined;
 }
 
 /** 200 ms: long enough to see the tick land, short enough not to feel slow. */
 const AUTO_ADVANCE_MS = 200;
+
+/**
+ * The free-text answer grows with what is typed up to about six lines, then
+ * scrolls — a long answer must not push the options out of the card.
+ */
+const CUSTOM_ANSWER_MAX_PX = 136;
+
+/** Below this card width the preview sits under the options, not beside them. */
+const PREVIEW_SIDE_BY_SIDE_MIN_PX = 520;
+const fitsPreviewBeside = (width: number): boolean => width >= PREVIEW_SIDE_BY_SIDE_MIN_PX;
+
+/** Arrow keys move between the options, so a preview can be browsed from the keyboard. */
+function focusSiblingOption(event: React.KeyboardEvent<HTMLElement>): void {
+  if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+  if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+  const target = event.target;
+  if (!(target instanceof HTMLElement) || !target.hasAttribute("data-question-option")) return;
+  const options = Array.from(
+    event.currentTarget.querySelectorAll<HTMLButtonElement>("[data-question-option]:not(:disabled)")
+  );
+  const index = options.indexOf(target as HTMLButtonElement);
+  const next = options[index + (event.key === "ArrowDown" ? 1 : -1)];
+  if (!next) return;
+  event.preventDefault();
+  next.focus();
+}
 
 /**
  * The question card.
@@ -80,6 +116,13 @@ const AUTO_ADVANCE_MS = 200;
  *    On mobile the one exception is explicit — the "Write a custom answer"
  *    button.
  *
+ * The question is the chat's markdown, like T3's: links, workspace images,
+ * code, tables. An option's label and description wrap rather than truncate
+ * ("Move them (Recommended)" and its trade-off are the answer), and the
+ * description is inline markdown — it sits inside the option's button. When
+ * options carry a `preview` (Claude), the one being looked at is shown in a
+ * pane beside the options, or under them on a narrow card.
+ *
  * *T3: `ComposerPendingUserInputPanel.tsx:75-82, 118-135, 137-166, 247-272`.*
  */
 export function QuestionCard({
@@ -92,7 +135,8 @@ export function QuestionCard({
   onDismiss,
   onCarryTextToDraft,
   compact = false,
-  active
+  active,
+  onOpenFile
 }: QuestionCardProps): React.ReactElement | null {
   const [draftAnswers, setDraftAnswers] = React.useState<Record<string, PendingAnswerDraft>>({});
   const [questionIndex, setQuestionIndex] = React.useState(0);
@@ -102,11 +146,25 @@ export function QuestionCard({
     optionValue: string;
   } | null>(null);
   const advanceTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
-  const cardRef = React.useRef<HTMLDivElement>(null);
+  const cardRef = React.useRef<HTMLDivElement | null>(null);
+  const [measureCard, previewBeside] = useElementWidth<HTMLDivElement, boolean>(fitsPreviewBeside);
+  const setCardRef = React.useCallback(
+    (node: HTMLDivElement | null) => {
+      cardRef.current = node;
+      measureCard(node);
+    },
+    [measureCard]
+  );
   /** Compact layout only: the custom field starts behind a tap (R8-B2). */
   const [customFieldOpen, setCustomFieldOpen] = React.useState(false);
   const customAnswerRef = React.useRef<HTMLInputElement | HTMLTextAreaElement | null>(null);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
+  /**
+   * The option the user is looking at — focused, hovered or just picked — and
+   * so whose preview is shown. Keyed by question, like the collapse: the next
+   * question opens on its own options, not on a stale value.
+   */
+  const [inspected, setInspected] = React.useState<{ questionId: string; optionValue: string } | null>(null);
 
   // A new request is a new card: everything about the old one is gone.
   const requestId = request.requestId;
@@ -116,6 +174,7 @@ export function QuestionCard({
     setCollapsedQuestionId(null);
     setOptimisticSelection(null);
     setCustomFieldOpen(false);
+    setInspected(null);
   }, [requestId]);
 
   React.useEffect(
@@ -173,6 +232,8 @@ export function QuestionCard({
       if (displaced.length > 0) onCarryTextToDraft(displaced);
 
       const option = question.options.find((entry) => questionOptionValue(entry) === optionValue);
+      // A digit picks without focusing: the preview follows the pick anyway.
+      setInspected({ questionId: question.id, optionValue });
       setDraftAnswers((current) => ({
         ...current,
         [question.id]: togglePendingUserInputOptionSelection(question, current[question.id], optionValue)
@@ -243,6 +304,23 @@ export function QuestionCard({
     if (optimisticSelection.questionId !== activeQuestion.id) setOptimisticSelection(null);
   }, [activeQuestion, optimisticSelection]);
 
+  // Auto-grow, as the composer's own field does (`field-sizing` is not in
+  // every engine the web client ships to): to the content, capped, then it
+  // scrolls. Unlaid-out (a hidden tab) measures 0 and is left alone.
+  const customAnswerText = mergedProgress.customAnswer;
+  const activeQuestionId = activeQuestion?.id;
+  React.useLayoutEffect(() => {
+    const element = customAnswerRef.current;
+    if (!(element instanceof HTMLTextAreaElement)) return;
+    element.style.height = "auto";
+    if (element.scrollHeight === 0) {
+      element.style.removeProperty("height");
+      return;
+    }
+    const borders = element.offsetHeight - element.clientHeight;
+    element.style.height = `${Math.min(CUSTOM_ANSWER_MAX_PX, element.scrollHeight + borders)}px`;
+  }, [customAnswerText, activeQuestionId, customFieldOpen, isCollapsed]);
+
   if (!activeQuestion) return null;
 
   const customAllowed = allowsCustomAnswer(activeQuestion);
@@ -250,6 +328,13 @@ export function QuestionCard({
   const secret = isSecretQuestion(activeQuestion);
   const customAnswerActive = mergedProgress.customAnswer.trim().length > 0;
   const total = request.questions.length;
+  const previewOption = previewOptionFor(activeQuestion, {
+    inspectedValue: inspected?.questionId === activeQuestion.id ? inspected.optionValue : null,
+    selectedValues: customAnswerActive ? [] : mergedProgress.selectedOptionValues
+  });
+  // The phone keeps the preview under the options whatever the card measures.
+  const sideBySide = previewOption !== null && !compact && previewBeside === true;
+  const inspect = (optionValue: string) => setInspected({ questionId: activeQuestion.id, optionValue });
 
   const submit = () => {
     const answers = buildPendingUserInputAnswers(request.questions, effectiveDraftAnswers);
@@ -268,6 +353,30 @@ export function QuestionCard({
     isResponding ||
     attachmentsBlocked ||
     (mergedProgress.isLastQuestion ? !mergedProgress.isComplete : !mergedProgress.canAdvance);
+
+  const setCustomAnswer = (value: string) =>
+    setDraftAnswers((current) => ({
+      ...current,
+      [activeQuestion.id]: setPendingUserInputCustomAnswer(current[activeQuestion.id], value)
+    }));
+
+  // Enter answers, Shift+Enter is a newline — the composer's convention, IME
+  // and phone rules included (`customAnswerSubmitsOnEnter`).
+  const onCustomAnswerKeyDown = (event: React.KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+    const submits = customAnswerSubmitsOnEnter({
+      key: event.key,
+      shiftKey: event.shiftKey,
+      isComposing: event.nativeEvent.isComposing,
+      keyCode: event.keyCode,
+      multiline: !secret,
+      isMobile: compact
+    });
+    if (!submits) return;
+    event.preventDefault();
+    if (primaryDisabled) return;
+    if (mergedProgress.isLastQuestion) submit();
+    else advance();
+  };
 
   return (
     <BannerCard
@@ -304,53 +413,88 @@ export function QuestionCard({
          * A dozen options is normal for both Claude and Codex.
          */}
         <div
-          ref={cardRef}
+          ref={setCardRef}
           className="ac-scroll-thin max-h-[min(24rem,40dvh)] min-w-0 overflow-y-auto pb-0.5"
         >
-          <p className="break-words text-sm text-neutral-200">{activeQuestion.question}</p>
+          <ChatMarkdown
+            text={activeQuestion.question}
+            onOpenFile={onOpenFile}
+            className="text-neutral-200"
+          />
           {activeQuestion.multiSelect ? (
             <p className="mt-1 text-[11px] text-neutral-500">Select one or more options.</p>
           ) : null}
 
-          <div className="mt-2 space-y-0.5">
-            {activeQuestion.options.map((option, index) => {
-              const optionValue = questionOptionValue(option);
-              const optimistic =
-                optimisticSelection?.questionId === activeQuestion.id &&
-                optimisticSelection.optionValue === optionValue;
-              const selected =
-                optimistic ||
-                (!customAnswerActive && mergedProgress.selectedOptionValues.includes(optionValue));
-              const shortcut = index < 9 ? index + 1 : null;
-              return (
-                <button
-                  key={`${activeQuestion.id}:${optionValue}`}
-                  type="button"
-                  disabled={isResponding}
-                  onClick={() => selectOption(activeQuestion, optionValue)}
-                  className={cn(
-                    "group flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left",
-                    "transition-colors duration-150 focus:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-neutral-500",
-                    selected
-                      ? "bg-neutral-800/60 text-neutral-100"
-                      : "bg-transparent text-neutral-300 hover:bg-neutral-800/40",
-                    isResponding ? "cursor-not-allowed opacity-50" : "cursor-pointer"
-                  )}
-                >
-                  <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-                    <span className="truncate text-sm font-medium">{option.label}</span>
-                    {option.description && option.description !== option.label ? (
-                      <span className="text-[11px] text-neutral-500">{option.description}</span>
+          <div
+            className={cn(
+              "mt-2",
+              sideBySide && "grid grid-cols-[minmax(0,2fr)_minmax(0,3fr)] items-start gap-3"
+            )}
+          >
+            <div className="min-w-0 space-y-0.5" onKeyDown={focusSiblingOption}>
+              {activeQuestion.options.map((option, index) => {
+                const optionValue = questionOptionValue(option);
+                const optimistic =
+                  optimisticSelection?.questionId === activeQuestion.id &&
+                  optimisticSelection.optionValue === optionValue;
+                const selected =
+                  optimistic ||
+                  (!customAnswerActive && mergedProgress.selectedOptionValues.includes(optionValue));
+                const previewed =
+                  previewOption !== null && questionOptionValue(previewOption) === optionValue;
+                const shortcut = index < 9 ? index + 1 : null;
+                return (
+                  <button
+                    key={`${activeQuestion.id}:${optionValue}`}
+                    type="button"
+                    disabled={isResponding}
+                    data-question-option=""
+                    aria-pressed={selected}
+                    onClick={() => selectOption(activeQuestion, optionValue)}
+                    onFocus={() => inspect(optionValue)}
+                    onMouseEnter={() => inspect(optionValue)}
+                    className={cn(
+                      "group flex w-full items-start gap-2 rounded-md px-2.5 py-2 text-left",
+                      "transition-colors duration-150 focus:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-neutral-500",
+                      selected
+                        ? "bg-neutral-800/60 text-neutral-100"
+                        : previewed
+                          ? "bg-neutral-800/30 text-neutral-200"
+                          : "bg-transparent text-neutral-300 hover:bg-neutral-800/40",
+                      isResponding ? "cursor-not-allowed opacity-50" : "cursor-pointer"
+                    )}
+                  >
+                    <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                      <span className="break-words text-sm font-medium [overflow-wrap:anywhere]">
+                        {option.label}
+                      </span>
+                      {option.description && option.description !== option.label ? (
+                        <ChatInlineMarkdown
+                          text={option.description}
+                          className="text-[11px] leading-snug text-neutral-500"
+                        />
+                      ) : null}
+                    </span>
+                    {/* `mt-0.5` sits the mark on the label's first line when it wraps. */}
+                    {selected ? (
+                      <Check size={14} className="mt-0.5 shrink-0 text-info" aria-hidden />
+                    ) : shortcut !== null ? (
+                      <Kbd variant="plain" className="mt-px">
+                        {shortcut}
+                      </Kbd>
                     ) : null}
-                  </span>
-                  {selected ? (
-                    <Check size={14} className="shrink-0 text-info" aria-hidden />
-                  ) : shortcut !== null ? (
-                    <Kbd variant="plain">{shortcut}</Kbd>
-                  ) : null}
-                </button>
-              );
-            })}
+                  </button>
+                );
+              })}
+            </div>
+            {previewOption ? (
+              <QuestionOptionPreview
+                option={previewOption}
+                onOpenFile={onOpenFile}
+                // Beside the options it stays in view while they scroll.
+                className={sideBySide ? "sticky top-0" : "mt-2"}
+              />
+            ) : null}
           </div>
 
           {customAllowed ? (
@@ -381,31 +525,34 @@ export function QuestionCard({
                 >
                   {mergedProgress.customAnswer || "Write a custom answer"}
                 </button>
-              ) : (
+              ) : secret ? (
+                /*
+                 * A secret stays a masked, single-line `<input>`: a textarea
+                 * cannot be masked, and its value would sit on screen.
+                 */
                 <input
                   ref={customAnswerRef as React.RefObject<HTMLInputElement>}
-                  {...(secret ? SECRET_INPUT_ATTRIBUTES : { type: "text" })}
+                  {...SECRET_INPUT_ATTRIBUTES}
                   value={mergedProgress.customAnswer}
                   disabled={isResponding}
-                  placeholder={secret ? "Enter the value (hidden)" : "Write a custom answer"}
-                  aria-label={secret ? "Custom answer (hidden)" : "Custom answer"}
-                  onChange={(event) =>
-                    setDraftAnswers((current) => ({
-                      ...current,
-                      [activeQuestion.id]: setPendingUserInputCustomAnswer(
-                        current[activeQuestion.id],
-                        event.target.value
-                      )
-                    }))
-                  }
-                  onKeyDown={(event) => {
-                    if (event.key !== "Enter" || event.shiftKey) return;
-                    event.preventDefault();
-                    if (primaryDisabled) return;
-                    if (mergedProgress.isLastQuestion) submit();
-                    else advance();
-                  }}
+                  placeholder="Enter the value (hidden)"
+                  aria-label="Custom answer (hidden)"
+                  onChange={(event) => setCustomAnswer(event.target.value)}
+                  onKeyDown={onCustomAnswerKeyDown}
                   className={CARD_INPUT_CLASS}
+                />
+              ) : (
+                <textarea
+                  ref={customAnswerRef as React.RefObject<HTMLTextAreaElement>}
+                  rows={1}
+                  value={mergedProgress.customAnswer}
+                  disabled={isResponding}
+                  placeholder="Write a custom answer"
+                  aria-label="Custom answer"
+                  onChange={(event) => setCustomAnswer(event.target.value)}
+                  onKeyDown={onCustomAnswerKeyDown}
+                  className={cn(CARD_INPUT_CLASS, "ac-scroll-thin block resize-none overflow-y-auto leading-5")}
+                  style={{ maxHeight: CUSTOM_ANSWER_MAX_PX }}
                 />
               )}
             </div>
