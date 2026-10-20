@@ -280,7 +280,12 @@ class BoxAttempt {
   constructor(
     readonly attemptDir: string,
     readonly state: BoxAttemptState,
-    private readonly runner: { hub: BoxSandboxDeps["hub"]; logger?: WorkflowLogger }
+    private readonly runner: {
+      hub: BoxSandboxDeps["hub"];
+      logger?: WorkflowLogger;
+      /** An attempt given up while its box was away: its process is owed a SIGKILL and a release. */
+      onAbandoned(state: BoxAttemptState): void;
+    }
   ) {
     this.offset = state.resumeOffset;
     const maxLog = WORKFLOW_LIMITS.maxLogBytes;
@@ -431,8 +436,9 @@ class BoxAttempt {
         return;
       }
       if (this.state.abandoned) {
-        await connection.request("proc.signal", { procId: this.state.procId, signal: "SIGKILL" }).catch(() => undefined);
-        await connection.request("proc.release", { procId: this.state.procId }).catch(() => undefined);
+        // Given up before (an earlier daemon run): nothing more to read; its process is reaped.
+        this.runner.onAbandoned(this.state);
+        await this.finishLost();
         return;
       }
       const start = Math.max(this.offset, info.bufferStart);
@@ -518,6 +524,7 @@ class BoxAttempt {
     if (this.finished) return;
     this.state.abandoned = true;
     await this.saveState().catch(() => undefined);
+    this.runner.onAbandoned(this.state);
     await this.finishLost();
   }
 
@@ -604,13 +611,89 @@ function clampMemoryMb(value: number | undefined): number {
 export function createBoxAwareSandboxRunner(host: DetailedSandboxRunner, deps: BoxSandboxDeps): DetailedSandboxRunner {
   const clock = deps.clock ?? realClock;
   const attempts = new Map<string, BoxAttempt>();
-  const runnerContext = { hub: deps.hub, ...(deps.logger ? { logger: deps.logger } : {}) };
+  /**
+   * Processes of attempts given up while their box was away (boxId → procIds). An abandoned
+   * attempt is settled at once, so it leaves `attempts`; its process stays here until the box is
+   * back and it is SIGKILLed, seen to exit and released — or the box is destroyed.
+   */
+  const abandoned = new Map<string, Set<string>>();
+  /** The reap running per box, and the boxes asked again meanwhile (a reconnect during one). */
+  const reaping = new Map<string, Promise<void>>();
+  const reapAgain = new Set<string>();
+
+  /** SIGKILL a detached process, wait for its exit, release it. True once nothing of it is left. */
+  const killAndRelease = async (connection: BoxConnection, procId: string): Promise<boolean> => {
+    try {
+      const info = (await connection.request("proc.list", {})).find((entry) => entry.procId === procId);
+      if (!info) return true;
+      if (info.running) {
+        // Attached at the end of its output: only its exit is wanted.
+        const proc = connection.attach(procId, info.outputBytes);
+        const exited = new Promise<boolean>((resolve) => {
+          proc.once("exit", () => resolve(true));
+          proc.on("detached", () => resolve(false));
+          proc.once("error", () => resolve(false));
+        });
+        proc.stdout.resume();
+        proc.stderr.resume();
+        proc.stdin.on("error", () => undefined);
+        proc.kill("SIGKILL");
+        if (!(await exited)) return false;
+      }
+      await connection.request("proc.release", { procId });
+      return true;
+    } catch (error) {
+      deps.logger?.warn("box sandbox could not end an abandoned attempt", { procId, error: error instanceof Error ? error.message : String(error) });
+      return false;
+    }
+  };
+
+  /**
+   * End the abandoned processes of a connected box; what fails stays owed for its next connect.
+   * One reap per box at a time: asked again while one runs (the link dropped and came back
+   * mid-kill), it runs once more after it.
+   */
+  const reap = (boxId: string): Promise<void> => {
+    const running = reaping.get(boxId);
+    if (running) {
+      reapAgain.add(boxId);
+      return running;
+    }
+    const run = (async () => {
+      const owed = abandoned.get(boxId);
+      const connection = deps.hub.get(boxId);
+      if (!owed || !connection?.connected) return;
+      await Promise.all(
+        [...owed].map(async (procId) => {
+          if (await killAndRelease(connection, procId)) owed.delete(procId);
+        })
+      );
+      if (owed.size === 0 && abandoned.get(boxId) === owed) abandoned.delete(boxId);
+    })().finally(() => {
+      reaping.delete(boxId);
+      if (reapAgain.delete(boxId)) void reap(boxId);
+    });
+    reaping.set(boxId, run);
+    return run;
+  };
+
+  const runnerContext = {
+    hub: deps.hub,
+    ...(deps.logger ? { logger: deps.logger } : {}),
+    onAbandoned: (state: BoxAttemptState): void => {
+      const owed = abandoned.get(state.boxId) ?? new Set<string>();
+      owed.add(state.procId);
+      abandoned.set(state.boxId, owed);
+      void reap(state.boxId);
+    }
+  };
 
   const isBoxAttempt = (attemptDir: string): boolean => existsSync(join(attemptDir, STATE_FILE));
 
   const forBox = (boxId: string): BoxAttempt[] => [...attempts.values()].filter((attempt) => attempt.state.boxId === boxId);
 
   deps.hub.onConnectionChange((boxId, connected) => {
+    if (connected) void reap(boxId);
     for (const attempt of forBox(boxId)) {
       if (connected) void attempt.reattach();
       else attempt.proc = null;
@@ -619,6 +702,8 @@ export function createBoxAwareSandboxRunner(host: DetailedSandboxRunner, deps: B
   deps.registry.onChange((boxId) => {
     const record = deps.registry.get(boxId);
     if (record && record.state !== "destroyed") return;
+    // A destroyed box took its processes with it.
+    abandoned.delete(boxId);
     for (const attempt of forBox(boxId)) void attempt.finishLost();
   });
 

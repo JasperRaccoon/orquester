@@ -33,7 +33,9 @@
 
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { sep } from "node:path";
+import { readFileSync } from "node:fs";
+import { mkdir, rename, writeFile } from "node:fs/promises";
+import { dirname, sep } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 
 import type { AgentEventRequest, CreateSessionRequest, RegistryEntry, SessionActivity, SessionSummary } from "@orquester/api";
@@ -74,7 +76,35 @@ export interface BoxTerminalDeps {
   registry: Pick<BoxRegistry, "get" | "locate" | "onChange">;
   hub: Pick<BoxHub, "get" | "onConnectionChange">;
   tooling?: Pick<BoxToolingProvisioner, "contribution">;
+  /**
+   * Where terminals closed while their box was away are remembered until their shells are ended
+   * (`boxPendingTerminalKillsPath`), so a daemon restart in between still ends them. Absent: kept
+   * in memory only.
+   */
+  pendingKillsFile?: string;
   logger?: { warn(message: string, meta?: Record<string, unknown>): void };
+}
+
+/** The pending kills read from `pendingKillsFile` (a missing or unreadable file: none). */
+function readPendingKills(file: string | undefined): Map<string, Set<string>> {
+  const out = new Map<string, Set<string>>();
+  if (!file) return out;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(file, "utf8"));
+  } catch {
+    return out;
+  }
+  const kills = (parsed as { kills?: unknown } | null)?.kills;
+  if (!Array.isArray(kills)) return out;
+  for (const entry of kills) {
+    const { boxId, procId } = (entry ?? {}) as { boxId?: unknown; procId?: unknown };
+    if (typeof boxId !== "string" || typeof procId !== "string" || !boxId || !procId) continue;
+    const set = out.get(boxId) ?? new Set<string>();
+    set.add(procId);
+    out.set(boxId, set);
+  }
+  return out;
 }
 
 /** A terminal's cwd in the box: a host-form path is mapped, a box path (the home default) kept. */
@@ -110,13 +140,21 @@ export class BoxTerminalManager {
   /** Emits "created" | "exited" | "updated" (SessionSummary), "closed" ({ id }), "activity" and "output" like the host backends. */
   readonly lifecycle = new EventEmitter();
   private readonly sessions = new Map<string, BoxTerminal>();
-  /** Terminals closed while their box was away: their processes are ended on reconnect. */
-  private readonly closedAway = new Map<string, Set<string>>();
+  /**
+   * Terminals closed while their box was away (boxId → procIds): their processes are ended on
+   * reconnect, and forgotten only once that succeeded (or the box is destroyed). Persisted to
+   * `deps.pendingKillsFile`.
+   */
+  private readonly closedAway: Map<string, Set<string>>;
+  /** procIds being ended right now (a reconnect while one runs does not start a second). */
+  private readonly ending = new Set<string>();
+  private saveQueue: Promise<void> = Promise.resolve();
   private persist: () => void = () => undefined;
   private shuttingDown = false;
   private readonly unsubscribe: (() => void)[] = [];
 
   constructor(private readonly deps: BoxTerminalDeps) {
+    this.closedAway = readPendingKills(deps.pendingKillsFile);
     this.unsubscribe.push(
       deps.hub.onConnectionChange((boxId, connected) => {
         if (connected) void this.onBoxConnected(boxId);
@@ -124,6 +162,67 @@ export class BoxTerminalManager {
       }),
       deps.registry.onChange((boxId) => this.onBoxChanged(boxId))
     );
+    // Shells owed an end from before a restart, in boxes already connected.
+    for (const boxId of this.closedAway.keys()) {
+      if (deps.hub.get(boxId)?.connected) void this.endClosedAway(boxId);
+    }
+  }
+
+  /** Remember (or forget) that a closed terminal's shell is still owed an end. */
+  private markClosedAway(boxId: string, procId: string, owed: boolean): void {
+    const set = this.closedAway.get(boxId) ?? new Set<string>();
+    if (owed === set.has(procId)) return;
+    if (owed) set.add(procId);
+    else set.delete(procId);
+    if (set.size > 0) this.closedAway.set(boxId, set);
+    else this.closedAway.delete(boxId);
+    this.saveClosedAway();
+  }
+
+  /** Write the pending kills (atomically, in order); a failed write is logged and the memory copy stays. */
+  private saveClosedAway(): void {
+    const file = this.deps.pendingKillsFile;
+    if (!file) return;
+    const kills = [...this.closedAway].flatMap(([boxId, procIds]) => [...procIds].map((procId) => ({ boxId, procId })));
+    const text = `${JSON.stringify({ version: 1, kills }, null, 2)}\n`;
+    this.saveQueue = this.saveQueue
+      .then(async () => {
+        await mkdir(dirname(file), { recursive: true, mode: 0o700 });
+        const tmp = `${file}.${process.pid}.${randomUUID()}.tmp`;
+        await writeFile(tmp, text, { mode: 0o600 });
+        await rename(tmp, file);
+      })
+      .catch((error: unknown) => {
+        this.deps.logger?.warn("box terminal pending kills could not be saved", { error: error instanceof Error ? error.message : String(error) });
+      });
+  }
+
+  /** End the shells of a box's terminals closed while it was away; each is forgotten once ended. */
+  private async endClosedAway(boxId: string): Promise<void> {
+    const away = this.closedAway.get(boxId);
+    const connection = this.deps.hub.get(boxId);
+    if (!away || !connection?.connected) return;
+    await Promise.all(
+      [...away].map(async (procId) => {
+        if (this.ending.has(procId)) return;
+        this.ending.add(procId);
+        try {
+          if (await this.terminate(connection, procId, null)) this.markClosedAway(boxId, procId, false);
+        } finally {
+          this.ending.delete(procId);
+        }
+      })
+    );
+  }
+
+  /** Pending kills, for tests and status: box id → procIds. */
+  pendingKills(): Map<string, string[]> {
+    return new Map([...this.closedAway].map(([boxId, procIds]) => [boxId, [...procIds]]));
+  }
+
+  /** Resolves once every pending-kills write queued so far is on disk (tests, shutdown). */
+  pendingKillsSaved(): Promise<void> {
+    return this.saveQueue;
   }
 
   /** The host manager's immediate index write (it owns `sessions.json`). */
@@ -336,6 +435,13 @@ export class BoxTerminalManager {
         }
         session.offsetKnown = true;
         this.wire(session, proc, start);
+        // The tab may have been resized while the stream was gone (the resize then reached no
+        // process): the PTY gets the tab's size again.
+        try {
+          proc.resize(session.summary.cols, session.summary.rows);
+        } catch {
+          // a stream that is gone again; the next reattach resends it
+        }
         return;
       }
       if (connection.sys.tmux && (await this.tmuxAlive(connection, id))) {
@@ -353,12 +459,7 @@ export class BoxTerminalManager {
   }
 
   private async onBoxConnected(boxId: string): Promise<void> {
-    const away = this.closedAway.get(boxId);
-    if (away) {
-      this.closedAway.delete(boxId);
-      const connection = this.deps.hub.get(boxId);
-      if (connection) for (const procId of away) void this.terminate(connection, procId, null);
-    }
+    void this.endClosedAway(boxId);
     for (const session of [...this.sessions.values()]) {
       if (session.summary.boxId === boxId) await this.reattach(session);
     }
@@ -378,11 +479,14 @@ export class BoxTerminalManager {
     for (const session of [...this.sessions.values()]) {
       if (session.summary.boxId === boxId) this.markExited(session, null);
     }
-    this.closedAway.delete(boxId);
+    if (this.closedAway.delete(boxId)) this.saveClosedAway();
   }
 
-  /** End a terminal's processes in the box: its tmux session, then the process (SIGHUP, SIGKILL after a grace). */
-  private async terminate(connection: BoxConnection, procId: string, proc: BoxProcess | null): Promise<void> {
+  /**
+   * End a terminal's processes in the box: its tmux session, then the process (SIGHUP, SIGKILL
+   * after a grace), then its release. True once nothing of it is left in the box.
+   */
+  private async terminate(connection: BoxConnection, procId: string, proc: BoxProcess | null): Promise<boolean> {
     try {
       if (connection.sys.tmux) {
         await runInBox(connection, "tmux", ["-L", BOX_TMUX_SERVER, "kill-session", "-t", tmuxName(procId)], { timeout: 15_000 }).catch(() => undefined);
@@ -390,10 +494,10 @@ export class BoxTerminalManager {
       let handle = proc;
       if (handle === null) {
         const info = (await connection.request("proc.list", {})).find((entry) => entry.procId === procId);
-        if (!info) return;
+        if (!info) return true;
         if (!info.running) {
           await connection.request("proc.release", { procId });
-          return;
+          return true;
         }
         handle = connection.attach(procId, info.outputBytes);
       }
@@ -411,9 +515,12 @@ export class BoxTerminalManager {
       grace.unref?.();
       await ended;
       clearTimeout(grace);
+      // Still running (the link dropped mid-close): the release answers BUSY and this is retried.
       await connection.request("proc.release", { procId });
+      return true;
     } catch (error) {
       this.deps.logger?.warn("box terminal close did not finish", { procId, error: error instanceof Error ? error.message : String(error) });
+      return false;
     }
   }
 
@@ -519,13 +626,17 @@ export class BoxTerminalManager {
     const proc = session.proc;
     session.proc = null;
     if (session.summary.status === "running") {
-      const connection = this.deps.hub.get(session.summary.boxId);
+      const { boxId } = session.summary;
+      const connection = this.deps.hub.get(boxId);
       if (connection?.connected) {
-        void this.terminate(connection, id, proc);
+        // A close that cannot finish (the link dropped mid-way) is owed like one made while away.
+        void this.terminate(connection, id, proc).then((ended) => {
+          if (ended) return;
+          this.markClosedAway(boxId, id, true);
+          if (this.deps.hub.get(boxId)?.connected) void this.endClosedAway(boxId);
+        });
       } else {
-        const away = this.closedAway.get(session.summary.boxId) ?? new Set<string>();
-        away.add(id);
-        this.closedAway.set(session.summary.boxId, away);
+        this.markClosedAway(boxId, id, true);
       }
     }
     return true;

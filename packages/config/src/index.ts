@@ -220,6 +220,12 @@ export function boxSyncBaselinePath(baseDir: string, boxId: string): string {
   return joinPath(boxesDir(baseDir), "sync", `${boxId}.json`);
 }
 
+// boxes (remote/exec): box terminals closed while their box was away, whose shells are still owed
+// an end when it reconnects (`{ version: 1, kills: [{ boxId, procId }] }`), so a restart keeps them.
+export function boxPendingTerminalKillsPath(baseDir: string): string {
+  return joinPath(boxesDir(baseDir), "pending-terminal-kills.json");
+}
+
 // boxes: the Agent config servers that run inside a box chat's box (`box-mcp.ts`, spec §8.4).
 export function boxMcpSettingsPath(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "box-mcp.json");

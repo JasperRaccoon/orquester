@@ -281,6 +281,63 @@ describe("box attempts across a daemon restart", () => {
     assert.equal(cancelExit.timedOut, false);
   });
 
+  test("an attempt given up while its box is away is SIGKILLed and released once it is back, retried until that succeeds", async () => {
+    // The process ignores the first SIGKILL it is sent (a link that drops mid-kill), then dies.
+    let kills = 0;
+    let firstKillSeen!: () => void;
+    const firstKill = new Promise<void>((resolve) => (firstKillSeen = resolve));
+    const connection = fakeAgentConnection({
+      behavior: (control) => ({
+        onSignal(signal) {
+          if (signal !== "SIGKILL") return;
+          kills += 1;
+          if (kills === 1) firstKillSeen();
+          else control.exit(null, "SIGKILL");
+        }
+      })
+    });
+    const boxes = fakeBoxes();
+    boxes.add(boxRecord("box-1", { project: { workspace: "ws", name: "app", path: project } }), connection);
+    // A manual clock: the deadline, grace and backstop fire when the test says so.
+    const timers: (() => void)[] = [];
+    const clock = {
+      now: () => new Date(),
+      setTimeout(fn: () => void, _ms: number) {
+        timers.push(fn);
+        return {
+          cancel: () => {
+            const index = timers.indexOf(fn);
+            if (index >= 0) timers.splice(index, 1);
+          }
+        };
+      }
+    };
+    const runner = createBoxAwareSandboxRunner(hostRunner(), { registry: boxes.registry, hub: boxes.hub, clock });
+    const handle = await runner.spawn(request({ kind: "shell", source: "sleep", attemptDir: await freshDir() }));
+    const procId = connection.execs.find((e) => e.detach)!.detach!.procId;
+
+    // The box goes away; the deadline passes and the attempt is given up.
+    connection.dropLink();
+    const waiting = runner.wait(handle, waitOpts(new AbortController().signal, 0));
+    while (timers.length > 0) timers.shift()!();
+    const exit = await waiting;
+    assert.equal(exit.interrupted, true);
+    assert.ok(connection.detachedProcs().some((proc) => proc.procId === procId && proc.running), "still running in the box");
+
+    // Back: the first SIGKILL is lost with the link, so the process is still owed.
+    connection.restoreLink();
+    await firstKill;
+    connection.dropLink();
+    assert.ok(connection.detachedProcs().some((proc) => proc.procId === procId), "kept while not confirmed");
+
+    // Next connect: killed, seen to exit, released.
+    const released = connection.nextCall("proc.release");
+    connection.restoreLink();
+    await released;
+    assert.equal(kills, 2);
+    assert.ok(!connection.detachedProcs().some((proc) => proc.procId === procId), "released from the box");
+  });
+
   test("a box destroyed under a running attempt ends it as interrupted", async () => {
     const connection = fakeAgentConnection();
     const boxes = fakeBoxes();
