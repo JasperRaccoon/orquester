@@ -1,0 +1,22 @@
+{
+  "name": "@orquester/box-agent",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "node --import tsx scripts/build.ts",
+    "typecheck": "tsc -p tsconfig.json && node scripts/go.mjs vet ./...",
+    "test": "node --import tsx --import ../../scripts/test/assert-ok.mjs --test --test-concurrency=${ORQUESTER_TEST_CONCURRENCY:-4} $(find src -name '*.test.ts') && node scripts/go.mjs test ./..."
+  },
+  "dependencies": {
+    "@orquester/api": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.21",
+    "tsx": "^4.22.4",
+    "typescript": "^5.8.3"
+  }
+}

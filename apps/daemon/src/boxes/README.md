@@ -8,7 +8,7 @@ Contracts: `packages/api/src/boxes.ts` (HTTP/UI), `packages/api/src/box-protocol
 
 | Module | Owns |
 |---|---|
-| `apps/box-agent/` | `orq-agent`, the program in every box: dials the daemon, serves channels and requests, detached processes, forwards, file transfer. Built per platform with `bun build --compile`. |
+| `apps/box-agent/` | `orq-agent`, the program in every box: dials the daemon, serves channels and requests, detached processes, forwards, file transfer. Written in Go (PTY and ConPTY without native addons), cross-compiled per platform by `pnpm --filter @orquester/box-agent build`; `fixtures/*.json` keep its wire types in step with `box-protocol.ts`. |
 | `boxes/hub/` | The connect WebSocket route, box authentication (bootstrap token, box credential, GitHub OIDC via `VerifyGithubOidc`), the `BoxHub`/`BoxConnection` implementation, per-box local relay sockets (`boxSocketPath`), serving `orq-agent` builds. |
 | `boxes/client/` | A `BoxConnection` over a relay socket, for the agent host and other local processes (static imports only — agent-host rule). |
 | `boxes/providers/` | One adapter per provider (`BoxProviderAdapter`), price tables, recorded API fixtures. `vm-providers.ts`, `gpu-providers.ts` and `blacksmith.ts` each export their adapters; `index.ts` assembles the registry. |

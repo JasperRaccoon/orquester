@@ -111,6 +111,8 @@ import { AgentChatService, ChatSessionError, type CreateAgentChatRequest } from 
 import { INVALID_OWNER, parseSessionOwner } from "./agent-chat/owner.ts";
 import { ChatAwareSessionManager } from "./agent-chat/session-router.ts";
 import { AGENT_VISUAL_ROUTE_PATTERN, registerAgentChatRoutes } from "./agent-chat/proxy-routes.ts";
+// boxes: route patterns exempt from user auth (they do box auth).
+import { BOX_HUB_PUBLIC_ROUTES } from "./boxes/hub/routes.ts";
 import { LineageService } from "./agent-chat/lineage.ts";
 import { registerLineageRoutes } from "./agent-chat/lineage-routes.ts";
 // umcp:t5 begin
@@ -1838,6 +1840,12 @@ export function createServer(
     // one (spec 2026-10-14 §2.2). Only the matched route pattern lets it
     // through, never a path prefix.
     if (routePath === AGENT_VISUAL_ROUTE_PATTERN) {
+      return;
+    }
+    // boxes: the box connect WebSocket and the orq-agent download authenticate the
+    // box themselves (bootstrap token, box credential or GitHub OIDC) and accept
+    // nothing else. Only these matched route patterns, never a path prefix.
+    if (routePath !== undefined && BOX_HUB_PUBLIC_ROUTES.includes(routePath)) {
       return;
     }
 

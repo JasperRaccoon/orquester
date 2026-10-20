@@ -18,6 +18,22 @@ importers:
         specifier: ^5.8.3
         version: 5.9.3
 
+  apps/box-agent:
+    dependencies:
+      '@orquester/api':
+        specifier: workspace:*
+        version: link:../../packages/api
+    devDependencies:
+      '@types/node':
+        specifier: ^22.19.21
+        version: 22.19.21
+      tsx:
+        specifier: ^4.22.4
+        version: 4.22.4
+      typescript:
+        specifier: ^5.8.3
+        version: 5.9.3
+
   apps/daemon:
     dependencies:
       '@anthropic-ai/claude-agent-sdk':
