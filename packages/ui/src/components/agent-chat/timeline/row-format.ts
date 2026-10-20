@@ -46,6 +46,7 @@ export function rowBottomPadding(row: AgentChatTimelineRow): string {
     row.kind === "work" ||
     row.kind === "work-live" ||
     row.kind === "work-toggle" ||
+    row.kind === "delegate-group" ||
     row.kind === "activity-group" ||
     row.kind === "thinking"
   ) {

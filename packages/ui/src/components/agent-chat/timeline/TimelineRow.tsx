@@ -30,10 +30,13 @@ import {
   WorkingRow
 } from "./rows/StructureRows";
 import { VisualRow } from "./rows/VisualRow";
+import { DelegateGroupRow } from "./rows/DelegateGroupRow";
 import { McpAppRow } from "./rows/McpAppRow";
 
 function RowBody({ row }: { row: AgentChatTimelineRow }): React.ReactElement | null {
   switch (row.kind) {
+    case "delegate-group":
+      return <DelegateGroupRow row={row} />;
     case "activity-group":
       return <ActivityGroupRow row={row} />;
     case "work":

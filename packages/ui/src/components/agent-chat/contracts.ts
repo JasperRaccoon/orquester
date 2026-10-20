@@ -30,6 +30,7 @@ import type {
 } from "@orquester/api/agent-chat";
 
 import type { ChatAccountOption } from "../../lib/agent-chat/account-switch";
+import type { DelegateChildView } from "../../lib/agent-chat/delegates.logic";
 import type { GoalActionModel } from "./status/goal-chip";
 import type {
   ActivePlanState,
@@ -395,6 +396,12 @@ export interface AgentRosterProps {
   /** Roster ids a `/task/stop` is in flight for; their Stop reads "Stopping…". */
   stoppingTaskIds?: readonly string[];
   onStopTask?: (taskId: string) => void;
+  /**
+   * The open chats this thread delegated tasks to (`delegates.logic`), listed beside its own
+   * agents in the same row shape, with the "2/5 working" count in the footer. A row opens the
+   * chat's tab. Like agent rows, a finished one fades when the turn ends.
+   */
+  delegates?: readonly DelegateChildView[];
 }
 
 export interface AgentDrillInProps {

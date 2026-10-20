@@ -93,6 +93,8 @@ import {
   type DrillInMemoryEntry
 } from "./roster/drill-in-memory";
 import { AgentRoster } from "./roster/AgentRoster";
+import { useShallow } from "zustand/react/shallow";
+import { delegatedChildrenOf, delegateTabView, isDelegateLive } from "../../lib/agent-chat/delegates.logic";
 import { rosterKindCounts } from "./roster/roster-summary";
 import { EmptyThreadPanel } from "./EmptyThreadPanel";
 import { ChatLoadingScreen } from "./ChatLoadingScreen";
@@ -983,6 +985,12 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
     tokensUsed: slice.contextWindow?.usedTokens ?? null,
     model: slice.head?.modelSelection.model ?? null
   };
+  // The chats this one delegated tasks to, live off their tab records: the roster lists them
+  // beside its own agents. Docked while any of them works, or while this thread's own turn runs.
+  const delegatedTabs = useAppStore(useShallow((state) => delegatedChildrenOf(state.sessions, sessionId)));
+  const rosterDelegates = React.useMemo(() => delegatedTabs.map(delegateTabView), [delegatedTabs]);
+  const rosterHasDelegates =
+    rosterDelegates.length > 0 && (rosterMain.turnActive || rosterDelegates.some((view) => isDelegateLive(view.status)));
   // --- the read-only viewer for a full tool output --------------------------
   // A §6.3 read with no store slice behind it: the timeline asks, the shell
   // fetches, and the answer is shown in the app's modal rather than folded
@@ -1350,7 +1358,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
               entirely when there is nothing to list, so an ordinary thread
               gives the timeline every pixel.
             */}
-            {roster.panel.hasAgents && !paintOnly ? (
+            {(roster.panel.hasAgents || rosterHasDelegates) && !paintOnly ? (
               <div className="pointer-events-auto mx-auto w-full min-w-0 max-w-3xl px-3 sm:px-5">
                 <AgentRoster
                   sessionId={sessionId}
@@ -1369,6 +1377,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                   canStopTasks={provider?.capabilities?.supportsTaskStop === true}
                   stoppingTaskIds={roster.stoppingTaskIds}
                   onStopTask={(taskId) => dispatch(() => actions.stopTask({ taskId }))}
+                  delegates={rosterDelegates}
                 />
               </div>
             ) : null}

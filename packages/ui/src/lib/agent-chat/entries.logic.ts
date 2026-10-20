@@ -32,6 +32,8 @@ import {
   mcpAppReferenceOfActivityPayload,
   IDENTITY_CHANGED_ACTIVITY_KIND,
   PROFILE_CHANGED_ACTIVITY_KIND,
+  STOP_CASCADED_ACTIVITY_KIND,
+  parseInterruptCause,
   isAgentOwnedActivity,
   isCompactionActivity,
   isPlanImplementationMessage,
@@ -419,6 +421,12 @@ function derivedWorkLogEntry(activity: ThreadActivityItem): DerivedWorkLogEntry 
         ...(previousAccountId ? { previousAccountId } : {})
       };
     }
+  }
+
+  // The delegate stop cascade's marker: why this chat stopped (its parent did).
+  if (activity.activityKind === STOP_CASCADED_ACTIVITY_KIND) {
+    const cause = parseInterruptCause(activity.payload);
+    if (cause) entry.stopCascade = cause;
   }
 
   // Agent profiles §5.3: the profile switch, ids only (null = Global); the name resolves at render.

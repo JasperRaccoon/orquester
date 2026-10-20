@@ -778,6 +778,7 @@ function rowTurnId(row: AgentChatTimelineRow): string | null {
     case "turn-fold":
       return row.turnId;
     case "work-toggle":
+    case "delegate-group":
     case "turn-diff":
     case "goal-marker":
     case "visual":
