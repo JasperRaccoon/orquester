@@ -807,9 +807,10 @@ test("a thread's usage-limit notice is handed on when it moves, never for a host
   const h = await harness(t, undefined, undefined, undefined, undefined, undefined, (threadId, notice) => notices.push([threadId, notice]));
   seedTab(h.chat, "t1");
   await h.read("t1", {});
-  assert.deepEqual(notices, [], "an older host sends no field: nothing is said");
+  assert.equal(notices.length, 0, "an older host sends no field: nothing is said");
   await h.read("t1", { usageLimit: null });
-  assert.deepEqual(notices, [["t1", null]], "the first read says it, even when not limited");
+  assert.equal(notices.length, 1);
+  assert.deepEqual(notices[0], ["t1", null], "the first read says it, even when not limited");
   const usageLimit = { activityId: "a1", turnId: "turn-1", resetsAt: "2026-10-20T15:40:00.000Z", message: "limit", at: "2026-10-20T12:00:00.000Z", parked: true };
   await h.read("t1", { usageLimit });
   await h.read("t1", { usageLimit });
