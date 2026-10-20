@@ -26,10 +26,13 @@
  * data-changing Act is refused unless `planSafe` (a turn-causing Act carries the plan on, §5.3);
  * a path outside a project, a refused self target and a target that is not an own child are
  * denied before anything else. Grant options are the executor's (`grantOptionsFor`).
+ *
+ * boxes: a tool that spends the owner's money (`spendFamily`, `create_box`) opens a `spend` card
+ * in every mode — for a workflow-owned caller too — and is refused only while planning.
  */
 
 import { RUNTIME_MODES, type RuntimeMode } from "@orquester/api/agent-chat";
-import type { AdminFamily, ApprovalFamily } from "@orquester/api";
+import type { AdminFamily, ApprovalFamily, SpendFamily } from "@orquester/api";
 
 import { clipText, MAX_ECHO_CHARS } from "../result.ts";
 import type { ScopeClaim, ThreadCaller, Tier } from "../catalog/contract.ts";
@@ -52,6 +55,8 @@ export interface GateInput {
   /** The Admin family of this call (resolved), when the tier is `admin`. */
   adminFamily?: AdminFamily;
   planSafe: boolean;
+  /** boxes: the tool's `spendFamily` — every call spends money: a `spend` card in every mode. */
+  spendFamily?: SpendFamily;
   caller: ThreadCaller;
   scope: ScopeClaim;
   /** Every project the call reaches: `scope.projects`, the projects of `scope.paths`, classified. */
@@ -79,7 +84,8 @@ export type GateDecision =
   | { kind: "deny"; code: GateDenyCode; message: string }
   | {
       kind: "card";
-      approvalKind: "admin" | "boundary";
+      /** `spend` (boxes): a call that spends the owner's money. */
+      approvalKind: "admin" | "boundary" | "spend";
       family: ApprovalFamily;
       /** Admin: the call reaches a project other than the caller's own (never grantable). */
       crossProject: boolean;
@@ -135,6 +141,16 @@ export function gate(input: GateInput): GateDecision {
   }
   if (input.notOwnChildren.length > 0) {
     return deny("PERMISSION_DENIED", scope.ownChildrenOnly ?? `${tool} acts only on chats this chat created.`);
+  }
+
+  // boxes: a call that spends the owner's money (Ephemeral AI VMs spec §13.2) — a card in EVERY
+  // mode, a workflow-owned chat included (its card waits for the owner, who gets a push, and
+  // expires as a timeout); never a grant; never while planning.
+  if (input.spendFamily !== undefined) {
+    if (caller.planning) {
+      return deny("PERMISSION_DENIED", `You are planning: ${tool} rents a machine that costs money. Propose it in your plan instead.`);
+    }
+    return { kind: "card", approvalKind: "spend", family: input.spendFamily, crossProject: false, reason: "renting a machine that costs money" };
   }
 
   // Admin (§6): a card in every permission mode; never while planning; never for a workflow-owned chat.

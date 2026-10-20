@@ -9,14 +9,14 @@
 
 import type { z } from "zod";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import type { AdminFamily, ApprovalFamily, ApprovalKind, ApprovalPreviewSection, TOOL_APPROVAL_LIMIT, ToolApprovalGrantScope, ToolsetId, ToolTier } from "@orquester/api";
+import type { AdminFamily, ApprovalFamily, ApprovalKind, ApprovalPreviewSection, SpendFamily, TOOL_APPROVAL_LIMIT, ToolApprovalGrantScope, ToolsetId, ToolTier } from "@orquester/api";
 import type { AgentAdapterId, CausedBy, InteractionMode, RuntimeMode, ThreadMessageOrigin, ThreadReplyMode } from "@orquester/api/agent-chat";
 import type { AgentToolGrantQuery, AgentToolGrantRecord } from "@orquester/config";
 
 import type { DaemonApi } from "../daemon-api.ts";
 import type { SessionSecretRequests } from "../../session-tools/contract.ts";
 
-export type { AdminFamily, ApprovalFamily, ApprovalKind, ToolsetId };
+export type { AdminFamily, ApprovalFamily, ApprovalKind, SpendFamily, ToolsetId };
 
 // ---------------------------------------------------------------------------
 // Vocabulary
@@ -374,8 +374,15 @@ export interface OrquesterTool<Shape extends z.ZodRawShape = z.ZodRawShape> {
   adminFamily?: AdminFamily | ((args: z.infer<z.ZodObject<Shape>>, scope: ScopeClaim) => AdminFamily);
   /** Allowed while the caller plans even though it changes something (`html_render`, `request_secret`, …). */
   planSafe?: boolean;
+  /**
+   * boxes: every call spends the owner's money (`create_box`, Ephemeral AI VMs spec §13.2): a
+   * `spend` card of this family in EVERY permission mode — workflow-owned and agent-to-agent chats
+   * included (nobody may be watching: the card waits, a push goes out, and it expires as
+   * `APPROVAL_TIMEOUT`) — never covered or offered a grant, refused while planning. Requires `approval`.
+   */
+  spendFamily?: SpendFamily;
   scope(args: z.infer<z.ZodObject<Shape>>, ctx: ScopeContext): Promise<ScopeClaim>;
-  /** The card's content; required when the tier can be `admin`. */
+  /** The card's content; required when the tier can be `admin`, and with `spendFamily`. */
   approval?(args: z.infer<z.ZodObject<Shape>>, ctx: ScopeContext): Promise<ApprovalPreview>;
   annotations: ToolAnnotations;
   resultKind: ToolResultKind;

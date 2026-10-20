@@ -13,6 +13,7 @@ import {
   toolApprovalGrantChoices,
   toolApprovalGuardKey,
   toolApprovalKeyAction,
+  toolApprovalKindBadge,
   toolApprovalCardKey,
   toolApprovalClickGuarded,
   toolApprovalPreviewIsCut,
@@ -156,6 +157,15 @@ test("every Admin family has its own change sentence; a secret-files push names 
   assert.match(push, /this repo's vault/);
   assert.match(push, /every clone listed/);
   assert.match(push, /never values/);
+});
+
+// boxes: renting a box is a spend card of its own.
+test("a box rental (spend card) says what approving costs and reads as money, not Admin", () => {
+  const sentence = toolApprovalChangeSentence({ kind: "spend", family: "boxes", scope: { label: "Billed to your Hetzner account" } });
+  assert.doesNotMatch(sentence, /newer Orquester/);
+  assert.match(sentence, /billed to your account/);
+  assert.match(sentence, /when this chat closes/);
+  assert.equal(toolApprovalKindBadge({ kind: "spend" }), "Costs money");
 });
 
 test("grant choices are exactly the offered scopes", () => {

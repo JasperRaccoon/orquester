@@ -294,6 +294,8 @@ import { fsPathFromQuery } from "./fs-path-query.js";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { request as httpRequest, type IncomingMessage } from "node:http";
 import bcrypt from "bcryptjs";
+// boxes: temporary boxes for agent chats (Ephemeral AI VMs spec §13).
+import { registerTemporaryBoxRoutes, TemporaryBoxTools } from "./boxes/temporary/index.ts";
 
 const daemonId = randomUUID();
 
@@ -1377,6 +1379,17 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // in every chat: there are no toolsets to resolve.
   const disconnectExecutor = connectExecutor(agentToolsRuntime, executorPorts);
   // umcp:t3 end
+  // boxes: begin
+  // Temporary boxes for agent chats (Ephemeral AI VMs spec §13): the box MCP tools' daemon side.
+  // The box service attaches itself with `temporaryBoxTools.connect({ boxes, hub, registry })` once
+  // its records are loaded; until then the box tools are not advertised and answer BOXES_DISABLED.
+  // A closed chat's temporary boxes are destroyed (`chat-closed`, spec §13.3).
+  const temporaryBoxTools = new TemporaryBoxTools({ isChatOpen: (id) => agentChat.chat.has(id), logger: console });
+  agentChat.chat.lifecycle.on("closed", ({ id, rolledBack }: { id: string; rolledBack?: boolean }) => {
+    if (!rolledBack) temporaryBoxTools.chatClosed(id);
+  });
+  services.temporaryBoxTools = temporaryBoxTools;
+  // boxes: end
   // umcp:t6 begin
   // The chat transport (unified MCP design 2026-10-15 §9.4, §12.1): per-thread manifests for the
   // agent host (every chat tool; no always-Admin one for a workflow-owned chat), pushed to it when a
@@ -1398,6 +1411,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     },
     openThreads: () => agentChat.chat.list().map((tab) => tab.id),
     catalog: () => catalogFor("chat"),
+    // boxes: the box tools are advertised only while a box can be rented.
+    boxesAvailable: () => temporaryBoxTools.available(),
     api: () => services.internalApi,
     pushToHost: async (id, manifest): Promise<SessionToolsRefreshResponse | null> => {
       const route = agentChat.routeDeps();
@@ -1413,6 +1428,10 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     logger: console
   });
   agentChat.chat.lifecycle.on("closed", ({ id }: { id: string }) => sessionToolsRefresher.forget(id));
+  // boxes: when boxes become rentable (or stop being), every open chat gets its new tool list.
+  temporaryBoxTools.onAvailabilityChange(() => {
+    void sessionToolsRefresher.refresh(null).catch((error) => console.warn("session-tools: box tools refresh failed", error instanceof Error ? error.message : String(error)));
+  });
   // A changed MCP server config (agent profile) is read afresh by the next manifest.
   const agentProfileSink = {
     send: (data: string) => {
@@ -1481,7 +1500,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     agentChat,
     // Getters: the client lives as long as the daemon, and PUT /api/config/daemon moves both.
     fsRoot: () => resolved.fsRoot,
-    workspacesDir: () => resolved.workspacesDir
+    workspacesDir: () => resolved.workspacesDir,
+    // boxes: the box MCP tools' streamed operations.
+    boxes: temporaryBoxTools
   });
 
   lineage.attachApi(services.internalApi);
@@ -1596,6 +1617,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     disconnectExecutor();
     await agentToolsRuntime.shutdown().catch((error) => console.error("Agent tools stop failed", error));
     // umcp:t3 end
+    // boxes: host-side port forwards close; detached jobs keep running in their boxes.
+    await temporaryBoxTools.shutdown().catch((error) => console.error("Temporary box tools stop failed", error));
     // umcp:t6 begin
     broadcaster.remove(agentProfileSink);
     sessionToolsRefresher.stop();
@@ -1725,6 +1748,8 @@ interface Services {
   /** The chat transport's manifests and manifest pushes (unified MCP §9.4). Optional: route tests build a partial `services`. */
   sessionToolsRefresher?: SessionToolsRefresher;
   // umcp:t6 end
+  // boxes: temporary boxes for agent chats (routes and the box tools' operations). Optional: route tests build a partial `services`.
+  temporaryBoxTools?: TemporaryBoxTools;
   usage: UsageService;
   usageTokens: UsageTokensScanner;
   /** Per-day usage from Orquester's own chat logs, for agents without a transcript scanner (Grok). Optional: route tests build a partial `services`. */
@@ -3904,6 +3929,10 @@ export function createServer(
     registerAgentToolsRuntimeRoutes(app, services.agentToolsRuntime);
   }
   // umcp:t3 end
+  // boxes: the temporary-box routes, both transports (ownership by the request's principal).
+  if (services.temporaryBoxTools) {
+    registerTemporaryBoxRoutes(app, services.temporaryBoxTools);
+  }
 
   // Sessions (PTYs and chat tabs — one list, one per-project order)
   app.get<{ Querystring: { projectPath?: string } }>(

@@ -555,6 +555,15 @@ export const SESSION_TOOL_LABELS: Readonly<Record<string, string>> = {
   // secret-files
   secret_files_status: "Checked secret files",
   push_secret_files: "Pushed secret files",
+  // boxes (temporary boxes, Ephemeral AI VMs §13)
+  create_box: "Rented a box",
+  list_boxes: "Listed boxes",
+  box_exec: "Ran a command in a box",
+  box_exec_output: "Read a box job",
+  box_upload: "Copied into a box",
+  box_download: "Copied out of a box",
+  box_forward_port: "Forwarded a box port",
+  destroy_box: "Destroyed a box",
 
   // --- Legacy in-chat names (design 2026-10-14 §5, §6) ----------------------
   // Older builds' toolset request (every chat tool is on now).

@@ -39,7 +39,7 @@ describe("the output heuristic never judges a call still in progress", () => {
 describe("session tool labels (unified MCP §4)", () => {
   it("every chat tool of the catalogue has its own label, read from TOOLSETS", () => {
     const names = TOOLSETS.flatMap((toolset) => toolset.tools.map((tool) => tool.name));
-    assert.equal(names.length, 46);
+    assert.equal(names.length, 54);
     assert.deepEqual(names, chatToolNames());
     for (const name of names) {
       assert.ok(Object.hasOwn(SESSION_TOOL_LABELS, name), `${name} has no label`);

@@ -256,6 +256,9 @@ export function toolApprovalChangeSentence(card: CardFacts): string {
     case "cross-project-read":
     case "cross-workspace-read":
       return "Approving lets the agent read content (transcripts, files or diffs) of another project, as the preview shows. Nothing is changed.";
+    // boxes: a temporary box (Ephemeral AI VMs §13.2).
+    case "boxes":
+      return "Approving rents this machine from the provider shown, billed to your account at about the price shown until it is destroyed: by the agent, at its time limit, or when this chat closes.";
     default:
       return "This approval comes from a newer Orquester than this client knows: check it on an updated client before approving.";
   }
@@ -280,6 +283,9 @@ export function toolApprovalKindBadge(card: Pick<ParsedToolApprovalSummary, "kin
       return "Another project";
     case "toolset":
       return "Tools";
+    // boxes: a call that spends money.
+    case "spend":
+      return "Costs money";
     default:
       return "Approval";
   }

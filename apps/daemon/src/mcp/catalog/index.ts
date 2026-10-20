@@ -11,6 +11,8 @@
  */
 
 import { agentProfileFamily } from "../tools/agent-profile.ts";
+// boxes: temporary boxes for agent chats (Ephemeral AI VMs spec §13).
+import { boxesFamily } from "../tools/boxes.ts";
 import { catalogFamily } from "../tools/catalog.ts";
 import { desktopsFamily } from "../tools/desktops.ts";
 import { filesFamily } from "../tools/files.ts";
@@ -74,7 +76,9 @@ export const CATALOG: readonly AnyOrquesterTool[] = buildCatalog([
   desktopsFamily,
   visualsFamily,
   secretsFamily,
-  secretFilesFamily
+  secretFilesFamily,
+  // boxes: chat-only, advertised while a box can be rented.
+  boxesFamily
 ]);
 
 const byAudience = new Map<Audience, readonly AnyOrquesterTool[]>();

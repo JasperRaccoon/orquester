@@ -31,10 +31,11 @@ import { sessionToolNameOfData, sessionToolReferences } from "./session-tools.ts
 /**
  * What raised the card: an Admin call or a project boundary. `toolset` is LEGACY: older builds'
  * `request_toolset` raised it, and their cards and tool-row references still read; no current
- * build raises one.
+ * build raises one. `spend` (boxes): a call that spends the owner's money — a card in EVERY
+ * permission mode, workflow-owned and agent-to-agent chats included, never grantable.
  */
-export type ApprovalKind = "admin" | "boundary" | "toolset";
-export const APPROVAL_KINDS: readonly ApprovalKind[] = ["admin", "boundary", "toolset"];
+export type ApprovalKind = "admin" | "boundary" | "toolset" | "spend";
+export const APPROVAL_KINDS: readonly ApprovalKind[] = ["admin", "boundary", "toolset", "spend"];
 
 /** The Admin families (spec §3.2, §6): what an Admin call changes. Grants are per family (§7.6). */
 export const ADMIN_FAMILIES = ["workflows", "workflow-secrets", "agent-profile", "desktops", "saved-prompts", "secret-files"] as const;
@@ -48,9 +49,17 @@ export type AdminFamily = (typeof ADMIN_FAMILIES)[number];
 export const BOUNDARY_FAMILIES = ["cross-project", "cross-project-read", "cross-workspace-read"] as const;
 export type BoundaryFamily = (typeof BOUNDARY_FAMILIES)[number];
 
+// boxes: the `spend` kind's families (Ephemeral AI VMs spec §13.2) — `boxes`: renting a temporary box (`create_box`).
+export const SPEND_FAMILIES = ["boxes"] as const;
+export type SpendFamily = (typeof SPEND_FAMILIES)[number];
+
+export function isSpendFamily(value: unknown): value is SpendFamily {
+  return typeof value === "string" && (SPEND_FAMILIES as readonly string[]).includes(value);
+}
+
 /** Every card family (`toolset`: legacy, see {@link ApprovalKind}). */
-export type ApprovalFamily = AdminFamily | BoundaryFamily | "toolset";
-export const APPROVAL_FAMILIES: readonly ApprovalFamily[] = [...ADMIN_FAMILIES, ...BOUNDARY_FAMILIES, "toolset"];
+export type ApprovalFamily = AdminFamily | BoundaryFamily | "toolset" | SpendFamily;
+export const APPROVAL_FAMILIES: readonly ApprovalFamily[] = [...ADMIN_FAMILIES, ...BOUNDARY_FAMILIES, "toolset", ...SPEND_FAMILIES];
 
 export function isAdminFamily(value: unknown): value is AdminFamily {
   return typeof value === "string" && (ADMIN_FAMILIES as readonly string[]).includes(value);

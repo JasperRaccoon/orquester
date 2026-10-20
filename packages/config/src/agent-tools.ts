@@ -32,7 +32,7 @@ export type AgentToolGrantScope = "chat" | "project";
 /**
  * Per approval family, the grant scopes a `full-access` caller may be offered (spec §7.6). Every
  * family absent here, or mapped to `[]`, is never grantable: `agent-profile`, `workflow-secrets`,
- * `secret-files`, the read boundaries and older builds' toolset cards.
+ * `secret-files`, the read boundaries, older builds' toolset cards and `boxes` (spend cards).
  */
 export const AGENT_TOOL_GRANT_SCOPES: Readonly<Record<string, readonly AgentToolGrantScope[]>> = {
   workflows: ["chat"],
@@ -44,7 +44,9 @@ export const AGENT_TOOL_GRANT_SCOPES: Readonly<Record<string, readonly AgentTool
   "secret-files": [],
   "cross-project-read": [],
   "cross-workspace-read": [],
-  toolset: []
+  toolset: [],
+  // boxes: renting a temporary box spends money — the owner approves every one (Ephemeral AI VMs spec §13.2).
+  boxes: []
 };
 
 /** The grant scopes `family` allows at all (before the per-call rules of {@link findGrant}). */

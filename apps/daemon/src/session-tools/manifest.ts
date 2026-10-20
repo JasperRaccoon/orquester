@@ -1,7 +1,8 @@
 /**
  * The per-thread manifest of the in-chat `orquester` server (unified MCP design 2026-10-15 §9.4):
  * which chat tools ONE provider session of a thread advertises — every chat tool, but no
- * always-Admin one to a workflow-owned chat (§5.4) — its instruction block (§10) and the MCP
+ * always-Admin one to a workflow-owned chat (§5.4), and the box tools only while a box can be
+ * rented (Ephemeral AI VMs §13) — its instruction block (§10) and the MCP
  * servers it must deny (§12.1). The agent host asks for it at every provider-session start
  * (`daemonRoutesForHost.sessionToolsManifest`) and is handed a new one when the daemon pushes one
  * (`agentHostRoutes.sessionToolsRefresh`).
@@ -47,6 +48,8 @@ export interface ManifestInput {
   catalog: readonly AnyOrquesterTool[];
   /** The daemon-pointing MCP servers the agent-profile service found (Task 11's read; [] until known). */
   daemonPointing: readonly DaemonPointingServer[];
+  /** boxes: whether temporary boxes can be rented now (the Ephemeral AI VMs plugin is wired); absent = no. */
+  boxesAvailable?: boolean;
 }
 
 /** True when a tool is Admin whatever its arguments — never advertised to a workflow-owned chat (§5.4). */
@@ -54,9 +57,13 @@ export function alwaysAdmin(tool: AnyOrquesterTool): boolean {
   return tool.tier === "admin";
 }
 
-/** The chat tools a thread advertises, in catalog order: all of them, less the always-Admin ones for a workflow-owned chat. */
-export function advertisedChatTools(catalog: readonly AnyOrquesterTool[], workflowOwned: boolean): string[] {
-  return catalog.filter((tool) => !(workflowOwned && alwaysAdmin(tool))).map((tool) => tool.name);
+/**
+ * The chat tools a thread advertises, in catalog order: all of them, less the always-Admin ones for
+ * a workflow-owned chat — and (boxes) less the `boxes` toolset while no box can be rented, so no
+ * chat pays for tools it cannot use.
+ */
+export function advertisedChatTools(catalog: readonly AnyOrquesterTool[], workflowOwned: boolean, boxesAvailable = false): string[] {
+  return catalog.filter((tool) => !(workflowOwned && alwaysAdmin(tool)) && (boxesAvailable || tool.toolset !== "boxes")).map((tool) => tool.name);
 }
 
 const samePath = (a: string, b: string): boolean => a !== "" && b !== "" && resolve(a) === resolve(b);
@@ -113,7 +120,7 @@ export function denyFor(thread: ManifestThread, servers: readonly DaemonPointing
 /** The manifest of one thread. */
 export function buildSessionToolsManifest(input: ManifestInput): SessionToolsManifest {
   return {
-    tools: advertisedChatTools(input.catalog, input.thread.workflowOwned),
+    tools: advertisedChatTools(input.catalog, input.thread.workflowOwned, input.boxesAvailable === true),
     instructions: composeOrquesterInstructions({ workflowOwned: input.thread.workflowOwned }),
     deny: denyFor(input.thread, input.daemonPointing)
   };

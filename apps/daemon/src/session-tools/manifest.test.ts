@@ -134,16 +134,23 @@ test("the manifest: tools, the composed block and the deny list; no legacy tools
 
 test("the production catalog: a fresh chat of any agent, with nothing configured, is advertised every chat tool", () => {
   const chat = catalogFor("chat");
+  // boxes: the box tools only while a box can be rented.
+  const withoutBoxes = chat.filter((t) => t.toolset !== "boxes");
   for (const agentId of ["claude", "codex", "grok", "opencode"] as const) {
     const manifest = buildSessionToolsManifest({ thread: thread({ agentId }), catalog: chat, daemonPointing: [] });
-    assert.deepEqual(manifest.tools, chat.map((t) => t.name), agentId);
+    assert.deepEqual(manifest.tools, withoutBoxes.map((t) => t.name), agentId);
+    const renting = buildSessionToolsManifest({ thread: thread({ agentId }), catalog: chat, daemonPointing: [], boxesAvailable: true });
+    assert.deepEqual(renting.tools, chat.map((t) => t.name), agentId);
   }
+  // A workflow-owned chat may rent a box too (its card waits for the owner): create_box is not Admin.
+  const ownedRenting = buildSessionToolsManifest({ thread: thread({ workflowOwned: true }), catalog: chat, daemonPointing: [], boxesAvailable: true }).tools;
+  for (const name of ["create_box", "box_exec", "destroy_box"]) assert.ok(ownedRenting.includes(name), name);
   // Formerly off-by-default groups are in it, and request_toolset is gone.
   const tools = buildSessionToolsManifest({ thread: thread(), catalog: chat, daemonPointing: [] }).tools;
   for (const name of ["update_todos", "control_desktop", "create_workflow", "edit_agent_profile", "read_file", "notify_user"]) assert.ok(tools.includes(name), name);
   assert.ok(!tools.includes("request_toolset"));
   // A workflow-owned chat: everything but the always-Admin tools.
   const owned = buildSessionToolsManifest({ thread: thread({ workflowOwned: true }), catalog: chat, daemonPointing: [] }).tools;
-  assert.deepEqual(owned, chat.filter((t) => t.tier !== "admin").map((t) => t.name));
+  assert.deepEqual(owned, withoutBoxes.filter((t) => t.tier !== "admin").map((t) => t.name));
   assert.ok(owned.includes("update_todos") && !owned.includes("edit_agent_profile"));
 });
