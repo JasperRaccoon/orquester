@@ -64,8 +64,6 @@ export class FakeAdapter implements BoxProviderAdapter {
   readonly validKey = "good-key-1234";
   failCreate: Error | null = null;
   failDestroy: Error | null = null;
-  /** Destroy succeeds but the instance never reports gone. */
-  destroyLeavesRunning = false;
   /** Called inside `create` before the instance exists (assert the record is already written). */
   onCreate: ((request: ProviderCreateRequest) => void) | null = null;
   offersCalls = 0;
@@ -119,7 +117,7 @@ export class FakeAdapter implements BoxProviderAdapter {
   async destroy(_credentials: ProviderCredentials, ref: ProviderInstanceRef): Promise<void> {
     if (this.failDestroy) throw this.failDestroy;
     this.destroyed.push(String(ref.id));
-    if (!this.destroyLeavesRunning) this.instances.delete(String(ref.id));
+    this.instances.delete(String(ref.id));
   }
 
   async listManaged(): Promise<ProviderManagedInstance[]> {

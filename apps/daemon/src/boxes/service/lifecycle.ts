@@ -49,7 +49,7 @@ import { BoxError, errorLine, isAbortError } from "./errors.ts";
 import { boxGitConfigCommands, boxKnownHostsPath, cloneUrlHost } from "./git-setup.ts";
 import type { BoxStore } from "./store.ts";
 import { initialStoredSetup, SETUP_STEP_LABELS } from "./summary.ts";
-import { planToolchain, TOOLCHAIN_PROBE_FILES, TOOLCHAIN_READ_FILES } from "./toolchain.ts";
+import { bubblewrapScript, planToolchain, TOOLCHAIN_PROBE_FILES, TOOLCHAIN_READ_FILES } from "./toolchain.ts";
 
 export type StoredBoxProject = NonNullable<StoredBox["project"]>;
 
@@ -625,6 +625,18 @@ export class BoxLifecycle {
     const { sys } = connection;
     if (sys.os === "win32") return { state: "skipped", message: "Automatic toolchain setup is not available on Windows boxes." };
     const boxDir = hostToBoxPath(connection.paths, project.path);
+    if (sys.os === "linux" && !(sys.isRoot || sys.canElevate)) {
+      log("No root access in the box: skipped installing bubblewrap (Codex's sandbox).");
+    } else if (sys.os === "linux") {
+      // Codex's sandbox needs bubblewrap; best effort, never the step's failure.
+      log("Checking bubblewrap (Codex's sandbox).");
+      const bwrap = await runBoxCommand(
+        connection,
+        { command: bubblewrapScript(), shell: true },
+        { signal: AbortSignal.any([signal, AbortSignal.timeout(TOOLCHAIN_COMMAND_TIMEOUT_MS)]), onLine: log }
+      );
+      if (bwrap.code !== 0) log(`Could not install bubblewrap (exit ${bwrap.code ?? bwrap.signal}); Codex runs without its sandbox here.`);
+    }
     const present = new Set<string>();
     const contents: Record<string, string> = {};
     for (const file of TOOLCHAIN_PROBE_FILES) {

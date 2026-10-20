@@ -4,7 +4,7 @@
  * hot paths (file routes call `locate` per request).
  */
 
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 
 import type { BoxSummary } from "@orquester/api";
 import type { StoredBox } from "@orquester/config";
@@ -22,12 +22,19 @@ export function projectDeleted(record: StoredBox): boolean {
 }
 
 export class StoreBoxRegistry implements BoxRegistry {
+  /** Project path → its box record, rebuilt after a record change: `locate` runs on hot paths. */
+  private projectIndex: Map<string, StoredBox> | null = null;
+
   constructor(
     private readonly store: BoxStore,
     private readonly hub: BoxHub,
     private readonly providers: BoxProviderRegistry,
     private readonly now: () => number
-  ) {}
+  ) {
+    store.events.on("changed", () => {
+      this.projectIndex = null;
+    });
+  }
 
   list(): StoredBox[] {
     return this.store.list();
@@ -55,19 +62,33 @@ export class StoreBoxRegistry implements BoxRegistry {
       .sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0));
   }
 
-  /** The project box record for exactly `projectPath` (or one that contains `path`), deleted projects excluded. */
-  projectRecord(path: string): StoredBox | undefined {
-    const target = resolve(path);
-    let best: StoredBox | undefined;
+  private index(): Map<string, StoredBox> {
+    if (this.projectIndex) return this.projectIndex;
+    const index = new Map<string, StoredBox>();
     for (const record of this.store.list()) {
       const project = record.project;
       if (record.purpose !== "project" || !project || projectDeleted(record)) continue;
       const root = resolve(project.path);
-      if (target !== root && !target.startsWith(`${root}/`)) continue;
+      const current = index.get(root);
       // The newest record wins when a stale one (an older build's) names the same path.
-      if (!best || record.createdAt > best.createdAt) best = record;
+      if (!current || record.createdAt > current.createdAt) index.set(root, record);
     }
-    return best;
+    this.projectIndex = index;
+    return index;
+  }
+
+  /** The project box record for exactly `projectPath` (or one that contains `path`), deleted projects excluded. */
+  projectRecord(path: string): StoredBox | undefined {
+    const index = this.index();
+    if (index.size === 0) return undefined;
+    // Walk up from the path: a box project is a directory, so a file under it maps to it too.
+    for (let current = resolve(path); ; ) {
+      const record = index.get(current);
+      if (record) return record;
+      const parent = dirname(current);
+      if (parent === current) return undefined;
+      current = parent;
+    }
   }
 
   locate(path: string): ProjectLocation {

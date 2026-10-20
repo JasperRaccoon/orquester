@@ -110,6 +110,7 @@ export class BoxStore implements BoxRecordStore {
     await this.loadFile(this.boxes, (data) => isObject(data) && (data.boxes === undefined || isObject(data.boxes)));
     await this.loadFile(this.secrets, (data) => isObject(data));
     this.reindex();
+    this.events.emit("changed", null);
   }
 
   /** Why changes to boxes.json are refused this run, if they are. */

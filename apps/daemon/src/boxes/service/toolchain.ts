@@ -128,6 +128,29 @@ function packageManagerOf(text: string | undefined): string | null {
   }
 }
 
+/**
+ * Install bubblewrap (Codex's Linux sandbox) where it is missing: as root or through passwordless
+ * sudo, with whichever package manager the box has. Exits 0 when it cannot (no root, no package
+ * manager — a container): the caller treats a failure as a note, never a failed step.
+ */
+export function bubblewrapScript(): string {
+  return [
+    "command -v bwrap >/dev/null 2>&1 && { echo 'bubblewrap is installed.'; exit 0; }",
+    'SUDO=""',
+    'if [ "$(id -u)" != 0 ]; then',
+    "  if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then SUDO='sudo -n'; else echo 'No root access: skipped bubblewrap.'; exit 0; fi",
+    "fi",
+    "if command -v apt-get >/dev/null 2>&1; then",
+    "  $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -q bubblewrap || { $SUDO apt-get update -q && $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -q bubblewrap; }",
+    "elif command -v dnf >/dev/null 2>&1; then $SUDO dnf install -y -q bubblewrap",
+    "elif command -v yum >/dev/null 2>&1; then $SUDO yum install -y -q bubblewrap",
+    "elif command -v apk >/dev/null 2>&1; then $SUDO apk add --no-cache bubblewrap",
+    "elif command -v zypper >/dev/null 2>&1; then $SUDO zypper --non-interactive install bubblewrap",
+    "elif command -v pacman >/dev/null 2>&1; then $SUDO pacman -S --noconfirm --needed bubblewrap",
+    "else echo 'No package manager: skipped bubblewrap.'; fi"
+  ].join("\n");
+}
+
 export function planToolchain(input: ToolchainInput): ToolchainPlan {
   const { present, contents } = input;
   const has = (file: ToolchainProbeFile) => present.has(file);

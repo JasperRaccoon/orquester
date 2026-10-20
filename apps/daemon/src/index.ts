@@ -2289,8 +2289,9 @@ export function createServer(
 
       // boxes: a project in a new box (Ephemeral AI VMs §8.1) — validated, stubbed on the host and
       // set up in the background by the box service; this answers at once with the project.
-      if (body.location !== undefined && body.location.kind !== "host") {
-        if (!isBoxLocation(body.location)) {
+      const location: unknown = body.location;
+      if (location !== undefined && location !== null && (location as { kind?: unknown }).kind !== "host") {
+        if (!isBoxLocation(location)) {
           return reply.code(400).send({ code: "BOX_INVALID_REQUEST", message: "Unknown project location." });
         }
         if (!services.boxes) {
