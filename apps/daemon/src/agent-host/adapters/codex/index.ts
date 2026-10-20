@@ -429,7 +429,9 @@ export const createCodexAdapter: AdapterFactory = async (
       bin,
       env: box?.env ?? env,
       ...((box !== undefined ? box.profile : profile) !== undefined ? { profile: (box !== undefined ? box.profile : profile)! } : {}),
-      ...(boxLaunch !== undefined && box !== undefined ? { box: { launch: boxLaunch, envUnset: box.envUnset } } : {}),
+      ...(boxLaunch !== undefined && box !== undefined
+        ? { box: { launch: boxLaunch, envUnset: box.envUnset, ...(codexHome !== null ? { hostCodexHome: codexHome } : {}) } }
+        : {}),
       ...(grant !== undefined
         ? {
             sessionTools: {

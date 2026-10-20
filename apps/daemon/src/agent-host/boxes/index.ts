@@ -30,7 +30,7 @@ import { join } from "node:path";
 
 import type { SpawnedProcess, SpawnOptions } from "@anthropic-ai/claude-agent-sdk";
 import type { AccountHome, AgentAdapterId } from "@orquester/api/agent-chat";
-import type { BoxPathMap, BoxSysInfo } from "@orquester/api";
+import type { BoxDetachedProcInfo, BoxPathMap, BoxSysInfo } from "@orquester/api";
 import { boxMcpSettingsPath, runInBoxServerNames, sessionProfileDir } from "@orquester/config";
 
 import type { AgentTokenGrant, BoxConnection } from "../../boxes/contracts.ts";
@@ -55,7 +55,7 @@ import {
 } from "./mcp-bridge-registry.ts";
 import { mcpBridgeArgv, planMcpBridges, type McpBridgePlan, type McpServerSpec } from "./mcp-plan.ts";
 import { spawnBoxChild, type BoxProviderChild } from "./remote-child.ts";
-import { BoxTokenTracker, BOX_TOKEN_MIN_VALID_SECONDS } from "./token-policy.ts";
+import { BoxTokenTracker, BOX_TOKEN_MIN_VALID_SECONDS, BOX_TOKEN_RENEW_MAX_DELAY_MS, BOX_TOKEN_RENEW_RETRY_MS } from "./token-policy.ts";
 
 export { BoxLaunchError } from "./errors.ts";
 export type { BoxConnector } from "./connections.ts";
@@ -66,6 +66,9 @@ type TokenAgent = "claude" | "codex" | "grok";
 function isTokenAgent(agent: AgentAdapterId): agent is TokenAgent {
   return agent === "claude" || agent === "codex" || agent === "grok";
 }
+
+/** How long a SIGKILLed leftover CLI may take to be reported gone before the start fails. */
+const LEFTOVER_STOP_DEADLINE_MS = 15_000;
 
 export interface BoxLaunchInput {
   threadId: string;
@@ -106,6 +109,8 @@ export class BoxLaunch {
   private closed = false;
   private credentialWriter: ((grant: AgentTokenGrant) => Promise<void>) | null = null;
   private credentialWork: Promise<void> = Promise.resolve();
+  /** Cancels the armed mid-turn renewal of the login file, if any. */
+  private cancelCredentialTimer: (() => void) | null = null;
 
   constructor(
     private readonly host: AgentHostBoxesImpl,
@@ -250,12 +255,40 @@ export class BoxLaunch {
     await write(grant);
     this.credentialWriter = write;
     this.host.credentialLaunches.set(this.threadId, this);
+    this.armCredentialTimer();
+  }
+
+  /**
+   * The mid-turn renewal: a timer armed for the moment the token turns stale, so a turn that
+   * runs past it (a long one, or one that started just before) gets a fresh login file too — the
+   * between-turn renewals alone left such a turn to a 401. Each firing renews (or finds a
+   * between-turn renewal already did) and re-arms for the token then current; a renewal that did
+   * not land is retried a minute later. Never keeps the host alive; ends with {@link close}.
+   */
+  private armCredentialTimer(): void {
+    this.cancelCredentialTimer?.();
+    this.cancelCredentialTimer = null;
+    if (this.closed || this.credentialWriter === null) return;
+    const until = this.host.tracker.msUntilStale(this.threadId);
+    if (until === null) return;
+    const delay = Math.min(until < 0 ? BOX_TOKEN_RENEW_RETRY_MS : until + 1, BOX_TOKEN_RENEW_MAX_DELAY_MS);
+    this.cancelCredentialTimer = this.host.schedule(() => {
+      this.cancelCredentialTimer = null;
+      void this.refreshCredentials()
+        .catch((error: unknown) => {
+          this.host.logger.warn(`box ${this.box.boxId}: the login of ${this.threadId} could not be renewed during its turn`, error);
+        })
+        .finally(() => {
+          if (this.cancelCredentialTimer === null) this.armCredentialTimer();
+        });
+    }, delay);
   }
 
   /**
    * Rewrite the login file when the token has less than the restart margin left
-   * (`token-policy.ts`). Serialized; a failure while the old token is still good is logged, not
-   * thrown — the turn goes ahead on it — and one with the token already expired fails the turn.
+   * (`token-policy.ts`): before a turn, after one, and from the renewal timer mid-turn.
+   * Serialized; a failure while the old token is still good is logged, not thrown — the turn
+   * goes ahead on it — and one with the token already expired fails the turn.
    */
   refreshCredentials(): Promise<void> {
     const write = this.credentialWriter;
@@ -408,6 +441,8 @@ export class BoxLaunch {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    this.cancelCredentialTimer?.();
+    this.cancelCredentialTimer = null;
     this.host.tracker.forget(this.threadId);
     if (this.host.credentialLaunches.get(this.threadId) === this) this.host.credentialLaunches.delete(this.threadId);
     const ids = this.bridgeIds.splice(0);
@@ -449,6 +484,8 @@ export interface AgentHostBoxesOptions {
   sync: BoxSyncClient;
   logger: AdapterLogger;
   now?: () => number;
+  /** Run `callback` after `delayMs` (unref'd); answers its cancel. Tests: a manual clock. */
+  schedule?: (callback: () => void, delayMs: number) => () => void;
   connectTimeoutMs?: number;
   /** Install commands by agent instead of the registry's (tests: a stand-in CLI, no network). */
   installCommands?: Partial<Record<AgentAdapterId, string>>;
@@ -481,6 +518,7 @@ class AgentHostBoxesImpl implements AgentHostBoxes {
   readonly logger: AdapterLogger;
   readonly tracker: BoxTokenTracker;
   readonly now: () => number;
+  readonly schedule: (callback: () => void, delayMs: number) => () => void;
   private readonly pool: BoxConnectionPool;
   private readonly connectTimeoutMs: number | undefined;
   private readonly installCommands: Partial<Record<AgentAdapterId, string>> | undefined;
@@ -498,6 +536,13 @@ class AgentHostBoxesImpl implements AgentHostBoxes {
     this.sync = options.sync;
     this.logger = options.logger;
     this.now = options.now ?? Date.now;
+    this.schedule =
+      options.schedule ??
+      ((callback, delayMs) => {
+        const timer = setTimeout(callback, delayMs);
+        timer.unref?.();
+        return () => clearTimeout(timer);
+      });
     this.tracker = new BoxTokenTracker(this.now);
     this.pool = new BoxConnectionPool(options.connector);
     this.connectTimeoutMs = options.connectTimeoutMs;
@@ -541,6 +586,9 @@ class AgentHostBoxesImpl implements AgentHostBoxes {
     // The live connection's facts win: a re-provisioned agent may report a new path.
     const box: HostThreadBox = { ...input.box, sys: connection.sys, paths: connection.paths };
 
+    // A leftover CLI of this thread is stopped BEFORE anything is synced: one still running would
+    // keep appending to the very transcript a resume pushes (and the push compares against).
+    if (input.sync !== false && input.agent !== "opencode") await this.sweepThreadProcs(connection, input);
     if (input.sync !== false) {
       const configRoots = [input.configRoot ?? input.home.path, ...(input.profile !== undefined ? [input.profile.preparedDir] : [])].filter(
         (root, index, all): root is string => typeof root === "string" && root.length > 0 && all.indexOf(root) === index
@@ -564,7 +612,6 @@ class AgentHostBoxesImpl implements AgentHostBoxes {
       }
     }
 
-    if (input.sync !== false && input.agent !== "opencode") await this.sweepThreadProcs(connection, input);
     const cli = await this.resolveCli(connection, input);
     return new BoxLaunch(this, input, connection, box, cli.bin, cli.path, accountId);
   }
@@ -573,20 +620,66 @@ class AgentHostBoxesImpl implements AgentHostBoxes {
    * A thread starts its CLI only once its previous session is gone (one live session per
    * thread), so a detached process of the thread still running in the box is a leftover: a host
    * that died without its teardown never stopped it, and nothing would ever reattach to it. It
-   * is stopped here, before the new one starts (never OpenCode's, whose server a project's
-   * threads share). Best-effort: a box that cannot list its processes keeps them.
+   * is stopped here, before the new one starts and before its transcript is synced (never
+   * OpenCode's, whose server a project's threads share). A box that cannot list its processes, or
+   * a leftover that does not end, fails the start: the new CLI would run beside the old one.
    */
   private async sweepThreadProcs(connection: BoxConnection, input: BoxLaunchInput): Promise<void> {
     const prefix = this.procIdPrefix(input);
-    const procs = await connection.request("proc.list", {}).catch(() => []);
+    let procs: BoxDetachedProcInfo[];
+    try {
+      procs = await connection.request("proc.list", {});
+    } catch (error) {
+      throw new BoxLaunchError(
+        "BOX_UNAVAILABLE",
+        `The box could not list its processes, so this chat could not make sure an earlier run of its agent has stopped: ${describeBoxFailure(error)}`
+      );
+    }
     for (const proc of procs) {
       if (!proc.procId.startsWith(prefix)) continue;
       if (proc.running) {
         this.logger.warn(`box ${connection.boxId}: stopping a ${input.agent} process an earlier host left running for ${input.threadId}`);
-        await connection.request("proc.signal", { procId: proc.procId, signal: "SIGKILL" }).catch(() => undefined);
+        await this.stopLeftover(connection, proc);
       }
-      await connection.request("proc.release", { procId: proc.procId }).catch(() => undefined);
+      // The box refuses to release a process that still runs (BUSY): only an ended one is released.
+      await connection.request("proc.release", { procId: proc.procId }).catch((error: unknown) => {
+        this.logger.warn(`box ${connection.boxId}: could not release the ended process ${proc.procId}`, error);
+      });
     }
+  }
+
+  /**
+   * SIGKILL a leftover and wait for the box to report its exit — on an attach from its current
+   * output end, the one exit signal the protocol has — within {@link LEFTOVER_STOP_DEADLINE_MS}.
+   * An attach that ends without the exit (the link dropped) is settled by listing again.
+   */
+  private async stopLeftover(connection: BoxConnection, proc: BoxDetachedProcInfo): Promise<void> {
+    const handle = connection.attach(proc.procId, proc.outputBytes);
+    // Nobody reads the leftover's output: drained, so it never holds the exit back.
+    handle.stdout.resume();
+    handle.stderr.resume();
+    const exited = new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => resolve(false), LEFTOVER_STOP_DEADLINE_MS);
+      timer.unref?.();
+      const done = (value: boolean): void => {
+        clearTimeout(timer);
+        resolve(value);
+      };
+      handle.once("exit", () => done(true));
+      handle.on("detached", () => done(false));
+      handle.once("error", () => done(false));
+    });
+    await connection.request("proc.signal", { procId: proc.procId, signal: "SIGKILL" }).catch(() => {
+      handle.kill("SIGKILL");
+    });
+    if (await exited) return;
+    const listed = await connection.request("proc.list", {}).catch(() => null);
+    const still = listed === null ? undefined : listed.find((entry) => entry.procId === proc.procId);
+    if (listed !== null && (still === undefined || !still.running)) return;
+    throw new BoxLaunchError(
+      "BOX_UNAVAILABLE",
+      "An earlier run of this chat's agent is still running in the box and could not be stopped. Try again in a moment, or restart the box."
+    );
   }
 
   /** Every detached process id of a thread's agent starts with this. */

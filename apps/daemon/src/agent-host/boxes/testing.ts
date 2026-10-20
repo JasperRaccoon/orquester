@@ -80,6 +80,8 @@ export interface ReattachableBoxConnection extends LocalBoxConnection {
   restoreLink(): void;
   /** `attach` calls made, for assertions. */
   readonly attaches: { procId: string; fromOffset: number }[];
+  /** Detached processes released (`proc.release` of an ended one), in order. */
+  readonly releases: string[];
   /** Resolves once a detached process's whole output so far satisfies `predicate` (attached or not). */
   outputSeen(procId: string, predicate: (text: string) => boolean): Promise<void>;
   /** SIGKILL every process this double started (a test's cleanup). */
@@ -91,6 +93,7 @@ export function reattachableBoxConnection(options: LocalBoxConnectionOptions = {
   const detached = new Map<string, DetachedRecord>();
   const started: BoxProcess[] = [];
   const attaches: { procId: string; fromOffset: number }[] = [];
+  const releases: string[] = [];
   const output = new EventEmitter();
   const textOf = (record: DetachedRecord): string => Buffer.concat(record.chunks.map((chunk) => chunk.data)).toString("utf8");
 
@@ -113,6 +116,7 @@ export function reattachableBoxConnection(options: LocalBoxConnectionOptions = {
 
   const connection: ReattachableBoxConnection = Object.assign(Object.create(base) as object, {
     attaches,
+    releases,
     exec(execOptions: BoxExecOptions): BoxProcess {
       const real = base.exec(execOptions);
       started.push(real);
@@ -179,7 +183,13 @@ export function reattachableBoxConnection(options: LocalBoxConnectionOptions = {
         return undefined;
       }
       if (method === "proc.release") {
-        detached.delete((params as { procId: string }).procId);
+        const procId = (params as { procId: string }).procId;
+        // As the box agent (`procs.go`): a process that still runs is not released.
+        if (detached.get(procId)?.exit === null) {
+          throw Object.assign(new Error("the process is still running; signal it first"), { code: "BUSY" });
+        }
+        detached.delete(procId);
+        releases.push(procId);
         return undefined;
       }
       return (base.request as (m: string, p: unknown, o?: unknown) => Promise<unknown>)(method, params, requestOptions);

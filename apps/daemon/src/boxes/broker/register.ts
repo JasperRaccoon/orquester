@@ -2,7 +2,8 @@
  * The token broker's two entry points (spec 2026-10-19 boxes §7):
  *
  * - {@link registerTokenBroker}: the box → host `token.get` request (`orq-agent token …` in a box).
- *   The box's identity is the authenticated link's, never a field of the request.
+ *   The box's identity is the authenticated link's, never a field of the request, and its
+ *   `minValidSeconds` is lowered to {@link BOX_MAX_MIN_VALID_SECONDS}.
  * - {@link registerTokenBrokerRoutes}: `POST boxRoutes.internalToken`, for the agent host at spawn
  *   time and on Codex `account/chatgptAuthTokens/refresh`. SOCKET-ONLY, like the reply-subscription
  *   routes: the daemon calls it with the unix-socket app alone (`unixServer` in `index.ts`), never
@@ -16,7 +17,7 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import { boxRoutes } from "@orquester/api";
 
 import type { AgentTokenBroker, AgentTokenGrant, BoxHub } from "../contracts.ts";
-import { AgentTokenError, parseTokenRequest } from "./broker.ts";
+import { AgentTokenError, BOX_MAX_MIN_VALID_SECONDS, parseTokenRequest } from "./broker.ts";
 
 /** Longest a token request waits for a host CLI to renew a held account's login. */
 export const TOKEN_REQUEST_MAX_WAIT_MS = 10 * 60_000;
@@ -24,11 +25,13 @@ export const TOKEN_REQUEST_MAX_WAIT_MS = 10 * 60_000;
 export function registerTokenBroker(hub: Pick<BoxHub, "handle">, broker: AgentTokenBroker): void {
   hub.handle("token.get", (context, params, signal) => {
     const fields = typeof params === "object" && params !== null ? (params as unknown as Record<string, unknown>) : {};
-    // Untrusted shapes go through `parseTokenRequest` inside `getToken`; the box id is the link's.
+    // Untrusted shapes go through `parseTokenRequest` inside `getToken`; the box id is the link's,
+    // and a box never asks for more life than a fresh token has (a refresh on every call).
+    const minValidSeconds = fields.minValidSeconds;
     const request = {
       agent: fields.agent,
       accountId: fields.accountId,
-      minValidSeconds: fields.minValidSeconds,
+      minValidSeconds: typeof minValidSeconds === "number" ? Math.min(minValidSeconds, BOX_MAX_MIN_VALID_SECONDS) : minValidSeconds,
       rejectedAccessToken: fields.rejectedAccessToken,
       boxId: context.boxId
     };

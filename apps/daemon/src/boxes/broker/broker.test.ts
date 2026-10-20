@@ -11,10 +11,12 @@ import { AgentAccountError } from "../../agent-account-paths.ts";
 import type { AccountRefreshOutcome } from "../../agent-accounts.ts";
 import {
   AgentTokenError,
+  COOLDOWN_MIN_LIFE_MS,
   createAgentTokenBroker,
   DEFAULT_MIN_VALID_SECONDS,
   HELD_REFRESH_FLOOR_MS,
-  MAX_REJECTED_TOKEN_LENGTH
+  MAX_REJECTED_TOKEN_LENGTH,
+  REFRESH_COOLDOWN_MS
 } from "./broker.ts";
 import { brokerWorld, claudeCreds, codexAuth, grokAuth, homeOf, MIN, NOW, settle, storedBox, type BrokerWorld } from "./testing.ts";
 
@@ -322,6 +324,49 @@ test("a rejected access token that is still current is renewed, not handed out a
   );
   assert.equal(again.accessToken, renewed.accessToken);
   assert.equal(w.refreshCalls.length, 1);
+});
+
+test("the refresh cooldown: right after a refresh, asking for more life or rejecting the new token does not refresh again", async () => {
+  const w = world();
+  // A provider whose tokens live one hour: a 60-minute minValidSeconds can never be met.
+  w.refreshImpl = async (_agent, id) => {
+    w.files.write(`${homeOf("claude", id)}/.credentials.json`, claudeCreds(`claude-access-${w.refreshCalls.length}`, w.clock.now + 60 * MIN));
+    return "refreshed";
+  };
+  w.files.write(claudePath, claudeCreds("claude-access-OLD", NOW + 20 * MIN));
+  const broker = createAgentTokenBroker(w.deps);
+  const ask = (extra: Record<string, unknown> = {}) =>
+    broker.getToken({ boxId: "box-1", agent: "claude", accountId: CLAUDE_ID, minValidSeconds: 60 * 60, ...extra }, signal());
+
+  const first = await ask();
+  assert.equal(first.accessToken, "claude-access-1");
+  assert.equal(w.refreshCalls.length, 1);
+  // 59.9 minutes left < the asked 60: without the cooldown, every call would refresh.
+  w.clock.now += 6_000;
+  for (let i = 0; i < 5; i++) assert.equal((await ask()).accessToken, "claude-access-1");
+  assert.equal((await ask({ rejectedAccessToken: "claude-access-1" })).accessToken, "claude-access-1");
+  assert.equal(w.refreshCalls.length, 1, "one refresh, however often the box asks");
+
+  // Past the cooldown, a short token is renewed again.
+  w.clock.now = NOW + REFRESH_COOLDOWN_MS;
+  assert.equal((await ask()).accessToken, "claude-access-2");
+  assert.equal(w.refreshCalls.length, 2);
+
+  // Inside the cooldown but with under 5 minutes left: renewed, the cooldown never hands out a dying token.
+  w.refreshImpl = async (_agent, id) => {
+    w.files.write(`${homeOf("claude", id)}/.credentials.json`, claudeCreds("claude-access-SHORT", w.clock.now + 4 * MIN));
+    return "refreshed";
+  };
+  w.clock.now += COOLDOWN_MIN_LIFE_MS * 12;
+  assert.equal((await ask()).accessToken, "claude-access-SHORT");
+  assert.equal(w.refreshCalls.length, 3);
+  w.refreshImpl = async (_agent, id) => {
+    w.files.write(`${homeOf("claude", id)}/.credentials.json`, claudeCreds("claude-access-LONG", w.clock.now + 60 * MIN));
+    return "refreshed";
+  };
+  w.clock.now += MIN;
+  assert.equal((await ask()).accessToken, "claude-access-LONG");
+  assert.equal(w.refreshCalls.length, 4);
 });
 
 test("concurrent requests rejecting the same token share one refresh", async () => {

@@ -88,6 +88,15 @@ function kindOf(stats: { isFile(): boolean; isDirectory(): boolean; isSymbolicLi
   return "other";
 }
 
+/**
+ * Whether a directory entry name from a box is one path segment: not empty, not `.` or `..`,
+ * without `/`, `\` or NUL. A box answers its own listings, so a name like `../../x` would
+ * otherwise turn `join(dir, name)` into a path outside the directory.
+ */
+export function isSafeEntryName(name: string): boolean {
+  return name !== "" && name !== "." && name !== ".." && !/[\\/\0]/.test(name);
+}
+
 async function collect(stream: Readable): Promise<Buffer> {
   const chunks: Buffer[] = [];
   for await (const chunk of stream) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array));
@@ -240,9 +249,12 @@ export class BoxProjectFs implements ProjectFs {
     return { kind: found.kind, size: found.size, mtimeMs: found.mtimeMs, mode: found.mode, identity: found.identity };
   }
 
+  /** The directory's entries. Names come from the box: one that is no single path segment is dropped (see {@link isSafeEntryName}). */
   async readdir(path: string): Promise<ProjectFsDirEntry[]> {
     const entries = await this.call(() => this.connection.request("fs.readdir", { path: this.toBox(path) }));
-    return entries.map((entry) => ({ name: entry.name, kind: entry.kind, size: entry.size, mtimeMs: entry.mtimeMs }));
+    return entries
+      .filter((entry) => isSafeEntryName(entry.name))
+      .map((entry) => ({ name: entry.name, kind: entry.kind, size: entry.size, mtimeMs: entry.mtimeMs }));
   }
 
   async realpath(path: string): Promise<string> {

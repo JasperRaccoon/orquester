@@ -87,6 +87,8 @@ export type GitRouteResolver = (cwd: string) => Promise<GitExecRoute | null>;
  *     picked up — fetch/push therefore use the bound account's identity + SSH
  *     key automatically. This service does NOT depend on AccountsService; when
  *     no account is bound, ambient git config is used.
+ *   - Every call carries {@link gitSafetyArgs}: no fsmonitor command, and no
+ *     hooks for the reads the daemon runs on its own (status polling, diffs).
  *   - `--no-color` + machine-readable `--porcelain`/`-z`/`--format` everywhere;
  *     rejected commands carry `.stdout`/`.stderr`/`.code`, surfaced as GitError.
  */
@@ -152,7 +154,7 @@ export class GitService {
     };
     const runner = route?.runner ?? this.runner;
     try {
-      const { stdout, stderr } = await runner("git", args, {
+      const { stdout, stderr } = await runner("git", [...gitSafetyArgs(args, route === null), ...args], {
         cwd,
         env,
         maxBuffer: opts?.maxBuffer ?? 64 * 1024 * 1024,
@@ -928,6 +930,41 @@ const WORKING_DIFF_CONFIG: readonly string[] = [
   "-c",
   "diff.dstPrefix=b/"
 ];
+
+/**
+ * Subcommands whose hooks are part of what the user asked for (a commit runs its
+ * pre-commit hook, a push its pre-push hook, …). Every other git the daemon runs
+ * — the git panel's status polling, diffs, logs, branch lists — is a read.
+ */
+const HOOKED_COMMANDS: ReadonlySet<string> = new Set(["add", "checkout", "clean", "commit", "fetch", "merge", "push", "reset", "restore", "stash"]);
+
+/** The subcommand of an argv (after any leading `-c <key=value>` pairs), and its first argument. */
+function subcommandOf(args: readonly string[]): { command: string; first: string | undefined } {
+  let index = 0;
+  while (args[index] === "-c") index += 2;
+  return { command: args[index] ?? "", first: args[index + 1] };
+}
+
+/**
+ * The `-c` options in front of every git the daemon runs. A repository's own
+ * config must never make a git the daemon starts by itself run a program:
+ *
+ * - `core.fsmonitor=false`, always: a repo-configured fsmonitor is a command
+ *   that `status`/`diff`/`add` run on every index refresh — on the 2 s git
+ *   panel poll that would be code execution on this host for whoever could
+ *   write `.git/config`.
+ * - `core.hooksPath=/dev/null` for reads on this host: `status` writes the
+ *   refreshed index, which fires `post-index-change`; `/dev/null/<hook>` never
+ *   exists, so no hook runs. Commands the user started (commit, push, …) keep
+ *   the repo's hooks. A box repo's hooks run in its box, not here.
+ */
+export function gitSafetyArgs(args: readonly string[], onHost: boolean): string[] {
+  const out = ["-c", "core.fsmonitor=false"];
+  const { command, first } = subcommandOf(args);
+  const hooked = HOOKED_COMMANDS.has(command) && !(command === "stash" && first === "list");
+  if (onHost && !hooked) out.push("-c", "core.hooksPath=/dev/null");
+  return out;
+}
 
 /** `workingDiff`'s `untracked` is capped here: a prompt wants a list, not an un-ignored build dir's inventory. */
 const WORKING_DIFF_UNTRACKED_MAX = 1000;

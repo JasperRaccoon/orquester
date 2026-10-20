@@ -73,7 +73,7 @@ interface Rig {
   tmuxCalls: string[][];
 }
 
-function rig(options: { tmux?: boolean; tmuxAlive?: boolean; tooling?: boolean } = {}): Rig {
+function rig(options: { tmux?: boolean; tmuxAlive?: boolean; tooling?: boolean; pendingKillsFile?: string } = {}): Rig {
   const tmuxCalls: string[][] = [];
   const connection = fakeAgentConnection({
     sys: { tmux: options.tmux ?? false, shell: "/bin/bash", home: "/home/box", agentPath: "/opt/orq/orq-agent" },
@@ -97,6 +97,7 @@ function rig(options: { tmux?: boolean; tmuxAlive?: boolean; tooling?: boolean }
   const box = new BoxTerminalManager({
     registry: boxes.registry,
     hub: boxes.hub,
+    ...(options.pendingKillsFile ? { pendingKillsFile: options.pendingKillsFile } : {}),
     ...(options.tooling
       ? { tooling: { contribution: () => ({ pathPrepend: ["/var/lib/orq-agent/tools/bin"], env: { TSRS_ENGINE: "tsrs" }, nodeRequire: ["/var/lib/orq-agent/tools/preload.cjs"] }) } }
       : {})
@@ -144,7 +145,8 @@ test("a box project's terminal runs a detached login shell in the box; input, ou
     assert.deepEqual(spawned.detach, { procId: summary.id });
     assert.deepEqual(spawned.pty, { cols: 100, rows: 30, term: "xterm-256color" });
     assert.equal(spawned.env?.TERM, "xterm-256color");
-    assert.equal(spawned.env?.GIT_CONFIG_VALUE_1, "!'/opt/orq/orq-agent' git-credential");
+    assert.equal(spawned.env?.GIT_CONFIG_COUNT, undefined, "no git credential helper: a box never gets a token");
+    assert.equal(spawned.env?.GIT_SSH_COMMAND, undefined);
     assert.equal(spawned.env?.NODE_OPTIONS, undefined, "the host preload never reaches a box");
 
     const control = r.connection.proc(summary.id)!;
@@ -265,6 +267,60 @@ test("a dropped link detaches the shell; reconnecting reattaches from the last o
     assert.equal(r.sessions.buffer(summary.id), "one\nwhile-away\necho:pwd\n");
   } finally {
     r.box.dispose();
+  }
+});
+
+test("a resize made while the box is away reaches the PTY once the shell is reattached", async () => {
+  const r = rig();
+  try {
+    const summary = await r.sessions.create({ kind: "shell", refId: "bash", projectPath: PROJECT, cols: 80, rows: 24 });
+    const control = r.connection.proc(summary.id)!;
+    r.connection.dropLink();
+    r.sessions.resize(summary.id, 132, 50);
+    assert.deepEqual(control.resizes, [], "no process to tell while away");
+    assert.equal(r.sessions.get(summary.id)?.cols, 132);
+
+    const resumed = nextOutput(r.sessions, summary.id, /back\n/);
+    control.write("back\n");
+    r.connection.restoreLink();
+    await resumed;
+    assert.deepEqual(control.resizes, [{ cols: 132, rows: 50 }]);
+  } finally {
+    r.box.dispose();
+  }
+});
+
+test("a terminal closed while its box is away is ended on reconnect, across a daemon restart", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "orq-box-terminals-"));
+  const pendingKillsFile = join(dir, "boxes", "pending-terminal-kills.json");
+  const r = rig({ pendingKillsFile });
+  try {
+    const summary = await r.sessions.create({ kind: "shell", refId: "bash", projectPath: PROJECT });
+    const control = r.connection.proc(summary.id)!;
+    r.connection.dropLink();
+    assert.equal(r.sessions.close(summary.id), true);
+    await r.box.pendingKillsSaved();
+    assert.deepEqual(JSON.parse(await readFile(pendingKillsFile, "utf8")), { version: 1, kills: [{ boxId: "box-1", procId: summary.id }] });
+
+    // The daemon restarts before the box is back: the new manager still owes the kill.
+    r.box.dispose();
+    const box2 = new BoxTerminalManager({ registry: r.boxes.registry, hub: r.boxes.hub, pendingKillsFile });
+    try {
+      assert.deepEqual([...box2.pendingKills()], [["box-1", [summary.id]]]);
+      const released = r.connection.nextCall("proc.release");
+      r.connection.restoreLink();
+      assert.deepEqual(await released, { procId: summary.id });
+      assert.deepEqual(control.signals, ["SIGHUP"]);
+      assert.ok(!r.connection.detachedProcs().some((proc) => proc.procId === summary.id), "nothing left in the box");
+      await box2.pendingKillsSaved();
+      assert.deepEqual(box2.pendingKills().size, 0);
+      assert.deepEqual(JSON.parse(await readFile(pendingKillsFile, "utf8")), { version: 1, kills: [] });
+    } finally {
+      box2.dispose();
+    }
+  } finally {
+    r.box.dispose();
+    await rm(dir, { recursive: true, force: true });
   }
 });
 

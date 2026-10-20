@@ -10,7 +10,9 @@
  * - **The box service is injected late** ({@link TemporaryBoxTools.connect}): until it is, every
  *   operation answers `BOXES_DISABLED`, and the box tools are not advertised to chats.
  * - **Files are streamed**: a file as its bytes, a directory as a tar stream made and unpacked by
- *   the host's `tar`; host paths are checked against the calling chat's project after realpath.
+ *   the host's `tar`; host paths are checked against the calling chat's project after realpath. A
+ *   download never writes git metadata (a `.git` path, a git directory, or a directory carrying
+ *   either): its config or hooks would run on the host.
  * - **Background jobs** run detached in the box (they survive link drops; the output is followed
  *   again from the offset last seen when the box reconnects) and their output tail is kept here.
  * - **Lifetime.** A closed chat's boxes are destroyed (`chat-closed`, {@link chatClosed}); a
@@ -24,7 +26,7 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
 import { lstat, mkdir, mkdtemp, readdir, rename, rm } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, relative, sep } from "node:path";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
@@ -232,6 +234,55 @@ export function boxPathFor(sys: Pick<BoxSysInfo, "os" | "home">, path: string | 
 function boxBasename(path: string): string {
   const segments = path.split(/[\\/]+/).filter((segment) => segment.length > 0);
   return segments.at(-1) ?? "";
+}
+
+const GIT_METADATA_REFUSAL =
+  "local_path is inside git metadata (a .git directory or a git directory): box_download never writes there. Choose a path in the project's working files.";
+
+/** A path segment git reads as `.git`: any case (case-insensitive file systems), trailing dots or spaces dropped (as Windows does). */
+export function isGitSegment(segment: string): boolean {
+  return segment.replace(/[. ]+$/, "").toLowerCase() === ".git";
+}
+
+/**
+ * Whether `dir` is laid out as a git directory (what git's discovery accepts as one: `HEAD` with
+ * `objects`/`refs`/`commondir`, or `objects` and `refs` a `HEAD` would complete). Not followed
+ * through symlinks.
+ */
+async function looksLikeGitDir(dir: string): Promise<boolean> {
+  const [head, objects, refs, commondir] = await Promise.all(["HEAD", "objects", "refs", "commondir"].map((name) => lstat(join(dir, name)).catch(() => null)));
+  const isDir = (entry: Awaited<ReturnType<typeof lstat>> | null): boolean => entry?.isDirectory() === true;
+  if (isDir(objects) && isDir(refs)) return true;
+  return head?.isFile() === true && (isDir(objects) || isDir(refs) || commondir?.isFile() === true);
+}
+
+/**
+ * Whether a download target lies in git metadata: a `.git` segment in the path as asked or as
+ * resolved (realpath, inside `projectRoot`), or a directory from its parent up to the project root
+ * that is a git directory (a bare repository, a worktree's or submodule's gitdir).
+ */
+export async function insideGitMetadata(projectRoot: string, requested: string, resolved: string): Promise<boolean> {
+  if (requested.split(/[\\/]+/).some(isGitSegment)) return true;
+  const rel = relative(projectRoot, resolved);
+  if (rel.split(sep).some(isGitSegment)) return true;
+  for (let dir = dirname(resolved); ; dir = dirname(dir)) {
+    if (await looksLikeGitDir(dir)) return true;
+    if (dir === projectRoot || dirname(dir) === dir || relative(projectRoot, dir).startsWith("..")) return false;
+  }
+}
+
+/** Whether an unpacked tree holds a `.git` entry anywhere or a directory laid out as a git directory (symlinks are not followed). */
+export async function containsGitMetadata(root: string): Promise<boolean> {
+  const pending = [root];
+  while (pending.length > 0) {
+    const dir = pending.pop()!;
+    if (await looksLikeGitDir(dir)) return true;
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      if (isGitSegment(entry.name)) return true;
+      if (entry.isDirectory()) pending.push(join(dir, entry.name));
+    }
+  }
+  return false;
 }
 
 /** The default shell of a box: PowerShell on Windows, bash elsewhere. */
@@ -573,6 +624,9 @@ export class TemporaryBoxTools {
     if (!target.ok) return target;
     const projectRoot = await assertInsideFsRoot(project.value, project.value);
     if (target.value === projectRoot) return refuse(400, "INVALID_ARGUMENT", "local_path is the project itself: name a new file or directory inside it.");
+    // A box's bytes never land in git metadata: a planted config (core.fsmonitor) or hook would
+    // run on the host the next time anything runs git in the project.
+    if (await insideGitMetadata(projectRoot, request.localPath, target.value)) return refuse(403, "PERMISSION_DENIED", GIT_METADATA_REFUSAL);
     const remote = boxPathFor(connection.sys, request.remotePath);
     if (remote === null || request.remotePath.trim() === "") return refuse(400, "INVALID_ARGUMENT", "remote_path is not a usable path.");
     let remoteStat;
@@ -619,6 +673,11 @@ export class TemporaryBoxTools {
       const { code, stderr } = await exited;
       if (code !== 0) throw new Error(`tar could not unpack the directory${stderr ? `: ${stderr}` : ""}`);
       const item = await this.unpackedItem(connection, remote, staging, options.signal);
+      // A directory that carries git metadata (a `.git`, or is itself a git directory) would bring
+      // its config and hooks onto the host: refused whole, nothing is moved into the project.
+      if (await containsGitMetadata(item)) {
+        return refuse(403, "PERMISSION_DENIED", "The directory holds git metadata (a .git entry or a git directory): box_download never copies that. Send a git bundle or a patch instead, or download the files without .git.");
+      }
       await rename(item, target.value);
       if (item !== staging) await rm(staging, { recursive: true, force: true });
       staging = null;

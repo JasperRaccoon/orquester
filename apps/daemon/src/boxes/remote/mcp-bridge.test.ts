@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -188,4 +189,59 @@ test("a bridged HTTP server is reached from the host with its headers; the box n
   } finally {
     await new Promise<void>((resolve) => http.close(() => resolve()));
   }
+});
+
+test("a box holds at most maxChannelsPerBox open bridges: more are refused until one ends; other boxes are not affected", async () => {
+  const appdir = await mkdtemp(join(tmpdir(), "mcp-bridge-"));
+  const serverId = "server-id-aaaaaaaaaaaaaaaaaaaaaaaa";
+  // A stdio server that runs until its stdin ends (the channel closing).
+  const target = {
+    transport: "stdio" as const,
+    command: process.execPath,
+    args: ["-e", "process.stdin.resume(); process.stdin.on('end', () => process.exit(0))"],
+    env: {}
+  };
+  await writeMcpBridgeEntry(appdir, entry(appdir, { boxId: "box-1", serverId, target }));
+  await writeMcpBridgeEntry(appdir, entry(appdir, { boxId: "box-2", serverId, target }));
+  const children: ChildProcess[] = [];
+  const spawned: (() => void)[] = [];
+  const capture = hubCapture();
+  registerMcpBridge(capture.hub, {
+    appdir,
+    maxChannelsPerBox: 2,
+    spawn: ((...args: Parameters<typeof nodeSpawn>) => {
+      const child = nodeSpawn(...args);
+      children.push(child);
+      spawned.shift()?.();
+      return child;
+    }) as typeof nodeSpawn,
+    baseEnv: () => ({ PATH: process.env.PATH ?? "" })
+  });
+  const open = async (boxId: string): Promise<ReturnType<typeof channel>> => {
+    const link = channel();
+    const started = new Promise<void>((resolve) => spawned.push(resolve));
+    capture.handler()(context(boxId), { kind: "mcp-bridge", serverId }, link.stream);
+    await started;
+    return link;
+  };
+  const first = await open("box-1");
+  const second = await open("box-1");
+  // The third of box-1 is refused at once: closed, nothing spawned.
+  const refused = channel();
+  capture.handler()(context("box-1"), { kind: "mcp-bridge", serverId }, refused.stream);
+  await refused.closed;
+  assert.equal(children.length, 2);
+  // Another box has its own allowance.
+  const other = await open("box-2");
+  assert.equal(children.length, 3);
+  // One of box-1's ends: a new one is accepted again.
+  first.stream.destroy();
+  await first.closed;
+  const fourth = await open("box-1");
+  assert.equal(children.length, 4);
+  const exits = children.map((child) =>
+    child.exitCode !== null || child.signalCode !== null ? Promise.resolve() : new Promise<void>((resolve) => child.once("exit", () => resolve()))
+  );
+  for (const link of [second, other, fourth]) link.stream.destroy();
+  await Promise.all(exits);
 });
