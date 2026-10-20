@@ -11,8 +11,22 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
+
 	"orquester/box-agent/internal/wire"
 )
+
+// sendInput writes `text` to the process behind channel `ch` (stream 0).
+func (d *testDaemon) sendInput(ch int, text string) {
+	d.t.Helper()
+	frame, err := wire.EncodeDataFrame(uint32(ch), wire.StreamToBox, []byte(text))
+	if err != nil {
+		d.t.Fatal(err)
+	}
+	if err := d.conn.Write(d.ctx, websocket.MessageBinary, frame); err != nil {
+		d.t.Fatal(err)
+	}
+}
 
 // nextData returns the next data frame of channel `ch`, failing after 10 s.
 func (d *testDaemon) nextData(ch int) []byte {
@@ -118,12 +132,12 @@ func (d *testDaemon) waitProc(procId string, done func(map[string]any) bool, oth
 // with OUTPUT_OVERRUN rather than skipping the lost bytes.
 func TestDetachedViewerThatFallsBehindItsBufferEndsWithAnError(t *testing.T) {
 	d := newTestDaemon(t)
-	spec := map[string]any{
-		"command": "head",
-		"args":    []string{"-c", strconv.Itoa(3 * wire.ChannelWindowBytes), "/dev/zero"},
-		"detach":  map[string]any{"procId": "fast", "bufferBytes": 64 * 1024},
-	}
+	// The process writes only once its viewer is there (on input), so the
+	// viewer starts at offset 0 and has to fall behind, not start late.
+	spec := shellSpec("read go; head -c "+strconv.Itoa(3*wire.ChannelWindowBytes)+" /dev/zero", false)
+	spec["detach"] = map[string]any{"procId": "fast", "bufferBytes": 64 * 1024}
 	d.openExec(1, spec)
+	d.sendInput(1, "go\n")
 	// The viewer may overrun on its own while the process writes.
 	var closed map[string]any
 	d.waitProc("fast", func(proc map[string]any) bool { return proc["running"] == false }, func(msg map[string]any) {

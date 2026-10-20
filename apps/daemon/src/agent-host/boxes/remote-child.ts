@@ -19,7 +19,14 @@
  *   byte already received (the protocol's own offset, emission order).
  *   Input written meanwhile is held and delivered after the reattach. A link
  *   that does not come back within the reattach deadline ends the child as
- *   `SIGHUP`, as a dropped local terminal would.
+ *   `SIGHUP`, as a dropped local terminal would. A channel lost before it
+ *   opened (`BOX_DISCONNECTED`: the link went away again) is a detach too.
+ * - **Output is never skipped.** The box's buffer may have moved past the
+ *   offset (an attach reports `droppedBytes`, or a viewer overran it,
+ *   `OUTPUT_OVERRUN`): the agent CLI's protocol stream now has a hole, so the
+ *   child is ended — the process in the box SIGKILLed, the exit `SIGKILL` —
+ *   with a notice, rather than resynchronised on corrupt input. Any other
+ *   failure of an open channel ends it the same way.
  * - `exited` never rejects and resolves exactly once; a finished detached
  *   process is released (`proc.release`) so the box frees its buffer.
  */
@@ -29,6 +36,7 @@ import { PassThrough } from "node:stream";
 
 import type { BoxDetachedProcInfo } from "@orquester/api";
 
+import { BOX_DISCONNECTED } from "../../boxes/client/mux.ts";
 import type { BoxConnection, BoxExecOptions, BoxProcess } from "../../boxes/contracts.ts";
 import { DEFAULT_KILL_GRACE_MS, type ChildExitReason, type ProviderChild } from "../support/spawn.ts";
 
@@ -41,6 +49,13 @@ export const BOX_REATTACH_DEADLINE_MS = 15 * 60_000;
  * channel that never closes — a deadline, not a timing guess.
  */
 const EXIT_DRAIN_GRACE_MS = 1_000;
+
+/** orq-agent's close code for a viewer that fell behind the process's output buffer. */
+const OUTPUT_OVERRUN = "OUTPUT_OVERRUN";
+
+function errorCode(error: unknown): unknown {
+  return typeof error === "object" && error !== null ? (error as { code?: unknown }).code : undefined;
+}
 
 export interface SpawnBoxChildOptions {
   connection: BoxConnection;
@@ -111,6 +126,8 @@ export function spawnBoxChild(options: SpawnBoxChildOptions): BoxProviderChild {
   /** A signal asked for while no channel could carry it. */
   let pendingSignal: NodeJS.Signals | null = null;
   let stopWaiting: (() => void) | null = null;
+  /** The output can no longer be followed; the box process is being ended. */
+  let ending = false;
 
   const finish = (next: ChildExitReason): void => {
     if (reason !== null) return;
@@ -144,6 +161,58 @@ export function spawnBoxChild(options: SpawnBoxChildOptions): BoxProviderChild {
     current?.stdin.end();
   });
   stdin.on("error", () => undefined);
+
+  /** Resolves once `proc` (or, without one, a fresh viewer of the process) reports its end, or after `grace`. */
+  const waitBoxExit = (proc: BoxProcess | null): Promise<void> =>
+    new Promise<void>((resolve) => {
+      let viewer: BoxProcess;
+      try {
+        viewer = proc ?? connection.attach(procId, received);
+      } catch {
+        resolve();
+        return;
+      }
+      const timer = setTimeout(done, grace);
+      function done(): void {
+        clearTimeout(timer);
+        viewer.off("exit", done);
+        viewer.off("error", done);
+        viewer.off("detached", done);
+        resolve();
+      }
+      // Its output is of no use any more: let it flow so the box can finish.
+      viewer.stdout.resume();
+      viewer.stderr.resume();
+      viewer.stdin.on("error", () => undefined);
+      viewer.on("exit", done);
+      viewer.on("error", done);
+      viewer.on("detached", done);
+    });
+
+  /**
+   * The output stream has a hole (or its channel failed): what the CLI says next cannot be
+   * trusted, so end the process in the box and the child with it. `live` is a still-open
+   * channel to the process, to watch its end on.
+   */
+  const endDesynced = (why: string, live: BoxProcess | null): void => {
+    if (reason !== null || ending) return;
+    ending = true;
+    stopWaiting?.();
+    stopWaiting = null;
+    unhookCurrent?.();
+    notice(`box process ${procId}: ${why}; ending it`);
+    if (options.detach === undefined) {
+      // A process that is not detached is hung up by the box when its channel ends.
+      finish({ kind: "signal", code: null, signal: "SIGHUP" });
+      return;
+    }
+    void (async () => {
+      await connection.request("proc.signal", { procId, signal: "SIGKILL" }).catch(() => undefined);
+      // Released only once it has ended (a running process cannot be).
+      await waitBoxExit(live);
+      finish({ kind: "signal", code: null, signal: "SIGKILL" });
+    })();
+  };
 
   /** Settle a detached process the box no longer streams: from its last known state. */
   const settleFromBox = async (why: string): Promise<void> => {
@@ -187,6 +256,11 @@ export function spawnBoxChild(options: SpawnBoxChildOptions): BoxProviderChild {
     };
     const onSpawn = (): void => {
       opened = true;
+      // An attach that starts past the offset asked for lost the bytes in between.
+      const offset = proc.outputOffset;
+      if (options.detach !== undefined && offset !== undefined && offset !== received) {
+        endDesynced(`${offset - received} bytes of its output were dropped by the box before the ${mode === "attach" ? "reattach" : "start"}`, proc);
+      }
     };
     const onExit = (code: number | null, signal: NodeJS.Signals | null): void => {
       exitInfo = { code, signal };
@@ -196,7 +270,16 @@ export function spawnBoxChild(options: SpawnBoxChildOptions): BoxProviderChild {
       }
     };
     const onError = (error: Error): void => {
-      if (reason !== null) return;
+      if (reason !== null || ending) return;
+      if (errorCode(error) === OUTPUT_OVERRUN) {
+        endDesynced(`the box dropped output it had not delivered (${error.message})`, null);
+        return;
+      }
+      if (!opened && options.detach !== undefined && errorCode(error) === BOX_DISCONNECTED) {
+        // The link went away again before the channel opened: still detached.
+        onDetached();
+        return;
+      }
       if (!opened) {
         if (mode === "spawn") {
           finish({ kind: "spawn-error", code: null, signal: null, error });
@@ -207,11 +290,12 @@ export function spawnBoxChild(options: SpawnBoxChildOptions): BoxProviderChild {
         }
         return;
       }
-      notice(`box process ${procId}: ${error.message}`);
+      // The open channel failed: whatever it still carried is lost.
+      endDesynced(`its channel failed (${error.message})`, null);
     };
     const onDetached = (): void => {
       unhook();
-      waitForLink();
+      if (!ending) waitForLink();
     };
     const unhook = (): void => {
       proc.stdout.off("data", onOut);

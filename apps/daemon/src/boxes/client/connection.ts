@@ -45,6 +45,7 @@ export interface LinkInfo {
 /** A Readable fed by one inbound stream, returning credit as it drains. */
 class ChannelReadable extends Readable {
   private held = 0;
+  private finished = false;
   private readonly credit: (bytes: number) => void;
 
   constructor(credit: (bytes: number) => void) {
@@ -52,8 +53,9 @@ class ChannelReadable extends Readable {
     this.credit = credit;
   }
 
+  /** Bytes after {@link finish} (a peer that sends past its eof) are dropped, never pushed after EOF. */
   feed(chunk: Buffer): void {
-    if (this.readableEnded || this.destroyed) return;
+    if (this.finished || this.readableEnded || this.destroyed) return;
     if (this.push(chunk)) this.credit(chunk.byteLength);
     else this.held += chunk.byteLength;
   }
@@ -67,17 +69,10 @@ class ChannelReadable extends Readable {
   }
 
   finish(): void {
+    if (this.finished) return;
+    this.finished = true;
     if (!this.readableEnded && !this.destroyed) this.push(null);
   }
-}
-
-/** Reads are ended (not errored) on a lost link: consumers see EOF. */
-function attachReadable(channel: MuxChannel, readable: ChannelReadable, stream: BoxStream): void {
-  const previous = channel.onData;
-  channel.onData = (s, chunk) => {
-    if (s === stream) readable.feed(chunk);
-    else previous?.(s, chunk);
-  };
 }
 
 /** A Writable that sends stream 0 of a channel (eof on end). */
@@ -174,8 +169,12 @@ export function channelDuplex(channel: MuxChannel): Duplex {
 
 /**
  * A process in the box (contracts.ts `BoxProcess`). `outputOffset` is the
- * detached-output offset reached so far (stdout + stderr bytes), for a later
- * `attach`.
+ * detached-output offset reached so far (stdout + stderr bytes, plus any
+ * `droppedBytes` an attach reported), for a later `attach`.
+ *
+ * A detached process (`procId` set) whose channel is lost with the link —
+ * also before it opened, or when no link came back in time to open it —
+ * emits `detached`, never `error`: the process may be running in the box.
  */
 export class RemoteBoxProcess extends EventEmitter implements BoxProcess {
   readonly stdin: Writable;
@@ -248,14 +247,30 @@ export class RemoteBoxProcess extends EventEmitter implements BoxProcess {
             this.pendingSignals = [];
             this.emit("spawn");
           },
-          (error: Error) => this.fail(error)
+          (error: Error) => this.failOrDetach(error)
         );
       },
       (error: Error) => {
         rejectChannel(error);
-        this.fail(error);
+        this.failOrDetach(error);
       }
     );
+  }
+
+  /** A failure before the channel opened: a lost link only detaches a detached process. */
+  private failOrDetach(error: Error): void {
+    if (this.procId !== null && (error as BoxError).code === BOX_DISCONNECTED) {
+      this.detach();
+      return;
+    }
+    this.fail(error);
+  }
+
+  private detach(): void {
+    if (this.done) return;
+    this.endStreams();
+    this.done = true;
+    this.emit("detached");
   }
 
   private wire(channel: MuxChannel): void {
@@ -277,14 +292,14 @@ export class RemoteBoxProcess extends EventEmitter implements BoxProcess {
         return;
       }
       // The link dropped (or the box gave up) before `exit`.
+      if (this.procId !== null) {
+        this.detach();
+        return;
+      }
       this.endStreams();
       this.done = true;
-      if (this.procId !== null) {
-        this.emit("detached");
-      } else {
-        this.signalCode = "SIGHUP";
-        this.emit("exit", null, "SIGHUP");
-      }
+      this.signalCode = "SIGHUP";
+      this.emit("exit", null, "SIGHUP");
     };
   }
 
@@ -526,12 +541,27 @@ export class LinkedBoxConnection implements BoxConnection {
   async openChannel(spec: BoxChannelSpec): Promise<Duplex> {
     const channel = await this.openMuxChannel(spec, CHANNEL_OPEN_TIMEOUT_MS);
     const duplex = channelDuplex(channel);
+    // `opened` and a failing `close` can arrive together, before the caller
+    // holds the duplex (and its error listener): keep the error to throw it.
+    let early: BoxError | null = null;
+    const onClose = channel.onClose;
+    channel.onClose = (error) => {
+      if (error && error.code !== BOX_DISCONNECTED && early === null) early = error;
+      onClose?.(error);
+    };
+    duplex.on("error", () => undefined);
     try {
       await channel.opened;
     } catch (error) {
       duplex.destroy();
       throw error;
     }
+    if (early !== null) {
+      duplex.destroy();
+      throw early;
+    }
+    channel.onClose = onClose;
+    duplex.removeAllListeners("error");
     return duplex;
   }
 
@@ -577,21 +607,46 @@ export class LinkedBoxConnection implements BoxConnection {
     };
   }
 
-  /** A download channel (file-read, tar-read): stream 1 as a Readable; errors on a failed close. */
+  /**
+   * A download channel (file-read, tar-read): stream 1 as a Readable; errors on a failed close.
+   * A `file-read` with a `length` never yields more than `length` bytes: a box that sends
+   * more ends the stream with an error instead of growing the host's buffers.
+   */
   private async openDownload(spec: BoxChannelSpec, signal?: AbortSignal): Promise<Readable> {
     const channel = await this.openMuxChannel(spec, CHANNEL_OPEN_TIMEOUT_MS);
     const readable = new ChannelReadable((bytes) => channel.consumed(bytes));
     let gotEof = false;
     let returned = false;
-    attachReadable(channel, readable, BOX_STREAM_FROM_BOX);
+    /** A failing close that came before the caller held the stream (with `opened`). */
+    let early: BoxError | null = null;
+    const limit = spec.kind === "file-read" && spec.length !== undefined ? spec.length : Number.POSITIVE_INFINITY;
+    let received = 0;
+    channel.onData = (stream, chunk) => {
+      if (stream !== BOX_STREAM_FROM_BOX) return;
+      received += chunk.byteLength;
+      if (received > limit) {
+        const error = new BoxError("TOO_LONG", `The box sent more than the ${limit} bytes asked for`);
+        channel.close({ code: error.code, message: error.message });
+        if (returned) readable.destroy(error);
+        else {
+          early = error;
+          readable.destroy();
+        }
+        return;
+      }
+      readable.feed(chunk);
+    };
     channel.onEof = (stream) => {
       if (stream === BOX_STREAM_FROM_BOX) gotEof = true;
     };
     channel.onClose = (error) => {
       if (gotEof && !error) readable.finish();
-      // Before the caller holds the stream the failure surfaces through `opened`.
-      else if (!returned) readable.destroy();
-      else readable.destroy(error ?? disconnectedError());
+      // Before the caller holds the stream the failure surfaces through `opened`
+      // (or, if `opened` came first, from this call).
+      else if (!returned) {
+        early ??= error;
+        readable.destroy();
+      } else readable.destroy(error ?? disconnectedError());
     };
     readable.once("close", () => channel.close());
     if (signal) {
@@ -607,6 +662,7 @@ export class LinkedBoxConnection implements BoxConnection {
       readable.destroy();
       throw error;
     }
+    if (early !== null) throw early;
     returned = true;
     return readable;
   }
