@@ -165,7 +165,12 @@ func (p *unixProcess) targets(session bool) []int {
 	if p.ptmx == nil {
 		return groups
 	}
-	if fg, err := unix.IoctlGetInt(int(p.ptmx.Fd()), unix.TIOCGPGRP); err == nil && fg > 0 && fg != pid {
+	var fg int
+	err := p.withPtmx(func(fd int) (err error) {
+		fg, err = unix.IoctlGetInt(fd, unix.TIOCGPGRP)
+		return err
+	})
+	if err == nil && fg > 0 && fg != pid {
 		groups = append([]int{fg}, groups...)
 	}
 	if session {
@@ -234,7 +239,29 @@ func (p *unixProcess) resize(cols, rows int) error {
 		return nil
 	}
 	c, r := clampSize(cols, rows)
-	return pty.Setsize(p.ptmx, &pty.Winsize{Cols: c, Rows: r})
+	// Not pty.Setsize: it reads ptmx.Fd(), the same race as in targets.
+	return p.withPtmx(func(fd int) error {
+		return unix.IoctlSetWinsize(fd, unix.TIOCSWINSZ, &unix.Winsize{Col: c, Row: r})
+	})
+}
+
+// withPtmx runs fn on the PTY master's descriptor while holding a reference to
+// it. A signal or resize arrives on the link's goroutines while the exit path
+// closes the master (closeOutput, release): ptmx.Fd() would read the
+// descriptor unsynchronized with that Close, and could hand an ioctl a number
+// the kernel already reused for another file. Through the raw conn, Close
+// waits for fn to return, and a master already closed answers an error
+// ("use of closed file") without fn running.
+func (p *unixProcess) withPtmx(fn func(fd int) error) error {
+	raw, err := p.ptmx.SyscallConn()
+	if err != nil {
+		return err
+	}
+	var inner error
+	if err := raw.Control(func(fd uintptr) { inner = fn(int(fd)) }); err != nil {
+		return err
+	}
+	return inner
 }
 
 func (p *unixProcess) kill() {

@@ -13,8 +13,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -288,6 +290,61 @@ func TestProcSignalEndsADetachedProcessGroup(t *testing.T) {
 			}
 			assertGone(t, pid, child)
 		})
+	}
+}
+
+// A signal or resize from the link races the exit path closing the PTY master
+// (run with -race): neither may read the master's descriptor unsynchronized
+// with that Close, and after it neither may touch the closed descriptor.
+func TestPtyCallsRacingReleaseNeverUseAClosedMaster(t *testing.T) {
+	p, err := startProcess(&startSpec{
+		path: "/bin/sh",
+		args: []string{"/bin/sh", "-c", "exec sleep 30"},
+		env:  os.Environ(),
+		pty:  &wire.PtySpec{Cols: 80, Rows: 24},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		p.kill()
+		p.wait()
+	})
+	up := p.(*unixProcess)
+	stop := make(chan struct{})
+	var started, done sync.WaitGroup
+	for range 4 {
+		started.Add(1)
+		done.Add(1)
+		go func() {
+			defer done.Done()
+			first := true
+			for {
+				_ = p.resize(100, 30)
+				_ = up.targets(true)
+				if first {
+					started.Done()
+					first = false
+				}
+				select {
+				case <-stop:
+					return
+				default:
+				}
+			}
+		}()
+	}
+	started.Wait()
+	p.closeOutput()
+	p.release()
+	close(stop)
+	done.Wait()
+
+	if err := p.resize(90, 20); err == nil {
+		t.Fatal("resize after release succeeded on a closed master")
+	}
+	if got := up.targets(false); !slices.Equal(got, []int{p.pid()}) {
+		t.Fatalf("targets after release = %v; want only the process group %d", got, p.pid())
 	}
 }
 

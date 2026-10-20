@@ -106,8 +106,38 @@ test("HostProjectFs and BoxProjectFs answer the same for the same files", async 
   assert.equal(await host.stat(join(root, "p", "missing")), null);
   await box.writeFile("/p/new/w.txt", "box", { mkdirs: true });
   await host.writeFile(join(root, "p", "new", "h.txt"), "host", { mkdirs: true });
-  assert.equal((await host.read(join(root, "p", "new", "w.txt"))).toString(), "box");
-  assert.equal((await box.read("/p/new/h.txt")).toString(), "host");
+  assert.equal((await host.read(join(root, "p", "new", "w.txt"), { length: 64 })).toString(), "box");
+  assert.equal((await box.read("/p/new/h.txt", { length: 64 })).toString(), "host");
+});
+
+test("read always asks the box for its length, refuses a missing one, and fails when the box sends more", async (t) => {
+  const root = await disk(t);
+  await mkdir(join(root, "p"), { recursive: true });
+  await writeFile(join(root, "p", "f.txt"), "0123456789");
+  const connection = boxDiskConnection({ disk: root });
+  const asked: (number | undefined)[] = [];
+  const inner = connection.readFile;
+  connection.readFile = (path, readOptions) => {
+    asked.push(readOptions?.length);
+    return inner(path, readOptions);
+  };
+  const box = new BoxProjectFs(connection);
+  const host = new HostProjectFs();
+
+  assert.equal((await box.read("/p/f.txt", { length: 4 })).toString(), "0123");
+  assert.equal((await box.read("/p/f.txt", { length: 100 })).toString(), "0123456789", "fewer at the end of the file");
+  assert.deepEqual(asked, [4, 100]);
+  for (const fs of [box, host]) {
+    const path = fs === box ? "/p/f.txt" : join(root, "p", "f.txt");
+    for (const length of [undefined, Number.POSITIVE_INFINITY, -1, 2.5]) {
+      await assert.rejects(fs.read(path, { length } as { length: number }), RangeError, `${fs.location} ${length}`);
+    }
+  }
+  assert.equal(asked.length, 2, "no read went to the box without a length");
+
+  // A box that ignores the range it was asked for: the read fails instead of growing the buffer.
+  connection.readFile = (path) => inner(path, {});
+  await assert.rejects(box.read("/p/f.txt", { length: 4 }), /more than the 4 bytes/);
 });
 
 // --- selection ------------------------------------------------------------------------------

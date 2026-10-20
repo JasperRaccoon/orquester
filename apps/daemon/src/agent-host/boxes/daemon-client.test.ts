@@ -88,18 +88,41 @@ test("the sync seams are one socket route, one op each; an unreachable daemon is
     await sync.pushForResume("box-1", { agent: "grok", configRoot: "/home/a", cwd: "/w/p", sessionRef: "s1" });
     await sync.pullAfterTurn("box-1", { agent: "grok", configRoot: "/home/a", cwd: "/w/p", sessionRef: null });
     await sync.turnEnded("box-1", "t1");
+    await sync.turnStarted("box-1", "t2");
     assert.deepEqual(
       fake.seen.map((entry) => [entry.path, (entry.body as { op: string }).op]),
       [
         [daemonRoutesForHost.boxSync, "ensureSynced"],
         [daemonRoutesForHost.boxSync, "pushForResume"],
         [daemonRoutesForHost.boxSync, "pullAfterTurn"],
-        [daemonRoutesForHost.boxSync, "turnEnded"]
+        [daemonRoutesForHost.boxSync, "turnEnded"],
+        [daemonRoutesForHost.boxSync, "turnStarted"]
       ]
     );
+    assert.deepEqual(fake.seen.at(-1)?.body, { op: "turnStarted", boxId: "box-1", threadId: "t2" });
   } finally {
     await fake.close();
   }
   const gone = createDaemonBoxSyncClient({ socketPath: () => "/nonexistent/daemon.sock", token: "t" });
   await assert.rejects(gone.turnEnded("box-1", "t1"), (error: unknown) => error instanceof BoxDaemonCallError && error.code === "UNAVAILABLE");
+});
+
+test("a turn's start mark is bounded: an older daemon's 400 and a daemon that never answers both fail the call", async () => {
+  const fake = await daemon((seen, response) => {
+    if ((seen.body as { threadId?: string }).threadId === "old") {
+      response.writeHead(400, { "content-type": "application/json" });
+      response.end(JSON.stringify({ code: "INVALID_ARGUMENT", message: "Not a box sync request." }));
+    }
+    // Any other thread: never answered; the client's deadline ends the wait and drops the request.
+  });
+  try {
+    const sync = createDaemonBoxSyncClient({ socketPath: () => fake.socketPath, token: "t", turnStartTimeoutMs: 50 });
+    await assert.rejects(
+      sync.turnStarted("box-1", "old"),
+      (error: unknown) => error instanceof BoxDaemonCallError && error.code === "INVALID_ARGUMENT" && error.status === 400
+    );
+    await assert.rejects(sync.turnStarted("box-1", "stuck"), (error: unknown) => error instanceof BoxDaemonCallError && error.code === "TIMEOUT");
+  } finally {
+    await fake.close();
+  }
 });

@@ -628,6 +628,11 @@ export async function startAgentHost(
         resumeCursor
       });
     },
+    // boxes: a box thread's turn start marks the turn, so its box config changes group per turn.
+    onTurnStarted: ({ threadId, launch }) => {
+      if (launch?.box === undefined) return;
+      boxes.turnStarted({ threadId, box: launch.box });
+    },
     onThreadDeleted: (threadId: string) => sessionTools.forgetThread(threadId),
     // Agent Profiles: the daemon's current launch for a profile thread, before each session start.
     launchProfile: createDaemonLaunchProfileClient({ socketPath: () => daemonSocketPath, token }),

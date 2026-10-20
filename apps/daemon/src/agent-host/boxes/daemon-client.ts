@@ -29,6 +29,8 @@ export interface BoxSyncClient {
   pushForResume(boxId: string, request: TranscriptRequest, signal?: AbortSignal): Promise<void>;
   pullAfterTurn(boxId: string, request: TranscriptRequest, signal?: AbortSignal): Promise<void>;
   turnEnded(boxId: string, threadId: string, signal?: AbortSignal): Promise<void>;
+  /** A live turn started: the box changes it makes wait for its {@link turnEnded}. */
+  turnStarted(boxId: string, threadId: string, signal?: AbortSignal): Promise<void>;
 }
 
 /** A refusal or failure of a daemon box call, with the daemon's own code. */
@@ -50,6 +52,8 @@ export const BOX_TOKEN_TIMEOUT_MS = 60_000;
 export const BOX_SYNC_TIMEOUT_MS = 10 * 60_000;
 /** A turn's transcript mirror and its config-change set. */
 export const BOX_TURN_SYNC_TIMEOUT_MS = 2 * 60_000;
+/** A turn's start mark: an in-memory note in the daemon, no box I/O. */
+export const BOX_TURN_START_TIMEOUT_MS = 15_000;
 
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 
@@ -186,7 +190,9 @@ export function createDaemonBoxTokenSource(options: DaemonCallOptions & { timeou
   };
 }
 
-export function createDaemonBoxSyncClient(options: DaemonCallOptions & { timeoutMs?: number; turnTimeoutMs?: number }): BoxSyncClient {
+export function createDaemonBoxSyncClient(
+  options: DaemonCallOptions & { timeoutMs?: number; turnTimeoutMs?: number; turnStartTimeoutMs?: number }
+): BoxSyncClient {
   const call = (body: BoxSyncRequest, timeoutMs: number, signal: AbortSignal | undefined, what: string): Promise<void> =>
     postJson(options, daemonRoutesForHost.boxSync, body, timeoutMs, signal, what).then(() => undefined);
   const launchTimeout = options.timeoutMs ?? BOX_SYNC_TIMEOUT_MS;
@@ -199,6 +205,13 @@ export function createDaemonBoxSyncClient(options: DaemonCallOptions & { timeout
     pullAfterTurn: (boxId, request, signal) =>
       call({ op: "pullAfterTurn", boxId, transcript: request }, turnTimeout, signal, "copy the chat's transcript back from the box"),
     turnEnded: (boxId, threadId, signal) =>
-      call({ op: "turnEnded", boxId, threadId }, turnTimeout, signal, "collect the turn's configuration changes")
+      call({ op: "turnEnded", boxId, threadId }, turnTimeout, signal, "collect the turn's configuration changes"),
+    turnStarted: (boxId, threadId, signal) =>
+      call(
+        { op: "turnStarted", boxId, threadId },
+        options.turnStartTimeoutMs ?? BOX_TURN_START_TIMEOUT_MS,
+        signal,
+        "note the turn's start for its configuration changes"
+      )
   };
 }

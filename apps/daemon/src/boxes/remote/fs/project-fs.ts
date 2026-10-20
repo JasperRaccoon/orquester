@@ -52,6 +52,11 @@ export interface ProjectFsReadOptions {
   signal?: AbortSignal;
 }
 
+/** A `read` always names its `length`: a box sends at most that many bytes (more fails with `TOO_LONG`). */
+export interface ProjectFsBoundedReadOptions extends ProjectFsReadOptions {
+  length: number;
+}
+
 export interface ProjectFsWriteOptions {
   mode?: number;
   /** Create missing parent directories. */
@@ -72,8 +77,11 @@ export interface ProjectFs {
   readdir(path: string): Promise<ProjectFsDirEntry[]>;
   realpath(path: string): Promise<string>;
   readStream(path: string, options?: ProjectFsReadOptions): Promise<Readable>;
-  /** The bytes of a range (or the whole file), collected in memory: callers bound `length`. */
-  read(path: string, options?: ProjectFsReadOptions): Promise<Buffer>;
+  /**
+   * The bytes of a range, collected in memory: at most `length` bytes (fewer at the end of the
+   * file). Callers read `limit + 1` to tell a file past their limit from one at it.
+   */
+  read(path: string, options: ProjectFsBoundedReadOptions): Promise<Buffer>;
   /** Atomic where the files live supports it (the box always writes temp + rename). */
   writeFile(path: string, data: Readable | Uint8Array | string, options?: ProjectFsWriteOptions): Promise<void>;
   mkdir(path: string, options?: { recursive?: boolean }): Promise<void>;
@@ -97,9 +105,23 @@ export function isSafeEntryName(name: string): boolean {
   return name !== "" && name !== "." && name !== ".." && !/[\\/\0]/.test(name);
 }
 
-async function collect(stream: Readable): Promise<Buffer> {
+function assertReadLength(length: number): void {
+  if (!Number.isSafeInteger(length) || length < 0) throw new RangeError(`A read needs a length in bytes (got ${length})`);
+}
+
+/** The stream's bytes; more than `length` (a box ignoring the range it was asked for) fails. */
+async function collect(stream: Readable, length: number): Promise<Buffer> {
   const chunks: Buffer[] = [];
-  for await (const chunk of stream) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array));
+  let total = 0;
+  for await (const chunk of stream) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
+    total += buffer.length;
+    if (total > length) {
+      stream.destroy();
+      throw new RangeError(`Read more than the ${length} bytes asked for`);
+    }
+    chunks.push(buffer);
+  }
   return Buffer.concat(chunks);
 }
 
@@ -151,8 +173,9 @@ export class HostProjectFs implements ProjectFs {
     return stream;
   }
 
-  async read(path: string, options: ProjectFsReadOptions = {}): Promise<Buffer> {
-    return collect(await this.readStream(path, options));
+  async read(path: string, options: ProjectFsBoundedReadOptions): Promise<Buffer> {
+    assertReadLength(options.length);
+    return collect(await this.readStream(path, options), options.length);
   }
 
   async writeFile(path: string, data: Readable | Uint8Array | string, options: ProjectFsWriteOptions = {}): Promise<void> {
@@ -277,9 +300,10 @@ export class BoxProjectFs implements ProjectFs {
     );
   }
 
-  async read(path: string, options: ProjectFsReadOptions = {}): Promise<Buffer> {
+  async read(path: string, options: ProjectFsBoundedReadOptions): Promise<Buffer> {
+    assertReadLength(options.length);
     const stream = await this.readStream(path, options);
-    return this.call(() => collect(stream));
+    return this.call(() => collect(stream, options.length));
   }
 
   writeFile(path: string, data: Readable | Uint8Array | string, options: ProjectFsWriteOptions = {}): Promise<void> {

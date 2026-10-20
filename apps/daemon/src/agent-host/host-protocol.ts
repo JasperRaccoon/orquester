@@ -322,6 +322,9 @@ export const daemonRoutesForHost = {
    * start, the transcript push before a resume, the transcript mirror and the config-change set
    * after every turn. Socket-only, the host's bearer besides (`agent-chat/box-host-routes.ts`).
    * A failure answers `{code, message}`; a daemon without the route answers 404.
+   * boxes: `turnStarted` marks a live turn's start (§8.3), so the box changes it makes wait for
+   * its `turnEnded`; a daemon that predates the op answers 400 `INVALID_ARGUMENT`, which the host
+   * logs and goes on without (changes are then grouped by the idle debounce, as before).
    */
   boxSync: "/api/agent-host/boxes/sync"
 } as const;
@@ -353,7 +356,9 @@ export type BoxSyncRequest =
       scope: { agent: "claude" | "codex" | "grok" | "opencode"; configRoots: string[]; threadId: string | null };
     }
   | { op: "pushForResume" | "pullAfterTurn"; boxId: string; transcript: BoxTranscriptRef }
-  | { op: "turnEnded"; boxId: string; threadId: string };
+  | { op: "turnEnded"; boxId: string; threadId: string }
+  // boxes: a live turn of the thread started (`BoxConfigSync.turnStarted`).
+  | { op: "turnStarted"; boxId: string; threadId: string };
 
 /** Body of `POST /api/agent-host/threads/launch-profile`. */
 export interface ThreadLaunchProfileRequest {

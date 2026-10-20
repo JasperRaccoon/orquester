@@ -363,6 +363,56 @@ test("a turn's end mirrors the transcript back and closes the turn's config-chan
   ]);
 });
 
+test("a turn's start is marked in the daemon in turn order per thread, and a failing mark holds nothing up", async () => {
+  const sync = recordingSync();
+  const warnings: string[] = [];
+  const logger: AdapterLogger = { ...quiet, warn: (message: string) => void warnings.push(message) };
+  const boxes = createAgentHostBoxes({ appdir: "/nonexistent", connector: null, tokens: recordingTokens({ accessToken: "t", expiresAt: null }), sync, logger });
+  const box = launchBox(localBoxConnection());
+  const deferred = (): { promise: Promise<void>; resolve: () => void } => {
+    let resolve!: () => void;
+    const promise = new Promise<void>((done) => (resolve = done));
+    return { promise, resolve };
+  };
+  const endReached = deferred();
+  const endGate = deferred();
+  const otherThreadMarked = deferred();
+  const secondStart = deferred();
+  const original = { turnStarted: sync.turnStarted, turnEnded: sync.turnEnded };
+  let starts = 0;
+  sync.turnStarted = async (boxId, threadId) => {
+    await original.turnStarted(boxId, threadId);
+    if (threadId === "t2") return otherThreadMarked.resolve();
+    starts += 1;
+    // The first mark fails the way a daemon that predates the op answers.
+    if (starts === 1) throw Object.assign(new Error("Not a box sync request."), { code: "INVALID_ARGUMENT" });
+    secondStart.resolve();
+  };
+  sync.turnEnded = async (boxId, threadId) => {
+    endReached.resolve();
+    await endGate.promise;
+    await original.turnEnded(boxId, threadId);
+  };
+  const ops = (): string[] => sync.calls.map((call) => `${call.op} ${call.detail === null || typeof call.detail === "string" ? call.detail : "…"}`);
+
+  boxes.turnStarted({ threadId: "t1", box });
+  boxes.turnEnded({ threadId: "t1", adapter: "codex", cwd: "/w/p", box, homePath: "/accounts/codex/a/home", resumeCursor: null });
+  // The next turn starts while the first one's end is still with the daemon.
+  boxes.turnStarted({ threadId: "t1", box });
+  await endReached.promise;
+  // Another thread's mark does not wait for t1's calls.
+  boxes.turnStarted({ threadId: "t2", box });
+  await otherThreadMarked.promise;
+  assert.deepEqual(ops(), ["turnStarted t1", "pullAfterTurn …", "turnStarted t2"]);
+  assert.equal(warnings.length, 1, "the failed mark is logged");
+  assert.match(warnings[0]!, /start of a turn of t1/);
+
+  endGate.resolve();
+  await secondStart.promise;
+  // The second start's mark lands after the first turn's end, so that end cannot clear it.
+  assert.deepEqual(ops(), ["turnStarted t1", "pullAfterTurn …", "turnStarted t2", "turnEnded t1", "turnStarted t1"]);
+});
+
 test("Grok's box overlay carries the login command; the command is quoted for the box's shell", async () => {
   const home = await boxHome(["grok"]);
   const connection = localBoxConnection({ sys: { home, shell: join(home, "sh"), agentPath: "/var/lib/orq agent/orq-agent" } });

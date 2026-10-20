@@ -396,7 +396,8 @@ function routes(deps: BoxFsRoutingDeps): Record<string, BoxRoute> {
           reply.raw.on("close", () => abort.abort());
           let stream;
           try {
-            stream = await fs.readStream(safe, { signal: abort.signal });
+            // Bounded by the size just sent as Content-Length: a file grown since is cut there, and a box sending more fails the read.
+            stream = await fs.readStream(safe, { length: info.size, signal: abort.signal });
           } catch (error) {
             await sendError(reply, error, "Cannot read file.", fs);
             return;
