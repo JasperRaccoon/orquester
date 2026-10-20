@@ -20,6 +20,7 @@
  * (`paths.ts`), error messages included.
  */
 
+import { realpath } from "node:fs/promises";
 import { posix } from "node:path";
 
 import { cachedAsyncBuffer } from "hyparquet";
@@ -541,14 +542,24 @@ function routes(deps: BoxFsRoutingDeps): Record<string, BoxRoute> {
     // Upload one file: the body streams straight into the box (temp file beside the target, then renamed).
     "POST /api/fs/upload": {
       upload: true,
+      // Routed on where the file lands, not on `destDir` alone: `destDir=<workspace>` with
+      // `relativePath=<box project>/a.txt` writes into the box project, never its host stub.
       target: (request) => {
         const { destDir, relativePath } = queryOf(request);
-        return destDir && relativePath ? destDir : undefined;
+        if (!destDir || !relativePath) return undefined;
+        const segments = relativePath.split(/[\\/]+/).filter((segment) => segment.length > 0);
+        // An invalid relativePath is refused by whichever handler answers (both refuse `..`).
+        return segments.some((segment) => segment === "." || segment === "..") ? destDir : posix.join(destDir, ...segments);
       },
-      async serve({ request, reply, fs, contain }) {
+      async serve({ request, reply, fs, projectRoot, contain }) {
         const { destDir, relativePath, onConflict = "error" } = queryOf(request) as Partial<FsUploadRequest>;
         if (onConflict !== "error" && onConflict !== "overwrite" && onConflict !== "rename") {
           refuseUpload(reply, 400, "INVALID_REQUEST", "onConflict must be error, overwrite or rename.");
+          return;
+        }
+        if (!isInsideOrSame(projectRoot, posix.resolve(destDir!))) {
+          // The file would land in a box project from outside it (a folder upload into its workspace).
+          refuseUpload(reply, 400, "INVALID_REQUEST", "Upload into a box project from its own folder: destDir must be the project or a folder inside it.");
           return;
         }
         const segments = relativePath!.split(/[\\/]+/).filter((segment) => segment.length > 0);
@@ -673,9 +684,35 @@ async function nextAvailableName(fs: BoxProjectFs, desired: string): Promise<str
   }
 }
 
+function isInsideOrSame(root: string, path: string): boolean {
+  return path === root || path.startsWith(root.endsWith("/") ? root : `${root}/`);
+}
+
+/** `path` with its deepest existing ancestor realpath'd ON THIS HOST (what the host handlers would touch). */
+async function hostRealpath(path: string): Promise<string> {
+  let ancestor = path;
+  for (;;) {
+    try {
+      const real = await realpath(ancestor);
+      const tail = posix.relative(ancestor, path);
+      return tail ? posix.join(real, tail) : real;
+    } catch {
+      const parent = posix.dirname(ancestor);
+      if (parent === ancestor) return path;
+      ancestor = parent;
+    }
+  }
+}
+
 /**
  * Route `/api/fs/*` requests for box-project paths to the box (see the module
  * doc). Registered once per app; host paths fall through to `index.ts`.
+ *
+ * A path is located as the host handler would resolve it (relative to the
+ * daemon's cwd). One that reads as a host path but resolves on this host into
+ * a box project (a symlink to its folder, `..` through one) is refused: the
+ * host handler would act on the project's empty stub, and the box handler
+ * only takes the project's own spelling.
  */
 export function registerBoxFsRouting(app: FastifyInstance, deps: BoxFsRoutingDeps): void {
   const table = routes(deps);
@@ -685,13 +722,19 @@ export function registerBoxFsRouting(app: FastifyInstance, deps: BoxFsRoutingDep
     if (!route) return;
     const target = route.target(request);
     if (!target) return;
+    const registry = deps.boxes();
+    if (!registry) return;
+    const refuse = (status: number, code: string, message: string) =>
+      route.upload ? refuseUpload(reply, status, code, message) : reply.code(status).send({ code, message });
     let location;
     try {
-      location = locateProjectFs(deps.boxes(), target);
+      location = locateProjectFs(registry, posix.resolve(target));
+      if (location.kind === "host" && locateProjectFs(registry, await hostRealpath(posix.resolve(target))).kind === "box") {
+        return refuse(403, "FS_FORBIDDEN", "This path leads into a box project through a link: use the project's own path.");
+      }
     } catch (error) {
       if (!(error instanceof BoxFsUnavailableError)) throw error;
-      if (route.upload) return refuseUpload(reply, error.status, error.code, error.message);
-      return reply.code(error.status).send({ code: error.code, message: error.message });
+      return refuse(error.status, error.code, error.message);
     }
     if (location.kind === "host") return;
     const { fs, projectRoot } = location;
