@@ -152,12 +152,17 @@ import { CodexUsageTracker } from "./usage.ts";
 import { codexProfileSkillDisables, codexProfileSkillsConfig, type CodexProfileLaunch } from "./profile.ts";
 import { CODEX_SLASH_COMMANDS, skillsFromList } from "./probe.ts";
 import {
+  codexBoxMcpOverrides,
   codexDenyConfig,
   codexSessionToolsConfig,
   codexSessionToolsServerName,
   codexSessionToolsContext,
+  type CodexConfigValue,
   type CodexSessionToolsLaunch
 } from "./session-tools.ts";
+// boxes:
+import type { BoxLaunch } from "../../boxes/index.ts";
+import { tomlMcpSpec } from "../../boxes/mcp-plan.ts";
 import {
   MCP_APP_READ_CACHE_MS,
   MCP_APP_TOOLS_CACHE_MS,
@@ -253,6 +258,21 @@ export interface CodexSessionOptions {
    * profile's, from a fresh `skills/list`.
    */
   profile?: CodexProfileLaunch;
+  /**
+   * boxes (spec 2026-10-19 §7, §8.4, §8.5): `codex app-server` runs in this box. `cwd`,
+   * `codexHome` and `bin` above are then the BOX's; `env` is the box env. The session logs in
+   * with `chatgptAuthTokens` (a brokered access token, never a refresh token), answers
+   * `account/chatgptAuthTokens/refresh` through the broker, and moves the thread's own MCP
+   * servers to the host behind `orq-agent mcp-bridge`.
+   */
+  box?: CodexBoxLaunch;
+}
+
+/** A box start's pieces (`index.ts` builds them). */
+export interface CodexBoxLaunch {
+  launch: BoxLaunch;
+  /** Removed from `orq-agent`'s own environment. */
+  envUnset: readonly string[];
 }
 
 /** What every parked server→client request carries, approval or question. */
@@ -334,6 +354,8 @@ export class CodexSession {
   private sessionToolsServerName: string | undefined;
   /** The MCP servers this thread's effective config defines (`config/read`); undefined when unread. */
   private effectiveMcpServers: ReadonlySet<string> | undefined;
+  /** boxes: the overrides that bridge this box thread's own MCP servers to the host. */
+  private boxMcpOverrides: Map<string, CodexConfigValue> | undefined;
   /** A profile thread's skill switch-offs (`profile.ts`), read by `start` before the thread opens. */
   private profileSkillsConfig: NonNullable<CodexProtocol.v2.ThreadStartParams["config"]> = {};
   /** A profile thread's skills as its last start listed them, minus the switched-off ones. */
@@ -492,17 +514,29 @@ export class CodexSession {
    * than leaving the thread `starting` forever (§3.1).
    */
   async start(): Promise<ProviderSession> {
-    const child = spawnProviderChild({
-      command: this.options.bin,
-      // Exactly `app-server`. The registry row's `--yolo` is the terminal
-      // CLI's flag (`app-server` does not take it); the runtime mode rides the
-      // protocol instead — `approvalPolicy`, `approvalsReviewer` and the
-      // sandbox go on `thread/start`, on `thread/resume` and on every
-      // `turn/start` (§4.4).
-      args: ["app-server"],
-      env: this.options.env,
-      cwd: this.options.cwd
-    });
+    // Exactly `app-server`. The registry row's `--yolo` is the terminal
+    // CLI's flag (`app-server` does not take it); the runtime mode rides the
+    // protocol instead — `approvalPolicy`, `approvalsReviewer` and the
+    // sandbox go on `thread/start`, on `thread/resume` and on every
+    // `turn/start` (§4.4).
+    const box = this.options.box;
+    const child: ProviderChild =
+      box !== undefined
+        ? // boxes: in the box, detached, so a dropped link reattaches rather than ending the thread.
+          box.launch.spawn({
+            command: this.options.bin,
+            args: ["app-server"],
+            env: this.options.env,
+            envUnset: box.envUnset,
+            cwd: this.options.cwd,
+            detached: true
+          })
+        : spawnProviderChild({
+            command: this.options.bin,
+            args: ["app-server"],
+            env: this.options.env,
+            cwd: this.options.cwd
+          });
     this.child = child;
     this.watchStderr(child);
     // `exited` never rejects, but `handleExit` runs the whole settle path
@@ -583,6 +617,8 @@ export class CodexSession {
     );
     // `initialized` takes no params; the server rejects an explicit null.
     peer.notify("initialized");
+    // boxes: the box holds no `auth.json` — log the app-server in with a brokered access token.
+    if (box !== undefined) await this.loginBox(box);
 
     const profile = this.options.profile;
     if (profile !== undefined && initialize.codexHome !== profile.codexHome && initialize.codexHome !== profile.codexHomeReal) {
@@ -608,6 +644,8 @@ export class CodexSession {
     }
 
     await this.resolveSessionToolsServerName();
+    // boxes: the thread's own MCP servers move to the host (`codexBoxMcpOverrides`).
+    if (box !== undefined) await this.resolveBoxMcpServers(box);
     if (profile !== undefined) await this.resolveProfileSkills(profile);
     await this.openThread();
     this.setStatus("ready");
@@ -1557,6 +1595,80 @@ export class CodexSession {
     }
   }
 
+  /**
+   * boxes (spec 2026-10-19 §7): `account/login/start` with `chatgptAuthTokens` — the broker's
+   * access token and the account's `chatgptAccountId` (`AgentTokenGrant.extra`). Codex keeps them
+   * in memory and asks `account/chatgptAuthTokens/refresh` when they stop working. A failure
+   * fails the start: an app-server without a login cannot run a turn.
+   */
+  private async loginBox(box: CodexBoxLaunch): Promise<void> {
+    const login = await this.boxTokens(box, null);
+    await this.bounded(
+      () =>
+        this.requirePeer().request("account/login/start", {
+          type: "chatgptAuthTokens",
+          accessToken: login.accessToken,
+          chatgptAccountId: login.chatgptAccountId,
+          chatgptPlanType: login.chatgptPlanType
+        }),
+      AGENT_HOST_DEADLINES.handshakeMs,
+      "account/login/start"
+    );
+  }
+
+  /** A brokered token in Codex's `chatgptAuthTokens` shape. */
+  private async boxTokens(
+    box: CodexBoxLaunch,
+    previousAccountId: string | null
+  ): Promise<{ accessToken: string; chatgptAccountId: string; chatgptPlanType: string | null }> {
+    const grant = await box.launch.token();
+    const chatgptAccountId = grant.extra?.chatgptAccountId ?? previousAccountId ?? "";
+    if (chatgptAccountId.length === 0) {
+      throw new Error("Orquester's login for this Codex account names no ChatGPT workspace, so it cannot be used in a box.");
+    }
+    return { accessToken: grant.accessToken, chatgptAccountId, chatgptPlanType: grant.extra?.chatgptPlanType ?? null };
+  }
+
+  /**
+   * boxes (spec 2026-10-19 §8.4): the thread's effective MCP servers (`config/read` with its cwd)
+   * planned for the box — every one that must run, or be reached, on the host is bridged.
+   * A read that fails leaves them as the box's config has them (logged), never the start failed.
+   */
+  private async resolveBoxMcpServers(box: CodexBoxLaunch): Promise<void> {
+    let servers: Record<string, unknown> = {};
+    try {
+      const read = await this.bounded(
+        () => this.requirePeer().request("config/read", { cwd: this.options.cwd }),
+        AGENT_HOST_DEADLINES.sessionOpenMs,
+        "config/read"
+      );
+      const found = (read.config as { mcp_servers?: unknown } | null | undefined)?.mcp_servers;
+      if (found !== null && typeof found === "object") servers = found as Record<string, unknown>;
+    } catch (error) {
+      this.options.context.logger.warn("codex: could not read the thread's MCP servers; they run in the box as configured there", {
+        threadId: this.threadId,
+        error: describeError(error)
+      });
+      return;
+    }
+    const ours = this.sessionToolsServerName;
+    const specs = Object.entries(servers).flatMap(([name, entry]) => {
+      if (name === ours) return [];
+      const spec = tomlMcpSpec(name, entry, this.options.env);
+      return spec === null ? [] : [spec];
+    });
+    const plan = await box.launch.bridgeMcpServers(specs);
+    this.boxMcpOverrides = codexBoxMcpOverrides(
+      plan.bridged.map((server) => ({
+        name: server.name,
+        command: server.command,
+        args: server.args,
+        transport: server.target.transport,
+        envKeys: server.target.transport === "stdio" ? Object.keys(server.target.env) : []
+      }))
+    );
+  }
+
   /** The session's own server, under the name it has in this thread. */
   private sessionToolsLaunch(): CodexSessionToolsLaunch | undefined {
     const tools = this.options.sessionTools;
@@ -1617,8 +1729,8 @@ export class CodexSession {
     // thread's config does not have it (`session-tools.ts`).
     const config = {
       ...(tools !== undefined
-        ? codexSessionToolsConfig(tools)
-        : codexDenyConfig(this.options.deniedMcpServers ?? [], "", this.effectiveMcpServers)),
+        ? codexSessionToolsConfig(tools, this.boxMcpOverrides)
+        : codexDenyConfig(this.options.deniedMcpServers ?? [], "", this.effectiveMcpServers, this.boxMcpOverrides)),
       // Its own top-level key (`skills`), never one of the `mcp_servers` ones above.
       ...this.profileSkillsConfig
     };
@@ -2222,6 +2334,17 @@ export class CodexSession {
         return {
           answers: toCodexAnswers(questions, answers)
         } satisfies CodexProtocol.v2.ToolRequestUserInputResponse;
+      }
+
+      // boxes (spec 2026-10-19 §7): the box's app-server was logged in with `chatgptAuthTokens`
+      // and its token stopped working — a fresh one from the broker. On the host it is still
+      // refused (`-32601`): a host app-server refreshes its own login.
+      case "account/chatgptAuthTokens/refresh": {
+        const box = this.options.box;
+        if (box === undefined) throw CodexRequestRefusal.methodNotFound(request.method);
+        const params = request.params as CodexProtocol.v2.ChatgptAuthTokensRefreshParams;
+        const tokens = await this.boxTokens(box, params.previousAccountId ?? null);
+        return tokens satisfies CodexProtocol.v2.ChatgptAuthTokensRefreshResponse;
       }
 
       default:

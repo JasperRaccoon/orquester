@@ -71,6 +71,8 @@ import { claudeConfigDir } from "./config-dir.ts";
 import { ClaudeGoalTranscript, locateClaudeTranscript } from "./goal-transcript.ts";
 import { createClaudeHistoryReader, type ClaudeHistoryReader } from "./history.ts";
 import { buildClaudeQueryOptions } from "./launch.ts";
+// boxes:
+import { boxProfileFiles, removeBoxProfileFiles, writeBoxProfileFiles, type ClaudeBoxSession } from "./box-launch.ts";
 import {
   claudeProfileLaunchFiles,
   removeClaudeProfileLaunchFiles,
@@ -269,6 +271,12 @@ interface ClaudeSessionOptions {
   prefetchHistory?: boolean;
   /** An Agent Profile thread's launch (`profile-launch.ts`); absent = Global. */
   profileLaunch?: ClaudeProfileLaunch;
+  /**
+   * boxes (spec 2026-10-19 §8.5, `box-launch.ts`): the CLI runs in this box. `cwd`, `env` and
+   * `executablePath` above stay the HOST's (the history and goal readers read the host's mirror);
+   * the query gets the box's, and its profile launch replaces `profileLaunch`.
+   */
+  box?: ClaudeBoxSession;
 }
 
 export class ClaudeSession {
@@ -425,6 +433,19 @@ export class ClaudeSession {
     return this.normalizer.goals.lastEmitted;
   }
 
+  /** boxes: the box launch this session's CLI runs under; undefined on this machine. */
+  get boxLaunch(): ClaudeBoxSession["launch"] | undefined {
+    return this.options.box?.launch;
+  }
+
+  /** The profile's launch files go — from the box for a box session. Never throws. */
+  private async removeProfileFiles(): Promise<void> {
+    const files = this.profileFiles;
+    if (files === undefined) return;
+    if (this.options.box !== undefined) await removeBoxProfileFiles(this.options.box.launch, files);
+    else await removeClaudeProfileLaunchFiles(files);
+  }
+
   // -------------------------------------------------------------------------
   // Start
   // -------------------------------------------------------------------------
@@ -455,7 +476,8 @@ export class ClaudeSession {
           })
         : undefined;
     this.sessionToolNames = toolsLaunch !== undefined ? () => toolsLaunch.names() : () => new Set();
-    const profileLaunch = this.options.profileLaunch;
+    const box = this.options.box;
+    const profileLaunch = box?.profileLaunch ?? this.options.profileLaunch;
     const profileFiles =
       profileLaunch !== undefined
         ? claudeProfileLaunchFiles(this.options.context.tmpDir(), this.threadId)
@@ -463,11 +485,18 @@ export class ClaudeSession {
     const built = buildClaudeQueryOptions({
       ...(toolsLaunch !== undefined ? { sessionTools: toolsLaunch } : {}),
       ...(profileLaunch !== undefined && profileFiles !== undefined
-        ? { profile: { launch: profileLaunch, files: profileFiles } }
+        ? { profile: { launch: profileLaunch, files: box !== undefined ? boxProfileFiles(profileFiles, box.launch) : profileFiles } }
         : {}),
-      cwd: this.options.cwd,
-      executablePath: this.options.executablePath,
-      env: this.options.env,
+      // boxes: the query runs the box's CLI, in the box's cwd, with the box's env.
+      cwd: box?.cwd ?? this.options.cwd,
+      executablePath: box?.executablePath ?? this.options.executablePath,
+      env: box?.env ?? this.options.env,
+      ...(box !== undefined
+        ? {
+            spawnClaudeCodeProcess: box.launch.claudeSpawner((data) => this.onStderr(data), box.envUnset),
+            bridgedMcpServers: box.mcpServers
+          }
+        : {}),
       runtimeMode: this.options.runtimeMode,
       modelSelection: this.options.modelSelection,
       models: this.options.models,
@@ -495,10 +524,13 @@ export class ClaudeSession {
     if (profileFiles !== undefined && built.profileFiles !== undefined) {
       // Before anything is emitted: a failure here fails the start like a bad manifest does.
       try {
-        await writeClaudeProfileLaunchFiles(profileFiles, built.profileFiles);
+        // boxes: a box CLI reads them in the box, at the same (mapped) paths.
+        if (box !== undefined) await writeBoxProfileFiles(box.launch, profileFiles, built.profileFiles);
+        else await writeClaudeProfileLaunchFiles(profileFiles, built.profileFiles);
       } catch (error) {
         toolsLaunch?.release();
-        await removeClaudeProfileLaunchFiles(profileFiles);
+        this.profileFiles = profileFiles;
+        await this.removeProfileFiles();
         throw new Error(`Could not write the Agent Profile's launch files: ${errorMessage(error)}`);
       }
       this.profileFiles = profileFiles;
@@ -531,9 +563,8 @@ export class ClaudeSession {
         })
       ]);
       this.options.onClosed(this);
-      if (this.profileFiles !== undefined) {
-        await removeClaudeProfileLaunchFiles(this.profileFiles);
-      }
+      await this.removeProfileFiles();
+      await this.options.box?.launch.close();
       throw error instanceof Error ? error : new Error(errorMessage(error));
     }
 
@@ -1536,9 +1567,9 @@ export class ClaudeSession {
       this.goalOutputOpen = false;
 
       // The CLI is gone: its launch files (secrets) go with it, before the next start may write them.
-      if (this.profileFiles !== undefined) {
-        await removeClaudeProfileLaunchFiles(this.profileFiles);
-      }
+      await this.removeProfileFiles();
+      // boxes: its MCP bridge registrations and its token tracking go too.
+      await this.options.box?.launch.close();
 
       step("session.exited", () => {
         if (input.emitExit !== false) {

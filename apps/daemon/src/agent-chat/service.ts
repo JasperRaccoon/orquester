@@ -26,6 +26,9 @@ import { SYSTEM_ACCOUNT_ID, isSessionProfileAgentId, type SessionProfileAgentId 
 import { CONVERSATION_ALREADY_OPEN, forkTitle } from "@orquester/api/agent-chat";
 import type { AgentChatHome, RuntimePlatform } from "@orquester/config";
 import { agentHostSocketPath, agentHostTokenPath } from "@orquester/config";
+// boxes:
+import { boxSocketPath } from "@orquester/config";
+import type { BoxRegistry, BoxToolingProvisioner } from "../boxes/contracts.ts";
 import {
   AGENT_HOST_HEALTH_INTERVAL_MS,
   agentHostAuthValue,
@@ -36,6 +39,7 @@ import {
   type ForkHostThreadResponse,
   type AgentHostRecycleOpenCodeRequest,
   type AgentHostProfileLeasesResponse,
+  type HostThreadBox,
   type HostThreadProfile,
   type HostThreadServerPool,
   type SetThreadIdentityRequest,
@@ -208,11 +212,20 @@ export interface AgentChatServiceOptions {
    * Absent: every launch, fork or switch that names a profile is refused.
    */
   sessionProfiles?: ChatSessionProfiles;
+  /** boxes: box projects and their tooling (also settable later, {@link AgentChatService.setBoxes}). */
+  boxes?: ChatBoxes;
   logger?: {
     log?: (...a: unknown[]) => void;
     warn?: (...a: unknown[]) => void;
     error?: (...a: unknown[]) => void;
   };
+}
+
+/** boxes (spec 2026-10-19 §8.5): what a chat launch needs to know about box projects. */
+export interface ChatBoxes {
+  registry: Pick<BoxRegistry, "locate">;
+  /** The per-session env the box's tooling plugins contribute (spec §10); absent: none. */
+  tooling?: Pick<BoxToolingProvisioner, "contribution">;
 }
 
 /** The Agent Profiles a chat launch draws on (`session-profiles/launch.ts`). */
@@ -561,6 +574,58 @@ export class AgentChatService {
   /** `index.ts`: the Agent Profiles a launch draws on, once the preparation lifecycle exists. */
   setSessionProfiles(profiles: ChatSessionProfiles): void {
     this.sessionProfiles = profiles;
+  }
+
+  // boxes (spec 2026-10-19 §8.5) ---------------------------------------------------------------
+
+  private boxes: ChatBoxes | null = null;
+
+  /** `index.ts`: where box projects are (`BoxRegistry`) and what their tooling contributes, once the box service exists. */
+  setBoxes(boxes: ChatBoxes): void {
+    this.boxes = boxes;
+  }
+
+  /**
+   * The `box` launch field of a chat in `projectPath` (`HostThreadBox`), or none for a host
+   * project. Refused — a `ChatSessionError` the chat shows — when the project's box cannot take a
+   * chat: the agent host predates boxes (it would run the CLI here, in the empty stub), the chat
+   * runs as the System account (its logins are refreshed outside Orquester, spec §7), or the box is
+   * destroyed or has never connected.
+   */
+  private boxLaunchFor(projectPath: string, adapter: AgentAdapterId, accountId: string): { box?: HostThreadBox } {
+    const boxes = this.boxes ?? this.opts.boxes ?? null;
+    if (boxes === null || projectPath.length === 0) return {};
+    const location = boxes.registry.locate(projectPath);
+    if (location.kind !== "box") return {};
+    if (location.record.state === "destroyed") {
+      throw new ChatSessionError("This project's box was destroyed, so no agent can run in it.", "BOX_DESTROYED");
+    }
+    if (!this.supervisor.hostSupports("boxes")) {
+      throw new ChatSessionError(
+        "Chats in a box project need the updated agent host, which starts once no turn is running. Try again then.",
+        "COMMAND_REJECTED"
+      );
+    }
+    // OpenCode has no managed accounts: it runs as the System identity with API-key providers.
+    if (adapter !== "opencode" && accountId.length === 0) {
+      throw new ChatSessionError(
+        "Chats in a box project run with an Orquester-managed account, not the System login. Pick an account for this chat.",
+        "BOX_SYSTEM_ACCOUNT"
+      );
+    }
+    const connection = location.connection;
+    if (connection === undefined) {
+      throw new ChatSessionError("This project's box has not connected yet. Try again once it shows ready.", "BOX_NOT_READY");
+    }
+    return {
+      box: {
+        boxId: location.boxId,
+        socketPath: boxSocketPath(this.opts.baseDir, location.boxId),
+        sys: connection.sys,
+        paths: connection.paths,
+        tooling: boxes.tooling?.contribution(location.boxId) ?? { pathPrepend: [], env: {}, nodeRequire: [] }
+      }
+    };
   }
 
   /**
@@ -954,6 +1019,8 @@ export class AgentChatService {
         base: launchFields
       }));
     }
+    // boxes: a box project's chat runs its CLI in the box (refused here when it cannot).
+    const boxField = this.boxLaunchFor(req.projectPath ?? "", adapter, accountId);
     const id = randomUUID();
 
     // Prepare Claude trust before the thread exists so its first turn sees the project settings.
@@ -994,7 +1061,9 @@ export class AgentChatService {
       ...launchFields,
       ...(fields.resume ? { resume: fields.resume } : {}),
       ...(lineage ? { lineage } : {}),
-      ...(profile ? { profile, profileId: profile.profileId } : {})
+      ...(profile ? { profile, profileId: profile.profileId } : {}),
+      // boxes:
+      ...boxField
     };
     try {
       const response = await this.client.json<{
@@ -1243,6 +1312,8 @@ export class AgentChatService {
       }
     }
     const { launchEnv } = launchFields;
+    // boxes: the child runs where its parent's conversation lives.
+    const boxField = this.boxLaunchFor(parent.projectPath, adapter, parentAccount);
     await this.prepareHome(adapter, launchEnv, parent.projectPath);
 
     const existing = this.chat.get(id);
@@ -1288,6 +1359,8 @@ export class AgentChatService {
       runtimeMode: undefined,
       ...launchFields,
       ...profileFields,
+      // boxes:
+      ...boxField,
       fork: {
         ...(messageId !== undefined ? { messageId } : {}),
         ...(turnId !== undefined ? { turnId } : {}),
@@ -1407,7 +1480,7 @@ export class AgentChatService {
     // that does not (only builds of this feature before it) forks exactly as the lost request
     // asked, which converges just as the same key's retry does.
     const accountId = tab.accountId ?? "";
-    let launchFields: Pick<ForkHostThreadRequest, "launchEnv" | "unsetEnv" | "homePath" | "serverPool"> = {};
+    let launchFields: Pick<ForkHostThreadRequest, "launchEnv" | "unsetEnv" | "homePath" | "serverPool" | "box"> = {};
     let profileFields: Pick<ForkHostThreadRequest, "profile" | "profileId"> = {};
     try {
       const entry = this.opts.registryEntry(tab.refId);
@@ -1427,7 +1500,8 @@ export class AgentChatService {
             profileFields = { profile: null, profileId: null };
           }
           await this.prepareHome(adapter, fields.launchEnv, tab.projectPath);
-          launchFields = fields;
+          // boxes: the reconcile re-sends the box the fork named.
+          launchFields = { ...fields, ...this.boxLaunchFor(tab.projectPath, adapter, accountId) };
         }
       }
     } catch (error) {
@@ -1647,6 +1721,9 @@ export class AgentChatService {
         if (!(error instanceof ChatSessionError && error.code === "PROFILE_NOT_FOUND")) throw error;
       }
     }
+    // boxes: a launch field like the others (it replaces `launch.json`'s); the System account is
+    // refused for a box project here.
+    const boxField = this.boxLaunchFor(summary.projectPath ?? "", adapter, accountId);
     // The new home may never have been used for this project.
     await this.prepareHome(adapter, launchFields.launchEnv, summary.projectPath ?? "");
 
@@ -1654,7 +1731,7 @@ export class AgentChatService {
     // it out would move a keyed thread to the global server.
     const receipt = await this.postIdentity(
       id,
-      { commandId, accountId, home, ...launchFields, ...profileFields },
+      { commandId, accountId, home, ...launchFields, ...profileFields, ...boxField },
       "The agent host refused the account switch."
     );
     // Only after the host accepted: `sessions.json`, the tab badge and
@@ -1791,6 +1868,8 @@ export class AgentChatService {
         base: launchFields
       }));
     }
+    // boxes: the switch's launch fields replace `launch.json`'s, the box included.
+    const boxField = this.boxLaunchFor(summary.projectPath, adapter, accountId);
     await this.prepareHome(adapter, launchFields.launchEnv, summary.projectPath);
     const receipt = await this.postIdentity(
       id,
@@ -1800,7 +1879,8 @@ export class AgentChatService {
         home: resolveHomeKind(accountId),
         ...launchFields,
         profile,
-        profileId: profile?.profileId ?? null
+        profileId: profile?.profileId ?? null,
+        ...boxField
       },
       "The agent host refused the profile switch."
     );

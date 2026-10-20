@@ -316,13 +316,36 @@ const GROK_MANAGED_CONFIG: ReadonlyArray<{ section: string; key: string; value: 
 /** The env var the CLI reads an additional config layer from. */
 export const GROK_CONFIG_PATH_ENV = "GROK_CONFIG_PATH";
 
-/** The overlay's contents. Fully host-owned, so it is rendered, not patched. */
-function renderGrokOverlayConfig(): string {
+/**
+ * boxes (spec 2026-10-19 §7): the box's Grok gets its login from `orq-agent token grok`, never a
+ * credential file. The command is written as `[auth] auth_provider_command` into the overlay,
+ * as the spec prescribes — and ALSO set as `GROK_AUTH_PROVIDER_COMMAND`, because grok 1.0.46
+ * keeps only `[features]` of a `GROK_CONFIG_PATH` overlay (`grok inspect --json` reports
+ * `sections: features` for an overlay holding `[features]` + `[auth]`, measured 2026-10-20); its
+ * own config reference documents the variable as the same setting ("Also
+ * GROK_AUTH_PROVIDER_COMMAND"). The command runs through `sh -c` / `cmd /C`.
+ */
+export const GROK_AUTH_PROVIDER_COMMAND_ENV = "GROK_AUTH_PROVIDER_COMMAND";
+
+/** A TOML literal string (single quotes) — a Windows path's backslashes survive it. */
+function tomlLiteral(value: string): string {
+  if (!value.includes("'") && !value.includes("\n")) return `'${value}'`;
+  return JSON.stringify(value);
+}
+
+/**
+ * The overlay's contents. Fully host-owned, so it is rendered, not patched. `authProviderCommand`
+ * (a box launch only) adds the `[auth]` table.
+ */
+export function renderGrokOverlayConfig(options: { authProviderCommand?: string } = {}): string {
   const bySection = new Map<string, string[]>();
   for (const { section, key, value } of GROK_MANAGED_CONFIG) {
     const lines = bySection.get(section) ?? [];
     lines.push(`${key} = ${value}`);
     bySection.set(section, lines);
+  }
+  if (options.authProviderCommand !== undefined) {
+    bySection.set("auth", [`auth_provider_command = ${tomlLiteral(options.authProviderCommand)}`]);
   }
   const blocks: string[] = [
     "# Written by Orquester for one agent-chat thread. Not the user's config:",
