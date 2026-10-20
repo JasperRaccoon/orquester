@@ -1151,6 +1151,13 @@ export interface AppState {
    * its update — for the caller to show.
    */
   forkChatTab: (sessionId: string, request: ForkSessionRequest) => Promise<ForkSessionResponse>;
+  /**
+   * "Continue in another agent…" asked for a whole chat from outside its view (the tab's menu):
+   * the tab is opened and its view, once it sees this, opens the picker and clears it.
+   */
+  continueInRequest: { sessionId: string } | null;
+  requestContinueIn: (sessionId: string) => void;
+  clearContinueInRequest: () => void;
   /** Dismiss the transient refused-resume notice. */
   dismissResumeError: () => void;
   /** Raise the chat provider auth-error toast (§7.7). Replaces any current one. */
@@ -1344,6 +1351,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   activityById: {},
   resumeError: null,
   openingChat: null,
+  continueInRequest: null,
   agentAuthError: null,
   dismissedAgentAuthErrors: [],
   providerRateLimits: {},
@@ -2787,6 +2795,12 @@ export const useAppStore = create<AppState>((set, get) => ({
     }));
     return result;
   },
+
+  requestContinueIn: (sessionId) => {
+    get().activateTab(sessionId);
+    set({ continueInRequest: { sessionId } });
+  },
+  clearContinueInRequest: () => set({ continueInRequest: null }),
 
   dismissResumeError: () => set({ resumeError: null }),
 

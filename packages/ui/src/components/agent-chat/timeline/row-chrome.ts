@@ -33,6 +33,11 @@ export function workEntryIsIdentityChange(entry: WorkLogEntry): boolean {
   return entry.sourceActivityKind === IDENTITY_CHANGED_ACTIVITY_KIND;
 }
 
+/** A chat continued in another agent or account (thread lineage §6): where it came from. */
+export function workEntryIsContinuation(entry: WorkLogEntry): boolean {
+  return entry.sourceActivityKind === "thread.forked" && entry.continuation !== undefined;
+}
+
 /** The Agent Profile switch marker (agent profiles §5.3): the same kind of statement. */
 export function workEntryIsProfileChange(entry: WorkLogEntry): boolean {
   return entry.sourceActivityKind === PROFILE_CHANGED_ACTIVITY_KIND && entry.profileSwitch !== undefined;

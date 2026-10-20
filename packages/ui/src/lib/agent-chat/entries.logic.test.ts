@@ -82,6 +82,25 @@ describe("workLogEntryFromActivity", () => {
     );
   });
 
+  it("reads a continued chat's source off its thread.forked row; an ordinary fork's row has none", () => {
+    const continued = workLogEntryFromActivity(
+      activity("thread.forked", {
+        parentThreadId: "parent-1",
+        strategy: "transcript",
+        detail: "The last 3 of 5 messages (≈2 KB) are handed to Codex with your first message.",
+        continuation: { sourceAgent: "claude", sourceLabel: "Claude Opus 4.1", sourceTitle: "Login bug", targetAgent: "codex" }
+      })
+    );
+    assert.deepEqual(continued.continuation, { parentThreadId: "parent-1", sourceTitle: "Login bug", sourceLabel: "Claude Opus 4.1" });
+    assert.match(continued.detail ?? "", /handed to Codex/);
+    assert.equal(workLogEntryFromActivity(activity("thread.forked", { parentThreadId: "p", strategy: "transcript" })).continuation, undefined);
+    assert.equal(
+      workLogEntryFromActivity(activity("thread.forked", { parentThreadId: "p", continuation: { sourceTitle: "x" } })).continuation,
+      undefined,
+      "no label, no row of its own"
+    );
+  });
+
 });
 
 describe("deriveWorkLogEntries", () => {
