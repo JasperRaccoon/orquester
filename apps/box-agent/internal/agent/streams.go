@@ -26,7 +26,13 @@ type halfCloser interface {
 // → conn, conn → channel stream 1. A clean EOF half-closes; an error on
 // either side tears down both.
 func bridge(ch *Channel, conn io.ReadWriteCloser) {
-	ch.SetHandlers(nil, nil, func(*wire.RPCError) { _ = conn.Close() })
+	ch.SetHandlers(nil, nil, func(err *wire.RPCError) {
+		// A plain close after the peer's eof: let the last bytes drain to conn.
+		if err == nil && ch.gotEOF() {
+			return
+		}
+		_ = conn.Close()
+	})
 	var once sync.Once
 	abort := func() {
 		once.Do(func() {
@@ -45,6 +51,10 @@ func bridge(ch *Channel, conn io.ReadWriteCloser) {
 		}
 		if hc, ok := conn.(halfCloser); ok {
 			_ = hc.CloseWrite()
+		}
+		if !ch.alive() {
+			// The peer already closed: nothing more can travel the other way.
+			abort()
 		}
 	}()
 	go func() {

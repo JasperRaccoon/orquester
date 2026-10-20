@@ -240,6 +240,13 @@ func (w streamWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// gotEOF reports whether the peer half-closed stream 0.
+func (c *Channel) gotEOF() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.inEOF
+}
+
 func (c *Channel) alive() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()

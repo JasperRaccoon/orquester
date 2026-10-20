@@ -4,8 +4,9 @@
  * box over a real WebSocket.
  */
 
+import { spawn } from "node:child_process";
 import { once } from "node:events";
-import type { AddressInfo } from "node:net";
+import { createConnection, createServer, type AddressInfo, type Socket } from "node:net";
 
 import websocketPlugin from "@fastify/websocket";
 import { boxRoutes, parseControlMessage, type BoxControlMessage, type BoxHello, type BoxSysInfo } from "@orquester/api";
@@ -14,9 +15,59 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { WebSocket } from "ws";
 
 import { localSysInfo } from "../testing.ts";
-import type { BoxRecordStore } from "./hub.ts";
+import { BOX_AGENT_SOURCE_DIR } from "./builds.ts";
+import type { BoxHubServer, BoxRecordStore } from "./hub.ts";
 import { registerBoxHubRoutes } from "./routes.ts";
-import type { BoxHubServer } from "./hub.ts";
+
+/** Builds orq-agent from source (CGO off) with a version; false when Go is not installed. */
+export async function buildTestAgent(outPath: string, version: string): Promise<boolean> {
+  const go = process.env.GO || "go";
+  return await new Promise<boolean>((resolve, reject) => {
+    const child = spawn(go, ["build", "-o", outPath, "-ldflags", `-X main.version=${version}`, "."], {
+      cwd: BOX_AGENT_SOURCE_DIR,
+      env: { ...process.env, CGO_ENABLED: "0" },
+      stdio: ["ignore", "ignore", "pipe"]
+    });
+    let stderr = "";
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf8");
+    });
+    child.once("error", (error: NodeJS.ErrnoException) => (error.code === "ENOENT" ? resolve(false) : reject(error)));
+    child.once("exit", (code) => (code === 0 ? resolve(true) : reject(new Error(`go build failed: ${stderr}`))));
+  });
+}
+
+/** A TCP proxy whose connections can all be cut at once (simulates a dropped link). */
+export async function startCuttableProxy(targetPort: number): Promise<{ port: number; cutAll(): void; close(): Promise<void> }> {
+  const sockets = new Set<Socket>();
+  const server = createServer((client) => {
+    const upstream = createConnection({ port: targetPort, host: "127.0.0.1" });
+    sockets.add(client);
+    sockets.add(upstream);
+    const drop = (): void => {
+      client.destroy();
+      upstream.destroy();
+      sockets.delete(client);
+      sockets.delete(upstream);
+    };
+    client.on("error", drop).on("close", drop);
+    upstream.on("error", drop).on("close", drop);
+    client.pipe(upstream).pipe(client);
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return {
+    port: (server.address() as AddressInfo).port,
+    cutAll() {
+      for (const socket of sockets) socket.destroy();
+      sockets.clear();
+    },
+    close: () =>
+      new Promise<void>((resolve) => {
+        for (const socket of sockets) socket.destroy();
+        server.close(() => resolve());
+      })
+  };
+}
 
 export class MemoryRecords implements BoxRecordStore {
   readonly records = new Map<string, StoredBox>();

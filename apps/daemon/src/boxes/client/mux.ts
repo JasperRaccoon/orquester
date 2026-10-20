@@ -142,9 +142,9 @@ export class MuxChannel {
 
   /** @internal */
   handleOpenFailed(error: BoxRpcError): void {
+    // Reported through `opened` only: the channel never carried anything.
     this.markDead();
     this.rejectOpen(BoxError.from(error));
-    this.onClose?.(BoxError.from(error));
   }
 
   /** @internal */

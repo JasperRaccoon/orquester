@@ -10,7 +10,7 @@
 
 import { EventEmitter } from "node:events";
 import { createServer, type AddressInfo, type Server, type Socket } from "node:net";
-import { Duplex, Readable, Writable } from "node:stream";
+import { Duplex, PassThrough, Readable, Writable } from "node:stream";
 
 import {
   BOX_STREAM_FROM_BOX,
@@ -117,9 +117,14 @@ export function channelDuplex(channel: MuxChannel): Duplex {
       }
     },
     write(chunk: Buffer, _encoding, callback) {
+      if (channel.closed) {
+        // Like writing to a socket the peer already closed: nothing to deliver to.
+        callback();
+        return;
+      }
       channel.send(BOX_STREAM_TO_BOX, chunk).then(
         () => callback(),
-        (error: Error) => callback(error)
+        () => callback()
       );
     },
     final(callback) {
@@ -127,7 +132,11 @@ export function channelDuplex(channel: MuxChannel): Duplex {
       callback();
     },
     destroy(error, callback) {
-      channel.close();
+      // After a graceful end of both directions the box sends `close`; a
+      // close from here would race its last writes. Anything else aborts.
+      if (error || !(duplex.readableEnded && duplex.writableFinished)) {
+        channel.close(error ? { code: "ABORTED", message: error.message } : undefined);
+      }
       callback(error);
     }
   });
@@ -142,18 +151,24 @@ export function channelDuplex(channel: MuxChannel): Duplex {
       duplex.push(null);
     }
   };
+  // The box sends `close` once both directions are done (or on failure); the
+  // host only closes to abort (destroy). Buffered output is still delivered.
   channel.onClose = (error) => {
+    if (error && error.code !== BOX_DISCONNECTED && !ended) {
+      ended = true;
+      duplex.destroy(error);
+      return;
+    }
     if (!ended) {
       ended = true;
-      if (error && error.code !== BOX_DISCONNECTED) duplex.destroy(error);
-      else duplex.push(null);
+      duplex.push(null);
     }
-    // Both directions are over: let the stream finish closing.
-    if (!duplex.destroyed && duplex.writableFinished) duplex.destroy();
+    const settle = (): void => {
+      if (!duplex.destroyed) duplex.destroy();
+    };
+    if (duplex.readableEnded) settle();
+    else duplex.once("end", settle);
   };
-  duplex.on("finish", () => {
-    if (ended && !duplex.destroyed) duplex.destroy();
-  });
   return duplex;
 }
 
@@ -353,6 +368,11 @@ export class LinkedBoxConnection implements BoxConnection {
     return this.info.procs.map((proc) => ({ ...proc }));
   }
 
+  /** Whether `mux` is the link this connection is attached to. */
+  currentLinkIs(mux: BoxMux): boolean {
+    return this.mux === mux;
+  }
+
   /** The live mux, if any (the relay passes channels through it). */
   currentMux(): BoxMux | null {
     return this.connected ? this.mux : null;
@@ -506,7 +526,12 @@ export class LinkedBoxConnection implements BoxConnection {
   async openChannel(spec: BoxChannelSpec): Promise<Duplex> {
     const channel = await this.openMuxChannel(spec, CHANNEL_OPEN_TIMEOUT_MS);
     const duplex = channelDuplex(channel);
-    await channel.opened;
+    try {
+      await channel.opened;
+    } catch (error) {
+      duplex.destroy();
+      throw error;
+    }
     return duplex;
   }
 
@@ -516,7 +541,9 @@ export class LinkedBoxConnection implements BoxConnection {
 
   async forwardToHost(boxPort: number, options: { hostPort?: number } = {}): Promise<BoxHostForward> {
     const sockets = new Set<Socket>();
-    const server: Server = createServer((client) => {
+    // Half-open sockets: a client's FIN travels to the box as eof, and the
+    // box's answer can still come back.
+    const server: Server = createServer({ allowHalfOpen: true }, (client) => {
       sockets.add(client);
       client.once("close", () => sockets.delete(client));
       client.pause();
@@ -555,12 +582,15 @@ export class LinkedBoxConnection implements BoxConnection {
     const channel = await this.openMuxChannel(spec, CHANNEL_OPEN_TIMEOUT_MS);
     const readable = new ChannelReadable((bytes) => channel.consumed(bytes));
     let gotEof = false;
+    let returned = false;
     attachReadable(channel, readable, BOX_STREAM_FROM_BOX);
     channel.onEof = (stream) => {
       if (stream === BOX_STREAM_FROM_BOX) gotEof = true;
     };
     channel.onClose = (error) => {
       if (gotEof && !error) readable.finish();
+      // Before the caller holds the stream the failure surfaces through `opened`.
+      else if (!returned) readable.destroy();
       else readable.destroy(error ?? disconnectedError());
     };
     readable.once("close", () => channel.close());
@@ -571,17 +601,29 @@ export class LinkedBoxConnection implements BoxConnection {
       signal.addEventListener("abort", onAbort, { once: true });
       readable.once("close", () => signal.removeEventListener("abort", onAbort));
     }
-    await channel.opened;
+    try {
+      await channel.opened;
+    } catch (error) {
+      readable.destroy();
+      throw error;
+    }
+    returned = true;
     return readable;
   }
 
   /** An upload channel (file-write, tar-write): resolves on eof(1)+close, rejects on a failed close. */
   private async upload(spec: BoxChannelSpec, source: Readable): Promise<void> {
+    // Take hold of the source right away: a child process's stdout that has
+    // no reader when the child exits is drained and discarded by Node.
+    const staged = new PassThrough();
+    source.once("error", (error) => staged.destroy(error));
+    source.pipe(staged);
     let channel: MuxChannel;
     try {
       channel = await this.openMuxChannel(spec, CHANNEL_OPEN_TIMEOUT_MS);
     } catch (error) {
       source.destroy();
+      staged.destroy();
       throw error;
     }
     let committed = false;
@@ -596,24 +638,27 @@ export class LinkedBoxConnection implements BoxConnection {
         else reject(error ?? new BoxError("WRITE_FAILED", "The box closed the upload without committing it"));
       };
     });
+    done.catch(() => undefined);
     try {
       await channel.opened;
     } catch (error) {
       source.destroy();
+      staged.destroy();
       throw error;
     }
     const sink = channelWritable(channel, Promise.resolve());
-    source.once("error", (error) => {
+    staged.once("error", (error) => {
       // Nothing was committed: the box drops its temp file on close.
       channel.close({ code: "SOURCE_FAILED", message: error.message });
       fail(error);
     });
-    source.pipe(sink);
+    staged.pipe(sink);
     try {
       await done;
     } catch (error) {
-      source.unpipe(sink);
+      staged.unpipe(sink);
       source.destroy();
+      staged.destroy();
       throw error;
     }
   }

@@ -286,6 +286,11 @@ func (a *Agent) Run(ctx context.Context) (int, bool) {
 			a.stopWith(0, false)
 		case <-a.stop:
 		}
+		// Unblock the serving link so the loop below sees the stop.
+		if link := a.currentLink(); link != nil {
+			_ = link.conn.Close(websocket.StatusNormalClosure, "shutting down")
+			link.cancel()
+		}
 	}()
 	control, err := a.startControl()
 	if err != nil {
@@ -322,11 +327,6 @@ func (a *Agent) Run(ctx context.Context) (int, bool) {
 		case <-a.stop:
 		}
 	}
-	a.linkMu.Lock()
-	if a.link != nil {
-		_ = a.link.conn.Close(websocket.StatusNormalClosure, "shutting down")
-	}
-	a.linkMu.Unlock()
 	return a.exitCode, a.restart
 }
 

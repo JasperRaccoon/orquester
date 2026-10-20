@@ -275,7 +275,7 @@ export function createBoxHub(deps: BoxHubDeps): BoxHubServer {
     if (links.get(boxId) === link) {
       links.delete(boxId);
       const connection = connections.get(boxId);
-      if (connection?.connected) {
+      if (connection?.currentLinkIs(link.mux)) {
         connection.detachLink(link.mux);
         changes.emit("change", boxId, false);
       }
