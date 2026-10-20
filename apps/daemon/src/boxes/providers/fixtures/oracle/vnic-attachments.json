@@ -1,0 +1,13 @@
+[
+  {
+    "id": "ocid1.vnicattachment.oc1.eu-frankfurt-1.aaaaaaaa1111111111111111111111111111111111111111111111111111",
+    "availabilityDomain": "Uocm:EU-FRANKFURT-1-AD-1",
+    "compartmentId": "ocid1.tenancy.oc1..aaaaaaaa11111111111111111111111111111111111111111111111111aa",
+    "instanceId": "ocid1.instance.oc1.eu-frankfurt-1.aaaaaaaa1111111111111111111111111111111111111111111111111111",
+    "subnetId": "ocid1.subnet.oc1.eu-frankfurt-1.aaaaaaaa1111111111111111111111111111111111111111111111111111",
+    "vnicId": "ocid1.vnic.oc1.eu-frankfurt-1.aaaaaaaa1111111111111111111111111111111111111111111111111111",
+    "nicIndex": 0,
+    "lifecycleState": "ATTACHED",
+    "timeCreated": "2026-10-19T23:00:40.000Z"
+  }
+]

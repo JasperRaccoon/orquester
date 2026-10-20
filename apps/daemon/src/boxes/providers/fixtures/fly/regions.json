@@ -1,0 +1,89 @@
+{
+  "Regions": [
+    {
+      "code": "ams",
+      "name": "Amsterdam, Netherlands",
+      "latitude": 52.374344,
+      "longitude": 4.895439,
+      "gateway_available": true,
+      "mpg_available": true,
+      "requires_paid_plan": false,
+      "geo_region": "europe",
+      "deprecated": false,
+      "capacity": 1
+    },
+    {
+      "code": "fra",
+      "name": "Frankfurt, Germany",
+      "latitude": 50.1167,
+      "longitude": 8.6833,
+      "gateway_available": true,
+      "mpg_available": true,
+      "requires_paid_plan": false,
+      "geo_region": "europe",
+      "deprecated": false,
+      "capacity": 1
+    },
+    {
+      "code": "iad",
+      "name": "Ashburn, Virginia (US)",
+      "latitude": 39.02214,
+      "longitude": -77.462555,
+      "gateway_available": true,
+      "mpg_available": true,
+      "requires_paid_plan": false,
+      "geo_region": "north_america",
+      "deprecated": false,
+      "capacity": 1
+    },
+    {
+      "code": "ord",
+      "name": "Chicago, Illinois (US)",
+      "latitude": 41.891544,
+      "longitude": -87.63039,
+      "gateway_available": true,
+      "mpg_available": true,
+      "requires_paid_plan": false,
+      "geo_region": "north_america",
+      "deprecated": false,
+      "capacity": 1
+    },
+    {
+      "code": "sin",
+      "name": "Singapore, Singapore",
+      "latitude": 1.3,
+      "longitude": 103.8,
+      "gateway_available": true,
+      "mpg_available": true,
+      "requires_paid_plan": false,
+      "geo_region": "asia_pacific",
+      "deprecated": false,
+      "capacity": 1
+    },
+    {
+      "code": "mad",
+      "name": "Madrid, Spain",
+      "latitude": 40.4381,
+      "longitude": -3.82,
+      "gateway_available": false,
+      "mpg_available": false,
+      "requires_paid_plan": false,
+      "geo_region": "europe",
+      "deprecated": true,
+      "capacity": 1
+    },
+    {
+      "code": "xyz",
+      "name": "Example City, Nowhere",
+      "latitude": 0,
+      "longitude": 0,
+      "gateway_available": false,
+      "mpg_available": false,
+      "requires_paid_plan": false,
+      "geo_region": "europe",
+      "deprecated": false,
+      "capacity": 1
+    }
+  ],
+  "nearest": "ams"
+}

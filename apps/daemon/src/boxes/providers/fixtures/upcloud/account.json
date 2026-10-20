@@ -1,0 +1,15 @@
+{
+  "account": {
+    "credits": 10000,
+    "username": "orq-api",
+    "resource_limits": {
+      "cores": 100,
+      "memory": 307200,
+      "networks": 100,
+      "public_ipv4": 20,
+      "public_ipv6": 100,
+      "storage_hdd": 10240,
+      "storage_ssd": 10240
+    }
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "action": {
+    "id": 300000003,
+    "command": "delete_server",
+    "started": "2026-10-19T23:01:53Z",
+    "finished": null,
+    "progress": 0,
+    "status": "running",
+    "resources": [
+      {
+        "id": 100000001,
+        "type": "server"
+      }
+    ],
+    "error": null
+  }
+}

@@ -1,0 +1,244 @@
+{
+  "images": [
+    {
+      "id": 67794396,
+      "name": "ubuntu-22.04",
+      "architecture": "x86",
+      "bound_to": null,
+      "created": "2022-04-21T13:32:38Z",
+      "created_from": null,
+      "deleted": null,
+      "deprecated": null,
+      "deprecation": null,
+      "description": "Ubuntu 22.04",
+      "disk_size": 5,
+      "image_size": null,
+      "labels": {},
+      "os_flavor": "ubuntu",
+      "os_version": "22.04",
+      "protection": {
+        "delete": false
+      },
+      "rapid_deploy": true,
+      "status": "available",
+      "type": "system"
+    },
+    {
+      "id": 76766499,
+      "name": "rocky-9",
+      "architecture": "x86",
+      "bound_to": null,
+      "created": "2022-07-20T13:55:52Z",
+      "created_from": null,
+      "deleted": null,
+      "deprecated": null,
+      "deprecation": null,
+      "description": "Rocky Linux 9",
+      "disk_size": 5,
+      "image_size": null,
+      "labels": {},
+      "os_flavor": "rocky",
+      "os_version": "9",
+      "protection": {
+        "delete": false
+      },
+      "rapid_deploy": true,
+      "status": "available",
+      "type": "system"
+    },
+    {
+      "id": 103907769,
+      "name": "rocky-9",
+      "architecture": "arm",
+      "bound_to": null,
+      "created": "2023-03-20T10:08:36Z",
+      "created_from": null,
+      "deleted": null,
+      "deprecated": null,
+      "deprecation": null,
+      "description": "Rocky Linux 9",
+      "disk_size": 5,
+      "image_size": null,
+      "labels": {},
+      "os_flavor": "rocky",
+      "os_version": "9",
+      "protection": {
+        "delete": false
+      },
+      "rapid_deploy": true,
+      "status": "available",
+      "type": "system"
+    },
+    {
+      "id": 103908130,
+      "name": "ubuntu-22.04",
+      "architecture": "arm",
+      "bound_to": null,
+      "created": "2023-03-20T10:10:04Z",
+      "created_from": null,
+      "deleted": null,
+      "deprecated": null,
+      "deprecation": null,
+      "description": "Ubuntu 22.04",
+      "disk_size": 5,
+      "image_size": null,
+      "labels": {},
+      "os_flavor": "ubuntu",
+      "os_version": "22.04",
+      "protection": {
+        "delete": false
+      },
+      "rapid_deploy": true,
+      "status": "available",
+      "type": "system"
+    },
+    {
+      "id": 114690387,
+      "name": "debian-12",
+      "architecture": "x86",
+      "bound_to": null,
+      "created": "2023-06-13T06:00:02Z",
+      "created_from": null,
+      "deleted": null,
+      "deprecated": null,
+      "deprecation": null,
+      "description": "Debian 12",
+      "disk_size": 5,
+      "image_size": null,
+      "labels": {},
+      "os_flavor": "debian",
+      "os_version": "12",
+      "protection": {
+        "delete": false
+      },
+      "rapid_deploy": true,
+      "status": "available",
+      "type": "system"
+    },
+    {
+      "id": 114690389,
+      "name": "debian-12",
+      "architecture": "arm",
+      "bound_to": null,
+      "created": "2023-06-13T06:00:03Z",
+      "created_from": null,
+      "deleted": null,
+      "deprecated": null,
+      "deprecation": null,
+      "description": "Debian 12",
+      "disk_size": 5,
+      "image_size": null,
+      "labels": {},
+      "os_flavor": "debian",
+      "os_version": "12",
+      "protection": {
+        "delete": false
+      },
+      "rapid_deploy": true,
+      "status": "available",
+      "type": "system"
+    },
+    {
+      "id": 161547269,
+      "name": "ubuntu-24.04",
+      "architecture": "x86",
+      "bound_to": null,
+      "created": "2024-04-25T13:26:27Z",
+      "created_from": null,
+      "deleted": null,
+      "deprecated": null,
+      "deprecation": null,
+      "description": "Ubuntu 24.04",
+      "disk_size": 5,
+      "image_size": null,
+      "labels": {},
+      "os_flavor": "ubuntu",
+      "os_version": "24.04",
+      "protection": {
+        "delete": false
+      },
+      "rapid_deploy": true,
+      "status": "available",
+      "type": "system"
+    },
+    {
+      "id": 161547270,
+      "name": "ubuntu-24.04",
+      "architecture": "arm",
+      "bound_to": null,
+      "created": "2024-04-25T13:26:51Z",
+      "created_from": null,
+      "deleted": null,
+      "deprecated": null,
+      "deprecation": null,
+      "description": "Ubuntu 24.04",
+      "disk_size": 5,
+      "image_size": null,
+      "labels": {},
+      "os_flavor": "ubuntu",
+      "os_version": "24.04",
+      "protection": {
+        "delete": false
+      },
+      "rapid_deploy": true,
+      "status": "available",
+      "type": "system"
+    },
+    {
+      "id": 387894169,
+      "name": "ubuntu-26.04",
+      "architecture": "x86",
+      "bound_to": null,
+      "created": "2026-05-18T11:00:39Z",
+      "created_from": null,
+      "deleted": null,
+      "deprecated": null,
+      "deprecation": null,
+      "description": "Ubuntu 26.04",
+      "disk_size": 5,
+      "image_size": null,
+      "labels": {},
+      "os_flavor": "ubuntu",
+      "os_version": "26.04",
+      "protection": {
+        "delete": false
+      },
+      "rapid_deploy": true,
+      "status": "available",
+      "type": "system"
+    },
+    {
+      "id": 387894171,
+      "name": "ubuntu-26.04",
+      "architecture": "arm",
+      "bound_to": null,
+      "created": "2026-05-18T11:00:54Z",
+      "created_from": null,
+      "deleted": null,
+      "deprecated": null,
+      "deprecation": null,
+      "description": "Ubuntu 26.04",
+      "disk_size": 5,
+      "image_size": null,
+      "labels": {},
+      "os_flavor": "ubuntu",
+      "os_version": "26.04",
+      "protection": {
+        "delete": false
+      },
+      "rapid_deploy": true,
+      "status": "available",
+      "type": "system"
+    }
+  ],
+  "meta": {
+    "pagination": {
+      "page": 1,
+      "per_page": 50,
+      "previous_page": null,
+      "next_page": null,
+      "last_page": 1,
+      "total_entries": 10
+    }
+  }
+}

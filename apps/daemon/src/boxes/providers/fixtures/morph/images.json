@@ -1,0 +1,21 @@
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "morphvm-sandbox",
+      "object": "image",
+      "name": "morphvm-sandbox",
+      "description": null,
+      "disk_size": 4294967296,
+      "created": 1760000000
+    },
+    {
+      "id": "morphvm-minimal",
+      "object": "image",
+      "name": "morphvm-minimal",
+      "description": "Minimal Morph VM",
+      "disk_size": 2147483648,
+      "created": 1740000000
+    }
+  ]
+}

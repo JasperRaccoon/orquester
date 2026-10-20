@@ -1,0 +1,77 @@
+{
+  "images": [
+    {
+      "id": "fd6931c1-5326-4f8d-8fdf-57867b2830e3",
+      "name": "Debian 12 (Bookworm)",
+      "label": "debian_bookworm",
+      "categories": [
+        "distribution"
+      ],
+      "valid_until": null
+    },
+    {
+      "id": "193cdddd-0b0b-43b5-84a6-f0d88ebe7611",
+      "name": "Debian 13 (Trixie)",
+      "label": "debian_trixie",
+      "categories": [
+        "distribution"
+      ],
+      "valid_until": null
+    },
+    {
+      "id": "589c35a9-20ce-4ed9-92d7-16dc061be52b",
+      "name": "Rocky Linux 9",
+      "label": "rockylinux_9",
+      "categories": [
+        "distribution"
+      ],
+      "valid_until": null
+    },
+    {
+      "id": "1123148c-7660-4cb2-9fd3-7b5b4896f72f",
+      "name": "Ubuntu 22.04 Jammy Jellyfish",
+      "label": "ubuntu_jammy",
+      "categories": [
+        "distribution"
+      ],
+      "valid_until": null
+    },
+    {
+      "id": "607b12c2-685d-45f7-905f-57bc23863834",
+      "name": "Ubuntu 24.04 Noble Numbat",
+      "label": "ubuntu_noble",
+      "categories": [
+        "distribution"
+      ],
+      "valid_until": null
+    },
+    {
+      "id": "63cb3ba6-570a-48f8-a5b8-29c9650e6980",
+      "name": "Ubuntu 26.04 Resolute Raccoon",
+      "label": "ubuntu_resolute",
+      "categories": [
+        "distribution"
+      ],
+      "valid_until": null
+    },
+    {
+      "id": "741cfd27-a822-4c82-b80f-973b562743ad",
+      "name": "Ubuntu Noble GPU OS 13 (Nvidia)",
+      "label": "ubuntu_noble_gpu_os_13_nvidia",
+      "categories": [
+        "Machine Learning"
+      ],
+      "valid_until": null
+    },
+    {
+      "id": "1b38cd96-9e7c-428e-8d2f-484058b284cd",
+      "name": "Windows Server 2022",
+      "label": "windows_server_2022",
+      "categories": [
+        "distribution"
+      ],
+      "valid_until": null
+    }
+  ],
+  "total_count": 8
+}

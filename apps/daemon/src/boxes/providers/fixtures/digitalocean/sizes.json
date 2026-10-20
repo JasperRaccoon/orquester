@@ -1,0 +1,265 @@
+{
+  "sizes": [
+    {
+      "slug": "s-1vcpu-512mb-10gb",
+      "memory": 512,
+      "vcpus": 1,
+      "disk": 10,
+      "transfer": 0.5,
+      "price_monthly": 4.0,
+      "price_hourly": 0.00595,
+      "regions": [
+        "nyc1",
+        "fra1"
+      ],
+      "available": true,
+      "description": "Basic",
+      "disk_info": [
+        {
+          "type": "local",
+          "size": {
+            "amount": 10,
+            "unit": "gib"
+          }
+        }
+      ]
+    },
+    {
+      "slug": "s-1vcpu-1gb",
+      "memory": 1024,
+      "vcpus": 1,
+      "disk": 25,
+      "transfer": 1.0,
+      "price_monthly": 6.0,
+      "price_hourly": 0.00893,
+      "regions": [
+        "ams3",
+        "fra1",
+        "nyc1",
+        "nyc3",
+        "sgp1"
+      ],
+      "available": true,
+      "description": "Basic",
+      "disk_info": [
+        {
+          "type": "local",
+          "size": {
+            "amount": 25,
+            "unit": "gib"
+          }
+        }
+      ]
+    },
+    {
+      "slug": "s-2vcpu-4gb",
+      "memory": 4096,
+      "vcpus": 2,
+      "disk": 80,
+      "transfer": 4.0,
+      "price_monthly": 24.0,
+      "price_hourly": 0.03571,
+      "regions": [
+        "ams3",
+        "fra1",
+        "nyc1",
+        "nyc3",
+        "sgp1"
+      ],
+      "available": true,
+      "description": "Basic",
+      "disk_info": [
+        {
+          "type": "local",
+          "size": {
+            "amount": 80,
+            "unit": "gib"
+          }
+        }
+      ]
+    },
+    {
+      "slug": "g-2vcpu-8gb",
+      "memory": 8192,
+      "vcpus": 2,
+      "disk": 25,
+      "transfer": 4.0,
+      "price_monthly": 63.0,
+      "price_hourly": 0.09375,
+      "regions": [
+        "fra1",
+        "nyc3"
+      ],
+      "available": true,
+      "description": "General Purpose",
+      "disk_info": [
+        {
+          "type": "local",
+          "size": {
+            "amount": 25,
+            "unit": "gib"
+          }
+        }
+      ]
+    },
+    {
+      "slug": "c-2",
+      "memory": 4096,
+      "vcpus": 2,
+      "disk": 25,
+      "transfer": 4.0,
+      "price_monthly": 42.0,
+      "price_hourly": 0.0625,
+      "regions": [],
+      "available": false,
+      "description": "CPU-Optimized",
+      "disk_info": [
+        {
+          "type": "local",
+          "size": {
+            "amount": 25,
+            "unit": "gib"
+          }
+        }
+      ]
+    },
+    {
+      "slug": "gpu-h100x1-80gb",
+      "memory": 245760,
+      "vcpus": 20,
+      "disk": 720,
+      "transfer": 15.0,
+      "price_monthly": 2482.56,
+      "price_hourly": 3.39,
+      "regions": [
+        "nyc2",
+        "tor1"
+      ],
+      "available": true,
+      "description": "H100 GPU - 1X",
+      "disk_info": [
+        {
+          "type": "local",
+          "size": {
+            "amount": 720,
+            "unit": "gib"
+          }
+        },
+        {
+          "type": "scratch",
+          "size": {
+            "amount": 5120,
+            "unit": "gib"
+          }
+        }
+      ],
+      "gpu_info": {
+        "count": 1,
+        "vram": {
+          "amount": 80,
+          "unit": "gib"
+        },
+        "model": "nvidia_h100"
+      }
+    },
+    {
+      "slug": "gpu-h100x8-640gb",
+      "memory": 1966080,
+      "vcpus": 160,
+      "disk": 2046,
+      "transfer": 60.0,
+      "price_monthly": 17796.48,
+      "price_hourly": 23.92,
+      "regions": [
+        "nyc2",
+        "tor1"
+      ],
+      "available": true,
+      "description": "H100 GPU - 8X",
+      "disk_info": [
+        {
+          "type": "local",
+          "size": {
+            "amount": 2046,
+            "unit": "gib"
+          }
+        }
+      ],
+      "gpu_info": {
+        "count": 8,
+        "vram": {
+          "amount": 640,
+          "unit": "gib"
+        },
+        "model": "nvidia_h100"
+      }
+    },
+    {
+      "slug": "gpu-mi300x1-192gb",
+      "memory": 245760,
+      "vcpus": 20,
+      "disk": 720,
+      "transfer": 15.0,
+      "price_monthly": 1451.04,
+      "price_hourly": 1.99,
+      "regions": [
+        "atl1"
+      ],
+      "available": true,
+      "description": "AMD MI300X - 1X",
+      "disk_info": [
+        {
+          "type": "local",
+          "size": {
+            "amount": 720,
+            "unit": "gib"
+          }
+        }
+      ],
+      "gpu_info": {
+        "count": 1,
+        "vram": {
+          "amount": 192,
+          "unit": "gib"
+        },
+        "model": "amd_mi300x"
+      }
+    },
+    {
+      "slug": "gpu-4000adax1-20gb",
+      "memory": 32768,
+      "vcpus": 8,
+      "disk": 500,
+      "transfer": 10.0,
+      "price_monthly": 557.04,
+      "price_hourly": 0.76,
+      "regions": [
+        "tor1",
+        "sfo3"
+      ],
+      "available": true,
+      "description": "RTX 4000 Ada GPU - 1X",
+      "disk_info": [
+        {
+          "type": "local",
+          "size": {
+            "amount": 500,
+            "unit": "gib"
+          }
+        }
+      ],
+      "gpu_info": {
+        "count": 1,
+        "vram": {
+          "amount": 20,
+          "unit": "gib"
+        },
+        "model": "nvidia_rtx_4000_ada"
+      }
+    }
+  ],
+  "links": {},
+  "meta": {
+    "total": 9
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "rate_limit_exceeded",
+    "message": "limit of 3600 requests per hour reached",
+    "details": {}
+  }
+}

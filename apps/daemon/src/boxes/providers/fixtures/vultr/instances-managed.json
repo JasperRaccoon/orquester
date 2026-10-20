@@ -1,0 +1,54 @@
+{
+  "instances": [
+    {
+      "id": "11111111-2222-4333-8444-555555555555",
+      "os": "Ubuntu 24.04 LTS x64",
+      "ram": 1024,
+      "disk": 25,
+      "main_ip": "203.0.113.20",
+      "vcpu_count": 1,
+      "region": "ewr",
+      "plan": "vc2-1c-1gb",
+      "date_created": "2026-10-19T23:06:41+00:00",
+      "status": "active",
+      "allowed_bandwidth": 1,
+      "netmask_v4": "255.255.255.128",
+      "gateway_v4": "203.0.113.1",
+      "power_status": "running",
+      "server_status": "ok",
+      "v6_network": "2001:db8:0:860a::",
+      "v6_main_ip": "2001:db8:0:860a:5400:6ff:fe00:1",
+      "v6_network_size": 64,
+      "label": "orq-0a1b2c3d4e5f",
+      "internal_ip": "",
+      "vpcs": [],
+      "kvm": "https://console.vultr.com/subs/vps/novnc/api.php?data=REDACTED",
+      "hostname": "orq-0a1b2c3d4e5f",
+      "tag": "orquester-box",
+      "tags": [
+        "orquester-box",
+        "orquester-box=0a1b2c3d4e5f"
+      ],
+      "os_id": 2284,
+      "app_id": 0,
+      "image_id": "",
+      "snapshot_id": "",
+      "firewall_group_id": "",
+      "vpc_only": false,
+      "enable_memorybacking": "shared",
+      "features": [
+        "ipv6"
+      ],
+      "user_scheme": "root",
+      "boot_method": "local",
+      "vke_cluster_id": ""
+    }
+  ],
+  "meta": {
+    "total": 1,
+    "links": {
+      "next": "",
+      "prev": ""
+    }
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "error": {
+    "code": "SERVER_STATE_ILLEGAL",
+    "message": "The server is in a state in which it cannot be used"
+  }
+}

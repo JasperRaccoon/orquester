@@ -1,0 +1,44 @@
+[
+  {
+    "id": "22222222-2222-4222-8222-222222222201",
+    "name": "orq-0a1b2c3d4e5f",
+    "region": "GRA11",
+    "status": "ACTIVE",
+    "created": "2026-10-19T23:00:37Z",
+    "flavorId": "33333333-3333-4333-8333-333333333304",
+    "imageId": "44444444-4444-4444-8444-444444444401",
+    "sshKeyId": "b3JxLTBhMWIyYzNkNGU1Zg==",
+    "planCode": "b3-8.consumption",
+    "monthlyBilling": null,
+    "ipAddresses": [{ "ip": "203.0.113.20", "type": "public", "version": 4, "networkId": "55555555-5555-4555-8555-555555555501", "gatewayIp": "203.0.113.1" }],
+    "operationIds": []
+  },
+  {
+    "id": "22222222-2222-4222-8222-222222222202",
+    "name": "orq-ffeeddccbbaa",
+    "region": "GRA11",
+    "status": "BUILD",
+    "created": "2026-10-19T21:12:00Z",
+    "flavorId": "33333333-3333-4333-8333-333333333308",
+    "imageId": "44444444-4444-4444-8444-444444444502",
+    "sshKeyId": null,
+    "planCode": "b3-8.consumption",
+    "monthlyBilling": null,
+    "ipAddresses": [],
+    "operationIds": []
+  },
+  {
+    "id": "22222222-2222-4222-8222-222222222203",
+    "name": "web-frontend-1",
+    "region": "SBG5",
+    "status": "ACTIVE",
+    "created": "2026-08-02T09:30:00Z",
+    "flavorId": "33333333-3333-4333-8333-333333333399",
+    "imageId": "44444444-4444-4444-8444-444444444499",
+    "sshKeyId": "dXNlci1rZXk=",
+    "planCode": "b2-7.monthly.postpaid",
+    "monthlyBilling": { "since": "2026-08-02T09:30:00Z", "status": "ok" },
+    "ipAddresses": [{ "ip": "203.0.113.40", "type": "public", "version": 4, "networkId": "55555555-5555-4555-8555-555555555503", "gatewayIp": "203.0.113.1" }],
+    "operationIds": []
+  }
+]

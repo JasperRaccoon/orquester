@@ -1,0 +1,20 @@
+{
+  "ssh_keys": [
+    {
+      "id": 500000009,
+      "fingerprint": "aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99",
+      "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOwnerKeyRedacted owner",
+      "name": "owner-laptop"
+    },
+    {
+      "id": 500000002,
+      "fingerprint": "3b:16:bf:e4:8b:00:8b:b8:59:8c:a9:d3:f0:19:45:fb",
+      "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOrqTestKeyOnlyForFixtures orq-box",
+      "name": "orq-ffeeddccbbaa"
+    }
+  ],
+  "links": {},
+  "meta": {
+    "total": 2
+  }
+}

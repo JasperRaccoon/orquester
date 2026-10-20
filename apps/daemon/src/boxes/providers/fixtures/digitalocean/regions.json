@@ -1,0 +1,156 @@
+{
+  "regions": [
+    {
+      "slug": "nyc1",
+      "name": "New York 1",
+      "features": [
+        "backups",
+        "ipv6",
+        "metadata",
+        "install_agent",
+        "storage",
+        "image_transfer"
+      ],
+      "available": true,
+      "sizes": [
+        "s-1vcpu-1gb",
+        "s-2vcpu-4gb"
+      ]
+    },
+    {
+      "slug": "nyc2",
+      "name": "New York 2",
+      "features": [
+        "backups",
+        "ipv6",
+        "metadata",
+        "install_agent"
+      ],
+      "available": true,
+      "sizes": [
+        "gpu-h100x1-80gb",
+        "gpu-h100x8-640gb"
+      ]
+    },
+    {
+      "slug": "nyc3",
+      "name": "New York 3",
+      "features": [
+        "backups",
+        "ipv6",
+        "metadata",
+        "install_agent",
+        "storage",
+        "image_transfer"
+      ],
+      "available": true,
+      "sizes": [
+        "s-1vcpu-1gb",
+        "s-2vcpu-4gb",
+        "g-2vcpu-8gb"
+      ]
+    },
+    {
+      "slug": "ams3",
+      "name": "Amsterdam 3",
+      "features": [
+        "backups",
+        "ipv6",
+        "metadata",
+        "install_agent",
+        "storage",
+        "image_transfer"
+      ],
+      "available": true,
+      "sizes": [
+        "s-1vcpu-1gb",
+        "s-2vcpu-4gb"
+      ]
+    },
+    {
+      "slug": "fra1",
+      "name": "Frankfurt 1",
+      "features": [
+        "backups",
+        "ipv6",
+        "metadata",
+        "install_agent",
+        "storage",
+        "image_transfer"
+      ],
+      "available": true,
+      "sizes": [
+        "s-1vcpu-1gb",
+        "s-2vcpu-4gb",
+        "g-2vcpu-8gb"
+      ]
+    },
+    {
+      "slug": "sgp1",
+      "name": "Singapore 1",
+      "features": [
+        "backups",
+        "ipv6",
+        "metadata",
+        "install_agent",
+        "storage",
+        "image_transfer"
+      ],
+      "available": false,
+      "sizes": []
+    },
+    {
+      "slug": "tor1",
+      "name": "Toronto 1",
+      "features": [
+        "backups",
+        "ipv6",
+        "metadata",
+        "install_agent",
+        "storage",
+        "image_transfer"
+      ],
+      "available": true,
+      "sizes": [
+        "gpu-h100x1-80gb",
+        "gpu-h100x8-640gb",
+        "gpu-4000adax1-20gb"
+      ]
+    },
+    {
+      "slug": "atl1",
+      "name": "Atlanta 1",
+      "features": [
+        "backups",
+        "ipv6",
+        "metadata",
+        "install_agent",
+        "storage"
+      ],
+      "available": true,
+      "sizes": [
+        "gpu-mi300x1-192gb"
+      ]
+    },
+    {
+      "slug": "sfo3",
+      "name": "San Francisco 3",
+      "features": [
+        "backups",
+        "ipv6",
+        "metadata",
+        "install_agent",
+        "storage",
+        "image_transfer"
+      ],
+      "available": true,
+      "sizes": [
+        "gpu-4000adax1-20gb"
+      ]
+    }
+  ],
+  "links": {},
+  "meta": {
+    "total": 9
+  }
+}

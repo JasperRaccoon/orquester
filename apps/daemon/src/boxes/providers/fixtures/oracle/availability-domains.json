@@ -1,0 +1,17 @@
+[
+  {
+    "compartmentId": "ocid1.tenancy.oc1..aaaaaaaa11111111111111111111111111111111111111111111111111aa",
+    "id": "ocid1.availabilitydomain.oc1..aaaaaaaa1111111111111111111111111111111111111111111111111111",
+    "name": "Uocm:EU-FRANKFURT-1-AD-1"
+  },
+  {
+    "compartmentId": "ocid1.tenancy.oc1..aaaaaaaa11111111111111111111111111111111111111111111111111aa",
+    "id": "ocid1.availabilitydomain.oc1..aaaaaaaa2222222222222222222222222222222222222222222222222222",
+    "name": "Uocm:EU-FRANKFURT-1-AD-2"
+  },
+  {
+    "compartmentId": "ocid1.tenancy.oc1..aaaaaaaa11111111111111111111111111111111111111111111111111aa",
+    "id": "ocid1.availabilitydomain.oc1..aaaaaaaa3333333333333333333333333333333333333333333333333333",
+    "name": "Uocm:EU-FRANKFURT-1-AD-3"
+  }
+]

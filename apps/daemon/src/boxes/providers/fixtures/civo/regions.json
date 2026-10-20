@@ -1,0 +1,102 @@
+[
+  {
+    "code": "LON1",
+    "name": "London 1",
+    "type": "civostack",
+    "out_of_capacity": false,
+    "country": "uk",
+    "country_name": "United Kingdom",
+    "features": {
+      "iaas": true,
+      "kubernetes": true,
+      "object_store": true,
+      "loadbalancer": true,
+      "dbaas": true,
+      "volume": true,
+      "paas": false,
+      "kfaas": false,
+      "public_ip_node_pools": true
+    },
+    "default": false
+  },
+  {
+    "code": "FRA1",
+    "name": "Frankfurt 1",
+    "type": "civostack",
+    "out_of_capacity": false,
+    "country": "de",
+    "country_name": "Germany",
+    "features": {
+      "iaas": true,
+      "kubernetes": true,
+      "object_store": true,
+      "loadbalancer": true,
+      "dbaas": true,
+      "volume": true,
+      "paas": false,
+      "kfaas": false,
+      "public_ip_node_pools": true
+    },
+    "default": true
+  },
+  {
+    "code": "NYC1",
+    "name": "New York 1",
+    "type": "civostack",
+    "out_of_capacity": true,
+    "country": "us",
+    "country_name": "United States",
+    "features": {
+      "iaas": true,
+      "kubernetes": true,
+      "object_store": true,
+      "loadbalancer": true,
+      "dbaas": true,
+      "volume": true,
+      "paas": false,
+      "kfaas": false,
+      "public_ip_node_pools": true
+    },
+    "default": false
+  },
+  {
+    "code": "PHX1",
+    "name": "Phoenix 1",
+    "type": "civostack",
+    "out_of_capacity": false,
+    "country": "us",
+    "country_name": "United States",
+    "features": {
+      "iaas": true,
+      "kubernetes": true,
+      "object_store": true,
+      "loadbalancer": true,
+      "dbaas": true,
+      "volume": true,
+      "paas": false,
+      "kfaas": false,
+      "public_ip_node_pools": true
+    },
+    "default": false
+  },
+  {
+    "code": "MUM1",
+    "name": "Mumbai 1",
+    "type": "civostack",
+    "out_of_capacity": false,
+    "country": "in",
+    "country_name": "India",
+    "features": {
+      "iaas": false,
+      "kubernetes": true,
+      "object_store": true,
+      "loadbalancer": true,
+      "dbaas": true,
+      "volume": true,
+      "paas": false,
+      "kfaas": false,
+      "public_ip_node_pools": true
+    },
+    "default": false
+  }
+]

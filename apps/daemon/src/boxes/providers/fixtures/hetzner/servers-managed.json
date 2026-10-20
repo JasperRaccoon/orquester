@@ -1,0 +1,306 @@
+{
+  "servers": [
+    {
+      "id": 100000001,
+      "name": "orq-0a1b2c3d4e5f",
+      "status": "running",
+      "server_type": {
+        "id": 114,
+        "name": "cx23",
+        "architecture": "x86",
+        "cores": 2,
+        "cpu_type": "shared",
+        "category": "cost_optimized",
+        "deprecated": false,
+        "deprecation": null,
+        "description": "CX 23",
+        "disk": 40,
+        "memory": 4,
+        "prices": [
+          {
+            "location": "fsn1",
+            "price_hourly": {
+              "gross": "0.0088000000000000",
+              "net": "0.0088000000"
+            },
+            "price_monthly": {
+              "gross": "5.4900000000000000",
+              "net": "5.4900000000"
+            }
+          },
+          {
+            "location": "hel1",
+            "price_hourly": {
+              "gross": "0.0088000000000000",
+              "net": "0.0088000000"
+            },
+            "price_monthly": {
+              "gross": "5.4900000000000000",
+              "net": "5.4900000000"
+            }
+          },
+          {
+            "location": "nbg1",
+            "price_hourly": {
+              "gross": "0.0088000000000000",
+              "net": "0.0088000000"
+            },
+            "price_monthly": {
+              "gross": "5.4900000000000000",
+              "net": "5.4900000000"
+            }
+          }
+        ],
+        "storage_type": "local",
+        "locations": [
+          {
+            "id": 1,
+            "name": "fsn1",
+            "available": true,
+            "recommended": false,
+            "deprecation": null
+          },
+          {
+            "id": 2,
+            "name": "nbg1",
+            "available": false,
+            "recommended": false,
+            "deprecation": null
+          },
+          {
+            "id": 3,
+            "name": "hel1",
+            "available": true,
+            "recommended": true,
+            "deprecation": null
+          }
+        ]
+      },
+      "location": {
+        "id": 1,
+        "name": "fsn1",
+        "description": "Falkenstein DC Park 1",
+        "city": "Falkenstein",
+        "country": "DE",
+        "latitude": 50.47612,
+        "longitude": 12.370071,
+        "network_zone": "eu-central"
+      },
+      "image": {
+        "id": 161547269,
+        "type": "system",
+        "name": "ubuntu-24.04",
+        "architecture": "x86",
+        "bound_to": null,
+        "created_from": null,
+        "deprecated": null,
+        "deprecation": null,
+        "description": "Ubuntu 24.04",
+        "disk_size": 5,
+        "image_size": null,
+        "labels": {},
+        "os_flavor": "ubuntu",
+        "os_version": "24.04",
+        "protection": {
+          "delete": false
+        },
+        "rapid_deploy": true,
+        "status": "available",
+        "created": "2024-04-25T13:26:27Z",
+        "deleted": null
+      },
+      "iso": null,
+      "primary_disk_size": 40,
+      "labels": {
+        "orquester-box": "0a1b2c3d4e5f"
+      },
+      "protection": {
+        "delete": false,
+        "rebuild": false
+      },
+      "backup_window": null,
+      "rescue_enabled": false,
+      "locked": false,
+      "placement_group": null,
+      "public_net": {
+        "firewalls": [],
+        "floating_ips": [],
+        "ipv4": {
+          "id": 200000001,
+          "ip": "203.0.113.10",
+          "blocked": false,
+          "dns_ptr": "static.10.113.0.203.clients.your-server.de"
+        },
+        "ipv6": {
+          "id": 200000002,
+          "ip": "2001:db8:1:2::/64",
+          "blocked": false,
+          "dns_ptr": []
+        }
+      },
+      "private_net": [],
+      "load_balancers": [],
+      "volumes": [],
+      "included_traffic": 21990232555520,
+      "ingoing_traffic": 0,
+      "outgoing_traffic": 0,
+      "created": "2026-10-19T23:00:37Z"
+    },
+    {
+      "id": 100000002,
+      "name": "orq-ffeeddccbbaa",
+      "status": "initializing",
+      "server_type": {
+        "id": 114,
+        "name": "cx23",
+        "architecture": "x86",
+        "cores": 2,
+        "cpu_type": "shared",
+        "category": "cost_optimized",
+        "deprecated": false,
+        "deprecation": null,
+        "description": "CX 23",
+        "disk": 40,
+        "memory": 4,
+        "prices": [
+          {
+            "location": "fsn1",
+            "price_hourly": {
+              "gross": "0.0088000000000000",
+              "net": "0.0088000000"
+            },
+            "price_monthly": {
+              "gross": "5.4900000000000000",
+              "net": "5.4900000000"
+            }
+          },
+          {
+            "location": "hel1",
+            "price_hourly": {
+              "gross": "0.0088000000000000",
+              "net": "0.0088000000"
+            },
+            "price_monthly": {
+              "gross": "5.4900000000000000",
+              "net": "5.4900000000"
+            }
+          },
+          {
+            "location": "nbg1",
+            "price_hourly": {
+              "gross": "0.0088000000000000",
+              "net": "0.0088000000"
+            },
+            "price_monthly": {
+              "gross": "5.4900000000000000",
+              "net": "5.4900000000"
+            }
+          }
+        ],
+        "storage_type": "local",
+        "locations": [
+          {
+            "id": 1,
+            "name": "fsn1",
+            "available": true,
+            "recommended": false,
+            "deprecation": null
+          },
+          {
+            "id": 2,
+            "name": "nbg1",
+            "available": false,
+            "recommended": false,
+            "deprecation": null
+          },
+          {
+            "id": 3,
+            "name": "hel1",
+            "available": true,
+            "recommended": true,
+            "deprecation": null
+          }
+        ]
+      },
+      "location": {
+        "id": 3,
+        "name": "hel1",
+        "description": "Helsinki DC Park 1",
+        "city": "Helsinki",
+        "country": "FI",
+        "latitude": 60.169855,
+        "longitude": 24.938379,
+        "network_zone": "eu-central"
+      },
+      "image": {
+        "id": 161547269,
+        "type": "system",
+        "name": "ubuntu-24.04",
+        "architecture": "x86",
+        "bound_to": null,
+        "created_from": null,
+        "deprecated": null,
+        "deprecation": null,
+        "description": "Ubuntu 24.04",
+        "disk_size": 5,
+        "image_size": null,
+        "labels": {},
+        "os_flavor": "ubuntu",
+        "os_version": "24.04",
+        "protection": {
+          "delete": false
+        },
+        "rapid_deploy": true,
+        "status": "available",
+        "created": "2024-04-25T13:26:27Z",
+        "deleted": null
+      },
+      "iso": null,
+      "primary_disk_size": 40,
+      "labels": {
+        "orquester-box": "ffeeddccbbaa"
+      },
+      "protection": {
+        "delete": false,
+        "rebuild": false
+      },
+      "backup_window": null,
+      "rescue_enabled": false,
+      "locked": false,
+      "placement_group": null,
+      "public_net": {
+        "firewalls": [],
+        "floating_ips": [],
+        "ipv4": {
+          "id": 200000003,
+          "ip": "203.0.113.11",
+          "blocked": false,
+          "dns_ptr": "static.11.113.0.203.clients.your-server.de"
+        },
+        "ipv6": {
+          "id": 200000004,
+          "ip": "2001:db8:1:3::/64",
+          "blocked": false,
+          "dns_ptr": []
+        }
+      },
+      "private_net": [],
+      "load_balancers": [],
+      "volumes": [],
+      "included_traffic": 21990232555520,
+      "ingoing_traffic": 0,
+      "outgoing_traffic": 0,
+      "created": "2026-10-19T21:12:00Z"
+    }
+  ],
+  "meta": {
+    "pagination": {
+      "last_page": 1,
+      "next_page": null,
+      "page": 1,
+      "per_page": 50,
+      "previous_page": null,
+      "total_entries": 2
+    }
+  }
+}

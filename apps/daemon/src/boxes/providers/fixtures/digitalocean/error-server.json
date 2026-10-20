@@ -1,0 +1,5 @@
+{
+  "id": "server_error",
+  "message": "Unexpected server-side error",
+  "request_id": "11111111-2222-4333-8444-555555555555"
+}

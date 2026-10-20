@@ -1,0 +1,11 @@
+{
+  "message": "Quotas exceeded for this resource",
+  "type": "quotas_exceeded",
+  "details": [
+    {
+      "resource": "instances_pop2_2c_8g",
+      "quota": 0,
+      "current": 0
+    }
+  ]
+}

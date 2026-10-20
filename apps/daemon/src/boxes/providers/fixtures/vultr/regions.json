@@ -1,0 +1,94 @@
+{
+  "regions": [
+    {
+      "id": "ams",
+      "city": "Amsterdam",
+      "country": "NL",
+      "continent": "Europe",
+      "options": [
+        "ddos_protection",
+        "block_storage_storage_opt",
+        "block_storage_high_perf",
+        "load_balancers",
+        "kubernetes"
+      ],
+      "connectivity": [
+        "public_ip",
+        "nat_gateway"
+      ]
+    },
+    {
+      "id": "ewr",
+      "city": "New Jersey",
+      "country": "US",
+      "continent": "North America",
+      "options": [
+        "ddos_protection",
+        "block_storage_high_perf",
+        "block_storage_storage_opt",
+        "load_balancers",
+        "kubernetes"
+      ],
+      "connectivity": [
+        "public_ip",
+        "nat_gateway"
+      ]
+    },
+    {
+      "id": "fra",
+      "city": "Frankfurt",
+      "country": "DE",
+      "continent": "Europe",
+      "options": [
+        "ddos_protection",
+        "block_storage_storage_opt",
+        "load_balancers",
+        "kubernetes"
+      ],
+      "connectivity": [
+        "public_ip",
+        "nat_gateway"
+      ]
+    },
+    {
+      "id": "hnl",
+      "city": "Honolulu",
+      "country": "US",
+      "continent": "North America",
+      "options": [
+        "ddos_protection",
+        "block_storage_storage_opt",
+        "load_balancers",
+        "kubernetes"
+      ],
+      "connectivity": [
+        "public_ip",
+        "nat_gateway"
+      ]
+    },
+    {
+      "id": "nrt",
+      "city": "Tokyo",
+      "country": "JP",
+      "continent": "Asia",
+      "options": [
+        "ddos_protection",
+        "block_storage_high_perf",
+        "block_storage_storage_opt",
+        "load_balancers",
+        "kubernetes"
+      ],
+      "connectivity": [
+        "public_ip",
+        "nat_gateway"
+      ]
+    }
+  ],
+  "meta": {
+    "total": 5,
+    "links": {
+      "next": "",
+      "prev": ""
+    }
+  }
+}

@@ -1,0 +1,139 @@
+{
+  "instance-types": [
+    {
+      "family": "standard",
+      "authorized": true,
+      "memory": 536870912,
+      "size": "micro",
+      "id": "71004023-bb72-4a97-b1e9-bc66dfce9470",
+      "zones": [
+        "ch-dk-2",
+        "de-fra-1",
+        "ch-gva-2",
+        "at-vie-1"
+      ],
+      "cpus": 1
+    },
+    {
+      "family": "standard",
+      "authorized": true,
+      "memory": 1073741824,
+      "size": "tiny",
+      "id": "b6cd1ff5-3a2f-4e9d-a4d1-8988c1191fe8",
+      "zones": [
+        "ch-dk-2",
+        "de-fra-1",
+        "ch-gva-2",
+        "at-vie-1"
+      ],
+      "cpus": 1
+    },
+    {
+      "family": "standard",
+      "authorized": true,
+      "memory": 2147483648,
+      "size": "small",
+      "id": "21624abb-764e-4def-81d7-9fc54b5957fb",
+      "zones": [
+        "ch-dk-2",
+        "de-fra-1",
+        "ch-gva-2",
+        "at-vie-1"
+      ],
+      "cpus": 2
+    },
+    {
+      "family": "standard",
+      "authorized": true,
+      "memory": 4294967296,
+      "size": "medium",
+      "id": "b6e9d1e8-89fc-4db3-aaa4-9b4c5b1d0844",
+      "zones": [
+        "ch-dk-2",
+        "de-fra-1",
+        "ch-gva-2",
+        "at-vie-1"
+      ],
+      "cpus": 2
+    },
+    {
+      "family": "standard",
+      "authorized": true,
+      "memory": 8589934592,
+      "size": "large",
+      "id": "c6f99499-7f59-4138-9427-a09db13af2bc",
+      "zones": [
+        "ch-dk-2",
+        "de-fra-1",
+        "ch-gva-2",
+        "at-vie-1"
+      ],
+      "cpus": 4
+    },
+    {
+      "family": "standard",
+      "authorized": false,
+      "memory": 68719476736,
+      "size": "mega",
+      "id": "c0d3fb5d-6fdb-4a63-9361-3e5cfa8b36d0",
+      "zones": [
+        "ch-dk-2",
+        "de-fra-1",
+        "ch-gva-2",
+        "at-vie-1"
+      ],
+      "cpus": 12
+    },
+    {
+      "family": "storage",
+      "authorized": true,
+      "memory": 17179869184,
+      "size": "extra-large",
+      "id": "f17df7cf-aced-4314-8709-4a0041408fdf",
+      "zones": [
+        "ch-dk-2",
+        "de-fra-1",
+        "ch-gva-2",
+        "at-vie-1"
+      ],
+      "cpus": 4
+    },
+    {
+      "family": "gpu2",
+      "authorized": false,
+      "memory": 60129542144,
+      "gpus": 1,
+      "size": "small",
+      "id": "d141049f-71a3-4b1a-9016-3df0ac9a8cc9",
+      "zones": [
+        "at-vie-1"
+      ],
+      "cpus": 12
+    },
+    {
+      "family": "cpu",
+      "authorized": true,
+      "memory": 17179869184,
+      "size": "extra-large",
+      "id": "221d39c3-b2b9-4014-b32b-5d262f684eff",
+      "zones": [
+        "ch-dk-2",
+        "de-fra-1",
+        "ch-gva-2",
+        "at-vie-1"
+      ],
+      "cpus": 8
+    },
+    {
+      "family": "memory",
+      "authorized": true,
+      "memory": 17179869184,
+      "size": "extra-large",
+      "id": "dd6abc94-337f-4732-baff-ed745f8bd4f5",
+      "zones": [
+        "de-fra-1"
+      ],
+      "cpus": 2
+    }
+  ]
+}

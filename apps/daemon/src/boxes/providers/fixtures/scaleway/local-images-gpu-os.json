@@ -1,0 +1,17 @@
+{
+  "local_images": [
+    {
+      "id": "e6d1b7f4-8954-4a29-bd69-a15976398041",
+      "arch": "x86_64",
+      "zone": "fr-par-2",
+      "compatible_commercial_types": [
+        "L4-1-24G",
+        "L40S-1-48G",
+        "H100-1-80G"
+      ],
+      "label": "ubuntu_noble_gpu_os_13_nvidia",
+      "type": "instance_sbs"
+    }
+  ],
+  "total_count": 1
+}

@@ -1,0 +1,27 @@
+{
+  "data": [
+    {
+      "region": "us-east",
+      "plan": "g1-gpu-rtx6000-1",
+      "available": true
+    },
+    {
+      "region": "us-ord",
+      "plan": "g2-gpu-rtx4000a1-s",
+      "available": false
+    },
+    {
+      "region": "eu-central",
+      "plan": "g2-gpu-rtx4000a1-s",
+      "available": true
+    },
+    {
+      "region": "us-ord",
+      "plan": "g7-premium-2",
+      "available": true
+    }
+  ],
+  "page": 1,
+  "pages": 1,
+  "results": 4
+}

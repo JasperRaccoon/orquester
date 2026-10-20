@@ -1,0 +1,58 @@
+[
+  {
+    "id": "ocid1.image.oc1.eu-frankfurt-1.aaaaaaaa8888888888888888888888888888888888888888888888888888",
+    "compartmentId": null,
+    "displayName": "Windows-Server-2025-Standard-Edition-VM-2026.10.08-0",
+    "operatingSystem": "Windows",
+    "operatingSystemVersion": "Server 2025 Standard",
+    "lifecycleState": "AVAILABLE",
+    "timeCreated": "2026-10-09T10:00:00.000Z",
+    "launchMode": "PARAVIRTUALIZED",
+    "sizeInMBs": 47694,
+    "billableSizeInGBs": 3,
+    "createImageAllowed": true,
+    "listingType": "NATIVE"
+  },
+  {
+    "id": "ocid1.image.oc1.eu-frankfurt-1.aaaaaaaa9999999999999999999999999999999999999999999999999999",
+    "compartmentId": null,
+    "displayName": "Windows-Server-2022-Standard-Edition-VM-2026.10.08-0",
+    "operatingSystem": "Windows",
+    "operatingSystemVersion": "Server 2022 Standard",
+    "lifecycleState": "AVAILABLE",
+    "timeCreated": "2026-10-09T09:00:00.000Z",
+    "launchMode": "PARAVIRTUALIZED",
+    "sizeInMBs": 47694,
+    "billableSizeInGBs": 3,
+    "createImageAllowed": true,
+    "listingType": "NATIVE"
+  },
+  {
+    "id": "ocid1.image.oc1.eu-frankfurt-1.aaaaaaaa1010101010101010101010101010101010101010101010101010",
+    "compartmentId": null,
+    "displayName": "Windows-Server-2019-Standard-Edition-VM-2026.10.08-0",
+    "operatingSystem": "Windows",
+    "operatingSystemVersion": "Server 2019 Standard",
+    "lifecycleState": "AVAILABLE",
+    "timeCreated": "2026-10-09T08:00:00.000Z",
+    "launchMode": "PARAVIRTUALIZED",
+    "sizeInMBs": 47694,
+    "billableSizeInGBs": 3,
+    "createImageAllowed": true,
+    "listingType": "NATIVE"
+  },
+  {
+    "id": "ocid1.image.oc1.eu-frankfurt-1.aaaaaaaa1111111111111111111111111111111111111111111111111111",
+    "compartmentId": null,
+    "displayName": "Windows-Server-2016-Standard-Edition-VM-2026.10.08-0",
+    "operatingSystem": "Windows",
+    "operatingSystemVersion": "Server 2016 Standard",
+    "lifecycleState": "AVAILABLE",
+    "timeCreated": "2026-10-09T07:00:00.000Z",
+    "launchMode": "PARAVIRTUALIZED",
+    "sizeInMBs": 47694,
+    "billableSizeInGBs": 3,
+    "createImageAllowed": true,
+    "listingType": "NATIVE"
+  }
+]

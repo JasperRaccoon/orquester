@@ -1,0 +1,1 @@
+{ "class": "Client::BadRequest", "message": "Quota exceeded for instances in region GRA11" }

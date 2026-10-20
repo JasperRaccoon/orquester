@@ -1,0 +1,56 @@
+{
+  "servers": [
+    {
+      "id": "11111111-1111-4111-8111-111111111112",
+      "name": "orq-ffeeddccbbaa",
+      "arch": "x86_64",
+      "commercial_type": "POP2-2C-8G",
+      "boot_type": "local",
+      "organization": "22222222-2222-4222-8222-222222222222",
+      "project": "33333333-3333-4333-8333-333333333333",
+      "hostname": "orq-ffeeddccbbaa",
+      "image": {
+        "id": "a4a3ce62-effa-4293-bf89-2a5c2ceb9d71",
+        "name": "Ubuntu 24.04 Noble Numbat",
+        "arch": "x86_64",
+        "zone": "nl-ams-1"
+      },
+      "volumes": {
+        "0": {
+          "boot": false,
+          "id": "44444444-4444-4444-8444-444444444445",
+          "volume_type": "sbs_volume",
+          "state": "available",
+          "zone": "nl-ams-1"
+        }
+      },
+      "tags": [
+        "orquester-box"
+      ],
+      "state": "starting",
+      "protected": false,
+      "state_detail": "booting kernel",
+      "public_ip": null,
+      "public_ips": [],
+      "mac_address": "de:00:00:00:00:01",
+      "routed_ip_enabled": true,
+      "ipv6": null,
+      "dynamic_ip_required": true,
+      "creation_date": "2026-10-19T21:12:00.000000+00:00",
+      "modification_date": "2026-10-19T21:12:00.000000+00:00",
+      "zone": "nl-ams-1",
+      "allowed_actions": [
+        "poweroff",
+        "terminate"
+      ],
+      "private_nics": [],
+      "maintenances": [],
+      "placement_group": null,
+      "security_group": {
+        "id": "55555555-5555-4555-8555-555555555555",
+        "name": "Default security group"
+      },
+      "end_of_service": false
+    }
+  ]
+}

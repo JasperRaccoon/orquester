@@ -1,0 +1,62 @@
+[
+  {
+    "id": "11111111-1111-4111-8111-000000000001",
+    "name": "ubuntu-noble",
+    "version": "24.04",
+    "state": "available",
+    "initial_user": "civo",
+    "distribution": "ubuntu",
+    "os": "linux",
+    "description": "",
+    "label": "",
+    "distribution_default": true
+  },
+  {
+    "id": "11111111-1111-4111-8111-000000000002",
+    "name": "ubuntu-jammy",
+    "version": "22.04",
+    "state": "available",
+    "initial_user": "civo",
+    "distribution": "ubuntu",
+    "os": "linux",
+    "description": "",
+    "label": "",
+    "distribution_default": false
+  },
+  {
+    "id": "11111111-1111-4111-8111-000000000003",
+    "name": "debian-12",
+    "version": "12",
+    "state": "available",
+    "initial_user": "civo",
+    "distribution": "debian",
+    "os": "linux",
+    "description": "",
+    "label": "",
+    "distribution_default": true
+  },
+  {
+    "id": "11111111-1111-4111-8111-000000000004",
+    "name": "rocky-9-1",
+    "version": "9.1",
+    "state": "available",
+    "initial_user": "civo",
+    "distribution": "rocky",
+    "os": "linux",
+    "description": "",
+    "label": "",
+    "distribution_default": true
+  },
+  {
+    "id": "11111111-1111-4111-8111-000000000005",
+    "name": "ubuntu-focal",
+    "version": "20.04",
+    "state": "deprecated",
+    "initial_user": "civo",
+    "distribution": "ubuntu",
+    "os": "linux",
+    "description": "",
+    "label": "",
+    "distribution_default": false
+  }
+]

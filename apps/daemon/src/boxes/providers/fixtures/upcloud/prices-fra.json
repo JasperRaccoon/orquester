@@ -1,0 +1,70 @@
+{
+  "prices": {
+    "currency": "EUR",
+    "zone": [
+      {
+        "name": "de-fra1",
+        "firewall": {
+          "amount": 1,
+          "price": 0.5
+        },
+        "ipv4_address": {
+          "amount": 1,
+          "price": 0.3
+        },
+        "ipv6_address": {
+          "amount": 1,
+          "price": 0
+        },
+        "public_ipv4_bandwidth_out": {
+          "amount": 1,
+          "price": 5
+        },
+        "storage_backup": {
+          "amount": 1,
+          "price": 0.007
+        },
+        "storage_hdd": {
+          "amount": 1,
+          "price": 0.013
+        },
+        "storage_maxiops": {
+          "amount": 1,
+          "price": 0.028
+        },
+        "storage_standard": {
+          "amount": 1,
+          "price": 0.0089
+        },
+        "server_plan_1xCPU-1GB": {
+          "amount": 1,
+          "price": 0.744
+        },
+        "server_plan_2xCPU-4GB": {
+          "amount": 1,
+          "price": 2.9762
+        },
+        "server_plan_DEV-1xCPU-2GB": {
+          "amount": 1,
+          "price": 0.5208
+        },
+        "server_plan_STARTER-1xCPU-0.5GB": {
+          "amount": 1,
+          "price": 0.4464
+        },
+        "server_plan_CLOUDNATIVE-2xCPU-8GB": {
+          "amount": 1,
+          "price": 2.0833
+        },
+        "server_plan_4xCPU-8GB-LEGACY": {
+          "amount": 1,
+          "price": 5.9524
+        },
+        "server_plan_GPU-8xCPU-64GB-1xL40S": {
+          "amount": 1,
+          "price": 150
+        }
+      }
+    ]
+  }
+}

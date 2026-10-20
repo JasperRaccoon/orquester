@@ -1,0 +1,4 @@
+{
+  "code": "NotAuthorizedOrNotFound",
+  "message": "Authorization failed or requested resource not found."
+}
