@@ -17,7 +17,9 @@
  *    asks for at most {@link BOX_MAX_MIN_VALID_SECONDS} (`register.ts`).
  * 3. Otherwise, when no HOST-LOCAL session holds the account, refresh through
  *    `AgentAccountsService.refreshNow` (its per-account dedupe and `invalid_grant` → `needsReauth`)
- *    and return the new token. Concurrent requests for one account share one refresh.
+ *    and return the new token. Concurrent requests for one account share one refresh. A refresh
+ *    that cannot happen (no refresh token, the sign-in service unreachable) returns the current
+ *    token while it has over 5 minutes left and is not the rejected one, instead of a refusal.
  * 4. When a host-local session holds it, that CLI is the refresher. Claude CLIs adopt a credential
  *    file another process rewrote, and re-read it (twice, the second time under their refresh
  *    lock) before spending their own refresh token, so the daemon refreshes directly — but only
@@ -311,6 +313,11 @@ export function createAgentTokenBroker(deps: AgentTokenBrokerDeps): AgentTokenBr
         throw error;
       }
       const path = credentialPath(home, agent);
+      /** The fallback when no renewal can happen: a token the provider has not refused, with some life left. */
+      const stillUsable = (grant: AgentTokenGrant | null): grant is AgentTokenGrant =>
+        grant !== null &&
+        grant.accessToken !== request.rejectedAccessToken &&
+        (grant.expiresAt === null || grant.expiresAt - now() > COOLDOWN_MIN_LIFE_MS);
 
       // Subscribed before the first read, so a rewrite or a session ending between a read and the
       // wait still wakes it.
@@ -344,6 +351,10 @@ export function createAgentTokenBroker(deps: AgentTokenBrokerDeps): AgentTokenBr
             if (outcome === "invalid-grant") {
               throw new AgentTokenError(409, "TOKEN_NEEDS_REAUTH", "This account's login has expired. Sign in to it again in Settings → Agent accounts.");
             }
+            // No renewal now (no refresh token, or the sign-in service is unreachable): a token
+            // that still works beats a refusal — the box runs until it really runs out, as a host
+            // CLI with the same file would. A rejected one never comes back this way.
+            if ((outcome === "unavailable" || outcome === "failed") && stillUsable(grant)) return grant;
             if (outcome === "unavailable") {
               throw new AgentTokenError(503, "TOKEN_UNAVAILABLE", "This account has no login Orquester can renew. Sign in to it again in Settings → Agent accounts.");
             }
