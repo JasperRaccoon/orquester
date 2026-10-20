@@ -57,7 +57,7 @@ import { markClaudeProjectTrusted } from "./home-prep.ts";
 import { parseSessionOwner } from "./owner.ts";
 import type { FastifyReply } from "fastify";
 import type { AgentChatRouteDeps } from "./proxy-routes.ts";
-import type { HtmlRenderReference, Skill, SlashCommand } from "@orquester/api/agent-chat";
+import type { HtmlRenderReference, Skill, SlashCommand, ThreadUsageLimitNotice } from "@orquester/api/agent-chat";
 import { publishHtmlRender, type PublishHtmlRenderInput } from "./html-render-publish.ts";
 import { HtmlPreviewError, measureHtmlPage, previewHtmlPage, type HtmlPageRenderer, type HtmlPreview, type HtmlPreviewInput } from "../html-preview/index.ts";
 import { createVisualUrlSigner, type VisualUrlSigner } from "./visual-urls.ts";
@@ -439,11 +439,19 @@ export class AgentChatService {
       // subagent fleet or watch loop finishing, which the drain also waits on.
       onTurnSettled: () => this.supervisor.handleTurnSettled(),
       onBackgroundWorkEnded: () => this.supervisor.handleTurnSettled(),
-      onUsageLimits: (reading) => this.usageLimitsListener(reading)
+      onUsageLimits: (reading) => this.usageLimitsListener(reading),
+      onUsageLimitNotice: (threadId, notice) => this.usageLimitNoticeListener(threadId, notice)
     });
   }
 
   private usageLimitsListener: (reading: ThreadUsageReading) => void = () => undefined;
+
+  private usageLimitNoticeListener: (threadId: string, notice: ThreadUsageLimitNotice | null) => void = () => undefined;
+
+  /** Where each thread's current usage limit goes (`index.ts`: the usage-limit recovery). */
+  setUsageLimitNoticeListener(listener: (threadId: string, notice: ThreadUsageLimitNotice | null) => void): void {
+    this.usageLimitNoticeListener = listener;
+  }
 
   /** Where each thread's live account-usage reading goes (`index.ts`: the usage service). */
   setUsageLimitsListener(listener: (reading: ThreadUsageReading) => void): void {

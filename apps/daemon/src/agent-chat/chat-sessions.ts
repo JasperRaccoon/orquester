@@ -13,12 +13,14 @@
 import { EventEmitter } from "node:events";
 import type {
   AgentChatSessionSummaryFields,
+  ChatLimitFailover,
+  ChatUsageLimitState,
   PendingMergeBack,
   SessionSummary,
   ThreadLineage,
   WorkflowSessionOwner
 } from "@orquester/api";
-import type { AgentChatHome, SessionRecord } from "@orquester/config";
+import type { AgentChatHome, ChatLimitFailoverRecord, ChatUsageLimitRecord, SessionRecord } from "@orquester/config";
 
 /** Thrown for a refusal the route maps to a 400. */
 export class ChatSessionError extends Error {
@@ -75,7 +77,68 @@ interface ChatSession {
     profileId?: string;
     /** `CreateAgentChatSessionFields.unattended`, persisted. */
     unattended?: true;
+    /** Usage-limit recovery (`limit-recovery.ts`): kept whole, unknown fields included. */
+    usageLimit?: ChatUsageLimitRecord;
+    limitFailover?: ChatLimitFailoverRecord;
   };
+}
+
+/** `ChatUsageLimitState`'s own keys: what a summary carries, and what a rewrite replaces. */
+const USAGE_LIMIT_KEYS: ReadonlySet<string> = new Set([
+  "noticeId",
+  "turnId",
+  "detectedAt",
+  "limitedAt",
+  "resetAt",
+  "accountId",
+  "parked",
+  "autoResume",
+  "resumeAt",
+  "userCancelled",
+  "message",
+  "action"
+]);
+
+const LIMIT_FAILOVER_KEYS: ReadonlySet<string> = new Set(["fromAccountId", "toAccountId", "at", "automatic"]);
+
+/** The stored block's own fields, without the unknown ones a newer daemon may have written. */
+function publicUsageLimit(record: ChatUsageLimitRecord): ChatUsageLimitState {
+  return {
+    noticeId: record.noticeId,
+    turnId: record.turnId,
+    detectedAt: record.detectedAt,
+    limitedAt: record.limitedAt,
+    resetAt: record.resetAt,
+    accountId: record.accountId,
+    parked: record.parked,
+    autoResume: record.autoResume,
+    resumeAt: record.resumeAt,
+    ...(record.userCancelled === true ? { userCancelled: true as const } : {}),
+    ...(record.message !== undefined ? { message: record.message } : {}),
+    ...(record.action
+      ? {
+          action: {
+            kind: record.action.kind,
+            commandId: record.action.commandId,
+            ...(record.action.accountId !== undefined ? { accountId: record.action.accountId } : {}),
+            startedAt: record.action.startedAt,
+            ...(record.action.automatic !== undefined ? { automatic: record.action.automatic } : {})
+          }
+        }
+      : {})
+  };
+}
+
+function publicLimitFailover(record: ChatLimitFailoverRecord): ChatLimitFailover {
+  return { fromAccountId: record.fromAccountId, toAccountId: record.toAccountId, at: record.at, automatic: record.automatic };
+}
+
+/** `next`, carrying over the fields of `previous` this build does not know (AGENTS.md: preserve unknown fields). */
+function withUnknownFields<T extends object>(previous: Record<string, unknown> | undefined, known: ReadonlySet<string>, next: T): T {
+  if (!previous) return { ...next };
+  const kept: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(previous)) if (!known.has(key)) kept[key] = value;
+  return { ...kept, ...next } as T;
 }
 
 /**
@@ -307,6 +370,62 @@ export class ChatSessionManager {
     return this.sessions.get(id)?.chat.unattended === true;
   }
 
+  /** The chat's usage-limit recovery state (`SessionSummary.usageLimit`), or null when it is not limited. */
+  usageLimitOf(id: string): ChatUsageLimitState | null {
+    const record = this.sessions.get(id)?.chat.usageLimit;
+    return record ? publicUsageLimit(record) : null;
+  }
+
+  /**
+   * Set (or clear, `null`) the chat's usage-limit recovery state: persisted on the tab record and
+   * published with an explicit `null` when cleared (a client merges summaries field-wise).
+   * "updated" only on a change.
+   */
+  setUsageLimit(id: string, state: ChatUsageLimitState | null): SessionSummary | null {
+    const session = this.sessions.get(id);
+    if (!session) return null;
+    const before = session.chat.usageLimit;
+    if (state === null) {
+      if (before === undefined) return null;
+      delete session.chat.usageLimit;
+      session.summary.usageLimit = null;
+    } else {
+      const next = withUnknownFields(before, USAGE_LIMIT_KEYS, state) as ChatUsageLimitRecord;
+      if (before !== undefined && JSON.stringify(before) === JSON.stringify(next)) return null;
+      session.chat.usageLimit = next;
+      session.summary.usageLimit = publicUsageLimit(next);
+    }
+    this.lifecycle.emit("updated", { ...session.summary });
+    this.options.requestPersist();
+    return { ...session.summary };
+  }
+
+  /** The "switched account after a usage limit" notice (`SessionSummary.limitFailover`), or null. */
+  limitFailoverOf(id: string): ChatLimitFailover | null {
+    const record = this.sessions.get(id)?.chat.limitFailover;
+    return record ? publicLimitFailover(record) : null;
+  }
+
+  /** Set or clear (`null`) that notice; persisted, "updated" only on a change. */
+  setLimitFailover(id: string, failover: ChatLimitFailover | null): SessionSummary | null {
+    const session = this.sessions.get(id);
+    if (!session) return null;
+    const before = session.chat.limitFailover;
+    if (failover === null) {
+      if (before === undefined) return null;
+      delete session.chat.limitFailover;
+      session.summary.limitFailover = null;
+    } else {
+      const next = withUnknownFields(before, LIMIT_FAILOVER_KEYS, failover) as ChatLimitFailoverRecord;
+      if (before !== undefined && JSON.stringify(before) === JSON.stringify(next)) return null;
+      session.chat.limitFailover = next;
+      session.summary.limitFailover = publicLimitFailover(next);
+    }
+    this.lifecycle.emit("updated", { ...session.summary });
+    this.options.requestPersist();
+    return { ...session.summary };
+  }
+
   /**
    * Record the lineage the host resolved for a fork (spec 2026-10-14 §6): its fork point is
    * only known once the host has cut the parent's conversation.
@@ -451,7 +570,9 @@ export class ChatSessionManager {
         ...(record.lineage ? { lineage: lineageFromRecord(record.lineage) } : {}),
         // A fork or a create whose host answer never came: still being reconciled.
         ...(record.chat.forkUnconfirmed === true || record.chat.createUnconfirmed === true ? { chatPending: true } : {}),
-        profileId: record.chat.profileId ?? null
+        profileId: record.chat.profileId ?? null,
+        ...(record.chat.usageLimit ? { usageLimit: publicUsageLimit(record.chat.usageLimit) } : {}),
+        ...(record.chat.limitFailover ? { limitFailover: publicLimitFailover(record.chat.limitFailover) } : {})
       };
       this.sessions.set(record.id, {
         summary,
@@ -466,7 +587,9 @@ export class ChatSessionManager {
           ...(record.chat.forkUnconfirmed === true ? { forkUnconfirmed: true as const } : {}),
           ...(record.chat.createUnconfirmed === true ? { createUnconfirmed: true as const } : {}),
           ...(record.chat.profileId !== undefined ? { profileId: record.chat.profileId } : {}),
-          ...(record.chat.unattended === true ? { unattended: true as const } : {})
+          ...(record.chat.unattended === true ? { unattended: true as const } : {}),
+          ...(record.chat.usageLimit ? { usageLimit: record.chat.usageLimit } : {}),
+          ...(record.chat.limitFailover ? { limitFailover: record.chat.limitFailover } : {})
         }
       });
     }

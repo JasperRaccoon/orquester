@@ -113,6 +113,10 @@ import { ChatAwareSessionManager } from "./agent-chat/session-router.ts";
 import { AGENT_VISUAL_ROUTE_PATTERN, registerAgentChatRoutes } from "./agent-chat/proxy-routes.ts";
 import { LineageService } from "./agent-chat/lineage.ts";
 import { registerLineageRoutes } from "./agent-chat/lineage-routes.ts";
+import { ChatLimitRecovery } from "./agent-chat/limit-recovery.ts";
+import { registerUsageLimitRoutes } from "./agent-chat/limit-recovery-routes.ts";
+import { createCooldownStore } from "./workflows/agent/cooldowns.ts";
+import { realClock } from "./workflows/factory.ts";
 // umcp:t5 begin
 import { registerReplySubscriptionRoutes } from "./agent-chat/lineage-routes.ts";
 import { ReplyRouter } from "./agent-chat/replies.ts";
@@ -1255,6 +1259,27 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     logger: consoleWorkflowLogger
   });
   workflowValidationCatalog = workflowDaemon.validationCatalog;
+  // Usage-limit recovery for interactive chats (`agent-chat/limit-recovery.ts`): the host's
+  // per-thread limit notice (the summary poll) → the chat's recovery state, the resume at the
+  // reset and the opt-in account failover. It shares the workflows' cooldown store (one
+  // `workflow-state.json`), usage reading and accounts, so chats and workflows agree on which
+  // accounts are spent. The tab records are loaded (reattach above): `start` rebuilds every
+  // persisted schedule; its sends wait for the daemon's own API (`attachApi` below).
+  const limitRecovery = new ChatLimitRecovery({
+    chat: agentChat.chat,
+    cooldowns: createCooldownStore(workflowState, realClock),
+    usage: { snapshot: () => workflowUsage },
+    accounts: { list: () => agentAccounts.list() },
+    prefs: async () => {
+      const agents = (await readAppConfigFile(resolved.appConfigFile)).agents;
+      return { autoResume: agents.autoResumeLimitedChats, switchAccount: agents.switchAccountOnUsageLimit };
+    },
+    adapterOf: (refId) => registry.get(refId)?.chat?.adapter ?? null,
+    clock: realClock,
+    logger: console
+  });
+  agentChat.setUsageLimitNoticeListener((threadId, notice) => limitRecovery.onNotice(threadId, notice));
+  limitRecovery.start();
   publishWorkflowEvents({
     service: workflows,
     secrets: workflowSecrets,
@@ -1344,6 +1369,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     sessionProfileLifecycle,
     workflows, workflowSecrets, workflowRuns, workflowState, workflowEngine: null, internalApi: null,
     lineage,
+    limitRecovery,
     workflowProjects: workflowDaemon.runtime.projects,
     workflowCatalogReady: () => workflowDaemon.validationCatalog.ready()
   };
@@ -1483,6 +1509,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   });
 
   lineage.attachApi(services.internalApi);
+  limitRecovery.attachApi(services.internalApi);
   // umcp:t6 — every chat tool is on in every chat: a provider session the host kept across this
   // boot (launched by an older build, with fewer tools) is handed the current manifest once. The
   // host answers `unchanged` for an equal list, else applies it in-session or at the chat's next
@@ -1587,6 +1614,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // Stops supervising only: under tmux the agent host is deliberately left
     // running so in-flight turns survive the deploy (chat spec §3.1).
     await lineage.stop();
+    limitRecovery.stop();
     // umcp:t3 begin
     // Disconnect FIRST, while the transports may still serve: new calls get no card or grant
     // (PERMISSION_DENIED). Then pending cards end `cancelled`
@@ -1748,6 +1776,8 @@ interface Services {
    * route-level tests build a partial `services`.
    */
   lineage?: LineageService;
+  /** Usage-limit recovery of interactive chats. Optional: route-level tests build a partial `services`. */
+  limitRecovery?: ChatLimitRecovery;
   /** Restart the HTTP transport (set in main once the lifecycle exists). */
   reloadHttp?: () => Promise<void>;
 }
@@ -2515,6 +2545,16 @@ export function createServer(
     try {
       const merged = parseAppConfig({ ...current, ...((request.body as object) ?? {}) });
       await writeJsonFile(resolved.appConfigFile, merged);
+      // A usage-limit setting moved: armed chats follow at once (off disarms, on re-arms).
+      if (
+        merged.agents.autoResumeLimitedChats !== current.agents.autoResumeLimitedChats ||
+        merged.agents.switchAccountOnUsageLimit !== current.agents.switchAccountOnUsageLimit
+      ) {
+        services.limitRecovery?.prefsChanged({
+          autoResume: merged.agents.autoResumeLimitedChats,
+          switchAccount: merged.agents.switchAccountOnUsageLimit
+        });
+      }
       return merged;
     } catch {
       return reply.code(400).send({ code: "INVALID_CONFIG", message: "Invalid app config." });
@@ -3887,6 +3927,11 @@ export function createServer(
           sessions.list(projectPath).reduce((max, s) => Math.max(max, s.order), -1) + 1
         );
       }
+    });
+    // Usage-limit recovery: arm/cancel the automatic resume, resume now, switch and continue.
+    registerUsageLimitRoutes(app, {
+      recovery: () => services.limitRecovery ?? null,
+      isChatSession: (id) => services.agentChat.chat.has(id)
     });
     // The `request_secret` cards: daemon-owned, never proxied to the host.
     if (services.secretRequests) {
