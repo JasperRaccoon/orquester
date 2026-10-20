@@ -74,6 +74,11 @@ export interface AgentChatRouteDeps {
   /** Remember the sequence a client has been served to (§5.2 `lastSeq`). */
   noteSeq(id: string, seq: number): void;
   /**
+   * boxes: why a command that runs the agent CLI (a turn, a compaction) cannot run in this chat
+   * now — its project's box was destroyed — or null. Optional: route tests build partial deps.
+   */
+  agentRunRefusal?(id: string): string | null;
+  /**
    * §3.4's account switch. **Not** a proxied command: the body is not forwarded
    * verbatim — the daemon resolves the account, recomposes the launch
    * environment, prepares the home and only then calls the host, which is why
@@ -222,6 +227,11 @@ export function registerAgentChatRoutes(app: FastifyInstance, deps: AgentChatRou
         }
         if (!deps.isHostHealthy()) {
           return reply.code(503).send(HOST_UNAVAILABLE);
+        }
+        // boxes: a turn in a chat whose box is gone would wait for a CLI that can never start.
+        const refusal = name === "turn" || name === "compact" ? (deps.agentRunRefusal?.(id) ?? null) : null;
+        if (refusal !== null) {
+          return reply.code(CHAT_ERROR_STATUS.COMMAND_REJECTED).send(chatError("COMMAND_REJECTED", refusal));
         }
         return forwardJson(
           deps,

@@ -177,6 +177,31 @@ test("ensureFreshForUsage refreshes an idle Codex account whose token is expirin
   assert.equal(auth.tokens.account_id, "acc1"); // preserved
 });
 
+test("an empty or missing refresh token is never posted: Claude, Codex and Grok accounts are unavailable to refresh", async (t) => {
+  const now = 1_000_000;
+  let called = 0;
+  const svc = await makeServiceWithFetch(t, now, async () => {
+    called++;
+    return new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 });
+  });
+  const expiring = Math.floor((now + 60_000) / 1000);
+  const codexEmpty = await svc.importAccount({
+    content: JSON.stringify({ tokens: { access_token: jwt({ exp: expiring }), refresh_token: "", account_id: "acc1", id_token: jwt({ email: "c@x.com" }) } })
+  });
+  const codexNone = await svc.importAccount({ content: JSON.stringify({ tokens: { access_token: jwt({ exp: expiring }), account_id: "acc2" } }), label: "No refresh" });
+  const claudeEmpty = await svc.importAccount({ content: JSON.stringify({ claudeAiOauth: { accessToken: "t", refreshToken: "", expiresAt: now + 60_000 } }), label: "Claude" });
+  const claudeNone = await svc.importAccount({ content: JSON.stringify({ claudeAiOauth: { accessToken: "t", expiresAt: now + 60_000 } }), label: "Claude 2" });
+  const grokNone = await svc.importAccount({
+    content: JSON.stringify({ "https://auth.x.ai::client": { key: "k", expires_at: new Date(now + 60_000).toISOString(), email: "g@x.com" } })
+  });
+  for (const account of [codexEmpty, codexNone, claudeEmpty, claudeNone, grokNone]) {
+    assert.equal(await svc.refreshNow(account.agent as "claude" | "codex" | "grok", account.id), "unavailable", account.label);
+    await svc.ensureFreshForUsage(account.agent as "claude" | "codex" | "grok", account.id, new Set());
+  }
+  assert.equal(called, 0, "no token endpoint was called");
+  assert.equal(svc.list().accounts.some((account) => account.needsReauth), false, "nothing was marked for re-auth");
+});
+
 test("ensureFreshForUsage does not refresh an account with a live session", async (t) => {
   const now = 1_000_000;
   let called = 0;

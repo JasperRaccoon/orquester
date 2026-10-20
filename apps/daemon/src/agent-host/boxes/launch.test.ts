@@ -623,3 +623,44 @@ test("a Claude Global box start gives a \"Run in box\" server its secrets from t
     await session.launch.close();
   }
 });
+
+test("a Claude box start as root says the box is a sandbox (IS_SANDBOX=1), so Full access may skip permissions; not as a user", async () => {
+  for (const isRoot of [true, false]) {
+    const home = await boxHome(["claude"]);
+    const root = await mkdtemp(join(tmpdir(), "box-root-"));
+    const configDir = join(root, "accounts", "claude", "acct-1", "home");
+    await mkdir(configDir, { recursive: true });
+    const connection = redirectedBoxConnection(
+      localBoxConnection({ sys: { home, shell: join(home, "sh"), agentPath: "/opt/orq-agent", isRoot } }),
+      join(root, "box")
+    );
+    const boxes = createAgentHostBoxes({
+      appdir: join(root, "appdir"),
+      connector: () => connection,
+      tokens: recordingTokens({ accessToken: "t", expiresAt: null }),
+      sync: recordingSync(),
+      logger: quiet
+    });
+    const { context } = createFakeContext({ boxes, attachmentsDir: (threadId) => join(root, "attachments", threadId) });
+    const session = await prepareClaudeBoxSession({
+      context,
+      start: {
+        threadId: "t1",
+        cwd: "/w/p",
+        projectPath: "/w/p",
+        home: { kind: "account", accountId: "acct-1", path: configDir },
+        box: launchBox(connection),
+        modelSelection: { model: "opus" },
+        runtimeMode: "full-access"
+      },
+      hostEnv: { CLAUDE_CONFIG_DIR: configDir, HOME: "/var/lib/orquester" },
+      resumeSessionId: undefined,
+      loadProfileLaunch: async () => null
+    });
+    try {
+      assert.equal(session.env.IS_SANDBOX, isRoot ? "1" : undefined, `isRoot ${isRoot}`);
+    } finally {
+      await session.launch.close();
+    }
+  }
+});

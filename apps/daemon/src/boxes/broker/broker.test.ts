@@ -253,6 +253,27 @@ test("invalid_grant reaches the box as TOKEN_NEEDS_REAUTH; other refresh failure
   }
 });
 
+test("no renewal possible (no refresh token, service unreachable): a still-usable token is handed out, never a rejected or nearly spent one", async () => {
+  const w = world();
+  const broker = createAgentTokenBroker(w.deps);
+  for (const outcome of ["unavailable", "failed"] as const) {
+    w.refreshImpl = async () => outcome;
+    // Below minValidSeconds but with 20 min left: the box gets it.
+    w.files.write(grokPath, grokAuth("grok-access-LEFT", NOW + 20 * MIN));
+    const grant = await broker.getToken({ boxId: "box-1", agent: "grok", accountId: GROK_ID }, signal());
+    assert.equal(grant.accessToken, "grok-access-LEFT", outcome);
+    // The provider refused it already: never handed out again.
+    await rejectsWith(
+      broker.getToken({ boxId: "box-1", agent: "grok", accountId: GROK_ID, rejectedAccessToken: "grok-access-LEFT" }, signal()),
+      "TOKEN_UNAVAILABLE",
+      503
+    );
+    // Too little life left to be worth handing out.
+    w.files.write(grokPath, grokAuth("grok-access-SPENT", NOW + COOLDOWN_MIN_LIFE_MS - MIN));
+    await rejectsWith(broker.getToken({ boxId: "box-1", agent: "grok", accountId: GROK_ID }, signal()), "TOKEN_UNAVAILABLE", 503);
+  }
+});
+
 test("a refresh that finds the account newly held waits for that CLI instead of spinning", async () => {
   const w = world();
   w.files.write(codexPath, codexAuth(Math.floor((NOW + MIN) / 1000)));

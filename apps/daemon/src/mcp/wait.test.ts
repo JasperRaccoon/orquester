@@ -32,6 +32,32 @@ test("waitForTurn: a new turn completing after the baseline, a pending question,
   assert.equal((await sp).outcome, "interrupted");
 });
 
+test("waitForTurn: an error the session showed before the message (a failed CLI start) is not this message's outcome", async () => {
+  // The earlier start failed: no turn id, interrupted, the session in error.
+  const failedStart = { turnId: null, state: "interrupted" as const, startedAt: null, completedAt: stamp(1) };
+  const errored = chatSummary({ chatSessionStatus: "error", latestTurn: failedStart });
+  const api = new FakeDaemonApi().on("GET", "/api/sessions", { status: 200, body: [errored] });
+  const p = waitForTurn(api, "c1", turnBaseline(errored), { timeoutMs: 5_000, signal: new AbortController().signal, now });
+  await new Promise((r) => setImmediate(r));
+  // Still the old error, then this message's pending row (the status not caught up yet): no verdict.
+  api.emit(busEvent("session.updated", errored));
+  api.emit(busEvent("session.updated", chatSummary({ chatSessionStatus: "error", latestTurn: { turnId: null, state: "pending", startedAt: null, completedAt: null } })));
+  api.emit(busEvent("session.updated", running()));
+  api.emit(busEvent("session.updated", done()));
+  assert.equal((await p).outcome, "completed");
+
+  // This message's own start failing again settles a new failed start: that is its failure.
+  const again = new FakeDaemonApi().on("GET", "/api/sessions", { status: 200, body: [errored] });
+  const q = waitForTurn(again, "c1", turnBaseline(errored), { timeoutMs: 5_000, signal: new AbortController().signal, now });
+  await new Promise((r) => setImmediate(r));
+  again.emit(busEvent("session.updated", chatSummary({ chatSessionStatus: "error", latestTurn: { ...failedStart, completedAt: stamp(5) } })));
+  assert.equal((await q).outcome, "failed");
+
+  // Without a moving turn the old error never ends the wait.
+  const stuck = new FakeDaemonApi().on("GET", "/api/sessions", { status: 200, body: [errored] });
+  assert.equal((await waitForTurn(stuck, "c1", turnBaseline(errored), { timeoutMs: 20, signal: new AbortController().signal, now })).outcome, "timeout");
+});
+
 test("waitForTurn: the baseline turn itself never counts, a timeout reports timeout, a closed session throws", async () => {
   const api = new FakeDaemonApi().on("GET", "/api/sessions", { status: 200, body: [chatSummary()] });
   const r = await waitForTurn(api, "c1", turnBaseline(chatSummary()), { timeoutMs: 20, signal: new AbortController().signal, now });

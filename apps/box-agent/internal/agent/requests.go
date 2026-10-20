@@ -16,18 +16,22 @@ type requestHandler func(ctx context.Context, a *Agent, l *Link, params json.Raw
 // requestHandlers serves every BoxHostToBoxMethods entry (a test checks the
 // set against the golden fixture).
 var requestHandlers = map[string]requestHandler{
-	"fs.stat":           handleFsStat,
-	"fs.readdir":        handleFsReaddir,
-	"fs.realpath":       handleFsRealpath,
-	"fs.mkdir":          handleFsMkdir,
-	"fs.rename":         handleFsRename,
-	"fs.rm":             handleFsRm,
-	"fs.chmod":          handleFsChmod,
-	"fs.symlink":        handleFsSymlink,
-	"fs.watch":          handleFsWatch,
-	"fs.unwatch":        handleFsUnwatch,
-	"sys.info":          func(_ context.Context, a *Agent, _ *Link, _ json.RawMessage) (any, error) { return a.refreshSysInfo(), nil },
-	"sys.ports":         func(ctx context.Context, _ *Agent, _ *Link, _ json.RawMessage) (any, error) { return listeningPorts(ctx) },
+	"fs.stat":     handleFsStat,
+	"fs.readdir":  handleFsReaddir,
+	"fs.realpath": handleFsRealpath,
+	"fs.mkdir":    handleFsMkdir,
+	"fs.rename":   handleFsRename,
+	"fs.rm":       handleFsRm,
+	"fs.chmod":    handleFsChmod,
+	"fs.symlink":  handleFsSymlink,
+	"fs.watch":    handleFsWatch,
+	"fs.unwatch":  handleFsUnwatch,
+	"sys.info": func(_ context.Context, a *Agent, _ *Link, _ json.RawMessage) (any, error) {
+		return a.refreshSysInfo(), nil
+	},
+	"sys.ports": func(ctx context.Context, _ *Agent, _ *Link, _ json.RawMessage) (any, error) {
+		return listeningPorts(ctx)
+	},
 	"sys.stats":         func(ctx context.Context, a *Agent, _ *Link, _ json.RawMessage) (any, error) { return a.stats(ctx) },
 	"proc.list":         func(_ context.Context, a *Agent, _ *Link, _ json.RawMessage) (any, error) { return a.procs.list(), nil },
 	"proc.signal":       handleProcSignal,

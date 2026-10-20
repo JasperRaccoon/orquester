@@ -160,6 +160,8 @@ interface Runtime {
   boxEventTimer: NodeJS.Timeout | null;
   boxEventPaths: Map<string, Set<string>>;
   hostTargets: Map<string, HostWatchTarget[]>;
+  /** Root key → the host dirs its last host walk saw (a dir new since then gets a second look). */
+  hostDirs: Map<string, Set<string>>;
   hostWatchers: Map<string, HostWatcherEntry>;
   /** Box `fs.watch` ids → the root and dir they cover. */
   boxWatches: Map<string, { root: SyncRoot; dir: string }>;
@@ -432,6 +434,7 @@ export class BoxConfigSyncService implements BoxConfigSync {
         boxEventTimer: null,
         boxEventPaths: new Map(),
         hostTargets: new Map(),
+        hostDirs: new Map(),
         hostWatchers: new Map(),
         boxWatches: new Map(),
         connection: null,
@@ -549,6 +552,7 @@ export class BoxConfigSyncService implements BoxConfigSync {
     for (const entry of runtime.hostWatchers.values()) entry.watcher.close();
     runtime.hostWatchers.clear();
     runtime.hostTargets.clear();
+    runtime.hostDirs.clear();
     if (connection?.connected) {
       for (const watchId of runtime.boxWatches.keys()) {
         void connection.request("fs.unwatch", { watchId }).catch(() => undefined);
@@ -765,6 +769,12 @@ export class BoxConfigSyncService implements BoxConfigSync {
       hostDirs = tree.dirs;
       unreadable.push(...tree.unreadable);
       runtime.hostTargets.set(root.key, tree.watch);
+      // A dir that appeared since the last walk may still be filling (a skill installed as
+      // mkdir, then its files): what lands in it before its watcher exists raises no event, so
+      // the root gets one more host pass after the debounce.
+      const before = runtime.hostDirs.get(root.key);
+      runtime.hostDirs.set(root.key, tree.dirs);
+      if (before !== undefined && [...tree.dirs].some((dir) => !before.has(dir))) this.scheduleHostPass(runtime);
     }
     // Box side (`host` mode: the baseline stands for it).
     let box: Map<string, BoxFile> | null = null;
@@ -1197,6 +1207,8 @@ export class BoxConfigSyncService implements BoxConfigSync {
     if (seen.hostFile === null || seen.hh === null) {
       await removeBoxPath(connection, path);
       baseline.delete(path);
+      // A denied new skill leaves no empty dir behind (dirs the host has stay).
+      await this.pruneEmptyBoxDirs(connection, root, [path], new Set());
       return;
     }
     await this.pushToBox(connection, root, path, seen.hostFile, seen.hh, baseline, ctx);

@@ -86,6 +86,11 @@ test("secrets appear only where a script assigns or writes them, never in argv",
   assert.match(boot.powershellScript, /--auth-key=file:\$TsKeyFile/);
   assert.match(boot.powershellScript, /& \$Exe install-service/);
   assert.match(boot.powershellScript, /\/api\/boxes\/agent\/win32-x64/);
+  // The download is run (`--version`) before it is installed: PowerShell runs only names ending
+  // in a PATHEXT extension as programs, so the staged file ends in .exe.
+  const download = /^\$Download = (.+)$/m.exec(boot.powershellScript)?.[1] ?? "";
+  assert.match(download, /\.exe'\s*$/, `the staged download ends in .exe: ${download}`);
+  assert.match(boot.powershellScript, /& \$Download --version/);
 
   for (const script of [boot.posixScript, boot.containerCommand[2]!, fileScript]) {
     // Every Tailscale join passes the key by file and names the node orq-<boxId>.

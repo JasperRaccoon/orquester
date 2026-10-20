@@ -860,8 +860,9 @@ export class AgentAccountsService {
       // A session took the account since the snapshot.
       if (!options.allowHeld && this.liveAccountIds?.().has(id)) return "held";
       if (agent === "claude") {
+        // An empty one (a logged-out keychain export, an access-token-only file) is none: never posted.
         const refreshToken = creds?.claudeAiOauth?.refreshToken;
-        if (typeof refreshToken !== "string") return "unavailable";
+        if (typeof refreshToken !== "string" || !refreshToken) return "unavailable";
         const out = await refreshClaudeToken(refreshToken);
         if (out.ok) {
           await writeFile(credsPath, JSON.stringify(mergeClaudeRefreshedCreds(creds, out, this.opts.now())), { mode: 0o600 });
@@ -885,8 +886,9 @@ export class AgentAccountsService {
         if (out.invalidGrant) await this.markNeedsReauth(id, true);
         return out.invalidGrant ? "invalid-grant" : "failed";
       }
+      // Codex needs the field to parse its auth.json, so a file without a refresh token has `""`.
       const refreshToken = creds?.tokens?.refresh_token;
-      if (typeof refreshToken !== "string") return "unavailable";
+      if (typeof refreshToken !== "string" || !refreshToken) return "unavailable";
       const out = await refreshCodexToken(refreshToken);
       if (out.ok) {
         await writeFile(credsPath, JSON.stringify(mergeCodexRefreshedTokens(creds, out)), { mode: 0o600 });

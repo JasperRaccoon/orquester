@@ -174,11 +174,12 @@ async function watchSessions<T>(opts: WatchOptions<T>): Promise<T | null> {
   }
 }
 
-export interface TurnBaseline { turnId: string | null; completedAt: string | null; running: boolean }
+/** `errored`: the session read `error` already (a start that failed earlier): only a latest turn that moves counts then. */
+export interface TurnBaseline { turnId: string | null; completedAt: string | null; running: boolean; errored?: boolean }
 export function turnBaseline(s: SessionSummary): TurnBaseline {
   const lt = s.latestTurn ?? null;
   const running = s.chatSessionStatus === "running" || s.chatSessionStatus === "starting" || lt?.state === "running" || lt?.state === "pending";
-  return { turnId: lt?.turnId ?? null, completedAt: lt?.completedAt ?? null, running };
+  return { turnId: lt?.turnId ?? null, completedAt: lt?.completedAt ?? null, running, errored: s.chatSessionStatus === "error" };
 }
 
 export type TurnOutcome = "completed" | "needs-input" | "plan-ready" | "interrupted" | "failed" | "timeout";
@@ -199,7 +200,12 @@ function turnOutcome(s: SessionSummary, baseline: TurnBaseline): TurnOutcome | n
   // plan-ready waits for a new turn too: the summary moves only on the host poll, so the
   // first reads after implement_plan posts still show the very plan being implemented.
   if (isNew && rung === "plan-ready") return "plan-ready";
-  if (s.chatSessionStatus === "error") return "failed";
+  // An error the session already showed when the message was posted is the earlier failure (a
+  // CLI that never started): this message's turn has not reached the summary yet. It counts once
+  // a settled latest turn moves — this message's own start failing settles a new one (its pending
+  // row, which shows first, is not that yet).
+  const moved = lt !== null && SETTLED_TURN_STATES.has(lt.state) && (lt.turnId !== baseline.turnId || lt.completedAt !== baseline.completedAt);
+  if (s.chatSessionStatus === "error" && (!baseline.errored || moved)) return "failed";
   if (!lt || !isNew || !SETTLED_TURN_STATES.has(lt.state)) return null;
   if (lt.state === "completed") return "completed";
   if (lt.state === "failed") return "failed";

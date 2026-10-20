@@ -126,6 +126,13 @@ func (a *Agent) processEnv(extra map[string]string, unset []string, pty *wire.Pt
 		env.set("HOME", a.work.home)
 		env.set("USER", a.work.name)
 		env.set("LOGNAME", a.work.name)
+	} else if !isWindows {
+		// A service manager (systemd, cloud-init) starts orq-agent without HOME or USER, and
+		// processes would inherit none: `git config --global` fails with "$HOME not set".
+		info := a.sysInfo()
+		env.setDefault("HOME", info.Home)
+		env.setDefault("USER", info.User)
+		env.setDefault("LOGNAME", info.User)
 	}
 	if pty != nil {
 		term := pty.Term
@@ -181,6 +188,14 @@ func (m *envMap) set(key, value string) {
 		m.names[k] = key
 	}
 	m.values[k] = value
+}
+
+// setDefault sets key only when it is missing or empty (and value is not empty).
+func (m *envMap) setDefault(key, value string) {
+	if value == "" || m.values[envKey(key)] != "" {
+		return
+	}
+	m.set(key, value)
 }
 
 func (m *envMap) del(key string) {

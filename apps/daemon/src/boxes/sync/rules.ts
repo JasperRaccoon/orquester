@@ -92,8 +92,11 @@ export function isSafeRelPath(rel: string): boolean {
   return rel.length > 0 && rel.split("/").every(isSafeEntryName);
 }
 
-/** Backups (`settings.json.bak-20260820`), CLI caches (`plugin-catalog-cache.json`), sweep markers (`.last_inuse_sweep`). */
-const EXCLUDED_BASENAME = /\.bak(-[^/]*)?$|\.orig$|(^|[-_.])cache\.json$|^\.last[-_]/i;
+/**
+ * Backups (`settings.json.bak-20260820`), CLI caches (`plugin-catalog-cache.json`,
+ * `plugin-directory-cache-v2.json`), sweep markers (`.last_inuse_sweep`).
+ */
+const EXCLUDED_BASENAME = /\.bak(-[^/]*)?$|\.orig$|(^|[-_.])cache([-_.]v?\d+)?\.json$|^\.last[-_]/i;
 
 function excludedByName(rel: string): boolean {
   for (const segment of rel.split("/")) {
@@ -123,6 +126,9 @@ function rule(
 
 const startsWithDir = (rel: string, dir: string): boolean => rel === dir || rel.startsWith(`${dir}/`);
 
+/** The Claude CLI's account-synced areas (`synced`, `.trash`, `.staging` in its skill and plugin stores). */
+const CLAUDE_CLI_MANAGED = ["skills", "plugins"].flatMap((store) => ["synced", ".trash", ".staging"].map((dir) => `${store}/${dir}`));
+
 /**
  * Claude `CLAUDE_CONFIG_DIR` (`syncAccountHome` links `skills`, `plugins`, `settings.json`,
  * `CLAUDE.md` and `commands` into the system `~/.claude`). `plugins/` holds the installed plugin
@@ -147,7 +153,9 @@ const CLAUDE_ACCOUNT = rule(
   ],
   {
     // `plugins/data/` is the plugins' own runtime state (`${CLAUDE_PLUGIN_DATA}`), written as they run.
-    exclude: (rel) => startsWithDir(rel, "plugins/data"),
+    // `synced/`, `.trash/` and `.staging/` under `skills/` and `plugins/` are the CLI's own copy of
+    // what the claude.ai account syncs (each box's CLI fetches it for the same account itself).
+    exclude: (rel) => startsWithDir(rel, "plugins/data") || CLAUDE_CLI_MANAGED.some((dir) => startsWithDir(rel, dir)),
     codecs: { ".claude.json": "claude-json", "settings.json": "mcp-json", "settings.local.json": "mcp-json" }
   }
 );

@@ -77,6 +77,8 @@ export async function launchGrokInBox(
 /** What `grok inspect --json` may print (the host's cap, `agent-isolation/grok.ts`). */
 const INSPECT_MAX_BYTES = 8 * 1024 * 1024;
 const INSPECT_TIMEOUT_MS = 30_000;
+/** A config file `grok inspect` names as a server's source is read from the box up to this size. */
+const CONFIG_SOURCE_MAX_BYTES = 1024 * 1024;
 
 /**
  * `grokDiscoveredPluginNames` run in the box: the same contract (host paths and a host-built env
@@ -114,7 +116,7 @@ export function boxGrokPluginNames(launch: BoxLaunch): typeof grokDiscoveredPlug
 }
 
 /** A config file's text: the host's copy when it has one (the source of truth), else the box's. */
-async function readConfigSource(launch: BoxLaunch, boxPath: string): Promise<string | null> {
+export async function readConfigSource(launch: Pick<BoxLaunch, "paths" | "connection">, boxPath: string): Promise<string | null> {
   const hostPath = boxToHostPath(launch.paths, boxPath);
   if (hostPath !== null) {
     try {
@@ -124,9 +126,21 @@ async function readConfigSource(launch: BoxLaunch, boxPath: string): Promise<str
     }
   }
   try {
-    const stream = await launch.connection.readFile(boxPath);
+    const info = await launch.connection.request("fs.stat", { path: boxPath });
+    if (info === null || info.kind !== "file" || info.size > CONFIG_SOURCE_MAX_BYTES) return null;
+    // Bounded by the stat's size: the box sends no more than that.
+    const stream = await launch.connection.readFile(boxPath, { length: info.size });
     const chunks: Buffer[] = [];
-    for await (const chunk of stream) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array));
+    let total = 0;
+    for await (const chunk of stream) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
+      total += buffer.length;
+      if (total > CONFIG_SOURCE_MAX_BYTES) {
+        stream.destroy();
+        return null;
+      }
+      chunks.push(buffer);
+    }
     return Buffer.concat(chunks).toString("utf8");
   } catch {
     return null;

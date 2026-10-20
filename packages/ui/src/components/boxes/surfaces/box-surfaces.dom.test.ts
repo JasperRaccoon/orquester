@@ -32,6 +32,7 @@ let act: typeof import("react-dom/test-utils").act;
 let createRoot: typeof import("react-dom/client").createRoot;
 let BoxChatPanel: typeof import("./BoxChatSurfaces").BoxChatPanel;
 let BoxComposerLock: typeof import("./BoxChatSurfaces").BoxComposerLock;
+let AgentCardBoxBanner: typeof import("./BoxBadge").AgentCardBoxBanner;
 let ProjectRow: typeof import("../../sidebar/WorkspaceProjects").ProjectRow;
 let store: typeof import("../../../lib/boxes/store");
 
@@ -65,6 +66,7 @@ before(async () => {
   ({ act } = await import("react-dom/test-utils"));
   ({ createRoot } = await import("react-dom/client"));
   ({ BoxChatPanel, BoxComposerLock } = await import("./BoxChatSurfaces"));
+  ({ AgentCardBoxBanner } = await import("./BoxBadge"));
   ({ ProjectRow } = await import("../../sidebar/WorkspaceProjects"));
   store = await import("../../../lib/boxes/store");
 });
@@ -209,6 +211,14 @@ describe("box surfaces", () => {
     const lock = document.querySelector<HTMLElement>("[data-box-composer-lock]");
     assert.match(lock?.textContent ?? "", /read-only/);
     assert.equal(document.querySelector("textarea"), null, "no composer to type into");
+  });
+
+  it("keeps an Opened agents card's destroyed banner to two lines, the whole message as its tooltip", async () => {
+    await render(createElement(AgentCardBoxBanner, { view: { info: destroyedInfo, box: null, setupStep: null } }));
+    const note = document.querySelector<HTMLElement>('[role="note"]');
+    assert.ok(note);
+    assert.match(note.title, /destroyed outside Orquester \(gone in the Vultr dashboard\)\. The transcript stays readable/);
+    assert.ok(note.querySelector(".line-clamp-2"), "the text is clamped");
   });
 
   it("lists the chat's temporary box with Watch and Destroy, and its pending config change", async () => {

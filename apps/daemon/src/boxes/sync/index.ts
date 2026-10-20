@@ -11,6 +11,7 @@
  * | `config-sync.ts` | `BoxConfigSyncService` (`BoxConfigSync`): passes, watches, change sets, decisions. |
  * | `transcripts.ts` | `BoxTranscriptSyncService` (`BoxTranscriptSync`): pull after a turn, push before a resume. |
  * | `routes.ts` | `boxRoutes.configChanges` / `configChange(id)` and the `BOX_CONFIG_CHANGES_EVENT` publisher. |
+ * | `watches.ts` | `BoxConfigWatches`: the standing watches of every scope a live project box was synced with. |
  * | `testing.ts` | `mappedBoxConnection` (a box file system under its own dir), `fakeBoxHub`. |
  */
 
@@ -18,3 +19,4 @@ export { BoxConfigSyncService, BoxSyncError, wireChangeSet, type BoxConfigSyncOp
 export { BoxTranscriptSyncService, claudeProjectDirName, type BoxTranscriptSyncOptions, type HostRunner, type TranscriptRequest } from "./transcripts.ts";
 export { boxConfigChangesPublisher, registerBoxConfigChangeRoutes, type BoxConfigChangeRoutesDeps } from "./routes.ts";
 export { execBoxHasher, type BoxHasher } from "./box-fs.ts";
+export { BoxConfigWatches, type BoxConfigWatchesOptions } from "./watches.ts";

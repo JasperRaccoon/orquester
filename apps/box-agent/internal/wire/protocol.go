@@ -15,16 +15,16 @@ import (
 
 // Constants (box-protocol.ts).
 const (
-	ProtocolVersion       = 1
-	ChannelWindowBytes    = 1024 * 1024
-	MaxFramePayload       = 256 * 1024
-	HeartbeatMs           = 15_000
-	DetachBufferBytes     = 4 * 1024 * 1024
-	DataFrameHeaderBytes  = 5
-	WindowsPathPrefix     = `C:\orq`
-	StreamToBox      byte = 0
-	StreamFromBox    byte = 1
-	StreamStderr     byte = 2
+	ProtocolVersion           = 1
+	ChannelWindowBytes        = 1024 * 1024
+	MaxFramePayload           = 256 * 1024
+	HeartbeatMs               = 15_000
+	DetachBufferBytes         = 4 * 1024 * 1024
+	DataFrameHeaderBytes      = 5
+	WindowsPathPrefix         = `C:\orq`
+	StreamToBox          byte = 0
+	StreamFromBox        byte = 1
+	StreamStderr         byte = 2
 )
 
 // AgentPlatforms lists every build target (BOX_AGENT_PLATFORMS).
@@ -43,24 +43,24 @@ var AgentPlatforms = []string{
 // ---------------------------------------------------------------------------
 
 type SysInfo struct {
-	OS        string   `json:"os"`
-	Arch      string   `json:"arch"`
-	Libc      *string  `json:"libc"`
-	Hostname  string   `json:"hostname"`
-	OSRelease string   `json:"osRelease"`
-	User      string   `json:"user"`
-	IsRoot    bool     `json:"isRoot"`
-	CanElevate bool    `json:"canElevate"`
-	Home      string   `json:"home"`
-	Shell     string   `json:"shell"`
-	Tmux      bool     `json:"tmux"`
-	Docker    bool     `json:"docker"`
-	CPUs      int      `json:"cpus"`
-	MemBytes  int64    `json:"memBytes"`
-	GPUs      []string `json:"gpus"`
-	AgentPath string   `json:"agentPath"`
-	DataDir   string   `json:"dataDir"`
-	Container bool     `json:"container"`
+	OS         string   `json:"os"`
+	Arch       string   `json:"arch"`
+	Libc       *string  `json:"libc"`
+	Hostname   string   `json:"hostname"`
+	OSRelease  string   `json:"osRelease"`
+	User       string   `json:"user"`
+	IsRoot     bool     `json:"isRoot"`
+	CanElevate bool     `json:"canElevate"`
+	Home       string   `json:"home"`
+	Shell      string   `json:"shell"`
+	Tmux       bool     `json:"tmux"`
+	Docker     bool     `json:"docker"`
+	CPUs       int      `json:"cpus"`
+	MemBytes   int64    `json:"memBytes"`
+	GPUs       []string `json:"gpus"`
+	AgentPath  string   `json:"agentPath"`
+	DataDir    string   `json:"dataDir"`
+	Container  bool     `json:"container"`
 }
 
 type PathMap struct {
