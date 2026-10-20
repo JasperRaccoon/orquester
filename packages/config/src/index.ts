@@ -214,6 +214,12 @@ export function boxConfigChangesPath(baseDir: string): string {
   return joinPath(boxesDir(baseDir), "config-changes.json");
 }
 
+// boxes (sync): what config sync last agreed with one box (per-file hashes), so a restart can tell
+// a box-made change from a host-made one. A disposable cache: losing it only makes the host win.
+export function boxSyncBaselinePath(baseDir: string, boxId: string): string {
+  return joinPath(boxesDir(baseDir), "sync", `${boxId}.json`);
+}
+
 /** Parent of every desktop's runtime dir (sockets, cookies, logs); mode 0700. */
 export function desktopsRuntimeDir(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "desktops");
