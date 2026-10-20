@@ -1,7 +1,8 @@
 /**
  * The per-thread manifest of the in-chat `orquester` server (unified MCP design 2026-10-15 §9.4):
  * which chat tools ONE provider session of a thread advertises — every chat tool, but no
- * always-Admin one to a workflow-owned chat (§5.4) — its instruction block (§10) and the MCP
+ * always-Admin one to a workflow-owned chat (§5.4), and the box tools only while a box can be
+ * rented (Ephemeral AI VMs §13) — its instruction block (§10) and the MCP
  * servers it must deny (§12.1). The agent host asks for it at every provider-session start
  * (`daemonRoutesForHost.sessionToolsManifest`) and is handed a new one when the daemon pushes one
  * (`agentHostRoutes.sessionToolsRefresh`).

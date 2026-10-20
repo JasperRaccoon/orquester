@@ -44,7 +44,7 @@ import {
 import type { CallerPrincipal } from "@orquester/api/agent-chat";
 import { assertInsideFsRoot, FsSandboxError } from "@orquester/config/fs";
 
-import type { BoxConnection, BoxHub, BoxProcess } from "../contracts.ts";
+import type { BoxConnection, BoxHub, BoxProcess, BoxRegistry } from "../contracts.ts";
 import type {
   BoxExecRequest,
   BoxExecResult,
@@ -145,8 +145,6 @@ const SYSTEM_CLOCK: TemporaryBoxClock = {
 export interface TemporaryBoxToolsDeps {
   /** Whether a chat is still open: a create that finishes after its chat closed is torn down. */
   isChatOpen?(threadId: string): boolean;
-  /** Whether a host path is a box project's stub (its files live in that box, not on this host). */
-  isBoxProject?(path: string): boolean;
   clock?: TemporaryBoxClock;
   newId?: () => string;
   /** The host's tar for directory transfers (default `tar`). */
@@ -158,6 +156,8 @@ export interface TemporaryBoxToolsDeps {
 export interface TemporaryBoxesConnection {
   boxes: TemporaryBoxes;
   hub: Pick<BoxHub, "get">;
+  /** Tells a box project's host stub apart (its files live in its own box, not on this host). */
+  registry?: Pick<BoxRegistry, "locate">;
 }
 
 /** Call options of the operations: who acts (forced by `withPrincipal`), and the call's abort. */
@@ -686,7 +686,7 @@ export class TemporaryBoxTools {
   private chatProject(principal: CallerPrincipal): BoxOutcome<string> {
     if (principal.kind !== "agent") return refuse(403, "PERMISSION_DENIED", "Files move between a box and the project of the agent chat that owns it.");
     if (principal.projectPath === "") return refuse(400, "NO_PROJECT", "This chat has no project, so there is nowhere on the host to move files from or to.");
-    if (this.deps.isBoxProject?.(principal.projectPath)) {
+    if (this.connection?.registry?.locate(principal.projectPath).kind === "box") {
       return refuse(400, "BOX_UNSUPPORTED", "This chat's project runs in a box of its own: its files are not on this host, so they cannot be moved to or from a temporary box here.");
     }
     return done(principal.projectPath);

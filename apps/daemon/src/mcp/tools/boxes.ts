@@ -158,7 +158,9 @@ function boxView(box: BoxSummary): Record<string, unknown> {
 
 async function getJson<T>(api: DaemonApi, path: string, notFound: { code: string; message: string }): Promise<T> {
   const res = await api.request("GET", path);
-  if (res.status === 404 && (res.body as { code?: unknown } | null)?.code === undefined) throw new ToolError(notFound.code, notFound.message);
+  // A 404 that is not the plugin's own refusal (a `BOX_*` code): its routes are not there.
+  const code = (res.body as { code?: unknown } | null)?.code;
+  if (res.status === 404 && !(typeof code === "string" && code.startsWith("BOX"))) throw new ToolError(notFound.code, notFound.message);
   if (res.status >= 400) throw daemonError(res);
   return res.body as T;
 }

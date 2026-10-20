@@ -15,6 +15,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import type { CallerPrincipal } from "@orquester/api/agent-chat";
+import type { StoredBox } from "@orquester/config";
 
 import type { BoxProcess } from "../contracts.ts";
 import { localBoxConnection, type LocalBoxConnection } from "../testing.ts";
@@ -394,8 +395,13 @@ test("files move only between the box and the calling chat's own project (after 
 
 test("files: a box project's chat cannot move files through the host stub", async () => {
   const boxes = new FakeTemporaryBoxes().add(boxSummary({ id: "box-a", threadId: "chat-a" }));
-  const tools = new TemporaryBoxTools({ isBoxProject: (path) => path === PROJECT });
-  tools.connect({ boxes, hub: { get: () => localBoxConnection({ sys: { home: BOX } }) } });
+  const tools = new TemporaryBoxTools();
+  const record = boxSummary({ id: "box-project", purpose: "project" }) as unknown as StoredBox;
+  tools.connect({
+    boxes,
+    hub: { get: () => localBoxConnection({ sys: { home: BOX } }) },
+    registry: { locate: (path) => (path === PROJECT ? { kind: "box", boxId: "box-project", record, connection: undefined } : { kind: "host" }) }
+  });
   const refused = await tools.upload("box-a", { localPath: join(PROJECT, "run.sh"), remotePath: "s" }, { principal: agent() });
   assert.ok(!refused.ok && refused.code === "BOX_UNSUPPORTED");
 });
