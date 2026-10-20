@@ -78,8 +78,10 @@ the CLIProxyAPI model proxy, which was removed (`model-proxy-retirement.ts:5-13`
 ### Anti-goals (a failure even if everything else works)
 
 - An agent refresh token, a git private key, a git hosting token or a provider API key present
-  in a box in any form; any secret written to disk in a box, passed in a process argument, or
-  written to a log. (MCP and workflow secrets reach a box only in process env, and only for a
+  in a box in any form; any other secret written to disk in a box, passed in a process argument,
+  or written to a log. Exceptions, each decided: short-lived agent ACCESS tokens in a 0600
+  credentials file in the box's agent home (Claude, Grok — spikes doc), and Secret files plugin
+  files synced into project boxes (**owner decision**, 2026-10-20). (MCP and workflow secrets reach a box only in process env, and only for a
   server the owner switched to "Run in box" or a workflow block in a box project — §8.4, §8.8.)
 - Anything other than the existing single refresher ever spending a refresh token
   (`agent-account-refresh.ts`, or the host-local CLI that holds the account).
@@ -207,7 +209,7 @@ home. The existing sub-second window around a session starting mid-refresh stays
 | CLI | How the box gets tokens |
 |---|---|
 | Codex | `codex app-server` in the box, logged in with the app-server's `chatgptAuthTokens` mode: the host supplies `accessToken` + `chatgptAccountId` and answers `account/chatgptAuthTokens/refresh` requests through the broker. Regenerate the Codex bindings per the `_generated` README if new protocol types are needed. |
-| Claude Code | Started with only the current access token (`CLAUDE_CODE_OAUTH_TOKEN`, or a credentials file with no refresh token — whichever the spike shows works with full subscription features). Before the token's remaining life drops below the threshold, the adapter restarts the CLI between turns with `resume`. Anthropic's own Desktop SSH sessions use the same model: the desktop keeps the refresh token and pushes fresh credentials to the remote engine. |
+| Claude Code | A refresh-token-free `.credentials.json` in the box's config dir (spike: `CLAUDE_CODE_OAUTH_TOKEN` switches the default model). A running CLI re-reads the file, so before the token's remaining life drops below the threshold the adapter rewrites it between turns. Anthropic's own Desktop SSH sessions use the same model: the desktop keeps the refresh token and pushes fresh credentials to the remote engine. |
 | Grok | `[auth] auth_provider_command` in the box's Grok config runs `orq-agent token grok`, which prints `{access_token, expires_in}` from the broker; Grok re-runs it with `GROK_AUTH_EXPIRED=1`. Written through the `GROK_CONFIG_PATH` overlay, never through account-home symlinks. |
 | OpenCode | No managed accounts today; it uses the host's own `auth.json`. My call: in a box, OpenCode works with API-key providers through a host-side key-injecting endpoint (the documented gateway pattern), and OpenCode OAuth providers show as unsupported in boxes with a clear message. |
 
