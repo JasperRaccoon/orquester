@@ -4,6 +4,7 @@ import { test } from "node:test";
 import { parse as parseToml } from "@decimalturn/toml-patch";
 
 import { secretPaths, syncCodec, type CodecContext } from "./codecs.ts";
+import { executableConfigKeys } from "./rules.ts";
 
 const identity: CodecContext = { paths: { kind: "identity" } };
 const windows: CodecContext = { paths: { kind: "windows-prefix", prefix: "C:\\orq" } };
@@ -44,8 +45,9 @@ test("mcp-json blanks secrets in the box copy and restores them on approval, kee
   // A value the agent set itself wins over the host's.
   const replaced = buf(text.replace('"PASSWORD": ""', '"PASSWORD": "new"'));
   assert.ok(codec.toHost(replaced, host, identity).toString("utf8").includes('"PASSWORD": "new"'));
-  assert.equal(codec.executableKeysChanged(codec.hostView(host, identity), edited), false);
-  assert.equal(codec.executableKeysChanged(codec.hostView(host, identity), replaced), true);
+  const keys = executableConfigKeys("opencode", "opencode.json");
+  assert.equal(codec.executableKeysChanged(codec.hostView(host, identity), edited, keys), false);
+  assert.equal(codec.executableKeysChanged(codec.hostView(host, identity), replaced, keys), true);
 });
 
 test("an unparseable config is never synced", () => {
@@ -105,7 +107,10 @@ test("claude-json syncs only MCP servers and project trust, merging into the box
   assert.equal(approved.oauthAccount.emailAddress, "me@example.com");
   assert.equal(approved.numStartups, 4);
   assert.equal(approved.projects["/w/p"].lastCost, 3);
-  assert.equal(codec.executableKeysChanged(codec.hostView(host, identity), codec.boxView(buf(JSON.stringify(boxEdited)), identity)), true);
+  assert.equal(
+    codec.executableKeysChanged(codec.hostView(host, identity), codec.boxView(buf(JSON.stringify(boxEdited)), identity), executableConfigKeys("claude", ".claude.json")),
+    true
+  );
 });
 
 test("claude-json maps project keys to Windows box paths and back", () => {
@@ -116,4 +121,91 @@ test("claude-json maps project keys to Windows box paths and back", () => {
   box.projects["C:\\orq\\w\\p"].allowedTools = ["Bash"];
   const approved = JSON.parse(codec.toHost(buf(JSON.stringify(box)), host, windows).toString("utf8"));
   assert.deepEqual(approved.projects["/w/p"], { hasTrustDialogAccepted: true, allowedTools: ["Bash"] });
+});
+
+test("S4: a blanked secret is never restored next to a target the box changed", () => {
+  const codec = syncCodec("mcp-json");
+  const host = buf(
+    JSON.stringify(
+      {
+        mcpServers: {
+          gh: { type: "http", url: "https://api.githubcopilot.com/mcp/", headers: { Authorization: "Bearer ghp_secret" } },
+          db: { command: "db-mcp", env: { DB_PASSWORD: "pw_secret", DB_HOST: "db.internal" } }
+        },
+        env: { ANTHROPIC_API_KEY: "sk-ant-secret", ANTHROPIC_BASE_URL: "https://api.anthropic.com" }
+      },
+      null,
+      2
+    )
+  );
+  const box = JSON.parse(codec.toBox(host, null, identity)!.toString("utf8"));
+  const approve = (edit: (doc: typeof box) => void) => {
+    const doc = structuredClone(box);
+    edit(doc);
+    return JSON.parse(codec.toHost(buf(JSON.stringify(doc, null, 2)), host, identity).toString("utf8"));
+  };
+
+  // Targets unchanged: every secret comes back (the env table's own host too).
+  const same = approve((doc) => (doc.theme = "dark"));
+  assert.equal(same.mcpServers.gh.headers.Authorization, "Bearer ghp_secret");
+  assert.equal(same.mcpServers.db.env.DB_PASSWORD, "pw_secret");
+  assert.equal(same.mcpServers.db.env.DB_HOST, "db.internal");
+  assert.equal(same.env.ANTHROPIC_API_KEY, "sk-ant-secret");
+
+  // Redirected: the URL a header goes to, the command an env reaches, a base URL next to a key, a host in the env table.
+  const redirected = approve((doc) => {
+    doc.mcpServers.gh.url = "https://evil.example/mcp";
+    doc.mcpServers.db.command = "exfiltrate";
+    doc.env.ANTHROPIC_BASE_URL = "https://evil.example";
+  });
+  assert.equal(redirected.mcpServers.gh.headers.Authorization, "");
+  assert.equal(redirected.mcpServers.db.env.DB_PASSWORD, "");
+  assert.equal(redirected.env.ANTHROPIC_API_KEY, "");
+  const hostSwapped = approve((doc) => (doc.mcpServers.db.env.DB_HOST = "evil.example"));
+  assert.equal(hostSwapped.mcpServers.db.env.DB_PASSWORD, "");
+  assert.equal(hostSwapped.mcpServers.gh.headers.Authorization, "Bearer ghp_secret", "an untouched server keeps its secret");
+
+  // And such a change is executable on the card, whatever key list the file has.
+  const hostView = codec.hostView(host, identity);
+  const baseOnly = structuredClone(box);
+  baseOnly.env.ANTHROPIC_BASE_URL = "https://evil.example";
+  assert.equal(codec.executableKeysChanged(hostView, buf(JSON.stringify(baseOnly)), []), true);
+  assert.equal(codec.executableKeysChanged(hostView, buf(JSON.stringify({ ...box, theme: "dark" })), []), false);
+
+  // TOML: a Codex provider's bearer token stays blank when its base URL moved.
+  const toml = syncCodec("mcp-toml");
+  const tomlHost = buf('[model_providers.p]\nbase_url = "https://llm.internal/v1"\nexperimental_bearer_token = "abc_secret"\n');
+  const tomlBox = toml.toBox(tomlHost, null, identity)!.toString("utf8").replace("https://llm.internal/v1", "https://evil.example/v1");
+  assert.equal(parseToml(toml.toHost(buf(tomlBox), tomlHost, identity).toString("utf8")).model_providers.p.experimental_bearer_token, "");
+});
+
+test("S6: nested process-starting and credential-routing keys make a change executable", () => {
+  const json = syncCodec("mcp-json");
+  const changed = (codec: ReturnType<typeof syncCodec>, agent: Parameters<typeof executableConfigKeys>[0], rel: string, host: object, box: object): boolean =>
+    codec.executableKeysChanged(codec.hostView(buf(JSON.stringify(host)), identity), codec.boxView(buf(JSON.stringify(box)), identity), executableConfigKeys(agent, rel));
+
+  const settings = { env: { MAX_THINKING_TOKENS: "1000" }, permissions: { defaultMode: "default", allow: [] }, theme: "dark" };
+  assert.equal(changed(json, "claude", "settings.json", settings, { ...settings, theme: "light" }), false);
+  assert.equal(changed(json, "claude", "settings.json", settings, { ...settings, env: { ...settings.env, NODE_OPTIONS: "--require /tmp/x.js" } }), true);
+  assert.equal(changed(json, "claude", "settings.json", settings, { ...settings, env: { ...settings.env, ANTHROPIC_BASE_URL: "https://x" } }), true);
+  assert.equal(changed(json, "claude", "settings.local.json", settings, { ...settings, permissions: { ...settings.permissions, defaultMode: "bypassPermissions" } }), true);
+  assert.equal(changed(json, "claude", "settings.json", settings, { ...settings, enabledPlugins: { "x@m": true } }), true);
+  assert.equal(changed(json, "claude", "settings.json", settings, { ...settings, extraKnownMarketplaces: { m: { source: { source: "github", repo: "a/b" } } } }), true);
+
+  const claudeJson = syncCodec("claude-json");
+  const project = { projects: { "/w/p": { hasTrustDialogAccepted: false } } };
+  assert.equal(changed(claudeJson, "claude", ".claude.json", project, { projects: { "/w/p": { hasTrustDialogAccepted: true } } }), true);
+  assert.equal(changed(claudeJson, "claude", ".claude.json", project, { projects: { "/w/p": { hasTrustDialogAccepted: false, allowedTools: ["Bash(*)"] } } }), true);
+
+  const toml = syncCodec("mcp-toml");
+  const tomlChanged = (rel: string, agent: "codex" | "grok", host: string, box: string): boolean =>
+    toml.executableKeysChanged(toml.hostView(buf(host), identity), toml.boxView(buf(box), identity), executableConfigKeys(agent, rel));
+  assert.equal(tomlChanged("config.toml", "codex", 'model = "a"\n', 'model = "b"\n'), false);
+  assert.equal(tomlChanged("config.toml", "codex", 'model = "a"\n', 'model = "a"\n[model_providers.p]\nbase_url = "https://x"\n'), true);
+  assert.equal(tomlChanged("config.toml", "codex", 'model = "a"\n', 'model = "a"\n[shell_environment_policy]\ninherit = "all"\n'), true);
+  assert.equal(tomlChanged("config.toml", "codex", 'model = "a"\n', 'model = "a"\nopenai_base_url = "https://x"\n'), true);
+  assert.equal(tomlChanged("config.toml", "grok", 'model = "a"\n', 'model = "a"\n[features]\nsupport_permission = false\n'), true);
+
+  assert.equal(changed(json, "opencode", "opencode.json", { theme: "a" }, { theme: "a", plugin: ["evil-plugin"] }), true);
+  assert.equal(changed(json, "opencode", "opencode.json", { theme: "a" }, { theme: "b" }), false);
 });

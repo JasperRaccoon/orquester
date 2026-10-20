@@ -23,6 +23,8 @@
 
 import { posix } from "node:path";
 
+import { boxesDir, boxSecretsPath, keysDir, secretFilesDir, sessionProfileSourcesDir, workflowSecretsPath } from "@orquester/config";
+
 import type { BoxAgentId } from "../contracts.ts";
 
 export type SyncAgent = BoxAgentId | "opencode";
@@ -68,13 +70,35 @@ const EXCLUDED_SUFFIXES = [".lock", ".log", ".tmp", ".swp", ".sqlite", ".sqlite-
 /** Our own temp files (`*.orq-sync-<id>`), never synced in either direction. */
 export const SYNC_TEMP_MARKER = ".orq-sync-";
 
+/** `orq-agent`'s temp files (`.<name>.orq-tmp-<n>` while a file channel writes), never synced either. */
+export const BOX_AGENT_TEMP_MARKER = ".orq-tmp";
+
+/** Whether a name is one of the two temp-file kinds. */
+export function isTempName(name: string): boolean {
+  return name.includes(SYNC_TEMP_MARKER) || name.includes(BOX_AGENT_TEMP_MARKER);
+}
+
+/**
+ * Whether a name a box listed (or a session id it reported) can be one path segment: not empty,
+ * not `.`/`..`, no separator of either OS, no NUL. A box's listing is untrusted input; every name
+ * that becomes part of a host path goes through this.
+ */
+export function isSafeEntryName(name: string): boolean {
+  return name.length > 0 && name !== "." && name !== ".." && !/[/\\\u0000]/.test(name);
+}
+
+/** Whether a POSIX relative path is made only of {@link isSafeEntryName} segments. */
+export function isSafeRelPath(rel: string): boolean {
+  return rel.length > 0 && rel.split("/").every(isSafeEntryName);
+}
+
 /** Backups (`settings.json.bak-20260820`), CLI caches (`plugin-catalog-cache.json`), sweep markers (`.last_inuse_sweep`). */
 const EXCLUDED_BASENAME = /\.bak(-[^/]*)?$|\.orig$|(^|[-_.])cache\.json$|^\.last[-_]/i;
 
 function excludedByName(rel: string): boolean {
   for (const segment of rel.split("/")) {
     if (EXCLUDED_NAMES.has(segment)) return true;
-    if (segment.includes(SYNC_TEMP_MARKER)) return true;
+    if (isTempName(segment)) return true;
   }
   const base = posix.basename(rel);
   return EXCLUDED_BASENAME.test(base) || EXCLUDED_SUFFIXES.some((suffix) => base.endsWith(suffix));
@@ -246,9 +270,7 @@ export function syncRootKind(root: string, preparedRoot: string | null): SyncRoo
  * not excluded, not denied.
  */
 export function isSyncedRel(rule: SyncRule, rel: string): boolean {
-  if (rel.length === 0 || rel.startsWith("/") || rel.split("/").some((segment) => segment === ".." || segment === "." || segment === "")) {
-    return false;
-  }
+  if (!isSafeRelPath(rel)) return false;
   const top = rel.split("/")[0]!;
   if (!rule.include.has(top)) return false;
   if (rule.excluded(rel)) return false;
@@ -320,10 +342,23 @@ export function isDeniedRealPath(path: string, denyRoots: readonly string[] = []
 
 /**
  * A transcript file's name (its directories are the CLI's own encoding of the project path, which
- * may legitimately say `secret-files`): only the file name and credential store dirs are checked.
+ * may legitimately say `secret-files`): only the file name, credential store dirs and `denyRoots`
+ * are checked.
  */
-export function isDeniedTranscriptPath(path: string): boolean {
-  return isDeniedRealPath(path);
+export function isDeniedTranscriptPath(path: string, denyRoots: readonly string[]): boolean {
+  return isDeniedRealPath(path, denyRoots);
+}
+
+/** The daemon's own secret places: never read nor written by any sync. */
+export function defaultSyncDenyRoots(appdir: string): string[] {
+  return [
+    keysDir(appdir),
+    boxesDir(appdir),
+    boxSecretsPath(appdir),
+    workflowSecretsPath(appdir),
+    secretFilesDir(appdir),
+    sessionProfileSourcesDir(appdir)
+  ];
 }
 
 // ---------------------------------------------------------------------------
@@ -361,13 +396,90 @@ const SCRIPT_EXTENSIONS = new Set([
 /** Dirs whose every file is code a CLI runs or loads (hooks, OpenCode plugins and tools, Codex exec rules). */
 const CODE_DIRS = new Set(["hooks", "plugin", "tool", "tools", "rules"]);
 
-/** Config keys whose values start processes: hooks, status lines, MCP servers, notify commands. */
-export const EXECUTABLE_CONFIG_KEYS = ["hooks", "statusLine", "mcpServers", "mcp_servers", "mcp", "notify", "apiKeyHelper", "otelHeadersHelper"];
+/**
+ * A key path in a structured config: key names, `"*"` for any key, or a pattern a key must match.
+ * `["projects", "*", "allowedTools"]` is every project's `allowedTools`.
+ */
+export type ConfigKeyPattern = readonly (string | RegExp)[];
+
+/**
+ * In every structured config: keys whose values start processes (hooks, status lines, MCP servers,
+ * notify commands, credential helpers) or say where requests and their credentials go.
+ */
+const COMMON_EXECUTABLE_KEYS: readonly ConfigKeyPattern[] = [
+  ["hooks"],
+  ["statusLine"],
+  ["mcpServers"],
+  ["mcp_servers"],
+  ["mcp"],
+  ["notify"],
+  ["apiKeyHelper"],
+  ["otelHeadersHelper"],
+  [/base_?url$/i]
+];
+
+/**
+ * Claude `settings.json`: `env` reaches the CLI and everything it runs (`NODE_OPTIONS`,
+ * `*_BASE_URL`, `PATH`, proxies…), so any change there counts; permission mode and allow rules
+ * let tools run unasked; plugins and marketplaces install code; AWS helpers and the file
+ * suggestion command are commands.
+ */
+const CLAUDE_SETTINGS_KEYS: readonly ConfigKeyPattern[] = [
+  ["env"],
+  ["permissions", "defaultMode"],
+  ["permissions", "allow"],
+  ["enabledPlugins"],
+  ["extraKnownMarketplaces"],
+  ["enableAllProjectMcpServers"],
+  ["enabledMcpjsonServers"],
+  ["disabledMcpjsonServers"],
+  ["awsAuthRefresh"],
+  ["awsCredentialExport"],
+  ["fileSuggestion"]
+];
+
+/** `.claude.json` (its synced subset): MCP servers, `.mcp.json` approvals, trust and allowed tools per project. */
+const CLAUDE_JSON_KEYS: readonly ConfigKeyPattern[] = [
+  ["mcpServers"],
+  ...["mcpServers", "enabledMcpjsonServers", "disabledMcpjsonServers", "hasTrustDialogAccepted", "allowedTools"].map((key) => ["projects", "*", key])
+];
+
+/** Codex `config.toml`: providers and their endpoints, the shell's environment, approval and sandbox modes, trust. */
+const CODEX_CONFIG_KEYS: readonly ConfigKeyPattern[] = [
+  ["model_providers"],
+  ["model_provider"],
+  ["profiles"],
+  ["profile"],
+  ["shell_environment_policy"],
+  ["approval_policy"],
+  ["sandbox_mode"],
+  ["sandbox_workspace_write"],
+  ["projects", "*", "trust_level"]
+];
+
+/** Grok `config.toml`: model providers, feature switches (`support_permission`), permissions, plugins. */
+const GROK_CONFIG_KEYS: readonly ConfigKeyPattern[] = [["models"], ["providers"], ["features"], ["permission"], ["permissions"], ["plugins"]];
+
+/** OpenCode config: plugins, providers, formatters and LSP servers (commands), permissions (also per agent / mode). */
+const OPENCODE_CONFIG_KEYS: readonly ConfigKeyPattern[] = [["plugin"], ["provider"], ["formatter"], ["lsp"], ["permission"], ["agent"], ["mode"], ["tools"]];
+
+const EXECUTABLE_KEYS_BY_FILE: Readonly<Record<SyncAgent, Readonly<Record<string, readonly ConfigKeyPattern[]>>>> = {
+  claude: { "settings.json": CLAUDE_SETTINGS_KEYS, "settings.local.json": CLAUDE_SETTINGS_KEYS, ".claude.json": CLAUDE_JSON_KEYS },
+  codex: { "config.toml": CODEX_CONFIG_KEYS },
+  grok: { "config.toml": GROK_CONFIG_KEYS, "profile/config.base.toml": GROK_CONFIG_KEYS },
+  opencode: Object.fromEntries(OPENCODE_CONFIG_FILES.flatMap((name) => [[name, OPENCODE_CONFIG_KEYS], [`opencode/${name}`, OPENCODE_CONFIG_KEYS]]))
+};
+
+/** The key paths of a config file (`rel` in a root of `agent`) whose change runs code or redirects credentials. */
+export function executableConfigKeys(agent: SyncAgent, rel: string): ConfigKeyPattern[] {
+  return [...COMMON_EXECUTABLE_KEYS, ...(EXECUTABLE_KEYS_BY_FILE[agent][rel] ?? [])];
+}
 
 /**
  * Whether a changed file is executable for the card: a script under `plugins/`/`skills/` (by
- * extension or shebang), anything under a hooks/plugin/tool dir, a file with an exec bit, or a
- * config whose process-starting keys differ (`configKeysChanged`, decided by the codec).
+ * extension or shebang), anything under a hooks/plugin/tool dir, a file with an exec bit, Grok's
+ * folder trust list, or a config whose {@link executableConfigKeys} differ (`configKeysChanged`,
+ * decided by the codec).
  */
 export function isExecutableChange(input: {
   rule: SyncRule;
@@ -382,7 +494,7 @@ export function isExecutableChange(input: {
   const top = segments[0]!;
   if (CODE_DIRS.has(top) || (input.rule.agent === "opencode" && top === "plugins")) return true;
   if (input.rule.kind === "prepared" && segments.includes("hooks")) return true;
-  if (top === "hooks.json") return true;
+  if (top === "hooks.json" || top === "trusted_folders.toml") return true;
   if (segments.some((segment) => segment === "hooks" || segment === "bin" || segment === "scripts")) return true;
   if (top === "plugins" || top === "skills" || top === "plugin" || top === "skill" || top === "profile") {
     const extension = posix.extname(input.rel).toLowerCase();

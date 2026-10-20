@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { isDeniedRealPath, isDeniedRelPath, isExecutableChange, isSyncedRel, syncRootKind, syncRuleFor } from "./rules.ts";
+import {
+  isDeniedRealPath,
+  isDeniedRelPath,
+  isExecutableChange,
+  isSafeEntryName,
+  isSafeRelPath,
+  isSyncedRel,
+  syncRootKind,
+  syncRuleFor
+} from "./rules.ts";
 
 test("the deny list refuses credential files, credential-like names and credential stores", () => {
   for (const rel of [
@@ -81,6 +90,22 @@ test("roots under the prepared root are host → box only", () => {
   assert.equal(syncRootKind("/app/daemon/agent-accounts/claude/a/home", "/app/daemon/session-profiles/prepared"), "account");
   assert.equal(syncRuleFor("claude", "prepared").twoWay, false);
   assert.equal(syncRuleFor("claude", "account").twoWay, true);
+});
+
+test("box-listed names: only plain segments; temp files of either side never sync", () => {
+  for (const name of ["", ".", "..", "a/b", "../x", "a\\b", "..\\x", "a\u0000b"]) assert.equal(isSafeEntryName(name), false, JSON.stringify(name));
+  for (const name of ["s1.jsonl", ".hidden", "...", "a..b", "rollout-1-x.jsonl"]) assert.equal(isSafeEntryName(name), true, name);
+  assert.equal(isSafeRelPath("s1/subagents/a.jsonl"), true);
+  for (const rel of ["s1/../x", "./s1", "s1//a", "s1/", "/s1"]) assert.equal(isSafeRelPath(rel), false, rel);
+  const claude = syncRuleFor("claude", "account");
+  assert.equal(isSyncedRel(claude, "skills/x/.SKILL.md.orq-tmp-123"), false);
+  assert.equal(isSyncedRel(claude, "skills/x/SKILL.md.orq-sync-abc"), false);
+  assert.equal(isSyncedRel(claude, "skills/a\\..\\b"), false);
+});
+
+test("executable changes: Grok's trusted folders list counts", () => {
+  const grok = syncRuleFor("grok", "account");
+  assert.equal(isExecutableChange({ rule: grok, rel: "trusted_folders.toml", mode: 0o644, content: Buffer.from(""), configKeysChanged: false }), true);
 });
 
 test("executable changes: hooks, scripts, exec bits and process-starting config keys", () => {

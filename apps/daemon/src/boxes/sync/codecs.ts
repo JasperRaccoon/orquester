@@ -23,7 +23,7 @@ import { applyEdits, modify, parse as parseJsonc, type ParseError } from "jsonc-
 import { boxToHostPath, hostToBoxPath, type BoxPathMap } from "@orquester/api";
 
 import { editToml, parseToml, type TomlEdit } from "../../agent-profile/adapters/grok/toml-patch.ts";
-import { EXECUTABLE_CONFIG_KEYS, type SyncCodecId } from "./rules.ts";
+import type { ConfigKeyPattern, SyncCodecId } from "./rules.ts";
 
 export interface CodecContext {
   /** The box's path mapping (Claude's `.claude.json` keys projects by box path). */
@@ -38,8 +38,12 @@ export interface SyncCodec {
   toBox(host: Buffer, box: Buffer | null, ctx: CodecContext): Buffer | null;
   /** The host bytes after approving the box's copy (null host = the file is new on the host). */
   toHost(box: Buffer, host: Buffer | null, ctx: CodecContext): Buffer;
-  /** Whether keys that start processes (hooks, MCP servers, status line…) differ between two views. */
-  executableKeysChanged(hostView: Buffer | null, boxView: Buffer | null): boolean;
+  /**
+   * Whether keys that start processes or redirect credentials (`keys`, from
+   * `executableConfigKeys`) differ between two views — or what a blanked secret would be restored
+   * next to (its server's command or URL, a provider's base URL…).
+   */
+  executableKeysChanged(hostView: Buffer | null, boxView: Buffer | null, keys: readonly ConfigKeyPattern[]): boolean;
 }
 
 type Doc = Record<string, unknown>;
@@ -67,19 +71,24 @@ function inMcpSecretTable(path: readonly string[]): boolean {
   return path.length >= 4 && MCP_SECRET_TABLES.has(path[path.length - 2]!) && MCP_PARENTS.has(path[path.length - 4]!);
 }
 
-/** Paths of every non-empty string value that is a secret (objects only; arrays are not entered). */
-export function secretPaths(doc: unknown, prefix: KeyPath = []): KeyPath[] {
+/** Paths of every string value at a secret's place, non-empty ones or (`blank`) empty ones; arrays are not entered. */
+function secretLeafPaths(doc: unknown, blank: boolean, prefix: KeyPath = []): KeyPath[] {
   const out: KeyPath[] = [];
   if (!isPlainObject(doc)) return out;
   for (const [key, value] of Object.entries(doc)) {
     const path = [...prefix, key];
     if (typeof value === "string") {
-      if (value.length > 0 && (inMcpSecretTable(path) || isSecretKey(key))) out.push(path);
+      if ((value.length === 0) === blank &&(inMcpSecretTable(path) || isSecretKey(key))) out.push(path);
     } else if (isPlainObject(value)) {
-      out.push(...secretPaths(value, path));
+      out.push(...secretLeafPaths(value, blank, path));
     }
   }
   return out;
+}
+
+/** Paths of every non-empty string value that is a secret (objects only; arrays are not entered). */
+export function secretPaths(doc: unknown, prefix: KeyPath = []): KeyPath[] {
+  return secretLeafPaths(doc, false, prefix);
 }
 
 function getPath(doc: unknown, path: readonly string[]): unknown {
@@ -89,6 +98,66 @@ function getPath(doc: unknown, path: readonly string[]): unknown {
     node = node[segment];
   }
   return node;
+}
+
+/**
+ * Keys that decide where a secret goes or what receives it: an MCP server's command, arguments,
+ * transport and URL; a provider's base URL or endpoint; hosts and proxies; env that loads code.
+ */
+const SECRET_TARGET_KEY = /^(command|args|cwd|type|transport|node_options|ld_preload|dyld_insert_libraries)$|(url|uri|endpoint|proxy)$|(^|[_-])host$/i;
+
+/** The objects whose target keys decide where the secret at `path` goes: its own, and the MCP server it belongs to. */
+function secretOwners(path: KeyPath): KeyPath[] {
+  const owners = [path.slice(0, -1)];
+  if (inMcpSecretTable(path)) owners.push(path.slice(0, -2));
+  return owners;
+}
+
+/**
+ * Whether a target key next to the secret at `path` differs between `host` and `box`. A box value
+ * left blank where the host has a secret (`hostSecrets`) is no difference: it is restored too.
+ */
+function secretTargetChanged(host: Doc, box: Doc, path: KeyPath, hostSecrets: ReadonlySet<string>): boolean {
+  for (const owner of secretOwners(path)) {
+    const hostNode = owner.length === 0 ? host : getPath(host, owner);
+    const boxNode = owner.length === 0 ? box : getPath(box, owner);
+    const hostObject = isPlainObject(hostNode) ? hostNode : {};
+    const boxObject = isPlainObject(boxNode) ? boxNode : {};
+    for (const key of new Set([...Object.keys(hostObject), ...Object.keys(boxObject)])) {
+      if (!SECRET_TARGET_KEY.test(key)) continue;
+      if (boxObject[key] === "" && hostSecrets.has(JSON.stringify([...owner, key]))) continue;
+      if (canonicalJson(hostObject[key] ?? null) !== canonicalJson(boxObject[key] ?? null)) return true;
+    }
+  }
+  return false;
+}
+
+/** Whether, between two views (secrets blanked in both), a blanked secret's targets moved. */
+function blankedSecretTargetsChanged(hostView: Doc | null, boxView: Doc | null): boolean {
+  if (hostView === null || boxView === null) return false;
+  return secretLeafPaths(hostView, true).some((path) => getPath(boxView, path) === "" && secretTargetChanged(hostView, boxView, path, new Set()));
+}
+
+/** Every value of `doc` at a path matching `pattern`, keyed by that path. */
+function valuesAt(doc: unknown, pattern: ConfigKeyPattern): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  const visit = (node: unknown, index: number, path: string[]): void => {
+    if (index === pattern.length) {
+      out[JSON.stringify(path)] = node;
+      return;
+    }
+    if (!isPlainObject(node)) return;
+    const segment = pattern[index]!;
+    for (const key of Object.keys(node)) {
+      if (segment === "*" || (typeof segment === "string" ? key === segment : segment.test(key))) visit(node[key], index + 1, [...path, key]);
+    }
+  };
+  visit(doc, 0, []);
+  return out;
+}
+
+function executableKeysDiffer(a: Doc | null, b: Doc | null, keys: readonly ConfigKeyPattern[]): boolean {
+  return keys.some((pattern) => canonicalJson(valuesAt(a, pattern)) !== canonicalJson(valuesAt(b, pattern)));
 }
 
 // ---------------------------------------------------------------------------
@@ -133,10 +202,6 @@ export function canonicalJson(value: unknown): string {
   return `${JSON.stringify(sort(value), null, 2)}\n`;
 }
 
-function topLevelExecutableKeysDiffer(a: Doc | null, b: Doc | null): boolean {
-  return EXECUTABLE_CONFIG_KEYS.some((key) => canonicalJson(a?.[key] ?? null) !== canonicalJson(b?.[key] ?? null));
-}
-
 // ---------------------------------------------------------------------------
 // Codecs
 // ---------------------------------------------------------------------------
@@ -170,13 +235,20 @@ function redactText(format: StructuredFormat, text: string): string | null {
   return paths.length === 0 ? text : format.edit(text, paths.map((path) => ({ path, value: "" })));
 }
 
-/** The box's text with every value it left blank restored from the host's text. */
+/**
+ * The box's text with every value it left blank restored from the host's text — except a secret
+ * whose targets the box changed (its server's command or URL, a provider's base URL, a host or
+ * proxy next to it): restoring that would hand the secret to whatever the box pointed it at, so
+ * it stays blank.
+ */
 function restoreText(format: StructuredFormat, boxText: string, hostText: string | null): string {
   const hostDoc = hostText === null ? null : format.parse(hostText);
   const boxDoc = format.parse(boxText);
   if (hostDoc === null || boxDoc === null) return boxText;
-  const edits = secretPaths(hostDoc)
-    .filter((path) => getPath(boxDoc, path) === "")
+  const secrets = secretPaths(hostDoc);
+  const hostSecrets = new Set(secrets.map((path) => JSON.stringify(path)));
+  const edits = secrets
+    .filter((path) => getPath(boxDoc, path) === "" && !secretTargetChanged(hostDoc, boxDoc, path, hostSecrets))
     .map((path) => ({ path, value: getPath(hostDoc, path) }));
   return edits.length === 0 ? boxText : format.edit(boxText, edits);
 }
@@ -191,8 +263,11 @@ function redactingCodec(format: StructuredFormat): SyncCodec {
     boxView: (box) => box,
     toBox: (host) => view(host),
     toHost: (box, host) => Buffer.from(restoreText(format, box.toString("utf8"), host?.toString("utf8") ?? null), "utf8"),
-    executableKeysChanged: (hostView, boxView) =>
-      topLevelExecutableKeysDiffer(hostView && format.parse(hostView.toString("utf8")), boxView && format.parse(boxView.toString("utf8")))
+    executableKeysChanged: (hostView, boxView, keys) => {
+      const a = hostView === null ? null : format.parse(hostView.toString("utf8"));
+      const b = boxView === null ? null : format.parse(boxView.toString("utf8"));
+      return executableKeysDiffer(a, b, keys) || blankedSecretTargetsChanged(a, b);
+    }
   };
 }
 
@@ -293,17 +368,11 @@ const claudeJsonCodec: SyncCodec = {
     const edits = claudeSubsetEdits(hostSubset, next);
     return edits.length === 0 ? (host ?? Buffer.from(hostText, "utf8")) : Buffer.from(editJson(hostText, edits), "utf8");
   },
-  executableKeysChanged(hostView, boxView) {
+  executableKeysChanged(hostView, boxView, keys) {
+    // Both views are the synced subset, project keys spelled as the box does.
     const a = hostView === null ? null : parseJsonDoc(hostView.toString("utf8"));
     const b = boxView === null ? null : parseJsonDoc(boxView.toString("utf8"));
-    const servers = (doc: Doc | null): string => {
-      const projects = isPlainObject(doc?.projects) ? (doc.projects as Record<string, Doc>) : {};
-      return canonicalJson({
-        top: doc?.mcpServers ?? null,
-        projects: Object.fromEntries(Object.entries(projects).map(([key, project]) => [key, project.mcpServers ?? null]))
-      });
-    };
-    return servers(a) !== servers(b);
+    return executableKeysDiffer(a, b, keys) || blankedSecretTargetsChanged(a, b);
   }
 };
 

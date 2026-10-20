@@ -15,6 +15,8 @@ import type { Readable } from "node:stream";
 import { hostToBoxPath, type BoxFsStat } from "@orquester/api";
 
 import type { BoxConnection } from "../contracts.ts";
+import { MAX_SYNC_FILE_BYTES } from "./host-fs.ts";
+import { isSafeEntryName } from "./rules.ts";
 
 /** Box entry of a walk, keyed by its HOST path. */
 export interface BoxFile {
@@ -45,7 +47,9 @@ export async function boxStat(connection: BoxConnection, hostPath: string, signa
 /**
  * Walk box dirs below each of `starts` (host paths). `accept(hostPath, isDir)` decides what is
  * entered or reported. Box-side symlinks to files are reported with their target's size;
- * symlinked dirs are not entered (the host never puts a link in a box).
+ * symlinked dirs are not entered (the host never puts a link in a box). A listed name that cannot
+ * be one path segment (empty, `.`, `..`, a separator, NUL) is dropped: only a hostile or broken
+ * box lists one, and every reported path may become a host path.
  */
 export async function walkBox(
   connection: BoxConnection,
@@ -75,6 +79,7 @@ export async function walkBox(
         signal?.throwIfAborted();
         const entries = await connection.request("fs.readdir", { path: boxPathOf(connection, path) }, { signal }).catch(() => []);
         for (const entry of entries) {
+          if (typeof entry?.name !== "string" || !isSafeEntryName(entry.name)) continue;
           const child = `${path}/${entry.name}`;
           if (entry.kind === "dir") {
             if (depth < MAX_DEPTH && accept(child, true)) {
@@ -110,7 +115,10 @@ async function collect(stream: Readable, maxBytes: number): Promise<Buffer> {
   return Buffer.concat(chunks);
 }
 
-/** A whole box file (or `length` bytes from `offset`); null when it does not exist. */
+/**
+ * A whole box file (or `length` bytes from `offset`); null when it does not exist. At most
+ * `maxBytes` (default {@link MAX_SYNC_FILE_BYTES}) are accepted, whatever size the box claims.
+ */
 export async function readBoxFile(
   connection: BoxConnection,
   hostPath: string,
@@ -124,7 +132,7 @@ export async function readBoxFile(
     length: options.length,
     signal: options.signal
   });
-  return collect(stream, options.maxBytes ?? Number.MAX_SAFE_INTEGER);
+  return collect(stream, options.maxBytes ?? MAX_SYNC_FILE_BYTES);
 }
 
 export async function writeBoxFile(connection: BoxConnection, hostPath: string, data: Buffer | Readable, mode: number): Promise<void> {

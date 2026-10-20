@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, realpath, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { Readable } from "node:stream";
 import { test } from "node:test";
 
-import type { BoxPathMap } from "@orquester/api";
+import type { BoxFsDirEntry, BoxFsStat, BoxPathMap } from "@orquester/api";
 
 import { fakeBoxHub, mappedBoxConnection, type MappedBoxConnection } from "./testing.ts";
 import { BoxTranscriptSyncService, claudeProjectDirName, type HostRunner } from "./transcripts.ts";
@@ -50,8 +51,14 @@ async function fixture(options: { paths?: BoxPathMap; realpaths?: (cwd: string) 
     imports.push({ args, cwd: runOptions.cwd, content: await readFile(args[1]!, "utf8") });
     return { code: 0, stdout: Buffer.alloc(0), stderr: "" };
   };
-  const sync = new BoxTranscriptSyncService({ hub: fakeBoxHub({ b1: box }), runHost });
-  return { base, home, shared, cwd, box, reads, sync, imports };
+  const warnings: string[] = [];
+  const sync = new BoxTranscriptSyncService({
+    appdir: join(base, "app"),
+    hub: fakeBoxHub({ b1: box }),
+    runHost,
+    logger: { warn: (message) => warnings.push(message) }
+  });
+  return { base, home, shared, cwd, box, reads, sync, imports, warnings };
 }
 
 const signal = (): AbortSignal => new AbortController().signal;
@@ -219,6 +226,7 @@ test("OpenCode: sessions travel as export/import in the project's cwd", async ()
   );
   await chmod(script, 0o755);
   const sync = new BoxTranscriptSyncService({
+    appdir: join(f.base, "app"),
     hub: fakeBoxHub({ b1: f.box }),
     opencode: { boxCommand: script },
     runHost: async (command, args, options) => {
@@ -239,4 +247,187 @@ test("OpenCode: sessions travel as export/import in the project's cwd", async ()
   // An export naming another session is refused, never imported.
   await assert.rejects(sync.pullAfterTurn("b1", { ...request, sessionRef: "ses_mismatch" }, signal()), /another session/);
   assert.equal(f.imports.length, 1);
+});
+
+/** Every file and link under `dir` (recursive), except `skip`. */
+async function treeOf(dir: string, skip: string): Promise<string[]> {
+  const out: string[] = [];
+  for (const entry of await readdir(dir, { withFileTypes: true }).catch(() => [])) {
+    const path = join(dir, entry.name);
+    if (path === skip) continue;
+    if (entry.isDirectory()) out.push(...(await treeOf(path, skip)));
+    else out.push(path);
+  }
+  return out;
+}
+
+/**
+ * A hostile box: `fs.readdir` of a dir also lists what `inject` returns for it, `fs.stat` of any
+ * path naming "evil" says it is a small file, and reading one yields attacker bytes.
+ */
+function hostileBox(box: MappedBoxConnection, inject: (boxDir: string) => BoxFsDirEntry[]): void {
+  const request = box.request.bind(box);
+  box.request = (async (method: string, params: unknown, options?: { signal?: AbortSignal }) => {
+    const path = (params as { path?: string } | null)?.path ?? "";
+    if (method === "fs.stat" && path.includes("evil")) {
+      return { path, kind: "file", size: 6, mtimeMs: 1, mode: 0o644, identity: null } satisfies BoxFsStat;
+    }
+    const result: unknown = await request(method as never, params as never, options);
+    if (method === "fs.readdir") return [...(result as BoxFsDirEntry[]), ...inject(path)];
+    return result;
+  }) as typeof box.request;
+  const readFile = box.readFile.bind(box);
+  box.readFile = async (path, options) => (path.includes("evil") ? Readable.from([Buffer.from("PWNED\n")]) : readFile(path, options));
+}
+
+const evil = (name: string, kind: BoxFsDirEntry["kind"] = "file"): BoxFsDirEntry => ({ name, kind, size: 6, mtimeMs: 1 });
+
+for (const sessionRef of ["s1", null]) {
+  test(`S1: a box listing with traversal names never writes outside the session dir (sessionRef ${sessionRef})`, async () => {
+    const f = await fixture();
+    const hostDir = join(f.shared, claudeProjectDirName(f.cwd));
+    const boxDir = join(f.home, "projects", claudeProjectDirName(f.cwd));
+    await put(f.box.local(join(boxDir, "s1.jsonl")), LINE(1));
+    await put(f.box.local(join(boxDir, "s1", "subagents", "agent-a.jsonl")), LINE(2));
+    hostileBox(f.box, (dir) => {
+      if (dir === boxDir) {
+        return [
+          evil(".."),
+          // (Never more `..` than lead back to the test's own temp dir, even unfixed.)
+          evil("../../../../evil-1.jsonl"),
+          evil("..", "dir"),
+          evil("."),
+          evil(""),
+          evil("s1.jsonl/../../evil-2.jsonl"),
+          evil("a\\..\\evil-3.jsonl"),
+          evil("evil\u0000.jsonl")
+        ];
+      }
+      if (dir === join(boxDir, "s1")) return [evil("..", "dir"), evil("../../../../evil-4.jsonl"), evil("subagents/../../../evil-5.jsonl")];
+      return [];
+    });
+    await f.sync.pullAfterTurn("b1", { agent: "claude", configRoot: f.home, cwd: f.cwd, sessionRef }, signal());
+
+    // The legit files arrived; nothing else exists anywhere on the host side.
+    assert.equal(await readFile(join(hostDir, "s1.jsonl"), "utf8"), LINE(1));
+    assert.equal(await readFile(join(hostDir, "s1", "subagents", "agent-a.jsonl"), "utf8"), LINE(2));
+    const host = await treeOf(f.base, join(f.base, "box"));
+    assert.deepEqual(
+      host.filter((path) => path.includes("evil")),
+      [],
+      "no box-named traversal reached the host"
+    );
+    assert.deepEqual(host.filter((path) => path.startsWith(`${hostDir}/`)).sort(), [join(hostDir, "s1", "subagents", "agent-a.jsonl"), join(hostDir, "s1.jsonl")].sort());
+  });
+}
+
+test("S1: host symlinks below the session dir are never followed (dirs, and appends to a linked file)", async () => {
+  const f = await fixture();
+  const hostDir = join(f.shared, claudeProjectDirName(f.cwd));
+  const boxDir = join(f.home, "projects", claudeProjectDirName(f.cwd));
+  const outside = join(f.base, "outside");
+  await put(join(outside, "victim.jsonl"), LINE(1));
+  await mkdir(hostDir, { recursive: true });
+  await symlink(outside, join(hostDir, "s1"));
+  await symlink(join(outside, "victim.jsonl"), join(hostDir, "s1.jsonl"));
+  await put(f.box.local(join(boxDir, "s1.jsonl")), LINE(1) + LINE(2));
+  await put(f.box.local(join(boxDir, "s1", "subagents", "agent-a.jsonl")), LINE(3));
+  await f.sync.pullAfterTurn("b1", { agent: "claude", configRoot: f.home, cwd: f.cwd, sessionRef: "s1" }, signal());
+  assert.equal(await readFile(join(outside, "victim.jsonl"), "utf8"), LINE(1), "the link target is untouched");
+  assert.deepEqual(await readdir(outside), ["victim.jsonl"], "nothing written through the linked dir");
+  assert.ok(f.warnings.length > 0, "the refusals are logged");
+});
+
+test("S1: a session id that is not a plain name is refused", async () => {
+  const f = await fixture();
+  for (const sessionRef of ["..", "../x", "a/b", "", "a\\b", "."]) {
+    const request = { configRoot: f.home, cwd: f.cwd, sessionRef };
+    await assert.rejects(f.sync.pullAfterTurn("b1", { agent: "claude", ...request }, signal()), /session id/, JSON.stringify(sessionRef));
+    await assert.rejects(f.sync.pushForResume("b1", { agent: "grok", ...request }, signal()), /session id/, JSON.stringify(sessionRef));
+  }
+});
+
+test("S1: transcripts never land inside the daemon's deny roots", async () => {
+  const f = await fixture();
+  const sync = new BoxTranscriptSyncService({ appdir: join(f.base, "app"), denyRoots: [f.shared], hub: fakeBoxHub({ b1: f.box }) });
+  const boxDir = join(f.home, "projects", claudeProjectDirName(f.cwd));
+  await put(f.box.local(join(boxDir, "s1.jsonl")), LINE(1));
+  await sync.pullAfterTurn("b1", { agent: "claude", configRoot: f.home, cwd: f.cwd, sessionRef: "s1" }, signal());
+  assert.equal(await exists(join(f.shared, claudeProjectDirName(f.cwd), "s1.jsonl")), false);
+});
+
+test("box agent temp files (.orq-tmp) never mirror", async () => {
+  const f = await fixture();
+  const boxDir = join(f.home, "projects", claudeProjectDirName(f.cwd));
+  await put(f.box.local(join(boxDir, "s1", "tool-results", ".r1.txt.orq-tmp-123")), "partial");
+  await put(f.box.local(join(boxDir, "s1", "tool-results", "r1.txt")), "done");
+  await f.sync.pullAfterTurn("b1", { agent: "claude", configRoot: f.home, cwd: f.cwd, sessionRef: "s1" }, signal());
+  assert.deepEqual(await readdir(join(f.shared, claudeProjectDirName(f.cwd), "s1", "tool-results")), ["r1.txt"]);
+});
+
+test("C9: a resume never overwrites a box transcript that is ahead of the host; the tail comes back instead", async () => {
+  const f = await fixture();
+  const hostFile = join(f.shared, claudeProjectDirName(f.cwd), "s1.jsonl");
+  const boxFile = f.box.local(join(f.home, "projects", claudeProjectDirName(f.cwd), "s1.jsonl"));
+  const request = { agent: "claude" as const, configRoot: f.home, cwd: f.cwd, sessionRef: "s1" };
+  await put(hostFile, LINE(1));
+  await f.sync.pushForResume("b1", request, signal());
+  assert.equal(await readFile(boxFile, "utf8"), LINE(1));
+  // A turn went on in the box but its pull never happened (the host died): the box is ahead.
+  await put(boxFile, LINE(1) + LINE(2) + LINE(3));
+  f.reads.length = 0;
+  await f.sync.pushForResume("b1", request, signal());
+  assert.equal(await readFile(boxFile, "utf8"), LINE(1) + LINE(2) + LINE(3), "the box copy is kept");
+  assert.equal(await readFile(hostFile, "utf8"), LINE(1) + LINE(2) + LINE(3), "and its tail mirrored to the host");
+  assert.equal(f.reads.filter((read) => read.path.endsWith("s1.jsonl"))[0]?.offset, Buffer.byteLength(LINE(1)), "only the tail moved");
+
+  // The host is ahead (the chat went on elsewhere): pushed.
+  await put(hostFile, LINE(1) + LINE(2) + LINE(3) + LINE(4));
+  await f.sync.pushForResume("b1", request, signal());
+  assert.equal(await readFile(boxFile, "utf8"), LINE(1) + LINE(2) + LINE(3) + LINE(4));
+
+  // Diverged (the box rewrote history after its last sync): the box copy stays, with a warning.
+  const rewritten = LINE(7) + LINE(8) + LINE(9) + LINE(10) + LINE(11);
+  await put(boxFile, rewritten);
+  await f.sync.pushForResume("b1", request, signal());
+  assert.equal(await readFile(boxFile, "utf8"), rewritten);
+  assert.equal(await readFile(hostFile, "utf8"), LINE(1) + LINE(2) + LINE(3) + LINE(4), "nor is the host copy overwritten");
+  assert.ok(
+    f.warnings.some((message) => message.includes("diverged")),
+    f.warnings.join("\n")
+  );
+});
+
+test("C9: a whole-file transcript the box changed since its last sync is kept; one it did not change is replaced", async () => {
+  const f = await fixture();
+  const grokHome = join(f.base, "app", "agent-accounts", "grok", "g1", "home");
+  const dir = join(grokHome, "sessions", encodeURIComponent(f.cwd), "g-1");
+  const request = { agent: "grok" as const, configRoot: grokHome, cwd: f.cwd, sessionRef: "g-1" };
+  await put(join(dir, "summary.json"), '{"generated_title":"A"}');
+  await f.sync.pushForResume("b1", request, signal());
+  // The host's copy moved on, the box's did not: pushed.
+  await put(join(dir, "summary.json"), '{"generated_title":"B!"}');
+  await f.sync.pushForResume("b1", request, signal());
+  assert.equal(await readFile(f.box.local(join(dir, "summary.json")), "utf8"), '{"generated_title":"B!"}');
+  // The box's copy moved on since: kept.
+  await put(f.box.local(join(dir, "summary.json")), '{"generated_title":"from the box"}');
+  await f.sync.pushForResume("b1", request, signal());
+  assert.equal(await readFile(f.box.local(join(dir, "summary.json")), "utf8"), '{"generated_title":"from the box"}');
+});
+
+test("a host copy changed behind the mirror cache is mirrored again; overlapping pulls of one file stay consistent", async () => {
+  const f = await fixture();
+  const hostFile = join(f.shared, claudeProjectDirName(f.cwd), "s1.jsonl");
+  const boxFile = f.box.local(join(f.home, "projects", claudeProjectDirName(f.cwd), "s1.jsonl"));
+  const request = { agent: "claude" as const, configRoot: f.home, cwd: f.cwd, sessionRef: "s1" };
+  await put(boxFile, LINE(1) + LINE(2));
+  await f.sync.pullAfterTurn("b1", request, signal());
+  // Something cut the host copy short; the box file did not change.
+  await put(hostFile, LINE(1));
+  await f.sync.pullAfterTurn("b1", request, signal());
+  assert.equal(await readFile(hostFile, "utf8"), LINE(1) + LINE(2), "the cache does not hide a short host copy");
+
+  await put(boxFile, LINE(1) + LINE(2) + LINE(3));
+  await Promise.all([1, 2, 3].map(() => f.sync.pullAfterTurn("b1", request, signal())));
+  assert.equal(await readFile(hostFile, "utf8"), LINE(1) + LINE(2) + LINE(3));
 });
