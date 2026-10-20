@@ -21,7 +21,35 @@ export interface ComposerDraft {
   text: string;
   attachments: AttachmentRef[];
   context: ComposerContextRecord[];
+  /**
+   * Passages quoted from the agent's replies, in the order they were added.
+   * Absent when there are none, so a draft without quotes keeps the shape an
+   * older bundle wrote and reads. Sent as blockquotes ahead of `text`
+   * (`composeQuotedPrompt`).
+   */
+  quotes?: ComposerQuote[];
 }
+
+/**
+ * One passage of an agent's reply quoted into the composer: its markdown,
+ * rebuilt from what the user selected (`selectionMarkdown`), and the id its
+ * chip is keyed by. The id is the draft's own, never the message's: the same
+ * passage may be quoted twice.
+ */
+export interface ComposerQuote {
+  id: string;
+  text: string;
+}
+
+/** How many quotes one draft holds. */
+export const MAX_COMPOSER_QUOTES = 20;
+
+/**
+ * The longest passage one quote holds. The whole prompt is still measured
+ * against the turn input bound on send; this keeps a selection of a whole
+ * long thread from landing in `localStorage` as one quote.
+ */
+export const MAX_COMPOSER_QUOTE_CHARS = 50_000;
 
 export const EMPTY_DRAFT: ComposerDraft = { text: "", attachments: [], context: [] };
 
@@ -29,7 +57,8 @@ function draftIsEmpty(draft: ComposerDraft): boolean {
   return (
     draft.text.trim().length === 0 &&
     draft.attachments.length === 0 &&
-    draft.context.length === 0
+    draft.context.length === 0 &&
+    (draft.quotes?.length ?? 0) === 0
   );
 }
 
@@ -91,6 +120,38 @@ export function parsePersistedContextRecords(value: unknown): ComposerContextRec
   return Array.isArray(value) ? value.filter(isContextRecord) : [];
 }
 
+function isQuote(value: unknown): value is ComposerQuote {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  return (
+    typeof record.id === "string" &&
+    record.id.length > 0 &&
+    typeof record.text === "string" &&
+    record.text.trim().length > 0 &&
+    record.text.length <= MAX_COMPOSER_QUOTE_CHARS
+  );
+}
+
+/**
+ * A persisted list of quotes, field-wise: every well-formed entry narrowed to
+ * its own fields, the first of a repeated id, at most
+ * {@link MAX_COMPOSER_QUOTES}. Anything else is dropped, never the whole list.
+ */
+export function parsePersistedQuotes(value: unknown): ComposerQuote[] {
+  if (!Array.isArray(value)) return [];
+  const quotes: ComposerQuote[] = [];
+  const seen = new Set<string>();
+  for (const entry of value) {
+    if (!isQuote(entry) || seen.has(entry.id)) continue;
+    seen.add(entry.id);
+    quotes.push({ id: entry.id, text: entry.text });
+    if (quotes.length === MAX_COMPOSER_QUOTES) break;
+  }
+  return quotes;
+}
+
 /**
  * Field-wise validation with a fallback, per AGENTS.md: **raw `JSON.parse`
  * output must never reach typed code** — an old bundle's payload outlives a
@@ -119,10 +180,12 @@ export function parsePersistedDrafts(raw: string | null): Record<string, Compose
     if (typeof record.text !== "string") {
       continue;
     }
+    const quotes = parsePersistedQuotes(record.quotes);
     result[sessionId] = {
       text: record.text,
       attachments: parsePersistedAttachmentRefs(record.attachments),
-      context: parsePersistedContextRecords(record.context)
+      context: parsePersistedContextRecords(record.context),
+      ...(quotes.length > 0 ? { quotes } : {})
     };
   }
   return result;

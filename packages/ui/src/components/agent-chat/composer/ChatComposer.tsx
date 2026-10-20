@@ -48,8 +48,19 @@ import {
   type DraftPersistScheduler
 } from "./composer-draft";
 import { ComposerPrimaryActions } from "./ComposerPrimaryActions";
+import { ComposerQuotes } from "./ComposerQuotes";
 import { ComposerTokenMenu } from "./ComposerTokenMenu";
-import { registerComposerHandle, type ComposerSubmitResult } from "./composer-bridge";
+import {
+  registerComposerHandle,
+  type ComposerQuoteResult,
+  type ComposerSubmitResult
+} from "./composer-bridge";
+import {
+  addComposerQuote,
+  composeQuotedPrompt,
+  mergeQuotes,
+  type ComposerQuote
+} from "./composer-quotes";
 import { restoreFailedSendDraft } from "./composer-failed-send";
 import { beginComposerSend, isComposerSending } from "./composer-sends";
 import { useComposerSending } from "./use-composer-sending";
@@ -128,9 +139,11 @@ import { useComposerPathSearch } from "./use-composer-path-search";
 interface DraftState {
   text: string;
   attachments: StagedAttachment[];
+  /** Passages quoted from the agent's replies, sent as blockquotes ahead of `text`. */
+  quotes: ComposerQuote[];
 }
 
-const EMPTY_DRAFT: DraftState = { text: "", attachments: [] };
+const EMPTY_DRAFT: DraftState = { text: "", attachments: [], quotes: [] };
 
 /** What goes on the wire for the staged chips: their uploaded references. */
 function attachmentRefs(attachments: readonly StagedAttachment[]): AttachmentRef[] {
@@ -362,7 +375,11 @@ export function ChatComposer({
     revokeImagePreviews(draftRef.current.attachments);
     const loaded = loadComposerDraft(storeDraftRef.current);
     carriedContextRef.current = loaded.context;
-    const next: DraftState = { text: loaded.text, attachments: loaded.attachments };
+    const next: DraftState = {
+      text: loaded.text,
+      attachments: loaded.attachments,
+      quotes: loaded.quotes
+    };
     draftRef.current = next;
     setDraft(next);
     setCursor(next.text.length);
@@ -427,7 +444,8 @@ export function ChatComposer({
     const next = composerDraftToPersist({
       text: draft.text,
       attachments: draft.attachments,
-      context: carriedContextRef.current
+      context: carriedContextRef.current,
+      quotes: draft.quotes
     });
     if (persistedDraftsEqual(next, storeDraftRef.current)) {
       scheduler.cancel();
@@ -446,7 +464,11 @@ export function ChatComposer({
   // ---------------------------------------------------------------------
   // Height publishing (§7.4)
   // ---------------------------------------------------------------------
-  const resting = !focused && draft.text.length === 0 && draft.attachments.length === 0;
+  const resting =
+    !focused &&
+    draft.text.length === 0 &&
+    draft.attachments.length === 0 &&
+    draft.quotes.length === 0;
   restingRef.current = resting;
 
   const publishHeight = React.useCallback(
@@ -510,7 +532,8 @@ export function ChatComposer({
     isMobileViewport: isMobile,
     isFocused: focused,
     hasMultilineDraft: draft.text.includes("\n"),
-    hasAttachments,
+    // A quote is shown above the textarea as a chip is, so it un-collapses too.
+    hasAttachments: hasAttachments || draft.quotes.length > 0,
     hasDockedBanner: hasPendingRequest || planFollowUp !== null
   });
 
@@ -705,14 +728,20 @@ export function ChatComposer({
       const added = next.attachments.filter(
         (chip) => !current.attachments.some((entry) => entry.key === chip.key)
       );
-      draftRef.current = { text: next.text, attachments: next.attachments };
+      const returnedQuotes = message.quotes ?? [];
+      draftRef.current = {
+        text: next.text,
+        attachments: next.attachments,
+        quotes: mergeQuotes(current.quotes, returnedQuotes)
+      };
       caretRef.current = next.text.length;
       setDraft((state) => ({
         text: next.text,
         attachments: [
           ...state.attachments,
           ...added.filter((chip) => !state.attachments.some((entry) => entry.key === chip.key))
-        ]
+        ],
+        quotes: mergeQuotes(state.quotes, returnedQuotes)
       }));
       applyCaret(next.text.length, { focus: isTextareaFocused() });
       return next.unstaged;
@@ -758,7 +787,10 @@ export function ChatComposer({
       flushSync(() => {
         setDraft((state) => {
           const next = draftAfterSend({ outcome: restore.outcome, sent: restore.sent, draft: state });
-          return next === null ? state : { ...state, ...next };
+          // Its quotes come back with its text, ahead of any quoted meanwhile.
+          return next === null
+            ? state
+            : { ...state, ...next, quotes: mergeQuotes(restore.quotes ?? [], state.quotes) };
         });
         setNotice(restore.outcome.notice);
       });
@@ -766,6 +798,47 @@ export function ChatComposer({
     },
     []
   );
+
+  /**
+   * A passage of the agent's reply quoted from the timeline's selection
+   * toolbar: added after the draft's other quotes, then the textarea focused
+   * with the caret at the end, so what the user types next is their comment
+   * on it. Unlike a bridge insert this one takes focus: the user asked for it
+   * with a click on Quote, and typing about the quote is the next step. A
+   * refusal (the draft holds as many quotes as it may, or the passage is too
+   * long) is said on the status line and answered to the toolbar.
+   *
+   * Batch-safe, like `insertText`: the quote is appended to whatever the
+   * state holds when the update runs, never to this render's snapshot.
+   */
+  const addQuote = React.useCallback(
+    (text: string): ComposerQuoteResult => {
+      const current = draftRef.current;
+      const result = addComposerQuote(current.quotes, text);
+      if (!result.ok) {
+        setNotice(result.reason);
+        return { ok: false, reason: result.reason };
+      }
+      const { quote } = result;
+      draftRef.current = { ...current, quotes: result.quotes };
+      setDraft((state) =>
+        state.quotes.some((entry) => entry.id === quote.id)
+          ? state
+          : { ...state, quotes: [...state.quotes, quote] }
+      );
+      focusAtEnd();
+      return { ok: true };
+    },
+    [focusAtEnd]
+  );
+
+  /** A quote's X: it leaves the draft, and focus goes back to the textarea, not to a vanished button. */
+  const removeQuote = React.useCallback((id: string) => {
+    const current = draftRef.current;
+    draftRef.current = { ...current, quotes: current.quotes.filter((quote) => quote.id !== id) };
+    setDraft((state) => ({ ...state, quotes: state.quotes.filter((quote) => quote.id !== id) }));
+    textareaRef.current?.focus({ preventScroll: true });
+  }, []);
 
   // A LAYOUT effect, as the draft load and the draft scheduler are: the handle
   // names this composer's thread from the commit that loads that thread's
@@ -788,9 +861,11 @@ export function ChatComposer({
         openControl,
         sendText: (text) => sendExternalTextRef.current(text),
         submitText: (text) => submitExternalTextRef.current(text),
-        restoreFailedSend: (restore) => restoreIntoLiveDraft(sessionId, restore)
+        restoreFailedSend: (restore) => restoreIntoLiveDraft(sessionId, restore),
+        addQuote
       }),
     [
+      addQuote,
       focusAtEnd,
       insertText,
       isTextareaFocused,
@@ -1162,7 +1237,8 @@ export function ChatComposer({
   const uploadBlock = uploadsBlockSend(draft.attachments);
   const sendable = hasSendableContent({
     text: draft.text,
-    attachmentCount: draft.attachments.length
+    attachmentCount: draft.attachments.length,
+    quoteCount: draft.quotes.length
   });
   // A draft files came back into may hold more than the eight: every one stays,
   // and it is neither sent nor queued until the user removes enough (§7.4).
@@ -1198,6 +1274,12 @@ export function ChatComposer({
          * whatever the user is typing — its failure is the notice alone.
          */
         returnToDraftOnFailure?: boolean;
+        /**
+         * The send opens with the draft's quotes (`composeQuotedPrompt`): a
+         * failure puts back the user's own `text` and the quotes as quotes,
+         * never the blockquotes glued into the textarea.
+         */
+        quoted?: { text: string; quotes: readonly ComposerQuote[] };
       } = {}
     ) => {
       // The thread this message leaves FROM. A failure goes back into its
@@ -1250,11 +1332,23 @@ export function ChatComposer({
         // shows it now, else that thread's persisted draft, where the next
         // composer to show it loads it (`restoreFailedSendDraft`). Its notice
         // goes only where its draft does.
+        //
+        // A quoted send comes back as it was composed: the user's words in
+        // the text, the quotes as quotes.
+        const quoted = options.quoted;
+        const restore: FailedSendRestore<StagedAttachment> =
+          quoted && outcome.kind === "failed" && outcome.text !== null
+            ? {
+                outcome: { ...outcome, text: quoted.text },
+                sent: withoutPreviews(attachments),
+                quotes: quoted.quotes
+              }
+            : { outcome, sent: withoutPreviews(attachments) };
         restoreFailedSendDraft({
           sentFrom,
           liveThread: liveThreadRef.current,
-          restore: { outcome, sent: withoutPreviews(attachments) },
-          restoreLive: (restore) => restoreIntoLiveDraft(sentFrom, restore)
+          restore,
+          restoreLive: (next) => restoreIntoLiveDraft(sentFrom, next)
         });
       } finally {
         // After the restore: no frame shows an enabled, empty composer that is
@@ -1363,17 +1457,25 @@ export function ChatComposer({
       // composer of this thread started is in flight too (§7.4).
       if (reverting || isComposerSending(sessionId)) return;
       const text = draft.text;
+      const quotes = draft.quotes;
+      // The quotes go ahead of the user's words as blockquotes; from here on
+      // the message is this one text, measured, queued and sent as a whole.
+      const composed = composeQuotedPrompt(quotes, text);
 
       // §4.6.5(a): `/plan` and `/default` are re-recognised on submit, but only
       // when the whole trimmed draft is that command and nothing is attached.
       // §4.6.5(a): swallowed client-side ONLY where the toggle exists. On
       // OpenCode/Grok the provider may dispatch `/plan` natively, so with the
-      // toggle hidden the draft is ordinary text and goes to the wire.
-      const standalone = swallowsStandalonePlanCommand({
-        text,
-        showPlanModeToggle,
-        attachmentCount: draft.attachments.length
-      });
+      // toggle hidden the draft is ordinary text and goes to the wire. A draft
+      // with quotes is a message about them, never a bare command.
+      const standalone =
+        quotes.length > 0
+          ? null
+          : swallowsStandalonePlanCommand({
+              text,
+              showPlanModeToggle,
+              attachmentCount: draft.attachments.length
+            });
       if (standalone) {
         setPlanMode(standalone);
         setDraft((state) => ({ ...state, text: "" }));
@@ -1388,10 +1490,11 @@ export function ChatComposer({
       // R7-3: the plan is resolved BEFORE the emptiness guard, because an
       // empty draft is exactly the input "Implement" is defined on — the plan
       // supplies the text. Guarding first made the enabled Implement button a
-      // silent no-op.
+      // silent no-op. Quotes count as the draft's text here: quoting part of
+      // the plan and sending it is a Refine about that part.
       const plan = planFollowUp
         ? resolvePlanFollowUpSubmission({
-            draftText: text,
+            draftText: composed,
             planMarkdown: planFollowUp.planMarkdown
           })
         : null;
@@ -1409,12 +1512,12 @@ export function ChatComposer({
       // §4.6.5(c): Grok's `/always-approve` would desynchronise the host's
       // runtime mode. Refuse on the SEND path, not just in the menu — the user
       // can type it by hand. (Absorbed from W11's slash-commands.logic.ts.)
-      const blocked = blockedProviderCommandMessage(provider?.id, text);
+      const blocked = blockedProviderCommandMessage(provider?.id, composed);
       if (blocked) {
         setNotice(blocked);
         return;
       }
-      const outgoing = plan?.text ?? text.trim();
+      const outgoing = plan?.text ?? composed.trim();
       const outgoingMode = plan?.interactionMode ?? interactionMode;
       // Implement resolves its prompt at send time through the store's read:
       // as is when intact, read back whole when §5.6 cut it at 16 KiB. It sends
@@ -1478,7 +1581,12 @@ export function ChatComposer({
         });
         return;
       }
-      void runSend(outgoing, outgoingMode, sentAttachments, { resolveText: implementationText });
+      void runSend(outgoing, outgoingMode, sentAttachments, {
+        resolveText: implementationText,
+        // A failure puts the quotes back as quotes and the user's words as
+        // they typed them (`runSend`), not the composed blockquotes.
+        ...(quotes.length > 0 ? { quoted: { text: text.trim(), quotes } } : {})
+      });
     },
     [
       planFollowUp,
@@ -1486,6 +1594,7 @@ export function ChatComposer({
       applyCaret,
       countBlock,
       draft.attachments,
+      draft.quotes,
       draft.text,
       hostGoalCommand,
       interactionMode,
@@ -1866,6 +1975,8 @@ export function ChatComposer({
             collapsed && "py-1.5"
           )}
         >
+          <ComposerQuotes quotes={draft.quotes} onRemove={removeQuote} disabled={reverting} />
+
           <ComposerAttachments
             attachments={draft.attachments}
             onRemove={removeAttachment}
@@ -1893,7 +2004,11 @@ export function ChatComposer({
                 ? willQueue
                   ? "Queue a follow-up…"
                   : "Steer the agent…"
-                : planTitle
+                : draft.quotes.length > 0
+                  ? draft.quotes.length === 1
+                    ? "Say what to do with the quote…"
+                    : "Say what to do with the quotes…"
+                  : planTitle
                   ? `Refine “${planTitle}” — or press Implement`
                   : "Ask, or describe the change…"
             }
@@ -2049,7 +2164,8 @@ export function ChatComposer({
             <ComposerPrimaryActions
               isRunning={isTurnActive}
               showPlanFollowUp={planFollowUp !== null}
-              promptHasText={draft.text.trim().length > 0}
+              // Quotes are part of the prompt: with a plan waiting they make it a Refine.
+              promptHasText={draft.text.trim().length > 0 || draft.quotes.length > 0}
               hasSendableContent={sendable}
               isSendBusy={sending}
               sendDisabledReason={sendDisabledReason}

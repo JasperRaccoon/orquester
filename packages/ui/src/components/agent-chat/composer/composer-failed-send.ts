@@ -53,7 +53,12 @@ export function restoreFailedSendDraft(input: {
   if (target === "live" && input.restoreLive(restore)) return "live";
   if (target === "composer" && restoreComposerFailedSend(sentFrom, restore)) return "composer";
   updateThreadDraft(sentFrom, (persisted) =>
-    persistedDraftAfterSend({ outcome: restore.outcome, sent: restore.sent, persisted })
+    persistedDraftAfterSend({
+      outcome: restore.outcome,
+      sent: restore.sent,
+      quotes: restore.quotes,
+      persisted
+    })
   );
   return "persisted";
 }

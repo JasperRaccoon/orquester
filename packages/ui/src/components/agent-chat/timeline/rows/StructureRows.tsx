@@ -15,6 +15,7 @@ import {
 import { ChatIconButton, CopyButton, DisclosureChevron, WorkingIndicator } from "../../primitives";
 import { useTimelineRowContext } from "../context";
 import { ChatMarkdown } from "../markdown/ChatMarkdown";
+import { QUOTE_SOURCE_ATTR } from "../quote-selection";
 import { ChangedFilesCard } from "./ChangedFilesCard";
 
 type Row<K extends AgentChatTimelineRow["kind"]> = Extract<AgentChatTimelineRow, { kind: K }>;
@@ -346,7 +347,10 @@ export const ProposedPlanRow = React.memo(function ProposedPlanRow({
       </div>
       <div className="mt-3">
         <div className={cn("relative", canCollapse && !expanded && "max-h-[26rem] overflow-hidden")}>
-          <ChatMarkdown text={markdown} onOpenFile={ctx.onOpenFile} />
+          {/* A plan is the agent's text too: a passage of it may be quoted (to Refine it). */}
+          <div {...{ [QUOTE_SOURCE_ATTR]: `plan:${row.id}` }}>
+            <ChatMarkdown text={markdown} onOpenFile={ctx.onOpenFile} />
+          </div>
           {canCollapse && !expanded ? (
             <div className="pointer-events-none absolute inset-x-0 bottom-0 h-24 bg-gradient-to-t from-neutral-900 via-neutral-900/80 to-transparent" />
           ) : null}

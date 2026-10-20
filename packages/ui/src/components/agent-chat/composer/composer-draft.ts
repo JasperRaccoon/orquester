@@ -37,11 +37,13 @@ import type { AttachmentRef, ComposerContextRecord } from "@orquester/api/agent-
 import {
   attachmentPathOf,
   EMPTY_DRAFT,
-  type ComposerDraft
+  type ComposerDraft,
+  type ComposerQuote
 } from "../../../lib/agent-chat/composer.logic";
 import { composerTextForDelivery } from "../../../lib/composer-inbox";
 import { textNamesPath } from "./composer-files";
 import { removeImagePlaceholder } from "./composer-images";
+import { mergeQuotes, quotesEqual } from "./composer-quotes";
 import {
   decideStagedAttachmentForRef,
   draftAfterSend,
@@ -82,16 +84,22 @@ function persistableAttachmentRefs(
   return refs;
 }
 
-/** The live draft, narrowed to what is worth persisting. */
+/**
+ * The live draft, narrowed to what is worth persisting. Its quotes go whole,
+ * since they are text, and only when there are any, so a draft without them
+ * keeps the shape every older bundle wrote.
+ */
 export function composerDraftToPersist(input: {
   text: string;
   attachments: readonly PersistableAttachment[];
   context: readonly ComposerContextRecord[];
+  quotes?: readonly ComposerQuote[];
 }): ComposerDraft {
   return {
     text: input.text,
     attachments: persistableAttachmentRefs(input.attachments),
-    context: [...input.context]
+    context: [...input.context],
+    ...(input.quotes && input.quotes.length > 0 ? { quotes: [...input.quotes] } : {})
   };
 }
 
@@ -117,7 +125,8 @@ export function persistedDraftsEqual(a: ComposerDraft, b: ComposerDraft): boolea
     a.attachments.length === b.attachments.length &&
     a.context.length === b.context.length &&
     a.attachments.every((ref, index) => sameAttachment(ref, b.attachments[index]!)) &&
-    a.context.every((record, index) => sameContext(record, b.context[index]!))
+    a.context.every((record, index) => sameContext(record, b.context[index]!)) &&
+    quotesEqual(a.quotes, b.quotes)
   );
 }
 
@@ -126,6 +135,7 @@ export interface LoadedComposerDraft {
   text: string;
   attachments: StagedAttachment[];
   context: ComposerContextRecord[];
+  quotes: ComposerQuote[];
 }
 
 /**
@@ -179,7 +189,12 @@ export function loadComposerDraft(persisted: ComposerDraft): LoadedComposerDraft
     if (decision.kind !== "staged") continue;
     attachments.push(readyChip(decision, ref));
   }
-  return { text: persisted.text, attachments, context: [...persisted.context] };
+  return {
+    text: persisted.text,
+    attachments,
+    context: [...persisted.context],
+    quotes: [...(persisted.quotes ?? [])]
+  };
 }
 
 /**
@@ -192,13 +207,16 @@ export function loadComposerDraft(persisted: ComposerDraft): LoadedComposerDraft
  * puts the send's text and chips back ahead of what it already held — what
  * was typed there since stays, behind them — and the result is narrowed back
  * for storage ({@link composerDraftToPersist}) with the draft's context
- * records as they were. `null` when the send gives nothing back: a refusal,
- * or a failed Implement.
+ * records as they were, and the quotes the send carried ahead of any the
+ * draft holds (`mergeQuotes`). `null` when the send gives nothing back: a
+ * refusal, or a failed Implement.
  */
 export function persistedDraftAfterSend(input: {
   outcome: ComposerSendOutcome;
   /** The chips the send carried, in tray order. */
   sent: readonly StagedAttachment[];
+  /** The quotes the send carried, in draft order. */
+  quotes?: readonly ComposerQuote[] | undefined;
   /** The thread's persisted draft as it is now. */
   persisted: ComposerDraft;
 }): ComposerDraft | null {
@@ -208,7 +226,8 @@ export function persistedDraftAfterSend(input: {
   return composerDraftToPersist({
     text: next.text,
     attachments: next.attachments,
-    context: loaded.context
+    context: loaded.context,
+    quotes: mergeQuotes(input.quotes ?? [], loaded.quotes)
   });
 }
 
@@ -303,10 +322,12 @@ export function persistedDraftAfterReturn(input: {
     draft: { text: input.persisted.text, attachments: input.persisted.attachments.map(storedChip) },
     message: input.message
   });
+  const quotes = mergeQuotes(input.persisted.quotes ?? [], input.message.quotes ?? []);
   return {
     text: withPathsAppended(next.text, next.unstaged),
     attachments: persistableAttachmentRefs(next.attachments),
-    context: [...input.persisted.context, ...input.message.context]
+    context: [...input.persisted.context, ...input.message.context],
+    ...(quotes.length > 0 ? { quotes } : {})
   };
 }
 

@@ -13,6 +13,7 @@ import { ChatIconButton, ScrollToBottomButton } from "../primitives";
 import { readPlanWithoutStore, TimelineRowContext, type TimelineRowContextValue } from "./context";
 import { drillInEmptyNotice, timelineChildren, type EmptyNotice } from "./empty-notice";
 import { TimelineRow } from "./TimelineRow";
+import { QuoteSelectionToolbar } from "./QuoteSelectionToolbar";
 import { LoadOlderRow } from "./rows/LoadOlderRow";
 import { nextRowEnterState, rowEnters, type RowEnterState } from "./row-enter";
 
@@ -231,6 +232,11 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
 
   // The drill-in dispatches no commands, whether or not the caller says so.
   const effectiveReadOnly = readOnly === true || agentId !== undefined;
+
+  // The scroller as state, for the selection toolbar's listeners: it is
+  // mounted for this component's whole life, so this is set once.
+  const [scroller, setScroller] = React.useState<HTMLDivElement | null>(null);
+  React.useLayoutEffect(() => setScroller(scrollerRef.current), []);
 
   // A turn — or a drill-in's live agent — is live exactly when the projection
   // says so; nothing here re-derives turn state from items (§7.2: the UI
@@ -869,6 +875,12 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
       {/* The single affordance that re-arms follow. Nothing else scrolls the
           user back. */}
       <ScrollToBottomButton visible={!follow} onClick={reArmFollow} bottom={bottomInset + 4} />
+
+      {/* Quote or copy a selection in an agent's reply — only where there is
+          a composer to quote into: never the drill-in or a read-only view. */}
+      {effectiveReadOnly ? null : (
+        <QuoteSelectionToolbar viewport={scroller} sessionId={sessionId} bottomInset={bottomInset} />
+      )}
     </div>
   );
 }

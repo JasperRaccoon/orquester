@@ -221,6 +221,11 @@ test("a draft with only whitespace has nothing to send", () => {
   assert.equal(hasSendableContent({ text: "hi", attachmentCount: 0 }), true);
 });
 
+test("quotes alone are a message", () => {
+  assert.equal(hasSendableContent({ text: " ", attachmentCount: 0, quoteCount: 1 }), true);
+  assert.equal(hasSendableContent({ text: " ", attachmentCount: 0, quoteCount: 0 }), false);
+});
+
 test("an empty draft implements the plan and leaves plan mode", () => {
   const resolved = resolvePlanFollowUpSubmission({
     draftText: "  ",

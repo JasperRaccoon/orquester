@@ -9,6 +9,8 @@ import {
   draftAfterReturn,
   loadComposerDraft,
   persistedDraftAfterReturn,
+  persistedDraftAfterSend,
+  persistedDraftsEqual,
 } from "./composer-draft";
 import type { StagedAttachment } from "./ComposerAttachments";
 import { attachmentCountBlockSend } from "./composer-submission";
@@ -182,6 +184,81 @@ describe("a message coming back to a draft no composer shows (§7.4)", () => {
       next.attachments.length,
       "the next mount stages every ref the draft holds"
     );
+  });
+});
+
+describe("the draft's quotes", () => {
+  const quote = (id: string, text = `passage ${id}`) => ({ id, text });
+
+  it("persists them whole, and leaves the field off when there are none", () => {
+    const withQuotes = composerDraftToPersist({
+      text: "why?",
+      attachments: [],
+      context: [],
+      quotes: [quote("q1"), quote("q2")]
+    });
+    assert.deepEqual(withQuotes, {
+      text: "why?",
+      attachments: [],
+      context: [],
+      quotes: [quote("q1"), quote("q2")]
+    });
+    const without = composerDraftToPersist({ text: "why?", attachments: [], context: [], quotes: [] });
+    assert.equal("quotes" in without, false, "the shape an older bundle wrote");
+  });
+
+  it("tells a draft whose quotes changed from one that did not", () => {
+    const base: ComposerDraft = { text: "t", attachments: [], context: [], quotes: [quote("q1")] };
+    assert.equal(persistedDraftsEqual(base, { ...base, quotes: [quote("q1")] }), true);
+    assert.equal(persistedDraftsEqual(base, { ...base, quotes: [] }), false);
+    assert.equal(persistedDraftsEqual(base, { ...base, quotes: [quote("q1", "edited")] }), false);
+    assert.equal(
+      persistedDraftsEqual({ text: "t", attachments: [], context: [] }, { text: "t", attachments: [], context: [], quotes: [] }),
+      true,
+      "absent and empty are the same draft"
+    );
+  });
+
+  it("loads them back with the text", () => {
+    const loaded = loadComposerDraft({ text: "", attachments: [], context: [], quotes: [quote("q1")] });
+    assert.deepEqual(loaded.quotes, [quote("q1")]);
+    assert.deepEqual(loadComposerDraft({ text: "", attachments: [], context: [] }).quotes, []);
+  });
+
+  it("puts a failed send's quotes back ahead of the persisted ones, with its own words", () => {
+    const next = persistedDraftAfterSend({
+      outcome: { kind: "failed", text: "what about this?", notice: "Network error" },
+      sent: [],
+      quotes: [quote("sent")],
+      persisted: { text: "typed meanwhile", attachments: [], context: [], quotes: [quote("later")] }
+    });
+    assert.deepEqual(next, {
+      text: "what about this?\n\ntyped meanwhile",
+      attachments: [],
+      context: [],
+      quotes: [quote("sent"), quote("later")]
+    });
+  });
+
+  it("gives nothing back for a refusal, whatever it carried", () => {
+    assert.equal(
+      persistedDraftAfterSend({
+        outcome: { kind: "refused", notice: "no" },
+        sent: [],
+        quotes: [quote("sent")],
+        persisted: { text: "", attachments: [], context: [] }
+      }),
+      null
+    );
+  });
+
+  it("keeps the persisted quotes when a message comes back behind the draft", () => {
+    const next = persistedDraftAfterReturn({
+      persisted: { text: "draft", attachments: [], context: [], quotes: [quote("kept")] },
+      message: { text: "returned", attachments: [], context: [] }
+    });
+    assert.deepEqual(next.quotes, [quote("kept")]);
+    assert.equal(next.text, "draft\n\nreturned");
   });
 });
 
