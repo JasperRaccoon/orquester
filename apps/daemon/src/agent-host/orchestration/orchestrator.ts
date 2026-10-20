@@ -353,6 +353,12 @@ export interface OrchestratorOptions {
     launch: ThreadLaunchConfig | null;
     resumeCursor: unknown;
   }) => void;
+  /**
+   * boxes (spec 2026-10-19 §8.3): a live (not replayed) turn of a thread started — one the host
+   * dispatched or the provider's own. A box thread marks it in the daemon's config sync, so the
+   * box changes the turn makes wait for its `onTurnEnded`. Fire-and-forget, must not throw.
+   */
+  onTurnStarted?: (input: { threadId: string; launch: ThreadLaunchConfig | null }) => void;
   /** A thread was deleted (after everything of it is freed): per-thread state elsewhere goes too. Must not throw. */
   onThreadDeleted?: (threadId: string) => void;
   /**
@@ -6181,6 +6187,14 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
                   runtime.continueAfterRestart.turnId !== turnId
                 ) {
                   await dropContinuationMarker(runtime);
+                }
+                // boxes: a live turn's start marks a box thread's turn for its config changes.
+                if (options.onTurnStarted !== undefined) {
+                  try {
+                    options.onTurnStarted({ threadId: runtime.id, launch: runtime.launch });
+                  } catch (error) {
+                    logger.warn(`agent-host: the turn-start hook failed for ${runtime.id}`, error);
+                  }
                 }
               }
               // Backstop for turns the host did not dispatch itself (a

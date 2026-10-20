@@ -2,7 +2,7 @@
  * Ephemeral AI VMs — the daemon's socket-only route the agent host calls around a box CLI's life
  * (`daemonRoutesForHost.boxSync`, spec 2026-10-19 §8.3, §8.5): the config sync before every CLI
  * start, the transcript push before a resume, the transcript mirror and the config-change set
- * after every turn. The implementations are the sync track's (`BoxConfigSync`,
+ * after every turn, and the mark of every turn's start. The implementations are the sync track's (`BoxConfigSync`,
  * `BoxTranscriptSync`); this only carries the agent host's calls to them.
  *
  * Registered ONLY on the unix-socket app, never on remote HTTP, and it requires the agent host's
@@ -63,8 +63,9 @@ export function parseBoxSyncRequest(body: unknown): BoxSyncRequest | null {
       return transcript === null ? null : { op: body.op, boxId, transcript };
     }
     case "turnEnded":
+    case "turnStarted":
       return typeof body.threadId === "string" && body.threadId.length > 0 && body.threadId.length <= 256
-        ? { op: "turnEnded", boxId, threadId: body.threadId }
+        ? { op: body.op, boxId, threadId: body.threadId }
         : null;
     default:
       return null;
@@ -100,6 +101,10 @@ export function registerBoxHostRoutes(app: FastifyInstance, deps: BoxHostRoutesD
           break;
         case "turnEnded":
           await deps.sync.turnEnded(body.boxId, body.threadId);
+          break;
+        case "turnStarted":
+          // In memory only, so it needs no box link. A sync without the hook groups by the debounce.
+          deps.sync.turnStarted?.(body.boxId, body.threadId);
           break;
       }
       return reply.code(204).send();

@@ -320,6 +320,9 @@ export function recordingSync(): RecordingSync {
     },
     turnEnded: async (boxId, threadId) => {
       calls.push({ op: "turnEnded", boxId, detail: threadId });
+    },
+    turnStarted: async (boxId, threadId) => {
+      calls.push({ op: "turnStarted", boxId, detail: threadId });
     }
   };
 }

@@ -7,7 +7,7 @@
  *
  * - {@link AgentHostBoxes} — one per host (`AdapterContext.boxes`): the box
  *   connections, the token broker and sync clients, the Claude token restart
- *   policy, the turn-end mirror, the checkpoint git runners.
+ *   policy, the turn-start mark and turn-end mirror, the checkpoint git runners.
  * - {@link BoxLaunch} — one per CLI start ({@link AgentHostBoxes.launch}):
  *   refuses the System account, waits for the box, syncs the CLI's config
  *   (and its transcript, on a resume), resolves — or installs — the CLI in
@@ -464,6 +464,12 @@ export interface BoxTurnEnd {
   resumeCursor: unknown;
 }
 
+/** What a box thread's live turn start hands {@link AgentHostBoxes.turnStarted}. */
+export interface BoxTurnStart {
+  threadId: string;
+  box: HostThreadBox;
+}
+
 export interface AgentHostBoxes {
   /** Prepare one CLI start in a box. Rejects with a {@link BoxLaunchError} the chat shows. */
   launch(input: BoxLaunchInput): Promise<BoxLaunch>;
@@ -472,6 +478,11 @@ export interface AgentHostBoxes {
    * set, and renew a login file that runs short (Claude).
    */
   turnEnded(input: BoxTurnEnd): void;
+  /**
+   * The orchestrator's `onTurnStarted` for a box thread: mark the turn in the daemon's config
+   * sync, so the box changes it makes become its change set (spec §8.3).
+   */
+  turnStarted(input: BoxTurnStart): void;
   /** The checkpoint service's git runner for a box project's repository. */
   gitRunner(box: HostThreadBox): Promise<GitRunner>;
 }
@@ -528,6 +539,8 @@ class AgentHostBoxesImpl implements AgentHostBoxes {
   private readonly gitRunners = new Map<string, Promise<GitRunner>>();
   /** The live launch of each thread whose CLI reads its login from a file in the box (Claude). */
   readonly credentialLaunches = new Map<string, BoxLaunch>();
+  /** Per thread, the tail of its turn-start and turn-end daemon calls (see {@link inTurnOrder}). */
+  private readonly turnCalls = new Map<string, Promise<void>>();
   private procSeq = 0;
 
   constructor(options: AgentHostBoxesOptions) {
@@ -729,7 +742,7 @@ class AgentHostBoxesImpl implements AgentHostBoxes {
       ...(input.profile !== undefined ? { profile: input.profile } : {})
     });
     const boxId = input.box.boxId;
-    void (async () => {
+    this.inTurnOrder(input.threadId, async () => {
       if (configRoot !== null) {
         await this.sync
           .pullAfterTurn(boxId, {
@@ -745,7 +758,33 @@ class AgentHostBoxesImpl implements AgentHostBoxes {
       await this.sync.turnEnded(boxId, input.threadId).catch((error: unknown) => {
         this.logger.warn(`box ${boxId}: the turn's configuration changes of ${input.threadId} could not be collected`, error);
       });
-    })();
+    });
+  }
+
+  turnStarted(input: BoxTurnStart): void {
+    const boxId = input.box.boxId;
+    this.inTurnOrder(input.threadId, () =>
+      this.sync.turnStarted(boxId, input.threadId).catch((error: unknown) => {
+        // Not fatal: the turn's box changes are then grouped by the daemon's idle debounce.
+        this.logger.warn(`box ${boxId}: the start of a turn of ${input.threadId} could not be noted for its configuration changes`, error);
+      })
+    );
+  }
+
+  /**
+   * Run a thread's turn-start or turn-end daemon calls one after another, in the order the turns
+   * started and ended: a start mark sent while the previous turn's end is still in flight would
+   * otherwise be cleared by it, and a short turn's end could overtake its own start. Never blocks
+   * the turn (callers do not wait); every call has its own deadline, so the chain always moves on.
+   */
+  private inTurnOrder(threadId: string, run: () => Promise<void>): void {
+    const next = (this.turnCalls.get(threadId) ?? Promise.resolve()).then(run).catch((error: unknown) => {
+      this.logger.warn(`agent-host: a box turn call of ${threadId} failed`, error);
+    });
+    this.turnCalls.set(threadId, next);
+    void next.then(() => {
+      if (this.turnCalls.get(threadId) === next) this.turnCalls.delete(threadId);
+    });
   }
 
   gitRunner(box: HostThreadBox): Promise<GitRunner> {

@@ -177,6 +177,9 @@ test("the agent host's box sync route: its bearer only, field-wise bodies, each 
     watch: () => () => undefined,
     turnEnded: async (boxId, threadId) => {
       calls.push(`turnEnded ${boxId} ${threadId}`);
+    },
+    turnStarted: (boxId, threadId) => {
+      calls.push(`turnStarted ${boxId} ${threadId}`);
     }
   };
   const transcripts: BoxTranscriptSync = {
@@ -198,12 +201,34 @@ test("the agent host's box sync route: its bearer only, field-wise bodies, each 
     assert.equal((await post({ op: "ensureSynced", boxId: "b1", scope: { agent: "claude", configRoots: ["/a/home"], threadId: "t1" } })).statusCode, 204);
     const transcript = { agent: "claude", configRoot: "/a/home", cwd: "/w/p", sessionRef: "s1" };
     assert.equal((await post({ op: "pushForResume", boxId: "b1", transcript })).statusCode, 204);
+    assert.equal((await post({ op: "turnStarted", boxId: "b1", threadId: "t1" })).statusCode, 204);
+    assert.equal((await post({ op: "turnStarted", boxId: "b1", threadId: "" })).statusCode, 400);
+    assert.equal((await post({ op: "turnStarted", boxId: "b1" })).statusCode, 400);
+    assert.equal((await post({ op: "turnStarted", boxId: "b1", threadId: "t1" }, "other")).statusCode, 401);
     assert.equal((await post({ op: "pullAfterTurn", boxId: "b1", transcript })).statusCode, 204);
     assert.equal((await post({ op: "turnEnded", boxId: "b1", threadId: "t1" })).statusCode, 204);
     const failed = await post({ op: "pullAfterTurn", boxId: "b1", transcript: { ...transcript, sessionRef: "fails" } });
     assert.equal(failed.statusCode, 409);
     assert.equal((failed.json() as { code: string }).code, "BOX_NOT_READY");
-    assert.deepEqual(calls, ["ensureSynced b1 claude /a/home t1", "pushForResume b1 s1", "pullAfterTurn b1 s1", "turnEnded b1 t1"]);
+    assert.deepEqual(calls, ["ensureSynced b1 claude /a/home t1", "pushForResume b1 s1", "turnStarted b1 t1", "pullAfterTurn b1 s1", "turnEnded b1 t1"]);
+  } finally {
+    await app.close();
+  }
+});
+
+test("the box sync route's turnStarted: a sync without the optional hook still answers 204", async () => {
+  const sync: BoxConfigSync = { ensureSynced: async () => undefined, watch: () => () => undefined, turnEnded: async () => undefined };
+  const transcripts: BoxTranscriptSync = { pushForResume: async () => undefined, pullAfterTurn: async () => undefined };
+  const app = Fastify();
+  registerBoxHostRoutes(app, { authorizeHost: (value) => value === agentHostAuthValue("host-token"), sync, transcripts });
+  try {
+    const answer = await app.inject({
+      method: "POST",
+      url: daemonRoutesForHost.boxSync,
+      headers: { authorization: agentHostAuthValue("host-token") },
+      payload: { op: "turnStarted", boxId: "b1", threadId: "t1" }
+    });
+    assert.equal(answer.statusCode, 204);
   } finally {
     await app.close();
   }

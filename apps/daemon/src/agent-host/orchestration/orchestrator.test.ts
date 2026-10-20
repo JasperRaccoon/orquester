@@ -11,6 +11,7 @@ import {
   currentInteractionMode,
   decodeHistoryCursor,
   encodeHistoryCursor,
+  HISTORICAL_RAW_SOURCE,
   type AttachmentRef,
   type DomainEvent,
   type RuntimeEvent,
@@ -3264,6 +3265,59 @@ describe("orchestrator — attachment delivery (§4.1, §6.3)", () => {
         event.payload.activity.activityKind === "provider.turn.start.failed"
     );
     assert.equal(refused.length, 1);
+    await host.stop();
+  });
+});
+
+describe("orchestrator — the box turn-start hook (boxes spec 2026-10-19 §8.3)", () => {
+  it("is told of every live turn start with the thread's launch, never of a replayed one", async () => {
+    const started: Array<{ threadId: string; launch: unknown }> = [];
+    const host = createTestHost({ onTurnStarted: (input) => void started.push(input) });
+    const threadId = await host.createThread();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
+    await host.settle();
+    const turnId = host.adapter.turnIds[0]!;
+
+    const consumed = host.orchestrator.consume(host.adapter);
+    host.adapter.emit({
+      ...turnBoundary(host, "turn.started", "replayed-turn", threadId),
+      raw: { source: HISTORICAL_RAW_SOURCE, method: "history", payload: {} }
+    } as unknown as RuntimeEvent);
+    host.adapter.emit(turnBoundary(host, "turn.started", turnId, threadId));
+    host.adapter.emit(turnBoundary(host, "turn.completed", turnId, threadId));
+    await until(() => host.checkpoints.turnEndRequests.some((request) => request.turnId === turnId));
+    await host.settle();
+
+    assert.deepEqual(
+      started.map((input) => input.threadId),
+      [threadId]
+    );
+    assert.deepEqual(started[0]!.launch, host.orchestrator.launchConfig(threadId));
+    host.adapter.close();
+    await consumed;
+    await host.stop();
+  });
+
+  it("a hook that throws is logged, and the turn goes on", async () => {
+    const host = createTestHost({
+      onTurnStarted: () => {
+        throw new Error("hook broke");
+      }
+    });
+    const threadId = await host.createThread();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
+    await host.settle();
+    const turnId = host.adapter.turnIds[0]!;
+
+    const consumed = host.orchestrator.consume(host.adapter);
+    host.adapter.emit(turnBoundary(host, "turn.started", turnId, threadId));
+    host.adapter.emit(turnBoundary(host, "turn.completed", turnId, threadId));
+    await until(() => host.checkpoints.turnEndRequests.some((request) => request.turnId === turnId));
+    await host.settle();
+
+    assert.ok(host.logger.entries.some((entry) => entry.level === "warn" && entry.message.includes("turn-start hook failed")));
+    host.adapter.close();
+    await consumed;
     await host.stop();
   });
 });

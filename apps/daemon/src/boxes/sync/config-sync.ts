@@ -106,6 +106,12 @@ export interface BoxConfigSyncOptions {
   hostDebounceMs?: number;
   /** Quiet time before box changes made outside a turn become a change set. */
   idleFlushMs?: number;
+  /**
+   * How long a `turnStarted` mark holds the idle flush without its `turnEnded` (default 6 h): a
+   * turn whose end never arrives (the agent host gone mid-turn) must not hold a box's changes
+   * back for good. Past it, the changes are grouped by the idle debounce again.
+   */
+  turnMarkMaxMs?: number;
   /** Box event coalescing delay. */
   boxEventDebounceMs?: number;
   hasher?: BoxHasher;
@@ -146,8 +152,8 @@ interface Runtime {
   roots: Map<string, SyncRoot>;
   /** Box-made changes waiting to become a change set: host path → root. */
   collected: Map<string, SyncRoot>;
-  /** Threads with a turn running in this box. */
-  running: Set<string>;
+  /** Threads with a turn running in this box → when it was marked (ms). */
+  running: Map<string, number>;
   chain: Promise<void>;
   flushTimer: NodeJS.Timeout | null;
   hostTimer: NodeJS.Timeout | null;
@@ -229,6 +235,7 @@ export class BoxConfigSyncService implements BoxConfigSync {
   private readonly denyRoots: readonly string[];
   private readonly hostDebounceMs: number;
   private readonly idleFlushMs: number;
+  private readonly turnMarkMaxMs: number;
   private readonly boxEventDebounceMs: number;
   private readonly now: () => Date;
   private watchCounter = 0;
@@ -243,6 +250,7 @@ export class BoxConfigSyncService implements BoxConfigSync {
     this.denyRoots = options.denyRoots ?? defaultSyncDenyRoots(options.appdir);
     this.hostDebounceMs = options.hostDebounceMs ?? 250;
     this.idleFlushMs = options.idleFlushMs ?? 3000;
+    this.turnMarkMaxMs = options.turnMarkMaxMs ?? 6 * 60 * 60_000;
     this.boxEventDebounceMs = options.boxEventDebounceMs ?? 100;
   }
 
@@ -300,7 +308,7 @@ export class BoxConfigSyncService implements BoxConfigSync {
 
   turnStarted(boxId: string, threadId: string): void {
     const runtime = this.runtime(boxId);
-    runtime.running.add(threadId);
+    runtime.running.set(threadId, this.now().getTime());
     if (runtime.flushTimer !== null) {
       clearTimeout(runtime.flushTimer);
       runtime.flushTimer = null;
@@ -417,7 +425,7 @@ export class BoxConfigSyncService implements BoxConfigSync {
         scopes: new Map(),
         roots: new Map(),
         collected: new Map(),
-        running: new Set(),
+        running: new Map(),
         chain: Promise.resolve(),
         flushTimer: null,
         hostTimer: null,
@@ -699,13 +707,25 @@ export class BoxConfigSyncService implements BoxConfigSync {
     }, this.boxEventDebounceMs);
   }
 
+  /** Whether a turn runs in the box; drops marks older than `turnMarkMaxMs` first. */
+  private turnRunning(runtime: Runtime): boolean {
+    const oldest = this.now().getTime() - this.turnMarkMaxMs;
+    for (const [threadId, markedAt] of runtime.running) {
+      if (markedAt < oldest) {
+        runtime.running.delete(threadId);
+        this.options.logger?.warn?.(`box ${runtime.boxId}: the turn of ${threadId} never ended; its changes are grouped by the idle debounce again`);
+      }
+    }
+    return runtime.running.size > 0;
+  }
+
   private scheduleFlush(runtime: Runtime): void {
-    if (runtime.running.size > 0 || this.closed) return;
+    if (this.turnRunning(runtime) || this.closed) return;
     if (runtime.flushTimer !== null) clearTimeout(runtime.flushTimer);
     runtime.flushTimer = setTimeout(() => {
       runtime.flushTimer = null;
       const connection = runtime.connection ?? this.options.hub.get(runtime.boxId);
-      if (!connection?.connected || runtime.running.size > 0) return;
+      if (!connection?.connected || this.turnRunning(runtime)) return;
       this.background(runtime, "idle flush", () => this.flush(runtime, connection, null));
     }, this.idleFlushMs);
   }

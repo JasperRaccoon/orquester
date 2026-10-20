@@ -9,7 +9,7 @@ import { sessionProfilePreparedRootDir } from "@orquester/config";
 
 import type { BoxSyncScope } from "../contracts.ts";
 import { execBoxHasher, type BoxHasher } from "./box-fs.ts";
-import { BoxConfigSyncService, BoxSyncError } from "./config-sync.ts";
+import { BoxConfigSyncService, BoxSyncError, type BoxConfigSyncOptions } from "./config-sync.ts";
 import { fakeBoxHub, mappedBoxConnection, type MappedBoxConnection } from "./testing.ts";
 
 const SECRETS = ["ghp_mcpsecret", "ghp_settingssecret", "CREDENTIALS-CONTENT", "PRIVATE-KEY-CONTENT"];
@@ -82,7 +82,7 @@ async function fixture(options: { paths?: BoxPathMap } = {}) {
   const hub = fakeBoxHub({ b1: box1, b2: box2 });
   const published: BoxConfigChangesResponse[] = [];
   const listeners: ((payload: BoxConfigChangesResponse) => void)[] = [];
-  const make = (): BoxConfigSyncService =>
+  const make = (overrides: Partial<BoxConfigSyncOptions> = {}): BoxConfigSyncService =>
     new BoxConfigSyncService({
       appdir,
       hub,
@@ -92,7 +92,8 @@ async function fixture(options: { paths?: BoxPathMap } = {}) {
       publish: (payload) => {
         published.push(payload);
         for (const listener of listeners.splice(0)) listener(payload);
-      }
+      },
+      ...overrides
     });
   const scope: BoxSyncScope = { agent: "claude", configRoots: [home], threadId: "t1" };
   const nextPublish = (): Promise<BoxConfigChangesResponse> => new Promise((resolve) => listeners.push(resolve));
@@ -336,6 +337,36 @@ test("box watch events outside a turn are grouped after the idle window with no 
     set.files.map((file) => file.path),
     [join(f.home, "commands", "typed.md")]
   );
+  await sync.close();
+});
+
+// A deadline, not a wait: a mark that never expired would hold the publish back for good.
+test("a turn mark whose end never came stops holding the idle flush once it is older than turnMarkMaxMs", { timeout: 30_000 }, async () => {
+  const f = await fixture();
+  let nowMs = Date.parse("2026-10-20T10:00:00Z");
+  const warnings: string[] = [];
+  const sync = f.make({ now: () => new Date(nowMs), turnMarkMaxMs: 60_000, logger: { warn: (message) => void warnings.push(message) } });
+  await sync.ensureSynced("b1", f.scope, signal());
+  sync.watch("b1", f.scope);
+  await sync.idle();
+  const watchCall = f.box1.calls.find(
+    (call) => call.method === "fs.watch" && (call.params as { path: string }).path === join(f.home, "commands")
+  );
+  assert.ok(watchCall, "the commands dir is watched in the box");
+  const { watchId } = watchCall.params as { watchId: string };
+  // The agent host marked a turn, then went away without ending it.
+  sync.turnStarted("b1", "t-lost");
+  nowMs += 60_001;
+  const published = f.nextPublish();
+  await put(join(f.box1.local(f.home), "commands", "later.md"), "Made after the lost turn.\n");
+  f.box1.emitEvent("fs.change", { watchId, changes: [{ path: join(f.home, "commands", "later.md"), type: "create" }] });
+  const set = (await published).changes.find((change) => change.state === "pending")!;
+  assert.equal(set.threadId, null, "grouped by the idle debounce again");
+  assert.deepEqual(
+    set.files.map((file) => file.path),
+    [join(f.home, "commands", "later.md")]
+  );
+  assert.ok(warnings.some((message) => message.includes("t-lost")));
   await sync.close();
 });
 
