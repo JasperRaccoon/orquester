@@ -20,6 +20,10 @@
  *   `enabledPlugins: {id: false}` in `--settings` turns it off again. The profile's own plugins load
  *   by path (`<name>@inline`), so the override never touches them.
  *
+ * The project's files (`.claude/settings*.json`, `.mcp.json` up the tree, `.claude/` skills and
+ * commands) are read where they live: a box project's in its box (`where.projectFs`, the host
+ * directory being an empty stub); the account's and the profile's files are always this machine's.
+ *
  * Secrets: the MCP servers and the carried settings (`env`, auth helpers) never reach argv — the
  * launch writes them to 0600 files in a 0700 per-thread directory ({@link writeClaudeProfileLaunchFiles})
  * and passes the paths; the session removes the directory when it ends. The host's tmp dir may be a
@@ -42,7 +46,8 @@ import {
   claudeProjectMcpServers,
   isPlainObject,
   mcpServersOf,
-  readJsonObject
+  readJsonObject,
+  type ClaudeNamesFs
 } from "../../../agent-isolation/claude-names.ts";
 import { claudeRuntimeSettings } from "../../../agent-isolation/runtime-settings.ts";
 import type { ClaudePreparedHooks, ClaudePreparedSection } from "../../../session-profiles/manifest/claude.ts";
@@ -122,6 +127,11 @@ export async function loadClaudeProfileLaunch(
     claudeJson: string;
     /** The child's `HOME`: where the project walk for `.claude/` skills stops. */
     home: string;
+    /**
+     * boxes: where the project's files are read — the box's (`BoxProjectFs`, host paths mapped)
+     * for a box thread; this machine's when absent. `home` is then the box's.
+     */
+    projectFs?: ClaudeNamesFs;
   }
 ): Promise<ClaudeProfileLaunch | null> {
   const section: ClaudePreparedSection | null = await loadProfileManifest(input, "claude");
@@ -156,8 +166,11 @@ export async function loadClaudeProfileLaunch(
   const userSettings = (await readJsonObject(join(where.configDir, "settings.json"))) ?? {};
   const carriedSettings = claudeRuntimeSettings(userSettings);
 
+  const projectFs = where.projectFs;
   const projectSettings = await Promise.all(
-    [join(input.cwd, ".claude", "settings.json"), join(input.cwd, ".claude", "settings.local.json")].map(readJsonObject)
+    [join(input.cwd, ".claude", "settings.json"), join(input.cwd, ".claude", "settings.local.json")].map((file) =>
+      readJsonObject(file, projectFs)
+    )
   );
   const claudeJson = await readJsonObject(where.claudeJson);
   const projectEntry = isPlainObject(claudeJson?.projects) ? claudeJson.projects[resolve(input.cwd)] : undefined;
@@ -168,7 +181,7 @@ export async function loadClaudeProfileLaunch(
     ...(isPlainObject(projectEntry) ? stringList(projectEntry.disabledMcpjsonServers) : [])
   ]);
   const mcpServers: Record<string, Doc> = {};
-  for (const [name, def] of Object.entries(await claudeProjectMcpServers(input.cwd))) {
+  for (const [name, def] of Object.entries(await claudeProjectMcpServers(input.cwd, projectFs))) {
     if (!disabledMcp.has(name)) mcpServers[name] = def;
   }
   Object.assign(mcpServers, profileServers);
@@ -182,7 +195,7 @@ export async function loadClaudeProfileLaunch(
 
   const skills =
     section.skills !== undefined
-      ? [...new Set([...section.skills, ...(await claudeProjectEntryNames(input.cwd, where.home))])]
+      ? [...new Set([...section.skills, ...(await claudeProjectEntryNames(input.cwd, where.home, projectFs))])]
       : undefined;
 
   return {

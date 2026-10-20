@@ -4,15 +4,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
+import { claudeProjectMcpServers } from "../../agent-isolation/claude-names.ts";
 import { localBoxConnection } from "../../boxes/testing.ts";
 import type { AdapterContext, AdapterLogger } from "../adapter.ts";
 import type { HostThreadBox } from "../host-protocol.ts";
-import { claudeBoxCredentials } from "../adapters/claude/box-launch.ts";
+import { claudeBoxCredentials, prepareClaudeBoxSession } from "../adapters/claude/box-launch.ts";
+import { createFakeContext } from "../adapters/codex/testing.ts";
 import { renderGrokOverlayConfig } from "../adapters/grok/launch.ts";
 import { createAgentHostBoxes, BoxLaunchError } from "./index.ts";
 import { readMcpBridgeEntry } from "./mcp-bridge-registry.ts";
 import { BOX_TOKEN_RESTART_MARGIN_MS } from "./token-policy.ts";
-import { reattachableBoxConnection, recordingSync, recordingTokens, redirectedBoxConnection } from "./testing.ts";
+import { reattachableBoxConnection, recordingSync, recordingTokens, redirectedBoxConnection, rootedReadsBoxConnection } from "./testing.ts";
 
 const quiet: AdapterLogger = { debug: () => undefined, info: () => undefined, warn: () => undefined, error: () => undefined };
 
@@ -332,5 +334,49 @@ test("a thread's process an earlier host left running in the box is stopped befo
     assert.equal(other.signalCode, null);
   } finally {
     await connection.killAll();
+  }
+});
+
+test("a Claude box start loads the profile launch through the box: the project's files are the box's, the walk stops at the box's home", async () => {
+  const home = await boxHome(["claude"]);
+  const root = await mkdtemp(join(tmpdir(), "box-root-"));
+  const boxFiles = join(root, "box");
+  // The project's `.mcp.json` exists only in the box; the host path `/w/p` holds nothing.
+  await mkdir(join(boxFiles, "w", "p"), { recursive: true });
+  await writeFile(join(boxFiles, "w", "p", ".mcp.json"), JSON.stringify({ mcpServers: { "box-only": { command: "srv" } } }));
+  const local = localBoxConnection({ sys: { home, shell: join(home, "sh"), agentPath: "/opt/orq-agent" } });
+  const connection = redirectedBoxConnection(rootedReadsBoxConnection(local, boxFiles), join(root, "writes"));
+  const boxes = createAgentHostBoxes({
+    appdir: join(root, "appdir"),
+    connector: () => connection,
+    tokens: recordingTokens({ accessToken: "t", expiresAt: null }),
+    sync: recordingSync(),
+    logger: quiet
+  });
+  const { context } = createFakeContext({ boxes, attachmentsDir: (threadId) => join(root, "attachments", threadId) });
+  const seen: { servers: string[]; home: string }[] = [];
+  const session = await prepareClaudeBoxSession({
+    context,
+    start: {
+      threadId: "t1",
+      cwd: "/w/p",
+      projectPath: "/w/p",
+      home: { kind: "account", accountId: "acct-1", path: "/accounts/claude/acct-1/home" },
+      box: launchBox(connection),
+      modelSelection: { model: "opus" },
+      runtimeMode: "approval-required"
+    },
+    hostEnv: { CLAUDE_CONFIG_DIR: "/accounts/claude/acct-1/home", HOME: "/var/lib/orquester" },
+    resumeSessionId: undefined,
+    loadProfileLaunch: async ({ projectFs, home: walkHome }) => {
+      seen.push({ servers: Object.keys(await claudeProjectMcpServers("/w/p", projectFs)), home: walkHome });
+      return null;
+    }
+  });
+  try {
+    assert.deepEqual(seen, [{ servers: ["box-only"], home }]);
+    assert.equal(session.profileLaunch, undefined, "a Global thread has none");
+  } finally {
+    await session.launch.close();
   }
 });

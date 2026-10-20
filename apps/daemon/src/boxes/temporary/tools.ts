@@ -99,7 +99,10 @@ const BOX_ERROR_STATUS: Readonly<Record<BoxErrorCode, number>> = {
   BOX_PROVIDER_ERROR: 502,
   BOX_INVALID_REQUEST: 400,
   BOX_CONNECTION_NOT_CONFIGURED: 409,
-  BOX_UNSUPPORTED: 400
+  BOX_UNSUPPORTED: 400,
+  BOX_CONFIG_CHANGE_NOT_FOUND: 404,
+  BOX_CONFIG_CHANGE_DECIDED: 409,
+  BOX_DESTROYED: 410
 };
 
 const DISABLED = refuse(503, "BOXES_DISABLED", "Temporary boxes are not available: the Ephemeral AI VMs plugin is off or still starting.");

@@ -62,7 +62,7 @@ import { join } from "node:path";
 import { MAX_TURN_INPUT_CHARS } from "@orquester/api/agent-chat";
 import { projectGrokHistory } from "./history.ts";
 import { GROK_EXTRA_ENV } from "./launch.ts";
-import { prepareGrokProfileSpawn } from "./profile-launch.ts";
+import { prepareGrokProfileSpawn, type GrokProfileSpawn } from "./profile-launch.ts";
 import { pendingStatusMessage } from "../pending.ts";
 import {
   COMPACT_SLASH_COMMAND,
@@ -73,11 +73,12 @@ import {
 } from "./probe.ts";
 // boxes:
 import { runInBox } from "../../boxes/box-tools.ts";
+import type { BoxLaunch } from "../../boxes/index.ts";
 import { AGENT_HOST_DEADLINES } from "../../support/deadline.ts";
 import { issueSessionToolsGrant, launchHomeKey } from "../../session-tools/index.ts";
 import { GrokSession } from "./session.ts";
 // boxes:
-import { grokBoxMcpServers, launchGrokInBox, type GrokBoxLaunch } from "./box-launch.ts";
+import { boxGrokPluginNames, grokBoxMcpServers, launchGrokInBox, type GrokBoxLaunch } from "./box-launch.ts";
 import { ACCOUNT_HOME_ENV_VAR } from "../../support/env.ts";
 import { McpAppSnapshotStore } from "../mcp-app-capture.ts";
 import { recordLeftoverWork, sweepLeftoverWork } from "../../support/leftover-work.ts";
@@ -296,18 +297,23 @@ class GrokAdapter implements AgentAdapter {
     // Agent Profiles (spec §6.3): a profile thread renders its home's `config.toml` and gets
     // `--no-leader` / `--plugin-dir` before every spawn; a home it cannot launch from fails the
     // start (`profile-launch.ts`). `null` for a Global thread — nothing below changes for it.
-    // boxes: rendered on this machine (its home is the source the box's copy syncs from), BEFORE
-    // the launch syncs it.
-    if (hostCommand === null && input.profile !== undefined) {
-      throw new Error("An Agent Profile chat in a box needs the Grok CLI on this machine too, to prepare the profile's home. Install it from Settings → Agents.");
+    // boxes (spec 2026-10-19 §8.5): sync, then the box's grok. A profile's home is rendered on
+    // this machine (the source its box copy syncs from) with the plugins `grok inspect` finds IN
+    // the box, then synced into the box again.
+    let profileSpawn: GrokProfileSpawn | null;
+    let boxLaunch: BoxLaunch | undefined;
+    if (input.box === undefined) {
+      profileSpawn = await prepareGrokProfileSpawn({ profile: input.profile, env, command: hostCommand! });
+    } else {
+      boxLaunch = await launchGrokInBox(this.context, { ...input, box: input.box }, env[ACCOUNT_HOME_ENV_VAR.grok] ?? input.home.path);
+      try {
+        profileSpawn = await prepareGrokProfileSpawn({ profile: input.profile, env, command: boxLaunch.bin, inspect: boxGrokPluginNames(boxLaunch) });
+        if (profileSpawn !== null) await boxLaunch.syncProfile();
+      } catch (error) {
+        await boxLaunch.close();
+        throw error;
+      }
     }
-    const profileSpawn = await prepareGrokProfileSpawn({ profile: input.profile, env, command: hostCommand ?? "grok" });
-
-    // boxes (spec 2026-10-19 §8.5): sync, then the box's grok.
-    const boxLaunch =
-      input.box !== undefined
-        ? await launchGrokInBox(this.context, { ...input, box: input.box }, env[ACCOUNT_HOME_ENV_VAR.grok] ?? input.home.path)
-        : undefined;
     const command = boxLaunch?.bin ?? hostCommand!;
 
     // Design 2026-10-14 §1.2: a fresh credential per `grok agent stdio`
