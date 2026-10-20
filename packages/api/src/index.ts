@@ -330,6 +330,14 @@ export interface OwnerSummary {
 export type CreateProjectRequest = CreateProjectSource & {
   /** Where the project runs. Absent or `{ kind: "host" }` = this host (Ephemeral AI VMs spec §8.1). */
   location?: ProjectLocationRequest;
+  // boxes: the Template tab's command for a project created in a box.
+  /**
+   * Box locations only: the Template tab's assembled scaffold command. On the
+   * host the client types it into a setup terminal itself; for a box the daemon
+   * types it into the box project's first terminal once setup is done (spec §8.2
+   * step 5). Ignored for `{ kind: "host" }`.
+   */
+  templateCommand?: string;
 };
 
 export type CreateProjectSource =

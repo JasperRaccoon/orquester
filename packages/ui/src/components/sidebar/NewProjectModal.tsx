@@ -28,6 +28,9 @@ import { useAppStore } from "../../store/app";
 import { ApiError } from "../../lib/api-client";
 import { ProjectSetupError } from "../../lib/project-setup-error";
 import type { AccountSummary, OwnerSummary, RepoSummary } from "../../types";
+// boxes: the "Runs on" row (Ephemeral AI VMs spec §8.1; hidden while the plugin is off).
+import { RunsOnRow, useRunsOn } from "../boxes/location/RunsOnRow";
+import { useOpenBoxesSettings } from "../../lib/boxes/hooks";
 
 /**
  * Opens the modal on one flow with its subject fixed. `clone-repo`: a fresh
@@ -244,6 +247,11 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose,
   const listOwners = useAppStore((s) => s.listOwners);
   const openSettings = useAppStore((s) => s.openSettings);
   const api = useAppStore((s) => s.api);
+  // boxes: where the project runs. A box location sends every tab through the
+  // server-side create (the daemon clones and scaffolds in the box).
+  const runsOn = useRunsOn(open);
+  const openBoxesSettings = useOpenBoxesSettings();
+  const boxLocation = runsOn.location ? { location: runsOn.location } : {};
 
   // Resolve the workspace's linked account (the only one repo features use).
   const account = useMemo<AccountSummary | null>(() => {
@@ -337,6 +345,8 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose,
     setTemplateId(null);
     setVariantId(null);
     setOptionOverrides({});
+    // boxes: back to this host.
+    runsOn.dispatch({ type: "reset" });
   };
 
   const close = () => {
@@ -479,8 +489,11 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose,
   /** A step that shows the exact command and asks for a deliberate confirm. */
   const inReview =
     (mode === "clone" && cloneReview) || (mode === "template" && templateStep === "review");
-  /** This clone is typed into a terminal: no account to clone with, or a preset's fallback. */
-  const typedClone = mode === "clone" && (!canServerClone || typedFallback);
+  /**
+   * This clone is typed into a terminal: no account to clone with, or a preset's fallback.
+   * boxes: never for a box, which the daemon clones into with host-forwarded credentials.
+   */
+  const typedClone = mode === "clone" && (!canServerClone || typedFallback) && !runsOn.inBox;
 
   // Arm the confirm a beat after a review appears, and move focus onto it. The
   // step that OPENS the review shares the footer slot with the confirm (Review →
@@ -660,7 +673,12 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose,
       }
       setBusy(true);
       try {
-        await createProjectWithCommand({ source: "empty", name: trimmed }, templateCommand);
+        if (runsOn.location) {
+          // boxes: the daemon creates the box and types the command into its first terminal.
+          await createProject({ source: "empty", name: trimmed, location: runsOn.location, templateCommand });
+        } else {
+          await createProjectWithCommand({ source: "empty", name: trimmed }, templateCommand);
+        }
         close();
       } catch (err) {
         if (err instanceof ProjectSetupError) {
@@ -714,14 +732,14 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose,
 
     setBusy(true);
     try {
-      await createProject(req);
+      await createProject({ ...req, ...boxLocation });
       close();
     } catch (err) {
       setError(describeCreateError(err));
       // A taken name fails the typed clone just the same; anything else (a repo
       // the account cannot reach, another host) may well clone with the
-      // server's own git credentials.
-      if (preset && mode === "clone" && !(err instanceof ApiError && err.status === 409)) {
+      // server's own git credentials. boxes: a box has no typed fallback.
+      if (preset && mode === "clone" && !runsOn.inBox && !(err instanceof ApiError && err.status === 409)) {
         setServerCloneFailed(true);
       }
     } finally {
@@ -731,6 +749,10 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose,
 
   const canSubmit = (() => {
     if (busy || (inReview && !reviewArmed)) {
+      return false;
+    }
+    // boxes: a box choice needs its provider, size and region first.
+    if (!runsOn.ready) {
       return false;
     }
     if (mode === "empty") {
@@ -769,8 +791,12 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose,
   const browsing = mode === "template" && templateStep !== "review";
   // In a review step the confirm reads as its own act ("Create & run") rather
   // than repeating the label of the button that opened the review.
-  const submitLabel =
-    typedClone && !cloneReview
+  const submitLabel = runsOn.inBox
+    ? // boxes: the submit says where the project goes.
+      mode === "clone"
+      ? "Clone into a new VM"
+      : "Create in a new VM"
+    : typedClone && !cloneReview
       ? "Review"
       : inReview
         ? "Create & run"
@@ -778,11 +804,23 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose,
           ? "Clone"
           : "Create";
 
+  // boxes: the Runs on row, placed under each tab's fields (under Name in the preset dialog).
+  const runsOnRow = (
+    <RunsOnRow
+      runsOn={runsOn}
+      disabled={busy}
+      onSetUpMore={() => {
+        close();
+        openBoxesSettings();
+      }}
+    />
+  );
+
   return (
     <Modal
       open={open}
       onClose={requestClose}
-      className={browsing ? "max-h-[80vh] max-w-2xl" : "max-w-md"}
+      className={browsing ? "max-h-[80vh] max-w-2xl" : runsOn.enabled ? "max-w-lg" : "max-w-md"}
     >
       <div className="flex min-h-0 w-full flex-col">
         <div className="flex h-12 shrink-0 items-center justify-between border-b border-neutral-800 px-4">
@@ -861,6 +899,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose,
               {collisionNote}
             </div>
           )}
+          {mode === "empty" && runsOnRow}
 
           {mode === "clone" && !cloneReview && preset && (
             <div className="space-y-1.5">
@@ -878,14 +917,17 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose,
               />
               {collisionNote}
               <p className="text-[11px] text-neutral-500">
-                {typedFallback
-                  ? "The clone runs in a terminal tab with the server's own git credentials."
-                  : canServerClone
-                    ? "A fresh clone of the repo's default branch, in a new folder of this workspace."
-                    : "No git account with repo access is linked to this workspace, so the clone runs in a terminal tab with the server's own git credentials."}
+                {runsOn.inBox
+                  ? "A fresh clone of the repo's default branch, in a new VM."
+                  : typedFallback
+                    ? "The clone runs in a terminal tab with the server's own git credentials."
+                    : canServerClone
+                      ? "A fresh clone of the repo's default branch, in a new folder of this workspace."
+                      : "No git account with repo access is linked to this workspace, so the clone runs in a terminal tab with the server's own git credentials."}
               </p>
             </div>
           )}
+          {mode === "clone" && !cloneReview && preset && runsOnRow}
 
           {mode === "clone" && !cloneReview && !preset && (
             <div className="space-y-3">
@@ -972,7 +1014,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose,
                   }}
                   onKeyDown={onEnter}
                 />
-                {!canServerClone && (
+                {!canServerClone && !runsOn.inBox && (
                   <p className="text-[11px] text-neutral-500">
                     No git account is linked to this workspace, so the clone runs in a terminal tab
                     with the server's own git credentials. Public repositories work as-is.
@@ -995,6 +1037,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose,
                 />
                 {collisionNote}
               </div>
+              {runsOnRow}
             </div>
           )}
 
@@ -1077,6 +1120,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose,
                   onKeyDown={onEnter}
                 />
               </div>
+              {runsOnRow}
             </div>
           )}
 
@@ -1229,11 +1273,14 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose,
               )}
 
               <div className="space-y-1.5">
-                <label className="text-xs text-neutral-400">Runs in a terminal tab</label>
+                <label className="text-xs text-neutral-400">
+                  {runsOn.inBox ? "Runs in the VM's first terminal tab" : "Runs in a terminal tab"}
+                </label>
                 <pre className="overflow-x-auto rounded-md border border-neutral-800 bg-neutral-950 px-3 py-2 text-xs text-neutral-300">
                   <code>{templateCommand}</code>
                 </pre>
               </div>
+              {runsOnRow}
             </div>
           )}
 

@@ -1,0 +1,352 @@
+import assert from "node:assert/strict";
+import { beforeEach, describe, it } from "node:test";
+
+import {
+  BOXES_CHANGED_EVENT,
+  BOX_CONFIG_CHANGES_EVENT,
+  BOX_PROVIDERS_CHANGED_EVENT,
+  type BoxesResponse
+} from "@orquester/api";
+
+import {
+  applyBoxesEvent,
+  boxesStore,
+  decideBoxConfigChange,
+  destroyBox,
+  loadBoxes,
+  loadBoxesList,
+  loadBoxOffers,
+  prepareBoxWindowsImage,
+  projectBoxIn,
+  resetBoxes,
+  saveBoxConnection,
+  saveBoxProviderCredentials,
+  type BoxesApi
+} from "./store.ts";
+import { sanitizeBoxOffersResponse, sanitizeBoxProviderInfo, sanitizeBoxSummary, sanitizeBoxesResponse } from "./validate.ts";
+import { box, change, kind, offers, provider } from "./fixtures.test-helpers.ts";
+
+const TOTALS = { activeCount: 1, hourlyUsd: 0.0119, monthEstimatedUsd: 3.1 };
+const listOf = (...boxes: ReturnType<typeof box>[]): BoxesResponse => ({ boxes, totals: TOTALS });
+
+/** A deferred answer: the test decides when (and with what) a read resolves. */
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+function fakeApi(overrides: Partial<Record<keyof BoxesApi, unknown>> = {}, connection = "c1") {
+  const calls: string[] = [];
+  const api: Record<string, unknown> = {
+    connection: { id: connection },
+    listBoxes: async () => (calls.push("listBoxes"), listOf(box())),
+    getBox: async (id: string) => (calls.push(`getBox:${id}`), { box: box({ id }) }),
+    destroyBox: async (id: string) => (calls.push(`destroyBox:${id}`), { box: box({ id, state: "destroying" }) }),
+    listBoxKinds: async () => (calls.push("listBoxKinds"), { kinds: [kind()] }),
+    listBoxProviders: async () => (calls.push("listBoxProviders"), { providers: [provider()] }),
+    setBoxProviderCredentials: async (id: string) => (calls.push(`setCreds:${id}`), provider({ id: id as never })),
+    removeBoxProviderCredentials: async () => undefined,
+    getBoxOffers: async (id: string, k: string) => (calls.push(`offers:${id}:${k}`), offers()),
+    prepareBoxWindowsImage: async () => (calls.push("prepare"), undefined),
+    getBoxConnection: async () => ({ mode: "public-url", publicUrl: "https://o.example.com", tailscale: {}, reachable: "ok" }),
+    setBoxConnection: async () => ({ mode: "tailscale", tailscale: { configured: true }, reachable: "unknown" }),
+    testBoxConnection: async () => ({ mode: "public-url", reachable: "ok" }),
+    getBlacksmithSetup: async () => ({ steps: [] }),
+    setBlacksmithSetup: async () => ({ steps: [] }),
+    startBlacksmithTest: async () => undefined,
+    listBoxConfigChanges: async () => (calls.push("listChanges"), { changes: [change()] }),
+    decideBoxConfigChange: async (id: string) => ({ change: change({ id, state: "approved" }) }),
+    ...overrides
+  };
+  return { api: api as unknown as BoxesApi, calls };
+}
+
+const flush = async () => {
+  for (let i = 0; i < 10; i += 1) await Promise.resolve();
+};
+
+describe("box payload validation", () => {
+  it("keeps a well-formed box as it is", () => {
+    assert.deepEqual(sanitizeBoxSummary(box()), box());
+  });
+
+  it("drops a box it cannot reason about", () => {
+    assert.equal(sanitizeBoxSummary(null), null);
+    assert.equal(sanitizeBoxSummary([]), null);
+    assert.equal(sanitizeBoxSummary({ ...box(), id: "" }), null);
+    assert.equal(sanitizeBoxSummary({ ...box(), state: "hibernating" }), null);
+    assert.equal(sanitizeBoxSummary({ ...box(), kind: "solaris" }), null);
+    assert.equal(sanitizeBoxSummary({ ...box(), provider: "aws" }), null);
+    assert.equal(sanitizeBoxSummary({ ...box(), purpose: "forever" }), null);
+  });
+
+  it("repairs bad optional fields one by one", () => {
+    const clean = sanitizeBoxSummary({
+      ...box(),
+      providerLabel: 7,
+      hourlyUsd: -1,
+      estimatedCostUsd: "lots",
+      os: "plan9",
+      destroyedReason: "aliens",
+      connected: "yes",
+      project: { path: "" },
+      setup: [{ id: "create", state: "weird" }, { id: "nope" }, "x", { id: "create", state: "done" }],
+      extra: "unknown field"
+    });
+    assert.ok(clean);
+    assert.equal(clean.providerLabel, "hetzner");
+    assert.equal(clean.hourlyUsd, null);
+    assert.equal(clean.estimatedCostUsd, 0);
+    assert.equal(clean.os, null);
+    assert.equal(clean.destroyedReason, null);
+    assert.equal(clean.connected, false);
+    assert.equal(clean.project, null);
+    // Unknown steps and duplicates are left out; a bad state reads as pending.
+    assert.deepEqual(clean.setup, [
+      { id: "create", label: "create", state: "pending", startedAt: null, finishedAt: null, message: null }
+    ]);
+    assert.equal("extra" in clean, false);
+  });
+
+  it("rejects a broken list envelope and recomputes missing totals", () => {
+    assert.equal(sanitizeBoxesResponse({ boxes: "nope" }), null);
+    assert.equal(sanitizeBoxesResponse(null), null);
+    const response = sanitizeBoxesResponse({
+      boxes: [box({ id: "a", hourlyUsd: 0.5 }), box({ id: "b", state: "destroyed", hourlyUsd: 2 }), { id: "bad" }, box({ id: "a" })]
+    });
+    assert.ok(response);
+    assert.deepEqual(response.boxes.map((entry) => entry.id), ["a", "b"]);
+    assert.deepEqual(response.totals, { activeCount: 1, hourlyUsd: 0.5, monthEstimatedUsd: 0.84 });
+  });
+
+  it("only links http(s) URLs and masks fields of unknown secrecy", () => {
+    const clean = sanitizeBoxProviderInfo({
+      ...provider(),
+      credentialsUrl: "javascript:alert(1)",
+      website: "not a url",
+      kinds: ["linux", "linux", "mainframe"],
+      credentialFields: [{ id: "token", label: "Token" }, { id: "user", label: "User", secret: false }, { label: "No id" }],
+      status: "sleeping",
+      maxLifetimeMinutes: 0,
+      windowsImage: { state: "baking" }
+    });
+    assert.ok(clean);
+    assert.equal(clean.credentialsUrl, "");
+    assert.equal(clean.website, "");
+    assert.deepEqual(clean.kinds, ["linux"]);
+    assert.deepEqual(clean.credentialFields, [
+      { id: "token", label: "Token", secret: true },
+      { id: "user", label: "User", secret: false }
+    ]);
+    assert.equal(clean.status, "not-configured");
+    assert.equal(clean.maxLifetimeMinutes, null);
+    assert.deepEqual(clean.windowsImage, { state: "none", message: null, updatedAt: null });
+    assert.equal(sanitizeBoxProviderInfo({ ...provider(), id: "aws" }), null);
+  });
+
+  it("drops offers for another provider or kind, and sizes rented nowhere", () => {
+    assert.equal(sanitizeBoxOffersResponse(offers(), "vultr", "linux"), null);
+    assert.equal(sanitizeBoxOffersResponse(offers(), "hetzner", "windows"), null);
+    const clean = sanitizeBoxOffersResponse(
+      {
+        ...offers(),
+        sizes: [
+          ...offers().sizes,
+          { id: "ghost", label: "Ghost", vcpu: 1, ramGb: 1, gpu: null, hourlyUsd: 0.001, regions: ["mars"] },
+          { id: "", label: "No id" }
+        ],
+        priceSource: "guess"
+      },
+      "hetzner",
+      "linux"
+    );
+    assert.ok(clean);
+    assert.deepEqual(clean.sizes.map((size) => size.id), ["cx32", "cx22", "ccx13"]);
+    assert.equal(clean.priceSource, "table");
+  });
+});
+
+describe("the boxes store", () => {
+  beforeEach(() => resetBoxes());
+
+  it("loads every slot the plugin needs", async () => {
+    const { api, calls } = fakeApi();
+    await loadBoxes(api);
+    const state = boxesStore.getState();
+    assert.deepEqual(state.boxes?.map((entry) => entry.id), ["b1"]);
+    assert.deepEqual(state.totals, TOTALS);
+    assert.deepEqual(state.providers?.map((entry) => entry.id), ["hetzner"]);
+    assert.deepEqual(state.kinds?.map((entry) => entry.kind), ["linux"]);
+    assert.deepEqual(state.configChanges?.map((entry) => entry.id), ["c1"]);
+    assert.deepEqual(calls.sort(), ["listBoxKinds", "listBoxProviders", "listBoxes", "listChanges"]);
+  });
+
+  it("rejects a list in another shape and keeps what it holds", async () => {
+    const { api } = fakeApi();
+    await loadBoxesList(api);
+    const bad = fakeApi({ listBoxes: async () => ({ boxes: 3 }) });
+    await assert.rejects(loadBoxesList(bad.api), /unexpected shape/);
+    assert.deepEqual(boxesStore.getState().boxes?.map((entry) => entry.id), ["b1"]);
+  });
+
+  it("applies each event type and ignores malformed or unknown ones", () => {
+    applyBoxesEvent({ type: BOXES_CHANGED_EVENT, payload: listOf(box({ id: "x" })) });
+    assert.deepEqual(boxesStore.getState().boxes?.map((entry) => entry.id), ["x"]);
+    applyBoxesEvent({ type: BOXES_CHANGED_EVENT, payload: { boxes: null } });
+    applyBoxesEvent({ type: BOXES_CHANGED_EVENT, payload: "garbage" });
+    applyBoxesEvent({ type: "boxes.somethingNew", payload: listOf() });
+    assert.deepEqual(boxesStore.getState().boxes?.map((entry) => entry.id), ["x"]);
+
+    applyBoxesEvent({ type: BOX_PROVIDERS_CHANGED_EVENT, payload: { providers: [provider({ id: "vultr", label: "Vultr" }), { id: "aws" }] } });
+    assert.deepEqual(boxesStore.getState().providers?.map((entry) => entry.id), ["vultr"]);
+
+    applyBoxesEvent({ type: BOX_CONFIG_CHANGES_EVENT, payload: { changes: [change(), { id: "c2", boxId: "b1", state: "??" }] } });
+    assert.deepEqual(boxesStore.getState().configChanges?.map((entry) => entry.id), ["c1"]);
+  });
+
+  it("drops a load's answer when an event overtook it", async () => {
+    const answer = deferred<BoxesResponse>();
+    const { api } = fakeApi({ listBoxes: () => answer.promise });
+    const loading = loadBoxesList(api);
+    applyBoxesEvent({ type: BOXES_CHANGED_EVENT, payload: listOf(box({ id: "newer" })) });
+    answer.resolve(listOf(box({ id: "older" })));
+    await loading;
+    assert.deepEqual(boxesStore.getState().boxes?.map((entry) => entry.id), ["newer"]);
+  });
+
+  it("drops answers that arrive after a reset, and resets for another connection", async () => {
+    const answer = deferred<BoxesResponse>();
+    const first = fakeApi({ listBoxes: () => answer.promise }, "c1");
+    const loading = loadBoxesList(first.api);
+    resetBoxes();
+    answer.resolve(listOf(box({ id: "stale" })));
+    await loading;
+    assert.equal(boxesStore.getState().boxes, null);
+
+    await loadBoxesList(fakeApi({}, "c1").api);
+    assert.equal(boxesStore.getState().boxes?.length, 1);
+    // A client of another connection: the old daemon's boxes go first.
+    const other = fakeApi({ listBoxes: async () => listOf(box({ id: "elsewhere" })), listBoxProviders: async () => ({ providers: [] }) }, "c2");
+    applyBoxesEvent({ type: BOX_PROVIDERS_CHANGED_EVENT, payload: { providers: [provider()] } });
+    await loadBoxesList(other.api);
+    assert.deepEqual(boxesStore.getState().boxes?.map((entry) => entry.id), ["elsewhere"]);
+    assert.equal(boxesStore.getState().providers, null);
+  });
+
+  it("applies a destroy's answer to its box, and reloads when the answer is unreadable", async () => {
+    const { api } = fakeApi();
+    await loadBoxesList(api);
+    await destroyBox(api, "b1");
+    assert.equal(boxesStore.getState().boxes?.[0].state, "destroying");
+
+    const silent = fakeApi({ destroyBox: async () => undefined });
+    await destroyBox(silent.api, "b1");
+    await flush();
+    assert.ok(silent.calls.includes("listBoxes"));
+  });
+
+  it("refuses a destroy the daemon refuses, leaving the box as it was", async () => {
+    const { api } = fakeApi({
+      destroyBox: async () => {
+        throw Object.assign(new Error("409"), { status: 409, body: { code: "BOX_IS_PROJECT" } });
+      }
+    });
+    await loadBoxesList(api);
+    await assert.rejects(destroyBox(api, "b1"), /409/);
+    assert.equal(boxesStore.getState().boxes?.[0].state, "ready");
+  });
+
+  it("saving credentials upserts the provider and re-reads the kinds that were loaded", async () => {
+    const { api, calls } = fakeApi({
+      setBoxProviderCredentials: async (id: string) => (calls.push(`set:${id}`), provider({ id: "vultr", label: "Vultr", kinds: ["linux", "windows"] }))
+    });
+    await loadBoxes(api);
+    calls.length = 0;
+    const saved = await saveBoxProviderCredentials(api, "vultr", { key: "abc" });
+    assert.equal(saved?.id, "vultr");
+    await flush();
+    assert.deepEqual(boxesStore.getState().providers?.map((entry) => entry.id), ["hetzner", "vultr"]);
+    assert.ok(calls.includes("listBoxKinds"));
+  });
+
+  it("a provider change event drops cached offers and re-reads the kinds", async () => {
+    const { api, calls } = fakeApi();
+    await loadBoxes(api);
+    await loadBoxOffers(api, "hetzner", "linux");
+    await loadBoxOffers(api, "hetzner", "linux");
+    assert.equal(calls.filter((call) => call.startsWith("offers:")).length, 1);
+    calls.length = 0;
+    applyBoxesEvent({ type: BOX_PROVIDERS_CHANGED_EVENT, payload: { providers: [provider()] } });
+    await flush();
+    assert.ok(calls.includes("listBoxKinds"));
+    await loadBoxOffers(api, "hetzner", "linux");
+    assert.equal(calls.filter((call) => call.startsWith("offers:")).length, 1);
+  });
+
+  it("shares an offers read in flight and rejects one in another shape", async () => {
+    const answer = deferred<unknown>();
+    const { api, calls } = fakeApi({ getBoxOffers: (id: string, k: string) => (calls.push(`offers:${id}:${k}`), answer.promise) });
+    const a = loadBoxOffers(api, "hetzner", "linux");
+    const b = loadBoxOffers(api, "hetzner", "linux");
+    answer.resolve(offers());
+    assert.equal(await a, await b);
+    assert.equal(calls.filter((call) => call.startsWith("offers:")).length, 1);
+
+    const wrong = fakeApi({ getBoxOffers: async () => offers({ kind: "windows" }) });
+    await assert.rejects(loadBoxOffers(wrong.api, "hetzner", "linux", { fresh: true }), /unexpected shape/);
+  });
+
+  it("marks a Windows image as preparing at once", async () => {
+    const { api } = fakeApi({
+      listBoxProviders: async () => ({
+        providers: [provider({ id: "vultr", windowsImage: { state: "none", message: null, updatedAt: null } })]
+      })
+    });
+    await loadBoxes(api);
+    // The reload after the POST answers "none" again — but a later read, so it is applied.
+    const slow = deferred<unknown>();
+    const { api: second } = fakeApi({
+      listBoxProviders: () => slow.promise
+    });
+    await prepareBoxWindowsImage(second, "vultr");
+    assert.equal(boxesStore.getState().providers?.[0].windowsImage?.state, "preparing");
+    slow.resolve({ providers: [provider({ id: "vultr", windowsImage: { state: "preparing", message: "Building", updatedAt: null } })] });
+    await flush();
+    assert.equal(boxesStore.getState().providers?.[0].windowsImage?.message, "Building");
+  });
+
+  it("connection answers are validated, and a decision updates its change set", async () => {
+    const { api } = fakeApi();
+    const settings = await saveBoxConnection(api, { mode: "tailscale" });
+    assert.equal(settings.mode, "tailscale");
+    assert.equal(settings.tailscale.configured, true);
+    assert.equal(settings.tailscale.policySnippet, "");
+    assert.equal(boxesStore.getState().connection?.mode, "tailscale");
+
+    await loadBoxes(api);
+    await decideBoxConfigChange(api, "c1", "approve");
+    assert.equal(boxesStore.getState().configChanges?.[0].state, "approved");
+
+    const bad = fakeApi({ setBoxConnection: async () => "nope" });
+    await assert.rejects(saveBoxConnection(bad.api, {}), /unexpected shape/);
+  });
+
+  it("finds a project's box: the live one, else the latest destroyed", () => {
+    const path = "/w/jaspersito/JasperEngine";
+    const project = { workspace: "jaspersito", name: "JasperEngine", path };
+    const gone1 = box({ id: "g1", state: "destroyed", destroyedAt: "2026-10-19T00:00:00.000Z", project });
+    const gone2 = box({ id: "g2", state: "destroyed", destroyedAt: "2026-10-20T00:00:00.000Z", project });
+    const live = box({ id: "live", project });
+    const temp = box({ id: "temp", purpose: "temporary", project });
+    assert.equal(projectBoxIn([gone1, gone2], path)?.id, "g2");
+    assert.equal(projectBoxIn([gone1, temp, live, gone2], path)?.id, "live");
+    assert.equal(projectBoxIn([temp], path), undefined);
+    assert.equal(projectBoxIn(null, path), undefined);
+    assert.equal(projectBoxIn([live], undefined), undefined);
+  });
+});
