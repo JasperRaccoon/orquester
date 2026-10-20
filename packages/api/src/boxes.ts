@@ -520,6 +520,8 @@ export const boxRoutes = {
   box: (id: string): string => boxPath(id),
   /** `GET` → text/plain setup log of a box (no secrets). */
   setupLog: (id: string): string => `${boxPath(id)}/setup-log`,
+  /** `GET` → `BoxStats` (box-protocol.ts) of a connected box; 409 `BOX_NOT_READY` while it is away. */
+  stats: (id: string): string => `${boxPath(id)}/stats`,
   /** `GET` → `BoxKindsResponse`. */
   kinds: "/api/boxes/kinds",
   /** `GET` → `BoxProvidersResponse`. */

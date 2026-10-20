@@ -5232,7 +5232,9 @@ function gitError(reply: FastifyReply, error: unknown): void {
   }
   const status = error instanceof GitError ? error.status : 500;
   const message = error instanceof Error ? error.message : "Git operation failed.";
-  void reply.code(status).send({ code: "GIT_ERROR", message });
+  // boxes: a box project's git panel learns BOX_NOT_READY (its box is away) rather than GIT_ERROR.
+  const code = error instanceof GitError && error.code ? error.code : "GIT_ERROR";
+  void reply.code(status).send({ code, message });
 }
 
 /**
