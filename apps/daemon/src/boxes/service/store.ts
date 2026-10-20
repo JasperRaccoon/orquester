@@ -9,17 +9,27 @@
  * - **Serialized and atomic.** Every change runs in one queue against a copy of the current state,
  *   is written with temp + rename, and only then becomes the state in memory. A failed write
  *   changes nothing (the caller sees the error — a box is never created without its record).
+ * - **Durable.** The temp file and then its directory are fsynced around the rename: a record
+ *   written before a provider call must survive a power cut right after it.
  * - **Corrupt files** (not JSON, not an object) are moved aside to `.corrupt-<stamp>` and the store
  *   starts empty, logged. A file that cannot even be read, or a corrupt one that cannot be moved,
- *   is never written over: every change answers 503 until the daemon restarts with it fixed.
+ *   is never written over: every change answers 503 until the daemon restarts with it fixed. A
+ *   boxes.json moved aside keeps its installation id when it can still be read out of the text,
+ *   and pauses orphan destruction for {@link ORPHAN_SWEEP_PAUSE_MS}: the boxes whose records were
+ *   in that file must not be swept as orphans while someone can still look at it.
+ * - **Installation id.** One per appdir ({@link BOX_INSTALLATION_ID_PATTERN}), made on the first
+ *   box created ({@link BoxStore.ensureInstallationId}); a store without one is from an older build.
  *
  * Secret values never appear in a log line or an error message from this module.
  */
 
+import { randomBytes, randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { chmod, readFile, rename } from "node:fs/promises";
+import { mkdir, open, readFile, realpath, rename, rm } from "node:fs/promises";
+import { dirname } from "node:path";
 
 import {
+  BOX_INSTALLATION_ID_PATTERN,
   BOX_SECRETS_VERSION,
   BOXES_STORE_VERSION,
   blacksmithSettingsSchema,
@@ -32,8 +42,10 @@ import {
 } from "@orquester/config";
 import { z } from "zod";
 
-import { writeFileAtomic } from "../../agent-hooks.ts";
 import { BoxError } from "./errors.ts";
+
+/** How long orphan destruction stays paused after a corrupt boxes.json was moved aside. */
+export const ORPHAN_SWEEP_PAUSE_MS = 24 * 60 * 60_000;
 
 /**
  * What the hub (boxes/hub) needs of the box records: read one, and change one in the store's
@@ -78,6 +90,47 @@ function objectField(parent: JsonObject, key: string): JsonObject {
 export interface BoxStoreOptions {
   baseDir: string;
   logger?: Pick<Console, "warn" | "error">;
+  /** For the orphan-sweep pause (defaults to `Date.now`). */
+  now?: () => number;
+}
+
+/**
+ * Write `content` to `path` via a temp file and rename, fsyncing the file before and its directory
+ * after the rename. Writes through a symlinked path to its target; the mode is always `mode`.
+ */
+async function writeFileDurable(path: string, content: string, mode: number): Promise<void> {
+  let target = path;
+  try {
+    target = await realpath(path);
+  } catch {
+    // ENOENT (a new file, or a broken link): write at the given path.
+  }
+  const dir = dirname(target);
+  await mkdir(dir, { recursive: true });
+  const tmp = `${target}.${randomUUID()}.tmp`;
+  try {
+    const handle = await open(tmp, "w", mode);
+    try {
+      await handle.writeFile(content, "utf8");
+      await handle.chmod(mode);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await rename(tmp, target);
+  } catch (error) {
+    await rm(tmp, { force: true }).catch(() => undefined);
+    throw error;
+  }
+  // The rename is durable once the directory entry is; platforms that cannot open or sync a
+  // directory (Windows) have nothing more to do.
+  const handle = await open(dir, "r").catch(() => null);
+  if (!handle) return;
+  try {
+    await handle.sync().catch(() => undefined);
+  } finally {
+    await handle.close();
+  }
 }
 
 /** One file's state: the object as read, or why changes are refused. */
@@ -96,21 +149,50 @@ export class BoxStore implements BoxRecordStore {
   private readonly boxes: FileState;
   private readonly secrets: FileState;
   private readonly logger: Pick<Console, "warn" | "error">;
+  private readonly now: () => number;
   private queue: Promise<unknown> = Promise.resolve();
   /** Parsed records, rebuilt after every load and write. */
   private records = new Map<string, StoredBox>();
 
   constructor(options: BoxStoreOptions) {
     this.logger = options.logger ?? console;
+    this.now = options.now ?? Date.now;
     this.boxes = { path: boxesStorePath(options.baseDir), label: "boxes.json", data: { version: BOXES_STORE_VERSION, boxes: {} }, blocked: null, mode: 0o600 };
     this.secrets = { path: boxSecretsPath(options.baseDir), label: "box-secrets.json", data: { version: BOX_SECRETS_VERSION, providers: {} }, blocked: null, mode: 0o600 };
   }
 
   async load(): Promise<void> {
-    await this.loadFile(this.boxes, (data) => isObject(data) && (data.boxes === undefined || isObject(data.boxes)));
+    const movedAside = await this.loadFile(this.boxes, (data) => isObject(data) && (data.boxes === undefined || isObject(data.boxes)));
     await this.loadFile(this.secrets, (data) => isObject(data));
     this.reindex();
+    if (movedAside !== null) await this.pauseOrphanSweep(movedAside);
     this.events.emit("changed", null);
+  }
+
+  // ---- installation ----------------------------------------------------------------------------
+
+  /** This appdir's installation id, or null while no box was created since it was introduced. */
+  installationId(): string | null {
+    const id = this.boxes.data.installationId;
+    return typeof id === "string" && BOX_INSTALLATION_ID_PATTERN.test(id) ? id : null;
+  }
+
+  /** The installation id, made and written now when there is none (before the first new box's record). */
+  async ensureInstallationId(): Promise<string> {
+    const existing = this.installationId();
+    if (existing) return existing;
+    await this.change(this.boxes, (data) => {
+      if (typeof data.installationId === "string" && BOX_INSTALLATION_ID_PATTERN.test(data.installationId)) return false;
+      data.installationId = randomBytes(4).toString("hex");
+    });
+    return this.installationId()!;
+  }
+
+  /** Until when orphan destruction is paused (a corrupt boxes.json was moved aside), or null. */
+  orphanSweepPausedUntil(): number | null {
+    const value = this.boxes.data.orphanSweepPausedUntil;
+    const at = typeof value === "string" ? Date.parse(value) : Number.NaN;
+    return Number.isFinite(at) && at > this.now() ? at : null;
   }
 
   /** Why changes to boxes.json are refused this run, if they are. */
@@ -333,8 +415,7 @@ export class BoxStore implements BoxRecordStore {
 
   private async write(file: FileState, data: JsonObject): Promise<void> {
     try {
-      await writeFileAtomic(file.path, `${JSON.stringify(data, null, 2)}\n`, file.mode, false);
-      await chmod(file.path, file.mode);
+      await writeFileDurable(file.path, `${JSON.stringify(data, null, 2)}\n`, file.mode);
     } catch (error) {
       const code = (error as NodeJS.ErrnoException)?.code;
       this.logger.error(`Failed to write ${file.label} (${code ?? "unknown error"})`);
@@ -342,15 +423,16 @@ export class BoxStore implements BoxRecordStore {
     }
   }
 
-  private async loadFile(file: FileState, valid: (data: unknown) => boolean): Promise<void> {
+  /** Resolves the text of a corrupt file it moved aside, else null. */
+  private async loadFile(file: FileState, valid: (data: unknown) => boolean): Promise<string | null> {
     let text: string;
     try {
       text = await readFile(file.path, "utf8");
     } catch (error) {
       const code = (error as NodeJS.ErrnoException)?.code;
-      if (code === "ENOENT") return;
+      if (code === "ENOENT") return null;
       this.block(file, `it could not be read (${code ?? "unknown error"})`);
-      return;
+      return null;
     }
     let data: unknown;
     let detail: string | null = null;
@@ -363,7 +445,7 @@ export class BoxStore implements BoxRecordStore {
     }
     if (detail === null) {
       file.data = data as JsonObject;
-      return;
+      return null;
     }
     const aside = `${file.path}.corrupt-${new Date().toISOString().replace(/[:.]/g, "-")}`;
     try {
@@ -371,9 +453,32 @@ export class BoxStore implements BoxRecordStore {
     } catch (moveError) {
       const code = (moveError as NodeJS.ErrnoException)?.code;
       this.block(file, `it is unreadable (${detail}) and could not be moved aside (${code ?? "unknown error"})`);
-      return;
+      return null;
     }
     this.logger.warn(`${file.label} is unreadable (${detail}); moved it to ${aside} and started empty.`);
+    return text;
+  }
+
+  /**
+   * boxes.json was moved aside: keep its installation id when the text still shows it (a truncated
+   * file usually does), and pause orphan destruction, written to the fresh file.
+   */
+  private async pauseOrphanSweep(movedText: string): Promise<void> {
+    const salvaged = /"installationId"\s*:\s*"([0-9a-f]{8})"/.exec(movedText)?.[1];
+    const until = new Date(this.now() + ORPHAN_SWEEP_PAUSE_MS).toISOString();
+    try {
+      await this.change(this.boxes, (data) => {
+        if (salvaged) data.installationId = salvaged;
+        data.orphanSweepPausedUntil = until;
+      });
+    } catch {
+      // Logged by `write`; the pause then holds for this run only (the in-memory state below).
+      if (salvaged) this.boxes.data.installationId = salvaged;
+      this.boxes.data.orphanSweepPausedUntil = until;
+    }
+    this.logger.warn(
+      `boxes.json was moved aside: Orquester destroys no unrecorded box of this installation until ${until}. Check the moved file and the providers' consoles for boxes that are still wanted.`
+    );
   }
 
   private block(file: FileState, reason: string): void {

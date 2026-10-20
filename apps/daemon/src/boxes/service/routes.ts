@@ -2,7 +2,7 @@
  * The plugin's HTTP routes (`boxRoutes` in packages/api): boxes, setup logs, kinds, providers and
  * their offers, Windows images, the connection route and the Blacksmith setup. Registered on both
  * transports like the other plugin routes; the bearer hook gates the remote one. While the plugin
- * is off everything but reads answers 409 `BOXES_DISABLED`. Refusals are `{ code, message }` and
+ * is off everything but reads and destroying a box answers 409 `BOXES_DISABLED`. Refusals are `{ code, message }` and
  * never carry a secret. (The box-authenticated `agentBinary`/`connect` routes are the hub's; the
  * config-changes routes are the sync module's.)
  */
@@ -101,8 +101,9 @@ export function registerBoxRoutes(app: FastifyInstance, service: BoxService): vo
       return sendBoxError(reply, error);
     }
   });
+  // Not guarded: a box that exists must stay destroyable while the plugin is off (it still bills).
   app.delete<{ Params: { id: string } }>("/api/boxes/:id", (request, reply) =>
-    guarded(async (): Promise<BoxResponse> => {
+    read(async (): Promise<BoxResponse> => {
       const summary = box(request.params.id);
       if (summary.purpose === "project") {
         throw new BoxError(409, "BOX_IS_PROJECT", "This box belongs to a project: delete the project to destroy it.");

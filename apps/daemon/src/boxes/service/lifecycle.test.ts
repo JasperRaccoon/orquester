@@ -10,7 +10,7 @@ import { boxesStorePath } from "@orquester/config";
 import type { BoxSyncScope } from "../contracts.ts";
 import { localBoxConnection } from "../testing.ts";
 import { BoxError } from "./errors.ts";
-import { connectProvider, FakeAdapter, isolatedBoxConnection, testBoxService } from "./testing.ts";
+import { connectProvider, FakeAdapter, isolatedBoxConnection, testBoxService, testClock } from "./testing.ts";
 
 async function tempDir(t: test.TestContext, prefix: string): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), prefix));
@@ -75,8 +75,12 @@ test("a temporary box: the record is written before the provider call, then crea
   );
   const stored = JSON.parse(await readFile(boxesStorePath(base), "utf8")).boxes[box.id];
   assert.equal(stored.state, "ready");
-  assert.equal(adapter.creates[0]!.name, `orq-${box.id}`);
-  assert.deepEqual(adapter.creates[0]!.tags, { "orquester-box": box.id });
+  // The installation id (made with the first box) is in the name and the tags.
+  const installation = String(stored.name).split("-")[1]!;
+  assert.match(installation, /^[0-9a-f]{8}$/);
+  assert.equal(JSON.parse(await readFile(boxesStorePath(base), "utf8")).installationId, installation);
+  assert.equal(adapter.creates[0]!.name, `orq-${installation}-${box.id}`);
+  assert.deepEqual(adapter.creates[0]!.tags, { "orquester-box": box.id, "orquester-install": installation });
   assert.match(adapter.creates[0]!.sshPublicKey, /^ssh-ed25519 [A-Za-z0-9+/=]+ orquester-box$/);
   const log = await service.setupLog(box.id);
   assert.match(log, /\[connect\] Done/);
@@ -364,4 +368,152 @@ test("without orq-agent builds (no Go on the host) nothing is created and the re
   hub.autoConnect = (boxId) => localBoxConnection({ boxId });
   const box = await service.createTemporaryBox({ threadId: "t", kind: "linux", lifetimeMinutes: 30, purposeNote: "x" });
   assert.equal(box.state, "ready");
+});
+
+test("a destroy during the provider's create call waits for it and destroys what it made", async (t) => {
+  const base = await tempDir(t, "orq-box-life-");
+  const adapter = new FakeAdapter();
+  const { service } = testBoxService({ baseDir: base, adapters: [adapter] });
+  t.after(() => service.stop());
+  await service.start();
+  await connectProvider(service, adapter);
+  let release!: () => void;
+  adapter.holdCreate = new Promise((resolve) => (release = resolve));
+  const calling = new Promise<void>((resolve) => (adapter.onCreate = () => resolve()));
+  const box = await service.startTemporaryBox({ threadId: "t", kind: "linux", lifetimeMinutes: 30, purposeNote: "x" });
+  await calling;
+  const destroying = service.destroyBox(box.id, "agent");
+  release();
+  const destroyed = await destroying;
+  assert.equal(destroyed.state, "destroyed");
+  assert.equal(destroyed.destroyedReason, "agent");
+  assert.deepEqual(adapter.destroyed, ["i-1"], "the instance the create made is destroyed");
+  assert.equal(adapter.instances.size, 0);
+});
+
+test("a create that failed after the provider accepted it: destroy finds the instance by its marker", async (t) => {
+  const base = await tempDir(t, "orq-box-life-");
+  const adapter = new FakeAdapter();
+  const { service } = testBoxService({ baseDir: base, adapters: [adapter] });
+  t.after(() => service.stop());
+  await service.start();
+  await connectProvider(service, adapter);
+  adapter.failCreateAfterAccept = new Error("socket hang up");
+  await assert.rejects(service.createTemporaryBox({ threadId: "t", kind: "linux", lifetimeMinutes: 30, purposeNote: "x" }), /socket hang up/);
+  const [record] = service.registry.list();
+  assert.equal(record!.state, "destroyed");
+  assert.deepEqual(record!.providerRef, { id: "i-1" }, "the found instance is recorded");
+  assert.deepEqual(adapter.destroyed, ["i-1"]);
+  assert.equal(adapter.instances.size, 0);
+});
+
+test("without a ref, a lookup that cannot list leaves destroy-failed (never destroyed unconfirmed)", async (t) => {
+  const base = await tempDir(t, "orq-box-life-");
+  const adapter = new FakeAdapter();
+  const { service } = testBoxService({ baseDir: base, adapters: [adapter] });
+  t.after(() => service.stop());
+  await service.start();
+  await connectProvider(service, adapter);
+  adapter.failCreateAfterAccept = new Error("socket hang up");
+  adapter.failList = new Error("503 Service Unavailable");
+  await assert.rejects(service.createTemporaryBox({ threadId: "t", kind: "linux", lifetimeMinutes: 30, purposeNote: "x" }));
+  const [record] = service.registry.list();
+  assert.equal(record!.state, "destroy-failed");
+  assert.match(String(record!.stateReason), /Could not check whether Fake Cloud created the machine/);
+  assert.equal(adapter.instances.size, 1, "still there, and still on the record's books");
+
+  adapter.failList = null;
+  const destroyed = await service.destroyBox(record!.id, "agent");
+  assert.equal(destroyed.state, "destroyed");
+  assert.equal(adapter.instances.size, 0);
+});
+
+test("a failed status poll during a destroy is retried, not taken as a failed destroy", async (t) => {
+  const base = await tempDir(t, "orq-box-life-");
+  const adapter = new FakeAdapter();
+  const { service, hub } = testBoxService({ baseDir: base, adapters: [adapter] });
+  t.after(() => service.stop());
+  await service.start();
+  await connectProvider(service, adapter);
+  hub.autoConnect = (boxId) => localBoxConnection({ boxId });
+  const box = await service.createTemporaryBox({ threadId: "t", kind: "linux", lifetimeMinutes: 30, purposeNote: "x" });
+  adapter.failStatusTimes = 2;
+  const destroyed = await service.destroyBox(box.id, "agent");
+  assert.equal(destroyed.state, "destroyed");
+  assert.equal(adapter.failStatusTimes, 0);
+});
+
+test("with the plugin off, live boxes stay managed: the reconciler still enforces their time limit", { timeout: 30_000 }, async (t) => {
+  const base = await tempDir(t, "orq-box-life-");
+  const adapter = new FakeAdapter();
+  let now = Date.now();
+  const { service, hub, setEnabled } = testBoxService({ baseDir: base, adapters: [adapter], overrides: { clock: testClock(() => now) } });
+  t.after(() => service.stop());
+  await service.start();
+  await connectProvider(service, adapter);
+  hub.autoConnect = (boxId) => localBoxConnection({ boxId });
+  const box = await service.createTemporaryBox({ threadId: "t", kind: "linux", lifetimeMinutes: 30, purposeNote: "x" });
+  setEnabled(false);
+  now += 31 * 60_000;
+  const destroyed = new Promise<void>((resolve) => {
+    const off = service.registry.onChange((id) => {
+      if (id === box.id && service.registry.get(id)?.state === "destroyed") {
+        off();
+        resolve();
+      }
+    });
+  });
+  // Turning the plugin off drops every box's link: the reconciler takes a look.
+  hub.disconnect(box.id);
+  await destroyed;
+  await service.settled();
+  assert.equal(service.registry.get(box.id)!.destroyedReason, "time-limit");
+  assert.equal(adapter.instances.size, 0);
+});
+
+test("two appdirs on one provider account never sweep each other's boxes", async (t) => {
+  const adapter = new FakeAdapter();
+  let now = Date.now();
+  const clock = testClock(() => now);
+  const mine = testBoxService({ baseDir: await tempDir(t, "orq-box-life-"), adapters: [adapter], overrides: { clock } });
+  const stage = testBoxService({ baseDir: await tempDir(t, "orq-box-life-"), adapters: [adapter], overrides: { clock } });
+  t.after(() => Promise.all([mine.service.stop(), stage.service.stop()]));
+  for (const { service } of [mine, stage]) {
+    await service.start();
+    await connectProvider(service, adapter);
+  }
+  mine.hub.autoConnect = (boxId) => localBoxConnection({ boxId });
+  stage.hub.autoConnect = (boxId) => localBoxConnection({ boxId });
+  const box = await mine.service.createTemporaryBox({ threadId: "t", kind: "linux", lifetimeMinutes: 600, purposeNote: "x" });
+  const staged = await stage.service.createTemporaryBox({ threadId: "t", kind: "linux", lifetimeMinutes: 600, purposeNote: "x" });
+  await stage.service.reconcileNow();
+  await mine.service.reconcileNow();
+  now += 11 * 60_000;
+  await stage.service.reconcileNow();
+  await mine.service.reconcileNow();
+  await Promise.all([mine.service.settled(), stage.service.settled()]);
+  assert.deepEqual(adapter.destroyed, []);
+  assert.equal(adapter.instances.size, 2);
+  assert.equal(mine.service.registry.get(box.id)!.state, "ready");
+  assert.equal(stage.service.registry.get(staged.id)!.state, "ready");
+});
+
+test("new credentials must see the live boxes: another account's key is refused, a rotated key is not", async (t) => {
+  const base = await tempDir(t, "orq-box-life-");
+  const adapter = new FakeAdapter();
+  const { service, hub } = testBoxService({ baseDir: base, adapters: [adapter] });
+  t.after(() => service.stop());
+  await service.start();
+  await connectProvider(service, adapter);
+  hub.autoConnect = (boxId) => localBoxConnection({ boxId });
+  const box = await service.createTemporaryBox({ threadId: "t", kind: "linux", lifetimeMinutes: 30, purposeNote: "x" });
+  await assert.rejects(
+    service.settings.setCredentials(adapter.id, { credentials: { apiKey: adapter.otherAccountKey } }),
+    (error: unknown) => error instanceof BoxError && error.status === 409 && /cannot see box/.test(error.message)
+  );
+  assert.equal(service.settings.providersResponse().providers[0]!.keyHint, "1234", "the old key is kept");
+  await service.reconcileNow();
+  assert.equal(service.registry.get(box.id)!.state, "ready", "not taken for gone");
+  const rotated = await service.settings.setCredentials(adapter.id, { credentials: { apiKey: adapter.rotatedKey } });
+  assert.equal(rotated.keyHint, "5678");
 });

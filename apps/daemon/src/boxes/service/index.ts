@@ -4,10 +4,11 @@
  * adapters, bootstrap, Tailscale, config sync, tooling and the Blacksmith GitHub driver are
  * injected (contracts.ts and the interfaces below).
  *
- * The plugin switch (`EPHEMERAL_VMS_PLUGIN_ID`): while it is off the reconciler's timers stop and
- * nothing new is created or changed through the routes; boxes that exist keep running (the plugin
- * page lists them) and are destroyed through their project's delete, or the programmatic
- * `destroyBox` (chat close, the agent).
+ * The plugin switch (`EPHEMERAL_VMS_PLUGIN_ID`): while it is off nothing new is created or changed
+ * through the routes. Boxes that exist keep running and stay managed: the reconciler keeps running
+ * (time limits, destroy retries, gone instances; no setup is resumed) as long as any record is not
+ * `destroyed`, the plugin page lists them, and they are destroyed through `DELETE /api/boxes/:id`
+ * (temporary boxes), their project's delete, or the programmatic `destroyBox` (chat close, the agent).
  */
 
 import type { FastifyInstance } from "fastify";
@@ -41,7 +42,7 @@ import { projectDeleted, StoreBoxRegistry } from "./registry.ts";
 import { registerBoxRoutes } from "./routes.ts";
 import { BoxSettings, type BlacksmithSetupDriver, type BoxHostingAccounts, type TailscaleCredentials } from "./settings.ts";
 import { BoxStore, type BoxRecordStore } from "./store.ts";
-import { boxesTotals, utcMonthStart } from "./summary.ts";
+import { boxesTotals, isActiveRecord, utcMonthStart } from "./summary.ts";
 
 export { BoxError } from "./errors.ts";
 export { sendBoxError } from "./routes.ts";
@@ -99,7 +100,7 @@ export interface BoxService {
   settings: BoxSettings;
   enabled(): boolean;
   registerRoutes(app: FastifyInstance): void;
-  /** Load the stores, follow the plugin switch, start the reconciler while on. */
+  /** Load the stores, follow the plugin switch; the reconciler runs while it is on or any box is not destroyed. */
   start(): Promise<void>;
   /** Stop timers and setup runs (records stay; the next start resumes them); queued writes land. */
   stop(): Promise<void>;
@@ -124,7 +125,7 @@ const MAX_PURPOSE_NOTE = 200;
 export function createBoxService(deps: BoxServiceDeps): BoxService {
   const clock = deps.clock ?? systemClock;
   const logger = deps.logger ?? console;
-  const store = new BoxStore({ baseDir: deps.baseDir, logger });
+  const store = new BoxStore({ baseDir: deps.baseDir, logger, now: () => clock.now() });
   const registry = new StoreBoxRegistry(store, deps.hub, deps.providers, () => clock.now());
   const setupLog = new BoxSetupLog(deps.baseDir, logger);
   let enabled = false;
@@ -191,6 +192,7 @@ export function createBoxService(deps: BoxServiceDeps): BoxService {
     clock,
     ...(deps.fetch ? { fetch: deps.fetch } : {}),
     logger,
+    enabled: () => enabled,
     publishChanged: publishBoxes
   });
   const projects = new BoxProjects({ store, registry, lifecycle, settings, accounts: deps.accounts, enabled: () => enabled, now: () => clock.now() });
@@ -198,12 +200,18 @@ export function createBoxService(deps: BoxServiceDeps): BoxService {
   const unsubscribers: (() => void)[] = [];
   let blacksmithTest: Promise<void> | null = null;
   const background = new Set<Promise<unknown>>();
+  let started = false;
+
+  /** The reconciler runs while the plugin is on, or while any box may still bill: no box is left unmanaged. */
+  const followActivity = () => {
+    if (started && (enabled || store.list().some(isActiveRecord))) reconciler.start();
+    else reconciler.stop();
+  };
 
   const setEnabled = (next: boolean) => {
     if (next === enabled) return;
     enabled = next;
-    if (next) reconciler.start();
-    else reconciler.stop();
+    followActivity();
     publishBoxes();
     publishProviders();
   };
@@ -285,6 +293,7 @@ export function createBoxService(deps: BoxServiceDeps): BoxService {
       unsubscribers.push(
         registry.onChange(() => {
           publishBoxes();
+          followActivity();
           reconciler.armDeadline();
         }),
         deps.hub.onConnectionChange((boxId, connected) => {
@@ -293,11 +302,16 @@ export function createBoxService(deps: BoxServiceDeps): BoxService {
         }),
         deps.onPluginChange(setEnabled)
       );
-      setEnabled(await deps.pluginEnabled().catch(() => false));
+      started = true;
+      enabled = await deps.pluginEnabled().catch(() => false);
+      followActivity();
+      publishBoxes();
+      publishProviders();
     },
 
     async stop() {
       for (const unsubscribe of unsubscribers.splice(0)) unsubscribe();
+      started = false;
       reconciler.stop();
       lifecycle.stop();
       enabled = false;
@@ -349,6 +363,7 @@ export function createBoxService(deps: BoxServiceDeps): BoxService {
       for (;;) {
         await Promise.allSettled([...background]);
         await lifecycle.settled();
+        await reconciler.settled();
         await settings.windowsImagesSettled();
         await store.flush();
         await setupLog.flush();

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, open, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -7,7 +7,7 @@ import test from "node:test";
 import { boxesStorePath, boxSecretsPath, type StoredBox } from "@orquester/config";
 
 import { BoxError } from "./errors.ts";
-import { BoxStore } from "./store.ts";
+import { BoxStore, ORPHAN_SWEEP_PAUSE_MS } from "./store.ts";
 
 const quiet = { warn: () => undefined, error: () => undefined };
 
@@ -90,6 +90,61 @@ test("a corrupt boxes.json is moved aside, never written over", async (t) => {
   assert.match(warnings.join("\n"), /moved it to/);
   await store.insert(record("dddddddddddd"));
   assert.ok(JSON.parse(await readFile(file, "utf8")).boxes.dddddddddddd);
+});
+
+test("a moved-aside boxes.json keeps its installation id and pauses the orphan sweep for a day", async (t) => {
+  const base = await tempBase(t);
+  const file = boxesStorePath(base);
+  await mkdir(dirname(file), { recursive: true });
+  // Cut off mid-write: not JSON, but the id is still readable.
+  await writeFile(file, '{"version":1,"installationId":"0badc0de","boxes":{"aaaaaaaaaaaa":{"id":"aaa');
+  const now = Date.parse("2026-10-20T12:00:00.000Z");
+  const store = new BoxStore({ baseDir: base, logger: quiet, now: () => now });
+  await store.load();
+  assert.equal(store.installationId(), "0badc0de");
+  assert.equal(store.orphanSweepPausedUntil(), now + ORPHAN_SWEEP_PAUSE_MS);
+  const written = JSON.parse(await readFile(file, "utf8"));
+  assert.equal(written.installationId, "0badc0de");
+  assert.equal(written.orphanSweepPausedUntil, new Date(now + ORPHAN_SWEEP_PAUSE_MS).toISOString());
+
+  // It survives a restart, and ends on its own.
+  const later = new BoxStore({ baseDir: base, logger: quiet, now: () => now + ORPHAN_SWEEP_PAUSE_MS - 1 });
+  await later.load();
+  assert.equal(later.orphanSweepPausedUntil(), now + ORPHAN_SWEEP_PAUSE_MS);
+  const after = new BoxStore({ baseDir: base, logger: quiet, now: () => now + ORPHAN_SWEEP_PAUSE_MS });
+  await after.load();
+  assert.equal(after.orphanSweepPausedUntil(), null);
+});
+
+test("the installation id is made once, with the first box, and kept for records from before it", async (t) => {
+  const base = await tempBase(t);
+  const file = boxesStorePath(base);
+  await mkdir(dirname(file), { recursive: true });
+  await writeFile(file, JSON.stringify({ version: 1, boxes: { aaaaaaaaaaaa: record("aaaaaaaaaaaa") } }));
+  const store = new BoxStore({ baseDir: base, logger: quiet });
+  await store.load();
+  assert.equal(store.installationId(), null, "an older build's store has none");
+  assert.equal(store.orphanSweepPausedUntil(), null);
+  const id = await store.ensureInstallationId();
+  assert.match(id, /^[0-9a-f]{8}$/);
+  assert.equal(await store.ensureInstallationId(), id);
+  const reloaded = new BoxStore({ baseDir: base, logger: quiet });
+  await reloaded.load();
+  assert.equal(reloaded.installationId(), id);
+  assert.ok(reloaded.get("aaaaaaaaaaaa"), "the older record is kept");
+});
+
+test("writes are fsynced: the file before the rename, its directory after", async (t) => {
+  const base = await tempBase(t);
+  const store = new BoxStore({ baseDir: base, logger: quiet });
+  await store.load();
+  await store.insert(record("aaaaaaaaaaaa"));
+  const probe = await open(boxesStorePath(base), "r");
+  const proto = Object.getPrototypeOf(probe) as { sync: () => Promise<void> };
+  await probe.close();
+  const sync = t.mock.method(proto, "sync");
+  await store.update("aaaaaaaaaaaa", (next) => void (next.state = "destroyed"));
+  assert.ok(sync.mock.callCount() >= 2, `synced ${sync.mock.callCount()} times`);
 });
 
 test("a boxes.json that cannot be read blocks every change", async (t) => {
