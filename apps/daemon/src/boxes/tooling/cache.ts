@@ -9,7 +9,7 @@
 import { randomUUID } from "node:crypto";
 import { createWriteStream } from "node:fs";
 import { mkdir, readdir, rename, rm, stat } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
@@ -76,7 +76,9 @@ export class ToolingArchiveCache {
       throw error;
     });
     for (const version of versions) {
-      if (!keep.has(version) && ![...this.inflight.keys()].some((file) => file.startsWith(join(dir, version) + "/"))) {
+      // A download in flight for that version is kept too: a provision is about to use it.
+      const downloading = [...this.inflight.keys()].some((file) => resolve(dirname(file)) === resolve(dir, version));
+      if (!keep.has(version) && !downloading) {
         await rm(join(dir, version), { recursive: true, force: true });
       }
     }

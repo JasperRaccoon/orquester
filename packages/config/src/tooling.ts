@@ -107,8 +107,8 @@ export function toolingEnvKey(env: Readonly<Record<string, string | undefined>>,
  *   path's backslashes are doubled, and a path with spaces stays one argument.
  * - **PATH**: the `pathPrepend` entries go first, joined with `os`'s
  *   delimiter. On Windows every spelling of PATH in `env` (`Path`, `PATH`, …)
- *   is merged into one key — the first one present, `Path` when none — since a
- *   child given two spellings sees only one of them.
+ *   is merged into one key — the first one present — since a child given two
+ *   spellings sees only one of them; this happens with nothing to prepend too.
  *
  * Throws when a contribution prepends to PATH and `env` has none: a PATH of
  * only the plugin's dirs would hide every other program from the session.
@@ -132,9 +132,10 @@ export function applyToolingContributions(
     if (value !== undefined) next[key] = value;
   }
   const prepend = contributions.flatMap((contribution) => contribution.pathPrepend);
-  if (prepend.length > 0) {
+  const keys = os === "win32" ? Object.keys(next).filter((key) => key.toUpperCase() === "PATH") : "PATH" in next ? ["PATH"] : [];
+  // Windows: two spellings of PATH are merged even with nothing to prepend.
+  if (prepend.length > 0 || keys.length > 1) {
     const delimiter = toolingPathDelimiter(os);
-    const keys = os === "win32" ? Object.keys(next).filter((key) => key.toUpperCase() === "PATH") : "PATH" in next ? ["PATH"] : [];
     const existing = keys
       .map((key) => next[key] ?? "")
       .flatMap((value) => value.split(delimiter))

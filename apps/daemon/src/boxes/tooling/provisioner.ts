@@ -20,7 +20,8 @@
  * another waits joins it.
  *
  * A box is provisioned again when a plugin reports a change (on/off, engine,
- * a new version): every connected box this process provisioned gets it now,
+ * a new version) or the workspaces root moves (`workspacesChanged`): every
+ * connected box this process provisioned gets it now,
  * the rest when they reconnect. After a daemon restart a project box that
  * finished setup is provisioned when it connects.
  */
@@ -28,7 +29,13 @@
 import { realpath } from "node:fs/promises";
 import { posix, resolve, win32 } from "node:path";
 
-import { type PluginBoxToolingState, type PluginBoxToolingStatus, hostToBoxPath } from "@orquester/api";
+import {
+  type BoxPathMap,
+  type BoxSysInfo,
+  type PluginBoxToolingState,
+  type PluginBoxToolingStatus,
+  hostToBoxPath
+} from "@orquester/api";
 import {
   applyToolingContributions,
   boxToolVersionDir,
@@ -86,12 +93,46 @@ export interface BoxToolingProvisionerHandle extends BoxToolingProvisioner {
   sessionEnv(boxId: string, env: Readonly<Record<string, string>>): Record<string, string>;
   /** Provision in the background (logged, never rejects); joins a provision already waiting. */
   requestProvision(boxId: string): Promise<void>;
+  /** The daemon's workspaces root moved: boxes get preloads that bake in the new one. */
+  workspacesChanged(): void;
   /** The box is gone: drop its status and contributions. */
   forget(boxId: string): void;
   /** Stop reacting to changes and cancel running provisions. */
   stop(): Promise<void>;
   /** Every requested provision has finished (for tests and shutdown). */
   settled(): Promise<void>;
+}
+
+/**
+ * The box paths a plugin renders with, in the box's path syntax: its data
+ * dir's `tooling/` layout and the host workspaces roots mapped into the box
+ * (`hostToBoxPath`: unchanged on POSIX boxes, under `C:\orq\` on Windows).
+ */
+export function toolingTargetContext(input: {
+  boxId: string;
+  sys: Pick<BoxSysInfo, "os" | "arch" | "libc" | "dataDir">;
+  paths: BoxPathMap;
+  pluginId: string;
+  /** Absolute host paths. */
+  hostWorkspacesRoots: readonly string[];
+}): ToolingTargetContext {
+  const { os, arch, libc, dataDir } = input.sys;
+  const rules = os === "win32" ? win32 : posix;
+  if (!rules.isAbsolute(dataDir)) throw new ToolingStepError("resolve", `the box reports no absolute data dir (${dataDir})`);
+  const workspacesRoots: string[] = [];
+  for (const root of input.hostWorkspacesRoots) {
+    const boxRoot = hostToBoxPath(input.paths, root);
+    if (!workspacesRoots.includes(boxRoot)) workspacesRoots.push(boxRoot);
+  }
+  return {
+    boxId: input.boxId,
+    target: { os, arch, libc },
+    path: rules,
+    pluginDir: boxToolingPluginDir(os, dataDir, input.pluginId),
+    versionDir: (tool, version) => boxToolVersionDir(os, dataDir, tool, version),
+    versionsDir: (tool) => toolingJoinPath(os, boxToolDir(os, dataDir, tool), "versions"),
+    workspacesRoots
+  };
 }
 
 /** Box states after setup, in which a reconnecting project box gets its tooling again. */
@@ -164,27 +205,17 @@ export function createBoxToolingProvisioner(deps: BoxToolingProvisionerDeps): Bo
     setContribution(boxId, pluginId, contribution);
   };
 
-  /** Box paths for `plugin` in `connection`'s box, in its path syntax. */
+  /** Box paths for `plugin` in `connection`'s box: the workspaces root as it is now, real and configured. */
   const contextFor = async (connection: BoxConnection, plugin: ToolingPlugin): Promise<ToolingTargetContext> => {
-    const { os, arch, libc, dataDir } = connection.sys;
-    const rules = os === "win32" ? win32 : posix;
-    if (!rules.isAbsolute(dataDir)) throw new ToolingStepError("resolve", `the box reports no absolute data dir (${dataDir})`);
     const configured = resolve(deps.workspacesDir());
     const real = await realpath(configured).catch(() => configured);
-    const workspacesRoots: string[] = [];
-    for (const root of [real, configured]) {
-      const boxRoot = hostToBoxPath(connection.paths, root);
-      if (!workspacesRoots.includes(boxRoot)) workspacesRoots.push(boxRoot);
-    }
-    return {
+    return toolingTargetContext({
       boxId: connection.boxId,
-      target: { os, arch, libc },
-      path: rules,
-      pluginDir: boxToolingPluginDir(os, dataDir, plugin.id),
-      versionDir: (tool, version) => boxToolVersionDir(os, dataDir, tool, version),
-      versionsDir: (tool) => toolingJoinPath(os, boxToolDir(os, dataDir, tool), "versions"),
-      workspacesRoots
-    };
+      sys: connection.sys,
+      paths: connection.paths,
+      pluginId: plugin.id,
+      hostWorkspacesRoots: [real, configured]
+    });
   };
 
   /** One plugin in one box. Resolves the failure message, or null when it succeeded. */
@@ -333,11 +364,12 @@ export function createBoxToolingProvisioner(deps: BoxToolingProvisionerDeps): Bo
     provision,
     contribution: mergedContribution,
     requestProvision,
+    workspacesChanged: onPluginChange,
     sessionEnv(boxId, env) {
       const entry = boxes.get(boxId);
       const os = entry?.target?.os ?? deps.hub.get(boxId)?.sys.os;
-      if (!os || !entry || entry.contributions.size === 0) return { ...env };
-      return applyToolingContributions(env, [...entry.contributions.values()], os);
+      if (!os) return { ...env };
+      return applyToolingContributions(env, [...(entry?.contributions.values() ?? [])], os);
     },
     toolingStatus(boxId) {
       return [...(boxes.get(boxId)?.statuses.values() ?? [])].map((status) => ({ ...status }));
