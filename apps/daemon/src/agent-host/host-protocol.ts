@@ -333,6 +333,8 @@ export interface BoxTokenRequest {
   accountId: string;
   /** The token must stay valid at least this long; the broker refreshes on demand otherwise. */
   minValidSeconds?: number;
+  /** boxes: the token the CLI was refused with (a Codex refresh request); renewed when still current. */
+  rejectedAccessToken?: string;
 }
 
 /** boxes: one transcript to push or mirror (`BoxTranscriptSync`'s request; host paths). */
