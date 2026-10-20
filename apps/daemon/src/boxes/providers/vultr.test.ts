@@ -186,13 +186,16 @@ test("status: a stopped or suspended instance reads as stopped", async () => {
   const running = fixture<{ instance: Record<string, unknown> }>("vultr", "instance-running");
   const replay = replayFetch([
     { method: "GET", url: instanceUrl, body: { instance: { ...running.instance, power_status: "stopped" } } },
-    { method: "GET", url: instanceUrl, body: { instance: { ...running.instance, status: "suspended" } } }
+    { method: "GET", url: instanceUrl, body: { instance: { ...running.instance, status: "suspended" } } },
+    { method: "GET", url: instanceUrl, body: { instance: { ...running.instance, status: "something-new" } } }
   ]);
   const ref = { instanceId: INSTANCE_ID };
   const stopped = await vultrAdapter.status(credentials, ref, replayOptions(replay));
   assert.equal(stopped.state, "stopped");
   assert.equal(stopped.detail, "Vultr reports the instance active, power stopped");
   assert.equal((await vultrAdapter.status(credentials, ref, replayOptions(replay))).state, "stopped");
+  // A state the adapter does not know is transient (pending), never a failure that destroys the box.
+  assert.equal((await vultrAdapter.status(credentials, ref, replayOptions(replay))).state, "pending");
 });
 
 test("destroy: deletes the instance and its boot script, idempotently", async () => {

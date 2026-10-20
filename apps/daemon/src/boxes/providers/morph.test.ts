@@ -171,6 +171,7 @@ test("status: maps instance states, 404 is gone, 429 is retried", async () => {
     { method: "GET", url: INSTANCE, body: { ...ready, status: "pending" } },
     { method: "GET", url: INSTANCE, body: { ...ready, status: "paused" } },
     { method: "GET", url: INSTANCE, body: { ...ready, status: "error" } },
+    { method: "GET", url: INSTANCE, body: { ...ready, status: "something-new" } },
     { method: "GET", url: INSTANCE, status: 404, body: fixture("morph", "error-not-found") }
   ]);
   const ref = { instanceId: "morphvm_11111111", snapshotId: "snapshot_11111111" };
@@ -180,6 +181,8 @@ test("status: maps instance states, 404 is gone, 429 is retried", async () => {
   assert.equal(paused.state, "stopped");
   assert.equal(paused.detail, "Morph reports the instance paused");
   assert.equal((await morphAdapter.status(credentials, ref, replayOptions(replay))).state, "error");
+  // A state the adapter does not know is transient (pending), never a failure that destroys the box.
+  assert.equal((await morphAdapter.status(credentials, ref, replayOptions(replay))).state, "pending");
   assert.equal((await morphAdapter.status(credentials, ref, replayOptions(replay))).state, "gone");
   assert.equal(replay.pending().length, 0);
 });

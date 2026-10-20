@@ -434,8 +434,10 @@ test("status: maps lifecycle states, reads the public IP, 404 is gone, 429 is re
     { method: "GET", url: `${CORE}/vnics/${vnic}`, body: fixture("oracle", "vnic") },
     { method: "GET", url: instanceUrl, body: { ...running, lifecycleState: "PROVISIONING" } },
     { method: "GET", url: instanceUrl, body: { ...running, lifecycleState: "STOPPED" } },
+    { method: "GET", url: instanceUrl, body: { ...running, lifecycleState: "SOMETHING_NEW" } },
     { method: "GET", url: instanceUrl, body: { ...running, lifecycleState: "TERMINATED" } },
-    { method: "GET", url: instanceUrl, status: 404, body: fixture("oracle", "error-not-found") }
+    { method: "GET", url: instanceUrl, status: 404, body: fixture("oracle", "error-not-found") },
+    { method: "GET", url: `${CORE}/instances?compartmentId=${TENANCY}&limit=100`, body: [] }
   ]);
   assert.deepEqual(await oracleAdapter.status(credentials, ref, replayOptions(replay)), {
     state: "running",
@@ -446,6 +448,8 @@ test("status: maps lifecycle states, reads the public IP, 404 is gone, 429 is re
   assert.equal((await oracleAdapter.status(credentials, ref, replayOptions(replay))).state, "pending");
   const stopped = await oracleAdapter.status(credentials, ref, replayOptions(replay));
   assert.deepEqual(stopped, { state: "stopped", detail: "Oracle Cloud reports the instance STOPPED", publicIp: null, hourlyUsd: null });
+  // A state the adapter does not know is transient (pending), never a failure that destroys the box.
+  assert.equal((await oracleAdapter.status(credentials, ref, replayOptions(replay))).state, "pending");
   assert.equal((await oracleAdapter.status(credentials, ref, replayOptions(replay))).state, "gone");
   assert.deepEqual(await oracleAdapter.status(credentials, ref, replayOptions(replay)), {
     state: "gone",
@@ -453,6 +457,24 @@ test("status: maps lifecycle states, reads the public IP, 404 is gone, 429 is re
     publicIp: null,
     hourlyUsd: null
   });
+  assert.equal(replay.pending().length, 0);
+});
+
+test("status: NotAuthorizedOrNotFound is gone only when the compartment's listing confirms it", async () => {
+  const instanceUrl = `${CORE}/instances/${INSTANCE_ID}`;
+  const listUrl = `${CORE}/instances?compartmentId=${TENANCY}&limit=100`;
+  const notFound = { method: "GET", url: instanceUrl, status: 404, body: fixture("oracle", "error-not-found") } as const;
+  const running = fixture<Record<string, unknown>>("oracle", "instance-running");
+  const replay = replayFetch([
+    // The key lost access to the compartment: nothing is confirmed.
+    notFound,
+    { method: "GET", url: listUrl, status: 404, body: fixture("oracle", "error-not-found") },
+    // Still listed and running: not gone.
+    notFound,
+    { method: "GET", url: listUrl, body: [{ ...running, lifecycleState: "STOPPED" }] }
+  ]);
+  await assert.rejects(oracleAdapter.status(credentials, ref, replayOptions(replay)), /Authorization failed or requested resource not found/);
+  assert.equal((await oracleAdapter.status(credentials, ref, replayOptions(replay))).state, "stopped");
   assert.equal(replay.pending().length, 0);
 });
 

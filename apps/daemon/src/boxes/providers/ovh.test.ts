@@ -360,6 +360,7 @@ test("status: maps instance states, 404 is gone, 429 is retried", async () => {
     { method: "GET", url, body: { ...active, status: "SHUTOFF" } },
     { method: "GET", url, body: { ...active, status: "SHELVED_OFFLOADED" } },
     { method: "GET", url, body: { ...active, status: "ERROR" } },
+    { method: "GET", url, body: { ...active, status: "UNKNOWN" } },
     { method: "GET", url, body: { ...active, status: "DELETING" } },
     { method: "GET", url, status: 404, body: fixture("ovh", "error-not-found") }
   ]);
@@ -377,6 +378,8 @@ test("status: maps instance states, 404 is gone, 429 is retried", async () => {
   assert.deepEqual([stopped.state, stopped.detail], ["stopped", "OVHcloud reports the instance SHUTOFF"]);
   assert.equal((await ovhAdapter.status(credentials, ref, replayOptions(replay))).state, "stopped");
   assert.equal((await ovhAdapter.status(credentials, ref, replayOptions(replay))).state, "error");
+  // OpenStack's UNKNOWN (the hypervisor did not answer) is transient: never a failure that destroys the box.
+  assert.equal((await ovhAdapter.status(credentials, ref, replayOptions(replay))).state, "pending");
   assert.equal((await ovhAdapter.status(credentials, ref, replayOptions(replay))).state, "gone");
   assert.deepEqual(await ovhAdapter.status(credentials, ref, replayOptions(replay)), {
     state: "gone",

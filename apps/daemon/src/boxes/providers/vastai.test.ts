@@ -175,7 +175,9 @@ test("vastai: status maps the instance, and {instances:null} means gone", async 
     ["loading", "running", "pending"],
     ["exited", "running", "error"],
     ["exited", "stopped", "stopped"],
-    ["offline", "running", "error"],
+    // The host lost touch with vast.ai for a while: transient, never a failure that destroys the box.
+    ["offline", "running", "pending"],
+    ["unknown", "running", "pending"],
     ["stopped", "stopped", "stopped"]
   ] as const) {
     const stub = routedFetch([

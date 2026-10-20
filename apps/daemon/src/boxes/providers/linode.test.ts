@@ -162,7 +162,8 @@ test("status: maps instance states, 404 is gone, 429 is retried", async () => {
   assert.equal((await linodeAdapter.status(credentials, ref, replayOptions(replay))).state, "pending");
   const stopping = await linodeAdapter.status(credentials, ref, replayOptions(replay));
   assert.deepEqual([stopping.state, stopping.detail], ["stopped", "Linode reports the instance shutting down"]);
-  assert.equal((await linodeAdapter.status(credentials, ref, replayOptions(replay))).state, "error");
+  // A state the adapter does not know is transient (pending), never a failure that destroys the box.
+  assert.equal((await linodeAdapter.status(credentials, ref, replayOptions(replay))).state, "pending");
   assert.deepEqual(await linodeAdapter.status(credentials, ref, replayOptions(replay)), {
     state: "gone",
     detail: "The instance no longer exists in Akamai Cloud",

@@ -198,6 +198,7 @@ test("status: maps server states, 404 is gone, 429 is retried", async () => {
     { method: "GET", url, body: { server: { ...started.server, state: "maintenance" } } },
     { method: "GET", url, body: { server: { ...started.server, state: "stopped" } } },
     { method: "GET", url, body: { server: { ...started.server, state: "error" } } },
+    { method: "GET", url, body: { server: { ...started.server, state: "something-new" } } },
     { method: "GET", url, status: 404, body: fixture("upcloud", "error-not-found") }
   ]);
   const ref = { serverUuid: SERVER_ID, zone: "de-fra1" };
@@ -212,6 +213,8 @@ test("status: maps server states, 404 is gone, 429 is retried", async () => {
   assert.equal(stopped.state, "stopped");
   assert.equal(stopped.detail, "UpCloud reports the server stopped");
   assert.equal((await upcloudAdapter.status(credentials, ref, replayOptions(replay))).state, "error");
+  // A state the adapter does not know is transient (pending), never a failure that destroys the box.
+  assert.equal((await upcloudAdapter.status(credentials, ref, replayOptions(replay))).state, "pending");
   assert.deepEqual(await upcloudAdapter.status(credentials, ref, replayOptions(replay)), {
     state: "gone",
     detail: "The server no longer exists in UpCloud",

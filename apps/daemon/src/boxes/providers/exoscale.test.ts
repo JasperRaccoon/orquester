@@ -273,6 +273,7 @@ test("status: maps instance states in the ref's zone, 404 is gone, 429 is retrie
     { method: "GET", url, body: { ...running, state: "stopped" } },
     { method: "GET", url, body: { ...running, state: "destroying" } },
     { method: "GET", url, body: { ...running, state: "error" } },
+    { method: "GET", url, body: { ...running, state: "something-new" } },
     { method: "GET", url, status: 404, body: fixture("exoscale", "error-not-found") }
   ]);
   const ref = { instanceId: INSTANCE_ID, zone: "de-fra-1" };
@@ -288,6 +289,8 @@ test("status: maps instance states in the ref's zone, 404 is gone, 429 is retrie
   assert.equal(stopped.detail, "Exoscale reports the instance stopped");
   assert.equal((await exoscaleAdapter.status(credentials, ref, replayOptions(replay))).state, "gone");
   assert.equal((await exoscaleAdapter.status(credentials, ref, replayOptions(replay))).state, "error");
+  // A state the adapter does not know is transient (pending), never a failure that destroys the box.
+  assert.equal((await exoscaleAdapter.status(credentials, ref, replayOptions(replay))).state, "pending");
   assert.deepEqual(await exoscaleAdapter.status(credentials, ref, replayOptions(replay)), {
     state: "gone",
     detail: "The instance no longer exists in Exoscale",

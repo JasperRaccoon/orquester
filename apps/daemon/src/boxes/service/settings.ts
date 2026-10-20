@@ -247,6 +247,7 @@ export class BoxSettings implements BoxConnectivity {
       this.deps.providersChanged();
     }
     if (!result.ok) throw new BoxError(400, "BOX_PROVIDER_ERROR", `${adapter.label} refused the credentials: ${result.message}`);
+    await this.assertSeesLiveBoxes(adapter, credentials);
     await this.deps.store.setProviderCredentials(adapter.id, credentials);
     const at = new Date(this.deps.clock.now()).toISOString();
     await this.deps.store.updateProviderSettings(adapter.id, (settings) => {
@@ -257,6 +258,38 @@ export class BoxSettings implements BoxConnectivity {
     this.invalidateOffers(adapter.id);
     this.deps.providersChanged();
     return this.providerInfo(adapter);
+  }
+
+  /**
+   * Replacing the credentials of a provider with live boxes is allowed only when the new ones see
+   * every one of them: a key for another account would make them read as gone (the record
+   * destroyed, the box billing on). A box still being created with the stored key (no instance ref
+   * yet) blocks it; without a stored key (box-secrets.json was lost) such a box cannot be checked
+   * and does not.
+   */
+  private async assertSeesLiveBoxes(adapter: BoxProviderAdapter, credentials: ProviderCredentials): Promise<void> {
+    const live = this.deps.store.list().filter((record) => record.provider === adapter.id && isActiveRecord(record));
+    if (live.length === 0) return;
+    const stored = this.deps.store.providerCredentials(adapter.id) !== null;
+    const refuse = (detail: string) =>
+      new BoxError(
+        409,
+        "BOX_INVALID_REQUEST",
+        `${live.length} box${live.length === 1 ? "" : "es"} at ${adapter.label} still exist${live.length === 1 ? "s" : ""}, and ${detail} New credentials must belong to the account the boxes run in; destroy the boxes first to switch accounts.`
+      );
+    for (const record of live) {
+      if (!record.providerRef) {
+        if (stored) throw refuse(`box ${record.name} is still being created.`);
+        continue;
+      }
+      let state: string;
+      try {
+        state = (await adapter.status(credentials, record.providerRef, this.callOptions())).state;
+      } catch (error) {
+        throw refuse(`the new credentials could not be checked against box ${record.name} (${errorLine(error)}).`);
+      }
+      if (state === "gone") throw refuse(`the new credentials cannot see box ${record.name}.`);
+    }
   }
 
   /** Forget a provider's credentials. Refused while a box of it may still exist (it could not be destroyed without them). */

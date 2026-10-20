@@ -166,6 +166,17 @@ test("destroy cancels, force-cancels a run that does not stop, and is idempotent
   assert.equal(github.calls.slice(before).filter((entry) => entry.method === "POST").length, 0);
 });
 
+test("a run 404 behind a control repo the token cannot see is not gone", async () => {
+  const github = setUp();
+  const options = { signal, fetch: github.fetch };
+  const run = github.addRun({ displayTitle: "orq-box-0123456789ab", status: "in_progress", jobStatus: "in_progress" });
+  const ref = { repository: "Org/orquester-macos-boxes", runId: String(run.id) };
+  // Access removed (GitHub then answers 404 for the repo and its runs alike).
+  github.repos.delete("Org/orquester-macos-boxes");
+  await assert.rejects(BLACKSMITH_ADAPTER.status(credentials, ref, options), /control repo Org\/orquester-macos-boxes is not visible/);
+  await assert.rejects(BLACKSMITH_ADAPTER.destroy(credentials, ref, options), /cannot be confirmed/);
+});
+
 test("listManaged returns the active orq- runs", async () => {
   const github = setUp();
   const live = github.addRun({ displayTitle: "orq-box-live00000000", status: "in_progress" });

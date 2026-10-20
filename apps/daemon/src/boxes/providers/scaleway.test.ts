@@ -17,6 +17,17 @@ const WITH_FIXTURES = new Set(["fr-par-1", "fr-par-2", "fr-par-3"]);
 const zoneApi = (zone: string): string => `${API}/instance/v1/zones/${zone}`;
 const serverUrl = `${zoneApi("fr-par-1")}/servers/${SERVER_ID}`;
 const ref = { serverId: SERVER_ID, zone: "fr-par-1", volumeIds: [VOLUME_ID] };
+const volumeUrl = `${API}/block/v1/zones/fr-par-1/volumes/${VOLUME_ID}`;
+const volumeGone = { method: "GET", url: volumeUrl, status: 404, body: { message: "resource is not found", type: "not_found" } } as const;
+
+/** The Block Storage listing of tagged volumes in a zone. */
+function volumesRoute(zone: string, volumes: unknown[] = []): ReplayRoute {
+  return {
+    method: "GET",
+    url: `${API}/block/v1/zones/${zone}/volumes?project_id=${PROJECT}&tags=orquester-box&page=1&page_size=100`,
+    body: { volumes, total_count: volumes.length }
+  };
+}
 
 function linuxEur(hourly: number, rootGb: number): number {
   return roundUsd((hourly + rootGb * SCALEWAY_BLOCK_EUR_PER_GB_HOUR + SCALEWAY_IPV4_EUR_PER_HOUR) * EUR_TO_USD);
@@ -167,6 +178,7 @@ test("create: tagged server on a block root volume, cloud-init as raw user data,
     ...createRoutes(),
     { method: "POST", url: `${zoneApi("fr-par-1")}/servers`, status: 201, body: fixture("scaleway", "create-server") },
     { method: "PATCH", url: `${serverUrl}/user_data/cloud-init`, status: 204 },
+    { method: "PATCH", url: volumeUrl, body: { id: VOLUME_ID } },
     { method: "POST", url: `${serverUrl}/action`, status: 202, body: fixture("scaleway", "action-poweron") }
   ]);
   const request = testCreateRequest({ size: "POP2-2C-8G", region: "fr-par-1" });
@@ -189,8 +201,11 @@ test("create: tagged server on a block root volume, cloud-init as raw user data,
   assert.deepEqual(replay.requests.at(-1)?.body, { action: "poweron" });
   assert.deepEqual(
     replay.requests.map((entry) => entry.method),
-    ["GET", "GET", "POST", "PATCH", "POST"]
+    ["GET", "GET", "POST", "PATCH", "PATCH", "POST"]
   );
+  // The root volume bills on its own: it carries the server's name and marker tags.
+  const volumePatch = replay.requests.find((entry) => entry.method === "PATCH" && entry.url === volumeUrl);
+  assert.deepEqual(volumePatch?.body, { name: `orq-${TEST_BOX_ID}`, tags: ["orquester-box", `orquester-box=${TEST_BOX_ID}`] });
 
   assert.deepEqual(result.ref, { serverId: SERVER_ID, zone: "fr-par-1", volumeIds: [VOLUME_ID] });
   assert.equal(result.hourlyUsd, linuxEur(0.0735, 20));
@@ -273,7 +288,8 @@ test("status: maps server states, 404 is gone, 429 is retried", async () => {
     { method: "GET", url: serverUrl, body: withState("starting", "provisioning node") },
     { method: "GET", url: serverUrl, body: withState("stopped in place") },
     { method: "GET", url: serverUrl, body: withState("locked") },
-    { method: "GET", url: serverUrl, status: 404, body: fixture("scaleway", "error-not-found") }
+    { method: "GET", url: serverUrl, status: 404, body: fixture("scaleway", "error-not-found") },
+    volumeGone
   ]);
   assert.deepEqual(await scalewayAdapter.status(credentials, ref, replayOptions(replay)), {
     state: "running",
@@ -284,13 +300,38 @@ test("status: maps server states, 404 is gone, 429 is retried", async () => {
   const starting = await scalewayAdapter.status(credentials, ref, replayOptions(replay));
   assert.deepEqual([starting.state, starting.detail, starting.publicIp], ["pending", "Scaleway reports the server starting (provisioning node)", null]);
   assert.equal((await scalewayAdapter.status(credentials, ref, replayOptions(replay))).state, "stopped");
-  assert.equal((await scalewayAdapter.status(credentials, ref, replayOptions(replay))).state, "error");
+  // `locked` is a Scaleway hold, not a failure: the box is never destroyed for it.
+  assert.equal((await scalewayAdapter.status(credentials, ref, replayOptions(replay))).state, "pending");
   assert.deepEqual(await scalewayAdapter.status(credentials, ref, replayOptions(replay)), {
     state: "gone",
     detail: "The server no longer exists in Scaleway",
     publicIp: null,
     hourlyUsd: null
   });
+  assert.equal(replay.pending().length, 0);
+});
+
+test("status: a box is gone only once its block volume is; a loose volume's ref reads the volume alone", async () => {
+  const notFound = { method: "GET", url: serverUrl, status: 404, body: fixture("scaleway", "error-not-found") } as const;
+  const replay = replayFetch([notFound, { method: "GET", url: volumeUrl, body: { id: VOLUME_ID, status: "available" } }, notFound, volumeGone]);
+  assert.deepEqual(await scalewayAdapter.status(credentials, ref, replayOptions(replay)), {
+    state: "error",
+    detail: `The server is gone but its block volume ${VOLUME_ID} remains in Scaleway`,
+    publicIp: null,
+    hourlyUsd: null
+  });
+  assert.equal((await scalewayAdapter.status(credentials, ref, replayOptions(replay))).state, "gone");
+  const loose = { zone: "fr-par-1", volumeIds: [VOLUME_ID] };
+  const volumeOnly = replayFetch([{ method: "GET", url: volumeUrl, body: { id: VOLUME_ID, status: "available" } }, volumeGone]);
+  assert.equal((await scalewayAdapter.status(credentials, loose, replayOptions(volumeOnly))).state, "error");
+  assert.equal((await scalewayAdapter.status(credentials, loose, replayOptions(volumeOnly))).state, "gone");
+  assert.equal(replay.pending().length + volumeOnly.pending().length, 0);
+  await assert.rejects(scalewayAdapter.status(credentials, { zone: "fr-par-1" }, replayOptions(volumeOnly)), /instance reference has no serverId/);
+});
+
+test("destroy: a loose volume's ref deletes the volume only", async () => {
+  const replay = replayFetch([{ method: "DELETE", url: volumeUrl, status: 204 }]);
+  await scalewayAdapter.destroy(credentials, { zone: "fr-par-1", volumeIds: [VOLUME_ID] }, replayOptions(replay));
   assert.equal(replay.pending().length, 0);
 });
 
@@ -327,16 +368,30 @@ test("destroy: idempotent when the server and volume are already gone; volumes f
   await assert.rejects(scalewayAdapter.destroy(credentials, { serverId: SERVER_ID }, replayOptions(stopped)), /instance reference has no zone/);
 });
 
-test("listManaged: lists the orquester-box tag in every zone of the project", async () => {
-  const routes: ReplayRoute[] = ZONES.map((zone) => {
+test("listManaged: lists the orquester-box tag in every zone of the project, and tagged volumes no server holds", async () => {
+  const loose = {
+    id: "44444444-4444-4444-8444-444444444499",
+    name: "orq-1a2b3c4d-aabbccddeeff",
+    status: "available",
+    tags: ["orquester-box", "orquester-box=aabbccddeeff", "orquester-install=1a2b3c4d"],
+    zone: "fr-par-2",
+    created_at: "2026-10-19T20:00:00.000Z",
+    references: []
+  };
+  // Still attached (held by a listed server, or `in_use`): not loose.
+  const held = { ...loose, id: VOLUME_ID, name: `orq-${TEST_BOX_ID}`, zone: "fr-par-1", references: [{ id: "r" }], status: "in_use" };
+  const routes: ReplayRoute[] = ZONES.flatMap((zone): ReplayRoute[] => {
     const name = zone === "fr-par-1" || zone === "nl-ams-1" ? `servers-managed-${zone}` : "servers-empty";
     const body = fixture<{ servers: unknown[] }>("scaleway", name);
-    return {
-      method: "GET",
-      url: `${zoneApi(zone)}/servers?tags=orquester-box&project=${PROJECT}&page=1&per_page=100`,
-      body,
-      headers: { "x-total-count": String(body.servers.length) }
-    };
+    return [
+      {
+        method: "GET",
+        url: `${zoneApi(zone)}/servers?tags=orquester-box&project=${PROJECT}&page=1&per_page=100`,
+        body,
+        headers: { "x-total-count": String(body.servers.length) }
+      },
+      volumesRoute(zone, zone === "fr-par-2" ? [loose] : zone === "fr-par-1" ? [held] : [])
+    ];
   });
   const replay = replayFetch(routes);
   const managed = await scalewayAdapter.listManaged(credentials, replayOptions(replay));
@@ -354,6 +409,13 @@ test("listManaged: lists the orquester-box tag in every zone of the project", as
       boxId: "ffeeddccbbaa",
       createdAt: "2026-10-19T21:12:00.000Z",
       state: "pending"
+    },
+    {
+      ref: { zone: "fr-par-2", volumeIds: [loose.id] },
+      name: loose.name,
+      boxId: "aabbccddeeff",
+      createdAt: "2026-10-19T20:00:00.000Z",
+      state: "error"
     }
   ]);
   assert.equal(replay.pending().length, 0);

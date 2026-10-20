@@ -277,11 +277,27 @@ test("plugin routes: boxes, providers, kinds and offers, connection, refusals", 
   for (const [method, url] of [
     ["PUT", "/api/boxes/providers/hetzner"],
     ["GET", "/api/boxes/kinds"],
-    ["POST", "/api/boxes/connection/test"],
-    ["DELETE", `/api/boxes/${created.box!.boxId}`]
+    ["POST", "/api/boxes/connection/test"]
   ] as const) {
     const res = await h.inject({ method, url, payload: method === "PUT" ? { credentials: {} } : undefined });
     assert.equal(res.statusCode, 409, `${method} ${url}`);
     assert.equal(res.json().code, "BOXES_DISABLED");
   }
+});
+
+test("with the plugin off, live boxes are still listed and a temporary box can be destroyed", async (t) => {
+  const h = await harness(t);
+  await connectProvider(h.service, h.adapter);
+  const box = await h.service.startTemporaryBox({ threadId: "t", kind: "linux", lifetimeMinutes: 30, purposeNote: "x" });
+  await until(h.service, box.id, () => h.service.registry.get(box.id)?.providerRef !== undefined);
+  h.setEnabled(false);
+  const listed = (await h.inject({ method: "GET", url: "/api/boxes" })).json() as BoxesResponse;
+  assert.deepEqual(
+    listed.boxes.map((entry) => entry.id),
+    [box.id]
+  );
+  const res = await h.inject({ method: "DELETE", url: `/api/boxes/${box.id}` });
+  assert.equal(res.statusCode, 200, res.body);
+  assert.equal(res.json().box.state, "destroyed");
+  assert.equal(h.adapter.instances.size, 0, "destroyed at the provider");
 });

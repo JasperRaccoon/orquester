@@ -107,6 +107,17 @@ function completedDetail(run: WorkflowRun): string {
   }
 }
 
+/**
+ * GitHub answers 404 for a private repo the token cannot see as for a missing one: a run's 404
+ * means it was deleted only while its control repo is still visible. Throws otherwise.
+ */
+async function assertRepoVisible(repository: string, call: GithubCallOptions): Promise<void> {
+  if ((await getControlRepo(repository, call)) !== null) return;
+  throw new Error(
+    `Blacksmith: the control repo ${repository} is not visible to the Git hosting account (deleted, renamed, or access removed), so the macOS run's state cannot be confirmed; check it on GitHub`
+  );
+}
+
 export const BLACKSMITH_ADAPTER: BoxProviderAdapter = {
   id: "blacksmith",
   label: "Blacksmith",
@@ -198,7 +209,10 @@ export const BLACKSMITH_ADAPTER: BoxProviderAdapter = {
     const call = github(credentials, options);
     const { repository, runId } = refFields(ref);
     const run = await getRun(repository, runId, call);
-    if (run === null) return { state: "gone", detail: "The macOS run was deleted on GitHub", publicIp: null, hourlyUsd: null };
+    if (run === null) {
+      await assertRepoVisible(repository, call);
+      return { state: "gone", detail: "The macOS run was deleted on GitHub", publicIp: null, hourlyUsd: null };
+    }
     if (run.status === "completed") return { state: "gone", detail: completedDetail(run), publicIp: null, hourlyUsd: null };
     // A run is in_progress as soon as GitHub schedules it; the box exists once its job has a runner.
     const jobs = await getRunJobs(repository, runId, call);
@@ -215,7 +229,8 @@ export const BLACKSMITH_ADAPTER: BoxProviderAdapter = {
     const call = github(credentials, options);
     const { repository, runId } = refFields(ref);
     const run = await getRun(repository, runId, call);
-    if (run === null || run.status === "completed") return;
+    if (run === null) return assertRepoVisible(repository, call);
+    if (run.status === "completed") return;
     // A plain cancel first (orq-agent may already be exiting on the service's request), then force.
     await cancelRun(repository, runId, call);
     const after = await waitRunCompleted(repository, runId, { ...call, deadlineMs: CANCEL_WAIT_MS });

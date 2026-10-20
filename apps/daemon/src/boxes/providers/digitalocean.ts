@@ -160,7 +160,8 @@ function mapState(status: string): ProviderInstanceState {
     case "archive":
       return "gone";
     default:
-      return "error";
+      // A state this adapter does not know is taken as transient: only a failure state destroys a box.
+      return "pending";
   }
 }
 

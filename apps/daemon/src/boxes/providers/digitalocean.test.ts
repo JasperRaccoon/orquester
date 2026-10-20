@@ -162,6 +162,7 @@ test("status: maps Droplet states, 404 is gone, 429 is retried", async () => {
     { method: "GET", url: dropletUrl, body: active },
     { method: "GET", url: dropletUrl, body: fixture("digitalocean", "create-droplet") },
     { method: "GET", url: dropletUrl, body: { droplet: { ...active.droplet, status: "off" } } },
+    { method: "GET", url: dropletUrl, body: { droplet: { ...active.droplet, status: "something-new" } } },
     { method: "GET", url: dropletUrl, body: { droplet: { ...active.droplet, status: "archive" } } },
     { method: "GET", url: dropletUrl, status: 404, body: fixture("digitalocean", "error-not-found") }
   ]);
@@ -175,6 +176,8 @@ test("status: maps Droplet states, 404 is gone, 429 is retried", async () => {
   const pending = await digitaloceanAdapter.status(credentials, ref, replayOptions(replay));
   assert.deepEqual(pending, { state: "pending", detail: "DigitalOcean reports the Droplet new", publicIp: null, hourlyUsd: null });
   assert.equal((await digitaloceanAdapter.status(credentials, ref, replayOptions(replay))).state, "stopped");
+  // A state the adapter does not know is transient (pending), never a failure that destroys the box.
+  assert.equal((await digitaloceanAdapter.status(credentials, ref, replayOptions(replay))).state, "pending");
   assert.equal((await digitaloceanAdapter.status(credentials, ref, replayOptions(replay))).state, "gone");
   const gone = await digitaloceanAdapter.status(credentials, ref, replayOptions(replay));
   assert.deepEqual(gone, { state: "gone", detail: "The Droplet no longer exists in DigitalOcean", publicIp: null, hourlyUsd: null });

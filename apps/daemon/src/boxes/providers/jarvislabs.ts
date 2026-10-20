@@ -155,12 +155,24 @@ function rowPrice(row: JlServerMeta): { usd: number | null; source: "live" | "ta
   return live !== null ? { usd: live, source: "live" } : { usd: tableHourlyUsd("jarvislabs", row.gpu_type!, 1), source: "table" };
 }
 
+/** A `success: false` reply that says the instance does not exist (`"Instance not found"`). */
+function saysNotFound(body: unknown): boolean {
+  return /\b(not found|does not exist|no such)\b/i.test(bodyMessage(body) ?? "");
+}
+
+/**
+ * The instance, or null when Jarvislabs says it does not exist (404, or a 200 `success: false`
+ * reply saying so). Any other unsuccessful reply throws: it proves nothing about the instance.
+ */
 async function fetchInstance(credentials: ProviderCredentials, id: number, options: ProviderCallOptions): Promise<JlInstance | null> {
-  const { data } = await call<JlEnvelope & { instance?: JlInstance }>(
+  const { status, data } = await call<JlEnvelope & { instance?: JlInstance }>(
     { url: `${DEFAULT_HOST}users/fetch/${id}`, headers: headers(credentials), okStatuses: [404] },
     options
   );
-  return succeeded(data) && data?.instance ? data.instance : null;
+  if (status === 404) return null;
+  if (succeeded(data) && data?.instance) return data.instance;
+  if (!succeeded(data) && saysNotFound(data)) return null;
+  throw new ProviderHttpError(PROVIDER, status, `${PROVIDER}: ${bodyMessage(data) ?? "the instance could not be read"}`, data);
 }
 
 /** `multipart/form-data` with one file field, as `scripts/add` wants (the HTTP helper sends strings as is). */
@@ -346,7 +358,11 @@ export const jarvislabsAdapter: BoxProviderAdapter = {
   },
 
   async listManaged(credentials, options): Promise<ProviderManagedInstance[]> {
-    const { data } = await call<JlEnvelope & { instances?: JlInstance[] }>({ url: `${DEFAULT_HOST}users/fetch`, headers: headers(credentials) }, options);
+    const { status, data } = await call<JlEnvelope & { instances?: JlInstance[] }>({ url: `${DEFAULT_HOST}users/fetch`, headers: headers(credentials) }, options);
+    // An error reply is not an empty account: the reconciler would take every box for gone.
+    if (!succeeded(data) || (data?.instances !== undefined && !Array.isArray(data.instances))) {
+      throw new ProviderHttpError(PROVIDER, status, `${PROVIDER}: ${bodyMessage(data) ?? "the instance list could not be read"}`, data);
+    }
     return (data?.instances ?? [])
       .filter((instance) => typeof instance.name === "string" && instance.name.startsWith("orq-"))
       .map((instance) => ({

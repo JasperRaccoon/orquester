@@ -143,9 +143,23 @@ export const boxProviderSettingsSchema = z
   })
   .passthrough();
 
+/**
+ * This appdir's installation id: {@link BOX_INSTALLATION_ID_PATTERN}, written once. New boxes carry
+ * it in their `orquester-install` tag and their `orq-<installationId>-<boxId>` name, so the
+ * reconciler of one appdir never sweeps another's boxes on a shared provider account.
+ */
+export const BOX_INSTALLATION_ID_PATTERN = /^[0-9a-f]{8}$/;
+
 export const boxesStoreSchema = z
   .object({
     version: z.number().int().optional(),
+    /** See {@link BOX_INSTALLATION_ID_PATTERN}. Absent in stores written before it existed (added at load). */
+    installationId: z.string().optional(),
+    /**
+     * Set when a corrupt boxes.json was moved aside: until then the reconciler destroys no
+     * instance of this installation that has no record at all (its record may be in the moved file).
+     */
+    orphanSweepPausedUntil: isoString.optional(),
     boxes: z.record(storedBoxSchema).default({}),
     connection: boxConnectionSettingsSchema.optional(),
     blacksmith: blacksmithSettingsSchema.optional(),

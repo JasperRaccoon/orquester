@@ -233,8 +233,11 @@ function mapState(state: string): ProviderInstanceState {
       return "stopped";
     case "pending_delete":
       return "gone";
-    default:
+    case "error":
       return "error";
+    default:
+      // A state this adapter does not know is taken as transient: only a failure state destroys a box.
+      return "pending";
   }
 }
 

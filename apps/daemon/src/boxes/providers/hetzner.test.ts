@@ -150,6 +150,7 @@ test("status: maps server states, 404 is gone, 429 is retried", async () => {
     { method: "GET", url: `${API}/servers/100000001`, body: running },
     { method: "GET", url: `${API}/servers/100000001`, body: starting },
     { method: "GET", url: `${API}/servers/100000001`, body: off },
+    { method: "GET", url: `${API}/servers/100000001`, body: { server: { ...running.server, status: "unknown" } } },
     { method: "GET", url: `${API}/servers/100000001`, status: 404, body: fixture("hetzner", "error-not-found") }
   ]);
   const ref = { serverId: 100000001, location: "fsn1" };
@@ -163,6 +164,8 @@ test("status: maps server states, 404 is gone, 429 is retried", async () => {
   const stopped = await hetznerAdapter.status(credentials, ref, replayOptions(replay));
   assert.equal(stopped.state, "stopped");
   assert.equal(stopped.detail, "Hetzner reports the server off");
+  // Hetzner's `unknown` is transient (pending), never a failure that destroys the box.
+  assert.equal((await hetznerAdapter.status(credentials, ref, replayOptions(replay))).state, "pending");
   assert.equal((await hetznerAdapter.status(credentials, ref, replayOptions(replay))).state, "gone");
   assert.equal(replay.pending().length, 0);
 });

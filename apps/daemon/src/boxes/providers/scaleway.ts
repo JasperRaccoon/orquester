@@ -14,7 +14,12 @@
  *   stopped server again (it is tagged from the start either way).
  * - Root volume: a Block Storage (`sbs_volume`) volume made from the image.
  *   `terminate` only detaches block volumes, so destroy deletes them through
- *   the Block Storage API once the server is gone.
+ *   the Block Storage API once the server is gone. The volume bills on its own,
+ *   so a box is gone only once its volumes are too: `status` reads the ref's
+ *   volumes after the server has gone, create names and tags the volume like
+ *   the server, and `listManaged` lists tagged volumes no server holds (a
+ *   destroy cut off between the server and its volume) as instances of their
+ *   own (`{ zone, volumeIds }`, no `serverId`), which `destroy` deletes.
  * - Windows is not offered: Scaleway's Windows images run no cloud-init or
  *   cloudbase-init, and their metadata user data is only readable from a
  *   privileged source port, which the images' own PowerShell module documents
@@ -107,6 +112,17 @@ interface ScalewayServerVolume {
   volume_type: string;
 }
 
+/** A Block Storage volume (`/block/v1/zones/{zone}/volumes`). */
+interface ScalewayBlockVolume {
+  id: string;
+  name: string;
+  status: string;
+  tags?: string[];
+  zone?: string;
+  created_at?: string;
+  references?: unknown[];
+}
+
 interface ScalewayServerIp {
   address: string;
   family: "inet" | "inet6";
@@ -173,7 +189,7 @@ async function forEachPage(
   options: ProviderCallOptions,
   merge: (data: unknown) => number
 ): Promise<void> {
-  const sizeParam = url.startsWith(`${API}/marketplace/`) ? "page_size" : "per_page";
+  const sizeParam = url.startsWith(`${API}/marketplace/`) || url.startsWith(`${API}/block/`) ? "page_size" : "per_page";
   let seen = 0;
   for (let page = 1; ; page++) {
     const separator = url.includes("?") ? "&" : "?";
@@ -266,13 +282,15 @@ function mapState(state: string): ProviderInstanceState {
     case "running":
       return "running";
     case "starting":
+    case "locked":
       return "pending";
     case "stopping":
     case "stopped":
     case "stopped in place":
       return "stopped";
     default:
-      return "error";
+      // `locked` (a Scaleway hold) and unknown states are transient: Scaleway has no failure state.
+      return "pending";
   }
 }
 
@@ -340,6 +358,39 @@ async function getServer(
   }
 }
 
+function blockVolumeUrl(zone: string, volumeId: string): string {
+  return `${API}/block/v1/zones/${encodeURIComponent(zone)}/volumes/${encodeURIComponent(volumeId)}`;
+}
+
+/** The ref's volumes that still exist (each one bills). */
+async function remainingVolumes(credentials: ProviderCredentials, zone: string, volumeIds: string[], options: ProviderCallOptions): Promise<string[]> {
+  const remaining: string[] = [];
+  for (const volumeId of volumeIds) {
+    const { status } = await providerRequest(PROVIDER, { url: blockVolumeUrl(zone, volumeId), headers: headers(credentials), okStatuses: [404] }, options);
+    if (status !== 404) remaining.push(volumeId);
+  }
+  return remaining;
+}
+
+/** Tagged volumes in a zone that no server holds: leftovers of a destroy cut off before its volume went. */
+async function looseVolumes(credentials: ProviderCredentials, zone: string, options: ProviderCallOptions): Promise<ScalewayBlockVolume[]> {
+  const volumes: ScalewayBlockVolume[] = [];
+  const query = `project_id=${encodeURIComponent(projectId(credentials))}&tags=${encodeURIComponent(BOX_TAG_KEY)}`;
+  await forEachPage(credentials, `${API}/block/v1/zones/${encodeURIComponent(zone)}/volumes?${query}`, options, (data) => {
+    const page = (data as { volumes?: ScalewayBlockVolume[] }).volumes ?? [];
+    volumes.push(...page);
+    return page.length;
+  });
+  return volumes.filter(
+    (volume) =>
+      (volume.tags ?? []).includes(BOX_TAG_KEY) &&
+      (volume.references ?? []).length === 0 &&
+      volume.status !== "in_use" &&
+      volume.status !== "deleting" &&
+      volume.status !== "deleted"
+  );
+}
+
 /** Delete a block volume once it is detached; 404 means it is already gone. */
 async function deleteBlockVolume(
   credentials: ProviderCredentials,
@@ -354,7 +405,7 @@ async function deleteBlockVolume(
         PROVIDER,
         {
           method: "DELETE",
-          url: `${API}/block/v1/zones/${encodeURIComponent(zone)}/volumes/${encodeURIComponent(volumeId)}`,
+          url: blockVolumeUrl(zone, volumeId),
           headers: headers(credentials),
           okStatuses: [404]
         },
@@ -560,6 +611,7 @@ export const scalewayAdapter: BoxProviderAdapter = {
         return null;
       });
     const imageId = await resolveImage(credentials, zone, commercialType, label, options);
+    const tags = [BOX_TAG_KEY, ...Object.entries(request.tags).map(([key, value]) => `${key}=${value}`)];
 
     const { data } = await providerRequest<{ server: ScalewayServer }>(
       PROVIDER,
@@ -573,7 +625,7 @@ export const scalewayAdapter: BoxProviderAdapter = {
           commercial_type: commercialType,
           image: imageId,
           project,
-          tags: [BOX_TAG_KEY, ...Object.entries(request.tags).map(([key, value]) => `${key}=${value}`)],
+          tags,
           dynamic_ip_required: true,
           volumes: { "0": { size: rootGb(request.kind) * 1_000_000_000, volume_type: "sbs_volume" } },
           protected: false
@@ -595,6 +647,17 @@ export const scalewayAdapter: BoxProviderAdapter = {
         },
         options
       );
+      // The volume carries the box's marker too, so a volume left by a cut-off destroy is found.
+      // Best effort: the record's ref names the volume either way.
+      for (const volumeId of volumeIds) {
+        await providerRequest(
+          PROVIDER,
+          { method: "PATCH", url: blockVolumeUrl(zone, volumeId), headers: auth, body: { name: request.name, tags } },
+          options
+        ).catch((error: unknown) => {
+          if (options.signal.aborted) throw error;
+        });
+      }
       await providerRequest(
         PROVIDER,
         {
@@ -621,10 +684,23 @@ export const scalewayAdapter: BoxProviderAdapter = {
   },
 
   async status(credentials, ref, options): Promise<ProviderInstanceStatus> {
-    const serverId = refString(PROVIDER, ref, "serverId");
     const zone = refString(PROVIDER, ref, "zone");
-    const server = await getServer(credentials, zone, serverId, options);
-    if (!server) return { state: "gone", detail: "The server no longer exists in Scaleway", publicIp: null, hourlyUsd: null };
+    // A loose volume's ref (listManaged) has volumes only.
+    const serverId = ref.serverId === undefined && refVolumeIds(ref).length > 0 ? null : refString(PROVIDER, ref, "serverId");
+    const server = serverId === null ? null : await getServer(credentials, zone, serverId, options);
+    if (!server) {
+      // The server is gone; its block volumes bill until they are deleted (destroy does that).
+      const remaining = await remainingVolumes(credentials, zone, refVolumeIds(ref), options);
+      if (remaining.length > 0) {
+        return {
+          state: "error",
+          detail: `The server is gone but its block volume ${remaining.join(", ")} remains in Scaleway`,
+          publicIp: null,
+          hourlyUsd: null
+        };
+      }
+      return { state: "gone", detail: "The server no longer exists in Scaleway", publicIp: null, hourlyUsd: null };
+    }
     const state = mapState(server.state);
     const reason = server.state_detail ? ` (${server.state_detail})` : "";
     return {
@@ -636,16 +712,27 @@ export const scalewayAdapter: BoxProviderAdapter = {
   },
 
   async destroy(credentials, ref, options): Promise<void> {
-    const serverId = refString(PROVIDER, ref, "serverId");
     const zone = refString(PROVIDER, ref, "zone");
-    await destroyServer(credentials, zone, serverId, refVolumeIds(ref), options);
+    if (ref.serverId === undefined && refVolumeIds(ref).length > 0) {
+      // A loose volume (listManaged): nothing holds it any more.
+      const deadline = Date.now() + DESTROY_DEADLINE_MS;
+      for (const volumeId of refVolumeIds(ref)) await deleteBlockVolume(credentials, zone, volumeId, deadline, options);
+      return;
+    }
+    await destroyServer(credentials, zone, refString(PROVIDER, ref, "serverId"), refVolumeIds(ref), options);
   },
 
   async listManaged(credentials, options): Promise<ProviderManagedInstance[]> {
     const query = `tags=${encodeURIComponent(BOX_TAG_KEY)}&project=${encodeURIComponent(projectId(credentials))}`;
-    const perZone = await Promise.all(ZONES.map((zone) => listServers(credentials, zone.id, query, options)));
-    return perZone
-      .flat()
+    const perZone = await Promise.all(
+      ZONES.map(async (zone) => ({
+        zone: zone.id,
+        servers: await listServers(credentials, zone.id, query, options),
+        volumes: await looseVolumes(credentials, zone.id, options)
+      }))
+    );
+    const servers: ProviderManagedInstance[] = perZone
+      .flatMap((entry) => entry.servers)
       .filter((server) => server.tags.includes(BOX_TAG_KEY) || isManagedName(server.name))
       .map((server) => ({
         ref: { serverId: server.id, zone: server.zone, volumeIds: blockVolumeIds(server) },
@@ -654,5 +741,19 @@ export const scalewayAdapter: BoxProviderAdapter = {
         createdAt: isoOrNull(server.creation_date),
         state: mapState(server.state)
       }));
+    const held = new Set(servers.flatMap((server) => refVolumeIds(server.ref)));
+    const volumes: ProviderManagedInstance[] = perZone.flatMap((entry) =>
+      entry.volumes
+        .filter((volume) => !held.has(volume.id))
+        .map((volume) => ({
+          ref: { zone: volume.zone ?? entry.zone, volumeIds: [volume.id] },
+          name: volume.name,
+          boxId: managedBoxId(boxIdFromTags(volume.tags ?? []), volume.name),
+          createdAt: isoOrNull(volume.created_at),
+          // Billing with no server: a live record holding it is destroyed, an orphan swept.
+          state: "error" as const
+        }))
+    );
+    return [...servers, ...volumes];
   }
 };

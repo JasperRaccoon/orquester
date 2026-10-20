@@ -1,8 +1,10 @@
 /**
  * The box lifecycle (spec §8.2, §9.1): create → connect → setup → ready, and destroy.
  *
- * - The record is written (state `provisioning`, its `orq-<id>` instance name) before any provider
- *   call, so a crash mid-create leaves something the reconciler can match.
+ * - The record is written (state `provisioning`, its `orq-<installationId>-<id>` instance name)
+ *   before any provider call, so a crash mid-create leaves something the reconciler can match. The
+ *   instance also carries the `orquester-box` and `orquester-install` tags where the provider has
+ *   tags; the installation id keeps another appdir's reconciler (same provider account) off it.
  * - Setup runs in the background, one step at a time; every step's state is persisted (and so
  *   broadcast) as it changes, and its progress goes to the box's setup log. A temporary box runs
  *   create, connect and ready only.
@@ -10,7 +12,10 @@
  *   any later step fails on its own and the box still becomes ready, its `stateReason` naming the
  *   step. A pipeline resumed after a restart skips the steps already finished.
  * - Destroy aborts setup, asks the provider to destroy the instance and waits until the provider
- *   reports it gone; anything less leaves `destroy-failed` (the box may still bill) and throws.
+ *   reports it gone; anything less leaves `destroy-failed` (the box may still bill) and throws. A
+ *   provider create call already sent is never aborted: destroy waits for it and destroys what it
+ *   returned. A record without an instance ref whose create was sent (it threw, or a restart cut it
+ *   off) is looked up by its name and tags first; a lookup that fails leaves `destroy-failed`.
  */
 
 import { generateKeyPairSync, randomBytes, randomInt } from "node:crypto";
@@ -41,6 +46,7 @@ import type {
   BuildBootstrap,
   ProviderCredentials,
   ProviderInstanceRef,
+  ProviderManagedInstance,
   TailscaleKeys
 } from "../contracts.ts";
 import { cloneArgs, isFullSha, isMissingRemoteRef, mayBeAbbreviatedSha } from "../../workflows/git-remote/index.ts";
@@ -154,8 +160,11 @@ export const CONNECT_DEADLINE_MS: Readonly<Record<BoxKind, number>> = {
   macos: 15 * 60_000
 };
 
-/** How long a destroy waits for the provider to report the instance gone. */
-export const DESTROY_CONFIRM_MS = 5 * 60_000;
+/**
+ * How long a destroy waits for the provider to report the instance gone. Above every adapter's own
+ * destroy wait (Scaleway's volume detach: 10 min; Blacksmith's cancel and force-cancel: 3.5 min).
+ */
+export const DESTROY_CONFIRM_MS = 15 * 60_000;
 const DESTROY_POLL_MS = [2_000, 4_000, 8_000, 15_000];
 const CLONE_TIMEOUT_MS = 30 * 60_000;
 const TOOLCHAIN_COMMAND_TIMEOUT_MS = 30 * 60_000;
@@ -164,6 +173,39 @@ const FILE_READ_MAX = 64 * 1024;
 /** Fields kept on a record while a destroy is in flight, so a destroy interrupted by a restart resumes with its reason. */
 export const PENDING_DESTROY_REASON = "pendingDestroyReason";
 const PENDING_DESTROY_MESSAGE = "pendingDestroyMessage";
+/** Written just before the provider's create call: an instance may exist even without a `providerRef`. */
+export const CREATE_REQUESTED_AT = "createRequestedAt";
+
+/** The tag carrying the box id: with the `orq-` name, the reconciler's marker. */
+export const BOX_TAG = "orquester-box";
+/** The tag carrying this appdir's installation id ({@link BoxStore.installationId}). */
+export const INSTALLATION_TAG = "orquester-install";
+
+/** What an instance's name and tags say about it: its box id and, for boxes made since the installation id exists, the installation. */
+export interface InstanceMarker {
+  boxId: string;
+  installationId: string | null;
+}
+
+const MARKED_ID = /^(?:([0-9a-f]{8})-)?([0-9a-f]{12})$/;
+
+/**
+ * The marker of a listed instance: the box id from its tag (adapters report it as `boxId`), else
+ * from its `orq-<boxId>` / `orq-<installationId>-<boxId>` name; the installation id from the
+ * name (adapters that read the box id from the name report `<installationId>-<boxId>`). Null for an
+ * instance without this build's id format (another tool's `orq-…`, a name cut short).
+ */
+export function instanceMarker(instance: Pick<ProviderManagedInstance, "name" | "boxId">): InstanceMarker | null {
+  const fromName = /^orq-(.+)$/.exec(instance.name)?.[1];
+  const named = fromName ? MARKED_ID.exec(fromName) : null;
+  const tagged = instance.boxId ? MARKED_ID.exec(instance.boxId) : null;
+  if (instance.boxId && !tagged) return null;
+  const boxId = tagged?.[2] ?? named?.[2];
+  if (!boxId) return null;
+  // A name that disagrees with the tag says nothing about the installation.
+  const nameInstallation = named && named[2] === boxId ? (named[1] ?? null) : null;
+  return { boxId, installationId: tagged?.[1] ?? nameInstallation };
+}
 
 export function destroyedReasonText(reason: BoxDestroyedReason, providerLabel: string): string {
   switch (reason) {
@@ -245,6 +287,8 @@ export class BoxLifecycle {
   private readonly destroys = new Map<string, Promise<StoredBox>>();
   private readonly inflight = new Set<Promise<unknown>>();
   private stopped = false;
+  /** Aborts provider create calls on shutdown only: a destroy waits for a create in flight instead. */
+  private readonly shutdown = new AbortController();
 
   constructor(private readonly deps: BoxLifecycleDeps) {}
 
@@ -267,6 +311,7 @@ export class BoxLifecycle {
         "orq-agent builds are unavailable on this daemon: install Go 1.24 or later on the host (or deploy prebuilt builds) and restart the daemon."
       );
     }
+    const installationId = await this.deps.store.ensureInstallationId();
     let id = newBoxId();
     while (this.deps.store.get(id)) id = newBoxId();
     const now = new Date(this.deps.clock.now());
@@ -282,7 +327,7 @@ export class BoxLifecycle {
       size: spec.size,
       sizeLabel: spec.sizeLabel,
       image: spec.image,
-      name: `orq-${id}`,
+      name: `orq-${installationId}-${id}`,
       os: null,
       arch: null,
       libc: null,
@@ -332,6 +377,7 @@ export class BoxLifecycle {
   stop(): void {
     this.stopped = true;
     for (const run of this.runs.values()) run.abort.abort();
+    this.shutdown.abort();
   }
 
   /**
@@ -494,6 +540,10 @@ export class BoxLifecycle {
       await this.deps.store.setWindowsPassword(boxId, windowsPassword);
     }
     const lifetimeMinutes = typeof record.lifetimeMinutes === "number" ? record.lifetimeMinutes : null;
+    const installationId = this.deps.store.installationId();
+    // Past this point an instance may exist: a destroy waits for the call instead of aborting it.
+    signal.throwIfAborted();
+    await this.deps.store.update(boxId, (next) => void (next[CREATE_REQUESTED_AT] = this.iso()));
     try {
       const result = await adapter.create(
         credentials,
@@ -504,13 +554,14 @@ export class BoxLifecycle {
           size: record.size,
           region: record.region,
           image: record.image ?? null,
-          tags: { "orquester-box": boxId },
+          tags: { [BOX_TAG]: boxId, ...(installationId ? { [INSTALLATION_TAG]: installationId } : {}) },
           bootstrap,
           sshPublicKey: throwawaySshPublicKey(),
           windowsPassword,
           lifetimeMinutes
         },
-        { signal, ...(this.deps.fetch ? { fetch: this.deps.fetch } : {}) }
+        // Not `signal`: aborting a create the provider may already have accepted leaves an instance without a ref.
+        { signal: this.shutdown.signal, ...(this.deps.fetch ? { fetch: this.deps.fetch } : {}) }
       );
       await this.deps.store.update(boxId, (next) => {
         next.providerRef = result.ref;
@@ -519,7 +570,7 @@ export class BoxLifecycle {
       });
       if (result.windowsPassword) await this.deps.store.setWindowsPassword(boxId, result.windowsPassword);
     } catch (error) {
-      if (!signal.aborted) this.deps.onProviderError(adapter.id);
+      if (!this.shutdown.signal.aborted) this.deps.onProviderError(adapter.id);
       throw error;
     }
     return { state: "done" };
@@ -765,11 +816,21 @@ export class BoxLifecycle {
     void this.deps.setupLog.append(boxId, `Destroying (${reason})${message ? `: ${message}` : ""}.`);
     try {
       if (record.kind === "macos") await this.shutdownAgent(boxId);
-      if (record.providerRef) {
+      // A create that was sent but returned no ref (it threw, or a restart cut it off) may have made an instance.
+      const unconfirmed = !record.providerRef && (record[CREATE_REQUESTED_AT] !== undefined || this.createStepState(record) === "running");
+      if (record.providerRef || unconfirmed) {
         if (!adapter) throw new Error(`This build has no adapter for the provider "${record.provider}".`);
         const credentials = await this.deps.connectivity.credentials(adapter.id);
         if (!credentials) throw new Error(`${adapter.label} is not connected any more; reconnect it to destroy this box.`);
-        await this.destroyAndConfirm(adapter, credentials, record.providerRef);
+        let ref = record.providerRef;
+        if (!ref) {
+          ref = (await this.findInstance(adapter, credentials, record)) ?? undefined;
+          if (ref) {
+            const found = ref;
+            await this.deps.store.update(boxId, (next) => void (next.providerRef ??= found));
+          }
+        }
+        if (ref) await this.destroyAndConfirm(adapter, credentials, ref);
       }
     } catch (error) {
       const line = errorLine(error);
@@ -811,14 +872,23 @@ export class BoxLifecycle {
     return destroyed ?? this.require(boxId);
   }
 
-  /** Destroy, then poll the provider (with backoff, bounded) until it reports the instance gone. */
+  /**
+   * Destroy, then poll the provider (with backoff, bounded) until it reports the instance gone. A
+   * failed status poll is retried like a "not gone yet" answer until the deadline.
+   */
   private async destroyAndConfirm(adapter: BoxProviderAdapter, credentials: ProviderCredentials, ref: ProviderInstanceRef): Promise<void> {
     const signal = AbortSignal.timeout(DESTROY_CONFIRM_MS);
     const options = { signal, ...(this.deps.fetch ? { fetch: this.deps.fetch } : {}) };
     await adapter.destroy(credentials, ref, options);
+    let lastError: unknown = null;
     for (let attempt = 0; ; attempt++) {
-      const status = await adapter.status(credentials, ref, options);
-      if (status.state === "gone") return;
+      try {
+        const status = await adapter.status(credentials, ref, options);
+        if (status.state === "gone") return;
+        lastError = null;
+      } catch (error) {
+        lastError = error;
+      }
       if (signal.aborted) break;
       try {
         await this.deps.clock.wait(DESTROY_POLL_MS[Math.min(attempt, DESTROY_POLL_MS.length - 1)]!, signal);
@@ -826,7 +896,32 @@ export class BoxLifecycle {
         break;
       }
     }
-    throw new Error(`${adapter.label} did not confirm the instance is gone within ${DESTROY_CONFIRM_MS / 60_000} min.`);
+    const why = lastError ? ` (last check: ${errorLine(lastError)})` : "";
+    throw new Error(`${adapter.label} did not confirm the instance is gone within ${DESTROY_CONFIRM_MS / 60_000} min${why}.`);
+  }
+
+  /**
+   * The instance a record without a ref may have, looked up by its marker. Null when the provider
+   * lists none; throws when the listing fails (nothing is confirmed then).
+   */
+  private async findInstance(adapter: BoxProviderAdapter, credentials: ProviderCredentials, record: StoredBox): Promise<ProviderInstanceRef | null> {
+    let instances: ProviderManagedInstance[];
+    try {
+      instances = await adapter.listManaged(credentials, {
+        signal: AbortSignal.timeout(DESTROY_CONFIRM_MS),
+        ...(this.deps.fetch ? { fetch: this.deps.fetch } : {})
+      });
+    } catch (error) {
+      throw new Error(`Could not check whether ${adapter.label} created the machine (${errorLine(error)}).`);
+    }
+    const found = instances.find(
+      (instance) => instance.state !== "gone" && (instance.name === record.name || instanceMarker(instance)?.boxId === record.id)
+    );
+    return found?.ref ?? null;
+  }
+
+  private createStepState(record: StoredBox): string | null {
+    return (record.setup ?? []).find((step) => step.id === "create")?.state ?? null;
   }
 
   /** macOS runners: ask `orq-agent` to exit so the job ends successfully before it is cancelled. */

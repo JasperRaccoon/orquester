@@ -14,6 +14,7 @@ import type {
   BoxHub,
   BoxProviderAdapter,
   BuildBootstrap,
+  ProviderCallOptions,
   ProviderCreateRequest,
   ProviderCreateResult,
   ProviderCredentials,
@@ -61,8 +62,19 @@ export class FakeAdapter implements BoxProviderAdapter {
   readonly creates: ProviderCreateRequest[] = [];
   readonly destroyed: string[] = [];
   readonly validKey = "good-key-1234";
+  /** Another key of the same account (sees its instances). */
+  readonly rotatedKey = "good-key-5678";
+  /** A valid key of another account: every instance reads as gone through it. */
+  readonly otherAccountKey = "other-account-9012";
   failCreate: Error | null = null;
+  /** Thrown by `create` after the instance was made (the provider accepted; the answer was lost). */
+  failCreateAfterAccept: Error | null = null;
   failDestroy: Error | null = null;
+  failList: Error | null = null;
+  /** How many of the next `status` calls throw. */
+  failStatusTimes = 0;
+  /** `create` waits for this before making the instance; then it honours its signal like a real HTTP call. */
+  holdCreate: Promise<void> | null = null;
   /** Called inside `create` before the instance exists (assert the record is already written). */
   onCreate: ((request: ProviderCreateRequest) => void) | null = null;
   offersCalls = 0;
@@ -83,7 +95,9 @@ export class FakeAdapter implements BoxProviderAdapter {
   }
 
   async validate(credentials: ProviderCredentials) {
-    return credentials.apiKey === this.validKey ? ({ ok: true } as const) : ({ ok: false, message: "invalid token" } as const);
+    return [this.validKey, this.rotatedKey, this.otherAccountKey].includes(credentials.apiKey ?? "")
+      ? ({ ok: true } as const)
+      : ({ ok: false, message: "invalid token" } as const);
   }
 
   async offers(): Promise<ProviderOffers> {
@@ -99,17 +113,25 @@ export class FakeAdapter implements BoxProviderAdapter {
     };
   }
 
-  async create(_credentials: ProviderCredentials, request: ProviderCreateRequest): Promise<ProviderCreateResult> {
+  async create(_credentials: ProviderCredentials, request: ProviderCreateRequest, options?: ProviderCallOptions): Promise<ProviderCreateResult> {
     this.onCreate?.(request);
     this.creates.push(request);
     if (this.failCreate) throw this.failCreate;
+    if (this.holdCreate) await this.holdCreate;
     const id = `i-${this.next++}`;
     this.instances.set(id, { ref: { id }, name: request.name, boxId: request.boxId, state: "running", createdAt: new Date().toISOString() });
+    if (this.failCreateAfterAccept) throw this.failCreateAfterAccept;
+    // An aborted request loses the answer, not the instance the provider already made.
+    options?.signal.throwIfAborted();
     return { ref: { id }, hourlyUsd: null };
   }
 
-  async status(_credentials: ProviderCredentials, ref: ProviderInstanceRef): Promise<ProviderInstanceStatus> {
-    const instance = this.instances.get(String(ref.id));
+  async status(credentials: ProviderCredentials, ref: ProviderInstanceRef): Promise<ProviderInstanceStatus> {
+    if (this.failStatusTimes > 0) {
+      this.failStatusTimes -= 1;
+      throw new Error("status: 502 Bad Gateway");
+    }
+    const instance = credentials.apiKey === this.otherAccountKey ? undefined : this.instances.get(String(ref.id));
     return { state: instance?.state ?? "gone", detail: instance ? null : "Not found", publicIp: null, hourlyUsd: null };
   }
 
@@ -119,7 +141,9 @@ export class FakeAdapter implements BoxProviderAdapter {
     this.instances.delete(String(ref.id));
   }
 
-  async listManaged(): Promise<ProviderManagedInstance[]> {
+  async listManaged(credentials: ProviderCredentials): Promise<ProviderManagedInstance[]> {
+    if (this.failList) throw this.failList;
+    if (credentials.apiKey === this.otherAccountKey) return [];
     return [...this.instances.values()].map((instance) => ({ ...instance }));
   }
 }
