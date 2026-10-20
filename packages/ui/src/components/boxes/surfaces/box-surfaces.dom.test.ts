@@ -18,6 +18,7 @@ import {
   BOX_CONFIG_CHANGES_EVENT,
   boxRoutes,
   type BoxConfigChangeSet,
+  type DecideBoxConfigChangeRequest,
   type BoxSummary,
   type EventMessage,
   type ProjectBoxInfo
@@ -32,7 +33,7 @@ let createRoot: typeof import("react-dom/client").createRoot;
 let BoxChatPanel: typeof import("./BoxChatSurfaces").BoxChatPanel;
 let BoxComposerLock: typeof import("./BoxChatSurfaces").BoxComposerLock;
 let ProjectRow: typeof import("../../sidebar/WorkspaceProjects").ProjectRow;
-let store: typeof import("./box-store");
+let store: typeof import("../../../lib/boxes/store");
 
 let dom: JSDOM;
 const globals = [
@@ -65,7 +66,7 @@ before(async () => {
   ({ createRoot } = await import("react-dom/client"));
   ({ BoxChatPanel, BoxComposerLock } = await import("./BoxChatSurfaces"));
   ({ ProjectRow } = await import("../../sidebar/WorkspaceProjects"));
-  store = await import("./box-store");
+  store = await import("../../../lib/boxes/store");
 });
 
 after(() => {
@@ -142,13 +143,11 @@ describe("box surfaces", () => {
   let root: Root;
   let posts: { path: string; body: unknown }[];
 
+  // The boxes store's client call: a decision answers with the decided set.
   const fakeApi = {
-    send: async (method: string, path: string, options?: { body?: unknown }) => {
-      if (method === "POST" && path === boxRoutes.configChange("cc-1")) {
-        posts.push({ path, body: options?.body });
-        return { change: { ...pendingChange, state: "approved", decidedAt: iso(0) } };
-      }
-      throw new Error(`unexpected ${method} ${path}`);
+    decideBoxConfigChange: async (id: string, body: DecideBoxConfigChangeRequest) => {
+      posts.push({ path: boxRoutes.configChange(id), body });
+      return { change: { ...pendingChange, state: "approved", decidedAt: iso(0) } };
     }
   } as unknown as ApiClient;
 
@@ -165,7 +164,7 @@ describe("box surfaces", () => {
 
   beforeEach(() => {
     posts = [];
-    store.resetBoxSurfaces();
+    store.resetBoxes();
     const mount = document.createElement("div");
     document.body.replaceChildren(mount);
     root = createRoot(mount);
@@ -217,8 +216,8 @@ describe("box surfaces", () => {
     assert.equal(document.querySelector("[data-box-chat-panel]"), null, "nothing to show yet");
 
     await act(async () => {
-      store.applyBoxSurfacesEvent(boxesEvent(BOXES_CHANGED_EVENT, { boxes: [temporary] }));
-      store.applyBoxSurfacesEvent(boxesEvent(BOX_CONFIG_CHANGES_EVENT, { changes: [pendingChange] }));
+      store.applyBoxesEvent(boxesEvent(BOXES_CHANGED_EVENT, { boxes: [temporary] }));
+      store.applyBoxesEvent(boxesEvent(BOX_CONFIG_CHANGES_EVENT, { changes: [pendingChange] }));
     });
     await flush();
 

@@ -100,13 +100,17 @@ function renderFuzzy(text: string, offset: number, matched: Set<number>): React.
  */
 export const SearchPanel: React.FC<{
   root: string;
+  /** boxes: false when regex search can't run where `root` lives (a box without ripgrep). */
+  regexSearch?: boolean;
   onOpenFile: (path: string, size: number, line?: number, column?: number, matchLength?: number) => void;
   onActiveChange: (active: boolean) => void;
-}> = ({ root, onOpenFile, onActiveChange }) => {
+}> = ({ root, regexSearch = true, onOpenFile, onActiveChange }) => {
   const api = useApi();
   const [query, setQuery] = useState("");
   const [options, setOptions] = useState<SearchOptions>(() => loadSearchOptions(root));
-  const { caseSensitive, wholeWord, regex, include, exclude, filtersExpanded, includeIgnored } = options;
+  const { caseSensitive, wholeWord, include, exclude, filtersExpanded, includeIgnored } = options;
+  // boxes: the saved regex choice stays, but only applies where regex search can run.
+  const regex = options.regex && regexSearch;
   const [filesVersion, setFilesVersion] = useState(0);
   const [filesError, setFilesError] = useState<string | null>(null);
   const [content, setContent] = useState<FsSearchResponse | null>(null);
@@ -550,7 +554,12 @@ export const SearchPanel: React.FC<{
           <ToggleButton active={wholeWord} onClick={() => toggleOption("wholeWord")} label="Match whole word">
             <WholeWord size={15} />
           </ToggleButton>
-          <ToggleButton active={regex} onClick={() => toggleOption("regex")} label="Use regular expression">
+          <ToggleButton
+            active={regex}
+            onClick={() => toggleOption("regex")}
+            disabled={!regexSearch}
+            label={regexSearch ? "Use regular expression" : "Regex search needs ripgrep (rg) installed in this VM"}
+          >
             .*
           </ToggleButton>
           <ToggleButton
@@ -763,8 +772,9 @@ const ToggleButton: React.FC<{
   onClick: () => void;
   label: string;
   ariaExpanded?: boolean;
+  disabled?: boolean;
   children: React.ReactNode;
-}> = ({ active, onClick, label, ariaExpanded, children }) => (
+}> = ({ active, onClick, label, ariaExpanded, disabled, children }) => (
   <button
     type="button"
     aria-label={label}
@@ -772,10 +782,13 @@ const ToggleButton: React.FC<{
     aria-expanded={ariaExpanded}
     title={label}
     onClick={onClick}
+    disabled={disabled}
     className={cn(
       "inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-xs font-semibold transition-colors",
       "focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500",
-      active
+      disabled
+        ? "cursor-not-allowed text-neutral-600"
+        : active
         ? "bg-neutral-700 text-neutral-100"
         : "text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100"
     )}

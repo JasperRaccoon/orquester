@@ -354,6 +354,49 @@ describe("Agent Profiles panel", () => {
     assert.equal(body.draft.kind, "mcp");
     assert.equal(body.draft.agents, "all");
     assert.deepEqual(body.draft.mcp.env, [{ key: "JIRA_TOKEN", keep: true }]);
+    // boxes: with the Ephemeral AI VMs plugin off, no "Run in box" switch, and the draft leaves it as it is.
+    assert.equal(dialog!.querySelector("[data-mcp-run-in-box]"), null);
+    assert.equal("runInBox" in (body.draft.mcp as object), false);
+  });
+
+  // boxes: the MCP item's "Run in box" switch, while the Ephemeral AI VMs plugin is on.
+  it("the MCP editor offers Run in box with the plugin on, and sends the switch with the item", async () => {
+    useAppStore.setState({
+      plugins: [
+        {
+          id: "ephemeral-vms",
+          name: "Ephemeral AI VMs",
+          description: "",
+          source: { label: "Built in", url: "" },
+          provider: "Orquester",
+          scope: "global",
+          updates: false,
+          platform: "supported",
+          enabled: true,
+          enabledWorkspaces: [],
+          current: null,
+          previous: null,
+          skippedVersion: null,
+          lastCheckAt: null,
+          lastError: null,
+          job: "idle"
+        }
+      ]
+    } as never);
+    await openDeveloper();
+    await openJiraEditor();
+    const row = document.querySelector('[role="dialog"] [data-mcp-run-in-box]');
+    assert.ok(row, "the switch is offered");
+    assert.match(row!.textContent ?? "", /its secrets will be present in the VM while it runs/);
+    const toggle = row!.querySelector<HTMLButtonElement>('[role="switch"]');
+    assert.equal(toggle?.getAttribute("aria-checked"), "false");
+    await click(toggle);
+    assert.equal(toggle?.getAttribute("aria-checked"), "true");
+
+    await click(buttonByText("Save"));
+    assert.equal(server.updates.length, 1);
+    const body = server.updates[0]!.body as { draft: { mcp: { runInBox?: boolean } } };
+    assert.equal(body.draft.mcp.runInBox, true);
   });
 
   const type = async (selector: string, value: string) => {

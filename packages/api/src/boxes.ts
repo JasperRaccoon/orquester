@@ -550,6 +550,11 @@ export const boxRoutes = {
   /** `POST` `DecideBoxConfigChangeRequest` → `{ change: BoxConfigChangeSet }`. */
   configChange: (id: string): string => `/api/boxes/config-changes/${encodeURIComponent(id)}`,
   /**
+   * Global (Agent config) MCP servers' "Run in box" switch, kept in `box-mcp.json`:
+   * `GET` → `BoxMcpRunInBoxResponse`; `PUT` `SetBoxMcpRunInBoxRequest` → `BoxMcpRunInBoxResponse`.
+   */
+  mcpRunInBox: "/api/boxes/mcp-run-in-box",
+  /**
    * REMOTE, box-authenticated (bootstrap token or box credential in `Authorization: Bearer`):
    * `GET` → the `orq-agent` executable for `<os>-<arch>[-musl]`, e.g. `linux-x64`, `linux-arm64-musl`,
    * `darwin-arm64`, `win32-x64`. Not behind the daemon's user auth.
@@ -572,6 +577,25 @@ export interface BoxInternalTokenRequest {
   agent: "claude" | "codex" | "grok";
   accountId: string;
   minValidSeconds?: number;
+}
+
+/** One Global MCP server's "Run in box" switch (an agent's server, by name). */
+export interface BoxMcpRunInBoxEntry {
+  name: string;
+  agent: string;
+  runInBox: boolean;
+}
+
+/** Answer of `boxRoutes.mcpRunInBox` (`GET` and `PUT`). */
+export interface BoxMcpRunInBoxResponse {
+  servers: BoxMcpRunInBoxEntry[];
+}
+
+/** Body of `PUT boxRoutes.mcpRunInBox`. */
+export interface SetBoxMcpRunInBoxRequest {
+  agent: string;
+  name: string;
+  runInBox: boolean;
 }
 
 /** The `/events` channel box changes go out on. */

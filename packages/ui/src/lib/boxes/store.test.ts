@@ -23,7 +23,16 @@ import {
   saveBoxProviderCredentials,
   type BoxesApi
 } from "./store.ts";
-import { sanitizeBoxOffersResponse, sanitizeBoxProviderInfo, sanitizeBoxSummary, sanitizeBoxesResponse } from "./validate.ts";
+import {
+  readDestroyedReason,
+  runsInBox,
+  sanitizeBoxConfigChangeSet,
+  sanitizeBoxMcpRunInBoxResponse,
+  sanitizeBoxOffersResponse,
+  sanitizeBoxProviderInfo,
+  sanitizeBoxSummary,
+  sanitizeBoxesResponse
+} from "./validate.ts";
 import { box, change, kind, offers, provider } from "./fixtures.test-helpers.ts";
 
 const TOTALS = { activeCount: 1, hourlyUsd: 0.0119, monthEstimatedUsd: 3.1 };
@@ -122,6 +131,43 @@ describe("box payload validation", () => {
     assert.ok(response);
     assert.deepEqual(response.boxes.map((entry) => entry.id), ["a", "b"]);
     assert.deepEqual(response.totals, { activeCount: 1, hourlyUsd: 0.5, monthEstimatedUsd: 0.84 });
+  });
+
+  it("reads a config change set, leaving out files that do not read", () => {
+    assert.deepEqual(sanitizeBoxConfigChangeSet(change()), change());
+    const files = change().files;
+    const set = sanitizeBoxConfigChangeSet({ ...change(), files: [{ path: "" }, "x", ...files] });
+    assert.deepEqual(set?.files, files);
+    assert.equal(sanitizeBoxConfigChangeSet({ ...change(), state: "maybe" }), null);
+    assert.equal(sanitizeBoxConfigChangeSet({ ...change(), boxId: "" }), null);
+  });
+
+  it("reads the Global MCP servers' Run in box settings", () => {
+    assert.equal(sanitizeBoxMcpRunInBoxResponse({ servers: "nope" }), null);
+    const response = sanitizeBoxMcpRunInBoxResponse({
+      servers: [
+        { agent: "claude", name: "jira", runInBox: true },
+        { agent: "claude", name: "jira", runInBox: false },
+        { agent: "codex", name: "jira", runInBox: "yes" },
+        { agent: "", name: "x", runInBox: true },
+        "junk"
+      ]
+    });
+    assert.deepEqual(response, {
+      servers: [
+        { agent: "claude", name: "jira", runInBox: true },
+        { agent: "codex", name: "jira", runInBox: false }
+      ]
+    });
+    assert.equal(runsInBox(response!, "claude", "jira"), true);
+    assert.equal(runsInBox(response!, "codex", "jira"), false);
+    assert.equal(runsInBox(response!, "grok", "jira"), false);
+  });
+
+  it("narrows a destroyed reason to the ones this build knows", () => {
+    assert.equal(readDestroyedReason("provider-gone"), "provider-gone");
+    assert.equal(readDestroyedReason("meteor"), null);
+    assert.equal(readDestroyedReason(undefined), null);
   });
 
   it("only links http(s) URLs and masks fields of unknown secrecy", () => {

@@ -165,6 +165,8 @@ export function sanitizeMcpView(value: unknown): McpServerView | null {
   const headers = sanitizeSecretEntries(value.headers);
   if (headers !== undefined) view.headers = headers;
   if (isRecord(value.advanced)) view.advanced = { ...value.advanced };
+  // boxes: only a real `true` switches it on; anything else reads as the default (off).
+  if (value.runInBox === true) view.runInBox = true;
   return view;
 }
 
