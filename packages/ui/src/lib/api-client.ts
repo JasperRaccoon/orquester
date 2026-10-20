@@ -225,7 +225,9 @@ import type {
   ToolApprovalDetailResponse,
   ToolApprovalListResponse,
   TurnDiffQuery,
-  TurnDiffResponse
+  TurnDiffResponse,
+  UsageLimitActionResponse,
+  UsageLimitSwitchRequest
 } from "@orquester/api/agent-chat";
 
 export interface ApiRequestOptions {
@@ -1754,6 +1756,29 @@ export class ApiClient {
    */
   answerToolApproval(id: string, approvalId: string, body: ToolApprovalAnswer): Promise<ToolApprovalAnswerResponse> {
     return this.send("POST", agentChatRoutes.toolApproval(id, approvalId), { body });
+  }
+
+  /**
+   * Usage-limit recovery (`agentChatRoutes.usageLimit`): arm (`true`) or cancel the automatic
+   * resume of a chat stopped on its usage limit. Answers the chat's state after it.
+   */
+  setUsageLimitAutoResume(id: string, armed: boolean): Promise<UsageLimitActionResponse> {
+    return this.send("POST", agentChatRoutes.usageLimit(id, "auto-resume"), { body: { armed } });
+  }
+
+  /** Send the continue message into a limited chat now; a retry with the same `commandId` never sends twice. */
+  resumeLimitedChat(id: string, commandId: string): Promise<UsageLimitActionResponse> {
+    return this.send("POST", agentChatRoutes.usageLimit(id, "resume"), { body: { commandId } });
+  }
+
+  /** Move a limited chat to another account of its agent (the daemon's pick without `accountId`) and continue. */
+  switchLimitedChat(id: string, body: UsageLimitSwitchRequest): Promise<UsageLimitActionResponse> {
+    return this.send("POST", agentChatRoutes.usageLimit(id, "switch"), { body });
+  }
+
+  /** Dismiss the "switched account after a usage limit" notice. */
+  dismissLimitFailover(id: string): Promise<UsageLimitActionResponse> {
+    return this.send("POST", agentChatRoutes.usageLimit(id, "dismiss-failover"), { body: {} });
   }
 
   /** Settings › Agent tools: every grant (§7.6). */

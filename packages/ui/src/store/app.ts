@@ -247,7 +247,10 @@ const DEFAULT_AGENT_PREFS: AgentPrefs = {
   claudeSubagentCacheTtl: "auto",
   // Agent chat §3.3: continuing an interrupted turn is opt-in, per project.
   continueThreadsAfterRestart: false,
-  continueThreadsByProject: {}
+  continueThreadsByProject: {},
+  // Usage-limit recovery: resuming at the reset is on, moving to another account is opt-in.
+  autoResumeLimitedChats: true,
+  switchAccountOnUsageLimit: false
 };
 
 /**

@@ -56,6 +56,8 @@ export interface DockNotice {
   description?: React.ReactNode;
   icon?: React.ReactNode;
   actions?: React.ReactNode;
+  /** A second row under the title (`BannerCard`'s body): actions that would crowd a narrow first row. */
+  body?: React.ReactNode;
   onDismiss?: () => void;
 }
 
@@ -320,6 +322,7 @@ export function ChatBannerDock({
             description={notice.description}
             actions={notice.actions}
             onDismiss={notice.onDismiss ? () => requestDismiss(notice) : undefined}
+            {...(notice.body ? { children: notice.body } : {})}
             className={exitingNoticeId === notice.id ? "ac-banner-exit" : undefined}
           />
         )

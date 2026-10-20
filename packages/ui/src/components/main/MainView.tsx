@@ -15,6 +15,7 @@ import { DesktopView } from "../desktop/DesktopView";
 import { desktopTabTitle } from "../../lib/desktop-state";
 import { getRegistryIcon } from "../../icons";
 import { SessionStatusDot } from "../ui/session-status-dot";
+import { LimitedMarker } from "../ui/limited-marker";
 import { ResizeHandle } from "../ui";
 import { useIsDesktop, useRegistry } from "../../hooks";
 import { GRID_MIN_COL_PX, GRID_MIN_ROW_PX, type GridTracks } from "../../lib/panel-sizes";
@@ -345,6 +346,7 @@ export const MainView: React.FC = () => {
               >
                 <span className="text-neutral-500">{cellIcon(tab)}</span>
                 <span className="flex-1 truncate text-xs text-neutral-300">{cellTitle(tab)}</span>
+                <LimitedMarker session={tabSession(tab)} />
                 {tabSession(tab) ? (
                   <SessionStatusDot
                     sessionId={tab.id}

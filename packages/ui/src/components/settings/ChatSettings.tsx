@@ -12,10 +12,11 @@ const FOLLOW_UP_OPTIONS = [
 /**
  * Agent-chat behaviour (agent chat spec §7.4, §4.6.7, §3.3).
  *
- * Three settings with two different homes, which is why the page splits them
- * into sections by where they are saved: the composer habits are per-device and
+ * Settings with two different homes, which is why the page splits them into
+ * sections by where they are saved: the composer habits are per-device and
  * live in localStorage; continuing after a restart is daemon state the HOST
- * reads at boot, per project, so it rides `app.json` and is shared by every
+ * reads at boot, per project, and the usage-limit recovery is daemon state the
+ * DAEMON reads at every limit, so both ride `app.json` and are shared by every
  * client of that daemon.
  */
 export const ChatSettings: React.FC = () => {
@@ -33,7 +34,7 @@ export const ChatSettings: React.FC = () => {
     : agentPrefs.continueThreadsAfterRestart;
 
   return (
-    <SettingsPage title="Agent chat" description="How the composer sends messages and what happens to turns a restart cuts short.">
+    <SettingsPage title="Agent chat" description="How the composer sends messages, what happens to turns a restart cuts short, and how chats recover from usage limits.">
       <SettingsSection title="Composer" description="Saved on this device.">
         <SettingRow
           label="Enter while the agent is working"
@@ -124,6 +125,29 @@ export const ChatSettings: React.FC = () => {
             description="Open a project to pin a different choice for it."
           />
         )}
+      </SettingsSection>
+
+      <SettingsSection title="Usage limits" description="Shared by every client of this server.">
+        <SettingRow
+          label="Auto-resume chats when the usage limit resets"
+          description={'When a chat stops on its account\'s usage limit and the reset time is known, send "Continue where you left off." shortly after the reset. A chat you have written to since, or that waits for an approval or an answer, is left alone; each chat\'s banner can cancel it.'}
+        >
+          <Switch
+            label="Auto-resume chats when the usage limit resets"
+            checked={agentPrefs.autoResumeLimitedChats}
+            onChange={(checked) => void updateAgentPrefs({ ...agentPrefs, autoResumeLimitedChats: checked })}
+          />
+        </SettingRow>
+        <SettingRow
+          label="Switch to another account when a chat hits its usage limit"
+          description="Move the chat to another account of the same agent that still has quota, and continue there. When every account is limited, the chat waits for the earliest reset instead. Off by default: it spends another account's quota without asking. Never for OpenCode, which has no accounts."
+        >
+          <Switch
+            label="Switch to another account when a chat hits its usage limit"
+            checked={agentPrefs.switchAccountOnUsageLimit}
+            onChange={(checked) => void updateAgentPrefs({ ...agentPrefs, switchAccountOnUsageLimit: checked })}
+          />
+        </SettingRow>
       </SettingsSection>
     </SettingsPage>
   );

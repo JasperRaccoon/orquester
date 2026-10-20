@@ -6,6 +6,7 @@ import { getRegistryIcon } from "../../icons";
 import { ConfirmDialog } from "../ui";
 import { ContextMenu, type ContextMenuItem } from "../ui/context-menu";
 import { SessionStatusDot } from "../ui/session-status-dot";
+import { LimitedMarker } from "../ui/limited-marker";
 import { isLegacyAgentTerminal } from "../../lib/session-kind";
 import { WorkflowChip } from "../workflows/WorkflowChip";
 import { LineageMark } from "../agent-chat/LineageMark";
@@ -279,6 +280,7 @@ export const TabStrip: React.FC = () => {
                 {accountLabel}
               </span>
             ) : null}
+            <LimitedMarker session={session} className="ml-1" />
             {session ? (
               <SessionStatusDot
                 sessionId={tab.id}
