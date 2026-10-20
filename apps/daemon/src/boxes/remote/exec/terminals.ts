@@ -23,9 +23,9 @@
  * - Plain shells only. Terminal agents, IDEs and other registry launches are
  *   refused for boxes (their account env, hooks and host binaries do not apply
  *   there; agent chats run in the box through the agent host instead).
- * - Env: the box's own, plus git's host-backed auth (`boxGitEnv`) and the
- *   tooling plugins' contribution for the box. Never the host's env and never
- *   the host's NODE_OPTIONS preload.
+ * - Env: the box's own, plus the tooling plugins' contribution for the box
+ *   (git uses the box user's config and `orq-agent`'s `SSH_AUTH_SOCK`). Never
+ *   the host's env and never the host's NODE_OPTIONS preload.
  *
  * {@link BoxAwareSessionManager} routes the `ISessionManager` surface between
  * the host backend (tmux or direct PTY, untouched) and {@link BoxTerminalManager}.
@@ -44,7 +44,7 @@ import { ActivityTracker } from "../../../ansi-activity.ts";
 import { SessionError, type ISessionManager, type SessionIndexContributor } from "../../../sessions.ts";
 import { captureArgs, tmuxName } from "../../../tmux.ts";
 import type { BoxConnection, BoxHub, BoxProcess, BoxRegistry, BoxToolingProvisioner } from "../../contracts.ts";
-import { boxGitEnv, boxToolingEnv, toolingFor } from "./env.ts";
+import { boxToolingEnv, toolingFor } from "./env.ts";
 import { runInBox, waitSpawned } from "./run.ts";
 
 /** Hot replay ring, as for host sessions. */
@@ -213,7 +213,6 @@ export class BoxTerminalManager {
     const env: Record<string, string> = {
       TERM: "xterm-256color",
       COLORTERM: "truecolor",
-      ...boxGitEnv(connection.sys),
       ...(await boxToolingEnv(connection, toolingFor(this.deps.tooling, boxId)))
     };
     const cwd = boxCwd(connection, session.summary.cwd);

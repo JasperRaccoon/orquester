@@ -121,7 +121,9 @@ describe("shell blocks in a box", () => {
     assert.equal(spec.env?.TERM, "dumb");
     assert.equal(spec.env?.ORQUESTER_WORKFLOW_RUN_ID, "run-1");
     assert.equal(spec.env?.GREETING, "hi");
-    assert.equal(spec.env?.GIT_CONFIG_KEY_1, "credential.helper");
+    // No git overrides: no credential helper (a box never gets a token), no GIT_SSH_COMMAND over the box's pinned config.
+    assert.equal(spec.env?.GIT_CONFIG_COUNT, undefined);
+    assert.equal(spec.env?.GIT_SSH_COMMAND, undefined);
     assert.equal(spec.env?.PATH, undefined, "the host PATH is never handed to the box");
     const state = JSON.parse(await readFile(join(attemptDir, "box.json"), "utf8")) as { boxId: string; procId: string };
     assert.equal(state.boxId, "box-1");

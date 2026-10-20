@@ -119,8 +119,9 @@ test("status, diff, stage, commit, log and push run in the box with the box's HO
     for (const e of gitExecs) {
       assert.equal(e.cwd, f.project);
       assert.equal(e.env?.HOME, f.boxHome);
-      assert.equal(e.env?.GIT_CONFIG_KEY_1, "credential.helper");
-      assert.match(e.env?.GIT_CONFIG_VALUE_1 ?? "", / git-credential$/);
+      // No credential helper (a box never gets a token) and no GIT_SSH_COMMAND over the box's pinned config.
+      assert.equal(e.env?.GIT_CONFIG_COUNT, undefined);
+      assert.equal(e.env?.GIT_SSH_COMMAND, undefined);
       assert.equal(e.env?.PATH, undefined, "the host env is never passed");
     }
     const pushExec = gitExecs.find((e) => e.args?.[0] === "push");

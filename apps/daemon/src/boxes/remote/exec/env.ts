@@ -7,12 +7,13 @@
  * keeps the host's `NODE_OPTIONS` preload, host PATH entries and the daemon's
  * `ORQUESTER_*` secrets out of the box.
  *
- * - {@link boxGitEnv}: git in the box authenticates through the host. HTTPS
- *   asks `orq-agent git-credential`, which forwards to the daemon's
- *   `git.credential` handler (`../git-auth.ts`); SSH uses the agent socket
- *   `orq-agent` exports as `SSH_AUTH_SOCK` (the `ssh-agent` channel). Set
- *   through `GIT_CONFIG_*` env, so nothing is written to the box's git config
- *   and nothing secret is involved at all.
+ * - Git: nothing is added. A box never holds a git hosting token: git in the
+ *   box reaches the workspace account's host over SSH only, through the agent
+ *   socket `orq-agent` exports as `SSH_AUTH_SOCK` (the host's restricted
+ *   `ssh-agent` channel, `../git-auth.ts`), with the HTTPS → SSH rewrites and
+ *   pinned host keys the box setup wrote to the box user's own git config. No
+ *   env overrides that config (a `GIT_SSH_COMMAND` here would replace its
+ *   pinned `core.sshCommand`).
  * - {@link boxToolingEnv}: a tooling plugin's per-target contribution
  *   (`BoxToolingProvisioner.contribution`), with PATH prepended to the box's
  *   own PATH and the `--require` files as the whole of `NODE_OPTIONS`.
@@ -23,30 +24,6 @@ import type { BoxSysInfo } from "@orquester/api";
 
 import type { BoxConnection, BoxToolingProvisioner, SessionToolingContribution } from "../../contracts.ts";
 import { runInBox } from "./run.ts";
-
-/** POSIX single-quote a word for `sh` (`'` → `'\''`). */
-export function shQuote(value: string): string {
-  return `'${value.replace(/'/g, "'\\''")}'`;
-}
-
-/**
- * Env that points git in the box at the host-backed credential helper and the
- * forwarded SSH agent. The first `credential.helper` entry is empty, which
- * resets any helper list from the box's own config, so only the host answers.
- * `accept-new` trusts a host key on first use, like the host's own account
- * transport (`accounts.ts` `sshCommandFor`).
- */
-export function boxGitEnv(sys: Pick<BoxSysInfo, "agentPath">): Record<string, string> {
-  return {
-    GIT_CONFIG_COUNT: "2",
-    GIT_CONFIG_KEY_0: "credential.helper",
-    GIT_CONFIG_VALUE_0: "",
-    GIT_CONFIG_KEY_1: "credential.helper",
-    // `!` = a shell snippet git runs with the operation appended ("… get").
-    GIT_CONFIG_VALUE_1: `!${shQuote(sys.agentPath)} git-credential`,
-    GIT_SSH_COMMAND: "ssh -o StrictHostKeyChecking=accept-new"
-  };
-}
 
 /** The name of the search-path variable a box's OS uses. */
 export function pathVariable(sys: Pick<BoxSysInfo, "os">): "PATH" | "Path" {

@@ -24,7 +24,8 @@
  *   same grace as the host runner); a box that stays away past the deadline is
  *   given up as interrupted, and its process killed when the box returns.
  * - Env: the box's own, the block's env, the workflow ids and launch marker,
- *   git's host-backed auth and the tooling contribution. Never the host's env.
+ *   and the tooling contribution (git uses the box user's config and
+ *   `orq-agent`'s `SSH_AUTH_SOCK`). Never the host's env.
  */
 
 import { randomBytes, randomUUID } from "node:crypto";
@@ -41,7 +42,7 @@ import { AGENT_LAUNCH_ENV_VAR } from "../../../agent-host/support/leftover-proce
 import type { Clock, SandboxHandle, SandboxSpawnRequest, WorkflowLogger } from "../../../workflows/contracts.ts";
 import type { DetailedSandboxRunner, SandboxExitDetail } from "../../../workflows/sandbox/sandbox.ts";
 import type { BoxConnection, BoxHub, BoxProcess, BoxRegistry, BoxToolingProvisioner } from "../../contracts.ts";
-import { boxGitEnv, boxToolingEnv, toolingFor } from "./env.ts";
+import { boxToolingEnv, toolingFor } from "./env.ts";
 import { waitSpawned } from "./run.ts";
 
 /** SIGTERM → SIGKILL grace, as the host runner's. */
@@ -572,7 +573,6 @@ async function boxSandboxEnv(request: SandboxSpawnRequest, connection: BoxConnec
   const contribution = toolingFor(deps.tooling, boxId);
   const env: Record<string, string> = {
     TERM: "dumb",
-    ...boxGitEnv(connection.sys),
     ...(await boxToolingEnv(connection, contribution))
   };
   for (const [name, value] of Object.entries(request.env)) {

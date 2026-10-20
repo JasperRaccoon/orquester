@@ -144,7 +144,8 @@ test("a box project's terminal runs a detached login shell in the box; input, ou
     assert.deepEqual(spawned.detach, { procId: summary.id });
     assert.deepEqual(spawned.pty, { cols: 100, rows: 30, term: "xterm-256color" });
     assert.equal(spawned.env?.TERM, "xterm-256color");
-    assert.equal(spawned.env?.GIT_CONFIG_VALUE_1, "!'/opt/orq/orq-agent' git-credential");
+    assert.equal(spawned.env?.GIT_CONFIG_COUNT, undefined, "no git credential helper: a box never gets a token");
+    assert.equal(spawned.env?.GIT_SSH_COMMAND, undefined);
     assert.equal(spawned.env?.NODE_OPTIONS, undefined, "the host preload never reaches a box");
 
     const control = r.connection.proc(summary.id)!;
