@@ -33,6 +33,8 @@ import { createProjectOps } from "./projects.ts";
 import { createPromptRenderer } from "./prompt-renderer.ts";
 import { createSandboxRunner } from "./sandbox/sandbox.ts";
 import { createWorkflowSweepers, type WorkflowSweepers } from "./sweepers.ts";
+// boxes: box projects' blocks run in their box.
+import { createBoxAwareSandboxRunner, type BoxSandboxDeps } from "../boxes/remote/exec/sandbox.ts";
 
 export interface WorkflowRuntimeDeps {
   /** Definitions (storage's WorkflowService). */
@@ -66,6 +68,8 @@ export interface WorkflowRuntimeDeps {
   fsRoot: string | (() => string);
   /** `<appdir>/tmp` — the sandbox attempts' TMPDIR. */
   appdirTmp?: string;
+  // boxes: shell/code blocks of box projects run in their box (Ephemeral AI VMs spec §8.8). Absent = host only.
+  boxSandbox?: BoxSandboxDeps;
   /** The daemon's PushService (`notifyWorkflowRun`); null disables pushes. */
   push: WorkflowPushSender | null;
   logger: WorkflowLogger;
@@ -104,7 +108,11 @@ export function createWorkflowRuntime(deps: WorkflowRuntimeDeps): WorkflowRuntim
   };
   const projects = createProjectOps({ api: () => api, git: deps.git, workspacesDir: deps.workspacesDir, fsRoot: deps.fsRoot });
   const prompts = createPromptRenderer({ git: deps.git, savedPrompts: deps.savedPrompts, now: () => clock.now() });
-  const sandbox = createSandboxRunner({ clock, logger: deps.logger, ...(deps.appdirTmp !== undefined ? { appdirTmp: deps.appdirTmp } : {}) });
+  const hostSandbox = createSandboxRunner({ clock, logger: deps.logger, ...(deps.appdirTmp !== undefined ? { appdirTmp: deps.appdirTmp } : {}) });
+  // boxes: the box-aware runner routes box projects' attempts into their box.
+  const sandbox = deps.boxSandbox
+    ? createBoxAwareSandboxRunner(hostSandbox, { clock, logger: deps.logger, ...deps.boxSandbox })
+    : hostSandbox;
   const notifier = createWorkflowNotifier({ push: deps.push, clock, logger: deps.logger });
   const mintId = randomUUID;
   const agent = createAgentExecutor({

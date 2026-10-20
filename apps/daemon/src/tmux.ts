@@ -20,12 +20,14 @@ function assertServiceName(name: string): void {
 }
 
 /** Derive the tmux session name from a session id. */
-function tmuxName(id: string): string {
+// boxes: exported so box terminals name their in-box tmux sessions the same way.
+export function tmuxName(id: string): string {
   return `${TMUX_SESSION_PREFIX}${id}`;
 }
 
 /** Build the `capture-pane` argv. Pure (testable without tmux). `name` is the full orq-<id>. */
-function captureArgs(
+// boxes: exported so box terminals capture their in-box panes with the same argv.
+export function captureArgs(
   name: string,
   opts: { escapes?: boolean; lines?: number | "all" } = {}
 ): string[] {
