@@ -142,7 +142,7 @@ export class BoxTranscriptSyncService implements BoxTranscriptSync {
     }
     const files: FileToMirror[] = [];
     for (const pair of await this.dirPairs(connection, request, signal)) {
-      const tree = await walkBox(connection, [pair.box], (path) => this.inSession(request, pair.box, path), signal);
+      const tree = await walkBox(connection, [pair.box], (path, isDir) => this.inSession(request, pair.box, path, isDir), signal);
       for (const file of tree.files.values()) {
         const rel = file.path.slice(pair.box.length + 1);
         const host = `${pair.host}/${rel}`;
@@ -171,16 +171,17 @@ export class BoxTranscriptSyncService implements BoxTranscriptSync {
     for (const pair of pairs) {
       const rels = hostFiles.get(pair.host) ?? [];
       const targets = rels.map((rel) => ({ rel, box: `${pair.box}/${rel}`, host: `${pair.host}/${rel}` }));
-      const present: { index: number; size: number }[] = [];
+      // Files already in the box with the same size: compare hashes before sending them again.
+      const present: number[] = [];
       for (const [index, target] of targets.entries()) {
         const info = await boxStat(connection, target.box, signal);
         const local = await stat(target.host).catch(() => null);
-        if (info?.kind === "file" && local && info.size === local.size) present.push({ index, size: info.size });
+        if (info?.kind === "file" && local && info.size === local.size) present.push(index);
       }
       const same = new Set<number>();
       if (present.length > 0) {
-        const hashes = await this.hasher(connection, present.map(({ index }) => ({ path: targets[index]!.box })), signal);
-        for (const [position, { index }] of present.entries()) {
+        const hashes = await this.hasher(connection, present.map((index) => ({ path: targets[index]!.box })), signal);
+        for (const [position, index] of present.entries()) {
           if (hashes[position] === (await sha256File(targets[index]!.host))) same.add(index);
         }
       }
@@ -210,14 +211,6 @@ export class BoxTranscriptSyncService implements BoxTranscriptSync {
     return real !== null && real !== mapped ? [mapped, real] : [mapped];
   }
 
-  /**
-   * Host-shaped path of a box dir whose LAST segment is `name`, under host dir `parent` (whose box
-   * form is `hostToBoxPath(parent)`). Box helpers map it back with `hostToBoxPath`.
-   */
-  private boxChild(parent: string, name: string): string {
-    return `${parent}/${name}`;
-  }
-
   private async dirPairs(connection: BoxConnection, request: TranscriptRequest, signal: AbortSignal, options: { forPush?: boolean } = {}): Promise<DirPair[]> {
     const root = posix.normalize(request.configRoot).replace(/\/+$/, "");
     const spellings = await this.boxCwds(connection, request.cwd, signal);
@@ -235,7 +228,7 @@ export class BoxTranscriptSyncService implements BoxTranscriptSync {
         for (const name of boxNames) {
           // The box folder maps to the host's own folder for this cwd (same name when the spelling is the host's).
           const host = name === hostName || hostNames.includes(name) ? `${projects}/${name}` : `${projects}/${hostNames[0] ?? hostName}`;
-          pairs.push({ host, box: this.boxChild(projects, name) });
+          pairs.push({ host, box: `${projects}/${name}` });
         }
       }
       return pairs;
@@ -246,7 +239,7 @@ export class BoxTranscriptSyncService implements BoxTranscriptSync {
     // grok
     const sessions = `${root}/sessions`;
     const hostDir = `${sessions}/${encodeURIComponent(request.cwd)}`;
-    return spellings.map((spelling) => ({ host: hostDir, box: this.boxChild(sessions, encodeURIComponent(spelling)) }));
+    return spellings.map((spelling) => ({ host: hostDir, box: `${sessions}/${encodeURIComponent(spelling)}` }));
   }
 
   private async prefixMatches(dir: string, name: string): Promise<string[]> {
@@ -262,7 +255,7 @@ export class BoxTranscriptSyncService implements BoxTranscriptSync {
   }
 
   /** Whether a path below a session dir belongs to the request's session. */
-  private inSession(request: TranscriptRequest, base: string, path: string): boolean {
+  private inSession(request: TranscriptRequest, base: string, path: string, isDir: boolean): boolean {
     if (path === base) return true;
     const rel = path.slice(base.length + 1);
     if (rel.length === 0 || path.slice(0, base.length + 1) !== `${base}/`) return false;
@@ -273,9 +266,9 @@ export class BoxTranscriptSyncService implements BoxTranscriptSync {
       case "claude":
         return first === `${id}.jsonl` || first === id;
       case "codex": {
-        // YYYY/MM/DD/rollout-<time>-<id>.jsonl: dirs are entered, files must name the thread.
+        // YYYY/MM/DD/rollout-<time>-<id>.jsonl: the date dirs are entered, files must name the thread.
         const name = posix.basename(rel);
-        return !name.endsWith(".jsonl") ? !name.includes(".") : name.startsWith("rollout-") && name.endsWith(`-${id}.jsonl`);
+        return isDir ? /^\d+$/.test(name) : name.startsWith("rollout-") && name.endsWith(`-${id}.jsonl`);
       }
       case "grok":
         return first === id;
@@ -293,11 +286,12 @@ export class BoxTranscriptSyncService implements BoxTranscriptSync {
       for (const entry of entries) {
         const childRel = rel === "" ? entry.name : `${rel}/${entry.name}`;
         const child = `${path}/${entry.name}`;
-        if (!this.inSession(request, dir, child)) continue;
         if (isDeniedTranscriptPath(child) || entry.name.includes(SYNC_TEMP_MARKER)) continue;
+        // Names first: a big sessions tree costs a stat only for what may belong to the session.
+        if (!this.inSession(request, dir, child, true) && !this.inSession(request, dir, child, false)) continue;
         const info = await stat(child).catch(() => null);
-        if (info?.isDirectory()) await walk(child, childRel, depth + 1);
-        else if (info?.isFile()) out.push(childRel);
+        if (info?.isDirectory() && this.inSession(request, dir, child, true)) await walk(child, childRel, depth + 1);
+        else if (info?.isFile() && this.inSession(request, dir, child, false)) out.push(childRel);
       }
     };
     await walk(dir, "", 0);

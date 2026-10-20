@@ -398,6 +398,39 @@ test("Windows boxes get every file under C:\\orq at the host path's segments", a
   await sync.close();
 });
 
+test("box-only credential files are invisible to sync: never sent, deleted, listed or reported", async () => {
+  const f = await fixture();
+  const sync = f.make();
+  await sync.ensureSynced("b1", f.scope, signal());
+  const boxHome = f.box1.local(f.home);
+  // What the agent host writes in a box: access-token-only credentials (and a denied name inside a synced dir).
+  await put(join(boxHome, ".credentials.json"), '{"claudeAiOauth":{"accessToken":"box-access-token"}}');
+  await put(join(boxHome, "skills", "review", "token.json"), "box-token");
+  sync.watch("b1", f.scope);
+  await sync.idle();
+  const watchCall = f.box1.calls.find((call) => call.method === "fs.watch" && (call.params as { path: string }).path === f.home)!;
+  f.box1.emitEvent("fs.change", {
+    watchId: (watchCall.params as { watchId: string }).watchId,
+    changes: [{ path: join(f.home, ".credentials.json"), type: "update" }]
+  });
+  // The host removes the skill around the denied file; the dir it sits in stays for it.
+  await rm(join(f.system, "skills", "review"), { recursive: true });
+  await sync.hostChanged("b1");
+  await sync.ensureSynced("b1", f.scope, signal());
+  sync.turnStarted("b1", "t1");
+  await sync.turnEnded("b1", "t1");
+  await sync.idle();
+
+  assert.equal(await readFile(join(boxHome, ".credentials.json"), "utf8"), '{"claudeAiOauth":{"accessToken":"box-access-token"}}');
+  assert.equal(await readFile(join(boxHome, "skills", "review", "token.json"), "utf8"), "box-token");
+  assert.equal(await exists(join(boxHome, "skills", "review", "SKILL.md")), false);
+  assert.equal(await readFile(join(f.home, ".credentials.json"), "utf8"), "CREDENTIALS-CONTENT");
+  assert.equal(f.published.length, 0, "no change set mentions them");
+  const touched = [...f.box1.writes, ...f.box1.calls.map((call) => (call.params as { path?: string } | null)?.path ?? "")];
+  assert.ok(!touched.some((path) => path.endsWith(".credentials.json") || path.endsWith("token.json")), "never read, written, statted or removed");
+  await sync.close();
+});
+
 test("ensureSynced refuses a box that is not connected", async () => {
   const f = await fixture();
   const sync = f.make();

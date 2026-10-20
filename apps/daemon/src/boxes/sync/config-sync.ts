@@ -621,7 +621,7 @@ export class BoxConfigSyncService implements BoxConfigSync {
         continue;
       }
       try {
-        const watcher = watchFs(want.dir, { recursive: want.recursive, persistent: false });
+        const watcher = watchFs(want.dir, { recursive: want.recursive });
         const entry: HostWatcherEntry = { watcher, matchers: want.matchers };
         watcher.on("change", (_event, filename) => {
           const name = filename === null ? null : filename.toString();
@@ -648,7 +648,6 @@ export class BoxConfigSyncService implements BoxConfigSync {
         this.options.logger?.warn?.(`box sync (${runtime.boxId}): host pass failed: ${error instanceof Error ? error.message : String(error)}`);
       });
     }, this.hostDebounceMs);
-    runtime.hostTimer.unref?.();
   }
 
   /** Queue a host-only pass over the watched roots (pushes host changes, recreates watchers). */
@@ -667,7 +666,9 @@ export class BoxConfigSyncService implements BoxConfigSync {
     if (!watch || !Array.isArray(event.changes)) return;
     for (const change of event.changes) {
       const hostPath = typeof change?.path === "string" ? boxToHostPath(connection.paths, change.path) : null;
-      if (hostPath === null || relOf(watch.root.root, hostPath) === null) continue;
+      const rel = hostPath === null ? null : relOf(watch.root.root, hostPath);
+      // Denied and excluded paths (the box's own access-token files) are invisible: not even checked.
+      if (hostPath === null || rel === null || !isSyncedRel(watch.root.rule, rel)) continue;
       const paths = runtime.boxEventPaths.get(watch.root.key) ?? new Set<string>();
       paths.add(hostPath);
       runtime.boxEventPaths.set(watch.root.key, paths);
@@ -693,7 +694,6 @@ export class BoxConfigSyncService implements BoxConfigSync {
         if (newTopDir) await this.refreshWatches(runtime);
       });
     }, this.boxEventDebounceMs);
-    runtime.boxEventTimer.unref?.();
   }
 
   private scheduleFlush(runtime: Runtime): void {
@@ -705,7 +705,6 @@ export class BoxConfigSyncService implements BoxConfigSync {
       if (!connection?.connected || runtime.running.size > 0) return;
       this.background(runtime, "idle flush", () => this.flush(runtime, connection, null));
     }, this.idleFlushMs);
-    runtime.flushTimer.unref?.();
   }
 
   // -------------------------------------------------------------------------
