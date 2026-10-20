@@ -170,7 +170,8 @@ export class BoxSettings implements BoxConnectivity {
   }
 
   providersResponse(): BoxProvidersResponse {
-    return { providers: [...this.deps.providers.values()].map((adapter) => this.providerInfo(adapter)) };
+    // An adapter that rents no kind (Thunder: it cannot bootstrap without SSH) is not offered.
+    return { providers: [...this.deps.providers.values()].filter((adapter) => adapter.kinds.length > 0).map((adapter) => this.providerInfo(adapter)) };
   }
 
   providerInfo(adapter: BoxProviderAdapter): BoxProviderInfo {

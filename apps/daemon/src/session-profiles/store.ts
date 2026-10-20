@@ -1189,7 +1189,9 @@ export class SessionProfileStore {
             ...(env.keys.length > 0 ? { envKeys: env.keys } : {}),
             ...(mcp.url !== undefined ? { url: mcp.url } : {}),
             ...(headers.keys.length > 0 ? { headerKeys: headers.keys } : {}),
-            ...(mcp.advanced !== undefined ? { advanced: mcp.advanced } : {})
+            ...(mcp.advanced !== undefined ? { advanced: mcp.advanced } : {}),
+            // boxes: "Run in box" (absent in the draft: the stored switch stays).
+            ...(mcp.runInBox !== undefined ? { runInBox: mcp.runInBox } : {})
           }
         };
       }
@@ -1365,6 +1367,7 @@ function validateMcpDraft(draft: McpServerDraft): McpServerDraft {
   } else {
     throw errors.invalidItem("transport must be stdio, http or sse.");
   }
+  if (draft.runInBox !== undefined && typeof draft.runInBox !== "boolean") throw errors.invalidItem("runInBox must be true or false.");
   return draft;
 }
 

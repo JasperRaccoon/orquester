@@ -84,6 +84,11 @@ export interface BoxHubServer extends BoxHub {
   /** Box auth for the agent-binary route: `Bearer <bootstrap|credential>` or `GitHubOIDC <jwt>` + `X-Orq-Box-Id`. */
   authorizeDownload(headers: Record<string, string | string[] | undefined>): Promise<{ boxId: string } | null>;
   readonly builds: BoxAgentBuilds | null;
+  /**
+   * Drop every live link (the plugin was turned off). The boxes keep running and keep redialling;
+   * `enabled` decides whether they are let back in (else their hello gets `BOXES_DISABLED`).
+   */
+  disconnectAll(reason: string): void;
   close(): Promise<void>;
 }
 
@@ -655,6 +660,14 @@ export function createBoxHub(deps: BoxHubDeps): BoxHubServer {
     onConnectionChange(listener) {
       changes.on("change", listener);
       return () => changes.off("change", listener);
+    },
+
+    disconnectAll(reason) {
+      for (const [boxId, link] of [...links]) {
+        // A plain close: the box redials and its next hello gets the BOXES_DISABLED reject.
+        link.socket.close(CLOSE_POLICY, reason.slice(0, 120));
+        dropLink(boxId, link);
+      }
     },
 
     async close() {

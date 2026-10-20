@@ -25,8 +25,11 @@ export interface FakeGithubOptions {
   scopes?: string | null;
   org?: string;
   role?: "admin" | "member" | null;
-  membersCanCreatePrivateRepos?: boolean;
-  installations?: Array<{ app_slug: string; repository_selection: string }> | "forbidden";
+  /** `pending` = invited, not accepted yet. */
+  membershipState?: "active" | "pending";
+  /** Omitted from GET /orgs/:org when undefined (GitHub does not say). */
+  membersCanCreatePrivateRepos?: boolean | undefined;
+  installations?: Array<{ app_slug: string; repository_selection: string; suspended_at?: string | null }> | "forbidden";
 }
 
 interface FakeRepo {
@@ -58,6 +61,7 @@ export class FakeGithub {
       scopes: "repo, workflow, admin:org",
       org: "Org",
       role: "admin",
+      membershipState: "active",
       membersCanCreatePrivateRepos: false,
       installations: [{ app_slug: "blacksmith-sh", repository_selection: "all" }],
       ...options
@@ -129,7 +133,7 @@ export class FakeGithub {
     }
     if (method === "GET" && (match = /^\/user\/memberships\/orgs\/([^/]+)$/.exec(path))) {
       if (match[1] !== options.org || options.role === null) return this.json(404, { message: "Not Found" });
-      return this.json(200, { state: "active", role: options.role });
+      return this.json(200, { state: options.membershipState, role: options.role });
     }
     if (method === "GET" && (match = /^\/orgs\/([^/]+)$/.exec(path))) {
       return this.json(200, { login: match[1], members_can_create_private_repositories: options.membersCanCreatePrivateRepos });

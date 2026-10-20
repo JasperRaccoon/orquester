@@ -175,10 +175,13 @@ test("a project box: host paths, config sync, clone at a ref with the workspace 
   const gitconfig = await readFile(join(boxHome, ".gitconfig"), "utf8");
   assert.match(gitconfig, /name = Octo Cat/);
   assert.match(gitconfig, /email = octo@example.com/);
-  assert.match(gitconfig, /helper = !'[^']+' git-credential/);
-  assert.match(gitconfig, /sshCommand = ssh -o UserKnownHostsFile=/);
+  // SSH only: no credential helper, the account's HTTPS URLs rewritten, the git host's keys pinned.
+  assert.doesNotMatch(gitconfig, /git-credential/);
+  assert.match(gitconfig, /helper = \n/);
+  assert.match(gitconfig, /\[url "git@github.com:"\]\n\tinsteadOf = https:\/\/github.com\//);
+  assert.match(gitconfig, /sshCommand = ssh -o UserKnownHostsFile=.* -o StrictHostKeyChecking=yes/);
   assert.ok(!gitconfig.includes("ghp_"), "no token in the box");
-  assert.equal(await readFile(join(boxHome, ".ssh", "orquester_known_hosts"), "utf8"), "");
+  assert.match(await readFile(join(boxHome, ".ssh", "orquester_known_hosts"), "utf8"), /^github\.com ssh-ed25519 /m);
   // The host paths a box mirrors were created.
   assert.ok((await stat(join(base, "daemon", "agent-accounts"))).isDirectory());
   assert.ok((await stat(join(base, "daemon", "agent", "threads"))).isDirectory());
@@ -341,4 +344,24 @@ test("with the plugin off, new boxes are refused and existing ones keep running"
   );
   assert.equal(service.registry.get(box.id)!.state, "ready");
   assert.equal(adapter.instances.size, 1);
+});
+
+test("without orq-agent builds (no Go on the host) nothing is created and the refusal says why", async (t) => {
+  const base = await tempDir(t, "orq-box-life-");
+  const adapter = new FakeAdapter();
+  let builds: { version: string } | null = null;
+  const { service, hub } = testBoxService({ baseDir: base, adapters: [adapter], overrides: { agentBuilds: { current: async () => builds } } });
+  t.after(() => service.stop());
+  await service.start();
+  await connectProvider(service, adapter);
+  await assert.rejects(
+    service.startTemporaryBox({ threadId: "t", kind: "linux", lifetimeMinutes: 30, purposeNote: "x" }),
+    (error: unknown) => error instanceof BoxError && error.code === "BOXES_UNAVAILABLE" && /orq-agent builds are unavailable/.test(error.message)
+  );
+  assert.equal(service.registry.list().length, 0);
+  assert.equal(adapter.instances.size, 0);
+  builds = { version: "1" };
+  hub.autoConnect = (boxId) => localBoxConnection({ boxId });
+  const box = await service.createTemporaryBox({ threadId: "t", kind: "linux", lifetimeMinutes: 30, purposeNote: "x" });
+  assert.equal(box.state, "ready");
 });

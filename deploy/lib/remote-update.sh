@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runs ON the VPS (delivered by ./deploy.sh via scp — never `bash -s`).
-# Routine update cycle: fetch/reset -> pnpm install -> SPA build -> native-module
-# guard -> chown -> restart -> health. Inputs via env:
+# Routine update cycle: fetch/reset -> pnpm install -> SPA build -> Go + orq-agent
+# build (best-effort) -> native-module guard -> chown -> restart -> health. Inputs via env:
 #   SUDO       "" or "sudo" — prefix for privileged commands (git/pnpm/node/chown/systemctl)
 #   BRANCH     branch to deploy (default main)
 #   RESET_REF  ref to reset to (default origin/$BRANCH; rollback passes a sha)
@@ -36,6 +36,26 @@ echo "[remote-update] HEAD: ${old_head:0:7} -> ${new_head:0:7}"
 # </dev/null: pnpm must never read stdin. Build runs bare: set -e catches failures.
 $SUDO env CI=1 ELECTRON_SKIP_BINARY_DOWNLOAD=1 pnpm install --frozen-lockfile </dev/null
 $SUDO env ELECTRON_SKIP_BINARY_DOWNLOAD=1 pnpm --filter @orquester/web build </dev/null
+# orq-agent (apps/box-agent, Go): install the pinned toolchain and prebuild
+# apps/box-agent/dist. Best-effort — a failure warns and the deploy continues: the
+# daemon still starts and builds on demand into the appdir, or reports orq-agent
+# builds unavailable. A stale dist is removed so boxes never get an outdated agent.
+# Refs without the box agent (old rollbacks) skip this.
+box_agent="skipped"
+if [ -f apps/box-agent/package.json ]; then
+  if ! $SUDO bash deploy/install-go.sh </dev/null; then
+    box_agent="FAILED: Go toolchain install (deploy/install-go.sh)"
+  elif ! $SUDO env GO=/usr/local/go/bin/go GOTOOLCHAIN=local pnpm --filter @orquester/box-agent build </dev/null; then
+    box_agent="FAILED: pnpm --filter @orquester/box-agent build"
+  else
+    box_agent="ok"
+  fi
+  if [ "$box_agent" != "ok" ]; then
+    $SUDO rm -rf apps/box-agent/dist
+    echo "[remote-update] WARNING: orq-agent not prebuilt — $box_agent (see output above)." >&2
+    echo "[remote-update]          Continuing: the daemon builds it on demand, or boxes report builds unavailable." >&2
+  fi
+fi
 # The daemon loads better-sqlite3 and node-pty under /usr/bin/node (the unit's
 # ExecStart interpreter): prove they load there, rebuilding any that don't,
 # BEFORE the restart, so a deploy never restarts into a daemon that cannot start.
@@ -58,4 +78,5 @@ curl -fsS --retry 120 --retry-delay 1 --retry-max-time 150 --retry-connrefused h
 printf '%s\n' "$new_head" | $SUDO tee "$state_file" >/dev/null
 echo "[remote-update] service=$(systemctl is-active orquester)"
 echo "[remote-update] bundle=$(curl -s http://127.0.0.1:47831/ | grep -o 'index-[^.]*\.js' | head -n1)"
+echo "[remote-update] box-agent=$box_agent"
 echo "[remote-update] OK"

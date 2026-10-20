@@ -417,7 +417,9 @@ function mcpView(record: Extract<SessionProfileItemRecord, { kind: "mcp" }>): Mc
     ...(mcp.envKeys && mcp.envKeys.length > 0 ? { env: mcp.envKeys.map((key) => ({ key, set: true as const })) } : {}),
     ...(mcp.url !== undefined ? { url: mcp.url } : {}),
     ...(mcp.headerKeys && mcp.headerKeys.length > 0 ? { headers: mcp.headerKeys.map((key) => ({ key, set: true as const })) } : {}),
-    ...(mcp.advanced !== undefined ? { advanced: { ...mcp.advanced } } : {})
+    ...(mcp.advanced !== undefined ? { advanced: { ...mcp.advanced } } : {}),
+    // boxes: "Run in box".
+    ...(mcp.runInBox === true ? { runInBox: true } : {})
   };
 }
 

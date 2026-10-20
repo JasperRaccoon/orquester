@@ -1,13 +1,15 @@
 /**
  * The provider registry: every `BoxProviderAdapter` by id (spec §11). The adapters live in
  * `vm-providers.ts` (`VM_PROVIDER_ADAPTERS`), `gpu-providers.ts` (`GPU_PROVIDER_ADAPTERS`) and
- * `blacksmith.ts` (`BLACKSMITH_ADAPTER`); the daemon builds its registry with
- * `createProviderRegistry([...VM_PROVIDER_ADAPTERS, ...GPU_PROVIDER_ADAPTERS, BLACKSMITH_ADAPTER])`.
+ * `blacksmith.ts` (`BLACKSMITH_ADAPTER`); {@link BOX_PROVIDERS} is the daemon's registry of all of them.
  */
 
 import { BOX_PROVIDER_IDS, type BoxProviderId } from "@orquester/api";
 
 import type { BoxProviderAdapter, BoxProviderRegistry } from "../contracts.ts";
+import { BLACKSMITH_ADAPTER } from "./blacksmith.ts";
+import { GPU_PROVIDER_ADAPTERS } from "./gpu-providers.ts";
+import { VM_PROVIDER_ADAPTERS } from "./vm-providers.ts";
 
 /**
  * A registry over `adapters`, in `BOX_PROVIDER_IDS` order (the order the plugin page lists them).
@@ -31,3 +33,6 @@ export function createProviderRegistry(adapters: readonly BoxProviderAdapter[]):
   }
   return ordered;
 }
+
+/** Every provider this build rents boxes from (adapters with `kinds: []` stay registered but are not offered). */
+export const BOX_PROVIDERS: BoxProviderRegistry = createProviderRegistry([...VM_PROVIDER_ADAPTERS, ...GPU_PROVIDER_ADAPTERS, BLACKSMITH_ADAPTER]);

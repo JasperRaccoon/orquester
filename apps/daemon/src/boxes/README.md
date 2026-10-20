@@ -23,6 +23,7 @@ Contracts: `packages/api/src/boxes.ts` (HTTP/UI), `packages/api/src/box-protocol
 | `agent-host/boxes/` | Agent CLIs in boxes: remote spawn, path mapping, auth wiring per CLI, MCP bridge. |
 | `mcp/tools/boxes.ts` | Temporary-box MCP tools and their approval card. |
 | `boxes/temporary/` | The box tools' daemon side: the `TemporaryBoxes` seam the service implements (`connect`ed in the daemon wiring), ownership per chat, exec and background jobs, streamed transfers, port forwards, the temporary-box routes, chat-close cleanup. |
+| `boxes/wiring.ts` | Every module above put together over the daemon's services for `startDaemon` (build order, the plugin switch gating the hub and the box tools, routes per transport, shutdown), the Template command runner, and the "Run in box" route's wiring. |
 
 Rules every module follows:
 

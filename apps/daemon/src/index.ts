@@ -305,6 +305,8 @@ import { request as httpRequest, type IncomingMessage } from "node:http";
 import bcrypt from "bcryptjs";
 // boxes: temporary boxes for agent chats (Ephemeral AI VMs spec §13).
 import { registerTemporaryBoxRoutes, TemporaryBoxTools } from "./boxes/temporary/index.ts";
+// boxes: every box module wired over the daemon's services.
+import { createDaemonBoxes, type DaemonBoxes } from "./boxes/wiring.ts";
 
 const daemonId = randomUUID();
 
@@ -658,20 +660,64 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     logger: console
   });
 
-  const ptySessions = createSessionManager(registry, tmux, resolved.sessionsIndexFile, {
-    resolveExtraEnv: async (entry, ctx) => {
-      if (entry.kind !== "agent") return null;
-      try {
-        return await resolveAgentLaunchEnv(entry, ctx);
-      } catch (error) {
-        throw new SessionError(error instanceof Error ? error.message : String(error));
-      }
-    },
-    daemonSockPath: paths.socketPath,
-    onAgentLaunch: (entry, launchEnv) => agentHooks.ensureForEntry(entry.id, launchEnv),
-    // Chat tabs share `sessions.json`; the PTY manager stays its only writer.
-    indexContributor: agentChat.indexContributor()
+  // boxes: begin
+  // Git hosting accounts and the built-in plugins are built here (started below, where they were)
+  // because the box modules need both before the session manager exists.
+  const accounts = new AccountsService(resolved.accountsFile, resolved.keysDir);
+  // Built-in plugins (Settings → Plugins; plugins spec §4–5): plugins.json, the TypeScript engine install and
+  // its hourly update check, and the preload new sessions load through NODE_OPTIONS. Started before
+  // any transport serves or any chat or workflow run starts, so new sessions already see the
+  // preload; its update checks run in the background.
+  const plugins = new PluginsService({
+    baseDir: paths.baseDir,
+    // A getter: PUT /api/config/daemon moves it, then calls `workspacesChanged`.
+    workspacesDir: () => resolved.workspacesDir,
+    writeJson: writeJsonFile,
+    env,
+    logger: console
   });
+  publishPluginEvents(plugins, broadcaster);
+  // Ephemeral AI VMs (spec 2026-10-19): the hub, the box service, sync, tooling and the box
+  // terminals the session manager wraps (`boxes/wiring.ts` says what is wired when).
+  const boxes: DaemonBoxes = createDaemonBoxes({
+    baseDir: paths.baseDir,
+    keysDir: resolved.keysDir,
+    home: resolved.vars.userhome,
+    env,
+    accounts,
+    agentAccounts,
+    plugins,
+    broadcaster,
+    catalog: registry,
+    workspacesDir: () => resolved.workspacesDir,
+    accountsFile: resolved.accountsFile,
+    workspacesMetaFile: resolved.workspacesMetaFile,
+    writeJson: writeJsonFile,
+    sessionPath,
+    logger: console
+  });
+  // boxes: end
+
+  // boxes: a box project's terminals run in its box; the host manager stays the only writer of
+  // `sessions.json` (box terminals and chat tabs contribute their records to it).
+  const ptySessions = boxes.wrapSessions(
+    (indexContributor) =>
+      createSessionManager(registry, tmux, resolved.sessionsIndexFile, {
+        resolveExtraEnv: async (entry, ctx) => {
+          if (entry.kind !== "agent") return null;
+          try {
+            return await resolveAgentLaunchEnv(entry, ctx);
+          } catch (error) {
+            throw new SessionError(error instanceof Error ? error.message : String(error));
+          }
+        },
+        daemonSockPath: paths.socketPath,
+        onAgentLaunch: (entry, launchEnv) => agentHooks.ensureForEntry(entry.id, launchEnv),
+        // Chat tabs share `sessions.json`; the PTY manager stays its only writer.
+        indexContributor
+      }),
+    agentChat.indexContributor()
+  );
   agentChat.setPersist(() => ptySessions.persistIndexNow());
 
   // One session list over both backends, so every existing surface (tab strip,
@@ -704,8 +750,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     sessionsLoaded: () => sessionsReattached
   });
   await lineage.load();
-  const accounts = new AccountsService(resolved.accountsFile, resolved.keysDir);
-  const git = new GitService();
+  // boxes: git in a box project runs in its box (`accounts` is built above, with the box modules).
+  const git = new GitService({ route: boxes.gitRoute });
   const todos = new TodoListManager(resolved.todosIndexFile, console);
   await todos.load();
   const recentProjects = new RecentProjectsService(
@@ -737,20 +783,10 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     logger: console
   });
   await repoIdentities.load();
-  // Built-in plugins (Settings → Plugins; plugins spec §4–5): plugins.json, the TypeScript engine install and
-  // its hourly update check, and the preload new sessions load through NODE_OPTIONS. Started before
-  // any transport serves or any chat or workflow run starts, so new sessions already see the
-  // preload; its update checks run in the background.
-  const plugins = new PluginsService({
-    baseDir: paths.baseDir,
-    // A getter: PUT /api/config/daemon moves it, then calls `workspacesChanged`.
-    workspacesDir: () => resolved.workspacesDir,
-    writeJson: writeJsonFile,
-    env,
-    logger: console
-  });
-  publishPluginEvents(plugins, broadcaster);
+  // Built-in plugins: built above (with the box modules), started here.
   await plugins.start();
+  // boxes: the box records load (a reattached box terminal finds its box) and the plugin switch is followed.
+  await boxes.start().catch((error) => console.error("Box service start failed", error instanceof Error ? error.message : error));
   // Secret files (the "Secret files" plugin, spec 2026-10-19): one vault per repo per workspace,
   // synced to every clone while the plugin is on. A store it cannot load leaves it read-only (503).
   const secretVaults = new SecretVaultStore({ dir: secretFilesDir(paths.baseDir), logger: console });
@@ -1271,7 +1307,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     fsRoot: () => resolved.fsRoot,
     appdirTmp: workflowTmp,
     push,
-    logger: consoleWorkflowLogger
+    logger: consoleWorkflowLogger,
+    // boxes: a box project's shell and code blocks run in its box.
+    boxSandbox: boxes.workflowSandbox
   });
   workflowValidationCatalog = workflowDaemon.validationCatalog;
   publishWorkflowEvents({
@@ -1364,7 +1402,11 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     workflows, workflowSecrets, workflowRuns, workflowState, workflowEngine: null, internalApi: null,
     lineage,
     workflowProjects: workflowDaemon.runtime.projects,
-    workflowCatalogReady: () => workflowDaemon.validationCatalog.ready()
+    workflowCatalogReady: () => workflowDaemon.validationCatalog.ready(),
+    // boxes: the box service, which paths are in box projects, and the rest of the box wiring.
+    boxes: boxes.service,
+    boxRegistry: boxes.registry,
+    boxWiring: boxes
   };
   // umcp:t3 begin
   // Orquester approval cards (memory only; a journal of open ids resolves a crash's leftovers as
@@ -1404,6 +1446,12 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     if (!rolledBack) temporaryBoxTools.chatClosed(id);
   });
   services.temporaryBoxTools = temporaryBoxTools;
+  // The rest of the box wiring over the session list, browser tabs and chats: the token broker,
+  // git auth, the MCP bridge, dev-server forwards, agent chats in boxes, the Template command, and
+  // the box tools (connected while the plugin is on).
+  await boxes
+    .attach({ sessions, browsers, agentChat, agentProfile, temporaryBoxTools })
+    .catch((error) => console.error("Box wiring failed", error instanceof Error ? error.message : error));
   // boxes: end
   // umcp:t6 begin
   // The chat transport (unified MCP design 2026-10-15 §9.4, §12.1): per-thread manifests for the
@@ -1636,6 +1684,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // umcp:t3 end
     // boxes: host-side port forwards close; detached jobs keep running in their boxes.
     await temporaryBoxTools.shutdown().catch((error) => console.error("Temporary box tools stop failed", error));
+    // boxes: timers, setup runs, watchers and box links stop (boxes and their processes keep running).
+    await boxes.stop().catch((error) => console.error("Box wiring stop failed", error));
     // umcp:t6 begin
     broadcaster.remove(agentProfileSink);
     sessionToolsRefresher.stop();
@@ -1796,9 +1846,11 @@ interface Services {
   lineage?: LineageService;
   /** Restart the HTTP transport (set in main once the lifecycle exists). */
   reloadHttp?: () => Promise<void>;
-  // boxes: which paths live in a box project (boxes/service). Absent while the plugin is off:
-  // every path is a host path. Read per request.
+  // boxes: which paths live in a box project (boxes/service). Absent: every path is a host path
+  // (route tests). Read per request.
   boxRegistry?: BoxRegistry;
+  // boxes: the rest of the box wiring (hub, sync, tooling, forwards, broker routes). Optional: route tests build a partial `services`.
+  boxWiring?: DaemonBoxes;
 }
 
 export function createServer(
@@ -2046,6 +2098,8 @@ export function createServer(
     await mkdir(resolved.workspacesDir, { recursive: true }).catch(() => undefined);
     // The TypeScript engine preload has the workspaces root baked in: rewrite it for the new one.
     void services.plugins.workspacesChanged();
+    // boxes: boxes get tooling preloads that bake in the new root.
+    services.boxWiring?.workspacesChanged();
     void services.reloadHttp?.();
 
     return sanitizeDaemonConfig(config);
@@ -2126,6 +2180,8 @@ export function createServer(
     const root = await realpath(resolved.workspacesDir).catch(() => resolve(resolved.workspacesDir));
     if (parentDir === root) {
       void services.plugins?.workspacesChanged();
+      // boxes: boxes get tooling preloads that bake in the new root.
+      services.boxWiring?.workspacesChanged();
     }
   };
 
@@ -2176,6 +2232,8 @@ export function createServer(
       });
     }
     void services.plugins?.workspacesChanged();
+    // boxes: boxes get tooling preloads that bake in the new root.
+    services.boxWiring?.workspacesChanged();
 
     return {
       name,
@@ -2581,6 +2639,8 @@ export function createServer(
       await services.accounts.unbindWorkspace(target).catch(() => undefined);
       await rm(safe, { recursive: true, force: true });
       void services.plugins?.workspacesChanged();
+      // boxes: boxes get tooling preloads that bake in the new root.
+      services.boxWiring?.workspacesChanged();
       // Only now that the tree is gone: cascade-delete the workspace's own to-do
       // lists AND every list under a project inside it (`workspace` = name
       // refKey; `target` = raw-join path), and the saved prompts of every
@@ -4163,7 +4223,10 @@ export function createServer(
     "/api/browsers/suggestions",
     async (request): Promise<BrowserSuggestionsResponse> => {
       const projectPath = request.query.projectPath;
-      return { urls: projectPath ? services.urlWatcher.suggestions(projectPath) : [] };
+      if (!projectPath) return { urls: [] };
+      const sniffed = services.urlWatcher.suggestions(projectPath);
+      // boxes: a box project's dev servers are offered at their host-side forwards.
+      return { urls: services.boxWiring ? await services.boxWiring.browserSuggestions(projectPath, sniffed) : sniffed };
     }
   );
 
@@ -4685,6 +4748,10 @@ export function createServer(
   // routes stay in encapsulated child contexts only so they are declared after
   // the plugin has loaded (avvio loads plugins in registration order).
   void app.register(websocketPlugin);
+  // boxes: config-change, stats and "Run in box" routes on both transports; the box connect
+  // WebSocket and orq-agent downloads (box-authenticated) on the remote one, after the WebSocket
+  // plugin; the agent host's token and sync routes on the unix socket only.
+  services.boxWiring?.registerRoutes(app, options.mode);
   void app.register(async (instance) => {
     instance.get("/ws", { websocket: true }, (socket, request) => {
       if (options.authRequired) {

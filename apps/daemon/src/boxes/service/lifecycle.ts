@@ -46,7 +46,8 @@ import type {
 import { cloneArgs, isFullSha, isMissingRemoteRef, mayBeAbbreviatedSha } from "../../workflows/git-remote/index.ts";
 import { runBoxCommand, type BoxCommandResult, type BoxCommandSpec, type BoxSetupLog } from "./box-exec.ts";
 import { BoxError, errorLine, isAbortError } from "./errors.ts";
-import { boxGitConfigCommands, boxKnownHostsPath, cloneUrlHost } from "./git-setup.ts";
+import { boxCloneUrl, boxGitConfig, boxGitSshTarget, type BoxGitEndpoint } from "../remote/git-auth.ts";
+import { boxGitConfigCommands, boxKnownHostsPath } from "./git-setup.ts";
 import type { BoxStore } from "./store.ts";
 import { initialStoredSetup, SETUP_STEP_LABELS } from "./summary.ts";
 import { bubblewrapScript, planToolchain, TOOLCHAIN_PROBE_FILES, TOOLCHAIN_READ_FILES } from "./toolchain.ts";
@@ -64,6 +65,8 @@ export interface ManagedAgentHome {
 export interface BoxGitAccess {
   /** The `user.name`/`user.email` of a connected git hosting account, or null when it is gone. */
   identity(accountId: string): Promise<{ name: string; email: string } | null>;
+  /** Where the account's git traffic goes (its provider and hosts; no token), or null when it is gone. */
+  endpoint(accountId: string): Promise<BoxGitEndpoint | null>;
   /** known_hosts lines the box should trust for `host` (the daemon's pinned keys and its own entries for the host). */
   knownHosts(host: string, port: number | null): Promise<string>;
 }
@@ -114,6 +117,11 @@ export interface BoxLifecycleDeps {
   logger: Pick<Console, "warn" | "error" | "log">;
   /** A provider call failed: the reconciler takes a look at that provider soon. */
   onProviderError(provider: string): void;
+  /**
+   * The `orq-agent` builds boxes download (`BoxAgentBuilds.current`): null means there are none
+   * (no Go toolchain to build them), and nothing billable is created. Absent: not checked.
+   */
+  agentBuilds?: { current(): Promise<{ version: string } | null> };
 }
 
 export interface CreateBoxSpec {
@@ -135,7 +143,7 @@ export interface CreateBoxSpec {
 }
 
 /** Providers whose boxes are containers: `orq-agent` runs in the foreground, tailscaled in userspace mode. */
-export const CONTAINER_PROVIDERS: ReadonlySet<string> = new Set(["vastai", "runpod", "jarvislabs", "fly"]);
+export const CONTAINER_PROVIDERS: ReadonlySet<string> = new Set(["vastai", "runpod", "jarvislabs", "fly", "morph"]);
 
 /** How long `orq-agent` may take to connect after create, per kind (images, GPU drivers, Windows first boot). */
 export const CONNECT_DEADLINE_MS: Readonly<Record<BoxKind, number>> = {
@@ -251,6 +259,14 @@ export class BoxLifecycle {
    */
   async create(spec: CreateBoxSpec): Promise<StoredBox> {
     const route = this.deps.connectivity.route();
+    // A box that cannot download orq-agent never connects: refuse before anything is billed.
+    if (this.deps.agentBuilds && !(await this.deps.agentBuilds.current().catch(() => null))) {
+      throw new BoxError(
+        503,
+        "BOXES_UNAVAILABLE",
+        "orq-agent builds are unavailable on this daemon: install Go 1.24 or later on the host (or deploy prebuilt builds) and restart the daemon."
+      );
+    }
     let id = newBoxId();
     while (this.deps.store.get(id)) id = newBoxId();
     const now = new Date(this.deps.clock.now());
@@ -561,26 +577,36 @@ export class BoxLifecycle {
     const { sys } = connection;
     const url = typeof project.remoteUrl === "string" ? project.remoteUrl : null;
 
-    // The host keys the box trusts for the remote, then git's credential helper, SSH and identity.
+    // Git in the box is SSH only (spec §7): the account's HTTPS URLs rewritten to SSH, the host keys
+    // the box may trust for its SSH host, no credential helper, and the workspace identity.
     const knownHostsPath = boxKnownHostsPath(sys.os, sys.home);
-    const remote = url && !/^https?:\/\//i.test(url) ? cloneUrlHost(url) : null;
-    const knownHosts = remote ? await this.deps.git.knownHosts(remote.host, remote.port) : "";
-    await connection.writeFile(knownHostsPath, knownHosts, { mode: 0o644, mkdirs: true });
     const accountId = typeof project.gitAccountId === "string" ? project.gitAccountId : null;
+    const endpoint = accountId ? await this.deps.git.endpoint(accountId) : null;
+    const target = endpoint ? boxGitSshTarget(endpoint) : null;
+    const gitConfig = endpoint && target ? boxGitConfig(endpoint, await this.deps.git.knownHosts(target.host, target.port)) : null;
+    const knownHosts = gitConfig?.knownHosts ?? "";
+    await connection.writeFile(knownHostsPath, knownHosts, { mode: 0o644, mkdirs: true });
     const identity = accountId ? await this.deps.git.identity(accountId) : null;
-    const commands = boxGitConfigCommands({ os: sys.os, agentPath: sys.agentPath, knownHostsPath, identity });
-    for (const [index, args] of commands.entries()) {
+    const commands = boxGitConfigCommands({
+      os: sys.os,
+      knownHostsPath,
+      strictHostKeys: knownHosts.trim().length > 0,
+      entries: gitConfig?.entries ?? [],
+      identity
+    });
+    for (const { args, mayBeMissing } of commands) {
       const result = await this.git(connection, args, undefined, signal, log);
-      // `--unset-all` exits 5 when there was no helper to unset.
-      if (result.code !== 0 && !(index === 0 && result.code === 5)) {
+      // `--unset-all` exits 5 when there was nothing to unset.
+      if (result.code !== 0 && !(mayBeMissing && result.code === 5)) {
         throw new SetupStepError(`git ${args.slice(0, 3).join(" ")} failed (exit ${result.code ?? result.signal}): ${result.tail.trim().split("\n").pop() ?? ""}`);
       }
     }
     const identityNote = identity ? `git identity ${identity.name} <${identity.email}>` : "no git identity (the workspace has no git account)";
+    const authNote = gitConfig ? "" : accountId ? "; the account has no SSH endpoint, so git in the box has no authenticated access" : "";
 
     if (project.source === "empty" || project.source === "template" || !url) {
       const what = project.source === "template" ? "the template command runs in the first terminal" : "empty project, nothing to clone";
-      return { state: "done", message: `Git configured (${identityNote}); ${what}.` };
+      return { state: "done", message: `Git configured (${identityNote}${authNote}); ${what}.` };
     }
 
     const boxDir = hostToBoxPath(connection.paths, project.path);
@@ -592,12 +618,14 @@ export class BoxLifecycle {
     const parent = hostToBoxPath(connection.paths, dirname(project.path));
     const dest = basename(project.path);
     const ref = typeof project.ref === "string" && project.ref.length > 0 ? project.ref : undefined;
-    log(`git clone ${url}${ref ? ` (${ref})` : ""}`);
+    // The SSH form of the account's HTTPS URLs: the box has no token to clone over HTTPS with.
+    const cloneUrl = endpoint ? boxCloneUrl(endpoint, url) : url;
+    log(`git clone ${cloneUrl}${ref ? ` (${ref})` : ""}`);
     let commit = ref !== undefined && isFullSha(ref) ? ref : undefined;
-    let result = await this.git(connection, cloneArgs(url, dest, commit === undefined ? ref : undefined), parent, cloneSignal, log);
+    let result = await this.git(connection, cloneArgs(cloneUrl, dest, commit === undefined ? ref : undefined), parent, cloneSignal, log);
     if (result.code !== 0 && ref !== undefined && commit === undefined && mayBeAbbreviatedSha(ref) && isMissingRemoteRef(result.tail)) {
       commit = ref;
-      result = await this.git(connection, cloneArgs(url, dest), parent, cloneSignal, log);
+      result = await this.git(connection, cloneArgs(cloneUrl, dest), parent, cloneSignal, log);
     }
     if (result.code !== 0) {
       throw new SetupStepError(`git clone failed (exit ${result.code ?? result.signal}): ${result.tail.trim().split("\n").pop() ?? ""}`);
@@ -611,7 +639,7 @@ export class BoxLifecycle {
       }
       if (checkout.code !== 0) throw new SetupStepError(`Cloned, but could not check out ${commit}.`);
     }
-    return { state: "done", message: `Cloned${ref ? ` at ${ref}` : ""}; ${identityNote}.` };
+    return { state: "done", message: `Cloned${ref ? ` at ${ref}` : ""}; ${identityNote}${authNote}.` };
   }
 
   private async installToolchain(

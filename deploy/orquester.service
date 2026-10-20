@@ -25,6 +25,10 @@ Environment=NPM_CONFIG_PREFIX=/var/lib/orquester/.npm-global
 # .npm-global/bin still follows for the other npm-installed agents (codex, opencode, ...).
 Environment=PATH=/var/lib/orquester/.local/bin:/var/lib/orquester/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStartPre=/usr/bin/mkdir -p /var/lib/orquester/.npm-global/bin
+# orq-agent (apps/box-agent) is Go. Deploys prebuild apps/box-agent/dist; without it the
+# daemon builds into the appdir on demand with this toolchain (pinned and installed by
+# deploy/install-go.sh). If Go is missing the daemon still runs; boxes report builds unavailable.
+Environment=GO=/usr/local/go/bin/go
 # This monorepo is noEmit (TS is run via tsx, same as `pnpm dev:daemon`); there is
 # no standalone dist build, so run the daemon through tsx as a single node process.
 ExecStart=/usr/bin/node --import tsx /opt/orquester/apps/daemon/src/cli.ts --appdir /var/lib/orquester

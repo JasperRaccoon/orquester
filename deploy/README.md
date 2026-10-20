@@ -13,6 +13,7 @@ Use the repository-root `./deploy.sh` for provisioning and deployment commands.
   drop-in (`sudoers.d/orquester-pkg`), and user-space tools (`devtools-user.sh`: `uv`, `cargo-audit`).
   First-time provisioning runs it, so any **new** VPS gets session dev tooling + scoped sudo out of
   the box. Idempotent — re-run to catch up an **existing** VPS, then `systemctl daemon-reload && systemctl restart orquester`.
+- `install-go.sh` → installs the pinned Go toolchain that builds `orq-agent` (see below); run as root.
 - `devtools-user.sh` → user-space tool installer (no root); also runnable from a session to refresh
   `uv`/`cargo-audit` in the appdir.
 - `sudoers.d/orquester-pkg` → scoped passwordless sudo (`apt`/`apt-get`/`dpkg`) for the service user.
@@ -32,6 +33,27 @@ install and SPA build, `remote-update.sh` and `remote-provision.sh` run
 any that fail (a Node upgrade, or binaries rebuilt for Electron), and fails the deploy *before* the
 service (re)starts if they still do not load. Run it by hand from the repo root the same way:
 `node scripts/ensure-node-native.mjs`.
+
+### orq-agent (boxes) — Go toolchain
+
+`orq-agent` (`apps/box-agent`) is written in Go; building it needs Go ≥ the `go` line in
+`apps/box-agent/go.mod`. `install-go.sh` (run as root by provision and every deploy) installs a
+**pinned** Go — currently **1.27.3** — into `/usr/local/go`, verifying the tarball's sha256, plus a
+`/usr/local/go/bin/go` symlink at `/usr/local/bin/go` (an existing non-symlink there is left alone).
+It is a no-op when the pinned version is already installed. After `pnpm install`, provision and
+deploy run `pnpm --filter @orquester/box-agent build` with `GO=/usr/local/go/bin/go
+GOTOOLCHAIN=local`, which writes `apps/box-agent/dist/manifest.json`. `orquester.service` sets
+`GO=/usr/local/go/bin/go` so the daemon can build on demand into the appdir when there is no dist
+(existing units without that line still find Go through the `/usr/local/bin/go` symlink on PATH).
+
+A Go install or build failure only warns (`box-agent=FAILED…` at the end of the deploy output):
+`apps/box-agent/dist` is removed so no stale agent is served, the daemon still restarts, and boxes
+fall back to an on-demand build, or report orq-agent builds unavailable when Go is missing.
+`./deploy.sh verify` prints the prebuilt `box-agent` version and the `go` version.
+
+To bump Go: set `GO_VERSION`, `GO_SHA256_AMD64` and `GO_SHA256_ARM64` in `install-go.sh` from the
+`linux-amd64` / `linux-arm64` archive entries of `https://go.dev/dl/?mode=json`; the next deploy
+installs it.
 
 Archive previews want `p7zip-full` or `libarchive-tools` (`bsdtar`) on PATH; `provision-devtools.sh`
 installs `libarchive-tools`. Without either, archives degrade to a download card.

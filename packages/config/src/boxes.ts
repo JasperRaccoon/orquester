@@ -44,7 +44,9 @@ export const storedBoxProjectSchema = z
     repoKey: z.string().optional(),
     repoName: z.string().optional(),
     /** Template tab: the command typed into the box's first terminal. */
-    templateCommand: z.string().optional()
+    templateCommand: z.string().optional(),
+    /** When the daemon opened that terminal and typed the command (it is typed once). */
+    templateStartedAt: z.string().optional()
   })
   .passthrough();
 
