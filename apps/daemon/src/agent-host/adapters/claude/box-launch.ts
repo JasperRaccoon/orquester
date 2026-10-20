@@ -31,6 +31,8 @@
 
 import { readFile } from "node:fs/promises";
 
+import type { ClaudeNamesFs } from "../../../agent-isolation/claude-names.ts";
+import { BoxProjectFs } from "../../../boxes/remote/fs/project-fs.ts";
 import type { AdapterContext, StartSessionInput } from "../../adapter.ts";
 import { requireBoxes, type BoxLaunch } from "../../boxes/index.ts";
 import { claudeMcpSpec, type McpBridgePlan, type McpServerSpec } from "../../boxes/mcp-plan.ts";
@@ -196,7 +198,12 @@ export async function prepareClaudeBoxSession(input: {
   start: StartSessionInput & { box: NonNullable<StartSessionInput["box"]> };
   hostEnv: Record<string, string>;
   resumeSessionId: string | undefined;
-  profileLaunch: ClaudeProfileLaunch | null;
+  /**
+   * The thread's profile launch (`loadClaudeProfileLaunch`), or `null` for a Global thread —
+   * loaded once the launch is up, with the project's files read in the box (`projectFs`) and the
+   * project walk stopping at the box's home.
+   */
+  loadProfileLaunch: (project: { projectFs: ClaudeNamesFs; home: string }) => Promise<ClaudeProfileLaunch | null>;
 }): Promise<ClaudeBoxSession> {
   const { context, start, hostEnv } = input;
   const launch = await requireBoxes(context).launch({
@@ -236,20 +243,24 @@ export async function prepareClaudeBoxSession(input: {
     const cwd = launch.toBox(start.cwd);
     await launch.ensureDirs([context.attachmentsDir(start.threadId)]);
 
+    // The project's `.mcp.json` servers, settings and `.claude/` entries are the box's: the
+    // host's project directory is an empty stub.
+    const loadedProfile = await input.loadProfileLaunch({ projectFs: new BoxProjectFs(launch.connection), home: launch.sys.home });
+
     let mcpServers: Record<string, Doc> = {};
     let profileLaunch: ClaudeProfileLaunch | undefined;
-    if (input.profileLaunch !== null) {
+    if (loadedProfile !== null) {
       // A profile chat is strict: its `--mcp-config` is the whole set, rewritten in place.
-      const servers = input.profileLaunch.mcpServers;
+      const servers = loadedProfile.mcpServers;
       const specs = Object.entries(servers).flatMap(([name, def]) => {
         const spec = claudeMcpSpec(name, def);
         return spec === null ? [] : [spec];
       });
       const plan = await launch.bridgeMcpServers(specs);
       profileLaunch = {
-        ...input.profileLaunch,
+        ...loadedProfile,
         mcpServers: rewriteServers(servers, plan, env),
-        plugins: input.profileLaunch.plugins.map((plugin) => ({ ...plugin, path: launch.toBox(plugin.path) }))
+        plugins: loadedProfile.plugins.map((plugin) => ({ ...plugin, path: launch.toBox(plugin.path) }))
       };
     } else {
       // A Global chat loads the account's own config from the box's synced copy; the bridged

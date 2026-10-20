@@ -5,7 +5,7 @@
  *
  * | Adapter | Machine | Bootstrap delivery | Marker | Prices |
  * |---|---|---|---|---|
- * | vast.ai | container | `onstart` (≤ 4048 chars) + env | label | live (offer search) |
+ * | vast.ai | container | `onstart` = `stagedPosixScript` (≤ 4048 chars) + env | label | live (offer search) |
  * | RunPod | container | ENTRYPOINT (`containerCommand`) + env | name + env | live (catalog) |
  * | Hyperstack | VM | cloud-init `user_data` | name + label | live (pricebook), table fallback |
  * | Thunder Compute | container | none possible — no kinds (see `thunder.ts`) | name | live (public pricing) |

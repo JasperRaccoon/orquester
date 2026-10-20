@@ -560,6 +560,12 @@ export const boxRoutes = {
    * `darwin-arm64`, `win32-x64`. Not behind the daemon's user auth.
    */
   agentBinary: (platform: string): string => `/api/boxes/agent/${encodeURIComponent(platform)}`,
+  /**
+   * REMOTE, box-authenticated like `agentBinary`: `GET` → the second stage of a staged bootstrap
+   * (`text/x-shellscript`; generic, no secret in it) for `posix` (VMs) or `container`. Not behind
+   * the daemon's user auth.
+   */
+  bootstrapScript: (variant: string): string => `/api/boxes/bootstrap/${encodeURIComponent(variant)}`,
   /** REMOTE WebSocket, box-authenticated by its `hello` message (`box-protocol.ts`). */
   connect: "/api/boxes/connect",
   /**
@@ -577,6 +583,12 @@ export interface BoxInternalTokenRequest {
   agent: "claude" | "codex" | "grok";
   accountId: string;
   minValidSeconds?: number;
+  /**
+   * The access token the CLI was just refused with (Codex `account/chatgptAuthTokens/refresh`):
+   * when it is still the account's current token, the broker renews it (under its usual holder
+   * rules) instead of handing it out again.
+   */
+  rejectedAccessToken?: string;
 }
 
 /** One Global MCP server's "Run in box" switch (an agent's server, by name). */

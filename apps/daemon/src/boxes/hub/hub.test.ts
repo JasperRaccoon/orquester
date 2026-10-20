@@ -4,8 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, test } from "node:test";
 
-import type { BoxControlMessage } from "@orquester/api";
+import { boxRoutes, type BoxControlMessage } from "@orquester/api";
 
+import { bootstrapSecondStage } from "../bootstrap/bootstrap.ts";
 import type { VerifyGithubOidc } from "../contracts.ts";
 import { hashSecret } from "./auth.ts";
 import type { BoxAgentBuilds } from "./builds.ts";
@@ -190,6 +191,28 @@ describe("box hub authentication", () => {
     assert.equal((await get({ authorization: `GitHubOIDC ${jwt}`, "x-orq-box-id": "box-dl-000001" })).status, 401);
   });
 
+  test("bootstrap-script route: box auth only, one generic script per variant", async () => {
+    records.add("box-stage-0001");
+    const token = await hub.issueBootstrapToken("box-stage-0001", 60_000);
+    const get = (variant: string, headers: Record<string, string>) => fetch(`${url}/api/boxes/bootstrap/${variant}`, { headers });
+    assert.equal((await get("container", {})).status, 401);
+    assert.equal((await get("container", { authorization: "Bearer box-stage-0001.CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC" })).status, 401);
+    // Authenticated: an unknown variant is 404, not 401.
+    assert.equal((await get("windows", { authorization: `Bearer ${token}` })).status, 404);
+    for (const variant of ["posix", "container"]) {
+      const response = await get(variant, { authorization: `Bearer ${token}` });
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get("content-type"), "text/x-shellscript");
+      assert.equal(response.headers.get("cache-control"), "no-store");
+      const script = await response.text();
+      assert.equal(script, bootstrapSecondStage(variant));
+      assert.ok(!script.includes(token) && !script.includes("box-stage-0001"), "the second stage is generic");
+    }
+    // Fetching the script does not spend the token: the binary download that follows still works.
+    assert.equal(records.get("box-stage-0001")?.bootstrapTokenHash, hashSecret(token));
+    assert.equal((await fetch(`${url}/api/boxes/agent/linux-x64`, { headers: { authorization: `Bearer ${token}` } })).status, 404);
+  });
+
   test("revoke closes the link and refuses the box from then on", async () => {
     records.add("box-revoke-01");
     const token = await hub.issueBootstrapToken("box-revoke-01", 60_000);
@@ -226,7 +249,8 @@ describe("box hub authentication", () => {
     await box.closed;
   });
 
-  test("the user-auth exemption names exactly the two box routes", () => {
-    assert.deepEqual([...BOX_HUB_PUBLIC_ROUTES].sort(), ["/api/boxes/agent/:platform", "/api/boxes/connect"]);
+  test("the user-auth exemption names exactly the box routes", () => {
+    assert.deepEqual([...BOX_HUB_PUBLIC_ROUTES].sort(), ["/api/boxes/agent/:platform", "/api/boxes/bootstrap/:variant", "/api/boxes/connect"]);
+    assert.equal(boxRoutes.bootstrapScript("container"), "/api/boxes/bootstrap/container");
   });
 });

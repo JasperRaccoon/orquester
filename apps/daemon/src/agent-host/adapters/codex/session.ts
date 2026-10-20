@@ -417,6 +417,12 @@ export class CodexSession {
   private closedPromise: Promise<void> | null = null;
   private requestSeq = 0;
   /**
+   * boxes: the access token the box's app-server holds — the login's, then each refresh answer's.
+   * A refresh request means the provider refused it, so it goes to the broker as
+   * `rejectedAccessToken` (renewed rather than handed out again).
+   */
+  private boxAccessToken: string | null = null;
+  /**
    * Unique per PROVIDER SESSION (E2E round 2, R2-1).
    *
    * A request id must be unique for the lifetime of the THREAD, not of the
@@ -1616,16 +1622,21 @@ export class CodexSession {
     );
   }
 
-  /** A brokered token in Codex's `chatgptAuthTokens` shape. */
+  /**
+   * A brokered token in Codex's `chatgptAuthTokens` shape, remembered as the one the app-server
+   * now holds. `rejected`: the token the app-server was refused with (a refresh request).
+   */
   private async boxTokens(
     box: CodexBoxLaunch,
-    previousAccountId: string | null
+    previousAccountId: string | null,
+    rejected: string | null = null
   ): Promise<{ accessToken: string; chatgptAccountId: string; chatgptPlanType: string | null }> {
-    const grant = await box.launch.token();
+    const grant = await box.launch.token(undefined, undefined, rejected ?? undefined);
     const chatgptAccountId = grant.extra?.chatgptAccountId ?? previousAccountId ?? "";
     if (chatgptAccountId.length === 0) {
       throw new Error("Orquester's login for this Codex account names no ChatGPT workspace, so it cannot be used in a box.");
     }
+    this.boxAccessToken = grant.accessToken;
     return { accessToken: grant.accessToken, chatgptAccountId, chatgptPlanType: grant.extra?.chatgptPlanType ?? null };
   }
 
@@ -2337,13 +2348,14 @@ export class CodexSession {
       }
 
       // boxes (spec 2026-10-19 §7): the box's app-server was logged in with `chatgptAuthTokens`
-      // and its token stopped working — a fresh one from the broker. On the host it is still
-      // refused (`-32601`): a host app-server refreshes its own login.
+      // and its token stopped working — a fresh one from the broker, which renews the token the
+      // app-server holds rather than answering it again. On the host it is still refused
+      // (`-32601`): a host app-server refreshes its own login.
       case "account/chatgptAuthTokens/refresh": {
         const box = this.options.box;
         if (box === undefined) throw CodexRequestRefusal.methodNotFound(request.method);
         const params = request.params as CodexProtocol.v2.ChatgptAuthTokensRefreshParams;
-        const tokens = await this.boxTokens(box, params.previousAccountId ?? null);
+        const tokens = await this.boxTokens(box, params.previousAccountId ?? null, this.boxAccessToken);
         return tokens satisfies CodexProtocol.v2.ChatgptAuthTokensRefreshResponse;
       }
 

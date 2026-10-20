@@ -9,7 +9,9 @@
  *    session) in its project launched with that account, or a temporary box whose owning chat
  *    uses it. The System account is refused: its logins belong to CLIs outside Orquester.
  * 2. Read the account's credential file (after `assertOwnedAccountHome`). Enough life left
- *    (`minValidSeconds`, default 45 min) → return it.
+ *    (`minValidSeconds`, default 45 min) → return it — unless it is the request's
+ *    `rejectedAccessToken` (the provider already refused it: Codex's refresh request after a 401),
+ *    which is then renewed by steps 3 and 4 like an expiring one.
  * 3. Otherwise, when no HOST-LOCAL session holds the account, refresh through
  *    `AgentAccountsService.refreshNow` (its per-account dedupe and `invalid_grant` → `needsReauth`)
  *    and return the new token. Concurrent requests for one account share one refresh.
@@ -42,6 +44,8 @@ import {
 export const DEFAULT_MIN_VALID_SECONDS = 45 * 60;
 /** Upper bound for `minValidSeconds`: providers issue tokens for hours, not days. */
 export const MAX_MIN_VALID_SECONDS = 24 * 60 * 60;
+/** Upper bound for `rejectedAccessToken`: access tokens (JWTs included) are a few KB. */
+export const MAX_REJECTED_TOKEN_LENGTH = 32 * 1024;
 /**
  * A held Claude account is refreshed by the daemon only while its token has more than this left.
  * The Claude CLI refreshes only inside the last 5 minutes (2.1.285: `now + 300000 >= expiresAt`),
@@ -88,14 +92,19 @@ export interface AgentTokenRequest {
   agent: BoxAgentId;
   accountId: string;
   minValidSeconds?: number;
+  /** The token the CLI was refused with: while it is still the current one, it is renewed rather than handed out. */
+  rejectedAccessToken?: string;
 }
 
+/** A request after {@link parseTokenRequest}: `minValidSeconds` defaulted. */
+export type ParsedTokenRequest = Required<Omit<AgentTokenRequest, "rejectedAccessToken">> & Pick<AgentTokenRequest, "rejectedAccessToken">;
+
 /** Runtime check of a request from a box or the socket route (both untrusted shapes). */
-export function parseTokenRequest(raw: unknown): Required<AgentTokenRequest> {
+export function parseTokenRequest(raw: unknown): ParsedTokenRequest {
   const body = typeof raw === "object" && raw !== null ? (raw as Record<string, unknown>) : null;
   const invalid = (message: string) => new AgentTokenError(400, "TOKEN_INVALID_REQUEST", message);
   if (!body) throw invalid("The token request must be an object.");
-  const { boxId, agent, accountId, minValidSeconds } = body;
+  const { boxId, agent, accountId, minValidSeconds, rejectedAccessToken } = body;
   if (typeof boxId !== "string" || boxId.length === 0) throw invalid("boxId is required.");
   if (typeof agent !== "string" || !(BOX_AGENTS as readonly string[]).includes(agent)) {
     throw invalid("agent must be claude, codex or grok.");
@@ -107,7 +116,19 @@ export function parseTokenRequest(raw: unknown): Required<AgentTokenRequest> {
   ) {
     throw invalid(`minValidSeconds must be between 0 and ${MAX_MIN_VALID_SECONDS}.`);
   }
-  return { boxId, agent: agent as BoxAgentId, accountId, minValidSeconds: minValidSeconds ?? DEFAULT_MIN_VALID_SECONDS };
+  if (
+    rejectedAccessToken !== undefined &&
+    (typeof rejectedAccessToken !== "string" || rejectedAccessToken.length === 0 || rejectedAccessToken.length > MAX_REJECTED_TOKEN_LENGTH)
+  ) {
+    throw invalid("rejectedAccessToken must be a non-empty token.");
+  }
+  return {
+    boxId,
+    agent: agent as BoxAgentId,
+    accountId,
+    minValidSeconds: minValidSeconds ?? DEFAULT_MIN_VALID_SECONDS,
+    ...(rejectedAccessToken !== undefined ? { rejectedAccessToken } : {})
+  };
 }
 
 /** The slice of `AgentAccountsService` the broker uses. */
@@ -211,7 +232,7 @@ export function createAgentTokenBroker(deps: AgentTokenBrokerDeps): AgentTokenBr
     return false;
   }
 
-  function authorize(request: Required<AgentTokenRequest>): void {
+  function authorize(request: ParsedTokenRequest): void {
     if (request.accountId === SYSTEM_ACCOUNT_ID) {
       throw new AgentTokenError(403, "TOKEN_FORBIDDEN", "Box chats use managed accounts only; the System account's logins stay on this host.");
     }
@@ -273,7 +294,9 @@ export function createAgentTokenBroker(deps: AgentTokenBrokerDeps): AgentTokenBr
           change.arm();
           const grant = await readGrant(agent, path);
           const held = deps.hostLocalAccountIds().has(accountId);
-          if (grant !== null) {
+          // The token the CLI was refused with is never handed out again: it is renewed below,
+          // or awaited from a holder's CLI, like one that ran out.
+          if (grant !== null && grant.accessToken !== request.rejectedAccessToken) {
             // An unknown expiry cannot be judged: a holder's CLI owns it; otherwise refresh once.
             if (grant.expiresAt === null ? held : grant.expiresAt - now() >= minValidMs) return grant;
           }

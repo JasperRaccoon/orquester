@@ -72,14 +72,9 @@ test("a sniffed box dev server is suggested at its host forward, which really re
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const port = (server.address() as AddressInfo).port;
   const r = rig({ ports: [] });
-  // The local double does not reject a listen that fails (EADDRINUSE goes unhandled), as a real
-  // hub's forward does: make it reject for a taken port, as the code under test expects.
-  const localForward = r.connection.forwardToHost.bind(r.connection);
-  r.connection.forwardToHost = async (boxPort, forwardOptions) => {
-    if (forwardOptions?.hostPort === port) throw Object.assign(new Error(`listen EADDRINUSE 127.0.0.1:${port}`), { code: "EADDRINUSE" });
-    return localForward(boxPort, forwardOptions);
-  };
   try {
+    // The local double rejects a taken host port, as a real hub's forward does.
+    await assert.rejects(r.connection.forwardToHost(port, { hostPort: port }), { code: "EADDRINUSE" });
     // The "box" is this machine, so the same port number is taken on the host: any free one is used.
     const [url, ...rest] = await r.forwards.suggestions(PROJECT, [`http://localhost:${port}`]);
     assert.deepEqual(rest, []);

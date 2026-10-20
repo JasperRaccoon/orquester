@@ -9,7 +9,13 @@ import { test } from "node:test";
 
 import { AgentAccountError } from "../../agent-account-paths.ts";
 import type { AccountRefreshOutcome } from "../../agent-accounts.ts";
-import { AgentTokenError, createAgentTokenBroker, DEFAULT_MIN_VALID_SECONDS, HELD_REFRESH_FLOOR_MS } from "./broker.ts";
+import {
+  AgentTokenError,
+  createAgentTokenBroker,
+  DEFAULT_MIN_VALID_SECONDS,
+  HELD_REFRESH_FLOOR_MS,
+  MAX_REJECTED_TOKEN_LENGTH
+} from "./broker.ts";
 import { brokerWorld, claudeCreds, codexAuth, grokAuth, homeOf, MIN, NOW, settle, storedBox, type BrokerWorld } from "./testing.ts";
 
 const CLAUDE_ID = "11111111-1111-4111-8111-111111111111";
@@ -292,4 +298,97 @@ test("authorization: managed accounts the box's own launches use, live boxes onl
   w.sessions.push({ id: "chat-box", projectPath: "/ws/w/p", accountId: CLAUDE_ID });
   w.files.ownedHomeError = new AgentAccountError("Account home is a symlink: claude/x");
   await rejectsWith(ask({}), "TOKEN_UNAVAILABLE", 503);
+});
+
+test("a rejected access token that is still current is renewed, not handed out again", async () => {
+  const w = world();
+  // Days of life left, but the provider refused it (Codex's refresh request after a 401).
+  w.files.write(codexPath, codexAuth(Math.floor((NOW + 10 * 24 * 60 * MIN) / 1000), "refused"));
+  const broker = createAgentTokenBroker(w.deps);
+  const current = await broker.getToken({ boxId: "box-1", agent: "codex", accountId: CODEX_ID }, signal());
+  assert.equal(w.refreshCalls.length, 0, "a long-lived token is handed out as is");
+
+  const renewed = await broker.getToken(
+    { boxId: "box-1", agent: "codex", accountId: CODEX_ID, rejectedAccessToken: current.accessToken },
+    signal()
+  );
+  assert.notEqual(renewed.accessToken, current.accessToken);
+  assert.deepEqual(w.refreshCalls, [{ agent: "codex", id: CODEX_ID, allowHeld: false }]);
+
+  // A rejected token that is no longer current (another request renewed it meanwhile): the current one, no refresh.
+  const again = await broker.getToken(
+    { boxId: "box-1", agent: "codex", accountId: CODEX_ID, rejectedAccessToken: current.accessToken },
+    signal()
+  );
+  assert.equal(again.accessToken, renewed.accessToken);
+  assert.equal(w.refreshCalls.length, 1);
+});
+
+test("concurrent requests rejecting the same token share one refresh", async () => {
+  const w = world();
+  w.files.write(grokPath, grokAuth("grok-access-REFUSED", NOW + 3 * 60 * MIN));
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  const original = w.refreshImpl;
+  w.refreshImpl = async (agent, id) => {
+    await gate;
+    return original(agent, id);
+  };
+  const broker = createAgentTokenBroker(w.deps);
+  const requests = [1, 2, 3].map(() =>
+    broker.getToken({ boxId: "box-1", agent: "grok", accountId: GROK_ID, rejectedAccessToken: "grok-access-REFUSED" }, signal())
+  );
+  await settle(() => w.refreshCalls.length > 0);
+  release();
+  const grants = await Promise.all(requests);
+  assert.equal(w.refreshCalls.length, 1, "one refresh for three requests");
+  assert.deepEqual(new Set(grants.map((g) => g.accessToken)), new Set(["grok-access-NEW"]));
+});
+
+test("a rejected token of a host-held Codex account: the request waits for that CLI's rewrite", async () => {
+  const w = world();
+  w.hostLocal.add(CODEX_ID);
+  w.files.write(codexPath, codexAuth(Math.floor((NOW + 10 * 24 * 60 * MIN) / 1000), "refused"));
+  const broker = createAgentTokenBroker(w.deps);
+  const current = await broker.getToken({ boxId: "box-1", agent: "codex", accountId: CODEX_ID }, signal());
+  let settled = false;
+  const pending = broker
+    .getToken({ boxId: "box-1", agent: "codex", accountId: CODEX_ID, rejectedAccessToken: current.accessToken }, signal())
+    .finally(() => (settled = true));
+  await settle(() => w.files.watcherCount(codexPath) === 1);
+  for (let i = 0; i < 20; i++) await Promise.resolve();
+  assert.equal(settled, false, "the refused token is not handed out again");
+  assert.equal(w.refreshCalls.length, 0, "the host CLI stays the only refresher");
+
+  w.files.write(codexPath, codexAuth(Math.floor((NOW + 11 * 24 * 60 * MIN) / 1000), "cli"));
+  const grant = await pending;
+  assert.notEqual(grant.accessToken, current.accessToken);
+  assert.equal(w.refreshCalls.length, 0);
+});
+
+test("a rejected token of a host-held Claude account above the floor is refreshed directly", async () => {
+  const w = world();
+  w.hostLocal.add(CLAUDE_ID);
+  w.files.write(claudePath, claudeCreds("claude-access-REFUSED", NOW + 5 * 60 * MIN));
+  const broker = createAgentTokenBroker(w.deps);
+  const grant = await broker.getToken(
+    { boxId: "box-1", agent: "claude", accountId: CLAUDE_ID, rejectedAccessToken: "claude-access-REFUSED" },
+    signal()
+  );
+  assert.equal(grant.accessToken, "claude-access-NEW");
+  assert.deepEqual(w.refreshCalls, [{ agent: "claude", id: CLAUDE_ID, allowHeld: true }]);
+});
+
+test("rejectedAccessToken must be a non-empty string of bounded length", async () => {
+  const w = world();
+  w.files.write(claudePath, claudeCreds("claude-access-A", NOW + 5 * 60 * MIN));
+  const broker = createAgentTokenBroker(w.deps);
+  for (const rejectedAccessToken of ["", 42, "x".repeat(MAX_REJECTED_TOKEN_LENGTH + 1)]) {
+    await rejectsWith(
+      broker.getToken({ boxId: "box-1", agent: "claude", accountId: CLAUDE_ID, rejectedAccessToken } as never, signal()),
+      "TOKEN_INVALID_REQUEST",
+      400
+    );
+  }
+  assert.equal(w.refreshCalls.length, 0);
 });

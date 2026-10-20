@@ -362,10 +362,11 @@ export interface BoxHostToBoxMethods {
 export interface BoxBoxToHostMethods {
   /**
    * An agent CLI in the box needs its access token (spec §7). Never returns a refresh token.
-   * `agent` is the CLI; `accountId` the managed account the session was launched with.
+   * `agent` is the CLI; `accountId` the managed account the session was launched with;
+   * `rejectedAccessToken` the token the CLI was just refused with (renewed when still current).
    */
   "token.get": [
-    { agent: "claude" | "codex" | "grok"; accountId: string; minValidSeconds?: number },
+    { agent: "claude" | "codex" | "grok"; accountId: string; minValidSeconds?: number; rejectedAccessToken?: string },
     { accessToken: string; expiresAt: number | null; extra?: Record<string, string> }
   ];
   /**

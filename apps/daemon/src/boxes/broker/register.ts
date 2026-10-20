@@ -25,7 +25,13 @@ export function registerTokenBroker(hub: Pick<BoxHub, "handle">, broker: AgentTo
   hub.handle("token.get", (context, params, signal) => {
     const fields = typeof params === "object" && params !== null ? (params as unknown as Record<string, unknown>) : {};
     // Untrusted shapes go through `parseTokenRequest` inside `getToken`; the box id is the link's.
-    const request = { agent: fields.agent, accountId: fields.accountId, minValidSeconds: fields.minValidSeconds, boxId: context.boxId };
+    const request = {
+      agent: fields.agent,
+      accountId: fields.accountId,
+      minValidSeconds: fields.minValidSeconds,
+      rejectedAccessToken: fields.rejectedAccessToken,
+      boxId: context.boxId
+    };
     return broker.getToken(request as Parameters<AgentTokenBroker["getToken"]>[0], AbortSignal.any([signal, AbortSignal.timeout(TOKEN_REQUEST_MAX_WAIT_MS)]));
   });
 }

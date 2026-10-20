@@ -35,9 +35,10 @@ test("token.get: the box id is the authenticated link's, never a request field",
   });
   registerTokenBroker(hub as never, broker);
   const context: BoxRequestContext = { boxId: "box-linked", record: storedBox({ id: "box-linked" }) };
-  const params = { agent: "claude", accountId: "acc", boxId: "box-other" } as never;
+  const params = { agent: "claude", accountId: "acc", boxId: "box-other", rejectedAccessToken: "refused" } as never;
   assert.deepEqual(await handler!(context, params, new AbortController().signal), { accessToken: "a", expiresAt: null });
   assert.equal((seen[0].request as { boxId: string }).boxId, "box-linked");
+  assert.equal((seen[0].request as { rejectedAccessToken?: string }).rejectedAccessToken, "refused", "the refused token reaches the broker");
 
   // The link's own signal still ends the wait.
   const link = new AbortController();

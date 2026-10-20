@@ -62,7 +62,7 @@ test("Codex in a box: app-server spawned there, logged in with chatgptAuthTokens
     connector: () => connection,
     tokens: {
       getToken: async (request) => {
-        asked.push(`${request.agent}:${request.accountId}`);
+        asked.push(`${request.agent}:${request.accountId}:${request.rejectedAccessToken ?? "-"}`);
         return grants.shift() ?? { accessToken: "access-n", expiresAt: null, extra: { chatgptAccountId: "ws-1" } };
       }
     },
@@ -112,7 +112,8 @@ test("Codex in a box: app-server spawned there, logged in with chatgptAuthTokens
       .map((line) => JSON.parse(line) as Frame)
       .find((frame) => frame.id === 1000 && frame.method === undefined);
     assert.deepEqual(refreshAnswer?.result, { accessToken: "access-2", chatgptAccountId: "ws-1", chatgptPlanType: null });
-    assert.deepEqual(asked, ["codex:acct-1", "codex:acct-1"]);
+    // The refresh names the token the app-server was logged in with, so the broker renews it.
+    assert.deepEqual(asked, ["codex:acct-1:-", "codex:acct-1:access-1"]);
     // The user's stdio server is replaced, under its own name, by the bridge; its secret stays here.
     const start = received.find((frame) => frame.method === "thread/start");
     const config = (start?.params?.config ?? {}) as Record<string, { command: string; args: string[]; env: Record<string, string> }>;

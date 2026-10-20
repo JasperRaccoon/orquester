@@ -14,6 +14,11 @@
  *   (the source of truth; the box's are copies) or, for a project's own file,
  *   in the box. Each one that must run here becomes a same-named ACP stdio
  *   entry of the bridge, which REPLACES the config's server (session-tools.ts).
+ * - An Agent Profile chat: the prepared home's `config.toml` denies every plugin Grok discovers
+ *   but the profile's own — discovered by `grok inspect --json` IN the box
+ *   ({@link boxGrokPluginNames}), since the box's Grok loads the box's plugins. The file is
+ *   rendered on this machine (the home's source of truth) once the launch is up, then synced
+ *   into the box again (`BoxLaunch.syncProfile`).
  */
 
 import { readFile } from "node:fs/promises";
@@ -25,6 +30,7 @@ import type { AdapterContext, StartSessionInput } from "../../adapter.ts";
 import { requireBoxes, type BoxLaunch } from "../../boxes/index.ts";
 import { runInBox } from "../../boxes/box-tools.ts";
 import { claudeMcpSpec, tomlMcpSpec, type McpServerSpec } from "../../boxes/mcp-plan.ts";
+import { parsePluginNames, type GrokPluginNamesResult, type grokDiscoveredPluginNames } from "../../../agent-isolation/grok.ts";
 import type { McpServer } from "./acp/_generated/schema.ts";
 import type { GrokBoxMcpServers } from "./session-tools.ts";
 
@@ -64,6 +70,45 @@ export async function launchGrokInBox(
     signal: context.signal,
     onProgress: (message) => context.logger.info(`grok: ${message}`, { threadId: input.threadId })
   });
+}
+
+/** What `grok inspect --json` may print (the host's cap, `agent-isolation/grok.ts`). */
+const INSPECT_MAX_BYTES = 8 * 1024 * 1024;
+const INSPECT_TIMEOUT_MS = 30_000;
+
+/**
+ * `grokDiscoveredPluginNames` run in the box: the same contract (host paths and a host-built env
+ * in, `{ ok, names | error }` out, never throws), with `grokBin` the box's `grok`, the env and
+ * cwd mapped to the box.
+ */
+export function boxGrokPluginNames(launch: BoxLaunch): typeof grokDiscoveredPluginNames {
+  return async (options): Promise<GrokPluginNamesResult> => {
+    const { env, unset } = launch.env(options.env);
+    let result;
+    try {
+      result = await runInBox(launch.connection, {
+        command: options.grokBin,
+        args: options.args ?? ["inspect", "--json"],
+        env,
+        envUnset: unset,
+        cwd: launch.toBox(options.cwd),
+        timeoutMs: options.timeoutMs ?? INSPECT_TIMEOUT_MS,
+        maxOutputBytes: INSPECT_MAX_BYTES + 1,
+        label: "grok inspect in the box"
+      });
+    } catch (error) {
+      return { ok: false, error: `grok inspect in the box did not finish: ${error instanceof Error ? error.message : String(error)}` };
+    }
+    if (result.code !== 0) {
+      const tail = result.stderr.trim().split("\n").slice(-3).join("\n");
+      const how = result.code !== null ? `exited with code ${result.code}` : `was stopped by ${result.signal ?? "a signal"}`;
+      return { ok: false, error: `grok inspect --json in the box ${how}${tail ? `: ${tail}` : ""}` };
+    }
+    if (Buffer.byteLength(result.stdout) > INSPECT_MAX_BYTES) {
+      return { ok: false, error: `grok inspect --json printed more than ${INSPECT_MAX_BYTES} bytes` };
+    }
+    return parsePluginNames(result.stdout);
+  };
 }
 
 /** A config file's text: the host's copy when it has one (the source of truth), else the box's. */

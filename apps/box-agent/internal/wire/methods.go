@@ -243,6 +243,8 @@ type TokenGetParams struct {
 	Agent           string `json:"agent"`
 	AccountID       string `json:"accountId"`
 	MinValidSeconds *int64 `json:"minValidSeconds,omitempty"`
+	// RejectedAccessToken: the token the CLI was refused with; the host renews it while it is current.
+	RejectedAccessToken string `json:"rejectedAccessToken,omitempty"`
 }
 
 type TokenGetResult struct {

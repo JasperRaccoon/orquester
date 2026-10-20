@@ -6,6 +6,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { buildBootstrap } from "../bootstrap/bootstrap.ts";
 import { callOptions, fixture, routedFetch, sampleCreateRequest } from "./gpu-testing.ts";
 import { ProviderHttpError } from "./http.ts";
 import { VAST_DEFAULT_IMAGE, VAST_DISK_GB, VAST_ONSTART_MAX, vastCountry, vastSearchBody, vastaiAdapter } from "./vastai.ts";
@@ -79,7 +80,8 @@ test("vastai: create rents the cheapest matching offer once, with label, onstart
   assert.equal(rent.disk, VAST_DISK_GB);
   assert.equal(rent.image, VAST_DEFAULT_IMAGE);
   assert.equal(rent.cancel_unavail, true);
-  assert.deepEqual(rent.env, { ...request.bootstrap.env, ORQUESTER_BOX_ID: "box-0123abcd" });
+  // The bootstrap secrets stay out of the container's environment.
+  assert.deepEqual(rent.env, { ORQ_DAEMON_URL: request.bootstrap.env.ORQ_DAEMON_URL, ORQUESTER_BOX_ID: "box-0123abcd" });
   assert.deepEqual(result.ref, { instanceId: 31002002, offerId: 22001002, gpuName: "RTX 4090" });
   assert.equal(result.hourlyUsd, 0.299);
   assert.ok(!JSON.stringify(result).includes("instance_api_key"));
@@ -115,11 +117,43 @@ test("vastai: create moves to the next offer only when the offer is gone, and ne
   await assert.rejects(vastaiAdapter.create(creds, sampleCreateRequest({ size: "B200", region: "IS" }), callOptions(none.fetch)), /no rentable B200 offer in IS/);
 });
 
+test("vastai: onstart is the staged first stage of a real bootstrap, with Tailscale, and fits", async () => {
+  const { fetch, seen } = routedFetch([
+    { method: "POST", path: "/api/v0/bundles/", replies: [{ body: f("bundles.json") }] },
+    { method: "PUT", path: "/api/v0/asks/", replies: [{ body: f("rent-ok.json") }] }
+  ]);
+  const token = `box-0123abcd.${"A".repeat(43)}`;
+  const tailscaleKey = `tskey-auth-kTEST1CNTRL-${"x".repeat(40)}`;
+  const bootstrap = buildBootstrap({
+    boxId: "box-0123abcd",
+    daemonUrl: "https://orq-host.tail1234.ts.net:8443",
+    bootstrapToken: token,
+    tailscaleAuthKey: tailscaleKey,
+    container: true
+  });
+  assert.ok(bootstrap.posixScript.length > VAST_ONSTART_MAX, "the single-stage script is what does not fit");
+  await vastaiAdapter.create(creds, sampleCreateRequest({ size: "RTX 4090", region: "any", bootstrap }), callOptions(fetch));
+  const rent = seen[1]!.body as Record<string, unknown>;
+  assert.equal(rent.onstart, bootstrap.stagedPosixScript);
+  assert.ok((rent.onstart as string).length <= VAST_ONSTART_MAX);
+  assert.match(rent.onstart as string, /\/api\/boxes\/bootstrap\/container/);
+  assert.deepEqual(rent.env, {
+    ORQ_DAEMON_URL: "https://orq-host.tail1234.ts.net:8443",
+    ORQ_BOX_ID: "box-0123abcd",
+    ORQUESTER_BOX_ID: "box-0123abcd"
+  });
+  const rest = { ...rent };
+  delete rest.onstart;
+  assert.ok(!JSON.stringify(rest).includes(token) && !JSON.stringify(rest).includes(tailscaleKey), "secrets only in onstart");
+});
+
 test("vastai: create refuses an onstart script over 4048 characters before renting", async () => {
   const { fetch, seen } = routedFetch([]);
   const request = sampleCreateRequest({ size: "RTX 4090", region: "any" });
   const long = { ...request, bootstrap: { ...request.bootstrap, posixScript: "#".repeat(VAST_ONSTART_MAX + 1) } };
   await assert.rejects(vastaiAdapter.create(creds, long, callOptions(fetch)), /at most 4048/);
+  const longStaged = { ...request, bootstrap: { ...request.bootstrap, stagedPosixScript: "#".repeat(VAST_ONSTART_MAX + 1) } };
+  await assert.rejects(vastaiAdapter.create(creds, longStaged, callOptions(fetch)), /at most 4048/);
   assert.equal(seen.length, 0);
 });
 

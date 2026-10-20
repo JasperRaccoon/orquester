@@ -265,11 +265,10 @@ export async function createClaudeAdapterWith(
 
     // An Agent Profile thread launches from its prepared directory; one that cannot be read
     // fails the start here — never a Global launch (spec 2026-10-18 §2).
-    const profileLaunch = await loadClaudeProfileLaunch(input, {
-      configDir: claudeConfigDir(env),
-      claudeJson: claudeJsonPath(env),
-      home: env.HOME ?? nodeOs.homedir()
-    });
+    const profileWhere = { configDir: claudeConfigDir(env), claudeJson: claudeJsonPath(env), home: env.HOME ?? nodeOs.homedir() };
+    // boxes: a box project's files are in its box, so its profile launch is loaded once the box
+    // launch is up, reading the project through the box (`box-launch.ts`).
+    const hostProfileLaunch = input.box === undefined ? await loadClaudeProfileLaunch(input, profileWhere) : null;
 
     // boxes (spec 2026-10-19 §8.5): sync, the box's CLI, a brokered token, bridged MCP servers.
     const box =
@@ -279,9 +278,10 @@ export async function createClaudeAdapterWith(
             start: { ...input, box: input.box },
             hostEnv: env,
             resumeSessionId: cursor?.resume,
-            profileLaunch
+            loadProfileLaunch: (project) => loadClaudeProfileLaunch(input, { ...profileWhere, ...project })
           })
         : undefined;
+    const profileLaunch = box !== undefined ? (box.profileLaunch ?? null) : hostProfileLaunch;
 
     if (snapshot === undefined) {
       // A first session should not wait on a full probe, but it must not run

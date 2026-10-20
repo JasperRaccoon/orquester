@@ -11,6 +11,12 @@
  * 4. Starts it: `orq-agent install-service` where a service manager can own it
  *    (systemd as root; Windows), otherwise `exec orq-agent run` in the foreground.
  *
+ * The staged POSIX variant (`stagedPosixScript`, for size-capped startup scripts) splits
+ * this after step 2: the per-box first stage then downloads the generic second stage
+ * (steps 3–4, {@link bootstrapSecondStage}) from `<daemonUrl>/api/boxes/bootstrap/<variant>`
+ * with the same bearer token and runs it, handing it the URL, box id, token file path
+ * and proxy in its environment.
+ *
  * What `orq-agent` receives ({@link ORQ_AGENT_ENV}): the daemon URL, the box id,
  * the PATH of the token file (it deletes the file after its first connect and
  * prefers its stored box credential from then on), and `ORQ_PROXY` when it must
@@ -201,38 +207,60 @@ fi`;
 fi`;
 }
 
-function posixScript(options: PosixOptions): string {
-  const start = options.container
-    ? `say "starting orq-agent"
-exec "$B" run`
-    : `if [ "$OS" = linux ] && [ "$ROOT" = 1 ] && [ "$SYSTEMD" = 1 ]; then
-  say "installing the orq-agent service"
-  exec "$B" install-service
-fi
-say "starting orq-agent"
-exec "$B" run`;
-
-  return `#!/bin/sh
-# Orquester box bootstrap (Ephemeral AI VMs). Downloads orq-agent from the
-# Orquester daemon and starts it. Secrets stay in mode-0600 files; never in argv
-# or this script's output.
+/**
+ * The POSIX pieces every script below is assembled from. Order matters: each piece uses the
+ * shell variables the ones before it set (`D`, `TF`, `KF`, `PX`, `ROOT`, `OS`, `A`, `P`, `SYSTEMD`).
+ */
+const posix = {
+  /** Shebang, strict mode, `say`/`die`. With `vars`, assigns and exports the daemon URL and box id. */
+  header(comment: string, vars: { daemonUrl: string; boxId: string } | null): string {
+    const assign = vars
+      ? `${ORQ_AGENT_ENV.daemonUrl}=${shQuote(vars.daemonUrl)}
+${ORQ_AGENT_ENV.boxId}=${shQuote(vars.boxId)}
+export ${ORQ_AGENT_ENV.daemonUrl} ${ORQ_AGENT_ENV.boxId}
+`
+      : "";
+    return `#!/bin/sh
+${comment}
 set +x
 set -eu
 umask 077
-${ORQ_AGENT_ENV.daemonUrl}=${shQuote(options.daemonUrl)}
-${ORQ_AGENT_ENV.boxId}=${shQuote(options.boxId)}
-export ${ORQ_AGENT_ENV.daemonUrl} ${ORQ_AGENT_ENV.boxId}
-say() { printf 'orq-bootstrap: %s\\n' "$*" >&2; }
+${assign}say() { printf 'orq-bootstrap: %s\\n' "$*" >&2; }
 die() { say "error: $*"; exit 1; }
+`;
+  },
 
-if [ "$(id -u)" = 0 ]; then ROOT=1; D=${POSIX_ROOT_DATA_DIR}; else ROOT=0; D="$HOME/.orq-agent"; fi
+  /**
+   * The data dir `D`, the token file `TF`, the key file `KF` and the proxy `PX`. `fromEnv`: the
+   * second stage, which takes the token file, URL, box id and proxy from the first stage's env.
+   */
+  dataDir(options: { tailscale: boolean; fromEnv: boolean }): string {
+    const paths = options.fromEnv
+      ? `TF=\${${ORQ_AGENT_ENV.bootstrapTokenFile}:-}
+[ -n "\${${ORQ_AGENT_ENV.daemonUrl}:-}" ] && [ -n "\${${ORQ_AGENT_ENV.boxId}:-}" ] && [ -s "$TF" ] \\
+  || die "${ORQ_AGENT_ENV.daemonUrl}, ${ORQ_AGENT_ENV.boxId} and ${ORQ_AGENT_ENV.bootstrapTokenFile} must be set (by the first stage)"
+PX=\${${ORQ_AGENT_ENV.proxy}:-}`
+      : `TF="$D/bootstrap-token"
+${options.tailscale ? `KF="$D/ts-authkey"\n` : ""}PX=`;
+    return `if [ "$(id -u)" = 0 ]; then ROOT=1; D=${POSIX_ROOT_DATA_DIR}; else ROOT=0; D="$HOME/.orq-agent"; fi
 mkdir -p "$D/bin"
 chmod 700 "$D"
-TF="$D/bootstrap-token"
-${options.tailscale ? `KF="$D/ts-authkey"\n` : ""}PX=
-${posixSecretsPrologue(options.secrets, options.tailscale)}
+${paths}
+`;
+  },
 
-OS=$(uname -s)
+  /** VMs: `SYSTEMD`. */
+  systemd(container: boolean): string {
+    return container
+      ? ""
+      : `SYSTEMD=0
+if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then SYSTEMD=1; fi
+`;
+  },
+
+  /** `OS`, `A` and `orq-agent`'s platform `P` (musl detection); VMs: `SYSTEMD`. */
+  platform(container: boolean): string {
+    return `OS=$(uname -s)
 M=$(uname -m)
 case "$OS" in Linux) OS=linux ;; Darwin) OS=darwin ;; *) die "unsupported OS: $OS" ;; esac
 case "$M" in x86_64 | amd64) A=x64 ;; aarch64 | arm64) A=arm64 ;; *) die "unsupported CPU: $M" ;; esac
@@ -241,14 +269,22 @@ P="$OS-$A"
 if [ "$OS" = linux ]; then
   if ls /lib/ld-musl-* >/dev/null 2>&1 || ldd --version 2>&1 | grep -qi musl; then P="$P-musl"; fi
 fi
-${
-    options.container
-      ? ""
-      : `SYSTEMD=0
-if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then SYSTEMD=1; fi
-`
-  }
-# fetch URL OUT AUTH -> prints the HTTP status. AUTH=1: the daemon (bearer token, ORQ proxy, no redirects).
+${posix.systemd(container)}`;
+  },
+
+  /**
+   * Only what the tailnet join reads, for the first stage: containers (always Linux) need the CPU
+   * for the Tailscale download (`A`); VMs need `OS` and `SYSTEMD`.
+   */
+  tailnetPlatform(container: boolean): string {
+    return container
+      ? `case "$(uname -m)" in x86_64 | amd64) A=x64 ;; aarch64 | arm64) A=arm64 ;; *) die "unsupported CPU: $(uname -m)" ;; esac\n`
+      : `case "$(uname -s)" in Linux) OS=linux ;; Darwin) OS=darwin ;; *) die "unsupported OS: $(uname -s)" ;; esac\n${posix.systemd(false)}`;
+  },
+
+  /** curl, else GNU wget, else curl from apk (Alpine as root); `fetch URL OUT AUTH`. */
+  fetch(): string {
+    return `# fetch URL OUT AUTH -> prints the HTTP status. AUTH=1: the daemon (bearer token, ORQ proxy, no redirects).
 if command -v curl >/dev/null 2>&1; then
   FETCH=curl
 elif wget --help 2>&1 | grep -q -- '--config'; then
@@ -279,38 +315,152 @@ fetch() {
     rm -f "$rc"
   fi
 }
+`;
+  },
 
-${options.tailscale ? posixTailscale(options.container) : ""}
-
-B="$D/bin/orq-agent"
-say "downloading orq-agent ($P)"
+  /**
+   * Downloads `$ORQ_DAEMON_URL<path>` to `<out>.download` with the bearer token, retrying with a
+   * backoff until {@link DOWNLOAD_DEADLINE_SECONDS}. `spent` runs on 401/403 before giving up: it
+   * may `break` to keep what a restarted box already has (its token was spent on first connect).
+   */
+  download(options: { what: string; path: string; out: string; spent: string; missing: string }): string {
+    return `say "downloading ${options.what}"
 end=$(($(date +%s) + ${DOWNLOAD_DEADLINE_SECONDS}))
 n=0
 while :; do
-  code=$(fetch "$ORQ_DAEMON_URL/api/boxes/agent/$P" "$B.download" 1) || code=000
+  code=$(fetch "$${ORQ_AGENT_ENV.daemonUrl}${options.path}" "${options.out}.download" 1) || code=000
   case "$code" in
     200) break ;;
     401 | 403)
-      # A restarted box whose token was already spent keeps the orq-agent it has.
-      if [ -x "$B" ] && "$B" --version >/dev/null 2>&1; then say "token already used; keeping the installed orq-agent"; rm -f "$B.download"; break; fi
+      # A restarted box whose token was already spent keeps what it has.
+      ${options.spent}
       die "the daemon refused the bootstrap token (HTTP $code)" ;;
-    404) die "the daemon has no orq-agent build for $P" ;;
+    404) die "${options.missing}" ;;
   esac
-  [ "$(date +%s)" -lt "$end" ] || die "could not download orq-agent (last HTTP status $code)"
+  [ "$(date +%s)" -lt "$end" ] || die "could not download ${options.what} (last HTTP status $code)"
   n=$((n + 1)); w=$((n * 2)); [ "$w" -le 30 ] || w=30
   say "download failed (HTTP $code); retrying in $w s"
   sleep "$w"
 done
-if [ -f "$B.download" ]; then
+`;
+  },
+
+  /** Downloads `orq-agent` for `P` to `B` and checks that it runs. */
+  agent(): string {
+    const download = posix.download({
+      what: "orq-agent ($P)",
+      path: "/api/boxes/agent/$P",
+      out: "$B",
+      spent: `if [ -x "$B" ] && "$B" --version >/dev/null 2>&1; then say "token already used; keeping the installed orq-agent"; rm -f "$B.download"; break; fi`,
+      missing: "the daemon has no orq-agent build for $P"
+    });
+    return `B="$D/bin/orq-agent"
+${download}if [ -f "$B.download" ]; then
   chmod 755 "$B.download"
   "$B.download" --version >/dev/null 2>&1 || die "the downloaded orq-agent does not run here ($P)"
   mv -f "$B.download" "$B"
 fi
-
-${ORQ_AGENT_ENV.bootstrapTokenFile}=$TF
-export ${ORQ_AGENT_ENV.bootstrapTokenFile}
-${start}
 `;
+  },
+
+  /** Hands `orq-agent` the token file and starts it (as a systemd service on VMs where it can). */
+  start(container: boolean): string {
+    const service = container
+      ? ""
+      : `if [ "$OS" = linux ] && [ "$ROOT" = 1 ] && [ "$SYSTEMD" = 1 ]; then
+  say "installing the orq-agent service"
+  exec "$B" install-service
+fi
+`;
+    return `${ORQ_AGENT_ENV.bootstrapTokenFile}=$TF
+export ${ORQ_AGENT_ENV.bootstrapTokenFile}
+${service}say "starting orq-agent"
+exec "$B" run
+`;
+  }
+};
+
+/** The second stage's variants (`boxRoutes.bootstrapScript(variant)`): VMs, and containers (no service manager). */
+export const BOOTSTRAP_STAGE2_VARIANTS = ["posix", "container"] as const;
+export type BootstrapStage2Variant = (typeof BOOTSTRAP_STAGE2_VARIANTS)[number];
+
+function posixScript(options: PosixOptions): string {
+  return [
+    posix.header(
+      `# Orquester box bootstrap (Ephemeral AI VMs). Downloads orq-agent from the
+# Orquester daemon and starts it. Secrets stay in mode-0600 files; never in argv
+# or this script's output.`,
+      options
+    ),
+    posix.dataDir({ tailscale: options.tailscale, fromEnv: false }),
+    posixSecretsPrologue(options.secrets, options.tailscale),
+    "",
+    posix.platform(options.container),
+    posix.fetch(),
+    options.tailscale ? posixTailscale(options.container) : "",
+    "",
+    posix.agent(),
+    posix.start(options.container)
+  ].join("\n");
+}
+
+/**
+ * The second stage of a staged bootstrap ({@link stagedPosixScript}): everything after the
+ * tailnet join — download `orq-agent`, start it. Generic per variant (no box id, URL or secret
+ * in it): the first stage's environment supplies the daemon URL, the box id, the token file
+ * path and, behind tailscaled's userspace proxy, `ORQ_PROXY` ({@link ORQ_AGENT_ENV}).
+ * `null` for an unknown variant.
+ */
+export function bootstrapSecondStage(variant: string): string | null {
+  if (!(BOOTSTRAP_STAGE2_VARIANTS as readonly string[]).includes(variant)) return null;
+  const container = variant === "container";
+  return [
+    posix.header(
+      `# Orquester box bootstrap, second stage (Ephemeral AI VMs). Run by the first
+# stage, which wrote the bootstrap token file and joined the tailnet. Downloads
+# orq-agent from the Orquester daemon and starts it.`,
+      null
+    ),
+    posix.dataDir({ tailscale: false, fromEnv: true }),
+    posix.platform(container),
+    posix.fetch(),
+    posix.agent(),
+    posix.start(container)
+  ].join("\n");
+}
+
+/**
+ * The first stage of a staged bootstrap, for providers that cap the script's size (vast.ai's
+ * `onstart`): writes the secrets to 0600 files, joins the tailnet, then downloads the second
+ * stage for its variant (`boxRoutes.bootstrapScript`, authenticated with the same bootstrap
+ * token, which downloading does not spend) and runs it. A restarted box whose token is spent
+ * runs the copy it saved the first time. Compacted like the container command.
+ */
+function stagedPosixScript(options: PosixOptions): string {
+  const variant: BootstrapStage2Variant = options.container ? "container" : "posix";
+  return compactShell(
+    [
+      posix.header("# Orquester box bootstrap, first stage (Ephemeral AI VMs).", options),
+      posix.dataDir({ tailscale: options.tailscale, fromEnv: false }),
+      posixSecretsPrologue(options.secrets, options.tailscale),
+      // Only the tailnet join needs to know the machine.
+      options.tailscale ? posix.tailnetPlatform(options.container) : "",
+      posix.fetch(),
+      options.tailscale ? posixTailscale(options.container) : "",
+      `S="$D/bootstrap-stage2.sh"`,
+      posix.download({
+        what: "the bootstrap",
+        path: `/api/boxes/bootstrap/${variant}`,
+        out: "$S",
+        spent: `if [ -s "$S" ]; then say "token already used; running the saved bootstrap"; rm -f "$S.download"; break; fi`,
+        missing: "the daemon does not serve the bootstrap's second stage"
+      }),
+      `if [ -f "$S.download" ]; then mv -f "$S.download" "$S"; fi`,
+      `${ORQ_AGENT_ENV.bootstrapTokenFile}=$TF`,
+      `export ${ORQ_AGENT_ENV.bootstrapTokenFile}`,
+      `exec sh "$S"`
+    ].join("\n")
+  );
 }
 
 function powershellScript(input: BootstrapInput, daemonUrl: string): string {
@@ -463,11 +613,10 @@ export const buildBootstrap: BuildBootstrap = (input: BootstrapInput): BoxBootst
     [ORQ_AGENT_ENV.bootstrapToken]: input.bootstrapToken
   };
   if (input.tailscaleAuthKey !== null) env[ORQ_AGENT_ENV.tailscaleAuthKey] = input.tailscaleAuthKey;
+  const literal: SecretSource = { kind: "literal", token: input.bootstrapToken, tailscaleAuthKey: input.tailscaleAuthKey };
   return {
-    posixScript: posixScript({
-      ...base,
-      secrets: { kind: "literal", token: input.bootstrapToken, tailscaleAuthKey: input.tailscaleAuthKey }
-    }),
+    posixScript: posixScript({ ...base, secrets: literal }),
+    stagedPosixScript: stagedPosixScript({ ...base, secrets: literal }),
     powershellScript: powershellScript(input, daemonUrl),
     // The container's argv is visible to `ps` and in provider dashboards: the secrets come from `env`.
     containerCommand: ["/bin/sh", "-c", compactShell(posixScript({ ...base, container: true, secrets: { kind: "env" } }))],

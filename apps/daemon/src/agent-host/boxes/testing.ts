@@ -7,6 +7,8 @@
  *   own semantics, `box-protocol.ts`).
  * - {@link redirectedBoxConnection}: every box file write lands under a temp root, recorded, so
  *   a test of "copied into the box at its mapped path" never touches the real path.
+ * - {@link rootedReadsBoxConnection}: the box's file reads see a temp root — the box's own files,
+ *   apart from this machine's same paths (a box project's host directory is an empty stub).
  * - {@link recordingTokens} / {@link recordingSync}: the broker and the sync seams, recording.
  * - {@link writeReplayPeer}: a stdio peer that answers each request with the frames a recorded
  *   provider fixture shows after that request (`apps/daemon/test/fixtures/<provider>/`), so a box
@@ -20,7 +22,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough, type Readable } from "node:stream";
 
-import type { AgentTokenGrant, BoxConnection, BoxExecOptions, BoxProcess } from "../../boxes/contracts.ts";
+import type { AgentTokenGrant, BoxConnection, BoxExecOptions, BoxProcess, BoxRequestOptions } from "../../boxes/contracts.ts";
 import { localBoxConnection, type LocalBoxConnection, type LocalBoxConnectionOptions } from "../../boxes/testing.ts";
 import type { BoxTokenRequest } from "../host-protocol.ts";
 import type { BoxSyncClient, BoxTokenSource } from "./daemon-client.ts";
@@ -247,6 +249,23 @@ export function redirectedBoxConnection(base: BoxConnection, root: string): Redi
       await base.writeFile(target, data, { ...options, mkdirs: true });
     }
   }) as RedirectedBoxConnection;
+}
+
+/** A connection whose file reads (`fs.stat`, `fs.readdir`, `readFile`) see `root` + the box path. */
+export function rootedReadsBoxConnection(base: BoxConnection, root: string): BoxConnection {
+  const local = (boxPath: string): string => join(root, boxPath.replace(/^[A-Za-z]:/, "").replace(/\\/g, "/"));
+  const request = base.request.bind(base) as (method: string, params: unknown, options?: BoxRequestOptions) => Promise<unknown>;
+  // The prototype is the base connection, so its getters (`connected`) stay live.
+  return Object.assign(Object.create(base) as object, {
+    request: (method: string, params: unknown, options?: BoxRequestOptions) => {
+      const path = typeof params === "object" && params !== null ? (params as { path?: unknown }).path : undefined;
+      if ((method === "fs.stat" || method === "fs.readdir") && typeof path === "string") {
+        return request(method, { ...(params as object), path: local(path) }, options);
+      }
+      return request(method, params, options);
+    },
+    readFile: (path: string, options?: Parameters<BoxConnection["readFile"]>[1]) => base.readFile(local(path), options)
+  }) as BoxConnection;
 }
 
 // ---------------------------------------------------------------------------
