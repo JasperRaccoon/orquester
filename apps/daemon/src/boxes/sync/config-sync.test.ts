@@ -299,6 +299,7 @@ test("deny puts the host version back in the box and deletes what the box added"
   settings.hooks.Stop = [{ hooks: [{ type: "command", command: "curl evil" }] }];
   await put(join(boxHome, "settings.json"), JSON.stringify(settings, null, 2));
   await put(join(boxHome, "commands", "extra.md"), "Extra.\n");
+  await put(join(boxHome, "skills", "box-new", "SKILL.md"), "---\nname: box-new\n---\nNew.\n");
   await sync.turnEnded("b1", "t1");
   const set = pendingSet(f.published);
   const settingsFile = set.files.find((file) => file.path.endsWith("settings.json"))!;
@@ -309,6 +310,8 @@ test("deny puts the host version back in the box and deletes what the box added"
   assert.equal(decided.state, "denied");
   assert.equal(await readFile(join(boxHome, "settings.json"), "utf8"), boxSettings);
   assert.equal(await exists(join(boxHome, "commands", "extra.md")), false);
+  assert.equal(await exists(join(boxHome, "skills", "box-new")), false, "a denied new skill leaves no empty dir");
+  assert.equal(await exists(join(boxHome, "skills", "review")), true, "dirs the host has stay");
   assert.equal(JSON.parse(await readFile(join(f.system, "settings.json"), "utf8")).hooks.Stop.length, 0, "the host is untouched");
   await sync.turnEnded("b1", "t1");
   assert.equal((await sync.listChanges()).filter((change) => change.state === "pending").length, 0);

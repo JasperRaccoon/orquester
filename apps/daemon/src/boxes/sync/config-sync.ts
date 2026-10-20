@@ -1207,6 +1207,8 @@ export class BoxConfigSyncService implements BoxConfigSync {
     if (seen.hostFile === null || seen.hh === null) {
       await removeBoxPath(connection, path);
       baseline.delete(path);
+      // A denied new skill leaves no empty dir behind (dirs the host has stay).
+      await this.pruneEmptyBoxDirs(connection, root, [path], new Set());
       return;
     }
     await this.pushToBox(connection, root, path, seen.hostFile, seen.hh, baseline, ctx);
