@@ -13,7 +13,21 @@
  * `Your questions have been answered: "<question>"="<label>"`.
  */
 
-import type { UserInputQuestion, UserInputQuestionOption } from "@orquester/api/agent-chat";
+import type {
+  UserInputPreviewFormat,
+  UserInputQuestion,
+  UserInputQuestionOption
+} from "@orquester/api/agent-chat";
+
+/**
+ * The format the session asks Claude to write option previews in
+ * (`toolConfig.askUserQuestion.previewFormat`, SDK 0.3.278 `ToolConfig`), and
+ * so the format every parsed preview is tagged with. Markdown, the CLI's own
+ * default: the card renders it with the chat's markdown — code, tables,
+ * mermaid — where an HTML fragment could only be shown inert, in a frame with
+ * no scripts.
+ */
+export const CLAUDE_QUESTION_PREVIEW_FORMAT: UserInputPreviewFormat = "markdown";
 
 interface AskUserQuestionParse {
   questions: UserInputQuestion[];
@@ -34,13 +48,18 @@ function optionsOf(value: unknown): UserInputQuestionOption[] {
     if (entry === null || typeof entry !== "object") {
       continue;
     }
-    const option = entry as { label?: unknown; description?: unknown; value?: unknown };
+    const option = entry as { label?: unknown; description?: unknown; value?: unknown; preview?: unknown };
     options.push({
       label: typeof option.label === "string" ? option.label : "",
       description: typeof option.description === "string" ? option.description : "",
       // Claude's options carry `label` + `description` and no `value`
       // (fixtures README observation 12); a newer CLI that adds one is kept.
-      ...(typeof option.value === "string" ? { value: option.value } : {})
+      ...(typeof option.value === "string" ? { value: option.value } : {}),
+      // The optional `preview` (fixtures README observation 12): display-only,
+      // so a value of any other shape is dropped rather than the option.
+      ...(typeof option.preview === "string" && option.preview.length > 0
+        ? { preview: option.preview, previewFormat: CLAUDE_QUESTION_PREVIEW_FORMAT }
+        : {})
     });
   }
   return options;
@@ -83,13 +102,71 @@ export function parseAskUserQuestionInput(input: Record<string, unknown>): AskUs
   };
 }
 
+/** `AskUserQuestionInput.annotations`: per question text, what the user saw. */
+type AskUserQuestionAnnotations = Record<string, { preview?: string; notes?: string }>;
+
+function previewOf(option: unknown, label: string): string | undefined {
+  if (option === null || typeof option !== "object") {
+    return undefined;
+  }
+  const record = option as { label?: unknown; preview?: unknown };
+  return record.label === label && typeof record.preview === "string" && record.preview.length > 0
+    ? record.preview
+    : undefined;
+}
+
+/**
+ * The previews the user chose, as the SDK takes them back: `annotations`,
+ * keyed by question text, each `{ preview }` — the preview content of the
+ * selected option (SDK 0.3.278 `AskUserQuestionInput.annotations`), so the
+ * model knows which mockup was picked, not only its label.
+ *
+ * Only a single-select answer that IS one option's label carries one: the
+ * tool supports previews on single-select questions alone, and a typed answer
+ * chose no option, so there is no preview to send back.
+ */
+function chosenPreviews(
+  toolInput: Record<string, unknown>,
+  answers: Record<string, unknown>
+): AskUserQuestionAnnotations {
+  const annotations: AskUserQuestionAnnotations = {};
+  const questions = Array.isArray(toolInput.questions) ? toolInput.questions : [];
+  for (const entry of questions) {
+    if (entry === null || typeof entry !== "object") {
+      continue;
+    }
+    const record = entry as { question?: unknown; options?: unknown; multiSelect?: unknown };
+    if (typeof record.question !== "string" || record.multiSelect === true || !Array.isArray(record.options)) {
+      continue;
+    }
+    const answer = answers[record.question];
+    if (typeof answer !== "string") {
+      continue;
+    }
+    for (const option of record.options) {
+      const preview = previewOf(option, answer);
+      if (preview !== undefined) {
+        annotations[record.question] = { preview };
+        break;
+      }
+    }
+  }
+  return annotations;
+}
+
 /**
  * The reply the SDK expects: the original `questions` array plus an `answers`
- * map keyed by question **text**, whose value is the option **label**.
+ * map keyed by question **text**, whose value is the option **label** — and,
+ * when a chosen option had a preview, `annotations` ({@link chosenPreviews}).
  */
 export function buildAskUserQuestionReply(
   toolInput: Record<string, unknown>,
   answers: Record<string, unknown>
-): { questions: unknown; answers: Record<string, unknown> } {
-  return { questions: toolInput.questions, answers };
+): { questions: unknown; answers: Record<string, unknown>; annotations?: AskUserQuestionAnnotations } {
+  const annotations = chosenPreviews(toolInput, answers);
+  return {
+    questions: toolInput.questions,
+    answers,
+    ...(Object.keys(annotations).length > 0 ? { annotations } : {})
+  };
 }

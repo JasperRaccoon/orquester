@@ -16,6 +16,7 @@
  *   rather than shown as an unanswerable card.
  */
 
+import { isUserInputPreviewFormat } from "./runtime-events.ts";
 import type { ProviderRequestKind, UserInputQuestion } from "./runtime-events.ts";
 import type {
   PendingApproval,
@@ -158,7 +159,14 @@ function parseQuestions(value: unknown): UserInputQuestion[] {
       options.push({
         label: option.label,
         description: typeof option.description === "string" ? option.description : "",
-        ...(typeof option.value === "string" ? { value: option.value } : {})
+        ...(typeof option.value === "string" ? { value: option.value } : {}),
+        // Display-only: a preview of any other shape is dropped, never the option.
+        ...(typeof option.preview === "string" && option.preview.length > 0
+          ? {
+              preview: option.preview,
+              ...(isUserInputPreviewFormat(option.previewFormat) ? { previewFormat: option.previewFormat } : {})
+            }
+          : {})
       });
     }
     if (options.length === 0 && question.allowCustomAnswer === false) {
