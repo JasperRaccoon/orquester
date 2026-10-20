@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ChevronRight,
   ExternalLink,
+  KeyRound,
   Loader2,
   PenTool,
   Puzzle,
@@ -11,7 +12,7 @@ import {
   Trash2,
   X
 } from "lucide-react";
-import type { PluginId, PluginInfo, TsCheckerEngine } from "@orquester/api";
+import { SECRET_FILES_PLUGIN_ID, type PluginId, type PluginInfo, type TsCheckerEngine } from "@orquester/api";
 import { cn } from "../../lib/cn";
 import { relativeTime } from "../../lib/relative-time";
 import { Button, ConfirmDialog, Switch } from "../ui";
@@ -27,12 +28,21 @@ import {
   pluginJobLabel,
   pluginSourceHref,
   pluginToggleDecision,
-  selectedPlugin
+  secretVaultRows,
+  selectedPlugin,
+  type SecretVaultRow
 } from "./plugins.logic";
+import { useRepoIdentities } from "../../lib/repo-identities/hooks";
+import { useSecretVaults } from "../../lib/secret-files/hooks";
+import { SecretFilesDialog } from "../secret-files/SecretFilesDialog";
 import { Badge, EmptyState, InfoRow, Notice, SettingRow, SettingsCard, SettingsPage, SettingsSection } from "./primitives";
 
 /** What each built-in plugin's icon tile shows. */
-const PLUGIN_GLYPH: Record<PluginId, React.ReactNode> = { "ts-rust": "TS", excalidraw: <PenTool size={15} /> };
+const PLUGIN_GLYPH: Record<PluginId, React.ReactNode> = {
+  "ts-rust": "TS",
+  excalidraw: <PenTool size={15} />,
+  "secret-files": <KeyRound size={15} />
+};
 
 /** The daemon's error text for a failed request, else the error's own. */
 const errorText = (err: unknown): string => {
@@ -444,6 +454,8 @@ const PluginDetail: React.FC<{
         </SettingsSection>
       )}
 
+      {plugin.id === SECRET_FILES_PLUGIN_ID && <SecretFilesPluginSection enabled={plugin.enabled} />}
+
       <SettingsSection title="Settings">
         <SettingRow
           label="Enable on this server"
@@ -499,5 +511,82 @@ const PluginDetail: React.FC<{
         )}
       </SettingsSection>
     </div>
+  );
+};
+
+/**
+ * The Secret files plugin's part of its detail panel (spec §1): what it does
+ * and, while it is on, every repo with a vault and its sync status, each
+ * opening that repo's "Secret files…" dialog.
+ */
+const SecretFilesPluginSection: React.FC<{ enabled: boolean }> = ({ enabled }) => {
+  const vaults = useSecretVaults();
+  const identities = useRepoIdentities();
+  const rows = useMemo(() => secretVaultRows(vaults.values(), identities), [vaults, identities]);
+  const [open, setOpen] = useState<SecretVaultRow | null>(null);
+
+  return (
+    <>
+      <SettingsSection title="How it works">
+        <div className="space-y-2 px-4 py-3 text-sm leading-relaxed text-neutral-400">
+          <p>
+            Each repo gets one vault per workspace holding its secret files (<code className="font-mono text-xs">.env</code>{" "}
+            files and any you add). Every clone of the repo in that workspace receives them and stays in sync; a clone
+            whose copy differs is flagged so you can push it to the vault or reset it.
+          </p>
+          <p>
+            Values never leave the server: Orquester only shows file names, variable names and what changed. Files git
+            tracks are skipped. Set a repo up from its ⋯ menu in the sidebar, under Secret files….
+          </p>
+        </div>
+      </SettingsSection>
+
+      {enabled && (
+        <SettingsSection title="Vaults">
+          {rows.length === 0 ? (
+            <EmptyState
+              icon={<KeyRound size={18} />}
+              title="No vaults yet"
+              description="Open a repo group's ⋯ menu in the sidebar and choose Secret files… to set one up."
+            />
+          ) : (
+            <ul aria-label="Secret file vaults" className="divide-y divide-neutral-800/80">
+              {rows.map((row) => (
+                <li key={`${row.workspace}\u0000${row.repoKey}`} className="flex items-center gap-3 px-4 py-2.5">
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm text-neutral-100" title={row.repoKey}>
+                      {row.label}
+                    </p>
+                    <p className="truncate text-xs text-neutral-500">
+                      {row.workspace} · {row.fileCount} {row.fileCount === 1 ? "file" : "files"}
+                    </p>
+                  </div>
+                  {row.clonesNeedingAttention > 0 ? (
+                    <Badge tone="warn">
+                      {row.clonesNeedingAttention} {row.clonesNeedingAttention === 1 ? "clone needs" : "clones need"} attention
+                    </Badge>
+                  ) : (
+                    <Badge tone="ok">In sync</Badge>
+                  )}
+                  <Button size="sm" variant="outline" aria-label={`Open secret files of ${row.label}`} onClick={() => setOpen(row)}>
+                    Open
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </SettingsSection>
+      )}
+
+      {open && (
+        <SecretFilesDialog
+          open
+          workspace={open.workspace}
+          repoKey={open.repoKey}
+          repoLabel={open.label}
+          onClose={() => setOpen(null)}
+        />
+      )}
+    </>
   );
 };

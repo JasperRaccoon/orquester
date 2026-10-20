@@ -73,7 +73,8 @@ const CONTRACT: Record<string, { required: string[]; annotations: object }> = {
   edit_agent_profile: { required: ["agent", "changes"], annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false } },
   // Desktops (desktop tab spec §7.4): launching an app runs anything, so no write claims a closed world.
   get_desktops: { required: [], annotations: READ },
-  control_desktop: { required: ["action"], annotations: { ...WRITE, destructiveHint: true } }
+  control_desktop: { required: ["action"], annotations: { ...WRITE, destructiveHint: true } },
+  secret_files_status: { required: [], annotations: READ }
 };
 
 type ListedTool = { name: string; title?: string; description: string; annotations?: object; inputSchema: { properties?: Record<string, { description?: string }>; required?: string[]; additionalProperties?: unknown } };

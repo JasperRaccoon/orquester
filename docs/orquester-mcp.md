@@ -17,13 +17,14 @@ chat; wait until a session needs attention; read quota, cost and one session's t
 notification to the user's devices; read files and a project's git state; keep the shared todo lists
 and the saved-prompt library; build, edit, run and debug the daemon's automated workflows (§12);
 manage each agent CLI's own global MCP servers, skills, plugins, marketplaces, hooks, commands and
-instruction file (§13); and open desktop tabs — Linux GUI apps on a virtual display on the daemon's
-host (§14). That is **41 tools** (server version 3.0.0; §6 lists them, and opens with the migration
+instruction file (§13); open desktop tabs — Linux GUI apps on a virtual display on the daemon's
+host (§14); and check a repo's Secret files vault. That is **42 tools** (server version 3.0.0; §6 lists them, and opens with the migration
 from the 72-tool 2.x surface).
 
 **One catalog, two audiences.** The same tool definitions also serve the agents chatting *inside*
 Orquester (the in-chat `orquester` server, `apps/daemon/src/session-tools/README.md`), which get
-these 41 tools plus three chat-only ones (`html_preview`, `html_render`, `request_secret`). Every
+these 42 tools plus four chat-only ones (`html_preview`, `html_render`, `request_secret`,
+`push_secret_files`). Every
 tool has a **tier** — Read, Act or Admin — and a **toolset** (a group label only: every chat gets
 every tool, and nothing switches one on or off); in a chat the tier decides what runs without
 asking and what needs the user's approval card. **An external client is full trust:** for you the tier is information only (`_meta` on every
@@ -281,7 +282,7 @@ read); `list_sessions` adds `limit`; desktop tools take `project` where they too
 `create_session` accepts a legacy model when named (the result says `isLegacy: true`) and reports
 the account it got with `accountSource`.
 
-### The 41 tools
+### The 42 tools
 
 `tools/list` gives every tool a title, annotations, a description of every parameter and
 `_meta: {"orquester/tier", "orquester/toolset"}`. The toolset is the tool's group; the tier is what
@@ -333,6 +334,7 @@ call is listed by its widest (`admin` in `_meta`). For you, every tool simply ru
 | `edit_agent_profile` | agent-profile-editing | Admin | Up to 10 agent-profile changes in one call |
 | `get_desktops` | desktops | Read | Desktop tabs, their apps and windows, an app's log, the host's readiness |
 | `control_desktop` | desktops | Admin for `open` / `launch_app`; Act otherwise | Open a desktop, launch, stop or close apps and windows, close it |
+| `secret_files_status` | secret-files | Read | A repo's Secret files vault: managed files, each clone's state per file, variable names that differ |
 <!-- external-tools:end -->
 
 ### Results and errors
@@ -1388,6 +1390,22 @@ that one whole character (up to 4 bytes), so paging always advances. Binary file
 `get_git_state` is read only (no tool writes git): `diff` is the uncommitted changes against
 `HEAD` plus untracked files, or one file's (`path`, `staged`), cut to fit (`truncated`); the lists
 are capped and say so.
+
+### Secret files
+
+| Tool | Input | Returns | GUI equivalent |
+|---|---|---|---|
+| `secret_files_status` | `project` (required here) | `{project, workspace, repoKey, pluginEnabled, vault: {fileCount, clonesNeedingAttention, files: [{path, updatedAt, updatedBy}], newCandidates?}, clones: [{project, current?, needsAttention, files: [{path, state, refusal?}]}], compare?}`; `vault: null` with a `note` when the repo has no vault in that workspace (or the project no `origin` remote) | The repo's "Secret files…" dialog and its compare |
+
+The "Secret files" plugin keeps one vault per repo per workspace (the project's `repoKey`) and syncs
+its files (`.env` and others) to every clone of the repo in that workspace. A clone's file is
+`synced`, `outdated`, `missing`, `missing-dir`, `modified`, `deleted` or `refused`. `compare` covers
+the named project's `modified` and `outdated` files: per file `{format: "env", added, removed,
+changed, unchanged}` (variable names, `added` = only in the clone), `{format: "lines", linesAdded,
+linesRemoved}`, or why it cannot be read. **No result ever carries a value.** The tool works with the
+plugin off (`pluginEnabled: false`: nothing is synced). Pushing a clone's copy to the vault is
+`push_secret_files`, which only in-chat agents get, for their own project, behind an approval card
+that is never covered by a grant.
 
 ### Todos and saved prompts
 

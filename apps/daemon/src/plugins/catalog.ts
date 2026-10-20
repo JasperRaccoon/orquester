@@ -7,6 +7,7 @@ import {
   type PluginEngineInfo,
   type PluginId,
   type PluginInfo,
+  SECRET_FILES_PLUGIN_ID,
   TS_RUST_PLUGIN_ID,
   type TsCheckerEngine
 } from "@orquester/api";
@@ -35,6 +36,16 @@ export const BUILT_IN_PLUGINS: readonly PluginCatalogEntry[] = [
     description: "Sketch hand-drawn diagrams in a whiteboard tab, saved as .excalidraw files in the project.",
     source: { label: "excalidraw/excalidraw", url: "https://github.com/excalidraw/excalidraw" },
     provider: "Community",
+    scope: "global",
+    updates: false
+  },
+  {
+    // Part of Orquester (no download); the secret-files service watches clones only while it's on.
+    id: SECRET_FILES_PLUGIN_ID,
+    name: "Secret files",
+    description: "Keep each repo's secret files (.env and others) in one vault and synced to every clone.",
+    source: { label: "JasperRaccoon/orquester", url: "https://github.com/JasperRaccoon/orquester" },
+    provider: "Orquester",
     scope: "global",
     updates: false
   }

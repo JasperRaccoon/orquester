@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { SECRET_BLOBS_DIR_NAME, SECRET_VAULT_INDEX_FILE } from "./secret-files.ts";
 
 export const ORQUESTER_DIR_NAME = ".orquester";
 export const DEFAULT_HTTP_HOST = "127.0.0.1";
@@ -215,6 +216,21 @@ export function workflowSecretsPath(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "workflow-secrets.json");
 }
 
+/** The Secret files vaults (spec 2026-10-19 §3): the index and the content blobs; mode 0700. */
+export function secretFilesDir(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "secret-files");
+}
+
+/** The vault index; 0600. */
+export function secretVaultIndexPath(baseDir: string): string {
+  return joinPath(secretFilesDir(baseDir), SECRET_VAULT_INDEX_FILE);
+}
+
+/** Secret file contents, each named by its sha256; files 0600. */
+export function secretBlobsDir(baseDir: string): string {
+  return joinPath(secretFilesDir(baseDir), SECRET_BLOBS_DIR_NAME);
+}
+
 /** Parent of every `<runId>/` run directory (§5.8). */
 export function workflowRunsDir(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "workflow-runs");
@@ -402,7 +418,7 @@ export function subagentCacheTtlStateFile(baseDir: string): string {
 //       meta.json          ThreadHead, rewritten atomically every 50 events
 //       events.ndjson      append-only domain events, per-thread monotonic seq
 //       raw.ndjson         provider frames, rotated (§3.1)
-//       attachments/<id>.<ext>
+//       attachments/<thread>-<uuid>.<ext>   the id `<thread>-<uuid>-<ext>`
 //   <appdir>/daemon/agent-host.sock    the host's HTTP-over-unix-socket API
 //   <appdir>/daemon/agent-host.token   0600 shared secret, daemon <-> host
 //
@@ -2353,3 +2369,4 @@ export * from "./workflows.ts";
 export * from "./agent-tools.ts";
 export * from "./session-profiles.ts";
 export * from "./repo-identities.ts";
+export * from "./secret-files.ts";

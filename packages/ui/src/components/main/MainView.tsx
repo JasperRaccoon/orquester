@@ -20,6 +20,7 @@ import { useIsDesktop, useRegistry } from "../../hooks";
 import { GRID_MIN_COL_PX, GRID_MIN_ROW_PX, type GridTracks } from "../../lib/panel-sizes";
 import { AgentChatView } from "../agent-chat";
 import { ChatLoadingScreen } from "../agent-chat/ChatLoadingScreen";
+import { SecretFilesProjectBar } from "../secret-files/SecretFilesProjectBar";
 import { activeChatSessionIdFor, setActiveChatTab } from "../../lib/agent-chat-active-tab";
 import {
   isSessionTab,
@@ -155,17 +156,20 @@ export const MainView: React.FC = () => {
 
   if (tabs.length === 0) {
     return (
-      <main className="relative min-h-0 flex-1 overflow-hidden bg-neutral-950">
+      <main className="relative flex min-h-0 flex-1 flex-col overflow-hidden bg-neutral-950">
         {openingOverlay}
-        {ctx.kind === "project" ? (
-          <ProjectOverview projectPath={ctx.project.path} />
-        ) : (
-          <EmptyState
-            icon={<ListTodo size={40} strokeWidth={1.25} />}
-            title="No to-do lists open"
-            description='Use "+" or the sidebar to open a to-do list.'
-          />
-        )}
+        <SecretFilesProjectBar />
+        <div className="min-h-0 flex-1">
+          {ctx.kind === "project" ? (
+            <ProjectOverview projectPath={ctx.project.path} />
+          ) : (
+            <EmptyState
+              icon={<ListTodo size={40} strokeWidth={1.25} />}
+              title="No to-do lists open"
+              description='Use "+" or the sidebar to open a to-do list.'
+            />
+          )}
+        </div>
       </main>
     );
   }
@@ -308,11 +312,13 @@ export const MainView: React.FC = () => {
   };
 
   return (
-    <main className="relative min-h-0 flex-1 overflow-hidden bg-neutral-950">
+    <main className="relative flex min-h-0 flex-1 flex-col overflow-hidden bg-neutral-950">
       {openingOverlay}
+      {/* The open project's secret-file drift, above every tab (or the grid). */}
+      <SecretFilesProjectBar />
       <div
         ref={gridRef}
-        className={cn("h-full w-full", grid && "relative grid gap-px")}
+        className={cn("min-h-0 w-full flex-1", grid && "relative grid gap-px")}
         style={grid ? { gridTemplateColumns: colTemplate, gridTemplateRows: rowTemplate } : undefined}
       >
         {tabs.map((tab) => {

@@ -9,6 +9,11 @@
  * segment sanitised to `[a-z0-9_-]`, so an id NAMES its owning thread and a
  * traversal-shaped name cannot survive: every lookup re-derives the directory
  * from the thread id and refuses an id whose segment does not match.
+ *
+ * The id `<threadSegment>-<uuid>-<ext>` is stored as `<threadSegment>-<uuid>.<ext>`
+ * — the path an agent is handed in its prompt — so the extension is not
+ * doubled. Files written as `<id>.<ext>` (`…-txt.txt`) by earlier versions
+ * still resolve and still map back to their id.
  */
 
 import * as NodePath from "node:path";
@@ -122,6 +127,16 @@ export function parseAttachmentFileExtension(attachmentId: string): string | nul
   return matchAttachmentId(attachmentId)?.[3]?.toLowerCase() ?? null;
 }
 
+/** The file name a newly stored id is written under. */
+export function attachmentFileName(attachmentId: string): string {
+  const match = matchAttachmentId(attachmentId);
+  const fileExtension = match?.[3]?.toLowerCase();
+  if (!match || !fileExtension) {
+    return `${attachmentId}.bin`;
+  }
+  return `${match[1]}-${match[2]}.${fileExtension}`;
+}
+
 /** The id encoded in a stored file name, or null when the name is not one. */
 export function parseAttachmentIdFromRelativePath(relativePath: string): string | null {
   const normalized = normalizeAttachmentRelativePath(relativePath);
@@ -132,14 +147,27 @@ export function parseAttachmentIdFromRelativePath(relativePath: string): string 
   if (extensionIndex <= 0) {
     return null;
   }
-  const id = normalized.slice(0, extensionIndex);
-  return id.length > 0 && !id.includes(".") ? id : null;
+  const base = normalized.slice(0, extensionIndex);
+  if (base.length === 0 || base.includes(".")) {
+    return null;
+  }
+  // `<thread>-<uuid>.<ext>` is the id `<thread>-<uuid>-<ext>`; a legacy
+  // `<id>.<ext>` name already carries its extension suffix in the base.
+  const match = base.match(ATTACHMENT_ID_PATTERN);
+  if (match && match[3] === undefined) {
+    const id = `${base}-${normalized.slice(extensionIndex + 1).toLowerCase()}`;
+    if (ATTACHMENT_ID_PATTERN.test(id)) {
+      return id;
+    }
+  }
+  return base;
 }
 
 /**
  * Every candidate file name an id could be stored under, most specific first.
- * The id's own extension suffix names the file when present; older ids without
- * one are probed against the known extensions.
+ * An id with an extension suffix is stored as {@link attachmentFileName}, or as
+ * `<id>.<ext>` by earlier versions; ids without one are probed against the
+ * known extensions.
  */
 export function attachmentFileNameCandidates(attachmentId: string): string[] {
   const normalizedId = normalizeAttachmentRelativePath(attachmentId);
@@ -148,7 +176,7 @@ export function attachmentFileNameCandidates(attachmentId: string): string[] {
   }
   const fileExtension = parseAttachmentFileExtension(normalizedId);
   if (fileExtension) {
-    return [`${normalizedId}.${fileExtension}`];
+    return [attachmentFileName(normalizedId), `${normalizedId}.${fileExtension}`];
   }
   return ATTACHMENT_FILENAME_EXTENSIONS.map((extension) => `${normalizedId}${extension}`);
 }

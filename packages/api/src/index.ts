@@ -61,6 +61,7 @@ import type { AgentProfileAgentId, ProfileImportScanResponse } from "./agent-pro
 export * from "./agent-chat/index.ts";
 export * from "./saved-prompts.ts";
 export * from "./repo-identities.ts";
+export * from "./secret-files.ts";
 export * from "./agent-profile.ts";
 export * from "./session-profiles.ts";
 export * from "./prompt-variables.ts";

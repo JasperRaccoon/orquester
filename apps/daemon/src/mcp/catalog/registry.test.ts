@@ -5,7 +5,7 @@
  * (the agent host loads it statically); only the executor runs a tool; and the byte budgets,
  * measured on `tools/list` exactly as an MCP client receives it — for every tool, no exemption.
  *
- * Counts (spec §1.4, §9.1): 41 external tools, 44 chat tools (41 shared + 3 chat-only), every one
+ * Counts (spec §1.4, §9.1): 42 external tools, 46 chat tools (42 shared + 4 chat-only), every one
  * of them advertised to every chat (toolsets only group them).
  */
 
@@ -29,8 +29,8 @@ import { buildCatalog, CATALOG, catalogFor, TOOL_NAME_PATTERN, toolByName } from
 
 const SRC = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
-/** The chat-only tools (spec §4 rows 42–44; `request_toolset` is gone). */
-const CHAT_ONLY = ["html_preview", "html_render", "request_secret"];
+/** The chat-only tools (spec §4 rows 42–44, and secret files §8; `request_toolset` is gone). */
+const CHAT_ONLY = ["html_preview", "html_render", "request_secret", "push_secret_files"];
 
 test("names, audiences, toolsets, tiers: well-formed and unique; Admin-capable tools carry a family and a preview", () => {
   const names = new Set<string>();
@@ -79,15 +79,15 @@ test("TOOLSETS agree with the catalog: every chat tool sits in the toolset TOOLS
   assert.deepEqual([...chatToolNames()].sort(), catalogFor("chat").map((tool) => tool.name).sort());
 });
 
-test("counts: 41 external, 44 chat (the 41 plus 3 chat-only), 16 in core", () => {
+test("counts: 42 external, 46 chat (the 42 plus 4 chat-only), 16 in core", () => {
   const external = catalogFor("external").map((tool) => tool.name);
   const chat = catalogFor("chat").map((tool) => tool.name);
-  assert.equal(external.length, 41);
-  assert.equal(chat.length, 44);
+  assert.equal(external.length, 42);
+  assert.equal(chat.length, 46);
   assert.deepEqual(externalMcpToolNames(), external);
   assert.deepEqual(chat.filter((name) => !external.includes(name)), CHAT_ONLY);
   assert.deepEqual(external.filter((name) => !chat.includes(name)), [], "every external tool is a chat tool too");
-  assert.equal(CATALOG.length, 44);
+  assert.equal(CATALOG.length, 46);
   assert.equal(toolByName("request_toolset", "chat"), undefined);
   assert.equal(catalogFor("chat").filter((tool) => tool.toolset === "core").length, 16);
 });
@@ -163,6 +163,7 @@ const PURE_MODULES = new Set([
   "mcp/tools/requests.ts",
   "mcp/tools/saved-prompts.ts",
   "mcp/tools/search.ts",
+  "mcp/tools/secret-files.ts",
   "mcp/tools/secrets.ts",
   "mcp/tools/session-access.ts",
   "mcp/tools/sessions.ts",

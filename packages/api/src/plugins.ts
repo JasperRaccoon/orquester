@@ -4,8 +4,10 @@
 
 export const TS_RUST_PLUGIN_ID = "ts-rust";
 export const EXCALIDRAW_PLUGIN_ID = "excalidraw";
-export type PluginId = typeof TS_RUST_PLUGIN_ID | typeof EXCALIDRAW_PLUGIN_ID;
-export const PLUGIN_IDS: readonly PluginId[] = [TS_RUST_PLUGIN_ID, EXCALIDRAW_PLUGIN_ID];
+/** "Secret files" (docs/superpowers/specs/2026-10-19-secret-files-plugin-design.md; contracts in `secret-files.ts`). */
+export const SECRET_FILES_PLUGIN_ID = "secret-files";
+export type PluginId = typeof TS_RUST_PLUGIN_ID | typeof EXCALIDRAW_PLUGIN_ID | typeof SECRET_FILES_PLUGIN_ID;
+export const PLUGIN_IDS: readonly PluginId[] = [TS_RUST_PLUGIN_ID, EXCALIDRAW_PLUGIN_ID, SECRET_FILES_PLUGIN_ID];
 
 export function isPluginId(value: unknown): value is PluginId {
   return typeof value === "string" && (PLUGIN_IDS as readonly string[]).includes(value);

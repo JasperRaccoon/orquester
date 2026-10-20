@@ -8,7 +8,7 @@
  *     events.ndjson      append-only domain events, per-thread monotonic `seq`
  *     state.json         the fold snapshot: a cache of the fold as of one seq (A2)
  *     raw.ndjson         provider frames, rotated + redacted (§3.1)
- *     attachments/<id>.<ext>
+ *     attachments/<thread>-<uuid>.<ext>   the id `<thread>-<uuid>-<ext>`
  *   pending-attachments/ uploads made before their thread existed, swept after 24 h
  *   receipts.json        commandId -> {seq, status}, a ring of 500
  * ```
@@ -93,6 +93,7 @@ import {
   PENDING_ATTACHMENT_MAX_AGE_MS,
   PENDING_ATTACHMENT_THREAD_SEGMENT,
   attachmentFileExtension,
+  attachmentFileName,
   attachmentFileNameCandidates,
   createAttachmentId,
   parseAttachmentIdFromRelativePath,
@@ -1513,7 +1514,7 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
       }
       const dir = threadAttachmentsDir(rootDir, input.threadId);
       await fsp.mkdir(dir, { recursive: true });
-      const destination = path.join(dir, `${attachmentId}${extension}`);
+      const destination = path.join(dir, attachmentFileName(attachmentId));
       // COPIED, never hard-linked: an agent editing the delivered file in
       // place must not mutate the retry source (§6.3).
       await fsp.copyFile(input.sourcePath, destination);

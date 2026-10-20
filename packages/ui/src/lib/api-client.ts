@@ -14,6 +14,13 @@ import type {
   CreateProjectRequest,
   CreateSessionRequest,
   CreateSavedPromptRequest,
+  SecretFileCandidatesResponse,
+  SecretFileCompareResponse,
+  SecretFilesCloneRequest,
+  SecretVaultResponse,
+  SecretVaultsResponse,
+  SetupSecretVaultRequest,
+  UpdateSecretFilesRequest,
   FetchRepoFaviconRequest,
   RepoIconUploadType,
   RepoIdentitiesResponse,
@@ -109,7 +116,7 @@ import {
 import { fsPathQuery } from "./fs-path-query";
 import { parsePluginActionResult, parsePluginsResponse } from "./plugins-state";
 import { buildQueryString } from "./transporter";
-import { AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, agentProfileRoutes, agentToolsRoutes, desktopRoutes, pluginRoutes, repoIdentityRoutes, sessionProfileRoutes, workflowRoutes } from "@orquester/api";
+import { AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, agentProfileRoutes, agentToolsRoutes, desktopRoutes, pluginRoutes, repoIdentityRoutes, secretFilesRoutes, sessionProfileRoutes, workflowRoutes } from "@orquester/api";
 import type {
   AddSessionProfilePluginRequest,
   CopySessionProfileItemsRequest,
@@ -750,6 +757,59 @@ export class ApiClient {
 
   deleteTodo(id: string): Promise<void> {
     return this.send("DELETE", `/api/todos/${encodeURIComponent(id)}`);
+  }
+
+  // --- Secret files (the "Secret files" plugin; vault per repo per workspace) ---
+
+  listSecretVaults(signal?: AbortSignal): Promise<SecretVaultsResponse> {
+    return this.send("GET", secretFilesRoutes.list, { signal });
+  }
+
+  getSecretVault(workspace: string, repoKey: string, signal?: AbortSignal): Promise<SecretVaultResponse> {
+    return this.send("GET", secretFilesRoutes.vault, { query: { workspace, repoKey }, signal });
+  }
+
+  deleteSecretVault(workspace: string, repoKey: string): Promise<void> {
+    return this.send("DELETE", secretFilesRoutes.vault, { query: { workspace, repoKey } });
+  }
+
+  /** The setup scan; `path` scans one hand-typed path instead of the conventional candidates. */
+  scanSecretFileCandidates(
+    workspace: string,
+    repoKey: string,
+    path?: string,
+    signal?: AbortSignal
+  ): Promise<SecretFileCandidatesResponse> {
+    return this.send("GET", secretFilesRoutes.candidates, {
+      query: { workspace, repoKey, ...(path !== undefined ? { path } : {}) },
+      signal
+    });
+  }
+
+  setupSecretVault(req: SetupSecretVaultRequest): Promise<SecretVaultResponse> {
+    return this.send("POST", secretFilesRoutes.setup, { body: req });
+  }
+
+  updateSecretFiles(req: UpdateSecretFilesRequest): Promise<SecretVaultResponse> {
+    return this.send("PUT", secretFilesRoutes.files, { body: req });
+  }
+
+  pushSecretFiles(req: SecretFilesCloneRequest): Promise<SecretVaultResponse> {
+    return this.send("POST", secretFilesRoutes.push, { body: req });
+  }
+
+  resetSecretFiles(req: SecretFilesCloneRequest): Promise<SecretVaultResponse> {
+    return this.send("POST", secretFilesRoutes.reset, { body: req });
+  }
+
+  compareSecretFile(
+    workspace: string,
+    repoKey: string,
+    projectPath: string,
+    path: string,
+    signal?: AbortSignal
+  ): Promise<SecretFileCompareResponse> {
+    return this.send("GET", secretFilesRoutes.compare, { query: { workspace, repoKey, projectPath, path }, signal });
   }
 
   // --- Repo identities (icon + label per git repo; daemon-persisted, shared) ---

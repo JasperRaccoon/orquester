@@ -9,17 +9,24 @@ import { after, afterEach, before, beforeEach, describe, it } from "node:test";
 import { createElement } from "react";
 import type { Root } from "react-dom/client";
 import { JSDOM } from "jsdom";
-import type { SetRepoLabelRequest } from "@orquester/api";
+import {
+  SECRET_FILES_PLUGIN_ID,
+  type PluginInfo,
+  type SecretVaultDetail,
+  type SetRepoLabelRequest
+} from "@orquester/api";
 
 import { OrquesterProvider } from "../../context/orquester-context";
 import type { ApiClient } from "../../lib/api-client";
 import type { RepoProjectGroup } from "../../lib/repo-groups";
 import { applyRepoIdentity, resetRepoIdentities } from "../../lib/repo-identities/store";
+import { applySecretVault, resetSecretFiles } from "../../lib/secret-files/store";
 
 // Loaded once the DOM globals exist: react-dom decides at load time which DOM events it can use.
 let act: typeof import("react-dom/test-utils").act;
 let createRoot: typeof import("react-dom/client").createRoot;
 let RepoGroupSection: typeof import("./RepoGroupSection").RepoGroupSection;
+let useAppStore: typeof import("../../store/app").useAppStore;
 
 let dom: JSDOM;
 const globals = ["window", "document", "HTMLElement", "Element", "Node", "navigator", "KeyboardEvent", "MouseEvent", "Event", "localStorage"] as const;
@@ -39,6 +46,7 @@ before(async () => {
   ({ act } = await import("react-dom/test-utils"));
   ({ createRoot } = await import("react-dom/client"));
   ({ RepoGroupSection } = await import("./RepoGroupSection"));
+  ({ useAppStore } = await import("../../store/app"));
 });
 
 after(() => {
@@ -77,7 +85,9 @@ describe("a repo group header", () => {
       return {
         identity: req.label === null ? null : { repoKey: req.repoKey, label: req.label, updatedAt: "2026-10-19T00:00:00Z" }
       };
-    }
+    },
+    // The Secret files dialog asks for its vault when it opens; it never answers here.
+    getSecretVault: () => new Promise(() => undefined)
   } as unknown as ApiClient;
 
   const render = async (g: RepoProjectGroup) => {
@@ -88,6 +98,7 @@ describe("a repo group header", () => {
           api: fakeApi,
           useTitlebar: false,
           children: createElement(RepoGroupSection, {
+            workspace: "ws",
             group: g,
             onClone: () => {
               clones += 1;
@@ -198,5 +209,102 @@ describe("a repo group header", () => {
     await type("x", "Escape");
     assert.equal(document.querySelector('input[aria-label="Repo label"]'), null);
     assert.deepEqual(labels, []);
+  });
+
+  describe("with the Secret files plugin", () => {
+    let initialApp: ReturnType<typeof useAppStore.getState>;
+    before(() => {
+      initialApp = { ...useAppStore.getState() };
+    });
+    // Before each (not after): the outer afterEach unmounts after this level's hooks.
+    beforeEach(() => {
+      resetSecretFiles();
+      useAppStore.setState(initialApp, true);
+    });
+    after(() => {
+      resetSecretFiles();
+      useAppStore.setState(initialApp, true);
+    });
+
+    const secretFilesPlugin = (enabled: boolean): PluginInfo => ({
+      id: SECRET_FILES_PLUGIN_ID,
+      name: "Secret files",
+      description: "Keep each repo's secret files in one vault.",
+      source: { label: "Orquester", url: "https://example.invalid" },
+      provider: "Orquester",
+      scope: "global",
+      updates: false,
+      platform: "supported",
+      enabled,
+      enabledWorkspaces: [],
+      current: null,
+      previous: null,
+      skippedVersion: null,
+      lastCheckAt: null,
+      lastError: null,
+      job: "idle"
+    });
+    const vault = (overrides: Partial<SecretVaultDetail> = {}): SecretVaultDetail => ({
+      workspace: "ws",
+      repoKey: KEY,
+      fileCount: 1,
+      clonesNeedingAttention: 0,
+      newCandidates: 0,
+      updatedAt: "2026-10-19T00:00:00Z",
+      files: [],
+      excluded: [],
+      candidates: [],
+      clones: [],
+      ...overrides
+    });
+    const pill = () => document.querySelector<HTMLElement>("button[aria-expanded] [title*='Secret files']");
+
+    it("hides its menu item and count while the plugin is off", async () => {
+      useAppStore.setState({ plugins: [secretFilesPlugin(false)] });
+      applySecretVault("ws", KEY, vault({ clonesNeedingAttention: 2 }));
+      await render(group());
+      assert.equal(pill(), null);
+      await openMenu();
+      assert.deepEqual(menuLabels(), ["Change icon…", "Rename label…", "Copy repo id"]);
+    });
+
+    it("offers Secret files… while the plugin is on, even before the repo has a vault", async () => {
+      useAppStore.setState({ plugins: [secretFilesPlugin(true)] });
+      await render(group());
+      assert.equal(pill(), null);
+      await openMenu();
+      assert.deepEqual(menuLabels(), ["Change icon…", "Rename label…", "Copy repo id", "Secret files…"]);
+    });
+
+    it("closes Secret files… when the plugin turns off, and doesn't reopen it when it turns back on", async () => {
+      useAppStore.setState({ plugins: [secretFilesPlugin(true)] });
+      await render(group());
+      const dialog = () => document.querySelector('[role="dialog"]');
+      assert.equal(dialog(), null);
+      await openMenu();
+      await pick("Secret files…");
+      assert.ok(dialog(), "the dialog opened");
+      await act(async () => useAppStore.setState({ plugins: [secretFilesPlugin(false)] }));
+      assert.equal(dialog(), null);
+      await act(async () => useAppStore.setState({ plugins: [secretFilesPlugin(true)] }));
+      assert.equal(dialog(), null);
+    });
+
+    it("counts clones needing attention plus new candidates, for this workspace's vault only", async () => {
+      useAppStore.setState({ plugins: [secretFilesPlugin(true)] });
+      applySecretVault("other", KEY, vault({ workspace: "other", clonesNeedingAttention: 5 }));
+      await render(group());
+      assert.equal(pill(), null);
+
+      await act(async () => applySecretVault("ws", KEY, vault({ clonesNeedingAttention: 1, newCandidates: 2 })));
+      const shown = pill();
+      assert.ok(shown, "a key count");
+      assert.equal(shown.textContent?.trim(), "3");
+      assert.match(shown.title, /1 clone has secret files that need attention/);
+      assert.match(shown.title, /2 new secret files were found/);
+
+      await act(async () => applySecretVault("ws", KEY, vault()));
+      assert.equal(pill(), null);
+    });
   });
 });

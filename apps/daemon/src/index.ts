@@ -130,6 +130,7 @@ import { catalogFor } from "./mcp/catalog/index.ts";
 import { canonicalProjectPath } from "./agent-tools/approval-port.ts";
 import { registerSessionToolsManifestRoute, SessionToolsRefresher } from "./session-tools/session-tools-refresh.ts";
 import { AGENT_PROFILE_CHANNEL, type AgentProfileAgentId } from "@orquester/api";
+import { SECRET_FILES_CHANGED, SECRET_FILES_CHANNEL, SECRET_FILES_PLUGIN_ID, type PluginsResponse } from "@orquester/api";
 // umcp:t6 end
 // umcp:t9 begin
 import { registerPushNotifyRoute } from "./push.ts";
@@ -140,6 +141,9 @@ import { RecentProjectsService, describeProjectPath } from "./recent-projects";
 import { SavedPromptsService, publishSavedPromptEvents, registerSavedPromptRoutes } from "./saved-prompts.ts";
 import { RepoIdentitiesService, publishRepoIdentityEvents } from "./repo-identities/service.ts";
 import { registerRepoIdentityRoutes } from "./repo-identities/routes.ts";
+import { SecretVaultStore } from "./secret-files/vault-store.ts";
+import { SecretFilesService } from "./secret-files/service.ts";
+import { registerSecretFilesRoutes } from "./secret-files/routes.ts";
 import { registerTodoToggleRoute } from "./todo-items.ts";
 import { PluginsService, publishPluginEvents } from "./plugins/plugins-service.ts";
 import { registerPluginRoutes } from "./plugins/routes.ts";
@@ -257,6 +261,7 @@ import {
   recentProjectsPath,
   remotesConfigPath,
   repoIconsDir,
+  secretFilesDir,
   repoIdentitiesPath,
   resolveDaemonPaths,
   savedPromptsPath,
@@ -732,6 +737,38 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   });
   publishPluginEvents(plugins, broadcaster);
   await plugins.start();
+  // Secret files (the "Secret files" plugin, spec 2026-10-19): one vault per repo per workspace,
+  // synced to every clone while the plugin is on. A store it cannot load leaves it read-only (503).
+  const secretVaults = new SecretVaultStore({ dir: secretFilesDir(paths.baseDir), logger: console });
+  await secretVaults.load().catch((error) => console.error("Secret files store load failed", error instanceof Error ? error.name : error));
+  const secretFiles = new SecretFilesService({
+    store: secretVaults,
+    // Every workspace's projects, read per call (PUT /api/config/daemon may move the root). A project
+    // of an archived workspace is hidden from the sidebar, so it counts as archived.
+    listProjects: async () => {
+      const workspaces = await listWorkspaces(resolved.workspacesDir, resolved.workspacesMetaFile);
+      const lists = await Promise.all(
+        workspaces.map(async (workspace) =>
+          (await listProjects(resolved.workspacesDir, workspace.name, resolved.workspacesMetaFile)).map((project) => ({
+            ...project,
+            isArchived: project.isArchived === true || workspace.isArchived === true
+          }))
+        )
+      );
+      return lists.flat();
+    },
+    pluginEnabled: async () => (await plugins.get(SECRET_FILES_PLUGIN_ID)).enabled,
+    onPluginChange: (listener) => {
+      const onChanged = (response: PluginsResponse) =>
+        listener(response.plugins.some((plugin) => plugin.id === SECRET_FILES_PLUGIN_ID && plugin.enabled));
+      plugins.events.on("changed", onChanged);
+      return () => void plugins.events.off("changed", onChanged);
+    },
+    publish: (payload) => broadcaster.publish(SECRET_FILES_CHANNEL, SECRET_FILES_CHANGED, payload),
+    // Every clone write checks the clone root's realpath stays inside the (current) workspaces root.
+    workspacesRoot: () => resolved.workspacesDir,
+    logger: console
+  });
   // Automated workflows (workflows spec §3, §5.7, §5.8): definitions, secrets, runs and runtime
   // state. Each store is tolerant at load — a file it cannot parse is moved aside, one it cannot
   // read leaves that store read-only (503 WORKFLOWS_UNAVAILABLE) — so none of them blocks boot.
@@ -1300,6 +1337,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     secretRequests,
     registry, sessions, grokDeviceLink, codexDeviceLink, claudeOAuthLink, accounts, git, gitWatcher, todos, recentProjects, savedPrompts, repoIdentities, usage, usageTokens, chatThreadUsage, subagentCacheTtl, push, broadcaster, agentAccounts, browsers, urlWatcher, agentChat,
     plugins,
+    secretFiles,
     desktops, desktopAudio,
     agentProfile,
     sessionProfiles,
@@ -1512,6 +1550,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   await startHttp();
   // Agent profile change detection (fs watchers on each installed agent's config), after boot.
   agentProfile.start();
+  // Secret files: follows the plugin; while on, watches clones and runs its first reconcile in the background.
+  await secretFiles.start().catch((error) => console.error("Secret files start failed", error instanceof Error ? error.name : error));
 
   const stop = async () => {
     usage.stop();
@@ -1525,6 +1565,10 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // Plugins: the hourly timer, and a running download or smoke test cancelled (its staging dir is
     // emptied at the next start); queued plugins.json writes land.
     await plugins.stop().catch((error) => console.error("Plugins stop failed", error));
+    // Secret files: watchers, timers and git children stop at once (nothing new starts or writes a
+    // clone); an operation already in flight is awaited last, bounded, below.
+    secretFiles.stop();
+    const secretFilesIdle = secretFiles.idle().catch((error) => console.error("Secret files stop failed", error instanceof Error ? error.name : error));
     // Agent profile: its watchers and debounce timers, each adapter's long-lived helpers (a codex
     // app-server may take its whole kill grace to exit) and the import trees. Started here, awaited
     // last: it must not hold up the session and agent-host shutdown below within cli.ts's 3 s backstop.
@@ -1566,6 +1610,16 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     unixServer.server.closeAllConnections?.();
     await unixClosed.catch(() => undefined);
     await agentProfileStopped;
+    // Last, and bounded: a secret-files vault write in flight lands, a stuck one never holds the exit.
+    let secretFilesBound: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      secretFilesIdle,
+      new Promise<void>((resolve) => {
+        secretFilesBound = setTimeout(resolve, 1000);
+        secretFilesBound.unref?.();
+      })
+    ]);
+    clearTimeout(secretFilesBound);
   };
 
   console.log(`Orquester daemon ${daemonId} on unix:${paths.socketPath} (workspaces: ${resolved.workspacesDir})`);
@@ -1629,6 +1683,8 @@ interface Services {
   repoIdentities: RepoIdentitiesService;
   /** Built-in plugins (Settings → Plugins): plugins.json, the TypeScript engine (tsrs or tsc-rs) install, the session preload. */
   plugins: PluginsService;
+  /** The "Secret files" plugin's vaults and sync engine: ONE instance both transports share. Optional: route tests build a partial `services`. */
+  secretFiles?: SecretFilesService;
   /** Each agent CLI's own global config (agent profile spec §4): Settings → Agent config. */
   agentProfile: AgentProfileService;
   /** Orquester-owned per-session Agent Profiles (spec 2026-10-18). */
@@ -2127,6 +2183,8 @@ export function createServer(
       if (!isValidName(workspace)) {
         return reply.code(400).send({ code: "INVALID_NAME", message: "Invalid workspace name." });
       }
+      // The UI re-lists after a clone lands: a (debounced) secret-files reconcile picks up new clones.
+      services.secretFiles?.notifyProjectsListed();
       return listProjects(resolved.workspacesDir, workspace, resolved.workspacesMetaFile);
     }
   );
@@ -2311,6 +2369,8 @@ export function createServer(
           // A stale archived name (dir removed outside orquester) would hide
           // the fresh clone — prune it, same as the empty branch above.
           await pruneArchivedProject(resolved.workspacesMetaFile, workspace, name);
+          // A clone of a repo with a secret-files vault gets its files before this answers (never throws).
+          await services.secretFiles?.notifyProjectCreated(join(workspaceDir, name));
           return { name, workspace, path: join(workspaceDir, name), isArchived: false };
         }
 
@@ -2335,6 +2395,7 @@ export function createServer(
           await mkdir(workspaceDir, { recursive: true });
           await accounts.cloneCreatedRepo(accountId, repo, name, workspaceDir);
           await pruneArchivedProject(resolved.workspacesMetaFile, workspace, name);
+          await services.secretFiles?.notifyProjectCreated(path);
           return { name, workspace, path, isArchived: false };
         }
 
@@ -4308,6 +4369,9 @@ export function createServer(
   // Repo identities (spec 2026-10-18 §2). Both transports; the bearer hook gates HTTP like every
   // /api route — no ?token= exemption (clients fetch icon bytes with auth).
   registerRepoIdentityRoutes(app, { service: services.repoIdentities });
+  if (services.secretFiles) {
+    registerSecretFilesRoutes(app, { service: services.secretFiles, logger: console });
+  }
 
   // Built-in plugins (plugins spec §5.3). Both transports, like the protect-archived toggle:
   // enabling downloads and runs a verified binary, which is no more than a remote user can do

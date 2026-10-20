@@ -37,7 +37,7 @@ export type ApprovalKind = "admin" | "boundary" | "toolset";
 export const APPROVAL_KINDS: readonly ApprovalKind[] = ["admin", "boundary", "toolset"];
 
 /** The Admin families (spec §3.2, §6): what an Admin call changes. Grants are per family (§7.6). */
-export const ADMIN_FAMILIES = ["workflows", "workflow-secrets", "agent-profile", "desktops", "saved-prompts"] as const;
+export const ADMIN_FAMILIES = ["workflows", "workflow-secrets", "agent-profile", "desktops", "saved-prompts", "secret-files"] as const;
 export type AdminFamily = (typeof ADMIN_FAMILIES)[number];
 
 /**

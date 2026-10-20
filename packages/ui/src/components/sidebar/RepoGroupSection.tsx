@@ -1,5 +1,5 @@
-import React, { useRef, useState } from "react";
-import { ChevronRight, ClipboardCopy, ImageIcon, Pencil, Plus, RotateCcw } from "lucide-react";
+import React, { useEffect, useRef, useState } from "react";
+import { ChevronRight, ClipboardCopy, ImageIcon, KeyRound, Pencil, Plus, RotateCcw } from "lucide-react";
 import { normalizeRepoLabel, repoLabelProblem } from "@orquester/api";
 import { cn } from "../../lib/cn";
 import { copyText } from "../../lib/clipboard";
@@ -8,9 +8,12 @@ import { useApi } from "../../context/orquester-context";
 import { useRepoIdentity } from "../../lib/repo-identities/hooks";
 import { setRepoLabel } from "../../lib/repo-identities/store";
 import { setRepoGroupCollapsed } from "../../lib/collapsed-repo-groups";
+import { useSecretFilesEnabled, useSecretVault } from "../../lib/secret-files/hooks";
 import type { RepoProjectGroup } from "../../lib/repo-groups";
 import { RepoIcon } from "../repo/RepoIcon";
 import { RepoIconDialog } from "../repo/RepoIconDialog";
+import { SecretFilesDialog } from "../secret-files/SecretFilesDialog";
+import { repoSecretCount } from "../secret-files/drift.logic";
 import { ContextMenu, Input, type ContextMenuItem } from "../ui";
 import { CountPill, RowActionsButton } from "./parts";
 
@@ -100,19 +103,30 @@ const RepoLabelInput: React.FC<{
 /**
  * One repo group inside the open workspace (spec 2026-10-18 §1, §3): a header
  * — chevron, repo icon, label, count, "+" (a fresh clone) and a ⋯ menu that
- * right-click also opens — and, unless collapsed, its project rows.
+ * right-click also opens — and, unless collapsed, its project rows. With the
+ * Secret files plugin on, the menu opens the repo's "Secret files…" dialog and
+ * an amber key count flags clones needing attention or new candidate files.
  */
 export const RepoGroupSection: React.FC<{
+  /** The workspace whose projects the group lists (the secret-files vault's scope). */
+  workspace: string;
   group: RepoProjectGroup;
   /** Start a fresh clone of this repo; absent when there is no clone URL. */
   onClone?: () => void;
   children: React.ReactNode;
-}> = ({ group, onClone, children }) => {
+}> = ({ workspace, group, onClone, children }) => {
   const api = useApi();
   const customLabel = useRepoIdentity(group.repoKey)?.label;
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const [renaming, setRenaming] = useState(false);
   const [iconOpen, setIconOpen] = useState(false);
+  const [secretsOpen, setSecretsOpen] = useState(false);
+  const secretsOn = useSecretFilesEnabled();
+  // The plugin turning off closes the dialog for good: turning it back on doesn't reopen it.
+  useEffect(() => {
+    if (!secretsOn) setSecretsOpen(false);
+  }, [secretsOn]);
+  const secretCount = repoSecretCount(secretsOn, useSecretVault(workspace, group.repoKey));
   const [error, setError] = useState<string | null>(null);
   const expanded = !group.collapsed;
 
@@ -129,6 +143,7 @@ export const RepoGroupSection: React.FC<{
       }
     },
     { label: "Copy repo id", icon: <ClipboardCopy size={13} />, onClick: () => void copyText(group.repoKey) },
+    ...(secretsOn ? [{ label: "Secret files…", icon: <KeyRound size={13} />, onClick: () => setSecretsOpen(true) }] : []),
     ...(customLabel !== undefined
       ? [
           {
@@ -182,6 +197,12 @@ export const RepoGroupSection: React.FC<{
             />
             <RepoIcon repoKey={group.repoKey} size={24} />
             <span className="min-w-0 flex-1 truncate">{group.label}</span>
+            {secretCount && (
+              <CountPill tone="warn" title={secretCount.title}>
+                <KeyRound size={11} aria-hidden />
+                {secretCount.count}
+              </CountPill>
+            )}
             <CountPill>{group.projects.length}</CountPill>
           </button>
           {onClone && (
@@ -217,6 +238,15 @@ export const RepoGroupSection: React.FC<{
         repoLabel={group.label}
         onClose={() => setIconOpen(false)}
       />
+      {secretsOn && (
+        <SecretFilesDialog
+          open={secretsOn && secretsOpen}
+          workspace={workspace}
+          repoKey={group.repoKey}
+          repoLabel={group.label}
+          onClose={() => setSecretsOpen(false)}
+        />
+      )}
     </div>
   );
 };

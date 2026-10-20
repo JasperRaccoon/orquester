@@ -14,6 +14,7 @@ import {
   pluginJobLabel,
   pluginSourceHref,
   pluginToggleDecision,
+  secretVaultRows,
   selectedPlugin
 } from "./plugins.logic.ts";
 
@@ -209,4 +210,37 @@ test("a plugin without engines, or from a daemon before the choice, has no engin
   assert.deepEqual(pluginEngineOptions(plugin({ engines }), false), [], "no active engine named");
   assert.equal(pluginEngineLabel(plugin()), null);
   assert.equal(pluginEngineChange(plugin(), "tsrs", false), false);
+});
+
+test("secretVaultRows: labels each vault by its custom label or key, ordered by workspace then label", () => {
+  const vault = (workspace: string, repoKey: string, clonesNeedingAttention = 0) => ({
+    workspace,
+    repoKey,
+    fileCount: 2,
+    clonesNeedingAttention
+  });
+  const rows = secretVaultRows(
+    [
+      vault("work", "host.example/o/zeta"),
+      vault("home", "host.example/o/repo10", 1),
+      vault("home", "host.example/o/repo9"),
+      vault("work", "host.example/o/alpha")
+    ],
+    new Map([["host.example/o/zeta", { label: "Aardvark" }]])
+  );
+  assert.deepEqual(
+    rows.map((r) => [r.workspace, r.label, r.clonesNeedingAttention]),
+    [
+      ["home", "o/repo9", 0],
+      ["home", "o/repo10", 1],
+      ["work", "Aardvark", 0],
+      ["work", "o/alpha", 0]
+    ]
+  );
+  assert.equal(rows[2].repoKey, "host.example/o/zeta");
+  assert.equal(rows[2].fileCount, 2);
+  assert.deepEqual(
+    secretVaultRows([vault("w", "nohost")], new Map()).map((r) => r.label),
+    ["nohost"]
+  );
 });
