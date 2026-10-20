@@ -197,13 +197,20 @@ interface FakeDaemon {
   failFirst: number[];
   /** The token was spent by a first connect: every request is refused. */
   spent: boolean;
+  /** How many requests to answer with a redirect to `/stolen` (on this same server) first. */
+  redirectFirst: number;
   server: Server;
 }
 
 async function startFakeDaemon(t: test.TestContext): Promise<FakeDaemon> {
-  const daemon: FakeDaemon = { url: "", requests: [], failFirst: [], spent: false, server: undefined as unknown as Server };
+  const daemon: FakeDaemon = { url: "", requests: [], failFirst: [], spent: false, redirectFirst: 0, server: undefined as unknown as Server };
   daemon.server = createServer((request: IncomingMessage, response) => {
     daemon.requests.push({ path: request.url ?? "", authorization: request.headers.authorization });
+    if (daemon.redirectFirst > 0 && request.url !== "/stolen") {
+      daemon.redirectFirst -= 1;
+      response.writeHead(302, { location: `${daemon.url}/stolen` }).end();
+      return;
+    }
     const fail = daemon.failFirst.shift();
     if (fail !== undefined) {
       response.writeHead(fail).end();
@@ -359,6 +366,30 @@ test("posixScript falls back to GNU wget and retries a failing daemon", async (t
   assert.equal(code, 0, output);
   assert.match(output, /download failed \(HTTP 503\); retrying/);
   assert.equal(daemon.requests.length, 2);
+  await assertAgentStarted(box, daemon, output);
+});
+
+test("the wget fallback never follows a redirect with the bearer token", async (t) => {
+  if (!has("wget")) {
+    t.skip("wget is not installed");
+    return;
+  }
+  const daemon = await startFakeDaemon(t);
+  daemon.redirectFirst = 1;
+  const tools = ["sh", "uname", "ls", "ldd", "grep", "mkdir", "chmod", "mv", "rm", "cat", "date", "sleep", "awk", "wget", "stat", "env"];
+  const box = await sandbox(t, tools.filter(has));
+  const boot = buildBootstrap(input({ daemonUrl: daemon.url }));
+  const scriptPath = join(box.dir, "user-data.sh");
+  await writeFile(scriptPath, boot.posixScript);
+
+  const { code, output } = await runScript(box, ["sh", scriptPath], { onlyPath: true });
+  assert.equal(code, 0, output);
+  // The 302 is answered as a failed attempt and retried; its target is never asked.
+  assert.match(output, /download failed \(HTTP 302\); retrying/);
+  assert.deepEqual(
+    daemon.requests.map((request) => request.path.replace(/linux-(x64|arm64)(-musl)?$/, "linux")),
+    ["/api/boxes/agent/linux", "/api/boxes/agent/linux"]
+  );
   await assertAgentStarted(box, daemon, output);
 });
 

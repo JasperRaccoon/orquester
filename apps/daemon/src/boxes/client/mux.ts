@@ -4,9 +4,15 @@
  * Requests, events, and channels with the BOX_CHANNEL_WINDOW_BYTES credit
  * window. The host opens EVEN channel ids, never reused within one transport.
  *
- * Raw channels ({@link BoxMux.openRaw}) skip flow control and stream
- * adaptation: every frame for the id goes to a sink as-is. The relay uses
- * them to pass a local client's channel through to the box end to end.
+ * Raw channels ({@link BoxMux.openRaw}) skip stream adaptation: every frame
+ * for the id goes to a sink as-is. The relay uses them to pass a local
+ * client's channel through to the box end to end; the client returns the
+ * credit, and the mux still counts it to hold the peer to the window.
+ *
+ * The receive window is enforced: a peer that sends more unacknowledged
+ * bytes on a channel than BOX_CHANNEL_WINDOW_BYTES gets the channel closed
+ * with WINDOW_EXCEEDED, so a misbehaving box cannot make the host buffer
+ * without bound.
  *
  * Static imports only: this module runs inside the agent host.
  */
@@ -37,6 +43,12 @@ export class BoxError extends Error {
 }
 
 export const BOX_DISCONNECTED = "BOX_DISCONNECTED";
+/** A channel's peer sent past the credit window. */
+export const WINDOW_EXCEEDED = "WINDOW_EXCEEDED";
+
+function windowExceeded(): BoxRpcError {
+  return { code: WINDOW_EXCEEDED, message: `The peer sent more than ${BOX_CHANNEL_WINDOW_BYTES} unacknowledged bytes on a channel` };
+}
 
 export function disconnectedError(): BoxError {
   return new BoxError(BOX_DISCONNECTED, "The box is not connected");
@@ -108,6 +120,8 @@ export class MuxChannel {
   private credit = BOX_CHANNEL_WINDOW_BYTES;
   private creditWaiters: (() => void)[] = [];
   private uncredited = 0;
+  /** Bytes received and not yet credited back to the peer (at most the window). */
+  private unacked = 0;
   private creditTimer: NodeJS.Immediate | null = null;
   private resolveOpen!: (info: BoxChannelOpenedInfo) => void;
   private rejectOpen!: (error: Error) => void;
@@ -150,6 +164,14 @@ export class MuxChannel {
   /** @internal */
   handleData(stream: BoxStream, payload: Uint8Array): void {
     if (this.dead) return;
+    this.unacked += payload.byteLength;
+    if (this.unacked > BOX_CHANNEL_WINDOW_BYTES) {
+      // The peer ignores flow control: stop buffering for it.
+      const error = windowExceeded();
+      this.close(error);
+      this.onClose?.(BoxError.from(error));
+      return;
+    }
     this.onData?.(stream, Buffer.from(payload));
   }
 
@@ -204,6 +226,7 @@ export class MuxChannel {
     if (this.dead || this.uncredited <= 0) return;
     const bytes = this.uncredited;
     this.uncredited = 0;
+    this.unacked = Math.max(0, this.unacked - bytes);
     this.mux.sendControl({ t: "credit", ch: this.id, bytes });
   }
 
@@ -257,6 +280,8 @@ export class BoxMux {
   private readonly pending = new Map<number, Pending>();
   private readonly channels = new Map<number, MuxChannel>();
   private readonly raw = new Map<number, RawChannelSink>();
+  /** Raw channels: bytes received and not yet credited back by the sink's owner. */
+  private readonly rawUnacked = new Map<number, number>();
   private readonly inbound = new Map<number, AbortController>();
   private shutDown = false;
 
@@ -346,6 +371,7 @@ export class BoxMux {
       return id;
     }
     this.raw.set(id, sink);
+    this.rawUnacked.set(id, 0);
     this.sendControl({ t: "open", ch: id, spec });
     return id;
   }
@@ -353,8 +379,14 @@ export class BoxMux {
   /** Send a control frame of a raw channel (its `ch` is replaced by `id`). */
   sendRaw(id: number, message: BoxControlMessage): void {
     if (!this.raw.has(id)) return;
-    if (message.t === "close") this.raw.delete(id);
+    if (message.t === "close") this.forgetRaw(id);
+    if (message.t === "credit" && message.bytes > 0) this.rawUnacked.set(id, Math.max(0, (this.rawUnacked.get(id) ?? 0) - message.bytes));
     this.sendControl({ ...message, ch: id } as BoxControlMessage);
+  }
+
+  private forgetRaw(id: number): void {
+    this.raw.delete(id);
+    this.rawUnacked.delete(id);
   }
 
   sendRawData(id: number, stream: BoxStream, payload: Uint8Array): void {
@@ -376,6 +408,16 @@ export class BoxMux {
     }
     const raw = this.raw.get(decoded.channel);
     if (raw) {
+      const unacked = (this.rawUnacked.get(decoded.channel) ?? 0) + decoded.payload.byteLength;
+      if (unacked > BOX_CHANNEL_WINDOW_BYTES) {
+        // Close it both ways: to the peer, and to the sink's owner as a peer close.
+        const error = windowExceeded();
+        this.forgetRaw(decoded.channel);
+        this.sendControl({ t: "close", ch: decoded.channel, error });
+        raw.control({ t: "close", ch: decoded.channel, error });
+        return;
+      }
+      this.rawUnacked.set(decoded.channel, unacked);
       raw.data(decoded.stream, decoded.payload);
       return;
     }
@@ -414,7 +456,7 @@ export class BoxMux {
     if (!("ch" in message)) return;
     const raw = this.raw.get(message.ch);
     if (raw) {
-      if (message.t === "close" || message.t === "open-failed") this.raw.delete(message.ch);
+      if (message.t === "close" || message.t === "open-failed") this.forgetRaw(message.ch);
       raw.control(message);
       return;
     }
@@ -502,6 +544,7 @@ export class BoxMux {
     this.channels.clear();
     const raw = [...this.raw.values()];
     this.raw.clear();
+    this.rawUnacked.clear();
     for (const sink of raw) sink.lost();
   }
 }

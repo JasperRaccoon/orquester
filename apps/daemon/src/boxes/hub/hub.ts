@@ -88,6 +88,20 @@ export interface BoxHubServer extends BoxHub {
 }
 
 const HELLO_TIMEOUT_MS = 30_000;
+/**
+ * Largest WebSocket message a box may send before its hello is authenticated
+ * (a hello is a few KiB): an unauthenticated peer cannot make the daemon buffer
+ * the ws default of 100 MiB per message.
+ */
+export const BOX_PRE_AUTH_MAX_MESSAGE_BYTES = 64 * 1024;
+/**
+ * Largest message on an authenticated link: data frames are at most
+ * BOX_MAX_FRAME_PAYLOAD + 5 bytes; control frames (a large `fs.readdir`
+ * answer) get what orq-agent itself accepts from the daemon.
+ */
+export const BOX_LINK_MAX_MESSAGE_BYTES = 64 * 1024 * 1024;
+/** Frames a box may send after its hello and before the welcome (orq-agent sends none). */
+const EARLY_MAX_BYTES = 64 * 1024;
 const OIDC_TIMEOUT_MS = 30_000;
 const UPDATE_TIMEOUT_MS = 5 * 60_000;
 /** WebSocket close codes the hub uses. */
@@ -115,6 +129,17 @@ function rawDataToBuffer(data: Buffer | ArrayBuffer | Buffer[]): Buffer {
 
 function headerValue(value: string | string[] | undefined): string | undefined {
   return Array.isArray(value) ? value[0] : value;
+}
+
+/**
+ * Set the largest message `socket` accepts from now on. The daemon registers
+ * one `@fastify/websocket` server for every route, so the limit is per socket:
+ * ws keeps it on the socket's receiver, which checks each frame's announced
+ * length before buffering it (and closes with 1009 when it is too long).
+ */
+function limitMessageBytes(socket: WebSocket, bytes: number): void {
+  const receiver = (socket as unknown as { _receiver?: { _maxPayload?: unknown } })._receiver;
+  if (receiver && typeof receiver._maxPayload === "number") receiver._maxPayload = bytes;
 }
 
 export function createBoxHub(deps: BoxHubDeps): BoxHubServer {
@@ -271,7 +296,6 @@ export function createBoxHub(deps: BoxHubDeps): BoxHubServer {
 
   const dropLink = (boxId: string, link: LiveLink): void => {
     clearInterval(link.heartbeat);
-    link.mux.shutdown();
     if (links.get(boxId) === link) {
       links.delete(boxId);
       const connection = connections.get(boxId);
@@ -281,6 +305,11 @@ export function createBoxHub(deps: BoxHubDeps): BoxHubServer {
       }
       touchRecord(boxId, null);
     }
+    // Only now fail the link's channels: everyone (the relay's clients too)
+    // already knows the box is away, so a detached process's viewer that
+    // loses its channel waits for the reconnect instead of reattaching into
+    // a link that is not there.
+    link.mux.shutdown();
   };
 
   const reject = (socket: WebSocket, code: BoxRejectCode, message: string, upgradeUrl?: string): void => {
@@ -330,6 +359,25 @@ export function createBoxHub(deps: BoxHubDeps): BoxHubServer {
 
   const establish = async (socket: WebSocket, hello: BoxHello, auth: Extract<AuthResult, { ok: true }>, early: (Buffer | string)[], feed: { target: ((data: Buffer, binary: boolean) => void) | null }): Promise<void> => {
     const { boxId } = auth;
+    // Authentication awaited (a GitHub OIDC check, a record write): the box
+    // may have been revoked or destroyed meanwhile. Check again, synchronously
+    // with linking it.
+    const current = deps.records.get(boxId);
+    if (closed || revoked.has(boxId) || !current || current.state === "destroyed") {
+      logger.warn("box connection refused", { code: "BOX_DESTROYED", auth: hello.auth?.kind });
+      reject(socket, "BOX_DESTROYED", "This box was destroyed");
+      if (auth.credential && current) {
+        // The credential minted for this connect must not outlive the revoke.
+        const minted = hashSecret(auth.credential);
+        await deps.records
+          .update(boxId, (record) => {
+            if (record.credentialHash === minted) delete record.credentialHash;
+          })
+          .catch((error: Error) => logger.warn("could not clear the box credentials", { boxId, error: error.message }));
+      }
+      return;
+    }
+    limitMessageBytes(socket, BOX_LINK_MAX_MESSAGE_BYTES);
     const previous = links.get(boxId);
     if (previous) {
       // A new connection for the same box replaces the old one.
@@ -417,9 +465,12 @@ export function createBoxHub(deps: BoxHubDeps): BoxHubServer {
         socket.close(1001, "daemon shutting down");
         return;
       }
+      // Nothing large is accepted until the hello is authenticated.
+      limitMessageBytes(socket, BOX_PRE_AUTH_MAX_MESSAGE_BYTES);
       // Frames that arrive while the hello is being authenticated are kept
-      // in order and handed to the link once it exists.
+      // in order (up to EARLY_MAX_BYTES) and handed to the link once it exists.
       const early: (Buffer | string)[] = [];
+      let earlyBytes = 0;
       const feed: { target: ((data: Buffer, binary: boolean) => void) | null } = { target: null };
       let gotHello = false;
       const helloTimer = setTimeout(() => {
@@ -435,6 +486,12 @@ export function createBoxHub(deps: BoxHubDeps): BoxHubServer {
           return;
         }
         if (gotHello) {
+          earlyBytes += buffer.byteLength;
+          if (earlyBytes > EARLY_MAX_BYTES) {
+            early.length = 0;
+            socket.close(CLOSE_POLICY, "too much data before the welcome");
+            return;
+          }
           early.push(isBinary ? buffer : buffer.toString("utf8"));
           return;
         }

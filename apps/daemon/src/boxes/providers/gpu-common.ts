@@ -136,14 +136,29 @@ export async function pollUntil<T>(
 }
 
 /**
+ * `posixScript` that deletes its own file before it does anything else: a bootstrap written to a
+ * file (it embeds the single-use token) leaves no copy behind once `sh` has opened it, whether it
+ * succeeds or not. Run it as `sh <file>` (`$0` is the file).
+ */
+export function selfDeletingScript(posixScript: string): string {
+  return `rm -f "$0"\n${posixScript}`;
+}
+
+/**
  * The bootstrap as one shell command line, for providers whose "startup command" is a single
- * string (templated into cloud-init or run by their agent): decode the base64 `posixScript` into a
+ * string (templated into cloud-init or run by their agent): decode the base64 bootstrap into a
  * private temp file (mktemp → 0600) and start it detached, so the command returns at once and the
  * script survives the provider's shell. Base64 keeps the line free of quotes and newlines.
+ *
+ * The line itself (the token inside its base64) is in the argv of the shell that runs it, so only
+ * that shell may see it, briefly: the braces background `nohup sh "$f"` alone (a fork that execs
+ * it), never the whole `&&` list — that would leave a subshell carrying this argv as the parent of
+ * the bootstrap, and of `orq-agent`, for the box's lifetime. The script deletes its file first
+ * ({@link selfDeletingScript}).
  */
 export function detachedStartCommand(posixScript: string): string {
-  const encoded = Buffer.from(posixScript, "utf8").toString("base64");
-  return `f=$(mktemp) && echo ${encoded} | base64 -d > "$f" && nohup sh "$f" > "$f.log" 2>&1 &`;
+  const encoded = Buffer.from(selfDeletingScript(posixScript), "utf8").toString("base64");
+  return `f=$(mktemp) && echo ${encoded} | base64 -d > "$f" && { nohup sh "$f" > "$f.log" 2>&1 & }`;
 }
 
 /** Throws `signal.reason` when aborted (between multi-call steps). */

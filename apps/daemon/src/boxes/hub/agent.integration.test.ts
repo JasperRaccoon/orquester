@@ -5,7 +5,7 @@
  */
 
 import assert from "node:assert/strict";
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { once } from "node:events";
 import { mkdir, mkdtemp, readFile, readlink, rm, stat, symlink, writeFile } from "node:fs/promises";
@@ -18,6 +18,7 @@ import { after, before, describe, test } from "node:test";
 import type { BoxFsChangeEvent } from "@orquester/api";
 import { boxSocketPath } from "@orquester/config";
 
+import { spawnBoxChild } from "../../agent-host/boxes/remote-child.ts";
 import { connectBoxRelay } from "../client/index.ts";
 import type { BoxConnection, BoxProcess } from "../contracts.ts";
 import type { BoxAgentBuilds } from "./builds.ts";
@@ -269,10 +270,15 @@ describe("orq-agent ↔ hub", { concurrency: false }, () => {
     await connection.request("proc.release", { procId: "p1" });
     assert.equal((await connection.request("proc.list", {})).some((p) => p.procId === "p1"), false);
 
-    // A small ring buffer: attaching from 0 reports what was dropped.
-    const small = connection.exec({ command: "sh", args: ["-c", "echo 0123456789abcdef; read x"], detach: { procId: "p2", bufferBytes: 8 } });
-    await waitForText(small.stdout, "abcdef\n");
-    const late = connection.attach("p2", 0) as BoxProcess & { outputOffset: number };
+    // A small ring buffer: the process's own viewer cannot follow output that overwrote
+    // itself, and ends with an error instead of skipping; attaching from 0 reports the loss.
+    // (The process writes only once its viewer is there, on input.)
+    const small = connection.exec({ command: "sh", args: ["-c", "read go; echo 0123456789abcdef; read x"], detach: { procId: "p2", bufferBytes: 8 } });
+    const overrun = new Promise<Error & { code?: string }>((resolve) => small.once("error", resolve));
+    await new Promise<void>((resolve) => small.once("spawn", () => resolve()));
+    small.stdin.write("go\n");
+    assert.equal((await overrun).code, "OUTPUT_OVERRUN");
+    const late = connection.attach("p2", 0);
     const lateExit = new Promise((resolve) => late.once("exit", resolve));
     const tail = await waitForText(late.stdout, "\n");
     assert.equal(tail, "9abcdef\n");
@@ -508,6 +514,76 @@ describe("orq-agent ↔ hub", { concurrency: false }, () => {
       const waiting = relay.request("fs.stat", { path: work }, { timeoutMs: 60_000 });
       await up;
       assert.equal((await waiting)?.kind, "dir");
+    } finally {
+      relay.close();
+    }
+  });
+
+  test("an agent child in the box keeps running across a dropped link and reattaches through the relay", TIMEOUT, async (t) => {
+    if (!haveGo) return t.skip("Go toolchain not installed");
+    const relay = await connectBoxRelay(boxSocketPath(root, BOX_ID), { boxId: BOX_ID });
+    try {
+      const notices: string[] = [];
+      const child = spawnBoxChild({
+        connection: relay,
+        command: "sh",
+        args: ["-c", 'echo one; read x; echo "two:$x"'],
+        env: {},
+        cwd: work,
+        detach: { procId: "rc-1" },
+        onNotice: (message) => notices.push(message)
+      });
+      const firstLine = waitForText(child.stdout, "one\n");
+      let out = "";
+      child.stdout.on("data", (chunk: Buffer) => (out += chunk.toString("utf8")));
+      await firstLine;
+      const down = waitStatus(relay, false);
+      const up = (async () => {
+        await down;
+        await waitStatus(relay, true);
+      })();
+      proxy.cutAll();
+      await up;
+      child.stdin.write("x\n");
+      assert.deepEqual(await child.exited, { kind: "exit", code: 0, signal: null }, notices.join("\n"));
+      assert.equal(out, "one\ntwo:x\n");
+      assert.ok(notices.some((notice) => notice.includes("reattached at offset 4")), notices.join("\n"));
+    } finally {
+      relay.close();
+    }
+  });
+
+  test("an agent child whose output the box dropped while it was away is ended, and its process killed", TIMEOUT, async (t) => {
+    if (!haveGo) return t.skip("Go toolchain not installed");
+    const go = join(root, "rc2-go");
+    const done = join(root, "rc2-done");
+    assert.equal(spawnSync("mkfifo", [go, done]).status, 0);
+    const relay = await connectBoxRelay(boxSocketPath(root, BOX_ID), { boxId: BOX_ID });
+    try {
+      const notices: string[] = [];
+      const child = spawnBoxChild({
+        connection: relay,
+        command: "sh",
+        // Waits for the test, writes four times its buffer, reports that locally, then idles.
+        args: ["-c", `echo ready; read x < '${go}'; head -c 4096 /dev/zero; echo done > '${done}'; read y`],
+        env: {},
+        cwd: work,
+        detach: { procId: "rc-2", bufferBytes: 1024 },
+        onNotice: (message) => notices.push(message)
+      });
+      await waitForText(child.stdout, "ready\n");
+      // The box stays away while the process writes past its buffer.
+      const down = waitStatus(relay, false);
+      const release = proxy.hold();
+      proxy.cutAll();
+      await down;
+      await writeFile(go, "go\n");
+      assert.equal(await readFile(done, "utf8"), "done\n");
+      release();
+      assert.deepEqual(await child.exited, { kind: "signal", code: null, signal: "SIGKILL" }, notices.join("\n"));
+      assert.ok(notices.some((notice) => /dropped/.test(notice)), notices.join("\n"));
+      const listed = (await connection.request("proc.list", {})).find((proc) => proc.procId === "rc-2");
+      assert.ok(listed === undefined || !listed.running, "the process in the box was killed");
     } finally {
       relay.close();
     }

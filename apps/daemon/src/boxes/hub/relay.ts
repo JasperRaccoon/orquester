@@ -5,6 +5,12 @@
  * to the box raw, with ids remapped, so flow control stays end to end. When
  * a client goes away its channels are closed and its watches and forwards
  * are removed from the box.
+ *
+ * A link drop reaches clients as `relay-status {connected:false}` BEFORE the
+ * `close {BOX_DISCONNECTED}` of their channels (the hub detaches the link
+ * first), and an `open` while the box is away waits for the link like a
+ * request does: a detached process's viewer that reattaches at once is held
+ * until the box is back instead of failing (and being taken for gone).
  */
 
 import { chmod, lstat, mkdir, unlink } from "node:fs/promises";
@@ -13,8 +19,8 @@ import { dirname } from "node:path";
 
 import { parseControlMessage, type BoxControlMessage, type BoxStream } from "@orquester/api";
 
-import type { LinkedBoxConnection } from "../client/connection.ts";
-import { BOX_DISCONNECTED } from "../client/mux.ts";
+import { CHANNEL_OPEN_TIMEOUT_MS, type LinkedBoxConnection } from "../client/connection.ts";
+import { BOX_DISCONNECTED, type BoxMux } from "../client/mux.ts";
 import {
   RELAY_FRAME_BINARY,
   RELAY_PROTOCOL_VERSION,
@@ -51,6 +57,8 @@ class RelayClientSession {
   private welcomed = false;
   /** client channel id → box channel id (and the reverse on the box mux). */
   private readonly channels = new Map<number, { boxId: number; mux: ReturnType<LinkedBoxConnection["currentMux"]> }>();
+  /** Opens waiting for the box link; frames the client sends meanwhile are queued in order. */
+  private readonly pendingOpens = new Map<number, { abort: AbortController; queued: ({ control: BoxControlMessage } | { data: Uint8Array })[] }>();
   private readonly requests = new Map<number, AbortController>();
   private readonly watches = new Set<string>();
   private readonly forwards = new Set<number>();
@@ -131,6 +139,15 @@ class RelayClientSession {
       case "credit":
       case "close":
       case "exit": {
+        const pending = this.pendingOpens.get(message.ch);
+        if (pending) {
+          if (message.t === "close") {
+            // Given up before the box came back: nothing was opened there.
+            this.pendingOpens.delete(message.ch);
+            pending.abort.abort();
+          } else pending.queued.push({ control: message });
+          return;
+        }
         const entry = this.channels.get(message.ch);
         if (!entry) return;
         if (message.t === "close") this.channels.delete(message.ch);
@@ -145,6 +162,11 @@ class RelayClientSession {
   private onData(frame: Uint8Array): void {
     const decoded = decodeData(frame);
     if (!decoded) return;
+    const pending = this.pendingOpens.get(decoded.channel);
+    if (pending) {
+      pending.queued.push({ data: frame });
+      return;
+    }
     const entry = this.channels.get(decoded.channel);
     entry?.mux?.sendRawData(entry.boxId, decoded.stream, decoded.payload);
   }
@@ -169,15 +191,39 @@ class RelayClientSession {
   }
 
   private relayOpen(clientId: number, message: Extract<BoxControlMessage, { t: "open" }>): void {
-    const mux = this.relay.connection.currentMux();
-    if (clientId % 2 !== 0 || this.channels.has(clientId)) {
+    if (clientId % 2 !== 0 || this.channels.has(clientId) || this.pendingOpens.has(clientId)) {
       this.sendText({ t: "open-failed", ch: clientId, error: { code: "BAD_CHANNEL", message: "Channel id not allowed" } });
       return;
     }
-    if (!mux) {
-      this.sendText({ t: "open-failed", ch: clientId, error: { code: BOX_DISCONNECTED, message: "The box is not connected" } });
+    const mux = this.relay.connection.currentMux();
+    if (mux) {
+      this.openOn(mux, clientId, message);
       return;
     }
+    // The box is away (a reconnect in progress): wait for its link, as a
+    // relayed request would, then open; fail only once the wait is over.
+    const pending = { abort: new AbortController(), queued: [] as ({ control: BoxControlMessage } | { data: Uint8Array })[] };
+    this.pendingOpens.set(clientId, pending);
+    this.relay.connection.waitMux(Date.now() + CHANNEL_OPEN_TIMEOUT_MS, pending.abort.signal).then(
+      (next) => {
+        if (this.pendingOpens.get(clientId) !== pending) return;
+        this.pendingOpens.delete(clientId);
+        if (this.closed) return;
+        this.openOn(next, clientId, message);
+        for (const item of pending.queued) {
+          if ("data" in item) this.onData(item.data);
+          else this.onControl(item.control);
+        }
+      },
+      () => {
+        if (this.pendingOpens.get(clientId) !== pending) return;
+        this.pendingOpens.delete(clientId);
+        this.sendText({ t: "open-failed", ch: clientId, error: { code: BOX_DISCONNECTED, message: "The box did not reconnect in time" } });
+      }
+    );
+  }
+
+  private openOn(mux: BoxMux, clientId: number, message: Extract<BoxControlMessage, { t: "open" }>): void {
     const boxId = mux.openRaw(message.spec, {
       control: (frame) => {
         if (frame.t === "close" || frame.t === "open-failed") this.channels.delete(clientId);
@@ -200,6 +246,8 @@ class RelayClientSession {
     this.relay.forgetSession(this);
     for (const controller of this.requests.values()) controller.abort();
     this.requests.clear();
+    for (const pending of this.pendingOpens.values()) pending.abort.abort();
+    this.pendingOpens.clear();
     for (const entry of this.channels.values()) entry.mux?.sendRaw(entry.boxId, { t: "close", ch: entry.boxId });
     this.channels.clear();
     const connection = this.relay.connection;

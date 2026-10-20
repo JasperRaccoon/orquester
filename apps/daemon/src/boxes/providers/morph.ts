@@ -18,6 +18,7 @@
  *   have neither curl nor wget. The exec API takes only argv, so the script
  *   text — bootstrap token included — is visible in the box's own process
  *   list for the few milliseconds the writer runs; the token is single-use.
+ *   The script deletes its file as soon as it starts (`selfDeletingScript`).
  */
 
 import type { BoxImageOffer, BoxKind, BoxRegionOffer, BoxSizeOffer } from "@orquester/api";
@@ -34,6 +35,7 @@ import type {
   ProviderManagedInstance,
   ProviderOffers
 } from "../contracts.ts";
+import { selfDeletingScript } from "./gpu-common.ts";
 import { providerRequest } from "./http.ts";
 import { MORPH_MCU_DISK_GB, MORPH_MCU_RAM_GB, MORPH_USD_PER_MCU, roundUsd } from "./price-tables.ts";
 import {
@@ -197,7 +199,7 @@ export function bootstrapCommand(posixScript: string): string[] {
     "set -e",
     "umask 077",
     'f="${HOME:-/root}/.orq-bootstrap.sh"',
-    `printf '%s' '${base64(posixScript)}' | base64 -d > "$f"`,
+    `printf '%s' '${base64(selfDeletingScript(posixScript))}' | base64 -d > "$f"`,
     'chmod 700 "$f"',
     "setsid nohup /bin/sh -c '" +
       "command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || " +
