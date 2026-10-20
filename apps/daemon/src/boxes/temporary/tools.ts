@@ -520,7 +520,11 @@ export class TemporaryBoxTools {
         if (!box) return finish(refuse(409, "BOX_PROVISIONING_FAILED", "The box's record disappeared while it was starting."));
         if (box.state === "ready") return finish(done(box));
         if (box.state === "destroyed" || box.state === "destroying" || box.state === "destroy-failed") {
-          return finish(refuse(409, "BOX_PROVISIONING_FAILED", `The box did not start: ${clip(box.stateReason ?? box.destroyedReason ?? box.state)}.`));
+          // The failed step says why ("no instances available"); the state reason only says what
+          // happens next ("Destroying…").
+          const failed = (box.setup ?? []).find((step) => step.state === "failed");
+          const why = failed?.message ? `${failed.label}: ${failed.message}` : (box.stateReason ?? box.destroyedReason ?? box.state);
+          return finish(refuse(409, "BOX_PROVISIONING_FAILED", `The box did not start: ${clip(why.replace(/[.…]+$/, ""))}.`));
         }
       };
       const onAbort = (): void => finish(refuse(499, "CANCELLED", "The wait was cancelled."));

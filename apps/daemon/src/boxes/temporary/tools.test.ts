@@ -184,6 +184,22 @@ test("waitReady: resolves on the change that makes the box ready; fails on destr
   const failed = await failing;
   assert.ok(!failed.ok && failed.code === "BOX_PROVISIONING_FAILED" && failed.message.includes("Vultr refused the image"));
 
+  // The teardown's state reason ("Destroying…") is no reason: the failed step's message is.
+  const stock = await tools.create(agent(), createBody);
+  assert.ok(stock.ok);
+  const outOfStock = tools.waitReady(stock.value.id, 60_000, { principal: agent() });
+  boxes.update(stock.value.id, {
+    state: "destroying",
+    stateReason: "Destroying…",
+    setup: [
+      { id: "create", label: "Create the machine", state: "failed", startedAt: null, finishedAt: null, message: "RunPod: There are no longer any instances available." },
+      { id: "connect", label: "Wait for orq-agent to connect", state: "pending", startedAt: null, finishedAt: null, message: null }
+    ]
+  });
+  const stockFailed = await outOfStock;
+  assert.ok(!stockFailed.ok);
+  assert.equal(stockFailed.message, "The box did not start: Create the machine: RunPod: There are no longer any instances available.");
+
   const third = await tools.create(agent(), createBody);
   assert.ok(third.ok);
   const timing = tools.waitReady(third.value.id, 60_000, { principal: agent() });
