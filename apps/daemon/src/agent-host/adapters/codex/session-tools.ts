@@ -171,7 +171,10 @@ function codexThreadConfig(
   }
   const config: ThreadConfig = {};
   for (const [name, entry] of entries) {
-    const whole = (name === ours && launch !== undefined) || Object.keys(entry as object).length > 1;
+    // Only a bare `{enabled: false}` becomes the one dotted key; any other entry (boxes: a "Run
+    // in box" server's `{env}` alone) is a table merged whole.
+    const disableOnly = Object.keys(entry as object).length === 1 && (entry as { enabled?: unknown }).enabled === false;
+    const whole = (name === ours && launch !== undefined) || !disableOnly;
     if (whole) config[`mcp_servers.${name}`] = entry;
     else config[`mcp_servers.${name}.enabled`] = false;
   }
@@ -203,11 +206,22 @@ export function codexSessionToolsConfig(launch: CodexSessionToolsLaunch, extra?:
  * value would otherwise ride into the bridge process). A bridged HTTP server (host loopback, or
  * secret headers) cannot turn into a stdio one under its own name (Codex refuses a `url` merged
  * with a `command`): it is switched off and its bridge registered as `<name>_host`.
+ *
+ * A "Run in box" server (`inBox`) keeps running in the box, but the box's copy of its config has
+ * every env and header value blanked by the sync: its `env` / `http_headers` values from the
+ * host's definition are merged back here — in the thread's config, which reaches the app-server
+ * over its stdio and never a file in the box.
  */
 export function codexBoxMcpOverrides(
-  bridged: readonly { name: string; command: string; args: string[]; transport: "stdio" | "http" | "sse"; envKeys: readonly string[] }[]
+  bridged: readonly { name: string; command: string; args: string[]; transport: "stdio" | "http" | "sse"; envKeys: readonly string[] }[],
+  inBox: readonly { name: string; transport: "stdio" | "http" | "sse"; env?: Record<string, string>; headers?: Record<string, string> }[] = []
 ): Map<string, ConfigValue> {
   const entries = new Map<string, ConfigValue>();
+  for (const server of inBox) {
+    const values = server.transport === "stdio" ? server.env : server.headers;
+    if (values === undefined || Object.keys(values).length === 0) continue;
+    entries.set(server.name, server.transport === "stdio" ? { env: { ...values } } : { http_headers: { ...values } });
+  }
   for (const server of bridged) {
     if (server.transport === "stdio") {
       entries.set(server.name, {

@@ -13,7 +13,9 @@
  *   --json` IN the box, their definitions read from those files on the host
  *   (the source of truth; the box's are copies) or, for a project's own file,
  *   in the box. Each one that must run here becomes a same-named ACP stdio
- *   entry of the bridge, which REPLACES the config's server (session-tools.ts).
+ *   entry of the bridge, which REPLACES the config's server (session-tools.ts);
+ *   a "Run in box" one is replaced the same way by its host definition, so its
+ *   env and header values (blanked in the box's copy) reach Grok in memory.
  * - An Agent Profile chat: the prepared home's `config.toml` denies every plugin Grok discovers
  *   but the profile's own — discovered by `grok inspect --json` IN the box
  *   ({@link boxGrokPluginNames}), since the box's Grok loads the box's plugins. The file is
@@ -39,7 +41,7 @@ export interface GrokBoxLaunch {
   launch: BoxLaunch;
   /** Removed from `orq-agent`'s own environment. */
   envUnset: readonly string[];
-  /** The bridged servers and our own server's bridge, for `session/new` / `session/load`. */
+  /** The bridged (and "Run in box") servers and our own server's bridge, for `session/new` / `session/load`. */
   mcp: GrokBoxMcpServers;
 }
 
@@ -156,7 +158,8 @@ function definitionIn(text: string, path: string, name: string, cwd: string, env
 }
 
 /**
- * The servers Grok would load in the box, planned and registered for the bridge. A failing
+ * The servers Grok would load in the box, planned and registered for the bridge — and each
+ * "Run in box" one given again with its host definition ({@link inBoxAcpServer}). A failing
  * inspect leaves every server as the box's config has it (logged): the session still starts.
  */
 export async function grokBoxMcpServers(input: {
@@ -200,5 +203,22 @@ export async function grokBoxMcpServers(input: {
     if (spec !== null) specs.push(spec);
   }
   const plan = await launch.bridgeMcpServers(specs);
-  return plan.bridged.map((server) => ({ name: server.name, command: server.command, args: server.args, env: [] }));
+  return [
+    ...plan.bridged.map((server): McpServer => ({ name: server.name, command: server.command, args: server.args, env: [] })),
+    ...plan.inBox.map(inBoxAcpServer)
+  ];
+}
+
+/**
+ * A "Run in box" server as a same-named ACP entry that replaces the config's: the box's copy of
+ * the file has its env and header values blanked, so the host's definition (with them) rides the
+ * `session/new` / `session/load` request into Grok's memory — never a file in the box.
+ */
+function inBoxAcpServer(server: McpServerSpec): McpServer {
+  const pairs = (values: Record<string, string> | undefined) =>
+    Object.entries(values ?? {}).map(([name, value]) => ({ name, value }));
+  if (server.transport === "stdio") {
+    return { name: server.name, command: server.command ?? "", args: server.args ?? [], env: pairs(server.env) };
+  }
+  return { type: server.transport, name: server.name, url: server.url ?? "", headers: pairs(server.headers) };
 }

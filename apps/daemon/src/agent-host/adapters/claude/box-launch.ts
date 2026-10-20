@@ -12,9 +12,9 @@
  *   `CLAUDE_CODE_OAUTH_TOKEN`, which switches the default model to Sonnet);
  * - its login: a brokered ACCESS token in a refresh-token-free
  *   `<box config dir>/.credentials.json` (0600, atomic), which the running CLI
- *   re-reads on its next request — so it is rewritten with a fresh grant before
- *   a turn whenever the token has under 30 minutes left (`token-policy.ts`),
- *   with no restart (spikes doc (a));
+ *   re-reads on its next request — so it is rewritten with a fresh grant
+ *   whenever the token has under 30 minutes left: before and after a turn, and
+ *   by a timer mid-turn (`token-policy.ts`), with no restart (spikes doc (a));
  * - the MCP servers of the account's own config (user and local scope of its
  *   `.claude.json`) and a profile's `--mcp-config`, rewritten so every server
  *   that must run here is reached through `orq-agent mcp-bridge` under the same
@@ -66,28 +66,35 @@ function isRecord(value: unknown): value is Doc {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** The account's user- and local-scope servers (`.claude.json`), the host copy being the source of truth. */
-async function accountMcpServers(claudeJson: string, cwd: string): Promise<McpServerSpec[]> {
+/**
+ * The account's user- and local-scope servers (`.claude.json`), the host copy being the source of
+ * truth: each one's spec, and its definition as the file has it (secrets included — the box's
+ * copy has them blanked).
+ */
+async function accountMcpServers(claudeJson: string, cwd: string): Promise<{ specs: McpServerSpec[]; defs: Record<string, Doc> }> {
   let doc: unknown;
   try {
     doc = JSON.parse(await readFile(claudeJson, "utf8")) as unknown;
   } catch {
-    return [];
+    return { specs: [], defs: {} };
   }
-  if (!isRecord(doc)) return [];
+  if (!isRecord(doc)) return { specs: [], defs: {} };
   const byName = new Map<string, McpServerSpec>();
+  const defs: Record<string, Doc> = {};
   const add = (servers: unknown): void => {
     if (!isRecord(servers)) return;
     for (const [name, def] of Object.entries(servers)) {
       const spec = claudeMcpSpec(name, def);
-      if (spec !== null) byName.set(name, spec);
+      if (spec === null || !isRecord(def)) continue;
+      byName.set(name, spec);
+      defs[name] = def;
     }
   };
   add(doc.mcpServers);
   // Local scope wins over user scope, as in the CLI.
   const project = isRecord(doc.projects) ? doc.projects[cwd] : undefined;
   if (isRecord(project)) add(project.mcpServers);
-  return [...byName.values()];
+  return { specs: [...byName.values()], defs };
 }
 
 /** Without an expiry from the broker, the file says one hour; the CLI does not refresh either way. */
@@ -264,9 +271,17 @@ export async function prepareClaudeBoxSession(input: {
       };
     } else {
       // A Global chat loads the account's own config from the box's synced copy; the bridged
-      // servers replace their same-named entries there.
-      const plan = await launch.bridgeMcpServers(await accountMcpServers(claudeJsonPath(hostEnv), start.cwd));
-      mcpServers = Object.fromEntries(plan.bridged.map((server) => [server.name, bridgedEntry(server.command, server.args)]));
+      // servers replace their same-named entries there, and so does each "Run in box" one — the
+      // copy has its env and header values blanked, so it is given again from the host's
+      // definition with those values moved into the CLI's env (`${VAR}` in the entry).
+      const account = await accountMcpServers(claudeJsonPath(hostEnv), start.cwd);
+      const plan = await launch.bridgeMcpServers(account.specs);
+      const replaced = new Set([...plan.bridged, ...plan.inBox].map((server) => server.name));
+      mcpServers = rewriteServers(
+        Object.fromEntries(Object.entries(account.defs).filter(([name]) => replaced.has(name))),
+        plan,
+        env
+      );
     }
 
     return {

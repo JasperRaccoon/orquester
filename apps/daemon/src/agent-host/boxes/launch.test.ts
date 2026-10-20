@@ -1,19 +1,21 @@
 import assert from "node:assert/strict";
 import { chmod, mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
+
+import { boxMcpSettingsPath, withRunInBox } from "@orquester/config";
 
 import { claudeProjectMcpServers } from "../../agent-isolation/claude-names.ts";
 import { localBoxConnection } from "../../boxes/testing.ts";
 import type { AdapterContext, AdapterLogger } from "../adapter.ts";
 import type { HostThreadBox } from "../host-protocol.ts";
 import { claudeBoxCredentials, prepareClaudeBoxSession } from "../adapters/claude/box-launch.ts";
-import { createFakeContext } from "../adapters/codex/testing.ts";
+import { createFakeContext, waitUntil } from "../adapters/codex/testing.ts";
 import { renderGrokOverlayConfig } from "../adapters/grok/launch.ts";
 import { createAgentHostBoxes, BoxLaunchError } from "./index.ts";
 import { readMcpBridgeEntry } from "./mcp-bridge-registry.ts";
-import { BOX_TOKEN_RESTART_MARGIN_MS } from "./token-policy.ts";
+import { BOX_TOKEN_RENEW_MAX_DELAY_MS, BOX_TOKEN_RESTART_MARGIN_MS } from "./token-policy.ts";
 import { reattachableBoxConnection, recordingSync, recordingTokens, redirectedBoxConnection, rootedReadsBoxConnection } from "./testing.ts";
 
 const quiet: AdapterLogger = { debug: () => undefined, info: () => undefined, warn: () => undefined, error: () => undefined };
@@ -182,6 +184,88 @@ test("Claude's box login: a refresh-token-free credentials file, rewritten only 
   assert.equal(tokens.requests.length, 2);
 });
 
+test("Claude's box login is renewed mid-turn: a timer armed for the margin rewrites the file with no turn boundary", async () => {
+  const home = await boxHome(["claude"]);
+  const root = await mkdtemp(join(tmpdir(), "box-root-"));
+  const connection = redirectedBoxConnection(localBoxConnection({ sys: { home, shell: join(home, "sh"), agentPath: "/opt/orq-agent" } }), root);
+  let now = 1_800_000_000_000;
+  const timers: { callback: () => void; delayMs: number; done: boolean }[] = [];
+  const live = () => timers.filter((timer) => !timer.done);
+  const fire = (): void => {
+    const [timer] = live();
+    assert.ok(timer !== undefined, "a renewal timer is armed");
+    timer.done = true;
+    now += timer.delayMs;
+    timer.callback();
+  };
+  const tokens = recordingTokens({ accessToken: "access-1", expiresAt: now + 8 * 60 * 60_000 });
+  let failRenewal = false;
+  const boxes = createAgentHostBoxes({
+    appdir: join(root, "appdir"),
+    connector: () => connection,
+    tokens: {
+      getToken: async (request, signal) => {
+        if (failRenewal) throw new Error("sign-in service unreachable");
+        return tokens.getToken(request, signal);
+      }
+    },
+    sync: recordingSync(),
+    logger: quiet,
+    now: () => now,
+    schedule: (callback, delayMs) => {
+      const timer = { callback, delayMs, done: false };
+      timers.push(timer);
+      return () => {
+        timer.done = true;
+      };
+    }
+  });
+  const launch = await boxes.launch({
+    threadId: "t1",
+    agent: "claude",
+    box: launchBox(connection),
+    home: { kind: "account", accountId: "acct-1", path: "/accounts/claude/acct-1/home" },
+    cwd: "/w/p"
+  });
+  const path = "/accounts/claude/acct-1/home/.credentials.json";
+  const fileToken = async () =>
+    (JSON.parse(await readFile(connection.localPathOf(path), "utf8")) as { claudeAiOauth: { accessToken: string } }).claudeAiOauth.accessToken;
+  await launch.installCredentials((grant) => connection.writeFile(path, JSON.stringify(claudeBoxCredentials(grant, now)), { mode: 0o600 }));
+  // Armed for the moment the token enters the 30-minute margin — at most 6 hours ahead, then
+  // looked at again without asking for anything.
+  assert.equal(live().length, 1);
+  assert.equal(live()[0]?.delayMs, BOX_TOKEN_RENEW_MAX_DELAY_MS);
+  fire();
+  await waitUntil(() => live().length === 1, "the timer re-armed for the rest");
+  assert.equal(tokens.requests.length, 1);
+  assert.equal(live()[0]?.delayMs, 8 * 60 * 60_000 - BOX_TOKEN_RENEW_MAX_DELAY_MS - BOX_TOKEN_RESTART_MARGIN_MS + 1);
+
+  // A turn is running (no turn boundary in sight) when the moment comes: the file is rewritten.
+  tokens.grant = { accessToken: "access-2", expiresAt: now + live()[0]!.delayMs + 4 * 60 * 60_000 };
+  fire();
+  await waitUntil(() => live().length === 1, "the timer re-armed after the renewal");
+  assert.equal(await fileToken(), "access-2");
+  assert.equal(tokens.requests.length, 2);
+  // Re-armed for the NEW token's margin.
+  assert.equal(live()[0]?.delayMs, 4 * 60 * 60_000 - BOX_TOKEN_RESTART_MARGIN_MS + 1);
+
+  // A renewal that fails while the token is still good is retried a minute later, not dropped.
+  failRenewal = true;
+  fire();
+  await waitUntil(() => live().length === 1, "the retry armed");
+  assert.equal(live()[0]?.delayMs, 60_000);
+  assert.equal(await fileToken(), "access-2");
+  failRenewal = false;
+  tokens.grant = { accessToken: "access-3", expiresAt: now + 60_000 + 8 * 60 * 60_000 };
+  fire();
+  await waitUntil(() => live().length === 1, "the timer re-armed after the retry");
+  assert.equal(await fileToken(), "access-3");
+
+  // Closing the launch cancels the timer.
+  await launch.close();
+  assert.equal(live().length, 0);
+});
+
 test("a turn's attachments are copied into the box at their mapped path and named by it", async () => {
   const home = await boxHome(["claude"]);
   const root = await mkdtemp(join(tmpdir(), "box-root-"));
@@ -312,12 +396,25 @@ test("a thread's process an earlier host left running in the box is stopped befo
     args: ["-e", "setInterval(() => {}, 1000)"],
     detach: { procId: "agent-claude-t10-old-1" }
   });
-  const leftoverExit = new Promise<string | null>((resolve) => leftover.once("exit", (_code, signal) => resolve(signal)));
+  assert.equal(leftover.exitCode, null);
+  // What the sync seams saw of the box when each was called.
+  const sync = recordingSync();
+  const seenAtSync: { op: string; released: string[] }[] = [];
+  const ensureSynced = sync.ensureSynced;
+  const pushForResume = sync.pushForResume;
+  sync.ensureSynced = async (...args) => {
+    seenAtSync.push({ op: "ensureSynced", released: [...connection.releases] });
+    return ensureSynced(...args);
+  };
+  sync.pushForResume = async (...args) => {
+    seenAtSync.push({ op: "pushForResume", released: [...connection.releases] });
+    return pushForResume(...args);
+  };
   const boxes = createAgentHostBoxes({
     appdir: join(home, "appdir"),
     connector: () => connection,
     tokens: recordingTokens({ accessToken: "t", expiresAt: null }),
-    sync: recordingSync(),
+    sync,
     logger: quiet
   });
   try {
@@ -326,15 +423,55 @@ test("a thread's process an earlier host left running in the box is stopped befo
       agent: "claude",
       box: launchBox(connection),
       home: { kind: "account", accountId: "a", path: "/accounts/claude/a/home" },
-      cwd: "/w/p"
+      cwd: "/w/p",
+      resumeSessionRef: "session-9"
     });
-    assert.equal(await leftoverExit, "SIGKILL");
+    // Stopped, its exit awaited, and only then released (the box refuses a running one: BUSY) —
+    // all before the config sync and the transcript push, which the leftover would race.
+    assert.deepEqual(seenAtSync, [
+      { op: "ensureSynced", released: ["agent-claude-t9-old-1"] },
+      { op: "pushForResume", released: ["agent-claude-t9-old-1"] }
+    ]);
+    assert.equal(
+      (await connection.request("proc.list", {})).some((proc) => proc.procId === "agent-claude-t9-old-1"),
+      false
+    );
     // Another thread's process is not this launch's to stop.
     assert.equal(other.exitCode, null);
     assert.equal(other.signalCode, null);
   } finally {
     await connection.killAll();
   }
+});
+
+test("a box that cannot list its processes fails the start before anything is synced", async () => {
+  const home = await boxHome(["claude"]);
+  const base = localBoxConnection({ sys: { home, shell: join(home, "sh"), agentPath: "/opt/orq-agent" } });
+  const request = base.request.bind(base) as (method: string, params: unknown) => Promise<unknown>;
+  const connection = Object.assign(Object.create(base) as object, {
+    request: (method: string, params: unknown) =>
+      method === "proc.list" ? Promise.reject(new Error("link dropped")) : request(method, params)
+  }) as typeof base;
+  const sync = recordingSync();
+  const boxes = createAgentHostBoxes({
+    appdir: join(home, "appdir"),
+    connector: () => connection,
+    tokens: recordingTokens({ accessToken: "t", expiresAt: null }),
+    sync,
+    logger: quiet
+  });
+  await assert.rejects(
+    boxes.launch({
+      threadId: "t9",
+      agent: "claude",
+      box: launchBox(connection),
+      home: { kind: "account", accountId: "a", path: "/accounts/claude/a/home" },
+      cwd: "/w/p",
+      resumeSessionRef: "session-9"
+    }),
+    (error: unknown) => error instanceof BoxLaunchError && error.code === "BOX_UNAVAILABLE" && /link dropped/.test(error.message)
+  );
+  assert.equal(sync.calls.length, 0);
 });
 
 test("a Claude box start loads the profile launch through the box: the project's files are the box's, the walk stops at the box's home", async () => {
@@ -376,6 +513,62 @@ test("a Claude box start loads the profile launch through the box: the project's
   try {
     assert.deepEqual(seen, [{ servers: ["box-only"], home }]);
     assert.equal(session.profileLaunch, undefined, "a Global thread has none");
+  } finally {
+    await session.launch.close();
+  }
+});
+
+test("a Claude Global box start gives a \"Run in box\" server its secrets from the host's definition, in the CLI's env only", async () => {
+  const home = await boxHome(["claude"]);
+  const root = await mkdtemp(join(tmpdir(), "box-root-"));
+  const appdir = join(root, "appdir");
+  // The account's own `.claude.json` on the host (the source of truth; the box's copy has every
+  // env value blanked): one server switched to "Run in box", one bridged.
+  const configDir = join(root, "accounts", "claude", "acct-1", "home");
+  await mkdir(configDir, { recursive: true });
+  await writeFile(
+    join(configDir, ".claude.json"),
+    JSON.stringify({
+      mcpServers: {
+        "local-db": { type: "stdio", command: "db-mcp", args: [], env: { DB_PASSWORD: "db-host-secret" } },
+        remote: { type: "stdio", command: "remote-mcp", args: [], env: { REMOTE_TOKEN: "remote-host-secret" } }
+      }
+    })
+  );
+  await mkdir(dirname(boxMcpSettingsPath(appdir)), { recursive: true });
+  await writeFile(boxMcpSettingsPath(appdir), JSON.stringify(withRunInBox({}, "claude", "local-db", true)));
+  const connection = redirectedBoxConnection(localBoxConnection({ sys: { home, shell: join(home, "sh"), agentPath: "/opt/orq-agent" } }), join(root, "box"));
+  const boxes = createAgentHostBoxes({ appdir, connector: () => connection, tokens: recordingTokens({ accessToken: "t", expiresAt: null }), sync: recordingSync(), logger: quiet });
+  const { context } = createFakeContext({ boxes, attachmentsDir: (threadId) => join(root, "attachments", threadId) });
+  const session = await prepareClaudeBoxSession({
+    context,
+    start: {
+      threadId: "t1",
+      cwd: "/w/p",
+      projectPath: "/w/p",
+      home: { kind: "account", accountId: "acct-1", path: configDir },
+      box: launchBox(connection),
+      modelSelection: { model: "opus" },
+      runtimeMode: "approval-required"
+    },
+    hostEnv: { CLAUDE_CONFIG_DIR: configDir, HOME: "/var/lib/orquester" },
+    resumeSessionId: undefined,
+    loadProfileLaunch: async () => null
+  });
+  try {
+    // The in-box server replaces the box copy's blanked one; its value is a `${VAR}` reference
+    // the CLI expands from its own env — never in the config it is handed.
+    const localDb = session.mcpServers["local-db"] as { command: string; env: Record<string, string> };
+    assert.equal(localDb.command, "db-mcp");
+    const [reference] = Object.values(localDb.env);
+    const variable = /^\$\{(ORQ_MCP_\d+_E_DB_PASSWORD)\}$/.exec(reference ?? "")?.[1];
+    assert.ok(variable !== undefined, `a \${VAR} reference, got ${reference}`);
+    assert.equal(session.env[variable], "db-host-secret");
+    assert.equal(JSON.stringify(session.mcpServers).includes("db-host-secret"), false);
+    // The bridged one is `orq-agent mcp-bridge`; its secret stays in the host registry.
+    const remote = session.mcpServers.remote as { command: string; args: string[] };
+    assert.deepEqual([remote.command, remote.args[0]], ["/opt/orq-agent", "mcp-bridge"]);
+    assert.equal(JSON.stringify(session.env).includes("remote-host-secret"), false);
   } finally {
     await session.launch.close();
   }

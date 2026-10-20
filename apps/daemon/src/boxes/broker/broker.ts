@@ -11,7 +11,10 @@
  * 2. Read the account's credential file (after `assertOwnedAccountHome`). Enough life left
  *    (`minValidSeconds`, default 45 min) → return it — unless it is the request's
  *    `rejectedAccessToken` (the provider already refused it: Codex's refresh request after a 401),
- *    which is then renewed by steps 3 and 4 like an expiring one.
+ *    which is then renewed by steps 3 and 4 like an expiring one. Within
+ *    {@link REFRESH_COOLDOWN_MS} of this broker's last refresh of the account, the token that
+ *    refresh produced is returned instead of refreshing again while it has over 5 minutes left; a box's own request
+ *    asks for at most {@link BOX_MAX_MIN_VALID_SECONDS} (`register.ts`).
  * 3. Otherwise, when no HOST-LOCAL session holds the account, refresh through
  *    `AgentAccountsService.refreshNow` (its per-account dedupe and `invalid_grant` → `needsReauth`)
  *    and return the new token. Concurrent requests for one account share one refresh.
@@ -44,6 +47,20 @@ import {
 export const DEFAULT_MIN_VALID_SECONDS = 45 * 60;
 /** Upper bound for `minValidSeconds`: providers issue tokens for hours, not days. */
 export const MAX_MIN_VALID_SECONDS = 24 * 60 * 60;
+/**
+ * What a BOX may ask for (`token.get`, `register.ts`): a larger `minValidSeconds` is lowered to
+ * this. A box is untrusted, and asking for more life than a fresh token has would make every
+ * call spend the account's refresh token.
+ */
+export const BOX_MAX_MIN_VALID_SECONDS = 60 * 60;
+/**
+ * The refresh cooldown: once this broker refreshed an account, for this long it hands out the
+ * token that refresh produced without refreshing again — whatever `minValidSeconds` or `rejectedAccessToken`
+ * asks — while the token has more than {@link COOLDOWN_MIN_LIFE_MS} left. One box (or a burst of
+ * them) cannot turn into a refresh per request.
+ */
+export const REFRESH_COOLDOWN_MS = 10 * 60_000;
+export const COOLDOWN_MIN_LIFE_MS = 5 * 60_000;
 /** Upper bound for `rejectedAccessToken`: access tokens (JWTs included) are a few KB. */
 export const MAX_REJECTED_TOKEN_LENGTH = 32 * 1024;
 /**
@@ -209,6 +226,8 @@ export function createAgentTokenBroker(deps: AgentTokenBrokerDeps): AgentTokenBr
   const now = deps.now ?? Date.now;
   /** Account id → the refresh this broker started for it; concurrent requests share it. */
   const refreshing = new Map<string, Promise<AccountRefreshOutcome>>();
+  /** Account id → the token this broker's last refresh of it produced, and when (the cooldown). */
+  const lastRefresh = new Map<string, { at: number; accessToken: string }>();
 
   function refreshOnce(agent: BoxAgentId, accountId: string, allowHeld: boolean): Promise<AccountRefreshOutcome> {
     const inFlight = refreshing.get(accountId);
@@ -216,6 +235,16 @@ export function createAgentTokenBroker(deps: AgentTokenBrokerDeps): AgentTokenBr
     const run = deps.accounts.refreshNow(agent, accountId, { allowHeld }).finally(() => refreshing.delete(accountId));
     refreshing.set(accountId, run);
     return run;
+  }
+
+  /**
+   * Whether `grant` is handed out as is because it IS the token this broker refreshed moments
+   * ago (a token someone else wrote since follows the usual rules).
+   */
+  function inCooldown(accountId: string, grant: AgentTokenGrant): boolean {
+    const last = lastRefresh.get(accountId);
+    if (last === undefined || last.accessToken !== grant.accessToken || now() - last.at >= REFRESH_COOLDOWN_MS) return false;
+    return grant.expiresAt === null || grant.expiresAt - now() > COOLDOWN_MIN_LIFE_MS;
   }
 
   /** Whether one of the box's own launches uses the account (step 1). */
@@ -300,11 +329,16 @@ export function createAgentTokenBroker(deps: AgentTokenBrokerDeps): AgentTokenBr
             // An unknown expiry cannot be judged: a holder's CLI owns it; otherwise refresh once.
             if (grant.expiresAt === null ? held : grant.expiresAt - now() >= minValidMs) return grant;
           }
+          // Refreshed moments ago: that token is the answer, not another refresh.
+          if (grant !== null && inCooldown(accountId, grant)) return grant;
           if (!held || (await mayRefreshHeld(agent, home, grant))) {
             const outcome = await refreshOnce(agent, accountId, held);
             if (outcome === "refreshed") {
               const fresh = await readGrant(agent, path);
-              if (fresh !== null && (fresh.expiresAt === null || fresh.expiresAt > now())) return fresh;
+              if (fresh !== null && (fresh.expiresAt === null || fresh.expiresAt > now())) {
+                lastRefresh.set(accountId, { at: now(), accessToken: fresh.accessToken });
+                return fresh;
+              }
               throw new AgentTokenError(503, "TOKEN_UNAVAILABLE", "The account was refreshed but its new login could not be read.");
             }
             if (outcome === "invalid-grant") {

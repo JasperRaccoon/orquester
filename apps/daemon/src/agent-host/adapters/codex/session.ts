@@ -161,6 +161,9 @@ import {
   type CodexSessionToolsLaunch
 } from "./session-tools.ts";
 // boxes:
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { parse as parseToml } from "@decimalturn/toml-patch";
 import type { BoxLaunch } from "../../boxes/index.ts";
 import { tomlMcpSpec } from "../../boxes/mcp-plan.ts";
 import {
@@ -201,6 +204,33 @@ function parseResumeCursor(value: unknown): CodexResumeCursor | null {
   }
   const threadId = (value as { threadId?: unknown }).threadId;
   return isUsableConversationId(threadId) ? { threadId } : null;
+}
+
+/** The credential fields of Codex's login frames (`account/login/start` params, the refresh answer). */
+const CODEX_AUTH_FRAME_FIELDS = ["accessToken", "apiKey", "idToken", "refreshToken"] as const;
+
+/**
+ * A frame as the raw log may keep it: the credentials of `account/login/start`'s params and of
+ * the answer to `account/chatgptAuthTokens/refresh` (a `{id, result}` with no method) replaced
+ * BEFORE the frame leaves the session, so no later stage can write them out — the raw log's own
+ * scrub (`store/raw-log.ts`) is the second line, not the only one. Anything else passes as is.
+ */
+export function redactCodexAuthFrame(frame: unknown): unknown {
+  if (typeof frame !== "object" || frame === null) return frame;
+  const record = frame as Record<string, unknown>;
+  let out: Record<string, unknown> | null = null;
+  for (const section of ["params", "result"] as const) {
+    const value = record[section];
+    if (typeof value !== "object" || value === null || Array.isArray(value)) continue;
+    const fields = value as Record<string, unknown>;
+    if (!CODEX_AUTH_FRAME_FIELDS.some((field) => typeof fields[field] === "string")) continue;
+    const scrubbed = { ...fields };
+    for (const field of CODEX_AUTH_FRAME_FIELDS) {
+      if (typeof scrubbed[field] === "string") scrubbed[field] = "[redacted]";
+    }
+    out = { ...(out ?? record), [section]: scrubbed };
+  }
+  return out ?? frame;
 }
 
 export interface CodexSessionOptions {
@@ -273,6 +303,12 @@ export interface CodexBoxLaunch {
   launch: BoxLaunch;
   /** Removed from `orq-agent`'s own environment. */
   envUnset: readonly string[];
+  /**
+   * HOST path of the CODEX_HOME the box's is a synced copy of (the account home, or a profile's
+   * prepared home): its `config.toml` holds the MCP server definitions with their secrets, which
+   * the box's copy has blanked.
+   */
+  hostCodexHome?: string;
 }
 
 /** What every parked server→client request carries, approval or question. */
@@ -589,7 +625,7 @@ export class CodexSession {
         }
       },
       onFrame: (direction, frame) => {
-        this.options.context.logRawFrame(this.threadId, { direction, frame });
+        this.options.context.logRawFrame(this.threadId, { direction, frame: redactCodexAuthFrame(frame) });
       }
     });
     this.peer = peer;
@@ -1663,9 +1699,14 @@ export class CodexSession {
       return;
     }
     const ours = this.sessionToolsServerName;
+    // The NAMES are the box's effective set; each DEFINITION is the host's `config.toml` table
+    // when it has one (the box's copy is the sync's, every secret blanked), else the box's own
+    // (a project's `.codex/config.toml`, which lives in the box).
+    const hostServers = await this.readHostMcpServers(box);
     const specs = Object.entries(servers).flatMap(([name, entry]) => {
       if (name === ours) return [];
-      const spec = tomlMcpSpec(name, entry, this.options.env);
+      if (typeof entry === "object" && entry !== null && (entry as { enabled?: unknown }).enabled === false) return [];
+      const spec = tomlMcpSpec(name, hostServers[name] ?? entry, this.options.env);
       return spec === null ? [] : [spec];
     });
     const plan = await box.launch.bridgeMcpServers(specs);
@@ -1676,8 +1717,45 @@ export class CodexSession {
         args: server.args,
         transport: server.target.transport,
         envKeys: server.target.transport === "stdio" ? Object.keys(server.target.env) : []
+      })),
+      plan.inBox.map((server) => ({
+        name: server.name,
+        transport: server.transport,
+        ...(server.env !== undefined ? { env: server.env } : {}),
+        ...(server.headers !== undefined ? { headers: server.headers } : {})
       }))
     );
+  }
+
+  /**
+   * The `mcp_servers` tables of the host's `config.toml` behind the box's CODEX_HOME. A missing
+   * file is an empty set; one that does not read or parse is logged and an empty set too (the
+   * box's definitions are used, as before).
+   */
+  private async readHostMcpServers(box: CodexBoxLaunch): Promise<Record<string, unknown>> {
+    if (box.hostCodexHome === undefined) return {};
+    let text: string;
+    try {
+      text = await readFile(join(box.hostCodexHome, "config.toml"), "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        this.options.context.logger.warn("codex: could not read this account's config.toml for the box's MCP servers", {
+          threadId: this.threadId,
+          error: describeError(error)
+        });
+      }
+      return {};
+    }
+    try {
+      const servers = (parseToml(text) as { mcp_servers?: unknown }).mcp_servers;
+      return typeof servers === "object" && servers !== null && !Array.isArray(servers) ? (servers as Record<string, unknown>) : {};
+    } catch (error) {
+      this.options.context.logger.warn("codex: this account's config.toml does not parse; the box's MCP server definitions are used", {
+        threadId: this.threadId,
+        error: describeError(error)
+      });
+      return {};
+    }
   }
 
   /** The session's own server, under the name it has in this thread. */

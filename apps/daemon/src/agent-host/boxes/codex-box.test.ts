@@ -6,10 +6,13 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import type { AgentTokenGrant } from "../../boxes/contracts.ts";
+import { boxMcpSettingsPath, withRunInBox } from "@orquester/config";
+
 import { localBoxConnection } from "../../boxes/testing.ts";
 import { createCodexAdapter } from "../adapters/codex/index.ts";
 import { createFakeContext, EventCollector, waitUntil } from "../adapters/codex/testing.ts";
 import type { HostThreadBox } from "../host-protocol.ts";
+import { RawFrameLog } from "../store/raw-log.ts";
 import { createAgentHostBoxes } from "./index.ts";
 import { readMcpBridgeEntry } from "./mcp-bridge-registry.ts";
 import { recordingSync, writeReplayPeer } from "./testing.ts";
@@ -36,8 +39,15 @@ test("Codex in a box: app-server spawned there, logged in with chatgptAuthTokens
     version: "codex-cli 0.159.0",
     results: {
       "account/login/start": { type: "chatgptAuthTokens" },
+      // The box's effective config: its copy of the account's `config.toml`, every secret blanked
+      // by the sync (boxes/sync/codecs.ts).
       "config/read": {
-        config: { mcp_servers: { github: { command: "gh-mcp", args: ["--stdio"], env: { GITHUB_TOKEN: "ghp_host_secret" } } } },
+        config: {
+          mcp_servers: {
+            github: { command: "gh-mcp", args: ["--stdio"], env: { GITHUB_TOKEN: "" } },
+            "local-db": { command: "db-mcp", args: [], env: { DB_PASSWORD: "" } }
+          }
+        },
         origins: {},
         layers: null
       }
@@ -50,6 +60,17 @@ test("Codex in a box: app-server spawned there, logged in with chatgptAuthTokens
   });
   await symlink(peer.bin, join(home, ".local", "bin", "codex"));
 
+  // The host's `config.toml` (the source of truth) holds the real values; `local-db` is switched
+  // to "Run in box".
+  const accountHome = join(appdir, "accounts", "codex", "acct-1", "home");
+  await mkdir(accountHome, { recursive: true });
+  await writeFile(
+    join(accountHome, "config.toml"),
+    '[mcp_servers.github]\ncommand = "gh-mcp"\nargs = ["--stdio"]\nenv = { GITHUB_TOKEN = "ghp_host_secret" }\n\n[mcp_servers.local-db]\ncommand = "db-mcp"\nenv = { DB_PASSWORD = "db-host-secret" }\n',
+    "utf8"
+  );
+  await mkdir(dirname(boxMcpSettingsPath(appdir)), { recursive: true });
+  await writeFile(boxMcpSettingsPath(appdir), JSON.stringify(withRunInBox({}, "codex", "local-db", true)), "utf8");
   const connection = localBoxConnection({ sys: { home, shell: join(home, "sh"), agentPath: "/opt/orq-agent" } });
   const grants: AgentTokenGrant[] = [
     { accessToken: "access-1", expiresAt: null, extra: { chatgptAccountId: "ws-1" } },
@@ -88,7 +109,7 @@ test("Codex in a box: app-server spawned there, logged in with chatgptAuthTokens
       threadId: "t1",
       cwd,
       projectPath: cwd,
-      home: { kind: "account", accountId: "acct-1", path: join(appdir, "accounts", "codex", "acct-1", "home") },
+      home: { kind: "account", accountId: "acct-1", path: accountHome },
       box,
       modelSelection: { model: "gpt-5.5" },
       runtimeMode: "approval-required"
@@ -112,6 +133,14 @@ test("Codex in a box: app-server spawned there, logged in with chatgptAuthTokens
       .map((line) => JSON.parse(line) as Frame)
       .find((frame) => frame.id === 1000 && frame.method === undefined);
     assert.deepEqual(refreshAnswer?.result, { accessToken: "access-2", chatgptAccountId: "ws-1", chatgptPlanType: null });
+    // Neither brokered token reaches the raw frame log: the login and the refresh answer are
+    // logged with their credential replaced.
+    const logged = fake.rawFrames.map((entry) => entry.frame as { direction: string; frame: Frame });
+    const loggedLogin = logged.find((entry) => entry.frame.method === "account/login/start");
+    assert.deepEqual(loggedLogin?.frame.params, { type: "chatgptAuthTokens", accessToken: "[redacted]", chatgptAccountId: "ws-1", chatgptPlanType: null });
+    const loggedAnswer = logged.find((entry) => entry.direction === "send" && entry.frame.id === 1000 && entry.frame.method === undefined);
+    assert.deepEqual(loggedAnswer?.frame.result, { accessToken: "[redacted]", chatgptAccountId: "ws-1", chatgptPlanType: null });
+    assert.equal(/access-[12n]/.test(JSON.stringify(fake.rawFrames)), false);
     // The refresh names the token the app-server was logged in with, so the broker renews it.
     assert.deepEqual(asked, ["codex:acct-1:-", "codex:acct-1:access-1"]);
     // The user's stdio server is replaced, under its own name, by the bridge; its secret stays here.
@@ -122,8 +151,20 @@ test("Codex in a box: app-server spawned there, logged in with chatgptAuthTokens
     assert.equal(github?.args[0], "mcp-bridge");
     assert.deepEqual(github?.env, { GITHUB_TOKEN: "" });
     assert.equal(JSON.stringify(start).includes("ghp_host_secret"), false);
+    // Its definition is the HOST's: the box's blanked copy would start it without its secret.
     const entry = await readMcpBridgeEntry(appdir, connection.boxId, github!.args[1]!);
     assert.deepEqual(entry?.target, { transport: "stdio", command: "gh-mcp", args: ["--stdio"], env: { GITHUB_TOKEN: "ghp_host_secret" } });
+    // The "Run in box" server keeps running in the box; its blanked env value is merged back from
+    // the host's definition through the thread's config (stdio), never a box file.
+    assert.deepEqual(config["mcp_servers.local-db"], { env: { DB_PASSWORD: "db-host-secret" } });
+    // …and the raw frame log keeps none of it (the session's frames through the real writer).
+    const rawPath = join(appdir, "raw.ndjson");
+    const rawLog = new RawFrameLog({ filePath: rawPath });
+    for (const entry of fake.rawFrames) rawLog.write(entry.frame);
+    rawLog.close();
+    const rawText = await readFile(rawPath, "utf8");
+    assert.ok(rawText.includes("mcp_servers.local-db"));
+    assert.equal(/db-host-secret|access-[12n]/.test(rawText), false);
     // The launch synced the account home first.
     assert.equal(sync.calls[0]?.op, "ensureSynced");
   } finally {
