@@ -13,9 +13,13 @@
  * the next one, up to three. Rents are never retried on any other failure.
  *
  * Bootstrap: `runtype: "ssh"` keeps vast.ai's own init in the container (it keeps
- * the container alive) and runs `onstart` — `BoxBootstrap.posixScript`, which
- * must fit vast.ai's 4048-character limit — with `BoxBootstrap.env` set. No
- * ports are mapped; `orq-agent` dials out. The marker is the instance `label`
+ * the container alive) and runs `onstart`, which vast.ai caps at 4048 characters:
+ * `BoxBootstrap.stagedPosixScript`, the compact first stage that writes the
+ * secrets, joins the tailnet and fetches the rest of the bootstrap from the
+ * daemon (a full `posixScript` with Tailscale does not fit). A bootstrap without
+ * a staged script sends `posixScript`; either is refused before renting when it
+ * is too long. `env` is `BoxBootstrap.env` minus its secrets, which `onstart`
+ * already carries. No ports are mapped; `orq-agent` dials out. The marker is the instance `label`
  * (`orq-<boxId>`). Prices (`dph_total`) include the disk's storage.
  */
 
@@ -32,6 +36,7 @@ import type {
   ProviderManagedInstance,
   ProviderOffers
 } from "../contracts.ts";
+import { ORQ_AGENT_ENV } from "../bootstrap/bootstrap.ts";
 import { gpuSizeLabel, hourly, isoTime, num, providerRequestWorded, requireCredential, str, throwIfAborted, validateWith } from "./gpu-common.ts";
 import { ProviderHttpError, boxIdFromInstanceName } from "./http.ts";
 import type { ProviderRequest, ProviderResponse } from "./http.ts";
@@ -89,6 +94,12 @@ function headers(credentials: ProviderCredentials): Record<string, string> {
 /** vast.ai error bodies are `{success, error, msg}`: `error` is a code (`auth_error`, `no_such_ask`), `msg` the sentence. */
 function vastRequest<T>(request: ProviderRequest, options: ProviderCallOptions): Promise<ProviderResponse<T>> {
   return providerRequestWorded<T>(PROVIDER, request, options);
+}
+
+/** The bootstrap env without its secrets: `onstart` writes them to 0600 files, so they need not sit in every process's environment. */
+export function vastEnv(env: Record<string, string>): Record<string, string> {
+  const secrets: readonly string[] = [ORQ_AGENT_ENV.bootstrapToken, ORQ_AGENT_ENV.tailscaleAuthKey];
+  return Object.fromEntries(Object.entries(env).filter(([name]) => !secrets.includes(name)));
 }
 
 /** `"Oregon, US"` → `US`. */
@@ -231,7 +242,7 @@ export const vastaiAdapter: BoxProviderAdapter = {
   },
 
   async create(credentials, request, options): Promise<ProviderCreateResult> {
-    const onstart = request.bootstrap.posixScript;
+    const onstart = request.bootstrap.stagedPosixScript ?? request.bootstrap.posixScript;
     if (onstart.length > VAST_ONSTART_MAX) {
       throw new Error(`${PROVIDER}: the bootstrap script is ${onstart.length} characters; vast.ai accepts at most ${VAST_ONSTART_MAX}`);
     }
@@ -261,7 +272,7 @@ export const vastaiAdapter: BoxProviderAdapter = {
               label: request.name,
               runtype: "ssh",
               onstart,
-              env: { ...request.bootstrap.env, ORQUESTER_BOX_ID: boxId },
+              env: { ...vastEnv(request.bootstrap.env), ORQUESTER_BOX_ID: boxId },
               cancel_unavail: true
             },
             attempts: 1,

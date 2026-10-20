@@ -192,7 +192,7 @@ async function sizeSnapshot(
 }
 
 /** The `sh -c` program the bootstrap exec runs (see the header). */
-function bootstrapCommand(posixScript: string): string[] {
+export function bootstrapCommand(posixScript: string): string[] {
   const program = [
     "set -e",
     "umask 077",

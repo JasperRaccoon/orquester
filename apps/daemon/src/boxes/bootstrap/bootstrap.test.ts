@@ -8,7 +8,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import type { BootstrapInput } from "../contracts.ts";
-import { buildBootstrap, normalizeDaemonUrl, ORQ_AGENT_ENV } from "./bootstrap.ts";
+import { BOOTSTRAP_STAGE2_VARIANTS, bootstrapSecondStage, buildBootstrap, normalizeDaemonUrl, ORQ_AGENT_ENV } from "./bootstrap.ts";
 
 const TOKEN = "obt_test-TOKEN.value_0123456789abcdef";
 const TS_KEY = "tskey-auth-kTEST1CNTRL-0123456789abcdefABCDEF";
@@ -95,6 +95,41 @@ test("secrets appear only where a script assigns or writes them, never in argv",
   }
 });
 
+test("the staged bootstrap: secrets only in the first stage's assignments; the second stage is generic", () => {
+  for (const container of [false, true]) {
+    const boot = buildBootstrap(input({ tailscaleAuthKey: TS_KEY, container }));
+    const staged = boot.stagedPosixScript!;
+    const secretLines = staged.split("\n").filter((line) => line.includes(TOKEN) || line.includes(TS_KEY));
+    assert.deepEqual(secretLines, [`T='${TOKEN}'`, `K='${TS_KEY}'`]);
+    assert.match(staged, /^#!\/bin\/sh\nset \+x\n/);
+    assert.match(staged, /up --auth-key="file:\$KF" --hostname="orq-\$ORQ_BOX_ID"/);
+    assert.doesNotMatch(staged, /curl[^\n]*-H /, "no auth header on a curl command line");
+    assert.doesNotMatch(staged, /wget[^\n]*--header/, "no auth header on a wget command line");
+    const variant = container ? "container" : "posix";
+    assert.ok(staged.includes(`fetch "$ORQ_DAEMON_URL/api/boxes/bootstrap/${variant}" "$S.download" 1`));
+    assert.match(staged, /exec sh "\$S"\n?$/);
+    // The first stage never downloads orq-agent itself.
+    assert.doesNotMatch(staged, /\/api\/boxes\/agent\//);
+    if (container) assert.match(staged, /--tun=userspace-networking/);
+  }
+
+  assert.deepEqual([...BOOTSTRAP_STAGE2_VARIANTS], ["posix", "container"]);
+  assert.equal(bootstrapSecondStage("windows"), null);
+  assert.equal(bootstrapSecondStage("../posix"), null);
+  const vm = bootstrapSecondStage("posix")!;
+  const container = bootstrapSecondStage("container")!;
+  for (const script of [vm, container]) {
+    assert.ok(!script.includes(TOKEN) && !script.includes(BOX_ID) && !script.includes("orq.example.com"), "nothing per box");
+    assert.doesNotMatch(script, /tailscale/i, "the first stage joined the tailnet");
+    assert.match(script, /^TF=\$\{ORQ_BOOTSTRAP_TOKEN_FILE:-\}$/m);
+    assert.match(script, /^PX=\$\{ORQ_PROXY:-\}$/m);
+    assert.match(script, /\$ORQ_DAEMON_URL\/api\/boxes\/agent\/\$P/);
+    assert.match(script, /exec "\$B" run\n$/);
+  }
+  assert.match(vm, /exec "\$B" install-service/);
+  assert.doesNotMatch(container, /install-service|SYSTEMD/);
+});
+
 test("containers use userspace tailscaled and hand orq-agent its proxy", () => {
   const boot = buildBootstrap(input({ tailscaleAuthKey: TS_KEY, container: true }));
   for (const script of [boot.posixScript, boot.containerCommand[2]!]) {
@@ -108,11 +143,16 @@ test("containers use userspace tailscaled and hand orq-agent its proxy", () => {
 });
 
 test("the POSIX scripts parse under dash, bash and busybox sh, and pass shellcheck", () => {
-  const variants = [input(), input({ tailscaleAuthKey: TS_KEY }), input({ tailscaleAuthKey: TS_KEY, container: true })];
-  const scripts: string[] = [];
+  const variants = [
+    input(),
+    input({ tailscaleAuthKey: TS_KEY }),
+    input({ container: true }),
+    input({ tailscaleAuthKey: TS_KEY, container: true })
+  ];
+  const scripts: string[] = BOOTSTRAP_STAGE2_VARIANTS.map((variant) => bootstrapSecondStage(variant)!);
   for (const variant of variants) {
     const boot = buildBootstrap(variant);
-    scripts.push(boot.posixScript, boot.containerCommand[2]!, cloudInitScript(boot.cloudInit));
+    scripts.push(boot.posixScript, boot.containerCommand[2]!, cloudInitScript(boot.cloudInit), boot.stagedPosixScript!);
   }
   const shells = [["dash", "-n"], ["bash", "-n"], ["busybox", "sh", "-n"]].filter(([shell]) => has(shell!));
   assert.ok(shells.length > 0, "at least one POSIX shell to check with");
@@ -153,13 +193,15 @@ esac
 interface FakeDaemon {
   url: string;
   requests: Array<{ path: string; authorization: string | undefined }>;
-  /** Status codes to answer before serving the binary. */
+  /** Status codes to answer before serving anything. */
   failFirst: number[];
+  /** The token was spent by a first connect: every request is refused. */
+  spent: boolean;
   server: Server;
 }
 
 async function startFakeDaemon(t: test.TestContext): Promise<FakeDaemon> {
-  const daemon: FakeDaemon = { url: "", requests: [], failFirst: [], server: undefined as unknown as Server };
+  const daemon: FakeDaemon = { url: "", requests: [], failFirst: [], spent: false, server: undefined as unknown as Server };
   daemon.server = createServer((request: IncomingMessage, response) => {
     daemon.requests.push({ path: request.url ?? "", authorization: request.headers.authorization });
     const fail = daemon.failFirst.shift();
@@ -167,8 +209,14 @@ async function startFakeDaemon(t: test.TestContext): Promise<FakeDaemon> {
       response.writeHead(fail).end();
       return;
     }
-    if (request.headers.authorization !== `Bearer ${TOKEN}`) {
+    if (daemon.spent || request.headers.authorization !== `Bearer ${TOKEN}`) {
       response.writeHead(401).end();
+      return;
+    }
+    const stage = /^\/api\/boxes\/bootstrap\/([^/]+)$/.exec(request.url ?? "");
+    if (stage) {
+      const script = bootstrapSecondStage(stage[1]!);
+      response.writeHead(script === null ? 404 : 200, { "content-type": "text/x-shellscript" }).end(script ?? "");
       return;
     }
     if (!/^\/api\/boxes\/agent\/linux-(x64|arm64)(-musl)?$/.test(request.url ?? "")) {
@@ -353,4 +401,74 @@ test("a refused token stops the bootstrap without printing it", async (t) => {
   assert.match(output, /refused the bootstrap token \(HTTP 401\)/);
   assert.ok(!output.includes("obt_wrong-token"));
   await assert.rejects(stat(box.result), { code: "ENOENT" });
+});
+
+test("stagedPosixScript joins the tailnet, fetches the second stage with the bearer token, and that starts orq-agent", async (t) => {
+  const daemon = await startFakeDaemon(t);
+  daemon.failFirst = [502];
+  const box = await sandbox(t);
+  const boot = buildBootstrap(input({ daemonUrl: daemon.url, tailscaleAuthKey: TS_KEY }));
+  const scriptPath = join(box.dir, "user-data.sh");
+  await writeFile(scriptPath, boot.stagedPosixScript!);
+
+  const { code, output } = await runScript(box, ["sh", scriptPath]);
+  assert.equal(code, 0, output);
+  assert.match(output, /download failed \(HTTP 502\); retrying/);
+  await assertAgentStarted(box, daemon, output);
+  assert.deepEqual(
+    daemon.requests.map((request) => request.path.replace(/linux-(x64|arm64)(-musl)?$/, "linux")),
+    ["/api/boxes/bootstrap/posix", "/api/boxes/bootstrap/posix", "/api/boxes/agent/linux"]
+  );
+  const argvLog = await readFile(box.log, "utf8");
+  const argvLines = argvLog.split("\n").filter((line) => /^(curl|tailscale) /.test(line));
+  assert.ok(argvLines.length >= 3 && argvLines.every((line) => !line.includes(TOKEN) && !line.includes(TS_KEY)), "no secret in any recorded argv");
+  assert.match(argvLog, new RegExp(`^tailscale up --auth-key=file:\\S+ --hostname=orq-${BOX_ID} --timeout=180s$`, "m"));
+  assert.ok(argvLog.includes(`keyfile=${TS_KEY} `));
+  await assert.rejects(stat(join(box.home, ".orq-agent", "ts-authkey")), { code: "ENOENT" });
+  // The second stage is kept for a restart, with nothing secret in it.
+  const saved = await readFile(join(box.home, ".orq-agent", "bootstrap-stage2.sh"), "utf8");
+  assert.equal(saved, bootstrapSecondStage("posix"));
+
+  // Restart after the first connect spent the token: the saved stage and the installed orq-agent carry on.
+  daemon.spent = true;
+  await rm(box.result, { force: true });
+  const again = await runScript(box, ["sh", scriptPath]);
+  assert.equal(again.code, 0, again.output);
+  assert.match(again.output, /token already used; running the saved bootstrap/);
+  assert.match(again.output, /token already used; keeping the installed orq-agent/);
+  assert.equal((await readResult(box)).cmd, "run");
+});
+
+test("stagedPosixScript without the saved second stage stops on a refused token", async (t) => {
+  const daemon = await startFakeDaemon(t);
+  daemon.spent = true;
+  const box = await sandbox(t);
+  const boot = buildBootstrap(input({ daemonUrl: daemon.url, container: true }));
+  const scriptPath = join(box.dir, "onstart.sh");
+  await writeFile(scriptPath, boot.stagedPosixScript!);
+  const { code, output } = await runScript(box, ["sh", scriptPath]);
+  assert.equal(code, 1);
+  assert.match(output, /refused the bootstrap token \(HTTP 401\)/);
+  assert.ok(!output.includes(TOKEN));
+  assert.deepEqual(daemon.requests.map((request) => request.path), ["/api/boxes/bootstrap/container"]);
+});
+
+test("the container second stage runs from the first stage's environment and refuses to run without it", async (t) => {
+  const daemon = await startFakeDaemon(t);
+  const box = await sandbox(t);
+  const scriptPath = join(box.dir, "stage2.sh");
+  await writeFile(scriptPath, bootstrapSecondStage("container")!);
+
+  const missing = await runScript(box, ["sh", scriptPath], { env: { ORQ_DAEMON_URL: daemon.url } });
+  assert.equal(missing.code, 1);
+  assert.match(missing.output, /must be set/);
+
+  const dataDir = join(box.home, ".orq-agent");
+  await mkdir(dataDir, { recursive: true, mode: 0o700 });
+  await writeFile(join(dataDir, "bootstrap-token"), TOKEN, { mode: 0o600 });
+  const { code, output } = await runScript(box, ["sh", scriptPath], {
+    env: { ORQ_DAEMON_URL: daemon.url, ORQ_BOX_ID: BOX_ID, ORQ_BOOTSTRAP_TOKEN_FILE: join(dataDir, "bootstrap-token") }
+  });
+  assert.equal(code, 0, output);
+  await assertAgentStarted(box, daemon, output);
 });

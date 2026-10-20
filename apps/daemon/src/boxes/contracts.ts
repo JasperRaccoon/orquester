@@ -190,6 +190,12 @@ export interface BoxBootstrap {
   env: Record<string, string>;
   /** cloud-init user data wrapping `posixScript` (`#cloud-config` with a runcmd), for providers that want YAML. */
   cloudInit: string;
+  /**
+   * A compact first stage for providers that cap the script's size (vast.ai `onstart`): writes the
+   * secrets like `posixScript`, joins the tailnet, then fetches and runs the generic second stage
+   * (`boxRoutes.bootstrapScript`) with the bootstrap token. Optional: test doubles may omit it.
+   */
+  stagedPosixScript?: string;
 }
 
 export interface ProviderCreateRequest {
@@ -370,7 +376,8 @@ export interface AgentTokenGrant {
 /** Spec §7: hands out access tokens; never a refresh token; never a second refresher. */
 export interface AgentTokenBroker {
   getToken(
-    request: { boxId: string; agent: BoxAgentId; accountId: string; minValidSeconds?: number },
+    /** `rejectedAccessToken`: the token the CLI was refused with; renewed (holder rules apply) while it is still current. */
+    request: { boxId: string; agent: BoxAgentId; accountId: string; minValidSeconds?: number; rejectedAccessToken?: string },
     signal: AbortSignal
   ): Promise<AgentTokenGrant>;
 }
