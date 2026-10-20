@@ -585,6 +585,16 @@ export class AgentChatService {
     this.boxes = boxes;
   }
 
+  /** A chat whose project's box was destroyed: why no agent can run in it (its transcript stays readable). */
+  private destroyedBoxRefusal(id: string): string | null {
+    const boxes = this.boxes ?? this.opts.boxes ?? null;
+    const projectPath = this.chat.get(id)?.projectPath ?? "";
+    if (boxes === null || projectPath.length === 0) return null;
+    const location = boxes.registry.locate(projectPath);
+    if (location.kind !== "box" || location.record.state !== "destroyed") return null;
+    return "This project's box was destroyed, so no agent can run in it. Its transcript stays readable here.";
+  }
+
   /**
    * The `box` launch field of a chat in `projectPath` (`HostThreadBox`), or none for a host
    * project. Refused — a `ChatSessionError` the chat shows — when the project's box cannot take a
@@ -877,6 +887,7 @@ export class AgentChatService {
       hostInstanceId: () => this.supervisor.status().hostInstanceId,
       chatSession: (id) => this.chat.get(id),
       noteSeq: (id, seq) => this.chat.noteSeq(id, seq),
+      agentRunRefusal: (id) => this.destroyedBoxRefusal(id),
       switchAccount: (id, body) => this.switchAccount(id, body),
       switchProfile: (id, body) => this.switchProfile(id, body),
       profileCatalog: (summary) => this.profileCatalog(summary),

@@ -19,7 +19,9 @@ import { agentHostSocketPath, agentHostTokenPath, boxSocketPath } from "@orquest
 import { agentHostAuthValue, daemonRoutesForHost, type CreateHostThreadRequest } from "../agent-host/host-protocol.ts";
 import type { BoxConfigSync, BoxTranscriptSync, ProjectLocation } from "../boxes/contracts.ts";
 import { localBoxConnection } from "../boxes/testing.ts";
+import { agentChatRoutes } from "@orquester/api/agent-chat";
 import { registerBoxHostRoutes } from "./box-host-routes.ts";
+import { registerAgentChatRoutes } from "./proxy-routes.ts";
 import { ChatSessionError } from "./chat-sessions.ts";
 import { AgentChatService, type ChatLaunchEnv } from "./service.ts";
 
@@ -165,6 +167,33 @@ test("a box chat is refused, and no tab is created, for the System account, an o
     } finally {
       await f.cleanup();
     }
+  }
+});
+
+test("a turn in a chat whose box was destroyed since is refused (409), never forwarded to wait for a CLI that cannot start", async () => {
+  let state = "ready";
+  const f = await makeFixture({ location: (path) => inBox(state)(path) });
+  const app = Fastify();
+  try {
+    registerAgentChatRoutes(app, f.service.routeDeps());
+    const tab = (await create(f)) as { id: string };
+    const turn = (commandId: string) =>
+      app.inject({ method: "POST", url: agentChatRoutes.turn(tab.id), payload: { commandId, input: "hello" } });
+    assert.equal((await turn("6b0f7a4c-1d2e-4f3a-9b8c-7d6e5f4a3b21")).statusCode, 200, "a live box's chat is forwarded");
+    state = "destroyed";
+    const refused = await turn("6b0f7a4c-1d2e-4f3a-9b8c-7d6e5f4a3b22");
+    assert.equal(refused.statusCode, 409);
+    const body = (refused.json() as { error: { code: string; message: string } }).error;
+    assert.equal(body.code, "COMMAND_REJECTED");
+    assert.match(body.message, /box was destroyed/);
+    const compact = await app.inject({ method: "POST", url: agentChatRoutes.compact(tab.id), payload: { commandId: "6b0f7a4c-1d2e-4f3a-9b8c-7d6e5f4a3b23" } });
+    assert.equal(compact.statusCode, 409);
+    // Reading the chat (and other commands) stays possible.
+    const interrupt = await app.inject({ method: "POST", url: agentChatRoutes.interrupt(tab.id), payload: { commandId: "6b0f7a4c-1d2e-4f3a-9b8c-7d6e5f4a3b24" } });
+    assert.notEqual(interrupt.statusCode, 409);
+  } finally {
+    await app.close();
+    await f.cleanup();
   }
 });
 
