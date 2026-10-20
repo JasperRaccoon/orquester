@@ -162,7 +162,8 @@ test("cloudrift: the start command is one line that decodes the script; image ch
   const command = detachedStartCommand("#!/bin/sh\necho 'hi'\n");
   assert.ok(!command.includes("\n"));
   const encoded = /echo (\S+) \| base64 -d/.exec(command)![1]!;
-  assert.equal(Buffer.from(encoded, "base64").toString("utf8"), "#!/bin/sh\necho 'hi'\n");
+  // The script deletes its own file (it holds the bootstrap token) before anything else.
+  assert.equal(Buffer.from(encoded, "base64").toString("utf8"), "rm -f \"$0\"\n#!/bin/sh\necho 'hi'\n");
   assert.equal(pickCloudriftImage(recipes, "OpenOrProprietary"), imageOf("Ubuntu 24.04 Server (R580, CUDA 13.3)"));
   assert.equal(pickCloudriftImage([], "OpenOnly"), null);
 

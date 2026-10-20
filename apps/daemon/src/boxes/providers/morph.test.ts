@@ -83,7 +83,8 @@ test("create: base snapshot by digest, one instance start with the marker, the b
     metadata: { "orquester-box": TEST_BOX_ID, name: `orq-${TEST_BOX_ID}` }
   });
   const exec = replay.requests[5]!;
-  assert.equal(scriptFromExec(exec.body), request.bootstrap.posixScript);
+  // The script deletes its own file (it holds the bootstrap token) before anything else.
+  assert.equal(scriptFromExec(exec.body), `rm -f "$0"\n${request.bootstrap.posixScript}`);
   const program = (exec.body as { command: string[] }).command[2]!;
   assert.match(program, /setsid nohup \/bin\/sh -c '.*command -v curl.*exec \/bin\/sh "\$0"' "\$f" > .* < \/dev\/null &$/);
   assert.equal(program.includes("orq-bootstrap-posix"), false);

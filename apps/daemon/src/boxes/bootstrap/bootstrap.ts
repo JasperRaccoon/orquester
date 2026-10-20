@@ -308,8 +308,9 @@ fetch() {
     rc="$D/wgetrc.$$"
     : >"$rc"
     if [ "$3" = 1 ]; then
-      printf 'header = Authorization: Bearer %s\\n' "$(cat "$TF")" >>"$rc"
-      if [ -n "$PX" ]; then printf 'use_proxy = on\\nhttps_proxy = %s\\nhttp_proxy = %s\\nmax_redirect = 0\\n' "$PX" "$PX" >>"$rc"; fi
+      # Never follow a redirect with the bearer token (curl above does not either).
+      printf 'header = Authorization: Bearer %s\\nmax_redirect = 0\\n' "$(cat "$TF")" >>"$rc"
+      if [ -n "$PX" ]; then printf 'use_proxy = on\\nhttps_proxy = %s\\nhttp_proxy = %s\\n' "$PX" "$PX" >>"$rc"; fi
     fi
     wget --config="$rc" -q -S -T 20 -O "$2" "$1" 2>&1 | awk '/^  HTTP\\//{c=$2} END{if (c == "") c = "000"; print c}'
     rm -f "$rc"
