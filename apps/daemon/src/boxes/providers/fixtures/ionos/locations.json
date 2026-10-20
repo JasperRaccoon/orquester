@@ -1,0 +1,164 @@
+{
+  "id": "locations",
+  "type": "collection",
+  "href": "https://api.ionos.com/cloudapi/v6/locations",
+  "items": [
+    {
+      "id": "de/fra",
+      "type": "location",
+      "href": "https://api.ionos.com/cloudapi/v6/locations/de/fra",
+      "properties": {
+        "name": "frankfurt",
+        "features": [
+          "SSD",
+          "cloud-init"
+        ],
+        "imageAliases": [
+          "centos:latest",
+          "debian:11",
+          "debian:12",
+          "debian:latest",
+          "debian:12_iso",
+          "ubuntu:22.04",
+          "ubuntu:24.04",
+          "ubuntu:latest",
+          "ubuntu:24.04_iso",
+          "windows:2022",
+          "windows:2022_iso"
+        ],
+        "cpuArchitecture": [
+          {
+            "cpuFamily": "INTEL_SKYLAKE",
+            "maxCores": 62,
+            "maxRam": 245760,
+            "vendor": "GenuineIntel"
+          }
+        ]
+      }
+    },
+    {
+      "id": "de/txl",
+      "type": "location",
+      "href": "https://api.ionos.com/cloudapi/v6/locations/de/txl",
+      "properties": {
+        "name": "berlin",
+        "features": [
+          "SSD",
+          "cloud-init"
+        ],
+        "imageAliases": [
+          "centos:latest",
+          "debian:11",
+          "debian:12",
+          "debian:latest",
+          "debian:12_iso",
+          "ubuntu:22.04",
+          "ubuntu:24.04",
+          "ubuntu:latest",
+          "ubuntu:24.04_iso",
+          "windows:2022",
+          "windows:2022_iso"
+        ],
+        "cpuArchitecture": [
+          {
+            "cpuFamily": "INTEL_SKYLAKE",
+            "maxCores": 62,
+            "maxRam": 245760,
+            "vendor": "GenuineIntel"
+          }
+        ]
+      }
+    },
+    {
+      "id": "de/fkb",
+      "type": "location",
+      "href": "https://api.ionos.com/cloudapi/v6/locations/de/fkb",
+      "properties": {
+        "name": "karlsruhe",
+        "features": [
+          "SSD",
+          "cloud-init"
+        ],
+        "imageAliases": [
+          "centos:latest",
+          "debian:11",
+          "debian:12",
+          "debian:latest",
+          "debian:12_iso",
+          "ubuntu:22.04",
+          "ubuntu:24.04",
+          "ubuntu:latest",
+          "ubuntu:24.04_iso",
+          "windows:2022",
+          "windows:2022_iso"
+        ],
+        "cpuArchitecture": [
+          {
+            "cpuFamily": "INTEL_SKYLAKE",
+            "maxCores": 62,
+            "maxRam": 245760,
+            "vendor": "GenuineIntel"
+          }
+        ]
+      }
+    },
+    {
+      "id": "us/las",
+      "type": "location",
+      "href": "https://api.ionos.com/cloudapi/v6/locations/us/las",
+      "properties": {
+        "name": "lasvegas",
+        "features": [
+          "SSD",
+          "cloud-init"
+        ],
+        "imageAliases": [
+          "centos:latest",
+          "debian:11",
+          "debian:12",
+          "debian:latest",
+          "debian:12_iso",
+          "ubuntu:22.04",
+          "ubuntu:24.04",
+          "ubuntu:latest",
+          "ubuntu:24.04_iso",
+          "windows:2022",
+          "windows:2022_iso"
+        ],
+        "cpuArchitecture": [
+          {
+            "cpuFamily": "INTEL_SKYLAKE",
+            "maxCores": 62,
+            "maxRam": 245760,
+            "vendor": "GenuineIntel"
+          }
+        ]
+      }
+    },
+    {
+      "id": "us/ewr",
+      "type": "location",
+      "href": "https://api.ionos.com/cloudapi/v6/locations/us/ewr",
+      "properties": {
+        "name": "newark",
+        "features": [
+          "SSD",
+          "cloud-init"
+        ],
+        "imageAliases": [
+          "debian:12",
+          "ubuntu:22.04",
+          "ubuntu:latest"
+        ],
+        "cpuArchitecture": [
+          {
+            "cpuFamily": "INTEL_SKYLAKE",
+            "maxCores": 62,
+            "maxRam": 245760,
+            "vendor": "GenuineIntel"
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "httpStatus": 404,
+  "messages": [
+    {
+      "errorCode": "309",
+      "message": "Resource does not exist"
+    }
+  ]
+}

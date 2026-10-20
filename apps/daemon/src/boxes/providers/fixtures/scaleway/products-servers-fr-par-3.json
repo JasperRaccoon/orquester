@@ -1,0 +1,33 @@
+{
+  "servers": {
+    "POP2-2C-8G": {
+      "alt_names": [],
+      "arch": "x86_64",
+      "ncpus": 2,
+      "ram": 8589934592,
+      "gpu": 0,
+      "gpu_info": null,
+      "volumes_constraint": {
+        "min_size": 0,
+        "max_size": 0
+      },
+      "per_volume_constraint": {
+        "l_ssd": {
+          "min_size": 0,
+          "max_size": 0
+        }
+      },
+      "monthly_price": 80.4825,
+      "hourly_price": 0.11025,
+      "capabilities": {
+        "boot_types": [
+          "local",
+          "rescue"
+        ],
+        "block_storage": true
+      },
+      "end_of_service": false,
+      "sku": "/instance/server/pop2_2c_8g/fr-par-3"
+    }
+  }
+}

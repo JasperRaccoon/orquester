@@ -1,0 +1,8 @@
+{
+  "ssh_key": {
+    "id": 500000001,
+    "fingerprint": "3b:16:bf:e4:8b:00:8b:b8:59:8c:a9:d3:f0:19:45:fa",
+    "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOrqTestKeyOnlyForFixtures orq-box",
+    "name": "orq-0a1b2c3d4e5f"
+  }
+}

@@ -156,6 +156,29 @@ export function isoOrNull(value: unknown): string | null {
   return null;
 }
 
+/**
+ * Wait `ms` between two polls of a provider inside a deadline loop (a create
+ * operation, a server that must stop before it can be deleted). Rejects with
+ * the signal's reason as soon as the caller aborts.
+ */
+export function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 /** A required string field of a provider instance ref (persisted `StoredBox.providerRef`). */
 export function refString(provider: string, ref: Record<string, unknown>, key: string): string {
   const value = ref[key];

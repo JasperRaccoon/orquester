@@ -1,0 +1,29 @@
+{
+  "local_images": [
+    {
+      "id": "037f7fe4-f7c8-40b1-92ba-da0092d62f29",
+      "arch": "arm64",
+      "zone": "fr-par-1",
+      "compatible_commercial_types": [
+        "COPARM1-2C-8G",
+        "BASIC2-A2C-4G"
+      ],
+      "label": "ubuntu_noble",
+      "type": "instance_sbs"
+    },
+    {
+      "id": "a4a3ce62-effa-4293-bf89-2a5c2ceb9d71",
+      "arch": "x86_64",
+      "zone": "fr-par-1",
+      "compatible_commercial_types": [
+        "DEV1-S",
+        "PLAY2-NANO",
+        "PLAY2-PICO",
+        "POP2-2C-8G"
+      ],
+      "label": "ubuntu_noble",
+      "type": "instance_sbs"
+    }
+  ],
+  "total_count": 2
+}

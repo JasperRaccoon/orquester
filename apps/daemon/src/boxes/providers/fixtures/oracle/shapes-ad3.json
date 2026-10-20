@@ -1,0 +1,11 @@
+[
+  {
+    "shape": "VM.Standard.E2.1.Micro",
+    "processorDescription": "2.0 GHz AMD EPYC™ 7551 (Naples)",
+    "ocpus": 1,
+    "memoryInGBs": 1,
+    "isFlexible": false,
+    "billingType": "ALWAYS_FREE",
+    "gpus": 0
+  }
+]

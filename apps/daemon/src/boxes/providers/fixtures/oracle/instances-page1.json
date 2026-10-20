@@ -1,0 +1,60 @@
+[
+  {
+    "id": "ocid1.instance.oc1.eu-frankfurt-1.aaaaaaaa1111111111111111111111111111111111111111111111111111",
+    "compartmentId": "ocid1.tenancy.oc1..aaaaaaaa11111111111111111111111111111111111111111111111111aa",
+    "availabilityDomain": "Uocm:EU-FRANKFURT-1-AD-1",
+    "faultDomain": "FAULT-DOMAIN-2",
+    "displayName": "orq-0a1b2c3d4e5f",
+    "region": "eu-frankfurt-1",
+    "shape": "VM.Standard.E5.Flex",
+    "shapeConfig": {
+      "ocpus": 2,
+      "memoryInGBs": 16,
+      "vcpus": 4,
+      "processorDescription": "2.4 GHz AMD EPYC™ 9J14 (Genoa)"
+    },
+    "imageId": "ocid1.image.oc1.eu-frankfurt-1.aaaaaaaa4444444444444444444444444444444444444444444444444444",
+    "sourceDetails": {
+      "sourceType": "image",
+      "imageId": "ocid1.image.oc1.eu-frankfurt-1.aaaaaaaa4444444444444444444444444444444444444444444444444444",
+      "bootVolumeSizeInGBs": 50
+    },
+    "lifecycleState": "RUNNING",
+    "timeCreated": "2026-10-19T23:00:37.123Z",
+    "freeformTags": {
+      "orquester-box": "0a1b2c3d4e5f"
+    },
+    "definedTags": {},
+    "metadata": {
+      "ssh_authorized_keys": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOrqTestKeyOnlyForFixtures orq-box"
+    }
+  },
+  {
+    "id": "ocid1.instance.oc1.eu-frankfurt-1.aaaaaaaa2222222222222222222222222222222222222222222222222222",
+    "compartmentId": "ocid1.tenancy.oc1..aaaaaaaa11111111111111111111111111111111111111111111111111aa",
+    "availabilityDomain": "Uocm:EU-FRANKFURT-1-AD-1",
+    "faultDomain": "FAULT-DOMAIN-2",
+    "displayName": "build-server",
+    "region": "eu-frankfurt-1",
+    "shape": "VM.Standard.E5.Flex",
+    "shapeConfig": {
+      "ocpus": 2,
+      "memoryInGBs": 16,
+      "vcpus": 4,
+      "processorDescription": "2.4 GHz AMD EPYC™ 9J14 (Genoa)"
+    },
+    "imageId": "ocid1.image.oc1.eu-frankfurt-1.aaaaaaaa4444444444444444444444444444444444444444444444444444",
+    "sourceDetails": {
+      "sourceType": "image",
+      "imageId": "ocid1.image.oc1.eu-frankfurt-1.aaaaaaaa4444444444444444444444444444444444444444444444444444",
+      "bootVolumeSizeInGBs": 50
+    },
+    "lifecycleState": "RUNNING",
+    "timeCreated": "2026-10-19T23:00:37.123Z",
+    "freeformTags": {},
+    "definedTags": {},
+    "metadata": {
+      "ssh_authorized_keys": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOrqTestKeyOnlyForFixtures orq-box"
+    }
+  }
+]

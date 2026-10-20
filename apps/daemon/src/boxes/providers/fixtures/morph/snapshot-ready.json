@@ -1,0 +1,22 @@
+{
+  "id": "snapshot_11111111",
+  "object": "snapshot",
+  "created": 1792450800,
+  "status": "ready",
+  "spec": {
+    "vcpus": 2,
+    "memory": 8192,
+    "disk_size": 32768
+  },
+  "refs": {
+    "image_id": "morphvm-minimal"
+  },
+  "digest": "orquester-morphvm-minimal-2c-8192m-32768d",
+  "metadata": {
+    "orquester": "base"
+  },
+  "ttl": {
+    "ttl_seconds": null,
+    "ttl_expire_at": null
+  }
+}

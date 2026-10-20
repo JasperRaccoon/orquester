@@ -1,0 +1,4 @@
+{
+  "message": "rate limit exceeded",
+  "type": "too_many_requests"
+}

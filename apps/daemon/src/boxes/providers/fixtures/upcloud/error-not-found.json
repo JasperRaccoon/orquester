@@ -1,0 +1,6 @@
+{
+  "error": {
+    "error_code": "SERVER_NOT_FOUND",
+    "error_message": "The server 00111111-1111-4111-8111-111111111101 does not exist."
+  }
+}

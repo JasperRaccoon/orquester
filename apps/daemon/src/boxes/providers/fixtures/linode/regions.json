@@ -1,0 +1,228 @@
+{
+  "data": [
+    {
+      "id": "us-east",
+      "label": "Newark, NJ",
+      "country": "us",
+      "capabilities": [
+        "Linodes",
+        "Backups",
+        "NodeBalancers",
+        "Block Storage",
+        "Kubernetes",
+        "Cloud Firewall",
+        "Vlans",
+        "VPCs",
+        "Placement Group",
+        "Metadata",
+        "GPU Linodes",
+        "Premium Plans"
+      ],
+      "status": "ok",
+      "site_type": "core",
+      "resolvers": {
+        "ipv4": "192.0.2.1,192.0.2.2",
+        "ipv6": "2001:db8::1,2001:db8::2"
+      },
+      "placement_group_limits": {
+        "maximum_pgs_per_customer": null,
+        "maximum_linodes_per_pg": 5
+      }
+    },
+    {
+      "id": "us-ord",
+      "label": "Chicago, IL",
+      "country": "us",
+      "capabilities": [
+        "Linodes",
+        "Backups",
+        "NodeBalancers",
+        "Block Storage",
+        "Kubernetes",
+        "Cloud Firewall",
+        "Vlans",
+        "VPCs",
+        "Placement Group",
+        "Metadata",
+        "GPU Linodes",
+        "Premium Plans"
+      ],
+      "status": "ok",
+      "site_type": "core",
+      "resolvers": {
+        "ipv4": "192.0.2.1,192.0.2.2",
+        "ipv6": "2001:db8::1,2001:db8::2"
+      },
+      "placement_group_limits": {
+        "maximum_pgs_per_customer": null,
+        "maximum_linodes_per_pg": 5
+      }
+    },
+    {
+      "id": "eu-central",
+      "label": "Frankfurt, DE",
+      "country": "de",
+      "capabilities": [
+        "Linodes",
+        "Backups",
+        "NodeBalancers",
+        "Block Storage",
+        "Kubernetes",
+        "Cloud Firewall",
+        "Vlans",
+        "VPCs",
+        "Placement Group",
+        "Metadata",
+        "GPU Linodes"
+      ],
+      "status": "ok",
+      "site_type": "core",
+      "resolvers": {
+        "ipv4": "192.0.2.1,192.0.2.2",
+        "ipv6": "2001:db8::1,2001:db8::2"
+      },
+      "placement_group_limits": {
+        "maximum_pgs_per_customer": null,
+        "maximum_linodes_per_pg": 5
+      }
+    },
+    {
+      "id": "id-cgk",
+      "label": "Jakarta, ID",
+      "country": "id",
+      "capabilities": [
+        "Linodes",
+        "Backups",
+        "NodeBalancers",
+        "Block Storage",
+        "Kubernetes",
+        "Cloud Firewall",
+        "Vlans",
+        "VPCs",
+        "Placement Group",
+        "Metadata"
+      ],
+      "status": "ok",
+      "site_type": "core",
+      "resolvers": {
+        "ipv4": "192.0.2.1,192.0.2.2",
+        "ipv6": "2001:db8::1,2001:db8::2"
+      },
+      "placement_group_limits": {
+        "maximum_pgs_per_customer": null,
+        "maximum_linodes_per_pg": 5
+      }
+    },
+    {
+      "id": "br-gru",
+      "label": "Sao Paulo, BR",
+      "country": "br",
+      "capabilities": [
+        "Linodes",
+        "Backups",
+        "NodeBalancers",
+        "Block Storage",
+        "Kubernetes",
+        "Cloud Firewall",
+        "Vlans",
+        "VPCs",
+        "Placement Group",
+        "Metadata"
+      ],
+      "status": "ok",
+      "site_type": "core",
+      "resolvers": {
+        "ipv4": "192.0.2.1,192.0.2.2",
+        "ipv6": "2001:db8::1,2001:db8::2"
+      },
+      "placement_group_limits": {
+        "maximum_pgs_per_customer": null,
+        "maximum_linodes_per_pg": 5
+      }
+    },
+    {
+      "id": "ap-south",
+      "label": "Singapore, SG",
+      "country": "sg",
+      "capabilities": [
+        "Linodes",
+        "Backups",
+        "NodeBalancers",
+        "Block Storage",
+        "Kubernetes",
+        "Cloud Firewall",
+        "Vlans",
+        "VPCs",
+        "Placement Group"
+      ],
+      "status": "ok",
+      "site_type": "core",
+      "resolvers": {
+        "ipv4": "192.0.2.1,192.0.2.2",
+        "ipv6": "2001:db8::1,2001:db8::2"
+      },
+      "placement_group_limits": {
+        "maximum_pgs_per_customer": null,
+        "maximum_linodes_per_pg": 5
+      }
+    },
+    {
+      "id": "us-den-edge-1",
+      "label": "Denver, CO",
+      "country": "us",
+      "capabilities": [
+        "Linodes",
+        "Backups",
+        "NodeBalancers",
+        "Block Storage",
+        "Kubernetes",
+        "Cloud Firewall",
+        "Vlans",
+        "VPCs",
+        "Placement Group",
+        "Metadata"
+      ],
+      "status": "ok",
+      "site_type": "distributed",
+      "resolvers": {
+        "ipv4": "192.0.2.1,192.0.2.2",
+        "ipv6": "2001:db8::1,2001:db8::2"
+      },
+      "placement_group_limits": {
+        "maximum_pgs_per_customer": null,
+        "maximum_linodes_per_pg": 5
+      }
+    },
+    {
+      "id": "fr-par",
+      "label": "Paris, FR",
+      "country": "fr",
+      "capabilities": [
+        "Linodes",
+        "Backups",
+        "NodeBalancers",
+        "Block Storage",
+        "Kubernetes",
+        "Cloud Firewall",
+        "Vlans",
+        "VPCs",
+        "Placement Group",
+        "Metadata",
+        "Premium Plans"
+      ],
+      "status": "outage",
+      "site_type": "core",
+      "resolvers": {
+        "ipv4": "192.0.2.1,192.0.2.2",
+        "ipv6": "2001:db8::1,2001:db8::2"
+      },
+      "placement_group_limits": {
+        "maximum_pgs_per_customer": null,
+        "maximum_linodes_per_pg": 5
+      }
+    }
+  ],
+  "page": 1,
+  "pages": 1,
+  "results": 8
+}

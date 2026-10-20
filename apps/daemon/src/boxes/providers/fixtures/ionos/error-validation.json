@@ -1,0 +1,9 @@
+{
+  "httpStatus": 422,
+  "messages": [
+    {
+      "errorCode": "100",
+      "message": "[(root).entities.volumes.items[0].properties.imageAlias] Image alias 'ubuntu:24.04' is not supported for location 'us/ewr'"
+    }
+  ]
+}

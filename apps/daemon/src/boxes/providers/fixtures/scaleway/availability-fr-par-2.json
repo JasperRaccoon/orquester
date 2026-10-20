@@ -1,0 +1,16 @@
+{
+  "servers": {
+    "PLAY2-PICO": {
+      "availability": "available"
+    },
+    "POP2-2C-8G": {
+      "availability": "available"
+    },
+    "L4-1-24G": {
+      "availability": "available"
+    },
+    "H100-1-80G": {
+      "availability": "available"
+    }
+  }
+}
