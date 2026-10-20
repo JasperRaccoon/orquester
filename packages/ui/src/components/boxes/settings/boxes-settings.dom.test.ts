@@ -14,7 +14,7 @@ import type { BoxProviderId, SetBoxConnectionRequest, SetBoxProviderCredentialsR
 
 import { ApiError } from "../../../lib/api-client";
 import { useAppStore } from "../../../store/app";
-import { resetBoxes } from "../../../lib/boxes/store";
+import { resetBoxes, setBoxesPluginOn } from "../../../lib/boxes/store";
 import { box, kind, provider } from "../../../lib/boxes/fixtures.test-helpers";
 
 let act: typeof import("react-dom/test-utils").act;
@@ -251,5 +251,57 @@ describe("the Ephemeral AI VMs settings section", () => {
     await click(confirm);
     assert.deepEqual(deletes, ["box:t1"]);
     assert.ok(text().includes("Destroying…"));
+  });
+
+  describe("with the plugin off", () => {
+    const original = api.listBoxes;
+    const render = async (boxes: unknown[]) => {
+      (api as { listBoxes: unknown }).listBoxes = async () => ({
+        boxes,
+        totals: { activeCount: boxes.length, hourlyUsd: 1, monthEstimatedUsd: 1 }
+      });
+      act(() => root.unmount());
+      resetBoxes();
+      setBoxesPluginOn(false);
+      const mount = document.createElement("div");
+      document.body.replaceChildren(mount);
+      root = createRoot(mount);
+      await act(async () => {
+        root.render(createElement(BoxesPluginSection, { enabled: false }));
+      });
+      await settle();
+    };
+
+    afterEach(() => {
+      api.listBoxes = original;
+      setBoxesPluginOn(true);
+    });
+
+    it("still lists the boxes that are running, with a notice, and destroys a temporary one", async () => {
+      await render([
+        box(),
+        box({ id: "t1", purpose: "temporary", project: null, purposeNote: "build on macOS", kind: "macos", providerLabel: "Blacksmith" }),
+        box({ id: "old", purpose: "temporary", project: null, purposeNote: "long gone", state: "destroyed", destroyedAt: new Date().toISOString() })
+      ]);
+      assert.ok(text().includes("Ephemeral AI VMs is off, but these boxes are still running and billing."));
+      assert.ok(text().includes("jaspersito / JasperEngine"));
+      assert.ok(text().includes("Agent chat: build on macOS"));
+      assert.equal(text().includes("long gone"), false);
+      // Nothing of the plugin's setup while it is off.
+      assert.equal(buttonNamed("Add API key"), undefined);
+      const destroyButtons = [...document.querySelectorAll<HTMLButtonElement>("button")].filter((b) => b.textContent?.trim() === "Destroy");
+      assert.equal(destroyButtons.length, 1);
+      await click(destroyButtons[0]);
+      const confirm = [...document.querySelectorAll<HTMLButtonElement>("button")].filter((b) => b.textContent?.trim() === "Destroy").pop();
+      await click(confirm);
+      assert.deepEqual(deletes, ["box:t1"]);
+      assert.ok(text().includes("Destroying…"));
+    });
+
+    it("shows no notice when nothing is running", async () => {
+      await render([box({ state: "destroyed", destroyedAt: new Date().toISOString() })]);
+      assert.equal(text().includes("still running and billing"), false);
+      assert.equal(text().includes("JasperEngine"), false);
+    });
   });
 });
