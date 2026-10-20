@@ -151,6 +151,11 @@ const PURE_MODULES = new Set([
   // Task 11: the YAML frontmatter (de)serialiser the adapters write skills with (pure, `yaml` only),
   // so the card shows a skill's file exactly as it will be written.
   "agent-profile/infra/frontmatter.ts",
+  // boxes: read_file of a box project reads it in its box (`fs-tools.ts`): the file-system view over
+  // a `BoxConnection` and its path and error helpers (node fs/path/stream, @orquester/api, config/fs).
+  "boxes/remote/fs/errors.ts",
+  "boxes/remote/fs/paths.ts",
+  "boxes/remote/fs/project-fs.ts",
   "mcp/addressing.ts",
   "mcp/agents.ts",
   "mcp/attachments.ts",
@@ -212,6 +217,8 @@ const PURE_PACKAGES = new Set([
   "node:fs/promises",
   "node:path",
   "node:stream",
+  // boxes: project-fs.ts pipes box file streams.
+  "node:stream/promises",
   // Task 11: frontmatter.ts (pure YAML).
   "yaml"
 ]);
