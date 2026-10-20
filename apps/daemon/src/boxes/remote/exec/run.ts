@@ -64,6 +64,33 @@ export class BoxRunError extends Error {
 
 const DEFAULT_MAX_BUFFER = 64 * 1024 * 1024;
 
+/** Resolves once a box process is running; rejects with its spawn error (or an exit before it ran). */
+export function waitSpawned(proc: BoxProcess): Promise<void> {
+  if (proc.pid !== null) return Promise.resolve();
+  return new Promise<void>((resolve, reject) => {
+    const cleanup = (): void => {
+      proc.off("spawn", onSpawn);
+      proc.off("error", onError);
+      proc.off("exit", onExit);
+    };
+    const onSpawn = (): void => {
+      cleanup();
+      resolve();
+    };
+    const onError = (error: Error): void => {
+      cleanup();
+      reject(error);
+    };
+    const onExit = (code: number | null, signal: NodeJS.Signals | null): void => {
+      cleanup();
+      reject(new Error(`The process ended before it started (${code !== null ? `exit ${code}` : signal ?? "no status"}).`));
+    };
+    proc.on("spawn", onSpawn);
+    proc.on("error", onError);
+    proc.on("exit", onExit);
+  });
+}
+
 /** Collects one stream up to `cap` bytes; reports when it passed the cap. */
 class CappedCollector {
   private readonly chunks: Buffer[] = [];

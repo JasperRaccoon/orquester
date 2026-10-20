@@ -140,8 +140,8 @@ interface FakeProc {
   running: boolean;
   exitCode: number | null;
   signal: string | null;
-  /** Output kept for reattach, from `bufferStart`. */
-  buffer: Buffer;
+  /** Output kept for reattach, from `bufferStart`, in emission order. */
+  buffer: { stream: 1 | 2; data: Buffer }[];
   bufferStart: number;
   outputBytes: number;
   handles: Set<FakeHandle>;
@@ -243,11 +243,15 @@ export function fakeAgentConnection(
 
   const emitOutput = (proc: FakeProc, data: Buffer, stream: 1 | 2): void => {
     proc.outputBytes += data.length;
-    proc.buffer = Buffer.concat([proc.buffer, data]);
-    if (proc.buffer.length > cap) {
-      const drop = proc.buffer.length - cap;
-      proc.buffer = proc.buffer.subarray(drop);
+    proc.buffer.push({ stream, data });
+    let kept = proc.buffer.reduce((sum, segment) => sum + segment.data.length, 0);
+    while (kept > cap && proc.buffer.length > 0) {
+      const first = proc.buffer[0]!;
+      const drop = Math.min(first.data.length, kept - cap);
+      if (drop === first.data.length) proc.buffer.shift();
+      else first.data = first.data.subarray(drop);
       proc.bufferStart += drop;
+      kept -= drop;
     }
     for (const handle of proc.handles) (stream === 2 ? handle.stderr : handle.stdout).write(data);
   };
@@ -270,7 +274,7 @@ export function fakeAgentConnection(
     running: true,
     exitCode: null,
     signal: null,
-    buffer: Buffer.alloc(0),
+    buffer: [],
     bufferStart: 0,
     outputBytes: 0,
     handles: new Set(),
@@ -332,9 +336,16 @@ export function fakeAgentConnection(
       const proc = procs.get(procId);
       if (!proc) throw Object.assign(new Error(`UNKNOWN_PROC ${procId}`), { code: "UNKNOWN_PROC" });
       const handle = newHandle(proc);
-      const start = Math.max(fromOffset, proc.bufferStart);
-      const replay = proc.buffer.subarray(start - proc.bufferStart);
-      if (replay.length > 0) handle.stdout.write(replay);
+      // Replay what is kept from `fromOffset`, each byte on the stream it was emitted on.
+      let at = proc.bufferStart;
+      for (const segment of proc.buffer) {
+        const end = at + segment.data.length;
+        if (end > fromOffset) {
+          const part = segment.data.subarray(Math.max(0, fromOffset - at));
+          (segment.stream === 2 ? handle.stderr : handle.stdout).write(part);
+        }
+        at = end;
+      }
       if (!proc.running) {
         proc.handles.delete(handle);
         handle.finish(proc.exitCode, proc.signal as NodeJS.Signals | null);

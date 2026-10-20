@@ -45,7 +45,7 @@ import { SessionError, type ISessionManager, type SessionIndexContributor } from
 import { captureArgs, tmuxName } from "../../../tmux.ts";
 import type { BoxConnection, BoxHub, BoxProcess, BoxRegistry, BoxToolingProvisioner } from "../../contracts.ts";
 import { boxGitEnv, boxToolingEnv, toolingFor } from "./env.ts";
-import { runInBox } from "./run.ts";
+import { runInBox, waitSpawned } from "./run.ts";
 
 /** Hot replay ring, as for host sessions. */
 const MAX_BUFFER = 256 * 1024;
@@ -75,33 +75,6 @@ export interface BoxTerminalDeps {
   hub: Pick<BoxHub, "get" | "onConnectionChange">;
   tooling?: Pick<BoxToolingProvisioner, "contribution">;
   logger?: { warn(message: string, meta?: Record<string, unknown>): void };
-}
-
-/** Resolves once the process is running; rejects with its spawn error (or an early exit). */
-function spawned(proc: BoxProcess): Promise<void> {
-  if (proc.pid !== null) return Promise.resolve();
-  return new Promise<void>((resolve, reject) => {
-    const cleanup = (): void => {
-      proc.off("spawn", onSpawn);
-      proc.off("error", onError);
-      proc.off("exit", onExit);
-    };
-    const onSpawn = (): void => {
-      cleanup();
-      resolve();
-    };
-    const onError = (error: Error): void => {
-      cleanup();
-      reject(error);
-    };
-    const onExit = (code: number | null, signal: NodeJS.Signals | null): void => {
-      cleanup();
-      reject(new Error(`The shell ended at once (${code !== null ? `exit ${code}` : signal ?? "no status"}).`));
-    };
-    proc.on("spawn", onSpawn);
-    proc.on("error", onError);
-    proc.on("exit", onExit);
-  });
 }
 
 /** A terminal's cwd in the box: a host-form path is mapped, a box path (the home default) kept. */
@@ -246,7 +219,7 @@ export class BoxTerminalManager {
     const cwd = boxCwd(connection, session.summary.cwd);
     const { command, args } = boxShellCommand(connection, { id, cwd, cols, rows, env });
     const proc = connection.exec({ command, args, cwd, env, pty: { cols, rows, term: "xterm-256color" }, detach: { procId: id } });
-    await spawned(proc);
+    await waitSpawned(proc);
     this.wire(session, proc, 0);
   }
 
@@ -349,7 +322,7 @@ export class BoxTerminalManager {
         // After a restart the hot ring is rebuilt from the box's buffer.
         if (!session.offsetKnown) session.buffer = "";
         const proc = connection.attach(id, start);
-        await spawned(proc);
+        await waitSpawned(proc);
         if (this.sessions.get(id) !== session) {
           proc.kill("SIGHUP");
           return;
