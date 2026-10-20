@@ -3,6 +3,7 @@
 // there is no generic plugin runtime.
 
 import {
+  EPHEMERAL_VMS_PLUGIN_ID,
   EXCALIDRAW_PLUGIN_ID,
   type PluginEngineInfo,
   type PluginId,
@@ -44,6 +45,16 @@ export const BUILT_IN_PLUGINS: readonly PluginCatalogEntry[] = [
     id: SECRET_FILES_PLUGIN_ID,
     name: "Secret files",
     description: "Keep each repo's secret files (.env and others) in one vault and synced to every clone.",
+    source: { label: "JasperRaccoon/orquester", url: "https://github.com/JasperRaccoon/orquester" },
+    provider: "Orquester",
+    scope: "global",
+    updates: false
+  },
+  {
+    // Part of Orquester; the box service (apps/daemon/src/boxes) runs only while it's on.
+    id: EPHEMERAL_VMS_PLUGIN_ID,
+    name: "Ephemeral AI VMs",
+    description: "Run projects and agent tasks on rented Linux, GPU, Windows and macOS boxes from your own cloud accounts.",
     source: { label: "JasperRaccoon/orquester", url: "https://github.com/JasperRaccoon/orquester" },
     provider: "Orquester",
     scope: "global",

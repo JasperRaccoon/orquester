@@ -222,13 +222,14 @@ export function Segmented<T extends string>({
 }
 
 /** A switch with its label and help, the whole row finger-sized on a phone. */
-const SwitchRow: React.FC<{
+export const SwitchRow: React.FC<{
   id: string;
   label: string;
   help?: string;
   checked: boolean;
   onChange: (checked: boolean) => void;
-}> = ({ id, label, help, checked, onChange }) => {
+  disabled?: boolean;
+}> = ({ id, label, help, checked, onChange, disabled }) => {
   const touch = useTouch();
   return (
     <div className={cn("flex items-center justify-between gap-3", touch && "min-h-10")}>
@@ -243,10 +244,12 @@ const SwitchRow: React.FC<{
         type="button"
         role="switch"
         aria-checked={checked}
+        disabled={disabled}
         onClick={() => onChange(!checked)}
         className={cn(
           "relative inline-flex shrink-0 items-center justify-center rounded-full",
           FOCUS_RING,
+          disabled && "cursor-not-allowed opacity-50",
           touch ? "h-10 w-12" : "h-6 w-10"
         )}
       >

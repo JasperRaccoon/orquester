@@ -1,0 +1,79 @@
+{
+  "pricing": {
+    "currency": "EUR",
+    "vat_rate": "0.000000",
+    "primary_ips": [
+      {
+        "type": "ipv4",
+        "prices": [
+          {
+            "location": "fsn1",
+            "price_hourly": {
+              "net": "0.0008000000",
+              "gross": "0.0008000000000000"
+            },
+            "price_monthly": {
+              "net": "0.5000000000",
+              "gross": "0.5000000000000000"
+            }
+          },
+          {
+            "location": "nbg1",
+            "price_hourly": {
+              "net": "0.0008000000",
+              "gross": "0.0008000000000000"
+            },
+            "price_monthly": {
+              "net": "0.5000000000",
+              "gross": "0.5000000000000000"
+            }
+          },
+          {
+            "location": "hel1",
+            "price_hourly": {
+              "net": "0.0008000000",
+              "gross": "0.0008000000000000"
+            },
+            "price_monthly": {
+              "net": "0.5000000000",
+              "gross": "0.5000000000000000"
+            }
+          },
+          {
+            "location": "ash",
+            "price_hourly": {
+              "net": "0.0008000000",
+              "gross": "0.0008000000000000"
+            },
+            "price_monthly": {
+              "net": "0.5000000000",
+              "gross": "0.5000000000000000"
+            }
+          },
+          {
+            "location": "hil",
+            "price_hourly": {
+              "net": "0.0008000000",
+              "gross": "0.0008000000000000"
+            },
+            "price_monthly": {
+              "net": "0.5000000000",
+              "gross": "0.5000000000000000"
+            }
+          },
+          {
+            "location": "sin",
+            "price_hourly": {
+              "net": "0.0008000000",
+              "gross": "0.0008000000000000"
+            },
+            "price_monthly": {
+              "net": "0.5000000000",
+              "gross": "0.5000000000000000"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

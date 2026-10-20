@@ -1,0 +1,191 @@
+{
+  "version": "2025-01-29",
+  "data": {
+    "instance_types": [
+      {
+        "name": "rtx49-15-80-400-ec",
+        "brand_short": "RTX 4090",
+        "manufacturer": "NVIDIA",
+        "variants": [
+          {
+            "name": "rtx49-15-80-400-ec.1",
+            "cpu_count": 15,
+            "logical_cpu_count": 30,
+            "gpu_count": 1,
+            "dram": 85899345920,
+            "vram": 25757220864,
+            "disk": 429496729600,
+            "cost_per_hour": 47.84,
+            "nodes": 0,
+            "nodes_per_dc": {},
+            "available_nodes": 0,
+            "available_nodes_per_dc": {},
+            "ip_availability_per_dc": {},
+            "volume_types_per_dc": {},
+            "mig_profile": null,
+            "cpu_sharing_policy": "Dedicated"
+          },
+          {
+            "name": "rtx49-15-80-400-ec.2",
+            "cpu_count": 30,
+            "logical_cpu_count": 60,
+            "gpu_count": 2,
+            "dram": 171798691840,
+            "vram": 25757220864,
+            "disk": 858993459200,
+            "cost_per_hour": 92.0,
+            "nodes": 0,
+            "nodes_per_dc": {},
+            "available_nodes": 0,
+            "available_nodes_per_dc": {},
+            "ip_availability_per_dc": {},
+            "volume_types_per_dc": {},
+            "mig_profile": null,
+            "cpu_sharing_policy": "Dedicated"
+          }
+        ],
+        "cost_per_hour": 368,
+        "datacenters": [],
+        "nvidia_kernel_module_support": null
+      },
+      {
+        "name": "rtx59-16c-nr",
+        "brand_short": "RTX 5090",
+        "manufacturer": "NVIDIA",
+        "variants": [
+          {
+            "name": "rtx59-16c-nr.2",
+            "cpu_count": 30,
+            "logical_cpu_count": 60,
+            "gpu_count": 2,
+            "dram": 214748364800,
+            "vram": 34359738368,
+            "disk": 2147483648000,
+            "cost_per_hour": 120.0,
+            "nodes": 1,
+            "nodes_per_dc": {
+              "us-east-nc-nr-1": 1
+            },
+            "available_nodes": 0,
+            "available_nodes_per_dc": {
+              "us-east-nc-nr-1": 0
+            },
+            "ip_availability_per_dc": {
+              "us-east-nc-nr-1": {
+                "public_ips": false
+              }
+            },
+            "volume_types_per_dc": {},
+            "mig_profile": null,
+            "cpu_sharing_policy": "Dedicated"
+          },
+          {
+            "name": "rtx59-16c-nr.1",
+            "cpu_count": 15,
+            "logical_cpu_count": 30,
+            "gpu_count": 1,
+            "dram": 107374182400,
+            "vram": 34359738368,
+            "disk": 1073741824000,
+            "cost_per_hour": 62.4,
+            "nodes": 1,
+            "nodes_per_dc": {
+              "us-east-nc-nr-1": 1
+            },
+            "available_nodes": 1,
+            "available_nodes_per_dc": {
+              "us-east-nc-nr-1": 1
+            },
+            "ip_availability_per_dc": {
+              "us-east-nc-nr-1": {
+                "public_ips": false
+              }
+            },
+            "volume_types_per_dc": {},
+            "mig_profile": null,
+            "cpu_sharing_policy": "Dedicated"
+          }
+        ],
+        "cost_per_hour": 480,
+        "datacenters": [
+          {
+            "name": "us-east-nc-nr-1",
+            "provider_name": "Provider",
+            "provider_logo": null,
+            "country_code": "USA"
+          }
+        ],
+        "nvidia_kernel_module_support": "OpenOnly"
+      },
+      {
+        "name": "rtx49-7c-kn",
+        "brand_short": "RTX 4090",
+        "manufacturer": "NVIDIA",
+        "variants": [
+          {
+            "name": "rtx49-7c-kn.1",
+            "cpu_count": 15,
+            "logical_cpu_count": 30,
+            "gpu_count": 1,
+            "dram": 53687091200,
+            "vram": 25757220864,
+            "disk": 858993459200,
+            "cost_per_hour": 38.75,
+            "nodes": 1,
+            "nodes_per_dc": {
+              "ap-east-tw-kn-2": 1
+            },
+            "available_nodes": 1,
+            "available_nodes_per_dc": {
+              "ap-east-tw-kn-2": 1
+            },
+            "ip_availability_per_dc": {
+              "ap-east-tw-kn-2": {
+                "public_ips": true
+              }
+            },
+            "volume_types_per_dc": {},
+            "mig_profile": null,
+            "cpu_sharing_policy": "Dedicated"
+          },
+          {
+            "name": "rtx49-7c-kn.2",
+            "cpu_count": 30,
+            "logical_cpu_count": 60,
+            "gpu_count": 2,
+            "dram": 107374182400,
+            "vram": 25757220864,
+            "disk": 1717986918400,
+            "cost_per_hour": 77.5,
+            "nodes": 1,
+            "nodes_per_dc": {
+              "ap-east-tw-kn-2": 1
+            },
+            "available_nodes": 0,
+            "available_nodes_per_dc": {
+              "ap-east-tw-kn-2": 0
+            },
+            "ip_availability_per_dc": {
+              "ap-east-tw-kn-2": {
+                "public_ips": true
+              }
+            },
+            "volume_types_per_dc": {},
+            "mig_profile": null,
+            "cpu_sharing_policy": "Dedicated"
+          }
+        ],
+        "cost_per_hour": 310,
+        "datacenters": [
+          {
+            "name": "ap-east-tw-kn-2",
+            "provider_name": "Provider",
+            "provider_logo": null,
+            "country_code": "TWN"
+          }
+        ],
+        "nvidia_kernel_module_support": "ProprietaryOnly"
+      }
+    ]
+  }
+}

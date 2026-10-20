@@ -62,16 +62,24 @@ import { join } from "node:path";
 import { MAX_TURN_INPUT_CHARS } from "@orquester/api/agent-chat";
 import { projectGrokHistory } from "./history.ts";
 import { GROK_EXTRA_ENV } from "./launch.ts";
-import { prepareGrokProfileSpawn } from "./profile-launch.ts";
+import { prepareGrokProfileSpawn, type GrokProfileSpawn } from "./profile-launch.ts";
 import { pendingStatusMessage } from "../pending.ts";
 import {
   COMPACT_SLASH_COMMAND,
   FALLBACK_GROK_MODELS,
+  parseGrokInspectSkills,
   probeGrok,
   probeSkills
 } from "./probe.ts";
+// boxes:
+import { runInBox } from "../../boxes/box-tools.ts";
+import type { BoxLaunch } from "../../boxes/index.ts";
+import { AGENT_HOST_DEADLINES } from "../../support/deadline.ts";
 import { issueSessionToolsGrant, launchHomeKey } from "../../session-tools/index.ts";
 import { GrokSession } from "./session.ts";
+// boxes:
+import { boxGrokPluginNames, grokBoxMcpServers, launchGrokInBox, type GrokBoxLaunch } from "./box-launch.ts";
+import { ACCOUNT_HOME_ENV_VAR } from "../../support/env.ts";
 import { McpAppSnapshotStore } from "../mcp-app-capture.ts";
 import { recordLeftoverWork, sweepLeftoverWork } from "../../support/leftover-work.ts";
 
@@ -275,8 +283,8 @@ class GrokAdapter implements AgentAdapter {
       this.sessions.delete(input.threadId);
     }
 
-    const command = await this.context.resolveBin("grok");
-    if (command === null) {
+    const hostCommand = await this.context.resolveBin("grok");
+    if (hostCommand === null && input.box === undefined) {
       throw new Error("Grok CLI (`grok`) is not installed or not on PATH.");
     }
 
@@ -289,7 +297,24 @@ class GrokAdapter implements AgentAdapter {
     // Agent Profiles (spec §6.3): a profile thread renders its home's `config.toml` and gets
     // `--no-leader` / `--plugin-dir` before every spawn; a home it cannot launch from fails the
     // start (`profile-launch.ts`). `null` for a Global thread — nothing below changes for it.
-    const profileSpawn = await prepareGrokProfileSpawn({ profile: input.profile, env, command });
+    // boxes (spec 2026-10-19 §8.5): sync, then the box's grok. A profile's home is rendered on
+    // this machine (the source its box copy syncs from) with the plugins `grok inspect` finds IN
+    // the box, then synced into the box again.
+    let profileSpawn: GrokProfileSpawn | null;
+    let boxLaunch: BoxLaunch | undefined;
+    if (input.box === undefined) {
+      profileSpawn = await prepareGrokProfileSpawn({ profile: input.profile, env, command: hostCommand! });
+    } else {
+      boxLaunch = await launchGrokInBox(this.context, { ...input, box: input.box }, env[ACCOUNT_HOME_ENV_VAR.grok] ?? input.home.path);
+      try {
+        profileSpawn = await prepareGrokProfileSpawn({ profile: input.profile, env, command: boxLaunch.bin, inspect: boxGrokPluginNames(boxLaunch) });
+        if (profileSpawn !== null) await boxLaunch.syncProfile();
+      } catch (error) {
+        await boxLaunch.close();
+        throw error;
+      }
+    }
+    const command = boxLaunch?.bin ?? hostCommand!;
 
     // Design 2026-10-14 §1.2: a fresh credential per `grok agent stdio`
     // launch, carried by the ACP `mcpServers` entry (`session-tools.ts`); this
@@ -301,7 +326,38 @@ class GrokAdapter implements AgentAdapter {
     });
     const grant = tools.grant;
 
+    // boxes: the box env, the servers that run here behind the bridge, and ours behind it too.
+    let box: GrokBoxLaunch | undefined;
+    let sessionEnv = env;
+    if (boxLaunch !== undefined) {
+      try {
+        const boxEnv = boxLaunch.env({ ...env, ...profileSpawn?.env });
+        const bridged = await grokBoxMcpServers({
+          launch: boxLaunch,
+          env: boxEnv.env,
+          envUnset: boxEnv.unset,
+          cwd: input.cwd,
+          logger: this.context.logger
+        });
+        const sessionToolsBridge =
+          grant !== undefined
+            ? await boxLaunch.bridgeHttp("orquester", grant.url, { Authorization: grant.authorization })
+            : undefined;
+        box = {
+          launch: boxLaunch,
+          envUnset: boxEnv.unset,
+          mcp: { bridged, ...(sessionToolsBridge !== undefined ? { sessionToolsBridge } : {}) }
+        };
+        sessionEnv = boxEnv.env;
+      } catch (error) {
+        grant?.revoke();
+        await boxLaunch.close();
+        throw error;
+      }
+    }
+
     const session: GrokSession = new GrokSession({
+      ...(box !== undefined ? { box } : {}),
       ...(grant !== undefined
         ? {
             sessionTools: {
@@ -326,7 +382,8 @@ class GrokAdapter implements AgentAdapter {
             }
           : {}),
       threadId: input.threadId,
-      cwd: input.cwd,
+      // boxes: the box's cwd (identity on a POSIX box).
+      cwd: boxLaunch !== undefined ? boxLaunch.toBox(input.cwd) : input.cwd,
       home: input.home,
       ...(profileSpawn === null ? {} : { profileSpawn }),
       runtimeMode: input.runtimeMode,
@@ -338,7 +395,7 @@ class GrokAdapter implements AgentAdapter {
       knownGoal: input.knownGoal ?? null,
       now: () => this.context.clock.now().getTime(),
       command,
-      env,
+      env: sessionEnv,
       clientInfo: { name: "orquester", version: "1" },
       emit: this.emit,
       stamp: () => ({ eventId: this.context.ids.eventId(), createdAt: this.context.clock.nowIso() }),
@@ -360,6 +417,8 @@ class GrokAdapter implements AgentAdapter {
       },
       onClosed: (threadId) => {
         grant?.revoke();
+        // boxes: the session's bridge registrations go with it.
+        void boxLaunch?.close();
         if (this.sessions.get(threadId) === session) {
           this.sessions.delete(threadId);
         }
@@ -386,12 +445,13 @@ class GrokAdapter implements AgentAdapter {
     } catch (error) {
       grant?.revoke();
       this.sessions.delete(input.threadId);
+      await boxLaunch?.close();
       throw error;
     }
 
     // §4.6.4: refresh the per-cwd skill overlay off session start, forked so
-    // it never delays the first turn.
-    void this.refreshWorkspace(input.cwd).catch(() => undefined);
+    // it never delays the first turn. boxes: the box's skills are not this machine's to probe.
+    if (boxLaunch === undefined) void this.refreshWorkspace(input.cwd).catch(() => undefined);
 
     return session.summary;
   }
@@ -416,11 +476,16 @@ class GrokAdapter implements AgentAdapter {
     const session = this.requireSession(input.threadId);
     // References only (§4.1): the host owns the bytes, the adapter only ever
     // hands the agent a path it can read for itself.
+    // boxes: a box session's attachments are copied into its box and named by their box path.
+    const resolve =
+      session.boxLaunch !== undefined
+        ? session.boxLaunch.adapterContext(this.context).resolveAttachmentPath
+        : this.context.resolveAttachmentPath;
     const attachments = await Promise.all(
       input.attachments.map(async (attachment) => ({
         id: attachment.id,
         name: attachment.name,
-        path: await this.context.resolveAttachmentPath(input.threadId, attachment.id),
+        path: await resolve(input.threadId, attachment.id),
         ...(attachment.mimeType === undefined ? {} : { mimeType: attachment.mimeType })
       }))
     );
@@ -587,9 +652,25 @@ class GrokAdapter implements AgentAdapter {
 
   /** One `grok inspect` per session; a failed one is not kept, so the next read tries again. */
   private async inspectSessionSkills(session: GrokSession): Promise<Skill[]> {
-    const command = await this.context.resolveBin("grok");
     const { env, cwd } = session.inspectTarget;
-    const skills = command === null ? null : await probeSkills(command, env, cwd);
+    let skills: Skill[] | null;
+    const boxLaunch = session.boxLaunch;
+    if (boxLaunch !== undefined) {
+      // boxes: what the session loads is the box's — inspected there, with the session's env.
+      const output = await runInBox(boxLaunch.connection, {
+        command: boxLaunch.bin,
+        args: ["inspect", "--json"],
+        env,
+        cwd,
+        timeoutMs: AGENT_HOST_DEADLINES.probeMs,
+        maxOutputBytes: 8 * 1024 * 1024,
+        label: "grok inspect in the box"
+      }).catch(() => null);
+      skills = output !== null && output.code === 0 ? parseGrokInspectSkills(output.stdout) : null;
+    } else {
+      const command = await this.context.resolveBin("grok");
+      skills = command === null ? null : await probeSkills(command, env, cwd);
+    }
     if (skills === null) {
       this.sessionSkills.delete(session);
       return [];

@@ -90,6 +90,8 @@ export interface WorkflowDaemonDeps {
   fsRoot: () => string;
   /** `<appdir>/tmp` — the sandbox attempts' TMPDIR. */
   appdirTmp?: string;
+  // boxes: the box registry/hub for box projects' blocks (Ephemeral AI VMs spec §8.8). Absent = host only.
+  boxSandbox?: WorkflowRuntimeDeps["boxSandbox"];
   push: WorkflowPushSender | null;
   logger: WorkflowLogger;
 }
@@ -223,6 +225,8 @@ export function createWorkflowDaemon(deps: WorkflowDaemonDeps): WorkflowDaemon {
     workspacesDir: deps.workspacesDir,
     fsRoot: deps.fsRoot,
     ...(deps.appdirTmp !== undefined ? { appdirTmp: deps.appdirTmp } : {}),
+    // boxes: box projects' shell/code blocks run in their box.
+    ...(deps.boxSandbox !== undefined ? { boxSandbox: deps.boxSandbox } : {}),
     push: deps.push,
     logger,
     clock

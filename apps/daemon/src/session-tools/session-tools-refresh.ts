@@ -93,6 +93,8 @@ export interface SessionToolsRefreshDeps {
   openThreads(): string[];
   /** The chat audience of the catalog. */
   catalog(): readonly AnyOrquesterTool[];
+  /** boxes: whether temporary boxes can be rented now (their tools are advertised only then). Absent: never. */
+  boxesAvailable?(): boolean;
   /** The daemon's in-process API (null while it does not exist yet). */
   api(): DaemonApi | null;
   /**
@@ -342,7 +344,13 @@ export class SessionToolsRefresher {
       ...(denyEveryKnown ? { denyEveryKnown: true } : {}),
       workflowOwned
     };
-    const manifest = buildSessionToolsManifest({ thread: manifestThread, catalog: this.deps.catalog(), daemonPointing });
+    const manifest = buildSessionToolsManifest({
+      thread: manifestThread,
+      catalog: this.deps.catalog(),
+      daemonPointing,
+      // boxes: the box tools only while a box can be rented.
+      boxesAvailable: this.deps.boxesAvailable?.() === true
+    });
     return { ...manifest, seq: this.nextSeq(), epoch: this.epoch };
   }
 

@@ -1,0 +1,71 @@
+{
+  "status": true,
+  "message": "Getting VM detail successful",
+  "instance": {
+    "id": 7613,
+    "name": "orq-box-0123abcd",
+    "status": "ACTIVE",
+    "environment": {
+      "id": 3287,
+      "name": "orquester-canada-1",
+      "org_id": 1129,
+      "region": "CANADA-1",
+      "features": {
+        "network_optimised": false,
+        "green_status": "GREEN"
+      }
+    },
+    "image": {
+      "name": "Ubuntu Server 22.04 LTS R550 CUDA 12.4 with Docker"
+    },
+    "flavor": {
+      "id": 101,
+      "name": "n3-RTX-A6000x1",
+      "cpu": 28,
+      "ram": 58,
+      "disk": 100,
+      "ephemeral": 0,
+      "gpu": "RTX-A6000",
+      "gpu_count": 1,
+      "labels": [],
+      "features": {
+        "network_optimised": false,
+        "no_reboot": false,
+        "no_hibernation": false,
+        "no_snapshot": false,
+        "local_storage_only": false,
+        "api_only": false
+      }
+    },
+    "os": "Ubuntu",
+    "keypair": {
+      "name": "orq-box-0123abcd"
+    },
+    "volume_attachments": [],
+    "power_state": "RUNNING",
+    "vm_state": "active",
+    "fixed_ip": "10.0.0.14",
+    "floating_ip": "192.0.2.118",
+    "floating_ip_status": "ATTACHED",
+    "security_rules": [],
+    "callback_url": null,
+    "locked": false,
+    "contract_id": null,
+    "labels": [
+      "orquester-box=box-0123abcd"
+    ],
+    "created_at": "2026-10-20T08:01:09Z",
+    "features": {
+      "network_optimised": false,
+      "no_reboot": false,
+      "no_hibernation": false,
+      "no_snapshot": false,
+      "local_storage_only": false,
+      "api_only": false
+    },
+    "port_randomization": false,
+    "port_randomization_status": "DISABLED",
+    "requires_public_ip": false,
+    "cluster_id": null
+  }
+}

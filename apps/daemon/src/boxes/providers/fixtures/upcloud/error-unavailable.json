@@ -1,0 +1,6 @@
+{
+  "error": {
+    "error_code": "SERVICE_UNAVAILABLE",
+    "error_message": "The API service is not in use because of maintenance."
+  }
+}

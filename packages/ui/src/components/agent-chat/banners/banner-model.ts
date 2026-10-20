@@ -256,13 +256,26 @@ export function toolApprovalChangeSentence(card: CardFacts): string {
     case "cross-project-read":
     case "cross-workspace-read":
       return "Approving lets the agent read content (transcripts, files or diffs) of another project, as the preview shows. Nothing is changed.";
+    // boxes: a temporary box (Ephemeral AI VMs §13.2).
+    case "boxes":
+      return "Approving rents this machine from the provider shown, billed to your account at about the price shown until it is destroyed: by the agent, at its time limit, or when this chat closes.";
     default:
       return "This approval comes from a newer Orquester than this client knows: check it on an updated client before approving.";
   }
 }
 
+/**
+ * boxes: a temporary-box card — `create_box` asking to rent a VM (Ephemeral AI VMs spec §13.2).
+ * Read by its kind `"box"`, or by the tool's name while this build's parser does not know that
+ * kind yet (it then reads `"unknown"`, with its caution, and is still named for what it is).
+ */
+export function isBoxApprovalCard(card: Pick<ParsedToolApprovalSummary, "kind"> & { tool?: string }): boolean {
+  return (card.kind as string) === "box" || card.tool === "create_box";
+}
+
 /** The card's badge: what kind of decision it is. */
-export function toolApprovalKindBadge(card: Pick<ParsedToolApprovalSummary, "kind">): string {
+export function toolApprovalKindBadge(card: Pick<ParsedToolApprovalSummary, "kind"> & { tool?: string }): string {
+  if (isBoxApprovalCard(card)) return "Rent a VM";
   switch (card.kind) {
     case "admin":
       return "Admin";
@@ -270,6 +283,9 @@ export function toolApprovalKindBadge(card: Pick<ParsedToolApprovalSummary, "kin
       return "Another project";
     case "toolset":
       return "Tools";
+    // boxes: a call that spends money.
+    case "spend":
+      return "Costs money";
     default:
       return "Approval";
   }

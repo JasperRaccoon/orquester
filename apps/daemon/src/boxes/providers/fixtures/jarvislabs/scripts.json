@@ -1,0 +1,13 @@
+{
+  "success": true,
+  "script_meta": [
+    {
+      "script_id": 11,
+      "script_name": "my-setup"
+    },
+    {
+      "script_id": 27,
+      "script_name": "orq-box-0123abcd"
+    }
+  ]
+}

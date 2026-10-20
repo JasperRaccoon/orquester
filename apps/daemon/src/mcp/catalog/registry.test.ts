@@ -5,7 +5,7 @@
  * (the agent host loads it statically); only the executor runs a tool; and the byte budgets,
  * measured on `tools/list` exactly as an MCP client receives it — for every tool, no exemption.
  *
- * Counts (spec §1.4, §9.1): 42 external tools, 46 chat tools (42 shared + 4 chat-only), every one
+ * Counts (spec §1.4, §9.1): 42 external tools, 54 chat tools (42 shared + 12 chat-only), every one
  * of them advertised to every chat (toolsets only group them).
  */
 
@@ -30,7 +30,21 @@ import { buildCatalog, CATALOG, catalogFor, TOOL_NAME_PATTERN, toolByName } from
 const SRC = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
 /** The chat-only tools (spec §4 rows 42–44, and secret files §8; `request_toolset` is gone). */
-const CHAT_ONLY = ["html_preview", "html_render", "request_secret", "push_secret_files"];
+const CHAT_ONLY = [
+  "html_preview",
+  "html_render",
+  "request_secret",
+  "push_secret_files",
+  // boxes: the temporary-box family (Ephemeral AI VMs spec §13).
+  "create_box",
+  "list_boxes",
+  "box_exec",
+  "box_exec_output",
+  "box_upload",
+  "box_download",
+  "box_forward_port",
+  "destroy_box"
+];
 
 test("names, audiences, toolsets, tiers: well-formed and unique; Admin-capable tools carry a family and a preview", () => {
   const names = new Set<string>();
@@ -79,15 +93,15 @@ test("TOOLSETS agree with the catalog: every chat tool sits in the toolset TOOLS
   assert.deepEqual([...chatToolNames()].sort(), catalogFor("chat").map((tool) => tool.name).sort());
 });
 
-test("counts: 42 external, 46 chat (the 42 plus 4 chat-only), 16 in core", () => {
+test("counts: 42 external, 54 chat (the 42 plus 12 chat-only), 16 in core", () => {
   const external = catalogFor("external").map((tool) => tool.name);
   const chat = catalogFor("chat").map((tool) => tool.name);
   assert.equal(external.length, 42);
-  assert.equal(chat.length, 46);
+  assert.equal(chat.length, 54);
   assert.deepEqual(externalMcpToolNames(), external);
   assert.deepEqual(chat.filter((name) => !external.includes(name)), CHAT_ONLY);
   assert.deepEqual(external.filter((name) => !chat.includes(name)), [], "every external tool is a chat tool too");
-  assert.equal(CATALOG.length, 46);
+  assert.equal(CATALOG.length, 54);
   assert.equal(toolByName("request_toolset", "chat"), undefined);
   assert.equal(catalogFor("chat").filter((tool) => tool.toolset === "core").length, 16);
 });
@@ -137,6 +151,11 @@ const PURE_MODULES = new Set([
   // Task 11: the YAML frontmatter (de)serialiser the adapters write skills with (pure, `yaml` only),
   // so the card shows a skill's file exactly as it will be written.
   "agent-profile/infra/frontmatter.ts",
+  // boxes: read_file of a box project reads it in its box (`fs-tools.ts`): the file-system view over
+  // a `BoxConnection` and its path and error helpers (node fs/path/stream, @orquester/api, config/fs).
+  "boxes/remote/fs/errors.ts",
+  "boxes/remote/fs/paths.ts",
+  "boxes/remote/fs/project-fs.ts",
   "mcp/addressing.ts",
   "mcp/agents.ts",
   "mcp/attachments.ts",
@@ -150,6 +169,8 @@ const PURE_MODULES = new Set([
   "mcp/reads.ts",
   "mcp/result.ts",
   "mcp/tools/agent-profile.ts",
+  // boxes: the temporary-box tools (DaemonApi only; their daemon-side contract is imported as types).
+  "mcp/tools/boxes.ts",
   "mcp/tools/agent-profile-preview.ts",
   "mcp/tools/catalog.ts",
   "mcp/tools/desktop-preview.ts",
@@ -196,6 +217,8 @@ const PURE_PACKAGES = new Set([
   "node:fs/promises",
   "node:path",
   "node:stream",
+  // boxes: project-fs.ts pipes box file streams.
+  "node:stream/promises",
   // Task 11: frontmatter.ts (pure YAML).
   "yaml"
 ]);
@@ -317,8 +340,12 @@ test("byte budgets (§9.5): every tool, every description and field text; the ex
       }
     } else {
       // Every chat gets every chat tool: the whole chat set, as the host serves it (compacted), is the one budget (≤ 56 KiB).
+      // boxes: the `boxes` toolset is advertised only while a box can be rented, on a budget of its own (≤ 6 KiB).
       assert.equal(rows.length, catalogFor("chat").length);
-      assert.ok(total(rows) <= 57_344, `chat tools/list is ${total(rows)} bytes`);
+      const boxRows = rows.filter((row) => toolByName(row.name)!.toolset === "boxes");
+      const baseRows = rows.filter((row) => toolByName(row.name)!.toolset !== "boxes");
+      assert.ok(total(baseRows) <= 57_344, `chat tools/list is ${total(baseRows)} bytes`);
+      assert.ok(boxRows.reduce((sum, row) => sum + row.bytes + 1, 0) <= 6_144, `the box tools add ${boxRows.reduce((sum, row) => sum + row.bytes + 1, 0)} bytes`);
       for (const row of rows) assert.equal((row.listed as { _meta?: unknown })._meta, undefined, "chat entries carry no _meta");
     }
   }

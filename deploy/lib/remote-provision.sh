@@ -62,7 +62,7 @@ if ! command -v caddy >/dev/null 2>&1; then
   apt-get install -y caddy
 fi
 
-log "3/7 repo checkout + install + build"
+log "3/7 repo checkout + install + build (SPA, Go toolchain, orq-agent)"
 if [ ! -d /opt/orquester/.git ]; then
   mkdir -p /opt/orquester
   # An SSH clone URL needs a deploy key + known_hosts entry for root on THIS box;
@@ -80,6 +80,21 @@ git checkout -q "$BRANCH"
 git reset --hard -q "origin/$BRANCH"
 CI=1 ELECTRON_SKIP_BINARY_DOWNLOAD=1 pnpm install --frozen-lockfile </dev/null
 ELECTRON_SKIP_BINARY_DOWNLOAD=1 pnpm --filter @orquester/web build </dev/null
+# orq-agent (apps/box-agent, Go): pinned toolchain + prebuilt apps/box-agent/dist.
+# Best-effort, like remote-update.sh: the daemon still starts without it and builds
+# on demand into the appdir, or reports orq-agent builds unavailable.
+BOX_AGENT_WARNING=""
+if [ -f apps/box-agent/package.json ]; then
+  if ! bash deploy/install-go.sh </dev/null; then
+    BOX_AGENT_WARNING="Go toolchain install failed — orq-agent not prebuilt"
+  elif ! GO=/usr/local/go/bin/go GOTOOLCHAIN=local pnpm --filter @orquester/box-agent build </dev/null; then
+    rm -rf apps/box-agent/dist
+    BOX_AGENT_WARNING="orq-agent build failed"
+  fi
+fi
+if [ -n "$BOX_AGENT_WARNING" ]; then
+  echo "[provision] WARNING: $BOX_AGENT_WARNING (see above) — continuing; deploy again to retry." >&2
+fi
 # The daemon loads better-sqlite3 and node-pty under /usr/bin/node (the unit's
 # ExecStart interpreter): prove they load there, rebuilding any that don't,
 # before the service is started below.
@@ -136,6 +151,9 @@ ufw allow 443/tcp
 ufw --force enable
 
 log "DONE — https://$DOMAIN"
+if [ -n "$BOX_AGENT_WARNING" ]; then
+  echo "[provision] WARNING: $BOX_AGENT_WARNING — boxes fall back to an on-demand build; deploy again to retry." >&2
+fi
 if [ -n "$GENERATED_PASSWORD" ]; then
   echo '=============================================================='
   echo ' HTTP password (username from daemon.env, default: mapacho):'

@@ -1,0 +1,4 @@
+{
+  "code": "authentication_failed",
+  "reason": "Authentication failed, please check your API key"
+}

@@ -156,16 +156,79 @@ export function tsRustPreloadPath(baseDir: string): string {
   return joinPath(tsRustPluginDir(baseDir), "preload.cjs");
 }
 
+// appendNodeRequireOption lives in ./tooling.ts (re-exported below) beside the per-target env helpers.
+
+/** Ephemeral AI VMs: box records and plugin settings (`boxes.ts`). */
+export function boxesStorePath(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "boxes.json");
+}
+
+/** Ephemeral AI VMs: provider and Tailscale credentials; mode 0600, never sent to clients. */
+export function boxSecretsPath(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "box-secrets.json");
+}
+
+/** `<appdir>/daemon/boxes`: per-box sockets, setup logs, orq-agent builds; mode 0700. */
+export function boxesDir(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "boxes");
+}
+
 /**
- * Append `--require "<preloadPath>"` to an existing NODE_OPTIONS value, keeping
- * whatever the user already set. Idempotent: a value that already requires the
- * preload is returned unchanged.
+ * Local relay socket for one connected box: the agent host (and other local
+ * processes) open box channels through it with the same protocol as the box link.
  */
-export function appendNodeRequireOption(existing: string | undefined, preloadPath: string): string {
-  const option = `--require ${JSON.stringify(preloadPath)}`;
-  const current = (existing ?? "").trim();
-  if (current.includes(option)) return current;
-  return current.length > 0 ? `${current} ${option}` : option;
+export function boxSocketPath(baseDir: string, boxId: string): string {
+  return joinPath(boxesDir(baseDir), "sockets", `${boxId}.sock`);
+}
+
+/** One box's setup log (plain text, no secrets). */
+export function boxSetupLogPath(baseDir: string, boxId: string): string {
+  return joinPath(boxesDir(baseDir), "logs", `${boxId}.log`);
+}
+
+/** Built `orq-agent` executables, one per platform (`<platform>/orq-agent[.exe]`). */
+export function boxAgentBuildsDir(baseDir: string): string {
+  return joinPath(boxesDir(baseDir), "agent-builds");
+}
+
+/** Verified plugin tooling archives for boxes, keyed by (tool, version, platform). */
+export function boxToolingCacheDir(baseDir: string): string {
+  return joinPath(boxesDir(baseDir), "tooling-cache");
+}
+
+/**
+ * One verified archive in the box tooling cache:
+ * `<boxToolingCacheDir>/<tool>/<version>/<os>-<arch>[-<libc>].tgz`. Callers pass
+ * plain names (no separators, no `..`); the daemon checks them before use.
+ */
+export function boxToolingArchivePath(
+  baseDir: string,
+  key: { tool: string; version: string; os: string; arch: string; libc: string | null }
+): string {
+  const platform = key.libc ? `${key.os}-${key.arch}-${key.libc}` : `${key.os}-${key.arch}`;
+  return joinPath(boxToolingCacheDir(baseDir), key.tool, key.version, `${platform}.tgz`);
+}
+
+/** Box → host config-change sets waiting for approval (spec §8.3). */
+export function boxConfigChangesPath(baseDir: string): string {
+  return joinPath(boxesDir(baseDir), "config-changes.json");
+}
+
+// boxes (sync): what config sync last agreed with one box (per-file hashes), so a restart can tell
+// a box-made change from a host-made one. A disposable cache: losing it only makes the host win.
+export function boxSyncBaselinePath(baseDir: string, boxId: string): string {
+  return joinPath(boxesDir(baseDir), "sync", `${boxId}.json`);
+}
+
+// boxes (remote/exec): box terminals closed while their box was away, whose shells are still owed
+// an end when it reconnects (`{ version: 1, kills: [{ boxId, procId }] }`), so a restart keeps them.
+export function boxPendingTerminalKillsPath(baseDir: string): string {
+  return joinPath(boxesDir(baseDir), "pending-terminal-kills.json");
+}
+
+// boxes: the Agent config servers that run inside a box chat's box (`box-mcp.ts`, spec §8.4).
+export function boxMcpSettingsPath(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "box-mcp.json");
 }
 
 /** Parent of every desktop's runtime dir (sockets, cookies, logs); mode 0700. */
@@ -1245,7 +1308,11 @@ export const sessionRecordSchema = z.object({
   // Agent-chat tabs: the thread this one was forked from or delegated by (spec 2026-10-14 §6).
   // Tolerant like `owner`: a malformed lineage is dropped, never the record; an older daemon
   // strips the key, which only loses the lineage chip.
-  lineage: threadLineageRecordSchema.optional().catch(undefined)
+  lineage: threadLineageRecordSchema.optional().catch(undefined),
+  // boxes: a terminal running in a box (Ephemeral AI VMs spec §8.8): its shell is a detached
+  // `orq-agent` process (procId = the session id) the daemon reattaches to after a restart.
+  // An older daemon strips the key, sees no tmux pane and forgets the tab.
+  boxId: z.string().min(1).optional().catch(undefined)
 });
 
 export const sessionsConfigSchema = z.object({
@@ -2370,3 +2437,7 @@ export * from "./agent-tools.ts";
 export * from "./session-profiles.ts";
 export * from "./repo-identities.ts";
 export * from "./secret-files.ts";
+export * from "./boxes.ts";
+export * from "./tooling.ts";
+// boxes:
+export * from "./box-mcp.ts";

@@ -35,11 +35,16 @@
  *
  * `events` emits `"changed"` with the whole {@link PluginsResponse} after every
  * state or job change, in order.
+ *
+ * Boxes (Ephemeral AI VMs spec §10): the box tooling provisioner reads ts-rust's
+ * state through `tsRustToolingState` and reports each box's install back
+ * (`setBoxToolingStatusSource`, `boxToolingChanged`) as `PluginInfo.boxes`.
  */
 import { EventEmitter } from "node:events";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import {
+  type PluginBoxToolingStatus,
   type PluginId,
   type PluginInfo,
   type PluginJobState,
@@ -83,6 +88,7 @@ import {
   tsRustBinaryPath
 } from "./ts-rust/installer.ts";
 import { type TsRustPreloadOptions, writeTsRustPreload } from "./ts-rust/preload.ts";
+import type { TsRustToolingState } from "./ts-rust/box-tooling.ts";
 
 /** How often a scheduled update check runs while the plugin is on. */
 export const PLUGIN_CHECK_INTERVAL_MS = 60 * 60_000;
@@ -171,6 +177,8 @@ export class PluginsService {
   private timer: ReturnType<typeof setInterval> | null = null;
 
   private emitQueue: Promise<unknown> = Promise.resolve();
+  /** boxes: each plugin's install status per box, from the box tooling provisioner. */
+  private boxToolingStatus: ((id: PluginId) => PluginBoxToolingStatus[]) | null = null;
   /** Background refreshes in flight (`workspacesChanged`, the timer), for `settled()`. */
   private readonly inflight = new Set<Promise<void>>();
   private stopped = false;
@@ -368,6 +376,36 @@ export class PluginsService {
       }
     });
     return this.get(id);
+  }
+
+  // ---- boxes (Ephemeral AI VMs spec §10) -----------------------------------------------------
+
+  /**
+   * ts-rust's state as the box tooling needs it: on or off, the engine
+   * plugins.json names, and the host's current version of each engine. Null
+   * while plugins.json does not read.
+   */
+  tsRustToolingState(): TsRustToolingState | null {
+    if (this.config === null || this.readError !== null) return null;
+    const state = this.state(TS_RUST_PLUGIN_ID);
+    return {
+      enabled: state.enabled === true,
+      engine: storedTsCheckerEngine(state),
+      current: {
+        tsrs: engineVersions(state, "tsrs").current?.version ?? null,
+        "tsc-rs": engineVersions(state, "tsc-rs").current?.version ?? null
+      }
+    };
+  }
+
+  /** Where `PluginInfo.boxes` comes from: the box tooling provisioner's statuses (null: none). */
+  setBoxToolingStatusSource(source: ((id: PluginId) => PluginBoxToolingStatus[]) | null): void {
+    this.boxToolingStatus = source;
+  }
+
+  /** A box's tooling status changed: publish the plugins again. */
+  boxToolingChanged(): void {
+    this.emitChanged();
   }
 
   // ---- update checks and installs ------------------------------------------------------------
@@ -713,6 +751,8 @@ export class PluginsService {
     const entry = pluginCatalogEntry(id);
     const state = pluginStateOf(config ?? createDefaultPluginsConfig(), id);
     const enabled = state.enabled === true;
+    const boxStatuses = this.boxToolingStatus?.(id) ?? [];
+    const boxes = boxStatuses.length > 0 ? { boxes: boxStatuses.map((status) => ({ ...status })) } : {};
     if (!entry.updates) {
       return {
         ...entry,
@@ -724,7 +764,8 @@ export class PluginsService {
         skippedVersion: null,
         lastCheckAt: null,
         lastError: null,
-        job: "idle"
+        job: "idle",
+        ...boxes
       };
     }
     const engine = this.activeEngine(state);
@@ -748,7 +789,8 @@ export class PluginsService {
         ...option,
         source: { ...option.source },
         platform: this.platformPackages[option.id] === null ? "unsupported" : "supported"
-      }))
+      })),
+      ...boxes
     };
   }
 

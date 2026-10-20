@@ -97,6 +97,9 @@ import { openCodeRoutes, type ProviderListResponse } from "./routes.ts";
 import { issueSessionToolsGrant, launchHomeKey } from "../../session-tools/index.ts";
 import { openCodeSessionToolsServerName } from "./session-tools.ts";
 import { Mutex } from "./util.ts";
+// boxes:
+import { prepareOpenCodeBoxServer } from "./box-launch.ts";
+import { mapHostValue } from "../../boxes/launch-info.ts";
 import { opencodeProfilePoolKey } from "../../../session-profiles/manifest/opencode.ts";
 import { loadProfileManifest, ProfileLaunchError } from "../profile-manifest.ts";
 
@@ -747,13 +750,33 @@ class OpenCodeAdapterImpl implements AgentAdapter {
       );
     }
     await assertProfileServerPool(input);
-    const cwd = resolvePath(input.cwd);
+    // boxes: a box project's directory is named as the box knows it (identity on a POSIX box).
+    const cwd = input.box !== undefined ? mapHostValue(input.box.paths, resolvePath(input.cwd)) : resolvePath(input.cwd);
     // The SERVER is keyed by the project and the thread's pool key (global
     // unless its launch config names one); the thread's own `cwd` still
     // travels per request as the client-level `directory` (§4.5 "there is no
     // cwd on the process"), so a subdirectory thread shares the project's
     // server while still scoping every call to itself.
-    const server = await this.pool.acquire(projectDirFor(input), input.serverPool);
+    // boxes (spec 2026-10-19 §8.5): the project's server runs in its box (API-key logins only).
+    const boxServer =
+      input.box !== undefined
+        ? await prepareOpenCodeBoxServer({
+            context: this.ctx,
+            start: { ...input, box: input.box },
+            hostEnv: this.ctx.buildEnv({
+              ...{ projectPath: projectDirFor(input) },
+              threadId: `project:${projectDirFor(input)}`,
+              home: { kind: "system", path: process.env.HOME ?? "/" }
+            })
+          })
+        : undefined;
+    let server: OpenCodeServerHandle;
+    try {
+      server = await this.pool.acquire(projectDirFor(input), input.serverPool, boxServer);
+    } catch (error) {
+      await boxServer?.launch.close();
+      throw error;
+    }
     this.servers.set(input.threadId, server);
     let sessionToolsGrant: { revoke(): void } | undefined;
     try {
@@ -772,14 +795,23 @@ class OpenCodeAdapterImpl implements AgentAdapter {
       });
       const grant = tools.grant;
       sessionToolsGrant = grant;
+      // boxes: the thread's own session-tool server is a local one in the box, behind the bridge.
+      const sessionToolsBridge =
+        boxServer !== undefined && grant !== undefined
+          ? await boxServer.launch.bridgeHttp(openCodeSessionToolsServerName(input.threadId), grant.url, {
+              Authorization: grant.authorization
+            })
+          : undefined;
       const session = await OpenCodeThreadSession.start(
         {
-          ctx: this.ctx,
+          // boxes: attachments are copied into the box and named by their box path.
+          ctx: boxServer !== undefined ? boxServer.launch.adapterContext(this.ctx) : this.ctx,
           emit: (event) => this.emit(event),
           onClosed: (threadId) => {
             this.sessions.delete(threadId);
             this.servers.delete(threadId);
             this.startInputs.delete(threadId);
+            void boxServer?.launch.close();
           }
         },
         {
@@ -804,7 +836,10 @@ class OpenCodeAdapterImpl implements AgentAdapter {
                   authorization: grant.authorization,
                   instructions: grant.prepared.instructions,
                   deny: grant.prepared.deny,
-                  revoke: grant.revoke
+                  revoke: grant.revoke,
+                  ...(sessionToolsBridge !== undefined
+                    ? { bridge: { command: [sessionToolsBridge.command, ...sessionToolsBridge.args] } }
+                    : {})
                 }
               }
             : {})
@@ -813,13 +848,14 @@ class OpenCodeAdapterImpl implements AgentAdapter {
       this.sessions.set(input.threadId, session);
       this.startInputs.set(input.threadId, input);
       // §4.6.4: the per-cwd catalogue refresh is forked so it never delays the
-      // turn that follows.
-      void this.refreshSnapshot({ cwd }).catch(() => undefined);
+      // turn that follows. boxes: never for a box project (its server is the box's).
+      if (boxServer === undefined) void this.refreshSnapshot({ cwd }).catch(() => undefined);
       return session;
     } catch (error) {
       sessionToolsGrant?.revoke();
       server.release();
       this.servers.delete(input.threadId);
+      await boxServer?.launch.close();
       throw error;
     }
   }
@@ -1007,10 +1043,29 @@ class OpenCodeAdapterImpl implements AgentAdapter {
     if (source.sessionId === null) {
       throw new Error(OPENCODE_FORK_NO_SESSION);
     }
-    const directory = resolvePath(input.cwd);
+    // boxes: a box parent's session store is the box's: the fork runs on the box's server.
+    const directory = input.box !== undefined ? mapHostValue(input.box.paths, resolvePath(input.cwd)) : resolvePath(input.cwd);
+    const boxServer =
+      input.box !== undefined
+        ? await prepareOpenCodeBoxServer({
+            context: this.ctx,
+            start: { threadId: input.threadId, home: input.home, cwd: input.cwd, box: input.box, ...(input.profile !== undefined ? { profile: input.profile } : {}) },
+            hostEnv: this.ctx.buildEnv({
+              ...{ projectPath: projectDirFor(input) },
+              threadId: `project:${projectDirFor(input)}`,
+              home: { kind: "system", path: process.env.HOME ?? "/" }
+            })
+          })
+        : undefined;
     // On the CHILD's server: the session store is shared by every key's
     // server, so the fork is visible wherever the child then resumes it.
-    const server = await this.pool.acquire(projectDirFor(input), input.serverPool);
+    let server: OpenCodeServerHandle;
+    try {
+      server = await this.pool.acquire(projectDirFor(input), input.serverPool, boxServer);
+    } finally {
+      // The pool keeps what it started with; this launch's own registrations end here.
+      await boxServer?.launch.close();
+    }
     try {
       const sessionId = await forkOpenCodeSession({
         client: server.client(directory),

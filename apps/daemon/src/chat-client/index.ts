@@ -4,6 +4,8 @@ import type { FastifyInstance } from "fastify";
 import type { Broadcaster } from "../broadcaster.ts";
 import type { AgentChatService } from "../agent-chat/service.ts";
 import { InjectDaemonApi, type LivePath } from "../mcp/daemon-api.ts";
+import type { TemporaryBoxTools } from "../boxes/temporary/tools.ts";
+import type { BoxRegistry } from "../boxes/contracts.ts";
 
 export type { DaemonApi } from "../mcp/daemon-api.ts";
 export { ToolError, expectOk } from "../mcp/errors.ts";
@@ -33,6 +35,10 @@ interface InternalDaemonApiOptions {
   /** Getters for a long-lived client: `PUT /api/config/daemon` moves both in place. */
   fsRoot: LivePath;
   workspacesDir: LivePath;
+  // boxes: the temporary-box backend behind the box MCP tools' `DaemonApi` operations.
+  boxes?: TemporaryBoxTools | null;
+  // boxes: which paths live in a box project, for the file reads (absent: all host).
+  boxRegistry?: () => BoxRegistry | undefined;
 }
 
 /**
@@ -48,6 +54,9 @@ export function createInternalDaemonApi(opts: InternalDaemonApiOptions): InjectD
     agentChat: opts.agentChat,
     broadcaster: opts.broadcaster,
     fsRoot: opts.fsRoot,
-    workspacesDir: opts.workspacesDir
+    workspacesDir: opts.workspacesDir,
+    // boxes: passed through when wired.
+    ...(opts.boxes ? { boxes: opts.boxes } : {}),
+    ...(opts.boxRegistry ? { boxRegistry: opts.boxRegistry } : {})
   });
 }

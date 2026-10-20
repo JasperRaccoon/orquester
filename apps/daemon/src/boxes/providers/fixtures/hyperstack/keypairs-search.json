@@ -1,0 +1,17 @@
+{
+  "status": true,
+  "message": "Success",
+  "keypairs": [
+    {
+      "id": 5521,
+      "name": "orq-box-0123abcd"
+    },
+    {
+      "id": 5522,
+      "name": "orq-box-0123abcd-old"
+    }
+  ],
+  "page": 1,
+  "page_size": 10,
+  "count": 2
+}

@@ -5,12 +5,15 @@
  */
 
 import assert from "node:assert/strict";
-import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
 
+import { BoxProjectFs } from "../../../boxes/remote/fs/project-fs.ts";
+import { localBoxConnection } from "../../../boxes/testing.ts";
 import { writePreparedManifest } from "../../../session-profiles/manifest.ts";
+import { rootedReadsBoxConnection } from "../../boxes/testing.ts";
 import { claudePreparer } from "../../../session-profiles/preparers/claude.ts";
 import { FIXTURE_SECRETS, makeClaudeProfileFixture } from "../../../session-profiles/preparers/claude.testing.ts";
 import { ProfileLaunchError } from "../profile-manifest.ts";
@@ -110,6 +113,28 @@ describe("loadClaudeProfileLaunch", () => {
     assert.deepEqual(Object.keys(launch.mcpServers), ["projmcp", "search", "docs", "plugin:toolbox:db"]);
     assert.equal((launch.mcpServers.search as { env: Record<string, string> }).env.API_KEY, FIXTURE_SECRETS.env);
     assert.equal("usermcp" in launch.mcpServers, false, "user-scope servers stay out");
+  });
+
+  it("boxes: reads a box project's files in its box — the host directory is an empty stub", async () => {
+    const { root, cwd, where, profile } = await setup();
+    // The project lives in the box: its files move under the box's root, the host keeps a stub.
+    const boxRoot = join(root, "box");
+    await mkdir(join(boxRoot, cwd, ".."), { recursive: true });
+    await rename(cwd, join(boxRoot, cwd));
+    await mkdir(cwd, { recursive: true });
+
+    const fromStub = await loadClaudeProfileLaunch({ profile, cwd }, where);
+    assert.ok(fromStub !== null);
+    assert.equal("projmcp" in fromStub.mcpServers, false, "the stub has no .mcp.json");
+    assert.equal(fromStub.skills?.includes("proj-skill"), false);
+
+    const projectFs = new BoxProjectFs(rootedReadsBoxConnection(localBoxConnection(), boxRoot));
+    const launch = await loadClaudeProfileLaunch({ profile, cwd }, { ...where, projectFs });
+    assert.ok(launch !== null);
+    // Exactly what the same files give on this machine (the test above).
+    assert.deepEqual(launch.skills, ["dev-kit:review", "dev-kit:git:pr", "toolbox:fmt", "toolbox:lint", "workflow-authoring", "proj-cmd", "proj-skill"]);
+    assert.deepEqual(launch.disabledPluginIds, ["gplug@mkt", "other@mkt", "projplug@mkt"]);
+    assert.deepEqual(Object.keys(launch.mcpServers), ["projmcp", "search", "docs", "plugin:toolbox:db"]);
   });
 
   it("tolerates a missing or invalid user settings.json", async () => {

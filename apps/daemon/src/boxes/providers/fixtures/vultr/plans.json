@@ -1,0 +1,262 @@
+{
+  "plans": [
+    {
+      "id": "vc2-1c-0.5gb-v6",
+      "vcpu_count": 1,
+      "ram": 512,
+      "disk": 10,
+      "disk_type": "SSD",
+      "disk_count": 1,
+      "bandwidth": 512,
+      "monthly_cost": 2.5,
+      "hourly_cost": 0.003,
+      "monthly_cost_preemptible": 2.5,
+      "hourly_cost_preemptible": 0.003,
+      "invoice_type": "monthly",
+      "type": "vc2",
+      "locations": [
+        "ewr"
+      ],
+      "cpu_vendor": "Intel",
+      "storage_type": "local_storage",
+      "vcpu_type": "thread",
+      "deploy_ondemand": true,
+      "deploy_preemptible": false,
+      "location_cost": {},
+      "gpu_brand": "none"
+    },
+    {
+      "id": "vc2-1c-0.5gb",
+      "vcpu_count": 1,
+      "ram": 512,
+      "disk": 10,
+      "disk_type": "SSD",
+      "disk_count": 1,
+      "bandwidth": 512,
+      "monthly_cost": 3.5,
+      "hourly_cost": 0.005,
+      "monthly_cost_preemptible": 3.5,
+      "hourly_cost_preemptible": 0.005,
+      "invoice_type": "monthly",
+      "type": "vc2",
+      "locations": [
+        "ewr"
+      ],
+      "cpu_vendor": "Intel",
+      "storage_type": "local_storage",
+      "vcpu_type": "thread",
+      "deploy_ondemand": true,
+      "deploy_preemptible": false,
+      "location_cost": {},
+      "gpu_brand": "none"
+    },
+    {
+      "id": "vc2-1c-1gb",
+      "vcpu_count": 1,
+      "ram": 1024,
+      "disk": 25,
+      "disk_type": "SSD",
+      "disk_count": 1,
+      "bandwidth": 1024,
+      "monthly_cost": 5,
+      "hourly_cost": 0.007,
+      "monthly_cost_preemptible": 5,
+      "hourly_cost_preemptible": 0.007,
+      "invoice_type": "monthly",
+      "type": "vc2",
+      "locations": [
+        "ewr",
+        "ams",
+        "fra",
+        "nrt"
+      ],
+      "cpu_vendor": "Intel",
+      "storage_type": "local_storage",
+      "vcpu_type": "thread",
+      "deploy_ondemand": true,
+      "deploy_preemptible": false,
+      "location_cost": {
+        "sao": {
+          "monthly_cost": 7.5,
+          "hourly_cost": 0.01,
+          "monthly_cost_preemptible": 7.5,
+          "hourly_cost_preemptible": 0.01
+        }
+      },
+      "gpu_brand": "none"
+    },
+    {
+      "id": "vc2-1c-2gb",
+      "vcpu_count": 1,
+      "ram": 2048,
+      "disk": 55,
+      "disk_type": "SSD",
+      "disk_count": 1,
+      "bandwidth": 2048,
+      "monthly_cost": 10,
+      "hourly_cost": 0.014,
+      "monthly_cost_preemptible": 10,
+      "hourly_cost_preemptible": 0.014,
+      "invoice_type": "monthly",
+      "type": "vc2",
+      "locations": [
+        "ewr",
+        "ams",
+        "fra",
+        "nrt"
+      ],
+      "cpu_vendor": "Intel",
+      "storage_type": "local_storage",
+      "vcpu_type": "thread",
+      "deploy_ondemand": true,
+      "deploy_preemptible": false,
+      "location_cost": {
+        "sao": {
+          "monthly_cost": 15,
+          "hourly_cost": 0.021,
+          "monthly_cost_preemptible": 15,
+          "hourly_cost_preemptible": 0.021
+        }
+      },
+      "gpu_brand": "none"
+    },
+    {
+      "id": "vc2-2c-4gb",
+      "vcpu_count": 2,
+      "ram": 4096,
+      "disk": 80,
+      "disk_type": "SSD",
+      "disk_count": 1,
+      "bandwidth": 3072,
+      "monthly_cost": 20,
+      "hourly_cost": 0.027,
+      "monthly_cost_preemptible": 20,
+      "hourly_cost_preemptible": 0.027,
+      "invoice_type": "monthly",
+      "type": "vc2",
+      "locations": [
+        "ewr",
+        "ams",
+        "fra",
+        "nrt"
+      ],
+      "cpu_vendor": "Intel",
+      "storage_type": "local_storage",
+      "vcpu_type": "thread",
+      "deploy_ondemand": true,
+      "deploy_preemptible": false,
+      "location_cost": {
+        "sao": {
+          "monthly_cost": 30,
+          "hourly_cost": 0.041,
+          "monthly_cost_preemptible": 30,
+          "hourly_cost_preemptible": 0.041
+        }
+      },
+      "gpu_brand": "none"
+    },
+    {
+      "id": "vhf-1c-1gb",
+      "vcpu_count": 1,
+      "ram": 1024,
+      "disk": 32,
+      "disk_type": "HIGHFREQUENCY",
+      "disk_count": 1,
+      "bandwidth": 1024,
+      "monthly_cost": 6,
+      "hourly_cost": 0.008,
+      "monthly_cost_preemptible": 6,
+      "hourly_cost_preemptible": 0.008,
+      "invoice_type": "monthly",
+      "type": "vhf",
+      "locations": [
+        "ewr",
+        "ams",
+        "fra",
+        "nrt"
+      ],
+      "cpu_vendor": "Intel",
+      "storage_type": "local_storage",
+      "vcpu_type": "thread",
+      "deploy_ondemand": true,
+      "deploy_preemptible": false,
+      "location_cost": {
+        "sao": {
+          "monthly_cost": 9,
+          "hourly_cost": 0.012,
+          "monthly_cost_preemptible": 9,
+          "hourly_cost_preemptible": 0.012
+        }
+      },
+      "gpu_brand": "none"
+    },
+    {
+      "id": "vhp-2c-4gb-amd",
+      "vcpu_count": 2,
+      "ram": 4096,
+      "disk": 100,
+      "disk_type": "AMDHIGHPERF",
+      "disk_count": 1,
+      "bandwidth": 5120,
+      "monthly_cost": 24,
+      "hourly_cost": 0.033,
+      "monthly_cost_preemptible": 24,
+      "hourly_cost_preemptible": 0.033,
+      "invoice_type": "monthly",
+      "type": "vhp",
+      "locations": [
+        "ewr",
+        "ams",
+        "fra",
+        "nrt"
+      ],
+      "cpu_vendor": "AMD",
+      "storage_type": "local_storage",
+      "vcpu_type": "thread",
+      "deploy_ondemand": true,
+      "deploy_preemptible": false,
+      "location_cost": {
+        "sao": {
+          "monthly_cost": 36,
+          "hourly_cost": 0.049,
+          "monthly_cost_preemptible": 36,
+          "hourly_cost_preemptible": 0.049
+        }
+      },
+      "gpu_brand": "none"
+    },
+    {
+      "id": "vcg-l40s-16c-180g-48vram",
+      "vcpu_count": 16,
+      "ram": 184320,
+      "disk": 1200,
+      "disk_type": "CLOUDGPU",
+      "disk_count": 1,
+      "bandwidth": 10240,
+      "monthly_cost": 1122.91,
+      "hourly_cost": 1.671,
+      "monthly_cost_preemptible": 1122.91,
+      "hourly_cost_preemptible": 1.671,
+      "invoice_type": "hourly",
+      "type": "vcg",
+      "locations": [],
+      "cpu_vendor": "Intel",
+      "storage_type": "local_storage",
+      "vcpu_type": "thread",
+      "deploy_ondemand": true,
+      "deploy_preemptible": false,
+      "location_cost": {},
+      "gpu_brand": "NVIDIA",
+      "gpu_vram_gb": 48,
+      "gpu_type": "NVIDIA_L40S",
+      "gpu_count": 1
+    }
+  ],
+  "meta": {
+    "total": 8,
+    "links": {
+      "next": "",
+      "prev": ""
+    }
+  }
+}

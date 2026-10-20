@@ -1,0 +1,16 @@
+{
+  "id": "ocid1.subnet.oc1.eu-frankfurt-1.aaaaaaaa1111111111111111111111111111111111111111111111111111",
+  "compartmentId": "ocid1.tenancy.oc1..aaaaaaaa11111111111111111111111111111111111111111111111111aa",
+  "vcnId": "ocid1.vcn.oc1.eu-frankfurt-1.aaaaaaaa1111111111111111111111111111111111111111111111111111",
+  "displayName": "orquester-boxes",
+  "cidrBlock": "10.77.0.0/20",
+  "availabilityDomain": null,
+  "routeTableId": "ocid1.routetable.oc1.eu-frankfurt-1.aaaaaaaa1111111111111111111111111111111111111111111111111111",
+  "securityListIds": [
+    "ocid1.securitylist.oc1.eu-frankfurt-1.aaaaaaaa1111111111111111111111111111111111111111111111111111"
+  ],
+  "prohibitPublicIpOnVnic": false,
+  "lifecycleState": "AVAILABLE",
+  "timeCreated": "2026-10-19T20:00:05.000Z",
+  "virtualRouterIp": "10.77.0.1"
+}

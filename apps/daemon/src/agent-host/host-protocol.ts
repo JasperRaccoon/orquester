@@ -18,6 +18,9 @@ import type {
   ThreadHead,
   ThreadLineage
 } from "@orquester/api/agent-chat";
+// boxes: type-only, so neither side loads a box module through this file.
+import type { BoxPathMap, BoxSysInfo } from "@orquester/api";
+import type { SessionToolingContribution } from "../boxes/contracts.ts";
 
 /**
  * Re-exported so the daemon and the host resolve the socket and the token from
@@ -304,8 +307,58 @@ export const daemonRoutesForHost = {
    * the route (its generic 404): the host launches from the persisted profile only if its
    * manifest still validates, else the start fails — never Global.
    */
-  threadLaunchProfile: "/api/agent-host/threads/launch-profile"
+  threadLaunchProfile: "/api/agent-host/threads/launch-profile",
+  /**
+   * boxes: Ephemeral AI VMs (spec 2026-10-19 §7). `POST` {@link BoxTokenRequest} → 200
+   * `AgentTokenGrant` (`boxes/contracts.ts`): a short-lived ACCESS token for one box launch —
+   * never a refresh token. The token broker's socket-only route, sent with the host's bearer.
+   * Asked at a box CLI's spawn and on a Codex `account/chatgptAuthTokens/refresh`. A daemon
+   * without it answers 404, and the box launch fails with a message saying so.
+   */
+  boxToken: "/api/boxes/internal/token",
+  /**
+   * boxes: `POST` {@link BoxSyncRequest} → 204 (spec 2026-10-19 §8.3, §8.5): the daemon's
+   * `BoxConfigSync` / `BoxTranscriptSync` for a box launch — the config sync before every CLI
+   * start, the transcript push before a resume, the transcript mirror and the config-change set
+   * after every turn. Socket-only, the host's bearer besides (`agent-chat/box-host-routes.ts`).
+   * A failure answers `{code, message}`; a daemon without the route answers 404.
+   * boxes: `turnStarted` marks a live turn's start (§8.3), so the box changes it makes wait for
+   * its `turnEnded`; a daemon that predates the op answers 400 `INVALID_ARGUMENT`, which the host
+   * logs and goes on without (changes are then grouped by the idle debounce, as before).
+   */
+  boxSync: "/api/agent-host/boxes/sync"
 } as const;
+
+/** boxes: the body of `daemonRoutesForHost.boxToken`. */
+export interface BoxTokenRequest {
+  boxId: string;
+  agent: "claude" | "codex" | "grok";
+  accountId: string;
+  /** The token must stay valid at least this long; the broker refreshes on demand otherwise. */
+  minValidSeconds?: number;
+  /** boxes: the token the CLI was refused with (a Codex refresh request); renewed when still current. */
+  rejectedAccessToken?: string;
+}
+
+/** boxes: one transcript to push or mirror (`BoxTranscriptSync`'s request; host paths). */
+export interface BoxTranscriptRef {
+  agent: "claude" | "codex" | "grok" | "opencode";
+  configRoot: string;
+  cwd: string;
+  sessionRef: string | null;
+}
+
+/** boxes: the body of `daemonRoutesForHost.boxSync`. Every path is a HOST path. */
+export type BoxSyncRequest =
+  | {
+      op: "ensureSynced";
+      boxId: string;
+      scope: { agent: "claude" | "codex" | "grok" | "opencode"; configRoots: string[]; threadId: string | null };
+    }
+  | { op: "pushForResume" | "pullAfterTurn"; boxId: string; transcript: BoxTranscriptRef }
+  | { op: "turnEnded"; boxId: string; threadId: string }
+  // boxes: a live turn of the thread started (`BoxConfigSync.turnStarted`).
+  | { op: "turnStarted"; boxId: string; threadId: string };
 
 /** Body of `POST /api/agent-host/threads/launch-profile`. */
 export interface ThreadLaunchProfileRequest {
@@ -534,11 +587,21 @@ export interface AgentHostCapabilities {
    * would run a profile thread as Global — the daemon must not send it one.
    */
   sessionProfiles?: number;
+  /**
+   * boxes: Ephemeral AI VMs (spec 2026-10-19 §8.5): `1` = the host runs a thread whose launch
+   * names `box` ({@link HostThreadBox}) with its CLI IN that box — remote spawn, mapped paths,
+   * brokered tokens, bridged MCP servers, checkpoints in the box. A host without it would run the
+   * CLI on this machine in the project's empty stub directory, so the daemon must not send it a
+   * box thread.
+   */
+  boxes?: number;
 }
 
 /** The capabilities this host build advertises on `/health`. */
 export const AGENT_HOST_CAPABILITIES: Readonly<Required<AgentHostCapabilities>> = Object.freeze({
-  sessionProfiles: 1
+  sessionProfiles: 1,
+  // boxes:
+  boxes: 1
 });
 
 /**
@@ -647,6 +710,28 @@ export interface CreateHostThreadRequest {
    * start as `StartSessionInput.profile`, and its `profileId` recorded on `thread.created`.
    */
   profile?: HostThreadProfile;
+  /**
+   * boxes: the project lives in a box (spec 2026-10-19 §8.5) — the thread's CLI runs there.
+   * Persisted in `launch.json` beside the launch env and handed to every session start as
+   * `StartSessionInput.box`. Absent: the CLI runs on this machine, exactly as before. Additive:
+   * an older host ignores it, so the daemon checks {@link AgentHostCapabilities.boxes} first.
+   */
+  box?: HostThreadBox;
+}
+
+/**
+ * boxes: where a box thread's CLI runs (spec 2026-10-19 §8.5), resolved daemon-side from the
+ * project's box record. `socketPath` is the box's local relay socket (`boxSocketPath`), which the
+ * host opens with `connectBoxRelay`; `sys` and `paths` are what `orq-agent` reported (the live
+ * connection's own values win when they differ); `tooling` is the per-session env the box's
+ * tooling plugins contribute, in the box's path syntax. Never carries a secret.
+ */
+export interface HostThreadBox {
+  boxId: string;
+  socketPath: string;
+  sys: BoxSysInfo;
+  paths: BoxPathMap;
+  tooling: SessionToolingContribution;
 }
 
 /**
@@ -737,6 +822,12 @@ export interface SetThreadIdentityRequest {
    * thread to the server keyed by the new profile. Additive: an older host ignores it.
    */
   serverPool?: HostThreadServerPool;
+  /**
+   * boxes: the thread's box ({@link HostThreadBox}), a launch field like the four above: it
+   * REPLACES what `launch.json` held. A project never moves between the host and a box, so the
+   * daemon sends the same box again (with fresh tooling); absent = a host project. Additive.
+   */
+  box?: HostThreadBox;
   /**
    * The Agent Profile switch (spec 2026-10-18 §5.3, "switching in a running chat"):
    *

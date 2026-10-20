@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "resource_unavailable",
+    "message": "server type cx23 is unavailable in this location",
+    "details": {}
+  }
+}

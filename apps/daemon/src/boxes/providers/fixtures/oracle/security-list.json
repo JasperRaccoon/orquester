@@ -1,0 +1,28 @@
+{
+  "id": "ocid1.securitylist.oc1.eu-frankfurt-1.aaaaaaaa1111111111111111111111111111111111111111111111111111",
+  "compartmentId": "ocid1.tenancy.oc1..aaaaaaaa11111111111111111111111111111111111111111111111111aa",
+  "vcnId": "ocid1.vcn.oc1.eu-frankfurt-1.aaaaaaaa1111111111111111111111111111111111111111111111111111",
+  "displayName": "Default Security List for orquester-boxes",
+  "lifecycleState": "AVAILABLE",
+  "egressSecurityRules": [
+    {
+      "destination": "0.0.0.0/0",
+      "destinationType": "CIDR_BLOCK",
+      "protocol": "all",
+      "isStateless": false
+    }
+  ],
+  "ingressSecurityRules": [
+    {
+      "source": "0.0.0.0/0",
+      "sourceType": "CIDR_BLOCK",
+      "protocol": "1",
+      "isStateless": false,
+      "icmpOptions": {
+        "type": 3,
+        "code": 4
+      }
+    }
+  ],
+  "timeCreated": "2026-10-19T20:00:00.000Z"
+}

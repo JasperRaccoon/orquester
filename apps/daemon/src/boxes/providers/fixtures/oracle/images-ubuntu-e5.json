@@ -1,0 +1,44 @@
+[
+  {
+    "id": "ocid1.image.oc1.eu-frankfurt-1.aaaaaaaa1212121212121212121212121212121212121212121212121212",
+    "compartmentId": null,
+    "displayName": "Canonical-Ubuntu-24.04-GPU-2026.09.30-0",
+    "operatingSystem": "Canonical Ubuntu",
+    "operatingSystemVersion": "24.04",
+    "lifecycleState": "AVAILABLE",
+    "timeCreated": "2026-10-03T07:00:00.000Z",
+    "launchMode": "PARAVIRTUALIZED",
+    "sizeInMBs": 47694,
+    "billableSizeInGBs": 3,
+    "createImageAllowed": true,
+    "listingType": "NATIVE"
+  },
+  {
+    "id": "ocid1.image.oc1.eu-frankfurt-1.aaaaaaaa4444444444444444444444444444444444444444444444444444",
+    "compartmentId": null,
+    "displayName": "Canonical-Ubuntu-24.04-2026.09.30-0",
+    "operatingSystem": "Canonical Ubuntu",
+    "operatingSystemVersion": "24.04",
+    "lifecycleState": "AVAILABLE",
+    "timeCreated": "2026-10-02T07:00:00.000Z",
+    "launchMode": "PARAVIRTUALIZED",
+    "sizeInMBs": 47694,
+    "billableSizeInGBs": 3,
+    "createImageAllowed": true,
+    "listingType": "NATIVE"
+  },
+  {
+    "id": "ocid1.image.oc1.eu-frankfurt-1.aaaaaaaa1313131313131313131313131313131313131313131313131313",
+    "compartmentId": null,
+    "displayName": "Canonical-Ubuntu-24.04-2026.08.31-0",
+    "operatingSystem": "Canonical Ubuntu",
+    "operatingSystemVersion": "24.04",
+    "lifecycleState": "AVAILABLE",
+    "timeCreated": "2026-09-02T07:00:00.000Z",
+    "launchMode": "PARAVIRTUALIZED",
+    "sizeInMBs": 47694,
+    "billableSizeInGBs": 3,
+    "createImageAllowed": true,
+    "listingType": "NATIVE"
+  }
+]

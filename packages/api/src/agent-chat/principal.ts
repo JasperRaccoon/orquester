@@ -119,7 +119,12 @@ export const PRINCIPAL_ROUTES: readonly { method: "GET" | "POST" | "PUT" | "DELE
   { method: "PUT", path: "/api/agent-tools/settings", gate: "principal", reads: "agents refused (403)" },
   { method: "PUT", path: "/api/sessions/:id/agent-tools", gate: "principal", reads: "agents refused (403)" },
   { method: "DELETE", path: "/api/agent-tools/grants", gate: "principal", reads: "agents refused (403)" },
-  { method: "DELETE", path: "/api/agent-tools/grants/:id", gate: "principal", reads: "agents refused (403)" }
+  { method: "DELETE", path: "/api/agent-tools/grants/:id", gate: "principal", reads: "agents refused (403)" },
+  // boxes: temporary boxes (`box-tools.ts`): a chat reaches only the boxes it created.
+  { method: "GET", path: "/api/boxes/temporary", gate: "principal", reads: "an agent lists only its chat's boxes; external refused (403)" },
+  { method: "POST", path: "/api/boxes/temporary", gate: "principal", reads: "agents only (an approved create_box); the box belongs to the agent's chat" },
+  { method: "GET", path: "/api/boxes/temporary/:id", gate: "principal", reads: "an agent reaches only its chat's boxes (404 otherwise)" },
+  { method: "DELETE", path: "/api/boxes/temporary/:id", gate: "principal", reads: "an agent reaches only its chat's boxes (404 otherwise)" }
 ];
 
 /** Whether a principal-gated hint may be honoured: the principal is that very agent. */

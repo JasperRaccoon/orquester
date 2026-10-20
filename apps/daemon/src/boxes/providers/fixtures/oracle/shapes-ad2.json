@@ -1,0 +1,61 @@
+[
+  {
+    "shape": "VM.Standard.E2.1.Micro",
+    "processorDescription": "2.0 GHz AMD EPYC™ 7551 (Naples)",
+    "ocpus": 1,
+    "memoryInGBs": 1,
+    "isFlexible": false,
+    "billingType": "ALWAYS_FREE",
+    "gpus": 0
+  },
+  {
+    "shape": "VM.Standard.E4.Flex",
+    "processorDescription": "2.55 GHz AMD EPYC™ 7J13 (Milan)",
+    "ocpus": 1,
+    "memoryInGBs": 16,
+    "isFlexible": true,
+    "billingType": "PAID",
+    "networkingBandwidthInGbps": 1,
+    "maxVnicAttachments": 2,
+    "gpus": 0,
+    "ocpuOptions": {
+      "min": 1,
+      "max": 64,
+      "maxPerNumaNode": 64
+    },
+    "memoryOptions": {
+      "minInGBs": 1,
+      "maxInGBs": 1024,
+      "defaultPerOcpuInGBs": 16,
+      "minPerOcpuInGBs": 1,
+      "maxPerOcpuInGBs": 64
+    },
+    "isBilledForStoppedInstance": false,
+    "quotaNames": []
+  },
+  {
+    "shape": "VM.Standard.E5.Flex",
+    "processorDescription": "2.4 GHz AMD EPYC™ 9J14 (Genoa)",
+    "ocpus": 1,
+    "memoryInGBs": 16,
+    "isFlexible": true,
+    "billingType": "PAID",
+    "networkingBandwidthInGbps": 1,
+    "maxVnicAttachments": 2,
+    "gpus": 0,
+    "ocpuOptions": {
+      "min": 1,
+      "max": 94,
+      "maxPerNumaNode": 94
+    },
+    "memoryOptions": {
+      "minInGBs": 1,
+      "maxInGBs": 1049,
+      "defaultPerOcpuInGBs": 16,
+      "minPerOcpuInGBs": 1,
+      "maxPerOcpuInGBs": 64
+    },
+    "isBilledForStoppedInstance": false,
+    "quotaNames": []
+  }
+]

@@ -64,22 +64,40 @@ export interface GrokSessionToolsLaunch {
  */
 export const GROK_UNREACHABLE_SHADOW_URL = "http://127.0.0.1:9/mcp/denied";
 
+/**
+ * boxes (spec 2026-10-19 §8.4): a session whose CLI runs in a box. Ours is a stdio server there
+ * — `orq-agent mcp-bridge <serverId>`, the endpoint and its credential held on the host — and
+ * the user's own servers that must run on the host are same-named stdio entries of the bridge
+ * (an ACP entry REPLACES the config's server of the same name, probed on 1.0.46 above). A
+ * denied name's shadow points at the host's loopback, which the box cannot reach: it still
+ * replaces the user's server and connects to nothing (fail closed).
+ */
+export interface GrokBoxMcpServers {
+  sessionToolsBridge?: { command: string; args: string[] };
+  bridged: readonly McpServer[];
+}
+
 /** The `mcpServers` list for `session/new` / `session/load`. */
-export function grokSessionMcpServers(launch: GrokSessionToolsLaunch | undefined): McpServer[] {
+export function grokSessionMcpServers(launch: GrokSessionToolsLaunch | undefined, box?: GrokBoxMcpServers): McpServer[] {
   if (launch === undefined) {
-    return [];
+    return box !== undefined ? [...box.bridged] : [];
   }
   const deniedUrl = launch.deniedUrl ?? GROK_UNREACHABLE_SHADOW_URL;
   const own: McpServer[] =
     launch.url !== undefined && launch.authorization !== undefined
-      ? [{ type: "http", name: SESSION_TOOLS_SERVER_NAME, url: launch.url, headers: [{ name: "Authorization", value: launch.authorization }] }]
+      ? box?.sessionToolsBridge !== undefined
+        ? [{ name: SESSION_TOOLS_SERVER_NAME, command: box.sessionToolsBridge.command, args: box.sessionToolsBridge.args, env: [] }]
+        : [{ type: "http", name: SESSION_TOOLS_SERVER_NAME, url: launch.url, headers: [{ name: "Authorization", value: launch.authorization }] }]
       : [];
   // Without our own entry, a user's `orquester` would load: shadow it too.
   const names = new Set(launch.deny ?? []);
   if (own.length === 0) names.add(SESSION_TOOLS_SERVER_NAME);
   else names.delete(SESSION_TOOLS_SERVER_NAME);
   const shadows: McpServer[] = [...names].filter((name) => name.length > 0).map((name) => ({ type: "http", name, url: deniedUrl, headers: [] }));
-  return [...own, ...shadows];
+  // boxes: a bridged server never displaces ours or a denial's shadow.
+  const taken = new Set([...own, ...shadows].map((server) => server.name));
+  const bridged = (box?.bridged ?? []).filter((server) => !taken.has(server.name));
+  return [...own, ...shadows, ...bridged];
 }
 
 /** `session/new`'s (and `session/load`'s) `_meta` for the instruction block, or undefined. */

@@ -1,0 +1,6 @@
+{
+  "error": {
+    "error_code": "TOO_MANY_REQUESTS",
+    "error_message": "Too many requests, slow down."
+  }
+}

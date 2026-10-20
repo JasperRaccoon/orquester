@@ -234,6 +234,22 @@ test("workflow-owned callers never get a card: Admin → ADMIN_NOT_AVAILABLE, bo
   await assert.rejects(h.port.request(card({ threadId: "gone" }), new AbortController().signal), (e: Error & { code?: string }) => e.code === "THREAD_NOT_FOUND");
 });
 
+// boxes: renting a box spends money — its card opens for a workflow-owned chat too, never with a grant.
+test("a spend card (create_box) opens for a workflow-owned chat, offers no grant, and expires as timed_out", async (t) => {
+  const h = await harness(t);
+  h.owned.add("t1");
+  h.traits.set("t1", { runtimeMode: "full-access", workflowOwned: true });
+  const spend = card({ tool: "create_box", kind: "spend", family: "boxes", grantOptions: ["chat", "project"], title: "Rent a Linux box", scope: { label: "Billed to your Hetzner account" } });
+  const waiting = h.port.request(spend, new AbortController().signal);
+  await h.opened();
+  const [summary] = h.registry.list("t1");
+  assert.equal(summary!.kind, "spend");
+  assert.equal(summary!.family, "boxes");
+  assert.deepEqual(summary!.grantOptions, [], "never grantable, whatever the card asked");
+  h.clock.advance(30 * 60 * 1000);
+  assert.equal((await waiting).outcome, "timed_out");
+});
+
 test("an older build's toolset card is never opened: every tool is on already", async (t) => {
   const h = await harness(t);
   const legacy = card({ tool: "request_toolset", kind: "toolset", family: "toolset", grantOptions: [], title: "Claude asks to enable Desktops for this chat" });

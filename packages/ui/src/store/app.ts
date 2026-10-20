@@ -181,6 +181,10 @@ import {
   WORKFLOWS_CHANNEL
 } from "@orquester/api";
 import type { PluginInfo } from "@orquester/api";
+// boxes: the Ephemeral AI VMs plugin's module store (own channel, loaded while the plugin is on;
+// with it off, only the boxes still running).
+import { BOXES_CHANNEL, EPHEMERAL_VMS_PLUGIN_ID } from "@orquester/api";
+import { applyBoxesEvent, loadBoxes, loadBoxesList, resetBoxes, setBoxesPluginOn } from "../lib/boxes/store";
 import type { AgentPrefs, UsagePrefs } from "@orquester/config";
 
 const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -701,6 +705,9 @@ export interface OpenTabRequest {
   initialCommand?: string;
   /** The §6.1 chat block. Required in practice for `kind: "agent-chat"`. */
   chat?: CreateAgentChatSessionFields;
+  // boxes: a shell attached to one of a chat's temporary boxes (its "Watch" button).
+  /** Start the shell in this box instead of on this host (`CreateSessionRequest.boxId`). */
+  boxId?: string;
 }
 
 /** What the tab strip + MainView are showing. A project (full tab set) or a
@@ -1534,6 +1541,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     );
 
     const secretFilesWasOn = secretFilesOn(get().plugins);
+    // boxes: same rule as the secret files — a reconnect with the plugin on reloads.
+    const boxesWasOn = boxesOn(get().plugins);
     await Promise.all([
       get().loadWorkspaces(),
       get().loadRecentProjects(),
@@ -1576,6 +1585,16 @@ export const useAppStore = create<AppState>((set, get) => ({
           // here — the event stream has no replay.
           if (secretFilesWasOn && secretFilesOn(get().plugins) && get().api === active) {
             void loadSecretVaults(active).catch(() => undefined);
+          }
+          // boxes: the plugin's boxes, providers, kinds and config changes, likewise.
+          if (boxesWasOn && boxesOn(get().plugins) && get().api === active) {
+            void loadBoxes(active).catch(() => undefined);
+          }
+          // boxes: with the plugin off, boxes may still be running (and billing): the list
+          // is read to find them (the store keeps it only while one is). An older daemon
+          // refuses the route while the plugin is off — nothing to show then.
+          if (get().plugins !== null && !boxesOn(get().plugins) && get().api === active) {
+            void loadBoxesList(active).catch(() => undefined);
           }
         }),
       // Repo icons + labels (own module store). Every (re)connect: the event
@@ -1899,6 +1918,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     resetSavedPrompts();
     resetRepoIdentities();
     resetSecretFiles();
+    // boxes: another daemon's boxes.
+    resetBoxes();
     stopSetupFollows();
     projectsLoadSeq += 1;
     resetSecretRequests();
@@ -2652,7 +2673,9 @@ export const useAppStore = create<AppState>((set, get) => ({
           resumeConversationId,
           initialCommand,
           chat,
-          ...(profileId !== undefined ? { profileId } : {})
+          ...(profileId !== undefined ? { profileId } : {}),
+          // boxes: a temporary box's terminal.
+          ...(request.boxId !== undefined ? { boxId: request.boxId } : {})
         });
       } catch (error) {
         // A refused RESUME is the one create failure with a useful recovery ("open
@@ -3661,6 +3684,12 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (secretFilesOn(get().plugins)) applySecretFilesEvent(event);
       return;
     }
+    // boxes: box, provider and config-change snapshots (validated in their module store,
+    // which holds only the boxes still running while the plugin is off).
+    if (event.channel === BOXES_CHANNEL) {
+      if (get().plugins !== null) applyBoxesEvent(event);
+      return;
+    }
     if (event.channel === AGENT_PROFILE_CHANNEL) {
       // Agent config (Settings) keeps each agent's snapshot in its own module store: a
       // change refetches that agent when it was loaded and its revision moved
@@ -3800,6 +3829,23 @@ useAppStore.subscribe((state, previous) => {
   if (on === secretFilesOn(previous.plugins)) return;
   if (!on) resetSecretFiles();
   else if (state.api) void loadSecretVaults(state.api).catch(() => undefined);
+});
+
+// boxes: the Ephemeral AI VMs plugin, wired like the secret files above — its
+// state loads when the plugin turns on. When it turns off the store keeps only
+// the boxes still running (they bill until destroyed), and a connection switch's
+// empty plugins list forgets everything.
+function boxesOn(plugins: readonly PluginInfo[] | null): boolean {
+  return isGlobalPluginEnabled(plugins, EPHEMERAL_VMS_PLUGIN_ID);
+}
+
+useAppStore.subscribe((state, previous) => {
+  if (state.plugins === previous.plugins) return;
+  const on = boxesOn(state.plugins);
+  setBoxesPluginOn(on);
+  if (state.plugins === null) resetBoxes();
+  if (on === boxesOn(previous.plugins)) return;
+  if (on && state.api) void loadBoxes(state.api).catch(() => undefined);
 });
 
 // Agent profiles §5.3: a remembered pick the connected daemon does not have (deleted while this

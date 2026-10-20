@@ -1,0 +1,4 @@
+{
+  "code": "database_instance_not_found",
+  "reason": "Failed to find the instance within the internal database"
+}

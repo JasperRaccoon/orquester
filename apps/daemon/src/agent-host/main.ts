@@ -85,6 +85,10 @@ import {
   type SessionToolsHost
 } from "./session-tools/index.ts";
 import { SessionSecretRedactor } from "./session-tools/secret-redaction.ts";
+// boxes:
+import { createAgentHostBoxes, type AgentHostBoxes, type BoxConnector } from "./boxes/index.ts";
+import { createDaemonBoxSyncClient, createDaemonBoxTokenSource } from "./boxes/daemon-client.ts";
+import { connectBoxRelay } from "../boxes/client/index.ts";
 
 /**
  * How long a host teardown lets the consumers read what the adapters'
@@ -247,6 +251,12 @@ interface StartAgentHostOptions {
    * hold a handle to wind down on its own.
    */
   onStopped?: () => void;
+  /**
+   * boxes (spec 2026-10-19 §8.5): opens a box's local relay socket — `connectBoxRelay` from
+   * `../boxes/client/` in production. Absent: a box thread's start fails with a message saying
+   * this host cannot reach boxes (never runs its CLI here instead).
+   */
+  boxConnector?: BoxConnector;
 }
 
 export async function startAgentHost(
@@ -292,6 +302,17 @@ export async function startAgentHost(
     onSecretValues: (threadId, values) => secretRedactor.remember(threadId, values)
   });
 
+  // ---- boxes (spec 2026-10-19 §7, §8.4, §8.5) ----------------------------
+  // Agent CLIs of box projects run in their box: the relay connector, the token broker and the
+  // sync seams (both on the daemon's socket, with this host's bearer).
+  const boxes: AgentHostBoxes = createAgentHostBoxes({
+    appdir,
+    connector: options.boxConnector ?? null,
+    tokens: createDaemonBoxTokenSource({ socketPath: () => daemonSocketPath, token }),
+    sync: createDaemonBoxSyncClient({ socketPath: () => daemonSocketPath, token }),
+    logger
+  });
+
   // ---- services ----------------------------------------------------------
   const liveness = createLivenessRegistry();
   const launchConfigs = createFileLaunchConfigStore({ rootDir: stateDir });
@@ -307,6 +328,11 @@ export async function startAgentHost(
       HOME: homeDir,
       TMPDIR: tmpDir,
       GIT_TERMINAL_PROMPT: "0"
+    },
+    // boxes: a box project's git runs in its box (refs in the box's repository).
+    runnerFor: async (cwd) => {
+      const box = orchestrator?.launchConfigForCwd(cwd)?.box;
+      return box !== undefined ? boxes.gitRunner(box) : null;
     },
     log: (message, detail) => logger.debug(message, detail)
   });
@@ -459,7 +485,9 @@ export async function startAgentHost(
     sessionPath: () => sessionPath,
     tmpDir: () => tmpDir,
     signal: shutdown.signal,
-    sessionTools
+    sessionTools,
+    // boxes:
+    boxes
   });
 
   // ---- provider snapshots ------------------------------------------------
@@ -585,6 +613,26 @@ export async function startAgentHost(
     // A pushed manifest the live session could not take in-session (unified MCP §9.3): restart it
     // with resume at its next idle point.
     sessionToolsStale: (threadId: string) => sessionTools.needsRestart(threadId),
+    // boxes: a box thread's turn end mirrors its transcript back, closes its config-change set and
+    // renews a login file that runs short.
+    onTurnEnded: ({ threadId, adapter, cwd, launch, resumeCursor }) => {
+      if (launch?.box === undefined) return;
+      boxes.turnEnded({
+        threadId,
+        adapter,
+        cwd,
+        box: launch.box,
+        ...(launch.profile !== undefined ? { profile: launch.profile } : {}),
+        ...(launch.launchEnv !== undefined ? { launchEnv: launch.launchEnv } : {}),
+        ...(launch.homePath !== undefined ? { homePath: launch.homePath } : {}),
+        resumeCursor
+      });
+    },
+    // boxes: a box thread's turn start marks the turn, so its box config changes group per turn.
+    onTurnStarted: ({ threadId, launch }) => {
+      if (launch?.box === undefined) return;
+      boxes.turnStarted({ threadId, box: launch.box });
+    },
     onThreadDeleted: (threadId: string) => sessionTools.forgetThread(threadId),
     // Agent Profiles: the daemon's current launch for a profile thread, before each session start.
     launchProfile: createDaemonLaunchProfileClient({ socketPath: () => daemonSocketPath, token }),
@@ -1017,7 +1065,9 @@ if (isProcessEntry()) {
     ...(appdir !== undefined ? { appdir } : {}),
     // An intentional stop ends the process: the daemon's exit grace waits on
     // the tmux session, which only ends when this command does.
-    onStopped: () => process.exit(0)
+    onStopped: () => process.exit(0),
+    // boxes: box threads reach their box through the daemon hub's per-box relay socket.
+    boxConnector: connectBoxRelay
   })
     .then((host) => {
       let stopping = false;

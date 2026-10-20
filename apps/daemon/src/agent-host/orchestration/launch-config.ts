@@ -28,7 +28,8 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
 
-import type { HostThreadProfile, HostThreadServerPool } from "../host-protocol.ts";
+import type { HostThreadBox, HostThreadProfile, HostThreadServerPool } from "../host-protocol.ts";
+import { parseHostThreadBox } from "../boxes/launch-info.ts";
 
 export interface ThreadLaunchConfig {
   /** Layered over the adapter's own extras; the daemon's values win. */
@@ -54,6 +55,16 @@ export interface ThreadLaunchConfig {
    * rolled-back switch); a profile switch writes a fresh config without it.
    */
   profileUnreadable?: true;
+  /**
+   * boxes: the box the thread's CLI runs in (spec 2026-10-19 §8.5), handed to the adapter as
+   * `StartSessionInput.box`. Omitted: this machine.
+   */
+  box?: HostThreadBox;
+  /**
+   * boxes: the file named a `box` that does not read, so the session start FAILS rather than
+   * running the CLI on this machine in the project's empty stub directory.
+   */
+  boxUnreadable?: true;
 }
 
 export interface LaunchConfigStore {
@@ -112,6 +123,18 @@ function parseThreadLaunchConfig(value: unknown): ThreadLaunchConfig | null {
   }
   if (value.profileUnreadable === true) {
     config.profileUnreadable = true;
+  }
+  // boxes:
+  if (value.box !== undefined && value.box !== null) {
+    const box = parseHostThreadBox(value.box);
+    if (box !== undefined) {
+      config.box = box;
+    } else {
+      config.boxUnreadable = true;
+    }
+  }
+  if (value.boxUnreadable === true) {
+    config.boxUnreadable = true;
   }
   // Any other field — an older build's `proxyRefId` among them — is ignored.
   return config;
@@ -185,6 +208,8 @@ export function launchConfigFromRequest(
     unsetEnv?: string[];
     homePath?: string;
     serverPool?: HostThreadServerPool;
+    /** boxes: validated here like the persisted copy; one that does not read marks the config. */
+    box?: unknown;
   },
   profile?: HostThreadProfile
 ): ThreadLaunchConfig {
@@ -193,7 +218,9 @@ export function launchConfigFromRequest(
     unsetEnv: request.unsetEnv,
     homePath: request.homePath,
     serverPool: request.serverPool,
-    profile
+    profile,
+    // boxes:
+    box: request.box
   }) ?? {};
 }
 

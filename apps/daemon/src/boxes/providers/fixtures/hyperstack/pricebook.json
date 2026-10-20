@@ -1,0 +1,38 @@
+[
+  {
+    "id": 2058,
+    "name": "RTX-A6000",
+    "value": "0.500000000",
+    "original_value": "0.500000000",
+    "discount_applied": false,
+    "start_time": null,
+    "end_time": null
+  },
+  {
+    "id": 2059,
+    "name": "H100-80G-PCIe",
+    "value": "1.900000000",
+    "original_value": "2.500000000",
+    "discount_applied": true,
+    "start_time": null,
+    "end_time": null
+  },
+  {
+    "id": 1402,
+    "name": "vCPU",
+    "value": "0E-9",
+    "original_value": "0E-9",
+    "discount_applied": false,
+    "start_time": null,
+    "end_time": null
+  },
+  {
+    "id": 1500,
+    "name": "PublicIP",
+    "value": "0.006720430",
+    "original_value": "0.006720430",
+    "discount_applied": false,
+    "start_time": null,
+    "end_time": null
+  }
+]

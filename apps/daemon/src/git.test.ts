@@ -11,6 +11,7 @@ import {
   GitError,
   GitService,
   GitWatcher,
+  gitSafetyArgs,
   passesGitEventFilter,
   workingDiffMaxBytes
 } from "./git";
@@ -35,13 +36,21 @@ const tempRepo = async (): Promise<string> => {
   return dir;
 };
 
+/** An argv without the `-c` safety options GitService puts in front of every git (asserted on their own below). */
+const withoutSafetyArgs = (argv: string[]): string[] => {
+  let index = 0;
+  while (argv[index] === "-c" && /^core\.(fsmonitor|hooksPath)=/.test(argv[index + 1] ?? "")) index += 2;
+  return argv.slice(index);
+};
+
 /** A GitService whose git invocations are answered from a fixture map. */
 const fakeGit = (
   reply: (args: string[]) => string | { stdout?: string; stderr?: string },
   calls: string[][] = []
 ) => {
   const git = new GitService({
-    runner: async (_file, args) => {
+    runner: async (_file, argv) => {
+      const args = withoutSafetyArgs(argv);
       calls.push(args);
       const out = reply(args);
       return typeof out === "string" ? { stdout: out, stderr: "" } : { stdout: out.stdout ?? "", stderr: out.stderr ?? "" };
@@ -460,7 +469,7 @@ test("workingDiffMaxBytes parses an integer, defaults, and clamps", () => {
 test("an overflow on a read that did not ask for a cap is still an error", async () => {
   const git = new GitService({
     runner: async (_file, args) => {
-      if (args[0] === "rev-parse") return { stdout: "true\n", stderr: "" };
+      if (withoutSafetyArgs(args)[0] === "rev-parse") return { stdout: "true\n", stderr: "" };
       throw Object.assign(new Error("stdout maxBuffer length exceeded"), {
         code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
         stdout: "partial",
@@ -665,6 +674,58 @@ test("working diff ignores the user's own diff config: no quoting, a/ b/ prefixe
     assert.match(result.diff, /^--- a\/site\/naïve-café\.txt\n\+\+\+ b\/site\/naïve-café\.txt$/m);
     assert.doesNotMatch(result.diff, /\\303/, "no C-quoted bytes");
     assert.deepEqual(result.untracked, ["site/新しい.txt"]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("gitSafetyArgs: fsmonitor off everywhere, hooks off for the daemon's own reads on this host", () => {
+  const off = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"];
+  assert.deepEqual(gitSafetyArgs(["status", "--porcelain=v2"], true), off);
+  assert.deepEqual(gitSafetyArgs(["-c", "core.quotePath=false", "diff", "--no-color"], true), off);
+  assert.deepEqual(gitSafetyArgs(["stash", "list"], true), off);
+  for (const command of ["commit", "push", "fetch", "merge", "checkout", "add", "stash"]) {
+    assert.deepEqual(gitSafetyArgs([command], true), ["-c", "core.fsmonitor=false"], `${command} keeps the repo's hooks`);
+  }
+  // A box repo's hooks run in its box; its fsmonitor is still never asked for.
+  assert.deepEqual(gitSafetyArgs(["status"], false), ["-c", "core.fsmonitor=false"]);
+});
+
+test("a repo's own fsmonitor command and post-index-change hook never run on the daemon's reads; commit hooks still do", async () => {
+  const dir = await tempRepo();
+  try {
+    const git = (...args: string[]) => exec("git", args, { cwd: dir, env: { ...process.env, HOME: dir, GIT_CONFIG_GLOBAL: "/dev/null" } });
+    const marker = (name: string) => join(dir, ".git", `ran-${name}`);
+    const script = (path: string, name: string) => writeFile(path, `#!/bin/sh\ntouch '${marker(name)}'\n`, { mode: 0o755 });
+    // What a hostile write into .git/ (config, hooks) would plant.
+    await script(join(dir, ".git", "fsmonitor.sh"), "fsmonitor");
+    await git("config", "core.fsmonitor", join(dir, ".git", "fsmonitor.sh"));
+    await script(join(dir, ".git", "hooks", "post-index-change"), "post-index-change");
+    await script(join(dir, ".git", "hooks", "pre-commit"), "pre-commit");
+    await writeFile(join(dir, "kept.txt"), "two\n");
+    await writeFile(join(dir, "new.txt"), "untracked\n");
+
+    const service = new GitService();
+    await service.status(dir);
+    await service.diff(dir, "kept.txt", {});
+    await service.log(dir, {});
+    await service.workingDiff(dir, GIT_WORKING_DIFF_DEFAULT_MAX_BYTES);
+    await service.branches(dir);
+    for (const name of ["fsmonitor", "post-index-change"]) {
+      await assert.rejects(stat(marker(name)), { code: "ENOENT" }, `${name} ran on a read`);
+    }
+
+    // The user's own commit keeps the repo's hooks (and still no fsmonitor).
+    await service.stage(dir, ["kept.txt"]);
+    const committed = await service.commit(dir, "two");
+    assert.equal(committed.ok, true);
+    await stat(marker("pre-commit"));
+    await assert.rejects(stat(marker("fsmonitor")), { code: "ENOENT" });
+
+    // Sanity: a plain git in the same repo does run what was planted.
+    await writeFile(join(dir, "kept.txt"), "three\n");
+    await git("status");
+    await stat(marker("fsmonitor"));
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

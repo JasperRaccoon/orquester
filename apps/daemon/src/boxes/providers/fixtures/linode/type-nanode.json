@@ -1,0 +1,37 @@
+{
+  "id": "g6-nanode-1",
+  "label": "Nanode 1GB",
+  "class": "nanode",
+  "vcpus": 1,
+  "memory": 1024,
+  "disk": 25600,
+  "gpus": 0,
+  "transfer": 1000,
+  "network_out": 1000,
+  "price": {
+    "hourly": 0.0075,
+    "monthly": 5
+  },
+  "region_prices": [
+    {
+      "id": "id-cgk",
+      "hourly": 0.009,
+      "monthly": 6
+    },
+    {
+      "id": "br-gru",
+      "hourly": 0.0105,
+      "monthly": 7
+    }
+  ],
+  "addons": {
+    "backups": {
+      "price": {
+        "hourly": 0.003,
+        "monthly": 2
+      },
+      "region_prices": []
+    }
+  },
+  "successor": null
+}

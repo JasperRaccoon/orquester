@@ -1,0 +1,19 @@
+{
+  "zones": [
+    {
+      "name": "ch-gva-2",
+      "api-endpoint": "https://api-ch-gva-2.exoscale.com/v2",
+      "sos-endpoint": "https://sos-ch-gva-2.exo.io"
+    },
+    {
+      "name": "ch-dk-2",
+      "api-endpoint": "https://api-ch-dk-2.exoscale.com/v2",
+      "sos-endpoint": "https://sos-ch-dk-2.exo.io"
+    },
+    {
+      "name": "de-fra-1",
+      "api-endpoint": "https://api-de-fra-1.exoscale.com/v2",
+      "sos-endpoint": "https://sos-de-fra-1.exo.io"
+    }
+  ]
+}

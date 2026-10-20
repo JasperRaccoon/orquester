@@ -12,6 +12,7 @@ import {
   parquetReadObjects,
   parquetSchema
 } from "hyparquet";
+import type { AsyncBuffer } from "hyparquet";
 import { compressors } from "hyparquet-compressors";
 import type { FsParquetResponse, ParquetColumn } from "@orquester/api";
 
@@ -55,16 +56,29 @@ interface RowGroupSlot {
 }
 let rowGroupSlot: RowGroupSlot | null = null;
 
+/**
+ * boxes: a parquet file that is not on this host's disk (a box project's file,
+ * read in ranges over the box link). Absent: `absPath` is read from this host.
+ */
+export interface ParquetSource {
+  /** Key of the sort and row-group caches; must never equal a host path. */
+  key: string;
+  open(): Promise<AsyncBuffer>;
+  mtimeMs(): Promise<number>;
+}
+
 export async function readParquetWindow(
   absPath: string,
-  opts: ParquetWindowOptions = {}
+  opts: ParquetWindowOptions = {},
+  source?: ParquetSource
 ): Promise<FsParquetResponse> {
+  const cacheKey = source?.key ?? absPath;
   let file: Awaited<ReturnType<typeof asyncBufferFromFile>>;
   let metadata: Awaited<ReturnType<typeof parquetMetadataAsync>>;
   let rowCount: number;
   let columns: ParquetColumn[];
   try {
-    file = await asyncBufferFromFile(absPath);
+    file = source ? await source.open() : await asyncBufferFromFile(absPath);
     metadata = await parquetMetadataAsync(file);
     rowCount = Number(metadata.num_rows);
     columns = columnsOf(metadata);
@@ -85,10 +99,10 @@ export async function readParquetWindow(
           `Too many rows to sort (${rowCount.toLocaleString()} > ${MAX_SORT_ROWS.toLocaleString()}).`
         );
       }
-      const { mtimeMs } = await stat(absPath);
-      const order = await sortedOrder(absPath, mtimeMs, file, metadata, rowCount, orderBy, opts.desc ?? false);
+      const mtimeMs = source ? await source.mtimeMs() : (await stat(absPath)).mtimeMs;
+      const order = await sortedOrder(cacheKey, mtimeMs, file, metadata, rowCount, orderBy, opts.desc ?? false);
       const indices = Array.from(order.subarray(offset, Math.min(offset + limit, rowCount)));
-      raw = await readRowsByIndex(absPath, mtimeMs, file, metadata, indices);
+      raw = await readRowsByIndex(cacheKey, mtimeMs, file, metadata, indices);
     } else {
       raw = await parquetReadObjects({
         file,

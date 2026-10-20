@@ -1,0 +1,5 @@
+{
+  "detail": "Subject token is invalid or expired",
+  "status": 401,
+  "title": "Unauthorized"
+}

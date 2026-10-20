@@ -51,6 +51,9 @@ import {
 } from "../../support/spawn.ts";
 import { OpenCodeClient } from "./http.ts";
 import { meetsMinimumOpenCodeVersion, tooOldMessage } from "./semver.ts";
+// boxes:
+import type { BoxHostForward } from "../../../boxes/contracts.ts";
+import { mergeOpenCodeConfigContent, type OpenCodeBoxServer } from "./box-launch.ts";
 
 /**
  * The pool key of the server every thread without a pool spec shares: the
@@ -241,6 +244,8 @@ interface PoolEntry {
   /** `serverKey(projectDir, spec.key)`: this entry's key in `entries`. */
   id: string;
   spec: ResolvedPoolSpec;
+  /** boxes: the project runs in a box — its server does too (the acquire that starts it decides). */
+  box?: OpenCodeBoxServer;
   refs: number;
   idleTimer?: ReturnType<typeof setTimeout>;
   starting?: Promise<Started>;
@@ -296,7 +301,7 @@ export class OpenCodeServerPool {
    * server when omitted), starting it if nobody holds one. Concurrent acquires
    * for the same (project, key) collapse onto one start.
    */
-  async acquire(projectDir: string, pool?: OpenCodeServerPoolSpec): Promise<OpenCodeServerHandle> {
+  async acquire(projectDir: string, pool?: OpenCodeServerPoolSpec, box?: OpenCodeBoxServer): Promise<OpenCodeServerHandle> {
     if (this.options.signal.aborted) {
       throw new Error("agent host is shutting down");
     }
@@ -304,8 +309,11 @@ export class OpenCodeServerPool {
     const id = serverKey(projectDir, spec.key);
     let entry = this.entries.get(id);
     if (entry === undefined) {
-      entry = { projectDir, id, spec, refs: 0 };
+      entry = { projectDir, id, spec, refs: 0, ...(box !== undefined ? { box } : {}) };
       this.entries.set(id, entry);
+    } else if (box !== undefined && entry.started === undefined && entry.starting === undefined) {
+      // boxes: a server that is not running starts with the latest launch's pieces.
+      entry.box = box;
     } else if (entry.spec.fingerprint !== spec.fingerprint) {
       // Keys are the caller's promise of one env; keep the running server
       // (its threads depend on it) and say so rather than guess.
@@ -515,6 +523,8 @@ export class OpenCodeServerPool {
   private async start(entry: PoolEntry): Promise<Started> {
     const { projectDir, spec } = entry;
     await this.retiring.get(entry.id);
+    // boxes: the project's server runs in its box, reached through a forwarded port.
+    if (entry.box !== undefined) return this.startInBox(entry, entry.box);
     const bin = await this.options.resolveBin();
     const port = await probeFreePort(this.hostname);
     const password = randomBytes(24).toString("base64url");
@@ -547,8 +557,79 @@ export class OpenCodeServerPool {
       // serve` is a Bun binary that spawns its own children.
       killGraceMs: OPENCODE_KILL_GRACE_MS
     });
+    return await this.awaitReady(entry, child, { homeDir: childEnv.HOME ?? "", password });
+  }
 
-    const stderr = new StderrCapture({ homeDirs: [childEnv.HOME ?? ""] });
+  /**
+   * boxes (spec 2026-10-19 §8.5): the project's server in its box. A free port THERE (the box's
+   * listening ports, `sys.ports`), the box env with the launch's config content merged in, the
+   * readiness line scraped as for a local server — and then the box port forwarded to a loopback
+   * port HERE, which every client (the health check included) talks to. The child is detached:
+   * a dropped link reattaches rather than ending every thread on the server.
+   */
+  private async startInBox(entry: PoolEntry, box: OpenCodeBoxServer): Promise<Started> {
+    const { projectDir, spec } = entry;
+    const password = randomBytes(24).toString("base64url");
+    const env: Record<string, string> = { ...box.env };
+    for (const name of spec.unsetEnv) {
+      delete env[name];
+    }
+    for (const [key, value] of Object.entries(spec.env)) {
+      env[key] = box.launch.toBox(value);
+    }
+    // The bridged MCP servers belong to THIS server: registered now, released when it is gone.
+    const config = await box.configContent();
+    const childEnv: Record<string, string> = {
+      ...env,
+      OPENCODE_CONFIG_CONTENT: mergeOpenCodeConfigContent(env.OPENCODE_CONFIG_CONTENT ?? "{}", config.content),
+      OPENCODE_SERVER_PASSWORD: password
+    };
+    let port: number;
+    try {
+      port = await freeBoxPort(box.launch);
+    } catch (error) {
+      await config.release();
+      throw error;
+    }
+    const child = box.launch.spawn({
+      command: box.launch.bin,
+      args: ["serve", `--hostname=${this.hostname}`, `--port=${port}`],
+      env: childEnv,
+      envUnset: box.envUnset,
+      cwd: box.launch.toBox(projectDir),
+      killGraceMs: OPENCODE_KILL_GRACE_MS,
+      detached: true
+    });
+    let forward: BoxHostForward | null = null;
+    void child.exited.then(async () => {
+      await forward?.close().catch(() => undefined);
+      await config.release();
+    });
+    return await this.awaitReady(entry, child, {
+      homeDir: box.launch.sys.home,
+      password,
+      toHostUrl: async (scraped) => {
+        const boxPort = Number(new URL(scraped).port) || port;
+        const opened = await box.launch.connection.forwardToHost(boxPort);
+        forward = opened;
+        if (child.hasExited()) await opened.close().catch(() => undefined);
+        return `http://127.0.0.1:${opened.hostPort}`;
+      }
+    });
+  }
+
+  /**
+   * The readiness scrape, then the version check against the server — a local one's or, through
+   * `toHostUrl`, a box one's forwarded port. Kills the child on any failure.
+   */
+  private async awaitReady(
+    entry: PoolEntry,
+    child: ProviderChild,
+    input: { homeDir: string; password: string; toHostUrl?: (scraped: string) => Promise<string> }
+  ): Promise<Started> {
+    const { projectDir, spec } = entry;
+    const password = input.password;
+    const stderr = new StderrCapture({ homeDirs: [input.homeDir] });
     let stdoutCapture: string | null = "";
     let readyUrl: string | null = null;
     let resolveReady: ((url: string) => void) | undefined;
@@ -613,6 +694,8 @@ export class OpenCodeServerPool {
         onTimeout: () => void child.kill().catch(() => undefined),
         signal: this.options.signal
       });
+      // boxes: the box's readiness URL names a box port; clients use the forwarded one.
+      if (input.toHostUrl !== undefined) url = await input.toHostUrl(url);
     } catch (error) {
       await child.kill().catch(() => undefined);
       throw error;
@@ -647,6 +730,21 @@ export class OpenCodeServerPool {
 
     return { url, version, serverPassword: password, child };
   }
+}
+
+/**
+ * boxes: a port nothing listens on in the box, from its own listening-port list. Random in the
+ * ephemeral range, so two servers starting at once rarely pick the same one — and a clash is the
+ * server's own bind failure, reported like any failed start.
+ */
+async function freeBoxPort(launch: OpenCodeBoxServer["launch"]): Promise<number> {
+  const listening = await launch.connection.request("sys.ports", {}).catch(() => []);
+  const taken = new Set(listening.map((entry) => entry.port));
+  for (let attempt = 0; attempt < 64; attempt += 1) {
+    const port = 20_000 + Math.floor(Math.random() * 40_000);
+    if (!taken.has(port)) return port;
+  }
+  throw new Error("Could not find a free port in the box for the OpenCode server.");
 }
 
 /**

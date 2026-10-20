@@ -239,6 +239,31 @@ describe("session profile routes", () => {
     }
   });
 
+  it("keeps an MCP server's Run in box switch (boxes)", async () => {
+    const { app } = await harness();
+    const profile = (await app.inject({ method: "POST", url: sessionProfileRoutes.list, payload: { name: "Box" } })).json() as SessionProfileDetail;
+    const create = async (revision: string, name: string, runInBox?: unknown) =>
+      app.inject({
+        method: "POST",
+        url: sessionProfileRoutes.items(profile.id),
+        payload: { revision, draft: { kind: "mcp", agents: "all", mcp: { name, transport: "stdio", command: "srv", ...(runInBox !== undefined ? { runInBox } : {}) } } }
+      });
+    const inBox = await create("1", "inbox", true);
+    assert.equal(inBox.statusCode, 201, inBox.body);
+    const onHost = await create("2", "onhost");
+    assert.equal(onHost.statusCode, 201, onHost.body);
+    const detail = async (res: { json(): unknown }) =>
+      (await app.inject({ method: "GET", url: sessionProfileRoutes.item(profile.id, (res.json() as SessionProfileMutationResponse).itemId!) })).json() as SessionProfileItemDetail;
+    const boxed = await detail(inBox);
+    assert.ok(boxed.kind === "mcp");
+    assert.equal(boxed.mcp.runInBox, true);
+    const hosted = await detail(onHost);
+    assert.ok(hosted.kind === "mcp");
+    assert.equal(hosted.mcp.runInBox, undefined);
+    const bad = await create("3", "bad", "yes");
+    assert.equal(bad.statusCode, 400, bad.body);
+  });
+
   it("never quotes a secret value in a refusal", async () => {
     const { app } = await harness();
     const profile = (await app.inject({ method: "POST", url: sessionProfileRoutes.list, payload: { name: "P" } })).json() as SessionProfileDetail;

@@ -1,0 +1,11 @@
+{
+  "id": "55555555-5555-4555-8555-555555555555",
+  "type": "request-status",
+  "href": "https://api.ionos.com/cloudapi/v6/requests/55555555-5555-4555-8555-555555555555/status",
+  "metadata": {
+    "status": "FAILED",
+    "message": "[VDC-1-1213] Resource limit exceeded: cores",
+    "etag": "5bdf5bee1fd8ed5ae7bd6f8a1c6b9e5e",
+    "targets": []
+  }
+}

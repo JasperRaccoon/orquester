@@ -266,6 +266,11 @@ export interface ChatComposerProps {
    * the chip's own "available when idle".
    */
   accountSwitchRefusal?: string | null | undefined;
+  /**
+   * boxes: a line the account picker adds under its choices, and to its
+   * tooltip — why a box chat offers no System account (Ephemeral AI VMs §17.16).
+   */
+  accountNote?: string | undefined;
   /** A turn is live: Enter steers, Escape interrupts, the primary action is Stop. */
   isTurnActive: boolean;
   /** Blocks a flush and disables submit while a card is open (§7.4). */

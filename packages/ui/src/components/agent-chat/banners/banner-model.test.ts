@@ -13,10 +13,13 @@ import {
   toolApprovalGrantChoices,
   toolApprovalGuardKey,
   toolApprovalKeyAction,
+  toolApprovalKindBadge,
   toolApprovalCardKey,
   toolApprovalClickGuarded,
   toolApprovalPreviewIsCut,
-  TOOL_APPROVAL_POINTER_GUARD_MS
+  TOOL_APPROVAL_POINTER_GUARD_MS,
+  // boxes:
+  isBoxApprovalCard
 } from "./banner-model.ts";
 import { ADMIN_FAMILIES, parseToolApprovalSummary } from "@orquester/api/agent-chat";
 
@@ -155,6 +158,15 @@ test("every Admin family has its own change sentence; a secret-files push names 
   assert.match(push, /never values/);
 });
 
+// boxes: renting a box is a spend card of its own.
+test("a box rental (spend card) says what approving costs and reads as money, not Admin", () => {
+  const sentence = toolApprovalChangeSentence({ kind: "spend", family: "boxes", scope: { label: "Billed to your Hetzner account" } });
+  assert.doesNotMatch(sentence, /newer Orquester/);
+  assert.match(sentence, /billed to your account/);
+  assert.match(sentence, /when this chat closes/);
+  assert.equal(toolApprovalKindBadge({ kind: "spend" }), "Costs money");
+});
+
 test("grant choices are exactly the offered scopes", () => {
   assert.deepEqual(toolApprovalGrantChoices({ grantOptions: [], family: "desktops" }), []);
   assert.deepEqual(toolApprovalGrantChoices({ grantOptions: ["project"], family: "desktops" }).map((choice) => choice.scope), ["project"]);
@@ -225,4 +237,15 @@ test("the card key moves with the summary's content under the same id", () => {
   assert.notEqual(toolApprovalCardKey(parsed({ title: "T2" })), a);
   assert.notEqual(toolApprovalCardKey(parsed({ scope: { label: "S2" } })), a);
   assert.notEqual(toolApprovalCardKey(parsed({ reason: "r" })), a);
+});
+
+// boxes: the temporary-box card (Ephemeral AI VMs §13.2) is named for what it is.
+test("a create_box card reads as renting a VM, by its kind or, before this build knows the kind, by its tool", () => {
+  assert.equal(isBoxApprovalCard({ kind: "box" as never }), true);
+  const unknownKind = parsed({ kind: "box", family: "boxes", tool: "create_box" });
+  assert.equal(unknownKind.kind, "unknown");
+  assert.equal(isBoxApprovalCard(unknownKind), true);
+  assert.equal(toolApprovalKindBadge(unknownKind), "Rent a VM");
+  assert.equal(isBoxApprovalCard(parsed({})), false);
+  assert.equal(toolApprovalKindBadge(parsed({})), "Admin");
 });

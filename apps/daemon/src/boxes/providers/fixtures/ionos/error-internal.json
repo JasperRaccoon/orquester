@@ -1,0 +1,9 @@
+{
+  "httpStatus": 500,
+  "messages": [
+    {
+      "errorCode": "000",
+      "message": "An internal error occurred. Please try again later."
+    }
+  ]
+}

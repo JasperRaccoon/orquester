@@ -6,8 +6,19 @@ export const TS_RUST_PLUGIN_ID = "ts-rust";
 export const EXCALIDRAW_PLUGIN_ID = "excalidraw";
 /** "Secret files" (docs/superpowers/specs/2026-10-19-secret-files-plugin-design.md; contracts in `secret-files.ts`). */
 export const SECRET_FILES_PLUGIN_ID = "secret-files";
-export type PluginId = typeof TS_RUST_PLUGIN_ID | typeof EXCALIDRAW_PLUGIN_ID | typeof SECRET_FILES_PLUGIN_ID;
-export const PLUGIN_IDS: readonly PluginId[] = [TS_RUST_PLUGIN_ID, EXCALIDRAW_PLUGIN_ID, SECRET_FILES_PLUGIN_ID];
+/** "Ephemeral AI VMs" (docs/superpowers/specs/2026-10-19-ephemeral-ai-vms-design.md; contracts in `boxes.ts`). */
+export const EPHEMERAL_VMS_PLUGIN_ID = "ephemeral-vms";
+export type PluginId =
+  | typeof TS_RUST_PLUGIN_ID
+  | typeof EXCALIDRAW_PLUGIN_ID
+  | typeof SECRET_FILES_PLUGIN_ID
+  | typeof EPHEMERAL_VMS_PLUGIN_ID;
+export const PLUGIN_IDS: readonly PluginId[] = [
+  TS_RUST_PLUGIN_ID,
+  EXCALIDRAW_PLUGIN_ID,
+  SECRET_FILES_PLUGIN_ID,
+  EPHEMERAL_VMS_PLUGIN_ID
+];
 
 export function isPluginId(value: unknown): value is PluginId {
   return typeof value === "string" && (PLUGIN_IDS as readonly string[]).includes(value);
@@ -100,6 +111,31 @@ export interface PluginInfo {
   engine?: TsCheckerEngine;
   /** ts-rust only: the engines to choose from, in display order. */
   engines?: PluginEngineInfo[];
+  /**
+   * boxes: plugins with per-session tooling only — how its install stands in
+   * each box it was provisioned to since the daemon started (Ephemeral AI VMs
+   * spec §10; the Status section shows a line for a box whose install failed).
+   * Absent when no box has one, and from daemons without boxes.
+   */
+  boxes?: PluginBoxToolingStatus[];
+}
+
+/**
+ * boxes: a plugin's tooling in one box.
+ * - `installing` — being installed or updated in the box now.
+ * - `ready` — installed and smoke-tested; new sessions in the box use it.
+ * - `off` — the plugin is off; the box was told, and its sessions run the real tools.
+ * - `unsupported` — the plugin has no build for the box's OS/CPU.
+ * - `failed` — the last install failed (`message` names the step); the box keeps what it had.
+ */
+export type PluginBoxToolingState = "installing" | "ready" | "off" | "unsupported" | "failed";
+
+export interface PluginBoxToolingStatus {
+  boxId: string;
+  state: PluginBoxToolingState;
+  /** One line: what is installed ("tsrs 0.16.0"), or what failed and at which step. */
+  message: string | null;
+  updatedAt: string;
 }
 
 export interface PluginsResponse {

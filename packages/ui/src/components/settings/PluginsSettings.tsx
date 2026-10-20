@@ -9,6 +9,7 @@ import {
   RefreshCw,
   RotateCcw,
   Search,
+  Server,
   Trash2,
   X
 } from "lucide-react";
@@ -36,12 +37,20 @@ import { useRepoIdentities } from "../../lib/repo-identities/hooks";
 import { useSecretVaults } from "../../lib/secret-files/hooks";
 import { SecretFilesDialog } from "../secret-files/SecretFilesDialog";
 import { Badge, EmptyState, InfoRow, Notice, SettingRow, SettingsCard, SettingsPage, SettingsSection } from "./primitives";
+// boxes: the Ephemeral AI VMs plugin's section, and "Set up more…" asking for it.
+import { EPHEMERAL_VMS_PLUGIN_ID } from "@orquester/api";
+import { BoxesPluginSection } from "../boxes/settings/BoxesPluginSection";
+import { takeBoxesSettingsFocus, useBoxesSettingsFocus } from "../../lib/boxes/hooks";
+// boxes: a plugin's per-box tooling installs that failed (Status).
+import { useBoxes } from "../../lib/boxes/store";
+import { pluginBoxIssues, type PluginBoxIssue } from "./plugins.logic";
 
 /** What each built-in plugin's icon tile shows. */
 const PLUGIN_GLYPH: Record<PluginId, React.ReactNode> = {
   "ts-rust": "TS",
   excalidraw: <PenTool size={15} />,
-  "secret-files": <KeyRound size={15} />
+  "secret-files": <KeyRound size={15} />,
+  "ephemeral-vms": <Server size={15} />
 };
 
 /** The daemon's error text for a failed request, else the error's own. */
@@ -99,6 +108,15 @@ export const PluginsSettings: React.FC = () => {
   const [pending, setPending] = useState<{ pluginId: PluginId; action: PluginAction } | null>(null);
   const [actionError, setActionError] = useState<ActionError | null>(null);
   const [confirmEnable, setConfirmEnable] = useState<PluginInfo | null>(null);
+
+  // boxes: the New project dialog's "Set up more…" opens this page on the plugin.
+  const boxesFocus = useBoxesSettingsFocus();
+  useEffect(() => {
+    if (!boxesFocus) return;
+    setQuery("");
+    setSelectedId(EPHEMERAL_VMS_PLUGIN_ID);
+    takeBoxesSettingsFocus();
+  }, [boxesFocus]);
 
   const load = useCallback(() => {
     setLoadError(null);
@@ -327,6 +345,25 @@ const PluginRow: React.FC<{
   );
 };
 
+/** boxes: one line per box whose copy of the plugin's tooling did not install; nothing when none failed. */
+const PluginBoxIssues: React.FC<{ issues: readonly PluginBoxIssue[] }> = ({ issues }) => {
+  if (issues.length === 0) return null;
+  return (
+    <div className="px-4 py-3" data-plugin-box-issues>
+      <Notice tone="warn" title={issues.length === 1 ? "Not installed in 1 VM" : `Not installed in ${issues.length} VMs`}>
+        <ul className="space-y-1">
+          {issues.map((issue) => (
+            <li key={issue.boxId} data-plugin-box-issue={issue.boxId} className="break-words">
+              <span className="font-medium text-neutral-200">{issue.label}</span>
+              {issue.state === "unsupported" ? " (unsupported)" : ""}: {issue.message}
+            </li>
+          ))}
+        </ul>
+      </Notice>
+    </div>
+  );
+};
+
 /** The selected plugin: what it is, its installed version and jobs, and its settings. */
 const PluginDetail: React.FC<{
   plugin: PluginInfo;
@@ -344,6 +381,9 @@ const PluginDetail: React.FC<{
   const jobLabel = pluginJobLabel(plugin.job);
   const sourceHref = pluginSourceHref(plugin.source.url);
   const unsupported = plugin.platform === "unsupported";
+  // boxes: labelled from the boxes store (only the boxes still running while the Ephemeral AI VMs plugin is off).
+  const boxes = useBoxes();
+  const boxIssues = useMemo(() => pluginBoxIssues(plugin, boxes), [plugin, boxes]);
   const spinner = (action: PluginAction) =>
     pending === action ? <Loader2 size={13} className="animate-spin" /> : null;
 
@@ -432,6 +472,7 @@ const PluginDetail: React.FC<{
               </Notice>
             </div>
           )}
+          <PluginBoxIssues issues={boxIssues} />
           <div className="flex flex-wrap gap-2 px-4 py-3">
             <Button size="sm" variant="outline" disabled={!controls.checkForUpdates} onClick={onCheck}>
               {spinner("check") ?? <RefreshCw size={13} />} Check for updates
@@ -454,7 +495,15 @@ const PluginDetail: React.FC<{
         </SettingsSection>
       )}
 
+      {/* boxes: a plugin without updates has no Status section of its own to put these in. */}
+      {!plugin.updates && boxIssues.length > 0 && (
+        <SettingsSection title="Status">
+          <PluginBoxIssues issues={boxIssues} />
+        </SettingsSection>
+      )}
+
       {plugin.id === SECRET_FILES_PLUGIN_ID && <SecretFilesPluginSection enabled={plugin.enabled} />}
+      {plugin.id === EPHEMERAL_VMS_PLUGIN_ID && <BoxesPluginSection enabled={plugin.enabled} />}
 
       <SettingsSection title="Settings">
         <SettingRow

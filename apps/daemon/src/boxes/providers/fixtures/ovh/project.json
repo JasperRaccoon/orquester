@@ -1,0 +1,15 @@
+{
+  "project_id": "11111111111111111111111111111111",
+  "projectName": "orquester-boxes",
+  "description": "orquester-boxes",
+  "planCode": "project.2018",
+  "unleash": false,
+  "status": "ok",
+  "access": "full",
+  "creationDate": "2026-09-01T10:00:00Z",
+  "manualQuota": false,
+  "iam": {
+    "id": "11111111-1111-4111-8111-111111111111",
+    "urn": "urn:v1:eu:resource:publicCloudProject:11111111111111111111111111111111"
+  }
+}

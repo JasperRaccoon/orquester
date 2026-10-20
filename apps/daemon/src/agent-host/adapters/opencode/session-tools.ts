@@ -74,6 +74,12 @@ export interface OpenCodeSessionToolsLaunch {
   /** MCP servers to deny in this thread's session (§12.1), by their config names. */
   deny?: readonly string[];
   revoke(): void;
+  /**
+   * boxes (spec 2026-10-19 §8.4): the server runs in a box, so ours registers as a LOCAL server
+   * there — `orq-agent mcp-bridge <serverId>`, whose host side holds `url` and `authorization` —
+   * and no credential reaches the box.
+   */
+  bridge?: { command: string[] };
 }
 
 /** A server name as OpenCode spells it inside tool ids (`[a-zA-Z0-9_-]`, anything else `_`). */
@@ -184,6 +190,17 @@ export async function registerOpenCodeSessionTools(
   client: OpenCodeClient,
   launch: OpenCodeSessionToolsLaunch
 ): Promise<void> {
+  if (launch.bridge !== undefined) {
+    // boxes: a local server in the box; the bridge's host side carries the credential.
+    await client.post<unknown>(openCodeRoutes.mcp, {
+      timeoutMs: AGENT_HOST_DEADLINES.sessionOpenMs,
+      body: {
+        name: launch.serverName,
+        config: { type: "local", command: launch.bridge.command, enabled: true, timeout: SESSION_TOOL_CALL_TIMEOUT_MS }
+      }
+    });
+    return;
+  }
   await client.post<unknown>(openCodeRoutes.mcp, {
     timeoutMs: AGENT_HOST_DEADLINES.sessionOpenMs,
     body: {

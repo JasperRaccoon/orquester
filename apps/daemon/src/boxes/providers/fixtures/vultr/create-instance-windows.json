@@ -1,0 +1,43 @@
+{
+  "instance": {
+    "id": "11111111-2222-4333-8444-555555555555",
+    "os": "Windows 2022 Standard",
+    "ram": 4096,
+    "disk": 0,
+    "main_ip": "0.0.0.0",
+    "vcpu_count": 2,
+    "region": "ewr",
+    "plan": "vc2-2c-4gb",
+    "date_created": "2026-10-19T23:09:22+00:00",
+    "status": "pending",
+    "allowed_bandwidth": 4,
+    "netmask_v4": "",
+    "gateway_v4": "0.0.0.0",
+    "power_status": "running",
+    "server_status": "none",
+    "v6_network": "",
+    "v6_main_ip": "",
+    "v6_network_size": 0,
+    "label": "orq-0a1b2c3d4e5f",
+    "internal_ip": "",
+    "kvm": "",
+    "hostname": "orq-0a1b2c3d4e5",
+    "tag": "orquester-box",
+    "tags": [
+      "orquester-box",
+      "orquester-box=0a1b2c3d4e5f"
+    ],
+    "os_id": 501,
+    "app_id": 0,
+    "image_id": "",
+    "firewall_group_id": "",
+    "features": [],
+    "user_scheme": "root",
+    "vpc_only": false,
+    "enable_memorybacking": "shared",
+    "pending_charges": 0,
+    "default_password": "REDACTED",
+    "cluster_id": "",
+    "attached_block_storages": []
+  }
+}

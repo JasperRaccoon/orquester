@@ -1,0 +1,4 @@
+{
+  "error": "insufficient resources available to fulfill request: could not reserve resource for machine: insufficient CPUs available to fulfill request",
+  "status": "insufficient_capacity"
+}

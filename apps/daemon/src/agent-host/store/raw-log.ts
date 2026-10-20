@@ -77,10 +77,36 @@ const RAW_LOG_DROPPED_FRAME_TYPES: ReadonlySet<string> = new Set([
   "_x.ai/session/update"
 ]);
 
-/** Keys whose VALUE is an environment map full of credentials. */
-const ENV_MAP_KEYS: ReadonlySet<string> = new Set(["env", "environment", "envVars"]);
-/** Keys whose value is a credential outright, whatever the shape. */
-const SECRET_KEY_RE = /^(?:.*_)?(?:api[-_]?key|secret|token|password|passwd|credential)s?$/i;
+/**
+ * Keys whose VALUE is an environment (or header) map full of credentials: every value of one is
+ * a credential until proven otherwise, whatever its key is called.
+ */
+const ENV_MAP_KEYS: ReadonlySet<string> = new Set(["env", "environment", "envVars", "headers", "http_headers", "httpHeaders"]);
+/** A key's last word that makes its value a credential (`accessToken`, `GITHUB_TOKEN`, `client-secret`). */
+const SECRET_LAST_WORDS: ReadonlySet<string> = new Set(["token", "secret", "password", "passwd", "passphrase", "credential", "authorization", "cookie"]);
+/** …or its last two words, run together (`apiKey`, `x-api-key`, `PRIVATE_KEY`, `secretAccessKey`). */
+const SECRET_LAST_PAIRS: ReadonlySet<string> = new Set(["apikey", "privatekey", "accesskey", "secretkey", "signingkey"]);
+
+/**
+ * Whether a key names a credential, in any spelling: the key is split into words at
+ * separators AND camelCase humps (`chatgptAccessToken` → chatgpt, access, token; `refresh_token`;
+ * `idToken`; `X-Api-Key`; `APIKey` → api, key), and the last word (or the last two) decides.
+ * Codex's `account/login/start` and `account/chatgptAuthTokens/refresh` carry `accessToken` in
+ * camelCase, which a snake_case-only rule let through to `raw.ndjson`.
+ */
+export function isSecretKey(key: string): boolean {
+  const words = key
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((word) => word.length > 0)
+    .map((word) => (word.length > 3 && word.endsWith("s") ? word.slice(0, -1) : word));
+  const last = words.at(-1);
+  if (last === undefined) return false;
+  if (SECRET_LAST_WORDS.has(last) || SECRET_LAST_PAIRS.has(last)) return true;
+  return words.length >= 2 && SECRET_LAST_PAIRS.has(`${words.at(-2)}${last}`);
+}
 
 /**
  * Structural scrub, with the textual redaction applied **per string value**
@@ -96,8 +122,16 @@ function scrub(
   value: unknown,
   depth: number,
   budget: { fields: number },
-  homeDirs: readonly string[] | undefined
+  homeDirs: readonly string[] | undefined,
+  /**
+   * Under a credential-named key: every string is redacted, while numbers and booleans stay —
+   * `input_tokens: 812` or OpenCode's `tokens: {input, output}` are usage counts, not secrets.
+   */
+  secret = false
 ): unknown {
+  if (typeof value === "string" && secret) {
+    return "[redacted]";
+  }
   if (typeof value === "string") {
     const redacted = redactStderr(value, {
       ...(homeDirs !== undefined ? { homeDirs } : {})
@@ -120,7 +154,7 @@ function scrub(
         break;
       }
       budget.fields -= 1;
-      out.push(scrub(entry, depth + 1, budget, homeDirs));
+      out.push(scrub(entry, depth + 1, budget, homeDirs, secret));
     }
     return out;
   }
@@ -131,8 +165,8 @@ function scrub(
       break;
     }
     budget.fields -= 1;
-    if (SECRET_KEY_RE.test(key)) {
-      out[key] = "[redacted]";
+    if (secret || isSecretKey(key)) {
+      out[key] = scrub(entry, depth + 1, budget, homeDirs, true);
       continue;
     }
     if (ENV_MAP_KEYS.has(key) && entry !== null && typeof entry === "object") {

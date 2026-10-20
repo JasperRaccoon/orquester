@@ -121,6 +121,11 @@ export const FileBrowser: React.FC<{ rootPath: string; active?: boolean; reveal?
   // answers, so a fast right-click before it resolves still works on a capable
   // server; if the server has no tool the folder item disables itself.
   const [folderZip, setFolderZip] = useState(true);
+  // boxes: whether regex search works where the root lives (a box without
+  // ripgrep answers false); optimistic until the probe answers, like folderZip.
+  const [regexSearch, setRegexSearch] = useState(true);
+  // boxes: whether archives can be listed (a box without 7z/bsdtar answers archiveTool: null).
+  const [archivePreview, setArchivePreview] = useState(true);
 
   const loadDir = useCallback(
     async (dir: string) => {
@@ -183,20 +188,31 @@ export const FileBrowser: React.FC<{ rootPath: string; active?: boolean; reveal?
     void loadDir(rootPath);
   }, [rootPath, loadDir]);
 
+  // Probed for the root path: in a box project the box answers with its own
+  // tools; for a host project the host answers as it always did.
   useEffect(() => {
     let alive = true;
+    const controller = new AbortController();
+    setFolderZip(true);
+    setRegexSearch(true);
+    setArchivePreview(true);
     api
-      .getFsCapabilities()
+      .getFsCapabilities(controller.signal, rootPath)
       .then((caps) => {
-        if (alive) setFolderZip(caps.folderZip);
+        if (!alive) return;
+        setFolderZip(caps.folderZip);
+        // Only a box answers these; absent means the host, which always can.
+        setRegexSearch(caps.regexSearch !== false);
+        setArchivePreview(caps.archiveTool !== null);
       })
       .catch(() => {
-        /* leave optimistic; a failed download surfaces its own error */
+        /* leave optimistic; a failed download or search surfaces its own error */
       });
     return () => {
       alive = false;
+      controller.abort();
     };
-  }, [api]);
+  }, [api, rootPath]);
 
   // Refresh the whole tree when the tab goes inactive -> active again, so a
   // file created/deleted in another tab shows up the moment you return.
@@ -630,7 +646,12 @@ export const FileBrowser: React.FC<{ rootPath: string; active?: boolean; reveal?
             searchActive ? "flex-1" : "shrink-0"
           )}
         >
-          <SearchPanel root={rootPath} onOpenFile={openFromSearch} onActiveChange={onSearchActiveChange} />
+          <SearchPanel
+            root={rootPath}
+            regexSearch={regexSearch}
+            onOpenFile={openFromSearch}
+            onActiveChange={onSearchActiveChange}
+          />
         </div>
 
         <div
@@ -734,6 +755,7 @@ export const FileBrowser: React.FC<{ rootPath: string; active?: boolean; reveal?
           jumpToColumn={pendingColumn ?? undefined}
           jumpLength={pendingLength ?? undefined}
           jumpNonce={jumpNonce}
+          archivePreview={archivePreview}
           onBack={() => setSelectedFile(null)}
         />
       </div>

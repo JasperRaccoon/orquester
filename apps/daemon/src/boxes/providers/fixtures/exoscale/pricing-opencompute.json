@@ -1,0 +1,53 @@
+{
+  "chf": {
+    "running_micro": "0.00729000",
+    "running_tiny": "0.01458000",
+    "running_small": "0.02333000",
+    "running_medium": "0.04666000",
+    "running_large": "0.09333000",
+    "running_mega": "0.74667000",
+    "running_cpu_extra_large": "0.23333000",
+    "running_memory_extra_large": "0.14000000",
+    "running_storage_extra_large": "0.14000000",
+    "running_gpu2_small": "1.37500000",
+    "volume": "0.00014000",
+    "eip_address": "0.01389000",
+    "traffic": "0.02000000",
+    "snapshot": "0.00014000",
+    "template": "0.00028000"
+  },
+  "eur": {
+    "running_micro": "0.00729000",
+    "running_tiny": "0.01458000",
+    "running_small": "0.02333000",
+    "running_medium": "0.04666000",
+    "running_large": "0.09333000",
+    "running_mega": "0.74667000",
+    "running_cpu_extra_large": "0.23333000",
+    "running_memory_extra_large": "0.14000000",
+    "running_storage_extra_large": "0.14000000",
+    "running_gpu2_small": "1.37500000",
+    "volume": "0.00014000",
+    "eip_address": "0.01389000",
+    "traffic": "0.02000000",
+    "snapshot": "0.00014000",
+    "template": "0.00028000"
+  },
+  "usd": {
+    "running_micro": "0.00729000",
+    "running_tiny": "0.01458000",
+    "running_small": "0.02333000",
+    "running_medium": "0.04666000",
+    "running_large": "0.09333000",
+    "running_mega": "0.74667000",
+    "running_cpu_extra_large": "0.23333000",
+    "running_memory_extra_large": "0.14000000",
+    "running_storage_extra_large": "0.14000000",
+    "running_gpu2_small": "1.37500000",
+    "volume": "0.00014000",
+    "eip_address": "0.01389000",
+    "traffic": "0.02000000",
+    "snapshot": "0.00014000",
+    "template": "0.00028000"
+  }
+}

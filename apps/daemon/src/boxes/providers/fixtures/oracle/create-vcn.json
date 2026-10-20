@@ -1,0 +1,17 @@
+{
+  "id": "ocid1.vcn.oc1.eu-frankfurt-1.aaaaaaaa1111111111111111111111111111111111111111111111111111",
+  "compartmentId": "ocid1.tenancy.oc1..aaaaaaaa11111111111111111111111111111111111111111111111111aa",
+  "displayName": "orquester-boxes",
+  "cidrBlock": "10.77.0.0/16",
+  "cidrBlocks": [
+    "10.77.0.0/16"
+  ],
+  "defaultRouteTableId": "ocid1.routetable.oc1.eu-frankfurt-1.aaaaaaaa1111111111111111111111111111111111111111111111111111",
+  "defaultSecurityListId": "ocid1.securitylist.oc1.eu-frankfurt-1.aaaaaaaa1111111111111111111111111111111111111111111111111111",
+  "defaultDhcpOptionsId": "ocid1.dhcpoptions.oc1.eu-frankfurt-1.aaaaaaaa1111111111111111111111111111111111111111111111111111",
+  "lifecycleState": "PROVISIONING",
+  "timeCreated": "2026-10-19T20:00:00.000Z",
+  "freeformTags": {
+    "orquester-network": "boxes"
+  }
+}

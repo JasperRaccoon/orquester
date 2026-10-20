@@ -1,0 +1,5 @@
+{
+  "status": false,
+  "message": "VM 7613 does not exists.",
+  "error_reason": "not_found"
+}

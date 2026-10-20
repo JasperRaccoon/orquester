@@ -5,6 +5,10 @@ import { utf8SequenceLength } from "@orquester/api/agent-chat";
 import { assertInsideFsRoot, FsSandboxError } from "@orquester/config/fs";
 import { ToolError } from "./errors.ts";
 import { wholeUtf8Length } from "./result.ts";
+// boxes: a path in a box project is read in its box (spec §8.7).
+import type { BoxRegistry } from "../boxes/contracts.ts";
+import { BoxFsUnavailableError, errnoOf } from "../boxes/remote/fs/errors.ts";
+import { locateProjectFs, type BoxProjectFs } from "../boxes/remote/fs/project-fs.ts";
 
 export const MAX_FS_ENTRIES = 500;
 export const DEFAULT_READ_BYTES = 64 * 1024;
@@ -57,9 +61,12 @@ function normalizeMaxBytes(maxBytes: number | undefined): number {
 }
 
 export class FsTools {
-  constructor(private readonly opts: { fsRoot: string }) {}
+  /** `boxes`: where box projects are (absent: every path is a host path). */
+  constructor(private readonly opts: { fsRoot: string; boxes?: () => BoxRegistry | undefined }) {}
 
   async listFiles(path: string): Promise<ListFilesResult> {
+    const box = await this.boxPath(path);
+    if (box) return boxListFiles(box.fs, box.safe);
     const safe = await this.resolvePath(path);
     let dirents: Dirent[];
     let truncated = false;
@@ -104,6 +111,8 @@ export class FsTools {
     path: string,
     opts?: { offset?: number; maxBytes?: number }
   ): Promise<ReadFileWindowResult> {
+    const box = await this.boxPath(path);
+    if (box) return boxReadFileWindow(box.fs, box.safe, opts);
     const safe = await this.resolvePath(path);
     let fileStat: Awaited<ReturnType<typeof stat>>;
     try {
@@ -135,24 +144,33 @@ export class FsTools {
       const extra = Math.max(0, Math.min(3, fileStat.size - offset - readLength));
       const buffer = Buffer.allocUnsafe(readLength + extra);
       const { bytesRead } = readLength > 0 ? await file.read(buffer, 0, buffer.length, offset) : { bytesRead: 0 };
-      const windowBytes = Math.min(bytesRead, readLength);
-      let consumed = windowBytes;
-      if (offset + windowBytes < fileStat.size) {
-        // The window ends before the file does: end it on a character boundary, never inside a character. One narrower
-        // than the character it starts with takes that character whole (at most 4 bytes), so paging always advances.
-        consumed = wholeUtf8Length(buffer.subarray(0, windowBytes));
-        if (consumed === 0 && windowBytes > 0) consumed = Math.min(bytesRead, utf8SequenceLength(buffer[0]!));
-      }
-      return {
-        path: safe,
-        text: buffer.subarray(0, consumed).toString("utf8"),
-        size: fileStat.size,
-        offset,
-        truncated: offset + consumed < fileStat.size,
-        consumed,
-      };
+      return windowResult(safe, buffer, bytesRead, readLength, offset, fileStat.size);
     } finally {
       await file.close();
+    }
+  }
+
+  /**
+   * boxes: the box and the contained host path when `path` is in a box project; null for a host path. As the file
+   * routes: the project's folder inside `fsRoot` (on the host, its stub), the target inside the folder (in the box).
+   */
+  private async boxPath(path: string): Promise<{ fs: BoxProjectFs; safe: string } | null> {
+    const target = isAbsolute(path) ? path : join(this.opts.fsRoot, path);
+    let location;
+    try {
+      location = locateProjectFs(this.opts.boxes?.(), target);
+    } catch (error) {
+      if (error instanceof BoxFsUnavailableError) throw new ToolError(error.code, error.message);
+      throw error;
+    }
+    if (location.kind === "host") return null;
+    try {
+      await assertInsideFsRoot(this.opts.fsRoot, location.projectRoot);
+      return { fs: location.fs, safe: await location.fs.assertInside(location.projectRoot, target) };
+    } catch (error) {
+      if (error instanceof FsSandboxError) throw new FsSandboxError("Path is not allowed (outside the sandbox).");
+      if (error instanceof BoxFsUnavailableError) throw new ToolError(error.code, error.message);
+      throw error;
     }
   }
 
@@ -167,6 +185,76 @@ export class FsTools {
       throw error;
     }
   }
+}
+
+/** The window `buffer` (`bytesRead` bytes read from `offset`, `readLength` asked) answers, ending on a character boundary. */
+function windowResult(safe: string, buffer: Buffer, bytesRead: number, readLength: number, offset: number, size: number): ReadFileWindowResult {
+  const windowBytes = Math.min(bytesRead, readLength);
+  let consumed = windowBytes;
+  if (offset + windowBytes < size) {
+    // The window ends before the file does: end it on a character boundary, never inside a character. One narrower
+    // than the character it starts with takes that character whole (at most 4 bytes), so paging always advances.
+    consumed = wholeUtf8Length(buffer.subarray(0, windowBytes));
+    if (consumed === 0 && windowBytes > 0) consumed = Math.min(bytesRead, utf8SequenceLength(buffer[0]!));
+  }
+  return {
+    path: safe,
+    text: buffer.subarray(0, consumed).toString("utf8"),
+    size,
+    offset,
+    truncated: offset + consumed < size,
+    consumed,
+  };
+}
+
+// boxes: the two reads for a box project, with the host versions' limits and agent-facing errors.
+
+async function boxListFiles(fs: BoxProjectFs, safe: string): Promise<ListFilesResult> {
+  let listed;
+  try {
+    listed = await fs.readdir(safe);
+  } catch (error) {
+    if (error instanceof BoxFsUnavailableError) throw new ToolError(error.code, error.message);
+    const code = errnoOf(error);
+    if (code === "ENOENT") throw new ToolError("INVALID_ARGUMENT", "Directory not found.");
+    if (code === "ENOTDIR") throw new ToolError("INVALID_ARGUMENT", "Path is not a directory.");
+    throw new ToolError("INVALID_ARGUMENT", "Unable to list directory.");
+  }
+  const truncated = listed.length > MAX_FS_ENTRIES;
+  const entries = listed
+    .slice(0, MAX_FS_ENTRIES)
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((entry) => ({ name: entry.name, kind: entry.kind, size: entry.kind === "file" ? entry.size : 0 }));
+  return { path: safe, entries, truncated };
+}
+
+async function boxReadFileWindow(fs: BoxProjectFs, safe: string, opts?: { offset?: number; maxBytes?: number }): Promise<ReadFileWindowResult> {
+  const failed = (error: unknown): never => {
+    if (error instanceof BoxFsUnavailableError) throw new ToolError(error.code, error.message);
+    throw new ToolError("INVALID_ARGUMENT", "Unable to read file.");
+  };
+  let fileStat;
+  try {
+    fileStat = await fs.stat(safe);
+  } catch (error) {
+    if (errnoOf(error) === "ENOTDIR") throw new ToolError("INVALID_ARGUMENT", "File not found.");
+    return failed(error);
+  }
+  if (fileStat === null) throw new ToolError("INVALID_ARGUMENT", "File not found.");
+  if (fileStat.kind === "dir") throw new FsDirectoryError();
+  if (fileStat.kind !== "file") throw new ToolError("INVALID_ARGUMENT", "Path is not a regular file.");
+  const offset = normalizeOffset(opts?.offset);
+  const maxBytes = normalizeMaxBytes(opts?.maxBytes);
+  const sniffLength = Math.min(8 * 1024, fileStat.size);
+  if (sniffLength > 0) {
+    const head = await fs.read(safe, { length: sniffLength }).catch(failed);
+    if (head.includes(0)) throw new ToolError("INVALID_ARGUMENT", "Refusing to read binary file.");
+  }
+  const readLength = offset < fileStat.size ? Math.min(maxBytes, fileStat.size - offset) : 0;
+  // Up to 3 bytes past the window, as on the host.
+  const extra = Math.max(0, Math.min(3, fileStat.size - offset - readLength));
+  const buffer = readLength > 0 ? await fs.read(safe, { offset, length: readLength + extra }).catch(failed) : Buffer.alloc(0);
+  return windowResult(safe, buffer, buffer.length, readLength, offset, fileStat.size);
 }
 
 function entryKind(entry: Dirent): FsEntryKind {

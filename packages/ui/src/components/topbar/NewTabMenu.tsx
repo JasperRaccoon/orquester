@@ -50,6 +50,15 @@ import { launchModelList, resolveLaunchModel } from "../../lib/launch-models";
 import { copyText } from "../../lib/clipboard";
 import { isGlobalPluginEnabled } from "../../lib/plugins-state";
 import { isWhiteboardFile, whiteboardTitle, whiteboardsDirOf } from "../../lib/whiteboard";
+// boxes:
+import { useProjectBox } from "../boxes/surfaces/box-data";
+import {
+  BOX_MANAGED_ACCOUNTS_NOTE,
+  boxAccountOptions,
+  boxShellChoices,
+  launchAccountFor,
+  newTabMenuGates
+} from "../boxes/surfaces/box-surfaces.logic";
 
 /** Past conversations listed inline per agent before the "…and N more" cutoff. */
 const MAX_INLINE_CONVERSATIONS = 10;
@@ -177,9 +186,10 @@ const ResumeSection: React.FC<{
  * sentinel (not an omitted value) so it forces the host identity over any
  * per-agent default.
  */
-const AgentRow: React.FC<{ agent: RegistryEntry; projectPath?: string }> = ({
+const AgentRow: React.FC<{ agent: RegistryEntry; projectPath?: string; inBox?: boolean }> = ({
   agent,
-  projectPath
+  projectPath,
+  inBox = false
 }) => {
   const openTab = useAppStore((s) => s.openTab);
   const agentAccounts = useAppStore((s) => s.agentAccounts);
@@ -198,13 +208,19 @@ const AgentRow: React.FC<{ agent: RegistryEntry; projectPath?: string }> = ({
 
   const managed = (agentAccounts?.accounts ?? []).filter((a) => a.agent === agent.id);
 
-  const options = [
-    { id: SYSTEM_ACCOUNT_ID, label: "System" },
-    ...managed.map((a) => ({ id: a.id, label: shortAccountLabel(a.label) }))
-  ];
+  // boxes: a chat in a box project runs under a managed account only (spec 2026-10-19
+  // §17.16) — no System chip, and the first managed account when the wanted one is System.
+  const options = boxAccountOptions(
+    [
+      { id: SYSTEM_ACCOUNT_ID, label: "System" },
+      ...managed.map((a) => ({ id: a.id, label: shortAccountLabel(a.label) }))
+    ],
+    inBox
+  );
   const fallback = agentAccounts?.defaults[agent.id as "claude" | "codex" | "grok"] ?? SYSTEM_ACCOUNT_ID;
   const wanted = preferred ?? fallback;
-  const selectedAccount = options.some((o) => o.id === wanted) ? wanted : SYSTEM_ACCOUNT_ID;
+  const launchAccount = launchAccountFor(options, wanted, inBox);
+  const selectedAccount = launchAccount ?? SYSTEM_ACCOUNT_ID;
 
   // The models come from the adapter's own catalog once the host has published
   // a snapshot.
@@ -269,6 +285,14 @@ const AgentRow: React.FC<{ agent: RegistryEntry; projectPath?: string }> = ({
           </span>
         }
         onClick={() => {
+          // boxes: nothing to launch a box chat with until a managed account exists.
+          if (launchAccount === null) {
+            setNotice({
+              title: agent.name,
+              message: `${BOX_MANAGED_ACCOUNTS_NOTE}: add a ${agent.name} account in Settings → Agents to start one here.`
+            });
+            return;
+          }
           if (!chatFields) {
             // The catalogue has not arrived, so there is no model to name and
             // the host would refuse the create. Say that instead of firing a
@@ -310,7 +334,9 @@ const AgentRow: React.FC<{ agent: RegistryEntry; projectPath?: string }> = ({
           {[
             managed.length > 0
               ? (options.find((o) => o.id === selectedAccount)?.label ?? "System")
-              : null,
+              : inBox
+                ? "No managed account"
+                : null,
             RUNTIME_MODE_LABELS[runtimeMode],
             selectedModelLabel
           ]
@@ -420,6 +446,15 @@ const AgentRow: React.FC<{ agent: RegistryEntry; projectPath?: string }> = ({
           ))}
         </div>
       ) : null}
+      {/* boxes: why the System chip is missing. */}
+      {optionsOpen && inBox ? (
+        <p
+          className="mb-1.5 ml-8 mr-2 text-[11px] text-neutral-500"
+          title="The System account's login lives on this host and cannot be lent to a VM"
+        >
+          {BOX_MANAGED_ACCOUNTS_NOTE}
+        </p>
+      ) : null}
       {/* Last, below the chips it inherits: resume is a second action on the row,
           not something that changes how the row itself launches. Offered inside
           a project (conversations are scoped to one); the per-agent gate is now
@@ -428,7 +463,7 @@ const AgentRow: React.FC<{ agent: RegistryEntry; projectPath?: string }> = ({
           through the launcher's `resumeArgs` (§5.3). */}
       {/* No resolvable model means no launch block, so the resume rows have
           nothing to start either — hidden rather than offered and refused. */}
-      {projectPath && chatFields ? (
+      {projectPath && chatFields && launchAccount !== null ? (
         <ResumeSection
           agent={agent}
           projectPath={projectPath}
@@ -570,8 +605,18 @@ export const NewTabMenu: React.FC = () => {
   const openTodo = useAppStore((s) => s.openTodo);
   const whiteboardsOn = useAppStore((s) => isGlobalPluginEnabled(s.plugins, EXCALIDRAW_PLUGIN_ID));
   const registry = useRegistry();
+  // boxes: a box project offers agent chats and plain shells of the box's OS; desktops
+  // (and the IDE / file-explorer launches they carry) are not offered (spec §8.8).
+  const boxView = useProjectBox(
+    ctx?.kind === "project" ? ctx.project.path : null,
+    ctx?.kind === "project" ? ctx.project.box : undefined
+  );
+  const boxGates = newTabMenuGates(boxView?.info);
 
-  const shells = registry.shells.filter((s) => s.enabled);
+  const shells = boxShellChoices(
+    registry.shells.filter((s) => s.enabled),
+    boxView?.info.kind ?? null
+  );
   // Only installed agents an adapter can actually drive: agent tabs are chat
   // only now (§1), so a catalog row with no `chat` block (the detect-only
   // `deepseek`) has no launch path left and must not be offered one (§5.3).
@@ -648,7 +693,10 @@ export const NewTabMenu: React.FC = () => {
       ) : (
         <DropdownEmpty>Browser — install chromium on the host</DropdownEmpty>
       )}
-      {ctx?.kind === "project" ? <DesktopEntries projectPath={ctx.project.path} /> : null}
+      {ctx?.kind === "project" && boxGates.showDesktops ? <DesktopEntries projectPath={ctx.project.path} /> : null}
+      {ctx?.kind === "project" && !boxGates.showDesktops ? (
+        <DropdownEmpty>Desktops and app launches — not available in a VM project</DropdownEmpty>
+      ) : null}
       <DropdownItem
         icon={<ListTodo size={14} />}
         onClick={() => ctx && void createTodo("project", ctx.key, "to-dos")}
@@ -671,6 +719,7 @@ export const NewTabMenu: React.FC = () => {
           key={agent.id}
           agent={agent}
           projectPath={ctx?.kind === "project" ? ctx.project.path : undefined}
+          inBox={boxView !== null}
         />
       ))}
     </AdaptiveMenu>

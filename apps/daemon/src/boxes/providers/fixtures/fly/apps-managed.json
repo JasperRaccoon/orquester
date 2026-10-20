@@ -1,0 +1,41 @@
+{
+  "total_apps": 3,
+  "apps": [
+    {
+      "id": "11111111aaaa0001",
+      "name": "orq-0a1b2c3d4e5f",
+      "machine_count": 1,
+      "volume_count": 0,
+      "network": "default",
+      "status": "deployed",
+      "organization": {
+        "name": "Personal",
+        "slug": "personal"
+      }
+    },
+    {
+      "id": "11111111aaaa0002",
+      "name": "my-website",
+      "machine_count": 2,
+      "volume_count": 1,
+      "network": "default",
+      "status": "deployed",
+      "organization": {
+        "name": "Personal",
+        "slug": "personal"
+      }
+    },
+    {
+      "id": "11111111aaaa0003",
+      "name": "orq-ffeeddccbbaa",
+      "machine_count": 0,
+      "volume_count": 0,
+      "network": "default",
+      "status": "pending",
+      "organization": {
+        "name": "Personal",
+        "slug": "personal"
+      }
+    }
+  ]
+}

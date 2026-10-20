@@ -363,7 +363,7 @@ function slashCommandsFromInitialize(initialize: InitializeResponse): SlashComma
  * are **kept but marked disabled**, so a picker filtering on `enabled` hides
  * them while other surfaces can still see that they exist.
  */
-function parseGrokInspectSkills(stdout: string): Skill[] | null {
+export function parseGrokInspectSkills(stdout: string): Skill[] | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(stdout);

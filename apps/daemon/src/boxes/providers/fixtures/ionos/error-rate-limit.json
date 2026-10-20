@@ -1,0 +1,9 @@
+{
+  "httpStatus": 429,
+  "messages": [
+    {
+      "errorCode": "429",
+      "message": "Too many requests. Please retry later."
+    }
+  ]
+}

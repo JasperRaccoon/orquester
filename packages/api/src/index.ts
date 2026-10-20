@@ -58,6 +58,7 @@ import {
   type UpdateSessionProfileRequest
 } from "./session-profiles.ts";
 import type { AgentProfileAgentId, ProfileImportScanResponse } from "./agent-profile.ts";
+import type { ProjectBoxInfo, ProjectLocationRequest } from "./boxes.ts";
 export * from "./agent-chat/index.ts";
 export * from "./saved-prompts.ts";
 export * from "./repo-identities.ts";
@@ -68,6 +69,10 @@ export * from "./prompt-variables.ts";
 export * from "./workflows/index.ts";
 export * from "./desktops.ts";
 export * from "./plugins.ts";
+export * from "./boxes.ts";
+export * from "./box-protocol.ts";
+// boxes: temporary boxes for agent chats (routes behind the box MCP tools).
+export * from "./box-tools.ts";
 export * from "./agent-tools.ts";
 
 export type {
@@ -167,6 +172,12 @@ export interface ProjectSummary {
    * fresh clone of the same repo. Set with `repoKey`.
    */
   cloneUrl?: string;
+  /**
+   * Set when the project runs in a box (Ephemeral AI VMs plugin, spec
+   * 2026-10-19 §8). Absent = this host. For a box project the repo fields above
+   * come from the project's record, since the host directory is only a stub.
+   */
+  box?: ProjectBoxInfo;
 }
 
 /**
@@ -318,7 +329,20 @@ export interface OwnerSummary {
  * "New Folder"/name-only path) keep working unchanged. Repo modes resolve the
  * git account from the workspace's `gitAccountId`.
  */
-export type CreateProjectRequest =
+export type CreateProjectRequest = CreateProjectSource & {
+  /** Where the project runs. Absent or `{ kind: "host" }` = this host (Ephemeral AI VMs spec §8.1). */
+  location?: ProjectLocationRequest;
+  // boxes: the Template tab's command for a project created in a box.
+  /**
+   * Box locations only: the Template tab's assembled scaffold command. On the
+   * host the client types it into a setup terminal itself; for a box the daemon
+   * types it into the box project's first terminal once setup is done (spec §8.2
+   * step 5). Ignored for `{ kind: "host" }`.
+   */
+  templateCommand?: string;
+};
+
+export type CreateProjectSource =
   | { source?: "empty"; name: string }
   /**
    * `url`: full URL, `git@…`, or `owner/repo`; `name` overrides the dest dir. `ref` (optional)
@@ -545,6 +569,11 @@ export interface FsCapabilitiesResponse {
   folderZip: boolean;
   /** Resolved zip tool basename for diagnostics ("bsdtar"|"zip"|"7z"|…), or null. */
   zipTool: string | null;
+  // boxes: answered only for `?path=` inside a box project (the box's own tools, spec §8.7).
+  /** The archive-listing tool the box has ("7z"|"bsdtar"|…), or null. */
+  archiveTool?: string | null;
+  /** Whether regex search works (ripgrep is in the box). */
+  regexSearch?: boolean;
 }
 
 // Git — a project's git repo surfaced as a GitHub-Desktop-style tab. Stateless;
@@ -1391,6 +1420,8 @@ export interface SessionSummary {
    * Set only by `reattach()`; a fresh agent launch can no longer produce one.
    */
   legacyAgentTerminal?: boolean;
+  /** boxes: the box this terminal's shell runs in (Ephemeral AI VMs spec §8.8); absent = this host. */
+  boxId?: string;
 
   // --- agent chat (kind "agent-chat") -------------------------------------
   // The seven derived fields of the chat design spec §6.4 / §7.1 (and the
@@ -1541,6 +1572,13 @@ export interface CreateSessionRequest {
   profileId?: string;
   /** The workflow run that starts this session (workflows spec §5.10). Persisted on the tab record. */
   owner?: WorkflowSessionOwner;
+  /**
+   * boxes: run this terminal in that box (Ephemeral AI VMs spec §8.8, §13.3 "Watch"), whatever
+   * `projectPath` is — a temporary box's terminal sits in its chat's project. `cwd` defaults to
+   * the box user's home. Only plain shells; refused for a destroyed box. Without it, a terminal
+   * in a box project runs in that project's box anyway.
+   */
+  boxId?: string;
 }
 
 /** Longest `CreateSessionRequest.initialCommand` the daemon will type. */

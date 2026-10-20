@@ -1,0 +1,238 @@
+/**
+ * Grok adapter — `grok agent stdio` in a box (spec 2026-10-19 §7, §8.4, §8.5).
+ *
+ * - The launch (`boxes/index.ts`): the System account refused, the account
+ *   home (or the profile's prepared home) synced, the session's files pushed
+ *   for a `session/load`, the box's `grok` resolved or installed.
+ * - Login: no credential file — `orq-agent token grok --account <id>`, run by
+ *   Grok itself whenever it needs a token (`launch.ts`,
+ *   `GROK_AUTH_PROVIDER_COMMAND` and the overlay's `[auth]` table). The
+ *   overlay is written into the box, beside the host's at the same path.
+ * - MCP: Grok loads the servers of its config files (its own `config.toml`,
+ *   the Claude-compat `.claude.json`/`.mcp.json`) — read by `grok inspect
+ *   --json` IN the box, their definitions read from those files on the host
+ *   (the source of truth; the box's are copies) or, for a project's own file,
+ *   in the box. Each one that must run here becomes a same-named ACP stdio
+ *   entry of the bridge, which REPLACES the config's server (session-tools.ts);
+ *   a "Run in box" one is replaced the same way by its host definition, so its
+ *   env and header values (blanked in the box's copy) reach Grok in memory.
+ * - An Agent Profile chat: the prepared home's `config.toml` denies every plugin Grok discovers
+ *   but the profile's own — discovered by `grok inspect --json` IN the box
+ *   ({@link boxGrokPluginNames}), since the box's Grok loads the box's plugins. The file is
+ *   rendered on this machine (the home's source of truth) once the launch is up, then synced
+ *   into the box again (`BoxLaunch.syncProfile`).
+ */
+
+import { readFile } from "node:fs/promises";
+
+import { boxToHostPath } from "@orquester/api";
+import { parse as parseToml } from "@decimalturn/toml-patch";
+
+import type { AdapterContext, StartSessionInput } from "../../adapter.ts";
+import { requireBoxes, type BoxLaunch } from "../../boxes/index.ts";
+import { runInBox } from "../../boxes/box-tools.ts";
+import { claudeMcpSpec, tomlMcpSpec, type McpServerSpec } from "../../boxes/mcp-plan.ts";
+import { parsePluginNames, type GrokPluginNamesResult, type grokDiscoveredPluginNames } from "../../../agent-isolation/grok.ts";
+import type { McpServer } from "./acp/_generated/schema.ts";
+import type { GrokBoxMcpServers } from "./session-tools.ts";
+
+/** What `GrokSession` gets for a box start. */
+export interface GrokBoxLaunch {
+  launch: BoxLaunch;
+  /** Removed from `orq-agent`'s own environment. */
+  envUnset: readonly string[];
+  /** The bridged (and "Run in box") servers and our own server's bridge, for `session/new` / `session/load`. */
+  mcp: GrokBoxMcpServers;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** A Grok cursor's session id (`{schemaVersion, sessionId}`), for the transcript push. */
+function grokSessionRef(cursor: unknown): string | null {
+  if (!isRecord(cursor) || typeof cursor.sessionId !== "string" || cursor.sessionId.length === 0) return null;
+  return cursor.sessionId;
+}
+
+export async function launchGrokInBox(
+  context: AdapterContext,
+  input: StartSessionInput & { box: NonNullable<StartSessionInput["box"]> },
+  configRoot: string | undefined
+): Promise<BoxLaunch> {
+  return requireBoxes(context).launch({
+    threadId: input.threadId,
+    agent: "grok",
+    box: input.box,
+    home: input.home,
+    cwd: input.cwd,
+    ...(input.profile !== undefined ? { profile: input.profile } : {}),
+    ...(configRoot !== undefined ? { configRoot } : {}),
+    resumeSessionRef: grokSessionRef(input.resumeCursor),
+    signal: context.signal,
+    onProgress: (message) => context.logger.info(`grok: ${message}`, { threadId: input.threadId })
+  });
+}
+
+/** What `grok inspect --json` may print (the host's cap, `agent-isolation/grok.ts`). */
+const INSPECT_MAX_BYTES = 8 * 1024 * 1024;
+const INSPECT_TIMEOUT_MS = 30_000;
+/** A config file `grok inspect` names as a server's source is read from the box up to this size. */
+const CONFIG_SOURCE_MAX_BYTES = 1024 * 1024;
+
+/**
+ * `grokDiscoveredPluginNames` run in the box: the same contract (host paths and a host-built env
+ * in, `{ ok, names | error }` out, never throws), with `grokBin` the box's `grok`, the env and
+ * cwd mapped to the box.
+ */
+export function boxGrokPluginNames(launch: BoxLaunch): typeof grokDiscoveredPluginNames {
+  return async (options): Promise<GrokPluginNamesResult> => {
+    const { env, unset } = launch.env(options.env);
+    let result;
+    try {
+      result = await runInBox(launch.connection, {
+        command: options.grokBin,
+        args: options.args ?? ["inspect", "--json"],
+        env,
+        envUnset: unset,
+        cwd: launch.toBox(options.cwd),
+        timeoutMs: options.timeoutMs ?? INSPECT_TIMEOUT_MS,
+        maxOutputBytes: INSPECT_MAX_BYTES + 1,
+        label: "grok inspect in the box"
+      });
+    } catch (error) {
+      return { ok: false, error: `grok inspect in the box did not finish: ${error instanceof Error ? error.message : String(error)}` };
+    }
+    if (result.code !== 0) {
+      const tail = result.stderr.trim().split("\n").slice(-3).join("\n");
+      const how = result.code !== null ? `exited with code ${result.code}` : `was stopped by ${result.signal ?? "a signal"}`;
+      return { ok: false, error: `grok inspect --json in the box ${how}${tail ? `: ${tail}` : ""}` };
+    }
+    if (Buffer.byteLength(result.stdout) > INSPECT_MAX_BYTES) {
+      return { ok: false, error: `grok inspect --json printed more than ${INSPECT_MAX_BYTES} bytes` };
+    }
+    return parsePluginNames(result.stdout);
+  };
+}
+
+/** A config file's text: the host's copy when it has one (the source of truth), else the box's. */
+export async function readConfigSource(launch: Pick<BoxLaunch, "paths" | "connection">, boxPath: string): Promise<string | null> {
+  const hostPath = boxToHostPath(launch.paths, boxPath);
+  if (hostPath !== null) {
+    try {
+      return await readFile(hostPath, "utf8");
+    } catch {
+      // Not on the host: a project's own file, which lives in the box.
+    }
+  }
+  try {
+    const info = await launch.connection.request("fs.stat", { path: boxPath });
+    if (info === null || info.kind !== "file" || info.size > CONFIG_SOURCE_MAX_BYTES) return null;
+    // Bounded by the stat's size: the box sends no more than that.
+    const stream = await launch.connection.readFile(boxPath, { length: info.size });
+    const chunks: Buffer[] = [];
+    let total = 0;
+    for await (const chunk of stream) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
+      total += buffer.length;
+      if (total > CONFIG_SOURCE_MAX_BYTES) {
+        stream.destroy();
+        return null;
+      }
+      chunks.push(buffer);
+    }
+    return Buffer.concat(chunks).toString("utf8");
+  } catch {
+    return null;
+  }
+}
+
+/** One server's definition out of the file `grok inspect` named as its source. */
+function definitionIn(text: string, path: string, name: string, cwd: string, env: Record<string, string>): McpServerSpec | null {
+  if (path.endsWith(".toml")) {
+    try {
+      const doc = parseToml(text) as unknown;
+      const servers = isRecord(doc) ? doc.mcp_servers : undefined;
+      return isRecord(servers) ? tomlMcpSpec(name, servers[name], env) : null;
+    } catch {
+      return null;
+    }
+  }
+  try {
+    const doc = JSON.parse(text) as unknown;
+    if (!isRecord(doc)) return null;
+    const top = isRecord(doc.mcpServers) ? doc.mcpServers[name] : undefined;
+    if (top !== undefined) return claudeMcpSpec(name, top);
+    const project = isRecord(doc.projects) ? doc.projects[cwd] : undefined;
+    const local = isRecord(project) && isRecord(project.mcpServers) ? project.mcpServers[name] : undefined;
+    return local !== undefined ? claudeMcpSpec(name, local) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The servers Grok would load in the box, planned and registered for the bridge — and each
+ * "Run in box" one given again with its host definition ({@link inBoxAcpServer}). A failing
+ * inspect leaves every server as the box's config has it (logged): the session still starts.
+ */
+export async function grokBoxMcpServers(input: {
+  launch: BoxLaunch;
+  env: Record<string, string>;
+  envUnset: readonly string[];
+  /** Host cwd. */
+  cwd: string;
+  logger: AdapterContext["logger"];
+}): Promise<McpServer[]> {
+  const { launch } = input;
+  let listed: unknown;
+  try {
+    const result = await runInBox(launch.connection, {
+      command: launch.bin,
+      args: ["inspect", "--json"],
+      env: input.env,
+      envUnset: input.envUnset,
+      cwd: launch.toBox(input.cwd),
+      timeoutMs: 30_000,
+      maxOutputBytes: 8 * 1024 * 1024,
+      label: "grok inspect in the box"
+    });
+    listed = result.code === 0 ? (JSON.parse(result.stdout) as unknown) : null;
+  } catch (error) {
+    input.logger.warn("grok: could not list the box's MCP servers; they run in the box as configured there", error);
+    return [];
+  }
+  const servers = isRecord(listed) && Array.isArray(listed.mcpServers) ? listed.mcpServers : [];
+  const specs: McpServerSpec[] = [];
+  const texts = new Map<string, string | null>();
+  for (const entry of servers) {
+    if (!isRecord(entry) || typeof entry.name !== "string") continue;
+    const source = isRecord(entry.source) ? entry.source : {};
+    // A plugin's servers live with the plugin (synced into the box); they run there.
+    if (source.type === "plugin" || typeof source.path !== "string") continue;
+    if (!texts.has(source.path)) texts.set(source.path, await readConfigSource(launch, source.path));
+    const text = texts.get(source.path) ?? null;
+    if (text === null) continue;
+    const spec = definitionIn(text, source.path, entry.name, input.cwd, input.env);
+    if (spec !== null) specs.push(spec);
+  }
+  const plan = await launch.bridgeMcpServers(specs);
+  return [
+    ...plan.bridged.map((server): McpServer => ({ name: server.name, command: server.command, args: server.args, env: [] })),
+    ...plan.inBox.map(inBoxAcpServer)
+  ];
+}
+
+/**
+ * A "Run in box" server as a same-named ACP entry that replaces the config's: the box's copy of
+ * the file has its env and header values blanked, so the host's definition (with them) rides the
+ * `session/new` / `session/load` request into Grok's memory — never a file in the box.
+ */
+function inBoxAcpServer(server: McpServerSpec): McpServer {
+  const pairs = (values: Record<string, string> | undefined) =>
+    Object.entries(values ?? {}).map(([name, value]) => ({ name, value }));
+  if (server.transport === "stdio") {
+    return { name: server.name, command: server.command ?? "", args: server.args ?? [], env: pairs(server.env) };
+  }
+  return { type: server.transport, name: server.name, url: server.url ?? "", headers: pairs(server.headers) };
+}

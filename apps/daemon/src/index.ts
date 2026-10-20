@@ -111,6 +111,8 @@ import { AgentChatService, ChatSessionError, type CreateAgentChatRequest } from 
 import { INVALID_OWNER, parseSessionOwner } from "./agent-chat/owner.ts";
 import { ChatAwareSessionManager } from "./agent-chat/session-router.ts";
 import { AGENT_VISUAL_ROUTE_PATTERN, registerAgentChatRoutes } from "./agent-chat/proxy-routes.ts";
+// boxes: route patterns exempt from user auth (they do box auth).
+import { BOX_HUB_PUBLIC_ROUTES } from "./boxes/hub/routes.ts";
 import { LineageService } from "./agent-chat/lineage.ts";
 import { registerLineageRoutes } from "./agent-chat/lineage-routes.ts";
 // umcp:t5 begin
@@ -147,6 +149,8 @@ import { registerSecretFilesRoutes } from "./secret-files/routes.ts";
 import { registerTodoToggleRoute } from "./todo-items.ts";
 import { PluginsService, publishPluginEvents } from "./plugins/plugins-service.ts";
 import { registerPluginRoutes } from "./plugins/routes.ts";
+// boxes: Ephemeral AI VMs — the box service (projects in boxes, the plugin's routes).
+import { isBoxLocation, sendBoxError, type BoxService } from "./boxes/service/index.ts";
 import { detectRepoInfo, remoteRepoFields } from "./repo-id";
 import { Tmux, sessionPath, tmuxAvailable, tmuxVersionOk } from "./tmux";
 import { SystemStatusService } from "./system-status";
@@ -216,6 +220,11 @@ import { HtmlPreviewBrowser } from "./html-preview/index.ts";
 import { registerMcp } from "./mcp/server.ts";
 import { externalCredentialId, registerPrincipalHook, registerRemoteFieldStripping } from "./mcp/principal.ts";
 import { registerSessionToolsRoute } from "./session-tools/route.ts";
+// boxes: file routes of box projects (spec §8.7).
+import type { BoxRegistry } from "./boxes/contracts.ts";
+import { registerBoxFsRouting } from "./boxes/remote/fs/routes.ts";
+import { boxAwareSecretFileIo } from "./boxes/remote/fs/secret-files.ts";
+import { boxImageReader } from "./boxes/remote/fs/images.ts";
 import {
   UploadTooLargeError,
   acceptRawBody,
@@ -294,6 +303,10 @@ import { fsPathFromQuery } from "./fs-path-query.js";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { request as httpRequest, type IncomingMessage } from "node:http";
 import bcrypt from "bcryptjs";
+// boxes: temporary boxes for agent chats (Ephemeral AI VMs spec §13).
+import { registerTemporaryBoxRoutes, TemporaryBoxTools } from "./boxes/temporary/index.ts";
+// boxes: every box module wired over the daemon's services.
+import { createDaemonBoxes, type DaemonBoxes } from "./boxes/wiring.ts";
 
 const daemonId = randomUUID();
 
@@ -641,23 +654,70 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
         return null;
       }
     },
+    // boxes: html_render / html_preview read a box project's images in its box (spec §8.9).
+    // `services` is read per call: no page is published before it exists.
+    localImages: (projectDir) => boxImageReader(services.boxRegistry, projectDir),
     logger: console
   });
 
-  const ptySessions = createSessionManager(registry, tmux, resolved.sessionsIndexFile, {
-    resolveExtraEnv: async (entry, ctx) => {
-      if (entry.kind !== "agent") return null;
-      try {
-        return await resolveAgentLaunchEnv(entry, ctx);
-      } catch (error) {
-        throw new SessionError(error instanceof Error ? error.message : String(error));
-      }
-    },
-    daemonSockPath: paths.socketPath,
-    onAgentLaunch: (entry, launchEnv) => agentHooks.ensureForEntry(entry.id, launchEnv),
-    // Chat tabs share `sessions.json`; the PTY manager stays its only writer.
-    indexContributor: agentChat.indexContributor()
+  // boxes: begin
+  // Git hosting accounts and the built-in plugins are built here (started below, where they were)
+  // because the box modules need both before the session manager exists.
+  const accounts = new AccountsService(resolved.accountsFile, resolved.keysDir);
+  // Built-in plugins (Settings → Plugins; plugins spec §4–5): plugins.json, the TypeScript engine install and
+  // its hourly update check, and the preload new sessions load through NODE_OPTIONS. Started before
+  // any transport serves or any chat or workflow run starts, so new sessions already see the
+  // preload; its update checks run in the background.
+  const plugins = new PluginsService({
+    baseDir: paths.baseDir,
+    // A getter: PUT /api/config/daemon moves it, then calls `workspacesChanged`.
+    workspacesDir: () => resolved.workspacesDir,
+    writeJson: writeJsonFile,
+    env,
+    logger: console
   });
+  publishPluginEvents(plugins, broadcaster);
+  // Ephemeral AI VMs (spec 2026-10-19): the hub, the box service, sync, tooling and the box
+  // terminals the session manager wraps (`boxes/wiring.ts` says what is wired when).
+  const boxes: DaemonBoxes = createDaemonBoxes({
+    baseDir: paths.baseDir,
+    keysDir: resolved.keysDir,
+    home: resolved.vars.userhome,
+    env,
+    accounts,
+    agentAccounts,
+    plugins,
+    broadcaster,
+    catalog: registry,
+    workspacesDir: () => resolved.workspacesDir,
+    accountsFile: resolved.accountsFile,
+    workspacesMetaFile: resolved.workspacesMetaFile,
+    writeJson: writeJsonFile,
+    sessionPath,
+    logger: console
+  });
+  // boxes: end
+
+  // boxes: a box project's terminals run in its box; the host manager stays the only writer of
+  // `sessions.json` (box terminals and chat tabs contribute their records to it).
+  const ptySessions = boxes.wrapSessions(
+    (indexContributor) =>
+      createSessionManager(registry, tmux, resolved.sessionsIndexFile, {
+        resolveExtraEnv: async (entry, ctx) => {
+          if (entry.kind !== "agent") return null;
+          try {
+            return await resolveAgentLaunchEnv(entry, ctx);
+          } catch (error) {
+            throw new SessionError(error instanceof Error ? error.message : String(error));
+          }
+        },
+        daemonSockPath: paths.socketPath,
+        onAgentLaunch: (entry, launchEnv) => agentHooks.ensureForEntry(entry.id, launchEnv),
+        // Chat tabs share `sessions.json`; the PTY manager stays its only writer.
+        indexContributor
+      }),
+    agentChat.indexContributor()
+  );
   agentChat.setPersist(() => ptySessions.persistIndexNow());
 
   // One session list over both backends, so every existing surface (tab strip,
@@ -690,8 +750,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     sessionsLoaded: () => sessionsReattached
   });
   await lineage.load();
-  const accounts = new AccountsService(resolved.accountsFile, resolved.keysDir);
-  const git = new GitService();
+  // boxes: git in a box project runs in its box (`accounts` is built above, with the box modules).
+  const git = new GitService({ route: boxes.gitRoute });
   const todos = new TodoListManager(resolved.todosIndexFile, console);
   await todos.load();
   const recentProjects = new RecentProjectsService(
@@ -723,20 +783,10 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     logger: console
   });
   await repoIdentities.load();
-  // Built-in plugins (Settings → Plugins; plugins spec §4–5): plugins.json, the TypeScript engine install and
-  // its hourly update check, and the preload new sessions load through NODE_OPTIONS. Started before
-  // any transport serves or any chat or workflow run starts, so new sessions already see the
-  // preload; its update checks run in the background.
-  const plugins = new PluginsService({
-    baseDir: paths.baseDir,
-    // A getter: PUT /api/config/daemon moves it, then calls `workspacesChanged`.
-    workspacesDir: () => resolved.workspacesDir,
-    writeJson: writeJsonFile,
-    env,
-    logger: console
-  });
-  publishPluginEvents(plugins, broadcaster);
+  // Built-in plugins: built above (with the box modules), started here.
   await plugins.start();
+  // boxes: the box records load (a reattached box terminal finds its box) and the plugin switch is followed.
+  await boxes.start().catch((error) => console.error("Box service start failed", error instanceof Error ? error.message : error));
   // Secret files (the "Secret files" plugin, spec 2026-10-19): one vault per repo per workspace,
   // synced to every clone while the plugin is on. A store it cannot load leaves it read-only (503).
   const secretVaults = new SecretVaultStore({ dir: secretFilesDir(paths.baseDir), logger: console });
@@ -767,7 +817,10 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     publish: (payload) => broadcaster.publish(SECRET_FILES_CHANNEL, SECRET_FILES_CHANGED, payload),
     // Every clone write checks the clone root's realpath stays inside the (current) workspaces root.
     workspacesRoot: () => resolved.workspacesDir,
-    logger: console
+    logger: console,
+    // boxes: a clone in a box project is read, written and watched in its box (spec §8.7).
+    // `services` is read per call: the service starts only after it exists.
+    ...boxAwareSecretFileIo(() => services.boxRegistry)
   });
   // Automated workflows (workflows spec §3, §5.7, §5.8): definitions, secrets, runs and runtime
   // state. Each store is tolerant at load — a file it cannot parse is moved aside, one it cannot
@@ -880,7 +933,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     if (managed.length === 0) return base;
     // Otherwise always surface every managed account so the panel can show them all.
     const accounts: UsageAccount[] = [];
-    const live = sessions.liveAccountIds();
+    // boxes: only host-local sessions refresh their account (spec 2026-10-19 boxes §7).
+    const live = sessions.hostLocalAccountIds();
     for (const acct of managed) {
       // Keep an idle account's token warm so its usage never renders stale.
       await agentAccounts.ensureFreshForUsage(agent, acct.id, live).catch(() => undefined);
@@ -1009,7 +1063,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
       for (const dir of removed) console.warn(`Removed orphan account home ${dir}`);
     })
     .catch((error) => console.error("Orphan account home sweep failed", error));
-  agentAccounts.startRefresher(() => sessions.liveAccountIds());
+  // boxes: box sessions never refresh, so they never stop the daemon refresher (spec 2026-10-19 boxes §7).
+  agentAccounts.startRefresher(() => sessions.hostLocalAccountIds());
   // First usage reading only now: managed accounts are loaded and reattached
   // sessions are known (its token-freshness pass consults liveAccountIds()).
   usage.start();
@@ -1252,7 +1307,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     fsRoot: () => resolved.fsRoot,
     appdirTmp: workflowTmp,
     push,
-    logger: consoleWorkflowLogger
+    logger: consoleWorkflowLogger,
+    // boxes: a box project's shell and code blocks run in its box.
+    boxSandbox: boxes.workflowSandbox
   });
   workflowValidationCatalog = workflowDaemon.validationCatalog;
   publishWorkflowEvents({
@@ -1345,7 +1402,11 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     workflows, workflowSecrets, workflowRuns, workflowState, workflowEngine: null, internalApi: null,
     lineage,
     workflowProjects: workflowDaemon.runtime.projects,
-    workflowCatalogReady: () => workflowDaemon.validationCatalog.ready()
+    workflowCatalogReady: () => workflowDaemon.validationCatalog.ready(),
+    // boxes: the box service, which paths are in box projects, and the rest of the box wiring.
+    boxes: boxes.service,
+    boxRegistry: boxes.registry,
+    boxWiring: boxes
   };
   // umcp:t3 begin
   // Orquester approval cards (memory only; a journal of open ids resolves a crash's leftovers as
@@ -1375,6 +1436,23 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // in every chat: there are no toolsets to resolve.
   const disconnectExecutor = connectExecutor(agentToolsRuntime, executorPorts);
   // umcp:t3 end
+  // boxes: begin
+  // Temporary boxes for agent chats (Ephemeral AI VMs spec §13): the box MCP tools' daemon side.
+  // The box service attaches itself with `temporaryBoxTools.connect({ boxes, hub, registry })` once
+  // its records are loaded; until then the box tools are not advertised and answer BOXES_DISABLED.
+  // A closed chat's temporary boxes are destroyed (`chat-closed`, spec §13.3).
+  const temporaryBoxTools = new TemporaryBoxTools({ isChatOpen: (id) => agentChat.chat.has(id), logger: console });
+  agentChat.chat.lifecycle.on("closed", ({ id, rolledBack }: { id: string; rolledBack?: boolean }) => {
+    if (!rolledBack) temporaryBoxTools.chatClosed(id);
+  });
+  services.temporaryBoxTools = temporaryBoxTools;
+  // The rest of the box wiring over the session list, browser tabs and chats: the token broker,
+  // git auth, the MCP bridge, dev-server forwards, agent chats in boxes, the Template command, and
+  // the box tools (connected while the plugin is on).
+  await boxes
+    .attach({ sessions, browsers, agentChat, agentProfile, temporaryBoxTools })
+    .catch((error) => console.error("Box wiring failed", error instanceof Error ? error.message : error));
+  // boxes: end
   // umcp:t6 begin
   // The chat transport (unified MCP design 2026-10-15 §9.4, §12.1): per-thread manifests for the
   // agent host (every chat tool; no always-Admin one for a workflow-owned chat), pushed to it when a
@@ -1396,6 +1474,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     },
     openThreads: () => agentChat.chat.list().map((tab) => tab.id),
     catalog: () => catalogFor("chat"),
+    // boxes: the box tools are advertised only while a box can be rented.
+    boxesAvailable: () => temporaryBoxTools.available(),
     api: () => services.internalApi,
     pushToHost: async (id, manifest): Promise<SessionToolsRefreshResponse | null> => {
       const route = agentChat.routeDeps();
@@ -1411,6 +1491,10 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     logger: console
   });
   agentChat.chat.lifecycle.on("closed", ({ id }: { id: string }) => sessionToolsRefresher.forget(id));
+  // boxes: when boxes become rentable (or stop being), every open chat gets its new tool list.
+  temporaryBoxTools.onAvailabilityChange(() => {
+    void sessionToolsRefresher.refresh(null).catch((error) => console.warn("session-tools: box tools refresh failed", error instanceof Error ? error.message : String(error)));
+  });
   // A changed MCP server config (agent profile) is read afresh by the next manifest.
   const agentProfileSink = {
     send: (data: string) => {
@@ -1479,7 +1563,11 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     agentChat,
     // Getters: the client lives as long as the daemon, and PUT /api/config/daemon moves both.
     fsRoot: () => resolved.fsRoot,
-    workspacesDir: () => resolved.workspacesDir
+    workspacesDir: () => resolved.workspacesDir,
+    // boxes: the box MCP tools' streamed operations.
+    boxes: temporaryBoxTools,
+    // boxes: read_file / directory reads of box projects go to the box.
+    boxRegistry: () => services.boxRegistry
   });
 
   lineage.attachApi(services.internalApi);
@@ -1594,6 +1682,10 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     disconnectExecutor();
     await agentToolsRuntime.shutdown().catch((error) => console.error("Agent tools stop failed", error));
     // umcp:t3 end
+    // boxes: host-side port forwards close; detached jobs keep running in their boxes.
+    await temporaryBoxTools.shutdown().catch((error) => console.error("Temporary box tools stop failed", error));
+    // boxes: timers, setup runs, watchers and box links stop (boxes and their processes keep running).
+    await boxes.stop().catch((error) => console.error("Box wiring stop failed", error));
     // umcp:t6 begin
     broadcaster.remove(agentProfileSink);
     sessionToolsRefresher.stop();
@@ -1685,6 +1777,8 @@ interface Services {
   plugins: PluginsService;
   /** The "Secret files" plugin's vaults and sync engine: ONE instance both transports share. Optional: route tests build a partial `services`. */
   secretFiles?: SecretFilesService;
+  // boxes: the Ephemeral AI VMs box service (spec 2026-10-19). Optional: route tests build a partial `services`.
+  boxes?: BoxService;
   /** Each agent CLI's own global config (agent profile spec §4): Settings → Agent config. */
   agentProfile: AgentProfileService;
   /** Orquester-owned per-session Agent Profiles (spec 2026-10-18). */
@@ -1723,6 +1817,8 @@ interface Services {
   /** The chat transport's manifests and manifest pushes (unified MCP §9.4). Optional: route tests build a partial `services`. */
   sessionToolsRefresher?: SessionToolsRefresher;
   // umcp:t6 end
+  // boxes: temporary boxes for agent chats (routes and the box tools' operations). Optional: route tests build a partial `services`.
+  temporaryBoxTools?: TemporaryBoxTools;
   usage: UsageService;
   usageTokens: UsageTokensScanner;
   /** Per-day usage from Orquester's own chat logs, for agents without a transcript scanner (Grok). Optional: route tests build a partial `services`. */
@@ -1750,6 +1846,11 @@ interface Services {
   lineage?: LineageService;
   /** Restart the HTTP transport (set in main once the lifecycle exists). */
   reloadHttp?: () => Promise<void>;
+  // boxes: which paths live in a box project (boxes/service). Absent: every path is a host path
+  // (route tests). Read per request.
+  boxRegistry?: BoxRegistry;
+  // boxes: the rest of the box wiring (hub, sync, tooling, forwards, broker routes). Optional: route tests build a partial `services`.
+  boxWiring?: DaemonBoxes;
 }
 
 export function createServer(
@@ -1807,6 +1908,12 @@ export function createServer(
     // one (spec 2026-10-14 §2.2). Only the matched route pattern lets it
     // through, never a path prefix.
     if (routePath === AGENT_VISUAL_ROUTE_PATTERN) {
+      return;
+    }
+    // boxes: the box connect WebSocket and the orq-agent download authenticate the
+    // box themselves (bootstrap token, box credential or GitHub OIDC) and accept
+    // nothing else. Only these matched route patterns, never a path prefix.
+    if (routePath !== undefined && BOX_HUB_PUBLIC_ROUTES.includes(routePath)) {
       return;
     }
 
@@ -1991,6 +2098,8 @@ export function createServer(
     await mkdir(resolved.workspacesDir, { recursive: true }).catch(() => undefined);
     // The TypeScript engine preload has the workspaces root baked in: rewrite it for the new one.
     void services.plugins.workspacesChanged();
+    // boxes: boxes get tooling preloads that bake in the new root.
+    services.boxWiring?.workspacesChanged();
     void services.reloadHttp?.();
 
     return sanitizeDaemonConfig(config);
@@ -2071,6 +2180,8 @@ export function createServer(
     const root = await realpath(resolved.workspacesDir).catch(() => resolve(resolved.workspacesDir));
     if (parentDir === root) {
       void services.plugins?.workspacesChanged();
+      // boxes: boxes get tooling preloads that bake in the new root.
+      services.boxWiring?.workspacesChanged();
     }
   };
 
@@ -2121,6 +2232,8 @@ export function createServer(
       });
     }
     void services.plugins?.workspacesChanged();
+    // boxes: boxes get tooling preloads that bake in the new root.
+    services.boxWiring?.workspacesChanged();
 
     return {
       name,
@@ -2185,7 +2298,9 @@ export function createServer(
       }
       // The UI re-lists after a clone lands: a (debounced) secret-files reconcile picks up new clones.
       services.secretFiles?.notifyProjectsListed();
-      return listProjects(resolved.workspacesDir, workspace, resolved.workspacesMetaFile);
+      // boxes: a box project's stub dir has no .git; its repo fields and box come from its record.
+      const projects = await listProjects(resolved.workspacesDir, workspace, resolved.workspacesMetaFile);
+      return services.boxes ? services.boxes.projects.decorate(projects) : projects;
     }
   );
 
@@ -2280,6 +2395,28 @@ export function createServer(
       }
       const body = request.body ?? ({ name: "" } as CreateProjectRequest);
       const workspaceDir = join(resolved.workspacesDir, workspace);
+
+      // boxes: a project in a new box (Ephemeral AI VMs §8.1) — validated, stubbed on the host and
+      // set up in the background by the box service; this answers at once with the project.
+      const location: unknown = body.location;
+      if (location !== undefined && location !== null && (location as { kind?: unknown }).kind !== "host") {
+        if (!isBoxLocation(location)) {
+          return reply.code(400).send({ code: "BOX_INVALID_REQUEST", message: "Unknown project location." });
+        }
+        if (!services.boxes) {
+          return reply.code(409).send({ code: "BOXES_DISABLED", message: "Ephemeral AI VMs is not available on this daemon." });
+        }
+        try {
+          const gitAccountId =
+            (await readWorkspacesMeta(resolved.workspacesMetaFile)).workspaces.find((w) => w.name === workspace)?.gitAccountId ?? null;
+          await mkdir(workspaceDir, { recursive: true });
+          const created = await services.boxes.projects.create({ workspace, workspaceDir, body, gitAccountId });
+          await pruneArchivedProject(resolved.workspacesMetaFile, workspace, created.name);
+          return created;
+        } catch (error) {
+          return sendBoxError(reply, error);
+        }
+      }
 
       // Empty (or absent source): today's behavior — mkdir the validated name.
       if (body.source === undefined || body.source === "empty") {
@@ -2423,6 +2560,14 @@ export function createServer(
         return reply.code(404).send();
       }
 
+      // boxes: a box project's box is destroyed (and confirmed gone) before anything is removed;
+      // a failed destroy keeps the project ("Destroy failed — retry" is this DELETE again).
+      try {
+        await services.boxes?.projects.beforeDelete(target);
+      } catch (error) {
+        return sendBoxError(reply, error);
+      }
+
       // Cascade against `target` (the non-realpath join), not `safe`: sessions
       // store projectPath as the raw client-sent join path (sessions.ts:122/552
       // ← listProjects index.ts), so closeByProjectPrefix must match that form,
@@ -2441,6 +2586,8 @@ export function createServer(
       // leave the project on disk with its data deleted.
       await todos.deleteByProjectPath(target);
       await services.savedPrompts.deleteForProject(target);
+      // boxes: the destroyed box's record stays (month totals) but no longer owns the path.
+      await services.boxes?.projects.afterDelete(target).catch((error) => console.error("Failed to unlink the project's box record", error));
 
       // Prune the archive flag so a recreated same-name project starts fresh
       // (mirrors the workspace delete pruning its whole meta entry). Non-fatal:
@@ -2470,6 +2617,13 @@ export function createServer(
         return reply.code(404).send();
       }
 
+      // boxes: every box project's box in it is destroyed (and confirmed gone) first; any failure keeps the workspace.
+      try {
+        await services.boxes?.projects.beforeWorkspaceDelete(target);
+      } catch (error) {
+        return sendBoxError(reply, error);
+      }
+
       // Kill every session under the workspace, remove the tree, then prune the
       // metadata entry (keyed by name). Cascade against `target` (non-realpath
       // join), not `safe`: stored projectPaths use the raw join form, so matching
@@ -2485,6 +2639,8 @@ export function createServer(
       await services.accounts.unbindWorkspace(target).catch(() => undefined);
       await rm(safe, { recursive: true, force: true });
       void services.plugins?.workspacesChanged();
+      // boxes: boxes get tooling preloads that bake in the new root.
+      services.boxWiring?.workspacesChanged();
       // Only now that the tree is gone: cascade-delete the workspace's own to-do
       // lists AND every list under a project inside it (`workspace` = name
       // refKey; `target` = raw-join path), and the saved prompts of every
@@ -2493,6 +2649,8 @@ export function createServer(
       // disk with their data deleted.
       await todos.deleteByWorkspace(workspace, target);
       await services.savedPrompts.deleteForWorkspace(target);
+      // boxes: unlink the destroyed boxes' records from the removed projects.
+      await services.boxes?.projects.afterWorkspaceDelete(target).catch((error) => console.error("Failed to unlink the workspace's box records", error));
       // Non-fatal, same as the project delete above: the tree is already gone,
       // so a corrupt workspaces.json must not report a 500 for a delete that
       // actually succeeded.
@@ -2651,6 +2809,20 @@ export function createServer(
       }
     }
   );
+
+  // boxes: a path inside a box project is answered by the box before the handlers below run
+  // (one preHandler hook, boxes/remote/fs/routes.ts); host paths reach them unchanged.
+  registerBoxFsRouting(app, {
+    boxes: () => services.boxRegistry,
+    fsRoot: () => resolved.fsRoot,
+    rawMaxBytes: RAW_MAX_BYTES,
+    closeUnder: async (safe, raw) => {
+      sessions.closeByProjectPrefix(safe);
+      sessions.closeByProjectPrefix(raw);
+      await services.browsers.closeForProject(safe, raw);
+      await services.desktops.closeForProject(safe);
+    }
+  });
 
   // File browser: list a directory.
   app.get<{ Querystring: { path?: string; p?: string } }>(
@@ -3902,6 +4074,10 @@ export function createServer(
     registerAgentToolsRuntimeRoutes(app, services.agentToolsRuntime);
   }
   // umcp:t3 end
+  // boxes: the temporary-box routes, both transports (ownership by the request's principal).
+  if (services.temporaryBoxTools) {
+    registerTemporaryBoxRoutes(app, services.temporaryBoxTools);
+  }
 
   // Sessions (PTYs and chat tabs — one list, one per-project order)
   app.get<{ Querystring: { projectPath?: string } }>(
@@ -4047,7 +4223,10 @@ export function createServer(
     "/api/browsers/suggestions",
     async (request): Promise<BrowserSuggestionsResponse> => {
       const projectPath = request.query.projectPath;
-      return { urls: projectPath ? services.urlWatcher.suggestions(projectPath) : [] };
+      if (!projectPath) return { urls: [] };
+      const sniffed = services.urlWatcher.suggestions(projectPath);
+      // boxes: a box project's dev servers are offered at their host-side forwards.
+      return { urls: services.boxWiring ? await services.boxWiring.browserSuggestions(projectPath, sniffed) : sniffed };
     }
   );
 
@@ -4377,6 +4556,8 @@ export function createServer(
   // enabling downloads and runs a verified binary, which is no more than a remote user can do
   // already (installing agent CLIs, running shells), and nothing here is secret.
   registerPluginRoutes(app, { plugins: services.plugins });
+  // boxes: the Ephemeral AI VMs routes (boxRoutes), on both transports like the plugin routes above.
+  services.boxes?.registerRoutes(app);
 
   // Automated workflows (workflows spec §8.1) — definitions, runs, logs, secrets. Both
   // transports; the bearer hook above gates HTTP. Secret values are write-only.
@@ -4567,6 +4748,10 @@ export function createServer(
   // routes stay in encapsulated child contexts only so they are declared after
   // the plugin has loaded (avvio loads plugins in registration order).
   void app.register(websocketPlugin);
+  // boxes: config-change, stats and "Run in box" routes on both transports; the box connect
+  // WebSocket and orq-agent downloads (box-authenticated) on the remote one, after the WebSocket
+  // plugin; the agent host's token and sync routes on the unix socket only.
+  services.boxWiring?.registerRoutes(app, options.mode);
   void app.register(async (instance) => {
     instance.get("/ws", { websocket: true }, (socket, request) => {
       if (options.authRequired) {
@@ -4961,7 +5146,9 @@ export function createServer(
           agentChat: services.agentChat ?? null,
           broadcaster: services.broadcaster,
           fsRoot: resolved.fsRoot,
-          workspacesDir: resolved.workspacesDir
+          workspacesDir: resolved.workspacesDir,
+          // boxes: read_file / directory reads of box projects go to the box.
+          boxRegistry: () => services.boxRegistry
         }),
       credentialId: () => externalCredentialId(config.transports.http.username)
     });
@@ -5232,7 +5419,9 @@ function gitError(reply: FastifyReply, error: unknown): void {
   }
   const status = error instanceof GitError ? error.status : 500;
   const message = error instanceof Error ? error.message : "Git operation failed.";
-  void reply.code(status).send({ code: "GIT_ERROR", message });
+  // boxes: a box project's git panel learns BOX_NOT_READY (its box is away) rather than GIT_ERROR.
+  const code = error instanceof GitError && error.code ? error.code : "GIT_ERROR";
+  void reply.code(status).send({ code, message });
 }
 
 /**

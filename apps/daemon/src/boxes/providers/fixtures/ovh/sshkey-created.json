@@ -1,0 +1,7 @@
+{
+  "id": "b3JxLTBhMWIyYzNkNGU1Zg==",
+  "name": "orq-0a1b2c3d4e5f",
+  "publicKey": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOrqTestKeyOnlyForFixtures orq-box",
+  "fingerPrint": "aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99",
+  "regions": ["GRA11", "BHS5", "EU-WEST-PAR"]
+}

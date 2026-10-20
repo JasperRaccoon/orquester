@@ -1,0 +1,16 @@
+{
+  "id": "ocid1.routetable.oc1.eu-frankfurt-1.aaaaaaaa1111111111111111111111111111111111111111111111111111",
+  "compartmentId": "ocid1.tenancy.oc1..aaaaaaaa11111111111111111111111111111111111111111111111111aa",
+  "vcnId": "ocid1.vcn.oc1.eu-frankfurt-1.aaaaaaaa1111111111111111111111111111111111111111111111111111",
+  "displayName": "Default Route Table for orquester-boxes",
+  "lifecycleState": "AVAILABLE",
+  "routeRules": [
+    {
+      "destination": "0.0.0.0/0",
+      "destinationType": "CIDR_BLOCK",
+      "networkEntityId": "ocid1.internetgateway.oc1.eu-frankfurt-1.aaaaaaaa1111111111111111111111111111111111111111111111111111",
+      "routeType": "STATIC"
+    }
+  ],
+  "timeCreated": "2026-10-19T20:00:00.000Z"
+}

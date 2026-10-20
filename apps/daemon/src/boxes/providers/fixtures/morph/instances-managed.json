@@ -1,0 +1,99 @@
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "morphvm_11111111",
+      "object": "instance",
+      "created": 1792450837,
+      "status": "ready",
+      "spec": {
+        "vcpus": 2,
+        "memory": 8192,
+        "disk_size": 32768
+      },
+      "refs": {
+        "snapshot_id": "snapshot_11111111",
+        "image_id": "morphvm-minimal"
+      },
+      "networking": {
+        "internal_ip": "10.0.0.2",
+        "http_services": []
+      },
+      "metadata": {
+        "orquester-box": "0a1b2c3d4e5f",
+        "name": "orq-0a1b2c3d4e5f"
+      },
+      "ttl": {
+        "ttl_seconds": null,
+        "ttl_expire_at": null,
+        "ttl_action": null
+      },
+      "wake_on": {
+        "wake_on_ssh": false,
+        "wake_on_http": false
+      }
+    },
+    {
+      "id": "morphvm_33333333",
+      "object": "instance",
+      "created": 1792450837,
+      "status": "ready",
+      "spec": {
+        "vcpus": 2,
+        "memory": 8192,
+        "disk_size": 32768
+      },
+      "refs": {
+        "snapshot_id": "snapshot_11111111",
+        "image_id": "morphvm-minimal"
+      },
+      "networking": {
+        "internal_ip": "10.0.0.2",
+        "http_services": []
+      },
+      "metadata": {
+        "name": "my-devbox"
+      },
+      "ttl": {
+        "ttl_seconds": null,
+        "ttl_expire_at": null,
+        "ttl_action": null
+      },
+      "wake_on": {
+        "wake_on_ssh": false,
+        "wake_on_http": false
+      }
+    },
+    {
+      "id": "morphvm_22222222",
+      "object": "instance",
+      "created": 1792444320,
+      "status": "paused",
+      "spec": {
+        "vcpus": 2,
+        "memory": 8192,
+        "disk_size": 32768
+      },
+      "refs": {
+        "snapshot_id": "snapshot_11111111",
+        "image_id": "morphvm-minimal"
+      },
+      "networking": {
+        "internal_ip": "10.0.0.2",
+        "http_services": []
+      },
+      "metadata": {
+        "name": "orq-ffeeddccbbaa"
+      },
+      "ttl": {
+        "ttl_seconds": null,
+        "ttl_expire_at": null,
+        "ttl_action": null
+      },
+      "wake_on": {
+        "wake_on_ssh": false,
+        "wake_on_http": false
+      }
+    }
+  ]
+}

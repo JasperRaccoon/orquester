@@ -23,7 +23,7 @@ import { stripUrlCredentials } from "./workflows/git-remote/remote-url";
 
 const run = promisify(execFile);
 
-type GitRunner = (
+export type GitRunner = (
   file: string,
   args: string[],
   options: {
@@ -38,12 +38,40 @@ type GitRunner = (
 export class GitError extends Error {
   constructor(
     public readonly status: number,
-    message: string
+    message: string,
+    // boxes: a machine-readable code for the route ("BOX_NOT_READY"); absent = GIT_ERROR.
+    public readonly code?: string
   ) {
     super(message);
     this.name = "GitError";
   }
 }
+
+// boxes: where a repository's git runs when its project lives in a box (Ephemeral AI VMs
+// spec §8.7). A route runs git with the same argv, timeouts, buffer caps and error contract
+// as the host runner. The env it is handed carries only what the service adds — never the
+// host's — and the route supplies the box's own HOME and git auth.
+/** The file reads `diff` needs for an untracked file, on whichever machine holds the repo. */
+export interface UntrackedFs {
+  /** Path separator of that machine. */
+  sep: string;
+  join(dir: string, file: string): string;
+  lstat(path: string): Promise<{ isSymbolicLink(): boolean; isFile(): boolean }>;
+  readlink(path: string): Promise<string>;
+  realpath(path: string): Promise<string>;
+  /** At most the first `length` bytes of a file. */
+  readHead(path: string, length: number): Promise<Buffer>;
+}
+
+export interface GitExecRoute {
+  runner: GitRunner;
+  /** mtime (ISO) of a file on the repo's machine; rejects when it does not exist. */
+  mtime(path: string): Promise<string>;
+  fs: UntrackedFs;
+}
+
+/** Null = the repo is on this host. Rejects (with `status`/`code`) when its box cannot be reached. */
+export type GitRouteResolver = (cwd: string) => Promise<GitExecRoute | null>;
 
 /**
  * Reads & mutates a project's git repo by shelling out to the system `git`
@@ -59,6 +87,8 @@ export class GitError extends Error {
  *     picked up — fetch/push therefore use the bound account's identity + SSH
  *     key automatically. This service does NOT depend on AccountsService; when
  *     no account is bound, ambient git config is used.
+ *   - Every call carries {@link gitSafetyArgs}: no fsmonitor command, and no
+ *     hooks for the reads the daemon runs on its own (status polling, diffs).
  *   - `--no-color` + machine-readable `--porcelain`/`-z`/`--format` everywhere;
  *     rejected commands carry `.stdout`/`.stderr`/`.code`, surfaced as GitError.
  */
@@ -74,9 +104,26 @@ export class GitService {
   private readonly mutationTails = new Map<string, Promise<void>>();
 
   private readonly runner: GitRunner;
+  // boxes: per-cwd routing to a box (absent = every repo is on this host).
+  private readonly route: GitRouteResolver | undefined;
 
-  constructor(options?: { runner?: GitRunner }) {
+  constructor(options?: { runner?: GitRunner; route?: GitRouteResolver }) {
     this.runner = options?.runner ?? (run as GitRunner);
+    this.route = options?.route;
+  }
+
+  // boxes: the box route for `cwd`, or null for this host. A box that cannot be reached is a
+  // GitError with the registry's status (409 BOX_NOT_READY), so the git panel can say so.
+  private async routeFor(cwd: string): Promise<GitExecRoute | null> {
+    if (!this.route) return null;
+    try {
+      return await this.route(cwd);
+    } catch (error) {
+      const e = error as { status?: unknown; statusCode?: unknown; code?: unknown };
+      const status = typeof e.status === "number" ? e.status : typeof e.statusCode === "number" ? e.statusCode : 409;
+      const message = error instanceof Error ? error.message : "The project's box is not reachable.";
+      throw new GitError(status, message, typeof e.code === "string" ? e.code : "BOX_NOT_READY");
+    }
   }
 
   // --- Core runner ---------------------------------------------------------
@@ -98,14 +145,16 @@ export class GitService {
     args: string[],
     opts?: { timeout?: number; allowFail?: boolean; remote?: boolean; maxBuffer?: number }
   ): Promise<{ stdout: string; stderr: string; code: number; overflowed?: boolean }> {
+    // boxes: a box repo's git runs in the box, never with the host's env.
+    const route = await this.routeFor(cwd);
     const env = {
-      ...process.env,
-      HOME: this.home,
+      ...(route ? {} : { ...process.env, HOME: this.home }),
       // Remote ops must never block on an interactive credential/host prompt.
       ...(opts?.remote ? { GIT_TERMINAL_PROMPT: "0" } : {})
     };
+    const runner = route?.runner ?? this.runner;
     try {
-      const { stdout, stderr } = await this.runner("git", args, {
+      const { stdout, stderr } = await runner("git", [...gitSafetyArgs(args, route === null), ...args], {
         cwd,
         env,
         maxBuffer: opts?.maxBuffer ?? 64 * 1024 * 1024,
@@ -255,8 +304,12 @@ export class GitService {
     }
 
     let lastFetched: string | null = null;
+    // boxes: a box repo's FETCH_HEAD is in the box.
+    const route = await this.routeFor(cwd);
     try {
-      lastFetched = (await stat(join(cwd, ".git", "FETCH_HEAD"))).mtime.toISOString();
+      lastFetched = route
+        ? await route.mtime(route.fs.join(route.fs.join(cwd, ".git"), "FETCH_HEAD"))
+        : (await stat(join(cwd, ".git", "FETCH_HEAD"))).mtime.toISOString();
     } catch {
       /* never fetched (or .git is a file/worktree) — leave null */
     }
@@ -319,7 +372,8 @@ export class GitService {
       // Empty is the only case that can be an untracked file, so the extra
       // status read never runs for the common (modified) path.
       if (!diff && (await this.isUntracked(cwd, file))) {
-        return untrackedDiff(cwd, file);
+        // boxes: the untracked file is read on the machine that holds the repo.
+        return untrackedDiff(cwd, file, (await this.routeFor(cwd))?.fs ?? HOST_UNTRACKED_FS);
       }
     }
     return { diff, binary: isBinaryDiff(diff) };
@@ -877,6 +931,41 @@ const WORKING_DIFF_CONFIG: readonly string[] = [
   "diff.dstPrefix=b/"
 ];
 
+/**
+ * Subcommands whose hooks are part of what the user asked for (a commit runs its
+ * pre-commit hook, a push its pre-push hook, …). Every other git the daemon runs
+ * — the git panel's status polling, diffs, logs, branch lists — is a read.
+ */
+const HOOKED_COMMANDS: ReadonlySet<string> = new Set(["add", "checkout", "clean", "commit", "fetch", "merge", "push", "reset", "restore", "stash"]);
+
+/** The subcommand of an argv (after any leading `-c <key=value>` pairs), and its first argument. */
+function subcommandOf(args: readonly string[]): { command: string; first: string | undefined } {
+  let index = 0;
+  while (args[index] === "-c") index += 2;
+  return { command: args[index] ?? "", first: args[index + 1] };
+}
+
+/**
+ * The `-c` options in front of every git the daemon runs. A repository's own
+ * config must never make a git the daemon starts by itself run a program:
+ *
+ * - `core.fsmonitor=false`, always: a repo-configured fsmonitor is a command
+ *   that `status`/`diff`/`add` run on every index refresh — on the 2 s git
+ *   panel poll that would be code execution on this host for whoever could
+ *   write `.git/config`.
+ * - `core.hooksPath=/dev/null` for reads on this host: `status` writes the
+ *   refreshed index, which fires `post-index-change`; `/dev/null/<hook>` never
+ *   exists, so no hook runs. Commands the user started (commit, push, …) keep
+ *   the repo's hooks. A box repo's hooks run in its box, not here.
+ */
+export function gitSafetyArgs(args: readonly string[], onHost: boolean): string[] {
+  const out = ["-c", "core.fsmonitor=false"];
+  const { command, first } = subcommandOf(args);
+  const hooked = HOOKED_COMMANDS.has(command) && !(command === "stash" && first === "list");
+  if (onHost && !hooked) out.push("-c", "core.hooksPath=/dev/null");
+  return out;
+}
+
 /** `workingDiff`'s `untracked` is capped here: a prompt wants a list, not an un-ignored build dir's inventory. */
 const WORKING_DIFF_UNTRACKED_MAX = 1000;
 
@@ -1071,6 +1160,25 @@ function parseStashSubject(subject: string): { branch: string; message: string }
  */
 const UNTRACKED_DIFF_CAP = 1024 * 1024;
 
+// boxes: the host side of `UntrackedFs` (a box route brings its own).
+const HOST_UNTRACKED_FS: UntrackedFs = {
+  sep,
+  join,
+  lstat,
+  readlink: (path) => readlink(path),
+  realpath: (path) => realpath(path),
+  async readHead(path, length) {
+    const handle = await open(path, "r");
+    try {
+      const buffer = Buffer.alloc(length);
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+      return buffer.subarray(0, bytesRead);
+    } finally {
+      await handle.close();
+    }
+  }
+};
+
 /**
  * Build the `diff --git` new-file patch git itself never emits for an untracked
  * file. Best-effort: an unreadable path (deleted between status and read, a
@@ -1084,14 +1192,14 @@ const UNTRACKED_DIFF_CAP = 1024 * 1024;
  * additionally realpath-checked to still be inside the repo, since a symlinked
  * PARENT directory would escape the same way.
  */
-async function untrackedDiff(cwd: string, file: string): Promise<GitDiffResponse> {
+async function untrackedDiff(cwd: string, file: string, fs: UntrackedFs = HOST_UNTRACKED_FS): Promise<GitDiffResponse> {
   const placeholder = (reason: string) =>
     `diff --git a/${file} b/${file}\nnew file mode 100644\nBinary files /dev/null and b/${file} differ\n${reason}\n`;
 
-  const full = join(cwd, file);
+  const full = fs.join(cwd, file);
   let info;
   try {
-    info = await lstat(full);
+    info = await fs.lstat(full);
   } catch {
     return { diff: "", binary: false };
   }
@@ -1099,7 +1207,7 @@ async function untrackedDiff(cwd: string, file: string): Promise<GitDiffResponse
   if (info.isSymbolicLink()) {
     let target: string;
     try {
-      target = await readlink(full);
+      target = await fs.readlink(full);
     } catch {
       return { diff: "", binary: false };
     }
@@ -1116,8 +1224,8 @@ async function untrackedDiff(cwd: string, file: string): Promise<GitDiffResponse
     return { diff: "", binary: false };
   }
   try {
-    const [realFile, realRoot] = await Promise.all([realpath(full), realpath(cwd)]);
-    if (realFile !== realRoot && !realFile.startsWith(realRoot + sep)) {
+    const [realFile, realRoot] = await Promise.all([fs.realpath(full), fs.realpath(cwd)]);
+    if (realFile !== realRoot && !realFile.startsWith(realRoot + fs.sep)) {
       return { diff: "", binary: false };
     }
   } catch {
@@ -1126,21 +1234,14 @@ async function untrackedDiff(cwd: string, file: string): Promise<GitDiffResponse
 
   let content: string;
   try {
-    const handle = await open(full, "r");
-    try {
-      const buffer = Buffer.alloc(UNTRACKED_DIFF_CAP + 1);
-      const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-      const bytes = buffer.subarray(0, bytesRead);
-      if (bytesRead > UNTRACKED_DIFF_CAP) {
-        return { diff: placeholder("(untracked file larger than 1 MB)"), binary: true };
-      }
-      if (bytes.includes(0)) {
-        return { diff: placeholder("(untracked binary file)"), binary: true };
-      }
-      content = bytes.toString("utf8");
-    } finally {
-      await handle.close();
+    const bytes = await fs.readHead(full, UNTRACKED_DIFF_CAP + 1);
+    if (bytes.length > UNTRACKED_DIFF_CAP) {
+      return { diff: placeholder("(untracked file larger than 1 MB)"), binary: true };
     }
+    if (bytes.includes(0)) {
+      return { diff: placeholder("(untracked binary file)"), binary: true };
+    }
+    content = bytes.toString("utf8");
   } catch {
     return { diff: "", binary: false };
   }

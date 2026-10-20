@@ -1,0 +1,77 @@
+[
+  {
+    "shape": "VM.Standard.E5.Flex",
+    "processorDescription": "2.4 GHz AMD EPYC™ 9J14 (Genoa)",
+    "ocpus": 1,
+    "memoryInGBs": 16,
+    "isFlexible": true,
+    "billingType": "PAID",
+    "networkingBandwidthInGbps": 1,
+    "maxVnicAttachments": 2,
+    "gpus": 0,
+    "ocpuOptions": {
+      "min": 1,
+      "max": 94,
+      "maxPerNumaNode": 94
+    },
+    "memoryOptions": {
+      "minInGBs": 1,
+      "maxInGBs": 1049,
+      "defaultPerOcpuInGBs": 16,
+      "minPerOcpuInGBs": 1,
+      "maxPerOcpuInGBs": 64
+    },
+    "isBilledForStoppedInstance": false,
+    "quotaNames": []
+  },
+  {
+    "shape": "VM.Standard3.Flex",
+    "processorDescription": "2.0 GHz Intel® Xeon® Platinum 8358 (Ice Lake)",
+    "ocpus": 1,
+    "memoryInGBs": 16,
+    "isFlexible": true,
+    "billingType": "PAID",
+    "networkingBandwidthInGbps": 1,
+    "maxVnicAttachments": 2,
+    "gpus": 0,
+    "ocpuOptions": {
+      "min": 1,
+      "max": 32,
+      "maxPerNumaNode": 32
+    },
+    "memoryOptions": {
+      "minInGBs": 1,
+      "maxInGBs": 512,
+      "defaultPerOcpuInGBs": 16,
+      "minPerOcpuInGBs": 1,
+      "maxPerOcpuInGBs": 64
+    },
+    "isBilledForStoppedInstance": false,
+    "quotaNames": []
+  },
+  {
+    "shape": "VM.Standard.A1.Flex",
+    "processorDescription": "3.0 GHz Ampere® Altra™",
+    "ocpus": 1,
+    "memoryInGBs": 16,
+    "isFlexible": true,
+    "billingType": "LIMITED_FREE",
+    "networkingBandwidthInGbps": 1,
+    "maxVnicAttachments": 2,
+    "gpus": 0,
+    "ocpuOptions": {
+      "min": 1,
+      "max": 80,
+      "maxPerNumaNode": 80
+    },
+    "memoryOptions": {
+      "minInGBs": 1,
+      "maxInGBs": 512,
+      "defaultPerOcpuInGBs": 16,
+      "minPerOcpuInGBs": 1,
+      "maxPerOcpuInGBs": 64
+    },
+    "isBilledForStoppedInstance": false,
+    "quotaNames": []
+  }
+]

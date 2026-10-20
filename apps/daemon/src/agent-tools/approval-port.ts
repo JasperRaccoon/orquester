@@ -78,7 +78,9 @@ export class AgentToolsApprovalPort implements ApprovalPort {
   async request(card: ApprovalRequest, signal: AbortSignal): Promise<ApprovalOutcome> {
     const traits = await this.deps.callerTraits(card.threadId);
     if (!traits) throw new ToolError("THREAD_NOT_FOUND", "This chat is no longer open.");
-    if (traits.workflowOwned || this.deps.workflowOwned(card.threadId)) {
+    // boxes: a `spend` card (renting a box) opens for a workflow-owned chat too — its owner gets the
+    // card's push and may answer it in the workflow's chat tab; unanswered, it expires (spec §13.1).
+    if (card.kind !== "spend" && (traits.workflowOwned || this.deps.workflowOwned(card.threadId))) {
       throw card.kind === "admin"
         ? new ToolError("ADMIN_NOT_AVAILABLE", "This chat runs inside an automated workflow: changes that need the user's approval are not available.")
         : new ToolError("PERMISSION_DENIED", "This chat runs inside an automated workflow: nothing here can ask the user for approval.");

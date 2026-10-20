@@ -82,7 +82,18 @@ export interface CodexSessionToolsLaunch {
   serverName?: string;
   /** The servers the thread's effective config defines (`config/read`), when read. */
   configured?: ReadonlySet<string>;
+  /**
+   * boxes (spec 2026-10-19 §8.4): the CLI runs in a box, so ours is a stdio server there —
+   * `orq-agent mcp-bridge <serverId>`, whose host side holds the endpoint and its credential —
+   * instead of `url` + `bearer_token_env_var` (no token reaches the box).
+   */
+  bridge?: { command: string; args: string[] };
 }
+
+/** `thread/start`'s (and `thread/resume`'s) `config` map, exported for the box overrides. */
+export type CodexThreadConfig = NonNullable<CodexProtocol.v2.ThreadStartParams["config"]>;
+/** One `mcp_servers` override value. */
+export type CodexConfigValue = NonNullable<CodexThreadConfig[string]>;
 
 /** Where a stub that denies a server the thread's config does not define points: never contacted. */
 export const CODEX_DENIED_STUB_URL = "http://127.0.0.1:9/orquester-denied";
@@ -115,8 +126,10 @@ function codexServerOverrides(
   const entries = new Map<string, ConfigValue>();
   if (launch !== undefined) {
     entries.set(ours, {
-      url: launch.url,
-      bearer_token_env_var: CODEX_SESSION_TOOLS_TOKEN_ENV,
+      // boxes: a box CLI reaches ours through the bridge; its credential stays on the host.
+      ...(launch.bridge !== undefined
+        ? { command: launch.bridge.command, args: launch.bridge.args }
+        : { url: launch.url, bearer_token_env_var: CODEX_SESSION_TOOLS_TOKEN_ENV }),
       default_tools_approval_mode: "approve",
       // Codex gives up on an MCP call after 60 s by default; a session tool
       // that waits for the user (`request_secret`) ends its own wait first.
@@ -145,15 +158,23 @@ function codexThreadConfig(
   launch: CodexSessionToolsLaunch | undefined,
   deny: readonly string[],
   ours: string,
-  configured: ReadonlySet<string> | undefined
+  configured: ReadonlySet<string> | undefined,
+  extra?: ReadonlyMap<string, ConfigValue>
 ): ThreadConfig {
   const entries = codexServerOverrides(launch, deny, ours, configured);
+  // boxes: the bridged replacements of the thread's own servers; ours and a denial win a name.
+  for (const [name, entry] of extra ?? []) {
+    if (!entries.has(name)) entries.set(name, entry);
+  }
   if ([...entries.keys()].some((name) => name.includes("."))) {
     return entries.size === 0 ? {} : { mcp_servers: Object.fromEntries(entries) };
   }
   const config: ThreadConfig = {};
   for (const [name, entry] of entries) {
-    const whole = (name === ours && launch !== undefined) || Object.keys(entry as object).length > 1;
+    // Only a bare `{enabled: false}` becomes the one dotted key; any other entry (boxes: a "Run
+    // in box" server's `{env}` alone) is a table merged whole.
+    const disableOnly = Object.keys(entry as object).length === 1 && (entry as { enabled?: unknown }).enabled === false;
+    const whole = (name === ours && launch !== undefined) || !disableOnly;
     if (whole) config[`mcp_servers.${name}`] = entry;
     else config[`mcp_servers.${name}.enabled`] = false;
   }
@@ -164,13 +185,57 @@ function codexThreadConfig(
  * The thread `config` that switches the denied servers off — also without our own server (no
  * grant: `ours` empty, so a daemon-pointing `orquester` of the config is denied like any other).
  */
-export function codexDenyConfig(deny: readonly string[] = [], ours = "", configured?: ReadonlySet<string>): ThreadConfig {
-  return codexThreadConfig(undefined, deny, ours, configured);
+export function codexDenyConfig(
+  deny: readonly string[] = [],
+  ours = "",
+  configured?: ReadonlySet<string>,
+  extra?: ReadonlyMap<string, ConfigValue>
+): ThreadConfig {
+  return codexThreadConfig(undefined, deny, ours, configured, extra);
 }
 
 /** The thread `config` overrides that attach the server (and switch the denied ones off). Names an env var, never the credential. */
-export function codexSessionToolsConfig(launch: CodexSessionToolsLaunch): ThreadConfig {
-  return codexThreadConfig(launch, launch.deny ?? [], launch.serverName ?? SESSION_TOOLS_SERVER_NAME, launch.configured);
+export function codexSessionToolsConfig(launch: CodexSessionToolsLaunch, extra?: ReadonlyMap<string, ConfigValue>): ThreadConfig {
+  return codexThreadConfig(launch, launch.deny ?? [], launch.serverName ?? SESSION_TOOLS_SERVER_NAME, launch.configured, extra);
+}
+
+/**
+ * boxes (spec 2026-10-19 §8.4): the overrides that move a box thread's own MCP servers to the
+ * host. A bridged stdio server keeps its name and becomes `orq-agent mcp-bridge <serverId>`; its
+ * env keys are blanked (an override table is MERGED into the server's, so the box's copy of a
+ * value would otherwise ride into the bridge process). A bridged HTTP server (host loopback, or
+ * secret headers) cannot turn into a stdio one under its own name (Codex refuses a `url` merged
+ * with a `command`): it is switched off and its bridge registered as `<name>_host`.
+ *
+ * A "Run in box" server (`inBox`) keeps running in the box, but the box's copy of its config has
+ * every env and header value blanked by the sync: its `env` / `http_headers` values from the
+ * host's definition are merged back here — in the thread's config, which reaches the app-server
+ * over its stdio and never a file in the box.
+ */
+export function codexBoxMcpOverrides(
+  bridged: readonly { name: string; command: string; args: string[]; transport: "stdio" | "http" | "sse"; envKeys: readonly string[] }[],
+  inBox: readonly { name: string; transport: "stdio" | "http" | "sse"; env?: Record<string, string>; headers?: Record<string, string> }[] = []
+): Map<string, ConfigValue> {
+  const entries = new Map<string, ConfigValue>();
+  for (const server of inBox) {
+    const values = server.transport === "stdio" ? server.env : server.headers;
+    if (values === undefined || Object.keys(values).length === 0) continue;
+    entries.set(server.name, server.transport === "stdio" ? { env: { ...values } } : { http_headers: { ...values } });
+  }
+  for (const server of bridged) {
+    if (server.transport === "stdio") {
+      entries.set(server.name, {
+        command: server.command,
+        args: server.args,
+        env: Object.fromEntries(server.envKeys.map((key) => [key, ""])),
+        env_vars: []
+      });
+    } else {
+      entries.set(server.name, { enabled: false });
+      entries.set(`${server.name}_host`, { command: server.command, args: server.args });
+    }
+  }
+  return entries;
 }
 
 /** `turn/start`'s `additionalContext` for the instruction block, or undefined for none. */

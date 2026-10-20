@@ -1,0 +1,1 @@
+{ "class": "Client::TooManyRequests", "message": "Too many requests, please retry later" }

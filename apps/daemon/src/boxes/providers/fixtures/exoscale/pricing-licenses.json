@@ -1,0 +1,20 @@
+{
+  "chf": {
+    "license_rhl_small": "0.05500000",
+    "license_win": "0.01111000",
+    "license_win_tier1": "0.01111000",
+    "license_win_tier2": "0.02222000"
+  },
+  "eur": {
+    "license_rhl_small": "0.05500000",
+    "license_win": "0.01111000",
+    "license_win_tier1": "0.01111000",
+    "license_win_tier2": "0.02222000"
+  },
+  "usd": {
+    "license_rhl_small": "0.05500000",
+    "license_win": "0.01111000",
+    "license_win_tier1": "0.01111000",
+    "license_win_tier2": "0.02222000"
+  }
+}

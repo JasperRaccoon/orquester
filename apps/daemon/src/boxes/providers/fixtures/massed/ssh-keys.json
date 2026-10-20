@@ -1,0 +1,14 @@
+{
+  "sshKeys": [
+    {
+      "id": 412,
+      "name": "orq-box-0123abcd",
+      "public_key": "ssh-ed25519 AAAA... orq"
+    },
+    {
+      "id": 99,
+      "name": "laptop",
+      "public_key": "ssh-ed25519 AAAA... me"
+    }
+  ]
+}

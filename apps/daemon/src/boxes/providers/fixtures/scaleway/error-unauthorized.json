@@ -1,0 +1,6 @@
+{
+  "message": "authentication is denied",
+  "method": "api_key",
+  "reason": "invalid_argument",
+  "type": "denied_authentication"
+}

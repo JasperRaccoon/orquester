@@ -1,0 +1,128 @@
+{
+  "servers": {
+    "PLAY2-PICO": {
+      "alt_names": [],
+      "arch": "x86_64",
+      "ncpus": 1,
+      "ram": 2147483648,
+      "gpu": 0,
+      "gpu_info": null,
+      "volumes_constraint": {
+        "min_size": 0,
+        "max_size": 0
+      },
+      "per_volume_constraint": {
+        "l_ssd": {
+          "min_size": 0,
+          "max_size": 0
+        }
+      },
+      "monthly_price": 10.4244,
+      "hourly_price": 0.01428,
+      "capabilities": {
+        "boot_types": [
+          "local",
+          "rescue"
+        ],
+        "block_storage": true
+      },
+      "end_of_service": false,
+      "sku": "/instance/server/play2_pico/fr-par-2"
+    },
+    "POP2-2C-8G": {
+      "alt_names": [],
+      "arch": "x86_64",
+      "ncpus": 2,
+      "ram": 8589934592,
+      "gpu": 0,
+      "gpu_info": null,
+      "volumes_constraint": {
+        "min_size": 0,
+        "max_size": 0
+      },
+      "per_volume_constraint": {
+        "l_ssd": {
+          "min_size": 0,
+          "max_size": 0
+        }
+      },
+      "monthly_price": 53.655,
+      "hourly_price": 0.0735,
+      "capabilities": {
+        "boot_types": [
+          "local",
+          "rescue"
+        ],
+        "block_storage": true
+      },
+      "end_of_service": false,
+      "sku": "/instance/server/pop2_2c_8g/fr-par-2"
+    },
+    "L4-1-24G": {
+      "alt_names": [],
+      "arch": "x86_64",
+      "ncpus": 8,
+      "ram": 51539607552,
+      "gpu": 1,
+      "gpu_info": {
+        "gpu_manufacturer": "NVIDIA",
+        "gpu_name": "L4",
+        "gpu_memory": 25769803776
+      },
+      "volumes_constraint": {
+        "min_size": 0,
+        "max_size": 0
+      },
+      "per_volume_constraint": {
+        "l_ssd": {
+          "min_size": 0,
+          "max_size": 0
+        }
+      },
+      "monthly_price": 574.875,
+      "hourly_price": 0.7875,
+      "capabilities": {
+        "boot_types": [
+          "local",
+          "rescue"
+        ],
+        "block_storage": true
+      },
+      "end_of_service": false,
+      "sku": "/instance/server/l4_1_24g/fr-par-2"
+    },
+    "H100-1-80G": {
+      "alt_names": [],
+      "arch": "x86_64",
+      "ncpus": 24,
+      "ram": 257698037760,
+      "gpu": 1,
+      "gpu_info": {
+        "gpu_manufacturer": "NVIDIA",
+        "gpu_name": "H100-PCIe",
+        "gpu_memory": 85899345920
+      },
+      "volumes_constraint": {
+        "min_size": 0,
+        "max_size": 0
+      },
+      "per_volume_constraint": {
+        "l_ssd": {
+          "min_size": 0,
+          "max_size": 0
+        }
+      },
+      "monthly_price": 2092.545,
+      "hourly_price": 2.8665,
+      "capabilities": {
+        "boot_types": [
+          "local",
+          "rescue"
+        ],
+        "block_storage": true
+      },
+      "end_of_service": false,
+      "sku": "/instance/server/h100_1_80g/fr-par-2"
+    }
+  }
+}

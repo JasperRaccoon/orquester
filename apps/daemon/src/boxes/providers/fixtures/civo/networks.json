@@ -1,0 +1,22 @@
+[
+  {
+    "id": "22222222-2222-4222-8222-000000000001",
+    "name": "cust-default-11111111",
+    "default": true,
+    "cidr": "192.168.1.0/24",
+    "label": "Default",
+    "status": "Active",
+    "ipv4_enabled": true,
+    "ipv6_enabled": false
+  },
+  {
+    "id": "22222222-2222-4222-8222-000000000002",
+    "name": "cust-private-11111111",
+    "default": false,
+    "cidr": "10.0.0.0/24",
+    "label": "private",
+    "status": "Active",
+    "ipv4_enabled": true,
+    "ipv6_enabled": false
+  }
+]

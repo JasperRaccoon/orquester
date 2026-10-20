@@ -1,0 +1,89 @@
+{
+  "os": [
+    {
+      "id": 159,
+      "name": "Custom",
+      "arch": "x64",
+      "family": "iso"
+    },
+    {
+      "id": 501,
+      "name": "Windows 2022 Standard x64",
+      "arch": "x64",
+      "family": "windows"
+    },
+    {
+      "id": 521,
+      "name": "Windows Core 2022 Standard x64",
+      "arch": "x64",
+      "family": "windows"
+    },
+    {
+      "id": 1743,
+      "name": "Ubuntu 22.04 LTS x64",
+      "arch": "x64",
+      "family": "ubuntu"
+    },
+    {
+      "id": 1765,
+      "name": "Windows 2022 Datacenter x64",
+      "arch": "x64",
+      "family": "windows"
+    },
+    {
+      "id": 2136,
+      "name": "Debian 12 x64 (bookworm)",
+      "arch": "x64",
+      "family": "debian"
+    },
+    {
+      "id": 2284,
+      "name": "Ubuntu 24.04 LTS x64",
+      "arch": "x64",
+      "family": "ubuntu"
+    },
+    {
+      "id": 2514,
+      "name": "Windows 2025 Standard x64",
+      "arch": "x64",
+      "family": "windows"
+    },
+    {
+      "id": 2625,
+      "name": "Debian 13 x64 (trixie)",
+      "arch": "x64",
+      "family": "debian"
+    },
+    {
+      "id": 2658,
+      "name": "Fedora 43 x64",
+      "arch": "x64",
+      "family": "fedora"
+    },
+    {
+      "id": 2752,
+      "name": "Fedora 44 x64",
+      "arch": "x64",
+      "family": "fedora"
+    },
+    {
+      "id": 2760,
+      "name": "Ubuntu 26.04 LTS x64",
+      "arch": "x64",
+      "family": "ubuntu"
+    },
+    {
+      "id": 2838,
+      "name": "Ubuntu 26.10 x64",
+      "arch": "x64",
+      "family": "ubuntu"
+    }
+  ],
+  "meta": {
+    "total": 13,
+    "links": {
+      "next": "",
+      "prev": ""
+    }
+  }
+}

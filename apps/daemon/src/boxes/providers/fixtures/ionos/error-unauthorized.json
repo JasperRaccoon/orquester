@@ -1,0 +1,9 @@
+{
+  "httpStatus": 401,
+  "messages": [
+    {
+      "errorCode": "315",
+      "message": "Unauthorized"
+    }
+  ]
+}

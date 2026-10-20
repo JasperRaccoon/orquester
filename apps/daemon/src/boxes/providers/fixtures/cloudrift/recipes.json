@@ -1,0 +1,257 @@
+{
+  "version": "2025-01-29",
+  "data": {
+    "groups": [
+      {
+        "name": "LLM",
+        "description": "LLM Endpoints",
+        "tags": [],
+        "logo_url": "https://storage.googleapis.com/cloudrift-resources/vendor/logo/alpaca.png",
+        "metadata": "{\"color\": \"6994FF\"}",
+        "recipes": [
+          {
+            "name": "DeepSeekR1-7b",
+            "description": "DeepSeekR1-7b Endpoint via Ollama",
+            "tags": [],
+            "logo_url": "https://storage.googleapis.com/cloudrift-resources/images/logo/deepseek.svg",
+            "instructions_url": "https://storage.googleapis.com/cloudrift-resources/instructions/deepseek_r1_7b.md",
+            "details": {
+              "Docker": {
+                "image": "cloudriftai/deepseek-r1_7b:1.0",
+                "command": [],
+                "ports": [
+                  "11434:11434"
+                ],
+                "env": []
+              }
+            }
+          },
+          {
+            "name": "DeepSeekR1-32b",
+            "description": "DeepSeekR1-32b Endpoint via Ollama",
+            "tags": [],
+            "logo_url": "https://storage.googleapis.com/cloudrift-resources/images/logo/deepseek.svg",
+            "instructions_url": "https://storage.googleapis.com/cloudrift-resources/instructions/deepseek_r1_32b.md",
+            "details": {
+              "Docker": {
+                "image": "cloudriftai/deepseek-r1_32b:1.0",
+                "command": [],
+                "ports": [
+                  "11434:11434"
+                ],
+                "env": []
+              }
+            }
+          },
+          {
+            "name": "LLama3.1-8b",
+            "description": "LLama3.1-8b Endpoint",
+            "tags": [],
+            "logo_url": "https://storage.googleapis.com/cloudrift-resources/images/logo/meta.svg",
+            "instructions_url": "https://storage.googleapis.com/cloudrift-resources/instructions/llama_31_8b.md",
+            "details": {
+              "Docker": {
+                "image": "cloudriftai/llama3.1_8b:1.0",
+                "command": [],
+                "ports": [
+                  "11434:11434"
+                ],
+                "env": []
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "Linux",
+        "description": "Linux Distributions",
+        "tags": [
+          "VM"
+        ],
+        "logo_url": "https://storage.googleapis.com/cloudrift-resources/images/logo/linux.svg",
+        "metadata": "{\"color\": \"EC9706\"}",
+        "recipes": [
+          {
+            "name": "Ubuntu 24.04 Server",
+            "description": "Ubuntu 24.04 Server base image",
+            "tags": [],
+            "logo_url": "https://storage.googleapis.com/cloudrift-resources/images/logo/ubuntu.svg",
+            "instructions_url": null,
+            "details": {
+              "VirtualMachine": {
+                "image_url": "https://storage.googleapis.com/cloudrift-vm-disks/disks/ubuntu/24.04/noble-server-cloudimg-amd64.img",
+                "cloudinit_url": "https://storage.googleapis.com/cloudrift-vm-disks/cloudinit/ubuntu-base.cloudinit"
+              }
+            }
+          },
+          {
+            "name": "Ubuntu 22.04 Server",
+            "description": "Ubuntu 22.04 Server base image",
+            "tags": [],
+            "logo_url": "https://storage.googleapis.com/cloudrift-resources/images/logo/ubuntu.svg",
+            "instructions_url": null,
+            "details": {
+              "VirtualMachine": {
+                "image_url": "https://storage.googleapis.com/cloudrift-vm-disks/disks/ubuntu/22.04/jammy-server-cloudimg-amd64.img",
+                "cloudinit_url": "https://storage.googleapis.com/cloudrift-vm-disks/cloudinit/ubuntu-base.cloudinit"
+              }
+            }
+          },
+          {
+            "name": "Ubuntu 24.04 Server (AMD, ROCm 7.2)",
+            "description": "Ubuntu 24.04 Server image with ROCm 7.2",
+            "tags": [
+              "VM",
+              "amd-driver"
+            ],
+            "logo_url": "https://storage.googleapis.com/cloudrift-resources/images/logo/ubuntu.svg",
+            "instructions_url": null,
+            "details": {
+              "VirtualMachine": {
+                "image_url": "https://storage.googleapis.com/cloudrift-vm-disks/disks/github/ubuntu-noble-server-rocm-64-20260220-025112.img",
+                "cloudinit_url": "https://storage.googleapis.com/cloudrift-vm-disks/cloudinit/ubuntu-base.cloudinit"
+              }
+            }
+          },
+          {
+            "name": "Ubuntu 24.04 Server (R580, CUDA 13.3)",
+            "description": "Ubuntu 24.04 Server, open NVIDIA 580 driver, CUDA 13.3, kernel 6.8.0-134",
+            "tags": [
+              "nvidia-driver"
+            ],
+            "logo_url": "https://storage.googleapis.com/cloudrift-resources/images/logo/ubuntu.svg",
+            "instructions_url": null,
+            "details": {
+              "VirtualMachine": {
+                "image_url": "https://storage.googleapis.com/cloudrift-vm-disks/disks/github/ubuntu-noble-server-gpu-580-13-20260716-134457.img",
+                "cloudinit_url": "https://storage.googleapis.com/cloudrift-vm-disks/cloudinit/ubuntu-base.cloudinit"
+              }
+            }
+          },
+          {
+            "name": "Ubuntu 24.04 Server (R580, CUDA 12.9)",
+            "description": "Ubuntu 24.04 Server, open NVIDIA 580 driver, CUDA 12.9, kernel 6.8.0-134",
+            "tags": [
+              "nvidia-driver"
+            ],
+            "logo_url": "https://storage.googleapis.com/cloudrift-resources/images/logo/ubuntu.svg",
+            "instructions_url": null,
+            "details": {
+              "VirtualMachine": {
+                "image_url": "https://storage.googleapis.com/cloudrift-vm-disks/disks/github/ubuntu-noble-server-gpu-580-129-20260716-134310.img",
+                "cloudinit_url": "https://storage.googleapis.com/cloudrift-vm-disks/cloudinit/ubuntu-base.cloudinit"
+              }
+            }
+          },
+          {
+            "name": "Ubuntu 22.04 Server (R580, CUDA 12.9)",
+            "description": "Ubuntu 22.04 Server, open NVIDIA 580 driver, CUDA 12.9, kernel 5.15.0-186",
+            "tags": [
+              "nvidia-driver"
+            ],
+            "logo_url": "https://storage.googleapis.com/cloudrift-resources/images/logo/ubuntu.svg",
+            "instructions_url": null,
+            "details": {
+              "VirtualMachine": {
+                "image_url": "https://storage.googleapis.com/cloudrift-vm-disks/disks/github/ubuntu-jammy-server-gpu-20260720-122230.img",
+                "cloudinit_url": "https://storage.googleapis.com/cloudrift-vm-disks/cloudinit/ubuntu-base.cloudinit"
+              }
+            }
+          },
+          {
+            "name": "Ubuntu 24.04 Server (R580 proprietary, CUDA 12.9)",
+            "description": "Ubuntu 24.04 with the proprietary NVIDIA driver 580 + CUDA 12.9, on kernel 6.8.0-124. Supports all NVIDIA GPUs from Pascal onwards (P100, V100, T4, A100, L40, H100, B200, ...). Use this image when renting on a host with a Pascal/Volta GPU; the open-driver Ubuntu images cannot boot on those.",
+            "tags": [
+              "nvidia-driver",
+              "nvidia-driver-proprietary"
+            ],
+            "logo_url": "https://storage.googleapis.com/cloudrift-resources/images/logo/ubuntu.svg",
+            "instructions_url": null,
+            "details": {
+              "VirtualMachine": {
+                "image_url": "https://storage.googleapis.com/cloudrift-vm-disks/disks/github/ubuntu-noble-server-gpup-580-129-20260916-043401.img",
+                "cloudinit_url": "https://storage.googleapis.com/cloudrift-vm-disks/cloudinit/ubuntu-base.cloudinit"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "Jupyter",
+        "description": "Jupyter Notebooks",
+        "tags": [],
+        "logo_url": "https://storage.googleapis.com/cloudrift-resources/images/logo/jupyter.svg",
+        "metadata": "{\"color\": \"EC9706\"}",
+        "recipes": [
+          {
+            "name": "Jupyter-PyTorch",
+            "description": "Jupyter Notebook with PyTorch",
+            "tags": [],
+            "logo_url": "https://storage.googleapis.com/cloudrift-resources/images/logo/pytorch.svg",
+            "instructions_url": null,
+            "details": {
+              "Docker": {
+                "image": "quay.io/jupyter/pytorch-notebook",
+                "command": [],
+                "ports": [
+                  "8888:8888"
+                ],
+                "env": []
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "Image Generation",
+        "description": "Image Generation Models and Tools",
+        "tags": [],
+        "logo_url": "https://storage.googleapis.com/cloudrift-resources/images/logo/comfyui.svg",
+        "metadata": "{\"color\": \"90D5FF\"}",
+        "recipes": [
+          {
+            "name": "ComfyUI-FLUX.1-Schnell",
+            "description": "ComfyUI with FLUX.1 Schnell image generation model built in",
+            "tags": [],
+            "logo_url": "https://storage.googleapis.com/cloudrift-resources/images/logo/comfyui.svg",
+            "instructions_url": "https://storage.googleapis.com/cloudrift-resources/instructions/comfyui_flux.1_schnell.md",
+            "details": {
+              "Docker": {
+                "image": "cloudriftai/comfyui-flux1",
+                "command": [],
+                "ports": [
+                  "8188:8188"
+                ],
+                "env": [
+                  [
+                    "WEB_ENABLE_AUTH",
+                    "false"
+                  ]
+                ]
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "other_recipes": [
+      {
+        "name": "LLama3.3-70b",
+        "description": "LLama3.3-70b Endpoint",
+        "tags": [],
+        "logo_url": "https://storage.googleapis.com/cloudrift-resources/images/logo/meta.svg",
+        "instructions_url": "https://storage.googleapis.com/cloudrift-resources/instructions/llama_33_70b.md",
+        "details": {
+          "Docker": {
+            "image": "cloudriftai/llama3.3:1.0",
+            "command": [],
+            "ports": [
+              "11434:11434"
+            ],
+            "env": []
+          }
+        }
+      }
+    ]
+  }
+}
