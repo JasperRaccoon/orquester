@@ -222,9 +222,12 @@ credentials. Handing the owner's own short-lived token to the owner's own box mi
 Anthropic's Desktop SSH design and involves no proxy, but it is not explicitly documented for
 third parties. The owner accepts this residual risk by approving this design.
 
-**Git.** The box's git authenticates through the host: SSH via an agent forwarded over
-`orq-agent` (the private key stays in `<appdir>/daemon/keys`), HTTPS via a git credential
-helper (`orq-agent git-credential`) that asks the daemon. The workspace git identity
+**Git.** The box's git authenticates through the host over SSH only: an agent forwarded over
+`orq-agent` signs with the workspace account's key, which stays in `<appdir>/daemon/keys`. The
+agent signs nothing but an SSH user-authentication request for the git host's user (honouring
+`session-bind@openssh.com` against the git host's known host keys); HTTPS remotes are rewritten
+to SSH with `url.<ssh>.insteadOf`. `git.credential` always answers empty — no git hosting token
+ever reaches a box (security review, 2026-10-20). The workspace git identity
 (`user.name`, `user.email`) is written into the box's git config; it is not secret. My call:
 `gh` inside a box is not authenticated in this version (pushing, fetching and cloning work).
 
