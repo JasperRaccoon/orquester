@@ -8,6 +8,7 @@ import type { BoxConfigChangesResponse, BoxConfigChangeSet, BoxPathMap } from "@
 import { sessionProfilePreparedRootDir } from "@orquester/config";
 
 import type { BoxSyncScope } from "../contracts.ts";
+import { execBoxHasher, type BoxHasher } from "./box-fs.ts";
 import { BoxConfigSyncService, BoxSyncError } from "./config-sync.ts";
 import { fakeBoxHub, mappedBoxConnection, type MappedBoxConnection } from "./testing.ts";
 
@@ -428,6 +429,87 @@ test("box-only credential files are invisible to sync: never sent, deleted, list
   assert.equal(f.published.length, 0, "no change set mentions them");
   const touched = [...f.box1.writes, ...f.box1.calls.map((call) => (call.params as { path?: string } | null)?.path ?? "")];
   assert.ok(!touched.some((path) => path.endsWith(".credentials.json") || path.endsWith("token.json")), "never read, written, statted or removed");
+  await sync.close();
+});
+
+test("C15: a host dir or file that cannot be read is never taken for a deletion", async () => {
+  const f = await fixture();
+  const sync = f.make();
+  await sync.ensureSynced("b1", f.scope, signal());
+  const boxHome = f.box1.local(f.home);
+  await chmod(join(f.system, "commands"), 0o000);
+  await chmod(join(f.home, "CLAUDE.md"), 0o000);
+  try {
+    await sync.ensureSynced("b1", f.scope, signal());
+    sync.watch("b1", f.scope);
+    await sync.hostChanged("b1");
+    await sync.idle();
+    assert.equal(await readFile(join(boxHome, "commands", "ship.md"), "utf8"), "Ship it.\n", "an unreadable host dir keeps the box's copies");
+    assert.equal(await readFile(join(boxHome, "CLAUDE.md"), "utf8"), "# Global rules\n", "an unreadable host file keeps the box's copy");
+  } finally {
+    await chmod(join(f.system, "commands"), 0o755);
+    await chmod(join(f.home, "CLAUDE.md"), 0o644);
+  }
+  // Readable again and really removed: now the box copy goes.
+  await rm(join(f.system, "commands", "ship.md"));
+  await sync.ensureSynced("b1", f.scope, signal());
+  assert.equal(await exists(join(boxHome, "commands", "ship.md")), false);
+  await sync.close();
+});
+
+test("S5: a large box file is applied only with the exact bytes its card was made of", async () => {
+  const f = await fixture();
+  // A box that lies about a file it changed after the card: its hash tool keeps answering the old hash.
+  const firstHash = new Map<string, string | null>();
+  const lyingHasher: BoxHasher = async (connection, items, hashSignal) => {
+    const hashes = await execBoxHasher(connection, items, hashSignal);
+    return items.map((item, index) => {
+      if (!item.path.includes("lies")) return hashes[index]!;
+      if (!firstHash.has(item.path)) firstHash.set(item.path, hashes[index]!);
+      return firstHash.get(item.path)!;
+    });
+  };
+  const sync = new BoxConfigSyncService({
+    appdir: f.appdir,
+    hub: f.hub,
+    watchHost: false,
+    idleFlushMs: 10,
+    hasher: lyingHasher,
+    publish: (payload) => f.published.push(payload)
+  });
+  await sync.ensureSynced("b1", f.scope, signal());
+  const boxHome = f.box1.local(f.home);
+  const big = Buffer.alloc(1536 * 1024, "a");
+
+  // Honest: approved and written as it is.
+  await put(join(boxHome, "skills", "assets", "honest.bin"), big.toString("latin1"));
+  await sync.turnEnded("b1", "t1");
+  const honest = pendingSet(f.published);
+  assert.match(honest.files[0]!.diff, /too large/);
+  await sync.decide(honest.id, "approve");
+  assert.ok((await readFile(join(f.system, "skills", "assets", "honest.bin"))).equals(big));
+
+  // Swapped after the card: never written.
+  await put(join(boxHome, "skills", "assets", "lies.bin"), big.toString("latin1"));
+  await sync.turnEnded("b1", "t2");
+  const card = pendingSet(f.published);
+  await put(join(boxHome, "skills", "assets", "lies.bin"), Buffer.alloc(big.length, "e").toString("latin1"));
+  await sync.decide(card.id, "approve");
+  assert.equal(await exists(join(f.system, "skills", "assets", "lies.bin")), false, "other bytes than the approved ones never reach the host");
+  assert.deepEqual((await readdir(join(f.system, "skills", "assets"))).sort(), ["honest.bin"], "and no temp file is left");
+  await sync.close();
+});
+
+test("S6: a nested permission or env change in settings.json is executable on the card", async () => {
+  const f = await fixture();
+  const sync = f.make();
+  await sync.ensureSynced("b1", f.scope, signal());
+  const boxSettings = join(f.box1.local(f.home), "settings.json");
+  const settings = JSON.parse(await readFile(boxSettings, "utf8"));
+  settings.permissions = { defaultMode: "bypassPermissions" };
+  await put(boxSettings, JSON.stringify(settings, null, 2));
+  await sync.turnEnded("b1", "t1");
+  assert.equal(pendingSet(f.published).files[0]!.executable, true);
   await sync.close();
 });
 

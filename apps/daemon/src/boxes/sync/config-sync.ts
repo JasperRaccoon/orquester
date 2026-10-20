@@ -34,7 +34,7 @@
 
 import { randomUUID } from "node:crypto";
 import { createReadStream, watch as watchFs, type FSWatcher } from "node:fs";
-import { readFile, rm, stat } from "node:fs/promises";
+import { mkdir, readFile, rm, stat } from "node:fs/promises";
 import { posix } from "node:path";
 import type { Readable } from "node:stream";
 
@@ -48,13 +48,7 @@ import {
   type BoxFsChangeEvent
 } from "@orquester/api";
 import {
-  boxesDir,
-  boxSecretsPath,
-  keysDir,
-  secretFilesDir,
   sessionProfilePreparedRootDir,
-  sessionProfileSourcesDir,
-  workflowSecretsPath,
   type BoxSyncBaselineEntry,
   type StoredBoxConfigChangeFile,
   type StoredBoxConfigChangeSet
@@ -64,8 +58,24 @@ import { unifiedDiff } from "../../mcp/tools/agent-profile-preview.ts";
 import type { BoxConfigSync, BoxConnection, BoxHub, BoxSyncScope } from "../contracts.ts";
 import { boxPathOf, boxStat, execBoxHasher, readBoxFile, removeBoxPath, walkBox, writeBoxFile, type BoxFile, type BoxHasher } from "./box-fs.ts";
 import { syncCodec, type CodecContext } from "./codecs.ts";
-import { hostFileAt, hostWriteTarget, HostViewHashes, relOf, sha256, walkHost, writeHostFileAtomic, type HostFile, type HostWatchTarget } from "./host-fs.ts";
 import {
+  hostFileAt,
+  hostWriteTarget,
+  HostViewHashes,
+  isAbsentError,
+  MAX_SYNC_FILE_BYTES,
+  orAbsent,
+  relOf,
+  sha256,
+  walkHost,
+  writeHostFileAtomic,
+  writeHostStreamAtomic,
+  type HostFile,
+  type HostWatchTarget
+} from "./host-fs.ts";
+import {
+  defaultSyncDenyRoots,
+  executableConfigKeys,
   isDeniedRealPath,
   isExecutableChange,
   isInsidePath,
@@ -230,14 +240,7 @@ export class BoxConfigSyncService implements BoxConfigSync {
     this.baselines = new BoxSyncBaselines(options.appdir);
     this.hasher = options.hasher ?? execBoxHasher;
     this.preparedRoot = options.preparedRoot === undefined ? sessionProfilePreparedRootDir(options.appdir) : options.preparedRoot;
-    this.denyRoots = options.denyRoots ?? [
-      keysDir(options.appdir),
-      boxesDir(options.appdir),
-      boxSecretsPath(options.appdir),
-      workflowSecretsPath(options.appdir),
-      secretFilesDir(options.appdir),
-      sessionProfileSourcesDir(options.appdir)
-    ];
+    this.denyRoots = options.denyRoots ?? defaultSyncDenyRoots(options.appdir);
     this.hostDebounceMs = options.hostDebounceMs ?? 250;
     this.idleFlushMs = options.idleFlushMs ?? 3000;
     this.boxEventDebounceMs = options.boxEventDebounceMs ?? 100;
@@ -734,10 +737,13 @@ export class BoxConfigSyncService implements BoxConfigSync {
     // Host side (`paths` mode: looked up per candidate below).
     const host = new Map<string, HostFile>();
     let hostDirs = new Set<string>();
+    /** Host paths whose state could not be read: nothing at or below them is pushed, deleted or recorded. */
+    const unreadable: string[] = [];
     if (mode !== "paths") {
       const tree = await walkHost(root.root, root.rule, this.denyRoots);
       for (const [path, file] of tree.files) host.set(path, file);
       hostDirs = tree.dirs;
+      unreadable.push(...tree.unreadable);
       runtime.hostTargets.set(root.key, tree.watch);
     }
     // Box side (`host` mode: the baseline stands for it).
@@ -767,12 +773,27 @@ export class BoxConfigSyncService implements BoxConfigSync {
     if (mode === "paths") {
       for (const path of options.paths ?? []) if (accept(path)) candidates.add(path);
       for (const path of candidates) {
-        const file = await hostFileAt(root.root, root.rule, path, this.denyRoots);
-        if (file) host.set(path, file);
+        try {
+          const file = await hostFileAt(root.root, root.rule, path, this.denyRoots);
+          if (file) host.set(path, file);
+        } catch {
+          unreadable.push(path);
+        }
       }
     }
     const hostHash = new Map<string, string | null>();
-    for (const [path, file] of host) hostHash.set(path, await this.hashes.hash(file, root.rule, ctx));
+    for (const [path, file] of host) {
+      try {
+        hostHash.set(path, await this.hashes.hash(file, root.rule, ctx));
+      } catch (error) {
+        if (isAbsentError(error)) host.delete(path); // removed since the walk
+        else unreadable.push(path);
+      }
+    }
+    if (unreadable.length > 0) {
+      this.options.logger?.warn?.(`box sync (${runtime.boxId}): ${unreadable.length} host path(s) could not be read; the box keeps its copies there`);
+    }
+    const isUnreadable = (path: string): boolean => unreadable.some((dir) => isInsidePath(path, dir));
 
     // Box view hashes.
     const boxHash = new Map<string, string | null>();
@@ -805,7 +826,7 @@ export class BoxConfigSyncService implements BoxConfigSync {
     const removals: string[] = [];
     const staleSets = new Set<StoredBoxConfigChangeSet>();
     for (const path of [...candidates].sort()) {
-      if (!accept(path)) continue;
+      if (!accept(path) || isUnreadable(path)) continue;
       const hostFile = host.get(path);
       const hh = hostFile ? (hostHash.get(path) ?? null) : null;
       if (hostFile && hh === null) continue; // unparseable config: never touched
@@ -899,7 +920,9 @@ export class BoxConfigSyncService implements BoxConfigSync {
     }
     for (const dir of [...dirs].sort((a, b) => b.length - a.length)) {
       if (hostDirs.has(dir)) continue;
-      if ((await stat(dir).catch(() => null))?.isDirectory()) continue;
+      // Kept unless the host dir is known to be absent (an unreadable one may still be there).
+      const info = await orAbsent(stat(dir)).catch(() => undefined);
+      if (info === undefined || info?.isDirectory()) continue;
       const entries = await connection.request("fs.readdir", { path: boxPathOf(connection, dir) }).catch(() => null);
       if (entries !== null && entries.length === 0) await removeBoxPath(connection, dir, true).catch(() => undefined);
     }
@@ -972,7 +995,15 @@ export class BoxConfigSyncService implements BoxConfigSync {
     for (const set of this.store.pending(runtime.boxId)) for (const file of set.files) pendingHashes.set(file.path, file.boxHash ?? null);
     const files: StoredBoxConfigChangeFile[] = [];
     for (const [path, root] of collected) {
-      const seen = await this.observe(connection, root, path);
+      let seen: Observed | null;
+      try {
+        seen = await this.observe(connection, root, path);
+      } catch (error) {
+        if (!connection.connected) throw error;
+        // An unreadable host copy: no card can say what changed; the next full pass looks again.
+        this.options.logger?.warn?.(`box sync (${runtime.boxId}): a box change could not be compared: ${error instanceof Error ? error.message : String(error)}`);
+        continue;
+      }
       if (seen === null || seen.unsyncable) continue;
       if (seen.hh === seen.bh) {
         if (seen.bh === null) baseline.delete(path);
@@ -1005,7 +1036,7 @@ export class BoxConfigSyncService implements BoxConfigSync {
           rel: seen.rel,
           mode: seen.boxMode ?? seen.hostFile?.mode ?? null,
           content: seen.boxBytes,
-          configKeysChanged: codec.executableKeysChanged(seen.hostView, seen.boxView)
+          configKeysChanged: codec.executableKeysChanged(seen.hostView, seen.boxView, executableConfigKeys(root.agent, seen.rel))
         }),
         diff,
         truncated,
@@ -1100,17 +1131,35 @@ export class BoxConfigSyncService implements BoxConfigSync {
       baseline.delete(path);
       return;
     }
-    let boxBytes = seen.boxBytes;
-    if (boxBytes === null) boxBytes = await readBoxFile(connection, path);
-    if (boxBytes === null) return;
-    const codec = syncCodec(root.rule.codec(seen.rel));
-    const next = codec.toHost(boxBytes, seen.hostBytes, ctx);
     const target = seen.hostFile ? seen.hostFile.real : await hostWriteTarget(path);
     if (isDeniedRealPath(target, this.denyRoots)) {
       this.options.logger?.warn?.("box sync: an approved change targets a denied host path; skipped");
       return;
     }
     const mode = seen.hostFile ? seen.hostFile.mode : seen.boxMode !== null && (seen.boxMode & 0o111) !== 0 ? 0o700 : 0o600;
+    if (seen.tooLarge) {
+      // Too large to read for the card (raw codec: the bytes are the view): the card stands on
+      // the hash the box gave. The bytes travel once, into a host temp file hashed on the host,
+      // and replace the host file only when they are exactly what was approved.
+      await mkdir(posix.dirname(target), { recursive: true, mode: 0o700 });
+      try {
+        const stream = await connection.readFile(boxPathOf(connection, path), { length: MAX_SYNC_FILE_BYTES + 1 });
+        await writeHostStreamAtomic(target, stream, mode, {
+          maxBytes: MAX_SYNC_FILE_BYTES,
+          check: ({ sha256: hash }) => (hash === seen.bh ? null : "the box sent other bytes than the approved ones")
+        });
+      } catch (error) {
+        if (!connection.connected) throw error;
+        this.options.logger?.warn?.(`box sync (${connection.boxId}): an approved change was not applied: ${error instanceof Error ? error.message : String(error)}`);
+        return;
+      }
+      baseline.set(path, { h: seen.bh, s: seen.boxSize, m: seen.boxMtimeMs });
+      return;
+    }
+    const boxBytes = seen.boxBytes;
+    if (boxBytes === null) return;
+    const codec = syncCodec(root.rule.codec(seen.rel));
+    const next = codec.toHost(boxBytes, seen.hostBytes, ctx);
     await writeHostFileAtomic(target, next, mode);
     const view = codec.hostView(next, ctx);
     if (view !== null && sha256(view) === seen.bh) baseline.set(path, { h: seen.bh, s: seen.boxSize, m: seen.boxMtimeMs });
