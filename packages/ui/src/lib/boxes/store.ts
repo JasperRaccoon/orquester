@@ -9,28 +9,36 @@
  * daemon three ways, which race freely:
  *
  * - a **load** per connection (connect, reconnect and the plugin turning on —
- *   the app store; only while the plugin is on), and the settings' own loads;
+ *   the app store), and the settings' own loads;
  * - the answer of each **mutation**, applied at once;
  * - `BOXES_CHANNEL` **events** (full snapshots of a list), routed here by the
  *   app store's `applyEvent`.
  *
  * Every write is validated first (`validate.ts`): a malformed payload is
- * ignored, never applied half-way. A load's answer never undoes a change that
- * landed while it was in flight: each slot carries a revision every event and
- * mutation bumps, and a load whose slot moved meanwhile drops its answer.
+ * ignored, never applied half-way. An answer never undoes a change that landed
+ * while it was in flight: each slot carries a revision every event and
+ * mutation bumps, and a load or mutation whose slot moved meanwhile drops its
+ * answer (a mutation then re-reads the slot instead).
  *
- * Per connection: `resetBoxes()` runs on a connection switch and when the
- * plugin turns off (the app store), and a call through a client of another
- * connection resets first.
+ * While the plugin is off (`setBoxesPluginOn(false)`, the app store) boxes may
+ * still be running — and billing — at their providers: the store then holds
+ * the boxes list only, as long as one of them is not destroyed, so the plugin
+ * settings can still show and destroy them and project rows keep their
+ * badges. Every other slot stays empty, and the list is forgotten once nothing
+ * in it is left running.
  *
- * Exported API for other UI modules: the vanilla `boxesStore`, the hooks
- * `useBoxes()`, `useBoxesTotals()`, `useBox(id)`, `useProjectBox(path)`,
+ * Per connection: `resetBoxes()` runs on a connection switch (the app store),
+ * and a call through a client of another connection resets first.
+ *
+ * Exported API for other UI modules: the vanilla `boxesStore`,
+ * `setBoxesPluginOn(on)`, `hasActiveBoxes(boxes)`, the hooks `useBoxes()`,
+ * `useActiveBoxes()`, `useBoxesTotals()`, `useBox(id)`, `useProjectBox(path)`,
  * `useBoxProviders()`, `useBoxKinds()`, `useBoxConfigChanges()`,
  * `useBoxConnection()`, `useBlacksmithSetup()`, and the load / mutation
  * functions below (each takes the `ApiClient`).
  */
 
-import { useSyncExternalStore } from "react";
+import { useMemo, useSyncExternalStore } from "react";
 import { createStore } from "zustand/vanilla";
 
 import {
@@ -128,6 +136,8 @@ export const boxesStore = createStore<BoxesState>(() => INITIAL);
 
 /** Bumped by a reset: an answer from before it is dropped, never applied. */
 let generation = 0;
+/** The plugin is off: only a boxes list with something still running is held (see the module comment). */
+let pluginOff = false;
 let boundConnectionId: string | null = null;
 /** The client of the latest call — what follow-up reloads (kinds after a provider change) go through. */
 let boundApi: BoxesApi | null = null;
@@ -157,12 +167,51 @@ function bind(api: BoxesApi): void {
   boundApi = api;
 }
 
+const OTHER_SLOTS_EMPTY: Partial<BoxesState> = {
+  providers: null,
+  kinds: null,
+  configChanges: null,
+  connection: null,
+  blacksmith: null
+};
+
 function write(slot: Slot, patch: Partial<BoxesState>): void {
+  // Plugin off: everything but the boxes list stays empty.
+  if (pluginOff && slot !== "boxes") return;
   revisions[slot] += 1;
   boxesStore.setState(patch);
+  if (pluginOff) forgetUnlessRunning();
 }
 
-/** A connection switch or the plugin turning off: forget everything; answers still in flight are dropped. */
+/** Whether any box in a list is not destroyed yet (it may still bill at its provider). */
+export function hasActiveBoxes(boxes: readonly BoxSummary[] | null): boolean {
+  return boxes?.some((box) => box.state !== "destroyed") ?? false;
+}
+
+/** Plugin off: a boxes list with nothing left running is forgotten (one not read yet is waited for). */
+function forgetUnlessRunning(): void {
+  const { boxes } = boxesStore.getState();
+  if (boxes !== null && !hasActiveBoxes(boxes)) resetBoxes();
+}
+
+/**
+ * The plugin turned on or off (the app store calls this on every plugins list).
+ * Off, every slot but the boxes list is emptied (loads of them still in flight
+ * are dropped), and the list itself only once nothing in it runs any more.
+ * On again, the app store loads everything.
+ */
+export function setBoxesPluginOn(on: boolean): void {
+  if (pluginOff === !on) return;
+  pluginOff = !on;
+  if (on) return;
+  for (const slot of Object.keys(revisions) as Slot[]) if (slot !== "boxes") revisions[slot] += 1;
+  offersCache.clear();
+  offersInFlight.clear();
+  boxesStore.setState(OTHER_SLOTS_EMPTY);
+  forgetUnlessRunning();
+}
+
+/** A connection switch, or nothing left running while the plugin is off: forget everything; answers still in flight are dropped. */
 export function resetBoxes(): void {
   generation += 1;
   boundConnectionId = null;
@@ -381,12 +430,25 @@ export async function loadBoxOffers(
 // Mutations — each applies what the daemon answered
 // ---------------------------------------------------------------------------
 
-/** Run `call` for the client's connection; resolves with its answer and whether it is still current. */
-async function mutate<T>(api: BoxesApi, call: () => Promise<T>): Promise<{ answer: T; current: boolean }> {
+/**
+ * Run `call` for the client's connection. Resolves with its answer and:
+ * - `reset`: the store was reset meanwhile (another connection, or nothing
+ *   left running with the plugin off) — the answer must not be applied;
+ * - `current`: nothing reset it and no event or other mutation wrote `slot`
+ *   meanwhile — the answer may be applied. When `slot` moved, the answer may be
+ *   older than what is held: the caller drops it and re-reads the slot.
+ */
+async function mutate<T>(
+  api: BoxesApi,
+  slot: Slot | null,
+  call: () => Promise<T>
+): Promise<{ answer: T; reset: boolean; current: boolean }> {
   bind(api);
   const gen = generation;
+  const revision = slot === null ? 0 : revisions[slot];
   const answer = await call();
-  return { answer, current: gen === generation };
+  const reset = gen !== generation;
+  return { answer, reset, current: !reset && (slot === null || revisions[slot] === revision) };
 }
 
 /** Re-read a slot after an answer this client cannot read; failures are left to the next event. */
@@ -404,32 +466,34 @@ export async function saveBoxProviderCredentials(
   id: BoxProviderId,
   credentials: Record<string, string>
 ): Promise<BoxProviderInfo | null> {
-  const { answer, current } = await mutate(api, () => api.setBoxProviderCredentials(id, { credentials }));
-  if (!current) return null;
+  const { answer, reset, current } = await mutate(api, "providers", () => api.setBoxProviderCredentials(id, { credentials }));
+  if (reset) return null;
   offersCache.clear();
-  const provider = sanitizeBoxProviderInfo(answer);
-  if (provider && provider.id === id) upsertProvider(provider);
+  const read = sanitizeBoxProviderInfo(answer);
+  const provider = read && read.id === id ? read : null;
+  if (provider && current) upsertProvider(provider);
   else reloadQuietly(() => loadBoxProviders(api));
   refreshKindsLater();
-  return provider && provider.id === id ? provider : null;
+  return provider;
 }
 
 /** Forget a provider's credentials. */
 export async function removeBoxProviderCredentials(api: BoxesApi, id: BoxProviderId): Promise<void> {
-  const { answer, current } = await mutate(api, () => api.removeBoxProviderCredentials(id));
-  if (!current) return;
+  const { answer, reset, current } = await mutate(api, "providers", () => api.removeBoxProviderCredentials(id));
+  if (reset) return;
   offersCache.clear();
   const provider = sanitizeBoxProviderInfo(answer);
-  if (provider && provider.id === id) upsertProvider(provider);
+  if (provider && provider.id === id && current) upsertProvider(provider);
   else reloadQuietly(() => loadBoxProviders(api));
   refreshKindsLater();
 }
 
 /** Start the provider's Windows image build; it shows as preparing until the daemon reports otherwise. */
 export async function prepareBoxWindowsImage(api: BoxesApi, id: BoxProviderId): Promise<void> {
-  const { current } = await mutate(api, () => api.prepareBoxWindowsImage(id));
-  if (!current) return;
-  const provider = boxesStore.getState().providers?.find((entry) => entry.id === id);
+  const { reset, current } = await mutate(api, "providers", () => api.prepareBoxWindowsImage(id));
+  if (reset) return;
+  // Overtaken by an event: that one already tells (the re-read below confirms either way).
+  const provider = current ? boxesStore.getState().providers?.find((entry) => entry.id === id) : undefined;
   if (provider?.windowsImage) {
     upsertProvider({ ...provider, windowsImage: { ...provider.windowsImage, state: "preparing", message: null } });
   }
@@ -438,42 +502,43 @@ export async function prepareBoxWindowsImage(api: BoxesApi, id: BoxProviderId): 
 
 /** Destroy a temporary box. Rejects with the daemon's error (409 `BOX_IS_PROJECT` for a project box). */
 export async function destroyBox(api: BoxesApi, id: string): Promise<void> {
-  const { answer, current } = await mutate(api, () => api.destroyBox(id));
-  if (!current) return;
+  const { answer, reset, current } = await mutate(api, "boxes", () => api.destroyBox(id));
+  if (reset) return;
   const box = sanitizeBoxResponse(answer);
-  if (box && box.id === id) upsertBox(box);
+  if (box && box.id === id && current) upsertBox(box);
   else reloadQuietly(() => loadBoxesList(api));
 }
 
-/** One box from the daemon, applied. */
+/** One box from the daemon, applied — unless an event or mutation wrote the list meanwhile (that is newer). */
 export async function fetchBox(api: BoxesApi, id: string, signal?: AbortSignal): Promise<BoxSummary | null> {
-  const { answer, current } = await mutate(api, () => api.getBox(id, signal));
+  const { answer, current } = await mutate(api, "boxes", () => api.getBox(id, signal));
   const box = sanitizeBoxResponse(answer);
   if (!box || box.id !== id) throw new Error("The daemon answered the box in an unexpected shape.");
   if (current) upsertBox(box);
   return box;
 }
 
-function applyConnectionAnswer(answer: unknown, current: boolean): BoxConnectionSettings {
+function applyConnectionAnswer(
+  api: BoxesApi,
+  { answer, reset, current }: { answer: unknown; reset: boolean; current: boolean }
+): BoxConnectionSettings {
   const connection = sanitizeBoxConnectionSettings(answer);
   if (connection === null) throw new Error("The daemon answered the connection settings in an unexpected shape.");
-  if (current) {
-    write("connection", { connection });
-    refreshKindsLater();
-  }
+  if (reset) return connection;
+  if (current) write("connection", { connection });
+  else reloadQuietly(() => loadBoxConnection(api));
+  refreshKindsLater();
   return connection;
 }
 
 /** Save connection settings (secret fields are write-only). */
 export async function saveBoxConnection(api: BoxesApi, req: SetBoxConnectionRequest): Promise<BoxConnectionSettings> {
-  const { answer, current } = await mutate(api, () => api.setBoxConnection(req));
-  return applyConnectionAnswer(answer, current);
+  return applyConnectionAnswer(api, await mutate(api, "connection", () => api.setBoxConnection(req)));
 }
 
 /** Run the reachability check. */
 export async function testBoxConnection(api: BoxesApi): Promise<BoxConnectionSettings> {
-  const { answer, current } = await mutate(api, () => api.testBoxConnection());
-  return applyConnectionAnswer(answer, current);
+  return applyConnectionAnswer(api, await mutate(api, "connection", () => api.testBoxConnection()));
 }
 
 /** Pick the Blacksmith account or org (an empty request re-runs the automatic steps). */
@@ -481,20 +546,20 @@ export async function saveBlacksmithSetup(
   api: BoxesApi,
   req: SetBlacksmithSetupRequest
 ): Promise<BlacksmithSetupResponse> {
-  const { answer, current } = await mutate(api, () => api.setBlacksmithSetup(req));
+  const { answer, reset, current } = await mutate(api, "blacksmith", () => api.setBlacksmithSetup(req));
   const blacksmith = sanitizeBlacksmithSetup(answer);
   if (blacksmith === null) throw new Error("The daemon answered the Blacksmith setup in an unexpected shape.");
-  if (current) {
-    write("blacksmith", { blacksmith });
-    refreshKindsLater();
-  }
+  if (reset) return blacksmith;
+  if (current) write("blacksmith", { blacksmith });
+  else reloadQuietly(() => loadBlacksmithSetup(api));
+  refreshKindsLater();
   return blacksmith;
 }
 
 /** Start the macOS test run, then re-read the setup so its step shows as running. */
 export async function startBlacksmithTest(api: BoxesApi): Promise<void> {
-  const { current } = await mutate(api, () => api.startBlacksmithTest());
-  if (current) await loadBlacksmithSetup(api);
+  const { reset } = await mutate(api, null, () => api.startBlacksmithTest());
+  if (!reset) await loadBlacksmithSetup(api);
 }
 
 /** Approve or deny a box's config change set. */
@@ -503,10 +568,10 @@ export async function decideBoxConfigChange(
   id: string,
   decision: DecideBoxConfigChangeRequest["decision"]
 ): Promise<BoxConfigChangeSet | null> {
-  const { answer, current } = await mutate(api, () => api.decideBoxConfigChange(id, { decision }));
+  const { answer, reset, current } = await mutate(api, "configChanges", () => api.decideBoxConfigChange(id, { decision }));
   const change = isRecord(answer) ? sanitizeBoxConfigChangeSet(answer.change) : null;
-  if (!current) return change;
-  if (change && change.id === id) upsertConfigChange(change);
+  if (reset) return change;
+  if (change && change.id === id && current) upsertConfigChange(change);
   else reloadQuietly(() => loadBoxConfigChanges(api));
   return change;
 }
@@ -548,6 +613,12 @@ export function useBoxesState<T>(select: (state: BoxesState) => T): T {
 /** Every box the daemon lists (destroyed ones included); empty until loaded. */
 export function useBoxes(): readonly BoxSummary[] {
   return useBoxesState((state) => state.boxes ?? EMPTY_BOXES);
+}
+
+/** The boxes not destroyed yet (they may still bill); empty until loaded. */
+export function useActiveBoxes(): readonly BoxSummary[] {
+  const boxes = useBoxes();
+  return useMemo(() => boxes.filter((box) => box.state !== "destroyed"), [boxes]);
 }
 
 /** Whether the boxes list has loaded on this connection. */

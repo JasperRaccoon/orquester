@@ -5,7 +5,8 @@
  *
  * That store is the one copy of the plugin's state: the app store loads it per
  * connection while the plugin is on, feeds it the `boxes` channel events and
- * resets it on a connection switch or when the plugin turns off. This module
+ * resets it on a connection switch; with the plugin off it holds only the
+ * boxes still running (so their badges stay live). This module
  * only reads it, adds what the surfaces need on top (a project's box joined
  * with the project list's own `ProjectSummary.box`, which only refreshes with
  * the list), and forwards the surfaces' actions to the store's mutations.

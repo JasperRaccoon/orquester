@@ -23,9 +23,13 @@ const timeOf = (value: string | null): number => {
   return Number.isNaN(time) ? 0 : time;
 };
 
-/** Live boxes (newest first), then those destroyed within {@link RECENTLY_DESTROYED_MS} (latest first). */
-export function listedBoxes(boxes: readonly BoxSummary[], now: number): BoxSummary[] {
+/**
+ * Live boxes (newest first), then — unless `liveOnly` — those destroyed within
+ * {@link RECENTLY_DESTROYED_MS} (latest first).
+ */
+export function listedBoxes(boxes: readonly BoxSummary[], now: number, liveOnly = false): BoxSummary[] {
   const live = boxes.filter((box) => box.state !== "destroyed").sort((a, b) => timeOf(b.createdAt) - timeOf(a.createdAt));
+  if (liveOnly) return live;
   const gone = boxes
     .filter((box) => box.state === "destroyed" && now - timeOf(box.destroyedAt ?? box.createdAt) <= RECENTLY_DESTROYED_MS)
     .sort((a, b) => timeOf(b.destroyedAt) - timeOf(a.destroyedAt));

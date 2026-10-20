@@ -21,6 +21,7 @@ import {
   resetBoxes,
   saveBoxConnection,
   saveBoxProviderCredentials,
+  setBoxesPluginOn,
   type BoxesApi
 } from "./store.ts";
 import {
@@ -218,7 +219,10 @@ describe("box payload validation", () => {
 });
 
 describe("the boxes store", () => {
-  beforeEach(() => resetBoxes());
+  beforeEach(() => {
+    setBoxesPluginOn(true);
+    resetBoxes();
+  });
 
   it("loads every slot the plugin needs", async () => {
     const { api, calls } = fakeApi();
@@ -380,6 +384,103 @@ describe("the boxes store", () => {
 
     const bad = fakeApi({ setBoxConnection: async () => "nope" });
     await assert.rejects(saveBoxConnection(bad.api, {}), /unexpected shape/);
+  });
+
+  it("drops a destroy's answer an event overtook, and re-reads the list instead", async () => {
+    const answer = deferred<unknown>();
+    const { api, calls } = fakeApi({
+      destroyBox: () => answer.promise,
+      listBoxes: async () => (calls.push("listBoxes"), listOf(box({ id: "b1", state: "destroyed" })))
+    });
+    applyBoxesEvent({ type: BOXES_CHANGED_EVENT, payload: listOf(box({ id: "b1" })) });
+    const destroying = destroyBox(api, "b1");
+    // The daemon's event about the same box lands before its answer: it is newer.
+    applyBoxesEvent({ type: BOXES_CHANGED_EVENT, payload: listOf(box({ id: "b1", state: "destroyed" })) });
+    answer.resolve({ box: box({ id: "b1", state: "destroying" }) });
+    await destroying;
+    assert.equal(boxesStore.getState().boxes?.[0].state, "destroyed");
+    await flush();
+    assert.ok(calls.includes("listBoxes"));
+    assert.equal(boxesStore.getState().boxes?.[0].state, "destroyed");
+  });
+
+  it("drops a decision's answer an event overtook, and an older connection answer than the newer save's", async () => {
+    const decided = deferred<unknown>();
+    const { api } = fakeApi({
+      decideBoxConfigChange: () => decided.promise,
+      listBoxConfigChanges: async () => ({ changes: [change({ state: "denied" })] })
+    });
+    applyBoxesEvent({ type: BOX_CONFIG_CHANGES_EVENT, payload: { changes: [change()] } });
+    const deciding = decideBoxConfigChange(api, "c1", "approve");
+    applyBoxesEvent({ type: BOX_CONFIG_CHANGES_EVENT, payload: { changes: [change({ state: "denied" })] } });
+    decided.resolve({ change: change({ state: "approved" }) });
+    const answered = await deciding;
+    // The caller still learns the answer; the store keeps the newer event.
+    assert.equal(answered?.state, "approved");
+    assert.equal(boxesStore.getState().configChanges?.[0].state, "denied");
+
+    const first = deferred<unknown>();
+    const reads: string[] = [];
+    const second = fakeApi({
+      setBoxConnection: (req: { publicUrl?: string }) =>
+        req.publicUrl === "https://a.example.com"
+          ? first.promise
+          : Promise.resolve({ mode: "public-url", publicUrl: req.publicUrl, tailscale: {}, reachable: "unknown" }),
+      getBoxConnection: async () => (reads.push("get"), { mode: "public-url", publicUrl: "https://b.example.com", tailscale: {}, reachable: "unknown" })
+    });
+    const older = saveBoxConnection(second.api, { publicUrl: "https://a.example.com" });
+    await saveBoxConnection(second.api, { publicUrl: "https://b.example.com" });
+    first.resolve({ mode: "public-url", publicUrl: "https://a.example.com", tailscale: {}, reachable: "unknown" });
+    await older;
+    await flush();
+    assert.deepEqual(reads, ["get"]);
+    assert.equal(boxesStore.getState().connection?.publicUrl, "https://b.example.com");
+  });
+
+  it("with the plugin off, keeps only the boxes still running and lets them be destroyed", async () => {
+    const { api } = fakeApi({
+      listBoxes: async () => listOf(box({ id: "p1" }), box({ id: "t1", purpose: "temporary", project: null }), box({ id: "gone", state: "destroyed" })),
+      destroyBox: async (id: string) => ({ box: box({ id, purpose: "temporary", project: null, state: "destroying" }) })
+    });
+    await loadBoxes(api);
+    await saveBoxConnection(api, { mode: "tailscale" });
+    setBoxesPluginOn(false);
+    const state = boxesStore.getState();
+    assert.deepEqual(state.boxes?.map((entry) => entry.id), ["p1", "t1", "gone"]);
+    assert.equal(state.providers, null);
+    assert.equal(state.kinds, null);
+    assert.equal(state.configChanges, null);
+    assert.equal(state.connection, null);
+    // Other slots stay empty: their events are not held while the plugin is off.
+    applyBoxesEvent({ type: BOX_PROVIDERS_CHANGED_EVENT, payload: { providers: [provider()] } });
+    applyBoxesEvent({ type: BOX_CONFIG_CHANGES_EVENT, payload: { changes: [change()] } });
+    assert.equal(boxesStore.getState().providers, null);
+    assert.equal(boxesStore.getState().configChanges, null);
+
+    // Destroy still works, and the list follows its events.
+    await destroyBox(api, "t1");
+    assert.equal(boxesStore.getState().boxes?.find((entry) => entry.id === "t1")?.state, "destroying");
+    applyBoxesEvent({ type: BOXES_CHANGED_EVENT, payload: listOf(box({ id: "p1" }), box({ id: "t1", state: "destroyed" })) });
+    assert.deepEqual(boxesStore.getState().boxes?.map((entry) => entry.id), ["p1", "t1"]);
+
+    // Nothing left running: the list is forgotten.
+    applyBoxesEvent({ type: BOXES_CHANGED_EVENT, payload: listOf(box({ id: "p1", state: "destroyed" }), box({ id: "t1", state: "destroyed" })) });
+    assert.equal(boxesStore.getState().boxes, null);
+  });
+
+  it("with the plugin off, a read that finds nothing running holds nothing", async () => {
+    setBoxesPluginOn(false);
+    await loadBoxesList(fakeApi({ listBoxes: async () => listOf(box({ state: "destroyed" })) }).api);
+    assert.equal(boxesStore.getState().boxes, null);
+    await loadBoxesList(fakeApi({ listBoxes: async () => listOf(box({ state: "destroy-failed" })) }).api);
+    assert.deepEqual(boxesStore.getState().boxes?.map((entry) => entry.state), ["destroy-failed"]);
+
+    // Turning off with a list of destroyed boxes only forgets it at once.
+    setBoxesPluginOn(true);
+    applyBoxesEvent({ type: BOXES_CHANGED_EVENT, payload: listOf(box({ state: "destroyed" })) });
+    assert.equal(boxesStore.getState().boxes?.length, 1);
+    setBoxesPluginOn(false);
+    assert.equal(boxesStore.getState().boxes, null);
   });
 
   it("finds a project's box: the live one, else the latest destroyed", () => {
