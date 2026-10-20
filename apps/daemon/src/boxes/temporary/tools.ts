@@ -345,6 +345,8 @@ function wake(target: Waitable): void {
 
 export class TemporaryBoxTools {
   private connection: TemporaryBoxesConnection | null = null;
+  /** The chat-close cleanup's view of the box service, independent of {@link connect}. */
+  private cleanupBoxes: Pick<TemporaryBoxes, "list" | "destroyBox"> | null = null;
   private unsubscribeBoxes: (() => void) | null = null;
   private readonly availability = new Set<() => void>();
   private readonly jobs = new Map<string, Job>();
@@ -380,6 +382,15 @@ export class TemporaryBoxTools {
     };
   }
 
+  /**
+   * The box service for the chat-close cleanup only ({@link chatClosed}), set once at startup and
+   * kept whatever the plugin switch says: a box rented before the plugin was turned off still
+   * bills, so its chat closing still destroys it. Nothing else reaches the boxes through it.
+   */
+  setCleanup(boxes: Pick<TemporaryBoxes, "list" | "destroyBox">): void {
+    this.cleanupBoxes = boxes;
+  }
+
   /** Whether boxes can be rented now (the box tools are advertised only then). */
   available(): boolean {
     return this.connection !== null;
@@ -403,7 +414,8 @@ export class TemporaryBoxTools {
    * with reason `chat-closed`. Never throws; failures are logged (the box shows `destroy-failed`).
    */
   chatClosed(threadId: string): void {
-    const boxes = this.connection?.boxes;
+    // Not only while connected: with the plugin off the boxes keep billing, so a closed chat's still go.
+    const boxes = this.connection?.boxes ?? this.cleanupBoxes;
     if (!boxes) return;
     for (const box of boxes.list()) {
       if (box.purpose !== "temporary" || box.threadId !== threadId) continue;
@@ -649,7 +661,9 @@ export class TemporaryBoxTools {
       await mkdir(parent, { recursive: true });
       if (remoteStat.kind === "file") {
         staging = join(parent, `.orq-download-${id}`);
-        const source = await connection.readFile(remote, { ...(options.signal ? { signal: options.signal } : {}) });
+        // A bounded read: the stat's size, at most one byte past the cap (so the counter trips on it).
+        const length = Math.min(remoteStat.size, BOX_DOWNLOAD_MAX_BYTES + 1);
+        const source = await connection.readFile(remote, { length, ...(options.signal ? { signal: options.signal } : {}) });
         abortWith(options.signal, () => source.destroy(new Error("cancelled")));
         await pipeline(source, counter.stream, createWriteStream(staging, { mode: (remoteStat.mode & 0o111) !== 0 ? 0o755 : 0o644, flags: "wx" }));
         await rename(staging, target.value);
@@ -1110,7 +1124,7 @@ export class TemporaryBoxTools {
     }
   }
 
-  private destroyQuietly(boxes: TemporaryBoxes, boxId: string, reason: BoxDestroyedReason): void {
+  private destroyQuietly(boxes: Pick<TemporaryBoxes, "destroyBox">, boxId: string, reason: BoxDestroyedReason): void {
     void boxes.destroyBox(boxId, reason).then(
       () => this.boxGone(boxId),
       (error: unknown) => this.deps.logger?.error?.(`boxes: destroying box ${boxId} (${reason}) failed`, errorName(error))

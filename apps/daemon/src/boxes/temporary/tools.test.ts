@@ -434,6 +434,22 @@ test("download: a file replaces a file atomically (exec bit kept); a directory l
   assert.deepEqual(readdirSync(join(PROJECT, "artifacts")), ["logs-copy"]);
 });
 
+test("download: a file is read with a length (the stat's size), never until the box stops sending", async () => {
+  const { tools, connection } = world();
+  mkdirSync(join(BOX, "out"), { recursive: true });
+  writeFileSync(join(BOX, "out", "sized.bin"), "0123456789");
+  const reads: { offset?: number; length?: number }[] = [];
+  const readFile = connection.readFile.bind(connection);
+  connection.readFile = (path, options) => {
+    reads.push({ ...(options?.offset !== undefined ? { offset: options.offset } : {}), ...(options?.length !== undefined ? { length: options.length } : {}) });
+    return readFile(path, options);
+  };
+  const file = await tools.download("box-a", { remotePath: join(BOX, "out", "sized.bin"), localPath: join(PROJECT, "sized.bin") }, { principal: agent() });
+  assert.ok(file.ok, file.ok ? "" : file.message);
+  assert.deepEqual(reads, [{ length: 10 }]);
+  assert.equal(readFileSync(join(PROJECT, "sized.bin"), "utf8"), "0123456789");
+});
+
 test("download: a directory whose only entry has its own name keeps its shape", async () => {
   const { tools } = world();
   mkdirSync(join(BOX, "same", "same"), { recursive: true });
@@ -540,4 +556,27 @@ test("chat close destroys that chat's live temporary boxes with reason chat-clos
   );
   assert.equal(boxes.get("box-b")!.state, "ready");
   assert.equal(boxes.get("box-p")!.state, "ready");
+});
+
+test("chat close destroys the chat's boxes with the box tools disconnected (plugin off), through the cleanup seam", async () => {
+  const { tools, boxes } = world({ connect: false });
+  tools.chatClosed("chat-a");
+  assert.equal(boxes.destroyed.length, 0, "nothing to reach before the cleanup seam is set");
+  tools.setCleanup(boxes);
+  assert.equal(tools.available(), false, "the cleanup seam does not advertise the box tools");
+  const listed = tools.list(USER);
+  assert.ok(!listed.ok && listed.code === "BOXES_DISABLED", "nor does it open the tools' operations");
+  tools.chatClosed("chat-a");
+  assert.deepEqual(
+    boxes.destroyed.map((entry) => `${entry.boxId}:${entry.reason}`),
+    ["box-a:chat-closed"]
+  );
+  // Connected then disconnected again (the plugin turned on and off): the cleanup still reaches the boxes.
+  const disconnect = tools.connect({ boxes, hub: { get: () => undefined } });
+  disconnect();
+  tools.chatClosed("chat-b");
+  assert.deepEqual(
+    boxes.destroyed.map((entry) => `${entry.boxId}:${entry.reason}`),
+    ["box-a:chat-closed", "box-b:chat-closed"]
+  );
 });

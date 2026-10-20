@@ -15,8 +15,13 @@
  * 5. `stop()` at shutdown.
  *
  * The plugin switch gates the boxes: while it is off the hub refuses every box, the reconciler is
- * stopped, nothing is created, and the box tools are not advertised. Box records and the hub stay
- * loaded, so a box project's paths keep routing to its (unreachable) box instead of the empty stub.
+ * stopped, nothing is created, the box tools are not advertised and the config watches stop. Box
+ * records and the hub stay loaded, so a box project's paths keep routing to its (unreachable) box
+ * instead of the empty stub, and a closed chat's temporary boxes are still destroyed.
+ *
+ * Config sync (spec §8.3): every live project box keeps its managed account homes, and every
+ * scope a chat's launch synced, under `BoxConfigSync.watch` from its setup (or the daemon's start,
+ * or the plugin's switch-on) until its destroy (`BoxConfigWatches`).
  */
 
 import { EPHEMERAL_VMS_PLUGIN_ID, type PluginsResponse } from "@orquester/api";
@@ -55,11 +60,17 @@ import { registerBoxStatsRoute } from "./remote/exec/stats.ts";
 import { BoxAwareSessionManager, BoxTerminalManager, composeIndexContributors } from "./remote/exec/terminals.ts";
 import { registerBoxGitAuth, workspaceAccountFromFiles } from "./remote/git-auth.ts";
 import { registerMcpBridge } from "./remote/mcp-bridge.ts";
-import { createDaemonBoxService } from "./service/daemon-wiring.ts";
+import { createDaemonBoxService, managedAgentHomes } from "./service/daemon-wiring.ts";
 import { registerBoxMcpRunInBoxRoutes } from "./service/mcp-run-in-box.ts";
 import type { BoxService } from "./service/index.ts";
 import { knownHostsForBox } from "./service/known-hosts.ts";
-import { BoxConfigSyncService, BoxTranscriptSyncService, boxConfigChangesPublisher, registerBoxConfigChangeRoutes } from "./sync/index.ts";
+import {
+  BoxConfigSyncService,
+  BoxConfigWatches,
+  BoxTranscriptSyncService,
+  boxConfigChangesPublisher,
+  registerBoxConfigChangeRoutes
+} from "./sync/index.ts";
 import { createTailscaleKeys, type TailscaleCredentials as TailscaleApiCredentials } from "./tailscale/keys.ts";
 import type { TemporaryBoxes } from "./temporary/contract.ts";
 import type { TemporaryBoxTools } from "./temporary/tools.ts";
@@ -132,6 +143,11 @@ export interface DaemonBoxes {
   stop(): Promise<void>;
 }
 
+/** A box that is (or is being set up to be) in use: not on its way out. */
+function isLiveState(state: StoredBox["state"]): boolean {
+  return state === "provisioning" || state === "ready" || state === "unreachable";
+}
+
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -188,6 +204,18 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
     publish: boxConfigChangesPublisher(deps.broadcaster),
     logger: { warn: (message: string) => logger.warn(`[boxes] ${message}`) } as ConstructorParameters<typeof BoxConfigSyncService>[0]["logger"]
   });
+  // Agent config stays in sync for a box's whole life (spec §8.3): every scope a live project box
+  // was synced with — at setup or at a chat's launch — stays watched until its destroy or the
+  // plugin's switch-off. `watchedSync` is the sync the setup step and the agent host's route use.
+  const watches = new BoxConfigWatches({
+    sync: configSync,
+    active: (boxId) => {
+      const record = service?.registry.get(boxId);
+      return (service?.enabled() ?? false) && record?.purpose === "project" && isLiveState(record.state);
+    },
+    logger: { warn: (message) => logger.warn(`[boxes] ${message}`) }
+  });
+  const watchedSync = watches.syncing(configSync);
 
   // Plugin tooling in boxes (spec §10): Better TS Typecheck's engine for the box's target.
   // `registry` is read lazily for the same reason as the hub's records.
@@ -223,7 +251,7 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
       hub,
       buildBootstrap,
       tailscale: (credentials) => createTailscaleKeys({ credentials: () => tailscaleApiCredentials(credentials) }),
-      configSync,
+      configSync: watchedSync,
       tooling,
       blacksmith: createBlacksmithSetupDriver(),
       agentBuilds: builds
@@ -283,10 +311,12 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
       // Build orq-agent now (when no prebuilt one exists) rather than in the first create request.
       void builds.current().catch(() => undefined);
       if (temporaryBoxTools && !disconnectTools) disconnectTools = temporaryBoxTools.connect({ boxes: temporaryBoxes, hub, registry });
+      for (const record of registry.list()) keepConfigInSync(record.id);
     } else {
       // Off means no box traffic at all: live links drop (the boxes keep running and are let back
       // in when the plugin is turned on again).
       hub.disconnectAll("The Ephemeral AI VMs plugin was turned off");
+      watches.releaseAll();
       if (disconnectTools) {
         const disconnect = disconnectTools;
         disconnectTools = null;
@@ -297,8 +327,25 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
   const onPluginsChanged = (response: PluginsResponse): void =>
     followPlugin(response.plugins.some((plugin) => plugin.id === EPHEMERAL_VMS_PLUGIN_ID && plugin.enabled));
 
+  /**
+   * A live project box keeps every managed account home watched (what its setup synced; a chat's
+   * launch adds its own scope through `watchedSync`). Idempotent; the daemon's restart and the
+   * plugin's switch-on start them again for boxes that were set up before.
+   */
+  const keepConfigInSync = (boxId: string): void => {
+    const record = registry.get(boxId);
+    if (!record || record.purpose !== "project") return;
+    if (!isLiveState(record.state)) {
+      watches.release(boxId);
+      return;
+    }
+    if (record.state === "provisioning") return; // the setup's `config` step starts them
+    for (const home of managedAgentHomes(deps.agentAccounts)) watches.keep(boxId, { agent: home.agent, configRoots: [home.home] });
+  };
+
   /** A destroyed box: its sync state, tooling status and contributions go. */
   const forgetIfDestroyed = (record: StoredBox | undefined, boxId: string): void => {
+    if (!record || !isLiveState(record.state)) watches.release(boxId);
     if (record && record.state !== "destroyed") return;
     if (forgotten.has(boxId)) return;
     forgotten.add(boxId);
@@ -354,7 +401,12 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
 
     async start() {
       await boxes.start();
-      unsubscribers.push(registry.onChange((boxId) => forgetIfDestroyed(registry.get(boxId), boxId)));
+      unsubscribers.push(
+        registry.onChange((boxId) => {
+          forgetIfDestroyed(registry.get(boxId), boxId);
+          keepConfigInSync(boxId);
+        })
+      );
       for (const record of registry.list()) if (record.state === "destroyed") forgotten.add(record.id);
     },
 
@@ -363,6 +415,8 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
       agentChat = attachment.agentChat;
       agentProfile = attachment.agentProfile;
       temporaryBoxTools = attachment.temporaryBoxTools;
+      // A closed chat's temporary boxes are destroyed whatever the plugin switch says (they bill either way).
+      attachment.temporaryBoxTools.setCleanup(temporaryBoxes);
 
       // Sessions in box projects never refresh their account on this host (spec §7).
       sessions.setBoxProjectPredicate((path) => registry.locate(path).kind === "box");
@@ -463,7 +517,7 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
         const chat = agentChat;
         registerBoxHostRoutes(app, {
           authorizeHost: (authorization) => chat.authorizeHostRequest(authorization),
-          sync: configSync,
+          sync: watchedSync,
           transcripts,
           logger
         });
@@ -479,6 +533,7 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
       await boxes.stop().catch((error) => logger.error("[boxes] Box service stop failed", errorText(error)));
       await forwards?.dispose().catch((error) => logger.warn("[boxes] Closing dev-server forwards failed", errorText(error)));
       await tooling.stop().catch((error) => logger.warn("[boxes] Tooling stop failed", errorText(error)));
+      watches.releaseAll();
       await configSync.close().catch((error) => logger.warn("[boxes] Config sync stop failed", errorText(error)));
       terminals.dispose();
       await hub.close().catch((error) => logger.warn("[boxes] Hub close failed", errorText(error)));

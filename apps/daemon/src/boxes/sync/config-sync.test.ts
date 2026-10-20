@@ -10,6 +10,7 @@ import { sessionProfilePreparedRootDir } from "@orquester/config";
 import type { BoxSyncScope } from "../contracts.ts";
 import { execBoxHasher, type BoxHasher } from "./box-fs.ts";
 import { BoxConfigSyncService, BoxSyncError, type BoxConfigSyncOptions } from "./config-sync.ts";
+import { BoxConfigWatches } from "./watches.ts";
 import { fakeBoxHub, mappedBoxConnection, type MappedBoxConnection } from "./testing.ts";
 
 const SECRETS = ["ghp_mcpsecret", "ghp_settingssecret", "CREDENTIALS-CONTENT", "PRIVATE-KEY-CONTENT"];
@@ -184,6 +185,29 @@ test("host watchers push a host edit to a watching box on their own", async () =
   await put(join(f.system, "commands", "watched.md"), "Watched.\n");
   await written;
   assert.equal(await readFile(f.box1.local(target), "utf8"), "Watched.\n");
+  await sync.close();
+});
+
+test("a scope synced through BoxConfigWatches.syncing stays watched: a later host edit reaches the box with no launch", async () => {
+  const f = await fixture();
+  const sync = new BoxConfigSyncService({ appdir: f.appdir, hub: f.hub, hostDebounceMs: 20 });
+  const watches = new BoxConfigWatches({ sync, active: (boxId) => boxId === "b1" });
+  await watches.syncing(sync).ensureSynced("b1", f.scope, signal());
+  assert.equal(watches.watched("b1"), 1);
+  await sync.idle();
+  const target = join(f.home, "skills", "later", "SKILL.md");
+  const written = new Promise<void>((resolve) => {
+    const original = f.box1.writeFile.bind(f.box1);
+    f.box1.writeFile = async (path, data, options) => {
+      await original(path, data, options);
+      if (path === target) resolve();
+    };
+  });
+  await put(join(f.system, "skills", "later", "SKILL.md"), "---\nname: later\n---\nAdded on the host.\n");
+  await written;
+  assert.equal(await readFile(f.box1.local(target), "utf8"), "---\nname: later\n---\nAdded on the host.\n");
+  watches.release("b1");
+  assert.equal(watches.watched("b1"), 0);
   await sync.close();
 });
 

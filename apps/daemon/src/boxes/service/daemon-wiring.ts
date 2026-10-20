@@ -44,6 +44,14 @@ export type DaemonBoxParts = Pick<
   "providers" | "hub" | "buildBootstrap" | "tailscale" | "configSync" | "tooling" | "blacksmith" | "agentBuilds"
 >;
 
+/** Every managed account home of an agent that runs in boxes (the setup's `config` step syncs each). */
+export function managedAgentHomes(agentAccounts: Pick<AgentAccountsService, "list" | "homePath">): ManagedAgentHome[] {
+  return agentAccounts
+    .list()
+    .accounts.filter((account) => BOX_AGENTS.includes(account.agent))
+    .map((account) => ({ agent: account.agent as BoxAgentId, accountId: account.id, home: agentAccounts.homePath(account.agent, account.id) }));
+}
+
 export function createDaemonBoxService(host: DaemonBoxHost, parts: DaemonBoxParts): BoxService {
   const { accounts } = host;
   return createBoxService({
@@ -78,11 +86,7 @@ export function createDaemonBoxService(host: DaemonBoxHost, parts: DaemonBoxPart
       },
       knownHosts: (hostName, port) => knownHostsForBox({ keysDir: host.keysDir, home: host.home, host: hostName, port })
     },
-    managedAgentHomes: (): ManagedAgentHome[] =>
-      host.agentAccounts
-        .list()
-        .accounts.filter((account) => BOX_AGENTS.includes(account.agent))
-        .map((account) => ({ agent: account.agent as BoxAgentId, accountId: account.id, home: host.agentAccounts.homePath(account.agent, account.id) })),
+    managedAgentHomes: () => managedAgentHomes(host.agentAccounts),
     pluginEnabled: async () => (await host.plugins.get(EPHEMERAL_VMS_PLUGIN_ID)).enabled,
     onPluginChange: (listener) => {
       const onChanged = (response: PluginsResponse) =>

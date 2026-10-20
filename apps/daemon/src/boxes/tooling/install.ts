@@ -100,8 +100,17 @@ export async function readBoxText(connection: BoxConnection, path: string, maxBy
   const info = await connection.request("fs.stat", { path });
   if (info === null || info.kind !== "file" || info.size > maxBytes) return null;
   const chunks: Buffer[] = [];
-  for await (const chunk of await connection.readFile(path)) {
-    chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : (chunk as Buffer));
+  let total = 0;
+  // Bounded by the stat's size: a file that grew since is read up to it, and never past `maxBytes`.
+  const stream = await connection.readFile(path, { length: info.size });
+  for await (const chunk of stream) {
+    const buffer = typeof chunk === "string" ? Buffer.from(chunk) : (chunk as Buffer);
+    total += buffer.length;
+    if (total > maxBytes) {
+      stream.destroy();
+      return null;
+    }
+    chunks.push(buffer);
   }
   return Buffer.concat(chunks).toString("utf8");
 }
