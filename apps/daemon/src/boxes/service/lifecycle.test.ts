@@ -175,10 +175,13 @@ test("a project box: host paths, config sync, clone at a ref with the workspace 
   const gitconfig = await readFile(join(boxHome, ".gitconfig"), "utf8");
   assert.match(gitconfig, /name = Octo Cat/);
   assert.match(gitconfig, /email = octo@example.com/);
-  assert.match(gitconfig, /helper = !'[^']+' git-credential/);
-  assert.match(gitconfig, /sshCommand = ssh -o UserKnownHostsFile=/);
+  // SSH only: no credential helper, the account's HTTPS URLs rewritten, the git host's keys pinned.
+  assert.doesNotMatch(gitconfig, /git-credential/);
+  assert.match(gitconfig, /helper = \n/);
+  assert.match(gitconfig, /\[url "git@github.com:"\]\n\tinsteadOf = https:\/\/github.com\//);
+  assert.match(gitconfig, /sshCommand = ssh -o UserKnownHostsFile=.* -o StrictHostKeyChecking=yes/);
   assert.ok(!gitconfig.includes("ghp_"), "no token in the box");
-  assert.equal(await readFile(join(boxHome, ".ssh", "orquester_known_hosts"), "utf8"), "");
+  assert.match(await readFile(join(boxHome, ".ssh", "orquester_known_hosts"), "utf8"), /^github\.com ssh-ed25519 /m);
   // The host paths a box mirrors were created.
   assert.ok((await stat(join(base, "daemon", "agent-accounts"))).isDirectory());
   assert.ok((await stat(join(base, "daemon", "agent", "threads"))).isDirectory());

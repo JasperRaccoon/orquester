@@ -268,6 +268,7 @@ export function testBoxService(options: TestServiceOptions): TestService {
     },
     git: {
       identity: async (accountId) => (accountId === "acct" ? { name: "Octo Cat", email: "octo@example.com" } : null),
+      endpoint: async (accountId) => (accountId === "acct" ? { provider: "github", login: "octo" } : null),
       knownHosts: async () => "github.com ssh-ed25519 AAAAtest\n"
     },
     managedAgentHomes: () => [],

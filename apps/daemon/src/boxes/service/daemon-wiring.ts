@@ -5,7 +5,10 @@
  * bootstrap, Tailscale, sync, tooling, the Blacksmith driver).
  */
 
+import { readFile } from "node:fs/promises";
+
 import { EPHEMERAL_VMS_PLUGIN_ID, type PluginsResponse } from "@orquester/api";
+import { parseAccountsConfig } from "@orquester/config";
 
 import type { AccountsService } from "../../accounts.ts";
 import type { AgentAccountsService } from "../../agent-accounts.ts";
@@ -24,6 +27,8 @@ export interface DaemonBoxHost {
   keysDir: string;
   /** The daemon user's home (its `~/.ssh/known_hosts`). */
   home: string;
+  /** `accounts.json`: an account's git endpoint (provider, hosts) for the box's SSH-only git setup. */
+  accountsFile: string;
   accounts: AccountsService;
   agentAccounts: Pick<AgentAccountsService, "list" | "homePath">;
   plugins: Pick<PluginsService, "get" | "events">;
@@ -54,6 +59,22 @@ export function createDaemonBoxService(host: DaemonBoxHost, parts: DaemonBoxPart
       identity: async (accountId) => {
         const account = (await accounts.list()).find((candidate) => candidate.id === accountId);
         return account && account.gitName && account.gitEmail ? { name: account.gitName, email: account.gitEmail } : null;
+      },
+      // Read per call from accounts.json (public fields only; the token stays where it is).
+      endpoint: async (accountId) => {
+        try {
+          const account = parseAccountsConfig(JSON.parse(await readFile(host.accountsFile, "utf8"))).accounts.find((candidate) => candidate.id === accountId);
+          if (!account) return null;
+          return {
+            provider: account.provider,
+            login: account.login,
+            ...(account.email !== undefined ? { email: account.email } : {}),
+            ...(account.baseUrl !== undefined ? { baseUrl: account.baseUrl } : {}),
+            ...(account.sshHost !== undefined ? { sshHost: account.sshHost } : {})
+          };
+        } catch {
+          return null;
+        }
       },
       knownHosts: (hostName, port) => knownHostsForBox({ keysDir: host.keysDir, home: host.home, host: hostName, port })
     },

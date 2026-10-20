@@ -20,7 +20,7 @@
  */
 
 import { EPHEMERAL_VMS_PLUGIN_ID, type PluginsResponse } from "@orquester/api";
-import { agentAccountsDir, boxMcpSettingsPath, type StoredBox } from "@orquester/config";
+import { agentAccountsDir, boxMcpSettingsPath, boxPendingTerminalKillsPath, type StoredBox } from "@orquester/config";
 import type { FastifyInstance } from "fastify";
 
 import type { AccountsService } from "../accounts.ts";
@@ -58,6 +58,7 @@ import { registerMcpBridge } from "./remote/mcp-bridge.ts";
 import { createDaemonBoxService } from "./service/daemon-wiring.ts";
 import { registerBoxMcpRunInBoxRoutes } from "./service/mcp-run-in-box.ts";
 import type { BoxService } from "./service/index.ts";
+import { knownHostsForBox } from "./service/known-hosts.ts";
 import { BoxConfigSyncService, BoxTranscriptSyncService, boxConfigChangesPublisher, registerBoxConfigChangeRoutes } from "./sync/index.ts";
 import { createTailscaleKeys, type TailscaleCredentials as TailscaleApiCredentials } from "./tailscale/keys.ts";
 import type { TemporaryBoxes } from "./temporary/contract.ts";
@@ -207,6 +208,7 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
       baseDir: deps.baseDir,
       keysDir: deps.keysDir,
       home: deps.home,
+      accountsFile: deps.accountsFile,
       accounts: deps.accounts,
       agentAccounts: deps.agentAccounts,
       plugins: deps.plugins,
@@ -234,6 +236,8 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
     registry,
     hub,
     tooling,
+    // Terminals closed while their box was away are ended when it is back, across restarts too.
+    pendingKillsFile: boxPendingTerminalKillsPath(deps.baseDir),
     logger: { warn: (message, meta) => logger.warn(`[boxes] ${message}`, meta ?? "") }
   });
   const gitRoute = createBoxGitRouteResolver(registry);
@@ -380,6 +384,7 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
       registerTokenBroker(hub, tokenBroker);
       registerBoxGitAuth(hub, {
         workspaceAccount: workspaceAccountFromFiles({ accountsFile: deps.accountsFile, workspacesMetaFile: deps.workspacesMetaFile }),
+        knownHosts: (host, port) => knownHostsForBox({ keysDir: deps.keysDir, home: deps.home, host, port }),
         logger: { warn: (message, meta) => logger.warn(`[boxes] ${message}`, meta ?? "") }
       });
       registerMcpBridge(hub, {

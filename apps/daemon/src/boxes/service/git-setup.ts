@@ -1,9 +1,10 @@
 /**
- * The box's git configuration for a project box (spec §7 "Git"): HTTPS credentials come from
- * `orq-agent git-credential` (answered by the host), SSH authenticates through the ssh-agent
- * `orq-agent` forwards to the host (`SSH_AUTH_SOCK` in every process it starts) and trusts the
- * host keys the daemon wrote, and the workspace's git identity is the box user's global identity.
- * No token or private key is ever written to the box.
+ * The box's git configuration for a project box (spec §7 "Git"): git in a box is SSH only. Every
+ * HTTPS URL of the workspace account's host is rewritten to its SSH form (`boxGitConfig` in
+ * `remote/git-auth.ts`), SSH authenticates through the restricted ssh-agent `orq-agent` forwards
+ * to the host (`SSH_AUTH_SOCK` in every process it starts) and trusts only the host keys the daemon
+ * wrote, and the workspace's git identity is the box user's global identity. No git hosting token
+ * and no private key ever reaches the box; credential helpers are reset to none.
  */
 
 import type { BoxOs } from "@orquester/api";
@@ -12,10 +13,12 @@ import { shQuote } from "./box-exec.ts";
 
 export interface BoxGitConfigInput {
   os: BoxOs;
-  /** Absolute path of `orq-agent` in the box (`BoxSysInfo.agentPath`). */
-  agentPath: string;
   /** Box path of the known_hosts file the daemon wrote. */
   knownHostsPath: string;
+  /** Whether that file holds the git host's keys: SSH then refuses any other key (else accept-new). */
+  strictHostKeys: boolean;
+  /** `git config --global --add` entries (`BoxGitConfig.entries`: the `url.<ssh>.insteadOf` rewrites). */
+  entries: readonly { key: string; value: string }[];
   identity: { name: string; email: string } | null;
 }
 
@@ -29,38 +32,38 @@ function configPath(os: BoxOs, path: string): string {
   return os === "win32" ? `"${path.replace(/\\/g, "/")}"` : shQuote(path);
 }
 
-/**
- * The `git` argument lists that configure the box, in order. The first may exit 5 (no helper to
- * unset); every other must succeed. The empty helper entry resets helpers from system config
- * (Git for Windows' credential manager, a distro's), so only `orq-agent` answers.
- */
-export function boxGitConfigCommands(input: BoxGitConfigInput): string[][] {
-  const commands: string[][] = [
-    ["config", "--global", "--unset-all", "credential.helper"],
-    ["config", "--global", "--add", "credential.helper", ""],
-    ["config", "--global", "--add", "credential.helper", `!${configPath(input.os, input.agentPath)} git-credential`],
-    // The host picks the account by repository, so git must pass the path along.
-    ["config", "--global", "credential.useHttpPath", "true"],
-    [
-      "config",
-      "--global",
-      "core.sshCommand",
-      `ssh -o UserKnownHostsFile=${configPath(input.os, input.knownHostsPath)} -o StrictHostKeyChecking=accept-new`
-    ]
-  ];
-  if (input.identity) {
-    commands.push(["config", "--global", "user.name", input.identity.name]);
-    commands.push(["config", "--global", "user.email", input.identity.email]);
-  }
-  return commands;
+/** One `git` invocation of the setup; `mayBeMissing`: exit 5 (nothing to unset) is fine. */
+export interface BoxGitConfigCommand {
+  args: string[];
+  mayBeMissing?: true;
 }
 
-/** The host a clone URL connects to (`git@host:o/r`, `ssh://git@host:7999/o/r`, `https://host/o/r`), or null. */
-export function cloneUrlHost(url: string): { host: string; port: number | null } | null {
-  const scheme = /^([a-z][a-z0-9+.-]*):\/\/(?:[^@/?#]*@)?(\[[^\]]+\]|[^:/?#]+)(?::(\d+))?/i.exec(url);
-  if (scheme) {
-    return { host: scheme[2]!.replace(/^\[|\]$/g, "").toLowerCase(), port: scheme[3] ? Number(scheme[3]) : null };
+/**
+ * The `git` argument lists that configure the box, in order. The empty helper entry resets
+ * helpers from system config (Git for Windows' credential manager, a distro's): git never asks
+ * anything for a password. Each rewrite key is cleared before it is added, so a setup that runs
+ * again (a resume) leaves one copy.
+ */
+export function boxGitConfigCommands(input: BoxGitConfigInput): BoxGitConfigCommand[] {
+  const commands: BoxGitConfigCommand[] = [
+    { args: ["config", "--global", "--unset-all", "credential.helper"], mayBeMissing: true },
+    { args: ["config", "--global", "--add", "credential.helper", ""] },
+    {
+      args: [
+        "config",
+        "--global",
+        "core.sshCommand",
+        `ssh -o UserKnownHostsFile=${configPath(input.os, input.knownHostsPath)} -o StrictHostKeyChecking=${input.strictHostKeys ? "yes" : "accept-new"}`
+      ]
+    }
+  ];
+  for (const key of new Set(input.entries.map((entry) => entry.key))) {
+    commands.push({ args: ["config", "--global", "--unset-all", key], mayBeMissing: true });
   }
-  const scp = /^(?:[^@/]+@)?([^:/]+):(?!\/\/)/.exec(url);
-  return scp ? { host: scp[1]!.toLowerCase(), port: null } : null;
+  for (const entry of input.entries) commands.push({ args: ["config", "--global", "--add", entry.key, entry.value] });
+  if (input.identity) {
+    commands.push({ args: ["config", "--global", "user.name", input.identity.name] });
+    commands.push({ args: ["config", "--global", "user.email", input.identity.email] });
+  }
+  return commands;
 }
