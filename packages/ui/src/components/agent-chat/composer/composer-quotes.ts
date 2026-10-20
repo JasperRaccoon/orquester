@@ -164,6 +164,21 @@ export function splitLeadingQuotes(text: string): { quotes: string[]; body: stri
   return { quotes, body: lines.slice(bodyStart).join("\n") };
 }
 
+/**
+ * A message coming back into a draft — a queued one returned, a rewound one,
+ * a send a reload could not finish — with the blockquotes it opens with taken
+ * back out as quotes, so it returns as it was composed: quotes above, the
+ * user's words in the text. A quote too long to hold leaves the message as
+ * it is, in the text, where nothing of it is lost.
+ */
+export function quotesFromText(text: string): { text: string; quotes: ComposerQuote[] } {
+  const split = splitLeadingQuotes(text);
+  if (split.quotes.length === 0 || split.quotes.some((quote) => quote.length > MAX_COMPOSER_QUOTE_CHARS)) {
+    return { text, quotes: [] };
+  }
+  return { text: split.body, quotes: split.quotes.map((quote) => ({ id: newQuoteId(), text: quote })) };
+}
+
 // ---------------------------------------------------------------------------
 // The draft's list
 // ---------------------------------------------------------------------------

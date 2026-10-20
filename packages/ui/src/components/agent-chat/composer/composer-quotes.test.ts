@@ -13,6 +13,7 @@ import {
   normalizeQuoteText,
   quoteExcerpt,
   quotesEqual,
+  quotesFromText,
   splitLeadingQuotes,
   type ComposerQuote
 } from "./composer-quotes";
@@ -100,6 +101,21 @@ describe("a user message split into its quotes and its body", () => {
 
   it("takes off one level of `>` and an optional space", () => {
     assert.deepEqual(splitLeadingQuotes(">tight\n>  two spaces\n\nbody").quotes, ["tight\n two spaces"]);
+  });
+});
+
+describe("a message coming back into a draft", () => {
+  it("returns as it was composed: its quotes as quotes, its words as the text", () => {
+    const back = quotesFromText(composeQuotedPrompt([q("1", "one"), q("2", "two")], "why?"));
+    assert.deepEqual(back.quotes.map((quote) => quote.text), ["one", "two"]);
+    assert.equal(back.text, "why?");
+    assert.notEqual(back.quotes[0]!.id, back.quotes[1]!.id);
+  });
+
+  it("is left as it is without quotes, or with one too long to hold", () => {
+    assert.deepEqual(quotesFromText("plain [Image #1]"), { text: "plain [Image #1]", quotes: [] });
+    const long = `> ${"x".repeat(MAX_COMPOSER_QUOTE_CHARS + 1)}\n\nbody`;
+    assert.deepEqual(quotesFromText(long), { text: long, quotes: [] });
   });
 });
 

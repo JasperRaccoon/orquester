@@ -33,11 +33,12 @@ describe("persisted quotes", () => {
     );
   });
 
-  it("reads anything that is not a list as no quotes, and bounds the count", () => {
+  it("reads anything that is not a list as no quotes, and keeps every quote of a long one", () => {
     assert.deepEqual(parsePersistedQuotes(undefined), []);
     assert.deepEqual(parsePersistedQuotes({ id: "a", text: "t" }), []);
+    // The bound gates adding; a returned message may take a draft past it.
     const many = Array.from({ length: MAX_COMPOSER_QUOTES + 5 }, (_, index) => ({ id: `q${index}`, text: "t" }));
-    assert.equal(parsePersistedQuotes(many).length, MAX_COMPOSER_QUOTES);
+    assert.equal(parsePersistedQuotes(many).length, MAX_COMPOSER_QUOTES + 5);
   });
 
   it("loads a draft's quotes, and leaves the field off a draft without any", () => {

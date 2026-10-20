@@ -43,7 +43,7 @@ import {
 import { composerTextForDelivery } from "../../../lib/composer-inbox";
 import { textNamesPath } from "./composer-files";
 import { removeImagePlaceholder } from "./composer-images";
-import { mergeQuotes, quotesEqual } from "./composer-quotes";
+import { mergeQuotes, quotesEqual, quotesFromText } from "./composer-quotes";
 import {
   decideStagedAttachmentForRef,
   draftAfterSend,
@@ -248,12 +248,23 @@ export function persistedDraftAfterSend(input: {
  * path the text already names is in the draft already. Nothing is parked
  * behind the composer: a mounted composer owns its draft, and its next save
  * would write over anything left there.
+ *
+ * A message that went out with quotes opens with their blockquotes: they come
+ * back as quotes (`quotesFromText`), answered in `quotes` — the message's own,
+ * for the caller to put after the draft's — and its text is the rest.
  */
 export function draftAfterReturn(input: {
   draft: { text: string; attachments: readonly StagedAttachment[] };
-  message: { text: string; attachments: readonly AttachmentRef[] };
-}): { text: string; attachments: StagedAttachment[]; unstaged: AttachmentRef[] } {
-  let text = input.message.text;
+  message: { text: string; attachments: readonly AttachmentRef[]; quotes?: readonly ComposerQuote[] };
+}): {
+  text: string;
+  attachments: StagedAttachment[];
+  unstaged: AttachmentRef[];
+  quotes: ComposerQuote[];
+} {
+  const quoted = quotesFromText(input.message.text);
+  const quotes = [...(input.message.quotes ?? []), ...quoted.quotes];
+  let text = quoted.text;
   const chips: StagedAttachment[] = [];
   const refused: AttachmentRef[] = [];
   for (const ref of input.message.attachments) {
@@ -280,7 +291,7 @@ export function draftAfterReturn(input: {
     const path = attachmentPathOf(ref);
     return path === undefined || !textNamesPath(merged.text, path);
   });
-  return { ...merged, unstaged };
+  return { ...merged, unstaged, quotes };
 }
 
 /**
@@ -322,7 +333,7 @@ export function persistedDraftAfterReturn(input: {
     draft: { text: input.persisted.text, attachments: input.persisted.attachments.map(storedChip) },
     message: input.message
   });
-  const quotes = mergeQuotes(input.persisted.quotes ?? [], input.message.quotes ?? []);
+  const quotes = mergeQuotes(input.persisted.quotes ?? [], next.quotes);
   return {
     text: withPathsAppended(next.text, next.unstaged),
     attachments: persistableAttachmentRefs(next.attachments),

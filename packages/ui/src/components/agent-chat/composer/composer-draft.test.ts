@@ -260,6 +260,22 @@ describe("the draft's quotes", () => {
     assert.deepEqual(next.quotes, [quote("kept")]);
     assert.equal(next.text, "draft\n\nreturned");
   });
+
+  it("takes a returned quoted message's quotes back out, after the draft's", () => {
+    const next = persistedDraftAfterReturn({
+      persisted: { text: "draft", attachments: [], context: [], quotes: [quote("kept")] },
+      message: { text: "> the passage\n\nabout [Image #1]", attachments: [imageRef("i1")], context: [] }
+    });
+    assert.deepEqual(next.quotes?.map((entry) => entry.text), ["passage kept", "the passage"]);
+    assert.equal(next.text, "draft\n\nabout [Image #1]", "its image keeps its placeholder");
+    assert.deepEqual(next.attachments.map((entry) => entry.id), ["i1"]);
+    const live = draftAfterReturn({
+      draft: { text: "", attachments: [] },
+      message: { text: "> quoted\n\nwhy", attachments: [] }
+    });
+    assert.deepEqual(live.quotes.map((entry) => entry.text), ["quoted"]);
+    assert.equal(live.text, "why");
+  });
 });
 
 describe("when the persisted draft is written", () => {

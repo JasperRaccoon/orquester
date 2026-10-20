@@ -148,6 +148,7 @@ import {
   persistedDraftAfterSend,
   storedChip
 } from "../../components/agent-chat/composer/composer-draft";
+import { quotesFromText } from "../../components/agent-chat/composer/composer-quotes";
 import {
   adoptOutboxLeftovers,
   holdOutboxQueuedAtFront,
@@ -1244,15 +1245,24 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
      * ahead of what the draft holds — its files back as the chips a draft load
      * stages. From a torn-down generation through the thread's live slice or
      * storage, never over this one's stale copy, as `appendToDraft` does.
+     * A quoted send comes back with its quotes as quotes (`quotesFromText`),
+     * as the composer's own failed send does.
      */
     const restoreSend = (turn: OutboxTurn, notice: string): void => {
+      const quoted = quotesFromText(turn.input);
       const restore: FailedSendRestore<StagedAttachment> = {
-        outcome: { kind: "failed", text: turn.input, notice },
-        sent: (turn.attachments ?? []).map(storedChip)
+        outcome: { kind: "failed", text: quoted.text, notice },
+        sent: (turn.attachments ?? []).map(storedChip),
+        ...(quoted.quotes.length > 0 ? { quotes: quoted.quotes } : {})
       };
       if (restoreComposerFailedSend(sessionId, restore)) return;
       const merge = (draft: ComposerDraft): ComposerDraft | null =>
-        persistedDraftAfterSend({ outcome: restore.outcome, sent: restore.sent, persisted: draft });
+        persistedDraftAfterSend({
+          outcome: restore.outcome,
+          sent: restore.sent,
+          quotes: restore.quotes,
+          persisted: draft
+        });
       if (closed) {
         updateThreadDraft(sessionId, merge);
         return;

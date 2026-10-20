@@ -728,7 +728,9 @@ export function ChatComposer({
       const added = next.attachments.filter(
         (chip) => !current.attachments.some((entry) => entry.key === chip.key)
       );
-      const returnedQuotes = message.quotes ?? [];
+      // Its quotes — the blockquotes it opened with, taken back out — go
+      // after the draft's, as its text goes after the draft's text.
+      const returnedQuotes = next.quotes;
       draftRef.current = {
         text: next.text,
         attachments: next.attachments,

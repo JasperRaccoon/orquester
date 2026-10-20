@@ -41,7 +41,11 @@ export interface ComposerQuote {
   text: string;
 }
 
-/** How many quotes one draft holds. */
+/**
+ * How many quotes the toolbar adds to one draft. A gate on adding only: a
+ * message coming back with its own quotes (a failed send, a returned queued
+ * message) keeps every one, as it keeps every file.
+ */
 export const MAX_COMPOSER_QUOTES = 20;
 
 /**
@@ -136,8 +140,9 @@ function isQuote(value: unknown): value is ComposerQuote {
 
 /**
  * A persisted list of quotes, field-wise: every well-formed entry narrowed to
- * its own fields, the first of a repeated id, at most
- * {@link MAX_COMPOSER_QUOTES}. Anything else is dropped, never the whole list.
+ * its own fields, the first of a repeated id. Anything else is dropped, never
+ * the whole list. Not cut to {@link MAX_COMPOSER_QUOTES}: that gates adding,
+ * and a draft a returned message took past it keeps every quote.
  */
 export function parsePersistedQuotes(value: unknown): ComposerQuote[] {
   if (!Array.isArray(value)) return [];
@@ -147,7 +152,6 @@ export function parsePersistedQuotes(value: unknown): ComposerQuote[] {
     if (!isQuote(entry) || seen.has(entry.id)) continue;
     seen.add(entry.id);
     quotes.push({ id: entry.id, text: entry.text });
-    if (quotes.length === MAX_COMPOSER_QUOTES) break;
   }
   return quotes;
 }
