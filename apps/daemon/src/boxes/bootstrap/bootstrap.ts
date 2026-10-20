@@ -518,7 +518,8 @@ $TokenFile = Join-Path $Dir 'bootstrap-token'
 [IO.File]::WriteAllText($TokenFile, ${psQuote(input.bootstrapToken)})
 ${tailscale}
 $Exe = Join-Path $Dir 'orq-agent.exe'
-$Download = "$Exe.download"
+# Ends in .exe: PowerShell runs only PATHEXT files as programs (any other name is a document).
+$Download = Join-Path $Dir 'orq-agent.download.exe'
 Say 'downloading orq-agent (win32-x64)'
 $Until = (Get-Date).AddSeconds(${DOWNLOAD_DEADLINE_SECONDS})
 $Attempt = 0
