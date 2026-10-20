@@ -103,6 +103,7 @@ const ROSTER_COLLAPSED_KEY = "orquester.chat.roster-collapsed";
 import { ChatBannerDock } from "./banners/ChatBannerDock";
 import type { SecretRequestAnswer } from "./banners/SecretRequestCard";
 import { useSecretRequests } from "./banners/use-secret-requests";
+import { useUsageLimitNotices } from "./banners/use-usage-limit-notices";
 import { markSecretRequestClosed } from "../../lib/agent-chat/secret-requests";
 import { ChatComposer } from "./composer/ChatComposer";
 import { ChatErrorBoundary } from "./ChatErrorBoundary";
@@ -356,6 +357,13 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
             }
           ],
     [secretNotice, sessionId]
+  );
+  // Usage-limit recovery: the limited chat's banner and the "switched account" notice, both off
+  // the session summary the daemon keeps current.
+  const usageLimitNotices = useUsageLimitNotices({ session, api, accounts: agentAccounts?.accounts });
+  const dockNotices = React.useMemo(
+    () => (usageLimitNotices.length === 0 ? secretNotices : [...usageLimitNotices, ...(secretNotices ?? [])]),
+    [secretNotices, usageLimitNotices]
   );
 
   // --- the composer overlay's published height -----------------------------
@@ -1298,7 +1306,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 active={active}
                 entries={paintOnly ? undefined : slice.entries}
                 planTitle={planFollowUp ? proposedPlanTitle(planFollowUp.planMarkdown) : null}
-                notices={paintOnly ? undefined : secretNotices}
+                notices={paintOnly ? undefined : dockNotices}
                 secretRequests={paintOnly ? undefined : secretRequests}
                 onAnswerSecret={paintOnly ? undefined : answerSecret}
                 // A question's markdown resolves images and opens file links

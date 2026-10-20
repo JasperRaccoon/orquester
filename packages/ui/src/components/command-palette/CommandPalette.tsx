@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { Box, Search } from "lucide-react";
 import { useOpenLayer } from "../../hooks/use-open-layer";
 import { cn } from "../../lib/cn";
+import { LimitedMarker } from "../ui/limited-marker";
 import { cachedProjectIndex, refreshProjectIndex, type ProjectIndex } from "../../lib/project-index";
 import { jumpToProject } from "../../lib/session-nav";
 import { useApi } from "../../context/orquester-context";
@@ -571,6 +572,7 @@ export const CommandPalette: React.FC = () => {
             <span className="min-w-0 flex-1 truncate">
               <Highlighted text={item.session.title} query={trimmedQuery} />
             </span>
+            <LimitedMarker session={item.session} />
             <span className="min-w-0 shrink truncate text-xs text-neutral-500">
               <Highlighted text={item.project.name} query={trimmedQuery} />
             </span>

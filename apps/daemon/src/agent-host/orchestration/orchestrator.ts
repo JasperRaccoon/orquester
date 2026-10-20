@@ -101,7 +101,7 @@ import {
 
 import type { AccountHome, HistoryImportProgress, McpAppOperation, McpAppReference } from "@orquester/api/agent-chat";
 import { htmlRenderReferenceOfActivityPayload, mcpAppReferenceOfActivityPayload } from "@orquester/api/agent-chat";
-import { parseCausedBy } from "@orquester/api/agent-chat";
+import { parseCausedBy, usageLimitNoticeOf } from "@orquester/api/agent-chat";
 import { runMcpAppRequest } from "../mcp-apps.ts";
 
 import { stat } from "node:fs/promises";
@@ -5771,7 +5771,9 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         : null,
       chatSessionStatus: head.session.status,
       goal: goalSummaryOf(runtime, head),
-      usageLimits: liveUsageLimits.get(threadId) ?? null
+      usageLimits: liveUsageLimits.get(threadId) ?? null,
+      // Usage-limit recovery (`usage-limit.ts`): the limit the thread stopped on, if it still is.
+      usageLimit: usageLimitNoticeOf(runtime.state.items ?? [], turns)
     };
   };
 
