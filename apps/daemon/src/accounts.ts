@@ -820,6 +820,48 @@ export class AccountsService {
     await this.cloneRepo(id, cloneUrl, destName, cwd);
   }
 
+  // boxes: Ephemeral AI VMs (spec 2026-10-19 §7, §11.2). A project box clones IN the box (through
+  // credentials the host answers per request), so it needs the URL a clone would use without the
+  // clone; the Blacksmith setup calls GitHub's REST API with the account's token, host-side only.
+
+  /** `cloneFromInput`'s parse and transport choice, without cloning: the URL and the default dir name. */
+  async resolveCloneTarget(accountId: string, input: string): Promise<{ url: string; name: string }> {
+    const account = await this.ensureSshHost(await this.requireAccount(accountId));
+    const provider = providerFor(account.provider);
+    const parsed = provider.parseRepoUrl(input, this.urlCtx(account));
+    if (!parsed) {
+      const other = PROVIDER_IDS.filter((providerId) => providerId !== account.provider).some(
+        (providerId) => providerFor(providerId).parseRepoUrl(input, {}) !== null
+      );
+      throw new AccountError(
+        400,
+        other
+          ? `That URL belongs to a different provider — this workspace is bound to a ${account.provider} account.`
+          : "Could not parse the repository URL for this account's provider."
+      );
+    }
+    const url = pickCloneUrl(account, await provider.cloneUrls(this.credsOf(account), parsed));
+    if (!url) {
+      throw new AccountError(502, "The repository exposes no clone URL (neither HTTP(S) nor SSH).");
+    }
+    return { url, name: repoNameFrom(url) };
+  }
+
+  /** The URL `cloneCreatedRepo` would clone a just-created repo over. */
+  async cloneUrlForRepo(id: string, repo: Pick<RepoSummary, "sshUrl" | "httpsUrl">): Promise<string> {
+    const url = pickCloneUrl(await this.requireAccount(id), { ssh: repo.sshUrl, https: repo.httpsUrl });
+    if (!url) {
+      throw new AccountError(502, "The repository exposes no clone URL (neither HTTP(S) nor SSH).");
+    }
+    return url;
+  }
+
+  /** The account's REST token, or null when it has none. Host-only: never returned by a route or logged. */
+  async hostingToken(id: string): Promise<string | null> {
+    return (await this.requireAccount(id)).token || null;
+  }
+  // boxes: end
+
   /**
    * The `-c` config and env a remote git command runs with — exactly what a clone uses. SSH URLs
    * pin the account's key through `GIT_SSH_COMMAND` (no token in the URL/argv) rather than relying
