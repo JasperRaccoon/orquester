@@ -72,7 +72,7 @@ export function asSearchProcess(proc: BoxProcess): SearchProcess {
 
 /** A `SearchSpawn` that runs in the box (`cwd` is a host path). Windows boxes print `/` separators too. */
 export function boxSearchSpawn(fs: BoxProjectFs): SearchSpawn {
-  const windows = fs.connection.sys.os === "win32";
+  const windows = fs.connection.sys.os === "win32" || fs.connection.paths.kind === "windows-prefix";
   return (command, args, cwd) => {
     const finalArgs = windows && command === "rg" ? ["--path-separator", "/", ...args] : args;
     const proc = fs.exec({ command, args: finalArgs, cwd });

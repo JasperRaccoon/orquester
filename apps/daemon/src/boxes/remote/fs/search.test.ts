@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { once } from "node:events";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -46,7 +45,7 @@ function abortOnSpawn(connection: BoxDiskConnection, command: string, controller
 }
 
 async function killed(proc: BoxProcess): Promise<void> {
-  if (proc.exitCode === null && proc.signalCode === null) await once(proc, "exit");
+  if (proc.exitCode === null && proc.signalCode === null) await new Promise<void>((resolve) => proc.once("exit", () => resolve()));
   assert.ok(proc.killed || proc.signalCode !== null, "the box process was killed");
 }
 

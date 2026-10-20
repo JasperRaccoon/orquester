@@ -25,6 +25,7 @@ export class BoxPaths {
 
   /** The box path of an absolute host path (normalized first: `..` and `//` never reach the box). */
   toBox(hostPath: string): string {
+    if (!posix.isAbsolute(hostPath)) throw new Error(`Not an absolute host path: ${hostPath}`);
     return hostToBoxPath(this.map, posix.resolve(hostPath));
   }
 

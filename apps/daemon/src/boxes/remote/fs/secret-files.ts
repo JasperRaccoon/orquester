@@ -302,8 +302,13 @@ export function watchBoxDir(fs: BoxProjectFs, dir: string, onChange: (filename: 
     onChange(null);
     fail(new Error("The box link changed; the watch is re-armed by the next check."));
   });
+  // A failed watch is dead: it reports once, then stays silent until the service closes it.
+  let dead = false;
   const fail = (error: Error): void => {
-    if (closed) return;
+    if (closed || dead) return;
+    dead = true;
+    stopEvents();
+    stopStatus();
     onError(error);
   };
   const handle = {

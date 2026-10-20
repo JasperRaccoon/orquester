@@ -382,6 +382,7 @@ test("POST /api/fs/upload streams a multi-MB body into the box, with conflicts",
   assert.equal(invalid.statusCode, 400);
   // No temp files left behind.
   assert.deepEqual((await readdir(h.local("assets"))).sort(), ["data (1).bin", "data.bin"]);
+  assert.deepEqual((await readdir(h.local())).filter((name) => name.startsWith(".orq-upload-")), []);
   await hostStubIsEmpty(h);
 });
 

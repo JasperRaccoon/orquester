@@ -289,11 +289,8 @@ export class BoxProjectFs implements ProjectFs {
 
   async rm(path: string, options: { recursive?: boolean; force?: boolean } = {}): Promise<void> {
     await this.call(() =>
-      this.connection.request("fs.rm", {
-        path: this.toBox(path),
-        ...(options.recursive !== undefined ? { recursive: options.recursive } : {}),
-        ...(options.force !== undefined ? { force: options.force } : {})
-      })
+      // Both flags always explicit: an `orq-agent` passing an absent one on as `undefined` must not refuse the call.
+      this.connection.request("fs.rm", { path: this.toBox(path), recursive: options.recursive ?? false, force: options.force ?? false })
     );
   }
 
