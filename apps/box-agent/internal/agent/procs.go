@@ -77,16 +77,18 @@ func (r *ring) bounds() (start, total int64) {
 	return r.start, r.total
 }
 
-// read returns buffered output at `offset` (moved up to the buffer start if
-// it fell behind), or a channel to wait on when there is nothing yet.
-func (r *ring) read(offset int64, limit int) (stream byte, data []byte, next int64, finished bool, wait <-chan struct{}) {
+// read returns buffered output at `offset`, or a channel to wait on when
+// there is nothing yet. `overrun` reports that the buffer has already moved
+// past `offset`: the bytes there are gone, and a reader that skipped them
+// would silently desynchronise (callers position at `bounds` first).
+func (r *ring) read(offset int64, limit int) (stream byte, data []byte, next int64, finished bool, wait <-chan struct{}, overrun bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if offset < r.start {
-		offset = r.start
+		return 0, nil, offset, false, nil, true
 	}
 	if offset >= r.total {
-		return 0, nil, offset, r.finished, r.changed
+		return 0, nil, offset, r.finished, r.changed, false
 	}
 	i := sort.Search(len(r.chunks), func(i int) bool {
 		return r.chunks[i].offset+int64(len(r.chunks[i].data)) > offset
@@ -98,7 +100,7 @@ func (r *ring) read(offset int64, limit int) (stream byte, data []byte, next int
 	}
 	out := make([]byte, len(piece))
 	copy(out, piece)
-	return chunk.stream, out, offset + int64(len(out)), false, nil
+	return chunk.stream, out, offset + int64(len(out)), false, nil, false
 }
 
 // detachedProc is a process started with `detach`: it keeps running and

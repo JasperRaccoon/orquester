@@ -53,6 +53,9 @@ var secretEnv = []string{
 	"ORQ_BOOTSTRAP_TOKEN_FILE",
 	"ACTIONS_ID_TOKEN_REQUEST_TOKEN",
 	"ACTIONS_ID_TOKEN_REQUEST_URL",
+	// Container boxes get the Tailscale auth key in env (the bootstrap unsets
+	// it in its own shell, but orq-agent's env is what children inherit).
+	"ORQ_TAILSCALE_AUTHKEY",
 }
 
 // LoadConfig reads the configuration. `dataDir` overrides ORQ_DATA_DIR.
@@ -96,15 +99,24 @@ func LoadConfig(version, dataDir string) (Config, error) {
 }
 
 // daemonClient is the HTTP client for daemon traffic: through ORQ_PROXY when
-// set, else Go's default (which honours HTTPS_PROXY/NO_PROXY).
+// set, else Go's default (which honours HTTPS_PROXY/NO_PROXY). It never
+// follows a redirect: requests carry the box's credential or bootstrap token,
+// and the daemon never redirects them, so a 3xx is answered as is (and fails)
+// instead of replaying the request — and its Authorization — elsewhere.
 func daemonClient(cfg Config) *http.Client {
+	client := &http.Client{CheckRedirect: refuseRedirect}
 	if cfg.Proxy == "" {
-		return &http.Client{}
+		return client
 	}
 	proxy, _ := url.Parse(cfg.Proxy)
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = http.ProxyURL(proxy)
-	return &http.Client{Transport: transport}
+	client.Transport = transport
+	return client
+}
+
+func refuseRedirect(*http.Request, []*http.Request) error {
+	return http.ErrUseLastResponse
 }
 
 // DefaultDataDir: `/var/lib/orq-agent` as root, `~/.orq-agent` otherwise, `C:\orq\agent` on Windows.
