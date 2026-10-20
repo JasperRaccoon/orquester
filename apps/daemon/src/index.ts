@@ -141,6 +141,8 @@ import { RecentProjectsService, describeProjectPath } from "./recent-projects";
 import { SavedPromptsService, publishSavedPromptEvents, registerSavedPromptRoutes } from "./saved-prompts.ts";
 import { RepoIdentitiesService, publishRepoIdentityEvents } from "./repo-identities/service.ts";
 import { registerRepoIdentityRoutes } from "./repo-identities/routes.ts";
+import { GitHubLinkPreviewService } from "./github-links/service.ts";
+import { registerGitHubLinkRoutes } from "./github-links/routes.ts";
 import { SecretVaultStore } from "./secret-files/vault-store.ts";
 import { SecretFilesService } from "./secret-files/service.ts";
 import { registerSecretFilesRoutes } from "./secret-files/routes.ts";
@@ -723,6 +725,20 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     logger: console
   });
   await repoIdentities.load();
+  // GitHub link previews for the chat's link pills: read with the git account bound to the
+  // project's workspace when it has a GitHub token (else another stored GitHub account, else
+  // anonymously). In memory only; the token never leaves the service.
+  const githubLinks = new GitHubLinkPreviewService({
+    resolveCredential: async ({ owner, projectPath }) => {
+      const described = projectPath ? describeProjectPath(resolved.workspacesDir, projectPath) : null;
+      const preferredAccountId = described
+        ? (await readWorkspacesMeta(resolved.workspacesMetaFile)).workspaces.find((w) => w.name === described.workspace)
+            ?.gitAccountId
+        : undefined;
+      return accounts.githubReadCredential({ owner, preferredAccountId: preferredAccountId ?? null });
+    },
+    logger: console
+  });
   // Built-in plugins (Settings → Plugins; plugins spec §4–5): plugins.json, the TypeScript engine install and
   // its hourly update check, and the preload new sessions load through NODE_OPTIONS. Started before
   // any transport serves or any chat or workflow run starts, so new sessions already see the
@@ -1335,7 +1351,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   agentChat.setSecretRequests(secretRequests);
   const services: Services = {
     secretRequests,
-    registry, sessions, grokDeviceLink, codexDeviceLink, claudeOAuthLink, accounts, git, gitWatcher, todos, recentProjects, savedPrompts, repoIdentities, usage, usageTokens, chatThreadUsage, subagentCacheTtl, push, broadcaster, agentAccounts, browsers, urlWatcher, agentChat,
+    registry, sessions, grokDeviceLink, codexDeviceLink, claudeOAuthLink, accounts, git, gitWatcher, todos, recentProjects, savedPrompts, repoIdentities, githubLinks, usage, usageTokens, chatThreadUsage, subagentCacheTtl, push, broadcaster, agentAccounts, browsers, urlWatcher, agentChat,
     plugins,
     secretFiles,
     desktops, desktopAudio,
@@ -1681,6 +1697,8 @@ interface Services {
   savedPrompts: SavedPromptsService;
   /** Daemon-owned repo identities (a label and icon per git repo), shared by every client. */
   repoIdentities: RepoIdentitiesService;
+  /** GitHub link previews for the chat's link pills. Optional: route tests build a partial `services`. */
+  githubLinks?: GitHubLinkPreviewService;
   /** Built-in plugins (Settings → Plugins): plugins.json, the TypeScript engine (tsrs or tsc-rs) install, the session preload. */
   plugins: PluginsService;
   /** The "Secret files" plugin's vaults and sync engine: ONE instance both transports share. Optional: route tests build a partial `services`. */
@@ -4369,6 +4387,10 @@ export function createServer(
   // Repo identities (spec 2026-10-18 §2). Both transports; the bearer hook gates HTTP like every
   // /api route — no ?token= exemption (clients fetch icon bytes with auth).
   registerRepoIdentityRoutes(app, { service: services.repoIdentities });
+  // GitHub link previews (the chat's link pills). Both transports; the bearer hook gates HTTP.
+  if (services.githubLinks) {
+    registerGitHubLinkRoutes(app, { service: services.githubLinks });
+  }
   if (services.secretFiles) {
     registerSecretFilesRoutes(app, { service: services.secretFiles, logger: console });
   }

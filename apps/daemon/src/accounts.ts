@@ -1060,6 +1060,29 @@ export class AccountsService {
     return provider.listPullRequests(creds, repo, opts);
   }
 
+  /**
+   * The stored GitHub token a read-only preview of `owner`'s repository runs with (chat link
+   * previews), or null to read anonymously. Prefers the account bound to the project's workspace,
+   * then the account whose login is `owner`, then any GitHub account with a token: any of them
+   * reads what is public, and the user's own accounts may read what is private. The token stays
+   * in the daemon — callers put it in an `Authorization` header and nowhere else.
+   */
+  async githubReadCredential(opts: {
+    owner: string;
+    preferredAccountId?: string | null;
+  }): Promise<{ accountId: string; token: string } | null> {
+    const candidates = (await this.read()).accounts.filter(
+      (account): account is Account & { token: string } =>
+        account.provider === "github" && typeof account.token === "string" && account.token.length > 0
+    );
+    const owner = opts.owner.toLowerCase();
+    const chosen =
+      candidates.find((account) => opts.preferredAccountId && account.id === opts.preferredAccountId) ??
+      candidates.find((account) => account.login.toLowerCase() === owner) ??
+      candidates[0];
+    return chosen ? { accountId: chosen.id, token: chosen.token } : null;
+  }
+
   /** One page of the repo's releases, newest first (GitHub only; others `{items: [], unsupported: true}`). */
   async listReleases(
     accountId: string | null,
