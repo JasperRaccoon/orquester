@@ -66,8 +66,16 @@ async function isFile(path: string, fs: ClaudeNamesFs): Promise<boolean> {
   return (await kindOf(path, fs)) === "file";
 }
 
+/**
+ * The most bytes read from one file here. These are config files (`.mcp.json`, `SKILL.md`,
+ * `~/.claude.json`), far below it; a larger one is treated as unreadable.
+ */
+export const MAX_CLAUDE_FILE_BYTES = 64 * 1024 * 1024;
+
 async function readText(file: string, fs: ClaudeNamesFs): Promise<string> {
-  return (await fs.read(file)).toString("utf8");
+  const bytes = await fs.read(file, { length: MAX_CLAUDE_FILE_BYTES + 1 });
+  if (bytes.length > MAX_CLAUDE_FILE_BYTES) throw new Error(`${file} is larger than ${MAX_CLAUDE_FILE_BYTES} bytes`);
+  return bytes.toString("utf8");
 }
 
 /** The `name` of a markdown file's frontmatter, when it is a non-empty string. */

@@ -117,22 +117,33 @@ async function collect(stream: Readable, maxBytes: number): Promise<Buffer> {
 
 /**
  * A whole box file (or `length` bytes from `offset`); null when it does not exist. At most
- * `maxBytes` (default {@link MAX_SYNC_FILE_BYTES}) are accepted, whatever size the box claims.
+ * `maxBytes` (default {@link MAX_SYNC_FILE_BYTES}, always finite) are accepted, whatever size the
+ * box claims: a file the stat already shows past it fails before any byte is read. The read
+ * always names its `length` (the stat's size from `offset` when the caller gave none), so the box
+ * sends no more than that: a file that grew since the stat is read up to the stat's size.
  */
 export async function readBoxFile(
   connection: BoxConnection,
   hostPath: string,
   options: { offset?: number; length?: number; maxBytes?: number; signal?: AbortSignal } = {}
 ): Promise<Buffer | null> {
+  const maxBytes = options.maxBytes ?? MAX_SYNC_FILE_BYTES;
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) throw new RangeError(`maxBytes must be a byte count (got ${maxBytes})`);
+  const offset = options.offset ?? 0;
   const info = await boxStat(connection, hostPath, options.signal);
   if (info === null || info.kind !== "file") return null;
-  if (options.length === 0) return Buffer.alloc(0);
+  const available = Math.max(0, info.size - offset);
+  if (Math.min(options.length ?? available, available) > maxBytes) throw new Error(`box file larger than ${maxBytes} bytes`);
+  // An explicit `length` past the stat's size may still find bytes (the file grew): ask for at most
+  // one past `maxBytes` so `collect` can tell such a file from one at the limit.
+  const length = options.length === undefined ? available : Math.min(options.length, maxBytes + 1);
+  if (length === 0) return Buffer.alloc(0);
   const stream = await connection.readFile(boxPathOf(connection, hostPath), {
-    offset: options.offset,
-    length: options.length,
+    ...(offset !== 0 ? { offset } : {}),
+    length,
     signal: options.signal
   });
-  return collect(stream, options.maxBytes ?? MAX_SYNC_FILE_BYTES);
+  return collect(stream, maxBytes);
 }
 
 export async function writeBoxFile(connection: BoxConnection, hostPath: string, data: Buffer | Readable, mode: number): Promise<void> {
@@ -316,7 +327,8 @@ async function readHashBatch(connection: BoxConnection, items: readonly BoxHashI
       continue;
     }
     const hash = createHash("sha256");
-    const length = item.length === undefined ? undefined : Math.min(item.length, info.size);
+    // Always a bounded read: the stat's size (or the prefix asked for), never "until the box stops".
+    const length = item.length === undefined ? info.size : Math.min(item.length, info.size);
     if (length !== 0) {
       const stream = await connection.readFile(boxPathOf(connection, item.path), { length, signal });
       for await (const chunk of stream) hash.update(chunk as Buffer);
