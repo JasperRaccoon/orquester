@@ -46,6 +46,28 @@ function shortStatusLines(status: GitStatusResponse): string[] {
   });
 }
 
+/**
+ * `git status --short`-style text of `path` within `maxBytes` (a line count past the cap): the
+ * handoffs' summary of the working tree — a workflow agent's failover and a chat continued in
+ * another agent read it alike.
+ */
+export async function readGitStatusShort(git: Pick<ProjectOpsDeps["git"], "status">, path: string, maxBytes: number): Promise<string> {
+  const status = await git.status(path);
+  if (!status.isRepo) return "(not a git repository)";
+  const lines = shortStatusLines(status);
+  if (lines.length === 0) return "(no changes)";
+  let out = "";
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = `${lines[index]}\n`;
+    if (Buffer.byteLength(out + line, "utf8") > maxBytes - 40) {
+      out += `… (${lines.length - index} more)\n`;
+      break;
+    }
+    out += line;
+  }
+  return out.trimEnd();
+}
+
 export function createProjectOps(deps: ProjectOpsDeps): ProjectOps {
   const api = (): DaemonApi => {
     const resolved = typeof deps.api === "function" ? deps.api() : deps.api;
@@ -113,21 +135,8 @@ export function createProjectOps(deps: ProjectOpsDeps): ProjectOps {
       return join(read(deps.workspacesDir), workspace, name);
     },
 
-    async gitStatusShort(path: string, maxBytes: number): Promise<string> {
-      const status = await deps.git.status(path);
-      if (!status.isRepo) return "(not a git repository)";
-      const lines = shortStatusLines(status);
-      if (lines.length === 0) return "(no changes)";
-      let out = "";
-      for (let index = 0; index < lines.length; index += 1) {
-        const line = `${lines[index]}\n`;
-        if (Buffer.byteLength(out + line, "utf8") > maxBytes - 40) {
-          out += `… (${lines.length - index} more)\n`;
-          break;
-        }
-        out += line;
-      }
-      return out.trimEnd();
+    gitStatusShort(path: string, maxBytes: number): Promise<string> {
+      return readGitStatusShort(deps.git, path, maxBytes);
     },
 
     async currentBranch(path: string): Promise<string | undefined> {

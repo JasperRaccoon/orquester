@@ -481,7 +481,9 @@ function cloneLineage(lineage: ThreadLineage): ThreadLineage {
     createdAt: lineage.createdAt,
     ...(lineage.delegationDepth !== undefined ? { delegationDepth: lineage.delegationDepth } : {}),
     ...(lineage.agentCreated === true ? { agentCreated: true as const } : {}),
-    ...(lineage.workflowOwned === true ? { workflowOwned: true as const } : {})
+    ...(lineage.workflowOwned === true ? { workflowOwned: true as const } : {}),
+    ...(lineage.sourceAgent !== undefined ? { sourceAgent: lineage.sourceAgent } : {}),
+    ...(lineage.sourceModel !== undefined ? { sourceModel: lineage.sourceModel } : {})
   };
 }
 
@@ -495,7 +497,10 @@ function lineageFromRecord(record: NonNullable<SessionRecord["lineage"]>): Threa
     // Unified MCP design 2026-10-15 §13 c: only a child a chat tool created is its parent agent's.
     ...(record.agentCreated === true ? { agentCreated: true as const } : {}),
     // §5.4: inherited workflow ownership, stamped at creation; survives the creator's tab closing.
-    ...(record.workflowOwned === true ? { workflowOwned: true as const } : {})
+    ...(record.workflowOwned === true ? { workflowOwned: true as const } : {}),
+    // A continuation in another agent or account: the parent's adapter and model at the fork.
+    ...(record.sourceAgent !== undefined ? { sourceAgent: record.sourceAgent } : {}),
+    ...(record.sourceModel !== undefined ? { sourceModel: record.sourceModel } : {})
   };
 }
 

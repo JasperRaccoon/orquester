@@ -10,14 +10,15 @@ import { z } from "zod";
 import type { ForkSessionRequest, ForkSessionResponse, MergeBackActionResponse, MergeBackResponse, SessionSummary } from "@orquester/api";
 import { agentChatRoutes, SETTLED_TURN_STATES as SETTLED, startedTurns } from "@orquester/api/agent-chat";
 import { canonicalProject } from "../addressing.ts";
-import { findAgent, loadAgents } from "../agents.ts";
+import { findAgent, findModel, loadAgents, resolveModelSelection, validateAccountId } from "../agents.ts";
 import { ToolError, expectOk } from "../errors.ts";
-import { listSessions, postIdempotent, readThread, requireChatSession } from "../reads.ts";
+import { listSessions, postIdempotent, readThread, readThreadHead, requireChatSession } from "../reads.ts";
 import { clipText, MAX_ECHO_CHARS, toSafeToolError } from "../result.ts";
 import { chatDetail } from "../views.ts";
 import { defineTool, MUTATING, type AnyOrquesterTool, type ScopeClaim } from "../catalog/contract.ts";
 import { chatThreadRef, sessionCard, sessionClaim, threadCaller } from "./session-access.ts";
-import { MAX_RUNNING_SESSIONS_PER_PROJECT } from "./sessions.ts";
+import { MAX_RUNNING_SESSIONS_PER_PROJECT, optionsSchema } from "./sessions.ts";
+import { launchModel } from "./messages.ts";
 import { profileNames, profileRef, resolveProfileArg } from "../profiles.ts";
 
 // Every call goes through the daemon's own routes (agentChatRoutes.fork, .mergeBack, .mergeBackItem), so the GUI's
@@ -87,18 +88,64 @@ async function forkWithProfile(api: Parameters<typeof readThread>[0], target: st
   }
 }
 
+/**
+ * The fork's agent, model, options and account (`agent`, `model`, `options`, `accountId`), checked
+ * as create_session checks them. Another agent needs a model from ITS catalogue (named, else its
+ * launch default); the same agent keeps its own unless one is named. Nothing named: `{}`.
+ */
+async function forkTarget(
+  api: Parameters<typeof readThread>[0],
+  summary: SessionSummary,
+  args: { agent?: string; model?: string; options?: Record<string, string | boolean>; accountId?: string }
+): Promise<Pick<ForkSessionRequest, "refId" | "accountId" | "modelSelection"> & { isLegacy?: true }> {
+  const sameAgent = args.agent === undefined || args.agent === summary.refId;
+  if (sameAgent && args.model === undefined && args.options === undefined && args.accountId === undefined) return {};
+  const refId = args.agent ?? summary.refId;
+  const agent = findAgent(await loadAgents(api, { includeLegacyModels: true }), refId);
+  if (!agent.enabled) throw new ToolError("INVALID_ARGUMENT", `${refId} is not available on this host (not installed or disabled).`);
+  if (args.accountId !== undefined && args.accountId !== "system" && agent.adapter === "opencode") {
+    throw new ToolError("INVALID_ARGUMENT", "OpenCode chats run under the server's own identity: leave accountId out.");
+  }
+  const accountId = validateAccountId(agent, args.accountId);
+  let modelSelection: ForkSessionRequest["modelSelection"];
+  let isLegacy = false;
+  if (!sameAgent) {
+    const model = launchModel(agent, args.model, undefined);
+    isLegacy = model.isLegacy;
+    const selection = resolveModelSelection(agent, { model: model.slug, ...(args.options !== undefined ? { options: args.options } : {}) });
+    modelSelection = { model: selection.model, options: selection.options };
+  } else if (args.model !== undefined || args.options !== undefined) {
+    const current = (await readThreadHead(api, summary.id)).head.modelSelection;
+    const model = args.model !== undefined ? findModel(agent, args.model) : undefined;
+    isLegacy = model?.isLegacy === true;
+    const selection = resolveModelSelection(agent, { ...(args.model !== undefined ? { model: args.model } : {}), ...(args.options !== undefined ? { options: args.options } : {}), current });
+    modelSelection = { ...(current.instanceId !== undefined ? { instanceId: current.instanceId } : {}), model: selection.model, options: selection.options };
+  }
+  return {
+    ...(!sameAgent ? { refId } : {}),
+    ...(accountId !== undefined ? { accountId } : {}),
+    ...(modelSelection !== undefined ? { modelSelection } : {}),
+    ...(isLegacy ? { isLegacy: true as const } : {})
+  };
+}
+
 export const forkSessionTool = defineTool({
   name: "fork_session",
   title: "Fork a chat session",
   description:
-    "Fork a chat into a new idle tab (same project, agent, settings, Agent Profile) holding its conversation through `throughTurn` (transcript numbers; default: the latest finished turn) or up to `messageId`. Grok forks are handed the transcript (`strategy`). A bad profile fails it. send_message the fork work; it returns its result with merge_back_session.",
+    "Fork a chat into a new idle tab (same project, agent, settings, Agent Profile) holding its conversation through `throughTurn` (transcript numbers; default: the latest finished turn) or up to `messageId`. Grok forks are handed the transcript (`strategy`). A bad profile fails it. send_message the fork work; it returns its result with merge_back_session. " +
+    "`agent` (another one) or `accountId` (another account) CONTINUES it there instead: never native — a fresh session handed the newest whole messages (≤64 KB, `handoff` says how many) with its first message, `strategy` \"transcript\"; earlier history stays readable with read_transcript on the original. `model`/`options` as create_session (another agent: its own model, default its launch default).",
   chatNote: "Default: this chat (your running turn is not included).",
   input: {
     sessionId: catalogSessionId.optional(),
     throughTurn: z.number().int().min(0).optional().describe("Keep turns 1..N (0: none)."),
     messageId: z.string().min(1).max(200).optional().describe("Fork at this message (a user message: just before it)."),
     title: z.string().trim().min(1).max(200).optional(),
-    profile: z.string().trim().min(1).max(200).nullable().optional().describe("Agent Profile id/name; null: Global.")
+    profile: z.string().trim().min(1).max(200).nullable().optional().describe("Agent Profile id/name; null: Global."),
+    agent: z.string().min(1).max(64).optional().describe("Continue in this agent (list_agents); default: the same one."),
+    model: z.string().min(1).max(200).optional().describe("From list_agents, for the fork's agent."),
+    options: optionsSchema.optional(),
+    accountId: z.string().min(1).max(200).optional().describe("From list_agents, or \"system\"; default: same agent's, else the agent's default.")
   },
   audiences: ["external", "chat"],
   toolset: "core",
@@ -116,7 +163,11 @@ export const forkSessionTool = defineTool({
       ...(args.throughTurn !== undefined ? [{ label: "Through turn", value: String(args.throughTurn) }] : []),
       ...(args.messageId !== undefined ? [{ label: "At message", value: args.messageId }] : []),
       ...(args.title !== undefined ? [{ label: "Fork title", value: args.title }] : []),
-      ...(args.profile !== undefined ? [{ label: "Agent Profile", value: args.profile ?? "Global" }] : [])
+      ...(args.profile !== undefined ? [{ label: "Agent Profile", value: args.profile ?? "Global" }] : []),
+      ...(args.agent !== undefined ? [{ label: "Continue in agent", value: args.agent }] : []),
+      ...(args.model !== undefined ? [{ label: "Model", value: args.model }] : []),
+      ...(args.options !== undefined ? [{ label: "Options", value: JSON.stringify(args.options) }] : []),
+      ...(args.accountId !== undefined ? [{ label: "Account", value: args.accountId }] : [])
     ]),
   annotations: MUTATING,
   resultKind: "json",
@@ -133,21 +184,32 @@ export const forkSessionTool = defineTool({
     if (args.title !== undefined) body.title = args.title;
     if (args.messageId !== undefined) body.messageId = args.messageId;
     if (args.throughTurn !== undefined) Object.assign(body, await forkCut(api, target, args.throughTurn, caller !== null && target === caller.threadId));
+    // Another agent, model or account: checked as create_session checks them, before anything is made.
+    const { isLegacy, ...forkAt } = await forkTarget(api, summary, args);
+    Object.assign(body, forkAt);
     // A chat's fork is its own child (§13 c): the route keeps the flag only from the forked chat's own agent.
     if (caller !== null) body.agentCreated = true;
     const result = await forkWithProfile(api, target, body, profile === undefined ? (summary.profileId ?? null) : profile);
+    // A continuation says where it runs and what its transcript carries.
+    const continued = {
+      ...(result.lineage.sourceAgent !== undefined ? { agent: result.session.refId, accountId: result.session.accountId || "system" } : {}),
+      ...(forkAt.modelSelection !== undefined ? { model: forkAt.modelSelection.model } : {}),
+      ...(isLegacy ? { isLegacy: true } : {}),
+      ...(result.handoff !== undefined ? { handoff: result.handoff } : {})
+    };
     if (caller !== null) {
       return {
         sessionId: result.session.id,
         title: result.session.title,
         strategy: result.strategy,
+        ...continued,
         profile: profileRef(result.session.profileId, await profileNames(api)),
         ...(result.lineage.forkedFrom ? { forkedFrom: result.lineage.forkedFrom } : {}),
         ...chatThreadRef(caller, sessions, result.session, target === caller.threadId ? "fork" : "thread")
       };
     }
     try {
-      return { strategy: result.strategy, lineage: result.lineage, session: await chatDetail(api, result.session.id) };
+      return { strategy: result.strategy, ...continued, lineage: result.lineage, session: await chatDetail(api, result.session.id) };
     } catch (error) {
       // The fork exists now: a caller told only that the read failed would fork again.
       const failure = toSafeToolError(error).structuredContent;

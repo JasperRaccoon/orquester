@@ -731,9 +731,9 @@ async function sendFromChat(args: SendArgs, ctx: CallContext, caller: ThreadCall
 // create_session (§4 row 10, §4.1)
 // ---------------------------------------------------------------------------
 
-type AccountSource = "requested" | "inherited" | "family-default";
+export type AccountSource = "requested" | "inherited" | "family-default";
 
-interface ResumeRow { id: string; agent: string; title: string; home: "system" | "account"; accountId?: string }
+export interface ResumeRow { id: string; agent: string; title: string; home: "system" | "account"; accountId?: string }
 
 /** A delegated task's default tab title: "Task: " and the prompt's first line, cut short. */
 function delegateTitle(prompt: string): string {
@@ -769,7 +769,7 @@ function agentDepth(sessions: readonly SessionSummary[], threadId: string): numb
  * default with): the named one — legacy accepted and marked —, else the inherited one while the
  * catalogue still lists it, else the catalogue default (never a legacy model).
  */
-function launchModel(agent: AgentView, requested: string | undefined, inherited: string | undefined): { slug: string; isLegacy: boolean } {
+export function launchModel(agent: AgentView, requested: string | undefined, inherited: string | undefined): { slug: string; isLegacy: boolean } {
   if (requested !== undefined) {
     const model = findModel(agent, requested);
     return { slug: model.slug, isLegacy: model.isLegacy === true };
@@ -783,7 +783,7 @@ function launchModel(agent: AgentView, requested: string | undefined, inherited:
 }
 
 /** The account a launch names and where it came from (D-24): requested, this chat's (same agent), or the family default. */
-function launchAccount(agent: AgentView, requested: string | undefined, inherited: string | undefined, resume: ResumeRow | undefined): { accountId?: string; source: AccountSource; note?: string } {
+export function launchAccount(agent: AgentView, requested: string | undefined, inherited: string | undefined, resume: ResumeRow | undefined): { accountId?: string; source: AccountSource; note?: string } {
   // A transcript in a managed account's home is visible only from there: that account is forced (the GUI's `resumeAccountId`).
   if (resume?.home === "account" && resume.accountId) {
     if (requested !== undefined) validateAccountId(agent, requested);

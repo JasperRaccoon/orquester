@@ -165,6 +165,10 @@ async function makeFixture(
     holdAnswer?: { status: number; body: unknown };
     /** The agent pages' browser (design 2026-10-14 §2.1); none by default. */
     htmlPreview?: HtmlPageRenderer;
+    /** More registry entries beside `entry` (a continuation in another agent). */
+    extraEntries?: RegistryEntry[];
+    /** The working tree a continuation hands over (`AgentChatServiceOptions.gitStatusShort`). */
+    gitStatusShort?: (projectPath: string) => Promise<string>;
     /** The service's clock (a fork reconcile's backoff). */
     now?: () => number;
   } = {}
@@ -395,7 +399,8 @@ async function makeFixture(
     },
     broadcaster: { publish: (_topic, kind) => { state.broadcasts.emit(kind); } },
     push: { notifyStructural: async () => undefined },
-    registryEntry: (refId) => (refId === entry.id ? entry : undefined),
+    registryEntry: (refId) => (refId === entry.id ? entry : options.extraEntries?.find((extra) => extra.id === refId)),
+    ...(options.gitStatusShort ? { gitStatusShort: options.gitStatusShort } : {}),
     resolveLaunchEnv: async (_entry, ctx) => state.launchFor(ctx),
     listManagedAccounts: () => ({ accounts: state.accounts }),
     systemClaudeConfigFile: () => join(appdir, ".claude.json"),
@@ -1491,6 +1496,173 @@ test("a fork refuses a parent whose account is gone, and rolls its tab back on a
   await assert.rejects(f.service.forkSession(parent.id, {}, 1), /updated agent host/);
   await assert.rejects(f.service.forkSession(parent.id, { role: "system" } as never, 1), /role must be/);
   await assert.rejects(f.service.forkSession("nope", {}, 1), /No chat session/);
+  await f.cleanup();
+});
+
+// --- "Continue in another agent" ----------------------------------------------
+
+const CODEX: RegistryEntry = {
+  id: "codex",
+  name: "Codex",
+  kind: "agent",
+  bin: ["codex"],
+  resolvedBin: "/usr/bin/codex",
+  enabled: true,
+  installState: "idle",
+  env: {},
+  chat: { adapter: "codex" }
+};
+
+const CROSS_AGENT_HOST = { capabilities: { sessionProfiles: 1, crossAgentFork: 1 } };
+
+async function continuationFixture(health: Record<string, unknown> = CROSS_AGENT_HOST) {
+  const gitReads: string[] = [];
+  const f = await makeFixture(
+    CLAUDE,
+    { env: { CLAUDE_CONFIG_DIR: "/homes/acc-1" }, accountId: "acc-1" },
+    {
+      health,
+      extraEntries: [CODEX, { ...CODEX, id: "off", name: "Off", enabled: false }],
+      gitStatusShort: async (path) => {
+        gitReads.push(path);
+        return " M src/app.ts";
+      }
+    }
+  );
+  f.launchFor = (ctx) =>
+    ctx.accountId === undefined
+      ? { env: { CODEX_HOME: "/homes/cod-default" }, accountId: "cod-default" }
+      : ctx.accountId === "system"
+        ? null
+        : { env: { CLAUDE_CONFIG_DIR: `/homes/${ctx.accountId}` }, accountId: ctx.accountId };
+  f.accounts = [
+    { id: "acc-1", agent: "claude", label: "one" } as AgentAccount,
+    { id: "acc-2", agent: "claude", label: "two" } as AgentAccount,
+    { id: "cod-1", agent: "codex", label: "codex one" } as AgentAccount,
+    { id: "cod-default", agent: "codex", label: "codex default" } as AgentAccount
+  ];
+  const parent = await f.service.createSession(
+    { kind: "agent-chat", refId: "claude", accountId: "acc-1", projectPath: "/w/p", cwd: "/w/p", title: "Plan" },
+    0
+  );
+  return Object.assign(f, { parent, gitReads });
+}
+
+const CODEX_MODEL = { model: "gpt-5-codex", options: [{ id: "effort", value: "high" }] };
+
+test("a fork continued in another agent runs on that agent, account and model, with a transcript handoff", async () => {
+  const f = await continuationFixture();
+  const handoff = { carried: 23, total: 41, bytes: 59_000 };
+  f.forkAnswer = {
+    status: 200,
+    body: {
+      head: { id: "x" },
+      strategy: "transcript",
+      lineage: { parentThreadId: f.parent.id, relation: "fork", forkedFrom: { messageId: "msg-7", turnId: "t1" }, createdAt: "c", sourceAgent: "claude", sourceModel: "opus" },
+      handoff
+    }
+  };
+  const result = await f.service.forkSession(
+    f.parent.id,
+    { messageId: "msg-7", refId: "codex", accountId: "cod-1", modelSelection: CODEX_MODEL },
+    3
+  );
+  const { body } = f.forks[0]!;
+  assert.equal(body.refId, "codex");
+  assert.equal(body.accountId, "cod-1");
+  assert.equal(body.home, "account");
+  assert.deepEqual(body.modelSelection, CODEX_MODEL);
+  assert.deepEqual(body.continuation, { gitStatus: " M src/app.ts" }, "the working tree rides along");
+  assert.deepEqual(f.gitReads, ["/w/p"]);
+  assert.deepEqual(body.fork, { messageId: "msg-7" });
+  assert.equal(result.strategy, "transcript");
+  assert.deepEqual(result.handoff, handoff);
+  assert.equal(result.session.refId, "codex");
+  assert.equal(result.session.accountId, "cod-1");
+  assert.equal(result.session.title, "Plan (in Codex)");
+  assert.equal(result.lineage.relation, "fork");
+  assert.equal(result.lineage.sourceAgent, "claude", "lineage records the source agent");
+  assert.deepEqual(f.service.chat.get(result.session.id)?.lineage, result.lineage);
+
+  // Another agent with no account named: that agent's default account.
+  const byDefault = await f.service.forkSession(f.parent.id, { refId: "codex", modelSelection: CODEX_MODEL }, 4);
+  assert.equal(f.forks[1]!.body.accountId, "cod-default");
+  assert.equal(byDefault.session.accountId, "cod-default");
+  await f.cleanup();
+});
+
+test("the same agent under another account continues by transcript; same agent and account stays an ordinary fork", async () => {
+  const f = await continuationFixture();
+  await f.service.forkSession(f.parent.id, { accountId: "acc-2" }, 1);
+  assert.equal(f.forks[0]!.body.refId, "claude");
+  assert.equal(f.forks[0]!.body.accountId, "acc-2");
+  assert.deepEqual(f.forks[0]!.body.continuation, { gitStatus: " M src/app.ts" });
+  assert.equal(f.forks[0]!.body.modelSelection, undefined, "the same agent keeps the parent's model");
+
+  // Naming the parent's own account, or a model alone, is today's fork: native, no handoff.
+  await f.service.forkSession(f.parent.id, { accountId: "acc-1" }, 2);
+  await f.service.forkSession(f.parent.id, { modelSelection: { model: "claude-sonnet" } }, 3);
+  assert.equal("continuation" in f.forks[1]!.body, false);
+  assert.equal("continuation" in f.forks[2]!.body, false);
+  assert.deepEqual(f.forks[2]!.body.modelSelection, { model: "claude-sonnet" });
+  assert.equal(f.forks[2]!.body.accountId, "acc-1");
+  assert.equal(f.gitReads.length, 1, "only a continuation reads the working tree");
+  await f.cleanup();
+});
+
+test("a continuation is validated before anything is created", async () => {
+  const f = await continuationFixture();
+  const refused = (code: string, pattern: RegExp) => (error: unknown) =>
+    error instanceof ChatSessionError && error.code === code && pattern.test(error.message);
+  await assert.rejects(f.service.forkSession(f.parent.id, { refId: "codex" }, 1), refused("INVALID_COMMAND", /modelSelection is required/));
+  await assert.rejects(
+    f.service.forkSession(f.parent.id, { refId: "nope", modelSelection: CODEX_MODEL }, 1),
+    refused("INVALID_COMMAND", /not available to continue in/)
+  );
+  await assert.rejects(
+    f.service.forkSession(f.parent.id, { refId: "off", modelSelection: CODEX_MODEL }, 1),
+    refused("INVALID_COMMAND", /not available to continue in/)
+  );
+  await assert.rejects(
+    f.service.forkSession(f.parent.id, { refId: "codex", accountId: "acc-2", modelSelection: CODEX_MODEL }, 1),
+    refused("INVALID_COMMAND", /cannot run "Codex"/),
+    "an account of another family"
+  );
+  await assert.rejects(
+    f.service.forkSession(f.parent.id, { refId: "codex", modelSelection: { model: "" } } as never, 1),
+    refused("INVALID_COMMAND", /modelSelection must name a model/)
+  );
+  await assert.rejects(
+    f.service.forkSession(f.parent.id, { refId: "codex", modelSelection: { model: "m", options: [{ id: "x", value: 3 }] } } as never, 1),
+    refused("INVALID_COMMAND", /modelSelection/)
+  );
+  assert.equal(f.forks.length, 0, "the host was never asked");
+  assert.equal(f.service.chat.list("/w/p").length, 1, "no tab was left behind");
+  await f.cleanup();
+});
+
+test("a host without cross-agent forks refuses a continuation, never forks it natively", async () => {
+  const f = await continuationFixture({ capabilities: { sessionProfiles: 1 } });
+  await assert.rejects(
+    f.service.forkSession(f.parent.id, { refId: "codex", modelSelection: CODEX_MODEL }, 1),
+    (error: unknown) => error instanceof ChatSessionError && error.code === "COMMAND_REJECTED" && /updated agent host/.test(error.message)
+  );
+  await assert.rejects(f.service.forkSession(f.parent.id, { accountId: "acc-2" }, 1), /updated agent host/);
+  assert.equal(f.forks.length, 0);
+  // An ordinary fork still goes.
+  assert.equal((await f.service.forkSession(f.parent.id, {}, 1)).strategy, "native");
+  await f.cleanup();
+});
+
+test("a fork key aimed at another agent is another fork: COMMAND_ID_CONFLICT", async () => {
+  const f = await continuationFixture();
+  const first = await f.service.forkSession(f.parent.id, { commandId: "k", messageId: "m", refId: "codex", modelSelection: CODEX_MODEL }, 1);
+  const again = await f.service.forkSession(f.parent.id, { commandId: "k", messageId: "m", refId: "codex", modelSelection: CODEX_MODEL }, 1);
+  assert.equal(again.session.id, first.session.id, "a repeat is the same fork");
+  await assert.rejects(
+    f.service.forkSession(f.parent.id, { commandId: "k", messageId: "m" }, 2),
+    (error: unknown) => error instanceof ChatSessionError && error.code === "COMMAND_ID_CONFLICT"
+  );
   await f.cleanup();
 });
 

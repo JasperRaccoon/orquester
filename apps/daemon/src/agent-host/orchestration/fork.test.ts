@@ -28,7 +28,10 @@ import type { ForkConversationInput } from "../adapter.ts";
 import { createThreadStore, type AgentThreadStore } from "../store/index.ts";
 import { isAgentChatCommandError } from "./errors.ts";
 import {
+  buildContinuationTranscript,
   buildForkTranscript,
+  continuationDetail,
+  parseForkContinuation,
   createFileForkHandoffStore,
   FORK_TRANSCRIPT_MAX_CHARS,
   ForkRefusal,
@@ -935,6 +938,209 @@ describe("forkThread", () => {
       await codeOf(host.orchestrator.forkThread(parentId, forkRequest(parentId, "claude", {}))),
       "INVALID_COMMAND"
     );
+    // A continuation in another agent must name that agent's model.
+    assert.equal(
+      await codeOf(host.orchestrator.forkThread(parentId, { ...forkRequest("c4", "grok", {}), continuation: {} })),
+      "INVALID_COMMAND"
+    );
+    await host.stop();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// "Continue in another agent": a fork onto another adapter or account
+// ---------------------------------------------------------------------------
+
+describe("the continuation handoff", () => {
+  const retained = [turn("t1", "completed", "u1"), turn("t2", "completed", "u2")] as Parameters<typeof buildContinuationTranscript>[0]["retained"];
+  const items = [
+    message("u1", "user", null, "first question"),
+    message("a1", "assistant", "t1", "first answer"),
+    message("r2", "reasoning", "t2", "secret thoughts"),
+    message("u2", "user", null, "second question"),
+    message("a2", "assistant", "t2", "second answer")
+  ];
+
+  it("budgets whole messages, names the source and the reader, and carries the working tree", () => {
+    const built = buildContinuationTranscript({
+      items,
+      retained,
+      parentThreadId: "parent-1",
+      parentTitle: "Login bug",
+      sourceLabel: "Claude Opus 4.1",
+      targetLabel: "Codex",
+      gitStatus: " M src/login.ts"
+    })!;
+    assert.deepEqual(built.summary, { carried: 4, total: 4, bytes: built.summary.bytes });
+    assert.match(built.transcript, /^<forked-conversation>\n/);
+    assert.match(built.transcript, /ran on Claude Opus 4\.1 \(Orquester session parent-1\)/);
+    assert.match(built.transcript, /read_transcript/);
+    assert.match(built.transcript, /\[Assistant \(Claude Opus 4\.1\)\]\nsecond answer/);
+    assert.ok(!built.transcript.includes("secret thoughts"), "no reasoning");
+    assert.match(built.transcript, /`git status --short` of the project:\n\n M src\/login\.ts\n<\/forked-conversation>$/);
+    // The same delimiters as the same-agent transcript: a replayed prompt strips back to the user's words.
+    assert.equal(stripForkHandoff(withForkHandoff("go on", built.transcript)!), "go on");
+  });
+
+  it("leaves the oldest out past the budget and says so", () => {
+    const built = buildContinuationTranscript({
+      items,
+      retained,
+      parentThreadId: "parent-1",
+      parentTitle: "Login bug",
+      sourceLabel: "Claude",
+      targetLabel: "Codex",
+      budgetBytes: 2 * (48 + 15)
+    })!;
+    assert.equal(built.summary.carried, 2);
+    assert.equal(built.summary.total, 4);
+    assert.match(built.transcript, /the last 2 of 4 messages/);
+    assert.ok(!built.transcript.includes("first question"));
+  });
+
+  it("is null when the kept turns hold no message", () => {
+    assert.equal(
+      buildContinuationTranscript({ items: [], retained, parentThreadId: "p", parentTitle: "t", sourceLabel: "Claude", targetLabel: "Codex" }),
+      null
+    );
+  });
+
+  it("reads the request's continuation tolerantly, and words the child's row", () => {
+    assert.equal(parseForkContinuation(undefined), undefined);
+    assert.equal(parseForkContinuation("yes"), undefined);
+    assert.deepEqual(parseForkContinuation({}), {});
+    assert.deepEqual(parseForkContinuation({ gitStatus: 3 }), {});
+    assert.deepEqual(parseForkContinuation({ gitStatus: "?? a" }), { gitStatus: "?? a" });
+    assert.match(continuationDetail("transcript", { carried: 23, total: 41, bytes: 58 * 1024 }, "Codex"), /^The last 23 of 41 messages \(≈58 KB\) are handed to Codex with your first message/);
+    assert.match(continuationDetail("transcript", { carried: 4, total: 4, bytes: 900 }, "Codex"), /^The whole conversation \(4 messages, ≈1 KB\)/);
+    assert.match(continuationDetail("transcript", { carried: 1, total: 2, bytes: 60_000, clipped: true }, "Codex"), /^Only the end of the newest message/);
+    assert.match(continuationDetail("empty", undefined, "Codex"), /Codex starts fresh/);
+    assert.match(continuationDetail("unavailable", undefined, "Codex"), /could not be carried over/);
+  });
+});
+
+describe("forkThread: continue in another agent", () => {
+  const codexSelection = { model: "gpt-5-codex", options: [{ id: "effort", value: "high" }] };
+
+  it("hands a claude conversation to codex as a budgeted transcript, never natively", async () => {
+    const forks: ForkConversationInput[] = [];
+    const claude = createScriptedAdapter({
+      id: "claude",
+      forkConversation: async (input) => {
+        forks.push(input);
+        return { resumeCursor: { threadId: input.threadId, resume: "forked" } };
+      }
+    });
+    const codex = createScriptedAdapter({ id: "codex" });
+    const host = createTestHost({ adapters: { claude, codex } });
+    const parentProfile = { profileId: "p1", revision: "3", preparedDir: "/prepared/p1/claude/shared" };
+    const parentId = await host.createThread({ threadId: "parent", refId: "claude", profile: parentProfile });
+    await runTurn(host, claude, parentId, "remember SWORDFISH", "noted");
+    const second = await runTurn(host, claude, parentId, "and then?", "done");
+    await runTurn(host, claude, parentId, "past the fork point", "not carried");
+    const parentLog = logOf(host, parentId).length;
+
+    const result = await host.orchestrator.forkThread(parentId, {
+      ...forkRequest("child", "codex", { messageId: second.replyId }),
+      accountId: "",
+      home: "system",
+      modelSelection: codexSelection,
+      continuation: { gitStatus: " M src/app.ts" }
+    });
+    await host.settle();
+
+    assert.equal(result.strategy, "transcript");
+    assert.equal(forks.length, 0, "another agent is never forked natively");
+    assert.equal(result.head.adapter, "codex");
+    assert.equal(result.head.home, "system", "the child's own home, not the parent's");
+    assert.deepEqual(result.head.modelSelection, codexSelection);
+    assert.equal(result.head.profileId, undefined, "the parent's profile does not cross agents unasked");
+    assert.equal(result.lineage.relation, "fork");
+    assert.equal(result.lineage.sourceAgent, "claude");
+    assert.equal(result.lineage.sourceModel, "test-model");
+    assert.deepEqual(result.lineage.forkedFrom, { messageId: second.replyId, turnId: second.turnId });
+    assert.deepEqual(result.handoff, { carried: 4, total: 4, bytes: result.handoff!.bytes });
+
+    const row = activitiesOf(host, "child").find((activity) => activity.activityKind === "thread.forked");
+    assert.match(row?.summary ?? "", /^Continued from "Test thread" \(Claude · test-model\)$/);
+    assert.match((row?.payload as { detail?: string } | undefined)?.detail ?? "", /handed to Codex with your first message/);
+    const continuation = (row?.payload as { continuation?: Record<string, unknown> }).continuation;
+    assert.equal(continuation?.sourceAgent, "claude");
+    assert.equal(continuation?.targetAgent, "codex");
+    assert.equal(continuation?.sourceTitle, "Test thread");
+
+    await host.orchestrator.command("child", "turn", { commandId: cmd(), input: "carry on" });
+    await host.settle();
+    const sent = codex.lastTurn?.input ?? "";
+    assert.match(sent, /^<forked-conversation>\n/);
+    assert.match(sent, /remember SWORDFISH/);
+    assert.ok(!sent.includes("past the fork point"), "only history up to the fork point");
+    assert.match(sent, /read_transcript` with \{"sessionId":"parent"/);
+    assert.match(sent, /M src\/app\.ts/);
+    assert.match(sent, /\n\ncarry on$/);
+    const userTexts = (await snapshotOf(host, "child")).items
+      .filter((item) => item.kind === "message" && item.role === "user")
+      .map((item) => (item as { text: string }).text);
+    assert.deepEqual(userTexts, ["carry on"], "the timeline keeps what the user typed");
+
+    // The parent is only read.
+    assert.equal(logOf(host, parentId).length, parentLog);
+    assert.deepEqual(host.orchestrator.launchConfig(parentId)?.profile, parentProfile);
+
+    // A repeat answers the child it made.
+    const again = await host.orchestrator.forkThread(parentId, {
+      ...forkRequest("child", "codex", { messageId: second.replyId }),
+      accountId: "",
+      home: "system",
+      modelSelection: codexSelection,
+      continuation: {}
+    });
+    assert.equal(again.head.id, "child");
+    assert.equal(again.strategy, "transcript");
+    await host.stop();
+  });
+
+  it("the same agent under another account is a continuation too: no native fork into the wrong home", async () => {
+    const forks: ForkConversationInput[] = [];
+    const claude = createScriptedAdapter({
+      id: "claude",
+      forkConversation: async (input) => {
+        forks.push(input);
+        return { resumeCursor: { threadId: input.threadId, resume: "forked" } };
+      }
+    });
+    const host = createTestHost({ adapters: { claude } });
+    const parentId = await host.createThread({ threadId: "parent", refId: "claude" });
+    const said = await runTurn(host, claude, parentId, "hello", "hi");
+    const result = await host.orchestrator.forkThread(parentId, {
+      ...forkRequest("child", "claude", { messageId: said.replyId }),
+      accountId: "acc2",
+      continuation: {}
+    });
+    await host.settle();
+    assert.equal(result.strategy, "transcript");
+    assert.equal(forks.length, 0);
+    assert.equal(result.head.accountId, "acc2");
+    assert.equal(result.lineage.sourceAgent, "claude");
+    assert.equal(result.head.modelSelection.model, "test-model", "the same agent keeps its model unless one is named");
+    await host.stop();
+  });
+
+  it("a continuation before the first message starts the other agent fresh", async () => {
+    const claude = createScriptedAdapter({ id: "claude" });
+    const codex = createScriptedAdapter({ id: "codex" });
+    const host = createTestHost({ adapters: { claude, codex } });
+    const parentId = await host.createThread({ threadId: "parent", refId: "claude" });
+    const result = await host.orchestrator.forkThread(parentId, {
+      ...forkRequest("child", "codex", {}),
+      modelSelection: codexSelection,
+      continuation: {}
+    });
+    await host.settle();
+    assert.equal(result.strategy, "empty");
+    assert.equal(result.handoff, undefined);
+    const row = activitiesOf(host, "child").find((activity) => activity.activityKind === "thread.forked");
+    assert.match((row?.payload as { detail?: string } | undefined)?.detail ?? "", /Codex starts fresh/);
     await host.stop();
   });
 });
