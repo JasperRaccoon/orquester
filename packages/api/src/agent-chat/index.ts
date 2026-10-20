@@ -43,4 +43,5 @@ export * from "./thread-head.ts";
 export * from "./thread-tools.ts";
 export * from "./turn-state.ts";
 export * from "./turns.ts";
+export * from "./usage-limit.ts";
 export * from "./utf8.ts";

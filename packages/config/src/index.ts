@@ -724,7 +724,21 @@ export const agentPrefsSchema = z.object({
    * Resolved per the thread's project over the host-wide default; an absent
    * entry means "use the default".
    */
-  continueThreadsByProject: z.record(z.string(), z.boolean()).default({})
+  continueThreadsByProject: z.record(z.string(), z.boolean()).default({}),
+  /**
+   * Usage-limit recovery: when a chat stops on its account's usage limit and the reset time is
+   * known, the daemon sends "Continue where you left off." into it once the limit has reset.
+   * Host-wide, **on** by default — the chat resumes the work the user already asked for. A chat
+   * the user has written to since, or that waits on an approval, is never resumed.
+   */
+  autoResumeLimitedChats: z.boolean().default(true),
+  /**
+   * Usage-limit recovery: when a chat stops on its account's usage limit, move it to another
+   * account of the same agent that is not cooling down and continue there. Host-wide, **off** by
+   * default — it spends another account's quota without asking. Never for an agent without
+   * managed accounts (OpenCode).
+   */
+  switchAccountOnUsageLimit: z.boolean().default(false)
 });
 export type AgentPrefs = z.infer<typeof agentPrefsSchema>;
 
@@ -1121,6 +1135,59 @@ export const agentChatHomeSchema = z.preprocess(
 );
 export type AgentChatHome = z.infer<typeof agentChatHomeSchema>;
 
+/** An ISO time that parses, else null (a value that does not read is no time, never the record). */
+const isoTimeOrNull = z
+  .string()
+  .max(64)
+  .nullable()
+  .transform((value) => (value !== null && Number.isFinite(Date.parse(value)) ? value : null))
+  .catch(null);
+
+/**
+ * A limited chat's usage-limit recovery state on its tab record. Mirrors `ChatUsageLimitState` in
+ * `@orquester/api` (`agent-chat/usage-limit.ts`). Tolerant: a field that does not read falls back
+ * on its own, unknown fields are kept (`passthrough`) so a newer daemon's survive a rewrite, and a
+ * block that does not parse at all is dropped — never the record (`sessionChatRecordSchema`).
+ */
+export const chatUsageLimitRecordSchema = z
+  .object({
+    noticeId: z.string().min(1).max(200),
+    turnId: z.string().min(1).max(200).nullable().catch(null),
+    detectedAt: z.string().max(64),
+    limitedAt: z.string().max(64).catch(""),
+    resetAt: isoTimeOrNull,
+    accountId: z.string().max(200).catch(""),
+    parked: z.boolean().catch(false),
+    autoResume: z.enum(["armed", "resuming", "off", "unscheduled"]).catch("off"),
+    resumeAt: isoTimeOrNull,
+    userCancelled: z.literal(true).optional().catch(undefined),
+    message: z.string().max(500).optional().catch(undefined),
+    action: z
+      .object({
+        kind: z.enum(["resume", "switch"]),
+        commandId: z.string().min(1).max(200),
+        accountId: z.string().max(200).optional().catch(undefined),
+        startedAt: z.string().max(64),
+        automatic: z.boolean().optional().catch(undefined)
+      })
+      .passthrough()
+      .optional()
+      .catch(undefined)
+  })
+  .passthrough();
+export type ChatUsageLimitRecord = z.infer<typeof chatUsageLimitRecordSchema>;
+
+/** The chat moved accounts after a usage limit. Mirrors `ChatLimitFailover` in `@orquester/api`. */
+export const chatLimitFailoverRecordSchema = z
+  .object({
+    fromAccountId: z.string().max(200),
+    toAccountId: z.string().max(200),
+    at: z.string().max(64),
+    automatic: z.boolean().catch(false)
+  })
+  .passthrough();
+export type ChatLimitFailoverRecord = z.infer<typeof chatLimitFailoverRecordSchema>;
+
 /**
  * The agent-chat block on a tab record (spec §5.2). `sessions.json` stays tab
  * metadata only; the agent host is the source of truth for thread state, so
@@ -1164,7 +1231,14 @@ export const sessionChatRecordSchema = z.object({
    * falls back to Global with a notice, because nobody is there to read it (spec 2026-10-18
    * §5.5). Anything else reads as absent (interactive).
    */
-  unattended: z.literal(true).optional().catch(undefined)
+  unattended: z.literal(true).optional().catch(undefined),
+  /**
+   * Usage-limit recovery (`chatUsageLimitRecordSchema`): present while the chat is limited, so a
+   * restart rebuilds its automatic resume. One that does not read is dropped (not limited).
+   */
+  usageLimit: chatUsageLimitRecordSchema.optional().catch(undefined),
+  /** The "switched account after a usage limit" notice, until dismissed. */
+  limitFailover: chatLimitFailoverRecordSchema.optional().catch(undefined)
 });
 export type SessionChatRecord = z.infer<typeof sessionChatRecordSchema>;
 

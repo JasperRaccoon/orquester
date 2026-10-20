@@ -4,6 +4,8 @@ import type {
   AgentAdapterId,
   AgentChatGoalSummary,
   BackgroundLiveness as AgentChatBackgroundLiveness,
+  ChatLimitFailover,
+  ChatUsageLimitState,
   CreateAgentChatSessionFields,
   LatestTurnSummary as AgentChatLatestTurnSummary,
   PendingMergeBack,
@@ -1451,6 +1453,18 @@ export interface SessionSummary {
    * Read it through a sanitizer: an older daemon omits it (= unknown, treat as Global).
    */
   profileId?: string | null;
+  /**
+   * Agent-chat tabs only: the chat hit its account's usage limit and has not resumed — the reset,
+   * the account, and where the automatic resume stands (`usage-limit.ts`). `null` once it resumed
+   * or the user sent a message: cleared with an explicit `null`, never by dropping the key (a
+   * client merges summaries field-wise). Absent from an older daemon (= not limited).
+   */
+  usageLimit?: ChatUsageLimitState | null;
+  /**
+   * Agent-chat tabs only: the chat was moved to another account after a usage limit, until the
+   * user dismisses the notice. `null` when there is none (explicit, as `usageLimit`).
+   */
+  limitFailover?: ChatLimitFailover | null;
 }
 
 // --- Thread lineage (spec 2026-10-14 §6) ------------------------------------

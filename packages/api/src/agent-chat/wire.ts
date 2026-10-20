@@ -27,6 +27,7 @@ import type { AgentGoalStatus } from "./goal.ts";
 import type { McpAppCallToolResult } from "./mcp-app.ts";
 import type { ForkSessionRequest, MergeBackRequest, MergeBackResponse } from "./lineage.ts";
 import type { ApprovalDecision, TurnTokenUsage } from "./runtime-events.ts";
+import type { UsageLimitAction } from "./usage-limit.ts";
 import type {
   CausedBy,
   Checkpoint,
@@ -160,6 +161,17 @@ export const agentChatRoutes = {
    * the launch environment, so it is absent from {@link AGENT_CHAT_COMMAND_NAMES}.
    */
   profile: (sessionId: string): string => `${sessionBase(sessionId)}/profile`,
+  /**
+   * Usage-limit recovery of a limited chat (`usage-limit.ts`), daemon-owned like
+   * {@link agentChatRoutes.account} — never proxied to the host, both transports. `POST`:
+   * - `auto-resume` (`UsageLimitAutoResumeRequest`): arm or cancel the automatic resume;
+   * - `resume` (`UsageLimitResumeRequest`): send the continue message now;
+   * - `switch` (`UsageLimitSwitchRequest`): move to another account of the family and continue;
+   * - `dismiss-failover` (no body): clear the "switched account" notice.
+   * Each answers `UsageLimitActionResponse`; refusals are the §6.2 envelope (409
+   * `COMMAND_REJECTED` when the chat is not limited or the action cannot apply).
+   */
+  usageLimit: (sessionId: string, action: UsageLimitAction): string => `${sessionBase(sessionId)}/usage-limit/${action}`,
   /**
    * The thread's pending `request_secret` cards (`GET`,
    * `SecretRequestListResponse`) — daemon-owned like `account`: the
