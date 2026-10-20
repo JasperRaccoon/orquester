@@ -7,7 +7,19 @@ import { fileURLToPath } from "node:url";
 
 const go = process.env.GO || "go";
 const cwd = dirname(dirname(fileURLToPath(import.meta.url)));
-const result = spawnSync(go, process.argv.slice(2), { cwd, stdio: "inherit", env: { ...process.env, CGO_ENABLED: "0" } });
+let args = process.argv.slice(2);
+// Builds stay static (no cgo). The race detector needs cgo, so `-race` turns it
+// on where Go's C compiler runs, and is dropped (with a warning) where it does not.
+let cgo = "0";
+if (args.includes("-race")) {
+  const cc = spawnSync(go, ["env", "CC"], { cwd, encoding: "utf8" }).stdout?.trim().split(/\s+/)[0] || "cc";
+  if (spawnSync(cc, ["--version"], { stdio: "ignore" }).status === 0) cgo = "1";
+  else {
+    console.warn(`orq-agent: the race detector needs a C compiler (${cc} did not run); testing without -race.`);
+    args = args.filter((arg) => arg !== "-race");
+  }
+}
+const result = spawnSync(go, args, { cwd, stdio: "inherit", env: { ...process.env, CGO_ENABLED: cgo } });
 if (result.error) {
   console.error(`orq-agent: cannot run the Go toolchain (${go}): ${result.error.message}. Install Go ≥ 1.24 or set GO=/path/to/go.`);
   process.exit(1);
