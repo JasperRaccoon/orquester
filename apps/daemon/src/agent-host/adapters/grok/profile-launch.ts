@@ -15,7 +15,8 @@
  *   in and the project's own plugins stay as in Global) and denies every discovered plugin by
  *   exact name (`[plugins] disabled`) except the profile's own: Grok enables Claude-installed
  *   plugins by itself, and only exact names stop them. An inspect that fails FAILS the start — a
- *   chat never launches with an unknown plugin set;
+ *   chat never launches with an unknown plugin set. boxes: a box thread's inspect runs in its
+ *   box (`inspect` = `boxGrokPluginNames`, `box-launch.ts`), whose Grok loads the box's plugins;
  * - renders `config.toml` from the prepared base (`renderGrokProfileConfigToml`: carried-over
  *   runtime settings, the profile's `[mcp_servers]`, `[cli] auto_update/use_leader = false`, the
  *   compat cells) and replaces the home's file atomically (temp + rename; 0600, it carries the
@@ -68,9 +69,12 @@ export interface GrokProfileSpawnInput {
   profile?: HostThreadProfile;
   /** The child's env as `buildEnv` made it (`HOME`, `GROK_AUTH_PATH` from the launch env). */
   env: Readonly<Record<string, string>>;
-  /** The resolved `grok` binary. */
+  /** The resolved `grok` binary (a box thread's: the box's). */
   command: string;
-  /** Tests: `grok inspect --json` stand-in (same contract as `grokDiscoveredPluginNames`). */
+  /**
+   * `grok inspect --json` elsewhere than this machine (same contract as `grokDiscoveredPluginNames`):
+   * a box thread's runs in its box; tests pass a stand-in.
+   */
   inspect?: (options: Parameters<typeof grokDiscoveredPluginNames>[0]) => Promise<GrokPluginNamesResult>;
 }
 

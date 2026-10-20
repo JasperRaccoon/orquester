@@ -38,7 +38,9 @@ export const FilePreview: React.FC<{
   jumpLength?: number;
   /** Bumped on every search-result open so re-clicking the same line re-jumps. */
   jumpNonce?: number;
-}> = ({ path, size, onBack, jumpToLine, jumpToColumn, jumpLength, jumpNonce }) => {
+  /** boxes: false when the project's box has no archive-listing tool. */
+  archivePreview?: boolean;
+}> = ({ path, size, onBack, jumpToLine, jumpToColumn, jumpLength, jumpNonce, archivePreview = true }) => {
   const api = useApi();
   const fetchBytes = useCallback((p: string, signal?: AbortSignal) => api.readFileBytes(p, signal), [api]);
   const whiteboardsOn = useAppStore((s) => isGlobalPluginEnabled(s.plugins, EXCALIDRAW_PLUGIN_ID));
@@ -112,7 +114,9 @@ export const FilePreview: React.FC<{
   } else if (kind === "audio" || kind === "video") {
     body = <MediaViewer path={path} mime={mime} kind={kind} fetchBytes={fetchBytes} />;
   } else if (kind === "archive") {
-    body = <ArchiveViewer path={path} name={name} size={size} mime={mime} fetchBytes={fetchBytes} />;
+    body = (
+      <ArchiveViewer path={path} name={name} size={size} mime={mime} fetchBytes={fetchBytes} previewable={archivePreview} />
+    );
   } else if (kind === "pdf") {
     body = <PdfViewer path={path} fetchBytes={fetchBytes} />;
   } else {

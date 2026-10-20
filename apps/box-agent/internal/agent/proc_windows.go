@@ -57,7 +57,7 @@ func clampSize(cols, rows int) (int16, int16) {
 	return int16(min(cols, 32767)), int16(min(rows, 32767))
 }
 
-// killTree ends a process and its descendants.
+// killTree ends a process and its descendants (without a job object).
 func killTree(pid int) {
 	cmd := exec.Command("taskkill.exe", "/T", "/F", "/PID", strconv.Itoa(pid))
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
@@ -69,6 +69,104 @@ func killTree(pid int) {
 	}
 }
 
+// processJob is the job object a started process and every descendant it
+// spawns belong to: terminating it ends the whole tree, and it is
+// kill-on-close, so the tree also ends if orq-agent dies.
+type processJob struct {
+	mu       sync.Mutex
+	handle   windows.Handle // 0 when no job could be set up
+	pid      int
+	released bool // the process was waited for; its pid may be reused
+}
+
+// setJobLimits sets the job's limit flags.
+func setJobLimits(job windows.Handle, flags uint32) error {
+	info := windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION{
+		BasicLimitInformation: windows.JOBOBJECT_BASIC_LIMIT_INFORMATION{LimitFlags: flags},
+	}
+	_, err := windows.SetInformationJobObject(job, windows.JobObjectExtendedLimitInformation,
+		uintptr(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info)))
+	return err
+}
+
+// newProcessJob puts a process, created suspended (so it cannot spawn
+// anything before), into a new job. Without a job (assignment refused) kills
+// fall back to killTree.
+func newProcessJob(process windows.Handle, pid int) *processJob {
+	j := &processJob{pid: pid}
+	job, err := windows.CreateJobObject(nil, nil)
+	if err != nil {
+		return j
+	}
+	if setJobLimits(job, windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE) != nil ||
+		windows.AssignProcessToJobObject(job, process) != nil {
+		_ = windows.CloseHandle(job)
+		return j
+	}
+	j.handle = job
+	return j
+}
+
+// kill ends the process and its descendants.
+func (j *processJob) kill() {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.released {
+		return
+	}
+	if j.handle != 0 {
+		if windows.TerminateJobObject(j.handle, 1) == nil {
+			return
+		}
+	}
+	killTree(j.pid)
+}
+
+// release drops the job once the process was waited for. Descendants still
+// running are left alone (as on POSIX, where nothing signals the group after
+// the leader exited): the kill-on-close limit is lifted first.
+func (j *processJob) release() {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.released = true
+	if j.handle == 0 {
+		return
+	}
+	_ = setJobLimits(j.handle, 0)
+	_ = windows.CloseHandle(j.handle)
+	j.handle = 0
+}
+
+// resumeProcess resumes the threads of a process created suspended.
+func resumeProcess(pid int) error {
+	snap, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPTHREAD, 0)
+	if err != nil {
+		return err
+	}
+	defer windows.CloseHandle(snap)
+	entry := windows.ThreadEntry32{Size: uint32(unsafe.Sizeof(windows.ThreadEntry32{}))}
+	resumed := false
+	for err = windows.Thread32First(snap, &entry); err == nil; err = windows.Thread32Next(snap, &entry) {
+		if entry.OwnerProcessID != uint32(pid) {
+			continue
+		}
+		thread, err := windows.OpenThread(windows.THREAD_SUSPEND_RESUME, false, entry.ThreadID)
+		if err != nil {
+			return err
+		}
+		_, err = windows.ResumeThread(thread)
+		_ = windows.CloseHandle(thread)
+		if err != nil {
+			return err
+		}
+		resumed = true
+	}
+	if !resumed {
+		return errors.New("no thread of the new process to resume")
+	}
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // Pipes
 // ---------------------------------------------------------------------------
@@ -78,6 +176,7 @@ type pipedProcess struct {
 	in     io.WriteCloser
 	out    io.ReadCloser
 	errOut io.ReadCloser
+	job    *processJob
 
 	waitMu sync.Mutex
 	waited bool
@@ -86,7 +185,10 @@ type pipedProcess struct {
 
 func startPiped(s *startSpec) (process, error) {
 	cmd := &exec.Cmd{Path: s.path, Args: s.args, Dir: s.dir, Env: s.env}
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NEW_PROCESS_GROUP}
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		HideWindow:    true,
+		CreationFlags: windows.CREATE_NEW_PROCESS_GROUP | windows.CREATE_SUSPENDED,
+	}
 	stdinR, stdinW, err := os.Pipe()
 	if err != nil {
 		return nil, err
@@ -116,7 +218,23 @@ func startPiped(s *startSpec) (process, error) {
 		stderrR.Close()
 		return nil, spawnError(err)
 	}
-	return &pipedProcess{cmd: cmd, in: stdinW, out: stdoutR, errOut: stderrR}, nil
+	pid := cmd.Process.Pid
+	job := &processJob{pid: pid}
+	// Suspended, the process cannot exit, so its pid is still its own.
+	if h, err := windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE, false, uint32(pid)); err == nil {
+		job = newProcessJob(h, pid)
+		_ = windows.CloseHandle(h)
+	}
+	if err := resumeProcess(pid); err != nil {
+		job.kill()
+		_ = cmd.Wait()
+		job.release()
+		stdinW.Close()
+		stdoutR.Close()
+		stderrR.Close()
+		return nil, rpcErr("SPAWN_FAILED", "resume: "+err.Error())
+	}
+	return &pipedProcess{cmd: cmd, in: stdinW, out: stdoutR, errOut: stderrR, job: job}, nil
 }
 
 func (p *pipedProcess) pid() int              { return p.cmd.Process.Pid }
@@ -143,14 +261,14 @@ func (p *pipedProcess) signal(name string) error {
 		_ = windows.GenerateConsoleCtrlEvent(windows.CTRL_BREAK_EVENT, uint32(p.pid()))
 		return nil
 	case "SIGTERM", "SIGKILL", "SIGHUP", "SIGQUIT":
-		killTree(p.pid())
+		p.job.kill()
 		return nil
 	}
 	return rpcErr("BAD_REQUEST", "signal "+name+" is not supported on Windows")
 }
 
 func (p *pipedProcess) resize(int, int) error { return nil }
-func (p *pipedProcess) kill()                 { killTree(p.pid()) }
+func (p *pipedProcess) kill()                 { p.job.kill() }
 
 func (p *pipedProcess) closeOutput() {
 	_ = p.out.Close()
@@ -158,6 +276,7 @@ func (p *pipedProcess) closeOutput() {
 }
 
 func (p *pipedProcess) release() {
+	p.job.release()
 	_ = p.in.Close()
 	_ = p.out.Close()
 	_ = p.errOut.Close()
@@ -170,6 +289,7 @@ func (p *pipedProcess) release() {
 type conptyProcess struct {
 	hpc     windows.Handle
 	handle  windows.Handle
+	job     *processJob
 	pidNum  int
 	in      *os.File
 	out     *os.File
@@ -250,14 +370,24 @@ func startConPTY(s *startSpec) (process, error) {
 		}
 	}
 	var pi windows.ProcessInformation
-	flags := uint32(windows.EXTENDED_STARTUPINFO_PRESENT | windows.CREATE_UNICODE_ENVIRONMENT)
+	// Suspended until it is in its job, so nothing it spawns escapes the job.
+	flags := uint32(windows.EXTENDED_STARTUPINFO_PRESENT | windows.CREATE_UNICODE_ENVIRONMENT | windows.CREATE_SUSPENDED)
 	if err := windows.CreateProcess(appName, cmdLine, nil, nil, false, flags, envBlock(s.env), dir, &si.StartupInfo, &pi); err != nil {
 		return fail(spawnError(err))
 	}
+	job := newProcessJob(pi.Process, int(pi.ProcessId))
+	_, err = windows.ResumeThread(pi.Thread)
 	windows.CloseHandle(pi.Thread)
+	if err != nil {
+		_ = windows.TerminateProcess(pi.Process, 1)
+		job.release()
+		windows.CloseHandle(pi.Process)
+		return fail(rpcErr("SPAWN_FAILED", "ResumeThread: "+err.Error()))
+	}
 	return &conptyProcess{
 		hpc:    hpc,
 		handle: pi.Process,
+		job:    job,
 		pidNum: int(pi.ProcessId),
 		in:     os.NewFile(uintptr(inW), "conpty-in"),
 		out:    os.NewFile(uintptr(outR), "conpty-out"),
@@ -302,7 +432,7 @@ func (p *conptyProcess) signal(name string) error {
 		_, err := p.in.Write([]byte{0x03})
 		return err
 	case "SIGTERM", "SIGKILL", "SIGHUP", "SIGQUIT":
-		killTree(p.pidNum)
+		p.job.kill()
 		return nil
 	}
 	return rpcErr("BAD_REQUEST", "signal "+name+" is not supported on Windows")
@@ -313,11 +443,12 @@ func (p *conptyProcess) resize(cols, rows int) error {
 	return windows.ResizePseudoConsole(p.hpc, windows.Coord{X: c, Y: r})
 }
 
-func (p *conptyProcess) kill() { killTree(p.pidNum) }
+func (p *conptyProcess) kill() { p.job.kill() }
 
 func (p *conptyProcess) closeOutput() { _ = p.out.Close() }
 
 func (p *conptyProcess) release() {
+	p.job.release()
 	p.closeConsole()
 	_ = p.in.Close()
 	_ = p.out.Close()

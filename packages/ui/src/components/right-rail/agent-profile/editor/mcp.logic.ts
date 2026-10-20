@@ -14,13 +14,19 @@ import {
   MCP_TRANSPORTS,
   PROFILE_MCP_NAME_MAX,
   type AgentProfileAgentId,
+  type BoxMcpRunInBoxResponse,
   type McpServerDraft,
   type McpServerView,
   type McpTransport,
   type ProfileFieldSpec,
+  type ProfileMutationResponse,
   type SecretEntryDraft,
-  type SecretEntryView
+  type SecretEntryView,
+  type SetBoxMcpRunInBoxRequest
 } from "@orquester/api";
+
+import { runsInBox } from "../../../../lib/boxes/validate";
+import { profileError } from "./errors";
 
 // ---------------------------------------------------------------------------
 // Secret rows
@@ -412,4 +418,38 @@ export function validateMcpForm(agent: AgentProfileAgentId, form: McpForm): McpV
 export function mcpFormSignature(form: McpForm): string {
   const rows = (list: SecretRow[]) => list.map(({ key, value, state }) => [key, value, state]);
   return JSON.stringify({ ...form, env: rows(form.env), headers: rows(form.headers) });
+}
+
+// ---------------------------------------------------------------------------
+// boxes: the Global "Run in box" switch
+// ---------------------------------------------------------------------------
+
+/**
+ * boxes: after the server itself saved, bring its "Run in box" setting along —
+ * to the name it was saved under (a "Keep both" copy gets a suffix), and off
+ * for its old name after a rename. A failure here does not undo the save: it
+ * is said in the saved notice instead.
+ */
+export async function saveGlobalRunInBox(
+  api: { setBoxMcpRunInBox(req: SetBoxMcpRunInBoxRequest): Promise<unknown> },
+  agent: AgentProfileAgentId,
+  response: ProfileMutationResponse,
+  input: { settings: BoxMcpRunInBoxResponse; previousName: string | null; name: string; wanted: boolean }
+): Promise<ProfileMutationResponse> {
+  const savedId = response.itemIds[0];
+  const name = response.snapshot.items.find((item) => item.id === savedId && item.kind === "mcp")?.name ?? input.name;
+  const writes: { name: string; runInBox: boolean }[] = [];
+  if (input.previousName !== null && input.previousName !== name && runsInBox(input.settings, agent, input.previousName)) {
+    writes.push({ name: input.previousName, runInBox: false });
+  }
+  if (input.wanted !== runsInBox(input.settings, agent, name)) writes.push({ name, runInBox: input.wanted });
+  try {
+    for (const write of writes) await api.setBoxMcpRunInBox({ agent, ...write });
+    return response;
+  } catch (error) {
+    return {
+      ...response,
+      notes: [...response.notes, `Its "Run in box" setting was not saved (${profileError(error).message}); open it again to retry.`]
+    };
+  }
 }

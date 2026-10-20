@@ -268,7 +268,7 @@ const boxToHost: MethodSamples<BoxBoxToHostMethods> = {
   "token.get": [
     { params: { agent: "claude", accountId: "acc-1" }, result: { accessToken: "sk-ant-oat-x", expiresAt: 1729000000000 } },
     {
-      params: { agent: "codex", accountId: "acc-2", minValidSeconds: 900 },
+      params: { agent: "codex", accountId: "acc-2", minValidSeconds: 900, rejectedAccessToken: "eyJ-refused" },
       result: { accessToken: "eyJ", expiresAt: null, extra: { chatgptAccountId: "org-1" } }
     }
   ],

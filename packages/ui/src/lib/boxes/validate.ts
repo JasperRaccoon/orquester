@@ -31,6 +31,8 @@ import {
   type BoxImageOffer,
   type BoxKindAvailability,
   type BoxKindsResponse,
+  type BoxMcpRunInBoxEntry,
+  type BoxMcpRunInBoxResponse,
   type BoxOffersResponse,
   type BoxOs,
   type BoxProjectRef,
@@ -112,6 +114,11 @@ const DESTROYED_REASONS: readonly BoxDestroyedReason[] = [
   "orphan"
 ];
 
+/** A destroyed reason this build knows, else null (a newer daemon's reason reads as plain "destroyed"). */
+export function readDestroyedReason(value: unknown): BoxDestroyedReason | null {
+  return oneOf(DESTROYED_REASONS, value) ? value : null;
+}
+
 function sanitizeSetupStep(value: unknown): BoxSetupStep | null {
   if (!isRecord(value) || !oneOf<BoxSetupStepId>(BOX_SETUP_STEP_IDS, value.id)) return null;
   return {
@@ -156,7 +163,7 @@ export function sanitizeBoxSummary(value: unknown): BoxSummary | null {
     arch: oneOf(ARCHES, value.arch) ? value.arch : null,
     state,
     stateReason: stringOrNull(value.stateReason),
-    destroyedReason: oneOf(DESTROYED_REASONS, value.destroyedReason) ? value.destroyedReason : null,
+    destroyedReason: readDestroyedReason(value.destroyedReason),
     hourlyUsd: amountOrNull(value.hourlyUsd),
     estimatedCostUsd: amountOrNull(value.estimatedCostUsd) ?? 0,
     createdAt: stringOr(value.createdAt, ""),
@@ -448,4 +455,24 @@ export function sanitizeBoxConfigChangeSet(value: unknown): BoxConfigChangeSet |
 export function sanitizeBoxConfigChangesResponse(value: unknown): BoxConfigChangesResponse | null {
   if (!isRecord(value) || !Array.isArray(value.changes)) return null;
   return { changes: listOf(value.changes, sanitizeBoxConfigChangeSet, (change) => change.id) };
+}
+
+// ---------------------------------------------------------------------------
+// Global MCP servers' "Run in box"
+// ---------------------------------------------------------------------------
+
+function sanitizeRunInBoxEntry(value: unknown): BoxMcpRunInBoxEntry | null {
+  if (!isRecord(value) || !nonEmpty(value.name) || !nonEmpty(value.agent)) return null;
+  return { name: value.name, agent: value.agent, runInBox: value.runInBox === true };
+}
+
+/** `GET` / `PUT boxRoutes.mcpRunInBox`; null when the envelope is broken. */
+export function sanitizeBoxMcpRunInBoxResponse(value: unknown): BoxMcpRunInBoxResponse | null {
+  if (!isRecord(value) || !Array.isArray(value.servers)) return null;
+  return { servers: listOf(value.servers, sanitizeRunInBoxEntry, (entry) => `${entry.agent}\u0000${entry.name}`) };
+}
+
+/** Whether an agent's Global server is switched to "Run in box" (absent: it is not). */
+export function runsInBox(response: BoxMcpRunInBoxResponse, agent: string, name: string): boolean {
+  return response.servers.some((entry) => entry.agent === agent && entry.name === name && entry.runInBox);
 }

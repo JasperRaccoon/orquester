@@ -11,6 +11,10 @@ import {
   TS_RUST_PLUGIN_ID,
   type TsCheckerEngine
 } from "@orquester/api";
+// boxes: per-box tooling installs.
+import { BOX_KIND_LABELS, type BoxSummary } from "@orquester/api";
+
+import { boxOwner } from "../boxes/settings/boxes-list.logic";
 
 /** Shown before Better TS Typecheck is turned on (spec §6, first-enable confirmation). */
 export const FIRST_ENABLE_MESSAGE =
@@ -164,4 +168,35 @@ export function pluginSourceHref(url: string): string | null {
   } catch {
     return null;
   }
+}
+
+/** boxes: one box whose copy of a plugin's tooling did not install (Ephemeral AI VMs spec §10). */
+export interface PluginBoxIssue {
+  boxId: string;
+  /** Whose box it is and what it runs on, or its id when this client does not hold it. */
+  label: string;
+  state: "failed" | "unsupported";
+  message: string;
+}
+
+const BOX_ISSUE_FALLBACK: Record<PluginBoxIssue["state"], string> = {
+  failed: "The install failed; the box keeps what it had.",
+  unsupported: "There is no build of this plugin for the box's operating system and processor."
+};
+
+/**
+ * boxes: the boxes where a plugin's tooling failed to install or has no build,
+ * labelled from the boxes this client holds. Empty for a plugin without
+ * per-box tooling, and for one whose installs all went through.
+ */
+export function pluginBoxIssues(plugin: PluginInfo, boxes: readonly BoxSummary[]): PluginBoxIssue[] {
+  const issues: PluginBoxIssue[] = [];
+  for (const entry of plugin.boxes ?? []) {
+    if (entry.state !== "failed" && entry.state !== "unsupported") continue;
+    const box = boxes.find((candidate) => candidate.id === entry.boxId);
+    const label = box ? `${boxOwner(box)} · ${BOX_KIND_LABELS[box.kind]} on ${box.providerLabel}` : `Box ${entry.boxId}`;
+    const message = entry.message?.trim() || BOX_ISSUE_FALLBACK[entry.state];
+    issues.push({ boxId: entry.boxId, label, state: entry.state, message });
+  }
+  return issues;
 }

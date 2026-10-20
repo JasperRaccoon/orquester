@@ -283,7 +283,8 @@
         "params": {
           "agent": "codex",
           "accountId": "acc-2",
-          "minValidSeconds": 900
+          "minValidSeconds": 900,
+          "rejectedAccessToken": "eyJ-refused"
         },
         "result": {
           "accessToken": "eyJ",

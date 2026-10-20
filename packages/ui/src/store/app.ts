@@ -9,8 +9,6 @@ import { notifyProvidersChanged, setProviderSideEffects } from "../lib/agent-cha
 import { applySavedPromptEvent, resetSavedPrompts } from "../lib/saved-prompts/store";
 import { applyRepoIdentityEvent, loadRepoIdentities, resetRepoIdentities } from "../lib/repo-identities/store";
 import { applySecretFilesEvent, loadSecretVaults, resetSecretFiles } from "../lib/secret-files/store";
-// boxes: the box surfaces' stand-in store (see components/boxes/surfaces/box-data.ts).
-import { applyBoxSurfacesEvent } from "../components/boxes/surfaces/box-store";
 import { applySecretRequestEvent, resetSecretRequests } from "../lib/agent-chat/secret-requests";
 import {
   applyAgentToolsEvent,
@@ -3682,8 +3680,6 @@ export const useAppStore = create<AppState>((set, get) => ({
     // boxes: box, provider and config-change snapshots (validated in their module store).
     if (event.channel === BOXES_CHANNEL) {
       if (boxesOn(get().plugins)) applyBoxesEvent(event);
-      // boxes: the surfaces' stand-in store until it is re-pointed at lib/boxes/store (integration).
-      applyBoxSurfacesEvent(event);
       return;
     }
     if (event.channel === AGENT_PROFILE_CHANNEL) {

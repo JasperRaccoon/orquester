@@ -17,12 +17,16 @@ import { parse as parseToml } from "@decimalturn/toml-patch";
 
 import type { RuntimeMode } from "@orquester/api/agent-chat";
 import { GROK_PROFILE_ENV, GROK_USER_SKILL_ROOTS, type GrokPluginNamesResult } from "../../../agent-isolation/grok.ts";
+import { localBoxConnection } from "../../../boxes/testing.ts";
+import { createAgentHostBoxes } from "../../boxes/index.ts";
+import { recordingSync, recordingTokens } from "../../boxes/testing.ts";
 import { writePreparedManifest } from "../../../session-profiles/manifest.ts";
 import { grokPreparer } from "../../../session-profiles/preparers/grok.ts";
 import { GROK_FIXTURE_SECRETS, makeGrokProfileFixture } from "../../../session-profiles/preparers/grok.testing.ts";
 import type { AdapterContext } from "../../adapter.ts";
 import type { HostThreadProfile } from "../../host-protocol.ts";
 import { ProfileLaunchError } from "../profile-manifest.ts";
+import { boxGrokPluginNames } from "./box-launch.ts";
 import { createGrokAdapter } from "./index.ts";
 import { grokSpawnArgs } from "./launch.ts";
 import { prepareGrokProfileSpawn, withAgentOptions } from "./profile-launch.ts";
@@ -148,6 +152,53 @@ describe("prepareGrokProfileSpawn", () => {
     await prepareGrokProfileSpawn({ profile, env, command: bin });
     // The fake reports $GROK_HOME and its cwd as plugin names: both the home.
     assert.deepEqual((await readToml(join(preparedDir, "config.toml"))).plugins, { disabled: [preparedDir] });
+  });
+
+  it("boxes: a box thread's inspect runs the box's grok in the box, under the profile home; the home is synced again", async () => {
+    const { root, preparedDir, profile, env, accountHome } = await setup();
+    // The box's own `grok` in `~/.local/bin` (its login PATH has none, nor does this machine's).
+    const boxHome = join(root, "box-home");
+    await mkdir(join(boxHome, ".local", "bin"), { recursive: true });
+    await writeFile(join(boxHome, "sh"), '#!/bin/sh\nprintf "%s" "/usr/bin:/bin"\n');
+    await chmod(join(boxHome, "sh"), 0o755);
+    const boxGrok = join(boxHome, ".local", "bin", "grok");
+    const script = (code: number) =>
+      `#!/bin/sh\nprintf '{"plugins":[{"name":"in-box"},{"name":"%s"},{"name":"%s"},{"name":"toolbox"}]}' "$GROK_HOME" "$(pwd)"\nexit ${code}\n`;
+    await writeFile(boxGrok, script(0));
+    await chmod(boxGrok, 0o755);
+    const connection = localBoxConnection({ sys: { home: boxHome, shell: join(boxHome, "sh"), agentPath: "/opt/orq-agent" } });
+    const sync = recordingSync();
+    const boxes = createAgentHostBoxes({
+      appdir: join(root, "host-appdir"),
+      connector: () => connection,
+      tokens: recordingTokens({ accessToken: "t", expiresAt: null }),
+      sync,
+      logger: { debug: () => undefined, info: () => undefined, warn: () => undefined, error: () => undefined }
+    });
+    const launch = await boxes.launch({
+      threadId: "t1",
+      agent: "grok",
+      box: { boxId: connection.boxId, socketPath: "/nonexistent/relay.sock", sys: connection.sys, paths: connection.paths, tooling: { pathPrepend: [], env: {}, nodeRequire: [] } },
+      home: { kind: "account", accountId: "acct-1", path: accountHome },
+      cwd: root,
+      profile
+    });
+    assert.equal(launch.bin, boxGrok);
+
+    await prepareGrokProfileSpawn({ profile, env, command: launch.bin, inspect: boxGrokPluginNames(launch) });
+    // The box's plugins, inspected with GROK_HOME and cwd the profile home (as the box knows it);
+    // the profile's own stays enabled.
+    assert.deepEqual((await readToml(join(preparedDir, "config.toml"))).plugins, { disabled: ["in-box", preparedDir] });
+    await launch.syncProfile();
+    assert.deepEqual(sync.calls.at(-1), { op: "ensureSynced", boxId: connection.boxId, detail: { agent: "grok", configRoots: [preparedDir], threadId: "t1" } });
+
+    // A failing inspect in the box fails the start, as on this machine.
+    await writeFile(boxGrok, script(3));
+    await assert.rejects(
+      prepareGrokProfileSpawn({ profile, env, command: launch.bin, inspect: boxGrokPluginNames(launch) }),
+      (error: unknown) => error instanceof ProfileLaunchError && /grok inspect --json in the box exited with code 3/.test(error.message)
+    );
+    await launch.close();
   });
 
   it("fails the start when inspect fails, and leaves the config as it was", async () => {

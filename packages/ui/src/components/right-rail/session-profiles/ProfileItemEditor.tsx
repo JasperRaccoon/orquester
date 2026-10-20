@@ -36,6 +36,7 @@ import {
 import { useApi } from "../../../context/orquester-context";
 import { useMediaQuery } from "../../../hooks/use-media-query";
 import type { ApiClient } from "../../../lib/api-client";
+import { useBoxesEnabled } from "../../../lib/boxes/hooks";
 import {
   itemSaveRevision,
   itemUnchanged,
@@ -442,7 +443,16 @@ const McpBody: React.FC<{ base?: ItemSaveBase; detail?: McpDetail; onReload?: ()
   const { submit, save: saveItem } = useItemSave(base ?? null);
   const validation = validateMcpForm(agent, form);
   const scopeProblem = sessionProfileScopeProblem("mcp", scope);
-  useReportDirty(mcpFormSignature(form) !== mcpFormSignature(initial) || scopeKey(scope) !== scopeKey(initialScope));
+  // boxes: "Run in box", part of the item; shown and sent only while the Ephemeral AI VMs plugin is on
+  // (absent from the draft = left as it is).
+  const boxesOn = useBoxesEnabled();
+  const runInBoxInitial = detail?.mcp.runInBox === true;
+  const [runInBox, setRunInBox] = useState(runInBoxInitial);
+  useReportDirty(
+    mcpFormSignature(form) !== mcpFormSignature(initial) ||
+      scopeKey(scope) !== scopeKey(initialScope) ||
+      runInBox !== runInBoxInitial
+  );
 
   const change = useCallback(
     (patch: Partial<McpForm>) => {
@@ -457,7 +467,9 @@ const McpBody: React.FC<{ base?: ItemSaveBase; detail?: McpDetail; onReload?: ()
       setShowErrors(true);
       return;
     }
-    saveItem({ kind: "mcp", agents: scope, mcp: mcpDraftFromForm(agent, form, origin) });
+    const mcp = mcpDraftFromForm(agent, form, origin);
+    if (boxesOn) mcp.runInBox = runInBox;
+    saveItem({ kind: "mcp", agents: scope, mcp });
   };
 
   return (
@@ -485,6 +497,17 @@ const McpBody: React.FC<{ base?: ItemSaveBase; detail?: McpDetail; onReload?: ()
           validation={validation}
           showErrors={showErrors}
           nameError={submit.nameError}
+          runInBox={
+            boxesOn
+              ? {
+                  checked: runInBox,
+                  onChange: (checked) => {
+                    setRunInBox(checked);
+                    submit.clear();
+                  }
+                }
+              : undefined
+          }
         />
       </FormAgent>
     </EditorShell>

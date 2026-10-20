@@ -1,23 +1,19 @@
 /**
- * Ephemeral AI VMs — the ONE module the box surfaces (sidebar badges, "Opened
- * agents" cards, the chat banner, temporary-box and config-change cards) read
- * box data through.
+ * Ephemeral AI VMs — the box surfaces' (sidebar badges, "Opened agents" cards,
+ * the chat banner, temporary-box and config-change cards) view of the boxes
+ * store (`lib/boxes/store.ts`).
  *
- * Today it reads `ProjectSummary.box` (the project list's own copy) and this
- * folder's stand-in store (`box-store.ts`: `GET boxRoutes.list` /
- * `boxRoutes.configChanges` plus the `boxes` channel events), and prefers the
- * live box over the project list's copy, which only refreshes with the list.
- *
- * MERGE NOTE: when the boxes store slice (`lib/boxes/store.ts`: `useBoxes`,
- * `useBox`, `useProjectBox`, `useBoxConfigChanges`) lands, re-point the hooks
- * below at it, delete `box-store.ts` and the app store's `// boxes:` event
- * branch that feeds it. Nothing else imports `box-store.ts`.
+ * That store is the one copy of the plugin's state: the app store loads it per
+ * connection while the plugin is on, feeds it the `boxes` channel events and
+ * resets it on a connection switch or when the plugin turns off. This module
+ * only reads it, adds what the surfaces need on top (a project's box joined
+ * with the project list's own `ProjectSummary.box`, which only refreshes with
+ * the list), and forwards the surfaces' actions to the store's mutations.
  */
 
-import { useMemo, useSyncExternalStore } from "react";
+import { useMemo } from "react";
 
 import {
-  EPHEMERAL_VMS_PLUGIN_ID,
   projectBoxInfo,
   type BoxConfigChangeSet,
   type BoxSummary,
@@ -25,87 +21,23 @@ import {
   type ProjectBoxInfo
 } from "@orquester/api";
 
-import { isGlobalPluginEnabled } from "../../../lib/plugins-state";
-import { useAppStore, type AppState } from "../../../store/app";
 import {
-  boxSurfacesStore,
   decideBoxConfigChange,
-  destroyTemporaryBox,
-  loadBoxSurfaces,
-  readDestroyedReason,
-  resetBoxSurfaces,
-  type BoxSurfacesApi,
-  type BoxSurfacesState
-} from "./box-store";
+  destroyBox as destroyStoreBox,
+  projectBoxIn,
+  useBoxConfigChanges,
+  useBoxes,
+  type BoxesApi
+} from "../../../lib/boxes/store";
+import { readDestroyedReason } from "../../../lib/boxes/validate";
+import { useAppStore, type AppState } from "../../../store/app";
 import { boxShellRefId, boxTerminalTitle, currentSetupStep } from "./box-surfaces.logic";
 
-// ---------------------------------------------------------------------------
-// Loading: once per connected episode, while the plugin is on
-// ---------------------------------------------------------------------------
-
-let wired = false;
-/** The client the held copy came from: another one (a connection switch) resets it. */
-let heldApi: AppState["api"] = null;
-/** The client a load ran for in this connected episode; cleared when the connection drops. */
-let loadedFor: AppState["api"] = null;
-
-function sync(state: Pick<AppState, "api" | "connectionStatus" | "plugins">): void {
-  const api = state.api;
-  if (api !== heldApi) {
-    heldApi = api;
-    loadedFor = null;
-    resetBoxSurfaces();
-  }
-  if (!api || state.connectionStatus !== "connected") {
-    // The event stream has no replay: the next connected episode reloads.
-    loadedFor = null;
-    return;
-  }
-  if (!isGlobalPluginEnabled(state.plugins, EPHEMERAL_VMS_PLUGIN_ID)) {
-    if (loadedFor !== null || boxSurfacesStore.getState().boxes !== null) resetBoxSurfaces();
-    loadedFor = null;
-    return;
-  }
-  if (loadedFor === api) return;
-  loadedFor = api;
-  void loadBoxSurfaces(api).catch(() => undefined);
-}
-
-/** Starts following the app store the first time any box surface renders. */
-function ensureWired(): void {
-  if (wired) return;
-  wired = true;
-  useAppStore.subscribe((state, previous) => {
-    if (state.api === previous.api && state.connectionStatus === previous.connectionStatus && state.plugins === previous.plugins) return;
-    sync(state);
-  });
-  sync(useAppStore.getState());
-}
-
-const subscribe = (listener: () => void) => boxSurfacesStore.subscribe(listener);
-const snapshot = (): BoxSurfacesState => boxSurfacesStore.getState();
-
-function useSurfacesState(): BoxSurfacesState {
-  ensureWired();
-  return useSyncExternalStore(subscribe, snapshot, snapshot);
-}
-
-const NO_BOXES: readonly BoxSummary[] = [];
-const NO_CHANGES: readonly BoxConfigChangeSet[] = [];
+export { useBoxConfigChanges, useBoxes };
 
 // ---------------------------------------------------------------------------
 // Reads
 // ---------------------------------------------------------------------------
-
-/** Every box this client knows (empty until loaded, or with the plugin off). */
-export function useBoxes(): readonly BoxSummary[] {
-  return useSurfacesState().boxes ?? NO_BOXES;
-}
-
-/** Every box → host config change set held, pending first as the daemon sends them. */
-export function useBoxConfigChanges(): readonly BoxConfigChangeSet[] {
-  return useSurfacesState().configChanges ?? NO_CHANGES;
-}
 
 /** A project's box as its surfaces show it, with the live summary when one is held. */
 export interface ProjectBoxView {
@@ -140,10 +72,8 @@ export function useProjectBox(projectPath: string | null | undefined, listed?: P
     if (!projectPath) return null;
     const live =
       (summary ? boxes.find((box) => box.id === summary.boxId) : undefined) ??
-      // The newest project box at this path — a destroyed box's record outlives it.
-      [...boxes]
-        .filter((box) => box.purpose === "project" && box.project?.path === projectPath)
-        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
+      // The project's live box at this path, else its newest destroyed one (its record outlives it).
+      projectBoxIn(boxes, projectPath);
     if (live) {
       return {
         info: normalizedInfo(projectBoxInfo(live)),
@@ -161,16 +91,16 @@ export function useProjectBox(projectPath: string | null | undefined, listed?: P
 
 /** Approve or deny a config change set; resolves with the decided set (null if the answer did not read). */
 export function decideConfigChange(
-  api: BoxSurfacesApi,
+  api: BoxesApi,
   id: string,
   decision: DecideBoxConfigChangeRequest["decision"]
 ): Promise<BoxConfigChangeSet | null> {
   return decideBoxConfigChange(api, id, decision);
 }
 
-/** Destroy one of a chat's temporary boxes (`DELETE boxRoutes.box`). */
-export function destroyBox(api: BoxSurfacesApi, id: string): Promise<void> {
-  return destroyTemporaryBox(api, id);
+/** Destroy one of a chat's temporary boxes (`DELETE boxRoutes.box`); the answer lands in the store. */
+export function destroyBox(api: BoxesApi, id: string): Promise<void> {
+  return destroyStoreBox(api, id);
 }
 
 /**

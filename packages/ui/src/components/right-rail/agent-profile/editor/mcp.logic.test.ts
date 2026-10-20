@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import type { McpServerView } from "@orquester/api";
+import type { McpServerView, ProfileMutationResponse } from "@orquester/api";
 
 import {
   initialMcpForm,
@@ -9,6 +9,7 @@ import {
   mcpFormOrigin,
   newSecretRow,
   parsePastedCommandLine,
+  saveGlobalRunInBox,
   validateMcpForm,
   type SecretRow
 } from "./mcp.logic";
@@ -174,4 +175,46 @@ test("validation: stdio needs a command, http a real http(s) URL, numbers must p
 test("editing an SSE server preserves its transport in the saved draft", () => {
   const view: McpServerView = { name: "s", transport: "sse", url: "https://x" };
   assert.deepEqual(mcpDraftFromForm("grok", initialMcpForm("grok", view), mcpFormOrigin(view)), view);
+});
+
+// boxes: the Global "Run in box" switch follows the server's save.
+test("saveGlobalRunInBox writes only what moved, under the name the server was saved as", async () => {
+  const snapshot = (items: { id: string; name: string }[]) =>
+    ({ items: items.map((item) => ({ ...item, kind: "mcp" })) }) as unknown as ProfileMutationResponse["snapshot"];
+  const response = (name: string): ProfileMutationResponse => ({ snapshot: snapshot([{ id: `mcp:${name}`, name }]), itemIds: [`mcp:${name}`], notes: [] });
+  const settings = { servers: [{ agent: "claude", name: "jira", runInBox: true }, { agent: "codex", name: "linear", runInBox: true }] };
+  const writes: unknown[] = [];
+  const api = { setBoxMcpRunInBox: async (req: unknown) => void writes.push(req) };
+
+  // Unchanged: nothing written.
+  await saveGlobalRunInBox(api, "claude", response("jira"), { settings, previousName: "jira", name: "jira", wanted: true });
+  assert.deepEqual(writes, []);
+
+  // Switched off.
+  await saveGlobalRunInBox(api, "claude", response("jira"), { settings, previousName: "jira", name: "jira", wanted: false });
+  assert.deepEqual(writes.splice(0), [{ agent: "claude", name: "jira", runInBox: false }]);
+
+  // Renamed: the old name is cleared, the new one carries the switch.
+  await saveGlobalRunInBox(api, "claude", response("jira-cloud"), { settings, previousName: "jira", name: "jira-cloud", wanted: true });
+  assert.deepEqual(writes.splice(0), [
+    { agent: "claude", name: "jira", runInBox: false },
+    { agent: "claude", name: "jira-cloud", runInBox: true }
+  ]);
+
+  // A "Keep both" copy is saved under its suffixed name; another agent's same name is not this one's.
+  await saveGlobalRunInBox(api, "claude", response("linear-2"), { settings, previousName: null, name: "linear", wanted: true });
+  assert.deepEqual(writes.splice(0), [{ agent: "claude", name: "linear-2", runInBox: true }]);
+});
+
+test("saveGlobalRunInBox keeps the save when the switch can't be written, and says so", async () => {
+  const saved: ProfileMutationResponse = {
+    snapshot: { items: [] } as unknown as ProfileMutationResponse["snapshot"],
+    itemIds: ["mcp:jira"],
+    notes: ["Saved."]
+  };
+  const api = { setBoxMcpRunInBox: async () => Promise.reject(new Error("offline")) };
+  const answer = await saveGlobalRunInBox(api, "claude", saved, { settings: { servers: [] }, previousName: null, name: "jira", wanted: true });
+  assert.equal(answer.itemIds[0], "mcp:jira");
+  assert.equal(answer.notes[0], "Saved.");
+  assert.match(answer.notes[1] ?? "", /"Run in box" setting was not saved \(offline\)/);
 });

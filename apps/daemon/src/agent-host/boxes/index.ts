@@ -211,9 +211,11 @@ export class BoxLaunch {
 
   /**
    * A fresh access token for the launch's account (spec §7) — never a refresh token. Claude's
-   * expiry is tracked for the restart-before-expiry policy. Fails with a {@link BoxLaunchError}.
+   * expiry is tracked for the restart-before-expiry policy. `rejectedAccessToken`: the token the
+   * CLI was refused with, which the broker renews instead of answering again. Fails with a
+   * {@link BoxLaunchError}.
    */
-  async token(minValidSeconds = BOX_TOKEN_MIN_VALID_SECONDS, signal?: AbortSignal): Promise<AgentTokenGrant> {
+  async token(minValidSeconds = BOX_TOKEN_MIN_VALID_SECONDS, signal?: AbortSignal, rejectedAccessToken?: string): Promise<AgentTokenGrant> {
     const agent = this.input.agent;
     if (!isTokenAgent(agent)) {
       throw new BoxLaunchError("BOX_UNSUPPORTED", "This agent does not use Orquester-managed logins in a box.");
@@ -221,7 +223,13 @@ export class BoxLaunch {
     let grant: AgentTokenGrant;
     try {
       grant = await this.host.tokens.getToken(
-        { boxId: this.box.boxId, agent, accountId: this.accountId, minValidSeconds },
+        {
+          boxId: this.box.boxId,
+          agent,
+          accountId: this.accountId,
+          minValidSeconds,
+          ...(rejectedAccessToken !== undefined ? { rejectedAccessToken } : {})
+        },
         signal ?? this.input.signal
       );
     } catch (error) {
@@ -372,6 +380,28 @@ export class BoxLaunch {
     const quoted = this.sys.os === "win32" ? `"${agentPath.replace(/"/g, "")}"` : `'${agentPath.replace(/'/g, "'\\''")}'`;
     const account = this.accountId.replace(/[^A-Za-z0-9._-]/g, "");
     return `${quoted} token grok --account ${account}`;
+  }
+
+  /**
+   * Sync the profile's prepared dir into the box again: a launch file was rendered in it on this
+   * machine after {@link AgentHostBoxes.launch} synced it (Grok's `config.toml`, whose plugin list
+   * needs `grok inspect` in the box first). A no-op for a Global thread.
+   */
+  async syncProfile(): Promise<void> {
+    const preparedDir = this.input.profile?.preparedDir;
+    if (preparedDir === undefined || preparedDir.length === 0) return;
+    try {
+      await this.host.sync.ensureSynced(
+        this.box.boxId,
+        { agent: this.input.agent, configRoots: [preparedDir], threadId: this.threadId },
+        this.input.signal
+      );
+    } catch (error) {
+      throw new BoxLaunchError(
+        "BOX_SYNC_FAILED",
+        `The agent's configuration could not be synced into the box, so it was not started: ${describeBoxFailure(error)}`
+      );
+    }
   }
 
   /** The session ended: its bridge registrations go, and so does its token tracking. Idempotent. */
