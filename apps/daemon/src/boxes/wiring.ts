@@ -394,6 +394,7 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
       // Transcripts: built now, after `registry.init()`, so OpenCode's resolved binary is known.
       const opencode = deps.catalog.get("opencode")?.resolvedBin;
       transcripts = new BoxTranscriptSyncService({
+        appdir: deps.baseDir,
         hub,
         logger: { warn: (message: string) => logger.warn(`[boxes] ${message}`) },
         ...(opencode ? { opencode: { hostCommand: opencode } } : {})
