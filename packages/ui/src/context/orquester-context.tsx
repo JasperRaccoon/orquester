@@ -47,3 +47,11 @@ export function useOrquester(): OrquesterContextValue {
 export function useApi(): ApiClient {
   return useOrquester().api;
 }
+
+/**
+ * The client when one is provided, else null — for leaf decorations (a link
+ * pill's preview) that render fine without one, such as in a static render.
+ */
+export function useOptionalApi(): ApiClient | null {
+  return useContext(OrquesterContext)?.api ?? null;
+}

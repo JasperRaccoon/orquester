@@ -22,6 +22,7 @@ import type {
   SetupSecretVaultRequest,
   UpdateSecretFilesRequest,
   FetchRepoFaviconRequest,
+  GitHubLinkPreviewResponse,
   RepoIconUploadType,
   RepoIdentitiesResponse,
   RepoIdentityResponse,
@@ -116,7 +117,7 @@ import {
 import { fsPathQuery } from "./fs-path-query";
 import { parsePluginActionResult, parsePluginsResponse } from "./plugins-state";
 import { buildQueryString } from "./transporter";
-import { AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, agentProfileRoutes, agentToolsRoutes, desktopRoutes, pluginRoutes, repoIdentityRoutes, secretFilesRoutes, sessionProfileRoutes, workflowRoutes } from "@orquester/api";
+import { AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, agentProfileRoutes, agentToolsRoutes, desktopRoutes, githubLinkRoutes, pluginRoutes, repoIdentityRoutes, secretFilesRoutes, sessionProfileRoutes, workflowRoutes } from "@orquester/api";
 import type {
   AddSessionProfilePluginRequest,
   CopySessionProfileItemsRequest,
@@ -854,6 +855,16 @@ export class ApiClient {
       throw new ApiError(response.status, "GET", repoIdentityRoutes.icon, response.headers, undefined);
     }
     return response.data;
+  }
+
+  // --- GitHub link previews (the chat's link pills) ------------------------
+
+  /**
+   * The pull request, issue or commit a GitHub link names. `projectPath` lets the daemon read
+   * with the git account bound to that project's workspace; tokens never come back.
+   */
+  getGitHubLinkPreview(url: string, projectPath?: string | null, signal?: AbortSignal): Promise<GitHubLinkPreviewResponse> {
+    return this.send("GET", githubLinkRoutes.preview, { query: { url, ...(projectPath ? { projectPath } : {}) }, signal });
   }
 
   // --- Saved prompts (the right rail; daemon-persisted, shared) ------------
