@@ -2,12 +2,15 @@ import React from "react";
 import Markdown, { type Components } from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
+import { parseForgeLink } from "@orquester/api";
 
 import { useApi } from "../../../../context/orquester-context";
 import { useObjectUrl } from "../../../../hooks";
 import { cn } from "../../../../lib/cn";
 import { detectFileKind } from "../../../../lib/file-kind";
+import { isUrlText } from "../../../../lib/github-links/text-links";
 import { useAppStore } from "../../../../store/app";
+import { ForgeLinkPill } from "../../forge-links/ForgeLinkPill";
 import { useTimelineRowContext } from "../context";
 import { CodeBlock } from "./CodeBlock";
 import { extractFenceLanguage } from "./highlight-core";
@@ -131,6 +134,14 @@ function MarkdownLink({
 }): React.ReactElement {
   const { onOpenFile } = React.useContext(MarkdownConfigCtx);
   const target = href ?? "";
+  const forge = React.useMemo(() => parseForgeLink(target), [target]);
+  // A GitHub (or GitLab/Bitbucket change request) link is a pill: an autolink shows the short
+  // label, a link with the author's own words keeps them. An image-only link (a badge) stays a
+  // plain link around its image.
+  const text = forge ? nodeToText(children) : "";
+  if (forge && text.trim().length > 0) {
+    return <ForgeLinkPill link={forge}>{isUrlText(text, target) ? undefined : children}</ForgeLinkPill>;
+  }
   // Info-coloured, no underline at rest; hover draws a dotted one.
   const linkClass = "text-info-300 underline-offset-2 hover:underline hover:decoration-dotted";
   if (onOpenFile && looksLikeWorkspacePath(target)) {

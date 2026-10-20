@@ -26,8 +26,10 @@ import {
 import { ChatIconButton, CopyButton, DisclosureChevron, ShimmerText } from "../../primitives";
 import { useTimelineRowContext } from "../context";
 import { ChatMarkdown } from "../markdown/ChatMarkdown";
+import { splitForgeLinks, type ForgeTextRun } from "../../../../lib/github-links/text-links";
+import { ForgeLinkPill } from "../../forge-links/ForgeLinkPill";
 import { queuedStatusLabel, shouldClampUserMessage } from "../row-format";
-import { splitSkillMentions } from "../row-chrome";
+import { splitSkillMentions, type MessageTextRun } from "../row-chrome";
 import { formatRowTimestamp, formatRowTimestampTooltip } from "../timestamp";
 
 type Row<K extends AgentChatTimelineRow["kind"]> = Extract<AgentChatTimelineRow, { kind: K }>;
@@ -106,12 +108,24 @@ function AttachmentChips({ attachments }: { attachments: readonly AttachmentRef[
  */
 function MessageBodyText({ text }: { text: string }): React.ReactElement {
   const { skills } = useTimelineRowContext();
-  const runs = React.useMemo(() => splitSkillMentions(text, skills), [text, skills]);
-  if (runs.length === 1) return <>{text}</>;
+  // GitHub links first (they are pills, as in assistant markdown), then skill mentions in the rest.
+  const runs = React.useMemo<Array<MessageTextRun & ForgeTextRun>>(
+    () => splitForgeLinks(text).flatMap((run) => (run.link ? [run] : splitSkillMentions(run.text, skills))),
+    [text, skills]
+  );
+  if (runs.length === 1 && !runs[0]?.link && runs[0]?.skill === undefined) return <>{text}</>;
   return (
     <>
       {runs.map((run, index) =>
-        run.skill === undefined ? (
+        run.link ? (
+          <ForgeLinkPill
+            // eslint-disable-next-line react/no-array-index-key
+            key={index}
+            link={run.link}
+            // The bubble is neutral-800 already; a darker wash keeps the pill visible on it.
+            className="border-neutral-700 bg-neutral-900/60 hover:bg-neutral-900"
+          />
+        ) : run.skill === undefined ? (
           // eslint-disable-next-line react/no-array-index-key
           <React.Fragment key={index}>{run.text}</React.Fragment>
         ) : (

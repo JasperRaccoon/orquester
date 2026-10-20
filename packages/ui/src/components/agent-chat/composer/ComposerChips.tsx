@@ -10,10 +10,12 @@ import type {
 import { modelPickerHint, RUNTIME_MODE_LABELS, RUNTIME_MODE_SHORT_HINTS as RUNTIME_MODE_HINTS, RUNTIME_MODES } from "@orquester/api/agent-chat";
 
 import { cn } from "../../../lib/cn";
+import { forgeLinksInText } from "../../../lib/github-links/text-links";
 import { useUsageNow } from "../../../hooks/use-usage-display";
 import { LoginExpiryWarning } from "../../auth/LoginExpiryWarning";
 import { loginExpiryWarning } from "../../../lib/login-expiry";
 import type { ChatAccountOption } from "../../../lib/agent-chat/account-switch";
+import { ForgeLinkPill } from "../forge-links/ForgeLinkPill";
 import { Kbd } from "../primitives";
 import { ComposerMenuRow, ComposerPopover } from "./ComposerPopover";
 import {
@@ -370,6 +372,47 @@ export function PlanChip({
         value: planning ? "Plan mode" : null
       })}
     </button>
+  );
+}
+
+/** How long the draft must rest before its links become chips: typing `/pull/123` reads one PR, not three. */
+export const LINK_CHIPS_SETTLE_MS = 400;
+
+export interface ComposerLinkChipsProps {
+  /** The live draft. */
+  text: string;
+  /** The thread's project, whose workspace account reads previews. */
+  projectPath: string | null;
+}
+
+/**
+ * The GitHub (and GitLab/Bitbucket change-request) links in the draft, as the
+ * same pills the timeline draws, so the user sees what a message references
+ * before sending it. The draft itself stays plain text in the `<textarea>`;
+ * a chip is a real link that opens the page, with the hover card on hover or
+ * focus. Renders nothing while the draft names no forge link.
+ */
+export function ComposerLinkChips({ text, projectPath }: ComposerLinkChipsProps): React.ReactElement | null {
+  const [settled, setSettled] = React.useState(text);
+  React.useEffect(() => {
+    // A cleared draft (a send) clears the row at once; anything else waits for the typing to rest.
+    if (text.length === 0) {
+      setSettled(text);
+      return;
+    }
+    const timer = setTimeout(() => setSettled(text), LINK_CHIPS_SETTLE_MS);
+    return () => clearTimeout(timer);
+  }, [text]);
+  const links = React.useMemo(() => forgeLinksInText(settled), [settled]);
+  if (links.length === 0) return null;
+  return (
+    <ul aria-label="Links in this message" className="flex min-w-0 flex-wrap items-center gap-1 pt-2">
+      {links.map((link) => (
+        <li key={link.url} className="min-w-0 max-w-full">
+          <ForgeLinkPill link={link} variant="chip" projectPath={projectPath} />
+        </li>
+      ))}
+    </ul>
   );
 }
 

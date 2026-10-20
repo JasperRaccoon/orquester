@@ -20,7 +20,7 @@ import { attachmentPathOf, type ComposerDraft } from "../../../lib/agent-chat/co
 import { useAgentChatDraft } from "../../../lib/agent-chat/hooks";
 import { createEscapeSequence, type EscapeSequence } from "../../../lib/agent-chat/rewind.logic";
 import type { ChatComposerProps } from "../contracts";
-import { AccountChip, ModelChip, OptionChip, PlanChip, RuntimeModeChip } from "./ComposerChips";
+import { AccountChip, ComposerLinkChips, ModelChip, OptionChip, PlanChip, RuntimeModeChip } from "./ComposerChips";
 import { ProfileChip, type ProfileChipProps } from "./ProfileChip";
 import { removeFilePath, textNamesPath } from "./composer-files";
 import {
@@ -257,6 +257,9 @@ export function ChatComposer({
     (state) => state.sessions.find((session) => session.id === sessionId)?.cwd ?? null
   );
   const root = searchRoot ?? sessionCwd;
+  const sessionProjectPath = useAppStore(
+    (state) => state.sessions.find((session) => session.id === sessionId)?.projectPath ?? null
+  );
   /**
    * The thread store's persisted draft — the durable copy of everything the
    * user has not sent yet, and the only one that outlives this component.
@@ -1924,6 +1927,8 @@ export function ChatComposer({
               {statusText}
             </p>
           ) : null}
+
+          <ComposerLinkChips text={draft.text} projectPath={sessionProjectPath} />
 
           <div className="flex items-end justify-between gap-2 pt-2">
             <div

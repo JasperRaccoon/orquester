@@ -135,6 +135,9 @@
   --git-deleted: rgb(239 68 68);       /* red-500    */
   --git-renamed: rgb(96 165 250);      /* blue-400   */
   --git-conflict: rgb(249 115 22);     /* orange-500 */
+  /* GitHub's "merged" (and "closed as completed") purple for chat link pills; open, closed and
+     draft use the ok/danger/neutral tokens. */
+  --gh-merged: rgb(167 139 250);       /* violet-400 */
 
   --usage-ok: rgb(52 211 153);         /* emerald-400 */
   --usage-med: rgb(250 204 21);        /* yellow-400  */
@@ -223,6 +226,7 @@
   --git-deleted: rgb(220 38 38);       /* red-600    */
   --git-renamed: rgb(29 78 216);       /* blue-700   */
   --git-conflict: rgb(124 45 18);      /* orange-900 — orange-700 sat too close to red-600 "deleted" */
+  --gh-merged: rgb(109 40 217);        /* violet-700 */
 
   --usage-ok: rgb(4 120 87);           /* emerald-700 */
   --usage-med: rgb(161 98 7);          /* yellow-700  */
