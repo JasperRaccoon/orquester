@@ -84,6 +84,68 @@ test("credential-shaped keys and text are both scrubbed", async () => {
   assert.equal(written.cwd, "~/workspaces/p");
 });
 
+test("camelCase credential keys are scrubbed too: Codex's chatgptAuthTokens login and refresh frames", async () => {
+  const filePath = await tempFile();
+  const log = new RawFrameLog({ filePath });
+  // The shapes the Codex box session sends (`account/login/start`) and answers
+  // (`account/chatgptAuthTokens/refresh`); a JWT matches no textual token rule.
+  const jwt = "eyJhbGciOiJSUzI1NiJ9.eyJleHAiOjE4MDAwMDAwMDB9.c2lnbmF0dXJlLXNlY3JldA";
+  log.write({
+    direction: "send",
+    frame: {
+      id: 3,
+      method: "account/login/start",
+      params: { type: "chatgptAuthTokens", accessToken: jwt, chatgptAccountId: "ws-1", chatgptPlanType: null }
+    }
+  });
+  log.write({ direction: "send", frame: { id: 1000, result: { accessToken: jwt, chatgptAccountId: "ws-1", chatgptPlanType: "pro" } } });
+  log.write({
+    direction: "recv",
+    frame: {
+      method: "x/other",
+      params: {
+        idToken: jwt,
+        refresh_token: jwt,
+        chatgptAccessToken: jwt,
+        rejectedAccessToken: jwt,
+        "X-Api-Key": jwt,
+        APIKey: jwt,
+        clientSecret: jwt,
+        credentials: { user: "u", pass: jwt },
+        // Usage counts are not credentials, whatever their key says.
+        usage: { input_tokens: 812, outputTokens: 40 },
+        tokens: { input: 5, output: 7 },
+        maxTokens: 4096,
+        tokenUsage: { total: 3 },
+        tokenizer: "o200k",
+        headers: { "X-Custom": jwt }
+      }
+    }
+  });
+  log.close();
+  const text = fs.readFileSync(filePath, "utf8");
+  assert.equal(text.includes(jwt), false, "no access token reaches the file");
+  const [login, refresh, other] = readLines(filePath) as { frame: { params?: Record<string, unknown>; result?: Record<string, unknown> } }[];
+  assert.deepEqual(login?.frame.params, {
+    type: "chatgptAuthTokens",
+    accessToken: "[redacted]",
+    chatgptAccountId: "ws-1",
+    chatgptPlanType: null
+  });
+  assert.deepEqual(refresh?.frame.result, { accessToken: "[redacted]", chatgptAccountId: "ws-1", chatgptPlanType: "pro" });
+  const params = other?.frame.params ?? {};
+  for (const key of ["idToken", "refresh_token", "chatgptAccessToken", "rejectedAccessToken", "X-Api-Key", "APIKey", "clientSecret"]) {
+    assert.equal(params[key], "[redacted]", key);
+  }
+  assert.deepEqual(params.credentials, { user: "[redacted]", pass: "[redacted]" });
+  assert.deepEqual(params.usage, { input_tokens: 812, outputTokens: 40 });
+  assert.deepEqual(params.tokens, { input: 5, output: 7 });
+  assert.equal(params.maxTokens, 4096);
+  assert.deepEqual(params.tokenUsage, { total: 3 });
+  assert.equal(params.tokenizer, "o200k");
+  assert.deepEqual(params.headers, { "X-Custom": "[redacted]" });
+});
+
 test("a long string is capped per record", async () => {
   const filePath = await tempFile();
   const log = new RawFrameLog({ filePath });

@@ -7,8 +7,10 @@
  * refresh-token-free `.credentials.json` in the box's config dir and re-reads
  * that file on its next request, so before the token's remaining life drops
  * under {@link BOX_TOKEN_RESTART_MARGIN_MS} the file is rewritten with a fresh
- * grant BETWEEN turns — before each turn is sent and when one ends
- * (`BoxLaunch.refreshCredentials`). No restart is needed.
+ * grant — before each turn is sent, when one ends, and by a timer armed for
+ * that moment, so a turn running past it gets the new token too (the rewrite
+ * is atomic, so a mid-turn re-read sees the old file or the new one, spikes
+ * doc (a)) (`BoxLaunch.refreshCredentials`). No restart is needed.
  *
  * A token that was ALREADY inside the margin when the CLI got it (the broker
  * could not do better) is not "stale" until its last
@@ -20,6 +22,10 @@ export const BOX_TOKEN_RESTART_MARGIN_MS = 30 * 60_000;
 export const BOX_TOKEN_HARD_FLOOR_MS = 5 * 60_000;
 /** What a spawn asks the broker for: comfortably more than the restart margin. */
 export const BOX_TOKEN_MIN_VALID_SECONDS = 45 * 60;
+/** A renewal that did not land (the token still stale) is tried again this much later. */
+export const BOX_TOKEN_RENEW_RETRY_MS = 60_000;
+/** The renewal timer never waits longer than this before looking again (`setTimeout`'s range). */
+export const BOX_TOKEN_RENEW_MAX_DELAY_MS = 6 * 60 * 60_000;
 
 interface TrackedToken {
   expiresAt: number;
@@ -51,12 +57,21 @@ export class BoxTokenTracker {
     return token === undefined ? null : token.expiresAt - this.now();
   }
 
-  /** True when the live CLI's token must be replaced before its next turn. */
+  /** True when the live CLI's token must be replaced now. */
   stale(threadId: string): boolean {
+    const until = this.msUntilStale(threadId);
+    return until !== null && until < 0;
+  }
+
+  /**
+   * How long until the token turns {@link stale} (negative once it has); null when none is
+   * tracked. What the mid-turn renewal timer of a login file is armed with.
+   */
+  msUntilStale(threadId: string): number | null {
     const token = this.tokens.get(threadId);
-    if (token === undefined) return false;
+    if (token === undefined) return null;
     const remaining = token.expiresAt - this.now();
     const margin = token.initialLifeMs <= BOX_TOKEN_RESTART_MARGIN_MS ? BOX_TOKEN_HARD_FLOOR_MS : BOX_TOKEN_RESTART_MARGIN_MS;
-    return remaining < margin;
+    return remaining - margin;
   }
 }

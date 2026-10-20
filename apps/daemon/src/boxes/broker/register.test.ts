@@ -6,7 +6,7 @@ import Fastify from "fastify";
 import { boxRoutes } from "@orquester/api";
 
 import type { AgentTokenBroker, BoxRequestContext, BoxRequestHandler } from "../contracts.ts";
-import { AgentTokenError, parseTokenRequest } from "./broker.ts";
+import { AgentTokenError, BOX_MAX_MIN_VALID_SECONDS, parseTokenRequest } from "./broker.ts";
 import { registerTokenBroker, registerTokenBrokerRoutes } from "./register.ts";
 import { storedBox } from "./testing.ts";
 
@@ -45,6 +45,36 @@ test("token.get: the box id is the authenticated link's, never a request field",
   await handler!(context, params, link.signal);
   link.abort();
   assert.equal(seen[1].signal.aborted, true);
+});
+
+test("token.get: a box asks for at most an hour of life; the agent host's socket route is not lowered", async () => {
+  let handler: BoxRequestHandler<"token.get"> | undefined;
+  const hub = { handle: (_method: string, h: unknown) => (handler = h as BoxRequestHandler<"token.get">) };
+  const { broker, seen } = recordingBroker(async (request) => {
+    parseTokenRequest(request);
+    return { accessToken: "a", expiresAt: null };
+  });
+  registerTokenBroker(hub as never, broker);
+  const context: BoxRequestContext = { boxId: "box-1", record: storedBox() };
+  for (const minValidSeconds of [24 * 60 * 60, 2 * 60 * 60, 30 * 60]) {
+    await handler!(context, { agent: "claude", accountId: "acc", minValidSeconds } as never, new AbortController().signal);
+  }
+  assert.deepEqual(
+    seen.map((entry) => (entry.request as { minValidSeconds: number }).minValidSeconds),
+    [BOX_MAX_MIN_VALID_SECONDS, BOX_MAX_MIN_VALID_SECONDS, 30 * 60]
+  );
+  // A malformed value still reaches the parser (and is refused there), never "fixed".
+  await assert.rejects(
+    handler!(context, { agent: "claude", accountId: "acc", minValidSeconds: "lots" } as never, new AbortController().signal),
+    (error: unknown) => error instanceof AgentTokenError && error.code === "TOKEN_INVALID_REQUEST"
+  );
+
+  const app = Fastify();
+  const route = recordingBroker(async () => ({ accessToken: "a", expiresAt: null }));
+  registerTokenBrokerRoutes(app, route.broker);
+  await app.inject({ method: "POST", url: boxRoutes.internalToken, payload: { boxId: "b", agent: "claude", accountId: "a", minValidSeconds: 2 * 60 * 60 } });
+  assert.equal((route.seen[0]?.request as { minValidSeconds: number }).minValidSeconds, 2 * 60 * 60);
+  await app.close();
 });
 
 test("the socket route answers grants, refusals as { code, message }, and no-store", async () => {

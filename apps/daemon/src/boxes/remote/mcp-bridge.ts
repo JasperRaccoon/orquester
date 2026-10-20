@@ -35,6 +35,12 @@ import type { BoxChannelHandler, BoxHub } from "../contracts.ts";
 
 /** SIGTERM, then SIGKILL this long after, for a bridged stdio server whose channel closed. */
 const MCP_BRIDGE_KILL_GRACE_MS = 2_000;
+/**
+ * Open bridge channels one box may hold at once. Each can be a process on this machine, and a
+ * box is untrusted: past this, a new channel is refused (closed) until one of its own ends.
+ * Comfortably above real use — every chat's CLI opens one per configured server.
+ */
+export const MCP_BRIDGE_MAX_CHANNELS_PER_BOX = 64;
 
 export interface McpBridgeLogger {
   info?(message: string, detail?: Record<string, unknown>): void;
@@ -54,6 +60,8 @@ export interface McpBridgeDeps {
   spawn?: typeof nodeSpawn;
   /** Tests: the HTTP transport's fetch. */
   fetch?: typeof fetch;
+  /** Default {@link MCP_BRIDGE_MAX_CHANNELS_PER_BOX}. */
+  maxChannelsPerBox?: number;
 }
 
 function defaultBaseEnv(): Record<string, string> {
@@ -72,11 +80,32 @@ export function registerMcpBridge(hub: Pick<BoxHub, "handleChannel">, deps: McpB
 
 /** The handler itself (exported for tests and for a hub that registers handlers its own way). */
 export function mcpBridgeChannelHandler(deps: McpBridgeDeps): BoxChannelHandler {
+  const max = deps.maxChannelsPerBox ?? MCP_BRIDGE_MAX_CHANNELS_PER_BOX;
+  /** Box id → its open bridge channels, counted from the open (before any lookup or spawn). */
+  const open = new Map<string, number>();
   return (context, spec, stream) => {
     if (spec.kind !== "mcp-bridge") {
       stream.destroy();
       return;
     }
+    const held = open.get(context.boxId) ?? 0;
+    if (held >= max) {
+      deps.logger?.warn?.("boxes: an MCP bridge was refused: the box holds too many open bridges", { boxId: context.boxId, open: held });
+      stream.destroy();
+      return;
+    }
+    open.set(context.boxId, held + 1);
+    let counted = true;
+    const release = (): void => {
+      if (!counted) return;
+      counted = false;
+      const left = (open.get(context.boxId) ?? 1) - 1;
+      if (left > 0) open.set(context.boxId, left);
+      else open.delete(context.boxId);
+    };
+    // `close` follows every end of the channel (destroyed, or both sides ended).
+    stream.once("close", release);
+    if (stream.destroyed) release();
     void (async () => {
       const entry = await readMcpBridgeEntry(deps.appdir, context.boxId, spec.serverId);
       if (entry === null) {

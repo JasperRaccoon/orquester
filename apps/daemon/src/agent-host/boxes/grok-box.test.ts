@@ -5,6 +5,8 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { boxMcpSettingsPath, withRunInBox } from "@orquester/config";
+
 import { localBoxConnection } from "../../boxes/testing.ts";
 import { createGrokAdapter } from "../adapters/grok/index.ts";
 import { createFakeContext, EventCollector } from "../adapters/codex/testing.ts";
@@ -28,9 +30,26 @@ test("Grok in a box: signed in through grok.com's auth provider, its config over
   const appdir = await mkdtemp(join(tmpdir(), "grok-box-appdir-"));
   // The account's own Claude-compat config, which Grok loads its servers from (host copy).
   const claudeJson = join(appdir, "claude.json");
-  await writeFile(claudeJson, JSON.stringify({ mcpServers: { github: { command: "gh-mcp", args: [], env: { GITHUB_TOKEN: "ghp_host_secret" } } } }), "utf8");
+  await writeFile(
+    claudeJson,
+    JSON.stringify({
+      mcpServers: {
+        github: { command: "gh-mcp", args: [], env: { GITHUB_TOKEN: "ghp_host_secret" } },
+        "local-db": { command: "db-mcp", args: [], env: { DB_PASSWORD: "db-host-secret" } }
+      }
+    }),
+    "utf8"
+  );
+  // `local-db` is switched to "Run in box".
+  await mkdir(dirname(boxMcpSettingsPath(appdir)), { recursive: true });
+  await writeFile(boxMcpSettingsPath(appdir), JSON.stringify(withRunInBox({}, "grok", "local-db", true)), "utf8");
   const peer = writeReplayPeer(FIXTURE, {
-    inspect: { mcpServers: [{ name: "github", transport: "stdio", target: "gh-mcp", source: { type: "claudeJson", path: claudeJson } }] }
+    inspect: {
+      mcpServers: [
+        { name: "github", transport: "stdio", target: "gh-mcp", source: { type: "claudeJson", path: claudeJson } },
+        { name: "local-db", transport: "stdio", target: "db-mcp", source: { type: "claudeJson", path: claudeJson } }
+      ]
+    }
   });
   await symlink(peer.bin, join(home, ".local", "bin", "grok"));
 
@@ -78,7 +97,10 @@ test("Grok in a box: signed in through grok.com's auth provider, its config over
     assert.deepEqual(methods.slice(0, 3), ["initialize", "authenticate", "session/new"]);
     assert.deepEqual(received[1]?.params, { methodId: "grok.com" });
     const servers = (received[2]?.params?.mcpServers ?? []) as { name: string; command: string; args: string[]; env: unknown[] }[];
-    assert.equal(servers.length, 1);
+    assert.equal(servers.length, 2);
+    // The "Run in box" server replaces the box copy's (its env blanked there) with the host's
+    // definition: it runs in the box, its secret handed over in `session/new`, never a file.
+    assert.deepEqual(servers[1], { name: "local-db", command: "db-mcp", args: [], env: [{ name: "DB_PASSWORD", value: "db-host-secret" }] });
     assert.equal(servers[0]?.name, "github");
     assert.equal(servers[0]?.command, "/opt/orq-agent");
     assert.deepEqual(servers[0]?.env, []);
