@@ -133,8 +133,8 @@ export const forkSessionTool = defineTool({
   name: "fork_session",
   title: "Fork a chat session",
   description:
-    "Fork a chat into a new idle tab (same project, agent, settings, Agent Profile) holding its conversation through `throughTurn` (transcript numbers; default: the latest finished turn) or up to `messageId`. Grok forks are handed the transcript (`strategy`). A bad profile fails it. send_message the fork work; it returns its result with merge_back_session. " +
-    "`agent` (another one) or `accountId` (another account) CONTINUES it there instead: never native — a fresh session handed the newest whole messages (≤64 KB, `handoff` says how many) with its first message, `strategy` \"transcript\"; earlier history stays readable with read_transcript on the original. `model`/`options` as create_session (another agent: its own model, default its launch default).",
+    "Fork a chat into a new idle tab (same project, agent, settings, Agent Profile) holding its conversation through `throughTurn` (transcript numbers; default: the latest finished turn) or up to `messageId`. A bad profile fails it. send_message the fork work; it returns its result with merge_back_session. " +
+    "`agent` or `accountId` CONTINUES it in another agent or account: a fresh session handed the newest whole messages (≤64 KB; `handoff` says how many), earlier history readable with read_transcript. `model`/`options` as create_session.",
   chatNote: "Default: this chat (your running turn is not included).",
   input: {
     sessionId: catalogSessionId.optional(),
@@ -142,10 +142,10 @@ export const forkSessionTool = defineTool({
     messageId: z.string().min(1).max(200).optional().describe("Fork at this message (a user message: just before it)."),
     title: z.string().trim().min(1).max(200).optional(),
     profile: z.string().trim().min(1).max(200).nullable().optional().describe("Agent Profile id/name; null: Global."),
-    agent: z.string().min(1).max(64).optional().describe("Continue in this agent (list_agents); default: the same one."),
-    model: z.string().min(1).max(200).optional().describe("From list_agents, for the fork's agent."),
+    agent: z.string().min(1).max(64).optional().describe("Another agent to continue in (list_agents)."),
+    model: z.string().min(1).max(200).optional().describe("For the fork's agent (list_agents)."),
     options: optionsSchema.optional(),
-    accountId: z.string().min(1).max(200).optional().describe("From list_agents, or \"system\"; default: same agent's, else the agent's default.")
+    accountId: z.string().min(1).max(200).optional().describe("Another account (list_agents) or \"system\".")
   },
   audiences: ["external", "chat"],
   toolset: "core",
