@@ -205,6 +205,23 @@ describe("box hub authentication", () => {
     assert.equal(expectT(await again.next(), "reject").code, "BOX_DESTROYED");
   });
 
+  test("disconnectAll drops live links but keeps the box's credential", async () => {
+    records.add("box-off-0001");
+    const token = await hub.issueBootstrapToken("box-off-0001", 60_000);
+    const box = await FakeBox.connect(url);
+    box.hello({ kind: "bootstrap", token });
+    const credential = expectT(await box.next(), "welcome").credential!;
+    await hub.waitConnected("box-off-0001", { timeoutMs: 5_000 });
+    hub.disconnectAll("plugin turned off");
+    assert.equal(await box.closed, 1008);
+    assert.equal(hub.get("box-off-0001")?.connected, false);
+    const again = await FakeBox.connect(url);
+    again.hello({ kind: "credential", boxId: "box-off-0001", credential });
+    expectT(await again.next(), "welcome");
+    await hub.waitConnected("box-off-0001", { timeoutMs: 5_000 });
+    again.close();
+  });
+
   test("box → host requests reach handlers; unknown methods answer UNKNOWN_METHOD", async () => {
     records.add("box-req-00001");
     hub.handle("git.credential", async (context, params) => ({ output: `box=${context.boxId} op=${params.operation}\n` }));

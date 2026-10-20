@@ -279,10 +279,15 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
       // Build orq-agent now (when no prebuilt one exists) rather than in the first create request.
       void builds.current().catch(() => undefined);
       if (temporaryBoxTools && !disconnectTools) disconnectTools = temporaryBoxTools.connect({ boxes: temporaryBoxes, hub, registry });
-    } else if (disconnectTools) {
-      const disconnect = disconnectTools;
-      disconnectTools = null;
-      disconnect();
+    } else {
+      // Off means no box traffic at all: live links drop (the boxes keep running and are let back
+      // in when the plugin is turned on again).
+      hub.disconnectAll("The Ephemeral AI VMs plugin was turned off");
+      if (disconnectTools) {
+        const disconnect = disconnectTools;
+        disconnectTools = null;
+        disconnect();
+      }
     }
   };
   const onPluginsChanged = (response: PluginsResponse): void =>

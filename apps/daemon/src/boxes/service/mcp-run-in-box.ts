@@ -14,7 +14,7 @@ import {
   boxRoutes,
   type AgentProfileAgentId,
   type BoxMcpRunInBoxResponse,
-  type BoxMcpRunInBoxServer,
+  type BoxMcpRunInBoxEntry,
   type SetBoxMcpRunInBoxRequest
 } from "@orquester/api";
 import { runInBoxServerNames, withRunInBox } from "@orquester/config";
@@ -63,7 +63,7 @@ export function registerBoxMcpRunInBoxRoutes(app: FastifyInstance, deps: BoxMcpR
 
   const response = async (): Promise<BoxMcpRunInBoxResponse> => {
     const settings = await readSettings(deps);
-    const servers: BoxMcpRunInBoxServer[] = [];
+    const servers: BoxMcpRunInBoxEntry[] = [];
     for (const agent of BOX_MCP_AGENTS) {
       const snapshot = await deps.snapshot(agent).catch((error: unknown) => {
         deps.logger?.warn(`Agent config of ${agent} does not read`, error instanceof Error ? error.message : String(error));

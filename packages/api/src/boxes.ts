@@ -569,7 +569,7 @@ export const boxRoutes = {
 } as const;
 
 /** One Agent config MCP server and whether a box chat runs it inside the box (else on the host, bridged). */
-export interface BoxMcpRunInBoxServer {
+export interface BoxMcpRunInBoxEntry {
   name: string;
   /** The agent whose config holds it (`claude`, `codex`, `grok`). */
   agent: string;
@@ -578,7 +578,7 @@ export interface BoxMcpRunInBoxServer {
 
 /** `GET`/`PUT` `boxRoutes.mcpRunInBox`. */
 export interface BoxMcpRunInBoxResponse {
-  servers: BoxMcpRunInBoxServer[];
+  servers: BoxMcpRunInBoxEntry[];
 }
 
 /** `PUT` `boxRoutes.mcpRunInBox`. */
