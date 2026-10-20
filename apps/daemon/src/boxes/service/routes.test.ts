@@ -127,7 +127,7 @@ test("a cloned box project lists its repo fields from the record and keeps the t
   const templated = await h.inject({
     method: "POST",
     url: "/api/workspaces/acme/projects",
-    payload: { source: "empty", name: "site", location: { ...location, templateCommand: "npx create-next-app@latest ." } }
+    payload: { source: "empty", name: "site", location, templateCommand: "npx create-next-app@latest ." }
   });
   assert.equal(templated.statusCode, 200, templated.body);
   const record = h.service.registry.get((templated.json() as ProjectSummary).box!.boxId)!;
@@ -147,14 +147,16 @@ test("the location is validated before anything is created", async (t) => {
     [{ ...location, boxKind: "macos" }, 400, "BOX_UNSUPPORTED"],
     [{ ...location, size: "huge" }, 400, "BOX_INVALID_REQUEST"],
     [{ ...location, size: "small", region: "ash" }, 400, "BOX_INVALID_REQUEST"],
-    [{ ...location, region: undefined }, 400, "BOX_INVALID_REQUEST"],
-    [{ ...location, templateCommand: "echo hi\nrm -rf /" }, 400, "BOX_INVALID_REQUEST"]
+    [{ ...location, region: undefined }, 400, "BOX_INVALID_REQUEST"]
   ];
   for (const [bad, status, code] of cases) {
     const res = await post({ name: "a", location: bad });
     assert.equal(res.statusCode, status, `${JSON.stringify(bad)} → ${res.body}`);
     assert.equal(res.json().code, code);
   }
+  const multiline = await post({ name: "a", location, templateCommand: "echo hi\nrm -rf /" });
+  assert.equal(multiline.statusCode, 400, multiline.body);
+  assert.equal(multiline.json().code, "BOX_INVALID_REQUEST");
   const clone = await post({ source: "clone", url: "git@github.com:a/b.git", location });
   assert.equal(clone.statusCode, 400, "no git account on the workspace");
   assert.equal(h.adapter.creates.length, 0);

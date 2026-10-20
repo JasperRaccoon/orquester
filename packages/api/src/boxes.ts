@@ -286,11 +286,7 @@ export interface BoxLocationRequest {
   image?: string;
   /** macOS: the job's lifetime, ≤ the provider's `maxLifetimeMinutes`. Default: the maximum. */
   lifetimeMinutes?: number;
-  /**
-   * Template tab (with `source: "empty"`): the scaffold command to run in the box's first terminal
-   * once the box is ready (≤ 4096 chars, no control characters). Recorded on the box's project.
-   */
-  templateCommand?: string;
+  // The Template tab's command rides `CreateProjectRequest.templateCommand` (packages/api index.ts).
 }
 
 export type ProjectLocationRequest = { kind: "host" } | BoxLocationRequest;
@@ -550,6 +546,12 @@ export const boxRoutes = {
   /** `POST` `DecideBoxConfigChangeRequest` → `{ change: BoxConfigChangeSet }`. */
   configChange: (id: string): string => `/api/boxes/config-changes/${encodeURIComponent(id)}`,
   /**
+   * "Run in box" for the agents' own (Global, Agent config) MCP servers: `GET` → `BoxMcpRunInBoxResponse`
+   * (every MCP server Agent config shows for Claude, Codex and Grok, with its switch); `PUT`
+   * `SetBoxMcpRunInBoxRequest` → `BoxMcpRunInBoxResponse`. Persisted in `<appdir>/daemon/box-mcp.json`.
+   */
+  mcpRunInBox: "/api/boxes/mcp-run-in-box",
+  /**
    * REMOTE, box-authenticated (bootstrap token or box credential in `Authorization: Bearer`):
    * `GET` → the `orq-agent` executable for `<os>-<arch>[-musl]`, e.g. `linux-x64`, `linux-arm64-musl`,
    * `darwin-arm64`, `win32-x64`. Not behind the daemon's user auth.
@@ -565,6 +567,26 @@ export const boxRoutes = {
    */
   internalToken: "/api/boxes/internal/token"
 } as const;
+
+/** One Agent config MCP server and whether a box chat runs it inside the box (else on the host, bridged). */
+export interface BoxMcpRunInBoxServer {
+  name: string;
+  /** The agent whose config holds it (`claude`, `codex`, `grok`). */
+  agent: string;
+  runInBox: boolean;
+}
+
+/** `GET`/`PUT` `boxRoutes.mcpRunInBox`. */
+export interface BoxMcpRunInBoxResponse {
+  servers: BoxMcpRunInBoxServer[];
+}
+
+/** `PUT` `boxRoutes.mcpRunInBox`. */
+export interface SetBoxMcpRunInBoxRequest {
+  agent: string;
+  name: string;
+  runInBox: boolean;
+}
 
 /** Body of `boxRoutes.internalToken`. `minValidSeconds` defaults to 45 minutes. */
 export interface BoxInternalTokenRequest {

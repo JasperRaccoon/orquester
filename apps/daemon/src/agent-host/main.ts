@@ -88,6 +88,7 @@ import { SessionSecretRedactor } from "./session-tools/secret-redaction.ts";
 // boxes:
 import { createAgentHostBoxes, type AgentHostBoxes, type BoxConnector } from "./boxes/index.ts";
 import { createDaemonBoxSyncClient, createDaemonBoxTokenSource } from "./boxes/daemon-client.ts";
+import { connectBoxRelay } from "../boxes/client/index.ts";
 
 /**
  * How long a host teardown lets the consumers read what the adapters'
@@ -1059,7 +1060,9 @@ if (isProcessEntry()) {
     ...(appdir !== undefined ? { appdir } : {}),
     // An intentional stop ends the process: the daemon's exit grace waits on
     // the tmux session, which only ends when this command does.
-    onStopped: () => process.exit(0)
+    onStopped: () => process.exit(0),
+    // boxes: box threads reach their box through the daemon hub's per-box relay socket.
+    boxConnector: connectBoxRelay
   })
     .then((host) => {
       let stopping = false;

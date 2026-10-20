@@ -66,6 +66,8 @@ export interface BoxServiceDeps {
   /** Every managed agent account home (the `config` step syncs each). */
   managedAgentHomes: () => ManagedAgentHome[];
   blacksmith?: BlacksmithSetupDriver;
+  /** The `orq-agent` builds boxes download; a create is refused while there are none. Absent: not checked. */
+  agentBuilds?: { current(): Promise<{ version: string } | null> };
   pluginEnabled: () => Promise<boolean>;
   onPluginChange: (listener: (enabled: boolean) => void) => () => void;
   publish: (channel: string, type: string, payload: unknown) => void;
@@ -83,6 +85,8 @@ export interface CreateTemporaryBoxRequest {
   provider?: BoxProviderId;
   size?: string;
   region?: string;
+  /** A `BoxImageOffer.id`, when the provider offers a choice for the kind. */
+  image?: string;
   lifetimeMinutes: number;
   purposeNote: string;
 }
@@ -101,6 +105,11 @@ export interface BoxService {
   stop(): Promise<void>;
   boxesResponse(): BoxesResponse;
   setupLog(boxId: string): Promise<string>;
+  /**
+   * Persist a temporary box's record and start its setup in the background; resolves with its
+   * summary once the record exists (readiness and failure arrive as registry changes).
+   */
+  startTemporaryBox(request: CreateTemporaryBoxRequest): Promise<BoxSummary>;
   /** Create a temporary box and resolve once it is ready (rejects, torn down, when setup fails). Aborting destroys it. */
   createTemporaryBox(request: CreateTemporaryBoxRequest, signal?: AbortSignal): Promise<BoxSummary>;
   destroyBox(boxId: string, reason: BoxDestroyedReason): Promise<BoxSummary>;
@@ -170,7 +179,8 @@ export function createBoxService(deps: BoxServiceDeps): BoxService {
     clock,
     ...(deps.fetch ? { fetch: deps.fetch } : {}),
     logger,
-    onProviderError: () => void reconciler.requestRun()
+    onProviderError: () => void reconciler.requestRun(),
+    ...(deps.agentBuilds ? { agentBuilds: deps.agentBuilds } : {})
   });
   reconciler = new BoxReconciler({
     store,
@@ -206,19 +216,19 @@ export function createBoxService(deps: BoxServiceDeps): BoxService {
     return summary;
   };
 
-  const createTemporaryBox = async (request: CreateTemporaryBoxRequest, signal?: AbortSignal): Promise<BoxSummary> => {
+  const startTemporaryBox = async (request: CreateTemporaryBoxRequest): Promise<BoxSummary> => {
     if (!enabled) throw new BoxError(409, "BOXES_DISABLED", "Ephemeral AI VMs is turned off in Settings → Plugins.");
     if (request.threadId !== null && (typeof request.threadId !== "string" || request.threadId.length === 0)) {
       throw new BoxError(400, "BOX_INVALID_REQUEST", "`threadId` must be the chat's id.");
     }
     const note = typeof request.purposeNote === "string" ? request.purposeNote.trim().replace(/\s+/g, " ") : "";
     if (note.length === 0) throw new BoxError(400, "BOX_INVALID_REQUEST", "Say in a few words what the box is for.");
-    signal?.throwIfAborted();
     const placement = await resolvePlacement(settings, {
       kind: request.kind,
       provider: request.provider,
       size: request.size,
       region: request.region,
+      image: request.image,
       lifetimeMinutes: request.lifetimeMinutes,
       explicit: false,
       lifetimeRequired: true
@@ -238,6 +248,14 @@ export function createBoxService(deps: BoxServiceDeps): BoxService {
       threadId: request.threadId,
       purposeNote: note.slice(0, MAX_PURPOSE_NOTE)
     });
+    const summary = registry.summarize(record);
+    if (!summary) throw new BoxError(500, "BOXES_UNAVAILABLE", "The new box's record cannot be shown.");
+    return summary;
+  };
+
+  const createTemporaryBox = async (request: CreateTemporaryBoxRequest, signal?: AbortSignal): Promise<BoxSummary> => {
+    signal?.throwIfAborted();
+    const record = await startTemporaryBox(request);
     const onAbort = () => void lifecycle.destroy(record.id, "agent").catch(() => undefined);
     signal?.addEventListener("abort", onAbort, { once: true });
     try {
@@ -292,6 +310,7 @@ export function createBoxService(deps: BoxServiceDeps): BoxService {
     },
 
     setupLog: (boxId) => setupLog.read(boxId),
+    startTemporaryBox,
     createTemporaryBox,
     destroyBox,
 

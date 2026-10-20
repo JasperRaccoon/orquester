@@ -182,8 +182,6 @@ import {
   SESSION_PROFILES_CHANNEL,
   WORKFLOWS_CHANNEL
 } from "@orquester/api";
-// boxes:
-import { BOXES_CHANNEL } from "@orquester/api";
 import type { PluginInfo } from "@orquester/api";
 // boxes: the Ephemeral AI VMs plugin's module store (own channel, loaded while the plugin is on).
 import { BOXES_CHANNEL, EPHEMERAL_VMS_PLUGIN_ID } from "@orquester/api";

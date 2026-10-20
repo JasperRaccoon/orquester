@@ -114,6 +114,11 @@ export interface BoxLifecycleDeps {
   logger: Pick<Console, "warn" | "error" | "log">;
   /** A provider call failed: the reconciler takes a look at that provider soon. */
   onProviderError(provider: string): void;
+  /**
+   * The `orq-agent` builds boxes download (`BoxAgentBuilds.current`): null means there are none
+   * (no Go toolchain to build them), and nothing billable is created. Absent: not checked.
+   */
+  agentBuilds?: { current(): Promise<{ version: string } | null> };
 }
 
 export interface CreateBoxSpec {
@@ -135,7 +140,7 @@ export interface CreateBoxSpec {
 }
 
 /** Providers whose boxes are containers: `orq-agent` runs in the foreground, tailscaled in userspace mode. */
-export const CONTAINER_PROVIDERS: ReadonlySet<string> = new Set(["vastai", "runpod", "jarvislabs", "fly"]);
+export const CONTAINER_PROVIDERS: ReadonlySet<string> = new Set(["vastai", "runpod", "jarvislabs", "fly", "morph"]);
 
 /** How long `orq-agent` may take to connect after create, per kind (images, GPU drivers, Windows first boot). */
 export const CONNECT_DEADLINE_MS: Readonly<Record<BoxKind, number>> = {
@@ -251,6 +256,14 @@ export class BoxLifecycle {
    */
   async create(spec: CreateBoxSpec): Promise<StoredBox> {
     const route = this.deps.connectivity.route();
+    // A box that cannot download orq-agent never connects: refuse before anything is billed.
+    if (this.deps.agentBuilds && !(await this.deps.agentBuilds.current().catch(() => null))) {
+      throw new BoxError(
+        503,
+        "BOXES_UNAVAILABLE",
+        "orq-agent builds are unavailable on this daemon: install Go 1.24 or later on the host (or deploy prebuilt builds) and restart the daemon."
+      );
+    }
     let id = newBoxId();
     while (this.deps.store.get(id)) id = newBoxId();
     const now = new Date(this.deps.clock.now());

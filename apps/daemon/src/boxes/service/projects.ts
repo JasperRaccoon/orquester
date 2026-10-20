@@ -88,8 +88,9 @@ export class BoxProjects {
     };
     if (source === "empty") {
       name = (body as Extract<CreateProjectRequest, { name: string }>).name;
-      if (location.templateCommand !== undefined) {
-        const command = location.templateCommand;
+      // The Template tab's command (`CreateProjectRequest.templateCommand`), run in the box's first terminal once it is ready.
+      if (body.templateCommand !== undefined) {
+        const command: unknown = body.templateCommand;
         if (typeof command !== "string" || command.trim().length === 0 || command.length > MAX_TEMPLATE_COMMAND || /[\u0000-\u001f\u007f]/.test(command)) {
           throw invalid(`\`templateCommand\` must be one line of at most ${MAX_TEMPLATE_COMMAND} characters.`);
         }

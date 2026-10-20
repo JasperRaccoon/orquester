@@ -19,8 +19,7 @@ import {
   toolApprovalPreviewIsCut,
   TOOL_APPROVAL_POINTER_GUARD_MS,
   // boxes:
-  isBoxApprovalCard,
-  toolApprovalKindBadge
+  isBoxApprovalCard
 } from "./banner-model.ts";
 import { ADMIN_FAMILIES, parseToolApprovalSummary } from "@orquester/api/agent-chat";
 

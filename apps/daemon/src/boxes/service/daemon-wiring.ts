@@ -34,7 +34,10 @@ export interface DaemonBoxHost {
 }
 
 /** The parts other box modules provide. */
-export type DaemonBoxParts = Pick<BoxServiceDeps, "providers" | "hub" | "buildBootstrap" | "tailscale" | "configSync" | "tooling" | "blacksmith">;
+export type DaemonBoxParts = Pick<
+  BoxServiceDeps,
+  "providers" | "hub" | "buildBootstrap" | "tailscale" | "configSync" | "tooling" | "blacksmith" | "agentBuilds"
+>;
 
 export function createDaemonBoxService(host: DaemonBoxHost, parts: DaemonBoxParts): BoxService {
   const { accounts } = host;

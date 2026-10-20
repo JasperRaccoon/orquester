@@ -131,12 +131,27 @@ function hasScope(scopes: string[], scope: string): boolean {
   return false;
 }
 
-/** Check the token's scopes and its membership in `org` (spec §11.2 step 1). Throws only on network/server failures. */
-export async function checkGithubAccount(org: string, options: GithubCallOptions): Promise<GithubAccountCheck> {
+export type GithubTokenCheck = Pick<GithubAccountCheck, "login" | "scopes" | "missingScopes" | "problem">;
+
+/** Check the token's scopes alone (one `GET /user`, no org). Throws on network/server failures and a rejected token. */
+export async function checkGithubToken(options: GithubCallOptions): Promise<GithubTokenCheck> {
   const user = await gh<{ login: string }>(options, { path: "/user" });
   const header = user.headers.get("x-oauth-scopes");
   const scopes = header === null ? null : header.split(",").map((scope) => scope.trim()).filter((scope) => scope.length > 0);
   const missingScopes = REQUIRED_GITHUB_SCOPES.filter((scope) => scopes === null || !hasScope(scopes, scope));
+  let problem: string | null = null;
+  if (scopes === null) {
+    problem = `Use a classic personal access token with the ${REQUIRED_GITHUB_SCOPES.join(" and ")} scopes.`;
+  } else if (missingScopes.length > 0) {
+    problem = `Add the ${missingScopes.join(" and ")} scope${missingScopes.length > 1 ? "s" : ""} to this token on GitHub (Settings → Developer settings → Personal access tokens).`;
+  }
+  return { login: user.data.login, scopes, missingScopes, problem };
+}
+
+/** Check the token's scopes and its membership in `org` (spec §11.2 step 1). Throws only on network/server failures. */
+export async function checkGithubAccount(org: string, options: GithubCallOptions): Promise<GithubAccountCheck> {
+  const token = await checkGithubToken(options);
+  const { login, scopes, missingScopes } = token;
 
   const membership = await gh<{ state?: string; role?: string }>(options, {
     path: `/user/memberships/orgs/${encodeURIComponent(org)}`,
@@ -160,19 +175,17 @@ export async function checkGithubAccount(org: string, options: GithubCallOptions
     canCreateRepo = false;
   }
 
-  let problem: string | null = null;
-  if (scopes === null) {
-    problem = `Use a classic personal access token with the ${REQUIRED_GITHUB_SCOPES.join(" and ")} scopes.`;
-  } else if (missingScopes.length > 0) {
-    problem = `Add the ${missingScopes.join(" and ")} scope${missingScopes.length > 1 ? "s" : ""} to this token on GitHub (Settings → Developer settings → Personal access tokens).`;
-  } else if (orgRole === null) {
-    problem = `${user.data.login} is not a member of ${org}.`;
+  // The token's scopes come first.
+  let problem: string | null = token.problem;
+  if (problem !== null) return { login, scopes, missingScopes, orgRole, membershipState, canCreateRepo, problem };
+  if (orgRole === null) {
+    problem = `${login} is not a member of ${org}.`;
   } else if (membershipState === "pending") {
     problem = `Accept the invitation to ${org} on GitHub first.`;
   } else if (canCreateRepo === false) {
-    problem = `${user.data.login} cannot create private repositories in ${org}; ask an org owner to allow it or to make them an owner.`;
+    problem = `${login} cannot create private repositories in ${org}; ask an org owner to allow it or to make them an owner.`;
   }
-  return { login: user.data.login, scopes, missingScopes, orgRole, membershipState, canCreateRepo, problem };
+  return { login, scopes, missingScopes, orgRole, membershipState, canCreateRepo, problem };
 }
 
 export interface BlacksmithAppStatus {
