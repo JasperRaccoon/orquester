@@ -211,6 +211,31 @@ test("a scope synced through BoxConfigWatches.syncing stays watched: a later hos
   await sync.close();
 });
 
+test("a host dir that appears gets a second look: files written into it after the pass that saw it empty still reach the box", async () => {
+  const f = await fixture();
+  // No host watchers: nothing but the second look can notice the file.
+  const sync = f.make({ hostDebounceMs: 20 });
+  await sync.ensureSynced("b1", f.scope, signal());
+  sync.watch("b1", f.scope);
+  await sync.idle();
+  const target = join(f.home, "skills", "fresh", "SKILL.md");
+  const written = new Promise<void>((resolve) => {
+    const original = f.box1.writeFile.bind(f.box1);
+    f.box1.writeFile = async (path, data, options) => {
+      await original(path, data, options);
+      if (path === target) resolve();
+    };
+  });
+  // A skill installed as mkdir, then its file: the pass runs in between.
+  await mkdir(join(f.system, "skills", "fresh"));
+  await sync.hostChanged("b1");
+  assert.equal(await exists(f.box1.local(target)), false, "the pass saw the dir empty");
+  await put(join(f.system, "skills", "fresh", "SKILL.md"), "---\nname: fresh\n---\nNew.\n");
+  await written;
+  assert.equal(await readFile(f.box1.local(target), "utf8"), "---\nname: fresh\n---\nNew.\n");
+  await sync.close();
+});
+
 test("a box change becomes one pending set for its turn; approve writes through links and reaches the other box", async () => {
   const f = await fixture();
   const sync = f.make();
