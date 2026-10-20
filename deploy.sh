@@ -22,7 +22,7 @@ usage: ./deploy.sh [--dry-run|-n] <command> [args]
 commands:
   deploy [target|all]        update + restart + verify each target (default: all)
   provision <target>         first-time setup of a fresh Ubuntu VPS
-  verify [target|all]        read-only: HEAD, health, service, bundle hash
+  verify [target|all]        read-only: HEAD, health, service, bundle hash, orq-agent, Go
   rollback <target> <sha>    reset the target to <sha>, rebuild, restart, verify
   logs <target> [-n N]       tail the daemon journal (default 50 lines)
   rotate-password <target>   generate + install a new HTTP password (shown once)
@@ -237,7 +237,9 @@ cmd_verify_target() {
 echo \"HEAD=\$(${s:+$s }git -C /opt/orquester rev-parse --short HEAD)\"
 curl -fsS http://127.0.0.1:47831/health; echo
 echo \"service=\$(systemctl is-active orquester)\"
-echo \"bundle=\$(curl -s http://127.0.0.1:47831/ | grep -o 'index-[^.]*\.js' | head -n1)\""
+echo \"bundle=\$(curl -s http://127.0.0.1:47831/ | grep -o 'index-[^.]*\.js' | head -n1)\"
+echo \"box-agent=\$(node -p \"require('/opt/orquester/apps/box-agent/dist/manifest.json').version\" 2>/dev/null || echo 'not prebuilt')\"
+echo \"go=\$(/usr/local/go/bin/go version 2>/dev/null || echo missing)\""
 }
 
 cmd_logs() {
