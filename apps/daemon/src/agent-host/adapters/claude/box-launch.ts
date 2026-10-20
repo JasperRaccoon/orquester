@@ -227,6 +227,9 @@ export async function prepareClaudeBoxSession(input: {
   });
   try {
     const { env, unset } = launch.env(hostEnv);
+    // A rented box is a throwaway sandbox, and orq-agent runs as root on most VMs: Claude refuses
+    // `--dangerously-skip-permissions` (Full access) as root unless `IS_SANDBOX=1` says so.
+    if (launch.sys.isRoot && launch.sys.os !== "win32") env.IS_SANDBOX = "1";
     // The version gate runs against the BOX's CLI (§10): never started and told to fail later.
     const version = parseClaudeVersion((await launch.version(unset)) ?? "");
     if (!meetsMinimumClaudeVersion(version)) {
