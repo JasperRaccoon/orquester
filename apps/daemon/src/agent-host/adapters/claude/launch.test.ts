@@ -405,6 +405,49 @@ function buildWith(profile: ClaudeProfileLaunch | undefined, modelSelection?: Mo
   });
 }
 
+describe("claude launch — NODE_OPTIONS (the plugins' tsc preload)", () => {
+  const PRELOAD = '--require "/appdir/daemon/plugins/ts-rust/preload.cjs"';
+  function withNodeOptions(profile: ClaudeProfileLaunch | undefined, settingsNodeOptions?: string) {
+    return buildClaudeQueryOptions({
+      cwd: "/work/project",
+      executablePath: "/usr/local/bin/claude",
+      env: { PATH: "/usr/bin", HOME: "/home/orq", NODE_OPTIONS: PRELOAD },
+      ...(settingsNodeOptions !== undefined ? { settingsNodeOptions } : {}),
+      runtimeMode: "approval-required",
+      models: MODELS,
+      attachmentsDir: "/appdir/threads/t1/attachments",
+      canUseTool: noopCanUseTool,
+      sessionId: "11111111-2222-3333-4444-555555555555",
+      ...(profile !== undefined ? { profile: { launch: profile, files: FILES } } : {})
+    });
+  }
+
+  it("rides the flag-tier env, which the SDK passes on (it deletes NODE_OPTIONS from options.env)", () => {
+    const { options } = withNodeOptions(undefined);
+    assert.deepEqual((options.settings as Record<string, unknown>).env, { NODE_OPTIONS: PRELOAD });
+  });
+
+  it("keeps the settings files' value in front, since the flag tier replaces it", () => {
+    const { options } = withNodeOptions(undefined, "--max-old-space-size=4096");
+    assert.deepEqual((options.settings as Record<string, unknown>).env, {
+      NODE_OPTIONS: `--max-old-space-size=4096 ${PRELOAD}`
+    });
+  });
+
+  it("is absent without a NODE_OPTIONS in the env", () => {
+    const settings = build("approval-required", { model: "haiku" }).options.settings as Record<string, unknown> | undefined;
+    assert.equal(settings !== undefined && "env" in settings, false);
+  });
+
+  it("a profile chat merges it into the carried env instead of replacing that", () => {
+    const built = withNodeOptions(profileLaunch(), "--from-user");
+    assert.deepEqual(built.profileFiles?.settings.env, {
+      TOKEN: "carried-secret",
+      NODE_OPTIONS: `--from-user ${PRELOAD}`
+    });
+  });
+});
+
 describe("claude launch — Agent Profile chats (spec 2026-10-18 §6.1)", () => {
   it("a Global chat is untouched: user source, no strict MCP, no plugins, no skills, no launch files", () => {
     const built = buildWith(undefined, { model: "default", options: [{ id: "thinking", value: true }] });

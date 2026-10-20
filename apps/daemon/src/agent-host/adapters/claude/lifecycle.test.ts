@@ -370,6 +370,8 @@ interface HarnessOptions {
   sessionTools?: AdapterContext["sessionTools"];
   /** `<appdir>/tmp` (a profile chat writes its launch files there); default `/tmp`. */
   tmpDir?: string;
+  /** The NODE_OPTIONS `buildEnv` adds (`main.ts`: the plugins' preload); default none. */
+  nodeOptions?: string;
 }
 
 async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
@@ -407,7 +409,8 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
       PATH: "/usr/bin",
       HOME: "/home/orq",
       TMPDIR: "/tmp",
-      ...(home.kind !== "system" && home.path.length > 0 ? { CLAUDE_CONFIG_DIR: home.path } : {})
+      ...(home.kind !== "system" && home.path.length > 0 ? { CLAUDE_CONFIG_DIR: home.path } : {}),
+      ...(options.nodeOptions !== undefined ? { NODE_OPTIONS: options.nodeOptions } : {})
     }),
     resolveBin: async () =>
       options.binaryPath === undefined ? "/usr/local/bin/claude" : options.binaryPath,
@@ -774,6 +777,36 @@ describe("claude adapter — turns", () => {
     peer.emit(systemInit());
     peer.emit(successResult());
     await harness.waitFor("turn.completed");
+  });
+
+  it("the host's NODE_OPTIONS reaches the CLI through the flag-tier env, after the settings files' own", async () => {
+    // The SDK deletes NODE_OPTIONS from the child env, so `options.env` alone would lose the
+    // plugins' tsc preload; the flag-tier `env` replaces a settings file's value, so that goes first.
+    const root = await mkdtemp(nodePath.join(tmpdir(), "orq-node-options-"));
+    try {
+      const home = nodePath.join(root, "home");
+      const cwd = nodePath.join(root, "project");
+      await mkdir(home, { recursive: true });
+      await mkdir(nodePath.join(cwd, ".claude"), { recursive: true });
+      await writeFile(nodePath.join(home, "settings.json"), JSON.stringify({ env: { NODE_OPTIONS: "--from-user" } }));
+      await writeFile(
+        nodePath.join(cwd, ".claude", "settings.local.json"),
+        JSON.stringify({ env: { NODE_OPTIONS: "--max-old-space-size=4096" } })
+      );
+      const harness = await makeHarness({ nodeOptions: '--require "/appdir/preload.cjs"' });
+      await harness.adapter.startSession({ ...START, cwd, home: { kind: "account", accountId: "acc-1", path: home } });
+      const options = harness.queryOptions.filter((entry) => entry.persistSession !== false).at(-1)!;
+      assert.deepEqual((options.settings as Record<string, unknown>).env, {
+        NODE_OPTIONS: '--max-old-space-size=4096 --require "/appdir/preload.cjs"'
+      });
+
+      const plain = await makeHarness();
+      await plain.adapter.startSession({ ...START, cwd, home: { kind: "account", accountId: "acc-1", path: home } });
+      const plainOptions = plain.queryOptions.filter((entry) => entry.persistSession !== false).at(-1)!;
+      assert.equal("env" in ((plainOptions.settings as Record<string, unknown> | undefined) ?? {}), false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("a system-home thread finds its user-scope skills under the host user's ~/.claude", async () => {
