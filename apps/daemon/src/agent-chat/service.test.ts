@@ -1529,7 +1529,7 @@ async function continuationFixture(health: Record<string, unknown> = CROSS_AGENT
       }
     }
   );
-  f.launchFor = (ctx) =>
+  f.launchFor = (ctx): ChatLaunchEnv | null =>
     ctx.accountId === undefined
       ? { env: { CODEX_HOME: "/homes/cod-default" }, accountId: "cod-default" }
       : ctx.accountId === "system"

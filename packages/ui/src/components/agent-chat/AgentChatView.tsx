@@ -725,6 +725,10 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   // else as a budgeted transcript handoff — and the store opens the new tab.
   const [continueFrom, setContinueFrom] = React.useState<{ input: TimelineForkInput | null } | null>(null);
   React.useEffect(() => setContinueFrom(null), [sessionId]);
+  // The picker is portaled over the whole window: leaving this tab closes it, as the popovers do.
+  React.useEffect(() => {
+    if (active === false) setContinueFrom(null);
+  }, [active]);
   const openContinueIn = React.useCallback((input: TimelineForkInput) => setContinueFrom({ input }), []);
   const continueInRequest = useAppStore((s) => s.continueInRequest);
   const clearContinueInRequest = useAppStore((s) => s.clearContinueInRequest);
