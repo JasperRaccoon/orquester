@@ -128,6 +128,35 @@ test("a prompt and a reply offer Fork from here; a read-only timeline does not",
   assert.doesNotMatch(unanswered, /Fork from/, "a prompt the host would refuse is not offered");
 });
 
+test("Continue in another agent… sits beside the fork buttons, only where it is offered", () => {
+  const offered = context({ onContinueIn: () => undefined });
+  const user = render(createElement(UserMessageRow, { row: messageRow("user", "hi") as never }), offered);
+  assert.match(user, /Continue in another agent from before this message…/);
+  const meta = render(createElement(AssistantMetaRow, { row: messageRow("assistant", "hello", "assistant-meta") as never }), offered);
+  assert.match(meta, /aria-label="Continue in another agent…"/);
+  assert.match(meta, /aria-haspopup="dialog"/);
+  const notOffered = render(createElement(AssistantMetaRow, { row: messageRow("assistant", "hello", "assistant-meta") as never }), context({}));
+  assert.doesNotMatch(notOffered, /Continue in another agent/);
+  const readOnly = render(
+    createElement(UserMessageRow, { row: messageRow("user", "hi") as never }),
+    context({ readOnly: true, onFork: null, onContinueIn: () => undefined })
+  );
+  assert.doesNotMatch(readOnly, /Continue in another agent/);
+});
+
+test("a continued chat's bar says where it came from, and keeps Merge back", () => {
+  const continued = tab("continued", {
+    refId: "codex",
+    title: "Plan the API (in Codex)",
+    lineage: { parentThreadId: "parent", relation: "fork", createdAt: "2026-10-14T01:00:00.000Z", sourceAgent: "claude" }
+  });
+  const html = bar(continued, [parent, continued]);
+  assert.match(html, /Continued from/);
+  assert.match(html, /Plan the API/);
+  assert.match(html, /data-lineage-source-agent="claude"[^>]*>\(Claude\)/);
+  assert.match(html, /Merge back/);
+});
+
 test("pending merges show on both tabs, with deliver and discard; a failed one says why", () => {
   const queued = { mergeId: "m1", parentSessionId: "parent", childSessionId: "fork", queuedAt: "t", state: "queued" as const, preview: "B works", attempts: 0 };
   const onFork = bar({ ...fork, pendingMerges: [queued] }, [parent, fork]);

@@ -11,6 +11,7 @@ import { foldThread } from "./fold.ts";
 import { deserializeFoldState, serializeFoldState } from "./fold-snapshot.ts";
 import {
   buildMergeBackMessage,
+  continuationTitle,
   forkTitle,
   parseMergeBackMessage,
   parseThreadLineage,
@@ -33,6 +34,21 @@ describe("parseThreadLineage", () => {
       relation: "delegate",
       createdAt: "x"
     });
+  });
+
+  it("keeps a continuation's source agent and model, and drops a bad one on its own", () => {
+    const continued = { ...LINEAGE, sourceAgent: "claude", sourceModel: "claude-opus-4-1" };
+    assert.deepEqual(parseThreadLineage(continued), continued);
+    assert.deepEqual(parseThreadLineage({ ...LINEAGE, sourceAgent: 7, sourceModel: "x" }), LINEAGE, "no model without an agent");
+    assert.deepEqual(parseThreadLineage({ ...LINEAGE, sourceAgent: "codex", sourceModel: "" }), { ...LINEAGE, sourceAgent: "codex" });
+    assert.deepEqual(parseThreadLineage({ ...LINEAGE, sourceAgent: "x".repeat(65) }), LINEAGE);
+  });
+
+  it("titles a continuation after its new agent", () => {
+    assert.equal(continuationTitle("Fix login", "Codex"), "Fix login (in Codex)");
+    assert.equal(continuationTitle("Fix login (in Codex)", "Grok"), "Fix login (in Grok)");
+    assert.equal(continuationTitle("Fix login (fork)", "Claude"), "Fix login (in Claude)");
+    assert.equal(continuationTitle("  ", "Claude"), "Chat (in Claude)");
   });
 
   it("drops what does not read, and a bad fork point on its own", () => {

@@ -9,6 +9,7 @@ import type {
   CreateAgentChatSessionFields,
   DelegateView as AgentChatDelegateView,
   LatestTurnSummary as AgentChatLatestTurnSummary,
+  ForkHandoffSummary,
   PendingMergeBack,
   ThreadForkStrategy,
   ThreadLineage,
@@ -1483,6 +1484,12 @@ export interface ForkSessionResponse {
   session: SessionSummary;
   lineage: ThreadLineage;
   strategy: ThreadForkStrategy;
+  /**
+   * A continuation in another agent or account (`ForkSessionRequest.refId` / `accountId`): what
+   * its budgeted transcript carries. Absent for an ordinary fork, and when the host answered a
+   * repeat of a fork it had already made.
+   */
+  handoff?: ForkHandoffSummary;
 }
 
 /** A thread named by a lineage, as the daemon knows it now. */

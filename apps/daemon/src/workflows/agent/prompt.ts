@@ -6,7 +6,7 @@
 // `{variables}` themselves, daemon-side (`PromptRenderer`), in the workflow's time zone. A failed
 // variable read fails the block naming it — a prompt is never sent missing its variables.
 
-import { escapePromptVariables, renderTemplate, WORKFLOW_LIMITS, type AgentBlockConfig, type AgentFailureReason } from "@orquester/api";
+import { escapePromptVariables, gitStatusSection, renderTemplate, WORKFLOW_LIMITS, type AgentBlockConfig, type AgentFailureReason } from "@orquester/api";
 import type { NodeExecutionContext, PromptRenderer } from "../contracts.ts";
 import { tailUtf8, truncateUtf8 } from "../run-context.ts";
 
@@ -71,8 +71,8 @@ export function buildHandoffPrompt(input: {
     parts.push(`The previous agent's last messages${messages.truncated ? " (the oldest part cut)" : ""}:\n\n${messages.text}`);
   }
   if (input.gitStatus !== null) {
-    const status = clipUtf8(input.gitStatus.trimEnd(), WORKFLOW_LIMITS.handoffGitStatusBytes);
-    parts.push(`\`git status --short\` of the project${status.truncated ? " (cut)" : ""}:\n\n${status.text || "(clean)"}`);
+    // The section a chat continued in another agent hands over too (`@orquester/api` handoff.ts).
+    parts.push(gitStatusSection(input.gitStatus, WORKFLOW_LIMITS.handoffGitStatusBytes));
   }
   return withAutonomyNote(parts.join("\n\n"), input.autonomyNote);
 }

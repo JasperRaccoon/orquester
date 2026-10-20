@@ -12,6 +12,7 @@
  * record that carries it.
  */
 
+import type { ModelSelection } from "./adapter-types.ts";
 import type { CausedBy } from "./thread.ts";
 
 /**
@@ -62,6 +63,16 @@ export interface ThreadLineage {
    * (records written before it, or by an older build, fall back to the walk). Additive.
    */
   workflowOwned?: true;
+  /**
+   * A fork CONTINUED in another agent or account ("Continue in another agent"): the adapter the
+   * parent ran on at the fork (`claude`, `codex`, …), absent for an ordinary fork. The child is
+   * still a `fork` — its lineage bar, merge back and children list work as for any fork — but its
+   * conversation was handed over as a budgeted transcript. Additive: an older build drops it and
+   * reads an ordinary fork.
+   */
+  sourceAgent?: string;
+  /** With `sourceAgent`: the parent's model slug at the fork, when known. Additive. */
+  sourceModel?: string;
 }
 
 /** The deepest delegation depth a lineage may record (well past any cap). */
@@ -110,6 +121,9 @@ export function parseThreadLineage(value: unknown): ThreadLineage | undefined {
       forkedFrom = { messageId, turnId };
     }
   }
+  const agent = lineageId(record.sourceAgent);
+  const sourceAgent = agent !== undefined && agent.length <= 64 ? agent : undefined;
+  const sourceModel = sourceAgent !== undefined ? lineageId(record.sourceModel) : undefined;
   const depth = record.delegationDepth;
   const delegationDepth =
     typeof depth === "number" && Number.isInteger(depth) && depth >= 0 && depth <= MAX_LINEAGE_DELEGATION_DEPTH ? depth : undefined;
@@ -120,7 +134,9 @@ export function parseThreadLineage(value: unknown): ThreadLineage | undefined {
     createdAt,
     ...(delegationDepth !== undefined ? { delegationDepth } : {}),
     ...(record.agentCreated === true ? { agentCreated: true as const } : {}),
-    ...(record.workflowOwned === true ? { workflowOwned: true as const } : {})
+    ...(record.workflowOwned === true ? { workflowOwned: true as const } : {}),
+    ...(sourceAgent !== undefined ? { sourceAgent } : {}),
+    ...(sourceModel !== undefined ? { sourceModel } : {})
   };
 }
 
@@ -133,9 +149,11 @@ export function parseThreadLineage(value: unknown): ThreadLineage | undefined {
  * - `native` — the provider's own fork (Claude `forkSession`, Codex
  *   `thread/fork`, OpenCode `POST /session/:id/fork`); the child resumes it and
  *   its timeline replays the inherited history.
- * - `transcript` — the provider has no fork (Grok's ACP agent advertises none):
- *   a fresh session, handed the conversation so far as a transcript together
- *   with the child's first message.
+ * - `transcript` — the provider has no fork (Grok's ACP agent advertises none),
+ *   or the fork CONTINUES in another agent or account (`ForkSessionRequest.refId`
+ *   / `accountId`): a fresh session, handed the conversation so far as a
+ *   transcript together with the child's first message (for a continuation, a
+ *   budgeted one: `handoff.ts`).
  * - `empty` — nothing preceded the fork point (forked before the first
  *   message): a fresh session with the lineage alone.
  * - `unavailable` — turns preceded the fork point, but neither the provider
@@ -196,12 +214,38 @@ export interface ForkSessionRequest extends ThreadForkTarget {
    * too. See `CreateAgentChatSessionFields.unattended`.
    */
   unattended?: boolean;
+  /**
+   * "Continue in another agent": the registry id of the agent the fork runs on (`claude`,
+   * `codex`, `grok`, `opencode`). Absent, or the parent's own agent: an ordinary fork. Another
+   * agent's fork is never native — the conversation is handed over as a budgeted transcript
+   * (`handoff.ts`) with the fork's first message, and `lineage.sourceAgent` records the parent's.
+   */
+  refId?: string;
+  /**
+   * The managed account the fork runs under (`"system"` for the host identity). Absent: the
+   * parent's for the same agent, the agent's default account for another. A same-agent fork under
+   * ANOTHER account is a continuation too — a provider's resume identity stays in the home that
+   * created it, so such a fork is handed the transcript rather than forked natively.
+   */
+  accountId?: string;
+  /**
+   * The fork's model and options. Absent: the parent's (same agent). REQUIRED for another agent:
+   * the parent's model means nothing to it. A same-agent fork with another model still forks
+   * natively, and runs on this one.
+   */
+  modelSelection?: ModelSelection;
 }
 
 /** The fork tab's default title. */
 export function forkTitle(parentTitle: string): string {
   const base = parentTitle.trim() || "Chat";
   return base.endsWith("(fork)") ? base : `${base} (fork)`;
+}
+
+/** A continuation's default title: the parent's, the new agent named — "Fix login (in Codex)". */
+export function continuationTitle(parentTitle: string, agentLabel: string): string {
+  const base = (parentTitle.trim() || "Chat").replace(/ \((?:fork|in [^()]+)\)$/, "");
+  return `${base} (in ${agentLabel})`;
 }
 
 // ---------------------------------------------------------------------------

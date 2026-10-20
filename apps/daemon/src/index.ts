@@ -176,6 +176,8 @@ import { WorkflowSecretsService } from "./workflows/secrets.ts";
 import { FileRunStore } from "./workflows/run-store.ts";
 import { WorkflowStateStore } from "./workflows/state-store.ts";
 import { registerWorkflowRoutes } from "./workflows/routes.ts";
+import { readGitStatusShort } from "./workflows/projects.ts";
+import { HANDOFF_GIT_STATUS_BYTES } from "@orquester/api/agent-chat";
 import { AgentProfileService, publishAgentProfileEvents } from "./agent-profile/service.ts";
 import { registerAgentProfileRoutes } from "./agent-profile/routes.ts";
 import { SessionProfileService, publishSessionProfileEvents } from "./session-profiles/service.ts";
@@ -648,6 +650,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
         return null;
       }
     },
+    // "Continue in another agent": the working tree handed over with the transcript, read as the
+    // workflow handoff reads it. `git` is created below; a fork only runs once the daemon is up.
+    gitStatusShort: (projectPath) => readGitStatusShort(git, projectPath, HANDOFF_GIT_STATUS_BYTES),
     logger: console
   });
 

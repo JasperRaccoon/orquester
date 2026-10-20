@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Dot, FolderTree, GitBranch, Globe, ListTodo, MessageCircleQuestion, Monitor, Pencil, PenTool, Trash2, Workflow, X } from "lucide-react";
+import { ArrowRightLeft, Dot, FolderTree, GitBranch, Globe, ListTodo, MessageCircleQuestion, Monitor, Pencil, PenTool, Trash2, Workflow, X } from "lucide-react";
 import { useShallow } from "zustand/react/shallow";
 import { cn } from "../../lib/cn";
 import { shortAccountLabel } from "../../lib/account-label";
@@ -120,6 +120,7 @@ export const TabStrip: React.FC = () => {
   const deleteTodo = useAppStore((s) => s.deleteTodo);
   const reorderTabs = useAppStore((s) => s.reorderTabs);
   const markTabUnread = useAppStore((s) => s.markTabUnread);
+  const requestContinueIn = useAppStore((s) => s.requestContinueIn);
   const agentAccounts = useAppStore((s) => s.agentAccounts);
 
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -162,6 +163,17 @@ export const TabStrip: React.FC = () => {
                 label: "Mark unread",
                 icon: <Dot size={13} />,
                 onClick: () => markTabUnread(tab.id)
+              }
+            ]
+          : []),
+        // Thread lineage §6: the whole conversation forked onto another agent, model or account;
+        // the chat's own view opens the picker. Offered once there is a conversation to carry.
+        ...(tab.type === "agent-chat" && tab.session.latestTurn
+          ? [
+              {
+                label: "Continue in another agent…",
+                icon: <ArrowRightLeft size={13} />,
+                onClick: () => requestContinueIn(tab.id)
               }
             ]
           : []),

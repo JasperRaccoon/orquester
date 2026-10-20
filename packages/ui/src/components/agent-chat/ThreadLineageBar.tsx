@@ -2,6 +2,7 @@ import React from "react";
 import { GitFork, GitMerge, X } from "lucide-react";
 
 import type { SessionSummary } from "@orquester/api";
+import { agentAdapterLabel } from "@orquester/api/agent-chat";
 
 import { cn } from "../../lib/cn";
 import {
@@ -120,6 +121,12 @@ export function ThreadLineageBar({
                 a closed chat
               </span>
             )}
+            {/* A continuation names the agent the conversation came from. */}
+            {lineage.sourceAgent !== undefined ? (
+              <span className="shrink-0 text-neutral-500" data-lineage-source-agent={lineage.sourceAgent}>
+                ({agentAdapterLabel(lineage.sourceAgent)})
+              </span>
+            ) : null}
           </span>
         ) : null}
         {lineage && parent ? (

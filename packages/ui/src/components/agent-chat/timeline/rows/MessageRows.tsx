@@ -1,5 +1,5 @@
 import React from "react";
-import { ArrowUp, Clock, GitFork, GitMerge, Undo2, X } from "lucide-react";
+import { ArrowRightLeft, ArrowUp, Clock, GitFork, GitMerge, Undo2, X } from "lucide-react";
 
 import type { AttachmentRef } from "@orquester/api";
 import {
@@ -235,26 +235,40 @@ function ForkFromHereButton({
   role: "user" | "assistant";
   text: string;
 }): React.ReactElement | null {
-  const { onFork } = useTimelineRowContext();
+  const { onFork, onContinueIn } = useTimelineRowContext();
   // One fork per click: held until the daemon answered, so a double click
   // never opens two tabs (the view also refuses a second fork in flight).
   const [busy, setBusy] = React.useState(false);
   if (!onFork) return null;
   const label = role === "user" ? "Fork from before this message" : "Fork from here";
   return (
-    <ChatIconButton
-      size="micro"
-      label={label}
-      disabled={busy}
-      aria-busy={busy || undefined}
-      onClick={() => {
-        if (busy) return;
-        setBusy(true);
-        void Promise.resolve(onFork({ messageId, turnId, role, text })).finally(() => setBusy(false));
-      }}
-    >
-      <GitFork size={12} strokeWidth={1.8} aria-hidden />
-    </ChatIconButton>
+    <>
+      <ChatIconButton
+        size="micro"
+        label={label}
+        disabled={busy}
+        aria-busy={busy || undefined}
+        onClick={() => {
+          if (busy) return;
+          setBusy(true);
+          void Promise.resolve(onFork({ messageId, turnId, role, text })).finally(() => setBusy(false));
+        }}
+      >
+        <GitFork size={12} strokeWidth={1.8} aria-hidden />
+      </ChatIconButton>
+      {/* The same cut in another agent, model or account — the picker says what it carries. */}
+      {onContinueIn ? (
+        <ChatIconButton
+          size="micro"
+          label={role === "user" ? "Continue in another agent from before this message…" : "Continue in another agent…"}
+          aria-haspopup="dialog"
+          disabled={busy}
+          onClick={() => onContinueIn({ messageId, turnId, role, text })}
+        >
+          <ArrowRightLeft size={12} strokeWidth={1.8} aria-hidden />
+        </ChatIconButton>
+      ) : null}
+    </>
   );
 }
 

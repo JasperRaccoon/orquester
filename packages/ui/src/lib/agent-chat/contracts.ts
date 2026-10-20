@@ -394,6 +394,16 @@ export interface WorkLogEntry {
    */
   stopCascade?: InterruptCause;
   /**
+   * Present on the `thread.forked` row of a chat CONTINUED in another agent or account (thread
+   * lineage §6, "Continue in another agent"): the chat it came from — linked by id, its live
+   * title preferred over the one recorded — and that chat's agent and model ("Claude Opus 4.1").
+   */
+  continuation?: {
+    parentThreadId: string;
+    sourceTitle: string;
+    sourceLabel: string;
+  };
+  /**
    * Present on a COMPLETED session-tool `html_render` call (spec 2026-10-14
    * §2.5) — a row the host's ingestion marked as its own (`sessionTool`):
    * the page the agent published, read by the shared reader

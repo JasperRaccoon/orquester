@@ -14,7 +14,9 @@ import { isMessageStreaming, type MessageStreamingContext } from "@orquester/api
  * (`opened`, unified MCP §4.1) reads "Opened by" — it is not a fork: it starts empty, with that
  * chat's first message.
  */
-export function lineageVerb(lineage: Pick<ThreadLineage, "relation">): string {
+export function lineageVerb(lineage: Pick<ThreadLineage, "relation" | "sourceAgent">): string {
+  // A fork continued in another agent or account ("Continue in another agent").
+  if (lineage.relation === "fork" && lineage.sourceAgent !== undefined) return "Continued from";
   switch (lineage.relation) {
     case "delegate":
       return "Delegated by";
@@ -155,9 +157,20 @@ export class ForkRetryKeys {
 
   static keyFor(
     sessionId: string,
-    request: { messageId?: string | null; turnId?: string | null; role?: string | null }
+    request: {
+      messageId?: string | null;
+      turnId?: string | null;
+      role?: string | null;
+      refId?: string | null;
+      accountId?: string | null;
+      modelSelection?: { model: string } | null;
+    }
   ): string {
-    return JSON.stringify([sessionId, request.messageId ?? null, request.turnId ?? null, request.role ?? null]);
+    const cut = [sessionId, request.messageId ?? null, request.turnId ?? null, request.role ?? null];
+    // "Continue in another agent": the same point aimed at another agent, account or model is
+    // another fork, never a retry of this one. A plain fork's key keeps its four elements.
+    const target = [request.refId ?? null, request.accountId ?? null, request.modelSelection?.model ?? null];
+    return JSON.stringify(target.every((value) => value === null) ? cut : [...cut, ...target]);
   }
 
   /** The id to send: the one an unknown outcome left for this point, else a fresh one. */

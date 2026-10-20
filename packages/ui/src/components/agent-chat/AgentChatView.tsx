@@ -3,6 +3,7 @@ import { flushSync } from "react-dom";
 
 import { DEFAULT_RUNTIME_MODE, SETTLED_TURN_STATES, messageStreamingContext, startedTurns } from "@orquester/api/agent-chat";
 import type { GoalAction } from "@orquester/api/agent-chat";
+import type { ForkSessionRequest } from "@orquester/api";
 
 import { shortAccountLabel } from "../../lib/account-label";
 import {
@@ -115,6 +116,8 @@ import { GOAL_ACTION_TEXT, goalActions, goalActionsNote } from "./status/goal-ch
 import { ChatTimeline } from "./timeline/ChatTimeline";
 import type { TimelineForkInput } from "./timeline/context";
 import { ThreadLineageBar, type LineageNotice } from "./ThreadLineageBar";
+import { ContinueInAgentDialog } from "./ContinueInAgentDialog";
+import { continueHandoffPreview } from "../../lib/agent-chat/continue-in.logic";
 import { ThreadGoneNotice } from "./ThreadGoneNotice";
 import {
   goneDisplay,
@@ -725,6 +728,62 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   // only the door and its state. A failure lands on the row in words — the
   // action never rejects — and a search hit's reveal scrolls a row into view.
   const historyHasOlder = !paintOnly && canLoadOlderHistory(slice.history);
+
+  // --- "Continue in another agent…" (thread lineage §6) ---------------------
+  // From a message (beside "Fork from here") or the whole thread (the tab's menu): the picker
+  // forks onto the agent, model and account chosen — natively for the same agent and account,
+  // else as a budgeted transcript handoff — and the store opens the new tab.
+  const [continueFrom, setContinueFrom] = React.useState<{ input: TimelineForkInput | null } | null>(null);
+  React.useEffect(() => setContinueFrom(null), [sessionId]);
+  // The picker is portaled over the whole window: leaving this tab closes it, as the popovers do.
+  React.useEffect(() => {
+    if (active === false) setContinueFrom(null);
+  }, [active]);
+  const openContinueIn = React.useCallback((input: TimelineForkInput) => setContinueFrom({ input }), []);
+  const continueInRequest = useAppStore((s) => s.continueInRequest);
+  const clearContinueInRequest = useAppStore((s) => s.clearContinueInRequest);
+  React.useEffect(() => {
+    if (paintOnly || continueInRequest?.sessionId !== sessionId) return;
+    clearContinueInRequest();
+    setContinueFrom({ input: null });
+  }, [continueInRequest, sessionId, paintOnly, clearContinueInRequest]);
+  const continueTarget = React.useMemo(
+    () =>
+      continueFrom?.input
+        ? {
+            messageId: continueFrom.input.messageId,
+            ...(continueFrom.input.turnId !== null ? { turnId: continueFrom.input.turnId } : {}),
+            role: continueFrom.input.role
+          }
+        : {},
+    [continueFrom]
+  );
+  const continuePreview = React.useMemo(
+    () => (continueFrom ? continueHandoffPreview({ turns: slice.turns, items: slice.entries }, continueTarget) : null),
+    [continueFrom, continueTarget, slice.turns, slice.entries]
+  );
+  const continueIn = React.useCallback(
+    async (fields: Pick<ForkSessionRequest, "refId" | "accountId" | "modelSelection">): Promise<void> => {
+      const input = continueFrom?.input ?? null;
+      setLineageNotice(null);
+      const result = await forkChatTab(sessionId, { ...continueTarget, ...fields });
+      if (input?.role === "user" && input.text.trim().length > 0) {
+        deliverToComposerDraft(result.session.id, { text: input.text, attachments: [] });
+      }
+      activateTab(result.session.id);
+    },
+    [continueFrom, continueTarget, forkChatTab, sessionId, activateTab]
+  );
+  const continueSource = React.useMemo(
+    () => ({
+      refId: session.refId,
+      adapter: provider?.id ?? null,
+      accountId: slice.head?.accountId ?? session.accountId ?? "",
+      modelSelection: slice.head?.modelSelection ?? null,
+      title: session.title
+    }),
+    [session.refId, session.accountId, session.title, provider?.id, slice.head?.accountId, slice.head?.modelSelection]
+  );
   const loadOlderHistory = React.useCallback(
     () => dispatch(() => actions.loadOlderHistory()),
     [actions]
@@ -1189,6 +1248,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
               // §5.5 flow, ending with the message back in the composer.
               onRevert={paintOnly ? noop : rewindTo}
               onFork={paintOnly ? undefined : forkFrom}
+              onContinueIn={paintOnly ? undefined : openContinueIn}
               revertBusy={revertBusy}
               startedTurnCount={startedTurnCount}
               onOpenTurnDiff={paintOnly ? noop : openTurnDiff}
@@ -1419,6 +1479,22 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
         </div>
       </Modal>
       <TurnDiffModal request={turnDiff} onClose={closeTurnDiff} />
+      <ContinueInAgentDialog
+        open={continueFrom !== null && !paintOnly}
+        onClose={() => setContinueFrom(null)}
+        source={continueSource}
+        pointLabel={
+          continueFrom?.input
+            ? continueFrom.input.role === "user"
+              ? "from before this message"
+              : "through this reply"
+            : "through the latest finished turn"
+        }
+        preview={continuePreview}
+        moreOlder={historyHasOlder}
+        onSubmit={continueIn}
+        errorText={lineageErrorText}
+      />
     </div>
   );
 }

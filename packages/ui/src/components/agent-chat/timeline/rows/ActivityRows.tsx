@@ -1,5 +1,5 @@
 import React from "react";
-import { ArrowDownToLine, ArrowUpRight, CircleStop, Layers, UserRound, X } from "lucide-react";
+import { ArrowDownToLine, ArrowRightLeft, ArrowUpRight, CircleStop, Layers, UserRound, X } from "lucide-react";
 import { stopCascadedSummary } from "@orquester/api/agent-chat";
 
 import type { RuntimeSubagent } from "@orquester/api";
@@ -35,6 +35,7 @@ import {
 } from "../../../../lib/agent-chat/presentation.logic";
 import {
   joinLifecycleDetails,
+  workEntryIsContinuation,
   workEntryIsIdentityChange,
   workEntryIsProfileChange,
   workEntryIsStopCascade,
@@ -361,6 +362,56 @@ function StopCascadeNoticeRow({ entry }: { entry: WorkLogEntry }): React.ReactEl
   );
 }
 
+/**
+ * "Continued from “<source>” (Claude Opus 4.1)" (thread lineage §6): the first row of a chat
+ * continued in another agent or account. The source's title links back to its tab — its live
+ * title, else the one recorded at the fork, marked closed — and the second line says what the
+ * handoff carried and when the agent reads it.
+ */
+function ContinuationNoticeRow({ entry }: { entry: WorkLogEntry }): React.ReactElement {
+  const continuation = entry.continuation!;
+  const liveTitle = useAppStore(
+    (state) =>
+      state.sessions.find((session) => session.id === continuation.parentThreadId && session.kind === "agent-chat")?.title
+  );
+  const activateTab = useAppStore((state) => state.activateTab);
+  const detail = entry.detail?.trim() ?? "";
+  return (
+    <div
+      data-activity-id={entry.id}
+      data-continued-from={continuation.parentThreadId}
+      className={cn(
+        "my-0.5 flex min-w-0 items-start gap-1.5 rounded-md border px-2 py-1 text-xs leading-4",
+        TONE_BAND.info,
+        TONE_BAND_TEXT.info
+      )}
+    >
+      <span className="flex h-4 w-4 shrink-0 items-center justify-center">
+        <ArrowRightLeft size={12} aria-hidden />
+      </span>
+      <span className="min-w-0 flex-1 break-words">
+        Continued from{" "}
+        {liveTitle !== undefined ? (
+          <button
+            type="button"
+            data-thread-link={continuation.parentThreadId}
+            onClick={() => activateTab(continuation.parentThreadId)}
+            title={`Open “${liveTitle}”`}
+            className="inline rounded font-medium underline-offset-2 hover:underline focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500"
+          >
+            “{liveTitle}”
+            <ArrowUpRight size={11} strokeWidth={1.8} aria-hidden className="ml-0.5 inline align-[-1px]" />
+          </button>
+        ) : (
+          <span title="That chat's tab was closed">“{continuation.sourceTitle}” (closed)</span>
+        )}{" "}
+        <span className="text-neutral-400">({continuation.sourceLabel})</span>
+        {detail.length > 0 ? <span className="block text-neutral-400">{detail}</span> : null}
+      </span>
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // The tool row
 // ---------------------------------------------------------------------------
@@ -439,6 +490,7 @@ const ToolEntryRow = React.memo(function ToolEntryRow({
   if (workEntryIsIdentityChange(entry)) return <IdentityNoticeRow entry={entry} />;
   if (workEntryIsProfileChange(entry)) return <ProfileNoticeRow entry={entry} />;
   if (workEntryIsStopCascade(entry)) return <StopCascadeNoticeRow entry={entry} />;
+  if (workEntryIsContinuation(entry)) return <ContinuationNoticeRow entry={entry} />;
 
   const iconName: RowGlyphName = warning || destructive ? "circle-alert" : workEntryIconName(entry);
   const label = displayLabel ?? workEntryDisplayLabel(entry, ctx.workspaceRoot);

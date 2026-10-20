@@ -86,6 +86,8 @@ export interface ChatTimelineProps {
    * no fork is offered.
    */
   onFork?: ((input: TimelineForkInput) => Promise<unknown> | void) | undefined;
+  /** "Continue in another agent…" on the same messages a fork is offered on. Absent: not offered. */
+  onContinueIn?: ((input: TimelineForkInput) => void) | undefined;
   /**
    * A turn is running or a revert is in flight: the rewind button is shown
    * but disabled ("Available when the agent is idle"). Absent means idle.

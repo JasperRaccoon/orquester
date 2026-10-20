@@ -1281,7 +1281,11 @@ export const threadLineageRecordSchema = z.object({
   agentCreated: z.literal(true).optional().catch(undefined),
   // Inherited workflow ownership (`ThreadLineage.workflowOwned`, §5.4), stamped at creation.
   // Anything but `true` is dropped on its own.
-  workflowOwned: z.literal(true).optional().catch(undefined)
+  workflowOwned: z.literal(true).optional().catch(undefined),
+  // A fork continued in another agent or account (`ThreadLineage.sourceAgent` / `sourceModel`):
+  // the parent's adapter and model at the fork. A bad value is dropped on its own.
+  sourceAgent: z.string().min(1).max(64).regex(/\S/).optional().catch(undefined),
+  sourceModel: lineageIdSchema.optional().catch(undefined)
 });
 export type ThreadLineageRecord = z.infer<typeof threadLineageRecordSchema>;
 
