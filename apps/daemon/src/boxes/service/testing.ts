@@ -7,10 +7,9 @@
 import { EventEmitter } from "node:events";
 import { join } from "node:path";
 
-import type { BoxKind, BoxProviderCredentialField, BoxProviderId, BoxSizeOffer } from "@orquester/api";
+import type { BoxAgentConfig, BoxKind, BoxProviderCredentialField, BoxProviderId, BoxSizeOffer } from "@orquester/api";
 
 import type {
-  BoxAgentConfig,
   BoxConnection,
   BoxHub,
   BoxProviderAdapter,
