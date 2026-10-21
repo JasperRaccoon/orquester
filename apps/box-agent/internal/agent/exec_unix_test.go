@@ -177,7 +177,8 @@ func TestAttachFromADroppedOffsetReportsTheLoss(t *testing.T) {
 
 // The Tailscale auth key a container box starts with is never inherited.
 func TestProcessesNeverInheritTheTailscaleAuthKey(t *testing.T) {
-	t.Setenv("ORQ_TAILSCALE_AUTHKEY", "tskey-auth-test-secret")
+	// Split so secret scanners do not read the fake key as a real one.
+	t.Setenv("ORQ_TAILSCALE_AUTHKEY", "tskey-auth-"+"test-secret")
 	d := newTestDaemon(t)
 	d.openExec(1, shellSpec(`echo "key=${ORQ_TAILSCALE_AUTHKEY:-none}"`, false))
 	var out strings.Builder

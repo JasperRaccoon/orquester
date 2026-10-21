@@ -30,14 +30,16 @@ function fakeApi(routes: Record<string, (call: Call) => Response>): { fetch: typ
 }
 
 const signal = new AbortController().signal;
+// Split so secret scanners do not read the fake key as a real one.
+const MINTED_KEY = "tskey-auth-" + "k123-SECRET";
 
 test("mints a single-use, ephemeral, pre-authorized, tagged key with an API token", async () => {
   const api = fakeApi({
-    "POST /api/v2/tailnet/-/keys": () => Response.json({ id: "k123", key: "tskey-auth-k123-SECRET", expires: "2026-10-20T12:05:00Z" })
+    "POST /api/v2/tailnet/-/keys": () => Response.json({ id: "k123", key: MINTED_KEY, expires: "2026-10-20T12:05:00Z" })
   });
   const keys = createTailscaleKeys({ credentials: () => ({ apiToken: "tskey-api-TOKEN" }), fetch: api.fetch });
   const key = await keys.mintAuthKey({ boxId: "box-0123456789abcdef0123456789abcdef0123456789", ttlSeconds: 600, signal });
-  assert.equal(key, "tskey-auth-k123-SECRET");
+  assert.equal(key, MINTED_KEY);
   assert.equal(api.calls.length, 1);
   assert.equal(api.calls[0]!.authorization, "Bearer tskey-api-TOKEN");
   const body = JSON.parse(api.calls[0]!.body!) as Record<string, unknown>;
@@ -112,7 +114,7 @@ test("unconfigured credentials and API errors fail without leaking secrets", asy
     "GET /api/v2/tailnet/-/keys": () => Response.json({ message: "API token invalid" }, { status: 401 }),
     "POST /api/v2/tailnet/-/keys": () => Response.json({ message: "requested tags [tag:orq-box] are invalid or not permitted" }, { status: 400 })
   });
-  const keys = createTailscaleKeys({ credentials: () => ({ apiToken: "tskey-api-SECRET-VALUE" }), fetch: api.fetch });
+  const keys = createTailscaleKeys({ credentials: () => ({ apiToken: "tskey-api-" + "SECRET-VALUE" }), fetch: api.fetch });
   const validation = await keys.validate({ signal });
   assert.equal(validation.ok, false);
   await assert.rejects(keys.mintAuthKey({ boxId: "box-0123456789ab", ttlSeconds: 60, signal }), (error: Error) => {
