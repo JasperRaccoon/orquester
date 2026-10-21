@@ -23,7 +23,13 @@ import type {
   SessionSummary, AgentAccount,
   ThreadLineage } from "@orquester/api";
 import { SYSTEM_ACCOUNT_ID, isSessionProfileAgentId, type SessionProfileAgentId } from "@orquester/api";
-import { CONVERSATION_ALREADY_OPEN, forkTitle } from "@orquester/api/agent-chat";
+import {
+  agentAdapterLabel,
+  continuationTitle,
+  CONVERSATION_ALREADY_OPEN,
+  forkTitle,
+  type ModelSelection
+} from "@orquester/api/agent-chat";
 import type { AgentChatHome, RuntimePlatform } from "@orquester/config";
 import { agentHostSocketPath, agentHostTokenPath } from "@orquester/config";
 // boxes:
@@ -61,7 +67,7 @@ import { markClaudeProjectTrusted } from "./home-prep.ts";
 import { parseSessionOwner } from "./owner.ts";
 import type { FastifyReply } from "fastify";
 import type { AgentChatRouteDeps } from "./proxy-routes.ts";
-import type { HtmlRenderReference, Skill, SlashCommand } from "@orquester/api/agent-chat";
+import type { HtmlRenderReference, Skill, SlashCommand, ThreadUsageLimitNotice } from "@orquester/api/agent-chat";
 import { publishHtmlRender, type LocalImageReader, type PublishHtmlRenderInput } from "./html-render-publish.ts";
 import { HtmlPreviewError, measureHtmlPage, previewHtmlPage, type HtmlPageRenderer, type HtmlPreview, type HtmlPreviewInput } from "../html-preview/index.ts";
 import { createVisualUrlSigner, type VisualUrlSigner } from "./visual-urls.ts";
@@ -214,6 +220,12 @@ export interface AgentChatServiceOptions {
   sessionProfiles?: ChatSessionProfiles;
   /** boxes: box projects and their tooling (also settable later, {@link AgentChatService.setBoxes}). */
   boxes?: ChatBoxes;
+  /**
+   * `git status --short` of a project, capped — the workflow handoff's own reader
+   * (`workflows/projects.ts` `gitStatusShort`). A continuation in another agent hands it over with
+   * the transcript. Absent, or failing: the handoff goes without it.
+   */
+  gitStatusShort?(projectPath: string): Promise<string>;
   logger?: {
     log?: (...a: unknown[]) => void;
     warn?: (...a: unknown[]) => void;
@@ -304,10 +316,47 @@ class ForkOutcomeUnknown extends Error {
 /** How many fork keys {@link AgentChatService.forkSession} remembers. */
 const FORK_RECORDS = 512;
 
-/** A fork request's cut, for telling a repeat from a reuse of its key. */
+/**
+ * A fork request's cut, for telling a repeat from a reuse of its key — and, for a continuation in
+ * another agent or account, its target: the same key aimed elsewhere is another fork. An ordinary
+ * fork's fingerprint keeps its three-element spelling, so tabs recorded before continuations
+ * compare as they always did.
+ */
 function forkFingerprint(req: ForkSessionRequest): string {
   const body = (req ?? {}) as Record<string, unknown>;
-  return JSON.stringify([body.messageId ?? null, body.turnId ?? null, body.role ?? null]);
+  const cut = [body.messageId ?? null, body.turnId ?? null, body.role ?? null];
+  const target = [body.refId ?? null, body.accountId ?? null];
+  return JSON.stringify(target.every((value) => value === null) ? cut : [...cut, ...target]);
+}
+
+/** The longest model id a fork request may name. */
+const MAX_FORK_MODEL_CHARS = 200;
+/** The most options a fork request's model selection may carry. */
+const MAX_FORK_MODEL_OPTIONS = 32;
+
+/** A fork request's `modelSelection`: absent, or a model id and options the host can read. */
+function forkModelSelection(value: unknown): ModelSelection | undefined {
+  if (value === undefined || value === null) return undefined;
+  const invalid = (): ChatSessionError =>
+    new ChatSessionError("modelSelection must name a model, with options as [{ id, value }].", "INVALID_COMMAND");
+  if (typeof value !== "object" || Array.isArray(value)) throw invalid();
+  const { model, options, instanceId } = value as Record<string, unknown>;
+  if (typeof model !== "string" || !/\S/.test(model) || model.length > MAX_FORK_MODEL_CHARS) throw invalid();
+  let parsed: ModelSelection["options"];
+  if (options !== undefined) {
+    if (!Array.isArray(options) || options.length > MAX_FORK_MODEL_OPTIONS) throw invalid();
+    parsed = options.map((option: unknown) => {
+      const { id, value: optionValue } = (option ?? {}) as Record<string, unknown>;
+      if (typeof id !== "string" || id.length === 0 || id.length > 64) throw invalid();
+      if (typeof optionValue !== "string" && typeof optionValue !== "boolean") throw invalid();
+      return { id, value: optionValue };
+    });
+  }
+  return {
+    ...(typeof instanceId === "string" && instanceId.length > 0 ? { instanceId } : {}),
+    model: model.trim(),
+    ...(parsed !== undefined ? { options: parsed } : {})
+  };
 }
 
 /** The fork point a recorded {@link forkFingerprint} names, for re-sending the fork. */
@@ -457,11 +506,19 @@ export class AgentChatService {
       // subagent fleet or watch loop finishing, which the drain also waits on.
       onTurnSettled: () => this.supervisor.handleTurnSettled(),
       onBackgroundWorkEnded: () => this.supervisor.handleTurnSettled(),
-      onUsageLimits: (reading) => this.usageLimitsListener(reading)
+      onUsageLimits: (reading) => this.usageLimitsListener(reading),
+      onUsageLimitNotice: (threadId, notice) => this.usageLimitNoticeListener(threadId, notice)
     });
   }
 
   private usageLimitsListener: (reading: ThreadUsageReading) => void = () => undefined;
+
+  private usageLimitNoticeListener: (threadId: string, notice: ThreadUsageLimitNotice | null) => void = () => undefined;
+
+  /** Where each thread's current usage limit goes (`index.ts`: the usage-limit recovery). */
+  setUsageLimitNoticeListener(listener: (threadId: string, notice: ThreadUsageLimitNotice | null) => void): void {
+    this.usageLimitNoticeListener = listener;
+  }
 
   /** Where each thread's live account-usage reading goes (`index.ts`: the usage service). */
   setUsageLimitsListener(listener: (reading: ThreadUsageReading) => void): void {
@@ -1148,6 +1205,11 @@ export class AgentChatService {
    * The account is the PARENT's, pinned (the system identity included): a provider's resume
    * identity stays in the home that created it, so a parent whose account is gone is refused
    * rather than forked into another home.
+   *
+   * "Continue in another agent" (`refId` naming another agent, or `accountId` another account):
+   * the child runs on that agent and account with the request's model, and the host hands it the
+   * parent's conversation as a budgeted transcript with its first message — never natively.
+   * Lineage records a `fork` with `sourceAgent`, so the lineage bar and merge back work unchanged.
    */
   async forkSession(parentId: string, req: ForkSessionRequest, order: number): Promise<ForkSessionResponse> {
     const commandId = optionalField((req as Record<string, unknown> | undefined)?.commandId, "commandId", 200);
@@ -1256,37 +1318,83 @@ export class AgentChatService {
     // request's principal is the forked chat's own agent, so a `true` here is one (§13 c). A
     // repeat of a keyed fork keeps what the first recorded.
     const agentCreated = existingAgentCreated(this.chat.get(id)) ?? body.agentCreated === true;
-    const entry = this.opts.registryEntry(parent.refId);
+    // "Continue in another agent": the agent and account the request names. Another adapter, or
+    // another account of this one, is a CONTINUATION — never a native fork (a provider's resume
+    // identity stays in the home that created it), but a budgeted transcript handoff.
+    const parentAdapter = this.opts.registryEntry(parent.refId)?.chat?.adapter;
+    const refId = optionalField(body.refId, "refId", 64)?.trim() ?? parent.refId;
+    const entry = this.opts.registryEntry(refId);
     if (!entry?.resolvedBin || !entry.enabled || !entry.chat?.adapter) {
-      throw new ChatSessionError(`Registry entry "${parent.refId}" is not available.`);
+      throw refId === parent.refId
+        ? new ChatSessionError(`Registry entry "${parent.refId}" is not available.`)
+        : new ChatSessionError(`"${entry?.name ?? refId}" is not available to continue in (not installed, disabled, or no chat).`, "INVALID_COMMAND");
     }
     const adapter = entry.chat.adapter;
+    const crossAgent = parentAdapter !== undefined ? adapter !== parentAdapter : refId !== parent.refId;
+    const parentAccount = parent.accountId ?? "";
+    const requestedAccount = optionalField(body.accountId, "accountId", 200)?.trim();
+    const requestedAccountId = requestedAccount === SYSTEM_ACCOUNT_ID ? "" : requestedAccount;
+    const continuation = crossAgent || (requestedAccountId !== undefined && requestedAccountId !== parentAccount);
+    const modelSelection = forkModelSelection(body.modelSelection);
+    if (crossAgent && modelSelection === undefined) {
+      throw new ChatSessionError(
+        `modelSelection is required to continue in ${entry.name}: a model from its own catalogue.`,
+        "INVALID_COMMAND"
+      );
+    }
+    if (continuation && requestedAccountId) {
+      // The family gate, as an account switch has it: `resolveLaunchEnv` answers the system
+      // identity for an account of another family, so a mismatched id is refused here.
+      const account = this.opts.listManagedAccounts?.().accounts.find((candidate) => candidate.id === requestedAccountId);
+      if (adapter === "opencode" || !account || account.agent !== entry.id) {
+        throw new ChatSessionError(`That account cannot run "${entry.name}".`, "INVALID_COMMAND");
+      }
+    }
     if (!this.supervisor.isHealthy()) {
       throw this.hostUnavailable();
     }
-    const parentAccount = parent.accountId ?? "";
+    if (continuation && !this.supervisor.hostSupports("crossAgentFork")) {
+      throw new ChatSessionError(
+        "Continuing in another agent or account needs the updated agent host, which starts once no turn is running. Try again then.",
+        "COMMAND_REJECTED"
+      );
+    }
     let launch: ChatLaunchEnv | null = null;
     try {
-      launch = await this.opts.resolveLaunchEnv(entry, { accountId: parentAccount || SYSTEM_ACCOUNT_ID });
+      // An ordinary fork is pinned to the parent's account. A continuation runs under the one it
+      // names, else (another agent) that agent's default account.
+      launch = await this.opts.resolveLaunchEnv(
+        entry,
+        continuation
+          ? requestedAccount !== undefined
+            ? { accountId: requestedAccount }
+            : {}
+          : { accountId: parentAccount || SYSTEM_ACCOUNT_ID }
+      );
     } catch (error) {
       throw error instanceof ChatSessionError
         ? error
         : new ChatSessionError(error instanceof Error ? error.message : String(error));
     }
-    if ((launch?.accountId ?? "") !== parentAccount) {
+    const childAccount = launch?.accountId ?? "";
+    if (!continuation && childAccount !== parentAccount) {
       throw new ChatSessionError(
         "The account this conversation runs under is no longer available, so it cannot be forked.",
         "SESSION_UNAVAILABLE"
       );
     }
-    const home = resolveHomeKind(parentAccount);
+    if (continuation && requestedAccountId !== undefined && childAccount !== requestedAccountId) {
+      throw new ChatSessionError(`That account is not available to "${entry.name}" any more.`, "INVALID_COMMAND");
+    }
+    const home = resolveHomeKind(childAccount);
     // The child's Agent Profile (spec 2026-10-18 §5.5): the parent's unless the request names one
     // (`null` = Global). A fork of an unattended chat is unattended too.
     const requestedProfile = requestedProfileId(body.profileId, true);
     const unattended = body.unattended === true || this.chat.isUnattended(parentId);
     let childProfileId = requestedProfile === undefined ? (this.chat.profileOf(parentId) ?? null) : requestedProfile;
     let launchFields = this.accountLaunchFields(entry, adapter, launch);
-    // Absent: the host gives the child the parent's own (its `launch.json`).
+    // Absent: the host gives the child the parent's own (its `launch.json`) — for a continuation,
+    // Global.
     let profileFields: Pick<ForkHostThreadRequest, "profile" | "profileId" | "profileFallback"> =
       requestedProfile === null ? { profile: null, profileId: null } : {};
     if (childProfileId !== null) {
@@ -1294,7 +1402,7 @@ export class AgentChatService {
         const resolved = await this.profileLaunch({
           profileId: childProfileId,
           adapter,
-          accountId: parentAccount,
+          accountId: childAccount,
           projectPath: parent.projectPath,
           base: launchFields
         });
@@ -1304,28 +1412,41 @@ export class AgentChatService {
         // The parent's profile was deleted: an interactive fork goes ahead as Global under the
         // account's launch, SAID explicitly (inheriting would hand the child the parent's
         // `launch.json` version, which the delete may have collected — a native fork reads it),
-        // with the §5.6 notice on the child. A profile the request named, an unattended fork, or
-        // any other refusal fails.
-        const inheritedAndGone =
-          error instanceof ChatSessionError &&
-          error.code === "PROFILE_NOT_FOUND" &&
+        // with the §5.6 notice on the child. A continuation whose inherited profile has nothing
+        // for its new agent goes Global the same way. A profile the request named, an unattended
+        // fork, or any other refusal fails.
+        const code = error instanceof ChatSessionError ? error.code : undefined;
+        const inheritedAndUnusable =
+          (code === "PROFILE_NOT_FOUND" || (crossAgent && code === "PROFILE_UNSUPPORTED_AGENT")) &&
           requestedProfile === undefined &&
           !unattended;
-        if (!inheritedAndGone) throw error;
+        if (!inheritedAndUnusable) throw error;
         const profiles = this.sessionProfiles ?? this.opts.sessionProfiles ?? null;
         const name = await Promise.resolve(profiles?.profileName?.(childProfileId)).catch(() => undefined);
         profileFields = {
           profile: null,
           profileId: null,
-          profileFallback: { previousProfileId: childProfileId, notice: deletedProfileNotice(name) }
+          profileFallback: {
+            previousProfileId: childProfileId,
+            notice:
+              code === "PROFILE_NOT_FOUND"
+                ? deletedProfileNotice(name)
+                : `${name !== undefined ? `Agent Profile "${name}"` : "This chat's Agent Profile"} has nothing for ${agentAdapterLabel(adapter)}, so this chat uses Global.`
+          }
         };
         childProfileId = null;
       }
     }
     const { launchEnv } = launchFields;
     // boxes: the child runs where its parent's conversation lives.
-    const boxField = this.boxLaunchFor(parent.projectPath, adapter, parentAccount);
+    const boxField = this.boxLaunchFor(parent.projectPath, adapter, childAccount);
     await this.prepareHome(adapter, launchEnv, parent.projectPath);
+    // The project's `git status --short`, handed over with a continuation's transcript (the
+    // workflow handoff's reader); a failure costs the handoff that section, never the fork.
+    const gitStatus =
+      continuation && this.opts.gitStatusShort !== undefined && parent.projectPath
+        ? await this.opts.gitStatusShort(parent.projectPath).catch(() => undefined)
+        : undefined;
 
     const existing = this.chat.get(id);
     if (existing && existing.lineage?.parentThreadId !== parentId) {
@@ -1333,19 +1454,24 @@ export class AgentChatService {
     }
     const summary = existing ?? this.chat.create({
       id,
-      refId: parent.refId,
-      title: title || forkTitle(parent.title),
+      refId: entry.id,
+      title: title || (crossAgent ? continuationTitle(parent.title, agentAdapterLabel(adapter)) : forkTitle(parent.title)),
       projectPath: parent.projectPath,
       cwd: parent.cwd,
       order,
-      accountId: parentAccount,
+      accountId: childAccount,
       home,
       // A mirror of the head's: the child's own (or the parent's, inherited), else Global.
       ...(childProfileId !== null ? { profileId: childProfileId } : {}),
       ...(unattended ? { unattended: true } : {}),
       // Provisional until the host answers with the fork point it resolved.
       lineage: withLineageStamps(
-        { parentThreadId: parentId, relation: "fork", createdAt: new Date().toISOString() },
+        {
+          parentThreadId: parentId,
+          relation: "fork",
+          createdAt: new Date().toISOString(),
+          ...(continuation ? { sourceAgent: parentAdapter ?? parent.refId } : {})
+        },
         this.delegationDepthOf(parent),
         agentCreated,
         this.inheritsWorkflowOwnership(parent)
@@ -1362,11 +1488,11 @@ export class AgentChatService {
       projectPath: summary.projectPath,
       cwd: summary.cwd,
       title: summary.title,
-      refId: parent.refId,
-      accountId: parentAccount,
+      refId: entry.id,
+      accountId: childAccount,
       home,
-      // The parent's, chosen by the host from its head.
-      modelSelection: undefined,
+      // Absent: the parent's, chosen by the host from its head (same agent only).
+      modelSelection,
       runtimeMode: undefined,
       ...launchFields,
       ...profileFields,
@@ -1376,7 +1502,8 @@ export class AgentChatService {
         ...(messageId !== undefined ? { messageId } : {}),
         ...(turnId !== undefined ? { turnId } : {}),
         ...(role !== undefined ? { role } : {})
-      }
+      },
+      ...(continuation ? { continuation: gitStatus !== undefined ? { gitStatus } : {} } : {})
     };
     let result: ForkHostThreadResponse;
     try {
@@ -1427,7 +1554,12 @@ export class AgentChatService {
     // The host resolves the fork point; the depth is the daemon's, from the parent's record.
     const lineage = withLineageStamps(result.lineage, this.delegationDepthOf(parent), agentCreated, this.inheritsWorkflowOwnership(parent));
     const forked = this.chat.setLineage(id, lineage) ?? summary;
-    return { session: forked, lineage, strategy: result.strategy };
+    return {
+      session: forked,
+      lineage,
+      strategy: result.strategy,
+      ...(result.handoff !== undefined ? { handoff: result.handoff } : {})
+    };
   }
 
   /** Fork tabs whose host fork this daemon is asking for right now ({@link forkSessionNow}). */

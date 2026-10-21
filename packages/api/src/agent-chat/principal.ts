@@ -52,6 +52,8 @@
  * - `TurnCommandBody.causedBy` ({@link REMOTE_STRIPPED_TURN_FIELDS}, `stripRemoteTurnFields`);
  * - `MergeBackRequest.causedBy` ({@link REMOTE_STRIPPED_MERGE_BACK_FIELDS},
  *   `stripRemoteMergeBackFields`);
+ * - `InterruptCommandBody.cause` ({@link REMOTE_STRIPPED_INTERRUPT_FIELDS},
+ *   `stripRemoteInterruptFields`): the delegate stop cascade's mark;
  * - every field of the reply-subscription routes, which exist on the socket app only. When the
  *   request carries an agent principal, its `threadId` must equal `fromThreadId` (403 otherwise).
  *

@@ -2,12 +2,15 @@ import React from "react";
 import Markdown, { type Components } from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
+import { parseForgeLink } from "@orquester/api";
 
 import { useApi } from "../../../../context/orquester-context";
 import { useObjectUrl } from "../../../../hooks";
 import { cn } from "../../../../lib/cn";
 import { detectFileKind } from "../../../../lib/file-kind";
+import { isUrlText } from "../../../../lib/github-links/text-links";
 import { useAppStore } from "../../../../store/app";
+import { ForgeLinkPill } from "../../forge-links/ForgeLinkPill";
 import { useTimelineRowContext } from "../context";
 import { CodeBlock } from "./CodeBlock";
 import { extractFenceLanguage } from "./highlight-core";
@@ -131,6 +134,14 @@ function MarkdownLink({
 }): React.ReactElement {
   const { onOpenFile } = React.useContext(MarkdownConfigCtx);
   const target = href ?? "";
+  const forge = React.useMemo(() => parseForgeLink(target), [target]);
+  // A GitHub (or GitLab/Bitbucket change request) link is a pill: an autolink shows the short
+  // label, a link with the author's own words keeps them. An image-only link (a badge) stays a
+  // plain link around its image.
+  const text = forge ? nodeToText(children) : "";
+  if (forge && text.trim().length > 0) {
+    return <ForgeLinkPill link={forge}>{isUrlText(text, target) ? undefined : children}</ForgeLinkPill>;
+  }
   // Info-coloured, no underline at rest; hover draws a dotted one.
   const linkClass = "text-info-300 underline-offset-2 hover:underline hover:decoration-dotted";
   if (onOpenFile && looksLikeWorkspacePath(target)) {
@@ -288,6 +299,54 @@ export const ChatMarkdown = React.memo(function ChatMarkdown({
         </Markdown>
       </div>
     </MarkdownConfigCtx.Provider>
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Inline markdown, for text that lives inside a control
+// ---------------------------------------------------------------------------
+
+/**
+ * Emphasis, code and links only; everything else is unwrapped to its text. A
+ * question option's description sits inside the option's `<button>`, where a
+ * block (`<div>`, `<p>`, `<pre>`) or a second interactive element is invalid
+ * markup — and a link that navigated would swallow the click that picks the
+ * option — so a link reads as one and nothing more.
+ */
+const INLINE_ELEMENTS = ["p", "strong", "em", "del", "code", "a", "br"];
+
+const INLINE_COMPONENTS: Components = {
+  // A `<span>`, not a `<p>`: phrasing content only inside a button.
+  p: ({ children }) => <span className="block [&:not(:first-child)]:mt-1">{children}</span>,
+  code: ({ children }) => (
+    <code className="rounded-[0.3rem] border border-neutral-800 bg-neutral-900/70 px-1 font-mono text-[0.92em] text-neutral-300">
+      {children}
+    </code>
+  ),
+  a: ({ children }) => <span className="text-info-300">{children}</span>
+};
+
+export interface ChatInlineMarkdownProps {
+  text: string;
+  className?: string;
+}
+
+/** {@link ChatMarkdown}'s inline subset, as phrasing content (see `INLINE_ELEMENTS`). */
+export const ChatInlineMarkdown = React.memo(function ChatInlineMarkdown({
+  text,
+  className
+}: ChatInlineMarkdownProps): React.ReactElement {
+  return (
+    <span className={cn("min-w-0 [overflow-wrap:anywhere]", className)}>
+      <Markdown
+        remarkPlugins={STATIC_PLUGINS}
+        allowedElements={INLINE_ELEMENTS}
+        unwrapDisallowed
+        components={INLINE_COMPONENTS}
+      >
+        {text}
+      </Markdown>
+    </span>
   );
 });
 

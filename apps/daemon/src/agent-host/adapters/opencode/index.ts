@@ -48,6 +48,7 @@
  * No lazy dynamic `import()` anywhere (§8): every import above is static.
  */
 
+import { realpath, stat } from "node:fs/promises";
 import { resolve as resolvePath } from "node:path";
 
 import type {
@@ -114,6 +115,14 @@ const OPENCODE_REF_ID = "opencode";
 const SNAPSHOT_TTL_MS = 5 * 60_000;
 
 /**
+ * `opencode --version` is a cold Bun start like the CLI catalogue probes, not
+ * a quick version flag: ~3 s of CPU, measured at 4.6–6 s on a loaded host. The
+ * generic 4 s probe window cut it off and the user saw "Could not read an
+ * OpenCode version" for a perfectly good install.
+ */
+const VERSION_PROBE_TIMEOUT_MS = 15_000;
+
+/**
  * The ceiling the host must give this adapter's snapshot probe (E9).
  *
  * Unlike every other provider, OpenCode's catalogue is not on disk: it lives
@@ -166,6 +175,12 @@ class OpenCodeAdapterImpl implements AgentAdapter {
     | undefined;
   /** The machine-level CLI catalogue: three Bun spawns and several MB (E9). */
   private cachedCliInventory: { value: OpenCodeInventory; at: number } | undefined;
+  /**
+   * The binary the caches above were filled from (`realpath:mtime:size`). An
+   * `npm update -g opencode-ai` rewrites the file in place, and the daemon's
+   * post-update refresh must re-probe rather than be answered from the TTL.
+   */
+  private cachedBinSignature: string | null | undefined;
   /**
    * `provider/model → limit.context`, per SERVER (§7.6's denominator). Keyed
    * on the server URL, so the project's threads share one `GET /provider`
@@ -443,15 +458,33 @@ class OpenCodeAdapterImpl implements AgentAdapter {
     return resolved;
   }
 
-  /** `opencode --version`, bounded, never a shell, and cached for the TTL. */
+  /**
+   * `opencode --version`, bounded, never a shell, and cached for the TTL. A
+   * read that found no version is never cached, and never replaces the one the
+   * same binary answered before: a slow start is not a downgrade.
+   */
   private async probeVersion(): Promise<{ installed: boolean; version: string | null }> {
     const cached = this.cachedVersion;
     if (cached !== undefined && Date.now() - cached.at < SNAPSHOT_TTL_MS) {
       return cached.value;
     }
     const probed = await this.probeVersionUncached();
+    if (probed.installed && probed.version === null) {
+      return cached?.value.version != null ? cached.value : probed;
+    }
     this.cachedVersion = { value: probed, at: Date.now() };
     return probed;
+  }
+
+  /** `realpath:mtime:size` of the resolved binary; `null` when there is none. */
+  private async binSignature(): Promise<string | null> {
+    try {
+      const real = await realpath(await this.resolveBin());
+      const stats = await stat(real);
+      return `${real}:${Math.trunc(stats.mtimeMs)}:${stats.size}`;
+    } catch {
+      return null;
+    }
   }
 
   private async probeVersionUncached(): Promise<{ installed: boolean; version: string | null }> {
@@ -486,10 +519,14 @@ class OpenCodeAdapterImpl implements AgentAdapter {
     try {
       await withDeadline(child.exited, {
         label: "opencode --version",
-        timeoutMs: AGENT_HOST_DEADLINES.probeMs,
+        timeoutMs: VERSION_PROBE_TIMEOUT_MS,
         onTimeout: () => void child.kill().catch(() => undefined)
       });
-    } catch {
+    } catch (error) {
+      this.ctx.logger.warn("opencode --version probe failed", {
+        error: error instanceof Error ? error.message : String(error),
+        stderr: stderr.excerpt()
+      });
       return { installed: true, version: null };
     }
     const parsed = parseSemver(stdout);
@@ -513,6 +550,13 @@ class OpenCodeAdapterImpl implements AgentAdapter {
   async refreshSnapshot(input?: { cwd?: string }): Promise<ProviderSnapshot> {
     return await this.snapshotLock.run(async () => {
       const cwd = input?.cwd === undefined ? undefined : resolvePath(input.cwd);
+      const binSignature = await this.binSignature();
+      if (binSignature !== this.cachedBinSignature) {
+        this.cachedBinSignature = binSignature;
+        this.cachedSnapshot = undefined;
+        this.cachedVersion = undefined;
+        this.cachedCliInventory = undefined;
+      }
       const cached = this.cachedSnapshot;
       const fresh = cached !== undefined && Date.now() - cached.at < SNAPSHOT_TTL_MS;
       // A cwd already present is never re-probed (§4.6.4).
@@ -533,7 +577,10 @@ class OpenCodeAdapterImpl implements AgentAdapter {
           version: probe.version,
           checkedAt
         });
-        this.cachedSnapshot = { snapshot, at: Date.now() };
+        // An unread version is retried by the next refresh, not served for the TTL.
+        if (probe.version !== null) {
+          this.cachedSnapshot = { snapshot, at: Date.now() };
+        }
         return snapshot;
       }
 

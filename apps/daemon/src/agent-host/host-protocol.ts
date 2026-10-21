@@ -13,6 +13,7 @@ import { agentHostSocketPath, agentHostTokenPath } from "@orquester/config";
 import type {
   Skill,
   SlashCommand,
+  ForkHandoffSummary,
   ThreadForkStrategy,
   ThreadForkTarget,
   ThreadHead,
@@ -595,11 +596,20 @@ export interface AgentHostCapabilities {
    * box thread.
    */
   boxes?: number;
+  /**
+   * "Continue in another agent": `1` = the fork route takes
+   * {@link ForkHostThreadRequest.continuation} — a child on another adapter or account, handed a
+   * budgeted transcript of the parent. A host without it refuses another agent's fork and would
+   * fork a same-agent, other-account child natively into the wrong home, so the daemon must not
+   * send it one.
+   */
+  crossAgentFork?: number;
 }
 
 /** The capabilities this host build advertises on `/health`. */
 export const AGENT_HOST_CAPABILITIES: Readonly<Required<AgentHostCapabilities>> = Object.freeze({
   sessionProfiles: 1,
+  crossAgentFork: 1,
   // boxes:
   boxes: 1
 });
@@ -784,12 +794,32 @@ export interface ForkHostThreadRequest extends Omit<CreateHostThreadRequest, "pr
    * before the flag existed have the fork route without it.)
    */
   confirmOnly?: boolean;
+  /**
+   * "Continue in another agent": the child runs on ANOTHER agent (`refId` maps to another
+   * adapter than the parent's) or under another account of the same one, so it is never forked
+   * natively — the parent's conversation up to the fork point waits in `fork-handoff.json` as a
+   * BUDGETED transcript (`@orquester/api` `handoff.ts`) for the child's first message. With it,
+   * the child's `home` and launch fields are the request's own (never the parent's), the profile
+   * is only the one the request names (`profile` absent = Global), and `modelSelection` is
+   * required when the adapter differs. Sent only to a host advertising
+   * {@link AgentHostCapabilities.crossAgentFork}; an older host refuses another agent's fork
+   * ("A fork runs on its parent's agent.").
+   */
+  continuation?: ForkContinuation;
+}
+
+/** {@link ForkHostThreadRequest.continuation}. */
+export interface ForkContinuation {
+  /** The project's `git status --short` at the fork, read daemon-side; absent when unknown. */
+  gitStatus?: string;
 }
 
 export interface ForkHostThreadResponse {
   head: ThreadHead;
   strategy: ThreadForkStrategy;
   lineage: ThreadLineage;
+  /** A continuation's handoff: what its transcript carries. Absent otherwise and on a repeat. */
+  handoff?: ForkHandoffSummary;
 }
 
 /**

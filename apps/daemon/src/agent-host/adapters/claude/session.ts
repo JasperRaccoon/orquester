@@ -67,6 +67,8 @@ import {
 import { permissionResultForDecision } from "./decisions.ts";
 import { CLAUDE_COMPACT_DEADLINE_MS, CLAUDE_CONTEXT_USAGE_DEADLINE_MS, type ClaudeAdapterDeps } from "./deps.ts";
 import { transcriptGoalFromLastRow } from "./goal.ts";
+import { isPlainObject, readJsonObject, type ClaudeNamesFs } from "../../../agent-isolation/claude-names.ts";
+import { BoxProjectFs } from "../../../boxes/remote/fs/project-fs.ts";
 import { claudeConfigDir } from "./config-dir.ts";
 import { ClaudeGoalTranscript, locateClaudeTranscript } from "./goal-transcript.ts";
 import { createClaudeHistoryReader, type ClaudeHistoryReader } from "./history.ts";
@@ -482,8 +484,20 @@ export class ClaudeSession {
       profileLaunch !== undefined
         ? claudeProfileLaunchFiles(this.options.context.tmpDir(), this.threadId)
         : undefined;
+    // boxes: the env the CLI gets decides whether there is a NODE_OPTIONS to carry (a box chat's
+    // is the box's tooling, never the host's), and the box's project files are read in the box.
+    const settingsNodeOptions =
+      (box?.env ?? this.options.env).NODE_OPTIONS !== undefined
+        ? await claudeSettingsNodeOptions(
+            this.options.env,
+            this.options.cwd,
+            profileLaunch !== undefined,
+            box !== undefined ? new BoxProjectFs(box.launch.connection) : undefined
+          )
+        : undefined;
     const built = buildClaudeQueryOptions({
       ...(toolsLaunch !== undefined ? { sessionTools: toolsLaunch } : {}),
+      ...(settingsNodeOptions !== undefined ? { settingsNodeOptions } : {}),
       ...(profileLaunch !== undefined && profileFiles !== undefined
         ? { profile: { launch: profileLaunch, files: box !== undefined ? boxProfileFiles(profileFiles, box.launch) : profileFiles } }
         : {}),
@@ -2794,6 +2808,36 @@ export class ClaudeSession {
       this.record = { ...this.record, activeTurnId: undefined };
     }
   }
+}
+
+/**
+ * The `env.NODE_OPTIONS` the CLI would take from the chat's settings files: the last of them that
+ * sets one. A Global chat reads user < project < local; a profile chat carries the user's at the
+ * flag tier (`launch.ts`), so there it wins over project and local.
+ */
+export async function claudeSettingsNodeOptions(
+  env: Readonly<Record<string, string | undefined>>,
+  cwd: string,
+  profile: boolean,
+  /**
+   * boxes: where the project's two files are read — a box chat's project lives in its box (the
+   * host directory is an empty stub). The user file is the host account home's, the source of truth
+   * the box's copy is synced from.
+   */
+  projectFs?: ClaudeNamesFs
+): Promise<string | undefined> {
+  const user = nodePath.join(claudeConfigDir(env), "settings.json");
+  const project = nodePath.join(cwd, ".claude", "settings.json");
+  const local = nodePath.join(cwd, ".claude", "settings.local.json");
+  const read = (file: string): ReturnType<typeof readJsonObject> =>
+    file === user || projectFs === undefined ? readJsonObject(file) : readJsonObject(file, projectFs);
+  const docs = await Promise.all((profile ? [project, local, user] : [user, project, local]).map(read));
+  let value: string | undefined;
+  for (const doc of docs) {
+    const nodeOptions = isPlainObject(doc?.env) ? doc.env.NODE_OPTIONS : undefined;
+    if (typeof nodeOptions === "string") value = nodeOptions;
+  }
+  return value;
 }
 
 function errorMessage(error: unknown): string {

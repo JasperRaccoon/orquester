@@ -18,6 +18,7 @@ import {
   SUPPORTED_ATTACHMENT_IMAGE_MIME_TYPES
 } from "@orquester/api/agent-chat";
 import type { AttachmentRef } from "@orquester/api/agent-chat";
+import type { ComposerQuote } from "../../../lib/agent-chat/composer.logic";
 import { blockedProviderCommandMessage } from "./composer-menu";
 import { imageOrdinal, imagePlaceholder } from "./composer-images";
 import { parseStandaloneComposerSlashCommand } from "./composer-trigger";
@@ -525,12 +526,16 @@ export function planExternalSubmit(input: {
   return { kind: "queue", text };
 }
 
-/** A draft with neither text nor a finished attachment has nothing to send. */
+/**
+ * A draft with no text, no finished attachment and no quote has nothing to
+ * send. Quotes alone are a message: the passages are what the user asks about.
+ */
 export function hasSendableContent(input: {
   text: string;
   attachmentCount: number;
+  quoteCount?: number;
 }): boolean {
-  return input.text.trim().length > 0 || input.attachmentCount > 0;
+  return input.text.trim().length > 0 || input.attachmentCount > 0 || (input.quoteCount ?? 0) > 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -792,10 +797,15 @@ export function draftAfterSend<A extends RestorableAttachment>(input: {
  * carried, in tray order. {@link draftAfterSend} decides what that does to
  * whichever draft it reaches; {@link failedSendRestoreTarget} decides which
  * draft that is.
+ *
+ * A send that carried quotes restores them as quotes: its outcome's text is
+ * then the user's own words, without the blockquotes the send put ahead of
+ * them, and `quotes` goes back ahead of any quoted meanwhile (`mergeQuotes`).
  */
 export interface FailedSendRestore<A extends RestorableAttachment = RestorableAttachment> {
   outcome: Exclude<ComposerSendOutcome, { kind: "sent" }>;
   sent: readonly A[];
+  quotes?: readonly ComposerQuote[];
 }
 
 /**

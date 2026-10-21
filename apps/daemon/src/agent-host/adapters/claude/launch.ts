@@ -16,6 +16,8 @@
 import type { CanUseTool, Options as ClaudeQueryOptions } from "@anthropic-ai/claude-agent-sdk";
 import type { ModelSelection, ProviderModel, RuntimeMode } from "@orquester/api/agent-chat";
 
+import { isPlainObject } from "../../../agent-isolation/claude-names.ts";
+import { CLAUDE_QUESTION_PREVIEW_FORMAT } from "./questions.ts";
 import { CLAUDE_PROFILE_ENV, type ClaudeProfileLaunch, type ClaudeProfileLaunchFiles } from "./profile-launch.ts";
 import { claudeDeniedMcpServers, claudeDisallowedTools, type ClaudeSessionToolsLaunch } from "./session-tools.ts";
 import {
@@ -58,6 +60,11 @@ interface BuildClaudeQueryOptionsInput {
   executablePath: string;
   /** The complete child env, built by `support/env.ts` — never a spread. */
   env: Record<string, string>;
+  /**
+   * The `env.NODE_OPTIONS` the chat's own settings files set (the one the CLI would use), read only
+   * while `env` carries a NODE_OPTIONS: the flag-tier value below replaces it, so it goes first.
+   */
+  settingsNodeOptions?: string;
   runtimeMode: RuntimeMode;
   modelSelection?: ModelSelection;
   /** The catalogue the snapshot published, for per-model option gating. */
@@ -144,7 +151,18 @@ export function buildClaudeQueryOptions(
   // returns the raw chain of thought.
   const wantsThinkingSummaries = thinking !== false;
 
+  // The SDK deletes NODE_OPTIONS from the CLI's env (0.3.278 `sdk.mjs`), so the host's value — the
+  // plugins' tsc preload — reaches the CLI's commands, hooks and MCP servers through the flag-tier
+  // `env` instead. That tier wins per key over the settings files, so their value is kept in front.
+  const nodeOptions =
+    input.env.NODE_OPTIONS === undefined
+      ? undefined
+      : input.settingsNodeOptions !== undefined && input.settingsNodeOptions.trim().length > 0
+        ? `${input.settingsNodeOptions} ${input.env.NODE_OPTIONS}`
+        : input.env.NODE_OPTIONS;
+
   const settings: Record<string, unknown> = {
+    ...(nodeOptions !== undefined ? { env: { NODE_OPTIONS: nodeOptions } } : {}),
     ...(typeof thinking === "boolean" ? { alwaysThinkingEnabled: thinking } : {}),
     ...(wantsThinkingSummaries ? { showThinkingSummaries: true } : {}),
     ...(fastMode === true ? { fastMode: true } : {}),
@@ -218,6 +236,10 @@ export function buildClaudeQueryOptions(
     // module…") for the roster's activity line; forks the subagent's cache,
     // so the cost is small. SDK 0.3.278 `agentProgressSummaries`.
     agentProgressSummaries: true,
+    // Said explicitly rather than left to the CLI's default: the question card
+    // renders option previews in this format (`questions.ts`), and a default
+    // that moved would hand it fragments it shows as the wrong thing.
+    toolConfig: { askUserQuestion: { previewFormat: CLAUDE_QUESTION_PREVIEW_FORMAT } },
     canUseTool: input.canUseTool,
     ...(input.onUserDialog !== undefined
       ? { onUserDialog: input.onUserDialog, supportedDialogKinds: ["resume_return"] }
@@ -284,9 +306,15 @@ function buildProfileFiles(
     ...(Array.isArray(carried.deniedMcpServers) ? carried.deniedMcpServers : []),
     ...(Array.isArray(chatSettings.deniedMcpServers) ? chatSettings.deniedMcpServers : [])
   ];
+  // The chat's NODE_OPTIONS joins the carried env rather than replacing it.
+  const env = {
+    ...(isPlainObject(carried.env) ? carried.env : {}),
+    ...(isPlainObject(chatSettings.env) ? chatSettings.env : {})
+  };
   const settings: Record<string, unknown> = {
     ...carried,
     ...chatSettings,
+    ...(Object.keys(env).length > 0 ? { env } : {}),
     ...(denied.length > 0 ? { deniedMcpServers: denied } : {}),
     ...(launch.disabledPluginIds.length > 0
       ? { enabledPlugins: Object.fromEntries(launch.disabledPluginIds.map((id) => [id, false])) }

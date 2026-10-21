@@ -34,9 +34,10 @@ import type {
   BackgroundLiveness,
   LatestTurnSummary,
   ThreadSessionStatus,
+  ThreadUsageLimitNotice,
   TurnState
 } from "@orquester/api/agent-chat";
-import { AGENT_GOAL_STATUSES, SETTLED_TURN_STATES } from "@orquester/api/agent-chat";
+import { AGENT_GOAL_STATUSES, parseDelegateView, SETTLED_TURN_STATES } from "@orquester/api/agent-chat";
 import {
   agentHostExtraRoutes,
   type AgentHostPendingRequest,
@@ -102,6 +103,13 @@ interface AgentChatSummaryOptions {
    * account named, so usage follows every model response.
    */
   onUsageLimits?: (reading: ThreadUsageReading) => void;
+  /**
+   * A thread's current usage limit (`AgentHostThreadSummary.usageLimit`) on its first read and
+   * whenever it moves — a limit appearing, its row or parked state changing, or it clearing
+   * (`null`). Never called for a host older than the field. The usage-limit recovery
+   * (`limit-recovery.ts`) is the listener.
+   */
+  onUsageLimitNotice?: (threadId: string, notice: ThreadUsageLimitNotice | null) => void;
 }
 
 /** A thread's live account-usage reading, with the tab's registry entry. */
@@ -167,6 +175,8 @@ export class AgentChatSummaryService {
   private readonly pushedApprovals = new Map<string, Set<string>>();
   /** The `observedAt` of each thread's last usage reading handed on. */
   private readonly usageObservedAt = new Map<string, string>();
+  /** Each thread's last usage-limit notice handed on, as a comparable key ("" = none). */
+  private readonly limitNoticeKeys = new Map<string, string>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private polling = false;
   /** True once one poll round has completed — before that the view is unknown. */
@@ -206,6 +216,7 @@ export class AgentChatSummaryService {
   forget(threadId: string): void {
     this.threads.delete(threadId);
     this.usageObservedAt.delete(threadId);
+    this.limitNoticeKeys.delete(threadId);
   }
 
   /**
@@ -301,6 +312,7 @@ export class AgentChatSummaryService {
           }
         }
         this.threads.delete(threadId);
+        this.limitNoticeKeys.delete(threadId);
         return;
       }
       if (response.status !== 200) return;
@@ -310,6 +322,23 @@ export class AgentChatSummaryService {
     }
     this.applyFields(threadId, sanitizeFields(raw), sanitizePendingRequests(raw));
     this.applyUsageLimits(threadId, sanitizeUsageLimits(raw));
+    this.applyUsageLimitNotice(threadId, raw);
+  }
+
+  /** Hand a thread's usage-limit notice on when it moved (or on its first read). Never throws. */
+  private applyUsageLimitNotice(threadId: string, raw: unknown): void {
+    const notice = sanitizeUsageLimitNotice(raw);
+    // `undefined`: a host older than the field — nothing is known, nothing is said.
+    if (notice === undefined || !this.opts.chat.has(threadId)) return;
+    const key =
+      notice === null ? "" : JSON.stringify([notice.activityId, notice.turnId, notice.resetsAt ?? null, notice.parked]);
+    if (this.limitNoticeKeys.get(threadId) === key) return;
+    this.limitNoticeKeys.set(threadId, key);
+    try {
+      this.opts.onUsageLimitNotice?.(threadId, notice);
+    } catch (error) {
+      this.opts.logger?.warn?.("agent-chat: usage-limit listener failed", error);
+    }
   }
 
   /** Hand a thread's usage reading on once per new `observedAt`. Never throws. */
@@ -634,6 +663,31 @@ function sanitizeUsageLimits(value: unknown): AgentHostThreadUsageLimits | null 
 }
 
 /**
+ * The summary's `usageLimit`: `undefined` when the host does not send the field (older host),
+ * `null` when it says the thread is not limited (or sent a malformed notice — dropped, never
+ * trusted: the recovery would schedule a resume on it), else the notice.
+ */
+export function sanitizeUsageLimitNotice(value: unknown): ThreadUsageLimitNotice | null | undefined {
+  if (!value || typeof value !== "object" || !("usageLimit" in value)) return undefined;
+  const raw = (value as { usageLimit?: unknown }).usageLimit;
+  if (raw === undefined) return undefined;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const row = raw as Record<string, unknown>;
+  if (typeof row.activityId !== "string" || row.activityId.length === 0 || row.activityId.length > 200) return null;
+  if (row.turnId !== null && (typeof row.turnId !== "string" || row.turnId.length === 0 || row.turnId.length > 200)) return null;
+  if (typeof row.at !== "string" || !Number.isFinite(Date.parse(row.at))) return null;
+  const resetsAt = typeof row.resetsAt === "string" && Number.isFinite(Date.parse(row.resetsAt)) ? row.resetsAt : undefined;
+  return {
+    activityId: row.activityId,
+    turnId: row.turnId as string | null,
+    ...(resetsAt !== undefined ? { resetsAt } : {}),
+    message: typeof row.message === "string" ? row.message.slice(0, 500) : "",
+    at: row.at,
+    parked: row.parked === true
+  };
+}
+
+/**
  * Keep only the seven §6.4 fields (goals §4.7 added `goal`), each only when
  * it has the right shape.
  *
@@ -683,6 +737,13 @@ function sanitizeFields(value: unknown): AgentChatSessionSummaryFields {
   } else {
     const goal = sanitizeGoal(row.goal);
     if (goal !== null) fields.goal = goal;
+  }
+  // A delegated child's model and latest word (`delegation.ts`), read field-wise like the rest.
+  if (row.delegateView === null) {
+    fields.delegateView = null;
+  } else {
+    const view = parseDelegateView(row.delegateView);
+    if (view !== undefined) fields.delegateView = view;
   }
   return fields;
 }

@@ -246,6 +246,25 @@ export interface UserInputQuestionOption {
   label: string;
   description: string;
   value?: string;
+  /**
+   * Content shown beside the options while this one is focused — a mockup, a
+   * code snippet, a configuration example. Claude's `AskUserQuestion` option
+   * `preview` (SDK 0.3.278 `sdk-tools.d.ts`); absent on every other provider.
+   */
+  preview?: string;
+  /**
+   * How {@link preview} is written: the format the session asked the model
+   * for (Claude's `toolConfig.askUserQuestion.previewFormat`). Absent means
+   * `markdown`, the CLI's own default.
+   */
+  previewFormat?: UserInputPreviewFormat;
+}
+
+/** The two `previewFormat`s Claude's SDK accepts. */
+export type UserInputPreviewFormat = "markdown" | "html";
+
+export function isUserInputPreviewFormat(value: unknown): value is UserInputPreviewFormat {
+  return value === "markdown" || value === "html";
 }
 
 /**

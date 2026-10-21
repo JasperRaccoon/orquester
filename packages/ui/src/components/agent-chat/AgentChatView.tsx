@@ -3,6 +3,7 @@ import { flushSync } from "react-dom";
 
 import { DEFAULT_RUNTIME_MODE, SETTLED_TURN_STATES, messageStreamingContext, startedTurns } from "@orquester/api/agent-chat";
 import type { GoalAction } from "@orquester/api/agent-chat";
+import type { ForkSessionRequest } from "@orquester/api";
 
 import { shortAccountLabel } from "../../lib/account-label";
 import {
@@ -93,6 +94,8 @@ import {
   type DrillInMemoryEntry
 } from "./roster/drill-in-memory";
 import { AgentRoster } from "./roster/AgentRoster";
+import { useShallow } from "zustand/react/shallow";
+import { delegatedChildrenOf, delegateTabView, isDelegateLive } from "../../lib/agent-chat/delegates.logic";
 import { rosterKindCounts } from "./roster/roster-summary";
 import { EmptyThreadPanel } from "./EmptyThreadPanel";
 import { ChatLoadingScreen } from "./ChatLoadingScreen";
@@ -107,6 +110,7 @@ const ROSTER_COLLAPSED_KEY = "orquester.chat.roster-collapsed";
 import { ChatBannerDock } from "./banners/ChatBannerDock";
 import type { SecretRequestAnswer } from "./banners/SecretRequestCard";
 import { useSecretRequests } from "./banners/use-secret-requests";
+import { useUsageLimitNotices } from "./banners/use-usage-limit-notices";
 import { markSecretRequestClosed } from "../../lib/agent-chat/secret-requests";
 import { ChatComposer } from "./composer/ChatComposer";
 import { ChatErrorBoundary } from "./ChatErrorBoundary";
@@ -116,6 +120,8 @@ import { GOAL_ACTION_TEXT, goalActions, goalActionsNote } from "./status/goal-ch
 import { ChatTimeline } from "./timeline/ChatTimeline";
 import type { TimelineForkInput } from "./timeline/context";
 import { ThreadLineageBar, type LineageNotice } from "./ThreadLineageBar";
+import { ContinueInAgentDialog } from "./ContinueInAgentDialog";
+import { continueHandoffPreview } from "../../lib/agent-chat/continue-in.logic";
 import { ThreadGoneNotice } from "./ThreadGoneNotice";
 import {
   goneDisplay,
@@ -364,6 +370,13 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
             }
           ],
     [secretNotice, sessionId]
+  );
+  // Usage-limit recovery: the limited chat's banner and the "switched account" notice, both off
+  // the session summary the daemon keeps current.
+  const usageLimitNotices = useUsageLimitNotices({ session, api, accounts: agentAccounts?.accounts });
+  const dockNotices = React.useMemo(
+    () => (usageLimitNotices.length === 0 ? secretNotices : [...usageLimitNotices, ...(secretNotices ?? [])]),
+    [secretNotices, usageLimitNotices]
   );
 
   // --- the composer overlay's published height -----------------------------
@@ -724,6 +737,62 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   // only the door and its state. A failure lands on the row in words — the
   // action never rejects — and a search hit's reveal scrolls a row into view.
   const historyHasOlder = !paintOnly && canLoadOlderHistory(slice.history);
+
+  // --- "Continue in another agent…" (thread lineage §6) ---------------------
+  // From a message (beside "Fork from here") or the whole thread (the tab's menu): the picker
+  // forks onto the agent, model and account chosen — natively for the same agent and account,
+  // else as a budgeted transcript handoff — and the store opens the new tab.
+  const [continueFrom, setContinueFrom] = React.useState<{ input: TimelineForkInput | null } | null>(null);
+  React.useEffect(() => setContinueFrom(null), [sessionId]);
+  // The picker is portaled over the whole window: leaving this tab closes it, as the popovers do.
+  React.useEffect(() => {
+    if (active === false) setContinueFrom(null);
+  }, [active]);
+  const openContinueIn = React.useCallback((input: TimelineForkInput) => setContinueFrom({ input }), []);
+  const continueInRequest = useAppStore((s) => s.continueInRequest);
+  const clearContinueInRequest = useAppStore((s) => s.clearContinueInRequest);
+  React.useEffect(() => {
+    if (paintOnly || continueInRequest?.sessionId !== sessionId) return;
+    clearContinueInRequest();
+    setContinueFrom({ input: null });
+  }, [continueInRequest, sessionId, paintOnly, clearContinueInRequest]);
+  const continueTarget = React.useMemo(
+    () =>
+      continueFrom?.input
+        ? {
+            messageId: continueFrom.input.messageId,
+            ...(continueFrom.input.turnId !== null ? { turnId: continueFrom.input.turnId } : {}),
+            role: continueFrom.input.role
+          }
+        : {},
+    [continueFrom]
+  );
+  const continuePreview = React.useMemo(
+    () => (continueFrom ? continueHandoffPreview({ turns: slice.turns, items: slice.entries }, continueTarget) : null),
+    [continueFrom, continueTarget, slice.turns, slice.entries]
+  );
+  const continueIn = React.useCallback(
+    async (fields: Pick<ForkSessionRequest, "refId" | "accountId" | "modelSelection">): Promise<void> => {
+      const input = continueFrom?.input ?? null;
+      setLineageNotice(null);
+      const result = await forkChatTab(sessionId, { ...continueTarget, ...fields });
+      if (input?.role === "user" && input.text.trim().length > 0) {
+        deliverToComposerDraft(result.session.id, { text: input.text, attachments: [] });
+      }
+      activateTab(result.session.id);
+    },
+    [continueFrom, continueTarget, forkChatTab, sessionId, activateTab]
+  );
+  const continueSource = React.useMemo(
+    () => ({
+      refId: session.refId,
+      adapter: provider?.id ?? null,
+      accountId: slice.head?.accountId ?? session.accountId ?? "",
+      modelSelection: slice.head?.modelSelection ?? null,
+      title: session.title
+    }),
+    [session.refId, session.accountId, session.title, provider?.id, slice.head?.accountId, slice.head?.modelSelection]
+  );
   const loadOlderHistory = React.useCallback(
     () => dispatch(() => actions.loadOlderHistory()),
     [actions]
@@ -996,6 +1065,12 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
     tokensUsed: slice.contextWindow?.usedTokens ?? null,
     model: slice.head?.modelSelection.model ?? null
   };
+  // The chats this one delegated tasks to, live off their tab records: the roster lists them
+  // beside its own agents. Docked while any of them works, or while this thread's own turn runs.
+  const delegatedTabs = useAppStore(useShallow((state) => delegatedChildrenOf(state.sessions, sessionId)));
+  const rosterDelegates = React.useMemo(() => delegatedTabs.map(delegateTabView), [delegatedTabs]);
+  const rosterHasDelegates =
+    rosterDelegates.length > 0 && (rosterMain.turnActive || rosterDelegates.some((view) => isDelegateLive(view.status)));
   // --- the read-only viewer for a full tool output --------------------------
   // A §6.3 read with no store slice behind it: the timeline asks, the shell
   // fetches, and the answer is shown in the app's modal rather than folded
@@ -1189,6 +1264,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
               // §5.5 flow, ending with the message back in the composer.
               onRevert={paintOnly ? noop : rewindTo}
               onFork={paintOnly ? undefined : forkFrom}
+              onContinueIn={paintOnly ? undefined : openContinueIn}
               revertBusy={revertBusy}
               startedTurnCount={startedTurnCount}
               onOpenTurnDiff={paintOnly ? noop : openTurnDiff}
@@ -1316,9 +1392,13 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 active={active}
                 entries={paintOnly ? undefined : slice.entries}
                 planTitle={planFollowUp ? proposedPlanTitle(planFollowUp.planMarkdown) : null}
-                notices={paintOnly ? undefined : secretNotices}
+                notices={paintOnly ? undefined : dockNotices}
                 secretRequests={paintOnly ? undefined : secretRequests}
                 onAnswerSecret={paintOnly ? undefined : answerSecret}
+                // A question's markdown resolves images and opens file links
+                // as the timeline's messages do.
+                projectPath={projectPath}
+                onOpenFile={paintOnly ? noop : openFile}
               />
             </div>
             <div className="pointer-events-auto relative z-10 mx-auto w-full min-w-0 max-w-3xl px-3 sm:px-5">
@@ -1375,7 +1455,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
               entirely when there is nothing to list, so an ordinary thread
               gives the timeline every pixel.
             */}
-            {roster.panel.hasAgents && !paintOnly ? (
+            {(roster.panel.hasAgents || rosterHasDelegates) && !paintOnly ? (
               <div className="pointer-events-auto mx-auto w-full min-w-0 max-w-3xl px-3 sm:px-5">
                 <AgentRoster
                   sessionId={sessionId}
@@ -1394,6 +1474,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                   canStopTasks={provider?.capabilities?.supportsTaskStop === true}
                   stoppingTaskIds={roster.stoppingTaskIds}
                   onStopTask={(taskId) => dispatch(() => actions.stopTask({ taskId }))}
+                  delegates={rosterDelegates}
                 />
               </div>
             ) : null}
@@ -1423,6 +1504,22 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
         </div>
       </Modal>
       <TurnDiffModal request={turnDiff} onClose={closeTurnDiff} />
+      <ContinueInAgentDialog
+        open={continueFrom !== null && !paintOnly}
+        onClose={() => setContinueFrom(null)}
+        source={continueSource}
+        pointLabel={
+          continueFrom?.input
+            ? continueFrom.input.role === "user"
+              ? "from before this message"
+              : "through this reply"
+            : "through the latest finished turn"
+        }
+        preview={continuePreview}
+        moreOlder={historyHasOlder}
+        onSubmit={continueIn}
+        errorText={lineageErrorText}
+      />
     </div>
   );
 }

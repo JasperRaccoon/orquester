@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { Dot, Workflow as WorkflowIcon } from "lucide-react";
 import { cn } from "../../lib/cn";
 import { SessionStatusDot } from "../ui/session-status-dot";
+import { LimitedMarker } from "../ui/limited-marker";
 import { ContextMenu } from "../ui/context-menu";
 import {
   resolveSidebarThreadStatus,
@@ -132,6 +133,7 @@ const AgentCard: React.FC<{
             className="h-1.5 w-1.5 shrink-0 rounded-full bg-neutral-300"
           />
         )}
+        <LimitedMarker session={entry.session} />
         <SessionStatusDot
           sessionId={entry.session.id}
           status={entry.session.status}

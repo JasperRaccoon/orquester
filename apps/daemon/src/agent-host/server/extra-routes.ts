@@ -12,7 +12,8 @@ import type {
   AccountHomeKind,
   AgentChatSessionSummaryFields,
   McpAppOperation,
-  ProviderUsageWindow
+  ProviderUsageWindow,
+  ThreadUsageLimitNotice
 } from "@orquester/api/agent-chat";
 
 const thread = (threadId: string): string => `/threads/${encodeURIComponent(threadId)}`;
@@ -76,6 +77,13 @@ export interface AgentHostThreadSummary extends AgentChatSessionSummaryFields {
    * older than the field, and until the thread's provider reports one.
    */
   usageLimits?: AgentHostThreadUsageLimits | null;
+  /**
+   * The thread's CURRENT usage limit (`usageLimitNoticeOf` over its newest rows): the account
+   * ran out of quota and nothing has happened since — no user message, no progress, no newer
+   * turn. `null` when the thread is not limited. The daemon's usage-limit recovery reads it on
+   * every poll. Absent from a host older than the field (the daemon then does nothing).
+   */
+  usageLimit?: ThreadUsageLimitNotice | null;
 }
 
 /** One thread's latest live account usage (see {@link AgentHostThreadSummary.usageLimits}). */

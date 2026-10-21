@@ -37,9 +37,24 @@ import {
 } from "./roster-summary";
 import { AgentRosterRow, BackgroundShellRow, RosterMainRow } from "./AgentRosterRow";
 import { WorkflowGroup } from "./WorkflowGroup";
+import { DelegateRosterRow } from "./DelegateRosterRow";
 import { taskStopControl } from "../../../lib/agent-chat/roster.logic";
+import { delegatePillLabel, isDelegateLive, type DelegateChildView } from "../../../lib/agent-chat/delegates.logic";
+import { lineageIcon } from "../LineageMark";
 
 const NO_TASK_IDS: readonly string[] = [];
+const NO_DELEGATES: readonly DelegateChildView[] = [];
+
+/** The delegated chats' rows, live first: a finished one follows the agent rows' exit (`finished`). */
+function delegateRosterRows(
+  delegates: readonly DelegateChildView[],
+  finished: FinishedRowsPhase
+): Array<{ view: DelegateChildView; fading: boolean }> {
+  const live = delegates.filter((view) => isDelegateLive(view.status)).map((view) => ({ view, fading: false }));
+  if (finished === "removed") return live;
+  const settled = delegates.filter((view) => !isDelegateLive(view.status)).map((view) => ({ view, fading: finished === "fading" }));
+  return [...live, ...settled];
+}
 
 /** Matches the row's `duration-300` opacity transition. */
 export const ROSTER_FADE_MS = 300;
@@ -137,7 +152,8 @@ export function AgentRoster({
   onCollapsedChange,
   canStopTasks = false,
   stoppingTaskIds = NO_TASK_IDS,
-  onStopTask
+  onStopTask,
+  delegates = NO_DELEGATES
 }: AgentRosterProps): React.ReactElement | null {
   const phase = useFinishedRowsPhase(main?.turnActive ?? false);
   // Without a `main` row there is no turn signal, so there is nothing to fade
@@ -156,13 +172,17 @@ export function AgentRoster({
   const shellSection = shellSectionLabel(counts);
 
   const hasWorkflows = panel.workflows.length > 0;
-  if (!main && selection.rows.length === 0 && !hasWorkflows) return null;
+  const delegateRows = React.useMemo(() => delegateRosterRows(delegates, finished), [delegates, finished]);
+  const delegatePill = delegatePillLabel(delegates);
+  if (!main && selection.rows.length === 0 && !hasWorkflows && delegateRows.length === 0) return null;
 
   const visuals = main ? mainRowVisuals(main) : null;
   // "Working" counts agents only: a running shell is named by its own section
   // and by the folded label, never blended into the fleet's number.
   const workingCount = counts.liveAgents;
-  const showFooter = selection.hiddenCount > 0 || expanded || workingCount > 0 || Boolean(onCollapsedChange);
+  const showFooter =
+    selection.hiddenCount > 0 || expanded || workingCount > 0 || Boolean(onCollapsedChange) || delegatePill !== null;
+  const DelegateIcon = lineageIcon("delegate");
 
   return (
     <section
@@ -215,12 +235,31 @@ export function AgentRoster({
           />
         ))}
 
+        {delegateRows.length > 0 ? (
+          <div
+            data-roster-delegates="true"
+            className={cn(
+              "flex items-center gap-1.5 px-1.5 pb-0.5 pt-2 text-[10px] font-medium uppercase tracking-wider text-neutral-500",
+              (main || agentRows.length > 0 || hasWorkflows) && "mt-1 border-t border-neutral-800/80"
+            )}
+          >
+            <DelegateIcon size={11} strokeWidth={2} aria-hidden className="text-neutral-600" />
+            <span>Delegated chats</span>
+            {delegatePill?.live ? (
+              <span className="ac-tabular font-mono font-normal normal-case text-info-300">· {delegatePill.label}</span>
+            ) : null}
+          </div>
+        ) : null}
+        {delegateRows.map((row) => (
+          <DelegateRosterRow key={row.view.ref.callId} view={row.view} fading={row.fading} />
+        ))}
+
         {shellRows.length > 0 ? (
           <div
             data-roster-shells="true"
             className={cn(
               "flex items-center gap-1.5 px-1.5 pb-0.5 pt-2 text-[10px] font-medium uppercase tracking-wider text-neutral-500",
-              (main || agentRows.length > 0 || hasWorkflows) && "mt-1 border-t border-neutral-800/80"
+              (main || agentRows.length > 0 || hasWorkflows || delegateRows.length > 0) && "mt-1 border-t border-neutral-800/80"
             )}
           >
             <Terminal size={11} strokeWidth={2} aria-hidden className="text-neutral-600" />
@@ -303,6 +342,19 @@ export function AgentRoster({
             </button>
           ) : null}
           <span className="ml-auto flex items-center gap-2">
+            {delegatePill ? (
+              <span
+                data-delegate-pill="true"
+                title={delegatePill.live ? "Delegated chats still working" : "Every delegated chat has finished"}
+                className={cn(
+                  "ac-tabular inline-flex h-4 items-center gap-1 rounded-full border px-1.5 text-[10px]",
+                  delegatePill.live ? "border-info/40 text-info-300" : "border-neutral-800 text-neutral-500"
+                )}
+              >
+                <DelegateIcon size={10} strokeWidth={2} aria-hidden />
+                {delegatePill.label}
+              </span>
+            ) : null}
             {!onCollapsedChange && workingCount > 0 ? (
               <span className="ac-tabular text-info-300">● {workingCount} working</span>
             ) : null}

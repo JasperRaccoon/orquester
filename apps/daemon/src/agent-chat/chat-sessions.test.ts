@@ -177,6 +177,28 @@ test("the derived §6.4 fields publish only when one actually moved", () => {
   assert.equal(updates[1].hasPendingApprovals, true);
 });
 
+test("a delegated child's view rides the tab: republished when its model or preview text moves, cleared with null", () => {
+  const chat = chatManager();
+  seed(chat, "t1", 0);
+  const updates: SessionSummary[] = [];
+  chat.lifecycle.on("updated", (s: SessionSummary) => updates.push(s));
+  const view = { model: "gpt-5", preview: { kind: "progress" as const, text: "Reading the parser", at: "2026-10-20T10:00:00.000Z" } };
+  assert.ok(chat.applyFields("t1", { chatSessionStatus: "running", delegateView: view }));
+  assert.deepEqual(chat.get("t1")?.delegateView, view);
+  // The same words written later (a streaming message moves `at` alone): no broadcast.
+  assert.equal(
+    chat.applyFields("t1", { chatSessionStatus: "running", delegateView: { ...view, preview: { ...view.preview, at: "2026-10-20T10:00:05.000Z" } } }),
+    null
+  );
+  assert.ok(chat.applyFields("t1", { chatSessionStatus: "running", delegateView: { ...view, preview: { ...view.preview, text: "Ran the tests" } } }));
+  assert.ok(chat.applyFields("t1", { chatSessionStatus: "running", delegateView: { ...view, model: "gpt-5-mini" } }));
+  // A host that stops sending it: cleared with an explicit null (clients merge field-wise).
+  assert.ok(chat.applyFields("t1", { chatSessionStatus: "running" }));
+  assert.equal(chat.get("t1")?.delegateView, null);
+  assert.equal(chat.applyFields("t1", { chatSessionStatus: "running" }), null, "null and absent are one fact");
+  assert.equal(updates.length, 4);
+});
+
 test("the goal rides the tab and republishes only when it moves (goals §4.7)", () => {
   const chat = chatManager();
   seed(chat, "t1", 0);
@@ -465,4 +487,50 @@ test("a chat running through an Agent Profile home still pins its account for th
   assert.deepEqual([...chat.liveAccountIds()], ["acc-9"]);
   chat.setProfile("p1", "research");
   assert.deepEqual([...chat.liveAccountIds()], ["acc-9"], "a profile switch is not an account switch");
+});
+
+test("a chat's usage-limit state is persisted on its record, keeps a newer daemon's fields, and clears with an explicit null", () => {
+  const limit = {
+    noticeId: "a1",
+    turnId: "t1",
+    detectedAt: "2026-10-20T12:00:00.000Z",
+    limitedAt: "2026-10-20T12:00:00.000Z",
+    resetAt: "2026-10-20T15:40:00.000Z",
+    accountId: "acc-1",
+    parked: false,
+    autoResume: "armed" as const,
+    resumeAt: "2026-10-20T15:40:45.000Z"
+  };
+  const parsed = parseSessionsConfig({
+    sessions: [
+      {
+        id: "t1",
+        title: "chat",
+        order: 0,
+        projectPath: "/w/p",
+        refId: "claude",
+        kind: "agent-chat",
+        cwd: "/w/p",
+        createdAt: "2026-10-20T11:00:00.000Z",
+        chat: { threadId: "t1", accountId: "acc-1", home: "account", lastSeq: 0, usageLimit: { ...limit, newer: true } }
+      }
+    ]
+  });
+  let persisted = 0;
+  const chat = chatManager(() => (persisted += 1));
+  chat.adopt(parsed.sessions);
+  assert.deepEqual(chat.get("t1")?.usageLimit, limit, "the summary carries the known fields only");
+  chat.setUsageLimit("t1", { ...limit, autoResume: "off", resumeAt: null, userCancelled: true });
+  const record = chat.records()[0]?.chat?.usageLimit as Record<string, unknown> | undefined;
+  assert.equal(record?.autoResume, "off");
+  assert.equal(record?.newer, true, "an unknown field survives the rewrite");
+  assert.equal(persisted, 1);
+  assert.equal(chat.setUsageLimit("t1", { ...limit, autoResume: "off", resumeAt: null, userCancelled: true }), null, "no change, no update");
+  chat.setUsageLimit("t1", null);
+  assert.equal(chat.get("t1")?.usageLimit, null);
+  assert.equal(chat.records()[0]?.chat?.usageLimit, undefined);
+  chat.setLimitFailover("t1", { fromAccountId: "acc-1", toAccountId: "acc-2", at: "2026-10-20T12:01:00.000Z", automatic: true });
+  assert.equal(chat.limitFailoverOf("t1")?.toAccountId, "acc-2");
+  chat.setLimitFailover("t1", null);
+  assert.equal(chat.get("t1")?.limitFailover, null);
 });

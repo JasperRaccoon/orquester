@@ -1,5 +1,5 @@
 import React from "react";
-import { ArrowUp, Clock, GitFork, GitMerge, Undo2, X } from "lucide-react";
+import { ArrowRightLeft, ArrowUp, Clock, GitFork, GitMerge, Undo2, X } from "lucide-react";
 
 import type { AttachmentRef } from "@orquester/api";
 import {
@@ -17,6 +17,7 @@ import { cn } from "../../../../lib/cn";
 import { PROMPT_CUT_AT_REST_NOTE, type AgentPrompt } from "../../../../lib/agent-chat/agent-prompt.logic";
 import type { AgentChatTimelineRow } from "../../../../lib/agent-chat/contracts";
 import { ComposerPopover } from "../../composer/ComposerPopover";
+import { splitLeadingQuotes } from "../../composer/composer-quotes";
 import {
   REWIND_BUSY_TITLE,
   REWIND_DISABLED_EXPLAINS_ITSELF,
@@ -26,16 +27,19 @@ import {
 import { ChatIconButton, CopyButton, DisclosureChevron, ShimmerText } from "../../primitives";
 import { useTimelineRowContext } from "../context";
 import { ChatMarkdown } from "../markdown/ChatMarkdown";
+import { QUOTE_SOURCE_ATTR } from "../quote-selection";
+import { splitForgeLinks, type ForgeTextRun } from "../../../../lib/github-links/text-links";
+import { ForgeLinkPill } from "../../forge-links/ForgeLinkPill";
 import { queuedStatusLabel, shouldClampUserMessage } from "../row-format";
-import { splitSkillMentions } from "../row-chrome";
+import { splitSkillMentions, type MessageTextRun } from "../row-chrome";
 import { formatRowTimestamp, formatRowTimestampTooltip } from "../timestamp";
 
 type Row<K extends AgentChatTimelineRow["kind"]> = Extract<AgentChatTimelineRow, { kind: K }>;
 
 /**
  * The caption over a message another chat sent (unified MCP §8.2): how it came — sent, opened,
- * delegated, or a reply to this chat's own message — and from which chat (and project, when the
- * v2 header names one).
+ * delegated, a reply to this chat's own message, or Orquester's notice that a task it delegated
+ * needs input — and from which chat (and project, when the v2 header names one).
  */
 export function threadMessageCaption(message: Pick<ParsedThreadMessage, "origin" | "fromTitle" | "fromProject">): string {
   const verb =
@@ -45,7 +49,9 @@ export function threadMessageCaption(message: Pick<ParsedThreadMessage, "origin"
         ? "Opened by"
         : message.origin === "reply"
           ? "Reply from"
-          : "Sent by";
+          : message.origin === "attention"
+            ? "Needs input in"
+            : "Sent by";
   return `${verb} “${message.fromTitle}”${message.fromProject ? ` · ${message.fromProject}` : ""}`;
 }
 
@@ -106,12 +112,24 @@ function AttachmentChips({ attachments }: { attachments: readonly AttachmentRef[
  */
 function MessageBodyText({ text }: { text: string }): React.ReactElement {
   const { skills } = useTimelineRowContext();
-  const runs = React.useMemo(() => splitSkillMentions(text, skills), [text, skills]);
-  if (runs.length === 1) return <>{text}</>;
+  // GitHub links first (they are pills, as in assistant markdown), then skill mentions in the rest.
+  const runs = React.useMemo<Array<MessageTextRun & ForgeTextRun>>(
+    () => splitForgeLinks(text).flatMap((run) => (run.link ? [run] : splitSkillMentions(run.text, skills))),
+    [text, skills]
+  );
+  if (runs.length === 1 && !runs[0]?.link && runs[0]?.skill === undefined) return <>{text}</>;
   return (
     <>
       {runs.map((run, index) =>
-        run.skill === undefined ? (
+        run.link ? (
+          <ForgeLinkPill
+            // eslint-disable-next-line react/no-array-index-key
+            key={index}
+            link={run.link}
+            // The bubble is neutral-800 already; a darker wash keeps the pill visible on it.
+            className="border-neutral-700 bg-neutral-900/60 hover:bg-neutral-900"
+          />
+        ) : run.skill === undefined ? (
           // eslint-disable-next-line react/no-array-index-key
           <React.Fragment key={index}>{run.text}</React.Fragment>
         ) : (
@@ -217,26 +235,70 @@ function ForkFromHereButton({
   role: "user" | "assistant";
   text: string;
 }): React.ReactElement | null {
-  const { onFork } = useTimelineRowContext();
+  const { onFork, onContinueIn } = useTimelineRowContext();
   // One fork per click: held until the daemon answered, so a double click
   // never opens two tabs (the view also refuses a second fork in flight).
   const [busy, setBusy] = React.useState(false);
   if (!onFork) return null;
   const label = role === "user" ? "Fork from before this message" : "Fork from here";
   return (
-    <ChatIconButton
-      size="micro"
-      label={label}
-      disabled={busy}
-      aria-busy={busy || undefined}
-      onClick={() => {
-        if (busy) return;
-        setBusy(true);
-        void Promise.resolve(onFork({ messageId, turnId, role, text })).finally(() => setBusy(false));
-      }}
-    >
-      <GitFork size={12} strokeWidth={1.8} aria-hidden />
-    </ChatIconButton>
+    <>
+      <ChatIconButton
+        size="micro"
+        label={label}
+        disabled={busy}
+        aria-busy={busy || undefined}
+        onClick={() => {
+          if (busy) return;
+          setBusy(true);
+          void Promise.resolve(onFork({ messageId, turnId, role, text })).finally(() => setBusy(false));
+        }}
+      >
+        <GitFork size={12} strokeWidth={1.8} aria-hidden />
+      </ChatIconButton>
+      {/* The same cut in another agent, model or account — the picker says what it carries. */}
+      {onContinueIn ? (
+        <ChatIconButton
+          size="micro"
+          label={role === "user" ? "Continue in another agent from before this message…" : "Continue in another agent…"}
+          aria-haspopup="dialog"
+          disabled={busy}
+          onClick={() => onContinueIn({ messageId, turnId, role, text })}
+        >
+          <ArrowRightLeft size={12} strokeWidth={1.8} aria-hidden />
+        </ChatIconButton>
+      ) : null}
+    </>
+  );
+}
+
+/**
+ * A user message that opens with blockquotes — the passages quoted from the
+ * agent's replies, which a send puts ahead of the user's words
+ * (`composeQuotedPrompt`) — shows them as quotes: each its own block, rendered
+ * as the markdown it is (a quoted code block stays a code block), and the
+ * user's own text under them as the bubble always shows it. A message that
+ * does not open that way is the bubble's plain text.
+ */
+function QuotedBodyText({ text }: { text: string }): React.ReactElement {
+  const { onOpenFile } = useTimelineRowContext();
+  const split = React.useMemo(() => splitLeadingQuotes(text), [text]);
+  if (split.quotes.length === 0) return <MessageBodyText text={text} />;
+  return (
+    <>
+      {split.quotes.map((quote, index) => (
+        <blockquote
+          // A message's quotes never reorder.
+          // eslint-disable-next-line react/no-array-index-key
+          key={index}
+          data-user-quote="true"
+          className="mb-2 whitespace-normal border-l-2 border-neutral-600 pl-3 last:mb-0"
+        >
+          <ChatMarkdown text={quote} onOpenFile={onOpenFile} className="text-[13px] text-neutral-300" />
+        </blockquote>
+      ))}
+      {split.body.length > 0 ? <MessageBodyText text={split.body} /> : null}
+    </>
   );
 }
 
@@ -251,13 +313,16 @@ function ClampedBubbleText({
   text,
   showLabel,
   onShowFull,
-  mono = false
+  mono = false,
+  quotes = false
 }: {
   text: string;
   showLabel: string;
   onShowFull?: (() => void) | undefined;
   /** Code, not prose: a workflow's script. */
   mono?: boolean;
+  /** The user's own message: blockquotes it opens with show as quotes (`QuotedBodyText`). */
+  quotes?: boolean;
 }): React.ReactElement {
   const [expanded, setExpanded] = React.useState(false);
   const clampable = onShowFull !== undefined || shouldClampUserMessage(text);
@@ -272,7 +337,7 @@ function ClampedBubbleText({
             "max-h-44 overflow-hidden [mask-image:linear-gradient(to_bottom,black_calc(100%-1.75rem),transparent)]"
         )}
       >
-        <MessageBodyText text={text} />
+        {quotes && !mono ? <QuotedBodyText text={text} /> : <MessageBodyText text={text} />}
       </div>
       {clampable ? (
         <button
@@ -340,7 +405,11 @@ export const UserMessageRow = React.memo(function UserMessageRow({
             longer reads (an agent's scheduled task from before scheduling was removed). */}
         <AuthorHeading>{fromThread || markedThread ? "Another chat" : fromOrquester ? "Orquester" : "You"}</AuthorHeading>
         {attachments.length > 0 ? <AttachmentChips attachments={attachments} /> : null}
-        <ClampedBubbleText text={merged ? merged.body : fromThread ? fromThread.body : text} showLabel="Show full message" />
+        <ClampedBubbleText
+          text={merged ? merged.body : fromThread ? fromThread.body : text}
+          showLabel="Show full message"
+          quotes
+        />
       </div>
       <div
         className="ac-reveal ac-tabular flex w-full max-w-[80%] items-center justify-end gap-2 pe-1 text-xs"
@@ -462,11 +531,15 @@ export const AssistantMessageRow = React.memo(function AssistantMessageRow({
   return (
     <div className="group/assistant relative min-w-0 px-1 py-0.5">
       <AuthorHeading>Agent</AuthorHeading>
-      <ChatMarkdown
-        text={text}
-        streaming={streaming}
-        onOpenFile={ctx.onOpenFile}
-      />
+      {/* The body a selection may be quoted from (`QuoteSelectionToolbar`) —
+          the reply's own text, never the placeholder for an empty one. */}
+      <div {...(row.message.text ? { [QUOTE_SOURCE_ATTR]: row.message.id } : {})}>
+        <ChatMarkdown
+          text={text}
+          streaming={streaming}
+          onOpenFile={ctx.onOpenFile}
+        />
+      </div>
     </div>
   );
 });
@@ -600,7 +673,7 @@ export const QueuedMessageRow = React.memo(function QueuedMessageRow({
       <div className="max-w-[80%] rounded-2xl border border-dashed border-neutral-700 p-3 text-neutral-300">
         {text.length > 0 ? (
           <div className="whitespace-pre-wrap text-sm leading-relaxed [overflow-wrap:anywhere]">
-            <MessageBodyText text={text} />
+            <QuotedBodyText text={text} />
           </div>
         ) : null}
         {attachmentCount > 0 || contextCount > 0 ? (

@@ -8,6 +8,8 @@ import test from "node:test";
 
 import {
   attachmentFileExtension,
+  attachmentFileName,
+  attachmentFileNameCandidates,
   createAttachmentId,
   parseAttachmentFileExtension,
   parseAttachmentIdFromRelativePath,
@@ -52,8 +54,18 @@ test(".part is reserved, so a stored archive.part becomes .bin", () => {
   assert.equal(attachmentFileExtension("weird.reallylongextension"), ".bin");
 });
 
+test("an id is stored without doubling its extension", () => {
+  assert.equal(attachmentFileName(`t1-${UUID}-txt`), `t1-${UUID}.txt`);
+  assert.deepEqual(attachmentFileNameCandidates(`t1-${UUID}-txt`), [
+    `t1-${UUID}.txt`,
+    `t1-${UUID}-txt.txt`
+  ]);
+});
+
 test("an id is recovered from a stored file name", () => {
+  assert.equal(parseAttachmentIdFromRelativePath(`t1-${UUID}.png`), `t1-${UUID}-png`);
   assert.equal(parseAttachmentIdFromRelativePath(`t1-${UUID}-png.png`), `t1-${UUID}-png`);
+  assert.equal(parseAttachmentIdFromRelativePath(`t1-${UUID}.html`), `t1-${UUID}-html`);
   assert.equal(parseAttachmentIdFromRelativePath("noextension"), null);
   assert.equal(parseAttachmentIdFromRelativePath("dir/file.png"), null);
 });

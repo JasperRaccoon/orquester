@@ -21,11 +21,13 @@
  */
 
 import assert from "node:assert/strict";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
 import type { AdapterContext } from "../../adapter.ts";
 import { createOpenCodeAdapter } from "./index.ts";
+import { MINIMUM_OPENCODE_VERSION } from "./semver.ts";
 import { makePeer, type Peer } from "./testing/peer.ts";
 
 function peerCtx(
@@ -197,6 +199,48 @@ test("E9: a catalogue failure degrades the snapshot while retaining available sk
     assert.deepEqual(snapshot.models, []);
     assert.equal(snapshot.status, "degraded");
     assert.ok(snapshot.skills.some((skill) => skill.name === "review"));
+  } finally {
+    await adapter.stopAll();
+    peer.cleanup();
+  }
+});
+
+test("an unread version is not served from the cache: the next refresh reads it again", async () => {
+  // `opencode --version` is a cold Bun start; on a loaded host it outran the
+  // probe window, and the "Could not read an OpenCode version" snapshot was then
+  // served for the whole TTL — a good install looked broken for five minutes.
+  const peer = makePeer();
+  const env: Record<string, string> = { MOCK_MODE: "ok", MOCK_VERSION: "not a version" };
+  const adapter = await createOpenCodeAdapter(peerCtx(peer, env));
+  try {
+    const unread = await adapter.refreshSnapshot();
+    assert.match(unread.message ?? "", /Could not read an OpenCode version/);
+    env.MOCK_VERSION = "1.19.3";
+    const read = await adapter.refreshSnapshot();
+    assert.equal(read.version, "1.19.3");
+    assert.equal(read.installed, true);
+    assert.doesNotMatch(read.message ?? "", /Could not read/);
+  } finally {
+    await adapter.stopAll();
+    peer.cleanup();
+  }
+});
+
+test("an update that rewrites the binary is re-probed, not answered from the TTL cache", async () => {
+  // `npm update -g opencode-ai` rewrites the binary in place, and the daemon
+  // then asks the host to refresh — which must see the new CLI.
+  const peer = makePeer();
+  const adapter = await createOpenCodeAdapter(peerCtx(peer, { MOCK_MODE: "ok" }));
+  try {
+    const before = await adapter.refreshSnapshot();
+    assert.equal(before.version, MINIMUM_OPENCODE_VERSION);
+    const shim = readFileSync(peer.bin, "utf8");
+    writeFileSync(
+      peer.bin,
+      `${shim.replace(`MOCK_VERSION:-${MINIMUM_OPENCODE_VERSION}`, "MOCK_VERSION:-1.19.3")}# updated\n`
+    );
+    const after = await adapter.refreshSnapshot();
+    assert.equal(after.version, "1.19.3");
   } finally {
     await adapter.stopAll();
     peer.cleanup();

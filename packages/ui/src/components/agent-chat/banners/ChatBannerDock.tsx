@@ -21,6 +21,7 @@ import { useMediaQuery } from "../../../hooks/use-media-query";
 import type { AgentChatActions } from "../../../lib/agent-chat/contracts";
 import type { ChatBannerDockProps } from "../contracts";
 import { BannerCard } from "../primitives";
+import { TimelineRowContext, useTimelineRowContext, type TimelineRowContextValue } from "../timeline/context";
 import { ApprovalCard } from "./ApprovalCard";
 import { McpAppConsentCard } from "./McpAppConsentCard";
 import { mcpAppConsents } from "../../../lib/agent-chat/mcp-app-consent";
@@ -56,6 +57,8 @@ export interface DockNotice {
   description?: React.ReactNode;
   icon?: React.ReactNode;
   actions?: React.ReactNode;
+  /** A second row under the title (`BannerCard`'s body): actions that would crowd a narrow first row. */
+  body?: React.ReactNode;
   onDismiss?: () => void;
 }
 
@@ -101,6 +104,13 @@ export interface ChatBannerDockExtraProps {
    * fixtures.
    */
   toolApprovals?: readonly ParsedToolApprovalSummary[];
+  /**
+   * The project directory, so a question's markdown resolves a relative image
+   * against it and reads it through the file API, as the timeline does.
+   */
+  projectPath?: string;
+  /** Opens a workspace-relative link of a question in an editor tab, as the timeline does. */
+  onOpenFile?: (path: string) => void;
 }
 
 const NO_SECRET_REQUESTS: readonly SecretRequestSummary[] = [];
@@ -160,7 +170,9 @@ export function ChatBannerDock({
   planTitle = null,
   secretRequests = NO_SECRET_REQUESTS,
   onAnswerSecret,
-  toolApprovals: toolApprovalsProp
+  toolApprovals: toolApprovalsProp,
+  projectPath,
+  onOpenFile
 }: ChatBannerDockProps & ChatBannerDockExtraProps): React.ReactElement | null {
   // One breakpoint governs every mobile rule in the chat surface (§7.8).
   const isMobile = !useMediaQuery("(min-width: 640px)");
@@ -222,6 +234,24 @@ export function ChatBannerDock({
     () => mcpAppConsents.pending(sessionId)
   );
   const appConsent = appConsents[0] ?? null;
+
+  /*
+   * The question card renders the chat's markdown, whose images resolve
+   * against the row context's `workspaceRoot`; the dock sits outside the
+   * timeline's provider, so it provides one. Outside a timeline the context
+   * holds its read-only fallback, which is what a card wants for the rest:
+   * no row affordance applies to it.
+   */
+  const rowContext = useTimelineRowContext();
+  const questionRowContext = React.useMemo<TimelineRowContextValue>(
+    () => ({
+      ...rowContext,
+      sessionId,
+      workspaceRoot: projectPath || undefined,
+      ...(onOpenFile ? { onOpenFile } : {})
+    }),
+    [onOpenFile, projectPath, rowContext, sessionId]
+  );
 
   // Per-question attachment drafts belong to one request; a new one starts
   // clean rather than inheriting the previous question's files.
@@ -320,6 +350,7 @@ export function ChatBannerDock({
             description={notice.description}
             actions={notice.actions}
             onDismiss={notice.onDismiss ? () => requestDismiss(notice) : undefined}
+            {...(notice.body ? { children: notice.body } : {})}
             className={exitingNoticeId === notice.id ? "ac-banner-exit" : undefined}
           />
         )
@@ -494,27 +525,30 @@ export function ChatBannerDock({
       ) : null}
 
       {(card === "question" || card === "question-mobile") && userInput ? (
-        <QuestionCard
-          key={userInput.requestId}
-          request={userInput}
-          compact={card === "question-mobile"}
-          isResponding={respondingRequestIds.includes(userInput.requestId)}
-          attachments={questionAttachments}
-          onAttachFiles={uploadAttachment ? attachToQuestion : undefined}
-          onRemoveAttachment={uploadAttachment ? removeQuestionAttachment : undefined}
-          onSubmit={({ answers, attachmentsByQuestionId }) =>
-            onAnswer({
-              requestId: userInput.requestId,
-              answers,
-              ...(Object.keys(attachmentsByQuestionId).length > 0
-                ? { attachmentsByQuestionId }
-                : {})
-            })
-          }
-          onDismiss={userInput.dismissible ? () => onDismiss(userInput.requestId) : null}
-          onCarryTextToDraft={onCarryTextToDraft}
-          active={active}
-        />
+        <TimelineRowContext.Provider value={questionRowContext}>
+          <QuestionCard
+            key={userInput.requestId}
+            request={userInput}
+            compact={card === "question-mobile"}
+            isResponding={respondingRequestIds.includes(userInput.requestId)}
+            attachments={questionAttachments}
+            onAttachFiles={uploadAttachment ? attachToQuestion : undefined}
+            onRemoveAttachment={uploadAttachment ? removeQuestionAttachment : undefined}
+            onSubmit={({ answers, attachmentsByQuestionId }) =>
+              onAnswer({
+                requestId: userInput.requestId,
+                answers,
+                ...(Object.keys(attachmentsByQuestionId).length > 0
+                  ? { attachmentsByQuestionId }
+                  : {})
+              })
+            }
+            onDismiss={userInput.dismissible ? () => onDismiss(userInput.requestId) : null}
+            onCarryTextToDraft={onCarryTextToDraft}
+            active={active}
+            onOpenFile={onOpenFile}
+          />
+        </TimelineRowContext.Provider>
       ) : null}
 
       {card === "secret" && secretRequest && onAnswerSecret ? (

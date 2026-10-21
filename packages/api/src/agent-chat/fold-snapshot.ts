@@ -53,6 +53,7 @@ import type { ModelSelection } from "./adapter-types.ts";
 import type { FoldEvictions, ThreadFoldState } from "./fold.ts";
 import { parseThreadGoal } from "./goal.ts";
 import type { ThreadGoal } from "./goal.ts";
+import { isUserInputPreviewFormat } from "./runtime-events.ts";
 import type {
   ApprovalOption,
   TaskRunHandles,
@@ -89,7 +90,8 @@ import type {
  */
 // 7: `thread.created`'s `lineage` reaches the head (spec 2026-10-14 §6).
 // 8: `thread.created`'s and `thread.meta-updated`'s `profileId` reach the head (Agent Profiles).
-export const FOLD_SNAPSHOT_VERSION = 8;
+// 9: a question option's `preview` and `previewFormat` reach the pending question.
+export const FOLD_SNAPSHOT_VERSION = 9;
 
 /**
  * {@link ThreadFoldState} as JSON: without `activities` (rebuilt from
@@ -523,11 +525,35 @@ const isPendingApproval = shaped<PendingApproval>({
   options: optional(listOf(isApprovalOption))
 });
 
-const isQuestionOption = shaped<UserInputQuestionOption>({
+const isQuestionOptionShape = shaped<UserInputQuestionOption>({
   label: isString,
   description: isString,
-  value: optional(isString)
+  value: optional(isString),
+  // Display-only, so never a reason to discard the file: settled below.
+  preview: anything,
+  previewFormat: anything
 });
+
+/**
+ * An option, with its display-only preview checked leniently: a preview or a
+ * format of another shape (a newer build's richer preview, say) is dropped
+ * from the option rather than discarding the whole snapshot over it — the
+ * card simply shows no preview. A freshly parsed file has no other owner, so
+ * the field is deleted in place.
+ */
+function isQuestionOption(value: unknown): value is UserInputQuestionOption {
+  if (!isQuestionOptionShape(value)) {
+    return false;
+  }
+  const option = value as { preview?: unknown; previewFormat?: unknown };
+  if (option.preview !== undefined && !isString(option.preview)) {
+    delete option.preview;
+  }
+  if (option.preview === undefined || (option.previewFormat !== undefined && !isUserInputPreviewFormat(option.previewFormat))) {
+    delete option.previewFormat;
+  }
+  return true;
+}
 
 const isQuestion = shaped<UserInputQuestion>({
   id: isString,

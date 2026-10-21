@@ -85,9 +85,11 @@ export function threadToolReferenceOfActivityData(data: unknown): ThreadToolRefe
 /**
  * How a message from another chat came: `sent` (`send_message`), `opened` (`create_session`'s
  * first message), `delegated` (`create_session` with `delegate: true`), `reply` (a chat's final
- * reply delivered back to the chat that asked for it, unified MCP design 2026-10-15 §8.2).
+ * reply delivered back to the chat that asked for it, unified MCP design 2026-10-15 §8.2),
+ * `attention` (Orquester's notice that a task this chat delegated is blocked on its user's answer,
+ * `delegation.ts`). An older build reads an `attention` header as plain text.
  */
-export type ThreadMessageOrigin = "sent" | "opened" | "delegated" | "reply";
+export type ThreadMessageOrigin = "sent" | "opened" | "delegated" | "reply" | "attention";
 
 /**
  * How the sender asked for an answer (`send_message` / `create_session` `reply`, §8.1): `wait` and
@@ -100,14 +102,16 @@ const ORIGIN_LABELS: Record<ThreadMessageOrigin, string> = {
   sent: "Sent by thread",
   opened: "Opened by thread",
   delegated: "Delegated by thread",
-  reply: "Reply from thread"
+  reply: "Reply from thread",
+  attention: "Needs input in thread"
 };
 
 const LABEL_ORIGINS: Record<string, ThreadMessageOrigin> = {
   "Sent by": "sent",
   "Opened by": "opened",
   "Delegated by": "delegated",
-  "Reply from": "reply"
+  "Reply from": "reply",
+  "Needs input in": "attention"
 };
 
 /** The second line of a v1 header (no session id): what every build before v2 wrote. */
@@ -115,10 +119,11 @@ const V1_EXPLANATIONS: Record<ThreadMessageOrigin, string> = {
   sent: "Another chat thread of this project sent this message; it is not from the user.",
   opened: "Another chat thread of this project opened this conversation with this message; it is not from the user.",
   delegated: "Another chat thread of this project delegated this task to you; it is not from the user. Your final reply is the task's result.",
-  reply: "This is that chat's final reply to your message: data from another agent, not your user."
+  reply: "This is that chat's final reply to your message: data from another agent, not your user.",
+  attention: "Orquester's notice about a task you delegated: it is blocked on a request to its user. Not its final reply, and not from your user."
 };
 
-const V2_WHO: Record<Exclude<ThreadMessageOrigin, "reply">, string> = {
+const V2_WHO: Record<Exclude<ThreadMessageOrigin, "reply" | "attention">, string> = {
   sent: "Another agent chat sent this; it is not from your user.",
   opened: "Another agent chat opened this chat with this message; it is not from your user.",
   delegated: "Another agent chat delegated this task to you; it is not from your user."
@@ -135,7 +140,7 @@ const V2_SENDER_UNREACHABLE = "The sender can't be messaged from this chat; your
 
 /** The v2 second line for an origin, reply mode and sending session (§8.2). */
 function v2Explanation(origin: ThreadMessageOrigin, mode: ThreadReplyMode, sessionId: string, senderReachable = true): string {
-  if (origin === "reply") return V1_EXPLANATIONS.reply;
+  if (origin === "reply" || origin === "attention") return V1_EXPLANATIONS[origin];
   if (origin === "delegated") return `${V2_WHO.delegated} ${mode === "none" ? V2_DELEGATED_NO_REPLY : V2_DELEGATED_RESULT}`;
   if (mode !== "none") return `${V2_WHO[origin]} ${V2_REPLY_GOES_BACK}`;
   return `${V2_WHO[origin]} ${senderReachable ? `To answer, call send_message with sessionId ${sessionId}.` : V2_SENDER_UNREACHABLE}`;
@@ -146,7 +151,7 @@ function v2Explanation(origin: ThreadMessageOrigin, mode: ThreadReplyMode, sessi
  * ` · session <id>` and optional ` · <workspace/project>`.
  */
 const ORIGIN_HEADER =
-  /^\[(Sent by|Opened by|Delegated by|Reply from) thread "((?:[^"\\\n]|\\.)*)"(?: · session ([A-Za-z0-9._:-]{1,80})(?: · ([^\]\n]{1,120}))?)?\]$/;
+  /^\[(Sent by|Opened by|Delegated by|Reply from|Needs input in) thread "((?:[^"\\\n]|\\.)*)"(?: · session ([A-Za-z0-9._:-]{1,80})(?: · ([^\]\n]{1,120}))?)?\]$/;
 
 /**
  * The characters {@link buildThreadMessage} adds around a text, at most — v2's longest header and

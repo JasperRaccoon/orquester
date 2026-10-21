@@ -481,6 +481,46 @@ test("a field of the wrong shape anywhere in the state is rejected", () => {
   }
 });
 
+test("a question option's preview is lenient: absent loads, malformed is dropped, valid rides through", () => {
+  const state = foldThread(richLog());
+  const options = () => serializedCopy(state).pending.userInputs[0].questions[0].options;
+
+  // A snapshot written before previews existed: no option carries one.
+  const old = serializedCopy(state);
+  assert.equal("preview" in old.pending.userInputs[0].questions[0].options[0], false);
+  assert.notEqual(deserializeFoldState(old), null);
+
+  const valid = serializedCopy(state);
+  valid.pending.userInputs[0].questions[0].options = [
+    { ...options()[0], preview: "```ts\nconst a = 1;\n```", previewFormat: "markdown" },
+    { ...options()[1], preview: "<b>B</b>", previewFormat: "html" }
+  ];
+  const restoredValid = deserializeFoldState(valid);
+  assert.ok(restoredValid !== null);
+  assert.deepEqual(
+    restoredValid.pending.userInputs[0]!.questions[0]!.options.map((option) => [option.preview, option.previewFormat]),
+    [["```ts\nconst a = 1;\n```", "markdown"], ["<b>B</b>", "html"]]
+  );
+
+  const malformed = serializedCopy(state);
+  malformed.pending.userInputs[0].questions[0].options = [
+    { ...options()[0], preview: { format: "svg", body: "<svg/>" }, previewFormat: "html" },
+    { ...options()[1], preview: "kept", previewFormat: "svg" },
+    { label: "C", description: "", previewFormat: "markdown" }
+  ];
+  const restored = deserializeFoldState(malformed);
+  assert.ok(restored !== null, "a bad preview never discards the snapshot");
+  const [first, second, third] = restored.pending.userInputs[0]!.questions[0]!.options;
+  assert.deepEqual(first, { label: "A", description: "first" }, "the preview and its format are dropped, the option stays");
+  assert.deepEqual(second, { label: "B", description: "second", value: "b", preview: "kept" });
+  assert.deepEqual(third, { label: "C", description: "" }, "a format without a preview is dropped");
+
+  // The option's own fields are still strict.
+  const broken = serializedCopy(state);
+  broken.pending.userInputs[0].questions[0].options[0].label = 7;
+  assert.equal(deserializeFoldState(broken), null);
+});
+
 test("what the fold copies through untouched is not second-guessed", () => {
   const state = foldThread(richLog());
   const activityAt = state.items.findIndex((item) => item.kind === "activity");

@@ -10,7 +10,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { agentChatRoutes } from "@orquester/api/agent-chat";
 import type { CallContext } from "../catalog/contract.ts";
-import { chatSummary, snapshot, stamp, turn } from "../fixtures.ts";
+import { chatSummary, head, snapshot, stamp, turn } from "../fixtures.ts";
 import { FakeDaemonApi } from "../testing.ts";
 import { lineageFamily } from "./lineage.ts";
 
@@ -119,6 +119,86 @@ test("fork_session profile refusals: an unknown one is refused before anything i
   api.on("GET", "/api/sessions", { status: 200, body: [chatSummary({ profileId: "prof-gone" })] });
   api.on("POST", agentChatRoutes.fork("c1"), { status: 400, body: { code: "PROFILE_NOT_FOUND", message: "No Agent Profile \"prof-gone\"." } });
   await assert.rejects(tool("fork_session").run({ sessionId: "c1" }, api), (e: { code: string; message: string }) => e.code === "PROFILE_NOT_FOUND" && /Agent Profile "prof-gone"/.test(e.message));
+});
+
+// "Continue in another agent": `agent`, `model`, `options`, `accountId`, checked as create_session checks them.
+const AGENTS = { shells: [], ides: [], fileExplorers: [], browsers: [], agents: [
+  { id: "claude", kind: "agent", name: "Claude Code", bin: ["claude"], enabled: true, installState: "idle", chat: { adapter: "claude" } },
+  { id: "codex", kind: "agent", name: "Codex", bin: ["codex"], enabled: true, installState: "idle", chat: { adapter: "codex" } },
+  { id: "grok", kind: "agent", name: "Grok Build", bin: ["grok"], enabled: false, installState: "idle", chat: { adapter: "grok" } }
+] };
+const effort = { optionDescriptors: [{ id: "effort", label: "Effort", type: "select", options: [{ id: "medium", label: "Medium", isDefault: true }, { id: "high", label: "High" }] }] };
+const providerRow = (id: string, models: unknown[]) => ({ id, refIds: [id], installed: true, version: "1", status: "ready", auth: { status: "authenticated" }, checkedAt: stamp(0), slashCommands: [], skills: [], models,
+  capabilities: { sessionModelSwitch: "in-session", supportsConversationRollback: true, showPlanModeToggle: true, reportsContextWindow: true, compaction: { type: "native" } } });
+const PROVIDERS = { hostInstanceId: "h", providers: [
+  providerRow("claude", [{ slug: "opus", name: "Opus", isDefault: true, capabilities: effort }, { slug: "sonnet", name: "Sonnet", capabilities: effort }]),
+  providerRow("codex", [{ slug: "gpt-5-codex", name: "GPT-5 Codex", isDefault: true, capabilities: effort }, { slug: "gpt-5", name: "GPT-5", capabilities: effort }])
+] };
+const ACCOUNTS = { accounts: [
+  { id: "cx-1", agent: "codex", label: "codex one", email: null, plan: null, needsReauth: false, createdAt: stamp(0), importedAt: stamp(0) },
+  { id: "cl-2", agent: "claude", label: "claude two", email: null, plan: null, needsReauth: false, createdAt: stamp(0), importedAt: stamp(0) }
+], defaults: { claude: null, codex: "cx-1", grok: null } };
+
+function continuing() {
+  const { api } = harness();
+  api.on("GET", "/api/registry", { status: 200, body: AGENTS })
+    .on("GET", "/api/agent/providers", { status: 200, body: PROVIDERS })
+    .on("GET", "/api/agent-accounts", { status: 200, body: ACCOUNTS })
+    .on("GET", agentChatRoutes.threadHead("c1"), { status: 200, body: { head: head({ modelSelection: { model: "opus", options: [{ id: "effort", value: "high" }] } }) } });
+  const handoff = { carried: 3, total: 4, bytes: 2_048 };
+  api.on("POST", agentChatRoutes.fork("c1"), ({ body }) => {
+    const request = body as { refId?: string; accountId?: string };
+    const continued = request.refId !== undefined || request.accountId !== undefined;
+    return {
+      status: 200,
+      body: {
+        session: chatSummary({ id: "f1", refId: request.refId ?? "claude", accountId: request.accountId ?? "" }),
+        strategy: continued ? "transcript" : "native",
+        lineage: { parentThreadId: "c1", relation: "fork", createdAt: "x", ...(continued ? { sourceAgent: "claude" } : {}) },
+        ...(continued ? { handoff } : {})
+      }
+    };
+  });
+  const lastBody = () => withoutId(api.calls.filter((c) => c.method === "POST").at(-1)!.body);
+  return { api, lastBody, handoff };
+}
+
+test("fork_session continues in another agent: its model (named, else its default), options and account", async () => {
+  const { api, lastBody, handoff } = continuing();
+  const result = await tool("fork_session").run({ sessionId: "c1", agent: "codex", model: "gpt-5", options: { effort: "high" }, accountId: "cx-1" }, api);
+  assert.deepEqual(lastBody(), { unattended: true, refId: "codex", accountId: "cx-1", modelSelection: { model: "gpt-5", options: [{ id: "effort", value: "high" }] } });
+  assert.equal(result.strategy, "transcript");
+  assert.equal(result.agent, "codex");
+  assert.equal(result.accountId, "cx-1");
+  assert.equal(result.model, "gpt-5");
+  assert.deepEqual(result.handoff, handoff);
+  assert.equal((result.lineage as { sourceAgent?: string }).sourceAgent, "claude");
+
+  // No model named: the agent's launch default, never the parent's (another catalogue).
+  await tool("fork_session").run({ sessionId: "c1", agent: "codex" }, api);
+  assert.deepEqual(lastBody(), { unattended: true, refId: "codex", modelSelection: { model: "gpt-5-codex", options: [] } });
+});
+
+test("fork_session on the same agent: a model alone forks natively on it; another account continues by transcript", async () => {
+  const { api, lastBody } = continuing();
+  await tool("fork_session").run({ sessionId: "c1", model: "sonnet" }, api);
+  assert.deepEqual(lastBody(), { unattended: true, modelSelection: { model: "sonnet", options: [{ id: "effort", value: "high" }] } }, "the parent's options survive a model its catalogue accepts them for");
+  const accountOnly = await tool("fork_session").run({ sessionId: "c1", accountId: "cl-2" }, api);
+  assert.deepEqual(lastBody(), { unattended: true, accountId: "cl-2" });
+  assert.equal(accountOnly.strategy, "transcript");
+  await tool("fork_session").run({ sessionId: "c1", agent: "claude" }, api);
+  assert.deepEqual(lastBody(), { unattended: true }, "naming the parent's own agent is an ordinary fork");
+});
+
+test("fork_session refuses an unknown or unavailable agent, a model or account it does not have — before anything is forked", async () => {
+  const { api } = continuing();
+  const refused = (pattern: RegExp) => (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && pattern.test(e.message);
+  await assert.rejects(tool("fork_session").run({ sessionId: "c1", agent: "gemini" }, api), refused(/Unknown agent "gemini"/));
+  await assert.rejects(tool("fork_session").run({ sessionId: "c1", agent: "grok" }, api), refused(/not available on this host/));
+  await assert.rejects(tool("fork_session").run({ sessionId: "c1", agent: "codex", model: "opus" }, api), refused(/Unknown model "opus" for codex/));
+  await assert.rejects(tool("fork_session").run({ sessionId: "c1", agent: "codex", accountId: "cl-2" }, api), refused(/not usable with codex/));
+  await assert.rejects(tool("fork_session").run({ sessionId: "c1", agent: "codex", options: { effort: "ludicrous" } }, api), (e: { code: string }) => e.code === "INVALID_ARGUMENT");
+  assert.equal(api.calls.some((c) => c.method === "POST"), false, "nothing forked");
 });
 
 test("merge_back_session sends the fork's text and reports the delivery; a session that is no fork is refused", async () => {

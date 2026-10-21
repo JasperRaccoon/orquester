@@ -123,6 +123,12 @@ export interface AgentChatRouteDeps {
   sendAttachment(reply: FastifyReply, path: string): Promise<unknown>;
   /** Mints and checks the signed URLs agent pages are framed from (spec 2026-10-14 §2.2). */
   visualUrls: VisualUrlSigner;
+  /**
+   * The host accepted an `interrupt` or a `session/stop` for this chat (any caller): the delegate
+   * stop cascade interrupts the chats it delegated to (`DelegateStopCascade.commandAccepted`).
+   * Must not throw or block. Optional: without it nothing cascades.
+   */
+  onStopCommand?(id: string, command: "interrupt" | "session/stop", body: unknown): void;
   logger?: { warn?: (...a: unknown[]) => void; error?: (...a: unknown[]) => void };
 }
 
@@ -233,13 +239,22 @@ export function registerAgentChatRoutes(app: FastifyInstance, deps: AgentChatRou
         if (refusal !== null) {
           return reply.code(CHAT_ERROR_STATUS.COMMAND_REJECTED).send(chatError("COMMAND_REJECTED", refusal));
         }
-        return forwardJson(
+        const answer = await forwardJson(
           deps,
           reply,
           "POST",
           HOST_COMMAND_ROUTE[name](id),
           request.body ?? {}
         );
+        // A stop the host took: the chats this one delegated stop too (`delegates.ts`).
+        if ((name === "interrupt" || name === "session/stop") && reply.statusCode < 400) {
+          try {
+            deps.onStopCommand?.(id, name, request.body ?? {});
+          } catch (error) {
+            deps.logger?.warn?.("the delegate stop cascade could not start", error);
+          }
+        }
+        return answer;
       }
     );
   }

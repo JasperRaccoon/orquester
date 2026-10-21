@@ -481,7 +481,7 @@ export function subagentCacheTtlStateFile(baseDir: string): string {
 //       meta.json          ThreadHead, rewritten atomically every 50 events
 //       events.ndjson      append-only domain events, per-thread monotonic seq
 //       raw.ndjson         provider frames, rotated (§3.1)
-//       attachments/<id>.<ext>
+//       attachments/<thread>-<uuid>.<ext>   the id `<thread>-<uuid>-<ext>`
 //   <appdir>/daemon/agent-host.sock    the host's HTTP-over-unix-socket API
 //   <appdir>/daemon/agent-host.token   0600 shared secret, daemon <-> host
 //
@@ -787,7 +787,21 @@ export const agentPrefsSchema = z.object({
    * Resolved per the thread's project over the host-wide default; an absent
    * entry means "use the default".
    */
-  continueThreadsByProject: z.record(z.string(), z.boolean()).default({})
+  continueThreadsByProject: z.record(z.string(), z.boolean()).default({}),
+  /**
+   * Usage-limit recovery: when a chat stops on its account's usage limit and the reset time is
+   * known, the daemon sends "Continue where you left off." into it once the limit has reset.
+   * Host-wide, **on** by default — the chat resumes the work the user already asked for. A chat
+   * the user has written to since, or that waits on an approval, is never resumed.
+   */
+  autoResumeLimitedChats: z.boolean().default(true),
+  /**
+   * Usage-limit recovery: when a chat stops on its account's usage limit, move it to another
+   * account of the same agent that is not cooling down and continue there. Host-wide, **off** by
+   * default — it spends another account's quota without asking. Never for an agent without
+   * managed accounts (OpenCode).
+   */
+  switchAccountOnUsageLimit: z.boolean().default(false)
 });
 export type AgentPrefs = z.infer<typeof agentPrefsSchema>;
 
@@ -1184,6 +1198,59 @@ export const agentChatHomeSchema = z.preprocess(
 );
 export type AgentChatHome = z.infer<typeof agentChatHomeSchema>;
 
+/** An ISO time that parses, else null (a value that does not read is no time, never the record). */
+const isoTimeOrNull = z
+  .string()
+  .max(64)
+  .nullable()
+  .transform((value) => (value !== null && Number.isFinite(Date.parse(value)) ? value : null))
+  .catch(null);
+
+/**
+ * A limited chat's usage-limit recovery state on its tab record. Mirrors `ChatUsageLimitState` in
+ * `@orquester/api` (`agent-chat/usage-limit.ts`). Tolerant: a field that does not read falls back
+ * on its own, unknown fields are kept (`passthrough`) so a newer daemon's survive a rewrite, and a
+ * block that does not parse at all is dropped — never the record (`sessionChatRecordSchema`).
+ */
+export const chatUsageLimitRecordSchema = z
+  .object({
+    noticeId: z.string().min(1).max(200),
+    turnId: z.string().min(1).max(200).nullable().catch(null),
+    detectedAt: z.string().max(64),
+    limitedAt: z.string().max(64).catch(""),
+    resetAt: isoTimeOrNull,
+    accountId: z.string().max(200).catch(""),
+    parked: z.boolean().catch(false),
+    autoResume: z.enum(["armed", "resuming", "off", "unscheduled"]).catch("off"),
+    resumeAt: isoTimeOrNull,
+    userCancelled: z.literal(true).optional().catch(undefined),
+    message: z.string().max(500).optional().catch(undefined),
+    action: z
+      .object({
+        kind: z.enum(["resume", "switch"]),
+        commandId: z.string().min(1).max(200),
+        accountId: z.string().max(200).optional().catch(undefined),
+        startedAt: z.string().max(64),
+        automatic: z.boolean().optional().catch(undefined)
+      })
+      .passthrough()
+      .optional()
+      .catch(undefined)
+  })
+  .passthrough();
+export type ChatUsageLimitRecord = z.infer<typeof chatUsageLimitRecordSchema>;
+
+/** The chat moved accounts after a usage limit. Mirrors `ChatLimitFailover` in `@orquester/api`. */
+export const chatLimitFailoverRecordSchema = z
+  .object({
+    fromAccountId: z.string().max(200),
+    toAccountId: z.string().max(200),
+    at: z.string().max(64),
+    automatic: z.boolean().catch(false)
+  })
+  .passthrough();
+export type ChatLimitFailoverRecord = z.infer<typeof chatLimitFailoverRecordSchema>;
+
 /**
  * The agent-chat block on a tab record (spec §5.2). `sessions.json` stays tab
  * metadata only; the agent host is the source of truth for thread state, so
@@ -1227,7 +1294,14 @@ export const sessionChatRecordSchema = z.object({
    * falls back to Global with a notice, because nobody is there to read it (spec 2026-10-18
    * §5.5). Anything else reads as absent (interactive).
    */
-  unattended: z.literal(true).optional().catch(undefined)
+  unattended: z.literal(true).optional().catch(undefined),
+  /**
+   * Usage-limit recovery (`chatUsageLimitRecordSchema`): present while the chat is limited, so a
+   * restart rebuilds its automatic resume. One that does not read is dropped (not limited).
+   */
+  usageLimit: chatUsageLimitRecordSchema.optional().catch(undefined),
+  /** The "switched account after a usage limit" notice, until dismissed. */
+  limitFailover: chatLimitFailoverRecordSchema.optional().catch(undefined)
 });
 export type SessionChatRecord = z.infer<typeof sessionChatRecordSchema>;
 
@@ -1270,7 +1344,11 @@ export const threadLineageRecordSchema = z.object({
   agentCreated: z.literal(true).optional().catch(undefined),
   // Inherited workflow ownership (`ThreadLineage.workflowOwned`, §5.4), stamped at creation.
   // Anything but `true` is dropped on its own.
-  workflowOwned: z.literal(true).optional().catch(undefined)
+  workflowOwned: z.literal(true).optional().catch(undefined),
+  // A fork continued in another agent or account (`ThreadLineage.sourceAgent` / `sourceModel`):
+  // the parent's adapter and model at the fork. A bad value is dropped on its own.
+  sourceAgent: z.string().min(1).max(64).regex(/\S/).optional().catch(undefined),
+  sourceModel: lineageIdSchema.optional().catch(undefined)
 });
 export type ThreadLineageRecord = z.infer<typeof threadLineageRecordSchema>;
 
@@ -1672,13 +1750,54 @@ export const replyDeliverySchema = z
   .passthrough();
 export type ReplyDeliveryRecord = z.infer<typeof replyDeliverySchema>;
 
+/** What a blocked delegated child waits for (`DelegateAttentionKind`). */
+export const REPLY_ATTENTION_KINDS = ["question", "approval", "secret"] as const;
+
+/**
+ * One "your delegated task is blocked on its user" notice to the parent (the agent conversation
+ * protocol's attention half, `apps/daemon/src/agent-chat/replies.ts`): one per child request id,
+ * persisted before it is handed to the delivery queue (kind `reply`, a fixed command id) so a
+ * restart neither loses nor repeats it. `dropped`: it did not go out (the request was answered
+ * first, or a side closed).
+ */
+export const replyAttentionNoticeSchema = z
+  .object({
+    id: z.string().min(1).max(200),
+    /** The parent's open subscription to the child this notice rides (its exchange, its plan mode). */
+    subscriptionId: z.string().min(1).max(200),
+    /** The parent, who receives it. */
+    toThreadId: z.string().min(1).max(200),
+    /** The blocked child. */
+    fromThreadId: z.string().min(1).max(200),
+    /** The child's pending request (the summary's id: a host request, `secret:…` or `approval:…`). */
+    requestId: z.string().min(1).max(400),
+    kind: z.enum(REPLY_ATTENTION_KINDS),
+    /** The fixed `/turn` command id of its first post; also its delivery-queue entry id. */
+    commandId: z.string().min(1).max(200),
+    /** The whole `/turn` input, header included. */
+    input: z.string().min(1),
+    interactionMode: z.enum(["default", "plan"]).catch("default").default("default"),
+    causedBy: z.object({ threadId: z.string().min(1), exchangeId: z.string().min(1).max(200), hop: z.number().int().min(1) }),
+    state: z.enum(["pending", "queued", "delivered", "dropped"]),
+    createdAt: z.string(),
+    updatedAt: z.string().optional().catch(undefined)
+  })
+  .passthrough();
+export type ReplyAttentionNoticeRecord = z.infer<typeof replyAttentionNoticeSchema>;
+
 export interface ReplyOutbox {
   subscriptions: ReplySubscriptionRecord[];
   deliveries: ReplyDeliveryRecord[];
   /** Entries this build cannot read, kept verbatim for the next rewrite. */
   unreadableSubscriptions: unknown[];
   unreadableDeliveries: unknown[];
-  /** Every top-level key but `version`, `subscriptions` and `deliveries`, exactly as found. */
+  /**
+   * The attention notices ({@link replyAttentionNoticeSchema}); absent from an outbox that never
+   * held one. An older build keeps the list verbatim among its `extra` keys.
+   */
+  attentionNotices?: ReplyAttentionNoticeRecord[];
+  unreadableAttentionNotices?: unknown[];
+  /** Every top-level key but `version`, `subscriptions`, `deliveries` and `attentionNotices`, exactly as found. */
   extra?: Record<string, unknown>;
 }
 
@@ -1700,7 +1819,7 @@ export function parseReplyOutbox(value: unknown): ReplyOutbox {
   if (record.version !== undefined && record.version !== 1) {
     throw new Error(`Not a version-1 reply outbox (version ${JSON.stringify(record.version)})`);
   }
-  for (const key of ["subscriptions", "deliveries"] as const) {
+  for (const key of ["subscriptions", "deliveries", "attentionNotices"] as const) {
     if (record[key] !== undefined && !Array.isArray(record[key])) {
       throw new Error(`Not a reply outbox (${key} is not a list)`);
     }
@@ -1723,26 +1842,32 @@ export function parseReplyOutbox(value: unknown): ReplyOutbox {
   };
   const subscriptions = read(record.subscriptions, replySubscriptionSchema);
   const deliveries = read(record.deliveries, replyDeliverySchema);
+  const notices = record.attentionNotices === undefined ? null : read(record.attentionNotices, replyAttentionNoticeSchema);
   const extra = Object.fromEntries(
-    Object.entries(record).filter(([key]) => key !== "version" && key !== "subscriptions" && key !== "deliveries")
+    Object.entries(record).filter(
+      ([key]) => key !== "version" && key !== "subscriptions" && key !== "deliveries" && key !== "attentionNotices"
+    )
   );
   return {
     subscriptions: subscriptions.good,
     deliveries: deliveries.good,
     unreadableSubscriptions: subscriptions.bad,
     unreadableDeliveries: deliveries.bad,
+    ...(notices !== null ? { attentionNotices: notices.good, unreadableAttentionNotices: notices.bad } : {}),
     ...(Object.keys(extra).length > 0 ? { extra } : {})
   };
 }
 
 /** The outbox as written: unknown top-level keys, then the readable entries, then the unreadable ones as they came. */
 export function serializeReplyOutbox(outbox: ReplyOutbox): string {
+  const notices = [...(outbox.attentionNotices ?? []), ...(outbox.unreadableAttentionNotices ?? [])];
   return JSON.stringify(
     {
       ...(outbox.extra ?? {}),
       version: 1,
       subscriptions: [...outbox.subscriptions, ...outbox.unreadableSubscriptions],
-      deliveries: [...outbox.deliveries, ...outbox.unreadableDeliveries]
+      deliveries: [...outbox.deliveries, ...outbox.unreadableDeliveries],
+      ...(notices.length > 0 ? { attentionNotices: notices } : {})
     },
     null,
     2

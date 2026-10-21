@@ -4,8 +4,12 @@ import type {
   AgentAdapterId,
   AgentChatGoalSummary,
   BackgroundLiveness as AgentChatBackgroundLiveness,
+  ChatLimitFailover,
+  ChatUsageLimitState,
   CreateAgentChatSessionFields,
+  DelegateView as AgentChatDelegateView,
   LatestTurnSummary as AgentChatLatestTurnSummary,
+  ForkHandoffSummary,
   PendingMergeBack,
   ThreadForkStrategy,
   ThreadLineage,
@@ -62,6 +66,7 @@ import type { ProjectBoxInfo, ProjectLocationRequest } from "./boxes.ts";
 export * from "./agent-chat/index.ts";
 export * from "./saved-prompts.ts";
 export * from "./repo-identities.ts";
+export * from "./forge-links.ts";
 export * from "./secret-files.ts";
 export * from "./agent-profile.ts";
 export * from "./session-profiles.ts";
@@ -1453,6 +1458,12 @@ export interface SessionSummary {
    */
   goal?: AgentChatGoalSummary | null;
   /**
+   * Delegated children only (lineage relation `delegate`): the model the child runs and its
+   * latest progress or result, cut short, for the parent's subagent strip and roster. `null`
+   * when it has none — a client merges summaries field-wise — and absent from an older daemon.
+   */
+  delegateView?: AgentChatDelegateView | null;
+  /**
    * Set when an automated workflow started this session (workflows spec §5.10): the tab shows a
    * Workflow chip linking to the run, and the workflow tab sweeper may close it.
    */
@@ -1482,6 +1493,18 @@ export interface SessionSummary {
    * Read it through a sanitizer: an older daemon omits it (= unknown, treat as Global).
    */
   profileId?: string | null;
+  /**
+   * Agent-chat tabs only: the chat hit its account's usage limit and has not resumed — the reset,
+   * the account, and where the automatic resume stands (`usage-limit.ts`). `null` once it resumed
+   * or the user sent a message: cleared with an explicit `null`, never by dropping the key (a
+   * client merges summaries field-wise). Absent from an older daemon (= not limited).
+   */
+  usageLimit?: ChatUsageLimitState | null;
+  /**
+   * Agent-chat tabs only: the chat was moved to another account after a usage limit, until the
+   * user dismisses the notice. `null` when there is none (explicit, as `usageLimit`).
+   */
+  limitFailover?: ChatLimitFailover | null;
 }
 
 // --- Thread lineage (spec 2026-10-14 §6) ------------------------------------
@@ -1492,6 +1515,12 @@ export interface ForkSessionResponse {
   session: SessionSummary;
   lineage: ThreadLineage;
   strategy: ThreadForkStrategy;
+  /**
+   * A continuation in another agent or account (`ForkSessionRequest.refId` / `accountId`): what
+   * its budgeted transcript carries. Absent for an ordinary fork, and when the host answered a
+   * repeat of a fork it had already made.
+   */
+  handoff?: ForkHandoffSummary;
 }
 
 /** A thread named by a lineage, as the daemon knows it now. */

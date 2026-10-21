@@ -32,6 +32,8 @@ import {
   mcpAppReferenceOfActivityPayload,
   IDENTITY_CHANGED_ACTIVITY_KIND,
   PROFILE_CHANGED_ACTIVITY_KIND,
+  STOP_CASCADED_ACTIVITY_KIND,
+  parseInterruptCause,
   isAgentOwnedActivity,
   isCompactionActivity,
   isPlanImplementationMessage,
@@ -421,6 +423,12 @@ function derivedWorkLogEntry(activity: ThreadActivityItem): DerivedWorkLogEntry 
     }
   }
 
+  // The delegate stop cascade's marker: why this chat stopped (its parent did).
+  if (activity.activityKind === STOP_CASCADED_ACTIVITY_KIND) {
+    const cause = parseInterruptCause(activity.payload);
+    if (cause) entry.stopCascade = cause;
+  }
+
   // Agent profiles §5.3: the profile switch, ids only (null = Global); the name resolves at render.
   if (activity.activityKind === PROFILE_CHANGED_ACTIVITY_KIND) {
     const change = asRecord(activity.payload);
@@ -430,6 +438,21 @@ function derivedWorkLogEntry(activity: ThreadActivityItem): DerivedWorkLogEntry 
       entry.profileSwitch = {
         profileId,
         ...(typeof previous === "string" || previous === null ? { previousProfileId: previous } : {})
+      };
+    }
+  }
+
+  // Thread lineage §6: a chat continued in another agent says where it came from.
+  if (activity.activityKind === "thread.forked") {
+    const forked = asRecord(activity.payload);
+    const continuation = asRecord(forked?.continuation);
+    const parentThreadId = asTrimmedString(forked?.parentThreadId);
+    const sourceLabel = asTrimmedString(continuation?.sourceLabel);
+    if (continuation && parentThreadId && sourceLabel) {
+      entry.continuation = {
+        parentThreadId,
+        sourceTitle: asTrimmedString(continuation.sourceTitle) ?? "the original chat",
+        sourceLabel
       };
     }
   }

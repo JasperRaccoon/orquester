@@ -261,6 +261,40 @@ test("pending questions preserve native answer keys and drop unanswerable cards"
   assert.equal(questions[1]?.id, "y");
 });
 
+test("an option's preview reaches the pending question; a malformed one is dropped, not the option", () => {
+  resetActivityIds();
+  const pending = derivePendingRequests([activity("user-input.requested", { requestId: "q1", questions: [
+    {
+      id: "Which layout?",
+      header: "Layout",
+      question: "Which layout?",
+      options: [
+        { label: "Sidebar", description: "nav on the left", preview: "┌──┬─────┐\n│  │     │", previewFormat: "markdown" },
+        { label: "Tabs", description: "nav on top", preview: "<div>tabs</div>", previewFormat: "html" },
+        { label: "Plain", description: "no preview" },
+        { label: "Odd", description: "a newer shape", preview: { format: "svg" }, previewFormat: "html" },
+        { label: "Empty", description: "an empty preview", preview: "" },
+        { label: "Unknown format", description: "", preview: "x", previewFormat: "svg" }
+      ]
+    }
+  ] })]);
+  const options = pending.userInputs[0]!.questions[0]!.options;
+  assert.deepEqual(options.map((option) => option.label), ["Sidebar", "Tabs", "Plain", "Odd", "Empty", "Unknown format"]);
+  assert.deepEqual(options[0], {
+    label: "Sidebar",
+    description: "nav on the left",
+    preview: "┌──┬─────┐\n│  │     │",
+    previewFormat: "markdown"
+  });
+  assert.equal(options[1]?.previewFormat, "html");
+  assert.equal("preview" in options[2]!, false);
+  assert.equal("preview" in options[3]!, false, "a preview that is not a string is dropped");
+  assert.equal("previewFormat" in options[3]!, false, "and so is its format");
+  assert.equal("preview" in options[4]!, false, "an empty preview shows nothing, so it is not kept");
+  assert.equal(options[5]?.preview, "x");
+  assert.equal("previewFormat" in options[5]!, false, "an unknown format falls back to the default");
+});
+
 test("a question row with no decodable question at all is dropped, not shown empty", () => {
   resetActivityIds();
   const pending = derivePendingRequests([

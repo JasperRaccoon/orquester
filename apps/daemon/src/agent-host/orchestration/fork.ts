@@ -15,8 +15,17 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
 import {
+  escapeForkHandoffTags as escapeHandoffTags,
+  FORK_HANDOFF_CLOSE_TAG as CLOSE_TAG,
+  FORK_HANDOFF_OPEN_TAG as OPEN_TAG,
+  formatHandoffBytes,
+  handoffMessagesOf,
+  handoffSummaryOf,
+  renderHandoffTranscript,
+  selectHandoffMessages,
   SETTLED_TURN_STATES,
   startedTurns,
+  type ForkHandoffSummary,
   type StartedTurn,
   type ThreadForkPoint,
   type ThreadForkTarget,
@@ -140,18 +149,8 @@ export const FORK_TRANSCRIPT_MAX_CHARS = 120_000;
 /** The most one message contributes; a longer one keeps its head and tail. */
 export const FORK_TRANSCRIPT_MESSAGE_MAX_CHARS = 8_000;
 
-const OPEN_TAG = "<forked-conversation>";
-const CLOSE_TAG = "</forked-conversation>";
-
-/**
- * The parent's own words with the delimiters spelled as entities: a message
- * (or title) that quotes `</forked-conversation>` must not end the block
- * early, or {@link stripForkHandoff} would show the rest of the transcript
- * as the user's message.
- */
-function escapeHandoffTags(text: string): string {
-  return text.replace(/<(\/?)(forked-conversation)>/gi, "&lt;$1$2&gt;");
-}
+// The delimiters and their escaping are shared with the continuation's budgeted transcript
+// (`@orquester/api` `handoff.ts`), so {@link stripForkHandoff} strips either kind of handoff.
 
 function clip(text: string, max: number): string {
   if (text.length <= max) return text;
@@ -218,6 +217,73 @@ export function buildForkTranscript(input: {
       : "") +
     (omitted > 0 ? ` The ${omitted} oldest message${omitted === 1 ? " was" : "s were"} left out for length.` : "");
   return `${OPEN_TAG}\n${preamble}\n\n${blocks.slice(first).join("\n\n")}\n${CLOSE_TAG}`;
+}
+
+/**
+ * "Continue in another agent" (a fork onto another adapter or account): the kept turns' user and
+ * assistant messages, picked whole and newest first within the handoff budget, rendered with the
+ * source's agent and model, what was left out and how the new agent reads it (`read_transcript`
+ * on the parent). `null` when the kept turns hold no message the fold still has — the child then
+ * starts fresh (`unavailable`), as a same-agent fork does.
+ */
+export function buildContinuationTranscript(input: {
+  items: readonly ThreadItem[];
+  retained: readonly StartedTurn[];
+  parentThreadId: string;
+  parentTitle: string;
+  /** "Claude Opus 4.1": the parent's agent and model. */
+  sourceLabel: string;
+  /** "Codex": the child's agent. */
+  targetLabel: string;
+  gitStatus?: string | undefined;
+  budgetBytes?: number;
+}): { transcript: string; summary: ForkHandoffSummary } | null {
+  const messages = handoffMessagesOf(input.items, input.retained);
+  if (messages.length === 0) return null;
+  const selection = selectHandoffMessages(messages, input.budgetBytes);
+  return {
+    transcript: renderHandoffTranscript({
+      selection,
+      source: { sessionId: input.parentThreadId, title: input.parentTitle, label: input.sourceLabel },
+      targetLabel: input.targetLabel,
+      ...(input.gitStatus !== undefined ? { gitStatus: input.gitStatus } : {})
+    }),
+    summary: handoffSummaryOf(selection)
+  };
+}
+
+/** The most `git status --short` text a continuation request may carry (the handoff cuts it further). */
+const CONTINUATION_GIT_STATUS_MAX_CHARS = 64 * 1024;
+
+/**
+ * `ForkHostThreadRequest.continuation`, read tolerantly: an object is a continuation (its
+ * `gitStatus` kept only as a string, capped); anything else — absent included — is none.
+ */
+export function parseForkContinuation(raw: unknown): { gitStatus?: string } | undefined {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const gitStatus = (raw as Record<string, unknown>).gitStatus;
+  return typeof gitStatus === "string" ? { gitStatus: gitStatus.slice(0, CONTINUATION_GIT_STATUS_MAX_CHARS) } : {};
+}
+
+/** The continuation row's second line: what was carried over, and when the new agent reads it. */
+export function continuationDetail(
+  strategy: "native" | "transcript" | "empty" | "unavailable",
+  handoff: ForkHandoffSummary | undefined,
+  targetLabel: string
+): string {
+  if (strategy === "empty") return `Continued before the first message: ${targetLabel} starts fresh.`;
+  if (strategy !== "transcript" || handoff === undefined) {
+    return `The conversation before this point could not be carried over: its messages are no longer held here, so ${targetLabel} starts fresh.`;
+  }
+  const size = formatHandoffBytes(handoff.bytes);
+  const when = `handed to ${targetLabel} with your first message`;
+  if (handoff.clipped) {
+    return `Only the end of the newest message fits the handoff (${size}); it is ${when}, and the full history stays readable in the original chat.`;
+  }
+  if (handoff.carried >= handoff.total) {
+    return `The whole conversation (${handoff.total} message${handoff.total === 1 ? "" : "s"}, ${size}) is ${when}.`;
+  }
+  return `The last ${handoff.carried} of ${handoff.total} messages (${size}) are ${when}; earlier history stays readable in the original chat.`;
 }
 
 /**

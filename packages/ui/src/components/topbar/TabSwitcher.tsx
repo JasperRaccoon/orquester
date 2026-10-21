@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { ChevronDown, Circle, FolderTree, GitBranch, Globe, ListTodo, Monitor, Pencil, PenTool, Trash2, Workflow, X } from "lucide-react";
 import { BottomSheet, ConfirmDialog, DropdownEmpty } from "../ui";
 import { SessionStatusDot } from "../ui/session-status-dot";
+import { LimitedMarker } from "../ui/limited-marker";
 import { cn } from "../../lib/cn";
 import { getRegistryIcon } from "../../icons";
 import { WorkflowChip } from "../workflows/WorkflowChip";
@@ -176,6 +177,7 @@ export const TabSwitcher: React.FC = () => {
                   />
                 ) : null}
                 <span className="min-w-0 flex-1 truncate">{tabLabel(tab)}</span>
+                <LimitedMarker session={tabSession(tab)} />
                 {isActive && <Circle size={7} className="shrink-0 fill-neutral-300 text-neutral-300" />}
               </button>
               {/* A sibling of the row, never inside it: a button cannot nest in a button. */}

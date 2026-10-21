@@ -25,8 +25,10 @@ import type {
 import type { DomainEvent } from "./domain-events.ts";
 import type { AgentGoalStatus } from "./goal.ts";
 import type { McpAppCallToolResult } from "./mcp-app.ts";
+import type { DelegateView, InterruptCause } from "./delegation.ts";
 import type { ForkSessionRequest, MergeBackRequest, MergeBackResponse } from "./lineage.ts";
 import type { ApprovalDecision, TurnTokenUsage } from "./runtime-events.ts";
+import type { UsageLimitAction } from "./usage-limit.ts";
 import type {
   CausedBy,
   Checkpoint,
@@ -160,6 +162,17 @@ export const agentChatRoutes = {
    * the launch environment, so it is absent from {@link AGENT_CHAT_COMMAND_NAMES}.
    */
   profile: (sessionId: string): string => `${sessionBase(sessionId)}/profile`,
+  /**
+   * Usage-limit recovery of a limited chat (`usage-limit.ts`), daemon-owned like
+   * {@link agentChatRoutes.account} — never proxied to the host, both transports. `POST`:
+   * - `auto-resume` (`UsageLimitAutoResumeRequest`): arm or cancel the automatic resume;
+   * - `resume` (`UsageLimitResumeRequest`): send the continue message now;
+   * - `switch` (`UsageLimitSwitchRequest`): move to another account of the family and continue;
+   * - `dismiss-failover` (no body): clear the "switched account" notice.
+   * Each answers `UsageLimitActionResponse`; refusals are the §6.2 envelope (409
+   * `COMMAND_REJECTED` when the chat is not limited or the action cannot apply).
+   */
+  usageLimit: (sessionId: string, action: UsageLimitAction): string => `${sessionBase(sessionId)}/usage-limit/${action}`,
   /**
    * The thread's pending `request_secret` cards (`GET`,
    * `SecretRequestListResponse`) — daemon-owned like `account`: the
@@ -688,6 +701,9 @@ export const REMOTE_STRIPPED_TURN_FIELDS = ["causedBy"] as const satisfies reado
 /** The {@link MergeBackRequest} fields only socket / in-process callers may set: removed from every remote body. */
 export const REMOTE_STRIPPED_MERGE_BACK_FIELDS = ["causedBy"] as const satisfies readonly (keyof MergeBackRequest)[];
 
+/** The {@link InterruptCommandBody} fields only the daemon may set: removed from every remote body. */
+export const REMOTE_STRIPPED_INTERRUPT_FIELDS = ["cause", "cascade"] as const satisfies readonly (keyof InterruptCommandBody)[];
+
 function stripFields<T extends object>(body: T, fields: readonly string[]): T {
   if (!fields.some((field) => Object.prototype.hasOwnProperty.call(body, field))) return body;
   const copy = { ...body } as Record<string, unknown>;
@@ -705,6 +721,11 @@ export function stripRemoteMergeBackFields<T extends object>(body: T): T {
   return stripFields(body, REMOTE_STRIPPED_MERGE_BACK_FIELDS);
 }
 
+/** An interrupt body without its socket-trusted fields — what the remote transport forwards. Same reference when none was present. */
+export function stripRemoteInterruptFields<T extends object>(body: T): T {
+  return stripFields(body, REMOTE_STRIPPED_INTERRUPT_FIELDS);
+}
+
 /**
  * Settle pending requests, then interrupt. With no running turn it stops the
  * thread's live background work — the client omits `turnId` whenever the
@@ -712,6 +733,21 @@ export function stripRemoteMergeBackFields<T extends object>(body: T): T {
  */
 export interface InterruptCommandBody extends AgentChatCommandBase {
   turnId?: string;
+  /**
+   * Why Orquester interrupts this chat: the chat that delegated it stopped (the daemon's stop
+   * cascade, `agent-chat/delegates.ts`). SOCKET-TRUSTED like `TurnCommandBody.causedBy`: only the
+   * daemon sets it, and the remote transport strips it ({@link REMOTE_STRIPPED_INTERRUPT_FIELDS}).
+   * The host writes it into the timeline as a `STOP_CASCADED_ACTIVITY_KIND` row; one that does not
+   * parse is dropped, never a refusal. Additive: an older host ignores it (the interrupt still runs).
+   */
+  cause?: InterruptCause;
+  /**
+   * `false` when the interrupt is Orquester's own housekeeping rather than a stop — usage-limit
+   * recovery clearing a parked turn before it resumes (`agent-chat/limit-recovery.ts`): the chats
+   * this one delegated keep running (`agent-chat/delegates.ts`). SOCKET-TRUSTED and stripped from
+   * remote bodies like `cause`; the host ignores it.
+   */
+  cascade?: false;
 }
 
 export interface ApprovalCommandBody extends AgentChatCommandBase {
@@ -1466,4 +1502,10 @@ export interface AgentChatSessionSummaryFields {
   chatSessionStatus?: ThreadSessionStatus;
   /** The thread's unfinished goal, `null` when it has none (goals §4.7). */
   goal?: AgentChatGoalSummary | null;
+  /**
+   * A delegated child's model and latest word, for its parent's subagent strip and roster
+   * (`delegation.ts`). Only on a thread whose lineage is a `delegate`; `null` once it has none, to
+   * clear what a client merged. Additive: an older host never sends it.
+   */
+  delegateView?: DelegateView | null;
 }

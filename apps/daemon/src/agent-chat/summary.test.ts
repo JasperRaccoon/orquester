@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import type { SessionSummary } from "@orquester/api";
+import type { ThreadUsageLimitNotice } from "@orquester/api/agent-chat";
 import { ChatSessionManager } from "./chat-sessions.ts";
 import { AgentHostClient } from "./host-client.ts";
 import {
@@ -35,7 +36,8 @@ async function harness(
   onTurnSettled?: () => void,
   onBackgroundWorkEnded?: () => void,
   onUsageLimits?: (reading: ThreadUsageReading) => void,
-  approvalPushes?: Array<{ id: string; title: string }>
+  approvalPushes?: Array<{ id: string; title: string }>,
+  onUsageLimitNotice?: (threadId: string, notice: ThreadUsageLimitNotice | null) => void
 ): Promise<Harness> {
   t.mock.timers.enable({ apis: ["Date"], now: now() });
   const dir = await mkdtemp(join(tmpdir(), "orq-summary-"));
@@ -65,7 +67,8 @@ async function harness(
     },
     onTurnSettled,
     onBackgroundWorkEnded,
-    onUsageLimits
+    onUsageLimits,
+    onUsageLimitNotice
   });
   return {
     service, chat, published, pushes,
@@ -797,4 +800,23 @@ test("an approval card pushes once for its life, even when its thread is forgott
   cards.push({ approvalId: "a2", title: "Claude wants to run the workflow Deploy" });
   h.service.secretRequestsChanged("t1");
   assert.deepEqual(approvalPushes.map((p) => p.title), ["Claude wants to open a desktop", "Claude wants to run the workflow Deploy"]);
+});
+
+test("a thread's usage-limit notice is handed on when it moves, never for a host without the field", async (t) => {
+  const notices: Array<[string, ThreadUsageLimitNotice | null]> = [];
+  const h = await harness(t, undefined, undefined, undefined, undefined, undefined, (threadId, notice) => notices.push([threadId, notice]));
+  seedTab(h.chat, "t1");
+  await h.read("t1", {});
+  assert.equal(notices.length, 0, "an older host sends no field: nothing is said");
+  await h.read("t1", { usageLimit: null });
+  assert.equal(notices.length, 1);
+  assert.deepEqual(notices[0], ["t1", null], "the first read says it, even when not limited");
+  const usageLimit = { activityId: "a1", turnId: "turn-1", resetsAt: "2026-10-20T15:40:00.000Z", message: "limit", at: "2026-10-20T12:00:00.000Z", parked: true };
+  await h.read("t1", { usageLimit });
+  await h.read("t1", { usageLimit });
+  assert.equal(notices.length, 2, "once per change");
+  assert.deepEqual(notices[1], ["t1", usageLimit]);
+  await h.read("t1", { usageLimit: { ...usageLimit, parked: false } });
+  await h.read("t1", { usageLimit: null });
+  assert.deepEqual(notices.map(([, notice]) => notice?.parked ?? null), [null, true, false, null]);
 });

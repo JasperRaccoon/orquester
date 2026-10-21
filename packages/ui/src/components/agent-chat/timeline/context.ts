@@ -79,6 +79,8 @@ export interface TimelineRowContextValue {
   onRevert: (input: { messageId: string; targetTurnCount: number }) => void;
   /** "Fork from here" (spec 2026-10-14 §6); null where no fork is offered (the drill-in). */
   onFork: ((input: TimelineForkInput) => Promise<unknown> | void) | null;
+  /** "Continue in another agent…" from a message: opens the picker; null where no fork is offered. */
+  onContinueIn: ((input: TimelineForkInput) => void) | null;
   onOpenTurnDiff: (turnCount: number) => void;
   onOpenFile: (path: string) => void;
   /**
@@ -155,6 +157,7 @@ const FALLBACK: TimelineRowContextValue = {
   setToolOutputOffset: NOOP,
   onRevert: NOOP,
   onFork: null,
+  onContinueIn: null,
   onOpenTurnDiff: NOOP,
   onOpenFile: NOOP,
   onLoadFullOutput: NOOP,

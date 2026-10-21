@@ -114,7 +114,12 @@ import { AGENT_VISUAL_ROUTE_PATTERN, registerAgentChatRoutes } from "./agent-cha
 // boxes: route patterns exempt from user auth (they do box auth).
 import { BOX_HUB_PUBLIC_ROUTES } from "./boxes/hub/routes.ts";
 import { LineageService } from "./agent-chat/lineage.ts";
+import { DelegateStopCascade } from "./agent-chat/delegates.ts";
 import { registerLineageRoutes } from "./agent-chat/lineage-routes.ts";
+import { ChatLimitRecovery } from "./agent-chat/limit-recovery.ts";
+import { registerUsageLimitRoutes } from "./agent-chat/limit-recovery-routes.ts";
+import { createCooldownStore } from "./workflows/agent/cooldowns.ts";
+import { realClock } from "./workflows/factory.ts";
 // umcp:t5 begin
 import { registerReplySubscriptionRoutes } from "./agent-chat/lineage-routes.ts";
 import { ReplyRouter } from "./agent-chat/replies.ts";
@@ -143,6 +148,8 @@ import { RecentProjectsService, describeProjectPath } from "./recent-projects";
 import { SavedPromptsService, publishSavedPromptEvents, registerSavedPromptRoutes } from "./saved-prompts.ts";
 import { RepoIdentitiesService, publishRepoIdentityEvents } from "./repo-identities/service.ts";
 import { registerRepoIdentityRoutes } from "./repo-identities/routes.ts";
+import { GitHubLinkPreviewService } from "./github-links/service.ts";
+import { registerGitHubLinkRoutes } from "./github-links/routes.ts";
 import { SecretVaultStore } from "./secret-files/vault-store.ts";
 import { SecretFilesService } from "./secret-files/service.ts";
 import { registerSecretFilesRoutes } from "./secret-files/routes.ts";
@@ -173,6 +180,8 @@ import { WorkflowSecretsService } from "./workflows/secrets.ts";
 import { FileRunStore } from "./workflows/run-store.ts";
 import { WorkflowStateStore } from "./workflows/state-store.ts";
 import { registerWorkflowRoutes } from "./workflows/routes.ts";
+import { readGitStatusShort } from "./workflows/projects.ts";
+import { HANDOFF_GIT_STATUS_BYTES } from "@orquester/api/agent-chat";
 import { AgentProfileService, publishAgentProfileEvents } from "./agent-profile/service.ts";
 import { registerAgentProfileRoutes } from "./agent-profile/routes.ts";
 import { SessionProfileService, publishSessionProfileEvents } from "./session-profiles/service.ts";
@@ -657,6 +666,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // boxes: html_render / html_preview read a box project's images in its box (spec §8.9).
     // `services` is read per call: no page is published before it exists.
     localImages: (projectDir) => boxImageReader(services.boxRegistry, projectDir),
+    // "Continue in another agent": the working tree handed over with the transcript, read as the
+    // workflow handoff reads it. `git` is created below; a fork only runs once the daemon is up.
+    gitStatusShort: (projectPath) => readGitStatusShort(git, projectPath, HANDOFF_GIT_STATUS_BYTES),
     logger: console
   });
 
@@ -720,6 +732,11 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   );
   agentChat.setPersist(() => ptySessions.persistIndexNow());
 
+  // The delegate stop cascade: a chat stopped, interrupted or closed stops the chats it delegated
+  // tasks to (`delegates.ts`). Its interrupts go through the daemon's own API (`attachApi` below);
+  // a close is heard here, while the closing tab's record is still readable.
+  const delegateStops = new DelegateStopCascade({ sessions: agentChat.chat, logger: console });
+
   // One session list over both backends, so every existing surface (tab strip,
   // Attention Center, palette, upload sweep, delete cascade, kill guard) treats
   // `agent-chat` as the agent kind without learning a second service (§7.1).
@@ -732,7 +749,10 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
           req as CreateAgentChatRequest,
           sessions.nextOrder(req.projectPath ?? "")
         ),
-      onClose: (id) => agentChat.deleteThread(id),
+      onClose: (id) => {
+        delegateStops.closing(id);
+        agentChat.deleteThread(id);
+      },
       onRename: (id, title, opts) => agentChat.renameThread(id, title, opts)
     }
   );
@@ -783,6 +803,20 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     logger: console
   });
   await repoIdentities.load();
+  // GitHub link previews for the chat's link pills: read with the git account bound to the
+  // project's workspace when it has a GitHub token (else another stored GitHub account, else
+  // anonymously). In memory only; the token never leaves the service.
+  const githubLinks = new GitHubLinkPreviewService({
+    resolveCredential: async ({ owner, projectPath }) => {
+      const described = projectPath ? describeProjectPath(resolved.workspacesDir, projectPath) : null;
+      const preferredAccountId = described
+        ? (await readWorkspacesMeta(resolved.workspacesMetaFile)).workspaces.find((w) => w.name === described.workspace)
+            ?.gitAccountId
+        : undefined;
+      return accounts.githubReadCredential({ owner, preferredAccountId: preferredAccountId ?? null });
+    },
+    logger: console
+  });
   // Built-in plugins: built above (with the box modules), started here.
   await plugins.start();
   // boxes: the box records load (a reattached box terminal finds its box) and the plugin switch is followed.
@@ -1312,6 +1346,27 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     boxSandbox: boxes.workflowSandbox
   });
   workflowValidationCatalog = workflowDaemon.validationCatalog;
+  // Usage-limit recovery for interactive chats (`agent-chat/limit-recovery.ts`): the host's
+  // per-thread limit notice (the summary poll) → the chat's recovery state, the resume at the
+  // reset and the opt-in account failover. It shares the workflows' cooldown store (one
+  // `workflow-state.json`), usage reading and accounts, so chats and workflows agree on which
+  // accounts are spent. The tab records are loaded (reattach above): `start` rebuilds every
+  // persisted schedule; its sends wait for the daemon's own API (`attachApi` below).
+  const limitRecovery = new ChatLimitRecovery({
+    chat: agentChat.chat,
+    cooldowns: createCooldownStore(workflowState, realClock),
+    usage: { snapshot: () => workflowUsage },
+    accounts: { list: () => agentAccounts.list() },
+    prefs: async () => {
+      const agents = (await readAppConfigFile(resolved.appConfigFile)).agents;
+      return { autoResume: agents.autoResumeLimitedChats, switchAccount: agents.switchAccountOnUsageLimit };
+    },
+    adapterOf: (refId) => registry.get(refId)?.chat?.adapter ?? null,
+    clock: realClock,
+    logger: console
+  });
+  agentChat.setUsageLimitNoticeListener((threadId, notice) => limitRecovery.onNotice(threadId, notice));
+  limitRecovery.start();
   publishWorkflowEvents({
     service: workflows,
     secrets: workflowSecrets,
@@ -1392,7 +1447,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   agentChat.setSecretRequests(secretRequests);
   const services: Services = {
     secretRequests,
-    registry, sessions, grokDeviceLink, codexDeviceLink, claudeOAuthLink, accounts, git, gitWatcher, todos, recentProjects, savedPrompts, repoIdentities, usage, usageTokens, chatThreadUsage, subagentCacheTtl, push, broadcaster, agentAccounts, browsers, urlWatcher, agentChat,
+    registry, sessions, grokDeviceLink, codexDeviceLink, claudeOAuthLink, accounts, git, gitWatcher, todos, recentProjects, savedPrompts, repoIdentities, githubLinks, usage, usageTokens, chatThreadUsage, subagentCacheTtl, push, broadcaster, agentAccounts, browsers, urlWatcher, agentChat,
     plugins,
     secretFiles,
     desktops, desktopAudio,
@@ -1401,6 +1456,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     sessionProfileLifecycle,
     workflows, workflowSecrets, workflowRuns, workflowState, workflowEngine: null, internalApi: null,
     lineage,
+    limitRecovery,
+    delegateStops,
     workflowProjects: workflowDaemon.runtime.projects,
     workflowCatalogReady: () => workflowDaemon.validationCatalog.ready(),
     // boxes: the box service, which paths are in box projects, and the rest of the box wiring.
@@ -1571,6 +1628,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   });
 
   lineage.attachApi(services.internalApi);
+  limitRecovery.attachApi(services.internalApi);
+  delegateStops.attachApi(services.internalApi);
   // umcp:t6 — every chat tool is on in every chat: a provider session the host kept across this
   // boot (launched by an older build, with fewer tools) is handed the current manifest once. The
   // host answers `unchanged` for an equal list, else applies it in-session or at the chat's next
@@ -1674,7 +1733,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     sessions.shutdown();
     // Stops supervising only: under tmux the agent host is deliberately left
     // running so in-flight turns survive the deploy (chat spec §3.1).
+    delegateStops.stop();
     await lineage.stop();
+    limitRecovery.stop();
     // umcp:t3 begin
     // Disconnect FIRST, while the transports may still serve: new calls get no card or grant
     // (PERMISSION_DENIED). Then pending cards end `cancelled`
@@ -1773,6 +1834,8 @@ interface Services {
   savedPrompts: SavedPromptsService;
   /** Daemon-owned repo identities (a label and icon per git repo), shared by every client. */
   repoIdentities: RepoIdentitiesService;
+  /** GitHub link previews for the chat's link pills. Optional: route tests build a partial `services`. */
+  githubLinks?: GitHubLinkPreviewService;
   /** Built-in plugins (Settings → Plugins): plugins.json, the TypeScript engine (tsrs or tsc-rs) install, the session preload. */
   plugins: PluginsService;
   /** The "Secret files" plugin's vaults and sync engine: ONE instance both transports share. Optional: route tests build a partial `services`. */
@@ -1844,6 +1907,13 @@ interface Services {
    * route-level tests build a partial `services`.
    */
   lineage?: LineageService;
+  /** Usage-limit recovery of interactive chats. Optional: route-level tests build a partial `services`. */
+  limitRecovery?: ChatLimitRecovery;
+  /**
+   * The delegate stop cascade (`agent-chat/delegates.ts`): the command routes report every
+   * accepted interrupt and stop to it. Optional: route-level tests build a partial `services`.
+   */
+  delegateStops?: DelegateStopCascade;
   /** Restart the HTTP transport (set in main once the lifecycle exists). */
   reloadHttp?: () => Promise<void>;
   // boxes: which paths live in a box project (boxes/service). Absent: every path is a host path
@@ -2673,6 +2743,16 @@ export function createServer(
     try {
       const merged = parseAppConfig({ ...current, ...((request.body as object) ?? {}) });
       await writeJsonFile(resolved.appConfigFile, merged);
+      // A usage-limit setting moved: armed chats follow at once (off disarms, on re-arms).
+      if (
+        merged.agents.autoResumeLimitedChats !== current.agents.autoResumeLimitedChats ||
+        merged.agents.switchAccountOnUsageLimit !== current.agents.switchAccountOnUsageLimit
+      ) {
+        services.limitRecovery?.prefsChanged({
+          autoResume: merged.agents.autoResumeLimitedChats,
+          switchAccount: merged.agents.switchAccountOnUsageLimit
+        });
+      }
       return merged;
     } catch {
       return reply.code(400).send({ code: "INVALID_CONFIG", message: "Invalid app config." });
@@ -4045,7 +4125,10 @@ export function createServer(
   // (Optional-chained: route-level tests build a partial `services`.)
   const agentChatDeps = services.agentChat?.routeDeps();
   if (agentChatDeps) {
-    registerAgentChatRoutes(app, agentChatDeps);
+    registerAgentChatRoutes(app, {
+      ...agentChatDeps,
+      onStopCommand: (id, command, body) => services.delegateStops?.commandAccepted(id, command, body)
+    });
     // Thread lineage (spec 2026-10-14 §6): fork, merge back, the lineage read.
     registerLineageRoutes(app, {
       lineage: () => services.lineage ?? null,
@@ -4059,6 +4142,11 @@ export function createServer(
           sessions.list(projectPath).reduce((max, s) => Math.max(max, s.order), -1) + 1
         );
       }
+    });
+    // Usage-limit recovery: arm/cancel the automatic resume, resume now, switch and continue.
+    registerUsageLimitRoutes(app, {
+      recovery: () => services.limitRecovery ?? null,
+      isChatSession: (id) => services.agentChat.chat.has(id)
     });
     // The `request_secret` cards: daemon-owned, never proxied to the host.
     if (services.secretRequests) {
@@ -4548,6 +4636,10 @@ export function createServer(
   // Repo identities (spec 2026-10-18 §2). Both transports; the bearer hook gates HTTP like every
   // /api route — no ?token= exemption (clients fetch icon bytes with auth).
   registerRepoIdentityRoutes(app, { service: services.repoIdentities });
+  // GitHub link previews (the chat's link pills). Both transports; the bearer hook gates HTTP.
+  if (services.githubLinks) {
+    registerGitHubLinkRoutes(app, { service: services.githubLinks });
+  }
   if (services.secretFiles) {
     registerSecretFilesRoutes(app, { service: services.secretFiles, logger: console });
   }

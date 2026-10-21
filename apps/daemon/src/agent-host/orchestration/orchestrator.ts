@@ -46,6 +46,8 @@ import {
   isHistoricalRuntimeEvent,
   isPlanImplementationMessage,
   isUnfinishedGoal,
+  agentAdapterLabel,
+  agentModelLabel,
   parseThreadLineage,
   recallablePromptText,
   SETTLED_TURN_STATES,
@@ -75,6 +77,7 @@ import {
   type RuntimeMode,
   type ThreadActivityItem,
   type ThreadFoldState,
+  type ForkHandoffSummary,
   type ThreadForkStrategy,
   type ThreadHead,
   type ThreadLineage,
@@ -101,7 +104,8 @@ import {
 
 import type { AccountHome, HistoryImportProgress, McpAppOperation, McpAppReference } from "@orquester/api/agent-chat";
 import { htmlRenderReferenceOfActivityPayload, mcpAppReferenceOfActivityPayload } from "@orquester/api/agent-chat";
-import { parseCausedBy } from "@orquester/api/agent-chat";
+import { parseCausedBy, usageLimitNoticeOf } from "@orquester/api/agent-chat";
+import { delegatePreviewOf, parseInterruptCause, STOP_CASCADED_ACTIVITY_KIND, stopCascadedSummary } from "@orquester/api/agent-chat";
 import { runMcpAppRequest } from "../mcp-apps.ts";
 
 import { stat } from "node:fs/promises";
@@ -229,7 +233,10 @@ import {
 } from "./validate.ts";
 import { isUsableConversationId, resumeCursorFor } from "./resume.ts";
 import {
+  buildContinuationTranscript,
   buildForkTranscript,
+  continuationDetail,
+  parseForkContinuation,
   createMemoryForkHandoffStore,
   ForkRefusal,
   resolveForkCut,
@@ -3582,15 +3589,41 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
 
       case "interrupt": {
         const turnId = parseOptionalTurnId(body.turnId);
-        return {
-          events: [
+        // The daemon's stop cascade says why it interrupts a delegated chat (socket-trusted; the
+        // remote transport strips it): the timeline shows the chat stopped because its parent did.
+        // A cause that does not parse is dropped, never a refusal.
+        const cause = parseInterruptCause(body.cause);
+        const occurredAt = clock.nowIso();
+        const events: AppendableDomainEvent[] = [
+          buildEvent(
+            runtime.id,
+            "thread.turn-interrupt-requested",
+            { turnId: turnId ?? null },
+            { commandId, occurredAt }
+          )
+        ];
+        if (cause !== undefined) {
+          events.push(
             buildEvent(
               runtime.id,
-              "thread.turn-interrupt-requested",
-              { turnId: turnId ?? null },
-              { commandId }
+              "thread.activity-appended",
+              {
+                activity: makeActivity({
+                  id: ids.eventId(),
+                  tone: "info",
+                  activityKind: STOP_CASCADED_ACTIVITY_KIND,
+                  summary: stopCascadedSummary(cause.action, cause.parentTitle),
+                  payload: cause,
+                  turnId: turnId ?? null,
+                  createdAt: occurredAt
+                })
+              },
+              { commandId, occurredAt }
             )
-          ],
+          );
+        }
+        return {
+          events,
           effect: () => interruptEffect(runtime, turnId)
         };
       }
@@ -4443,7 +4476,10 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     if (parentHead === null || parent.deleted) {
       throw threadNotFound(parentThreadId);
     }
-    if (parentHead.adapter !== adapterId) {
+    // "Continue in another agent" (`continuation`): another adapter, or another account of this
+    // one. Without it a fork runs on its parent's agent, exactly as before.
+    const continuation = parseForkContinuation(request.continuation);
+    if (parentHead.adapter !== adapterId && continuation === undefined) {
       throw invalidCommand("A fork runs on its parent's agent.");
     }
     const runtime = await loadRuntime(threadId);
@@ -4469,6 +4505,10 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       if (error instanceof ForkRefusal) throw commandRejected(error.message);
       throw error;
     }
+    const crossAgent = parentHead.adapter !== adapterId;
+    if (crossAgent && request.modelSelection === undefined) {
+      throw invalidCommand("modelSelection is required to continue in another agent.");
+    }
     const modelSelection =
       request.modelSelection === undefined
         ? parentHead.modelSelection
@@ -4477,13 +4517,29 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       request.runtimeMode === undefined
         ? parentHead.runtimeMode
         : parseRuntimeMode(request.runtimeMode);
+    // A continuation's home is its own (another agent's, or another account's), never the parent's.
+    const childHome = continuation !== undefined ? request.home : parentHead.home;
+    if (childHome !== "system" && childHome !== "account") {
+      throw invalidCommand("home must be system or account.");
+    }
     // The child's Agent Profile: the parent's own (`launch.json`) unless the
     // request names one — `null` for Global. The account is the parent's too,
-    // so the parent's prepared directory is the child's.
+    // so the parent's prepared directory is the child's. A continuation's
+    // agent or account is another, so the parent's prepared directory is not
+    // its own: only a profile the request names applies, else Global.
     const requested = requestedProfile(request, { allowGlobal: true });
     const childProfile =
-      requested === undefined ? parent.launch?.profile : (requested ?? undefined);
-    if (requested === undefined && childProfile === undefined && parentHead.profileId !== undefined) {
+      requested === undefined
+        ? continuation !== undefined
+          ? undefined
+          : parent.launch?.profile
+        : (requested ?? undefined);
+    if (
+      continuation === undefined &&
+      requested === undefined &&
+      childProfile === undefined &&
+      parentHead.profileId !== undefined
+    ) {
       // The parent names a profile its launch config lost: never fork it as Global.
       throw commandRejected(
         "The parent chat's Agent Profile is not known to the agent host; choose a profile for the fork."
@@ -4491,17 +4547,27 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     }
     // The daemon made the child Global because the parent's profile was deleted: its notice.
     const fallback = requested === null ? parseProfileFallback(request.profileFallback) : undefined;
+    const sourceModel = parentHead.modelSelection.model.trim();
     const lineage: ThreadLineage = {
       parentThreadId,
       relation: "fork",
       ...(cut.forkedFrom !== undefined ? { forkedFrom: cut.forkedFrom } : {}),
-      createdAt: clock.nowIso()
+      createdAt: clock.nowIso(),
+      // A continuation says where it came from: the lineage bar and the timeline name the agent.
+      ...(continuation !== undefined
+        ? {
+            sourceAgent: parentHead.adapter,
+            ...(sourceModel.length > 0 && sourceModel.length <= 200 ? { sourceModel } : {})
+          }
+        : {})
     };
 
     let strategy: ThreadForkStrategy = "empty";
     let resumeCursor: unknown;
     let nativeFailure: string | null = null;
-    if (cut.retained.length > 0) {
+    // A continuation is never native: another agent cannot read this one's conversation, and
+    // another account's home does not hold it (a resume identity stays where it was made).
+    if (cut.retained.length > 0 && continuation === undefined) {
       const adapter = options.adapters.get(adapterId);
       const sourceCursor = persistedResumeCursor(parent, parentHead);
       if (adapter?.forkConversation !== undefined && sourceCursor !== undefined) {
@@ -4545,7 +4611,26 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       }
     }
     let transcript: string | null = null;
-    if (strategy !== "native" && cut.retained.length > 0) {
+    let handoff: ForkHandoffSummary | undefined;
+    const sourceLabel = agentModelLabel(
+      agentAdapterLabel(parentHead.adapter),
+      snapshots.get(parentHead.adapter)?.models.find((model) => model.slug === sourceModel)?.name ?? sourceModel
+    );
+    const targetLabel = agentAdapterLabel(adapterId);
+    if (continuation !== undefined && cut.retained.length > 0) {
+      const built = buildContinuationTranscript({
+        items: parent.state.items,
+        retained: cut.retained,
+        parentThreadId,
+        parentTitle: parentHead.title,
+        sourceLabel,
+        targetLabel,
+        ...(continuation.gitStatus !== undefined ? { gitStatus: continuation.gitStatus } : {})
+      });
+      transcript = built?.transcript ?? null;
+      handoff = built?.summary;
+      strategy = built !== null ? "transcript" : "unavailable";
+    } else if (strategy !== "native" && cut.retained.length > 0) {
       transcript = buildForkTranscript({
         items: parent.state.items,
         retained: cut.retained,
@@ -4568,7 +4653,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       adapterId,
       modelSelection,
       runtimeMode,
-      home: parentHead.home,
+      home: childHome,
       resumeCursor,
       lineage,
       profile: childProfile,
@@ -4594,6 +4679,28 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
           });
         }
         if (strategy === "native") return;
+        if (continuation !== undefined) {
+          await appendActivity(runtime, {
+            kind: "thread.forked",
+            tone: "info",
+            turnId: null,
+            summary: `Continued from "${parentHead.title}" (${sourceLabel})`,
+            detail: continuationDetail(strategy, handoff, targetLabel),
+            payload: {
+              parentThreadId,
+              strategy,
+              continuation: {
+                sourceAgent: parentHead.adapter,
+                ...(sourceModel.length > 0 ? { sourceModel } : {}),
+                sourceLabel,
+                sourceTitle: parentHead.title,
+                targetAgent: adapterId,
+                ...(handoff !== undefined ? { handoff } : {})
+              }
+            }
+          });
+          return;
+        }
         await appendActivity(runtime, {
           kind: "thread.forked",
           tone: "info",
@@ -4609,7 +4716,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         });
       }
     });
-    return { head, strategy, lineage };
+    return { head, strategy, lineage, ...(handoff !== undefined ? { handoff } : {}) };
   };
 
   /**
@@ -5809,7 +5916,19 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         : null,
       chatSessionStatus: head.session.status,
       goal: goalSummaryOf(runtime, head),
-      usageLimits: liveUsageLimits.get(threadId) ?? null
+      // A delegated child's model and latest word, for its parent's strip: only a delegate's,
+      // so an ordinary chat's streaming text never moves its summary.
+      ...(head.lineage?.relation === "delegate"
+        ? {
+            delegateView: {
+              model: head.modelSelection?.model ?? null,
+              preview: delegatePreviewOf(runtime.state.items ?? [], turns)
+            }
+          }
+        : {}),
+      usageLimits: liveUsageLimits.get(threadId) ?? null,
+      // Usage-limit recovery (`usage-limit.ts`): the limit the thread stopped on, if it still is.
+      usageLimit: usageLimitNoticeOf(runtime.state.items ?? [], turns)
     };
   };
 

@@ -743,7 +743,9 @@ test("wait_for_session from an external client: attention after the cursor, time
 // Byte budgets (§9.5 trim plan): each conversation tool's own target, under the registry test's ceilings
 // ---------------------------------------------------------------------------
 
-const TARGETS: Record<string, number> = { create_session: 2_900, send_message: 2_300, wait_for_session: 1_200, fork_session: 1_200, merge_back_session: 1_100 };
+// fork_session was 1 200 until it took create_session's agent/model/options/accountId fields
+// ("Continue in another agent"): those four alone are ~500 bytes of schema.
+const TARGETS: Record<string, number> = { create_session: 2_900, send_message: 2_300, wait_for_session: 1_200, fork_session: 1_900, merge_back_session: 1_100 };
 
 test("the conversation tools meet their §9.5 targets in tools/list, for both audiences (descriptions ≤ 1 000 bytes, field texts ≤ 160)", async () => {
   for (const audience of ["chat", "external"] as const) {
