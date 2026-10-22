@@ -732,6 +732,13 @@ export interface RequestOpenedPayload {
    */
   dismissible: boolean;
   detail?: string;
+  /**
+   * Why the provider asked, in its own words, when it says and the words add
+   * something to `detail`: Claude's `canUseTool` `decisionReason` (an ask
+   * rule, a path outside the workspace, a safety check), Codex's command
+   * `reason`. Absent when the provider gives none.
+   */
+  reason?: string;
   appName?: string;
   /** When absent the UI shows the default set of §4.3. */
   options?: ApprovalOption[];

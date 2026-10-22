@@ -28,7 +28,7 @@ import type {
 import type { RuntimeEvent } from "@orquester/api/agent-chat";
 import { HISTORICAL_RAW_SOURCE } from "@orquester/api/agent-chat";
 
-import type { AdapterContext, AgentAdapter, SendTurnResult } from "../../adapter.ts";
+import { APPROVAL_REDIRECT_MESSAGE, type AdapterContext, type AgentAdapter, type SendTurnResult } from "../../adapter.ts";
 import { resumeCursorFor } from "../../orchestration/resume.ts";
 import type { ChildExitReason, ProviderChild } from "../../support/spawn.ts";
 import { AsyncEventQueue, createDeferred } from "./async-queue.ts";
@@ -1146,6 +1146,79 @@ describe("claude adapter — approvals", () => {
     assert.equal(opened?.payload.dismissible, false);
     harness.adapter.respondToApproval(START.threadId, requestId, "accept");
     assert.deepEqual(await decision, { behavior: "allow", updatedInput: { command: "rm -f x" } });
+  });
+
+  it("says why Claude asked, and offers no standing grant where the CLI forbids one", async () => {
+    const harness = await makeHarness();
+    await harness.adapter.startSession(START);
+    const peer = harness.peers[0]!;
+    await harness.adapter.sendTurn({
+      threadId: START.threadId,
+      input: "remove the file",
+      attachments: [],
+      interactionMode: "default"
+    });
+    await peer.nextTurn();
+    const decision = peer.canUseTool!("Bash", { command: "rm -rf build" }, {
+      signal: new AbortController().signal,
+      toolUseID: "toolu_reason",
+      requestId: "req-reason",
+      description: "Remove the build directory",
+      decisionReason: "\u001b[1mPermission rule Bash(rm:*) requires approval\u001b[22m ",
+      suppressAlwaysAllowRule: true
+    } as unknown as Parameters<CanUseTool>[2]);
+    const opened = await harness.waitFor("request.opened");
+    assert.equal(opened.payload.reason, "Permission rule Bash(rm:*) requires approval");
+    assert.deepEqual(opened.payload.options, [
+      { decision: "decline", label: "Decline" },
+      { decision: "accept", label: "Approve" }
+    ]);
+    await harness.adapter.respondToApproval(START.threadId, opened.requestId!, "accept");
+    assert.equal(((await decision) as { behavior: string }).behavior, "allow");
+  });
+
+  it("omits a reason Claude did not give, or one that only repeats the detail", async () => {
+    for (const decisionReason of [undefined, "  ", "Remove x"]) {
+      const harness = await makeHarness();
+      await harness.adapter.startSession(START);
+      const peer = harness.peers[0]!;
+      await harness.adapter.sendTurn({
+        threadId: START.threadId,
+        input: "remove the file",
+        attachments: [],
+        interactionMode: "default"
+      });
+      await peer.nextTurn();
+      void peer.canUseTool!("Bash", { command: "rm -f x" }, {
+        signal: new AbortController().signal,
+        toolUseID: "toolu_1",
+        requestId: "req-1",
+        description: "Remove x",
+        ...(decisionReason !== undefined ? { decisionReason } : {})
+      } as unknown as Parameters<CanUseTool>[2]);
+      const opened = await harness.waitFor("request.opened");
+      assert.equal("reason" in opened.payload, false, `reason ${JSON.stringify(decisionReason)}`);
+      assert.equal(opened.payload.options, undefined);
+      await harness.adapter.stopSession(START.threadId);
+    }
+  });
+
+  it("a redirecting decline denies with the redirect message, a plain one with the decline", async () => {
+    const redirected = await openApproval();
+    await redirected.harness.adapter.respondToApproval(
+      START.threadId,
+      redirected.requestId,
+      "decline",
+      { redirect: true }
+    );
+    assert.deepEqual(await redirected.decision, { behavior: "deny", message: APPROVAL_REDIRECT_MESSAGE });
+    const resolved = findEvent(redirected.harness.events, "request.resolved");
+    assert.equal(resolved?.payload.decision, "decline");
+    assert.equal(resolved?.payload.withdrawn, undefined, "the user answered it");
+
+    const plain = await openApproval();
+    await plain.harness.adapter.respondToApproval(START.threadId, plain.requestId, "decline");
+    assert.deepEqual(await plain.decision, { behavior: "deny", message: "User declined tool execution." });
   });
 
   it("a redelivered request does not open a second card", async () => {

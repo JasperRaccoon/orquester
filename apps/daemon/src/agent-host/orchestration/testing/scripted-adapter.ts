@@ -25,6 +25,7 @@ import type {
 
 import type {
   AgentAdapter,
+  ApprovalResponseOptions,
   ForkConversationInput,
   GoalCommandOptions,
   GoalCommandResult,
@@ -248,9 +249,14 @@ export function createScriptedAdapter(options: ScriptedAdapterOptions = {}): Scr
     async respondToApproval(
       threadId: string,
       requestId: string,
-      decision: ApprovalDecision
+      decision: ApprovalDecision,
+      options?: ApprovalResponseOptions
     ): Promise<void> {
-      calls.push({ kind: "respondToApproval", threadId, detail: { requestId, decision } });
+      calls.push({
+        kind: "respondToApproval",
+        threadId,
+        detail: { requestId, decision, ...(options?.redirect === true ? { redirect: true } : {}) }
+      });
       const failure = take("failApproval");
       if (failure) throw failure;
     },

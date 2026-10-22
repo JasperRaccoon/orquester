@@ -693,7 +693,27 @@ export interface TurnCommandBody extends AgentChatCommandBase {
    * Additive: an older host ignores it (the steer race stays there).
    */
   ifIdle?: true;
+  /**
+   * The message REDIRECTS the agent: the pending approvals the user saw when they sent it
+   * (`requestId`s). The host declines every one of them still pending, telling the provider the
+   * user is redirecting where it takes a reason with a denial, then sends this message as a steer
+   * — one command, so a retry under the same `commandId` neither declines nor sends twice. An
+   * approval pending but NOT listed (one that arrived after the user looked) refuses the whole
+   * command 409 `COMMAND_REJECTED` ({@link APPROVAL_ARRIVED_REASON}) before anything is written,
+   * so the message goes back to the draft and a new send declines that one too; a listed one
+   * already answered is skipped. Additive: an older host ignores it
+   * and the message steers in behind the open card.
+   */
+  declineApprovals?: string[];
 }
+
+/** Why a redirect ({@link TurnCommandBody.declineApprovals}) was refused: an approval the user had not seen is pending. */
+export const APPROVAL_ARRIVED_REASON =
+  "Another approval arrived, so your message wasn't sent. Read it, then send again to decline it too.";
+
+/** Why a redirect that is a `/compact` was refused: a compaction waits for the turn the card holds. */
+export const REDIRECT_COMPACT_REASON =
+  "A compaction can't redirect the agent. Answer the request above first, or stop the turn.";
 
 /** The {@link TurnCommandBody} fields only the daemon may set: removed from every remote body. */
 export const REMOTE_STRIPPED_TURN_FIELDS = ["causedBy"] as const satisfies readonly (keyof TurnCommandBody)[];

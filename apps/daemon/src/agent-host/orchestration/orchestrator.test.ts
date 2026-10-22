@@ -7,11 +7,13 @@ import { afterEach, beforeEach, describe, it, mock, type TestContext } from "nod
 import {
   ACTIVITY_RETENTION_LIMIT,
   ACTIVITY_RETENTION_SLACK,
+  APPROVAL_ARRIVED_REASON,
   createEmptyThreadState,
   currentInteractionMode,
   decodeHistoryCursor,
   encodeHistoryCursor,
   HISTORICAL_RAW_SOURCE,
+  REDIRECT_COMPACT_REASON,
   type AttachmentRef,
   type DomainEvent,
   type RuntimeEvent,
@@ -3338,6 +3340,127 @@ describe("orchestrator — the box turn-start hook (boxes spec 2026-10-19 §8.3)
     assert.ok(host.logger.entries.some((entry) => entry.level === "warn" && entry.message.includes("turn-start hook failed")));
     host.adapter.close();
     await consumed;
+    await host.stop();
+  });
+});
+
+describe("orchestrator — a message over pending approvals redirects the agent", () => {
+  it("declines every approval the user saw, with the redirect flag, THEN steers the message — once per command", async () => {
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
+    await openApproval(host, "req-1");
+    await openApproval(host, "req-2");
+    await host.settle();
+
+    const redirectId = cmd();
+    const body = { commandId: redirectId, input: "use the staging bucket instead", declineApprovals: ["req-2", "req-1"] };
+    await host.orchestrator.command(threadId, "turn", body);
+    await host.settle();
+    // A retry under the same id is the receipt's: nothing is declined or sent again.
+    await host.orchestrator.command(threadId, "turn", body);
+    await host.settle();
+
+    const calls = host.adapter.calls.filter(
+      (call) => call.kind === "respondToApproval" || call.kind === "sendTurn"
+    );
+    assert.deepEqual(
+      calls.map((call) => call.kind),
+      ["sendTurn", "respondToApproval", "respondToApproval", "sendTurn"],
+      "both declines reach the provider before the steer"
+    );
+    assert.deepEqual(
+      calls.filter((call) => call.kind === "respondToApproval").map((call) => call.detail),
+      [
+        { requestId: "req-1", decision: "decline", redirect: true },
+        { requestId: "req-2", decision: "decline", redirect: true }
+      ]
+    );
+    assert.equal(host.adapter.lastTurn?.input, "use the staging bucket instead");
+    const responses = (host.store.logs.get(threadId) ?? []).filter(
+      (event) => event.type === "thread.approval-response-requested"
+    );
+    assert.deepEqual(
+      responses.map((event) => [event.commandId, (event.payload as { requestId: string; decision: string }).requestId, (event.payload as { decision: string }).decision]),
+      [[redirectId, "req-1", "decline"], [redirectId, "req-2", "decline"]]
+    );
+    const starts = (host.store.logs.get(threadId) ?? []).filter(
+      (event) => event.type === "thread.turn-start-requested"
+    );
+    assert.equal(starts.length, 1, "the redirect steers the running turn");
+    await host.stop();
+  });
+
+  it("an approval the user never saw refuses the whole send: nothing is declined, nothing is sent", async () => {
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
+    await openApproval(host, "req-1");
+    await openApproval(host, "req-new");
+    await host.settle();
+    const sendsBefore = host.adapter.calls.filter((call) => call.kind === "sendTurn").length;
+    const logBefore = (host.store.logs.get(threadId) ?? []).length;
+
+    await assert.rejects(
+      () =>
+        host.orchestrator.command(threadId, "turn", {
+          commandId: cmd(),
+          input: "stop that",
+          declineApprovals: ["req-1"]
+        }),
+      (error: unknown) =>
+        isAgentChatCommandError(error) &&
+        error.code === "COMMAND_REJECTED" &&
+        error.message === APPROVAL_ARRIVED_REASON
+    );
+    await host.settle();
+    assert.equal(host.adapter.calls.filter((call) => call.kind === "respondToApproval").length, 0);
+    assert.equal(host.adapter.calls.filter((call) => call.kind === "sendTurn").length, sendsBefore);
+    assert.equal((host.store.logs.get(threadId) ?? []).length, logBefore, "nothing written");
+    assert.equal(host.orchestrator.summary(threadId)?.hasPendingApprovals, true);
+    await host.stop();
+  });
+
+  it("an approval answered meanwhile is skipped, and the message still goes out", async () => {
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
+    await openApproval(host, "req-1");
+    await host.settle();
+    await adapterResolution(host, "req-1", "approval", { decision: "accept", requestKind: "command" });
+    await host.settle();
+
+    await host.orchestrator.command(threadId, "turn", {
+      commandId: cmd(),
+      input: "and then tidy up",
+      declineApprovals: ["req-1"]
+    });
+    await host.settle();
+    assert.equal(host.adapter.calls.filter((call) => call.kind === "respondToApproval").length, 0);
+    assert.equal(host.adapter.lastTurn?.input, "and then tidy up");
+    await host.stop();
+  });
+
+  it("refuses a /compact redirect and a malformed list before anything is written", async () => {
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
+    await openApproval(host, "req-1");
+    await host.settle();
+
+    await assert.rejects(
+      () => host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "/compact", declineApprovals: ["req-1"] }),
+      (error: unknown) =>
+        isAgentChatCommandError(error) && error.code === "COMMAND_REJECTED" && error.message === REDIRECT_COMPACT_REASON
+    );
+    for (const declineApprovals of ["req-1", [""], [1], {}]) {
+      await assert.rejects(
+        () => host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "hi", declineApprovals }),
+        (error: unknown) => isAgentChatCommandError(error) && error.code === "INVALID_COMMAND"
+      );
+    }
+    await host.settle();
+    assert.equal(host.adapter.calls.filter((call) => call.kind === "respondToApproval").length, 0);
     await host.stop();
   });
 });

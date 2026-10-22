@@ -459,12 +459,12 @@ export async function createClaudeAdapterWith(
       await sessions.get(threadId)?.interruptTurn(turnId);
     },
 
-    async respondToApproval(threadId, requestId, decision: ApprovalDecision) {
+    async respondToApproval(threadId, requestId, decision: ApprovalDecision, options) {
       const session = sessions.get(threadId);
       if (session === undefined) {
         throw new Error(`No live Claude session for thread ${threadId}.`);
       }
-      session.respondToApproval(requestId, decision);
+      session.respondToApproval(requestId, decision, options);
     },
 
     async respondToUserInput(threadId, requestId, answers) {

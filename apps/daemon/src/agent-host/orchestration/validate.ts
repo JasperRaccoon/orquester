@@ -294,3 +294,22 @@ export function parseOptionalTurnId(value: unknown): string | undefined {
   }
   return value;
 }
+
+/**
+ * `/turn`'s `declineApprovals` (a redirect over pending approvals): absent, or
+ * a list of request ids — at most a hundred, each a non-empty string. Repeats
+ * are dropped, keeping the first place.
+ */
+export function parseDeclineApprovals(value: unknown): string[] | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (
+    !Array.isArray(value) ||
+    value.length > 100 ||
+    value.some((entry) => typeof entry !== "string" || entry.length === 0)
+  ) {
+    throw invalidCommand("declineApprovals must be a list of request ids.");
+  }
+  return [...new Set(value as string[])];
+}

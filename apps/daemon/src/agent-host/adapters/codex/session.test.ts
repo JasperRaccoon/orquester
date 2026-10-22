@@ -287,6 +287,30 @@ describe("codex session — steering", () => {
 });
 
 describe("codex session — approvals", () => {
+  it("carries the provider's reason onto the card, and omits a null one", async () => {
+    // The shape `05-tool-request-user-input.ndjson` captured: a command
+    // approval whose `reason` says why the model wants to run it.
+    const reason =
+      "Read repository metadata only so the LICENSE plan can use the right existing project context without changing files.";
+    const r = rig({ turns: [{ kind: "command-approval", command: "ls -1", reason }] });
+    await r.session.start();
+    await r.session.sendTurn({ input: "list", attachments: [], interactionMode: "default" });
+    const opened = await r.events.waitForType("request.opened");
+    assert.equal((opened.payload as { reason?: string }).reason, reason);
+    r.session.respondToApproval(opened.requestId!, "accept");
+    await r.events.waitForType("turn.completed");
+    await r.stop();
+
+    const bare = rig({ turns: [{ kind: "command-approval", command: "ls -1" }] });
+    await bare.session.start();
+    await bare.session.sendTurn({ input: "list", attachments: [], interactionMode: "default" });
+    const unexplained = await bare.events.waitForType("request.opened");
+    assert.equal("reason" in (unexplained.payload as object), false);
+    bare.session.respondToApproval(unexplained.requestId!, "accept");
+    await bare.events.waitForType("turn.completed");
+    await bare.stop();
+  });
+
   it("opens a request with the provider's advertised options and answers it", async () => {
     const r = rig({ turns: [{ kind: "command-approval", command: "ls -1" }] });
     await r.session.start();

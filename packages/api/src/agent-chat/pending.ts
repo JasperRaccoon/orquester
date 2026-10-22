@@ -300,6 +300,9 @@ export function derivePendingRequests(
         ...(typeof payload.detail === "string" && payload.detail
           ? { detail: payload.detail }
           : {}),
+        ...(typeof payload.reason === "string" && payload.reason
+          ? { reason: payload.reason }
+          : {}),
         ...(typeof payload.appName === "string" && payload.appName
           ? { appName: payload.appName }
           : {}),

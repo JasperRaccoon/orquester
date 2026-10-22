@@ -104,7 +104,7 @@ import {
 
 import type { AccountHome, HistoryImportProgress, McpAppOperation, McpAppReference } from "@orquester/api/agent-chat";
 import { htmlRenderReferenceOfActivityPayload, mcpAppReferenceOfActivityPayload } from "@orquester/api/agent-chat";
-import { parseCausedBy, usageLimitNoticeOf } from "@orquester/api/agent-chat";
+import { APPROVAL_ARRIVED_REASON, parseCausedBy, REDIRECT_COMPACT_REASON, usageLimitNoticeOf } from "@orquester/api/agent-chat";
 import { delegatePreviewOf, parseInterruptCause, STOP_CASCADED_ACTIVITY_KIND, stopCascadedSummary } from "@orquester/api/agent-chat";
 import { runMcpAppRequest } from "../mcp-apps.ts";
 
@@ -113,6 +113,7 @@ import { stat } from "node:fs/promises";
 import type {
   AdapterLogger,
   AgentAdapter,
+  ApprovalResponseOptions,
   GoalCommandOptions,
   GoalCommandResult,
   HostGoalCommand
@@ -220,6 +221,7 @@ import {
   parseAttachments,
   parseAttachmentsByQuestionId,
   parseComposerContext,
+  parseDeclineApprovals,
   parseInteractionMode,
   parseModelSelection,
   parseOptionalTurnId,
@@ -2990,7 +2992,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   const approvalEffect = async (
     runtime: ThreadRuntime,
     requestId: string,
-    decision: Parameters<AgentAdapter["respondToApproval"]>[2]
+    decision: Parameters<AgentAdapter["respondToApproval"]>[2],
+    responseOptions?: ApprovalResponseOptions
   ): Promise<void> => {
     const head = headOf(runtime);
     const adapter = head ? options.adapters.get(head.adapter) : undefined;
@@ -3004,7 +3007,12 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       return;
     }
     try {
-      await adapter.respondToApproval(runtime.id, requestId, decision);
+      await adapter.respondToApproval(
+        runtime.id,
+        requestId,
+        decision,
+        ...(responseOptions !== undefined ? [responseOptions] : [])
+      );
     } catch (error) {
       await appendActivity(runtime, {
         kind: "provider.approval.respond.failed",
@@ -3250,6 +3258,22 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     schedule?: () => void;
   }
 
+  /**
+   * The approvals a redirect declines (`TurnCommandBody.declineApprovals`): every
+   * pending approval, when the user saw them all — a listed one already answered
+   * is simply not among them. Refused when an approval is pending that the list
+   * does not name: it arrived after the user sent, and they have not read it.
+   */
+  const redirectDeclines = (runtime: ThreadRuntime, listed: readonly string[] | undefined): string[] => {
+    if (listed === undefined) return [];
+    const seen = new Set(listed);
+    const pending = runtime.state.pending?.approvals ?? [];
+    if (pending.some((approval) => !seen.has(approval.requestId))) {
+      throw commandRejected(APPROVAL_ARRIVED_REASON);
+    }
+    return pending.map((approval) => approval.requestId);
+  };
+
   const turnIsActive = (runtime: ThreadRuntime): boolean => {
     const session = currentSession(runtime);
     if (session.activeTurnId !== null) return true;
@@ -3457,6 +3481,9 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         // this turn in (unified MCP design 2026-10-15 §8.4). The daemon alone sets it — the remote
         // transport strips it — so a value that does not parse is dropped, never a refusal.
         const causedBy = parseCausedBy(body.causedBy);
+        // A redirect over pending approvals (`TurnCommandBody.declineApprovals`); parsed up
+        // front so a malformed list refuses before anything else is decided.
+        const declineApprovals = parseDeclineApprovals(body.declineApprovals);
         // `ifIdle: true` (unified MCP design 2026-10-15 §8.3, additive): the daemon's delivery
         // queue posts a reply-bound message or a reply only as a NEW turn, never a steer. With a
         // turn active the command is refused — not recorded, so the same id may be posted again at
@@ -3478,6 +3505,10 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         const blocked = blockedProviderCommandMessage(head.adapter, input);
         if (blocked !== null) {
           throw invalidCommand(blocked);
+        }
+        // A compaction waits for the turn the card holds, so it can redirect nothing.
+        if (declineApprovals !== undefined && isHostNativeCompact({ text: input, attachments })) {
+          throw commandRejected(REDIRECT_COMPACT_REASON);
         }
         // §4.6.5(b): the same host path as the `/compact` command, including
         // its refusal and queueing rules.
@@ -3502,9 +3533,26 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
           }
         }
 
+        // The approvals this message declines, in the order the fold holds them: every listed
+        // one still pending. One the user never saw refuses the whole send — declining it on
+        // their behalf would answer a request they have not read.
+        const declined = redirectDeclines(runtime, declineApprovals);
+
         const messageId = ids.messageId("user:");
         const occurredAt = clock.nowIso();
         const events: AppendableDomainEvent[] = [];
+        // Each decline is the same `approval-response-requested` an answer on the card writes,
+        // under this command, ahead of the message it makes way for.
+        for (const requestId of declined) {
+          events.push(
+            buildEvent(
+              runtime.id,
+              "thread.approval-response-requested",
+              { requestId, decision: "decline" },
+              { commandId, occurredAt, metadata: { requestId } }
+            )
+          );
+        }
         if (
           modelSelection !== undefined &&
           !modelSelectionEquals(modelSelection, head.modelSelection)
@@ -3574,6 +3622,17 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         return {
           events,
           schedule: () => {
+            // The declines go first, on the same effect queue: the provider
+            // is unblocked (and, where it takes one, told why) before the
+            // message reaches it as a steer. A decline that fails writes its
+            // `respond.failed` row and the message is sent all the same.
+            if (declined.length > 0) {
+              void runEffect(runtime, async () => {
+                for (const requestId of declined) {
+                  await approvalEffect(runtime, requestId, "decline", { redirect: true });
+                }
+              });
+            }
             // A `/turn` that arrives during a compaction is queued per thread
             // and replayed in order afterwards, each awaited before the next is
             // dispatched and the original message id reused so the user sees

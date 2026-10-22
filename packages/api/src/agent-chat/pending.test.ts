@@ -32,6 +32,23 @@ test("tracks open approvals and removes resolved ones", () => {
   );
 });
 
+test("an approval keeps the provider's reason, and has none when it gave none", () => {
+  resetActivityIds();
+  const pending = derivePendingRequests([
+    activity("approval.requested", {
+      requestId: "r1",
+      requestType: "command_execution_approval",
+      detail: "rm -rf build",
+      reason: "Permission rule Bash(rm:*) requires approval"
+    }),
+    activity("approval.requested", { requestId: "r2", requestType: "command_execution_approval", reason: "" }),
+    activity("approval.requested", { requestId: "r3", requestType: "command_execution_approval", reason: 7 })
+  ]);
+  assert.equal(pending.approvals[0]?.reason, "Permission rule Bash(rm:*) requires approval");
+  assert.equal("reason" in pending.approvals[1]!, false);
+  assert.equal("reason" in pending.approvals[2]!, false);
+});
+
 test("a REPLAY of a resolved request cannot reopen it", () => {
   // A replay is the same row delivered twice, so it carries the SAME stamp as
   // the original — which is how it is told apart from a provider recycling the

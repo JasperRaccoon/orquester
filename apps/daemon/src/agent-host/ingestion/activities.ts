@@ -314,6 +314,7 @@ export function runtimeEventToActivities(
             requestType: event.payload.requestType,
             dismissible: event.payload.dismissible,
             ...(event.payload.detail !== undefined ? { detail: event.payload.detail } : {}),
+            ...(event.payload.reason !== undefined ? { reason: event.payload.reason } : {}),
             ...(event.payload.appName !== undefined ? { appName: event.payload.appName } : {}),
             ...(event.payload.options !== undefined ? { options: event.payload.options } : {}),
             ...(event.payload.args !== undefined ? { args: event.payload.args } : {})

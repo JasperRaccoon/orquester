@@ -727,6 +727,7 @@ export class ClaudeNormalizer {
     requestId: string;
     requestType: CanonicalRequestType;
     detail?: string;
+    reason?: string;
     toolName: string;
     toolInput: Record<string, unknown>;
     toolUseId?: string;
@@ -752,6 +753,7 @@ export class ClaudeNormalizer {
         // answered or cancelled, so none of them is dismissible (§4.2).
         dismissible: false,
         ...(input.detail !== undefined ? { detail: input.detail } : {}),
+        ...(input.reason !== undefined ? { reason: input.reason } : {}),
         ...(input.appName !== undefined ? { appName: input.appName } : {}),
         ...(input.options !== undefined ? { options: input.options } : {}),
         args: {
