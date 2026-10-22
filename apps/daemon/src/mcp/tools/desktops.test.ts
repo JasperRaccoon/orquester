@@ -99,6 +99,14 @@ test("get_desktops {desktopId} finds the desktop in the full list; an unknown id
   assert.deepEqual(withHost.host, { available: true, installHint: null });
   // boxes: the status is asked for the desktop's project (its VM's, for a VM project).
   assert.ok(api.calls.some((c) => c.path === "/api/desktops/host" && (c as { query?: { projectPath?: string } }).query?.projectPath === GAME));
+  // A VM project whose VM is offline still gets its desktops, with a status saying why it cannot tell.
+  api.on("GET", "/api/desktops/host", { status: 409, body: { code: "BOX_NOT_READY", message: "This project's box is not connected right now." } });
+  const offline = await value(api, "get_desktops", { project: "acme/game", host: true });
+  assert.ok(Array.isArray(offline.desktops));
+  assert.equal((offline.host as { available: boolean }).available, false);
+  assert.match((offline.host as { warnings: string[] }).warnings[0]!, /not connected/);
+  api.on("GET", "/api/desktops/host", { status: 500, body: { code: "DESKTOP_ERROR", message: "boom" } });
+  await refused(api, "get_desktops", { project: "acme/game", host: true }, "DESKTOP_ERROR");
   await refused(api, "get_desktops", { appId: "app-1" }, "INVALID_ARGUMENT");
   await refused(api, "get_desktops", { desktopId: "dt-1", project: "acme/game" }, "INVALID_ARGUMENT");
 });

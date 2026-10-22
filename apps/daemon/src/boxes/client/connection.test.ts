@@ -198,3 +198,36 @@ test("a detached process's channel lost before it opened is a detach, not an err
   away.rejectWaiters(Object.assign(new Error("gone"), { code: "BOX_DISCONNECTED" }));
   assert.equal(await later, "detached");
 });
+
+test("an unwatch asked while the link is down is not undone by the next link's replay", async () => {
+  const info = { sys: localSysInfo(), paths: { kind: "identity" as const }, agentVersion: "v", procs: [] };
+  /** A mux that answers every request at once, recording what was sent on it. */
+  const answering = () => {
+    const sent: BoxControlMessage[] = [];
+    const mux: BoxMux = new BoxMux({
+      sendText: (text) => {
+        const message = parseControlMessage(text)!;
+        sent.push(message);
+        if (message.t === "req") setImmediate(() => mux.receiveControl({ t: "res", id: message.id, ok: true, result: null }));
+      },
+      sendBinary: () => {}
+    });
+    return { mux, sent };
+  };
+  const connection = new LinkedBoxConnection("b1", info, { replay: true });
+  const first = answering();
+  connection.attachLink(first.mux, info);
+  await connection.request("fs.watch", { watchId: "w1", path: "/d", recursive: false });
+  await connection.request("fs.watch", { watchId: "w2", path: "/e", recursive: false });
+  connection.detachLink(first.mux);
+
+  const unwatched = connection.request("fs.unwatch", { watchId: "w1" });
+  const second = answering();
+  connection.attachLink(second.mux, info);
+  await unwatched;
+  const requests = second.sent.filter((m): m is Extract<BoxControlMessage, { t: "req" }> => m.t === "req");
+  assert.deepEqual(
+    requests.map((m) => [m.method, (m.params as { watchId: string }).watchId]).sort(),
+    [["fs.unwatch", "w1"], ["fs.watch", "w2"]]
+  );
+});

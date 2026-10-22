@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -322,4 +323,44 @@ test("box host env: the box's own base, never the host's (no host PATH or NODE_O
   assert.equal(env.PATH, undefined, "PATH stays the box's own (the tmux server's)");
   assert.equal(env.NODE_OPTIONS, undefined);
   assert.equal(env.HOME, undefined);
+});
+
+test("box host signals: a group is hit only while its leader still carries the desktop's marker", async () => {
+  const connection = localBoxConnection();
+  const host = new BoxDesktopHost({ boxId: "b1", connection: () => connection });
+  const leader = (args: string[], env: Record<string, string> = {}) => {
+    // detached: its own process group, the child leading it.
+    const child = spawn("/bin/sh", args, { detached: true, stdio: "ignore", env: { ...process.env, ...env } });
+    const exited = new Promise<NodeJS.Signals | null>((resolve) => child.once("exit", (_code, signal) => resolve(signal)));
+    return { pid: child.pid!, exited };
+  };
+
+  const app = leader(["-c", "sleep 600 & wait"], { XAUTHORITY: "/d/ours/Xauthority" });
+  // Someone else's group under the same pid (a reboot reused it): left alone.
+  await host.signalGroup(app.pid, "SIGTERM", { environ: "XAUTHORITY=/d/other/Xauthority" });
+  await host.signalGroup(app.pid, "SIGTERM", { argument: "/d/ours" });
+  await host.signalGroup(app.pid, "SIGKILL", { environ: "XAUTHORITY=/d/ours/Xauthority" });
+  assert.equal(await app.exited, "SIGKILL", "only the matching check signalled it");
+
+  const hostGroup = leader(["-c", "sleep 600 & wait", "sh", "/d/ours"]);
+  await host.signalGroup(hostGroup.pid, "SIGTERM", { argument: "/d/other" });
+  await host.signalGroup(hostGroup.pid, "SIGKILL", { argument: "/d/ours" });
+  assert.equal(await hostGroup.exited, "SIGKILL");
+
+  // Nothing there at all: no error.
+  await host.signalGroup(app.pid, "SIGKILL", { argument: "/d/ours" });
+});
+
+test("an orq-agent without unix channels is told apart, and its VM refuses desktops with how it updates", async () => {
+  const h = harness();
+  assert.equal(await h.desktops.host("b1")!.unixChannels(), true, "a missing socket still means the channel kind exists");
+  const old = harness();
+  old.connection.openChannel = async () => {
+    throw Object.assign(new Error("the box does not accept unix channels"), { code: "UNKNOWN_CHANNEL" });
+  };
+  const status = await old.desktops.status("b1");
+  assert.equal(status.available, false);
+  assert.match(status.warnings[0] ?? "", /orq-agent is too old for desktops/);
+  assert.match(status.installHint ?? "", /recreate the VM/);
+  await assert.rejects(old.desktops.ensure("b1", () => {}), { status: 409, code: DESKTOP_UNAVAILABLE_CODE, message: /updates itself once/ });
 });

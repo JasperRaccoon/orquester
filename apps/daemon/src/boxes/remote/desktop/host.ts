@@ -27,7 +27,7 @@ import { PassThrough, type Duplex } from "node:stream";
 import type { BoxFsChangeEvent } from "@orquester/api";
 
 import type { DesktopAudioEncoderProcess, DesktopAudioSpawn } from "../../../desktops/audio.ts";
-import type { DesktopHost, DesktopScripts, DesktopWatch } from "../../../desktops/desktop-host.ts";
+import type { DesktopGroupOwner, DesktopHost, DesktopScripts, DesktopWatch } from "../../../desktops/desktop-host.ts";
 import { type AppEnvOptions, DESKTOP_HOST_SCRIPT, buildAppEnv, fallbackSocketDir } from "../../../desktops/host-env.ts";
 import { type ProcStat, parseProcStat, type DesktopWindowTrackerOptions } from "../../../desktops/windows.ts";
 import { x11SocketPath } from "../../../desktops/x11/connection.ts";
@@ -84,6 +84,23 @@ const PROC_CHAIN_SCRIPT = [
   "done"
 ].join("\n");
 
+/**
+ * Signal a group only while its leader is the desktop's (`sh -c <this> sh <pgid> <SIG>
+ * <environ|cmdline> <marker>`): one NUL-separated entry of the leader's environment or
+ * arguments must be exactly `marker`. A gone leader, or one that is someone else's, is left alone.
+ */
+const SIGNAL_OWNED_GROUP_SCRIPT = [
+  'tr "\\000" "\\n" <"/proc/$1/$3" 2>/dev/null | grep -qxF -- "$4" || exit 0',
+  'kill -s "$2" -- "-$1" 2>/dev/null',
+  "exit 0"
+].join("\n");
+
+/** Where the `unix` channel probe points: no socket is ever there. */
+const UNIX_PROBE_PATH = "/nonexistent/.orquester-desktop-probe.sock";
+
+/** Output cap of the small commands (an id, a kill): the box's answer is never trusted to be small. */
+const SMALL_OUTPUT_BYTES = 64 * 1024;
+
 /** One file of the shipped assets: its path relative to the assets dir, its bytes and mode. */
 interface AssetFile {
   path: string;
@@ -133,6 +150,7 @@ export class BoxDesktopHost implements DesktopHost {
   private uidRead: { connection: BoxConnection; uid: Promise<number> } | null = null;
   private renderNodeRead: { connection: BoxConnection; present: Promise<boolean> } | null = null;
   private scriptsCopied: { connection: BoxConnection; scripts: Promise<DesktopScripts> } | null = null;
+  private unixProbe: { connection: BoxConnection; key: string; supported: Promise<boolean> } | null = null;
 
   constructor(private readonly options: BoxDesktopHostOptions) {
     this.boxId = options.boxId;
@@ -178,7 +196,7 @@ export class BoxDesktopHost implements DesktopHost {
   private uid(): Promise<number> {
     const connection = this.link();
     if (this.uidRead?.connection !== connection) {
-      const uid = runInBox(connection, "id", ["-u"], { timeout: COMMAND_TIMEOUT_MS }).then(({ stdout }) => {
+      const uid = runInBox(connection, "id", ["-u"], { timeout: COMMAND_TIMEOUT_MS, maxBuffer: SMALL_OUTPUT_BYTES }).then(({ stdout }) => {
         const value = Number(stdout.trim());
         if (!Number.isInteger(value) || value < 0) throw new Error("The VM did not report its user id.");
         return value;
@@ -224,7 +242,7 @@ export class BoxDesktopHost implements DesktopHost {
 
   async prepareDirs(dirs: readonly string[]): Promise<void> {
     try {
-      await runInBox(this.link(), "/bin/sh", ["-c", PREPARE_DIRS_SCRIPT, "sh", ...dirs], { timeout: COMMAND_TIMEOUT_MS });
+      await runInBox(this.link(), "/bin/sh", ["-c", PREPARE_DIRS_SCRIPT, "sh", ...dirs], { timeout: COMMAND_TIMEOUT_MS, maxBuffer: SMALL_OUTPUT_BYTES });
     } catch (error) {
       const stderr = (error as { stderr?: unknown }).stderr;
       throw new Error(typeof stderr === "string" && stderr.trim() ? stderr.trim() : (error as Error).message);
@@ -320,16 +338,28 @@ export class BoxDesktopHost implements DesktopHost {
         closed = true;
         offEvent?.();
         offStatus?.();
-        if (connection?.connected) void connection.request("fs.unwatch", { watchId }).catch(() => undefined);
+        // Always asked, also while the link is down: a connection that replays watches on
+        // reconnect forgets this one at once, and the box ends it once the request gets there.
+        void connection?.request("fs.unwatch", { watchId }).catch(() => undefined);
       }
     };
   }
 
-  async signalGroup(pgid: number, signal: NodeJS.Signals): Promise<void> {
+  async signalGroup(pgid: number, signal: NodeJS.Signals, owner?: DesktopGroupOwner): Promise<void> {
     // > 1: never a caller's own group (0) or init's.
     if (!Number.isInteger(pgid) || pgid <= 1) return;
+    const name = signal.replace(/^SIG/, "");
     try {
-      await runInBox(this.link(), "kill", ["-s", signal.replace(/^SIG/, ""), "--", `-${pgid}`], { timeout: COMMAND_TIMEOUT_MS });
+      if (owner) {
+        // The check and the kill in one command: no round trip between them.
+        const [file, marker] = "environ" in owner ? ["environ", owner.environ] : ["cmdline", owner.argument];
+        await runInBox(this.link(), "/bin/sh", ["-c", SIGNAL_OWNED_GROUP_SCRIPT, "sh", String(pgid), name, file, marker], {
+          timeout: COMMAND_TIMEOUT_MS,
+          maxBuffer: SMALL_OUTPUT_BYTES
+        });
+      } else {
+        await runInBox(this.link(), "kill", ["-s", name, "--", `-${pgid}`], { timeout: COMMAND_TIMEOUT_MS, maxBuffer: SMALL_OUTPUT_BYTES });
+      }
     } catch {
       /* already gone, or the link dropped (the next connect reaps or reattaches) */
     }
@@ -389,6 +419,35 @@ export class BoxDesktopHost implements DesktopHost {
       .filter((line) => line.length > 0)
       .map(parseProcStat)
       .filter((entry): entry is ProcStat => entry !== null);
+  }
+
+  /**
+   * Whether this box's `orq-agent` opens `unix` channels (the VNC, X11 and
+   * PulseAudio sockets go through them); an older one answers UNKNOWN_CHANNEL.
+   * Asked once per connection and agent version, by opening one to a path that
+   * is not there. Throws when the box cannot be asked (the link dropped).
+   */
+  unixChannels(): Promise<boolean> {
+    const connection = this.link();
+    const key = `${connection.agentVersion}`;
+    if (this.unixProbe?.connection !== connection || this.unixProbe.key !== key) {
+      const supported = connection.openChannel({ kind: "unix", path: UNIX_PROBE_PATH }).then(
+        (stream) => {
+          stream.destroy();
+          return true;
+        },
+        (error: unknown) => {
+          if (errnoOf(error) === "UNKNOWN_CHANNEL") return false;
+          if (!connection.connected) throw error;
+          return true;
+        }
+      );
+      supported.catch(() => {
+        if (this.unixProbe?.supported === supported) this.unixProbe = null;
+      });
+      this.unixProbe = { connection, key, supported };
+    }
+    return this.unixProbe.supported;
   }
 
   connectUnix(path: string): Promise<Duplex> {

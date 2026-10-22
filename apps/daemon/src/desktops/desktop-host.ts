@@ -24,6 +24,9 @@ export interface DesktopWatch {
   close(): void;
 }
 
+/** What marks a process group's leader as a desktop's own (see {@link DesktopHost.signalGroup}). */
+export type DesktopGroupOwner = { environ: string } | { argument: string };
+
 /** The shipped scripts, as paths on the desktop's machine. */
 export interface DesktopScripts {
   host: string;
@@ -67,8 +70,15 @@ export interface DesktopHost {
    * Throws when the directory cannot be watched.
    */
   watch(dir: string, onChange: (name: string | null) => void, onError: (error: Error) => void): DesktopWatch;
-  /** Signal a whole process group; a gone group (or a nonsense pgid) is ignored. */
-  signalGroup(pgid: number, signal: NodeJS.Signals): Promise<void>;
+  /**
+   * Signal a whole process group; a gone group (or a nonsense pgid) is ignored.
+   * `owner` (boxes): signal only while the group's leader is still the
+   * desktop's process — its environment holds `environ` (`XAUTHORITY=…`), or
+   * its arguments hold `argument` (the desktop dir) — so a pid reused while the
+   * VM was out of sight (a reboot) is never hit. This machine's groups are
+   * followed without a gap, and are signalled as they always were.
+   */
+  signalGroup(pgid: number, signal: NodeJS.Signals, owner?: DesktopGroupOwner): Promise<void>;
   /** Whether the process `pid` carries `XAUTHORITY=<xauthority>` (a desktop app's leader, not a recycled pid). */
   leaderBelongsTo(pid: number, xauthority: string): Promise<boolean>;
   /** An app's whole environment there (§5.5): that machine's base, the desktop wiring, the user's variables. */

@@ -126,7 +126,7 @@ function nextEvent<T>(
     };
     const timer = setTimeout(() => {
       emitter.off(event, listener as never);
-      reject(new Error(`timed out waiting for ${event}`));
+      reject(new Error(`timed out waiting for ${event} last: ${JSON.stringify(emitter.list().map((d) => ({ status: d.status, box: d.box, apps: d.apps.map((a) => a.status) })))}`));
     }, timeoutMs);
     emitter.on(event, listener as never);
   });
@@ -141,15 +141,38 @@ async function until(
 ): Promise<DesktopSummary> {
   const current = target.get(id);
   if (current && predicate(current)) return current;
-  return nextEvent<DesktopSummary>(target, "updated", (summary) => summary.id === id && predicate(summary), timeoutMs);
+  return nextEvent<DesktopSummary>(target, "updated", function untilPredicate(summary) { return summary.id === id && predicate(summary); }, timeoutMs).catch((error: Error) => {
+    throw new Error(`${error.message} — waiting for ${predicate.toString()}`);
+  });
 }
 
-/** The window `appId` owns: in the summary now, or from the next `windows` event that has it. */
+/**
+ * The window `appId` owns: in the summary now, or from the next `windows` event — or
+ * `updated` summary (a tracker that just (re)started reports its first list there) — that has it.
+ */
 async function windowOf(target: DesktopManager, id: string, appId: string): Promise<DesktopWindowsPayload["windows"][number]> {
   const find = (windows: DesktopWindowsPayload["windows"]) => windows.find((window) => window.appId === appId);
   const now = find(target.get(id)?.windows ?? []);
   if (now) return now;
-  return find((await nextEvent<DesktopWindowsPayload>(target, "windows", (p) => p.desktopId === id && find(p.windows) !== undefined, 20_000)).windows)!;
+  return new Promise((resolve, reject) => {
+    const settle = (windows: DesktopWindowsPayload["windows"]) => {
+      const found = find(windows);
+      if (!found) return;
+      clearTimeout(timer);
+      target.off("windows", onWindows);
+      target.off("updated", onUpdated);
+      resolve(found);
+    };
+    const onWindows = (payload: DesktopWindowsPayload) => payload.desktopId === id && settle(payload.windows);
+    const onUpdated = (summary: DesktopSummary) => summary.id === id && settle(summary.windows);
+    const timer = setTimeout(() => {
+      target.off("windows", onWindows);
+      target.off("updated", onUpdated);
+      reject(new Error(`timed out waiting for the window of app ${appId}`));
+    }, 20_000);
+    target.on("windows", onWindows);
+    target.on("updated", onUpdated);
+  });
 }
 
 /** Resolve once `done()` holds, re-checked on every fs.watch event in `dir` (bounded by a timeout). */
@@ -387,6 +410,29 @@ test("6. after a daemon restart the desktop waits for its VM, then reattaches th
   } finally {
     stream.destroy();
   }
+});
+
+test("6b. a VM that restarted while out of reach: the desktop leaves running, then restarts there", { skip: skipReason ?? false }, async () => {
+  assert.ok(desktopId, "needs step 1");
+  const pane = await hostPanePid(desktopId);
+  groups.add(pane);
+  const { stdout: serverPid } = await boxTmux(["list-sessions", "-F", "#{pid}"]);
+  setLink(false);
+  // The restart: every process of the desktop dies at once (no trap runs, nothing writes
+  // host.exit), and so does the box's tmux server.
+  process.kill(-pane, "SIGKILL");
+  process.kill(Number(serverPid.split("\n")[0]), "SIGKILL");
+  assert.equal(existsSync(join(boxDir(desktopId), "host.exit")), false);
+  assert.equal(manager.get(desktopId)?.status, "running", "unseen while the link is down");
+
+  setLink(true);
+  const stopped = await until(manager, desktopId, (d) => d.status === "stopped");
+  assert.match(stopped.error ?? "", /ended while the VM was out of reach/);
+  assert.equal(manager.vncStream(desktopId), null);
+
+  const again = await manager.restart(desktopId);
+  assert.equal(again.status, "running", again.error);
+  groups.add(await hostPanePid(desktopId));
 });
 
 test("7. closing takes everything down in the box", { skip: skipReason ?? false }, async () => {

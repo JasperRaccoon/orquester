@@ -69,6 +69,34 @@ function expectDesktopOk<T>(res: DaemonResponse): T {
   return res.body as T;
 }
 
+/** Box errors of a project whose VM cannot be asked right now (boxes/remote/fs/errors.ts). */
+const VM_AWAY_CODES = new Set(["BOX_NOT_READY", "BOX_DESTROYED", "DESKTOP_BOX_UNREACHABLE"]);
+
+/**
+ * The desktop prerequisites where `projectPath`'s desktops run (the host's without one).
+ * boxes: a VM project whose VM is offline answers a status saying so, not an error, so
+ * the rest of the result (the desktops) still comes back.
+ */
+async function hostStatusOf(api: DaemonApi, projectPath: string | null): Promise<DesktopHostStatus> {
+  const res = await api.request("GET", desktopRoutes.host, projectPath ? { query: { projectPath } } : undefined);
+  const code = (res.body as { code?: unknown } | null)?.code;
+  if (res.status >= 400 && typeof code === "string" && VM_AWAY_CODES.has(code)) {
+    const message = (res.body as { message?: unknown }).message;
+    return {
+      available: false,
+      audioAvailable: false,
+      tools: [],
+      ffmpegPulse: false,
+      ffmpegOpus: false,
+      renderNode: false,
+      tmuxUsable: false,
+      warnings: [typeof message === "string" && message ? message : "The project's VM is not connected right now."],
+      installHint: null
+    };
+  }
+  return expectDesktopOk<DesktopHostStatus>(res);
+}
+
 /** The last characters of `text` whose JSON size fits `budget` bytes, never splitting a character. */
 function tailJsonBytes(text: string, budget: number): { text: string; truncated: boolean } {
   if (jsonBytes(text) <= budget) return { text, truncated: false };
@@ -165,14 +193,7 @@ const getDesktops = defineTool({
         : args.desktopId !== undefined
           ? (await findDesktop(api, args.desktopId)).projectPath
           : await projectOf(args.project, ctx);
-    const host =
-      args.host === true
-        ? {
-            host: expectDesktopOk<DesktopHostStatus>(
-              await api.request("GET", desktopRoutes.host, hostProject ? { query: { projectPath: hostProject } } : undefined)
-            )
-          }
-        : {};
+    const host = args.host === true ? { host: await hostStatusOf(api, hostProject) } : {};
     if (args.desktopId !== undefined && args.appId !== undefined) {
       const body = expectDesktopOk<unknown>(await api.request("GET", desktopRoutes.appLog(args.desktopId, args.appId)));
       // text/plain; the in-process client parses a body that happens to be JSON, so give such a log back as text.

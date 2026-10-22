@@ -16,6 +16,8 @@ export const BOX_DESKTOP_TMUX_SERVER = "orquester-desktops";
 
 const SERVICE_SESSION_PREFIX = "orqsvc-";
 const TMUX_TIMEOUT_MS = 15_000;
+/** A listing's output is the box's to say: never more than this. */
+const TMUX_OUTPUT_BYTES = 1024 * 1024;
 
 /** Throws unless `name` is in the service namespace, as the host's `Tmux` does. */
 function assertServiceName(name: string): void {
@@ -51,7 +53,7 @@ export class BoxDesktopTmux implements DesktopTmux {
   ) {}
 
   private run(args: string[]): Promise<{ stdout: string; stderr: string }> {
-    return runInBox(this.connection(), "tmux", ["-L", this.server, ...args], { timeout: TMUX_TIMEOUT_MS });
+    return runInBox(this.connection(), "tmux", ["-L", this.server, ...args], { timeout: TMUX_TIMEOUT_MS, maxBuffer: TMUX_OUTPUT_BYTES });
   }
 
   async newServiceSession(opts: Parameters<DesktopTmux["newServiceSession"]>[0]): Promise<void> {
