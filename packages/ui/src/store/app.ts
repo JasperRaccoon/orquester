@@ -589,6 +589,9 @@ function buildTransporter(connection: UiConnection): Transporter {
 export interface FileReveal {
   path: string;
   nonce: number;
+  /** 1-based line (and column) to jump to in the opened file. */
+  line?: number;
+  column?: number;
 }
 
 /** A client-local, non-PTY tab (e.g. the file browser). */
@@ -1194,9 +1197,9 @@ export interface AppState {
   openFileBrowser: () => void;
   /**
    * Open absolute `path` in the current project's file browser: its first Files
-   * tab when there is one, otherwise a new one.
+   * tab when there is one, otherwise a new one. `position` jumps to a line.
    */
-  revealInFileBrowser: (path: string) => void;
+  revealInFileBrowser: (path: string, position?: { line?: number; column?: number }) => void;
   openGit: () => void;
   /** Open (or focus) the whiteboard tab of `.excalidraw` file `path` in the current project. */
   openWhiteboard: (path: string) => void;
@@ -2923,7 +2926,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       };
     }),
 
-  revealInFileBrowser: (path) =>
+  revealInFileBrowser: (path, position) =>
     set((state) => {
       const project = state.currentProject;
       if (!project) {
@@ -2931,7 +2934,12 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
       const tabs = state.fileTabsByProject[project.path] ?? [];
       const existing = tabs[0];
-      const reveal: FileReveal = { path, nonce: (existing?.reveal?.nonce ?? 0) + 1 };
+      const reveal: FileReveal = {
+        path,
+        nonce: (existing?.reveal?.nonce ?? 0) + 1,
+        ...(position?.line ? { line: position.line } : {}),
+        ...(position?.column ? { column: position.column } : {})
+      };
       const tab: FileTab = existing
         ? { ...existing, reveal }
         : { id: crypto.randomUUID(), projectPath: project.path, title: "Files", reveal };

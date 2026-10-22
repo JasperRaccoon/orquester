@@ -301,6 +301,8 @@ export const FileBrowser: React.FC<{ rootPath: string; active?: boolean; reveal?
   // select it. Keyed on the nonce so asking for the same file again re-opens it.
   const revealPath = reveal?.path;
   const revealNonce = reveal?.nonce;
+  const revealLine = reveal?.line;
+  const revealColumn = reveal?.column;
   useEffect(() => {
     if (!revealPath) return;
     let alive = true;
@@ -325,12 +327,19 @@ export const FileBrowser: React.FC<{ rootPath: string; active?: boolean; reveal?
       setChildrenByPath((prev) => ({ ...prev, ...Object.fromEntries(loaded) }));
       setExpanded((prev) => new Set([...prev, ...chain]));
       const entry = loaded.find(([d]) => d === dir)?.[1].find((e) => e.path === revealPath);
-      openFromSearch(revealPath, entry?.size ?? 0);
+      if (entry?.kind === "dir") {
+        // A folder (e.g. a path link in a terminal): expand it instead of opening it.
+        setActiveDir(revealPath);
+        setExpanded((prev) => new Set([...prev, revealPath]));
+        void loadDir(revealPath);
+        return;
+      }
+      openFromSearch(revealPath, entry?.size ?? 0, revealLine, revealColumn);
     });
     return () => {
       alive = false;
     };
-  }, [api, rootPath, revealPath, revealNonce, openFromSearch]);
+  }, [api, rootPath, revealPath, revealNonce, revealLine, revealColumn, openFromSearch, loadDir]);
 
   const onSearchActiveChange = useCallback((value: boolean) => setSearchActive(value), []);
 
