@@ -159,3 +159,16 @@ test("providerNodePreload: only an existing preload with tsc-rs turned on", asyn
   await rm(pluginsConfigPath(appdir));
   assert.equal(providerNodePreload(appdir), undefined, "no plugins.json");
 });
+
+test("a Claude child gets CLAUDE_CODE_ENABLE_TODO_TOOLS=1 unless the launcher env set it", () => {
+  assert.equal(buildProviderEnv({ adapter: "claude", ...base }).CLAUDE_CODE_ENABLE_TODO_TOOLS, "1");
+  assert.equal(
+    buildProviderEnv({ adapter: "claude", ...base, extraEnv: { CLAUDE_CODE_ENABLE_TODO_TOOLS: "0" } })
+      .CLAUDE_CODE_ENABLE_TODO_TOOLS,
+    "0",
+    "the user's value wins"
+  );
+  for (const adapter of ["codex", "opencode", "grok"] as const) {
+    assert.equal(buildProviderEnv({ adapter, ...base }).CLAUDE_CODE_ENABLE_TODO_TOOLS, undefined, adapter);
+  }
+});

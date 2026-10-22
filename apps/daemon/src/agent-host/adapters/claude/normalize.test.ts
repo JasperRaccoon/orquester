@@ -3406,3 +3406,50 @@ describe("claude normaliser — account failures carry a structured reason (work
     );
   });
 });
+
+describe("claude normaliser — TodoWrite (CLAUDE_CODE_ENABLE_TODO_TOOLS)", () => {
+  it("is a to-do row, never a file change, and its todos become the turn's plan", () => {
+    const normalizer = new ClaudeNormalizer({ threadId: "t", clock: fixedClock(), ids: countingIds() });
+    normalizer.beginTurn({ turnId: "turn-1" });
+    const stream = (event: Record<string, unknown>): RuntimeEvent[] =>
+      normalizer.handleMessage({
+        type: "stream_event",
+        event,
+        uuid: "u",
+        session_id: "s",
+        parent_tool_use_id: null
+      } as unknown as SDKMessage);
+    const events = [
+      ...stream({
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "tool_use", id: "toolu_todo", name: "TodoWrite", input: {} }
+      }),
+      ...stream({
+        type: "content_block_delta",
+        index: 0,
+        delta: {
+          type: "input_json_delta",
+          partial_json: JSON.stringify({
+            todos: [
+              { content: "Read the code", status: "completed", activeForm: "Reading the code" },
+              { content: "Fix the bug", status: "in_progress", activeForm: "Fixing the bug" },
+              { content: "Run the tests", status: "pending", activeForm: "Running the tests" }
+            ]
+          })
+        }
+      })
+    ];
+    const items = events.filter(
+      (event) => event.type === "item.started" || event.type === "item.updated"
+    ) as Array<Extract<RuntimeEvent, { type: "item.started" | "item.updated" }>>;
+    assert.ok(items.length > 0);
+    assert.ok(items.every((event) => event.payload.itemType === "dynamic_tool_call"));
+    const plan = allOf(events, "turn.plan.updated").at(-1)?.payload.plan;
+    assert.deepEqual(plan, [
+      { step: "Read the code", status: "completed" },
+      { step: "Fix the bug", status: "inProgress" },
+      { step: "Run the tests", status: "pending" }
+    ]);
+  });
+});

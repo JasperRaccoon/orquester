@@ -61,7 +61,10 @@ export const REGISTRY = {
       args: ["--dangerously-skip-permissions", "--effort", "max", "--verbose"] as const,
       // Claude Code repaints its whole TUI each frame, which flickers over a
       // streamed PTY; this switches it to flicker-free diff rendering.
-      env: { CLAUDE_CODE_NO_FLICKER: "1" },
+      // CLAUDE_CODE_ENABLE_TODO_TOOLS keeps its task tools (TodoWrite, Task*)
+      // on for every model; the CLI otherwise offers them only on some. A
+      // per-launcher env file still overrides either.
+      env: { CLAUDE_CODE_NO_FLICKER: "1", CLAUDE_CODE_ENABLE_TODO_TOOLS: "1" },
       versionFlag: "--version",
       // Native installer (not npm -g): it manages ~/.local/bin/claude as a symlink into
       // ~/.local/share/claude/versions/<v> and flips it atomically on update, so a running
