@@ -11,6 +11,7 @@ import {
 import { getRegistryIcon } from "../../icons";
 import { useApi } from "../../context/orquester-context";
 import { useIsDesktop } from "../../hooks";
+import { LONG_PRESS_SURFACE, useLongPress } from "../../hooks/use-long-press";
 import {
   cachedProjectIndex,
   ensureProjectIndex,
@@ -66,6 +67,8 @@ const AgentCard: React.FC<{
   const inOpenProject = useAppStore((s) => s.currentProject?.path === entry.session.projectPath);
   const onScreen = activeInProject && inOpenProject;
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  // Right-click, or a long press on a touch screen (iOS fires no `contextmenu`).
+  const press = useLongPress((point) => setMenu(point));
   // boxes: the project's box badge, and the destroyed banner (§8.10, §9.3).
   const boxView = useProjectBox(entry.project.path, entry.project.box);
 
@@ -87,14 +90,11 @@ const AgentCard: React.FC<{
       <button
         type="button"
         onClick={() => focusAgentSession(entry)}
-        onContextMenu={(event) => {
-          if (!canMarkUnread) return;
-          event.preventDefault();
-          setMenu({ x: event.clientX, y: event.clientY });
-        }}
+        {...(canMarkUnread ? press : {})}
         aria-current={onScreen ? "page" : undefined}
         className={cn(
           "flex w-full items-center gap-3 rounded-xl border px-3 py-2 text-left",
+          LONG_PRESS_SURFACE,
           "transition-[background-color,border-color,opacity]",
           "focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500",
           onScreen

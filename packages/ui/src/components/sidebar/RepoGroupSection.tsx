@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { ChevronRight, ClipboardCopy, ImageIcon, KeyRound, Pencil, Plus, RotateCcw } from "lucide-react";
 import { normalizeRepoLabel, repoLabelProblem } from "@orquester/api";
 import { cn } from "../../lib/cn";
+import { LONG_PRESS_SURFACE, useLongPress } from "../../hooks/use-long-press";
 import { copyText } from "../../lib/clipboard";
 import { ApiError } from "../../lib/api-client";
 import { useApi } from "../../context/orquester-context";
@@ -118,6 +119,8 @@ export const RepoGroupSection: React.FC<{
   const api = useApi();
   const customLabel = useRepoIdentity(group.repoKey)?.label;
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  // Right-click, or a long press on a touch screen (iOS fires no `contextmenu`).
+  const press = useLongPress((point) => setMenu(point));
   const [renaming, setRenaming] = useState(false);
   const [iconOpen, setIconOpen] = useState(false);
   const [secretsOpen, setSecretsOpen] = useState(false);
@@ -170,11 +173,11 @@ export const RepoGroupSection: React.FC<{
         />
       ) : (
         <div
-          onContextMenu={(event) => {
-            event.preventDefault();
-            setMenu({ x: event.clientX, y: event.clientY });
-          }}
-          className="group flex items-center rounded-lg text-neutral-200 transition-colors hover:bg-neutral-800/60 hover:text-neutral-50"
+          {...press}
+          className={cn(
+            "group flex items-center rounded-lg text-neutral-200 transition-colors hover:bg-neutral-800/60 hover:text-neutral-50",
+            LONG_PRESS_SURFACE
+          )}
         >
           <button
             type="button"

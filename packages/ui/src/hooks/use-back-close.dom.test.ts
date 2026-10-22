@@ -36,7 +36,6 @@ after(() => {
     else delete (globalThis as Record<string, unknown>)[name];
   }
   delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
-  dom.window.close();
 });
 
 /** The next `popstate` (jsdom traverses history asynchronously, like a browser). */
