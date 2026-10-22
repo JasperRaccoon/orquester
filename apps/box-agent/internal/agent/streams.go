@@ -91,6 +91,24 @@ func openTCP(ch *Channel, spec *wire.TCPSpec) {
 	bridge(ch, conn)
 }
 
+// openUnix connects to a Unix socket in the box (a desktop's VNC, X11 and PulseAudio sockets).
+func openUnix(ch *Channel, spec *wire.UnixSpec) {
+	if err := requireAbs(spec.Path); err != nil {
+		ch.OpenFailed(err)
+		return
+	}
+	conn, err := net.DialTimeout("unix", spec.Path, 15*time.Second)
+	if err != nil {
+		ch.OpenFailed(err)
+		return
+	}
+	if err := ch.Opened(nil); err != nil {
+		conn.Close()
+		return
+	}
+	bridge(ch, conn)
+}
+
 func openFileRead(ch *Channel, spec *wire.FileReadSpec) {
 	if err := requireAbs(spec.Path); err != nil {
 		ch.OpenFailed(err)

@@ -3,8 +3,10 @@
 package agent
 
 import (
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -238,5 +240,44 @@ func TestDaemonClientNeverFollowsRedirects(t *testing.T) {
 	}
 	if hits.Load() != 0 {
 		t.Fatalf("the redirect target was requested %d times", hits.Load())
+	}
+}
+
+func TestUnixChannelBridgesASocketInTheBox(t *testing.T) {
+	d := newTestDaemon(t)
+	path := filepath.Join(t.TempDir(), "echo.sock")
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		buf := make([]byte, 64)
+		n, _ := conn.Read(buf)
+		conn.Write([]byte("echo:" + string(buf[:n])))
+	}()
+	d.send(map[string]any{"t": "open", "ch": 3, "spec": map[string]any{"kind": "unix", "path": path}})
+	d.expect("opened", func(msg map[string]any) bool {
+		if msg["t"] == "open-failed" && msg["ch"] == float64(3) {
+			t.Fatalf("open failed: %v", msg["error"])
+		}
+		return isMsg("opened", 3)(msg)
+	})
+	d.sendInput(3, "vnc")
+	if got := string(d.nextData(3)); got != "echo:vnc" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestUnixChannelRefusesARelativePathAndAMissingSocket(t *testing.T) {
+	d := newTestDaemon(t)
+	for ch, path := range map[int]string{5: "vnc.sock", 7: filepath.Join(t.TempDir(), "none.sock")} {
+		d.send(map[string]any{"t": "open", "ch": ch, "spec": map[string]any{"kind": "unix", "path": path}})
+		d.expect("open-failed", isMsg("open-failed", ch))
 	}
 }

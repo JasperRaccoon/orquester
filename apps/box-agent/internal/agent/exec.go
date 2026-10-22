@@ -46,6 +46,8 @@ func (a *Agent) handleOpen(l *Link, ch *Channel, raw json.RawMessage) {
 		a.openAttach(ch, s)
 	case *wire.TCPSpec:
 		openTCP(ch, s)
+	case *wire.UnixSpec:
+		openUnix(ch, s)
 	case *wire.FileReadSpec:
 		openFileRead(ch, s)
 	case *wire.FileWriteSpec:

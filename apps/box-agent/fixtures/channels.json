@@ -69,6 +69,12 @@
       "port": 5432
     }
   ],
+  "unix": [
+    {
+      "kind": "unix",
+      "path": "/home/dev/.orq-agent/desktops/d1/vnc.sock"
+    }
+  ],
   "host-tcp": [
     {
       "kind": "host-tcp",

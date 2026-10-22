@@ -19,6 +19,7 @@ import { PassThrough, Readable, type Duplex } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
 import type {
+  BoxChannelSpec,
   BoxDetachedProcInfo,
   BoxFsDirEntry,
   BoxFsStat,
@@ -246,8 +247,13 @@ export function localBoxConnection(options: LocalBoxConnectionOptions = {}): Loc
         close: () => new Promise<void>((resolve) => server.close(() => resolve()))
       };
     },
-    async openChannel(): Promise<Duplex> {
-      throw new Error("openChannel is not supported by the local box double");
+    async openChannel(spec: BoxChannelSpec): Promise<Duplex> {
+      requireConnected();
+      if (spec.kind !== "tcp" && spec.kind !== "unix") throw new Error(`openChannel(${spec.kind}) is not supported by the local box double`);
+      return await new Promise((resolve, reject) => {
+        const socket = spec.kind === "unix" ? createConnection(spec.path, () => resolve(socket)) : createConnection({ port: spec.port, host: spec.host ?? "127.0.0.1" }, () => resolve(socket));
+        socket.once("error", reject);
+      });
     },
     async readFile(path: string, readOptions?: { offset?: number; length?: number }): Promise<Readable> {
       requireConnected();
