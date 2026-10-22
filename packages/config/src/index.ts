@@ -754,6 +754,17 @@ export function usageAgentEnabled(prefs: UsagePrefs, id: string): boolean {
   return prefs.enabled && (prefs.agents[id] ?? true);
 }
 
+// Adapted from T3 Code (MIT): packages/contracts/src/settings.ts
+/** When an idle Claude chat is compacted, with T3 Code's names, labels and order. */
+export const IDLE_COMPACTION_MODES = [
+  { value: "onReturn", label: "When you return" },
+  { value: "beforeCacheExpires", label: "Before the cache expires (beta)" },
+  { value: "off", label: "Never" }
+] as const;
+export const idleCompactionModeSchema = z.enum(["onReturn", "beforeCacheExpires", "off"]);
+export type IdleCompactionMode = z.infer<typeof idleCompactionModeSchema>;
+export const DEFAULT_IDLE_COMPACTION_MODE: IdleCompactionMode = "onReturn";
+
 /**
  * Agent-harness runtime preferences. Daemon-side and per-VPS: the daemon reads
  * them at session launch, so every client that launches a session gets the same
@@ -801,9 +812,49 @@ export const agentPrefsSchema = z.object({
    * default — it spends another account's quota without asking. Never for an agent without
    * managed accounts (OpenCode).
    */
-  switchAccountOnUsageLimit: z.boolean().default(false)
+  switchAccountOnUsageLimit: z.boolean().default(false),
+  /**
+   * When an idle Claude chat over 200,000 tokens is compacted (T3 Code's "Compact idle threads"):
+   * `onReturn` offers it when the user comes back after the prompt cache expired, the default;
+   * `beforeCacheExpires` (beta) has the daemon send `/compact` two minutes before the cache
+   * expires (`apps/daemon/src/agent-chat/idle-compaction.ts`); `off` never compacts on its own
+   * and answers Claude's resume prompt with "keep full history". A value from another version
+   * reads as the default rather than failing the whole file.
+   */
+  claudeIdleCompaction: idleCompactionModeSchema.catch(DEFAULT_IDLE_COMPACTION_MODE).default(DEFAULT_IDLE_COMPACTION_MODE),
+  /**
+   * Per-account override of the mode above, keyed by managed account id (`"system"` for the
+   * system login): T3 Code's per-instance override, since an account is a separate Claude home
+   * with its own cache lifetime (an API key's 5 minutes, a subscription's hour). An absent entry
+   * means "use the default"; an unreadable one is dropped.
+   */
+  claudeIdleCompactionByAccount: z
+    .record(z.string(), z.unknown())
+    .catch({})
+    .default({})
+    .transform((entries) => {
+      const out: Record<string, IdleCompactionMode> = {};
+      for (const [account, mode] of Object.entries(entries)) {
+        const parsed = idleCompactionModeSchema.safeParse(mode);
+        if (parsed.success) out[account] = parsed.data;
+      }
+      return out;
+    })
 });
 export type AgentPrefs = z.infer<typeof agentPrefsSchema>;
+
+/**
+ * The idle-compaction mode a Claude chat on `accountKey` runs under: its account's override, else
+ * the host-wide default. The single resolution point, so the daemon's scheduler, the host's resume
+ * prompt and the Settings panel cannot disagree. *T3: `resolveIdleCompaction`.*
+ */
+export function resolveIdleCompaction(
+  prefs: Pick<AgentPrefs, "claudeIdleCompaction" | "claudeIdleCompactionByAccount">,
+  accountKey: string
+): IdleCompactionMode {
+  const byAccount = prefs.claudeIdleCompactionByAccount;
+  return Object.hasOwn(byAccount, accountKey) ? byAccount[accountKey]! : prefs.claudeIdleCompaction;
+}
 
 /**
  * Whether an interrupted turn in this project is continued after a host
