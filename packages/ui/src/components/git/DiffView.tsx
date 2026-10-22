@@ -1,6 +1,6 @@
 import React, { useMemo } from "react";
 import { cn } from "../../lib/cn";
-import { parseUnifiedDiff, type DiffRow } from "./git-diff";
+import { parseUnifiedDiff, type DiffHunk, type DiffRow } from "./git-diff";
 
 /**
  * Renders a unified diff in the GitHub-Desktop style: a scrollable monospace
@@ -28,14 +28,19 @@ export const DiffView: React.FC<{
 
   return (
     <div className="min-h-0 flex-1 overflow-auto bg-neutral-950 font-mono text-xs leading-5">
-      {parsed.hunks.map((hunk, hunkIndex) =>
-        hunk.rows.map((row, rowIndex) => (
-          <DiffLine key={`${hunkIndex}:${rowIndex}`} row={row} />
-        ))
-      )}
+      <DiffHunks hunks={parsed.hunks} />
     </div>
   );
 };
+
+/** One file's hunks as gutter-numbered rows — shared with the multi-file `DiffFilesView`. */
+export const DiffHunks: React.FC<{ hunks: readonly DiffHunk[] }> = ({ hunks }) => (
+  <>
+    {hunks.map((hunk, hunkIndex) =>
+      hunk.rows.map((row, rowIndex) => <DiffLine key={`${hunkIndex}:${rowIndex}`} row={row} />)
+    )}
+  </>
+);
 
 const DiffLine: React.FC<{ row: DiffRow }> = ({ row }) => {
   if (row.type === "hunk") {
@@ -66,7 +71,19 @@ const DiffLine: React.FC<{ row: DiffRow }> = ({ row }) => {
       <span className="w-4 shrink-0 select-none text-center">
         {row.type === "add" ? "+" : row.type === "del" ? "-" : ""}
       </span>
-      <span className="min-w-0 whitespace-pre-wrap break-words pr-2">{row.text}</span>
+      <span className="min-w-0 whitespace-pre-wrap break-words pr-2">
+        {row.text}
+        {row.noNewline ? (
+          <span
+            role="img"
+            aria-label="No newline at end of file"
+            title="No newline at end of file"
+            className="ml-1 select-none text-neutral-600"
+          >
+            ⊘
+          </span>
+        ) : null}
+      </span>
     </div>
   );
 };
