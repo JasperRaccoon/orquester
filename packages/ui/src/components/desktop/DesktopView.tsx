@@ -18,6 +18,7 @@ import { openDesktopVncChannel, type DesktopVncChannel } from "../../lib/desktop
 import { DesktopToolbar } from "./DesktopToolbar";
 import { DesktopAppsDialog, DesktopInfoDialog } from "./DesktopDialogs";
 import { DesktopKeyStrip, useDesktopHiddenInput } from "./DesktopKeyboard";
+import { exitPoint } from "./desktop-pointer";
 import { MODIFIER_KEYSYM, keysymsForText, pasteKeystroke, type LatchModifier, type PasteChord } from "./desktop-keys";
 
 export interface DesktopViewProps {
@@ -430,6 +431,23 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
     };
     target.addEventListener("touchend", onTouchEnd);
     return () => target.removeEventListener("touchend", onTouchEnd);
+  }, []);
+
+  // The mouse leaving the display parks the remote pointer where it crossed
+  // the edge (see desktop-pointer.ts): otherwise the button it last hovered
+  // stays hovered and its tooltip floats above every window raised next.
+  useEffect(() => {
+    const target = targetRef.current;
+    if (!target) return;
+    const onPointerLeave = (e: PointerEvent) => {
+      if (e.pointerType !== "mouse" || e.buttons !== 0) return; // a drag keeps noVNC's capture
+      const canvas = target.querySelector("canvas");
+      if (!canvas || !rfbRef.current) return;
+      const at = exitPoint(canvas.getBoundingClientRect(), e.clientX, e.clientY);
+      canvas.dispatchEvent(new MouseEvent("mousemove", { clientX: at.x, clientY: at.y, bubbles: true, cancelable: true, view: window }));
+    };
+    target.addEventListener("pointerleave", onPointerLeave);
+    return () => target.removeEventListener("pointerleave", onPointerLeave);
   }, []);
 
   /** Hand the keyboard to the display (to the hidden input while the touch keyboard is up). */
