@@ -1,6 +1,5 @@
 import React from "react";
 import Markdown, { type Components } from "react-markdown";
-import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import { parseForgeLink } from "@orquester/api";
 
@@ -16,7 +15,8 @@ import { CodeBlock } from "./CodeBlock";
 import { extractFenceLanguage } from "./highlight-core";
 import { createIncrementalMarkdownPlugin } from "./incremental";
 import { resolveMarkdownImageSource } from "./local-image";
-import { KATEX_OPTIONS, mightContainMath, remarkChatMath } from "./math";
+import { MarkdownMath } from "./MarkdownMath";
+import { mathKind, mightContainMath, remarkChatMath } from "./math";
 import { MermaidBlock } from "./MermaidBlock";
 import { isMermaidFence } from "./mermaid-render";
 
@@ -27,7 +27,9 @@ import { isMermaidFence } from "./mermaid-render";
  * untrusted by construction, and `dangerouslySetInnerHTML` on it is stored XSS
  * in a single-user box whose sessions run shells. `react-markdown` also refuses
  * raw HTML by default, which is the behaviour we want and the reason no
- * `rehype-raw` appears anywhere near this file.
+ * `rehype-raw` appears anywhere near this file. Math (`math.ts`) arrives as
+ * `code.language-math` elements and is typeset by `MarkdownMath`, which loads
+ * KaTeX only once a message has a formula.
  *
  * Three rules, all of them T3's:
  *
@@ -102,8 +104,10 @@ function MarkdownCode({
   children?: React.ReactNode;
 }): React.ReactElement {
   const { mode, streaming } = React.useContext(MarkdownConfigCtx);
-  const language = extractFenceLanguage(className);
   const text = nodeToText(children);
+  const math = mathKind(className);
+  if (math) return <MarkdownMath tex={text} display={math === "display"} />;
+  const language = extractFenceLanguage(className);
   // `react-markdown` marks a fenced block with `language-*`; a fence with no
   // info string arrives with no class but always with a trailing newline.
   const fenced = language.length > 0 || text.includes("\n");
@@ -240,9 +244,6 @@ const COMPONENTS: Components = {
 
 const STATIC_PLUGINS = [remarkGfm];
 const MATH_PLUGINS = [remarkGfm, remarkChatMath as unknown as typeof remarkGfm];
-const NO_REHYPE_PLUGINS: never[] = [];
-/** KaTeX writes hast elements (no HTML string); see `math.ts` for its settings. */
-const MATH_REHYPE_PLUGINS = [[rehypeKatex, KATEX_OPTIONS]] as React.ComponentProps<typeof Markdown>["rehypePlugins"];
 
 /**
  * Arms the incremental parser: streaming, and the text already contains a
@@ -267,8 +268,8 @@ export const ChatMarkdown = React.memo(function ChatMarkdown({
   incrementalPlugin.current ??= createIncrementalMarkdownPlugin() as unknown as typeof remarkGfm;
 
   const armed = shouldArmIncrementalParser(text, streaming);
-  // Math is armed per message by a dollar sign, so the common message pays
-  // nothing for it; the arrays are memoised so a stream's tokens keep the
+  // Math is armed per message by a delimiter (`mightContainMath`), so the
+  // common message pays nothing for it; the arrays are memoised so a stream's tokens keep the
   // processor unless one of the two switches flips.
   const math = mightContainMath(text);
   const plugins = React.useMemo(() => {
@@ -290,11 +291,7 @@ export const ChatMarkdown = React.memo(function ChatMarkdown({
         )}
         {...(streaming ? { "data-streaming": "true" } : {})}
       >
-        <Markdown
-          remarkPlugins={plugins}
-          rehypePlugins={math ? MATH_REHYPE_PLUGINS : NO_REHYPE_PLUGINS}
-          components={COMPONENTS}
-        >
+        <Markdown remarkPlugins={plugins} components={COMPONENTS}>
           {text}
         </Markdown>
       </div>
@@ -307,7 +304,7 @@ export const ChatMarkdown = React.memo(function ChatMarkdown({
 // ---------------------------------------------------------------------------
 
 /**
- * Emphasis, code and links only; everything else is unwrapped to its text. A
+ * Emphasis, code, math and links only; everything else is unwrapped to its text. A
  * question option's description sits inside the option's `<button>`, where a
  * block (`<div>`, `<p>`, `<pre>`) or a second interactive element is invalid
  * markup — and a link that navigated would swallow the click that picks the
@@ -318,11 +315,15 @@ const INLINE_ELEMENTS = ["p", "strong", "em", "del", "code", "a", "br"];
 const INLINE_COMPONENTS: Components = {
   // A `<span>`, not a `<p>`: phrasing content only inside a button.
   p: ({ children }) => <span className="block [&:not(:first-child)]:mt-1">{children}</span>,
-  code: ({ children }) => (
-    <code className="rounded-[0.3rem] border border-neutral-800 bg-neutral-900/70 px-1 font-mono text-[0.92em] text-neutral-300">
-      {children}
-    </code>
-  ),
+  code: ({ className, children }) => {
+    const math = mathKind(className);
+    if (math) return <MarkdownMath tex={nodeToText(children)} display={math === "display"} focusable={false} />;
+    return (
+      <code className="rounded-[0.3rem] border border-neutral-800 bg-neutral-900/70 px-1 font-mono text-[0.92em] text-neutral-300">
+        {children}
+      </code>
+    );
+  },
   a: ({ children }) => <span className="text-info-300">{children}</span>
 };
 
@@ -339,7 +340,7 @@ export const ChatInlineMarkdown = React.memo(function ChatInlineMarkdown({
   return (
     <span className={cn("min-w-0 [overflow-wrap:anywhere]", className)}>
       <Markdown
-        remarkPlugins={STATIC_PLUGINS}
+        remarkPlugins={mightContainMath(text) ? MATH_PLUGINS : STATIC_PLUGINS}
         allowedElements={INLINE_ELEMENTS}
         unwrapDisallowed
         components={INLINE_COMPONENTS}
