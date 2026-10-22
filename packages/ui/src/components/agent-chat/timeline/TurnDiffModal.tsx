@@ -129,7 +129,7 @@ export function TurnDiffBody({ request }: { request: TurnDiffRequest }): React.R
       diff={state?.diff ?? ""}
       loading={state?.loading ?? true}
       emptyLabel={
-        ignoreWhitespace ? "This turn changed no files, apart from whitespace." : "This turn changed no files."
+        ignoreWhitespace ? "No changes left once whitespace is hidden." : "This turn changed no files."
       }
       controls={toggle}
     />
