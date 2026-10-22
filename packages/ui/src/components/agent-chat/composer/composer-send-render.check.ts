@@ -61,7 +61,7 @@ const TARGET: RewindTarget = {
 };
 
 /** A freshly mounted composer for `sessionId` — what a project switch and back renders. */
-function composer(sessionId: string): string {
+function composer(sessionId: string, extra: Record<string, unknown> = {}): string {
   return render(
     createElement(OrquesterProvider, {
       runtime: "web",
@@ -85,7 +85,8 @@ function composer(sessionId: string): string {
         onRewind: () => undefined,
         actions: {} as never,
         onHeightChange: () => undefined,
-        active: true
+        active: true,
+        ...extra
       })
     })
   );
@@ -119,6 +120,29 @@ try {
 assert.ok(!DISABLED_ATTR.test(button(composer("A"), "send")), "settled: A can implement its plan");
 assert.ok(!DISABLED_ATTR.test(button(composer("A"), "rewind")), "settled: A may rewind again");
 
+// ---------------------------------------------------------------------------
+// A docked request: the composer stays usable and says what Send will do
+// ---------------------------------------------------------------------------
+
+const overApproval = composer("C", {
+  isTurnActive: true,
+  hasPendingRequest: true,
+  actionableProposedPlan: null,
+  pendingRequests: { approvalIds: ["req-1"], respondingRequestIds: [], hasQuestion: false }
+});
+assert.match(overApproval, /data-composer-pending-hint="true"[^>]*>Sending declines the pending request and redirects the agent\.</);
+assert.match(overApproval, /placeholder="Tell the agent what to do instead…"/);
+assert.doesNotMatch(overApproval, /<textarea[^>]*disabled/, "the field stays usable");
+const overQuestion = composer("C", {
+  hasPendingRequest: true,
+  actionableProposedPlan: null,
+  pendingRequests: { approvalIds: [], respondingRequestIds: [], hasQuestion: true }
+});
+assert.match(overQuestion, />Sending answers the question above\.</);
+const legacy = composer("C", { hasPendingRequest: true, actionableProposedPlan: null });
+assert.doesNotMatch(legacy, /data-composer-pending-hint/, "not told what the dock holds: no promise");
+
 releaseThreadStore("A");
 releaseThreadStore("B");
+releaseThreadStore("C");
 console.log("composer send render checks passed");

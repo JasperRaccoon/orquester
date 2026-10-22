@@ -1714,7 +1714,10 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
           ...(input.attachments ? { attachments: input.attachments } : {}),
           ...(input.context ? { context: input.context } : {}),
           interactionMode: input.interactionMode ?? get().slice.interactionMode,
-          ...(input.modelSelection ? { modelSelection: input.modelSelection } : {})
+          ...(input.modelSelection ? { modelSelection: input.modelSelection } : {}),
+          ...(input.declineApprovals && input.declineApprovals.length > 0
+            ? { declineApprovals: input.declineApprovals }
+            : {})
         };
         const commandId = newId();
         // In the tab's outbox from before its first post until it settles:

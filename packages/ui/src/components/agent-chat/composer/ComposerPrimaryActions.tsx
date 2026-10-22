@@ -16,6 +16,12 @@ export interface ComposerPrimaryActionsProps {
   sendDisabledReason: string | null;
   /** True once a plain send would queue rather than steer (§7.4). */
   willQueue: boolean;
+  /**
+   * What Send does to the card in front of the user, when one is up ("Decline
+   * and redirect the agent", "Answer the question"): the button's label and
+   * tooltip say so.
+   */
+  pendingSendLabel?: string | null | undefined;
   onInterrupt: () => void;
 }
 
@@ -52,6 +58,7 @@ export function ComposerPrimaryActions({
   isSendBusy,
   sendDisabledReason,
   willQueue,
+  pendingSendLabel = null,
   onInterrupt
 }: ComposerPrimaryActionsProps): React.ReactElement {
   const sendDisabled = sendDisabledReason !== null || isSendBusy || !hasSendableContent;
@@ -102,10 +109,13 @@ export function ComposerPrimaryActions({
       data-composer-shortcut="send"
       onPointerDown={(event) => event.preventDefault()}
       disabled={sendDisabled}
-      title={sendDisabledReason ?? undefined}
+      title={sendDisabledReason ?? pendingSendLabel ?? undefined}
       aria-label={
         sendDisabledReason ??
-        (isSendBusy ? "Sending" : isRunning ? (willQueue ? "Queue message" : "Steer the agent") : "Send message")
+        (isSendBusy
+          ? "Sending"
+          : (pendingSendLabel ??
+            (isRunning ? (willQueue ? "Queue message" : "Steer the agent") : "Send message")))
       }
       className={cn(
         ROUND,

@@ -120,6 +120,8 @@ export interface OutboxTurn {
   context?: ComposerContextRecord[];
   interactionMode?: InteractionMode;
   modelSelection?: ModelSelection;
+  /** A redirect's approvals (`TurnCommandBody.declineApprovals`): re-posted with the message. */
+  declineApprovals?: string[];
 }
 
 /** A composer send (a turn or a steer), from its first post until it settles. */
@@ -254,6 +256,10 @@ function parseTurn(value: unknown): OutboxTurn | null {
   if (!isRecord(value) || typeof value.input !== "string") return null;
   const interactionMode = parseInteractionMode(value.interactionMode);
   const modelSelection = parseModelSelection(value.modelSelection);
+  // A list another bundle wrote that is not one of ids is dropped, never the send.
+  const declineApprovals = Array.isArray(value.declineApprovals)
+    ? value.declineApprovals.filter((id): id is string => typeof id === "string" && id.length > 0)
+    : [];
   return {
     input: value.input,
     ...(Array.isArray(value.attachments)
@@ -261,7 +267,8 @@ function parseTurn(value: unknown): OutboxTurn | null {
       : {}),
     ...(Array.isArray(value.context) ? { context: parsePersistedContextRecords(value.context) } : {}),
     ...(interactionMode ? { interactionMode } : {}),
-    ...(modelSelection ? { modelSelection } : {})
+    ...(modelSelection ? { modelSelection } : {}),
+    ...(declineApprovals.length > 0 ? { declineApprovals } : {})
   };
 }
 

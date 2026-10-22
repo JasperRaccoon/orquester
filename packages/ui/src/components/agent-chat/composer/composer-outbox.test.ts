@@ -286,6 +286,15 @@ describe("the composer outbox", () => {
       );
     });
 
+    it("keeps a redirect's approvals with its send, so a re-post declines them too", async () => {
+      const [entry] = parse([
+        { ...send, turn: { input: "use staging", declineApprovals: ["req-1", "", 4, "req-2"] } }
+      ]);
+      assert.equal(entry?.kind, "send");
+      if (entry?.kind !== "send") return;
+      assert.deepEqual(entry.turn, { input: "use staging", declineApprovals: ["req-1", "req-2"] });
+    });
+
     it("drops a malformed optional field, never the message it belongs to", async () => {
       const [entry] = parse([
         {
@@ -299,7 +308,8 @@ describe("the composer outbox", () => {
             ],
             context: [{ kind: "file", label: "a.ts", ref: "/w/p/a.ts" }, { kind: 1 }],
             interactionMode: "turbo",
-            modelSelection: { model: 7 }
+            modelSelection: { model: 7 },
+            declineApprovals: "req-1"
           },
           generatedPrompt: "yes"
         }

@@ -722,6 +722,12 @@ export interface AgentChatActions {
      * what the user is typing.
      */
     generatedPrompt?: boolean;
+    /**
+     * The message redirects the agent: the pending approvals the user saw,
+     * which the host declines before it steers the message in
+     * (`TurnCommandBody.declineApprovals`).
+     */
+    declineApprovals?: string[];
   }): Promise<void>;
   /** `/turn` against a live turn. Same route; named apart for call-site clarity. */
   steer(input: { text: string; attachments?: AttachmentRef[] }): Promise<void>;

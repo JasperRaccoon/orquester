@@ -8,7 +8,8 @@ import type {
   ComposerContextRecord,
   InteractionMode,
   ModelSelection,
-  SelectProviderOptionDescriptor
+  SelectProviderOptionDescriptor,
+  ThreadItem
 } from "@orquester/api/agent-chat";
 import { MAX_TURN_ATTACHMENTS } from "@orquester/api/agent-chat";
 
@@ -128,6 +129,15 @@ import {
   type ComposerTrigger
 } from "./composer-trigger";
 import { useComposerPathSearch } from "./use-composer-path-search";
+import { planPendingRequestSend, pendingRequestWording } from "./composer-pending-send";
+import {
+  buildPromptRecallEntries,
+  promptRecallDirection,
+  stepPromptRecall,
+  textareaCaretOnEdge,
+  type PromptRecallPosition
+} from "./composer-recall";
+import { answerQuestionFromComposer } from "../banners/question-composer-bridge";
 
 /**
  * The **live** draft: what is on screen, including uploads still in flight.
@@ -212,6 +222,12 @@ export interface ChatComposerExtraProps {
    * whose agent no profile serves). Picking one calls `actions.setProfile`.
    */
   profileChip?: Omit<ProfileChipProps, "onChange" | "returnFocusTo"> | undefined;
+  /**
+   * The thread's items, read when an arrow key may recall a sent prompt
+   * (`composer-recall.ts`) — a reader rather than the list, so the composer
+   * does not re-render on every streamed token. Absent: no recall.
+   */
+  readRecallItems?: (() => readonly ThreadItem[]) | undefined;
 }
 
 /**
@@ -251,6 +267,7 @@ export function ChatComposer({
   accountNote,
   isTurnActive,
   hasPendingRequest,
+  pendingRequests,
   queue,
   activePlan,
   actionableProposedPlan,
@@ -264,7 +281,8 @@ export function ChatComposer({
   searchRoot,
   active,
   onLeaveDrillIn,
-  profileChip
+  profileChip,
+  readRecallItems
 }: ChatComposerProps & ChatComposerExtraProps): React.ReactElement {
   const isMobile = !useMediaQuery("(min-width: 640px)");
   const sessionCwd = useAppStore(
@@ -327,6 +345,8 @@ export function ChatComposer({
   const [focused, setFocused] = React.useState(false);
   const [highlightedIndex, setHighlightedIndex] = React.useState(0);
   const [menuDismissed, setMenuDismissed] = React.useState(false);
+  /** The sent prompt ArrowUp/ArrowDown recalled into the draft, while it stays unedited. */
+  const [recallPosition, setRecallPosition] = React.useState<PromptRecallPosition | null>(null);
   const [notice, setNotice] = React.useState<string | null>(null);
   /**
    * A send from THIS thread is in flight — from this composer, or from one a
@@ -393,6 +413,8 @@ export function ChatComposer({
     // has a send in flight is the registry's to say, not this instance's.
     setNotice(null);
     setMenuDismissed(false);
+    // A recall belongs to the thread it walked.
+    setRecallPosition(null);
     // A half-finished double Escape belongs to the thread it was pressed in.
     escapeSequenceRef.current?.reset();
   }, [sessionId]);
@@ -1012,7 +1034,10 @@ export function ChatComposer({
   React.useEffect(() => setMenuDismissed(false), [triggerKind, triggerStart]);
 
   const menuOpen = trigger !== null && (menuItems.length > 0 || pathSearch.loading);
-  const showMenu = menuOpen && !menuDismissed;
+  // An unedited recall is a sent prompt, not something being typed: its `/`
+  // or `@` opens no menu, so the next arrow keeps walking the history (T3).
+  const showingRecall = recallPosition !== null && recallPosition.recalled === draft.text;
+  const showMenu = menuOpen && !menuDismissed && !showingRecall;
 
   const pickMenuItem = React.useCallback(
     (item: ComposerMenuItem) => {
@@ -1249,13 +1274,20 @@ export function ChatComposer({
   // A draft files came back into may hold more than the eight: every one stays,
   // and it is neither sent nor queued until the user removes enough (§7.4).
   const countBlock = attachmentCountBlockSend(draft.attachments);
-  // An open card holds a send back — but not a `/goal …` the host applies
-  // itself (final fix wave, the same rule as the chip's actions).
-  const cardBlocksSend = pendingRequestBlocksSend({
-    hasPendingRequest,
-    text: draft.text,
-    hostParsesGoal: hostGoalCommand
-  });
+  // Told what the dock holds, a card never disables Send: a message over an
+  // approval redirects the agent and one over a question answers it, and what
+  // refuses either is said on submit (`planPendingRequestSend`). Not told, an
+  // open card holds a send back — but not a `/goal …` the host applies itself
+  // (final fix wave, the same rule as the chip's actions).
+  const cardBlocksSend =
+    pendingRequests === undefined &&
+    pendingRequestBlocksSend({
+      hasPendingRequest,
+      text: draft.text,
+      hostParsesGoal: hostGoalCommand
+    });
+  // What a send does to the card in front of the user, said before they send.
+  const pendingWording = pendingRequests === undefined ? null : pendingRequestWording(pendingRequests);
   const sendDisabledReason = reverting
     ? REVERT_RUNNING_REASON
     : cardBlocksSend
@@ -1286,6 +1318,8 @@ export function ChatComposer({
          * never the blockquotes glued into the textarea.
          */
         quoted?: { text: string; quotes: readonly ComposerQuote[] };
+        /** A redirect: the approvals the host declines before it steers this in. */
+        declineApprovals?: string[];
       } = {}
     ) => {
       // The thread this message leaves FROM. A failure goes back into its
@@ -1309,7 +1343,8 @@ export function ChatComposer({
               ...(refs.length > 0 ? { attachments: refs } : {}),
               interactionMode: mode,
               ...(modelSelection ? { modelSelection } : {}),
-              ...(generatedPrompt ? { generatedPrompt: true } : {})
+              ...(generatedPrompt ? { generatedPrompt: true } : {}),
+              ...(options.declineApprovals ? { declineApprovals: options.declineApprovals } : {})
             })
         });
         if (outcome.kind === "sent") {
@@ -1387,6 +1422,7 @@ export function ChatComposer({
       // way — from any composer, a reload's re-post included — refuses this one.
       sending: isComposerSending(sessionId),
       hasPendingRequest,
+      pendingRequests,
       adapterId: provider?.id,
       hostParsesGoal: hostGoalCommand
     });
@@ -1394,7 +1430,10 @@ export function ChatComposer({
     // does — a stale "Answer the request above first." must not outlive it.
     setNotice(plan.notice);
     if (plan.text === null) return false;
-    void runSend(plan.text, interactionMode, [], { returnToDraftOnFailure: false });
+    void runSend(plan.text, interactionMode, [], {
+      returnToDraftOnFailure: false,
+      ...(plan.declineApprovals ? { declineApprovals: plan.declineApprovals } : {})
+    });
     return true;
   };
   const sendExternalTextRef = React.useRef(sendExternalText);
@@ -1419,6 +1458,7 @@ export function ChatComposer({
       // way — from any composer, a reload's re-post included — refuses this one.
       sending: isComposerSending(sessionId),
       hasPendingRequest,
+      pendingRequests,
       adapterId: provider?.id,
       hostParsesGoal: hostGoalCommand,
       showPlanModeToggle,
@@ -1450,7 +1490,12 @@ export function ChatComposer({
         return { ok: true, disposition: "queued" };
       case "send":
         setNotice(null);
-        void runSend(plan.text, interactionMode, []);
+        void runSend(
+          plan.text,
+          interactionMode,
+          [],
+          plan.declineApprovals ? { declineApprovals: plan.declineApprovals } : {}
+        );
         return { ok: true, disposition: "sent" };
     }
   };
@@ -1546,6 +1591,36 @@ export function ChatComposer({
       }
 
       const sentAttachments = draft.attachments;
+      // The card in front of the user decides what this send is: a redirect
+      // over an approval, the open question's answer, or an ordinary send.
+      const pendingPlan =
+        pendingRequests === undefined
+          ? ({ kind: "send" } as const)
+          : planPendingRequestSend({
+              pending: pendingRequests,
+              text: outgoing,
+              attachmentCount: sentAttachments.length,
+              hostParsesGoal: hostGoalCommand
+            });
+      if (pendingPlan.kind === "refuse") {
+        setNotice(pendingPlan.reason);
+        return;
+      }
+      if (pendingPlan.kind === "answer-question") {
+        const answered = answerQuestionFromComposer(sessionId, outgoing);
+        if (answered === null || !answered.ok) {
+          setNotice(answered?.reason ?? PENDING_REQUEST_REASON);
+          return;
+        }
+        // The card took it: the text is an answer now, not a draft.
+        setDraft(EMPTY_DRAFT);
+        carriedContextRef.current = [];
+        persistRef.current?.write(EMPTY_PERSISTED_DRAFT);
+        applyCaret(0);
+        setNotice(null);
+        return;
+      }
+      const declineApprovals = pendingPlan.kind === "redirect" ? pendingPlan.declineApprovals : undefined;
       const disposition = resolveFollowUpDisposition({
         followUpBehavior: chatPrefs.followUpBehavior,
         intent,
@@ -1553,7 +1628,9 @@ export function ChatComposer({
         isRunning: isTurnActive && plan === null,
         // Nor is a `/goal …` the host applies itself (goals §5.1): it starts
         // no turn, so holding it behind the running one only delays it.
-        hostCommand: isHostGoalCommandText(outgoing, hostGoalCommand)
+        hostCommand: isHostGoalCommandText(outgoing, hostGoalCommand),
+        // Nor a redirect: it answers the card the running turn waits on.
+        redirect: declineApprovals !== undefined
       });
 
       revokeImagePreviews(draft.attachments);
@@ -1591,7 +1668,8 @@ export function ChatComposer({
         resolveText: implementationText,
         // A failure puts the quotes back as quotes and the user's words as
         // they typed them (`runSend`), not the composed blockquotes.
-        ...(quotes.length > 0 ? { quoted: { text: text.trim(), quotes } } : {})
+        ...(quotes.length > 0 ? { quoted: { text: text.trim(), quotes } } : {}),
+        ...(declineApprovals !== undefined ? { declineApprovals } : {})
       });
     },
     [
@@ -1606,6 +1684,7 @@ export function ChatComposer({
       interactionMode,
       isTurnActive,
       chatPrefs.followUpBehavior,
+      pendingRequests,
       persistNow,
       reverting,
       runSend,
@@ -1825,6 +1904,39 @@ export function ChatComposer({
       }
     }
 
+    // ArrowUp / ArrowDown walk this chat's sent prompts from an empty
+    // composer, and only from the edge line — otherwise they move the caret.
+    const recallDirection =
+      readRecallItems === undefined
+        ? null
+        : promptRecallDirection({
+            key: event.key,
+            shiftKey: event.shiftKey,
+            altKey: event.altKey,
+            metaKey: event.metaKey,
+            ctrlKey: event.ctrlKey,
+            isComposing: event.nativeEvent.isComposing,
+            menuOpen: showMenu,
+            questionPending: pendingRequests?.hasQuestion === true,
+            draftHasExtras: draft.attachments.length > 0 || draft.quotes.length > 0,
+            caretOnEdge: (edge) => textareaCaretOnEdge(event.currentTarget, edge)
+          });
+    if (recallDirection !== null && readRecallItems !== undefined) {
+      const step = stepPromptRecall({
+        direction: recallDirection,
+        entries: buildPromptRecallEntries(readRecallItems()),
+        position: recallPosition,
+        currentPrompt: draft.text
+      });
+      if (step !== null) {
+        event.preventDefault();
+        setRecallPosition(step.position);
+        setDraft((state) => ({ ...state, text: step.prompt }));
+        applyCaret(step.prompt.length);
+        return;
+      }
+    }
+
     if (event.key === "Escape") {
       // Which of these it is — a held key's repeat, the menu's, an open
       // layer's, the drill-in's, the turn's or half of Esc Esc — is
@@ -1930,7 +2042,8 @@ export function ChatComposer({
       followUpBehavior: chatPrefs.followUpBehavior,
       intent: "foreground",
       isRunning: isTurnActive,
-      hostCommand: isHostGoalCommandText(draft.text, hostGoalCommand)
+      hostCommand: isHostGoalCommandText(draft.text, hostGoalCommand),
+      redirect: (pendingRequests?.approvalIds.length ?? 0) > 0
     }) === "queue";
 
   return (
@@ -2006,7 +2119,8 @@ export function ChatComposer({
             aria-activedescendant={showMenu ? `${menuId}-option-${highlightedIndex}` : undefined}
             aria-autocomplete="list"
             placeholder={
-              isTurnActive
+              pendingWording?.placeholder ??
+              (isTurnActive
                 ? willQueue
                   ? "Queue a follow-up…"
                   : "Steer the agent…"
@@ -2016,9 +2130,13 @@ export function ChatComposer({
                     : "Say what to do with the quotes…"
                   : planTitle
                   ? `Refine “${planTitle}” — or press Implement`
-                  : "Ask, or describe the change…"
+                  : "Ask, or describe the change…")
             }
             onChange={(event) => {
+              // An edited recall is a fresh draft: the arrows are the caret's again.
+              if (recallPosition !== null && recallPosition.recalled !== event.target.value) {
+                setRecallPosition(null);
+              }
               setDraft((state) => ({ ...state, text: event.target.value }));
               setCursor(event.target.selectionStart ?? event.target.value.length);
               if (notice) setNotice(null);
@@ -2043,6 +2161,14 @@ export function ChatComposer({
           {statusText ? (
             <p className="pt-1 text-[11px] leading-snug text-warn-300" role="status">
               {statusText}
+            </p>
+          ) : pendingWording ? (
+            <p
+              data-composer-pending-hint="true"
+              className="pt-1 text-[11px] leading-snug text-neutral-500"
+              role="status"
+            >
+              {pendingWording.hint}
             </p>
           ) : null}
 
@@ -2179,6 +2305,7 @@ export function ChatComposer({
               isSendBusy={sending}
               sendDisabledReason={sendDisabledReason}
               willQueue={willQueue}
+              pendingSendLabel={pendingWording?.sendLabel ?? null}
               onInterrupt={interrupt}
             />
           </div>
