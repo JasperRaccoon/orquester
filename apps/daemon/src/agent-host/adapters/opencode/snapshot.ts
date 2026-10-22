@@ -290,11 +290,17 @@ function flattenOpenCodeModels(inventory: OpenCodeInventory): ProviderModel[] {
         continue;
       }
       const subProvider = provider.name?.trim();
+      const context = model.limit?.context;
       models.push({
         slug: `${provider.id}/${model.id}`,
         name,
         ...(subProvider !== undefined && subProvider.length > 0 ? { subProvider } : {}),
         ...(defaults[provider.id] === model.id ? { isDefault: true } : {}),
+        // The same `limit.context` the meter divides by ({@link modelContextLimits}): a handoff
+        // into the model is sized by it.
+        ...(typeof context === "number" && Number.isFinite(context) && context > 0
+          ? { contextWindow: Math.round(context) }
+          : {}),
         capabilities: openCodeCapabilitiesForModel({
           providerID: provider.id,
           model,
