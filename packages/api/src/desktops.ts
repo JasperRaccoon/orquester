@@ -46,10 +46,27 @@ export interface DesktopSummary {
   renderThreads: number;
   status: DesktopStatus;
   error?: string;
+  /**
+   * boxes: what a `starting` desktop is doing right now when that takes a while (installing the
+   * desktop packages in its VM: the latest line of the install). Absent otherwise.
+   */
+  statusDetail?: string;
+  /**
+   * boxes: set when the desktop runs in a Linux VM (Ephemeral AI VMs) instead of on the daemon's
+   * host. `connected: false` while the VM's link is down: the desktop keeps running there and the
+   * view comes back once the link does.
+   */
+  box?: DesktopBoxInfo;
   audio: DesktopAudioAvailability;
   apps: DesktopAppSummary[];
   windows: DesktopWindow[];
   activeWindowId: string | null;
+}
+
+/** boxes: where a VM desktop runs (see {@link DesktopSummary.box}). */
+export interface DesktopBoxInfo {
+  id: string;
+  connected: boolean;
 }
 
 export interface DesktopHostTool {
@@ -118,6 +135,7 @@ const desktopPath = (id: string): string => `/api/desktops/${encodeURIComponent(
 export const desktopRoutes = {
   list: "/api/desktops",
   create: "/api/desktops",
+  /** The host's prerequisites; `?projectPath=` (boxes) answers for that project's machine: its VM for a box project. */
   host: "/api/desktops/host",
   suggestions: "/api/desktops/suggestions",
   desktop: desktopPath,

@@ -53,6 +53,17 @@ test("a well-formed summary parses; unknown fields ride along", () => {
   assert.equal((parsed as unknown as { future: number }).future, 1);
 });
 
+test("a VM desktop's box and install progress are kept; a malformed one is dropped, not the desktop", () => {
+  const vm = parseDesktopSummary({ ...desktop({ id: "d1", status: "starting" }), box: { id: "b1", connected: false, extra: 1 }, statusDetail: "Unpacking openbox" });
+  assert.deepEqual(vm?.box, { id: "b1", connected: false });
+  assert.equal(vm?.statusDetail, "Unpacking openbox");
+  const odd = parseDesktopSummary({ ...desktop({ id: "d2" }), box: { id: 7 }, statusDetail: 3 });
+  assert.equal(odd?.id, "d2");
+  assert.equal(odd?.box, undefined);
+  assert.equal(odd?.statusDetail, undefined);
+  assert.equal(parseDesktopSummary(desktop({ id: "d3" }))?.box, undefined);
+});
+
 test("malformed summaries are refused", () => {
   assert.equal(parseDesktopSummary(null), null);
   assert.equal(parseDesktopSummary({ ...desktop({ id: "d1" }), status: "exploded" }), null);

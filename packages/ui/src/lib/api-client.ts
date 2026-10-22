@@ -2031,8 +2031,9 @@ export class ApiClient {
 
   // Desktops (virtual X displays streamed over RFB + Opus)
 
-  desktopHostStatus(signal?: AbortSignal): Promise<DesktopHostStatus> {
-    return this.send("GET", desktopRoutes.host, { signal });
+  /** boxes: with `projectPath`, the prerequisites where that project's desktops run (its VM for a box project). */
+  desktopHostStatus(signal?: AbortSignal, projectPath?: string): Promise<DesktopHostStatus> {
+    return this.send("GET", desktopRoutes.host, { query: projectPath ? { projectPath } : undefined, signal });
   }
 
   listDesktops(projectPath?: string, signal?: AbortSignal): Promise<DesktopSummary[]> {
