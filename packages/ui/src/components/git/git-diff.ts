@@ -232,10 +232,17 @@ export function parseDiffFiles(diff: string): DiffFile[] {
   };
 
   const lines = diff.split("\n");
+  /** `--- x` directly followed by `+++ y`: a bare patch's file header. */
+  const isBareHeader = (index: number): boolean =>
+    lines[index]!.startsWith("--- ") && (lines[index + 1] ?? "").startsWith("+++ ");
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index]!;
 
-    if (file !== null && hunk !== null && (oldLeft > 0 || newLeft > 0)) {
+    // Inside a hunk by its counts — or past them on a +/-/context line, which
+    // git never writes there but a hand-made patch with understated counts
+    // does: its lines are kept rather than dropped.
+    const overrun = /^[+\- ]/.test(line) && !isBareHeader(index);
+    if (file !== null && hunk !== null && (oldLeft > 0 || newLeft > 0 || overrun)) {
       const marker = line[0];
       const current: FileBuilder = file;
       const rows: DiffRow[] = (hunk as DiffHunk).rows;
@@ -291,8 +298,7 @@ export function parseDiffFiles(diff: string): DiffFile[] {
 
     const hunkMatch = HUNK_HEADER.exec(line);
     // A second bare patch starts at its own `--- ` once the previous one has hunks.
-    const bareStart =
-      line.startsWith("--- ") && (lines[index + 1] ?? "").startsWith("+++ ") && (file === null || hunk !== null);
+    const bareStart = isBareHeader(index) && (file === null || hunk !== null);
     if (bareStart || (file === null && hunkMatch)) {
       flush();
       file = newFile();

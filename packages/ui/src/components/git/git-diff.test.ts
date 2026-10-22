@@ -257,6 +257,20 @@ describe("parseDiffFiles", () => {
     assert.deepEqual([files[0]?.additions, files[0]?.deletions], [1, 1]);
   });
 
+  it("keeps the lines of a hunk whose counts are understated", () => {
+    const [file] = parseDiffFiles(lines("--- a/x.ts", "+++ b/x.ts", "@@ -1 +1 @@", "-a", "+b", "+c", " d"));
+    assert.deepEqual(
+      file?.hunks[0]?.rows.slice(1).map((r) => [r.type, r.text]),
+      [
+        ["del", "a"],
+        ["add", "b"],
+        ["add", "c"],
+        ["context", "d"]
+      ]
+    );
+    assert.deepEqual([file?.additions, file?.deletions], [2, 1]);
+  });
+
   it("keeps what a truncated patch got through", () => {
     const files = parseDiffFiles("diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1,9 +1,9 @@\n+a");
     assert.equal(files.length, 1);
