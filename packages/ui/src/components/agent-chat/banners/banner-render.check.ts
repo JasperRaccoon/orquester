@@ -53,6 +53,17 @@ try {
   assert.ok(warned.includes(`aria-description="${warning}"`));
   assert.match(warned, />Run</, "the provider's option label is visible");
 
+  // Why the provider asked is said under the detail, and only when it said.
+  const reasoned = renderToStaticMarkup(createElement(ApprovalCard, {
+    approval: { ...approval, reason: "Permission rule Bash(make:*) requires approval" },
+    pendingCount: 1, isResponding: false, onRespond: noop
+  }));
+  assert.match(reasoned, /data-approval-reason="true"[^>]*>Permission rule Bash\(make:\*\) requires approval</);
+  const unreasoned = renderToStaticMarkup(createElement(ApprovalCard, {
+    approval, pendingCount: 1, isResponding: false, onRespond: noop
+  }));
+  assert.doesNotMatch(unreasoned, /data-approval-reason/);
+
   // The dock owns whether a native callback request can be dismissed.
   const dockProps = {
     sessionId: "s1", approvals: [], respondingRequestIds: [], backgroundLiveness: null,

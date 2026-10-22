@@ -45,6 +45,7 @@ import type { FullOutputSource } from "../../lib/agent-chat/full-output";
 import type { DrillInMemoryEntry } from "./roster/drill-in-memory";
 import type { RewindTarget } from "../../lib/agent-chat/rewind.logic";
 import type { TimelineForkInput } from "./timeline/context";
+import type { ComposerPendingRequests } from "./composer/composer-pending-send";
 
 /**
  * §7.1: **one** `AgentChatView` instance serves every chat tab in a project.
@@ -276,8 +277,14 @@ export interface ChatComposerProps {
   accountNote?: string | undefined;
   /** A turn is live: Enter steers, Escape interrupts, the primary action is Stop. */
   isTurnActive: boolean;
-  /** Blocks a flush and disables submit while a card is open (§7.4). */
+  /** Blocks a flush while a card is open (§7.4); disables submit only without {@link pendingRequests}. */
   hasPendingRequest: boolean;
+  /**
+   * What the dock holds: a send over an approval then redirects the agent and
+   * one over a question answers it (`composer-pending-send.ts`). Absent: any
+   * open card holds a send back.
+   */
+  pendingRequests?: ComposerPendingRequests | undefined;
   queue: QueuedComposerMessage[];
   activePlan: ActivePlanState | null;
   /**

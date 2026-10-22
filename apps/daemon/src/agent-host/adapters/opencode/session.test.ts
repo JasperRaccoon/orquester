@@ -19,7 +19,7 @@ import {
   type RuntimeEvent
 } from "@orquester/api/agent-chat";
 
-import type { AdapterContext } from "../../adapter.ts";
+import { APPROVAL_REDIRECT_MESSAGE, type AdapterContext } from "../../adapter.ts";
 import { createLivenessRegistry } from "../../orchestration/liveness.ts";
 import { OpenCodeThreadSession } from "./session.ts";
 import type { OpenCodeServerHandle } from "./server.ts";
@@ -1078,6 +1078,34 @@ test("an approval reply reaches `POST /permission/{id}/reply`, never the SDK tra
   assert.equal(resolved.payload.decision, "acceptForSession");
   await session.stop({ reason: "test", hostInitiated: true });
   harness.dispose();
+});
+
+test("a redirecting decline rejects WITH the redirect message; a plain decline rejects bare", async () => {
+  for (const redirect of [true, false]) {
+    const harness = makeHarness();
+    const session = await startSession(harness);
+    await session.sendTurn({
+      threadId: "thread-1",
+      input: "run it",
+      attachments: [],
+      interactionMode: "default"
+    });
+    harness.fake.push({
+      type: "permission.asked",
+      properties: { id: "per_1", sessionID: session.sessionId, permission: "bash", patterns: ["rm -rf x"] }
+    });
+    await waitFor(harness, "request.opened");
+    await session.respondToApproval("per_1", "decline", redirect ? { redirect: true } : undefined);
+    const reply = harness.fake.find("POST", "/permission/per_1/reply");
+    assert.deepEqual(
+      reply?.body,
+      redirect ? { reply: "reject", message: APPROVAL_REDIRECT_MESSAGE } : { reply: "reject" }
+    );
+    const resolved = await waitFor(harness, "request.resolved");
+    assert.equal(resolved.payload.decision, "decline");
+    await session.stop({ reason: "test", hostInitiated: true });
+    harness.dispose();
+  }
 });
 
 test("interrupt SETTLES every open request before the abort reaches the provider", async () => {

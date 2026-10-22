@@ -28,11 +28,13 @@ import type {
   ThreadSnapshot
 } from "@orquester/api/agent-chat";
 
-import type {
-  AdapterContext,
-  RollbackTarget,
-  SendTurnInput,
-  SendTurnResult
+import {
+  APPROVAL_REDIRECT_MESSAGE,
+  type AdapterContext,
+  type ApprovalResponseOptions,
+  type RollbackTarget,
+  type SendTurnInput,
+  type SendTurnResult
 } from "../../adapter.ts";
 import { AGENT_HOST_DEADLINES, withDeadline } from "../../support/deadline.ts";
 import { appendAttachmentPathLines, type AttachmentPathLine } from "../attachment-lines.ts";
@@ -1676,12 +1678,20 @@ export class OpenCodeThreadSession {
     return sessionId === undefined ? "foreign" : "unknown";
   }
 
-  async respondToApproval(requestId: string, decision: ApprovalDecision): Promise<void> {
+  async respondToApproval(
+    requestId: string,
+    decision: ApprovalDecision,
+    options?: ApprovalResponseOptions
+  ): Promise<void> {
     const reply = toOpenCodePermissionReply(decision);
+    // A redirect rejects WITH a message: OpenCode hands it to the model as the
+    // user's correction and keeps the loop going for the steer that follows,
+    // where a bare reject stops the loop as a refusal of the work.
+    const message = reply === "reject" && options?.redirect === true ? APPROVAL_REDIRECT_MESSAGE : undefined;
     try {
       await this.client.post<unknown>(openCodeRoutes.permissionReply(requestId), {
         timeoutMs: AGENT_HOST_DEADLINES.submitMs,
-        body: { reply }
+        body: { reply, ...(message !== undefined ? { message } : {}) }
       });
     } catch (error) {
       if (!isOpenCodeNotFound(error)) {

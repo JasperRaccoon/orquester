@@ -300,6 +300,35 @@ describe("QuestionCard — the multi-line custom answer", () => {
   });
 });
 
+describe("QuestionCard — the composer's send answers the question on screen", () => {
+  it("answers each question in turn, then sends them all; gone once the card is", async () => {
+    const { answerQuestionFromComposer } = await import("./question-composer-bridge");
+    render(request(question({ id: "first" }), question({ id: "second", allowCustomAnswer: false })), {
+      composerSessionId: "chat-1"
+    });
+    assert.deepEqual(answerQuestionFromComposer("chat-1", "Gamma, actually"), { ok: true });
+    await flush();
+    assert.deepEqual(submitted, [], "the first answer moved the card on");
+    // The second question takes only its options: the composer's text cannot answer it.
+    const refused = answerQuestionFromComposer("chat-1", "anything");
+    assert.equal(refused?.ok, false);
+    act(() => all<HTMLButtonElement>("[data-question-option]")[1]!.click());
+    await flush();
+    assert.equal(answerQuestionFromComposer("chat-2", "x"), null, "another chat's composer reaches no card");
+    act(() => root.unmount());
+    assert.equal(answerQuestionFromComposer("chat-1", "x"), null);
+    root = createRoot(mount);
+  });
+
+  it("a single question's typed answer from the composer is submitted at once", async () => {
+    const { answerQuestionFromComposer } = await import("./question-composer-bridge");
+    render(request(question()), { composerSessionId: "chat-1" });
+    assert.deepEqual(answerQuestionFromComposer("chat-1", "  neither  "), { ok: true });
+    await flush();
+    assert.deepEqual(submitted, [{ "Which one?": "neither" }]);
+  });
+});
+
 describe("QuestionCard — option previews", () => {
   const withPreviews = question({
     id: "Which layout?",

@@ -58,7 +58,7 @@ export interface SessionView { id: string; kind: "chat" | "terminal"; agent: str
   /** `profile`: the chat's Agent Profile (spec 2026-10-18), `null` = Global; `name` absent once the profile is gone. */
   chat?: { sessionStatus: ThreadSessionStatus; accountId: string; profile: ProfileRef; latestTurn: LatestTurnSummary | null; pending: { approvals: boolean; questions: boolean }; planReady: boolean; backgroundLiveness: "working" | "monitoring" | null; goal: GoalView | null };
   terminal?: { status: "running" | "exited"; exitCode?: number; legacyAgent?: boolean } }
-interface PendingApprovalView { requestId: string; kind: ProviderRequestKind; createdAt: string; detail?: string; appName?: string; tool?: { name: string; input: unknown }; decisions: { decision: ApprovalDecision; label: string; warning?: string }[] }
+interface PendingApprovalView { requestId: string; kind: ProviderRequestKind; createdAt: string; detail?: string; reason?: string; appName?: string; tool?: { name: string; input: unknown }; decisions: { decision: ApprovalDecision; label: string; warning?: string }[] }
 export interface PendingQuestionView { requestId: string; createdAt: string; turnId?: string; responseMode: "blocking" | "message"; dismissible: boolean;
   questions: { index: number; id: string; header: string; question: string; options: { label: string; description: string; value?: string }[]; multiSelect: boolean; allowCustomAnswer: boolean; isSecret?: boolean; isOther?: boolean }[] }
 /**
@@ -198,6 +198,7 @@ export function pendingApprovalViews(snap: ThreadSnapshotPayload): PendingApprov
       decisions: (a.options?.length ? a.options : DEFAULT_APPROVAL_DECISIONS).map((o) => ({ decision: o.decision, label: o.label, ...(o.warning ? { warning: o.warning } : {}) }))
     };
     if (a.detail) view.detail = capText(a.detail, 4096).text;
+    if (a.reason) view.reason = capText(a.reason, 1024).text;
     if (a.appName) view.appName = a.appName;
     if (args && typeof args === "object" && typeof args.toolName === "string") view.tool = { name: args.toolName, input: boundedJson(args.input, 4096) };
     return view;

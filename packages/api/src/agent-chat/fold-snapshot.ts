@@ -91,7 +91,8 @@ import type {
 // 7: `thread.created`'s `lineage` reaches the head (spec 2026-10-14 §6).
 // 8: `thread.created`'s and `thread.meta-updated`'s `profileId` reach the head (Agent Profiles).
 // 9: a question option's `preview` and `previewFormat` reach the pending question.
-export const FOLD_SNAPSHOT_VERSION = 9;
+// 10: an approval's `reason` reaches the pending approval.
+export const FOLD_SNAPSHOT_VERSION = 10;
 
 /**
  * {@link ThreadFoldState} as JSON: without `activities` (rebuilt from
@@ -521,6 +522,7 @@ const isPendingApproval = shaped<PendingApproval>({
   requestKind: isString,
   createdAt: isString,
   detail: optional(isString),
+  reason: optional(isString),
   appName: optional(isString),
   toolUseId: optional(isString),
   options: optional(listOf(isApprovalOption))

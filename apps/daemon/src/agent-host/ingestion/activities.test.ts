@@ -63,6 +63,21 @@ describe("approvals (§5.1)", () => {
     assert.equal(payload.dismissible, false);
   });
 
+  it("request.opened carries the provider's reason onto the row, and none when it gave none", () => {
+    const [explained] = runtimeEventToActivities(
+      runtimeEvent(
+        "request.opened",
+        { requestType: "command_execution_approval", dismissible: false, detail: "rm -rf build", reason: "Matched an ask rule" },
+        { requestId: "req-1" }
+      )
+    );
+    assert.equal(payloadOf(explained!).reason, "Matched an ask rule");
+    const [bare] = runtimeEventToActivities(
+      runtimeEvent("request.opened", { requestType: "command_execution_approval", dismissible: false }, { requestId: "req-2" })
+    );
+    assert.equal("reason" in payloadOf(bare!), false);
+  });
+
   it("tool_user_input is dropped from BOTH request arms — it is a question, not an approval", () => {
     assert.deepEqual(
       runtimeEventToActivities(

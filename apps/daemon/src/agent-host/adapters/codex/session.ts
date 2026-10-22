@@ -2215,6 +2215,10 @@ export class CodexSession {
           itemId: params.itemId,
           providerRequestId: String(request.id),
           detail: params.command ?? undefined,
+          // Codex's own "why" (a request for network access, say): the card's reason line.
+          ...(typeof params.reason === "string" && params.reason.trim().length > 0
+            ? { reason: params.reason.trim() }
+            : {}),
           options:
             approvalOptionsFromAvailableDecisions(params.availableDecisions) ??
             [...DEFAULT_APPROVAL_OPTIONS],
@@ -2450,6 +2454,7 @@ export class CodexSession {
     itemId?: string;
     providerRequestId: string;
     detail?: string;
+    reason?: string;
     appName?: string;
     options: ApprovalOption[];
     args?: unknown;
@@ -2514,6 +2519,7 @@ export class CodexSession {
           // waiting on a reply and it must be answered or cancelled (§4.2).
           dismissible: false,
           ...(input.detail !== undefined ? { detail: input.detail } : {}),
+          ...(input.reason !== undefined ? { reason: input.reason } : {}),
           ...(input.appName !== undefined ? { appName: input.appName } : {}),
           options: input.options,
           ...(input.args !== undefined ? { args: input.args } : {})

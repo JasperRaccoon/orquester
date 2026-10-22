@@ -322,6 +322,20 @@ export interface ForkConversationInput {
   cut: ForkCut;
 }
 
+/** {@link AgentAdapter.respondToApproval}'s options. */
+export interface ApprovalResponseOptions {
+  /** A decline the user's next message redirects; see {@link APPROVAL_REDIRECT_MESSAGE}. */
+  redirect?: boolean;
+}
+
+/**
+ * The denial a redirect hands a provider that takes one: the agent must not
+ * retry the declined action, and the user's message — steered in right
+ * after — is its new instruction.
+ */
+export const APPROVAL_REDIRECT_MESSAGE =
+  "The user declined this request and sent a new message instead. Do not retry it; follow the user's new message.";
+
 export interface AgentAdapter {
   readonly id: AgentAdapterId;
   readonly capabilities: AdapterCapabilities;
@@ -330,11 +344,21 @@ export interface AgentAdapter {
   sendTurn(input: SendTurnInput): Promise<SendTurnResult>;
 
   interruptTurn(threadId: string, turnId?: string): Promise<void>;
-  /** T3 names it `respondToRequest`; same contract. */
+  /**
+   * T3 names it `respondToRequest`; same contract.
+   *
+   * `options.redirect` (only with `decline`): the user sent a message over
+   * the card, which the host steers into the turn right after this answer
+   * (`TurnCommandBody.declineApprovals`). A provider that takes a reason with
+   * a denial is told so ({@link APPROVAL_REDIRECT_MESSAGE}: Claude's deny
+   * `message`, OpenCode's reject `message`); the others decline as usual
+   * (Codex `decline`, Grok `reject_once`) and the steer carries the message.
+   */
   respondToApproval(
     threadId: string,
     requestId: string,
-    decision: ApprovalDecision
+    decision: ApprovalDecision,
+    options?: ApprovalResponseOptions
   ): Promise<void>;
   /**
    * Attachments are folded into the answer text by the host before this call.

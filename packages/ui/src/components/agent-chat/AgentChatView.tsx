@@ -44,6 +44,7 @@ import {
   stageComposerAttachment
 } from "./composer/composer-bridge";
 import { timelineSkillNames } from "./composer/composer-menu";
+import { NO_PENDING_REQUESTS, type ComposerPendingRequests } from "./composer/composer-pending-send";
 import { rewindPickerEnabled } from "./composer/RewindControl";
 import { useComposerSending } from "./composer/use-composer-sending";
 import {
@@ -246,6 +247,21 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   const boxView = useProjectBox(projectPath || null);
   const boxBlockedReason = boxChatGate(boxView?.info, boxView?.setupStep ?? null).blockedReason;
   const pending = useAgentChatPending(sessionId);
+  // The items an arrow key's prompt recall reads, at the keypress: a ref, so
+  // the composer is not re-rendered for every streamed token.
+  const recallItemsRef = React.useRef(slice.entries);
+  recallItemsRef.current = slice.entries;
+  const readRecallItems = React.useCallback(() => recallItemsRef.current, []);
+  // What the dock holds, as the composer needs it: a send over an approval
+  // redirects the agent, one over a question answers it (§7.5).
+  const composerPendingRequests = React.useMemo<ComposerPendingRequests>(
+    () => ({
+      approvalIds: pending.approvals.map((approval) => approval.requestId),
+      respondingRequestIds: pending.respondingRequestIds,
+      hasQuestion: pending.userInputs.length > 0
+    }),
+    [pending]
+  );
   const roster = useAgentChatRoster(sessionId);
   // The banner counts by kind, as the roster's footer does: the panel's
   // `liveCount` also counts running shells as agents.
@@ -1453,6 +1469,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 profileChip={profileChip}
                 isTurnActive={!paintOnly && turnActive}
                 hasPendingRequest={!paintOnly && pending.totalCount > 0}
+                pendingRequests={paintOnly ? NO_PENDING_REQUESTS : composerPendingRequests}
                 queue={slice.queue}
                 activePlan={paintOnly ? null : activePlan}
                 actionableProposedPlan={planFollowUp}
@@ -1478,6 +1495,8 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 resumeCompactionTokens={resumeCompactionTokens}
                 // boxes: why the account picker offers no System account.
                 accountNote={boxView !== null ? BOX_MANAGED_ACCOUNTS_NOTE : undefined}
+                // ArrowUp recall reads the thread's own prompts on the keypress.
+                readRecallItems={paintOnly ? undefined : readRecallItems}
               />
               )}
             </div>

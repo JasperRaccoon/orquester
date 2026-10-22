@@ -225,6 +225,68 @@ export function derivePendingUserInputProgress(
   };
 }
 
+/** What a message sent from the composer does to the open question. */
+export type ComposerAnswerStep =
+  | { kind: "refuse"; reason: string }
+  /** The text answered the active question; the card moves to the next one. */
+  | { kind: "advance"; drafts: Record<string, PendingAnswerDraft> }
+  /** The text answered the last question: the card sends every answer. */
+  | { kind: "submit"; drafts: Record<string, PendingAnswerDraft>; answers: Record<string, string | string[]> };
+
+/** Why the composer's text could not answer the open question. */
+export const COMPOSER_ANSWER_REASONS = {
+  responding: "The answer is already on its way.",
+  choiceOnly: "This question takes one of its options. Pick one on the card above.",
+  secret: "Type this answer into the card above: it is a secret and stays out of the message box.",
+  uploading: "Wait for the question's files to finish uploading, then send again.",
+  incomplete: "Answer the questions above first, then send again."
+} as const;
+
+/**
+ * The composer's text as the open question's typed answer — T3's composer is
+ * the question's answer field, and a send from it answers the question on
+ * screen (`useComposerSend`: `onAdvanceActivePendingUserInput`).
+ *
+ * The text becomes the ACTIVE question's custom answer, which outranks any
+ * option picked for it; then the card moves on, or — on the last question,
+ * every one answered — sends. Refused where a typed answer cannot stand: a
+ * choice-only question (T3 keeps the composer read-only there), a secret one
+ * (typed in the clear, and the message box is persisted), unfinished uploads,
+ * or an answer already on its way.
+ */
+// Adapted from T3 Code (MIT): apps/web/src/components/chat/useComposerSend.ts
+export function applyComposerAnswer(input: {
+  questions: readonly UserInputQuestion[];
+  drafts: Record<string, PendingAnswerDraft>;
+  questionIndex: number;
+  text: string;
+  isResponding: boolean;
+}): ComposerAnswerStep {
+  if (input.isResponding) return { kind: "refuse", reason: COMPOSER_ANSWER_REASONS.responding };
+  const progress = derivePendingUserInputProgress(input.questions, input.drafts, input.questionIndex);
+  const question = progress.activeQuestion;
+  if (!question) return { kind: "refuse", reason: COMPOSER_ANSWER_REASONS.incomplete };
+  if (!allowsCustomAnswer(question)) return { kind: "refuse", reason: COMPOSER_ANSWER_REASONS.choiceOnly };
+  if (isSecretQuestion(question)) return { kind: "refuse", reason: COMPOSER_ANSWER_REASONS.secret };
+  if (input.drafts[question.id]?.attachmentsBlocked === true) {
+    return { kind: "refuse", reason: COMPOSER_ANSWER_REASONS.uploading };
+  }
+  const previous = input.drafts[question.id];
+  const drafts = {
+    ...input.drafts,
+    [question.id]: {
+      ...setPendingUserInputCustomAnswer(previous, input.text.trim()),
+      // The question's own files still go with its answer.
+      ...(previous?.attachmentCount !== undefined ? { attachmentCount: previous.attachmentCount } : {})
+    }
+  };
+  if (!progress.isLastQuestion) return { kind: "advance", drafts };
+  const answers = buildPendingUserInputAnswers(input.questions, drafts);
+  return answers === null
+    ? { kind: "refuse", reason: COMPOSER_ANSWER_REASONS.incomplete }
+    : { kind: "submit", drafts, answers };
+}
+
 /**
  * Answer attachments live in their own per-question draft namespace, keyed by
  * `(requestId, questionId)`, separate from the prompt draft — so moving

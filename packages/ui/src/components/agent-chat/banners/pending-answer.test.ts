@@ -4,7 +4,9 @@ import type { UserInputQuestion } from "@orquester/api/agent-chat";
 
 import {
   allowsAnswerAttachments,
+  applyComposerAnswer,
   buildPendingUserInputAnswers,
+  COMPOSER_ANSWER_REASONS,
   carryDisplacedCustomAnswerIntoPrompt,
   customAnswerSubmitsOnEnter,
   derivePendingUserInputProgress,
@@ -296,4 +298,78 @@ test("an inspected option without a preview is still the one the pane names", ()
   const option = previewOptionFor(previewed, { inspectedValue: "None", selectedValues: ["top"] });
   assert.equal(option?.label, "None");
   assert.equal(option?.preview, undefined, "the pane says it has none rather than keep another's");
+});
+
+// ---------------------------------------------------------------------------
+// The composer's send as the open question's typed answer (T3's composer field)
+// ---------------------------------------------------------------------------
+
+test("the composer's text answers a single question and submits it, over a picked option", () => {
+  const q = question();
+  const step = applyComposerAnswer({
+    questions: [q],
+    drafts: { [q.id]: { selectedOptionValues: ["main"] } },
+    questionIndex: 0,
+    text: "  neither, use release/2.1  ",
+    isResponding: false
+  });
+  assert.equal(step.kind, "submit");
+  if (step.kind !== "submit") return;
+  assert.deepEqual(step.answers, { [q.id]: "neither, use release/2.1" });
+});
+
+test("on an earlier question the composer's text answers it and the card moves on", () => {
+  const first = question({ id: "first" });
+  const second = question({ id: "second" });
+  const step = applyComposerAnswer({
+    questions: [first, second],
+    drafts: {},
+    questionIndex: 0,
+    text: "main, but rebased",
+    isResponding: false
+  });
+  assert.equal(step.kind, "advance");
+  if (step.kind !== "advance") return;
+  assert.equal(step.drafts.first?.customAnswer, "main, but rebased");
+  // The last question, answered from the composer, sends every answer.
+  const last = applyComposerAnswer({
+    questions: [first, second],
+    drafts: step.drafts,
+    questionIndex: 1,
+    text: "yes",
+    isResponding: false
+  });
+  assert.deepEqual(last.kind === "submit" ? last.answers : null, { first: "main, but rebased", second: "yes" });
+});
+
+test("the last question cannot send while an earlier one is unanswered", () => {
+  const first = question({ id: "first" });
+  const second = question({ id: "second" });
+  assert.deepEqual(
+    applyComposerAnswer({ questions: [first, second], drafts: {}, questionIndex: 1, text: "yes", isResponding: false }),
+    { kind: "refuse", reason: COMPOSER_ANSWER_REASONS.incomplete }
+  );
+});
+
+test("a typed answer is refused where it cannot stand", () => {
+  const base = { drafts: {}, questionIndex: 0, text: "something", isResponding: false };
+  const choiceOnly = question({ allowCustomAnswer: false });
+  assert.deepEqual(applyComposerAnswer({ ...base, questions: [choiceOnly] }), {
+    kind: "refuse",
+    reason: COMPOSER_ANSWER_REASONS.choiceOnly
+  });
+  const secret = { ...question({ options: [] }), isSecret: true } as UserInputQuestion;
+  assert.deepEqual(applyComposerAnswer({ ...base, questions: [secret] }), {
+    kind: "refuse",
+    reason: COMPOSER_ANSWER_REASONS.secret
+  });
+  const q = question();
+  assert.deepEqual(
+    applyComposerAnswer({ ...base, questions: [q], drafts: { [q.id]: { attachmentsBlocked: true } } }),
+    { kind: "refuse", reason: COMPOSER_ANSWER_REASONS.uploading }
+  );
+  assert.deepEqual(applyComposerAnswer({ ...base, questions: [q], isResponding: true }), {
+    kind: "refuse",
+    reason: COMPOSER_ANSWER_REASONS.responding
+  });
 });

@@ -22,6 +22,7 @@ import type { ComposerQuote } from "../../../lib/agent-chat/composer.logic";
 import { blockedProviderCommandMessage } from "./composer-menu";
 import { imageOrdinal, imagePlaceholder } from "./composer-images";
 import { parseStandaloneComposerSlashCommand } from "./composer-trigger";
+import { planPendingRequestSend, type ComposerPendingRequests } from "./composer-pending-send";
 import type { FollowUpBehavior } from "../../../lib/agent-chat/queue.logic";
 
 // ---------------------------------------------------------------------------
@@ -100,6 +101,10 @@ export function composerSubmissionIntentForEnter(input: {
  * the running turn — a Pause held until the goal's own turn ends — would only
  * defeat it. The same rule as the goal chip's actions (goals §8.2).
  *
+ * **Nor is a redirect** (`redirect`): a message sent over a pending approval
+ * declines it and steers the turn that was waiting on it — queued, it would
+ * wait behind the very card it answers (T3 forces a steer there too).
+ *
  * *T3: `ChatView.tsx:7629-7658` — the XOR.*
  */
 export function resolveFollowUpDisposition(input: {
@@ -107,8 +112,9 @@ export function resolveFollowUpDisposition(input: {
   intent: ComposerSubmissionIntent;
   isRunning: boolean;
   hostCommand?: boolean;
+  redirect?: boolean;
 }): "send" | "queue" {
-  if (!input.isRunning || input.hostCommand === true) return "send";
+  if (!input.isRunning || input.hostCommand === true || input.redirect === true) return "send";
   return (input.followUpBehavior === "queue") !== (input.intent === "alternate") ? "queue" : "send";
 }
 
@@ -401,7 +407,12 @@ export function composerStatusText(input: {
 /** Why nothing can be sent while a revert rewrites the thread (§7.5). */
 export const REVERT_RUNNING_REASON = "A revert is running.";
 
-/** Why nothing can be sent while an approval or a question is docked (§7.5). */
+/**
+ * Why an open card holds a send back (§7.5): a question, for text another
+ * surface hands over (the composer's own text answers it), or any card where
+ * the caller does not say what the dock holds. An approval never does: a
+ * message over it is a redirect (`composer-pending-send.ts`).
+ */
 export const PENDING_REQUEST_REASON = "Answer the request above first.";
 
 /**
@@ -435,27 +446,46 @@ function externalSendRefusal(input: {
   reverting: boolean;
   sending: boolean;
   hasPendingRequest: boolean;
+  /**
+   * What the dock holds, when the caller knows: an approval makes the message
+   * a redirect ({@link planPendingRequestSend}), as it does the composer's own
+   * send. A question still holds it back — text another surface hands over is
+   * not the user's answer to it. Absent: any open card holds it back.
+   */
+  pendingRequests?: ComposerPendingRequests | undefined;
   /** The thread's adapter, for the provider-command refusals (§4.6.5(c)). */
   adapterId: string | undefined;
   /** `capabilities.goals.command === "host"` — see {@link pendingRequestBlocksSend}. */
   hostParsesGoal?: boolean | undefined;
-}): string | null {
-  if (input.reverting) return REVERT_RUNNING_REASON;
-  if (input.sending) return "A message is still being sent.";
-  if (
+}): { refusal: string } | { declineApprovals?: string[] } {
+  if (input.reverting) return { refusal: REVERT_RUNNING_REASON };
+  if (input.sending) return { refusal: "A message is still being sent." };
+  let declineApprovals: string[] | undefined;
+  if (input.pendingRequests !== undefined) {
+    const plan = planPendingRequestSend({
+      pending: input.pendingRequests,
+      text: input.text,
+      attachmentCount: 0,
+      hostParsesGoal: input.hostParsesGoal === true
+    });
+    if (plan.kind === "refuse") return { refusal: plan.reason };
+    if (plan.kind === "answer-question") return { refusal: PENDING_REQUEST_REASON };
+    if (plan.kind === "redirect") declineApprovals = plan.declineApprovals;
+  } else if (
     pendingRequestBlocksSend({
       hasPendingRequest: input.hasPendingRequest,
       text: input.text,
       hostParsesGoal: input.hostParsesGoal === true
     })
   ) {
-    return PENDING_REQUEST_REASON;
+    return { refusal: PENDING_REQUEST_REASON };
   }
-  if (input.text.trim().length === 0) return "Nothing to send.";
-  return (
+  if (input.text.trim().length === 0) return { refusal: "Nothing to send." };
+  const refusal =
     blockedProviderCommandMessage(input.adapterId, input.text) ??
-    composerSubmissionValidationMessage({ prompt: input.text, submissionTarget: "provider-turn" })
-  );
+    composerSubmissionValidationMessage({ prompt: input.text, submissionTarget: "provider-turn" });
+  if (refusal !== null) return { refusal };
+  return declineApprovals !== undefined ? { declineApprovals } : {};
 }
 
 /**
@@ -465,9 +495,16 @@ function externalSendRefusal(input: {
  */
 export function planExternalSend(
   input: Parameters<typeof externalSendRefusal>[0]
-): { text: string; notice: null } | { text: null; notice: string } {
-  const refusal = externalSendRefusal(input);
-  return refusal === null ? { text: input.text.trim(), notice: null } : { text: null, notice: refusal };
+):
+  | { text: string; notice: null; declineApprovals?: string[] }
+  | { text: null; notice: string } {
+  const outcome = externalSendRefusal(input);
+  if ("refusal" in outcome) return { text: null, notice: outcome.refusal };
+  return {
+    text: input.text.trim(),
+    notice: null,
+    ...(outcome.declineApprovals !== undefined ? { declineApprovals: outcome.declineApprovals } : {})
+  };
 }
 
 /** A second identical queue from the rail inside this window is a double click's twin. */
@@ -495,13 +532,15 @@ export type ExternalSubmitPlan =
   | { kind: "refuse"; reason: string }
   | { kind: "plan-mode"; mode: "plan" | "default" }
   | { kind: "queue"; text: string }
-  | { kind: "send"; text: string };
+  /** `declineApprovals`: a redirect over the pending approvals, as Enter's ({@link planPendingRequestSend}). */
+  | { kind: "send"; text: string; declineApprovals?: string[] };
 
 export function planExternalSubmit(input: {
   text: string;
   reverting: boolean;
   sending: boolean;
   hasPendingRequest: boolean;
+  pendingRequests?: ComposerPendingRequests | undefined;
   adapterId: string | undefined;
   hostParsesGoal: boolean;
   showPlanModeToggle: boolean;
@@ -518,22 +557,30 @@ export function planExternalSubmit(input: {
     attachmentCount: 0
   });
   if (mode !== null) return { kind: "plan-mode", mode };
-  const refusal = externalSendRefusal({
+  const outcome = externalSendRefusal({
     text,
     reverting: input.reverting,
     sending: input.sending,
     hasPendingRequest: input.hasPendingRequest,
+    pendingRequests: input.pendingRequests,
     adapterId: input.adapterId,
     hostParsesGoal: input.hostParsesGoal
   });
-  if (refusal !== null) return { kind: "refuse", reason: refusal };
+  if ("refusal" in outcome) return { kind: "refuse", reason: outcome.refusal };
   const disposition = resolveFollowUpDisposition({
     followUpBehavior: input.followUpBehavior,
     intent: "foreground",
     isRunning: input.isTurnActive,
-    hostCommand: isHostGoalCommandText(text, input.hostParsesGoal)
+    hostCommand: isHostGoalCommandText(text, input.hostParsesGoal),
+    redirect: outcome.declineApprovals !== undefined
   });
-  if (disposition === "send") return { kind: "send", text };
+  if (disposition === "send") {
+    return {
+      kind: "send",
+      text,
+      ...(outcome.declineApprovals !== undefined ? { declineApprovals: outcome.declineApprovals } : {})
+    };
+  }
   const twin = input.lastQueued;
   if (twin !== null && twin.text === text && input.now - twin.at < EXTERNAL_QUEUE_TWIN_MS) {
     return { kind: "refuse", reason: ALREADY_QUEUED_REASON };

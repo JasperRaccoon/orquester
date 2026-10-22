@@ -491,6 +491,27 @@ test("a declined tool settles as cancelled, not as an interrupt", async () => {
   await r.dispose();
 });
 
+test("a redirecting decline is Grok's own reject_once: the card resolves declined, the steer carries the message", async () => {
+  const r = await rig({ scenario: "permission" });
+  await start(r);
+  void r.adapter.sendTurn({ threadId: "t1", input: "write", attachments: [], interactionMode: "default" });
+  const opened = await r.waitFor((event) => event.type === "request.opened", "request.opened");
+  // ACP's `session/request_permission` takes no reason: the redirect flag
+  // changes nothing on the wire, and the host's steer that follows is the
+  // user's message.
+  await r.adapter.respondToApproval("t1", opened.requestId!, "decline", { redirect: true });
+  const completed = (await r.waitFor(
+    (event) => event.type === "turn.completed",
+    "turn.completed"
+  )) as Extract<RuntimeEvent, { type: "turn.completed" }>;
+  assert.equal(completed.payload.state, "cancelled");
+  await r.drain();
+  assert.deepEqual(resolutionsOf(r.events, opened.requestId).map((event) => event.payload), [
+    { requestType: "file_change_approval", decision: "decline" }
+  ]);
+  await r.dispose();
+});
+
 test("full-access answers the approval itself with no card at all", async () => {
   const r = await rig({ scenario: "permission" });
   await start(r, { runtimeMode: "full-access" });

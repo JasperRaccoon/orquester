@@ -550,6 +550,7 @@ export function ChatBannerDock({
             onCarryTextToDraft={onCarryTextToDraft}
             active={active}
             onOpenFile={onOpenFile}
+            composerSessionId={sessionId}
           />
         </TimelineRowContext.Provider>
       ) : null}
