@@ -120,8 +120,12 @@ import { GOAL_ACTION_TEXT, goalActions, goalActionsNote } from "./status/goal-ch
 import { ChatTimeline } from "./timeline/ChatTimeline";
 import type { TimelineForkInput } from "./timeline/context";
 import { ThreadLineageBar, type LineageNotice } from "./ThreadLineageBar";
-import { ContinueInAgentDialog } from "./ContinueInAgentDialog";
-import { continueHandoffPreview } from "../../lib/agent-chat/continue-in.logic";
+import { ContinueInAgentDialog, type ContinueHandoffPreview } from "./ContinueInAgentDialog";
+import {
+  continueHandoffBudget,
+  continueHandoffPreview,
+  type ContinueHandoffTarget
+} from "../../lib/agent-chat/continue-in.logic";
 import { ThreadGoneNotice } from "./ThreadGoneNotice";
 import {
   goneDisplay,
@@ -767,9 +771,14 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
         : {},
     [continueFrom]
   );
-  const continuePreview = React.useMemo(
-    () => (continueFrom ? continueHandoffPreview({ turns: slice.turns, items: slice.entries }, continueTarget) : null),
-    [continueFrom, continueTarget, slice.turns, slice.entries]
+  // Counted for the agent and model the picker names: the handoff's budget is the target model's.
+  const continuePreviewFor = React.useCallback(
+    (handoff: ContinueHandoffTarget): ContinueHandoffPreview => {
+      const state = { turns: slice.turns, items: slice.entries };
+      const budgetBytes = continueHandoffBudget(state, slice.head?.modelSelection ?? null, handoff);
+      return { budgetBytes, preview: continueFrom ? continueHandoffPreview(state, continueTarget, budgetBytes) : null };
+    },
+    [continueFrom, continueTarget, slice.turns, slice.entries, slice.head?.modelSelection]
   );
   const continueIn = React.useCallback(
     async (fields: Pick<ForkSessionRequest, "refId" | "accountId" | "modelSelection">): Promise<void> => {
@@ -1515,7 +1524,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
               : "through this reply"
             : "through the latest finished turn"
         }
-        preview={continuePreview}
+        previewFor={continuePreviewFor}
         moreOlder={historyHasOlder}
         onSubmit={continueIn}
         errorText={lineageErrorText}

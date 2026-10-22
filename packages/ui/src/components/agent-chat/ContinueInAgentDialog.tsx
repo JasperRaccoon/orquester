@@ -18,6 +18,7 @@ import {
   continueRequestFields,
   continueSummaryText,
   sourceAccountChip,
+  type ContinueHandoffTarget,
   type ContinueSource
 } from "../../lib/agent-chat/continue-in.logic";
 import { Button, Modal, ModalCloseButton } from "../ui";
@@ -84,6 +85,12 @@ function Section({ label, children }: { label: string; children: React.ReactNode
   );
 }
 
+/** A handoff's count for one pick: its budget, and what it carries (null: the window cannot tell). */
+export interface ContinueHandoffPreview {
+  budgetBytes: number;
+  preview: ForkHandoffSummary | null;
+}
+
 export interface ContinueInAgentDialogProps {
   open: boolean;
   onClose: () => void;
@@ -91,8 +98,11 @@ export interface ContinueInAgentDialogProps {
   source: ContinueSource & { title: string };
   /** Where the fork is cut, in words: "from this reply", "through the latest finished turn". */
   pointLabel: string;
-  /** What a transcript handoff would carry, counted over this client's window; null: unknown. */
-  preview: ForkHandoffSummary | null;
+  /**
+   * What a transcript handoff into the picked agent and model would carry, counted over this
+   * client's window, and its budget.
+   */
+  previewFor: (target: ContinueHandoffTarget) => ContinueHandoffPreview;
   /** The client's window does not hold the oldest turns. */
   moreOlder: boolean;
   /** Fork with these target fields; rejects with the daemon's refusal (said in the dialog). */
@@ -120,7 +130,7 @@ function ContinueInAgentPanel({
   onClose,
   source,
   pointLabel,
-  preview,
+  previewFor,
   moreOlder,
   onSubmit,
   errorText
@@ -186,7 +196,20 @@ function ContinueInAgentPanel({
   const mode = continueMode(source, pick, agent?.adapter ?? null);
   const targetName = agent?.name ?? refId;
   const loadingModels = mode === "handoff" && selection === null;
-  const summary = continueSummaryText({ mode, targetName, preview, moreOlder });
+  const handoff = React.useMemo(
+    () =>
+      mode === "handoff"
+        ? previewFor({ sameAgent: agent !== null && agent.adapter === source.adapter, modelSelection: selection, catalog: catalogue })
+        : null,
+    [mode, previewFor, agent, source.adapter, selection, catalogue]
+  );
+  const summary = continueSummaryText({
+    mode,
+    targetName,
+    preview: handoff?.preview ?? null,
+    moreOlder,
+    ...(handoff !== null ? { budgetBytes: handoff.budgetBytes } : {})
+  });
 
   const setSelection = (next: ModelSelection): void => setSelections((current) => ({ ...current, [refId]: next }));
 

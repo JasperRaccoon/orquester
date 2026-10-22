@@ -172,6 +172,8 @@ export interface PickerModelView {
   /** The model a launch naming none gets (exactly one per catalogue; never a legacy one when another exists). */
   isDefault: boolean;
   isLegacy?: true;
+  /** The model's context window in tokens, when the catalogue states one. */
+  contextWindow?: number;
   options: PickerOptionView[];
 }
 
@@ -226,6 +228,7 @@ export function providerPickerView(snapshot: Pick<ProviderSnapshot, "status" | "
         ...(hint !== undefined ? { hint } : {}),
         isDefault: model.slug === fallback?.slug,
         ...(model.isLegacy === true ? { isLegacy: true as const } : {}),
+        ...(model.contextWindow !== undefined ? { contextWindow: model.contextWindow } : {}),
         options: optionDescriptors(model).map(optionView)
       };
     })

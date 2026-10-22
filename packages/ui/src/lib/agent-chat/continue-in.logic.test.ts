@@ -7,6 +7,7 @@ import type { ThreadItem, Turn } from "@orquester/api/agent-chat";
 import {
   continueActionLabel,
   continueAgentOptions,
+  continueHandoffBudget,
   continueHandoffPreview,
   continueMode,
   continueRequestFields,
@@ -89,24 +90,53 @@ describe("the continue-in picker", () => {
     };
     const throughTwo = continueHandoffPreview(state, { messageId: "a2" })!;
     assert.equal(throughTwo.total, 4, "only history up to the reply's turn");
-    assert.equal(throughTwo.carried, 3, "the 40 KB prompt no longer fits beside the rest");
-    assert.ok(throughTwo.bytes > 30_000 && throughTwo.bytes < 64 * 1024);
+    assert.equal(throughTwo.carried, 3, "the 30 KB reply no longer fits beside the 40 KB original request");
+    assert.equal(throughTwo.firstRequest, true);
+    assert.ok(throughTwo.bytes > 40_000 && throughTwo.bytes < 64 * 1024);
     const beforeThree = continueHandoffPreview(state, { messageId: "u3" })!;
     assert.equal(beforeThree.total, 4, "a prompt forks just before itself");
     assert.equal(continueHandoffPreview(state, {})!.total, 6, "the whole thread through its latest finished turn");
     assert.equal(continueHandoffPreview(state, { messageId: "gone" }), null, "a point the window cannot place");
   });
 
+  it("sizes the count for the picked model's context window", () => {
+    const items = [
+      msg("u1", "user", "x".repeat(20_000), null),
+      msg("a1", "assistant", "y".repeat(20_000), "t1"),
+      msg("u2", "user", "second", null),
+      msg("a2", "assistant", "answer two", "t2"),
+      { kind: "activity", id: "cw", activityKind: "context-window.updated", tone: "info", summary: "", payload: { usedTokens: 1, maxTokens: 40_000 }, turnId: "t2", createdAt: "t" } as unknown as ThreadItem
+    ];
+    const state = { turns: [turn("t1", "u1"), turn("t2", "u2")], items };
+    const opus = { model: "opus" };
+    const catalog = [{ slug: "local/small", name: "Small", capabilities: null, contextWindow: 32_000 }];
+    // Unknown window: the fallback, capped at 64 KB — everything fits.
+    const wide = continueHandoffBudget(state, opus, { sameAgent: false, modelSelection: { model: "gpt-5" }, catalog: [] });
+    assert.equal(wide, 64 * 1024);
+    assert.equal(continueHandoffPreview(state, {}, wide)!.carried, 4);
+    // A 32k catalogue window: 16k reserved, less the handoff's own words and git section.
+    const small = continueHandoffBudget(state, opus, { sameAgent: false, modelSelection: { model: "local/small" }, catalog });
+    assert.equal(small, 16_000 - 2 * 1024 - 8 * 1024);
+    const preview = continueHandoffPreview(state, {}, small)!;
+    assert.ok(preview.carried < 4 && preview.bytes <= small);
+    // The same agent and model under another account: the source's own reading.
+    assert.equal(continueHandoffBudget(state, opus, { sameAgent: true, modelSelection: opus, catalog: [] }), 40_000 - 16_000 - 10 * 1024);
+    assert.match(
+      continueSummaryText({ mode: "handoff", targetName: "Small", preview: null, moreOlder: false, budgetBytes: small }),
+      /^Carries the original request and the newest messages that fit \(up to ≈6 KB\)/
+    );
+  });
+
   it("says what will be carried over, and what the button does", () => {
     assert.equal(
-      continueSummaryText({ mode: "handoff", targetName: "Codex", preview: { carried: 23, total: 41, bytes: 58 * 1024 }, moreOlder: false }),
-      "Carries the last 23 of 41 messages (≈58 KB); earlier history stays readable. Codex reads it with your first message."
+      continueSummaryText({ mode: "handoff", targetName: "Codex", preview: { carried: 23, total: 41, bytes: 58 * 1024, firstRequest: true }, moreOlder: false }),
+      "Carries 23 of 41 messages (≈58 KB): the original request and the newest history that fits; the rest stays readable. Codex reads it with your first message."
     );
     assert.match(
       continueSummaryText({ mode: "handoff", targetName: "Codex", preview: { carried: 23, total: 41, bytes: 58 * 1024 }, moreOlder: true }),
       /of 41\+ messages/
     );
-    assert.match(continueSummaryText({ mode: "handoff", targetName: "Codex", preview: null, moreOlder: false }), /newest whole messages \(up to ≈64 KB\)/);
+    assert.match(continueSummaryText({ mode: "handoff", targetName: "Codex", preview: null, moreOlder: false }), /the newest messages that fit \(up to ≈64 KB\)/);
     assert.match(continueSummaryText({ mode: "native", targetName: "Claude Code", preview: null, moreOlder: false }), /^Native fork: Claude Code keeps the whole conversation/);
     assert.match(continueSummaryText({ mode: "same-agent-transcript", targetName: "Grok", preview: null, moreOlder: false }), /Grok has no native fork/);
     assert.equal(continueActionLabel("handoff", "Codex"), "Continue in Codex");

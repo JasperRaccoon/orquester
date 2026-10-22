@@ -52,6 +52,8 @@ export interface FakeModel {
   name: string;
   isDefault?: boolean;
   options?: FakeModelOption[];
+  /** The catalogue's context window, in tokens. */
+  contextWindow?: number;
 }
 
 export interface FakeAgent {
@@ -313,7 +315,7 @@ export class FakeChatHost implements DaemonApi {
         version: "1.0.0",
         status: "ready",
         auth: { status: "authenticated" },
-        models: a.models.map((m) => ({ slug: m.slug, name: m.name, ...(m.isDefault ? { isDefault: true } : {}), capabilities: { optionDescriptors: m.options ?? [] } })),
+        models: a.models.map((m) => ({ slug: m.slug, name: m.name, ...(m.isDefault ? { isDefault: true } : {}), ...(m.contextWindow !== undefined ? { contextWindow: m.contextWindow } : {}), capabilities: { optionDescriptors: m.options ?? [] } })),
         capabilities: {}
       }))
     };

@@ -415,6 +415,12 @@ export interface ProviderModel {
   isDefault?: boolean;
   isLegacy?: boolean;
   capabilities: ModelCapabilities | null;
+  /**
+   * The model's context window in tokens, when the provider's catalogue states one (OpenCode's
+   * `limit.context`, Grok's `totalContextTokens`). Absent means unknown; a handoff into the model
+   * then assumes `HANDOFF_FALLBACK_CONTEXT_WINDOW` (`handoff.ts`).
+   */
+  contextWindow?: number;
 }
 
 /** `input.hint` is the only argument metadata that exists (§4.6.1). */

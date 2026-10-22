@@ -35,6 +35,7 @@ import {
 import {
   buildPlanImplementationPrompt,
   failureReasonOfActivity,
+  latestContextWindowTokens,
   reEmittedAssistantCopies,
   repairsReEmittedAssistantCopies,
   SETTLED_TURN_STATES,
@@ -83,6 +84,7 @@ import {
   buildHandoffPrompt,
   clipUtf8,
   continueMessage,
+  handoffMessagesBudget,
   promptSource,
   renderExpressions,
   renderVariables,
@@ -774,11 +776,16 @@ class AgentBlockRun {
 
   private async handingOff(): Promise<NodeResult | null> {
     const previous = this.st.current!;
+    const next = this.st.next;
     let previousMessages = "";
+    // The next model's window sizes the handoff: its catalogue entry's, else — the same agent and
+    // model on another account — the previous session's own reading, else the fallback.
+    let contextWindow = next ? await this.catalog.contextWindow(next.agent, next.model) : undefined;
     if (this.st.sessionId) {
       try {
         const snap = await readThread(this.api, this.st.sessionId);
         previousMessages = parentAssistantText(snap, this.st.sessionStartTurnId ?? null);
+        if (contextWindow === undefined && next && sameModel(next, previous)) contextWindow = latestContextWindowTokens(snap.items);
       } catch (error) {
         this.ctx.log.debug("agent block: the previous session could not be read for the handoff", { error: String(error) });
       }
@@ -789,13 +796,15 @@ class AgentBlockRun {
     } catch (error) {
       this.ctx.log.debug("agent block: git status for the handoff failed", { error: String(error) });
     }
+    const originalPrompt = this.st.prompt ?? "";
     this.st.pendingInput = this.protect(buildHandoffPrompt({
-      originalPrompt: this.st.prompt ?? "",
+      originalPrompt,
       previousAgent: previous.agent,
       previousReason: this.lastHopReason(),
       previousMessages,
       gitStatus,
-      autonomyNote: this.config.autonomyNote
+      autonomyNote: this.config.autonomyNote,
+      messagesBudgetBytes: handoffMessagesBudget({ contextWindow, originalPrompt, gitStatus })
     }));
     this.st.creatingSince = this.now().toISOString();
     this.st.phase = "creating";
@@ -1044,6 +1053,12 @@ function finalText(snap: ThreadSnapshotPayload, sessionStartTurnId: string | nul
 }
 
 /** The parent's assistant messages since the block began in this session, oldest first — for a handoff. */
+/** Two candidates on the same agent, model and options (their accounts aside). */
+function sameModel(a: AgentCandidate, b: AgentCandidate): boolean {
+  const options = (c: AgentCandidate) => JSON.stringify([...c.options].sort((x, y) => x.id.localeCompare(y.id)).map((o) => [o.id, o.value]));
+  return a.agent === b.agent && a.model === b.model && options(a) === options(b);
+}
+
 function parentAssistantText(snap: ThreadSnapshotPayload, sessionStartTurnId: string | null): string {
   let startAt = 0;
   if (sessionStartTurnId !== null) {
