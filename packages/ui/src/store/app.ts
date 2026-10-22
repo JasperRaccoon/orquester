@@ -4,6 +4,7 @@ import { ApiClient, ApiError } from "../lib/api-client";
 import { createTransporter } from "../lib/transporters";
 import { wakeSessionChannels } from "../lib/transporters/ws-session-channel";
 import { wakeBrowserChannels } from "../lib/transporters/ws-browser-channel";
+import { backoffDelayMs, scheduleRetry, wakeReconnects } from "../lib/connection/backoff";
 import { toRemoteConfig, toUiConnection } from "../lib/connections";
 import { notifyProvidersChanged, setProviderSideEffects } from "../lib/agent-chat/providers";
 import { applySavedPromptEvent, resetSavedPrompts } from "../lib/saved-prompts/store";
@@ -189,36 +190,13 @@ import type { AgentPrefs, UsagePrefs } from "@orquester/config";
 
 const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-/** Pending reconnect-backoff waits that a wake (tab visible/online) short-circuits. */
-let wakeWaiters: Array<() => void> = [];
-
 /**
- * Like {@link delay}, but resolves early when {@link wakeReconnectWaiters} fires.
+ * Like {@link delay}, but resolves early on a wake ({@link wakeReconnects}).
  * Used for reconnect backoff only: a hidden tab's setTimeout is throttled/frozen,
  * so on tab return the wake path must be able to retry NOW instead of waiting
- * out a thawed backoff timer.
+ * out a thawed backoff timer. Resolves `true` when a wake cut it short.
  */
-const wakeableDelay = (ms: number) =>
-  new Promise<void>((resolve) => {
-    const wake = () => {
-      clearTimeout(timer);
-      resolve();
-    };
-    const timer = setTimeout(() => {
-      wakeWaiters = wakeWaiters.filter((w) => w !== wake);
-      resolve();
-    }, ms);
-    wakeWaiters.push(wake);
-  });
-
-/** Short-circuit every pending {@link wakeableDelay}. */
-function wakeReconnectWaiters(): void {
-  const waiters = wakeWaiters;
-  wakeWaiters = [];
-  for (const wake of waiters) {
-    wake();
-  }
-}
+const wakeableDelay = (ms: number) => new Promise<boolean>((resolve) => scheduleRetry(ms, resolve));
 
 /**
  * When the last /events line (any event or the daemon's 15s heartbeat) arrived.
@@ -412,10 +390,17 @@ const LOCKED_FALLBACK_BASE_MS = 8000;
 /** Cap (ms) for the locked-cycle exponential fallback. */
 const LOCKED_FALLBACK_CAP_MS = 120000;
 
-/** Capped exponential backoff (ms) for reconnect attempt N (1-based). */
-function backoffMs(attempt: number): number {
-  return Math.min(attempt * 1000, 8000);
-}
+/**
+ * Failed reconnect probes since the connection was last stable. Unlike the
+ * loop's own attempt count it survives a daemon that accepts the connection and
+ * drops it again at once, so such a flap keeps backing off instead of redialing
+ * at the shortest delay forever.
+ */
+let reconnectFailures = 0;
+/** When the current connection was established; 0 while not connected. */
+let connectedAt = 0;
+/** A connection that stayed up this long resets {@link reconnectFailures}. */
+const STABLE_CONNECTION_MS = 30_000;
 
 /**
  * Capped exponential fallback (ms) for the Nth consecutive locked cycle
@@ -1400,6 +1385,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     // starts from a clean exponential fallback.
     stopReconnect();
     lockedCycles = 0;
+    reconnectFailures = 0;
     set({ connectionStatus: "connecting", reconnectAttempt: 0, connectionError: null, lockedUntil: null });
 
     // The embedded daemon is spawned asynchronously: poll /health first.
@@ -1518,6 +1504,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
     // Successful connect resets the consecutive-lockout counter.
     lockedCycles = 0;
+    connectedAt = Date.now();
     // agentConversationsByProject: a (re)connect may be a restarted or upgraded
     // daemon, and the cache is the only place a failed scan settles as "none" —
     // dropping it here is what makes that recoverable.
@@ -1661,6 +1648,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       return;
     }
     reconnecting = true;
+    // Only a connection that stayed up resets the backoff (see reconnectFailures).
+    if (connectedAt !== 0 && Date.now() - connectedAt >= STABLE_CONNECTION_MS) {
+      reconnectFailures = 0;
+    }
+    connectedAt = 0;
 
     const loop = async () => {
       // Own this reconnect generation (mirrors eventsGen). Any newer flow
@@ -1708,8 +1700,10 @@ export const useAppStore = create<AppState>((set, get) => ({
             return;
           }
           // Wakeable: a tab-return/online event short-circuits the backoff so
-          // the next probe runs immediately instead of when the timer thaws.
-          await wakeableDelay(backoffMs(attempt));
+          // the next probe runs immediately instead of when the timer thaws —
+          // and starts the backoff over, since what made it wait has changed.
+          const woken = await wakeableDelay(backoffDelayMs(reconnectFailures));
+          reconnectFailures = woken ? 0 : reconnectFailures + 1;
           if (gen !== reconnectGen) {
             return;
           }
@@ -1734,14 +1728,16 @@ export const useAppStore = create<AppState>((set, get) => ({
     wakeSessionChannels();
     // Browser screencast WS: same redial/ping-probe on visibility regain.
     wakeBrowserChannels();
+    // Every other pending retry (this store's backoff loop, chat streams, git
+    // watches, desktop streams) runs now instead of when its timer thaws.
+    wakeReconnects();
 
     const api = get().api;
     if (!api) {
       return;
     }
     if (reconnecting) {
-      // A backoff loop is mid-wait: retry NOW instead of when its timer thaws.
-      wakeReconnectWaiters();
+      // A backoff loop is mid-wait: wakeReconnects() above retried it NOW.
       return;
     }
     const status = get().connectionStatus;

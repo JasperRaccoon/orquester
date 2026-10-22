@@ -16,6 +16,7 @@ import {
   createAgentChatTransport
 } from "./transport";
 import { ev, resetBuilders, snapshot } from "./test-helpers";
+import { wakeReconnects } from "../connection/backoff";
 
 interface OpenStream {
   path: string;
@@ -129,6 +130,27 @@ describe("the stream reader", () => {
 
     assert.equal(transporter.streams.length, 2);
     assert.equal(transporter.latest.path, "/api/sessions/s1/events?after=7");
+    handle.close();
+  });
+
+  it("a wake (back online, page visible) redials a waiting stream at once", () => {
+    const transporter = new FakeTransporter();
+    const transport = createAgentChatTransport(transporter);
+    mock.timers.enable({ apis: ["setTimeout"] });
+    const handle = transport.stream("s1", {}, { onFrame: () => {} });
+    // Several drops in a row grow the backoff well past a second.
+    for (let drop = 0; drop < 5; drop += 1) {
+      transporter.latest.handlers.onEnd();
+      mock.timers.tick(15_000);
+    }
+    const before = transporter.streams.length;
+    transporter.latest.handlers.onEnd();
+    wakeReconnects();
+    assert.equal(transporter.streams.length, before + 1, "redialed without waiting");
+    // The wake started the backoff over: the next drop waits at most the base.
+    transporter.latest.handlers.onEnd();
+    mock.timers.tick(500);
+    assert.equal(transporter.streams.length, before + 2);
     handle.close();
   });
 

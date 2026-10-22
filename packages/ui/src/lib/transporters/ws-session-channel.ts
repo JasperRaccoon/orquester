@@ -1,4 +1,5 @@
 import type { SessionChannel, StreamHandle, StreamHandlers } from "../transporter";
+import { backoffDelayMs } from "../connection/backoff";
 
 /**
  * Multiplexes every terminal's output/input/resize for one daemon over a single
@@ -193,8 +194,10 @@ export class WsSessionChannel implements SessionChannel {
     if (this.reconnectTimer) {
       return;
     }
+    // Shared jittered backoff: after a daemon restart, terminals and screencasts
+    // of every client must not redial in the same instant.
+    const delay = backoffDelayMs(this.attempts);
     this.attempts += 1;
-    const delay = Math.min(this.attempts * 500, 5000);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.connect();
