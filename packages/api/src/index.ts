@@ -79,6 +79,7 @@ export * from "./box-protocol.ts";
 // boxes: temporary boxes for agent chats (routes behind the box MCP tools).
 export * from "./box-tools.ts";
 export * from "./agent-tools.ts";
+export * from "./connection.ts";
 
 export type {
   AgentChatBackgroundLiveness,
@@ -88,12 +89,20 @@ export type {
 
 export interface HealthResponse {
   ok: true;
+  /** `ORQUESTER_SERVICE`; absent on daemons that predate it. */
+  service?: string;
+  /** The daemon's `ORQUESTER_PROTOCOL_VERSION`; absent on daemons that predate it. */
+  protocol?: number;
 }
 
 export interface ServerInfoResponse {
   name: string;
   dataDir: string;
   workspacesDir: string;
+  /** The daemon's `ORQUESTER_PROTOCOL_VERSION`; absent on daemons that predate it. */
+  protocol?: number;
+  /** The daemon checkout's short git commit, or null when it is not a git checkout. Absent on older daemons. */
+  build?: string | null;
   capabilities: {
     terminals: boolean;
     sessions: boolean;

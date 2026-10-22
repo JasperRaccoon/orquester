@@ -95,6 +95,14 @@ import {
   SECRET_REQUEST_EVENT_TYPE,
   SYSTEM_ACCOUNT_ID
 } from "@orquester/api";
+import {
+  DAEMON_EVENTS_CHANNEL,
+  DAEMON_STOPPING_EVENT,
+  ORQUESTER_PROTOCOL_VERSION,
+  ORQUESTER_SERVICE,
+  type DaemonStoppingPayload
+} from "@orquester/api";
+import { daemonBuild } from "./build-info.ts";
 import { isBinOnPath, RegistryService } from "./registry";
 import { BrowserError, BrowserManager } from "./browsers";
 import { DesktopAudioHub } from "./desktops/audio.ts";
@@ -1658,6 +1666,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // the daemon, sessions (PTYs) and the unix transport keep running. Connected
   // clients are dropped and reconnect (re-authenticating on a password change).
   let httpServer: FastifyInstance | null = null;
+  const publishDaemonStopping = (reason: DaemonStoppingPayload["reason"]): void => {
+    broadcaster.publish(DAEMON_EVENTS_CHANNEL, DAEMON_STOPPING_EVENT, { reason } satisfies DaemonStoppingPayload);
+  };
   const startHttp = async () => {
     if (!config.transports.http.enabled) {
       return;
@@ -1686,6 +1697,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     }
   };
   services.reloadHttp = async () => {
+    // Clients on the remote transport learn why their connection is about to drop.
+    publishDaemonStopping("http-restart");
     await stopHttp();
     try {
       await startHttp();
@@ -1701,6 +1714,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   await secretFiles.start().catch((error) => console.error("Secret files start failed", error instanceof Error ? error.name : error));
 
   const stop = async () => {
+    // First, while the event streams still flow: clients show "restarting"
+    // instead of a bare network error for the gap that follows.
+    publishDaemonStopping("shutdown");
     usage.stop();
     clearTimeout(liveRecompute);
     await usageState.flush();
@@ -2058,12 +2074,21 @@ export function createServer(
 
   // Public liveness only. Daemon id / version / mode / transports are not
   // disclosed to unauthenticated callers (moved behind /api/info, which is gated).
-  app.get("/health", async (): Promise<HealthResponse> => ({ ok: true }));
+  // The service marker and the wire protocol generation are: the web client is
+  // served from here anyway, and a client must tell "not an Orquester daemon"
+  // and "incompatible protocol" from "unreachable" before it signs in.
+  app.get("/health", async (): Promise<HealthResponse> => ({
+    ok: true,
+    service: ORQUESTER_SERVICE,
+    protocol: ORQUESTER_PROTOCOL_VERSION
+  }));
 
   app.get("/api/info", async (): Promise<ServerInfoResponse> => ({
     name: "Orquester daemon",
     dataDir: resolved.daemonDir,
     workspacesDir: resolved.workspacesDir,
+    protocol: ORQUESTER_PROTOCOL_VERSION,
+    build: await daemonBuild(),
     capabilities: {
       terminals: true,
       sessions: true,
