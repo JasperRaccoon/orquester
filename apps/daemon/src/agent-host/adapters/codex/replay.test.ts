@@ -448,6 +448,119 @@ describe("codex — account failures carry a structured reason (workflows §5.4)
     );
   });
 
+  // No capture holds a retry exhaustion either. The `codexErrorInfo` shape is
+  // the generated protocol's `responseTooManyFailedAttempts {httpStatusCode}`;
+  // the cases are T3 Code's (MIT) `CodexAdapterV2.test.ts` "exhausted-429" /
+  // "exhausted-500" and its completion-status table (regression #17501). The
+  // completion follows 13's recorded `turn/completed` envelope.
+  function completedFrame(codexErrorInfo: unknown): unknown {
+    return {
+      threadId: "thread-1",
+      turn: {
+        id: "turn-1",
+        items: [],
+        itemsView: "notLoaded",
+        status: "failed",
+        error:
+          codexErrorInfo === undefined
+            ? null
+            : {
+                message: "{\"type\":\"error\",\"status\":429,\"error\":{\"message\":\"limit\"}}",
+                codexErrorInfo,
+                additionalDetails: null,
+                misalignment: null
+              },
+        startedAt: 1789955366,
+        completedAt: 1789955369,
+        durationMs: 3516
+      }
+    };
+  }
+  const exhausted = (httpStatusCode: number | null): unknown => ({
+    responseTooManyFailedAttempts: { httpStatusCode }
+  });
+  function terminalErrors(payloads: RuntimeEvent["payload"][]): Array<{ reason?: string; class?: string }> {
+    return payloads.filter((payload) => "class" in (payload as object)) as Array<{ reason?: string; class?: string }>;
+  }
+
+  it("retries exhausted on 429 are a usage limit, with the exhausted window's reset", () => {
+    const [payload] = run([
+      ["account/rateLimits/updated", rateLimits(100, 1790220221)],
+      ["error", errorFrame(exhausted(429), false)]
+    ]);
+    assert.equal((payload as { reason?: string }).reason, "usage_limit");
+    assert.equal((payload as { class?: string }).class, "provider_error");
+    assert.equal((payload as { resetsAt?: string }).resetsAt, new Date(1790220221 * 1000).toISOString());
+  });
+
+  it("retries exhausted on another status stay a transport failure", () => {
+    const payloads = run([
+      ["error", errorFrame(exhausted(500), false)],
+      ["error", errorFrame(exhausted(null), false)],
+      ["error", errorFrame({ httpConnectionFailed: { httpStatusCode: 429 } }, false)],
+      ["error", errorFrame({ responseStreamDisconnected: { httpStatusCode: 429 } }, false)]
+    ]);
+    assert.deepEqual(
+      payloads.map((payload) => [(payload as { reason?: string }).reason, (payload as { class?: string }).class]),
+      [
+        [undefined, "transport_error"],
+        [undefined, "transport_error"],
+        [undefined, "transport_error"],
+        [undefined, "transport_error"]
+      ]
+    );
+  });
+
+  it("a completion's own 429 exhaustion decides when the notification's status did not", () => {
+    const errors = terminalErrors(
+      run([
+        ["error", errorFrame(exhausted(500), false)],
+        ["turn/completed", completedFrame(exhausted(429))]
+      ])
+    );
+    assert.deepEqual(
+      errors.map((error) => error.reason),
+      [undefined, "usage_limit"]
+    );
+  });
+
+  it("a 429 retry run that ends in a completion without its own status is a usage limit", () => {
+    for (const completion of [exhausted(null), undefined]) {
+      const payloads = run([
+        ["error", errorFrame(exhausted(429), true)],
+        ["turn/completed", completedFrame(completion)]
+      ]);
+      assert.equal(payloads.length, 2, "the retry warning, then the limit");
+      assert.equal((payloads[0] as { reason?: string }).reason, undefined, "a retry names no reason");
+      assert.equal((payloads[1] as { reason?: string }).reason, "usage_limit");
+    }
+  });
+
+  it("a completion that repeats the terminal limit raises it once", () => {
+    const errors = terminalErrors(
+      run([
+        ["error", errorFrame(exhausted(429), false)],
+        ["turn/completed", completedFrame(exhausted(429))]
+      ])
+    );
+    assert.deepEqual(
+      errors.map((error) => error.reason),
+      ["usage_limit"]
+    );
+  });
+
+  it("a completion with an explicit non-429 status, or another code, raises no limit", () => {
+    for (const completion of [exhausted(500), "other"]) {
+      const errors = terminalErrors(
+        run([
+          ["error", errorFrame(exhausted(429), true)],
+          ["turn/completed", completedFrame(completion)]
+        ])
+      );
+      assert.deepEqual(errors, []);
+    }
+  });
+
   it("the recorded error envelopes name no account failure", () => {
     const { events } = replay("13-error-envelopes.ndjson");
     for (const event of events) {

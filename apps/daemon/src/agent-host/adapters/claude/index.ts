@@ -197,6 +197,7 @@ export async function createClaudeAdapterWith(
             await buildClaudeWorkspaceSnapshot({
               cwd,
               configDir,
+              ...(env.CLAUDE_CODE_PLUGIN_CACHE_DIR !== undefined ? { pluginCacheDir: env.CLAUDE_CODE_PLUGIN_CACHE_DIR } : {}),
               checkedAt: built.snapshot.checkedAt,
               slashCommands: built.snapshot.slashCommands
             })
@@ -366,6 +367,7 @@ export async function createClaudeAdapterWith(
           await buildClaudeWorkspaceSnapshot({
             cwd,
             configDir: claudeConfigDir(env),
+            ...(env.CLAUDE_CODE_PLUGIN_CACHE_DIR !== undefined ? { pluginCacheDir: env.CLAUDE_CODE_PLUGIN_CACHE_DIR } : {}),
             checkedAt: context.clock.nowIso(),
             // The machine list rides along, or the client's
             // `overlay.slashCommands ?? provider.slashCommands` resolves to an

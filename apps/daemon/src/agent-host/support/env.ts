@@ -63,6 +63,17 @@ const AMBIENT_CREDENTIAL_ENV_VARS: Record<AgentAdapterId, readonly string[]> = {
   grok: ["XAI_API_KEY", "GROK_API_KEY"]
 };
 
+/**
+ * Variables an adapter's CLI gets unless the launcher env (the registry entry's
+ * env, the per-launcher env file) set them itself — the user's value wins.
+ */
+export const PROVIDER_DEFAULT_ENV: Partial<Record<AgentAdapterId, Readonly<Record<string, string>>>> = {
+  // Claude Code offers its task tools (TodoWrite, TaskCreate/TaskUpdate/TaskList) only on some
+  // models unless this is set; the chat timeline folds them into the turn's task list. The
+  // registry entry sets it for terminal launches too (`packages/registry`).
+  claude: { CLAUDE_CODE_ENABLE_TODO_TOOLS: "1" }
+};
+
 interface BuildProviderEnvInput {
   adapter: AgentAdapterId;
   /**
@@ -167,6 +178,10 @@ export function buildProviderEnv(input: BuildProviderEnvInput): Record<string, s
       continue;
     }
     env[key] = value;
+  }
+
+  for (const [key, value] of Object.entries(PROVIDER_DEFAULT_ENV[adapter] ?? {})) {
+    env[key] ??= value;
   }
 
   // Appended, never replacing a NODE_OPTIONS the launcher env set.

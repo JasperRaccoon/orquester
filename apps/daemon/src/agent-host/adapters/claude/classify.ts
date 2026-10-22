@@ -87,7 +87,8 @@ export function classifyToolItemType(
   if (readToolImagePath(toolName, input)) {
     return "image_view";
   }
-  if (isStepListTool(toolName) || toolName.trim() === "ToolSearch") {
+  // `TodoWrite` too: the substring ladder reads "write" and badged a to-do row as an edit.
+  if (isStepListTool(toolName) || toolName.trim() === "TodoWrite" || toolName.trim() === "ToolSearch") {
     return "dynamic_tool_call";
   }
   const normalized = toolName.toLowerCase();

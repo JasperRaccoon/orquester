@@ -77,3 +77,21 @@ test("RegistryService applies per-launcher env files without exposing them in re
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("the Claude entry turns its task tools on, and a per-launcher env file still decides", async () => {
+  const root = await mkdtemp(join(tmpdir(), "orquester-registry-todo-"));
+  try {
+    const registry = new RegistryService(root);
+    await registry.init();
+    assert.equal(registry.get("claude")?.env?.CLAUDE_CODE_ENABLE_TODO_TOOLS, "1");
+
+    await mkdir(join(root, "env"));
+    await writeFile(join(root, "env", "claude.env"), "CLAUDE_CODE_ENABLE_TODO_TOOLS=0\n");
+    const overridden = new RegistryService(root);
+    await overridden.init();
+    assert.equal(overridden.get("claude")?.env?.CLAUDE_CODE_ENABLE_TODO_TOOLS, "0");
+    assert.equal(overridden.get("claude")?.env?.CLAUDE_CODE_NO_FLICKER, "1");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

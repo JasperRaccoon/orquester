@@ -446,11 +446,17 @@ export function pendingClaudeSnapshot(checkedAt: string): ProviderSnapshot {
 export async function buildClaudeWorkspaceSnapshot(input: {
   cwd: string;
   configDir: string;
+  /** The `CLAUDE_CODE_PLUGIN_CACHE_DIR` the CLI sees, when set. */
+  pluginCacheDir?: string;
   checkedAt: string;
   /** The machine-level command list this overlay carries forward. */
   slashCommands?: readonly SlashCommand[];
 }): Promise<WorkspaceSnapshot> {
-  const skills = await discoverClaudeSkills({ configDir: input.configDir, cwd: input.cwd });
+  const skills = await discoverClaudeSkills({
+    configDir: input.configDir,
+    cwd: input.cwd,
+    ...(input.pluginCacheDir !== undefined ? { pluginCacheDir: input.pluginCacheDir } : {})
+  });
   return {
     cwd: input.cwd,
     checkedAt: input.checkedAt,

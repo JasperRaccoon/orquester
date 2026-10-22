@@ -2629,10 +2629,22 @@ export class ClaudeSession {
     // than `<home>/.claude/skills` and found none.
     const configDir = claudeConfigDir(this.options.env);
     try {
-      const skills = await discoverClaudeSkills({ configDir, cwd: this.options.cwd });
-      // An Agent Profile chat never loads the user's skills (`settingSources` drops that source):
-      // dispatching `/name` for one would only answer "Unknown command".
-      return this.options.profileLaunch !== undefined ? skills.filter((skill) => skill.scope !== "user") : skills;
+      const profile = this.options.profileLaunch;
+      const pluginCacheDir = this.options.env.CLAUDE_CODE_PLUGIN_CACHE_DIR;
+      const skills = await discoverClaudeSkills({
+        configDir,
+        cwd: this.options.cwd,
+        ...(pluginCacheDir !== undefined ? { pluginCacheDir } : {}),
+        // A profile chat loads its own plugins by path; every installed one is switched off.
+        ...(profile !== undefined ? { pluginDirs: profile.plugins.map((plugin) => ({ path: plugin.path })) } : {})
+      });
+      if (profile === undefined) return skills;
+      // An Agent Profile chat never loads the user's skills (`settingSources` drops that source),
+      // nor one its `skills` allow-list leaves out: dispatching `/name` for one would only answer
+      // "Unknown command".
+      return skills.filter(
+        (skill) => skill.scope !== "user" && (profile.skills === undefined || profile.skills.includes(skill.name))
+      );
     } catch {
       // Discovery is best-effort: a broken skills dir must never fail a turn.
       return [];
