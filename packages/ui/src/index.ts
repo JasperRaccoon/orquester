@@ -11,6 +11,12 @@ export {
   type OrquesterContextValue,
   type WindowControls
 } from "./context/orquester-context";
+export type {
+  DesktopHost,
+  DesktopMenuAction,
+  DesktopNotificationRequest,
+  DesktopNotificationTarget
+} from "./lib/desktop-host";
 
 // Connection layer
 export { ApiClient, ApiError, WorkflowApiError, type ApiRequestOptions } from "./lib/api-client";

@@ -891,6 +891,8 @@ export const appConfigSchema = z.object({
   runInBackground: z.boolean().default(false),
   /** Confirm before closing a live terminal/agent session tab (it ends the session). */
   confirmCloseSession: z.boolean().default(true),
+  /** Desktop: native notifications for the daemon's pushes, and the dock/taskbar attention badge. */
+  desktopNotifications: z.boolean().default(true),
   /** Top-bar agent-usage widget preferences. */
   usage: usagePrefsSchema.default({}),
   /** Agent-harness runtime preferences (see agentPrefsSchema). */
