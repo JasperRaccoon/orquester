@@ -9,7 +9,7 @@ then drive them from a desktop app, any browser, or your phone.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.8-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![Node 20](https://img.shields.io/badge/Node-20_LTS-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![Node 24](https://img.shields.io/badge/Node-24_LTS-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![pnpm](https://img.shields.io/badge/pnpm-10-F69220?logo=pnpm&logoColor=white)](https://pnpm.io/)
 [![Electron](https://img.shields.io/badge/Electron-33-47848F?logo=electron&logoColor=white)](https://www.electronjs.org/)
 [![PWA](https://img.shields.io/badge/PWA-installable-5A0FC8?logo=pwa&logoColor=white)](#-mobile--pwa)
@@ -158,7 +158,7 @@ Packages import each other's TypeScript **source** directly — the daemon runs 
 
 ## 🚀 Getting started
 
-**Prerequisites:** Node 20 LTS · pnpm 10 · tmux ≥ 3.2 (optional but strongly recommended — it's what makes sessions survive restarts).
+**Prerequisites:** Node 24 LTS · pnpm 10 · tmux ≥ 3.2 (optional but strongly recommended — it's what makes sessions survive restarts).
 
 ```sh
 git clone git@github.com:JasperRaccoon/orquester.git
