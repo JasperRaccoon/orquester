@@ -3,19 +3,24 @@
  * agents a chat can continue in, what the fork request says for the choice, and the line that
  * tells the user what will be carried over.
  *
- * Pure: no React, no store. The handoff is counted with the same selection the agent host
- * renders it with (`@orquester/api` `handoff.ts`), over the window this client holds.
+ * Pure: no React, no store. The handoff is counted with the same budget and selection the agent
+ * host renders it with (`@orquester/api` `handoff.ts`), over the window this client holds.
  */
 
 import { SYSTEM_ACCOUNT_ID, type ForkSessionRequest, type RegistryEntry } from "@orquester/api";
 import {
+  continuationBudgetBytes,
   describeHandoffSummary,
+  HANDOFF_BUDGET_BYTES,
+  formatHandoffBytes,
+  handoffContextWindow,
   handoffMessagesOf,
   handoffSummaryOf,
   retainedTurnsForFork,
   selectHandoffMessages,
   type ForkHandoffSummary,
   type ModelSelection,
+  type ProviderModel,
   type ThreadForkTarget,
   type ThreadItem,
   type Turn
@@ -115,9 +120,38 @@ export function continueRequestFields(
   };
 }
 
+/** What a continuation's handoff is sized for: the picked agent's model and catalogue. */
+export interface ContinueHandoffTarget {
+  /** The pick runs the source chat's own agent (another account of it). */
+  sameAgent: boolean;
+  modelSelection: ModelSelection | null;
+  catalog: readonly ProviderModel[];
+}
+
 /**
- * What a handoff from `target` would carry, counted over the client's window: the kept turns'
- * whole messages within the budget. `null` when the window cannot place the fork point.
+ * The bytes a continuation into `target` may carry — what the host's budget will be: the target
+ * model's window (its catalogue entry's, else the source's own reading for the very same model,
+ * else the fallback) less the reserve and the handoff's own words.
+ */
+export function continueHandoffBudget(
+  state: { items: readonly ThreadItem[] },
+  sourceSelection: ModelSelection | null,
+  target: ContinueHandoffTarget
+): number {
+  return continuationBudgetBytes(
+    handoffContextWindow({
+      target: target.modelSelection,
+      catalog: target.catalog,
+      sameAgent: target.sameAgent,
+      source: { modelSelection: sourceSelection, items: state.items }
+    })
+  );
+}
+
+/**
+ * What a handoff from `target` would carry, counted over the client's window: the original
+ * request and the newest messages within the budget. `null` when the window cannot place the
+ * fork point.
  */
 export function continueHandoffPreview(
   state: { turns: readonly Turn[]; items: readonly ThreadItem[] },
@@ -133,8 +167,9 @@ export function continueHandoffPreview(
  * The picker's "what will be carried over" line.
  * - native: the provider's fork keeps everything up to the point;
  * - Grok (same agent): its own transcript fork;
- * - another agent or account: the handoff's count ("Carries the last 23 of 41 messages
- *   (≈58 KB); earlier history stays readable"), or a plain promise when the window cannot tell.
+ * - another agent or account: the handoff's count ("Carries 23 of 41 messages (≈58 KB): the
+ *   original request and the newest history that fits; …"), or a plain promise when the window
+ *   cannot tell.
  */
 export function continueSummaryText(input: {
   mode: ContinueMode;
@@ -142,6 +177,8 @@ export function continueSummaryText(input: {
   preview: ForkHandoffSummary | null;
   /** The client's window does not hold the oldest turns. */
   moreOlder: boolean;
+  /** The handoff's budget for the picked model ({@link continueHandoffBudget}), when known. */
+  budgetBytes?: number;
 }): string {
   if (input.mode === "native") {
     return `Native fork: ${input.targetName} keeps the whole conversation up to this point.`;
@@ -151,7 +188,7 @@ export function continueSummaryText(input: {
   }
   const carried =
     input.preview === null
-      ? "Carries the newest whole messages (up to ≈64 KB); earlier history stays readable."
+      ? `Carries the original request and the newest messages that fit (up to ${formatHandoffBytes(input.budgetBytes ?? HANDOFF_BUDGET_BYTES)}); the rest stays readable.`
       : describeHandoffSummary(input.preview, { moreOlder: input.moreOlder });
   return `${carried} ${input.targetName} reads it with your first message.`;
 }
