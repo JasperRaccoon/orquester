@@ -17,6 +17,7 @@ import { createIncrementalMarkdownPlugin } from "./incremental";
 import { resolveMarkdownImageSource } from "./local-image";
 import { MarkdownMath } from "./MarkdownMath";
 import { mathKind, mightContainMath, remarkChatMath } from "./math";
+import { copyMathSelection } from "./math-clipboard";
 import { MermaidBlock } from "./MermaidBlock";
 import { isMermaidFence } from "./mermaid-render";
 
@@ -290,6 +291,7 @@ export const ChatMarkdown = React.memo(function ChatMarkdown({
           className
         )}
         {...(streaming ? { "data-streaming": "true" } : {})}
+        onCopy={math ? copyMathSelection : undefined}
       >
         <Markdown remarkPlugins={plugins} components={COMPONENTS}>
           {text}
