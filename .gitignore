@@ -15,6 +15,8 @@ release/
 # The .example templates ARE committed.
 /DEPLOY_TO_VPS.md
 /deploy/targets.conf
+# Version stamp a deploy writes for the daemon's /api/info (deploy/lib/remote-update.sh).
+/.orquester-version.json
 
 # Stage Sandbox: keep committed config + seed workspaces, ignore runtime artifacts
 .stage/**/logs/
