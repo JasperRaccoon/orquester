@@ -75,6 +75,7 @@ function fakeBox(appdir: string): FakeBox {
   const local = new LocalDesktopHost({ baseDir: appdir, tmux, baseEnv: () => ({}), renderNode: () => false, tmpDir: appdir });
   let up = true;
   const listeners = new Set<(boxId: string) => void>();
+  const watches = new Set<(name: string | null) => void>();
   const dirOf = (id: string) => join(appdir, "box-home", ".orquester", "desktops", id);
   // The box's tmux: sessions come and go; a killed host records host.exit, as its trap does.
   const boxTmux: DesktopTmux = {
@@ -111,7 +112,17 @@ function fakeBox(appdir: string): FakeBox {
     rm: (path, options) => local.rm(path, options),
     exists: (path) => local.exists(path),
     readdir: (path) => local.readdir(path),
-    watch: (dir, onChange, onError) => local.watch(dir, onChange, onError),
+    // As a box's watch does: back in place after a reconnect, it reports `null` (check again).
+    watch: (dir, onChange, onError) => {
+      const watch = local.watch(dir, onChange, onError);
+      watches.add(onChange);
+      return {
+        close: () => {
+          watches.delete(onChange);
+          watch.close();
+        }
+      };
+    },
     signalGroup: async (pgid, signal, owner) => {
       const entry = { pgid, signal, ...(owner ? { owner } : {}) };
       fake.signals.push(entry);
@@ -136,6 +147,8 @@ function fakeBox(appdir: string): FakeBox {
     beforeList: null,
     setConnected(next) {
       up = next;
+      // (The watches are back first: their re-check races the reconnect's reconcile.)
+      if (next) for (const onChange of [...watches]) onChange(null);
       for (const listener of listeners) listener("b1");
     },
     boxes: {
@@ -392,6 +405,22 @@ test("a VM that restarted while out of reach: its running desktop ends stopped, 
   assert.equal(stopped.apps.find((a) => a.id === appId)?.status, "exited");
   assert.deepEqual(box.signals.filter((s) => s.pgid === 777), [], "the app's old pgid is someone else's now");
   assert.equal(manager.vncStream(desktop.id), null);
+});
+
+test("a VM shut down cleanly while out of reach (its host's trap wrote host.exit): the reconnect says it restarted, not that the host crashed", async (t) => {
+  const { appdir, box, manager } = await setup(t);
+  const desktop = await manager.create({ projectPath: "/ws/p", projectRealPath: "/ws/p", boxId: "b1" });
+  const appId = await runningApp(appdir, manager, desktop.id, 778);
+  box.setConnected(false);
+  // `sudo reboot`: systemd ends the session, the host's trap records its SIGHUP exit, the VM comes back.
+  box.sessions.clear();
+  await atomicWrite(join(appdir, "box-home", ".orquester", "desktops", desktop.id, "host.exit"), "129\n");
+  box.setConnected(true);
+  const stopped = await until(manager, desktop.id, (d) => d.status === "stopped");
+  assert.match(stopped.error ?? "", /ended while the VM was out of reach/);
+  assert.doesNotMatch(stopped.error ?? "", /host exited/);
+  assert.equal(stopped.apps.find((a) => a.id === appId)?.status, "exited");
+  assert.deepEqual(box.signals.filter((s) => s.pgid === 778), [], "the app's old pgid is someone else's now");
 });
 
 test("a link blip without a restart: the desktop stays running, reconciled again", async (t) => {

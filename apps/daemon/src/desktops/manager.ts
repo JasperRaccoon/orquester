@@ -1053,10 +1053,15 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
     }
   }
 
-  /** The host exited on its own (Xvnc crash, host killed): §5.4 "Host exit". */
+  /**
+   * The host exited on its own (Xvnc crash, host killed): §5.4 "Host exit".
+   * boxes: not while the VM's reconnect reconcile is due — a box watch checks
+   * again as soon as the link is back, and a `host.exit` its trap wrote while
+   * the VM shut down is that reconcile's to report (the VM restarted).
+   */
   private async onHostExit(rt: Runtime, generation: number): Promise<void> {
     await this.enqueue(rt, async () => {
-      if (generation !== rt.generation || !this.isCurrent(rt) || rt.status !== "running") return;
+      if (generation !== rt.generation || !this.isCurrent(rt) || rt.status !== "running" || rt.reconcilePending) return;
       rt.generation += 1;
       this.unwatch(rt);
       this.stopTracker(rt);
