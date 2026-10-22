@@ -70,8 +70,11 @@ fi
 fifo="$dir/displayfd"
 rm -f "$fifo"
 mkfifo -m 600 "$fifo" || exit 1
+# -SendPrimary=0: only the CLIPBOARD selection (an app's Copy) goes to the
+# viewers. PRIMARY changes on every text selection; sending it replaced the
+# browser's clipboard whenever the user merely selected something.
 Xvnc -displayfd 3 -auth "$dir/Xauthority" -rfbunixpath "$sock/vnc.sock" -rfbunixmode 0600 -rfbport -1 \
-  -SecurityTypes None -AlwaysShared -nolisten tcp -geometry "${width}x${height}" -depth 24 3>"$fifo" &
+  -SecurityTypes None -AlwaysShared -nolisten tcp -geometry "${width}x${height}" -depth 24 -SendPrimary=0 3>"$fifo" &
 xvnc=$!
 display=
 read -r display <"$fifo"
