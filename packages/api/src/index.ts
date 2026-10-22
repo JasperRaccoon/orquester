@@ -1019,6 +1019,38 @@ export interface PushNotifyResponse {
   sent: number;
 }
 
+/**
+ * Every push the daemon sends to Web Push subscribers is also published on the event bus (channel
+ * {@link PUSH_CHANNEL}, type {@link PUSH_NOTIFICATION_EVENT_TYPE}), after the same debounce and rate
+ * limits, so a client that notifies on its own (the desktop app) shows exactly what a phone would.
+ */
+export const PUSH_CHANNEL = "push";
+export const PUSH_NOTIFICATION_EVENT_TYPE = "push.notification";
+
+/** Which push it is: a terminal bell, a structural agent state, an approval card, `notify_user`, or a workflow run. */
+export type PushNotificationKind =
+  | "attention"
+  | "needs-input"
+  | "finished"
+  | "plan-ready"
+  | "approval"
+  | "agent"
+  | "workflow";
+
+/** Payload of `push.notification`: the Web Push payload's text and deep link, plus its kind. */
+export interface PushNotificationEvent {
+  kind: PushNotificationKind;
+  title: string;
+  body: string;
+  /** Replaces an earlier notification with the same tag (`session-<id>`, `workflow-<id>`, `orquester-agent`). */
+  tag: string;
+  /** The session to open on click. */
+  sessionId?: string;
+  /** The workflow run to open on click (`kind: "workflow"`). */
+  workflowId?: string;
+  runId?: string;
+}
+
 // Daemon-pointing MCP servers (unified MCP design 2026-10-15 §12.1): MCP servers in an agent
 // CLI's config that reach THIS daemon's full-trust `/mcp` — denied inside every Orquester chat.
 
