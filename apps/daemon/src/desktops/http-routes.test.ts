@@ -8,6 +8,7 @@ import { DESKTOP_UNAVAILABLE_CODE, type DesktopSummary } from "@orquester/api";
 import { createDefaultClientConfig, createDefaultDaemonConfig } from "@orquester/config";
 import { createServer } from "../index.js";
 import { type CreateDesktopInput, DesktopError, type LaunchAppInput } from "./manager.ts";
+import { testAuthSessions } from "../auth/testing.ts";
 
 // Route-level coverage for /api/desktops (desktop spec §7.1), the
 // devtools-routes.test.ts way: the real createServer with a stubbed
@@ -18,7 +19,7 @@ type CreateServerArgs = Parameters<typeof createServer>;
 
 const USERNAME = "admin";
 const PASSWORD_HASH = "$2a$12$0123456789012345678901uFAKEfakeFAKEfakeFAKEfa";
-const BEARER = `Bearer ${Buffer.from(`${USERNAME}:${PASSWORD_HASH}`).toString("base64")}`;
+const { authSessions: AUTH_SESSIONS, bearer: BEARER } = await testAuthSessions();
 
 interface Harness {
   inject: ReturnType<typeof createServer>["inject"];
@@ -104,6 +105,7 @@ async function makeHarness(t: any, mode: "local" | "remote" = "local"): Promise<
     audioSource: () => null
   };
   const services = {
+    authSessions: AUTH_SESSIONS,
     desktops,
     desktopAudio: { subscribe: () => () => {}, stopDesktop: () => {}, shutdown: () => {} }
   } as unknown as CreateServerArgs[4];

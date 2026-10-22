@@ -15,6 +15,7 @@ import { createDefaultClientConfig, createDefaultDaemonConfig } from "@orquester
 import { createServer } from "../index.ts";
 import { registerGitHubLinkRoutes } from "./routes.ts";
 import { GitHubLinkPreviewError, GitHubLinkPreviewService } from "./service.ts";
+import { testAuthSessions } from "../auth/testing.ts";
 
 const TOKEN = "ghp_route_secret";
 
@@ -133,7 +134,7 @@ test("the remote transport requires the bearer; the local one does not", async (
   const root = await mkdtemp(join(tmpdir(), "orquester-github-link-routes-"));
   type Args = Parameters<typeof createServer>;
   const passwordHash = "$2a$12$0123456789012345678901uFAKEfakeFAKEfakeFAKEfa";
-  const bearer = `Bearer ${Buffer.from(`admin:${passwordHash}`).toString("base64")}`;
+  const { authSessions, bearer } = await testAuthSessions();
   const config = createDefaultDaemonConfig({ env: {} });
   config.transports.http.username = "admin";
   config.transports.http.passwordHash = passwordHash;
@@ -144,7 +145,7 @@ test("the remote transport requires the bearer; the local one does not", async (
       { daemonDir: root, workspacesDir: root, fsRoot: root } as unknown as Args[1],
       createDefaultClientConfig(join(root, "daemon.sock")),
       createWriteStream("/dev/null"),
-      { githubLinks, repoIdentities: { list: () => [] } } as unknown as Args[4],
+      { githubLinks, authSessions, repoIdentities: { list: () => [] } } as unknown as Args[4],
       options
     );
   const local = build({ authRequired: false, mode: "local" });
