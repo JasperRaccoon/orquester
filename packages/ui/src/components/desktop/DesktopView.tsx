@@ -660,6 +660,12 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
       Restart
     </button>
   );
+  // Why it stopped or failed (a host exit, a VM that restarted or went away).
+  const errorNote = desktop.error && (
+    <pre className="max-h-40 w-full max-w-lg overflow-auto whitespace-pre-wrap break-words rounded border border-neutral-800 bg-neutral-900 p-2 text-left font-mono text-[11px] text-neutral-300">
+      {desktop.error}
+    </pre>
+  );
   if (!vncAvailable) {
     overlay = <span>Desktop tabs require a remote (HTTP) connection.</span>;
   } else if (desktop.status === "starting") {
@@ -676,6 +682,7 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
       <>
         <Power size={20} className="text-neutral-500" />
         <span>Desktop stopped</span>
+        {errorNote}
         {restartButton}
       </>
     );
@@ -683,11 +690,7 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
     overlay = (
       <>
         <span className="text-danger">Desktop failed</span>
-        {desktop.error && (
-          <pre className="max-h-40 w-full max-w-lg overflow-auto whitespace-pre-wrap break-words rounded border border-neutral-800 bg-neutral-900 p-2 text-left font-mono text-[11px] text-neutral-300">
-            {desktop.error}
-          </pre>
-        )}
+        {errorNote}
         {installHint && (
           <div className="flex w-full max-w-lg flex-col gap-1 text-left">
             <span className="text-xs text-neutral-500">{desktop.box ? "In the VM:" : "Missing host tools — install with:"}</span>
