@@ -21,8 +21,11 @@ export const XK = {
   End: 0xff57,
   Control_L: 0xffe3,
   Alt_L: 0xffe9,
+  Alt_R: 0xffea,
   Super_L: 0xffeb,
+  Super_R: 0xffec,
   Mode_switch: 0xff7e,
+  ISO_Level3_Shift: 0xfe03,
   V: 0x0056,
   v: 0x0076
 } as const;
@@ -50,13 +53,22 @@ export interface KeyStep {
  *   Ctrl+V instead of their Ctrl+Shift+V paste.
  * - Alt and Cmd/Super are released first: Linux apps paste with Ctrl, and
  *   Cmd+V on a Mac (which noVNC forwards as Alt) must not arrive as Ctrl+Alt+V.
- *   noVNC maps Cmd to Alt_L and Option to Mode_switch on Apple platforms.
+ *   noVNC maps left/right Cmd to Alt_L/Super_L and left/right Option to
+ *   Mode_switch/ISO_Level3_Shift on Apple platforms. The chord does not say
+ *   which side is held, so both are released (a release of a key that is not
+ *   down is ignored by the server).
  */
 export function pasteKeystroke(chord: PasteChord | null, apple: boolean): KeyStep[] {
   const steps: KeyStep[] = [];
   const release = (keysym: number, code: string) => steps.push({ keysym, code, down: false });
-  if (chord?.meta) release(apple ? XK.Alt_L : XK.Super_L, "MetaLeft");
-  if (chord?.alt) release(apple ? XK.Mode_switch : XK.Alt_L, "AltLeft");
+  if (chord?.meta) {
+    release(apple ? XK.Alt_L : XK.Super_L, "MetaLeft");
+    release(apple ? XK.Super_L : XK.Super_R, "MetaRight");
+  }
+  if (chord?.alt) {
+    release(apple ? XK.Mode_switch : XK.Alt_L, "AltLeft");
+    release(apple ? XK.ISO_Level3_Shift : XK.Alt_R, "AltRight");
+  }
   const v = chord?.shift ? XK.V : XK.v;
   steps.push(
     { keysym: XK.Control_L, code: "ControlLeft", down: true },

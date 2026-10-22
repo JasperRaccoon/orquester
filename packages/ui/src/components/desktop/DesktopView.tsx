@@ -485,6 +485,8 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
       if (document.fullscreenElement !== document.documentElement) setFullscreen(false);
     };
     document.addEventListener("fullscreenchange", onChange);
+    // Fullscreen may already have ended (Esc) before this listener existed.
+    onChange();
     return () => {
       document.removeEventListener("fullscreenchange", onChange);
       navigatorKeyboard()?.unlock?.();
@@ -730,7 +732,7 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
     <div
       ref={rootRef}
       data-desktop-view
-      className={cn("flex flex-col bg-neutral-950", fullscreen ? "fixed inset-0 z-[90]" : "h-full w-full")}
+      className={cn("flex flex-col bg-neutral-950", fullscreen ? "app-no-drag fixed inset-0 z-[90]" : "h-full w-full")}
       onPaste={onPaste}
     >
       <DesktopToolbar
@@ -746,6 +748,7 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
         onToggleKeyboard={toggleKeyboard}
         fullscreen={fullscreen}
         onToggleFullscreen={fullscreenAvailable ? toggleFullscreen : null}
+        fullscreenLocksKeys={typeof navigatorKeyboard()?.lock === "function"}
         onSendClipboard={sendClipboard}
         onWindowAction={windowAction}
         onLaunchApp={onLaunchApp}

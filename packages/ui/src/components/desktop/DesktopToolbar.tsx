@@ -392,6 +392,8 @@ export interface DesktopToolbarProps {
   fullscreen: boolean;
   /** Null when the browser cannot go fullscreen (iPhone Safari). */
   onToggleFullscreen: (() => void) | null;
+  /** Keyboard Lock exists (Chromium): fullscreen sends Ctrl+W, Esc and the like to the desktop. */
+  fullscreenLocksKeys: boolean;
   onSendClipboard: (text: string) => void;
   onWindowAction: (win: DesktopWindow, action: DesktopWindowAction) => void;
   onLaunchApp: () => void;
@@ -431,7 +433,11 @@ export const DesktopToolbar: React.FC<DesktopToolbarProps> = (props) => {
       <DesktopClipboard remoteText={props.remoteClipboard} connected={props.connected} onSend={props.onSendClipboard} />
       {props.onToggleFullscreen && (
         <IconButton
-          label={props.fullscreen ? "Exit fullscreen (hold Esc)" : "Fullscreen: shortcuts like Ctrl+W go to the desktop"}
+          label={
+            props.fullscreenLocksKeys
+              ? props.fullscreen ? "Exit fullscreen (hold Esc)" : "Fullscreen: shortcuts like Ctrl+W go to the desktop"
+              : props.fullscreen ? "Exit fullscreen (Esc)" : "Fullscreen"
+          }
           aria-pressed={props.fullscreen}
           onClick={props.onToggleFullscreen}
           className={cn(props.fullscreen && "bg-neutral-800 text-neutral-100")}

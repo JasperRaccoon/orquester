@@ -34,11 +34,28 @@ test("a paste chord replays as Ctrl+V, keeping Shift with an uppercase keysym", 
   assert.deepEqual(keysyms(pasteKeystroke({ shift: true, alt: false, meta: false }, false)), [[0xffe3, true], [0x56, true], [0x56, false], [0xffe3, false]]);
 });
 
-test("Cmd+V on a Mac releases the Alt noVNC sent for Cmd before Ctrl+V", () => {
+test("Cmd+V on a Mac releases what noVNC sent for either Cmd key before Ctrl+V", () => {
   const steps = pasteKeystroke({ shift: false, alt: false, meta: true }, true);
-  assert.deepEqual(steps[0], { keysym: 0xffe9, code: "MetaLeft", down: false });
-  assert.deepEqual(steps.slice(1).map((s) => s.keysym), [0xffe3, 0x76, 0x76, 0xffe3]);
-  assert.deepEqual(pasteKeystroke({ shift: false, alt: false, meta: true }, false)[0], { keysym: 0xffeb, code: "MetaLeft", down: false });
+  assert.deepEqual(steps.slice(0, 2), [
+    { keysym: 0xffe9, code: "MetaLeft", down: false },
+    { keysym: 0xffeb, code: "MetaRight", down: false }
+  ]);
+  assert.deepEqual(steps.slice(2).map((s) => s.keysym), [0xffe3, 0x76, 0x76, 0xffe3]);
+  assert.deepEqual(pasteKeystroke({ shift: false, alt: false, meta: true }, false).slice(0, 2), [
+    { keysym: 0xffeb, code: "MetaLeft", down: false },
+    { keysym: 0xffec, code: "MetaRight", down: false }
+  ]);
+});
+
+test("a paste chord with Option/Alt releases both sides of it", () => {
+  assert.deepEqual(pasteKeystroke({ shift: false, alt: true, meta: false }, true).slice(0, 2), [
+    { keysym: 0xff7e, code: "AltLeft", down: false },
+    { keysym: 0xfe03, code: "AltRight", down: false }
+  ]);
+  assert.deepEqual(pasteKeystroke({ shift: false, alt: true, meta: false }, false).slice(0, 2), [
+    { keysym: 0xffe9, code: "AltLeft", down: false },
+    { keysym: 0xffea, code: "AltRight", down: false }
+  ]);
 });
 
 test("named keys", () => {
