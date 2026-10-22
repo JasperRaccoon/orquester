@@ -5,12 +5,33 @@ import type { DesktopEntrySuggestion } from "@orquester/api";
 
 // Launch-dialog suggestions (desktop spec §7.1): installed `.desktop` apps and
 // the project's own executables. Recent launches come from the manager.
+// boxes: for a VM desktop the same reads go to the VM (`SuggestionsFs`).
+
+/** The reads the suggestions make, on the machine the desktop runs on. */
+export interface SuggestionsFs {
+  /** A directory's entries; a symlink is not a directory here. Throws when it cannot be read. */
+  list(path: string): Promise<Array<{ name: string; isDirectory: boolean }>>;
+  readText(path: string): Promise<string>;
+  /** Following symlinks; throws when there is nothing (or a dangling link). */
+  stat(path: string): Promise<{ isFile: boolean; mode: number }>;
+}
+
+/** This machine. */
+export const hostSuggestionsFs: SuggestionsFs = {
+  list: async (path) =>
+    (await readdir(path, { withFileTypes: true })).map((entry) => ({ name: entry.name, isDirectory: entry.isDirectory() })),
+  readText: (path) => readFile(path, "utf8"),
+  stat: async (path) => {
+    const info = await stat(path);
+    return { isFile: info.isFile(), mode: info.mode };
+  }
+};
 
 /** Where `.desktop` entries are read from, user entries overriding system ones by file name. */
-export function desktopEntryDirs(): Array<{ path: string; source: DesktopEntrySuggestion["source"] }> {
+export function desktopEntryDirs(home: string = homedir()): Array<{ path: string; source: DesktopEntrySuggestion["source"] }> {
   return [
     { path: "/usr/share/applications", source: "system" },
-    { path: join(homedir(), ".local", "share", "applications"), source: "user" }
+    { path: join(home, ".local", "share", "applications"), source: "user" }
   ];
 }
 
@@ -65,13 +86,14 @@ export function parseDesktopEntry(
 
 /** Every visible app in `dirs`, a user file overriding the system file of the same name, sorted by name. */
 export async function scanDesktopEntries(
-  dirs = desktopEntryDirs()
+  dirs = desktopEntryDirs(),
+  fs: SuggestionsFs = hostSuggestionsFs
 ): Promise<DesktopEntrySuggestion[]> {
   const byFile = new Map<string, DesktopEntrySuggestion | null>();
   for (const dir of dirs) {
     let names: string[];
     try {
-      names = await readdir(dir.path);
+      names = (await fs.list(dir.path)).map((entry) => entry.name);
     } catch {
       continue;
     }
@@ -79,7 +101,7 @@ export async function scanDesktopEntries(
       if (!name.endsWith(".desktop")) continue;
       let text: string;
       try {
-        text = await readFile(join(dir.path, name), "utf8");
+        text = await fs.readText(join(dir.path, name));
       } catch {
         continue;
       }
@@ -98,10 +120,10 @@ const MAX_EXECUTABLE_DEPTH = 4;
 /** Directories visited under `build/` at most, so a huge build tree stays cheap. */
 const MAX_BUILD_DIRS = 2000;
 
-async function executablesIn(dir: string, rel: string, out: string[]): Promise<void> {
+async function executablesIn(fs: SuggestionsFs, dir: string, rel: string, out: string[]): Promise<void> {
   let names: string[];
   try {
-    names = (await readdir(dir)).sort();
+    names = (await fs.list(dir)).map((entry) => entry.name).sort();
   } catch {
     return;
   }
@@ -109,8 +131,8 @@ async function executablesIn(dir: string, rel: string, out: string[]): Promise<v
     if (out.length >= MAX_PROJECT_EXECUTABLES) return;
     if (name.startsWith(".")) continue;
     try {
-      const info = await stat(join(dir, name));
-      if (info.isFile() && (info.mode & 0o111) !== 0) {
+      const info = await fs.stat(join(dir, name));
+      if (info.isFile && (info.mode & 0o111) !== 0) {
         out.push(rel ? `${rel}/${name}` : name);
       }
     } catch {
@@ -126,29 +148,34 @@ async function executablesIn(dir: string, rel: string, out: string[]): Promise<v
  * Hidden entries and symlinked directories are not followed; capped at
  * {@link MAX_PROJECT_EXECUTABLES}.
  */
-export async function findProjectExecutables(projectPath: string): Promise<string[]> {
+export async function findProjectExecutables(
+  projectPath: string,
+  fs: SuggestionsFs = hostSuggestionsFs,
+  // boxes: each read in a VM is a round trip, so it visits fewer.
+  maxBuildDirs: number = MAX_BUILD_DIRS
+): Promise<string[]> {
   const out: string[] = [];
-  await executablesIn(projectPath, "", out);
-  await executablesIn(join(projectPath, "bin"), "bin", out);
+  await executablesIn(fs, projectPath, "", out);
+  await executablesIn(fs, join(projectPath, "bin"), "bin", out);
   let visited = 0;
   const walk = async (rel: string, depth: number): Promise<void> => {
-    if (out.length >= MAX_PROJECT_EXECUTABLES || depth >= MAX_EXECUTABLE_DEPTH || visited >= MAX_BUILD_DIRS) {
+    if (out.length >= MAX_PROJECT_EXECUTABLES || depth >= MAX_EXECUTABLE_DEPTH || visited >= maxBuildDirs) {
       return;
     }
     let entries;
     try {
-      entries = await readdir(join(projectPath, rel), { withFileTypes: true });
+      entries = await fs.list(join(projectPath, rel));
     } catch {
       return;
     }
     entries.sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of entries) {
-      // Dirent.isDirectory() is false for a symlink, so linked trees are not entered.
-      if (!entry.isDirectory() || entry.name.startsWith(".") || entry.name === "node_modules") continue;
+      // A symlink is not a directory here (Dirent.isDirectory() is false for one), so linked trees are not entered.
+      if (!entry.isDirectory || entry.name.startsWith(".") || entry.name === "node_modules") continue;
       visited += 1;
       const child = `${rel}/${entry.name}`;
       if (entry.name === "bin") {
-        await executablesIn(join(projectPath, child), child, out);
+        await executablesIn(fs, join(projectPath, child), child, out);
       } else {
         await walk(child, depth + 1);
       }

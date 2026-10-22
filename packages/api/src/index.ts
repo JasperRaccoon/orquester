@@ -1703,6 +1703,13 @@ export interface BrowserSummary {
   sandboxed: boolean;
   /** Launch/runtime error tail when status === "error". */
   errorMessage?: string;
+  /**
+   * boxes: where the tab's Chromium runs. "box": inside the project's Linux VM (its
+   * localhost is the VM's). Absent from older daemons, which only ran it on the host.
+   */
+  runsIn?: "host" | "box";
+  /** boxes: while status === "starting", the launch's latest step (installing Chromium in the VM). */
+  progress?: string;
 }
 
 export interface CreateBrowserRequest {
@@ -2018,7 +2025,8 @@ export interface SystemPortsResponse {
 }
 
 export interface OrquesterApi {
-  desktopHostStatus(): Promise<DesktopHostStatus>;
+  /** boxes: with `projectPath`, the prerequisites where that project's desktops run (its VM for a box project). */
+  desktopHostStatus(projectPath?: string): Promise<DesktopHostStatus>;
   listDesktops(projectPath: string): Promise<DesktopSummary[]>;
   desktopSuggestions(projectPath: string): Promise<DesktopSuggestionsResponse>;
   createDesktop(request: CreateDesktopRequest): Promise<DesktopSummary>;
@@ -2058,8 +2066,8 @@ export class HttpOrquesterApiClient implements OrquesterApi {
     return this.get("/health");
   }
 
-  desktopHostStatus(): Promise<DesktopHostStatus> {
-    return this.get(desktopRoutes.host);
+  desktopHostStatus(projectPath?: string): Promise<DesktopHostStatus> {
+    return this.get(projectPath ? `${desktopRoutes.host}?projectPath=${encodeURIComponent(projectPath)}` : desktopRoutes.host);
   }
 
   listDesktops(projectPath: string): Promise<DesktopSummary[]> {

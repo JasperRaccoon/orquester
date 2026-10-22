@@ -143,8 +143,12 @@ interface FileState {
 }
 
 export class BoxStore implements BoxRecordStore {
-  /** Emits `"changed"` with the box id a write touched, or null for settings and secrets. */
-  readonly events = new EventEmitter();
+  /**
+   * Emits `"changed"` with the box id a write touched, or null for settings and secrets. Every box
+   * module follows records through `BoxRegistry.onChange` (one listener each, a dozen or more at
+   * startup), so the default limit of 10 would warn about a leak that is not one.
+   */
+  readonly events = new EventEmitter().setMaxListeners(64);
 
   private readonly boxes: FileState;
   private readonly secrets: FileState;

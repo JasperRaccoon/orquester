@@ -40,6 +40,7 @@ import {
   describeLaunchError,
   rankSuggestions,
   rowsFromEnv,
+  startingDesktopDetail,
   suggestionItems,
   type EnvRow,
   type LaunchSuggestion
@@ -99,10 +100,13 @@ const LaunchAppForm: React.FC<{ target: LaunchDialogTarget; onClose: () => void 
   const [touched, setTouched] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // boxes: the desktops there before this dialog, so a new one's start can be followed while it waits.
+  const [knownIds] = useState<ReadonlySet<string>>(() => new Set(allDesktops.map((d) => d.id)));
   const commandRef = useRef<HTMLInputElement | null>(null);
 
   // A target that stopped (or never was running) falls back to "New desktop".
   const targetId = running.some((d) => d.id === desktopId) ? desktopId : "";
+  const startingDetail = submitting && !targetId ? startingDesktopDetail(allDesktops, projectPath, knownIds) : null;
 
   useEffect(() => {
     if (!api) return undefined;
@@ -465,6 +469,12 @@ const LaunchAppForm: React.FC<{ target: LaunchDialogTarget; onClose: () => void 
                 </div>
               ) : null}
             </div>
+          ) : null}
+
+          {startingDetail !== null ? (
+            <p role="status" className="truncate text-xs text-neutral-500" title={startingDetail}>
+              {startingDetail}
+            </p>
           ) : null}
 
           {error !== null ? (

@@ -690,7 +690,8 @@ function isInsideOrSame(root: string, path: string): boolean {
 }
 
 /** `path` with its deepest existing ancestor realpath'd ON THIS HOST (what the host handlers would touch). */
-async function hostRealpath(path: string): Promise<string> {
+// boxes: exported for the desktop routes, which refuse such a path the same way.
+export async function hostRealpath(path: string): Promise<string> {
   let ancestor = path;
   for (;;) {
     try {

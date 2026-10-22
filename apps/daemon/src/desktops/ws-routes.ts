@@ -6,23 +6,29 @@
 //   are RFB bytes both ways; client text frames are a control side channel
 //   (`{type:"ping",t}` → `{type:"pong",t}`), never forwarded to the VNC socket.
 // - `/ws-desktop-audio/:id`: the desktop's Opus stream from the audio hub.
-import { createConnection, type Socket } from "node:net";
+//
+// boxes: a VM desktop's RFB socket is in its VM; the relay's upstream is then a
+// stream through the box link (`vncStream`) instead of a local connection.
+import { createConnection } from "node:net";
+import type { Duplex } from "node:stream";
 import type { FastifyInstance } from "fastify";
 import { WebSocket } from "ws";
 import type { DesktopAudioStateMessage } from "@orquester/api";
-import { desktopAudioState, type DesktopAudioHub, type DesktopAudioSink } from "./audio.ts";
+import { desktopAudioState, type DesktopAudioHub, type DesktopAudioSink, type DesktopAudioSpawn } from "./audio.ts";
 
 export interface DesktopWsDeps {
   /** True when `token` (the `?token=` query value) is a valid credential. */
   authorize(token: string | undefined): boolean;
   /** Path of a RUNNING desktop's RFB unix socket; null when unknown or not running. */
   vncSocketPath(desktopId: string): string | null;
+  /** boxes: how to open a RUNNING VM desktop's RFB stream (through its box link); null when it is not one. */
+  vncStream?(desktopId: string): (() => Promise<Duplex>) | null;
   /**
-   * Audio source of a desktop: its pulse socket when it is running with audio,
-   * `{ unavailable: reason }` when running without audio, null when unknown or
-   * not running.
+   * Audio source of a desktop: its pulse socket when it is running with audio
+   * (and, in a VM, how to start the encoder there), `{ unavailable: reason }`
+   * when running without audio, null when unknown or not running.
    */
-  audioSource(desktopId: string): { pulseSocketPath: string } | { unavailable: string } | null;
+  audioSource(desktopId: string): { pulseSocketPath: string; spawn?: DesktopAudioSpawn } | { unavailable: string } | null;
   audio: DesktopAudioHub;
 }
 
@@ -66,7 +72,7 @@ export async function registerDesktopWsRoutes(app: FastifyInstance, deps: Deskto
         return;
       }
 
-      let upstream: Socket | null = null;
+      let upstream: Duplex | null = null;
       let upstreamOpen = false;
       let closed = false;
       let clientPaused = false;
@@ -123,38 +129,59 @@ export async function registerDesktopWsRoutes(app: FastifyInstance, deps: Deskto
       socket.on("error", () => closeBoth(1011, "client error"));
 
       const path = deps.vncSocketPath(request.params.id);
-      if (path === null) {
+      const openRemote = path === null ? (deps.vncStream?.(request.params.id) ?? null) : null;
+      if (path === null && openRemote === null) {
         closeBoth(1011, NOT_RUNNING);
         return;
       }
       if (closed) return;
-      const conn = createConnection(path);
-      upstream = conn;
-      conn.on("connect", () => {
+      const onOpen = () => {
         if (closed) return;
         upstreamOpen = true;
         for (const bytes of pending) writeUpstream(bytes);
         pending.length = 0;
         pendingBytes = 0;
-      });
-      // VNC → client: pause the unix socket above the HWM; resume from the send
-      // callbacks once the WebSocket has flushed below it.
-      const onFlushed = () => {
-        if (upstreamPaused && !closed && socket.bufferedAmount <= SEND_HWM) {
-          upstreamPaused = false;
-          conn.resume();
-        }
       };
-      conn.on("data", (chunk: Buffer) => {
-        if (closed) return;
-        try { socket.send(chunk, { binary: true }, onFlushed); } catch { /* closing */ }
-        if (!upstreamPaused && socket.bufferedAmount > SEND_HWM) {
-          upstreamPaused = true;
-          conn.pause();
-        }
-      });
-      conn.on("close", () => closeBoth(upstreamOpen ? 1000 : 1011, upstreamOpen ? "desktop closed" : NOT_RUNNING));
-      conn.on("error", () => closeBoth(1011, upstreamOpen ? "desktop connection error" : NOT_RUNNING));
+      const relay = (conn: Duplex) => {
+        upstream = conn;
+        // VNC → client: pause the unix socket above the HWM; resume from the send
+        // callbacks once the WebSocket has flushed below it.
+        const onFlushed = () => {
+          if (upstreamPaused && !closed && socket.bufferedAmount <= SEND_HWM) {
+            upstreamPaused = false;
+            conn.resume();
+          }
+        };
+        conn.on("data", (chunk: Buffer) => {
+          if (closed) return;
+          try { socket.send(chunk, { binary: true }, onFlushed); } catch { /* closing */ }
+          if (!upstreamPaused && socket.bufferedAmount > SEND_HWM) {
+            upstreamPaused = true;
+            conn.pause();
+          }
+        });
+        conn.on("close", () => closeBoth(upstreamOpen ? 1000 : 1011, upstreamOpen ? "desktop closed" : NOT_RUNNING));
+        conn.on("error", () => closeBoth(1011, upstreamOpen ? "desktop connection error" : NOT_RUNNING));
+      };
+      if (path !== null) {
+        const conn = createConnection(path);
+        relay(conn);
+        conn.on("connect", onOpen);
+        return;
+      }
+      // A VM desktop: the stream is open once the box answered the channel.
+      openRemote!().then(
+        (conn) => {
+          if (closed) {
+            conn.destroy();
+            return;
+          }
+          relay(conn);
+          if (conn.destroyed) closeBoth(1011, NOT_RUNNING);
+          else onOpen();
+        },
+        () => closeBoth(1011, NOT_RUNNING)
+      );
     });
 
     instance.get<{ Params: { id: string } }>("/ws-desktop-audio/:id", { websocket: true }, (socket, request) => {
@@ -209,7 +236,7 @@ export async function registerDesktopWsRoutes(app: FastifyInstance, deps: Deskto
           try { socket.close(1011, NOT_RUNNING); } catch { /* closing */ }
         }
       };
-      const off = deps.audio.subscribe(request.params.id, source.pulseSocketPath, sink);
+      const off = deps.audio.subscribe(request.params.id, source.pulseSocketPath, sink, source.spawn);
       if (closed) off();
       else unsubscribe = off;
     });

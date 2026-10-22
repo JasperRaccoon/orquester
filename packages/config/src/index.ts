@@ -2115,6 +2115,16 @@ export const desktopRecordSchema = z
     socketDir: z.string().nullable().default(null),
     /** The host was started with PulseAudio (decided at create time). */
     audio: z.boolean().optional(),
+    /**
+     * boxes: where the desktop runs when it is not this machine — a Linux box (Ephemeral AI VMs),
+     * with the desktop's directory there. Null (or absent, in records from before VM desktops): this
+     * machine. A malformed value rejects the record (kept verbatim) rather than reading it as a host desktop.
+     */
+    box: z
+      .object({ id: z.string().min(1), dir: z.string().min(1) })
+      .passthrough()
+      .nullable()
+      .default(null),
     apps: z.array(z.unknown()).catch([]).default([])
   })
   .passthrough()

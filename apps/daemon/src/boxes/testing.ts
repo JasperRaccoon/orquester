@@ -10,11 +10,11 @@
 
 import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { createReadStream, createWriteStream } from "node:fs";
+import { createReadStream, createWriteStream, type FSWatcher, watch as fsWatch } from "node:fs";
 import { chmod, lstat, mkdir, readdir, realpath, rename, rm, stat, symlink } from "node:fs/promises";
 import { createConnection, createServer, type AddressInfo } from "node:net";
 import { arch as osArch, cpus, homedir, hostname, platform, totalmem, userInfo } from "node:os";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { PassThrough, Readable, type Duplex } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
@@ -119,6 +119,14 @@ export interface LocalBoxConnectionOptions {
   paths?: BoxPathMap;
   /** Extra handlers for feature-namespace requests (`sync.*`, `tooling.*`). */
   rawHandlers?: Record<string, (params: unknown) => Promise<unknown>>;
+  /**
+   * `fs.watch` watches for real (node:fs) and emits `fs.change` events, as
+   * `orq-agent` does; `setConnected(false)` ends every watch, as a dropped link
+   * does. Off by default: `fs.watch` is then a no-op.
+   */
+  watch?: boolean;
+  /** `setConnected(false)` destroys every open `openChannel` stream, as a dropped link does. */
+  dropChannelsOnDisconnect?: boolean;
 }
 
 export interface LocalBoxConnection extends BoxConnection {
@@ -134,6 +142,12 @@ export function localBoxConnection(options: LocalBoxConnectionOptions = {}): Loc
   let connected = true;
   const calls: { method: string; params: unknown }[] = [];
   const sys = localSysInfo(options.sys);
+  const watchers = new Map<string, FSWatcher>();
+  const channels = new Set<Duplex>();
+  const stopWatch = (watchId: string): void => {
+    watchers.get(watchId)?.close();
+    watchers.delete(watchId);
+  };
 
   const handlers: { [K in BoxMethodName<BoxHostToBoxMethods>]?: (params: BoxMethodParams<BoxHostToBoxMethods, K>) => Promise<BoxMethodResult<BoxHostToBoxMethods, K>> } = {
     "fs.stat": async ({ path, followSymlinks }) => {
@@ -162,8 +176,22 @@ export function localBoxConnection(options: LocalBoxConnectionOptions = {}): Loc
     "fs.rm": async ({ path, recursive, force }) => rm(path, { recursive, force }),
     "fs.chmod": async ({ path, mode }) => chmod(path, mode),
     "fs.symlink": async ({ target, path }) => symlink(target, path),
-    "fs.watch": async () => undefined,
-    "fs.unwatch": async () => undefined,
+    "fs.watch": async ({ watchId, path, recursive }) => {
+      if (!options.watch) return undefined;
+      await stat(path);
+      stopWatch(watchId);
+      const watcher = fsWatch(path, { recursive }, (_event, name) => {
+        const changed = name === null ? path : join(path, name.toString());
+        events.emit("fs.change", { watchId, changes: [{ path: changed, type: "update" }] });
+      });
+      watcher.on("error", () => stopWatch(watchId));
+      watchers.set(watchId, watcher);
+      return undefined;
+    },
+    "fs.unwatch": async ({ watchId }) => {
+      stopWatch(watchId);
+      return undefined;
+    },
     "sys.info": async () => sys,
     "sys.ports": async () => [],
     "sys.stats": async () => ({ cpuPercent: 0, memUsedBytes: 0, memTotalBytes: totalmem(), diskUsedBytes: 0, diskTotalBytes: 0, uptimeSeconds: 0 }),
@@ -250,10 +278,15 @@ export function localBoxConnection(options: LocalBoxConnectionOptions = {}): Loc
     async openChannel(spec: BoxChannelSpec): Promise<Duplex> {
       requireConnected();
       if (spec.kind !== "tcp" && spec.kind !== "unix") throw new Error(`openChannel(${spec.kind}) is not supported by the local box double`);
-      return await new Promise((resolve, reject) => {
+      const stream: Duplex = await new Promise((resolve, reject) => {
         const socket = spec.kind === "unix" ? createConnection(spec.path, () => resolve(socket)) : createConnection({ port: spec.port, host: spec.host ?? "127.0.0.1" }, () => resolve(socket));
         socket.once("error", reject);
       });
+      if (options.dropChannelsOnDisconnect) {
+        channels.add(stream);
+        stream.once("close", () => channels.delete(stream));
+      }
+      return stream;
     },
     async readFile(path: string, readOptions?: { offset?: number; length?: number }): Promise<Readable> {
       requireConnected();
@@ -296,6 +329,10 @@ export function localBoxConnection(options: LocalBoxConnectionOptions = {}): Loc
     setConnected(next: boolean): void {
       if (next === connected) return;
       connected = next;
+      if (!next) {
+        for (const watchId of [...watchers.keys()]) stopWatch(watchId);
+        for (const stream of [...channels]) stream.destroy();
+      }
       status.emit("status", next);
     },
     emitEvent(name: string, data: unknown): void {

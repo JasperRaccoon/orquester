@@ -151,6 +151,34 @@ export function bubblewrapScript(): string {
   ].join("\n");
 }
 
+/**
+ * Install git and an SSH client (box clones go over SSH, spec §7) where either is missing: as root
+ * or through passwordless sudo, with whichever package manager the box has (minimal images such as
+ * Debian 12 ship neither). Exits 0 once both are on PATH, 1 when they are missing and cannot be
+ * installed (the message says why).
+ */
+export function gitClientScript(): string {
+  return [
+    "command -v git >/dev/null 2>&1 && command -v ssh >/dev/null 2>&1 && exit 0",
+    'SUDO=""',
+    'if [ "$(id -u)" != 0 ]; then',
+    "  if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then SUDO='sudo -n'; else echo 'git or ssh is missing and there is no root access to install them.'; exit 1; fi",
+    "fi",
+    "echo 'Installing git and the SSH client.'",
+    "if command -v apt-get >/dev/null 2>&1; then",
+    "  $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends git openssh-client || { $SUDO apt-get update -q && $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends git openssh-client; }",
+    "elif command -v dnf >/dev/null 2>&1; then $SUDO dnf install -y -q git openssh-clients",
+    "elif command -v yum >/dev/null 2>&1; then $SUDO yum install -y -q git openssh-clients",
+    "elif command -v apk >/dev/null 2>&1; then $SUDO apk add --no-cache git openssh-client",
+    "elif command -v zypper >/dev/null 2>&1; then $SUDO zypper --non-interactive install git openssh-clients",
+    "elif command -v pacman >/dev/null 2>&1; then $SUDO pacman -S --noconfirm --needed git openssh",
+    "else echo 'git or ssh is missing and the box has no known package manager.'; exit 1; fi",
+    "command -v git >/dev/null 2>&1 && command -v ssh >/dev/null 2>&1 && exit 0",
+    "echo 'Installing git and the SSH client failed.'",
+    "exit 1"
+  ].join("\n");
+}
+
 export function planToolchain(input: ToolchainInput): ToolchainPlan {
   const { present, contents } = input;
   const has = (file: ToolchainProbeFile) => present.has(file);

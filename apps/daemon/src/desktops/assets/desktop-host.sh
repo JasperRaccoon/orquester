@@ -45,7 +45,16 @@ trap 'finish 143' TERM
 echo "desktop host starting: ${width}x${height}, audio=$audio"
 export XDG_RUNTIME_DIR="$dir/run"
 
-dbus-daemon --session --address="unix:path=$sock/bus" --nofork --nopidfile &
+# The bus prints its address once it accepts connections; through a FIFO (as
+# for Xvnc below) `read` blocks until then, or sees EOF if it dies first.
+busfifo="$dir/busfd"
+rm -f "$busfifo"
+mkfifo -m 600 "$busfifo" || exit 1
+dbus-daemon --session --address="unix:path=$sock/bus" --nofork --nopidfile --print-address=4 4>"$busfifo" &
+bus=
+read -r bus <"$busfifo"
+rm -f "$busfifo"
+[ -n "$bus" ] || echo "dbus-daemon did not start"
 
 if [ "$audio" = 1 ]; then
   # Runtime, state and config under the desktop dir: nothing touches the
@@ -61,8 +70,11 @@ fi
 fifo="$dir/displayfd"
 rm -f "$fifo"
 mkfifo -m 600 "$fifo" || exit 1
+# -SendPrimary=0: only the CLIPBOARD selection (an app's Copy) goes to the
+# viewers. PRIMARY changes on every text selection; sending it replaced the
+# browser's clipboard whenever the user merely selected something.
 Xvnc -displayfd 3 -auth "$dir/Xauthority" -rfbunixpath "$sock/vnc.sock" -rfbunixmode 0600 -rfbport -1 \
-  -SecurityTypes None -AlwaysShared -nolisten tcp -geometry "${width}x${height}" -depth 24 3>"$fifo" &
+  -SecurityTypes None -AlwaysShared -nolisten tcp -geometry "${width}x${height}" -depth 24 -SendPrimary=0 3>"$fifo" &
 xvnc=$!
 display=
 read -r display <"$fifo"
@@ -73,10 +85,26 @@ case $display in
     exit 1
     ;;
 esac
+# Services the bus starts on demand (the GTK file-chooser portal, notification
+# daemons, D-Bus-activated apps) inherit the bus's environment, which has no
+# display: give them the desktop's wiring before any app can ask for one.
+if [ -n "$bus" ] && command -v dbus-update-activation-environment >/dev/null; then
+  DBUS_SESSION_BUS_ADDRESS="unix:path=$sock/bus" dbus-update-activation-environment \
+    DISPLAY=":$display" XAUTHORITY="$dir/Xauthority" XDG_SESSION_TYPE=x11 \
+    PULSE_SERVER="unix:$sock/pulse/native" PULSE_CLIENTCONFIG="$dir/client.conf" ||
+    echo "could not set the D-Bus activation environment"
+fi
+# A compositor, so windows with an alpha channel blend instead of showing
+# black: GTK 4 draws its popovers' and menus' shadows into ARGB windows, which
+# an uncomposited server paints as solid black boxes. -n: no shadows of its own.
+if command -v xcompmgr >/dev/null; then
+  DISPLAY=":$display" XAUTHORITY="$dir/Xauthority" xcompmgr -n &
+fi
 atomic_write "$dir/ready" "$display"
 echo "display :$display ready"
 
-DISPLAY=":$display" XAUTHORITY="$dir/Xauthority" DBUS_SESSION_BUS_ADDRESS="unix:path=$sock/bus" openbox &
+DISPLAY=":$display" XAUTHORITY="$dir/Xauthority" DBUS_SESSION_BUS_ADDRESS="unix:path=$sock/bus" \
+  openbox --config-file "$(dirname "$0")/openbox-rc.xml" &
 
 wait "$xvnc"
 exit $?

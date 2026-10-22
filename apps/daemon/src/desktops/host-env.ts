@@ -116,10 +116,12 @@ export const CLIENT_CONF_CONTENT = "autospawn = no\n";
 export function hostScriptArgs(
   layout: DesktopLayout,
   size: { width: number; height: number },
-  audio: boolean
+  audio: boolean,
+  // boxes: a VM desktop runs the box's copy of the script.
+  script: string = DESKTOP_HOST_SCRIPT
 ): string[] {
   return [
-    DESKTOP_HOST_SCRIPT,
+    script,
     layout.dir,
     String(size.width),
     String(size.height),

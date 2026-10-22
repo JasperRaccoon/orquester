@@ -34,6 +34,7 @@ import { registerBoxHostRoutes } from "../agent-chat/box-host-routes.ts";
 import type { AgentChatService } from "../agent-chat/service.ts";
 import type { AgentProfileService } from "../agent-profile/service.ts";
 import type { Broadcaster } from "../broadcaster.ts";
+import type { BrowserManager } from "../browsers.ts";
 import type { PluginsService } from "../plugins/plugins-service.ts";
 import { createTsRustToolingPlugin } from "../plugins/ts-rust/box-tooling.ts";
 import type { RegistryService } from "../registry.ts";
@@ -54,6 +55,8 @@ import {
   type BoxRecordStore as HubRecordStore
 } from "./hub/index.ts";
 import { BOX_PROVIDERS } from "./providers/index.ts";
+import { BoxBrowsers } from "./remote/browser/box-browsers.ts";
+import { BoxDesktops } from "./remote/desktop/index.ts";
 import { BoxDevForwards } from "./remote/exec/dev-forwards.ts";
 import { createBoxGitRouteResolver } from "./remote/exec/git.ts";
 import { registerBoxStatsRoute } from "./remote/exec/stats.ts";
@@ -72,6 +75,7 @@ import {
   registerBoxConfigChangeRoutes
 } from "./sync/index.ts";
 import { createTailscaleKeys, type TailscaleCredentials as TailscaleApiCredentials } from "./tailscale/keys.ts";
+import { createBoxGuiInstaller, type BoxGuiInstaller } from "./remote/gui/index.ts";
 import type { TemporaryBoxes } from "./temporary/contract.ts";
 import type { TemporaryBoxTools } from "./temporary/tools.ts";
 import { createBoxToolingProvisioner, type BoxToolingProvisionerHandle } from "./tooling/provisioner.ts";
@@ -104,6 +108,11 @@ export interface DaemonBoxesDeps {
   /** The session PATH every terminal gets (MCP servers bridged for box chats start with it). */
   sessionPath: () => string;
   logger: Pick<Console, "log" | "info" | "warn" | "error">;
+  /**
+   * Installs Chromium and the desktop stack in a Linux box for its project's Browser and Desktop
+   * tabs (default: `createBoxGuiInstaller()` from `remote/gui`; tests pass a fake).
+   */
+  guiInstaller?: BoxGuiInstaller;
 }
 
 /** What `attach` needs once the daemon's session list, browser tabs and chat services exist. */
@@ -113,7 +122,7 @@ export interface DaemonBoxesAttachment {
     hostLocalAccountIds(): ReadonlySet<string>;
     setBoxProjectPredicate(isBoxProject: (projectPath: string) => boolean): void;
   };
-  browsers: ConstructorParameters<typeof BoxDevForwards>[0]["browsers"];
+  browsers: ConstructorParameters<typeof BoxDevForwards>[0]["browsers"] & Pick<BrowserManager, "setRemoteChrome">;
   agentChat: AgentChatService;
   agentProfile: Pick<AgentProfileService, "snapshot">;
   temporaryBoxTools: TemporaryBoxTools;
@@ -126,6 +135,8 @@ export interface DaemonBoxes {
   tooling: BoxToolingProvisionerHandle;
   configSync: BoxConfigSyncService;
   builds: BoxAgentBuilds;
+  /** Linux VM desktops: the desktop manager's `boxes` option. */
+  desktops: BoxDesktops;
   /** Wrap the host session manager so box projects' terminals run in their box. */
   wrapSessions(createHost: (indexContributor: SessionIndexContributor) => ISessionManager, chatIndex: SessionIndexContributor): ISessionManager;
   /** The git route of box projects (`new GitService({ route })`). */
@@ -168,6 +179,7 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
     warn: (message: string, fields?: Record<string, unknown>) => logger.warn(`[boxes] ${message}`, fields ?? "")
   };
   const builds = createBoxAgentBuilds({ appdir: deps.baseDir, logger: hubLogger });
+  const gui = deps.guiInstaller ?? createBoxGuiInstaller({ logger: hubLogger });
 
   // The hub reads and updates box records; the service owns them and needs the hub. The service is
   // built right below, before anything can call the hub.
@@ -269,11 +281,14 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
     logger: { warn: (message, meta) => logger.warn(`[boxes] ${message}`, meta ?? "") }
   });
   const gitRoute = createBoxGitRouteResolver(registry);
+  // Desktops of Linux box projects run in their VM; the GUI installer sets up the desktop stack there.
+  const desktops = new BoxDesktops({ registry, hub, tooling, installer: gui });
 
   // ---- attached later ----------------------------------------------------------------------
   let transcripts: BoxTranscriptSyncService | null = null;
   let broker: AgentTokenBroker | null = null;
   let forwards: BoxDevForwards | null = null;
+  let boxBrowsers: BoxBrowsers | null = null;
   let agentChat: AgentChatService | null = null;
   let agentProfile: Pick<AgentProfileService, "snapshot"> | null = null;
   let temporaryBoxTools: TemporaryBoxTools | null = null;
@@ -350,6 +365,7 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
     if (forgotten.has(boxId)) return;
     forgotten.add(boxId);
     tooling.forget(boxId);
+    gui.forget(boxId);
     void configSync.forgetBox(boxId).catch((error) => logger.warn(`[boxes] Could not drop the sync state of box ${boxId}`, errorText(error)));
   };
 
@@ -391,6 +407,7 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
     tooling,
     configSync,
     builds,
+    desktops,
     gitRoute,
     workflowSandbox: { registry, hub, tooling },
 
@@ -462,11 +479,24 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
       // Agent chats in box projects run their CLI in the box (spec §8.5).
       attachment.agentChat.setBoxes({ registry, tooling });
 
+      // boxes: the Browser tab of a Linux box project runs its Chromium in the box.
+      const vmBrowsers = new BoxBrowsers({
+        registry,
+        hub,
+        installer: gui,
+        logger: { warn: (message, meta) => logger.warn(`[boxes] ${message}`, meta ?? "") }
+      });
+      boxBrowsers = vmBrowsers;
+      attachment.browsers.setRemoteChrome((projectPath) => vmBrowsers.launcherFor(projectPath));
+      void vmBrowsers.sweepConnected().catch((error) => logger.warn("[boxes] Stopping leftover VM browsers failed", errorText(error)));
+
       forwards = new BoxDevForwards({
         registry,
         hub,
         sessions,
         browsers: attachment.browsers,
+        browserRunsInBox: (projectPath) => vmBrowsers.runsInBox(projectPath),
+        ownPorts: (boxId) => vmBrowsers.ownPorts(boxId),
         logger: { warn: (message, meta) => logger.warn(`[boxes] ${message}`, meta ?? "") }
       });
       await forwards.restore().catch((error) => logger.warn("[boxes] Restoring dev-server forwards failed", errorText(error)));
@@ -526,6 +556,8 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
 
     async stop() {
       for (const unsubscribe of unsubscribers.splice(0)) unsubscribe();
+      // Box Chromiums end while the links still carry the kill (kill and relaunch, never reattach).
+      await boxBrowsers?.stop().catch((error) => logger.warn("[boxes] Closing VM browsers failed", errorText(error)));
       if (disconnectTools) {
         disconnectTools();
         disconnectTools = null;

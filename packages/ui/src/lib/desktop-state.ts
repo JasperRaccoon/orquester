@@ -71,7 +71,15 @@ export function parseDesktopSummary(value: unknown): DesktopSummary | null {
   ) {
     return null;
   }
-  return { ...(value as unknown as DesktopSummary), activeWindowId: (value.activeWindowId as string | null) ?? null };
+  // boxes: the VM fields are read by tabs and the viewer: a malformed one is dropped, not the desktop.
+  const { box, statusDetail, ...rest } = value;
+  const vm = isRecord(box) && typeof box.id === "string" && typeof box.connected === "boolean" ? { id: box.id, connected: box.connected } : null;
+  return {
+    ...(rest as unknown as DesktopSummary),
+    activeWindowId: (value.activeWindowId as string | null) ?? null,
+    ...(vm ? { box: vm } : {}),
+    ...(typeof statusDetail === "string" ? { statusDetail } : {})
+  };
 }
 
 /** The valid entries of a `GET /api/desktops` response (anything else → empty). */

@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import { execFile } from "node:child_process";
+import { chmod, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test, { type TestContext } from "node:test";
 
 import { boxGitConfigCommands } from "./git-setup.ts";
-import { planToolchain, type ToolchainInput } from "./toolchain.ts";
+import { gitClientScript, planToolchain, type ToolchainInput } from "./toolchain.ts";
 
 function plan(files: Record<string, string>, extra: Partial<ToolchainInput> = {}) {
   return planToolchain({
@@ -91,4 +95,66 @@ test("the box's git is SSH only: no credential helper, the daemon's known_hosts,
   const windows = boxGitConfigCommands({ os: "win32", knownHostsPath: "C:\\Users\\a\\.ssh\\k", strictHostKeys: false, entries: [], identity: null });
   assert.equal(windows[2]!.args[3], 'ssh -o UserKnownHostsFile="C:/Users/a/.ssh/k" -o StrictHostKeyChecking=accept-new');
   assert.equal(windows.length, 3, "no rewrites and no identity without a git account");
+});
+
+/**
+ * A PATH holding only stub commands: `id` reports `uid`, `sudo -n` runs its command, and `apt-get`
+ * logs its calls and (unless `install` fails) puts `git` and `ssh` on the PATH.
+ */
+async function gitStubs(t: TestContext, options: { uid: number; sudo: boolean; aptGet: boolean; installFails?: boolean }): Promise<{ bin: string; log: string }> {
+  const bin = await mkdtemp(join(tmpdir(), "orq-git-stubs-"));
+  t.after(() => rm(bin, { recursive: true, force: true }));
+  const log = join(bin, "calls.log");
+  const stub = async (name: string, body: string): Promise<void> => {
+    await writeFile(join(bin, name), `#!/bin/sh\n${body}\n`);
+    await chmod(join(bin, name), 0o755);
+  };
+  await symlink("/usr/bin/env", join(bin, "env"));
+  await stub("true", "exit 0");
+  await stub("id", `echo ${options.uid}`);
+  if (options.sudo) await stub("sudo", '[ "$1" = -n ] && shift; exec "$@"');
+  if (options.aptGet) {
+    // A successful install drops `git` and `ssh` stubs next to it, as a real one puts them on PATH.
+    const install = options.installFails ? "exit 100" : `for tool in git ssh; do /usr/bin/printf '#!/bin/sh\\n' > "${bin}/$tool"; /usr/bin/chmod 755 "${bin}/$tool"; done`;
+    await stub("apt-get", `echo "apt-get $*" >> "${log}"\n[ "$1" = install ] || exit 0\n${install}`);
+  }
+  return { bin, log };
+}
+
+function runGitClientScript(bin: string): Promise<{ code: number; out: string }> {
+  return new Promise((resolve) => {
+    execFile("/bin/sh", ["-c", gitClientScript()], { env: { PATH: bin } }, (error, stdout, stderr) => {
+      const code = error ? (typeof error.code === "number" ? error.code : 1) : 0;
+      resolve({ code, out: `${stdout}${stderr}` });
+    });
+  });
+}
+
+test("git and ssh missing: root installs them with apt (no recommends) and the script succeeds", async (t) => {
+  const { bin, log } = await gitStubs(t, { uid: 0, sudo: false, aptGet: true });
+  const { code, out } = await runGitClientScript(bin);
+  assert.equal(code, 0, out);
+  assert.match(out, /Installing git and the SSH client/);
+  assert.match(await readFile(log, "utf8"), /^apt-get install -y -q --no-install-recommends git openssh-client$/m);
+});
+
+test("a non-root user installs git through sudo -n; without sudo the script says why it cannot", async (t) => {
+  const withSudo = await gitStubs(t, { uid: 1000, sudo: true, aptGet: true });
+  assert.equal((await runGitClientScript(withSudo.bin)).code, 0);
+  const without = await gitStubs(t, { uid: 1000, sudo: false, aptGet: true });
+  const { code, out } = await runGitClientScript(without.bin);
+  assert.equal(code, 1);
+  assert.match(out, /no root access/);
+});
+
+test("a failed install refreshes the package lists, retries, then fails with a message; no package manager fails too", async (t) => {
+  const failing = await gitStubs(t, { uid: 0, sudo: false, aptGet: true, installFails: true });
+  const failed = await runGitClientScript(failing.bin);
+  assert.equal(failed.code, 1);
+  assert.match(failed.out, /Installing git and the SSH client failed/);
+  assert.deepEqual((await readFile(failing.log, "utf8")).trim().split("\n").map((line) => line.split(" ")[1]), ["install", "update", "install"]);
+  const none = await gitStubs(t, { uid: 0, sudo: false, aptGet: false });
+  const missing = await runGitClientScript(none.bin);
+  assert.equal(missing.code, 1);
+  assert.match(missing.out, /no known package manager/);
 });

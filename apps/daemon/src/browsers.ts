@@ -72,14 +72,48 @@ interface Tab {
    *  navigation); present only while picking, removed on disarm/pick. */
   pickScriptId?: string;
   loading: boolean;
+  /** While starting: the launch's latest step (a VM installing Chromium). */
+  progress?: string;
 }
 
-interface Chrome {
+/**
+ * A project's running Chromium: launched on the host here, or in the
+ * project's box by a {@link RemoteChromeLauncher} (`boxes/remote/browser`).
+ */
+export interface BrowserChrome {
   browser: Browser;
   sandboxed: boolean;
-  /** Loopback remote-debugging port (DevTools frontend + CDP WS proxy). */
+  /** HOST loopback remote-debugging port (DevTools frontend + CDP WS proxy);
+   *  for a box Chromium, the port of the forward to it. */
   debugPort: number;
+  /**
+   * Whether the DevTools frontend files and CDP socket on `debugPort` may be
+   * proxied onto the daemon's origin. Only a host Chromium's: the frontend runs
+   * same-origin with the app (and its credential), so it must never come from
+   * a box, which controls what its Chromium serves.
+   */
+  trustedDevtools: boolean;
+  /** End the Chromium and everything that reaches it. Idempotent; never rejects. */
+  close(): Promise<void>;
+  /** Why the browser disconnected when that was not a crash (a dropped VM
+   *  link), shown on its tabs; null when it reads as a crash. */
+  lostReason?(): string | null;
 }
+
+/** Why a VM tab has no DevTools (`BrowserChrome.trustedDevtools`). */
+export const VM_DEVTOOLS_REFUSED =
+  "DevTools is not available for a browser that runs in the VM: its frontend would come from the VM.";
+
+/** Starts a project's Chromium somewhere other than the host (its box). */
+export interface RemoteChromeLauncher {
+  /** `signal` aborts when the project's last tab closes mid-launch: reject promptly, leave nothing running. */
+  launch(options: { onProgress(line: string): void; signal: AbortSignal }): Promise<BrowserChrome>;
+}
+
+/** The launcher of a project whose Chromium does not run on the host; null = host. */
+export type RemoteChromeResolver = (projectPath: string) => RemoteChromeLauncher | null;
+
+type Chrome = BrowserChrome;
 
 export class BrowserManager {
   readonly lifecycle = new EventEmitter();
@@ -88,17 +122,29 @@ export class BrowserManager {
   /** In-flight per-project Chromium teardowns; launch() waits on these so a
    *  relaunch can't race the dying process for the profile dir. */
   private readonly closingChromes = new Map<string, Promise<void>>();
+  /** Per-project abort of an in-flight launch (honoured by remote launchers). */
+  private readonly launchAborts = new Map<string, AbortController>();
   // Serialize on-disk writes: concurrent persist() calls (framenavigated + load
   // fire close together) would otherwise race the same tmp file and corrupt it.
   private persistChain: Promise<void> = Promise.resolve();
+  private remoteChrome: RemoteChromeResolver | null;
 
   constructor(
     private readonly opts: {
       indexFile: string;
       profilesDir: string;
       resolveChromium: () => string | undefined;
+      /** boxes: projects whose Chromium runs in their box (else the host's). */
+      remoteChrome?: RemoteChromeResolver;
     }
-  ) {}
+  ) {
+    this.remoteChrome = opts.remoteChrome ?? null;
+  }
+
+  /** boxes: set by the box wiring, which is built after the manager. */
+  setRemoteChrome(resolver: RemoteChromeResolver | null): void {
+    this.remoteChrome = resolver;
+  }
 
   async load(): Promise<void> {
     let file = createDefaultBrowsersFile();
@@ -128,7 +174,8 @@ export class BrowserManager {
   }
 
   async create(projectPath: string, url = "about:blank"): Promise<BrowserSummary> {
-    if (!this.opts.resolveChromium()) {
+    // A project whose Chromium runs in its box needs none on the host.
+    if (!this.remoteChrome?.(projectPath) && !this.opts.resolveChromium()) {
       throw new BrowserError("No chromium/chrome binary found on the daemon host", 409);
     }
     const orders = this.list(projectPath).map((b) => b.order);
@@ -160,6 +207,9 @@ export class BrowserManager {
     if (![...this.tabs.values()].some((t) => t.record.projectPath === project)) {
       const pending = this.chromes.get(project);
       this.chromes.delete(project);
+      // A launch still under way (a VM installing Chromium) is cancelled rather
+      // than waited out; it tears down whatever it started before it rejects.
+      this.launchAborts.get(project)?.abort();
       if (pending) {
         // Await the process exit (browser.close() resolves on exit) so the
         // profile's SingletonLock is released, and publish the teardown so a
@@ -167,7 +217,7 @@ export class BrowserManager {
         // Chromium for the deterministic userDataDir.
         const closing = pending
           .catch(() => null)
-          .then((chrome) => chrome?.browser.close().catch(() => undefined))
+          .then((chrome) => chrome?.close())
           .then(() => undefined);
         this.closingChromes.set(project, closing);
         try {
@@ -201,11 +251,15 @@ export class BrowserManager {
       await this.ensurePage(tab);
       await this.startScreencast(tab);
       sink.onState(this.state(tab));
-      // Prime the canvas immediately — screencast only emits on change.
-      const shot = await tab.cdp!.send("Page.captureScreenshot", { format: "jpeg", quality: 60 });
-      sink.onFrame(Buffer.from(shot.data, "base64"));
+      // Prime the canvas immediately — screencast only emits on change. Best
+      // effort: a page still committing its first navigation (fired, not
+      // awaited, by createPage; long enough to hit over a VM link) answers
+      // "Not attached to an active page", and the screencast frames follow.
+      const shot = await tab.cdp!.send("Page.captureScreenshot", { format: "jpeg", quality: 60 }).catch(() => null);
+      if (shot) sink.onFrame(Buffer.from(shot.data, "base64"));
     } catch (error) {
       tab.status = "error";
+      tab.progress = undefined;
       tab.errorMessage = error instanceof Error ? error.message.slice(0, 500) : String(error);
       this.emitUpdated(tab);
       sink.onState(this.state(tab));
@@ -334,9 +388,17 @@ export class BrowserManager {
    *  able to start a Chromium process. */
   async devtoolsPort(id: string): Promise<number> {
     const tab = this.mustGet(id);
+    this.refuseUntrustedDevtools(tab);
     const pending = this.chromes.get(tab.record.projectPath);
     if (!pending) throw new BrowserError("Browser tab is not running", 409);
-    return (await pending).debugPort;
+    const chrome = await pending;
+    if (!chrome.trustedDevtools) throw new BrowserError(VM_DEVTOOLS_REFUSED, 409);
+    return chrome.debugPort;
+  }
+
+  /** boxes: a tab whose Chromium runs in a VM gets no DevTools on the daemon's origin. */
+  private refuseUntrustedDevtools(tab: Tab): void {
+    if (this.remoteChrome?.(tab.record.projectPath)) throw new BrowserError(VM_DEVTOOLS_REFUSED, 409);
   }
 
   /** Resolve the CDP endpoint the DevTools frontend attaches to. Routed by our
@@ -347,11 +409,13 @@ export class BrowserManager {
    *  running tab, and the asset route would 409 first regardless). */
   async devtoolsEndpoint(id: string): Promise<{ port: number; targetId: string }> {
     const tab = this.mustGet(id);
+    this.refuseUntrustedDevtools(tab);
     const cdp = tab.cdp;
     if (!cdp || tab.status !== "running") throw new BrowserError("Browser tab is not running", 409);
     // Target.getTargetInfo with no targetId returns the session's own target.
     const info = await cdp.send("Target.getTargetInfo");
     const chrome = await this.chromeFor(tab.record.projectPath);
+    if (!chrome.trustedDevtools) throw new BrowserError(VM_DEVTOOLS_REFUSED, 409);
     return { port: chrome.debugPort, targetId: info.targetInfo.targetId };
   }
 
@@ -360,8 +424,9 @@ export class BrowserManager {
       for (const sink of tab.sinks) sink.onEnd();
       tab.sinks.clear();
     }
+    for (const controller of this.launchAborts.values()) controller.abort();
     for (const pending of this.chromes.values()) {
-      (await pending.catch(() => null))?.browser.close().catch(() => undefined);
+      void (await pending.catch(() => null))?.close();
     }
     this.chromes.clear();
   }
@@ -379,7 +444,9 @@ export class BrowserManager {
       ...tab.record,
       status: tab.status,
       sandboxed: tab.sandboxed,
-      ...(tab.errorMessage ? { errorMessage: tab.errorMessage } : {})
+      ...(tab.errorMessage ? { errorMessage: tab.errorMessage } : {}),
+      runsIn: this.remoteChrome?.(tab.record.projectPath) ? "box" : "host",
+      ...(tab.status === "starting" && tab.progress ? { progress: tab.progress } : {})
     };
   }
 
@@ -403,10 +470,19 @@ export class BrowserManager {
   private chromeFor(projectPath: string): Promise<Chrome> {
     let pending = this.chromes.get(projectPath);
     if (!pending) {
-      const launched = this.launch(projectPath);
+      const abort = new AbortController();
+      const launched = this.launch(projectPath, abort.signal);
       pending = launched;
       this.chromes.set(projectPath, launched);
-      launched.catch(() => this.chromes.delete(projectPath));
+      this.launchAborts.set(projectPath, abort);
+      const settled = (): void => {
+        if (this.launchAborts.get(projectPath) === abort) this.launchAborts.delete(projectPath);
+      };
+      launched.then(settled, settled);
+      // Only this launch's own entry: a relaunch may already have replaced it.
+      launched.catch(() => {
+        if (this.chromes.get(projectPath) === launched) this.chromes.delete(projectPath);
+      });
       // Evict a browser that dies at runtime (renderer OOM taking Chromium down,
       // host kill, etc.) so the next subscribe/navigate relaunches instead of
       // reusing a dead Promise<Chrome> forever. Capture `launched` so a newer
@@ -414,14 +490,57 @@ export class BrowserManager {
       launched.then((chrome) => {
         chrome.browser.once("disconnected", () => {
           if (this.chromes.get(projectPath) === launched) this.chromes.delete(projectPath);
+          this.dropPages(projectPath, chrome);
         });
       }).catch(() => undefined);
     }
     return pending;
   }
 
-  private async launch(projectPath: string): Promise<Chrome> {
+  /**
+   * The tabs whose pages lived in a browser that went away: no page any more,
+   * so the next subscribe or Relaunch makes one in a fresh Chromium. A crash
+   * reads "crashed"; a lost VM link says so.
+   */
+  private dropPages(projectPath: string, chrome: Chrome): void {
+    const lost = chrome.lostReason?.() ?? null;
+    for (const tab of this.tabs.values()) {
+      if (tab.record.projectPath !== projectPath || !tab.page || tab.page.browser() !== chrome.browser) continue;
+      tab.page = null; tab.cdp = null; tab.streaming = false;
+      tab.status = lost ? "error" : "crashed";
+      tab.errorMessage = lost ?? undefined;
+      this.emitUpdated(tab);
+      this.pushState(tab);
+    }
+  }
+
+  /** A tab's launch failed: say why, and leave no half-made page behind. */
+  private failTab(tab: Tab, error: unknown): void {
+    const page = tab.page;
+    tab.page = null; tab.cdp = null; tab.streaming = false;
+    void page?.close().catch(() => undefined);
+    tab.status = "error";
+    tab.progress = undefined;
+    tab.errorMessage = error instanceof Error ? error.message.slice(0, 500) : String(error);
+    this.emitUpdated(tab);
+    this.pushState(tab);
+  }
+
+  private async launch(projectPath: string, signal: AbortSignal): Promise<Chrome> {
     await this.closingChromes.get(projectPath);
+    const remote = this.remoteChrome?.(projectPath);
+    if (remote) {
+      return remote.launch({
+        signal,
+        onProgress: (line) => {
+          for (const tab of this.tabs.values()) {
+            if (tab.record.projectPath !== projectPath || tab.status !== "starting" || tab.progress === line) continue;
+            tab.progress = line;
+            this.emitUpdated(tab);
+          }
+        }
+      });
+    }
     const executablePath = this.opts.resolveChromium();
     if (!executablePath) throw new BrowserError("No chromium/chrome binary found on the daemon host", 409);
     const hash = createHash("sha256").update(projectPath).digest("hex").slice(0, 16);
@@ -464,7 +583,7 @@ export class BrowserManager {
       await browser.close().catch(() => undefined);
       throw new BrowserError("Chromium did not expose a debugging endpoint", 500);
     }
-    return { browser, sandboxed, debugPort };
+    return { browser, sandboxed, debugPort, trustedDevtools: true, close: () => browser.close().catch(() => undefined) };
   }
 
   // Launch Chromium and force a renderer target to start, so a present-but-broken
@@ -489,7 +608,14 @@ export class BrowserManager {
     // callers can't each pass the null-page guard and create two CDP pages
     // (orphaning one page + doubling every screencast frame).
     if (!tab.ensuring) {
-      tab.ensuring = this.createPage(tab).finally(() => { tab.ensuring = undefined; });
+      tab.ensuring = this.createPage(tab)
+        .catch((error: unknown) => {
+          // Not left "starting": every caller (subscribe, navigate's Relaunch,
+          // pick) sees the failure on the tab.
+          if (this.tabs.get(tab.record.id) === tab) this.failTab(tab, error);
+          throw error;
+        })
+        .finally(() => { tab.ensuring = undefined; });
     }
     return tab.ensuring;
   }
@@ -525,6 +651,7 @@ export class BrowserManager {
     page.on("load", () => { tab.loading = false; void this.syncRecord(tab).catch(() => undefined); });
     page.on("close", () => {
       if (this.tabs.get(tab.record.id) !== tab) return; // our own close()
+      if (tab.page !== page) return; // already dropped with its browser
       tab.page = null; tab.cdp = null; tab.streaming = false;
       tab.status = "crashed";
       this.emitUpdated(tab);
@@ -532,6 +659,7 @@ export class BrowserManager {
     });
     tab.status = "running";
     tab.errorMessage = undefined;
+    tab.progress = undefined;
     if (tab.record.url && tab.record.url !== "about:blank") {
       tab.loading = true;
       void page.goto(tab.record.url, { waitUntil: "domcontentloaded", timeout: 30_000 })
@@ -571,10 +699,12 @@ export class BrowserManager {
   }
 
   private async stopScreencast(tab: Tab): Promise<void> {
-    if (!tab.streaming || !tab.cdp) return;
+    const cdp = tab.cdp;
+    if (!tab.streaming || !cdp) return;
     tab.streaming = false;
-    await tab.cdp.send("Page.stopScreencast").catch(() => undefined);
-    tab.cdp.removeAllListeners("Page.screencastFrame");
+    // The session captured: a browser that goes away meanwhile nulls `tab.cdp`.
+    await cdp.send("Page.stopScreencast").catch(() => undefined);
+    cdp.removeAllListeners("Page.screencastFrame");
   }
 
   private async onPickReport(tab: Tab, raw: string): Promise<void> {
