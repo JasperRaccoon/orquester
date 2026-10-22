@@ -350,6 +350,8 @@ interface Harness {
 
 interface HarnessOptions {
   binaryPath?: string | null;
+  /** `AdapterContext.idleCompactionMode`: the setting the resume question reads. */
+  idleCompactionMode?: AdapterContext["idleCompactionMode"];
   version?: string;
   queryThrows?: boolean;
   initResolves?: boolean;
@@ -417,7 +419,8 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
     sessionPath: () => "/usr/bin",
     tmpDir: () => options.tmpDir ?? "/tmp",
     signal: options.signal ?? new AbortController().signal,
-    ...(options.sessionTools !== undefined ? { sessionTools: options.sessionTools } : {})
+    ...(options.sessionTools !== undefined ? { sessionTools: options.sessionTools } : {}),
+    ...(options.idleCompactionMode !== undefined ? { idleCompactionMode: options.idleCompactionMode } : {})
   };
 
   const deps: ClaudeAdapterDeps = {
@@ -2374,6 +2377,37 @@ describe("claude adapter — fix-wave regressions", () => {
     );
     // `{behavior:"cancelled"}` is a real settlement the SDK forbids here.
     assert.equal(answer, null);
+  });
+
+  it("idle compaction set to Never keeps the full history without asking; other modes ask", async () => {
+    const homes: unknown[] = [];
+    const never = await makeHarness({
+      idleCompactionMode: async (home) => {
+        homes.push(home);
+        return "off";
+      }
+    });
+    await never.adapter.startSession(START);
+    const answer = await never.queryOptions.at(-1)!.onUserDialog!(
+      { dialogKind: "resume_return", payload: { sessionAgeMinutes: 90, estimatedTokens: 250_000 } },
+      { signal: new AbortController().signal, requestId: "req-r" }
+    );
+    assert.deepEqual(answer, { behavior: "completed", result: "continue" });
+    // Resolved for the thread's own account home.
+    assert.deepEqual(homes, [START.home]);
+    await never.drain();
+    assert.equal(never.events.some((event) => event.type === "user-input.requested"), false);
+
+    const asks = await makeHarness({ idleCompactionMode: async () => "onReturn" });
+    await asks.adapter.startSession(START);
+    const abort = new AbortController();
+    const pending = asks.queryOptions.at(-1)!.onUserDialog!(
+      { dialogKind: "resume_return", payload: { sessionAgeMinutes: 90, estimatedTokens: 250_000 } },
+      { signal: abort.signal, requestId: "req-s" }
+    );
+    await asks.waitFor("user-input.requested");
+    abort.abort();
+    assert.deepEqual(await pending, { behavior: "cancelled" });
   });
 
   it("R2-1: the per-cwd overlay carries the machine command list", async () => {
