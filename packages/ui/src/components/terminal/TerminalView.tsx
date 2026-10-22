@@ -1,7 +1,9 @@
 import React, { useEffect, useRef, useState } from "react";
-import { Terminal, type ITheme } from "@xterm/xterm";
+import { ArrowDownToLine, ClipboardPaste, Copy, TextSelect } from "lucide-react";
+import { Terminal, type ILink, type ITheme } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
+import { TERMINAL_SCROLLBACK_LINES } from "@orquester/api";
 import { useApi } from "../../context/orquester-context";
 import { useIsDesktop } from "../../hooks";
 import { useAppStore, useTerminalFontSize } from "../../store/app";
@@ -12,8 +14,18 @@ import { uploadFilesToSession, type UploadStatus } from "../../lib/session-uploa
 // chat tab has no PTY to apply them to.
 import { isLegacyAgentTerminal } from "../../lib/session-kind";
 import { UploadProgressBar } from "../ui/upload-progress";
+import { ContextMenu, type ContextMenuItem } from "../ui";
+import { isAppleLike } from "../agent-chat/primitives/shortcut";
 import { bracketPaste } from "../../lib/paste";
 import { applyLatchedModifiers } from "../../lib/terminal-keys";
+import { copyText } from "../../lib/clipboard";
+import {
+  isTerminalLinkActivation,
+  isTerminalUrl,
+  resolveTerminalPathLink,
+  terminalLinksForRow,
+  type TerminalLinkKind
+} from "../../lib/terminal-links";
 import type { SessionSummary } from "../../types";
 import type { ViewMode } from "../../lib/view-mode";
 
@@ -84,6 +96,21 @@ function hasLayoutBox(el: HTMLElement): boolean {
   return el.offsetWidth > 0 && el.offsetHeight > 0;
 }
 
+/** The terminal's right-click menu, as captured when it opened. */
+interface TerminalMenu {
+  x: number;
+  y: number;
+  selection: string;
+  atBottom: boolean;
+}
+
+/** Open a URL as a chat link opens: a new tab on the web, the system browser on the desktop. */
+function openTerminalUrl(url: string): void {
+  if (isTerminalUrl(url)) {
+    window.open(url, "_blank", "noopener,noreferrer");
+  }
+}
+
 /**
  * xterm.js view bound to a daemon session. Keystrokes (including control codes
  * like Ctrl-C `\x03`) are forwarded as input; the session's output stream is
@@ -113,6 +140,7 @@ export const TerminalView: React.FC<{
   // Drag-over highlight + a short-lived inline status line (uploading / errors).
   const [dragging, setDragging] = useState(false);
   const [status, setStatus] = useState<UploadStatus | null>(null);
+  const [menu, setMenu] = useState<TerminalMenu | null>(null);
 
   // Upload dropped/pasted files, then inject all returned paths in one input.
   // Stored in a ref so the (effect-mounted) DOM listeners always see the latest
@@ -137,7 +165,8 @@ export const TerminalView: React.FC<{
       fontWeightBold: 600,
       lineHeight: 1.2,
       letterSpacing: 0,
-      scrollback: 8000,
+      // The same number of lines the daemon keeps for a replay (tmux history-limit).
+      scrollback: TERMINAL_SCROLLBACK_LINES,
       allowProposedApi: true,
       drawBoldTextInBrightColors: true,
       macOptionIsMeta: true,
@@ -312,29 +341,95 @@ export const TerminalView: React.FC<{
       return true;
     });
 
-    // Right-click copies the current selection. Both handlers are CAPTURE-phase
-    // + stopPropagation so they run before xterm sees the event. The mousedown
-    // handler is the important one: when an app has mouse reporting enabled, the
-    // right-press is otherwise consumed by xterm (clearing the selection or
-    // forwarding it to the app) before the contextmenu fires — so we copy on the
-    // press itself. The contextmenu handler then suppresses the native menu.
-    // With no selection we leave the event alone (native menu / app gets it).
+    // Right-click opens the terminal menu (Copy, Paste, Select all, Jump to
+    // latest). Both handlers are CAPTURE-phase + stopPropagation so they run
+    // before xterm sees the event. The mousedown handler matters when there is
+    // a selection: with an app's mouse reporting on, xterm would otherwise
+    // consume the right-press (clearing the selection or forwarding it to the
+    // app) before the menu's Copy could read it. The menu captures the
+    // selection as it opens.
     const onRightMouseDown = (event: MouseEvent) => {
       if (event.button === 2 && term.hasSelection()) {
         event.preventDefault();
         event.stopPropagation();
-        void writeClipboard(term.getSelection());
       }
     };
     const onContextMenu = (event: MouseEvent) => {
-      if (term.hasSelection()) {
-        event.preventDefault();
-        event.stopPropagation();
-        void writeClipboard(term.getSelection());
-      }
+      event.preventDefault();
+      event.stopPropagation();
+      const buffer = term.buffer.active;
+      setMenu({
+        x: event.clientX,
+        y: event.clientY,
+        selection: term.getSelection(),
+        atBottom: buffer.viewportY >= buffer.baseY
+      });
     };
     container.addEventListener("mousedown", onRightMouseDown, true);
     container.addEventListener("contextmenu", onContextMenu, true);
+
+    // --- Links: URLs and file paths in the output ---------------------------
+    // Cmd-click (Apple) or Ctrl-click opens one, as in T3 Code; a plain click
+    // stays the program's. On touch a tap opens it, unless the program reads
+    // the mouse (the tap is then its). URLs open in a new tab (the system
+    // browser on the desktop); a path opens in the file browser, resolved
+    // against the session's directory and only when it is inside the project.
+    let lastPointerType = "mouse";
+    const notePointer = (event: PointerEvent) => {
+      lastPointerType = event.pointerType;
+    };
+    container.addEventListener("pointerdown", notePointer, true);
+    const shouldOpenLink = (event: MouseEvent) =>
+      lastPointerType === "touch"
+        ? term.modes.mouseTrackingMode === "none"
+        : isTerminalLinkActivation(event, isAppleLike());
+    const resolvePath = (text: string) => resolveTerminalPathLink(text, session.cwd, session.projectPath);
+    const openLink = (kind: TerminalLinkKind, text: string) => {
+      if (kind === "url") {
+        openTerminalUrl(text);
+        return;
+      }
+      const target = resolvePath(text);
+      if (target) {
+        useAppStore.getState().revealInFileBrowser(target.path, target);
+      }
+    };
+    const linkHint = isAppleLike() ? "⌘-click to open" : "Ctrl-click to open";
+    const linkProvider = term.registerLinkProvider({
+      provideLinks: (bufferLineNumber, callback) => {
+        const buffer = term.buffer.active;
+        const links = terminalLinksForRow(bufferLineNumber, (index) => buffer.getLine(index))
+          .filter((link) => link.kind === "url" || resolvePath(link.text) !== null)
+          .map<ILink>((link) => ({
+            range: link.range,
+            text: link.text,
+            activate: (event) => {
+              if (shouldOpenLink(event)) {
+                openLink(link.kind, link.text);
+              }
+            },
+            hover: () => {
+              if (lastPointerType !== "touch") {
+                container.title = linkHint;
+              }
+            },
+            leave: () => {
+              container.title = "";
+            }
+          }));
+        callback(links.length > 0 ? links : undefined);
+      }
+    });
+    // OSC 8 hyperlinks a program prints follow the same rule (xterm's default
+    // asks with a confirm() on every click).
+    term.options.linkHandler = {
+      activate: (event, text) => {
+        if (shouldOpenLink(event)) {
+          openTerminalUrl(text);
+        }
+      },
+      allowNonHttpProtocols: false
+    };
 
     // --- Touch drag-to-scroll (mobile) -------------------------------------
     // xterm's touch→mouse shim turns a one-finger drag into a selection /
@@ -553,7 +648,25 @@ export const TerminalView: React.FC<{
     // Capture phase (true): see onPaste — must run before xterm's textarea handler.
     container.addEventListener("paste", onPaste, true);
 
+    // xterm answers terminal queries (device attributes, cursor position,
+    // colours) through onData, the same path as keystrokes. A replayed snapshot
+    // can hold queries a program asked long ago; answering them now would type
+    // the replies into the live shell as junk at the prompt. So onData is
+    // detached while a replay is being parsed (the daemon also strips queries
+    // from what it replays). Keystrokes in that instant are dropped with it.
+    // Adapted from T3 Code (MIT): apps/web/src/terminal/ghostty/core.ts
+    let replayWrites = 0;
+    const writeReplay = (chunk: string) => {
+      replayWrites += 1;
+      term.write(chunk, () => {
+        replayWrites -= 1;
+      });
+    };
+
     const inputSub = term.onData((data) => {
+      if (replayWrites > 0) {
+        return;
+      }
       // The user is responding → clear any bell-driven attention pulse.
       useAppStore.getState().clearSessionAttention(session.id);
       // A Ctrl/Alt latched on the mobile key bar applies to this key. Only a
@@ -644,9 +757,14 @@ export const TerminalView: React.FC<{
         term.write(chunk);
         forceAgentRepaint();
       },
+      onReplay: (chunk) => {
+        writeReplay(chunk);
+        forceAgentRepaint();
+      },
       onEnd: () => term.write("\r\n\x1b[2m[session ended]\x1b[0m\r\n"),
-      // Multiplexed socket reconnected → clear before the buffer replay so the
-      // existing content isn't duplicated.
+      // Multiplexed socket reconnected, or the daemon is resyncing this
+      // terminal → clear before the buffer replay so the existing content
+      // isn't duplicated.
       onReset: () => {
         term.reset();
         repaintArmed = true;
@@ -656,6 +774,8 @@ export const TerminalView: React.FC<{
     return () => {
       container.removeEventListener("mousedown", onRightMouseDown, true);
       container.removeEventListener("contextmenu", onContextMenu, true);
+      container.removeEventListener("pointerdown", notePointer, true);
+      linkProvider.dispose();
       container.removeEventListener("touchstart", onTouchStart);
       container.removeEventListener("touchmove", onTouchMove);
       container.removeEventListener("touchend", onTouchEnd);
@@ -707,6 +827,53 @@ export const TerminalView: React.FC<{
     void api.resizeSession(session.id, term.cols, term.rows);
   }, [fontSize, api, session.id]);
 
+  // The right-click menu's actions. Paste goes where a native paste goes:
+  // agents get an explicit bracketed paste (see onPaste), the rest xterm's.
+  const pasteFromClipboard = async () => {
+    const term = termRef.current;
+    if (!term) {
+      return;
+    }
+    let text: string;
+    try {
+      text = await navigator.clipboard.readText();
+    } catch {
+      setStatus({ kind: "error", text: "Clipboard unavailable — allow paste access and try again." });
+      return;
+    }
+    if (!text) {
+      return;
+    }
+    if (isLegacyAgentTerminal(session)) {
+      void api.sendSessionInput(session.id, bracketPaste(text));
+    } else {
+      term.paste(text);
+    }
+  };
+  const menuItems = (open: TerminalMenu): ContextMenuItem[] => {
+    // Every action hands the keyboard back to the terminal.
+    const then = (action: () => void) => () => {
+      action();
+      termRef.current?.focus();
+    };
+    return [
+      {
+        label: "Copy",
+        icon: <Copy size={14} />,
+        disabled: !open.selection,
+        onClick: then(() => void copyText(open.selection))
+      },
+      { label: "Paste", icon: <ClipboardPaste size={14} />, onClick: then(() => void pasteFromClipboard()) },
+      { label: "Select all", icon: <TextSelect size={14} />, onClick: then(() => termRef.current?.selectAll()) },
+      {
+        label: "Jump to latest",
+        icon: <ArrowDownToLine size={14} />,
+        disabled: open.atBottom,
+        onClick: then(() => termRef.current?.scrollToBottom())
+      }
+    ];
+  };
+
   // Auto-clear a transient status line so it doesn't linger. An in-flight
   // upload is never timed out: its bar is superseded by the success (null) or
   // error the helper reports when it finishes.
@@ -752,6 +919,7 @@ export const TerminalView: React.FC<{
           {status.text}
         </div>
       ) : null}
+      {menu && <ContextMenu x={menu.x} y={menu.y} items={menuItems(menu)} onClose={() => setMenu(null)} />}
     </div>
   );
 };

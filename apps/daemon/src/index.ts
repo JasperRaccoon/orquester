@@ -109,6 +109,7 @@ import { DailyLogStream } from "./daily-log.ts";
 import { daemonBuildInfo, type BuildInfo } from "./build-info.ts";
 import { listAgentConversations } from "./agent-conversations.ts";
 import { type ISessionManager, SessionError, createSessionManager, resumeLaunchArgs } from "./sessions";
+import { createSessionStream } from "./session-stream";
 import { AgentChatService, ChatSessionError, type CreateAgentChatRequest } from "./agent-chat/service.ts";
 import { INVALID_OWNER, parseSessionOwner } from "./agent-chat/owner.ts";
 import { ChatAwareSessionManager } from "./agent-chat/session-router.ts";
@@ -4868,113 +4869,10 @@ export function createServer(
         }
       }
 
-      const subs = new Map<string, () => void>();
-      // Ids whose sub-time scrollback was captured before the client reported its
-      // real terminal size; re-sent once on the first resize after the sub so an
-      // alt-screen grid that was captured at the wrong width arrives un-wrapped.
-      const resyncPending = new Set<string>();
-      const send = (msg: unknown) => {
-        try {
-          socket.send(JSON.stringify(msg));
-        } catch {
-          /* socket closing */
-        }
-      };
-
-      socket.on("message", async (raw) => {
-        let msg: { t?: string; id?: string; data?: string; cols?: number; rows?: number };
-        try {
-          msg = JSON.parse(raw.toString());
-        } catch {
-          return;
-        }
-        // Liveness probe: mobile browsers kill a backgrounded tab's socket
-        // without a close frame, so the client pings on wake and treats a
-        // missing pong as a dead socket (see WsSessionChannel.wake).
-        if (msg.t === "ping") {
-          send({ t: "pong" });
-          return;
-        }
-        const id = msg.id;
-        if (!id) {
-          return;
-        }
-        if (msg.t === "sub") {
-          const summary = sessions.get(id);
-          if (!summary) {
-            send({ t: "end", id });
-            return;
-          }
-          // Cancel any prior subscription and reserve this id's slot SYNCHRONOUSLY
-          // with a unique placeholder before the await below. `ws` drains queued
-          // frames into this async handler at each await point, so a back-to-back
-          // `unsub` (fast tab close, or a strict-mode dev double-mount — see
-          // WsSessionChannel.openOutput/close) runs DURING this await. Reserving the
-          // slot lets that unsub remove it, and the identity check after the await
-          // lets the unsub — or a newer sub — win instead of installing an emitter
-          // listener the client already cancelled (which would leak and keep
-          // streaming output for a closed stream).
-          subs.get(id)?.();
-          const pending = () => {};
-          subs.set(id, pending);
-          send({ t: "out", id, data: await sessions.scrollback(id) });
-          // A racing unsub (or a newer sub) replaced our placeholder while we
-          // awaited — honor it and do not install the subscription.
-          if (subs.get(id) !== pending) {
-            return;
-          }
-          // Re-read the LIVE status after the await — the pre-await `summary` is a
-          // clone and can't reflect a transition during scrollback(). If the
-          // command exited (or the session was closed) while capture-pane was in
-          // flight, the attach PTY's onExit already emitted "exit" with no
-          // subscriber, so subscribing now would never deliver an end and the
-          // client's terminal pane would hang open. Send end + drop the slot.
-          const current = sessions.get(id);
-          if (!current || current.status === "exited") {
-            subs.delete(id);
-            send({ t: "end", id });
-            return;
-          }
-          subs.set(
-            id,
-            sessions.subscribe(
-              id,
-              (data) => send({ t: "out", id, data }),
-              () => send({ t: "end", id })
-            )
-          );
-          resyncPending.add(id);
-        } else if (msg.t === "unsub") {
-          subs.get(id)?.();
-          subs.delete(id);
-          resyncPending.delete(id);
-        } else if (msg.t === "input" && typeof msg.data === "string") {
-          sessions.input(id, msg.data);
-        } else if (msg.t === "resize" && typeof msg.cols === "number" && typeof msg.rows === "number") {
-          sessions.resize(id, msg.cols, msg.rows);
-          // The first resize after a sub is the client's REAL terminal size. The
-          // sub-time scrollback was captured before the client fit (often at the
-          // 80-col default), so an alt-screen TUI grid landed wrapped/garbled. Now
-          // the pane matches the client: re-capture at the correct width and re-send,
-          // once. The brief wait lets tmux apply the resize (SIGWINCH → window
-          // resize) before we snapshot. Reliable regardless of whether the agent
-          // emits more output — an idle agent would otherwise stay garbled.
-          if (resyncPending.delete(id)) {
-            await new Promise((resolve) => setTimeout(resolve, 80));
-            if (subs.has(id)) {
-              send({ t: "out", id, data: await sessions.scrollback(id) });
-            }
-          }
-        }
-      });
-
-      socket.on("close", () => {
-        for (const unsub of subs.values()) {
-          unsub();
-        }
-        subs.clear();
-        resyncPending.clear();
-      });
+      // Subscriptions, backpressure and resyncs live in session-stream.ts.
+      const stream = createSessionStream(socket, sessions);
+      socket.on("message", (raw) => void stream.onMessage(raw.toString()));
+      socket.on("close", () => stream.onClose());
     });
   });
 

@@ -19,22 +19,57 @@ import {
 } from "./tmux";
 import { sessionNodeOptions, sessionNodePreload } from "./plugins/session-env.ts";
 import { ActivityTracker } from "./ansi-activity.ts";
+import { TerminalOutputRing } from "./terminal-history.ts";
 import { classifyAgentEvent } from "./agent-status.ts";
-
-/**
- * Small live ring kept only for HOT replay between a session's creation and the
- * first client connect. The durable scrollback source of truth is tmux
- * capture-pane (survives daemon restarts); this ring does not.
- */
-const MAX_BUFFER = 256 * 1024;
 
 interface Session {
   summary: SessionSummary;
   /** Streaming PTY: `tmux attach -t orq-<id>`. Null once exited. */
   pty: IPty | null;
-  buffer: string;
+  /**
+   * Hot replay ring (query traffic stripped). The direct backend's only
+   * scrollback; on tmux, the fallback once the pane is gone — the durable source
+   * there is capture-pane (survives daemon restarts), which this ring does not.
+   */
+  buffer: TerminalOutputRing;
   tracker: ActivityTracker;
+  /** "output" (data), "exit" (code), and "closed" when the session is closed. */
   emitter: EventEmitter;
+  /** A size the attach PTY was resized to that tmux has not been seen to apply yet (tmux backend). */
+  pendingSize?: { cols: number; rows: number };
+}
+
+/**
+ * How many times {@link SessionManager.settleResize} asks tmux before giving
+ * up. Each check runs after the session's next output, so a busy session can't
+ * turn the wait into a burst of tmux calls.
+ */
+const MAX_RESIZE_CHECKS = 20;
+
+/**
+ * Resolves on the session's next output, its exit or close, or `signal`.
+ * Armed synchronously, so output arriving while the caller awaits something
+ * else is not missed. `cancel` removes the listeners.
+ */
+function nextSessionEvent(emitter: EventEmitter, signal?: AbortSignal): { promise: Promise<void>; cancel: () => void } {
+  let cancel = () => {};
+  const promise = new Promise<void>((resolve) => {
+    const done = () => {
+      cancel();
+      resolve();
+    };
+    cancel = () => {
+      emitter.off("output", done);
+      emitter.off("exit", done);
+      emitter.off("closed", done);
+      signal?.removeEventListener("abort", done);
+    };
+    emitter.on("output", done);
+    emitter.on("exit", done);
+    emitter.on("closed", done);
+    signal?.addEventListener("abort", done);
+  });
+  return { promise, cancel };
 }
 
 export class SessionError extends Error {}
@@ -75,6 +110,13 @@ export interface ISessionManager {
   agentEvent(id: string, req: AgentEventRequest): boolean;
   input(id: string, data: string): void;
   resize(id: string, cols: number, rows: number): void;
+  /**
+   * Resolves once the backend has applied the session's latest resize, so a
+   * snapshot taken next is at that size; at once when there is nothing to wait
+   * for, and early on `signal`. Absent where a resize applies synchronously
+   * (direct node-pty) or can't be observed.
+   */
+  settleResize?(id: string, signal?: AbortSignal): Promise<void>;
   /**
    * `opts.seed` marks a title the CLIENT auto-generated from the thread's
    * first message rather than one the user typed (agent chat §7.7). Only the
@@ -384,7 +426,7 @@ export class SessionManager implements ISessionManager {
         kind: summary.kind
       });
     });
-    const session: Session = { summary, pty: null, buffer: "", tracker, emitter: new EventEmitter() };
+    const session: Session = { summary, pty: null, buffer: new TerminalOutputRing(), tracker, emitter: new EventEmitter() };
     this.sessions.set(id, session);
 
     // 1) Spawn the command INSIDE tmux (detached), 2) attach a streaming PTY to
@@ -519,7 +561,7 @@ export class SessionManager implements ISessionManager {
       if (this.sessions.get(id) !== session) {
         return;
       }
-      session.buffer = (session.buffer + data).slice(-MAX_BUFFER);
+      session.buffer.append(data);
       session.tracker.noteOutput(data);
       session.emitter.emit("output", data);
       this.lifecycle.emit("output", { id, data });
@@ -594,12 +636,12 @@ export class SessionManager implements ISessionManager {
         return captured;
       }
     }
-    return session.buffer;
+    return session.buffer.value();
   }
 
   /** Synchronous hot-ring snapshot (kept for callers that can't await). */
   buffer(id: string): string {
-    return this.sessions.get(id)?.buffer ?? "";
+    return this.sessions.get(id)?.buffer.value() ?? "";
   }
 
   activity(id: string): SessionActivity | undefined {
@@ -655,10 +697,38 @@ export class SessionManager implements ISessionManager {
       if (session.summary.cols !== cols || session.summary.rows !== rows) {
         session.summary.cols = cols;
         session.summary.rows = rows;
+        // tmux applies it once its client has handled the SIGWINCH (settleResize).
+        session.pendingSize = { cols, rows };
         // Persist the new size (coalesced) so a daemon restart reattaches at it
         // rather than the 80×24 default — see reattach().
         this.schedulePersist();
       }
+    }
+  }
+
+  /**
+   * Wait for tmux to apply the latest resize: the attach PTY's ioctl only
+   * signals the tmux client, which tells the server, which resizes the pane and
+   * redraws the client. So check the client's size in tmux now and again after
+   * each output chunk (that redraw is output), never on a timer.
+   */
+  async settleResize(id: string, signal?: AbortSignal): Promise<void> {
+    const session = this.sessions.get(id);
+    for (let checks = 0; checks < MAX_RESIZE_CHECKS; checks += 1) {
+      const target = session?.pendingSize;
+      if (!session || !target || !session.pty || signal?.aborted || this.sessions.get(id) !== session) {
+        return;
+      }
+      const next = nextSessionEvent(session.emitter, signal);
+      const sizes = await this.tmux.clientSizes(id);
+      if (sizes.some((size) => size.cols === target.cols && size.rows === target.rows)) {
+        next.cancel();
+        if (session.pendingSize === target) {
+          session.pendingSize = undefined;
+        }
+        return;
+      }
+      await next.promise;
     }
   }
 
@@ -724,6 +794,7 @@ export class SessionManager implements ISessionManager {
     void this.tmux.killSession(id);
     session.tracker.dispose();
     this.sessions.delete(id);
+    session.emitter.emit("closed");
     this.lifecycle.emit("closed", { id });
     void this.persistIndex();
     return true;
@@ -869,7 +940,7 @@ export class SessionManager implements ISessionManager {
           kind: summary.kind
         });
       });
-      const session: Session = { summary, pty: null, buffer: "", tracker, emitter: new EventEmitter() };
+      const session: Session = { summary, pty: null, buffer: new TerminalOutputRing(), tracker, emitter: new EventEmitter() };
       this.sessions.set(record.id, session);
       this.attach(session);
     }
@@ -1129,14 +1200,14 @@ export class LocalSessionManager implements ISessionManager {
         kind: summary.kind
       });
     });
-    const session: Session = { summary, pty, buffer: "", tracker, emitter: new EventEmitter() };
+    const session: Session = { summary, pty, buffer: new TerminalOutputRing(), tracker, emitter: new EventEmitter() };
     this.sessions.set(id, session);
 
     pty.onData((data) => {
       if (this.sessions.get(id) !== session) {
         return;
       }
-      session.buffer = (session.buffer + data).slice(-MAX_BUFFER);
+      session.buffer.append(data);
       session.tracker.noteOutput(data);
       session.emitter.emit("output", data);
       this.lifecycle.emit("output", { id, data });
@@ -1197,7 +1268,7 @@ export class LocalSessionManager implements ISessionManager {
   }
 
   buffer(id: string): string {
-    return this.sessions.get(id)?.buffer ?? "";
+    return this.sessions.get(id)?.buffer.value() ?? "";
   }
 
   activity(id: string): SessionActivity | undefined {

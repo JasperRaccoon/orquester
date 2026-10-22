@@ -48,6 +48,18 @@ describe("revealInFileBrowser", () => {
     assert.equal(store().activeTabByProject[P], first.id);
   });
 
+  it("carries a line and column to jump to (a terminal's file:line:col link)", () => {
+    store().revealInFileBrowser(`${P}/src/a.ts`, { line: 12, column: 7 });
+    assert.deepEqual(
+      { ...store().fileTabsByProject[P][0].reveal, nonce: 0 },
+      { path: `${P}/src/a.ts`, nonce: 0, line: 12, column: 7 }
+    );
+    store().revealInFileBrowser(`${P}/src/a.ts`);
+    const reveal = store().fileTabsByProject[P][0].reveal;
+    assert.equal(reveal?.line, undefined);
+    assert.equal(reveal?.column, undefined);
+  });
+
   it("does nothing without a current project", () => {
     useAppStore.setState({ currentProject: null });
     store().revealInFileBrowser(`${P}/src/a.ts`);

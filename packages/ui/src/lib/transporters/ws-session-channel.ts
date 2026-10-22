@@ -1,3 +1,4 @@
+import type { TerminalStreamClientFrame } from "@orquester/api";
 import type { SessionChannel, StreamHandle, StreamHandlers } from "../transporter";
 
 /**
@@ -8,9 +9,9 @@ import type { SessionChannel, StreamHandle, StreamHandlers } from "../transporte
  * asks each terminal to reset before the daemon replays its buffer, so nothing
  * is duplicated.
  *
- * Wire protocol (JSON text frames):
- *   client → { t:"sub"|"unsub", id } | { t:"input", id, data } | { t:"resize", id, cols, rows } | { t:"ping" }
- *   server → { t:"out", id, data } | { t:"end", id } | { t:"pong" }
+ * Wire protocol: JSON text frames, `TerminalStreamClientFrame` and
+ * `TerminalStreamServerFrame` in packages/api. A server `reset` clears the
+ * terminal before the daemon resyncs it; an `out` with `replay` is a snapshot.
  */
 export class WsSessionChannel implements SessionChannel {
   private ws: WebSocket | null = null;
@@ -128,7 +129,7 @@ export class WsSessionChannel implements SessionChannel {
       if (typeof event.data !== "string") {
         return;
       }
-      let msg: { t?: string; id?: string; data?: string };
+      let msg: { t?: string; id?: string; data?: string; replay?: boolean };
       try {
         msg = JSON.parse(event.data);
       } catch {
@@ -146,7 +147,13 @@ export class WsSessionChannel implements SessionChannel {
         return;
       }
       if (msg.t === "out" && typeof msg.data === "string") {
-        handlers.onData(msg.data);
+        if (msg.replay === true && handlers.onReplay) {
+          handlers.onReplay(msg.data);
+        } else {
+          handlers.onData(msg.data);
+        }
+      } else if (msg.t === "reset") {
+        handlers.onReset?.();
       } else if (msg.t === "end") {
         handlers.onEnd();
       }
@@ -201,7 +208,7 @@ export class WsSessionChannel implements SessionChannel {
     }, delay);
   }
 
-  private raw(msg: Record<string, unknown>): void {
+  private raw(msg: TerminalStreamClientFrame): void {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(msg));
     }
