@@ -42,6 +42,7 @@ async function rig(
     /** null: no installer wired. */
     installer?: BoxBrowserInstaller | null;
     launchDeadlineMs?: number;
+    reconnectDeadlineMs?: number;
     exitDeadlineMs?: number;
   } = {}
 ) {
@@ -64,6 +65,7 @@ async function rig(
     ...(options.installer === null ? {} : { installer: options.installer ?? installed }),
     logger: { warn: (message) => warnings.push(message) },
     launchDeadlineMs: options.launchDeadlineMs ?? 5_000,
+    reconnectDeadlineMs: options.reconnectDeadlineMs ?? 50,
     exitDeadlineMs: options.exitDeadlineMs ?? 50
   });
   t.after(() => vm.stop());
@@ -170,6 +172,46 @@ test("a box that is away fails the launch with a clear message; Relaunch after i
   assert.equal(installs, 1, "the Relaunch tried again");
   assert.equal(r.manager.get(tab.id)!.status, "error", "a failed Relaunch is not left starting");
   assert.equal(r.manager.get(tab.id)!.errorMessage, "Chromium is not available in the VM: not wired.");
+});
+
+test("a tab that subscribes while its box is away (a daemon that just started) launches once the box is back", async (t) => {
+  let installs = 0;
+  const r = await rig(t, {
+    reconnectDeadlineMs: 10_000,
+    installer: {
+      ensureBrowser: async () => {
+        installs += 1;
+        throw Object.assign(new Error("not wired"), { code: "BOX_GUI_UNAVAILABLE", hint: null });
+      }
+    }
+  });
+  const tab = await r.manager.create(PROJECT);
+  r.connection.dropLink();
+  const waiting = new Promise<void>((resolve) => {
+    const onUpdated = (summary: { progress?: string }): void => {
+      if (summary.progress !== "Waiting for the VM to connect…") return;
+      r.manager.lifecycle.off("updated", onUpdated);
+      resolve();
+    };
+    r.manager.lifecycle.on("updated", onUpdated);
+  });
+  const state = firstState(r.manager, tab.id);
+  await waiting;
+  assert.equal(installs, 0, "nothing runs while the box is away");
+  r.connection.restoreLink();
+  await state;
+  assert.equal(installs, 1, "the launch went on once the box was back");
+  assert.equal(r.manager.get(tab.id)!.errorMessage, "Chromium is not available in the VM: not wired.");
+});
+
+test("a launch waiting for its box ends at once when the box is destroyed", async (t) => {
+  const r = await rig(t, { reconnectDeadlineMs: 10_000 });
+  const tab = await r.manager.create(PROJECT);
+  r.connection.dropLink();
+  const state = firstState(r.manager, tab.id);
+  r.boxes.update("box-1", { state: "destroyed" });
+  assert.equal((await state).status, "error");
+  assert.match(r.manager.get(tab.id)!.errorMessage ?? "", /VM was destroyed/);
 });
 
 test("a launch stops the project's leftover Chromium first, in its own profile dir under the agent's data dir", async (t) => {

@@ -251,9 +251,12 @@ export class BrowserManager {
       await this.ensurePage(tab);
       await this.startScreencast(tab);
       sink.onState(this.state(tab));
-      // Prime the canvas immediately — screencast only emits on change.
-      const shot = await tab.cdp!.send("Page.captureScreenshot", { format: "jpeg", quality: 60 });
-      sink.onFrame(Buffer.from(shot.data, "base64"));
+      // Prime the canvas immediately — screencast only emits on change. Best
+      // effort: a page still committing its first navigation (fired, not
+      // awaited, by createPage; long enough to hit over a VM link) answers
+      // "Not attached to an active page", and the screencast frames follow.
+      const shot = await tab.cdp!.send("Page.captureScreenshot", { format: "jpeg", quality: 60 }).catch(() => null);
+      if (shot) sink.onFrame(Buffer.from(shot.data, "base64"));
     } catch (error) {
       tab.status = "error";
       tab.progress = undefined;

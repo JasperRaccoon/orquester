@@ -48,6 +48,8 @@ export interface BoxDevForwardDeps {
   browsers: { list(projectPath?: string): { projectPath: string; url: string }[]; lifecycle: EventEmitter };
   /** Box projects whose Browser tab runs Chromium in the box (`BoxBrowsers.runsInBox`); none when absent. */
   browserRunsInBox?: (projectPath: string) => boolean;
+  /** Box ports that are Orquester's own, not a dev server (a VM browser's debugging port): never suggested. */
+  ownPorts?: (boxId: string) => readonly number[];
   logger?: { warn(message: string, meta?: Record<string, unknown>): void };
 }
 
@@ -146,7 +148,8 @@ export class BoxDevForwards {
     const target = this.connectionFor(projectPath);
     if (!target) return [];
     const wanted: { scheme: "http" | "https"; port: number }[] = [];
-    const seen = new Set<number>();
+    // Marked seen up front: Orquester's own listeners in the box are never offered.
+    const seen = new Set<number>(this.deps.ownPorts?.(target.boxId) ?? []);
     for (const url of sniffed) {
       const loop = loopbackTarget(url);
       if (loop && !seen.has(loop.port)) {

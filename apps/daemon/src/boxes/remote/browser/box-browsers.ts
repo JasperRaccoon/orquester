@@ -80,6 +80,8 @@ export interface BoxBrowsersDeps {
   logger?: { warn(message: string, meta?: Record<string, unknown>): void };
   /** Deadline for Chromium to announce its debugging endpoint. Default 30 s. */
   launchDeadlineMs?: number;
+  /** How long a launch waits for a box that is away to (re)connect. Default 30 s. */
+  reconnectDeadlineMs?: number;
   /** Deadline for a stopping Chromium to exit before it is SIGKILLed (and again after). Default 5 s. */
   exitDeadlineMs?: number;
   /** Largest CDP message accepted from a box Chromium. Default {@link BOX_CDP_MAX_PAYLOAD}. */
@@ -97,6 +99,7 @@ export const BOX_BROWSER_PROC_PREFIX = "orq-browser-";
 export const BOX_CDP_MAX_PAYLOAD = 32 * 1024 * 1024;
 
 const DEFAULT_LAUNCH_DEADLINE_MS = 30_000;
+const DEFAULT_RECONNECT_DEADLINE_MS = 30_000;
 const DEFAULT_EXIT_DEADLINE_MS = 5_000;
 const CDP_HANDSHAKE_DEADLINE_MS = 10_000;
 /** How long one CDP call to a box Chromium may take (puppeteer's default is 180 s). */
@@ -288,6 +291,8 @@ export class BoxBrowsers {
   private readonly live = new Map<string, Set<BoxChrome>>();
   /** Process ids this daemon started and has not finished stopping: never a leftover. */
   private readonly owned = new Set<string>();
+  /** procId → the box port its Chromium's debugging endpoint listens on, from the announcement to the teardown. */
+  private readonly debugPorts = new Map<string, { boxId: string; port: number }>();
   /**
    * Closes under way per project hash. A Chromium can close on its own (its channel failed, it
    * crashed) while `BrowserManager` already relaunches: the new one waits for the old one's end.
@@ -298,11 +303,13 @@ export class BoxBrowsers {
   private readonly unsubscribe: (() => void)[] = [];
   private readonly stopping = new AbortController();
   private readonly launchDeadlineMs: number;
+  private readonly reconnectDeadlineMs: number;
   private readonly exitDeadlineMs: number;
   private readonly cdpMaxPayload: number;
 
   constructor(private readonly deps: BoxBrowsersDeps) {
     this.launchDeadlineMs = deps.launchDeadlineMs ?? DEFAULT_LAUNCH_DEADLINE_MS;
+    this.reconnectDeadlineMs = deps.reconnectDeadlineMs ?? DEFAULT_RECONNECT_DEADLINE_MS;
     this.exitDeadlineMs = deps.exitDeadlineMs ?? DEFAULT_EXIT_DEADLINE_MS;
     this.cdpMaxPayload = deps.cdpMaxPayload ?? BOX_CDP_MAX_PAYLOAD;
     this.unsubscribe.push(
@@ -345,6 +352,14 @@ export class BoxBrowsers {
     await Promise.all([...this.live.keys()].map((boxId) => this.closeBox(boxId)));
   }
 
+  /**
+   * The box ports this module's Chromiums listen on (their debugging endpoints): not a dev server,
+   * so never offered as one (`BoxDevForwards`).
+   */
+  ownPorts(boxId: string): number[] {
+    return [...this.debugPorts.values()].filter((entry) => entry.boxId === boxId).map((entry) => entry.port);
+  }
+
   /** Live box Chromiums, for tests and status. */
   list(): { boxId: string; procId: string; debugPort: number }[] {
     return [...this.live.values()].flatMap((set) => [...set].map((chrome) => ({ boxId: chrome.boxId, procId: chrome.procId, debugPort: chrome.debugPort })));
@@ -367,15 +382,17 @@ export class BoxBrowsers {
     if (record.state === "destroyed" || record.state === "destroying" || record.state === "destroy-failed") {
       throw new BrowserError("The project's VM was destroyed; its browser cannot start.", 409);
     }
-    const connection = location.connection ?? this.deps.hub.get(boxId);
-    if (!connection?.connected) {
-      throw new BrowserError("The project's VM is not connected. Relaunch the browser once it is back.", 409);
-    }
-
     const progress = (line: string): void => {
       const text = line.trim();
       if (text && !signal.aborted) onProgress(text.slice(0, PROGRESS_MAX_CHARS));
     };
+    let connection = location.connection ?? this.deps.hub.get(boxId);
+    if (!connection?.connected) {
+      // A daemon that just started resubscribes its tabs before the boxes are back on their
+      // links (seconds later), and a dropped link is often back as soon: wait for it, bounded.
+      progress("Waiting for the VM to connect…");
+      connection = await this.awaitLink(boxId, signal);
+    }
     progress("Preparing Chromium in the VM…");
     let runtime: BoxBrowserRuntime;
     try {
@@ -426,6 +443,43 @@ export class BoxBrowsers {
     }
   }
 
+  /** The box's connection once it is on its link; refused at the reconnect deadline or once the box is destroyed. */
+  private awaitLink(boxId: string, signal: AbortSignal): Promise<BoxConnection> {
+    return new Promise<BoxConnection>((resolve, reject) => {
+      const finish = (error: Error | null, connection?: BoxConnection): void => {
+        clearTimeout(timer);
+        signal.removeEventListener("abort", onAbort);
+        offConnection();
+        offRecord();
+        if (error) reject(error);
+        else resolve(connection!);
+      };
+      const check = (): void => {
+        const record = this.deps.registry.get(boxId);
+        if (!record || record.state === "destroyed" || record.state === "destroying" || record.state === "destroy-failed") {
+          finish(new BrowserError("The project's VM was destroyed; its browser cannot start.", 409));
+          return;
+        }
+        const connection = this.deps.hub.get(boxId);
+        if (connection?.connected) finish(null, connection);
+      };
+      const onAbort = (): void => finish(cancelled());
+      const timer = setTimeout(
+        () => finish(new BrowserError("The project's VM is not connected. Relaunch the browser once it is back.", 409)),
+        this.reconnectDeadlineMs
+      );
+      signal.addEventListener("abort", onAbort, { once: true });
+      const offConnection = this.deps.hub.onConnectionChange((id, connected) => {
+        if (id === boxId && connected) check();
+      });
+      const offRecord = this.deps.registry.onChange((id) => {
+        if (id === boxId) check();
+      });
+      if (signal.aborted) onAbort();
+      else check();
+    });
+  }
+
   /** One Chromium start: the process, its endpoint, the forward, puppeteer, a probe page. */
   private async start(
     connection: BoxConnection,
@@ -455,6 +509,7 @@ export class BoxBrowsers {
         onFailure?.(error);
       });
       const endpoint = await this.awaitEndpoint(proc, signal);
+      this.debugPorts.set(procId, { boxId, port: endpoint.port });
       // Each step gives up as soon as the tab closes: a Chromium that accepts the socket and then
       // never answers would otherwise hold the close for puppeteer's protocol timeout.
       forward = await unlessAborted(connection.forwardToHost(endpoint.port), signal, (late) => void late.close().catch(() => undefined));
@@ -636,6 +691,7 @@ export class BoxBrowsers {
     } finally {
       // Still running in the box (the link was away): no longer ours, so the next sweep stops it.
       this.owned.delete(procId);
+      this.debugPorts.delete(procId);
       // A listener's close waits for its open connections; one to a Chromium that is still
       // running (the link was away) may never end, so it gets the same deadline.
       await withDeadline(forward?.close() ?? Promise.resolve(), this.exitDeadlineMs).catch(() => undefined);
