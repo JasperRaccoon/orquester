@@ -99,6 +99,8 @@ export const BOX_CDP_MAX_PAYLOAD = 32 * 1024 * 1024;
 const DEFAULT_LAUNCH_DEADLINE_MS = 30_000;
 const DEFAULT_EXIT_DEADLINE_MS = 5_000;
 const CDP_HANDSHAKE_DEADLINE_MS = 10_000;
+/** How long one CDP call to a box Chromium may take (puppeteer's default is 180 s). */
+const BOX_PROTOCOL_TIMEOUT_MS = 60_000;
 /** Chromium's stderr kept for a failed launch's message. */
 const STDERR_TAIL_CHARS = 2_000;
 /**
@@ -242,15 +244,22 @@ function cancelled(): BrowserError {
   return new BrowserError("The browser launch was cancelled", 409);
 }
 
-/** `promise`, rejected as soon as `signal` aborts (the work itself may finish later, unused). */
-function unlessAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
-  if (signal.aborted) return Promise.reject(cancelled());
+/**
+ * `promise`, rejected as soon as `signal` aborts. The work itself may finish later: its value is
+ * then unused, and handed to `dispose` (a socket or forward nobody will close otherwise).
+ */
+function unlessAborted<T>(promise: Promise<T>, signal: AbortSignal, dispose?: (value: T) => void): Promise<T> {
+  if (signal.aborted) {
+    if (dispose) promise.then(dispose, () => undefined);
+    return Promise.reject(cancelled());
+  }
   return new Promise<T>((resolve, reject) => {
     const onAbort = (): void => reject(cancelled());
     signal.addEventListener("abort", onAbort, { once: true });
     promise.then(
       (value) => {
         signal.removeEventListener("abort", onAbort);
+        if (signal.aborted) dispose?.(value);
         resolve(value);
       },
       (error: unknown) => {
@@ -446,13 +455,25 @@ export class BoxBrowsers {
         onFailure?.(error);
       });
       const endpoint = await this.awaitEndpoint(proc, signal);
-      forward = await connection.forwardToHost(endpoint.port);
-      transport = await connectBoundedTransport(`ws://127.0.0.1:${forward.hostPort}${endpoint.path}`, this.cdpMaxPayload);
-      browser = await puppeteer.connect({ transport, defaultViewport: null });
+      // Each step gives up as soon as the tab closes: a Chromium that accepts the socket and then
+      // never answers would otherwise hold the close for puppeteer's protocol timeout.
+      forward = await unlessAborted(connection.forwardToHost(endpoint.port), signal, (late) => void late.close().catch(() => undefined));
+      const hostPort = forward.hostPort;
+      transport = await unlessAborted(
+        connectBoundedTransport(`ws://127.0.0.1:${hostPort}${endpoint.path}`, this.cdpMaxPayload),
+        signal,
+        (late) => late.close()
+      );
+      const cdp = transport;
+      browser = await unlessAborted(
+        puppeteer.connect({ transport: cdp, defaultViewport: null, protocolTimeout: BOX_PROTOCOL_TIMEOUT_MS }),
+        signal,
+        (late) => void late.disconnect().catch(() => undefined)
+      );
       // A present-but-broken sandbox lets the browser start and then aborts the first renderer:
       // make it fail here (as the host's tryLaunch does) so the unsandboxed retry can run.
-      const probe = await browser.newPage();
-      await probe.close();
+      const probe = await unlessAborted(browser.newPage(), signal);
+      await unlessAborted(probe.close(), signal);
       // The tab closed or the daemon began shutting down meanwhile.
       if (signal.aborted) throw cancelled();
     } catch (error) {
