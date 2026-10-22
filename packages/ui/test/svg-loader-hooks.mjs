@@ -1,11 +1,20 @@
 const SVG = /\.svg(\?react|\?url)?$/;
+// Vite bundles a stylesheet a module imports (KaTeX's, with the lazily loaded
+// math engine); in plain Node it is an empty module.
+const CSS = /\.css$/;
 export async function resolve(specifier, context, next) {
   if (SVG.test(specifier)) {
     return { url: `orq-svg:${specifier}`, shortCircuit: true };
   }
+  if (CSS.test(specifier)) {
+    return { url: `orq-css:${specifier}`, shortCircuit: true };
+  }
   return next(specifier, context);
 }
 export async function load(url, context, next) {
+  if (url.startsWith("orq-css:")) {
+    return { format: "module", shortCircuit: true, source: "export default {};\n" };
+  }
   if (url.startsWith("orq-svg:")) {
     return {
       format: "module",

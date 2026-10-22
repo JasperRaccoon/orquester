@@ -13,8 +13,8 @@
  *    not quotable, and the toolbar stays away.
  *  - {@link selectionMarkdown} — the selected part of the rendered message
  *    written back as markdown: paragraphs, headings, lists, quotes, tables,
- *    inline code, emphasis, links, math, and a code block as a fenced block in
- *    its language. Rebuilt from the DOM, not mapped to the source: the source
+ *    inline code, emphasis, links, math (as its TeX in `\(…\)` or `\[…\]`), and
+ *    a code block as a fenced block in its language. Rebuilt from the DOM, not mapped to the source: the source
  *    offsets of a rendered fragment are not reliable, the structure is.
  *  - {@link quoteToolbarPosition} — pure: where the toolbar sits for a
  *    selection's rects, clear of the native touch handles.
@@ -127,8 +127,14 @@ function isElement(node: Node): node is Element {
   return node.nodeType === 1;
 }
 
+/** A rendered formula (`MarkdownMath`), and its TeX in markdown delimiters. */
+function mathSourceOf(element: Element): string | null {
+  if (!element.hasAttribute("data-markdown-math")) return null;
+  return element.getAttribute("data-markdown-copy")?.trim() ?? "";
+}
+
 function isBlock(element: Element): boolean {
-  if (element.classList.contains("katex-display")) return true;
+  if (element.getAttribute("data-markdown-math") === "display") return true;
   return BLOCK_TAGS.has(element.tagName);
 }
 
@@ -169,12 +175,6 @@ function inlineCode(code: string): string {
 export function fencedCode(code: string, language: string): string {
   const fence = "`".repeat(Math.max(3, longestRun(code, "`") + 1));
   return `${fence}${language}\n${code}\n${fence}`;
-}
-
-/** KaTeX's own TeX, kept in its MathML half. */
-function texOf(element: Element): string | null {
-  const annotation = element.querySelector('annotation[encoding="application/x-tex"]');
-  return annotation?.textContent?.trim() || null;
 }
 
 /**
@@ -236,10 +236,9 @@ function inlineMarkdown(range: Range, node: Node): string {
     return clippedText(range, node as Text).replace(/\s*\n\s*/g, " ");
   }
   if (!isElement(node) || isSkipped(node) || !range.intersectsNode(node)) return "";
-  if (node.classList.contains("katex")) {
-    const tex = texOf(node);
-    return tex ? `$${tex}$` : "";
-  }
+  // Any part of a formula stands for all of its TeX.
+  const math = mathSourceOf(node);
+  if (math !== null) return math;
   if (isBlock(node)) return blockMarkdown(range, node).join("\n");
   const inner = (): string => {
     let out = "";
@@ -361,10 +360,8 @@ function childBlocks(range: Range, element: Element): string[] {
 /** One block element's selected part as markdown blocks (none when nothing in it is selected). */
 function blockMarkdown(range: Range, element: Element): string[] {
   if (isSkipped(element) || !range.intersectsNode(element)) return [];
-  if (element.classList.contains("katex-display")) {
-    const tex = texOf(element);
-    return tex ? [`$$\n${tex}\n$$`] : [];
-  }
+  const math = mathSourceOf(element);
+  if (math !== null) return math.length > 0 ? [math] : [];
   const tag = element.tagName;
   if (tag === "PRE" || (element.hasAttribute("data-language") && element.querySelector("pre"))) {
     const pre = tag === "PRE" ? element : element.querySelector("pre")!;

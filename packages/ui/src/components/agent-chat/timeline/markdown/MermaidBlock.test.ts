@@ -4,6 +4,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ChatMarkdown } from "./ChatMarkdown.tsx";
 import { MermaidBlock } from "./MermaidBlock.tsx";
+import { loadMathEngine } from "./math-typeset.ts";
 import { setSharedMermaidRenderer } from "./mermaid-engine.ts";
 import type { MermaidRenderer, MermaidRenderResult } from "./mermaid-render.ts";
 
@@ -128,7 +129,8 @@ describe("ChatMarkdown wiring", () => {
     assert.deepEqual(renderer.reads, []);
   });
 
-  it("renders math and leaves currency alone in a real message", () => {
+  it("renders math and leaves currency alone in a real message", async () => {
+    await loadMathEngine();
     const html = render("It costs $5 or $10, and $E=mc^2$ holds.\n\n$$\\sum_i x_i$$\n\n$$\n\\sum_i x_i\n$$");
     assert.ok(html.includes("It costs $5 or $10, and "), html);
     assert.equal((html.match(/class="katex"/g) ?? []).length, 3, html);

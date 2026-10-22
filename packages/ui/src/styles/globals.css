@@ -4,11 +4,9 @@
 @import "./agent-chat.css";
 /* The workflow editor's canvas layer (React Flow + its theme). Same rule: an @import. */
 @import "./workflows.css";
-/* KaTeX's stylesheet and fonts, bundled (no CDN) for chat math. Same rule: an
-   @import. The fonts must stay separate files, never `data:` URIs: the
-   production CSP has no font-src, so fonts fall back to default-src 'self'
-   (see the assetsInlineLimit in apps/web and apps/desktop vite.config.ts). */
-@import "katex/dist/katex.min.css";
+/* KaTeX's stylesheet is not imported here: it loads with KaTeX itself, the
+   first time a chat message shows a formula (agent-chat/timeline/markdown/
+   katex-engine.ts). */
 
 @tailwind base;
 @tailwind components;

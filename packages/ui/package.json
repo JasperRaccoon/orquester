@@ -41,7 +41,6 @@
     "pdfjs-dist": "^4.7.76",
     "postcss": "^8.5.15",
     "react-markdown": "^10.1.0",
-    "rehype-katex": "^7.0.1",
     "remark-gfm": "^4.0.1",
     "remark-math": "^6.0.0",
     "simple-icons": "^16.34.0",

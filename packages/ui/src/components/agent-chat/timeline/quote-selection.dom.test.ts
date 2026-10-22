@@ -87,7 +87,7 @@ const TIMELINE = `
         </div>
         <blockquote><p>quoted by the agent</p></blockquote>
         <table><thead><tr><th>Key</th><th>Value</th></tr></thead><tbody><tr><td>a|b</td><td>1</td></tr></tbody></table>
-        <p id="math">Energy <span class="katex"><span class="katex-mathml"><math><semantics><mi>E</mi><annotation encoding="application/x-tex">E=mc^2</annotation></semantics></math></span><span class="katex-html" aria-hidden="true">E=mc2</span></span> holds.</p>
+        <p id="math">Energy <span data-markdown-math="inline" data-markdown-copy="\\(E=mc^2\\)" role="group"><span class="katex"><span class="katex-mathml"><math><semantics><mi>E</mi><annotation encoding="application/x-tex">E=mc^2</annotation></semantics></math></span><span class="katex-html" aria-hidden="true">E=mc2</span></span></span> holds.</p>
         <p id="p2">After code.</p>
       </div>
     </div>
@@ -191,7 +191,7 @@ describe("the markdown a selection is quoted as", () => {
         "```ts\nconst a = 1;\n\nconst b = `x`;\n```",
         "> quoted by the agent",
         "| Key | Value |\n| --- | --- |\n| a\\|b | 1 |",
-        "Energy $E=mc^2$ holds.",
+        "Energy \\(E=mc^2\\) holds.",
         "After code."
       ].join("\n\n")
     );

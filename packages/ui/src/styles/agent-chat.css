@@ -787,15 +787,18 @@
 }
 
 /*
- * Display math (`$$…$$`): a formula wider than the column scrolls on its own
- * instead of widening the message. The padding keeps tall glyphs (fractions,
- * large operators) from being clipped by the scroller.
+ * Display math (`MarkdownMath`): the wrapper owns the spacing and the
+ * scroller (a formula wider than the column scrolls on its own instead of
+ * widening the message), so KaTeX's own display margin goes. Its Copy TeX
+ * button shows on hovering the formula as well as the row.
  */
-.ac-stream .katex-display {
-  margin: 0.65rem 0;
-  overflow-x: auto;
-  overflow-y: hidden;
-  padding: 0.15rem 0;
+.ac-math-display .katex-display {
+  margin: 0;
+}
+
+.ac-math-display:hover .ac-reveal,
+.ac-math-display:focus-within .ac-reveal {
+  opacity: 1;
 }
 
 /*

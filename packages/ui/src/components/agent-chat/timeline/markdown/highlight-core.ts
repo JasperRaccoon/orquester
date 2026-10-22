@@ -281,7 +281,7 @@ export function highlightCode(code: string, parser: Parser | null): HighlightedL
 // Ported from T3 Code (MIT): apps/web/src/lib/lruCache.ts
 
 /** Size-aware LRU. `set` of an oversized value is a no-op, never an eviction storm. */
-class SizedLruCache<T> {
+export class SizedLruCache<T> {
   private readonly entries = new Map<string, { value: T; size: number }>();
   private totalSize = 0;
 
