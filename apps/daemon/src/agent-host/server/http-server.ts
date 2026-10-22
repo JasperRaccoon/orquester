@@ -814,7 +814,9 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
     const diffMatch = /^\/turns\/(\d+)\/diff$/.exec(rest);
     if (diffMatch && method === "GET") {
       const turnCount = Number.parseInt(diffMatch[1]!, 10);
-      const ignoreWhitespace = url.searchParams.get("ignoreWhitespace") !== "0";
+      // Opt-in: absent (or anything but 1/true) shows every change.
+      const flag = url.searchParams.get("ignoreWhitespace");
+      const ignoreWhitespace = flag === "1" || flag === "true";
       const result = await orchestrator.readTurnDiff(threadId, turnCount, { ignoreWhitespace });
       if (!result) {
         sendJson(response, 404, {

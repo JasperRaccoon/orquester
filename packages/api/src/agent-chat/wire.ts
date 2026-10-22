@@ -1129,7 +1129,10 @@ export type ThreadReadResponse =
   | { kind: "events"; seq: number; events: DomainEvent[] };
 
 export interface TurnDiffQuery {
-  /** Defaults to true (§5.4). */
+  /**
+   * Hide whitespace-only changes (`git diff --ignore-all-space`); `1`/`0` on
+   * the wire. Absent is false: every change shows, indentation included.
+   */
   ignoreWhitespace?: boolean;
 }
 

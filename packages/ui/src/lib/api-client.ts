@@ -1751,7 +1751,8 @@ export class ApiClient {
 
   /**
    * A chat turn's unified diff (agent chat spec §6.3), for the changed-files
-   * card's "view diff". Whitespace-insensitive by default, as §5.4 specifies.
+   * card's "view diff". Shows every change by default; `ignoreWhitespace`
+   * hides whitespace-only ones.
    *
    * An ordinary request on both transports — nothing about a chat read needs
    * the multiplexed channel, which carries terminal bytes only.

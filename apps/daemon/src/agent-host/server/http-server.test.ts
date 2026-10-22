@@ -363,6 +363,45 @@ describe("agent host server — commands and reads (§6.2, §6.3)", () => {
     await h.stop();
   });
 
+  it("reads a turn diff showing every change unless whitespace is asked to be hidden", async (t) => {
+    const h = await harness();
+    t.after(() => h.stop());
+    const threadId = await h.host.createThread();
+    const at = h.host.clock.nowIso();
+    await h.host.orchestrator.ingestionSink(threadId, [
+      {
+        eventId: "ev-checkpoint",
+        threadId,
+        type: "thread.turn-diff-completed" as const,
+        payload: {
+          turnCount: 1,
+          turnId: null,
+          ref: `refs/orquester/checkpoints/${threadId}/turn/1`,
+          status: "ready" as const,
+          files: [{ path: "a.txt", additions: 1, deletions: 0 }],
+          assistantMessageId: null,
+          completedAt: at
+        },
+        occurredAt: at,
+        commandId: null,
+        causationEventId: null,
+        metadata: {}
+      }
+    ]);
+    await h.host.settle();
+    h.host.checkpoints.diff = "diff --git a/a.txt b/a.txt\n";
+    const plain = await h.call("GET", agentHostRoutes.turnDiff(threadId, 1));
+    assert.equal(plain.status, 200);
+    assert.deepEqual(plain.body, { fromTurnCount: 0, toTurnCount: 1, diff: "diff --git a/a.txt b/a.txt\n" });
+    await h.call("GET", `${agentHostRoutes.turnDiff(threadId, 1)}?ignoreWhitespace=1`);
+    await h.call("GET", `${agentHostRoutes.turnDiff(threadId, 1)}?ignoreWhitespace=0`);
+    await h.call("GET", `${agentHostRoutes.turnDiff(threadId, 1)}?ignoreWhitespace=true`);
+    assert.deepEqual(
+      h.host.checkpoints.diffRequests.map((r) => r.ignoreWhitespace),
+      [false, true, false, true]
+    );
+  });
+
   it("404s an unknown item and an unknown turn diff", async () => {
     const h = await harness();
     const threadId = await h.host.createThread();

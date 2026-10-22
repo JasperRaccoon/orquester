@@ -5861,7 +5861,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
           cwd: head.cwd,
           fromTurnCount,
           toTurnCount: turnCount,
-          ignoreWhitespace: diffOptions.ignoreWhitespace ?? true
+          ignoreWhitespace: diffOptions.ignoreWhitespace ?? false
         });
         return { fromTurnCount, toTurnCount: turnCount, diff };
       } catch (error) {

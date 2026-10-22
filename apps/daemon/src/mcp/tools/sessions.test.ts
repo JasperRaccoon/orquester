@@ -728,7 +728,10 @@ test("get_turn_diff defaults to the latest checkpointed turn, includes the check
   const bytes = (v: unknown) => Buffer.byteLength(JSON.stringify(v), "utf8");
   assert.ok(bytes(r) <= 60_000, `${bytes(r)} bytes`);
 
-  assert.deepEqual(h.api.calls.find((c) => c.path.endsWith("/diff"))!.query, { ignoreWhitespace: "1" });
+  // Every change by default, indentation included; whitespace-only changes are hidden only when asked.
+  assert.deepEqual(h.api.calls.find((c) => c.path.endsWith("/diff"))!.query, { ignoreWhitespace: "0" });
+  await tool("get_turn_diff").run({ sessionId: "c1", ignoreWhitespace: true }, h.ctx);
+  assert.deepEqual(h.api.calls.filter((c) => c.path.endsWith("/diff")).at(-1)!.query, { ignoreWhitespace: "1" });
   // Escapes and multibyte characters are paid at their JSON-escaped UTF-8 size, not their length.
   const heavy = "é\"\n".repeat(30_000);
   h.api.on("GET", "/api/sessions/c1/turns/2/diff", { status: 200, body: { fromTurnCount: 1, toTurnCount: 2, diff: heavy } });

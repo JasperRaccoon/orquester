@@ -415,8 +415,10 @@ export function createAgentChatTransport(transporter: Transporter): AgentChatTra
 
     turnDiff(sessionId, turnCount, options) {
       return send<TurnDiffResponse>("GET", agentChatRoutes.turnDiff(sessionId, turnCount), {
-        // §5.4: whitespace is ignored by default; only an explicit `false` turns it off.
-        query: { ignoreWhitespace: options?.ignoreWhitespace === false ? 0 : 1 },
+        // Every change shows by default; only an explicit `true` hides
+        // whitespace-only ones. Always sent, so a host of either default
+        // answers the same.
+        query: { ignoreWhitespace: options?.ignoreWhitespace === true ? 1 : 0 },
         ...(options?.signal === undefined ? {} : { signal: options.signal })
       });
     },
