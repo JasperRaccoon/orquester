@@ -554,7 +554,25 @@ export const TerminalView: React.FC<{
     // Capture phase (true): see onPaste — must run before xterm's textarea handler.
     container.addEventListener("paste", onPaste, true);
 
+    // xterm answers terminal queries (device attributes, cursor position,
+    // colours) through onData, the same path as keystrokes. A replayed snapshot
+    // can hold queries a program asked long ago; answering them now would type
+    // the replies into the live shell as junk at the prompt. So onData is
+    // detached while a replay is being parsed (the daemon also strips queries
+    // from what it replays). Keystrokes in that instant are dropped with it.
+    // Adapted from T3 Code (MIT): apps/web/src/terminal/ghostty/core.ts
+    let replayWrites = 0;
+    const writeReplay = (chunk: string) => {
+      replayWrites += 1;
+      term.write(chunk, () => {
+        replayWrites -= 1;
+      });
+    };
+
     const inputSub = term.onData((data) => {
+      if (replayWrites > 0) {
+        return;
+      }
       // The user is responding → clear any bell-driven attention pulse.
       useAppStore.getState().clearSessionAttention(session.id);
       // On mobile there's no Shift modifier to distinguish "newline" from
@@ -637,9 +655,14 @@ export const TerminalView: React.FC<{
         term.write(chunk);
         forceAgentRepaint();
       },
+      onReplay: (chunk) => {
+        writeReplay(chunk);
+        forceAgentRepaint();
+      },
       onEnd: () => term.write("\r\n\x1b[2m[session ended]\x1b[0m\r\n"),
-      // Multiplexed socket reconnected → clear before the buffer replay so the
-      // existing content isn't duplicated.
+      // Multiplexed socket reconnected, or the daemon is resyncing this
+      // terminal → clear before the buffer replay so the existing content
+      // isn't duplicated.
       onReset: () => {
         term.reset();
         repaintArmed = true;

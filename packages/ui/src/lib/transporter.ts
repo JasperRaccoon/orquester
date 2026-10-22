@@ -49,12 +49,19 @@ export interface TransportResponse<T = unknown> {
 export interface StreamHandlers {
   /** A decoded text chunk arrived. */
   onData: (chunk: string) => void;
+  /**
+   * A snapshot of the session (its scrollback) arrived, as opposed to live
+   * output; falls back to `onData` when absent. Only the multiplexed channel
+   * can tell the two apart. A terminal should not answer queries in it.
+   */
+  onReplay?: (chunk: string) => void;
   /** The stream ended (server closed it). */
   onEnd: () => void;
   onError?: (error: unknown) => void;
   /**
-   * The multiplexed session socket reconnected and is about to replay the
-   * session's buffer; clear the terminal first so the replay doesn't duplicate.
+   * The session's buffer is about to be replayed into a terminal that already
+   * has content — the multiplexed socket reconnected, or the daemon is
+   * resyncing it — so clear the terminal first so the replay doesn't duplicate.
    */
   onReset?: () => void;
 }
