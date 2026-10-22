@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  ArrowLeft, ArrowRight, Braces, Crosshair, Keyboard, Monitor, RotateCw, ShieldAlert, Smartphone
+  ArrowLeft, ArrowRight, Braces, Crosshair, Keyboard, LoaderCircle, Monitor, RotateCw, Server, ShieldAlert, Smartphone
 } from "lucide-react";
 import type { BrowserPickPayload, BrowserStateMessage, BrowserSummary } from "@orquester/api";
 import { useAppStore } from "../../store/app";
@@ -12,6 +12,7 @@ import {
   clampDevtoolsSplit, loadDevtoolsSplit, persistDevtoolsSplit
 } from "../../lib/panel-sizes";
 import { PickComposeSheet } from "./PickComposeSheet";
+import { unsandboxedTitle, vmStartingText } from "./browser-tab.logic";
 
 const VIEWPORT = { desktop: { w: 1280, h: 800 }, mobile: { w: 390, h: 844 } } as const;
 
@@ -387,8 +388,16 @@ export const BrowserView: React.FC<{ browser: BrowserSummary; active: boolean }>
             <Keyboard size={14} />
           </button>
         )}
+        {browser.runsIn === "box" && (
+          // boxes: the page's localhost is the VM's, not this host's.
+          <span title="Chromium runs in the VM" data-browser-runs-in="box"
+            className="inline-flex h-[18px] shrink-0 items-center gap-1 rounded-full bg-neutral-800 px-1.5 text-[10px] font-medium text-neutral-400">
+            <Server size={11} />
+            VM
+          </span>
+        )}
         {state && !state.sandboxed && (
-          <span title="Chromium is running without its sandbox on this host">
+          <span title={unsandboxedTitle(browser.runsIn)}>
             <ShieldAlert size={14} className="text-warn-500" />
           </span>
         )}
@@ -405,7 +414,7 @@ export const BrowserView: React.FC<{ browser: BrowserSummary; active: boolean }>
           <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center text-sm text-neutral-400">
             <span>Browser tabs require a remote (HTTP) connection.</span>
           </div>
-        ) : state?.status === "crashed" || state?.status === "error" ? (
+        ) : (state?.status === "crashed" || state?.status === "error") && vmStartingText(browser) === null ? (
           <div className="flex h-full flex-col items-center justify-center gap-3 text-sm text-neutral-400">
             <span>{state.status === "crashed" ? "Browser crashed" : (browser.errorMessage ?? "Browser failed to start")}</span>
             <button type="button" onClick={() => navigate("reload")}
@@ -427,6 +436,13 @@ export const BrowserView: React.FC<{ browser: BrowserSummary; active: boolean }>
               transformOrigin: "0 0"
             }}
           />
+        )}
+        {channel && vmStartingText(browser) !== null && (
+          // boxes: a VM tab's first start may install Chromium in the VM first.
+          <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-2 px-6 text-center text-sm text-neutral-400">
+            <LoaderCircle size={16} className="animate-spin" />
+            <span className="max-w-full truncate">{vmStartingText(browser)}</span>
+          </div>
         )}
         {/* Invisible ON-SCREEN input (iOS refuses/blurs keyboard for far-offscreen
             fields): 1×1 px, opacity 0, 16px font so iOS doesn't zoom on focus.

@@ -17,7 +17,7 @@ function session(status: SessionSummary["status"]): SessionSummary {
   return { id: "s-1", kind: "shell", refId: "bash", title: "Bash", projectPath: PROJECT, cwd: PROJECT, cols: 80, rows: 24, status, order: 0, createdAt: "x" };
 }
 
-function rig(options: { ports?: BoxListeningPort[]; fakeForward?: boolean } = {}) {
+function rig(options: { ports?: BoxListeningPort[]; fakeForward?: boolean; browserInBox?: boolean } = {}) {
   const connection = localBoxConnection({ boxId: "box-1" });
   const forwardCalls: { boxPort: number; hostPort?: number }[] = [];
   const closed: number[] = [];
@@ -52,7 +52,8 @@ function rig(options: { ports?: BoxListeningPort[]; fakeForward?: boolean } = {}
     registry: boxes.registry,
     hub: boxes.hub,
     sessions: { list: (projectPath) => sessions.filter((s) => projectPath === undefined || s.projectPath === projectPath), lifecycle: sessionEvents },
-    browsers: { list: (projectPath) => tabs.filter((t) => projectPath === undefined || t.projectPath === projectPath), lifecycle: browserEvents }
+    browsers: { list: (projectPath) => tabs.filter((t) => projectPath === undefined || t.projectPath === projectPath), lifecycle: browserEvents },
+    ...(options.browserInBox !== undefined ? { browserRunsInBox: (projectPath: string) => options.browserInBox! && boxes.registry.locate(projectPath).kind === "box" } : {})
   });
   return {
     connection,
@@ -155,6 +156,47 @@ test("a box tab opened on localhost:<port> gets a same-port forward; host projec
     assert.deepEqual(await r.forwards.suggestions("/srv/workspaces/acme/host-project", ["http://localhost:1234"]), ["http://localhost:1234"]);
     r.connection.setConnected(false);
     assert.deepEqual(await r.forwards.suggestions(PROJECT, ["http://localhost:5173"]), [], "nothing to suggest while the box is away");
+  } finally {
+    await r.forwards.dispose();
+  }
+});
+
+test("a box project whose Chromium runs in the box is offered box-local addresses and gets no forward", async () => {
+  const r = rig({
+    fakeForward: true,
+    browserInBox: true,
+    ports: [
+      { port: 22, address: "0.0.0.0", pid: 1, command: "sshd" },
+      { port: 3000, address: "127.0.0.1", pid: 2, command: "node" },
+      { port: 8000, address: "::", pid: 4, command: "python3" }
+    ]
+  });
+  try {
+    const urls = await r.forwards.suggestions(PROJECT, ["https://0.0.0.0:5173/app", "http://127.0.0.1:3000"]);
+    assert.deepEqual(urls, ["https://localhost:5173", "http://localhost:3000", "http://localhost:8000"]);
+    // A tab opened or navigated on a box port, and a restore after a reconnect: still no forward.
+    r.setTabs([{ projectPath: PROJECT, url: "http://localhost:7000/" }]);
+    r.browserEvents.emit("created", { projectPath: PROJECT, url: "http://localhost:7000/" });
+    r.browserEvents.emit("updated", { projectPath: PROJECT, url: "http://localhost:3000/" });
+    await r.forwards.restore();
+    assert.deepEqual(r.forwardCalls, []);
+    assert.deepEqual(r.forwards.list(), []);
+    // Host projects are untouched either way; nothing is offered while the box is away.
+    assert.deepEqual(await r.forwards.suggestions("/srv/workspaces/acme/host-project", ["http://localhost:1234"]), ["http://localhost:1234"]);
+    r.connection.setConnected(false);
+    assert.deepEqual(await r.forwards.suggestions(PROJECT, ["http://localhost:5173"]), []);
+  } finally {
+    await r.forwards.dispose();
+  }
+});
+
+test("a box project whose Chromium stays on the host keeps the forwards", async () => {
+  const r = rig({ fakeForward: true, browserInBox: false, ports: [] });
+  try {
+    assert.deepEqual(await r.forwards.suggestions(PROJECT, ["http://localhost:5173"]), ["http://localhost:50000"]);
+    r.browserEvents.emit("created", { projectPath: PROJECT, url: "http://localhost:7000/" });
+    await r.forwards.restore();
+    assert.deepEqual(r.forwardCalls, [{ boxPort: 5173 }, { boxPort: 7000, hostPort: 7000 }]);
   } finally {
     await r.forwards.dispose();
   }
