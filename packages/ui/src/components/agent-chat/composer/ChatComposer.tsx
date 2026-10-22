@@ -95,6 +95,7 @@ import {
 import {
   attachmentCountBlockSend,
   attachmentRejectionReason,
+  attachmentSizeRejection,
   composerStatusText,
   composerSubmissionIntentForEnter,
   composerSubmissionValidationMessage,
@@ -128,6 +129,7 @@ import {
   type ComposerTrigger
 } from "./composer-trigger";
 import { useComposerPathSearch } from "./use-composer-path-search";
+import { downscalableImageMimeType, prepareImageForUpload } from "./composer-image-fit";
 
 /**
  * The **live** draft: what is on screen, including uploads still in flight.
@@ -1068,8 +1070,16 @@ export function ChatComposer({
   // Attachments
   // ---------------------------------------------------------------------
   const uploadOne = React.useCallback(
-    async (key: string, file: File) => {
+    async (key: string, staged: File) => {
       try {
+        // A large photo goes up at the provider's size, still as a binary
+        // stream; a retry reuses the smaller file. Its byte limit is checked
+        // here, after the shrink (`attachmentRejectionReason`'s `downscales`).
+        const file = await prepareImageForUpload(staged);
+        if (file !== staged && retryFilesRef.current.has(key)) retryFilesRef.current.set(key, file);
+        const tooLarge = attachmentSizeRejection(file.name, file.size, file.type);
+        if (tooLarge) throw new Error(tooLarge);
+        if (!draftRef.current.attachments.some((entry) => entry.key === key)) return;
         const ref: AttachmentRef = await actions.uploadAttachment(file, {
           name: file.name,
           type: file.type
@@ -1079,7 +1089,9 @@ export function ChatComposer({
         if (!draftRef.current.attachments.some((entry) => entry.key === key)) return;
         const ready = (entries: StagedAttachment[]): StagedAttachment[] =>
           entries.map((entry) =>
-            entry.key === key ? { ...entry, status: "ready" as const, progress: 1, ref } : entry
+            entry.key === key
+              ? { ...entry, status: "ready" as const, progress: 1, ref, name: file.name, sizeBytes: file.size }
+              : entry
           );
         draftRef.current = { ...draftRef.current, attachments: ready(draftRef.current.attachments) };
         // A file's path is known only now, so this is where it reaches the
@@ -1152,7 +1164,8 @@ export function ChatComposer({
           sizeBytes: file.size,
           mimeType: file.type,
           stagedCount: staged,
-          preparingCount: preparing
+          preparingCount: preparing,
+          downscales: downscalableImageMimeType(file.type) !== null
         });
         if (reason) {
           rejection ??= reason;
