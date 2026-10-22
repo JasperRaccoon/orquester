@@ -94,6 +94,12 @@ if [ -n "$bus" ] && command -v dbus-update-activation-environment >/dev/null; th
     PULSE_SERVER="unix:$sock/pulse/native" PULSE_CLIENTCONFIG="$dir/client.conf" ||
     echo "could not set the D-Bus activation environment"
 fi
+# A compositor, so windows with an alpha channel blend instead of showing
+# black: GTK 4 draws its popovers' and menus' shadows into ARGB windows, which
+# an uncomposited server paints as solid black boxes. -n: no shadows of its own.
+if command -v xcompmgr >/dev/null; then
+  DISPLAY=":$display" XAUTHORITY="$dir/Xauthority" xcompmgr -n &
+fi
 atomic_write "$dir/ready" "$display"
 echo "display :$display ready"
 
