@@ -110,6 +110,9 @@ import { DesktopHostProbe, resolveTool } from "./desktops/host-status.ts";
 import { registerDesktopHttpRoutes } from "./desktops/http-routes.ts";
 import { DesktopManager } from "./desktops/manager.ts";
 import { registerDesktopWsRoutes } from "./desktops/ws-routes.ts";
+import { registerAuthRoutes } from "./auth/routes.ts";
+import { AuthSessionStore } from "./auth/sessions.ts";
+import { LoginThrottle, clientIp } from "./auth/throttle.ts";
 import { redactUrlTokens, sanitizeDevtoolsPath } from "./devtools.js";
 import { UrlWatcher } from "./url-watcher";
 import { AgentHooks } from "./agent-hooks";
@@ -147,7 +150,7 @@ import { agentHostRoutes, SESSION_TOOLS_REFRESH_TIMEOUT_MS, type SessionToolsRef
 import { catalogFor } from "./mcp/catalog/index.ts";
 import { canonicalProjectPath } from "./agent-tools/approval-port.ts";
 import { registerSessionToolsManifestRoute, SessionToolsRefresher } from "./session-tools/session-tools-refresh.ts";
-import { AGENT_PROFILE_CHANNEL, type AgentProfileAgentId } from "@orquester/api";
+import { AGENT_PROFILE_CHANNEL, authRoutes, type AgentProfileAgentId } from "@orquester/api";
 import { PUSH_CHANNEL, PUSH_NOTIFICATION_EVENT_TYPE } from "@orquester/api";
 import { SECRET_FILES_CHANGED, SECRET_FILES_CHANNEL, SECRET_FILES_PLUGIN_ID, type PluginsResponse } from "@orquester/api";
 // umcp:t6 end
@@ -271,6 +274,7 @@ import {
   agentProfileImportsDir,
   agentAccountsFile,
   appConfigPath,
+  authSessionsPath,
   browserProfilesDir,
   browsersIndexPath,
   createDefaultAppConfig,
@@ -320,7 +324,7 @@ import { chmod, lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, wri
 import { homedir, platform as osPlatform } from "node:os";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { fsPathFromQuery } from "./fs-path-query.js";
-import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { request as httpRequest, type IncomingMessage } from "node:http";
 import bcrypt from "bcryptjs";
 // boxes: temporary boxes for agent chats (Ephemeral AI VMs spec §13).
@@ -1461,8 +1465,14 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     onChange: (threadId) => agentChat.secretRequestsChanged(threadId)
   });
   agentChat.setSecretRequests(secretRequests);
+  // The remote transport's sessions and API tokens. Bound to the password at boot: a hash changed
+  // while the daemon was down (a hand edit, `deploy.sh rotate-password`) signs every device out.
+  const authSessions = new AuthSessionStore({ file: authSessionsPath(paths.baseDir), logger: console });
+  await authSessions.load();
+  await authSessions.syncPassword(config.transports.http.passwordHash);
   const services: Services = {
     buildInfo,
+    authSessions,
     secretRequests,
     registry, sessions, grokDeviceLink, codexDeviceLink, claudeOAuthLink, accounts, git, gitWatcher, todos, recentProjects, savedPrompts, repoIdentities, githubLinks, usage, usageTokens, chatThreadUsage, subagentCacheTtl, push, broadcaster, agentAccounts, browsers, urlWatcher, agentChat,
     plugins,
@@ -1973,6 +1983,11 @@ interface Services {
   reloadHttp?: () => Promise<void>;
   /** Remote access → Tailscale HTTPS (`tailscale serve`). Optional: route tests build a partial `services`. */
   tailscaleServe?: TailscaleServe;
+  /**
+   * The remote transport's login sessions and API tokens (`auth/sessions.ts`). Optional: route
+   * tests build a partial `services` (each app then gets an empty in-memory store).
+   */
+  authSessions?: AuthSessionStore;
   // boxes: which paths live in a box project (boxes/service). Absent: every path is a host path
   // (route tests). Read per request.
   boxRegistry?: BoxRegistry;
@@ -2017,6 +2032,45 @@ export function createServer(
   });
 
   const throttle = new LoginThrottle();
+  // Password guesses (login, verify) have their own count: a valid bearer's success on the same
+  // IP must not reset it.
+  const passwordThrottle = new LoginThrottle();
+  const authSessions = services.authSessions ?? new AuthSessionStore();
+
+  // Open streams (event stream, WebSockets) by the session that authenticated them: a request
+  // re-checks its bearer every time, but a stream outlives that check, so revoking a session
+  // closes its streams too.
+  const liveStreams = new Map<string, Set<() => void>>();
+  const trackStream = (sessionId: string, close: () => void): (() => void) => {
+    const set = liveStreams.get(sessionId) ?? new Set<() => void>();
+    set.add(close);
+    liveStreams.set(sessionId, set);
+    return () => {
+      set.delete(close);
+      if (set.size === 0 && liveStreams.get(sessionId) === set) liveStreams.delete(sessionId);
+    };
+  };
+  const stopRevokeWatch = authSessions.onRevoked((ids) => {
+    for (const id of ids) {
+      const closers = liveStreams.get(id);
+      liveStreams.delete(id);
+      for (const close of closers ?? []) close();
+    }
+  });
+  app.addHook("onClose", async () => stopRevokeWatch());
+  /**
+   * The `?token=` check of a WebSocket route: true when auth is off or the token is a live session
+   * (the socket is then closed if that session is revoked).
+   */
+  const authorizeSocket = (token: string | undefined, socket: { close(code?: number, reason?: string): void; once(event: "close", listener: () => void): unknown }): boolean => {
+    if (!options.authRequired) return true;
+    const session = authSessions.verify(token);
+    if (!session) return false;
+    socket.once("close", trackStream(session.id, () => socket.close(1008, "unauthorized")));
+    return true;
+  };
+
+  app.decorateRequest("authSession", null);
 
   app.addHook("onRequest", async (request, reply) => {
     // The multiplexed session WebSocket authenticates itself via a query token
@@ -2045,14 +2099,15 @@ export function createServer(
     }
 
     // Only the API + event stream are token-gated; the static web client, its
-    // assets and the public auth-info endpoint load freely (the web app then
-    // authenticates its API calls with the credential bearer).
+    // assets and the public auth info and login endpoints load freely (the web
+    // app then authenticates its API calls with its session token).
     const decodedPath = safeDecodePath(rawPath);
     const url = routePath ?? decodedPath ?? rawPath;
     const gated = (path: string | undefined): boolean =>
       path !== undefined &&
       (path.startsWith("/api") || path.startsWith("/events") || path.startsWith("/mcp")) &&
-      path !== "/api/auth/info";
+      path !== authRoutes.info &&
+      path !== authRoutes.login;
     // A path that does not even decode is refused unless authenticated.
     const needsAuth = decodedPath === undefined || gated(rawPath) || gated(decodedPath) || gated(routePath);
     if (!options.authRequired || !needsAuth) {
@@ -2070,17 +2125,14 @@ export function createServer(
     }
 
     // A browser download navigation (<a download>) can't set an Authorization
-    // header, so /api/fs/download also accepts the credential as ?token= — the
+    // header, so /api/fs/download also accepts the token as ?token= — the
     // same trick /ws uses. Scoped to this one route; the token is redacted from
-    // logs by the request serializer above.
+    // logs by the request serializer above. Only a live session or API token
+    // passes (auth/sessions.ts) — never the stored password hash.
     const headerToken = request.headers.authorization?.replace(/^Bearer\s+/i, "");
     const queryToken = url === "/api/fs/download" ? (request.query as { token?: string }).token : undefined;
-    const authorized = authorizeCredential(
-      headerToken ?? queryToken,
-      config.transports.http.username,
-      config.transports.http.passwordHash
-    );
-    if (!authorized) {
+    const session = authSessions.verify(headerToken ?? queryToken);
+    if (!session) {
       throttle.recordFailure(ip);
       return reply.code(401).send({
         code: "UNAUTHORIZED",
@@ -2088,6 +2140,7 @@ export function createServer(
       });
     }
     throttle.recordSuccess(ip);
+    request.authSession = session;
   });
 
   // umcp:t2 begin — principals (unified MCP design 2026-10-15; `@orquester/api` principal.ts).
@@ -2099,18 +2152,13 @@ export function createServer(
   if (options.mode === "remote") registerRemoteFieldStripping(app);
   // umcp:t2 end
 
-  // Public: tells the web client whether auth is needed and the bcrypt salt to
-  // derive the bearer (the same hash the daemon stores). Never exposes the hash
-  // OR the username — only whether a username is required.
-  app.get("/api/auth/info", async () => {
-    const authRequired = options.mode === "remote" && Boolean(config.transports.http.passwordHash);
-    return {
-      authRequired,
-      salt: config.transports.http.passwordHash
-        ? config.transports.http.passwordHash.slice(0, 29)
-        : null,
-      requiresUsername: authRequired
-    };
+  // Public `info` (whether auth is needed — never the hash, a salt or the username) and `login`;
+  // the session and token management routes behind the bearer hook (auth/routes.ts).
+  registerAuthRoutes(app, {
+    mode: options.mode,
+    store: authSessions,
+    passwordThrottle,
+    credentials: () => ({ username: config.transports.http.username, passwordHash: config.transports.http.passwordHash })
   });
 
   // Public liveness only. Daemon id / version / mode / transports are not
@@ -2232,6 +2280,8 @@ export function createServer(
       return reply.code(400).send({ code: outcome.code, message: outcome.message });
     }
     const merged = outcome.merged;
+    // A new password signs every device out; API tokens stay (auth/sessions.ts).
+    await authSessions.syncPassword(merged.transports.http.passwordHash);
     resolved.workspacesDir = expandVars(merged.workspacesDir, resolved.vars);
     resolved.fsRoot = merged.transports.http.fsRoot
       ? expandVars(merged.transports.http.fsRoot, resolved.vars)
@@ -4769,7 +4819,8 @@ export function createServer(
     mode: options.mode,
     detector: new DaemonMcpDetector(
       {
-        verifyBearer: (token) => authorizeCredential(token, config.transports.http.username, config.transports.http.passwordHash),
+        // A peek: finding a token in a config file is not a use of it.
+        verifyBearer: (token) => authSessions.verify(token, false) !== null,
         httpPort: () => config.transports.http.port,
         // No public origin is configured anywhere: a proxied URL is caught by its bearer.
         publicOrigins: () => [],
@@ -4888,13 +4939,26 @@ export function createServer(
       sink.send(JSON.stringify(event));
     }, 15_000);
 
-    request.raw.on("close", () => {
+    let ended = false;
+    let untrack = (): void => undefined;
+    const cleanup = (): void => {
+      if (ended) return;
+      ended = true;
+      untrack();
       clearInterval(timer);
       services.broadcaster.remove(sink);
       if (watchedProject) {
         services.gitWatcher.unsubscribe(watchedProject);
       }
-    });
+    };
+    // Revoking the session that opened this stream ends it (the client then meets the 401).
+    if (request.authSession) {
+      untrack = trackStream(request.authSession.id, () => {
+        cleanup();
+        reply.raw.end();
+      });
+    }
+    request.raw.on("close", cleanup);
   });
 
   // Multiplexed session I/O over a single WebSocket. The web client opens ONE
@@ -4918,12 +4982,9 @@ export function createServer(
   services.boxWiring?.registerRoutes(app, options.mode);
   void app.register(async (instance) => {
     instance.get("/ws", { websocket: true }, (socket, request) => {
-      if (options.authRequired) {
-        const token = (request.query as { token?: string }).token;
-        if (!authorizeCredential(token, config.transports.http.username, config.transports.http.passwordHash)) {
-          socket.close(1008, "unauthorized");
-          return;
-        }
+      if (!authorizeSocket((request.query as { token?: string }).token, socket)) {
+        socket.close(1008, "unauthorized");
+        return;
       }
 
       // Subscriptions, backpressure and resyncs live in session-stream.ts.
@@ -4937,12 +4998,9 @@ export function createServer(
   // /ws so the terminal channel's text-only fast path is untouched.
   void app.register(async (instance) => {
     instance.get("/ws-browser", { websocket: true }, (socket, request) => {
-      if (options.authRequired) {
-        const token = (request.query as { token?: string }).token;
-        if (!authorizeCredential(token, config.transports.http.username, config.transports.http.passwordHash)) {
-          socket.close(1008, "unauthorized");
-          return;
-        }
+      if (!authorizeSocket((request.query as { token?: string }).token, socket)) {
+        socket.close(1008, "unauthorized");
+        return;
       }
 
       const subs = new Map<string, () => void>();
@@ -5037,9 +5095,7 @@ export function createServer(
   // context like /ws-browser; `?token=` is checked after the upgrade (1008).
   void app.register(async (instance) => {
     await registerDesktopWsRoutes(instance, {
-      authorize: (token) =>
-        !options.authRequired ||
-        authorizeCredential(token, config.transports.http.username, config.transports.http.passwordHash),
+      authorize: (token, socket) => authorizeSocket(token, socket),
       vncSocketPath: (id) => services.desktops.vncSocketPath(id),
       audioSource: (id) => services.desktops.audioSource(id),
       audio: services.desktopAudio
@@ -5059,12 +5115,9 @@ export function createServer(
         "/ws-devtools/:browserId",
         { websocket: true },
         (socket, request) => {
-          if (options.authRequired) {
-            const token = (request.query as { token?: string }).token;
-            if (!authorizeCredential(token, config.transports.http.username, config.transports.http.passwordHash)) {
-              socket.close(1008, "unauthorized");
-              return;
-            }
+          if (!authorizeSocket((request.query as { token?: string }).token, socket)) {
+            socket.close(1008, "unauthorized");
+            return;
           }
 
           // CDP is stateful → never drop frames; PAUSE/RESUME on a high-water
@@ -5728,59 +5781,6 @@ function safeDecodePath(path: string): string | undefined {
 }
 
 /**
- * Decode a credential bearer/token of the form base64("<username>:<hash>").
- * Splits on the FIRST ":" (a bcrypt hash contains no ":", but be defensive).
- * Returns empty strings when the input is missing or not valid base64 — the
- * caller still runs the full constant-time check so a malformed credential is
- * indistinguishable from a wrong one.
- */
-function decodeCredential(token: string | undefined): { user: string; hash: string } {
-  if (!token) {
-    return { user: "", hash: "" };
-  }
-  let decoded: string;
-  try {
-    decoded = Buffer.from(token, "base64").toString("utf8");
-  } catch {
-    return { user: "", hash: "" };
-  }
-  const sep = decoded.indexOf(":");
-  if (sep === -1) {
-    return { user: "", hash: "" };
-  }
-  return { user: decoded.slice(0, sep), hash: decoded.slice(sep + 1) };
-}
-
-/** Normalize a username for comparison (matches the config-side transform). */
-function normalizeUsername(value: string): string {
-  return value.trim().toLowerCase();
-}
-
-/** Fixed-length sha256 digest so timingSafeEqual gets equal-length buffers. */
-function sha256(value: string): Buffer {
-  return createHash("sha256").update(value).digest();
-}
-
-/**
- * Constant-time credential check with NO early return: both the username and
- * the password-hash comparisons are always computed, so wrong-username,
- * wrong-length and wrong-password are indistinguishable (no enumeration).
- */
-function authorizeCredential(
-  token: string | undefined,
-  expectedUsername: string,
-  expectedHash: string | undefined
-): boolean {
-  if (!expectedHash) {
-    return false;
-  }
-  const { user, hash } = decodeCredential(token);
-  const userOk = timingSafeEqual(sha256(normalizeUsername(user)), sha256(expectedUsername));
-  const passOk = timingSafeEqual(sha256(hash), sha256(expectedHash));
-  return userOk && passOk;
-}
-
-/**
  * Migrate a legacy/env plaintext `password` into a bcrypt `passwordHash` and
  * drop the plaintext. Returns true when the config changed (needs persisting).
  */
@@ -5848,9 +5848,9 @@ async function prepareDirs(resolved: ResolvedPaths): Promise<void> {
 }
 
 function sanitizeDaemonConfig(config: DaemonConfig): DaemonConfig {
-  // Never expose credential material over the wire. The hash is a
-  // bearer-equivalent (the client derives its own via the public salt at
-  // /api/auth/info), and the username is deliberately withheld too — same
+  // Never expose credential material over the wire. The hash is no bearer
+  // (only session tokens are, auth/sessions.ts) but it is an offline-crackable
+  // copy of the password, and the username is deliberately withheld too — same
   // invariant as /api/auth/info, which only reports `requiresUsername`, never
   // the username itself. Both are masked with the same sentinel the schema
   // accepts as a string; the fsRoot (sandbox root path) is server-internal.
@@ -5872,118 +5872,4 @@ function sanitizeDaemonConfig(config: DaemonConfig): DaemonConfig {
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && "code" in error;
-}
-
-/**
- * Per-IP failed-login throttle with escalating lockout. Single-user, so real
- * failures are rare: 5 fails within the window → locked out, with the lockout
- * doubling on each subsequent breach (15 min, 30, 60 … capped). Keyed on the
- * proxy-supplied client IP (X-Forwarded-For); this is defense-in-depth on top
- * of fail2ban (OS-layer ban on the daemon's 401 log lines, Phase 0).
- */
-class LoginThrottle {
-  private readonly state = new Map<
-    string,
-    { fails: number; lockedUntil: number; strikes: number; burstStartAt: number }
-  >();
-  private static readonly MAX_FAILS = 5;
-  private static readonly BASE_LOCKOUT_MS = 15 * 60 * 1000;
-  private static readonly MAX_LOCKOUT_MS = 24 * 60 * 60 * 1000;
-  // One login attempt fans out into several authenticated requests (workspaces,
-  // sessions, registry, events, …), so a single wrong password yields a burst of
-  // near-simultaneous 401s. Collapse failures within this window into ONE counted
-  // attempt so a lone typo can't trip the lockout instantly.
-  private static readonly BURST_WINDOW_MS = 2000;
-  // Bound the per-IP map: only sweep once it grows past this, then drop entries
-  // that are neither locked nor part of a recent burst.
-  private static readonly PRUNE_THRESHOLD = 1024;
-  private static readonly STALE_AFTER_MS = 10 * 60 * 1000;
-
-  /** Ms remaining on an active lockout for this IP, or 0 if not locked. */
-  retryAfterMs(ip: string): number {
-    const entry = this.state.get(ip);
-    if (!entry || entry.lockedUntil <= Date.now()) {
-      return 0;
-    }
-    return entry.lockedUntil - Date.now();
-  }
-
-  /** Record a failed attempt; locks the IP once MAX_FAILS is reached. */
-  recordFailure(ip: string): void {
-    const entry = this.state.get(ip) ?? { fails: 0, lockedUntil: 0, strikes: 0, burstStartAt: 0 };
-    const now = Date.now();
-    this.prune(now);
-    // Burst collapse: failures arriving within BURST_WINDOW_MS of the FIRST failure
-    // of the current burst belong to one login attempt's fan-out (or a rapid
-    // auto-reconnect), so they don't count. The window is anchored to that first
-    // failure and is NEVER refreshed — otherwise a sustained stream of guesses
-    // (even 1/sec) would keep the window alive forever and pin `fails` at 1, so the
-    // IP would never lock. Anchoring lets a real fan-out collapse to one strike
-    // while a continuous attack advances ~one strike per BURST_WINDOW_MS.
-    if (entry.fails > 0 && now - entry.burstStartAt < LoginThrottle.BURST_WINDOW_MS) {
-      this.state.set(ip, entry);
-      return;
-    }
-    entry.burstStartAt = now;
-    entry.fails += 1;
-    if (entry.fails >= LoginThrottle.MAX_FAILS) {
-      const lockout = Math.min(
-        LoginThrottle.BASE_LOCKOUT_MS * 2 ** entry.strikes,
-        LoginThrottle.MAX_LOCKOUT_MS
-      );
-      entry.lockedUntil = Date.now() + lockout;
-      entry.strikes += 1;
-      entry.fails = 0;
-    }
-    this.state.set(ip, entry);
-  }
-
-  // Opportunistic eviction so a distinct-IP spray can't grow `state` without
-  // bound: entries that are neither locked nor mid-burst carry no useful state.
-  // Cheap by default; sweeps the whole map only once it gets large.
-  private prune(now: number): void {
-    if (this.state.size <= LoginThrottle.PRUNE_THRESHOLD) {
-      return;
-    }
-    for (const [ip, entry] of this.state) {
-      if (entry.lockedUntil <= now && now - entry.burstStartAt > LoginThrottle.STALE_AFTER_MS) {
-        this.state.delete(ip);
-      }
-    }
-  }
-
-  /** Clear an IP's failure count after a successful auth. */
-  recordSuccess(ip: string): void {
-    this.state.delete(ip);
-  }
-}
-
-/**
- * Client IP used to key the login throttle.
- *
- * TRUSTED-HOP ASSUMPTION: exactly ONE trusted proxy (Caddy) fronts the daemon on
- * loopback. Caddy's default `reverse_proxy` APPENDS the real client IP to whatever
- * the client sent, so `X-Forwarded-For` is `<client-supplied…>, <real-client-ip>`
- * — the entry we trust is the RIGHTMOST one (the hop Caddy added), never the
- * leftmost (which is fully attacker-controlled and would let an attacker rotate it
- * per request to evade the per-IP throttle).
- *
- * With `trustProxy: "127.0.0.1"` set on the remote Fastify instance, proxy-addr
- * already computes exactly this (request.ip = closest untrusted address = the
- * rightmost XFF hop), so request.ip is authoritative; the manual rightmost parse
- * below is a belt-and-suspenders fallback that still refuses the client-controlled
- * leftmost value. If the deployment ever inserts more than one proxy hop, both
- * trustProxy and this helper must be updated together.
- */
-function clientIp(request: { headers: Record<string, unknown>; ip: string }): string {
-  if (request.ip) {
-    return request.ip;
-  }
-  const xff = request.headers["x-forwarded-for"];
-  const raw = Array.isArray(xff) ? xff[xff.length - 1] : xff;
-  if (typeof raw === "string" && raw.length > 0) {
-    const parts = raw.split(",");
-    return parts[parts.length - 1]!.trim();
-  }
-  return request.ip;
 }

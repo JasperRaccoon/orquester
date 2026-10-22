@@ -19,11 +19,12 @@ import { createDefaultClientConfig, createDefaultDaemonConfig } from "@orquester
 import { createVisualUrlSigner } from "./agent-chat/visual-urls.ts";
 import { SecretRequestRegistry } from "./agent-chat/secret-requests.ts";
 import { createServer } from "./index.ts";
+import { testAuthSessions } from "./auth/testing.ts";
 
 type CreateServerArgs = Parameters<typeof createServer>;
 const USERNAME = "admin";
 const PASSWORD_HASH = "$2a$12$0123456789012345678901uFAKEfakeFAKEfakeFAKEfa";
-const BEARER = `Bearer ${Buffer.from(`${USERNAME}:${PASSWORD_HASH}`).toString("base64")}`;
+const { authSessions: AUTH_SESSIONS, bearer: BEARER } = await testAuthSessions();
 
 function remoteApp(services: Record<string, unknown>, mode: "local" | "remote" = "remote") {
   const config = createDefaultDaemonConfig({ env: {} });
@@ -36,7 +37,7 @@ function remoteApp(services: Record<string, unknown>, mode: "local" | "remote" =
     resolved,
     createDefaultClientConfig(`${root}/daemon.sock`),
     createWriteStream("/dev/null"),
-    services as unknown as CreateServerArgs[4],
+    { authSessions: AUTH_SESSIONS, ...services } as unknown as CreateServerArgs[4],
     { authRequired: mode === "remote", mode }
   );
 }

@@ -213,8 +213,8 @@ See [`deploy/`](deploy/) and `AGENTS.md` for the full reference.
 
 Single-user by design, and honest about it:
 
-- **The password never crosses the wire.** The client fetches the bcrypt salt and derives the hash locally; the server verifies in constant time with one identical 401 for every failure mode.
-- **Escalating per-IP login throttle** behind Caddy's forwarded IP, on top of whatever fail2ban you run.
+- **Revocable sessions, not a password-equivalent bearer.** Signing in exchanges the password (sent once, bcrypt-checked on the daemon) for a random session token; the daemon stores only its SHA-256 digest, and the client stores only the token. Each device and each named API token is listed in Settings → Server and can be revoked on its own; device sessions lapse after 30 idle days, and a password change signs every device out. Bearers are compared in constant time with one identical 401 for every failure mode.
+- **Escalating per-IP login throttle** behind Caddy's forwarded IP — every wrong password counts, one check per IP at a time — on top of whatever fail2ban you run.
 - **Secrets stay home**: SSH private keys, git-hosting tokens (GitHub PATs, Bitbucket API tokens) and the VAPID push key are 0600 on disk and never returned by any API; `?token=` credentials are redacted from logs; daemon env vars are stripped from session environments.
 - **Sandboxed filesystem API**: every path is realpath-checked against the workspaces root — no traversal, no symlink escapes; folder zips store symlinks instead of following them.
 - **Transport asymmetry**: daemon config writes and shutdown are Unix-socket-only; the MCP endpoint and DevTools proxy exist only on the authenticated remote transport.

@@ -34,7 +34,7 @@ if (sessionLink) {
 
 // When served by the daemon itself the API is same-origin; in standalone dev
 // VITE_ORQUESTER_API_URL points at the daemon. A password-protected daemon
-// triggers an in-app prompt (the bearer is a stored bcrypt hash).
+// triggers an in-app sign-in (the bearer is a stored, revocable session token).
 const endpoint = import.meta.env.VITE_ORQUESTER_API_URL ?? window.location.origin;
 
 ReactDOM.createRoot(document.getElementById("root")!).render(

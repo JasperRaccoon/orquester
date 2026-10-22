@@ -18,11 +18,12 @@ import type { CallerPrincipal } from "@orquester/api/agent-chat";
 import { createServer } from "../index.ts";
 import { createAgentToolsRuntime, type AgentToolsRuntime } from "./approval-port.ts";
 import { registerAgentToolsRuntimeRoutes } from "./routes.ts";
+import { testAuthSessions } from "../auth/testing.ts";
 
 type CreateServerArgs = Parameters<typeof createServer>;
 const USERNAME = "admin";
 const PASSWORD_HASH = "$2a$12$0123456789012345678901uFAKEfakeFAKEfakeFAKEfa";
-const BEARER = `Bearer ${Buffer.from(`${USERNAME}:${PASSWORD_HASH}`).toString("base64")}`;
+const { authSessions: AUTH_SESSIONS, bearer: BEARER } = await testAuthSessions();
 
 async function runtime(t: TestContext) {
   const baseDir = await mkdtemp(join(tmpdir(), "orq-agent-tools-routes-"));
@@ -57,6 +58,7 @@ function server(rt: AgentToolsRuntime, mode: "local" | "remote") {
     createDefaultClientConfig(`${root}/daemon.sock`),
     createWriteStream("/dev/null"),
     {
+      authSessions: AUTH_SESSIONS,
       agentToolsRuntime: rt,
       agentChat: { authorizeHostRequest: () => false, sessionToolThread: () => null, routeDeps: () => undefined, protectedPids: () => [] }
     } as unknown as CreateServerArgs[4],

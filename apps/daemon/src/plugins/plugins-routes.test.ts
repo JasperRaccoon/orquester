@@ -24,6 +24,7 @@ import { PluginsService, publishPluginEvents } from "./plugins-service.ts";
 import { registerPluginRoutes } from "./routes.ts";
 import { combinedRegistryDeps, fakeRegistry, publish, tempRoot } from "./testing.ts";
 import { TSC_RS_ENGINE, TSRS_ENGINE } from "./ts-rust/installer.ts";
+import { testAuthSessions } from "../auth/testing.ts";
 
 // Route-level coverage for /api/plugins (spec §5.3) through the daemon's own
 // router — the real createServer and a real PluginsService over a temp appdir,
@@ -35,7 +36,7 @@ import { TSC_RS_ENGINE, TSRS_ENGINE } from "./ts-rust/installer.ts";
 type CreateServerArgs = Parameters<typeof createServer>;
 const USERNAME = "admin";
 const PASSWORD_HASH = "$2a$12$0123456789012345678901uFAKEfakeFAKEfakeFAKEfa";
-const BEARER = `Bearer ${Buffer.from(`${USERNAME}:${PASSWORD_HASH}`).toString("base64")}`;
+const { authSessions: AUTH_SESSIONS, bearer: BEARER } = await testAuthSessions();
 const ID = TS_RUST_PLUGIN_ID;
 
 async function harness(t: TestContext, options: { mode?: "local" | "remote"; seed?: string } = {}) {
@@ -98,6 +99,7 @@ async function harness(t: TestContext, options: { mode?: "local" | "remote"; see
     createDefaultClientConfig(join(root, "daemon.sock")),
     createWriteStream("/dev/null"),
     {
+      authSessions: AUTH_SESSIONS,
       plugins,
       broadcaster,
       // The workspace delete route's other cascades, stubbed: only the plugins notification is under test.

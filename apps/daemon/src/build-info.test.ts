@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
 import { createDefaultClientConfig, createDefaultDaemonConfig } from "@orquester/config";
+import { testAuthSessions } from "./auth/testing.ts";
 import { findRepoRoot, readBuildInfo, readGitCommit, VERSION_STAMP_FILE } from "./build-info.ts";
 import { createServer } from "./index.ts";
 
@@ -79,10 +80,10 @@ test("GET /api/info reports the version and commit, behind auth on the remote tr
   const config = createDefaultDaemonConfig({ env: {} });
   config.transports.http.username = "admin";
   config.transports.http.passwordHash = "$2a$12$0123456789012345678901uFAKEfakeFAKEfakeFAKEfa";
-  const bearer = `Bearer ${Buffer.from(`admin:${config.transports.http.passwordHash}`).toString("base64")}`;
+  const { authSessions, bearer } = await testAuthSessions();
   const dir = "/nonexistent-orquester-build-info-test";
   const resolved = { daemonDir: dir, baseDir: dir, workspacesDir: dir, workspacesMetaFile: `${dir}/workspaces.json`, fsRoot: dir } as unknown as Args[1];
-  const services = { buildInfo: { version: "1.2.3", commit: A } } as unknown as Args[4];
+  const services = { buildInfo: { version: "1.2.3", commit: A }, authSessions } as unknown as Args[4];
   const app = createServer(config, resolved, createDefaultClientConfig(`${dir}/daemon.sock`), createWriteStream("/dev/null"), services, {
     authRequired: true,
     mode: "remote"

@@ -52,16 +52,7 @@ import {
   whiteboardsDirOf
 } from "../lib/whiteboard";
 import type { AgentAdapterId } from "@orquester/api/agent-chat";
-import {
-  buildCredential,
-  clearStoredHash,
-  clearStoredUsername,
-  deriveAuthHash,
-  loadStoredHash,
-  loadStoredUsername,
-  storeHash,
-  storeUsername
-} from "../lib/auth";
+import { asSessionToken, clearStoredToken, loadStoredToken, storeToken, storeUsername } from "../lib/auth";
 import { loadViewModes, saveViewModes, type ViewMode } from "../lib/view-mode";
 import { loadPreferredAccounts, savePreferredAccounts } from "../lib/preferred-account";
 import {
@@ -491,7 +482,7 @@ function scheduleLockedReconnect(
   // cleared because nothing is scheduled to fire.
   if (cycle >= MAX_LOCKED_CYCLES) {
     const api = get().api;
-    const authInPlay = get().authSalt != null && api != null;
+    const authInPlay = get().authRequired && api != null;
     set({
       connectionStatus: "error",
       reconnectAttempt: 0,
@@ -569,6 +560,43 @@ async function persistRemotes(connections: UiConnection[]): Promise<void> {
   await homeApi
     ?.saveRemotes(connections.filter((c) => c.kind === "remote").map(toRemoteConfig))
     .catch(() => undefined);
+}
+
+/**
+ * Forget the active connection's bearer (stored and in memory) and show the
+ * sign-in prompt: a 401 means the token was revoked or lapsed, so retrying it
+ * can only fail again. Stops reconnecting; the prompt's sign-in reconnects.
+ */
+function dropCredential(
+  get: StoreApi<AppState>["getState"],
+  set: StoreApi<AppState>["setState"],
+  api: ApiClient,
+  message: string | null = "Your session ended. Sign in again."
+): void {
+  stopReconnect();
+  clearStoredToken(api.connection.endpoint);
+  set({
+    api: get().api === api ? apiWithCredential(api, "") : get().api,
+    connectionStatus: "error",
+    reconnectAttempt: 0,
+    connectionError: message,
+    authError: message,
+    lockedUntil: null,
+    authPrompt: { connectionId: api.connection.id }
+  });
+}
+
+/** The sign-in prompt's message for a failed login. */
+function signInError(error: unknown): string {
+  if (error instanceof ApiError) {
+    if (error.status === 401) return "Incorrect username or password.";
+    if (error.status === 429) {
+      const seconds = error.retryAfterSeconds;
+      return seconds ? `Too many failed attempts. Try again in ${seconds}s.` : "Too many failed attempts. Try again later.";
+    }
+    if (error.serverMessage) return error.serverMessage;
+  }
+  return "Could not reach the server. Try again.";
 }
 
 /** Rebuild an ApiClient for the same connection but with a bearer credential. */
@@ -857,9 +885,12 @@ export interface AppState {
 
   // auth (web → password-protected HTTP daemon)
   authPrompt: { connectionId: string } | null;
-  authSalt: string | null;
+  /** Whether the active connection requires a sign-in (its `/api/auth/info`). */
+  authRequired: boolean;
   /** Whether the active connection's auth needs a username (UI hint). */
   authRequiresUsername: boolean;
+  /** Why the last sign-in failed or the session ended (shown in the sign-in prompt). */
+  authError: string | null;
 
   // navigation
   currentWorkspace: string | null;
@@ -1096,7 +1127,10 @@ export interface AppState {
   updateAgentPrefs: (next: AgentPrefs) => Promise<void>;
 
   // auth
+  /** Sign in with the password: the daemon returns a session token, the only thing stored. */
   submitCredentials: (username: string, password: string) => Promise<void>;
+  /** Revoke this client's session on the daemon, forget its token and show the sign-in prompt. */
+  signOut: () => Promise<void>;
 
   loadWorkspaces: () => Promise<void>;
   createWorkspace: (name: string, gitAccountId?: string) => Promise<void>;
@@ -1340,8 +1374,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   pendingCloseTabId: null,
   sidebarDrawerOpen: false,
   authPrompt: null,
-  authSalt: null,
+  authRequired: false,
   authRequiresUsername: false,
+  authError: null,
   currentWorkspace: null,
   currentProject: null,
   registry: EMPTY_REGISTRY,
@@ -1448,22 +1483,21 @@ export const useAppStore = create<AppState>((set, get) => ({
     // untracked delay() — without it, the resumed loop would run a SECOND
     // establish (duplicate fan-out + double events subscription).
     const reconnectGenAtStart = reconnectGen;
-    // Auth gate: derive/restore the bearer credential (web) or prompt.
+    // Auth gate: restore the session token (web) or prompt.
     let active = api;
     const info = await active.authInfo().catch(() => null);
     if (reconnectGenAtStart !== reconnectGen) {
       return;
     }
-    set({ authSalt: info?.salt ?? null, authRequiresUsername: info?.requiresUsername ?? false });
+    set({ authRequired: info?.authRequired ?? false, authRequiresUsername: info?.requiresUsername ?? false });
     if (info?.authRequired) {
-      // The bearer is base64("<username>:<hash>"). Prefer one already on the
-      // connection; else rebuild it from the per-endpoint stored username+hash.
+      // The bearer is a session token from the daemon's login: the endpoint's
+      // stored one (validated) first, else one already on the connection (a
+      // sign-in just now, or a token configured for this remote). Anything
+      // that cannot be a token — an older build's base64("<user>:<hash>") —
+      // is never sent.
       const endpoint = active.connection.endpoint;
-      const storedHash = loadStoredHash(endpoint);
-      const storedUser = loadStoredUsername(endpoint);
-      const credential =
-        active.connection.password ??
-        (storedHash ? buildCredential(storedUser ?? "", storedHash) : undefined);
+      const credential = loadStoredToken(endpoint) ?? asSessionToken(active.connection.password);
       if (!credential) {
         stopReconnect();
         recordConnectionFailure({ kind: "unauthorized", detail: "This server needs a sign-in.", at: Date.now() });
@@ -1495,19 +1529,10 @@ export const useAppStore = create<AppState>((set, get) => ({
         return;
       }
       if (error instanceof ApiError && error.status === 401) {
-        // Wrong credentials: drop the stored hash/username and re-prompt. Do NOT
-        // fan out and do NOT reconnect.
+        // The token was revoked or lapsed (or is an old build's credential):
+        // drop it and re-prompt. Do NOT fan out and do NOT reconnect.
         recordFailure(error);
-        stopReconnect();
-        clearStoredHash(active.connection.endpoint);
-        clearStoredUsername(active.connection.endpoint);
-        set({
-          connectionStatus: "error",
-          reconnectAttempt: 0,
-          connectionError: "Incorrect username or password.",
-          lockedUntil: null,
-          authPrompt: { connectionId: active.connection.id }
-        });
+        dropCredential(get, set, active);
         return;
       }
       if (error instanceof ApiError && error.status === 429) {
@@ -1938,20 +1963,47 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   submitCredentials: async (username, password) => {
     const api = get().api;
-    const salt = get().authSalt;
-    if (!api || !salt) {
+    if (!api) {
       return;
     }
-    // Derive the same bcrypt hash the daemon stores; persist the hash + the
-    // plain username (never the plaintext password). The wire bearer is
-    // base64("<username>:<hash>").
+    // The password goes to the daemon once; what comes back is a revocable
+    // session token, the only thing kept (with the username, to pre-fill the
+    // next sign-in). The login route is public, so `api`'s own (dead) bearer is
+    // irrelevant here.
     const normalizedUser = username.trim().toLowerCase();
-    const hash = deriveAuthHash(password, salt);
-    const credential = buildCredential(normalizedUser, hash);
-    storeHash(api.connection.endpoint, hash);
+    let token: string;
+    try {
+      token = (await api.login({ username: normalizedUser, password })).token;
+    } catch (error) {
+      set({ authError: signInError(error) });
+      return;
+    }
+    if (get().api !== api || !asSessionToken(token)) {
+      if (get().api === api) set({ authError: "The server sent an invalid session token." });
+      return;
+    }
+    storeToken(api.connection.endpoint, token);
     storeUsername(api.connection.endpoint, normalizedUser);
-    set({ api: apiWithCredential(api, credential), authPrompt: null });
+    set({ api: apiWithCredential(api, token), authPrompt: null, authError: null });
     await get().connect();
+  },
+
+  signOut: async () => {
+    const api = get().api;
+    if (!api || api.connection.kind === "local") {
+      return;
+    }
+    // Close the event stream first: the daemon ends it when the session is
+    // revoked, and that end must not read as a disconnect to recover from.
+    // Then revoke (best effort: an unreachable daemon still loses this
+    // client's copy, and the session lapses on its own).
+    stopReconnect();
+    closeEvents();
+    await api.logout().catch(() => undefined);
+    if (get().api !== api) {
+      return;
+    }
+    dropCredential(get, set, api, null);
   },
 
   selectConnection: async (id) => {
@@ -2020,11 +2072,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   addRemote: async (input) => {
-    // No credential is captured at add-time: `connection.password` is the wire
-    // bearer base64("<username>:<hash>"), and the raw password must never leave
-    // the client (nor be persisted to remotes.json). The AuthModal derives the
-    // hash and builds the credential on first connect, exactly like the
-    // seeded-VPS remote (apps/desktop/src/main.ts).
+    // No credential is captured at add-time: the AuthModal signs in on first
+    // connect and the session token is stored per endpoint, exactly like the
+    // seeded-VPS remote (apps/desktop/src/main.ts). The password is never
+    // stored, nor persisted to remotes.json.
     const connection: UiConnection = {
       id: crypto.randomUUID(),
       name: input.name.trim() || input.baseUrl,
@@ -2138,15 +2189,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       // for a credential revoked mid-fan-out.)
       if (error instanceof ApiError && error.status === 401) {
         recordFailure(error);
-        stopReconnect();
-        clearStoredHash(api.connection.endpoint);
-        clearStoredUsername(api.connection.endpoint);
-        set({
-          connectionStatus: "error",
-          connectionError: "Incorrect username or password.",
-          lockedUntil: null,
-          authPrompt: { connectionId: api.connection.id }
-        });
+        dropCredential(get, set, api);
       } else {
         console.error("[orquester] failed to load workspaces", error);
       }

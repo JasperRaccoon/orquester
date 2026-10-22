@@ -13,15 +13,16 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { ORQUESTER_PROTOCOL_VERSION, ORQUESTER_SERVICE } from "@orquester/api";
 import { createDefaultClientConfig, createDefaultDaemonConfig } from "@orquester/config";
+import { testAuthSessions } from "./auth/testing.ts";
 import { createServer } from "./index.ts";
 
 type CreateServerArgs = Parameters<typeof createServer>;
 const USERNAME = "admin";
 const PASSWORD_HASH = "$2a$12$0123456789012345678901uFAKEfakeFAKEfakeFAKEfa";
-const BEARER = `Bearer ${Buffer.from(`${USERNAME}:${PASSWORD_HASH}`).toString("base64")}`;
 
 test("health is public and identifies the service; info carries the build to signed-in clients", async () => {
   const root = await mkdtemp(join(tmpdir(), "orq-health-route-"));
+  const { authSessions, bearer } = await testAuthSessions();
   const config = createDefaultDaemonConfig({ env: {} });
   config.transports.http.username = USERNAME;
   config.transports.http.passwordHash = PASSWORD_HASH;
@@ -31,7 +32,7 @@ test("health is public and identifies the service; info carries the build to sig
     resolved,
     createDefaultClientConfig(`${root}/daemon.sock`),
     createWriteStream("/dev/null"),
-    { buildInfo: { version: "1.2.3", commit: "0123456789abcdef0123456789abcdef01234567" } } as unknown as CreateServerArgs[4],
+    { buildInfo: { version: "1.2.3", commit: "0123456789abcdef0123456789abcdef01234567" }, authSessions } as unknown as CreateServerArgs[4],
     { authRequired: true, mode: "remote" }
   );
   try {
@@ -40,7 +41,7 @@ test("health is public and identifies the service; info carries the build to sig
     assert.deepEqual(health.json(), { ok: true, service: ORQUESTER_SERVICE, protocol: ORQUESTER_PROTOCOL_VERSION });
 
     assert.equal((await app.inject({ method: "GET", url: "/api/info" })).statusCode, 401);
-    const info = await app.inject({ method: "GET", url: "/api/info", headers: { authorization: BEARER } });
+    const info = await app.inject({ method: "GET", url: "/api/info", headers: { authorization: bearer } });
     assert.equal(info.statusCode, 200);
     const body = info.json() as { protocol: number; build: string | null };
     assert.equal(body.protocol, ORQUESTER_PROTOCOL_VERSION);

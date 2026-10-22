@@ -12,6 +12,7 @@ import { createServer } from "../index.ts";
 import { FaviconError, type FetchedFavicon } from "./favicon.ts";
 import { registerRepoIdentityRoutes, type RepoIdentityRoutesDeps } from "./routes.ts";
 import { RepoIdentitiesService } from "./service.ts";
+import { testAuthSessions } from "../auth/testing.ts";
 
 // Route-level coverage for /api/repo-identities: statuses, the `{ code, message }` envelope, the
 // icon headers, the raw upload's caps. Inject only — nothing listens, nothing hits the network.
@@ -324,7 +325,7 @@ test("the daemon serves the routes on both transports; the remote one requires t
   await service.setEmoji(KEY, "🦷");
   type Args = Parameters<typeof createServer>;
   const passwordHash = "$2a$12$0123456789012345678901uFAKEfakeFAKEfakeFAKEfa";
-  const bearer = `Bearer ${Buffer.from(`admin:${passwordHash}`).toString("base64")}`;
+  const { authSessions, bearer } = await testAuthSessions();
   const config = createDefaultDaemonConfig({ env: {} });
   config.transports.http.username = "admin";
   config.transports.http.passwordHash = passwordHash;
@@ -334,7 +335,7 @@ test("the daemon serves the routes on both transports; the remote one requires t
       { daemonDir: root, workspacesDir: root, fsRoot: root } as unknown as Args[1],
       createDefaultClientConfig(join(root, "daemon.sock")),
       createWriteStream("/dev/null"),
-      { repoIdentities: service } as unknown as Args[4],
+      { repoIdentities: service, authSessions } as unknown as Args[4],
       options
     );
   const local = build({ authRequired: false, mode: "local" });

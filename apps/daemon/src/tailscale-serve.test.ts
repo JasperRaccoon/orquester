@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import { tailscaleServeRoutes } from "@orquester/api";
 import { createDefaultClientConfig, createDefaultDaemonConfig } from "@orquester/config";
+import { testAuthSessions } from "./auth/testing.ts";
 import { createServer } from "./index.ts";
 import {
   TailscaleCliError,
@@ -260,7 +261,6 @@ describe("routes", () => {
   type CreateServerArgs = Parameters<typeof createServer>;
   const USERNAME = "admin";
   const PASSWORD_HASH = "$2a$12$0123456789012345678901uFAKEfakeFAKEfakeFAKEfa";
-  const BEARER = `Bearer ${Buffer.from(`${USERNAME}:${PASSWORD_HASH}`).toString("base64")}`;
 
   it("answer only authenticated clients on the remote transport, and toggle there", async () => {
     const root = await mkdtemp(join(tmpdir(), "orq-tailscale-route-"));
@@ -269,13 +269,14 @@ describe("routes", () => {
     config.transports.http.passwordHash = PASSWORD_HASH;
     const cli = fakeCli();
     const { serve } = controller(cli);
+    const { authSessions, bearer } = await testAuthSessions();
     const resolved = { daemonDir: root, baseDir: root, workspacesDir: root, workspacesMetaFile: `${root}/workspaces.json`, fsRoot: root, appConfigFile: join(root, "app.json") } as unknown as CreateServerArgs[1];
     const app = createServer(
       config,
       resolved,
       createDefaultClientConfig(`${root}/daemon.sock`),
       createWriteStream("/dev/null"),
-      { tailscaleServe: serve } as unknown as CreateServerArgs[4],
+      { tailscaleServe: serve, authSessions } as unknown as CreateServerArgs[4],
       { authRequired: true, mode: "remote" }
     );
     try {
@@ -283,7 +284,7 @@ describe("routes", () => {
       assert.equal((await app.inject({ method: "PUT", url: tailscaleServeRoutes.serve, payload: { enabled: true } })).statusCode, 401);
       assert.deepEqual(changing(cli.calls), []);
 
-      const headers = { authorization: BEARER };
+      const headers = { authorization: bearer };
       const status = await app.inject({ method: "GET", url: tailscaleServeRoutes.serve, headers });
       assert.equal(status.statusCode, 200);
       assert.equal(status.json().url, `https://${DNS}/`);
