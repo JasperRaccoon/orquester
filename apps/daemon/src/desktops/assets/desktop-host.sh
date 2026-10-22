@@ -76,7 +76,8 @@ esac
 atomic_write "$dir/ready" "$display"
 echo "display :$display ready"
 
-DISPLAY=":$display" XAUTHORITY="$dir/Xauthority" DBUS_SESSION_BUS_ADDRESS="unix:path=$sock/bus" openbox &
+DISPLAY=":$display" XAUTHORITY="$dir/Xauthority" DBUS_SESSION_BUS_ADDRESS="unix:path=$sock/bus" \
+  openbox --config-file "$(dirname "$0")/openbox-rc.xml" &
 
 wait "$xvnc"
 exit $?
