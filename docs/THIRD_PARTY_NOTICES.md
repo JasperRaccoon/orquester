@@ -39,6 +39,20 @@ header where the port is substantial:
   `apps/web/src/session-logic.ts`), and the design language of the chat
   surfaces.
 
+A later round, ported from T3 Code at commit `ed9b7ca9`, marks each port with an
+`// Adapted from T3 Code (MIT): <path>` comment. It covers the terminal output
+protocol, link patterns and replay guard; the change-kind classifier; idle
+compaction; the handoff budget; Claude plugin skill discovery; Codex usage-limit
+detection; connection diagnosis and reconnect supervision; the Tailscale serve
+helper; desktop notifications, application menu and window state; composer
+prompt recall, image fitting and pending-request sends; the workflow prompt
+framing; and the chat math renderer.
+
+The chat math parser (`packages/ui/src/components/agent-chat/timeline/markdown/math*.ts`)
+also adapts [micromark-extension-llm-math](https://github.com/ofk/micromark-extension-llm-math)
+3.1.0 as patched by T3 Code. Like the `micromark-extension-math` it forks
+(© Titus Wormer), it is MIT licensed under the same terms reproduced below.
+
 T3 Code is distributed under the MIT licence, reproduced in full below.
 
 ```
