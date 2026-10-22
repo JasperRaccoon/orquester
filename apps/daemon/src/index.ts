@@ -105,6 +105,7 @@ import { registerDesktopWsRoutes } from "./desktops/ws-routes.ts";
 import { redactUrlTokens, sanitizeDevtoolsPath } from "./devtools.js";
 import { UrlWatcher } from "./url-watcher";
 import { AgentHooks } from "./agent-hooks";
+import { DailyLogStream } from "./daily-log.ts";
 import { listAgentConversations } from "./agent-conversations.ts";
 import { type ISessionManager, SessionError, createSessionManager, resumeLaunchArgs } from "./sessions";
 import { AgentChatService, ChatSessionError, type CreateAgentChatRequest } from "./agent-chat/service.ts";
@@ -268,7 +269,6 @@ import {
   createDefaultDaemonConfig,
   createDefaultRemotesConfig,
   createDefaultWorkspacesConfig,
-  dailyLogFile,
   expandVars,
   keysDir,
   parseAppConfig,
@@ -304,7 +304,7 @@ import fastifyStatic from "@fastify/static";
 import websocketPlugin from "@fastify/websocket";
 import { WebSocket as UpstreamWebSocket } from "ws";
 import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
-import { createReadStream, createWriteStream, existsSync, type WriteStream } from "node:fs";
+import { createReadStream, createWriteStream, existsSync } from "node:fs";
 import { chmod, lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, platform as osPlatform } from "node:os";
 import { basename, dirname, join, resolve, sep } from "node:path";
@@ -515,7 +515,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   };
   await prepareDirs(resolved);
 
-  const logStream = createWriteStream(dailyLogFile(resolved.logsDir), { flags: "a" });
+  // Rolled over at local midnight and at its size cap; old days pruned (daily-log.ts).
+  const logStream = new DailyLogStream({ logsDir: () => resolved.logsDir });
   const clientConfig = createDefaultClientConfig(paths.socketPath);
 
   // Shared, transport-agnostic services. Sessions live here so they survive
@@ -1762,6 +1763,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     const unixClosed = unixServer.close();
     unixServer.server.closeAllConnections?.();
     await unixClosed.catch(() => undefined);
+    await logStream.close();
     await agentProfileStopped;
     // Last, and bounded: a secret-files vault write in flight lands, a stuck one never holds the exit.
     let secretFilesBound: ReturnType<typeof setTimeout> | undefined;
@@ -1927,7 +1929,7 @@ export function createServer(
   config: DaemonConfig,
   resolved: ResolvedPaths,
   clientConfig: ClientConfig,
-  logStream: WriteStream,
+  logStream: { write(line: string): void },
   services: Services,
   options: { authRequired: boolean; mode: "local" | "remote"; serveWeb?: string }
 ): FastifyInstance {

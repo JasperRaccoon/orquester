@@ -586,8 +586,22 @@ export function localDateStamp(date = new Date()): string {
   return `${year}-${month}-${day}`;
 }
 
-export function dailyLogFile(logsDir: string, date = new Date()): string {
-  return joinPath(logsDir, `${localDateStamp(date)}.log`);
+/** Days of daemon logs kept besides today's: older daily files are deleted. */
+export const DAILY_LOG_RETENTION_DAYS = 14;
+
+/**
+ * The daemon log for a local day: `<yyyy-mm-dd>.log`, then `<yyyy-mm-dd>.<part>.log` (part ≥ 1)
+ * for each later file of the same day once one reaches its size cap.
+ */
+export function dailyLogFile(logsDir: string, date = new Date(), part = 0): string {
+  return joinPath(logsDir, `${localDateStamp(date)}${part > 0 ? `.${part}` : ""}.log`);
+}
+
+/** The local day and part a daily log file name stands for, or null for any other file. */
+export function parseDailyLogFileName(name: string): { day: string; part: number } | null {
+  const match = /^(\d{4}-\d{2}-\d{2})(?:\.([1-9]\d{0,5}))?\.log$/.exec(name);
+  if (!match) return null;
+  return { day: match[1]!, part: match[2] === undefined ? 0 : Number(match[2]) };
 }
 
 // daemon.json
