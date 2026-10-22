@@ -69,8 +69,14 @@ const PRIMARY_BUTTON =
  *    `aria-description`.** The string is the provider's own (a prompt-injection
  *    notice, typically) and is never paraphrased.
  *
+ * Under the detail, **why the provider asked** (`approval.reason`) when it
+ * said: Claude's `decisionReason` — an ask rule, a path outside the
+ * workspace, a safety check — or Codex's own reason. Plain text, one short
+ * line, absent when the provider gave none.
+ *
  * It never steals focus and is never a modal: the user can keep typing with an
- * approval sitting there (§7.5).
+ * approval sitting there (§7.5) — and sending that message declines the
+ * request and redirects the agent (the composer says so).
  *
  * *T3: `ComposerPendingApprovalPanel.tsx:17-63`,
  * `ComposerPendingApprovalActions.tsx:23-108`.*
@@ -193,6 +199,14 @@ export function ApprovalCard({
           detail.text
         )}
       </div>
+      {approval.reason ? (
+        <p
+          data-approval-reason="true"
+          className="mt-1.5 min-w-0 whitespace-pre-wrap break-words text-[11px] leading-snug text-neutral-400"
+        >
+          {approval.reason}
+        </p>
+      ) : null}
     </BannerCard>
   );
 }
