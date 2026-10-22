@@ -45,7 +45,16 @@ trap 'finish 143' TERM
 echo "desktop host starting: ${width}x${height}, audio=$audio"
 export XDG_RUNTIME_DIR="$dir/run"
 
-dbus-daemon --session --address="unix:path=$sock/bus" --nofork --nopidfile &
+# The bus prints its address once it accepts connections; through a FIFO (as
+# for Xvnc below) `read` blocks until then, or sees EOF if it dies first.
+busfifo="$dir/busfd"
+rm -f "$busfifo"
+mkfifo -m 600 "$busfifo" || exit 1
+dbus-daemon --session --address="unix:path=$sock/bus" --nofork --nopidfile --print-address=4 4>"$busfifo" &
+bus=
+read -r bus <"$busfifo"
+rm -f "$busfifo"
+[ -n "$bus" ] || echo "dbus-daemon did not start"
 
 if [ "$audio" = 1 ]; then
   # Runtime, state and config under the desktop dir: nothing touches the
@@ -73,6 +82,15 @@ case $display in
     exit 1
     ;;
 esac
+# Services the bus starts on demand (the GTK file-chooser portal, notification
+# daemons, D-Bus-activated apps) inherit the bus's environment, which has no
+# display: give them the desktop's wiring before any app can ask for one.
+if [ -n "$bus" ] && command -v dbus-update-activation-environment >/dev/null; then
+  DBUS_SESSION_BUS_ADDRESS="unix:path=$sock/bus" dbus-update-activation-environment \
+    DISPLAY=":$display" XAUTHORITY="$dir/Xauthority" XDG_SESSION_TYPE=x11 \
+    PULSE_SERVER="unix:$sock/pulse/native" PULSE_CLIENTCONFIG="$dir/client.conf" ||
+    echo "could not set the D-Bus activation environment"
+fi
 atomic_write "$dir/ready" "$display"
 echo "display :$display ready"
 
