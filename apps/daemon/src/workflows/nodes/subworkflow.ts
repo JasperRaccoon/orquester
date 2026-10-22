@@ -2,7 +2,8 @@
 // both ways, depth ≤ 5, cycles refused. Its output is the child's final output; a child that does
 // not succeed fails the block with `child_run_failed`. Resumable through the `child-run` WaitingOn.
 
-import type { NodeExecutor, NodeResult } from "../contracts.ts";
+import { createPromptTrust, templateReferences } from "@orquester/api";
+import type { NodeExecutionContext, NodeExecutor, NodeResult } from "../contracts.ts";
 import { ChildRunUnknownError, EngineStoppedError, WorkflowEngineError } from "../run-context.ts";
 import { describeDuration } from "./process.ts";
 
@@ -32,8 +33,9 @@ export function createSubWorkflowExecutor(): NodeExecutor<"workflow"> {
           result = await ctx.services.awaitRun(ctx.resumeFrom.runId, controller.signal);
         } else {
           const config = ctx.node.config;
-          const input =
-            config.input !== undefined && config.input.trim().length > 0 ? ctx.renderValue(config.input).value : ctx.expressionContext().input;
+          const templated = config.input !== undefined && config.input.trim().length > 0;
+          const input = templated ? ctx.renderValue(config.input!).value : ctx.expressionContext().input;
+          const untrusted = passesUntrusted(ctx, templated ? config.input! : null);
           let started;
           try {
             started = await ctx.services.runChild({
@@ -44,7 +46,8 @@ export function createSubWorkflowExecutor(): NodeExecutor<"workflow"> {
               depth: ctx.depth,
               signal: controller.signal,
               // One child per attempt: asking again (a resumed attempt) returns the same run.
-              attempt: ctx.attempt
+              attempt: ctx.attempt,
+              ...(untrusted ? { untrusted: true } : {})
             });
           } catch (error) {
             // The engine is stopping: no child started, and none may — the block resumes (and starts
@@ -87,4 +90,20 @@ export function createSubWorkflowExecutor(): NodeExecutor<"workflow"> {
       }
     }
   };
+}
+
+/**
+ * Whether the child's input may carry text someone else wrote (`@orquester/api` prompt-safety.ts):
+ * its template reads untrusted data, or (no template) the block's own input is. The child then
+ * frames it in its agent prompts.
+ */
+function passesUntrusted(ctx: NodeExecutionContext<"workflow">, template: string | null): boolean {
+  const trust = createPromptTrust({
+    workflow: ctx.workflow,
+    nodeId: ctx.node.id,
+    trigger: ctx.expressionContext().trigger,
+    liveInputs: ctx.liveInputs?.() ?? []
+  });
+  if (template === null) return trust("input", []);
+  return templateReferences(template).some((ref) => trust(ref.root, ref.path));
 }

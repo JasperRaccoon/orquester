@@ -2,11 +2,21 @@
 //
 // Rendering is two passes, in this order and never the other: `{{…}}` expressions against the run
 // context first, with every inserted value escaped for the saved-prompt `{variables}` pass
-// (`escapePromptVariables`) so text a trigger delivered can never inject a `{diff}`; then the
-// `{variables}` themselves, daemon-side (`PromptRenderer`), in the workflow's time zone. A failed
-// variable read fails the block naming it — a prompt is never sent missing its variables.
+// (`escapePromptVariables`) so text a trigger delivered can never inject a `{diff}`, and data
+// someone else wrote (a PR, a release, an HTTP response…) framed as untrusted
+// (`@orquester/api` prompt-safety.ts); then the `{variables}` themselves, daemon-side
+// (`PromptRenderer`), in the workflow's time zone. A failed variable read fails the block naming
+// it — a prompt is never sent missing its variables.
 
-import { escapePromptVariables, gitStatusSection, renderTemplate, WORKFLOW_LIMITS, type AgentBlockConfig, type AgentFailureReason } from "@orquester/api";
+import { randomBytes } from "node:crypto";
+import {
+  createPromptTrust,
+  gitStatusSection,
+  renderAgentPromptTemplate,
+  WORKFLOW_LIMITS,
+  type AgentBlockConfig,
+  type AgentFailureReason
+} from "@orquester/api";
 import type { NodeExecutionContext, PromptRenderer } from "../contracts.ts";
 import { tailUtf8, truncateUtf8 } from "../run-context.ts";
 
@@ -100,14 +110,30 @@ export function promptSource(config: AgentBlockConfig, prompts: Pick<PromptRende
   return { ok: true, template: `${saved.body}${append}` };
 }
 
+/** A fresh frame ID per render, so untrusted text cannot guess and close its own frame. */
+export function newPromptFrameId(): string {
+  return randomBytes(6).toString("hex");
+}
+
 /**
  * Pass 1: `{{…}}` against the run context, every inserted value escaped for the `{variables}`
- * pass. Rendered with the shared renderer rather than `ctx.render` because only the renderer takes
- * the escape hook.
+ * pass and every untrusted one framed. Rendered with the shared renderer rather than `ctx.render`
+ * because only the renderer takes the insertion hook.
  */
-export function renderExpressions(template: string, ctx: Pick<NodeExecutionContext, "expressionContext" | "secrets">): { text: string; warnings: string[] } {
+export function renderExpressions(
+  template: string,
+  ctx: Pick<NodeExecutionContext, "expressionContext" | "secrets" | "workflow" | "node" | "liveInputs">,
+  frameId: string = newPromptFrameId()
+): { text: string; warnings: string[] } {
   const context = ctx.expressionContext();
-  return renderTemplate(template, { ...context, secrets: ctx.secrets }, { escapeValue: escapePromptVariables });
+  const trust = createPromptTrust({
+    workflow: ctx.workflow,
+    nodeId: ctx.node.id,
+    trigger: context.trigger,
+    liveInputs: ctx.liveInputs?.() ?? []
+  });
+  const rendered = renderAgentPromptTemplate(template, { ...context, secrets: ctx.secrets }, { trust, frameId });
+  return { text: rendered.text, warnings: rendered.warnings };
 }
 
 /** Pass 2: the saved-prompt `{variables}`, daemon-side. */

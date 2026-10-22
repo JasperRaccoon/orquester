@@ -659,6 +659,12 @@ export interface RenderOptions {
   /** Applied to every inserted value (e.g. `escapePromptVariables` before the `{variables}` pass). */
   escapeValue?: (text: string) => string;
   /**
+   * Turns an evaluated expression's value into the text inserted, in place of the default
+   * (`expressionValueToText`, then `escapeValue`): it knows which expression the value came from,
+   * so it can treat some sources differently (an agent prompt frames untrusted data).
+   */
+  insertValue?: (value: unknown, expr: TemplateExpression) => string;
+  /**
    * Stop once the text is this many UTF-16 units long: it is cut there, `truncated` is set, and no
    * expression after the cut is evaluated (nor warns). Unlimited when absent.
    */
@@ -698,8 +704,12 @@ export function renderTemplate(src: string, ctx: ExpressionContext, opts: Render
     } else {
       const result = evaluateExpression(segment, ctx);
       warnings.push(...result.warnings);
-      const inserted = expressionValueToText(result.value);
-      text += opts.escapeValue ? opts.escapeValue(inserted) : inserted;
+      if (opts.insertValue) {
+        text += opts.insertValue(result.value, segment);
+      } else {
+        const inserted = expressionValueToText(result.value);
+        text += opts.escapeValue ? opts.escapeValue(inserted) : inserted;
+      }
     }
     if (max !== undefined && text.length > max) return { text: cutText(text, max), warnings, truncated: true };
   }
