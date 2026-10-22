@@ -330,12 +330,19 @@ describe("commands", () => {
     );
   });
 
-  it("defaults the turn diff to ignoring whitespace", async () => {
+  it("defaults the turn diff to showing whitespace, and hides it only when asked", async () => {
     const transporter = new FakeTransporter();
     const transport = createAgentChatTransport(transporter);
     transporter.responses.push({ status: 200, ok: true, data: {} });
+    transporter.responses.push({ status: 200, ok: true, data: {} });
+    transporter.responses.push({ status: 200, ok: true, data: {} });
     await transport.turnDiff("s1", 3);
-    assert.deepEqual(transporter.requests[0]?.query, { ignoreWhitespace: 1 });
+    await transport.turnDiff("s1", 3, { ignoreWhitespace: true });
+    await transport.turnDiff("s1", 3, { ignoreWhitespace: false });
+    assert.deepEqual(
+      transporter.requests.map((request) => request.query),
+      [{ ignoreWhitespace: 0 }, { ignoreWhitespace: 1 }, { ignoreWhitespace: 0 }]
+    );
   });
 });
 

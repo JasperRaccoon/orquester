@@ -2,12 +2,7 @@ import React from "react";
 import { ChevronLeft } from "lucide-react";
 
 import { cn } from "../../../lib/cn";
-import {
-  TurnDiffBody,
-  turnDiffTitle,
-  useTurnDiff,
-  type TurnDiffRequest
-} from "../../agent-chat/timeline/TurnDiffModal";
+import { TurnDiffBody, turnDiffTitle, type TurnDiffRequest } from "../../agent-chat/timeline/TurnDiffModal";
 
 /**
  * A turn's diff INSIDE the panel — a phone's way to show it. The
@@ -29,7 +24,6 @@ export function TurnDiffInline({
   onBack: () => void;
   className?: string;
 }): React.ReactElement {
-  const state = useTurnDiff(request);
   const backRef = React.useRef<HTMLButtonElement>(null);
   React.useEffect(() => {
     backRef.current?.focus({ preventScroll: true });
@@ -60,8 +54,8 @@ export function TurnDiffInline({
         </button>
         <span className="min-w-0 truncate text-sm text-neutral-200">{turnDiffTitle(request)}</span>
       </div>
-      <div className="flex min-h-0 flex-1 flex-col overflow-auto">
-        {state !== null ? <TurnDiffBody state={state} /> : null}
+      <div className="flex min-h-0 flex-1 flex-col">
+        <TurnDiffBody request={request} />
       </div>
     </div>
   );

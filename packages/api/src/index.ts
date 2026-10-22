@@ -68,6 +68,7 @@ export * from "./saved-prompts.ts";
 export * from "./repo-identities.ts";
 export * from "./forge-links.ts";
 export * from "./terminal-stream.ts";
+export * from "./changed-file-kind.ts";
 export * from "./secret-files.ts";
 export * from "./agent-profile.ts";
 export * from "./session-profiles.ts";

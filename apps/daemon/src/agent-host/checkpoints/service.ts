@@ -572,7 +572,7 @@ export function createCheckpointService(options: CheckpointServiceOptions): Chec
   };
 
   const readTurnDiff: CheckpointService["readTurnDiff"] = async (input) => {
-    const ignoreWhitespace = input.ignoreWhitespace ?? true;
+    const ignoreWhitespace = input.ignoreWhitespace ?? false;
     // `from === to` short-circuits without touching git.
     if (input.fromTurnCount === input.toTurnCount) {
       return "";

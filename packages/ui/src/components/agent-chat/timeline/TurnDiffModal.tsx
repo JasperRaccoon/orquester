@@ -2,7 +2,8 @@ import React from "react";
 
 import { useApi } from "../../../context/orquester-context";
 import { ApiError } from "../../../lib/api-client";
-import { DiffView } from "../../git/DiffView";
+import { cn } from "../../../lib/cn";
+import { DiffFilesView } from "../../git/DiffFilesView";
 import { Modal, ModalCloseButton } from "../../ui";
 
 /**
@@ -45,28 +46,35 @@ export function turnDiffTitle(request: TurnDiffRequest): string {
 
 /**
  * Read `request`'s diff: `null` with no request, loading until the answer
- * lands. A new request starts over; an answer for a request that was closed
- * or replaced meanwhile is dropped.
+ * lands. A new request — or a flip of `ignoreWhitespace` — starts over; an
+ * answer for a read that was closed or replaced meanwhile is dropped.
  */
-export function useTurnDiff(request: TurnDiffRequest | null): TurnDiffState | null {
+export function useTurnDiff(
+  request: TurnDiffRequest | null,
+  options: { ignoreWhitespace?: boolean } = {}
+): TurnDiffState | null {
   const api = useApi();
-  const [answer, setAnswer] = React.useState<{ request: TurnDiffRequest; state: TurnDiffState } | null>(
-    null
-  );
+  const ignoreWhitespace = options.ignoreWhitespace === true;
+  const [answer, setAnswer] = React.useState<{
+    request: TurnDiffRequest;
+    ignoreWhitespace: boolean;
+    state: TurnDiffState;
+  } | null>(null);
   React.useEffect(() => {
     if (request === null) {
       return;
     }
     let current = true;
     api
-      .agentChatTurnDiff(request.sessionId, request.turnCount)
+      .agentChatTurnDiff(request.sessionId, request.turnCount, { ignoreWhitespace })
       .then((response) => {
-        if (current) setAnswer({ request, state: { loading: false, diff: response.diff } });
+        if (current) setAnswer({ request, ignoreWhitespace, state: { loading: false, diff: response.diff } });
       })
       .catch((error: unknown) => {
         if (current) {
           setAnswer({
             request,
+            ignoreWhitespace,
             state: { loading: false, error: errorText(error, "That turn's diff could not be read.") }
           });
         }
@@ -74,23 +82,56 @@ export function useTurnDiff(request: TurnDiffRequest | null): TurnDiffState | nu
     return () => {
       current = false;
     };
-  }, [api, request]);
+  }, [api, request, ignoreWhitespace]);
   if (request === null) {
     return null;
   }
-  return answer !== null && answer.request === request ? answer.state : { loading: true };
+  return answer !== null && answer.request === request && answer.ignoreWhitespace === ignoreWhitespace
+    ? answer.state
+    : { loading: true };
 }
 
-/** The diff itself, or why it is not there — the modal's body, and the rail sheet's inline view. */
-export function TurnDiffBody({ state }: { state: TurnDiffState }): React.ReactElement {
-  if (state.error) {
-    return <p className="px-4 py-6 text-sm text-danger">{state.error}</p>;
+/**
+ * The diff itself, per file, or why it is not there — the modal's body, and
+ * the rail sheet's inline view. It owns the read: whitespace-only changes show
+ * by default (an indentation change is a real change in Python or YAML), and
+ * its toggle re-reads the turn with them hidden.
+ */
+export function TurnDiffBody({ request }: { request: TurnDiffRequest }): React.ReactElement {
+  const [ignoreWhitespace, setIgnoreWhitespace] = React.useState(false);
+  const state = useTurnDiff(request, { ignoreWhitespace });
+  const toggle = (
+    <button
+      type="button"
+      aria-pressed={ignoreWhitespace}
+      onClick={() => setIgnoreWhitespace((value) => !value)}
+      title={ignoreWhitespace ? "Whitespace-only changes are hidden" : "Hide whitespace-only changes"}
+      className={cn(
+        "h-6 rounded px-1.5 text-[11px] focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500",
+        ignoreWhitespace
+          ? "bg-neutral-700 text-neutral-100 hover:bg-neutral-600"
+          : "text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100"
+      )}
+    >
+      Hide whitespace
+    </button>
+  );
+  if (state?.error) {
+    return (
+      <div className="flex min-h-0 flex-1 flex-col">
+        <div className="flex shrink-0 justify-end border-b border-neutral-800 px-3 py-1.5">{toggle}</div>
+        <p className="px-4 py-6 text-sm text-danger">{state.error}</p>
+      </div>
+    );
   }
   return (
-    <DiffView
-      diff={state.diff ?? ""}
-      loading={state.loading}
-      emptyLabel="This turn changed no files."
+    <DiffFilesView
+      diff={state?.diff ?? ""}
+      loading={state?.loading ?? true}
+      emptyLabel={
+        ignoreWhitespace ? "No changes left once whitespace is hidden." : "This turn changed no files."
+      }
+      controls={toggle}
     />
   );
 }
@@ -106,7 +147,6 @@ export interface TurnDiffModalProps {
  * overlays by construction, so the ladder needs no new z-index.
  */
 export function TurnDiffModal({ request, onClose }: TurnDiffModalProps): React.ReactElement {
-  const state = useTurnDiff(request);
   return (
     <Modal open={request !== null} onClose={onClose} className="max-h-[85vh] max-w-4xl">
       <div className="flex min-w-0 flex-1 flex-col">
@@ -116,8 +156,8 @@ export function TurnDiffModal({ request, onClose }: TurnDiffModalProps): React.R
           </span>
           <ModalCloseButton onClose={onClose} />
         </div>
-        <div className="min-h-0 flex-1 overflow-auto">
-          {state !== null ? <TurnDiffBody state={state} /> : null}
+        <div className="flex min-h-0 flex-1 flex-col">
+          {request !== null ? <TurnDiffBody request={request} /> : null}
         </div>
       </div>
     </Modal>
