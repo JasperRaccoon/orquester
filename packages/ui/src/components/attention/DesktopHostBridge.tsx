@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo } from "react";
 
 import {
   desktopBadgeCount,
@@ -8,7 +8,7 @@ import {
   subscribePushNotifications,
   type DesktopHost
 } from "../../lib/desktop-host";
-import { openNotificationTarget, openSessionById, viewingSessionId } from "../../lib/desktop-host-nav";
+import { openNotificationTarget, viewingSessionId } from "../../lib/desktop-host-nav";
 import { useProjectIndex } from "../../lib/project-index";
 import { useAppStore } from "../../store/app";
 import { useAgentSessions, verifiedAgentSessions } from "./agent-sessions";
@@ -23,7 +23,6 @@ import { useAgentSessions, verifiedAgentSessions } from "./agent-sessions";
 // Adapted from T3 Code (MIT): apps/web/src/components/ThreadNotificationCoordinator.tsx
 export function DesktopHostBridge({ host }: { host: DesktopHost }): null {
   const enabled = useAppStore((s) => s.appConfig.desktopNotifications);
-  const sessions = useAppStore((s) => s.sessions);
   const derived = useAgentSessions();
   const index = useProjectIndex();
   // Before the project index resolves, the store-derived list stands in (the
@@ -51,20 +50,11 @@ export function DesktopHostBridge({ host }: { host: DesktopHost }): null {
     });
   }, [host]);
 
-  // A click that relaunched the window arrives before the session list has
-  // loaded: keep the session and open it once the list knows it.
-  const pendingSession = useRef<string | null>(null);
-  useEffect(() => {
-    if (pendingSession.current !== null && openSessionById(pendingSession.current)) {
-      pendingSession.current = null;
-    }
-  }, [sessions]);
-
   useEffect(
     () =>
       host.onNotificationOpen?.((raw) => {
         const target = parseNotificationTarget(raw);
-        if (target) pendingSession.current = openNotificationTarget(target);
+        if (target) openNotificationTarget(target);
       }),
     [host]
   );
