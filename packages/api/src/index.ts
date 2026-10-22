@@ -64,6 +64,7 @@ import {
 import type { AgentProfileAgentId, ProfileImportScanResponse } from "./agent-profile.ts";
 import type { ProjectBoxInfo, ProjectLocationRequest } from "./boxes.ts";
 export * from "./agent-chat/index.ts";
+export * from "./auth.ts";
 export * from "./saved-prompts.ts";
 export * from "./repo-identities.ts";
 export * from "./forge-links.ts";
@@ -1070,11 +1071,9 @@ export interface DaemonMcpServersResponse {
   servers: DaemonPointingServer[];
 }
 
-/** Public auth metadata for the HTTP transport (no secrets). */
+/** Public auth metadata for the HTTP transport (no secrets). Sign in at `authRoutes.login`. */
 export interface AuthInfoResponse {
   authRequired: boolean;
-  /** bcrypt salt prefix the client uses to derive the bearer hash, or null. */
-  salt: string | null;
   /**
    * Whether the credential also needs a username (UI hint; shows the username
    * field). True when auth is required. The username itself is never returned.
@@ -2039,6 +2038,7 @@ export interface OrquesterApi {
 
 export interface HttpApiClientOptions {
   baseUrl: string;
+  /** The bearer: a session or API token (`authRoutes`), never the password. */
   password?: string;
   fetch?: typeof fetch;
 }

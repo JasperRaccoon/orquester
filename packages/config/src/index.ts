@@ -84,6 +84,14 @@ export function daemonConfigPath(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "daemon.json");
 }
 
+/**
+ * The remote transport's login sessions and API tokens (digests only, never a token). 0600, read
+ * tolerantly ({@link parseAuthSessionsFile}).
+ */
+export function authSessionsPath(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "auth-sessions.json");
+}
+
 export function accountsConfigPath(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "accounts.json");
 }
@@ -597,9 +605,9 @@ export const httpTransportSchema = z.object({
   host: z.string().min(1).default(DEFAULT_HTTP_HOST),
   port: z.coerce.number().int().min(1).max(65535).default(DEFAULT_HTTP_PORT),
   /**
-   * The username half of the credential. The wire bearer is
-   * base64("<username>:<passwordHash>"); the server compares this (normalized:
-   * trim + lowercase) in constant time. Defaults to "mapacho".
+   * The username a login checks with the password (normalized: trim +
+   * lowercase, compared in constant time). Defaults to "mapacho". A login mints
+   * a session token (`auth-sessions.json`); neither this nor the hash is a bearer.
    */
   username: z
     .string()
@@ -2559,6 +2567,7 @@ export function isValidName(name: string | undefined): name is string {
 
 export * from "./workflows.ts";
 export * from "./agent-tools.ts";
+export * from "./auth-sessions.ts";
 export * from "./session-profiles.ts";
 export * from "./repo-identities.ts";
 export * from "./secret-files.ts";
