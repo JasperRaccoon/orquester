@@ -270,8 +270,8 @@ export const ChatMarkdown = React.memo(function ChatMarkdown({
 
   const armed = shouldArmIncrementalParser(text, streaming);
   // Math is armed per message by a delimiter (`mightContainMath`), so the
-  // common message pays nothing for it; the arrays are memoised so a stream's tokens keep the
-  // processor unless one of the two switches flips.
+  // common message pays nothing for it; the arrays are memoised so a stream's
+  // tokens keep the processor unless one of the two switches flips.
   const math = mightContainMath(text);
   const plugins = React.useMemo(() => {
     const base = math ? MATH_PLUGINS : STATIC_PLUGINS;
