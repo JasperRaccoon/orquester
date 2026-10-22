@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useMemo } from "react";
 import type { ApiClient } from "../lib/api-client";
+import type { DesktopHost } from "../lib/desktop-host";
 import type { Runtime } from "../types";
 
 /**
@@ -18,6 +19,8 @@ export interface OrquesterContextValue {
   /** Render a custom titlebar (frameless window). */
   useTitlebar: boolean;
   windowControls?: WindowControls;
+  /** The desktop shell's native integration (notifications, badge, menu, frame). Absent on web. */
+  desktopHost?: DesktopHost;
 }
 
 const OrquesterContext = createContext<OrquesterContextValue | null>(null);
@@ -29,7 +32,7 @@ export interface OrquesterProviderProps extends OrquesterContextValue {
 export const OrquesterProvider: React.FC<OrquesterProviderProps> = ({ children, ...value }) => {
   const memo = useMemo(
     () => value,
-    [value.runtime, value.api, value.useTitlebar, value.windowControls]
+    [value.runtime, value.api, value.useTitlebar, value.windowControls, value.desktopHost]
   );
 
   return <OrquesterContext.Provider value={memo}>{children}</OrquesterContext.Provider>;

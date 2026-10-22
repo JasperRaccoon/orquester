@@ -139,6 +139,7 @@ import { catalogFor } from "./mcp/catalog/index.ts";
 import { canonicalProjectPath } from "./agent-tools/approval-port.ts";
 import { registerSessionToolsManifestRoute, SessionToolsRefresher } from "./session-tools/session-tools-refresh.ts";
 import { AGENT_PROFILE_CHANNEL, type AgentProfileAgentId } from "@orquester/api";
+import { PUSH_CHANNEL, PUSH_NOTIFICATION_EVENT_TYPE } from "@orquester/api";
 import { SECRET_FILES_CHANGED, SECRET_FILES_CHANNEL, SECRET_FILES_PLUGIN_ID, type PluginsResponse } from "@orquester/api";
 // umcp:t6 end
 // umcp:t9 begin
@@ -593,8 +594,11 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // than below with the rest) because the agent-chat service needs both, and it
   // in turn has to exist before the session manager, which persists its tab
   // records (chat spec §5.2).
-  const push = new PushService(resolved.pushConfigFile, console);
   const broadcaster = new Broadcaster();
+  // Every push also goes on the event bus: the desktop app shows it as a native notification.
+  const push = new PushService(resolved.pushConfigFile, console, {
+    onNotification: (event) => broadcaster.publish(PUSH_CHANNEL, PUSH_NOTIFICATION_EVENT_TYPE, event)
+  });
 
   // Chromium resolves through the registry's probed browser entries; no
   // bundled download. Only CDP-speaking (Chromium-family) browsers can drive

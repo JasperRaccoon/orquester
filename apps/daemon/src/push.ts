@@ -5,6 +5,7 @@ import {
   sanitizeApprovalLabel,
   sanitizeApprovalProse,
   type PushInfoResponse,
+  type PushNotificationEvent,
   type PushNotifyRequest,
   type PushNotifyResponse,
   type PushSubscribeRequest,
@@ -109,14 +110,20 @@ export class PushService {
   /** Last agent push per rate key (`pushRateKey`), for `notify_user`'s limits. */
   private readonly lastAgentPushAt = new Map<string, number>();
   private readonly now: () => number;
+  private readonly onNotification: ((event: PushNotificationEvent) => void) | undefined;
 
   constructor(
     /** Absolute path to push.json (resolved by the daemon via pushConfigPath). */
     private readonly configPath: string,
     private readonly logger: Logger = console,
-    opts?: { now?: () => number }
+    opts?: {
+      now?: () => number;
+      /** Sees every push past its debounce or rate limit, subscribers or not (the daemon publishes it on the event bus). */
+      onNotification?: (event: PushNotificationEvent) => void;
+    }
   ) {
     this.now = opts?.now ?? Date.now;
+    this.onNotification = opts?.onNotification;
   }
 
   // --- Persistence ---------------------------------------------------------
@@ -255,13 +262,13 @@ export class PushService {
         return;
       }
       const project = session.projectPath ? basename(session.projectPath) : "";
-      const payload = JSON.stringify({
+      await this.send({
+        kind: "approval",
         title: sanitizeApprovalLabel(`Approval needed: ${cardTitle}`, PUSH_NOTIFY_TITLE_MAX_CHARS),
         body: sanitizeApprovalLabel(project ? `${session.title} in ${project}` : session.title, PUSH_NOTIFY_BODY_MAX_CHARS),
         tag: `session-${session.id}`,
         sessionId: session.id
       });
-      await this.deliver(payload);
     } catch (error) {
       this.logger.error("approval push failed", error);
     }
@@ -292,7 +299,13 @@ export class PushService {
     const body = input.body ? sanitizeApprovalProse(input.body, PUSH_NOTIFY_BODY_MAX_CHARS).trim() : "";
     const sessionId = input.sessionId ?? "";
     try {
-      const sent = await this.deliver(JSON.stringify({ title, body, tag: sessionId ? `session-${sessionId}` : "orquester-agent", sessionId }));
+      const sent = await this.send({
+        kind: "agent",
+        title,
+        body,
+        tag: sessionId ? `session-${sessionId}` : "orquester-agent",
+        ...(sessionId ? { sessionId } : {})
+      });
       return { ok: true, sent };
     } catch (error) {
       this.logger.error("agent push failed", error);
@@ -300,19 +313,19 @@ export class PushService {
     }
   }
 
-  private async notify(session: SessionSummary, type: string, verb: string): Promise<void> {
+  private async notify(session: SessionSummary, type: "bell" | "needs-input" | "finished" | "plan-ready", verb: string): Promise<void> {
     try {
       if (this.debounced(`${session.id}:${type}`, this.now())) {
         return;
       }
       const project = session.projectPath ? basename(session.projectPath) : "";
-      const payload = JSON.stringify({
+      await this.send({
+        kind: type === "bell" ? "attention" : type,
         title: project ? `${session.title} in ${project} ${verb}` : `${session.title} ${verb}`,
         body: "",
         tag: `session-${session.id}`,
         sessionId: session.id
       });
-      await this.deliver(payload);
     } catch (error) {
       this.logger.error("push notify failed", error);
     }
@@ -324,7 +337,7 @@ export class PushService {
    */
   async notifyWorkflowRun(payload: { title: string; body: string; tag: string; workflowId: string; runId: string }): Promise<void> {
     try {
-      await this.deliver(JSON.stringify({ ...payload, sessionId: "" }));
+      await this.send({ kind: "workflow", ...payload });
     } catch (error) {
       this.logger.error("workflow push failed", error);
     }
@@ -342,6 +355,20 @@ export class PushService {
   }
 
   // --- Internals -----------------------------------------------------------
+
+  /**
+   * Hand a push to the observer, then to every subscription. The Web Push payload is the event without its
+   * `kind`, with `sessionId` always present ("" when the push opens no session) as the service worker reads it.
+   */
+  private async send(event: PushNotificationEvent): Promise<number> {
+    try {
+      this.onNotification?.(event);
+    } catch (error) {
+      this.logger.error("push observer failed", error);
+    }
+    const { kind: _kind, ...payload } = event;
+    return this.deliver(JSON.stringify({ ...payload, sessionId: event.sessionId ?? "" }));
+  }
 
   /**
    * Send `payload` to every subscription; drop any the push service reports as

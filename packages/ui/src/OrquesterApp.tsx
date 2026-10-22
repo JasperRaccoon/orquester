@@ -1,11 +1,13 @@
 import React, { useEffect, useState } from "react";
 import { AppWrapper, AppShell } from "./components/layout";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import { DesktopHostBridge } from "./components/attention/DesktopHostBridge";
 import { OrquesterProvider, type WindowControls } from "./context/orquester-context";
 import { ApiClient } from "./lib/api-client";
 import { useTheme } from "./hooks";
 import { createTransporter } from "./lib/transporters";
 import type { AppConfigAdapter } from "./lib/app-config";
+import type { DesktopHost } from "./lib/desktop-host";
 import { useAppStore } from "./store/app";
 import type { HttpClient } from "./lib/http-client";
 import type { Transporter } from "./lib/transporter";
@@ -25,6 +27,8 @@ export interface OrquesterAppProps {
   httpClient?: HttpClient;
   /** Native window controls bridge (desktop only). */
   windowControls?: WindowControls;
+  /** Native notifications, badge, menu and frame bridge (desktop only). */
+  desktopHost?: DesktopHost;
   /**
    * App-config persistence. Web passes a localStorage adapter; desktop omits it
    * so app config lives on the daemon (app.json). Remotes always live on the daemon.
@@ -39,6 +43,7 @@ export const OrquesterApp: React.FC<OrquesterAppProps> = ({
   transporter,
   httpClient,
   windowControls,
+  desktopHost,
   appConfigAdapter
 }) => {
   // A boot ApiClient so context always has one before the store initializes.
@@ -126,10 +131,14 @@ export const OrquesterApp: React.FC<OrquesterAppProps> = ({
         runtime={runtime}
         api={api}
         // Only the desktop shell has native window controls to replace; a web
-        // client that stored the flag on must not render dead buttons.
-        useTitlebar={runtime === "desktop" && titlebar}
+        // client that stored the flag on must not render dead buttons. A
+        // window built without its OS buttons gets the in-app ones whatever
+        // the (maybe not yet applied) setting says, so it is never left with none.
+        useTitlebar={runtime === "desktop" && (titlebar || desktopHost?.nativeWindowControls === false)}
         windowControls={windowControls}
+        desktopHost={desktopHost}
       >
+        {desktopHost && <DesktopHostBridge host={desktopHost} />}
         <AppWrapper>
           <AppShell />
         </AppWrapper>

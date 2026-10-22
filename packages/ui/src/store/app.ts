@@ -22,6 +22,7 @@ import { applyAgentProfileEvent, resetAgentProfile } from "../lib/agent-profile/
 import { applySessionProfileEvent, resetSessionProfiles, sessionProfilesStore } from "../lib/session-profiles/store";
 import { applyWorkflowsEvent, resetWorkflows, workflowsStore } from "../lib/workflows/store";
 import { observeWorkflowRunEvent, resetWorkflowNotifications } from "../lib/workflows/notifications";
+import { observePushEvent } from "../lib/desktop-host";
 import { clearDesktopPrefs } from "../lib/desktop-prefs";
 import {
   applyDesktopWindows,
@@ -173,6 +174,7 @@ import {
   DESKTOP_CHANNEL,
   PLUGINS_CHANGED_EVENT,
   PLUGINS_CHANNEL,
+  PUSH_CHANNEL,
   REPO_IDENTITIES_CHANNEL,
   SAVED_PROMPTS_CHANNEL,
   SECRET_FILES_CHANNEL,
@@ -557,6 +559,7 @@ export interface UiAppConfig {
   useTitlebar: boolean;
   runInBackground: boolean;
   confirmCloseSession: boolean;
+  desktopNotifications: boolean;
   usage: UsagePrefs;
   agents: AgentPrefs;
 }
@@ -1326,6 +1329,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     useTitlebar: false,
     runInBackground: false,
     confirmCloseSession: true,
+    desktopNotifications: true,
     usage: DEFAULT_USAGE_PREFS,
     agents: DEFAULT_AGENT_PREFS
   },
@@ -1779,6 +1783,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         useTitlebar: nextSetup.defaultUseTitlebar,
         runInBackground: false,
         confirmCloseSession: true,
+        desktopNotifications: true,
         usage: DEFAULT_USAGE_PREFS,
         agents: DEFAULT_AGENT_PREFS
       },
@@ -1806,6 +1811,7 @@ export const useAppStore = create<AppState>((set, get) => ({
             useTitlebar: config.useTitlebar ?? state.appConfig.useTitlebar,
             runInBackground: config.runInBackground ?? state.appConfig.runInBackground,
             confirmCloseSession: config.confirmCloseSession ?? state.appConfig.confirmCloseSession,
+            desktopNotifications: config.desktopNotifications ?? state.appConfig.desktopNotifications,
             usage: normalizeUsagePrefs(config.usage, state.appConfig.usage),
             // `agents` is deliberately NOT taken from `config`: it is daemon-side
             // (the daemon reads app.json at session launch), so it is owned by
@@ -3731,6 +3737,12 @@ export const useAppStore = create<AppState>((set, get) => ({
           return { preferredProfileByAgent };
         });
       }
+      return;
+    }
+    if (event.channel === PUSH_CHANNEL) {
+      // The daemon's pushes, for the desktop shell's system notifications
+      // (`lib/desktop-host.ts`); parsed there, and nothing here keeps them.
+      observePushEvent(event);
       return;
     }
     if (event.channel === AGENT_TOOLS_CHANNEL) {

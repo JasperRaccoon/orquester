@@ -1,4 +1,4 @@
-import { OrquesterApp, type UiConnection, type WindowControls } from "@orquester/ui";
+import { OrquesterApp, type DesktopHost, type UiConnection, type WindowControls } from "@orquester/ui";
 import React from "react";
 import ReactDOM from "react-dom/client";
 import "./styles.css";
@@ -23,6 +23,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
       transporter={transporter}
       httpClient={httpClient}
       windowControls={desktopBridge.windowControls}
+      desktopHost={desktopBridge.host}
     />
   </React.StrictMode>
 );
@@ -32,6 +33,8 @@ declare global {
     orquesterDesktop: DesktopBridge & {
       defaultConnection: UiConnection;
       windowControls: WindowControls;
+      /** Notifications, badge, menu actions and the window frame; absent from an older preload. */
+      host?: DesktopHost;
       /** Optional host hook the shared theme lib calls (lib/theme.ts) so the
        *  main process can paint the native window in the current scheme.
        *  Optional because a packaged app can run a new renderer bundle against
