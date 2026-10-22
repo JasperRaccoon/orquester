@@ -724,6 +724,37 @@ describe("claude adapter — Agent Profile threads (spec 2026-10-18 §6.1)", () 
     const content = peer.received[0]?.message.content as Array<{ type: string; text?: string }>;
     assert.equal(content.at(-1)?.text, "please $review");
   });
+
+  it("lists and dispatches its own plugins' skills as plugin:skill, never the account's installed plugins", async () => {
+    const { root, profile } = await prepared();
+    const accountHome = nodePath.join(root, "account-home");
+    const installed = nodePath.join(root, "account-cache", "gplug");
+    await mkdir(nodePath.join(installed, "skills", "gskill"), { recursive: true });
+    await writeFile(nodePath.join(installed, "skills", "gskill", "SKILL.md"), "---\ndescription: Global\n---\nx\n");
+    await mkdir(nodePath.join(accountHome, "plugins"), { recursive: true });
+    await writeFile(
+      nodePath.join(accountHome, "plugins", "installed_plugins.json"),
+      JSON.stringify({ version: 2, plugins: { "gplug@m": [{ scope: "user", installPath: installed }] } })
+    );
+    await writeFile(nodePath.join(accountHome, "settings.json"), JSON.stringify({ enabledPlugins: { "gplug@m": true } }));
+    const harness = await makeHarness({ tmpDir: nodePath.join(root, "appdir-tmp"), initCommands: [] });
+    await harness.adapter.startSession({ ...START, home: { ...START.home, path: accountHome }, profile });
+
+    const catalog = await harness.adapter.sessionCatalog!(START.threadId);
+    assert.deepEqual(
+      catalog?.skills.map((skill) => [skill.name, skill.scope]),
+      [
+        ["dev-kit:review", "plugin"],
+        ["toolbox:lint", "plugin"]
+      ]
+    );
+
+    const peer = harness.peers[0]!;
+    await harness.adapter.sendTurn({ threadId: START.threadId, input: "$toolbox:lint src", attachments: [], interactionMode: "default" });
+    await peer.nextTurn();
+    const content = peer.received[0]?.message.content as Array<{ type: string; text?: string }>;
+    assert.equal(content.at(-1)?.text, "/toolbox:lint src");
+  });
 });
 
 describe("claude adapter — turns", () => {

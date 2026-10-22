@@ -25,7 +25,7 @@
  * rendered chip and a dispatched skill are always the same set. `\p{Sc}` is
  * the currency-symbol class: `$name`, but never `$5k` or `$1e6`.
  */
-const SKILL_MENTION_PATTERN =
+export const SKILL_MENTION_PATTERN =
   /(^|\s)\p{Sc}(?![0-9][0-9_]*(?:[kKmMbBtT]|[eE][0-9]+)?(?:\s|$))(?=[a-zA-Z0-9:_-]*[a-zA-Z])([a-zA-Z0-9][a-zA-Z0-9:_-]*)(?=\s|$)/gu;
 
 interface ClaudeSkillDispatch {

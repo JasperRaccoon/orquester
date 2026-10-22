@@ -451,4 +451,28 @@ describe("SessionProfileService — the composer's fallback catalog", () => {
     assert.deepEqual(grok.skills.map((skill) => skill.name).sort(), ["grok-only", "review"]);
     await rejects(service.composerCatalog("nope", "claude"), "PROFILE_NOT_FOUND");
   });
+
+  it("adds a Claude plugin's skills as plugin:skill, for Claude only", async () => {
+    const { appdir, store, service } = await setup();
+    await store.create({ name: "P" });
+    await store.createItem("id-1", "1", SKILL);
+    const { itemId } = await store.createItem("id-1", "2", { kind: "plugin", agents: ["claude"], plugin: { name: "fmt" } });
+    const cache = profileLayout(sessionProfileDir(appdir, "id-1")).pluginCacheDir(itemId);
+    await mkdir(join(cache, "skills", "tidy"), { recursive: true });
+    await writeFile(join(cache, "skills", "tidy", "SKILL.md"), "---\ndescription: Tidy up\n---\nBody\n");
+    // The manifest does not read: the plugin goes by its profile name.
+    await mkdir(join(cache, ".claude-plugin"), { recursive: true });
+    await writeFile(join(cache, ".claude-plugin", "plugin.json"), "{ nope");
+
+    const claude = await service.composerCatalog("id-1", "claude");
+    assert.deepEqual(
+      claude.skills.map((skill) => [skill.name, skill.scope, skill.description]),
+      [
+        ["review", "profile", "Review the diff"],
+        ["fmt:tidy", "plugin", "Tidy up"]
+      ]
+    );
+    const codex = await service.composerCatalog("id-1", "codex");
+    assert.deepEqual(codex.skills.map((skill) => skill.name), ["review"]);
+  });
 });
