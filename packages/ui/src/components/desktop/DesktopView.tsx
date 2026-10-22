@@ -4,6 +4,7 @@ import { Loader2, Power, RotateCw } from "lucide-react";
 import type RFB from "@novnc/novnc";
 import { desktopRoutes, type DesktopSummary, type DesktopWindow, type DesktopWindowAction } from "@orquester/api";
 import { useAppStore } from "../../store/app";
+import { cn } from "../../lib/cn";
 import { useMediaQuery } from "../../hooks/use-media-query";
 import { useDesktopAudio } from "../../lib/desktop-audio";
 import { readDesktopPrefs, writeDesktopPrefs, type DesktopPrefs } from "../../lib/desktop-prefs";
@@ -128,6 +129,12 @@ function requestRemoteSize(rfb: RFB, target: HTMLElement, size: { width: number;
     style.width = saved.width;
     style.height = saved.height;
   }
+}
+
+/** Keyboard Lock (Chromium only; not in the DOM typings). */
+function navigatorKeyboard(): { lock?: () => Promise<void>; unlock?: () => void } | undefined {
+  if (typeof navigator === "undefined") return undefined;
+  return (navigator as Navigator & { keyboard?: { lock?: () => Promise<void>; unlock?: () => void } }).keyboard;
 }
 
 function errorText(err: unknown): string {
@@ -445,6 +452,51 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
     if (idle) focusDisplay();
   }, [desktop.activeWindowId, active, conn, focusDisplay]);
 
+  // ---- Fullscreen ------------------------------------------------------------
+
+  // The whole page goes fullscreen (the toolbar's menus and dialogs are portals
+  // on <body>, which an element-fullscreen would hide) and the view covers it.
+  // Keyboard Lock (Chromium) then routes browser and system shortcuts — Ctrl+W,
+  // Ctrl+T, Ctrl+N, Alt+Tab, Esc — to the desktop instead of closing the tab;
+  // holding Esc leaves fullscreen.
+  const [fullscreen, setFullscreen] = useState(false);
+  const fullscreenAvailable = typeof document !== "undefined" && document.fullscreenEnabled === true;
+  useEffect(() => {
+    if (!fullscreen) return;
+    const onChange = () => {
+      if (document.fullscreenElement !== document.documentElement) setFullscreen(false);
+    };
+    document.addEventListener("fullscreenchange", onChange);
+    return () => {
+      document.removeEventListener("fullscreenchange", onChange);
+      navigatorKeyboard()?.unlock?.();
+      // Unmounted while fullscreen (the tab closed): leave it.
+      if (document.fullscreenElement === document.documentElement) void document.exitFullscreen().catch(() => undefined);
+    };
+  }, [fullscreen]);
+  // Leaving the tab (or the desktop stopping) leaves fullscreen too.
+  useEffect(() => {
+    if (fullscreen && (!active || desktop.status !== "running") && document.fullscreenElement) {
+      void document.exitFullscreen().catch(() => undefined);
+    }
+  }, [fullscreen, active, desktop.status]);
+  const toggleFullscreen = () => {
+    if (fullscreen) {
+      if (document.fullscreenElement) void document.exitFullscreen().catch(() => undefined);
+      setFullscreen(false);
+      return;
+    }
+    // Inside the click: requestFullscreen needs the user gesture.
+    document.documentElement.requestFullscreen({ navigationUI: "hide" }).then(
+      () => {
+        setFullscreen(true);
+        void navigatorKeyboard()?.lock?.().catch(() => undefined);
+        focusDisplay();
+      },
+      (err: unknown) => setActionError(`Fullscreen is not available: ${errorText(err)}`)
+    );
+  };
+
   // An error'd desktop may be a host problem: show the install hint if any.
   useEffect(() => {
     if (desktop.status !== "error" || !api) {
@@ -645,7 +697,12 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
     // `data-desktop-view` marks this subtree as owning its own keystrokes: the
     // app's global shortcuts (`SHORTCUT_BAIL_SELECTOR`) stand down inside it so
     // keys reach the desktop's apps.
-    <div ref={rootRef} data-desktop-view className="flex h-full w-full flex-col bg-neutral-950" onPaste={onPaste}>
+    <div
+      ref={rootRef}
+      data-desktop-view
+      className={cn("flex flex-col bg-neutral-950", fullscreen ? "fixed inset-0 z-[90]" : "h-full w-full")}
+      onPaste={onPaste}
+    >
       <DesktopToolbar
         desktop={desktop}
         narrow={narrow}
@@ -657,6 +714,8 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
         remoteClipboard={remoteClipboard}
         keyboardOpen={keyboardOpen}
         onToggleKeyboard={toggleKeyboard}
+        fullscreen={fullscreen}
+        onToggleFullscreen={fullscreenAvailable ? toggleFullscreen : null}
         onSendClipboard={sendClipboard}
         onWindowAction={windowAction}
         onLaunchApp={onLaunchApp}
