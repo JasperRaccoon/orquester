@@ -17,6 +17,7 @@ import {
   NON_LINUX_BROWSER,
   NON_LINUX_DESKTOP,
   boxDesktopInstallHint,
+  browserFontChoices,
   canInstall,
   chromeArch,
   desktopInstallPlan,
@@ -30,6 +31,7 @@ import {
 } from "./probe.ts";
 import {
   EXIT_UNSUPPORTED,
+  browserFontsScript,
   browserInstallScript,
   chromeStartScript,
   desktopInstallScript,
@@ -233,6 +235,7 @@ class GuiInstaller implements BoxGuiInstaller {
         throw new BoxGuiUnavailableError("Google Chrome was installed, but the box has no working chrome binary.", "Check `google-chrome-stable --version` in a box terminal.");
       }
     }
+    await this.addBrowserFonts(connection, facts, signal, progress);
     const chrome = facts.chrome;
     progress(`Starting ${chrome.version || chrome.path} once to check its sandbox`);
     const root = facts.uid === 0 || connection.sys.isRoot;
@@ -262,6 +265,30 @@ class GuiInstaller implements BoxGuiInstaller {
     this.warn("box chrome does not start", connection, "browser", result);
     const log = start.log.length > 0 ? start.log.join("\n") : tailLines(result.tail);
     throw new BoxGuiUnavailableError(`Chrome is installed at ${chrome.path} but does not start in this box:\n${log}`, "Open a box terminal and run it with --headless=new to see why.");
+  }
+
+  /**
+   * CJK and color emoji fonts for the in-box browser, when the box lacks them and can install:
+   * without them Chinese, Japanese and Korean pages and emoji render as boxes. Best effort — a
+   * font that cannot be installed is a progress line, never the browser's failure.
+   */
+  private async addBrowserFonts(connection: BoxConnection, facts: BoxGuiFacts, signal: AbortSignal, progress: BoxGuiProgress): Promise<void> {
+    const manager = packageManagerOf(facts);
+    if (manager === null || !canInstall(facts)) return;
+    const fonts = browserFontChoices(facts, manager);
+    if (fonts.length === 0) return;
+    progress("Adding CJK and emoji fonts for the browser");
+    const result = await this.runScript(
+      connection,
+      { script: browserFontsScript(manager, fonts), asRoot: true, timeoutMs: this.installMs, what: "Installing the browser's fonts" },
+      facts,
+      signal,
+      progress
+    );
+    if (result.code !== 0) {
+      this.warn("box browser fonts install failed", connection, "browser", result);
+      progress("Could not add the CJK and emoji fonts; such text may show as boxes.");
+    }
   }
 
   // -------------------------------------------------------------------------

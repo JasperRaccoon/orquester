@@ -42,6 +42,10 @@ export interface BoxGuiFacts {
   machineId: boolean;
   /** At least one TrueType/OpenType/PCF font is installed. */
   fonts: boolean;
+  /** Browser part only: a font with CJK glyphs is installed (else Chinese, Japanese and Korean pages show boxes). */
+  cjkFonts: boolean;
+  /** Browser part only: a color emoji font is installed. */
+  emojiFont: boolean;
   /** Browser part only: the first usable non-snap Chrome/Chromium and its `--version`. */
   chrome: { path: string; version: string } | null;
   /** Candidates passed over (snap shims, binaries that would not print a version). */
@@ -99,6 +103,14 @@ export function guiProbeScript(parts: { desktop: boolean; browser: boolean }): s
   }
   if (parts.browser) {
     lines.push(
+      // fontconfig answers when it is there (Chrome depends on it); file names otherwise.
+      "if command -v fc-list >/dev/null 2>&1; then",
+      "  if [ -n \"$(fc-list :lang=zh family 2>/dev/null | head -n 1)\" ]; then kv cjk-fonts 1; else kv cjk-fonts 0; fi",
+      "  if [ -n \"$(fc-list ':charset=1f600' family 2>/dev/null | head -n 1)\" ]; then kv emoji-font 1; else kv emoji-font 0; fi",
+      "else",
+      "  if [ -n \"$(find /usr/share/fonts /usr/local/share/fonts -type f \\( -iname '*cjk*' -o -iname '*wqy*' -o -iname '*droidsansfallback*' \\) 2>/dev/null | head -n 1)\" ]; then kv cjk-fonts 1; else kv cjk-fonts 0; fi",
+      "  if [ -n \"$(find /usr/share/fonts /usr/local/share/fonts -type f -iname '*emoji*' 2>/dev/null | head -n 1)\" ]; then kv emoji-font 1; else kv emoji-font 0; fi",
+      "fi",
       `for c in ${CHROME_CANDIDATES.join(" ")}; do`,
       '  case $c in /*) p=$c ;; *) p=$(command -v "$c" 2>/dev/null) || continue ;; esac',
       '  [ -n "$p" ] && [ -f "$p" ] && [ -x "$p" ] || continue',
@@ -144,6 +156,8 @@ export function parseGuiProbe(stdout: string): BoxGuiFacts {
     mesaDri: false,
     machineId: false,
     fonts: false,
+    cjkFonts: false,
+    emojiFont: false,
     chrome: null,
     chromeSkipped: []
   };
@@ -212,6 +226,12 @@ export function parseGuiProbe(stdout: string): BoxGuiFacts {
       case "fonts":
         facts.fonts = value === "1";
         break;
+      case "cjk-fonts":
+        facts.cjkFonts = value === "1";
+        break;
+      case "emoji-font":
+        facts.emojiFont = value === "1";
+        break;
       case "chrome":
         chromePath = value.startsWith("/") ? value : null;
         break;
@@ -256,6 +276,17 @@ export const DESKTOP_PACKAGES: readonly DesktopPackage[] = [
   { apt: "xterm", rpm: ["xterm"], required: false },
   { apt: "fonts-dejavu-core", rpm: ["dejavu-sans-fonts"], required: false }
 ];
+
+/** Fonts the in-box browser adds so CJK and emoji text renders (best effort; Ubuntu names first). */
+export const BROWSER_FONT_PACKAGES: readonly { apt: string; rpm: readonly string[]; for: "cjkFonts" | "emojiFont" }[] = [
+  { apt: "fonts-noto-cjk", rpm: ["google-noto-sans-cjk-fonts", "google-noto-sans-cjk-ttc-fonts"], for: "cjkFonts" },
+  { apt: "fonts-noto-color-emoji", rpm: ["google-noto-color-emoji-fonts", "google-noto-emoji-color-fonts"], for: "emojiFont" }
+];
+
+/** The browser fonts this box lacks, in the package manager's names. */
+export function browserFontChoices(facts: Pick<BoxGuiFacts, "cjkFonts" | "emojiFont">, manager: BoxPackageManager): PackageChoice[] {
+  return BROWSER_FONT_PACKAGES.filter((pkg) => !facts[pkg.for]).map((pkg) => (manager === "apt" ? [pkg.apt] : pkg.rpm));
+}
 
 /** A package to install: its alternatives in the box's package manager naming, first preferred. */
 export type PackageChoice = readonly string[];

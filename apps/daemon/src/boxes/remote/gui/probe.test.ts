@@ -4,6 +4,7 @@ import { test } from "node:test";
 
 import {
   boxDesktopInstallHint,
+  browserFontChoices,
   chromeArch,
   desktopInstallPlan,
   evaluateBoxDesktop,
@@ -199,4 +200,17 @@ test("every probe variant is valid POSIX sh", () => {
   }
   assert.doesNotMatch(guiProbeScript({ desktop: false, browser: true }), /ffmpeg/);
   assert.doesNotMatch(guiProbeScript({ desktop: true, browser: false }), /chrome/);
+});
+
+test("the browser probe reads the CJK and emoji fonts; only missing ones are installed, per package manager", () => {
+  const facts = parseGuiProbe("os-id=ubuntu\nuid=0\npm=apt-get\ncjk-fonts=0\nemoji-font=1\n");
+  assert.equal(facts.cjkFonts, false);
+  assert.equal(facts.emojiFont, true);
+  assert.deepEqual(browserFontChoices(facts, "apt"), [["fonts-noto-cjk"]]);
+  assert.deepEqual(browserFontChoices({ cjkFonts: false, emojiFont: false }, "dnf"), [
+    ["google-noto-sans-cjk-fonts", "google-noto-sans-cjk-ttc-fonts"],
+    ["google-noto-color-emoji-fonts", "google-noto-emoji-color-fonts"]
+  ]);
+  assert.deepEqual(browserFontChoices({ cjkFonts: true, emojiFont: true }, "apt"), []);
+  execFileSync("/bin/sh", ["-n", "-c", guiProbeScript({ desktop: false, browser: true })]);
 });

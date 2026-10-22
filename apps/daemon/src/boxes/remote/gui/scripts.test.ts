@@ -8,6 +8,7 @@ import { test, type TestContext } from "node:test";
 import {
   EXIT_REQUIRED_FAILED,
   GOOGLE_SIGNING_KEY_FINGERPRINT,
+  browserFontsScript,
   browserInstallScript,
   chromeStartScript,
   desktopInstallScript,
@@ -167,4 +168,16 @@ test("parseChromeStart reads both attempts and their logs", () => {
     noSandbox: false,
     log: ["sandbox-log: boom", "nosandbox-log: bang"]
   });
+});
+
+test("browser fonts: a font the distro lacks is skipped alone and the script still succeeds", async (t) => {
+  const script = browserFontsScript("apt", [["fonts-noto-cjk"], ["fonts-noto-color-emoji"]]);
+  syntaxOk(script);
+  const stubs = await stubBin(t, "apt-get");
+  const { code, out } = await runWithStubs(script, stubs.bin, { ...stubs.env, FAIL: "fonts-noto-cjk" });
+  assert.equal(code, 0, out);
+  const calls = await readFile(stubs.log, "utf8");
+  assert.match(calls, /install --no-install-recommends fonts-noto-color-emoji$/m);
+  assert.match(out, /Skipped fonts-noto-cjk: it cannot be installed here\./);
+  assert.match(out, /Fonts are installed\./);
 });

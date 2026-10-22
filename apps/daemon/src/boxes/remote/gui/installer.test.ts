@@ -9,7 +9,7 @@ import type { BoxConnection, BoxExecOptions, BoxProcess } from "../../contracts.
 import { localSysInfo } from "../../testing.ts";
 import { BoxGuiUnavailableError, createBoxGuiInstaller } from "./index.ts";
 
-type Kind = "probe" | "desktop-install" | "browser-install" | "chrome-start";
+type Kind = "probe" | "desktop-install" | "browser-install" | "chrome-start" | "fonts-install";
 
 interface Answer {
   stdout?: string;
@@ -61,6 +61,8 @@ class FakeBox {
   connected = true;
   desktop = false;
   chrome = false;
+  /** CJK and emoji fonts are installed (most tests: yes, so their call lists stay short). */
+  fonts = true;
   uid = 0;
   sudo = false;
   pm = "apt-get";
@@ -104,12 +106,14 @@ class FakeBox {
         ? "desktop-install"
         : script.includes("Google Chrome is installed.")
           ? "browser-install"
-          : "chrome-start";
+          : script.includes("Fonts are installed.")
+            ? "fonts-install"
+            : "chrome-start";
     const call = { kind, command: options.command, args, proc };
     this.calls.push(call);
     options.signal?.addEventListener("abort", () => proc.kill("SIGTERM"), { once: true });
     const override = this.answers[kind]?.shift();
-    if (kind === "desktop-install" || kind === "browser-install") this.onInstall?.(call);
+    if (kind === "desktop-install" || kind === "browser-install" || kind === "fonts-install") this.onInstall?.(call);
     setImmediate(() => {
       if (override?.hang) return;
       if (override) return proc.finish(override.stdout ?? "", override.code ?? 0);
@@ -129,6 +133,9 @@ class FakeBox {
       case "browser-install":
         this.chrome = true;
         return call.proc.finish("Adding Google's signed Chrome repository\nGoogle Chrome is installed.\n", 0);
+      case "fonts-install":
+        this.fonts = true;
+        return call.proc.finish("Installing fonts: fonts-noto-cjk fonts-noto-color-emoji\nFonts are installed.\n", 0);
       case "chrome-start": {
         const trySandbox = call.args[call.args.length - 1] === "1" && this.uid !== 0;
         if (trySandbox && this.sandbox === "ok") return call.proc.finish("sandbox=ok\n", 0);
@@ -162,6 +169,7 @@ class FakeBox {
         lines.push(">>> ffmpeg-devices", " DE pulse           Pulse audio output", "<<< ffmpeg-devices", ">>> ffmpeg-encoders", " A....D libopus              libopus Opus", "<<< ffmpeg-encoders");
       }
     }
+    if (script.includes("fc-list")) lines.push(`cjk-fonts=${this.fonts ? 1 : 0}`, `emoji-font=${this.fonts ? 1 : 0}`);
     if (this.chrome) lines.push("chrome=/opt/google/chrome/chrome", "chrome-version=Google Chrome 156.0.8078.47");
     return `${lines.join("\n")}\n`;
   }
@@ -425,4 +433,35 @@ test("ensureBrowser installs Chrome when the box has none, then checks it", asyn
   const runtime = await createBoxGuiInstaller().ensureBrowser(fake.connection());
   assert.equal(runtime.chromiumPath, "/opt/google/chrome/chrome");
   assert.deepEqual(fake.calls.map((call) => call.kind), ["probe", "browser-install", "probe", "chrome-start"]);
+});
+
+test("ensureBrowser adds CJK and emoji fonts the box lacks before checking Chrome; never without root", async () => {
+  const fake = box();
+  fake.chrome = true;
+  fake.fonts = false;
+  const lines: string[] = [];
+  await createBoxGuiInstaller().ensureBrowser(fake.connection(), { onProgress: (line) => lines.push(line) });
+  assert.deepEqual(fake.calls.map((call) => call.kind), ["probe", "fonts-install", "chrome-start"]);
+  assert.ok(lines.includes("Adding CJK and emoji fonts for the browser"), lines.join("\n"));
+  const script = fake.calls[1]!.args[fake.calls[1]!.args.indexOf("-c") + 1]!;
+  assert.match(script, /fonts-noto-cjk/);
+  assert.match(script, /fonts-noto-color-emoji/);
+
+  const user = box({ user: "dev", isRoot: false });
+  user.uid = 1000;
+  user.chrome = true;
+  user.fonts = false;
+  await createBoxGuiInstaller().ensureBrowser(user.connection());
+  assert.deepEqual(user.calls.map((call) => call.kind), ["probe", "chrome-start"]);
+});
+
+test("fonts that cannot be installed cost a progress line, not the browser", async () => {
+  const fake = box();
+  fake.chrome = true;
+  fake.fonts = false;
+  fake.answers["fonts-install"] = [{ code: 100, stdout: "E: Unable to locate package fonts-noto-cjk\n" }];
+  const lines: string[] = [];
+  const runtime = await createBoxGuiInstaller().ensureBrowser(fake.connection(), { onProgress: (line) => lines.push(line) });
+  assert.equal(runtime.chromiumPath, "/opt/google/chrome/chrome");
+  assert.ok(lines.includes("Could not add the CJK and emoji fonts; such text may show as boxes."), lines.join("\n"));
 });

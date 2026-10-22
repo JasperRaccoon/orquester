@@ -99,6 +99,22 @@ export function desktopInstallScript(plan: { manager: BoxPackageManager; require
 }
 
 /**
+ * Install fonts the in-box browser lacks (CJK, color emoji): together, else one at a time trying
+ * each alternative name. A font that cannot be installed is reported and skipped; the script
+ * exits 0 either way, except when the package manager cannot run at all.
+ */
+export function browserFontsScript(manager: BoxPackageManager, fonts: readonly PackageChoice[]): string {
+  const lines = prelude(manager);
+  lines.push(shSay(`Installing fonts: ${label(fonts)}`), `if ! install_set ${words(fonts)}; then`);
+  for (const choice of fonts) {
+    const attempts = choice.map((name) => `add ${shQuote(name)}`).join(" || ");
+    lines.push(`  ${attempts} || ${shSay(`Skipped ${choice.join(" / ")}: it cannot be installed here.`)}`);
+  }
+  lines.push("fi", "say 'Fonts are installed.'");
+  return lines.join("\n");
+}
+
+/**
  * Install `google-chrome-stable` from Google's signed repository (amd64 and arm64). apt: the
  * signing key is fetched over HTTPS, its primary fingerprint checked against the pinned one when
  * gpg is available, and apt verifies the repository's signature with it (`signed-by`). Chrome's
