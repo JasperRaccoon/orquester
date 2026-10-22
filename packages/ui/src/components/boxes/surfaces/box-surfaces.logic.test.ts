@@ -302,8 +302,11 @@ describe("the + menu and accounts", () => {
   it("says what opening a VM desktop does when its packages are missing", () => {
     const status = { available: false, installHint: "Orquester installs the desktop packages when a desktop opens.", warnings: [] };
     assert.equal(vmDesktopNote(null), null);
-    assert.equal(vmDesktopNote({ ...status, available: true }), null);
+    assert.equal(vmDesktopNote({ ...status, available: true, installHint: null }), null);
     assert.equal(vmDesktopNote(status), status.installHint);
+    // Usable, but optional packages missing (sound, compositor…): the first desktop installs them too.
+    assert.equal(vmDesktopNote({ ...status, available: true }), status.installHint);
+    assert.match(vmDesktopNote({ ...status, available: true, audioAvailable: false, installHint: null }) ?? "", /without sound/);
     assert.equal(vmDesktopNote({ ...status, installHint: null, warnings: ["No sudo in this VM."] }), "No sudo in this VM.");
     assert.match(vmDesktopNote({ ...status, installHint: null }) ?? "", /first open/);
     assert.match(vmDesktopNote("error") ?? "", /Could not check/);

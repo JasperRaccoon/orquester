@@ -3,7 +3,7 @@ import { once } from "node:events";
 import { Duplex } from "node:stream";
 import { describe, test } from "node:test";
 
-import { X11Connection, X11ConnectionClosedError, X11Error, X11SetupError } from "./connection.ts";
+import { MAX_SERVER_MESSAGE_BYTES, X11Connection, X11ConnectionClosedError, X11Error, X11MessageTooLargeError, X11SetupError } from "./connection.ts";
 import { Opcode, type XEvent } from "./protocol.ts";
 
 /** An in-memory X server end: records the client's requests and lets the test answer. */
@@ -214,6 +214,21 @@ describe("X11Connection", () => {
     assert.ok(error instanceof X11ConnectionClosedError);
     assert.match(error.message, /reset/);
     await assert.rejects(conn.internAtom("B"), X11ConnectionClosedError);
+  });
+
+  test("a reply declaring more than the cap closes the connection instead of buffering it", async () => {
+    const { server, conn } = await connected();
+    const pending = conn.internAtom("A");
+    const closed = once(conn, "close") as Promise<[Error | null]>;
+    // A reply header whose length field says ~16 GiB follows.
+    const huge = reply(1);
+    huge.writeUInt32LE(0xffffffff, 4);
+    server.push(huge);
+    const [error] = await closed;
+    assert.ok(error instanceof X11ConnectionClosedError);
+    assert.ok(error.cause instanceof X11MessageTooLargeError);
+    assert.ok((error.cause as X11MessageTooLargeError).length > MAX_SERVER_MESSAGE_BYTES);
+    await assert.rejects(pending, X11ConnectionClosedError);
   });
 
   test("close() reports a null error", async () => {

@@ -38,6 +38,29 @@ function goneState(state: StoredBox["state"]): boolean {
 
 const NOT_CONNECTED = "The VM is not connected right now; try again once it is back.";
 
+/**
+ * A box whose `orq-agent` predates `unix` channels. The hub asks an outdated
+ * agent to update on every connect; one keeping processes alive for the
+ * daemon (terminals, agent chats) defers the update until they have ended.
+ */
+const AGENT_TOO_OLD =
+  "The VM's orq-agent is too old for desktops. It updates itself once the terminals and agent chats it keeps running in the VM have ended.";
+const AGENT_TOO_OLD_HINT = "Close (or let finish) this VM's terminals and agent chats, then open the desktop again; or recreate the VM.";
+
+function agentTooOldStatus(): DesktopHostStatus {
+  return {
+    available: false,
+    audioAvailable: false,
+    tools: [],
+    ffmpegPulse: false,
+    ffmpegOpus: false,
+    renderNode: false,
+    tmuxUsable: false,
+    warnings: [AGENT_TOO_OLD],
+    installHint: AGENT_TOO_OLD_HINT
+  };
+}
+
 /** The installer's refusal (`BoxGuiUnavailableError`, or its code on any error), else null. */
 function guiRefusal(error: unknown): { message: string; hint: string | null } | null {
   if (error instanceof BoxGuiUnavailableError) return { message: error.message, hint: error.hint };
@@ -73,11 +96,14 @@ export class BoxDesktops implements DesktopBoxes {
   }
 
   async status(boxId: string): Promise<DesktopHostStatus> {
-    return this.deps.installer.desktopStatus(this.connection(boxId));
+    const connection = this.connection(boxId);
+    if (!(await this.unixChannels(boxId))) return agentTooOldStatus();
+    return this.deps.installer.desktopStatus(connection);
   }
 
   async ensure(boxId: string, onProgress: (line: string) => void): Promise<DesktopHostStatus> {
     const connection = this.connection(boxId);
+    if (!(await this.unixChannels(boxId))) throw new DesktopError(409, DESKTOP_UNAVAILABLE_CODE, AGENT_TOO_OLD, AGENT_TOO_OLD_HINT);
     try {
       return await this.deps.installer.ensureDesktop(connection, { onProgress });
     } catch (error) {
@@ -104,6 +130,15 @@ export class BoxDesktops implements DesktopBoxes {
   /** Drop a gone box's host (the installer's own memo is the box wiring's to forget). */
   private forget(boxId: string): void {
     this.hosts.delete(boxId);
+  }
+
+  /** Whether the box's `orq-agent` carries `unix` channels (a link that drops while asking: 409). */
+  private async unixChannels(boxId: string): Promise<boolean> {
+    try {
+      return await this.host(boxId)!.unixChannels();
+    } catch {
+      throw new DesktopError(409, "DESKTOP_BOX_UNREACHABLE", NOT_CONNECTED);
+    }
   }
 
   private connection(boxId: string): BoxConnection {

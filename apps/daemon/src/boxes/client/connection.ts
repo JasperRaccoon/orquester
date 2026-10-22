@@ -489,6 +489,10 @@ export class LinkedBoxConnection implements BoxConnection {
   async requestRaw(method: string, params: unknown, options: BoxRequestOptions = {}): Promise<unknown> {
     const timeoutMs = options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     const deadline = Date.now() + timeoutMs;
+    // An unwatch ends the replayed watch at once, reached or not: a request that cannot get
+    // to the box now must not see the watch re-created on the next link (a dropped link ends
+    // every box-side watch anyway).
+    if (method === "fs.unwatch") this.track(method, params);
     const mux = await this.waitMux(deadline, options.signal);
     const result = await mux.request(method, params, { timeoutMs: Math.max(1, deadline - Date.now()), signal: options.signal });
     this.track(method, params);

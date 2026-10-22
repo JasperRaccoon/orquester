@@ -27,7 +27,7 @@ import {
   desktopRuntimeDir
 } from "@orquester/config";
 import type { DesktopAudioHub, DesktopAudioSpawn } from "./audio.ts";
-import { type DesktopBoxes, type DesktopHost, type DesktopWatch, LocalDesktopHost } from "./desktop-host.ts";
+import { type DesktopBoxes, type DesktopGroupOwner, type DesktopHost, type DesktopWatch, LocalDesktopHost } from "./desktop-host.ts";
 import {
   CLIENT_CONF_CONTENT,
   DESKTOP_HOST_WINDOW,
@@ -159,6 +159,12 @@ interface Runtime {
   awaitingBox: boolean;
   /** boxes: the VM's link dropped while the desktop ran there (its processes keep running). */
   linkDown: boolean;
+  /**
+   * boxes: what runs in the VM is not known for sure any more — its link dropped (the VM may
+   * have rebooted meanwhile), or a kill could not reach it — so the next connect reconciles it
+   * again: a desktop whose processes are gone ends stopped, leftovers of a stopped one are killed.
+   */
+  reconcilePending: boolean;
   /** boxes: what a `starting` desktop is waiting on (the install's latest line, the VM). */
   statusDetail?: string;
   /** boxes: the pending coalesced `updated` for install progress. */
@@ -209,6 +215,8 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
   /** boxes: per box, the last link state acted on, and the pass running for it. */
   private readonly boxStates = new Map<string, BoxLinkState>();
   private readonly boxPasses = new Map<string, Promise<void>>();
+  /** boxes: boxes whose link dropped since their last pass (each such drop gets a reconcile). */
+  private readonly boxesDropped = new Set<string>();
   private readonly unsubscribeBoxes: () => void;
 
   constructor(private readonly options: DesktopManagerOptions) {
@@ -387,7 +395,9 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
     this.desktops.set(id, rt);
     void this.store.persist();
     this.emit("created", this.summary(rt));
-    if (boxId !== null && !host.available) {
+    // A stop (or close) while the VM installs bumps this: the start is then off.
+    const generation = rt.generation;
+    if (boxId !== null && needsInstall(host)) {
       try {
         host = await this.installInBox(rt, boxId);
       } catch (error) {
@@ -401,8 +411,8 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
       rt.record.audio = host.audioAvailable;
     }
     await this.enqueue(rt, async () => {
-      // (Closed while its VM was installing.)
-      if (this.isCurrent(rt)) await this.startHost(rt);
+      // (Closed or stopped while its VM was installing.)
+      if (this.isCurrent(rt) && rt.status === "starting" && rt.generation === generation) await this.startHost(rt);
     });
     // (startHost moved the status on; TS still holds the "starting" assigned above.)
     if (input.app && (rt.status as DesktopStatus) === "running") {
@@ -465,7 +475,7 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
     rt.status = "starting";
     rt.error = undefined;
     this.emitUpdated(rt);
-    if (!host.available) {
+    if (needsInstall(host)) {
       try {
         host = await this.installInBox(rt, boxId);
       } catch (error) {
@@ -488,7 +498,7 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
   private async installInBox(rt: Runtime, boxId: string): Promise<DesktopHostStatus> {
     const boxes = this.options.boxes;
     if (!boxes) throw new DesktopError(409, DESKTOP_UNAVAILABLE_CODE, "VM desktops are not available on this daemon.");
-    rt.statusDetail = "Installing the desktop packages in the VM…";
+    rt.statusDetail = "Checking the desktop packages in the VM…";
     this.emitUpdated(rt);
     try {
       const host = await boxes.ensure(boxId, (line) => {
@@ -663,6 +673,11 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
    */
   private async reconcileOn(machine: DesktopHost, runtimes: Runtime[]): Promise<void> {
     const inBox = machine.boxId !== null;
+    // What each desktop was before anything is read: an operation that runs meanwhile (a launch,
+    // a stop) is not undone by an outcome read before it (an app launched meanwhile has no window
+    // in the listing yet).
+    const generations = new Map(runtimes.map((rt) => [rt, rt.generation] as const));
+    const knownApps = new Map(runtimes.map((rt) => [rt, new Set(rt.record.apps.map((app) => app.id))] as const));
     let liveSessions: string[];
     const windowsBySession = new Map<string, string[]>();
     try {
@@ -688,7 +703,6 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
       }
       return;
     }
-    const generations = new Map(runtimes.map((rt) => [rt, rt.generation] as const));
     const readyFiles = new Map<string, number>();
     const hostExitFiles = new Set<string>();
     const appExitFiles = new Map<string, Map<string, number | null>>();
@@ -732,9 +746,13 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
         continue;
       }
       await this.enqueue(rt, async () => {
-        if (!this.isCurrent(rt) || rt.generation !== generations.get(rt) || !machine.connected) return;
-        await this.applyReconciled(machine, rt, reconciled, now);
+        if (this.stopped || !this.isCurrent(rt) || rt.generation !== generations.get(rt) || !machine.connected) return;
+        const known = knownApps.get(rt)!;
+        const outcome = { ...reconciled, apps: reconciled.apps.filter((app) => known.has(app.id)) };
+        if (rt.awaitingBox) await this.applyReconciled(machine, rt, outcome, now);
+        else await this.applyReconnected(machine, rt, outcome, now);
         rt.awaitingBox = false;
+        rt.reconcilePending = false;
         rt.linkDown = false;
         rt.statusDetail = undefined;
         void this.store.persist();
@@ -744,6 +762,45 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
     if (inBox) return;
     void this.store.persist();
     for (const rt of runtimes) this.emitUpdated(rt);
+  }
+
+  /**
+   * boxes: a VM desktop's reconciled state after its VM was out of sight (the
+   * link dropped, a kill could not reach it). A running one that still runs
+   * there carries on (watched and tracked again); one whose processes are gone
+   * (the VM restarted, they were killed) ends stopped, saying so. A stopped or
+   * failed one with leftovers there (a host that came up after its start timed
+   * out, a stop that lost the link) has them killed, and stays as it is.
+   */
+  private async applyReconnected(machine: DesktopHost, rt: Runtime, reconciled: ReconciledDesktop, now: string): Promise<void> {
+    // Starting (its VM installing): the create that is installing it decides what comes next.
+    if (rt.status === "starting") return;
+    if (rt.status === "stopped" || rt.status === "error") {
+      if (reconciled.status !== "running" && !reconciled.killSession) return;
+      const layout = this.layout(rt.record);
+      for (const outcome of reconciled.apps) {
+        if (outcome.status !== "running") continue;
+        const app = rt.record.apps.find((candidate) => candidate.id === outcome.id);
+        const pgid = app?.pgid ?? (await readInt(machine, appFile(layout, outcome.id, "pgid")));
+        if (pgid !== null) await machine.signalGroup(pgid, "SIGKILL", appOwner(layout));
+      }
+      await this.killHost(rt);
+      return;
+    }
+    await this.applyReconciled(machine, rt, reconciled, now);
+    // Running here: still running there, or its processes are gone.
+    if (reconciled.status === "running") return;
+    rt.generation += 1;
+    this.unwatch(rt);
+    this.stopTracker(rt);
+    for (const timer of rt.killTimers.values()) clearTimeout(timer);
+    rt.killTimers.clear();
+    rt.pendingStops.clear();
+    this.options.audio?.stopDesktop(rt.record.id);
+    rt.error = "The desktop's processes in the VM ended while the VM was out of reach (did it restart?).";
+    rt.windows = [];
+    rt.activeWindowId = null;
+    this.emit("windows", { desktopId: rt.record.id, windows: [], activeWindowId: null });
   }
 
   /** One desktop's reconciled state, applied: apps, then running (watched, tracked) or stopped. */
@@ -757,7 +814,7 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
         if (wasLive && reconciled.status === "stopped" && app.pgid !== null) {
           // The host died while the daemon was away; its apps' groups may outlive it.
           // Kill only a group whose leader still carries this desktop's X authority path.
-          if (await machine.leaderBelongsTo(app.pgid, layout.xauthority)) await machine.signalGroup(app.pgid, "SIGKILL");
+          if (await machine.leaderBelongsTo(app.pgid, layout.xauthority)) await machine.signalGroup(app.pgid, "SIGKILL", appOwner(layout));
         }
         app.status = "exited";
         app.exitCode = outcome.exitCode;
@@ -796,14 +853,14 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
       for (const name of await machine.readdir(layout.appsDir)) {
         if (!name.endsWith(".pgid")) continue;
         const pgid = await readInt(machine, appFile(layout, name.slice(0, -".pgid".length), "pgid"));
-        if (pgid !== null && (await machine.leaderBelongsTo(pgid, layout.xauthority))) await machine.signalGroup(pgid, "SIGKILL");
+        if (pgid !== null) await machine.signalGroup(pgid, "SIGKILL", appOwner(layout));
       }
       const windows = await machine.tmux.listServiceWindows(session).catch(() => []);
       const hostWindow = windows.find((window) => window.name === DESKTOP_HOST_WINDOW);
       await machine.tmux.killServiceSession(session);
       if (hostWindow) {
         await waitFor(machine, layout.dir, () => machine.exists(layout.hostExit), this.stopGraceMs);
-        await machine.signalGroup(hostWindow.panePid, "SIGKILL");
+        await machine.signalGroup(hostWindow.panePid, "SIGKILL", hostOwner(layout));
       }
       await machine.rm(layout.dir, { recursive: true });
       if (layout.socketDir !== layout.dir) await machine.rm(layout.socketDir, { recursive: true });
@@ -911,10 +968,12 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
    * Kill the service session and wait (bounded) for the host's trap to record
    * `host.exit` — by then it has TERMed and reaped its children — then SIGKILL
    * whatever is left of its process group (the pane pid leads it). A VM that
-   * cannot be reached is left alone: the next connect reaps or reattaches it.
+   * cannot be reached (now, or any more by the end) is marked for the next
+   * connect, which kills what is left there.
    */
   private async killHost(rt: Runtime): Promise<void> {
     const machine = this.hostOf(rt);
+    if (machine && !machine.connected) rt.reconcilePending = true;
     if (!machine?.connected) return;
     const session = desktopSessionName(rt.record.id);
     const layout = this.layout(rt.record);
@@ -925,8 +984,9 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
     await machine.tmux.killServiceSession(session);
     if (host) {
       await waitFor(machine, layout.dir, () => exists(machine, layout.hostExit), this.stopGraceMs);
-      await machine.signalGroup(host.panePid, "SIGKILL");
+      await machine.signalGroup(host.panePid, "SIGKILL", hostOwner(layout));
     }
+    if (!machine.connected) rt.reconcilePending = true;
   }
 
   /**
@@ -950,7 +1010,7 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
     if (machine) {
       for (const app of live) {
         app.pgid = app.pgid ?? (await readInt(machine, appFile(layout, app.id, "pgid")));
-        if (app.pgid !== null) await machine.signalGroup(app.pgid, "SIGKILL");
+        if (app.pgid !== null) await machine.signalGroup(app.pgid, "SIGKILL", appOwner(layout));
       }
       const signalled = live.filter((app) => app.pgid !== null);
       if (signalled.length > 0) {
@@ -1008,7 +1068,7 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
         // Apps run in their own groups, out of the host trap's reach. A pgid
         // written but not yet synced is read from its file, as teardown does.
         app.pgid = app.pgid ?? (machine ? await readInt(machine, appFile(layout, app.id, "pgid")) : null);
-        if (app.pgid !== null) await machine?.signalGroup(app.pgid, "SIGKILL");
+        if (app.pgid !== null) await machine?.signalGroup(app.pgid, "SIGKILL", appOwner(layout));
         app.status = "exited";
         app.exitCode = null;
         app.exitedAt = exitedAt;
@@ -1039,7 +1099,8 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
   private watch(rt: Runtime): void {
     this.unwatch(rt);
     const machine = this.hostOf(rt);
-    if (!machine) return;
+    // (After shutdown nothing is watched: a late reconcile must not leave a watch open.)
+    if (!machine || this.stopped) return;
     const layout = this.layout(rt.record);
     const generation = rt.generation;
     const checkHost = () => {
@@ -1148,7 +1209,7 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
   private async startTracker(rt: Runtime): Promise<void> {
     this.stopTracker(rt);
     const machine = this.hostOf(rt);
-    if (rt.record.display === null || !machine?.connected) return;
+    if (rt.record.display === null || !machine?.connected || this.stopped) return;
     const options: DesktopWindowTrackerOptions = machine.trackerOptions({
       display: rt.record.display,
       xauthorityPath: this.layout(rt.record).xauthority,
@@ -1200,13 +1261,14 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
 
   private signalApp(rt: Runtime, app: DesktopAppRecord, force: boolean): void {
     const machine = this.hostOf(rt);
+    const owner = appOwner(this.layout(rt.record));
     if (app.pgid === null || !machine) return;
-    void machine.signalGroup(app.pgid, force ? "SIGKILL" : "SIGTERM");
+    void machine.signalGroup(app.pgid, force ? "SIGKILL" : "SIGTERM", owner);
     if (force || rt.killTimers.has(app.id)) return;
     const pgid = app.pgid;
     const timer = setTimeout(() => {
       rt.killTimers.delete(app.id);
-      if (app.status !== "exited") void machine.signalGroup(pgid, "SIGKILL");
+      if (app.status !== "exited") void machine.signalGroup(pgid, "SIGKILL", owner);
     }, this.stopGraceMs);
     timer.unref?.();
     rt.killTimers.set(app.id, timer);
@@ -1276,6 +1338,13 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
   /** A box connected, dropped its link or changed state: bring its desktops in line, one pass at a time per box. */
   private boxChanged(boxId: string): void {
     if (this.stopped) return;
+    // A drop is taken in now: the link may be back before the pass below runs, and what
+    // ran there meanwhile must still be checked again.
+    const machine = this.options.boxes?.host(boxId) ?? null;
+    if (machine && !machine.connected) {
+      this.boxesDropped.add(boxId);
+      for (const rt of this.desktops.values()) if (rt.record.box?.id === boxId) this.linkLost(rt);
+    }
     const run = (this.boxPasses.get(boxId) ?? Promise.resolve())
       .then(() => this.syncBox(boxId))
       .catch((error) => this.logger.error(`Desktops in box ${boxId}: could not follow its link`, error));
@@ -1298,8 +1367,8 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
     const state: BoxLinkState = machine === null ? "gone" : machine.connected ? "connected" : "disconnected";
     const previous = this.boxStates.get(boxId);
     this.boxStates.set(boxId, state);
-    if (state === previous) return;
     if (machine === null) {
+      if (state === previous) return;
       const reason = this.options.boxes
         ? "The VM this desktop ran in is gone."
         : "This desktop runs in a VM, and VMs are not available on this daemon.";
@@ -1314,8 +1383,14 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
       for (const rt of runtimes) this.linkLost(rt);
       return;
     }
-    await this.reconcileOn(machine, runtimes.filter((rt) => rt.awaitingBox));
+    // Everything that ran there while it was out of sight is checked again (the VM may have
+    // restarted), and its unclaimed sessions reaped: after every drop, however short.
+    const dropped = this.boxesDropped.delete(boxId);
+    const unsure = runtimes.filter((rt) => rt.awaitingBox || rt.reconcilePending);
+    if (state === previous && !dropped && unsure.length === 0) return;
+    await this.reconcileOn(machine, unsure);
     for (const rt of runtimes) {
+      // (One the reconcile left alone: an operation ran on it meanwhile.)
       if (!rt.awaitingBox && rt.linkDown) {
         await this.enqueue(rt, () => this.linkBack(rt)).catch((error) =>
           this.logger.warn(`Desktop ${rt.record.id}: could not resume after its VM reconnected`, error)
@@ -1324,9 +1399,14 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
     }
   }
 
-  /** The VM's link dropped: the desktop keeps running there; its view and window list wait for the link. */
+  /**
+   * The VM's link dropped: the desktop keeps running there; its view and window
+   * list wait for the link, and the next connect reconciles it.
+   */
   private linkLost(rt: Runtime): void {
-    if (rt.linkDown || rt.awaitingBox) return;
+    if (rt.awaitingBox) return;
+    rt.reconcilePending = true;
+    if (rt.linkDown) return;
     rt.linkDown = true;
     // Its X connection went with the link; a fresh tracker comes back with it.
     this.stopTracker(rt);
@@ -1456,6 +1536,7 @@ function newRuntime(record: DesktopRecord): Runtime {
     syncAgain: false,
     awaitingBox: false,
     linkDown: false,
+    reconcilePending: false,
     progressTimer: null
   };
 }
@@ -1483,12 +1564,31 @@ function unavailable(host: DesktopHostStatus, where = "on the server"): DesktopE
   return new DesktopError(409, DESKTOP_UNAVAILABLE_CODE, message, host.installHint);
 }
 
+/**
+ * boxes: the VM's stack lacks something its installer would see to — a required
+ * tool, or an optional one (sound, the compositor, a terminal, fonts: a hint is
+ * then given). The installer runs once per VM; what it cannot add stays optional.
+ */
+function needsInstall(host: DesktopHostStatus): boolean {
+  return !host.available || host.installHint !== null;
+}
+
 function clampThreads(threads: number, parallelism: number): number {
   return Math.min(Math.max(1, Math.round(threads)), Math.max(1, parallelism));
 }
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** An app group's leader carries the desktop's X authority path (app-run.sh exports the app's env file). */
+function appOwner(layout: DesktopLayout): DesktopGroupOwner {
+  return { environ: `XAUTHORITY=${layout.xauthority}` };
+}
+
+/** The host group's leader is desktop-host.sh, run with the desktop dir as an argument. */
+function hostOwner(layout: DesktopLayout): DesktopGroupOwner {
+  return { argument: layout.dir };
 }
 
 /** The integer a small status file (`ready`, `.pgid`, `.exit`) holds, or null. */

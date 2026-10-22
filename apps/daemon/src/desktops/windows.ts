@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 import type { Duplex } from "node:stream";
 import type { DesktopSize, DesktopWindow, DesktopWindowAction } from "@orquester/api";
 
-import { X11Connection, X11ConnectionClosedError, X11Error, x11SocketPath } from "./x11/connection.ts";
+import { X11Connection, X11ConnectionClosedError, X11Error, X11MessageTooLargeError, x11SocketPath } from "./x11/connection.ts";
 import {
   encodeClientMessage,
   EventMask,
@@ -298,7 +298,11 @@ export class DesktopWindowTracker extends EventEmitter<DesktopWindowTrackerEvent
     conn.on("event", (event) => {
       void this.enqueue(() => this.handleEvent(conn, event)).catch((error) => this.onJobError(conn, error));
     });
-    conn.on("close", () => this.onClose(conn));
+    conn.on("close", (error) => {
+      // A server that overruns the message cap is a protocol failure: said, then retried (bounded) like any loss.
+      if (error?.cause instanceof X11MessageTooLargeError && !this.stopped) this.fail(error.cause);
+      this.onClose(conn);
+    });
     try {
       await this.enqueue(() => this.initialize(conn));
     } catch (error) {
