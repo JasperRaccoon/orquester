@@ -48,6 +48,10 @@ import {
   isUnfinishedGoal,
   agentAdapterLabel,
   agentModelLabel,
+  continuationBudgetBytes,
+  HANDOFF_PREAMBLE_BYTES,
+  handoffBudgetBytes,
+  handoffContextWindow,
   parseThreadLineage,
   recallablePromptText,
   SETTLED_TURN_STATES,
@@ -236,6 +240,7 @@ import {
   buildContinuationTranscript,
   buildForkTranscript,
   continuationDetail,
+  FORK_TRANSCRIPT_MAX_BYTES,
   parseForkContinuation,
   createMemoryForkHandoffStore,
   ForkRefusal,
@@ -4617,6 +4622,14 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       snapshots.get(parentHead.adapter)?.models.find((model) => model.slug === sourceModel)?.name ?? sourceModel
     );
     const targetLabel = agentAdapterLabel(adapterId);
+    // The child's model's window sizes its handoff: its catalogue entry's, else the parent's own
+    // reading when the child runs the very same model, else the fallback (`handoffContextWindow`).
+    const childWindow = handoffContextWindow({
+      target: modelSelection,
+      catalog: snapshots.get(adapterId)?.models,
+      sameAgent: parentHead.adapter === adapterId,
+      source: { modelSelection: parentHead.modelSelection, items: parent.state.items }
+    });
     if (continuation !== undefined && cut.retained.length > 0) {
       const built = buildContinuationTranscript({
         items: parent.state.items,
@@ -4625,7 +4638,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         parentTitle: parentHead.title,
         sourceLabel,
         targetLabel,
-        ...(continuation.gitStatus !== undefined ? { gitStatus: continuation.gitStatus } : {})
+        ...(continuation.gitStatus !== undefined ? { gitStatus: continuation.gitStatus } : {}),
+        budgetBytes: continuationBudgetBytes(childWindow)
       });
       transcript = built?.transcript ?? null;
       handoff = built?.summary;
@@ -4634,7 +4648,12 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       transcript = buildForkTranscript({
         items: parent.state.items,
         retained: cut.retained,
-        parentTitle: parentHead.title
+        parentTitle: parentHead.title,
+        budgetBytes: handoffBudgetBytes({
+          contextWindow: childWindow,
+          reservedBytes: HANDOFF_PREAMBLE_BYTES,
+          capBytes: FORK_TRANSCRIPT_MAX_BYTES
+        })
       });
       strategy = transcript !== null ? "transcript" : "unavailable";
     }

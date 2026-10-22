@@ -12,6 +12,8 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import {
+  HANDOFF_GIT_STATUS_BYTES,
+  HANDOFF_PREAMBLE_BYTES,
   HISTORICAL_RAW_SOURCE,
   htmlRenderReferenceOfActivityPayload,
   mcpAppReferenceOfActivityPayload,
@@ -33,7 +35,8 @@ import {
   continuationDetail,
   parseForkContinuation,
   createFileForkHandoffStore,
-  FORK_TRANSCRIPT_MAX_CHARS,
+  FORK_TRANSCRIPT_MAX_BYTES,
+  clipForkMessage,
   ForkRefusal,
   resolveForkCut,
   stripForkHandoff,
@@ -186,7 +189,7 @@ describe("the transcript handoff", () => {
     assert.doesNotMatch(transcript, /thinking|subagent|second/);
   });
 
-  it("keeps the newest messages within its budget and says how many it left out", () => {
+  it("keeps the original request and the newest messages within its budget, and marks what it left out", () => {
     const big = "x".repeat(7_000);
     const items: ThreadItem[] = [];
     const turns: Turn[] = [];
@@ -195,10 +198,26 @@ describe("the transcript handoff", () => {
       items.push(message(`u${i}`, "user", `t${i}`, `q${i} ${big}`));
     }
     const transcript = buildForkTranscript({ items, retained: turns as never, parentTitle: "P" })!;
-    assert.ok(transcript.length <= FORK_TRANSCRIPT_MAX_CHARS + 1_000);
+    assert.ok(Buffer.byteLength(transcript) <= FORK_TRANSCRIPT_MAX_BYTES + 1_000);
     assert.match(transcript, /q39 /);
-    assert.doesNotMatch(transcript, /q0 /);
-    assert.match(transcript, /oldest messages were left out/);
+    assert.match(transcript, /\[User\]\nq0 /, "the original request is kept");
+    assert.doesNotMatch(transcript, /q1 /);
+    assert.match(transcript, /\d+ messages were left out for length \(the original request and the newest ones are kept\)/);
+    assert.match(transcript, /\[… \d+ messages omitted \(turns 2–\d+\) …\]/);
+    assert.ok(transcript.indexOf("q0 ") < transcript.indexOf("omitted (turns") && transcript.indexOf("omitted (turns") < transcript.indexOf("q39 "), "in order");
+  });
+
+  it("fits a small window's budget, and clips a long message without splitting a character", () => {
+    const items = [message("u1", "user", "t1", "first"), message("a1", "assistant", "t1", "😀".repeat(9_000))];
+    const transcript = buildForkTranscript({ items, retained: [turn("t1", "completed", "u1")] as never, parentTitle: "P", budgetBytes: 2_000 })!;
+    assert.match(transcript, /\[User\]\nfirst/);
+    assert.match(transcript, /cut in the middle to fit/);
+    assert.ok(!/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(transcript), "no half pair");
+    for (const max of [100, 101, 102, 103]) {
+      const clipped = clipForkMessage("a😀".repeat(200), max);
+      assert.ok(!/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(clipped), `max ${max}`);
+      assert.match(clipped, /\n\[… \d+ characters omitted …\]\n/);
+    }
   });
 
   it("says how many kept exchanges the window no longer holds a word of", () => {
@@ -982,20 +1001,22 @@ describe("the continuation handoff", () => {
     assert.equal(stripForkHandoff(withForkHandoff("go on", built.transcript)!), "go on");
   });
 
-  it("leaves the oldest out past the budget and says so", () => {
+  it("keeps the original request and the newest past the budget, and marks the rest", () => {
+    const long = items.map((item) => (item.id === "a1" ? { ...item, text: "first answer ".repeat(40) } : item)) as ThreadItem[];
     const built = buildContinuationTranscript({
-      items,
+      items: long,
       retained,
       parentThreadId: "parent-1",
       parentTitle: "Login bug",
       sourceLabel: "Claude",
       targetLabel: "Codex",
-      budgetBytes: 2 * (48 + 15)
+      budgetBytes: 3 * (48 + 15) + 64
     })!;
-    assert.equal(built.summary.carried, 2);
-    assert.equal(built.summary.total, 4);
-    assert.match(built.transcript, /the last 2 of 4 messages/);
-    assert.ok(!built.transcript.includes("first question"));
+    assert.deepEqual(built.summary, { carried: 3, total: 4, bytes: built.summary.bytes, firstRequest: true });
+    assert.match(built.transcript, /This carries 3 of 4 messages \(≈1 KB\): the original request and the newest history/);
+    assert.ok(built.transcript.includes("first question"), "the original request is kept");
+    assert.ok(!built.transcript.includes("first answer"));
+    assert.match(built.transcript, /\[… 1 message omitted \(turn 1\) …\]/);
   });
 
   it("is null when the kept turns hold no message", () => {
@@ -1011,9 +1032,14 @@ describe("the continuation handoff", () => {
     assert.deepEqual(parseForkContinuation({}), {});
     assert.deepEqual(parseForkContinuation({ gitStatus: 3 }), {});
     assert.deepEqual(parseForkContinuation({ gitStatus: "?? a" }), { gitStatus: "?? a" });
-    assert.match(continuationDetail("transcript", { carried: 23, total: 41, bytes: 58 * 1024 }, "Codex"), /^The last 23 of 41 messages \(≈58 KB\) are handed to Codex with your first message/);
+    assert.equal(
+      continuationDetail("transcript", { carried: 23, total: 41, bytes: 58 * 1024, firstRequest: true }, "Codex"),
+      "23 of 41 messages (≈58 KB) — the original request and the newest history — are handed to Codex with your first message; the rest stays readable in the original chat."
+    );
+    assert.match(continuationDetail("transcript", { carried: 23, total: 41, bytes: 58 * 1024, clipped: true }, "Codex"), /^23 of 41 messages \(≈58 KB\) — the newest history, the longest cut in the middle to fit — are/);
     assert.match(continuationDetail("transcript", { carried: 4, total: 4, bytes: 900 }, "Codex"), /^The whole conversation \(4 messages, ≈1 KB\)/);
-    assert.match(continuationDetail("transcript", { carried: 1, total: 2, bytes: 60_000, clipped: true }, "Codex"), /^Only the end of the newest message/);
+    assert.match(continuationDetail("transcript", { carried: 2, total: 2, bytes: 60_000, clipped: true }, "Codex"), /^All 2 messages \(≈59 KB\), the longest cut in the middle to fit, are handed/);
+    assert.match(continuationDetail("transcript", { carried: 0, total: 5, bytes: 0 }, "Codex"), /^None of the 5 messages fits Codex's context window/);
     assert.match(continuationDetail("empty", undefined, "Codex"), /Codex starts fresh/);
     assert.match(continuationDetail("unavailable", undefined, "Codex"), /could not be carried over/);
   });
@@ -1097,6 +1123,54 @@ describe("forkThread: continue in another agent", () => {
     });
     assert.equal(again.head.id, "child");
     assert.equal(again.strategy, "transcript");
+    await host.stop();
+  });
+
+  it("sizes the handoff from the target model's context window, keeping the original request", async () => {
+    const claude = createScriptedAdapter({ id: "claude" });
+    const opencode = createScriptedAdapter({ id: "opencode" });
+    const codex = createScriptedAdapter({ id: "codex" });
+    const host = createTestHost({ adapters: { claude, opencode, codex } });
+    host.snapshots.set({
+      id: "opencode",
+      refIds: ["opencode"],
+      installed: true,
+      version: null,
+      status: "ready",
+      auth: { status: "authenticated" },
+      checkedAt: host.clock.nowIso(),
+      models: [{ slug: "local/small", name: "Small", capabilities: null, contextWindow: 40_000 }],
+      slashCommands: [],
+      skills: [],
+      capabilities: opencode.capabilities
+    });
+    const parentId = await host.createThread({ threadId: "parent", refId: "claude" });
+    await runTurn(host, claude, parentId, "THE ORIGINAL REQUEST", "on it");
+    for (let i = 0; i < 30; i += 1) await runTurn(host, claude, parentId, `step ${i}`, `${i} ${"r".repeat(1_000)}`);
+
+    const small = await host.orchestrator.forkThread(parentId, {
+      ...forkRequest("small", "opencode", {}),
+      modelSelection: { model: "local/small" },
+      continuation: {}
+    });
+    // 40k tokens − a 16k reserve − the handoff's own words and git section, at a byte a token.
+    const budget = 40_000 - 16_000 - HANDOFF_PREAMBLE_BYTES - HANDOFF_GIT_STATUS_BYTES;
+    assert.ok(small.handoff !== undefined && small.handoff.carried < small.handoff.total);
+    assert.ok(small.handoff.bytes <= budget);
+    assert.equal(small.handoff.firstRequest, true);
+    await host.orchestrator.command("small", "turn", { commandId: cmd(), input: "carry on" });
+    await host.settle();
+    const sent = opencode.lastTurn?.input ?? "";
+    assert.match(sent, /\[User\]\nTHE ORIGINAL REQUEST\n\n\[… \d+ messages omitted \(turns 1–\d+\) …\]/);
+    assert.match(sent, /\[User\]\nstep 29\n\n\[Assistant \(Claude · test-model\)\]\n29 r+\n/);
+
+    // A model whose window nobody states gets the fallback's budget: this conversation whole.
+    const wide = await host.orchestrator.forkThread(parentId, {
+      ...forkRequest("wide", "codex", {}),
+      modelSelection: { model: "gpt-5-codex" },
+      continuation: {}
+    });
+    assert.deepEqual(wide.handoff, { carried: 62, total: 62, bytes: wide.handoff!.bytes });
     await host.stop();
   });
 
