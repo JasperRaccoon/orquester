@@ -106,6 +106,7 @@ import { redactUrlTokens, sanitizeDevtoolsPath } from "./devtools.js";
 import { UrlWatcher } from "./url-watcher";
 import { AgentHooks } from "./agent-hooks";
 import { DailyLogStream } from "./daily-log.ts";
+import { daemonBuildInfo, type BuildInfo } from "./build-info.ts";
 import { listAgentConversations } from "./agent-conversations.ts";
 import { type ISessionManager, SessionError, createSessionManager, resumeLaunchArgs } from "./sessions";
 import { AgentChatService, ChatSessionError, type CreateAgentChatRequest } from "./agent-chat/service.ts";
@@ -515,6 +516,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   };
   await prepareDirs(resolved);
 
+  const buildInfo = daemonBuildInfo();
   // Rolled over at local midnight and at its size cap; old days pruned (daily-log.ts).
   const logStream = new DailyLogStream({ logsDir: () => resolved.logsDir });
   const clientConfig = createDefaultClientConfig(paths.socketPath);
@@ -1447,6 +1449,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   });
   agentChat.setSecretRequests(secretRequests);
   const services: Services = {
+    buildInfo,
     secretRequests,
     registry, sessions, grokDeviceLink, codexDeviceLink, claudeOAuthLink, accounts, git, gitWatcher, todos, recentProjects, savedPrompts, repoIdentities, githubLinks, usage, usageTokens, chatThreadUsage, subagentCacheTtl, push, broadcaster, agentAccounts, browsers, urlWatcher, agentChat,
     plugins,
@@ -1777,7 +1780,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     clearTimeout(secretFilesBound);
   };
 
-  console.log(`Orquester daemon ${daemonId} on unix:${paths.socketPath} (workspaces: ${resolved.workspacesDir})`);
+  const running = buildInfo.commit ? ` ${buildInfo.version ?? "?"} (${buildInfo.commit.slice(0, 12)})` : "";
+  console.log(`Orquester daemon${running} ${daemonId} on unix:${paths.socketPath} (workspaces: ${resolved.workspacesDir})`);
 
   return {
     daemonId,
@@ -1818,6 +1822,8 @@ export function buildAgentLaunchEnv(
 const MANAGED_CRED_FILENAME = { claude: ".credentials.json", codex: "auth.json", grok: "auth.json" } as const;
 
 interface Services {
+  /** The version and commit this daemon runs, read once at boot (build-info.ts). */
+  buildInfo: BuildInfo;
   registry: RegistryService;
   sessions: ISessionManager;
   /** The Grok and Codex accounts' device-code links (Settings → Accounts). */
@@ -2064,6 +2070,8 @@ export function createServer(
 
   app.get("/api/info", async (): Promise<ServerInfoResponse> => ({
     name: "Orquester daemon",
+    version: services.buildInfo.version,
+    commit: services.buildInfo.commit,
     dataDir: resolved.daemonDir,
     workspacesDir: resolved.workspacesDir,
     capabilities: {
