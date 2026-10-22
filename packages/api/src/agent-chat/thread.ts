@@ -273,10 +273,20 @@ export interface ThreadMessageItem {
    * mode stands.
    */
   interactionMode?: import("./adapter-types.ts").InteractionMode;
+  /**
+   * Only on a `user` message Orquester sent on its own: `idle-compaction` is the `/compact` the
+   * daemon sent before the chat's prompt cache expired (`idle-compaction.ts`), which the timeline
+   * labels as automatic. Absent on everything the user (or an agent) wrote, and on every message a
+   * host from before the field recorded. An unknown value from a newer host reads as absent.
+   */
+  sentBy?: ThreadMessageSentBy;
   streaming: boolean;
   createdAt: string;
   updatedAt: string;
 }
+
+/** {@link ThreadMessageItem.sentBy}. */
+export type ThreadMessageSentBy = "idle-compaction";
 
 export type ThreadActivityTone = "info" | "tool" | "approval" | "error";
 

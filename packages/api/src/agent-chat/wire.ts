@@ -772,7 +772,17 @@ export interface RevertCommandBody extends AgentChatCommandBase {
   targetTurnCount: number;
 }
 
-export type CompactCommandBody = AgentChatCommandBase;
+export interface CompactCommandBody extends AgentChatCommandBase {
+  /**
+   * Idle compaction (`idle-compaction.ts`): the daemon's own `/compact`, sent before the chat's
+   * prompt cache expires. A precondition and a label: the host refuses it (409
+   * `COMMAND_REJECTED`, no receipt) unless `turnId` is still the chat's latest turn, settled
+   * `completed`, with nothing pending — so a chat that moved on since the daemon looked is never
+   * compacted under the user — and records the message with `sentBy: "idle-compaction"`.
+   * Additive: an older host ignores it and compacts as asked.
+   */
+  idle?: { turnId: string };
+}
 
 /**
  * `/background`: `toolUseId` names the one running call to move (the

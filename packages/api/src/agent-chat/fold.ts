@@ -1335,7 +1335,8 @@ function reduceMessageSent(
       // strip a badge the first event established.
       ...(payload.reasoningKind !== undefined ? { reasoningKind: payload.reasoningKind } : {}),
       ...(payload.messageKind !== undefined ? { messageKind: payload.messageKind } : {}),
-      ...(payload.interactionMode !== undefined ? { interactionMode: payload.interactionMode } : {})
+      ...(payload.interactionMode !== undefined ? { interactionMode: payload.interactionMode } : {}),
+      ...(payload.sentBy !== undefined ? { sentBy: payload.sentBy } : {})
     };
     const items = state.items.slice();
     items[existingIndex!] = next;
@@ -1361,7 +1362,8 @@ function reduceMessageSent(
     ...(payload.agentId !== undefined ? { agentId: payload.agentId } : {}),
     ...(payload.reasoningKind !== undefined ? { reasoningKind: payload.reasoningKind } : {}),
     ...(payload.messageKind !== undefined ? { messageKind: payload.messageKind } : {}),
-    ...(payload.interactionMode !== undefined ? { interactionMode: payload.interactionMode } : {})
+    ...(payload.interactionMode !== undefined ? { interactionMode: payload.interactionMode } : {}),
+    ...(payload.sentBy !== undefined ? { sentBy: payload.sentBy } : {})
   };
   return {
     // `concat` with an array argument takes V8's fast path, one exact-size

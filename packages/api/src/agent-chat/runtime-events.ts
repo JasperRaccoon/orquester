@@ -509,6 +509,22 @@ export interface ThreadTokenUsage {
    * answer must carry it on **every** emission, never on the first one only.
    */
   compactsAutomatically?: boolean;
+  /**
+   * Claude only: the prompt-cache lifetime the conversation's latest request
+   * wrote (`cache_creation.ephemeral_1h_input_tokens` → 1h, else
+   * `ephemeral_5m_input_tokens` → 5m), in ms. Absent when that request wrote
+   * no cache entry (served whole from the cache) or the provider has none:
+   * the expiry is then unknown. Carried on every emission like
+   * `compactsAutomatically`. *T3: `promptCacheTtlMs`.*
+   */
+  promptCacheTtlMs?: number;
+  /**
+   * When that request's prompt cache expires (ISO): the request's start plus
+   * {@link promptCacheTtlMs} — the lifetime runs from the request, not from
+   * its response. Idle compaction (`idle-compaction.ts`) schedules from it.
+   * *T3: `promptCacheExpiresAt`.*
+   */
+  promptCacheExpiresAt?: string;
 }
 
 // ---------------------------------------------------------------------------
