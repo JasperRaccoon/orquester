@@ -1,8 +1,9 @@
 /**
  * Linux VM desktops (Ephemeral AI VMs): what the desktop manager needs from the
  * boxes (`DesktopBoxes`) — a `BoxDesktopHost` per Linux box, the box's desktop
- * stack status and its install (through the injected `BoxGuiInstaller`), and
- * the box changes it follows (link up/down, destroyed).
+ * stack status and its install (through the daemon's one `BoxGuiInstaller`,
+ * `remote/gui`, whose memo the box wiring forgets with the box), and the box
+ * changes it follows (link up/down, destroyed).
  *
  * A box whose record is gone or on its way out (destroying, destroy-failed,
  * destroyed) has no host: its desktops end stopped. So does a macOS or Windows
@@ -15,17 +16,16 @@ import type { StoredBox } from "@orquester/config";
 import type { DesktopBoxes } from "../../../desktops/desktop-host.ts";
 import { DesktopError } from "../../../desktops/manager.ts";
 import type { BoxConnection, BoxHub, BoxRegistry, BoxToolingProvisioner } from "../../contracts.ts";
+import { type BoxGuiInstaller, BoxGuiUnavailableError } from "../gui/index.ts";
 import { BoxDesktopHost } from "./host.ts";
-import { type BoxGuiInstaller, guiUnavailable } from "./installer.ts";
 import { boxDesktopRefusal } from "./suggestions.ts";
 
 export { BoxDesktopHost } from "./host.ts";
-export { type BoxGuiInstaller, unwiredBoxGuiInstaller } from "./installer.ts";
 
 export interface BoxDesktopsDeps {
   registry: Pick<BoxRegistry, "get" | "onChange">;
   hub: Pick<BoxHub, "get" | "onConnectionChange">;
-  installer: BoxGuiInstaller;
+  installer: Pick<BoxGuiInstaller, "desktopStatus" | "ensureDesktop">;
   tooling?: Pick<BoxToolingProvisioner, "contribution">;
   /** The private tmux server desktops use in each box (tests use their own). */
   tmuxServer?: string;
@@ -37,6 +37,14 @@ function goneState(state: StoredBox["state"]): boolean {
 }
 
 const NOT_CONNECTED = "The VM is not connected right now; try again once it is back.";
+
+/** The installer's refusal (`BoxGuiUnavailableError`, or its code on any error), else null. */
+function guiRefusal(error: unknown): { message: string; hint: string | null } | null {
+  if (error instanceof BoxGuiUnavailableError) return { message: error.message, hint: error.hint };
+  const { code, hint, message } = (error ?? {}) as { code?: unknown; hint?: unknown; message?: unknown };
+  if (code !== "BOX_GUI_UNAVAILABLE") return null;
+  return { message: typeof message === "string" && message ? message : "The VM cannot run desktops.", hint: typeof hint === "string" ? hint : null };
+}
 
 export class BoxDesktops implements DesktopBoxes {
   private readonly hosts = new Map<string, BoxDesktopHost>();
@@ -73,7 +81,7 @@ export class BoxDesktops implements DesktopBoxes {
     try {
       return await this.deps.installer.ensureDesktop(connection, { onProgress });
     } catch (error) {
-      const refused = guiUnavailable(error);
+      const refused = guiRefusal(error);
       if (refused) throw new DesktopError(409, DESKTOP_UNAVAILABLE_CODE, refused.message, refused.hint);
       if (!connection.connected) throw new DesktopError(409, "DESKTOP_BOX_UNREACHABLE", NOT_CONNECTED);
       throw new DesktopError(500, "DESKTOP_INSTALL_FAILED", `Installing the desktop packages in the VM failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -93,8 +101,9 @@ export class BoxDesktops implements DesktopBoxes {
     };
   }
 
+  /** Drop a gone box's host (the installer's own memo is the box wiring's to forget). */
   private forget(boxId: string): void {
-    if (this.hosts.delete(boxId)) this.deps.installer.forget(boxId);
+    this.hosts.delete(boxId);
   }
 
   private connection(boxId: string): BoxConnection {

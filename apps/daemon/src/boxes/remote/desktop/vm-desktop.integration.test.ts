@@ -15,7 +15,7 @@ import { Tmux, tmuxAvailable, tmuxVersionOk } from "../../../tmux.ts";
 import type { BoxHub, BoxRegistry } from "../../contracts.ts";
 import { localBoxConnection, type LocalBoxConnection } from "../../testing.ts";
 import { BoxDesktops } from "./index.ts";
-import type { BoxGuiInstaller } from "./installer.ts";
+import type { BoxGuiInstaller } from "../gui/index.ts";
 
 // A whole VM desktop, for real, through the box seam: the "box" is this machine
 // (`localBoxConnection`: exec = local child processes, fs = node:fs, watches =
@@ -50,10 +50,10 @@ let desktopId = "";
 const groups = new Set<number>();
 let hostStatus: DesktopHostStatus;
 
-const installer: BoxGuiInstaller = {
+// The stack is this machine's: the installer reports it as found (the real one is tested in remote/gui).
+const installer: Pick<BoxGuiInstaller, "desktopStatus" | "ensureDesktop"> = {
   desktopStatus: async () => hostStatus,
-  ensureDesktop: async () => hostStatus,
-  forget: () => {}
+  ensureDesktop: async () => hostStatus
 };
 
 const registry: Pick<BoxRegistry, "get" | "onChange"> = {

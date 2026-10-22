@@ -9,14 +9,15 @@ import { sessionPath, tmuxAvailable, tmuxVersionOk } from "../tmux.ts";
 // whether ffmpeg can capture PulseAudio and encode Opus, GL and system checks,
 // and one apt install hint for whatever is missing.
 
-interface ToolSpec {
+export interface DesktopToolSpec {
   name: string;
   /** The Ubuntu package that provides it (the install hint). */
   pkg: string;
   required: boolean;
 }
 
-const TOOLS: ToolSpec[] = [
+/** The tools a desktop host runs (desktop-host.sh and the tmux service session), in report order. */
+export const DESKTOP_TOOLS: readonly DesktopToolSpec[] = [
   { name: "Xvnc", pkg: "tigervnc-standalone-server", required: true },
   { name: "openbox", pkg: "openbox", required: true },
   { name: "dbus-daemon", pkg: "dbus-x11", required: true },
@@ -25,6 +26,9 @@ const TOOLS: ToolSpec[] = [
   { name: "pactl", pkg: "pulseaudio-utils", required: false },
   { name: "ffmpeg", pkg: "ffmpeg", required: false }
 ];
+
+/** Ubuntu package of Mesa's software OpenGL driver (recommended, not required). */
+export const MESA_DRI_PACKAGE = "libgl1-mesa-dri";
 
 /** Package order in the hint (the spec's list). */
 const PACKAGE_ORDER = [
@@ -75,6 +79,18 @@ export function parseFfmpegPulseInput(devicesOutput: string): boolean {
 /** Whether `ffmpeg -hide_banner -encoders` lists `libopus` (rows: ` A....D libopus  …`). */
 export function parseFfmpegOpusEncoder(encodersOutput: string): boolean {
   return encodersOutput.split("\n").some((line) => /^ [A-Z.]{6} libopus(\s|$)/.test(line));
+}
+
+/**
+ * Whether `tmux -V` output ("tmux 3.4", "tmux 3.2a", "tmux next-3.4") is 3.2 or newer: the rule of
+ * `tmuxVersionOk` in tmux.ts, for output read somewhere else (a box).
+ */
+export function tmuxVersionOutputOk(output: string): boolean {
+  const match = /(\d+)\.(\d+)/.exec(output);
+  if (!match) return false;
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  return major > 3 || (major === 3 && minor >= 2);
 }
 
 /** The apt command for the missing packages in the spec's order, or null when nothing is missing. */
@@ -143,6 +159,70 @@ function passwdEntryOk(): boolean {
   }
 }
 
+/** What a desktop host was found to have: the inputs of {@link evaluateDesktopHost}. */
+export interface DesktopHostFacts {
+  /** Resolved path of each {@link DESKTOP_TOOLS} entry by name; missing or null = not found. */
+  toolPaths: Readonly<Record<string, string | null>>;
+  ffmpegPulse: boolean;
+  ffmpegOpus: boolean;
+  /** `tmux -V` reports 3.2 or newer. */
+  tmuxVersionOk: boolean;
+  renderNode: boolean;
+  /** Mesa's software rasterizer (`swrast_dri.so`) is installed. */
+  mesaDri: boolean;
+  /** `/etc/machine-id` is non-empty. */
+  machineId: boolean;
+  /** The desktop user has a passwd entry. */
+  passwdEntry: boolean;
+}
+
+/**
+ * The desktop rules over detected facts, shared by this host's probe and the probe of a box
+ * (boxes/remote/gui): which tools are required, when audio works, the warnings, and the Ubuntu
+ * packages that are missing (the caller words the install hint). `userLabel` names the account
+ * desktops run as in the passwd warning.
+ */
+export function evaluateDesktopHost(
+  facts: DesktopHostFacts,
+  options: { userLabel?: string } = {}
+): { status: Omit<DesktopHostStatus, "installHint">; missingPackages: string[] } {
+  const found = (name: string) => facts.toolPaths[name] ?? null;
+  const tools: DesktopHostTool[] = DESKTOP_TOOLS.map((tool) => ({ name: tool.name, path: found(tool.name), required: tool.required }));
+  const missing = new Set(DESKTOP_TOOLS.filter((tool) => found(tool.name) === null).map((tool) => tool.pkg));
+  const ffmpeg = found("ffmpeg");
+  const pulse = ffmpeg !== null && facts.ffmpegPulse;
+  const opus = ffmpeg !== null && facts.ffmpegOpus;
+  const tmuxUsable = found("tmux") !== null && facts.tmuxVersionOk;
+
+  const warnings: string[] = [];
+  if (!facts.mesaDri) {
+    missing.add(MESA_DRI_PACKAGE);
+    warnings.push("Mesa's software OpenGL driver (libgl1-mesa-dri) is not installed; OpenGL apps will fail.");
+  }
+  if (found("tmux") !== null && !facts.tmuxVersionOk) {
+    warnings.push("tmux is older than 3.2; desktops need tmux 3.2 or newer to survive daemon restarts.");
+  }
+  if (ffmpeg && !pulse) {
+    warnings.push("ffmpeg has no PulseAudio input device; desktops run without sound.");
+  }
+  if (ffmpeg && !opus) {
+    warnings.push("ffmpeg has no libopus encoder; desktops run without sound.");
+  }
+  if (!facts.machineId) {
+    warnings.push("/etc/machine-id is missing or empty; D-Bus and PulseAudio may refuse to start.");
+  }
+  if (!facts.passwdEntry) {
+    warnings.push(`${options.userLabel ?? "The daemon's user"} has no passwd entry; some apps may fail to start.`);
+  }
+
+  const available = DESKTOP_TOOLS.every((tool) => !tool.required || found(tool.name) !== null) && tmuxUsable;
+  const audioAvailable = found("pulseaudio") !== null && pulse && opus;
+  return {
+    status: { available, audioAvailable, tools, ffmpegPulse: pulse, ffmpegOpus: opus, renderNode: facts.renderNode, tmuxUsable, warnings },
+    missingPackages: [...missing]
+  };
+}
+
 /**
  * Detects the host once per call for the tools (installing a package lights
  * desktops up without a restart), and once per daemon run for the ffmpeg
@@ -156,56 +236,24 @@ export class DesktopHostProbe {
 
   async status(): Promise<DesktopHostStatus> {
     const path = this.options.path?.() ?? sessionPath();
-    const tools: DesktopHostTool[] = TOOLS.map((tool) => ({
-      name: tool.name,
-      path: resolveTool(tool.name, path),
-      required: tool.required
-    }));
-    const found = (name: string) => tools.find((tool) => tool.name === name)?.path ?? null;
-    const missing = new Set(TOOLS.filter((tool) => found(tool.name) === null).map((tool) => tool.pkg));
-
-    const ffmpeg = found("ffmpeg");
+    const toolPaths: Record<string, string | null> = {};
+    for (const tool of DESKTOP_TOOLS) toolPaths[tool.name] = resolveTool(tool.name, path);
+    const ffmpeg = toolPaths.ffmpeg ?? null;
     const caps = ffmpeg ? await this.ffmpegCapabilities(ffmpeg) : { pulse: false, opus: false };
     if (this.tmuxOk === null) {
       this.tmuxOk = tmuxAvailable() && tmuxVersionOk();
     }
-    const tmuxUsable = found("tmux") !== null && this.tmuxOk;
-
-    const warnings: string[] = [];
-    const renderNode = hasRenderNode();
-    if (!hasMesaDri()) {
-      missing.add("libgl1-mesa-dri");
-      warnings.push("Mesa's software OpenGL driver (libgl1-mesa-dri) is not installed; OpenGL apps will fail.");
-    }
-    if (found("tmux") !== null && !this.tmuxOk) {
-      warnings.push("tmux is older than 3.2; desktops need tmux 3.2 or newer to survive daemon restarts.");
-    }
-    if (ffmpeg && !caps.pulse) {
-      warnings.push("ffmpeg has no PulseAudio input device; desktops run without sound.");
-    }
-    if (ffmpeg && !caps.opus) {
-      warnings.push("ffmpeg has no libopus encoder; desktops run without sound.");
-    }
-    if (!machineIdOk()) {
-      warnings.push("/etc/machine-id is missing or empty; D-Bus and PulseAudio may refuse to start.");
-    }
-    if (!passwdEntryOk()) {
-      warnings.push("The daemon's user has no passwd entry; some apps may fail to start.");
-    }
-
-    const available = TOOLS.every((tool) => !tool.required || found(tool.name) !== null) && tmuxUsable;
-    const audioAvailable = found("pulseaudio") !== null && caps.pulse && caps.opus;
-    return {
-      available,
-      audioAvailable,
-      tools,
+    const { status, missingPackages } = evaluateDesktopHost({
+      toolPaths,
       ffmpegPulse: caps.pulse,
       ffmpegOpus: caps.opus,
-      renderNode,
-      tmuxUsable,
-      warnings,
-      installHint: buildInstallHint(missing)
-    };
+      tmuxVersionOk: this.tmuxOk,
+      renderNode: hasRenderNode(),
+      mesaDri: hasMesaDri(),
+      machineId: machineIdOk(),
+      passwdEntry: passwdEntryOk()
+    });
+    return { ...status, installHint: buildInstallHint(missingPackages) };
   }
 
   private ffmpegCapabilities(ffmpeg: string): Promise<{ pulse: boolean; opus: boolean }> {

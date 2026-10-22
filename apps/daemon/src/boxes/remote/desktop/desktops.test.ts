@@ -12,7 +12,7 @@ import type { BoxConnection, BoxExecOptions, BoxHub, BoxProcess, BoxRegistry } f
 import { localBoxConnection, localSysInfo } from "../../testing.ts";
 import { BoxDesktopHost } from "./host.ts";
 import { BoxDesktops } from "./index.ts";
-import { BOX_GUI_UNAVAILABLE, type BoxGuiInstaller, guiUnavailable, unwiredBoxGuiInstaller } from "./installer.ts";
+import { type BoxGuiInstaller, BoxGuiUnavailableError } from "../gui/index.ts";
 import { boxDesktopRefusal } from "./suggestions.ts";
 import { BOX_DESKTOP_TMUX_SERVER, BoxDesktopTmux } from "./tmux.ts";
 
@@ -32,12 +32,13 @@ const READY: DesktopHostStatus = {
   installHint: null
 };
 
-function harness(options: { record?: Partial<StoredBox> | null; os?: "linux" | "darwin" | "win32"; installer?: Partial<BoxGuiInstaller> } = {}) {
+type DesktopInstaller = Pick<BoxGuiInstaller, "desktopStatus" | "ensureDesktop">;
+
+function harness(options: { record?: Partial<StoredBox> | null; os?: "linux" | "darwin" | "win32"; installer?: Partial<DesktopInstaller> } = {}) {
   let record = options.record === null ? undefined : ({ id: "b1", state: "ready", kind: "linux", ...options.record } as StoredBox);
   const connection = localBoxConnection({ boxId: "b1", sys: { os: options.os ?? "linux" } });
   const registryListeners = new Set<(boxId: string) => void>();
   const hubListeners = new Set<(boxId: string, connected: boolean) => void>();
-  const forgotten: string[] = [];
   const registry: Pick<BoxRegistry, "get" | "onChange"> = {
     get: (boxId) => (boxId === "b1" ? record : undefined),
     onChange: (listener) => {
@@ -52,17 +53,15 @@ function harness(options: { record?: Partial<StoredBox> | null; os?: "linux" | "
       return () => hubListeners.delete(listener);
     }
   };
-  const installer: BoxGuiInstaller = {
+  const installer: DesktopInstaller = {
     desktopStatus: async () => READY,
     ensureDesktop: async () => READY,
-    forget: (boxId) => forgotten.push(boxId),
     ...options.installer
   };
   const desktops = new BoxDesktops({ registry, hub, installer });
   return {
     desktops,
     connection,
-    forgotten,
     setRecord: (next: Partial<StoredBox>) => {
       record = { ...record, ...next } as StoredBox;
       for (const listener of registryListeners) listener("b1");
@@ -85,7 +84,7 @@ test("only Linux boxes that are not on their way out have a desktop host, one pe
   }
 });
 
-test("a box going away drops its host and lets the installer forget it; listeners hear every change", () => {
+test("a box going away drops its host; listeners hear every change", () => {
   const h = harness();
   const heard: string[] = [];
   const off = h.desktops.onChange((boxId) => heard.push(boxId));
@@ -93,7 +92,6 @@ test("a box going away drops its host and lets the installer forget it; listener
   for (const listener of h.hubListeners) listener("b1", false);
   h.setRecord({ state: "destroyed" });
   assert.deepEqual(heard, ["b1", "b1"]);
-  assert.deepEqual(h.forgotten, ["b1"]);
   assert.equal(h.desktops.host("b1"), null);
   off();
   for (const listener of h.hubListeners) listener("b1", true);
@@ -104,7 +102,7 @@ test("installer refusals become 409 DESKTOP_UNAVAILABLE with their hint; other f
   const refused = harness({
     installer: {
       ensureDesktop: async () => {
-        throw Object.assign(new Error("No sudo in this VM."), { code: BOX_GUI_UNAVAILABLE, hint: "Run the VM as root." });
+        throw new BoxGuiUnavailableError("No sudo in this VM.", "Run the VM as root.");
       }
     }
   });
@@ -144,18 +142,15 @@ test("progress lines reach the caller", async () => {
   assert.deepEqual(lines, ["Unpacking openbox…"]);
 });
 
-test("the stand-in installer reports the stack unavailable and refuses to install", async () => {
-  const connection = localBoxConnection();
-  const status = await unwiredBoxGuiInstaller.desktopStatus(connection);
-  assert.equal(status.available, false);
-  assert.match(status.installHint ?? "", /not wired/);
-  const refusal = await unwiredBoxGuiInstaller.ensureDesktop(connection).then(
-    () => null,
-    (error: unknown) => guiUnavailable(error)
-  );
-  assert.ok(refusal);
-  assert.match(refusal.message, /not wired/);
-  assert.equal(guiUnavailable(new Error("other")), null);
+test("a refusal is read off its code too (an installer error from elsewhere)", async () => {
+  const h = harness({
+    installer: {
+      ensureDesktop: async () => {
+        throw Object.assign(new Error("Unsupported distro."), { code: "BOX_GUI_UNAVAILABLE", hint: null });
+      }
+    }
+  });
+  await assert.rejects(h.desktops.ensure("b1", () => {}), { status: 409, code: DESKTOP_UNAVAILABLE_CODE, message: "Unsupported distro.", hint: null });
 });
 
 test("desktops need Linux", () => {
