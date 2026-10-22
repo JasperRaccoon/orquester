@@ -56,7 +56,7 @@ import { boxCloneUrl, boxGitConfig, boxGitSshTarget, type BoxGitEndpoint } from 
 import { boxGitConfigCommands, boxKnownHostsPath } from "./git-setup.ts";
 import type { BoxStore } from "./store.ts";
 import { initialStoredSetup, SETUP_STEP_LABELS } from "./summary.ts";
-import { bubblewrapScript, planToolchain, TOOLCHAIN_PROBE_FILES, TOOLCHAIN_READ_FILES } from "./toolchain.ts";
+import { bubblewrapScript, gitClientScript, planToolchain, TOOLCHAIN_PROBE_FILES, TOOLCHAIN_READ_FILES } from "./toolchain.ts";
 
 export type StoredBoxProject = NonNullable<StoredBox["project"]>;
 
@@ -627,6 +627,17 @@ export class BoxLifecycle {
     if (!project) throw new SetupStepError("The box has no project.");
     const { sys } = connection;
     const url = typeof project.remoteUrl === "string" ? project.remoteUrl : null;
+
+    if (sys.os === "linux") {
+      const client = await runBoxCommand(
+        connection,
+        { command: gitClientScript(), shell: true },
+        { signal: AbortSignal.any([signal, AbortSignal.timeout(TOOLCHAIN_COMMAND_TIMEOUT_MS)]), onLine: log }
+      );
+      if (client.code !== 0) {
+        throw new SetupStepError(client.tail.trim().split("\n").pop() || `Installing git failed (exit ${client.code ?? client.signal}).`);
+      }
+    }
 
     // Git in the box is SSH only (spec §7): the account's HTTPS URLs rewritten to SSH, the host keys
     // the box may trust for its SSH host, no credential helper, and the workspace identity.
