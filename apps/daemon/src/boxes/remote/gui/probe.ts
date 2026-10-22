@@ -238,7 +238,7 @@ interface DesktopPackage {
   apt: string;
   /** Fedora/RHEL alternatives, first preferred (`ffmpeg` from RPM Fusion, else Fedora's `ffmpeg-free`). */
   rpm: readonly string[];
-  /** Without it no desktop starts; the others only cost sound, OpenGL, a terminal or legible text. */
+  /** Without it no desktop starts; the others only cost sound, OpenGL, GTK 4 popover shadows, a terminal or legible text. */
   required: boolean;
 }
 
@@ -252,6 +252,7 @@ export const DESKTOP_PACKAGES: readonly DesktopPackage[] = [
   { apt: "pulseaudio", rpm: ["pulseaudio"], required: false },
   { apt: "pulseaudio-utils", rpm: ["pulseaudio-utils"], required: false },
   { apt: "ffmpeg", rpm: ["ffmpeg", "ffmpeg-free"], required: false },
+  { apt: "xcompmgr", rpm: ["xcompmgr"], required: false },
   { apt: "xterm", rpm: ["xterm"], required: false },
   { apt: "fonts-dejavu-core", rpm: ["dejavu-sans-fonts"], required: false }
 ];

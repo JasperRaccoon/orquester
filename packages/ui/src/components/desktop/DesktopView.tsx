@@ -4,6 +4,7 @@ import { Loader2, Power, RotateCw } from "lucide-react";
 import type RFB from "@novnc/novnc";
 import { desktopRoutes, type DesktopSummary, type DesktopWindow, type DesktopWindowAction } from "@orquester/api";
 import { useAppStore } from "../../store/app";
+import { cn } from "../../lib/cn";
 import { useMediaQuery } from "../../hooks/use-media-query";
 import { useDesktopAudio } from "../../lib/desktop-audio";
 import { readDesktopPrefs, writeDesktopPrefs, type DesktopPrefs } from "../../lib/desktop-prefs";
@@ -17,7 +18,8 @@ import { openDesktopVncChannel, type DesktopVncChannel } from "../../lib/desktop
 import { DesktopToolbar } from "./DesktopToolbar";
 import { DesktopAppsDialog, DesktopInfoDialog } from "./DesktopDialogs";
 import { DesktopKeyStrip, useDesktopHiddenInput } from "./DesktopKeyboard";
-import { MODIFIER_KEYSYM, XK, keysymsForText, type LatchModifier } from "./desktop-keys";
+import { exitPoint } from "./desktop-pointer";
+import { MODIFIER_KEYSYM, keysymsForText, pasteKeystroke, type LatchModifier, type PasteChord } from "./desktop-keys";
 
 export interface DesktopViewProps {
   desktop: DesktopSummary;
@@ -37,6 +39,8 @@ const RECONNECT_MAX_MS = 10_000;
 /** RTT samples (one per 2 s) to spend getting a fixed size applied before giving up. */
 const FIXED_SIZE_ATTEMPTS = 5;
 const DISPLAY_BACKGROUND = "rgb(10, 10, 10)";
+/** noVNC's own Mac/iOS test (`core/util/browser.js`): there it forwards Cmd as Alt. */
+const APPLE_PLATFORM = typeof navigator !== "undefined" && /mac|ipad|iphone|ipod/i.test(navigator.platform);
 
 // noVNC is loaded on first use: it is only needed once a desktop tab is shown,
 // and its `core/util/browser.js` has a top-level await that is better kept out
@@ -128,6 +132,12 @@ function requestRemoteSize(rfb: RFB, target: HTMLElement, size: { width: number;
   }
 }
 
+/** Keyboard Lock (Chromium only; not in the DOM typings). */
+function navigatorKeyboard(): { lock?: () => Promise<void>; unlock?: () => void } | undefined {
+  if (typeof navigator === "undefined") return undefined;
+  return (navigator as Navigator & { keyboard?: { lock?: () => Promise<void>; unlock?: () => void } }).keyboard;
+}
+
 function errorText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
@@ -142,6 +152,8 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
   const targetRef = useRef<HTMLDivElement>(null);
   const hiddenInputRef = useRef<HTMLInputElement>(null);
   const rfbRef = useRef<RFB | null>(null);
+  /** The modifiers of the paste chord the view held back from noVNC, until its `paste` event. */
+  const pasteChordRef = useRef<PasteChord | null>(null);
 
   const [prefs, setPrefs] = useState<DesktopPrefs>(() => readDesktopPrefs(desktop.id));
   const prefsRef = useRef(prefs);
@@ -384,6 +396,7 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
     const onKeyDownCapture = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "v" && targetRef.current?.contains(e.target as Node)) {
         e.stopPropagation();
+        pasteChordRef.current = { shift: e.shiftKey, alt: e.altKey, meta: e.metaKey };
       }
     };
     root.addEventListener("pointerdown", onLocalInput, true);
@@ -419,6 +432,88 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
     target.addEventListener("touchend", onTouchEnd);
     return () => target.removeEventListener("touchend", onTouchEnd);
   }, []);
+
+  // The mouse leaving the display parks the remote pointer where it crossed
+  // the edge (see desktop-pointer.ts): otherwise the button it last hovered
+  // stays hovered and its tooltip floats above every window raised next.
+  useEffect(() => {
+    const target = targetRef.current;
+    if (!target) return;
+    const onPointerLeave = (e: PointerEvent) => {
+      if (e.pointerType !== "mouse" || e.buttons !== 0) return; // a drag keeps noVNC's capture
+      const canvas = target.querySelector("canvas");
+      if (!canvas || !rfbRef.current) return;
+      const at = exitPoint(canvas.getBoundingClientRect(), e.clientX, e.clientY);
+      canvas.dispatchEvent(new MouseEvent("mousemove", { clientX: at.x, clientY: at.y, bubbles: true, cancelable: true, view: window }));
+    };
+    target.addEventListener("pointerleave", onPointerLeave);
+    return () => target.removeEventListener("pointerleave", onPointerLeave);
+  }, []);
+
+  /** Hand the keyboard to the display (to the hidden input while the touch keyboard is up). */
+  const focusDisplay = useCallback(() => {
+    if (keyboardOpenRef.current) hiddenInputRef.current?.focus({ preventScroll: true });
+    else rfbRef.current?.focus({ preventScroll: true });
+  }, []);
+
+  // A window that became active (raised from the window list, launched from
+  // the dialog, left on top when another closed) gets the keys typed next: the
+  // display takes the focus back from a toolbar button or a closed dialog,
+  // never from a field the user is typing in or from outside the view.
+  useEffect(() => {
+    if (!active || conn !== "connected" || desktop.activeWindowId === null) return;
+    const focused = document.activeElement;
+    const idle =
+      !focused ||
+      focused === document.body ||
+      (focused instanceof HTMLButtonElement && rootRef.current?.contains(focused) === true);
+    if (idle) focusDisplay();
+  }, [desktop.activeWindowId, active, conn, focusDisplay]);
+
+  // ---- Fullscreen ------------------------------------------------------------
+
+  // The whole page goes fullscreen (the toolbar's menus and dialogs are portals
+  // on <body>, which an element-fullscreen would hide) and the view covers it.
+  // Keyboard Lock (Chromium) then routes browser and system shortcuts — Ctrl+W,
+  // Ctrl+T, Ctrl+N, Alt+Tab, Esc — to the desktop instead of closing the tab;
+  // holding Esc leaves fullscreen.
+  const [fullscreen, setFullscreen] = useState(false);
+  const fullscreenAvailable = typeof document !== "undefined" && document.fullscreenEnabled === true;
+  useEffect(() => {
+    if (!fullscreen) return;
+    const onChange = () => {
+      if (document.fullscreenElement !== document.documentElement) setFullscreen(false);
+    };
+    document.addEventListener("fullscreenchange", onChange);
+    return () => {
+      document.removeEventListener("fullscreenchange", onChange);
+      navigatorKeyboard()?.unlock?.();
+      // Unmounted while fullscreen (the tab closed): leave it.
+      if (document.fullscreenElement === document.documentElement) void document.exitFullscreen().catch(() => undefined);
+    };
+  }, [fullscreen]);
+  // Leaving the tab (or the desktop stopping) leaves fullscreen too.
+  useEffect(() => {
+    if (fullscreen && (!active || desktop.status !== "running") && document.fullscreenElement) {
+      void document.exitFullscreen().catch(() => undefined);
+    }
+  }, [fullscreen, active, desktop.status]);
+  const toggleFullscreen = () => {
+    if (fullscreen) {
+      if (document.fullscreenElement) void document.exitFullscreen().catch(() => undefined);
+      setFullscreen(false);
+      return;
+    }
+    // Inside the click: requestFullscreen needs the user gesture.
+    document.documentElement.requestFullscreen({ navigationUI: "hide" }).then(
+      () => {
+        setFullscreen(true);
+        void navigatorKeyboard()?.lock?.().catch(() => undefined);
+        focusDisplay();
+      },
+      (err: unknown) => setActionError(`Fullscreen is not available: ${errorText(err)}`)
+    );
+  };
 
   // An error'd desktop may be a host problem: show the install hint if any.
   useEffect(() => {
@@ -482,12 +577,12 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
     if ((where instanceof HTMLTextAreaElement || where instanceof HTMLInputElement) && where !== hiddenInputRef.current) return;
     const rfb = rfbRef.current;
     const text = e.clipboardData.getData("text/plain");
+    const chord = pasteChordRef.current;
+    pasteChordRef.current = null;
     if (!rfb || !text) return;
     e.preventDefault();
     rfb.clipboardPasteFrom(text);
-    rfb.sendKey(XK.Control_L, "ControlLeft", true);
-    rfb.sendKey(XK.v, "KeyV");
-    rfb.sendKey(XK.Control_L, "ControlLeft", false);
+    for (const step of pasteKeystroke(chord, APPLE_PLATFORM)) rfb.sendKey(step.keysym, step.code, step.down);
   };
 
   // The toolbar button keeps focus where it is on pointerdown, so "is the
@@ -543,6 +638,8 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
   };
   const windowAction = (win: DesktopWindow, action: DesktopWindowAction) => {
     if (!api) return;
+    // The window the user picked takes the keys typed next, not the pill.
+    if (action !== "close") focusDisplay();
     api.desktopWindowAction(desktop.id, win.id, action).catch((err: unknown) => setActionError(errorText(err)));
   };
 
@@ -618,7 +715,12 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
     // `data-desktop-view` marks this subtree as owning its own keystrokes: the
     // app's global shortcuts (`SHORTCUT_BAIL_SELECTOR`) stand down inside it so
     // keys reach the desktop's apps.
-    <div ref={rootRef} data-desktop-view className="flex h-full w-full flex-col bg-neutral-950" onPaste={onPaste}>
+    <div
+      ref={rootRef}
+      data-desktop-view
+      className={cn("flex flex-col bg-neutral-950", fullscreen ? "fixed inset-0 z-[90]" : "h-full w-full")}
+      onPaste={onPaste}
+    >
       <DesktopToolbar
         desktop={desktop}
         narrow={narrow}
@@ -630,6 +732,8 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
         remoteClipboard={remoteClipboard}
         keyboardOpen={keyboardOpen}
         onToggleKeyboard={toggleKeyboard}
+        fullscreen={fullscreen}
+        onToggleFullscreen={fullscreenAvailable ? toggleFullscreen : null}
         onSendClipboard={sendClipboard}
         onWindowAction={windowAction}
         onLaunchApp={onLaunchApp}

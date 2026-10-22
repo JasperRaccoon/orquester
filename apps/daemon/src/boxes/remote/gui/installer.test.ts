@@ -151,6 +151,7 @@ class FakeBox {
         `tool:pulseaudio=${have("/usr/bin/pulseaudio")}`,
         `tool:pactl=${have("/usr/bin/pactl")}`,
         `tool:ffmpeg=${have("/usr/bin/ffmpeg")}`,
+        `tool:xcompmgr=${have("/usr/bin/xcompmgr")}`,
         `tool:xterm=${have("/usr/bin/xterm")}`,
         `tmux-version=${this.tmux}`,
         `mesa=${this.desktop ? 1 : 0}`,

@@ -67,7 +67,7 @@ function label(choices: readonly PackageChoice[]): string {
 
 /**
  * Install the desktop packages: the required set in one transaction (failure exits 3), then the
- * optional set (sound, OpenGL, a terminal, fonts) — in one go, else one package at a time, trying
+ * optional set (sound, OpenGL, a compositor, a terminal, fonts) — in one go, else one package at a time, trying
  * each alternative name, so a package the distro lacks costs only that feature. Finally create
  * `/etc/machine-id` where it is missing (containers): D-Bus and PulseAudio refuse to start without.
  */
@@ -80,7 +80,7 @@ export function desktopInstallScript(plan: { manager: BoxPackageManager; require
     );
   }
   if (plan.optional.length > 0) {
-    lines.push(shSay(`Installing sound, OpenGL, terminal and font packages: ${label(plan.optional)}`), `if ! install_set ${words(plan.optional)}; then`);
+    lines.push(shSay(`Installing sound, OpenGL, compositor, terminal and font packages: ${label(plan.optional)}`), `if ! install_set ${words(plan.optional)}; then`);
     lines.push("  say 'Installing them one at a time'");
     for (const choice of plan.optional) {
       const attempts = choice.map((name) => `add ${shQuote(name)}`).join(" || ");

@@ -31,6 +31,7 @@ tool:tmux=/usr/bin/tmux
 tool:pulseaudio=/usr/bin/pulseaudio
 tool:pactl=/usr/bin/pactl
 tool:ffmpeg=/usr/bin/ffmpeg
+tool:xcompmgr=/usr/bin/xcompmgr
 tool:xterm=/usr/bin/xterm
 tmux-version=tmux 3.4
 >>> ffmpeg-devices
@@ -69,6 +70,7 @@ tool:tmux=/usr/bin/tmux
 tool:pulseaudio=
 tool:pactl=
 tool:ffmpeg=
+tool:xcompmgr=
 tool:xterm=
 tmux-version=tmux 3.4
 render=0
@@ -128,7 +130,7 @@ test("the box status follows the host's rules", () => {
 
   const fresh = evaluateBoxDesktop(facts(FRESH));
   assert.equal(fresh.status.available, false);
-  assert.deepEqual(fresh.missingPackages.sort(), ["ffmpeg", "libgl1-mesa-dri", "openbox", "pulseaudio", "pulseaudio-utils", "tigervnc-standalone-server"]);
+  assert.deepEqual(fresh.missingPackages.sort(), ["ffmpeg", "libgl1-mesa-dri", "openbox", "pulseaudio", "pulseaudio-utils", "tigervnc-standalone-server", "xcompmgr"]);
 
   const oldTmux = evaluateBoxDesktop(facts(INSTALLED, { tmuxVersion: "tmux 3.1c" }));
   assert.equal(oldTmux.status.available, false);
@@ -148,11 +150,11 @@ test("the install plan names packages per package manager, plus a terminal and f
   const { missingPackages } = evaluateBoxDesktop(fresh);
   const apt = desktopInstallPlan(fresh, missingPackages, "apt");
   assert.deepEqual(apt.required, [["tigervnc-standalone-server"], ["openbox"]]);
-  assert.deepEqual(apt.optional, [["libgl1-mesa-dri"], ["pulseaudio"], ["pulseaudio-utils"], ["ffmpeg"], ["xterm"], ["fonts-dejavu-core"]]);
+  assert.deepEqual(apt.optional, [["libgl1-mesa-dri"], ["pulseaudio"], ["pulseaudio-utils"], ["ffmpeg"], ["xcompmgr"], ["xterm"], ["fonts-dejavu-core"]]);
 
   const dnf = desktopInstallPlan(fresh, missingPackages, "dnf");
   assert.deepEqual(dnf.required, [["tigervnc-server-minimal"], ["openbox"]]);
-  assert.deepEqual(dnf.optional, [["mesa-dri-drivers"], ["pulseaudio"], ["pulseaudio-utils"], ["ffmpeg", "ffmpeg-free"], ["xterm"], ["dejavu-sans-fonts"]]);
+  assert.deepEqual(dnf.optional, [["mesa-dri-drivers"], ["pulseaudio"], ["pulseaudio-utils"], ["ffmpeg", "ffmpeg-free"], ["xcompmgr"], ["xterm"], ["dejavu-sans-fonts"]]);
   assert.equal(manualInstallCommand("dnf", dnf.required), "sudo dnf install -y tigervnc-server-minimal openbox");
 
   const complete = facts(INSTALLED);
@@ -164,7 +166,7 @@ test("the install hint says Orquester installs, or why it cannot", () => {
   const { missingPackages } = evaluateBoxDesktop(fresh);
   assert.equal(
     boxDesktopInstallHint(fresh, missingPackages, "dev"),
-    "Orquester installs tigervnc-standalone-server openbox libgl1-mesa-dri pulseaudio pulseaudio-utils ffmpeg xterm fonts-dejavu-core in the box when a desktop opens."
+    "Orquester installs tigervnc-standalone-server openbox libgl1-mesa-dri pulseaudio pulseaudio-utils ffmpeg xcompmgr xterm fonts-dejavu-core in the box when a desktop opens."
   );
   assert.match(
     boxDesktopInstallHint({ ...fresh, sudo: false }, missingPackages, "dev") ?? "",

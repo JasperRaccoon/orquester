@@ -24,7 +24,8 @@ export const DESKTOP_TOOLS: readonly DesktopToolSpec[] = [
   { name: "tmux", pkg: "tmux", required: true },
   { name: "pulseaudio", pkg: "pulseaudio", required: false },
   { name: "pactl", pkg: "pulseaudio-utils", required: false },
-  { name: "ffmpeg", pkg: "ffmpeg", required: false }
+  { name: "ffmpeg", pkg: "ffmpeg", required: false },
+  { name: "xcompmgr", pkg: "xcompmgr", required: false }
 ];
 
 /** Ubuntu package of Mesa's software OpenGL driver (recommended, not required). */
@@ -39,7 +40,8 @@ const PACKAGE_ORDER = [
   "dbus-x11",
   "libgl1-mesa-dri",
   "tmux",
-  "ffmpeg"
+  "ffmpeg",
+  "xcompmgr"
 ];
 
 /**
@@ -207,6 +209,9 @@ export function evaluateDesktopHost(
   }
   if (ffmpeg && !opus) {
     warnings.push("ffmpeg has no libopus encoder; desktops run without sound.");
+  }
+  if (found("xcompmgr") === null) {
+    warnings.push("xcompmgr is not installed; menus and popovers of GTK 4 apps show black boxes around them.");
   }
   if (!facts.machineId) {
     warnings.push("/etc/machine-id is missing or empty; D-Bus and PulseAudio may refuse to start.");
