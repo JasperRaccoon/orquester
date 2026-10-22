@@ -226,8 +226,8 @@ export function buildForkTranscript(input: {
  * assistant messages within `budgetBytes` (`continuationBudgetBytes` of the target model's window)
  * — the original request and the newest prompt and reply first, then the newest history that
  * fits — rendered with the source's agent and model, what was left out and how the new agent
- * reads it (`read_transcript` on the parent). `null` when the kept turns hold no message the fold still has — the child then
- * starts fresh (`unavailable`), as a same-agent fork does.
+ * reads it (`read_transcript` on the parent). `null` when the kept turns hold no message the fold
+ * still has — the child then starts fresh (`unavailable`), as a same-agent fork does.
  */
 export function buildContinuationTranscript(input: {
   items: readonly ThreadItem[];

@@ -411,7 +411,9 @@ export function selectHandoffMessages(
     for (let index = count - 1; index >= 0; index -= 1) if (messages[index]!.role === role) return index;
     return -1;
   };
-  const anchors = [lastOf("user"), lastOf("assistant"), firstUser].filter((index, position, all) => index >= 0 && all.indexOf(index) === position);
+  const anchors = [lastOf("user"), lastOf("assistant"), firstUser].filter(
+    (index, position, all) => index >= 0 && all.indexOf(index) === position
+  );
   for (let kept = anchors.length; kept > 0; kept -= 1) {
     const candidates = anchors.slice(0, kept);
     const room = budget - countSpans(count, candidates) * OMITTED_MARKER_BYTES;
