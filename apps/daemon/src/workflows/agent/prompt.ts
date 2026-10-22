@@ -7,6 +7,7 @@
 // variable read fails the block naming it — a prompt is never sent missing its variables.
 
 import { escapePromptVariables, gitStatusSection, renderTemplate, WORKFLOW_LIMITS, type AgentBlockConfig, type AgentFailureReason } from "@orquester/api";
+import { HANDOFF_PREAMBLE_BYTES, handoffBudgetBytes } from "@orquester/api/agent-chat";
 import type { NodeExecutionContext, PromptRenderer } from "../contracts.ts";
 import { tailUtf8, truncateUtf8 } from "../run-context.ts";
 
@@ -54,7 +55,8 @@ function clipUtf8Tail(text: string, maxBytes: number): { text: string; truncated
 
 /**
  * §5.4 step 4: the original rendered prompt, the handoff notice, the previous agent's last
- * assistant messages (≤ 32 KiB, newest kept) and `git status --short` (≤ 8 KiB).
+ * assistant messages (≤ 32 KiB, newest kept — less when the next model's window leaves less,
+ * {@link handoffMessagesBudget}) and `git status --short` (≤ 8 KiB).
  */
 export function buildHandoffPrompt(input: {
   originalPrompt: string;
@@ -64,9 +66,12 @@ export function buildHandoffPrompt(input: {
   previousMessages: string;
   gitStatus: string | null;
   autonomyNote: boolean;
+  /** The most bytes of the previous agent's messages carried; default the 32 KiB cap. */
+  messagesBudgetBytes?: number;
 }): string {
   const parts = [input.originalPrompt, handoffNotice(input.previousAgent, input.previousReason)];
-  const messages = clipUtf8Tail(input.previousMessages.trim(), WORKFLOW_LIMITS.handoffMessagesBytes);
+  const budget = Math.min(WORKFLOW_LIMITS.handoffMessagesBytes, Math.max(0, input.messagesBudgetBytes ?? WORKFLOW_LIMITS.handoffMessagesBytes));
+  const messages = clipUtf8Tail(input.previousMessages.trim(), budget);
   if (messages.text) {
     parts.push(`The previous agent's last messages${messages.truncated ? " (the oldest part cut)" : ""}:\n\n${messages.text}`);
   }
@@ -75,6 +80,22 @@ export function buildHandoffPrompt(input: {
     parts.push(gitStatusSection(input.gitStatus, WORKFLOW_LIMITS.handoffGitStatusBytes));
   }
   return withAutonomyNote(parts.join("\n\n"), input.autonomyNote);
+}
+
+/**
+ * How much of the previous agent's messages a handoff prompt may carry into a model with
+ * `contextWindow` tokens (unknown: the shared fallback): what the window leaves after its reserve,
+ * the original prompt, the handoff's own words and the git section — never over the 32 KiB cap.
+ */
+export function handoffMessagesBudget(input: { contextWindow: number | undefined; originalPrompt: string; gitStatus: string | null }): number {
+  return handoffBudgetBytes({
+    contextWindow: input.contextWindow,
+    reservedBytes:
+      Buffer.byteLength(input.originalPrompt, "utf8") +
+      HANDOFF_PREAMBLE_BYTES +
+      (input.gitStatus !== null ? WORKFLOW_LIMITS.handoffGitStatusBytes : 0),
+    capBytes: WORKFLOW_LIMITS.handoffMessagesBytes
+  });
 }
 
 /** §5.4 step 3 for an account whose login was refused (the account moved for a sign-in failure). */

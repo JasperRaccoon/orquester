@@ -9,7 +9,8 @@ import type { AgentBlockOutput } from "./executor.ts";
 import { candidateKey, coolDown, emptyMemory, type FailoverDeps } from "./failover.ts";
 import { FakeClock } from "./testing/fake-clock.ts";
 import { MemoryCooldowns, staticAccounts, staticUsage } from "./testing/fake-context.ts";
-import { FakeChatHost } from "./testing/fake-chat-host.ts";
+import { buildHandoffPrompt, handoffMessagesBudget } from "./prompt.ts";
+import { DEFAULT_FAKE_AGENTS, FakeChatHost, type FakeAgent } from "./testing/fake-chat-host.ts";
 import { byAccount, type ProviderStep } from "./testing/fake-chat-host.ts";
 import { account, agentNode, testWorkflow } from "./testing/fake-context.ts";
 import { Scenario } from "./testing/scenario.ts";
@@ -163,6 +164,41 @@ test("the handoff caps the previous messages at 32 KiB (newest kept) and git sta
   const handoff = sc.host.turnLog.find((t) => t.refId === "codex")!.input;
   assert.ok(handoff.includes("NEWEST"));
   assert.ok(Buffer.byteLength(handoff) < 32 * 1024 + 8 * 1024 + 2 * 1024);
+});
+
+test("the handoff carries less into a small context window: what the window leaves after the prompt (newest kept)", async () => {
+  const agents: FakeAgent[] = [
+    ...DEFAULT_FAKE_AGENTS.filter((a) => a.id !== "opencode"),
+    { id: "opencode", name: "OpenCode", adapter: "opencode", models: [{ slug: "oc/small", name: "Small", isDefault: true, contextWindow: 30_000 }] }
+  ];
+  const sc = new Scenario({
+    agents,
+    accounts: [account("claude", "a1")],
+    behaviour: byAccount({ a1: [{ kind: "say", text: `old ${"x".repeat(20 * 1024)}` }, { kind: "say", text: "NEWEST" }, { kind: "limit" }], opencode: ok() })
+  });
+  const prompt = "Fix issue #7.";
+  const wf = testWorkflow([agentNode("n1", { chain: chain(["claude", "opus"], ["opencode", "oc/small"]), prompt: { kind: "text", text: prompt } })]);
+  await sc.run(wf, "n1");
+  const handoff = sc.host.turnLog.find((t) => t.refId === "opencode")!.input;
+  assert.ok(handoff.startsWith(`${prompt}\n\n`) && handoff.includes("NEWEST"));
+  const budget = handoffMessagesBudget({ contextWindow: 30_000, originalPrompt: prompt, gitStatus: " M src/app.ts\n" });
+  assert.equal(budget, 30_000 - 16_000 - Buffer.byteLength(prompt) - 2 * 1024 - 8 * 1024);
+  const carried = /The previous agent's last messages \(the oldest part cut\):\n\n([\s\S]*?)\n\n`git status/.exec(handoff)?.[1] ?? "";
+  assert.ok(carried.endsWith("NEWEST") && Buffer.byteLength(carried) <= budget, "only the window's share, newest kept");
+});
+
+test("the handoff budget: the 32 KiB cap, a known window, the fallback and a prompt that fills the window", () => {
+  assert.equal(handoffMessagesBudget({ contextWindow: undefined, originalPrompt: "p", gitStatus: null }), 32 * 1024);
+  assert.equal(handoffMessagesBudget({ contextWindow: 1_000_000, originalPrompt: "p", gitStatus: " M a" }), 32 * 1024);
+  assert.equal(handoffMessagesBudget({ contextWindow: 20_000, originalPrompt: "p", gitStatus: null }), 20_000 - 16_000 - 1 - 2 * 1024);
+  assert.equal(handoffMessagesBudget({ contextWindow: 20_000, originalPrompt: "p".repeat(10_000), gitStatus: null }), 0);
+  const text = buildHandoffPrompt({ originalPrompt: "P", previousAgent: "claude", previousMessages: "old\n\nNEWEST", gitStatus: null, autonomyNote: false, messagesBudgetBytes: 6 });
+  assert.match(text, /last messages \(the oldest part cut\):\n\nNEWEST$/);
+  assert.doesNotMatch(
+    buildHandoffPrompt({ originalPrompt: "P", previousAgent: "claude", previousMessages: "old", gitStatus: null, autonomyNote: false, messagesBudgetBytes: 0 }),
+    /last messages/,
+    "nothing carried when the window leaves nothing"
+  );
 });
 
 test("OpenCode has no accounts: a limit goes to the next chain entry", async () => {
