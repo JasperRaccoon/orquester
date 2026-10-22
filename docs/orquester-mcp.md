@@ -58,58 +58,41 @@ Endpoint summary:
 | URL (local, HTTP enabled) | `http://127.0.0.1:47831/mcp` |
 | Method / transport | `POST` · MCP **Streamable HTTP**, stateless (`enableJsonResponse`); `GET` and `DELETE` answer `405` with `Allow: POST` |
 | Required request header | `Accept: application/json, text/event-stream` (MCP client libs set this automatically) |
-| Auth | `Authorization: Bearer <credential>` (see §3) |
+| Auth | `Authorization: Bearer <api-token>` (see §3) |
 | Request body | At most 16 MiB (room for inline base64 attachments, §9) |
 | Server | `orquester` 3.0.0, with a short `instructions` block for the driving model (≤ 2 KB) |
 
 ---
 
-## 3. Authentication — derive the bearer once
+## 3. Authentication — create an API token
 
-The credential is **not** the plaintext password. It is:
+The bearer is an **API token** you create in the app: **Settings → Server → Signed-in devices
+and API tokens → API token**. Name it after the client (`Claude Code on my laptop`), then copy
+it — it is shown once (the daemon keeps only a SHA-256 digest of it) and starts with `orq_`.
 
-```
-base64( "<username>:<bcrypt(password, salt)>" )
-```
+- An API token works until you revoke it in the same list. Changing the password does **not**
+  revoke API tokens (it signs every device out); **Revoke all others** does.
+- The password, its bcrypt hash in `daemon.json`, and the old `base64("<username>:<hash>")`
+  credential are **not** bearers: `/mcp` answers `401` to all of them.
+- Without the app, mint one with the password over the API (the login route is throttled per IP):
 
-where `salt` is the daemon's bcrypt salt (cost 12), fetched from the public
-`GET /api/auth/info`. MCP clients can't run bcrypt per-request, so **compute the bearer once**
-and paste it into the client config as a static header.
+  ```sh
+  # A device session (lapses after 30 days unused) — exchange it for an API token right away.
+  T=$(curl -sS https://<your-domain>/api/auth/login -H 'Content-Type: application/json' \
+        -d '{"username":"<username>","password":"<password>","label":"setup"}' | jq -r .token)
+  curl -sS https://<your-domain>/api/auth/tokens -H "Authorization: Bearer $T" \
+    -H 'Content-Type: application/json' -d '{"label":"Claude Code on my laptop"}' | jq -r .token
+  curl -sS -X POST https://<your-domain>/api/auth/logout -H "Authorization: Bearer $T"
+  ```
 
-Save this as `compute-bearer.mjs` and run it from the Orquester repo's `apps/daemon` directory
-(where `bcryptjs` is already installed) — or in any dir after `npm i bcryptjs`:
-
-```js
-// Usage: node compute-bearer.mjs https://your-domain.com <username> '<password>'
-import bcrypt from "bcryptjs";
-
-const [baseUrl, username, password] = process.argv.slice(2);
-if (!baseUrl || !username || password == null) {
-  throw new Error("usage: node compute-bearer.mjs <baseUrl> <username> <password>");
-}
-const info = await (await fetch(new URL("/api/auth/info", baseUrl))).json();
-if (!info.authRequired || !info.salt) {
-  throw new Error(`daemon reports authRequired=${info.authRequired} (no salt to derive against)`);
-}
-const hash = await bcrypt.hash(password, info.salt);          // salt carries the cost (12)
-const credential = Buffer.from(`${username}:${hash}`).toString("base64");
-console.log(`Authorization: Bearer ${credential}`);
-```
-
-```sh
-node compute-bearer.mjs https://your-domain.com admin 'your-password'
-# → Authorization: Bearer YWRtaW46JDJhJDEyJC4uLg==
-```
-
-> **Treat the bearer like the password** — it grants full drive of every session. Store it only in
-> your MCP client's secret config. If the daemon password is rotated, the salt changes and you must
-> re-derive.
+> **Treat the token like the password** — it grants full drive of every session. Store it only in
+> your MCP client's secret config, and revoke it from Settings → Server when the client goes away.
 
 ---
 
 ## 4. Install into a client
 
-Replace `<URL>` with your endpoint and `<CREDENTIAL>` with the `base64(...)` value from §3.
+Replace `<URL>` with your endpoint and `<CREDENTIAL>` with the API token from §3.
 
 > **For agents outside Orquester.** Every agent chatting inside Orquester already gets its own
 > thread-scoped server, also named `orquester`, with this whole catalog under tiers and approval
@@ -189,7 +172,7 @@ curl -sS -X POST <URL> \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
 ```
 
-Expect a `200` with the tool list. `401` = bad bearer · `406` = missing the `Accept` header ·
+Expect a `200` with the tool list. `401` = bad, revoked or legacy bearer · `406` = missing the `Accept` header ·
 `404` = HTTP transport off / wrong path / you hit the socket · `405` = not a `POST`.
 
 ---
@@ -1835,7 +1818,7 @@ limit (the daemon's backoff floor applies) but is still not for polling loops.
 
 | Symptom | Cause / fix |
 |---|---|
-| `401` | Missing/invalid bearer. Re-derive (§3); the salt changes if the password rotated. |
+| `401` | Missing, revoked or legacy bearer. Create an API token (§3); a password change does not revoke API tokens. |
 | `406` | Missing `Accept: application/json, text/event-stream` (raw clients only; SDK clients set it). |
 | `404` on `/mcp` | HTTP transport not enabled, wrong path, or you hit the **unix socket** (`/mcp` is HTTP-only). |
 | `405` on `/mcp` | Not a `POST`. The endpoint is stateless: there is no `GET` event stream and no session to `DELETE`. |

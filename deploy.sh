@@ -133,14 +133,15 @@ cmd_rotate_password() {
   # The daemon hashes ORQUESTER_HTTP_PASSWORD only when daemon.json has no
   # passwordHash yet (migrateHttpPassword, apps/daemon/src/index.ts) — a restart
   # alone leaves the OLD password valid. So: patch daemon.env, delete the stale
-  # hash, restart, then PROVE the rotation by comparing /api/auth/info's salt
-  # (the hash prefix) across the restart before printing anything.
+  # hash, restart, then PROVE the rotation by comparing daemon.json's stored
+  # hash across the restart before printing anything. The new hash signs every
+  # device out on boot (apps/daemon/src/auth/sessions.ts); API tokens stay.
   remote_run "set -e
 env_file=/etc/orquester/daemon.env
 cfg=/var/lib/orquester/daemon/daemon.json
-salt() { curl -fsS --retry 5 --retry-delay 1 http://127.0.0.1:47831/api/auth/info | sed -n 's/.*\"salt\":\"\([^\"]*\)\".*/\1/p'; }
+stored_hash() { ${s:+$s }node -e \"const c=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'));process.stdout.write(String(((c.transports||{}).http||{}).passwordHash||''))\" \"\$cfg\" 2>/dev/null; }
 ${s:+$s }grep -q '^ORQUESTER_HTTP_PASSWORD=' \"\$env_file\" || { echo \"rotate-password: no ORQUESTER_HTTP_PASSWORD= line in \$env_file — nothing rotated\" >&2; exit 1; }
-before=\$(salt || true)
+before=\$(stored_hash || true)
 new=\$(openssl rand -base64 32)
 ${s:+$s }sed -i \"s|^ORQUESTER_HTTP_PASSWORD=.*|ORQUESTER_HTTP_PASSWORD=\$new|\" \"\$env_file\"
 # From here the new password exists only on this box. If anything below aborts
@@ -152,7 +153,7 @@ if ${s:+$s }test -f \"\$cfg\"; then
 fi
 ${s:+$s }systemctl restart orquester
 curl -fsS --retry 120 --retry-delay 1 --retry-max-time 150 --retry-connrefused http://127.0.0.1:47831/health; echo
-after=\$(salt || true)
+after=\$(stored_hash || true)
 if [ \"\$after\" = \"\$before\" ] && [ -n \"\$after\" ]; then
   echo 'rotate-password: FAILED — the stored hash did not change, the OLD password is still valid' >&2
   echo \"rotate-password: read the installed value with: ${s:+$s }grep ORQUESTER_HTTP_PASSWORD \$env_file\" >&2
@@ -160,9 +161,9 @@ if [ \"\$after\" = \"\$before\" ] && [ -n \"\$after\" ]; then
 fi
 if [ -z \"\$after\" ]; then
   # The health check passed, so the daemon is up and has already re-hashed the
-  # NEW password — it is live even though the salt fetch came back empty. Never
+  # NEW password — it is live even though the hash read came back empty. Never
   # swallow it here or the operator is locked out of a password only the VPS knows.
-  echo 'rotate-password: WARNING — could not read /api/auth/info to confirm the rotation.' >&2
+  echo 'rotate-password: WARNING — could not read the stored hash in daemon.json to confirm the rotation.' >&2
   echo 'The new password below is most likely already ACTIVE. Verify by logging in.' >&2
   echo \"If it is not, read the installed value with: ${s:+$s }grep ORQUESTER_HTTP_PASSWORD \$env_file\" >&2
   echo '============================================================'
