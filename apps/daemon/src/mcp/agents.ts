@@ -10,9 +10,10 @@ interface AgentModelOptionView { id: string; label: string; type: "select" | "bo
 /**
  * One model as the composer picker shows it (`providerPickerView`, `@orquester/api` model-selection.ts): `shortName` is
  * the chip label (listed only when it differs from `name`), `hint` the picker row's hint, `isDefault` the model a launch naming none gets (exactly one per
- * catalogue, never a legacy one while another exists). `shortName`/`hint` are optional only for hand-built views.
+ * catalogue, never a legacy one while another exists), `contextWindow` its window in tokens where the catalogue states one.
+ * `shortName`/`hint` are optional only for hand-built views.
  */
-interface AgentModelView { slug: string; name: string; shortName?: string; subProvider?: string; hint?: string; isDefault: boolean; isLegacy?: boolean; options: AgentModelOptionView[] }
+interface AgentModelView { slug: string; name: string; shortName?: string; subProvider?: string; hint?: string; isDefault: boolean; isLegacy?: boolean; contextWindow?: number; options: AgentModelOptionView[] }
 interface AgentAccountView { id: string; label: string; email: string | null; plan: string | null; needsReauth: boolean; isDefault: boolean }
 /** What an agent supports, as list_agents and get_session both report it (`supportsFrom`). */
 export interface AgentSupports { planMode: boolean; rollback: boolean; compaction: boolean; backgroundTasks: boolean; taskStop: boolean; goals: AdapterGoalSupport | null }
@@ -63,6 +64,7 @@ function cleanModel(m: Raw & { slug: string; name: string }): ProviderModel {
     ...(nonEmpty(m.subProvider) ? { subProvider: m.subProvider } : {}),
     ...(m.isDefault === true ? { isDefault: true } : {}),
     ...(m.isLegacy === true ? { isLegacy: true } : {}),
+    ...(typeof m.contextWindow === "number" && Number.isFinite(m.contextWindow) && m.contextWindow > 0 ? { contextWindow: Math.floor(m.contextWindow) } : {}),
     capabilities: { optionDescriptors }
   };
 }

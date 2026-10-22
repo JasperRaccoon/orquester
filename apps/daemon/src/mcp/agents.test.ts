@@ -159,6 +159,18 @@ test("a degraded provider row (an older host's) is normalised field by field, ne
   }
 });
 
+test("a model's context window reaches the view when the catalogue states a usable one", async () => {
+  const withWindows = api().on("GET", "/api/agent/providers", { status: 200, body: { hostInstanceId: "h0", providers: [
+    { id: "grok", refIds: ["grok"], installed: true, version: "1", status: "ready", auth: { status: "authenticated" }, models: [
+      { slug: "a", name: "A", isDefault: true, contextWindow: 500_000, capabilities: null },
+      { slug: "b", name: "B", contextWindow: "big", capabilities: null },
+      { slug: "c", name: "C", contextWindow: -1, capabilities: null }
+    ] }
+  ] } });
+  const grok = findAgent(await loadAgents(withWindows), "grok");
+  assert.deepEqual(grok.models.map((m) => [m.slug, m.contextWindow]), [["a", 500_000], ["b", undefined], ["c", undefined]]);
+});
+
 test("the launch default is the picker's (resolveLaunchModel): a default-flagged legacy model is never chosen, and resolveModelSelection agrees with defaultModel", async () => {
   const legacyFirst = { ...providers, providers: [{ ...providers.providers[0]!, models: [
     { slug: "old", name: "Old", isDefault: true, isLegacy: true, capabilities: null },

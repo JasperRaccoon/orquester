@@ -524,6 +524,7 @@ A terminal tab's `get_session` is just its `SessionView`: there is no transcript
 { id: <agent id>, name, adapter, enabled, installed, version, status: "ready" | "degraded" | "error" | "unknown", message?,
   auth: { status: "authenticated" | "unauthenticated" | "unknown", label?, email? },
   models: [{ slug, name, shortName?, subProvider?, isDefault, isLegacy?,
+             contextWindow?,                       // tokens, where the catalogue states it (OpenCode, Grok)
              options: [{ id, label, type: "select" | "boolean", description?,
                          values?: [{ id, label, description?, isDefault? }] }] }],
              /* shed to fit the result: optionsOmitted: true in place of options */
