@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { keysymForCodePoint, keysymForNamedKey, keysymsForText } from "./desktop-keys.ts";
+import { keysymForCodePoint, keysymForNamedKey, keysymsForText, pasteKeystroke } from "./desktop-keys.ts";
 
 test("Latin-1 characters are their own keysym", () => {
   assert.equal(keysymForCodePoint("a".codePointAt(0)!), 0x61);
@@ -24,6 +24,21 @@ test("newline and tab map to Return and Tab; other controls are dropped", () => 
 
 test("text splits by code point, not UTF-16 unit", () => {
   assert.deepEqual(keysymsForText("a😀\n"), [0x61, 0x0101f600, 0xff0d]);
+});
+
+test("a paste chord replays as Ctrl+V, keeping Shift with an uppercase keysym", () => {
+  const keysyms = (steps: ReturnType<typeof pasteKeystroke>) => steps.map((s) => [s.keysym, s.down]);
+  assert.deepEqual(keysyms(pasteKeystroke(null, false)), [[0xffe3, true], [0x76, true], [0x76, false], [0xffe3, false]]);
+  assert.deepEqual(keysyms(pasteKeystroke({ shift: false, alt: false, meta: false }, false)), keysyms(pasteKeystroke(null, false)));
+  // Ctrl+Shift+V (terminals): `V`, so Xvnc does not release the held Shift.
+  assert.deepEqual(keysyms(pasteKeystroke({ shift: true, alt: false, meta: false }, false)), [[0xffe3, true], [0x56, true], [0x56, false], [0xffe3, false]]);
+});
+
+test("Cmd+V on a Mac releases the Alt noVNC sent for Cmd before Ctrl+V", () => {
+  const steps = pasteKeystroke({ shift: false, alt: false, meta: true }, true);
+  assert.deepEqual(steps[0], { keysym: 0xffe9, code: "MetaLeft", down: false });
+  assert.deepEqual(steps.slice(1).map((s) => s.keysym), [0xffe3, 0x76, 0x76, 0xffe3]);
+  assert.deepEqual(pasteKeystroke({ shift: false, alt: false, meta: true }, false)[0], { keysym: 0xffeb, code: "MetaLeft", down: false });
 });
 
 test("named keys", () => {

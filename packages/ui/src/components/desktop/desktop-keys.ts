@@ -22,8 +22,50 @@ export const XK = {
   Control_L: 0xffe3,
   Alt_L: 0xffe9,
   Super_L: 0xffeb,
+  Mode_switch: 0xff7e,
+  V: 0x0056,
   v: 0x0076
 } as const;
+
+/** The modifiers held for a local paste chord (Ctrl+V, Ctrl+Shift+V, Cmd+V). */
+export interface PasteChord {
+  shift: boolean;
+  alt: boolean;
+  meta: boolean;
+}
+
+export interface KeyStep {
+  keysym: number;
+  code: string;
+  down: boolean;
+}
+
+/**
+ * The keystroke that pastes the desktop's clipboard for a local paste chord,
+ * as noVNC `sendKey` steps. noVNC has already sent the chord's modifier
+ * presses (its keyboard handler saw them); only the V was held back.
+ *
+ * - Shift stays held, and the keysym is `V`: Xvnc maps keysyms, so a
+ *   lowercase `v` under Shift made it release Shift and terminals got a bare
+ *   Ctrl+V instead of their Ctrl+Shift+V paste.
+ * - Alt and Cmd/Super are released first: Linux apps paste with Ctrl, and
+ *   Cmd+V on a Mac (which noVNC forwards as Alt) must not arrive as Ctrl+Alt+V.
+ *   noVNC maps Cmd to Alt_L and Option to Mode_switch on Apple platforms.
+ */
+export function pasteKeystroke(chord: PasteChord | null, apple: boolean): KeyStep[] {
+  const steps: KeyStep[] = [];
+  const release = (keysym: number, code: string) => steps.push({ keysym, code, down: false });
+  if (chord?.meta) release(apple ? XK.Alt_L : XK.Super_L, "MetaLeft");
+  if (chord?.alt) release(apple ? XK.Mode_switch : XK.Alt_L, "AltLeft");
+  const v = chord?.shift ? XK.V : XK.v;
+  steps.push(
+    { keysym: XK.Control_L, code: "ControlLeft", down: true },
+    { keysym: v, code: "KeyV", down: true },
+    { keysym: v, code: "KeyV", down: false },
+    { keysym: XK.Control_L, code: "ControlLeft", down: false }
+  );
+  return steps;
+}
 
 export type LatchModifier = "ctrl" | "alt" | "super";
 
