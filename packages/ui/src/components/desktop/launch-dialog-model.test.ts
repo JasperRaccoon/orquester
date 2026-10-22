@@ -13,6 +13,7 @@ import {
   executableCommand,
   rankSuggestions,
   rowsFromEnv,
+  startingDesktopDetail,
   suggestionItems
 } from "./launch-dialog-model.ts";
 
@@ -140,4 +141,18 @@ test("daemon errors show their message and a 409's install hint", () => {
   assert.ok(message.includes("sudo apt-get install -y tigervnc-standalone-server"));
   assert.equal(describeLaunchError(new Error("boom")), "boom");
   assert.equal(describeLaunchError({ serverMessage: null, message: "x", body: { hint: "x" } }), "x");
+});
+
+test("while a new desktop starts, the dialog follows its detail; older and other projects' desktops are not it", () => {
+  const known = new Set(["old"]);
+  const base = { projectPath: "/w/p", status: "starting" as const };
+  assert.equal(startingDesktopDetail([], "/w/p", known), null);
+  assert.equal(startingDesktopDetail([{ ...base, id: "old", statusDetail: "Installing" }], "/w/p", known), null);
+  assert.equal(startingDesktopDetail([{ ...base, id: "x", projectPath: "/w/q", statusDetail: "Installing" }], "/w/p", known), null);
+  assert.equal(startingDesktopDetail([{ ...base, id: "new" }], "/w/p", known), null);
+  assert.equal(startingDesktopDetail([{ ...base, id: "new", status: "running", statusDetail: "done" }], "/w/p", known), null);
+  assert.equal(
+    startingDesktopDetail([{ ...base, id: "new", statusDetail: " Unpacking openbox (3.6.1) ... " }], "/w/p", known),
+    "Unpacking openbox (3.6.1) ..."
+  );
 });
