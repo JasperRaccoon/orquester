@@ -496,6 +496,7 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
         sessions,
         browsers: attachment.browsers,
         browserRunsInBox: (projectPath) => vmBrowsers.runsInBox(projectPath),
+        ownPorts: (boxId) => vmBrowsers.ownPorts(boxId),
         logger: { warn: (message, meta) => logger.warn(`[boxes] ${message}`, meta ?? "") }
       });
       await forwards.restore().catch((error) => logger.warn("[boxes] Restoring dev-server forwards failed", errorText(error)));

@@ -17,7 +17,7 @@ function session(status: SessionSummary["status"]): SessionSummary {
   return { id: "s-1", kind: "shell", refId: "bash", title: "Bash", projectPath: PROJECT, cwd: PROJECT, cols: 80, rows: 24, status, order: 0, createdAt: "x" };
 }
 
-function rig(options: { ports?: BoxListeningPort[]; fakeForward?: boolean; browserInBox?: boolean } = {}) {
+function rig(options: { ports?: BoxListeningPort[]; fakeForward?: boolean; browserInBox?: boolean; ownPorts?: number[] } = {}) {
   const connection = localBoxConnection({ boxId: "box-1" });
   const forwardCalls: { boxPort: number; hostPort?: number }[] = [];
   const closed: number[] = [];
@@ -53,7 +53,8 @@ function rig(options: { ports?: BoxListeningPort[]; fakeForward?: boolean; brows
     hub: boxes.hub,
     sessions: { list: (projectPath) => sessions.filter((s) => projectPath === undefined || s.projectPath === projectPath), lifecycle: sessionEvents },
     browsers: { list: (projectPath) => tabs.filter((t) => projectPath === undefined || t.projectPath === projectPath), lifecycle: browserEvents },
-    ...(options.browserInBox !== undefined ? { browserRunsInBox: (projectPath: string) => options.browserInBox! && boxes.registry.locate(projectPath).kind === "box" } : {})
+    ...(options.browserInBox !== undefined ? { browserRunsInBox: (projectPath: string) => options.browserInBox! && boxes.registry.locate(projectPath).kind === "box" } : {}),
+    ...(options.ownPorts ? { ownPorts: (boxId: string) => (boxId === "box-1" ? options.ownPorts! : []) } : {})
   });
   return {
     connection,
@@ -156,6 +157,23 @@ test("a box tab opened on localhost:<port> gets a same-port forward; host projec
     assert.deepEqual(await r.forwards.suggestions("/srv/workspaces/acme/host-project", ["http://localhost:1234"]), ["http://localhost:1234"]);
     r.connection.setConnected(false);
     assert.deepEqual(await r.forwards.suggestions(PROJECT, ["http://localhost:5173"]), [], "nothing to suggest while the box is away");
+  } finally {
+    await r.forwards.dispose();
+  }
+});
+
+test("the VM browser's own debugging port in the box is never offered as a dev server", async () => {
+  const r = rig({
+    fakeForward: true,
+    browserInBox: true,
+    ownPorts: [37225],
+    ports: [
+      { port: 37225, address: "127.0.0.1", pid: 3, command: "chrome" },
+      { port: 8000, address: "0.0.0.0", pid: 4, command: "python3" }
+    ]
+  });
+  try {
+    assert.deepEqual(await r.forwards.suggestions(PROJECT, ["http://127.0.0.1:37225/json"]), ["http://localhost:8000"]);
   } finally {
     await r.forwards.dispose();
   }

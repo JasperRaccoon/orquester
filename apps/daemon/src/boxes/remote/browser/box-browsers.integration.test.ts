@@ -305,6 +305,8 @@ test("a Linux box project's tab runs Chromium in the box: frames, navigation, no
   const debugPort = chrome.debugPort;
   const [forward] = r.connection.forwards;
   assert.equal(forward!.forward.hostPort, debugPort);
+  // Its box-side port is Orquester's own: the Browser tab's suggestions leave it out.
+  assert.deepEqual(r.vm.ownPorts("box-vm"), [forward!.forward.boxPort]);
   const version = await getThrough(debugPort, "/json/version");
   assert.equal(version.status, 200);
   await assert.rejects(r.manager.devtoolsPort(created.id), { statusCode: 409, message: VM_DEVTOOLS_REFUSED });
@@ -319,6 +321,7 @@ test("a Linux box project's tab runs Chromium in the box: frames, navigation, no
   assert.equal(r.connection.forwards.every((entry) => entry.closed), true);
   assert.equal(await refused(debugPort), true);
   assert.deepEqual(r.vm.list(), []);
+  assert.deepEqual(r.vm.ownPorts("box-vm"), []);
 });
 
 test("a dropped link evicts the box Chromium; the leftover is stopped on reconnect and Relaunch starts a new one", { skip: SKIP, timeout: TIMEOUT }, async (t) => {
