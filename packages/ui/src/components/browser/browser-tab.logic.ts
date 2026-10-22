@@ -40,6 +40,17 @@ export function vmStartingText(browser: Pick<BrowserSummary, "status" | "runsIn"
   return browser.progress?.trim() || "Starting Chromium in the VM…";
 }
 
+/**
+ * The DevTools panel's note for a VM tab, or null when DevTools may load. The daemon refuses
+ * DevTools for a Chromium in a VM: its frontend files would come from the VM and run
+ * same-origin with the app, so the panel never loads them.
+ */
+export function vmDevtoolsNote(browser: Pick<BrowserSummary, "runsIn">): string | null {
+  return browser.runsIn === "box"
+    ? "DevTools is not available for a browser that runs in the VM: its DevTools would come from the VM, which this app does not trust with its session."
+    : null;
+}
+
 /** The no-sandbox warning's tooltip, where the Chromium runs. */
 export function unsandboxedTitle(runsIn: BrowserSummary["runsIn"]): string {
   return runsIn === "box" ? "Chromium is running without its sandbox in the VM" : "Chromium is running without its sandbox on this host";

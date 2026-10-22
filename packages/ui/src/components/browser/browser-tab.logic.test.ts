@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { boxKindRunsBrowser, browserMenuEntry, unsandboxedTitle, vmStartingText } from "./browser-tab.logic";
+import { boxKindRunsBrowser, browserMenuEntry, unsandboxedTitle, vmDevtoolsNote, vmStartingText } from "./browser-tab.logic";
 
 describe("the VM browser rules", () => {
   it("only Linux boxes run the Browser tab's Chromium", () => {
@@ -34,6 +34,12 @@ describe("the VM browser rules", () => {
     assert.equal(vmStartingText({ status: "running", runsIn: "box", progress: "stale" }), null);
     assert.equal(vmStartingText({ status: "starting", runsIn: "host" }), null);
     assert.equal(vmStartingText({ status: "starting" }), null, "an older daemon's tab is a host tab");
+  });
+
+  it("a VM tab's DevTools panel explains why it stays empty; host tabs load DevTools", () => {
+    assert.match(vmDevtoolsNote({ runsIn: "box" }) ?? "", /not available for a browser that runs in the VM/);
+    assert.equal(vmDevtoolsNote({ runsIn: "host" }), null);
+    assert.equal(vmDevtoolsNote({}), null);
   });
 
   it("the no-sandbox warning says where Chromium runs", () => {

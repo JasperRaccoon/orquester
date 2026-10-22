@@ -12,7 +12,7 @@ import {
   clampDevtoolsSplit, loadDevtoolsSplit, persistDevtoolsSplit
 } from "../../lib/panel-sizes";
 import { PickComposeSheet } from "./PickComposeSheet";
-import { unsandboxedTitle, vmStartingText } from "./browser-tab.logic";
+import { unsandboxedTitle, vmDevtoolsNote, vmStartingText } from "./browser-tab.logic";
 
 const VIEWPORT = { desktop: { w: 1280, h: 800 }, mobile: { w: 390, h: 844 } } as const;
 
@@ -308,7 +308,13 @@ export const BrowserView: React.FC<{ browser: BrowserSummary; active: boolean }>
   // relaunched/crashed tab remounts or shows the placeholder. The DevTools
   // frontend does not auto-reconnect its CDP socket, hence the remount.
   const devtoolsRunning = browser.status === "running" || browser.status === "starting";
-  const devtoolsFrame = !devtoolsRunning ? (
+  // boxes: never an iframe for a VM tab (the daemon refuses it too).
+  const devtoolsNote = vmDevtoolsNote(browser);
+  const devtoolsFrame = devtoolsNote !== null ? (
+      <div className="flex h-full items-center justify-center px-4 text-center text-sm text-neutral-500">
+        {devtoolsNote}
+      </div>
+    ) : !devtoolsRunning ? (
       <div className="flex h-full items-center justify-center px-4 text-center text-sm text-neutral-500">
         DevTools unavailable — the browser is not running
       </div>

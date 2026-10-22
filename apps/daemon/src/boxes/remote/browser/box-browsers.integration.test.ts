@@ -20,9 +20,8 @@ import { PassThrough } from "node:stream";
 import test from "node:test";
 
 import type { BoxDetachedProcInfo, BrowserSummary } from "@orquester/api";
-import { WebSocket } from "ws";
 
-import { BrowserManager } from "../../../browsers.ts";
+import { BrowserManager, VM_DEVTOOLS_REFUSED } from "../../../browsers.ts";
 import type { BoxExecOptions, BoxHostForward, BoxProcess } from "../../contracts.ts";
 import { localBoxConnection, type LocalBoxConnection } from "../../testing.ts";
 import { boxRecord, fakeBoxes } from "../exec/testing.ts";
@@ -269,7 +268,7 @@ function refused(port: number): Promise<boolean> {
   });
 }
 
-/** GET through the forward with a loopback Host, as the daemon's DevTools asset proxy does. */
+/** GET through the forward with a loopback Host (Chromium refuses any other). */
 function getThrough(port: number, path: string): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
     const req = httpRequest({ host: "127.0.0.1", port, path, headers: { host: `127.0.0.1:${port}` } }, (res) => {
@@ -282,7 +281,7 @@ function getThrough(port: number, path: string): Promise<{ status: number; body:
   });
 }
 
-test("a Linux box project's tab runs Chromium in the box: frames, navigation, DevTools, and nothing left after close", { skip: SKIP, timeout: TIMEOUT }, async (t) => {
+test("a Linux box project's tab runs Chromium in the box: frames, navigation, no DevTools, and nothing left after close", { skip: SKIP, timeout: TIMEOUT }, async (t) => {
   const r = await rig(t);
   const created = await r.manager.create(PROJECT);
   assert.equal(created.runsIn, "box");
@@ -301,21 +300,15 @@ test("a Linux box project's tab runs Chromium in the box: frames, navigation, De
   assert.equal(r.manager.get(created.id)?.title, "Box page");
   assert.equal(r.manager.get(created.id)?.url, r.pageUrl);
 
-  // DevTools: the debug port is the forward's; Chromium accepts the loopback Host and no Origin.
-  const debugPort = await r.manager.devtoolsPort(created.id);
-  assert.equal(debugPort, chrome.debugPort);
+  // The CDP endpoint is reached through the forward; DevTools is refused on the daemon's origin
+  // even with the tab running (its frontend would be the box's).
+  const debugPort = chrome.debugPort;
   const [forward] = r.connection.forwards;
   assert.equal(forward!.forward.hostPort, debugPort);
   const version = await getThrough(debugPort, "/json/version");
   assert.equal(version.status, 200);
-  assert.match(version.body, /"Browser"/);
-  const endpoint = await r.manager.devtoolsEndpoint(created.id);
-  const socket = new WebSocket(`ws://127.0.0.1:${endpoint.port}/devtools/page/${endpoint.targetId}`, { headers: { host: `127.0.0.1:${endpoint.port}` } });
-  await once(socket, "open");
-  socket.send(JSON.stringify({ id: 1, method: "Runtime.evaluate", params: { expression: "document.title" } }));
-  const [reply] = (await once(socket, "message")) as [Buffer];
-  assert.equal(JSON.parse(String(reply)).result.result.value, "Box page");
-  socket.close();
+  await assert.rejects(r.manager.devtoolsPort(created.id), { statusCode: 409, message: VM_DEVTOOLS_REFUSED });
+  await assert.rejects(r.manager.devtoolsEndpoint(created.id), { statusCode: 409, message: VM_DEVTOOLS_REFUSED });
 
   // The last tab closes: the process ends, is released, and the forward is gone.
   unsubscribe();
@@ -378,4 +371,29 @@ test("a sandbox failure in the box relaunches unsandboxed and says so; the daemo
   assert.equal(isAlive(proc.pid), false, "shutdown ends the box Chromium while the link is up");
   assert.equal(r.connection.detached.size, 0);
   assert.equal(r.connection.forwards.every((entry) => entry.closed), true);
+});
+
+test("a Chromium channel that fails after the launch (an output overrun) closes that Chromium instead of crashing the daemon", { skip: SKIP, timeout: TIMEOUT }, async (t) => {
+  const r = await rig(t);
+  const created = await r.manager.create(PROJECT);
+  const { unsubscribe } = await subscribeForFrame(r.manager, created.id);
+  const [chrome] = r.vm.list();
+  const proc = r.connection.detached.get(chrome!.procId)!.proc;
+
+  const dropped = nextUpdate(r.manager, (summary) => summary.status === "crashed");
+  // What the box client emits when orq-agent ends a viewer that fell behind the output buffer.
+  (proc as unknown as EventEmitter).emit("error", Object.assign(new Error("the output buffer moved past offset 0"), { code: "OUTPUT_OVERRUN" }));
+  await dropped;
+  unsubscribe();
+  assert.deepEqual(r.vm.list(), []);
+
+  // The tab relaunches on its next subscribe, once the old Chromium is gone: its channel failed,
+  // so it was ended by its id (proc.list, attach, SIGKILL) and released.
+  const again = await subscribeForFrame(r.manager, created.id);
+  assert.equal(isAlive(proc.pid), false);
+  assert.equal(r.connection.detached.has(chrome!.procId), false);
+  assert.notEqual(r.vm.list()[0]?.procId, chrome!.procId);
+  again.unsubscribe();
+  await r.manager.close(created.id);
+  assert.equal(r.connection.detached.size, 0);
 });

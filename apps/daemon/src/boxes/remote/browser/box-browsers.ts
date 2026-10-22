@@ -1,11 +1,12 @@
 /**
  * The VM browser: the Browser tab of a project on a LINUX box runs its
  * Chromium inside the box, so the page's `localhost` is the box's and its dev
- * servers need no host forward. Everything else about the tab — screencast,
- * input, viewports, picker, DevTools — is `BrowserManager`'s, unchanged: this
- * module only supplies the project's {@link BrowserChrome}
- * (`BrowserManager.setRemoteChrome`). macOS and Windows boxes keep the host
- * Chromium and its dev forwards (`remote/exec/dev-forwards.ts`).
+ * servers need no host forward. Screencast, input, viewports and the picker
+ * are `BrowserManager`'s, unchanged: this module only supplies the project's
+ * {@link BrowserChrome} (`BrowserManager.setRemoteChrome`). macOS and Windows
+ * boxes keep the host Chromium and its dev forwards
+ * (`remote/exec/dev-forwards.ts`), and so does every box while no installer
+ * is wired.
  *
  * A launch:
  *
@@ -16,28 +17,36 @@
  *    `orq-agent`'s data dir. The port comes from Chromium's own
  *    `DevTools listening on ws://…` stderr line, within a deadline.
  * 3. A host loopback forward (`forwardToHost`) reaches that port; puppeteer
- *    connects through it and `debugPort` is the forward's port, so the
- *    DevTools proxy (which sends a loopback Host and no Origin) works as for a
- *    host Chromium.
+ *    connects through it over a socket whose messages are size-capped, so a
+ *    box cannot make the daemon buffer without bound.
  * 4. Sandboxing as on the host: sandboxed first, one `--no-sandbox` retry on a
- *    sandbox failure, and `sandboxed: false` reported honestly (directly when
- *    the installer says the box cannot sandbox, e.g. running as root).
+ *    sandbox failure (only once the first process is known to have ended),
+ *    and `sandboxed: false` reported honestly (directly when the installer
+ *    says the box cannot sandbox, e.g. running as root).
+ *
+ * Trust: the box controls what its Chromium serves and says. Nothing it
+ * serves reaches the daemon's origin — `trustedDevtools: false` keeps the
+ * DevTools frontend proxy (same-origin with the app and its credential) off
+ * VM tabs; what does reach the client (frames, titles, URLs, pick payloads)
+ * is data the UI renders as images and text.
  *
  * Lifetime — kill and relaunch, never reattach: the in-box Chromium lives
  * exactly as long as the host's `BrowserChrome` for it. Closing it (the
  * project's last tab, daemon shutdown, the box destroyed) ends the process
- * (CDP `Browser.close`, then SIGKILL), releases it and closes the forward. A
- * dropped link disconnects puppeteer at once, so `BrowserManager` evicts the
- * Chromium and the next subscribe relaunches. Whatever a dropped link or a
- * crashed daemon left running in the box is stopped when the box (re)connects
- * and before any launch of the same project (its profile lock would otherwise
- * hand the new Chromium off to the old one): every `orq-browser-*` process
- * this daemon does not own is a leftover.
+ * (CDP `Browser.close`, then SIGKILL), releases it and closes the forward; a
+ * last tab closed mid-launch aborts the launch, which ends whatever it
+ * started. A dropped link disconnects puppeteer at once, so `BrowserManager`
+ * evicts the Chromium and the next subscribe relaunches. Whatever a dropped
+ * link or a crashed daemon left running in the box is stopped when the box
+ * (re)connects and before any launch of the same project (its profile lock
+ * would otherwise hand the new Chromium off to the old one): every
+ * `orq-browser-*` process this daemon does not own is a leftover.
  */
 
 import { createHash, randomUUID } from "node:crypto";
 
-import puppeteer, { type Browser } from "puppeteer-core";
+import puppeteer, { type Browser, type ConnectionTransport } from "puppeteer-core";
+import { WebSocket } from "ws";
 
 import type { BoxDetachedProcInfo } from "@orquester/api";
 import type { StoredBox } from "@orquester/config";
@@ -66,23 +75,37 @@ export interface BoxBrowserInstaller {
 export interface BoxBrowsersDeps {
   registry: Pick<BoxRegistry, "locate" | "get" | "list" | "onChange">;
   hub: Pick<BoxHub, "get" | "onConnectionChange">;
-  installer: BoxBrowserInstaller;
+  /** Without one, no tab runs in a box: box projects keep the host Chromium and dev forwards. */
+  installer?: BoxBrowserInstaller;
   logger?: { warn(message: string, meta?: Record<string, unknown>): void };
   /** Deadline for Chromium to announce its debugging endpoint. Default 30 s. */
   launchDeadlineMs?: number;
   /** Deadline for a stopping Chromium to exit before it is SIGKILLed (and again after). Default 5 s. */
   exitDeadlineMs?: number;
+  /** Largest CDP message accepted from a box Chromium. Default {@link BOX_CDP_MAX_PAYLOAD}. */
+  cdpMaxPayload?: number;
 }
 
 /** Every detached Chromium process this module starts has an id with this prefix. */
 export const BOX_BROWSER_PROC_PREFIX = "orq-browser-";
 
+/**
+ * Largest CDP message from a box Chromium (puppeteer's own socket allows 256 MiB). Frames and
+ * pick screenshots are a few MiB at most; a larger message closes the socket, which reads as the
+ * browser going away.
+ */
+export const BOX_CDP_MAX_PAYLOAD = 32 * 1024 * 1024;
+
 const DEFAULT_LAUNCH_DEADLINE_MS = 30_000;
 const DEFAULT_EXIT_DEADLINE_MS = 5_000;
+const CDP_HANDSHAKE_DEADLINE_MS = 10_000;
 /** Chromium's stderr kept for a failed launch's message. */
 const STDERR_TAIL_CHARS = 2_000;
-/** The box's output buffer for a Chromium process (only its stderr chatter goes there). */
-const PROC_BUFFER_BYTES = 256 * 1024;
+/**
+ * The box's output buffer for a Chromium process. Its stderr is read as it comes; the buffer
+ * only absorbs bursts while the link is slow (a viewer that falls behind it ends with an error).
+ */
+const PROC_BUFFER_BYTES = 1024 * 1024;
 const PROGRESS_MAX_CHARS = 200;
 
 /** A project box whose Browser tab runs Chromium in the box: the Linux kinds. */
@@ -120,9 +143,35 @@ export function boxChromiumArgs(profileDir: string, noSandbox: boolean): string[
     "--no-default-browser-check",
     "--disable-dev-shm-usage",
     "--mute-audio",
+    // Errors and fatals only (sandbox failures among them): less stderr to carry from the box.
+    "--log-level=2",
     ...(noSandbox ? ["--no-sandbox"] : []),
     "about:blank"
   ];
+}
+
+/**
+ * A CDP transport over `ws` with a message size cap and a handshake deadline (puppeteer's own
+ * allows 256 MiB messages and waits on the handshake without one).
+ */
+export function connectBoundedTransport(url: string, maxPayload: number, handshakeTimeout = CDP_HANDSHAKE_DEADLINE_MS): Promise<ConnectionTransport> {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(url, [], { perMessageDeflate: false, allowSynchronousEvents: false, maxPayload, handshakeTimeout, followRedirects: false });
+    const transport: ConnectionTransport = {
+      send: (message) => {
+        if (ws.readyState === WebSocket.OPEN) ws.send(message);
+      },
+      close: () => ws.close()
+    };
+    ws.on("message", (data: WebSocket.RawData) => {
+      const bytes = Buffer.isBuffer(data) ? data : Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data);
+      transport.onmessage?.(bytes.toString("utf8"));
+    });
+    ws.on("close", () => transport.onclose?.());
+    ws.once("open", () => resolve(transport));
+    // Before open: the connect fails. After: a close follows (an oversized message is a 1009).
+    ws.on("error", (error) => reject(error));
+  });
 }
 
 function errorText(error: unknown): string {
@@ -137,23 +186,38 @@ function hasExited(proc: BoxProcess): boolean {
   return proc.exitCode !== null || proc.signalCode !== null;
 }
 
-/** Resolves true once `proc` reports its exit, false at the deadline or when its channel detaches. */
+/** Processes whose channel detached or failed: no exit will ever be reported on them. */
+const unobservable = new WeakSet<BoxProcess>();
+
+/** Mark `proc` unobservable once its channel detaches or fails; `onError` hears the failure. */
+function observe(proc: BoxProcess, onError: (error: Error) => void): void {
+  proc.on("detached", () => unobservable.add(proc));
+  // Permanent: an unheard "error" event would take the daemon down.
+  proc.on("error", (error) => {
+    unobservable.add(proc);
+    onError(error);
+  });
+  proc.stdin.on("error", () => undefined);
+}
+
+/** Resolves true once `proc` reports its exit; false at the deadline, or at once when it cannot report one. */
 function waitExit(proc: BoxProcess, deadlineMs: number): Promise<boolean> {
   if (hasExited(proc)) return Promise.resolve(true);
+  if (unobservable.has(proc)) return Promise.resolve(false);
   return new Promise<boolean>((resolve) => {
     const done = (exited: boolean): void => {
       clearTimeout(timer);
       proc.off("exit", onExit);
-      proc.off("detached", onDetached);
-      proc.off("error", onDetached);
+      proc.off("detached", onGone);
+      proc.off("error", onGone);
       resolve(exited);
     };
     const onExit = (): void => done(true);
-    const onDetached = (): void => done(false);
+    const onGone = (): void => done(false);
     const timer = setTimeout(() => done(false), deadlineMs);
     proc.on("exit", onExit);
-    proc.on("detached", onDetached);
-    proc.on("error", onDetached);
+    proc.on("detached", onGone);
+    proc.on("error", onGone);
   });
 }
 
@@ -174,6 +238,36 @@ function withDeadline<T>(promise: Promise<T>, ms: number): Promise<T | undefined
   });
 }
 
+function cancelled(): BrowserError {
+  return new BrowserError("The browser launch was cancelled", 409);
+}
+
+/** `promise`, rejected as soon as `signal` aborts (the work itself may finish later, unused). */
+function unlessAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(cancelled());
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => reject(cancelled());
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      }
+    );
+  });
+}
+
+/** A start that failed; `ended` says whether its process is known to be gone (or never ran). */
+class StartFailure extends Error {
+  constructor(readonly reason: unknown, readonly ended: boolean) {
+    super(errorText(reason));
+  }
+}
+
 /** A live box Chromium, as this module tracks it. */
 interface BoxChrome extends BrowserChrome {
   boxId: string;
@@ -185,16 +279,23 @@ export class BoxBrowsers {
   private readonly live = new Map<string, Set<BoxChrome>>();
   /** Process ids this daemon started and has not finished stopping: never a leftover. */
   private readonly owned = new Set<string>();
+  /**
+   * Closes under way per project hash. A Chromium can close on its own (its channel failed, it
+   * crashed) while `BrowserManager` already relaunches: the new one waits for the old one's end.
+   */
+  private readonly closingByProject = new Map<string, Set<Promise<void>>>();
   /** In-flight leftover sweeps per box, so a launch waits for one already running. */
   private readonly sweeping = new Map<string, Promise<void>>();
   private readonly unsubscribe: (() => void)[] = [];
   private readonly stopping = new AbortController();
   private readonly launchDeadlineMs: number;
   private readonly exitDeadlineMs: number;
+  private readonly cdpMaxPayload: number;
 
   constructor(private readonly deps: BoxBrowsersDeps) {
     this.launchDeadlineMs = deps.launchDeadlineMs ?? DEFAULT_LAUNCH_DEADLINE_MS;
     this.exitDeadlineMs = deps.exitDeadlineMs ?? DEFAULT_EXIT_DEADLINE_MS;
+    this.cdpMaxPayload = deps.cdpMaxPayload ?? BOX_CDP_MAX_PAYLOAD;
     this.unsubscribe.push(
       // A box back on its link: what a dropped link or a crashed daemon left running there goes.
       deps.hub.onConnectionChange((boxId, connected) => {
@@ -208,16 +309,18 @@ export class BoxBrowsers {
     );
   }
 
-  /** Whether `projectPath`'s Browser tab runs Chromium in its box (a Linux project box). */
+  /** Whether `projectPath`'s Browser tab runs Chromium in its box (a Linux project box, an installer wired). */
   runsInBox(projectPath: string): boolean {
+    if (!this.deps.installer) return false;
     const location = this.deps.registry.locate(projectPath);
     return location.kind === "box" && boxRunsBrowser(location.record);
   }
 
   /** `BrowserManager`'s seam: the launcher of a Linux box project, null for the host's Chromium. */
   launcherFor(projectPath: string): RemoteChromeLauncher | null {
-    if (!this.runsInBox(projectPath)) return null;
-    return { launch: (options) => this.launch(projectPath, options.onProgress) };
+    const installer = this.deps.installer;
+    if (!installer || !this.runsInBox(projectPath)) return null;
+    return { launch: (options) => this.launch(installer, projectPath, options.onProgress, options.signal) };
   }
 
   /** Stop leftovers in every box linked already (the wiring's attach: boxes that connected before it). */
@@ -240,8 +343,15 @@ export class BoxBrowsers {
 
   // ── launch ────────────────────────────────────────────────────────────────
 
-  private async launch(projectPath: string, onProgress: (line: string) => void): Promise<BrowserChrome> {
+  private async launch(
+    installer: BoxBrowserInstaller,
+    projectPath: string,
+    onProgress: (line: string) => void,
+    tabSignal: AbortSignal
+  ): Promise<BrowserChrome> {
     if (this.stopping.signal.aborted) throw new BrowserError("The daemon is shutting down", 503);
+    const signal = AbortSignal.any([tabSignal, this.stopping.signal]);
+    if (signal.aborted) throw cancelled();
     const location = this.deps.registry.locate(projectPath);
     if (location.kind !== "box") throw new BrowserError("The project is not in a VM", 409);
     const { boxId, record } = location;
@@ -255,16 +365,18 @@ export class BoxBrowsers {
 
     const progress = (line: string): void => {
       const text = line.trim();
-      if (text) onProgress(text.slice(0, PROGRESS_MAX_CHARS));
+      if (text && !signal.aborted) onProgress(text.slice(0, PROGRESS_MAX_CHARS));
     };
     progress("Preparing Chromium in the VM…");
     let runtime: BoxBrowserRuntime;
     try {
-      runtime = await this.deps.installer.ensureBrowser(connection, {
-        signal: this.stopping.signal,
-        onProgress: (line) => progress(`Installing Chromium in the VM: ${line}`)
-      });
+      // A closed tab does not wait out an install: it is told to stop, and not waited for.
+      runtime = await unlessAborted(
+        installer.ensureBrowser(connection, { signal, onProgress: (line) => progress(`Installing Chromium in the VM: ${line}`) }),
+        signal
+      );
     } catch (error) {
+      if (signal.aborted) throw cancelled();
       if (isGuiUnavailable(error)) {
         const reason = error.message.trim().replace(/[.\s]+$/, "");
         const hint = typeof error.hint === "string" && error.hint.trim() ? ` ${error.hint.trim()}` : "";
@@ -274,20 +386,34 @@ export class BoxBrowsers {
     }
 
     const hash = projectBrowserHash(projectPath);
-    // A Chromium of this project still running in the box holds its profile: stop it first.
+    // A Chromium of this project still running in the box holds its profile: let one that is
+    // closing finish, and stop any leftover.
+    await Promise.all(this.closingByProject.get(hash) ?? []);
     await this.sweepBox(boxId, `${BOX_BROWSER_PROC_PREFIX}${hash}-`, connection);
     const profileDir = `${connection.sys.dataDir.replace(/\/+$/, "")}/browser-profiles/${hash}`;
     await connection.request("fs.mkdir", { path: profileDir, recursive: true, mode: 0o700 });
+    if (signal.aborted) throw cancelled();
 
     progress("Starting Chromium in the VM…");
-    if (runtime.noSandbox) return this.start(connection, boxId, hash, runtime.chromiumPath, profileDir, false);
+    const start = (sandboxed: boolean): Promise<BoxChrome> =>
+      this.start(connection, boxId, hash, runtime.chromiumPath, profileDir, sandboxed, signal);
     try {
-      return await this.start(connection, boxId, hash, runtime.chromiumPath, profileDir, true);
+      if (runtime.noSandbox) return await start(false);
+      try {
+        return await start(true);
+      } catch (error) {
+        // As on the host: a sandbox that is not usable in the box is the one retryable failure,
+        // retried once unsandboxed and flagged (never silently). Only while the link is up and
+        // the first process is known to have ended: a link lost mid-connect reads like a crash
+        // ("Connection closed"), and a second Chromium beside a live first one would fight it
+        // for the profile.
+        const retry =
+          error instanceof StartFailure && error.ended && connection.connected && !signal.aborted && isRetryableSandboxFailure(error.reason);
+        if (!retry) throw error;
+        return await start(false);
+      }
     } catch (error) {
-      // As on the host: a sandbox that is not usable in the box is the one retryable failure,
-      // retried once unsandboxed and flagged (never silently).
-      if (!isRetryableSandboxFailure(error)) throw error;
-      return await this.start(connection, boxId, hash, runtime.chromiumPath, profileDir, false);
+      throw error instanceof StartFailure ? error.reason : error;
     }
   }
 
@@ -298,44 +424,53 @@ export class BoxBrowsers {
     hash: string,
     chromiumPath: string,
     profileDir: string,
-    sandboxed: boolean
+    sandboxed: boolean,
+    signal: AbortSignal
   ): Promise<BoxChrome> {
     const procId = `${BOX_BROWSER_PROC_PREFIX}${hash}-${randomUUID().slice(0, 8)}`;
     this.owned.add(procId);
     let proc: BoxProcess | null = null;
     let forward: BoxHostForward | null = null;
     let browser: Browser | null = null;
+    let transport: ConnectionTransport | null = null;
+    /** Set once tracked: a channel failure after the launch closes the Chromium. */
+    let onFailure: ((error: Error) => void) | null = null;
     try {
       proc = connection.exec({
         command: chromiumPath,
         args: boxChromiumArgs(profileDir, !sandboxed),
         detach: { procId, bufferBytes: PROC_BUFFER_BYTES }
       });
-      const endpoint = await this.awaitEndpoint(proc);
-      forward = await connection.forwardToHost(endpoint.port);
-      browser = await puppeteer.connect({
-        browserWSEndpoint: `ws://127.0.0.1:${forward.hostPort}${endpoint.path}`,
-        defaultViewport: null
+      observe(proc, (error) => {
+        this.deps.logger?.warn("box browser: Chromium's channel failed", { boxId, procId, error: error.message });
+        onFailure?.(error);
       });
+      const endpoint = await this.awaitEndpoint(proc, signal);
+      forward = await connection.forwardToHost(endpoint.port);
+      transport = await connectBoundedTransport(`ws://127.0.0.1:${forward.hostPort}${endpoint.path}`, this.cdpMaxPayload);
+      browser = await puppeteer.connect({ transport, defaultViewport: null });
       // A present-but-broken sandbox lets the browser start and then aborts the first renderer:
       // make it fail here (as the host's tryLaunch does) so the unsandboxed retry can run.
       const probe = await browser.newPage();
       await probe.close();
-      // The daemon began shutting down meanwhile: `stop()` has closed what it knew of already.
-      if (this.stopping.signal.aborted) throw new BrowserError("The daemon is shutting down", 503);
+      // The tab closed or the daemon began shutting down meanwhile.
+      if (signal.aborted) throw cancelled();
     } catch (error) {
-      await this.teardown(connection, procId, proc, forward, browser);
-      throw error;
+      // A socket puppeteer never took over is closed here; one it did closes with the browser.
+      if (!browser) transport?.close();
+      const ended = await this.teardown(connection, procId, proc, forward, browser);
+      throw new StartFailure(error, ended);
     }
-    return this.track(connection, boxId, procId, proc, forward, browser, sandboxed);
+    const chrome = this.track(connection, boxId, hash, procId, proc, forward, browser, sandboxed);
+    onFailure = () => void chrome.close();
+    return chrome;
   }
 
   /** Chromium's debugging endpoint from its stderr, within the launch deadline. Keeps draining after. */
-  private awaitEndpoint(proc: BoxProcess): Promise<{ port: number; path: string }> {
-    // Nobody reads Chromium's stdout; its stderr is read for the endpoint and kept flowing after,
-    // so neither ever holds the process back.
+  private awaitEndpoint(proc: BoxProcess, signal: AbortSignal): Promise<{ port: number; path: string }> {
+    // Nobody reads Chromium's stdout; its stderr is read for the endpoint and kept flowing after
+    // (discarded), so neither holds the process back nor falls behind the box's buffer.
     proc.stdout.resume();
-    proc.stdin.on("error", () => undefined);
     return new Promise((resolve, reject) => {
       let pending = "";
       let tail = "";
@@ -344,6 +479,7 @@ export class BoxBrowsers {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        signal.removeEventListener("abort", onAbort);
         proc.off("exit", onExit);
         proc.off("error", onError);
         proc.off("detached", onDetached);
@@ -368,14 +504,20 @@ export class BoxBrowsers {
         }
         if (pending.length > 64 * 1024) pending = pending.slice(-1024);
       };
-      const onExit = (code: number | null, signal: NodeJS.Signals | null): void =>
-        finish(new BrowserError(`Chromium in the VM exited (${signal ?? `code ${code}`}) before it was ready${tailText()}`, 500));
+      const onExit = (code: number | null, exitSignal: NodeJS.Signals | null): void =>
+        finish(new BrowserError(`Chromium in the VM exited (${exitSignal ?? `code ${code}`}) before it was ready${tailText()}`, 500));
       const onError = (error: Error): void => finish(new BrowserError(`Chromium in the VM could not start: ${error.message}`, 500));
       const onDetached = (): void => finish(new BrowserError("The connection to the VM dropped while Chromium was starting.", 409));
+      const onAbort = (): void => finish(cancelled());
       const timer = setTimeout(
         () => finish(new BrowserError(`Chromium in the VM did not expose a debugging endpoint within ${Math.max(1, Math.round(this.launchDeadlineMs / 1000))} s${tailText()}`, 500)),
         this.launchDeadlineMs
       );
+      if (signal.aborted) {
+        onAbort();
+        return;
+      }
+      signal.addEventListener("abort", onAbort, { once: true });
       proc.stderr.on("data", onData);
       proc.on("exit", onExit);
       proc.on("error", onError);
@@ -386,6 +528,7 @@ export class BoxBrowsers {
   private track(
     connection: BoxConnection,
     boxId: string,
+    hash: string,
     procId: string,
     proc: BoxProcess,
     forward: BoxHostForward,
@@ -404,14 +547,28 @@ export class BoxBrowsers {
       browser,
       sandboxed,
       debugPort: forward.hostPort,
+      // Its DevTools frontend would come from the box: never onto the daemon's origin.
+      trustedDevtools: false,
       close: () => {
-        closing ??= (async () => {
+        if (closing) return closing;
+        const run = (async () => {
           offStatus();
           this.live.get(boxId)?.delete(chrome);
           if (this.live.get(boxId)?.size === 0) this.live.delete(boxId);
           await this.teardown(connection, procId, proc, forward, browser);
         })();
-        return closing;
+        closing = run;
+        let pending = this.closingByProject.get(hash);
+        if (!pending) {
+          pending = new Set();
+          this.closingByProject.set(hash, pending);
+        }
+        pending.add(run);
+        void run.then(() => {
+          pending.delete(run);
+          if (pending.size === 0 && this.closingByProject.get(hash) === pending) this.closingByProject.delete(hash);
+        });
+        return run;
       },
       lostReason: () => {
         const record = this.deps.registry.get(boxId);
@@ -430,23 +587,30 @@ export class BoxBrowsers {
     return chrome;
   }
 
-  /** End a Chromium start in any state: CDP close, the process stopped and released, the forward closed. */
+  /**
+   * End a Chromium start in any state: CDP close, the process stopped and released, the forward
+   * closed. Resolves whether the process is known to have ended (or never started).
+   */
   private async teardown(
     connection: BoxConnection,
     procId: string,
     proc: BoxProcess | null,
     forward: BoxHostForward | null,
     browser: Browser | null
-  ): Promise<void> {
+  ): Promise<boolean> {
+    let ended = proc === null;
     try {
       if (browser?.connected) await withDeadline(browser.close(), this.exitDeadlineMs).catch(() => undefined);
       if (proc && connection.connected) {
-        if (!(await waitExit(proc, this.exitDeadlineMs)) && connection.connected) {
+        ended = await waitExit(proc, this.exitDeadlineMs);
+        if (!ended && !unobservable.has(proc) && connection.connected) {
           proc.kill("SIGKILL");
           await connection.request("proc.signal", { procId, signal: "SIGKILL" }).catch(() => undefined);
-          await waitExit(proc, this.exitDeadlineMs);
+          ended = await waitExit(proc, this.exitDeadlineMs);
         }
-        if (hasExited(proc)) await connection.request("proc.release", { procId }).catch(() => undefined);
+        // Its channel is gone (failed, or detached and the link is back): end it by its id.
+        if (!ended && unobservable.has(proc) && connection.connected) ended = await this.stopById(connection, procId);
+        if (ended) await connection.request("proc.release", { procId }).catch(() => undefined);
       }
     } finally {
       // Still running in the box (the link was away): no longer ours, so the next sweep stops it.
@@ -455,6 +619,7 @@ export class BoxBrowsers {
       // running (the link was away) may never end, so it gets the same deadline.
       await withDeadline(forward?.close() ?? Promise.resolve(), this.exitDeadlineMs).catch(() => undefined);
     }
+    return ended;
   }
 
   private async closeBox(boxId: string): Promise<void> {
@@ -502,6 +667,15 @@ export class BoxBrowsers {
     return run;
   }
 
+  /** A process this daemon can no longer follow on its own channel: listed, and stopped if it runs. */
+  private async stopById(connection: BoxConnection, procId: string): Promise<boolean> {
+    const listed = await connection.request("proc.list", {}).catch(() => null);
+    if (listed === null) return false;
+    const info = listed.find((entry) => entry.procId === procId);
+    if (!info || !info.running) return true;
+    return this.stopLeftover(connection, info);
+  }
+
   /** SIGKILL a leftover and wait for the box to report its end (on an attach), within the deadline. */
   private async stopLeftover(connection: BoxConnection, info: BoxDetachedProcInfo): Promise<boolean> {
     let viewer: BoxProcess | null = null;
@@ -509,7 +683,8 @@ export class BoxBrowsers {
       viewer = connection.attach(info.procId, info.outputBytes);
       viewer.stdout.resume();
       viewer.stderr.resume();
-      viewer.stdin.on("error", () => undefined);
+      // Permanent: the viewer may fail (an overrun, the link) after the wait below has settled.
+      observe(viewer, () => undefined);
     } catch {
       viewer = null;
     }
