@@ -1,5 +1,6 @@
 import type { SessionChannel, StreamHandle, StreamHandlers } from "../transporter";
 import { backoffDelayMs } from "../connection/backoff";
+import { noteWsClosed, noteWsOpened } from "../connection/connection-log";
 
 /**
  * Multiplexes every terminal's output/input/resize for one daemon over a single
@@ -117,6 +118,7 @@ export class WsSessionChannel implements SessionChannel {
 
     ws.onopen = () => {
       this.attempts = 0;
+      noteWsOpened(this.wsUrl);
       // Re-subscribe everything. Each is a reconnect for a terminal that already
       // has content, so reset it before the daemon replays its buffer.
       for (const [id, handlers] of this.subs) {
@@ -153,13 +155,16 @@ export class WsSessionChannel implements SessionChannel {
       }
     };
 
-    ws.onclose = () => {
+    ws.onclose = (event: CloseEvent) => {
       // Superseded by an explicit reconnect (wake/credential change): this close
       // is expected — scheduling another dial here would double-connect.
       if (this.ws !== ws) {
         return;
       }
       this.ws = null;
+      // For the connection diagnosis: closes that keep coming while HTTP works
+      // mean something between here and the daemon blocks WebSockets.
+      noteWsClosed(this.wsUrl, typeof event?.code === "number" ? event.code : null);
       // A wake-probe deadline racing this close would tear down the redial.
       this.clearPongDeadline();
       this.scheduleReconnect();
@@ -224,8 +229,13 @@ export function wakeSessionChannels(): void {
   }
 }
 
+/** The terminal WebSocket URL for a daemon's HTTP base URL. */
+export function sessionChannelUrl(httpBaseUrl: string): string {
+  return `${httpBaseUrl.replace(/^http/, "ws").replace(/\/$/, "")}/ws`;
+}
+
 export function getSessionChannel(httpBaseUrl: string, credential?: string): WsSessionChannel {
-  const wsUrl = `${httpBaseUrl.replace(/^http/, "ws").replace(/\/$/, "")}/ws`;
+  const wsUrl = sessionChannelUrl(httpBaseUrl);
   const existing = channels.get(wsUrl);
   if (existing) {
     existing.setCredential(credential);

@@ -5,6 +5,15 @@ import { createTransporter } from "../lib/transporters";
 import { wakeSessionChannels } from "../lib/transporters/ws-session-channel";
 import { wakeBrowserChannels } from "../lib/transporters/ws-browser-channel";
 import { backoffDelayMs, scheduleRetry, wakeReconnects } from "../lib/connection/backoff";
+import { checkHealth, classifyConnectionError, deviceOnline } from "../lib/connection/failure";
+import {
+  noteConnected,
+  noteDaemonStopping,
+  noteServerHealth,
+  noteServerInfo,
+  recordConnectionFailure,
+  resetConnectionLog
+} from "../lib/connection/connection-log";
 import { toRemoteConfig, toUiConnection } from "../lib/connections";
 import { notifyProvidersChanged, setProviderSideEffects } from "../lib/agent-chat/providers";
 import { applySavedPromptEvent, resetSavedPrompts } from "../lib/saved-prompts/store";
@@ -185,6 +194,7 @@ import type { PluginInfo } from "@orquester/api";
 // boxes: the Ephemeral AI VMs plugin's module store (own channel, loaded while the plugin is on;
 // with it off, only the boxes still running).
 import { BOXES_CHANNEL, EPHEMERAL_VMS_PLUGIN_ID } from "@orquester/api";
+import { DAEMON_EVENTS_CHANNEL, DAEMON_STOPPING_EVENT, type DaemonStoppingPayload } from "@orquester/api";
 import { applyBoxesEvent, loadBoxes, loadBoxesList, resetBoxes, setBoxesPluginOn } from "../lib/boxes/store";
 import type { AgentPrefs, UsagePrefs } from "@orquester/config";
 
@@ -389,6 +399,11 @@ const MAX_LOCKED_CYCLES = 4;
 const LOCKED_FALLBACK_BASE_MS = 8000;
 /** Cap (ms) for the locked-cycle exponential fallback. */
 const LOCKED_FALLBACK_CAP_MS = 120000;
+
+/** Log why an attempt to reach the daemon failed (the connection diagnosis reads it). */
+function recordFailure(error: unknown): void {
+  recordConnectionFailure(classifyConnectionError(error, { online: deviceOnline() }));
+}
 
 /**
  * Failed reconnect probes since the connection was last stable. Unlike the
@@ -1394,9 +1409,10 @@ export const useAppStore = create<AppState>((set, get) => ({
         return;
       }
       try {
-        await initial.health();
+        noteServerHealth(checkHealth(await initial.health()));
         break;
-      } catch {
+      } catch (error) {
+        recordFailure(error);
         await delay(500);
         if (attempt === 59) {
           set({ connectionStatus: "error" });
@@ -1408,10 +1424,11 @@ export const useAppStore = create<AppState>((set, get) => ({
 
     try {
       await get().establish(initial);
-    } catch {
+    } catch (error) {
       // A network error during establish (after /health came back) is a
       // transient disconnect: hand off to the exponential-backoff reconnect.
       // 401/429 are handled inside establish() and never reach here.
+      recordFailure(error);
       get().handleDisconnect();
     }
   },
@@ -1442,6 +1459,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         (storedHash ? buildCredential(storedUser ?? "", storedHash) : undefined);
       if (!credential) {
         stopReconnect();
+        recordConnectionFailure({ kind: "unauthorized", detail: "This server needs a sign-in.", at: Date.now() });
         set({
           connectionStatus: "error",
           reconnectAttempt: 0,
@@ -1462,7 +1480,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     // 401 (not five), and a locked-out client a single 429 — and we never enter
     // the reconnect loop on either. Only network errors fall through to retry.
     try {
-      await active.info();
+      noteServerInfo(await active.info());
     } catch (error) {
       // A newer flow preempted us while the pre-check was in flight: don't act on
       // this stale response (no creds-clear, no reschedule, no rethrow-to-retry).
@@ -1472,6 +1490,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (error instanceof ApiError && error.status === 401) {
         // Wrong credentials: drop the stored hash/username and re-prompt. Do NOT
         // fan out and do NOT reconnect.
+        recordFailure(error);
         stopReconnect();
         clearStoredHash(active.connection.endpoint);
         clearStoredUsername(active.connection.endpoint);
@@ -1487,6 +1506,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (error instanceof ApiError && error.status === 429) {
         // Rate-limited (too many failed attempts): back off until Retry-After
         // (or a capped exponential fallback) — never tight-loop.
+        recordFailure(error);
         scheduleLockedReconnect(get, set, error.retryAfterSeconds);
         return;
       }
@@ -1505,6 +1525,11 @@ export const useAppStore = create<AppState>((set, get) => ({
     // Successful connect resets the consecutive-lockout counter.
     lockedCycles = 0;
     connectedAt = Date.now();
+    noteConnected(connectedAt);
+    // After an outage the terminal and browser WebSockets may be deep in their
+    // own backoff: the daemon answers again, so redial (or ping) them now.
+    wakeSessionChannels();
+    wakeBrowserChannels();
     // agentConversationsByProject: a (re)connect may be a restarted or upgraded
     // daemon, and the cache is the only place a failed scan settles as "none" —
     // dropping it here is what makes that recoverable.
@@ -1632,10 +1657,14 @@ export const useAppStore = create<AppState>((set, get) => ({
         return;
       }
       if (Date.now() - lastEventAt > EVENTS_STALE_MS) {
+        recordConnectionFailure({ kind: "stalled", detail: "No event or heartbeat for 45 s.", at: Date.now() });
         get().handleDisconnect();
         return;
       }
-      void current.health().catch(() => get().handleDisconnect());
+      void current.health().catch((error: unknown) => {
+        recordFailure(error);
+        get().handleDisconnect();
+      });
     }, 4000);
   },
 
@@ -1677,7 +1706,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         }
         set({ connectionStatus: "connecting", reconnectAttempt: attempt, connectionError: null });
         try {
-          await current.health();
+          noteServerHealth(checkHealth(await current.health()));
           if (gen !== reconnectGen) {
             return;
           }
@@ -1693,6 +1722,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           if (gen !== reconnectGen) {
             return;
           }
+          recordFailure(error);
           // Even /health can 429 if the limiter is broadened: honor Retry-After.
           if (error instanceof ApiError && error.status === 429) {
             reconnecting = false;
@@ -1746,9 +1776,13 @@ export const useAppStore = create<AppState>((set, get) => ({
       // onEnd having been delivered yet. Probe immediately rather than waiting
       // for the 4s interval (throttled to ≥60s while hidden) to notice.
       if (now - lastEventAt > EVENTS_STALE_MS) {
+        recordConnectionFailure({ kind: "stalled", detail: "No event or heartbeat for 45 s.", at: now });
         get().handleDisconnect();
       } else {
-        void api.health().catch(() => get().handleDisconnect());
+        void api.health().catch((error: unknown) => {
+          recordFailure(error);
+          get().handleDisconnect();
+        });
       }
       return;
     }
@@ -1918,6 +1952,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
     stopReconnect();
     closeEvents();
+    // What was learned about the old daemon's connection says nothing about the new one.
+    resetConnectionLog();
     // The verified project index is daemon-scoped too, and it lives outside the
     // store (module cache) — reset it by hand with the rest. So are the saved
     // prompts (`lib/saved-prompts/store.ts`).
@@ -2092,6 +2128,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       // establish() pre-check catches this first; this is the defensive fallback
       // for a credential revoked mid-fan-out.)
       if (error instanceof ApiError && error.status === 401) {
+        recordFailure(error);
         stopReconnect();
         clearStoredHash(api.connection.endpoint);
         clearStoredUsername(api.connection.endpoint);
@@ -3578,6 +3615,15 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   applyEvent: (event) => {
+    if (event.channel === DAEMON_EVENTS_CHANNEL && event.type === DAEMON_STOPPING_EVENT) {
+      // The disconnect that follows is a restart, not a network failure. An HTTP
+      // listener restart drops only clients that came in over HTTP.
+      const reason = (event.payload as Partial<DaemonStoppingPayload> | undefined)?.reason;
+      if (reason !== "http-restart" || get().api?.transportKind === "http") {
+        noteDaemonStopping();
+      }
+      return;
+    }
     if (event.channel === "usage") {
       set({ usage: event.payload as UsageResponse });
       return;

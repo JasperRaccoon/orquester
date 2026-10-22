@@ -2,6 +2,7 @@ import react from "@vitejs/plugin-react";
 import svgr from "vite-plugin-svgr";
 import { defineConfig } from "vite";
 import { excalidrawAssets } from "../../packages/ui/vite/excalidraw-assets";
+import { orquesterBuildDefine } from "../../packages/ui/vite/build-id";
 
 export default defineConfig({
   base: "./",
@@ -15,6 +16,8 @@ export default defineConfig({
     assetsInlineLimit: (file) => (/KaTeX_[^/]*\.(woff2?|ttf)$/.test(file) ? false : undefined)
   },
   optimizeDeps: { esbuildOptions: { target: "es2022" } },
+  // The app build named in the connection diagnostics.
+  define: orquesterBuildDefine(),
   plugins: [
     react(),
     // The whiteboard plugin's fonts, served from the app (see the plugin).
