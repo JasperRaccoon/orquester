@@ -813,6 +813,11 @@ export class BoxAwareSessionManager implements ISessionManager {
     else this.host.resize(id, cols, rows);
   }
 
+  /** A box terminal's resize crosses the link and can't be observed here; the host's can. */
+  async settleResize(id: string, signal?: AbortSignal): Promise<void> {
+    if (!this.box.has(id)) await this.host.settleResize?.(id, signal);
+  }
+
   rename(id: string, title: string, opts?: { seed?: boolean }): SessionSummary | undefined {
     if (!this.box.has(id)) return this.host.rename(id, title, opts);
     const refId = this.box.get(id)?.refId ?? "";

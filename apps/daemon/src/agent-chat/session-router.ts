@@ -185,6 +185,11 @@ export class ChatAwareSessionManager implements ISessionManager {
     this.pty.resize(id, cols, rows);
   }
 
+  async settleResize(id: string, signal?: AbortSignal): Promise<void> {
+    if (this.chat.has(id)) return;
+    await this.pty.settleResize?.(id, signal);
+  }
+
   subscribe(
     id: string,
     onOutput: (data: string) => void,

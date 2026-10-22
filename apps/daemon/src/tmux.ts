@@ -459,6 +459,19 @@ export class Tmux {
     return Number.isInteger(pid) && pid > 0 ? pid : null;
   }
 
+  /** Terminal size of each client attached to session orq-<id> (none when it is gone). */
+  async clientSizes(id: string): Promise<Array<{ cols: number; rows: number }>> {
+    const result = await this.run(["list-clients", "-t", tmuxName(id), "-F", "#{client_width} #{client_height}"]);
+    if (result.code !== 0) {
+      return [];
+    }
+    return result.stdout
+      .split("\n")
+      .map((line) => line.trim().split(" ").map(Number))
+      .filter(([cols, rows]) => cols! > 0 && rows! > 0)
+      .map(([cols, rows]) => ({ cols: cols!, rows: rows! }));
+  }
+
   /** Make every session follow the most-recent attached client's size. */
   async setWindowSizeLatest(): Promise<void> {
     await this.run(["set-option", "-g", "window-size", "latest"]);
