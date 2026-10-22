@@ -34,6 +34,7 @@ import { registerBoxHostRoutes } from "../agent-chat/box-host-routes.ts";
 import type { AgentChatService } from "../agent-chat/service.ts";
 import type { AgentProfileService } from "../agent-profile/service.ts";
 import type { Broadcaster } from "../broadcaster.ts";
+import type { BrowserManager } from "../browsers.ts";
 import type { PluginsService } from "../plugins/plugins-service.ts";
 import { createTsRustToolingPlugin } from "../plugins/ts-rust/box-tooling.ts";
 import type { RegistryService } from "../registry.ts";
@@ -54,6 +55,7 @@ import {
   type BoxRecordStore as HubRecordStore
 } from "./hub/index.ts";
 import { BOX_PROVIDERS } from "./providers/index.ts";
+import { BoxBrowsers, type BoxBrowserInstaller } from "./remote/browser/box-browsers.ts";
 import { BoxDevForwards } from "./remote/exec/dev-forwards.ts";
 import { createBoxGitRouteResolver } from "./remote/exec/git.ts";
 import { registerBoxStatsRoute } from "./remote/exec/stats.ts";
@@ -104,7 +106,20 @@ export interface DaemonBoxesDeps {
   /** The session PATH every terminal gets (MCP servers bridged for box chats start with it). */
   sessionPath: () => string;
   logger: Pick<Console, "log" | "info" | "warn" | "error">;
+  /**
+   * boxes (VM browser): installs Chromium in a Linux box for its project's Browser tab — the GUI
+   * installer's `ensureBrowser` (`createBoxGuiInstaller()` from `remote/gui`). Without it, a box
+   * tab reports that the installer is not wired.
+   */
+  browserInstaller?: BoxBrowserInstaller;
 }
+
+/** A VM browser that cannot start because no installer was passed in {@link DaemonBoxesDeps}. */
+const UNWIRED_BROWSER_INSTALLER: BoxBrowserInstaller = {
+  ensureBrowser: async () => {
+    throw Object.assign(new Error("VM browser installer is not wired"), { code: "BOX_GUI_UNAVAILABLE", hint: null });
+  }
+};
 
 /** What `attach` needs once the daemon's session list, browser tabs and chat services exist. */
 export interface DaemonBoxesAttachment {
@@ -113,7 +128,7 @@ export interface DaemonBoxesAttachment {
     hostLocalAccountIds(): ReadonlySet<string>;
     setBoxProjectPredicate(isBoxProject: (projectPath: string) => boolean): void;
   };
-  browsers: ConstructorParameters<typeof BoxDevForwards>[0]["browsers"];
+  browsers: ConstructorParameters<typeof BoxDevForwards>[0]["browsers"] & Pick<BrowserManager, "setRemoteChrome">;
   agentChat: AgentChatService;
   agentProfile: Pick<AgentProfileService, "snapshot">;
   temporaryBoxTools: TemporaryBoxTools;
@@ -274,6 +289,7 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
   let transcripts: BoxTranscriptSyncService | null = null;
   let broker: AgentTokenBroker | null = null;
   let forwards: BoxDevForwards | null = null;
+  let boxBrowsers: BoxBrowsers | null = null;
   let agentChat: AgentChatService | null = null;
   let agentProfile: Pick<AgentProfileService, "snapshot"> | null = null;
   let temporaryBoxTools: TemporaryBoxTools | null = null;
@@ -462,11 +478,23 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
       // Agent chats in box projects run their CLI in the box (spec §8.5).
       attachment.agentChat.setBoxes({ registry, tooling });
 
+      // boxes: the Browser tab of a Linux box project runs its Chromium in the box.
+      const vmBrowsers = new BoxBrowsers({
+        registry,
+        hub,
+        installer: deps.browserInstaller ?? UNWIRED_BROWSER_INSTALLER,
+        logger: { warn: (message, meta) => logger.warn(`[boxes] ${message}`, meta ?? "") }
+      });
+      boxBrowsers = vmBrowsers;
+      attachment.browsers.setRemoteChrome((projectPath) => vmBrowsers.launcherFor(projectPath));
+      void vmBrowsers.sweepConnected().catch((error) => logger.warn("[boxes] Stopping leftover VM browsers failed", errorText(error)));
+
       forwards = new BoxDevForwards({
         registry,
         hub,
         sessions,
         browsers: attachment.browsers,
+        browserRunsInBox: (projectPath) => vmBrowsers.runsInBox(projectPath),
         logger: { warn: (message, meta) => logger.warn(`[boxes] ${message}`, meta ?? "") }
       });
       await forwards.restore().catch((error) => logger.warn("[boxes] Restoring dev-server forwards failed", errorText(error)));
@@ -526,6 +554,8 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
 
     async stop() {
       for (const unsubscribe of unsubscribers.splice(0)) unsubscribe();
+      // Box Chromiums end while the links still carry the kill (kill and relaunch, never reattach).
+      await boxBrowsers?.stop().catch((error) => logger.warn("[boxes] Closing VM browsers failed", errorText(error)));
       if (disconnectTools) {
         disconnectTools();
         disconnectTools = null;

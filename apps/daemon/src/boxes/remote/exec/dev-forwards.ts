@@ -19,6 +19,10 @@
  *   points at them; once the project's sessions have all ended, the forwards
  *   no tab uses are closed. A destroyed box's forwards are closed.
  *
+ * Box projects whose Browser tab runs Chromium IN the box (Linux boxes,
+ * `remote/browser`) need none of that: their suggestions are the box-local
+ * addresses (`http://localhost:<box port>`), and no forward is made for them.
+ *
  * Host projects pass through untouched.
  */
 
@@ -42,6 +46,8 @@ export interface BoxDevForwardDeps {
   sessions: { list(projectPath?: string): SessionSummary[]; lifecycle: EventEmitter };
   /** The Browser tabs (`BrowserManager`). */
   browsers: { list(projectPath?: string): { projectPath: string; url: string }[]; lifecycle: EventEmitter };
+  /** Box projects whose Browser tab runs Chromium in the box (`BoxBrowsers.runsInBox`); none when absent. */
+  browserRunsInBox?: (projectPath: string) => boolean;
   logger?: { warn(message: string, meta?: Record<string, unknown>): void };
 }
 
@@ -130,7 +136,9 @@ export class BoxDevForwards {
   /**
    * The Browser tab's suggestions for a project. Host projects: `sniffed` as
    * is. Box projects: the forwarded addresses of the sniffed ports, then the
-   * box's other listening ports; none while the box is away.
+   * box's other listening ports; none while the box is away. A box project
+   * whose Chromium runs in the box gets the same ports at their box-local
+   * address, with no forward.
    */
   async suggestions(projectPath: string, sniffed: readonly string[]): Promise<string[]> {
     const location = this.deps.registry.locate(projectPath);
@@ -155,6 +163,9 @@ export class BoxDevForwards {
       }
     } catch (error) {
       this.deps.logger?.warn("box port list failed", { boxId: target.boxId, error: error instanceof Error ? error.message : String(error) });
+    }
+    if (this.deps.browserRunsInBox?.(projectPath)) {
+      return wanted.slice(0, MAX_SUGGESTIONS).map(({ scheme, port }) => `${scheme}://localhost:${port}`);
     }
     const out: string[] = [];
     for (const { scheme, port } of wanted.slice(0, MAX_SUGGESTIONS)) {
@@ -209,10 +220,13 @@ export class BoxDevForwards {
     );
   }
 
-  /** A box project's tab on `localhost:<port>` with no forward yet: forward that port to the same number. */
+  /**
+   * A box project's tab on `localhost:<port>` with no forward yet: forward that port to the same
+   * number. Not for a tab whose Chromium runs in the box: its `localhost` already is the box's.
+   */
   private async followBrowser(projectPath: string, url: string): Promise<void> {
     const loop = loopbackTarget(url);
-    if (!loop) return;
+    if (!loop || this.deps.browserRunsInBox?.(projectPath)) return;
     const target = this.connectionFor(projectPath);
     if (!target) return;
     const byPort = this.forwards.get(target.boxId);
