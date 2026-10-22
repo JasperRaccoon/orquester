@@ -4,6 +4,7 @@ import type { GitCommitDetail, GitCommitFile, GitFileStatus, GitLogEntry } from 
 import { cn } from "../../lib/cn";
 import { copyText } from "../../lib/clipboard";
 import { Button, ResizeHandle } from "../ui";
+import { ChangeKindSplit } from "./ChangeKindSplit";
 import { DiffView } from "./DiffView";
 import { layoutGraph, laneColor, type GraphRow, type GraphSegment } from "./graph";
 import { useApi } from "../../context/orquester-context";
@@ -359,6 +360,7 @@ export const HistoryPanel: React.FC<HistoryPanelProps> = ({ projectPath, reloadT
                 <span className="text-[color:var(--git-deleted)]">-{totals.deletions}</span>
               </span>
             </div>
+            <ChangeKindSplit files={detail.files} />
           </div>
         )}
 

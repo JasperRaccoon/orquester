@@ -1,6 +1,7 @@
 import React from "react";
 import type { GitFileChange, GitFileStatus } from "@orquester/api";
 import { cn } from "../../lib/cn";
+import { ChangeKindSplit } from "./ChangeKindSplit";
 
 /** Single-letter badge for a status, matching git's porcelain letters. */
 const STATUS_LETTER: Record<GitFileStatus, string> = {
@@ -68,20 +69,24 @@ export const FileStatusList: React.FC<FileStatusListProps> = ({
 
   return (
     <div className="flex min-h-0 flex-col">
-      <label className="flex h-9 shrink-0 items-center gap-2 border-b border-neutral-800 px-2.5">
-        <input
-          type="checkbox"
-          checked={allChecked}
-          ref={(el) => {
-            if (el) el.indeterminate = !allChecked && someChecked;
-          }}
-          onChange={onToggleAll}
-          className="h-3.5 w-3.5 shrink-0 accent-neutral-300"
-        />
-        <span className="text-xs text-neutral-500">
-          {files.length} changed {files.length === 1 ? "file" : "files"}
-        </span>
-      </label>
+      <div className="flex h-9 shrink-0 items-center gap-2 border-b border-neutral-800 px-2.5">
+        <label className="flex shrink-0 items-center gap-2">
+          <input
+            type="checkbox"
+            checked={allChecked}
+            ref={(el) => {
+              if (el) el.indeterminate = !allChecked && someChecked;
+            }}
+            onChange={onToggleAll}
+            className="h-3.5 w-3.5 shrink-0 accent-neutral-300"
+          />
+          <span className="text-xs text-neutral-500">
+            {files.length} changed {files.length === 1 ? "file" : "files"}
+          </span>
+        </label>
+        {/* The working tree's status knows paths, not line counts: files per kind. */}
+        <ChangeKindSplit files={files} mode="files" className="ml-auto flex-nowrap overflow-hidden" />
+      </div>
 
       <div className="min-h-0 flex-1 overflow-auto py-1">
         {files.map((file) => {
