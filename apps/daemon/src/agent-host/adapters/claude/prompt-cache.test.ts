@@ -121,6 +121,18 @@ describe("claude prompt cache lifetime", () => {
     assert.equal(fresh?.promptCacheExpiresAt, "2026-10-22T11:30:00.000Z");
   });
 
+  it("a message held for its turn and replayed into it keeps its own request time", () => {
+    const clock = movableClock("2026-10-22T10:00:00.000Z");
+    const normalizer = new ClaudeNormalizer({ threadId: "t", clock, ids: countingIds() });
+    // The same message_start seen twice (held, then replayed): timed once.
+    normalizer.beginTurn({ turnId: "turn-1" });
+    normalizer.handleMessage(messageStart("m1", { ephemeral_1h_input_tokens: 2_000 }));
+    clock.set("2026-10-22T10:00:30.000Z");
+    normalizer.handleMessage(messageStart("m1", { ephemeral_1h_input_tokens: 2_000 }));
+    const [usage] = readings(normalizer.handleMessage(messageDelta()));
+    assert.equal(usage?.promptCacheExpiresAt, "2026-10-22T11:00:00.000Z");
+  });
+
   it("only the expiry moving is still a new reading", () => {
     const clock = movableClock("2026-10-22T10:00:00.000Z");
     const normalizer = new ClaudeNormalizer({ threadId: "t", clock, ids: countingIds() });

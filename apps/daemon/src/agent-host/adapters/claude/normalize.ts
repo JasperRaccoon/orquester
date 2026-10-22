@@ -533,7 +533,7 @@ export class ClaudeNormalizer {
    * no cache entry, so the expiry is unknown. Cleared by a compaction, which leaves the
    * conversation on a prefix no earlier request cached.
    */
-  private promptCacheRequest: { requestedAtMs: number; ttlMs: number | undefined } | undefined;
+  private promptCacheRequest: { messageId?: string; requestedAtMs: number; ttlMs: number | undefined } | undefined;
   /**
    * True once `getContextUsage` has named `rawMaxTokens` — the window the CLI
    * itself measures against. From then on `result.modelUsage`'s nominal
@@ -1541,10 +1541,18 @@ export class ClaudeNormalizer {
       return events;
     }
 
-    // The request started now, whether or not a turn claims its frames: its cache was written.
+    // The request started now, whether or not a turn claims its frames: its cache was written. A
+    // held frame replayed into its turn (`replayPreTurnStream`) is the same request, already timed.
     if (event.type === "message_start") {
-      const usage = (event as { message?: { usage?: unknown } }).message?.usage;
-      this.promptCacheRequest = { requestedAtMs: this.clock.now().getTime(), ttlMs: claudePromptCacheTtlMs(usage) };
+      const started = (event as { message?: { id?: unknown; usage?: unknown } }).message;
+      const messageId = typeof started?.id === "string" ? started.id : undefined;
+      if (messageId === undefined || this.promptCacheRequest?.messageId !== messageId) {
+        this.promptCacheRequest = {
+          ...(messageId !== undefined ? { messageId } : {}),
+          requestedAtMs: this.clock.now().getTime(),
+          ttlMs: claudePromptCacheTtlMs(started?.usage)
+        };
+      }
     }
 
     // A message streaming before its turn opens waits for it (`preTurnStream`).
