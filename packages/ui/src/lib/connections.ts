@@ -1,5 +1,6 @@
 import type { RemoteConnectionConfig } from "@orquester/config";
 import type { UiConnection } from "../types";
+import { asSessionToken } from "./auth";
 
 /**
  * Converters between the persisted remote-server shape (RemoteConnectionConfig,
@@ -13,7 +14,10 @@ export function toUiConnection(remote: RemoteConnectionConfig): UiConnection {
     kind: "remote",
     endpoint: remote.baseUrl,
     status: "disconnected",
-    password: remote.password
+    // remotes.json may carry a token for this remote (an API token, say). An
+    // older build's base64("<user>:<hash>") credential is no token: it would
+    // only ever 401, so it is not carried into the client.
+    password: asSessionToken(remote.password)
   };
 }
 

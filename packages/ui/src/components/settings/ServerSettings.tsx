@@ -6,6 +6,7 @@ import { Button, Input, Modal, PasswordVerify, Switch } from "../ui";
 import { useApi } from "../../context/orquester-context";
 import { useAppStore } from "../../store/app";
 import { Badge, FormField, Notice, SettingRow, SettingsPage, SettingsSection } from "./primitives";
+import { AuthSessionsSettings } from "./AuthSessionsSettings";
 
 /** The editable slice of daemon.json, as the form holds it. */
 interface Draft {
@@ -291,7 +292,7 @@ export const ServerSettings: React.FC = () => {
               }
               description={
                 passwordSet
-                  ? "Leave blank to keep the current password. At least 8 characters."
+                  ? "Leave blank to keep the current password. At least 8 characters. A new password signs every device out."
                   : "Required to turn on remote access. At least 8 characters."
               }
             >
@@ -325,6 +326,8 @@ export const ServerSettings: React.FC = () => {
           </div>
         )}
       </SettingsSection>
+
+      {(!isLocal || saved?.httpEnabled || passwordSet) && <AuthSessionsSettings remoteAccessOn={saved?.httpEnabled ?? !isLocal} />}
 
       <SettingsSection title="Security">
         <SettingRow

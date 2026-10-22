@@ -120,6 +120,15 @@ import { buildQueryString } from "./transporter";
 import { AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, agentProfileRoutes, agentToolsRoutes, desktopRoutes, githubLinkRoutes, pluginRoutes, repoIdentityRoutes, secretFilesRoutes, sessionProfileRoutes, workflowRoutes } from "@orquester/api";
 // boxes: the Ephemeral AI VMs plugin's routes and payloads.
 import { boxRoutes } from "@orquester/api";
+import {
+  authRoutes,
+  authSessionPath,
+  type AuthIssuedTokenResponse,
+  type AuthLoginRequest,
+  type AuthSessionsResponse,
+  type RevokeAuthSessionsResponse,
+  type VerifyPasswordResponse
+} from "@orquester/api";
 import type {
   BlacksmithSetupResponse,
   BoxConfigChangeSet,
@@ -399,9 +408,42 @@ export class ApiClient {
     return this.send("GET", "/api/info", { signal });
   }
 
-  /** Public auth metadata (whether a token is required + bcrypt salt to derive it). */
+  /** Public auth metadata: whether a sign-in is required (and a username with it). */
   authInfo(signal?: AbortSignal): Promise<AuthInfoResponse> {
-    return this.send("GET", "/api/auth/info", { signal });
+    return this.send("GET", authRoutes.info, { signal });
+  }
+
+  /** Sign in with the password: a new device session's token (shown once; store only it). */
+  login(req: AuthLoginRequest): Promise<AuthIssuedTokenResponse> {
+    return this.send("POST", authRoutes.login, { body: req });
+  }
+
+  /** Revoke the session this client signed in with. */
+  logout(): Promise<void> {
+    return this.send("POST", authRoutes.logout);
+  }
+
+  /** Check a retyped password on the daemon (`ok: false` when wrong; 429 while locked out). */
+  verifyPassword(password: string): Promise<VerifyPasswordResponse> {
+    return this.send("POST", authRoutes.verifyPassword, { body: { password } });
+  }
+
+  listAuthSessions(signal?: AbortSignal): Promise<AuthSessionsResponse> {
+    return this.send("GET", authRoutes.sessions, { signal });
+  }
+
+  revokeAuthSession(id: string): Promise<void> {
+    return this.send("DELETE", authSessionPath(id));
+  }
+
+  /** Revoke every other device session and API token. */
+  revokeOtherAuthSessions(): Promise<RevokeAuthSessionsResponse> {
+    return this.send("POST", authRoutes.revokeOthers);
+  }
+
+  /** Mint a named API token for an external client (shown once). */
+  createApiToken(label: string): Promise<AuthIssuedTokenResponse> {
+    return this.send("POST", authRoutes.tokens, { body: { label } });
   }
 
   getDaemonConfig(signal?: AbortSignal): Promise<DaemonConfig> {

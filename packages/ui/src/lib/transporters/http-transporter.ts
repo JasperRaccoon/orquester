@@ -14,8 +14,8 @@ import { getBrowserChannel, type WsBrowserChannel } from "./ws-browser-channel";
 
 export interface HttpTransporterOptions {
   baseUrl: string;
-  /** Bearer sent as `Authorization: Bearer <credential>` when present. The
-   *  credential is base64("<username>:<hash>"). */
+  /** Bearer sent as `Authorization: Bearer <credential>` when present: a
+   *  session or API token from the daemon's login (`authRoutes`). */
   credential?: string;
   /** Defaults to a {@link FetchHttpClient}. */
   httpClient?: HttpClient;

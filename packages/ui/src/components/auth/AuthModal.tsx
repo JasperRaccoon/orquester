@@ -2,27 +2,28 @@ import React, { useState } from "react";
 import { Lock } from "lucide-react";
 import { Button, Input, Modal } from "../ui";
 import { useAppStore } from "../../store/app";
+import { loadStoredUsername } from "../../lib/auth";
 
 /**
- * Credential prompt for a token-protected daemon (web). The password is turned
- * into a bcrypt hash (using the daemon's salt) and combined with the username
- * into a base64 bearer; only the hash + plain username are stored, never the
- * plaintext password.
+ * Sign-in prompt for a password-protected daemon. The password is sent to the
+ * daemon's login route once; the daemon answers with a revocable session token,
+ * which is all the client stores (with the username, to pre-fill this form).
  */
 export const AuthModal: React.FC = () => {
-  const authPrompt = useAppStore((s) => s.authPrompt);
+  const connectionId = useAppStore((s) => s.authPrompt?.connectionId);
+  // Keyed by connection: each prompt starts from that endpoint's stored username.
+  return connectionId ? <SignInForm key={connectionId} connectionId={connectionId} /> : null;
+};
+
+const SignInForm: React.FC<{ connectionId: string }> = ({ connectionId }) => {
   const connections = useAppStore((s) => s.connections);
   const requiresUsername = useAppStore((s) => s.authRequiresUsername);
+  const authError = useAppStore((s) => s.authError);
   const submitCredentials = useAppStore((s) => s.submitCredentials);
-  const [username, setUsername] = useState("mapacho");
+  const connection = connections.find((c) => c.id === connectionId);
+  const [username, setUsername] = useState(() => (connection ? loadStoredUsername(connection.endpoint) : undefined) ?? "mapacho");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
-
-  if (!authPrompt) {
-    return null;
-  }
-
-  const connection = connections.find((c) => c.id === authPrompt.connectionId);
 
   const submit = async () => {
     if (!password || busy) {
@@ -69,6 +70,7 @@ export const AuthModal: React.FC = () => {
         <Input
           autoFocus={!requiresUsername}
           type="password"
+          autoComplete="current-password"
           placeholder="Password"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
@@ -79,6 +81,12 @@ export const AuthModal: React.FC = () => {
           }}
         />
 
+        {authError && (
+          <p role="alert" className="mt-2 text-xs text-danger">
+            {authError}
+          </p>
+        )}
+
         <div className="mt-3 flex justify-end gap-2">
           <Button
             variant="outline"
@@ -88,7 +96,7 @@ export const AuthModal: React.FC = () => {
             Cancel
           </Button>
           <Button size="sm" disabled={!password || busy} onClick={() => void submit()}>
-            {busy ? "Connecting…" : "Connect"}
+            {busy ? "Signing in…" : "Sign in"}
           </Button>
         </div>
       </div>
