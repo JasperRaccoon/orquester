@@ -105,6 +105,8 @@ import { registerDesktopWsRoutes } from "./desktops/ws-routes.ts";
 import { redactUrlTokens, sanitizeDevtoolsPath } from "./devtools.js";
 import { UrlWatcher } from "./url-watcher";
 import { AgentHooks } from "./agent-hooks";
+import { DailyLogStream } from "./daily-log.ts";
+import { daemonBuildInfo, type BuildInfo } from "./build-info.ts";
 import { listAgentConversations } from "./agent-conversations.ts";
 import { type ISessionManager, SessionError, createSessionManager, resumeLaunchArgs } from "./sessions";
 import { AgentChatService, ChatSessionError, type CreateAgentChatRequest } from "./agent-chat/service.ts";
@@ -268,7 +270,6 @@ import {
   createDefaultDaemonConfig,
   createDefaultRemotesConfig,
   createDefaultWorkspacesConfig,
-  dailyLogFile,
   expandVars,
   keysDir,
   parseAppConfig,
@@ -304,7 +305,7 @@ import fastifyStatic from "@fastify/static";
 import websocketPlugin from "@fastify/websocket";
 import { WebSocket as UpstreamWebSocket } from "ws";
 import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
-import { createReadStream, createWriteStream, existsSync, type WriteStream } from "node:fs";
+import { createReadStream, createWriteStream, existsSync } from "node:fs";
 import { chmod, lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, platform as osPlatform } from "node:os";
 import { basename, dirname, join, resolve, sep } from "node:path";
@@ -515,7 +516,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   };
   await prepareDirs(resolved);
 
-  const logStream = createWriteStream(dailyLogFile(resolved.logsDir), { flags: "a" });
+  const buildInfo = daemonBuildInfo();
+  // Rolled over at local midnight and at its size cap; old days pruned (daily-log.ts).
+  const logStream = new DailyLogStream({ logsDir: () => resolved.logsDir });
   const clientConfig = createDefaultClientConfig(paths.socketPath);
 
   // Shared, transport-agnostic services. Sessions live here so they survive
@@ -1446,6 +1449,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   });
   agentChat.setSecretRequests(secretRequests);
   const services: Services = {
+    buildInfo,
     secretRequests,
     registry, sessions, grokDeviceLink, codexDeviceLink, claudeOAuthLink, accounts, git, gitWatcher, todos, recentProjects, savedPrompts, repoIdentities, githubLinks, usage, usageTokens, chatThreadUsage, subagentCacheTtl, push, broadcaster, agentAccounts, browsers, urlWatcher, agentChat,
     plugins,
@@ -1762,6 +1766,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     const unixClosed = unixServer.close();
     unixServer.server.closeAllConnections?.();
     await unixClosed.catch(() => undefined);
+    await logStream.close();
     await agentProfileStopped;
     // Last, and bounded: a secret-files vault write in flight lands, a stuck one never holds the exit.
     let secretFilesBound: ReturnType<typeof setTimeout> | undefined;
@@ -1775,7 +1780,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     clearTimeout(secretFilesBound);
   };
 
-  console.log(`Orquester daemon ${daemonId} on unix:${paths.socketPath} (workspaces: ${resolved.workspacesDir})`);
+  const running = buildInfo.commit ? ` ${buildInfo.version ?? "?"} (${buildInfo.commit.slice(0, 12)})` : "";
+  console.log(`Orquester daemon${running} ${daemonId} on unix:${paths.socketPath} (workspaces: ${resolved.workspacesDir})`);
 
   return {
     daemonId,
@@ -1816,6 +1822,8 @@ export function buildAgentLaunchEnv(
 const MANAGED_CRED_FILENAME = { claude: ".credentials.json", codex: "auth.json", grok: "auth.json" } as const;
 
 interface Services {
+  /** The version and commit this daemon runs, read once at boot (build-info.ts). */
+  buildInfo: BuildInfo;
   registry: RegistryService;
   sessions: ISessionManager;
   /** The Grok and Codex accounts' device-code links (Settings → Accounts). */
@@ -1927,7 +1935,7 @@ export function createServer(
   config: DaemonConfig,
   resolved: ResolvedPaths,
   clientConfig: ClientConfig,
-  logStream: WriteStream,
+  logStream: { write(line: string): void },
   services: Services,
   options: { authRequired: boolean; mode: "local" | "remote"; serveWeb?: string }
 ): FastifyInstance {
@@ -2062,6 +2070,8 @@ export function createServer(
 
   app.get("/api/info", async (): Promise<ServerInfoResponse> => ({
     name: "Orquester daemon",
+    version: services.buildInfo.version,
+    commit: services.buildInfo.commit,
     dataDir: resolved.daemonDir,
     workspacesDir: resolved.workspacesDir,
     capabilities: {

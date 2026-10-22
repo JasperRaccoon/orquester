@@ -20,9 +20,10 @@ usage() {
 usage: ./deploy.sh [--dry-run|-n] <command> [args]
 
 commands:
-  deploy [target|all]        update + restart + verify each target (default: all)
+  deploy [target|all]        update + restart + verify each target (default: all);
+                             a release that fails its health check is rolled back
   provision <target>         first-time setup of a fresh Ubuntu VPS
-  verify [target|all]        read-only: HEAD, health, service, bundle hash, orq-agent, Go
+  verify [target|all]        read-only: HEAD, version stamp, health, service, bundle hash, orq-agent, Go
   rollback <target> <sha>    reset the target to <sha>, rebuild, restart, verify
   logs <target> [-n N]       tail the daemon journal (default 50 lines)
   rotate-password <target>   generate + install a new HTTP password (shown once)
@@ -100,6 +101,26 @@ smoke_test() { # uses T_DOMAIN; a smoke failure fails the target's deploy
   SMOKE_CHROME="$chrome" node "$here/scripts/smoke-web.mjs" "https://$T_DOMAIN"
 }
 
+# remote_update <name> [KEY=VAL ...]: runs remote-update.sh; on failure names what
+# happened from its exit code (an automatic revert to the previous release, or a
+# revert that failed too) in STEP and in a loud warning.
+remote_update() {
+  local name="$1" rc=0
+  shift
+  STEP="remote-update"
+  run_payload "$here/deploy/lib/remote-update.sh" "$@" || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    3)
+      STEP="remote-update: unhealthy, AUTO-REVERTED to the previous release"
+      warn "$name: the new release failed its health check and was ROLLED BACK — the previous release is running. The deploy FAILED." ;;
+    4)
+      STEP="remote-update: unhealthy, and the AUTO-REVERT FAILED — daemon not healthy"
+      warn "$name: the new release failed its health check and the previous release did not come back either — the daemon is NOT healthy. Act now: ./deploy.sh logs $name" ;;
+  esac
+  return 1
+}
+
 cmd_deploy_target() {
   local name="$1" s
   load_target "$CONF" "$name"
@@ -107,7 +128,7 @@ cmd_deploy_target() {
   s="$(sudo_word)"
   info "=== deploy $name ($T_USER@$T_HOST) ==="
   STEP="preflight";     preflight_pushed "$T_BRANCH" || return 1
-  STEP="remote-update"; run_payload "$here/deploy/lib/remote-update.sh" "SUDO=$s" "BRANCH=$T_BRANCH" || return 1
+  remote_update "$name" "SUDO=$s" "BRANCH=$T_BRANCH" || return 1
   STEP="smoke-test";    smoke_test || return 1
   ok "$name deployed"
 }
@@ -119,7 +140,7 @@ cmd_rollback() {
   build_ssh_args
   s="$(sudo_word)"
   info "=== rollback $name -> $sha ($T_USER@$T_HOST) ==="
-  STEP="remote-update"; run_payload "$here/deploy/lib/remote-update.sh" "SUDO=$s" "BRANCH=$T_BRANCH" "RESET_REF=$sha" || return 1
+  remote_update "$name" "SUDO=$s" "BRANCH=$T_BRANCH" "RESET_REF=$sha" || return 1
   STEP="smoke-test";    smoke_test || return 1
   ok "$name rolled back to $sha"
 }
@@ -235,6 +256,7 @@ cmd_verify_target() {
   STEP="verify"
   remote_run "set -e
 echo \"HEAD=\$(${s:+$s }git -C /opt/orquester rev-parse --short HEAD)\"
+echo \"stamp=\$(cat /opt/orquester/.orquester-version.json 2>/dev/null || echo 'none')\"
 curl -fsS http://127.0.0.1:47831/health; echo
 echo \"service=\$(systemctl is-active orquester)\"
 echo \"bundle=\$(curl -s http://127.0.0.1:47831/ | grep -o 'index-[^.]*\.js' | head -n1)\"

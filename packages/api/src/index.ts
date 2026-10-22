@@ -92,6 +92,10 @@ export interface HealthResponse {
 
 export interface ServerInfoResponse {
   name: string;
+  /** The running daemon's version (the repository's package.json); null when unreadable. Absent from older daemons. */
+  version?: string | null;
+  /** The git commit the daemon runs (full sha), read once at boot; null when unknown. Absent from older daemons. */
+  commit?: string | null;
   dataDir: string;
   workspacesDir: string;
   capabilities: {

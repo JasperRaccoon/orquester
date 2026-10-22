@@ -4,6 +4,7 @@ import { disablePush, enablePush, getSubscription, pushSupported } from "../../l
 import { Button, Switch } from "../ui";
 import { useApi, useOrquester } from "../../context/orquester-context";
 import { useAppStore } from "../../store/app";
+import { serverVersionLabel } from "../../lib/server-version";
 import type { Runtime } from "../../types";
 import {
   Badge,
@@ -112,6 +113,7 @@ export const GeneralSettings: React.FC = () => {
             )
           }
         />
+        {active && <ServerVersionRow key={active.id} />}
         {runtime === "web" && (
           <SettingRow
             label="Reload app"
@@ -146,6 +148,23 @@ const NotificationsSection: React.FC = () => {
       )}
     </SettingsSection>
   );
+};
+
+/** The connected daemon's version and commit (`GET /api/info`); hidden when it reports neither. */
+const ServerVersionRow: React.FC = () => {
+  const api = useApi();
+  const [label, setLabel] = useState<string | null>(null);
+  useEffect(() => {
+    const controller = new AbortController();
+    api
+      .info(controller.signal)
+      .then((info) => setLabel(serverVersionLabel(info)))
+      .catch(() => {
+        /* offline or an older daemon: no row */
+      });
+    return () => controller.abort();
+  }, [api]);
+  return label ? <InfoRow label="Server version" value={label} mono /> : null;
 };
 
 /**

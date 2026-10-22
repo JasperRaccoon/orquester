@@ -1835,6 +1835,8 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
     depth: number;
     signal: AbortSignal;
     attempt?: number;
+    /** The input carries data someone else wrote: the child frames it in its prompts. */
+    untrusted?: boolean;
   }): Promise<{ runId: string; wait: Promise<RunResult> }> => {
     const depth = input.depth + 1;
     if (depth > limits.maxSubWorkflowDepth) {
@@ -1895,7 +1897,13 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
     }
     const launched = await launch(structuredClone(workflow), {
       trigger: { kind: "subworkflow", text: parent ? `From ${parent.run.workflowName}` : undefined },
-      payload: { kind: "subworkflow", input: input.input, parentRunId: input.parentRunId, parentNodeId: input.parentNodeId },
+      payload: {
+        kind: "subworkflow",
+        input: input.input,
+        parentRunId: input.parentRunId,
+        parentNodeId: input.parentNodeId,
+        ...(input.untrusted ? { untrusted: true as const } : {})
+      },
       test: parent?.run.test ?? false,
       force: true,
       depth,

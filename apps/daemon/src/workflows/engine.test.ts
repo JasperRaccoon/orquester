@@ -888,6 +888,22 @@ describe("engine: sub-workflows", () => {
     assert.deepEqual(childRun.triggerPayload, { kind: "subworkflow", input: 21, parentRunId: run.id, parentNodeId: "S" });
   });
 
+  test("a child given text someone else wrote is marked untrusted, so its prompts frame it", async () => {
+    const code = scripted("code", { X: () => ({ status: "succeeded", output: null }) });
+    const payload = { kind: "git" as const, event: "push" as const, repo: { url: "https://git.test/r.git", name: "r" }, ref: "refs/heads/main", sha: "abc", branch: "main" };
+    const childPayloadFor = async (input: string): Promise<unknown> => {
+      const git = node("G", "trigger.git", { repo: { kind: "url", url: "https://git.test/r.git" }, event: { kind: "push", branches: ["main"] } });
+      const parent = workflow("p", [git, node("S", "workflow", { workflowId: "c", input })], [edge("G", "S")]);
+      const h = createHarness({ workflows: [parent, child("c")], executors: { code } });
+      const fired = await h.engine.fire({ workflowId: "p", triggerNodeId: "G", kind: "git", payload });
+      await h.engine.waitForRun(fired.runId!);
+      const run = (await h.engine.getRun(fired.runId!))!;
+      return (await h.engine.getRun(run.blocks.S!.childRunId!))!.triggerPayload;
+    };
+    assert.equal((await childPayloadFor("{{ trigger.branch }}") as { untrusted?: boolean }).untrusted, true, "a branch name is free text");
+    assert.equal("untrusted" in (await childPayloadFor("{{ trigger.sha }}") as object), false, "a sha is not");
+  });
+
   test("a failing child fails the block with child_run_failed", async () => {
     const code = scripted("code", { X: () => ({ status: "failed", error: { kind: "exception", message: "inner" } }) });
     const parent = workflow("p", [T(), node("S", "workflow", { workflowId: "c" })], [edge("T", "S")]);

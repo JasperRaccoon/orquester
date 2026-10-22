@@ -201,6 +201,8 @@ export interface SubWorkflowTriggerPayload {
   input: unknown;
   parentRunId: string;
   parentNodeId: string;
+  /** Set when the parent passed data someone else wrote (prompt-safety.ts): the child frames it. */
+  untrusted?: true;
 }
 
 export type WorkflowTriggerPayload =

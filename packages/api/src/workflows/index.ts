@@ -1,5 +1,6 @@
 export * from "./types.ts";
 export * from "./expressions.ts";
+export * from "./prompt-safety.ts";
 export * from "./expression-preview.ts";
 export * from "./rules.ts";
 export * from "./graph.ts";

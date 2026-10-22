@@ -430,7 +430,7 @@ export interface EngineServices {
    * Start the child run of one attempt of a Run workflow block — idempotent per (parent run, block,
    * `attempt`): the child's id is derived from them, and asking again returns the run that exists.
    */
-  runChild(input: { workflowId: string; input: unknown; parentRunId: string; parentNodeId: string; depth: number; signal: AbortSignal; attempt?: number }): Promise<{ runId: string; wait: Promise<WorkflowRunSummary & { finalOutput?: unknown }> }>;
+  runChild(input: { workflowId: string; input: unknown; parentRunId: string; parentNodeId: string; depth: number; signal: AbortSignal; attempt?: number; untrusted?: boolean }): Promise<{ runId: string; wait: Promise<WorkflowRunSummary & { finalOutput?: unknown }> }>;
   /** Re-attach to a child run after a restart. */
   awaitRun(runId: string, signal: AbortSignal): Promise<WorkflowRunSummary & { finalOutput?: unknown }>;
   logger: WorkflowLogger;

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
 import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { isValidName, parseAgentThreadHead, parseSessionsConfig } from "./index.ts";
+import { dailyLogFile, isValidName, parseAgentThreadHead, parseDailyLogFileName, parseSessionsConfig } from "./index.ts";
 import { assertInsideFsRoot, FsSandboxError } from "./fs.ts";
 
 test("isValidName rejects traversal and empties", () => {
@@ -211,5 +211,16 @@ test("a malformed continuation stamp reads as unstamped — an older host's mark
     );
     assert.equal(parsed.goalHeldForHandover, true, "the rest of the head is untouched");
     assert.equal(parsed.id, "t1");
+  }
+});
+
+test("daily log files: a day's first file, its later parts, and parsing them back", () => {
+  const day = new Date(2026, 9, 5, 23, 59);
+  assert.equal(dailyLogFile("/logs", day), join("/logs", "2026-10-05.log"));
+  assert.equal(dailyLogFile("/logs", day, 2), join("/logs", "2026-10-05.2.log"));
+  assert.deepEqual(parseDailyLogFileName("2026-10-05.log"), { day: "2026-10-05", part: 0 });
+  assert.deepEqual(parseDailyLogFileName("2026-10-05.12.log"), { day: "2026-10-05", part: 12 });
+  for (const other of ["2026-10-05.0.log", "2026-10-5.log", "daemon.log", "2026-10-05.log.gz", "event-loop.ndjson"]) {
+    assert.equal(parseDailyLogFileName(other), null, other);
   }
 });
