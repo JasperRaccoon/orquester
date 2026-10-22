@@ -615,7 +615,13 @@ export const httpTransportSchema = z.object({
    * is outside this dir. Optional here; the daemon defaults it to the resolved
    * workspaces dir when unset (see resolved.fsRoot).
    */
-  fsRoot: z.string().min(1).optional()
+  fsRoot: z.string().min(1).optional(),
+  /**
+   * Also serve this transport to the tailnet over HTTPS with `tailscale serve`
+   * (Settings → Server → Remote access). Written only by its own route, which
+   * also applies it; the daemon re-applies it when the transport starts.
+   */
+  tailscaleServe: z.boolean().optional()
 });
 
 export const daemonConfigSchema = z.object({
