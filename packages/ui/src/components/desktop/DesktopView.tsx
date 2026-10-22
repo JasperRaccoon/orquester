@@ -565,12 +565,17 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
     setLatched(next);
   }, []);
 
+  // The Clipboard panel's Send. This machine's clipboard gets the text too:
+  // a paste chord on the display hands that clipboard over first, so it would
+  // otherwise replace what was just sent with whatever was copied before.
   const sendClipboard = useCallback((text: string) => {
     rfbRef.current?.clipboardPasteFrom(text);
+    navigator.clipboard?.writeText(text).catch(() => undefined);
   }, []);
 
   // Local paste inside the view (the chord on the display, or the soft
   // keyboard's paste): hand the text to the desktop's clipboard, then Ctrl+V.
+  // With no text here (an empty clipboard, an image) the desktop pastes its own.
   const onPaste = (e: React.ClipboardEvent) => {
     // React bubbles synthetic events out of portals: a paste into the clipboard
     // popover's textarea must stay a normal paste.
@@ -582,9 +587,9 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
     const text = e.clipboardData.getData("text/plain");
     const chord = pasteChordRef.current;
     pasteChordRef.current = null;
-    if (!rfb || !text) return;
+    if (!rfb) return;
     e.preventDefault();
-    rfb.clipboardPasteFrom(text);
+    if (text) rfb.clipboardPasteFrom(text);
     for (const step of pasteKeystroke(chord, APPLE_PLATFORM)) rfb.sendKey(step.keysym, step.code, step.down);
   };
 
