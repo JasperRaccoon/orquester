@@ -55,7 +55,7 @@ import {
   type BoxRecordStore as HubRecordStore
 } from "./hub/index.ts";
 import { BOX_PROVIDERS } from "./providers/index.ts";
-import { BoxBrowsers, type BoxBrowserInstaller } from "./remote/browser/box-browsers.ts";
+import { BoxBrowsers } from "./remote/browser/box-browsers.ts";
 import { BoxDevForwards } from "./remote/exec/dev-forwards.ts";
 import { createBoxGitRouteResolver } from "./remote/exec/git.ts";
 import { registerBoxStatsRoute } from "./remote/exec/stats.ts";
@@ -74,6 +74,7 @@ import {
   registerBoxConfigChangeRoutes
 } from "./sync/index.ts";
 import { createTailscaleKeys, type TailscaleCredentials as TailscaleApiCredentials } from "./tailscale/keys.ts";
+import { createBoxGuiInstaller, type BoxGuiInstaller } from "./remote/gui/index.ts";
 import type { TemporaryBoxes } from "./temporary/contract.ts";
 import type { TemporaryBoxTools } from "./temporary/tools.ts";
 import { createBoxToolingProvisioner, type BoxToolingProvisionerHandle } from "./tooling/provisioner.ts";
@@ -107,19 +108,11 @@ export interface DaemonBoxesDeps {
   sessionPath: () => string;
   logger: Pick<Console, "log" | "info" | "warn" | "error">;
   /**
-   * boxes (VM browser): installs Chromium in a Linux box for its project's Browser tab — the GUI
-   * installer's `ensureBrowser` (`createBoxGuiInstaller()` from `remote/gui`). Without it, a box
-   * tab reports that the installer is not wired.
+   * Installs Chromium and the desktop stack in a Linux box for its project's Browser and Desktop
+   * tabs (default: `createBoxGuiInstaller()` from `remote/gui`; tests pass a fake).
    */
-  browserInstaller?: BoxBrowserInstaller;
+  guiInstaller?: BoxGuiInstaller;
 }
-
-/** A VM browser that cannot start because no installer was passed in {@link DaemonBoxesDeps}. */
-const UNWIRED_BROWSER_INSTALLER: BoxBrowserInstaller = {
-  ensureBrowser: async () => {
-    throw Object.assign(new Error("VM browser installer is not wired"), { code: "BOX_GUI_UNAVAILABLE", hint: null });
-  }
-};
 
 /** What `attach` needs once the daemon's session list, browser tabs and chat services exist. */
 export interface DaemonBoxesAttachment {
@@ -183,6 +176,7 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
     warn: (message: string, fields?: Record<string, unknown>) => logger.warn(`[boxes] ${message}`, fields ?? "")
   };
   const builds = createBoxAgentBuilds({ appdir: deps.baseDir, logger: hubLogger });
+  const gui = deps.guiInstaller ?? createBoxGuiInstaller({ logger: hubLogger });
 
   // The hub reads and updates box records; the service owns them and needs the hub. The service is
   // built right below, before anything can call the hub.
@@ -366,6 +360,7 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
     if (forgotten.has(boxId)) return;
     forgotten.add(boxId);
     tooling.forget(boxId);
+    gui.forget(boxId);
     void configSync.forgetBox(boxId).catch((error) => logger.warn(`[boxes] Could not drop the sync state of box ${boxId}`, errorText(error)));
   };
 
@@ -482,7 +477,7 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
       const vmBrowsers = new BoxBrowsers({
         registry,
         hub,
-        installer: deps.browserInstaller ?? UNWIRED_BROWSER_INSTALLER,
+        installer: gui,
         logger: { warn: (message, meta) => logger.warn(`[boxes] ${message}`, meta ?? "") }
       });
       boxBrowsers = vmBrowsers;
