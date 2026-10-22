@@ -51,7 +51,7 @@ import {
 import { connectBlocks, connectionRefusal } from "./connection";
 import { NoteNode, noteSize, type NoteFlowNode } from "./NoteNode";
 import { GRID, moveNodes, removeElements, updateNode } from "./ops";
-import { useLongPress } from "../phone/use-long-press";
+import { useLongPress } from "../../../hooks/use-long-press";
 import type { TapConnectEvent, TapConnectState } from "./tap-connect";
 import { WorkflowConnectionLine, WorkflowEdgeComponent, type WorkflowFlowEdge } from "./WorkflowEdge";
 

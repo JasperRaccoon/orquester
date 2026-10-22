@@ -20,13 +20,15 @@
  *   for keys typed in it) and an open layer while it shows (the chat's Escape
  *   — interrupt, Esc-Esc rewind — stands down; the chat is not on screen).
  *   Escape inside it goes back to the tab content, unless something in it
- *   took the key first (the search box clearing itself stops it).
+ *   took the key first (the search box clearing itself stops it). The
+ *   phone's Back goes back to the tab content too, from whichever section.
  */
 
 import React from "react";
 import { AppWindow, MessageSquare, MoreHorizontal, type LucideIcon } from "lucide-react";
 
 import { useIsDesktop } from "../../hooks";
+import { useBackClose } from "../../hooks/use-back-close";
 import { useOpenLayer } from "../../hooks/use-open-layer";
 import { useSoftKeyboardOpen } from "../../hooks/use-soft-keyboard-open";
 import { cn } from "../../lib/cn";
@@ -105,6 +107,9 @@ export const MobileSectionOverlay: React.FC<{ projectPath: string | null }> = ({
     // so it does not come back by itself later.
     if (!available) setMobileSection(null);
   }, [available]);
+  // One entry for the whole visit: moving between sections keeps it, so Back
+  // returns to the tab content rather than walking through every section seen.
+  useBackClose(available && section !== null, leaveSection);
   if (!available || section === null || projectPath === null) return null;
   return <MobileSectionView section={section} projectPath={projectPath} onLeave={leaveSection} />;
 };

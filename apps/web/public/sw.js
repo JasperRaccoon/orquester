@@ -255,7 +255,8 @@ self.addEventListener("push", function (event) {
     icon: "/icon-192.png",
     badge: "/icon-192.png",
     data: {
-      sessionId: payload.sessionId,
+      // A session's notification names the session (its tap opens that tab).
+      sessionId: typeof payload.sessionId === "string" ? payload.sessionId : undefined,
       // A workflow run's notification names its run (daemon push.ts, notifyWorkflowRun).
       workflowId: typeof payload.workflowId === "string" ? payload.workflowId : undefined,
       runId: typeof payload.runId === "string" ? payload.runId : undefined
@@ -264,40 +265,61 @@ self.addEventListener("push", function (event) {
   event.waitUntil(self.registration.showNotification(title, options));
 });
 
-// A workflow id / run id as the app's deep link accepts it (lib/workflows/deep-link.ts).
+// An id as the app's deep links accept it (lib/workflows/deep-link.ts,
+// lib/session-deep-link.ts).
 function isLinkId(value) {
   return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value);
 }
 
+// What tapping a notification opens, from its data: `url` for a new window
+// (the app reads the link on boot and drops it from the address bar), and
+// `message` for an open one (the app opens the same thing in place).
+//   - a workflow run's (daemon push.ts, notifyWorkflowRun): that run, in the
+//     workflow's tab — /?workflow=<id>&run=<runId>;
+//   - a session's (needs input, finished, plan ready, approval needed, an
+//     agent's notify_user): that session's tab — /?session=<id>;
+//   - anything else (the test push, an agent push without a session): the app.
+function notificationTarget(data) {
+  var record = data || {};
+  var workflowId = isLinkId(record.workflowId) ? record.workflowId : null;
+  if (workflowId) {
+    var runId = isLinkId(record.runId) ? record.runId : null;
+    return {
+      url: "/?workflow=" + encodeURIComponent(workflowId) + (runId ? "&run=" + encodeURIComponent(runId) : ""),
+      message: { type: "orquester:open-workflow-run", workflowId: workflowId, runId: runId }
+    };
+  }
+  var sessionId = isLinkId(record.sessionId) ? record.sessionId : null;
+  if (sessionId) {
+    return {
+      url: "/?session=" + encodeURIComponent(sessionId),
+      message: { type: "orquester:open-session", sessionId: sessionId }
+    };
+  }
+  return { url: "/", message: null };
+}
+
+// An open window is focused and told what to open; else a new one starts on
+// the link.
+function openNotificationTarget(clients, target) {
+  return clients.matchAll({ type: "window", includeUncontrolled: true }).then(function (clientList) {
+    for (var i = 0; i < clientList.length; i++) {
+      var client = clientList[i];
+      if ("focus" in client) {
+        if (target.message) {
+          client.postMessage(target.message);
+        }
+        return client.focus();
+      }
+    }
+    if (clients.openWindow) {
+      return clients.openWindow(target.url);
+    }
+    return undefined;
+  });
+}
+
 self.addEventListener("notificationclick", function (event) {
   event.notification.close();
-  var data = event.notification.data || {};
-  var workflowId = isLinkId(data.workflowId) ? data.workflowId : null;
-  var runId = isLinkId(data.runId) ? data.runId : null;
-  // A workflow run's notification opens that run: an open window is focused
-  // and told (it opens the workflow's tab on the run); else a new window
-  // starts on /?workflow=<id>&run=<runId>, which the app reads on boot.
-  var target = "/";
-  if (workflowId) {
-    target = "/?workflow=" + encodeURIComponent(workflowId) + (runId ? "&run=" + encodeURIComponent(runId) : "");
-  }
-  event.waitUntil(
-    self.clients
-      .matchAll({ type: "window", includeUncontrolled: true })
-      .then(function (clientList) {
-        for (var i = 0; i < clientList.length; i++) {
-          var client = clientList[i];
-          if ("focus" in client) {
-            if (workflowId) {
-              client.postMessage({ type: "orquester:open-workflow-run", workflowId: workflowId, runId: runId });
-            }
-            return client.focus();
-          }
-        }
-        if (self.clients.openWindow) {
-          return self.clients.openWindow(target);
-        }
-        return undefined;
-      })
-  );
+  event.waitUntil(openNotificationTarget(self.clients, notificationTarget(event.notification.data)));
 });

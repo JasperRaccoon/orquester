@@ -13,7 +13,7 @@ import { Check } from "lucide-react";
 
 import { useOpenLayer } from "../../../hooks/use-open-layer";
 import { KEYBOARD_SURFACE_PROPS } from "../../../lib/keyboard-surfaces";
-import { pushBackClose } from "./back-close";
+import { pushBackClose } from "../../../lib/back-close";
 import { KeyBar } from "./KeyBar";
 import { PhoneLayoutContext } from "./phone-context";
 import { useVisualViewportBox } from "./use-visual-viewport";

@@ -30,7 +30,7 @@ import { useOpenLayer } from "../../../../hooks/use-open-layer";
 import { cn } from "../../../../lib/cn";
 import { KEYBOARD_SURFACE_PROPS } from "../../../../lib/keyboard-surfaces";
 import { openTrackedLayer } from "../../../../lib/open-layers";
-import { pushBackClose } from "../../../workflows/phone/back-close";
+import { pushBackClose } from "../../../../lib/back-close";
 import { useVisualViewportBox } from "../../../workflows/phone/use-visual-viewport";
 import type { EditorVariant } from "./layout.logic";
 

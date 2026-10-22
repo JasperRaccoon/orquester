@@ -1,5 +1,6 @@
 import React, { useEffect } from "react";
 import { createPortal } from "react-dom";
+import { useBackClose } from "../../hooks/use-back-close";
 import { useOpenLayer } from "../../hooks/use-open-layer";
 import { cn } from "../../lib/cn";
 import { DropdownContext } from "./dropdown";
@@ -17,10 +18,12 @@ export interface BottomSheetProps {
  * Mobile bottom sheet: slides up from the bottom, full-width, large touch
  * targets, respects the safe-area inset. Provides DropdownContext so the same
  * DropdownItem/Label/Separator render here as in a desktop dropdown. An open
- * layer while it is up (`useOpenLayer`): its Escape is its own.
+ * layer while it is up (`useOpenLayer`): its Escape is its own, and so is
+ * the phone's Back (`useBackClose`).
  */
 export const BottomSheet: React.FC<BottomSheetProps> = ({ open, onClose, title, label, children }) => {
   useOpenLayer(open);
+  useBackClose(open, onClose);
   useEffect(() => {
     if (!open) {
       return;

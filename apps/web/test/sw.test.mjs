@@ -29,15 +29,21 @@ function fakeCaches() {
 
 function worker() {
   const caches = fakeCaches();
+  const listeners = {};
   const context = {
-    self: { addEventListener() {}, location: { origin: "https://orq.example.com" } },
+    self: {
+      addEventListener(type, listener) {
+        listeners[type] = listener;
+      },
+      location: { origin: "https://orq.example.com" }
+    },
     caches,
     URL,
     Promise,
     Response: {}
   };
   vm.runInNewContext(source, context);
-  return { context, caches };
+  return { context, caches, listeners };
 }
 
 describe("the asset cache", () => {
@@ -91,5 +97,109 @@ describe("the asset cache", () => {
   it("has room for the lazy diagram and math chunks beside the app", () => {
     const { context } = worker();
     assert.ok(context.ASSET_CACHE_LIMIT >= 150);
+  });
+});
+
+/** A value out of the worker's realm, as plain data (its objects have the VM's prototypes). */
+const plain = (value) => JSON.parse(JSON.stringify(value));
+
+/** The worker's `clients`: windows that record what they were told, and the windows opened. */
+function fakeClients(count) {
+  const windows = Array.from({ length: count }, () => ({
+    messages: [],
+    focused: 0,
+    postMessage(message) {
+      this.messages.push(plain(message));
+    },
+    focus() {
+      this.focused += 1;
+      return Promise.resolve(this);
+    }
+  }));
+  const opened = [];
+  return {
+    windows,
+    opened,
+    matchAll: async () => windows,
+    openWindow: async (url) => {
+      opened.push(url);
+      return null;
+    }
+  };
+}
+
+describe("a notification's tap", () => {
+  it("a session's opens that session's tab", () => {
+    const { context } = worker();
+    assert.deepEqual(plain(context.notificationTarget({ sessionId: "3f2c1a9e-8b7d-4c6e-9f00-112233445566" })), {
+      url: "/?session=3f2c1a9e-8b7d-4c6e-9f00-112233445566",
+      message: { type: "orquester:open-session", sessionId: "3f2c1a9e-8b7d-4c6e-9f00-112233445566" }
+    });
+  });
+
+  it("a workflow run's opens the run, as before", () => {
+    const { context } = worker();
+    assert.deepEqual(plain(context.notificationTarget({ sessionId: "", workflowId: "wf-1", runId: "run 2" })), {
+      url: "/?workflow=wf-1",
+      message: { type: "orquester:open-workflow-run", workflowId: "wf-1", runId: null }
+    });
+    assert.equal(context.notificationTarget({ workflowId: "wf-1", runId: "r-2" }).url, "/?workflow=wf-1&run=r-2");
+  });
+
+  it("anything else (the test push, a malformed id) just opens the app", () => {
+    const { context } = worker();
+    for (const data of [{ sessionId: "" }, { sessionId: "../etc/passwd" }, { sessionId: "a&b=c" }, { sessionId: 7 }, {}, null, undefined]) {
+      assert.deepEqual(plain(context.notificationTarget(data)), { url: "/", message: null }, JSON.stringify(data));
+    }
+  });
+
+  it("an open window is focused and told which session to open", async () => {
+    const { context } = worker();
+    const clients = fakeClients(2);
+    await context.openNotificationTarget(clients, context.notificationTarget({ sessionId: "s-1" }));
+    assert.deepEqual(clients.windows[0].messages, [{ type: "orquester:open-session", sessionId: "s-1" }]);
+    assert.equal(clients.windows[0].focused, 1);
+    assert.equal(clients.windows[1].focused, 0);
+    assert.deepEqual(clients.opened, []);
+  });
+
+  it("with no window open, a new one starts on the session's link", async () => {
+    const { context } = worker();
+    const clients = fakeClients(0);
+    await context.openNotificationTarget(clients, context.notificationTarget({ sessionId: "s-1" }));
+    assert.deepEqual(clients.opened, ["/?session=s-1"]);
+  });
+
+  it("the click handler closes the notification and waits for the window", async () => {
+    const { context, listeners } = worker();
+    const clients = fakeClients(1);
+    context.self.clients = clients;
+    let closed = 0;
+    let waited = null;
+    listeners.notificationclick({
+      notification: { data: { sessionId: "s-9" }, close: () => (closed += 1) },
+      waitUntil: (promise) => {
+        waited = promise;
+      }
+    });
+    assert.equal(closed, 1);
+    await waited;
+    assert.deepEqual(clients.windows[0].messages, [{ type: "orquester:open-session", sessionId: "s-9" }]);
+  });
+
+  it("a push keeps the session, workflow and run ids for the tap", async () => {
+    const { context, listeners } = worker();
+    const shown = [];
+    context.self.registration = { showNotification: async (title, options) => shown.push(plain({ title, options })) };
+    let waited = null;
+    listeners.push({
+      data: { json: () => ({ title: "Agent finished", tag: "session-s-1", sessionId: "s-1" }) },
+      waitUntil: (promise) => {
+        waited = promise;
+      }
+    });
+    await waited;
+    assert.deepEqual(shown[0].options.data, { sessionId: "s-1" });
+    assert.equal(shown[0].options.tag, "session-s-1");
   });
 });

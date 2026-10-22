@@ -1,5 +1,6 @@
 import React, { useEffect } from "react";
 import { createPortal } from "react-dom";
+import { useBackClose } from "../../hooks/use-back-close";
 import { useOpenLayer } from "../../hooks/use-open-layer";
 import { cn } from "../../lib/cn";
 
@@ -23,10 +24,12 @@ const WIDTH = 192;
 /**
  * Cursor-anchored menu rendered in a portal; closes on outside click/Escape/scroll.
  * Mounted only while open, so it is an open layer for its whole life
- * (`useOpenLayer`): its Escape is its own.
+ * (`useOpenLayer`): its Escape is its own, and on a phone so is Back
+ * (`useBackClose`) — a long-pressed row's menu closes before anything under it.
  */
 export const ContextMenu: React.FC<ContextMenuProps> = ({ x, y, items, onClose }) => {
   useOpenLayer(true);
+  useBackClose(true, onClose);
   useEffect(() => {
     const close = () => onClose();
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();

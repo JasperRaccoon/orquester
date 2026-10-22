@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Box, Search } from "lucide-react";
+import { useBackClose } from "../../hooks/use-back-close";
 import { useOpenLayer } from "../../hooks/use-open-layer";
 import { cn } from "../../lib/cn";
 import { LimitedMarker } from "../ui/limited-marker";
@@ -226,6 +227,10 @@ export const CommandPalette: React.FC = () => {
       controllers.delete(controller);
     };
   }, [requestOpen, close]);
+
+  // The phone's Back closes it too, without handing focus back: on a phone
+  // that would raise the keyboard over a composer the user just left.
+  useBackClose(open, () => close(false));
 
   // Escape closes. Capture phase + stopPropagation: modals underneath listen
   // for Escape on `document` too, and one press must close only the top layer.

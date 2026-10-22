@@ -7,6 +7,7 @@ import { useSidebarView } from "./sidebar-view";
 import { ServerSwitcher } from "../servers";
 import { ResizeHandle } from "../ui";
 import { useIsDesktop } from "../../hooks";
+import { useBackClose } from "../../hooks/use-back-close";
 import { useAppStore, useSidebarWidth } from "../../store/app";
 import { SIDEBAR_MIN, SIDEBAR_MAX, PANE_FLEX_RESERVE } from "../../lib/panel-sizes";
 
@@ -15,7 +16,7 @@ import { SIDEBAR_MIN, SIDEBAR_MAX, PANE_FLEX_RESERVE } from "../../lib/panel-siz
  * picks — the projects tree (search, opened agents, workspaces) or workflows —
  * over the server footer. Mobile: an off-canvas drawer (with backdrop) toggled
  * from the top bar, holding the projects tree only; a phone reaches workflows
- * from its bottom section bar.
+ * from its bottom section bar. Back closes the drawer.
  */
 export const Sidebar: React.FC = () => {
   const isDesktop = useIsDesktop();
@@ -25,6 +26,7 @@ export const Sidebar: React.FC = () => {
   const sidebarWidth = useSidebarWidth();
   const setSidebarWidth = useAppStore((s) => s.setSidebarWidth);
   const resetSidebarWidth = useAppStore((s) => s.resetSidebarWidth);
+  useBackClose(!isDesktop && drawerOpen, () => setDrawer(false));
 
   // --- Desktop ---
   if (isDesktop) {

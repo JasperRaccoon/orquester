@@ -19,7 +19,7 @@ import type { Workflow, WorkflowProblem } from "@orquester/api";
 import { cn } from "../../../lib/cn";
 import { accentClass, nodeSummary, type NodeSummaryContext } from "../../../lib/workflows/catalog-ui";
 import { BlockTile } from "../AddBlockMenu";
-import { useLongPress } from "../phone/use-long-press";
+import { useLongPress } from "../../../hooks/use-long-press";
 import { deriveSteps, type OutputRef, type OutputTone, type StepRow } from "./steps-logic";
 
 export interface StepsViewProps {
