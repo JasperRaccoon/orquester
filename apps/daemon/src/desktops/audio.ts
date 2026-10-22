@@ -7,7 +7,12 @@
 // desktop's first subscriber, stops 2 s after the last one leaves (so a quick tab
 // switch doesn't restart it), and restarts with backoff if it dies while
 // subscribers remain.
-import { spawn, type ChildProcess } from "node:child_process";
+//
+// boxes: a VM desktop's ffmpeg runs IN its VM (its pulse server is there); the
+// subscriber passes how to start it (`DesktopAudioSpawn`) and the hub treats
+// that process exactly like a local one.
+import { spawn } from "node:child_process";
+import type { Readable } from "node:stream";
 import {
   DESKTOP_AUDIO_HEADER_BYTES,
   DESKTOP_AUDIO_PACKET_OPUS,
@@ -44,6 +49,22 @@ export interface DesktopAudioEncoderExit {
   signal: NodeJS.Signals | null;
   expected: boolean;
 }
+
+/**
+ * The encoder process as the hub uses it: a host ffmpeg child, or (boxes) an
+ * ffmpeg in a VM. `close` comes after stdout has ended, like a child's.
+ */
+export interface DesktopAudioEncoderProcess {
+  readonly pid?: number | null;
+  readonly stdout: Readable | null;
+  readonly stderr: Readable | null;
+  kill(signal?: NodeJS.Signals): boolean;
+  once(event: "error", listener: (error: Error) => void): unknown;
+  once(event: "close", listener: (code: number | null, signal: NodeJS.Signals | null) => void): unknown;
+}
+
+/** boxes: starts `ffmpeg <args>` where the desktop runs (its VM). Must not throw: a failure is an `error` event. */
+export type DesktopAudioSpawn = (args: string[]) => DesktopAudioEncoderProcess;
 
 /** Queued bytes above which a sink misses packets (~250 ms of 96 kbit/s audio). */
 export const DESKTOP_AUDIO_SINK_MAX_BUFFERED = 32 * 1024;
@@ -102,8 +123,10 @@ function desktopAudioFfmpegArgs(pulseSocketPath: string): string[] {
 interface DesktopEncoder {
   desktopId: string;
   pulseSocketPath: string;
+  /** boxes: starts the encoder in the desktop's VM; null = this machine's ffmpeg. */
+  spawn: DesktopAudioSpawn | null;
   sinks: Set<DesktopAudioSink>;
-  child: ChildProcess | null;
+  child: DesktopAudioEncoderProcess | null;
   /** Next packet's sequence number; per desktop, wraps at 2^32. */
   seq: number;
   state: DesktopAudioStateMessage;
@@ -123,10 +146,11 @@ export class DesktopAudioHub {
    * Subscribe a sink to a desktop's Opus stream. Starts one encoder per desktop on
    * the first subscriber (reading `<pulseSocketPath>`'s `orq.monitor`), stops it 2 s
    * after the last one leaves. Sends a `state` message to the sink first. Returns
-   * the unsubscribe function.
+   * the unsubscribe function. `spawn` (boxes): the desktop runs in a VM, and its
+   * encoder is started there.
    */
-  subscribe(desktopId: string, pulseSocketPath: string, sink: DesktopAudioSink): () => void {
-    if (this.options.ffmpegPath === null) {
+  subscribe(desktopId: string, pulseSocketPath: string, sink: DesktopAudioSink, spawn?: DesktopAudioSpawn): () => void {
+    if (this.options.ffmpegPath === null && !spawn) {
       sink.sendState(desktopAudioState("unavailable", "ffmpeg is not installed on the host"));
       return () => {};
     }
@@ -141,10 +165,13 @@ export class DesktopAudioHub {
       this.killChild(encoder);
       encoder.failures = 0;
     }
+    // The latest way to reach the desktop's machine (a VM's spawner closes over its current link).
+    if (encoder) encoder.spawn = spawn ?? null;
     if (!encoder) {
       encoder = {
         desktopId,
         pulseSocketPath,
+        spawn: spawn ?? null,
         sinks: new Set(),
         child: null,
         seq: 0,
@@ -231,17 +258,19 @@ export class DesktopAudioHub {
 
   private start(encoder: DesktopEncoder): void {
     const ffmpegPath = this.options.ffmpegPath;
-    if (ffmpegPath === null) return;
-    const child = spawn(ffmpegPath, desktopAudioFfmpegArgs(encoder.pulseSocketPath), {
-      stdio: ["ignore", "pipe", "pipe"],
-      // Minimal env: the pulse server is explicit (`-server unix:…`), so libpulse
-      // neither reads the daemon's PULSE_* settings nor autospawns a server.
-      env: {
-        PATH: process.env.PATH ?? "/usr/bin:/bin",
-        HOME: process.env.HOME ?? "/",
-        LANG: "C.UTF-8"
-      }
-    });
+    if (ffmpegPath === null && !encoder.spawn) return;
+    const child: DesktopAudioEncoderProcess = encoder.spawn
+      ? encoder.spawn(desktopAudioFfmpegArgs(encoder.pulseSocketPath))
+      : spawn(ffmpegPath!, desktopAudioFfmpegArgs(encoder.pulseSocketPath), {
+          stdio: ["ignore", "pipe", "pipe"],
+          // Minimal env: the pulse server is explicit (`-server unix:…`), so libpulse
+          // neither reads the daemon's PULSE_* settings nor autospawns a server.
+          env: {
+            PATH: process.env.PATH ?? "/usr/bin:/bin",
+            HOME: process.env.HOME ?? "/",
+            LANG: "C.UTF-8"
+          }
+        });
     encoder.child = child;
     const startedAt = Date.now();
     let producedPacket = false;

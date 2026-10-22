@@ -1401,7 +1401,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     indexFile: resolved.desktopsIndexFile,
     tmux,
     hostStatus: () => desktopHost.status(),
-    audio: desktopAudio
+    audio: desktopAudio,
+    // boxes: desktops of Linux box projects run in their VM.
+    boxes: boxes.desktops
   });
   await desktops.load();
   desktops.on("created", (d) => broadcaster.publish(DESKTOP_CHANNEL, "desktop.created", d));
@@ -4346,7 +4348,12 @@ export function createServer(
   // Desktop tabs (desktop spec §7.1) — CRUD, apps and window actions; the view
   // and sound ride /ws-desktop and /ws-desktop-audio. Launch bodies may carry
   // credentials in `env`: the request logger above logs only method + URL.
-  registerDesktopHttpRoutes(app, { desktops: services.desktops, fsRoot: () => resolved.fsRoot });
+  registerDesktopHttpRoutes(app, {
+    desktops: services.desktops,
+    fsRoot: () => resolved.fsRoot,
+    // boxes: a box project's paths are checked in its VM, where its desktops run.
+    boxes: () => services.boxRegistry
+  });
 
   // Embedded-DevTools frontend assets — reverse-proxied from the tab's own
   // Chromium, which serves a prebuilt, version-matched DevTools bundle at
@@ -5072,6 +5079,8 @@ export function createServer(
         !options.authRequired ||
         authorizeCredential(token, config.transports.http.username, config.transports.http.passwordHash),
       vncSocketPath: (id) => services.desktops.vncSocketPath(id),
+      // boxes: a VM desktop's RFB socket is reached through its box link.
+      vncStream: (id) => services.desktops.vncStream(id),
       audioSource: (id) => services.desktops.audioSource(id),
       audio: services.desktopAudio
     });

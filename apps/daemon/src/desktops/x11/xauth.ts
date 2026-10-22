@@ -73,16 +73,21 @@ export function encodeXauthEntry(entry: XauthEntry): Buffer {
 }
 
 /**
- * Replace the host's authority file with a fresh 16-byte MIT cookie (0600).
- * FamilyWild and an empty display number match whatever `-displayfd` picks.
+ * A fresh authority file's bytes: one 16-byte MIT cookie. FamilyWild and an
+ * empty display number match whatever `-displayfd` picks.
  */
-export async function writeXauthority(path: string): Promise<void> {
-  await rm(path, { force: true });
-  await writeFile(path, encodeXauthEntry({
+export function newXauthority(): Buffer {
+  return encodeXauthEntry({
     family: 0xffff,
     address: Buffer.alloc(0),
     number: "",
     name: MIT_MAGIC_COOKIE,
     data: randomBytes(16)
-  }), { mode: 0o600 });
+  });
+}
+
+/** Replace the host's authority file with a fresh cookie ({@link newXauthority}), 0600. */
+export async function writeXauthority(path: string): Promise<void> {
+  await rm(path, { force: true });
+  await writeFile(path, newXauthority(), { mode: 0o600 });
 }

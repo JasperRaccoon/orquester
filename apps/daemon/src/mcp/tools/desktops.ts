@@ -128,7 +128,7 @@ const getDesktops = defineTool({
   name: "get_desktops",
   title: "Get desktops",
   description:
-    "Desktop tabs: virtual X displays on the daemon's host running GUI apps, shown to the user live. No desktopId: a project's desktops (id, title, status, size, audio, apps, open windows). desktopId: that one. desktopId + appId: the app's last 64 KiB of stdout/stderr (truncated: true when cut). host: true adds whether this host can run desktops (tools found, GPU, warnings, installHint: the apt-get line for what's missing — installing is for the host's owner; tell the user).",
+    "Desktop tabs: virtual X displays on the daemon's host (in a Linux VM project: inside its VM; such a desktop has box: {id, connected}) running GUI apps, shown to the user live. No desktopId: a project's desktops (id, title, status, size, audio, apps, open windows). desktopId: that one. desktopId + appId: the app's last 64 KiB of stdout/stderr (truncated: true when cut). host: true adds whether the desktops' machine (the project's VM for a VM project) can run desktops (tools found, GPU, warnings, installHint: the apt-get line for what's missing — installing is for the host's owner; tell the user).",
   externalNote: "Without project: every project's desktops.",
   input: {
     project: z.string().min(1).optional().describe("\"<workspace>/<project>\" or a path."),
@@ -158,7 +158,21 @@ const getDesktops = defineTool({
   resultKind: "json",
   async run(args, ctx) {
     const { api } = ctx;
-    const host = args.host === true ? { host: expectDesktopOk<DesktopHostStatus>(await api.request("GET", desktopRoutes.host)) } : {};
+    // boxes: with a project (or a desktop), the status is that project's machine's (its VM for a box project).
+    const hostProject =
+      args.host !== true
+        ? null
+        : args.desktopId !== undefined
+          ? (await findDesktop(api, args.desktopId)).projectPath
+          : await projectOf(args.project, ctx);
+    const host =
+      args.host === true
+        ? {
+            host: expectDesktopOk<DesktopHostStatus>(
+              await api.request("GET", desktopRoutes.host, hostProject ? { query: { projectPath: hostProject } } : undefined)
+            )
+          }
+        : {};
     if (args.desktopId !== undefined && args.appId !== undefined) {
       const body = expectDesktopOk<unknown>(await api.request("GET", desktopRoutes.appLog(args.desktopId, args.appId)));
       // text/plain; the in-process client parses a body that happens to be JSON, so give such a log back as text.

@@ -68,6 +68,18 @@ test("unknown record fields and top-level keys survive a parse/serialise round t
   assert.deepEqual(parseDesktopsFile(JSON.parse(JSON.stringify(out))), parseDesktopsFile(raw));
 });
 
+test("a VM desktop names its box and its directory there; older records run on this machine", () => {
+  const box = { id: "box-1", dir: "/home/ubuntu/.orquester/desktops/d-2" };
+  const file = parseDesktopsFile({ version: 1, desktops: [desktop(), desktop({ id: "d-2", box })] });
+  assert.equal(file.desktops[0].box, null);
+  assert.deepEqual(file.desktops[1].box, box);
+  const again = parseDesktopsFile(JSON.parse(JSON.stringify(serializeDesktopsFile(file))));
+  assert.deepEqual(again.desktops[1].box, box);
+  // A box field this build cannot read is never taken for "this machine": the record is kept aside.
+  const odd = desktop({ id: "d-3", box: { id: "" } });
+  assert.deepEqual(parseDesktopsFile({ version: 1, desktops: [odd] }).rejected, [odd]);
+});
+
 test("a bad record is kept verbatim in rejected while the good ones load", () => {
   const bad = { id: 7, projectPath: ["nope"] };
   const duplicate = desktop({ title: "Second d-1" });

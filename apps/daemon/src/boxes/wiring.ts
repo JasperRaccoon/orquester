@@ -54,6 +54,7 @@ import {
   type BoxRecordStore as HubRecordStore
 } from "./hub/index.ts";
 import { BOX_PROVIDERS } from "./providers/index.ts";
+import { BoxDesktops, type BoxGuiInstaller, unwiredBoxGuiInstaller } from "./remote/desktop/index.ts";
 import { BoxDevForwards } from "./remote/exec/dev-forwards.ts";
 import { createBoxGitRouteResolver } from "./remote/exec/git.ts";
 import { registerBoxStatsRoute } from "./remote/exec/stats.ts";
@@ -103,6 +104,11 @@ export interface DaemonBoxesDeps {
   writeJson: (file: string, value: unknown) => Promise<void>;
   /** The session PATH every terminal gets (MCP servers bridged for box chats start with it). */
   sessionPath: () => string;
+  /**
+   * Installs the desktop stack in Linux boxes for VM desktops (`createBoxGuiInstaller()`).
+   * Absent: {@link unwiredBoxGuiInstaller} — every box reports it unavailable.
+   */
+  desktopInstaller?: BoxGuiInstaller;
   logger: Pick<Console, "log" | "info" | "warn" | "error">;
 }
 
@@ -126,6 +132,8 @@ export interface DaemonBoxes {
   tooling: BoxToolingProvisionerHandle;
   configSync: BoxConfigSyncService;
   builds: BoxAgentBuilds;
+  /** Linux VM desktops: the desktop manager's `boxes` option. */
+  desktops: BoxDesktops;
   /** Wrap the host session manager so box projects' terminals run in their box. */
   wrapSessions(createHost: (indexContributor: SessionIndexContributor) => ISessionManager, chatIndex: SessionIndexContributor): ISessionManager;
   /** The git route of box projects (`new GitService({ route })`). */
@@ -269,6 +277,8 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
     logger: { warn: (message, meta) => logger.warn(`[boxes] ${message}`, meta ?? "") }
   });
   const gitRoute = createBoxGitRouteResolver(registry);
+  // Desktops of Linux box projects run in their VM; the installer sets up the desktop stack there.
+  const desktops = new BoxDesktops({ registry, hub, tooling, installer: deps.desktopInstaller ?? unwiredBoxGuiInstaller });
 
   // ---- attached later ----------------------------------------------------------------------
   let transcripts: BoxTranscriptSyncService | null = null;
@@ -391,6 +401,7 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
     tooling,
     configSync,
     builds,
+    desktops,
     gitRoute,
     workflowSandbox: { registry, hub, tooling },
 
