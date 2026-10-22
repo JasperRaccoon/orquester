@@ -36,7 +36,7 @@ log "1/7 service user"
 id orquester >/dev/null 2>&1 || useradd --system --create-home \
   --home-dir /var/lib/orquester --shell /usr/sbin/nologin orquester
 
-log "2/7 packages: apt deps, Node 20, pnpm, Caddy"
+log "2/7 packages: apt deps, Node 24, pnpm, Caddy"
 apt-get update -qq
 apt-get install -y git openssh-client tmux ufw python3 make g++ curl \
   ca-certificates p7zip-full ripgrep gnupg
@@ -46,10 +46,10 @@ apt-get install -y tigervnc-standalone-server openbox pulseaudio \
 need_node=1
 if command -v node >/dev/null 2>&1; then
   major="$(node -p 'process.versions.node.split(".")[0]')"
-  [ "$major" -ge 20 ] && need_node=0
+  [ "$major" -ge 24 ] && need_node=0
 fi
 if [ "$need_node" -eq 1 ]; then
-  curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+  curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
   apt-get install -y nodejs
 fi
 command -v pnpm >/dev/null 2>&1 || npm install -g pnpm

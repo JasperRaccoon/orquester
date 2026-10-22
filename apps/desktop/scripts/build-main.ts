@@ -12,7 +12,7 @@ const options: BuildOptions = {
   outfile,
   bundle: true,
   platform: "node",
-  target: "node20",
+  target: "node24",
   format: "cjs",
   sourcemap: true,
   external: ["electron", "node-pty", "better-sqlite3"],
