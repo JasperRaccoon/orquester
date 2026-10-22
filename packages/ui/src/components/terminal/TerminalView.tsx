@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { Terminal, type ITheme } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
+import { TERMINAL_SCROLLBACK_LINES } from "@orquester/api";
 import { useApi } from "../../context/orquester-context";
 import { useIsDesktop } from "../../hooks";
 import { useAppStore, useTerminalFontSize } from "../../store/app";
@@ -136,7 +137,8 @@ export const TerminalView: React.FC<{
       fontWeightBold: 600,
       lineHeight: 1.2,
       letterSpacing: 0,
-      scrollback: 8000,
+      // The same number of lines the daemon keeps for a replay (tmux history-limit).
+      scrollback: TERMINAL_SCROLLBACK_LINES,
       allowProposedApi: true,
       drawBoldTextInBrightColors: true,
       macOptionIsMeta: true,

@@ -2,6 +2,7 @@ import { execFile, execFileSync } from "node:child_process";
 import { accessSync, constants } from "node:fs";
 import { homedir } from "node:os";
 import { basename, delimiter, isAbsolute, join } from "node:path";
+import { TERMINAL_SCROLLBACK_LINES } from "@orquester/api";
 
 /** Prefix for every orquester-owned tmux session (`orq-<uuid>`). */
 const TMUX_SESSION_PREFIX = "orq-";
@@ -23,6 +24,18 @@ function assertServiceName(name: string): void {
 // boxes: exported so box terminals name their in-box tmux sessions the same way.
 export function tmuxName(id: string): string {
   return `${TMUX_SESSION_PREFIX}${id}`;
+}
+
+/**
+ * A command (and its `;` separator) to put in front of a `new-session`: the
+ * history a pane keeps is fixed when the pane is created, from the global
+ * `history-limit`, so it is set on the same tmux invocation, just before. A
+ * replay then holds as many lines as the client's scrollback instead of tmux's
+ * default 2,000. Panes created earlier keep the limit they were created with.
+ */
+// boxes: exported so box terminals size their in-box panes' history the same way.
+export function historyLimitArgs(): string[] {
+  return ["set-option", "-g", "history-limit", String(TERMINAL_SCROLLBACK_LINES), ";"];
 }
 
 /** Build the `capture-pane` argv. Pure (testable without tmux). `name` is the full orq-<id>. */
@@ -284,6 +297,7 @@ export class Tmux {
       .filter(([, value]) => !value.includes("\n"))
       .flatMap(([key, value]) => ["-e", `${key}=${value}`]);
     const result = await this.run([
+      ...historyLimitArgs(),
       "new-session",
       "-d",
       "-s",

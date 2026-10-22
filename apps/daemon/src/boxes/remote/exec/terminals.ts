@@ -45,7 +45,7 @@ import type { SessionRecord } from "@orquester/config";
 import { ActivityTracker } from "../../../ansi-activity.ts";
 import { TerminalOutputRing } from "../../../terminal-history.ts";
 import { SessionError, type ISessionManager, type SessionIndexContributor } from "../../../sessions.ts";
-import { captureArgs, tmuxName } from "../../../tmux.ts";
+import { captureArgs, historyLimitArgs, tmuxName } from "../../../tmux.ts";
 import type { BoxConnection, BoxHub, BoxProcess, BoxRegistry, BoxToolingProvisioner } from "../../contracts.ts";
 import { boxToolingEnv, toolingFor } from "./env.ts";
 import { runInBox, waitSpawned } from "./run.ts";
@@ -122,13 +122,14 @@ export function boxShellCommand(
     // On a running tmux server a NEW session gets the server's global env plus `-e`, not the
     // client's env, so the launch env goes in as `-e` too (none of it is secret; SSH_AUTH_SOCK
     // reaches the session through tmux's default `update-environment`). `-A` attaches instead
-    // when the session already exists (a client restarted after `orq-agent` came back).
+    // when the session already exists (a client restarted after `orq-agent` came back). The
+    // history limit in front is the host's (historyLimitArgs).
     const envArgs = Object.entries(options.env)
       .filter(([, value]) => !value.includes("\n"))
       .flatMap(([key, value]) => ["-e", `${key}=${value}`]);
     return {
       command: "tmux",
-      args: ["-L", BOX_TMUX_SERVER, "new-session", "-A", "-s", tmuxName(options.id), "-x", String(options.cols), "-y", String(options.rows), "-c", options.cwd, ...envArgs]
+      args: ["-L", BOX_TMUX_SERVER, ...historyLimitArgs(), "new-session", "-A", "-s", tmuxName(options.id), "-x", String(options.cols), "-y", String(options.rows), "-c", options.cwd, ...envArgs]
     };
   }
   if (sys.os === "win32") return { command: sys.shell, args: ["-NoLogo"] };
