@@ -37,6 +37,7 @@ import type {
 import type { HostThreadBox, HostThreadProfile, HostThreadServerPool } from "./host-protocol.ts";
 import type { SessionToolsHost } from "./session-tools/index.ts";
 import type { AgentHostBoxes } from "./boxes/index.ts";
+import type { IdleCompactionMode } from "@orquester/config";
 
 // ---------------------------------------------------------------------------
 // Operation inputs
@@ -702,6 +703,13 @@ export interface AdapterContext {
    * names `box` launches through it; absent, such a start fails (never runs here instead).
    */
   boxes?: AgentHostBoxes;
+  /**
+   * The idle-compaction mode (`@orquester/config` `resolveIdleCompaction`) a chat on `home` runs
+   * under, read from `app.json` at each call so a change applies at once. The Claude adapter reads
+   * it when the CLI asks its resume question: `off` answers "keep full history" without asking
+   * (T3 Code's "Never"). Optional: without it the question is always asked.
+   */
+  idleCompactionMode?(home: AccountHome): Promise<IdleCompactionMode>;
 }
 
 /**

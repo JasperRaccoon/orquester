@@ -1,8 +1,12 @@
 import React from "react";
-import { continueThreadsForProject } from "@orquester/config";
+import { SYSTEM_ACCOUNT_ID } from "@orquester/api";
+import { continueThreadsForProject, IDLE_COMPACTION_MODES, type IdleCompactionMode } from "@orquester/config";
 import { Button, Switch } from "../ui";
 import { useAppStore } from "../../store/app";
 import { Badge, SegmentedControl, SettingRow, SettingsPage, SettingsSection } from "./primitives";
+
+const ACCOUNT_IDLE_COMPACTION_OPTIONS = [{ value: "default", label: "Use default" }, ...IDLE_COMPACTION_MODES] as const;
+type AccountIdleCompaction = (typeof ACCOUNT_IDLE_COMPACTION_OPTIONS)[number]["value"];
 
 const FOLLOW_UP_OPTIONS = [
   { value: "steer", label: "Steer" },
@@ -17,7 +21,8 @@ const FOLLOW_UP_OPTIONS = [
  * live in localStorage; continuing after a restart is daemon state the HOST
  * reads at boot, per project, and the usage-limit recovery is daemon state the
  * DAEMON reads at every limit, so both ride `app.json` and are shared by every
- * client of that daemon.
+ * client of that daemon. So does idle compaction, which the daemon schedules and
+ * the host reads when Claude asks its resume question.
  */
 export const ChatSettings: React.FC = () => {
   const chatPrefs = useAppStore((s) => s.chatPrefs);
@@ -25,6 +30,18 @@ export const ChatSettings: React.FC = () => {
   const agentPrefs = useAppStore((s) => s.appConfig.agents);
   const updateAgentPrefs = useAppStore((s) => s.updateAgentPrefs);
   const project = useAppStore((s) => s.currentProject);
+  const agentAccounts = useAppStore((s) => s.agentAccounts);
+  // T3 Code's per-instance override: the system login and each managed Claude account.
+  const claudeAccounts = [
+    { id: SYSTEM_ACCOUNT_ID, label: "System login" },
+    ...(agentAccounts?.accounts ?? []).filter((account) => account.agent === "claude").map((account) => ({ id: account.id, label: account.label }))
+  ];
+  const setAccountIdleCompaction = (accountId: string, value: AccountIdleCompaction) => {
+    const next: Record<string, IdleCompactionMode> = { ...agentPrefs.claudeIdleCompactionByAccount };
+    if (value === "default") delete next[accountId];
+    else next[accountId] = value;
+    void updateAgentPrefs({ ...agentPrefs, claudeIdleCompactionByAccount: next });
+  };
 
   const projectOverride = project
     ? agentPrefs.continueThreadsByProject[project.path]
@@ -34,7 +51,7 @@ export const ChatSettings: React.FC = () => {
     : agentPrefs.continueThreadsAfterRestart;
 
   return (
-    <SettingsPage title="Agent chat" description="How the composer sends messages, what happens to turns a restart cuts short, and how chats recover from usage limits.">
+    <SettingsPage title="Agent chat" description="How the composer sends messages, what happens to turns a restart cuts short, how chats recover from usage limits, and when idle Claude chats are compacted.">
       <SettingsSection title="Composer" description="Saved on this device.">
         <SettingRow
           label="Enter while the agent is working"
@@ -148,6 +165,49 @@ export const ChatSettings: React.FC = () => {
             onChange={(checked) => void updateAgentPrefs({ ...agentPrefs, switchAccountOnUsageLimit: checked })}
           />
         </SettingRow>
+      </SettingsSection>
+
+      <SettingsSection title="Idle Claude chats" description="Shared by every client of this server.">
+        <SettingRow
+          label="Compact idle chats"
+          description="When to compact an idle Claude chat over 200,000 tokens. When you return shows a Compact chip beside Send once its prompt cache has expired: sending compacts first, or click it to keep the full history. Before the cache expires (beta) sends /compact two minutes before the cache runs out (an hour on a subscription, 5 minutes with an API key), so coming back does not re-read the whole conversation; it shows in the chat as an automatic compaction. Never skips both, and answers Claude's own resume prompt with the full history. You can always compact by hand."
+        >
+          <SegmentedControl
+            ariaLabel="Compact idle chats"
+            value={agentPrefs.claudeIdleCompaction}
+            options={IDLE_COMPACTION_MODES}
+            onChange={(value) => void updateAgentPrefs({ ...agentPrefs, claudeIdleCompaction: value })}
+          />
+        </SettingRow>
+        {claudeAccounts.map((account) => {
+          const override = Object.hasOwn(agentPrefs.claudeIdleCompactionByAccount, account.id)
+            ? agentPrefs.claudeIdleCompactionByAccount[account.id]
+            : undefined;
+          return (
+            <SettingRow
+              key={account.id}
+              label={
+                <span className="inline-flex flex-wrap items-center gap-2">
+                  <span className="font-medium">{account.label}</span>
+                  {override === undefined ? <Badge>Default</Badge> : <Badge tone="info">Pinned</Badge>}
+                </span>
+              }
+              description={
+                override === undefined
+                  ? "Chats on this account follow the default."
+                  : "Chats on this account use this, whatever the default says."
+              }
+            >
+              <SegmentedControl
+                ariaLabel={`Compact idle chats on ${account.label}`}
+                size="xs"
+                value={override ?? "default"}
+                options={ACCOUNT_IDLE_COMPACTION_OPTIONS}
+                onChange={(value) => setAccountIdleCompaction(account.id, value)}
+              />
+            </SettingRow>
+          );
+        })}
       </SettingsSection>
     </SettingsPage>
   );

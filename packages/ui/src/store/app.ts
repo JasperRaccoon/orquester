@@ -235,7 +235,10 @@ const DEFAULT_AGENT_PREFS: AgentPrefs = {
   continueThreadsByProject: {},
   // Usage-limit recovery: resuming at the reset is on, moving to another account is opt-in.
   autoResumeLimitedChats: true,
-  switchAccountOnUsageLimit: false
+  switchAccountOnUsageLimit: false,
+  // Idle Claude compaction: offered when you return, T3 Code's default.
+  claudeIdleCompaction: "onReturn",
+  claudeIdleCompactionByAccount: {}
 };
 
 /**

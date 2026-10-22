@@ -294,3 +294,19 @@ export function parseOptionalTurnId(value: unknown): string | undefined {
   }
   return value;
 }
+
+/**
+ * `/compact`'s optional `idle` precondition (`CompactCommandBody.idle`): null when absent, the
+ * turn it names otherwise. A malformed one is refused rather than read as a plain compaction —
+ * the daemon sends it to compact ONLY an idle chat, never to compact regardless.
+ */
+export function idleCompactionOf(body: Record<string, unknown>): { turnId: string } | null {
+  if (body.idle === undefined) {
+    return null;
+  }
+  const turnId = isRecord(body.idle) ? body.idle.turnId : undefined;
+  if (typeof turnId !== "string" || turnId.length === 0 || turnId.length > 200) {
+    throw invalidCommand("idle.turnId must name a turn.");
+  }
+  return { turnId };
+}

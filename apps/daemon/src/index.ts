@@ -131,6 +131,7 @@ import { LineageService } from "./agent-chat/lineage.ts";
 import { DelegateStopCascade } from "./agent-chat/delegates.ts";
 import { registerLineageRoutes } from "./agent-chat/lineage-routes.ts";
 import { ChatLimitRecovery } from "./agent-chat/limit-recovery.ts";
+import { ChatIdleCompaction } from "./agent-chat/idle-compaction.ts";
 import { registerUsageLimitRoutes } from "./agent-chat/limit-recovery-routes.ts";
 import { createCooldownStore } from "./workflows/agent/cooldowns.ts";
 import { realClock } from "./workflows/factory.ts";
@@ -1387,6 +1388,18 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   });
   agentChat.setUsageLimitNoticeListener((threadId, notice) => limitRecovery.onNotice(threadId, notice));
   limitRecovery.start();
+  // Idle Claude compaction (`agent-chat/idle-compaction.ts`): each open chat's prompt-cache
+  // candidate (the summary poll) → a `/compact` two minutes before the cache expires, when the
+  // setting says so. Nothing persisted: the first poll after a restart re-arms from the logs.
+  const idleCompaction = new ChatIdleCompaction({
+    chat: agentChat.chat,
+    prefs: async () => (await readAppConfigFile(resolved.appConfigFile)).agents,
+    adapterOf: (refId) => registry.get(refId)?.chat?.adapter ?? null,
+    clock: realClock,
+    logger: console
+  });
+  agentChat.setIdleCompactionListener((threadId, candidate) => idleCompaction.onCandidate(threadId, candidate));
+  idleCompaction.start();
   publishWorkflowEvents({
     service: workflows,
     secrets: workflowSecrets,
@@ -1484,6 +1497,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     workflows, workflowSecrets, workflowRuns, workflowState, workflowEngine: null, internalApi: null,
     lineage,
     limitRecovery,
+    idleCompaction,
     delegateStops,
     workflowProjects: workflowDaemon.runtime.projects,
     workflowCatalogReady: () => workflowDaemon.validationCatalog.ready(),
@@ -1680,6 +1694,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
 
   lineage.attachApi(services.internalApi);
   limitRecovery.attachApi(services.internalApi);
+  idleCompaction.attachApi(services.internalApi);
   delegateStops.attachApi(services.internalApi);
   // umcp:t6 — every chat tool is on in every chat: a provider session the host kept across this
   // boot (launched by an older build, with fewer tools) is handed the current manifest once. The
@@ -1797,6 +1812,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     delegateStops.stop();
     await lineage.stop();
     limitRecovery.stop();
+    idleCompaction.stop();
     // umcp:t3 begin
     // Disconnect FIRST, while the transports may still serve: new calls get no card or grant
     // (PERMISSION_DENIED). Then pending cards end `cancelled`
@@ -1974,6 +1990,8 @@ interface Services {
   lineage?: LineageService;
   /** Usage-limit recovery of interactive chats. Optional: route-level tests build a partial `services`. */
   limitRecovery?: ChatLimitRecovery;
+  /** Idle Claude compaction. Optional: route-level tests build a partial `services`. */
+  idleCompaction?: ChatIdleCompaction;
   /**
    * The delegate stop cascade (`agent-chat/delegates.ts`): the command routes report every
    * accepted interrupt and stop to it. Optional: route-level tests build a partial `services`.
@@ -2874,6 +2892,14 @@ export function createServer(
           autoResume: merged.agents.autoResumeLimitedChats,
           switchAccount: merged.agents.switchAccountOnUsageLimit
         });
+      }
+      // The idle-compaction setting moved: armed chats follow at once (off cancels, on arms).
+      if (
+        merged.agents.claudeIdleCompaction !== current.agents.claudeIdleCompaction ||
+        JSON.stringify(merged.agents.claudeIdleCompactionByAccount) !==
+          JSON.stringify(current.agents.claudeIdleCompactionByAccount)
+      ) {
+        services.idleCompaction?.prefsChanged();
       }
       return merged;
     } catch {

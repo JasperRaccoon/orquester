@@ -109,6 +109,7 @@ import {
 import type { AccountHome, HistoryImportProgress, McpAppOperation, McpAppReference } from "@orquester/api/agent-chat";
 import { htmlRenderReferenceOfActivityPayload, mcpAppReferenceOfActivityPayload } from "@orquester/api/agent-chat";
 import { parseCausedBy, usageLimitNoticeOf } from "@orquester/api/agent-chat";
+import { IDLE_COMPACTION_SENT_BY, idleCompactionCandidateOf, type ThreadMessageSentBy } from "@orquester/api/agent-chat";
 import { delegatePreviewOf, parseInterruptCause, STOP_CASCADED_ACTIVITY_KIND, stopCascadedSummary } from "@orquester/api/agent-chat";
 import { runMcpAppRequest } from "../mcp-apps.ts";
 
@@ -233,7 +234,8 @@ import {
   parseTargetTurnCount,
   parseTurnInput,
   requireBody,
-  requireCommandId
+  requireCommandId,
+  idleCompactionOf
 } from "./validate.ts";
 import { isUsableConversationId, resumeCursorFor } from "./resume.ts";
 import {
@@ -3274,10 +3276,35 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     return (pending?.approvals.length ?? 0) === 0 && (pending?.userInputs.length ?? 0) === 0;
   };
 
+  /**
+   * Idle compaction (`@orquester/api` `idle-compaction.ts`): the daemon's own `/compact`, sent
+   * before the chat's prompt cache expires. Refused before anything is committed — and so with no
+   * receipt, the same id may come again for the next window — unless `turnId` is still the latest
+   * turn, settled `completed`, and the chat is idle as a delivery reads it (no turn, no session
+   * starting or running, no compaction, no approval or question). A chat that moved on since the
+   * daemon looked is never compacted under the user. Then the ordinary compaction, its message
+   * marked as sent by Orquester.
+   */
+  const decideIdleCompaction = (
+    runtime: ThreadRuntime,
+    commandId: string,
+    idle: { turnId: string }
+  ): Decision => {
+    const latest = (runtime.state.turns ?? []).at(-1);
+    if (latest === undefined || latest.turnId !== idle.turnId || latest.state !== "completed") {
+      throw commandRejected("The chat moved on since this idle compaction was scheduled.");
+    }
+    if (!threadIdleForDelivery(runtime)) {
+      throw commandRejected("The chat is not idle; the idle compaction was skipped.");
+    }
+    return decideCompaction(runtime, commandId, COMPACT_COMMAND_TEXT, IDLE_COMPACTION_SENT_BY);
+  };
+
   const decideCompaction = (
     runtime: ThreadRuntime,
     commandId: string,
-    text: string
+    text: string,
+    sentBy?: ThreadMessageSentBy
   ): Decision => {
     const session = currentSession(runtime);
     const userMessages = (runtime.state.items ?? []).filter(
@@ -3320,7 +3347,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
             // Persisted verbatim and rendered as a compaction marker (§4.6.5(b)).
             text,
             streaming: false,
-            turnId: null
+            turnId: null,
+            ...(sentBy !== undefined ? { sentBy } : {})
           },
           { commandId, occurredAt }
         )
@@ -3855,8 +3883,12 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         };
       }
 
-      case "compact":
-        return decideCompaction(runtime, commandId, COMPACT_COMMAND_TEXT);
+      case "compact": {
+        const idle = idleCompactionOf(body);
+        return idle === null
+          ? decideCompaction(runtime, commandId, COMPACT_COMMAND_TEXT)
+          : decideIdleCompaction(runtime, commandId, idle);
+      }
 
       case "background": {
         // The user's Ctrl+B (§4.5). Refused, not ignored, where the provider
@@ -5947,7 +5979,9 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         : {}),
       usageLimits: liveUsageLimits.get(threadId) ?? null,
       // Usage-limit recovery (`usage-limit.ts`): the limit the thread stopped on, if it still is.
-      usageLimit: usageLimitNoticeOf(runtime.state.items ?? [], turns)
+      usageLimit: usageLimitNoticeOf(runtime.state.items ?? [], turns),
+      // Idle compaction (`idle-compaction.ts`): the prompt cache the latest completed turn left.
+      idleCompaction: idleCompactionCandidateOf(runtime.state.items ?? [], turns)
     };
   };
 

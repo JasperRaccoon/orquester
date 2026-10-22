@@ -447,6 +447,7 @@ const isMessageItem = shaped<ThreadMessageItem>({
   reasoningKind: optional(isString),
   messageKind: optional(isString),
   interactionMode: optional(isString),
+  sentBy: optional(isString),
   streaming: isBoolean,
   createdAt: isString,
   updatedAt: isString

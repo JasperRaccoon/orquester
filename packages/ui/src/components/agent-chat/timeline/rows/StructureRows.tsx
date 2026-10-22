@@ -13,6 +13,7 @@ import {
   proposedPlanTitle
 } from "../row-format";
 import { ChatIconButton, CopyButton, DisclosureChevron, WorkingIndicator } from "../../primitives";
+import { compactRequestLabel } from "../row-chrome";
 import { useTimelineRowContext } from "../context";
 import { ChatMarkdown } from "../markdown/ChatMarkdown";
 import { QUOTE_SOURCE_ATTR } from "../quote-selection";
@@ -151,16 +152,17 @@ export const CompactRequestRow = React.memo(function CompactRequestRow({
 }: {
   row: Row<"message">;
 }): React.ReactElement {
-  void row;
+  // Idle compaction's own `/compact` reads as automatic.
+  const label = compactRequestLabel(row.message);
   return (
     <div
       role="separator"
-      aria-label="Compaction requested"
+      aria-label={label}
       className="ac-hairline py-1 text-xs text-neutral-500"
     >
       <span className="flex shrink-0 items-center gap-1.5">
         <Minimize2 size={12} strokeWidth={1.8} aria-hidden />
-        Compaction requested
+        {label}
       </span>
     </div>
   );

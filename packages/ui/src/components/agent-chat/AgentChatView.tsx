@@ -81,7 +81,9 @@ import {
 import { proposedPlanTitle, shouldShowPlanFollowUpPrompt } from "../../lib/agent-chat/plan.logic";
 import { useAppStore } from "../../store/app";
 import { REGISTRY, type RegistryEntryDef } from "@orquester/registry";
-import { isSessionProfileAgentId } from "@orquester/api";
+import { isSessionProfileAgentId, SYSTEM_ACCOUNT_ID } from "@orquester/api";
+import { resolveIdleCompaction } from "@orquester/config";
+import { resumeCompactionOffer, resumeCompactionWakeAt } from "../../lib/agent-chat/resume-compaction.logic";
 import { useSessionProfileList } from "../../lib/session-profiles/hooks";
 import { agentForRefId } from "../right-rail/agent-profile/default-agent";
 import { AgentDrillIn } from "./roster/AgentDrillIn";
@@ -936,6 +938,27 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   // switch there first — with the tab summary as the fallback for a thread
   // whose snapshot has not landed yet.
   const threadAccountId = slice.head?.accountId ?? session.accountId ?? "";
+  // Idle compaction's "When you return": offer to compact a large Claude chat whose prompt cache
+  // expired, re-read at the expiry itself so the chip appears without another event.
+  const agentPrefs = useAppStore((state) => state.appConfig.agents);
+  const promptCacheExpiresAt = slice.contextWindow?.promptCacheExpiresAt ?? null;
+  const [, setCacheExpiredTick] = React.useState(0);
+  React.useEffect(() => {
+    const wakeAt = resumeCompactionWakeAt(promptCacheExpiresAt, Date.now());
+    if (wakeAt === null) return;
+    const timer = setTimeout(() => setCacheExpiredTick((tick) => tick + 1), wakeAt - Date.now());
+    return () => clearTimeout(timer);
+  }, [promptCacheExpiresAt]);
+  const resumeCompactionTokens = paintOnly
+    ? null
+    : resumeCompactionOffer({
+        adapter: provider?.id,
+        mode: resolveIdleCompaction(agentPrefs, threadAccountId || SYSTEM_ACCOUNT_ID),
+        usedTokens: slice.contextWindow?.usedTokens ?? null,
+        promptCacheExpiresAt,
+        busy: turnActive || sending || pending.totalCount > 0 || slice.queue.length > 0,
+        nowMs: Date.now()
+      });
   // OpenCode runs one server per project under its own identity (§3.2), so
   // there is nothing to pick: the chip stays the label it always was.
   const accountOptions = chatAccountSwitchSupported({
@@ -1452,6 +1475,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 // `/compact` is offered only where there is something to
                 // compact (§4.6.7): an empty thread would earn a refusal.
                 threadHasContent={slice.entries.length > 0}
+                resumeCompactionTokens={resumeCompactionTokens}
                 // boxes: why the account picker offers no System account.
                 accountNote={boxView !== null ? BOX_MANAGED_ACCOUNTS_NOTE : undefined}
               />
