@@ -311,9 +311,8 @@ export function manualInstallCommand(manager: BoxPackageManager, choices: readon
 export function boxDesktopInstallHint(facts: BoxGuiFacts, missingPackages: readonly string[], user: string): string | null {
   const manager = packageManagerOf(facts);
   if (manager === null) {
-    const extra = missingPackages.length > 0 ? missingPackages : [];
-    if (extra.length === 0) return null;
-    return `Orquester installs desktop packages only with apt or dnf/yum; install ${extra.join(", ")} (Ubuntu names) in the box yourself.`;
+    if (missingPackages.length === 0) return null;
+    return `Orquester installs desktop packages only with apt or dnf/yum; install ${missingPackages.join(", ")} (Ubuntu names) in the box yourself.`;
   }
   const plan = desktopInstallPlan(facts, missingPackages, manager);
   if (plan.missing.length === 0) return null;

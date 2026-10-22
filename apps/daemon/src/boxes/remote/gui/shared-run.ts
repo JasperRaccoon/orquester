@@ -42,7 +42,7 @@ export class SharedRun<T> {
     if (signal?.aborted) return Promise.reject(signal.reason);
     this.waiters += 1;
     if (onProgress) {
-      for (const line of this.backlog) onProgress(line);
+      for (const line of this.backlog) deliver(onProgress, line);
       this.listeners.add(onProgress);
     }
     return new Promise<T>((resolve, reject) => {
@@ -83,12 +83,14 @@ export class SharedRun<T> {
   private emit(line: string): void {
     this.backlog.push(line);
     if (this.backlog.length > BACKLOG_LINES) this.backlog.splice(0, this.backlog.length - BACKLOG_LINES);
-    for (const listener of this.listeners) {
-      try {
-        listener(line);
-      } catch {
-        // A caller's progress sink never breaks the run or the other callers.
-      }
-    }
+    for (const listener of this.listeners) deliver(listener, line);
+  }
+}
+
+function deliver(listener: BoxGuiProgress, line: string): void {
+  try {
+    listener(line);
+  } catch {
+    // A caller's progress sink never breaks the run or the other callers.
   }
 }

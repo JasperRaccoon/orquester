@@ -17,6 +17,9 @@ export const GOOGLE_CHROME_RPM_REPO = "https://dl.google.com/linux/chrome/rpm/st
 const APT_KEYRING = "/etc/apt/keyrings/google-chrome.asc";
 /** The file name Chrome's own postinst manages, so it never adds a second, conflicting entry. */
 const APT_SOURCE = "/etc/apt/sources.list.d/google-chrome.list";
+/** What Chrome's postinst (`/opt/google/chrome/cron/google-chrome`) turns it into. */
+const CHROME_OWN_SOURCE = "/etc/apt/sources.list.d/google-chrome.sources";
+const CHROME_OWN_KEYRING = "/usr/share/keyrings/google-chrome.gpg";
 const RPM_REPO_FILE = "/etc/yum.repos.d/google-chrome.repo";
 
 export const EXIT_REQUIRED_FAILED = 3;
@@ -98,8 +101,10 @@ export function desktopInstallScript(plan: { manager: BoxPackageManager; require
 /**
  * Install `google-chrome-stable` from Google's signed repository (amd64 and arm64). apt: the
  * signing key is fetched over HTTPS, its primary fingerprint checked against the pinned one when
- * gpg is available, and apt verifies the repository's signature with it (`signed-by`). dnf/yum:
- * the repository file names the same key, and rpm checks every package's signature with it.
+ * gpg is available, and apt verifies the repository's signature with it (`signed-by`). Chrome's
+ * postinst then takes the repository over (its own `.sources` file and keyring) and drops our list,
+ * so a later run finds that and reuses it. dnf/yum: the repository file names the same key, and
+ * rpm checks every package's signature with it.
  */
 export function browserInstallScript(manager: BoxPackageManager): string {
   const lines = prelude(manager);
@@ -118,21 +123,28 @@ export function browserInstallScript(manager: BoxPackageManager): string {
       "  say 'Installing curl and the CA certificates'",
       `  install_set ca-certificates curl || exit ${EXIT_REQUIRED_FAILED}`,
       "fi",
-      "say \"Adding Google's signed Chrome repository\"",
-      "install -d -m 0755 /etc/apt/keyrings",
-      `key=${shQuote(`${APT_KEYRING}.tmp`)}`,
-      `fetch ${shQuote(GOOGLE_SIGNING_KEY_URL)} "$key" || { say "Could not download Google's signing key."; exit ${EXIT_REQUIRED_FAILED}; }`,
-      `grep -q 'BEGIN PGP PUBLIC KEY BLOCK' "$key" || { say "Google's signing key download is not a key."; rm -f "$key"; exit ${EXIT_REQUIRED_FAILED}; }`,
-      "if command -v gpg >/dev/null 2>&1; then",
-      "  home=$(mktemp -d)",
-      "  fpr=$(GNUPGHOME=$home gpg --batch --show-keys --with-colons \"$key\" 2>/dev/null | awk -F: '$1 == \"fpr\" { print $10; exit }')",
-      "  rm -rf \"$home\"",
-      `  if [ "$fpr" != ${shQuote(GOOGLE_SIGNING_KEY_FINGERPRINT)} ]; then say "Google's signing key has an unexpected fingerprint ($fpr)."; rm -f "$key"; exit ${EXIT_REQUIRED_FAILED}; fi`,
-      "  say \"Google's signing key fingerprint checks out.\"",
-      "fi",
-      `chmod 0644 "$key" && mv -f "$key" ${shQuote(APT_KEYRING)}`,
-      `printf 'deb [arch=%s signed-by=%s] %s stable main\\n' "$arch" ${shQuote(APT_KEYRING)} ${shQuote(GOOGLE_CHROME_DEB_REPO)} > ${shQuote(APT_SOURCE)}`,
-      `updated=0; refresh || exit ${EXIT_REQUIRED_FAILED}`
+      // Chrome's postinst owns the repository from then on: it rewrites our list as
+      // google-chrome.sources signed by its own keyring. Reuse that when it is there.
+      `if [ -f ${shQuote(CHROME_OWN_SOURCE)} ] && [ -s ${shQuote(CHROME_OWN_KEYRING)} ]; then`,
+      "  say \"Google's Chrome repository is already configured\"",
+      `  updated=0; refresh || exit ${EXIT_REQUIRED_FAILED}`,
+      "else",
+      "  say \"Adding Google's signed Chrome repository\"",
+      "  install -d -m 0755 /etc/apt/keyrings",
+      `  key=${shQuote(`${APT_KEYRING}.tmp`)}`,
+      `  fetch ${shQuote(GOOGLE_SIGNING_KEY_URL)} "$key" || { say "Could not download Google's signing key."; exit ${EXIT_REQUIRED_FAILED}; }`,
+      `  grep -q 'BEGIN PGP PUBLIC KEY BLOCK' "$key" || { say "Google's signing key download is not a key."; rm -f "$key"; exit ${EXIT_REQUIRED_FAILED}; }`,
+      "  if command -v gpg >/dev/null 2>&1; then",
+      "    home=$(mktemp -d)",
+      "    fpr=$(GNUPGHOME=$home gpg --batch --show-keys --with-colons \"$key\" 2>/dev/null | awk -F: '$1 == \"fpr\" { print $10; exit }')",
+      "    rm -rf \"$home\"",
+      `    if [ "$fpr" != ${shQuote(GOOGLE_SIGNING_KEY_FINGERPRINT)} ]; then say "Google's signing key has an unexpected fingerprint ($fpr)."; rm -f "$key"; exit ${EXIT_REQUIRED_FAILED}; fi`,
+      "    say \"Google's signing key fingerprint checks out.\"",
+      "  fi",
+      `  chmod 0644 "$key" && mv -f "$key" ${shQuote(APT_KEYRING)}`,
+      `  printf 'deb [arch=%s signed-by=%s] %s stable main\\n' "$arch" ${shQuote(APT_KEYRING)} ${shQuote(GOOGLE_CHROME_DEB_REPO)} > ${shQuote(APT_SOURCE)}`,
+      `  updated=0; refresh || exit ${EXIT_REQUIRED_FAILED}`,
+      "fi"
     );
   } else {
     lines.push(
@@ -150,9 +162,13 @@ export function browserInstallScript(manager: BoxPackageManager): string {
   }
   lines.push(
     "say 'Installing google-chrome-stable'",
-    `install_set google-chrome-stable || { say 'Could not install google-chrome-stable.'; exit ${EXIT_REQUIRED_FAILED}; }`,
-    "say 'Google Chrome is installed.'"
+    `install_set google-chrome-stable || { say 'Could not install google-chrome-stable.'; exit ${EXIT_REQUIRED_FAILED}; }`
   );
+  if (manager === "apt") {
+    // The postinst migrated our list to its own source and keyring: our key is unused now.
+    lines.push(`[ -f ${shQuote(APT_SOURCE)} ] || rm -f ${shQuote(APT_KEYRING)}`);
+  }
+  lines.push("say 'Google Chrome is installed.'");
   return lines.join("\n");
 }
 
