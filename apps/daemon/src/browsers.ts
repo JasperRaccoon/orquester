@@ -86,6 +86,13 @@ export interface BrowserChrome {
   /** HOST loopback remote-debugging port (DevTools frontend + CDP WS proxy);
    *  for a box Chromium, the port of the forward to it. */
   debugPort: number;
+  /**
+   * Whether the DevTools frontend files and CDP socket on `debugPort` may be
+   * proxied onto the daemon's origin. Only a host Chromium's: the frontend runs
+   * same-origin with the app (and its credential), so it must never come from
+   * a box, which controls what its Chromium serves.
+   */
+  trustedDevtools: boolean;
   /** End the Chromium and everything that reaches it. Idempotent; never rejects. */
   close(): Promise<void>;
   /** Why the browser disconnected when that was not a crash (a dropped VM
@@ -93,9 +100,14 @@ export interface BrowserChrome {
   lostReason?(): string | null;
 }
 
+/** Why a VM tab has no DevTools (`BrowserChrome.trustedDevtools`). */
+export const VM_DEVTOOLS_REFUSED =
+  "DevTools is not available for a browser that runs in the VM: its frontend would come from the VM.";
+
 /** Starts a project's Chromium somewhere other than the host (its box). */
 export interface RemoteChromeLauncher {
-  launch(options: { onProgress(line: string): void }): Promise<BrowserChrome>;
+  /** `signal` aborts when the project's last tab closes mid-launch: reject promptly, leave nothing running. */
+  launch(options: { onProgress(line: string): void; signal: AbortSignal }): Promise<BrowserChrome>;
 }
 
 /** The launcher of a project whose Chromium does not run on the host; null = host. */
@@ -110,6 +122,8 @@ export class BrowserManager {
   /** In-flight per-project Chromium teardowns; launch() waits on these so a
    *  relaunch can't race the dying process for the profile dir. */
   private readonly closingChromes = new Map<string, Promise<void>>();
+  /** Per-project abort of an in-flight launch (honoured by remote launchers). */
+  private readonly launchAborts = new Map<string, AbortController>();
   // Serialize on-disk writes: concurrent persist() calls (framenavigated + load
   // fire close together) would otherwise race the same tmp file and corrupt it.
   private persistChain: Promise<void> = Promise.resolve();
@@ -193,6 +207,9 @@ export class BrowserManager {
     if (![...this.tabs.values()].some((t) => t.record.projectPath === project)) {
       const pending = this.chromes.get(project);
       this.chromes.delete(project);
+      // A launch still under way (a VM installing Chromium) is cancelled rather
+      // than waited out; it tears down whatever it started before it rejects.
+      this.launchAborts.get(project)?.abort();
       if (pending) {
         // Await the process exit (browser.close() resolves on exit) so the
         // profile's SingletonLock is released, and publish the teardown so a
@@ -368,9 +385,17 @@ export class BrowserManager {
    *  able to start a Chromium process. */
   async devtoolsPort(id: string): Promise<number> {
     const tab = this.mustGet(id);
+    this.refuseUntrustedDevtools(tab);
     const pending = this.chromes.get(tab.record.projectPath);
     if (!pending) throw new BrowserError("Browser tab is not running", 409);
-    return (await pending).debugPort;
+    const chrome = await pending;
+    if (!chrome.trustedDevtools) throw new BrowserError(VM_DEVTOOLS_REFUSED, 409);
+    return chrome.debugPort;
+  }
+
+  /** boxes: a tab whose Chromium runs in a VM gets no DevTools on the daemon's origin. */
+  private refuseUntrustedDevtools(tab: Tab): void {
+    if (this.remoteChrome?.(tab.record.projectPath)) throw new BrowserError(VM_DEVTOOLS_REFUSED, 409);
   }
 
   /** Resolve the CDP endpoint the DevTools frontend attaches to. Routed by our
@@ -381,11 +406,13 @@ export class BrowserManager {
    *  running tab, and the asset route would 409 first regardless). */
   async devtoolsEndpoint(id: string): Promise<{ port: number; targetId: string }> {
     const tab = this.mustGet(id);
+    this.refuseUntrustedDevtools(tab);
     const cdp = tab.cdp;
     if (!cdp || tab.status !== "running") throw new BrowserError("Browser tab is not running", 409);
     // Target.getTargetInfo with no targetId returns the session's own target.
     const info = await cdp.send("Target.getTargetInfo");
     const chrome = await this.chromeFor(tab.record.projectPath);
+    if (!chrome.trustedDevtools) throw new BrowserError(VM_DEVTOOLS_REFUSED, 409);
     return { port: chrome.debugPort, targetId: info.targetInfo.targetId };
   }
 
@@ -394,6 +421,7 @@ export class BrowserManager {
       for (const sink of tab.sinks) sink.onEnd();
       tab.sinks.clear();
     }
+    for (const controller of this.launchAborts.values()) controller.abort();
     for (const pending of this.chromes.values()) {
       void (await pending.catch(() => null))?.close();
     }
@@ -439,10 +467,19 @@ export class BrowserManager {
   private chromeFor(projectPath: string): Promise<Chrome> {
     let pending = this.chromes.get(projectPath);
     if (!pending) {
-      const launched = this.launch(projectPath);
+      const abort = new AbortController();
+      const launched = this.launch(projectPath, abort.signal);
       pending = launched;
       this.chromes.set(projectPath, launched);
-      launched.catch(() => this.chromes.delete(projectPath));
+      this.launchAborts.set(projectPath, abort);
+      const settled = (): void => {
+        if (this.launchAborts.get(projectPath) === abort) this.launchAborts.delete(projectPath);
+      };
+      launched.then(settled, settled);
+      // Only this launch's own entry: a relaunch may already have replaced it.
+      launched.catch(() => {
+        if (this.chromes.get(projectPath) === launched) this.chromes.delete(projectPath);
+      });
       // Evict a browser that dies at runtime (renderer OOM taking Chromium down,
       // host kill, etc.) so the next subscribe/navigate relaunches instead of
       // reusing a dead Promise<Chrome> forever. Capture `launched` so a newer
@@ -486,11 +523,12 @@ export class BrowserManager {
     this.pushState(tab);
   }
 
-  private async launch(projectPath: string): Promise<Chrome> {
+  private async launch(projectPath: string, signal: AbortSignal): Promise<Chrome> {
     await this.closingChromes.get(projectPath);
     const remote = this.remoteChrome?.(projectPath);
     if (remote) {
       return remote.launch({
+        signal,
         onProgress: (line) => {
           for (const tab of this.tabs.values()) {
             if (tab.record.projectPath !== projectPath || tab.status !== "starting" || tab.progress === line) continue;
@@ -542,7 +580,7 @@ export class BrowserManager {
       await browser.close().catch(() => undefined);
       throw new BrowserError("Chromium did not expose a debugging endpoint", 500);
     }
-    return { browser, sandboxed, debugPort, close: () => browser.close().catch(() => undefined) };
+    return { browser, sandboxed, debugPort, trustedDevtools: true, close: () => browser.close().catch(() => undefined) };
   }
 
   // Launch Chromium and force a renderer target to start, so a present-but-broken

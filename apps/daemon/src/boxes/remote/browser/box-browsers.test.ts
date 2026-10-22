@@ -1,19 +1,23 @@
 import assert from "node:assert/strict";
+import { once } from "node:events";
 import { mkdtemp, rm, stat } from "node:fs/promises";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import type { BrowserStateMessage } from "@orquester/api";
+import { WebSocketServer } from "ws";
 
-import { BrowserManager } from "../../../browsers.ts";
+import { BrowserManager, VM_DEVTOOLS_REFUSED } from "../../../browsers.ts";
 import type { BoxConnection } from "../../contracts.ts";
-import { boxRecord, fakeAgentConnection, fakeBoxes, type FakeProcBehavior } from "../exec/testing.ts";
+import { boxRecord, fakeAgentConnection, fakeBoxes, type FakeAgentConnection, type FakeProcBehavior } from "../exec/testing.ts";
 import {
   BOX_BROWSER_PROC_PREFIX,
   BoxBrowsers,
   boxChromiumArgs,
   boxRunsBrowser,
+  connectBoundedTransport,
   parseDevtoolsListening,
   projectBrowserHash,
   type BoxBrowserInstaller
@@ -32,11 +36,23 @@ const installed: BoxBrowserInstaller = {
 
 async function rig(
   t: test.TestContext,
-  options: { behavior?: FakeProcBehavior; installer?: BoxBrowserInstaller; launchDeadlineMs?: number } = {}
+  options: {
+    /** A scripted detached process; `box` is the rig's connection (to drop its link mid-launch). */
+    behavior?: (control: Parameters<FakeProcBehavior>[0], box: FakeAgentConnection) => ReturnType<FakeProcBehavior>;
+    /** null: no installer wired. */
+    installer?: BoxBrowserInstaller | null;
+    launchDeadlineMs?: number;
+    exitDeadlineMs?: number;
+  } = {}
 ) {
   const dir = await mkdtemp(join(tmpdir(), "orq-box-browsers-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
-  const connection = fakeAgentConnection({ boxId: "box-1", sys: { dataDir: join(dir, "agent") }, behavior: options.behavior });
+  const script = options.behavior;
+  const connection: FakeAgentConnection = fakeAgentConnection({
+    boxId: "box-1",
+    sys: { dataDir: join(dir, "agent") },
+    ...(script ? { behavior: (control: Parameters<FakeProcBehavior>[0]) => script(control, connection) } : {})
+  });
   const mac = fakeAgentConnection({ boxId: "box-mac", sys: { os: "darwin" } });
   const boxes = fakeBoxes();
   boxes.add(boxRecord("box-1", { kind: "linux", project: { workspace: "acme", name: "app", path: PROJECT } }), connection);
@@ -45,10 +61,10 @@ async function rig(
   const vm = new BoxBrowsers({
     registry: boxes.registry,
     hub: boxes.hub,
-    installer: options.installer ?? installed,
+    ...(options.installer === null ? {} : { installer: options.installer ?? installed }),
     logger: { warn: (message) => warnings.push(message) },
     launchDeadlineMs: options.launchDeadlineMs ?? 5_000,
-    exitDeadlineMs: 50
+    exitDeadlineMs: options.exitDeadlineMs ?? 50
   });
   t.after(() => vm.stop());
   const manager = new BrowserManager({
@@ -242,4 +258,120 @@ test("a box that (re)connects has the Chromiums this daemon does not own stopped
   assert.equal(r.connection.proc(`${BOX_BROWSER_PROC_PREFIX}0123456789abcdef-b`), undefined);
   assert.ok(r.connection.proc("agent-claude-1"), "other detached processes are left alone");
   assert.deepEqual(r.warnings, []);
+});
+
+test("without an installer no tab runs in a box: box projects keep today's host Chromium path", async (t) => {
+  const r = await rig(t, { installer: null });
+  assert.equal(r.vm.runsInBox(PROJECT), false);
+  assert.equal(r.vm.launcherFor(PROJECT), null);
+  // No host Chromium here either: the create is refused as for any host-browser project.
+  await assert.rejects(r.manager.create(PROJECT), { statusCode: 409 });
+});
+
+test("a VM tab never gets DevTools on the daemon's origin", async (t) => {
+  const r = await rig(t);
+  const tab = await r.manager.create(PROJECT);
+  await assert.rejects(r.manager.devtoolsPort(tab.id), { statusCode: 409, message: VM_DEVTOOLS_REFUSED });
+  await assert.rejects(r.manager.devtoolsEndpoint(tab.id), { statusCode: 409, message: VM_DEVTOOLS_REFUSED });
+  assert.equal(r.connection.execs.length, 0, "and asking starts nothing");
+});
+
+test("a sandbox-looking failure is retried only once the first Chromium is known to have ended", async (t) => {
+  // It cannot be killed: a second Chromium beside it would fight it for the profile.
+  const stuck = await rig(t, {
+    launchDeadlineMs: 40,
+    behavior: (control) => {
+      control.write("No usable sandbox!\n", 2);
+      return { onSignal: () => undefined };
+    }
+  });
+  const tab = await stuck.manager.create(PROJECT);
+  await firstState(stuck.manager, tab.id);
+  assert.equal(chromeExecs(stuck.connection).length, 1, "no retry beside a live first process");
+  assert.match(stuck.manager.get(tab.id)!.errorMessage ?? "", /No usable sandbox/);
+
+  // Killed at the deadline: ended, so the unsandboxed retry runs.
+  const killed = await rig(t, {
+    launchDeadlineMs: 40,
+    behavior: (control) => {
+      control.write("No usable sandbox!\n", 2);
+    }
+  });
+  const killedTab = await killed.manager.create(PROJECT);
+  await firstState(killed.manager, killedTab.id);
+  const execs = chromeExecs(killed.connection);
+  assert.equal(execs.length, 2);
+  assert.ok(execs[1]!.args!.includes("--no-sandbox"));
+});
+
+test("a link that drops mid-start is not retried, and the detached process is stopped by id once the link is back", { timeout: 5_000 }, async (t) => {
+  // A long exit deadline: a detached process must not be waited on at all.
+  const r = await rig(t, {
+    exitDeadlineMs: 60_000,
+    behavior: (control, box) => {
+      control.write("No usable sandbox!\n", 2);
+      box.dropLink();
+      box.restoreLink();
+    }
+  });
+  const tab = await r.manager.create(PROJECT);
+  await firstState(r.manager, tab.id);
+  assert.match(r.manager.get(tab.id)!.errorMessage ?? "", /connection to the VM dropped while Chromium was starting/);
+  const [spec, ...more] = chromeExecs(r.connection);
+  assert.equal(more.length, 0, "a dropped link is not a sandbox failure");
+  assert.equal(r.connection.proc(spec!.detach!.procId), undefined, "stopped through an attach and released");
+});
+
+test("closing the last tab cancels a launch still installing Chromium, at once", async (t) => {
+  let seen: AbortSignal | undefined;
+  let entered!: () => void;
+  const installing = new Promise<void>((resolve) => (entered = resolve));
+  const r = await rig(t, {
+    installer: {
+      ensureBrowser: (_connection, options) => {
+        seen = options?.signal;
+        entered();
+        return new Promise(() => undefined); // an install that never finishes on its own
+      }
+    }
+  });
+  const tab = await r.manager.create(PROJECT);
+  const sink = { onFrame: () => undefined, onState: () => undefined, onPicked: () => undefined, onEnd: () => undefined };
+  const subscribed = r.manager.subscribe(tab.id, sink);
+  await installing;
+  await r.manager.close(tab.id);
+  assert.equal(seen?.aborted, true, "the installer was told to stop");
+  (await subscribed)();
+  assert.equal(chromeExecs(r.connection).length, 0, "no Chromium was started");
+  assert.deepEqual(r.manager.list(), []);
+});
+
+test("closing the last tab while Chromium starts ends that Chromium before the close returns", async (t) => {
+  const r = await rig(t, { behavior: () => undefined }); // never announces its endpoint
+  const tab = await r.manager.create(PROJECT);
+  const started = r.connection.nextExec((spec) => spec.detach?.procId.startsWith(BOX_BROWSER_PROC_PREFIX) ?? false);
+  const sink = { onFrame: () => undefined, onState: () => undefined, onPicked: () => undefined, onEnd: () => undefined };
+  const subscribed = r.manager.subscribe(tab.id, sink);
+  const spec = await started;
+  await r.manager.close(tab.id);
+  assert.equal(r.connection.proc(spec.detach!.procId), undefined, "killed and released");
+  (await subscribed)();
+  assert.deepEqual(r.vm.list(), []);
+});
+
+test("the CDP socket to a box closes on a message over the cap", async () => {
+  const server = new WebSocketServer({ port: 0, host: "127.0.0.1" });
+  await once(server, "listening");
+  server.on("connection", (socket) => {
+    socket.on("message", () => socket.send("x".repeat(2048)));
+  });
+  try {
+    const transport = await connectBoundedTransport(`ws://127.0.0.1:${(server.address() as AddressInfo).port}/devtools/browser/x`, 1024);
+    const closed = new Promise<void>((resolve) => (transport.onclose = resolve));
+    transport.onmessage = () => assert.fail("an oversized message is never delivered");
+    transport.send("{}");
+    await closed;
+  } finally {
+    server.close();
+  }
 });

@@ -108,18 +108,11 @@ export interface DaemonBoxesDeps {
   logger: Pick<Console, "log" | "info" | "warn" | "error">;
   /**
    * boxes (VM browser): installs Chromium in a Linux box for its project's Browser tab — the GUI
-   * installer's `ensureBrowser` (`createBoxGuiInstaller()` from `remote/gui`). Without it, a box
-   * tab reports that the installer is not wired.
+   * installer's `ensureBrowser` (`createBoxGuiInstaller()` from `remote/gui`). Without it, box
+   * projects keep the host Chromium and its dev-server forwards.
    */
   browserInstaller?: BoxBrowserInstaller;
 }
-
-/** A VM browser that cannot start because no installer was passed in {@link DaemonBoxesDeps}. */
-const UNWIRED_BROWSER_INSTALLER: BoxBrowserInstaller = {
-  ensureBrowser: async () => {
-    throw Object.assign(new Error("VM browser installer is not wired"), { code: "BOX_GUI_UNAVAILABLE", hint: null });
-  }
-};
 
 /** What `attach` needs once the daemon's session list, browser tabs and chat services exist. */
 export interface DaemonBoxesAttachment {
@@ -482,7 +475,7 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
       const vmBrowsers = new BoxBrowsers({
         registry,
         hub,
-        installer: deps.browserInstaller ?? UNWIRED_BROWSER_INSTALLER,
+        ...(deps.browserInstaller ? { installer: deps.browserInstaller } : {}),
         logger: { warn: (message, meta) => logger.warn(`[boxes] ${message}`, meta ?? "") }
       });
       boxBrowsers = vmBrowsers;
