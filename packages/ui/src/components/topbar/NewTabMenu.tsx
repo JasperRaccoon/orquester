@@ -23,6 +23,7 @@ import {
   type RegistryEntry
 } from "@orquester/api";
 import { CHROMIUM_FAMILY_IDS } from "@orquester/registry";
+import { browserMenuEntry } from "../browser/browser-tab.logic";
 import {
   AdaptiveMenu,
   DropdownEmpty,
@@ -628,6 +629,8 @@ export const NewTabMenu: React.FC = () => {
   // Only Chromium-family entries count: firefox/system-browser can be enabled
   // on a host the daemon's puppeteer-core resolver would still 409 on.
   const browserHostReady = registry.browsers.some((b) => b.enabled && CHROMIUM_FAMILY_IDS.has(b.id));
+  // boxes: a Linux box project's Chromium runs in its VM, so it needs none on the host.
+  const browserEntry = browserMenuEntry({ hasChannel: browserHasChannel, hostChromium: browserHostReady, boxKind: boxView?.info.kind ?? null });
 
   const trigger = (
     // Opening the menu refreshes the desktop prerequisites: an install done
@@ -684,11 +687,11 @@ export const NewTabMenu: React.FC = () => {
       <DropdownItem icon={<GitBranch size={14} />} onClick={() => openGit()}>
         Git
       </DropdownItem>
-      {browserHasChannel && browserHostReady ? (
+      {browserEntry.kind === "open" ? (
         <DropdownItem icon={<Globe size={14} />} onClick={() => void openBrowser()}>
           Browser
         </DropdownItem>
-      ) : !browserHasChannel ? (
+      ) : browserEntry.kind === "no-channel" ? (
         <DropdownEmpty>Browser — needs a remote (HTTP) connection</DropdownEmpty>
       ) : (
         <DropdownEmpty>Browser — install chromium on the host</DropdownEmpty>
