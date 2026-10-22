@@ -41,7 +41,8 @@ import {
   nextShownChangeIds,
   projectBoxBadge,
   projectPendingConfigChanges,
-  temporaryBoxCard
+  temporaryBoxCard,
+  vmDesktopNote
 } from "./box-surfaces.logic";
 
 const NOW = Date.parse("2026-10-20T12:00:00Z");
@@ -283,9 +284,29 @@ describe("the chat's composer gate", () => {
 });
 
 describe("the + menu and accounts", () => {
-  it("hides desktops (IDE and file-explorer launches) for a box project", () => {
-    assert.deepEqual(newTabMenuGates(info()), { showDesktops: false });
-    assert.deepEqual(newTabMenuGates(null), { showDesktops: true });
+  it("offers desktops in a Linux VM (they run inside it); a macOS or Windows VM, or a gone one, says why not", () => {
+    assert.deepEqual(newTabMenuGates(null), { showDesktops: true, desktopsInVm: false, desktopsUnavailable: null });
+    assert.deepEqual(newTabMenuGates(info()), { showDesktops: true, desktopsInVm: true, desktopsUnavailable: null });
+    assert.deepEqual(newTabMenuGates(info({ kind: "linux-gpu" })), { showDesktops: true, desktopsInVm: true, desktopsUnavailable: null });
+    const mac = newTabMenuGates(info({ kind: "macos" }));
+    assert.equal(mac.showDesktops, false);
+    assert.match(mac.desktopsUnavailable ?? "", /macOS VM \(Linux VMs only\)/);
+    assert.match(newTabMenuGates(info({ kind: "windows-gpu" })).desktopsUnavailable ?? "", /Windows VM/);
+    assert.deepEqual(newTabMenuGates(info({ state: "destroyed" })), {
+      showDesktops: false,
+      desktopsInVm: false,
+      desktopsUnavailable: "Desktops — not available: the VM is gone"
+    });
+  });
+
+  it("says what opening a VM desktop does when its packages are missing", () => {
+    const status = { available: false, installHint: "Orquester installs the desktop packages when a desktop opens.", warnings: [] };
+    assert.equal(vmDesktopNote(null), null);
+    assert.equal(vmDesktopNote({ ...status, available: true }), null);
+    assert.equal(vmDesktopNote(status), status.installHint);
+    assert.equal(vmDesktopNote({ ...status, installHint: null, warnings: ["No sudo in this VM."] }), "No sudo in this VM.");
+    assert.match(vmDesktopNote({ ...status, installHint: null }) ?? "", /first open/);
+    assert.match(vmDesktopNote("error") ?? "", /Could not check/);
   });
 
   it("offers the shells of the box's OS family, else all", () => {

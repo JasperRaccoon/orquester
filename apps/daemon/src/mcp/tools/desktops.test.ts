@@ -97,6 +97,8 @@ test("get_desktops {desktopId} finds the desktop in the full list; an unknown id
   assert.match(await refused(api, "get_desktops", { desktopId: "nope" }, "NOT_FOUND"), /get_desktops shows/);
   const withHost = await value(api, "get_desktops", { desktopId: "dt-1", host: true });
   assert.deepEqual(withHost.host, { available: true, installHint: null });
+  // boxes: the status is asked for the desktop's project (its VM's, for a VM project).
+  assert.ok(api.calls.some((c) => c.path === "/api/desktops/host" && (c as { query?: { projectPath?: string } }).query?.projectPath === GAME));
   await refused(api, "get_desktops", { appId: "app-1" }, "INVALID_ARGUMENT");
   await refused(api, "get_desktops", { desktopId: "dt-1", project: "acme/game" }, "INVALID_ARGUMENT");
 });

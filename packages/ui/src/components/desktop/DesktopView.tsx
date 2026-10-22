@@ -427,12 +427,13 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
       return;
     }
     const ctrl = new AbortController();
-    api.desktopHostStatus(ctrl.signal).then(
+    // boxes: a VM desktop's prerequisites are its VM's.
+    api.desktopHostStatus(ctrl.signal, desktop.box?.id ? desktop.projectPath : undefined).then(
       (host) => setInstallHint(host.available ? null : host.installHint),
       () => undefined
     );
     return () => ctrl.abort();
-  }, [desktop.status, api]);
+  }, [desktop.status, api, desktop.box?.id, desktop.projectPath]);
 
   // ---- Keys & clipboard ----------------------------------------------------
 
@@ -567,6 +568,8 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
       <>
         <Loader2 size={20} className="animate-spin text-neutral-500" />
         <span>Starting desktop…</span>
+        {/* boxes: what a VM desktop is waiting on (its VM, the desktop packages' install). */}
+        {desktop.statusDetail && <span className="max-w-sm truncate text-xs text-neutral-500">{desktop.statusDetail}</span>}
       </>
     );
   } else if (desktop.status === "stopped") {
@@ -588,13 +591,22 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
         )}
         {installHint && (
           <div className="flex w-full max-w-lg flex-col gap-1 text-left">
-            <span className="text-xs text-neutral-500">Missing host tools — install with:</span>
+            <span className="text-xs text-neutral-500">{desktop.box ? "In the VM:" : "Missing host tools — install with:"}</span>
             <code className="select-all break-all rounded border border-neutral-800 bg-neutral-900 p-2 font-mono text-[11px] text-neutral-300">
               {installHint}
             </code>
           </div>
         )}
         {restartButton}
+      </>
+    );
+  } else if (desktop.box && !desktop.box.connected) {
+    // boxes: the VM's link is down; the desktop keeps running there.
+    overlay = (
+      <>
+        <Loader2 size={20} className="animate-spin text-neutral-500" />
+        <span>The VM is not connected</span>
+        <span className="max-w-sm text-xs text-neutral-500">The desktop keeps running there; the view comes back with the VM.</span>
       </>
     );
   } else if (conn === "connecting" || conn === "idle") {
