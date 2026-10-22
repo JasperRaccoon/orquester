@@ -65,6 +65,7 @@ class FakeBox {
   sudo = false;
   pm = "apt-get";
   machine = "x86_64";
+  tmux = "tmux 3.4";
   sandbox: "ok" | "fail" = "ok";
   noSandbox: "ok" | "fail" = "ok";
   readonly calls: Call[] = [];
@@ -151,7 +152,7 @@ class FakeBox {
         `tool:pactl=${have("/usr/bin/pactl")}`,
         `tool:ffmpeg=${have("/usr/bin/ffmpeg")}`,
         `tool:xterm=${have("/usr/bin/xterm")}`,
-        "tmux-version=tmux 3.4",
+        `tmux-version=${this.tmux}`,
         `mesa=${this.desktop ? 1 : 0}`,
         "machine-id=1",
         `fonts=${this.desktop ? 1 : 0}`
@@ -244,6 +245,18 @@ test("an install that leaves the desktop unusable is refused with the reason", a
     createBoxGuiInstaller().ensureDesktop(fake.connection()),
     /^The desktop packages are installed, but a desktop still cannot start in this box: Xvnc, openbox still missing\.$/
   );
+});
+
+test("a desktop stack that installing cannot fix (tmux older than 3.2) is refused, not resolved", async () => {
+  const installed = box();
+  installed.desktop = true;
+  installed.tmux = "tmux 3.1c";
+  await rejectsGui(createBoxGuiInstaller().ensureDesktop(installed.connection()), /^A desktop cannot start in this box: tmux is older than 3\.2/);
+  assert.equal(installed.count("desktop-install"), 0);
+
+  const fresh = box();
+  fresh.tmux = "tmux 3.1c";
+  await rejectsGui(createBoxGuiInstaller().ensureDesktop(fresh.connection()), /^The desktop packages are installed, but a desktop still cannot start in this box: tmux is older than 3\.2/);
 });
 
 test("a sudoer installs through sudo -n; the probe and Chrome check run as the user", async () => {

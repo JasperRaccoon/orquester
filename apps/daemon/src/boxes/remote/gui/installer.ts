@@ -146,7 +146,7 @@ class GuiInstaller implements BoxGuiInstaller {
     const manager = packageManagerOf(facts);
     const user = connection.sys.user;
     if (manager === null) {
-      if (status.available) return this.withHint(connection, facts);
+      if (status.available || missingPackages.length === 0) return usable(this.withHint(connection, facts), false);
       throw new BoxGuiUnavailableError(
         `Orquester installs the desktop packages only with apt or dnf/yum, and this box has ${facts.packageCommand ?? "no package manager"}. Missing: ${missingPackages.join(", ")}.`,
         "Use an Ubuntu, Debian or Fedora image, or install those packages in the box yourself."
@@ -154,9 +154,10 @@ class GuiInstaller implements BoxGuiInstaller {
     }
     const plan = desktopInstallPlan(facts, missingPackages, manager);
     const all = [...plan.required, ...plan.optional];
-    if (plan.missing.length === 0 && facts.machineId) return this.withHint(connection, facts);
+    // Nothing to install (an old tmux is not fixed by installing): the stack is what it is.
+    if (plan.missing.length === 0 && facts.machineId) return usable(this.withHint(connection, facts), false);
     if (!canInstall(facts)) {
-      if (status.available) return this.withHint(connection, facts);
+      if (status.available || plan.required.length === 0) return usable(this.withHint(connection, facts), false);
       throw new BoxGuiUnavailableError(
         `Desktops need ${all.map((choice) => choice[0]).join(" ")} in this box, and its user ${user} has no root access or passwordless sudo to install them.`,
         `Install them in the box: ${manualInstallCommand(manager, all)}`
@@ -176,18 +177,7 @@ class GuiInstaller implements BoxGuiInstaller {
     }
     progress(`Installed in ${Math.round((Date.now() - started) / 1000)} s; checking again`);
     const after = await this.probe(connection, { desktop: true, browser: false }, signal);
-    const final = this.withHint(connection, after);
-    if (!final.available) {
-      const missingTools = final.tools.filter((tool) => tool.required && tool.path === null).map((tool) => tool.name);
-      const reasons = [
-        ...(missingTools.length > 0 ? [`${missingTools.join(", ")} still missing`] : []),
-        ...final.warnings.filter((warning) => warning.startsWith("tmux"))
-      ];
-      throw new BoxGuiUnavailableError(
-        `The desktop packages are installed, but a desktop still cannot start in this box: ${reasons.join("; ") || "the desktop tools are unusable"}.`,
-        "Use a newer Ubuntu, Debian or Fedora image for desktops."
-      );
-    }
+    const final = usable(this.withHint(connection, after), true);
     progress("The desktop stack is ready.");
     return final;
   }
@@ -333,6 +323,21 @@ class GuiInstaller implements BoxGuiInstaller {
   private warn(message: string, connection: BoxConnection, feature: BoxGuiFeature, result: BoxCommandResult): void {
     this.deps.logger?.warn(message, { boxId: connection.boxId, feature, code: result.code, signal: result.signal });
   }
+}
+
+/** `status` when a desktop can start; else the refusal saying why (required tools missing, tmux too old). */
+function usable(status: DesktopHostStatus, installed: boolean): DesktopHostStatus {
+  if (status.available) return status;
+  const missingTools = status.tools.filter((tool) => tool.required && tool.path === null).map((tool) => tool.name);
+  const reasons = [
+    ...(missingTools.length > 0 ? [`${missingTools.join(", ")} ${installed ? "still " : ""}missing`] : []),
+    ...status.warnings.filter((warning) => warning.startsWith("tmux"))
+  ];
+  const why = reasons.join("; ") || "the desktop tools are unusable";
+  throw new BoxGuiUnavailableError(
+    installed ? `The desktop packages are installed, but a desktop still cannot start in this box: ${why}.` : `A desktop cannot start in this box: ${why}.`,
+    "Use a newer Ubuntu, Debian or Fedora image for desktops."
+  );
 }
 
 function requireConnected(connection: BoxConnection): void {
