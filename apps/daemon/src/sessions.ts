@@ -19,20 +19,19 @@ import {
 } from "./tmux";
 import { sessionNodeOptions, sessionNodePreload } from "./plugins/session-env.ts";
 import { ActivityTracker } from "./ansi-activity.ts";
+import { TerminalOutputRing } from "./terminal-history.ts";
 import { classifyAgentEvent } from "./agent-status.ts";
-
-/**
- * Small live ring kept only for HOT replay between a session's creation and the
- * first client connect. The durable scrollback source of truth is tmux
- * capture-pane (survives daemon restarts); this ring does not.
- */
-const MAX_BUFFER = 256 * 1024;
 
 interface Session {
   summary: SessionSummary;
   /** Streaming PTY: `tmux attach -t orq-<id>`. Null once exited. */
   pty: IPty | null;
-  buffer: string;
+  /**
+   * Hot replay ring (query traffic stripped). The direct backend's only
+   * scrollback; on tmux, the fallback once the pane is gone — the durable source
+   * there is capture-pane (survives daemon restarts), which this ring does not.
+   */
+  buffer: TerminalOutputRing;
   tracker: ActivityTracker;
   emitter: EventEmitter;
 }
@@ -384,7 +383,7 @@ export class SessionManager implements ISessionManager {
         kind: summary.kind
       });
     });
-    const session: Session = { summary, pty: null, buffer: "", tracker, emitter: new EventEmitter() };
+    const session: Session = { summary, pty: null, buffer: new TerminalOutputRing(), tracker, emitter: new EventEmitter() };
     this.sessions.set(id, session);
 
     // 1) Spawn the command INSIDE tmux (detached), 2) attach a streaming PTY to
@@ -519,7 +518,7 @@ export class SessionManager implements ISessionManager {
       if (this.sessions.get(id) !== session) {
         return;
       }
-      session.buffer = (session.buffer + data).slice(-MAX_BUFFER);
+      session.buffer.append(data);
       session.tracker.noteOutput(data);
       session.emitter.emit("output", data);
       this.lifecycle.emit("output", { id, data });
@@ -594,12 +593,12 @@ export class SessionManager implements ISessionManager {
         return captured;
       }
     }
-    return session.buffer;
+    return session.buffer.value();
   }
 
   /** Synchronous hot-ring snapshot (kept for callers that can't await). */
   buffer(id: string): string {
-    return this.sessions.get(id)?.buffer ?? "";
+    return this.sessions.get(id)?.buffer.value() ?? "";
   }
 
   activity(id: string): SessionActivity | undefined {
@@ -869,7 +868,7 @@ export class SessionManager implements ISessionManager {
           kind: summary.kind
         });
       });
-      const session: Session = { summary, pty: null, buffer: "", tracker, emitter: new EventEmitter() };
+      const session: Session = { summary, pty: null, buffer: new TerminalOutputRing(), tracker, emitter: new EventEmitter() };
       this.sessions.set(record.id, session);
       this.attach(session);
     }
@@ -1129,14 +1128,14 @@ export class LocalSessionManager implements ISessionManager {
         kind: summary.kind
       });
     });
-    const session: Session = { summary, pty, buffer: "", tracker, emitter: new EventEmitter() };
+    const session: Session = { summary, pty, buffer: new TerminalOutputRing(), tracker, emitter: new EventEmitter() };
     this.sessions.set(id, session);
 
     pty.onData((data) => {
       if (this.sessions.get(id) !== session) {
         return;
       }
-      session.buffer = (session.buffer + data).slice(-MAX_BUFFER);
+      session.buffer.append(data);
       session.tracker.noteOutput(data);
       session.emitter.emit("output", data);
       this.lifecycle.emit("output", { id, data });
@@ -1197,7 +1196,7 @@ export class LocalSessionManager implements ISessionManager {
   }
 
   buffer(id: string): string {
-    return this.sessions.get(id)?.buffer ?? "";
+    return this.sessions.get(id)?.buffer.value() ?? "";
   }
 
   activity(id: string): SessionActivity | undefined {

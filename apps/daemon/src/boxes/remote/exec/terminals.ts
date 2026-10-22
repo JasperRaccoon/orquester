@@ -43,14 +43,13 @@ import { hostToBoxPath } from "@orquester/api";
 import type { SessionRecord } from "@orquester/config";
 
 import { ActivityTracker } from "../../../ansi-activity.ts";
+import { TerminalOutputRing } from "../../../terminal-history.ts";
 import { SessionError, type ISessionManager, type SessionIndexContributor } from "../../../sessions.ts";
 import { captureArgs, tmuxName } from "../../../tmux.ts";
 import type { BoxConnection, BoxHub, BoxProcess, BoxRegistry, BoxToolingProvisioner } from "../../contracts.ts";
 import { boxToolingEnv, toolingFor } from "./env.ts";
 import { runInBox, waitSpawned } from "./run.ts";
 
-/** Hot replay ring, as for host sessions. */
-const MAX_BUFFER = 256 * 1024;
 /** The private tmux server box terminals use (`tmux -L`), apart from the box user's own. */
 export const BOX_TMUX_SERVER = "orquester";
 /** How long a closed terminal's process gets after SIGHUP before SIGKILL. */
@@ -65,7 +64,8 @@ interface BoxTerminal {
   offset: number;
   /** Whether `offset` is trustworthy (false after a daemon restart, until the first reattach). */
   offsetKnown: boolean;
-  buffer: string;
+  /** Hot replay ring, as for host sessions. */
+  buffer: TerminalOutputRing;
   tracker: ActivityTracker;
   emitter: EventEmitter;
   reattaching: boolean;
@@ -303,7 +303,7 @@ export class BoxTerminalManager {
     const tracker = new ActivityTracker((activity, cause) => {
       this.lifecycle.emit("activity", { id: summary.id, activity, cause, hasHookSource: tracker.hasHookSource, kind: summary.kind });
     });
-    return { summary, proc: null, offset: 0, offsetKnown: false, buffer: "", tracker, emitter: new EventEmitter(), reattaching: false, recoveries: 0 };
+    return { summary, proc: null, offset: 0, offsetKnown: false, buffer: new TerminalOutputRing(), tracker, emitter: new EventEmitter(), reattaching: false, recoveries: 0 };
   }
 
   /** Start (or, for tmux, re-join) the terminal's process under its procId. */
@@ -332,7 +332,7 @@ export class BoxTerminalManager {
       session.recoveries = 0;
       const data = decoder.write(Buffer.from(chunk));
       if (!data) return;
-      session.buffer = (session.buffer + data).slice(-MAX_BUFFER);
+      session.buffer.append(data);
       session.tracker.noteOutput(data);
       session.emitter.emit("output", data);
       // The merged "output" feeds the project's dev-server URL suggestions: only a shell in the
@@ -426,7 +426,7 @@ export class BoxTerminalManager {
       if (info) {
         const start = Math.max(session.offsetKnown ? session.offset : info.bufferStart, info.bufferStart);
         // After a restart the hot ring is rebuilt from the box's buffer.
-        if (!session.offsetKnown) session.buffer = "";
+        if (!session.offsetKnown) session.buffer.clear();
         const proc = connection.attach(id, start);
         await waitSpawned(proc);
         if (this.sessions.get(id) !== session) {
@@ -556,11 +556,11 @@ export class BoxTerminalManager {
         // fall back to the hot ring
       }
     }
-    return session.buffer;
+    return session.buffer.value();
   }
 
   buffer(id: string): string {
-    return this.sessions.get(id)?.buffer ?? "";
+    return this.sessions.get(id)?.buffer.value() ?? "";
   }
 
   activity(id: string): SessionActivity | undefined {
