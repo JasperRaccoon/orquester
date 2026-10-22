@@ -229,6 +229,11 @@ export function latestContextWindowActivity(
       // from "the provider said no".
       ...(typeof record.compactsAutomatically === "boolean"
         ? { compactsAutomatically: record.compactsAutomatically }
+        : {}),
+      // Idle compaction's "when you return" offer reads when the prompt cache expires.
+      ...(typeof record.promptCacheTtlMs === "number" ? { promptCacheTtlMs: record.promptCacheTtlMs } : {}),
+      ...(typeof record.promptCacheExpiresAt === "string"
+        ? { promptCacheExpiresAt: record.promptCacheExpiresAt }
         : {})
     };
     return { usage, updatedAt: activity.createdAt };

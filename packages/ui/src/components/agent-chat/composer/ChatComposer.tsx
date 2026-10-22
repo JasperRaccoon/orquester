@@ -21,6 +21,8 @@ import { useAgentChatDraft } from "../../../lib/agent-chat/hooks";
 import { createEscapeSequence, type EscapeSequence } from "../../../lib/agent-chat/rewind.logic";
 import type { ChatComposerProps } from "../contracts";
 import { AccountChip, ComposerLinkChips, ModelChip, OptionChip, PlanChip, RuntimeModeChip } from "./ComposerChips";
+import { ResumeCompactionChip } from "./ResumeCompactionChip";
+import { sendAfterCompaction } from "../../../lib/agent-chat/resume-compaction.logic";
 import { ProfileChip, type ProfileChipProps } from "./ProfileChip";
 import { removeFilePath, textNamesPath } from "./composer-files";
 import {
@@ -191,6 +193,12 @@ export interface ChatComposerExtraProps {
    * not wired it cannot hide a command that would have worked.
    */
   threadHasContent?: boolean;
+  /**
+   * Idle compaction's "When you return" (`resume-compaction.logic.ts`): the context of a Claude
+   * chat whose prompt cache expired, when compacting before the next message is offered; null or
+   * absent otherwise. While offered, a send compacts first unless the chip says Full.
+   */
+  resumeCompactionTokens?: number | null;
   /** Overrides the root the `@` search walks; defaults to the session's cwd. */
   searchRoot?: string;
   /**
@@ -261,6 +269,7 @@ export function ChatComposer({
   onHeightChange,
   onDraftAttachmentCountChange,
   threadHasContent = true,
+  resumeCompactionTokens = null,
   searchRoot,
   active,
   onLeaveDrillIn,
@@ -271,6 +280,12 @@ export function ChatComposer({
     (state) => state.sessions.find((session) => session.id === sessionId)?.cwd ?? null
   );
   const root = searchRoot ?? sessionCwd;
+  // The thread whose resume offer the user switched to Full; it lasts while the offer stands.
+  const [fullHistoryThread, setFullHistoryThread] = React.useState<string | null>(null);
+  const keepFullHistory = fullHistoryThread === sessionId;
+  React.useEffect(() => {
+    if (resumeCompactionTokens === null) setFullHistoryThread(null);
+  }, [resumeCompactionTokens]);
   const sessionProjectPath = useAppStore(
     (state) => state.sessions.find((session) => session.id === sessionId)?.projectPath ?? null
   );
@@ -1286,6 +1301,11 @@ export function ChatComposer({
          * never the blockquotes glued into the textarea.
          */
         quoted?: { text: string; quotes: readonly ComposerQuote[] };
+        /**
+         * Idle compaction's "When you return": compact the chat first. The host queues the
+         * message behind the compaction; a compaction it refuses does not hold the message.
+         */
+        compactFirst?: boolean;
       } = {}
     ) => {
       // The thread this message leaves FROM. A failure goes back into its
@@ -1304,13 +1324,15 @@ export function ChatComposer({
           ...(options.resolveText ? { resolveText: options.resolveText } : {}),
           ...(options.returnToDraftOnFailure === false ? { returnToDraftOnFailure: false } : {}),
           send: (resolved, { generatedPrompt }) =>
-            actions.sendTurn({
-              text: resolved,
-              ...(refs.length > 0 ? { attachments: refs } : {}),
-              interactionMode: mode,
-              ...(modelSelection ? { modelSelection } : {}),
-              ...(generatedPrompt ? { generatedPrompt: true } : {})
-            })
+            sendAfterCompaction(options.compactFirst === true, () => actions.compact(), () =>
+              actions.sendTurn({
+                text: resolved,
+                ...(refs.length > 0 ? { attachments: refs } : {}),
+                interactionMode: mode,
+                ...(modelSelection ? { modelSelection } : {}),
+                ...(generatedPrompt ? { generatedPrompt: true } : {})
+              })
+            )
         });
         if (outcome.kind === "sent") {
           // The keyboard is worse than a lost second on mobile: dismiss it only
@@ -1589,6 +1611,7 @@ export function ChatComposer({
       }
       void runSend(outgoing, outgoingMode, sentAttachments, {
         resolveText: implementationText,
+        ...(resumeCompactionTokens !== null && !keepFullHistory ? { compactFirst: true } : {}),
         // A failure puts the quotes back as quotes and the user's words as
         // they typed them (`runSend`), not the composed blockquotes.
         ...(quotes.length > 0 ? { quoted: { text: text.trim(), quotes } } : {})
@@ -1605,6 +1628,8 @@ export function ChatComposer({
       hostGoalCommand,
       interactionMode,
       isTurnActive,
+      keepFullHistory,
+      resumeCompactionTokens,
       chatPrefs.followUpBehavior,
       persistNow,
       reverting,
@@ -2166,6 +2191,14 @@ export function ChatComposer({
                       }
                     : {})}
                   returnFocusTo={() => textareaRef.current}
+                />
+              ) : null}
+              {resumeCompactionTokens !== null ? (
+                <ResumeCompactionChip
+                  tokens={resumeCompactionTokens}
+                  keepFullHistory={keepFullHistory}
+                  disabled={reverting}
+                  onToggle={() => setFullHistoryThread(keepFullHistory ? null : sessionId)}
                 />
               ) : null}
             </div>

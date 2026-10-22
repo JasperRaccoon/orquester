@@ -826,7 +826,8 @@ function sameUsage(
     left.maxTokens === right.maxTokens &&
     left.autoCompactAtTokens === right.autoCompactAtTokens &&
     left.totalProcessedTokens === right.totalProcessedTokens &&
-    left.compactsAutomatically === right.compactsAutomatically
+    left.compactsAutomatically === right.compactsAutomatically &&
+    left.promptCacheExpiresAt === right.promptCacheExpiresAt
   );
 }
 
