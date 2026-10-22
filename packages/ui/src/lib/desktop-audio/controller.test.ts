@@ -10,6 +10,7 @@ import {
   type DesktopAudioInputs
 } from "./controller.ts";
 import type { DesktopAudioStats } from "./jitter-buffer.ts";
+import { wakeReconnects } from "../connection/backoff.ts";
 
 class FakeSocket implements AudioSocket {
   binaryType: BinaryType = "blob";
@@ -280,6 +281,8 @@ test("keepalive pings every 10 s and drops a silent connection", async (t: TestC
 
 test("an unexpected close reconnects with growing backoff; data resets it", async (t: TestContext) => {
   t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  // The backoff is jittered over [0, ceiling]; pin it to the ceiling.
+  t.mock.method(Math, "random", () => 1);
   const h = await harness();
   h.controller.update(PLAYING);
   h.current!.serverClose(1011, "desktop not running");
@@ -301,6 +304,21 @@ test("an unexpected close reconnects with growing backoff; data resets it", asyn
   h.current!.serverClose(1006);
   t.mock.timers.tick(500);
   assert.equal(h.sockets.length, 4);
+});
+
+test("a wake (back online, tab visible) reconnects at once", async (t: TestContext) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  t.mock.method(Math, "random", () => 1);
+  const h = await harness();
+  h.controller.update(PLAYING);
+  for (let close = 0; close < 4; close += 1) {
+    h.current!.serverClose(1006);
+    t.mock.timers.tick(10_000);
+  }
+  const before = h.sockets.length;
+  h.current!.serverClose(1006);
+  wakeReconnects();
+  assert.equal(h.sockets.length, before + 1);
 });
 
 test("pausing cancels a pending reconnect", async (t: TestContext) => {

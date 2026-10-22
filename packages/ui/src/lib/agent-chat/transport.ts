@@ -43,6 +43,7 @@ import {
 import type { SessionUploadResponse } from "@orquester/api";
 
 import type { BinaryBody, StreamHandle, Transporter } from "../transporter";
+import { scheduleRetry, type PendingRetry } from "../connection/backoff";
 import {
   NdjsonLineBuffer,
   parseStreamLine,
@@ -607,7 +608,7 @@ function openAgentChatStream(
    */
   let knownHostInstanceId: string | null = options.hostInstanceId ?? null;
   let inner: StreamHandle | null = null;
-  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+  let retryTimer: PendingRetry | null = null;
   let stallTimer: ReturnType<typeof setTimeout> | null = null;
   const lines = new NdjsonLineBuffer();
 
@@ -637,10 +638,12 @@ function openAgentChatStream(
     const delayMs = reconnectDelayMs(attempt);
     attempt = Math.min(attempt + 1, 32);
     handlers.onReconnect?.({ attempt, delayMs, reason });
-    retryTimer = setTimeout(() => {
+    // A wake (back online, page visible again) retries at once and starts over.
+    retryTimer = scheduleRetry(Math.min(delayMs, RECONNECT_MAX_MS), (woken) => {
       retryTimer = null;
+      if (woken) attempt = 0;
       connect();
-    }, Math.min(delayMs, RECONNECT_MAX_MS));
+    });
   };
 
   const connect = (): void => {
@@ -762,7 +765,7 @@ function openAgentChatStream(
       closed = true;
       clearStall();
       if (retryTimer !== null) {
-        clearTimeout(retryTimer);
+        retryTimer.cancel();
         retryTimer = null;
       }
       inner?.close();

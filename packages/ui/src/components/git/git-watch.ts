@@ -1,5 +1,6 @@
 import type { GitStatusChangedPayload } from "@orquester/api";
 import { ApiError, type ApiClient } from "../../lib/api-client";
+import { backoffDelayMs, scheduleRetry, type PendingRetry } from "../../lib/connection/backoff";
 
 /**
  * One shared `/events?project=<path>` subscription per project, refcounted
@@ -17,9 +18,12 @@ import { ApiError, type ApiClient } from "../../lib/api-client";
  * not "this React node exists".
  */
 
-/** First reconnect delay, doubled per consecutive failure up to the cap. */
-const RETRY_BASE_MS = 3000;
-const RETRY_MAX_MS = 30_000;
+/**
+ * The shared jittered backoff: first retry within 3 s, the window doubling per
+ * consecutive failure up to the cap. Jitter keeps every client's git watches
+ * from redialing a restarted daemon together.
+ */
+const RETRY_BACKOFF = { baseMs: 3000, maxMs: 30_000 };
 /**
  * Consecutive failed opens (a stream that ended without ever delivering an
  * event) before giving up. A live stream sends a heartbeat every 15s, so any
@@ -48,7 +52,7 @@ interface Entry {
    * dead handle.
    */
   conn: { closed: boolean; close: (() => void) | null } | null;
-  retry: ReturnType<typeof setTimeout> | null;
+  retry: PendingRetry | null;
   attempts: number;
   state: GitWatchState;
   disposed: boolean;
@@ -95,7 +99,7 @@ export function subscribeProjectGit(
     current.handlers.delete(handlers);
     if (current.handlers.size > 0) return;
     current.disposed = true;
-    if (current.retry) clearTimeout(current.retry);
+    current.retry?.cancel();
     current.conn?.close?.();
     current.conn = null;
     byApi.get(api)?.delete(projectPath);
@@ -176,7 +180,7 @@ function open(api: ApiClient, projectPath: string, entry: Entry): void {
         // The stream carried traffic and then dropped (daemon restart,
         // sleep/wake): treat it as a healthy reconnect, not a failure.
         entry.attempts = 0;
-        schedule(api, projectPath, entry, RETRY_BASE_MS);
+        schedule(api, projectPath, entry, backoffDelayMs(0, RETRY_BACKOFF));
         return;
       }
       entry.attempts += 1;
@@ -186,12 +190,7 @@ function open(api: ApiClient, projectPath: string, entry: Entry): void {
           setState(entry, { notice: NO_LIVE_UPDATES });
           return;
         }
-        schedule(
-          api,
-          projectPath,
-          entry,
-          Math.min(RETRY_BASE_MS * 2 ** (entry.attempts - 1), RETRY_MAX_MS)
-        );
+        schedule(api, projectPath, entry, backoffDelayMs(entry.attempts - 1, RETRY_BACKOFF));
       });
     },
     { project: projectPath }
@@ -209,7 +208,8 @@ function open(api: ApiClient, projectPath: string, entry: Entry): void {
 
 function schedule(api: ApiClient, projectPath: string, entry: Entry, delay: number): void {
   if (entry.disposed || entry.retry) return;
-  entry.retry = setTimeout(() => open(api, projectPath, entry), delay);
+  // A wake (back online, tab visible) reopens at once.
+  entry.retry = scheduleRetry(delay, () => open(api, projectPath, entry));
 }
 
 /**

@@ -5,6 +5,7 @@ import {
   type BrowserServerJsonMessage,
   type BrowserStateMessage
 } from "@orquester/api";
+import { backoffDelayMs } from "../connection/backoff";
 
 export interface BrowserStreamHandlers {
   onFrame(jpeg: ArrayBuffer): void;
@@ -194,8 +195,10 @@ export class WsBrowserChannel {
     if (this.reconnectTimer) {
       return;
     }
+    // Shared jittered backoff: after a daemon restart, terminals and screencasts
+    // of every client must not redial in the same instant.
+    const delay = backoffDelayMs(this.attempts);
     this.attempts += 1;
-    const delay = Math.min(this.attempts * 500, 5000);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.connect();

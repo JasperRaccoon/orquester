@@ -12,6 +12,7 @@ import {
 } from "@orquester/api";
 
 import type { DesktopAudioStats } from "./jitter-buffer.ts";
+import { backoffDelayMs, scheduleRetry, type PendingRetry } from "../connection/backoff.ts";
 
 export type DesktopAudioDecoderKind = "webcodecs" | "wasm" | "none";
 
@@ -84,8 +85,7 @@ interface AudioPacket {
 }
 
 const AUDIO_KEEPALIVE_MS = 10_000;
-const RECONNECT_BASE_MS = 500;
-const RECONNECT_MAX_MS = 10_000;
+const RECONNECT_BACKOFF = { baseMs: 500, maxMs: 10_000 };
 /** Decoded frames held while the worklet node is being created (~300 ms). */
 const MAX_PENDING_FRAMES = 30;
 const SOCKET_CONNECTING = 0;
@@ -145,7 +145,7 @@ export class DesktopAudioController {
   private readonly listeners = new Set<() => void>();
   private connection: Connection | null = null;
   private output: DesktopAudioOutput | null = null;
-  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectTimer: PendingRetry | null = null;
   private attempt = 0;
   /** The target the last stream learned; the next stream starts from it. */
   private lastTargetMs: number | undefined;
@@ -327,17 +327,19 @@ export class DesktopAudioController {
 
   private scheduleReconnect(): void {
     if (this.reconnectTimer) return;
-    const delay = Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** this.attempt);
+    // Shared jittered backoff; a wake (back online, tab visible) redials at once.
+    const delay = backoffDelayMs(this.attempt, RECONNECT_BACKOFF);
     this.attempt++;
-    this.reconnectTimer = setTimeout(() => {
+    this.reconnectTimer = scheduleRetry(delay, (woken) => {
       this.reconnectTimer = null;
+      if (woken) this.attempt = 0;
       this.reconcile();
-    }, delay);
+    });
   }
 
   private cancelReconnect(): void {
     if (!this.reconnectTimer) return;
-    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer.cancel();
     this.reconnectTimer = null;
   }
 

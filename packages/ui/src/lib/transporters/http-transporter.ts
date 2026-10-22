@@ -11,6 +11,15 @@ import {
 import { FetchHttpClient, type HttpClient } from "../http-client";
 import { getSessionChannel } from "./ws-session-channel";
 import { getBrowserChannel, type WsBrowserChannel } from "./ws-browser-channel";
+import { UnexpectedResponseError } from "../connection/failure";
+
+/** A response header, whatever case the client reported its name in. */
+function headerValue(headers: Record<string, string> | undefined, name: string): string | null {
+  for (const [key, value] of Object.entries(headers ?? {})) {
+    if (key.toLowerCase() === name) return value;
+  }
+  return null;
+}
 
 export interface HttpTransporterOptions {
   baseUrl: string;
@@ -68,7 +77,14 @@ export class HttpTransporter implements Transporter {
     });
 
     const raw = await response.text();
-    const data = raw ? (JSON.parse(raw) as T) : (undefined as T);
+    let data: T;
+    try {
+      data = raw ? (JSON.parse(raw) as T) : (undefined as T);
+    } catch {
+      // Not the daemon's API answering (an HTML error page, a captive portal,
+      // another web server): say so with the status, for the connection diagnosis.
+      throw new UnexpectedResponseError(response.status, headerValue(response.headers, "content-type"));
+    }
 
     return {
       status: response.status,

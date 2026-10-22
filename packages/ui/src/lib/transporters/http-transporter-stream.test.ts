@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 
 import { HttpTransporter } from "./http-transporter.ts";
+import { UnexpectedResponseError } from "../connection/failure.ts";
 
 const realFetch = globalThis.fetch;
 afterEach(() => {
@@ -42,5 +43,32 @@ describe("HttpTransporter.openStream", () => {
     });
     assert.equal(data.join(""), "hello");
     assert.equal(ends, 1);
+  });
+});
+
+describe("HttpTransporter.request", () => {
+  const answering = (status: number, body: string, headers: Record<string, string> = {}) =>
+    new HttpTransporter({
+      baseUrl: "http://daemon.test",
+      httpClient: {
+        send: async () => ({ status, ok: status < 400, headers, text: async () => body })
+      }
+    });
+
+  it("an answer that is not JSON is an UnexpectedResponseError carrying the status", async () => {
+    await assert.rejects(answering(200, "<html>portal</html>", { "Content-Type": "text/html" }).request({ method: "GET", path: "/health" }), (error: unknown) => {
+      assert.ok(error instanceof UnexpectedResponseError);
+      assert.equal(error.status, 200);
+      assert.equal(error.contentType, "text/html");
+      return true;
+    });
+    await assert.rejects(answering(502, "Bad Gateway").request({ method: "GET", path: "/health" }), (error: unknown) =>
+      error instanceof UnexpectedResponseError && error.status === 502 && error.contentType === null
+    );
+  });
+
+  it("JSON and empty bodies still parse", async () => {
+    assert.deepEqual((await answering(200, '{"ok":true}').request({ method: "GET", path: "/health" })).data, { ok: true });
+    assert.equal((await answering(204, "").request({ method: "GET", path: "/x" })).data, undefined);
   });
 });
