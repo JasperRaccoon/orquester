@@ -425,6 +425,26 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
     return () => target.removeEventListener("touchend", onTouchEnd);
   }, []);
 
+  /** Hand the keyboard to the display (to the hidden input while the touch keyboard is up). */
+  const focusDisplay = useCallback(() => {
+    if (keyboardOpenRef.current) hiddenInputRef.current?.focus({ preventScroll: true });
+    else rfbRef.current?.focus({ preventScroll: true });
+  }, []);
+
+  // A window that became active (raised from the window list, launched from
+  // the dialog, left on top when another closed) gets the keys typed next: the
+  // display takes the focus back from a toolbar button or a closed dialog,
+  // never from a field the user is typing in or from outside the view.
+  useEffect(() => {
+    if (!active || conn !== "connected" || desktop.activeWindowId === null) return;
+    const focused = document.activeElement;
+    const idle =
+      !focused ||
+      focused === document.body ||
+      (focused instanceof HTMLButtonElement && rootRef.current?.contains(focused) === true);
+    if (idle) focusDisplay();
+  }, [desktop.activeWindowId, active, conn, focusDisplay]);
+
   // An error'd desktop may be a host problem: show the install hint if any.
   useEffect(() => {
     if (desktop.status !== "error" || !api) {
@@ -548,6 +568,8 @@ export function DesktopView({ desktop, active, onLaunchApp, onCloseTab }: Deskto
   };
   const windowAction = (win: DesktopWindow, action: DesktopWindowAction) => {
     if (!api) return;
+    // The window the user picked takes the keys typed next, not the pill.
+    if (action !== "close") focusDisplay();
     api.desktopWindowAction(desktop.id, win.id, action).catch((err: unknown) => setActionError(errorText(err)));
   };
 
