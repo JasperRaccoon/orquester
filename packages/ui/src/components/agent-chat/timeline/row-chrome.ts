@@ -210,6 +210,17 @@ export function isCompactCommandMessage(message: {
   );
 }
 
+/**
+ * The words of a `/compact` request's marker: the one the daemon sent on its own before the
+ * chat's prompt cache expired (idle compaction, `sentBy: "idle-compaction"`) says so, so the user
+ * never takes it for one they asked for. Any other value, or none, is the user's own.
+ */
+export function compactRequestLabel(message: { sentBy?: unknown }): string {
+  return message.sentBy === "idle-compaction"
+    ? "Compaction requested automatically before the prompt cache expired"
+    : "Compaction requested";
+}
+
 // ---------------------------------------------------------------------------
 // §4.6.7 — `$skill` mentions are re-chipped from the stored text
 // ---------------------------------------------------------------------------
