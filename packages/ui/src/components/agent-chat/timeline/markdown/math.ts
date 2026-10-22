@@ -178,14 +178,16 @@ export function guardSingleDollarMath(construct: ConstructLike): ConstructLike {
 export function hasClosingLine(source: string, offset: number): boolean {
   const lineEnd = /\r\n|\r|\n/g;
   lineEnd.lastIndex = offset;
-  const first = lineEnd.exec(source);
-  if (first === null) return false;
-  const rest = source.slice(first.index + first[0].length).split(/\r\n|\r|\n/);
-  if (source.startsWith("\\[", offset)) return rest.some((line) => /\\\][ \t]*$/.test(line));
+  if (lineEnd.exec(source) === null) return false;
   let size = 0;
   while (source.charCodeAt(offset + size) === DOLLAR) size += 1;
-  const closer = new RegExp(`^[ \\t>]*\\\${${size},}[ \\t]*$`);
-  return rest.some((line) => closer.test(line));
+  // Searched from the end of the opening line, so the nearest closer ends the
+  // scan: it never splits the rest of a long message per attempt.
+  const closer = source.startsWith("\\[", offset)
+    ? /\\\][ \t]*(?=\r|\n|$)/g
+    : new RegExp("(?:\\r|\\n)[ \\t>]*\\${" + size + ",}[ \\t]*(?=\\r|\\n|$)", "g");
+  closer.lastIndex = lineEnd.lastIndex - (source.startsWith("\\[", offset) ? 0 : 1);
+  return closer.test(source);
 }
 
 /**
