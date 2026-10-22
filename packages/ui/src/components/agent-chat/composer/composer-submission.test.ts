@@ -5,6 +5,7 @@ import { buildPlanImplementationPrompt } from "@orquester/api/agent-chat";
 import {
   attachmentCountBlockSend,
   attachmentRejectionReason,
+  attachmentSizeRejection,
   composerPromptLengthValidationMessage,
   composerSubmissionIntentForEnter,
   composerStatusText,
@@ -196,6 +197,20 @@ test("an unsupported image type and an oversized file are both refused", () => {
       preparingCount: 0
     })
   );
+  // An image the composer will downscale is measured after that, not here.
+  assert.equal(
+    attachmentRejectionReason({
+      name: "big.jpg",
+      sizeBytes: 11 * 1024 * 1024,
+      mimeType: "image/jpeg",
+      stagedCount: 0,
+      preparingCount: 0,
+      downscales: true
+    }),
+    null
+  );
+  assert.equal(attachmentSizeRejection("big.jpg", 11 * 1024 * 1024, "image/jpeg"), "big.jpg is over the 10 MB limit.");
+  assert.equal(attachmentSizeRejection("ok.jpg", 10 * 1024 * 1024, "image/jpeg"), null);
   // A 11 MB non-image is fine: files get the 50 MiB bound.
   assert.equal(
     attachmentRejectionReason({

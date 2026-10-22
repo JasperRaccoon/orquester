@@ -13,6 +13,7 @@ import { uploadFilesToSession, type UploadStatus } from "../../lib/session-uploa
 import { isLegacyAgentTerminal } from "../../lib/session-kind";
 import { UploadProgressBar } from "../ui/upload-progress";
 import { bracketPaste } from "../../lib/paste";
+import { applyLatchedModifiers } from "../../lib/terminal-keys";
 import type { SessionSummary } from "../../types";
 import type { ViewMode } from "../../lib/view-mode";
 
@@ -555,6 +556,14 @@ export const TerminalView: React.FC<{
     const inputSub = term.onData((data) => {
       // The user is responding → clear any bell-driven attention pulse.
       useAppStore.getState().clearSessionAttention(session.id);
+      // A Ctrl/Alt latched on the mobile key bar applies to this key. Only a
+      // single key is modified: IME commits, pastes and xterm's own reports
+      // come back null and go out untouched below.
+      const modified = applyLatchedModifiers(session.id, data);
+      if (modified !== null) {
+        void api.sendSessionInput(session.id, modified);
+        return;
+      }
       // On mobile there's no Shift modifier to distinguish "newline" from
       // "submit", so a bare Enter from the soft keyboard would submit an agent's
       // prompt mid-compose. Treat the soft-keyboard Enter as "insert newline"

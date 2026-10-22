@@ -22,6 +22,7 @@ import type { AgentChatActions } from "../../../lib/agent-chat/contracts";
 import type { ChatBannerDockProps } from "../contracts";
 import { BannerCard } from "../primitives";
 import { TimelineRowContext, useTimelineRowContext, type TimelineRowContextValue } from "../timeline/context";
+import { prepareImageForUpload } from "../composer/composer-image-fit";
 import { ApprovalCard } from "./ApprovalCard";
 import { McpAppConsentCard } from "./McpAppConsentCard";
 import { mcpAppConsents } from "../../../lib/agent-chat/mcp-app-consent";
@@ -405,7 +406,9 @@ export function ChatBannerDock({
             [key]: [...existing, { key: entryKey, name: file.name, status: "uploading" }]
           };
         });
-        void uploadAttachment(file, { name: file.name, type: file.type })
+        // A large photo goes up at the provider's size, as in the composer.
+        void prepareImageForUpload(file)
+          .then((prepared) => uploadAttachment(prepared, { name: prepared.name, type: prepared.type }))
           .then((ref: AttachmentRef) => {
             setQuestionAttachments((current) => ({
               ...current,

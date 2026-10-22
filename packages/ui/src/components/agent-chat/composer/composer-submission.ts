@@ -227,6 +227,10 @@ export function isSupportedAttachmentImage(mimeType: string): boolean {
  * **Staged files and in-flight preparations count together** against the same
  * budget (§7.5) — a file whose upload has not finished still occupies a slot.
  *
+ * An image the composer downscales before upload (`downscales`) is measured
+ * after that instead, with {@link attachmentSizeRejection}: a phone photo over
+ * the image limit usually fits once it is at the provider's size.
+ *
  * *T3: `questionAttachments.ts:28-36`.*
  */
 export function attachmentRejectionReason(input: {
@@ -235,6 +239,7 @@ export function attachmentRejectionReason(input: {
   mimeType: string;
   stagedCount: number;
   preparingCount: number;
+  downscales?: boolean;
 }): string | null {
   if (input.stagedCount + input.preparingCount >= MAX_TURN_ATTACHMENTS) {
     return `Up to ${MAX_TURN_ATTACHMENTS} attachments per message.`;
@@ -243,9 +248,19 @@ export function attachmentRejectionReason(input: {
   if (isImage && !isSupportedAttachmentImage(input.mimeType)) {
     return `${input.name}: only GIF, JPEG, PNG and WebP images can be attached.`;
   }
-  const limit = isImage ? MAX_TURN_IMAGE_BYTES : MAX_TURN_FILE_BYTES;
-  if (input.sizeBytes > limit) {
-    return `${input.name} is over the ${Math.round(limit / (1024 * 1024))} MB limit.`;
+  if (input.downscales && isImage) return null;
+  return attachmentSizeRejection(input.name, input.sizeBytes, input.mimeType);
+}
+
+/** Why a file of this size cannot be attached, or null when it fits its bound. */
+export function attachmentSizeRejection(
+  name: string,
+  sizeBytes: number,
+  mimeType: string
+): string | null {
+  const limit = mimeType.startsWith("image/") ? MAX_TURN_IMAGE_BYTES : MAX_TURN_FILE_BYTES;
+  if (sizeBytes > limit) {
+    return `${name} is over the ${Math.round(limit / (1024 * 1024))} MB limit.`;
   }
   return null;
 }
