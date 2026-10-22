@@ -106,8 +106,7 @@ export const AuthSessionsSettings: React.FC<{ remoteAccessOn: boolean }> = ({ re
                   Keep
                 </Button>
                 <Button size="sm" variant="outline" className="text-danger-300" disabled={busyId !== null} onClick={revokeOthers}>
-                  Revoke {others} {isLocal ? "" : "other "}
-                  {others === 1 ? "session" : "sessions"}
+                  {others === 1 ? "Revoke 1 device or token" : `Revoke ${others} devices and tokens`}
                 </Button>
               </>
             ) : (
