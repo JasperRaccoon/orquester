@@ -145,6 +145,32 @@ export function normalizeActiveTokenUsage(
   });
 }
 
+const PROMPT_CACHE_1H_MS = 60 * 60_000;
+const PROMPT_CACHE_5M_MS = 5 * 60_000;
+
+/**
+ * The prompt-cache lifetime one request wrote, from its `usage.cache_creation` split (the
+ * stream's `message_delta` carries it on its last `iterations` entry only): 1h when any 1h tokens
+ * were written, else 5m when any 5m tokens were, else `undefined` — a request served whole from
+ * the cache wrote no entry, so its lifetime is unknown (idle compaction then leaves the thread
+ * alone). *T3: `claudePromptCacheTtlMs`.*
+ */
+// Adapted from T3 Code (MIT): apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts
+export function claudePromptCacheTtlMs(value: unknown): number | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const usage = value as Record<string, unknown>;
+  const creation = usage.cache_creation ?? lastClaudeUsageIteration(usage)?.cache_creation;
+  if (creation === null || typeof creation !== "object" || Array.isArray(creation)) {
+    return undefined;
+  }
+  const split = creation as Record<string, unknown>;
+  if ((finiteNonNegativeInteger(split.ephemeral_1h_input_tokens) ?? 0) > 0) return PROMPT_CACHE_1H_MS;
+  if ((finiteNonNegativeInteger(split.ephemeral_5m_input_tokens) ?? 0) > 0) return PROMPT_CACHE_5M_MS;
+  return undefined;
+}
+
 /** Drop the internal `lastUsedTokens` before an event carries the snapshot. */
 export function toThreadTokenUsage(snapshot: ClaudeTokenUsageSnapshot): ThreadTokenUsage {
   const { lastUsedTokens: _lastUsedTokens, ...rest } = snapshot;

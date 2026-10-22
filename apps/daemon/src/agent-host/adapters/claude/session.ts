@@ -1895,6 +1895,12 @@ export class ClaudeSession {
       // it.
       return null;
     }
+    // Idle compaction set to "Never": keep the full history without asking (T3 Code's `off`).
+    // An unreadable setting asks, as before.
+    const idleCompaction = await this.options.context.idleCompactionMode?.(this.options.home).catch(() => undefined);
+    if (idleCompaction === "off") {
+      return { behavior: "completed", result: "continue" };
+    }
     const ageMinutes = Number(request.payload.sessionAgeMinutes ?? 0);
     const estimatedTokens = Number(request.payload.estimatedTokens ?? 0);
     const question =

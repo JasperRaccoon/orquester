@@ -89,6 +89,7 @@ import {
   type ClaudeTranscriptGoal
 } from "./goal.ts";
 import {
+  claudePromptCacheTtlMs,
   claudeTotalProcessedTokens,
   compactBoundarySnapshot,
   contextUsageSnapshot,
@@ -525,6 +526,14 @@ export class ClaudeNormalizer {
   lastKnownContextWindow: number | undefined;
   lastKnownTotalProcessedTokens: number | undefined;
   lastKnownTokenUsage: ClaudeTokenUsageSnapshot | undefined;
+  /**
+   * The prompt cache the conversation's latest request wrote (idle compaction): its lifetime and
+   * when it started (`message_start`'s arrival — the lifetime runs from the request, not from its
+   * response), stamped on every context reading this emits. `ttlMs` undefined: that request wrote
+   * no cache entry, so the expiry is unknown. Cleared by a compaction, which leaves the
+   * conversation on a prefix no earlier request cached.
+   */
+  private promptCacheRequest: { requestedAtMs: number; ttlMs: number | undefined } | undefined;
   /**
    * True once `getContextUsage` has named `rawMaxTokens` — the window the CLI
    * itself measures against. From then on `result.modelUsage`'s nominal
@@ -1532,6 +1541,12 @@ export class ClaudeNormalizer {
       return events;
     }
 
+    // The request started now, whether or not a turn claims its frames: its cache was written.
+    if (event.type === "message_start") {
+      const usage = (event as { message?: { usage?: unknown } }).message?.usage;
+      this.promptCacheRequest = { requestedAtMs: this.clock.now().getTime(), ttlMs: claudePromptCacheTtlMs(usage) };
+    }
+
     // A message streaming before its turn opens waits for it (`preTurnStream`).
     if (this.turnState === undefined) {
       const wasHeld = this.preTurnStream !== undefined;
@@ -1562,6 +1577,11 @@ export class ClaudeNormalizer {
     }
 
     if (event.type === "message_delta") {
+      // Cumulative for its message: a split it names replaces message_start's, one it omits keeps it.
+      const deltaTtl = claudePromptCacheTtlMs((event as { usage?: unknown }).usage);
+      if (deltaTtl !== undefined && this.promptCacheRequest !== undefined) {
+        this.promptCacheRequest.ttlMs = deltaTtl;
+      }
       const snapshot = normalizeActiveTokenUsage(
         (event as { usage?: unknown }).usage,
         this.lastKnownContextWindow,
@@ -2510,6 +2530,7 @@ export class ClaudeNormalizer {
         // The boundary is the other end of the phase the `compacting` status
         // opened; a compaction that reached a boundary succeeded.
         this.compacting = false;
+        this.promptCacheRequest = undefined;
         const turn = this.turnState;
         if (turn) {
           turn.latestAssistantUsage = undefined;
@@ -4579,6 +4600,7 @@ export class ClaudeNormalizer {
     if (!snapshot) {
       return [];
     }
+    snapshot = this.withPromptCache(snapshot);
     const previous = this.lastKnownTokenUsage;
     if (
       previous !== undefined &&
@@ -4586,7 +4608,8 @@ export class ClaudeNormalizer {
       previous.maxTokens === snapshot.maxTokens &&
       previous.totalProcessedTokens === snapshot.totalProcessedTokens &&
       previous.compactsAutomatically === snapshot.compactsAutomatically &&
-      previous.autoCompactAtTokens === snapshot.autoCompactAtTokens
+      previous.autoCompactAtTokens === snapshot.autoCompactAtTokens &&
+      previous.promptCacheExpiresAt === snapshot.promptCacheExpiresAt
     ) {
       return [];
     }
@@ -4608,6 +4631,20 @@ export class ClaudeNormalizer {
         payload: { usage: toThreadTokenUsage(snapshot) }
       }
     ];
+  }
+
+  /** The reading with the latest request's prompt-cache lifetime and expiry, or without either. */
+  private withPromptCache(snapshot: ClaudeTokenUsageSnapshot): ClaudeTokenUsageSnapshot {
+    const { promptCacheTtlMs: _ttl, promptCacheExpiresAt: _expires, ...rest } = snapshot;
+    const request = this.promptCacheRequest;
+    if (request?.ttlMs === undefined) {
+      return rest;
+    }
+    return {
+      ...rest,
+      promptCacheTtlMs: request.ttlMs,
+      promptCacheExpiresAt: new Date(request.requestedAtMs + request.ttlMs).toISOString()
+    };
   }
 
   private turnUsageSnapshot(): ClaudeTokenUsageSnapshot | undefined {
