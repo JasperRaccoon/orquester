@@ -6,7 +6,8 @@ import { join } from "node:path";
 import { after, describe, it } from "node:test";
 import { promisify } from "node:util";
 import { parse } from "yaml";
-import { MYKG_PROFILE, buildMykgConfig, mykgMaxWorkers, renderMykgConfig, writeMykgConfig } from "./mykg-config.ts";
+import { MAX_TASK_TOKENS } from "./inbox.ts";
+import { MYKG_NORMALIZE_MAX_NAMES, MYKG_PROFILE, buildMykgConfig, mykgMaxWorkers, renderMykgConfig, writeMykgConfig } from "./mykg-config.ts";
 
 const roots: string[] = [];
 after(async () => {
@@ -93,7 +94,12 @@ describe("mykg_config.yaml", () => {
     assert.ok(pipeline.chunking.window_tokens <= pipeline.pass2.batch_token_target);
     assert.equal(pipeline.pass1.batch_token_target, 12000);
     assert.equal(pipeline.pass2.batch_token_target, 12000);
-    assert.equal(pipeline.normalize_names.batch_token_target, 12000);
+    // Name normalization: one concept type per call (its cache key then moves only with that
+    // type's names), and a type's name list capped so its task fits a tool result.
+    assert.equal(pipeline.normalize_names.enabled, true, "never off: every run rebuilds names from raw extractions");
+    assert.equal(pipeline.normalize_names.batch_token_target, 1);
+    assert.equal(pipeline.normalize_names.max_names_per_type, MYKG_NORMALIZE_MAX_NAMES);
+    assert.ok(MYKG_NORMALIZE_MAX_NAMES * 24 / 4 < MAX_TASK_TOKENS, "a capped type of ~20-character names stays under a task's size");
     assert.equal(pipeline.pass1.max_schema_proposals, 12);
     assert.equal(pipeline.pass1.max_workers, 12);
     assert.equal(pipeline.pass2.max_workers, 12);

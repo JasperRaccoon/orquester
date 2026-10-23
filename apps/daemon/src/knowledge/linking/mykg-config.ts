@@ -20,6 +20,8 @@
  *   hidden entries' concepts into visible ones);
  * - smaller chunks and batches ({@link MYKG_CHUNK_TOKENS}, {@link MYKG_BATCH_TOKENS}) so a task
  *   fits a tool result;
+ * - name normalization one concept type per call, each type's list capped
+ *   ({@link MYKG_NORMALIZE_MAX_NAMES}; the token trade-off is at that constant);
  * - `pass1/pass2/orphan.max_workers` = {@link mykgMaxWorkers} — enough calls in flight that the
  *   inbox always holds at least `concurrency × 2` waiting tasks beside the leased ones;
  * - `llm.timeout` 48 h: an inbox task waits through a usage-limit pause rather than failing the
@@ -52,6 +54,42 @@ export const MYKG_CONFIG_FILE = "mykg_config.yaml";
  */
 export const MYKG_CHUNK_TOKENS = 8000;
 export const MYKG_BATCH_TOKENS = 12000;
+
+/**
+ * Name normalization (`normalize_names`, myKG 0.4.10 `name_normalizer.py`, `steps/step_normalize.py`)
+ * is the one step whose cost grows with the whole knowledge base: every run that changes anything
+ * sends the inventory of EVERY extracted name, grouped by concept type, so the model can map
+ * surface forms ("Alice", "A. Smith") to one canonical name.
+ *
+ * What myKG lets us control, and why the cheaper-looking options are wrong:
+ * - `enabled: false` on small updates (or `max_names_per_type` cut down for them) is NOT an
+ *   option. Each run rebuilds `raw_extractions.json` from the per-entry shards, which hold the
+ *   names as extracted (not normalized), and rewrites `name_normalization.json` from this run's
+ *   answers alone. A run without normalization therefore UNDOES every earlier merge: aliases split
+ *   back into duplicate concepts until the next full normalization. Quality would oscillate.
+ * - Nothing in myKG makes it incremental: no "only new names" mode, no cross-run alias memory.
+ *
+ * So the step always runs on every name, and the plugin makes it cheap through caching instead:
+ * - `batch_token_target: 1` puts each concept type in a call of its own (myKG never splits a type;
+ *   it packs whole types greedily up to the target). An answered task is cached by its prompt, so a
+ *   type whose names did not change costs nothing; with packed batches, one new name re-sent every
+ *   type packed beside it, and a type that grew shifted the packing of all the types after it.
+ * - myKG's cache key also holds the call's label, `normalize_names batch i/n`, which moves when a
+ *   type appears or the types reorder; the inbox broker therefore answers a normalization task
+ *   from an earlier answer to the identical prompt (`inbox.ts` `REUSABLE_STEPS`), label aside.
+ * - Per call, the step's instructions reach a worker chat once per chat (the broker's dedup), so
+ *   more, smaller calls add little beyond each type's own names.
+ * Net effect: an update re-sends only the name lists of the types it touched (typically the few a
+ * new entry adds names to), not the whole inventory; quality is unchanged, every name is still
+ * normalized against every other name of its type.
+ *
+ * `max_names_per_type` keeps one type's call within a tool result (myKG's own cap of 50k names
+ * would be a ~300k-token task no chat could read whole): names past the first
+ * `MYKG_NORMALIZE_MAX_NAMES` of a type (myKG keeps them sorted, so alphabetically last) are not
+ * normalized — only ever a concern for a type with thousands of distinct names.
+ */
+export const MYKG_NORMALIZE_BATCH_TOKENS = 1;
+export const MYKG_NORMALIZE_MAX_NAMES = 6000;
 
 /** Seconds a task waits for its `.done` (myKG `llm.timeout`). */
 export const MYKG_TASK_TIMEOUT_SECONDS = 48 * 60 * 60;
@@ -120,7 +158,7 @@ export function buildMykgConfig(options: MykgConfigOptions): Record<string, unkn
             batch_per_file: true,
             batch_retry_max: 0
           },
-          normalize_names: { enabled: true, max_names_per_type: 50000, batch_token_target: MYKG_BATCH_TOKENS },
+          normalize_names: { enabled: true, max_names_per_type: MYKG_NORMALIZE_MAX_NAMES, batch_token_target: MYKG_NORMALIZE_BATCH_TOKENS },
           orphan_pass: {
             enabled: false,
             min_cooccurrence: 1,

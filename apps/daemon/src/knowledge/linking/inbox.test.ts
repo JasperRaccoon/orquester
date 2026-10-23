@@ -210,6 +210,30 @@ describe("InboxBroker", () => {
     assert.equal(next.kind === "task" && next.task.taskId, b);
   });
 
+  it("answers a name-normalization task from an earlier answer to the very same prompt, whatever its batch label", async () => {
+    const h = await harness();
+    const system = "NORMALIZE-SYSTEM";
+    const names = JSON.stringify({ Person: ["Alice", "Alice Smith"] });
+    const first = await h.addTask(system, names, "normalize_names");
+    const taken = await h.broker.next("w1");
+    assert.equal(taken.kind === "task" && taken.task.taskId, first);
+    await finishing(h, h.broker.submit("w1", first, '{"Person":{"Alice":"Alice Smith"}}'));
+
+    // The next run: the same names, but the batch moved (`normalize_names batch 2/3`): no chat is asked.
+    const run2 = new InboxBroker({ clock: h.clock, watch: null });
+    await run2.attach(h.dir);
+    const moved = await h.addTask(system, names, "normalize_names");
+    const other = await h.addTask(system, JSON.stringify({ Tool: ["Notion", "notion.so"] }), "normalize_names");
+    const pass2 = await h.addTask(system, names, "pass2");
+    await run2.rescan();
+    assert.deepEqual(JSON.parse(await readFile(join(h.outbox, `${moved}.answer.json`), "utf8")), { task_id: moved, answer: '{"Person":{"Alice":"Alice Smith"}}' });
+    assert.equal((await readdir(h.outbox)).includes(`${moved}.done`), true);
+    assert.equal(run2.counts().pending, 2, "a changed name list, and any other step, still go to a chat");
+    const next = await run2.next("w2");
+    assert.ok(next.kind === "task" && [other, pass2].includes(next.task.taskId));
+    assert.equal(run2.counts().answered, 0, "a reused answer is no chat's work");
+  });
+
   it("retires a chat at its task budget", async () => {
     const h = await harness({ budget: { tasks: 2, tokens: 1_000_000 } });
     const ids = [await h.addTask("S", "A"), await h.addTask("S", "B"), await h.addTask("S", "C")];
