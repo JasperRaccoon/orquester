@@ -204,6 +204,17 @@ export interface ThreadFoldState {
    * without a stamp the tombstone closes unconditionally, as it used to.
    */
   closedRequestAt?: Map<string, string>;
+  /**
+   * The pending approvals someone has already answered — an
+   * `approval-response-requested` is in the log — and when, while the
+   * provider's resolution is still on its way: the card is still pending, but
+   * a second answer (a redirect's decline, another tab's Approve) would answer
+   * it twice. An entry leaves when its approval stops being pending, when a
+   * newer request reuses the id, or when the response fails (the card is open
+   * to answer again). Optional so a state built by an older constructor still
+   * folds; `undefined` reads as empty.
+   */
+  answeredApprovals?: Map<string, string>;
   /** Highest `seq` applied. */
   seq: number;
   /** True once `thread.deleted` has been applied. */
@@ -227,6 +238,7 @@ export function createEmptyThreadState(): ThreadFoldState {
     goal: null,
     closedRequestIds: new Set(),
     closedRequestAt: new Map(),
+    answeredApprovals: new Map(),
     seq: 0,
     deleted: false
   };
@@ -950,6 +962,8 @@ type Mutation = {
   rederiveRoster?: boolean;
   /** The goal after this event (goals §4.4); `undefined` means unchanged. */
   goal?: ThreadGoal | null;
+  /** {@link ThreadFoldState.answeredApprovals} after this event; `undefined` means unchanged. */
+  answeredApprovals?: Map<string, string>;
 };
 
 /**
@@ -1087,6 +1101,13 @@ function commit(
   // before goals keeps none until a goal row lands.
   const goal = mutation.goal !== undefined ? mutation.goal : state.goal;
 
+  const answeredApprovals = answeredApprovalsAfter(
+    mutation.answeredApprovals ?? state.answeredApprovals,
+    event,
+    pending,
+    pending !== state.pending
+  );
+
   const head = mutation.head !== undefined ? mutation.head : state.head;
   const nextHead =
     head === null
@@ -1104,6 +1125,7 @@ function commit(
     ...(goal !== undefined ? { goal } : {}),
     closedRequestIds,
     ...(closedRequestAt !== undefined ? { closedRequestAt } : {}),
+    ...(answeredApprovals !== undefined ? { answeredApprovals } : {}),
     seq: event.seq,
     deleted: mutation.deleted ?? state.deleted,
     ...(evicted !== undefined ? { evicted } : {})
@@ -1113,6 +1135,60 @@ function commit(
   }
   if (dropped.length > 0) {
     droppedByStep.set(next, dropped);
+  }
+  return next;
+}
+
+/**
+ * An answer to a pending approval: remembered until the approval resolves
+ * ({@link ThreadFoldState.answeredApprovals}). An answer to anything not
+ * pending changes nothing — the provider's own "unknown request" closes it.
+ */
+function reduceApprovalResponseRequested(
+  state: ThreadFoldState,
+  event: Extract<DomainEvent, { type: "thread.approval-response-requested" }>
+): Mutation {
+  const requestId = event.payload.requestId;
+  if (!state.pending.approvals.some((approval) => approval.requestId === requestId)) return {};
+  if (state.answeredApprovals?.has(requestId) === true) return {};
+  return { answeredApprovals: new Map(state.answeredApprovals ?? []).set(requestId, event.occurredAt) };
+}
+
+/**
+ * The answered approvals after one step: a failed response forgets its
+ * answer — the card stays open to answer again — and, when `pending` moved,
+ * only answers to approvals still pending survive, and only for the request
+ * they answered (one stamped after the answer reuses the id: a new request).
+ * Same reference when nothing changed.
+ */
+function answeredApprovalsAfter(
+  answered: Map<string, string> | undefined,
+  event: DomainEvent,
+  pending: PendingRequests,
+  pendingMoved: boolean
+): Map<string, string> | undefined {
+  if (answered === undefined || answered.size === 0) return answered;
+  let next = answered;
+  if (event.type === "thread.activity-appended") {
+    const activity = event.payload.activity;
+    const requestId = (activity.payload as { requestId?: unknown } | null)?.requestId;
+    if (
+      activity.activityKind === "provider.approval.respond.failed" &&
+      typeof requestId === "string" &&
+      next.has(requestId)
+    ) {
+      next = new Map(next);
+      next.delete(requestId);
+    }
+  }
+  if (pendingMoved) {
+    const openSince = new Map(pending.approvals.map((approval) => [approval.requestId, approval.createdAt]));
+    for (const [requestId, answeredAt] of [...next]) {
+      const createdAt = openSince.get(requestId);
+      if (createdAt !== undefined && createdAt <= answeredAt) continue;
+      if (next === answered) next = new Map(answered);
+      next.delete(requestId);
+    }
   }
   return next;
 }
@@ -1291,9 +1367,12 @@ function reduce(state: ThreadFoldState, event: DomainEvent): Mutation {
 
     // Commands that record intent and project nothing of their own: the
     // provider's answer arrives as an activity (§5.1), and an interrupt
-    // settles its turn through `thread.session-set`.
-    case "thread.turn-interrupt-requested":
+    // settles its turn through `thread.session-set`. An approval's answer is
+    // remembered until that activity lands (`answeredApprovals`).
     case "thread.approval-response-requested":
+      return reduceApprovalResponseRequested(state, event);
+
+    case "thread.turn-interrupt-requested":
     case "thread.user-input-response-requested":
     case "thread.checkpoint-revert-requested":
       return {};

@@ -108,7 +108,7 @@ import {
 
 import type { AccountHome, HistoryImportProgress, McpAppOperation, McpAppReference } from "@orquester/api/agent-chat";
 import { htmlRenderReferenceOfActivityPayload, mcpAppReferenceOfActivityPayload } from "@orquester/api/agent-chat";
-import { APPROVAL_ARRIVED_REASON, parseCausedBy, REDIRECT_COMPACT_REASON, usageLimitNoticeOf } from "@orquester/api/agent-chat";
+import { APPROVAL_ALREADY_ANSWERED_REASON, APPROVAL_ARRIVED_REASON, parseCausedBy, REDIRECT_COMPACT_REASON, usageLimitNoticeOf } from "@orquester/api/agent-chat";
 import { IDLE_COMPACTION_SENT_BY, idleCompactionCandidateOf, type ThreadMessageSentBy } from "@orquester/api/agent-chat";
 import { delegatePreviewOf, parseInterruptCause, STOP_CASCADED_ACTIVITY_KIND, stopCascadedSummary } from "@orquester/api/agent-chat";
 import { runMcpAppRequest } from "../mcp-apps.ts";
@@ -3267,18 +3267,24 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
 
   /**
    * The approvals a redirect declines (`TurnCommandBody.declineApprovals`): every
-   * pending approval, when the user saw them all — a listed one already answered
-   * is simply not among them. Refused when an approval is pending that the list
-   * does not name: it arrived after the user sent, and they have not read it.
+   * pending approval nobody has answered yet, when the user saw them all. One
+   * already answered — resolved, or its answer committed and the provider's
+   * resolution still on its way (the fold's `answeredApprovals`: another tab's
+   * Approve, an MCP `respond_to_request`) — is skipped: declining it too would
+   * answer it twice. Refused when an unanswered approval is pending that the
+   * list does not name: it arrived after the user sent, and they have not read it.
    */
   const redirectDeclines = (runtime: ThreadRuntime, listed: readonly string[] | undefined): string[] => {
     if (listed === undefined) return [];
     const seen = new Set(listed);
-    const pending = runtime.state.pending?.approvals ?? [];
-    if (pending.some((approval) => !seen.has(approval.requestId))) {
+    const answered = runtime.state.answeredApprovals;
+    const open = (runtime.state.pending?.approvals ?? []).filter(
+      (approval) => answered?.has(approval.requestId) !== true
+    );
+    if (open.some((approval) => !seen.has(approval.requestId))) {
       throw commandRejected(APPROVAL_ARRIVED_REASON);
     }
-    return pending.map((approval) => approval.requestId);
+    return open.map((approval) => approval.requestId);
   };
 
   const turnIsActive = (runtime: ThreadRuntime): boolean => {
@@ -3723,6 +3729,13 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       case "approval": {
         const requestId = parseRequestId(body);
         const decision = parseApprovalDecision(body.decision);
+        // One answer per request: a second one (another tab, the MCP, a
+        // redirect that got there first) while the provider's resolution of
+        // the first is on its way would answer it twice. A retry of the SAME
+        // command is its receipt's; this is a different command.
+        if (runtime.state.answeredApprovals?.has(requestId) === true) {
+          throw commandRejected(APPROVAL_ALREADY_ANSWERED_REASON);
+        }
         return {
           events: [
             buildEvent(
