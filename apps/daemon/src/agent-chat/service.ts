@@ -504,8 +504,10 @@ export class AgentChatService {
       // A settled turn reopens the §3.1 drain window, so a deploy's version
       // handover happens the moment the host goes quiet — and so does a
       // subagent fleet or watch loop finishing, which the drain also waits on.
-      onTurnSettled: () => this.supervisor.handleTurnSettled(),
-      onBackgroundWorkEnded: () => this.supervisor.handleTurnSettled(),
+      onTurnSettled: (threadId) => this.supervisor.handleTurnSettled(threadId),
+      // …though not at once: the provider may be about to wake the agent with
+      // what just finished (`SupervisorAdapters` / pending wakes).
+      onBackgroundWorkEnded: (threadId) => this.supervisor.handleBackgroundWorkEnded(threadId),
       onUsageLimits: (reading) => this.usageLimitsListener(reading),
       onUsageLimitNotice: (threadId, notice) => this.usageLimitNoticeListener(threadId, notice)
     });
@@ -948,6 +950,15 @@ export class AgentChatService {
       switchAccount: (id, body) => this.switchAccount(id, body),
       switchProfile: (id, body) => this.switchProfile(id, body),
       profileCatalog: (summary) => this.profileCatalog(summary),
+      hostStatus: () => {
+        const status = this.supervisor.restartStatus();
+        if (status.pendingRestart === null) return status;
+        const blockers = status.pendingRestart.blockers.map((blocker) => {
+          const title = this.chat.get(blocker.threadId)?.title;
+          return title !== undefined && title.trim() !== "" ? { ...blocker, threadTitle: title } : blocker;
+        });
+        return { ...status, pendingRestart: { ...status.pendingRestart, blockers } };
+      },
       restartHost: async () => {
         this.lastMarkedThreadIds = [];
         const hostInstanceId = await this.supervisor.restartNow();

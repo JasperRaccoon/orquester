@@ -779,6 +779,9 @@ export async function startAgentHost(
   const stop = async (): Promise<void> => {
     if (stopping) return;
     stopping = true;
+    // Before any adapter stops: background work the teardown ends from here
+    // on is named in the chat (`orchestrator.beginTeardown`).
+    host.beginTeardown();
     shutdown.abort();
     snapshots.stop();
     await server.close().catch((error: unknown) => {

@@ -291,6 +291,8 @@ export const agentChatRoutes = {
   providerRefresh: (adapterId: string): string =>
     `/api/agent/providers/${encodeURIComponent(adapterId)}/refresh`,
   hostStop: "/api/agent-host/stop",
+  /** `GET`: {@link AgentHostStatusResponse} — the host and its pending drain-restart. */
+  hostStatus: "/api/agent-host/status",
 
   // Indexed history (design 2026-09-23 "thread index and lazy boot").
   /**
@@ -1300,6 +1302,56 @@ export interface AgentHostStopResponse {
   ok: boolean;
   /** Threads whose continuation marker was written before the drain. */
   markedThreadIds: string[];
+  /** The replacement's instance id, or null when it never became ready. */
+  hostInstanceId?: string | null;
+}
+
+/**
+ * One thing a pending agent-host restart waits on ({@link AgentHostStatusResponse}): a turn
+ * running, a background shell or watch loop, a subagent, a finished background task the
+ * provider is about to hand the agent (a pending wake), or background work the daemon knows of
+ * but the host does not itemise (an older host).
+ */
+export interface AgentHostRestartBlocker {
+  threadId: string;
+  /** The tab's title, when the daemon knows the thread. */
+  threadTitle?: string;
+  kind: "turn" | "background" | "agent" | "wake" | "work";
+  taskId?: string;
+  /** The task's own title (a shell's description, an agent's task). */
+  title?: string;
+  /** A background shell's command line. */
+  command?: string;
+  /** Since when (ISO): the task started, the wake's task finished. */
+  since?: string;
+  /** `POST /api/sessions/:id/task/stop` stops this task alone. */
+  stoppable?: boolean;
+}
+
+/**
+ * `GET /api/agent-host/status`: the agent host as the daemon supervises it, and the drain-restart
+ * a deploy left pending — what it waits on, per thread. A pending restart waits for no turn to
+ * run and no background work to be live (a running shell is never killed by it, however long
+ * it runs); `POST /api/agent-host/stop` restarts at once and stops all of it.
+ */
+export interface AgentHostStatusResponse {
+  state: "stopped" | "starting" | "healthy" | "foreign" | "error";
+  reason: string | null;
+  hostInstanceId: string | null;
+  pid: number | null;
+  /** The code the running host was started from (its code stamp), when it reports one. */
+  codeStamp: string | null;
+  /** The code in the daemon's checkout — what a restart would run. */
+  checkoutCodeStamp: string | null;
+  pendingRestart: {
+    /** Why it is pending ("agent host code 1570de7c8ee6 != f5aff27f7805"). */
+    reason: string;
+    /** Since when the restart has waited (ISO), or null before its first deferral. */
+    since: string | null;
+    /** The last deferral as the daemon logged it, or null. */
+    deferredBy: string | null;
+    blockers: AgentHostRestartBlocker[];
+  } | null;
 }
 
 // ---------------------------------------------------------------------------

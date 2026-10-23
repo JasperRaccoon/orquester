@@ -279,13 +279,20 @@ not live.
 
 *T3: `apps/server/src/orchestration/ThreadBackgroundLiveness.ts:1-166` — the whole registry, its two-state vocabulary and the "no persistence, no migration" rationale; `apps/server/src/orchestration/ThreadSettlementPolicy.ts:118-124` — live background work blocks auto-settlement; `apps/server/src/provider/Layers/ProviderSessionReaper.ts:81-95` — differs: T3 consults it to skip reaping a thread; Orquester never reaps, so it feeds only the activity/attention derivation*
 
-*Built: background rows expire (`orchestration/liveness.ts`) — a watch loop silent for 10 minutes,
-an agent whose rows carry `livenessTtlMs` that long after its latest row — and the end of a turn
-the host sent drops every watch loop that reported nothing during it. A turn the provider started
-itself — a Grok wake, an OpenCode woken reply, Claude's synthetic woken turn: no `/turn` row in
-the fold when its `turn.started` is consumed — sweeps nothing (final fix wave 2026-09-26). Wakes
-come at every background end and monitor line, and sweeping at their ends dropped a silent dev
-server long before its TTL, which let a deploy's drain kill it.*
+*Built (2026-10-23): **a background row is live until its work ends, never until it falls
+silent.** The silence expiry that used to apply here (a watch loop quiet for 10 minutes, or through a
+turn the user sent) read a quiet test suite with its output in a file as finished, showed the tab
+"finished" and let a deploy's drain kill it. A task now leaves the registry on its terminal row, on
+`session.exited`, or when the adapter that runs it says its work is gone
+(`AgentAdapter.backgroundTaskLive`, asked on every read): Claude by the CLI's own live set (the
+`background_tasks_changed` level, fixtures README observation 18b), Grok by the shell's own process
+(the pid its `BackgroundTaskStarted` reports, checked in `/proc` with its starttime). Only a task the
+adapter cannot answer for — a Grok box shell, an adapter without the check — is bounded by time, at
+`UNCHECKED_BACKGROUND_TTL_MS` (6 h) since its last transition; a Grok subagent keeps its rows'
+`livenessTtlMs` (1 h past its latest heartbeat). Codex and OpenCode report no shells. So a dev
+server left running holds a deploy's restart indefinitely: Settings → Host status
+(`GET /api/agent-host/status`) shows what a pending restart waits on, per chat, with a Stop for each
+task and "Restart agent host now".*
 
 **No-tmux hosts** (Windows, stock macOS dev): the host is a direct daemon child and dies with it.
 The same reconcile in §3.3 recovers on boot. Nothing else differs.
@@ -595,6 +602,21 @@ resumed turn runs, cleared when it ends, a new turn starts or the session is end
 that keeps taking the host down is resumed at most twice in a row and then settled
 (`MAX_CRASH_RESUME_ATTEMPTS`, `CRASH_RESUME_LIMIT_MESSAGE`). Background work the dead process ran
 is closed as before and named in one `runtime.warning` row.*
+
+*Built (2026-10-23): **pending wakes.** A background task the parent launched that ends while no
+turn runs is handed to the agent by the provider itself, in a turn it starts a second or so later
+(Claude's woken parent, Grok's and OpenCode's wakes; `AdapterCapabilities.wakesOnBackgroundCompletion`).
+A deploy's drain that restarted in that gap lost the result (thread bbd7145a). The host holds such an
+end as `ThreadHead.pendingWake` (task id, title, the provider's result text capped, its output file) —
+written to `meta.json` before the event is ingested, cleared when any turn starts, the user ends the
+session, or it is 15 minutes old — and reports it on `/health` (`pendingWakes`); the daemon's drain
+waits on one for at most `PENDING_WAKE_DRAIN_CAP_MS` (2 min), and on a host without the field for a
+grace after background work ends. A host that stops anyway (the cap, a crash, a reboot) leaves the
+mark; the next host's reconcile folds that thread and, under this section's rules (an open tab, the
+project's opt-in, a cursor, at most two attempts: `prepared`/`attempt` on the mark), sends a turn
+that gives the agent the results and names the background work the restart stopped, with a visible
+note row; opted out or without a cursor, the note says what finished and that a message continues.
+A completion a turn already followed is never delivered again (`wakeConsumed`).*
 
 **Archived and deleted threads are settled, never continued.** A thread the user closed or
 deleted while a turn was running is settled as an error on the next boot; resuming it would

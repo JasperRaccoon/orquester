@@ -474,23 +474,37 @@ export interface CheckpointService {
  * Deliberately not persisted: after a host restart the registry is empty,
  * which is correct, because orphaned background work is not live.
  */
-/** What the host knows about an event that the event itself does not say. */
-export interface LivenessObservation {
-  /**
-   * On `turn.started`: nobody asked the host for this turn — the provider
-   * started it (a Grok wake, an OpenCode woken reply, Claude's synthetic woken
-   * turn). Its end sweeps nothing (`liveness.ts`). Absent = the host's own.
-   */
-  providerInitiatedTurn?: boolean;
+/**
+ * The owning adapter's answer to "is this background task's work still
+ * running?" — `true` it runs (however quiet), `false` it is gone (its process
+ * exited, its provider dropped it, its session ended), `undefined` the
+ * adapter cannot tell (the registry then bounds the row by time). Synchronous
+ * and cheap: it is asked on every liveness read.
+ */
+export type TaskLivenessProbe = (threadId: string, taskId: string) => boolean | undefined;
+
+/** One live background task, for the drain's blocker list (`/health` `backgroundTasks`). */
+export interface LiveBackgroundTask {
+  taskId: string;
+  /** `agent` — a subagent; `background` — a background shell or watch loop. */
+  kind: "agent" | "background";
+  /** When the registry first saw it live (ISO). */
+  since: string;
+  taskType?: string;
+  title?: string;
 }
 
 export interface LivenessRegistry {
-  /** Fold one task or turn event into the registry. */
-  observe(event: RuntimeEvent, observation?: LivenessObservation): void;
+  /** Fold one task event (or a `session.exited`) into the registry. */
+  observe(event: RuntimeEvent): void;
   /** `"working"` | `"monitoring"` | `null`, per §3.1. */
   liveness(threadId: string): BackgroundLiveness | null;
   /** How many live *agent* rows the thread has, for the banner's copy (§7.6). */
   liveAgentCount(threadId: string): number;
+  /** Every live task of the thread. */
+  liveTasks(threadId: string): LiveBackgroundTask[];
+  /** Install (or remove) the adapters' {@link TaskLivenessProbe}. */
+  setProbe(probe: TaskLivenessProbe | null): void;
   /** `session.exited` clears the thread. */
   clear(threadId: string): void;
 }
