@@ -372,7 +372,7 @@ export class PluginsService {
       if (!previous) {
         throw new PluginsError(409, "NO_PREVIOUS_VERSION", "There is no previous version to roll back to.");
       }
-      if (!(await target.hasFiles(previous.version))) {
+      if (!(await installedFiles(target, previous.version))) {
         throw new PluginsError(409, "NO_PREVIOUS_VERSION", `The files of version ${previous.version} are missing.`);
       }
       await this.mutate((config) => {
@@ -523,7 +523,7 @@ export class PluginsService {
         const next = target.versionsIn(stateIn(config, id));
         if (next.current?.version !== installed.version) {
           // A current version whose files are gone is no rollback target: the old previous stays.
-          if (next.current && (await target.hasFiles(next.current.version))) next.previous = next.current;
+          if (next.current && (await installedFiles(target, next.current.version))) next.previous = next.current;
           // Only a version other than the skipped one gets here.
           delete next.skippedVersion;
         }
@@ -866,6 +866,11 @@ function stateIn(config: PluginsConfig, id: PluginId): PluginState {
   const state = pluginStateOf(config, id);
   config.plugins[id] = state;
   return state;
+}
+
+/** Whether `version` of `target` is installed (a rollback target), even if a check would repair it. */
+function installedFiles(target: PluginUpdateTarget, version: string): Promise<boolean> {
+  return target.hasInstalled ? target.hasInstalled(version) : target.hasFiles(version);
 }
 
 function installedInfo(version: PluginInstalledVersion | undefined): PluginInfo["current"] {

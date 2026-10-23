@@ -30,8 +30,14 @@ export interface PluginUpdateTarget<R extends PluginRelease = PluginRelease> {
   versions(state: PluginState): PluginEngineVersions;
   /** The same, to write: created in `state` when missing. */
   versionsIn(state: PluginState): PluginEngineVersions;
-  /** Whether `version`'s files are in place and usable. */
+  /** Whether `version`'s files are in place and usable; false makes a check repair it. */
   hasFiles(version: string): Promise<boolean>;
+  /**
+   * Whether `version` is installed and runs, though `hasFiles` may want it repaired
+   * (Knowledge Graph: installed with an older prompt overlay): what rollback and
+   * "keep it as previous" ask. `hasFiles` when absent.
+   */
+  hasInstalled?(version: string): Promise<boolean>;
   /** The latest release, or `pinned` exactly. */
   resolve(signal: AbortSignal, pinned?: string): Promise<R>;
   /** Install `release` (staged, verified, smoke-tested, renamed into place). */

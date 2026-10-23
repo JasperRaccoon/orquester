@@ -67,6 +67,8 @@ export function createKnowledgeGraphUpdater(options: KnowledgeGraphUpdaterOption
     // An install whose overlay is not the shipped one (an Orquester update changed the
     // prompts) counts as missing: the next check repairs it.
     hasFiles: async (version) => knowledgeRuntimeReady(runtimeDir, version, { overlayDigestNow: await currentDigest(), model }),
+    // With an older overlay it still runs (as KnowledgeRuntimeTracker serves it): a rollback target.
+    hasInstalled: (version) => knowledgeRuntimeReady(runtimeDir, version, { model }),
     resolve: (signal, pinned) => resolveMykgRelease(deps, signal, pinned),
     install: (release, signal) => {
       if (!uv) throw new KnowledgeInstallError("download", `uv has no build for ${platform}/${arch}`);
