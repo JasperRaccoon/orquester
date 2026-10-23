@@ -87,6 +87,11 @@ export interface DesktopHostStatus {
   warnings: string[];
   /** `sudo apt-get install -y …` for whatever is missing, or `null`. */
   installHint: string | null;
+  /**
+   * A VM project's desktop stack: Orquester installs what is missing itself when a desktop
+   * opens (`installHint` then only names it). Absent when the user must install it, and on the host.
+   */
+  installsOnOpen?: boolean;
 }
 
 export interface LaunchAppRequest {

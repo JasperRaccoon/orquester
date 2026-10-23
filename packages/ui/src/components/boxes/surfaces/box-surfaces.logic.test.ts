@@ -321,7 +321,10 @@ describe("the + menu and accounts", () => {
     assert.equal(vmDesktopNote({ ...status, available: true }), status.installHint);
     assert.match(vmDesktopNote({ ...status, available: true, audioAvailable: false, installHint: null }) ?? "", /without sound/);
     assert.equal(vmDesktopNote({ ...status, installHint: null, warnings: ["No sudo in this VM."] }), "No sudo in this VM.");
-    assert.match(vmDesktopNote({ ...status, installHint: null }) ?? "", /first open/);
+    assert.equal(vmDesktopNote({ ...status, installHint: null }), null);
+    // The first desktop installs what is missing by itself: nothing to tell the user.
+    assert.equal(vmDesktopNote({ ...status, installsOnOpen: true }), null);
+    assert.equal(vmDesktopNote({ ...status, available: true, audioAvailable: false, installsOnOpen: true }), null);
     assert.match(vmDesktopNote("error") ?? "", /Could not check/);
   });
 

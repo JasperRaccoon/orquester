@@ -339,6 +339,13 @@ export function manualInstallCommand(manager: BoxPackageManager, choices: readon
   return manager === "apt" ? `sudo apt-get install -y ${names.join(" ")}` : `sudo ${manager} install -y ${names.join(" ")}`;
 }
 
+/** Whether a desktop opening in this box installs what is missing by itself (a package manager, root or passwordless sudo). */
+export function boxDesktopInstallsOnOpen(facts: BoxGuiFacts, missingPackages: readonly string[]): boolean {
+  const manager = packageManagerOf(facts);
+  if (manager === null || !canInstall(facts)) return false;
+  return desktopInstallPlan(facts, missingPackages, manager).missing.length > 0;
+}
+
 /** The status' `installHint` for a box: what Orquester will install, or why it cannot. */
 export function boxDesktopInstallHint(facts: BoxGuiFacts, missingPackages: readonly string[], user: string): string | null {
   const manager = packageManagerOf(facts);

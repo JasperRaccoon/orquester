@@ -207,6 +207,7 @@ test("desktopStatus probes without installing and says what will be installed", 
   const status = await createBoxGuiInstaller().desktopStatus(fake.connection());
   assert.equal(status.available, false);
   assert.match(status.installHint ?? "", /^Orquester installs tigervnc-standalone-server openbox .* in the box when a desktop opens\.$/);
+  assert.equal(status.installsOnOpen, true, "a root box installs what is missing by itself");
   assert.deepEqual(fake.calls.map((call) => call.kind), ["probe"]);
   assert.equal(fake.calls[0]!.command, "/bin/sh");
 });
@@ -219,6 +220,7 @@ test("ensureDesktop as root installs once, re-probes, streams progress, and is m
   assert.equal(status.available, true);
   assert.equal(status.audioAvailable, true);
   assert.equal(status.installHint, null);
+  assert.equal(status.installsOnOpen, undefined, "nothing left to install");
   assert.deepEqual(fake.calls.map((call) => call.kind), ["probe", "desktop-install", "probe"]);
   const install = fake.calls[1]!;
   assert.equal(install.command, "/bin/sh", "root runs the script directly");
