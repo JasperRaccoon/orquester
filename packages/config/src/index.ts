@@ -2656,3 +2656,4 @@ export * from "./boxes.ts";
 export * from "./tooling.ts";
 // boxes:
 export * from "./box-mcp.ts";
+export * from "./knowledge-store.ts";
