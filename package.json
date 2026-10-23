@@ -15,8 +15,9 @@
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck",
     "check": "pnpm -r typecheck",
+    "check:changed": "node scripts/check-changed.mjs",
     "postinstall": "node scripts/fix-node-pty-perms.mjs",
-    "test": "pnpm -r --workspace-concurrency=1 --if-present test && node --test scripts/ensure-node-native.test.mjs scripts/deploy-public-url.test.mjs deploy/lib/remote-update.test.mjs"
+    "test": "pnpm -r --workspace-concurrency=1 --if-present test && node --test scripts/ensure-node-native.test.mjs scripts/check-changed.test.mjs scripts/deploy-public-url.test.mjs deploy/lib/remote-update.test.mjs"
   },
   "devDependencies": {
     "cross-env": "^7.0.3",

@@ -13,12 +13,16 @@
 # - /etc/needrestart/conf.d/orquester.conf: needrestart (Ubuntu's apt hook) must never restart
 #   orquester.service after a library upgrade — an unattended upgrade would otherwise restart the
 #   daemon behind the deploy's drain. Validated with `perl -c` before it is moved into place.
+# - /etc/tmpfiles.d/orquester.conf ← deploy/orquester-tmpfiles.conf: the daily
+#   systemd-tmpfiles-clean run ages out tsx transpile-cache entries under the service's TMPDIR.
 set -euo pipefail
 
 UNIT_SRC=deploy/orquester.service
 UNIT_DST=/etc/systemd/system/orquester.service
 NEEDRESTART_DIR=/etc/needrestart/conf.d
 NEEDRESTART_DST="$NEEDRESTART_DIR/orquester.conf"
+TMPFILES_SRC=deploy/orquester-tmpfiles.conf
+TMPFILES_DST=/etc/tmpfiles.d/orquester.conf
 
 log() { printf '[install-unit] %s\n' "$*"; }
 fail() { printf '[install-unit] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -47,4 +51,15 @@ else
   mkdir -p "$NEEDRESTART_DIR"
   install -m 0644 "$conf" "$NEEDRESTART_DST"
   log "needrestart exclusion installed: $NEEDRESTART_DST"
+fi
+
+# Refs from before the rule existed (old rollbacks) leave an installed one in place.
+if [ -f "$TMPFILES_SRC" ]; then
+  if [ -f "$TMPFILES_DST" ] && cmp -s "$TMPFILES_SRC" "$TMPFILES_DST"; then
+    log "tmpfiles rule already up to date"
+  else
+    mkdir -p "$(dirname "$TMPFILES_DST")"
+    install -m 0644 "$TMPFILES_SRC" "$TMPFILES_DST"
+    log "tmpfiles rule installed: $TMPFILES_DST (applied by the daily systemd-tmpfiles-clean run)"
+  fi
 fi
