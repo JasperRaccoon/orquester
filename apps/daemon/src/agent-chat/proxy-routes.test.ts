@@ -182,6 +182,33 @@ test("an accepted interrupt or stop is reported to the delegate stop cascade; a 
   await h.close();
 });
 
+test("a stop opens its hold before it is forwarded and closes it after the cascade heard it — accepted or refused", async () => {
+  const log: string[] = [];
+  const h = await makeHarness(
+    { t1: tab("t1") },
+    {
+      onStopCommand: (id, command) => log.push(`accepted ${id} ${command}`),
+      beforeStopCommand: (id, command) => {
+        log.push(`before ${id} ${command}`);
+        return () => log.push(`done ${id} ${command}`);
+      }
+    }
+  );
+  h.host.handler = (_req, res) => {
+    log.push("forwarded");
+    res.writeHead(200, { "content-type": "application/json" }).end('{"seq":5}');
+  };
+  await h.app.inject({ method: "POST", url: "/api/sessions/t1/interrupt", payload: { commandId: "c-1" } });
+  await h.app.inject({ method: "POST", url: "/api/sessions/t1/turn", payload: { commandId: "c-2", input: "hi" } });
+  assert.deepEqual(log, ["before t1 interrupt", "forwarded", "accepted t1 interrupt", "done t1 interrupt", "forwarded"]);
+  log.length = 0;
+  h.host.handler = (_req, res) =>
+    res.writeHead(409, { "content-type": "application/json" }).end(JSON.stringify({ error: { code: "COMMAND_REJECTED", message: "no" } }));
+  await h.app.inject({ method: "POST", url: "/api/sessions/t1/session/stop", payload: { commandId: "c-3" } });
+  assert.deepEqual(log, ["before t1 session/stop", "done t1 session/stop"], "a refused stop still closes its hold");
+  await h.close();
+});
+
 test("the host's error envelope is passed through verbatim, status included", async () => {
   // Exactly one surface describes a failure, whichever layer produced it.
   const h = await makeHarness({ t1: tab("t1") });

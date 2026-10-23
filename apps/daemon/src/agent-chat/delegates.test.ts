@@ -143,6 +143,22 @@ describe("the delegate stop cascade", () => {
     assert.deepEqual(idleHeard, ["d"]);
   });
 
+  it("holds replies to a chat while its stop is on the way, never for the cascade's own interrupts", () => {
+    const w = world(tree());
+    const log: string[] = [];
+    w.cascade.setListener({
+      delegatesStopped: async () => undefined,
+      stopRequested: (id) => log.push(`hold ${id}`),
+      stopResolved: (id) => log.push(`release ${id}`)
+    });
+    const done = w.cascade.commandRequested("root", "interrupt", { commandId: "c1" });
+    done();
+    done();
+    w.cascade.commandRequested("a", "interrupt", { commandId: "c2", cause: { kind: "parent-stopped", parentSessionId: "root", parentTitle: "", action: "interrupted" } })();
+    w.cascade.commandRequested("a", "interrupt", { commandId: "c3", cascade: false })();
+    assert.deepEqual(log, ["hold root", "release root"], "released once; cascaded and housekeeping interrupts hold nothing");
+  });
+
   it("a router that fails to record the stop never keeps the children running", async () => {
     const w = world(tree());
     w.cascade.setListener({ delegatesStopped: async () => { throw new Error("disk full"); } });

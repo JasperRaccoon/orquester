@@ -136,6 +136,13 @@ export interface AgentChatRouteDeps {
    * Must not throw or block. Optional: without it nothing cascades.
    */
   onStopCommand?(id: string, command: "interrupt" | "session/stop", body: unknown): void;
+  /**
+   * An `interrupt` or `session/stop` for this chat is about to be forwarded: replies stop flowing
+   * to it until the returned callback runs — after the host answered and {@link onStopCommand} ran
+   * — so a turn the stop settles is not woken first (`DelegateStopCascade.commandRequested`). Must
+   * not throw or block. Optional.
+   */
+  beforeStopCommand?(id: string, command: "interrupt" | "session/stop", body: unknown): () => void;
   logger?: { warn?: (...a: unknown[]) => void; error?: (...a: unknown[]) => void };
 }
 
@@ -246,22 +253,35 @@ export function registerAgentChatRoutes(app: FastifyInstance, deps: AgentChatRou
         if (refusal !== null) {
           return reply.code(CHAT_ERROR_STATUS.COMMAND_REJECTED).send(chatError("COMMAND_REJECTED", refusal));
         }
-        const answer = await forwardJson(
-          deps,
-          reply,
-          "POST",
-          HOST_COMMAND_ROUTE[name](id),
-          request.body ?? {}
-        );
-        // A stop the host took: the chats this one delegated stop too (`delegates.ts`).
-        if ((name === "interrupt" || name === "session/stop") && reply.statusCode < 400) {
+        const stop = name === "interrupt" || name === "session/stop" ? name : null;
+        let stopDone: (() => void) | undefined;
+        if (stop !== null) {
           try {
-            deps.onStopCommand?.(id, name, request.body ?? {});
+            stopDone = deps.beforeStopCommand?.(id, stop, request.body ?? {});
           } catch (error) {
-            deps.logger?.warn?.("the delegate stop cascade could not start", error);
+            deps.logger?.warn?.("the delegate stop cascade could not prepare", error);
           }
         }
-        return answer;
+        try {
+          const answer = await forwardJson(
+            deps,
+            reply,
+            "POST",
+            HOST_COMMAND_ROUTE[name](id),
+            request.body ?? {}
+          );
+          // A stop the host took: the chats this one delegated stop too (`delegates.ts`).
+          if (stop !== null && reply.statusCode < 400) {
+            try {
+              deps.onStopCommand?.(id, stop, request.body ?? {});
+            } catch (error) {
+              deps.logger?.warn?.("the delegate stop cascade could not start", error);
+            }
+          }
+          return answer;
+        } finally {
+          stopDone?.();
+        }
       }
     );
   }

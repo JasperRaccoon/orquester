@@ -123,7 +123,17 @@ export interface DeliveryListener {
   discarded(entry: MergeOutboxEntry, bySessionId: string): Promise<void>;
   /** The queue stops: so does the router. */
   stop(): Promise<void>;
+  /**
+   * Asked in the receiver's lane right before the queue posts `entry` on its own (an immediate
+   * post or a drain; never the user's Deliver now): `hold` keeps it for the user, `drop` takes it
+   * off the queue, `defer` leaves it queued for later (`kick` brings it round). Synchronous, so no
+   * stop can land between the answer and the post.
+   */
+  postVeto?(entry: MergeOutboxEntry): PostVeto;
 }
+
+/** {@link DeliveryListener.postVeto}'s answer; null posts as usual. */
+export type PostVeto = { action: "hold"; reason: string } | { action: "drop" } | { action: "defer" } | null;
 
 const DEFAULT_RECHECK_MS = 30_000;
 
@@ -678,7 +688,7 @@ export class LineageService {
         throw new LineageError("Orquester could not save the message to deliver later; try again in a moment.", "HOST_UNAVAILABLE");
       }
       // An entry handed in held (`failed`: a reply held after a stop) waits for the user alone.
-      if (entry.state !== "failed" && !olderWaiting && (await this.isIdle(api, receiver))) {
+      if (entry.state !== "failed" && !olderWaiting && (await this.isIdle(api, receiver)) && !(await this.vetoed(entry))) {
         const sent = await this.deliver(api, entry);
         if (sent.kind === "sent") {
           await this.notifyPosted(entry, sent);
@@ -728,6 +738,32 @@ export class LineageService {
       this.publish([entry.parentSessionId, entry.childSessionId]);
       return false;
     });
+  }
+
+  /**
+   * The listener's {@link DeliveryListener.postVeto} on an entry about to be posted, applied: true
+   * when it must not be posted now (held for the user, dropped, or deferred). Runs in the lane.
+   */
+  private async vetoed(entry: MergeOutboxEntry): Promise<boolean> {
+    const veto = this.listener?.postVeto?.(entry) ?? null;
+    if (veto === null) return false;
+    if (veto.action === "hold") {
+      entry.state = "failed";
+      entry.held = true;
+      entry.error = veto.reason.slice(0, 2_000);
+      this.retryAt.delete(entry.mergeId);
+      await this.persist([entry.parentSessionId, entry.childSessionId]);
+    } else if (veto.action === "drop") {
+      this.outbox.entries = this.outbox.entries.filter((other) => other.mergeId !== entry.mergeId);
+      this.retryAt.delete(entry.mergeId);
+      await this.persist([entry.parentSessionId, entry.childSessionId]);
+    }
+    return true;
+  }
+
+  /** Look at `parentId`'s queue again now (a deferral ended). */
+  kick(parentId: string): void {
+    void this.drain(parentId);
   }
 
   /**
@@ -822,6 +858,11 @@ export class LineageService {
     if (due !== undefined && this.nowMs() < due) return;
     const snap = await this.idleParent(api, parentId);
     if (snap === null) return;
+    if (await this.vetoed(entry)) {
+      // Held or dropped: the next one in line may go now.
+      if (!this.outbox.entries.some((other) => other.mergeId === entry.mergeId) || entry.state === "failed") void this.drain(parentId);
+      return;
+    }
     const sent = await this.deliver(api, entry);
     if (sent.kind === "unavailable" || sent.kind === "busy") return;
     if (sent.kind === "refused") {
