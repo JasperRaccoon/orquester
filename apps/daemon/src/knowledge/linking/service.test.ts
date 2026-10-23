@@ -519,6 +519,32 @@ describe("KnowledgeLinkingService — runs against a fake myKG and fake worker c
     await h.service.stop();
   });
 
+  it("a failed rebuild waits for the error retry like any failed run (no tight loop)", async () => {
+    const h = await harness();
+    await h.service.start();
+    h.service.entriesChanged(await h.store.put(ID(1), "one"));
+    await h.clock.advance(20_000);
+    await h.until(ranOk(h, 1));
+    await writeFile(join(h.mykgDir, "fake-mykg.json"), JSON.stringify({ fail: "names did not normalize" }));
+    await h.service.rebuild();
+    await h.until(() => lastRun(h)?.mode === "rebuild" && lastRun(h)?.outcome === "failed");
+    await h.service.idle();
+    const spawned = (await h.log()).length;
+    const status = h.service.status();
+    assert.equal(status.state, "paused");
+    assert.equal(status.state === "paused" && status.reason, "error");
+    await h.clock.advance(1_000);
+    await h.service.idle();
+    assert.equal((await h.log()).length, spawned, "not started again at once");
+    assert.equal(h.service.status().state, "paused");
+    await rm(join(h.mykgDir, "fake-mykg.json"));
+    await h.clock.advance(30 * 60_000);
+    await h.until(ranOk(h, 2));
+    assert.equal(lastRun(h)!.mode, "rebuild", "the rebuild is still owed, and runs at the retry");
+    assert.equal((await h.log()).length, spawned + 1);
+    await h.service.stop();
+  });
+
   it("only the run's own worker chats pass the worker gate", async () => {
     const h = await harness({ workerMode: "manual" });
     await h.service.start();

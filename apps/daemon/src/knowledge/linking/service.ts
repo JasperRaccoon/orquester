@@ -404,12 +404,13 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
     if (!state || this.active || !this.canRun()) return;
     const now = this.opts.clock.now().getTime();
     let at: number;
-    if (state.rebuildRequested) {
-      at = now;
-    } else if (state.pause?.reason === "error") {
+    // A failed run (a failed rebuild included) waits for its retry; asking again clears the pause.
+    if (state.pause?.reason === "error") {
       const resumes = state.pause.resumesAt ? Date.parse(state.pause.resumesAt) : Number.NaN;
       if (!Number.isFinite(resumes)) return;
       at = resumes;
+    } else if (state.rebuildRequested) {
+      at = now;
     } else if (state.pendingEntryIds.length > 0 && state.pendingSince) {
       const first = Date.parse(state.pendingSince);
       const last = this.lastChangeAt ?? now;
