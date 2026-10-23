@@ -90,8 +90,11 @@ if [ -f deploy/install-unit.sh ]; then
 fi
 
 $SUDO systemctl restart orquester
-# A loaded host can take well over 30 s to bring the daemon up; wait up to 2 min.
-curl -fsS --retry 120 --retry-delay 1 --retry-max-time 150 --retry-connrefused http://127.0.0.1:47831/health; echo
+# A loaded host can take minutes to bring the daemon up — the first start after a large update
+# compiles every new module (tsx's cache is cold); 3 min was seen on a busy host. Wait up to 10 min,
+# quietly: one connection-refused line per second would bury the rest of the output.
+curl -fsS --retry 600 --retry-delay 1 --retry-max-time 600 --retry-connrefused http://127.0.0.1:47831/health 2>/dev/null \
+  || curl -fsS --max-time 10 http://127.0.0.1:47831/health; echo
 printf '%s\n' "$new_head" | $SUDO tee "$state_file" >/dev/null
 echo "[remote-update] service=$(systemctl is-active orquester)"
 echo "[remote-update] bundle=$(curl -s http://127.0.0.1:47831/ | grep -o 'index-[^.]*\.js' | head -n1)"

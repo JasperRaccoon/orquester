@@ -128,7 +128,8 @@ bash deploy/provision-devtools.sh </dev/null
 systemctl daemon-reload
 systemctl enable --now orquester
 systemctl restart orquester
-curl -fsS --retry 120 --retry-delay 1 --retry-max-time 150 --retry-connrefused http://127.0.0.1:47831/health; echo
+curl -fsS --retry 600 --retry-delay 1 --retry-max-time 600 --retry-connrefused http://127.0.0.1:47831/health 2>/dev/null \
+  || curl -fsS --max-time 10 http://127.0.0.1:47831/health; echo
 
 log "6/7 Caddy vhost for $DOMAIN"
 # Re-run safe: never clobber an existing Caddyfile that drifted from the
