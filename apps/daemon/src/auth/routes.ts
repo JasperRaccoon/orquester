@@ -24,7 +24,7 @@ import {
   type VerifyPasswordResponse
 } from "@orquester/api";
 
-import { AuthSessionsUnavailableError, cleanLabel, deviceLabelFromUserAgent, type AuthSessionStore, type VerifiedAuthSession } from "./sessions.ts";
+import { AuthSessionsUnavailableError, StalePasswordError, cleanLabel, deviceLabelFromUserAgent, type AuthSessionStore, type VerifiedAuthSession } from "./sessions.ts";
 import { clientIp, type LoginThrottle } from "./throttle.ts";
 
 declare module "fastify" {
@@ -118,8 +118,12 @@ export function registerAuthRoutes(app: FastifyInstance, deps: AuthRouteDeps): v
     }
     try {
       const userAgent = typeof request.headers["user-agent"] === "string" ? request.headers["user-agent"] : undefined;
-      return await deps.store.create("device", cleanLabel(body.label, deviceLabelFromUserAgent(userAgent)));
+      // Bound to the hash bcrypt checked: a password change that landed meanwhile refuses it.
+      return await deps.store.create("device", cleanLabel(body.label, deviceLabelFromUserAgent(userAgent)), credentials.passwordHash);
     } catch (error) {
+      if (error instanceof StalePasswordError) {
+        return reply.code(401).send({ code: "INVALID_CREDENTIALS", message: error.message });
+      }
       if (error instanceof AuthSessionsUnavailableError) {
         return reply.code(503).send({ code: "AUTH_SESSIONS_UNAVAILABLE", message: error.message });
       }

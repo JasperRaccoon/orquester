@@ -699,6 +699,18 @@ function openHttpStream(
   }
 
   const req = httpModuleFor(target).request(target, { method: "GET", headers: headers || {} }, (res) => {
+    const status = res.statusCode ?? 0;
+    if (status >= 400) {
+      // An error answer is not stream content: drop its body and report the status instead.
+      res.resume();
+      res.on("end", () => {
+        streams.delete(streamId);
+        if (!event.sender.isDestroyed()) {
+          event.sender.send("orquester:http-stream:end", { streamId, status });
+        }
+      });
+      return;
+    }
     res.setEncoding("utf8");
     res.on("data", (chunk: string) => {
       if (!event.sender.isDestroyed()) {

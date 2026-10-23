@@ -12,11 +12,12 @@ import { request as httpRequest } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Writable } from "node:stream";
+import { PassThrough, Writable } from "node:stream";
 import { test } from "node:test";
 import bcrypt from "bcryptjs";
 import { WebSocket } from "ws";
 
+import { agentChatRoutes } from "@orquester/api/agent-chat";
 import { authRoutes, authSessionPath, type AuthIssuedTokenResponse, type AuthSessionsResponse } from "@orquester/api";
 import { createDefaultClientConfig, createDefaultDaemonConfig, type DaemonConfig } from "@orquester/config";
 
@@ -41,7 +42,10 @@ interface Harness {
   sinkRemoved: Promise<void>;
 }
 
-async function harness(logStream: NodeJS.WritableStream = createWriteStream("/dev/null")): Promise<Harness> {
+async function harness(
+  logStream: NodeJS.WritableStream = createWriteStream("/dev/null"),
+  extraServices: Record<string, unknown> = {}
+): Promise<Harness> {
   const root = await mkdtemp(join(tmpdir(), "orquester-auth-routes-"));
   const config = createDefaultDaemonConfig({ env: {} });
   config.workspacesDir = join(root, "workspaces");
@@ -55,9 +59,11 @@ async function harness(logStream: NodeJS.WritableStream = createWriteStream("/de
   const sinkRemoved = new Promise<void>((resolve) => (removed = resolve));
   const services = {
     authSessions: store,
+    buildInfo: { version: null, commit: null },
     broadcaster: { add: () => added(), remove: () => removed(), publish: () => undefined },
     gitWatcher: { subscribe: () => undefined, unsubscribe: () => undefined },
-    plugins: { workspacesChanged: async () => undefined }
+    plugins: { workspacesChanged: async () => undefined },
+    ...extraServices
   } as unknown as CreateServerArgs[4];
   const resolved = {
     baseDir: root,
@@ -176,18 +182,139 @@ test("revoking a session ends its open event stream", async (t) => {
   await h.remote.listen({ host: "127.0.0.1", port: 0 });
   const port = (h.remote.server.address() as AddressInfo).port;
 
-  const ended = new Promise<number | undefined>((resolve, reject) => {
-    const req = httpRequest({ host: "127.0.0.1", port, path: "/events", headers: { authorization: `Bearer ${token}` } }, (res) => {
-      res.resume();
-      res.on("end", () => resolve(res.statusCode));
-    });
-    req.on("error", reject);
-    req.end();
-  });
+  const stream = openStream(port, "/events", token);
   await h.sinkAdded;
   await h.store.revoke(session.id);
-  assert.equal(await ended, 200);
+  await stream.terminated;
   await h.sinkRemoved;
+});
+
+/** A long-lived GET as a client holds it: `terminated` settles when the daemon cuts it. */
+function openStream(port: number, path: string, token: string): { firstData: Promise<string>; terminated: Promise<void> } {
+  let gotData!: (chunk: string) => void;
+  let done!: () => void;
+  const firstData = new Promise<string>((resolve) => (gotData = resolve));
+  const terminated = new Promise<void>((resolve) => (done = resolve));
+  const req = httpRequest({ host: "127.0.0.1", port, path, headers: { authorization: `Bearer ${token}` } }, (res) => {
+    res.setEncoding("utf8");
+    res.on("data", (chunk: string) => gotData(chunk));
+    res.on("close", () => done());
+    res.on("error", () => done());
+  });
+  req.on("error", () => done());
+  req.end();
+  return { firstData, terminated };
+}
+
+/** Terminal sessions whose output stream the test drives; `scrollback` waits on `gate`. */
+function fakeSessions() {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  let asked!: () => void;
+  const scrollbackAsked = new Promise<void>((resolve) => (asked = resolve));
+  const state = { subscribed: 0, unsubscribed: 0, release, scrollbackAsked };
+  return {
+    state,
+    sessions: {
+      get: (id: string) => ({ id, status: "running" }),
+      list: () => [],
+      scrollback: async () => {
+        asked();
+        await gate;
+        return "replay\n";
+      },
+      subscribe: () => {
+        state.subscribed += 1;
+        return () => {
+          state.unsubscribed += 1;
+        };
+      }
+    }
+  };
+}
+
+test("revoking a session ends its terminal output stream", async (t) => {
+  const terminal = fakeSessions();
+  terminal.state.release();
+  const h = await harness(undefined, { sessions: terminal.sessions });
+  t.after(() => Promise.all([h.remote.close(), h.local.close()]));
+  const { token, session } = (await login(h)).json() as AuthIssuedTokenResponse;
+  await h.remote.listen({ host: "127.0.0.1", port: 0 });
+  const port = (h.remote.server.address() as AddressInfo).port;
+
+  const stream = openStream(port, "/api/sessions/s1/output", token);
+  assert.equal(await stream.firstData, "replay\n");
+  assert.equal(terminal.state.subscribed, 1);
+  await h.store.revoke(session.id);
+  await stream.terminated;
+  assert.equal(terminal.state.unsubscribed, 1, "the PTY subscription is released");
+});
+
+test("a stream that opens after its session was revoked is cut as it opens", async (t) => {
+  const terminal = fakeSessions();
+  const h = await harness(undefined, { sessions: terminal.sessions });
+  t.after(() => Promise.all([h.remote.close(), h.local.close()]));
+  const { token, session } = (await login(h)).json() as AuthIssuedTokenResponse;
+  await h.remote.listen({ host: "127.0.0.1", port: 0 });
+  const port = (h.remote.server.address() as AddressInfo).port;
+
+  // Past the bearer hook, still capturing scrollback (before the route hijacks) when revoked.
+  const stream = openStream(port, "/api/sessions/s1/output", token);
+  await terminal.state.scrollbackAsked;
+  await h.store.revoke(session.id);
+  terminal.state.release();
+  await stream.terminated;
+  assert.equal(terminal.state.unsubscribed, terminal.state.subscribed, "nothing stays subscribed");
+});
+
+test("revoking a session ends its agent-chat event stream and the host subscription", async (t) => {
+  const upstream = new PassThrough();
+  let aborted = false;
+  const deps = {
+    client: {
+      open: async () => ({
+        status: 200,
+        body: upstream,
+        abort: () => {
+          aborted = true;
+          upstream.destroy();
+        }
+      })
+    },
+    isHostHealthy: () => true,
+    chatSession: (id: string) => ({ id, kind: "agent-chat" })
+  };
+  const agentChat = {
+    routeDeps: () => deps,
+    protectedPids: () => [],
+    authorizeHostRequest: () => false,
+    sessionToolThread: () => null,
+    chat: { has: () => true, get: () => undefined }
+  };
+  const h = await harness(undefined, { agentChat });
+  t.after(() => Promise.all([h.remote.close(), h.local.close()]));
+  const { token, session } = (await login(h)).json() as AuthIssuedTokenResponse;
+  await h.remote.listen({ host: "127.0.0.1", port: 0 });
+  const port = (h.remote.server.address() as AddressInfo).port;
+
+  const stream = openStream(port, agentChatRoutes.events("t1"), token);
+  upstream.write(`${JSON.stringify({ kind: "synchronized", hostInstanceId: "h1" })}\n`);
+  assert.match(await stream.firstData, /synchronized/);
+  await h.store.revoke(session.id);
+  await stream.terminated;
+  assert.equal(aborted, true, "the host subscription is cancelled too");
+});
+
+test("a login whose password changed while it was checked mints nothing", async (t) => {
+  const h = await harness();
+  t.after(() => Promise.all([h.remote.close(), h.local.close()]));
+  // The change already reached the sessions (they are bound to the new hash) while this login
+  // checked the old one.
+  await h.store.syncPassword(bcrypt.hashSync("the new password", 4));
+  const res = await login(h);
+  assert.equal(res.statusCode, 401);
+  assert.equal(res.json().code, "INVALID_CREDENTIALS");
+  assert.deepEqual(h.store.list(null), []);
 });
 
 test("logout, list, revoke one and revoke-others", async (t) => {

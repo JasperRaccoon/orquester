@@ -80,7 +80,8 @@ export interface DesktopBridge {
   httpStreamOpen(streamId: string, url: string, headers?: Record<string, string>): void;
   httpStreamClose(streamId: string): void;
   onHttpStreamData(cb: (payload: { streamId: string; chunk: string }) => void): () => void;
-  onHttpStreamEnd(cb: (payload: { streamId: string }) => void): () => void;
+  /** `status`: the error status the daemon answered instead of a stream, if it did. */
+  onHttpStreamEnd(cb: (payload: { streamId: string; status?: unknown }) => void): () => void;
 }
 
 /**

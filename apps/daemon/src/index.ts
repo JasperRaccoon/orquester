@@ -2088,6 +2088,32 @@ export function createServer(
     return true;
   };
 
+  /**
+   * Tie a gated request's response to its session: revoking the session destroys a response that
+   * is already streaming (a hijacked NDJSON stream — events, chat events, terminal output, MCP — or
+   * a streamed download). One still being computed is left to finish (a logout's own reply), but if
+   * it hijacks afterwards — a stream that opens after a wait — it is destroyed then. Every route
+   * behind the bearer hook gets this, so no streaming route has to remember to register itself.
+   */
+  const endOnRevoke = (sessionId: string, reply: FastifyReply): void => {
+    let revoked = false;
+    const streaming = (): boolean => reply.sent || reply.raw.headersSent;
+    const end = (): void => {
+      if (!reply.raw.writableEnded) reply.raw.destroy();
+    };
+    const untrack = trackStream(sessionId, () => {
+      if (streaming()) end();
+      else revoked = true;
+    });
+    reply.raw.once("close", untrack);
+    const hijack = reply.hijack.bind(reply);
+    reply.hijack = () => {
+      const result = hijack();
+      if (revoked) queueMicrotask(end);
+      return result;
+    };
+  };
+
   app.decorateRequest("authSession", null);
 
   app.addHook("onRequest", async (request, reply) => {
@@ -2159,6 +2185,7 @@ export function createServer(
     }
     throttle.recordSuccess(ip);
     request.authSession = session;
+    endOnRevoke(session.id, reply);
   });
 
   // umcp:t2 begin — principals (unified MCP design 2026-10-15; `@orquester/api` principal.ts).
@@ -4965,26 +4992,15 @@ export function createServer(
       sink.send(JSON.stringify(event));
     }, 15_000);
 
-    let ended = false;
-    let untrack = (): void => undefined;
-    const cleanup = (): void => {
-      if (ended) return;
-      ended = true;
-      untrack();
+    // Revoking the session that opened this stream destroys it (the bearer hook's endOnRevoke);
+    // the close below cleans up then too.
+    request.raw.on("close", () => {
       clearInterval(timer);
       services.broadcaster.remove(sink);
       if (watchedProject) {
         services.gitWatcher.unsubscribe(watchedProject);
       }
-    };
-    // Revoking the session that opened this stream ends it (the client then meets the 401).
-    if (request.authSession) {
-      untrack = trackStream(request.authSession.id, () => {
-        cleanup();
-        reply.raw.end();
-      });
-    }
-    request.raw.on("close", cleanup);
+    });
   });
 
   // Multiplexed session I/O over a single WebSocket. The web client opens ONE

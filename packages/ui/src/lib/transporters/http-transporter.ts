@@ -121,7 +121,7 @@ export class HttpTransporter implements Transporter {
     if (this.client.stream) {
       return this.client.stream(
         { url, method: "GET", headers },
-        { onData: handlers.onData, onEnd: handlers.onEnd }
+        { onData: handlers.onData, onEnd: handlers.onEnd, onError: handlers.onError }
       );
     }
 

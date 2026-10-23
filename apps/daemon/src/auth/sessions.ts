@@ -45,6 +45,17 @@ export class AuthSessionsUnavailableError extends Error {
   }
 }
 
+/**
+ * A login checked against a password hash the device sessions are no longer bound to: the
+ * password changed while the check ran, so it must not mint a session.
+ */
+export class StalePasswordError extends Error {
+  constructor() {
+    super("The password changed while signing in. Sign in again.");
+    this.name = "StalePasswordError";
+  }
+}
+
 export interface AuthSessionStoreOptions {
   /** Absent: memory only (route tests). */
   file?: string;
@@ -226,9 +237,25 @@ export class AuthSessionStore {
   // Mint / verify
   // -------------------------------------------------------------------------
 
-  /** Mint a token. The token is returned once; only its digest is kept. */
-  async create(kind: AuthSessionKind, label: string): Promise<{ token: string; session: AuthSessionSummary }> {
+  /**
+   * Mint a token. The token is returned once; only its digest is kept. `checkedHash`: the password
+   * hash a login verified against. When the device sessions are already bound to another one (the
+   * password changed while bcrypt ran), nothing is minted ({@link StalePasswordError}); when the
+   * change is still on its way, the session is minted and that change's sync revokes it.
+   */
+  async create(
+    kind: AuthSessionKind,
+    label: string,
+    checkedHash?: string
+  ): Promise<{ token: string; session: AuthSessionSummary }> {
     if (this.readOnly) throw new AuthSessionsUnavailableError();
+    if (
+      checkedHash !== undefined &&
+      this.state.passwordFingerprint !== undefined &&
+      this.state.passwordFingerprint !== fingerprintOf(checkedHash)
+    ) {
+      throw new StalePasswordError();
+    }
     const token = `${AUTH_TOKEN_PREFIX}${randomBytes(32).toString("base64url")}`;
     const now = this.now();
     const stamp = new Date(now).toISOString();
