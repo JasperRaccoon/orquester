@@ -3,57 +3,45 @@
  * docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md): it composes the modules
  * behind `ports.ts` and owns their lifetimes.
  *
- * - **Always** (cheap, from construction or `start()`): the settings over the plugin record, the
- *   runtime tracker, chat visibility, the session-tools manifest read, the status, and the
- *   Agent Profile cache the collection views read.
- * - **While the plugin is on** (an "opening"): the store, the in-memory graph, search (BM25, the
- *   embedder, the vector cache) and the linking module. Switching the plugin off stops all of it
- *   (the embedder is released); switching it on opens it anew. With the plugin off nothing is
- *   read, indexed or loaded; the routes answer 409 `KNOWLEDGE_DISABLED`. An opening is also started
- *   by the first request or manifest that needs it, so nothing waits for `start()`.
- * - **Linking** plugs in through {@link KnowledgeService.attachLinking} (or the `linking` option):
- *   a {@link KnowledgeLinkingFactory} is called once per opening with that opening's ports, and its
- *   module is started after it and stopped before it closes. Until one is attached a placeholder
- *   answers the status (idle, or paused: plugin off / not installed) and ignores changes.
- * - **Failures never crash the daemon**: a store that cannot be opened leaves the routes answering
- *   500 `KNOWLEDGE_ERROR` (retried on the next request) and the status naming the error.
+ * - **Always** (cheap): the settings over the plugin record, the runtime tracker, chat visibility,
+ *   the session-tools manifest read, the status, and the Agent Profile cache the collection views
+ *   read.
+ * - **From the first time the plugin is on** (the "opening", kept until the daemon stops): the
+ *   store, the in-memory graph, search (BM25, the embedder, the vector cache) and linking
+ *   (`linking/service.ts`, built by the `linking` factory with the opening's store and graph; its
+ *   store changes are forwarded to it). With the plugin off since boot nothing of it is read. When
+ *   the plugin is switched off later the data routes answer 409 `KNOWLEDGE_DISABLED`, linking
+ *   pauses itself (a run in flight is cancelled), and the embedder is released: nothing indexes,
+ *   embeds or links; the entries stay in memory for the next switch-on.
+ * - **Failures never crash the daemon**: a store that cannot be opened leaves the data routes
+ *   answering 500 `KNOWLEDGE_ERROR` (retried on the next request) and the status naming the error;
+ *   a linking module that cannot be built or started leaves linking paused with the error.
  *
- * Routes ({@link KnowledgeService.registerRoutes}): settings and status always, the data routes
- * (gated on the plugin), rebuild, and — on the unix socket only — the two worker routes the
- * indexing sessions' tools reach through the daemon's in-process API.
+ * Routes ({@link KnowledgeService.registerRoutes}): settings, the data routes, and linking's status,
+ * rebuild and worker routes (`routes-linking.ts`; the worker is only ever the stamped agent principal).
  */
 
-import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { z } from "zod";
+import { EventEmitter } from "node:events";
+import type { FastifyInstance } from "fastify";
 import {
   KNOWLEDGE_CHANGED_EVENT,
   KNOWLEDGE_CHANNEL,
   KNOWLEDGE_STATUS_EVENT,
-  knowledgeRoutes,
   type KnowledgeChangedEvent,
   type KnowledgeLinkingState,
-  type KnowledgeRebuildEstimate,
   type KnowledgeStatus,
-  type KnowledgeWorkerNextResponse,
-  type KnowledgeWorkerSubmitResponse
+  type SessionOwner
 } from "@orquester/api";
-import type { CallerPrincipal } from "@orquester/api/agent-chat";
 import { knowledgeIndexDir } from "@orquester/config";
 
-import type { DaemonApi } from "../mcp/daemon-api.ts";
 import { profileKnowledgeCollections, profilesForCollection } from "../session-profiles/knowledge.ts";
 import type { SessionProfileStore } from "../session-profiles/store.ts";
 import type { ManifestKnowledge } from "../session-tools/manifest.ts";
 import { KnowledgeRuntimeTracker, type KnowledgeRuntimeTrackerOptions } from "./install/runtime.ts";
-import type {
-  KnowledgeEntryChange,
-  KnowledgeLinkingContext,
-  KnowledgeLinkingFactory,
-  KnowledgeLinkingModule,
-  KnowledgePublisher,
-  KnowledgeRuntimePort
-} from "./ports.ts";
+import type { KnowledgeLinkingService, KnowledgeLinkingSnapshot } from "./linking/service.ts";
+import type { KnowledgeRuntimePort, KnowledgeSettingsPort } from "./ports.ts";
 import { registerKnowledgeDataRoutes } from "./routes-data.ts";
+import { buildKnowledgeStatus, registerKnowledgeLinkingRoutes, type KnowledgeLinkingRouteService, type KnowledgeStatusCounts } from "./routes-linking.ts";
 import { runtimeEmbedderSource, type KnowledgeEmbedderSource } from "./search/embedder.ts";
 import { KnowledgeGraph } from "./search/graph.ts";
 import { KnowledgeSearch } from "./search/search.ts";
@@ -61,18 +49,39 @@ import { registerKnowledgeSettingsRoutes } from "./settings-routes.ts";
 import { KnowledgeSettingsService, type KnowledgeSettingsAccounts, type KnowledgeSettingsPlugins } from "./settings.ts";
 import { KnowledgeError } from "./store/errors.ts";
 import { KnowledgeStore } from "./store/store.ts";
-import { createKnowledgeForSession, KnowledgeSessionVisibility, type KnowledgeSessionRecord } from "./visibility.ts";
+import { createKnowledgeForSession, KnowledgeSessionVisibility, ownerKindOf } from "./visibility.ts";
 
 /** How long the Agent Profile read behind the collection views is reused (profile events clear it at once). */
 export const KNOWLEDGE_PROFILES_CACHE_MS = 60_000;
 
-/** A worker answer, as the route takes it (the tool's own cap, JSON-escaped). */
-const WORKER_BODY_LIMIT = 16 * 1024 * 1024;
-
 type Logger = Pick<Console, "warn" | "error">;
 
-/** An embedder source for one opening; released when it closes. */
+/** The `/events` broadcaster (`Broadcaster` satisfies it). */
+export interface KnowledgePublisher {
+  publish(channel: string, type: string, payload: unknown): void;
+}
+
+/** What the service runs of the linking module. `KnowledgeLinkingService` is it. */
+export type KnowledgeLinking = KnowledgeLinkingRouteService & Pick<KnowledgeLinkingService, "start" | "stop" | "status" | "entriesChanged" | "events">;
+
+/** Builds the linking module once, with the opening's store and graph (`KnowledgeLinkingOptions`). */
+export type KnowledgeLinkingFactory = (ports: {
+  store: KnowledgeStore;
+  graph: KnowledgeGraph;
+  runtime: KnowledgeRuntimePort;
+  settings: KnowledgeSettingsPort;
+}) => KnowledgeLinking;
+
+/** An embedder source over a runtime (the gated one: null while the plugin is off). */
 export type KnowledgeEmbedderSourceFactory = (runtime: KnowledgeRuntimePort) => KnowledgeEmbedderSource & { dispose?(): Promise<void> };
+
+/** What the daemon records about one session now. */
+export interface KnowledgeSessionInfo {
+  /** Its Agent Profile; null or absent = Global (what a chat whose profile was deleted becomes at its next start). */
+  profileId?: string | null;
+  /** `SessionSummary.owner`: a workflow's, or the plugin's own indexer chats' `{kind: "knowledge-indexer", runId}`. */
+  owner?: SessionOwner;
+}
 
 export interface KnowledgeServiceOptions {
   /** The appdir base (`paths.baseDir`); every path comes from the `packages/config` helpers. */
@@ -81,26 +90,20 @@ export interface KnowledgeServiceOptions {
   plugins: KnowledgeSettingsPlugins & KnowledgeRuntimeTrackerOptions["plugins"];
   /** `AgentAccountsService`: the indexing account is checked to be a Claude account. */
   accounts: KnowledgeSettingsAccounts;
-  /**
-   * What the daemon records about a session now: its Agent Profile (null = Global, which is what a
-   * chat whose profile was deleted becomes at its next start) and its owner's kind. Null for a
-   * session the daemon does not know (it then sees nothing).
-   */
-  session(sessionId: string): KnowledgeSessionRecord | null;
+  /** The session's record now (its tab), or null for a session the daemon does not know (it sees nothing). */
+  session(sessionId: string): KnowledgeSessionInfo | null;
   /** The Agent Profiles' store: each chat's ticked collections, and the profiles per collection. */
   profiles: Pick<SessionProfileStore, "list" | "read">;
   /** Subscribe to Agent Profile changes and deletions (by profile id); answers the unsubscribe. */
   onProfileChange?(listener: (profileId: string) => void): () => void;
   /** The `/events` broadcaster. */
   publisher: KnowledgePublisher;
-  /** The daemon's in-process API (linking starts its worker sessions through it). */
-  api?(): DaemonApi | null;
   /**
    * The knowledge tools a chat is advertised may have changed (the plugin was switched, a collection
    * was created, renamed or deleted, a profile's collections changed): push every open chat's manifest.
    */
   toolsChanged?(): void;
-  /** The linking module; also attachable later with {@link KnowledgeService.attachLinking}. */
+  /** Linking. Absent (tests of the rest): linking stays paused ("not built") and ignores changes. */
   linking?: KnowledgeLinkingFactory;
   /** Overrides the runtime tracker (tests). */
   runtime?: KnowledgeRuntimePort;
@@ -110,13 +113,13 @@ export interface KnowledgeServiceOptions {
   now?: () => Date;
 }
 
-/** One opening of the knowledge base: what runs while the plugin is on. */
+/** The knowledge base, open from the first switch-on until the daemon stops. */
 interface Opening {
   store: KnowledgeStore;
   graph: KnowledgeGraph;
   search: KnowledgeSearch;
   embedders: KnowledgeEmbedderSource & { dispose?(): Promise<void> };
-  linking: KnowledgeLinkingModule;
+  linking: KnowledgeLinking;
   unsubscribe: (() => void)[];
 }
 
@@ -124,31 +127,47 @@ type ProfilesByCollection = Map<string, { id: string; name: string }[]>;
 
 const NO_TOKENS: KnowledgeStatus["tokens"] = { week: { in: 0, out: 0 }, total: { in: 0, out: 0 } };
 
-/**
- * The linking slot before a linking module is attached, or when building one failed: it reports
- * why nothing links (plugin off, runtime not installed, the failure) or idle, and ignores changes.
- */
-class LinkingPlaceholder implements KnowledgeLinkingModule {
+/** Linking when none is built (tests) or building it failed: paused, with the reason; ignores changes. */
+class NoLinking implements KnowledgeLinking {
+  readonly events = new EventEmitter<{ status: [] }>();
+
   constructor(
-    private readonly deps: { enabled(): boolean; installed(): boolean; pending(): number },
-    private readonly failure: string | null = null
+    private readonly settings: KnowledgeSettingsPort,
+    private readonly message: string
   ) {}
 
+  async start(): Promise<void> {}
+  async stop(): Promise<void> {}
+  entriesChanged(): void {}
+
   status(): KnowledgeLinkingState {
-    const paused = (reason: "plugin-off" | "not-installed" | "error", message: string): KnowledgeLinkingState => ({
-      state: "paused",
-      reason,
-      message,
-      resumesAt: null,
-      pendingEntries: this.deps.pending()
-    });
-    if (!this.deps.enabled()) return paused("plugin-off", "The Knowledge Graph plugin is off.");
-    if (this.failure !== null) return paused("error", this.failure);
-    if (!this.deps.installed()) return paused("not-installed", "The Knowledge Graph runtime is not installed yet; entries are linked once it is.");
-    return { state: "idle" };
+    if (!this.settings.enabled()) return { state: "paused", reason: "plugin-off", message: "The Knowledge Graph plugin is off.", resumesAt: null, pendingEntries: 0 };
+    return { state: "paused", reason: "error", message: this.message, resumesAt: null, pendingEntries: 0 };
   }
 
-  entriesChanged(_change: KnowledgeEntryChange): void {}
+  snapshot(): KnowledgeLinkingSnapshot {
+    return { linking: this.status(), lastRun: null, recentRuns: [], workers: [], tokens: NO_TOKENS, lastError: null };
+  }
+
+  async rebuild(): Promise<{ queued: boolean; running: boolean }> {
+    throw new KnowledgeError("KNOWLEDGE_NOT_INSTALLED", this.message);
+  }
+
+  async rebuildEstimate(): Promise<{ entries: number; tasks: number }> {
+    return { entries: 0, tasks: 0 };
+  }
+
+  isActiveWorker(): boolean {
+    return false;
+  }
+
+  async workerNext(): Promise<{ kind: "done"; reason: "run-cancelled" }> {
+    return { kind: "done", reason: "run-cancelled" };
+  }
+
+  async workerSubmit(): Promise<{ accepted: false; error: string }> {
+    return { accepted: false, error: "No linking run is in flight; end your turn." };
+  }
 }
 
 export class KnowledgeService {
@@ -161,12 +180,11 @@ export class KnowledgeService {
   private readonly options: KnowledgeServiceOptions;
   private readonly logger: Logger;
   private readonly tracker: KnowledgeRuntimeTracker | null;
-  private linkingFactory: KnowledgeLinkingFactory | null;
+  /** The runtime as the embedder sees it: none while the plugin is off, so the model is released. */
+  private readonly embedderRuntime: KnowledgeRuntimePort;
   private opening: Opening | null = null;
-  /** The last opening, kept for a request already past `ready()` when the plugin is switched off. */
-  private lastOpening: Opening | null = null;
   private openError: { message: string; at: string } | null = null;
-  /** Openings and closings, one at a time. */
+  /** Openings (and the closing at stop), one at a time. */
   private chain: Promise<void> = Promise.resolve();
   private readonly unsubscribers: (() => void)[] = [];
   private started = false;
@@ -177,6 +195,8 @@ export class KnowledgeService {
   private toolsEnabled: boolean;
   /** The collections (id and name, in order) the chats' manifests were last pushed for. */
   private collectionsKey: string | null = null;
+  /** The graph's counts last announced (`knowledge.changed {graph: true}` when they move). */
+  private graphKey = "0/0";
   private profiles: { at: number; map: ProfilesByCollection } | null = null;
   private profilesRead: { generation: number; promise: Promise<ProfilesByCollection> } | null = null;
   /** Bumped by every profile event: a read started before it is not cached. */
@@ -186,12 +206,29 @@ export class KnowledgeService {
   constructor(options: KnowledgeServiceOptions) {
     this.options = options;
     this.logger = options.logger ?? console;
-    this.linkingFactory = options.linking ?? null;
     this.settings = new KnowledgeSettingsService({ plugins: options.plugins, accounts: options.accounts, logger: this.logger });
     this.tracker = options.runtime ? null : new KnowledgeRuntimeTracker({ baseDir: options.appdir, plugins: options.plugins, logger: this.logger });
     this.runtime = options.runtime ?? this.tracker!;
+    const runtime = this.runtime;
+    const settings = this.settings;
+    this.embedderRuntime = {
+      current: () => (settings.enabled() ? runtime.current() : null),
+      onChange: (listener) => {
+        const offRuntime = runtime.onChange(() => listener(this.embedderRuntime.current()));
+        const offSettings = settings.onChange(() => listener(this.embedderRuntime.current()));
+        return () => {
+          offRuntime();
+          offSettings();
+        };
+      }
+    };
     this.visibility = new KnowledgeSessionVisibility({
-      session: (sessionId) => options.session(sessionId),
+      session: (sessionId) => {
+        const session = options.session(sessionId);
+        if (!session) return null;
+        const ownerKind = ownerKindOf(session.owner);
+        return { profileId: session.profileId ?? null, ...(ownerKind !== undefined ? { ownerKind } : {}) };
+      },
       profileCollections: (profileId) => profileKnowledgeCollections(options.profiles, profileId),
       logger: this.logger
     });
@@ -209,9 +246,9 @@ export class KnowledgeService {
   // -------------------------------------------------------------------------
 
   /**
-   * Follow the plugin record, the runtime and the Agent Profiles (call after `PluginsService.start`).
-   * Resolves once the runtime state is settled; the knowledge base opens in the background when the
-   * plugin is on (requests wait for it). Never rejects.
+   * Follow the plugin record, the runtime and the Agent Profiles, and open the knowledge base when
+   * the plugin is on (linking then loads its graph and resumes). Call after `PluginsService.start`
+   * and once the daemon's in-process API exists (linking's worker chats use it). Never rejects.
    */
   async start(): Promise<void> {
     if (this.started || this.stopped) return;
@@ -221,57 +258,44 @@ export class KnowledgeService {
     const unsubscribeProfiles = this.options.onProfileChange?.((profileId) => this.profileChanged(profileId));
     if (unsubscribeProfiles) this.unsubscribers.push(unsubscribeProfiles);
     await this.tracker?.start().catch((error) => this.logger.warn("knowledge: the runtime state could not be read", error));
-    void this.sync();
+    await this.openIfEnabled();
   }
 
-  /** Stop following everything and close the knowledge base (linking first). Idempotent; never rejects. */
+  /** Stop following everything; linking stops first (its child is stopped, its chats left running), then search, the store, the embedder. Idempotent; never rejects. */
   stop(): Promise<void> {
     this.stopping ??= (async () => {
       this.stopped = true;
       for (const unsubscribe of this.unsubscribers.splice(0)) unsubscribe();
       this.tracker?.stop();
       this.settings.dispose();
-      await this.sync();
+      await this.enqueue(() => this.close());
       await this.profileChain;
     })();
     return this.stopping;
   }
 
-  /** Every opening, closing and profile event queued so far has been handled (tests). */
+  /** Every opening and profile event queued so far has been handled, and search is idle (tests). */
   async settled(): Promise<void> {
     await this.chain;
     await this.profileChain;
     await this.opening?.search.idle();
   }
 
-  /**
-   * Plug in the linking module. An open knowledge base swaps its placeholder for it at once; every
-   * later opening builds its own. Only one linking module can be attached.
-   */
-  attachLinking(factory: KnowledgeLinkingFactory): Promise<void> {
-    if (this.linkingFactory) throw new Error("knowledge: a linking module is already attached");
-    this.linkingFactory = factory;
-    return this.enqueue(async () => {
-      const opening = this.opening;
-      if (!opening) return;
-      opening.linking = this.buildLinking(opening);
-      await this.startLinking(opening);
-      this.publishStatus();
-    });
+  /** The linking module (null until the knowledge base opened). */
+  linking(): KnowledgeLinking | null {
+    return this.opening?.linking ?? null;
   }
 
   /** The open knowledge base, opening it first if the plugin is on. Throws the refusal the routes answer. */
   private async ready(): Promise<Opening> {
-    if (this.opening === null && !this.stopped) await this.sync();
+    if (this.opening === null) await this.openIfEnabled();
     const opening = this.opening;
     if (opening) return opening;
     if (!this.settings.enabled() || this.stopped) {
       throw new KnowledgeError("KNOWLEDGE_DISABLED", "The Knowledge Graph plugin is off. Turn it on in Settings → Plugins.");
     }
-    throw new KnowledgeError(
-      "KNOWLEDGE_ERROR",
-      `The knowledge base could not be opened (${this.openError?.message ?? "unknown error"}). See the daemon log.`
-    );
+    if (!this.started) throw new KnowledgeError("KNOWLEDGE_BUSY", "The Knowledge Graph plugin is still starting. Try again in a moment.");
+    throw new KnowledgeError("KNOWLEDGE_ERROR", `The knowledge base could not be opened (${this.openError?.message ?? "unknown error"}). See the daemon log.`);
   }
 
   private enqueue(task: () => Promise<void>): Promise<void> {
@@ -280,12 +304,9 @@ export class KnowledgeService {
     return this.chain;
   }
 
-  /** Open or close to match the plugin switch. */
-  private sync(): Promise<void> {
+  private openIfEnabled(): Promise<void> {
     return this.enqueue(async () => {
-      const wanted = !this.stopped && this.settings.enabled();
-      if (wanted && this.opening === null) await this.open();
-      else if (!wanted && this.opening !== null) await this.close();
+      if (this.started && !this.stopped && this.opening === null && this.settings.enabled()) await this.open();
     });
   }
 
@@ -302,12 +323,12 @@ export class KnowledgeService {
       return;
     }
     const graph = new KnowledgeGraph({ entries: store, logger: this.logger });
-    const embedders = (this.options.embedders ?? ((runtime) => runtimeEmbedderSource(runtime)))(this.runtime);
+    const embedders = (this.options.embedders ?? ((runtime) => runtimeEmbedderSource(runtime)))(this.embedderRuntime);
     const search = new KnowledgeSearch({ store, graph, embedders, indexDir: knowledgeIndexDir(appdir), logger: this.logger });
-    const opening: Opening = { store, graph, search, embedders, linking: this.placeholder(store), unsubscribe: [] };
     // Text indexing runs in the background; queries wait for it.
     void search.start().catch((error) => this.logger.warn("knowledge: indexing the entries failed", error));
-    opening.linking = this.buildLinking(opening);
+    const linking = this.buildLinking(store, graph);
+    const opening: Opening = { store, graph, search, embedders, linking, unsubscribe: [] };
     opening.unsubscribe.push(
       store.onChange((change) => {
         try {
@@ -318,14 +339,35 @@ export class KnowledgeService {
         this.publishStatus();
       })
     );
+    const onLinkingStatus = (): void => this.linkingMoved();
+    linking.events.on("status", onLinkingStatus);
+    opening.unsubscribe.push(() => linking.events.off("status", onLinkingStatus));
     this.opening = opening;
-    this.lastOpening = opening;
     this.openError = null;
     this.collectionsKey = collectionsKeyOf(store);
-    await this.startLinking(opening);
+    try {
+      // Loads state.json and the recorded graph, then resumes or schedules a run.
+      await linking.start();
+    } catch (error) {
+      this.logger.error("knowledge: starting linking failed", error);
+      opening.linking = new NoLinking(this.settings, `Linking could not start: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    this.linkingMoved();
     // The collection views read it; profile events then keep it current.
     void this.readProfiles().catch(() => undefined);
     this.publishStatus();
+  }
+
+  private buildLinking(store: KnowledgeStore, graph: KnowledgeGraph): KnowledgeLinking {
+    const factory = this.options.linking;
+    if (!factory) return new NoLinking(this.settings, "Graph linking is not available in this build.");
+    try {
+      return factory({ store, graph, runtime: this.runtime, settings: this.settings });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.error(`knowledge: the linking module could not be built (${message})`);
+      return new NoLinking(this.settings, `Linking could not start: ${message}`);
+    }
   }
 
   private async close(): Promise<void> {
@@ -333,104 +375,55 @@ export class KnowledgeService {
     if (!opening) return;
     this.opening = null;
     for (const unsubscribe of opening.unsubscribe.splice(0)) unsubscribe();
-    await opening.linking.stop?.().catch((error: unknown) => this.logger.warn("knowledge: stopping linking failed", error));
+    await opening.linking.stop().catch((error: unknown) => this.logger.warn("knowledge: stopping linking failed", error));
     await opening.search.stop().catch((error: unknown) => this.logger.warn("knowledge: stopping search failed", error));
     await opening.store.idle();
     await opening.embedders.dispose?.().catch((error: unknown) => this.logger.warn("knowledge: releasing the embedder failed", error));
-    this.publishStatus();
-  }
-
-  private placeholder(store: KnowledgeStore, failure: string | null = null): LinkingPlaceholder {
-    return new LinkingPlaceholder(
-      {
-        enabled: () => this.settings.enabled(),
-        installed: () => this.runtime.current() !== null,
-        pending: () => store.listMeta().filter((meta) => meta.linkState === "pending").length
-      },
-      failure
-    );
-  }
-
-  private buildLinking(opening: Opening): KnowledgeLinkingModule {
-    const factory = this.linkingFactory;
-    if (!factory) return this.placeholder(opening.store);
-    const context: KnowledgeLinkingContext = {
-      appdir: this.options.appdir,
-      store: opening.store,
-      graph: opening.graph,
-      runtime: this.runtime,
-      settings: this.settings,
-      api: () => this.options.api?.() ?? null,
-      isWorker: (sessionId) => this.visibility.isWorker(sessionId),
-      statusChanged: () => this.publishStatus(),
-      graphChanged: () => {
-        this.publishChanged({ graph: true });
-        this.publishStatus();
-      },
-      publisher: this.options.publisher,
-      logger: this.logger
-    };
-    try {
-      return factory(context);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.logger.error(`knowledge: the linking module could not be built (${message})`);
-      return this.placeholder(opening.store, `Linking could not start: ${message}`);
-    }
-  }
-
-  private async startLinking(opening: Opening): Promise<void> {
-    try {
-      await opening.linking.start?.();
-    } catch (error) {
-      this.logger.error("knowledge: starting linking failed", error);
-    }
   }
 
   // -------------------------------------------------------------------------
   // Status and events
   // -------------------------------------------------------------------------
 
-  /** The linking state, from the linking module (or why nothing links). Never throws. */
+  /** The linking state (linking's own, or why there is none yet). Never throws. */
   linkingStatus(): KnowledgeLinkingState {
+    return this.snapshot().linking;
+  }
+
+  private snapshot(): KnowledgeLinkingSnapshot {
     const opening = this.opening;
     if (opening) {
       try {
-        return opening.linking.status();
+        return opening.linking.snapshot();
       } catch (error) {
         this.logger.warn("knowledge: linking could not report its status", error);
-        return { state: "paused", reason: "error", message: "Linking could not report its status.", resumesAt: null, pendingEntries: 0 };
       }
     }
-    if (!this.settings.enabled()) return { state: "paused", reason: "plugin-off", message: "The Knowledge Graph plugin is off.", resumesAt: null, pendingEntries: 0 };
-    if (this.openError) return { state: "paused", reason: "error", message: `The knowledge base could not be opened: ${this.openError.message}`, resumesAt: null, pendingEntries: 0 };
-    return { state: "idle" };
+    const paused = (reason: "plugin-off" | "error", message: string): KnowledgeLinkingState => ({ state: "paused", reason, message, resumesAt: null, pendingEntries: 0 });
+    const linking = !this.settings.enabled()
+      ? paused("plugin-off", "The Knowledge Graph plugin is off.")
+      : this.openError
+        ? paused("error", `The knowledge base could not be opened: ${this.openError.message}`)
+        : ({ state: "idle" } as const);
+    return { linking, lastRun: null, recentRuns: [], workers: [], tokens: NO_TOKENS, lastError: this.openError };
   }
 
-  /** `GET knowledgeRoutes.status`. Counts are those of the open knowledge base (zero while the plugin is off). */
-  status(): KnowledgeStatus {
+  private counts(): KnowledgeStatusCounts {
     const opening = this.opening;
-    let report: ReturnType<NonNullable<KnowledgeLinkingModule["report"]>> | undefined;
-    try {
-      report = opening?.linking.report?.();
-    } catch (error) {
-      this.logger.warn("knowledge: linking could not report its runs", error);
-    }
-    const counts = opening?.graph.counts() ?? { nodes: 0, edges: 0 };
+    const graph = opening?.graph.counts() ?? { nodes: 0, edges: 0 };
     return {
       enabled: this.settings.enabled(),
       installed: this.runtime.current() !== null,
       entries: opening?.store.listMeta().length ?? 0,
-      concepts: counts.nodes,
-      edges: counts.edges,
-      collections: opening?.store.listCollections().length ?? 0,
-      linking: this.linkingStatus(),
-      lastRun: report?.lastRun ?? null,
-      recentRuns: report?.recentRuns ?? [],
-      workers: report?.workers ?? [],
-      tokens: report?.tokens ?? NO_TOKENS,
-      lastError: report?.lastError ?? this.openError
+      concepts: graph.nodes,
+      edges: graph.edges,
+      collections: opening?.store.listCollections().length ?? 0
     };
+  }
+
+  /** `GET knowledgeRoutes.status`. Counts are those of the knowledge base (zero before it first opened). */
+  status(): KnowledgeStatus {
+    return buildKnowledgeStatus(this.snapshot(), this.counts());
   }
 
   /** Publish `knowledge.status` once for every burst of changes in one tick. */
@@ -445,6 +438,17 @@ export class KnowledgeService {
         this.logger.warn("knowledge: publishing the status failed", error);
       }
     });
+  }
+
+  /** Linking moved: the status, and `knowledge.changed {graph: true}` when a run (re)loaded the graph. */
+  private linkingMoved(): void {
+    const counts = this.opening?.graph.counts();
+    const key = counts ? `${counts.nodes}/${counts.edges}` : this.graphKey;
+    if (key !== this.graphKey) {
+      this.graphKey = key;
+      this.publishChanged({ graph: true });
+    }
+    this.publishStatus();
   }
 
   private publishChanged(event: KnowledgeChangedEvent): void {
@@ -465,7 +469,9 @@ export class KnowledgeService {
 
   private settingsChanged(): void {
     this.publishStatus();
-    void this.sync().then(() => {
+    // Switched off: the embedder source drops its model now (its runtime reads as none).
+    if (!this.settings.enabled()) this.opening?.embedders.current();
+    void this.openIfEnabled().then(() => {
       const enabled = this.settings.enabled();
       if (enabled === this.toolsEnabled) return;
       this.toolsEnabled = enabled;
@@ -533,22 +539,22 @@ export class KnowledgeService {
   // -------------------------------------------------------------------------
 
   /**
-   * Every knowledge route on one transport: settings and status (answered with the plugin off), the
-   * data routes and rebuild (409 `KNOWLEDGE_DISABLED` while off), and with `socket` the worker
-   * routes, which only the in-process API reaches (the indexing sessions' tools). Remote HTTP gets
-   * the same bearer hook as every other `/api` route.
+   * Every knowledge route on one transport (both register them; remote HTTP behind the bearer hook
+   * like every `/api` route): settings, the data routes (409 `KNOWLEDGE_DISABLED` while off), and
+   * linking's status, rebuild and worker routes. In-chat tools reach them through the unix app's
+   * in-process client with the agent's principal, which is all the worker routes accept.
    */
-  registerRoutes(app: FastifyInstance, options: { socket: boolean }): void {
+  registerRoutes(app: FastifyInstance): void {
     const logger = this.logger;
     const service = this;
     registerKnowledgeSettingsRoutes(app, { settings: this.settings, logger });
     registerKnowledgeDataRoutes(app, {
-      // Read per request, after `ready`: the opening of the moment.
+      // Read per request, after `ready` (the opening exists then, until the daemon stops).
       get store() {
-        return (service.opening ?? service.lastOpening)!.store;
+        return service.opening!.store;
       },
       get search() {
-        return (service.opening ?? service.lastOpening)!.search;
+        return service.opening!.search;
       },
       settings: { enabled: () => this.settings.enabled() },
       ready: async () => {
@@ -565,86 +571,23 @@ export class KnowledgeService {
       profilesForCollection: () => this.profilesForCollection(),
       logger
     });
-
-    const fail = (reply: FastifyReply, error: unknown): FastifyReply => {
-      if (error instanceof KnowledgeError) return reply.code(error.status).send({ code: error.code, message: error.message });
-      logger.error(`knowledge: a request failed (${error instanceof Error ? error.message : String(error)})`);
-      return reply.code(500).send({ code: "KNOWLEDGE_ERROR", message: "The knowledge request failed." });
-    };
-    const notBuilt = (): KnowledgeError => new KnowledgeError("KNOWLEDGE_NOT_INSTALLED", "Graph linking is not available in this build.");
-    const gated = async (): Promise<Opening> => {
-      if (!this.settings.enabled()) throw new KnowledgeError("KNOWLEDGE_DISABLED", "The Knowledge Graph plugin is off. Turn it on in Settings → Plugins.");
-      return this.ready();
-    };
-
-    app.get(knowledgeRoutes.status, async (): Promise<KnowledgeStatus> => this.status());
-
-    app.get(knowledgeRoutes.rebuildEstimate, async (_request, reply): Promise<KnowledgeRebuildEstimate | FastifyReply> => {
-      try {
-        const opening = await gated();
-        if (!opening.linking.rebuildEstimate) throw notBuilt();
-        return await opening.linking.rebuildEstimate();
-      } catch (error) {
-        return fail(reply, error);
-      }
-    });
-
-    app.post(knowledgeRoutes.rebuild, async (_request, reply): Promise<KnowledgeStatus | FastifyReply> => {
-      try {
-        const opening = await gated();
-        if (!opening.linking.rebuild) throw notBuilt();
-        await opening.linking.rebuild();
-        return reply.code(202).send(this.status());
-      } catch (error) {
-        return fail(reply, error);
-      }
-    });
-
-    if (!options.socket) return;
-
-    /** The calling worker session: the agent principal's thread, else the body's `sessionId`; 403 unless it is a worker. */
-    const worker = async (request: FastifyRequest, bodySessionId: string | undefined): Promise<string> => {
-      const principal = (request as unknown as { principal?: CallerPrincipal }).principal;
-      const sessionId = principal?.kind === "agent" ? principal.threadId : bodySessionId;
-      if (!sessionId || !(await this.visibility.isWorker(sessionId))) {
-        throw new KnowledgeError("KNOWLEDGE_NOT_A_WORKER", "Only the Knowledge Graph plugin's indexing sessions take tasks.");
-      }
-      return sessionId;
-    };
-    /** No linking to work for (the plugin is off, or none is built): the worker ends its turn. */
-    const cancelled: KnowledgeWorkerNextResponse = { kind: "done", reason: "run-cancelled" };
-    const parse = <T extends z.ZodTypeAny>(schema: T, body: unknown): z.output<T> => {
-      const parsed = schema.safeParse(body ?? {});
-      if (parsed.success) return parsed.data;
-      const issue = parsed.error.issues[0];
-      throw new KnowledgeError("KNOWLEDGE_INVALID", `Invalid request — ${issue && issue.path.length > 0 ? `${issue.path.join(".")}: ` : ""}${issue?.message ?? "invalid"}.`);
-    };
-    const sessionId = z.string().min(1).max(200).optional();
-    const nextSchema = z.object({ sessionId });
-    const submitSchema = z.object({ sessionId, taskId: z.string().min(1).max(200), answer: z.string().max(2_000_000) });
-
-    app.post(knowledgeRoutes.workerNext, async (request, reply): Promise<KnowledgeWorkerNextResponse | FastifyReply> => {
-      try {
-        const body = parse(nextSchema, request.body);
-        const caller = await worker(request, body.sessionId);
-        const linking = this.opening?.linking;
-        if (!this.settings.enabled() || !linking?.workerNext) return cancelled;
-        return await linking.workerNext(caller);
-      } catch (error) {
-        return fail(reply, error);
-      }
-    });
-
-    app.post(knowledgeRoutes.workerSubmit, { bodyLimit: WORKER_BODY_LIMIT }, async (request, reply): Promise<KnowledgeWorkerSubmitResponse | FastifyReply> => {
-      try {
-        const body = parse(submitSchema, request.body);
-        const caller = await worker(request, body.sessionId);
-        const linking = this.opening?.linking;
-        if (!this.settings.enabled() || !linking?.workerSubmit) return { accepted: true, next: cancelled };
-        return await linking.workerSubmit(caller, { taskId: body.taskId, answer: body.answer });
-      } catch (error) {
-        return fail(reply, error);
-      }
+    // Linking's routes read the module of the moment (none before the knowledge base opened).
+    const current = (): KnowledgeLinkingRouteService => this.opening?.linking ?? new NoLinking(this.settings, "The knowledge base is not open.");
+    registerKnowledgeLinkingRoutes(app, {
+      linking: {
+        snapshot: () => this.snapshot(),
+        rebuild: async () => {
+          const opening = await this.ready();
+          return opening.linking.rebuild();
+        },
+        rebuildEstimate: () => current().rebuildEstimate(),
+        isActiveWorker: (owner) => current().isActiveWorker(owner),
+        workerNext: (sessionId, signal) => current().workerNext(sessionId, signal),
+        workerSubmit: (sessionId, taskId, answer, signal) => current().workerSubmit(sessionId, taskId, answer, signal)
+      },
+      counts: () => this.counts(),
+      sessionOwner: (sessionId) => this.options.session(sessionId)?.owner,
+      logger
     });
   }
 }

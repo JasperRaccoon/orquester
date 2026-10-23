@@ -4,6 +4,7 @@ import { EventEmitter } from "node:events";
 import { KNOWLEDGE_GRAPH_PLUGIN_ID, type PluginInfo, type PluginsResponse } from "@orquester/api";
 
 import type { KnowledgeRuntime, KnowledgeRuntimePort } from "./ports.ts";
+import type { KnowledgeEmbedderSource } from "./search/embedder.ts";
 import { FakeEmbedder, FakeEmbedderSource } from "./search/test-fakes.ts";
 
 /** The slice of `PluginsService` the service uses, with a switch the test flips. */
@@ -63,23 +64,38 @@ export class FakeRuntime implements KnowledgeRuntimePort {
   }
 }
 
-/** An embedder factory over fake embedders: how many were made and released. */
+/**
+ * An embedder factory over fake embedders, following the runtime it is given the way the ONNX
+ * source does: an embedder while the runtime reads as installed (one made per opening), none —
+ * the model released — while it reads as none (the service's gated runtime: the plugin is off).
+ */
 export function fakeEmbedders(): {
-  factory: () => FakeEmbedderSource & { dispose(): Promise<void> };
+  factory: (runtime: KnowledgeRuntimePort) => KnowledgeEmbedderSource & { dispose(): Promise<void> };
   made: FakeEmbedder[];
+  released: number;
   disposed: number;
 } {
   const state = {
     made: [] as FakeEmbedder[],
+    released: 0,
     disposed: 0,
-    factory: () => {
+    factory: (runtime: KnowledgeRuntimePort) => {
       const embedder = new FakeEmbedder();
       state.made.push(embedder);
-      return Object.assign(new FakeEmbedderSource(embedder), {
+      const source = new FakeEmbedderSource(embedder);
+      let live = true;
+      return {
+        current: () => {
+          const now = runtime.current() !== null;
+          if (live && !now) state.released += 1;
+          live = now;
+          return now ? source.current() : null;
+        },
+        onChange: (listener: () => void) => runtime.onChange(() => listener()),
         dispose: async () => {
           state.disposed += 1;
         }
-      });
+      };
     }
   };
   return state;

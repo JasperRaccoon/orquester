@@ -19,15 +19,9 @@ import type {
   KnowledgeEntryMeta,
   KnowledgeLinkState,
   KnowledgeLinkingState,
-  KnowledgeRebuildEstimate,
   KnowledgeSettings,
-  KnowledgeStatus,
-  KnowledgeVisibility,
-  KnowledgeWorkerNextResponse,
-  KnowledgeWorkerSubmitResponse
+  KnowledgeVisibility
 } from "@orquester/api";
-
-import type { DaemonApi } from "../mcp/daemon-api.ts";
 
 // ---------------------------------------------------------------------------
 // install/
@@ -109,68 +103,6 @@ export interface KnowledgeLinkingPort {
   status(): KnowledgeLinkingState;
   /** A store change; schedules a coalesced run when it needs linking. */
   entriesChanged(change: KnowledgeEntryChange): void;
-}
-
-/** The run history part of `KnowledgeStatus`, which only linking knows. */
-export type KnowledgeLinkingReport = Pick<KnowledgeStatus, "lastRun" | "recentRuns" | "workers" | "tokens" | "lastError">;
-
-/**
- * What `KnowledgeService` hands the linking module each time the knowledge base opens (the plugin
- * is switched on, or the daemon starts with it on). Every port is live for that opening only: the
- * module is stopped before the plugin is switched off or the daemon stops, and a later opening
- * builds a new module with new ports.
- */
-export interface KnowledgeLinkingContext {
-  /** The appdir (`packages/config` path helpers: `knowledgeMykgDir`, `knowledgeStatePath`, …). */
-  appdir: string;
-  store: KnowledgeStorePort;
-  /** Load a myKG session's output after a run (or at start, from the recorded session). */
-  graph: KnowledgeGraphPort;
-  /** The installed runtime (`mykgBin`, …), null while not installed. */
-  runtime: KnowledgeRuntimePort;
-  /** The plugin's switch and settings (account, model, concurrency). */
-  settings: KnowledgeSettingsPort;
-  /** The daemon's in-process API (worker sessions are started through it); null until it exists. */
-  api(): DaemonApi | null;
-  /** Whether a session is one of the plugin's worker sessions (`owner.kind === "knowledge-indexer"`). */
-  isWorker(sessionId: string): Promise<boolean>;
-  /** Tell the service `status()` or `report()` changed: it republishes `knowledge.status`. */
-  statusChanged(): void;
-  /** Tell the service the graph was (re)loaded: it publishes `knowledge.changed` `{ graph: true }` and the status. */
-  graphChanged(): void;
-  /** The `/events` broadcaster, for anything beyond the status and graph signals above. */
-  publisher: KnowledgePublisher;
-  logger: { warn(message: string): void; error(message: string): void };
-}
-
-/**
- * The linking module as the service runs it: the port, plus optional lifecycle and the handlers the
- * service's routes delegate to. Absent handlers answer as if linking were not built (the worker
- * routes say `done`, the rebuild routes refuse with `KNOWLEDGE_NOT_INSTALLED`).
- */
-export interface KnowledgeLinkingModule extends KnowledgeLinkingPort {
-  /** Called once after construction: resume a recorded run, load the recorded graph, … Errors are logged, never fatal. */
-  start?(): Promise<void>;
-  /** Stop timers, children and worker sessions it owns. Called once; must not throw for long (it is bounded at shutdown). */
-  stop?(): Promise<void>;
-  /** Run history for `GET /api/knowledge/status`; absent → no runs, no workers, no tokens. */
-  report?(): KnowledgeLinkingReport;
-  /** `POST knowledgeRoutes.workerNext` for a session the service checked is a worker. */
-  workerNext?(sessionId: string): Promise<KnowledgeWorkerNextResponse>;
-  /** `POST knowledgeRoutes.workerSubmit` for a session the service checked is a worker. */
-  workerSubmit?(sessionId: string, submission: { taskId: string; answer: string }): Promise<KnowledgeWorkerSubmitResponse>;
-  /** `GET knowledgeRoutes.rebuildEstimate`. */
-  rebuildEstimate?(): Promise<KnowledgeRebuildEstimate>;
-  /** `POST knowledgeRoutes.rebuild`: queue a full re-extraction (throw a `KnowledgeError` to refuse, e.g. `KNOWLEDGE_BUSY`). */
-  rebuild?(): Promise<void>;
-}
-
-/** Builds the linking module for one opening of the knowledge base (`KnowledgeService.attachLinking`). */
-export type KnowledgeLinkingFactory = (context: KnowledgeLinkingContext) => KnowledgeLinkingModule;
-
-/** The `/events` broadcaster (`Broadcaster` satisfies it). */
-export interface KnowledgePublisher {
-  publish(channel: string, type: string, payload: unknown): void;
 }
 
 // ---------------------------------------------------------------------------
