@@ -449,6 +449,38 @@ describe("KnowledgeLinkingService — runs against a fake myKG and fake worker c
     await h.service.stop();
   });
 
+  it("an update that died after myKG's ingest is re-run from the last good manifest: its edit and delete still land", async () => {
+    const h = await harness();
+    await h.service.start();
+    h.service.entriesChanged(await h.store.put(ID(1), "one"));
+    h.service.entriesChanged(await h.store.put(ID(2), "two"));
+    h.service.entriesChanged(await h.store.put(ID(3), "three"));
+    await h.clock.advance(20_000);
+    await h.until(ranOk(h, 1));
+    const session = (await readState(h)).session!;
+    const paths = mykgSessionPaths(h.mykgDir, session);
+
+    // myKG rewrites its manifest and evicts the edited and deleted entries' shards, then dies.
+    await writeFile(join(h.mykgDir, "fake-mykg.json"), JSON.stringify({ failAfterEvict: "worker gone" }));
+    h.service.entriesChanged(await h.store.put(ID(2), "two, edited"));
+    h.service.entriesChanged(await h.store.remove(ID(3)));
+    await h.clock.advance(20_000);
+    await h.until(() => lastRun(h)?.outcome === "failed");
+    assert.equal(h.store.linkStates.get(ID(2)), "failed");
+
+    // The retry (30 min later) must still see the edit and the delete.
+    await rm(join(h.mykgDir, "fake-mykg.json"));
+    await h.clock.advance(30 * 60_000);
+    await h.until(() => h.service.snapshot().recentRuns.filter((run) => run.outcome !== "running").length === 3);
+    assert.equal(lastRun(h)!.outcome, "ok", lastRun(h)!.error ?? "");
+    const nodes = (await readFile(paths.nodes, "utf8")).trim().split("\n").map((line) => JSON.parse(line) as { source_files: string[] });
+    assert.deepEqual(nodes.map((node) => node.source_files[0]).sort(), [`${ID(1)}.md`, `${ID(2)}.md`], "the edited entry is extracted again and the deleted one is gone");
+    const shard = JSON.parse(await readFile(join(paths.intermediate, "raw_extractions_shards", `${ID(2)}.md.json`), "utf8")) as { sha: string };
+    assert.equal(shard.sha, createHash("sha256").update("two, edited").digest("hex"));
+    assert.equal(h.store.linkStates.get(ID(2)), "linked");
+    await h.service.stop();
+  });
+
   it("turning the plugin off cancels the run and ends its chats; turning it on runs it again", async () => {
     const h = await harness({ workerMode: "manual" });
     await h.service.start();

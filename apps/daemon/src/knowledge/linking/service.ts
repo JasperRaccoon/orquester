@@ -20,7 +20,10 @@
  *   sooner); cancelled → back in the pending set.
  * - A daemon restart re-runs an interrupted run under the same id (a survivor child is stopped
  *   first): `--update` resumes from myKG's finished steps, cached shards and answered tasks; a
- *   full/rebuild run resumes its session. Worker chats still working are adopted.
+ *   full/rebuild run resumes its session. Worker chats still working are adopted. Every update
+ *   after one that did not succeed (interrupted, failed, cancelled) first puts back the last good
+ *   run's `file_manifest.json` (`mykg-files.ts` `guardMykgManifest`), else myKG would never see
+ *   that run's edits and deletes again.
  *
  * Schema growth policy (spec: thresholds are the builder's call). myKG's `detect-schema-drift`
  * only reports schema entries the graph no longer uses (a prune signal), not new topics, so growth
@@ -74,7 +77,7 @@ import type {
 } from "../ports.ts";
 import { InboxBroker, type InboxWatch } from "./inbox.ts";
 import { writeMykgConfig } from "./mykg-config.ts";
-import { isMykgSessionName, mykgSessionPaths, readFailedEntryIds, readMykgProgress } from "./mykg-files.ts";
+import { commitMykgManifest, guardMykgManifest, isMykgSessionName, mykgSessionPaths, readFailedEntryIds, readMykgProgress } from "./mykg-files.ts";
 import { startMykgRun, stopStaleMykg, type MykgRun, type MykgRunResult, type SpawnMykg } from "./runner.ts";
 import { LinkingStateFile } from "./state.ts";
 import { WorkerPool, type WorkerCandidate, type WorkerPoolEvent, type WorkerSessionPort } from "./workers.ts";
@@ -516,6 +519,10 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
     await mkdir(join(this.homeDir, "tmp"), { recursive: true, mode: 0o700 });
     await mkdir(this.workersDir, { recursive: true, mode: 0o700 });
     await writeMykgConfig(this.mykgDir, { concurrency: settings.concurrency, model: settings.model });
+    // An update after one that did not succeed starts from the last good run's manifest (`guardMykgManifest`).
+    if ((record.mode === "update" || record.mode === "grow-schema") && record.session && isMykgSessionName(record.session)) {
+      await guardMykgManifest(mykgSessionPaths(this.mykgDir, record.session));
+    }
 
     const broker = new InboxBroker({
       clock: this.opts.clock,
@@ -710,6 +717,7 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
         const failed = new Set(await readFailedEntryIds(paths.intermediate));
         const linked = existing.filter((id) => !failed.has(id));
         const notLinked = existing.filter((id) => failed.has(id));
+        await commitMykgManifest(paths).catch(() => undefined);
         if (linked.length > 0) await this.opts.store.setLinkState(linked, "linked");
         if (notLinked.length > 0) await this.opts.store.setLinkState(notLinked, "failed");
         const previous = state.session;
