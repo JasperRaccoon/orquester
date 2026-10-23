@@ -993,7 +993,7 @@ export class ApiClient {
   }
 
   updateKnowledgeSettings(req: UpdateKnowledgeSettingsRequest): Promise<KnowledgeSettings> {
-    return this.send("PATCH", knowledgeRoutes.settings, { body: req });
+    return this.send("PUT", knowledgeRoutes.settings, { body: req });
   }
 
   async listKnowledgeCollections(signal?: AbortSignal): Promise<KnowledgeCollectionsResponse> {
