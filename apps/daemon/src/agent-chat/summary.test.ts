@@ -126,6 +126,29 @@ test("a daemon restart NEVER pushes for state it is merely discovering", async (
   assert.deepEqual(h.pushes, [{ id: "t1", type: "needs-input" }]);
 });
 
+test("a knowledge indexer's worker chat never pushes", async (t) => {
+  const h = await harness(t);
+  h.chat.create({
+    id: "w1",
+    refId: "claude",
+    title: "Knowledge indexer",
+    projectPath: "/plugin/workers/w1",
+    cwd: "/plugin/workers/w1",
+    order: 0,
+    accountId: "acc-1",
+    home: "account",
+    owner: { kind: "knowledge-indexer", runId: "kr1" }
+  });
+  seedTab(h.chat, "t1");
+  for (const id of ["w1", "t1"]) {
+    await h.read(id, { chatSessionStatus: "ready" as const });
+    await h.read(id, { hasPendingApprovals: true });
+  }
+  assert.equal(h.chat.get("w1")?.activity?.attention, "needs-input");
+  assert.deepEqual(h.pushes.filter((p) => p.id === "w1"), [], "the worker chat never pushes");
+  assert.ok(h.pushes.some((p) => p.id === "t1" && p.type === "needs-input"), "an ordinary chat still does");
+});
+
 test("a re-adopted thread (after forget) also seeds silently", async (t) => {
   const h = await harness(t);
   seedTab(h.chat, "t1");

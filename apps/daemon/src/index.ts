@@ -4210,7 +4210,8 @@ export function createServer(
           body as CreateAgentChatRequest,
           sessions.list(body.projectPath ?? "").reduce((max, s) => Math.max(max, s.order), -1) + 1
         );
-        await markRecentProject(summary.projectPath);
+        // A knowledge indexer's worker chat runs in the plugin's own work dir: never a project.
+        if (summary.owner?.kind !== "knowledge-indexer") await markRecentProject(summary.projectPath);
         return summary;
       } catch (error) {
         const code = error instanceof ChatSessionError ? error.code : "SESSION_UNAVAILABLE";

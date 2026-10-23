@@ -132,9 +132,12 @@ export function sameLimit(state: Pick<ChatUsageLimitState, "turnId" | "noticeId"
   return state.noticeId === notice.activityId;
 }
 
-/** A workflow run drives this chat: its engine owns the failover (workflows §5.4). */
-function workflowOwned(tab: SessionSummary): boolean {
-  return tab.owner?.kind === "workflow" || tab.lineage?.workflowOwned === true;
+/**
+ * A workflow run (workflows §5.4) or the Knowledge Graph indexer drives this chat: its engine owns
+ * the failover, so the chat's own automatic resume and account switch stay out of it.
+ */
+function engineOwned(tab: SessionSummary): boolean {
+  return tab.owner?.kind === "workflow" || tab.owner?.kind === "knowledge-indexer" || tab.lineage?.workflowOwned === true;
 }
 
 function isBusy(tab: SessionSummary): boolean {
@@ -286,7 +289,7 @@ export class ChatLimitRecovery {
 
   private async applyNotice(id: string, notice: ThreadUsageLimitNotice | null): Promise<void> {
     const tab = this.opts.chat.get(id);
-    if (!tab || workflowOwned(tab)) return;
+    if (!tab || engineOwned(tab)) return;
     const current = this.opts.chat.usageLimitOf(id);
     if (notice === null) {
       // The chat spoke again (the user, a resume, a failover's continue): it is no longer limited.

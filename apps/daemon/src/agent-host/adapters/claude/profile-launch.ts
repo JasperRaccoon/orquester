@@ -72,6 +72,8 @@ export interface ClaudeProfileLaunch {
   instructions: string;
   hooks: ClaudePreparedHooks;
   disableWorkflows: boolean;
+  /** No built-in tool at all (`tools: []`): a managed profile whose chats work only through MCP tools. */
+  disableBuiltinTools?: boolean;
   /** The account's user settings minus the item keys (`claudeRuntimeSettings`). */
   carriedSettings: Doc;
   /** Installed or project-enabled plugin ids to switch off at the flag tier. */
@@ -204,6 +206,7 @@ export async function loadClaudeProfileLaunch(
     instructions,
     hooks: section.hooks,
     disableWorkflows: section.disableWorkflows,
+    ...(section.disableBuiltinTools === true ? { disableBuiltinTools: true } : {}),
     carriedSettings,
     disabledPluginIds,
     mcpServers
