@@ -156,6 +156,8 @@ import { registerSecretFilesRoutes } from "./secret-files/routes.ts";
 import { registerTodoToggleRoute } from "./todo-items.ts";
 import { PluginsService, publishPluginEvents } from "./plugins/plugins-service.ts";
 import { registerPluginRoutes } from "./plugins/routes.ts";
+import { KnowledgeService } from "./knowledge/service.ts";
+import { ownerKindOf } from "./knowledge/visibility.ts";
 // boxes: Ephemeral AI VMs — the box service (projects in boxes, the plugin's routes).
 import { isBoxLocation, sendBoxError, type BoxService } from "./boxes/service/index.ts";
 import { detectRepoInfo, remoteRepoFields } from "./repo-id";
@@ -1453,11 +1455,45 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     onChange: (threadId) => agentChat.secretRequestsChanged(threadId)
   });
   agentChat.setSecretRequests(secretRequests);
+  // Knowledge Graph plugin (spec 2026-10-23): one server-wide knowledge base for agent chats. Built
+  // here (it follows the plugin record, the chats' tabs and the Agent Profiles), started below once
+  // the transports serve; while the plugin is off nothing of it is read, indexed or loaded.
+  const knowledge = new KnowledgeService({
+    appdir: paths.baseDir,
+    plugins,
+    accounts: agentAccounts,
+    // The tab is the record of a chat's profile: a chat whose profile was deleted reads `null`
+    // (Global) once its next start fell back; its owner says whether it is an indexing session.
+    session: (sessionId) => {
+      const tab = agentChat.chat.get(sessionId);
+      return tab ? { profileId: tab.profileId ?? null, ownerKind: ownerKindOf(tab.owner) } : null;
+    },
+    profiles: sessionProfileStore,
+    onProfileChange: (listener) => {
+      const onChange = ({ profileId }: { profileId: string }) => listener(profileId);
+      sessionProfiles.events.on("changed", onChange);
+      sessionProfiles.events.on("deleted", onChange);
+      return () => {
+        sessionProfiles.events.off("changed", onChange);
+        sessionProfiles.events.off("deleted", onChange);
+      };
+    },
+    publisher: broadcaster,
+    api: () => services.internalApi,
+    // `services` is read per call: the refresher is built below.
+    toolsChanged: () => {
+      void services.sessionToolsRefresher
+        ?.refresh(null)
+        .catch((error) => console.warn("session-tools: knowledge tools refresh failed", error instanceof Error ? error.message : String(error)));
+    },
+    logger: console
+  });
   const services: Services = {
     secretRequests,
     registry, sessions, grokDeviceLink, codexDeviceLink, claudeOAuthLink, accounts, git, gitWatcher, todos, recentProjects, savedPrompts, repoIdentities, githubLinks, usage, usageTokens, chatThreadUsage, subagentCacheTtl, push, broadcaster, agentAccounts, browsers, urlWatcher, agentChat,
     plugins,
     secretFiles,
+    knowledge,
     desktops, desktopAudio,
     agentProfile,
     sessionProfiles,
@@ -1541,6 +1577,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     catalog: () => catalogFor("chat"),
     // boxes: the box tools are advertised only while a box can be rented.
     boxesAvailable: () => temporaryBoxTools.available(),
+    // Knowledge Graph: the plugin's view of each chat (on or off, worker or not, what it sees).
+    knowledgeForSession: (threadId) => knowledge.knowledgeForSession(threadId),
     api: () => services.internalApi,
     pushToHost: async (id, manifest): Promise<SessionToolsRefreshResponse | null> => {
       const route = agentChat.routeDeps();
@@ -1707,6 +1745,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   agentProfile.start();
   // Secret files: follows the plugin; while on, watches clones and runs its first reconcile in the background.
   await secretFiles.start().catch((error) => console.error("Secret files start failed", error instanceof Error ? error.name : error));
+  // Knowledge Graph: follows the plugin (after `plugins.start()` above); while on, its knowledge base
+  // opens in the background (a request or manifest that needs it first opens it itself).
+  await knowledge.start().catch((error) => console.error("Knowledge Graph start failed", error instanceof Error ? error.message : error));
 
   const stop = async () => {
     usage.stop();
@@ -1717,6 +1758,10 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // Both are fast; the 3 s backstop in cli.ts bounds them regardless.
     await workflowDaemon.stop().catch((error) => console.error("Workflow engine stop failed", error));
     await Promise.all([workflows.flush(), workflowSecrets.flush(), workflowRuns.flush(), workflowState.flush()]);
+    // Knowledge Graph: linking (its child and worker sessions), search and the embedder stop, and the
+    // store's queued writes land. Started here, before the plugins and the agent host stop; awaited
+    // last, bounded, with the secret files below.
+    const knowledgeStopped = knowledge.stop().catch((error) => console.error("Knowledge Graph stop failed", error instanceof Error ? error.message : error));
     // Plugins: the hourly timer, and a running download or smoke test cancelled (its staging dir is
     // emptied at the next start); queued plugins.json writes land.
     await plugins.stop().catch((error) => console.error("Plugins stop failed", error));
@@ -1771,10 +1816,11 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     unixServer.server.closeAllConnections?.();
     await unixClosed.catch(() => undefined);
     await agentProfileStopped;
-    // Last, and bounded: a secret-files vault write in flight lands, a stuck one never holds the exit.
+    // Last, and bounded: a secret-files vault write in flight lands, a stuck one never holds the exit;
+    // the same for the knowledge base's last writes.
     let secretFilesBound: ReturnType<typeof setTimeout> | undefined;
     await Promise.race([
-      secretFilesIdle,
+      Promise.all([secretFilesIdle, knowledgeStopped]),
       new Promise<void>((resolve) => {
         secretFilesBound = setTimeout(resolve, 1000);
         secretFilesBound.unref?.();
@@ -1848,6 +1894,8 @@ interface Services {
   plugins: PluginsService;
   /** The "Secret files" plugin's vaults and sync engine: ONE instance both transports share. Optional: route tests build a partial `services`. */
   secretFiles?: SecretFilesService;
+  /** The Knowledge Graph plugin: ONE instance both transports share. Optional: route tests build a partial `services`. */
+  knowledge?: KnowledgeService;
   // boxes: the Ephemeral AI VMs box service (spec 2026-10-19). Optional: route tests build a partial `services`.
   boxes?: BoxService;
   /** Each agent CLI's own global config (agent profile spec §4): Settings → Agent config. */
@@ -4661,6 +4709,11 @@ export function createServer(
   // enabling downloads and runs a verified binary, which is no more than a remote user can do
   // already (installing agent CLIs, running shells), and nothing here is secret.
   registerPluginRoutes(app, { plugins: services.plugins });
+  // Knowledge Graph (its spec, "Agent tools", "Settings → Plugins entry"): settings, status, the data
+  // routes and rebuild on both transports (the bearer hook gates HTTP; in-chat tools reach them
+  // through the unix app's in-process client with the agent's principal). The two worker routes are
+  // SOCKET-ONLY: only the indexing sessions' tools, through that client, call them.
+  services.knowledge?.registerRoutes(app, { socket: options.mode === "local" });
   // boxes: the Ephemeral AI VMs routes (boxRoutes), on both transports like the plugin routes above.
   services.boxes?.registerRoutes(app);
 
