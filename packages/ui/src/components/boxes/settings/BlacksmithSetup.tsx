@@ -27,6 +27,7 @@ import {
   blacksmithAccounts,
   blacksmithBusy,
   blacksmithCanPickOrg,
+  blacksmithCanRetry,
   blacksmithCanTest,
   blacksmithOrgs,
   blacksmithStatus,
@@ -233,7 +234,13 @@ const BlacksmithChecklist: React.FC<{ setup: BlacksmithSetupResponse | null }> =
           </span>
         ) : null;
       case "repo":
-        return setup.repo ? <span className="font-mono text-[11px] text-neutral-400">{setup.repo}</span> : null;
+        return blacksmithCanRetry(step) ? (
+          <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => save({})}>
+            {busy === "save" ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />} Retry
+          </Button>
+        ) : setup.repo ? (
+          <span className="font-mono text-[11px] text-neutral-400">{setup.repo}</span>
+        ) : null;
       case "test":
         return step.state === "running" ? (
           <span className="text-neutral-500">Starting a box, waiting for it to connect, destroying it (about 2 minutes)…</span>

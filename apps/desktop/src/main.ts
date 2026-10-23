@@ -994,8 +994,8 @@ function createWindow(replacing?: BrowserWindow): void {
     perform(windowOpenAction(url, { remoteBases }));
     return { action: "deny" };
   });
-  contents.on("will-navigate", (event, url) => {
-    const action = navigationAction(url, { currentUrl: contents.getURL(), remoteBases });
+  contents.on("will-navigate", (event) => {
+    const action = navigationAction(event.url, { currentUrl: contents.getURL(), remoteBases });
     if (action.kind === "allow") return;
     event.preventDefault();
     perform(action);

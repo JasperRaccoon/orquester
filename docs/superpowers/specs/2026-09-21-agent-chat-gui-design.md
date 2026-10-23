@@ -584,6 +584,18 @@ aborted stop clears it with the rest (goals §5.5). Before a deploy's stop, the 
 goal between its turns (`POST /goals/hold`, `goalHeldForHandover`), so the stop finds no turn
 running and the next host resumes the goal itself (goals §5.7).*
 
+*Built (2026-10-23): **crash-safe resume.** A host that stops unexpectedly (an OOM kill, a crash,
+its tmux session killed) writes no marker, but `meta.json` — rewritten on every session
+transition — still reads running, and that head is the in-flight record: the reconcile resumes the
+turn under the same opt-in, cursor and closed-tab rules, unless a newer turn follows it in the log
+(the user's message wins). Unlike a deploy's handover (an unprepared marker naming the turn), such
+a resume writes a `runtime.warning` row ("Resumed after the agent host stopped unexpectedly") and
+is counted — `crashAttempt` on the prepared marker, `crashResumedTurn` on the head while the
+resumed turn runs, cleared when it ends, a new turn starts or the session is ended — so a turn
+that keeps taking the host down is resumed at most twice in a row and then settled
+(`MAX_CRASH_RESUME_ATTEMPTS`, `CRASH_RESUME_LIMIT_MESSAGE`). Background work the dead process ran
+is closed as before and named in one `runtime.warning` row.*
+
 **Archived and deleted threads are settled, never continued.** A thread the user closed or
 deleted while a turn was running is settled as an error on the next boot; resuming it would
 restart a provider process and spend tokens for a tab nobody is looking at.

@@ -281,6 +281,18 @@ export const TabStrip: React.FC = () => {
             )}
           >
             <span className="text-neutral-500">{icon}</span>
+            {tab.type === "desktop" && tab.desktop.box ? (
+              // boxes: this desktop runs in the project's VM.
+              <span
+                title={tab.desktop.box.connected ? "Runs in the project's VM" : "Runs in the project's VM — not connected right now"}
+                className={cn(
+                  "rounded px-1 text-[9px] font-medium leading-4",
+                  tab.desktop.box.connected ? "bg-neutral-700/70 text-neutral-300" : "bg-warn-soft/40 text-warn"
+                )}
+              >
+                VM
+              </span>
+            ) : null}
             {tab.type === "agent-chat" ? <TabLineageMark session={session} /> : null}
             {tab.type === "agent-chat" ? <TabUnreadMark sessionId={tab.id} /> : null}
             {editing ? (

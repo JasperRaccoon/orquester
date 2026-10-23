@@ -7,6 +7,7 @@
 
 import type { BoxConnectionMode, BoxConnectionSettings, SetBoxConnectionRequest } from "@orquester/api";
 
+import { boxesErrorText } from "../../../lib/boxes/errors";
 import type { Tone } from "../../settings/primitives";
 
 export type TailscaleCredentialKind = "api-token" | "oauth";
@@ -19,6 +20,9 @@ export interface ConnectionDraft {
   apiToken: string;
   oauthClientId: string;
   oauthClientSecret: string;
+  /** The Tailscale federated identity macOS runners join the tailnet with (not secret). */
+  workloadClientId: string;
+  workloadAudience: string;
 }
 
 export function connectionDraft(settings: BoxConnectionSettings | null): ConnectionDraft {
@@ -29,7 +33,9 @@ export function connectionDraft(settings: BoxConnectionSettings | null): Connect
     credentialKind: "api-token",
     apiToken: "",
     oauthClientId: "",
-    oauthClientSecret: ""
+    oauthClientSecret: "",
+    workloadClientId: settings?.tailscale.workloadIdentity?.clientId ?? "",
+    workloadAudience: settings?.tailscale.workloadIdentity?.audience ?? ""
   };
 }
 
@@ -53,13 +59,25 @@ export function httpsUrlProblem(value: string, what: string): string | null {
 export function connectionProblems(
   draft: ConnectionDraft,
   settings: BoxConnectionSettings | null
-): Partial<Record<"publicUrl" | "daemonUrl" | "apiToken" | "oauthClientId" | "oauthClientSecret", string>> {
+): Partial<Record<"publicUrl" | "daemonUrl" | "apiToken" | "oauthClientId" | "oauthClientSecret" | "workloadClientId" | "workloadAudience", string>> {
   const problems: ReturnType<typeof connectionProblems> = {};
   if (draft.mode === "public-url") {
     const problem = httpsUrlProblem(draft.publicUrl, "public URL");
     if (problem) problems.publicUrl = problem;
     return problems;
   }
+  // Tailscale mode: the public URL is optional (macOS boxes dial it when set).
+  if (draft.publicUrl.trim()) {
+    const problem = httpsUrlProblem(draft.publicUrl, "public URL");
+    if (problem) problems.publicUrl = problem;
+  }
+  const workloadId = draft.workloadClientId.trim();
+  const workloadAudience = draft.workloadAudience.trim();
+  const workloadValue = /^[A-Za-z0-9._:/-]{1,200}$/;
+  if (workloadId && !workloadValue.test(workloadId)) problems.workloadClientId = "Letters, digits and . _ : / - only.";
+  else if (!workloadId && workloadAudience) problems.workloadClientId = "Enter the client ID too.";
+  if (workloadAudience && !workloadValue.test(workloadAudience)) problems.workloadAudience = "Letters, digits and . _ : / - only.";
+  else if (workloadId && !workloadAudience) problems.workloadAudience = "Enter the audience too.";
   const daemonUrl = httpsUrlProblem(draft.daemonUrl, "tailnet address");
   if (daemonUrl) problems.daemonUrl = daemonUrl;
   const stored = settings?.tailscale.configured ?? false;
@@ -96,6 +114,15 @@ export function connectionRequest(
   } else {
     const daemonUrl = draft.daemonUrl.trim();
     if (daemonUrl !== (settings?.tailscale.daemonUrl ?? "")) req.tailscaleDaemonUrl = daemonUrl;
+    const publicUrl = draft.publicUrl.trim();
+    if (publicUrl !== (settings?.publicUrl ?? "")) req.publicUrl = publicUrl || null;
+    const workloadId = draft.workloadClientId.trim();
+    const workloadAudience = draft.workloadAudience.trim();
+    const identity = settings?.tailscale.workloadIdentity ?? null;
+    if (workloadId !== (identity?.clientId ?? "") || workloadAudience !== (identity?.audience ?? "")) {
+      req.tailscaleWorkloadClientId = workloadId || null;
+      req.tailscaleWorkloadAudience = workloadAudience || null;
+    }
     if (draft.credentialKind === "api-token") {
       const token = draft.apiToken.trim();
       if (token) req.tailscaleApiToken = token;
@@ -121,4 +148,48 @@ export function reachabilityView(settings: BoxConnectionSettings | null): { tone
     default:
       return { tone: "neutral", label: "Not checked", title: null };
   }
+}
+
+/** Tailscale on the daemon's machine, as the Tailscale mode shows it. */
+export interface TailscaleLocalView {
+  /** The status line; null when the daemon does not report it (older daemons). */
+  status: string | null;
+  tone: Tone;
+  /** Offer "Use <url>": the address Tailscale serves (or would serve) Orquester at, when the field holds another. */
+  suggestion: string | null;
+  /** Offer "Set up for me": Tailscale runs here but does not serve Orquester yet. */
+  canSetUp: boolean;
+}
+
+function sameUrl(a: string, b: string): boolean {
+  const trim = (value: string) => value.trim().replace(/\/+$/, "");
+  try {
+    return new URL(trim(a)).href === new URL(trim(b)).href;
+  } catch {
+    return trim(a) === trim(b);
+  }
+}
+
+export function tailscaleLocalView(settings: BoxConnectionSettings | null, daemonUrl: string): TailscaleLocalView {
+  const local = settings?.tailscale.local;
+  if (!local) return { status: null, tone: "neutral", suggestion: null, canSetUp: false };
+  if (!local.installed) return { status: "Tailscale isn't installed on this machine.", tone: "warn", suggestion: null, canSetUp: false };
+  if (!local.running) return { status: "Tailscale isn't running on this machine.", tone: "warn", suggestion: null, canSetUp: false };
+  const name = local.dnsName ?? local.tailnetIp ?? "this machine";
+  const suggestion = local.suggestedUrl && !sameUrl(local.suggestedUrl, daemonUrl) ? local.suggestedUrl : null;
+  if (local.serving) {
+    return { status: `Tailscale on this machine: ${name} · serving Orquester on :${local.servePort}`, tone: "ok", suggestion, canSetUp: false };
+  }
+  return { status: `Tailscale on this machine: ${name} · not serving Orquester yet`, tone: "warn", suggestion, canSetUp: true };
+}
+
+/** Why "Set up for me" failed, and the commands that fix it (409 `BOX_TAILSCALE_NEEDS_PERMISSION`). */
+export function tailscaleSetupFailure(err: unknown): { message: string; commands: string[] } {
+  const body = (err as { body?: unknown } | null)?.body;
+  const record = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
+  const commands =
+    record.code === "BOX_TAILSCALE_NEEDS_PERMISSION" && Array.isArray(record.commands)
+      ? record.commands.filter((command): command is string => typeof command === "string" && command.length > 0 && command.length < 500).slice(0, 4)
+      : [];
+  return { message: boxesErrorText(err, "Tailscale could not be set up."), commands };
 }

@@ -371,12 +371,42 @@ export function boxChatChip(info: ProjectBoxInfo, now: number): { text: string; 
 export const BOX_MANAGED_ACCOUNTS_NOTE = "Box chats use managed accounts only";
 
 export interface NewTabMenuGates {
-  /** Desktops — and the IDE / file-explorer launches they carry — are not offered in a box. */
+  /** Desktops are offered: on the host, and in a Linux VM (they run inside it, its own apps offered). */
   showDesktops: boolean;
+  /** The project's desktops run in its VM: their prerequisites are the VM's. */
+  desktopsInVm: boolean;
+  /** The line shown instead when they are not offered (a macOS or Windows VM, a VM that is gone), else null. */
+  desktopsUnavailable: string | null;
 }
 
 export function newTabMenuGates(info: ProjectBoxInfo | null | undefined): NewTabMenuGates {
-  return { showDesktops: !info };
+  if (!info) return { showDesktops: true, desktopsInVm: false, desktopsUnavailable: null };
+  if (info.state === "destroyed" || info.state === "destroying") {
+    return { showDesktops: false, desktopsInVm: false, desktopsUnavailable: "Desktops — not available: the VM is gone" };
+  }
+  if (info.kind === "linux" || info.kind === "linux-gpu") {
+    return { showDesktops: true, desktopsInVm: true, desktopsUnavailable: null };
+  }
+  const os = info.kind === "macos" ? "macOS" : "Windows";
+  return { showDesktops: false, desktopsInVm: false, desktopsUnavailable: `Desktops — not available in a ${os} VM (Linux VMs only)` };
+}
+
+/**
+ * The quiet line under "New desktop…" in a VM project, from the VM's desktop
+ * status (`GET /api/desktops/host?projectPath=`): what opening one will do when
+ * packages are missing — required ones, or optional ones (sound, the compositor,
+ * a terminal, fonts), which the first desktop installs too — or what it will
+ * lack; null when nothing is missing (or not known yet).
+ */
+export function vmDesktopNote(
+  status: { available: boolean; audioAvailable?: boolean; installHint: string | null; warnings: readonly string[] } | null | "error"
+): string | null {
+  if (status === null) return null;
+  if (status === "error") return "Could not check the VM's desktop packages; they are installed when a desktop opens.";
+  if (status.installHint) return status.installHint;
+  if (!status.available) return status.warnings[0] ?? "Installs the desktop packages in the VM on first open.";
+  if (status.audioAvailable === false) return "Desktops in this VM run without sound.";
+  return null;
 }
 
 const WINDOWS_SHELLS: ReadonlySet<string> = new Set(["pwsh", "cmd"]);

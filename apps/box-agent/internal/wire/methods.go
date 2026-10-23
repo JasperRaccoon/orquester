@@ -44,6 +44,11 @@ type TCPSpec struct {
 	Port int    `json:"port"`
 }
 
+type UnixSpec struct {
+	Kind string `json:"kind"`
+	Path string `json:"path"`
+}
+
 type HostTCPSpec struct {
 	Kind    string `json:"kind"`
 	Target  string `json:"target"`
@@ -90,6 +95,7 @@ var ChannelKinds = map[string]func() any{
 	"exec":       func() any { return &ExecSpec{} },
 	"attach":     func() any { return &AttachSpec{} },
 	"tcp":        func() any { return &TCPSpec{} },
+	"unix":       func() any { return &UnixSpec{} },
 	"host-tcp":   func() any { return &HostTCPSpec{} },
 	"file-read":  func() any { return &FileReadSpec{} },
 	"file-write": func() any { return &FileWriteSpec{} },

@@ -189,6 +189,7 @@ export const channelsFixture: ByKind = {
   ],
   attach: [{ kind: "attach", procId: "proc-1", fromOffset: 0 }, { kind: "attach", procId: "proc-1", fromOffset: 4096 }],
   tcp: [{ kind: "tcp", port: 3000 }, { kind: "tcp", host: "10.0.0.2", port: 5432 }],
+  unix: [{ kind: "unix", path: "/home/dev/.orq-agent/desktops/d1/vnc.sock" }],
   "host-tcp": [{ kind: "host-tcp", target: "mcp:abc", boxPort: 40123 }],
   "file-read": [{ kind: "file-read", path: "/srv/p/a.bin" }, { kind: "file-read", path: "/srv/p/a.bin", offset: 0, length: 4096 }],
   "file-write": [

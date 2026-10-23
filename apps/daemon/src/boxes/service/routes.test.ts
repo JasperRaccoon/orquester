@@ -9,6 +9,7 @@ import type { BoxesResponse, BoxProvidersResponse, ProjectSummary } from "@orque
 import { createDefaultClientConfig, createDefaultDaemonConfig } from "@orquester/config";
 
 import { createServer } from "../../index.ts";
+import { createLocalTailscale, type CommandRunner } from "../tailscale/local.ts";
 import type { BoxService } from "./index.ts";
 import { connectProvider, FakeAdapter, testBoxService, type TestService } from "./testing.ts";
 
@@ -25,7 +26,10 @@ interface Harness extends TestService {
   inject: ReturnType<typeof createServer>["inject"];
 }
 
-async function harness(t: test.TestContext, options: { publicOrigin?: string | null; fetch?: typeof fetch } = {}): Promise<Harness> {
+async function harness(
+  t: test.TestContext,
+  options: { publicOrigin?: string | null; fetch?: typeof fetch; tailscale?: CommandRunner } = {}
+): Promise<Harness> {
   const root = await mkdtemp(join(tmpdir(), "orq-box-routes-"));
   const workspacesDir = join(root, "workspaces");
   await mkdir(join(workspacesDir, "acme"), { recursive: true });
@@ -35,7 +39,13 @@ async function harness(t: test.TestContext, options: { publicOrigin?: string | n
     adapters: [adapter],
     overrides: {
       publicOrigin: () => (options.publicOrigin === undefined ? "https://orq.example.test" : options.publicOrigin),
-      ...(options.fetch ? { fetch: options.fetch } : {})
+      ...(options.fetch ? { fetch: options.fetch } : {}),
+      ...(options.tailscale
+        ? {
+            localTailscale: createLocalTailscale({ daemonHttp: () => ({ host: "127.0.0.1", port: 47831 }), run: options.tailscale, user: () => "orq" }),
+            daemonHttp: () => ({ host: "127.0.0.1", port: 47831 })
+          }
+        : {})
     }
   });
   await test.service.start();
@@ -300,4 +310,142 @@ test("with the plugin off, live boxes are still listed and a temporary box can b
   assert.equal(res.statusCode, 200, res.body);
   assert.equal(res.json().box.state, "destroyed");
   assert.equal(h.adapter.instances.size, 0, "destroyed at the provider");
+});
+
+// ---- Tailscale on this machine: status and "Set up for me" ----------------------------------------
+
+const TS_NAME = "my-pc.tail1234.ts.net";
+const TS_STATUS = JSON.stringify({ BackendState: "Running", Self: { DNSName: `${TS_NAME}.`, TailscaleIPs: ["100.64.0.7"] } });
+const TS_SERVING = JSON.stringify({
+  TCP: { "10000": { HTTPS: true } },
+  Web: { [`${TS_NAME}:10000`]: { Handlers: { "/": { Proxy: "http://127.0.0.1:47831" } } } }
+});
+const commandFailed = (stderr: string, code: string | number = 1): Error => Object.assign(new Error(`Command failed\n${stderr}`), { code, stderr, stdout: "" });
+
+/** A fake `tailscale`/`sudo`: running, not serving until a serve command succeeds. */
+function fakeTailscale(options: { serve: "ok" | "denied"; sudo: boolean }): { run: CommandRunner; calls: string[] } {
+  const calls: string[] = [];
+  let serving = false;
+  const run: CommandRunner = async (file, args) => {
+    const line = [file, ...args].join(" ");
+    calls.push(line);
+    if (line === "tailscale status --json") return { stdout: TS_STATUS, stderr: "" };
+    if (line === "tailscale serve status --json") return { stdout: serving ? TS_SERVING : "{}", stderr: "" };
+    if (line === "sudo -n true") {
+      if (!options.sudo) throw commandFailed("sudo: a password is required");
+      return { stdout: "", stderr: "" };
+    }
+    if (line.startsWith("tailscale serve --bg")) {
+      if (options.serve === "denied") throw commandFailed("Access denied: serve config denied");
+      serving = true;
+      return { stdout: "", stderr: "" };
+    }
+    if (line.startsWith("sudo -n tailscale serve --bg")) {
+      serving = true;
+      return { stdout: "", stderr: "" };
+    }
+    throw commandFailed(`unexpected: ${line}`);
+  };
+  return { run, calls };
+}
+
+const answers401 = (fetched: string[]) =>
+  (async (url: string | URL) => {
+    fetched.push(String(url));
+    return new Response("unauthorized", { status: 401 });
+  }) as typeof fetch;
+
+test("connection reports Tailscale on this machine; Set up for me serves the daemon and checks it", async (t) => {
+  const fetched: string[] = [];
+  const tailscale = fakeTailscale({ serve: "ok", sudo: false });
+  const h = await harness(t, { fetch: answers401(fetched), tailscale: tailscale.run });
+
+  const before = (await h.inject({ method: "GET", url: "/api/boxes/connection" })).json();
+  assert.deepEqual(before.tailscale.local, {
+    installed: true,
+    running: true,
+    dnsName: TS_NAME,
+    tailnetIp: "100.64.0.7",
+    servePort: 10000,
+    serving: false,
+    suggestedUrl: `https://${TS_NAME}:10000`,
+    serveCommand: "tailscale serve --bg --https=10000 http://127.0.0.1:47831"
+  });
+  assert.match(before.tailscale.policySnippet, /"dst": \["100\.64\.0\.7"\], "ip": \["tcp:10000"\]/);
+
+  const res = await h.inject({ method: "POST", url: "/api/boxes/connection/tailscale-serve" });
+  assert.equal(res.statusCode, 200, res.body);
+  const after = res.json();
+  assert.equal(after.mode, "tailscale");
+  assert.equal(after.tailscale.daemonUrl, `https://${TS_NAME}:10000`);
+  assert.equal(after.tailscale.tailnet, "tail1234.ts.net");
+  assert.equal(after.tailscale.local.serving, true);
+  assert.equal(after.reachable, "ok");
+  assert.deepEqual(fetched, [`https://${TS_NAME}:10000/api/boxes/agent/linux-x64`]);
+  assert.ok(tailscale.calls.includes("tailscale serve --bg --https=10000 http://127.0.0.1:47831"));
+
+  // Already serving: nothing is run again.
+  const serveCalls = () => tailscale.calls.filter((line) => line.includes("serve --bg")).length;
+  assert.equal(serveCalls(), 1);
+  assert.equal((await h.inject({ method: "POST", url: "/api/boxes/connection/tailscale-serve" })).statusCode, 200);
+  assert.equal(serveCalls(), 1);
+});
+
+test("Set up for me retries through passwordless sudo when Tailscale refuses the daemon's user", async (t) => {
+  const tailscale = fakeTailscale({ serve: "denied", sudo: true });
+  const h = await harness(t, { fetch: answers401([]), tailscale: tailscale.run });
+  const res = await h.inject({ method: "POST", url: "/api/boxes/connection/tailscale-serve" });
+  assert.equal(res.statusCode, 200, res.body);
+  assert.equal(res.json().tailscale.local.serving, true);
+  assert.ok(tailscale.calls.includes("sudo -n tailscale serve --bg --https=10000 http://127.0.0.1:47831"));
+});
+
+test("Set up for me without permission answers 409 with both remedies", async (t) => {
+  const tailscale = fakeTailscale({ serve: "denied", sudo: false });
+  const h = await harness(t, { fetch: answers401([]), tailscale: tailscale.run });
+  const res = await h.inject({ method: "POST", url: "/api/boxes/connection/tailscale-serve" });
+  assert.equal(res.statusCode, 409);
+  const body = res.json();
+  assert.equal(body.code, "BOX_TAILSCALE_NEEDS_PERMISSION");
+  assert.match(body.message, /sudo tailscale set --operator=orq/);
+  assert.deepEqual(body.commands, ["sudo tailscale set --operator=orq", "sudo tailscale serve --bg --https=10000 http://127.0.0.1:47831"]);
+  assert.ok(!tailscale.calls.some((line) => line.startsWith("sudo -n tailscale")), "no sudo serve without passwordless sudo");
+  // Nothing was stored.
+  assert.equal((await h.inject({ method: "GET", url: "/api/boxes/connection" })).json().tailscale.daemonUrl, null);
+});
+
+test("Set up for me refuses when Tailscale isn't installed or running", async (t) => {
+  const missing = await harness(t, {
+    tailscale: async () => {
+      throw Object.assign(new Error("spawn tailscale ENOENT"), { code: "ENOENT" });
+    }
+  });
+  const res = await missing.inject({ method: "POST", url: "/api/boxes/connection/tailscale-serve" });
+  assert.equal(res.statusCode, 409);
+  assert.equal(res.json().code, "BOX_CONNECTION_NOT_CONFIGURED");
+  assert.match(res.json().message, /Tailscale isn't installed on this machine/);
+  assert.equal((await missing.inject({ method: "GET", url: "/api/boxes/connection" })).json().tailscale.local.installed, false);
+
+  const stopped = await harness(t, { tailscale: async () => ({ stdout: JSON.stringify({ BackendState: "Stopped" }), stderr: "" }) });
+  const refused = await stopped.inject({ method: "POST", url: "/api/boxes/connection/tailscale-serve" });
+  assert.equal(refused.statusCode, 409);
+  assert.match(refused.json().message, /Tailscale isn't running on this machine/);
+});
+
+test("the Check explains a failure and, in Tailscale mode, how to fix it", async (t) => {
+  const tailscale = fakeTailscale({ serve: "ok", sudo: false });
+  const h = await harness(t, {
+    fetch: (async () => {
+      throw new TypeError("fetch failed", { cause: Object.assign(new Error("Hostname/IP does not match certificate's altnames"), { code: "ERR_TLS_CERT_ALTNAME_INVALID" }) });
+    }) as typeof fetch,
+    tailscale: tailscale.run
+  });
+  await h.inject({ method: "PUT", url: "/api/boxes/connection", payload: { mode: "tailscale", tailscaleDaemonUrl: `https://${TS_NAME}` } });
+  const checked = (await h.inject({ method: "POST", url: "/api/boxes/connection/test" })).json();
+  assert.equal(checked.reachable, "failed");
+  assert.equal(
+    checked.reachableMessage,
+    `The server at ${TS_NAME}:443 presented a certificate that isn't for ${TS_NAME} — something other than Orquester answers on that port. ` +
+      'Click "Set up for me" or run: tailscale serve --bg --https=10000 http://127.0.0.1:47831'
+  );
 });

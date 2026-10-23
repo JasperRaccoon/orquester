@@ -4,9 +4,10 @@
 
 import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
+import type { Duplex } from "node:stream";
 import type { DesktopSize, DesktopWindow, DesktopWindowAction } from "@orquester/api";
 
-import { X11Connection, X11ConnectionClosedError, X11Error, x11SocketPath } from "./x11/connection.ts";
+import { X11Connection, X11ConnectionClosedError, X11Error, X11MessageTooLargeError, x11SocketPath } from "./x11/connection.ts";
 import {
   encodeClientMessage,
   EventMask,
@@ -15,7 +16,7 @@ import {
   propertyUint32s,
   type XEvent
 } from "./x11/protocol.ts";
-import { readXauthCookie } from "./x11/xauth.ts";
+import { findMitCookie, parseXauthority, readXauthCookie } from "./x11/xauth.ts";
 import { XRES_EXTENSION_NAME } from "./x11/xres.ts";
 
 export interface DesktopWindowTrackerOptions {
@@ -25,6 +26,18 @@ export interface DesktopWindowTrackerOptions {
   xauthorityPath: string;
   /** Map a recorded app process-group id to its app id, or null. */
   appForPgid: (pgid: number) => string | null;
+  /** boxes: the display is on another machine (a VM); absent: this machine's socket, authority file and /proc. */
+  remote?: DesktopWindowTrackerRemote;
+}
+
+/** boxes: how the tracker reaches a display in a VM. */
+export interface DesktopWindowTrackerRemote {
+  /** A stream to the display's X socket there. */
+  connect(): Promise<Duplex>;
+  /** The authority file's bytes there. */
+  readAuthority(): Promise<Buffer>;
+  /** `/proc` stats there from `pid` up through its ancestors (stopping before pid 1), [] when it is gone. */
+  procChain(pid: number): Promise<ProcStat[]>;
 }
 
 export interface DesktopWindowSnapshot {
@@ -92,6 +105,17 @@ export function appForPid(pid: number, appForPgid: (pgid: number) => string | nu
   return null;
 }
 
+/** boxes: {@link appForPid} over an already-read chain of stats (the process first, then its ancestors). */
+export function appForProcChain(chain: readonly ProcStat[], appForPgid: (pgid: number) => string | null): string | null {
+  for (const stat of chain.slice(0, MAX_PROC_DEPTH)) {
+    if (stat.pgrp > 0) {
+      const app = appForPgid(stat.pgrp);
+      if (app !== null) return app;
+    }
+  }
+  return null;
+}
+
 export const formatWindowId = (id: number): string => `0x${id.toString(16)}`;
 
 export function parseWindowId(value: string): number | null {
@@ -136,6 +160,8 @@ interface TrackedWindow {
   xresPid: number | null;
   netWmPid: number | null;
   appId: string | null;
+  /** boxes: the owning process's /proc chain in the VM, read once per pid (remote displays only). */
+  chain: ProcStat[] | null;
 }
 
 interface Session {
@@ -209,6 +235,17 @@ export class DesktopWindowTracker extends EventEmitter<DesktopWindowTrackerEvent
     if (this.stopped) return;
     for (const w of this.windows.values()) w.appId = this.resolveApp(w);
     this.scheduleChange();
+    // boxes: a chain the VM could not answer (a link blip) is asked for again.
+    if (this.options.remote && [...this.windows.values()].some((w) => w.chain === null && (w.xresPid ?? w.netWmPid) !== null)) {
+      void this.enqueue(async () => {
+        for (const w of this.windows.values()) {
+          if (w.chain !== null) continue;
+          await this.loadChain(w);
+          w.appId = this.resolveApp(w);
+        }
+        this.scheduleChange();
+      }).catch(() => {});
+    }
   }
 
   /** Throws DesktopWindowNotFoundError for an unknown window id. */
@@ -243,6 +280,11 @@ export class DesktopWindowTracker extends EventEmitter<DesktopWindowTrackerEvent
 
   /** Open the X connection. Overridable so tests can reach the raw connection. */
   protected async openConnection(): Promise<X11Connection> {
+    const remote = this.options.remote;
+    if (remote) {
+      const remoteAuth = findMitCookie(parseXauthority(await remote.readAuthority()), this.options.display);
+      return X11Connection.handshake(await remote.connect(), remoteAuth);
+    }
     const auth = await readXauthCookie(this.options.xauthorityPath, this.options.display);
     return X11Connection.connect({ path: x11SocketPath(this.options.display), auth });
   }
@@ -256,7 +298,11 @@ export class DesktopWindowTracker extends EventEmitter<DesktopWindowTrackerEvent
     conn.on("event", (event) => {
       void this.enqueue(() => this.handleEvent(conn, event)).catch((error) => this.onJobError(conn, error));
     });
-    conn.on("close", () => this.onClose(conn));
+    conn.on("close", (error) => {
+      // A server that overruns the message cap is a protocol failure: said, then retried (bounded) like any loss.
+      if (error?.cause instanceof X11MessageTooLargeError && !this.stopped) this.fail(error.cause);
+      this.onClose(conn);
+    });
     try {
       await this.enqueue(() => this.initialize(conn));
     } catch (error) {
@@ -323,6 +369,7 @@ export class DesktopWindowTracker extends EventEmitter<DesktopWindowTrackerEvent
           else if (event.atom === atoms._NET_WM_STATE) w.maximized = await this.readMaximized(session, w.id);
           else if (event.atom === atoms._NET_WM_PID) {
             w.netWmPid = await this.readNetWmPid(session, w.id);
+            await this.loadChain(w);
             w.appId = this.resolveApp(w);
           } else return;
         } catch (error) {
@@ -368,7 +415,8 @@ export class DesktopWindowTracker extends EventEmitter<DesktopWindowTrackerEvent
         this.readNetWmPid(session, id),
         session.xres === null ? Promise.resolve(null) : session.conn.xresClientPid(session.xres, id)
       ]);
-      const w: TrackedWindow = { id, netWmName, wmName, wmClass, maximized, xresPid, netWmPid, appId: null };
+      const w: TrackedWindow = { id, netWmName, wmName, wmClass, maximized, xresPid, netWmPid, appId: null, chain: null };
+      await this.loadChain(w);
       w.appId = this.resolveApp(w);
       return w;
     } catch (error) {
@@ -419,7 +467,17 @@ export class DesktopWindowTracker extends EventEmitter<DesktopWindowTrackerEvent
   /** XRes gives the owning client's pid; `_NET_WM_PID` is only a fallback when it is unknown. */
   private resolveApp(w: TrackedWindow): string | null {
     const pid = w.xresPid ?? w.netWmPid;
-    return pid === null ? null : appForPid(pid, this.options.appForPgid);
+    if (pid === null) return null;
+    if (this.options.remote) return w.chain === null ? null : appForProcChain(w.chain, this.options.appForPgid);
+    return appForPid(pid, this.options.appForPgid);
+  }
+
+  /** boxes: read the owning process's chain in the VM (remote displays only; null when it cannot be read). */
+  private async loadChain(w: TrackedWindow): Promise<void> {
+    const remote = this.options.remote;
+    if (!remote) return;
+    const pid = w.xresPid ?? w.netWmPid;
+    w.chain = pid === null ? null : await remote.procChain(pid).catch(() => null);
   }
 
   private updateSize(size: DesktopSize): void {

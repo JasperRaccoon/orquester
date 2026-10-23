@@ -5,7 +5,9 @@ export class BoxError extends Error {
   constructor(
     readonly status: 400 | 404 | 409 | 500 | 502 | 503,
     readonly code: BoxErrorCode | "BOXES_UNAVAILABLE",
-    message: string
+    message: string,
+    /** Shell commands that fix the refusal, for the client to offer to copy (never a secret). */
+    readonly commands?: readonly string[]
   ) {
     super(message);
     this.name = "BoxError";

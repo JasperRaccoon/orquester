@@ -15,12 +15,22 @@ import {
   totalsLine,
   windowsImageView
 } from "./providers.logic.ts";
-import { connectionDraft, connectionProblems, connectionRequest, httpsUrlProblem, reachabilityView } from "./connection.logic.ts";
+import {
+  connectionDraft,
+  connectionProblems,
+  connectionRequest,
+  httpsUrlProblem,
+  reachabilityView,
+  tailscaleLocalView,
+  tailscaleSetupFailure
+} from "./connection.logic.ts";
+import { ApiError } from "../../../lib/api-client.ts";
 import {
   BLACKSMITH_POLL,
   blacksmithAccounts,
   blacksmithBusy,
   blacksmithCanPickOrg,
+  blacksmithCanRetry,
   blacksmithCanTest,
   blacksmithOrgs,
   blacksmithStatus,
@@ -187,6 +197,30 @@ test("Tailscale needs credentials unless they are stored, and an address", () =>
   assert.deepEqual(connectionProblems({ ...kept, apiToken: "has space" }, stored), { apiToken: "The token must not contain spaces." });
 });
 
+test("Tailscale mode also saves the public URL (macOS boxes) and the federated identity", () => {
+  const stored = { ...SETTINGS, mode: "tailscale" as const, tailscale: { ...SETTINGS.tailscale, configured: true, daemonUrl: "https://pc.tail1234.ts.net" } };
+  const draft = connectionDraft(stored);
+  assert.equal(draft.publicUrl, "https://orquester.example.com");
+  assert.equal(connectionRequest(draft, stored), null);
+  assert.deepEqual(connectionRequest({ ...draft, publicUrl: "https://mac.example.com" }, stored), { publicUrl: "https://mac.example.com" });
+  assert.deepEqual(connectionRequest({ ...draft, publicUrl: "" }, stored), { publicUrl: null }, "optional here: emptying clears it");
+  assert.deepEqual(connectionProblems({ ...draft, publicUrl: "http://plain.example.com" }, stored), { publicUrl: "The public URL must start with https://." });
+  assert.deepEqual(connectionRequest({ ...draft, workloadClientId: " id1 ", workloadAudience: "api.tailscale.com/id1" }, stored), {
+    tailscaleWorkloadClientId: "id1",
+    tailscaleWorkloadAudience: "api.tailscale.com/id1"
+  });
+  assert.deepEqual(connectionProblems({ ...draft, workloadClientId: "id1" }, stored), { workloadAudience: "Enter the audience too." });
+  assert.deepEqual(connectionProblems({ ...draft, workloadAudience: "aud" }, stored), { workloadClientId: "Enter the client ID too." });
+  assert.deepEqual(connectionProblems({ ...draft, workloadClientId: "bad id", workloadAudience: "aud" }, stored), { workloadClientId: "Letters, digits and . _ : / - only." });
+  const withIdentity = { ...stored, tailscale: { ...stored.tailscale, workloadIdentity: { clientId: "id1", audience: "aud" } } };
+  const kept = connectionDraft(withIdentity);
+  assert.deepEqual([kept.workloadClientId, kept.workloadAudience], ["id1", "aud"]);
+  assert.deepEqual(connectionRequest({ ...kept, workloadClientId: "", workloadAudience: "" }, withIdentity), {
+    tailscaleWorkloadClientId: null,
+    tailscaleWorkloadAudience: null
+  });
+});
+
 test("the reachability pill", () => {
   assert.deepEqual(reachabilityView(null), { tone: "neutral", label: "Not checked", title: null });
   assert.deepEqual(reachabilityView({ ...SETTINGS, reachable: "ok" }), { tone: "ok", label: "Reachable", title: null });
@@ -195,6 +229,67 @@ test("the reachability pill", () => {
     label: "Unreachable",
     title: "TLS handshake failed"
   });
+});
+
+const LOCAL: NonNullable<BoxConnectionSettings["tailscale"]["local"]> = {
+  installed: true,
+  running: true,
+  dnsName: "my-pc.tail1234.ts.net",
+  tailnetIp: "100.64.0.7",
+  servePort: 10000,
+  serving: false,
+  suggestedUrl: "https://my-pc.tail1234.ts.net:10000",
+  serveCommand: "tailscale serve --bg --https=10000 http://127.0.0.1:47831"
+};
+const withLocal = (local: Partial<typeof LOCAL> | undefined): BoxConnectionSettings => ({
+  ...SETTINGS,
+  mode: "tailscale",
+  tailscale: { ...SETTINGS.tailscale, ...(local ? { local: { ...LOCAL, ...local } } : {}) }
+});
+
+test("Tailscale on this machine: status line, suggested URL and Set up for me", () => {
+  // Older daemons say nothing about it.
+  assert.deepEqual(tailscaleLocalView(withLocal(undefined), ""), { status: null, tone: "neutral", suggestion: null, canSetUp: false });
+  assert.deepEqual(tailscaleLocalView(withLocal({ installed: false, running: false }), ""), {
+    status: "Tailscale isn't installed on this machine.",
+    tone: "warn",
+    suggestion: null,
+    canSetUp: false
+  });
+  assert.deepEqual(tailscaleLocalView(withLocal({ running: false }), ""), {
+    status: "Tailscale isn't running on this machine.",
+    tone: "warn",
+    suggestion: null,
+    canSetUp: false
+  });
+  assert.deepEqual(tailscaleLocalView(withLocal({}), "https://my-pc.tail1234.ts.net"), {
+    status: "Tailscale on this machine: my-pc.tail1234.ts.net · not serving Orquester yet",
+    tone: "warn",
+    suggestion: "https://my-pc.tail1234.ts.net:10000",
+    canSetUp: true
+  });
+  assert.deepEqual(tailscaleLocalView(withLocal({ serving: true }), "https://my-pc.tail1234.ts.net:10000/"), {
+    status: "Tailscale on this machine: my-pc.tail1234.ts.net · serving Orquester on :10000",
+    tone: "ok",
+    suggestion: null,
+    canSetUp: false
+  });
+  assert.equal(tailscaleLocalView(withLocal({ serving: true }), "").suggestion, "https://my-pc.tail1234.ts.net:10000");
+  assert.equal(tailscaleLocalView(withLocal({ dnsName: null, suggestedUrl: null }), "").status, "Tailscale on this machine: 100.64.0.7 · not serving Orquester yet");
+});
+
+test("a Set up for me refusal keeps the daemon's message and its commands", () => {
+  const refusal = new ApiError(409, "POST", "/api/boxes/connection/tailscale-serve", undefined, {
+    code: "BOX_TAILSCALE_NEEDS_PERMISSION",
+    message: "Tailscale doesn't let this server's user (orq) change what it serves.",
+    commands: ["sudo tailscale set --operator=orq", "sudo tailscale serve --bg --https=10000 http://127.0.0.1:47831", 42]
+  });
+  assert.deepEqual(tailscaleSetupFailure(refusal), {
+    message: "Tailscale doesn't let this server's user (orq) change what it serves.",
+    commands: ["sudo tailscale set --operator=orq", "sudo tailscale serve --bg --https=10000 http://127.0.0.1:47831"]
+  });
+  const other = new ApiError(409, "POST", "/x", undefined, { code: "BOX_CONNECTION_NOT_CONFIGURED", message: "Tailscale isn't running.", commands: ["rm -rf /"] });
+  assert.deepEqual(tailscaleSetupFailure(other), { message: "Tailscale isn't running.", commands: [] });
 });
 
 // ---------------------------------------------------------------------------
@@ -252,6 +347,15 @@ test("Blacksmith steps unlock in order", () => {
   assert.equal(blacksmithCanTest(setup(["ok", "ok", "ok", "ok", "running"])), false);
   assert.equal(blacksmithBusy(setup(["ok", "ok", "ok", "ok", "running"])), true);
   assert.equal(blacksmithBusy(null), false);
+});
+
+test("a stopped control repo step offers Retry", () => {
+  const step = (id: BlacksmithSetupStep["id"], state: BlacksmithSetupStep["state"]): BlacksmithSetupStep => ({ id, label: id, state, message: null, actionUrl: null });
+  assert.equal(blacksmithCanRetry(step("repo", "action-needed")), true);
+  assert.equal(blacksmithCanRetry(step("repo", "failed")), true);
+  assert.equal(blacksmithCanRetry(step("repo", "ok")), false);
+  assert.equal(blacksmithCanRetry(step("repo", "running")), false);
+  assert.equal(blacksmithCanRetry(step("test", "failed")), false, "the test step has its own Run again");
 });
 
 test("a running setup is re-read on a growing delay until the deadline", () => {

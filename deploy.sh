@@ -101,14 +101,14 @@ smoke_test() { # uses T_DOMAIN; a smoke failure fails the target's deploy
   SMOKE_CHROME="$chrome" node "$here/scripts/smoke-web.mjs" "https://$T_DOMAIN"
 }
 
-# remote_update <name> [KEY=VAL ...]: runs remote-update.sh; on failure names what
+# remote_update <name> <payload> [KEY=VAL ...]: runs remote-update.sh; on failure names what
 # happened from its exit code (an automatic revert to the previous release, or a
 # revert that failed too) in STEP and in a loud warning.
 remote_update() {
   local name="$1" rc=0
   shift
   STEP="remote-update"
-  run_payload "$here/deploy/lib/remote-update.sh" "$@" || rc=$?
+  run_payload "$@" || rc=$?
   case "$rc" in
     0) return 0 ;;
     3)
@@ -128,7 +128,7 @@ cmd_deploy_target() {
   s="$(sudo_word)"
   info "=== deploy $name ($T_USER@$T_HOST) ==="
   STEP="preflight";     preflight_pushed "$T_BRANCH" || return 1
-  remote_update "$name" "SUDO=$s" "BRANCH=$T_BRANCH" || return 1
+  remote_update "$name" "$here/deploy/lib/remote-update.sh" "SUDO=$s" "BRANCH=$T_BRANCH" "DOMAIN=$T_DOMAIN" || return 1
   STEP="smoke-test";    smoke_test || return 1
   ok "$name deployed"
 }
@@ -140,7 +140,7 @@ cmd_rollback() {
   build_ssh_args
   s="$(sudo_word)"
   info "=== rollback $name -> $sha ($T_USER@$T_HOST) ==="
-  remote_update "$name" "SUDO=$s" "BRANCH=$T_BRANCH" "RESET_REF=$sha" || return 1
+  remote_update "$name" "$here/deploy/lib/remote-update.sh" "SUDO=$s" "BRANCH=$T_BRANCH" "RESET_REF=$sha" "DOMAIN=$T_DOMAIN" || return 1
   STEP="smoke-test";    smoke_test || return 1
   ok "$name rolled back to $sha"
 }
@@ -173,7 +173,8 @@ if ${s:+$s }test -f \"\$cfg\"; then
   ${s:+$s }node -e \"const fs=require('fs'),f=process.argv[1],c=JSON.parse(fs.readFileSync(f,'utf8'));if(c.transports&&c.transports.http)delete c.transports.http.passwordHash;fs.writeFileSync(f,JSON.stringify(c,null,2)+'\n')\" \"\$cfg\"
 fi
 ${s:+$s }systemctl restart orquester
-curl -fsS --retry 120 --retry-delay 1 --retry-max-time 150 --retry-connrefused http://127.0.0.1:47831/health; echo
+curl -fsS --retry 600 --retry-delay 1 --retry-max-time 600 --retry-connrefused http://127.0.0.1:47831/health 2>/dev/null \
+  || curl -fsS --max-time 10 http://127.0.0.1:47831/health; echo
 after=\$(stored_hash || true)
 if [ \"\$after\" = \"\$before\" ] && [ -n \"\$after\" ]; then
   echo 'rotate-password: FAILED — the stored hash did not change, the OLD password is still valid' >&2

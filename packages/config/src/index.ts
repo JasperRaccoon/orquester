@@ -1585,9 +1585,18 @@ export const agentThreadHeadSchema = z.object({
     .object({
       turnId: z.string().min(1),
       prepared: z.boolean().optional(),
-      markedAt: z.string().optional().catch(undefined)
+      markedAt: z.string().optional().catch(undefined),
+      // Crash-safe resume: the attempt count of a prepared automatic resume. Unreadable reads
+      // as none (a first attempt), never as a head nothing can read.
+      crashAttempt: z.number().int().positive().optional().catch(undefined)
     })
     .optional(),
+  // Crash-safe resume: the continuation a host started after an unexpected stop, and how many
+  // in a row. Head-only; unreadable reads as none.
+  crashResumedTurn: z
+    .object({ turnId: z.string().min(1), attempt: z.number().int().positive() })
+    .optional()
+    .catch(undefined),
   resumeGoalAfterRestart: z.literal(true).optional().catch(undefined),
   goalHeldForHandover: z.literal(true).optional().catch(undefined),
   // Spec 2026-10-14 §6, as `thread.created` recorded it. Must be listed (zod strips unknown
@@ -2196,6 +2205,16 @@ export const desktopRecordSchema = z
     socketDir: z.string().nullable().default(null),
     /** The host was started with PulseAudio (decided at create time). */
     audio: z.boolean().optional(),
+    /**
+     * boxes: where the desktop runs when it is not this machine — a Linux box (Ephemeral AI VMs),
+     * with the desktop's directory there. Null (or absent, in records from before VM desktops): this
+     * machine. A malformed value rejects the record (kept verbatim) rather than reading it as a host desktop.
+     */
+    box: z
+      .object({ id: z.string().min(1), dir: z.string().min(1) })
+      .passthrough()
+      .nullable()
+      .default(null),
     apps: z.array(z.unknown()).catch([]).default([])
   })
   .passthrough()

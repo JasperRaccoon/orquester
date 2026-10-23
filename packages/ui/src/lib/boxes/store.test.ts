@@ -20,6 +20,7 @@ import {
   projectBoxIn,
   resetBoxes,
   saveBoxConnection,
+  setupBoxTailscaleServe,
   saveBoxProviderCredentials,
   setBoxesPluginOn,
   type BoxesApi
@@ -381,6 +382,26 @@ describe("the boxes store", () => {
     await loadBoxes(api);
     await decideBoxConfigChange(api, "c1", "approve");
     assert.equal(boxesStore.getState().configChanges?.[0].state, "approved");
+
+    // Tailscale on the daemon's machine: validated, absent when malformed.
+    const local = { installed: true, running: true, dnsName: "pc.tail1.ts.net", tailnetIp: "100.64.0.7", servePort: 10000, serving: true, suggestedUrl: "https://pc.tail1.ts.net:10000", serveCommand: "tailscale serve --bg --https=10000 http://127.0.0.1:47831" };
+    const served = fakeApi({ setupBoxTailscaleServe: async () => ({ mode: "tailscale", tailscale: { configured: true, daemonUrl: "https://pc.tail1.ts.net:10000", local }, reachable: "ok" }) });
+    const setUp = await setupBoxTailscaleServe(served.api);
+    assert.deepEqual(setUp.tailscale.local, local);
+    assert.equal(boxesStore.getState().connection?.tailscale.daemonUrl, "https://pc.tail1.ts.net:10000");
+    const odd = fakeApi({ setBoxConnection: async () => ({ mode: "tailscale", tailscale: { local: { installed: "yes" } } }) });
+    assert.equal((await saveBoxConnection(odd.api, {})).tailscale.local, undefined);
+    const partial = fakeApi({ setBoxConnection: async () => ({ mode: "tailscale", tailscale: { local: { installed: true, servePort: -1, suggestedUrl: "javascript:x" } } }) });
+    assert.deepEqual((await saveBoxConnection(partial.api, {})).tailscale.local, {
+      installed: true,
+      running: false,
+      dnsName: null,
+      tailnetIp: null,
+      servePort: 10000,
+      serving: false,
+      suggestedUrl: null,
+      serveCommand: null
+    });
 
     const bad = fakeApi({ setBoxConnection: async () => "nope" });
     await assert.rejects(saveBoxConnection(bad.api, {}), /unexpected shape/);

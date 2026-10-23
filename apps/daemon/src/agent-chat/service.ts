@@ -444,9 +444,9 @@ export class AgentChatService {
         ...(opts.daemonSocketPath !== undefined ? { daemonSocketPath: opts.daemonSocketPath } : {})
       }),
       nodeBin: process.execPath,
-      // The daemon's own commit, read at boot; a surviving host reporting a
+      // The host code in the daemon's checkout, stamped at boot; a surviving host reporting a
       // different one is drained and replaced (see `support/code-stamp.ts`).
-      codeStamp: readCodeStamp(opts.cwd),
+      codeStamp: readCodeStamp(),
       adapters: {
         probe: () => this.probe(),
         requestStop: () => this.requestHostStop(),
@@ -2117,6 +2117,11 @@ export class AgentChatService {
         fallback: { previousProfileId: profileId, notice: deletedProfileNotice(name) }
       };
     }
+  }
+
+  /** True while a host is adopted and healthy (`PreparedDirLeases.available`). */
+  isHostHealthy(): boolean {
+    return this.supervisor.isHealthy();
   }
 
   /**

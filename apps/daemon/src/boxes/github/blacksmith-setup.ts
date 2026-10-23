@@ -112,7 +112,7 @@ export function createBlacksmithSetupDriver(options: BlacksmithSetupDriverOption
       return { ok: true, message: `The Blacksmith GitHub App is installed on ${org}.` };
     },
 
-    async ensureControlRepo(token, org, { daemonUrl, signal }) {
+    async ensureControlRepo(token, org, { daemonUrl, tailscale, signal }) {
       // The workflow takes the daemon URL as a dispatch input and requests its OIDC token with
       // the URL's origin as audience; its input check accepts https URLs only.
       const audience = githubOidcAudience(daemonUrl);
@@ -121,7 +121,8 @@ export function createBlacksmithSetupDriver(options: BlacksmithSetupDriverOption
       }
       const github = call(token, signal);
       const repo = await ensureControlRepo(org, github);
-      await ensureWorkflowFile(repo, BLACKSMITH_WORKFLOW_PATH, blacksmithWorkflowTemplate(), github);
+      // Over the tailnet, each run joins it first with the federated identity (no secret in the repo).
+      await ensureWorkflowFile(repo, BLACKSMITH_WORKFLOW_PATH, blacksmithWorkflowTemplate(tailscale ? { tailscale } : {}), github);
       await waitWorkflowReady(repo.repository, BLACKSMITH_WORKFLOW_FILE, github);
       return { repo: repo.repository, workflowFile: BLACKSMITH_WORKFLOW_FILE };
     },

@@ -253,6 +253,9 @@ const ProviderForm: React.FC<{ provider: BoxProviderInfo; onDone: () => void }> 
                 <input
                   {...common}
                   type={field.secret ? "password" : "text"}
+                  // Chrome ignores "off" on a password field and would fill a saved
+                  // login's username into the plugin search above.
+                  autoComplete={field.secret ? "new-password" : "off"}
                   // Keeps password managers from offering to save a provider key as a login.
                   data-1p-ignore
                   data-lpignore="true"

@@ -69,6 +69,34 @@ function expectDesktopOk<T>(res: DaemonResponse): T {
   return res.body as T;
 }
 
+/** Box errors of a project whose VM cannot be asked right now (boxes/remote/fs/errors.ts). */
+const VM_AWAY_CODES = new Set(["BOX_NOT_READY", "BOX_DESTROYED", "DESKTOP_BOX_UNREACHABLE"]);
+
+/**
+ * The desktop prerequisites where `projectPath`'s desktops run (the host's without one).
+ * boxes: a VM project whose VM is offline answers a status saying so, not an error, so
+ * the rest of the result (the desktops) still comes back.
+ */
+async function hostStatusOf(api: DaemonApi, projectPath: string | null): Promise<DesktopHostStatus> {
+  const res = await api.request("GET", desktopRoutes.host, projectPath ? { query: { projectPath } } : undefined);
+  const code = (res.body as { code?: unknown } | null)?.code;
+  if (res.status >= 400 && typeof code === "string" && VM_AWAY_CODES.has(code)) {
+    const message = (res.body as { message?: unknown }).message;
+    return {
+      available: false,
+      audioAvailable: false,
+      tools: [],
+      ffmpegPulse: false,
+      ffmpegOpus: false,
+      renderNode: false,
+      tmuxUsable: false,
+      warnings: [typeof message === "string" && message ? message : "The project's VM is not connected right now."],
+      installHint: null
+    };
+  }
+  return expectDesktopOk<DesktopHostStatus>(res);
+}
+
 /** The last characters of `text` whose JSON size fits `budget` bytes, never splitting a character. */
 function tailJsonBytes(text: string, budget: number): { text: string; truncated: boolean } {
   if (jsonBytes(text) <= budget) return { text, truncated: false };
@@ -128,7 +156,7 @@ const getDesktops = defineTool({
   name: "get_desktops",
   title: "Get desktops",
   description:
-    "Desktop tabs: virtual X displays on the daemon's host running GUI apps, shown to the user live. No desktopId: a project's desktops (id, title, status, size, audio, apps, open windows). desktopId: that one. desktopId + appId: the app's last 64 KiB of stdout/stderr (truncated: true when cut). host: true adds whether this host can run desktops (tools found, GPU, warnings, installHint: the apt-get line for what's missing — installing is for the host's owner; tell the user).",
+    "Desktop tabs: virtual X displays on the daemon's host (in a Linux VM project: inside its VM; such a desktop has box: {id, connected}) running GUI apps, shown to the user live. No desktopId: a project's desktops (id, title, status, size, audio, apps, open windows). desktopId: that one. desktopId + appId: the app's last 64 KiB of stdout/stderr (truncated: true when cut). host: true adds whether the desktops' machine (the project's VM for a VM project) can run desktops (tools found, GPU, warnings, installHint: the apt-get line for what's missing — installing is for the host's owner; tell the user).",
   externalNote: "Without project: every project's desktops.",
   input: {
     project: z.string().min(1).optional().describe("\"<workspace>/<project>\" or a path."),
@@ -158,7 +186,14 @@ const getDesktops = defineTool({
   resultKind: "json",
   async run(args, ctx) {
     const { api } = ctx;
-    const host = args.host === true ? { host: expectDesktopOk<DesktopHostStatus>(await api.request("GET", desktopRoutes.host)) } : {};
+    // boxes: with a project (or a desktop), the status is that project's machine's (its VM for a box project).
+    const hostProject =
+      args.host !== true
+        ? null
+        : args.desktopId !== undefined
+          ? (await findDesktop(api, args.desktopId)).projectPath
+          : await projectOf(args.project, ctx);
+    const host = args.host === true ? { host: await hostStatusOf(api, hostProject) } : {};
     if (args.desktopId !== undefined && args.appId !== undefined) {
       const body = expectDesktopOk<unknown>(await api.request("GET", desktopRoutes.appLog(args.desktopId, args.appId)));
       // text/plain; the in-process client parses a body that happens to be JSON, so give such a log back as text.

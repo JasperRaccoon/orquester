@@ -11,7 +11,7 @@ then drive them from a desktop app, any browser, or your phone.
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.8-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Node 24](https://img.shields.io/badge/Node-24_LTS-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![pnpm](https://img.shields.io/badge/pnpm-10-F69220?logo=pnpm&logoColor=white)](https://pnpm.io/)
-[![Electron](https://img.shields.io/badge/Electron-33-47848F?logo=electron&logoColor=white)](https://www.electronjs.org/)
+[![Electron](https://img.shields.io/badge/Electron-44-47848F?logo=electron&logoColor=white)](https://www.electronjs.org/)
 [![PWA](https://img.shields.io/badge/PWA-installable-5A0FC8?logo=pwa&logoColor=white)](#-mobile--pwa)
 
 *A private, self-hosted Coder/Gitpod — local-first, agent-native.*
@@ -203,7 +203,7 @@ What you get on the box:
 - **systemd-hardened daemon** (`ProtectSystem=strict`, unprivileged user, read-only code in `/opt`) with `KillMode=process` — restarts and redeploys leave the tmux server and all your agent sessions running.
 - **Caddy** as the only public face: automatic Let's Encrypt TLS, HSTS, strict CSP, WebSocket upgrades; the daemon itself stays on loopback and `ufw` allows only 22 + 443.
 - **Post-deploy browser smoke test** that loads the deployed SPA headlessly — with clean *and* legacy localStorage fixtures — and fails the deploy on any page error.
-- **Automatic revert**: a release that does not report healthy within 150 s after its restart is rolled back to the last successful deploy (rebuilt, restarted, health-checked), and the deploy still fails loudly. The running version and commit are in the deploy output and the authenticated `GET /api/info`.
+- **Automatic revert**: a release that does not report healthy within 10 minutes after its restart is rolled back to the last successful deploy (rebuilt, restarted, health-checked), and the deploy still fails loudly. The running version and commit are in the deploy output and the authenticated `GET /api/info`.
 
 See [`deploy/`](deploy/) and `AGENTS.md` for the full reference.
 

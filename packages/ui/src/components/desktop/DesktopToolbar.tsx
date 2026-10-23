@@ -1,7 +1,7 @@
 import React, { useRef, useState } from "react";
 import {
-  AppWindow, Check, Clipboard, Copy, Info, Keyboard, LayoutGrid, Maximize2, Monitor, MoreHorizontal,
-  Plus, Power, RotateCw, Volume2, VolumeX, X
+  AppWindow, Check, Clipboard, Copy, Expand, Info, Keyboard, LayoutGrid, Maximize2, Monitor, MoreHorizontal,
+  Plus, Power, RotateCw, Shrink, Volume2, VolumeX, X
 } from "lucide-react";
 import type { DesktopSummary, DesktopWindow, DesktopWindowAction } from "@orquester/api";
 import type { DesktopAudioState } from "../../lib/desktop-audio";
@@ -389,6 +389,11 @@ export interface DesktopToolbarProps {
   remoteClipboard: string | null;
   keyboardOpen: boolean;
   onToggleKeyboard: () => void;
+  fullscreen: boolean;
+  /** Null when the browser cannot go fullscreen (iPhone Safari). */
+  onToggleFullscreen: (() => void) | null;
+  /** Keyboard Lock exists (Chromium): fullscreen sends Ctrl+W, Esc and the like to the desktop. */
+  fullscreenLocksKeys: boolean;
   onSendClipboard: (text: string) => void;
   onWindowAction: (win: DesktopWindow, action: DesktopWindowAction) => void;
   onLaunchApp: () => void;
@@ -426,6 +431,20 @@ export const DesktopToolbar: React.FC<DesktopToolbarProps> = (props) => {
         </IconButton>
       )}
       <DesktopClipboard remoteText={props.remoteClipboard} connected={props.connected} onSend={props.onSendClipboard} />
+      {props.onToggleFullscreen && (
+        <IconButton
+          label={
+            props.fullscreenLocksKeys
+              ? props.fullscreen ? "Exit fullscreen (hold Esc)" : "Fullscreen: shortcuts like Ctrl+W go to the desktop"
+              : props.fullscreen ? "Exit fullscreen (Esc)" : "Fullscreen"
+          }
+          aria-pressed={props.fullscreen}
+          onClick={props.onToggleFullscreen}
+          className={cn(props.fullscreen && "bg-neutral-800 text-neutral-100")}
+        >
+          {props.fullscreen ? <Shrink size={14} /> : <Expand size={14} />}
+        </IconButton>
+      )}
       <AdaptiveMenu
         title={desktop.title}
         align="right"

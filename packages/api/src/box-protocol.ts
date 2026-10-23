@@ -416,6 +416,8 @@ export type BoxChannelSpec =
   | { kind: "attach"; procId: string; fromOffset: number }
   /** Host → box: TCP connection to `host:port` as seen from the box (default host 127.0.0.1). */
   | { kind: "tcp"; host?: string; port: number }
+  /** Host → box: a stream connection to the Unix socket at `path` (absolute) in the box: a desktop's VNC, X11 and PulseAudio sockets. */
+  | { kind: "unix"; path: string }
   /** Box → host: a connection accepted on a `forward.listen` port, for daemon target `target`. */
   | { kind: "host-tcp"; target: string; boxPort: number }
   /** Host → box: stream a file's bytes (stream 1). */

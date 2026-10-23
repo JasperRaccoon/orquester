@@ -717,6 +717,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     keysDir: resolved.keysDir,
     home: resolved.vars.userhome,
     env,
+    daemonHttp: () => ({ host: config.transports.http.host, port: config.transports.http.port }),
     accounts,
     agentAccounts,
     plugins,
@@ -1277,7 +1278,12 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // (down, restarting, an older host), and that GC pass then removes nothing.
     // `start()` below runs before the host is adopted: its pass removes nothing, so the lifecycle
     // collects again whenever a host becomes healthy (and on its own slow periodic pass).
-    leases: { inUse: () => agentChat.profileLeases(), onAvailable: (listener) => agentChat.onHostHealthy(listener) },
+    leases: {
+      inUse: () => agentChat.profileLeases(),
+      // Before the host is adopted the boot pass skips quietly instead of warning "not running".
+      available: () => agentChat.isHostHealthy(),
+      onAvailable: (listener) => agentChat.onHostHealthy(listener)
+    },
     logger: console
   });
   // Filling profiles (spec §4.5): Import from Global through Agent config (copies; Global is never
@@ -1434,7 +1440,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     indexFile: resolved.desktopsIndexFile,
     tmux,
     hostStatus: () => desktopHost.status(),
-    audio: desktopAudio
+    audio: desktopAudio,
+    // boxes: desktops of Linux box projects run in their VM.
+    boxes: boxes.desktops
   });
   await desktops.load();
   desktops.on("created", (d) => broadcaster.publish(DESKTOP_CHANNEL, "desktop.created", d));
@@ -4521,7 +4529,12 @@ export function createServer(
   // Desktop tabs (desktop spec §7.1) — CRUD, apps and window actions; the view
   // and sound ride /ws-desktop and /ws-desktop-audio. Launch bodies may carry
   // credentials in `env`: the request logger above logs only method + URL.
-  registerDesktopHttpRoutes(app, { desktops: services.desktops, fsRoot: () => resolved.fsRoot });
+  registerDesktopHttpRoutes(app, {
+    desktops: services.desktops,
+    fsRoot: () => resolved.fsRoot,
+    // boxes: a box project's paths are checked in its VM, where its desktops run.
+    boxes: () => services.boxRegistry
+  });
 
   // Embedded-DevTools frontend assets — reverse-proxied from the tab's own
   // Chromium, which serves a prebuilt, version-matched DevTools bundle at
@@ -5139,6 +5152,8 @@ export function createServer(
     await registerDesktopWsRoutes(instance, {
       authorize: (token, socket) => authorizeSocket(token, socket),
       vncSocketPath: (id) => services.desktops.vncSocketPath(id),
+      // boxes: a VM desktop's RFB socket is reached through its box link.
+      vncStream: (id) => services.desktops.vncStream(id),
       audioSource: (id) => services.desktops.audioSource(id),
       audio: services.desktopAudio
     });

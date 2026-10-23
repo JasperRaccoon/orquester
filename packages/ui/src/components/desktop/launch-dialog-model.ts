@@ -11,6 +11,7 @@ import {
   type CreateDesktopRequest,
   type DesktopSize,
   type DesktopSuggestionsResponse,
+  type DesktopSummary,
   type LaunchAppRequest,
   type RecentLaunch
 } from "@orquester/api";
@@ -206,4 +207,19 @@ export function describeLaunchError(error: unknown): string {
     "Launch failed";
   const hint = body && typeof body.hint === "string" && body.hint.trim() ? body.hint.trim() : null;
   return hint && !message.includes(hint) ? `${message} — ${hint}` : message;
+}
+
+/**
+ * While "Start desktop" waits, what the desktop it starts is doing: a VM desktop
+ * installs its packages first, which can take minutes that would otherwise show
+ * only a spinner. The new desktop is the project's `starting` one that was not
+ * there when the dialog opened (`knownIds`); null until it reports a detail.
+ */
+export function startingDesktopDetail(
+  desktops: readonly Pick<DesktopSummary, "id" | "projectPath" | "status" | "statusDetail">[],
+  projectPath: string,
+  knownIds: ReadonlySet<string>
+): string | null {
+  const starting = desktops.find((d) => d.projectPath === projectPath && d.status === "starting" && !knownIds.has(d.id));
+  return starting?.statusDetail?.trim() || null;
 }

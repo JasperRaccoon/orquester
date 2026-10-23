@@ -20,9 +20,11 @@ import {
   RUNTIME_MODES,
   SYSTEM_ACCOUNT_ID,
   type CreateAgentChatSessionFields,
+  type DesktopHostStatus,
   type RegistryEntry
 } from "@orquester/api";
 import { CHROMIUM_FAMILY_IDS } from "@orquester/registry";
+import { browserMenuEntry } from "../browser/browser-tab.logic";
 import {
   AdaptiveMenu,
   DropdownEmpty,
@@ -57,7 +59,8 @@ import {
   boxAccountOptions,
   boxShellChoices,
   launchAccountFor,
-  newTabMenuGates
+  newTabMenuGates,
+  vmDesktopNote
 } from "../boxes/surfaces/box-surfaces.logic";
 
 /** Past conversations listed inline per agent before the "…and N more" cutoff. */
@@ -480,18 +483,37 @@ const AgentRow: React.FC<{ agent: RegistryEntry; projectPath?: string; inBox?: b
  * per running desktop of the project, each opening the launch dialog. Offered
  * only over HTTP (desktops stream over WebSockets) on a host that has the
  * prerequisites; otherwise a hint says which of the two is missing.
+ *
+ * boxes: in a Linux VM project (`inVm`) the desktops run in the VM: the
+ * prerequisites are the VM's (missing packages are installed when a desktop
+ * opens), so the entries are always offered, with a note saying so.
  */
-const DesktopEntries: React.FC<{ projectPath: string }> = ({ projectPath }) => {
+const DesktopEntries: React.FC<{ projectPath: string; inVm?: boolean }> = ({ projectPath, inVm = false }) => {
   const api = useAppStore((s) => s.api);
   const host = useAppStore((s) => s.desktopHost);
   const desktops = useAppStore((s) => s.desktops);
   const openLaunchDialog = useAppStore((s) => s.openLaunchDialog);
   const [copied, setCopied] = React.useState(false);
+  const [vmHost, setVmHost] = React.useState<DesktopHostStatus | "error" | null>(null);
+
+  React.useEffect(() => {
+    if (!inVm || !api || api.desktopSocketUrl("/") === null) return;
+    const controller = new AbortController();
+    setVmHost(null);
+    api.desktopHostStatus(controller.signal, projectPath).then(
+      (status) => setVmHost(status),
+      () => {
+        if (!controller.signal.aborted) setVmHost("error");
+      }
+    );
+    return () => controller.abort();
+  }, [inVm, api, projectPath]);
 
   if (!api || api.desktopSocketUrl("/") === null) {
     return <DropdownEmpty>Desktops need a remote (HTTP) connection</DropdownEmpty>;
   }
-  if (!host?.available) {
+  const vmNote = inVm ? vmDesktopNote(vmHost) : null;
+  if (!inVm && !host?.available) {
     const hint = host?.installHint ?? null;
     return (
       <DropdownEmpty>
@@ -527,8 +549,9 @@ const DesktopEntries: React.FC<{ projectPath: string }> = ({ projectPath }) => {
         icon={<Monitor size={14} />}
         onClick={() => openLaunchDialog({ projectPath, targetDesktopId: null })}
       >
-        New desktop…
+        {inVm ? "New desktop in the VM…" : "New desktop…"}
       </DropdownItem>
+      {vmNote ? <DropdownEmpty>{vmNote}</DropdownEmpty> : null}
       {running.map((desktop) => (
         <DropdownItem
           key={desktop.id}
@@ -605,8 +628,8 @@ export const NewTabMenu: React.FC = () => {
   const openTodo = useAppStore((s) => s.openTodo);
   const whiteboardsOn = useAppStore((s) => isGlobalPluginEnabled(s.plugins, EXCALIDRAW_PLUGIN_ID));
   const registry = useRegistry();
-  // boxes: a box project offers agent chats and plain shells of the box's OS; desktops
-  // (and the IDE / file-explorer launches they carry) are not offered (spec §8.8).
+  // boxes: a box project offers agent chats and plain shells of the box's OS (spec §8.8);
+  // desktops in a Linux VM run inside it, and are not offered in macOS / Windows VMs.
   const boxView = useProjectBox(
     ctx?.kind === "project" ? ctx.project.path : null,
     ctx?.kind === "project" ? ctx.project.box : undefined
@@ -628,6 +651,8 @@ export const NewTabMenu: React.FC = () => {
   // Only Chromium-family entries count: firefox/system-browser can be enabled
   // on a host the daemon's puppeteer-core resolver would still 409 on.
   const browserHostReady = registry.browsers.some((b) => b.enabled && CHROMIUM_FAMILY_IDS.has(b.id));
+  // boxes: a Linux box project's Chromium runs in its VM, so it needs none on the host.
+  const browserEntry = browserMenuEntry({ hasChannel: browserHasChannel, hostChromium: browserHostReady, boxKind: boxView?.info.kind ?? null });
 
   const trigger = (
     // Opening the menu refreshes the desktop prerequisites: an install done
@@ -684,18 +709,20 @@ export const NewTabMenu: React.FC = () => {
       <DropdownItem icon={<GitBranch size={14} />} onClick={() => openGit()}>
         Git
       </DropdownItem>
-      {browserHasChannel && browserHostReady ? (
+      {browserEntry.kind === "open" ? (
         <DropdownItem icon={<Globe size={14} />} onClick={() => void openBrowser()}>
           Browser
         </DropdownItem>
-      ) : !browserHasChannel ? (
+      ) : browserEntry.kind === "no-channel" ? (
         <DropdownEmpty>Browser — needs a remote (HTTP) connection</DropdownEmpty>
       ) : (
         <DropdownEmpty>Browser — install chromium on the host</DropdownEmpty>
       )}
-      {ctx?.kind === "project" && boxGates.showDesktops ? <DesktopEntries projectPath={ctx.project.path} /> : null}
+      {ctx?.kind === "project" && boxGates.showDesktops ? (
+        <DesktopEntries projectPath={ctx.project.path} inVm={boxGates.desktopsInVm} />
+      ) : null}
       {ctx?.kind === "project" && !boxGates.showDesktops ? (
-        <DropdownEmpty>Desktops and app launches — not available in a VM project</DropdownEmpty>
+        <DropdownEmpty>{boxGates.desktopsUnavailable}</DropdownEmpty>
       ) : null}
       <DropdownItem
         icon={<ListTodo size={14} />}

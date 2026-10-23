@@ -40,9 +40,9 @@ log "2/7 packages: apt deps, Node 24, pnpm, Caddy"
 apt-get update -qq
 apt-get install -y git openssh-client tmux ufw python3 make g++ curl \
   ca-certificates p7zip-full ripgrep gnupg
-# Desktop tabs: virtual X display, window manager, audio and its Opus encoder.
+# Desktop tabs: virtual X display, window manager, compositor, audio and its Opus encoder.
 apt-get install -y tigervnc-standalone-server openbox pulseaudio \
-  pulseaudio-utils dbus-x11 libgl1-mesa-dri ffmpeg
+  pulseaudio-utils dbus-x11 libgl1-mesa-dri ffmpeg xcompmgr
 need_node=1
 if command -v node >/dev/null 2>&1; then
   major="$(node -p 'process.versions.node.split(".")[0]')"
@@ -117,16 +117,19 @@ if [ ! -f /etc/orquester/daemon.env ]; then
   sed "s|replace-with-a-32+char-random-secret|$GENERATED_PASSWORD|" \
     deploy/daemon.env.example > /etc/orquester/daemon.env
 else
-  log "daemon.env already exists — leaving it untouched"
+  log "daemon.env already exists — leaving it untouched (except a missing ORQUESTER_PUBLIC_URL)"
 fi
+# The daemon's public origin, from the target's domain (an existing value is kept).
+bash deploy/lib/ensure-public-url.sh /etc/orquester/daemon.env "$DOMAIN" </dev/null
 
 log "5/7 systemd unit + session devtools + start"
-cp deploy/orquester.service /etc/systemd/system/orquester.service
+bash deploy/install-unit.sh </dev/null
 bash deploy/provision-devtools.sh </dev/null
 systemctl daemon-reload
 systemctl enable --now orquester
 systemctl restart orquester
-curl -fsS --retry 120 --retry-delay 1 --retry-max-time 150 --retry-connrefused http://127.0.0.1:47831/health; echo
+curl -fsS --retry 600 --retry-delay 1 --retry-max-time 600 --retry-connrefused http://127.0.0.1:47831/health 2>/dev/null \
+  || curl -fsS --max-time 10 http://127.0.0.1:47831/health; echo
 
 log "6/7 Caddy vhost for $DOMAIN"
 # Re-run safe: never clobber an existing Caddyfile that drifted from the

@@ -424,7 +424,8 @@ const isSessionState = shaped<ThreadSessionState>({
 const isContinueAfterRestart = shaped<ContinueAfterRestart>({
   turnId: isString,
   prepared: optional(isBoolean),
-  markedAt: optional(isString)
+  markedAt: optional(isString),
+  crashAttempt: optional(isNumber)
 });
 
 const isThreadHead = shaped<ThreadHead>({
@@ -442,6 +443,8 @@ const isThreadHead = shaped<ThreadHead>({
   turnCount: isNumber,
   seq: isSequence,
   continueAfterRestart: optional(isContinueAfterRestart),
+  // Head-only too (crash-safe resume): a fold's own head never holds it.
+  crashResumedTurn: optional(isRecord),
   // Goals §5.5 and §5.7. Head-only state, so a fold's own head never holds
   // either; only the shape is checked, as for the other marker.
   resumeGoalAfterRestart: optional(isTrue),

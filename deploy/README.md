@@ -6,6 +6,11 @@ Use the repository-root `./deploy.sh` for provisioning and deployment commands.
 - `orquester.service` → `/etc/systemd/system/orquester.service`
   - Runs the daemon via `node --import tsx` (the repo is `noEmit`; no dist build).
 - `daemon.env.example` → copy to `/etc/orquester/daemon.env` (chmod 600), fill the password.
+  `ORQUESTER_PUBLIC_URL=https://<domain>` is the daemon's public origin: Ephemeral AI VMs use it as
+  the default Public URL, and macOS boxes (GitHub Actions runners, outside any tailnet) always dial
+  it. `./deploy.sh provision` and `./deploy.sh deploy`/`rollback` add it from the target's `domain`
+  (`lib/ensure-public-url.sh`) when the file has no `ORQUESTER_PUBLIC_URL=` line; an existing value
+  is never changed, and the file stays 0600. Restart the daemon after editing it by hand.
 - `opencode.env.example` → optional per-launcher proxy env; copy to
   `/var/lib/orquester/daemon/env/opencode.env` (chmod 600) to affect only OpenCode sessions.
 - `Caddyfile` → `/etc/caddy/Caddyfile` (set your real domain or a sslip.io host).
@@ -14,6 +19,12 @@ Use the repository-root `./deploy.sh` for provisioning and deployment commands.
   First-time provisioning runs it, so any **new** VPS gets session dev tooling + scoped sudo out of
   the box. Idempotent — re-run to catch up an **existing** VPS, then `systemctl daemon-reload && systemctl restart orquester`.
 - `install-go.sh` → installs the pinned Go toolchain that builds `orq-agent` (see below); run as root.
+- `install-unit.sh` → installs `orquester.service` (with `systemctl daemon-reload` when it changed)
+  and `/etc/needrestart/conf.d/orquester.conf` (`$nrconf{override_rc}{qr(^orquester\.service$)} = 0;`,
+  checked with `perl -c` first), so needrestart never restarts the daemon after an apt upgrade. Run as
+  root from the checkout; idempotent; it never restarts anything itself. Provisioning and every
+  deploy run it before their own (re)start, so a changed unit — e.g. `OOMPolicy=continue`, which keeps
+  one OOM-killed agent process from stopping the whole unit — applies at the deploy's restart.
 - `devtools-user.sh` → user-space tool installer (no root); also runnable from a session to refresh
   `uv`/`cargo-audit` in the appdir.
 - `sudoers.d/orquester-pkg` → scoped passwordless sudo (`apt`/`apt-get`/`dpkg`) for the service user.
@@ -29,7 +40,7 @@ file documents what those templates are for.
 
 ### Deploy health check and automatic revert
 
-`remote-update.sh` restarts the daemon and then waits up to 150 s (`HEALTH_WAIT`) for
+`remote-update.sh` restarts the daemon and then waits up to 10 minutes (`HEALTH_WAIT`, 600 s) for
 `/health` and an active unit. If the new release never gets there, it resets the tree to the last
 successful deploy (`.git/orq-last-deployed-head`), rebuilds it, restarts it and checks it the same
 way. The deploy fails either way: exit 3 means the previous release is back and healthy (the summary

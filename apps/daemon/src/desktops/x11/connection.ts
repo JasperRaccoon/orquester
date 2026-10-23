@@ -81,10 +81,25 @@ export class X11SetupError extends Error {
 
 export class X11ConnectionClosedError extends Error {
   constructor(cause?: Error) {
-    super(cause ? `X11 connection closed: ${cause.message}` : "X11 connection closed");
+    super(cause ? `X11 connection closed: ${cause.message}` : "X11 connection closed", cause ? { cause } : undefined);
     this.name = "X11ConnectionClosedError";
   }
 }
+
+/**
+ * The server declared a message longer than {@link MAX_SERVER_MESSAGE_BYTES}: the
+ * connection is closed instead of buffering it (boxes: a VM's X server is not trusted
+ * to stay within what this client ever asks for).
+ */
+export class X11MessageTooLargeError extends Error {
+  constructor(readonly length: number) {
+    super(`X11 server sent a ${length}-byte message (more than ${MAX_SERVER_MESSAGE_BYTES} bytes)`);
+    this.name = "X11MessageTooLargeError";
+  }
+}
+
+/** The longest reply or event this client accepts (property reads ask for 64 KiB at a time). */
+export const MAX_SERVER_MESSAGE_BYTES = 4 * 1024 * 1024;
 
 export interface X11ConnectionEvents {
   event: [XEvent];
@@ -290,6 +305,11 @@ export class X11Connection extends EventEmitter<X11ConnectionEvents> {
     this.buffered = this.buffered.length === 0 ? chunk : Buffer.concat([this.buffered, chunk]);
     for (;;) {
       const length = serverMessageLength(this.buffered);
+      if (length !== null && length > MAX_SERVER_MESSAGE_BYTES) {
+        this.buffered = Buffer.alloc(0);
+        this.stream.destroy(new X11MessageTooLargeError(length));
+        return;
+      }
       if (length === null || this.buffered.length < length) return;
       const message = Buffer.from(this.buffered.subarray(0, length));
       this.buffered = this.buffered.subarray(length);

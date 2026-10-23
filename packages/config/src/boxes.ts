@@ -104,6 +104,9 @@ export const boxConnectionSettingsSchema = z
     publicUrl: z.string().nullable().optional(),
     tailscaleDaemonUrl: z.string().nullable().optional(),
     tailnet: z.string().nullable().optional(),
+    /** Tailscale federated identity (client id + audience) macOS runners join the tailnet with. */
+    tailscaleWorkloadClientId: z.string().nullable().optional(),
+    tailscaleWorkloadAudience: z.string().nullable().optional(),
     lastCheck: z
       .object({ at: isoString, ok: z.boolean(), message: z.string().nullable().optional() })
       .passthrough()

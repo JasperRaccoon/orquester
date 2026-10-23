@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
 # Runs ON the VPS (delivered by ./deploy.sh via scp — never `bash -s`).
 # Routine update cycle: fetch/reset -> pnpm install -> SPA build -> Go + orq-agent
-# build (best-effort) -> native-module guard -> chown -> version stamp -> restart
-# -> health. If the new release never turns healthy, the previous release (the
-# last successful deploy) is reset, rebuilt, restarted and health-checked, and the
-# deploy still fails. Inputs via env:
+# build (best-effort) -> native-module guard -> chown -> version stamp -> public URL
+# + unit -> restart -> health. If the new release never turns healthy, the previous
+# release (the last successful deploy) is reset, rebuilt, restarted and
+# health-checked, and the deploy still fails. Inputs via env:
 #   SUDO        "" or "sudo" — prefix for privileged commands (git/pnpm/node/chown/systemctl)
 #   BRANCH      branch to deploy (default main)
 #   RESET_REF   ref to reset to (default origin/$BRANCH; rollback passes a sha)
+#   DOMAIN      the target's public domain (optional): adds ORQUESTER_PUBLIC_URL=https://$DOMAIN
+#               to /etc/orquester/daemon.env when it has none
+#   ENV_FILE    for local testing only (default /etc/orquester/daemon.env)
 #   REPO_DIR    for local testing only (default /opt/orquester)
 #   NODE_BIN    for local testing only (default /usr/bin/node, the unit's interpreter)
 #   HEALTH_URL  for local testing only (default http://127.0.0.1:47831/health)
-#   HEALTH_WAIT seconds the health check retries for (default 150)
+#   HEALTH_WAIT seconds the health check retries for after a restart (default 600)
 #   AUTO_REVERT 1 (default) rolls a release that fails its health check back; 0 leaves it
 # Exit codes: 0 deployed; 1 failed before or without a revert; 3 the new release
 # failed its health check and the previous one was restored (running, healthy);
@@ -23,9 +26,13 @@ SUDO="${SUDO:-}"
 BRANCH="${BRANCH:-main}"
 REPO_DIR="${REPO_DIR:-/opt/orquester}"
 RESET_REF="${RESET_REF:-origin/$BRANCH}"
+DOMAIN="${DOMAIN:-}"
+ENV_FILE="${ENV_FILE:-/etc/orquester/daemon.env}"
 NODE_BIN="${NODE_BIN:-/usr/bin/node}"
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:47831/health}"
-HEALTH_WAIT="${HEALTH_WAIT:-150}"
+# A loaded host can take minutes to bring the daemon up — the first start after a large update
+# compiles every new module (tsx's cache is cold); 3 min was seen on a busy host.
+HEALTH_WAIT="${HEALTH_WAIT:-600}"
 AUTO_REVERT="${AUTO_REVERT:-1}"
 # Read by the daemon for GET /api/info when the tree has no .git (apps/daemon/src/build-info.ts).
 STAMP_FILE=".orquester-version.json"
@@ -97,12 +104,27 @@ write_stamp() { # <commit>
     | $SUDO tee "$REPO_DIR/$STAMP_FILE" >/dev/null
 }
 
-# Restart and wait (bounded) for /health. A loaded host can take well over 30 s to
-# bring the daemon up, so the default window is 150 s.
+# The checked-out tree's host setup, run before each restart (the revert's too, so the unit
+# matches the release it starts): the daemon's public origin from the target's domain (an existing
+# value is kept), then the unit and the needrestart exclusion — a changed unit is reloaded here and
+# applies at the restart; nothing else is restarted. Refs from before a helper existed skip it.
+prepare_host() {
+  if [ -f deploy/lib/ensure-public-url.sh ]; then
+    $SUDO bash deploy/lib/ensure-public-url.sh "$ENV_FILE" "$DOMAIN" </dev/null || return 1
+  fi
+  if [ -f deploy/install-unit.sh ]; then
+    $SUDO bash deploy/install-unit.sh </dev/null || return 1
+  fi
+}
+
+# Restart and wait (bounded by HEALTH_WAIT) for /health and an active unit. The retries are
+# quiet — one connection-refused line per second would bury the rest of the output — and a last
+# plain request shows why the check failed.
 restart_healthy() {
   $SUDO systemctl restart orquester || return 1
   curl -fsS --retry "$HEALTH_WAIT" --retry-delay 1 --retry-max-time "$HEALTH_WAIT" --retry-connrefused \
-    --max-time 10 "$HEALTH_URL" || return 1
+    --max-time 10 "$HEALTH_URL" 2>/dev/null \
+    || curl -fsS --max-time 10 "$HEALTH_URL" || return 1
   echo
   [ "$(systemctl is-active orquester 2>/dev/null || true)" = "active" ]
 }
@@ -125,6 +147,7 @@ if ! $SUDO git diff --quiet "$drift_base" "$new_head" -- deploy/Caddyfile; then
 fi
 
 write_stamp "$new_head"
+prepare_host
 if ! restart_healthy; then
   echo "[remote-update] ERROR: release ${new_head:0:7} did not report healthy within ${HEALTH_WAIT}s." >&2
   if [ "$AUTO_REVERT" != "1" ] || [ "$previous" = "$new_head" ]; then
@@ -134,7 +157,7 @@ if ! restart_healthy; then
   fi
   echo "[remote-update] AUTO-REVERT: rolling back to the previous release ${previous:0:7}." >&2
   revert_ok=0
-  if $SUDO git reset --hard -q "$previous" && build_tree && write_stamp "$previous" && restart_healthy; then
+  if $SUDO git reset --hard -q "$previous" && build_tree && write_stamp "$previous" && prepare_host && restart_healthy; then
     revert_ok=1
   fi
   if [ "$revert_ok" -eq 1 ]; then

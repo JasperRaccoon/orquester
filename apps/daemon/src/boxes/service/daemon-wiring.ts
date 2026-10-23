@@ -41,7 +41,7 @@ export interface DaemonBoxHost {
 /** The parts other box modules provide. */
 export type DaemonBoxParts = Pick<
   BoxServiceDeps,
-  "providers" | "hub" | "buildBootstrap" | "tailscale" | "configSync" | "tooling" | "blacksmith" | "agentBuilds"
+  "providers" | "hub" | "buildBootstrap" | "tailscale" | "configSync" | "tooling" | "blacksmith" | "agentBuilds" | "localTailscale" | "daemonHttp"
 >;
 
 /** Every managed account home of an agent that runs in boxes (the setup's `config` step syncs each). */

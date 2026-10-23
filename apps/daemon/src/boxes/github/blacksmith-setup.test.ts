@@ -126,6 +126,17 @@ test("ensureControlRepo creates the private repo, commits the workflow, waits un
   assert.equal(github.calls.filter((entry) => entry.method === "PUT" || entry.method === "POST").length, writes, "a second run writes nothing");
 });
 
+test("ensureControlRepo over the tailnet commits the workflow that joins it with the federated identity", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: Date.parse("2026-10-20T12:00:00Z") });
+  const { github, driver } = setup();
+  const tailscale = { oauthClientId: "kJ2x7CNTRL", audience: "api.tailscale.com/kJ2x7CNTRL" };
+  await drive(t, driver.ensureControlRepo(TOKEN, "Org", { daemonUrl: DAEMON_URL, tailscale, signal }));
+  const content = github.repos.get("Org/orquester-macos-boxes")!.files.get(BLACKSMITH_WORKFLOW_PATH)!.content;
+  assert.equal(content, blacksmithWorkflowTemplate({ tailscale }));
+  assert.match(content, /uses: tailscale\/github-action@v4/);
+  assert.match(content, /oauth-client-id: "kJ2x7CNTRL"/);
+});
+
 test("ensureControlRepo refuses a daemon URL the workflow cannot use, before touching GitHub", async () => {
   const { github, driver } = setup();
   await assert.rejects(driver.ensureControlRepo(TOKEN, "Org", { daemonUrl: "http://orq.example.com", signal }), /over https/);

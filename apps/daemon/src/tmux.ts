@@ -8,7 +8,8 @@ import { TERMINAL_SCROLLBACK_LINES } from "@orquester/api";
 const TMUX_SESSION_PREFIX = "orq-";
 
 /** tmux's stderr when no server listens on the socket (not an error for a listing). */
-const TMUX_NO_SERVER = /no server running|error connecting to .*\((No such file or directory|Connection refused)\)/i;
+// boxes: exported so desktops in a box read their tmux's listings the same way.
+export const TMUX_NO_SERVER = /no server running|error connecting to .*\((No such file or directory|Connection refused)\)/i;
 
 /** Service sessions must stay outside `orq-`, which session reattachment reaps for orphans. */
 const SERVICE_SESSION_PREFIX = "orqsvc-";

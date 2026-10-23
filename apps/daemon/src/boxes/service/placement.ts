@@ -77,7 +77,7 @@ export async function resolvePlacement(settings: BoxSettings, request: Placement
     adapter = settings.adapter(first);
   }
   // No route to this daemon: nothing would ever connect.
-  settings.route();
+  settings.route(adapter.id);
 
   const offers = await settings.offers(adapter.id, kind);
   let size: BoxSizeOffer | undefined;

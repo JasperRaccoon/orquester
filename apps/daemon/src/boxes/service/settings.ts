@@ -17,6 +17,7 @@ import {
   type BoxConnectionSettings,
   type BoxKind,
   type BoxKindAvailability,
+  type BoxLocalTailscale,
   type BoxOffersResponse,
   type BoxProviderId,
   type BoxProviderInfo,
@@ -28,7 +29,9 @@ import {
 } from "@orquester/api";
 
 import type { BoxProviderAdapter, BoxProviderRegistry, BuildBootstrap, ProviderCredentials, TailscaleKeys } from "../contracts.ts";
+import { DEFAULT_TAILSCALE_SERVE_PORT, tailnetUrl, type DaemonHttpAddress, type LocalTailscale } from "../tailscale/local.ts";
 import type { BoxSetupLog } from "./box-exec.ts";
+import { fetchFailureMessage, statusFailureMessage } from "./connection-check.ts";
 import { BoxError, errorLine } from "./errors.ts";
 import type { BoxClock, BoxConnectivity, ConnectRoute } from "./lifecycle.ts";
 import type { BoxStore, TailscaleSecrets } from "./store.ts";
@@ -67,13 +70,39 @@ export interface BlacksmithSetupDriver {
   checkOrg(token: string, org: string, signal: AbortSignal): Promise<BlacksmithCheck>;
   /** The Blacksmith GitHub App is installed on the org. */
   checkApp(token: string, org: string, signal: AbortSignal): Promise<BlacksmithCheck>;
-  /** Create the private control repo (or reuse it), commit the workflow, wait until a dispatch is accepted. */
-  ensureControlRepo(token: string, org: string, options: { daemonUrl: string; signal: AbortSignal }): Promise<{ repo: string; workflowFile: string }>;
+  /**
+   * Create the private control repo (or reuse it), commit the workflow, wait until a dispatch is
+   * accepted. `tailscale`: the runs join the tailnet with this federated identity first.
+   */
+  ensureControlRepo(
+    token: string,
+    org: string,
+    options: { daemonUrl: string; tailscale?: BlacksmithTailnetJoin | null; signal: AbortSignal }
+  ): Promise<{ repo: string; workflowFile: string }>;
   /** The credentials the Blacksmith adapter takes for this setup. */
   adapterCredentials(setup: { token: string; org: string; repo: string; workflowFile: string }): ProviderCredentials;
 }
 
 export type BlacksmithCheck = { ok: true; message?: string } | { ok: false; message: string; actionUrl: string | null };
+
+/** The Tailscale federated identity a macOS runner joins the tailnet with (`tailscale/github-action`). */
+export interface BlacksmithTailnetJoin {
+  oauthClientId: string;
+  audience: string;
+}
+
+/** How macOS runners (GitHub Actions, outside the tailnet) reach this daemon. */
+export interface BlacksmithRoute {
+  mode: BoxConnectionMode;
+  daemonUrl: string;
+  /** Set when the runner dials the tailnet URL: the identity it joins with. */
+  join: BlacksmithTailnetJoin | null;
+}
+
+export const MACOS_ROUTE_MESSAGE =
+  "macOS boxes run on GitHub Actions runners outside your tailnet: set a Public URL (the runner dials it), or add a Tailscale federated identity.";
+/** The values the workflow's Tailscale step takes (workflow-template.ts checks the same). */
+const WORKLOAD_VALUE = /^[A-Za-z0-9._:/-]{1,200}$/;
 
 export interface BoxSettingsDeps {
   store: BoxStore;
@@ -84,6 +113,10 @@ export interface BoxSettingsDeps {
   blacksmith?: BlacksmithSetupDriver;
   /** The daemon's configured public origin, when it has one (the default public URL). */
   publicOrigin: () => string | null;
+  /** Tailscale on this machine (status, `tailscale serve`). Absent: not reported. */
+  localTailscale?: LocalTailscale;
+  /** Where the daemon's HTTP transport listens (the Check's reverse proxy hint names its port). */
+  daemonHttp?: () => DaemonHttpAddress;
   setupLog: BoxSetupLog;
   clock: BoxClock;
   fetch?: typeof fetch;
@@ -136,21 +169,26 @@ export function tailnetOf(url: string | null): string | null {
   }
 }
 
-export function tailscalePolicySnippet(daemonUrl: string | null): string {
-  let port = "443";
+/**
+ * The tailnet policy lines that let boxes reach only Orquester: this machine's Tailscale IP when
+ * known, and the port of the configured tailnet URL (else the port Tailscale serves Orquester on).
+ */
+export function tailscalePolicySnippet(daemonUrl: string | null, local?: Pick<BoxLocalTailscale, "tailnetIp" | "servePort"> | null): string {
+  let port = String(local?.servePort ?? DEFAULT_TAILSCALE_SERVE_PORT);
   if (daemonUrl) {
     try {
       const url = new URL(daemonUrl);
       port = url.port || (url.protocol === "http:" ? "80" : "443");
     } catch {
-      // Keep the default port.
+      // Keep the serve port.
     }
   }
+  const ip = local?.tailnetIp && /^[0-9a-f:.]+$/i.test(local.tailnetIp) ? local.tailnetIp : null;
   return [
     "// Lets Orquester boxes reach only Orquester's port on the daemon machine.",
-    "// Replace <daemon-tailscale-ip> with that machine's Tailscale IP (or a host alias).",
+    ...(ip ? [] : ["// Replace <daemon-tailscale-ip> with that machine's Tailscale IP (or a host alias)."]),
     '"tagOwners": { "tag:orq-box": ["autogroup:admin"] },',
-    `"grants": [{ "src": ["tag:orq-box"], "dst": ["<daemon-tailscale-ip>"], "ip": ["tcp:${port}"] }]`
+    `"grants": [{ "src": ["tag:orq-box"], "dst": ["${ip ?? "<daemon-tailscale-ip>"}"], "ip": ["tcp:${port}"] }]`
   ].join("\n");
 }
 
@@ -158,6 +196,9 @@ export class BoxSettings implements BoxConnectivity {
   private readonly offersCache = new Map<string, { at: number; value: Promise<BoxOffersResponse> }>();
   private readonly checking = new Set<string>();
   private readonly windowsImageRuns = new Map<string, Promise<void>>();
+  private serving: Promise<BoxConnectionSettings> | null = null;
+  /** Blacksmith checks run one at a time; a re-run queues behind the current one. */
+  private blacksmithRuns: Promise<void> = Promise.resolve();
 
   constructor(private readonly deps: BoxSettingsDeps) {}
 
@@ -372,10 +413,10 @@ export class BoxSettings implements BoxConnectivity {
     }
   }
 
-  /** Why no box can be created at all right now (no route to this daemon), or null. */
-  routeProblem(): string | null {
+  /** Why no box (of `provider`) can be created right now (no route to this daemon), or null. */
+  routeProblem(provider?: BoxProviderId): string | null {
     try {
-      this.route();
+      this.route(provider);
       return null;
     } catch (error) {
       return errorLine(error);
@@ -403,7 +444,6 @@ export class BoxSettings implements BoxConnectivity {
   }
 
   async kinds(): Promise<BoxKindAvailability[]> {
-    const routeProblem = this.routeProblem();
     return Promise.all(
       BOX_KINDS.map(async (kind): Promise<BoxKindAvailability> => {
         const renting = [...this.deps.providers.values()].filter((adapter) => adapter.kinds.includes(kind) && this.configured(adapter.id));
@@ -413,6 +453,9 @@ export class BoxSettings implements BoxConnectivity {
         priced.sort((a, b) => (a.price ?? Number.POSITIVE_INFINITY) - (b.price ?? Number.POSITIVE_INFINITY));
         const prices = priced.map((entry) => entry.price).filter((price): price is number => price !== null);
         const lifetimes = usable.map((adapter) => adapter.maxLifetimeMinutes).filter((value): value is number => value !== null);
+        // macOS runners route differently: a kind is blocked only when none of its providers has a route.
+        const routeProblems = usable.map((adapter) => this.routeProblem(adapter.id));
+        const routeProblem = routeProblems.every((problem) => problem !== null) ? (routeProblems[0] ?? null) : null;
         let unavailableReason: string | null = null;
         if (renting.length === 0) unavailableReason = `No connected provider rents ${BOX_KIND_LABELS[kind]} boxes.`;
         else if (usable.length === 0) unavailableReason = blocked.find((reason) => reason !== null) ?? null;
@@ -509,10 +552,12 @@ export class BoxSettings implements BoxConnectivity {
     return origin ? normalizeOrigin(origin) : null;
   }
 
+  /** The settings with Tailscale on this machine as last read (see {@link loadConnectionSettings}). */
   connectionSettings(): BoxConnectionSettings {
     const stored = this.deps.store.connection();
     const secrets = this.deps.store.tailscale();
     const daemonUrl = stored.tailscaleDaemonUrl ?? null;
+    const local = this.deps.localTailscale?.cached() ?? null;
     return {
       mode: this.mode(),
       publicUrl: this.publicUrl(),
@@ -521,12 +566,22 @@ export class BoxSettings implements BoxConnectivity {
         keyHint: keyHint(secrets?.apiToken ?? secrets?.oauthClientSecret),
         tailnet: stored.tailnet ?? tailnetOf(daemonUrl),
         daemonUrl,
-        policySnippet: tailscalePolicySnippet(daemonUrl)
+        policySnippet: tailscalePolicySnippet(daemonUrl, local),
+        ...(local ? { local } : {}),
+        workloadIdentity: this.workloadIdentity()
+          ? { clientId: stored.tailscaleWorkloadClientId as string, audience: stored.tailscaleWorkloadAudience as string }
+          : null
       },
       reachable: stored.lastCheck ? (stored.lastCheck.ok ? "ok" : "failed") : "unknown",
       reachableMessage: stored.lastCheck?.message ?? null,
       checkedAt: stored.lastCheck?.at ?? null
     };
+  }
+
+  /** {@link connectionSettings} after reading Tailscale on this machine (cached briefly). */
+  async loadConnectionSettings(options: { fresh?: boolean } = {}): Promise<BoxConnectionSettings> {
+    await this.deps.localTailscale?.state(options);
+    return this.connectionSettings();
   }
 
   async setConnection(body: SetBoxConnectionRequest | undefined): Promise<BoxConnectionSettings> {
@@ -558,6 +613,20 @@ export class BoxSettings implements BoxConnectivity {
       throw invalid("Send the Tailscale OAuth client id and secret together.");
     }
     if (clearTailscale !== undefined && typeof clearTailscale !== "boolean") throw invalid("`clearTailscale` must be a boolean.");
+    const { tailscaleWorkloadClientId, tailscaleWorkloadAudience } = request;
+    const workloadField = (value: unknown, name: string): string | null | undefined => {
+      if (value === undefined) return undefined;
+      if (value === null || (typeof value === "string" && value.trim() === "")) return null;
+      if (typeof value !== "string" || !WORKLOAD_VALUE.test(value.trim())) {
+        throw invalid(`\`${name}\` must be up to 200 letters, digits and . _ : / -.`);
+      }
+      return value.trim();
+    };
+    const workloadClientId = workloadField(tailscaleWorkloadClientId, "tailscaleWorkloadClientId");
+    const workloadAudience = workloadField(tailscaleWorkloadAudience, "tailscaleWorkloadAudience");
+    if ((workloadClientId === undefined) !== (workloadAudience === undefined) || (workloadClientId === null) !== (workloadAudience === null)) {
+      throw invalid("Send the Tailscale federated identity's client id and audience together.");
+    }
 
     if (clearTailscale === true) {
       await this.deps.store.setTailscale(null);
@@ -575,10 +644,16 @@ export class BoxSettings implements BoxConnectivity {
         settings.tailscaleDaemonUrl = nextTailscaleUrl;
         settings.tailnet = tailnetOf(nextTailscaleUrl);
       }
+      if (workloadClientId !== undefined) {
+        settings.tailscaleWorkloadClientId = workloadClientId;
+        settings.tailscaleWorkloadAudience = workloadAudience ?? null;
+      }
       // The route changed: the last reachability check says nothing about the new one.
       if (mode !== undefined || nextPublicUrl !== undefined || nextTailscaleUrl !== undefined) delete settings.lastCheck;
     });
-    return this.connectionSettings();
+    // The Blacksmith control repo step depends on the route: check it again.
+    this.rerunBlacksmithChecks();
+    return this.loadConnectionSettings();
   }
 
   /** Fetch `<url>/api/boxes/agent/linux-x64` without credentials: Orquester's own route answers 401. */
@@ -587,6 +662,9 @@ export class BoxSettings implements BoxConnectivity {
     const url = mode === "tailscale" ? (this.deps.store.connection().tailscaleDaemonUrl ?? null) : this.publicUrl();
     let ok = false;
     let message: string;
+    // The remedy depends on what Tailscale serves right now.
+    const local = mode === "tailscale" ? ((await this.deps.localTailscale?.state({ fresh: true })) ?? null) : null;
+    const context = { mode, local, daemonPort: this.deps.daemonHttp?.().port ?? null };
     if (!url) {
       message = mode === "tailscale" ? "Enter the daemon's tailnet URL first." : "Enter the daemon's public URL first.";
     } else {
@@ -598,19 +676,70 @@ export class BoxSettings implements BoxConnectivity {
         });
         await response.body?.cancel().catch(() => undefined);
         ok = response.status === 401;
-        message = ok ? `Reachable: ${url} answers as Orquester.` : `${url} answered ${response.status}; expected Orquester's 401.`;
+        message = ok ? `Reachable: ${url} answers as Orquester.` : statusFailureMessage(url, response.status, context);
       } catch (error) {
-        message = `${url} is not reachable: ${errorLine(error)}`;
+        message = fetchFailureMessage(url, error, context);
       }
     }
     const at = new Date(this.deps.clock.now()).toISOString();
     await this.deps.store.updateConnection((settings) => {
       settings.lastCheck = { at, ok, message };
     });
-    return this.connectionSettings();
+    if (ok) this.rerunBlacksmithChecks();
+    return this.loadConnectionSettings();
   }
 
-  route(): ConnectRoute {
+  /**
+   * "Set up for me": serve the daemon on an HTTPS port of this machine's tailnet name (unless it is
+   * served already), switch to Tailscale mode with that URL, and check it.
+   */
+  setupTailscaleServe(): Promise<BoxConnectionSettings> {
+    this.serving ??= this.runTailscaleServe().finally(() => {
+      this.serving = null;
+    });
+    return this.serving;
+  }
+
+  private async runTailscaleServe(): Promise<BoxConnectionSettings> {
+    const localTailscale = this.deps.localTailscale;
+    if (!localTailscale) throw new BoxError(409, "BOX_UNSUPPORTED", "This daemon can't run Tailscale commands.");
+    const local = await localTailscale.state({ fresh: true });
+    if (!local.installed) {
+      throw new BoxError(409, "BOX_CONNECTION_NOT_CONFIGURED", "Tailscale isn't installed on this machine: install it and log in, then try again.");
+    }
+    if (!local.running) {
+      throw new BoxError(409, "BOX_CONNECTION_NOT_CONFIGURED", "Tailscale isn't running on this machine: start it and log in (`tailscale up`), then try again.");
+    }
+    if (!local.dnsName) {
+      throw new BoxError(409, "BOX_CONNECTION_NOT_CONFIGURED", "This machine has no MagicDNS name: turn on MagicDNS and HTTPS certificates in the Tailscale admin console (DNS), then try again.");
+    }
+    let port = local.servePort;
+    if (!local.serving) {
+      const result = await localTailscale.serve(port);
+      if (!result.ok) {
+        if (result.reason === "permission") throw new BoxError(409, "BOX_TAILSCALE_NEEDS_PERMISSION", result.message, result.commands);
+        throw new BoxError(409, "BOX_CONNECTION_NOT_CONFIGURED", `Tailscale could not serve Orquester: ${result.message}`);
+      }
+      port = result.port;
+      const after = await localTailscale.state({ fresh: true });
+      if (after.serving) port = after.servePort;
+    }
+    const daemonUrl = normalizeOrigin(tailnetUrl(local.dnsName, port));
+    await this.deps.store.updateConnection((settings) => {
+      settings.mode = "tailscale";
+      settings.tailscaleDaemonUrl = daemonUrl;
+      settings.tailnet = tailnetOf(daemonUrl);
+      delete settings.lastCheck;
+    });
+    return this.testConnection();
+  }
+
+  route(provider?: BoxProviderId): ConnectRoute {
+    if (provider === "blacksmith") {
+      const route = this.blacksmithRoute();
+      // The runner joins the tailnet itself (federated identity): no auth key is minted for it.
+      return { mode: route.mode, daemonUrl: route.daemonUrl, tailscale: null };
+    }
     if (this.mode() === "tailscale") {
       const daemonUrl = this.deps.store.connection().tailscaleDaemonUrl ?? null;
       const secrets = this.deps.store.tailscale();
@@ -624,6 +753,26 @@ export class BoxSettings implements BoxConnectivity {
       throw new BoxError(409, "BOX_CONNECTION_NOT_CONFIGURED", "Boxes have no way to reach this daemon: set its public URL (or Tailscale) in Connection.");
     }
     return { mode: "public-url", daemonUrl: publicUrl, tailscale: null };
+  }
+
+  private workloadIdentity(): BlacksmithTailnetJoin | null {
+    const stored = this.deps.store.connection();
+    const clientId = stored.tailscaleWorkloadClientId;
+    const audience = stored.tailscaleWorkloadAudience;
+    return clientId && audience && WORKLOAD_VALUE.test(clientId) && WORKLOAD_VALUE.test(audience) ? { oauthClientId: clientId, audience } : null;
+  }
+
+  /**
+   * macOS runners are GitHub Actions jobs outside the tailnet: they dial the public URL whenever one
+   * is known (whatever the mode), else the tailnet URL only when they can join it (federated identity).
+   */
+  blacksmithRoute(): BlacksmithRoute {
+    const publicUrl = this.publicUrl();
+    if (publicUrl) return { mode: "public-url", daemonUrl: publicUrl, join: null };
+    const tailnetUrl = this.deps.store.connection().tailscaleDaemonUrl ?? null;
+    const join = this.workloadIdentity();
+    if (tailnetUrl && join) return { mode: "tailscale", daemonUrl: tailnetUrl, join };
+    throw new BoxError(409, "BOX_CONNECTION_NOT_CONFIGURED", MACOS_ROUTE_MESSAGE);
   }
 
   tailscaleKeys(): TailscaleKeys | null {
@@ -712,7 +861,38 @@ export class BoxSettings implements BoxConnectivity {
     return this.blacksmithResponse();
   }
 
-  private async runBlacksmithChecks(): Promise<void> {
+  /**
+   * The connection changed (or a Check passed): run the automatic steps again in the background,
+   * so a step that failed for want of a route does not keep its old error. Nothing to do before an
+   * account is picked.
+   */
+  rerunBlacksmithChecks(): void {
+    if (!this.deps.blacksmith || !this.deps.store.blacksmith().gitAccountId) return;
+    // Shown at once (the client re-reads the setup while a step runs); the checks queue behind any run.
+    const marked = this.setBlacksmithStep("repo", { state: "running", message: "Checking again with the new connection…", actionUrl: null }).catch(() => undefined);
+    this.blacksmithRuns = this.blacksmithRuns
+      .then(() => marked)
+      .then(() => this.checkBlacksmithSteps())
+      .catch((error) => this.deps.logger.warn("Blacksmith setup re-check failed", errorLine(error)))
+      .finally(() => this.deps.providersChanged());
+  }
+
+  /** Every background Blacksmith re-check has finished. */
+  async blacksmithChecksSettled(): Promise<void> {
+    for (let current = this.blacksmithRuns; ; current = this.blacksmithRuns) {
+      await current;
+      if (current === this.blacksmithRuns) return;
+    }
+  }
+
+  /** One run of the automatic steps at a time. */
+  private runBlacksmithChecks(): Promise<void> {
+    const run = this.blacksmithRuns.then(() => this.checkBlacksmithSteps());
+    this.blacksmithRuns = run.catch(() => undefined);
+    return run;
+  }
+
+  private async checkBlacksmithSteps(): Promise<void> {
     const setup = this.deps.store.blacksmith();
     const driver = this.deps.blacksmith;
     const signal = AbortSignal.timeout(5 * 60_000);
@@ -746,14 +926,14 @@ export class BoxSettings implements BoxConnectivity {
       const org = setup.org;
       if (!(await check("org", () => driver.checkOrg(token, org, signal)))) return;
       if (!(await check("app", () => driver.checkApp(token, org, signal)))) return;
-      let daemonUrl: string;
+      let route: BlacksmithRoute;
       try {
-        daemonUrl = this.route().daemonUrl;
+        route = this.blacksmithRoute();
       } catch (error) {
         return stop("repo", "action-needed", errorLine(error));
       }
       try {
-        const { repo, workflowFile } = await driver.ensureControlRepo(token, org, { daemonUrl, signal });
+        const { repo, workflowFile } = await driver.ensureControlRepo(token, org, { daemonUrl: route.daemonUrl, tailscale: route.join, signal });
         await this.deps.store.updateBlacksmith((settings) => {
           settings.repo = repo;
           settings.workflowFile = workflowFile;

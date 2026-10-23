@@ -56,7 +56,7 @@ import { boxCloneUrl, boxGitConfig, boxGitSshTarget, type BoxGitEndpoint } from 
 import { boxGitConfigCommands, boxKnownHostsPath } from "./git-setup.ts";
 import type { BoxStore } from "./store.ts";
 import { initialStoredSetup, SETUP_STEP_LABELS } from "./summary.ts";
-import { bubblewrapScript, planToolchain, TOOLCHAIN_PROBE_FILES, TOOLCHAIN_READ_FILES } from "./toolchain.ts";
+import { bubblewrapScript, gitClientScript, planToolchain, TOOLCHAIN_PROBE_FILES, TOOLCHAIN_READ_FILES } from "./toolchain.ts";
 
 export type StoredBoxProject = NonNullable<StoredBox["project"]>;
 
@@ -87,8 +87,11 @@ export interface ConnectRoute {
 }
 
 export interface BoxConnectivity {
-  /** Throws `BOX_CONNECTION_NOT_CONFIGURED` when boxes have no route to this daemon. */
-  route(): ConnectRoute;
+  /**
+   * Throws `BOX_CONNECTION_NOT_CONFIGURED` when boxes have no route to this daemon. With a provider:
+   * the route its boxes can use (macOS runners are outside the tailnet).
+   */
+  route(provider?: BoxProviderId): ConnectRoute;
   /** The credentials the provider's adapter takes, or null when it is not connected. */
   credentials(provider: BoxProviderId): Promise<ProviderCredentials | null>;
   /** For removing a destroyed box's tailnet node; null without Tailscale credentials. */
@@ -302,7 +305,7 @@ export class BoxLifecycle {
    * route to this daemon or the record cannot be written.
    */
   async create(spec: CreateBoxSpec): Promise<StoredBox> {
-    const route = this.deps.connectivity.route();
+    const route = this.deps.connectivity.route(spec.provider);
     // A box that cannot download orq-agent never connects: refuse before anything is billed.
     if (this.deps.agentBuilds && !(await this.deps.agentBuilds.current().catch(() => null))) {
       throw new BoxError(
@@ -519,7 +522,7 @@ export class BoxLifecycle {
     const record = this.require(boxId);
     if (record.providerRef) return { state: "done", message: "Created before a restart." };
     const kind = record.kind as BoxKind;
-    const route = this.deps.connectivity.route();
+    const route = this.deps.connectivity.route(adapter.id);
     const credentials = await this.deps.connectivity.credentials(adapter.id);
     if (!credentials) throw new SetupStepError(`${adapter.label} is not connected.`);
     const tokenTtlMs = (CONNECT_DEADLINE_MS[kind] ?? CONNECT_DEADLINE_MS.linux) + 15 * 60_000;
@@ -627,6 +630,17 @@ export class BoxLifecycle {
     if (!project) throw new SetupStepError("The box has no project.");
     const { sys } = connection;
     const url = typeof project.remoteUrl === "string" ? project.remoteUrl : null;
+
+    if (sys.os === "linux") {
+      const client = await runBoxCommand(
+        connection,
+        { command: gitClientScript(), shell: true },
+        { signal: AbortSignal.any([signal, AbortSignal.timeout(TOOLCHAIN_COMMAND_TIMEOUT_MS)]), onLine: log }
+      );
+      if (client.code !== 0) {
+        throw new SetupStepError(client.tail.trim().split("\n").pop() || `Installing git failed (exit ${client.code ?? client.signal}).`);
+      }
+    }
 
     // Git in the box is SSH only (spec §7): the account's HTTPS URLs rewritten to SSH, the host keys
     // the box may trust for its SSH host, no credential helper, and the workspace identity.

@@ -60,6 +60,14 @@ export function blacksmithCanTest(setup: BlacksmithSetupResponse | null): boolea
   return repo?.state === "ok" && test?.state !== "running";
 }
 
+/**
+ * An automatic step that stopped (the control repo) offers Retry: it re-runs the automatic steps
+ * (`PUT` with an empty body). The test step has its own "Run the test again".
+ */
+export function blacksmithCanRetry(step: BlacksmithSetupStep): boolean {
+  return step.id === "repo" && (step.state === "failed" || step.state === "action-needed");
+}
+
 /** The org step can be chosen once the account step is done. */
 export function blacksmithCanPickOrg(setup: BlacksmithSetupResponse | null): boolean {
   return !!setup?.gitAccountId && blacksmithStep(setup, "account")?.state === "ok";

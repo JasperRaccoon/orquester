@@ -97,6 +97,7 @@ export interface BoxesApi {
   getBoxConnection(signal?: AbortSignal): Promise<BoxConnectionSettings>;
   setBoxConnection(req: SetBoxConnectionRequest): Promise<BoxConnectionSettings>;
   testBoxConnection(): Promise<BoxConnectionSettings>;
+  setupBoxTailscaleServe(): Promise<BoxConnectionSettings>;
   getBlacksmithSetup(signal?: AbortSignal): Promise<BlacksmithSetupResponse>;
   setBlacksmithSetup(req: SetBlacksmithSetupRequest): Promise<BlacksmithSetupResponse>;
   startBlacksmithTest(): Promise<unknown>;
@@ -528,6 +529,8 @@ function applyConnectionAnswer(
   if (current) write("connection", { connection });
   else reloadQuietly(() => loadBoxConnection(api));
   refreshKindsLater();
+  // The daemon re-runs the Blacksmith steps on a connection change: show their new state.
+  if (boxesStore.getState().blacksmith !== null) reloadQuietly(() => loadBlacksmithSetup(api));
   return connection;
 }
 
@@ -539,6 +542,11 @@ export async function saveBoxConnection(api: BoxesApi, req: SetBoxConnectionRequ
 /** Run the reachability check. */
 export async function testBoxConnection(api: BoxesApi): Promise<BoxConnectionSettings> {
   return applyConnectionAnswer(api, await mutate(api, "connection", () => api.testBoxConnection()));
+}
+
+/** "Set up for me": the daemon serves itself on the tailnet; rejects 409 `BOX_TAILSCALE_NEEDS_PERMISSION` with `commands`. */
+export async function setupBoxTailscaleServe(api: BoxesApi): Promise<BoxConnectionSettings> {
+  return applyConnectionAnswer(api, await mutate(api, "connection", () => api.setupBoxTailscaleServe()));
 }
 
 /** Pick the Blacksmith account or org (an empty request re-runs the automatic steps). */
