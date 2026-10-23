@@ -270,6 +270,54 @@ test("rollback swaps current and previous and skips the version rolled back from
   await refusal(h.service.rollback(ID), 409, "NO_PREVIOUS_VERSION");
 });
 
+/** Make `version` look installed by an Orquester build that shipped another prompt overlay. */
+async function staleOverlay(h: Harness, version: string): Promise<string> {
+  const path = join(knowledgeVersionDir(h.runtimeDir, version), "runtime.json");
+  const manifest = JSON.parse(await readFile(path, "utf8"));
+  manifest.overlay.digest = "0".repeat(64);
+  await writeFile(path, JSON.stringify(manifest));
+  return path;
+}
+
+test("a previous version installed with an older overlay is still a rollback target; the next check repairs it", async (t) => {
+  const h = await harness(t);
+  await h.service.update(ID, { enabled: true });
+  await settle(h);
+  publishNewer(h);
+  await h.service.checkNow(ID);
+  await settle(h);
+  const manifest = await staleOverlay(h, MYKG_PINNED_VERSION);
+
+  const rolled = await h.service.rollback(ID);
+  await settle(h);
+  assert.equal(rolled.current?.version, MYKG_PINNED_VERSION);
+  assert.equal(rolled.skippedVersion, NEWER);
+  assert.equal(h.tracker.current()?.mykgVersion, MYKG_PINNED_VERSION);
+
+  // The check reinstalls the version rolled back to (with the shipped overlay), not the skipped one.
+  await h.service.checkNow(ID);
+  await settle(h);
+  const plugin = await info(h);
+  assert.equal(plugin.current?.version, MYKG_PINNED_VERSION);
+  assert.equal(plugin.previous?.version, NEWER);
+  assert.equal(plugin.skippedVersion, NEWER);
+  assert.notEqual(JSON.parse(await readFile(manifest, "utf8")).overlay.digest, "0".repeat(64));
+});
+
+test("an update over a current version with an older overlay keeps it as the rollback target", async (t) => {
+  const h = await harness(t);
+  await h.service.update(ID, { enabled: true });
+  await settle(h);
+  await staleOverlay(h, MYKG_PINNED_VERSION);
+  publishNewer(h);
+  await h.service.checkNow(ID);
+  await settle(h);
+  const plugin = await info(h);
+  assert.equal(plugin.current?.version, NEWER);
+  assert.equal(plugin.previous?.version, MYKG_PINNED_VERSION);
+  assert.deepEqual(await versions(h), [MYKG_PINNED_VERSION, NEWER]);
+});
+
 test("a failed install records its step and version; the hourly check does not retry it, a manual one does", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval"] });
   const h = await harness(t);

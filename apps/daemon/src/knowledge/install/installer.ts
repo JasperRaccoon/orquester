@@ -20,8 +20,10 @@
  * against both Orquester's pin and the release's published `.sha256`) and
  * discarded with the staging dir. The pinned myKG installs from a shipped lock
  * with every artifact's hash (`--require-hashes`); a newer patch of the same
- * minor line installs its PyPI wheel by sha256 with the lock's versions as
- * constraints. Children get a built-from-scratch env (never the daemon's own):
+ * minor line installs its PyPI wheel by sha256 with the lock's other entries,
+ * hashes included, as constraints (a dependency the lock lacks fails the
+ * install). Only wheels: nothing is built from source (`--no-build`; a build's
+ * own dependencies carry no hash). Children get a built-from-scratch env (never the daemon's own):
  * no credentials in argv or env, nothing written under the daemon user's HOME.
  */
 import { execFile } from "node:child_process";
@@ -417,7 +419,7 @@ export async function installKnowledgeRuntime(
     await step("extract", EXTRACT_TIMEOUT_MS, signal, async (bounded) => {
       await mkdir(join(staging, "uv"), { mode: 0o700 });
       // Relative archive path with cwd: GNU tar would read a `C:`-style path as a remote host.
-      await runTar(["-xzf", "uv.tar.gz", "-C", "uv"], staging, bounded);
+      await runTar(["-xzf", "uv.tar.gz", "-C", "uv"], staging, knowledgeChildEnv(runtimeDir, options.env), bounded);
       if (!(await isFile(uvBin))) throw new Error(`the uv archive has no uv-${build.target}/uv`);
       await chmod(uvBin, 0o755);
     });
@@ -445,6 +447,7 @@ export async function installKnowledgeRuntime(
       "--python",
       join(venv, "bin", "python"),
       "--compile-bytecode",
+      "--no-build",
       ...requirements
     ]);
 
@@ -517,20 +520,35 @@ export async function installKnowledgeRuntime(
 
 /**
  * The `uv pip install` arguments for `release`: the shipped lock with every
- * hash when there is one for it; else its wheel by sha256, constrained to the
- * pinned lock's versions.
+ * hash when there is one for it; else its wheel by sha256, with every other
+ * entry of the pinned lock (version, marker and hashes) as a constraint. uv
+ * checks a constraint's hashes, and `--require-hashes` refuses a package with
+ * none, so no byte installs unverified on either path.
  */
 async function writeRequirements(staging: string, release: MykgRelease, locksDir: string): Promise<string[]> {
   const own = MYKG_LOCKS[release.version];
   if (own) return ["--require-hashes", "-r", join(locksDir, own)];
   const pinnedLock = MYKG_LOCKS[MYKG_PINNED_VERSION];
   if (!pinnedLock) throw new Error(`no lock for myKG ${MYKG_PINNED_VERSION}`);
-  const constraints = parseLockVersions(await readFile(join(locksDir, pinnedLock), "utf8")).filter(
-    (line) => !line.startsWith(`${MYKG_PACKAGE}==`)
-  );
-  await writeFile(join(staging, "constraints.txt"), `${constraints.join("\n")}\n`);
+  const constraints = lockWithout(await readFile(join(locksDir, pinnedLock), "utf8"), MYKG_PACKAGE);
+  await writeFile(join(staging, "constraints.txt"), constraints);
   await writeFile(join(staging, "requirements.txt"), `${MYKG_PACKAGE}==${release.version} --hash=sha256:${release.wheelSha256}\n`);
-  return ["-r", join(staging, "requirements.txt"), "-c", join(staging, "constraints.txt")];
+  return ["--require-hashes", "-r", join(staging, "requirements.txt"), "-c", join(staging, "constraints.txt")];
+}
+
+/** A hashed lock without `name`'s entry (its requirement line and the continuation lines under it) and comments. */
+export function lockWithout(lock: string, name: string): string {
+  const out: string[] = [];
+  let dropping = false;
+  for (const line of lock.split(/\r?\n/)) {
+    if (line.startsWith(" ") || line.startsWith("\t")) {
+      if (!dropping) out.push(line);
+      continue;
+    }
+    dropping = line.startsWith(`${name}==`) || line.startsWith("#");
+    if (!dropping && line.trim() !== "") out.push(line);
+  }
+  return `${out.join("\n")}\n`;
 }
 
 /** `name==version[ ; marker]` of every requirement in a hashed lock (hashes and comments dropped). */
@@ -692,9 +710,9 @@ async function step<T>(
   }
 }
 
-function runTar(args: string[], cwd: string, signal: AbortSignal): Promise<void> {
+function runTar(args: string[], cwd: string, env: NodeJS.ProcessEnv, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
-    execFile("tar", args, { cwd, signal, windowsHide: true, maxBuffer: 4 * 1024 * 1024 }, (error, _stdout, stderr) => {
+    execFile("tar", args, { cwd, env, signal, windowsHide: true, maxBuffer: 4 * 1024 * 1024 }, (error, _stdout, stderr) => {
       if (error) {
         const detail = String(stderr).trim().split(/\r?\n/)[0];
         reject(new Error(detail ? `tar failed: ${detail}` : `tar failed: ${error.message}`));
