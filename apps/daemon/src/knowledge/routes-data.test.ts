@@ -219,9 +219,21 @@ test("collections: list with counts and profiles, create, rename, delete (relabe
   assert.equal(list.totalEntries, 3);
 
   h.state.visibilities.set("seo-chat", { kind: "collections", ids: [seo.id] });
-  const scoped = ok<KnowledgeCollectionsResponse>(await h.inject({ method: "GET", url: `${knowledgeRoutes.collections}?sessionId=seo-chat` }));
-  assert.deepEqual(scoped.collections.map((c) => c.name), ["SEO"]);
-  assert.equal(scoped.totalEntries, 1);
+  // A profile chat still lists EVERY collection (spec "Agent tools": knowledge_collections is for
+  // choosing where to save, and goal 3: it may save into collections it cannot see); only the
+  // entries it can see are counted as its total.
+  for (const asks of [{ url: `${knowledgeRoutes.collections}?sessionId=seo-chat` }, { url: knowledgeRoutes.collections, headers: { "x-test-agent": "seo-chat" } }]) {
+    const scoped = ok<KnowledgeCollectionsResponse>(await h.inject({ method: "GET", ...asks }));
+    assert.deepEqual(
+      scoped.collections.map((c) => [c.name, c.entryCount]),
+      [
+        ["SEO", 1],
+        ["SaaS", 2]
+      ]
+    );
+    assert.equal(scoped.totalEntries, 1);
+    assert.equal(scoped.unfiledCount, 0);
+  }
   refused(await h.inject({ method: "GET", url: `${knowledgeRoutes.collection(saas.id)}?sessionId=seo-chat` }), 404, "KNOWLEDGE_NOT_FOUND");
 
   const created = ok<KnowledgeCollectionView>(
