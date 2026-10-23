@@ -45,6 +45,9 @@ import { takeBoxesSettingsFocus, useBoxesSettingsFocus } from "../../lib/boxes/h
 // boxes: a plugin's per-box tooling installs that failed (Status).
 import { useBoxes } from "../../lib/boxes/store";
 import { pluginBoxIssues, type PluginBoxIssue } from "./plugins.logic";
+// knowledge: the Knowledge Graph plugin's Activity and indexing settings.
+import { KNOWLEDGE_GRAPH_PLUGIN_ID } from "@orquester/api";
+import { KnowledgePluginSection } from "../knowledge/KnowledgePluginSection";
 
 /** What each built-in plugin's icon tile shows. */
 const PLUGIN_GLYPH: Record<PluginId, React.ReactNode> = {
@@ -506,6 +509,7 @@ const PluginDetail: React.FC<{
 
       {plugin.id === SECRET_FILES_PLUGIN_ID && <SecretFilesPluginSection enabled={plugin.enabled} />}
       {plugin.id === EPHEMERAL_VMS_PLUGIN_ID && <BoxesPluginSection enabled={plugin.enabled} />}
+      {plugin.id === KNOWLEDGE_GRAPH_PLUGIN_ID && <KnowledgePluginSection enabled={plugin.enabled} />}
 
       <SettingsSection title="Settings">
         <SettingRow
