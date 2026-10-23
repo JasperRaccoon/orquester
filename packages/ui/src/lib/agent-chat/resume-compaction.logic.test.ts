@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { resumeCompactionOffer, resumeCompactionWakeAt, sendAfterCompaction, type ResumeCompactionInput } from "./resume-compaction.logic";
+import { compactsBeforeSend, resumeCompactionOffer, resumeCompactionWakeAt, sendAfterCompaction, type ResumeCompactionInput } from "./resume-compaction.logic";
 
 const EXPIRES = "2026-10-22T11:00:00.000Z";
 const EXPIRES_MS = Date.parse(EXPIRES);
@@ -60,4 +60,16 @@ test("a send under the offer compacts first, and a refused compaction still send
   assert.deepEqual(calls, ["send"]);
   // A failed send is the caller's to handle.
   await assert.rejects(sendAfterCompaction(false, async () => undefined, async () => Promise.reject(new Error("refused"))));
+});
+
+test("a typed /compact, bare or instructed, never gets a bare compaction first", () => {
+  const offered = { offered: true, keepFullHistory: false };
+  for (const text of ["hello", "/compactfoo", "/review the diff"]) {
+    assert.equal(compactsBeforeSend({ ...offered, text }), true, text);
+  }
+  for (const text of ["/compact", "/COMPACT", "  /compact keep the API notes", "/compact\n  tests"]) {
+    assert.equal(compactsBeforeSend({ ...offered, text }), false, JSON.stringify(text));
+  }
+  assert.equal(compactsBeforeSend({ offered: true, keepFullHistory: true, text: "hello" }), false, "Full");
+  assert.equal(compactsBeforeSend({ offered: false, keepFullHistory: false, text: "hello" }), false, "no offer");
 });
