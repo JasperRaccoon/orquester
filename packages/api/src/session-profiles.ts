@@ -28,6 +28,7 @@ import {
   type McpServerDraft,
   type McpServerView
 } from "./agent-profile.ts";
+import { KNOWLEDGE_COLLECTIONS_MAX } from "./knowledge.ts";
 
 // ---------------------------------------------------------------------------
 // Agents, kinds, scope
@@ -100,13 +101,26 @@ export interface SessionProfileSettings {
   hideBuiltinSkills: Record<SessionProfileAgentId, boolean>;
   /** Claude: keep the Workflow tool (and its `workflow-authoring` skill). Default `true`. */
   claudeWorkflowTool: boolean;
+  /**
+   * Knowledge Graph plugin (`knowledge.ts`): the collection ids this profile's chats see. Absent
+   * (an older daemon, or never set) = none ticked: the chat sees no collection, though it can still
+   * save. Ids of collections deleted since are kept and ignored.
+   */
+  knowledgeCollections?: string[];
 }
 
 /** A settings change: only the fields (and agents) named are changed. */
 export interface SessionProfileSettingsDraft {
   hideBuiltinSkills?: Partial<Record<SessionProfileAgentId, boolean>>;
   claudeWorkflowTool?: boolean;
+  /** Replaces the whole list (`[]` = none ticked). At most {@link SESSION_PROFILE_KNOWLEDGE_COLLECTIONS_MAX}. */
+  knowledgeCollections?: string[];
 }
+
+/** The most collection ids one profile ticks: the plugin's own cap on collections. */
+export const SESSION_PROFILE_KNOWLEDGE_COLLECTIONS_MAX = KNOWLEDGE_COLLECTIONS_MAX;
+/** A collection id as a profile stores it: one safe token (`kc_…`), never a path or a name. */
+export const SESSION_PROFILE_KNOWLEDGE_COLLECTION_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 
 export const SESSION_PROFILE_DEFAULT_SETTINGS: SessionProfileSettings = {
   hideBuiltinSkills: { claude: true, codex: true, grok: true, opencode: true },

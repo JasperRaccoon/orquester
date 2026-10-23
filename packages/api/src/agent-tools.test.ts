@@ -9,15 +9,15 @@ import { ADMIN_FAMILIES, APPROVAL_FAMILIES } from "./agent-chat/tool-approvals.t
 import { SESSION_TOOL_NAME_PATTERN } from "./agent-chat/session-tools.ts";
 import { agentToolsRoutes, chatToolNames, GRANT_TABLE, grantOptionsFor, TOOLSET_IDS, TOOLSETS, toolsetOfTool } from "./agent-tools.ts";
 
-test("the catalogue: 54 chat tools in their groups, unique valid names; no switch, no request_toolset", () => {
+test("the catalogue: 60 chat tools in their groups, unique valid names; no switch, no request_toolset", () => {
   const names = chatToolNames();
-  assert.equal(names.length, 54);
-  assert.equal(new Set(names).size, 54);
+  assert.equal(names.length, 60);
+  assert.equal(new Set(names).size, 60);
   for (const name of names) assert.match(name, SESSION_TOOL_NAME_PATTERN);
   assert.deepEqual(TOOLSETS.map((toolset) => toolset.id), [...TOOLSET_IDS]);
   assert.deepEqual(
     TOOLSETS.map((toolset) => [toolset.id, toolset.tools.length]),
-    [["core", 16], ["reads", 5], ["notes", 3], ["chat-extras", 6], ["files-git", 2], ["workflow-authoring", 9], ["agent-profile-editing", 1], ["desktops", 2], ["secret-files", 2], ["boxes", 8]]
+    [["core", 16], ["reads", 5], ["notes", 3], ["chat-extras", 6], ["files-git", 2], ["workflow-authoring", 9], ["agent-profile-editing", 1], ["desktops", 2], ["secret-files", 2], ["boxes", 8], ["knowledge", 6]]
   );
   // A group is a label: nothing on it turns its tools on or off.
   for (const toolset of TOOLSETS) assert.deepEqual(Object.keys(toolset).sort(), ["id", "label", "tools"], toolset.id);

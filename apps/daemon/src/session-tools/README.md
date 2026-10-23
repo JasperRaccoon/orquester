@@ -67,6 +67,8 @@ No dynamic `import()` either.
 | `agent-profile-editing` | `edit_agent_profile` (1) |
 | `desktops` | `get_desktops`, `control_desktop` (2) |
 | `secret-files` | `secret_files_status`, `push_secret_files` (2) |
+| `boxes` | the temporary-box tools (8), advertised only while a box can be rented |
+| `knowledge` | `knowledge_search`, `knowledge_get`, `knowledge_save`, `knowledge_collections`, `knowledge_worker_next_task`, `knowledge_worker_submit` (6), advertised only while the Knowledge Graph plugin is on — search and get only to a chat that sees a collection, the worker tools only (and alone) to the plugin's own indexing sessions |
 
 46 chat tools (the 42 external ones plus `html_preview`, `html_render`, `request_secret`, `push_secret_files`), **all
 advertised to every chat** of every agent. A toolset is only a group: a label in `@orquester/api`
@@ -125,9 +127,15 @@ scope) to every gated call's result, which the tool row shows.
 
 ## The instruction block (§10)
 
-Composed per thread by the manifest (`instructions.ts`): the fixed part (§10, 1 445 bytes), then,
-for a workflow-owned chat, the workflow-owned line. Every tool is on, so the block never lists tools
-that are off. Worst case ≤ 2 048 bytes (`instructions.test.ts`). Every tool
+Composed per thread by the manifest (`instructions.ts`): the fixed part (§10, 1 951 bytes), then,
+for a workflow-owned chat, the workflow-owned line, then — Knowledge Graph plugin on, the chat sees at
+least one collection — the knowledge line naming them (`Knowledge: SEO, Ads. Search it
+(knowledge_search) before deciding on these topics.`, ≤ 256 bytes, extra names as "… (+N more)").
+Every tool is on, so the block never lists tools that are off. Worst case ≤ 2 048 bytes, + 256 only
+with the knowledge line (`instructions.test.ts`). A knowledge worker session gets a one-line block
+naming its two tools instead. The line rides in `instructions`, so no host change was needed; it is
+rebuilt with every manifest, and the daemon pushes new ones when the plugin, the collections or a
+profile's `knowledgeCollections` change. Every tool
 name the block, the descriptions and the daemon's answers mention exists for the chat audience
 (`mcp/catalog/names.test.ts`).
 

@@ -35,6 +35,8 @@ import {
   isValidCommandName,
   isValidMcpServerName,
   isValidSkillName,
+  SESSION_PROFILE_KNOWLEDGE_COLLECTION_ID_PATTERN,
+  SESSION_PROFILE_KNOWLEDGE_COLLECTIONS_MAX,
   sessionProfileScopeProblem,
   type HookDraft,
   type McpServerDraft,
@@ -1347,7 +1349,27 @@ function mergeSettings(record: SessionProfileSettingsRecord, draft: SessionProfi
     next.hideBuiltinSkills = hide;
   }
   if (draft.claudeWorkflowTool !== undefined) next.claudeWorkflowTool = draft.claudeWorkflowTool;
+  if (draft.knowledgeCollections !== undefined) next.knowledgeCollections = knowledgeCollectionIds(draft.knowledgeCollections);
   return next;
+}
+
+/**
+ * Knowledge Graph: a profile's ticked collection ids, checked and deduplicated (order kept). Ids
+ * are never checked against the collections that exist: a collection deleted later stays listed
+ * and is ignored (`resolveSessionProfileSettings`), and an export carries ids from its server.
+ */
+function knowledgeCollectionIds(ids: readonly string[]): string[] {
+  if (!Array.isArray(ids)) throw errors.invalid("settings.knowledgeCollections must be an array of collection ids.");
+  const unique = [...new Set(ids)];
+  if (unique.length > SESSION_PROFILE_KNOWLEDGE_COLLECTIONS_MAX) {
+    throw errors.invalid(`settings.knowledgeCollections names more than ${SESSION_PROFILE_KNOWLEDGE_COLLECTIONS_MAX} collections.`);
+  }
+  for (const id of unique) {
+    if (typeof id !== "string" || !SESSION_PROFILE_KNOWLEDGE_COLLECTION_ID_PATTERN.test(id)) {
+      throw errors.invalid("settings.knowledgeCollections holds a value that is not a collection id.");
+    }
+  }
+  return unique;
 }
 
 function validateMcpDraft(draft: McpServerDraft): McpServerDraft {

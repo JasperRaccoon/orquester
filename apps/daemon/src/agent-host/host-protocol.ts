@@ -417,7 +417,10 @@ export interface SessionToolsManifestRequest {
 export interface SessionToolsManifest {
   /** The chat tools to advertise, by bare name (the host filters its static catalog by them). */
   tools: string[];
-  /** The "Orquester" instruction block for this thread (spec §10, ≤ 2 048 bytes). */
+  /**
+   * The "Orquester" instruction block for this thread (spec §10, ≤ 2 048 bytes; ≤ 2 304 when it
+   * ends with the Knowledge Graph plugin's knowledge line). The host passes it on as it came.
+   */
   instructions: string;
   /**
    * MCP server names, as the thread's CLI config names them, to deny in this chat: every server of

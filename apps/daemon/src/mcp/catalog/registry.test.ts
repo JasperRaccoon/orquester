@@ -5,8 +5,9 @@
  * (the agent host loads it statically); only the executor runs a tool; and the byte budgets,
  * measured on `tools/list` exactly as an MCP client receives it — for every tool, no exemption.
  *
- * Counts (spec §1.4, §9.1): 42 external tools, 54 chat tools (42 shared + 12 chat-only), every one
- * of them advertised to every chat (toolsets only group them).
+ * Counts (spec §1.4, §9.1): 42 external tools, 60 chat tools (42 shared + 18 chat-only), every one
+ * of them advertised to every chat (toolsets only group them) — but the box tools while a box can be
+ * rented and the knowledge tools while the Knowledge Graph plugin is on.
  */
 
 import assert from "node:assert/strict";
@@ -43,7 +44,14 @@ const CHAT_ONLY = [
   "box_upload",
   "box_download",
   "box_forward_port",
-  "destroy_box"
+  "destroy_box",
+  // Knowledge Graph plugin (its spec, "Agent tools").
+  "knowledge_search",
+  "knowledge_get",
+  "knowledge_save",
+  "knowledge_collections",
+  "knowledge_worker_next_task",
+  "knowledge_worker_submit"
 ];
 
 test("names, audiences, toolsets, tiers: well-formed and unique; Admin-capable tools carry a family and a preview", () => {
@@ -93,15 +101,15 @@ test("TOOLSETS agree with the catalog: every chat tool sits in the toolset TOOLS
   assert.deepEqual([...chatToolNames()].sort(), catalogFor("chat").map((tool) => tool.name).sort());
 });
 
-test("counts: 42 external, 54 chat (the 42 plus 12 chat-only), 16 in core", () => {
+test("counts: 42 external, 60 chat (the 42 plus 18 chat-only), 16 in core", () => {
   const external = catalogFor("external").map((tool) => tool.name);
   const chat = catalogFor("chat").map((tool) => tool.name);
   assert.equal(external.length, 42);
-  assert.equal(chat.length, 54);
+  assert.equal(chat.length, 60);
   assert.deepEqual(externalMcpToolNames(), external);
   assert.deepEqual(chat.filter((name) => !external.includes(name)), CHAT_ONLY);
   assert.deepEqual(external.filter((name) => !chat.includes(name)), [], "every external tool is a chat tool too");
-  assert.equal(CATALOG.length, 54);
+  assert.equal(CATALOG.length, 60);
   assert.equal(toolByName("request_toolset", "chat"), undefined);
   assert.equal(catalogFor("chat").filter((tool) => tool.toolset === "core").length, 16);
 });
@@ -177,6 +185,8 @@ const PURE_MODULES = new Set([
   "mcp/tools/desktops.ts",
   "mcp/tools/files.ts",
   "mcp/tools/git.ts",
+  // Knowledge Graph: the knowledge tools (DaemonApi only).
+  "mcp/tools/knowledge.ts",
   "mcp/tools/lineage.ts",
   "mcp/tools/messages.ts",
   "mcp/tools/notify.ts",
@@ -341,11 +351,19 @@ test("byte budgets (§9.5): every tool, every description and field text; the ex
     } else {
       // Every chat gets every chat tool: the whole chat set, as the host serves it (compacted), is the one budget (≤ 56 KiB).
       // boxes: the `boxes` toolset is advertised only while a box can be rented, on a budget of its own (≤ 6 KiB).
+      // Knowledge Graph: the `knowledge` toolset only while the plugin is on, on budgets of its own: a
+      // chat's four tools ≤ 4.5 KiB (4 196 measured); a worker session gets the two worker tools ALONE, ≤ 1.25 KiB (1 035).
       assert.equal(rows.length, catalogFor("chat").length);
+      const added = (subset: typeof rows) => subset.reduce((sum, row) => sum + row.bytes + 1, 0);
       const boxRows = rows.filter((row) => toolByName(row.name)!.toolset === "boxes");
-      const baseRows = rows.filter((row) => toolByName(row.name)!.toolset !== "boxes");
+      const knowledgeRows = rows.filter((row) => toolByName(row.name)!.toolset === "knowledge");
+      const workerRows = knowledgeRows.filter((row) => row.name.startsWith("knowledge_worker_"));
+      const baseRows = rows.filter((row) => !["boxes", "knowledge"].includes(toolByName(row.name)!.toolset));
       assert.ok(total(baseRows) <= 57_344, `chat tools/list is ${total(baseRows)} bytes`);
-      assert.ok(boxRows.reduce((sum, row) => sum + row.bytes + 1, 0) <= 6_144, `the box tools add ${boxRows.reduce((sum, row) => sum + row.bytes + 1, 0)} bytes`);
+      assert.ok(added(boxRows) <= 6_144, `the box tools add ${added(boxRows)} bytes`);
+      assert.equal(workerRows.length, 2);
+      assert.ok(added(knowledgeRows.filter((row) => !workerRows.includes(row))) <= 4_608, `the knowledge tools add ${added(knowledgeRows.filter((row) => !workerRows.includes(row)))} bytes`);
+      assert.ok(total(workerRows) <= 1_280, `a worker session's tools/list is ${total(workerRows)} bytes`);
       for (const row of rows) assert.equal((row.listed as { _meta?: unknown })._meta, undefined, "chat entries carry no _meta");
     }
   }
