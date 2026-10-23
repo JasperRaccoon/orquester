@@ -94,6 +94,44 @@ describe("credential redaction", () => {
   });
 });
 
+describe("redactCredentialText: more credential formats", () => {
+  const cases: [string, string][] = [
+    [`key=sk_live_${"a1B2".repeat(6)}`, "key=[redacted]"],
+    [`sk_test_${"Z9".repeat(12)} and rk_live_${"x".repeat(24)} and rk_test_${"Q".repeat(20)}`, "[redacted] and [redacted] and [redacted]"],
+    [`maps AIza${"Sy-_09ab".repeat(4)}abc done`, "maps [redacted] done"],
+    [`//registry.npmjs.org/:_authToken=npm_${"A1".repeat(18)}`, "//registry.npmjs.org/:_authToken=[redacted]"],
+    [`HF_TOKEN=hf_${"aBcD1234".repeat(4)}x`, "HF_TOKEN=[redacted]"],
+    [`slack xapp-1-A0123BCDEF-1234567890-${"f".repeat(64)}`, "slack [redacted]"],
+    ["clone https://deploy:s3cr3t-P%40ss@git.example.com/r.git", "clone https://deploy:[redacted]@git.example.com/r.git"],
+    ["redis://default:hunter2hunter2@cache:6379/0", "redis://default:[redacted]@cache:6379/0"],
+    ["authorization: bearer abcdefghijklmnop1234", "authorization: bearer [redacted]"],
+    ["AUTHORIZATION: BEARER abcdefghijklmnop1234", "AUTHORIZATION: BEARER [redacted]"],
+    ["authorization: basic dXNlcjpwYXNz", "authorization: basic [redacted]"],
+    ["authorization=token 0123456789ab", "authorization=token [redacted]"]
+  ];
+  for (const [input, expected] of cases) {
+    it(`redacts ${expected.includes("://") ? "a URL password" : input.slice(0, 24)}`, () => {
+      assert.equal(redactCredentialText(input), expected);
+    });
+  }
+
+  it("leaves look-alikes and prose alone", () => {
+    for (const text of [
+      "the bearer of bad news",
+      "basic internationalization and token authentication",
+      "sk_live_short",
+      "AIza is not a key",
+      "npm_package_name and hf_home",
+      "https://example.com:8080/path?a=b@c",
+      "mail user@example.com or see https://user@example.com/",
+      "xapp-store is a word",
+      "a b test_sk_live_value"
+    ]) {
+      assert.equal(redactCredentialText(text), text, text);
+    }
+  });
+});
+
 describe("frameUntrustedValue", () => {
   it("redacts, defuses, escapes {variables} and frames; empty stays empty", () => {
     assert.equal(frameUntrustedValue("hi $x {diff}", FRAME), `${OPEN}hi $${WJ}x {{diff}}${CLOSE}`);
