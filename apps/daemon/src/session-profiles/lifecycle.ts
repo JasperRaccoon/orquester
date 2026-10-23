@@ -26,7 +26,8 @@
  * - **Leased GC.** A non-current version (or a legacy unversioned key dir) is removed only when
  *   {@link PreparedDirLeases.inUse} does not list it and it was not handed out by `ensureReady`
  *   within {@link SESSION_PROFILE_HANDOUT_GRACE_MS} (a launch between `ensureReady` and the host
- *   registering its session). Without a leases source, or when `inUse()` fails, nothing
+ *   registering its session). Without a leases source, while it is not `available()` (quietly:
+ *   the daemon's boot, before the host is adopted) or when `inUse()` fails, nothing
  *   non-current is removed. GC runs after each publish, on profile delete, after `start()`, when
  *   the leases become available again ({@link PreparedDirLeases.onAvailable}), every
  *   {@link SESSION_PROFILE_GC_INTERVAL_MS} after `start()` and on `gc()`; per key it runs in the
@@ -133,6 +134,13 @@ export interface SessionProfileReady {
 export interface PreparedDirLeases {
   /** Absolute versioned prepared dirs in use. Rejecting = unknown: GC removes nothing. */
   inUse(): Promise<ReadonlySet<string>>;
+  /**
+   * False while `inUse()` cannot answer yet for an expected reason — the agent host is not
+   * adopted (daemon boot) or is being replaced. A GC pass then skips quietly: the
+   * {@link onAvailable} edge runs it again, and a warning on every boot was a false alarm.
+   * Absent = always ask `inUse()`.
+   */
+  available?(): boolean;
   /**
    * Calls `listener` whenever `inUse()` may answer again after it could not (the agent host became
    * healthy, or another host instance took over); answers the unsubscribe. The lifecycle runs a
@@ -670,6 +678,8 @@ export class SessionProfileLifecycle {
   private async collectPass(keyDirs?: string[]): Promise<void> {
     const leases = this.options.leases;
     if (!leases) return;
+    // Not knowable yet (no healthy host): nothing is removed, and `onAvailable` collects again.
+    if (leases.available?.() === false) return;
     const read = async (): Promise<{ dirs: Set<string>; at: number }> => {
       const at = this.now().getTime();
       return { dirs: new Set([...(await leases.inUse())].map((path) => resolve(path))), at };

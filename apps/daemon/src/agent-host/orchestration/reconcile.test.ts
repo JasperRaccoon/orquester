@@ -777,7 +777,8 @@ describe("reconcile (§3.3)", () => {
       ["startSession", "sendTurn"]
     );
     // Both writes are on disk before the provider is touched at all.
-    const prepared = { turnId: "turn-1", prepared: true, markedAt: next.clock.nowIso() };
+    // An orphan no `/stop` handed over is an unexpected stop's: its resume is counted.
+    const prepared = { turnId: "turn-1", prepared: true, markedAt: next.clock.nowIso(), crashAttempt: 1 };
     assert.deepEqual(observed[0]?.marker, prepared);
     assert.equal(observed[0]?.bindingStatus, "starting");
     assert.equal(observed[0]?.headStatus, "starting");
@@ -1388,6 +1389,12 @@ describe("reconcile — a host start closes what a dead process left open", () =
       new Set(closingsIn(appended).map(([, taskId]) => taskId)),
       new Set(Array.from({ length: fleet }, (_, i) => `fleet-${i}`))
     );
+    // And one notice where the user reads, after every closing: the fleet died with the host.
+    const notice = appended.at(-1);
+    assert.ok(notice?.type === "thread.activity-appended");
+    assert.equal(notice.payload.activity.activityKind, "runtime.warning");
+    assert.equal(notice.payload.activity.summary, `${fleet} background tasks stopped with the agent host`);
+    assert.match(String((notice.payload.activity.payload as { detail?: unknown }).detail), /Agent \d+ \(agent\).*, and 97 more\./);
     const activities = snapshotItems(read).filter((item): item is ThreadActivityItem => item.kind === "activity");
     assert.deepEqual(
       foldSubagentActivities(activities, { sessionLive: true }).filter((row) => row.status === "running"),
@@ -1399,7 +1406,7 @@ describe("reconcile — a host start closes what a dead process left open", () =
     await third.orchestrator.reconcile();
     await third.orchestrator.readThread(threadId);
     await third.settle();
-    assert.equal(first.store.logs.get(threadId)!.length, logLength + fleet, "a second load appends nothing");
+    assert.equal(first.store.logs.get(threadId)!.length, logLength + fleet + 1, "a second load appends nothing");
     await third.stop();
   });
 });

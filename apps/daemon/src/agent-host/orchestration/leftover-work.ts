@@ -235,6 +235,38 @@ export function leftoverWorkClosings(
   return closings;
 }
 
+/** How many stopped tasks the notice names before it counts the rest. */
+const NOTICE_TASK_NAMES = 8;
+
+/**
+ * The one row a thread's first load writes after its closings when they
+ * stopped BACKGROUND work — a subagent, a background shell — that died with
+ * the process that ran it. Each closing already ends its roster row; this
+ * says it where the user reads, rather than leaving a fleet that vanished to
+ * be noticed in the roster. `null` when no task was closed.
+ */
+export function backgroundWorkStoppedNotice(
+  closings: readonly LeftoverClosing[]
+): { summary: string; detail: string } | null {
+  const names = closings
+    .filter((closing) => closing.key.startsWith("task:"))
+    .map((closing) => {
+      const payload = asRecord(closing.activity.payload) ?? {};
+      const name = nonBlank(payload.title) ?? nonBlank(payload.detail) ?? closing.key.slice("task:".length);
+      return payload.agentKind === "background" ? `${name} (background task)` : `${name} (agent)`;
+    });
+  if (names.length === 0) return null;
+  const listed = names.slice(0, NOTICE_TASK_NAMES).join(", ");
+  const more = names.length > NOTICE_TASK_NAMES ? `, and ${names.length - NOTICE_TASK_NAMES} more` : "";
+  return {
+    summary:
+      names.length === 1
+        ? "Background work stopped with the agent host"
+        : `${names.length} background tasks stopped with the agent host`,
+    detail: `The agent host stopped while this was still running, and it ended with it: ${listed}${more}. Ask the agent to start it again if it is still needed.`
+  };
+}
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)

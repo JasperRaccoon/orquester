@@ -1257,7 +1257,12 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // (down, restarting, an older host), and that GC pass then removes nothing.
     // `start()` below runs before the host is adopted: its pass removes nothing, so the lifecycle
     // collects again whenever a host becomes healthy (and on its own slow periodic pass).
-    leases: { inUse: () => agentChat.profileLeases(), onAvailable: (listener) => agentChat.onHostHealthy(listener) },
+    leases: {
+      inUse: () => agentChat.profileLeases(),
+      // Before the host is adopted the boot pass skips quietly instead of warning "not running".
+      available: () => agentChat.isHostHealthy(),
+      onAvailable: (listener) => agentChat.onHostHealthy(listener)
+    },
     logger: console
   });
   // Filling profiles (spec §4.5): Import from Global through Agent config (copies; Global is never

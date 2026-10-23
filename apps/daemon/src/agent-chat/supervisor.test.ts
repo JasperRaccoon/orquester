@@ -347,6 +347,66 @@ test("case 3: a version mismatch with an ACTIVE turn adopts and waits", async ()
   await h.cleanup();
 });
 
+test("boot logs one line naming the host it adopted or spawned", async () => {
+  const adopted = await makeHarness([healthy({ codeStamp: "a".repeat(64) })], {
+    seedToken: "tok",
+    tmux: true,
+    codeStamp: "a".repeat(64)
+  });
+  await adopted.supervisor.init();
+  assert.deepEqual(
+    adopted.logs.filter((line) => line.startsWith("agent host adopted")),
+    [`agent host adopted: instance host-1, pid 4242, code ${"a".repeat(12)}`]
+  );
+  await adopted.cleanup();
+
+  const spawned = await makeHarness([{ ok: false, reachable: false }, healthy({ instance: "host-9" })], { tmux: true });
+  await spawned.supervisor.init();
+  assert.deepEqual(
+    spawned.logs.filter((line) => line.startsWith("agent host spawned") || line.startsWith("agent host adopted")),
+    ["agent host spawned: instance host-9, pid 4242, code unknown"]
+  );
+  await spawned.cleanup();
+});
+
+test("a completed drain-restart logs the code it moved from and to", async () => {
+  const h = await makeHarness([], { seedToken: "tok", tmux: true, codeStamp: "b".repeat(64) });
+  h.probeHook = () =>
+    h.spawns.length === 0
+      ? healthy({ codeStamp: "a".repeat(64) })
+      : healthy({ instance: "host-2", codeStamp: "b".repeat(64) });
+  await h.supervisor.init();
+  assert.deepEqual(
+    h.logs.filter((line) => line.startsWith("agent host restarted")),
+    [`agent host restarted: code ${"a".repeat(12)} → ${"b".repeat(12)}, instance host-2, pid 4242`]
+  );
+  await h.cleanup();
+});
+
+test("a restart deferred for 6 h warns, then once per 6 h — never per tick", async () => {
+  const h = await makeHarness([], { seedToken: "tok", tmux: true });
+  h.probeHook = mismatchUntilReplaced(h, ["thread-1"]);
+  await h.supervisor.init();
+  const warnings = () => h.logs.filter((line) => line.startsWith("agent host restart pending"));
+  const tick = async (ms: number) => {
+    h.advance(ms);
+    await h.supervisor.checkHealth();
+  };
+  for (let i = 0; i < 23; i += 1) {
+    await tick(15 * 60_000);
+  }
+  assert.deepEqual(warnings(), [], "under 6 h: the deferral line alone");
+  await tick(15 * 60_000);
+  assert.equal(warnings().length, 1);
+  assert.match(warnings()[0]!, /^agent host restart pending for 6 h: 1 thread\(s\) with an active turn/);
+  for (let i = 0; i < 20; i += 1) await tick(15_000);
+  assert.equal(warnings().length, 1, "not repeated on every tick");
+  await tick(6 * 3_600_000);
+  assert.equal(warnings().length, 2, "repeated once the next 6 h have passed");
+  assert.equal(h.spawns.length, 0, "and still never restarted under a running turn");
+  await h.cleanup();
+});
+
 test("case 4: a token rejection from a process that is not ours is FOREIGN — never killed", async () => {
   const h = await makeHarness([{ ok: false, reachable: true, rejected: true }], {
     seedToken: "tok",

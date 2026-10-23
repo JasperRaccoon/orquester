@@ -19,6 +19,12 @@ Use the repository-root `./deploy.sh` for provisioning and deployment commands.
   First-time provisioning runs it, so any **new** VPS gets session dev tooling + scoped sudo out of
   the box. Idempotent — re-run to catch up an **existing** VPS, then `systemctl daemon-reload && systemctl restart orquester`.
 - `install-go.sh` → installs the pinned Go toolchain that builds `orq-agent` (see below); run as root.
+- `install-unit.sh` → installs `orquester.service` (with `systemctl daemon-reload` when it changed)
+  and `/etc/needrestart/conf.d/orquester.conf` (`$nrconf{override_rc}{qr(^orquester\.service$)} = 0;`,
+  checked with `perl -c` first), so needrestart never restarts the daemon after an apt upgrade. Run as
+  root from the checkout; idempotent; it never restarts anything itself. Provisioning and every
+  deploy run it before their own (re)start, so a changed unit — e.g. `OOMPolicy=continue`, which keeps
+  one OOM-killed agent process from stopping the whole unit — applies at the deploy's restart.
 - `devtools-user.sh` → user-space tool installer (no root); also runnable from a session to refresh
   `uv`/`cargo-audit` in the appdir.
 - `sudoers.d/orquester-pkg` → scoped passwordless sudo (`apt`/`apt-get`/`dpkg`) for the service user.

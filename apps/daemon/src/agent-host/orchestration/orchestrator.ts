@@ -122,6 +122,9 @@ import {
   CONTINUATION_PROMPT,
   CONTINUATION_SEND_FAILED_MESSAGE,
   COMPACTION_FAILED_MESSAGE,
+  CRASH_RESUME_LIMIT_MESSAGE,
+  CRASH_RESUME_SUMMARY,
+  crashResumeDetail,
   type CreateHostThreadRequest,
   type ForkHostThreadRequest,
   type ForkHostThreadResponse,
@@ -181,7 +184,12 @@ import {
   threadNotFound
 } from "./errors.ts";
 import { applyEventsChunked } from "./fold-ops.ts";
-import { legacyLaunchStarts, leftoverWorkClosings } from "./leftover-work.ts";
+import {
+  backgroundWorkStoppedNotice,
+  legacyLaunchStarts,
+  leftoverWorkClosings,
+  type LeftoverClosing
+} from "./leftover-work.ts";
 import {
   launchConfigFromRequest,
   parseHostThreadProfile,
@@ -427,6 +435,13 @@ interface ThreadRuntime {
    */
   continueAfterRestart: ThreadHead["continueAfterRestart"];
   /**
+   * Crash-safe resume (§3.3), head-only like {@link continueAfterRestart}: the
+   * running continuation this host started after the previous host stopped
+   * unexpectedly, and how many such resumes in a row it is — so a turn that
+   * keeps taking the host down is resumed a bounded number of times.
+   */
+  crashResumedTurn: ThreadHead["crashResumedTurn"];
+  /**
    * Goals §5.5, head-only like {@link continueAfterRestart}: the handover
    * found this thread's goal continuing, so this host resumes its provider
    * session after the gate opens — and the summary keeps the goal
@@ -627,6 +642,14 @@ const EMPTY_LOG_DERIVED: LogDerived = { revertedTo: null, titleManual: false };
  * the provider.
  */
 const PENDING_TURN_GRACE_MS = 5 * 60_000;
+
+/**
+ * Crash-safe resume (§3.3): how many automatic resumes in a row one piece of
+ * work gets after unexpected host stops. A host that dies again while it
+ * resumes — or during the resumed turn — counts on; past this the turn is
+ * settled instead, so a turn that keeps taking the host down never loops.
+ */
+const MAX_CRASH_RESUME_ATTEMPTS = 2;
 
 /**
  * Goals §5.7: the row a goal held for a deploy leaves on its timeline, the one
@@ -1186,6 +1209,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       captures: createSerialQueue(),
       state,
       continueAfterRestart: persistedHead?.continueAfterRestart,
+      crashResumedTurn: persistedHead?.crashResumedTurn,
       resumeGoalAfterRestart: persistedHead?.resumeGoalAfterRestart === true ? true : undefined,
       goalHeldForHandover: persistedHead?.goalHeldForHandover === true ? true : undefined,
       forkStrategy: persistedHead?.forkStrategy,
@@ -1246,6 +1270,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
    */
   const withHeadOnlyState = (runtime: ThreadRuntime, head: ThreadHead): ThreadHead =>
     runtime.continueAfterRestart === undefined &&
+    runtime.crashResumedTurn === undefined &&
     runtime.resumeGoalAfterRestart === undefined &&
     runtime.goalHeldForHandover === undefined &&
     runtime.forkStrategy === undefined
@@ -1255,6 +1280,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
           ...(runtime.continueAfterRestart !== undefined
             ? { continueAfterRestart: runtime.continueAfterRestart }
             : {}),
+          ...(runtime.crashResumedTurn !== undefined ? { crashResumedTurn: runtime.crashResumedTurn } : {}),
           ...(runtime.resumeGoalAfterRestart === true ? { resumeGoalAfterRestart: true } : {}),
           ...(runtime.goalHeldForHandover === true ? { goalHeldForHandover: true } : {}),
           ...(runtime.forkStrategy !== undefined ? { forkStrategy: runtime.forkStrategy } : {})
@@ -2424,6 +2450,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     runtime.watchdog = null;
     // The user ended the session: nothing of it is to be continued (§3.3).
     await dropContinuationMarker(runtime);
+    await dropCrashResume(runtime);
     // FIRST, before the host answers the session's cards: a card's cancel can
     // end the provider, and an adapter that must read what its provider
     // started while it lives — or mark the end as the user's — does it now
@@ -2624,6 +2651,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     // this one's place (§3.3).
     if (currentSession(runtime).activeTurnId === null) {
       await dropContinuationMarker(runtime);
+      await dropCrashResume(runtime);
     }
     try {
       await ensureSession(runtime, { pendingTurnStart: true });
@@ -6307,6 +6335,9 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
                 ) {
                   await dropContinuationMarker(runtime);
                 }
+                if (runtime.crashResumedTurn !== undefined && runtime.crashResumedTurn.turnId !== turnId) {
+                  await dropCrashResume(runtime);
+                }
                 // boxes: a live turn's start marks a box thread's turn for its config changes.
                 if (options.onTurnStarted !== undefined) {
                   try {
@@ -6327,6 +6358,10 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
               });
             } else if (event.type === "turn.completed" || event.type === "turn.aborted") {
               persistCursorAtTurnEnd(runtime);
+              // The crash-resumed turn ended: the next unexpected stop counts from one.
+              if (!isHistoricalRuntimeEvent(event) && runtime.crashResumedTurn?.turnId === turnId) {
+                await dropCrashResume(runtime);
+              }
               captureTurnEnd(runtime, turnId, turnOrdinalOf(runtime, turnId));
               // boxes: a live turn's end mirrors a box thread's transcript and config changes.
               if (!isHistoricalRuntimeEvent(event) && options.onTurnEnded !== undefined) {
@@ -6485,6 +6520,22 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       await writeMarker(runtime, undefined);
     } catch (error) {
       logger.warn(`agent-host: failed to clear the continuation marker on ${runtime.id}`, error);
+    }
+  };
+
+  /**
+   * Crash-safe resume (§3.3): the crash-resumed turn is over — it ended, a
+   * new turn started, the user ended the session — so the next unexpected
+   * stop counts from one again. Best-effort like the marker's drop: the
+   * reconcile only counts on while that very turn is still the running one.
+   */
+  const dropCrashResume = async (runtime: ThreadRuntime): Promise<void> => {
+    if (runtime.crashResumedTurn === undefined) return;
+    runtime.crashResumedTurn = undefined;
+    try {
+      await saveHeadNow(runtime);
+    } catch (error) {
+      logger.warn(`agent-host: failed to clear the crash-resume record on ${runtime.id}`, error);
     }
   };
 
@@ -6682,6 +6733,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     message: string,
     options: { settledAt?: string } = {}
   ): Promise<void> => {
+    runtime.crashResumedTurn = undefined;
     await writeMarker(runtime, undefined);
     // The binding follows the session (`status`), never the cursor: a thread
     // that could not be continued is still resumable by hand from the same
@@ -6800,6 +6852,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     try {
       if (!headOf(runtime) || runtime.deleted || hasLiveSession(runtime.id)) return;
       const closed = new Set<string>();
+      const appended: LeftoverClosing[] = [];
       for (;;) {
         const occurredAt = clock.nowIso();
         const closings = leftoverWorkClosings(runtime.state, {
@@ -6808,7 +6861,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
           closed,
           ...(runningTurnId !== undefined ? { runningTurnId } : {})
         });
-        if (closings.length === 0) return;
+        if (closings.length === 0) break;
         for (const closing of closings) closed.add(closing.key);
         await append(
           runtime,
@@ -6826,6 +6879,19 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
             )
           )
         );
+        appended.push(...closings);
+      }
+      // Background work that died with the process is said where the user
+      // reads, not only in the roster rows the closings just ended.
+      const notice = backgroundWorkStoppedNotice(appended);
+      if (notice !== null) {
+        await appendActivity(runtime, {
+          kind: "runtime.warning",
+          tone: "info",
+          summary: notice.summary,
+          detail: notice.detail,
+          ...(runningTurnId !== undefined ? { turnId: runningTurnId } : {})
+        });
       }
     } catch (error) {
       logger.warn(
@@ -7283,12 +7349,31 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         : marker.turnId === session.activeTurnId);
     const optIn = (await options.continuationEnabled?.(head.projectPath)) === true;
     const hasCursor = persistedResumeCursor(runtime, head) !== undefined;
-    const continuable =
-      !closed &&
-      hasCursor &&
-      (markerMatches || (optIn && session.status === "running" && session.activeTurnId !== null));
     // The turn a continuation continues: the running one, else the marker's.
     const turnId = session.activeTurnId ?? marker?.turnId;
+    // Crash-safe resume. A clean stop hands its running turns over: `/stop`
+    // marks them first (an unprepared marker naming the turn), and the
+    // teardown settles them. An orphan with no such marker — its head still
+    // reads running, or a resume was prepared and never finished — is what a
+    // host that stopped UNEXPECTEDLY leaves (a crash, an OOM kill, its tmux
+    // session killed): `meta.json` is rewritten on every session transition,
+    // so the head is the in-flight record. Such a resume is counted — the
+    // marker's `crashAttempt` while it is prepared, `crashResumedTurn` while
+    // the resumed turn runs — so work that keeps taking the host down is
+    // resumed at most MAX_CRASH_RESUME_ATTEMPTS times in a row, never in a
+    // loop; and it says so in the chat.
+    const handedOver = marker !== undefined && marker.prepared !== true && markerMatches;
+    const crashAttempt = handedOver ? null : priorCrashAttempts(head) + 1;
+    // A newer turn — the user's message after the one that was running — wins:
+    // the older turn is never continued in its place.
+    const superseded = typeof turnId === "string" && hasLaterTurn(runtime.state.turns, turnId);
+    const eligible =
+      !closed &&
+      hasCursor &&
+      !superseded &&
+      (markerMatches || (optIn && session.status === "running" && session.activeTurnId !== null));
+    const exhausted = eligible && crashAttempt !== null && crashAttempt > MAX_CRASH_RESUME_ATTEMPTS;
+    const continuable = eligible && !exhausted;
 
     // §3.4's bounded grace window. A `/turn` commits its message and its
     // pending turn row BEFORE the effect runs, so a host that dies in that
@@ -7318,8 +7403,12 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       // died, and nothing it did ran past that process's last line; the host
       // notices only now, so what it then writes — the error, and the closing
       // of the work the process left open — carries the clock's time. The
-      // settle comes first, so the log's times never go back.
-      await settleAsError(runtime, CONTINUATION_FAILED_MESSAGE, {
+      // settle comes first, so the log's times never go back. A turn whose
+      // automatic resumes after unexpected stops ran out says so instead.
+      if (exhausted) {
+        logger.warn(`agent-host: not resuming ${threadId} again: the agent host stopped unexpectedly ${crashAttempt! - 1} time(s) in a row while it ran`);
+      }
+      await settleAsError(runtime, exhausted ? CRASH_RESUME_LIMIT_MESSAGE : CONTINUATION_FAILED_MESSAGE, {
         settledAt: crashSettleAt(runtime)
       });
       // A parked request's cancellation rides the turn the head said was
@@ -7341,7 +7430,14 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     // resuming and sending is recovered by the next boot rather than looking
     // like a settled thread (*T3: `serverRuntimeStartup.ts:655-690`*).
     try {
-      await writeMarker(runtime, { turnId, prepared: true, markedAt: clock.nowIso() });
+      // An unexpected stop's resume carries its attempt, so a host that dies
+      // before the send below counts on from it.
+      await writeMarker(runtime, {
+        turnId,
+        prepared: true,
+        markedAt: clock.nowIso(),
+        ...(crashAttempt !== null ? { crashAttempt } : {})
+      });
       await upsertBinding(runtime, { status: "starting" });
       await persistSession(runtime, { ...session, status: "starting", activeTurnId: null });
     } catch (error) {
@@ -7351,6 +7447,23 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       logger.warn(`agent-host: failed to prepare the continuation of ${threadId}`, error);
       await settleAsError(runtime, CONTINUATION_FAILED_MESSAGE);
       return;
+    }
+
+    if (crashAttempt !== null) {
+      // The user is told: a turn picked up after a crash is not one they
+      // expect, unlike a deploy's handover. Best-effort — a lost note never
+      // stops the resume.
+      logger.info(`agent-host: resuming ${threadId} after an unexpected stop (attempt ${crashAttempt} of ${MAX_CRASH_RESUME_ATTEMPTS})`);
+      await appendActivity(runtime, {
+        kind: "runtime.warning",
+        tone: "info",
+        summary: CRASH_RESUME_SUMMARY,
+        detail: crashResumeDetail(crashAttempt, MAX_CRASH_RESUME_ATTEMPTS),
+        turnId,
+        payload: { crashResume: { attempt: crashAttempt, maxAttempts: MAX_CRASH_RESUME_ATTEMPTS } }
+      }).catch((error: unknown) => {
+        logger.warn(`agent-host: could not note the crash resume of ${threadId}`, error);
+      });
     }
 
     // 3. Forked: the loop only prepares the continuation (§3.3).
@@ -7382,7 +7495,11 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         // a turn resumed from a cursor is the case most likely to wedge — arm
         // the §3.1 watchdog for it too, or it has no liveness bound at all.
         watchdogFor(runtime);
-        // 4. Clear the marker on success.
+        // 4. Clear the marker on success — in the same head write, the
+        // crash resume's count moves onto the turn it started, so a host that
+        // dies during it counts on (`priorCrashAttempts`).
+        runtime.crashResumedTurn =
+          crashAttempt !== null ? { turnId: result.turnId, attempt: crashAttempt } : undefined;
         await writeMarker(runtime, undefined);
       } catch (error) {
         logger.warn(`agent-host: failed to continue ${threadId} after a restart`, error);
@@ -8000,6 +8117,36 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
  */
 function isOrphanedHead(head: ThreadHead, turns?: readonly Turn[]): boolean {
   return isLiveOrphan(head) || continuesSettledTurn(head, turns);
+}
+
+/**
+ * Crash-safe resume (§3.3): how many automatic resumes after unexpected stops
+ * this orphan's work has had in a row — the prepared marker's `crashAttempt`
+ * when a host died while it resumed, `crashResumedTurn` when it died during
+ * the resumed turn (only while that turn is still the running one). Zero for
+ * work no host resumed yet: a deploy's continuation that was cut short starts
+ * the count.
+ */
+function priorCrashAttempts(head: ThreadHead): number {
+  const marker = head.continueAfterRestart;
+  const fromMarker = marker?.prepared === true ? (marker.crashAttempt ?? 0) : 0;
+  const resumed = head.crashResumedTurn;
+  const fromTurn =
+    resumed !== undefined && resumed.turnId === head.session.activeTurnId ? resumed.attempt : 0;
+  return Math.max(fromMarker, fromTurn);
+}
+
+/**
+ * Whether the thread has a turn after `turnId` — one the user asked for after
+ * it, even one only requested. Positional, as the latest-turn summary reads
+ * turns; false for a turn the fold does not list.
+ */
+function hasLaterTurn(turns: readonly Turn[] | undefined, turnId: string): boolean {
+  const list = turns ?? [];
+  for (let index = list.length - 1; index >= 0; index -= 1) {
+    if (list[index]!.turnId === turnId) return index < list.length - 1;
+  }
+  return false;
 }
 
 /** A turn was in flight, or a continuation was prepared and never sent. */

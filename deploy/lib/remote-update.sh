@@ -83,6 +83,12 @@ if [ -f deploy/lib/ensure-public-url.sh ]; then
   $SUDO bash deploy/lib/ensure-public-url.sh "$ENV_FILE" "$DOMAIN" </dev/null
 fi
 
+# The unit and the needrestart exclusion, from this checkout: a changed unit is reloaded here and
+# applies at the restart below — nothing else is restarted. Refs from before the script skip it.
+if [ -f deploy/install-unit.sh ]; then
+  $SUDO bash deploy/install-unit.sh </dev/null
+fi
+
 $SUDO systemctl restart orquester
 # A loaded host can take well over 30 s to bring the daemon up; wait up to 2 min.
 curl -fsS --retry 120 --retry-delay 1 --retry-max-time 150 --retry-connrefused http://127.0.0.1:47831/health; echo

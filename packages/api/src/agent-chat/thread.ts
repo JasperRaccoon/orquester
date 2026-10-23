@@ -81,6 +81,26 @@ export interface ContinueAfterRestart {
    * `meta.json` still parses; an older host ignores it.
    */
   markedAt?: string;
+  /**
+   * Crash-safe resume (§3.3): this prepared continuation is the `crashAttempt`-th automatic
+   * resume in a row of work the agent host was running when it stopped unexpectedly. Absent for
+   * a deploy's handover. A host that dies again before the send finds it here and counts on, so
+   * a turn that keeps taking the host down is resumed a bounded number of times, never in a loop.
+   * Optional; an older host ignores it.
+   */
+  crashAttempt?: number;
+}
+
+/**
+ * Crash-safe resume (§3.3): the turn `turnId` is a continuation a host started automatically
+ * after the previous one stopped unexpectedly — the `attempt`-th in a row. A host that finds this
+ * turn still running at its next start (it died again) counts on from `attempt`. Head-only like
+ * {@link ContinueAfterRestart}; cleared when that turn ends, a new turn starts or the session is
+ * ended. An older host ignores it.
+ */
+export interface CrashResumedTurn {
+  turnId: string;
+  attempt: number;
 }
 
 /**
@@ -107,6 +127,8 @@ export interface ThreadHead {
   turnCount: number;
   seq: number;
   continueAfterRestart?: ContinueAfterRestart;
+  /** Crash-safe resume (§3.3): see {@link CrashResumedTurn}. Head-only. */
+  crashResumedTurn?: CrashResumedTurn;
   /**
    * Goals §5.5: the deploy handover found this thread's goal CONTINUING —
    * active on a provider that starts its own turns (Codex) — with a usable

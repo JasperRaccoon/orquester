@@ -86,6 +86,12 @@ const STARVED_HOST_PATIENCE_MS = 10 * 60_000;
  * teardown; ours is generous because a wedged child costs the full grace.
  */
 const HOST_EXIT_GRACE_MS = 30_000;
+
+/**
+ * A pending drain-restart deferred this long gets a warning, repeated once per
+ * this interval: a host that never drains keeps running old code silently.
+ */
+const RESTART_PENDING_WARN_MS = 6 * 60 * 60_000;
 const HOST_EXIT_POLL_MS = 100;
 
 /**
@@ -256,7 +262,7 @@ export interface SupervisorOptions {
   nodeBin: string;
   adapters: SupervisorAdapters;
   /**
-   * The commit the DAEMON's code was read from (`support/code-stamp.ts`). A
+   * The stamp of the agent-host code in the DAEMON's checkout (`support/code-stamp.ts`). A
    * healthy host reporting a different known stamp is a §3.1 case-3
    * drain-restart exactly like a protocol mismatch: after a deploy the old
    * host would otherwise keep running old code for as long as it lived.
@@ -308,6 +314,10 @@ export class AgentHostSupervisor {
   private firstMissAt = 0;
   /** The last logged reason a pending version restart was deferred. */
   private lastDrainDeferral: string | null = null;
+  /** When the pending restart was first deferred (adapter clock), or null while none waits. */
+  private pendingRestartSince: number | null = null;
+  /** When {@link warnIfRestartLongPending} last warned, or null. */
+  private lastPendingWarnAt: number | null = null;
   /** What the host a deploy waits on answered to its §5.7 goal hold ({@link GoalHoldState}). */
   private goalHold: GoalHoldState | null = null;
   /** The §5.7 hold request still waiting for its answer, if any: one at a time. */
@@ -407,6 +417,7 @@ export class AgentHostSupervisor {
 
       if (probed.ok) {
         this.adopt(probed.health);
+        this.log("log", `agent host adopted: ${describeHost(probed.health)}`);
         if (this.isStale(probed.health)) {
           // Case 3. Adopt now — every in-flight turn keeps running — and hand
           // over as soon as no thread has an active turn or live background
@@ -438,7 +449,9 @@ export class AgentHostSupervisor {
       // Case 5 (and "answers but unhealthy"): spawn and poll readiness. Kill a
       // leftover service session first so a wedged host cannot hold the socket.
       const leftover = (await this.opts.adapters.tmux?.hasServiceSession(AGENT_HOST_SERVICE_SESSION)) ?? false;
-      await this.spawnAndWait(leftover || (probed.ok === false && probed.reachable));
+      if (await this.spawnAndWait(leftover || (probed.ok === false && probed.reachable)) && this.health !== null) {
+        this.log("log", `agent host spawned: ${describeHost(this.health)}`);
+      }
     });
   }
 
@@ -684,6 +697,7 @@ export class AgentHostSupervisor {
         this.lastDrainDeferral = blockers;
         this.log("log", `agent host restart deferred: ${blockers}`);
       }
+      this.warnIfRestartLongPending(blockers);
       // Agent goals §5.7. A continuing Codex goal starts its next turn within
       // milliseconds of the last, so `activeTurnThreadIds` is almost never
       // empty and this drain used to wait out the whole goal — hours. Ask the
@@ -913,12 +927,20 @@ export class AgentHostSupervisor {
       // by {@link HOST_EXIT_GRACE_MS}.
       await this.awaitHostExit();
     }
+    const previousCode = this.health?.codeStamp ?? null;
     this.pendingVersionRestart = false;
+    this.pendingRestartSince = null;
     const ready = await this.spawnAndWait(true);
     if (!ready) {
       this.setState("error", "replacement agent host never reached readiness");
       this.log("error", "agent host restart did not switch: the replacement never became ready");
       return;
+    }
+    if (this.health !== null) {
+      this.log(
+        "log",
+        `agent host restarted: code ${shortStamp(previousCode)} → ${shortStamp(this.health.codeStamp)}, instance ${this.health.hostInstanceId}, pid ${this.health.pid}`
+      );
     }
     await this.resumeLegacyGoalSessions();
   }
@@ -1089,8 +1111,30 @@ export class AgentHostSupervisor {
     this.missedProbes = 0;
     if (!this.isStale(health)) {
       this.pendingVersionRestart = false;
+      this.pendingRestartSince = null;
     }
     this.setState("healthy", null);
+  }
+
+  /**
+   * A drain-restart deferred for {@link RESTART_PENDING_WARN_MS} or longer is
+   * worth a warning — the host keeps running old code for as long as it waits
+   * — once per that interval, never per 15 s tick. The clock starts at the
+   * first deferred evaluation and stops when the restart happens or is no
+   * longer needed.
+   */
+  private warnIfRestartLongPending(blockers: string): void {
+    const now = this.opts.adapters.now();
+    if (this.pendingRestartSince === null) {
+      this.pendingRestartSince = now;
+      this.lastPendingWarnAt = null;
+      return;
+    }
+    const pendingMs = now - this.pendingRestartSince;
+    if (pendingMs < RESTART_PENDING_WARN_MS) return;
+    if (this.lastPendingWarnAt !== null && now - this.lastPendingWarnAt < RESTART_PENDING_WARN_MS) return;
+    this.lastPendingWarnAt = now;
+    this.log("warn", `agent host restart pending for ${Math.floor(pendingMs / 3_600_000)} h: ${blockers}`);
   }
 
   /** §3.1 case 3: a protocol mismatch, or a known code stamp that moved. */
@@ -1158,6 +1202,16 @@ export class AgentHostSupervisor {
     this.queue = run.catch(() => undefined);
     return run;
   }
+}
+
+/** A code stamp for a log line: its first 12 characters, or `unknown`. */
+function shortStamp(stamp: string | null | undefined): string {
+  return typeof stamp === "string" && stamp !== "" ? stamp.slice(0, 12) : "unknown";
+}
+
+/** One host's identity for a log line: instance, pid and code stamp. */
+function describeHost(health: AgentHostHealthResponse): string {
+  return `instance ${health.hostInstanceId}, pid ${health.pid}, code ${shortStamp(health.codeStamp)}`;
 }
 
 /**
