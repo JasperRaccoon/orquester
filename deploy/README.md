@@ -21,7 +21,10 @@ Use the repository-root `./deploy.sh` for provisioning and deployment commands.
 - `install-go.sh` → installs the pinned Go toolchain that builds `orq-agent` (see below); run as root.
 - `install-unit.sh` → installs `orquester.service` (with `systemctl daemon-reload` when it changed)
   and `/etc/needrestart/conf.d/orquester.conf` (`$nrconf{override_rc}{qr(^orquester\.service$)} = 0;`,
-  checked with `perl -c` first), so needrestart never restarts the daemon after an apt upgrade. Run as
+  checked with `perl -c` first), so needrestart never restarts the daemon after an apt upgrade, and
+  `/etc/tmpfiles.d/orquester.conf` (from `orquester-tmpfiles.conf`): the daily
+  `systemd-tmpfiles-clean` run deletes tsx transpile-cache entries under `/var/lib/orquester/tmp/tsx-*`
+  that nothing has used for 2 days, since tsx lists that whole directory at every start. Run as
   root from the checkout; idempotent; it never restarts anything itself. Provisioning and every
   deploy run it before their own (re)start, so a changed unit — e.g. `OOMPolicy=continue`, which keeps
   one OOM-killed agent process from stopping the whole unit — applies at the deploy's restart.
