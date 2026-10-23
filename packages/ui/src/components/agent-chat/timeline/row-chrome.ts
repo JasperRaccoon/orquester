@@ -243,9 +243,9 @@ export interface MessageTextRun {
  * renders as a chip in exactly the cases the composer would have treated as
  * one: unknown names stay literal, the catalog match is case-insensitive while
  * the typed spelling is preserved, `\p{Sc}` means a € or £ keyboard reaches
- * skills too, and a name may contain dots and dashes.
+ * skills too, and a name may contain dots, dashes and colons (`plugin:skill`).
  *
- * Longest-first alternation mirrors the tokeniser's greedy `[\w.-]+`: with both
+ * Longest-first alternation mirrors the tokeniser's greedy `[\w.:-]+`: with both
  * `my-skill` and `my-skill.v2` known, `$my-skill.v2` is one chip, not a chip
  * plus a stray `.v2`.
  *
@@ -267,7 +267,7 @@ export function splitSkillMentions(text: string, skills: readonly string[]): Mes
   // The same boundary the tokeniser uses: start-of-text or whitespace, then a
   // currency symbol. The trailing guard stops a shorter name matching inside a
   // longer one the tokeniser would have taken whole.
-  const pattern = new RegExp(`(^|\\s)(\\p{Sc})(${alternation})(?![\\w.-])`, "gu");
+  const pattern = new RegExp(`(^|\\s)(\\p{Sc})(${alternation})(?![\\w.:-])`, "gu");
 
   const runs: MessageTextRun[] = [];
   let cursor = 0;
