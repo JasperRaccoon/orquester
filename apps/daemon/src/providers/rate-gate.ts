@@ -10,7 +10,8 @@
  * - a request a user is waiting on fails at once too, saying how long to wait, rather than
  *   adding to the flood.
  *
- * The pause comes from the 429's Retry-After (or the provider's rate-limit reset), else 60 s.
+ * The pause comes from the 429's Retry-After (or the provider's rate-limit reset), else 60 s, and
+ * never runs past `MAX_RETRY_AFTER_MS` (1 h).
  *
  * Adapted from T3 Code (MIT): packages/source-control-bitbucket/src/server/BitbucketApi.ts
  */
@@ -18,7 +19,7 @@
 import { createHash } from "node:crypto";
 
 import type { ProviderCreds } from "./types";
-import { GitRemoteError } from "./types";
+import { GitRemoteError, MAX_RETRY_AFTER_MS } from "./types";
 
 /** Who is waiting on a request: the poller in the background, or a user. */
 export type RequestMode = "background" | "interactive";
@@ -59,9 +60,10 @@ export class HostRateGate {
     return Math.max(0, this.#pausedUntil - this.#now());
   }
 
-  /** Start (or extend — never shorten) the host-wide pause. */
+  /** Start (or extend — never shorten) the host-wide pause, at most `MAX_RETRY_AFTER_MS` from now. */
   pause(ms?: number): number {
-    const length = ms !== undefined && Number.isFinite(ms) && ms > 0 ? ms : this.#defaultPauseMs;
+    const asked = ms !== undefined && Number.isFinite(ms) && ms > 0 ? ms : this.#defaultPauseMs;
+    const length = Math.min(asked, MAX_RETRY_AFTER_MS);
     this.#pausedUntil = Math.max(this.#pausedUntil, this.#now() + length);
     return this.pausedForMs();
   }

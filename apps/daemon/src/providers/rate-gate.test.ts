@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 
 import { DEFAULT_RATE_PAUSE_MS, HostRateGate, rateGateFor, resetRateGates } from "./rate-gate";
-import { GitRemoteError } from "./types";
+import { GitRemoteError, MAX_RETRY_AFTER_MS } from "./types";
 
 afterEach(() => resetRateGates());
 
@@ -129,4 +129,17 @@ test("gates are per host and per account, and an unlimited gate never queues", a
   assert.equal(running, 10);
   for (const h of held) h.resolve("x");
   await Promise.all(runs);
+});
+
+test("a pause never runs past an hour, whatever Retry-After asks for", async () => {
+  const time = clock();
+  const gate = new HostRateGate("Bitbucket Server (bb.corp.example)", { now: time.now });
+  // A DC admin's bucket answering Retry-After: 1 week.
+  await assert.rejects(gate.run("background", async () => { throw limited(7 * 24 * 3_600_000); }));
+  assert.equal(gate.pausedForMs(), MAX_RETRY_AFTER_MS);
+  assert.equal(MAX_RETRY_AFTER_MS, 60 * 60_000);
+  gate.pause(Number.MAX_SAFE_INTEGER);
+  assert.equal(gate.pausedForMs(), MAX_RETRY_AFTER_MS);
+  time.advance(MAX_RETRY_AFTER_MS);
+  assert.equal(await gate.run("interactive", async () => "ok"), "ok", "a user's request goes out again after the hour");
 });

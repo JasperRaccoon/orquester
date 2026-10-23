@@ -187,6 +187,13 @@ export class GitRemoteError extends AccountError {
   }
 }
 
+/**
+ * The longest a provider's Retry-After is honoured, by the git-trigger poller and the per-host rate
+ * gate alike: a huge value (or an HTTP date far ahead — DC limits are admin-configured) must not
+ * stall a host until the daemon restarts.
+ */
+export const MAX_RETRY_AFTER_MS = 60 * 60_000;
+
 /** Parse a `Retry-After` header (seconds or an HTTP date) into ms; undefined when absent/unreadable. */
 export function retryAfterMs(value: string | null, now = Date.now()): number | undefined {
   if (!value) {

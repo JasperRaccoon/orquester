@@ -23,6 +23,7 @@ import type { Clock, FireRequest, TriggerHost, WorkflowLogger } from "../contrac
 import type { WorkflowStateStore } from "../state-store.ts";
 import { isFullSha, parseRemoteUrl, redactUrlUserinfo, repoDisplayName, repoKeyOf, stripUrlCredentials, type LsRemoteResult } from "../git-remote/index.ts";
 import type { ConditionalListOptions, ConditionalPage, PullRequestInfo, ReleaseInfo } from "../../providers/types.ts";
+import { MAX_RETRY_AFTER_MS } from "../../providers/types.ts";
 import {
   type DetectedEvent,
   type Detection,
@@ -43,8 +44,6 @@ const REST_POLL_MS = 120_000;
 const BITBUCKET_CLOUD_REST_POLL_MS = 180_000;
 const POLL_JITTER = 0.1;
 const MAX_BACKOFF_MS = 15 * 60_000;
-/** A provider's Retry-After is honoured up to this. */
-const MAX_RETRY_AFTER_MS = 60 * 60_000;
 /** The default branch is re-read every Nth refs poll. */
 const DEFAULT_BRANCH_EVERY = 10;
 /** First polls after a (re)arm are spread over this window. */
