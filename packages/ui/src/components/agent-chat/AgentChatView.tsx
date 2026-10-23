@@ -44,7 +44,11 @@ import {
   stageComposerAttachment
 } from "./composer/composer-bridge";
 import { timelineSkillNames } from "./composer/composer-menu";
-import { NO_PENDING_REQUESTS, type ComposerPendingRequests } from "./composer/composer-pending-send";
+import {
+  composerPendingRequestsOf,
+  NO_PENDING_REQUESTS,
+  type ComposerPendingRequests
+} from "./composer/composer-pending-send";
 import { rewindPickerEnabled } from "./composer/RewindControl";
 import { useComposerSending } from "./composer/use-composer-sending";
 import {
@@ -253,13 +257,19 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   recallItemsRef.current = slice.entries;
   const readRecallItems = React.useCallback(() => recallItemsRef.current, []);
   // What the dock holds, as the composer needs it: a send over an approval
-  // redirects the agent, one over a question answers it (§7.5).
+  // redirects the agent, one over a question answers it (§7.5). A request
+  // already answered — here, in another tab, over the MCP — is neither: its
+  // resolution is on its way, and a second answer would answer it twice.
   const composerPendingRequests = React.useMemo<ComposerPendingRequests>(
-    () => ({
-      approvalIds: pending.approvals.map((approval) => approval.requestId),
-      respondingRequestIds: pending.respondingRequestIds,
-      hasQuestion: pending.userInputs.length > 0
-    }),
+    () => composerPendingRequestsOf(pending),
+    [pending]
+  );
+  // The dock's in-flight lock-out covers an answer given elsewhere, too.
+  const dockRespondingRequestIds = React.useMemo(
+    () =>
+      pending.answeredRequestIds.length === 0
+        ? pending.respondingRequestIds
+        : [...new Set([...pending.respondingRequestIds, ...pending.answeredRequestIds])],
     [pending]
   );
   const roster = useAgentChatRoster(sessionId);
@@ -1414,7 +1424,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 sessionId={sessionId}
                 approvals={paintOnly ? NO_APPROVALS : pending.approvals}
                 userInputs={paintOnly ? NO_APPROVALS : pending.userInputs}
-                respondingRequestIds={paintOnly ? NO_REQUEST_IDS : pending.respondingRequestIds}
+                respondingRequestIds={paintOnly ? NO_REQUEST_IDS : dockRespondingRequestIds}
                 backgroundLiveness={paintOnly ? null : roster.backgroundLiveness}
                 liveAgentCount={paintOnly ? 0 : rosterCounts.liveAgents}
                 liveShellCount={paintOnly ? 0 : rosterCounts.liveShells}

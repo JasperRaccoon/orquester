@@ -33,6 +33,28 @@ export const NO_PENDING_REQUESTS: ComposerPendingRequests = {
   hasQuestion: false
 };
 
+/**
+ * What the composer is told from the thread's pending requests. A request
+ * already answered — in this tab, another one, or over the MCP — whose
+ * resolution is still on its way is left out: a send must not answer it a
+ * second time (the host would refuse it, 409).
+ */
+export function composerPendingRequestsOf(input: {
+  approvals: readonly { requestId: string }[];
+  userInputs: readonly { requestId: string }[];
+  respondingRequestIds: readonly string[];
+  answeredRequestIds: readonly string[];
+}): ComposerPendingRequests {
+  const answered = new Set(input.answeredRequestIds);
+  return {
+    approvalIds: input.approvals
+      .map((approval) => approval.requestId)
+      .filter((requestId) => !answered.has(requestId)),
+    respondingRequestIds: input.respondingRequestIds,
+    hasQuestion: input.userInputs.some((question) => !answered.has(question.requestId))
+  };
+}
+
 export type PendingRequestSendPlan =
   /** Nothing in the way: an ordinary send. */
   | { kind: "send" }

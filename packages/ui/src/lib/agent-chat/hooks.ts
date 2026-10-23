@@ -152,6 +152,8 @@ export const useAgentChatRoster: UseAgentChatRoster = (sessionId) => {
   );
 };
 
+const NO_ANSWERED_REQUEST_IDS: readonly string[] = [];
+
 export const useAgentChatPending: UseAgentChatPending = (sessionId) => {
   const store = useThreadStore(sessionId);
   const pending = useThreadState(store, (state) => state.slice.pending);
@@ -159,15 +161,20 @@ export const useAgentChatPending: UseAgentChatPending = (sessionId) => {
     store,
     (state) => state.slice.respondingRequestIds
   );
+  const answeredRequestIds = useThreadState(
+    store,
+    (state) => state.slice.answeredRequestIds ?? NO_ANSWERED_REQUEST_IDS
+  );
 
   return useMemo<AgentChatPendingView>(
     () => ({
       approvals: pending.approvals,
       userInputs: pending.userInputs,
       respondingRequestIds,
+      answeredRequestIds,
       totalCount: pending.approvals.length + pending.userInputs.length
     }),
-    [pending, respondingRequestIds]
+    [pending, respondingRequestIds, answeredRequestIds]
   );
 };
 

@@ -695,14 +695,15 @@ export interface TurnCommandBody extends AgentChatCommandBase {
   ifIdle?: true;
   /**
    * The message REDIRECTS the agent: the pending approvals the user saw when they sent it
-   * (`requestId`s). The host declines every one of them still pending, telling the provider the
-   * user is redirecting where it takes a reason with a denial, then sends this message as a steer
-   * — one command, so a retry under the same `commandId` neither declines nor sends twice. An
-   * approval pending but NOT listed (one that arrived after the user looked) refuses the whole
-   * command 409 `COMMAND_REJECTED` ({@link APPROVAL_ARRIVED_REASON}) before anything is written,
-   * so the message goes back to the draft and a new send declines that one too; a listed one
-   * already answered is skipped. Additive: an older host ignores it
-   * and the message steers in behind the open card.
+   * (`requestId`s). The host declines every one of them still pending and unanswered, telling the
+   * provider the user is redirecting where it takes a reason with a denial, then sends this message
+   * as a steer — one command, so a retry under the same `commandId` neither declines nor sends
+   * twice. An approval already answered — resolved, or its answer committed and the provider's
+   * resolution on its way (another tab's Approve, the MCP's `respond_to_request`) — is skipped,
+   * listed or not. An unanswered approval pending but NOT listed (one that arrived after the user
+   * looked) refuses the whole command 409 `COMMAND_REJECTED` ({@link APPROVAL_ARRIVED_REASON})
+   * before anything is written, so the message goes back to the draft and a new send declines that
+   * one too. Additive: an older host ignores it and the message steers in behind the open card.
    */
   declineApprovals?: string[];
 }
@@ -710,6 +711,12 @@ export interface TurnCommandBody extends AgentChatCommandBase {
 /** Why a redirect ({@link TurnCommandBody.declineApprovals}) was refused: an approval the user had not seen is pending. */
 export const APPROVAL_ARRIVED_REASON =
   "Another approval arrived, so your message wasn't sent. Read it, then send again to decline it too.";
+
+/** Why an `approval` command was refused: the request already has an answer on its way to the provider. */
+export const APPROVAL_ALREADY_ANSWERED_REASON = "This request has already been answered.";
+
+/** Why an `answer` command was refused: the question already has an answer on its way to the provider. */
+export const QUESTION_ALREADY_ANSWERED_REASON = "This question has already been answered.";
 
 /** Why a redirect that is a `/compact` was refused: a compaction waits for the turn the card holds. */
 export const REDIRECT_COMPACT_REASON =

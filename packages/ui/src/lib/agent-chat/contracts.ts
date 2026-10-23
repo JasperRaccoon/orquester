@@ -188,6 +188,12 @@ export interface AgentChatThreadSlice {
   turns: Turn[];
   checkpoints: Checkpoint[];
   pending: { approvals: PendingApproval[]; userInputs: PendingUserInput[] };
+  /**
+   * Pending requests someone already answered — here, in another tab or over
+   * the MCP — whose resolution is still on its way (the fold's
+   * `answeredApprovals` / `answeredQuestions`). Absent reads as none.
+   */
+  answeredRequestIds?: readonly string[];
   roster: RuntimeSubagent[];
   /** The latest turn's state, for the composer's primary action and the status line. */
   turnStatus: TurnState | null;
@@ -920,6 +926,8 @@ export interface AgentChatPendingView {
   userInputs: PendingUserInput[];
   /** `1/N` counters and the in-flight lock-out come from these. */
   respondingRequestIds: readonly string[];
+  /** Pending requests already answered, their resolution on its way ({@link AgentChatThreadSlice.answeredRequestIds}). */
+  answeredRequestIds: readonly string[];
   totalCount: number;
 }
 
