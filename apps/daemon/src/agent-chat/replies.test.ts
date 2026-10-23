@@ -23,6 +23,7 @@ import {
   nextCausedBy,
   parseThreadMessage,
   replyNoticeText,
+  STOP_CASCADED_ACTIVITY_KIND,
   THREAD_MESSAGE_CONTEXT_KIND,
   THREAD_REPLY_CONTEXT_KIND,
   type CausedBy,
@@ -33,8 +34,9 @@ import {
 
 import type { DaemonApi, DaemonResponse } from "../mcp/daemon-api.ts";
 import { headFromThreadRead } from "../mcp/testing.ts";
+import { DelegateStopCascade } from "./delegates.ts";
 import { LineageService } from "./lineage.ts";
-import { HISTORY_RETRY_MAX_MS, MAX_REDELIVERY_READS, ReplyError, ReplyRouter, waitResponseOf } from "./replies.ts";
+import { HELD_AFTER_STOP_TEXT, HISTORY_RETRY_MAX_MS, MAX_REDELIVERY_READS, ReplyError, ReplyRouter, waitResponseOf } from "./replies.ts";
 import { registerWait, waitsOn } from "./waits.ts";
 
 // ---------------------------------------------------------------------------
@@ -78,6 +80,7 @@ function fakeHost() {
   const sessions = new Map<string, SessionSummary>();
   const threads = new Map<string, FakeThread>();
   const posts: Post[] = [];
+  const interrupts: Post[] = [];
   const receipts = new Map<string, DaemonResponse>();
   const listeners = new Set<(event: EventMessage) => void>();
   let ids = 0;
@@ -197,6 +200,26 @@ function fakeHost() {
           }
         };
       }
+      const interruptPath = /^\/api\/sessions\/([^/]+)\/interrupt$/.exec(path);
+      if (method === "POST" && interruptPath) {
+        // The host's interrupt: the running turn settles `interrupted`; a cascade's cause leaves
+        // its `STOP_CASCADED_ACTIVITY_KIND` row on that turn, as the host writes it.
+        const sessionId = decodeURIComponent(interruptPath[1]!);
+        const body = (opts?.body ?? {}) as Record<string, unknown>;
+        interrupts.push({ sessionId, body });
+        const t = thread(sessionId);
+        const turn = active(t);
+        if (turn) {
+          if (body.cause !== undefined) {
+            t.items.push({ kind: "activity", id: `stop-${turn.turnId}`, activityKind: STOP_CASCADED_ACTIVITY_KIND, tone: "info", summary: "Stopped", payload: body.cause, turnId: turn.turnId, createdAt: "t" } as unknown as ThreadItem);
+          }
+          turn.state = "interrupted";
+          turn.completedAt = "t";
+          t.seq += 1;
+          touch(sessionId);
+        }
+        return { status: 200, body: { seq: t.seq } };
+      }
       const turnPath = /^\/api\/sessions\/([^/]+)\/turn$/.exec(path);
       if (method === "POST" && turnPath) {
         const sessionId = decodeURIComponent(turnPath[1]!);
@@ -270,6 +293,7 @@ function fakeHost() {
     sessions,
     threads,
     posts,
+    interrupts,
     receipts,
     thread,
     touch,
@@ -2018,6 +2042,167 @@ describe("attention: a delegated child's question wakes its parent", () => {
     w.host.openQuestion("tgt", "q-1", "Proceed?");
     await idle(w);
     assert.equal(notices(w.host).length, 0);
+    await w.cleanup();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A Stop sticks: the delegate stop cascade and the reply router together
+// ---------------------------------------------------------------------------
+
+describe("a stopped chat is not woken by the delegates its stop interrupted", () => {
+  const delegate = (parentThreadId: string): Partial<SessionSummary> => ({ lineage: { parentThreadId, relation: "delegate", createdAt: "t", agentCreated: true } });
+
+  /** `req` delegated a task to `tgt` (`reply: "notify"`, as `create_session {delegate: true}`), now running; the cascade is wired as the daemon wires it. */
+  async function stoppable(options: { reply?: "wait" | "notify" } = {}) {
+    const w = await world();
+    w.host.sessions.set("tgt", summary("tgt", delegate("req")));
+    const cascade = new DelegateStopCascade({ sessions: w.host.listing });
+    cascade.attachApi(w.host.api);
+    cascade.setListener(w.router);
+    const res = await w.router.subscribe("tgt", request(options.reply ?? "notify", { origin: "delegated" }));
+    await idle(w);
+    assert.equal(postsTo(w.host, "tgt").length, 1, "the task is running");
+    // Its summary says so (the cascade interrupts only unfinished chats).
+    w.host.touch("tgt");
+    const stop = async (sessionId = "req", command: "interrupt" | "session/stop" = "interrupt"): Promise<void> => {
+      cascade.commandAccepted(sessionId, command, { commandId: `stop-${sessionId}` });
+      await cascade.whenIdle();
+      await idle(w);
+    };
+    return { ...w, cascade, res, stop };
+  }
+  const sub = (w: World, id: string) => w.router.subscriptions().find((candidate) => candidate.id === id)!;
+
+  it("an idle parent stopped by the user gets no 'interrupted before it replied' turn", async () => {
+    const w = await stoppable();
+    await w.stop();
+    assert.equal(w.host.interrupts.filter((i) => i.sessionId === "tgt").length, 1, "the delegate was interrupted");
+    assert.equal(w.host.threads.get("tgt")!.turns.at(-1)!.state, "interrupted");
+    assert.equal(postsTo(w.host, "req").length, 0, "no turn on the chat the user stopped");
+    assert.deepEqual([sub(w, w.res.subscriptionId).state, (sub(w, w.res.subscriptionId) as { ended?: string }).ended], ["done", "stopped"]);
+    assert.equal(w.router.deliveries().length, 0);
+    // Persisted: a restart delivers nothing either.
+    const again = await world({ host: w.host, dir: w.dir });
+    await idle(again);
+    assert.equal(postsTo(w.host, "req").length, 0);
+    await again.cleanup(false);
+    await w.cleanup();
+  });
+
+  it("a session/stop does the same", async () => {
+    const w = await stoppable();
+    await w.stop("req", "session/stop");
+    assert.equal(w.host.interrupts.filter((i) => i.sessionId === "tgt").length, 1);
+    assert.equal(postsTo(w.host, "req").length, 0);
+    await w.cleanup();
+  });
+
+  it("a parent waiting in wait_for_session returns at once, told the task stopped with it, and is not woken after", async () => {
+    const w = await stoppable({ reply: "wait" });
+    const waiting = w.router.wait("tgt", w.res.subscriptionId, { timeoutSeconds: 60 }, { principal: { kind: "agent", threadId: "req", projectPath: "" } });
+    await until(() => sub(w, w.res.subscriptionId).state === "waiting" && w.timers.pending() > 0);
+    await w.stop();
+    const answer = await waiting;
+    assert.equal(answer.outcome, "replied");
+    assert.match((answer as { error?: string }).error ?? "", /was stopped together with the chat that asked, so no reply will come/);
+    assert.equal(postsTo(w.host, "req").length, 0);
+    // A later wait on it says the same, truthfully.
+    const later = await w.router.wait("tgt", w.res.subscriptionId, { timeoutSeconds: 1 }, { principal: { kind: "agent", threadId: "req", projectPath: "" } });
+    assert.equal((later as { state?: string }).state, "interrupted");
+    await w.cleanup();
+  });
+
+  it("a delegate the user stops directly, its parent left alone, still reports back", async () => {
+    const w = await stoppable();
+    // The user's own Stop on the child: no cause, no cascade above it.
+    await w.host.api.request("POST", "/api/sessions/tgt/interrupt", { body: { commandId: "user-stop" } });
+    await idle(w);
+    const sent = postsTo(w.host, "req");
+    assert.equal(sent.length, 1);
+    assert.match(sent[0]!.body.input as string, /interrupted/);
+    await w.cleanup();
+  });
+
+  it("deliveries already waiting when the Stop lands are not posted: a notice is dropped, a reply is held for the user", async () => {
+    const w = await stoppable();
+    // A second delegate, finished: its reply waits while the parent works.
+    w.host.sessions.set("tgt2", summary("tgt2", delegate("req")));
+    w.host.thread("tgt2");
+    await w.router.subscribe("tgt2", request("notify", { origin: "delegated", causedBy: exchange(1, "ex-2") }));
+    await idle(w);
+    w.host.userTurn("req", "parent-turn");
+    w.host.touch("req");
+    w.host.settle("tgt2", { reply: "The cache uses Redis." });
+    // The first delegate is stopped by its own user meanwhile: an "interrupted" notice waits too.
+    await w.host.api.request("POST", "/api/sessions/tgt/interrupt", { body: { commandId: "user-stop" } });
+    await idle(w);
+    assert.equal(w.queue.pendingFor("req").length, 2, "both wait for the busy parent");
+    // The user stops the parent: its turn settles, and it goes idle.
+    await w.stop();
+    w.host.settle("req", { state: "interrupted" });
+    await idle(w);
+    assert.equal(postsTo(w.host, "req").length, 0, "nothing wakes the stopped parent");
+    const pending = w.queue.pendingFor("req");
+    assert.equal(pending.length, 1, "the notice is gone, the reply is kept");
+    assert.equal(pending[0]!.childSessionId, "tgt2");
+    assert.equal(pending[0]!.state, "failed");
+    assert.equal(pending[0]!.error, HELD_AFTER_STOP_TEXT);
+    const dropped = w.router.deliveries().find((d) => d.fromThreadId === "tgt") as { state: string; stopped?: true };
+    assert.deepEqual([dropped.state, dropped.stopped], ["dropped", true]);
+    // A later turn of the parent's own does not release it either; Deliver now does.
+    w.host.userTurn("req", "later-turn");
+    w.host.settle("req", { reply: "ok" });
+    await idle(w);
+    assert.equal(postsTo(w.host, "req").length, 0);
+    await w.queue.actOnMerge("req", pending[0]!.mergeId, { action: "deliver" });
+    await idle(w);
+    assert.match(postsTo(w.host, "req")[0]!.body.input as string, /The cache uses Redis\./);
+    await w.cleanup();
+  });
+
+  it("a message still queued for the delegate is taken back, so the stop sticks below too", async () => {
+    const w = await stoppable();
+    w.host.settle("tgt", { reply: "first done" });
+    await idle(w);
+    w.host.userTurn("tgt", "own-turn");
+    w.host.touch("tgt");
+    const next = await w.router.subscribe("tgt", request("notify", { origin: "delegated", causedBy: exchange(3, "ex-3") }));
+    await idle(w);
+    assert.equal(w.queue.pendingFor("tgt").length, 1, "queued behind the child's own turn");
+    const before = postsTo(w.host, "req").length;
+    await w.stop();
+    assert.equal(w.queue.pendingFor("tgt").length, 0, "never runs");
+    assert.equal((sub(w, next.subscriptionId) as { ended?: string }).ended, "stopped");
+    assert.equal(postsTo(w.host, "tgt").length, 1, "the child got no new turn");
+    assert.equal(postsTo(w.host, "req").length, before);
+    await w.cleanup();
+  });
+
+  it("the stop runs down the whole tree: a grandchild's notice wakes neither chat", async () => {
+    const w = await stoppable();
+    w.host.sessions.set("g", summary("g", delegate("tgt")));
+    w.host.thread("g");
+    await w.router.subscribe("g", { ...request("notify", { origin: "delegated", causedBy: { threadId: "tgt", exchangeId: "ex-g", hop: 2 } }), fromThreadId: "tgt" });
+    await idle(w);
+    assert.equal(postsTo(w.host, "g").length, 1);
+    w.host.touch("g");
+    await w.stop();
+    assert.equal(w.host.interrupts.filter((i) => i.sessionId === "g").length, 1);
+    assert.equal(postsTo(w.host, "tgt").length, 1, "the child got no notice turn");
+    assert.equal(postsTo(w.host, "req").length, 0);
+    await w.cleanup();
+  });
+
+  it("without the stop's own record, the cascade's row on the interrupted turn still keeps the parent asleep", async () => {
+    const w = await stoppable();
+    // The cascade's interrupt lands, but the router never heard the stop (its write was lost).
+    await w.host.api.request("POST", "/api/sessions/tgt/interrupt", {
+      body: { commandId: "cascade", cause: { kind: "parent-stopped", parentSessionId: "req", parentTitle: "Implement auth", action: "interrupted" } }
+    });
+    await idle(w);
+    assert.equal(postsTo(w.host, "req").length, 0);
+    assert.equal((sub(w, w.res.subscriptionId) as { ended?: string }).ended, "stopped");
     await w.cleanup();
   });
 });

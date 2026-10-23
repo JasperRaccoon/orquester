@@ -1650,6 +1650,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   });
   await replies.load();
   lineage.setDeliveryListener(replies);
+  delegateStops.setListener(replies);
   registerReplySubscriptionRoutes(unixServer, {
     replies: () => replies,
     isChatSession: (id) => agentChat.chat.has(id)

@@ -677,7 +677,8 @@ export class LineageService {
         this.publish([receiver, entry.childSessionId]);
         throw new LineageError("Orquester could not save the message to deliver later; try again in a moment.", "HOST_UNAVAILABLE");
       }
-      if (!olderWaiting && (await this.isIdle(api, receiver))) {
+      // An entry handed in held (`failed`: a reply held after a stop) waits for the user alone.
+      if (entry.state !== "failed" && !olderWaiting && (await this.isIdle(api, receiver))) {
         const sent = await this.deliver(api, entry);
         if (sent.kind === "sent") {
           await this.notifyPosted(entry, sent);
@@ -726,6 +727,25 @@ export class LineageService {
       this.outbox.entries.splice(index, 0, taken!);
       this.publish([entry.parentSessionId, entry.childSessionId]);
       return false;
+    });
+  }
+
+  /**
+   * The router holds a queued entry for the user (a reply waiting for a chat that was stopped): it
+   * stays in the queue, shown on both tabs with its reason, and is posted only by Deliver now —
+   * never at the receiver's next idle point. Runs in the receiver's lane, so never mid-post.
+   */
+  async hold(mergeId: string, reason: string): Promise<void> {
+    const entry = this.outbox.entries.find((other) => other.mergeId === mergeId);
+    if (!entry) return;
+    await this.lane(entry.parentSessionId, async () => {
+      const current = this.outbox.entries.find((other) => other.mergeId === mergeId);
+      if (!current || current.state === "failed") return;
+      current.state = "failed";
+      current.held = true;
+      current.error = reason.slice(0, 2_000);
+      this.retryAt.delete(mergeId);
+      await this.persist([current.parentSessionId, current.childSessionId]);
     });
   }
 
@@ -961,7 +981,8 @@ function pendingOf(entry: MergeOutboxEntry): PendingMergeBack {
     state: entry.state === "failed" ? "failed" : "queued",
     preview: body.length > MERGE_PREVIEW_CHARS ? `${body.slice(0, MERGE_PREVIEW_CHARS - 1)}…` : body,
     attempts: entry.attempts ?? 0,
-    ...(entry.error ? { error: entry.error } : {})
+    ...(entry.error ? { error: entry.error } : {}),
+    ...(entry.held === true ? { held: true as const } : {})
   };
 }
 
