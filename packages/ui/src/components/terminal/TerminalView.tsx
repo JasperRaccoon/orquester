@@ -19,6 +19,7 @@ import { isAppleLike } from "../agent-chat/primitives/shortcut";
 import { bracketPaste } from "../../lib/paste";
 import { applyLatchedModifiers } from "../../lib/terminal-keys";
 import { copyText } from "../../lib/clipboard";
+import { resetAfterQueuedWrites } from "../../lib/terminal-reset";
 import {
   isTerminalLinkActivation,
   isTerminalUrl,
@@ -766,7 +767,9 @@ export const TerminalView: React.FC<{
       // terminal → clear before the buffer replay so the existing content
       // isn't duplicated.
       onReset: () => {
-        term.reset();
+        // In order with the writes: output still queued in xterm must not
+        // land on the cleared screen ahead of the replay.
+        resetAfterQueuedWrites(term);
         repaintArmed = true;
       }
     });
