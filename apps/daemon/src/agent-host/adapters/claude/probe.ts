@@ -62,6 +62,9 @@ export const CLAUDE_CAPABILITIES: AdapterCapabilities = {
   // `query.stopTask(taskId)`, the `stop_task` control: one task — a workflow
   // run, a subagent, a shell — stopped while the rest keep running.
   supportsTaskStop: true,
+  // A subagent's approval is denied with the user's own words (`canUseTool`'s
+  // deny `message`), so a message over it reaches the Task tool's agent.
+  approvalFeedbackToSubagents: true,
   // A background agent or shell that ends while no turn runs wakes the parent:
   // the CLI streams its reply and the adapter opens a synthetic turn for it.
   wakesOnBackgroundCompletion: true,

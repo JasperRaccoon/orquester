@@ -303,6 +303,9 @@ export function derivePendingRequests(
         ...(typeof payload.reason === "string" && payload.reason
           ? { reason: payload.reason }
           : {}),
+        ...(typeof payload.requestingAgentId === "string" && payload.requestingAgentId
+          ? { requestingAgentId: payload.requestingAgentId }
+          : {}),
         ...(typeof payload.appName === "string" && payload.appName
           ? { appName: payload.appName }
           : {}),

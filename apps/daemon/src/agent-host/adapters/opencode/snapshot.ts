@@ -63,6 +63,9 @@ export const OPENCODE_CAPABILITIES: AdapterCapabilities = {
   showPlanModeToggle: false,
   reportsContextWindow: true,
   compaction: { type: "native" },
+  // A child session's permission is rejected with the user's own words (the
+  // reply's `message`), which reach that child's model.
+  approvalFeedbackToSubagents: true,
   // A background `task` call's answer wakes the parent: the server writes its
   // reply, and the adapter opens the woken turn (`claimReply`).
   wakesOnBackgroundCompletion: true

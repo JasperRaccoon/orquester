@@ -706,6 +706,14 @@ export interface TurnCommandBody extends AgentChatCommandBase {
    * looked) refuses the whole command 409 `COMMAND_REJECTED` ({@link APPROVAL_ARRIVED_REASON})
    * before anything is written, so the message goes back to the draft and a new send declines that
    * one too. Additive: an older host ignores it and the message steers in behind the open card.
+   *
+   * **A subagent's approval** (`PendingApproval.requestingAgentId`, on an adapter with
+   * `approvalFeedbackToSubagents`) gets the message itself as its denial, capped at
+   * {@link APPROVAL_FEEDBACK_MAX_CHARS}: the subagent that asked reads the user's words, which a
+   * steer into the main agent would never reach. When every declined approval is a subagent's,
+   * nothing is steered — the message is recorded in the thread as the user's and sent nowhere
+   * else — and attachments are refused ({@link SUBAGENT_FEEDBACK_ATTACHMENTS_REASON}). With a
+   * main-agent approval among them, the main agent is redirected and steered as above.
    */
   declineApprovals?: string[];
 }
@@ -719,6 +727,16 @@ export const APPROVAL_ALREADY_ANSWERED_REASON = "This request has already been a
 
 /** Why an `answer` command was refused: the question already has an answer on its way to the provider. */
 export const QUESTION_ALREADY_ANSWERED_REASON = "This question has already been answered.";
+
+/**
+ * Why a message over a subagent's approval was refused: it goes to that
+ * subagent as its approval's denial, which carries text only.
+ */
+export const SUBAGENT_FEEDBACK_ATTACHMENTS_REASON =
+  "This message goes to the subagent that asked, as its answer, and can't carry attachments. Remove them, or answer on the card.";
+
+/** The longest a message handed to an agent as its approval's denial is, in characters; the rest is cut. */
+export const APPROVAL_FEEDBACK_MAX_CHARS = 16_000;
 
 /** Why a redirect that is a `/compact` was refused: a compaction waits for the turn the card holds. */
 export const REDIRECT_COMPACT_REASON =

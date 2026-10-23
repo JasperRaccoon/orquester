@@ -33,6 +33,7 @@ import type {
   SlashCommand,
   ThreadSnapshot
 } from "@orquester/api/agent-chat";
+import { APPROVAL_FEEDBACK_MAX_CHARS } from "@orquester/api/agent-chat";
 
 import type { HostThreadBox, HostThreadProfile, HostThreadServerPool } from "./host-protocol.ts";
 import type { SessionToolsHost } from "./session-tools/index.ts";
@@ -326,6 +327,20 @@ export interface ForkConversationInput {
 export interface ApprovalResponseOptions {
   /** A decline the user's next message redirects; see {@link APPROVAL_REDIRECT_MESSAGE}. */
   redirect?: boolean;
+  /**
+   * The user's own words, for a subagent's request on an adapter with
+   * `approvalFeedbackToSubagents`: the denial carries them (trimmed, capped at
+   * `APPROVAL_FEEDBACK_MAX_CHARS`) in place of {@link APPROVAL_REDIRECT_MESSAGE},
+   * so the subagent that asked reads them. Only with `decline`.
+   */
+  feedback?: string;
+}
+
+/** The user's words as an approval's denial: trimmed and capped. `undefined` when nothing is left. */
+export function approvalFeedbackText(feedback: string | undefined): string | undefined {
+  const trimmed = feedback?.trim() ?? "";
+  if (trimmed.length === 0) return undefined;
+  return trimmed.length > APPROVAL_FEEDBACK_MAX_CHARS ? trimmed.slice(0, APPROVAL_FEEDBACK_MAX_CHARS) : trimmed;
 }
 
 /**
@@ -353,6 +368,13 @@ export interface AgentAdapter {
    * a denial is told so ({@link APPROVAL_REDIRECT_MESSAGE}: Claude's deny
    * `message`, OpenCode's reject `message`); the others decline as usual
    * (Codex `decline`, Grok `reject_once`) and the steer carries the message.
+   *
+   * `options.feedback` (a subagent's request, on an adapter with
+   * `approvalFeedbackToSubagents`): the user's own words are the denial — Claude's deny `message`
+   * for a Task tool agent's `canUseTool`, OpenCode's reject `message` for a child session's
+   * permission — because nothing is steered into the subagent. Codex (a collab child's card) and
+   * Grok (a child session's permission) have no such channel: their subagent gets the plain
+   * decline, and the host steers the message into the main agent, as for any redirect.
    */
   respondToApproval(
     threadId: string,

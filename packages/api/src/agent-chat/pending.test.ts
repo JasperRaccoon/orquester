@@ -49,6 +49,18 @@ test("an approval keeps the provider's reason, and has none when it gave none", 
   assert.equal("reason" in pending.approvals[2]!, false);
 });
 
+test("an approval names the subagent that asked, and none for the main agent", () => {
+  resetActivityIds();
+  const pending = derivePendingRequests([
+    activity("approval.requested", { requestId: "r1", requestType: "command_execution_approval", requestingAgentId: "task-1" }),
+    activity("approval.requested", { requestId: "r2", requestType: "command_execution_approval" }),
+    activity("approval.requested", { requestId: "r3", requestType: "command_execution_approval", requestingAgentId: 3 })
+  ]);
+  assert.equal(pending.approvals[0]?.requestingAgentId, "task-1");
+  assert.equal("requestingAgentId" in pending.approvals[1]!, false);
+  assert.equal("requestingAgentId" in pending.approvals[2]!, false);
+});
+
 test("a REPLAY of a resolved request cannot reopen it", () => {
   // A replay is the same row delivered twice, so it carries the SAME stamp as
   // the original — which is how it is told apart from a provider recycling the

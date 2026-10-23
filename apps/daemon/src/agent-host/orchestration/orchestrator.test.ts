@@ -16,6 +16,7 @@ import {
   HISTORICAL_RAW_SOURCE,
   QUESTION_ALREADY_ANSWERED_REASON,
   REDIRECT_COMPACT_REASON,
+  SUBAGENT_FEEDBACK_ATTACHMENTS_REASON,
   type AttachmentRef,
   type DomainEvent,
   type RuntimeEvent,
@@ -3625,5 +3626,127 @@ describe("orchestrator — a question is answered once, whoever answers first", 
       (error: unknown) => isAgentChatCommandError(error) && error.message === QUESTION_ALREADY_ANSWERED_REASON
     );
     await next.stop();
+  });
+});
+
+describe("orchestrator — a message over a subagent's approval goes to that subagent", () => {
+  async function openSubagentApproval(host: TestHost, requestId: string, agentId: string | null): Promise<void> {
+    await host.orchestrator.ingestionSink("thread-1", [
+      {
+        eventId: `ingest-${requestId}`,
+        threadId: "thread-1",
+        type: "thread.activity-appended",
+        payload: {
+          activity: {
+            kind: "activity",
+            id: `approval:${requestId}`,
+            tone: "approval",
+            activityKind: "approval.requested",
+            summary: "Run a command?",
+            payload: { requestId, requestKind: "command", ...(agentId !== null ? { requestingAgentId: agentId } : {}) },
+            turnId: null,
+            createdAt: host.clock.nowIso(),
+            updatedAt: host.clock.nowIso()
+          }
+        },
+        occurredAt: host.clock.nowIso(),
+        commandId: null,
+        causationEventId: null,
+        metadata: {}
+      }
+    ]);
+  }
+  const feedbackHost = (supports = true) =>
+    createTestHost({
+      adapters: {
+        claude: createScriptedAdapter({
+          id: "claude",
+          capabilities: supports ? { approvalFeedbackToSubagents: true } : {}
+        })
+      }
+    });
+
+  it("only a subagent's approval: it is declined WITH the user's words, and nothing is steered", async () => {
+    const host = feedbackHost();
+    const threadId = await host.createThread();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
+    await openSubagentApproval(host, "req-sub", "task-1");
+    await host.settle();
+    const sendsBefore = host.adapter.calls.filter((call) => call.kind === "sendTurn").length;
+    const startsBefore = (host.store.logs.get(threadId) ?? []).filter((event) => event.type === "thread.turn-start-requested").length;
+
+    await assert.rejects(
+      () =>
+        host.orchestrator.command(threadId, "turn", {
+          commandId: cmd(),
+          input: "use the fixtures dir",
+          attachments: [{ type: "file", id: "f1", name: "a.txt", sizeBytes: 1 }],
+          declineApprovals: ["req-sub"]
+        }),
+      (error: unknown) => isAgentChatCommandError(error) && error.message === SUBAGENT_FEEDBACK_ATTACHMENTS_REASON
+    );
+    await host.orchestrator.command(threadId, "turn", {
+      commandId: cmd(),
+      input: "use the fixtures dir",
+      declineApprovals: ["req-sub"]
+    });
+    await host.settle();
+
+    assert.deepEqual(
+      host.adapter.calls.filter((call) => call.kind === "respondToApproval").map((call) => call.detail),
+      [{ requestId: "req-sub", decision: "decline", redirect: true, feedback: "use the fixtures dir" }]
+    );
+    assert.equal(host.adapter.calls.filter((call) => call.kind === "sendTurn").length, sendsBefore, "no steer");
+    const log = host.store.logs.get(threadId) ?? [];
+    assert.equal(log.filter((event) => event.type === "thread.turn-start-requested").length, startsBefore);
+    const recorded = log.filter((event) => event.type === "thread.message-sent").at(-1)?.payload as {
+      text: string;
+      role: string;
+      interactionMode?: string;
+    };
+    assert.equal(recorded.text, "use the fixtures dir", "the user's words stay in the thread");
+    assert.equal(recorded.role, "user");
+    assert.equal(recorded.interactionMode, undefined);
+    await host.stop();
+  });
+
+  it("with a main-agent approval among them: the subagent gets the words, the main agent the redirect and the steer", async () => {
+    const host = feedbackHost();
+    const threadId = await host.createThread();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
+    await openSubagentApproval(host, "req-main", null);
+    await openSubagentApproval(host, "req-sub", "task-1");
+    await host.settle();
+    await host.orchestrator.command(threadId, "turn", {
+      commandId: cmd(),
+      input: "stop and summarise",
+      declineApprovals: ["req-main", "req-sub"]
+    });
+    await host.settle();
+    assert.deepEqual(
+      host.adapter.calls.filter((call) => call.kind === "respondToApproval").map((call) => call.detail),
+      [
+        { requestId: "req-main", decision: "decline", redirect: true },
+        { requestId: "req-sub", decision: "decline", redirect: true, feedback: "stop and summarise" }
+      ]
+    );
+    assert.equal(host.adapter.lastTurn?.input, "stop and summarise", "the main agent is steered");
+    await host.stop();
+  });
+
+  it("an adapter that cannot hand a denial's text over keeps the redirect and the steer", async () => {
+    const host = feedbackHost(false);
+    const threadId = await host.createThread();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
+    await openSubagentApproval(host, "req-sub", "child-1");
+    await host.settle();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "do it later", declineApprovals: ["req-sub"] });
+    await host.settle();
+    assert.deepEqual(
+      host.adapter.calls.filter((call) => call.kind === "respondToApproval").map((call) => call.detail),
+      [{ requestId: "req-sub", decision: "decline", redirect: true }]
+    );
+    assert.equal(host.adapter.lastTurn?.input, "do it later");
+    await host.stop();
   });
 });

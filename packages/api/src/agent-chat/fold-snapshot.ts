@@ -93,7 +93,8 @@ import type {
 // 9: a question option's `preview` and `previewFormat` reach the pending question.
 // 10: an approval's `reason` reaches the pending approval.
 // 11: `answeredApprovals` / `answeredQuestions` — a pending request someone already answered.
-export const FOLD_SNAPSHOT_VERSION = 11;
+// 12: an approval's `requestingAgentId` reaches the pending approval.
+export const FOLD_SNAPSHOT_VERSION = 12;
 
 /**
  * {@link ThreadFoldState} as JSON: without `activities` (rebuilt from
@@ -549,6 +550,7 @@ const isPendingApproval = shaped<PendingApproval>({
   createdAt: isString,
   detail: optional(isString),
   reason: optional(isString),
+  requestingAgentId: optional(isString),
   appName: optional(isString),
   toolUseId: optional(isString),
   options: optional(listOf(isApprovalOption))

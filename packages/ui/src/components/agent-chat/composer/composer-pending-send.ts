@@ -15,7 +15,11 @@
  * back.
  */
 
-import { REDIRECT_COMPACT_REASON, isGoalCommandText } from "@orquester/api/agent-chat";
+import {
+  REDIRECT_COMPACT_REASON,
+  SUBAGENT_FEEDBACK_ATTACHMENTS_REASON,
+  isGoalCommandText
+} from "@orquester/api/agent-chat";
 
 /** The provider requests the dock shows, as the composer needs them. */
 export interface ComposerPendingRequests {
@@ -25,6 +29,13 @@ export interface ComposerPendingRequests {
   respondingRequestIds: readonly string[];
   /** A provider question is pending. */
   hasQuestion: boolean;
+  /**
+   * Every approval a send would decline is a subagent's, on a provider that
+   * hands the subagent the user's words (`approvalFeedbackToSubagents`): the
+   * message goes to that subagent as its answer, never into the main agent,
+   * and carries no files. Absent reads as no.
+   */
+  subagentOnly?: boolean;
 }
 
 export const NO_PENDING_REQUESTS: ComposerPendingRequests = {
@@ -40,18 +51,24 @@ export const NO_PENDING_REQUESTS: ComposerPendingRequests = {
  * second time (the host would refuse it, 409).
  */
 export function composerPendingRequestsOf(input: {
-  approvals: readonly { requestId: string }[];
+  approvals: readonly { requestId: string; requestingAgentId?: string }[];
   userInputs: readonly { requestId: string }[];
   respondingRequestIds: readonly string[];
   answeredRequestIds: readonly string[];
+  /** The provider's `approvalFeedbackToSubagents`. */
+  approvalFeedbackToSubagents?: boolean;
 }): ComposerPendingRequests {
   const answered = new Set(input.answeredRequestIds);
+  const open = input.approvals.filter((approval) => !answered.has(approval.requestId));
+  const subagentOnly =
+    input.approvalFeedbackToSubagents === true &&
+    open.length > 0 &&
+    open.every((approval) => approval.requestingAgentId !== undefined);
   return {
-    approvalIds: input.approvals
-      .map((approval) => approval.requestId)
-      .filter((requestId) => !answered.has(requestId)),
+    approvalIds: open.map((approval) => approval.requestId),
     respondingRequestIds: input.respondingRequestIds,
-    hasQuestion: input.userInputs.some((question) => !answered.has(question.requestId))
+    hasQuestion: input.userInputs.some((question) => !answered.has(question.requestId)),
+    ...(subagentOnly ? { subagentOnly: true } : {})
   };
 }
 
@@ -67,6 +84,10 @@ export type PendingRequestSendPlan =
 
 /** The composer's hint while an approval is pending: what Send will do. */
 export const REDIRECT_HINT = "Sending declines the pending request and redirects the agent.";
+
+/** The hint while only a subagent's approval is pending: the message is that subagent's answer. */
+export const SUBAGENT_REDIRECT_HINT =
+  "Sending declines the subagent's request and gives it your message; the main agent isn't interrupted.";
 
 /** The composer's hint while a question is pending. */
 export const QUESTION_HINT = "Sending answers the question above.";
@@ -111,6 +132,10 @@ export function planPendingRequestSend(input: {
     if (isCompactCommand(input.text, input.attachmentCount)) {
       return { kind: "refuse", reason: REDIRECT_COMPACT_REASON };
     }
+    // A subagent's answer is its approval's denial: text only (the host refuses files too).
+    if (pending.subagentOnly === true && input.attachmentCount > 0) {
+      return { kind: "refuse", reason: SUBAGENT_FEEDBACK_ATTACHMENTS_REASON };
+    }
     return { kind: "redirect", declineApprovals: [...pending.approvalIds] };
   }
   if (pending.hasQuestion) {
@@ -132,6 +157,13 @@ export interface PendingRequestWording {
 
 /** The composer's wording while a request is docked, or `null` with none. */
 export function pendingRequestWording(pending: ComposerPendingRequests): PendingRequestWording | null {
+  if (pending.approvalIds.length > 0 && pending.subagentOnly === true) {
+    return {
+      hint: SUBAGENT_REDIRECT_HINT,
+      placeholder: "Tell the subagent what to do instead…",
+      sendLabel: "Decline the request and reply to the subagent"
+    };
+  }
   if (pending.approvalIds.length > 0) {
     return {
       hint: REDIRECT_HINT,

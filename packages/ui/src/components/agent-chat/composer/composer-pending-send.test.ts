@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { REDIRECT_COMPACT_REASON } from "@orquester/api/agent-chat";
+import { REDIRECT_COMPACT_REASON, SUBAGENT_FEEDBACK_ATTACHMENTS_REASON } from "@orquester/api/agent-chat";
 
 import {
   APPROVAL_RESPONDING_REASON,
@@ -12,6 +12,7 @@ import {
   QUESTION_ATTACHMENTS_REASON,
   QUESTION_HINT,
   REDIRECT_HINT,
+  SUBAGENT_REDIRECT_HINT,
   type ComposerPendingRequests
 } from "./composer-pending-send";
 import {
@@ -149,4 +150,47 @@ test("a request already answered elsewhere is neither redirected nor answered ag
   const allAnswered = composerPendingRequestsOf({ ...pending, answeredRequestIds: ["req-1", "req-2", "q-1"] });
   assert.deepEqual(plan(allAnswered), { kind: "send" });
   assert.equal(composerPendingRequestsOf({ ...pending, answeredRequestIds: ["req-1", "req-2"] }).hasQuestion, true);
+});
+
+test("only subagents' approvals: the message is their answer, text only, and the wording says so", () => {
+  const told = composerPendingRequestsOf({
+    approvals: [{ requestId: "req-1", requestingAgentId: "task-1" }],
+    userInputs: [],
+    respondingRequestIds: [],
+    answeredRequestIds: [],
+    approvalFeedbackToSubagents: true
+  });
+  assert.equal(told.subagentOnly, true);
+  assert.deepEqual(plan(told), { kind: "redirect", declineApprovals: ["req-1"] });
+  assert.deepEqual(plan(told, "see the log", 1), { kind: "refuse", reason: SUBAGENT_FEEDBACK_ATTACHMENTS_REASON });
+  assert.equal(pendingRequestWording(told)?.hint, SUBAGENT_REDIRECT_HINT);
+  assert.equal(pendingRequestWording(told)?.placeholder, "Tell the subagent what to do instead…");
+
+  // A main-agent approval among them, or a provider that cannot hand the words over: today's redirect.
+  const mixed = composerPendingRequestsOf({
+    approvals: [{ requestId: "req-1", requestingAgentId: "task-1" }, { requestId: "req-2" }],
+    userInputs: [],
+    respondingRequestIds: [],
+    answeredRequestIds: [],
+    approvalFeedbackToSubagents: true
+  });
+  assert.equal(mixed.subagentOnly, undefined);
+  assert.equal(plan(mixed, "see the log", 1).kind, "redirect");
+  assert.equal(pendingRequestWording(mixed)?.hint, REDIRECT_HINT);
+  const codex = composerPendingRequestsOf({
+    approvals: [{ requestId: "req-1", requestingAgentId: "child-1" }],
+    userInputs: [],
+    respondingRequestIds: [],
+    answeredRequestIds: []
+  });
+  assert.equal(codex.subagentOnly, undefined);
+  // An answered main-agent approval leaves the subagent's alone in front.
+  const leftAlone = composerPendingRequestsOf({
+    approvals: [{ requestId: "req-1", requestingAgentId: "task-1" }, { requestId: "req-2" }],
+    userInputs: [],
+    respondingRequestIds: [],
+    answeredRequestIds: ["req-2"],
+    approvalFeedbackToSubagents: true
+  });
+  assert.equal(leftAlone.subagentOnly, true);
 });

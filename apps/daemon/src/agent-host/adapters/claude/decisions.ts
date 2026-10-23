@@ -15,7 +15,10 @@
  *
  * A decline that redirects — the user sent a message over the card — denies
  * with {@link APPROVAL_REDIRECT_MESSAGE}, so Claude reads the message that
- * follows as the new instruction rather than retrying the tool.
+ * follows as the new instruction rather than retrying the tool. A subagent's
+ * request is denied with the user's own words instead (`feedback`): the
+ * message is not steered into the main agent, so the denial is the only way
+ * it reaches the agent that asked (T3 `b7e802bd`).
  */
 
 import { stripVTControlCharacters } from "node:util";
@@ -23,7 +26,7 @@ import { stripVTControlCharacters } from "node:util";
 import type { CanUseTool, PermissionResult, PermissionUpdate } from "@anthropic-ai/claude-agent-sdk";
 import type { ApprovalDecision, ApprovalOption } from "@orquester/api/agent-chat";
 
-import { APPROVAL_REDIRECT_MESSAGE } from "../../adapter.ts";
+import { APPROVAL_REDIRECT_MESSAGE, approvalFeedbackText } from "../../adapter.ts";
 
 const DECLINE_MESSAGE = "User declined tool execution.";
 const CANCEL_MESSAGE = "User cancelled tool execution.";
@@ -74,10 +77,15 @@ export function permissionResultForDecision(input: {
   suggestions?: readonly PermissionUpdate[];
   /** The decline redirects: the user's message follows it as a steer. */
   redirect?: boolean;
+  /** The user's own words for the agent that asked (a subagent's request): the denial itself. */
+  feedback?: string;
 }): PermissionResult {
   const { decision, toolName, toolInput, suggestions } = input;
-  if (decision === "decline" && input.redirect === true) {
-    return { behavior: "deny", message: APPROVAL_REDIRECT_MESSAGE };
+  if (decision === "decline") {
+    // Adapted from T3 Code (MIT): apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts
+    const feedback = approvalFeedbackText(input.feedback);
+    if (feedback !== undefined) return { behavior: "deny", message: feedback };
+    if (input.redirect === true) return { behavior: "deny", message: APPROVAL_REDIRECT_MESSAGE };
   }
   if (decision === "accept") {
     return { behavior: "allow", updatedInput: toolInput };

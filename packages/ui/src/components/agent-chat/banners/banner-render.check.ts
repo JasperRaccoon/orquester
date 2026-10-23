@@ -3,7 +3,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { PendingApproval, PendingUserInput } from "@orquester/api/agent-chat";
 
-import { ApprovalCard } from "./ApprovalCard";
+import { ApprovalCard, approvalCardDescription } from "./ApprovalCard";
 import { ChatBannerDock } from "./ChatBannerDock";
 import { QuestionCard } from "./QuestionCard";
 
@@ -63,6 +63,15 @@ try {
     approval, pendingCount: 1, isResponding: false, onRespond: noop
   }));
   assert.doesNotMatch(unreasoned, /data-approval-reason/);
+
+  // A subagent's request says so, beside the MCP server that asks.
+  const fromSubagent = renderToStaticMarkup(createElement(ApprovalCard, {
+    approval: { ...approval, requestingAgentId: "task-1" },
+    pendingCount: 1, isResponding: false, onRespond: noop
+  }));
+  assert.match(fromSubagent, />Asked by a subagent</);
+  assert.equal(approvalCardDescription({ appName: "github", requestingAgentId: "t" }), "github · asked by a subagent");
+  assert.equal(approvalCardDescription({ appName: "github" }), "github");
 
   // The dock owns whether a native callback request can be dismissed.
   const dockProps = {

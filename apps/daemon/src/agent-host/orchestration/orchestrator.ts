@@ -114,6 +114,7 @@ import {
   parseCausedBy,
   QUESTION_ALREADY_ANSWERED_REASON,
   REDIRECT_COMPACT_REASON,
+  SUBAGENT_FEEDBACK_ATTACHMENTS_REASON,
   usageLimitNoticeOf
 } from "@orquester/api/agent-chat";
 import { IDLE_COMPACTION_SENT_BY, idleCompactionCandidateOf, type ThreadMessageSentBy } from "@orquester/api/agent-chat";
@@ -3368,6 +3369,28 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     return open.map((approval) => approval.requestId);
   };
 
+  /**
+   * The declined approvals that are a subagent's (`PendingApproval.requestingAgentId`) on an
+   * adapter that hands a denial's text to the agent that asked
+   * (`AdapterCapabilities.approvalFeedbackToSubagents`): those get the user's words.
+   */
+  const subagentFeedbackRequests = (
+    runtime: ThreadRuntime,
+    head: ThreadHead,
+    declined: readonly string[]
+  ): Set<string> => {
+    if (declined.length === 0) return new Set();
+    if (options.adapters.get(head.adapter)?.capabilities.approvalFeedbackToSubagents !== true) {
+      return new Set();
+    }
+    const listed = new Set(declined);
+    return new Set(
+      (runtime.state.pending?.approvals ?? [])
+        .filter((approval) => listed.has(approval.requestId) && approval.requestingAgentId !== undefined)
+        .map((approval) => approval.requestId)
+    );
+  };
+
   const turnIsActive = (runtime: ThreadRuntime): boolean => {
     const session = currentSession(runtime);
     if (session.activeTurnId !== null) return true;
@@ -3663,6 +3686,15 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         // one still pending. One the user never saw refuses the whole send — declining it on
         // their behalf would answer a request they have not read.
         const declined = redirectDeclines(runtime, declineApprovals);
+        // A subagent's approval takes the user's words as its denial — the only
+        // way they reach the agent that asked. When every declined approval is
+        // a subagent's, the message goes there alone: nothing is steered into
+        // the main agent, and a denial carries no files.
+        const feedbackTo = subagentFeedbackRequests(runtime, head, declined);
+        const feedbackOnly = declined.length > 0 && feedbackTo.size === declined.length;
+        if (feedbackOnly && attachments.length > 0) {
+          throw commandRejected(SUBAGENT_FEEDBACK_ATTACHMENTS_REASON);
+        }
 
         const messageId = ids.messageId("user:");
         const occurredAt = clock.nowIso();
@@ -3704,16 +3736,18 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
               // OpenCode send it with the steered prompt), so a default turn
               // steered into plan now plans — `currentInteractionMode` reads
               // it off this message (T6-M2). A new turn's mode is on its
-              // `turn-start-requested` instead.
-              ...(session.activeTurnId !== null ? { interactionMode } : {})
+              // `turn-start-requested` instead. A subagent's answer steers
+              // nothing, so it carries none.
+              ...(session.activeTurnId !== null && !feedbackOnly ? { interactionMode } : {})
             },
             { commandId, occurredAt }
           )
         );
         // Steering: `sendTurn` while a turn is active reuses the active turn id
         // and injects into the running loop. It is neither an error nor a
-        // second turn (§4.1), so no pending turn row is opened for it.
-        if (session.activeTurnId === null) {
+        // second turn (§4.1), so no pending turn row is opened for it. A
+        // subagent's answer is recorded as the user's message and starts nothing.
+        if (session.activeTurnId === null && !feedbackOnly) {
           events.push(
             buildEvent(
               runtime.id,
@@ -3755,10 +3789,16 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
             if (declined.length > 0) {
               void runEffect(runtime, async () => {
                 for (const requestId of declined) {
-                  await approvalEffect(runtime, requestId, "decline", { redirect: true });
+                  await approvalEffect(
+                    runtime,
+                    requestId,
+                    "decline",
+                    feedbackTo.has(requestId) ? { redirect: true, feedback: input } : { redirect: true }
+                  );
                 }
               });
             }
+            if (feedbackOnly) return;
             // A `/turn` that arrives during a compaction is queued per thread
             // and replayed in order afterwards, each awaited before the next is
             // dispatched and the original message id reused so the user sees
