@@ -55,6 +55,17 @@ Contracts: `@orquester/api` `session-profiles.ts` (wire types, `sessionProfileRo
   create route refuses `kind: "plugin"`; plugins arrive only through `…/plugins`, Import from
   Global, copy from profile and profile import (see "Plugin cache" below).
 
+## Managed profiles
+
+A profile Orquester itself owns (the Knowledge Graph indexer's "Knowledge indexer") carries
+`managed: "<owner>"` in `profile.json` and a fixed id. `store.ensureManaged(spec)` /
+`service.ensureManaged(spec)` create it or re-align it (one revision bump, `changed` event for the
+lifecycle) and are idempotent. It is never listed (`service.list`), `service.get` answers 404, every
+user mutation, delete and duplicate answers `PROFILE_NOT_FOUND`, and its name never collides with
+a user's. Its settings record may carry the daemon-internal `claudeBuiltinTools: false` (no wire
+setting): the Claude preparer then writes `disableBuiltinTools: true` and the launch passes SDK
+`tools: []` with `ENABLE_TOOL_SEARCH=false` (no built-in tool; MCP tools loaded up front).
+
 ## Plugin cache (what the per-agent preparers consume)
 
 A plugin item is single-agent (`agents: [agent]`). `plugins/<itemId>/` holds the plugin's files

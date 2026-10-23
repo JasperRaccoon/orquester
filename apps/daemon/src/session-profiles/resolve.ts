@@ -116,7 +116,8 @@ export interface ResolvedAgentProfile {
   revision: string;
   name: string;
   agent: SessionProfileAgentId;
-  settings: { hideBuiltinSkills: boolean; claudeWorkflowTool: boolean };
+  /** `claudeBuiltinTools`: absent = on; `false` only on a managed profile (no wire setting). */
+  settings: { hideBuiltinSkills: boolean; claudeWorkflowTool: boolean; claudeBuiltinTools?: boolean };
   /** `""` when the profile has none. */
   instructions: string;
   skills: ResolvedSkill[];
@@ -202,7 +203,11 @@ export function resolveForAgent(source: SessionProfileSource, agent: SessionProf
     revision: source.revision,
     name: source.name,
     agent,
-    settings: { hideBuiltinSkills: settings.hideBuiltinSkills[agent], claudeWorkflowTool: settings.claudeWorkflowTool },
+    settings: {
+      hideBuiltinSkills: settings.hideBuiltinSkills[agent],
+      claudeWorkflowTool: settings.claudeWorkflowTool,
+      ...(source.settings?.claudeBuiltinTools === false ? { claudeBuiltinTools: false } : {})
+    },
     instructions: source.instructions,
     skills: [],
     commands: [],

@@ -547,6 +547,16 @@ describe("claude launch — Agent Profile chats (spec 2026-10-18 §6.1)", () => 
     });
   });
 
+  it("a profile without built-in tools passes tools: [] and loads MCP tools up front", () => {
+    const off = buildWith(profileLaunch({ disableBuiltinTools: true }));
+    assert.deepEqual(off.options.tools, []);
+    assert.equal(off.options.env?.ENABLE_TOOL_SEARCH, "false");
+    assert.deepEqual(off.options.allowedTools, ["mcp__orquester__send_message"], "the session tools stay pre-approved");
+    const on = buildWith(profileLaunch());
+    assert.equal("tools" in on.options, false);
+    assert.equal(on.options.env?.ENABLE_TOOL_SEARCH, undefined);
+  });
+
   it("the Workflow tool off adds disableWorkflows; no MCP server means no --mcp-config", () => {
     const built = buildWith(profileLaunch({ disableWorkflows: true, mcpServers: {}, disabledPluginIds: [] }));
     assert.equal(built.profileFiles?.settings.disableWorkflows, true);

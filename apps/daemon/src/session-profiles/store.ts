@@ -73,7 +73,7 @@ import { readTextIfExists, writeProfileFile, writeProfileFileVerified } from "..
 import { readSkillFiles } from "../agent-profile/infra/markdown-items.ts";
 import { copyEntry, copyTree, isMissing } from "../agent-profile/infra/tree.ts";
 import type { PortableMcpServer } from "../agent-profile/adapters/types.ts";
-import { sessionProfileErrors as errors } from "./errors.ts";
+import { SessionProfileError, sessionProfileErrors as errors } from "./errors.ts";
 import { PLUGIN_TREE_CAPS, SKILL_TREE_CAPS, measureTree, normalizeProfileModes, type ZipEntry } from "./files.ts";
 import { PROFILE_DIR_MODE, PROFILE_FILE_MODE, profileLayout, type ProfileLayout } from "./layout.ts";
 import type { SessionProfileSource } from "./resolve.ts";
@@ -102,6 +102,21 @@ export interface CreateStoredProfileInput {
   icon?: string;
   description?: string;
   settings?: SessionProfileSettingsDraft;
+}
+
+/**
+ * A profile Orquester owns (`ensureManaged`): a fixed id, no items, its own settings record and
+ * instructions. Kept out of user-facing lists and edits (`manifest.managed`).
+ */
+export interface ManagedProfileSpec {
+  id: string;
+  /** What owns it, e.g. `"knowledge-indexer"` (`manifest.managed`). */
+  managed: string;
+  name: string;
+  description: string;
+  /** The raw settings record written as is (it may carry daemon-internal keys). */
+  settings: SessionProfileSettingsRecord;
+  instructions: string;
 }
 
 export interface UpdateStoredProfileInput {
@@ -468,6 +483,71 @@ export class SessionProfileStore {
     });
   }
 
+  /**
+   * Creates the managed profile `spec` describes, or brings an existing one in line with it (one
+   * revision bump when anything differs). Idempotent: an unchanged profile is not rewritten.
+   * Managed names never collide with the user's. A profile with that id that is not this managed
+   * one is refused with 409 `PROFILE_CONFLICT`, and nothing is touched.
+   */
+  async ensureManaged(spec: ManagedProfileSpec): Promise<{ profile: StoredSessionProfile; changed: boolean }> {
+    return this.queue.run(CATALOG, async () => {
+      const name = profileName(spec.name);
+      const description = profileDescription(spec.description);
+      const instructions = spec.instructions.trim() === "" ? "" : `${spec.instructions.trim()}\n`;
+      const layout = this.layout(spec.id);
+      let existing: SessionProfileManifestFile | null = null;
+      try {
+        existing = await this.readManifest(spec.id, layout);
+      } catch (error) {
+        if (!(error instanceof SessionProfileError && error.code === "PROFILE_NOT_FOUND")) throw error;
+      }
+      if (existing === null) {
+        const now = this.now().toISOString();
+        const manifest: SessionProfileManifestRecord = {
+          version: SESSION_PROFILE_MANIFEST_VERSION,
+          id: spec.id,
+          name,
+          description,
+          revision: 1,
+          createdAt: now,
+          updatedAt: now,
+          settings: { ...spec.settings },
+          managed: spec.managed
+        };
+        await this.materialize(spec.id, async (tmp) => {
+          const tmpLayout = profileLayout(tmp);
+          if (instructions !== "") await writeProfileFile(tmpLayout.instructions, instructions, WRITE);
+          await this.writeManifest(tmpLayout, { manifest, items: [] });
+        });
+        return { profile: await this.read(spec.id), changed: true };
+      }
+      if (existing.manifest.managed !== spec.managed) throw errors.conflict();
+      const currentInstructions = (await readTextIfExists(layout.instructions)) ?? "";
+      const same =
+        existing.manifest.name === name &&
+        existing.manifest.description === description &&
+        JSON.stringify(existing.manifest.settings) === JSON.stringify(spec.settings) &&
+        existing.items.length === 0 &&
+        currentInstructions === instructions;
+      if (same) return { profile: await this.readStored(layout, existing), changed: false };
+      const { profile } = await this.mutate(
+        spec.id,
+        String(existing.manifest.revision),
+        async (state) => {
+          state.file.manifest.name = name;
+          state.file.manifest.description = description;
+          state.file.manifest.settings = { ...spec.settings };
+          state.file.items = [];
+          await this.keepForRollback(state, state.layout.instructions);
+          if (instructions === "") await rm(state.layout.instructions, { force: true });
+          else await writeProfileFile(state.layout.instructions, instructions, WRITE);
+        },
+        { managed: true }
+      );
+      return { profile, changed: true };
+    });
+  }
+
   async update(profileId: string, revision: string, patch: UpdateStoredProfileInput): Promise<StoredSessionProfile> {
     const apply = () =>
       this.mutate(profileId, revision, async (state) => {
@@ -493,6 +573,7 @@ export class SessionProfileStore {
     await this.queue.run(profileId, async () => {
       const layout = this.layout(profileId);
       const file = await this.readManifest(profileId, layout);
+      if (isManaged(file.manifest)) throw errors.notFound(profileId);
       if (String(file.manifest.revision) !== revision) throw errors.conflict();
       // Its name first (kept for good): a chat of this profile falls back to Global at its next
       // start, maybe after a restart, with a notice that names the profile (spec §5.6).
@@ -510,6 +591,7 @@ export class SessionProfileStore {
       this.queue.run(profileId, async () => {
         const source = this.layout(profileId);
         const file = await this.readManifest(profileId, source);
+        if (isManaged(file.manifest)) throw errors.notFound(profileId);
         const newName = name !== undefined ? profileName(name) : await this.copyName(file.manifest.name);
         await this.assertNameFree(newName);
         const id = this.newId();
@@ -1040,14 +1122,17 @@ export class SessionProfileStore {
    * commit). Every file the change rewrites before the commit is restored when it fails
    * ({@link keepForRollback}; new files and dirs are removed by their own rollback entries).
    */
+  /** A managed profile (`manifest.managed`) is only changed by {@link ensureManaged} (`options.managed`); to anyone else it is not there. */
   private mutate<T>(
     profileId: string,
     revision: string,
-    change: (state: MutationState) => Promise<T>
+    change: (state: MutationState) => Promise<T>,
+    options: { managed?: boolean } = {}
   ): Promise<{ profile: StoredSessionProfile; result: T }> {
     return this.queue.run(profileId, async () => {
       const layout = this.layout(profileId);
       const file = await this.readManifest(profileId, layout);
+      if (isManaged(file.manifest) && options.managed !== true) throw errors.notFound(profileId);
       if (String(file.manifest.revision) !== revision) throw errors.conflict();
       let secrets: SessionProfileSecretsFile | null = null;
       const state: MutationState = {
@@ -1087,14 +1172,14 @@ export class SessionProfileStore {
   private async assertNameFree(name: string, exceptId?: string): Promise<void> {
     const { profiles } = await this.list();
     const lower = name.toLowerCase();
-    if (profiles.some((profile) => profile.manifest.id !== exceptId && profile.manifest.name.toLowerCase() === lower)) {
+    if (profiles.some((profile) => !isManaged(profile.manifest) && profile.manifest.id !== exceptId && profile.manifest.name.toLowerCase() === lower)) {
       throw errors.nameTaken(name);
     }
   }
 
   private async copyName(name: string): Promise<string> {
     const { profiles } = await this.list();
-    const taken = new Set(profiles.map((profile) => profile.manifest.name.toLowerCase()));
+    const taken = new Set(profiles.filter((profile) => !isManaged(profile.manifest)).map((profile) => profile.manifest.name.toLowerCase()));
     for (let n = 1; ; n += 1) {
       const suffix = n === 1 ? " copy" : ` copy ${n}`;
       const candidate = `${name.slice(0, SESSION_PROFILE_NAME_MAX - suffix.length)}${suffix}`;
@@ -1307,6 +1392,11 @@ function importName(entry: SessionProfileImportEntry): string {
     default:
       return entry.name;
   }
+}
+
+/** Orquester owns this profile (`manifest.managed`): hidden from users, edited only by `ensureManaged`. */
+export function isManaged(manifest: Pick<SessionProfileManifestRecord, "managed">): boolean {
+  return typeof manifest.managed === "string" && manifest.managed.length > 0;
 }
 
 function profileName(raw: string): string {
