@@ -255,7 +255,12 @@ export function createScriptedAdapter(options: ScriptedAdapterOptions = {}): Scr
       calls.push({
         kind: "respondToApproval",
         threadId,
-        detail: { requestId, decision, ...(options?.redirect === true ? { redirect: true } : {}) }
+        detail: {
+          requestId,
+          decision,
+          ...(options?.redirect === true ? { redirect: true } : {}),
+          ...(options?.feedback !== undefined ? { feedback: options.feedback } : {})
+        }
       });
       const failure = take("failApproval");
       if (failure) throw failure;

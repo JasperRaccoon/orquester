@@ -737,6 +737,7 @@ export class ClaudeNormalizer {
     requestType: CanonicalRequestType;
     detail?: string;
     reason?: string;
+    requestingAgentId?: string;
     toolName: string;
     toolInput: Record<string, unknown>;
     toolUseId?: string;
@@ -763,6 +764,7 @@ export class ClaudeNormalizer {
         dismissible: false,
         ...(input.detail !== undefined ? { detail: input.detail } : {}),
         ...(input.reason !== undefined ? { reason: input.reason } : {}),
+        ...(input.requestingAgentId !== undefined ? { requestingAgentId: input.requestingAgentId } : {}),
         ...(input.appName !== undefined ? { appName: input.appName } : {}),
         ...(input.options !== undefined ? { options: input.options } : {}),
         args: {
@@ -2228,6 +2230,11 @@ export class ClaudeNormalizer {
    * keyed by its stream content index, a subagent's by a negative synthetic
    * key (`nestedToolSeq`), so the id is the only lookup that finds both.
    */
+  /** The subagent a tool call belongs to, while the call is in flight; `undefined` for the main agent's. */
+  toolUseOwner(toolUseId: string): string | undefined {
+    return this.inFlightEntry(toolUseId)?.[1].agentId;
+  }
+
   private inFlightEntry(toolUseId: string): [number, ToolInFlight] | undefined {
     for (const entry of this.inFlightTools) {
       if (entry[1].itemId === toolUseId) {

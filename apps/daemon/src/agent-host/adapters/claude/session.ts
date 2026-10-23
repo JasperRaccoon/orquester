@@ -237,6 +237,14 @@ function claudeIngestsAttachment(
   return attachment.type === "image" && IMAGE_MIME_TYPES.has(attachment.mimeType);
 }
 
+/** What a decline's response hands `permissionResultForDecision`. */
+function responseFields(response: ApprovalResponseOptions | undefined): { redirect?: true; feedback?: string } {
+  return {
+    ...(response?.redirect === true ? { redirect: true as const } : {}),
+    ...(response?.feedback !== undefined ? { feedback: response.feedback } : {})
+  };
+}
+
 interface PendingApproval {
   requestId: string;
   requestType: CanonicalRequestType;
@@ -244,8 +252,11 @@ interface PendingApproval {
   toolInput: Record<string, unknown>;
   toolUseId?: string;
   suggestions?: readonly PermissionUpdate[];
-  /** `redirect`: a decline the user's next message redirects (`permissionResultForDecision`). */
-  settle: (decision: ApprovalDecision, redirect?: boolean) => void;
+  /**
+   * `response`: a decline the user's message redirects, or — a subagent's
+   * request — the user's own words for it (`permissionResultForDecision`).
+   */
+  settle: (decision: ApprovalDecision, response?: ApprovalResponseOptions) => void;
 }
 
 interface PendingUserInput {
@@ -1703,15 +1714,15 @@ export class ClaudeSession {
       // waits on the same decision.
       return new Promise<PermissionResult>((resolve) => {
         const previous = existing.settle;
-        existing.settle = (decision, redirect) => {
-          previous(decision, redirect);
+        existing.settle = (decision, response) => {
+          previous(decision, response);
           resolve(
             permissionResultForDecision({
               decision,
               toolName,
               toolInput,
               ...(existing.suggestions !== undefined ? { suggestions: existing.suggestions } : {}),
-              ...(redirect === true ? { redirect: true } : {})
+              ...responseFields(response)
             })
           );
         };
@@ -1726,7 +1737,15 @@ export class ClaudeSession {
     // Why Claude asked, and whether it allows a standing grant for it.
     const presentation = claudeApprovalPresentation({ detail, callbackOptions });
 
-    const decided = createDeferred<{ decision: ApprovalDecision; redirect?: boolean }>();
+    // A subagent's request (the Task tool's agent): a message sent over it is
+    // its answer, so it is said whose it is. The call's owner while it is in
+    // flight, else the SDK's own word for it.
+    const requestingAgentId =
+      (callbackOptions.toolUseID !== undefined
+        ? this.normalizer.toolUseOwner(callbackOptions.toolUseID)
+        : undefined) ?? trimmedString(callbackOptions.agentID);
+
+    const decided = createDeferred<{ decision: ApprovalDecision; response?: ApprovalResponseOptions }>();
     const pending: PendingApproval = {
       requestId,
       requestType,
@@ -1736,8 +1755,8 @@ export class ClaudeSession {
       ...(callbackOptions.suggestions !== undefined
         ? { suggestions: callbackOptions.suggestions }
         : {}),
-      settle: (decision, redirect) =>
-        decided.resolve({ decision, ...(redirect === true ? { redirect: true } : {}) })
+      settle: (decision, response) =>
+        decided.resolve({ decision, ...(response !== undefined ? { response } : {}) })
     };
     this.pendingApprovals.set(requestId, pending);
 
@@ -1747,6 +1766,7 @@ export class ClaudeSession {
         requestType,
         detail,
         ...presentation,
+        ...(requestingAgentId !== undefined ? { requestingAgentId } : {}),
         toolName,
         toolInput,
         ...(callbackOptions.toolUseID !== undefined
@@ -1787,14 +1807,14 @@ export class ClaudeSession {
       onAbort();
     }
 
-    const { decision, redirect } = await decided.promise;
+    const { decision, response } = await decided.promise;
     this.noteActivity();
     return permissionResultForDecision({
       decision,
       toolName,
       toolInput,
       ...(pending.suggestions !== undefined ? { suggestions: pending.suggestions } : {}),
-      ...(redirect === true ? { redirect: true } : {})
+      ...responseFields(response)
     });
   };
 
@@ -1985,7 +2005,7 @@ export class ClaudeSession {
       throw new Error(`Unknown pending approval request: ${requestId}`);
     }
     this.pendingApprovals.delete(requestId);
-    pending.settle(decision, options?.redirect === true);
+    pending.settle(decision, options);
     this.emit([
       this.normalizer.requestResolved({
         requestId,

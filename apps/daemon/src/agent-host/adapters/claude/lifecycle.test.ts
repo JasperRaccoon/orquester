@@ -1237,6 +1237,41 @@ describe("claude adapter — approvals", () => {
     }
   });
 
+  it("a subagent's request says whose it is, and its decline carries the user's own words", async () => {
+    const harness = await makeHarness();
+    await harness.adapter.startSession(START);
+    const peer = harness.peers[0]!;
+    await harness.adapter.sendTurn({
+      threadId: START.threadId,
+      input: "review the repo",
+      attachments: [],
+      interactionMode: "default"
+    });
+    await peer.nextTurn();
+    const decision = peer.canUseTool!("Bash", { command: "rm -rf fixtures" }, {
+      signal: new AbortController().signal,
+      toolUseID: "toolu_sub",
+      requestId: "req-sub",
+      agentID: "agent-explore-1"
+    } as unknown as Parameters<CanUseTool>[2]);
+    const opened = await harness.waitFor("request.opened");
+    assert.equal(opened.payload.requestingAgentId, "agent-explore-1");
+    assert.equal(opened.agentId, undefined, "the card stays the parent's");
+    await harness.adapter.respondToApproval(START.threadId, opened.requestId!, "decline", {
+      redirect: true,
+      feedback: "  keep the fixtures, delete only build/  "
+    });
+    assert.deepEqual(await decision, { behavior: "deny", message: "keep the fixtures, delete only build/" });
+  });
+
+  it("a main-agent request names no requesting agent", async () => {
+    const { harness, decision, requestId } = await openApproval();
+    const opened = findEvent(harness.events, "request.opened");
+    assert.equal("requestingAgentId" in (opened?.payload ?? {}), false);
+    await harness.adapter.respondToApproval(START.threadId, requestId, "accept");
+    await decision;
+  });
+
   it("a redirecting decline denies with the redirect message, a plain one with the decline", async () => {
     const redirected = await openApproval();
     await redirected.harness.adapter.respondToApproval(

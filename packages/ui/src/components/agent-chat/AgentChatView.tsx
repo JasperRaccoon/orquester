@@ -321,9 +321,14 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   // redirects the agent, one over a question answers it (§7.5). A request
   // already answered — here, in another tab, over the MCP — is neither: its
   // resolution is on its way, and a second answer would answer it twice.
+  const provider = useProviderSnapshot(session.refId);
   const composerPendingRequests = React.useMemo<ComposerPendingRequests>(
-    () => composerPendingRequestsOf(pending),
-    [pending]
+    () =>
+      composerPendingRequestsOf({
+        ...pending,
+        approvalFeedbackToSubagents: provider?.capabilities?.approvalFeedbackToSubagents === true
+      }),
+    [pending, provider?.capabilities?.approvalFeedbackToSubagents]
   );
   // The dock's in-flight lock-out covers an answer given elsewhere, too.
   const dockRespondingRequestIds = React.useMemo(
@@ -338,7 +343,6 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   // `liveCount` also counts running shells as agents.
   const rosterCounts = React.useMemo(() => rosterKindCounts(roster.agents), [roster.agents]);
   const status = useAgentChatStatus(sessionId);
-  const provider = useProviderSnapshot(session.refId);
   // An Agent Profile chat offers what ITS session loaded (else its profile's items), never the
   // provider's Global commands and skills; re-read as its session starts and turns end.
   const threadProfileId = slice.head?.profileId ?? null;

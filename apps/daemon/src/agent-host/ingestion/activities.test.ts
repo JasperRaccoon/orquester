@@ -67,11 +67,12 @@ describe("approvals (§5.1)", () => {
     const [explained] = runtimeEventToActivities(
       runtimeEvent(
         "request.opened",
-        { requestType: "command_execution_approval", dismissible: false, detail: "rm -rf build", reason: "Matched an ask rule" },
+        { requestType: "command_execution_approval", dismissible: false, detail: "rm -rf build", reason: "Matched an ask rule", requestingAgentId: "task-1" },
         { requestId: "req-1" }
       )
     );
     assert.equal(payloadOf(explained!).reason, "Matched an ask rule");
+    assert.equal(payloadOf(explained!).requestingAgentId, "task-1");
     const [bare] = runtimeEventToActivities(
       runtimeEvent("request.opened", { requestType: "command_execution_approval", dismissible: false }, { requestId: "req-2" })
     );

@@ -755,6 +755,14 @@ export interface RequestOpenedPayload {
    * `reason`. Absent when the provider gives none.
    */
   reason?: string;
+  /**
+   * The subagent that asked, when a subagent did (Claude's Task tool, an
+   * OpenCode child session): its roster id. The card stays the parent's —
+   * the event carries no owner — this only says whose request it is, so a
+   * message sent over it can go to that agent
+   * (`AdapterCapabilities.approvalFeedbackToSubagents`).
+   */
+  requestingAgentId?: string;
   appName?: string;
   /** When absent the UI shows the default set of §4.3. */
   options?: ApprovalOption[];

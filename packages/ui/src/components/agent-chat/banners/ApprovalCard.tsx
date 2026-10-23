@@ -81,6 +81,17 @@ const PRIMARY_BUTTON =
  * *T3: `ComposerPendingApprovalPanel.tsx:17-63`,
  * `ComposerPendingApprovalActions.tsx:23-108`.*
  */
+/**
+ * The line under the card's title: the MCP server that asks, and whether a
+ * subagent asked — a message sent over its card goes to that subagent.
+ */
+export function approvalCardDescription(
+  approval: Pick<PendingApproval, "appName" | "requestingAgentId">
+): string | undefined {
+  if (approval.requestingAgentId === undefined) return approval.appName;
+  return approval.appName ? `${approval.appName} · asked by a subagent` : "Asked by a subagent";
+}
+
 export function ApprovalCard({
   approval,
   pendingCount,
@@ -100,7 +111,7 @@ export function ApprovalCard({
       density="spacious"
       icon={<ShieldIcon size={14} aria-hidden />}
       title={label}
-      description={approval.appName}
+      description={approvalCardDescription(approval)}
       counter={pendingCount > 1 ? `1/${pendingCount}` : undefined}
       actions={
         <>

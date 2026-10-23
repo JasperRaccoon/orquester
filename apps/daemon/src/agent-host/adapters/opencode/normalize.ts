@@ -2689,11 +2689,16 @@ function openPermission(
   }
   state.autoRepliedRequestIds.delete(request.id);
   state.pendingPermissions.set(request.id, request);
+  // A child session's request (a `task` subagent): the roster's id for it is
+  // the child's session id, and a message sent over the card is its answer.
+  const requestingAgentId =
+    request.sessionID !== undefined && state.childAgents.has(request.sessionID) ? request.sessionID : undefined;
   out.push({
     ...out.base({ turnId: state.activeTurnId, requestId: request.id, raw }),
     type: "request.opened",
     payload: {
       requestType: mapPermissionToRequestType(request.permission),
+      ...(requestingAgentId !== undefined ? { requestingAgentId } : {}),
       // The provider is blocked waiting on a reply: it must be answered or
       // cancelled, never dismissed (§4.2).
       dismissible: false,

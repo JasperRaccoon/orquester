@@ -571,6 +571,8 @@ export interface PendingApproval {
   detail?: string;
   /** Why the provider asked ({@link RequestOpenedPayload.reason}); absent when it did not say. */
   reason?: string;
+  /** The subagent that asked ({@link RequestOpenedPayload.requestingAgentId}); absent for the main agent. */
+  requestingAgentId?: string;
   appName?: string;
   /**
    * The tool call this request gates, when the adapter knows it.
