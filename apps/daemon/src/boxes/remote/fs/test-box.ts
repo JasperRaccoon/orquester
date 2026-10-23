@@ -86,7 +86,7 @@ export function boxDiskConnection(options: BoxDiskOptions): BoxDiskConnection {
   wrapped.readFile = (path, readOptions) => inner.readFile(local(path), readOptions);
   wrapped.writeFile = (path, data, writeOptions) => inner.writeFile(local(path), data, writeOptions);
   wrapped.readTar = (path, tarOptions) => inner.readTar(local(path), tarOptions);
-  wrapped.writeTar = (path, tar) => inner.writeTar(local(path), tar);
+  wrapped.writeTar = (path, tar, tarOptions) => inner.writeTar(local(path), tar, tarOptions);
   wrapped.exec = (execOptions: BoxExecOptions) => {
     // Box paths in argv (an archive to list) point into the disk, like cwd. Only paths under
     // `argRoots` count: an rg glob such as "/src/keep.ts" is not a path.

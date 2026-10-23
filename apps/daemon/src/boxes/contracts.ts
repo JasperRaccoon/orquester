@@ -130,7 +130,8 @@ export interface BoxConnection {
   /** Resolves once the box confirmed the atomic rename. */
   writeFile(path: string, data: Readable | Uint8Array | string, options?: { mode?: number; mkdirs?: boolean }): Promise<void>;
   readTar(path: string, options?: { exclude?: string[] }): Promise<Readable>;
-  writeTar(path: string, tar: Readable): Promise<void>;
+  /** Extract a tar stream into dir `path` (`compression: "gzip"`: the stream is gzipped). */
+  writeTar(path: string, tar: Readable, options?: { compression?: "gzip" }): Promise<void>;
 
   /** `fs.change` and other box events. Returns an unsubscribe function. */
   onEvent(name: string, listener: (data: unknown) => void): () => void;
@@ -397,9 +398,22 @@ export interface BoxSyncScope {
   threadId: string | null;
 }
 
+/**
+ * How far one config root's pass got: `root` (a host path: one of the scope's roots, or a shared
+ * dir they link to), `total` files to send (0 while both sides are compared), `done` of them sent.
+ */
+export interface BoxSyncProgress {
+  root: string;
+  done: number;
+  total: number;
+}
+
 export interface BoxConfigSync {
-  /** Bring the box's copy of `scope` up to date (hash compare) before a CLI starts. */
-  ensureSynced(boxId: string, scope: BoxSyncScope, signal: AbortSignal): Promise<void>;
+  /**
+   * Bring the box's copy of `scope` up to date (hash compare) before a CLI starts. `onProgress`
+   * hears each root's pass as it goes (as often as files are sent: throttle before persisting).
+   */
+  ensureSynced(boxId: string, scope: BoxSyncScope, signal: AbortSignal, options?: { onProgress?: (progress: BoxSyncProgress) => void }): Promise<void>;
   /** Keep pushing host changes to the box and collecting box changes for approval. */
   watch(boxId: string, scope: BoxSyncScope): () => void;
   /** Mark the end of a turn: box changes collected since the last call become one approval set. */

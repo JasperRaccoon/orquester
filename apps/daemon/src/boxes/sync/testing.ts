@@ -21,6 +21,8 @@ export interface MappedBoxConnection extends BoxConnection {
   emitEvent(name: string, data: unknown): void;
   /** Box paths of every file written, in order. */
   readonly writes: string[];
+  /** Every bulk push (`writeTar`): the box dir it went to and its compression, in order. */
+  readonly tars: { path: string; compression: string | null }[];
   /** Every request (method + params as sent, box paths), in order. */
   readonly calls: { method: string; params: unknown }[];
   /** The local file standing for a HOST path in this box. */
@@ -42,6 +44,7 @@ export function mappedBoxConnection(options: MappedBoxConnectionOptions): Mapped
   const paths = options.paths ?? { kind: "identity" };
   const inner = localBoxConnection({ boxId: options.boxId, sys: options.sys, paths });
   const writes: string[] = [];
+  const tars: { path: string; compression: string | null }[] = [];
   const calls: { method: string; params: unknown }[] = [];
   const toLocal = (boxPath: string): string => {
     const host = boxToHostPath(paths, boxPath);
@@ -53,13 +56,15 @@ export function mappedBoxConnection(options: MappedBoxConnectionOptions): Mapped
     return hostToBoxPath(paths, local.slice(options.boxRoot.length) || "/");
   };
   const isBoxPath = (value: string): boolean => boxToHostPath(paths, value) !== null && (paths.kind !== "identity" || value.startsWith("/"));
-  const mapParams = (params: unknown): unknown => {
+  const mapParams = (method: string, params: unknown): unknown => {
     if (typeof params !== "object" || params === null) return params;
     const out: Record<string, unknown> = { ...(params as Record<string, unknown>) };
     for (const key of ["path", "from", "to"]) {
       if (typeof out[key] === "string") out[key] = toLocal(out[key] as string);
     }
     if (Array.isArray(out.paths)) out.paths = (out.paths as string[]).map(toLocal);
+    // A link the sync makes in the box names a box path: it points inside this box too.
+    if (method === "fs.symlink" && typeof out.target === "string" && isBoxPath(out.target)) out.target = toLocal(out.target);
     return out;
   };
   const realpathOverride = (boxPath: string): string | null => {
@@ -79,6 +84,7 @@ export function mappedBoxConnection(options: MappedBoxConnectionOptions): Mapped
     },
     agentVersion: inner.agentVersion,
     writes,
+    tars,
     calls,
     inner,
     local: (hostPath) => toLocal(hostToBoxPath(paths, hostPath)),
@@ -90,7 +96,7 @@ export function mappedBoxConnection(options: MappedBoxConnectionOptions): Mapped
         const override = realpathOverride(boxPath);
         if (override !== null) return override as never;
       }
-      const result = await inner.request(method, mapParams(params) as typeof params, requestOptions);
+      const result = await inner.request(method, mapParams(method, params) as typeof params, requestOptions);
       if (method === "fs.realpath" && typeof result === "string") return fromLocal(result) as never;
       if (method === "fs.stat" && result && typeof result === "object") {
         return { ...(result as object), path: (params as { path: string }).path } as never;
@@ -115,7 +121,10 @@ export function mappedBoxConnection(options: MappedBoxConnectionOptions): Mapped
       await inner.writeFile(toLocal(path), data, writeOptions);
     },
     readTar: (path, tarOptions) => inner.readTar(toLocal(path), tarOptions),
-    writeTar: (path, tar) => inner.writeTar(toLocal(path), tar),
+    async writeTar(path, tar, tarOptions) {
+      tars.push({ path, compression: tarOptions?.compression ?? null });
+      await inner.writeTar(toLocal(path), tar, tarOptions);
+    },
     onEvent: (name, listener) => inner.onEvent(name, listener),
     onStatus: (listener) => inner.onStatus(listener),
     setConnected: (next) => inner.setConnected(next),

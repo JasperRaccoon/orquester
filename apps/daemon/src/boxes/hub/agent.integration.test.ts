@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { once } from "node:events";
-import { mkdir, mkdtemp, readFile, readlink, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readlink, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { createConnection, createServer, type AddressInfo, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -387,6 +387,18 @@ describe("orq-agent ↔ hub", { concurrency: false }, () => {
     await assert.rejects(stat(join(out, "proj", "skip.log")), { code: "ENOENT" });
 
     await assert.rejects(connection.readTar(join(work, "no-such-dir")), { code: "ENOENT" });
+
+    // Gzipped: inflated by orq-agent before tar reads it; modes kept; a cut stream fails.
+    await writeFile(join(local, "src", "run.sh"), "#!/bin/sh\n");
+    await chmod(join(local, "src", "run.sh"), 0o755);
+    const gz = spawn("tar", ["-czf", "-", "-C", join(root, "tar-src"), "proj"], { stdio: ["ignore", "pipe", "ignore"] });
+    await connection.writeTar(join(work, "ungzipped"), gz.stdout!, { compression: "gzip" });
+    assert.equal(await readFile(join(work, "ungzipped", "proj", "src", "a.txt"), "utf8"), "A");
+    assert.equal((await stat(join(work, "ungzipped", "proj", "src", "run.sh"))).mode & 0o777, 0o755);
+    const whole = await readAll(spawn("tar", ["-czf", "-", "-C", join(root, "tar-src"), "proj"], { stdio: ["ignore", "pipe", "ignore"] }).stdout!);
+    const cut = new PassThrough();
+    cut.end(whole.subarray(0, whole.length - 12));
+    await assert.rejects(connection.writeTar(join(work, "cut"), cut, { compression: "gzip" }));
   });
 
   test("tcp: host → box, box port on host, and forward.listen to a host target", TIMEOUT, async (t) => {

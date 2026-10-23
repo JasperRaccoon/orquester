@@ -79,6 +79,8 @@ type TarReadSpec struct {
 type TarWriteSpec struct {
 	Kind string `json:"kind"`
 	Path string `json:"path"`
+	// Compression of stream 0: "" (plain tar) or "gzip".
+	Compression string `json:"compression,omitempty"`
 }
 
 type SSHAgentSpec struct {

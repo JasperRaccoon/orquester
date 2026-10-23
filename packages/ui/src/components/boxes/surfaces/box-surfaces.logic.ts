@@ -82,6 +82,15 @@ export function currentSetupStep(setup: readonly BoxSetupStep[]): BoxSetupStep |
   );
 }
 
+/**
+ * What a badge or gate says of a setup step: its label, and while it runs the progress it reports
+ * ("Sync agent configuration (Claude account 2 of 5 · 1,240 of 2,000 files)").
+ */
+export function setupStepText(step: BoxSetupStep | null): string | null {
+  if (!step) return null;
+  return step.state === "running" && step.message ? `${step.label} (${step.message})` : step.label;
+}
+
 /** The short name a badge leads with: "macOS" for a Mac, else the provider. */
 function badgeLead(info: Pick<ProjectBoxInfo, "kind" | "providerLabel">): string {
   return info.kind === "macos" ? "macOS" : info.providerLabel;
@@ -607,7 +616,8 @@ export function configChangeFileRow(file: BoxConfigChangeFile): ConfigChangeFile
   return {
     path: sanitizeApprovalLabel(file.path, CONFIG_PATH_MAX_CHARS),
     changeLabel: CHANGE_LABEL[file.change],
-    executable: file.executable,
+    // A deletion runs nothing (sets stored before the daemon said so may still flag one).
+    executable: file.executable && file.change !== "deleted",
     diff,
     note
   };
