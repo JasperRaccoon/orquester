@@ -19,12 +19,14 @@
  *    - the CLI's own process group ({@link watchGroup}), when the CLI leads
  *      one — `spawnProviderChild` starts Codex and OpenCode `detached`, and a
  *      stop already signals that group: the sweep makes a natural exit do the
- *      same. The Claude SDK spawns its CLI into the host's own group, so it
- *      never has one;
+ *      same. The Claude CLI leads a group of its own too (its host-death
+ *      lifeline, `claude/local-process.ts`; a box's runs in the box), but its
+ *      session does not record it: its scope is its helpers;
  *    - the CLI's helper processes ({@link recordHelpers}): its children once
  *      its session opened, before any of the user's work ran — its MCP
  *      servers — and their descendants that stayed in their session;
- * 3. it is not a shared daemon: no `AGENT_BROWSER_DAEMON` in its environment
+ * 3. it is not the CLI's lifeline watcher (`lifeline.ts`), which ends by itself, nor a
+ *    shared daemon: no `AGENT_BROWSER_DAEMON` in its environment
  *    (agent-browser's daemon and the browser it launched) and not a tmux
  *    server — and a process that `setsid`s away (how both daemonize) leaves
  *    the group and is never recorded as a helper;
@@ -32,7 +34,7 @@
  * SIGTERM first, SIGKILL past the grace to what a fresh scan still finds.
  *
  * What that leaves running, on purpose: the user's work a Claude chat started
- * in the host's group (its background shells — new children of the CLI, never
+ * in its CLI's group (its background shells — new children of the CLI, never
  * helpers), anything that daemonized, and anything a launch started without
  * the marker. Settings → System lists every marked orphan, killable by hand.
  * Linux-only, like everything that reads `/proc`; elsewhere a no-op.

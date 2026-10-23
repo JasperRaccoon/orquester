@@ -14,7 +14,8 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { after, describe, it } from "node:test";
 
-import { LIFELINE_KILL_GRACE_S, LIFELINE_SUPPORTED } from "./lifeline.ts";
+import { AGENT_LAUNCH_ENV_VAR, recordHelperProcesses } from "./leftover-processes.ts";
+import { isLifelineWatcher, LIFELINE_KILL_GRACE_S, LIFELINE_SUPPORTED } from "./lifeline.ts";
 import { spawnProviderChild } from "./spawn.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "orq-lifeline-"));
@@ -117,6 +118,39 @@ describe("the host-death lifeline", { skip: !LIFELINE_SUPPORTED || process.platf
     host.kill("SIGKILL");
     await once(host, "exit");
     assert.doesNotThrow(() => process.kill(survivor!, 0), "a released lifeline stops nothing");
+  });
+});
+
+/** `/proc/<pid>/stat` field 22, the starttime that makes a pid one process. */
+function starttime(pid: number): number {
+  const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+  return Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19]);
+}
+
+describe("the lifeline and the leftover sweep (real /proc)", { skip: process.platform !== "linux" }, () => {
+  it("the watcher, a marked child of the CLI, is never recorded as one of its helpers", { timeout: 30_000 }, async () => {
+    const child = spawnProviderChild({
+      command: "/bin/sh",
+      args: ["-c", "sleep 1000 & echo ready; wait"],
+      env: { PATH: process.env.PATH ?? "/usr/bin:/bin", [AGENT_LAUNCH_ENV_VAR]: "lifeline-test" },
+      cwd: "/"
+    });
+    try {
+      const lines = createInterface({ input: child.stdout })[Symbol.asyncIterator]();
+      assert.equal((await lines.next()).value, "ready");
+      const pid = child.pid!;
+      const members = groupMembers(pid).filter((member) => member !== pid);
+      const watchers = members.filter((member) => isLifelineWatcher(readFileSync(`/proc/${member}/cmdline`, "latin1")));
+      assert.equal(watchers.length, 1, "the CLI's group holds its watcher");
+      const helpers = await recordHelperProcesses({ pid, starttime: starttime(pid) });
+      assert.deepEqual(
+        helpers.map((entry) => entry.pid),
+        members.filter((member) => !watchers.includes(member)),
+        "its `sleep` is a helper, its watcher is not"
+      );
+    } finally {
+      await child.kill();
+    }
   });
 });
 
