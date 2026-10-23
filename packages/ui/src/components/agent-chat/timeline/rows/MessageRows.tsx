@@ -12,6 +12,7 @@ import {
   type ThreadLineageRelation
 } from "@orquester/api/agent-chat";
 
+import { noteRender } from "../../../../lib/render-probe";
 import { FileTypeIcon } from "../../../../icons/files";
 import { cn } from "../../../../lib/cn";
 import { PROMPT_CUT_AT_REST_NOTE, type AgentPrompt } from "../../../../lib/agent-chat/agent-prompt.logic";
@@ -614,6 +615,7 @@ export const AssistantMessageRow = React.memo(function AssistantMessageRow({
 }: {
   row: Row<"message">;
 }): React.ReactElement {
+  noteRender("AssistantMessageRow");
   const ctx = useTimelineRowContext();
   const streaming = row.streaming === true;
   const text = row.message.text || (streaming ? "" : "(empty response)");

@@ -2,6 +2,7 @@ import React from "react";
 import { flushSync } from "react-dom";
 
 import { DEFAULT_RUNTIME_MODE, SETTLED_TURN_STATES, messageStreamingContext, startedTurns } from "@orquester/api/agent-chat";
+import type { ThreadItem } from "@orquester/api/agent-chat";
 import type { GoalAction } from "@orquester/api/agent-chat";
 import type { ForkSessionRequest } from "@orquester/api";
 
@@ -18,15 +19,19 @@ import {
 import { isGoalHeldForUpdate } from "../../lib/agent-chat/goal.logic";
 import { ApiError } from "../../lib/api-client";
 import { useApi } from "../../context/orquester-context";
+import { noteRender } from "../../lib/render-probe";
 import { Modal, ModalCloseButton } from "../ui";
 import {
   useAgentChatPending,
   useAgentChatRoster,
   useAgentChatStatus,
-  useAgentChatThread,
+  useAgentChatThreadChrome,
+  useAgentChatThreadReader,
+  useAgentChatThreadSelector,
   useProviderSnapshot,
   useThreadCatalog
 } from "../../lib/agent-chat/hooks";
+import type { AgentChatThreadState } from "../../lib/agent-chat/store";
 import { withThreadCatalog } from "../../lib/agent-chat/thread-catalog";
 import {
   clearComposerInbox,
@@ -53,7 +58,7 @@ import { rewindPickerEnabled } from "./composer/RewindControl";
 import { useComposerSending } from "./composer/use-composer-sending";
 import {
   createEscapeSequence,
-  deriveRewindTargets,
+  createRewindTargetsMemo,
   type EscapeSequence,
   type RewindTarget
 } from "../../lib/agent-chat/rewind.logic";
@@ -145,10 +150,11 @@ import { TurnDiffModal, type TurnDiffRequest } from "./timeline/TurnDiffModal";
 import {
   nextHeldTimeline,
   resolveThreadSwitchTimeline,
+  threadSwitchDisplay,
   type HeldTimeline
 } from "./thread-switch";
 import type { AgentChatTimelineRow } from "../../lib/agent-chat/contracts";
-import type { AgentChatViewProps, AgentRosterMainRow } from "./contracts";
+import type { AgentChatViewProps, AgentRosterMainRow, ChatTimelineProps } from "./contracts";
 
 /** Stable empty arrays, so a neutralised render never churns child props. */
 const NO_APPROVALS: never[] = [];
@@ -242,20 +248,75 @@ function errorText(error: unknown, fallback: string): string {
  * paint hold is implemented anyway and does engage — on a reconnect
  * re-snapshot, and if this instance is ever handed a different `session.id`.
  */
+// What the chat view reads off what a streamed delta replaces: each answers a
+// value a delta leaves as it was, so the view does not re-render for one.
+const selectHasRows = (state: AgentChatThreadState): boolean => state.rows.length > 0;
+const selectHasEntries = (state: AgentChatThreadState): boolean => state.slice.entries.length > 0;
+const selectApprovalEntries = (state: AgentChatThreadState): readonly ThreadItem[] | undefined =>
+  state.slice.pending.approvals.length > 0 ? state.slice.entries : undefined;
+/** The thread's first own prompt — the title's seed — or `undefined`. */
+const selectFirstPrompt = (state: AgentChatThreadState): ThreadItem | undefined =>
+  state.slice.entries.find(
+    (item) => item.kind === "message" && item.role === "user" && item.agentId === undefined
+  );
+const selectRows = (state: AgentChatThreadState): AgentChatTimelineRow[] => state.rows;
+
+interface LiveChatTimelineProps extends Omit<ChatTimelineProps, "sessionId" | "rows"> {
+  /** The thread the view names; the timeline may still paint the held one (§7.1). */
+  threadSessionId: string;
+  loading: boolean;
+  /** The §7.1 paint hold, kept current here as the rows render. */
+  heldRef: React.MutableRefObject<HeldTimeline<AgentChatTimelineRow> | null>;
+}
+
+/**
+ * The timeline with its own subscription to the thread's rows: a streamed
+ * delta re-renders this and the streaming row, never the chat view around it
+ * or its composer (T3's `ThreadTimeline`).
+ */
+// Adapted from T3 Code (MIT): apps/web/src/components/chat/ThreadTimeline.tsx
+function LiveChatTimeline({ threadSessionId, loading, heldRef, ...timeline }: LiveChatTimelineProps): React.ReactElement {
+  const rows = useAgentChatThreadSelector(threadSessionId, selectRows);
+  const displayed = resolveThreadSwitchTimeline({
+    sessionId: threadSessionId,
+    rows,
+    loading,
+    held: heldRef.current
+  });
+  heldRef.current = nextHeldTimeline(heldRef.current, displayed);
+  return (
+    <ChatTimeline
+      {...timeline}
+      sessionId={displayed.displaySessionId}
+      rows={displayed.rows as AgentChatTimelineRow[]}
+    />
+  );
+}
+
 export function AgentChatView({ session, projectPath, active }: AgentChatViewProps): JSX.Element {
+  noteRender("AgentChatView");
   const sessionId = session.id;
-  const { slice, actions, rows, activePlan, actionableProposedPlan, reverting, reveal } =
-    useAgentChatThread(sessionId);
+  // The chrome's fields only — never `entries` or `rows`, which every streamed
+  // delta replaces: the timeline reads its rows itself (`LiveChatTimeline`), and
+  // the few facts read here off them come through narrow selectors below.
+  const { slice, actions, activePlan, actionableProposedPlan, reverting, reveal } =
+    useAgentChatThreadChrome(sessionId);
+  const readThread = useAgentChatThreadReader(sessionId);
   // boxes: a chat of a box project (spec 2026-10-19 §9.3): its box's state can make the
   // transcript read-only (destroyed) or hold sends until setup is done (provisioning).
   const boxView = useProjectBox(projectPath || null);
   const boxBlockedReason = boxChatGate(boxView?.info, boxView?.setupStep ?? null).blockedReason;
   const pending = useAgentChatPending(sessionId);
-  // The items an arrow key's prompt recall reads, at the keypress: a ref, so
-  // the composer is not re-rendered for every streamed token.
-  const recallItemsRef = React.useRef(slice.entries);
-  recallItemsRef.current = slice.entries;
-  const readRecallItems = React.useCallback(() => recallItemsRef.current, []);
+  // `/compact` is offered only on a thread with something in it (§4.6.7).
+  const hasEntries = useAgentChatThreadSelector(sessionId, selectHasEntries);
+  // An approval card joins a request to the tool call it gates by the thread's
+  // items (E2E E7): read only while one is up, so a reply that streams with no
+  // card open re-renders nothing here.
+  const approvalEntries = useAgentChatThreadSelector(sessionId, selectApprovalEntries);
+  // The items an arrow key's prompt recall reads, at the keypress — read from
+  // the store then, so neither this view nor the composer re-renders for every
+  // streamed token.
+  const readRecallItems = React.useCallback(() => readThread().slice.entries, [readThread]);
   // What the dock holds, as the composer needs it: a send over an approval
   // redirects the agent, one over a question answers it (§7.5). A request
   // already answered — here, in another tab, over the MCP — is neither: its
@@ -343,16 +404,13 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   const api = useApi();
 
   // --- the §7.1 paint hold -------------------------------------------------
+  // The held rows are the timeline's (`LiveChatTimeline` keeps them current as
+  // it renders); this view needs only whether its own thread has rows, which a
+  // delta never changes.
   const heldRef = React.useRef<HeldTimeline<AgentChatTimelineRow> | null>(null);
   const loading = slice.connection !== "synchronized";
-  const displayed = resolveThreadSwitchTimeline({
-    sessionId,
-    rows,
-    loading,
-    held: heldRef.current
-  });
-  heldRef.current = nextHeldTimeline(heldRef.current, displayed);
-  const paintOnly = displayed.paintOnly;
+  const hasRows = useAgentChatThreadSelector(sessionId, selectHasRows);
+  const { paintOnly } = threadSwitchDisplay({ sessionId, hasRows, loading, held: heldRef.current });
 
   // --- `request_secret` cards (design 2026-10-14 §5) ------------------------
   // Daemon-owned and memory-only; the value goes from the card to the answer
@@ -582,13 +640,11 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   // so a manual rename is never clobbered — and the same rule applies here:
   // once per thread, and only over a title nobody has chosen.
   const seededRef = React.useRef<string | null>(null);
+  const first = useAgentChatThreadSelector(sessionId, selectFirstPrompt);
   React.useEffect(() => {
     if (seededRef.current === sessionId) {
       return;
     }
-    const first = slice.entries.find(
-      (item) => item.kind === "message" && item.role === "user" && item.agentId === undefined
-    );
     if (!first || first.kind !== "message") {
       return;
     }
@@ -608,7 +664,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
       // manually-renamed and no provider name could ever land.
       dispatch(() => useAppStore.getState().renameTab(sessionId, seed, { seed: true }));
     }
-  }, [sessionId, slice.entries, session.title, session.refId]);
+  }, [sessionId, first, session.title, session.refId]);
 
   const turnActive = slice.turnStatus !== null && !SETTLED_TURN_STATES.has(slice.turnStatus);
 
@@ -620,10 +676,16 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   // `rewindTo` hands the message back to the composer for editing.
   const canRevert = !paintOnly && provider?.capabilities?.supportsConversationRollback !== false;
   const startedTurnCount = React.useMemo(() => startedTurns(slice.turns).length, [slice.turns]);
-  const rewindTargets = React.useMemo(
-    () =>
-      paintOnly || !canRevert ? NO_REWIND_TARGETS : deriveRewindTargets(displayed.rows, slice.turns),
-    [canRevert, displayed.rows, paintOnly, slice.turns]
+  // Read off the store's rows, and the same list by identity while a delta
+  // leaves it as it was, so the composer's footer does not re-render with it.
+  const [rewindTargetsOf] = React.useState(createRewindTargetsMemo);
+  const rewindTargets = useAgentChatThreadSelector(
+    sessionId,
+    React.useCallback(
+      (state: AgentChatThreadState) =>
+        paintOnly || !canRevert ? NO_REWIND_TARGETS : rewindTargetsOf(state.rows, state.slice.turns),
+      [canRevert, paintOnly, rewindTargetsOf]
+    )
   );
   // A composer send of this thread still on its way (§7.4) — whichever
   // composer sent it, one a project switch unmounted included. The row
@@ -757,11 +819,11 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
     },
     [api, sessionId]
   );
-  const mergeStreaming = messageStreamingContext(slice);
-  const mergeText = React.useMemo(
-    () => defaultMergeBackText(slice.entries, mergeStreaming),
-    [slice.entries, mergeStreaming]
-  );
+  // Read when the merge composer opens, never per streamed token.
+  const readMergeText = React.useCallback(() => {
+    const thread = readThread().slice;
+    return defaultMergeBackText(thread.entries, messageStreamingContext(thread));
+  }, [readThread]);
 
   // --- older history and the palette's reveal (design 2026-09-23) ----------
   // The "Load older turns" row pages the indexed log in ABOVE the window; the
@@ -802,11 +864,11 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   // Counted for the agent and model the picker names: the handoff's budget is the target model's.
   const continuePreviewFor = React.useCallback(
     (handoff: ContinueHandoffTarget): ContinueHandoffPreview => {
-      const state = { turns: slice.turns, items: slice.entries };
+      const state = { turns: slice.turns, items: readThread().slice.entries };
       const budgetBytes = continueHandoffBudget(state, slice.head?.modelSelection ?? null, handoff);
       return { budgetBytes, preview: continueFrom ? continueHandoffPreview(state, continueTarget, budgetBytes) : null };
     },
-    [continueFrom, continueTarget, slice.turns, slice.entries, slice.head?.modelSelection]
+    [continueFrom, continueTarget, slice.turns, readThread, slice.head?.modelSelection]
   );
   const continueIn = React.useCallback(
     async (fields: Pick<ForkSessionRequest, "refId" | "accountId" | "modelSelection">): Promise<void> => {
@@ -987,20 +1049,28 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
       });
   // OpenCode runs one server per project under its own identity (§3.2), so
   // there is nothing to pick: the chip stays the label it always was.
-  const accountOptions = chatAccountSwitchSupported({
+  // Memoised, like every prop the composer gets: it is a `React.memo` and
+  // re-renders only when what it shows changes.
+  const accountSwitchable = chatAccountSwitchSupported({
     refId: session.refId,
     adapterId: provider?.id
-  })
-    ? // boxes: a box chat runs under a managed account only (spec 2026-10-19 §17.16).
-      boxAccountOptions(
-        buildChatAccountOptions({
-          refId: session.refId,
-          accounts: agentAccounts?.accounts,
-          shortLabel: shortAccountLabel
-        }),
-        boxView !== null
-      )
-    : undefined;
+  });
+  const isBoxChat = boxView !== null;
+  const accountOptions = React.useMemo(
+    () =>
+      accountSwitchable
+        ? // boxes: a box chat runs under a managed account only (spec 2026-10-19 §17.16).
+          boxAccountOptions(
+            buildChatAccountOptions({
+              refId: session.refId,
+              accounts: agentAccounts?.accounts,
+              shortLabel: shortAccountLabel
+            }),
+            isBoxChat
+          )
+        : undefined,
+    [accountSwitchable, session.refId, agentAccounts?.accounts, isBoxChat]
+  );
   // A thread on the system identity showed no chip before the picker existed;
   // it shows one now, because "System" is a choice the user can move off.
   const accountLabel =
@@ -1066,16 +1136,21 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   const profileAgent = isSessionProfileAgentId(providerAdapter)
     ? providerAdapter
     : agentForRefId(session.refId, [], REGISTRY.agents as readonly RegistryEntryDef[]);
-  const profileChip =
-    profileAgent === null
-      ? undefined
-      : {
-          agent: profileAgent,
-          profiles: profileList.profiles,
-          selectedId: slice.head?.profileId ?? null,
-          canSwitch: accountSwitchEnabled,
-          disabledReason: paintOnly ? null : chatAccountSwitchRefusal(accountSwitchState, "profiles")
-        };
+  const profileRefusal = paintOnly ? null : chatAccountSwitchRefusal(accountSwitchState, "profiles");
+  const profileSelectedId = slice.head?.profileId ?? null;
+  const profileChip = React.useMemo(
+    () =>
+      profileAgent === null
+        ? undefined
+        : {
+            agent: profileAgent,
+            profiles: profileList.profiles,
+            selectedId: profileSelectedId,
+            canSwitch: accountSwitchEnabled,
+            disabledReason: profileRefusal
+          },
+    [profileAgent, profileList.profiles, profileSelectedId, accountSwitchEnabled, profileRefusal]
+  );
 
   // --- the goal chip (goals §8.2) -------------------------------------------
   // The chip shows whatever unfinished goal the fold holds; which actions its
@@ -1301,7 +1376,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
               <ThreadLineageBar
                 session={session}
                 sessions={projectSessions}
-                defaultMergeText={mergeText}
+                readDefaultMergeText={readMergeText}
                 notice={lineageNotice}
                 onDismissNotice={() => setLineageNotice(null)}
                 onOpenSession={activateTab}
@@ -1309,9 +1384,10 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 onMergeAction={actOnMerge}
               />
             )}
-            <ChatTimeline
-              sessionId={displayed.displaySessionId}
-              rows={displayed.rows as AgentChatTimelineRow[]}
+            <LiveChatTimeline
+              threadSessionId={sessionId}
+              loading={loading}
+              heldRef={heldRef}
               follow={!paintOnly && slice.follow}
               onFollowChange={paintOnly ? noop : actions.setFollow}
               disclosures={slice.disclosures}
@@ -1448,7 +1524,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 isTurnWorking={!paintOnly && turnActive}
                 uploadAttachment={actions.uploadAttachment}
                 active={active}
-                entries={paintOnly ? undefined : slice.entries}
+                entries={paintOnly ? undefined : approvalEntries}
                 planTitle={planFollowUp ? proposedPlanTitle(planFollowUp.planMarkdown) : null}
                 notices={paintOnly ? undefined : dockNotices}
                 secretRequests={paintOnly ? undefined : secretRequests}
@@ -1501,7 +1577,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 onHeightChange={setComposerHeight}
                 // `/compact` is offered only where there is something to
                 // compact (§4.6.7): an empty thread would earn a refusal.
-                threadHasContent={slice.entries.length > 0}
+                threadHasContent={hasEntries}
                 resumeCompactionTokens={resumeCompactionTokens}
                 // boxes: why the account picker offers no System account.
                 accountNote={boxView !== null ? BOX_MANAGED_ACCOUNTS_NOTE : undefined}

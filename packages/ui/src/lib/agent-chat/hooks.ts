@@ -20,6 +20,7 @@ import type {
   ProviderSnapshot,
   RuntimeSubagent,
   ThreadCatalogResponse,
+  ThreadHead,
   ThreadItem,
   ThreadSessionStatus,
   Turn
@@ -36,6 +37,7 @@ import type {
   AgentChatPendingView,
   AgentChatRosterView,
   AgentChatStatusView,
+  AgentChatThreadSlice,
   AgentChatThreadView,
   AgentChatTimelineRow,
   UseAgentChatPending,
@@ -120,6 +122,138 @@ export const useAgentChatThread: UseAgentChatThread = (sessionId) => {
 };
 
 /**
+ * The slice fields the chat view's chrome reads — head, turns, status,
+ * banners, queue, history, scroll — each through its own subscription. The
+ * reducer keeps every one of them by identity while a reply streams, so a
+ * text delta re-renders none of their readers (spec §7.2's first layer; T3's
+ * "quiet" thread atoms). What a delta does move — `entries`, `rows`, `seq` —
+ * is deliberately absent: the timeline reads its rows itself
+ * ({@link useAgentChatThreadSelector}), and the view reads the few facts it
+ * needs from them through narrow selectors that answer stable values.
+ */
+export type AgentChatThreadChrome = Pick<
+  AgentChatThreadSlice,
+  | "head"
+  | "turns"
+  | "checkpoints"
+  | "connection"
+  | "turnStatus"
+  | "sessionStatus"
+  | "contextWindow"
+  | "errorBanner"
+  | "scroll"
+  | "queue"
+  | "interactionMode"
+  | "goal"
+  | "historyImport"
+  | "history"
+  | "follow"
+  | "disclosures"
+>;
+
+/** {@link useAgentChatThread} without what a streamed delta moves: see {@link AgentChatThreadChrome}. */
+export function useAgentChatThreadChrome(
+  sessionId: string
+): Omit<AgentChatThreadView, "slice" | "rows"> & { slice: AgentChatThreadChrome } {
+  const store = useThreadStore(sessionId);
+  // The fold stamps `seq` and `updatedAt` on the head with every event, a
+  // streamed delta included; the chrome reads neither, so it gets the head it
+  // already has until something it does read moves (T3's quiet thread shell).
+  const quietHeadRef = useRef<ThreadHead | null>(null);
+  const head = useThreadState(store, (state) => {
+    quietHeadRef.current = quietHead(quietHeadRef.current, state.slice.head);
+    return quietHeadRef.current;
+  });
+  const turns = useThreadState(store, (state) => state.slice.turns);
+  const checkpoints = useThreadState(store, (state) => state.slice.checkpoints);
+  const connection = useThreadState(store, (state) => state.slice.connection);
+  const turnStatus = useThreadState(store, (state) => state.slice.turnStatus);
+  const sessionStatus = useThreadState(store, (state) => state.slice.sessionStatus);
+  const contextWindow = useThreadState(store, (state) => state.slice.contextWindow);
+  const errorBanner = useThreadState(store, (state) => state.slice.errorBanner);
+  const scroll = useThreadState(store, (state) => state.slice.scroll);
+  const queue = useThreadState(store, (state) => state.slice.queue);
+  const interactionMode = useThreadState(store, (state) => state.slice.interactionMode);
+  const goal = useThreadState(store, (state) => state.slice.goal);
+  const historyImport = useThreadState(store, (state) => state.slice.historyImport);
+  const history = useThreadState(store, (state) => state.slice.history);
+  const follow = useThreadState(store, (state) => state.slice.follow);
+  const disclosures = useThreadState(store, (state) => state.slice.disclosures);
+  const activePlan = useThreadState(store, (state) => state.activePlan);
+  const actionableProposedPlan = useThreadState(store, (state) => state.actionableProposedPlan);
+  const reverting = useThreadState(store, (state) => state.reverting);
+  const reveal = useThreadState(store, (state) => state.reveal);
+  const actions = useThreadState(store, (state) => state.actions);
+
+  const slice = useMemo<AgentChatThreadChrome>(
+    () => ({
+      head,
+      turns,
+      checkpoints,
+      connection,
+      turnStatus,
+      sessionStatus,
+      contextWindow,
+      errorBanner,
+      scroll,
+      queue,
+      interactionMode,
+      goal,
+      historyImport,
+      history,
+      follow,
+      disclosures
+    }),
+    [
+      head,
+      turns,
+      checkpoints,
+      connection,
+      turnStatus,
+      sessionStatus,
+      contextWindow,
+      errorBanner,
+      scroll,
+      queue,
+      interactionMode,
+      goal,
+      historyImport,
+      history,
+      follow,
+      disclosures
+    ]
+  );
+  return useMemo(
+    () => ({ slice, actions, activePlan, actionableProposedPlan, reverting, reveal }),
+    [slice, actions, activePlan, actionableProposedPlan, reverting, reveal]
+  );
+}
+
+/**
+ * `next`, or `previous` when the two differ only in the stamps every event
+ * moves (`seq`, `updatedAt`): every other field compared by identity.
+ */
+// Adapted from T3 Code (MIT): packages/client-runtime/src/state/threadShell.ts
+export function quietHead(previous: ThreadHead | null, next: ThreadHead | null): ThreadHead | null {
+  if (previous === next || previous === null || next === null) return next;
+  const keys = new Set([...Object.keys(previous), ...Object.keys(next)]);
+  for (const key of keys) {
+    if (key === "seq" || key === "updatedAt") continue;
+    if (previous[key as keyof ThreadHead] !== next[key as keyof ThreadHead]) return next;
+  }
+  return previous;
+}
+
+/**
+ * The thread's whole state, read when it is needed — a keypress, a dialog's
+ * preview — rather than subscribed to. Stable for the thread.
+ */
+export function useAgentChatThreadReader(sessionId: string): () => AgentChatThreadState {
+  const store = useThreadStore(sessionId);
+  return store.getState;
+}
+
+/**
  * ONE value of a thread's state, for a surface OUTSIDE the chat view (the
  * right rail's History) that must not re-render on every streamed token.
  * `select` must return a stable value — a field of the state, or a
@@ -180,35 +314,43 @@ export const useAgentChatPending: UseAgentChatPending = (sessionId) => {
 
 export const useAgentChatStatus: UseAgentChatStatus = (sessionId) => {
   const store = useThreadStore(sessionId);
-  const slice = useThreadState(store, (state) => state.slice);
-  const rows = useThreadState(store, (state) => state.rows);
+  // Field by field, never the whole slice: a streamed delta moves `entries`
+  // and `rows`, and none of what the status line shows.
+  const sessionStatus = useThreadState(store, (state) => state.slice.sessionStatus);
+  const turnStatus = useThreadState(store, (state) => state.slice.turnStatus);
+  const connection = useThreadState(store, (state) => state.slice.connection);
+  const contextWindow = useThreadState(store, (state) => state.slice.contextWindow);
+  const backgroundLiveness = useThreadState(store, (state) => state.slice.backgroundLiveness);
+  const pending = useThreadState(store, (state) => state.slice.pending);
+  const turns = useThreadState(store, (state) => state.slice.turns);
+  const refId = useThreadState(store, (state) => state.slice.head?.refId ?? "");
+  // The live tool label, when there is one: the working row's label is a
+  // self-ticking leaf, but the *text* comes from the row model (§7.6). A
+  // string, so a delta that leaves it as it was re-renders nothing.
+  const liveToolLabel = useThreadState(store, (state) => liveToolLabelOf(state.rows));
   // The same phase the timeline's live placeholders render, read off the store
   // rather than re-derived: the status line and the timeline must never
   // disagree about what the turn is doing (§7.6).
   const isCompacting = useThreadState(store, (state) => state.isCompacting);
-  const snapshot = useProviderSnapshot(slice.head?.refId ?? "");
+  const snapshot = useProviderSnapshot(refId);
 
   return useMemo<AgentChatStatusView>(() => {
-    const latestTurn = slice.turns.at(-1) ?? null;
-    // The live tool label, when there is one: the working row's label is a
-    // self-ticking leaf, but the *text* comes from the row model (§7.6).
-    const liveRow = rows.find((row) => row.kind === "work-live");
-    const liveToolLabel = liveRow && liveRow.kind === "work-live" ? liveRow.entry.label : null;
+    const latestTurn = turns.at(-1) ?? null;
     return {
-      sessionStatus: slice.sessionStatus,
-      turnStatus: slice.turnStatus,
-      connection: slice.connection,
-      contextWindow: slice.contextWindow,
+      sessionStatus,
+      turnStatus,
+      connection,
+      contextWindow,
       // Degrade, never zeros: without a snapshot we do not claim a meter.
       reportsContextWindow: snapshot?.capabilities.reportsContextWindow ?? false,
       activityLabel: resolveActivityLabel({
-        connection: slice.connection,
-        sessionStatus: slice.sessionStatus,
-        turnStatus: slice.turnStatus,
-        backgroundLiveness: slice.backgroundLiveness,
+        connection,
+        sessionStatus,
+        turnStatus,
+        backgroundLiveness,
         liveToolLabel,
-        pendingApprovals: slice.pending.approvals.length,
-        pendingQuestions: slice.pending.userInputs.length,
+        pendingApprovals: pending.approvals.length,
+        pendingQuestions: pending.userInputs.length,
         isCompacting
       }),
       // Only an UNSETTLED turn has a start time the status line may tick from.
@@ -218,11 +360,28 @@ export const useAgentChatStatus: UseAgentChatStatus = (sessionId) => {
       // the settled turn is in the snapshot (fix-wave E1). The status line
       // reads any non-null value as "a turn is running", so `null` is the
       // whole signal that it stopped.
-      turnStartedAt: turnStartedAt(latestTurn, slice.sessionStatus),
+      turnStartedAt: turnStartedAt(latestTurn, sessionStatus),
       isCompacting
     };
-  }, [slice, rows, snapshot, isCompacting]);
+  }, [
+    sessionStatus,
+    turnStatus,
+    connection,
+    contextWindow,
+    backgroundLiveness,
+    pending,
+    turns,
+    liveToolLabel,
+    snapshot,
+    isCompacting
+  ]);
 };
+
+/** The label of the timeline's (first) live tool row, or `null`. */
+function liveToolLabelOf(rows: readonly AgentChatTimelineRow[]): string | null {
+  const liveRow = rows.find((row) => row.kind === "work-live");
+  return liveRow && liveRow.kind === "work-live" ? liveRow.entry.label : null;
+}
 
 /**
  * The start stamp the status line's live timer ticks from, or `null`.

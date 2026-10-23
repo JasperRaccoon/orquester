@@ -2,18 +2,18 @@
 // apps/web/src/components/ChatView.tsx (the composer overlay and its inset)
 import React from "react";
 import { flushSync } from "react-dom";
-import { Paperclip, Wand2 } from "lucide-react";
+import { Wand2 } from "lucide-react";
 import type {
   AttachmentRef,
   ComposerContextRecord,
   InteractionMode,
   ModelSelection,
-  SelectProviderOptionDescriptor,
   ThreadItem
 } from "@orquester/api/agent-chat";
 import { MAX_TURN_ATTACHMENTS } from "@orquester/api/agent-chat";
 
 import { cn } from "../../../lib/cn";
+import { noteRender } from "../../../lib/render-probe";
 import { useMediaQuery } from "../../../hooks/use-media-query";
 import { insideKeyboardSurface } from "../../../lib/keyboard-surfaces";
 import { useAppStore } from "../../../store/app";
@@ -21,10 +21,10 @@ import { attachmentPathOf, type ComposerDraft } from "../../../lib/agent-chat/co
 import { useAgentChatDraft } from "../../../lib/agent-chat/hooks";
 import { createEscapeSequence, type EscapeSequence } from "../../../lib/agent-chat/rewind.logic";
 import type { ChatComposerProps } from "../contracts";
-import { AccountChip, ComposerLinkChips, ModelChip, OptionChip, PlanChip, RuntimeModeChip } from "./ComposerChips";
-import { ResumeCompactionChip } from "./ResumeCompactionChip";
+import { ComposerLinkChips } from "./ComposerChips";
+import { ComposerFooterControls } from "./ComposerFooterControls";
 import { compactsBeforeSend } from "../../../lib/agent-chat/resume-compaction.logic";
-import { ProfileChip, type ProfileChipProps } from "./ProfileChip";
+import type { ProfileChipProps } from "./ProfileChip";
 import { removeFilePath, textNamesPath } from "./composer-files";
 import {
   imageOrdinal,
@@ -36,7 +36,6 @@ import {
 import {
   REWIND_ESCAPE_HINT,
   REWIND_ESCAPE_HINT_MS,
-  RewindControl,
   rewindPickerEnabled
 } from "./RewindControl";
 import { ComposerAttachments, type StagedAttachment } from "./ComposerAttachments";
@@ -80,7 +79,6 @@ import {
 import {
   applyEffortArgument,
   findReasoningDescriptor,
-  optionDescriptors,
   resolveSelectedModel
 } from "./composer-model";
 import { isComposerCollapsedMobile, resolveComposerTimelineInset } from "./composer-inset";
@@ -262,7 +260,7 @@ export interface ChatComposerExtraProps {
  * *T3: `ChatView.tsx:9987-9998` (the overlay), `:5900-5917` (the republished
  * height), `ChatComposer.tsx:5880-5901` (`openControl`).*
  */
-export function ChatComposer({
+function ChatComposerView({
   sessionId,
   provider,
   modelSelection,
@@ -295,6 +293,7 @@ export function ChatComposer({
   profileChip,
   readRecallItems
 }: ChatComposerProps & ChatComposerExtraProps): React.ReactElement {
+  noteRender("ChatComposer");
   const isMobile = !useMediaQuery("(min-width: 640px)");
   const sessionCwd = useAppStore(
     (state) => state.sessions.find((session) => session.id === sessionId)?.cwd ?? null
@@ -303,6 +302,10 @@ export function ChatComposer({
   // The thread whose resume offer the user switched to Full; it lasts while the offer stands.
   const [fullHistoryThread, setFullHistoryThread] = React.useState<string | null>(null);
   const keepFullHistory = fullHistoryThread === sessionId;
+  const toggleFullHistory = React.useCallback(
+    () => setFullHistoryThread(keepFullHistory ? null : sessionId),
+    [keepFullHistory, sessionId]
+  );
   React.useEffect(() => {
     if (resumeCompactionTokens === null) setFullHistoryThread(null);
   }, [resumeCompactionTokens]);
@@ -328,7 +331,8 @@ export function ChatComposer({
 
   const shellRef = React.useRef<HTMLDivElement>(null);
   const textareaRef = React.useRef<HTMLTextAreaElement>(null);
-  const fileInputRef = React.useRef<HTMLInputElement>(null);
+  /** Where a footer chip's popover hands focus back: one function for the composer's life. */
+  const returnFocusToField = React.useCallback(() => textareaRef.current, []);
   const draftRef = React.useRef<DraftState>(EMPTY_DRAFT);
   const caretRef = React.useRef(0);
   /** A caret `applyCaret` still owes the textarea; whichever lands last, its microtask or the commit, clears it. */
@@ -949,9 +953,6 @@ export function ChatComposer({
   // a provider that parses its own lists it in the catalog above.
   const hostGoalCommand = provider?.capabilities?.goals?.command === "host";
   const selectedModel = resolveSelectedModel(models, modelSelection);
-  const selectDescriptors = optionDescriptors(selectedModel).filter(
-    (descriptor): descriptor is SelectProviderOptionDescriptor => descriptor.type === "select"
-  );
   const reasoningDescriptor = findReasoningDescriptor(selectedModel);
 
   const applyModelSelectionChange = React.useCallback(
@@ -2216,134 +2217,36 @@ export function ChatComposer({
           <ComposerLinkChips text={draft.text} projectPath={sessionProjectPath} />
 
           <div className="flex items-end justify-between gap-2 pt-2">
-            <div
-              data-chat-composer-resting-controls="true"
-              className="flex min-w-0 flex-wrap items-center gap-0.5"
-            >
-              <input
-                ref={fileInputRef}
-                type="file"
-                multiple
-                className="hidden"
-                onChange={(event) => {
-                  const files = Array.from(event.target.files ?? []);
-                  event.target.value = "";
-                  stageFiles(files);
-                }}
-              />
-              <button
-                type="button"
-                data-composer-shortcut="attach"
-                aria-label="Attach files"
-                title="Attach files"
-                disabled={reverting || draft.attachments.length >= MAX_TURN_ATTACHMENTS}
-                onClick={() => fileInputRef.current?.click()}
-                className={cn(
-                  "ac-press inline-flex h-7 w-7 items-center justify-center rounded-md",
-                  "text-neutral-500 hover:bg-neutral-800 hover:text-neutral-100",
-                  "focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500",
-                  "disabled:pointer-events-none disabled:opacity-40"
-                )}
-              >
-                <Paperclip size={14} aria-hidden />
-              </button>
-              {/* The rewind picker — the double Escape's destination (§5.5).
-                  Renders nothing while there is no message to go back to. */}
-              <RewindControl
-                targets={rewindTargets}
-                isTurnActive={isTurnActive}
-                reverting={reverting}
-                hasPendingRequest={hasPendingRequest}
-                isSending={sending}
-                onRewind={onRewind}
-                returnFocusTo={() => textareaRef.current}
-              />
-
-              <ModelChip
-                models={models}
-                selection={modelSelection}
-                selectedModel={selectedModel}
-                disabled={reverting}
-                onChange={applyModelSelectionChange}
-                returnFocusTo={() => textareaRef.current}
-              />
-              {selectDescriptors.map((descriptor) => (
-                <OptionChip
-                  key={descriptor.id}
-                  descriptor={descriptor}
-                  selection={modelSelection}
-                  fallbackModelSlug={selectedModel?.slug ?? ""}
-                  disabled={reverting}
-                  onChange={applyModelSelectionChange}
-                  returnFocusTo={() => textareaRef.current}
-                />
-              ))}
-              <RuntimeModeChip
-                mode={runtimeMode}
-                disabled={reverting}
-                onChange={(mode) => {
-                  void actions.setMode({ runtimeMode: mode }).catch((error: unknown) => {
-                    setNotice(
-                      error instanceof Error
-                        ? error.message
-                        : "Could not change the permission mode."
-                    );
-                  });
-                }}
-                returnFocusTo={() => textareaRef.current}
-              />
-              {showPlanModeToggle ? (
-                <PlanChip
-                  interactionMode={interactionMode}
-                  disabled={reverting}
-                  onChange={setPlanMode}
-                />
-              ) : null}
-              {profileChip ? (
-                <ProfileChip
-                  {...profileChip}
-                  canSwitch={profileChip.canSwitch && !reverting}
-                  onChange={(next) => {
-                    void actions.setProfile({ profileId: next }).catch((error: unknown) => {
-                      setNotice(error instanceof Error ? error.message : "Could not switch the profile.");
-                    });
-                  }}
-                  returnFocusTo={() => textareaRef.current}
-                />
-              ) : null}
-              {accountLabel ? (
-                <AccountChip
-                  label={accountLabel}
-                  {...(accountOptions ? { options: accountOptions } : {})}
-                  {...(accountId !== undefined ? { selectedId: accountId } : {})}
-                  canSwitch={accountSwitchEnabled === true && !reverting}
-                  disabledReason={accountSwitchRefusal}
-                  {...(accountNote ? { note: accountNote } : {})}
-                  {...(accountOptions
-                    ? {
-                        onChange: (next: string) => {
-                          void actions.setAccount({ accountId: next }).catch((error: unknown) => {
-                            setNotice(
-                              error instanceof Error
-                                ? error.message
-                                : "Could not switch the account."
-                            );
-                          });
-                        }
-                      }
-                    : {})}
-                  returnFocusTo={() => textareaRef.current}
-                />
-              ) : null}
-              {resumeCompactionTokens !== null ? (
-                <ResumeCompactionChip
-                  tokens={resumeCompactionTokens}
-                  keepFullHistory={keepFullHistory}
-                  disabled={reverting}
-                  onToggle={() => setFullHistoryThread(keepFullHistory ? null : sessionId)}
-                />
-              ) : null}
-            </div>
+            <ComposerFooterControls
+              reverting={reverting}
+              attachmentsFull={draft.attachments.length >= MAX_TURN_ATTACHMENTS}
+              onPickFiles={stageFiles}
+              rewindTargets={rewindTargets}
+              isTurnActive={isTurnActive}
+              hasPendingRequest={hasPendingRequest}
+              isSending={sending}
+              onRewind={onRewind}
+              returnFocusTo={returnFocusToField}
+              provider={provider}
+              modelSelection={modelSelection}
+              onModelSelectionChange={applyModelSelectionChange}
+              runtimeMode={runtimeMode}
+              showPlanModeToggle={showPlanModeToggle}
+              interactionMode={interactionMode}
+              onPlanModeChange={setPlanMode}
+              profileChip={profileChip}
+              accountLabel={accountLabel}
+              accountOptions={accountOptions}
+              accountId={accountId}
+              accountSwitchEnabled={accountSwitchEnabled}
+              accountSwitchRefusal={accountSwitchRefusal}
+              accountNote={accountNote}
+              resumeCompactionTokens={resumeCompactionTokens}
+              keepFullHistory={keepFullHistory}
+              onToggleFullHistory={toggleFullHistory}
+              actions={actions}
+              onNotice={setNotice}
+            />
 
             <ComposerPrimaryActions
               isRunning={isTurnActive}
@@ -2371,5 +2274,13 @@ export function ChatComposer({
     </div>
   );
 }
+
+/**
+ * Memoised: the chat view re-renders for the thread's own changes (a turn
+ * starting, a usage update), and every prop it hands the composer is held
+ * stable across those, so the composer — its draft, menu and footer — renders
+ * only for what it shows.
+ */
+export const ChatComposer = React.memo(ChatComposerView);
 
 export default ChatComposer;
