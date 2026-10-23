@@ -10,7 +10,7 @@ import { after, describe, it } from "node:test";
 import type { KnowledgeEntryMeta, KnowledgeLinkState, KnowledgeSettings } from "@orquester/api";
 import { KNOWLEDGE_DEFAULT_SETTINGS } from "@orquester/api";
 import { knowledgeMykgDir, knowledgeMykgInputDir, knowledgeStatePath, parseKnowledgeLinkingState } from "@orquester/config";
-import { FakeClock } from "../../workflows/agent/testing/fake-clock.ts";
+import { FakeClock, flushAsync } from "../../workflows/agent/testing/fake-clock.ts";
 import type { KnowledgeEntryChange, KnowledgeGraphPort, KnowledgeRuntime, KnowledgeRuntimePort, KnowledgeSettingsPort, KnowledgeStorePort } from "../ports.ts";
 import { mykgSessionPaths } from "./mykg-files.ts";
 import type { SpawnMykg } from "./runner.ts";
@@ -304,6 +304,44 @@ describe("KnowledgeLinkingService — the coalesced queue", () => {
     children[1]!.exit(1);
     await h.service.idle();
     await h.service.stop();
+  });
+});
+
+describe("KnowledgeLinkingService — one child per run", () => {
+  it("two environment changes in a row resume an interrupted run once, and a stopped service starts none", async () => {
+    const children: FakeChild[] = [];
+    const spawn: SpawnMykg = (_file, args) => {
+      const child = new FakeChild(args);
+      children.push(child);
+      return child as unknown as ChildProcess;
+    };
+    const first = await harness({ spawn, workerMode: "manual" });
+    await first.service.start();
+    first.service.entriesChanged(await first.store.put(ID(1), "one"));
+    await first.clock.advance(20_000);
+    await first.until(() => children.length === 1);
+    await first.service.stop();
+    assert.ok((await readState(first)).currentRun, "the interrupted run stays recorded");
+
+    const second = await harness({ appdir: first.appdir, store: first.store, spawn, workerMode: "manual" });
+    second.settings.on = false;
+    await second.service.start();
+    assert.equal(children.length, 1);
+    // The plugin comes on and, at once, another setting moves: both ask to resume the run.
+    second.settings.set(true);
+    second.settings.set(true);
+    await second.until(() => second.service.status().state === "running");
+    await flushAsync(20);
+    assert.equal(children.length, 2, "one myKG child for the resumed run, never two on its session");
+
+    // Stopping while a start is under way never leaves a child behind.
+    await second.service.stop();
+    const third = await harness({ appdir: first.appdir, store: first.store, spawn, workerMode: "manual" });
+    const starting = third.service.start();
+    await third.service.stop();
+    await starting;
+    await flushAsync(20);
+    assert.equal(children.length, 2, "no child after stop()");
   });
 });
 

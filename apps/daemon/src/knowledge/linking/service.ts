@@ -176,6 +176,8 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
   private startsAt: number | null = null;
   private lastChangeAt: number | null = null;
   private starting = false;
+  /** `launch` is between its first await and `this.active` (so no second child is spawned beside it). */
+  private launching = false;
   private stopped = false;
   /** Changes reported before `start` loaded the state. */
   private early: KnowledgeEntryChange[] = [];
@@ -435,7 +437,12 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
 
   private async maybeStart(): Promise<void> {
     const state = this.state;
-    if (!state || this.active || this.starting || !this.canRun()) return;
+    if (!state || this.active || this.starting || this.launching || !this.canRun()) return;
+    if (state.currentRun) {
+      // A recorded run that did not get going (a failed resume): it goes first, under its id.
+      await this.launch(state.currentRun, { resume: true });
+      return;
+    }
     if (state.pause?.reason === "error") state.pause = null;
     const mode = this.nextMode();
     if (mode === null) {
@@ -518,6 +525,16 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
   // --- a run ---------------------------------------------------------------------------------------
 
   private async launch(record: KnowledgeCurrentRunRecord, options: { resume: boolean }): Promise<void> {
+    if (this.launching) return;
+    this.launching = true;
+    try {
+      await this.launchNow(record, options);
+    } finally {
+      this.launching = false;
+    }
+  }
+
+  private async launchNow(record: KnowledgeCurrentRunRecord, options: { resume: boolean }): Promise<void> {
     const state = this.requireState();
     const runtime = this.opts.runtime.current();
     if (!runtime || this.active) return;
@@ -532,6 +549,8 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
     if ((record.mode === "update" || record.mode === "grow-schema") && record.session && isMykgSessionName(record.session)) {
       await guardMykgManifest(mykgSessionPaths(this.mykgDir, record.session));
     }
+    // The daemon began stopping, or the plugin went off, meanwhile: the run stays recorded for later.
+    if (!this.canRun() || this.active) return;
 
     const broker = new InboxBroker({
       clock: this.opts.clock,
