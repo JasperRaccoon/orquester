@@ -431,7 +431,11 @@ export class KnowledgeSearch {
   private async loadAll(): Promise<void> {
     const metas = [...this.store.listMeta()];
     const workers = Array.from({ length: Math.min(16, metas.length) }, async (_, worker) => {
-      for (let i = worker; i < metas.length; i += 16) await this.indexText(metas[i]!.id);
+      for (let i = worker; i < metas.length; i += 16) {
+        await this.indexText(metas[i]!.id).catch((error: Error) =>
+          this.logger.warn(`knowledge: could not index entry ${metas[i]!.id} (${error.message})`)
+        );
+      }
     });
     await Promise.all(workers);
     // Attach cached vectors now (reading the cache does not load the model); the rest are
