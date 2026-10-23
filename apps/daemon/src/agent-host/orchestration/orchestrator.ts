@@ -3316,12 +3316,18 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   ): Decision => {
     const latest = (runtime.state.turns ?? []).at(-1);
     if (latest === undefined || latest.turnId !== idle.turnId || latest.state !== "completed") {
-      throw commandRejected("The chat moved on since this idle compaction was scheduled.");
+      throw new IdleCompactionRefusal("The chat moved on since this idle compaction was scheduled.");
     }
     if (!threadIdleForDelivery(runtime)) {
-      throw commandRejected("The chat is not idle; the idle compaction was skipped.");
+      throw new IdleCompactionRefusal("The chat is not idle; the idle compaction waits for its next idle point.");
     }
-    return decideCompaction(runtime, commandId, COMPACT_COMMAND_TEXT, IDLE_COMPACTION_SENT_BY);
+    try {
+      return decideCompaction(runtime, commandId, COMPACT_COMMAND_TEXT, IDLE_COMPACTION_SENT_BY);
+    } catch (error) {
+      // Every refusal of an idle compaction is of the moment: none may become this id's receipt.
+      if (error instanceof AgentChatCommandError) throw new IdleCompactionRefusal(error.message);
+      throw error;
+    }
   };
 
   const decideCompaction = (
@@ -8928,5 +8934,17 @@ function withForkedMcpApp(event: RuntimeEvent, apps: ReadonlyMap<string, McpAppR
 class TurnNotIdleRefusal extends AgentChatCommandError {
   constructor() {
     super("TURN_NOT_IDLE", "The thread is working; the message waits for its next idle point.");
+  }
+}
+
+/**
+ * An idle compaction's precondition (`CompactCommandBody.idle`) refused. 409 `TURN_NOT_IDLE`, never
+ * recorded as a receipt — the same fixed id `idle-compact:<chat>:<turn>` may come again inside the
+ * window once the chat is idle (the daemon's scheduler re-posts it), and a recorded refusal would
+ * replay to that retry and lose the turn's compaction.
+ */
+class IdleCompactionRefusal extends AgentChatCommandError {
+  constructor(message: string) {
+    super("TURN_NOT_IDLE", message);
   }
 }

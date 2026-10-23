@@ -796,7 +796,7 @@ export interface CompactCommandBody extends AgentChatCommandBase {
   /**
    * Idle compaction (`idle-compaction.ts`): the daemon's own `/compact`, sent before the chat's
    * prompt cache expires. A precondition and a label: the host refuses it (409
-   * `COMMAND_REJECTED`, no receipt) unless `turnId` is still the chat's latest turn, settled
+   * {@link TURN_NOT_IDLE}, never recorded, so the same id may come again) unless `turnId` is still the chat's latest turn, settled
    * `completed`, with nothing pending — so a chat that moved on since the daemon looked is never
    * compacted under the user — and records the message with `sentBy: "idle-compaction"`.
    * Additive: an older host ignores it and compacts as asked.
@@ -995,7 +995,10 @@ export const AGENT_CHAT_ERROR_CODES = [
   "TURN_NOT_IDLE"
 ] as const satisfies readonly AgentChatErrorCode[];
 
-/** {@link AgentChatErrorCode} `TURN_NOT_IDLE`: the `ifIdle` precondition of a `turn` refused. */
+/**
+ * {@link AgentChatErrorCode} `TURN_NOT_IDLE`: the `ifIdle` precondition of a `turn` refused, or the
+ * `idle` precondition of an idle compaction (`CompactCommandBody.idle`).
+ */
 export const TURN_NOT_IDLE = "TURN_NOT_IDLE" satisfies AgentChatErrorCode;
 
 /** A failed command answers this, and it is not a transport error to swallow. */
