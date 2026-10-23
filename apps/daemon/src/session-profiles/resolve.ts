@@ -20,6 +20,7 @@ import {
   PROFILE_HOOK_EVENTS,
   SESSION_PROFILE_AGENTS,
   SESSION_PROFILE_DEFAULT_SETTINGS,
+  SESSION_PROFILE_KNOWLEDGE_COLLECTION_ID_PATTERN,
   isSessionProfileAgentId,
   sessionProfileScopeProblem,
   type McpTransport,
@@ -140,10 +141,25 @@ export function resolveSessionProfileSettings(record: SessionProfileSettingsReco
     if (typeof value === "boolean") hide[agent] = value;
   }
   const workflow = record?.claudeWorkflowTool;
+  const knowledge = knowledgeCollectionsOf(record);
   return {
     hideBuiltinSkills: hide,
-    claudeWorkflowTool: typeof workflow === "boolean" ? workflow : SESSION_PROFILE_DEFAULT_SETTINGS.claudeWorkflowTool
+    claudeWorkflowTool: typeof workflow === "boolean" ? workflow : SESSION_PROFILE_DEFAULT_SETTINGS.claudeWorkflowTool,
+    ...(knowledge !== undefined ? { knowledgeCollections: knowledge } : {})
   };
+}
+
+/**
+ * Knowledge Graph: the collection ids a profile ticks, as stored — `undefined` when it never set
+ * them (none ticked). A value this build cannot read counts as none ticked (fail closed: the chat
+ * sees no collection); non-id entries in a list are skipped. Ids of deleted collections are kept
+ * (the caller ignores what no longer exists).
+ */
+export function knowledgeCollectionsOf(record: SessionProfileSettingsRecord | undefined): string[] | undefined {
+  const raw = record?.knowledgeCollections;
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw)) return [];
+  return [...new Set(raw.filter((id): id is string => typeof id === "string" && SESSION_PROFILE_KNOWLEDGE_COLLECTION_ID_PATTERN.test(id)))];
 }
 
 /**

@@ -23,6 +23,8 @@ import {
   MAX_UPLOAD_BYTES,
   SESSION_PROFILE_AGENTS,
   SESSION_PROFILE_ITEM_KINDS,
+  SESSION_PROFILE_KNOWLEDGE_COLLECTION_ID_PATTERN,
+  SESSION_PROFILE_KNOWLEDGE_COLLECTIONS_MAX,
   isSessionProfileAgentId,
   sessionProfileRoutes,
   sessionProfileScopeProblem,
@@ -537,6 +539,16 @@ function parseSettings(raw: unknown, field: string): SessionProfileSettingsDraft
   if (raw.claudeWorkflowTool !== undefined) {
     if (typeof raw.claudeWorkflowTool !== "boolean") throw invalid(`${field}.claudeWorkflowTool must be true or false.`);
     settings.claudeWorkflowTool = raw.claudeWorkflowTool;
+  }
+  if (raw.knowledgeCollections !== undefined) {
+    const ids = raw.knowledgeCollections;
+    if (!Array.isArray(ids) || ids.length > SESSION_PROFILE_KNOWLEDGE_COLLECTIONS_MAX) {
+      throw invalid(`${field}.knowledgeCollections must be an array of at most ${SESSION_PROFILE_KNOWLEDGE_COLLECTIONS_MAX} collection ids.`);
+    }
+    for (const [index, id] of ids.entries()) {
+      if (typeof id !== "string" || !SESSION_PROFILE_KNOWLEDGE_COLLECTION_ID_PATTERN.test(id)) throw invalid(`${field}.knowledgeCollections[${index}] is not a collection id.`);
+    }
+    settings.knowledgeCollections = ids as string[];
   }
   return settings;
 }

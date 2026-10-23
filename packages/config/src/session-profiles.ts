@@ -153,12 +153,14 @@ export type SessionProfileItemRecord = z.infer<typeof sessionProfileItemRecordSc
  * Spec §4.3. Values are kept RAW: absent — or a value this build cannot read, kept as it is for
  * the rewrite — means the default (`SESSION_PROFILE_DEFAULT_SETTINGS` in `@orquester/api`),
  * applied where the settings are used. `hideBuiltinSkills` is normally an object of agent →
- * boolean; `claudeWorkflowTool` a boolean.
+ * boolean; `claudeWorkflowTool` a boolean; `knowledgeCollections` (Knowledge Graph plugin) an
+ * array of collection ids — absent means none ticked, and ids of deleted collections are kept.
  */
 export const sessionProfileSettingsRecordSchema = z
   .object({
     hideBuiltinSkills: z.unknown().optional(),
-    claudeWorkflowTool: z.unknown().optional()
+    claudeWorkflowTool: z.unknown().optional(),
+    knowledgeCollections: z.unknown().optional()
   })
   .passthrough();
 export type SessionProfileSettingsRecord = z.infer<typeof sessionProfileSettingsRecordSchema>;

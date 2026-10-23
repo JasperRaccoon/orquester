@@ -15,6 +15,7 @@ import {
   isSessionProfileItemKind,
   SESSION_PROFILE_AGENTS,
   SESSION_PROFILE_DEFAULT_SETTINGS,
+  SESSION_PROFILE_KNOWLEDGE_COLLECTION_ID_PATTERN,
   SESSION_PROFILE_ITEM_KINDS,
   type HookView,
   type McpServerView,
@@ -96,12 +97,17 @@ function sanitizeSettings(value: unknown): SessionProfileSettings {
   for (const agent of SESSION_PROFILE_AGENTS) {
     if (typeof hide[agent] === "boolean") hideBuiltinSkills[agent] = hide[agent] as boolean;
   }
+  // Knowledge Graph: the ticked collection ids; absent (an older daemon) = none ticked.
+  const knowledge = Array.isArray(record.knowledgeCollections)
+    ? [...new Set(record.knowledgeCollections.filter((id): id is string => typeof id === "string" && SESSION_PROFILE_KNOWLEDGE_COLLECTION_ID_PATTERN.test(id)))]
+    : undefined;
   return {
     hideBuiltinSkills,
     claudeWorkflowTool:
       typeof record.claudeWorkflowTool === "boolean"
         ? record.claudeWorkflowTool
-        : SESSION_PROFILE_DEFAULT_SETTINGS.claudeWorkflowTool
+        : SESSION_PROFILE_DEFAULT_SETTINGS.claudeWorkflowTool,
+    ...(knowledge !== undefined ? { knowledgeCollections: knowledge } : {})
   };
 }
 

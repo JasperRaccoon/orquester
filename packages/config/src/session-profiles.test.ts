@@ -99,6 +99,17 @@ describe("session profile manifest", () => {
     }
   });
 
+  it("knowledgeCollections (Knowledge Graph): absent is fine; a list, stale ids or an unreadable value round-trip verbatim", () => {
+    const bare = parseSessionProfileManifest({ ...MANIFEST, settings: { claudeWorkflowTool: true } });
+    assert.equal("knowledgeCollections" in bare.manifest.settings, false);
+    for (const knowledgeCollections of [["kc_aaaaaaaaaa", "kc_deleted00"], [], "all", [1, { id: "x" }]]) {
+      const settings = { claudeWorkflowTool: false, knowledgeCollections, futureSetting: 2 };
+      const file = parseSessionProfileManifest({ ...MANIFEST, settings });
+      assert.deepEqual(file.manifest.settings, settings);
+      assert.deepEqual(JSON.parse(serializeSessionProfileManifest(file)).settings, settings);
+    }
+  });
+
   it("keeps a plugin source it cannot read verbatim through a rewrite; reads it only at use", () => {
     const future = { type: "npm", package: "@x/y", copiedAt: "t" };
     const good = { type: "marketplace", marketplace: "official", copiedAt: "t", futureField: 1 };
