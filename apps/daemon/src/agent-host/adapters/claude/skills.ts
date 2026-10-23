@@ -26,6 +26,7 @@ import * as nodePath from "node:path";
 
 import type { Skill } from "@orquester/api/agent-chat";
 
+import { claudePluginNameOf, claudePluginSkillName } from "../../../agent-isolation/claude-names.ts";
 import { SKILL_MENTION_PATTERN } from "./skill-dispatch.ts";
 
 type ClaudeSkillScope = "user" | "project" | "plugin";
@@ -487,11 +488,14 @@ async function readInstalledPlugins(pluginsDir: string): Promise<Record<string, 
 }
 
 /**
- * The fields of `.claude-plugin/plugin.json` discovery reads, each dropped
- * when it does not read: a malformed manifest is a plugin named after its
- * id with only its default `skills/`.
+ * `.claude-plugin/plugin.json` as discovery reads it: the document (for the
+ * plugin's name, {@link claudePluginNameOf}) and its `skills` paths, dropped
+ * when they do not read. A malformed manifest is a plugin named by its
+ * fallback with only its default `skills/`.
  */
-async function readPluginManifest(installPath: string): Promise<{ name?: string; skills?: string[] }> {
+async function readPluginManifest(
+  installPath: string
+): Promise<{ doc?: Record<string, unknown>; skills?: string[] }> {
   const contents = await readFileOrUndefined(nodePath.join(installPath, ".claude-plugin", "plugin.json"));
   if (contents === undefined) return {};
   let parsed: unknown;
@@ -502,14 +506,13 @@ async function readPluginManifest(installPath: string): Promise<{ name?: string;
   }
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return {};
   const record = parsed as Record<string, unknown>;
-  const name = typeof record.name === "string" && record.name.trim().length > 0 ? record.name.trim() : undefined;
   const skills =
     typeof record.skills === "string"
       ? [record.skills]
       : Array.isArray(record.skills) && record.skills.every((entry) => typeof entry === "string")
         ? (record.skills as string[])
         : undefined;
-  return { ...(name !== undefined ? { name } : {}), ...(skills !== undefined ? { skills } : {}) };
+  return { doc: record, ...(skills !== undefined ? { skills } : {}) };
 }
 
 /**
@@ -595,27 +598,21 @@ async function discoverPluginSkillRoots(input: {
     if (install === undefined) continue;
     const installPath = nodePath.resolve(base, install.installPath);
     const manifest = await readPluginManifest(installPath);
-    const prefix = manifest.name ?? key.split("@")[0];
-    if (!prefix) continue;
+    const prefix = claudePluginNameOf(manifest.doc, key.split("@")[0] ?? "");
+    if (prefix === null) continue;
     roots.push(...(await pluginSkillRoots(installPath, prefix, manifest.skills)));
   }
   return roots;
 }
 
-/** A plugin loaded by path, and the name it goes by when its manifest names none (default: its directory's). */
-export interface ClaudePluginDir {
-  path: string;
-  name?: string;
-}
-
-/** The skill roots of plugins loaded by path (an Agent Profile's), each named by its manifest, else its fallback. */
-async function pluginDirSkillRoots(pluginDirs: readonly ClaudePluginDir[]): Promise<ClaudeSkillRoot[]> {
+/** The skill roots of plugins loaded by path (an Agent Profile's), each named by its manifest, else its directory. */
+async function pluginDirSkillRoots(pluginDirs: readonly string[]): Promise<ClaudeSkillRoot[]> {
   const roots: ClaudeSkillRoot[] = [];
   for (const dir of pluginDirs) {
-    const installPath = nodePath.resolve(dir.path);
+    const installPath = nodePath.resolve(dir);
     const manifest = await readPluginManifest(installPath);
-    const prefix = manifest.name ?? dir.name ?? nodePath.basename(installPath);
-    if (!prefix) continue;
+    const prefix = claudePluginNameOf(manifest.doc, nodePath.basename(installPath));
+    if (prefix === null) continue;
     roots.push(...(await pluginSkillRoots(installPath, prefix, manifest.skills)));
   }
   return roots;
@@ -633,7 +630,7 @@ interface DiscoverClaudeSkillsInput {
    * at these directories — an Agent Profile chat loads its own plugins by
    * path and switches every installed one off.
    */
-  pluginDirs?: readonly ClaudePluginDir[];
+  pluginDirs?: readonly string[];
 }
 
 /**
@@ -672,7 +669,7 @@ export async function discoverClaudeSkills(
  * The skills of plugins at these directories alone — an Agent Profile's
  * Claude plugins, for its composer before a session reports its own.
  */
-export async function discoverClaudePluginSkills(pluginDirs: readonly ClaudePluginDir[]): Promise<Skill[]> {
+export async function discoverClaudePluginSkills(pluginDirs: readonly string[]): Promise<Skill[]> {
   return collectSkills(await pluginDirSkillRoots(pluginDirs), new Map());
 }
 
@@ -709,9 +706,11 @@ async function collectSkills(
         frontmatter = await readFrontmatter(skillPath);
         if (frontmatter === undefined || frontmatter.kind === "malformed") continue;
         // Folder skills use their folder; only a single root SKILL.md uses its `name` field.
-        const declared = singleSkill && frontmatter.kind === "parsed" ? (frontmatter.name ?? "") : "";
-        const unprefixed = declared.startsWith(`${root.prefix}:`) ? declared.slice(root.prefix.length + 1) : declared;
-        name = `${root.prefix}:${(unprefixed || entry).replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+        name = claudePluginSkillName(
+          root.prefix,
+          entry,
+          singleSkill && frontmatter.kind === "parsed" ? frontmatter.name : undefined
+        );
         // Only a name the composer's `$name` grammar reads whole can be offered and dispatched.
         const [mention] = `$${name}`.matchAll(SKILL_MENTION_PATTERN);
         if (mention?.[2] !== name) continue;

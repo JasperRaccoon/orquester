@@ -31,6 +31,7 @@ import { copyEntry } from "../../agent-profile/infra/tree.ts";
 import { generateClaudeLocalPlugin } from "../../agent-isolation/claude-plugin.ts";
 import {
   claudePluginEntryIds,
+  claudePluginNameOf,
   isPlainObject,
   mcpServersOf,
   readClaudePluginManifest,
@@ -41,7 +42,7 @@ import type { SessionProfilePrepareContext, SessionProfilePreparer } from "../pr
 import type { ResolvedAgentProfile, ResolvedHook, ResolvedMcpServer } from "../resolve.ts";
 
 /** Bump when the prepared output changes for the same inputs. */
-export const CLAUDE_PREPARER_VERSION = "1";
+export const CLAUDE_PREPARER_VERSION = "2";
 
 /** The bundled skill the Workflow tool points at; omitting it makes Claude inline the guide (spec §6.1). */
 export const CLAUDE_WORKFLOW_AUTHORING_SKILL = "workflow-authoring";
@@ -172,10 +173,12 @@ async function prepareClaude(ctx: SessionProfilePrepareContext<"claude">): Promi
     await mkdir(join(ctx.stagingDir, PLUGINS_DIR), { recursive: true, mode: 0o700 });
     await copyEntry(plugin.cacheDir, dest, { symlinks: "preserve", followRoot: true });
     const manifest = await readClaudePluginManifest(dest);
-    const declaredName = typeof manifest.name === "string" ? manifest.name : "";
-    const name = PLUGIN_NAME.test(declaredName) ? declaredName : plugin.name;
+    // The name the CLI loads the copy under (its manifest's, else its directory's: the item id),
+    // which the session and the composer list it under too. One the CLI refuses loads nothing.
+    const loadedAs = claudePluginNameOf(manifest, plugin.id);
+    const name = loadedAs ?? plugin.id;
     plugins.push({ itemId: plugin.id, name, path });
-    allowlist.push(...(await claudePluginEntryIds(dest, name, manifest)));
+    if (loadedAs !== null) allowlist.push(...(await claudePluginEntryIds(dest, loadedAs, manifest)));
     const lifted = await pluginMcpServers(dest, manifest);
     if (Object.keys(lifted).length > 0) {
       const dataDir = join(ctx.stagingDir, PLUGIN_DATA_DIR, plugin.id);

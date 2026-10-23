@@ -51,6 +51,21 @@ test("the concatenated runs always reproduce the input exactly", () => {
   }
 });
 
+test("a sent `$plugin:skill` mention, dotted plugin name included, is one chip", () => {
+  const skills = ["dot.plug:my-folder", "toolbox:lint", "toolbox"];
+  assert.deepEqual(splitSkillMentions("run $dot.plug:my-folder and $toolbox:lint", skills), [
+    { text: "run " },
+    { text: "$dot.plug:my-folder", skill: "dot.plug:my-folder" },
+    { text: " and " },
+    { text: "$toolbox:lint", skill: "toolbox:lint" }
+  ]);
+  // `$toolbox` alone still chips; `$1.50` and a sentence-ending `.` never do.
+  assert.deepEqual(splitSkillMentions("$toolbox ok", skills)[0], { text: "$toolbox", skill: "toolbox" });
+  assert.deepEqual(splitSkillMentions("costs $1.50 and $toolbox:lint.", [...skills, "1"]), [
+    { text: "costs $1.50 and $toolbox:lint." }
+  ]);
+});
+
 test("a fileChange approval with no diff borrows it from its own item.started", () => {
   const started = entry({
     id: "s",

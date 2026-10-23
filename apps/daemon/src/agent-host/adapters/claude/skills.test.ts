@@ -18,6 +18,7 @@ import {
   readSkillOverridesFromSettings
 } from "./skills.ts";
 import { planClaudeSkillDispatch } from "./skill-dispatch.ts";
+import { claudePluginEntryIds } from "../../../agent-isolation/claude-names.ts";
 import {
   buildAskUserQuestionReply,
   CLAUDE_QUESTION_PREVIEW_FORMAT,
@@ -322,8 +323,8 @@ describe("claude skills — installed plugins", () => {
       .map((skill) => skill.name);
     // A manifest that does not read names the plugin after its id; `../outside` and a
     // symlink out of the plugin are refused; a single-skill plugin keeps its declared name;
-    // a name the `$name` grammar cannot read whole (`my.plugin:x`) is not offered.
-    assert.deepEqual(names, ["declared:added", "declared:base", "nameless:tidy", "single:solo"]);
+    // a dotted plugin name loads as written, as Claude Code loads it (`my.plugin:x`).
+    assert.deepEqual(names, ["declared:added", "declared:base", "my.plugin:x", "nameless:tidy", "single:solo"]);
 
     const broken = nodePath.join(root, "plugins-broken");
     await fs.mkdir(nodePath.join(broken, "plugins"), { recursive: true });
@@ -400,7 +401,7 @@ describe("claude skills — installed plugins", () => {
     );
   });
 
-  it("an Agent Profile's plugins replace the installed ones, named by manifest, else the fallback", async () => {
+  it("an Agent Profile's plugins replace the installed ones, named by manifest, else their directory", async () => {
     const plugin = await writePlugin(nodePath.join(root, "plugin-cache-g", "installed"), '{"name":"installed"}', { s: "---\n---" });
     const config = await account("plugins-g", { "installed@m": [user(plugin)] }, { "installed@m": true });
     const generated = await writePlugin(nodePath.join(root, "prepared-g", "plugin"), '{"name":"developer"}', {
@@ -411,16 +412,49 @@ describe("claude skills — installed plugins", () => {
     const skills = await discoverClaudeSkills({
       configDir: config,
       cwd,
-      pluginDirs: [{ path: generated }, { path: copied, name: "formatter" }]
+      pluginDirs: [generated, copied]
     });
     assert.deepEqual(
       skills.filter((skill) => skill.scope === "plugin").map((skill) => skill.name),
-      ["developer:review", "formatter:fmt"]
+      ["developer:review", "item-1:fmt"]
     );
-    assert.deepEqual(
-      (await discoverClaudePluginSkills([{ path: copied }])).map((skill) => skill.name),
-      ["item-1:fmt"]
-    );
+    assert.deepEqual((await discoverClaudePluginSkills([copied])).map((skill) => skill.name), ["item-1:fmt"]);
+  });
+
+  it("a plugin whose manifest names it invalidly loads nothing, as the CLI refuses it", async () => {
+    const bad = await writePlugin(nodePath.join(root, "plugin-cache-h", "bad"), '{"name":"bad name"}', { s: "---\n---" });
+    assert.deepEqual(await discoverClaudePluginSkills([bad]), []);
+  });
+
+  it("lists a profile plugin's skills under exactly the ids its skills allow-list carries", async () => {
+    // The live session filters its list by the prepared allow-list (`claudePluginEntryIds`):
+    // any naming drift between the two hides a skill the composer offers.
+    const dir = nodePath.join(root, "prepared-i", "plugins", "item-9");
+    await writePlugin(dir, '{"name":"dot.plug","skills":["./one"]}', {
+      "my.folder": "---\nname: front-name\n---",
+      "with space": "---\n---",
+      plain: "---\ndescription: d\n---"
+    });
+    await fs.mkdir(nodePath.join(dir, "one"), { recursive: true });
+    await fs.writeFile(nodePath.join(dir, "one", "SKILL.md"), "---\nname: dot.plug:So Lo\n---\nx\n");
+    const nameless = nodePath.join(root, "prepared-i", "plugins", "item-10");
+    await writePlugin(nameless, undefined, { fmt: "---\n---" });
+
+    for (const [path, pluginName] of [[dir, "dot.plug"], [nameless, "item-10"]] as const) {
+      const listed = (await discoverClaudePluginSkills([path])).map((skill) => skill.name).sort();
+      const allowed = (await claudePluginEntryIds(path, pluginName)).sort();
+      assert.deepEqual(listed, allowed, pluginName);
+    }
+    assert.deepEqual((await discoverClaudePluginSkills([dir])).map((skill) => skill.name), [
+      "dot.plug:my-folder",
+      "dot.plug:plain",
+      "dot.plug:So-Lo",
+      "dot.plug:with-space"
+    ]);
+    // ...and each dispatches as `/name`.
+    const names = dispatchableSkillNames(await discoverClaudePluginSkills([dir]));
+    assert.equal(planClaudeSkillDispatch("$dot.plug:my-folder now", names)?.commandText, "/dot.plug:my-folder now");
+    assert.equal(planClaudeSkillDispatch("costs $1.50.", names), undefined);
   });
 });
 

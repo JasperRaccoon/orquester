@@ -2659,7 +2659,7 @@ export class ClaudeSession {
         cwd: this.options.cwd,
         ...(pluginCacheDir !== undefined ? { pluginCacheDir } : {}),
         // A profile chat loads its own plugins by path; every installed one is switched off.
-        ...(profile !== undefined ? { pluginDirs: profile.plugins.map((plugin) => ({ path: plugin.path })) } : {})
+        ...(profile !== undefined ? { pluginDirs: profile.plugins.map((plugin) => plugin.path) } : {})
       });
       if (profile === undefined) return skills;
       // An Agent Profile chat never loads the user's skills (`settingSources` drops that source),

@@ -460,7 +460,8 @@ describe("SessionProfileService — the composer's fallback catalog", () => {
     const cache = profileLayout(sessionProfileDir(appdir, "id-1")).pluginCacheDir(itemId);
     await mkdir(join(cache, "skills", "tidy"), { recursive: true });
     await writeFile(join(cache, "skills", "tidy", "SKILL.md"), "---\ndescription: Tidy up\n---\nBody\n");
-    // The manifest does not read: the plugin goes by its profile name.
+    // The manifest does not read: the plugin goes by its directory, `plugins/<itemId>`, exactly as
+    // the CLI names the prepared copy the live session lists (and the allow-list names).
     await mkdir(join(cache, ".claude-plugin"), { recursive: true });
     await writeFile(join(cache, ".claude-plugin", "plugin.json"), "{ nope");
 
@@ -469,9 +470,10 @@ describe("SessionProfileService — the composer's fallback catalog", () => {
       claude.skills.map((skill) => [skill.name, skill.scope, skill.description]),
       [
         ["review", "profile", "Review the diff"],
-        ["fmt:tidy", "plugin", "Tidy up"]
+        [`${itemId}:tidy`, "plugin", "Tidy up"]
       ]
     );
+    assert.equal(cache.endsWith(`/${itemId}`), true, "the cache dir is named like the prepared copy");
     const codex = await service.composerCatalog("id-1", "codex");
     assert.deepEqual(codex.skills.map((skill) => skill.name), ["review"]);
   });

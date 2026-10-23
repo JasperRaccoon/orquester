@@ -9,9 +9,13 @@
  * and passed back explicitly.
  *
  * Rules observed on Claude Code 2.1.285 with no model call (SDK
- * `getContextUsage()` / `supportedCommands()` / `mcpServerStatus()`):
- * - A skill is `<SKILL.md frontmatter name>`, else its directory name; a
- *   plugin's is `<plugin>:<that>`.
+ * `getContextUsage()` / `supportedCommands()` / `mcpServerStatus()`), the
+ * skill names re-checked on 2.1.307 against the `skills` allow-list itself:
+ * - A skill folder's name — what the allow-list matches — is its DIRECTORY
+ *   name; its frontmatter `name` is only what `getContextUsage()` and
+ *   `supportedCommands()` display (an allow-list naming it hides the skill).
+ *   A plugin's skills follow {@link claudePluginSkillName}, under the
+ *   plugin's name ({@link claudePluginNameOf}).
  * - A command is its file stem, subdirectories joined by `:` (`git/x.md` →
  *   `git:x`); a plugin's is `<plugin>:<that>`.
  * - A plugin's `plugin.json` `skills` paths ADD to `skills/`; its `commands`
@@ -103,24 +107,55 @@ export function isPlainObject(value: unknown): value is Doc {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** The skill under `dir` (holding `SKILL.md`), as Claude names it; `null` when it is none. */
-async function skillNameOf(dir: string, fallback: string, fs: ClaudeNamesFs = HOST_FS): Promise<string | null> {
-  const file = join(dir, "SKILL.md");
-  if (!(await isFile(file, fs))) return null;
-  return (await frontmatterName(file, fs)) ?? fallback;
+/**
+ * Claude Code refuses to load a plugin whose name is empty or holds `@`, `:`, whitespace, a path
+ * separator or an invisible/control character (its manifest validation). Dots are fine:
+ * `my.plugin:skill` loads and dispatches as written.
+ */
+export function isValidClaudePluginName(name: string): boolean {
+  return name.length > 0 && !/[@:\s/\\\p{Cc}\p{Cf}]/u.test(name);
 }
 
-/** The skills directly under `root` (symlinked directories followed), as Claude names them. */
-export async function claudeSkillNamesIn(root: string, fs: ClaudeNamesFs = HOST_FS): Promise<string[]> {
+/**
+ * The name Claude Code loads a plugin under: its manifest's `name`, else `fallback` — the
+ * directory's name for a plugin loaded by path (a profile's copy, `plugins/<itemId>`), the
+ * registry id's plugin part for an installed one. `null` when that name is one the CLI refuses
+ * ({@link isValidClaudePluginName}): the plugin does not load, so it names nothing.
+ */
+export function claudePluginNameOf(manifest: Doc | null | undefined, fallback: string): string | null {
+  const declared = manifest?.name;
+  const name = typeof declared === "string" ? declared : fallback;
+  return isValidClaudePluginName(name) ? name : null;
+}
+
+/**
+ * A plugin skill's name as Claude Code's loader gives it (2.1.278 and 2.1.307 alike), the one the
+ * `skills` allow-list matches and `/name` dispatches: `<plugin>:<entry>`, where `entry` is
+ * - a skill FOLDER's directory name — its frontmatter `name` is display only; or
+ * - for a skill root that is itself one `SKILL.md` (a declared path, the plugin root), its
+ *   frontmatter `name` (`declaredName`) minus a `<plugin>:` prefix, else its directory name;
+ *
+ * every character outside `[a-zA-Z0-9_-]` replaced by `-`. The plugin name is kept as written.
+ */
+export function claudePluginSkillName(pluginName: string, directoryName: string, declaredName?: string): string {
+  const declared = declaredName?.trim() ?? "";
+  const unprefixed = declared.startsWith(`${pluginName}:`) ? declared.slice(pluginName.length + 1) : declared;
+  return `${pluginName}:${(unprefixed || directoryName).replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+}
+
+/** The skill folders directly under `root` (symlinked directories followed), by directory name. */
+async function skillFoldersIn(root: string, fs: ClaudeNamesFs): Promise<string[]> {
   const names: string[] = [];
   for (const dirent of await entries(root, fs)) {
     if (dirent.name.startsWith(".")) continue;
-    const dir = join(root, dirent.name);
-    if (!(await isDir(dir, fs))) continue;
-    const name = await skillNameOf(dir, dirent.name, fs);
-    if (name !== null) names.push(name);
+    if (await isFile(join(root, dirent.name, "SKILL.md"), fs)) names.push(dirent.name);
   }
   return names;
+}
+
+/** The skills directly under `root` (symlinked directories followed), as Claude names them: by directory. */
+export async function claudeSkillNamesIn(root: string, fs: ClaudeNamesFs = HOST_FS): Promise<string[]> {
+  return skillFoldersIn(root, fs);
 }
 
 /** Every `*.md` under `root`, at any depth (symlinks followed), as Claude names the command. */
@@ -181,16 +216,25 @@ export async function claudePluginEntryIds(root: string, pluginName: string, man
     // The object form names its commands itself.
     commandNames.push(...Object.keys(plugin.commands));
   }
-  const skillNames: string[] = [];
-  for (const path of [join(root, "skills"), ...manifestPaths(root, plugin.skills)]) {
-    const single = await skillNameOf(path, path.slice(path.lastIndexOf(sep) + 1));
-    if (single !== null && path !== join(root, "skills")) {
-      skillNames.push(single);
+  const skillIds: string[] = [];
+  const declared = manifestPaths(root, plugin.skills);
+  const defaultDir = join(root, "skills");
+  const skillRoots = [
+    ...((await isDir(defaultDir, HOST_FS)) ? [defaultDir] : []),
+    ...declared,
+    // A plugin that is itself one skill and declares none (as `skills.ts` lists it).
+    ...(plugin.skills === undefined && !(await isDir(defaultDir, HOST_FS)) ? [root] : [])
+  ];
+  for (const path of skillRoots) {
+    const file = join(path, "SKILL.md");
+    if (await isFile(file, HOST_FS)) {
+      const directoryName = path.slice(path.lastIndexOf(sep) + 1);
+      skillIds.push(claudePluginSkillName(pluginName, directoryName, await frontmatterName(file, HOST_FS)));
     } else {
-      skillNames.push(...(await claudeSkillNamesIn(path)));
+      for (const folder of await skillFoldersIn(path, HOST_FS)) skillIds.push(claudePluginSkillName(pluginName, folder));
     }
   }
-  return unique([...commandNames, ...skillNames].map((name) => `${pluginName}:${name}`));
+  return unique([...commandNames.map((name) => `${pluginName}:${name}`), ...skillIds]);
 }
 
 /**

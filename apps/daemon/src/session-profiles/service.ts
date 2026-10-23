@@ -286,11 +286,11 @@ export class SessionProfileService {
       slashCommands.push({ name: command.name, ...described(command.description), ...(hint !== undefined ? { input: { hint } } : {}) });
     }
     if (agent === "claude" && resolved.plugins.length > 0) {
-      // The profile's Claude plugins' skills, `plugin:skill` as the session loads them.
+      // The profile's Claude plugins' skills, `plugin:skill` as the session loads them: the cache
+      // dir is `plugins/<itemId>` like the prepared copy, so a plugin without a manifest name is
+      // named by the same directory in both.
       const taken = new Set(skills.map((skill) => skill.name));
-      const pluginSkills = await discoverClaudePluginSkills(
-        resolved.plugins.map((plugin) => ({ path: plugin.cacheDir, name: plugin.name }))
-      ).catch(() => []);
+      const pluginSkills = await discoverClaudePluginSkills(resolved.plugins.map((plugin) => plugin.cacheDir)).catch(() => []);
       skills.push(...pluginSkills.filter((skill) => !taken.has(skill.name)));
     }
     return { slashCommands, skills };
