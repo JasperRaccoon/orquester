@@ -366,6 +366,12 @@ importers:
       cronstrue:
         specifier: ^3.27.0
         version: 3.27.0
+      cytoscape:
+        specifier: 3.34.3
+        version: 3.34.3
+      cytoscape-fcose:
+        specifier: 2.2.0
+        version: 2.2.0(cytoscape@3.34.3)
       dompurify:
         specifier: ^3.4.17
         version: 3.4.17
