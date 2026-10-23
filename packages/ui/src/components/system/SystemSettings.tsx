@@ -3,6 +3,7 @@ import { Loader2, RefreshCw, ServerOff } from "lucide-react";
 import type { SystemPortsResponse, SystemProcessesResponse, SystemResourcesResponse } from "@orquester/api";
 import { cn } from "../../lib/cn";
 import { Badge, EmptyState, Notice, SettingsSection } from "../settings/primitives";
+import { AgentHostRestart } from "./AgentHostRestart";
 import { HostResourceCards } from "./HostResourceCards";
 import { OrquesterCore } from "./OrquesterCore";
 import { PortsTable } from "./PortsTable";
@@ -215,6 +216,8 @@ export const HostStatusView: React.FC<{ status: HostStatus }> = ({ status }) => 
 
   return (
     <>
+      <AgentHostRestart live={status.live} />
+
       <SettingsSection bare title="Orquester" description="The processes Orquester can't run without, pinned whatever the table is sorted by.">
         {processes.data ? (
           <OrquesterCore snapshot={processes.data} selectedPid={selectedPid} onSelect={selectFromCore} />

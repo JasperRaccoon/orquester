@@ -30,6 +30,7 @@ import { MCP_APP_CAPTURE_TIMEOUT_MS, type McpAppReference } from "@orquester/api
 import { AGENT_HOST_DEADLINES } from "../../support/deadline.ts";
 import {
   AGENT_LAUNCH_ENV_VAR,
+  processStillRunning,
   recordChildSessions,
   stopLeftoverProcesses,
   type RecordedSession
@@ -373,6 +374,8 @@ export class GrokSession {
   private updatedAt: string;
   private lastError: string | undefined;
   private stopped = false;
+  /** The starttime each background shell's process was first seen with (`backgroundTaskLive`). */
+  private readonly shellProcesses = new Map<string, number>();
   private hostInitiatedStop = false;
   /**
    * This launch's value of {@link AGENT_LAUNCH_ENV_VAR}, on the CLI's launch
@@ -1506,6 +1509,21 @@ export class GrokSession {
       return;
     }
     this.emitAll(this.normalizer.handleXaiNotification(method, params));
+  }
+
+  /**
+   * Whether a background task this session reported still runs: a shell by its own process (the
+   * pid the CLI's `BackgroundTaskStarted` named), `false` once its end was written or this
+   * session ended, `undefined` for a subagent (it runs inside the CLI: its rows' own
+   * `livenessTtlMs` bounds it), a shell with no pid, and every task of a box launch (its
+   * processes are in the box).
+   */
+  backgroundTaskLive(taskId: string): boolean | undefined {
+    if (this.stopped) return false;
+    const run = this.normalizer.backgroundTaskRun(taskId);
+    if (run.kind === "ended") return false;
+    if (run.kind !== "running" || run.pid === undefined || this.options.box !== undefined) return undefined;
+    return processStillRunning(run.pid, this.shellProcesses, taskId);
   }
 
   /**

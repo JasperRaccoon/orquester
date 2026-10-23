@@ -49,6 +49,12 @@ export interface SyncRule {
   /** Whether `rel` (POSIX, relative to the root, inside an included entry) stays out. */
   excluded(rel: string): boolean;
   codec(rel: string): SyncCodecId;
+  /**
+   * Whether `rel` is host → box only in a two-way root: the CLI manages it (marketplace refreshes)
+   * and rewrites it in the box on its own, so a box-made change there is neither collected nor
+   * undone; only a host change is pushed.
+   */
+  hostOnly(rel: string): boolean;
 }
 
 /** Names left out inside every included tree. */
@@ -111,7 +117,7 @@ function rule(
   agent: SyncAgent,
   kind: SyncRootKind,
   include: readonly string[],
-  options: { exclude?: (rel: string) => boolean; codecs?: Readonly<Record<string, SyncCodecId>> } = {}
+  options: { exclude?: (rel: string) => boolean; codecs?: Readonly<Record<string, SyncCodecId>>; hostOnly?: (rel: string) => boolean } = {}
 ): SyncRule {
   const codecs = options.codecs ?? {};
   return {
@@ -120,7 +126,8 @@ function rule(
     twoWay: kind === "account",
     include: new Set(include),
     excluded: (rel) => excludedByName(rel) || (options.exclude?.(rel) ?? false),
-    codec: (rel) => codecs[rel] ?? "raw"
+    codec: (rel) => codecs[rel] ?? "raw",
+    hostOnly: (rel) => options.hostOnly?.(rel) ?? false
   };
 }
 
@@ -155,8 +162,17 @@ const CLAUDE_ACCOUNT = rule(
     // `plugins/data/` is the plugins' own runtime state (`${CLAUDE_PLUGIN_DATA}`), written as they run.
     // `synced/`, `.trash/` and `.staging/` under `skills/` and `plugins/` are the CLI's own copy of
     // what the claude.ai account syncs (each box's CLI fetches it for the same account itself).
-    exclude: (rel) => startsWithDir(rel, "plugins/data") || CLAUDE_CLI_MANAGED.some((dir) => startsWithDir(rel, dir)),
-    codecs: { ".claude.json": "claude-json", "settings.json": "mcp-json", "settings.local.json": "mcp-json" }
+    // `plugins/cache/temp_git_*` are the CLI's leftover temporary clones; `.in_use/<pid>` in a
+    // cached plugin are per-process markers of the machine they were made on.
+    exclude: (rel) =>
+      startsWithDir(rel, "plugins/data") ||
+      CLAUDE_CLI_MANAGED.some((dir) => startsWithDir(rel, dir)) ||
+      /^plugins\/cache\/temp_git_[^/]*(\/|$)/.test(rel) ||
+      (rel.startsWith("plugins/cache/") && rel.split("/").includes(".in_use")),
+    codecs: { ".claude.json": "claude-json", "settings.json": "mcp-json", "settings.local.json": "mcp-json" },
+    // Marketplaces are the CLI's own: a box CLI refreshes them on start (from a snapshot instead
+    // of the host's git clone, say). The box gets the host's; what its CLI makes of them stays there.
+    hostOnly: (rel) => rel === "plugins/known_marketplaces.json" || startsWithDir(rel, "plugins/marketplaces")
   }
 );
 
@@ -259,6 +275,83 @@ const RULES: Readonly<Record<SyncAgent, Readonly<Record<SyncRootKind, SyncRule>>
 
 export function syncRuleFor(agent: SyncAgent, kind: SyncRootKind): SyncRule {
   return RULES[agent][kind];
+}
+
+/** `rule` with `top` its only included entry (a linked root: the one shared dir an account root links to). */
+export function ruleWithOnly(rule: SyncRule, top: string): SyncRule {
+  return { ...rule, include: new Set([top]) };
+}
+
+/** `rule` that also leaves out what `exclude` says. */
+export function ruleExcluding(rule: SyncRule, exclude: (rel: string) => boolean): SyncRule {
+  return { ...rule, excluded: (rel) => rule.excluded(rel) || exclude(rel) };
+}
+
+// ---------------------------------------------------------------------------
+// Claude's plugin cache: installed versions only
+// ---------------------------------------------------------------------------
+
+/** Where a Claude config root lists its installed plugins (and the cache dir each one runs from). */
+export const CLAUDE_INSTALLED_PLUGINS_REL = "plugins/installed_plugins.json";
+const PLUGIN_CACHE_PREFIX = "plugins/cache/";
+
+/**
+ * The `plugins/cache` dirs (`<marketplace>/<plugin>/<version>`, relative to `plugins/cache`) a
+ * Claude `installed_plugins.json` points at: each install's `installPath` below a
+ * `/plugins/cache/` (of whichever account home wrote it; the box has the same paths), and its
+ * `<name>@<marketplace>` + `version`. Null when the file does not parse as one.
+ */
+export function installedPluginCacheDirs(data: Buffer | string): string[] | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data.toString());
+  } catch {
+    return null;
+  }
+  const plugins = typeof parsed === "object" && parsed !== null ? (parsed as { plugins?: unknown }).plugins : undefined;
+  if (typeof plugins !== "object" || plugins === null || Array.isArray(plugins)) return null;
+  const out = new Set<string>();
+  for (const [id, installs] of Object.entries(plugins as Record<string, unknown>)) {
+    const at = id.lastIndexOf("@");
+    const name = at > 0 ? id.slice(0, at) : null;
+    const marketplace = at > 0 ? id.slice(at + 1) : null;
+    // Version 1 files hold one install object per plugin, version 2 a list.
+    for (const install of Array.isArray(installs) ? installs : [installs]) {
+      if (typeof install !== "object" || install === null) continue;
+      const { installPath, version } = install as { installPath?: unknown; version?: unknown };
+      if (typeof installPath === "string") {
+        const normalized = installPath.replace(/\\/g, "/");
+        const index = normalized.lastIndexOf(`/${PLUGIN_CACHE_PREFIX}`);
+        if (index >= 0) {
+          const rel = normalized.slice(index + PLUGIN_CACHE_PREFIX.length + 1).replace(/\/+$/, "");
+          if (isSafeRelPath(rel)) out.add(rel);
+        }
+      }
+      if (name !== null && marketplace !== null && typeof version === "string") {
+        const rel = `${marketplace}/${name}/${version}`;
+        if (isSafeRelPath(rel)) out.add(rel);
+      }
+    }
+  }
+  return [...out];
+}
+
+/**
+ * Whether `rel` is in `plugins/cache` but in none of the `allowed` dirs (nor on the way to one):
+ * the old versions the CLI leaves behind. `allowed` null = no filter (no `installed_plugins.json`
+ * on the host to go by).
+ */
+export function isUninstalledPluginCache(rel: string, allowed: ReadonlySet<string> | null): boolean {
+  if (allowed === null || !rel.startsWith(PLUGIN_CACHE_PREFIX)) return false;
+  const rest = rel.slice(PLUGIN_CACHE_PREFIX.length).split("/");
+  for (const dir of allowed) {
+    const parts = dir.split("/");
+    const shorter = Math.min(parts.length, rest.length);
+    let match = true;
+    for (let index = 0; index < shorter && match; index++) match = parts[index] === rest[index];
+    if (match) return false;
+  }
+  return true;
 }
 
 /** Whether `path` is `root` or inside it (both absolute POSIX paths, already normalized). */

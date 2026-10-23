@@ -478,6 +478,16 @@ export interface AgentAdapter {
   listSessions(): ProviderSession[];
   hasSession(threadId: string): boolean;
   /**
+   * Whether a background task this adapter reported — a background shell, a watch loop, a
+   * subagent — is still running: `true` it runs (however long it has said nothing), `false` it
+   * is gone (its own process exited, the provider dropped it from its live set, the session
+   * that ran it ended), `undefined` the adapter cannot tell. The host's liveness registry asks
+   * it on every read, so it must be synchronous and cheap, and it decides what a deploy's drain
+   * waits on: a running shell is never read as done because it fell silent. Optional — without
+   * it every task is bounded by time (`UNCHECKED_BACKGROUND_TTL_MS`).
+   */
+  backgroundTaskLive?(threadId: string, taskId: string): boolean | undefined;
+  /**
    * `options.endedByUser`: the user ended the session — the session stop
    * command or a closed tab (`stopSessionInternal`) — rather than the host
    * restarting it for a thread that goes on (an account, permission-mode or

@@ -98,6 +98,11 @@ export interface BoxConnectivity {
   tailscaleKeys(): TailscaleKeys | null;
 }
 
+/** A running setup step's progress line is written to `boxes.json` at most this often. */
+export const STEP_PROGRESS_INTERVAL_MS = 1000;
+
+const SYNC_AGENT_NAMES: Record<BoxAgentId, string> = { claude: "Claude", codex: "Codex", grok: "Grok" };
+
 export interface BoxClock {
   now(): number;
   /** Resolves after `ms` (a provider poll's backoff); rejects when `signal` aborts. */
@@ -595,14 +600,43 @@ export class BoxLifecycle {
     const homes = this.deps.managedAgentHomes();
     if (homes.length === 0) return { state: "skipped", message: "No managed agent accounts to sync." };
     const failures: string[] = [];
-    for (const home of homes) {
-      signal.throwIfAborted();
-      try {
-        await sync.ensureSynced(boxId, { agent: home.agent, configRoots: [home.home], threadId: null }, signal);
-      } catch (error) {
-        if (signal.aborted) throw error;
-        failures.push(`${home.agent} ${home.accountId}: ${errorLine(error)}`);
+    // "Claude account 2 of 5 · 1,240 of 2,000 files" while it runs.
+    const progress = this.stepProgress(boxId, "config");
+    const byAgent = new Map<BoxAgentId, ManagedAgentHome[]>();
+    for (const home of homes) byAgent.set(home.agent, [...(byAgent.get(home.agent) ?? []), home]);
+    const count = (value: number) => value.toLocaleString("en-US");
+    const syncHomes = async (agent: BoxAgentId, group: ManagedAgentHome[], all: ManagedAgentHome[]): Promise<void> => {
+      const labels = new Map(group.map((home) => [home.home, `${SYNC_AGENT_NAMES[agent]} account ${all.indexOf(home) + 1} of ${all.length}`]));
+      // A shared dir the homes link to is passed after them, once (labelled as shared).
+      const labelOf = (root: string) => labels.get(root) ?? `${SYNC_AGENT_NAMES[agent]} shared config`;
+      progress.set(`${labelOf(group[0]!.home)} · comparing files`);
+      await sync.ensureSynced(boxId, { agent, configRoots: group.map((home) => home.home), threadId: null }, signal, {
+        onProgress: ({ root, done, total }) =>
+          progress.set(total === 0 ? `${labelOf(root)} · comparing files` : `${labelOf(root)} · ${count(done)} of ${count(total)} files`)
+      });
+    };
+    try {
+      // One call per agent: the dirs its homes share are compared and sent once, not per home.
+      for (const [agent, group] of byAgent) {
+        signal.throwIfAborted();
+        try {
+          await syncHomes(agent, group, group);
+        } catch (error) {
+          if (signal.aborted) throw error;
+          // Home by home, to say which ones fail.
+          for (const home of group) {
+            signal.throwIfAborted();
+            try {
+              await syncHomes(agent, [home], group);
+            } catch (homeError) {
+              if (signal.aborted) throw homeError;
+              failures.push(`${home.agent} ${home.accountId}: ${errorLine(homeError)}`);
+            }
+          }
+        }
       }
+    } finally {
+      await progress.close();
     }
     if (failures.length > 0) throw new SetupStepError(`Could not sync ${failures.length} of ${homes.length} account homes (${failures[0]}).`);
     return { state: "done", message: `${homes.length} account home${homes.length === 1 ? "" : "s"} synced.` };
@@ -794,6 +828,54 @@ export class BoxLifecycle {
   private stepMessage(boxId: string, id: BoxSetupStepId): string {
     const step = (this.deps.store.get(boxId)?.setup ?? []).find((candidate) => candidate.id === id);
     return `${SETUP_STEP_LABELS[id]} failed${step?.message ? `: ${step.message}` : "."}`;
+  }
+
+  /**
+   * A running step's progress line: written to the record at most once per
+   * {@link STEP_PROGRESS_INTERVAL_MS} (the newest line wins), and only while the step still runs.
+   * `close` drops what is not written yet and waits for what is being written.
+   */
+  private stepProgress(boxId: string, id: BoxSetupStepId): { set(message: string): void; close(): Promise<void> } {
+    let last = Number.NEGATIVE_INFINITY;
+    let pending: string | null = null;
+    let timer: NodeJS.Timeout | null = null;
+    let writes: Promise<void> = Promise.resolve();
+    const write = (): void => {
+      timer = null;
+      if (pending === null) return;
+      const message = pending;
+      pending = null;
+      last = this.deps.clock.now();
+      writes = writes
+        .then(() =>
+          this.deps.store.update(boxId, (record) => {
+            const step = record.setup?.find((candidate) => candidate.id === id);
+            if (step?.state === "running") step.message = message;
+          })
+        )
+        .then(
+          () => undefined,
+          () => undefined
+        );
+    };
+    return {
+      set: (message) => {
+        pending = message;
+        if (timer !== null) return;
+        const wait = last + STEP_PROGRESS_INTERVAL_MS - this.deps.clock.now();
+        if (wait <= 0) write();
+        else {
+          timer = setTimeout(write, wait);
+          timer.unref?.();
+        }
+      },
+      close: async () => {
+        if (timer !== null) clearTimeout(timer);
+        timer = null;
+        pending = null;
+        await writes;
+      }
+    };
   }
 
   private async patchStep(boxId: string, id: BoxSetupStepId, patch: Partial<BoxSetupStep> & { state: BoxSetupStepState }): Promise<void> {

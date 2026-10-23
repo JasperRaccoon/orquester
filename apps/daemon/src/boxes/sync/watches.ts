@@ -67,8 +67,8 @@ export class BoxConfigWatches {
   /** `sync` with every successful `ensureSynced` also keeping its scope watched. */
   syncing(sync: BoxConfigSync): BoxConfigSync {
     const wrapped: BoxConfigSync = {
-      ensureSynced: async (boxId, scope, signal) => {
-        await sync.ensureSynced(boxId, scope, signal);
+      ensureSynced: async (boxId, scope, signal, options) => {
+        await sync.ensureSynced(boxId, scope, signal, options);
         this.keep(boxId, scope);
       },
       watch: (boxId, scope) => sync.watch(boxId, scope),

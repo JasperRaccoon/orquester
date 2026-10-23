@@ -191,6 +191,72 @@ test("a project box: host paths, config sync, clone at a ref with the workspace 
   assert.ok((await stat(join(base, "daemon", "agent", "threads"))).isDirectory());
 });
 
+test("the config step says which account it syncs and how many files are sent, at most once a second", async (t) => {
+  const base = await tempDir(t, "orq-box-life-");
+  const root = await tempDir(t, "orq-box-repo-");
+  const boxHome = await tempDir(t, "orq-box-home-");
+  const workspaceDir = join(base, "workspaces", "acme");
+  await mkdir(workspaceDir, { recursive: true });
+  const bare = bareRepo(root);
+  const adapter = new FakeAdapter();
+  let nowMs = Date.parse("2026-10-23T10:00:00Z");
+  const messages: string[] = [];
+  let boxId = "";
+  let onMessage: ((message: string) => void) | null = null;
+  const sawMessage = (want: string) =>
+    new Promise<void>((resolve) => {
+      if (messages.includes(want)) return resolve();
+      onMessage = (message) => {
+        if (message === want) resolve();
+      };
+    });
+  const { service, hub } = testBoxService({
+    baseDir: base,
+    adapters: [adapter],
+    overrides: {
+      clock: testClock(() => nowMs),
+      managedAgentHomes: () => [
+        { agent: "claude", accountId: "acc-1", home: join(base, "h1") },
+        { agent: "claude", accountId: "acc-2", home: join(base, "h2") }
+      ],
+      configSync: {
+        ensureSynced: async (_boxId, scope, _signal, options) => {
+          assert.deepEqual(scope.configRoots, [join(base, "h1"), join(base, "h2")], "one call for the agent's homes");
+          await sawMessage("Claude account 1 of 2 · comparing files");
+          nowMs += 1500;
+          options?.onProgress?.({ root: join(base, "h1"), done: 1240, total: 2000 });
+          await sawMessage("Claude account 1 of 2 · 1,240 of 2,000 files");
+          // Within the second: not written (the newest line replaces it, or the step ends first).
+          options?.onProgress?.({ root: join(base, "h1"), done: 1500, total: 2000 });
+        },
+        watch: () => () => undefined,
+        turnEnded: async () => undefined
+      }
+    }
+  });
+  t.after(() => service.stop());
+  service.registry.onChange((id) => {
+    const step = service.registry.get(id)?.setup?.find((candidate) => candidate.id === "config");
+    if (!step?.message || messages[messages.length - 1] === step.message) return;
+    boxId = id;
+    messages.push(step.message);
+    onMessage?.(step.message);
+  });
+  await service.start();
+  await connectProvider(service, adapter);
+  hub.autoConnect = (id) => isolatedBoxConnection(id, boxHome);
+  await service.projects.create({
+    workspace: "acme",
+    workspaceDir,
+    gitAccountId: "acct",
+    body: { source: "clone", url: bare, name: "app", location: { kind: "box", boxKind: "linux", provider: "hetzner", size: "big", region: "ash" } }
+  });
+  await service.settled();
+  assert.deepEqual(messages, ["Claude account 1 of 2 · comparing files", "Claude account 1 of 2 · 1,240 of 2,000 files", "2 account homes synced."]);
+  const config = service.registry.get(boxId)!.setup!.find((step) => step.id === "config")!;
+  assert.equal(config.state, "done");
+});
+
 test("a destroy the provider does not confirm leaves destroy-failed; a retry succeeds", async (t) => {
   const base = await tempDir(t, "orq-box-life-");
   const adapter = new FakeAdapter();

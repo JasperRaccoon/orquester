@@ -43,6 +43,7 @@
  * came for it.
  */
 
+import { readFileSync } from "node:fs";
 import { readFile, readdir } from "node:fs/promises";
 
 import { DEFAULT_KILL_GRACE_MS } from "./spawn.ts";
@@ -164,6 +165,38 @@ const PROC = {
 
 function running(stat: ProcStat | null): stat is ProcStat {
   return stat !== null && stat.state !== "Z" && stat.state !== "X";
+}
+
+/**
+ * Whether the process `pid` still runs — the one first seen under it: its
+ * starttime is remembered in `seen` (keyed by `key`) at the first look, and a
+ * pid recycled since reads as gone. `false` for a process that is gone (no
+ * `/proc` entry, a zombie), `undefined` when it cannot be told (not Linux, an
+ * unreadable entry). Synchronous: one small `/proc` read, for the liveness
+ * registry's per-read check.
+ */
+export function processStillRunning(
+  pid: number,
+  seen: Map<string, number>,
+  key: string
+): boolean | undefined {
+  if (process.platform !== "linux") return undefined;
+  let content: string;
+  try {
+    content = readFileSync(`/proc/${pid}/stat`, "utf8");
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code;
+    return code === "ENOENT" || code === "ESRCH" ? false : undefined;
+  }
+  const stat = parseStat(content);
+  if (stat === null) return undefined;
+  if (!running(stat)) return false;
+  const first = seen.get(key);
+  if (first === undefined) {
+    seen.set(key, stat.starttime);
+    return true;
+  }
+  return first === stat.starttime;
 }
 
 async function eachLimited<T>(items: readonly T[], work: (item: T) => Promise<void>): Promise<void> {

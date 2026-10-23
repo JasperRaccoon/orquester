@@ -23,6 +23,7 @@ import { createEscapeSequence, type EscapeSequence } from "../../../lib/agent-ch
 import type { ChatComposerProps } from "../contracts";
 import { ComposerLinkChips } from "./ComposerChips";
 import { ComposerFooterControls } from "./ComposerFooterControls";
+import { compactsBeforeSend } from "../../../lib/agent-chat/resume-compaction.logic";
 import type { ProfileChipProps } from "./ProfileChip";
 import { removeFilePath, textNamesPath } from "./composer-files";
 import {
@@ -1701,7 +1702,10 @@ function ChatComposerView({
       }
       void runSend(outgoing, outgoingMode, sentAttachments, {
         resolveText: implementationText,
-        ...(resumeCompactionTokens !== null && !keepFullHistory ? { compactFirst: true } : {}),
+        // Never ahead of a typed `/compact`: that message is the compaction (`compactsBeforeSend`).
+        ...(compactsBeforeSend({ offered: resumeCompactionTokens !== null, keepFullHistory, text: outgoing })
+          ? { compactFirst: true }
+          : {}),
         // A failure puts the quotes back as quotes and the user's words as
         // they typed them (`runSend`), not the composed blockquotes.
         ...(quotes.length > 0 ? { quoted: { text: text.trim(), quotes } } : {}),

@@ -62,7 +62,10 @@ export const OPENCODE_CAPABILITIES: AdapterCapabilities = {
   supportsConversationRollback: true,
   showPlanModeToggle: false,
   reportsContextWindow: true,
-  compaction: { type: "native" }
+  compaction: { type: "native" },
+  // A background `task` call's answer wakes the parent: the server writes its
+  // reply, and the adapter opens the woken turn (`claimReply`).
+  wakesOnBackgroundCompletion: true
 };
 
 /**

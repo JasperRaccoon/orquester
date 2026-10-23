@@ -12,6 +12,8 @@ import {
 } from "../agent-host/host-protocol.ts";
 import {
   AgentHostSupervisor,
+  BACKGROUND_END_GRACE_MS,
+  PENDING_WAKE_DRAIN_CAP_MS,
   buildAgentHostEnv,
   legacyGoalTurnOf,
   type LegacyGoalTurn,
@@ -86,6 +88,10 @@ const healthy = (
     background: string[];
     /** `AgentHostHealthResponse.capabilities`; omitted, as an older host does. */
     capabilities: AgentHostHealthResponse["capabilities"];
+    /** Pending wakes; omitted, as a host from before the field does. */
+    pendingWakes: NonNullable<AgentHostHealthResponse["pendingWakes"]>;
+    /** Live background tasks, itemised; omitted, as an older host does. */
+    backgroundTasks: NonNullable<AgentHostHealthResponse["backgroundTasks"]>;
   }> = {}
 ): ProbeOutcome => ({
   ok: true,
@@ -104,7 +110,9 @@ const healthy = (
     ...(overrides.providersRevision === undefined
       ? {}
       : { providersRevision: overrides.providersRevision }),
-    ...(overrides.capabilities === undefined ? {} : { capabilities: overrides.capabilities })
+    ...(overrides.capabilities === undefined ? {} : { capabilities: overrides.capabilities }),
+    ...(overrides.pendingWakes === undefined ? {} : { pendingWakes: overrides.pendingWakes }),
+    ...(overrides.backgroundTasks === undefined ? {} : { backgroundTasks: overrides.backgroundTasks })
   }
 });
 
@@ -132,6 +140,8 @@ async function makeHarness(
     daemonBackground?: () => readonly string[] | null;
     /** The machine's load per CPU (`SupervisorAdapters.loadPerCpu`). */
     loadPerCpu?: () => number;
+    /** `SupervisorOptions.pendingWakeCapMs`. */
+    pendingWakeCapMs?: number;
   } = {}
 ): Promise<Harness> {
   const dir = await mkdtemp(join(tmpdir(), "orq-agent-host-"));
@@ -210,6 +220,7 @@ async function makeHarness(
     env: {},
     nodeBin: "/usr/bin/node",
     ...(opts.codeStamp === undefined ? {} : { codeStamp: opts.codeStamp }),
+    ...(opts.pendingWakeCapMs === undefined ? {} : { pendingWakeCapMs: opts.pendingWakeCapMs }),
     adapters: {
       probe: async () => {
         const hooked = harness.probeHook?.();
@@ -770,7 +781,7 @@ test("case 3: live BACKGROUND work blocks the drain exactly like an active turn"
   let background: string[] = ["thread-1"];
   h.probeHook = () =>
     h.spawns.length === 0
-      ? healthy({ version: AGENT_HOST_PROTOCOL_VERSION + 1, background })
+      ? healthy({ version: AGENT_HOST_PROTOCOL_VERSION + 1, background, pendingWakes: [] })
       : healthy({ instance: "host-2" });
   await h.supervisor.init();
   assert.equal(h.supervisor.status().state, "healthy", "the fleet keeps running");
@@ -807,7 +818,10 @@ test("an older host that omits the background field is still held by the daemon'
   assert.equal(h.supervisor.status().pendingVersionRestart, true);
   daemonBackground = [];
   await h.supervisor.checkHealth();
-  assert.equal(h.spawns.length, 1, "the fleet finished; the next tick hands over");
+  assert.equal(h.spawns.length, 0, "such a host cannot say whether a wake is pending: it gets the grace");
+  h.advance(BACKGROUND_END_GRACE_MS);
+  await h.supervisor.checkHealth();
+  assert.equal(h.spawns.length, 1, "the fleet finished and the grace ran out; the next tick hands over");
   await h.cleanup();
 });
 
@@ -871,7 +885,7 @@ test("agent goals §5.7: every blocked drain evaluation asks the host to hold it
   let background: string[] = ["thread-F"];
   h.probeHook = () =>
     h.spawns.length === 0
-      ? healthy({ version: AGENT_HOST_PROTOCOL_VERSION + 1, active, background })
+      ? healthy({ version: AGENT_HOST_PROTOCOL_VERSION + 1, active, background, pendingWakes: [] })
       : healthy({ instance: "host-2" });
   await h.supervisor.init();
   assert.equal(h.holdRequests, 1, "boot adoption's own evaluation asks at once");
@@ -1389,4 +1403,137 @@ test("the launch environment is built explicitly, never from process.env", (t) =
   assert.equal(optional.TMPDIR, undefined);
   assert.equal(optional.HOME, undefined);
   assert.equal(optional.ORQUESTER_DAEMON_SOCK, undefined);
+});
+
+// Pending wakes (2026-10-23, thread bbd7145a): a background task that ends
+// while no turn runs is handed to the agent by the provider, in a turn it
+// starts by itself a second or so later. A restart in that gap lost the
+// result. The host reports the gap (`pendingWakes`); the drain waits on it —
+// for at most the cap — and an older host gets a grace after background work
+// ends instead.
+
+test("pending wake: the bbd7145a timeline — the end defers the drain, the wake turn runs, its settle hands over", async () => {
+  const h = await makeHarness([], { seedToken: "tok", tmux: true });
+  const T = "bbd7145a";
+  let background: string[] = [T];
+  let active: string[] = [];
+  let pendingWakes: Array<{ threadId: string; since: string }> = [];
+  h.probeHook = () =>
+    h.spawns.length === 0
+      ? healthy({ version: AGENT_HOST_PROTOCOL_VERSION + 1, active, background, pendingWakes })
+      : healthy({ instance: "host-2" });
+  await h.supervisor.init();
+  assert.equal(h.spawns.length, 0, "09:19:59 — the subagent still works");
+
+  // 09:20:10.905 — its end: the host holds it as a pending wake.
+  background = [];
+  pendingWakes = [{ threadId: T, since: new Date(h.now()).toISOString() }];
+  h.supervisor.handleBackgroundWorkEnded(T);
+  await h.supervisor.checkHealth();
+  assert.equal(h.spawns.length, 0, "the summary poll's 'background ended' no longer restarts at once");
+  assert.equal(h.stopRequests, 0);
+  assert.ok(h.logs.some((line) => line.includes("about to hand the agent a finished background task")), h.logs.join("\n"));
+  const status = h.supervisor.restartStatus();
+  assert.deepEqual(
+    status.pendingRestart?.blockers.map((blocker) => [blocker.threadId, blocker.kind]),
+    [[T, "wake"]],
+    "Settings → Host status says what the restart waits on"
+  );
+
+  // 09:20:12 — the wake turn starts: the host clears the wake, the turn holds.
+  h.advance(1_500);
+  pendingWakes = [];
+  active = [T];
+  await h.supervisor.checkHealth();
+  assert.equal(h.spawns.length, 0);
+
+  // The wake turn settles: drained.
+  h.advance(2_000);
+  active = [];
+  h.supervisor.handleTurnSettled(T);
+  await h.supervisor.checkHealth();
+  assert.equal(h.stopRequests, 1, "the drain goes ahead once the agent has its result");
+  assert.equal(h.spawns.length, 1);
+  await h.cleanup();
+});
+
+test("pending wake: one the provider never acts on holds the drain only for the cap", async () => {
+  const h = await makeHarness([], { seedToken: "tok", tmux: true });
+  const since = new Date(h.now()).toISOString();
+  h.probeHook = () =>
+    h.spawns.length === 0
+      ? healthy({ version: AGENT_HOST_PROTOCOL_VERSION + 1, background: [], pendingWakes: [{ threadId: "t1", since }] })
+      : healthy({ instance: "host-2" });
+  await h.supervisor.init();
+  assert.equal(h.spawns.length, 0);
+  h.advance(PENDING_WAKE_DRAIN_CAP_MS - 1);
+  await h.supervisor.checkHealth();
+  assert.equal(h.spawns.length, 0, "still inside the cap");
+  h.advance(1);
+  await h.supervisor.checkHealth();
+  assert.equal(h.spawns.length, 1, "past the cap the restart goes ahead — the host's mark carries the result over");
+  await h.cleanup();
+});
+
+test("pending wake: the cap is configurable", async () => {
+  const h = await makeHarness([], { seedToken: "tok", tmux: true, pendingWakeCapMs: 5_000 });
+  const since = new Date(h.now()).toISOString();
+  h.probeHook = () =>
+    h.spawns.length === 0
+      ? healthy({ version: AGENT_HOST_PROTOCOL_VERSION + 1, background: [], pendingWakes: [{ threadId: "t1", since }] })
+      : healthy({ instance: "host-2" });
+  await h.supervisor.init();
+  assert.equal(h.spawns.length, 0);
+  h.advance(5_000);
+  await h.supervisor.checkHealth();
+  assert.equal(h.spawns.length, 1);
+  await h.cleanup();
+});
+
+test("pending wake: a host from before the field gets a grace after background work ends — a settled turn of that thread ends it", async () => {
+  let daemonBackground: string[] = ["t1"];
+  const h = await makeHarness([], { seedToken: "tok", tmux: true, daemonBackground: () => daemonBackground });
+  h.probeHook = mismatchUntilReplaced(h);
+  await h.supervisor.init();
+  assert.equal(h.spawns.length, 0);
+  daemonBackground = [];
+  h.supervisor.handleBackgroundWorkEnded("t1");
+  await h.supervisor.checkHealth();
+  assert.equal(h.spawns.length, 0, "the provider may be about to wake the agent");
+  assert.deepEqual(
+    h.supervisor.restartStatus().pendingRestart?.blockers.map((blocker) => blocker.kind),
+    ["wake"]
+  );
+  // The wake came and went: its settle hands over at once.
+  h.supervisor.handleTurnSettled("t1");
+  await h.supervisor.checkHealth();
+  assert.equal(h.spawns.length, 1);
+  await h.cleanup();
+});
+
+test("restart status: every blocker per thread — a turn, a shell with its command and age, a subagent", async () => {
+  const h = await makeHarness([], { seedToken: "tok", tmux: true, codeStamp: "f5aff27f7805aaaa" });
+  h.probeHook = () =>
+    healthy({
+      codeStamp: "1570de7c8ee6bbbb",
+      active: ["t-turn"],
+      background: ["t-bg"],
+      pendingWakes: [],
+      backgroundTasks: [
+        { threadId: "t-bg", taskId: "b1", kind: "background", since: "2026-10-23T09:00:00.000Z", title: "Run the suite", command: "pnpm test > /tmp/x.log", stoppable: true },
+        { threadId: "t-bg", taskId: "a1", kind: "agent", since: "2026-10-23T09:01:00.000Z", stoppable: false }
+      ]
+    });
+  await h.supervisor.init();
+  assert.equal(h.spawns.length, 0);
+  const status = h.supervisor.restartStatus();
+  assert.equal(status.codeStamp, "1570de7c8ee6bbbb");
+  assert.equal(status.checkoutCodeStamp, "f5aff27f7805aaaa");
+  assert.match(status.pendingRestart?.reason ?? "", /agent host code 1570de7c8ee6 != f5aff27f7805/);
+  assert.deepEqual(status.pendingRestart?.blockers, [
+    { threadId: "t-turn", kind: "turn" },
+    { threadId: "t-bg", kind: "background", taskId: "b1", since: "2026-10-23T09:00:00.000Z", stoppable: true, title: "Run the suite", command: "pnpm test > /tmp/x.log" },
+    { threadId: "t-bg", kind: "agent", taskId: "a1", since: "2026-10-23T09:01:00.000Z", stoppable: false }
+  ]);
+  await h.cleanup();
 });

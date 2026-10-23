@@ -91,13 +91,13 @@ interface AgentChatSummaryOptions {
    * lets a deploy hand over the moment the host goes quiet instead of on the
    * next 15 s health tick.
    */
-  onTurnSettled?: () => void;
+  onTurnSettled?: (threadId: string) => void;
   /**
    * A thread's background liveness went from live to none. The same drain
    * window as `onTurnSettled`: the §3.1 restart also waits on subagent fleets
    * and watch loops, which have no turn to settle.
    */
-  onBackgroundWorkEnded?: () => void;
+  onBackgroundWorkEnded?: (threadId: string) => void;
   /**
    * A thread reported a NEW live account-usage reading (its `usageLimits`
    * moved since the last poll). The daemon's usage service takes it for the
@@ -468,7 +468,7 @@ export class AgentChatSummaryService {
       hasBackgroundLiveness(previous.fields) &&
       !hasBackgroundLiveness(fields)
     ) {
-      this.opts.onBackgroundWorkEnded?.();
+      this.opts.onBackgroundWorkEnded?.(threadId);
     }
 
     // The tab's own copy of the seven fields (the tab strip reads them off the
@@ -597,7 +597,7 @@ export class AgentChatSummaryService {
     };
     this.opts.broadcaster.publish("sessions", "agentChat.turn", payload);
     if (SETTLED_TURN_STATES.has(after.state)) {
-      this.opts.onTurnSettled?.();
+      this.opts.onTurnSettled?.(threadId);
     }
   }
 }

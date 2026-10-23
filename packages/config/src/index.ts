@@ -982,6 +982,45 @@ export function parseAppConfig(value: unknown): AppConfig {
   return appConfigSchema.parse(value);
 }
 
+/** The `app.json` groups a client writes as a whole object, which an update merges field-wise. */
+const APP_CONFIG_GROUPS: ReadonlySet<string> = new Set(["usage", "agents"]);
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/**
+ * Apply a client's `PUT /api/config/app` body to what `app.json` holds now, without losing what the
+ * client does not know.
+ *
+ * A client sends a whole group (`{agents: {...}}`) as its own schema parsed it, so an older client
+ * — one that predates a field such as `agents.claudeIdleCompaction` — drops that field from what it
+ * writes back. Replacing the group with it reset the field on every unrelated toggle. Instead each
+ * group is merged field-wise over the stored one (a field the body names wins; a record-valued
+ * field such as `continueThreadsByProject` is still replaced whole, so removing a key works), and
+ * every field this build does not know — a newer daemon's or a newer client's — is kept in the file
+ * (AGENTS.md: preserve unknown persisted fields). Throws when the merged config is invalid.
+ *
+ * `config` is the validated result; `stored` is what to write: the validated values over the raw
+ * merge, so known fields are normalized and unknown ones survive.
+ */
+export function applyAppConfigUpdate(storedRaw: unknown, update: unknown): { config: AppConfig; stored: Record<string, unknown> } {
+  const base = isPlainRecord(storedRaw) ? storedRaw : {};
+  const patch = isPlainRecord(update) ? update : {};
+  const merged: Record<string, unknown> = { ...base };
+  for (const [key, value] of Object.entries(patch)) {
+    const current = base[key];
+    merged[key] = APP_CONFIG_GROUPS.has(key) && isPlainRecord(value) && isPlainRecord(current) ? { ...current, ...value } : value;
+  }
+  const config = parseAppConfig(merged);
+  const stored: Record<string, unknown> = { ...merged };
+  for (const [key, value] of Object.entries(config)) {
+    const raw = merged[key];
+    stored[key] = isPlainRecord(value) && isPlainRecord(raw) ? { ...raw, ...value } : value;
+  }
+  return { config, stored };
+}
+
 // remotes.json (user-added remote servers; local is implicit)
 
 export const remotesConfigSchema = z.object({
@@ -1542,6 +1581,18 @@ export const agentThreadSessionSchema = z.object({
   lastError: z.string().optional()
 });
 
+/** One task of `meta.json`'s `pendingWake` (`PendingWakeTask` in `@orquester/api`). */
+const agentPendingWakeTaskSchema = z.object({
+  taskId: z.string().min(1),
+  status: z.string().min(1),
+  completedAt: z.string(),
+  title: z.string().optional().catch(undefined),
+  taskType: z.string().optional().catch(undefined),
+  result: z.string().optional().catch(undefined),
+  outputFile: z.string().optional().catch(undefined),
+  exitCode: z.number().optional().catch(undefined)
+});
+
 /**
  * `meta.json`. `continueAfterRestart` is a TURN ID, never a boolean (§3.3), so
  * a marker left over from an older turn is ignored rather than replaying the
@@ -1589,6 +1640,26 @@ export const agentThreadHeadSchema = z.object({
   // in a row. Head-only; unreadable reads as none.
   crashResumedTurn: z
     .object({ turnId: z.string().min(1), attempt: z.number().int().positive() })
+    .optional()
+    .catch(undefined),
+  // A background task's completion the agent has not picked up yet (`ThreadHead.pendingWake`):
+  // the next host hands the agent its result. Head-only; unreadable reads as none, and a task
+  // entry that does not read is dropped rather than losing the others.
+  pendingWake: z
+    .object({
+      since: z.string().min(1),
+      tasks: z
+        .array(z.unknown())
+        .transform((entries) =>
+          entries.flatMap((entry) => {
+            const parsed = agentPendingWakeTaskSchema.safeParse(entry);
+            return parsed.success ? [parsed.data] : [];
+          })
+        ),
+      moreTasks: z.number().int().nonnegative().optional().catch(undefined),
+      prepared: z.boolean().optional().catch(undefined),
+      attempt: z.number().int().positive().optional().catch(undefined)
+    })
     .optional()
     .catch(undefined),
   resumeGoalAfterRestart: z.literal(true).optional().catch(undefined),

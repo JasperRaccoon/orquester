@@ -118,6 +118,9 @@ const GROK_CAPABILITIES: AdapterCapabilities = {
   showPlanModeToggle: false,
   reportsContextWindow: true,
   compaction: { type: "slash-command", command: "/compact" },
+  // `subagent-completed-<id>` / `task-completed-<id>`: the CLI prompts the
+  // parent itself when background work ends (`openWakeTurn`).
+  wakesOnBackgroundCompletion: true,
   goals: { command: "provider", actions: ["resume", "clear"], continuesAcrossTurns: false }
 };
 
@@ -622,6 +625,13 @@ class GrokAdapter implements AgentAdapter {
 
   hasSession(threadId: string): boolean {
     return this.sessions.has(threadId);
+  }
+
+  backgroundTaskLive(threadId: string, taskId: string): boolean | undefined {
+    // The CLI that reported it is gone: nothing of this thread reports on it.
+    const session = this.sessions.get(threadId);
+    if (session === undefined) return false;
+    return session.backgroundTaskLive(taskId);
   }
 
   /**

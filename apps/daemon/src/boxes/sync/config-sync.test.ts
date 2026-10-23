@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 
 import type { BoxConfigChangesResponse, BoxConfigChangeSet, BoxPathMap } from "@orquester/api";
-import { sessionProfilePreparedRootDir } from "@orquester/config";
+import { secretFilesDir, sessionProfilePreparedRootDir } from "@orquester/config";
 
 import type { BoxSyncScope } from "../contracts.ts";
 import { execBoxHasher, type BoxHasher } from "./box-fs.ts";
@@ -30,7 +30,7 @@ async function allFiles(dir: string): Promise<string[]> {
   for (const entry of await readdir(dir, { withFileTypes: true }).catch(() => [])) {
     const path = join(dir, entry.name);
     if (entry.isDirectory()) out.push(...(await allFiles(path)));
-    else out.push(path);
+    else if (!entry.isSymbolicLink()) out.push(path); // a mirrored link: its target is listed where it is
   }
   return out;
 }
@@ -110,13 +110,15 @@ function pendingSet(published: BoxConfigChangesResponse[]): BoxConfigChangeSet {
   return set;
 }
 
-test("initial sync materializes links, blanks secrets and never sends credentials or transcripts", async () => {
+test("initial sync mirrors dir links, materializes file links, blanks secrets and never sends credentials or transcripts", async () => {
   const f = await fixture();
   const sync = f.make();
   await sync.ensureSynced("b1", f.scope, signal());
 
   const boxHome = f.box1.local(f.home);
-  assert.equal((await lstat(join(boxHome, "skills"))).isDirectory(), true, "a linked dir becomes a real dir");
+  assert.equal((await lstat(join(boxHome, "skills"))).isSymbolicLink(), true, "a linked dir is the same link in the box");
+  assert.equal(await realpath(join(boxHome, "skills")), f.box1.local(join(f.system, "skills")), "to the box's copy of the shared dir");
+  assert.equal((await lstat(f.box1.local(join(f.system, "skills")))).isDirectory(), true);
   assert.equal((await lstat(join(boxHome, "settings.json"))).isFile(), true, "a linked file becomes a real file");
   assert.equal(await readFile(join(boxHome, "skills", "review", "SKILL.md"), "utf8"), "---\nname: review\n---\nReview carefully.\n");
   assert.equal(await readFile(join(boxHome, "commands", "ship.md"), "utf8"), "Ship it.\n");
@@ -162,8 +164,8 @@ test("incremental sync pushes only what changed, deletes what the host removed, 
   assert.equal(await readFile(join(boxHome, "commands", "new.md"), "utf8"), "New.\n");
   assert.equal(await exists(join(boxHome, "skills", "review")), false, "the emptied skill dir is pruned");
   assert.deepEqual(
-    f.box1.writes.slice(writes).map((path) => path.slice(f.home.length + 1)).sort(),
-    ["CLAUDE.md", "commands/new.md"]
+    f.box1.writes.slice(writes).sort(),
+    [join(f.home, "CLAUDE.md"), join(f.system, "commands", "new.md")].sort()
   );
   await sync.close();
 });
@@ -174,7 +176,7 @@ test("host watchers push a host edit to a watching box on their own", async () =
   await sync.ensureSynced("b1", f.scope, signal());
   sync.watch("b1", f.scope);
   await sync.idle();
-  const target = join(f.home, "commands", "watched.md");
+  const target = join(f.system, "commands", "watched.md");
   const written = new Promise<void>((resolve) => {
     const original = f.box1.writeFile.bind(f.box1);
     f.box1.writeFile = async (path, data, options) => {
@@ -195,7 +197,7 @@ test("a scope synced through BoxConfigWatches.syncing stays watched: a later hos
   await watches.syncing(sync).ensureSynced("b1", f.scope, signal());
   assert.equal(watches.watched("b1"), 1);
   await sync.idle();
-  const target = join(f.home, "skills", "later", "SKILL.md");
+  const target = join(f.system, "skills", "later", "SKILL.md");
   const written = new Promise<void>((resolve) => {
     const original = f.box1.writeFile.bind(f.box1);
     f.box1.writeFile = async (path, data, options) => {
@@ -218,7 +220,7 @@ test("a host dir that appears gets a second look: files written into it after th
   await sync.ensureSynced("b1", f.scope, signal());
   sync.watch("b1", f.scope);
   await sync.idle();
-  const target = join(f.home, "skills", "fresh", "SKILL.md");
+  const target = join(f.system, "skills", "fresh", "SKILL.md");
   const written = new Promise<void>((resolve) => {
     const original = f.box1.writeFile.bind(f.box1);
     f.box1.writeFile = async (path, data, options) => {
@@ -259,7 +261,7 @@ test("a box change becomes one pending set for its turn; approve writes through 
   const set = pendingSet(f.published);
   assert.equal(set.threadId, "t1");
   assert.equal(set.boxId, "b1");
-  const byPath = new Map(set.files.map((file) => [file.path.slice(f.home.length + 1), file]));
+  const byPath = new Map(set.files.map((file) => [file.path.slice((file.path.startsWith(`${f.home}/`) ? f.home : f.system).length + 1), file]));
   assert.deepEqual([...byPath.keys()].sort(), ["CLAUDE.md", "hooks/check.sh", "skills/fresh/SKILL.md"]);
   assert.equal(byPath.get("skills/fresh/SKILL.md")!.change, "added");
   assert.equal(byPath.get("CLAUDE.md")!.change, "modified");
@@ -375,19 +377,19 @@ test("box watch events outside a turn are grouped after the idle window with no 
   sync.watch("b1", f.scope);
   await sync.idle();
   const watchCall = f.box1.calls.find(
-    (call) => call.method === "fs.watch" && (call.params as { path: string }).path === join(f.home, "commands")
+    (call) => call.method === "fs.watch" && (call.params as { path: string }).path === join(f.system, "commands")
   );
   assert.ok(watchCall, "the commands dir is watched in the box");
   const { watchId } = watchCall.params as { watchId: string };
   const published = f.nextPublish();
   await put(join(f.box1.local(f.home), "commands", "typed.md"), "Typed in a terminal.\n");
-  f.box1.emitEvent("fs.change", { watchId, changes: [{ path: join(f.home, "commands", "typed.md"), type: "create" }] });
+  f.box1.emitEvent("fs.change", { watchId, changes: [{ path: join(f.system, "commands", "typed.md"), type: "create" }] });
   const payload = await published;
   const set = payload.changes.find((change) => change.state === "pending")!;
   assert.equal(set.threadId, null);
   assert.deepEqual(
     set.files.map((file) => file.path),
-    [join(f.home, "commands", "typed.md")]
+    [join(f.system, "commands", "typed.md")]
   );
   await sync.close();
 });
@@ -402,7 +404,7 @@ test("a turn mark whose end never came stops holding the idle flush once it is o
   sync.watch("b1", f.scope);
   await sync.idle();
   const watchCall = f.box1.calls.find(
-    (call) => call.method === "fs.watch" && (call.params as { path: string }).path === join(f.home, "commands")
+    (call) => call.method === "fs.watch" && (call.params as { path: string }).path === join(f.system, "commands")
   );
   assert.ok(watchCall, "the commands dir is watched in the box");
   const { watchId } = watchCall.params as { watchId: string };
@@ -411,12 +413,12 @@ test("a turn mark whose end never came stops holding the idle flush once it is o
   nowMs += 60_001;
   const published = f.nextPublish();
   await put(join(f.box1.local(f.home), "commands", "later.md"), "Made after the lost turn.\n");
-  f.box1.emitEvent("fs.change", { watchId, changes: [{ path: join(f.home, "commands", "later.md"), type: "create" }] });
+  f.box1.emitEvent("fs.change", { watchId, changes: [{ path: join(f.system, "commands", "later.md"), type: "create" }] });
   const set = (await published).changes.find((change) => change.state === "pending")!;
   assert.equal(set.threadId, null, "grouped by the idle debounce again");
   assert.deepEqual(
     set.files.map((file) => file.path),
-    [join(f.home, "commands", "later.md")]
+    [join(f.system, "commands", "later.md")]
   );
   assert.ok(warnings.some((message) => message.includes("t-lost")));
   await sync.close();
@@ -601,5 +603,316 @@ test("ensureSynced refuses a box that is not connected", async () => {
   const sync = f.make();
   f.box1.setConnected(false);
   await assert.rejects(sync.ensureSynced("b1", f.scope, signal()), (error: unknown) => error instanceof BoxSyncError && error.code === "BOX_NOT_READY");
+  await sync.close();
+});
+
+// ---------------------------------------------------------------------------
+// Bulk pushes, mirrored links, the plugin cache, progress
+// ---------------------------------------------------------------------------
+
+/** `count` files under `<home>/agents` (a real dir of the account), and one executable script. */
+async function manyAgents(home: string, count: number): Promise<string[]> {
+  const paths: string[] = [];
+  for (let index = 0; index < count; index++) {
+    const path = join(home, "agents", `group-${index % 7}`, `agent-${index}.md`);
+    await put(path, `# Agent ${index}\n${"x".repeat(index * 13)}\n`);
+    paths.push(path);
+  }
+  const script = join(home, "agents", "bin", "run.sh");
+  await put(script, "#!/bin/sh\necho run\n", 0o755);
+  paths.push(script);
+  return paths;
+}
+
+/** A hasher that records what it is asked to hash (a pass that trusts its baseline asks for nothing). */
+function countingHasher(): { hasher: BoxHasher; hashed: string[] } {
+  const hashed: string[] = [];
+  return {
+    hashed,
+    hasher: async (connection, items, hashSignal) => {
+      hashed.push(...items.map((item) => item.path));
+      return execBoxHasher(connection, items, hashSignal);
+    }
+  };
+}
+
+test("a big first sync goes as one gzipped tar per root: modes kept, baseline right, a second pass sends and hashes nothing", async () => {
+  const f = await fixture();
+  const paths = await manyAgents(f.home, 60);
+  const { hasher, hashed } = countingHasher();
+  const progress: { root: string; done: number; total: number }[] = [];
+  const sync = f.make({ bulkMinFiles: 16, hasher });
+  await sync.ensureSynced("b1", f.scope, signal(), { onProgress: (step) => void progress.push(step) });
+
+  const homeTars = f.box1.tars.filter((entry) => entry.path === f.home);
+  assert.equal(homeTars.length, 1, "the account root's files went as one stream");
+  assert.equal(homeTars[0]!.compression, "gzip");
+  for (const path of paths) {
+    assert.equal(await readFile(f.box1.local(path), "utf8"), await readFile(path, "utf8"));
+    assert.ok(!f.box1.writes.includes(path), "not also sent one by one");
+  }
+  assert.equal((await stat(f.box1.local(join(f.home, "agents", "bin", "run.sh")))).mode & 0o111, 0o111, "exec bits survive");
+  assert.deepEqual(progress[0], { root: f.home, done: 0, total: 0 }, "comparing first");
+  assert.ok(
+    progress.some((step) => step.total >= paths.length && step.done === step.total),
+    "progress reached the end of the bulk push"
+  );
+
+  const writes = f.box1.writes.length;
+  const tars = f.box1.tars.length;
+  hashed.length = 0;
+  await sync.ensureSynced("b1", f.scope, signal());
+  assert.equal(f.box1.writes.length, writes, "nothing sent file by file");
+  assert.equal(f.box1.tars.length, tars, "nothing sent in bulk");
+  assert.deepEqual(hashed, [], "every box file matched its baseline's size and mtime");
+
+  // A box edit after the bulk push is still a box change.
+  await put(f.box1.local(paths[3]!), "edited in the box\n");
+  await sync.turnEnded("b1", "t1");
+  assert.deepEqual(
+    pendingSet(f.published).files.map((file) => file.path),
+    [paths[3]]
+  );
+  await sync.close();
+});
+
+test("a box that cannot inflate gets a plain tar; one whose tar-write fails gets the files one by one", async () => {
+  const f = await fixture();
+  const paths = await manyAgents(f.home, 30);
+  const warnings: string[] = [];
+  const original = f.box1.writeTar.bind(f.box1);
+  const seen: (string | null)[] = [];
+  f.box1.writeTar = async (path, tar, options) => {
+    seen.push(options?.compression ?? null);
+    if (options?.compression === "gzip") {
+      tar.resume();
+      throw new Error("TAR_FAILED: tar: Archive is compressed. Use -z option");
+    }
+    return original(path, tar, options);
+  };
+  const sync = f.make({ bulkMinFiles: 16, logger: { warn: (message) => void warnings.push(message) } });
+  await sync.ensureSynced("b1", f.scope, signal());
+  assert.equal(seen[0], "gzip");
+  assert.ok(seen.length >= 2 && seen.slice(1).every((compression) => compression === null), "plain from then on");
+  for (const path of paths) assert.equal(await readFile(f.box1.local(path), "utf8"), await readFile(path, "utf8"));
+  assert.ok(warnings.some((message) => message.includes("sending it plain")));
+
+  // Another box whose tar-write fails outright: file by file, and the baseline still holds.
+  f.box2.writeTar = async (_path, tar) => {
+    tar.resume();
+    throw new Error("UNKNOWN channel kind");
+  };
+  await sync.ensureSynced("b2", f.scope, signal());
+  for (const path of paths) {
+    assert.equal(await readFile(f.box2.local(path), "utf8"), await readFile(path, "utf8"));
+    assert.ok(f.box2.writes.includes(path));
+  }
+  assert.equal((await stat(f.box2.local(join(f.home, "agents", "bin", "run.sh")))).mode & 0o111, 0o111);
+  assert.ok(warnings.some((message) => message.includes("one by one")));
+  const writes = f.box2.writes.length;
+  await sync.ensureSynced("b2", f.scope, signal());
+  assert.equal(f.box2.writes.length, writes, "a second pass sends nothing");
+  await sync.close();
+});
+
+/** Another Claude account home linking the fixture's shared dirs. */
+async function secondHome(f: Awaited<ReturnType<typeof fixture>>, id = "a2"): Promise<{ home: string; scope: BoxSyncScope }> {
+  const home = join(f.appdir, "daemon", "agent-accounts", "claude", id, "home");
+  await mkdir(home, { recursive: true });
+  await symlink(join(f.system, "skills"), join(home, "skills"));
+  await symlink(join(f.system, "commands"), join(home, "commands"));
+  await put(join(home, "CLAUDE.md"), `# ${id}\n`);
+  return { home, scope: { agent: "claude", configRoots: [home], threadId: "t1" } };
+}
+
+test("a dir every account home links to is sent once per box, and a box change under it is one change, approved once", async () => {
+  const f = await fixture();
+  const a2 = await secondHome(f);
+  const sync = f.make();
+  await sync.ensureSynced("b1", f.scope, signal());
+  await sync.ensureSynced("b1", a2.scope, signal());
+  await sync.ensureSynced("b2", f.scope, signal());
+  sync.watch("b1", f.scope);
+  sync.watch("b1", a2.scope);
+  sync.watch("b2", f.scope);
+  await sync.idle();
+
+  const shared = join(f.system, "skills", "review", "SKILL.md");
+  assert.equal(f.box1.writes.filter((path) => path === shared).length, 1, "the shared skill went to box 1 once");
+  assert.ok(!f.box1.writes.some((path) => path.startsWith(`${f.home}/skills/`) || path.startsWith(`${a2.home}/skills/`)), "never per account");
+  for (const home of [f.home, a2.home]) {
+    assert.equal(await realpath(f.box1.local(join(home, "skills"))), f.box1.local(join(f.system, "skills")));
+    assert.equal(await readFile(f.box1.local(join(home, "skills", "review", "SKILL.md")), "utf8"), "---\nname: review\n---\nReview carefully.\n");
+  }
+
+  // Account 2's CLI adds a skill (through its link): one file, at the shared path.
+  sync.turnStarted("b1", "t1");
+  await put(f.box1.local(join(a2.home, "skills", "made", "SKILL.md")), "---\nname: made\n---\nIn the box.\n");
+  await sync.turnEnded("b1", "t1");
+  const set = pendingSet(f.published);
+  assert.deepEqual(
+    set.files.map((file) => file.path),
+    [join(f.system, "skills", "made", "SKILL.md")]
+  );
+  await sync.decide(set.id, "approve");
+  assert.equal(await readFile(join(f.system, "skills", "made", "SKILL.md"), "utf8"), "---\nname: made\n---\nIn the box.\n");
+  await sync.idle();
+  assert.equal(await readFile(f.box2.local(join(f.home, "skills", "made", "SKILL.md")), "utf8"), "---\nname: made\n---\nIn the box.\n", "and box 2 got it");
+  await sync.turnEnded("b1", "t2");
+  assert.equal((await sync.listChanges()).filter((change) => change.state === "pending").length, 0, "nothing left over");
+  await sync.close();
+});
+
+test("a link into a denied place is never mirrored nor synced; a link that stops being one becomes a real dir in the box", async () => {
+  const f = await fixture();
+  const denied = join(secretFilesDir(f.appdir), "skills");
+  await put(join(denied, "x", "SKILL.md"), "DENIED-CONTENT");
+  const a3 = await secondHome(f, "a3");
+  await rm(join(a3.home, "skills"));
+  await symlink(denied, join(a3.home, "skills"));
+  const sync = f.make();
+  await sync.ensureSynced("b1", a3.scope, signal());
+  assert.equal(await exists(f.box1.local(join(a3.home, "skills"))), false, "no link, no copy");
+  assert.equal(await exists(f.box1.local(denied)), false);
+  assert.ok(!f.box1.calls.some((call) => JSON.stringify(call.params).includes(secretFilesDir(f.appdir))), "the denied dir is never named to the box");
+
+  // The fixture's account: `commands` stops being a link (the host made it a real dir).
+  await sync.ensureSynced("b1", f.scope, signal());
+  assert.equal((await lstat(f.box1.local(join(f.home, "commands")))).isSymbolicLink(), true);
+  await rm(join(f.home, "commands"));
+  await put(join(f.home, "commands", "own.md"), "Own.\n");
+  await sync.ensureSynced("b1", f.scope, signal());
+  const boxCommands = f.box1.local(join(f.home, "commands"));
+  assert.equal((await lstat(boxCommands)).isDirectory(), true, "a real dir in the box now");
+  assert.deepEqual(await readdir(boxCommands), ["own.md"]);
+  assert.equal(await readFile(f.box1.local(join(f.system, "commands", "ship.md")), "utf8"), "Ship it.\n", "the shared copy was not written through");
+  await sync.turnEnded("b1", "t1");
+  assert.equal(f.published.length, 0, "no change set");
+  await sync.close();
+});
+
+test("a box synced while links were materialized: its per-account copy becomes the shared copy, with its baseline", async () => {
+  const f = await fixture();
+  // A box that could not make links (and so an older daemon's box): shared dirs copied per account.
+  const request = f.box1.request.bind(f.box1);
+  f.box1.request = (async (method: string, params: unknown, options: unknown) => {
+    if (method === "fs.symlink") throw new Error("EPERM: operation not permitted");
+    return request(method as never, params as never, options as never);
+  }) as typeof f.box1.request;
+  const old = f.make();
+  await old.ensureSynced("b1", f.scope, signal());
+  assert.equal((await lstat(f.box1.local(join(f.home, "skills")))).isDirectory(), true, "materialized");
+  await old.close();
+  f.box1.request = request;
+
+  const sync = f.make();
+  const writes = f.box1.writes.length;
+  await sync.ensureSynced("b1", f.scope, signal());
+  assert.equal((await lstat(f.box1.local(join(f.home, "skills")))).isSymbolicLink(), true);
+  assert.equal(await readFile(f.box1.local(join(f.system, "skills", "review", "SKILL.md")), "utf8"), "---\nname: review\n---\nReview carefully.\n");
+  assert.deepEqual(f.box1.writes.slice(writes), [], "the copy moved: nothing sent again");
+  await sync.turnEnded("b1", "t1");
+  assert.equal(f.published.length, 0, "the moved copy matches its baseline: no change set");
+  await sync.close();
+});
+
+/** The fixture's `plugins` with two versions of a plugin, a temp clone, in-use markers and a marketplace. */
+async function pluginLayout(f: Awaited<ReturnType<typeof fixture>>) {
+  const plugins = join(f.home, "plugins");
+  const cache = join(plugins, "cache");
+  await put(join(cache, "m", "p", "1.0", "skills", "a", "SKILL.md"), "p 1.0\n");
+  await put(join(cache, "m", "p", "1.0", ".in_use", "3010287"), "");
+  await put(join(cache, "m", "p", "0.9", "skills", "a", "SKILL.md"), "p 0.9 (old)\n");
+  await put(join(cache, "temp_git_1791328646189_oneqrz", "README.md"), "temp\n");
+  await put(join(plugins, "marketplaces", "m", ".claude-plugin", "marketplace.json"), '{"name":"m"}');
+  await put(join(plugins, "marketplaces", "m", ".github", "workflows", "ci.yml"), "on: push\n");
+  await put(join(plugins, "known_marketplaces.json"), '{"m":{"source":{"source":"github","repo":"o/m"},"lastUpdated":"2026-10-01"}}');
+  const installed = (entries: Record<string, string>): string =>
+    JSON.stringify({
+      version: 2,
+      plugins: Object.fromEntries(
+        Object.entries(entries).map(([id, version]) => {
+          const [name, market] = id.split("@");
+          return [id, [{ scope: "user", installPath: join(cache, market!, name!, version), version }]];
+        })
+      )
+    });
+  await put(join(plugins, "installed_plugins.json"), installed({ "p@m": "1.0" }));
+  return { plugins, cache, installed };
+}
+
+test("only installed plugin versions sync: no old versions, temp clones or in-use markers", async () => {
+  const f = await fixture();
+  const { cache } = await pluginLayout(f);
+  const sync = f.make();
+  await sync.ensureSynced("b1", f.scope, signal());
+  assert.equal(await readFile(f.box1.local(join(cache, "m", "p", "1.0", "skills", "a", "SKILL.md")), "utf8"), "p 1.0\n");
+  for (const absent of [join(cache, "m", "p", "0.9"), join(cache, "temp_git_1791328646189_oneqrz"), join(cache, "m", "p", "1.0", ".in_use")]) {
+    assert.equal(await exists(f.box1.local(absent)), false, absent);
+  }
+  await sync.close();
+});
+
+test("the box CLI's housekeeping (in-use markers, marketplace refresh, old-version GC) makes no change set; a real install does", async () => {
+  const f = await fixture();
+  const { plugins, cache, installed } = await pluginLayout(f);
+  const sync = f.make();
+  await sync.ensureSynced("b1", f.scope, signal());
+  const box = (path: string): string => f.box1.local(path);
+
+  // What a box CLI start did (set d71dfec9): its own in-use marker, the official marketplace
+  // refreshed from a snapshot (.gcs-sha added, .github gone), known_marketplaces.json rewritten,
+  // an orphaned version collected.
+  sync.turnStarted("b1", "t1");
+  await put(box(join(cache, "m", "p", "1.0", ".in_use", "1935")), "");
+  await put(box(join(plugins, "marketplaces", "m", ".gcs-sha")), "abc123\n");
+  await rm(box(join(plugins, "marketplaces", "m", ".github")), { recursive: true });
+  await put(box(join(plugins, "known_marketplaces.json")), '{"m":{"source":{"source":"gcs"},"lastUpdated":"2026-10-23"}}');
+  await put(box(join(cache, "m", "p", "0.8", "old.md")), "orphan\n");
+  await rm(box(join(cache, "m", "p", "0.8")), { recursive: true });
+  await sync.turnEnded("b1", "t1");
+  assert.equal(f.published.length, 0, "no change set");
+
+  // Nor fought: the next pass leaves the box CLI's marketplace as it made it.
+  await sync.ensureSynced("b1", f.scope, signal());
+  assert.equal(await readFile(box(join(plugins, "marketplaces", "m", ".gcs-sha")), "utf8"), "abc123\n");
+  assert.equal(await exists(box(join(plugins, "marketplaces", "m", ".github"))), false);
+  assert.match(await readFile(box(join(plugins, "known_marketplaces.json")), "utf8"), /gcs/);
+  assert.equal(await exists(box(join(cache, "m", "p", "1.0", ".in_use", "1935"))), true);
+  // A host change there is still pushed.
+  await put(join(plugins, "marketplaces", "m", ".claude-plugin", "marketplace.json"), '{"name":"m","v":2}');
+  await sync.ensureSynced("b1", f.scope, signal());
+  assert.equal(await readFile(box(join(plugins, "marketplaces", "m", ".claude-plugin", "marketplace.json")), "utf8"), '{"name":"m","v":2}');
+
+  // A real install in the box: its list entry and its new cache dir, in one set.
+  sync.turnStarted("b1", "t2");
+  await put(box(join(plugins, "installed_plugins.json")), installed({ "p@m": "1.0", "q@m": "2.0" }));
+  await put(box(join(cache, "m", "q", "2.0", ".claude-plugin", "plugin.json")), '{"name":"q"}');
+  await put(box(join(cache, "m", "q", "2.0", "hooks", "go.sh")), "#!/bin/sh\n", 0o755);
+  await put(box(join(cache, "m", "q", "2.0", ".in_use", "1935")), "");
+  await sync.turnEnded("b1", "t2");
+  const set = pendingSet(f.published);
+  assert.deepEqual(
+    set.files.map((file) => file.path.slice(plugins.length + 1)).sort(),
+    ["cache/m/q/2.0/.claude-plugin/plugin.json", "cache/m/q/2.0/hooks/go.sh", "installed_plugins.json"]
+  );
+  await sync.decide(set.id, "approve");
+  assert.equal(await readFile(join(cache, "m", "q", "2.0", ".claude-plugin", "plugin.json"), "utf8"), '{"name":"q"}');
+  assert.equal(await exists(join(cache, "m", "q", "2.0", ".in_use")), false, "no box marker reaches the host");
+  await sync.close();
+});
+
+test("a deleted file is never executable on the card", async () => {
+  const f = await fixture();
+  await put(join(f.home, "hooks", "old.sh"), "#!/bin/sh\nexit 0\n", 0o755);
+  const sync = f.make();
+  await sync.ensureSynced("b1", f.scope, signal());
+  await rm(f.box1.local(join(f.home, "hooks", "old.sh")));
+  await put(f.box1.local(join(f.home, "hooks", "new.sh")), "#!/bin/sh\nexit 1\n", 0o755);
+  await sync.turnEnded("b1", "t1");
+  const files = new Map(pendingSet(f.published).files.map((file) => [file.path.slice(f.home.length + 1), file]));
+  assert.equal(files.get("hooks/old.sh")!.change, "deleted");
+  assert.equal(files.get("hooks/old.sh")!.executable, false);
+  assert.equal(files.get("hooks/new.sh")!.executable, true);
   await sync.close();
 });

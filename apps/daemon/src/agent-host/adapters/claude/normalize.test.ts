@@ -1766,6 +1766,27 @@ describe("claude normaliser — background_tasks_changed is a LEVEL, not an edge
     assert.equal(payloadOf(done.find((event) => event.type === "task.completed")).status, "completed");
   });
 
+  it("answers the host's liveness check by the CLI's own accounting, never by silence", () => {
+    const { normalizer, feed } = feedable();
+    normalizer.beginTurn({ turnId: "turn-1" });
+    assert.equal(normalizer.backgroundTaskLive(SHELL_TASK_ID), undefined, "a task it never named");
+    feed(bashLaunchFrame({ command: "pnpm test > /tmp/suite.log 2>&1", run_in_background: true }));
+    feed(taskStartedFrame({ is_backgrounded: true }));
+    normalizer.completeTurn("completed");
+    // However long the shell says nothing, the CLI still lists it as live.
+    feed({
+      type: "system",
+      subtype: "background_tasks_changed",
+      tasks: [{ task_id: SHELL_TASK_ID, task_type: "local_bash", description: "pnpm test" }],
+      uuid: "u",
+      session_id: "s"
+    });
+    assert.equal(normalizer.backgroundTaskLive(SHELL_TASK_ID), true);
+    // Its process ended: the CLI drops it from its live set before the bookends.
+    feed({ type: "system", subtype: "background_tasks_changed", tasks: [], uuid: "u", session_id: "s" });
+    assert.equal(normalizer.backgroundTaskLive(SHELL_TASK_ID), false);
+  });
+
   it("still registers a task it names first, and leaves orphan notifications alone", () => {
     const { feed } = feedable();
     feed({

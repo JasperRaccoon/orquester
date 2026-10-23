@@ -5,7 +5,7 @@
  * controlled timestamps and Node's native timer mocks.
  */
 
-import type { AppendableDomainEvent, LivenessRegistry } from "../services.ts";
+import type { AppendableDomainEvent, LiveBackgroundTask, LivenessRegistry } from "../services.ts";
 import type { BackgroundLiveness, RuntimeEvent } from "@orquester/api/agent-chat";
 
 import type { Clock, IdGen } from "../adapter.ts";
@@ -100,6 +100,12 @@ export class RecordingLiveness implements LivenessRegistry {
   liveAgentCount(): number {
     return 0;
   }
+
+  liveTasks(): LiveBackgroundTask[] {
+    return [];
+  }
+
+  setProbe(): void {}
 
   clear(_threadId: string): void {}
 }

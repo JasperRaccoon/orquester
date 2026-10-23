@@ -40,6 +40,21 @@ export function resumeCompactionOffer(input: ResumeCompactionInput): number | nu
   return usedTokens;
 }
 
+// A typed `/compact`, with or without instructions, is already the compaction: a bare one ahead of
+// it would run an uninstructed compaction first and charge for two.
+const COMPACT_COMMAND_PATTERN = /^\/compact(?:\s|$)/i;
+
+/**
+ * Whether a send compacts first: the offer stands, the user did not switch it to Full, and the
+ * message is not itself a `/compact` (bare or with focus instructions). Every other message,
+ * slash commands included, compacts first, as T3 Code's does.
+ * *T3: `ChatView.logic.ts` `planComposerTurn` (#24008).*
+ */
+// Adapted from T3 Code (MIT): apps/web/src/components/ChatView.logic.ts
+export function compactsBeforeSend(input: { offered: boolean; keepFullHistory: boolean; text: string }): boolean {
+  return input.offered && !input.keepFullHistory && !COMPACT_COMMAND_PATTERN.test(input.text.trim());
+}
+
 /** When the offer can next appear by itself (the cache expiring), for a re-render; null for never. */
 export function resumeCompactionWakeAt(promptCacheExpiresAt: string | null | undefined, nowMs: number): number | null {
   const expiresAt = Date.parse(promptCacheExpiresAt ?? "");

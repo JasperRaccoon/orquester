@@ -1,5 +1,5 @@
 import React from "react";
-import { ArrowRightLeft, ArrowUp, Clock, GitFork, GitMerge, Undo2, X } from "lucide-react";
+import { ArrowRightLeft, ArrowUp, Clock, GitFork, GitMerge, MessagesSquare, Undo2, X } from "lucide-react";
 
 import type { AttachmentRef } from "@orquester/api";
 import {
@@ -31,7 +31,7 @@ import { ChatMarkdown } from "../markdown/ChatMarkdown";
 import { QUOTE_SOURCE_ATTR } from "../quote-selection";
 import { splitForgeLinks, type ForgeTextRun } from "../../../../lib/github-links/text-links";
 import { ForgeLinkPill } from "../../forge-links/ForgeLinkPill";
-import { queuedStatusLabel, shouldClampUserMessage } from "../row-format";
+import { foldedMessageSummary, foldsThreadMessage, queuedStatusLabel, shouldClampUserMessage } from "../row-format";
 import { splitSkillMentions, type MessageTextRun } from "../row-chrome";
 import { formatRowTimestamp, formatRowTimestampTooltip } from "../timestamp";
 
@@ -353,6 +353,89 @@ function ClampedBubbleText({
   );
 }
 
+// Adapted from T3 Code (MIT): apps/web/src/components/chat/TimelineUserMessageRow.tsx
+// (`FoldedMessageHeader`, and the folded body that stays mounted for find).
+
+/**
+ * Another chat's message, folded to one line (`foldsThreadMessage`) so the user's own messages
+ * stay easy to find: a button naming how and from which chat it came (the caption the open
+ * bubble wears) and the body's first line, which opens the whole message in the bubble below.
+ *
+ * The folded body stays mounted as `hidden="until-found"`: the browser's find-in-page searches
+ * it and fires `beforematch` on a hit, which opens the fold. React 18 renders `hidden` as a
+ * plain boolean, so the effect upgrades the attribute.
+ *
+ * Opening or closing keeps the header where the user clicked it: the scroller moves by however
+ * far the header moved (nothing, when the browser's own scroll anchoring already held it).
+ */
+function FoldedThreadMessage({
+  message,
+  attachments
+}: {
+  message: ParsedThreadMessage;
+  attachments: readonly AttachmentRef[];
+}): React.ReactElement {
+  const [expanded, setExpanded] = React.useState(false);
+  const bodyId = React.useId();
+  const headerRef = React.useRef<HTMLButtonElement>(null);
+  const bodyRef = React.useRef<HTMLDivElement>(null);
+  const headerTopRef = React.useRef<number | null>(null);
+  const caption = threadMessageCaption(message);
+  const summary = React.useMemo(() => foldedMessageSummary(message.body), [message.body]);
+
+  React.useLayoutEffect(() => {
+    if (!expanded) bodyRef.current?.setAttribute("hidden", "until-found");
+    const header = headerRef.current;
+    const before = headerTopRef.current;
+    headerTopRef.current = null;
+    if (!header || before === null) return;
+    const moved = header.getBoundingClientRect().top - before;
+    const scroller = header.closest<HTMLElement>("[data-agent-chat-timeline]");
+    if (scroller && moved !== 0) scroller.scrollTop += moved;
+  }, [expanded]);
+
+  React.useEffect(() => {
+    const body = bodyRef.current;
+    if (!body) return;
+    const reveal = (): void => setExpanded(true);
+    body.addEventListener("beforematch", reveal);
+    return () => body.removeEventListener("beforematch", reveal);
+  }, []);
+
+  return (
+    <div
+      className={cn("relative min-w-0 max-w-[80%] rounded-2xl bg-neutral-800 text-neutral-100", expanded && "w-full")}
+      data-from-thread={message.origin}
+      data-folded={expanded ? undefined : "true"}
+    >
+      <AuthorHeading>Another chat</AuthorHeading>
+      <button
+        ref={headerRef}
+        type="button"
+        aria-expanded={expanded}
+        aria-controls={bodyId}
+        title={caption}
+        onClick={() => {
+          headerTopRef.current = headerRef.current?.getBoundingClientRect().top ?? null;
+          setExpanded((value) => !value);
+        }}
+        className="flex min-h-9 w-full min-w-0 select-none items-center gap-1.5 rounded-2xl px-3 py-2 text-left text-sm focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500"
+      >
+        <MessagesSquare size={14} strokeWidth={1.8} aria-hidden className="shrink-0 text-neutral-500" />
+        <span className="max-w-[50%] shrink-0 truncate text-xs text-neutral-400">{caption}</span>
+        <span className={cn("min-w-0 flex-1 truncate", summary === "" && "text-neutral-500")}>
+          {summary === "" ? "No text" : summary}
+        </span>
+        <DisclosureChevron open={expanded} />
+      </button>
+      <div id={bodyId} ref={bodyRef} hidden={!expanded} className="px-3 pb-3" data-folded-body="true">
+        {attachments.length > 0 ? <AttachmentChips attachments={attachments} /> : null}
+        <ClampedBubbleText text={message.body} showLabel="Show full message" quotes />
+      </div>
+    </div>
+  );
+}
+
 /**
  * The user's filled bubble (§5.1 of the design reference) — the one filled
  * bubble in the timeline, which an agent's launch prompt reuses in its drill-in
@@ -396,22 +479,28 @@ export const UserMessageRow = React.memo(function UserMessageRow({
           {mergedBackCaption(merged.relation, merged.childTitle)}
         </span>
       ) : null}
-      {fromThread ? (
-        <span className="inline-flex items-center gap-1 pe-1 text-[11px] text-neutral-500" data-from-thread={fromThread.origin}>
-          {threadMessageCaption(fromThread)}
-        </span>
-      ) : null}
-      <div className="relative max-w-[80%] rounded-2xl bg-neutral-800 p-3 text-neutral-100">
-        {/* The chip alone says another chat sent it, even when its header is one this build no
-            longer reads (an agent's scheduled task from before scheduling was removed). */}
-        <AuthorHeading>{fromThread || markedThread ? "Another chat" : fromOrquester ? "Orquester" : "You"}</AuthorHeading>
-        {attachments.length > 0 ? <AttachmentChips attachments={attachments} /> : null}
-        <ClampedBubbleText
-          text={merged ? merged.body : fromThread ? fromThread.body : text}
-          showLabel="Show full message"
-          quotes
-        />
-      </div>
+      {fromThread && foldsThreadMessage(fromThread.origin) ? (
+        <FoldedThreadMessage message={fromThread} attachments={attachments} />
+      ) : (
+        <>
+          {fromThread ? (
+            <span className="inline-flex items-center gap-1 pe-1 text-[11px] text-neutral-500" data-from-thread={fromThread.origin}>
+              {threadMessageCaption(fromThread)}
+            </span>
+          ) : null}
+          <div className="relative max-w-[80%] rounded-2xl bg-neutral-800 p-3 text-neutral-100">
+            {/* The chip alone says another chat sent it, even when its header is one this build no
+                longer reads (an agent's scheduled task from before scheduling was removed). */}
+            <AuthorHeading>{fromThread || markedThread ? "Another chat" : fromOrquester ? "Orquester" : "You"}</AuthorHeading>
+            {attachments.length > 0 ? <AttachmentChips attachments={attachments} /> : null}
+            <ClampedBubbleText
+              text={merged ? merged.body : fromThread ? fromThread.body : text}
+              showLabel="Show full message"
+              quotes
+            />
+          </div>
+        </>
+      )}
       <div
         className="ac-reveal ac-tabular flex w-full max-w-[80%] items-center justify-end gap-2 pe-1 text-xs"
         data-visible={rewindOpen ? "true" : undefined}

@@ -10,13 +10,16 @@
  */
 
 import { createHash } from "node:crypto";
-import type { Readable } from "node:stream";
+import { posix } from "node:path";
+import { Readable } from "node:stream";
+import { createGzip } from "node:zlib";
 
 import { hostToBoxPath, type BoxFsStat } from "@orquester/api";
 
 import type { BoxConnection } from "../contracts.ts";
 import { MAX_SYNC_FILE_BYTES } from "./host-fs.ts";
 import { isSafeEntryName } from "./rules.ts";
+import { packTar, type TarFileEntry } from "./tar.ts";
 
 /** Box entry of a walk, keyed by its HOST path. */
 export interface BoxFile {
@@ -30,7 +33,8 @@ export interface BoxTree {
   dirs: Set<string>;
 }
 
-const READDIR_CONCURRENCY = 8;
+const READDIR_CONCURRENCY = 32;
+const STAT_READDIR_CONCURRENCY = 32;
 const HASH_BATCH_FILES = 200;
 const HASH_BATCH_ARG_BYTES = 96 * 1024;
 const HASH_TIMEOUT_MS = 120_000;
@@ -47,7 +51,8 @@ export async function boxStat(connection: BoxConnection, hostPath: string, signa
 /**
  * Walk box dirs below each of `starts` (host paths). `accept(hostPath, isDir)` decides what is
  * entered or reported. Box-side symlinks to files are reported with their target's size;
- * symlinked dirs are not entered (the host never puts a link in a box). A listed name that cannot
+ * symlinked dirs below a start are not entered (the only links sync makes in a box are mirrored
+ * top-level entries, which callers leave out of `starts`). A listed name that cannot
  * be one path segment (empty, `.`, `..`, a separator, NUL) is dropped: only a hostile or broken
  * box lists one, and every reported path may become a host path.
  */
@@ -58,7 +63,7 @@ export async function walkBox(
   signal?: AbortSignal
 ): Promise<BoxTree> {
   const tree: BoxTree = { files: new Map(), dirs: new Set() };
-  let queue: { path: string; depth: number }[] = [];
+  const queue: { path: string; depth: number }[] = [];
   for (const start of starts) {
     const info = await boxStat(connection, start, signal);
     if (info === null) continue;
@@ -71,32 +76,47 @@ export async function walkBox(
       tree.files.set(start, { path: start, size: info.size, mtimeMs: info.mtimeMs });
     }
   }
-  while (queue.length > 0) {
-    const batch = queue.splice(0, READDIR_CONCURRENCY);
-    const next: { path: string; depth: number }[] = [];
-    await Promise.all(
-      batch.map(async ({ path, depth }) => {
-        signal?.throwIfAborted();
-        const entries = await connection.request("fs.readdir", { path: boxPathOf(connection, path) }, { signal }).catch(() => []);
-        for (const entry of entries) {
-          if (typeof entry?.name !== "string" || !isSafeEntryName(entry.name)) continue;
-          const child = `${path}/${entry.name}`;
-          if (entry.kind === "dir") {
-            if (depth < MAX_DEPTH && accept(child, true)) {
-              tree.dirs.add(child);
-              next.push({ path: child, depth: depth + 1 });
+  // A pool, not levels: up to READDIR_CONCURRENCY listings in flight whatever the tree's shape.
+  let active = 0;
+  let failure: { error: unknown } | null = null;
+  await new Promise<void>((resolve) => {
+    const pump = (): void => {
+      while (failure === null && active < READDIR_CONCURRENCY && queue.length > 0) {
+        const { path, depth } = queue.shift()!;
+        active += 1;
+        void (async () => {
+          signal?.throwIfAborted();
+          const entries = await connection.request("fs.readdir", { path: boxPathOf(connection, path) }, { signal }).catch(() => []);
+          for (const entry of entries) {
+            if (typeof entry?.name !== "string" || !isSafeEntryName(entry.name)) continue;
+            const child = `${path}/${entry.name}`;
+            if (entry.kind === "dir") {
+              if (depth < MAX_DEPTH && accept(child, true)) {
+                tree.dirs.add(child);
+                queue.push({ path: child, depth: depth + 1 });
+              }
+            } else if (entry.kind === "file") {
+              if (accept(child, false)) tree.files.set(child, { path: child, size: entry.size, mtimeMs: entry.mtimeMs });
+            } else if (entry.kind === "symlink" && accept(child, false)) {
+              const target = await boxStat(connection, child, signal).catch(() => null);
+              if (target?.kind === "file") tree.files.set(child, { path: child, size: target.size, mtimeMs: target.mtimeMs });
             }
-          } else if (entry.kind === "file") {
-            if (accept(child, false)) tree.files.set(child, { path: child, size: entry.size, mtimeMs: entry.mtimeMs });
-          } else if (entry.kind === "symlink" && accept(child, false)) {
-            const target = await boxStat(connection, child, signal).catch(() => null);
-            if (target?.kind === "file") tree.files.set(child, { path: child, size: target.size, mtimeMs: target.mtimeMs });
           }
-        }
-      })
-    );
-    queue = queue.concat(next);
-  }
+        })()
+          .catch((error: unknown) => {
+            failure ??= { error };
+          })
+          .finally(() => {
+            active -= 1;
+            if (active === 0 && (queue.length === 0 || failure !== null)) resolve();
+            else pump();
+          });
+      }
+      if (active === 0) resolve();
+    };
+    pump();
+  });
+  if (failure !== null) throw (failure as { error: unknown }).error;
   return tree;
 }
 
@@ -148,6 +168,94 @@ export async function readBoxFile(
 
 export async function writeBoxFile(connection: BoxConnection, hostPath: string, data: Buffer | Readable, mode: number): Promise<void> {
   await connection.writeFile(boxPathOf(connection, hostPath), data, { mode, mkdirs: true });
+}
+
+/** Run `run` over `items`, at most `limit` at once; the first failure stops new starts and is thrown once all running ones end. */
+export async function forEachLimited<T>(items: readonly T[], limit: number, run: (item: T) => Promise<void>): Promise<void> {
+  let next = 0;
+  let failure: { error: unknown } | null = null;
+  const worker = async (): Promise<void> => {
+    while (failure === null && next < items.length) {
+      const item = items[next++]!;
+      try {
+        await run(item);
+      } catch (error) {
+        failure ??= { error };
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  if (failure !== null) throw (failure as { error: unknown }).error;
+}
+
+/**
+ * The box's size and mtime of each of `paths` (host paths) that is a regular file there: one
+ * `fs.readdir` per distinct parent dir, {@link STAT_READDIR_CONCURRENCY} at a time (the same
+ * numbers a later {@link walkBox} reports, so a baseline made from them matches it exactly).
+ */
+export async function statBoxFiles(connection: BoxConnection, paths: readonly string[], signal?: AbortSignal): Promise<Map<string, BoxFile>> {
+  const byDir = new Map<string, Set<string>>();
+  for (const path of paths) {
+    const dir = posix.dirname(path);
+    const names = byDir.get(dir) ?? new Set<string>();
+    names.add(posix.basename(path));
+    byDir.set(dir, names);
+  }
+  const out = new Map<string, BoxFile>();
+  await forEachLimited([...byDir], STAT_READDIR_CONCURRENCY, async ([dir, names]) => {
+    signal?.throwIfAborted();
+    const entries = await connection.request("fs.readdir", { path: boxPathOf(connection, dir) }, { signal }).catch(() => []);
+    for (const entry of entries) {
+      if (entry?.kind !== "file" || !names.has(entry.name)) continue;
+      const path = `${dir}/${entry.name}`;
+      out.set(path, { path, size: entry.size, mtimeMs: entry.mtimeMs });
+    }
+  });
+  return out;
+}
+
+/** One file of a bulk push: its host path below the push's dir, where its bytes are, its mode. */
+export interface BoxTarFile {
+  path: string;
+  source: string;
+  mode: number;
+}
+
+/**
+ * Push many files at once: ONE gzipped tar stream (`tar-write`) extracted into `hostDir` in the
+ * box, every file below it. Resolves each archived file's byte count by host path (a file that
+ * vanished before the packer reached it is missing). `gzip: false` sends a plain tar (an older
+ * `orq-agent` that ignores `compression`). Rejects when the box could not extract it; the box may
+ * then hold part of it.
+ */
+export async function writeBoxTar(
+  connection: BoxConnection,
+  hostDir: string,
+  files: readonly BoxTarFile[],
+  options: { gzip: boolean; signal?: AbortSignal; onFile?: () => void }
+): Promise<Map<string, number>> {
+  const prefix = hostDir === "/" ? "/" : `${hostDir}/`;
+  const entries: TarFileEntry[] = files.map((file) => {
+    if (!file.path.startsWith(prefix)) throw new Error(`${file.path} is not below ${hostDir}`);
+    return { name: file.path.slice(prefix.length), source: file.source, mode: file.mode };
+  });
+  const written = new Map<string, number>();
+  const tar = Readable.from(packTar(entries, written, options.onFile));
+  const stream: Readable = options.gzip ? tar.pipe(createGzip({ level: 4 })) : tar;
+  if (options.gzip) tar.once("error", (error) => stream.destroy(error));
+  const onAbort = (): void => {
+    stream.destroy(options.signal?.reason instanceof Error ? options.signal.reason : new Error("aborted"));
+  };
+  options.signal?.addEventListener("abort", onAbort, { once: true });
+  try {
+    await connection.writeTar(boxPathOf(connection, hostDir), stream, options.gzip ? { compression: "gzip" } : undefined);
+  } finally {
+    options.signal?.removeEventListener("abort", onAbort);
+    tar.destroy();
+  }
+  const out = new Map<string, number>();
+  for (const [name, bytes] of written) out.set(`${prefix}${name}`, bytes);
+  return out;
 }
 
 export async function removeBoxPath(connection: BoxConnection, hostPath: string, recursive = false): Promise<void> {

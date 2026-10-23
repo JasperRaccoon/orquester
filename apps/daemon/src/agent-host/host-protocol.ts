@@ -529,6 +529,32 @@ export interface AgentHostResumeGoalSessionsResponse {
   threadIds: string[];
 }
 
+/** One entry of {@link AgentHostHealthResponse.pendingWakes}. */
+export interface AgentHostPendingWake {
+  threadId: string;
+  /** When the first un-consumed completion landed (ISO). */
+  since: string;
+}
+
+/**
+ * One entry of {@link AgentHostHealthResponse.backgroundTasks}: a live background task, for the
+ * daemon's view of what a pending drain-restart waits on (Settings → System).
+ */
+export interface AgentHostBackgroundTask {
+  threadId: string;
+  taskId: string;
+  /** `agent` — a subagent; `background` — a background shell or watch loop. */
+  kind: "agent" | "background";
+  /** When the host first saw it running (ISO). */
+  since: string;
+  taskType?: string;
+  title?: string;
+  /** A shell's command line, when its launching call named one. */
+  command?: string;
+  /** The `task/stop` command can stop it alone (the adapter supports it and the roster allows it). */
+  stoppable: boolean;
+}
+
 /** `GET /health` on the host socket. */
 export interface AgentHostHealthResponse {
   ok: true;
@@ -548,6 +574,22 @@ export interface AgentHostHealthResponse {
    * older host omits it and the daemon drains on active turns alone.
    */
   backgroundWorkThreadIds?: string[];
+  /**
+   * Threads with a pending WAKE (`ThreadHead.pendingWake`): a background task finished after
+   * the thread's last turn settled, and the provider is about to start a turn by itself to hand
+   * the agent its result (Claude a second or so later, Grok, OpenCode). The drain waits on these
+   * too — a restart in that gap lost the result, and the chat sat waiting until the user typed
+   * "continue" (2026-10-23, thread bbd7145a) — but only for so long: `since` lets the daemon stop
+   * waiting on one the provider never acts on (`SupervisorOptions.pendingWakeCapMs`). Optional:
+   * an older host omits it, and the daemon then waits a grace window after background work ends
+   * instead.
+   */
+  pendingWakes?: AgentHostPendingWake[];
+  /**
+   * Every live background task behind {@link backgroundWorkThreadIds}, one entry each, for the
+   * daemon's pending-restart view. Optional: an older host omits it.
+   */
+  backgroundTasks?: AgentHostBackgroundTask[];
   pid: number;
   startedAt: string;
   /**

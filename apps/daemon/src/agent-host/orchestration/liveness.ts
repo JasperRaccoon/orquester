@@ -8,41 +8,28 @@
  * Subagent fleets, background shells and watch loops keep running inside the
  * provider process after the turn that launched them has settled. This is what
  * stops a thread reading `idle` with a "finished" attention stamp — and firing
- * a push — while an agent is still working in it.
+ * a push — while an agent is still working in it, and what a deploy's
+ * drain-restart waits on: a restart kills every one of them.
  *
  * In memory only, on purpose: after a host restart the registry is empty,
  * which is correct, because orphaned background work is not live.
  *
- * **Differs from T3: background rows expire.** T3 drops a task only on a
- * terminal status, which assumes every provider reports one — and every
- * provider can fail to: a Grok shell's end arrives by `_x.ai/task_completed`,
- * a snapshot or a poll (fixtures README observation 39), none of which comes
- * once the CLI stops reporting on it, and a thread could read `"monitoring"`
- * for the rest of the host's life while the §6.4 ladder kept the tab out of
- * "finished" forever. Two bounds fix it, both on the **background** bucket
- * only:
- *
- * - a watch loop with no transition for {@link BACKGROUND_LIVENESS_TTL_MS} is
- *   dropped (evaluated lazily on read, so there is no timer to leak and a test
- *   drives it with a set clock);
- * - a turn ending drops every background row that reported nothing **during
- *   that turn** — it was already not live while the agent worked. Only a turn
- *   the host sent: a turn the provider started itself (a Grok wake, an
- *   OpenCode woken reply, Claude's synthetic woken turn —
- *   `LivenessObservation.providerInitiatedTurn`) is not the agent working on
- *   anyone's behalf, and a watch loop's silence through it proves nothing.
- *   Wakes come at every background end and monitor line, so sweeping at their
- *   ends dropped a silent dev server long before its TTL — and let a deploy
- *   kill it.
- *
- * Agent rows are never expired — a subagent that runs for hours is real work —
- * unless the row says otherwise: an adapter whose agents' ends can go
- * unreported stamps `livenessTtlMs` on every row of the agent (Grok's: its
- * runs report their end and a heartbeat about every ten seconds, but a chat
- * session lives until Stop or the tab closes, so `session.exited` may never
- * come for a run whose reports stop). Such an agent counts for at most that
- * long after the latest row naming it; the roster keeps its row, and a later
- * end is recorded as any end is.
+ * **A row is live until its work ends, never until it falls silent.** A task
+ * leaves on its own terminal row, when its provider process goes
+ * (`session.exited`), or when the adapter that owns it says its work is gone
+ * ({@link TaskLivenessProbe}: Claude's own live-task set, which the CLI's
+ * level signal keeps; a Grok shell's own process, by its pid). Silence proves
+ * nothing: a test suite with its output sent to a file runs for twenty minutes
+ * without a line, and the expiry this registry used to apply to quiet shells —
+ * ten minutes, or the end of any turn the user sent while it said nothing —
+ * read such a shell as finished, let the thread show "finished", and let a
+ * deploy's drain kill it (2026-10-23). Only a task whose adapter can answer
+ * nothing about it — no probe, or an answer of `undefined` — is bounded by
+ * time, and generously ({@link UNCHECKED_BACKGROUND_TTL_MS}), as the guard
+ * against a provider that never reports an end. An agent row that carries its
+ * own `livenessTtlMs` (Grok's subagents, which run inside the CLI and report a
+ * heartbeat about every ten seconds) keeps that bound while its adapter cannot
+ * answer for it.
  */
 
 import {
@@ -52,34 +39,38 @@ import {
   type RuntimeEvent
 } from "@orquester/api/agent-chat";
 
-import type { LivenessObservation, LivenessRegistry } from "../services.ts";
+import type { LiveBackgroundTask, LivenessRegistry, TaskLivenessProbe } from "../services.ts";
 import { systemClock, type Clock } from "./runtime-seams.ts";
 
 /**
- * How long a watch loop may stay silent before it stops counting as live. Ten
- * minutes, the same horizon as the turn watchdog's idle window (§3.1): if
- * nothing has happened for that long, nothing is happening.
+ * How long a watch loop or shell whose adapter cannot say whether it still
+ * runs ({@link TaskLivenessProbe} answers `undefined`) counts as live after its
+ * last transition. Long on purpose: it only guards against a provider that
+ * never reports an end, and a shorter bound killed real work.
  */
-const BACKGROUND_LIVENESS_TTL_MS = 10 * 60_000;
+export const UNCHECKED_BACKGROUND_TTL_MS = 6 * 60 * 60_000;
+
+interface TaskEntry {
+  /** When the task was first seen live (epoch ms). */
+  readonly since: number;
+  /** Its last transition (epoch ms), for {@link UNCHECKED_BACKGROUND_TTL_MS}. */
+  lastSeenAt: number;
+  /** An agent's own bound: when it stops counting unless re-armed (`livenessTtlMs`), or null. */
+  expiresAt: number | null;
+  taskType: string | undefined;
+  title: string | undefined;
+}
 
 interface ThreadLivenessState {
-  /**
-   * taskId → when the agent stops counting (epoch ms: its latest row plus the
-   * row's `livenessTtlMs`), or `null` for an agent that counts until its end.
-   */
-  readonly agents: Map<string, number | null>;
-  /** taskId → the epoch ms of its last transition, for the TTL. */
-  readonly monitors: Map<string, number>;
-  /**
-   * When the thread's current turn started, for the turn-boundary sweep;
-   * `null` outside a turn and through a turn the provider started, whose end
-   * sweeps nothing.
-   */
-  turnStartedAt: number | null;
+  readonly agents: Map<string, TaskEntry>;
+  /** Watch loops and background shells (`MONITOR_TASK_TYPES`). */
+  readonly monitors: Map<string, TaskEntry>;
 }
 
 interface LivenessRegistryOptions {
   clock?: Clock;
+  /** The adapters' answer to "is this task's work still running?"; settable later. */
+  probe?: TaskLivenessProbe;
 }
 
 /** *T3: `ThreadBackgroundLiveness.ts:35-41`.* */
@@ -100,6 +91,7 @@ interface TaskTransition {
   status: string | undefined;
   kind: TaskTransitionKind;
   agentId: string | undefined;
+  title: string | undefined;
   /** The row's `livenessTtlMs`, when it is a positive finite number. */
   livenessTtlMs: number | undefined;
 }
@@ -127,6 +119,7 @@ function transitionFor(event: RuntimeEvent): TaskTransition | null {
             : event.type === "task.updated"
               ? "updated"
               : "completed";
+      const description = "description" in payload ? payload.description : undefined;
       return {
         threadId: event.threadId,
         taskId,
@@ -136,6 +129,7 @@ function transitionFor(event: RuntimeEvent): TaskTransition | null {
         // The task's own `agentId` marks work launched from inside a subagent;
         // it is on the payload linkage, and the envelope carries it too.
         agentId: payload.agentId ?? event.agentId,
+        title: nonBlank(payload.title) ?? nonBlank(description),
         livenessTtlMs:
           typeof payload.livenessTtlMs === "number" &&
           Number.isFinite(payload.livenessTtlMs) &&
@@ -153,6 +147,7 @@ export function createLivenessRegistry(
   options: LivenessRegistryOptions = {}
 ): LivenessRegistry {
   const clock = options.clock ?? systemClock;
+  let probe: TaskLivenessProbe | null = options.probe ?? null;
   const stateByThreadId = new Map<string, ThreadLivenessState>();
 
   const stateFor = (threadId: string): ThreadLivenessState => {
@@ -160,11 +155,7 @@ export function createLivenessRegistry(
     if (existing) {
       return existing;
     }
-    const created: ThreadLivenessState = {
-      agents: new Map(),
-      monitors: new Map(),
-      turnStartedAt: null
-    };
+    const created: ThreadLivenessState = { agents: new Map(), monitors: new Map() };
     stateByThreadId.set(threadId, created);
     return created;
   };
@@ -173,38 +164,54 @@ export function createLivenessRegistry(
   // taskType may later reveal itself as a shell, become inert, or turn out to
   // be agent-owned. Every path drops any prior entry for the taskId so a stale
   // bucket assignment cannot pin the thread's status.
-  const drop = (threadId: string, taskId: string): void => {
+  const drop = (threadId: string, taskId: string): TaskEntry | undefined => {
     const state = stateByThreadId.get(threadId);
     if (!state) {
-      return;
+      return undefined;
     }
+    const previous = state.agents.get(taskId) ?? state.monitors.get(taskId);
     state.agents.delete(taskId);
     state.monitors.delete(taskId);
     dropIfEmpty(threadId, state);
+    return previous;
   };
 
   const dropIfEmpty = (threadId: string, state: ThreadLivenessState): void => {
-    if (state.agents.size === 0 && state.monitors.size === 0 && state.turnStartedAt === null) {
+    if (state.agents.size === 0 && state.monitors.size === 0) {
       stateByThreadId.delete(threadId);
     }
   };
 
-  /**
-   * Lazy TTLs: evaluated on every read and write, so no timer can leak. A
-   * watch loop expires after the registry's own window; an agent only when its
-   * latest row set an expiry (`livenessTtlMs`).
-   */
-  const expire = (state: ThreadLivenessState): void => {
-    const now = clock.now().getTime();
-    const cutoff = now - BACKGROUND_LIVENESS_TTL_MS;
-    for (const [taskId, lastSeenAt] of state.monitors) {
-      if (lastSeenAt <= cutoff) {
-        state.monitors.delete(taskId);
-      }
+  /** The adapter's answer for one task; a probe that throws knows nothing. */
+  const ask = (threadId: string, taskId: string): boolean | undefined => {
+    if (probe === null) return undefined;
+    try {
+      return probe(threadId, taskId);
+    } catch {
+      return undefined;
     }
-    for (const [taskId, expiresAt] of state.agents) {
-      if (expiresAt !== null && expiresAt <= now) {
-        state.agents.delete(taskId);
+  };
+
+  /**
+   * Evaluated on every read and write, so no timer can leak. A task its
+   * adapter says is gone leaves; one it says runs stays, however quiet; one it
+   * cannot answer for is bounded — an agent by its own `livenessTtlMs`, a watch
+   * loop or shell by {@link UNCHECKED_BACKGROUND_TTL_MS}.
+   */
+  const settle = (threadId: string, state: ThreadLivenessState): void => {
+    const now = clock.now().getTime();
+    for (const [bucket, entries] of [
+      ["agent", state.agents],
+      ["monitor", state.monitors]
+    ] as const) {
+      for (const [taskId, entry] of entries) {
+        const answer = ask(threadId, taskId);
+        if (answer === true) continue;
+        const gone =
+          answer === false ||
+          (entry.expiresAt !== null && entry.expiresAt <= now) ||
+          (bucket === "monitor" && entry.lastSeenAt <= now - UNCHECKED_BACKGROUND_TTL_MS);
+        if (gone) entries.delete(taskId);
       }
     }
   };
@@ -212,12 +219,13 @@ export function createLivenessRegistry(
   const readState = (threadId: string): ThreadLivenessState | undefined => {
     const state = stateByThreadId.get(threadId);
     if (!state) return undefined;
-    expire(state);
-    return state;
+    settle(threadId, state);
+    dropIfEmpty(threadId, state);
+    return stateByThreadId.get(threadId);
   };
 
   const record = (input: TaskTransition): void => {
-    // An expired entry must read as gone to the status-free check below.
+    // A gone entry must read as gone to the status-free check below.
     readState(input.threadId);
     const taskType = input.taskType;
     if (taskType !== undefined && INERT_TASK_TYPES.has(taskType)) {
@@ -233,10 +241,10 @@ export function createLivenessRegistry(
     // (`adapters/grok/background-tasks.ts`), and reading that as "some agent's
     // shell" dropped every Grok shell — a dev server left running neither read
     // "monitoring" nor held a deploy's drain. Such a row is the task's own,
-    // classified below like any other: a shell is a watch loop, bounded by the
-    // TTL. Claude stamps only a real owner, and Codex and OpenCode type every
-    // live row `subagent` (Codex's Stop/exit closer carries no type, but it is
-    // terminal either way), so none of them reads differently.
+    // classified below like any other. Claude stamps only a real owner, and
+    // Codex and OpenCode type every live row `subagent` (Codex's Stop/exit
+    // closer carries no type, but it is terminal either way), so none of them
+    // reads differently.
     if (
       input.agentId !== undefined &&
       input.agentId.trim().length > 0 &&
@@ -270,54 +278,28 @@ export function createLivenessRegistry(
       }
     }
 
-    drop(input.threadId, input.taskId);
+    const previous = drop(input.threadId, input.taskId);
     const state = stateFor(input.threadId);
+    const now = clock.now().getTime();
+    const entry: TaskEntry = {
+      since: previous?.since ?? now,
+      lastSeenAt: now,
+      expiresAt: input.livenessTtlMs === undefined ? null : now + input.livenessTtlMs,
+      taskType: taskType ?? previous?.taskType,
+      title: input.title ?? previous?.title
+    };
     if (taskType !== undefined && MONITOR_TASK_TYPES.has(taskType)) {
-      state.monitors.set(input.taskId, clock.now().getTime());
+      state.monitors.set(input.taskId, { ...entry, expiresAt: null });
       return;
     }
-    state.agents.set(
-      input.taskId,
-      input.livenessTtlMs === undefined ? null : clock.now().getTime() + input.livenessTtlMs
-    );
+    state.agents.set(input.taskId, entry);
   };
 
   return {
-    observe(event: RuntimeEvent, observation: LivenessObservation = {}): void {
+    observe(event: RuntimeEvent): void {
       if (event.type === "session.exited") {
+        // The provider process that ran every task of the thread is gone.
         stateByThreadId.delete(event.threadId);
-        return;
-      }
-      if (event.type === "turn.started") {
-        if (observation.providerInitiatedTurn === true) {
-          // A turn the provider started arms no sweep: its end drops nothing.
-          const state = stateByThreadId.get(event.threadId);
-          if (state) {
-            state.turnStartedAt = null;
-            dropIfEmpty(event.threadId, state);
-          }
-          return;
-        }
-        const state = stateFor(event.threadId);
-        state.turnStartedAt = clock.now().getTime();
-        return;
-      }
-      if (event.type === "turn.completed" || event.type === "turn.aborted") {
-        const state = stateByThreadId.get(event.threadId);
-        if (!state) return;
-        const turnStartedAt = state.turnStartedAt;
-        state.turnStartedAt = null;
-        if (turnStartedAt !== null) {
-          // A watch loop that reported nothing for the whole turn was already
-          // not live while the agent worked.
-          for (const [taskId, lastSeenAt] of state.monitors) {
-            if (lastSeenAt < turnStartedAt) {
-              state.monitors.delete(taskId);
-            }
-          }
-        }
-        expire(state);
-        dropIfEmpty(event.threadId, state);
         return;
       }
       const transition = transitionFor(event);
@@ -344,8 +326,37 @@ export function createLivenessRegistry(
       return readState(threadId)?.agents.size ?? 0;
     },
 
+    liveTasks(threadId: string): LiveBackgroundTask[] {
+      const state = readState(threadId);
+      if (!state) return [];
+      const rows: LiveBackgroundTask[] = [];
+      for (const [bucket, entries] of [
+        ["agent", state.agents],
+        ["background", state.monitors]
+      ] as const) {
+        for (const [taskId, entry] of entries) {
+          rows.push({
+            taskId,
+            kind: bucket,
+            since: new Date(entry.since).toISOString(),
+            ...(entry.taskType !== undefined ? { taskType: entry.taskType } : {}),
+            ...(entry.title !== undefined ? { title: entry.title } : {})
+          });
+        }
+      }
+      return rows;
+    },
+
+    setProbe(next: TaskLivenessProbe | null): void {
+      probe = next;
+    },
+
     clear(threadId: string): void {
       stateByThreadId.delete(threadId);
     }
   };
+}
+
+function nonBlank(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
 }

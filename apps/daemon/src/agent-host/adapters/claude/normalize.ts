@@ -1226,6 +1226,18 @@ export class ClaudeNormalizer {
   }
 
   /**
+   * Whether a surfaced task's work still runs, as this CLI process accounts for it: live from
+   * its start until its terminal edge, the session's end, or — for background work — its absence
+   * from the CLI's own live set (`background_tasks_changed`, the level its process keeps; fixtures
+   * README observation 18b: good for clearing liveness, never a roster row). `undefined` for a
+   * task this process never named.
+   */
+  backgroundTaskLive(taskId: string): boolean | undefined {
+    if (this.liveTaskIds.has(taskId)) return true;
+    return this.taskAgents.has(taskId) ? false : undefined;
+  }
+
+  /**
    * True for a call of background work: its owner — or an agent that owner
    * runs inside — is a live task the CLI runs in the background. A foreground
    * agent the parent is waiting on (`is_backgrounded: false`, or absent on an
