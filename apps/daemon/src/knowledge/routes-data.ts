@@ -26,12 +26,21 @@ import { entryInScope } from "./search/visibility.ts";
 import { KnowledgeError, type KnowledgeLogger } from "./store/errors.ts";
 import type { KnowledgeStore } from "./store/store.ts";
 
-/** What the data routes need. Every field is a seam the service composes (`ports.ts`). */
+/**
+ * What the data routes need. Every field is a seam the service composes (`ports.ts`). `store` and
+ * `search` are read per request, after `ready()`: the service opens them when the plugin is
+ * switched on (and anew after it was switched off), so it passes them as getters.
+ */
 export interface KnowledgeDataRoutesDeps {
   store: KnowledgeStore;
   search: KnowledgeSearch;
   /** Every route answers 409 `KNOWLEDGE_DISABLED` while `enabled()` is false. */
   settings: Pick<KnowledgeSettingsPort, "enabled">;
+  /**
+   * Awaited after the plugin gate, before the handler: resolves once `store` and `search` are open,
+   * or throws a `KnowledgeError` (the refusal answered). Absent: they are always open.
+   */
+  ready?(): Promise<void>;
   visibility: KnowledgeVisibilityPort;
   /** Read after a save's store change was emitted (the service forwards changes to linking). */
   linking: Pick<KnowledgeLinkingPort, "status">;
@@ -156,7 +165,6 @@ function parse<T extends z.ZodTypeAny>(schema: T, value: unknown, what: string):
  * Mutations publish `knowledge.changed` on the `knowledge` channel.
  */
 export function registerKnowledgeDataRoutes(app: FastifyInstance, deps: KnowledgeDataRoutesDeps): void {
-  const { store, search } = deps;
   const logger = deps.logger ?? console;
 
   const fail = (reply: FastifyReply, error: unknown): FastifyReply => {
@@ -187,6 +195,7 @@ export function registerKnowledgeDataRoutes(app: FastifyInstance, deps: Knowledg
         if (!deps.settings.enabled()) {
           throw new KnowledgeError("KNOWLEDGE_DISABLED", "The Knowledge Graph plugin is off. Turn it on in Settings → Plugins.");
         }
+        await deps.ready?.();
         return await run(request, reply);
       } catch (error) {
         return fail(reply, error);
@@ -214,13 +223,13 @@ export function registerKnowledgeDataRoutes(app: FastifyInstance, deps: Knowledg
 
   const entryCounts = (): Map<string, number> => {
     const counts = new Map<string, number>();
-    for (const meta of store.listMeta()) for (const id of meta.collections) counts.set(id, (counts.get(id) ?? 0) + 1);
+    for (const meta of deps.store.listMeta()) for (const id of meta.collections) counts.set(id, (counts.get(id) ?? 0) + 1);
     return counts;
   };
 
   /** A collection the caller can see, or NOT_FOUND. */
   const visibleCollection = (id: string, visibility: KnowledgeVisibility): KnowledgeCollection => {
-    const collection = store.getCollection(id);
+    const collection = deps.store.getCollection(id);
     if (!collection || (visibility.kind === "collections" && !visibility.ids.includes(id))) {
       throw new KnowledgeError("KNOWLEDGE_NOT_FOUND", "No such collection.");
     }
@@ -229,12 +238,12 @@ export function registerKnowledgeDataRoutes(app: FastifyInstance, deps: Knowledg
 
   /** An entry the caller can see, or NOT_FOUND. */
   const visibleEntry = (id: string, visibility: KnowledgeVisibility): void => {
-    const meta = store.getMeta(id);
-    if (!meta || !entryInScope(meta, search.scope(visibility))) throw new KnowledgeError("KNOWLEDGE_NOT_FOUND", "No such entry.");
+    const meta = deps.store.getMeta(id);
+    if (!meta || !entryInScope(meta, deps.search.scope(visibility))) throw new KnowledgeError("KNOWLEDGE_NOT_FOUND", "No such entry.");
   };
 
   const entryDetail = async (id: string, visibility: KnowledgeVisibility): Promise<KnowledgeEntryDetail> => {
-    const detail = await search.entryDetail(id, visibility);
+    const detail = await deps.search.entryDetail(id, visibility);
     if (!detail) throw new KnowledgeError("KNOWLEDGE_NOT_FOUND", "No such entry.");
     return detail;
   };
@@ -246,16 +255,16 @@ export function registerKnowledgeDataRoutes(app: FastifyInstance, deps: Knowledg
     handle(async (request): Promise<KnowledgeCollectionsResponse> => {
       const query = parse(sessionQuerySchema, request.query, "query");
       const visibility = await visibilityOf(request, query.sessionId);
-      const scope = search.scope(visibility);
+      const scope = deps.search.scope(visibility);
       const byCollection = await profiles();
       const counts = entryCounts();
-      const metas = store.listMeta();
+      const metas = deps.store.listMeta();
       const known = scope.known;
       // Every collection, whoever asks: a profile chat chooses where to save from this list and may
       // save into collections it cannot see (spec goal 3, "Agent tools"). Names and counts are not
       // the entries; the totals below are the caller's.
       return {
-        collections: store.listCollections().map((c) => collectionView(c, counts, byCollection)),
+        collections: deps.store.listCollections().map((c) => collectionView(c, counts, byCollection)),
         unfiledCount: visibility.kind === "all" ? metas.filter((m) => !m.collections.some((id) => known.has(id))).length : 0,
         totalEntries: metas.filter((m) => entryInScope(m, scope)).length
       };
@@ -266,7 +275,7 @@ export function registerKnowledgeDataRoutes(app: FastifyInstance, deps: Knowledg
     knowledgeRoutes.collections,
     handle(async (request, reply) => {
       const body = parse(createCollectionSchema, request.body, "collection");
-      const created = await store.createCollection({
+      const created = await deps.store.createCollection({
         name: body.name,
         description: body.description,
         color: body.color as KnowledgeCollection["color"] | undefined
@@ -295,7 +304,7 @@ export function registerKnowledgeDataRoutes(app: FastifyInstance, deps: Knowledg
       const query = parse(sessionQuerySchema, request.query, "query");
       visibleCollection(id, await visibilityOf(request, query.sessionId));
       const body = parse(updateCollectionSchema, request.body, "collection");
-      const updated = await store.updateCollection(id, {
+      const updated = await deps.store.updateCollection(id, {
         name: body.name,
         description: body.description,
         color: body.color as KnowledgeCollection["color"] | undefined
@@ -311,8 +320,8 @@ export function registerKnowledgeDataRoutes(app: FastifyInstance, deps: Knowledg
       const id = (request.params as { id: string }).id;
       const query = parse(sessionQuerySchema, request.query, "query");
       visibleCollection(id, await visibilityOf(request, query.sessionId));
-      const relabelled = store.listMeta().filter((m) => m.collections.includes(id)).map((m) => m.id);
-      await store.deleteCollection(id);
+      const relabelled = deps.store.listMeta().filter((m) => m.collections.includes(id)).map((m) => m.id);
+      await deps.store.deleteCollection(id);
       changed(relabelled.length > 0 ? { collections: true, entryIds: relabelled } : { collections: true });
       return reply.code(204).send();
     })
@@ -325,7 +334,7 @@ export function registerKnowledgeDataRoutes(app: FastifyInstance, deps: Knowledg
     handle(async (request): Promise<KnowledgeEntriesResponse> => {
       const query = parse(entriesQuerySchema, request.query, "query");
       const visibility = await visibilityOf(request, query.sessionId);
-      return search.listEntries({ collection: query.collection, cursor: query.cursor, limit: query.limit }, visibility);
+      return deps.search.listEntries({ collection: query.collection, cursor: query.cursor, limit: query.limit }, visibility);
     })
   );
 
@@ -348,10 +357,10 @@ export function registerKnowledgeDataRoutes(app: FastifyInstance, deps: Knowledg
       const visibility = await visibilityOf(request, query.sessionId);
       visibleEntry(id, visibility);
       const body = parse(updateEntrySchema, request.body, "entry update");
-      const before = store.getMeta(id)!;
-      const after = await store.updateEntry(id, body);
+      const before = deps.store.getMeta(id)!;
+      const after = await deps.store.updateEntry(id, body);
       if (after.updatedAt !== before.updatedAt) {
-        await search.indexEntries([id]);
+        await deps.search.indexEntries([id]);
         changed(after.collections.join() === before.collections.join() ? { entryIds: [id] } : { entryIds: [id], collections: true });
       }
       return entryDetail(id, visibility);
@@ -364,7 +373,7 @@ export function registerKnowledgeDataRoutes(app: FastifyInstance, deps: Knowledg
       const id = (request.params as { id: string }).id;
       const query = parse(sessionQuerySchema, request.query, "query");
       visibleEntry(id, await visibilityOf(request, query.sessionId));
-      await store.deleteEntry(id);
+      await deps.store.deleteEntry(id);
       changed({ entryIds: [id], collections: true });
       return reply.code(204).send();
     })
@@ -376,7 +385,7 @@ export function registerKnowledgeDataRoutes(app: FastifyInstance, deps: Knowledg
     `${knowledgeRoutes.item("")}:id`,
     handle(async (request): Promise<KnowledgeItemResponse> => {
       const query = parse(sessionQuerySchema, request.query, "query");
-      const item = await search.item((request.params as { id: string }).id, await visibilityOf(request, query.sessionId));
+      const item = await deps.search.item((request.params as { id: string }).id, await visibilityOf(request, query.sessionId));
       if (!item) throw new KnowledgeError("KNOWLEDGE_NOT_FOUND", "Nothing visible has that id.");
       return item;
     })
@@ -387,7 +396,7 @@ export function registerKnowledgeDataRoutes(app: FastifyInstance, deps: Knowledg
     handle(async (request): Promise<KnowledgeGraphResponse> => {
       const query = parse(graphQuerySchema, request.query, "query");
       const visibility = await visibilityOf(request, query.sessionId);
-      return search.graphView({ collections: query.collections, focus: query.focus, depth: query.depth, limit: query.limit }, visibility);
+      return deps.search.graphView({ collections: query.collections, focus: query.focus, depth: query.depth, limit: query.limit }, visibility);
     })
   );
 
@@ -398,7 +407,7 @@ export function registerKnowledgeDataRoutes(app: FastifyInstance, deps: Knowledg
     handle(async (request): Promise<KnowledgeSearchResponse> => {
       const body = parse(searchSchema, request.body, "search");
       const visibility = await visibilityOf(request, body.sessionId);
-      return search.search({ query: body.query, collections: body.collections, limit: body.limit }, visibility);
+      return deps.search.search({ query: body.query, collections: body.collections, limit: body.limit }, visibility);
     })
   );
 
@@ -409,11 +418,11 @@ export function registerKnowledgeDataRoutes(app: FastifyInstance, deps: Knowledg
       const body = parse(saveSchema, request.body, "save");
       const principal = (request as unknown as { principal?: CallerPrincipal }).principal;
       const caller = principal?.kind === "agent" ? principal.threadId : body.sessionId;
-      const outcome = await store.save({ entries: body.entries, newCollections: body.newCollections, sessionId: caller });
+      const outcome = await deps.store.save({ entries: body.entries, newCollections: body.newCollections, sessionId: caller });
       const added = outcome.changes.filter((c) => c.kind === "added").flatMap((c) => c.entryIds);
       const touched = outcome.changes.flatMap((c) => c.entryIds);
       // Searchable (text and, for short entries, meaning) before the chat hears back.
-      if (added.length > 0) await search.indexEntries(added);
+      if (added.length > 0) await deps.search.indexEntries(added);
       if (touched.length > 0 || outcome.createdCollections.length > 0) {
         changed({ ...(touched.length > 0 ? { entryIds: touched } : {}), collections: true });
       }

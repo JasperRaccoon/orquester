@@ -310,3 +310,22 @@ test("a save waits a bounded time for its embeddings (a slow first model load ne
   await search.idle();
   assert.ok(entryIds((await search.search({ query: "onboarding" }, ALL)).hits).includes(id));
 });
+
+test("a save's own indexing and the store listener's for the same entries share one pass", async (t) => {
+  const { store, search } = await setup(t);
+  let reads = 0;
+  const getEntry = store.getEntry.bind(store);
+  store.getEntry = async (id) => {
+    reads += 1;
+    return getEntry(id);
+  };
+  const id = "ke_sharedshared";
+  // The listener starts indexing as the entry is added; the route then asks for the same entry.
+  store.put(id, "One pass: indexed once whoever asks first.", [SEO], { title: "Shared pass" });
+  await search.indexEntries([id]);
+  await search.idle();
+  assert.equal(reads, 1);
+  // A later call (nothing in flight) indexes again; so does an edit's.
+  await search.indexEntries([id]);
+  assert.equal(reads, 2);
+});

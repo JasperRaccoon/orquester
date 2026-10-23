@@ -111,6 +111,8 @@ export class KnowledgeSearch {
   private backfilledModel: string | null = null;
   private readonly embedQueue: string[] = [];
   private readonly embedWaiters = new Map<string, (() => void)[]>();
+  /** `indexEntries` calls in flight, by their entries and content hashes. */
+  private readonly indexing = new Map<string, Promise<void>>();
   private embedWorker: Promise<void> | null = null;
 
   constructor(options: KnowledgeSearchOptions) {
@@ -151,8 +153,22 @@ export class KnowledgeSearch {
    * searchable by text and — up to {@link SYNC_EMBED_CHUNKS} chunks in total, and for at most
    * {@link SYNC_EMBED_WAIT_MS}, so a save stays fast — by meaning; the rest is embedded in the
    * background.
+   *
+   * A call for the same entries at the same content as one still in flight shares it: a save's
+   * route and the store's change listener both ask for the entries it added.
    */
-  async indexEntries(ids: readonly string[]): Promise<void> {
+  indexEntries(ids: readonly string[]): Promise<void> {
+    const key = ids.map((id) => `${id}:${this.store.getMeta(id)?.contentHash ?? ""}`).join(",");
+    const running = this.indexing.get(key);
+    if (running) return running;
+    const run = this.indexEntriesNow(ids).finally(() => {
+      if (this.indexing.get(key) === run) this.indexing.delete(key);
+    });
+    this.indexing.set(key, run);
+    return run;
+  }
+
+  private async indexEntriesNow(ids: readonly string[]): Promise<void> {
     await this.whenReady();
     await this.serializeText(async () => {
       for (const id of ids) await this.indexText(id);
