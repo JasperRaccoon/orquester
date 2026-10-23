@@ -1172,7 +1172,13 @@ export const pluginStateSchema = z
      */
     engine: z.unknown().optional(),
     /** ts-rust: the tsrs engine's versions and checks. */
-    tsrs: pluginEngineVersionsSchema.optional()
+    tsrs: pluginEngineVersionsSchema.optional(),
+    /**
+     * The plugin's own settings object (knowledge-graph: `KnowledgeSettings`). Not validated
+     * here: its owner reads it field by field ({@link storedKnowledgeSettings}), so a value
+     * another build wrote never makes the record unreadable, and unknown keys are kept.
+     */
+    settings: z.unknown().optional()
   })
   .passthrough();
 
@@ -1211,6 +1217,31 @@ export function parsePluginsConfig(value: unknown): PluginsConfig {
  */
 export function pluginStateOf(config: PluginsConfig, id: string): PluginState {
   return pluginStateSchema.parse(config.plugins[id] ?? {});
+}
+
+/** The knowledge-graph settings fields a record carries with a usable type; others read as absent. */
+export interface StoredKnowledgeSettings {
+  accountId?: string | null;
+  model?: string | null;
+  concurrency?: number;
+}
+
+/**
+ * The knowledge-graph record's `settings`, field by field: a field of the wrong type (or a
+ * `settings` that is not an object) reads as absent, so the caller falls back to its default.
+ * Range checks are the caller's (the limits live in `@orquester/api`).
+ */
+export function storedKnowledgeSettings(state: PluginState): StoredKnowledgeSettings {
+  const raw = state.settings;
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return {};
+  const record = raw as Record<string, unknown>;
+  const out: StoredKnowledgeSettings = {};
+  const nullableString = (value: unknown): value is string | null =>
+    value === null || (typeof value === "string" && value.trim() !== "");
+  if (nullableString(record.accountId)) out.accountId = record.accountId;
+  if (nullableString(record.model)) out.model = record.model;
+  if (typeof record.concurrency === "number" && Number.isInteger(record.concurrency)) out.concurrency = record.concurrency;
+  return out;
 }
 
 /** The engine a ts-rust record names, or undefined when it names none this build knows. */
