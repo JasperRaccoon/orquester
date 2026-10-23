@@ -236,24 +236,30 @@ export function parseDiffFiles(diff: string): DiffFile[] {
   const isBareHeader = (index: number): boolean =>
     lines[index]!.startsWith("--- ") && (lines[index + 1] ?? "").startsWith("+++ ");
   for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index]!;
+    // Lines split on LF alone, as `git apply` splits them. A content row keeps
+    // a CR before the LF — to `git apply` that CR is part of the line, and a
+    // CRLF file's diff really does carry one — while every header, meta and
+    // hunk-header line drops it: git never writes a CR there, so one is a
+    // CRLF-converted patch, and left on it would end up in a path.
+    const raw = lines[index]!;
+    const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
 
     // Inside a hunk by its counts — or past them on a +/-/context line, which
     // git never writes there but a hand-made patch with understated counts
     // does: its lines are kept rather than dropped.
-    const overrun = /^[+\- ]/.test(line) && !isBareHeader(index);
+    const overrun = /^[+\- ]/.test(raw) && !isBareHeader(index);
     if (file !== null && hunk !== null && (oldLeft > 0 || newLeft > 0 || overrun)) {
-      const marker = line[0];
+      const marker = raw[0];
       const current: FileBuilder = file;
       const rows: DiffRow[] = (hunk as DiffHunk).rows;
       if (marker === "+") {
-        rows.push({ type: "add", oldNo: null, newNo: newNo++, text: line.slice(1) });
+        rows.push({ type: "add", oldNo: null, newNo: newNo++, text: raw.slice(1) });
         current.additions += 1;
         newLeft -= 1;
         continue;
       }
       if (marker === "-") {
-        rows.push({ type: "del", oldNo: oldNo++, newNo: null, text: line.slice(1) });
+        rows.push({ type: "del", oldNo: oldNo++, newNo: null, text: raw.slice(1) });
         current.deletions += 1;
         oldLeft -= 1;
         continue;
@@ -261,7 +267,7 @@ export function parseDiffFiles(diff: string): DiffFile[] {
       // An empty line is a context line whose leading space was stripped (some
       // editors and mailers do that) — or the end of a truncated patch.
       if (marker === " " || (line === "" && index < lines.length - 1)) {
-        rows.push({ type: "context", oldNo: oldNo++, newNo: newNo++, text: line.slice(1) });
+        rows.push({ type: "context", oldNo: oldNo++, newNo: newNo++, text: raw.slice(1) });
         oldLeft -= 1;
         newLeft -= 1;
         continue;
