@@ -202,7 +202,7 @@ export function createClosingLineIndex(source: string): (offset: number) => bool
       at += source.startsWith("\r\n", at) ? 2 : 1;
     }
     const dollars = runs.slice();
-    const brackets = isBracket.map((value) => (value ? 1 : 0));
+    const brackets: number[] = isBracket.map((value) => (value ? 1 : 0));
     for (let i = starts.length - 2; i >= 0; i -= 1) {
       dollars[i] = Math.max(dollars[i]!, dollars[i + 1]!);
       brackets[i] = Math.max(brackets[i]!, brackets[i + 1]!);
