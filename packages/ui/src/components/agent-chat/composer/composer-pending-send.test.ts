@@ -5,6 +5,7 @@ import { REDIRECT_COMPACT_REASON } from "@orquester/api/agent-chat";
 
 import {
   APPROVAL_RESPONDING_REASON,
+  composerPendingRequestsOf,
   NO_PENDING_REQUESTS,
   pendingRequestWording,
   planPendingRequestSend,
@@ -132,4 +133,20 @@ test("the rail's Send over an approval is a redirect, sent now even with queuein
     kind: "queue",
     text: "Review the current changes"
   });
+});
+
+test("a request already answered elsewhere is neither redirected nor answered again", () => {
+  const pending = {
+    approvals: [{ requestId: "req-1" }, { requestId: "req-2" }],
+    userInputs: [{ requestId: "q-1" }],
+    respondingRequestIds: [],
+    answeredRequestIds: ["req-1", "q-1"]
+  };
+  const told = composerPendingRequestsOf(pending);
+  assert.deepEqual(told, { approvalIds: ["req-2"], respondingRequestIds: [], hasQuestion: false });
+  assert.deepEqual(plan(told), { kind: "redirect", declineApprovals: ["req-2"] });
+  // Everything answered: an ordinary send, never a second answer.
+  const allAnswered = composerPendingRequestsOf({ ...pending, answeredRequestIds: ["req-1", "req-2", "q-1"] });
+  assert.deepEqual(plan(allAnswered), { kind: "send" });
+  assert.equal(composerPendingRequestsOf({ ...pending, answeredRequestIds: ["req-1", "req-2"] }).hasQuestion, true);
 });

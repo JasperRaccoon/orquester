@@ -14,6 +14,7 @@ import {
   decodeHistoryCursor,
   encodeHistoryCursor,
   HISTORICAL_RAW_SOURCE,
+  QUESTION_ALREADY_ANSWERED_REASON,
   REDIRECT_COMPACT_REASON,
   type AttachmentRef,
   type DomainEvent,
@@ -3580,6 +3581,69 @@ describe("orchestrator — an approval is answered once, whoever answers first",
     await assert.rejects(
       () => next.orchestrator.command(threadId, "approval", { commandId: cmd(), requestId: "req-1", decision: "decline" }),
       (error: unknown) => isAgentChatCommandError(error) && error.message === APPROVAL_ALREADY_ANSWERED_REASON
+    );
+    await next.stop();
+  });
+});
+
+describe("orchestrator — a question is answered once, whoever answers first", () => {
+  const answer = (requestId: string, choice: string) => ({
+    commandId: cmd(),
+    requestId,
+    answers: { "Which branch?": choice }
+  });
+
+  it("a second answer while the first is on its way is refused; its retry is the receipt's", async () => {
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
+    await openQuestion(host, "q-1", { dismissible: false });
+    await host.settle();
+    const first = answer("q-1", "main");
+    await host.orchestrator.command(threadId, "answer", first);
+    await host.settle();
+    await host.orchestrator.command(threadId, "answer", first);
+    await assert.rejects(
+      () => host.orchestrator.command(threadId, "answer", answer("q-1", "develop")),
+      (error: unknown) =>
+        isAgentChatCommandError(error) &&
+        error.code === "COMMAND_REJECTED" &&
+        error.message === QUESTION_ALREADY_ANSWERED_REASON
+    );
+    await host.settle();
+    assert.deepEqual(
+      host.adapter.calls.filter((call) => call.kind === "respondToUserInput").map((call) => call.detail),
+      [{ requestId: "q-1", answers: { "Which branch?": "main" } }]
+    );
+
+    // The provider's resolution lands; a new question under the same id takes an answer again.
+    await adapterResolution(host, "q-1", "question", { answers: { "Which branch?": "main" } });
+    await openQuestion(host, "q-1", { dismissible: false });
+    await host.settle();
+    await host.orchestrator.command(threadId, "answer", answer("q-1", "develop"));
+    await host.settle();
+    assert.equal(host.adapter.calls.filter((call) => call.kind === "respondToUserInput").length, 2);
+    await host.stop();
+  });
+
+  it("the answer survives a restart: a new host rebuilds it from the log", async () => {
+    const first = createTestHost();
+    const threadId = await first.createThread();
+    await first.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
+    await openQuestion(first, "q-1", { dismissible: false });
+    await first.settle();
+    await first.orchestrator.command(threadId, "answer", answer("q-1", "main"));
+    await first.settle();
+    await first.stop();
+
+    const next = createTestHost({ store: first.store });
+    const read = await next.orchestrator.readThread(threadId);
+    assert.equal(read.kind, "snapshot");
+    if (read.kind !== "snapshot") return;
+    assert.deepEqual(read.thread.answeredQuestions?.map(([requestId]) => requestId), ["q-1"], "the snapshot tells clients");
+    await assert.rejects(
+      () => next.orchestrator.command(threadId, "answer", answer("q-1", "develop")),
+      (error: unknown) => isAgentChatCommandError(error) && error.message === QUESTION_ALREADY_ANSWERED_REASON
     );
     await next.stop();
   });

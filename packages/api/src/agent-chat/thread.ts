@@ -732,6 +732,14 @@ export interface ThreadSnapshotPayload {
    * that as `null` and shows no goal until the drain-restart.
    */
   goal?: ThreadGoal | null;
+  /**
+   * Pending approvals and questions someone already answered, the provider's
+   * resolution still on its way (`ThreadFoldState.answeredApprovals` /
+   * `answeredQuestions`): `[requestId, answeredAt]`. Absent when there are
+   * none, and from a host that predates them.
+   */
+  answeredApprovals?: Array<[string, string]>;
+  answeredQuestions?: Array<[string, string]>;
 }
 
 /**

@@ -715,6 +715,9 @@ export const APPROVAL_ARRIVED_REASON =
 /** Why an `approval` command was refused: the request already has an answer on its way to the provider. */
 export const APPROVAL_ALREADY_ANSWERED_REASON = "This request has already been answered.";
 
+/** Why an `answer` command was refused: the question already has an answer on its way to the provider. */
+export const QUESTION_ALREADY_ANSWERED_REASON = "This question has already been answered.";
+
 /** Why a redirect that is a `/compact` was refused: a compaction waits for the turn the card holds. */
 export const REDIRECT_COMPACT_REASON =
   "A compaction can't redirect the agent. Answer the request above first, or stop the turn.";

@@ -92,7 +92,7 @@ import type {
 // 8: `thread.created`'s and `thread.meta-updated`'s `profileId` reach the head (Agent Profiles).
 // 9: a question option's `preview` and `previewFormat` reach the pending question.
 // 10: an approval's `reason` reaches the pending approval.
-// 11: `answeredApprovals` — a pending approval someone already answered.
+// 11: `answeredApprovals` / `answeredQuestions` — a pending request someone already answered.
 export const FOLD_SNAPSHOT_VERSION = 11;
 
 /**
@@ -116,6 +116,8 @@ export interface SerializedFoldState {
   closedRequestAt?: Array<[string, string]>;
   /** `[requestId, answeredAt]`; absent exactly when the state had no such map. */
   answeredApprovals?: Array<[string, string]>;
+  /** `[requestId, answeredAt]`; absent exactly when the state had no such map. */
+  answeredQuestions?: Array<[string, string]>;
   seq: number;
   deleted: boolean;
   /** Absent exactly when retention never dropped anything. */
@@ -157,6 +159,9 @@ export function serializeFoldState(state: ThreadFoldState): SerializedFoldState 
     ...(state.answeredApprovals !== undefined
       ? { answeredApprovals: [...state.answeredApprovals] }
       : {}),
+    ...(state.answeredQuestions !== undefined
+      ? { answeredQuestions: [...state.answeredQuestions] }
+      : {}),
     seq: state.seq,
     deleted: state.deleted,
     ...(state.evicted !== undefined ? { evicted: state.evicted } : {})
@@ -188,6 +193,7 @@ export function deserializeFoldState(value: unknown): ThreadFoldState | null {
     closedRequestIds,
     closedRequestAt,
     answeredApprovals,
+    answeredQuestions,
     seq,
     deleted,
     evicted
@@ -220,6 +226,9 @@ export function deserializeFoldState(value: unknown): ThreadFoldState | null {
   if (answeredApprovals !== undefined && !isListOf(answeredApprovals, isStringPair)) {
     return null;
   }
+  if (answeredQuestions !== undefined && !isListOf(answeredQuestions, isStringPair)) {
+    return null;
+  }
   return {
     head,
     items,
@@ -232,6 +241,7 @@ export function deserializeFoldState(value: unknown): ThreadFoldState | null {
     closedRequestIds: new Set(closedRequestIds),
     ...(closedRequestAt !== undefined ? { closedRequestAt: new Map(closedRequestAt) } : {}),
     ...(answeredApprovals !== undefined ? { answeredApprovals: new Map(answeredApprovals) } : {}),
+    ...(answeredQuestions !== undefined ? { answeredQuestions: new Map(answeredQuestions) } : {}),
     seq,
     deleted,
     ...(evicted !== undefined

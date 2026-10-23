@@ -215,6 +215,13 @@ export interface ThreadFoldState {
    * folds; `undefined` reads as empty.
    */
   answeredApprovals?: Map<string, string>;
+  /**
+   * The same for pending questions: a `user-input-response-requested` is in
+   * the log and the provider's `user-input.resolved` is still on its way.
+   * Cleared as {@link answeredApprovals} is, the failure being
+   * `provider.user-input.respond.failed`.
+   */
+  answeredQuestions?: Map<string, string>;
   /** Highest `seq` applied. */
   seq: number;
   /** True once `thread.deleted` has been applied. */
@@ -239,6 +246,7 @@ export function createEmptyThreadState(): ThreadFoldState {
     closedRequestIds: new Set(),
     closedRequestAt: new Map(),
     answeredApprovals: new Map(),
+    answeredQuestions: new Map(),
     seq: 0,
     deleted: false
   };
@@ -964,6 +972,8 @@ type Mutation = {
   goal?: ThreadGoal | null;
   /** {@link ThreadFoldState.answeredApprovals} after this event; `undefined` means unchanged. */
   answeredApprovals?: Map<string, string>;
+  /** {@link ThreadFoldState.answeredQuestions} after this event; `undefined` means unchanged. */
+  answeredQuestions?: Map<string, string>;
 };
 
 /**
@@ -1101,10 +1111,18 @@ function commit(
   // before goals keeps none until a goal row lands.
   const goal = mutation.goal !== undefined ? mutation.goal : state.goal;
 
-  const answeredApprovals = answeredApprovalsAfter(
+  const answeredApprovals = answeredAfter(
     mutation.answeredApprovals ?? state.answeredApprovals,
     event,
-    pending,
+    "provider.approval.respond.failed",
+    pending.approvals,
+    pending !== state.pending
+  );
+  const answeredQuestions = answeredAfter(
+    mutation.answeredQuestions ?? state.answeredQuestions,
+    event,
+    "provider.user-input.respond.failed",
+    pending.userInputs,
     pending !== state.pending
   );
 
@@ -1126,6 +1144,7 @@ function commit(
     closedRequestIds,
     ...(closedRequestAt !== undefined ? { closedRequestAt } : {}),
     ...(answeredApprovals !== undefined ? { answeredApprovals } : {}),
+    ...(answeredQuestions !== undefined ? { answeredQuestions } : {}),
     seq: event.seq,
     deleted: mutation.deleted ?? state.deleted,
     ...(evicted !== undefined ? { evicted } : {})
@@ -1154,17 +1173,29 @@ function reduceApprovalResponseRequested(
   return { answeredApprovals: new Map(state.answeredApprovals ?? []).set(requestId, event.occurredAt) };
 }
 
+/** An answer to a pending question, as {@link reduceApprovalResponseRequested} for an approval. */
+function reduceUserInputResponseRequested(
+  state: ThreadFoldState,
+  event: Extract<DomainEvent, { type: "thread.user-input-response-requested" }>
+): Mutation {
+  const requestId = event.payload.requestId;
+  if (!state.pending.userInputs.some((question) => question.requestId === requestId)) return {};
+  if (state.answeredQuestions?.has(requestId) === true) return {};
+  return { answeredQuestions: new Map(state.answeredQuestions ?? []).set(requestId, event.occurredAt) };
+}
+
 /**
- * The answered approvals after one step: a failed response forgets its
- * answer — the card stays open to answer again — and, when `pending` moved,
- * only answers to approvals still pending survive, and only for the request
- * they answered (one stamped after the answer reuses the id: a new request).
- * Same reference when nothing changed.
+ * The answered approvals (or questions) after one step: a failed response
+ * (`failureKind`) forgets its answer — the card stays open to answer again —
+ * and, when `pending` moved, only answers to requests still pending survive,
+ * and only for the request they answered (one stamped after the answer reuses
+ * the id: a new request). Same reference when nothing changed.
  */
-function answeredApprovalsAfter(
+function answeredAfter(
   answered: Map<string, string> | undefined,
   event: DomainEvent,
-  pending: PendingRequests,
+  failureKind: string,
+  open: readonly { requestId: string; createdAt: string }[],
   pendingMoved: boolean
 ): Map<string, string> | undefined {
   if (answered === undefined || answered.size === 0) return answered;
@@ -1173,7 +1204,7 @@ function answeredApprovalsAfter(
     const activity = event.payload.activity;
     const requestId = (activity.payload as { requestId?: unknown } | null)?.requestId;
     if (
-      activity.activityKind === "provider.approval.respond.failed" &&
+      activity.activityKind === failureKind &&
       typeof requestId === "string" &&
       next.has(requestId)
     ) {
@@ -1182,7 +1213,7 @@ function answeredApprovalsAfter(
     }
   }
   if (pendingMoved) {
-    const openSince = new Map(pending.approvals.map((approval) => [approval.requestId, approval.createdAt]));
+    const openSince = new Map(open.map((request) => [request.requestId, request.createdAt]));
     for (const [requestId, answeredAt] of [...next]) {
       const createdAt = openSince.get(requestId);
       if (createdAt !== undefined && createdAt <= answeredAt) continue;
@@ -1372,8 +1403,10 @@ function reduce(state: ThreadFoldState, event: DomainEvent): Mutation {
     case "thread.approval-response-requested":
       return reduceApprovalResponseRequested(state, event);
 
-    case "thread.turn-interrupt-requested":
     case "thread.user-input-response-requested":
+      return reduceUserInputResponseRequested(state, event);
+
+    case "thread.turn-interrupt-requested":
     case "thread.checkpoint-revert-requested":
       return {};
 
@@ -2084,6 +2117,12 @@ export function toThreadSnapshot(state: ThreadFoldState): ThreadSnapshotPayload 
     pending: state.pending,
     roster: state.roster,
     seq: state.seq,
-    goal: state.goal ?? null
+    goal: state.goal ?? null,
+    ...(state.answeredApprovals !== undefined && state.answeredApprovals.size > 0
+      ? { answeredApprovals: [...state.answeredApprovals] }
+      : {}),
+    ...(state.answeredQuestions !== undefined && state.answeredQuestions.size > 0
+      ? { answeredQuestions: [...state.answeredQuestions] }
+      : {})
   };
 }

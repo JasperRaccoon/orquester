@@ -108,7 +108,14 @@ import {
 
 import type { AccountHome, HistoryImportProgress, McpAppOperation, McpAppReference } from "@orquester/api/agent-chat";
 import { htmlRenderReferenceOfActivityPayload, mcpAppReferenceOfActivityPayload } from "@orquester/api/agent-chat";
-import { APPROVAL_ALREADY_ANSWERED_REASON, APPROVAL_ARRIVED_REASON, parseCausedBy, REDIRECT_COMPACT_REASON, usageLimitNoticeOf } from "@orquester/api/agent-chat";
+import {
+  APPROVAL_ALREADY_ANSWERED_REASON,
+  APPROVAL_ARRIVED_REASON,
+  parseCausedBy,
+  QUESTION_ALREADY_ANSWERED_REASON,
+  REDIRECT_COMPACT_REASON,
+  usageLimitNoticeOf
+} from "@orquester/api/agent-chat";
 import { IDLE_COMPACTION_SENT_BY, idleCompactionCandidateOf, type ThreadMessageSentBy } from "@orquester/api/agent-chat";
 import { delegatePreviewOf, parseInterruptCause, STOP_CASCADED_ACTIVITY_KIND, stopCascadedSummary } from "@orquester/api/agent-chat";
 import { runMcpAppRequest } from "../mcp-apps.ts";
@@ -3751,6 +3758,12 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
 
       case "answer": {
         const requestId = parseRequestId(body);
+        // One answer per question, as for an approval: a second one (another
+        // tab, the MCP) while the provider's resolution of the first is on its
+        // way would answer it twice. A retry of the SAME command is its receipt's.
+        if (runtime.state.answeredQuestions?.has(requestId) === true) {
+          throw commandRejected(QUESTION_ALREADY_ANSWERED_REASON);
+        }
         const answers = parseAnswers(body.answers);
         const attachmentsByQuestionId = parseAttachmentsByQuestionId(
           body.attachmentsByQuestionId

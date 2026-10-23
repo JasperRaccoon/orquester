@@ -1116,3 +1116,54 @@ test("an answer to an older request under a recycled id does not answer the new 
   assert.equal(state.pending.approvals.length, 1);
   assert.equal(state.answeredApprovals?.has("codex-T-1"), false);
 });
+
+test("an answer to a pending question is remembered until it resolves, fails, or the id is reused", () => {
+  reset();
+  const question = (requestId: string, createdAt?: string) =>
+    ev("thread.activity-appended", {
+      activity: activity(
+        "user-input.requested",
+        {
+          requestId,
+          dismissible: false,
+          questions: [{ id: "q", header: "Q", question: "Which?", options: [{ label: "a", description: "" }] }]
+        },
+        createdAt !== undefined ? { createdAt } : {}
+      )
+    });
+  const answer = (requestId: string, occurredAt?: string) =>
+    ev(
+      "thread.user-input-response-requested",
+      { requestId, answers: { q: "a" } },
+      occurredAt !== undefined ? { occurredAt } : {}
+    );
+  let state = fold([created(), question("q1"), question("q2"), answer("q1"), answer("nobody")]);
+  assert.deepEqual([...(state.answeredQuestions?.keys() ?? [])], ["q1"]);
+  assert.equal(state.pending.userInputs.length, 2);
+  assert.deepEqual(toThreadSnapshot(state).answeredQuestions?.map(([id]) => id), ["q1"], "clients are told");
+
+  state = applyDomainEvent(
+    state,
+    ev("thread.activity-appended", { activity: activity("user-input.resolved", { requestId: "q1", answers: { q: "a" } }) })
+  );
+  assert.equal(state.answeredQuestions?.size, 0);
+  assert.equal(toThreadSnapshot(state).answeredQuestions, undefined);
+
+  state = applyDomainEvent(state, answer("q2"));
+  state = applyDomainEvent(
+    state,
+    ev("thread.activity-appended", {
+      activity: activity("provider.user-input.respond.failed", { requestId: "q2", detail: "transport closed" })
+    })
+  );
+  assert.equal(state.answeredQuestions?.has("q2"), false, "a failed answer can be given again");
+
+  reset();
+  const recycled = fold([
+    created(),
+    question("q9", "2026-01-01T00:00:01.000Z"),
+    answer("q9", "2026-01-01T00:00:02.000Z"),
+    question("q9", "2026-01-01T00:00:03.000Z")
+  ]);
+  assert.equal(recycled.answeredQuestions?.has("q9"), false);
+});
