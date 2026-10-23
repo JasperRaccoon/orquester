@@ -23,7 +23,7 @@ import type { CallerPrincipal } from "@orquester/api/agent-chat";
 import type { KnowledgeLinkingPort, KnowledgeSettingsPort, KnowledgeVisibilityPort } from "./ports.ts";
 import type { KnowledgeSearch } from "./search/search.ts";
 import { entryInScope } from "./search/visibility.ts";
-import { KnowledgeError, type KnowledgeLogger } from "./store/errors.ts";
+import { KnowledgeError, type KnowledgeLogger, knowledgeFrameworkError } from "./store/errors.ts";
 import type { KnowledgeStore } from "./store/store.ts";
 
 /**
@@ -162,9 +162,18 @@ function parse<T extends z.ZodTypeAny>(schema: T, value: unknown, what: string):
  * concept or collection answers like an unknown one — except in the collections LIST, which names
  * every collection (with the caller's own totals) so a profile chat can choose where to save.
  *
- * Mutations publish `knowledge.changed` on the `knowledge` channel.
+ * The one exception: an entry edit that moves the entry out of the caller's view answers the
+ * edited entry (its collections and related entries still scoped), since the write landed.
+ *
+ * Mutations publish `knowledge.changed` on the `knowledge` channel. The routes register in their
+ * own encapsulated scope, whose error handler answers Fastify's refusals (bad JSON, a body over
+ * the limit, a media type with no parser) in the same shape without changing the rest of the app.
  */
 export function registerKnowledgeDataRoutes(app: FastifyInstance, deps: KnowledgeDataRoutesDeps): void {
+  app.register(async (scope) => registerDataRoutes(scope, deps));
+}
+
+function registerDataRoutes(app: FastifyInstance, deps: KnowledgeDataRoutesDeps): void {
   const logger = deps.logger ?? console;
 
   const fail = (reply: FastifyReply, error: unknown): FastifyReply => {
@@ -173,6 +182,8 @@ export function registerKnowledgeDataRoutes(app: FastifyInstance, deps: Knowledg
     const code: Code = "KNOWLEDGE_ERROR";
     return reply.code(500).send({ code, message: "The knowledge request failed." });
   };
+
+  app.setErrorHandler((error, _request, reply) => fail(reply, knowledgeFrameworkError(error) ?? error));
 
   const changed = (event: KnowledgeChangedEvent): void => {
     try {
@@ -242,8 +253,8 @@ export function registerKnowledgeDataRoutes(app: FastifyInstance, deps: Knowledg
     if (!meta || !entryInScope(meta, deps.search.scope(visibility))) throw new KnowledgeError("KNOWLEDGE_NOT_FOUND", "No such entry.");
   };
 
-  const entryDetail = async (id: string, visibility: KnowledgeVisibility): Promise<KnowledgeEntryDetail> => {
-    const detail = await deps.search.entryDetail(id, visibility);
+  const entryDetail = async (id: string, visibility: KnowledgeVisibility, options?: { evenIfHidden?: boolean }): Promise<KnowledgeEntryDetail> => {
+    const detail = await deps.search.entryDetail(id, visibility, options);
     if (!detail) throw new KnowledgeError("KNOWLEDGE_NOT_FOUND", "No such entry.");
     return detail;
   };
@@ -363,7 +374,9 @@ export function registerKnowledgeDataRoutes(app: FastifyInstance, deps: Knowledg
         await deps.search.indexEntries([id]);
         changed(after.collections.join() === before.collections.join() ? { entryIds: [id] } : { entryIds: [id], collections: true });
       }
-      return entryDetail(id, visibility);
+      // The edit landed even when it moved the entry out of the caller's view: answer it (only
+      // this entry; its collections and related entries stay scoped), not a 404.
+      return entryDetail(id, visibility, { evenIfHidden: true });
     })
   );
 

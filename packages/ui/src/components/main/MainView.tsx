@@ -1,5 +1,5 @@
 import React from "react";
-import { FolderTree, GitBranch, Globe, ListTodo, Monitor, PenTool, Workflow, X } from "lucide-react";
+import { FolderTree, GitBranch, Globe, ListTodo, Loader2, Monitor, PenTool, Waypoints, Workflow, X } from "lucide-react";
 import { cn } from "../../lib/cn";
 import { EmptyState } from "./EmptyState";
 import { ProjectOverview } from "./ProjectOverview";
@@ -35,6 +35,9 @@ import {
   type ProjectTab
 } from "../../store/app";
 
+// The Knowledge tab (and its graph library) loads with the first Knowledge tab, never with the app.
+const KnowledgeView = React.lazy(() => import("../knowledge/KnowledgeView"));
+
 /** Icon shown in a grid-cell header — mirrors the tab strip. */
 function cellIcon(tab: ProjectTab): React.ReactNode {
   const session = tabSession(tab);
@@ -48,6 +51,8 @@ function cellIcon(tab: ProjectTab): React.ReactNode {
     <Workflow size={13} />
   ) : tab.type === "whiteboard" ? (
     <PenTool size={13} />
+  ) : tab.type === "knowledge" ? (
+    <Waypoints size={13} />
   ) : tab.type === "browser" ? (
     <Globe size={13} />
   ) : tab.type === "desktop" ? (
@@ -405,6 +410,16 @@ export const MainView: React.FC = () => {
                   />
                 ) : tab.type === "whiteboard" ? (
                   <WhiteboardView path={tab.path} title={tab.title} active={show} />
+                ) : tab.type === "knowledge" ? (
+                  <React.Suspense
+                    fallback={
+                      <div className="flex h-full w-full items-center justify-center gap-2 text-sm text-neutral-500">
+                        <Loader2 size={16} className="motion-safe:animate-spin" /> Opening the knowledge…
+                      </div>
+                    }
+                  >
+                    <KnowledgeView focus={tab.focus} active={show} />
+                  </React.Suspense>
                 ) : tab.type === "workflow" ? (
                   <WorkflowEditorTab
                     workflowId={tab.workflowId}

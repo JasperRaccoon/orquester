@@ -67,6 +67,12 @@ test("sessionRecordSchema keeps a workflow owner and drops a malformed one, neve
     assert.equal(parsed.sessions[0].owner, undefined);
     assert.equal(parsed.sessions[0].chat?.threadId, "c1");
   }
+  // The Knowledge Graph indexer's worker chats: kept, extra keys stripped; a blank run id dropped.
+  const knowledge = parseSessionsConfig({ version: 1, sessions: [{ ...base, owner: { kind: "knowledge-indexer", runId: "kr1", stray: 1 } }] });
+  assert.deepEqual(knowledge.sessions[0].owner, { kind: "knowledge-indexer", runId: "kr1" });
+  const blank = parseSessionsConfig({ version: 1, sessions: [{ ...base, owner: { kind: "knowledge-indexer", runId: " " } }] });
+  assert.equal(blank.sessions.length, 1);
+  assert.equal(blank.sessions[0].owner, undefined);
 });
 
 test("assertInsideFsRoot allows in-root paths and rejects escapes", async (t) => {

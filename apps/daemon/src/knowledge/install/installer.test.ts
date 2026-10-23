@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
 import { join } from "node:path";
 import { type TestContext, test } from "node:test";
+import { promisify } from "node:util";
 import {
   type MykgRelease,
   KnowledgeInstallError,
@@ -131,7 +133,7 @@ test("the pinned release installs from the hashed lock into versions/<v>/ with t
   assert.deepEqual(runs[0]?.args, ["python", "install", "3.12", "--no-bin"]);
   assert.ok(runs[1]?.args.includes("--relocatable"));
   const pip = runs[2]?.args ?? [];
-  assert.deepEqual(pip.slice(pip.indexOf("--require-hashes")), ["--require-hashes", "-r", join(MYKG_LOCKS_DIR, "mykg-0.4.10.txt")]);
+  assert.deepEqual(pip.slice(pip.indexOf("--no-build")), ["--no-build", "--require-hashes", "-r", join(MYKG_LOCKS_DIR, "mykg-0.4.10.txt")]);
 
   // Nothing of the daemon's env but PATH and proxy settings; HOME and every uv dir inside the runtime dir.
   for (const call of runs) {
@@ -157,27 +159,62 @@ test("the pinned release installs from the hashed lock into versions/<v>/ with t
   assert.deepEqual(await list(join(h.runtimeDir, "versions")), [MYKG_PINNED_VERSION]);
 });
 
-test("a newer patch installs its wheel by sha256, constrained to the pinned lock's versions", async (t) => {
+test("a newer patch installs its wheel by sha256; every other package by the pinned lock's hashes", async (t) => {
   const h = await harness(t);
   let requirements = "";
   let constraints = "";
+  let pip: string[] = [];
   const run = h.host.deps.run;
   h.host.deps.run = async (command, args, options) => {
     if (args[0] === "pip") {
+      pip = [...args];
       requirements = await readFile(args[args.indexOf("-r") + 1] ?? "", "utf8");
       constraints = await readFile(args[args.indexOf("-c") + 1] ?? "", "utf8");
-      assert.ok(!args.includes("--require-hashes"));
     }
     return run(command, args, options);
   };
   const installed = await h.install({ version: "0.4.11", wheelSha256: NEWER_SHA });
   assert.equal(installed.version, "0.4.11");
   assert.equal(installed.integrity, `sha256:${NEWER_SHA}`);
+  // uv takes hashes from constraints; --require-hashes refuses any package without one (a
+  // dependency the patch added), --no-build any sdist build (its build deps carry no hash).
+  assert.ok(pip.includes("--require-hashes"), "every package is hash-checked");
+  assert.ok(pip.includes("--no-build"), "nothing is built from source");
   assert.equal(requirements, `mykg==0.4.11 --hash=sha256:${NEWER_SHA}\n`);
   assert.ok(!constraints.includes("mykg=="), "the pinned myKG is not a constraint");
-  assert.ok(!constraints.includes("--hash"), "constraints carry versions only");
-  assert.match(constraints, /^anthropic==0\.102\.0$/m);
+  assert.ok(!constraints.includes(MYKG_PINNED_WHEEL_SHA256), "nor its hashes");
+  const lock = await readFile(join(MYKG_LOCKS_DIR, MYKG_LOCKS[MYKG_PINNED_VERSION] ?? ""), "utf8");
+  const block = (text: string, name: string) => new RegExp(`^${name}==[^\\n]*(?:\\n[ \\t]+[^\\n]*)*`, "m").exec(text)?.[0];
+  for (const name of ["anthropic", "cryptography", "pywin32", "uv"]) {
+    const want = block(lock, name);
+    assert.ok(want?.includes("--hash=sha256:"), `${name} is hashed in the lock`);
+    assert.equal(block(constraints, name), want, `${name} keeps its version, marker and hashes`);
+  }
+  assert.deepEqual(
+    parseLockVersions(constraints),
+    parseLockVersions(lock).filter((line) => !line.startsWith("mykg==")),
+    "every other locked package is a constraint"
+  );
   assert.deepEqual(await list(join(h.runtimeDir, "versions")), ["0.4.11"]);
+});
+
+test("tar unpacks uv with the runtime's env too, not the daemon's", async (t) => {
+  const h = await harness(t);
+  // A `tar` first on the daemon's PATH that records its env, then runs the real one.
+  const bin = join(h.root, "bin");
+  const seen = join(h.root, "tar-env.txt");
+  const realTar = (await promisify(execFile)("sh", ["-c", "command -v tar"])).stdout.trim();
+  await mkdir(bin);
+  await writeFile(join(bin, "tar"), `#!/bin/sh\nenv > '${seen}'\nexec '${realTar}' "$@"\n`, { mode: 0o755 });
+  await installKnowledgeRuntime(h.runtimeDir, PINNED, h.host.deps, {
+    uv: h.uv.build,
+    env: { ...DAEMON_ENV, PATH: `${bin}:/usr/bin:/bin` },
+    signal: new AbortController().signal,
+    model: h.model.spec
+  });
+  const env = await readFile(seen, "utf8").catch(() => "");
+  assert.match(env, new RegExp(`^HOME=${knowledgeHomeDir(h.runtimeDir)}$`, "m"), "tar ran with the runtime's HOME");
+  assert.ok(!env.includes("hunter2") && !env.includes("sk-ant"), "tar saw a daemon secret");
 });
 
 test("uv must match both Orquester's pin and the release's published sha256", async (t) => {
@@ -308,7 +345,8 @@ test("the uv pins: one build per supported host, none elsewhere", () => {
   assert.equal(uvBuildFor("linux", "x64", "musl")?.target, "x86_64-unknown-linux-musl");
   assert.equal(uvBuildFor("linux", "arm64", "glibc")?.target, "aarch64-unknown-linux-gnu");
   assert.equal(uvBuildFor("linux", "arm64", "musl")?.target, "aarch64-unknown-linux-musl");
-  assert.equal(uvBuildFor("darwin", "x64", "glibc")?.target, "x86_64-apple-darwin");
+  // The pinned lock has no Intel-macOS wheel of cryptography 49 (and nothing is built from source).
+  assert.equal(uvBuildFor("darwin", "x64", "glibc"), null);
   assert.equal(uvBuildFor("darwin", "arm64", "glibc")?.target, "aarch64-apple-darwin");
   assert.equal(uvBuildFor("win32", "x64", "glibc"), null);
   assert.equal(uvBuildFor("linux", "riscv64", "glibc"), null);

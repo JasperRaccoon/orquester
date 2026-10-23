@@ -10,7 +10,11 @@ import type { HostLibc } from "../../plugins/ts-rust/installer.ts";
 
 export const UV_VERSION = "0.13.4";
 
-/** The standalone uv build of each supported host, and its archive's sha256 (as the release's `.sha256` publishes it). */
+/**
+ * The standalone uv build of each supported host, and its archive's sha256 (as the release's
+ * `.sha256` publishes it). Not Intel macOS: the pinned lock's cryptography 49.0.0 has no wheel
+ * for it, and the install builds nothing from source.
+ */
 export const UV_BUILDS: Readonly<Record<string, { target: string; sha256: string }>> = {
   "linux-x64-glibc": {
     target: "x86_64-unknown-linux-gnu",
@@ -27,10 +31,6 @@ export const UV_BUILDS: Readonly<Record<string, { target: string; sha256: string
   "linux-arm64-musl": {
     target: "aarch64-unknown-linux-musl",
     sha256: "253a17cadcb659ae77a0fe3b9a2f1c14297528d480c421899e61e64d64f24e8f"
-  },
-  "darwin-x64": {
-    target: "x86_64-apple-darwin",
-    sha256: "7be2dcd316122f4b3e5a0a7889f6248266c14425374e105ff7dc9779184603a6"
   },
   "darwin-arm64": {
     target: "aarch64-apple-darwin",

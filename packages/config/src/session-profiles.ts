@@ -155,12 +155,15 @@ export type SessionProfileItemRecord = z.infer<typeof sessionProfileItemRecordSc
  * applied where the settings are used. `hideBuiltinSkills` is normally an object of agent →
  * boolean; `claudeWorkflowTool` a boolean; `knowledgeCollections` (Knowledge Graph plugin) an
  * array of collection ids — absent means none ticked, and ids of deleted collections are kept.
+ * `claudeBuiltinTools` (daemon-internal, set only on managed profiles, never on the wire):
+ * `false` launches Claude with no built-in tools.
  */
 export const sessionProfileSettingsRecordSchema = z
   .object({
     hideBuiltinSkills: z.unknown().optional(),
     claudeWorkflowTool: z.unknown().optional(),
-    knowledgeCollections: z.unknown().optional()
+    knowledgeCollections: z.unknown().optional(),
+    claudeBuiltinTools: z.unknown().optional()
   })
   .passthrough();
 export type SessionProfileSettingsRecord = z.infer<typeof sessionProfileSettingsRecordSchema>;
@@ -177,6 +180,12 @@ const sessionProfileManifestShape = z.object({
   createdAt: z.string(),
   updatedAt: z.string(),
   settings: sessionProfileSettingsRecordSchema.default({}),
+  /**
+   * Set on a profile Orquester itself owns (e.g. `"knowledge-indexer"`): it is kept out of every
+   * user-facing list, refuses user edits and never takes part in the name-uniqueness check. One
+   * that does not read is dropped (the profile is then an ordinary one).
+   */
+  managed: z.string().min(1).max(64).optional().catch(undefined),
   items: z.array(z.unknown()).default([])
 });
 export const sessionProfileManifestSchema = sessionProfileManifestShape.passthrough();

@@ -30,6 +30,26 @@ export function isKnowledgeError(error: unknown): error is KnowledgeError {
   return error instanceof KnowledgeError;
 }
 
+/**
+ * A Fastify-level refusal (a body over the route's limit, a body that is not JSON, a media type
+ * with no parser) as the contract's {@link KnowledgeError}; null for anything else. Fastify's own
+ * message can quote the body, so it is never passed on.
+ */
+export function knowledgeFrameworkError(error: unknown): KnowledgeError | null {
+  const code = (error as { code?: unknown } | null)?.code;
+  const statusCode = (error as { statusCode?: unknown } | null)?.statusCode;
+  if (code === "FST_ERR_CTP_BODY_TOO_LARGE" || statusCode === 413) {
+    return new KnowledgeError("KNOWLEDGE_TOO_LARGE", "The request body is too large.");
+  }
+  if (code === "FST_ERR_CTP_INVALID_MEDIA_TYPE" || statusCode === 415) {
+    return new KnowledgeError("KNOWLEDGE_INVALID", "Send the request body as application/json.");
+  }
+  if (typeof statusCode === "number" && statusCode >= 400 && statusCode < 500) {
+    return new KnowledgeError("KNOWLEDGE_INVALID", "The request body is not valid JSON.");
+  }
+  return null;
+}
+
 export interface KnowledgeLogger {
   warn(message: string): void;
   error(message: string): void;

@@ -101,6 +101,7 @@ describe("loadClaudeProfileLaunch", () => {
     assert.equal(launch.instructions, "Be brief.");
     assert.deepEqual(launch.hooks.Stop, [{ hooks: [{ type: "command", command: "echo stop" }] }]);
     assert.equal(launch.disableWorkflows, false);
+    assert.equal(launch.disableBuiltinTools, undefined, "built-in tools stay on unless the section turns them off");
     // Runtime settings carried; item keys (hooks, enabledPlugins) and serverName denials dropped.
     assert.deepEqual(launch.carriedSettings, {
       model: "opus",

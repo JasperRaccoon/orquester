@@ -2,7 +2,7 @@
  * "Knowledge Graph" as a {@link PluginUpdater} of `PluginsService`: one
  * target (the myKG runtime), its versions in the record's own fields, latest =
  * the newest patch of the pinned myKG minor line on PyPI. Supported where uv
- * ships a standalone build (Linux x64/arm64 glibc and musl, macOS x64/arm64).
+ * ships a standalone build and the pinned lock has wheels (Linux x64/arm64 glibc and musl, macOS arm64).
  * A release that failed to install is not retried by the hourly check while a
  * working one is in place (each try is a large download); a manual check is.
  */
@@ -67,6 +67,8 @@ export function createKnowledgeGraphUpdater(options: KnowledgeGraphUpdaterOption
     // An install whose overlay is not the shipped one (an Orquester update changed the
     // prompts) counts as missing: the next check repairs it.
     hasFiles: async (version) => knowledgeRuntimeReady(runtimeDir, version, { overlayDigestNow: await currentDigest(), model }),
+    // With an older overlay it still runs (as KnowledgeRuntimeTracker serves it): a rollback target.
+    hasInstalled: (version) => knowledgeRuntimeReady(runtimeDir, version, { model }),
     resolve: (signal, pinned) => resolveMykgRelease(deps, signal, pinned),
     install: (release, signal) => {
       if (!uv) throw new KnowledgeInstallError("download", `uv has no build for ${platform}/${arch}`);

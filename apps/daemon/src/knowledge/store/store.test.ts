@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
+import { parse as parseYaml } from "yaml";
 import { KNOWLEDGE_ENTRY_MAX_BYTES, KNOWLEDGE_SAVE_MAX_ENTRIES } from "@orquester/api";
 import { knowledgeCollectionsPath, knowledgeEntriesDir, knowledgeMykgInputDir } from "@orquester/config";
 import type { KnowledgeEntryChange } from "../ports.ts";
@@ -404,4 +405,61 @@ test("a collections.json from a newer version is left in place and never written
   const names = await readdir(join(appdir, "daemon", "plugins", "knowledge-graph"));
   assert.ok(!names.some((n) => n.includes("corrupt")));
   assert.equal(store.listMeta().length, 0);
+});
+
+test("a collection colour this build does not know shows as a palette colour and stays on disk through rewrites", async (t) => {
+  const { appdir, open } = await setup(t);
+  await open();
+  const AT = "2026-10-23T09:00:00.000Z";
+  const record = { id: "kc_abcdefghij", name: "SEO", description: "", color: "chart-9", createdAt: AT, updatedAt: AT };
+  await writeFile(knowledgeCollectionsPath(appdir), JSON.stringify({ version: 1, collections: [record] }));
+  const { store } = await open();
+  assert.equal(store.getCollection(record.id)!.color, "chart-1");
+  await store.updateCollection(record.id, { name: "Search" });
+  await store.createCollection({ name: "Ads" });
+  const onDisk = JSON.parse(await readFile(knowledgeCollectionsPath(appdir), "utf8")) as { collections: { id: string; name: string; color: string }[] };
+  const kept = onDisk.collections.find((c) => c.id === record.id)!;
+  assert.equal(kept.name, "Search");
+  assert.equal(kept.color, "chart-9");
+  // Recolouring it is an ordinary change.
+  await store.updateCollection(record.id, { color: "chart-3" });
+  const recoloured = JSON.parse(await readFile(knowledgeCollectionsPath(appdir), "utf8")) as typeof onDisk;
+  assert.equal(recoloured.collections.find((c) => c.id === record.id)!.color, "chart-3");
+});
+
+test("savedFrom: unknown keys and an unknown `by` are read tolerantly and written back as found", async (t) => {
+  const { appdir, open, warnings } = await setup(t);
+  const first = await open();
+  await first.store.createCollection({ name: "SEO" });
+  const ads = await first.store.createCollection({ name: "Ads" });
+  const { results } = await first.store.save({
+    entries: [
+      { body: "an agent saved this one", collections: ["SEO"] },
+      { body: "a workflow saved this one", collections: ["SEO"] },
+      { body: "something else saved this one", collections: ["SEO"] }
+    ],
+    sessionId: "sess-1"
+  });
+  const [extraKey, newerBy, newerByNoSession] = results.map((r) => r.entryId) as [string, string, string];
+  const path = (id: string) => join(knowledgeEntriesDir(appdir), `${id}.md`);
+  const swap = async (id: string, savedFrom: string) => {
+    const text = await readFile(path(id), "utf8");
+    await writeFile(path(id), text.replace(/savedFrom:\n(?: {2}.*\n)+/, `savedFrom:\n${savedFrom}`));
+  };
+  await swap(extraKey, "  by: agent\n  sessionId: sess-1\n  via: mcp\n");
+  await swap(newerBy, "  by: workflow\n  sessionId: sess-1\n  runId: run-7\n");
+  await swap(newerByNoSession, "  by: schedule\n");
+
+  const { store } = await open();
+  assert.deepEqual(store.listMeta().map((m) => m.id).sort(), [extraKey, newerBy, newerByNoSession].sort());
+  assert.ok(!warnings.some((w) => w.includes("skipped")), warnings.join("\n"));
+  assert.deepEqual(store.getMeta(extraKey)!.savedFrom, { by: "agent", sessionId: "sess-1" });
+  assert.deepEqual(store.getMeta(newerBy)!.savedFrom, { by: "agent", sessionId: "sess-1" });
+  assert.deepEqual(store.getMeta(newerByNoSession)!.savedFrom, { by: "user" });
+
+  for (const id of [extraKey, newerBy, newerByNoSession]) await store.updateEntry(id, { collections: [ads.id] });
+  const savedFromOf = async (id: string) => (parseYaml((await readFile(path(id), "utf8")).split("---\n")[1]!) as { savedFrom: unknown }).savedFrom;
+  assert.deepEqual(await savedFromOf(extraKey), { by: "agent", sessionId: "sess-1", via: "mcp" });
+  assert.deepEqual(await savedFromOf(newerBy), { by: "workflow", sessionId: "sess-1", runId: "run-7" });
+  assert.deepEqual(await savedFromOf(newerByNoSession), { by: "schedule" });
 });

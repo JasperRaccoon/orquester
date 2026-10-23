@@ -158,6 +158,65 @@ describe("SessionProfileStore — profiles", () => {
   });
 });
 
+describe("SessionProfileStore — managed profiles", () => {
+  const SPEC = {
+    id: "orquester-test-managed",
+    managed: "test",
+    name: "Indexer",
+    description: "Orquester's own.",
+    settings: { hideBuiltinSkills: { claude: true }, claudeWorkflowTool: false, claudeBuiltinTools: false },
+    instructions: "Only use the two tools."
+  };
+
+  it("ensureManaged creates once, is idempotent, and re-aligns a drifted profile with one bump", async () => {
+    const { appdir, store } = await setup();
+    const first = await store.ensureManaged(SPEC);
+    assert.equal(first.changed, true);
+    assert.equal(first.profile.manifest.id, SPEC.id);
+    assert.equal(first.profile.manifest.managed, "test");
+    assert.equal(first.profile.manifest.revision, 1);
+    assert.equal(await readFile(profileLayout(sessionProfileDir(appdir, SPEC.id)).instructions, "utf8"), "Only use the two tools.\n");
+    const again = await store.ensureManaged(SPEC);
+    assert.equal(again.changed, false);
+    assert.equal(again.profile.manifest.revision, 1);
+    const moved = await store.ensureManaged({ ...SPEC, instructions: "New text." });
+    assert.equal(moved.changed, true);
+    assert.equal(moved.profile.manifest.revision, 2);
+    assert.equal((await store.readSource(SPEC.id)).instructions.trim(), "New text.");
+    assert.deepEqual((await store.read(SPEC.id)).manifest.settings, SPEC.settings, "the raw settings record, daemon-internal keys included");
+  });
+
+  it("refuses user edits, deletes and copies of a managed profile, and frees its name", async () => {
+    const { store, service } = await setup();
+    await store.ensureManaged(SPEC);
+    await rejects(store.update(SPEC.id, "1", { description: "x" }), "PROFILE_NOT_FOUND");
+    await rejects(store.writeInstructions(SPEC.id, "1", "x"), "PROFILE_NOT_FOUND");
+    await rejects(store.createItem(SPEC.id, "1", SKILL), "PROFILE_NOT_FOUND");
+    await rejects(store.delete(SPEC.id, "1"), "PROFILE_NOT_FOUND");
+    await rejects(store.duplicate(SPEC.id), "PROFILE_NOT_FOUND");
+    // The user may name a profile like it; the managed one is never listed nor shown.
+    const mine = await service.create({ name: "Indexer" });
+    assert.deepEqual((await service.list()).profiles.map((p) => p.id), [mine.id]);
+    await rejects(service.get(SPEC.id), "PROFILE_NOT_FOUND");
+    assert.equal((await store.list()).profiles.length, 2, "the store itself still sees both (preparation)");
+  });
+
+  it("the service announces a managed profile only when it changed", async () => {
+    const { service } = await setup();
+    const events: unknown[] = [];
+    service.events.on("changed", (payload) => events.push(payload));
+    assert.equal((await service.ensureManaged(SPEC)).changed, true);
+    assert.equal((await service.ensureManaged(SPEC)).changed, false);
+    assert.deepEqual(events, [{ profileId: SPEC.id, revision: "1" }]);
+  });
+
+  it("refuses to take over a profile with that id that is not the managed one", async () => {
+    const { store } = await setup();
+    await store.ensureManaged(SPEC);
+    await rejects(store.ensureManaged({ ...SPEC, managed: "other" }), "PROFILE_CONFLICT");
+  });
+});
+
 describe("SessionProfileStore — items", () => {
   it("stores MCP secret values only in secrets.json and masks them in every view", async () => {
     const { appdir, store, service } = await setup();

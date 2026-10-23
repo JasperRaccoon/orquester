@@ -52,7 +52,7 @@ import type { Broadcaster } from "../broadcaster.ts";
 import { SessionProfileError, sessionProfileErrors } from "./errors.ts";
 import type { SessionProfileImports, StoredImportResult } from "./imports.ts";
 import { itemUnsupportedReason, resolveForAgent, resolveSessionProfileSettings, wireScope, type ResolvedAgentProfile } from "./resolve.ts";
-import type { SessionProfileStore, StoredSessionProfile } from "./store.ts";
+import { isManaged, type ManagedProfileSpec, type SessionProfileStore, type StoredSessionProfile } from "./store.ts";
 
 /** Answers each agent's preparation state of a profile's current revision (the lifecycle's job). */
 export type SessionProfilePrepareStatusSource = (profile: {
@@ -93,16 +93,35 @@ export class SessionProfileService {
     return this.store.init();
   }
 
+  /** Every user profile; managed ones (`manifest.managed`) are never listed. */
   async list(): Promise<SessionProfileListResponse> {
     const { profiles, errors } = await this.store.list();
     return {
-      profiles: profiles.map((profile) => this.summary(profile)).sort((a, b) => a.name.localeCompare(b.name)),
+      profiles: profiles
+        .filter((profile) => !isManaged(profile.manifest))
+        .map((profile) => this.summary(profile))
+        .sort((a, b) => a.name.localeCompare(b.name)),
       errors
     };
   }
 
+  /** One user profile; a managed one answers 404 `PROFILE_NOT_FOUND` like a missing one. */
   async get(profileId: string): Promise<SessionProfileDetail> {
-    return this.detail(await this.store.read(profileId));
+    const profile = await this.store.read(profileId);
+    if (isManaged(profile.manifest)) throw sessionProfileErrors.notFound(profileId);
+    return this.detail(profile);
+  }
+
+  /**
+   * Creates or updates a managed profile (`SessionProfileStore.ensureManaged`) and, when it
+   * changed, announces it on {@link events} so the preparation lifecycle (re)prepares it.
+   * Answers the profile id and its revision.
+   */
+  async ensureManaged(spec: ManagedProfileSpec): Promise<{ profileId: string; revision: string; changed: boolean }> {
+    const { profile, changed } = await this.store.ensureManaged(spec);
+    const revision = String(profile.manifest.revision);
+    if (changed) this.events.emit("changed", { profileId: profile.manifest.id, revision });
+    return { profileId: profile.manifest.id, revision, changed };
   }
 
   async create(request: CreateSessionProfileRequest): Promise<SessionProfileDetail> {

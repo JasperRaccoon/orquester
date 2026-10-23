@@ -501,6 +501,8 @@ export class AgentChatSummaryService {
     if (approvalPushed && pushType === "needs-input") return;
     const summary = this.opts.chat.get(threadId);
     if (!summary) return;
+    // The Knowledge Graph indexer's worker chats are background machinery: never a push.
+    if (summary.owner?.kind === "knowledge-indexer") return;
     void this.opts.push.notifyStructural(summary, pushType);
   }
 
