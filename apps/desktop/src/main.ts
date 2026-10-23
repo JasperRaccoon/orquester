@@ -584,24 +584,19 @@ function openStreamOverSocket(event: IpcMainEvent, { streamId, path: streamPath 
     return;
   }
 
-  const req = http.request({ socketPath: daemonSocketPath, path: streamPath, method: "GET" }, (res) => {
-    res.setEncoding("utf8");
-    res.on("data", (chunk: string) => {
+  const req = http.request({ socketPath: daemonSocketPath, path: streamPath, method: "GET" });
+  // The embedded daemon restarting cuts the stream mid-body: reported at once, like the remote path.
+  pipeHttpStream(req, {
+    data: (chunk) => {
       if (!event.sender.isDestroyed()) {
         event.sender.send("orquester:stream:data", { streamId, chunk });
       }
-    });
-    res.on("end", () => {
+    },
+    end: (status) => {
       streams.delete(streamId);
       if (!event.sender.isDestroyed()) {
-        event.sender.send("orquester:stream:end", { streamId });
+        event.sender.send("orquester:stream:end", status === undefined ? { streamId } : { streamId, status });
       }
-    });
-  });
-  req.on("error", () => {
-    streams.delete(streamId);
-    if (!event.sender.isDestroyed()) {
-      event.sender.send("orquester:stream:end", { streamId });
     }
   });
   req.end();
