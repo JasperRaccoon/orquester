@@ -110,6 +110,7 @@ import {
   remapClaudeForkTurnBoundaries,
   type ClaudeHistoryMessage
 } from "./rollback.ts";
+import { claudeLifelineSpawner } from "./local-process.ts";
 import { dispatchableSkillNames, discoverClaudeSkills } from "./skills.ts";
 import { readWorkflowHistoryRun, workflowLaunchesIn } from "./workflow-history.ts";
 import { planClaudeSkillDispatch } from "./skill-dispatch.ts";
@@ -515,6 +516,8 @@ export class ClaudeSession {
             box !== undefined ? new BoxProjectFs(box.launch.connection) : undefined
           )
         : undefined;
+    // A local CLI runs through the host-death lifeline (`local-process.ts`); a box's has its own spawner.
+    const localSpawner = box === undefined ? claudeLifelineSpawner((data) => this.onStderr(data)) : undefined;
     const built = buildClaudeQueryOptions({
       ...(toolsLaunch !== undefined ? { sessionTools: toolsLaunch } : {}),
       ...(settingsNodeOptions !== undefined ? { settingsNodeOptions } : {}),
@@ -530,7 +533,9 @@ export class ClaudeSession {
             spawnClaudeCodeProcess: box.launch.claudeSpawner((data) => this.onStderr(data), box.envUnset),
             bridgedMcpServers: box.mcpServers
           }
-        : {}),
+        : localSpawner !== undefined
+          ? { spawnClaudeCodeProcess: localSpawner }
+          : {}),
       runtimeMode: this.options.runtimeMode,
       modelSelection: this.options.modelSelection,
       models: this.options.models,

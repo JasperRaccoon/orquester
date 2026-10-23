@@ -18,6 +18,8 @@
 import { spawn as nodeSpawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { accessSync, constants, existsSync } from "node:fs";
 
+import { lifelineLaunch, releaseLifeline } from "./lifeline.ts";
+
 /** SIGTERM, then SIGKILL after this long (§3.1 "a short grace"). */
 export const DEFAULT_KILL_GRACE_MS = 2_000;
 
@@ -37,6 +39,15 @@ export const PROVIDER_CHILD_NICENESS = 10;
  */
 const NICE_BIN =
   process.platform === "win32" ? null : (["/usr/bin/nice", "/bin/nice"].find((path) => existsSync(path)) ?? null);
+
+function isExecutable(command: string): boolean {
+  try {
+    accessSync(command, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * The command and args to spawn: the provider under {@link NICE_BIN}. A
@@ -115,10 +126,13 @@ export function spawnProviderChild(options: SpawnProviderChildOptions): Provider
   const grace = killGraceMs ?? DEFAULT_KILL_GRACE_MS;
 
   const launch = launchCommand(command, args);
-  const child = nodeSpawn(launch.command, launch.args, {
+  // The host-death lifeline (`lifeline.ts`) wraps an executable command only: one that cannot run
+  // is spawned bare, so its failure stays a `spawn-error` rather than the wrapper's exit 127.
+  const lifeline = isExecutable(command) ? lifelineLaunch(launch.command, launch.args, env) : null;
+  const child = nodeSpawn(lifeline?.command ?? launch.command, lifeline?.args ?? launch.args, {
     cwd,
     env,
-    stdio: ["pipe", "pipe", "pipe"],
+    stdio: lifeline !== null ? ["pipe", "pipe", "pipe", "pipe"] : ["pipe", "pipe", "pipe"],
     detached: process.platform !== "win32",
     // Never a shell: an arg that happens to contain a metacharacter must reach
     // the binary verbatim, and there is nothing here that needs a shell.
@@ -144,6 +158,8 @@ export function spawnProviderChild(options: SpawnProviderChildOptions): Provider
   child.once("error", (error: Error) => {
     finish({ kind: "spawn-error", code: null, signal: null, error });
   });
+  // Ended while the host lives: its watcher goes without signalling anything.
+  child.once("exit", () => releaseLifeline(child.stdio[3]));
   child.once("close", (code: number | null, signal: NodeJS.Signals | null) => {
     if (signal !== null) {
       finish({ kind: "signal", code: null, signal });
