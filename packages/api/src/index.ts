@@ -194,6 +194,12 @@ export interface ProjectSummary {
    */
   cloneUrl?: string;
   /**
+   * Only on the answer to a create-project request that cloned (`source: "clone"` /
+   * `"create"`): the transport the clone went over, and a notice when it is not the one it
+   * started on (the SSH key was refused, so it was cloned over HTTPS).
+   */
+  clone?: { transport: "ssh" | "https"; notice?: string };
+  /**
    * Set when the project runs in a box (Ephemeral AI VMs plugin, spec
    * 2026-10-19 §8). Absent = this host. For a box project the repo fields above
    * come from the project's record, since the host directory is only a stub.
