@@ -528,4 +528,6 @@ export type KnowledgeErrorCode =
   | "KNOWLEDGE_UNKNOWN_COLLECTION"
   | "KNOWLEDGE_TOO_LARGE"
   | "KNOWLEDGE_NOT_A_WORKER"
-  | "KNOWLEDGE_BUSY";
+  | "KNOWLEDGE_BUSY"
+  /** An unexpected failure (500). */
+  | "KNOWLEDGE_ERROR";
