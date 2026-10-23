@@ -2276,7 +2276,11 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (!api || !workspace) {
       return;
     }
-    await api.createProject(workspace, req);
+    const project = await api.createProject(workspace, req);
+    // A clone that fell back to HTTPS (the SSH key was refused) works, but the user should know.
+    if (project?.clone?.transport === "https" && typeof project.clone.notice === "string" && project.clone.notice) {
+      get().setNotice({ title: "Cloned over HTTPS", message: project.clone.notice });
+    }
     await get().loadProjects();
   },
 
