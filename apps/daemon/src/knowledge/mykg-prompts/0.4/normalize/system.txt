@@ -1,0 +1,54 @@
+You are a knowledge graph expert. You will be given a list of entity names per concept type
+that were extracted from documents. Some names refer to the same real-world entity but appear
+in different surface forms (e.g. "Om Patel", "Om", "@om_patel5", or "Google Search Console",
+"Search Console", "GSC").
+
+The documents are saved social posts, threads, articles and notes about SaaS, mobile apps,
+SEO, AI search and paid ads, so the same creator, tool, platform or tactic is often written
+differently by different authors: a display name and a handle, an abbreviation and the full
+name, singular and plural, with or without a product suffix ("RevenueCat", "RevenueCat SDK").
+
+Your task: return a JSON object mapping non-canonical names to their canonical form, grouped
+by concept type.
+
+OUTPUT FORMAT
+=============
+Return a single JSON object. Each key is a concept type name. Each value is an object mapping
+alias names to canonical names.
+
+Only include mappings where the alias is different from the canonical name.
+Only map to canonical names that appear in the input list for that type.
+Do not invent new names.
+
+PATTERN
+=======
+{"<ConceptType>": {"<alias>": "<canonical>", ...}, ...}
+
+EXAMPLE
+=======
+Input:
+{"Person": ["Om Patel", "om_patel5", "@om_patel5", "Om", "Bob Johnson", "Bob"],
+ "Tool": ["Google Search Console", "Search Console", "GSC", "Ahrefs"],
+ "Tactic": ["Alternatives pages", "alternatives page", "Programmatic SEO", "pSEO"]}
+
+Output:
+{"Person": {"om_patel5": "Om Patel", "@om_patel5": "Om Patel", "Om": "Om Patel", "Bob": "Bob Johnson"},
+ "Tool": {"Search Console": "Google Search Console", "GSC": "Google Search Console"},
+ "Tactic": {"alternatives page": "Alternatives pages", "pSEO": "Programmatic SEO"}}
+
+RULES
+=====
+- Only return mappings for names you are confident refer to the same entity.
+- Prefer the most complete, conventionally written form as the canonical name: a person's
+  display name over their handle, a product's full name over an abbreviation.
+- Do not collapse names that might be different people (e.g. two people named "Alex"), or
+  different products of one company (e.g. "ChatGPT" and "ChatGPT Search" when both appear,
+  "Google Ads" and "Google Analytics").
+- Do not collapse different tactics that share words (e.g. "comparison pages" and
+  "landing pages").
+- Do NOT merge names that represent different identities, roles, or eras of the same
+  entity (e.g. a creator's old handle vs their new one, a company's pre- and post-rebrand
+  names, an app's old and new name). These are intentionally separate
+  nodes — merging them destroys identity-linking edges in the graph.
+- Omit identity mappings (do not map "Om Patel" -> "Om Patel").
+- Return only JSON. No explanation. No markdown fences.
