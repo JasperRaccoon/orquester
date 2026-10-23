@@ -95,18 +95,35 @@ export function isCredentialName(name: string): boolean {
 const CREDENTIAL_VALUES: readonly RegExp[] = [
   /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g,
   /\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}|glpat-[A-Za-z0-9_-]{20,})/g,
-  /\bxox[abprse]-[A-Za-z0-9-]{10,}/g,
+  /\b(?:xox[abprse]-[A-Za-z0-9-]{10,}|xapp-\d-[A-Za-z0-9-]{10,})/g,
   /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g,
   /\bsk-(?:ant-|proj-)?[A-Za-z0-9_-]{20,}/g,
+  // Stripe secret and restricted keys.
+  /\b[sr]k_(?:live|test)_[A-Za-z0-9]{16,}/g,
+  /\bAIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])/g,
+  /\bnpm_[A-Za-z0-9]{36}\b/g,
+  /\bhf_[A-Za-z0-9]{30,}\b/g,
   /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g
 ];
-const BEARER = /\b(Bearer|Basic|Token)(\s+)[A-Za-z0-9._~+/=-]{16,}/g;
+/**
+ * A credential after its scheme word, the word kept: `Bearer` in any case (rarely followed by a
+ * 16-character run in prose), `Basic` / `Token` capitalized, or either in any case right after an
+ * `authorization:` header name.
+ */
+const AUTH_SCHEMES: readonly RegExp[] = [
+  /\b(bearer)(\s+)[A-Za-z0-9._~+/=-]{16,}/gi,
+  /\b(Basic|Token)(\s+)[A-Za-z0-9._~+/=-]{16,}/g,
+  /(\bauthorization\s*[:=]\s*(?:basic|token))(\s+)[A-Za-z0-9._~+/=-]{8,}/gi
+];
+/** The password of a URL's userinfo (`https://user:pass@host`); the user name is kept. */
+const URL_PASSWORD = /(\b[a-z][a-z0-9+.-]*:\/\/[^\s/?#@:]+:)[^\s/?#@]+@/gi;
 
-/** `text` with credential-shaped values (tokens, keys, `Bearer …`) replaced by `[redacted]`. */
+/** `text` with credential-shaped values (tokens, keys, `Bearer …`, URL passwords) replaced by `[redacted]`. */
 export function redactCredentialText(text: string): string {
   let out = text;
   for (const pattern of CREDENTIAL_VALUES) out = out.replace(pattern, REDACTED);
-  return out.replace(BEARER, `$1$2${REDACTED}`);
+  for (const pattern of AUTH_SCHEMES) out = out.replace(pattern, `$1$2${REDACTED}`);
+  return out.replace(URL_PASSWORD, `$1${REDACTED}@`);
 }
 
 /**
