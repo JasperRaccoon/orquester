@@ -184,7 +184,7 @@ function steps(kind: ConnectionDiagnosisKind, input: ConnectionDiagnosisInput): 
       return [
         "The server's certificate is untrusted, expired, or issued for another name.",
         "Behind Caddy, make sure the domain points at the server so it can renew the certificate.",
-        "Or connect through the Tailscale HTTPS address (Settings → Server → Remote access), whose certificate browsers trust."
+        "Or connect through an address with a certificate browsers already trust, such as the server's Tailscale ts.net name."
       ];
     case "timeout":
       return [

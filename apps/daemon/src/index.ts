@@ -102,7 +102,6 @@ import {
   ORQUESTER_SERVICE,
   type DaemonStoppingPayload
 } from "@orquester/api";
-import { registerTailscaleServeRoutes, TailscaleServe } from "./tailscale-serve.ts";
 import { isBinOnPath, RegistryService } from "./registry";
 import { BrowserError, BrowserManager } from "./browsers";
 import { DesktopAudioHub } from "./desktops/audio.ts";
@@ -1514,30 +1513,6 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     boxRegistry: boxes.registry,
     boxWiring: boxes
   };
-  // Remote access → Tailscale HTTPS: the saved choice lives in daemon.json (http.tailscaleServe).
-  services.tailscaleServe = new TailscaleServe({
-    http: () => config.transports.http,
-    saved: () => config.transports.http.tailscaleServe === true,
-    save: async (enabled) => {
-      const ok = await queueDaemonConfigWrite(async () => {
-        // Patch the one field into the file as it is now (as the protect-archived route does).
-        let persisted: DaemonConfig;
-        try {
-          persisted = parseDaemonConfig(JSON.parse(await readFile(resolved.configPath, "utf8")));
-          persisted.transports.http.tailscaleServe = enabled;
-          migrateHttpPassword(persisted);
-        } catch (error) {
-          console.error("Failed to read daemon config; refusing to overwrite it", error);
-          return false;
-        }
-        await writeJsonFile(resolved.configPath, persisted);
-        config.transports.http.tailscaleServe = enabled;
-        return true;
-      });
-      if (!ok) throw new Error("daemon.json is unreadable; refusing to overwrite it.");
-    },
-    log: (message) => console.log(message)
-  });
   // umcp:t3 begin
   // Orquester approval cards (memory only; a journal of open ids resolves a crash's leftovers as
   // cancelled) and `agent-tools.json` (the grants). A pending card is pending user input like a
@@ -1746,8 +1721,6 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     });
     await app.listen({ host: config.transports.http.host, port: config.transports.http.port });
     httpServer = app;
-    // The port may have changed since Tailscale HTTPS was turned on: re-point it (background, best effort).
-    void services.tailscaleServe?.reconcile();
     console.log(
       `http transport on ${config.transports.http.host}:${config.transports.http.port}${serveWeb ? " (+web)" : ""}`
     );
@@ -2007,8 +1980,6 @@ interface Services {
   delegateStops?: DelegateStopCascade;
   /** Restart the HTTP transport (set in main once the lifecycle exists). */
   reloadHttp?: () => Promise<void>;
-  /** Remote access → Tailscale HTTPS (`tailscale serve`). Optional: route tests build a partial `services`. */
-  tailscaleServe?: TailscaleServe;
   /**
    * The remote transport's login sessions and API tokens (`auth/sessions.ts`). Optional: route
    * tests build a partial `services` (each app then gets an empty in-memory store).
@@ -2242,8 +2213,6 @@ export function createServer(
   }));
 
   app.get("/api/config/daemon", async (): Promise<DaemonConfig> => sanitizeDaemonConfig(config));
-  // Remote access → Tailscale HTTPS. On both transports, behind the remote auth hook.
-  registerTailscaleServeRoutes(app, () => services.tailscaleServe);
   app.get("/api/config/client", async (): Promise<ClientConfig> => clientConfig);
 
   // Update daemon.json. Security boundary: only over the local unix socket —
@@ -2270,8 +2239,6 @@ export function createServer(
     if (httpPatch.username === "********") {
       delete httpPatch.username;
     }
-    // Tailscale HTTPS has its own route, which applies the change as it saves it.
-    delete (httpPatch as { tailscaleServe?: unknown }).tailscaleServe;
 
     // Merge + persist + apply inside the shared daemon.json queue: the
     // protect-archived route below does a read-modify-write of the same file,

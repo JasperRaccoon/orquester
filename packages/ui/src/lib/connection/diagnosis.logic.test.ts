@@ -89,7 +89,7 @@ describe("presentConnectionDiagnosis", () => {
   it("TLS points at the certificate and the Tailscale address", () => {
     const diagnosis = diagnose({ log: log({ lastFailure: failure("tls") }) });
     assert.ok(diagnosis?.steps.some((step) => step.includes("certificate")));
-    assert.ok(diagnosis?.steps.some((step) => step.includes("Tailscale HTTPS")));
+    assert.ok(diagnosis?.steps.some((step) => step.includes("Tailscale ts.net")));
   });
 
   it("an offline device beats whatever the last failure said", () => {

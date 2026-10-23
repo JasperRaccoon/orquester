@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
 import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { dailyLogFile, isValidName, parseAgentThreadHead, parseDailyLogFileName, parseSessionsConfig } from "./index.ts";
+import { dailyLogFile, isValidName, parseAgentThreadHead, parseDaemonConfig, parseDailyLogFileName, parseSessionsConfig } from "./index.ts";
 import { assertInsideFsRoot, FsSandboxError } from "./fs.ts";
 
 test("isValidName rejects traversal and empties", () => {
@@ -13,6 +13,18 @@ test("isValidName rejects traversal and empties", () => {
   assert.equal(isValidName("a\\b"), false);
   assert.equal(isValidName(""), false);
   assert.equal(isValidName(undefined), false);
+});
+
+test("a daemon.json written with the retired http.tailscaleServe flag still loads, the flag ignored", () => {
+  const config = parseDaemonConfig({
+    version: 1,
+    workspacesDir: "$userhome/workspaces",
+    logsDir: "$appdir/daemon/logs",
+    transports: { http: { enabled: true, host: "127.0.0.1", port: 7420, passwordHash: "hash", tailscaleServe: true } }
+  });
+  assert.equal(config.transports.http.enabled, true);
+  assert.equal(config.transports.http.port, 7420);
+  assert.equal("tailscaleServe" in config.transports.http, false);
 });
 
 test("sessionRecordSchema round-trips accountId so reattach keeps the account pin", () => {

@@ -6,7 +6,6 @@ import { Button, Input, Modal, PasswordVerify, Switch } from "../ui";
 import { useApi } from "../../context/orquester-context";
 import { useAppStore } from "../../store/app";
 import { Badge, FormField, Notice, SettingRow, SettingsPage, SettingsSection } from "./primitives";
-import { TailscaleServeSetting } from "./TailscaleServeSetting";
 import { AuthSessionsSettings } from "./AuthSessionsSettings";
 
 /** The editable slice of daemon.json, as the form holds it. */
@@ -184,8 +183,8 @@ export const ServerSettings: React.FC = () => {
           {!isLocal && (
             <Notice tone="info" title="Read-only on this connection">
               Server settings can only be changed from the local app (unix socket). Connected over HTTP they are
-              read-only — except “Tailscale HTTPS” and “Protect archived data”, which have their own endpoints and
-              can be changed from any signed-in client.
+              read-only — except “Protect archived data”, which has its own endpoint and can be changed from any
+              client.
             </Notice>
           )}
           {loadFailed && <Notice tone="danger">Could not load daemon config.</Notice>}
@@ -318,8 +317,6 @@ export const ServerSettings: React.FC = () => {
             </SettingRow>
           </>
         )}
-
-        {saved && <TailscaleServeSetting httpEnabled={saved.httpEnabled} />}
 
         {isLocal && transportDirty && (
           <div className="px-4 py-3">
