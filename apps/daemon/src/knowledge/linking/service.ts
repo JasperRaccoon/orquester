@@ -77,7 +77,15 @@ import type {
 } from "../ports.ts";
 import { InboxBroker, type InboxWatch } from "./inbox.ts";
 import { writeMykgConfig } from "./mykg-config.ts";
-import { commitMykgManifest, guardMykgManifest, isMykgSessionName, mykgSessionPaths, readFailedEntryIds, readMykgProgress } from "./mykg-files.ts";
+import {
+  commitMykgManifest,
+  guardMykgManifest,
+  isMykgSessionName,
+  mykgSessionPaths,
+  readFailedEntryIds,
+  readManifestEntryIds,
+  readMykgProgress
+} from "./mykg-files.ts";
 import { startMykgRun, stopStaleMykg, type MykgRun, type MykgRunResult, type SpawnMykg } from "./runner.ts";
 import { LinkingStateFile } from "./state.ts";
 import { WorkerPool, type WorkerCandidate, type WorkerPoolEvent, type WorkerSessionPort } from "./workers.ts";
@@ -716,8 +724,17 @@ export class KnowledgeLinkingService implements KnowledgeLinkingPort {
       }
       if (outcome === "ok") {
         const failed = new Set(await readFailedEntryIds(paths.intermediate));
-        const linked = existing.filter((id) => !failed.has(id));
-        const notLinked = existing.filter((id) => failed.has(id));
+        // An entry myKG's manifest does not list was never ingested (a resumed full run or rebuild
+        // skips ingest): it is not in the graph, so it waits for the next run instead.
+        const ingested = await readManifestEntryIds(paths.intermediate);
+        const missing = ingested ? existing.filter((id) => !ingested.has(id)) : [];
+        if (missing.length > 0) {
+          state.pendingEntryIds = [...new Set([...state.pendingEntryIds, ...missing])];
+          state.pendingSince ??= this.opts.clock.now().toISOString();
+        }
+        const inGraph = existing.filter((id) => !missing.includes(id));
+        const linked = inGraph.filter((id) => !failed.has(id));
+        const notLinked = inGraph.filter((id) => failed.has(id));
         await commitMykgManifest(paths).catch(() => undefined);
         if (linked.length > 0) await this.opts.store.setLinkState(linked, "linked");
         if (notLinked.length > 0) await this.opts.store.setLinkState(notLinked, "failed");

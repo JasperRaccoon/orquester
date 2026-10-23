@@ -445,6 +445,9 @@ describe("KnowledgeLinkingService — runs against a fake myKG and fake worker c
     await h.clock.advance(20_000);
     await h.until(ranOk(h, 1));
     assert.equal(h.store.linkStates.get(ID(1)), "linked");
+    // The retry resumed the failed run's session (no new ingest): entry 2 goes in the next update.
+    await h.clock.advance(20_000);
+    await h.until(ranOk(h, 2));
     assert.equal(h.store.linkStates.get(ID(2)), "linked");
     await h.service.stop();
   });
@@ -478,6 +481,35 @@ describe("KnowledgeLinkingService — runs against a fake myKG and fake worker c
     const shard = JSON.parse(await readFile(join(paths.intermediate, "raw_extractions_shards", `${ID(2)}.md.json`), "utf8")) as { sha: string };
     assert.equal(shard.sha, createHash("sha256").update("two, edited").digest("hex"));
     assert.equal(h.store.linkStates.get(ID(2)), "linked");
+    await h.service.stop();
+  });
+
+  it("an entry saved after a failed first run, whose session the retry resumes, is linked by an update, not claimed", async () => {
+    const h = await harness();
+    await h.service.start();
+    await mkdir(h.mykgDir, { recursive: true });
+    await writeFile(join(h.mykgDir, "fake-mykg.json"), JSON.stringify({ fail: "names did not normalize" }));
+    h.service.entriesChanged(await h.store.put(ID(1), "one"));
+    h.service.entriesChanged(await h.store.put(ID(2), "two"));
+    await h.clock.advance(20_000);
+    await h.until(() => lastRun(h)?.outcome === "failed");
+    await h.service.idle();
+    assert.ok((await readState(h)).resumeSession, "the session the failed full run made is resumed next");
+
+    await rm(join(h.mykgDir, "fake-mykg.json"));
+    h.service.entriesChanged(await h.store.put(ID(3), "three"));
+    await h.clock.advance(20_000);
+    await h.until(ranOk(h, 1));
+    assert.equal(lastRun(h)!.mode, "full");
+    // myKG resumed the session without a new ingest: entry 3 is not in it yet.
+    assert.notEqual(h.store.linkStates.get(ID(3)), "linked", "never marked linked while it is not in the graph");
+    assert.deepEqual((await readState(h)).pendingEntryIds, [ID(3)]);
+    await h.clock.advance(20_000);
+    await h.until(ranOk(h, 2));
+    assert.equal(lastRun(h)!.mode, "update");
+    assert.equal(h.store.linkStates.get(ID(3)), "linked");
+    const nodes = (await readFile(h.graph.loads.at(-1)! + "/nodes.jsonl", "utf8")).trim().split("\n");
+    assert.equal(nodes.length, 3);
     await h.service.stop();
   });
 
