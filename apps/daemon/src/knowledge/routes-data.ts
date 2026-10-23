@@ -150,7 +150,8 @@ function parse<T extends z.ZodTypeAny>(schema: T, value: unknown, what: string):
  * Who is asking: an in-chat agent's server-stamped principal names its session; otherwise the
  * request's `sessionId` (body for POST, query for GET); none → the user, who sees everything.
  * Visibility is resolved per request and applied inside search and traversal. A hidden entry,
- * concept or collection answers like an unknown one.
+ * concept or collection answers like an unknown one — except in the collections LIST, which names
+ * every collection (with the caller's own totals) so a profile chat can choose where to save.
  *
  * Mutations publish `knowledge.changed` on the `knowledge` channel.
  */
@@ -250,11 +251,11 @@ export function registerKnowledgeDataRoutes(app: FastifyInstance, deps: Knowledg
       const counts = entryCounts();
       const metas = store.listMeta();
       const known = scope.known;
+      // Every collection, whoever asks: a profile chat chooses where to save from this list and may
+      // save into collections it cannot see (spec goal 3, "Agent tools"). Names and counts are not
+      // the entries; the totals below are the caller's.
       return {
-        collections: store
-          .listCollections()
-          .filter((c) => scope.canSee === null || scope.canSee.has(c.id))
-          .map((c) => collectionView(c, counts, byCollection)),
+        collections: store.listCollections().map((c) => collectionView(c, counts, byCollection)),
         unfiledCount: visibility.kind === "all" ? metas.filter((m) => !m.collections.some((id) => known.has(id))).length : 0,
         totalEntries: metas.filter((m) => entryInScope(m, scope)).length
       };
