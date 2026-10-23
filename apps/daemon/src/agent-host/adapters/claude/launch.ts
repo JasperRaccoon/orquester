@@ -127,8 +127,12 @@ interface BuiltClaudeQueryOptions {
   profileFiles?: { settings: Record<string, unknown>; mcpConfig?: { mcpServers: Record<string, unknown> } };
 }
 
-/** Env of a launch with no built-in tools: every MCP tool loaded up front (no tool search). */
-export const CLAUDE_NO_BUILTIN_TOOLS_ENV: Readonly<Record<string, string>> = { ENABLE_TOOL_SEARCH: "false" };
+/**
+ * Env of a launch with no built-in tools (a managed profile that works through MCP tools only):
+ * every MCP tool loaded up front (no tool search to reach a deferred one), and tool results up to
+ * 60k tokens — such a chat's tool results ARE its work (the Knowledge indexer's tasks).
+ */
+export const CLAUDE_NO_BUILTIN_TOOLS_ENV: Readonly<Record<string, string>> = { ENABLE_TOOL_SEARCH: "false", MAX_MCP_OUTPUT_TOKENS: "60000" };
 
 export function buildClaudeQueryOptions(
   input: BuildClaudeQueryOptionsInput

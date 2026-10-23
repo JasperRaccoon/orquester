@@ -551,6 +551,7 @@ describe("claude launch — Agent Profile chats (spec 2026-10-18 §6.1)", () => 
     const off = buildWith(profileLaunch({ disableBuiltinTools: true }));
     assert.deepEqual(off.options.tools, []);
     assert.equal(off.options.env?.ENABLE_TOOL_SEARCH, "false");
+    assert.equal(off.options.env?.MAX_MCP_OUTPUT_TOKENS, "60000", "its tool results are its work");
     assert.deepEqual(off.options.allowedTools, ["mcp__orquester__send_message"], "the session tools stay pre-approved");
     const on = buildWith(profileLaunch());
     assert.equal("tools" in on.options, false);

@@ -195,6 +195,16 @@ export function knowledgeRuntimeDir(baseDir: string): string {
   return joinPath(knowledgeGraphPluginDir(baseDir), "runtime");
 }
 
+/** The empty directory the indexer's worker chats run in (no project files, no CLAUDE.md). */
+export function knowledgeWorkersDir(baseDir: string): string {
+  return joinPath(knowledgeGraphPluginDir(baseDir), "workers");
+}
+
+/** `HOME` of the myKG child, so it writes nothing into the user's real home. */
+export function knowledgeMykgHomeDir(baseDir: string): string {
+  return joinPath(knowledgeGraphPluginDir(baseDir), "mykg-home");
+}
+
 // appendNodeRequireOption lives in ./tooling.ts (re-exported below) beside the per-target env helpers.
 
 /** Ephemeral AI VMs: box records and plugin settings (`boxes.ts`). */
@@ -2667,6 +2677,7 @@ export * from "./agent-tools.ts";
 export * from "./session-profiles.ts";
 export * from "./repo-identities.ts";
 export * from "./secret-files.ts";
+export * from "./knowledge-linking.ts";
 export * from "./boxes.ts";
 export * from "./tooling.ts";
 // boxes:

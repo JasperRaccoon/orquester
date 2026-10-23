@@ -64,7 +64,8 @@ lifecycle) and are idempotent. It is never listed (`service.list`), `service.get
 user mutation, delete and duplicate answers `PROFILE_NOT_FOUND`, and its name never collides with
 a user's. Its settings record may carry the daemon-internal `claudeBuiltinTools: false` (no wire
 setting): the Claude preparer then writes `disableBuiltinTools: true` and the launch passes SDK
-`tools: []` with `ENABLE_TOOL_SEARCH=false` (no built-in tool; MCP tools loaded up front).
+`tools: []` with `ENABLE_TOOL_SEARCH=false` (no built-in tool; MCP tools loaded up front) and
+`MAX_MCP_OUTPUT_TOKENS=60000` (the chat's tool results are its work).
 
 ## Plugin cache (what the per-agent preparers consume)
 

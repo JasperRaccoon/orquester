@@ -1,0 +1,183 @@
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { after, describe, it } from "node:test";
+import { FakeClock } from "../../workflows/agent/testing/fake-clock.ts";
+import { InboxBroker } from "./inbox.ts";
+import { writeMykgConfig } from "./mykg-config.ts";
+import { mykgSessionPaths } from "./mykg-files.ts";
+import { mykgArgs, mykgEnv, startMykgRun, stopStaleMykg } from "./runner.ts";
+import { FAKE_RUNTIME as RUNTIME, defaultAnswer, fakeSpawn } from "./testing.ts";
+
+const roots: string[] = [];
+after(async () => {
+  await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })));
+});
+
+async function setup(entries: Record<string, string>): Promise<{ root: string; mykgDir: string; homeDir: string; inputDir: string }> {
+  const root = await mkdtemp(join(tmpdir(), "orq-runner-"));
+  roots.push(root);
+  const mykgDir = join(root, "mykg");
+  const inputDir = join(mykgDir, "input");
+  const homeDir = join(root, "home");
+  await mkdir(inputDir, { recursive: true });
+  await mkdir(homeDir, { recursive: true });
+  await writeMykgConfig(mykgDir, { concurrency: 2 });
+  for (const [id, body] of Object.entries(entries)) await writeFile(join(inputDir, `${id}.md`), body);
+  return { root, mykgDir, homeDir, inputDir };
+}
+
+/** Answers every task of a session's inbox until the run ends (a stand-in for the worker chats). */
+function answerAll(broker: InboxBroker): Promise<number> {
+  return (async () => {
+    let answered = 0;
+    let reply = await broker.next("worker");
+    while (reply.kind === "task") {
+      const submitted = await broker.submit("worker", reply.task.taskId, defaultAnswer(reply.task));
+      if (!submitted.accepted) throw new Error(submitted.error);
+      answered += 1;
+      reply = submitted.next;
+    }
+    return answered;
+  })();
+}
+
+describe("mykg argv and env", () => {
+  it("builds the four invocations", () => {
+    assert.deepEqual(mykgArgs({ inputDir: "/in", mode: "full", session: null }), ["extract-graph", "/in"]);
+    assert.deepEqual(mykgArgs({ inputDir: "/in", mode: "rebuild", session: "s2" }), ["extract-graph", "/in", "--session", "s2"]);
+    assert.deepEqual(mykgArgs({ inputDir: "/in", mode: "update", session: "s1" }), ["extract-graph", "/in", "--session", "s1", "--update"]);
+    assert.deepEqual(mykgArgs({ inputDir: "/in", mode: "grow-schema", session: "s1" }), [
+      "extract-graph",
+      "/in",
+      "--session",
+      "s1",
+      "--update",
+      "--append-with-grow-schema"
+    ]);
+    assert.throws(() => mykgArgs({ inputDir: "/in", mode: "update", session: null }));
+  });
+
+  it("is a minimal environment: HOME in the plugin, the venv first on PATH, nothing of the daemon's", () => {
+    const env = mykgEnv(RUNTIME, "/plugin/mykg-home");
+    assert.equal(env.HOME, "/plugin/mykg-home");
+    assert.equal(env.PATH!.split(":")[0], "/plugin/runtime/versions/0.4.10/venv/bin");
+    assert.equal(env.VIRTUAL_ENV, "/plugin/runtime/versions/0.4.10/venv");
+    for (const key of Object.keys(env)) assert.doesNotMatch(key, /API_KEY|_TOKEN$|ANTHROPIC|OPENAI|CLAUDE|CODEX|ACCOUNT|SECRET/);
+    assert.deepEqual(Object.keys(env).sort(), [
+      "HOME",
+      "LANG",
+      "LC_ALL",
+      "NO_COLOR",
+      "PATH",
+      "PYTHONDONTWRITEBYTECODE",
+      "PYTHONIOENCODING",
+      "PYTHONUNBUFFERED",
+      "TERM",
+      "TIKTOKEN_CACHE_DIR",
+      "TMPDIR",
+      "VIRTUAL_ENV",
+      "XDG_CACHE_HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME"
+    ]);
+  });
+});
+
+describe("MykgRun (against a fake myKG)", { timeout: 30_000 }, () => {
+  it("a first run creates and names its session, and its tasks are answered through the inbox", async () => {
+    const dirs = await setup({ ke_aaaaaaaaaaaa: "Author: A\nalpha", ke_bbbbbbbbbbbb: "Author: B\nbeta" });
+    const clock = new FakeClock();
+    const run = startMykgRun({ runtime: RUNTIME, ...dirs, mode: "full", session: null }, { clock, spawn: fakeSpawn });
+    const broker = new InboxBroker({ clock });
+    const sessions: string[] = [];
+    let answering: Promise<number> | null = null;
+    run.onSession((session) => {
+      sessions.push(session);
+      void broker.attach(mykgSessionPaths(dirs.mykgDir, session).intermediate);
+      answering = answerAll(broker);
+    });
+    const result = await run.done;
+    broker.finish("run-finished");
+    assert.equal(result.kind, "ok");
+    assert.equal(sessions.length, 1);
+    assert.equal(result.kind === "ok" && result.session, sessions[0]);
+    assert.equal(await answering, 3, "one Pass 1 task and one Pass 2 task per entry");
+    const nodes = (await readFile(mykgSessionPaths(dirs.mykgDir, sessions[0]!).nodes, "utf8")).trim().split("\n");
+    assert.equal(nodes.length, 2);
+    broker.dispose();
+    const log = (await readFile(join(dirs.mykgDir, "fake-mykg.log"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    assert.deepEqual(log[0].argv, ["extract-graph", dirs.inputDir]);
+    assert.equal(log[0].env.HOME, dirs.homeDir);
+    assert.equal(log[0].env.CLAUDE_CONFIG_DIR, undefined);
+    assert.equal(log[0].env.ANTHROPIC_API_KEY, undefined);
+  });
+
+  it("an update run reuses the session and only asks for the changed entry", async () => {
+    const dirs = await setup({ ke_aaaaaaaaaaaa: "alpha", ke_bbbbbbbbbbbb: "beta" });
+    const clock = new FakeClock();
+    const first = startMykgRun({ runtime: RUNTIME, ...dirs, mode: "full", session: null }, { clock, spawn: fakeSpawn });
+    const broker1 = new InboxBroker({ clock });
+    first.onSession((session) => void broker1.attach(mykgSessionPaths(dirs.mykgDir, session).intermediate).then(() => answerAll(broker1)));
+    const done = await first.done;
+    broker1.dispose();
+    assert.equal(done.kind, "ok");
+    const session = done.kind === "ok" ? done.session : "";
+    await writeFile(join(dirs.inputDir, "ke_bbbbbbbbbbbb.md"), "beta, edited");
+    const second = startMykgRun({ runtime: RUNTIME, ...dirs, mode: "update", session }, { clock, spawn: fakeSpawn });
+    const broker2 = new InboxBroker({ clock });
+    await broker2.attach(mykgSessionPaths(dirs.mykgDir, session).intermediate);
+    const answering = answerAll(broker2);
+    const result = await second.done;
+    broker2.finish("run-finished");
+    assert.deepEqual(result, { kind: "ok", session });
+    assert.equal(await answering, 1);
+    broker2.dispose();
+  });
+
+  it("a failed run reports the failed step and the stderr tail", async () => {
+    const dirs = await setup({ ke_aaaaaaaaaaaa: "alpha" });
+    await writeFile(join(dirs.mykgDir, "fake-mykg.json"), JSON.stringify({ fail: "names did not normalize" }));
+    const clock = new FakeClock();
+    const run = startMykgRun({ runtime: RUNTIME, ...dirs, mode: "full", session: null }, { clock, spawn: fakeSpawn });
+    const broker = new InboxBroker({ clock });
+    run.onSession((session) => void broker.attach(mykgSessionPaths(dirs.mykgDir, session).intermediate).then(() => answerAll(broker)));
+    const result = await run.done;
+    broker.dispose();
+    assert.equal(result.kind, "failed");
+    if (result.kind !== "failed") return;
+    assert.match(result.error, /^myKG exited with code 1\./);
+    assert.match(result.error, /normalize_names: names did not normalize/);
+    assert.match(result.error, /PipelineHaltError/);
+  });
+
+  it("an unknown session fails with myKG's message", async () => {
+    const dirs = await setup({ ke_aaaaaaaaaaaa: "alpha" });
+    const run = startMykgRun({ runtime: RUNTIME, ...dirs, mode: "update", session: "2026-01-01T00-00-00" }, { clock: new FakeClock(), spawn: fakeSpawn });
+    const result = await run.done;
+    assert.equal(result.kind, "failed");
+    assert.match(result.kind === "failed" ? result.error : "", /Session '2026-01-01T00-00-00' not found/);
+  });
+
+  it("cancel stops the child and reports cancelled", async () => {
+    const dirs = await setup({ ke_aaaaaaaaaaaa: "alpha" });
+    const run = startMykgRun({ runtime: RUNTIME, ...dirs, mode: "full", session: null }, { clock: new FakeClock(), spawn: fakeSpawn });
+    run.onSession(() => run.cancel());
+    const result = await run.done;
+    assert.equal(result.kind, "cancelled");
+  });
+});
+
+describe("stopStaleMykg", () => {
+  it("only signals a pid whose command line is a myKG extract", async () => {
+    assert.equal(await stopStaleMykg(null), false);
+    assert.equal(await stopStaleMykg(1234, async () => "/usr/bin/python3 -m http.server"), false);
+    assert.equal(await stopStaleMykg(1234, async () => null), false);
+    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+    const exited = new Promise((resolve) => child.on("exit", resolve));
+    assert.equal(await stopStaleMykg(child.pid!, async () => "/venv/bin/python /venv/bin/mykg extract-graph /in --session s --update"), true);
+    assert.equal(await exited, null);
+  });
+});
