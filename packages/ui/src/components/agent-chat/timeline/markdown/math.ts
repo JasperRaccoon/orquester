@@ -170,24 +170,70 @@ export function guardSingleDollarMath(construct: ConstructLike): ConstructLike {
 }
 
 /**
- * Whether the block opening at `offset` (a `$$` run or `\[`) has its closing
+ * Whether a block opening at an offset (a `$$` run or `\[`) has its closing
  * line further on in `source`: for `$$`, a line of at least as many dollars;
- * for `\[`, a line ending in `\]`. Container markers (`>`) and indentation
+ * for `\[`, a line that is `\]`. Container markers (`>`) and indentation
  * before a closer are skipped loosely; the tokenizer is the judge of the rest.
+ *
+ * The closing lines are indexed once per document, on the first question,
+ * and every opener is then a binary search: a message of thousands of `$$`
+ * or `\[` lines must not rescan the rest of itself per line.
  */
+export function createClosingLineIndex(source: string): (offset: number) => boolean {
+  let index: { starts: number[]; dollars: number[]; brackets: number[] } | null = null;
+  const build = (): NonNullable<typeof index> => {
+    // Per closing line, in order: where it starts, the longest `$$` run
+    // closing at or after it, and whether a `\]` line is at or after it.
+    const starts: number[] = [];
+    const runs: number[] = [];
+    const isBracket: boolean[] = [];
+    const line = /[^\r\n]*/g;
+    for (let at = 0; at <= source.length; ) {
+      line.lastIndex = at;
+      const text = line.exec(source)?.[0] ?? "";
+      const closer = /^[ \t>]*(?:(\$+)|\\\])[ \t]*$/.exec(text);
+      if (closer) {
+        starts.push(at);
+        runs.push(closer[1]?.length ?? 0);
+        isBracket.push(closer[1] === undefined);
+      }
+      at += text.length;
+      if (at >= source.length) break;
+      at += source.startsWith("\r\n", at) ? 2 : 1;
+    }
+    const dollars = runs.slice();
+    const brackets: number[] = isBracket.map((value) => (value ? 1 : 0));
+    for (let i = starts.length - 2; i >= 0; i -= 1) {
+      dollars[i] = Math.max(dollars[i]!, dollars[i + 1]!);
+      brackets[i] = Math.max(brackets[i]!, brackets[i + 1]!);
+    }
+    return { starts, dollars, brackets };
+  };
+  return (offset) => {
+    const lineEnd = /\r\n|\r|\n/g;
+    lineEnd.lastIndex = offset;
+    if (lineEnd.exec(source) === null) return false;
+    const after = lineEnd.lastIndex;
+    index ??= build();
+    // The first closing line starting on a later line than the opener.
+    let low = 0;
+    let high = index.starts.length;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (index.starts[middle]! < after) low = middle + 1;
+      else high = middle;
+    }
+    if (low >= index.starts.length) return false;
+    if (source.startsWith("\\[", offset)) return index.brackets[low] === 1;
+    let size = 0;
+    while (source.charCodeAt(offset + size) === DOLLAR) size += 1;
+    return index.dollars[low]! >= size;
+  };
+}
+
+/** {@link createClosingLineIndex} for one question. */
 export function hasClosingLine(source: string, offset: number): boolean {
-  const lineEnd = /\r\n|\r|\n/g;
-  lineEnd.lastIndex = offset;
-  if (lineEnd.exec(source) === null) return false;
-  let size = 0;
-  while (source.charCodeAt(offset + size) === DOLLAR) size += 1;
-  // Searched from the end of the opening line, so the nearest closer ends the
-  // scan: it never splits the rest of a long message per attempt.
-  const closer = source.startsWith("\\[", offset)
-    ? /\\\][ \t]*(?=\r|\n|$)/g
-    : new RegExp("(?:\\r|\\n)[ \\t>]*\\${" + size + ",}[ \\t]*(?=\\r|\\n|$)", "g");
-  closer.lastIndex = lineEnd.lastIndex - (source.startsWith("\\[", offset) ? 0 : 1);
-  return closer.test(source);
+  return createClosingLineIndex(source)(offset);
 }
 
 /**
@@ -345,15 +391,14 @@ export function remarkChatMath(this: MathProcessorLike): (tree: MdNode, file: { 
   // The text being parsed, for the block lookahead. Every parse on this
   // processor passes through here, including the incremental parser's suffix
   // parses, whose offsets are then relative to the suffix as well.
-  let document = "";
+  let closedAhead = createClosingLineIndex("");
   const parse = this.parser;
   if (parse) {
     this.parser = (text, file) => {
-      document = text;
+      closedAhead = createClosingLineIndex(text);
       return parse(text, file);
     };
   }
-  const closedAhead = (offset: number): boolean => hasClosingLine(document, offset);
   let resolveMathText: unknown;
   for (const extension of (data.micromarkExtensions ?? []).slice(before)) {
     const text = single(extension.text?.[DOLLAR]);
@@ -362,13 +407,13 @@ export function remarkChatMath(this: MathProcessorLike): (tree: MdNode, file: { 
       extension.text[DOLLAR] = guardSingleDollarMath(text);
     }
     const flow = single(extension.flow?.[DOLLAR]);
-    if (extension.flow && flow) extension.flow[DOLLAR] = guardClosedMathBlock(flow, closedAhead);
+    if (extension.flow && flow) extension.flow[DOLLAR] = guardClosedMathBlock(flow, (offset) => closedAhead(offset));
   }
   // The library's resolver folds the spaces and line endings inside a
   // formula into its data; `\(…\)` emits the same tokens, so it shares it.
   (data.micromarkExtensions ??= []).push({
     text: { [BACKSLASH]: { ...mathTexText, resolve: resolveMathText } },
-    flow: { [BACKSLASH]: guardClosedMathBlock(mathTexFlow as unknown as ConstructLike, closedAhead) }
+    flow: { [BACKSLASH]: guardClosedMathBlock(mathTexFlow as unknown as ConstructLike, (offset) => closedAhead(offset)) }
   });
   return (tree, file) => {
     settleDisplayMath(tree, typeof file.value === "string" ? file.value : String(file.value));

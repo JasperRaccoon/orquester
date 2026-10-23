@@ -14,8 +14,13 @@
  *    - for `\[…\]` holding only digits, commas and spaces, so citations such
  *      as `\[1\]` and `\[2, 3\]` stay `[1]` and `[2, 3]`.
  *  - {@link mathTexFlow}, a block: `\[` alone on its line through a line that
- *    ends in `\]`. Only a **closed** block is one: an unclosed `\[` (a block
- *    still streaming) declines, and its lines stay the paragraph they are.
+ *    is `\]` alone (indented up to three spaces, like a code fence's closer).
+ *    T3 also closes on a `\]` at the end of a line of content, which lets a
+ *    `\]` in prose much further on swallow the lists between into one
+ *    formula; `\[ x \]` on one line, or `x \]` ending a line, is inline math
+ *    in its paragraph instead. Only a **closed** block is one: an unclosed
+ *    `\[` (a block still streaming) declines, and its lines stay the
+ *    paragraph they are.
  *
  * Both emit the token names `micromark-extension-math` emits for `$`, so
  * `mdast-util-math` turns them into `inlineMath` and `math` nodes unchanged.
@@ -117,7 +122,31 @@ function factorySpace(effects: EffectsLike, ok: State, type: string, max?: numbe
 // Inline: \(…\) and \[…\]
 // ---------------------------------------------------------------------------
 
-function tokenizeMathTexText(effects: EffectsLike, ok: State, nok: State): State {
+/**
+ * The last opener of each kind (keyed by its closer) whose scan failed, per
+ * parse: from the opener to where the scan gave up. An unclosed `\(` scans to
+ * the end of its paragraph, so without this every later `\(` in the same
+ * paragraph would scan it again, quadratic in the paragraph's length (a
+ * streamed message is re-parsed on every token). A later opener of the same
+ * kind inside that span sees a suffix of the same text with no closer in it,
+ * so it fails the same way and is declined without a scan. Keyed on the
+ * parser, so each parse starts with none.
+ */
+const failedScans = new WeakMap<object, Map<number, { from: number; to: number }>>();
+
+function tokenizeMathTexText(
+  this: TokenizeContextLike,
+  effects: EffectsLike,
+  ok: State,
+  nok: State
+): State {
+  const self = this;
+  let scans = failedScans.get(self.parser);
+  if (scans === undefined) {
+    scans = new Map();
+    failedScans.set(self.parser, scans);
+  }
+  const from = self.now().offset;
   let token: TokenLike;
   let closeCode: number;
   /** Anything but spaces between the delimiters. */
@@ -132,16 +161,24 @@ function tokenizeMathTexText(effects: EffectsLike, ok: State, nok: State): State
     return sequenceOpen;
   };
 
+  /** Declines the opener, remembering how far its scan got (see {@link failedScans}). */
+  const fail: State = (code) => {
+    scans.set(closeCode, { from, to: self.now().offset });
+    return nok(code);
+  };
+
   const sequenceOpen: State = (code) => {
     if (code !== LEFT_PARENTHESIS && code !== LEFT_SQUARE_BRACKET) return nok(code);
     closeCode = code === LEFT_PARENTHESIS ? RIGHT_PARENTHESIS : RIGHT_SQUARE_BRACKET;
+    const failed = scans.get(closeCode);
+    if (failed !== undefined && failed.from < from && from < failed.to) return nok(code);
     effects.consume(code);
     effects.exit("mathTextSequence");
     return between;
   };
 
   const between: State = (code) => {
-    if (code === null || code === GRAVE_ACCENT) return nok(code);
+    if (code === null || code === GRAVE_ACCENT) return fail(code);
     if (code === BACKSLASH) {
       token = effects.enter("mathTextSequence");
       effects.consume(code);
@@ -165,7 +202,7 @@ function tokenizeMathTexText(effects: EffectsLike, ok: State, nok: State): State
   };
 
   const data: State = (code) => {
-    if (code === GRAVE_ACCENT) return nok(code);
+    if (code === GRAVE_ACCENT) return fail(code);
     if (code === null || code === SPACE || code === BACKSLASH || markdownLineEnding(code)) {
       effects.exit("mathTextData");
       return between(code);
@@ -178,7 +215,7 @@ function tokenizeMathTexText(effects: EffectsLike, ok: State, nok: State): State
 
   const sequenceClose: State = (code) => {
     if (code === closeCode) {
-      if (!content || (closeCode === RIGHT_SQUARE_BRACKET && !substantive)) return nok(code);
+      if (!content || (closeCode === RIGHT_SQUARE_BRACKET && !substantive)) return fail(code);
       effects.consume(code);
       effects.exit("mathTextSequence");
       effects.exit("mathText");
@@ -206,7 +243,7 @@ function tokenizeMathTexText(effects: EffectsLike, ok: State, nok: State): State
 export const mathTexText: TexConstruct = {
   name: "mathTexText",
   tokenize(effects, ok, nok) {
-    return tokenizeMathTexText(effects, ok, nok);
+    return tokenizeMathTexText.call(this, effects, ok, nok);
   },
   // A backslash right after a backslash is the second half of an escape.
   previous(code) {
@@ -233,19 +270,6 @@ const nonLazyContinuation: TexConstruct = {
         return lineStart;
       }
       return lineStart(code);
-    };
-  }
-};
-
-/** A backslash in the content that is not the start of the closing `\]`. */
-const nonClosingBackslash: TexConstruct = {
-  name: "mathTexNonClosingBackslash",
-  partial: true,
-  tokenize(effects, ok, nok) {
-    return (code) => {
-      effects.enter("mathFlowValue");
-      effects.consume(code);
-      return (next) => (next === RIGHT_SQUARE_BRACKET ? nok(next) : ok(next));
     };
   }
 };
@@ -308,22 +332,13 @@ function tokenizeMathTexFlow(
   };
 
   const contentChunk: State = (code) => {
-    if (code === null || code === BACKSLASH || markdownLineEnding(code)) {
+    if (code === null || markdownLineEnding(code)) {
       effects.exit("mathFlowValue");
       return beforeContentChunk(code);
     }
     effects.consume(code);
     return contentChunk;
   };
-
-  const continueContentChunk: State = (code) => {
-    effects.enter("mathFlowValue");
-    effects.consume(code);
-    return contentChunk;
-  };
-
-  const beforeContentChunkContinuation: State = (code) =>
-    effects.attempt(closingFence, after, continueContentChunk)(code);
 
   const beforeNonLazyContinuation: State = (code) => {
     if (code === null) return after(code);
@@ -332,9 +347,6 @@ function tokenizeMathTexFlow(
 
   function beforeContentChunk(code: Code): State | undefined {
     if (code === null) return after(code);
-    if (code === BACKSLASH) {
-      return effects.attempt(nonClosingBackslash, contentChunk, beforeContentChunkContinuation)(code);
-    }
     if (markdownLineEnding(code)) {
       return effects.attempt(nonLazyContinuation, beforeNonLazyContinuation, after)(code);
     }

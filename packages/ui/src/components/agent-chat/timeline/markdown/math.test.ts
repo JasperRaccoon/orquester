@@ -75,7 +75,9 @@ describe("delimiters", () => {
     ["Where\n\\[\n\\begin{aligned} a &= b \\\\ c &= d \\end{aligned}\n\\]\nholds.", [["display", "\\begin{aligned} a &= b \\\\ c &= d \\end{aligned}"]]],
     ["\\[\nx\n- y\n# z\n\\]\nafter", [["display", "x\n- y\n# z"]]],
     ["\\[\na\n=\nb\n\\]", [["display", "a\n=\nb"]]],
-    ["\\[\nx \\]", [["display", "x "]]],
+    // A `\]` after content is not a block's closer: this is inline math alone in its paragraph.
+    ["\\[\nx \\]", [["display", "x"]]],
+    ["\\[\nx\n   \\]", [["display", "x"]]],
     ["> $$\n> x\n> $$", [["display", "x"]]],
     ["> \\[\n> x\n> \\]", [["display", "x"]]],
     ["- intro\n\n  $$\n  x^2\n  $$", [["display", "x^2"]]],
@@ -229,6 +231,12 @@ describe("structure around an unclosed block (streaming)", () => {
     }
   });
 
+  it("does not let a `\\]` ending a later line of prose close a block", () => {
+    const { html, formulas: found } = parse("\\[\na+b\n\n- item one\n- item see foo\\]");
+    assert.deepEqual(found, []);
+    assert.equal(html.match(/<li>/g)?.length, 2, html);
+  });
+
   it("parses every prefix of a streamed message without throwing", () => {
     const message = "Energy \\(E = mc^2\\) and $$\\sum_i x_i$$ done.\n\n\\[\n\\int_0^1 x\\,dx\n\\]\n\n```math\na^2\n```\n";
     for (let end = 0; end <= message.length; end += 1) {
@@ -250,7 +258,11 @@ describe("structure around an unclosed block (streaming)", () => {
     assert.equal(hasClosingLine("$$", 0), false);
     assert.equal(hasClosingLine("> $$\n> x\n> $$", 2), true);
     assert.equal(hasClosingLine("\\[\nx\n\\]", 0), true);
-    assert.equal(hasClosingLine("\\[\nx \\]", 0), true);
+    assert.equal(hasClosingLine("\\[\nx \\]", 0), false, "a block's `\\]` starts its line");
+    assert.equal(hasClosingLine("\\[\nx\n  \\]  ", 0), true);
+    assert.equal(hasClosingLine("$$\nx\n\\]\n$", 0), false);
+    assert.equal(hasClosingLine("$$$\nx\n$$\ny\n$$$$", 0), true, "a longer run further on closes");
+    assert.equal(hasClosingLine("$$\n$$\nx", 3), false, "only lines after the opener's count");
     assert.equal(hasClosingLine("\\[\nx\n\\] trailing", 0), false);
     assert.equal(hasClosingLine("\\[\r\nx\r\n\\]", 0), true);
   });
@@ -261,6 +273,43 @@ describe("structure around an unclosed block (streaming)", () => {
     parse(`${prefix}$a$ and \\(b`, [plugin]);
     const second = parse(`${prefix}$a$ and \\(b\\) and\n\\[\nc\n\\]\n`, [plugin]);
     assert.deepEqual(second.formulas, [["inline", "a"], ["inline", "b"], ["display", "c"]]);
+  });
+});
+
+describe("parse time stays linear in unclosed openers", () => {
+  // Each unclosed opener used to rescan the rest of its paragraph: 5,000 of
+  // them took tens of seconds, and a streamed message re-parses per token.
+  // The bound is loose on purpose (the machine running the tests is shared);
+  // the quadratic parse misses it by an order of magnitude.
+  const BOUND_MS = 5000;
+  const timed = (source: string): number => {
+    const start = performance.now();
+    parse(source);
+    return performance.now() - start;
+  };
+
+  for (const [label, source] of [
+    ["5,000 unclosed \\( in one paragraph", "x \\( y ".repeat(5000)],
+    ["5,000 unclosed \\[ in one paragraph", "x \\[ y ".repeat(5000)],
+    ["alternating unclosed \\( and \\[", "x \\( y \\[ z ".repeat(3000)],
+    ["5,000 openers before one backtick", "\\( a ".repeat(5000) + "`"],
+    ["5,000 citations before one closer", "\\[ 1 ".repeat(5000) + "\\]"],
+    ["5,000 lines of \\[", "\\[\n".repeat(5000)],
+    ["5,000 lines of $$", "$$\n".repeat(5000)]
+  ] as const) {
+    it(label, () => {
+      parse("warm $x$ \\(y\\)");
+      const elapsed = timed(source);
+      assert.ok(elapsed < BOUND_MS, `${Math.round(elapsed)} ms`);
+    });
+  }
+
+  it("still finds the formula after a run of unclosed openers", () => {
+    assert.deepEqual(formulas("a \\( b ".repeat(50) + "`c` and \\(x\\) and \\[y\\]"), [
+      ["inline", "x"],
+      ["display", "y"]
+    ]);
+    assert.deepEqual(formulas("\\( a `b` \\( c \\)"), [["inline", "c"]]);
   });
 });
 
