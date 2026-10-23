@@ -94,6 +94,15 @@ function contextReadingOf(activity: ThreadActivityItem): { usedTokens: number; e
  *   describes the context before it), or an account or Agent Profile switch (the next request
  *   runs on another home, whose cache is cold).
  *
+ * A reading with no expiry taken OUTSIDE any turn (`turnId: null`) is passed over: it is the
+ * context read a (re)started Claude session makes before any request — a `mode` command that
+ * restarts a live idle session, a host restart's rehydrate. The cache stays warm across that:
+ * Anthropic's prompt cache is server-side, keyed on the request's prefix, and the resumed CLI sends
+ * the same transcript, system prompt and tools, so its next request reads the entry the last
+ * request wrote until that entry's own expiry. (A restart that changes the prefix — a different
+ * account or Agent Profile — leaves its own activity row, which voids the candidate above.) Its
+ * context size is still the newest one.
+ *
  * *T3: `IdleCompaction.ts` `idleCompactionWindow`, the record half.*
  */
 export function idleCompactionCandidateOf(items: readonly ThreadItem[], turns: readonly Turn[]): IdleCompactionCandidate | null {
@@ -101,7 +110,9 @@ export function idleCompactionCandidateOf(items: readonly ThreadItem[], turns: r
   if (latest === undefined || latest.state !== "completed" || latest.completedAt === null || latest.turnId === null) {
     return null;
   }
-  let reading: ReturnType<typeof contextReadingOf> | undefined;
+  // The newest reading's context size, and the newest expiry a request named.
+  let usedTokens: number | undefined;
+  let expiry: { expiresAt: string; ttlMs?: number } | undefined;
   const floor = Math.max(0, items.length - CANDIDATE_SCAN_ROWS);
   for (let index = items.length - 1; index >= floor; index -= 1) {
     const item = items[index]!;
@@ -112,7 +123,7 @@ export function idleCompactionCandidateOf(items: readonly ThreadItem[], turns: r
       if ((item.attachments?.length ?? 0) === 0 && isUserCompact(item.text)) return null;
       break;
     }
-    if (reading !== undefined || isAgentOwnedActivity(item)) continue;
+    if (expiry !== undefined || isAgentOwnedActivity(item)) continue;
     if (
       isCompactionActivity(item) ||
       item.activityKind === IDENTITY_CHANGED_ACTIVITY_KIND ||
@@ -120,15 +131,25 @@ export function idleCompactionCandidateOf(items: readonly ThreadItem[], turns: r
     ) {
       return null;
     }
-    if (item.activityKind === "context-window.updated") reading = contextReadingOf(item);
+    if (item.activityKind !== "context-window.updated") continue;
+    const reading = contextReadingOf(item);
+    if (reading === null) return null;
+    usedTokens ??= reading.usedTokens;
+    if (reading.expiresAt !== undefined) {
+      expiry = { expiresAt: reading.expiresAt, ...(reading.ttlMs !== undefined ? { ttlMs: reading.ttlMs } : {}) };
+      continue;
+    }
+    // A reading taken outside any turn — a (re)started session's own context read — made no
+    // request, so it says nothing about the cache: the expiry the last request named stands.
+    // Inside a turn, no expiry means a request wrote no cache entry: unknown.
+    if (item.turnId !== null) return null;
   }
-  if (reading === undefined || reading === null || reading.expiresAt === undefined) return null;
-  if (!Number.isFinite(Date.parse(reading.expiresAt))) return null;
+  if (usedTokens === undefined || expiry === undefined || !Number.isFinite(Date.parse(expiry.expiresAt))) return null;
   return {
     turnId: latest.turnId,
-    usedTokens: reading.usedTokens,
-    promptCacheExpiresAt: reading.expiresAt,
-    ...(reading.ttlMs !== undefined ? { promptCacheTtlMs: reading.ttlMs } : {})
+    usedTokens,
+    promptCacheExpiresAt: expiry.expiresAt,
+    ...(expiry.ttlMs !== undefined ? { promptCacheTtlMs: expiry.ttlMs } : {})
   };
 }
 

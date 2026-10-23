@@ -84,6 +84,26 @@ test("a reading without an expiry (served whole from cache, or not Claude) leave
   assert.equal(idleCompactionCandidateOf([message("hi")], TURNS), null);
 });
 
+test("a restarted session's own context read (outside any turn) keeps the last request's expiry", () => {
+  const restartRead = usage(251_000, {});
+  restartRead.turnId = null;
+  assert.deepEqual(idleCompactionCandidateOf([message("hi"), usage(250_000), restartRead], TURNS), {
+    turnId: "t1",
+    usedTokens: 251_000,
+    promptCacheExpiresAt: EXPIRES,
+    promptCacheTtlMs: 3_600_000
+  });
+  // Inside a turn, a reading without an expiry is a request that wrote no cache: unknown.
+  assert.equal(idleCompactionCandidateOf([message("hi"), usage(250_000), usage(251_000, {})], TURNS), null);
+  // Out-of-turn reads alone name no expiry.
+  assert.equal(idleCompactionCandidateOf([message("hi"), restartRead], TURNS), null);
+  // A switch between the request and the restart still voids it.
+  assert.equal(
+    idleCompactionCandidateOf([message("hi"), usage(250_000), activity("session.identity-changed", {}), restartRead], TURNS),
+    null
+  );
+});
+
 test("a subagent's reading is not the conversation's", () => {
   const items = [message("hi"), usage(250_000), usage(10_000, { promptCacheExpiresAt: EXPIRES, agentId: "sub" })];
   const subRow = items[2] as ThreadActivityItem;
