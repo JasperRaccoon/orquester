@@ -115,6 +115,7 @@ import { applyEventToHead } from "./head.ts";
 import { RawFrameLog, pruneRawLogDirectory } from "./raw-log.ts";
 import { joinToolOutput, type ItemWrite } from "./tool-output.ts";
 import { createToolOutputCache } from "./tool-output-cache.ts";
+import { ReplayCursorRing } from "./replay-cursors.ts";
 
 /** `meta.json` is rewritten after this many appended events (§5.1). */
 const HEAD_CHECKPOINT_EVENTS = 50;
@@ -219,6 +220,11 @@ export interface ThreadStoreOptions {
    * own logger.
    */
   logger?: { warn(message: string, detail?: unknown): void };
+  /**
+   * Told the bytes of `events.ndjson` each whole read ({@link ThreadStore.readAll}'s, a replay's
+   * fallback) and each cursor read (`readEventsFrom`) took. Diagnostics: what a reconnect costs.
+   */
+  onLogRead?: (read: { threadId: string; kind: "whole" | "from-cursor"; bytes: number }) => void;
 }
 
 /** Default cadence for the background sweep. */
@@ -264,6 +270,12 @@ interface ThreadRuntime {
    * one malformed line `readAll` stops at forever.
    */
   tornTail: boolean;
+  /**
+   * Where the thread's newest lines start (`replay-cursors.ts`), from this process's own appends:
+   * what lets a reconnect's {@link ThreadStore.readTail} read from line `after + 1` instead of the
+   * whole log. Null until the first append. Cleared whenever the log's length is re-read from disk.
+   */
+  replayCursors: ReplayCursorRing | null;
 }
 
 /**
@@ -408,7 +420,8 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
         queue: Promise.resolve(),
         raw: null,
         error: null,
-        tornTail: false
+        tornTail: false,
+        replayCursors: null
       };
       threads.set(threadId, entry);
     }
@@ -529,6 +542,8 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
    */
   async function resyncFromDisk(threadId: string, entry: ThreadRuntime): Promise<void> {
     const eventsPath = threadEventsPath(rootDir, threadId);
+    // Positions recorded before a write nobody can account for are not trusted.
+    entry.replayCursors?.clear();
     try {
       entry.logBytes = await truncateTornTail(eventsPath);
       entry.tornTail = false;
@@ -553,6 +568,60 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
       // Unreadable: keep the advanced counter — above anything on disk is the
       // one place a sequence can never collide.
     }
+  }
+
+  /**
+   * The log from a recorded cursor to its end. A cursor is only trusted
+   * while the line at its offset carries `afterSeq + 1`: a log that is
+   * shorter, rewritten, or cut mid-line there answers `mismatch` with
+   * nothing read, and the caller starts again from byte 0 — the log is the
+   * authority, never the cursor.
+   */
+  async function readEventsFrom(
+    threadId: string,
+    input: { byteOffset: number; afterSeq: number }
+  ): Promise<EventsFromResult> {
+    await ensureLoaded(threadId);
+    const { byteOffset, afterSeq } = input;
+    const stale: EventsFromResult = {
+      events: [],
+      positions: [],
+      truncated: false,
+      seq: afterSeq,
+      logBytes: byteOffset,
+      mismatch: true
+    };
+    // Checked BEFORE any read: position -1 means "the current position" to
+    // `read(2)`, which would silently read from the top.
+    if (!isCursorCount(byteOffset) || !isCursorCount(afterSeq)) {
+      return stale;
+    }
+    const window = await readFileWindow(threadEventsPath(rootDir, threadId), byteOffset);
+    if (window !== null) options.onLogRead?.({ threadId, kind: "from-cursor", bytes: window.bytes.length });
+    if ((window?.size ?? 0) < byteOffset) {
+      return stale;
+    }
+    // The line at a cursor past the log's start is the next one the store
+    // wrote — never empty, as the store writes none. A rewritten log can put
+    // a newline exactly there, and skipping it as an empty line would take
+    // the line after it for the cursor's next one.
+    if (byteOffset > 0 && window?.bytes[0] === 0x0a) {
+      return stale;
+    }
+    const decoded = await decodeWindow(window?.bytes ?? Buffer.alloc(0), byteOffset);
+    // The first complete line decides: it must decode AND carry afterSeq + 1.
+    if (decoded.lines > 0 && decoded.events[0]?.seq !== afterSeq + 1) {
+      return stale;
+    }
+    const last = decoded.positions[decoded.positions.length - 1];
+    return {
+      events: decoded.events,
+      positions: decoded.positions,
+      truncated: decoded.truncated,
+      seq: last?.seq ?? afterSeq,
+      logBytes: last === undefined ? byteOffset : last.byteOffset + last.byteLength,
+      mismatch: false
+    };
   }
 
   /** Chain one mutation onto a thread's write queue. */
@@ -614,6 +683,7 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
     if (contents === null) {
       return { events: [], seq: 0, truncated: false };
     }
+    options.onLogRead?.({ threadId, kind: "whole", bytes: Buffer.byteLength(contents, "utf8") });
     const events: DomainEvent[] = [];
     const torn = contents.length > 0 && !contents.endsWith("\n");
     let truncated = torn;
@@ -1132,6 +1202,7 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
             throw error;
           }
           entry.logBytes = endOffset;
+          (entry.replayCursors ??= new ReplayCursorRing()).note(positions);
         }
 
         // STRICTLY after the events: a receipt must never exist for events
@@ -1160,7 +1231,19 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
     },
 
     async readTail(threadId: string, afterSeq: number): Promise<ThreadTail> {
-      await ensureLoaded(threadId);
+      const entry = await ensureLoaded(threadId);
+      // A reconnect: read from the line after `afterSeq` when this process appended it, rather
+      // than decoding the whole log. Only a clean read is taken — a moved line (`mismatch`), a
+      // malformed or torn one (`truncated`) or a log that does not end where the store's own
+      // sequence says falls back to the whole read below, which is the authority.
+      const offset = entry.error === null ? entry.replayCursors?.offsetOf(afterSeq + 1) : undefined;
+      if (offset !== undefined) {
+        const headSeq = entry.seq;
+        const from = await readEventsFrom(threadId, { byteOffset: offset, afterSeq });
+        if (!from.mismatch && !from.truncated && from.seq >= headSeq) {
+          return { events: from.events, seq: from.seq, truncated: false };
+        }
+      }
       const tail = await readLog(threadId);
       return {
         events: tail.events.filter((event) => event.seq > afterSeq),
@@ -1174,58 +1257,8 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
       return readLog(threadId);
     },
 
-    /**
-     * The log from a recorded cursor to its end. A cursor is only trusted
-     * while the line at its offset carries `afterSeq + 1`: a log that is
-     * shorter, rewritten, or cut mid-line there answers `mismatch` with
-     * nothing read, and the caller starts again from byte 0 — the log is the
-     * authority, never the cursor.
-     */
-    async readEventsFrom(
-      threadId: string,
-      input: { byteOffset: number; afterSeq: number }
-    ): Promise<EventsFromResult> {
-      await ensureLoaded(threadId);
-      const { byteOffset, afterSeq } = input;
-      const stale: EventsFromResult = {
-        events: [],
-        positions: [],
-        truncated: false,
-        seq: afterSeq,
-        logBytes: byteOffset,
-        mismatch: true
-      };
-      // Checked BEFORE any read: position -1 means "the current position" to
-      // `read(2)`, which would silently read from the top.
-      if (!isCursorCount(byteOffset) || !isCursorCount(afterSeq)) {
-        return stale;
-      }
-      const window = await readFileWindow(threadEventsPath(rootDir, threadId), byteOffset);
-      if ((window?.size ?? 0) < byteOffset) {
-        return stale;
-      }
-      // The line at a cursor past the log's start is the next one the store
-      // wrote — never empty, as the store writes none. A rewritten log can put
-      // a newline exactly there, and skipping it as an empty line would take
-      // the line after it for the cursor's next one.
-      if (byteOffset > 0 && window?.bytes[0] === 0x0a) {
-        return stale;
-      }
-      const decoded = await decodeWindow(window?.bytes ?? Buffer.alloc(0), byteOffset);
-      // The first complete line decides: it must decode AND carry afterSeq + 1.
-      if (decoded.lines > 0 && decoded.events[0]?.seq !== afterSeq + 1) {
-        return stale;
-      }
-      const last = decoded.positions[decoded.positions.length - 1];
-      return {
-        events: decoded.events,
-        positions: decoded.positions,
-        truncated: decoded.truncated,
-        seq: last?.seq ?? afterSeq,
-        logBytes: last === undefined ? byteOffset : last.byteOffset + last.byteLength,
-        mismatch: false
-      };
-    },
+    /** The log from a recorded cursor to its end ({@link readEventsFrom}). */
+    readEventsFrom: (threadId, input) => readEventsFrom(threadId, input),
 
     /**
      * A history page's bytes: exactly `[fromByte, toByte)`, both line

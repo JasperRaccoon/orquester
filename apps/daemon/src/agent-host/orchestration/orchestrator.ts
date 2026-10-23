@@ -5930,6 +5930,11 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     if (afterSeq < 0 || afterSeq > runtime.state.seq) {
       return null;
     }
+    // Up to date (a reconnect after a blip with nothing new): nothing to read. Not for a thread
+    // whose log did not fold cleanly — its replay answers a snapshot, as the read below would.
+    if (afterSeq === runtime.state.seq && runtime.parseError === null) {
+      return [];
+    }
     // `seq` is per thread and increments by one per event, so the head minus
     // the cursor IS the row count. Checking it before the read keeps an
     // oversized range from being loaded just to be discarded.
