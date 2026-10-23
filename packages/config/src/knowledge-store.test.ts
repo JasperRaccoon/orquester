@@ -46,7 +46,7 @@ test("collections file: unknown fields, unreadable records and unknown keys surv
     file.collections.map((c) => [c.id, c.name, c.color]),
     [
       ["kc_abcdefghij", "SEO", "chart-2"],
-      ["kc_cccccccccc", "Ads", "chart-1"]
+      ["kc_cccccccccc", "Ads", "neon"]
     ]
   );
   assert.equal((file.collections[0] as Record<string, unknown>).extraField, 7);
@@ -55,6 +55,16 @@ test("collections file: unknown fields, unreadable records and unknown keys surv
   assert.equal(written.collections.length, 5);
   assert.deepEqual(written.future, { keep: true });
   assert.deepEqual(written.collections[2], raw.collections[1]);
+});
+
+test("collections file: a colour this build does not know (a newer palette key) is kept for the rewrite", () => {
+  const file = parseKnowledgeCollectionsConfig({
+    version: 1,
+    collections: [collection({ color: "chart-9" }), collection({ id: "kc_dddddddddd", name: "Ads", color: undefined })]
+  });
+  assert.deepEqual(file.collections.map((c) => c.color), ["chart-9", "chart-1"]);
+  const written = serializeKnowledgeCollectionsFile(file) as { collections: { color: unknown }[] };
+  assert.equal(written.collections[0]!.color, "chart-9");
 });
 
 test("collections file: a bare array reads as version 1; a wrong outer shape throws", () => {
@@ -88,4 +98,13 @@ test("entry frontmatter: defaults, tolerated variants, and unknown keys kept", (
     knowledgeEntryFrontmatterSchema.safeParse({ id: "bad", title: "T", savedAt: AT, contentHash: HASH }).success,
     false
   );
+});
+
+test("entry frontmatter: savedFrom keeps unknown keys, and an unknown `by` still reads", () => {
+  const base = { id: "ke_abcdefgh2345", title: "T", savedAt: AT, contentHash: HASH };
+  const unknownKey = knowledgeEntryFrontmatterSchema.parse({ ...base, savedFrom: { by: "agent", sessionId: "s-1", via: "mcp" } });
+  assert.deepEqual(unknownKey.savedFrom, { by: "agent", sessionId: "s-1", via: "mcp" });
+  const unknownBy = knowledgeEntryFrontmatterSchema.safeParse({ ...base, savedFrom: { by: "workflow", runId: "run-1" } });
+  assert.ok(unknownBy.success);
+  assert.deepEqual(unknownBy.data.savedFrom, { by: "workflow", runId: "run-1" });
 });

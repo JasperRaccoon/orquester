@@ -1,4 +1,4 @@
-import type { KnowledgeEntryMeta } from "@orquester/api";
+import type { KnowledgeEntryMeta, KnowledgeEntrySource } from "@orquester/api";
 import { KNOWLEDGE_ENTRY_FRONTMATTER_KEYS, knowledgeEntryFrontmatterSchema } from "@orquester/config";
 import { parseDocument, stringify } from "yaml";
 
@@ -9,9 +9,27 @@ import { parseDocument, stringify } from "yaml";
  */
 export interface ParsedEntryFile {
   meta: KnowledgeEntryMeta;
-  /** Frontmatter keys this build does not know, verbatim. */
+  /**
+   * What this build cannot carry in `meta`, verbatim: the frontmatter keys it does not know and,
+   * under `savedFrom`, the `savedFrom` mapping as found when it holds keys this build does not
+   * know or a `by` it does not know (a newer build's). Both are written back on every rewrite.
+   */
   extra: Record<string, unknown>;
   body: string;
+}
+
+const SAVED_BY: readonly string[] = ["agent", "user"] satisfies readonly KnowledgeEntrySource["by"][];
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/** `meta.savedFrom` over the stored mapping (if kept in `extra`): its unknown keys and an unknown `by` survive. */
+function savedFromFrontmatter(source: KnowledgeEntrySource, stored: unknown): Record<string, unknown> {
+  const known: Record<string, unknown> = source.sessionId ? { by: source.by, sessionId: source.sessionId } : { by: source.by };
+  if (!isPlainRecord(stored)) return known;
+  const by = typeof stored.by === "string" && !SAVED_BY.includes(stored.by) ? stored.by : source.by;
+  return { ...stored, ...known, by };
 }
 
 const OPEN = "---\n";
@@ -28,7 +46,7 @@ export function serializeEntryFile(meta: KnowledgeEntryMeta, extra: Record<strin
     postedAt: meta.postedAt,
     savedAt: meta.savedAt,
     updatedAt: meta.updatedAt,
-    savedFrom: meta.savedFrom.sessionId ? { by: meta.savedFrom.by, sessionId: meta.savedFrom.sessionId } : { by: meta.savedFrom.by },
+    savedFrom: savedFromFrontmatter(meta.savedFrom, extra.savedFrom),
     collections: [...meta.collections],
     contentHash: meta.contentHash,
     linkState: meta.linkState
@@ -61,7 +79,14 @@ export function parseEntryFile(text: string, expectedId: string): ParsedEntryFil
   }
   const front = parsed.data;
   if (front.id !== expectedId) throw new Error("frontmatter id does not match the file name");
-  const savedFrom = front.savedFrom as { by: "agent" | "user"; sessionId?: string };
+  const savedFrom = front.savedFrom as { by: string; sessionId?: string };
+  // An unknown `by` (a newer build's) reads as what the entry shows it is: saved by a chat when it
+  // names one, by the user otherwise. The stored value stays in `extra` for the rewrite.
+  const by: KnowledgeEntrySource["by"] = SAVED_BY.includes(savedFrom.by)
+    ? (savedFrom.by as KnowledgeEntrySource["by"])
+    : savedFrom.sessionId
+      ? "agent"
+      : "user";
   const meta: KnowledgeEntryMeta = {
     id: front.id,
     title: front.title,
@@ -72,16 +97,23 @@ export function parseEntryFile(text: string, expectedId: string): ParsedEntryFil
     postedAt: front.postedAt,
     savedAt: front.savedAt,
     updatedAt: front.updatedAt ?? front.savedAt,
-    savedFrom: savedFrom.sessionId ? { by: savedFrom.by, sessionId: savedFrom.sessionId } : { by: savedFrom.by },
+    savedFrom: savedFrom.sessionId ? { by, sessionId: savedFrom.sessionId } : { by },
     collections: [...new Set(front.collections)],
     contentHash: front.contentHash,
     linkState: front.linkState
   };
-  const extra = Object.fromEntries(
+  const extra: Record<string, unknown> = Object.fromEntries(
     Object.entries(raw as Record<string, unknown>).filter(
       ([key]) => !(KNOWLEDGE_ENTRY_FRONTMATTER_KEYS as readonly string[]).includes(key)
     )
   );
+  const storedSavedFrom = (raw as Record<string, unknown>).savedFrom;
+  if (
+    isPlainRecord(storedSavedFrom) &&
+    (by !== savedFrom.by || Object.keys(storedSavedFrom).some((key) => key !== "by" && key !== "sessionId"))
+  ) {
+    extra.savedFrom = storedSavedFrom;
+  }
   return { meta, extra, body };
 }
 

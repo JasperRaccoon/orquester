@@ -20,6 +20,7 @@ import {
 } from "@orquester/api";
 import {
   type KnowledgeCollectionsFile,
+  isKnowledgeColorKey,
   isKnowledgeEntryId,
   knowledgeCollectionsPath,
   knowledgeEntriesDir,
@@ -800,12 +801,13 @@ export class KnowledgeStore implements KnowledgeStorePort {
   }
 }
 
+/** A colour this build does not know (a newer build's palette key) shows as the first; the record keeps it. */
 function toCollection(record: KnowledgeCollectionsFile["collections"][number]): KnowledgeCollection {
   return {
     id: record.id,
     name: record.name,
     description: record.description,
-    color: record.color,
+    color: isKnowledgeColorKey(record.color) ? record.color : KNOWLEDGE_COLORS[0]!,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt
   };

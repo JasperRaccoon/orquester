@@ -175,3 +175,22 @@ test("an unreadable plugins.json is reported and never written over", async (t) 
   const get = await h.app.inject({ method: "GET", url: knowledgeRoutes.settings });
   assert.deepEqual(get.json(), KNOWLEDGE_DEFAULT_SETTINGS);
 });
+
+test("settings route: bad JSON, an oversized body and a wrong media type answer { code, message }", async (t) => {
+  const h = await harness(t);
+  const json = { "content-type": "application/json" };
+  const answer = async (headers: Record<string, string>, payload: string) => {
+    const response = await h.app.inject({ method: "PUT", url: knowledgeRoutes.settings, headers, payload });
+    return { status: response.statusCode, body: response.json() as { code: string; message: string } };
+  };
+  const badJson = await answer(json, '{"model": secret');
+  assert.equal(badJson.status, 400);
+  assert.equal(badJson.body.code, "KNOWLEDGE_INVALID");
+  assert.ok(badJson.body.message.length > 0 && !badJson.body.message.includes("secret"));
+  const tooLarge = await answer(json, JSON.stringify({ model: "x".repeat(2 * 1024 * 1024) }));
+  assert.equal(tooLarge.status, 413);
+  assert.equal(tooLarge.body.code, "KNOWLEDGE_TOO_LARGE");
+  const plain = await answer({ "content-type": "text/plain" }, "model");
+  assert.equal(plain.status, 400);
+  assert.equal(plain.body.code, "KNOWLEDGE_INVALID");
+});
