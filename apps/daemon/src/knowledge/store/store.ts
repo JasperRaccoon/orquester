@@ -106,6 +106,7 @@ function sha(text: string): string {
  * - A malformed entry file is skipped with a warning, never rewritten or deleted (and its mirror
  *   file is left alone). An unreadable `collections.json` is moved aside and the store starts with
  *   no collections (entries keep their ids, so restoring the file by hand restores the labels).
+ *   One a newer version wrote is left in place, and collection changes are refused until then.
  * - Change events follow `ports.ts`: `edited` when a field the mirror carries changed, `relabelled`
  *   for every metadata-only change (collections — and the URL, which myKG never sees).
  */
@@ -124,6 +125,8 @@ export class KnowledgeStore implements KnowledgeStorePort {
   /** sha256 of each mirror file as last written or verified. */
   private readonly mirrorDigest = new Map<string, string>();
   private collectionsFile: KnowledgeCollectionsFile = { version: 1, collections: [], rejected: [], extra: {} };
+  /** Set when `collections.json` was written by a newer version: it is kept as-is and never written. */
+  private collectionsReadOnly: string | null = null;
   private metaCache: readonly KnowledgeEntryMeta[] | null = null;
   private readonly listeners = new Set<(change: KnowledgeEntryChange) => void>();
   private chain: Promise<unknown> = Promise.resolve();
@@ -701,6 +704,7 @@ export class KnowledgeStore implements KnowledgeStorePort {
   }
 
   private async writeCollections(file: KnowledgeCollectionsFile): Promise<void> {
+    if (this.collectionsReadOnly) throw new KnowledgeError("KNOWLEDGE_INVALID", this.collectionsReadOnly, 409);
     await writeFileAtomic(this.collectionsPath, `${JSON.stringify(serializeKnowledgeCollectionsFile(file), null, 2)}\n`);
     this.collectionsFile = file;
   }
@@ -770,8 +774,21 @@ export class KnowledgeStore implements KnowledgeStorePort {
   private async loadCollections(): Promise<void> {
     const text = await readTextOrNull(this.collectionsPath);
     if (text === null) return;
+    let raw: unknown;
     try {
-      this.collectionsFile = parseKnowledgeCollectionsConfig(JSON.parse(text));
+      raw = JSON.parse(text);
+    } catch {
+      raw = undefined;
+    }
+    const version = raw !== null && typeof raw === "object" && !Array.isArray(raw) ? (raw as { version?: unknown }).version : undefined;
+    if (typeof version === "number" && version > 1) {
+      // Not damage: a newer build's format. Moving it aside would let the next write replace it.
+      this.collectionsReadOnly = `collections.json was written by a newer version of Orquester (version ${version}); collections can't be changed until Orquester is updated.`;
+      this.logger.error(`knowledge: ${this.collectionsReadOnly}`);
+      return;
+    }
+    try {
+      this.collectionsFile = parseKnowledgeCollectionsConfig(raw === undefined ? JSON.parse(text) : raw);
       if (this.collectionsFile.rejected.length > 0) {
         this.logger.warn(`knowledge: ${this.collectionsFile.rejected.length} collection record(s) could not be read; kept as-is`);
       }

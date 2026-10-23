@@ -386,3 +386,22 @@ test("bodies without a single word are only duplicates when identical", async (t
   assert.deepEqual(again.results.map((r) => r.status), ["saved", "duplicate"]);
   assert.equal(again.results[1]!.entryId, outcome.results[0]!.entryId);
 });
+
+test("a collections.json from a newer version is left in place and never written over", async (t) => {
+  const { appdir, open, warnings } = await setup(t);
+  await open();
+  const newer = `${JSON.stringify({ version: 2, collections: [{ key: "seo", label: "SEO" }] }, null, 2)}\n`;
+  await writeFile(knowledgeCollectionsPath(appdir), newer);
+  const { store } = await open();
+  assert.deepEqual(store.listCollections(), []);
+  assert.ok(warnings.some((w) => w.includes("newer")));
+  await assert.rejects(store.createCollection({ name: "Ads" }), (error: unknown) => error instanceof KnowledgeError && /newer/.test(error.message));
+  await assert.rejects(
+    store.save({ entries: [{ body: "A note", collections: ["Ads"] }], newCollections: [{ name: "Ads", description: "Ads" }] }),
+    (error: unknown) => error instanceof KnowledgeError && /newer/.test(error.message)
+  );
+  assert.equal(await readFile(knowledgeCollectionsPath(appdir), "utf8"), newer);
+  const names = await readdir(join(appdir, "daemon", "plugins", "knowledge-graph"));
+  assert.ok(!names.some((n) => n.includes("corrupt")));
+  assert.equal(store.listMeta().length, 0);
+});
