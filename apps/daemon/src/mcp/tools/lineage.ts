@@ -134,7 +134,7 @@ export const forkSessionTool = defineTool({
   title: "Fork a chat session",
   description:
     "Fork a chat into a new idle tab (same project, agent, settings, Agent Profile) holding its conversation through `throughTurn` (transcript numbers; default: the latest finished turn) or up to `messageId`. A bad profile fails it. send_message the fork work; it returns its result with merge_back_session. " +
-    "`agent` or `accountId` CONTINUES it in another agent or account: a fresh session handed the original request and the newest messages that fit the new model's context window (≤64 KB; `handoff` says how many), the rest readable with read_transcript. `model`/`options` as create_session.",
+    "`agent` or `accountId` CONTINUES it in another agent or account: a fresh session handed the first request and newest messages its model's window fits (≤64 KB; `handoff` counts), the rest via read_transcript. `model`/`options` as create_session.",
   chatNote: "Default: this chat (your running turn is not included).",
   input: {
     sessionId: catalogSessionId.optional(),
