@@ -121,6 +121,9 @@ interface Server {
   writeConflictNext: string | null;
   /** What the profile's items read as (another client's change). */
   items: SessionProfileItem[];
+  /** What the profile's settings read as (another client's change); null = the defaults of `detail`. */
+  settings: SessionProfileDetail["settings"] | null;
+  profileUpdates: unknown[];
 }
 
 /** A write carrying another revision than the server's is refused, as the daemon does. */
@@ -144,7 +147,14 @@ function fakeApi(server: Server): ApiClient {
     }),
     getSessionProfile: async () => {
       server.gets += 1;
-      return detail(server.revision, "preparing", server.items);
+      const read = detail(server.revision, "preparing", server.items);
+      return server.settings ? { ...read, settings: server.settings } : read;
+    },
+    updateSessionProfile: async (_profileId: string, body: unknown) => {
+      server.profileUpdates.push(body);
+      writeCheck(server, body);
+      const read = detail(server.revision, "preparing", server.items);
+      return server.settings ? { ...read, settings: server.settings } : read;
     },
     setSessionProfileItemEnabled: async (_profileId: string, itemId: string, revision: string, enabled: boolean) => {
       if (server.conflictNext) {
@@ -199,7 +209,7 @@ describe("Agent Profiles panel", () => {
   beforeEach(() => {
     mock.timers.enable({ apis: ["setTimeout"] });
     resetSessionProfiles();
-    server = { uses: [[]], deletes: [], usesChangedNext: false, revision: "1", toggles: [], updates: [], gets: 0, conflictNext: false, creates: [], writeConflictNext: null, items };
+    server = { uses: [[]], deletes: [], usesChangedNext: false, revision: "1", toggles: [], updates: [], gets: 0, conflictNext: false, creates: [], writeConflictNext: null, items, settings: null, profileUpdates: [] };
     const mount = document.createElement("div");
     document.body.replaceChildren(mount);
     root = createRoot(mount);
@@ -470,6 +480,22 @@ describe("Agent Profiles panel", () => {
     assert.equal((server.updates.at(-1)?.body as { revision: string }).revision, "9", "this item changed: sent at the revision it was read at");
     assert.match(document.querySelector('[role="dialog"]')?.textContent ?? "", /Changed on disk/);
     assert.ok(buttonByText("Reload (discard my changes)"));
+  });
+
+  it("profile settings send only what the dialog changed, never undoing a change made elsewhere while it was open", async () => {
+    await openDeveloper();
+    await click(document.querySelector('button[title="Profile settings"]'));
+    assert.ok(document.querySelector('form[aria-label="Profile settings"]'), "the settings dialog opened");
+    // Elsewhere, while it is open: Claude's Workflow tool off, Codex's skills shown, a collection ticked.
+    server.settings = {
+      hideBuiltinSkills: { claude: true, codex: false, grok: true, opencode: true },
+      claudeWorkflowTool: false,
+      knowledgeCollections: ["kc_seo"]
+    };
+    await moveProfile("2");
+    await type('form[aria-label="Profile settings"] input[placeholder="Developer, Editor, Research…"]', "Developer 2");
+    await click(buttonByText("Save"));
+    assert.deepEqual(server.profileUpdates, [{ name: "Developer 2", revision: "2" }]);
   });
 
   const openDeleteDialog = async () => {

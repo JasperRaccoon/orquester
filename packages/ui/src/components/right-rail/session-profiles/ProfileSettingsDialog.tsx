@@ -11,8 +11,9 @@
  * them, and the contract keeps them): they are not shown, and only leave the
  * list when it would otherwise exceed its cap.
  *
- * Saving sends only what changed (`UpdateSessionProfileRequest`); a cleared
- * icon is `icon: null`. The daemon's refusal — a taken name, a stale
+ * Saving sends only what changed (`UpdateSessionProfileRequest`) from the
+ * profile as the dialog opened on it — not as it reads now, so a change made
+ * elsewhere meanwhile is not undone; a cleared icon is `icon: null`. The daemon's refusal — a taken name, a stale
  * revision — is shown in the dialog, which stays open.
  */
 
@@ -148,8 +149,11 @@ export const ProfileSettingsDialog: React.FC<{
   focusName?: boolean;
   sheet: boolean;
   onCancel: () => void;
-  /** Resolves to the refusal's words, or `null` once saved (the dialog then closes). */
-  onSubmit: (form: ProfileSettingsForm) => Promise<string | null>;
+  /**
+   * Resolves to the refusal's words, or `null` once saved (the dialog then closes). `base` is the
+   * profile the form was filled from (null when creating): diff against it, not the profile now.
+   */
+  onSubmit: (form: ProfileSettingsForm, base: SessionProfileDetail | null) => Promise<string | null>;
 }> = ({ open, ...props }) => (
   <Modal open={open} onClose={props.onCancel} className="max-w-md">
     {open ? <SettingsBody {...props} /> : null}
@@ -162,9 +166,11 @@ const SettingsBody: React.FC<{
   focusName?: boolean;
   sheet: boolean;
   onCancel: () => void;
-  onSubmit: (form: ProfileSettingsForm) => Promise<string | null>;
+  onSubmit: (form: ProfileSettingsForm, base: SessionProfileDetail | null) => Promise<string | null>;
 }> = ({ mode, profile, focusName = false, sheet, onCancel, onSubmit }) => {
   const ids = useId();
+  // What the form was filled from: the profile may move on while the dialog is open.
+  const [base] = useState(profile);
   const [form, setForm] = useState<ProfileSettingsForm>(() => profileSettingsForm(profile));
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -183,7 +189,7 @@ const SettingsBody: React.FC<{
       return;
     }
     setBusy(true);
-    const refusal = await onSubmit(form);
+    const refusal = await onSubmit(form, base);
     setBusy(false);
     if (refusal !== null) setError(refusal);
   };
