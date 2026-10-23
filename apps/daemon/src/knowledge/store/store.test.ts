@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -342,4 +342,66 @@ test("collection colours go round-robin and writes are serialized", async (t) =>
   );
   assert.equal(new Set(saves.map((s) => s.results[0]!.entryId)).size, 10);
   assert.equal(store.listMeta().length, 10);
+});
+
+test("a save is all or nothing even when relabelling a duplicate fails after the new entries were written", async (t) => {
+  const { appdir, open } = await setup(t);
+  const { store, changes } = await open();
+  await store.createCollection({ name: "SEO" });
+  await store.createCollection({ name: "Ads" });
+  const first = await store.save({ entries: [{ body: POST, url: "https://x.com/om/status/42", collections: ["SEO"] }] });
+  const existing = first.results[0]!.entryId;
+  changes.length = 0;
+  // The existing entry's file can no longer be rewritten (a directory stands in for any I/O error).
+  const path = join(knowledgeEntriesDir(appdir), `${existing}.md`);
+  await rm(path);
+  await mkdir(path);
+  await assert.rejects(
+    store.save({
+      entries: [
+        { body: "A brand new note about ad budgets.", collections: ["Ads"] },
+        { body: "Different words", url: "https://twitter.com/om/status/42?s=20", collections: ["Ads"] }
+      ]
+    })
+  );
+  assert.equal(store.listMeta().length, 1, "the new entry was not kept");
+  assert.deepEqual(changes, []);
+  const files = (await readdir(knowledgeEntriesDir(appdir))).filter((n) => n.endsWith(".md"));
+  assert.deepEqual(files, [`${existing}.md`]);
+  assert.deepEqual((await readdir(knowledgeMykgInputDir(appdir))).filter((n) => n.endsWith(".md")), [`${existing}.md`]);
+});
+
+test("bodies without a single word are only duplicates when identical", async (t) => {
+  const { open } = await setup(t);
+  const { store } = await open();
+  await store.createCollection({ name: "SEO" });
+  const outcome = await store.save({
+    entries: [
+      { body: "🔥🔥🔥", collections: ["SEO"] },
+      { body: "→ ✅ ✅", collections: ["SEO"] }
+    ]
+  });
+  assert.deepEqual(outcome.results.map((r) => r.status), ["saved", "saved"]);
+  const again = await store.save({ entries: [{ body: "👀", collections: ["SEO"] }, { body: "🔥🔥🔥", collections: ["SEO"] }] });
+  assert.deepEqual(again.results.map((r) => r.status), ["saved", "duplicate"]);
+  assert.equal(again.results[1]!.entryId, outcome.results[0]!.entryId);
+});
+
+test("a collections.json from a newer version is left in place and never written over", async (t) => {
+  const { appdir, open, warnings } = await setup(t);
+  await open();
+  const newer = `${JSON.stringify({ version: 2, collections: [{ key: "seo", label: "SEO" }] }, null, 2)}\n`;
+  await writeFile(knowledgeCollectionsPath(appdir), newer);
+  const { store } = await open();
+  assert.deepEqual(store.listCollections(), []);
+  assert.ok(warnings.some((w) => w.includes("newer")));
+  await assert.rejects(store.createCollection({ name: "Ads" }), (error: unknown) => error instanceof KnowledgeError && /newer/.test(error.message));
+  await assert.rejects(
+    store.save({ entries: [{ body: "A note", collections: ["Ads"] }], newCollections: [{ name: "Ads", description: "Ads" }] }),
+    (error: unknown) => error instanceof KnowledgeError && /newer/.test(error.message)
+  );
+  assert.equal(await readFile(knowledgeCollectionsPath(appdir), "utf8"), newer);
+  const names = await readdir(join(appdir, "daemon", "plugins", "knowledge-graph"));
+  assert.ok(!names.some((n) => n.includes("corrupt")));
+  assert.equal(store.listMeta().length, 0);
 });

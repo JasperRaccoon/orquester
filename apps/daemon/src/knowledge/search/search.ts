@@ -18,6 +18,7 @@ import {
 import { isKnowledgeEntryId } from "@orquester/config";
 import type { KnowledgeEntryChange, KnowledgeStorePort } from "../ports.ts";
 import { KnowledgeError, type KnowledgeLogger } from "../store/errors.ts";
+import { knowledgeContentHash } from "../store/normalize.ts";
 import { Bm25Index } from "./bm25.ts";
 import type { KnowledgeEmbedder, KnowledgeEmbedderSource } from "./embedder.ts";
 import type { KnowledgeGraph } from "./graph.ts";
@@ -54,9 +55,20 @@ const WEIGHT = { bm25: 1, vector: 1, expansion: 0.5, concept: 1 } as const;
 const SCORE_SCALE = (WEIGHT.bm25 + WEIGHT.vector + WEIGHT.expansion) / (RRF_K + 1);
 /** Docs embedded per worker step (small, so a query never waits long behind a backfill). */
 const EMBED_BATCH_DOCS = 4;
+/**
+ * Chunks per model call. The model runs one call at a time, so a query (or a save) waits for at
+ * most one call of this size, however long the entries being embedded are.
+ */
+const EMBED_CALL_CHUNKS = 4;
 const FLUSH_EVERY = 64;
 /** Chunks a save waits to embed (~0.1 s each on two CPU threads); the rest are embedded after it returns. */
 const SYNC_EMBED_CHUNKS = 12;
+/**
+ * The longest a save waits for those embeddings (spec: a save returns within about 2 s). The
+ * first one after a start also loads the model; whatever is not done by then finishes in the
+ * background, and the entry is searchable by text meanwhile.
+ */
+const SYNC_EMBED_WAIT_MS = 1_200;
 
 interface Doc {
   id: string;
@@ -136,8 +148,9 @@ export class KnowledgeSearch {
 
   /**
    * Index these entries now: text at once, embeddings first in the queue. Resolves when they are
-   * searchable by text and — up to {@link SYNC_EMBED_CHUNKS} chunks in total, so a save stays
-   * fast — by meaning; longer bodies finish embedding in the background.
+   * searchable by text and — up to {@link SYNC_EMBED_CHUNKS} chunks in total, and for at most
+   * {@link SYNC_EMBED_WAIT_MS}, so a save stays fast — by meaning; the rest is embedded in the
+   * background.
    */
   async indexEntries(ids: readonly string[]): Promise<void> {
     await this.whenReady();
@@ -158,7 +171,13 @@ export class KnowledgeSearch {
     }
     const waiting = this.requestEmbeddings(now, true);
     void this.requestEmbeddings(later, false);
-    await waiting;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, SYNC_EMBED_WAIT_MS);
+      timer.unref?.();
+    });
+    await Promise.race([waiting, deadline]);
+    clearTimeout(timer);
   }
 
   /** Resolves once queued text indexing and embedding have finished (tests, shutdown). */
@@ -467,10 +486,12 @@ export class KnowledgeSearch {
       return;
     }
     const existing = this.docs.get(id);
+    // The vector cache key is the hash of the text embedded here, never the hash the metadata
+    // claims: a hand-edited file (or a read racing an edit) must not file vectors under another body.
     const doc: Doc =
-      existing && existing.hash === entry.contentHash && existing.body === entry.body
+      existing && existing.body === entry.body
         ? existing
-        : { id, hash: entry.contentHash, body: entry.body, spans: chunkBody(entry.body), vectors: null, vectorModel: null };
+        : { id, hash: knowledgeContentHash(entry.body), body: entry.body, spans: chunkBody(entry.body), vectors: null, vectorModel: null };
     this.docs.set(id, doc);
     this.bm25.add(id, [
       { tokens: tokenize(entry.title), weight: 3 },
@@ -577,7 +598,11 @@ export class KnowledgeSearch {
         }
         if (todo.length > 0) {
           const texts = todo.flatMap((doc) => doc.spans.map((span) => doc.body.slice(span.start, span.end)));
-          const vectors = await embedder.embed(texts);
+          const vectors: Float32Array[] = [];
+          for (let start = 0; start < texts.length; start += EMBED_CALL_CHUNKS) {
+            if (this.stopped) return; // `stop()` already released every waiter and flushes the cache
+            vectors.push(...(await embedder.embed(texts.slice(start, start + EMBED_CALL_CHUNKS))));
+          }
           let at = 0;
           for (const doc of todo) {
             const rows = new Float32Array(doc.spans.length * embedder.dimensions);

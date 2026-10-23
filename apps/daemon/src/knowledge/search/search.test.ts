@@ -248,3 +248,65 @@ test("read views: entry lists page newest first; details and items respect visib
   assert.throws(() => search.graphView({ collections: SAAS }, SEO_ONLY), (e: unknown) => e instanceof KnowledgeError && e.code === "KNOWLEDGE_UNKNOWN_COLLECTION");
   assert.throws(() => search.graphView({ focus: "tool-stripe" }, SEO_ONLY), (e: unknown) => e instanceof KnowledgeError && e.code === "KNOWLEDGE_NOT_FOUND");
 });
+
+test("a long entry is embedded in small calls, so a query never waits behind the whole entry", async (t) => {
+  const { store, search, embedder } = await setup(t);
+  await search.search({ query: "warm up" }, ALL);
+  await search.idle();
+  const sizes: number[] = [];
+  const embed = embedder!.embed.bind(embedder!);
+  embedder!.embed = (texts) => {
+    sizes.push(texts.length);
+    return embed(texts);
+  };
+  const id = "ke_longlonglong";
+  // ~5,000 words: dozens of chunks.
+  const body = Array.from({ length: 5_000 }, (_, i) => (i % 50 === 0 ? "chatgpt" : `word${i % 97}`)).join(" ");
+  store.put(id, body, [SEO], { title: "Long article" }, true);
+  await search.indexEntries([id]);
+  await search.idle();
+  assert.ok(sizes.reduce((a, b) => a + b, 0) > 20, "the entry was embedded");
+  assert.ok(Math.max(...sizes) <= 4, `embed calls of ${Math.max(...sizes)} texts`);
+  assert.ok(entryIds((await search.search({ query: "Ranking in ChatGPT", limit: 25 }, ALL)).hits).includes(id));
+});
+
+test("vectors are cached under the hash of the text that was embedded, not the hash the store claims", async (t) => {
+  const { store, search } = await setup(t);
+  // A hand-edited entry file whose frontmatter still carries the old body's hash.
+  const stale = "ke_stalestalest";
+  const oldBody = "Cap the daily budget while a campaign learns; raise spend after 50 conversions.";
+  store.put(stale, "Notes about iOS app store screenshots and android listings.", [SEO], { title: "Edited by hand", contentHash: store.entries.get(ADSPOST)!.contentHash }, true);
+  assert.equal(store.entries.get(ADSPOST)!.body, oldBody);
+  await search.indexEntries([stale]);
+  await search.search({ query: "warm up" }, ALL);
+  await search.idle();
+  // The ads entry must keep its own meaning (a query sharing no word with it), not the edited entry's.
+  assert.equal(entryIds((await search.search({ query: "cpc", limit: 25 }, ALL)).hits)[0], ADSPOST);
+});
+
+test("a save waits a bounded time for its embeddings (a slow first model load never holds the chat)", async (t) => {
+  const { store, search, embedder } = await setup(t);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  const embed = embedder!.embed.bind(embedder!);
+  embedder!.embed = async (texts) => {
+    if (texts.some((text) => text.includes("onboarding"))) await gate;
+    return embed(texts);
+  };
+  const id = "ke_slowslowslow";
+  store.put(id, "Welcome emails: onboarding sequences that convert.", [SEO], { title: "Onboarding emails" }, true);
+  let done = false;
+  const indexing = search.indexEntries([id]).then(() => (done = true));
+  for (let waited = 0; !done && waited < 10_000; waited += 500) {
+    t.mock.timers.tick(500);
+    for (let i = 0; i < 20 && !done; i += 1) await new Promise((resolve) => setImmediate(resolve));
+  }
+  if (!done) release();
+  assert.ok(done, "the save is still waiting for the model after 10 s");
+  await indexing;
+  assert.equal(entryIds((await search.search({ query: "welcome emails" }, ALL)).hits)[0], id, "searchable by text already");
+  release();
+  await search.idle();
+  assert.ok(entryIds((await search.search({ query: "onboarding" }, ALL)).hits).includes(id));
+});

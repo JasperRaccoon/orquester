@@ -158,7 +158,8 @@ export function knowledgeTextSignature(shingles: ReadonlySet<number>): Knowledge
 export function mayBeNearDuplicate(a: KnowledgeTextSignature, b: KnowledgeTextSignature): boolean {
   const small = Math.min(a.shingleCount, b.shingleCount);
   const large = Math.max(a.shingleCount, b.shingleCount);
-  if (large === 0) return true;
+  // No words at all (emoji, symbols): nothing to compare, so only an exact hash match is a duplicate.
+  if (small === 0) return false;
   if (small / large < NEAR_DUPLICATE_JACCARD) return false;
   let same = 0;
   for (let i = 0; i < MINHASH_SIZE; i += 1) if (a.minhash[i] === b.minhash[i]) same += 1;

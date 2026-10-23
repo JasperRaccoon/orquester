@@ -106,6 +106,7 @@ function sha(text: string): string {
  * - A malformed entry file is skipped with a warning, never rewritten or deleted (and its mirror
  *   file is left alone). An unreadable `collections.json` is moved aside and the store starts with
  *   no collections (entries keep their ids, so restoring the file by hand restores the labels).
+ *   One a newer version wrote is left in place, and collection changes are refused until then.
  * - Change events follow `ports.ts`: `edited` when a field the mirror carries changed, `relabelled`
  *   for every metadata-only change (collections — and the URL, which myKG never sees).
  */
@@ -124,6 +125,8 @@ export class KnowledgeStore implements KnowledgeStorePort {
   /** sha256 of each mirror file as last written or verified. */
   private readonly mirrorDigest = new Map<string, string>();
   private collectionsFile: KnowledgeCollectionsFile = { version: 1, collections: [], rejected: [], extra: {} };
+  /** Set when `collections.json` was written by a newer version: it is kept as-is and never written. */
+  private collectionsReadOnly: string | null = null;
   private metaCache: readonly KnowledgeEntryMeta[] | null = null;
   private readonly listeners = new Set<(change: KnowledgeEntryChange) => void>();
   private chain: Promise<unknown> = Promise.resolve();
@@ -415,11 +418,25 @@ export class KnowledgeStore implements KnowledgeStorePort {
         additions.set(step.id, set);
       }
 
-      // Write: collections, then new entries (file, then mirror), then relabelled duplicates.
+      // Relabelled duplicates are read (and their rewrite prepared) before anything is written.
+      const relabels: { id: string; stored: StoredEntry; meta: KnowledgeEntryMeta; previous: string; next: string }[] = [];
+      for (const [id, set] of additions) {
+        const stored = this.entries.get(id)!;
+        const collections = [...set];
+        if (collections.length === stored.meta.collections.length) continue;
+        const current = await this.readEntryText(id);
+        if (current === null) continue;
+        const meta = frozenMeta({ ...stored.meta, collections, updatedAt: at });
+        relabels.push({ id, stored, meta, previous: current.text, next: serializeEntryFile(meta, stored.extra, current.body) });
+      }
+
+      // Write: collections, then new entries (file, then mirror), then relabelled duplicates. Any
+      // failure undoes what this request wrote, so memory and events see all of it or none.
       const collectionsBefore = this.collectionsFile;
-      if (created.length > 0) await this.writeCollections({ ...this.collectionsFile, collections: plannedRecords });
       const written: string[] = [];
+      const rewritten: (typeof relabels)[number][] = [];
       try {
+        if (created.length > 0) await this.writeCollections({ ...this.collectionsFile, collections: plannedRecords });
         for (const plan of planned) {
           const meta = frozenMeta(plan.meta);
           await writeFileAtomic(this.entryPath(meta.id), serializeEntryFile(meta, {}, plan.body));
@@ -427,33 +444,30 @@ export class KnowledgeStore implements KnowledgeStorePort {
           await this.writeMirror(meta, plan.body);
           plan.meta = meta;
         }
+        for (const relabel of relabels) {
+          await writeFileAtomic(this.entryPath(relabel.id), relabel.next);
+          rewritten.push(relabel);
+        }
       } catch (error) {
+        for (const relabel of rewritten) await writeFileAtomic(this.entryPath(relabel.id), relabel.previous).catch(() => undefined);
         for (const id of written) {
           await removeIfExists(this.entryPath(id)).catch(() => undefined);
           await removeIfExists(this.mirrorPath(id)).catch(() => undefined);
           this.mirrorDigest.delete(id);
         }
-        if (created.length > 0) await this.writeCollections(collectionsBefore).catch(() => undefined);
+        if (this.collectionsFile !== collectionsBefore) await this.writeCollections(collectionsBefore).catch(() => undefined);
         throw error;
       }
       for (const plan of planned) {
         this.entries.set(plan.meta.id, { meta: plan.meta, extra: {}, signature: plan.signature, urlKey: plan.urlKey });
         this.index(plan.meta.id, plan.meta.contentHash, plan.urlKey);
       }
-      this.metaCache = null;
       const relabelled: string[] = [];
-      for (const [id, set] of additions) {
-        const stored = this.entries.get(id)!;
-        const collections = [...set];
-        if (collections.length === stored.meta.collections.length) continue;
-        const body = await this.readBody(id);
-        if (body === null) continue;
-        const meta = frozenMeta({ ...stored.meta, collections, updatedAt: at });
-        await writeFileAtomic(this.entryPath(id), serializeEntryFile(meta, stored.extra, body));
-        this.entries.set(id, { ...stored, meta });
-        this.metaCache = null;
-        relabelled.push(id);
+      for (const relabel of relabels) {
+        this.entries.set(relabel.id, { ...relabel.stored, meta: relabel.meta });
+        relabelled.push(relabel.id);
       }
+      this.metaCache = null;
 
       const changes: KnowledgeEntryChange[] = [];
       if (planned.length > 0) changes.push({ kind: "added", entryIds: planned.map((p) => p.meta.id) });
@@ -592,10 +606,15 @@ export class KnowledgeStore implements KnowledgeStorePort {
   }
 
   private async readBody(id: string): Promise<string | null> {
+    return (await this.readEntryText(id))?.body ?? null;
+  }
+
+  /** The entry file's text and body; null when it is gone or no longer parses. */
+  private async readEntryText(id: string): Promise<{ text: string; body: string } | null> {
     const text = await readTextOrNull(this.entryPath(id));
     if (text === null) return null;
     try {
-      return parseEntryFile(text, id).body;
+      return { text, body: parseEntryFile(text, id).body };
     } catch (error) {
       this.logger.warn(`knowledge: entry ${id} became unreadable (${(error as Error).message})`);
       return null;
@@ -685,6 +704,7 @@ export class KnowledgeStore implements KnowledgeStorePort {
   }
 
   private async writeCollections(file: KnowledgeCollectionsFile): Promise<void> {
+    if (this.collectionsReadOnly) throw new KnowledgeError("KNOWLEDGE_INVALID", this.collectionsReadOnly, 409);
     await writeFileAtomic(this.collectionsPath, `${JSON.stringify(serializeKnowledgeCollectionsFile(file), null, 2)}\n`);
     this.collectionsFile = file;
   }
@@ -754,8 +774,21 @@ export class KnowledgeStore implements KnowledgeStorePort {
   private async loadCollections(): Promise<void> {
     const text = await readTextOrNull(this.collectionsPath);
     if (text === null) return;
+    let raw: unknown;
     try {
-      this.collectionsFile = parseKnowledgeCollectionsConfig(JSON.parse(text));
+      raw = JSON.parse(text);
+    } catch {
+      raw = undefined;
+    }
+    const version = raw !== null && typeof raw === "object" && !Array.isArray(raw) ? (raw as { version?: unknown }).version : undefined;
+    if (typeof version === "number" && version > 1) {
+      // Not damage: a newer build's format. Moving it aside would let the next write replace it.
+      this.collectionsReadOnly = `collections.json was written by a newer version of Orquester (version ${version}); collections can't be changed until Orquester is updated.`;
+      this.logger.error(`knowledge: ${this.collectionsReadOnly}`);
+      return;
+    }
+    try {
+      this.collectionsFile = parseKnowledgeCollectionsConfig(raw === undefined ? JSON.parse(text) : raw);
       if (this.collectionsFile.rejected.length > 0) {
         this.logger.warn(`knowledge: ${this.collectionsFile.rejected.length} collection record(s) could not be read; kept as-is`);
       }
