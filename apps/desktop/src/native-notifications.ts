@@ -100,3 +100,51 @@ export function badgeOverlayBitmap(size = 16): Buffer {
   }
   return pixels;
 }
+
+/** How long a shown notification is held for its click handler before it is let go. */
+export const NOTIFICATION_HOLD_MS = 30 * 60_000;
+
+export interface Timers {
+  setTimeout(callback: () => void, ms: number): unknown;
+  clearTimeout(handle: unknown): void;
+}
+
+/**
+ * Shown notifications by tag. Holding one keeps its click handler from being
+ * collected; a newer one with the same tag replaces it. Electron does not
+ * promise a `close` event on Linux or Windows (a toast can sit in the action
+ * centre for good), so each hold also lapses after `holdMs`, and the caller
+ * releases on click, close and failure.
+ */
+export class NotificationRegistry<T> {
+  private readonly held = new Map<string, { item: T; timer: unknown }>();
+
+  constructor(
+    private readonly holdMs: number = NOTIFICATION_HOLD_MS,
+    private readonly timers: Timers = {
+      setTimeout: (callback, ms) => setTimeout(callback, ms),
+      clearTimeout: (handle) => clearTimeout(handle as NodeJS.Timeout)
+    }
+  ) {}
+
+  /** Hold `item` under `tag`; returns the one it replaces, for the caller to close. */
+  hold(tag: string, item: T): T | undefined {
+    const previous = this.held.get(tag);
+    if (previous) this.timers.clearTimeout(previous.timer);
+    const timer = this.timers.setTimeout(() => this.release(tag, item), this.holdMs);
+    this.held.set(tag, { item, timer });
+    return previous?.item;
+  }
+
+  /** Let go of `item`, if it is still the one held under `tag`. */
+  release(tag: string, item: T): void {
+    const entry = this.held.get(tag);
+    if (!entry || entry.item !== item) return;
+    this.timers.clearTimeout(entry.timer);
+    this.held.delete(tag);
+  }
+
+  get size(): number {
+    return this.held.size;
+  }
+}

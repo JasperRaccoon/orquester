@@ -28,6 +28,7 @@ import { applicationMenuTemplate, contextMenuTemplate } from "./menus";
 import {
   badgeDescription,
   badgeOverlayBitmap,
+  NotificationRegistry,
   parseBadgeCount,
   parseNotificationRequest,
   type NotificationTarget
@@ -44,6 +45,7 @@ import {
   windowFrameOptions,
   type WindowState
 } from "./window-state";
+import { canDeliverToRenderer, planShowWindow, RendererOutbox, replacementShows } from "./window-lifecycle";
 
 /**
  * A bridged request body: JSON as a string, or an upload's raw bytes as the
@@ -735,38 +737,41 @@ function fromMainWindow(event: IpcMainEvent): boolean {
   return mainWindow !== undefined && !mainWindow.isDestroyed() && event.sender === mainWindow.webContents;
 }
 
-/** Send to the main window's page, once it has loaded (a click may have just created the window). */
+// Messages for the main window's page (a clicked notification's target, a
+// menu action). They wait while the page loads — a click may have just created
+// the window — and through a titlebar rebuild, whose old page is about to go.
+const rendererOutbox = new RendererOutbox<{ channel: string; payload: unknown }>();
+
+/** Send to the main window's page now if it can take it, else when it can (`flushRendererOutbox`). */
 function sendToRenderer(channel: string, payload: unknown): void {
-  const contents = mainWindow?.webContents;
-  if (!contents || contents.isDestroyed()) return;
-  if (contents.isLoading()) {
-    contents.once("did-finish-load", () => {
-      if (!contents.isDestroyed()) contents.send(channel, payload);
-    });
-  } else {
-    contents.send(channel, payload);
-  }
+  rendererOutbox.push({ channel, payload });
+  flushRendererOutbox();
 }
 
-// Shown notifications by tag: a newer one with the same tag replaces the old,
-// and holding them keeps their click handlers from being collected.
-const notifications = new Map<string, Notification>();
+/** Deliver waiting messages to the main window's page: on its load, and when a rebuild ends. */
+function flushRendererOutbox(): void {
+  const contents = mainWindow?.webContents;
+  const mainLoaded = contents !== undefined && !contents.isDestroyed() && !contents.isLoading();
+  if (!contents || !canDeliverToRenderer({ mainLoaded, rebuilding: replacementWindow !== undefined })) return;
+  for (const message of rendererOutbox.drain()) contents.send(message.channel, message.payload);
+}
+
+// Shown notifications by tag, held for their click handlers (`NotificationRegistry`).
+const notifications = new NotificationRegistry<Notification>();
 
 function showNotification(payload: unknown): void {
   const request = parseNotificationRequest(payload);
   if (!request || !Notification.isSupported()) return;
-  notifications.get(request.tag)?.close();
   const notification = new Notification({ title: request.title, body: request.body });
-  notifications.set(request.tag, notification);
-  const forget = () => {
-    if (notifications.get(request.tag) === notification) notifications.delete(request.tag);
-  };
+  notifications.hold(request.tag, notification)?.close();
+  const release = () => notifications.release(request.tag, notification);
   notification.on("click", () => {
-    forget();
+    release();
     showWindow();
     if (request.target) sendToRenderer("orquester:notification-open", request.target satisfies NotificationTarget);
   });
-  notification.on("close", forget);
+  notification.on("close", release);
+  notification.on("failed", release);
   notification.show();
 }
 
@@ -861,11 +866,12 @@ function registerIpc(): void {
 }
 
 function showWindow(): void {
-  if (mainWindow) {
+  const plan = planShowWindow({ hasMain: mainWindow !== undefined, rebuilding: replacementWindow !== undefined });
+  if (plan === "show-main" && mainWindow) {
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.show();
     mainWindow.focus();
-  } else {
+  } else if (plan === "create") {
     createWindow();
   }
 }
@@ -1007,20 +1013,32 @@ function createWindow(replacing?: BrowserWindow): void {
   installContextMenu(win);
   const contentsId = contents.id;
   contents.once("destroyed", () => closeStreamsOf(contentsId));
+  contents.on("did-finish-load", flushRendererOutbox);
 
   win.once("ready-to-show", () => {
     if (state.maximized) win.maximize();
-    if (replacing) {
-      replacementWindow = undefined;
-      mainWindow = win;
-      mainWindowFrame = frameKey(frame);
-      if (!replacing.isDestroyed()) replacing.destroy();
-      applyBadge(badgeCount);
+    if (!replacing) {
+      win.show();
+      win.focus();
+      return;
     }
-    win.show();
-    win.focus();
+    // Hidden to the tray (run in background) stays hidden.
+    const show = replacementShows({
+      destroyed: replacing.isDestroyed(),
+      visible: !replacing.isDestroyed() && replacing.isVisible()
+    });
+    replacementWindow = undefined;
+    mainWindow = win;
+    mainWindowFrame = frameKey(frame);
+    if (!replacing.isDestroyed()) replacing.destroy();
+    applyBadge(badgeCount);
+    if (show) {
+      win.show();
+      win.focus();
+    }
+    flushRendererOutbox();
     // The setting may have changed again while this window loaded.
-    if (replacing) rebuildWindowIfFrameChanged();
+    rebuildWindowIfFrameChanged();
   });
   trackWindowState(win);
 
@@ -1037,8 +1055,14 @@ function createWindow(replacing?: BrowserWindow): void {
       mainWindowFrame = undefined;
       // No page is left to keep the count current.
       applyBadge(0);
+      // Closed mid-rebuild: the replacement must not appear in its place.
+      const pending = replacementWindow;
+      if (pending && !pending.isDestroyed()) pending.destroy();
     }
-    if (replacementWindow === win) replacementWindow = undefined;
+    if (replacementWindow === win) {
+      replacementWindow = undefined;
+      flushRendererOutbox();
+    }
   });
 
   const devUrl = process.env.ORQUESTER_DESKTOP_DEV_URL;

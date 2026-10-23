@@ -5,6 +5,7 @@ import {
   BADGE_MAX,
   badgeDescription,
   badgeOverlayBitmap,
+  NotificationRegistry,
   parseBadgeCount,
   parseNotificationRequest
 } from "./native-notifications";
@@ -87,5 +88,58 @@ describe("the attention badge", () => {
       // Premultiplied: no channel exceeds its alpha.
       assert.ok(pixels[i]! <= pixels[i + 3]! && pixels[i + 1]! <= pixels[i + 3]! && pixels[i + 2]! <= pixels[i + 3]!);
     }
+  });
+});
+
+describe("held notifications", () => {
+  /** A scheduler the test fires by hand. */
+  function fakeTimers() {
+    const pending = new Map<number, () => void>();
+    let next = 0;
+    return {
+      pending,
+      timers: {
+        setTimeout: (callback: () => void) => {
+          next += 1;
+          pending.set(next, callback);
+          return next;
+        },
+        clearTimeout: (handle: unknown) => {
+          pending.delete(handle as number);
+        }
+      },
+      fireAll: () => {
+        for (const [handle, callback] of [...pending]) {
+          pending.delete(handle);
+          callback();
+        }
+      }
+    };
+  }
+
+  it("replaces a notification with the same tag and hands back the old one to close", () => {
+    const { timers, pending } = fakeTimers();
+    const registry = new NotificationRegistry<string>(1000, timers);
+    assert.equal(registry.hold("session-c1", "first"), undefined);
+    assert.equal(registry.hold("session-c1", "second"), "first");
+    assert.equal(registry.size, 1);
+    assert.equal(pending.size, 1, "the replaced hold's timer is cancelled");
+    // The replaced one's late close event lets go of nothing.
+    registry.release("session-c1", "first");
+    assert.equal(registry.size, 1);
+  });
+
+  it("lets go on click, close or failure, and on its own once the hold lapses", () => {
+    const { timers, pending, fireAll } = fakeTimers();
+    const registry = new NotificationRegistry<string>(1000, timers);
+    registry.hold("session-c1", "one");
+    registry.release("session-c1", "one");
+    assert.equal(registry.size, 0);
+    assert.equal(pending.size, 0);
+    // No close event ever arrives (Linux, Windows): the hold still ends.
+    registry.hold("session-c2", "two");
+    registry.hold("workflow-w1", "three");
+    fireAll();
+    assert.equal(registry.size, 0);
   });
 });
