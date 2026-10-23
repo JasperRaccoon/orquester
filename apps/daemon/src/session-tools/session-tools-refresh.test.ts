@@ -29,6 +29,7 @@ import {
   SessionToolsRefresher,
   type SessionToolsRefreshDeps
 } from "./session-tools-refresh.ts";
+import type { ManifestKnowledge } from "./manifest.ts";
 
 const tool = (name: string, toolset: ToolsetId, tier: "read" | "admin" = "read"): AnyOrquesterTool =>
   defineTool({
@@ -410,4 +411,41 @@ test("per-cwd reads are cached for at most MAX_POINTING_SCOPES scopes (the all-p
 
 test("a manifest's own bounds stay below the host's bound on asking for it", () => {
   assert.ok(DAEMON_POINTING_READ_TIMEOUT_MS + MANIFEST_SESSIONS_READ_TIMEOUT_MS + 2_000 <= MANIFEST_TIMEOUT_MS);
+});
+
+test("Knowledge Graph: the chat's knowledge view is read fresh for every manifest; failing or unanswered it counts as off", async () => {
+  const catalog = [...CATALOG, tool("knowledge_search", "knowledge"), tool("knowledge_save", "knowledge"), tool("knowledge_worker_next_task", "knowledge")];
+  const reads: string[] = [];
+  let view: ManifestKnowledge | Error | "hang" = { enabled: true, worker: false, searchable: true, visibleCollectionNames: ["SEO"] };
+  const r = rig({
+    catalog: () => catalog,
+    knowledgeInfoTimeoutMs: 20,
+    knowledgeForSession: async (threadId) => {
+      reads.push(threadId);
+      if (view === "hang") return new Promise<ManifestKnowledge>(() => undefined);
+      if (view instanceof Error) throw view;
+      return view;
+    }
+  });
+  const on = await manifestOf(r, "claude-1");
+  assert.deepEqual(on.tools, [...ALL, "knowledge_search", "knowledge_save"]);
+  assert.match(on.instructions, /\nKnowledge: SEO\. Search it \(knowledge_search\)/);
+  // A profile edit is seen by the next manifest (and so by the next push): nothing is cached.
+  view = { enabled: true, worker: false, searchable: false, visibleCollectionNames: [] };
+  const blind = await manifestOf(r, "claude-1");
+  assert.deepEqual(blind.tools, [...ALL, "knowledge_save"]);
+  assert.doesNotMatch(blind.instructions, /Knowledge:/);
+  view = { enabled: true, worker: true, searchable: false, visibleCollectionNames: [] };
+  assert.deepEqual((await manifestOf(r, "claude-1")).tools, ["knowledge_worker_next_task"]);
+  assert.deepEqual(reads, ["claude-1", "claude-1", "claude-1"]);
+  for (const failing of [new Error("store down"), "hang" as const]) {
+    view = failing;
+    const off = await manifestOf(r, "claude-1");
+    assert.deepEqual(off.tools, ALL, "the plugin counts as off");
+    assert.doesNotMatch(off.instructions, /Knowledge:/);
+  }
+  assert.ok(r.warnings.some((warning) => /knowledge read failed/.test(warning)));
+  assert.ok(r.warnings.some((warning) => /knowledge read did not answer in time/.test(warning)));
+  // Unwired (the integration not there yet): off.
+  assert.deepEqual((await manifestOf(rig({ catalog: () => catalog }), "claude-1")).tools, ALL);
 });

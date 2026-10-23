@@ -1,9 +1,10 @@
 /**
  * The per-thread manifest of the in-chat `orquester` server (unified MCP design 2026-10-15 §9.4):
  * which chat tools ONE provider session of a thread advertises — every chat tool, but no
- * always-Admin one to a workflow-owned chat (§5.4), and the box tools only while a box can be
- * rented (Ephemeral AI VMs §13) — its instruction block (§10) and the MCP
- * servers it must deny (§12.1). The agent host asks for it at every provider-session start
+ * always-Admin one to a workflow-owned chat (§5.4), the box tools only while a box can be
+ * rented (Ephemeral AI VMs §13), and the knowledge tools only while the Knowledge Graph plugin is
+ * on (its spec, "Agent tools") — its instruction block (§10) and the MCP servers it must deny
+ * (§12.1). The agent host asks for it at every provider-session start
  * (`daemonRoutesForHost.sessionToolsManifest`) and is handed a new one when the daemon pushes one
  * (`agentHostRoutes.sessionToolsRefresh`).
  *
@@ -18,7 +19,7 @@ import type { AgentAdapterId } from "@orquester/api/agent-chat";
 
 import type { SessionToolsManifest } from "../agent-host/host-protocol.ts";
 import type { AnyOrquesterTool } from "../mcp/catalog/contract.ts";
-import { composeOrquesterInstructions } from "./instructions.ts";
+import { composeOrquesterInstructions, KNOWLEDGE_WORKER_INSTRUCTIONS } from "./instructions.ts";
 
 /** The thread a manifest is for, as the daemon's records say. */
 export interface ManifestThread {
@@ -50,7 +51,29 @@ export interface ManifestInput {
   daemonPointing: readonly DaemonPointingServer[];
   /** boxes: whether temporary boxes can be rented now (the Ephemeral AI VMs plugin is wired); absent = no. */
   boxesAvailable?: boolean;
+  /** Knowledge Graph: the plugin's view of this chat; absent = the plugin is off. */
+  knowledge?: ManifestKnowledge;
 }
+
+/** Knowledge Graph plugin: what the manifest needs to know about one chat (`knowledge/visibility.ts` builds it). */
+export interface ManifestKnowledge {
+  /** The plugin is enabled on this server: its chat tools are advertised. */
+  enabled: boolean;
+  /**
+   * One of the plugin's worker sessions (`owner.kind === "knowledge-indexer"`): it is advertised
+   * the two worker tools and nothing else, with {@link KNOWLEDGE_WORKER_INSTRUCTIONS} as its block.
+   */
+  worker: boolean;
+  /** The chat can see something (Global, or a profile ticking a collection that exists): `knowledge_search` and `knowledge_get` are advertised. */
+  searchable: boolean;
+  /** The names of the collections it sees (the knowledge line; none = no line). */
+  visibleCollectionNames: readonly string[];
+}
+
+/** The two tools only a knowledge worker session is advertised. */
+export const KNOWLEDGE_WORKER_TOOLS: readonly string[] = ["knowledge_worker_next_task", "knowledge_worker_submit"];
+/** The knowledge tools a chat that sees no collection is not advertised (saving and listing collections stay). */
+export const KNOWLEDGE_SEARCH_TOOLS: readonly string[] = ["knowledge_search", "knowledge_get"];
 
 /** True when a tool is Admin whatever its arguments — never advertised to a workflow-owned chat (§5.4). */
 export function alwaysAdmin(tool: AnyOrquesterTool): boolean {
@@ -60,10 +83,21 @@ export function alwaysAdmin(tool: AnyOrquesterTool): boolean {
 /**
  * The chat tools a thread advertises, in catalog order: all of them, less the always-Admin ones for
  * a workflow-owned chat — and (boxes) less the `boxes` toolset while no box can be rented, so no
- * chat pays for tools it cannot use.
+ * chat pays for tools it cannot use. Knowledge Graph: the `knowledge` toolset only while the plugin
+ * is on, without `knowledge_search`/`knowledge_get` for a chat that sees no collection, and never
+ * the worker tools; a worker session gets ONLY the worker tools.
  */
-export function advertisedChatTools(catalog: readonly AnyOrquesterTool[], workflowOwned: boolean, boxesAvailable = false): string[] {
-  return catalog.filter((tool) => !(workflowOwned && alwaysAdmin(tool)) && (boxesAvailable || tool.toolset !== "boxes")).map((tool) => tool.name);
+export function advertisedChatTools(catalog: readonly AnyOrquesterTool[], workflowOwned: boolean, boxesAvailable = false, knowledge?: ManifestKnowledge): string[] {
+  if (knowledge?.worker === true) return catalog.filter((tool) => KNOWLEDGE_WORKER_TOOLS.includes(tool.name)).map((tool) => tool.name);
+  const knowledgeTool = (tool: AnyOrquesterTool): boolean => {
+    if (KNOWLEDGE_WORKER_TOOLS.includes(tool.name)) return false;
+    if (tool.toolset !== "knowledge") return true;
+    if (knowledge?.enabled !== true) return false;
+    return knowledge.searchable || !KNOWLEDGE_SEARCH_TOOLS.includes(tool.name);
+  };
+  return catalog
+    .filter((tool) => !(workflowOwned && alwaysAdmin(tool)) && (boxesAvailable || tool.toolset !== "boxes") && knowledgeTool(tool))
+    .map((tool) => tool.name);
 }
 
 const samePath = (a: string, b: string): boolean => a !== "" && b !== "" && resolve(a) === resolve(b);
@@ -119,9 +153,15 @@ export function denyFor(thread: ManifestThread, servers: readonly DaemonPointing
 
 /** The manifest of one thread. */
 export function buildSessionToolsManifest(input: ManifestInput): SessionToolsManifest {
-  return {
-    tools: advertisedChatTools(input.catalog, input.thread.workflowOwned, input.boxesAvailable === true),
-    instructions: composeOrquesterInstructions({ workflowOwned: input.thread.workflowOwned }),
-    deny: denyFor(input.thread, input.daemonPointing)
-  };
+  const knowledge = input.knowledge;
+  const tools = advertisedChatTools(input.catalog, input.thread.workflowOwned, input.boxesAvailable === true, knowledge);
+  const instructions =
+    knowledge?.worker === true
+      ? KNOWLEDGE_WORKER_INSTRUCTIONS
+      : composeOrquesterInstructions({
+          workflowOwned: input.thread.workflowOwned,
+          // The line names knowledge_search: only where it is advertised.
+          ...(knowledge?.enabled === true && tools.includes("knowledge_search") ? { knowledgeCollections: knowledge.visibleCollectionNames } : {})
+        });
+  return { tools, instructions, deny: denyFor(input.thread, input.daemonPointing) };
 }
