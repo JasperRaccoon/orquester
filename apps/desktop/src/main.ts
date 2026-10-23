@@ -24,6 +24,7 @@ import {
   VISUAL_SCHEME,
   type NavigationAction
 } from "./navigation";
+import { pipeHttpStream } from "./http-stream";
 import { applicationMenuTemplate, contextMenuTemplate } from "./menus";
 import {
   badgeDescription,
@@ -583,24 +584,19 @@ function openStreamOverSocket(event: IpcMainEvent, { streamId, path: streamPath 
     return;
   }
 
-  const req = http.request({ socketPath: daemonSocketPath, path: streamPath, method: "GET" }, (res) => {
-    res.setEncoding("utf8");
-    res.on("data", (chunk: string) => {
+  const req = http.request({ socketPath: daemonSocketPath, path: streamPath, method: "GET" });
+  // The embedded daemon restarting cuts the stream mid-body: reported at once, like the remote path.
+  pipeHttpStream(req, {
+    data: (chunk) => {
       if (!event.sender.isDestroyed()) {
         event.sender.send("orquester:stream:data", { streamId, chunk });
       }
-    });
-    res.on("end", () => {
+    },
+    end: (status) => {
       streams.delete(streamId);
       if (!event.sender.isDestroyed()) {
-        event.sender.send("orquester:stream:end", { streamId });
+        event.sender.send("orquester:stream:end", status === undefined ? { streamId } : { streamId, status });
       }
-    });
-  });
-  req.on("error", () => {
-    streams.delete(streamId);
-    if (!event.sender.isDestroyed()) {
-      event.sender.send("orquester:stream:end", { streamId });
     }
   });
   req.end();
@@ -698,36 +694,18 @@ function openHttpStream(
     return;
   }
 
-  const req = httpModuleFor(target).request(target, { method: "GET", headers: headers || {} }, (res) => {
-    const status = res.statusCode ?? 0;
-    if (status >= 400) {
-      // An error answer is not stream content: drop its body and report the status instead.
-      res.resume();
-      res.on("end", () => {
-        streams.delete(streamId);
-        if (!event.sender.isDestroyed()) {
-          event.sender.send("orquester:http-stream:end", { streamId, status });
-        }
-      });
-      return;
-    }
-    res.setEncoding("utf8");
-    res.on("data", (chunk: string) => {
+  const req = httpModuleFor(target).request(target, { method: "GET", headers: headers || {} });
+  pipeHttpStream(req, {
+    data: (chunk) => {
       if (!event.sender.isDestroyed()) {
         event.sender.send("orquester:http-stream:data", { streamId, chunk });
       }
-    });
-    res.on("end", () => {
+    },
+    end: (status) => {
       streams.delete(streamId);
       if (!event.sender.isDestroyed()) {
-        event.sender.send("orquester:http-stream:end", { streamId });
+        event.sender.send("orquester:http-stream:end", status === undefined ? { streamId } : { streamId, status });
       }
-    });
-  });
-  req.on("error", () => {
-    streams.delete(streamId);
-    if (!event.sender.isDestroyed()) {
-      event.sender.send("orquester:http-stream:end", { streamId });
     }
   });
   req.end();

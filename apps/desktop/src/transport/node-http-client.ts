@@ -6,6 +6,7 @@ import type {
   HttpClientStreamHandle,
   HttpClientStreamHandlers
 } from "@orquester/ui";
+import { endBridgeStream } from "./stream-status";
 import { binaryBodyToArrayBuffer, type DesktopBridge } from "./unix-socket-transporter";
 
 /**
@@ -93,10 +94,7 @@ export class NodeHttpClient implements HttpClient {
         offEnd();
         // A refusal (a 401 for a revoked token, say) is no stream: report it so the caller can
         // stop retrying rather than reconnect forever.
-        if (typeof status === "number" && Number.isInteger(status) && status >= 400) {
-          handlers.onError?.(Object.assign(new Error(`The stream failed with status ${status}.`), { status }));
-        }
-        handlers.onEnd();
+        endBridgeStream(status, handlers);
       }
     });
 
