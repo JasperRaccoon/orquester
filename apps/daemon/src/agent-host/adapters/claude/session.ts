@@ -53,6 +53,7 @@ import type {
 } from "../../adapter.ts";
 import { parseInitializationCommands, withSynthesisedCommands } from "./probe.ts";
 import { AGENT_HOST_DEADLINES, TURN_LIVENESS_WINDOWS, withDeadline } from "../../support/deadline.ts";
+import { ProviderLeftovers } from "../../support/provider-leftovers.ts";
 import { StderrCapture } from "../../support/stderr.ts";
 import {
   FileTail,
@@ -298,6 +299,8 @@ export class ClaudeSession {
   private readonly stderr: StderrCapture;
 
   private query: Query | undefined;
+  /** This launch's leftover sweep (local launches only). */
+  private leftovers: ProviderLeftovers | null = null;
   /** The handshake's `commands` (`catalog()`); unset until it answered. */
   private initCommands: SlashCommand[] | undefined;
   private record: ProviderSession;
@@ -558,6 +561,11 @@ export class ClaudeSession {
 
     this.emit([this.normalizer.sessionStarted(this.options.resumeCursor)]);
 
+    // The CLI's MCP servers (and what they start) are stopped at every end of this launch;
+    // never the user's work, nor a shared daemon (`support/provider-leftovers.ts`). Not in a box.
+    if (box === undefined) {
+      this.leftovers = new ProviderLeftovers({ env: this.options.env, label: "claude", logger: this.options.context.logger });
+    }
     try {
       this.query = this.options.deps.query({
         prompt: this.promptQueue,
@@ -734,6 +742,11 @@ export class ClaudeSession {
         // so the turn's own events are out first, and against the turn that
         // ended — read before the frame settles it.
         const endsTurn = (message as { type?: unknown }).type === "result";
+        // The CLI's helpers: its children at its first `init` — its MCP servers, before any
+        // tool of the turn ran — then, at each turn's end, what those helpers started since.
+        if (endsTurn || isSystemInit(message)) {
+          void this.leftovers?.recordHelpers();
+        }
         const endingTurnId = endsTurn ? this.normalizer.turnState?.turnId : undefined;
         try {
           this.emit(this.normalizer.handleMessage(message));
@@ -1550,7 +1563,11 @@ export class ClaudeSession {
       // thread whose turn is already settled.
       step("background shells", () => this.stopAllBackgroundShells());
       step("workflow transcripts", () => this.stopAllWorkflowTails());
+      // A CLI that never saw a turn has only helpers: recorded now, if it still lives (after a
+      // turn, this only follows what the helpers recorded at its `init` started since).
+      step("the helpers", () => void this.leftovers?.recordHelpers());
       step("the query", () => this.closeQuery());
+      step("the leftovers", () => void this.leftovers?.sweep());
       step("the prompt queue", () => this.promptQueue.close());
 
       step("live tasks", () => this.emit(this.normalizer.closeLiveTasks()));
@@ -2977,4 +2994,10 @@ function isInterruptLikeError(error: unknown): boolean {
 function claudeRequestKey(requestId: string | undefined, fallback: () => string): string {
   const trimmed = typeof requestId === "string" ? requestId.trim() : "";
   return trimmed.length > 0 ? trimmed : fallback();
+}
+
+/** The CLI's `system/init` frame: its MCP servers are started, no tool of the turn has run. */
+function isSystemInit(message: unknown): boolean {
+  const frame = message as { type?: unknown; subtype?: unknown } | null;
+  return frame !== null && frame.type === "system" && frame.subtype === "init";
 }

@@ -458,8 +458,9 @@ export async function startAgentHost(
         // One marker per launch — every call builds one child's env — and
         // never the injectable `uuid()`, whose deterministic test ids two
         // hosts could share. Every adapter's provider and what it starts carry
-        // it, so Settings → System can reach what outlives the provider; only
-        // the Grok adapter sweeps by it (it stamps its own value over this one).
+        // it, so Settings → System can reach what outlives the provider; the
+        // adapters sweep by it at a session's end (Grok stamps its own value over
+        // this one; the others: `support/provider-leftovers.ts`).
         launchId: randomUUID(),
         // Checked per spawn: the plugin can be turned on while the host runs.
         nodePreloadPath: providerNodePreload(appdir)

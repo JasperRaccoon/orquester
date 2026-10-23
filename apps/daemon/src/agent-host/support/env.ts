@@ -105,9 +105,10 @@ interface BuildProviderEnvInput {
    * value per provider launch — never the injectable `uuid()` — which every
    * process the provider starts inherits. It is how Settings → System finds
    * what a provider CLI left running once no root reaches it (a Claude chat's
-   * background shells outlive its CLI, as a Grok chat's do), and how the Grok
-   * adapter finds what to sweep. Only Grok sweeps; for every other adapter it
-   * is a marker and nothing more.
+   * background shells outlive its CLI, as a Grok chat's do), and how an
+   * adapter finds what to sweep at a session's end: Grok its own way, Claude,
+   * Codex and OpenCode through `provider-leftovers.ts` (the CLI's helpers and
+   * its own group, never the user's later work nor a shared daemon).
    */
   launchId: string;
   /**
