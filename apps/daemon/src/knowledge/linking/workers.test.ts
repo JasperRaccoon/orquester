@@ -175,6 +175,19 @@ describe("WorkerPool", () => {
     assert.equal(h.broker.counts().answered, 2);
   });
 
+  it("a run that ends while the pool is paused leaves no timer behind", async () => {
+    const h = await harness({ concurrency: 1, accounts: ["a1"], behaviour: { a1: { limitAfter: 1, resetsAt: "2026-10-23T11:00:00.000Z" } } });
+    await h.addTasks(2);
+    await h.untilEvent((e) => e.kind === "paused");
+    await flushAsync(10);
+    h.broker.finish("run-finished");
+    await h.pool.settle(60_000);
+    const after = h.events.length;
+    await h.clock.advance(2 * 60 * 60_000);
+    await flushAsync(10);
+    assert.deepEqual(h.events.slice(after), [], "no resume (or anything else) after the run ended");
+  });
+
   it("says no-account when there is no Claude account at all", async () => {
     const h = await harness({ concurrency: 1, accounts: [] });
     await h.addTasks(1);

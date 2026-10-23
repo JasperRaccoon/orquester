@@ -177,9 +177,15 @@ export class WorkerPool<C extends WorkerCandidate = WorkerCandidate> {
     for (let i = 0; i < Math.min(wanted, room); i += 1) void this.startOne();
   }
 
-  /** Resolves once no chat runs or starts, or after `timeoutMs` (then the rest are stopped). */
+  /**
+   * The run ended: resolves once no chat runs or starts, or after `timeoutMs` (then the rest are
+   * stopped). Either way the pool is done: no pause or retry timer, nor its broker listener, outlives it.
+   */
   settle(timeoutMs: number): Promise<void> {
-    if (this.size === 0) return Promise.resolve();
+    if (this.size === 0) {
+      this.quiesce();
+      return Promise.resolve();
+    }
     return new Promise<void>((resolve) => {
       const timer = this.options.clock.setTimeout(() => {
         this.idleWaiters.delete(done);
@@ -187,6 +193,7 @@ export class WorkerPool<C extends WorkerCandidate = WorkerCandidate> {
       }, timeoutMs);
       const done = (): void => {
         timer.cancel();
+        this.quiesce();
         resolve();
       };
       this.idleWaiters.add(done);
@@ -195,12 +202,7 @@ export class WorkerPool<C extends WorkerCandidate = WorkerCandidate> {
 
   /** Ends every chat (interrupted, closed) and starts no more. */
   async stop(): Promise<void> {
-    this.stopped = true;
-    this.offBroker();
-    this.paused?.until.cancel();
-    this.paused = null;
-    this.retry?.cancel();
-    this.retry = null;
+    this.quiesce();
     const ending = [...this.workers.values()].map(async (worker) => {
       worker.abort.abort();
       this.options.broker.release(worker.record.sessionId);
@@ -215,18 +217,23 @@ export class WorkerPool<C extends WorkerCandidate = WorkerCandidate> {
    * the agent host, and the next start adopts them (`adopt`).
    */
   detach(): void {
-    this.stopped = true;
-    this.offBroker();
-    this.paused?.until.cancel();
-    this.paused = null;
-    this.retry?.cancel();
-    this.retry = null;
+    this.quiesce();
     for (const worker of this.workers.values()) worker.abort.abort();
     this.workers.clear();
     this.checkIdle();
   }
 
   // --- internals ---------------------------------------------------------------------------------
+
+  /** Starts nothing any more: the broker listener and the pause and retry timers go. */
+  private quiesce(): void {
+    this.stopped = true;
+    this.offBroker();
+    this.paused?.until.cancel();
+    this.paused = null;
+    this.retry?.cancel();
+    this.retry = null;
+  }
 
   private now(): string {
     return this.options.clock.now().toISOString();
