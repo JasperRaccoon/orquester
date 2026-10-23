@@ -13,7 +13,7 @@
  * - `KNOWLEDGE_CHANNEL` **events**, routed here by the app store's
  *   `applyEvent`: `knowledge.status` replaces the status, `knowledge.changed`
  *   refetches what it names (collections; entries, which also move collection
- *   counts; the graph).
+ *   counts, and with `collections` the graph's colours; the graph).
  *
  * Every write is validated first (`validate.ts`). An answer never undoes a
  * change that landed while it was in flight: each slot carries a sequence
@@ -221,7 +221,9 @@ export function applyKnowledgeEvent(event: EventMessage): void {
   if (!change) return;
   const entriesChanged = change.entryIds !== undefined;
   if (entriesChanged) bumpEntries(change.entryIds!.length > 0 ? change.entryIds! : null);
-  if (change.graph) bumpGraph();
+  // Entries relabelled or deleted (anywhere: `collections` comes with them) recolour or drop
+  // concepts at once, as this client's own edits do; a linking run reloads the graph.
+  if (change.graph || (entriesChanged && change.collections)) bumpGraph();
   // Entry changes move collection counts (added, relabelled, deleted).
   if ((change.collections || entriesChanged) && client) quietly(loadKnowledgeCollections(client));
 }

@@ -267,6 +267,16 @@ export function entryFormOf(entry: KnowledgeEntry): EntryForm {
 }
 
 const utf8Bytes = (text: string) => new TextEncoder().encode(text).length;
+
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+const ISO_DATE_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:\d{2})?$/;
+
+/** An ISO date (`2026-10-11`) or date-time, as the daemon accepts for `postedAt`. */
+function isIsoDate(text: string): boolean {
+  const dateOnly = ISO_DATE.test(text);
+  if (!dateOnly && !ISO_DATE_TIME.test(text)) return false;
+  return Number.isFinite(Date.parse(dateOnly ? `${text}T00:00:00Z` : text));
+}
 const optional = (value: string): string | null => (value.trim() ? value.trim() : null);
 
 /**
@@ -275,13 +285,14 @@ const optional = (value: string): string | null => (value.trim() ? value.trim() 
  */
 export function entryFormPatch(entry: KnowledgeEntry, form: EntryForm): { patch: UpdateKnowledgeEntryRequest } | { error: string } {
   const title = form.title.trim();
+  if (!title) return { error: "Give the entry a title." };
   if (title.length > KNOWLEDGE_TITLE_MAX) return { error: `Titles are at most ${KNOWLEDGE_TITLE_MAX} characters.` };
   if (!form.body.trim()) return { error: "The text cannot be empty." };
   if (utf8Bytes(form.body) > KNOWLEDGE_ENTRY_MAX_BYTES) return { error: "The text is too long." };
   const url = optional(form.url);
   if (url && !/^https?:\/\/\S+$/i.test(url)) return { error: "The URL must start with http:// or https://." };
   const postedAt = optional(form.postedAt);
-  if (postedAt && !Number.isFinite(new Date(postedAt).getTime())) return { error: "The date is not a date (use YYYY-MM-DD)." };
+  if (postedAt && !isIsoDate(postedAt)) return { error: "The date is not a date (use YYYY-MM-DD)." };
 
   const patch: UpdateKnowledgeEntryRequest = {};
   if (title !== entry.title) patch.title = title;

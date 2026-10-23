@@ -157,6 +157,14 @@ describe("the knowledge store", () => {
     assert.equal(state().entriesRevision, 0);
   });
 
+  it("entries relabelled or deleted elsewhere (entry ids with collections) recolour the graph at once", () => {
+    applyKnowledgeEvent(event(KNOWLEDGE_CHANNEL, KNOWLEDGE_CHANGED_EVENT, { entryIds: ["ke_1"], collections: true }));
+    assert.equal(state().entriesRevision, 1);
+    assert.equal(state().graphRevision, 1, "as this client's own relabel or delete does");
+    applyKnowledgeEvent(event(KNOWLEDGE_CHANNEL, KNOWLEDGE_CHANGED_EVENT, { entryIds: ["ke_1"] }));
+    assert.equal(state().graphRevision, 1, "a text edit re-links later");
+  });
+
   it("an entries change with no ids means any entry", () => {
     applyKnowledgeEvent(event(KNOWLEDGE_CHANNEL, KNOWLEDGE_CHANGED_EVENT, { entryIds: [] }));
     assert.equal(state().changedEntryIds, null);
