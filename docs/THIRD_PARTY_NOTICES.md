@@ -81,6 +81,19 @@ SOFTWARE.
 
 ---
 
+## pele 1.9.0 — MIT
+
+Chat Mermaid diagrams (`packages/ui/src/components/agent-chat/timeline/markdown/MermaidBlock.tsx`)
+are drawn by [pele](https://github.com/obsidianmd/pele) (Copyright (c) 2026
+kepano, MIT), installed from npm as `pele@1.9.0` (pinned exactly) and bundled
+**unmodified** into the web and desktop clients by `packages/ui`, one lazily
+loaded chunk per diagram type. Pele has no runtime dependencies. The specs and
+grammar files it derives from Mermaid are MIT licensed as well. Its licence text
+ships in the package (`node_modules/pele/LICENSE`); a redistribution must keep
+that notice.
+
+---
+
 ## noVNC 1.7.0 — MPL-2.0
 
 The Desktop tab (`docs/superpowers/specs/2026-09-30-desktop-tab-design.md`)

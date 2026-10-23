@@ -802,6 +802,37 @@
 }
 
 /*
+ * Mermaid diagrams (`MermaidBlock`): pele paints every diagram with these
+ * variables, so a diagram follows the colour scheme and mode like the rest of
+ * the chat, and a theme switch repaints it without drawing it again. The
+ * neutral steps are the code block's own: its surface is `neutral-900`, and
+ * every scheme (light ones invert the scale) re-points `--n-*`. Charts take
+ * their series from the semantic hues.
+ */
+.ac-mermaid {
+  --pele-bg: rgb(var(--n-900));
+  --pele-fg: rgb(var(--n-200));
+  --pele-muted: rgb(var(--n-400));
+  --pele-line: rgb(var(--n-400));
+  --pele-surface: rgb(var(--n-800));
+  --pele-surface-alt: rgb(var(--n-700));
+  --pele-border: rgb(var(--n-600));
+  --pele-accent: rgb(var(--sem-info-400));
+  --pele-critical: rgb(var(--sem-danger-400));
+  --pele-error: rgb(var(--sem-danger-400));
+  --pele-series-1: rgb(var(--sem-info-400));
+  --pele-series-2: rgb(var(--sem-ok-400));
+  --pele-series-3: rgb(var(--sem-warn-400));
+  --pele-series-4: rgb(var(--sem-danger-400));
+  --pele-series-5: var(--gh-merged);
+  --pele-series-6: var(--git-renamed);
+  --pele-series-7: var(--git-conflict);
+  --pele-series-8: rgb(var(--n-400));
+  --pele-font: inherit;
+  --pele-font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+/*
  * `.ac-fade-top` — the hairline fade under the status line, so rows dissolve
  * into the chrome instead of being guillotined by it. Mask, not a gradient
  * overlay: an overlay would have to re-blend every frame a streaming row

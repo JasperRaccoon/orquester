@@ -1,112 +1,149 @@
-// Ported from T3 Code (MIT): apps/web/src/components/chat/MermaidDiagram.tsx
-// (the DOMPurify pass and the standalone-SVG blob), hardened further here.
+// Adapted from T3 Code (MIT): apps/web/src/components/chat/MermaidDiagram.tsx
+// (the two DOMPurify profiles, the KaTeX MathML allowlist and the standalone-SVG blob).
 
 import DOMPurify from "dompurify";
 
 /**
- * What happens to Mermaid's SVG between the engine and the page (spec §4).
+ * What happens to a diagram's SVG between pele and the page (spec §4).
  *
- * Diagram source is untrusted model output. Mermaid's own
- * `securityLevel: "strict"` is the first line; this is the second: strip
+ * Diagram source is untrusted model output. Pele escapes label text, and the
+ * chat mounts it with links and images off; this is the second line: strip
  * anything that can navigate, run script or fetch remote content, whatever
- * Mermaid emitted. The SVG is then mounted as markup, so this pass is what
- * stands between a hostile diagram and the page.
+ * pele emitted. Pele hands each render to the sanitiser and mounts the node
+ * it returns, so this pass is what stands between a hostile diagram and the
+ * page.
  */
 
 /** A CSS `url(...)` that is not a same-document `url(#id)` reference. */
 const REMOTE_CSS_URL = /url\(\s*(?!['"]?#)[^)]*\)/gi;
 
+/**
+ * MathML elements KaTeX emits, without `annotation` (the math resolver removes
+ * it), `semantics` (only a wrapper, so its content is kept) and `mglyph` (an
+ * image).
+ */
+export const KATEX_MATHML_TAGS: ReadonlySet<string> = new Set([
+  "math", "menclose", "mfrac", "mi", "mlabeledtr", "mn", "mo", "mover", "mpadded", "mphantom",
+  "mroot", "mrow", "mspace", "msqrt", "mstyle", "msub", "msubsup", "msup", "mtable", "mtd",
+  "mtext", "mtr", "munder", "munderover"
+]);
+
+/** Presentation attributes KaTeX sets on those elements; the profiles already cover class, style, width, height, display and xmlns. */
+export const KATEX_MATHML_ATTRIBUTES: ReadonlySet<string> = new Set([
+  "accent", "accentunder", "columnalign", "columnlines", "columnspacing", "depth", "displaystyle",
+  "fence", "largeop", "linebreak", "linethickness", "lspace", "mathbackground", "mathcolor",
+  "mathsize", "mathvariant", "maxsize", "minsize", "notation", "rowlines", "rowspacing", "rspace",
+  "scriptlevel", "separator", "stretchy", "voffset"
+]);
+
+const FORBID_ATTR = ["href", "xlink:href", "src", "srcset"];
+
 type Purifier = ReturnType<typeof DOMPurify>;
 
+export interface DiagramSanitizers {
+  /** A diagram without math: SVG only; no `<foreignObject>`, no `<style>`. */
+  plain(svg: string): Node;
+  /**
+   * A diagram with `$$` labels: pele puts each label's MathML in a
+   * `<foreignObject>` with an HTML `<div>` around it, so that integration
+   * point and KaTeX's MathML (and nothing else of HTML that can load or
+   * navigate) are allowed. DOMPurify still accepts `<math>` only under an HTML
+   * parent and checks every MathML child's namespace.
+   */
+  math(svg: string): Node;
+}
+
 /**
- * Builds a sanitiser bound to one window. Remote `url(...)` in CSS is replaced
- * with `none`, keeping only local `url(#id)` references (markers, gradients);
- * `<a>`, `<img>`, `<image>` and `<script>` are dropped; `href`, `xlink:href`,
- * `src` and `srcset` never survive (DOMPurify drops `<use>` itself, so no
- * Mermaid output needs a reference attribute). Label text is untouched.
+ * Builds both sanitisers, bound to one window. Remote `url(...)` in an inline
+ * style becomes `none` (pele emits none, but a style the diagram itself sets
+ * goes through here too); `<a>`, `<img>`, `<image>`, `<script>` and `<style>`
+ * are dropped; `href`, `xlink:href`, `src` and `srcset` never survive. Label
+ * text is untouched. Each returns a fragment for pele to mount.
  */
-export function createMermaidSvgSanitizer(win: Window & typeof globalThis): (svg: string) => string {
+export function createDiagramSanitizers(win: Window & typeof globalThis): DiagramSanitizers {
   let purifier: Purifier | null = null;
-  return (svg) => {
+  const get = (): Purifier => {
     if (!purifier) {
       const created = DOMPurify(win);
-      created.addHook("uponSanitizeElement", (node, data) => {
-        if (data.tagName === "style" && node.textContent) {
-          node.textContent = node.textContent.replace(REMOTE_CSS_URL, "none");
-        }
-      });
       created.addHook("uponSanitizeAttribute", (_node, data) => {
-        if (data.attrName === "style") {
-          data.attrValue = data.attrValue.replace(REMOTE_CSS_URL, "none");
-        }
+        if (data.attrName === "style") data.attrValue = data.attrValue.replace(REMOTE_CSS_URL, "none");
       });
       purifier = created;
     }
-    return purifier.sanitize(svg, {
-      ADD_TAGS: ["foreignObject"],
-      HTML_INTEGRATION_POINTS: { foreignobject: true },
-      FORBID_ATTR: ["href", "xlink:href", "src", "srcset"],
-      FORBID_TAGS: ["a", "img", "image", "script"],
-      USE_PROFILES: { svg: true, svgFilters: true, html: true }
-    });
+    return purifier;
+  };
+  return {
+    plain: (svg) =>
+      get().sanitize(svg, {
+        FORBID_ATTR,
+        FORBID_TAGS: ["a", "image", "foreignObject", "style", "script"],
+        USE_PROFILES: { svg: true, svgFilters: true },
+        RETURN_DOM_FRAGMENT: true
+      }),
+    math: (svg) =>
+      get().sanitize(svg, {
+        ADD_TAGS: ["foreignObject", ...KATEX_MATHML_TAGS],
+        ADD_ATTR: (attribute: string, tagName: string) =>
+          KATEX_MATHML_TAGS.has(tagName) && KATEX_MATHML_ATTRIBUTES.has(attribute),
+        HTML_INTEGRATION_POINTS: { foreignobject: true },
+        FORBID_ATTR,
+        FORBID_TAGS: ["a", "img", "image", "script", "style"],
+        USE_PROFILES: { svg: true, svgFilters: true, html: true },
+        RETURN_DOM_FRAGMENT: true
+      })
   };
 }
 
-/** An id this module can rename and find again in a reference: Mermaid's are all of this shape. */
-const RENAMABLE_ID = /^[A-Za-z_][\w-]*$/;
+/** The colours and fonts pele reads from CSS, which a standalone image cannot inherit. */
+export const PELE_VARIABLES = [
+  "--pele-bg",
+  "--pele-fg",
+  "--pele-muted",
+  "--pele-line",
+  "--pele-surface",
+  "--pele-surface-alt",
+  "--pele-border",
+  "--pele-accent",
+  "--pele-critical",
+  "--pele-error",
+  "--pele-font",
+  "--pele-font-mono",
+  ...Array.from({ length: 8 }, (_, index) => `--pele-series-${index + 1}`)
+] as const;
 
-/**
- * One mount's copy of a cached diagram, every element id suffixed. The cache
- * hands the same SVG to each row that shows the diagram, and ids are
- * document-wide: two copies (a repeated fence, a kept-alive tab) would share
- * marker and style ids, so a `url(#…)` arrowhead or an `#id` style in one
- * copy would resolve to the other — broken, or gone with it when that copy is
- * hidden. The ids and every reference to them — `url(#id)`, an `#id` selector
- * in the diagram's `<style>`, `aria-labelledby`/`aria-describedby` — are
- * renamed together; `href` never survives sanitising, so there is no other.
- */
-export function uniquifySvgIds(svg: string, suffix: string): string {
-  const ids = new Set<string>();
-  for (const match of svg.matchAll(/\sid="([^"]+)"/g)) {
-    if (RENAMABLE_ID.test(match[1]!)) ids.add(match[1]!);
-  }
-  if (ids.size === 0) return svg;
-  const renamed = (id: string) => (ids.has(id) ? `${id}-${suffix}` : id);
-  return svg
-    .replace(/(\sid=")([^"]+)(")/g, (_all, open: string, id: string, close: string) => `${open}${renamed(id)}${close}`)
-    .replace(/#([A-Za-z_][\w-]*)/g, (all, id: string) => (ids.has(id) ? `#${renamed(id)}` : all))
-    .replace(
-      /(\saria-(?:labelledby|describedby)=")([^"]*)(")/g,
-      (_all, open: string, list: string, close: string) => `${open}${list.split(/\s+/).map(renamed).join(" ")}${close}`
-    );
-}
-
-/** The DOM constructors `standaloneSvg` needs; a browser `window` satisfies it. */
+/** The DOM pieces `standaloneSvg` needs; a browser `window` satisfies it. */
 export interface SvgDomEnvironment {
-  DOMParser: typeof DOMParser;
+  getComputedStyle(element: Element): CSSStyleDeclaration;
   XMLSerializer: typeof XMLSerializer;
 }
 
 /**
- * A rendered diagram as a self-contained SVG document with a fixed size and an
- * opaque background, for the expanded viewer. Mermaid's inline SVG is
- * `width="100%"` with a `max-width` style, which collapses outside its host.
- *
- * `svg` is DOMPurify's output, which is **HTML** markup (U+00A0 comes out as
- * `&nbsp;`, an entity XML does not define), so it is parsed as HTML and the
- * element re-serialised as XML. Parsing it as XML would turn any non-breaking
- * space in a label into a parser error and a broken image. Throws when there
- * is no SVG to serialise.
+ * A mounted diagram as a self-contained SVG document, for the expanded
+ * viewer: an image cannot inherit the page's `--pele-*` variables, so their
+ * resolved values (and the resolved font) are written onto the copy, with a
+ * fixed size from the viewBox and an opaque background. The mounted SVG is
+ * left alone.
  */
-export function standaloneSvg(svg: string, env: SvgDomEnvironment, background: string): string {
-  const element = new env.DOMParser().parseFromString(svg, "text/html").querySelector("svg");
-  if (!element) throw new Error("The diagram could not be prepared for viewing.");
+export function standaloneSvg(svg: SVGSVGElement, env: SvgDomEnvironment, background: string): string {
+  const element = svg.cloneNode(true) as SVGSVGElement;
+  const computed = env.getComputedStyle(svg);
+  for (const name of PELE_VARIABLES) {
+    const value = computed.getPropertyValue(name).trim();
+    if (value && value !== "inherit") element.style.setProperty(name, value);
+  }
+  const font = computed.getPropertyValue("font-family").trim();
+  if (font) element.style.setProperty("--pele-font", font);
   const viewBox = element.getAttribute("viewBox")?.trim().split(/\s+/).map(Number);
   if (viewBox?.length === 4 && viewBox.every(Number.isFinite)) {
     element.setAttribute("width", String(viewBox[2]));
     element.setAttribute("height", String(viewBox[3]));
   }
-  element.setAttribute("style", `max-width:none;background-color:${background}`);
+  element.style.maxWidth = "none";
+  element.style.backgroundColor = background;
+  // Pele's math labels sit in an HTML `<div xmlns="…">`. Parsed as HTML, that
+  // `xmlns` is a plain attribute, and the serialiser would write it next to
+  // the declaration it adds itself: a duplicate attribute, a broken image.
+  for (const node of Array.from(element.querySelectorAll("[xmlns]"))) node.removeAttribute("xmlns");
   // The serialiser supplies the SVG namespace declaration itself.
   return new env.XMLSerializer().serializeToString(element);
 }
@@ -117,8 +154,9 @@ export function standaloneSvg(svg: string, env: SvgDomEnvironment, background: s
  * fetches, and the production `img-src` allows `blob:`. The caller owns the
  * URL and must `URL.revokeObjectURL` it.
  */
-export function createDiagramBlobUrl(svg: string): string {
-  const background = getComputedStyle(document.body).backgroundColor;
-  const markup = standaloneSvg(svg, { DOMParser, XMLSerializer }, background);
+export function createDiagramBlobUrl(svg: SVGSVGElement): string {
+  const view = svg.ownerDocument.defaultView ?? window;
+  const background = view.getComputedStyle(svg.ownerDocument.body).backgroundColor;
+  const markup = standaloneSvg(svg, { getComputedStyle: (element) => view.getComputedStyle(element), XMLSerializer: view.XMLSerializer }, background);
   return URL.createObjectURL(new Blob([markup], { type: "image/svg+xml" }));
 }
