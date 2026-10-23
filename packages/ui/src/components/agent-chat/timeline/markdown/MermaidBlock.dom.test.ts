@@ -3,36 +3,34 @@ import { after, before, beforeEach, describe, it } from "node:test";
 import { createElement } from "react";
 import { act } from "react-dom/test-utils";
 import { createRoot, type Root } from "react-dom/client";
-import { JSDOM } from "jsdom";
+import { JSDOM, VirtualConsole } from "jsdom";
 import { MermaidBlock } from "./MermaidBlock.tsx";
-import { createMermaidRenderer, type MermaidRenderer, type MermaidRenderResult } from "./mermaid-render.ts";
+import { loadPele, setPeleLoader, type PeleEngine } from "./mermaid-engine.ts";
 
 /**
- * Client rendering in jsdom: error boundaries and Suspense only run here, not
- * under `renderToStaticMarkup`.
+ * Client rendering in jsdom, with the real `pele`: effects, the mount and the
+ * error boundary only run here, not under `renderToStaticMarkup`.
  */
 
-const SVG = '<svg viewBox="0 0 10 10"><text>Hello diagram</text></svg>';
-const CODE = "graph TD\nA-->B";
+const FLOWCHART = 'flowchart LR\n  A[Start] --> B{Is it?}\n  B -->|Yes| C[OK]\n  click A "https://evil.example/"';
 
 let dom: JSDOM;
 let container: HTMLElement;
 let root: Root;
 const savedConsoleError = console.error;
-const globals = [
-  "window",
-  "document",
-  "HTMLElement",
-  "Node",
-  "navigator",
-  "DOMParser",
-  "XMLSerializer",
-  "getComputedStyle"
-] as const;
+const globals = ["window", "document", "HTMLElement", "Node", "navigator", "DOMParser", "XMLSerializer", "getComputedStyle"] as const;
 const saved = new Map<string, PropertyDescriptor | undefined>();
 
 before(() => {
-  dom = new JSDOM("<!doctype html><body></body>", { url: "http://localhost/" });
+  // Pele probes for a canvas to measure text and falls back without one; jsdom
+  // reports the missing canvas as an error, which is noise here.
+  const virtualConsole = new VirtualConsole();
+  virtualConsole.on("jsdomError", (error) => {
+    if (!/HTMLCanvasElement\.prototype\.getContext/.test(error.message)) savedConsoleError(error);
+  });
+  dom = new JSDOM("<!doctype html><body></body>", { url: "http://localhost/", virtualConsole });
+  // Pele waits for its host to have a width; jsdom lays nothing out.
+  Object.defineProperty(dom.window.HTMLElement.prototype, "clientWidth", { configurable: true, get: () => 640 });
   for (const name of globals) {
     saved.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
     Object.defineProperty(globalThis, name, {
@@ -48,6 +46,7 @@ before(() => {
 });
 
 after(() => {
+  setPeleLoader(null);
   for (const name of globals) {
     const descriptor = saved.get(name);
     if (descriptor) Object.defineProperty(globalThis, name, descriptor);
@@ -58,120 +57,171 @@ after(() => {
 });
 
 beforeEach(() => {
+  setPeleLoader(null);
   container = dom.window.document.createElement("div");
   dom.window.document.body.replaceChildren(container);
   root = createRoot(container);
 });
 
-function table(answer: MermaidRenderResult | "throw"): MermaidRenderer {
-  return {
-    size: 0,
-    start: () => Promise.resolve({ status: "rendered", svg: "" }),
-    invalidate() {},
-    read() {
-      if (answer === "throw") throw new Error("boom");
-      return answer;
-    }
-  };
-}
-
-const show = async (props: { code?: string; renderer: MermaidRenderer }): Promise<void> => {
+/** Renders the block and lets every load and mount settle. */
+const show = async (props: { code?: string; mode?: "light" | "dark"; streaming?: boolean } = {}): Promise<void> => {
   await act(async () => {
-    root.render(createElement(MermaidBlock, { code: CODE, streaming: false, mode: "dark", ...props }));
+    root.render(createElement(MermaidBlock, { code: FLOWCHART, streaming: false, mode: "dark", ...props }));
+  });
+  // The renderer and the diagram's type chunk load over several ticks.
+  for (let index = 0; index < 5; index += 1) {
+    await act(async () => {
+      await loadPele().catch(() => undefined);
+    });
+  }
+};
+
+const diagram = (): SVGSVGElement | null => container.querySelector('[role="img"] svg');
+
+const button = (label: string): HTMLButtonElement => {
+  const found = [...container.querySelectorAll("button")].find((b) => b.getAttribute("aria-label") === label || b.textContent === label);
+  assert.ok(found, label);
+  return found;
+};
+
+const click = async (target: Element): Promise<void> => {
+  await act(async () => {
+    target.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
   });
 };
 
 describe("MermaidBlock in the DOM", () => {
-  it("falls back to the highlighted source when rendering the diagram throws", async () => {
-    // React logs the caught render error; that is the behaviour under test.
+  it("draws the diagram with pele, sanitised, under the palette's variables", async () => {
+    await show();
+    const svg = diagram();
+    assert.ok(svg, container.innerHTML);
+    assert.ok(svg.classList.contains("pele-flowchart"), svg.outerHTML.slice(0, 200));
+    assert.ok(svg.closest(".ac-mermaid"), "inside the --pele-* palette");
+    assert.ok(svg.textContent?.includes("Is it?"), "label text");
+    assert.ok(!/href|evil\.example|<a[\s>]/.test(svg.outerHTML), "a click link never survives");
+  });
+
+  it("draws every common diagram type", async () => {
+    for (const code of [
+      "sequenceDiagram\n  A->>B: Hello\n  B-->>A: Hi",
+      "classDiagram\n  Animal <|-- Duck",
+      "stateDiagram-v2\n  [*] --> Still\n  Still --> [*]",
+      "gantt\n  dateFormat YYYY-MM-DD\n  section A\n  Task :a1, 2026-01-01, 3d",
+      "erDiagram\n  CUSTOMER ||--o{ ORDER : places",
+      'pie title Pets\n  "Dogs" : 3\n  "Cats" : 2',
+      "mindmap\n  root((mindmap))\n    Origins"
+    ]) {
+      await show({ code });
+      assert.ok(diagram(), `${code.split("\n")[0]}: ${container.textContent?.slice(0, 200)}`);
+    }
+  });
+
+  it("gives two copies of one diagram their own ids", async () => {
+    await act(async () => {
+      root.render(
+        createElement("div", null, [
+          createElement(MermaidBlock, { key: "a", code: FLOWCHART, streaming: false, mode: "dark" }),
+          createElement(MermaidBlock, { key: "b", code: FLOWCHART, streaming: false, mode: "dark" })
+        ])
+      );
+    });
+    const ids = [...container.querySelectorAll("[id]")].map((element) => element.id);
+    assert.equal(new Set(ids).size, ids.length, ids.join(" "));
+  });
+
+  it("repaints on a theme switch without drawing the diagram again", async () => {
+    await show({ mode: "dark" });
+    const first = diagram();
+    assert.ok(first);
+    await show({ mode: "light" });
+    assert.equal(diagram(), first, "the same mounted SVG");
+  });
+
+  it("shows pele's parse error above the source, with no Retry", async () => {
+    await show({ code: "flowchart TD\n  A-->" });
+    assert.ok(container.textContent?.includes("Unable to render diagram: Parse error"), container.textContent ?? "");
+    assert.ok(container.querySelector('[data-language="mermaid"]')?.textContent?.includes("A-->"));
+    assert.equal(diagram(), null);
+    assert.ok(![...container.querySelectorAll("button")].some((b) => b.textContent === "Retry"));
+  });
+
+  it("offers Retry when the renderer fails to load, and draws once it loads", async () => {
+    setPeleLoader(() => Promise.reject(new Error("Failed to fetch dynamically imported module")));
+    await show();
+    assert.ok(container.textContent?.includes("The diagram renderer failed to load."), container.textContent ?? "");
+    assert.equal(diagram(), null);
+    setPeleLoader(null);
+    await click(button("Retry"));
+    await show();
+    assert.ok(diagram(), container.innerHTML.slice(0, 300));
+  });
+
+  it("toggles between the diagram and its source", async () => {
+    await show();
+    await click(button("Show code"));
+    assert.equal(diagram(), null);
+    assert.ok(container.querySelector('[data-language="mermaid"]')?.textContent?.includes("flowchart LR"));
+    await click(button("Show diagram"));
+    await show();
+    assert.ok(diagram());
+  });
+
+  it("falls back to the source when drawing throws", async () => {
+    const throwing: PeleEngine = {
+      detectType: () => "flowchart",
+      registered: () => true,
+      load: () => Promise.resolve(true),
+      mount: () => {
+        throw new Error("boom");
+      }
+    };
+    setPeleLoader(() => Promise.resolve(throwing));
+    // React logs the caught error; that is the behaviour under test.
     console.error = () => {};
-    await show({ renderer: table("throw") });
+    await show();
     console.error = savedConsoleError;
-    const block = container.querySelector('[data-language="mermaid"]');
-    assert.ok(block, "the code block is shown");
-    assert.ok(block.textContent?.includes("graph TD"), block.textContent ?? "");
+    assert.ok(container.querySelector('[data-language="mermaid"]')?.textContent?.includes("flowchart LR"));
     assert.equal(container.querySelector('[aria-label="Expand diagram"]'), null, "no diagram controls");
-    assert.equal(container.querySelector('[role="img"]'), null, "no diagram body");
-    assert.equal(container.textContent?.includes("Hello diagram"), false);
   });
 
-  it("tries the diagram again once the source changes after a failure", async () => {
-    console.error = () => {};
-    await show({ renderer: table("throw") });
-    console.error = savedConsoleError;
-    assert.equal(container.querySelector('[aria-label="Expand diagram"]'), null);
-    await show({ code: "graph LR\nX-->Y", renderer: table({ status: "rendered", svg: SVG }) });
-    assert.ok(container.textContent?.includes("Hello diagram"), container.innerHTML);
-    assert.ok(container.querySelector('[aria-label="Expand diagram"]'));
+  it("typesets $$ labels with the chat's KaTeX, as MathML without the TeX annotation", async () => {
+    // jsdom measures everything as 0×0, and pele draws a label it cannot size as text.
+    const prototype = dom.window.Element.prototype;
+    const realRect = prototype.getBoundingClientRect;
+    prototype.getBoundingClientRect = function (this: Element) {
+      return this.localName === "math" ? ({ width: 24, height: 18 } as DOMRect) : realRect.call(this);
+    };
+    try {
+      await show({ code: 'flowchart LR\n  A["$$x^2$$"] --> B' });
+    } finally {
+      prototype.getBoundingClientRect = realRect;
+    }
+    const svg = diagram();
+    assert.ok(svg, container.textContent ?? "");
+    const math = svg.querySelector("foreignObject math");
+    assert.ok(math, svg.outerHTML);
+    assert.ok(math.querySelector("msup"), math.outerHTML);
+    assert.equal(svg.querySelector("annotation"), null);
   });
-
-  it("suspends on a pending render, then shows the diagram when it settles", async () => {
-    let finish!: () => void;
-    const gate = new Promise<void>((resolve) => (finish = resolve));
-    const renderer = createMermaidRenderer({
-      loadMermaid: () =>
-        Promise.resolve({
-          initialize() {},
-          render: async () => {
-            await gate;
-            return { svg: SVG };
-          }
-        }),
-      sanitize: (svg) => svg,
-      fontFamily: () => ""
-    });
-    await show({ renderer });
-    assert.ok(container.textContent?.includes("Rendering diagram"), container.innerHTML);
-    await act(async () => {
-      finish();
-      await gate;
-    });
-    assert.ok(container.textContent?.includes("Hello diagram"), container.innerHTML);
-    assert.equal(container.textContent?.includes("Rendering diagram"), false);
-  });
-
-  it("shows the parser message above the source for an invalid diagram", async () => {
-    await show({ renderer: table({ status: "error", message: "Parse error on line 2", retryable: false }) });
-    assert.ok(container.textContent?.includes("Unable to render diagram: Parse error on line 2"));
-    assert.ok(container.querySelector('[data-language="mermaid"]')?.textContent?.includes("graph TD"));
-  });
-
-  const expand = async (): Promise<void> => {
-    const button = [...container.querySelectorAll("button")].find((b) => b.getAttribute("aria-label") === "Expand diagram");
-    assert.ok(button, "the header's Expand control");
-    await act(async () => {
-      button.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
-    });
-  };
 
   it("expands into the modal as a blob image, and revokes it on close", async () => {
     const revoked: string[] = [];
     const realRevoke = URL.revokeObjectURL;
     URL.revokeObjectURL = (url: string) => void revoked.push(url);
     try {
-      await show({ renderer: table({ status: "rendered", svg: SVG }) });
-      await expand();
+      await show();
+      await click(button("Expand diagram"));
       const image = dom.window.document.querySelector<HTMLImageElement>('[role="dialog"] img');
       assert.ok(image, "the expanded image");
       assert.ok(image.src.startsWith("blob:"), image.outerHTML);
       const url = image.src;
       const close = dom.window.document.querySelector<HTMLElement>('[role="dialog"] [aria-label="Close"]');
-      await act(async () => {
-        close?.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));
-      });
+      assert.ok(close);
+      await click(close);
       assert.equal(dom.window.document.querySelector('[role="dialog"]'), null);
       assert.deepEqual(revoked, [url]);
     } finally {
       URL.revokeObjectURL = realRevoke;
     }
-  });
-
-  it("shows an error in the modal when the diagram cannot be turned into an image", async () => {
-    await show({ renderer: table({ status: "rendered", svg: "<p>not an svg</p>" }) });
-    await expand();
-    const dialog = dom.window.document.querySelector('[role="dialog"]');
-    assert.ok(dialog, "the modal");
-    assert.ok(dialog.textContent?.includes("could not be prepared"), dialog.textContent ?? "");
-    assert.equal(dialog.querySelector("img"), null);
   });
 });

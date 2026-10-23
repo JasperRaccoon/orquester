@@ -1,5 +1,5 @@
 // Ported from T3 Code (MIT): apps/web/src/components/chat/ChatMarkdown.tsx
-// (`MarkdownMermaidCodeBlock`) and MermaidDiagram.tsx.
+// (`MarkdownMermaidCodeBlock`) and MermaidDiagram.tsx (the pele mount).
 
 import React from "react";
 import { Code, Maximize2, Workflow } from "lucide-react";
@@ -7,9 +7,16 @@ import { Code, Maximize2, Workflow } from "lucide-react";
 import { Modal, ModalCloseButton } from "../../../ui";
 import { ChatIconButton } from "../../primitives";
 import { CodeBlock } from "./CodeBlock";
-import { getMermaidRenderer } from "./mermaid-engine";
-import type { MermaidRenderer, MermaidTheme } from "./mermaid-render";
-import { createDiagramBlobUrl, uniquifySvgIds } from "./mermaid-svg";
+import {
+  detectDiagramType,
+  loadedMathResolver,
+  loadedPele,
+  loadMathResolver,
+  loadPele,
+  type MathResolver,
+  type PeleEngine
+} from "./mermaid-engine";
+import { createDiagramBlobUrl, createDiagramSanitizers, type DiagramSanitizers } from "./mermaid-svg";
 
 /**
  * A ` ```mermaid ` fence (spec §4): a diagram once the message settles, the
@@ -19,28 +26,29 @@ import { createDiagramBlobUrl, uniquifySvgIds } from "./mermaid-svg";
  *    every token, so nothing renders until the stream ends.
  *  - **Diagram ↔ code toggle** in the block's header, and the header's copy
  *    button always copies the source.
- *  - **A diagram that does not parse** keeps the highlighted source and puts
- *    the parser's message above it (with Retry when the cause was a lost
- *    chunk, not the text). A render that *throws* is caught by the boundary and
- *    falls back to the same source view.
+ *  - **A diagram that cannot be drawn** keeps the highlighted source and puts
+ *    the reason above it: pele's parse error, a diagram type pele does not
+ *    know, or a renderer chunk that failed to load (with Retry). A render that
+ *    *throws* is caught by the boundary and falls back to the same source view.
  *  - **Expand** opens the SVG as a standalone image in the app's modal layer,
  *    through a `blob:` URL (the production `img-src` allows it; `data:` URLs
  *    failed the desktop's connect-src policy in T3).
+ *  - **Theme** is CSS: pele paints with `--pele-*` variables, mapped to the
+ *    palette under `.ac-mermaid` in `agent-chat.css`, so a colour scheme or
+ *    mode switch repaints the mounted SVG without drawing it again.
  *
- * The one `dangerouslySetInnerHTML` here is Mermaid's SVG after Mermaid's own
- * strict sanitising and the DOMPurify pass in `mermaid-svg.ts`; it is never
- * provider text.
+ * Pele mounts the SVG itself, after the DOMPurify pass in `mermaid-svg.ts`;
+ * nothing here hands provider text to the browser as HTML.
  */
 
 export interface MermaidBlockProps {
   code: string;
   streaming: boolean;
-  mode: MermaidTheme;
-  /** Test seam; the app-wide renderer otherwise. */
-  renderer?: MermaidRenderer;
+  /** For the source view's highlighting only; the diagram follows the CSS theme. */
+  mode: "light" | "dark";
 }
 
-/** Falls back when the diagram's render throws; a new source or theme tries again. */
+/** Falls back when the diagram throws; a new source tries again. */
 class DiagramBoundary extends React.Component<
   { resetKey: string; fallback: React.ReactNode; children: React.ReactNode },
   { failed: boolean; resetKey: string }
@@ -75,30 +83,123 @@ function ViewToggle({ showingCode, onToggle }: { showingCode: boolean; onToggle:
   );
 }
 
-let diagramMounts = 0;
+// ---------------------------------------------------------------------------
+// Getting the renderer ready
+// ---------------------------------------------------------------------------
 
-function DiagramBody({ svg, onExpand }: { svg: string; onExpand: () => void }): React.ReactElement {
-  // The cached SVG is shared by every mount of this diagram; its ids are made this mount's own.
-  const [mount] = React.useState(() => ++diagramMounts);
-  const html = React.useMemo(() => uniquifySvgIds(svg, `m${mount}`), [svg, mount]);
+type Readiness =
+  | { status: "loading" }
+  | { status: "ready"; pele: PeleEngine; math: MathResolver | null }
+  | { status: "unsupported" }
+  | { status: "failed" };
+
+/** What is already loaded answers at once, so a remount never flashes "Rendering…". */
+function readinessNow(source: string): Readiness | null {
+  const pele = loadedPele();
+  if (!pele) return null;
+  const type = detectDiagramType(pele, source);
+  if (type === null) return { status: "unsupported" };
+  if (!pele.registered(type)) return null;
+  if (!source.includes("$$")) return { status: "ready", pele, math: null };
+  const math = loadedMathResolver();
+  return math ? { status: "ready", pele, math } : null;
+}
+
+async function prepare(source: string): Promise<Readiness> {
+  try {
+    const pele = await loadPele();
+    const type = detectDiagramType(pele, source);
+    if (type === null) return { status: "unsupported" };
+    if (!(await pele.load(type))) return { status: "unsupported" };
+    // A diagram whose labels fail to typeset still draws, with their TeX.
+    const math = source.includes("$$") ? await loadMathResolver() : null;
+    return { status: "ready", pele, math };
+  } catch {
+    return { status: "failed" };
+  }
+}
+
+function useReadiness(source: string, attempt: number): Readiness {
+  const [state, setState] = React.useState<{ source: string; attempt: number; readiness: Readiness }>(() => ({
+    source,
+    attempt,
+    readiness: readinessNow(source) ?? { status: "loading" }
+  }));
+  const current =
+    state.source === source && state.attempt === attempt
+      ? state.readiness
+      : (readinessNow(source) ?? { status: "loading" as const });
+  React.useEffect(() => {
+    if (current.status !== "loading") return undefined;
+    let cancelled = false;
+    void prepare(source).then((readiness) => {
+      if (!cancelled) setState({ source, attempt, readiness });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [source, attempt, current.status]);
+  return current;
+}
+
+// ---------------------------------------------------------------------------
+// The diagram
+// ---------------------------------------------------------------------------
+
+let sanitizers: DiagramSanitizers | null = null;
+
+function DiagramBody({
+  pele,
+  math,
+  source,
+  onError,
+  onExpand,
+  hostRef
+}: {
+  pele: PeleEngine;
+  math: MathResolver | null;
+  source: string;
+  onError: (message: string) => void;
+  onExpand: () => void;
+  hostRef: React.RefObject<HTMLSpanElement>;
+}): React.ReactElement {
+  React.useLayoutEffect(() => {
+    const host = hostRef.current;
+    if (!host) return undefined;
+    sanitizers ??= createDiagramSanitizers(window);
+    const sanitize = math ? sanitizers.math : sanitizers.plain;
+    const mounted = pele.mount(host, source, {
+      links: false,
+      images: false,
+      zoom: false,
+      // Keep the author's direction: a wide diagram scales down to fit instead of turning vertical.
+      autoDirection: false,
+      sanitize,
+      ...(math ? { math } : {}),
+      onError: (error) => onError(error instanceof Error ? error.message : "The diagram could not be rendered.")
+    });
+    return () => mounted.destroy();
+  }, [pele, math, source, onError, hostRef]);
+
   return (
     // The header's "Expand diagram" is the one control assistive tech and the
     // keyboard get; the diagram itself is a mouse shortcut for it, so it is
     // out of the tab order and hidden from the accessibility tree.
-    <div role="img" aria-label="Mermaid diagram" className="ac-scroll-thin overflow-x-auto px-[0.9rem] pb-[0.8rem] pt-1">
+    <div role="img" aria-label="Mermaid diagram" className="ac-mermaid ac-scroll-thin overflow-x-auto px-[0.9rem] pb-[0.8rem] pt-1">
       <button
         type="button"
         tabIndex={-1}
         aria-hidden="true"
         onClick={onExpand}
-        className="flex w-full cursor-zoom-in justify-center rounded-md focus-visible:outline focus-visible:outline-2 focus-visible:outline-neutral-500 [&_svg]:h-auto [&_svg]:max-w-full"
-        dangerouslySetInnerHTML={{ __html: html }}
-      />
+        className="block w-full cursor-zoom-in rounded-md focus-visible:outline focus-visible:outline-2 focus-visible:outline-neutral-500"
+      >
+        <span ref={hostRef} className="flex w-full justify-center" />
+      </button>
     </div>
   );
 }
 
-function ExpandedDiagram({ svg, onClose }: { svg: string; onClose: () => void }): React.ReactElement {
+function ExpandedDiagram({ svg, onClose }: { svg: SVGSVGElement; onClose: () => void }): React.ReactElement {
   const [view, setView] = React.useState<{ url: string } | { error: string } | null>(null);
   // Created on open and revoked on close, so a closed viewer holds no blob.
   React.useEffect(() => {
@@ -137,45 +238,91 @@ function ExpandedDiagram({ svg, onClose }: { svg: string; onClose: () => void })
   );
 }
 
-/** Suspends until the diagram is drawn (or has failed). */
-function SettledDiagram({
+function SourceWithNotice({
   code,
   mode,
-  renderer,
-  onToggle,
+  message,
   onRetry
 }: {
   code: string;
-  mode: MermaidTheme;
-  renderer: MermaidRenderer;
-  onToggle: () => void;
-  onRetry: () => void;
+  mode: "light" | "dark";
+  message: string;
+  onRetry?: (() => void) | undefined;
 }): React.ReactElement {
-  const result = renderer.read(code, mode);
-  const [expanded, setExpanded] = React.useState(false);
-  const closeExpanded = React.useCallback(() => setExpanded(false), []);
+  return (
+    <CodeBlock
+      code={code}
+      info="mermaid"
+      streaming={false}
+      mode={mode}
+      notice={
+        <div className="flex items-center justify-between gap-2 px-[0.9rem] pb-1 pt-1">
+          <p className="m-0 min-w-0 text-xs text-danger-300 [overflow-wrap:anywhere]">
+            Unable to render diagram: {message}
+          </p>
+          {onRetry ? (
+            <button
+              type="button"
+              onClick={onRetry}
+              className="shrink-0 rounded-md px-2 py-0.5 text-xs text-neutral-300 hover:bg-neutral-800"
+            >
+              Retry
+            </button>
+          ) : null}
+        </div>
+      }
+    />
+  );
+}
 
-  if (result.status === "error") {
+function SettledDiagram({
+  code,
+  mode,
+  onToggle
+}: {
+  code: string;
+  mode: "light" | "dark";
+  onToggle: () => void;
+}): React.ReactElement {
+  const source = code.trim();
+  const [attempt, setAttempt] = React.useState(0);
+  const readiness = useReadiness(source, attempt);
+  const [renderError, setRenderError] = React.useState<{ source: string; message: string } | null>(null);
+  const [expanded, setExpanded] = React.useState<SVGSVGElement | null>(null);
+  const hostRef = React.useRef<HTMLSpanElement>(null);
+  const onError = React.useCallback((message: string) => setRenderError({ source, message }), [source]);
+  const closeExpanded = React.useCallback(() => setExpanded(null), []);
+  const expand = React.useCallback(() => {
+    const svg = hostRef.current?.querySelector("svg");
+    if (svg) setExpanded(svg);
+  }, []);
+
+  if (readiness.status === "failed") {
+    return (
+      <SourceWithNotice
+        code={code}
+        mode={mode}
+        message="The diagram renderer failed to load."
+        onRetry={() => setAttempt((value) => value + 1)}
+      />
+    );
+  }
+  if (readiness.status === "unsupported") {
+    return <SourceWithNotice code={code} mode={mode} message="This diagram type is not supported." />;
+  }
+  if (renderError !== null && renderError.source === source) {
+    return <SourceWithNotice code={code} mode={mode} message={renderError.message} />;
+  }
+  if (readiness.status === "loading") {
     return (
       <CodeBlock
         code={code}
         info="mermaid"
         streaming={false}
         mode={mode}
-        notice={
-          <div className="flex items-center justify-between gap-2 px-[0.9rem] pb-1 pt-1">
-            <p className="m-0 min-w-0 text-xs text-danger-300 [overflow-wrap:anywhere]">
-              Unable to render diagram: {result.message}
-            </p>
-            {result.retryable ? (
-              <button
-                type="button"
-                onClick={onRetry}
-                className="shrink-0 rounded-md px-2 py-0.5 text-xs text-neutral-300 hover:bg-neutral-800"
-              >
-                Retry
-              </button>
-            ) : null}
+        body={
+          <div className="flex min-h-24 items-center justify-center px-3 pb-3 text-xs text-neutral-500">
+            Rendering diagram…
           </div>
         }
       />
@@ -192,21 +339,29 @@ function SettledDiagram({
         leadingActions={
           <>
             <ViewToggle showingCode={false} onToggle={onToggle} />
-            <ChatIconButton size="xs" label="Expand diagram" onClick={() => setExpanded(true)}>
+            <ChatIconButton size="xs" label="Expand diagram" onClick={expand}>
               <Maximize2 size={12} strokeWidth={1.8} aria-hidden />
             </ChatIconButton>
           </>
         }
-        body={<DiagramBody svg={result.svg} onExpand={() => setExpanded(true)} />}
+        body={
+          <DiagramBody
+            pele={readiness.pele}
+            math={readiness.math}
+            source={source}
+            onError={onError}
+            onExpand={expand}
+            hostRef={hostRef}
+          />
+        }
       />
-      {expanded ? <ExpandedDiagram svg={result.svg} onClose={closeExpanded} /> : null}
+      {expanded ? <ExpandedDiagram svg={expanded} onClose={closeExpanded} /> : null}
     </>
   );
 }
 
-export function MermaidBlock({ code, streaming, mode, renderer }: MermaidBlockProps): React.ReactElement {
+export function MermaidBlock({ code, streaming, mode }: MermaidBlockProps): React.ReactElement {
   const [showCode, setShowCode] = React.useState(false);
-  const [attempt, setAttempt] = React.useState(0);
   const toggle = React.useCallback(() => setShowCode((value) => !value), []);
 
   const showDiagram = !showCode && !streaming && code.trim().length > 0;
@@ -221,36 +376,9 @@ export function MermaidBlock({ code, streaming, mode, renderer }: MermaidBlockPr
   );
   if (!showDiagram) return source;
 
-  const live = renderer ?? getMermaidRenderer();
   return (
-    <DiagramBoundary resetKey={`${mode}\n${code}`} fallback={source}>
-      <React.Suspense
-        key={attempt}
-        fallback={
-          <CodeBlock
-            code={code}
-            info="mermaid"
-            streaming={false}
-            mode={mode}
-            body={
-              <div className="flex min-h-24 items-center justify-center px-3 pb-3 text-xs text-neutral-500">
-                Rendering diagram…
-              </div>
-            }
-          />
-        }
-      >
-        <SettledDiagram
-          code={code}
-          mode={mode}
-          renderer={live}
-          onToggle={toggle}
-          onRetry={() => {
-            live.invalidate(code, mode);
-            setAttempt((value) => value + 1);
-          }}
-        />
-      </React.Suspense>
+    <DiagramBoundary resetKey={code} fallback={source}>
+      <SettledDiagram code={code} mode={mode} onToggle={toggle} />
     </DiagramBoundary>
   );
 }

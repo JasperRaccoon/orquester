@@ -19,7 +19,7 @@ import { MarkdownMath } from "./MarkdownMath";
 import { mathKind, mightContainMath, remarkChatMath } from "./math";
 import { copyMathSelection } from "./math-clipboard";
 import { MermaidBlock } from "./MermaidBlock";
-import { isMermaidFence } from "./mermaid-render";
+import { isMermaidFence } from "./mermaid-engine";
 
 /**
  * Assistant markdown (spec §7.3).
