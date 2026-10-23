@@ -287,6 +287,7 @@ import {
   expandVars,
   keysDir,
   parseAppConfig,
+  applyAppConfigUpdate,
   parseDaemonConfig,
   parseRemotesConfig,
   parseWorkspacesConfig,
@@ -2882,9 +2883,18 @@ export function createServer(
 
   app.put("/api/config/app", async (request, reply): Promise<AppConfig | void> => {
     const current = await readAppConfigFile(resolved.appConfigFile);
+    // The file as written, unknown fields included; a missing or unreadable one is the defaults.
+    let raw: unknown = current;
     try {
-      const merged = parseAppConfig({ ...current, ...((request.body as object) ?? {}) });
-      await writeJsonFile(resolved.appConfigFile, merged);
+      raw = JSON.parse(await readFile(resolved.appConfigFile, "utf8")) as unknown;
+    } catch {
+      raw = current;
+    }
+    try {
+      // Field-wise per group, keeping what this build or the client does not know
+      // (`applyAppConfigUpdate`): an older client's `{agents}` lacks newer fields.
+      const { config: merged, stored } = applyAppConfigUpdate(raw, request.body);
+      await writeJsonFile(resolved.appConfigFile, stored);
       // A usage-limit setting moved: armed chats follow at once (off disarms, on re-arms).
       if (
         merged.agents.autoResumeLimitedChats !== current.agents.autoResumeLimitedChats ||
