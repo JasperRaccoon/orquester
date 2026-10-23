@@ -32,6 +32,11 @@ export const KNOWLEDGE_CONTENT_HASH_PATTERN = /^[0-9a-f]{64}$/;
 /** Mirrors `KNOWLEDGE_COLORS` in @orquester/api. */
 export const KNOWLEDGE_COLOR_KEYS = ["chart-1", "chart-2", "chart-3", "chart-4", "chart-5", "chart-6"] as const;
 
+/** Whether a stored collection colour is one of this build's palette keys. */
+export function isKnowledgeColorKey(value: unknown): value is (typeof KNOWLEDGE_COLOR_KEYS)[number] {
+  return typeof value === "string" && (KNOWLEDGE_COLOR_KEYS as readonly string[]).includes(value);
+}
+
 export function isKnowledgeEntryId(value: unknown): value is string {
   return typeof value === "string" && KNOWLEDGE_ENTRY_ID_PATTERN.test(value);
 }
@@ -54,13 +59,18 @@ const timestamp = z.string().datetime({ offset: true });
  * Checks SHAPE, not the service's limits (name length, uniqueness across records is checked by
  * the parser below): a read that re-applied this build's limits would hide a collection another
  * build stored.
+ *
+ * `color` is any non-empty string: a palette key this build does not know (a newer build's) is
+ * kept as stored, so a rewrite does not lose it; the daemon shows it as a {@link
+ * KNOWLEDGE_COLOR_KEYS} colour (`isKnowledgeColorKey`). A missing or non-string colour is no
+ * palette key at all and reads as `chart-1`.
  */
 export const knowledgeCollectionRecordSchema = z
   .object({
     id: z.string().regex(KNOWLEDGE_COLLECTION_ID_PATTERN, "not a collection id"),
     name: z.string().min(1),
     description: z.string().default(""),
-    color: z.enum(KNOWLEDGE_COLOR_KEYS).catch("chart-1"),
+    color: z.string().min(1).catch("chart-1"),
     createdAt: timestamp,
     updatedAt: timestamp
   })
@@ -122,11 +132,13 @@ const nullableText = z
   .optional()
   .transform((value) => (typeof value === "string" && value.length > 0 ? value : null));
 
-/** `savedFrom`: the object the contract describes, or a bare session id (the spec's sketch). */
+/**
+ * `savedFrom`: the object the contract describes, or a bare session id (the spec's sketch). Its
+ * unknown keys pass through, and `by` is any non-empty string: a value this build does not know (a
+ * newer build's) still reads — the daemon shows a fallback and writes the stored value back.
+ */
 const savedFromSchema = z.union([
-  z
-    .object({ by: z.enum(["agent", "user"]), sessionId: z.string().min(1).optional() })
-    .passthrough(),
+  z.object({ by: z.string().min(1), sessionId: z.string().min(1).optional() }).passthrough(),
   z.string().min(1).transform((sessionId) => ({ by: "agent" as const, sessionId })),
   z.null().transform(() => ({ by: "user" as const }))
 ]);

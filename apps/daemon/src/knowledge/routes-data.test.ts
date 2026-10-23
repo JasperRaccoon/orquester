@@ -81,6 +81,7 @@ async function harness(t: TestContext) {
     state,
     events,
     linkingSaw,
+    app,
     inject: (request: InjectOptions) => app.inject(request)
   };
 }
@@ -358,4 +359,53 @@ test("items, graph and search never show a profile chat what it cannot see", asy
     "KNOWLEDGE_UNKNOWN_COLLECTION"
   );
   refused(await h.inject({ method: "POST", url: knowledgeRoutes.search, payload: { query: "" } }), 400, "KNOWLEDGE_INVALID");
+});
+
+test("an edit that moves an entry out of a profile caller's view answers the edit, still scoped", async (t) => {
+  const h = await harness(t);
+  const { seo, saas, alt, billing } = await seed(h);
+  h.state.visibilities.set("seo-chat", { kind: "collections", ids: [seo.id] });
+  h.graph.replace([node("tactic-comparison", "Comparison pages", [`${alt}.md`, `${billing}.md`])], []);
+
+  const moved = ok<KnowledgeEntryDetail>(
+    await h.inject({ method: "PATCH", url: `${knowledgeRoutes.entry(alt)}?sessionId=seo-chat`, payload: { collections: [saas.id] } })
+  );
+  assert.equal(moved.entry.id, alt);
+  assert.deepEqual(moved.entry.collections, [], "the hidden collection is not named");
+  assert.deepEqual(moved.related, [], "hidden entries are not related");
+  assert.equal(moved.citation, `[Alternatives pages · @hridoy](orquester-knowledge:entry/${alt})`);
+  assert.deepEqual(h.store.getMeta(alt)!.collections, [saas.id]);
+  assert.deepEqual(h.events.at(-1)!.payload, { entryIds: [alt], collections: true });
+  // From now on the entry is hidden from that chat like any other.
+  refused(await h.inject({ method: "GET", url: `${knowledgeRoutes.entry(alt)}?sessionId=seo-chat` }), 404, "KNOWLEDGE_NOT_FOUND");
+  refused(
+    await h.inject({ method: "PATCH", url: `${knowledgeRoutes.entry(alt)}?sessionId=seo-chat`, payload: { title: "Again" } }),
+    404,
+    "KNOWLEDGE_NOT_FOUND"
+  );
+});
+
+test("framework refusals (bad JSON, too large, wrong media type) answer { code, message } on the knowledge routes only", async (t) => {
+  const h = await harness(t);
+  h.app.post("/elsewhere", async () => ({ ok: true }));
+  const { alt } = await seed(h);
+
+  const json = { "content-type": "application/json" };
+  const badJson = refused(await h.inject({ method: "POST", url: knowledgeRoutes.save, headers: json, payload: '{"entries": [ secret' }), 400, "KNOWLEDGE_INVALID");
+  assert.ok(!badJson.includes("secret"), "the body is not quoted");
+  refused(await h.inject({ method: "POST", url: knowledgeRoutes.collections, headers: { "content-type": "text/plain" }, payload: "SEO" }), 400, "KNOWLEDGE_INVALID");
+  refused(
+    await h.inject({ method: "PATCH", url: knowledgeRoutes.entry(alt), headers: json, payload: JSON.stringify({ body: "x".repeat(3 * 1024 * 1024) }) }),
+    413,
+    "KNOWLEDGE_TOO_LARGE"
+  );
+  refused(
+    await h.inject({ method: "POST", url: knowledgeRoutes.search, headers: json, payload: JSON.stringify({ query: "x".repeat(2 * 1024 * 1024) }) }),
+    413,
+    "KNOWLEDGE_TOO_LARGE"
+  );
+
+  const elsewhere = await h.inject({ method: "POST", url: "/elsewhere", headers: json, payload: "{nope" });
+  assert.equal(elsewhere.statusCode, 400);
+  assert.notEqual((elsewhere.json() as { code?: string }).code, "KNOWLEDGE_INVALID");
 });

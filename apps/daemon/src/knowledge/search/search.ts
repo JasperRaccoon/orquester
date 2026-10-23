@@ -322,12 +322,16 @@ export class KnowledgeSearch {
     };
   }
 
-  /** A visible entry with its concepts and related entries; null when hidden or unknown. */
-  async entryDetail(id: string, visibility: KnowledgeVisibility): Promise<KnowledgeEntryDetail | null> {
+  /**
+   * A visible entry with its concepts and related entries; null when hidden or unknown.
+   * `evenIfHidden`: the entry itself is answered even when out of scope (a caller's own edit that
+   * moved it out of view); its collections and related entries are still only the visible ones.
+   */
+  async entryDetail(id: string, visibility: KnowledgeVisibility, options: { evenIfHidden?: boolean } = {}): Promise<KnowledgeEntryDetail | null> {
     await this.whenReady();
     const scope = this.scope(visibility);
     const meta = this.store.getMeta(id);
-    if (!meta || !entryInScope(meta, scope)) return null;
+    if (!meta || (!options.evenIfHidden && !entryInScope(meta, scope))) return null;
     const entry = await this.store.getEntry(id);
     if (!entry) return null;
     const related = this.graph
