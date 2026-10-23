@@ -108,11 +108,11 @@ describe("idle compaction on the host", () => {
     await host.stop();
   });
 
-  it("refuses, recording nothing, when the chat moved on or is not idle", async () => {
+  it("refuses without a receipt when the chat moved on or is not idle; the same id compacts once it is idle", async () => {
     const host = createTestHost();
     const { threadId, turnId } = await idleThread(host);
     const before = (host.store.logs.get(threadId) ?? []).length;
-    assert.equal(await rejected(host.orchestrator.command(threadId, "compact", { commandId: cmd(), idle: { turnId: "older-turn" } })), "COMMAND_REJECTED");
+    assert.equal(await rejected(host.orchestrator.command(threadId, "compact", { commandId: cmd(), idle: { turnId: "older-turn" } })), "TURN_NOT_IDLE");
     assert.equal(await rejected(host.orchestrator.command(threadId, "compact", { commandId: cmd(), idle: { turnId: "" } })), "INVALID_COMMAND");
 
     await host.orchestrator.ingestionSink(threadId, [
@@ -140,9 +140,37 @@ describe("idle compaction on the host", () => {
     const withApproval = (host.store.logs.get(threadId) ?? []).length;
     assert.equal(withApproval, before + 1);
     const commandId = cmd();
-    assert.equal(await rejected(host.orchestrator.command(threadId, "compact", { commandId, idle: { turnId } })), "COMMAND_REJECTED");
+    assert.equal(await rejected(host.orchestrator.command(threadId, "compact", { commandId, idle: { turnId } })), "TURN_NOT_IDLE");
     assert.equal((host.store.logs.get(threadId) ?? []).length, withApproval, "nothing was recorded");
     assert.equal(compactCalls(host), 0);
+
+    // The approval is answered: the SAME id, retried inside the window, compacts — no receipt
+    // replays the refusal.
+    await host.orchestrator.ingestionSink(threadId, [
+      ingested(
+        host,
+        threadId,
+        "thread.activity-appended",
+        {
+          activity: {
+            kind: "activity",
+            id: "approval-resolved:r1",
+            tone: "approval",
+            activityKind: "approval.resolved",
+            summary: "Approval resolved",
+            payload: { requestId: "r1", decision: "accept" },
+            turnId: null,
+            createdAt: host.clock.nowIso(),
+            updatedAt: host.clock.nowIso()
+          }
+        },
+        "approval-resolved-1"
+      )
+    ]);
+    await host.settle();
+    await host.orchestrator.command(threadId, "compact", { commandId, idle: { turnId } });
+    await host.settle();
+    assert.equal(compactCalls(host), 1);
     await host.stop();
   });
 
@@ -152,7 +180,7 @@ describe("idle compaction on the host", () => {
     await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "one more thing" });
     await host.settle();
     assert.equal(host.orchestrator.summary(threadId)?.idleCompaction, null, "a running turn is not idle");
-    assert.equal(await rejected(host.orchestrator.command(threadId, "compact", { commandId: cmd(), idle: { turnId } })), "COMMAND_REJECTED");
+    assert.equal(await rejected(host.orchestrator.command(threadId, "compact", { commandId: cmd(), idle: { turnId } })), "TURN_NOT_IDLE");
     await host.stop();
 
     const plain = createTestHost();

@@ -125,6 +125,7 @@ import {
 import { providerForRefId, providersStore } from "./providers";
 import { failedTaskStopId, isLoopOrGoalRow, liveAgentTaskIds, pendingTaskStops } from "./roster.logic";
 import { isCompactingThread, latestContextWindowActivity } from "./status.logic";
+import { sendAfterCompaction } from "./resume-compaction.logic";
 import {
   drainQueue,
   EMPTY_QUEUE,
@@ -1733,7 +1734,9 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
           ...(input.generatedPrompt === true ? { generatedPrompt: true } : {})
         });
         try {
-          await command("turn", turn, commandId);
+          await sendAfterCompaction(input.compactFirst === true, () => command("compact", {}), () =>
+            command("turn", turn, commandId)
+          );
         } finally {
           removeOutboxEntry(commandId);
         }

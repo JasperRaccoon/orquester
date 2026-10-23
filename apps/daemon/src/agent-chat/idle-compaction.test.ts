@@ -375,7 +375,7 @@ test("an unavailable host is tried again until the window closes; a refusal wait
   assert.deepEqual(h.host.compactions, ["idle-compact:s1:t1"]);
 
   const refused = harness();
-  refused.host.answer = { status: 409, body: { error: { code: "COMMAND_REJECTED", message: "moved on" } } };
+  refused.host.answer = { status: 409, body: { error: { code: "TURN_NOT_IDLE", message: "moved on" } } };
   refused.service.onCandidate("s1", candidate());
   await advance(refused, HOUR - IDLE_COMPACTION_LEAD_MS);
   await advance(refused, IDLE_COMPACTION_LEAD_MS);

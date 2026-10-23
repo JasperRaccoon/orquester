@@ -734,6 +734,12 @@ export interface AgentChatActions {
      * (`TurnCommandBody.declineApprovals`).
      */
     declineApprovals?: string[];
+    /**
+     * Idle compaction's "When you return" (`resume-compaction.logic.ts`): compact the chat first.
+     * The message is in the outbox before the compaction is posted, so a reload while it runs
+     * re-posts the message rather than losing it (the draft was cleared at submit).
+     */
+    compactFirst?: boolean;
   }): Promise<void>;
   /** `/turn` against a live turn. Same route; named apart for call-site clarity. */
   steer(input: { text: string; attachments?: AttachmentRef[] }): Promise<void>;
