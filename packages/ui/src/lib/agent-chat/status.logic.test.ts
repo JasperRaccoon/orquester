@@ -20,6 +20,28 @@ describe("context window", () => {
     assert.equal(found?.usage.usedTokens, 10);
     assert.equal(latestContextWindowActivity([]), null);
   });
+
+  it("carries the last request's cache expiry past a restarted session's out-of-turn read, as the daemon does", () => {
+    const EXPIRES = "2026-10-22T11:00:00.000Z";
+    const stamped = activity(
+      "context-window.updated",
+      { usedTokens: 250_000, promptCacheTtlMs: 3_600_000, promptCacheExpiresAt: EXPIRES },
+      { turnId: "t1", createdAt: stamp(1) }
+    );
+    // A `mode` restart's own context read: outside any turn, no expiry, the newest size.
+    const restart = activity("context-window.updated", { usedTokens: 251_000 }, { turnId: null, createdAt: stamp(2) });
+    const found = latestContextWindowActivity([stamped, restart]);
+    assert.equal(found?.usage.usedTokens, 251_000, "the size is the newest reading's");
+    assert.equal(found?.usage.promptCacheExpiresAt, EXPIRES);
+    assert.equal(found?.usage.promptCacheTtlMs, 3_600_000);
+
+    // Inside a turn, no expiry is a request that wrote no cache entry: unknown.
+    const cached = activity("context-window.updated", { usedTokens: 252_000 }, { turnId: "t2", createdAt: stamp(3) });
+    assert.equal(latestContextWindowActivity([stamped, cached])?.usage.promptCacheExpiresAt, undefined);
+    // An account switch between them makes the old cache another home's.
+    const switched = activity("session.identity-changed", {}, { createdAt: stamp(4) });
+    assert.equal(latestContextWindowActivity([stamped, switched, restart])?.usage.promptCacheExpiresAt, undefined);
+  });
 });
 
 // ---------------------------------------------------------------------------
