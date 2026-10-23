@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
+import { classifyChangedFile } from "@orquester/api";
+
 import { parseDiffFiles, parseUnifiedDiff } from "./git-diff";
 
 const lines = (...rows: string[]): string => `${rows.join("\n")}\n`;
@@ -275,6 +277,98 @@ describe("parseDiffFiles", () => {
     const files = parseDiffFiles("diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1,9 +1,9 @@\n+a");
     assert.equal(files.length, 1);
     assert.equal(files[0]?.additions, 1);
+  });
+});
+
+describe("CRLF patches", () => {
+  const crlf = (text: string): string => text.replaceAll("\n", "\r\n");
+
+  it("reads paths, changes, modes and binary markers without the CR", () => {
+    const files = parseDiffFiles(
+      crlf(
+        MODIFIED +
+          BINARY +
+          lines("diff --git a/run.sh b/run.sh", "old mode 100644", "new mode 100755") +
+          lines("diff --git a/x.ts b/y.ts", "similarity index 90%", "rename from x.ts", "rename to y.ts") +
+          lines(
+            "diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml",
+            "--- a/pnpm-lock.yaml",
+            "+++ b/pnpm-lock.yaml",
+            "@@ -1 +1 @@",
+            "-a",
+            "+b"
+          ) +
+          lines('diff --git "a/caf\\303\\251.txt" "b/caf\\303\\251.txt"', "deleted file mode 100644")
+      )
+    );
+    assert.deepEqual(
+      files.map((f) => [f.path, f.oldPath, f.change, f.binary]),
+      [
+        ["src/a.ts", "src/a.ts", "modified", false],
+        ["assets/logo.png", "assets/logo.png", "modified", true],
+        ["run.sh", "run.sh", "modified", false],
+        ["y.ts", "x.ts", "renamed", false],
+        ["pnpm-lock.yaml", "pnpm-lock.yaml", "modified", false],
+        ["café.txt", "café.txt", "deleted", false]
+      ]
+    );
+    assert.deepEqual([files[2]?.oldMode, files[2]?.newMode], ["100644", "100755"]);
+    assert.equal(files[3]?.similarity, 90);
+    assert.equal(classifyChangedFile(files[4]!.path), "generated");
+  });
+
+  it("keeps hunk headers clean and the rows' line numbers and counts right", () => {
+    const [file] = parseDiffFiles(crlf(MODIFIED));
+    const rows = file?.hunks[0]?.rows ?? [];
+    assert.equal(file?.hunks[0]?.header, "@@ -1,3 +1,3 @@");
+    assert.equal(rows[0]?.text, "@@ -1,3 +1,3 @@");
+    assert.deepEqual(
+      rows.slice(1).map((r) => [r.type, r.oldNo, r.newNo]),
+      [
+        ["context", 1, 1],
+        ["del", 2, null],
+        ["add", null, 2],
+        ["context", 3, 3]
+      ]
+    );
+    assert.deepEqual([file?.additions, file?.deletions], [1, 1]);
+  });
+
+  it("keeps a content row's CR, as `git apply` does, and reads the markers around it", () => {
+    const [file] = parseDiffFiles(
+      crlf(
+        lines(
+          "diff --git a/a.txt b/a.txt",
+          "--- a/a.txt",
+          "+++ b/a.txt",
+          "@@ -1,3 +1,2 @@",
+          "-old",
+          "\\ No newline at end of file",
+          "+new",
+          "",
+          " tail"
+        )
+      )
+    );
+    const rows = file?.hunks[0]?.rows ?? [];
+    assert.deepEqual(
+      rows.slice(1).map((r) => [r.type, r.text, r.noNewline ?? false]),
+      [
+        ["del", "old\r", true],
+        ["add", "new\r", false],
+        ["context", "", false],
+        ["context", "tail\r", false]
+      ]
+    );
+  });
+
+  it("tells a CRLF line ending from a CR that is the change itself", () => {
+    // LF patch of a file whose line gained a CR: the CR is the whole change.
+    const [file] = parseDiffFiles(lines("--- a/a.txt", "+++ b/a.txt", "@@ -1 +1 @@", "-x", "+x\r"));
+    assert.deepEqual(
+      file?.hunks[0]?.rows.slice(1).map((r) => r.text),
+      ["x", "x\r"]
+    );
   });
 });
 

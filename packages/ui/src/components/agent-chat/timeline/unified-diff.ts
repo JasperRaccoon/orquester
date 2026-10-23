@@ -67,12 +67,16 @@ export function splitUnifiedDiff(diff: string): UnifiedDiffFile[] {
     current = null;
   };
 
-  for (const line of lines) {
+  for (const raw of lines) {
+    // Matched without a CRLF patch's CR, which would otherwise end up in the
+    // path; the patch slice keeps the line as it came, so `parseUnifiedDiff`
+    // can keep a content row's CR (see its note).
+    const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
     const header = DIFF_HEADER.exec(line);
     if (header) {
       flush();
       current = {
-        header: [line],
+        header: [raw],
         oldPath: unquote(header[1] ?? ""),
         newPath: unquote(header[2] ?? ""),
         binary: false
@@ -84,7 +88,7 @@ export function splitUnifiedDiff(diff: string): UnifiedDiffFile[] {
       if (!OLD_FILE.test(line) && !line.startsWith("@@")) continue;
       current = { header: [], oldPath: null, newPath: null, binary: false };
     }
-    current.header.push(line);
+    current.header.push(raw);
     if (BINARY.test(line)) current.binary = true;
     const oldMatch = OLD_FILE.exec(line);
     if (oldMatch && !line.startsWith("--- ---")) {

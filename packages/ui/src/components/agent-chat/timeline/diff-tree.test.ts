@@ -101,3 +101,20 @@ test("countDiffLines ignores the file headers", () => {
   const patch = splitUnifiedDiff(TWO_FILE_DIFF)[0]?.patch ?? "";
   assert.deepEqual(countDiffLines(patch), { additions: 1, deletions: 0 });
 });
+
+test("a CRLF patch splits with clean paths, binary flags and counts", () => {
+  const crlf = (text: string) => text.replaceAll("\n", "\r\n");
+  const files = splitUnifiedDiff(
+    crlf(`${TWO_FILE_DIFF}\ndiff --git a/logo.png b/logo.png\nBinary files a/logo.png and b/logo.png differ\n`)
+  );
+  assert.deepEqual(
+    files.map((f) => [f.path, f.oldPath, f.newPath, f.binary]),
+    [
+      ["src/a.ts", "src/a.ts", "src/a.ts", false],
+      ["src/gone.ts", "src/gone.ts", null, false],
+      ["logo.png", "logo.png", "logo.png", true]
+    ]
+  );
+  assert.deepEqual(countDiffLines(files[0]?.patch ?? ""), { additions: 1, deletions: 0 });
+  assert.deepEqual(countDiffLines(files[1]?.patch ?? ""), { additions: 0, deletions: 1 });
+});
