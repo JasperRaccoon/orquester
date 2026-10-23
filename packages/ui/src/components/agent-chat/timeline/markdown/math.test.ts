@@ -276,31 +276,79 @@ describe("structure around an unclosed block (streaming)", () => {
   });
 });
 
-describe("parse time stays linear in unclosed openers", () => {
-  // Each unclosed opener used to rescan the rest of its paragraph: 5,000 of
+/**
+ * A remark plugin, run after `remarkChatMath`, that counts the characters the
+ * math constructs (`$` and `\` keyed, text and flow) consume in a parse.
+ */
+function countMathWork(counter: { consumed: number }): unknown {
+  type Construct = { tokenize: (this: unknown, effects: Record<string, unknown>, ok: unknown, nok: unknown) => unknown };
+  return function countMathConsumes(this: {
+    data(): { micromarkExtensions?: Array<Partial<Record<"text" | "flow", Record<number, unknown>>>> };
+  }): void {
+    for (const extension of this.data().micromarkExtensions ?? []) {
+      for (const map of [extension.text, extension.flow]) {
+        for (const code of [36, 92]) {
+          const construct = map?.[code] as Construct | Construct[] | undefined;
+          if (map === undefined || construct === undefined || Array.isArray(construct)) continue;
+          map[code] = {
+            ...construct,
+            tokenize(this: unknown, effects: Record<string, unknown>, ok: unknown, nok: unknown) {
+              const consume = effects.consume as (code: number | null) => void;
+              const counting = {
+                ...effects,
+                consume(next: number | null) {
+                  counter.consumed += 1;
+                  consume(next);
+                }
+              };
+              return construct.tokenize.call(this, counting, ok, nok);
+            }
+          };
+        }
+      }
+    }
+  };
+}
+
+describe("parse work stays linear in unclosed openers", () => {
+  // Each unclosed opener used to rescan the rest of its paragraph, so 5,000 of
   // them took tens of seconds, and a streamed message re-parses per token.
-  // The bound is loose on purpose (the machine running the tests is shared);
-  // the quadratic parse misses it by an order of magnitude.
-  const BOUND_MS = 5000;
-  const timed = (source: string): number => {
-    const start = performance.now();
-    parse(source);
-    return performance.now() - start;
+  // The guard is the characters the math constructs read, which does not
+  // depend on the machine's load: linear work stays within a small multiple
+  // of the message, and a quadratic scan misses it by three orders of
+  // magnitude. Wall time is not a reliable signal here: micromark's own
+  // `resolveAllText` merges data runs with `splice` in a loop, which takes
+  // 0.5 s or (while V8 is marking the heap) 5–10 s for a paragraph with
+  // thousands of escapes, with or without the math plugins. The wall-clock
+  // cap is only a backstop against a hang.
+  const WALL_CAP_MS = 30_000;
+  const work = (source: string): number => {
+    const counter = { consumed: 0 };
+    parse(source, [countMathWork(counter)]);
+    return counter.consumed;
   };
 
-  for (const [label, source] of [
-    ["5,000 unclosed \\( in one paragraph", "x \\( y ".repeat(5000)],
-    ["5,000 unclosed \\[ in one paragraph", "x \\[ y ".repeat(5000)],
-    ["alternating unclosed \\( and \\[", "x \\( y \\[ z ".repeat(3000)],
-    ["5,000 openers before one backtick", "\\( a ".repeat(5000) + "`"],
-    ["5,000 citations before one closer", "\\[ 1 ".repeat(5000) + "\\]"],
-    ["5,000 lines of \\[", "\\[\n".repeat(5000)],
-    ["5,000 lines of $$", "$$\n".repeat(5000)]
+  for (const [label, unit, tail, count] of [
+    ["unclosed \\( in one paragraph", "x \\( y ", "", 5000],
+    ["unclosed \\[ in one paragraph", "x \\[ y ", "", 5000],
+    ["alternating unclosed \\( and \\[", "x \\( y \\[ z ", "", 3000],
+    ["openers before one backtick", "\\( a ", "`", 5000],
+    ["citations before one closer", "\\[ 1 ", "\\]", 5000],
+    ["unclosed $ in one paragraph", "x $ y ", "", 5000],
+    ["lines of \\[", "\\[\n", "", 5000],
+    ["lines of $$", "$$\n", "", 5000]
   ] as const) {
-    it(label, () => {
-      parse("warm $x$ \\(y\\)");
-      const elapsed = timed(source);
-      assert.ok(elapsed < BOUND_MS, `${Math.round(elapsed)} ms`);
+    it(`${count.toLocaleString("en")} ${label}`, () => {
+      const source = unit.repeat(count) + tail;
+      const small = work(unit.repeat(count / 5) + tail);
+      const start = performance.now();
+      const large = work(source);
+      const elapsed = performance.now() - start;
+      // At most one full scan per opener kind (`\(`, `\[`), plus the delimiters.
+      assert.ok(large <= 3 * source.length, `${large} characters read for a ${source.length}-character message`);
+      // Linear is 5x; a quadratic scan is 25x.
+      assert.ok(large <= 10 * Math.max(small, 1), `${small} -> ${large} characters read for 5x the openers`);
+      assert.ok(elapsed < WALL_CAP_MS, `${Math.round(elapsed)} ms`);
     });
   }
 
