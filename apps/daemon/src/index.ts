@@ -2705,7 +2705,7 @@ export function createServer(
             return reply.code(400).send({ code: "INVALID_REF", message: refProblem });
           }
           await mkdir(workspaceDir, { recursive: true });
-          const { name } = await accounts.cloneFromInput(
+          const { name, transport, notice } = await accounts.cloneFromInput(
             accountId,
             body.url,
             preferredName,
@@ -2722,7 +2722,13 @@ export function createServer(
           await pruneArchivedProject(resolved.workspacesMetaFile, workspace, name);
           // A clone of a repo with a secret-files vault gets its files before this answers (never throws).
           await services.secretFiles?.notifyProjectCreated(join(workspaceDir, name));
-          return { name, workspace, path: join(workspaceDir, name), isArchived: false };
+          return {
+            name,
+            workspace,
+            path: join(workspaceDir, name),
+            isArchived: false,
+            clone: { transport, ...(notice ? { notice } : {}) }
+          };
         }
 
         if (body.source === "create") {
@@ -2744,10 +2750,10 @@ export function createServer(
             ...(body.description ? { description: body.description } : {})
           });
           await mkdir(workspaceDir, { recursive: true });
-          await accounts.cloneCreatedRepo(accountId, repo, name, workspaceDir);
+          const clone = await accounts.cloneCreatedRepo(accountId, repo, name, workspaceDir);
           await pruneArchivedProject(resolved.workspacesMetaFile, workspace, name);
           await services.secretFiles?.notifyProjectCreated(path);
-          return { name, workspace, path, isArchived: false };
+          return { name, workspace, path, isArchived: false, clone };
         }
 
         return reply.code(400).send({ code: "INVALID_REQUEST", message: "Unknown project source." });

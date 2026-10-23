@@ -92,6 +92,26 @@ interface CloneOptions {
   unattended?: boolean;
   /** Ceiling on the whole clone, every step included (default: 10 min when `unattended`, else none). */
   timeoutMs?: number;
+  /** Never wait on a prompt (`GIT_TERMINAL_PROMPT=0`) without the `unattended` ceiling. */
+  noPrompt?: boolean;
+}
+
+/** How a clone got through: its transport, and why it is not the one it started on. */
+export interface CloneResult {
+  transport: "ssh" | "https";
+  /** Set when the SSH key was refused and the clone was made over HTTPS instead. */
+  notice?: string;
+}
+
+/**
+ * Whether a failed SSH git command was refused at the SSH layer — the key (or the host key) — rather
+ * than by the repository: `Permission denied (publickey)`, an unverifiable host key, or ssh giving up
+ * after too many keys. A missing repo or a read-only deploy key is not this.
+ */
+export function isSshKeyRefusal(stderr: string): boolean {
+  return /Permission denied \(publickey[^)]*\)|Host key verification failed|Too many authentication failures|no matching host key type found/i.test(
+    stderr
+  );
 }
 
 /** Options for `lsRemote`. */
@@ -762,7 +782,7 @@ export class AccountsService {
     destName: string | undefined,
     cwd: string,
     opts: CloneOptions = {}
-  ): Promise<{ name: string }> {
+  ): Promise<{ name: string } & CloneResult> {
     const account = await this.ensureSshHost(await this.requireAccount(accountId));
     const provider = providerFor(account.provider);
     const parsed = provider.parseRepoUrl(input, this.urlCtx(account));
@@ -796,8 +816,7 @@ export class AccountsService {
     if (existsSync(join(cwd, name))) {
       throw new AccountError(409, "A project with this name already exists.");
     }
-    await this.cloneRepo(accountId, cloneUrl, name, cwd, opts);
-    return { name };
+    return { name, ...(await this.cloneWithHttpsFallback(account, cloneUrl, urls.https, name, cwd, opts)) };
   }
 
   /**
@@ -808,16 +827,63 @@ export class AccountsService {
    */
   async cloneCreatedRepo(
     id: string,
-    repo: Pick<RepoSummary, "sshUrl" | "httpsUrl">,
+    repo: Pick<RepoSummary, "sshUrl" | "httpsUrl"> & { private?: boolean },
     destName: string,
     cwd: string
-  ): Promise<void> {
+  ): Promise<CloneResult> {
     const account = await this.requireAccount(id);
     const cloneUrl = pickCloneUrl(account, { ssh: repo.sshUrl, https: repo.httpsUrl });
     if (!cloneUrl) {
       throw new AccountError(502, "The repository exposes no clone URL (neither HTTP(S) nor SSH).");
     }
-    await this.cloneRepo(id, cloneUrl, destName, cwd);
+    return this.cloneWithHttpsFallback(account, cloneUrl, repo.httpsUrl, destName, cwd, {}, repo.private === false);
+  }
+
+  /**
+   * `cloneRepo` over `url`, and — when that was SSH and the SSH layer refused the key — once more
+   * over the repo's own HTTPS URL (`httpsUrl`, as the provider reported it; never derived), after
+   * removing whatever the failed clone left. Only when HTTPS can authenticate: the account has a
+   * token (its 0600 credential store answers git, so the token never reaches argv, a URL or a
+   * log), or the repo is known to be public. The retry never prompts. When it fails too, both
+   * failures are reported.
+   */
+  private async cloneWithHttpsFallback(
+    account: Account,
+    url: string,
+    httpsUrl: string | undefined,
+    destName: string,
+    cwd: string,
+    opts: CloneOptions,
+    knownPublic = false
+  ): Promise<CloneResult> {
+    const ssh = !/^https?:\/\//i.test(url);
+    const dest = join(cwd, destName);
+    const existed = existsSync(dest);
+    try {
+      await this.cloneRepo(account.id, url, destName, cwd, opts);
+      return { transport: ssh ? "ssh" : "https" };
+    } catch (sshError) {
+      const canRetry =
+        ssh &&
+        httpsUrl !== undefined &&
+        /^https:\/\//i.test(httpsUrl) &&
+        (Boolean(account.token) || knownPublic) &&
+        sshError instanceof GitRemoteError &&
+        sshError.kind === "auth";
+      if (!canRetry) throw sshError;
+      if (!existed) await rm(dest, { recursive: true, force: true }).catch(() => undefined);
+      try {
+        await this.cloneRepo(account.id, httpsUrl, destName, cwd, { ...opts, noPrompt: true });
+      } catch (httpsError) {
+        const status = httpsError instanceof AccountError ? httpsError.status : 502;
+        const detail = httpsError instanceof Error ? httpsError.message : "unknown error";
+        throw new AccountError(status, `${sshError.message} Cloning over HTTPS instead also failed: ${detail}`);
+      }
+      return {
+        transport: "https",
+        notice: "The SSH key was refused, so the repository was cloned over HTTPS instead."
+      };
+    }
   }
 
   // boxes: Ephemeral AI VMs (spec 2026-10-19 §7, §11.2). A project box clones IN the box (through
@@ -921,7 +987,9 @@ export class AccountsService {
     const timeoutMs = opts.timeoutMs ?? (opts.unattended === true ? DEFAULT_CLONE_TIMEOUT_MS : undefined);
     const deadline = timeoutMs === undefined ? undefined : Date.now() + timeoutMs;
     const remaining = () => (deadline === undefined ? undefined : Math.max(1_000, deadline - Date.now()));
-    const { configArgs, env } = await this.remoteTransport(account, url, { noPrompt: opts.unattended === true });
+    const { configArgs, env } = await this.remoteTransport(account, url, {
+      noPrompt: opts.unattended === true || opts.noPrompt === true
+    });
     const dest = join(cwd, destName);
     const git = (args: string[], at: string) =>
       this.exec("git", [...configArgs, ...args], {
@@ -939,6 +1007,9 @@ export class AccountsService {
         );
       }
       const detail = redactUrlUserinfo(errText(error));
+      if (isSshKeyRefusal(fullStderr(error))) {
+        return new GitRemoteError(400, `Could not clone the repository over SSH: the key was refused. ${detail}`, "auth");
+      }
       if (/HTTP 410/.test(detail)) {
         return new AccountError(
           400,
@@ -1345,6 +1416,11 @@ export class AccountsService {
       }
     }
   }
+}
+
+/** A failed exec's whole stderr (`errText` keeps 200 characters, which can cut the line that matters). */
+function fullStderr(error: unknown): string {
+  return error && typeof error === "object" && "stderr" in error ? String((error as { stderr?: unknown }).stderr ?? "") : "";
 }
 
 function errText(error: unknown): string {

@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import { bitbucketCloudProvider } from "./bitbucket-cloud";
 import { bitbucketServerProvider } from "./bitbucket-server";
 import { githubProvider } from "./github";
+import { resetRateGates } from "./rate-gate";
 import { GitRemoteError, retryAfterMs } from "./types";
 
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), "fixtures");
@@ -24,6 +25,8 @@ interface Seen {
 const realFetch = globalThis.fetch;
 afterEach(() => {
   globalThis.fetch = realFetch;
+  // One test's 429 must not leave its host paused for the next.
+  resetRateGates();
 });
 
 /** Answer every fetch with `respond(url)`, recording the URL and headers sent. */
@@ -354,6 +357,82 @@ test("bitbucket server: needs an account; personal projects keep the ~; a 403 is
     (error: unknown) => error instanceof GitRemoteError && error.kind === "auth" && error.status === 400
   );
   assert.match(seen[0].url, /\/projects\/~jdoe\/repos\/site\/pull-requests/);
+});
+
+// --- Rate limits: one pause per host and account -------------------------------
+
+const BB = { token: "t", email: "e@example.invalid" };
+
+test("bitbucket cloud: a 429 is not retried; it pauses the account, and later requests fail fast", async () => {
+  const seen = stubFetch(() => json('{"type":"error"}', 429, { "retry-after": "30" }));
+  await assert.rejects(bitbucketCloudProvider.listPullRequests(BB, { owner: "a", repo: "b" }), (error: unknown) => {
+    assert.ok(error instanceof GitRemoteError);
+    assert.equal(error.kind, "rate_limited");
+    assert.equal(error.retryAfterMs, 30_000);
+    return true;
+  });
+  assert.equal(seen.length, 1, "one 429, no retries into the limit");
+
+  // Another repo's poll on the same account: refused at once, with what is left of the pause.
+  await assert.rejects(bitbucketCloudProvider.listPullRequests(BB, { owner: "a", repo: "c" }), (error: unknown) => {
+    assert.ok(error instanceof GitRemoteError && error.kind === "rate_limited");
+    assert.ok(error.retryAfterMs !== undefined && error.retryAfterMs > 25_000 && error.retryAfterMs <= 30_000);
+    return true;
+  });
+  // A user's request on the same account says how long to wait instead of adding a request.
+  await assert.rejects(bitbucketCloudProvider.listRepos(BB), (error: unknown) => {
+    assert.ok(error instanceof GitRemoteError && error.status === 429);
+    assert.match(error.message, /^Bitbucket is rate limiting this account; try again in \d+ s\.$/);
+    return true;
+  });
+  assert.equal(seen.length, 1);
+
+  // Another account (and anonymous reads) have their own quota.
+  stubFetch(() => json('{"values":[]}'));
+  assert.deepEqual(await bitbucketCloudProvider.listPullRequests(null, { owner: "a", repo: "b" }), { items: [] });
+});
+
+test("bitbucket cloud: a 429 without Retry-After pauses for 60 s", async () => {
+  stubFetch(() => json('{"type":"error"}', 429));
+  await assert.rejects(
+    bitbucketCloudProvider.listPullRequests(BB, { owner: "a", repo: "b" }),
+    (error: unknown) => error instanceof GitRemoteError && error.retryAfterMs === 60_000
+  );
+});
+
+test("bitbucket server: a 429 reads Retry-After and stops the rest of the poll's pages", async () => {
+  const seen = stubFetch(() => json('{"errors":[]}', 429, { "retry-after": "120" }));
+  const dc = { token: "t", baseUrl: "https://bb.corp.example/bitbucket" };
+  await assert.rejects(bitbucketServerProvider.listPullRequests(dc, { owner: "PRJ", repo: "api" }, { knownOpen: [1, 2, 3] }), (error: unknown) => {
+    assert.ok(error instanceof GitRemoteError);
+    assert.equal(error.kind, "rate_limited");
+    assert.equal(error.retryAfterMs, 120_000);
+    return true;
+  });
+  assert.equal(seen.length, 1);
+  await assert.rejects(
+    bitbucketServerProvider.listPullRequests(dc, { owner: "PRJ", repo: "web" }),
+    (error: unknown) => error instanceof GitRemoteError && error.kind === "rate_limited"
+  );
+  assert.equal(seen.length, 1, "the instance is paused for this account");
+});
+
+test("github: a spent quota pauses the account until its reset; other answers start no pause", async () => {
+  const reset = Math.floor(Date.now() / 1000) + 120;
+  const seen = stubFetch(() =>
+    json('{"message":"API rate limit exceeded"}', 403, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": String(reset) })
+  );
+  await assert.rejects(githubProvider.listReleases({ token: "ghp_a" }, { owner: "o", repo: "r" }));
+  await assert.rejects(
+    githubProvider.listPullRequests({ token: "ghp_a" }, { owner: "o", repo: "other" }),
+    (error: unknown) => error instanceof GitRemoteError && error.kind === "rate_limited" && (error.retryAfterMs ?? 0) > 100_000
+  );
+  assert.equal(seen.length, 1);
+
+  const fine = stubFetch(() => json('{"message":"Not Found"}', 404));
+  await assert.rejects(githubProvider.listPullRequests({ token: "ghp_b" }, { owner: "o", repo: "r" }));
+  await assert.rejects(githubProvider.listPullRequests({ token: "ghp_b" }, { owner: "o", repo: "r" }));
+  assert.equal(fine.length, 2, "a 404 pauses nothing");
 });
 
 test("retryAfterMs reads seconds and HTTP dates", () => {
