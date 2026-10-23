@@ -1,8 +1,9 @@
 /**
- * Settings → Plugins → Knowledge Graph, while the plugin is on: the Activity
+ * Settings → Plugins → Knowledge Graph: while the plugin is on, the Activity
  * block (counts, linking state, the last run, tokens, the last error, worker
- * sessions, "Rebuild graph", "Open Knowledge tab") and the indexing settings
- * (account, model, concurrency).
+ * sessions, "Rebuild graph", "Open Knowledge tab"); always, the indexing
+ * settings (account, model, concurrency), which the daemon answers whether or
+ * not the plugin is on so they can be set before turning it on.
  *
  * Activity reads the knowledge store's status, which `knowledge.status` events
  * keep live; the settings are read here and saved with the settings PUT, whose
@@ -49,15 +50,12 @@ import {
 const SELECT_CLASS =
   "h-8 min-w-0 max-w-full rounded-md border border-neutral-700 bg-neutral-900 px-2 text-base text-neutral-100 disabled:opacity-50 sm:text-sm";
 
-export const KnowledgePluginSection: React.FC<{ enabled: boolean }> = ({ enabled }) => {
-  if (!enabled) return null;
-  return (
-    <>
-      <KnowledgeActivity />
-      <KnowledgeIndexingSettings />
-    </>
-  );
-};
+export const KnowledgePluginSection: React.FC<{ enabled: boolean }> = ({ enabled }) => (
+  <>
+    {enabled && <KnowledgeActivity />}
+    <KnowledgeIndexingSettings />
+  </>
+);
 
 // ---------------------------------------------------------------------------
 // Activity
