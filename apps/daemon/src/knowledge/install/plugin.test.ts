@@ -14,7 +14,7 @@ import { combinedRegistryDeps, fakeRegistry } from "../../plugins/testing.ts";
 import { TS_CHECKER_ENGINE_SPECS } from "../../plugins/ts-rust/installer.ts";
 import type { KnowledgeRuntime } from "../ports.ts";
 import { knowledgeVersionDir } from "./installer.ts";
-import { MYKG_PINNED_VERSION, MYKG_PINNED_WHEEL_SHA256 } from "./pins.ts";
+import { MYKG_PINNED_VERSION, MYKG_PINNED_WHEEL_SHA256, tiktokenCacheKey } from "./pins.ts";
 import { KnowledgeRuntimeTracker } from "./runtime.ts";
 import { type FakeKnowledgeHost, fakeKnowledgeHost, makeModel, makeUvBuild, pypiWheel, tempRoot } from "./testing.ts";
 import { createKnowledgeGraphUpdater } from "./updater.ts";
@@ -79,7 +79,8 @@ async function harness(t: TestContext, options: { platform?: string; seed?: unkn
       env: { PATH: process.env.PATH },
       deps: host.deps,
       uv: platform === "linux" ? uv.build : null,
-      model: model.spec
+      model: model.spec,
+      encodings: host.encodings
     }),
     logger: { warn: () => {}, error: () => {} }
   });
@@ -201,7 +202,8 @@ test("turning it on installs the pinned runtime in its own lane; the runtime por
     pythonBin: join(dir, "venv", "bin", "python"),
     embeddingModelDir: join(dir, "models"),
     embeddingModelId: "Fixture/mini-model",
-    embeddingDimensions: 384
+    embeddingDimensions: 384,
+    tiktokenCacheDir: join(dir, "tiktoken")
   });
   assert.deepEqual(h.runtimes, [runtime]);
 
@@ -210,6 +212,33 @@ test("turning it on installs the pinned runtime in its own lane; the runtime por
   await h.service.update(ID, { enabled: true });
   await settle(h);
   assert.equal(h.host.calls.downloads.length, downloads);
+});
+
+test("the first install is the pinned version even when PyPI has a newer patch; the next check offers that", async (t) => {
+  const h = await harness(t);
+  publishNewer(h);
+  await h.service.update(ID, { enabled: true });
+  await settle(h);
+  let plugin = await info(h);
+  assert.equal(plugin.current?.version, MYKG_PINNED_VERSION, "the tested version first");
+  assert.equal(plugin.current?.integrity, `sha256:${MYKG_PINNED_WHEEL_SHA256}`);
+  assert.deepEqual(h.host.calls.json, [], "resolved from the pin, no PyPI lookup");
+
+  await h.service.checkNow(ID);
+  await settle(h);
+  plugin = await info(h);
+  assert.equal(plugin.current?.version, NEWER);
+  assert.equal(plugin.previous?.version, MYKG_PINNED_VERSION);
+
+  // After "Remove downloads", turning it on again is a first install again.
+  await h.service.update(ID, { enabled: false });
+  await h.service.removeDownloads(ID);
+  await h.service.update(ID, { enabled: true });
+  await settle(h);
+  plugin = await info(h);
+  assert.equal(plugin.current?.version, MYKG_PINNED_VERSION);
+  assert.equal(plugin.previous, null);
+  assert.deepEqual(await versions(h), [MYKG_PINNED_VERSION]);
 });
 
 test("checks offer newer patches of the pinned line only; updates keep current and previous", async (t) => {
@@ -363,6 +392,40 @@ test("a first install that failed is retried by the hourly check", async (t) => 
   t.mock.timers.tick(PLUGIN_CHECK_INTERVAL_MS);
   await settle(h);
   assert.equal((await info(h)).current?.version, MYKG_PINNED_VERSION);
+});
+
+test("a myKG that rejects the generated config records a smoke-test error and keeps the working version", async (t) => {
+  const h = await harness(t);
+  await h.service.update(ID, { enabled: true });
+  await settle(h);
+  publishNewer(h);
+  h.host.configCheck = { exitCode: 1, stdout: "", stderr: "Traceback (most recent call last):\nKeyError: 'batch_per_file'\n", timedOut: false };
+  await h.service.checkNow(ID);
+  await settle(h);
+  const plugin = await info(h);
+  assert.equal(plugin.current?.version, MYKG_PINNED_VERSION);
+  assert.equal(plugin.lastError?.step, "smoke-test");
+  assert.equal(
+    plugin.lastError?.message,
+    "myKG 0.4.11 rejected the generated config (profile agent-claude-code): Traceback (most recent call last): | KeyError: 'batch_per_file'"
+  );
+  assert.equal((await onDisk(h)).lastError.version, NEWER);
+  assert.deepEqual(await versions(h), [MYKG_PINNED_VERSION]);
+});
+
+test("a runtime missing its tiktoken encoding is repaired by the next check", async (t) => {
+  const h = await harness(t);
+  await h.service.update(ID, { enabled: true });
+  await settle(h);
+  const cache = h.tracker.current()?.tiktokenCacheDir ?? "";
+  await rm(join(cache, tiktokenCacheKey(h.host.encodings[0]?.url ?? "")));
+  const downloads = h.host.calls.downloads.length;
+  await h.service.checkNow(ID);
+  await settle(h);
+  assert.ok(h.host.calls.downloads.length > downloads, "reinstalled");
+  assert.equal((await info(h)).current?.version, MYKG_PINNED_VERSION);
+  assert.equal((await info(h)).previous, null, "a repair is no update");
+  assert.equal((await readdir(cache)).length, 1);
 });
 
 test("remove downloads is refused while on, then deletes the runtime and keeps the settings", async (t) => {

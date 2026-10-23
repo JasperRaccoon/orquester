@@ -38,6 +38,11 @@ export interface PluginUpdateTarget<R extends PluginRelease = PluginRelease> {
    * "keep it as previous" ask. `hasFiles` when absent.
    */
   hasInstalled?(version: string): Promise<boolean>;
+  /**
+   * The version a first install (no current version in the record) installs, resolved as
+   * `pinned`; later checks resolve the latest. The latest from the start when absent.
+   */
+  readonly firstInstall?: string;
   /** The latest release, or `pinned` exactly. */
   resolve(signal: AbortSignal, pinned?: string): Promise<R>;
   /** Install `release` (staged, verified, smoke-tested, renamed into place). */

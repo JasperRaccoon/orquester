@@ -240,5 +240,6 @@ export const FAKE_RUNTIME: KnowledgeRuntime = {
   pythonBin: "/plugin/runtime/versions/0.4.10/venv/bin/python",
   embeddingModelDir: "/plugin/runtime/model",
   embeddingModelId: "Xenova/all-MiniLM-L6-v2",
-  embeddingDimensions: 384
+  embeddingDimensions: 384,
+  tiktokenCacheDir: "/plugin/runtime/versions/0.4.10/tiktoken"
 };

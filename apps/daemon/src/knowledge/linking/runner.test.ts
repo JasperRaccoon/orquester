@@ -65,6 +65,7 @@ describe("mykg argv and env", () => {
     assert.equal(env.HOME, "/plugin/mykg-home");
     assert.equal(env.PATH!.split(":")[0], "/plugin/runtime/versions/0.4.10/venv/bin");
     assert.equal(env.VIRTUAL_ENV, "/plugin/runtime/versions/0.4.10/venv");
+    assert.equal(env.TIKTOKEN_CACHE_DIR, RUNTIME.tiktokenCacheDir, "the runtime's prefetched encodings");
     for (const key of Object.keys(env)) assert.doesNotMatch(key, /API_KEY|_TOKEN$|ANTHROPIC|OPENAI|CLAUDE|CODEX|ACCOUNT|SECRET/);
     assert.deepEqual(Object.keys(env).sort(), [
       "HOME",

@@ -57,7 +57,7 @@ test("the runtime source makes the embedder lazily and swaps it when the runtime
   const listeners = new Set<() => void>();
   const source = runtimeEmbedderSource({
     current: () =>
-      runtime && { mykgVersion: "0.4.10", mykgBin: "/x", pythonBin: "/x", ...runtime },
+      runtime && { mykgVersion: "0.4.10", mykgBin: "/x", pythonBin: "/x", tiktokenCacheDir: "/x", ...runtime },
     onChange: (listener) => {
       listeners.add(listener as () => void);
       return () => listeners.delete(listener as () => void);

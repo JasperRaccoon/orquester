@@ -489,7 +489,8 @@ export class PluginsService {
         // A current version whose files are gone (deleted from outside) is repaired: ts-rust's
         // every tsc would otherwise print "<engine> failed to start" until the downloads were removed.
         const currentMissing = state.current !== undefined && !(await target.hasFiles(state.current.version));
-        let release = await target.resolve(abort.signal);
+        // Nothing installed yet: the target's first-install version when it names one.
+        let release = await target.resolve(abort.signal, state.current === undefined ? target.firstInstall : undefined);
         if (release.version === state.skippedVersion && currentMissing && state.current) {
           // Latest is the version rolled back from: reinstall the one rolled back to instead.
           release = await target.resolve(abort.signal, state.current.version);
