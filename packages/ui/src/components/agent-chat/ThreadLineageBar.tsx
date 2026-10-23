@@ -34,7 +34,7 @@ export interface LineageNotice {
 export function ThreadLineageBar({
   session,
   sessions,
-  defaultMergeText,
+  readDefaultMergeText,
   notice,
   onDismissNotice,
   onOpenSession,
@@ -44,8 +44,11 @@ export function ThreadLineageBar({
   session: SessionSummary;
   /** Every tab the store holds (the project's): parents and children are read from their records. */
   sessions: readonly SessionSummary[];
-  /** What "Merge back" offers to send: the thread's last finished answer. */
-  defaultMergeText: string;
+  /**
+   * What "Merge back" offers to send: the thread's last finished answer. Read
+   * when the merge composer opens, so a streamed reply re-renders nothing here.
+   */
+  readDefaultMergeText: () => string;
   notice: LineageNotice | null;
   onDismissNotice: () => void;
   onOpenSession: (sessionId: string) => void;
@@ -82,7 +85,7 @@ export function ThreadLineageBar({
   if (!lineage && children.length === 0 && notice === null && pendingMerges.length === 0) return null;
 
   const openComposer = (): void => {
-    setDraft(defaultMergeText);
+    setDraft(readDefaultMergeText());
     setComposing(true);
   };
   const submit = (): void => {

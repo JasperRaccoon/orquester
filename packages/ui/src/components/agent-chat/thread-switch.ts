@@ -29,6 +29,25 @@ export interface ThreadSwitchTimeline<TRow> {
   displaySessionId: string;
 }
 
+/**
+ * The paint hold's two flags without the rows — what the chat view reads,
+ * so it never subscribes to the rows a streamed delta replaces: the same
+ * answer as {@link resolveThreadSwitchTimeline} given only whether the named
+ * thread has rows.
+ */
+export function threadSwitchDisplay<TRow>(input: {
+  sessionId: string;
+  hasRows: boolean;
+  loading: boolean;
+  held: HeldTimeline<TRow> | null;
+}): Pick<ThreadSwitchTimeline<TRow>, "paintOnly" | "displaySessionId"> {
+  const { sessionId, hasRows, loading, held } = input;
+  if (!hasRows && loading && held && held.rows.length > 0) {
+    return { paintOnly: held.sessionId !== sessionId, displaySessionId: held.sessionId };
+  }
+  return { paintOnly: false, displaySessionId: sessionId };
+}
+
 export function resolveThreadSwitchTimeline<TRow>(input: {
   sessionId: string;
   rows: readonly TRow[];

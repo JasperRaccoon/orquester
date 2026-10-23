@@ -45,7 +45,7 @@ const bar = (session: SessionSummary, sessions: SessionSummary[]) =>
     createElement(ThreadLineageBar, {
       session,
       sessions,
-      defaultMergeText: "B works",
+      readDefaultMergeText: () => "B works",
       notice: null,
       onDismissNotice: () => undefined,
       onOpenSession: () => undefined,

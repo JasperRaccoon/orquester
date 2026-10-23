@@ -50,7 +50,7 @@ const ROUND =
  *
  * *T3: `ComposerPrimaryActions.tsx:161-216, 218-284`.*
  */
-export function ComposerPrimaryActions({
+export const ComposerPrimaryActions = React.memo(function ComposerPrimaryActions({
   isRunning,
   showPlanFollowUp,
   promptHasText,
@@ -146,4 +146,4 @@ export function ComposerPrimaryActions({
       {hasSendableContent ? sendButton : null}
     </div>
   );
-}
+});
