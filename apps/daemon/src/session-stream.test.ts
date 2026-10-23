@@ -18,6 +18,20 @@ class FakeSocket implements SessionStreamSocket {
     this.bufferedAmount += data.length;
   }
 
+  /** A slow link: write out `bytes` of what is queued, oldest first, firing callbacks of whole frames. */
+  drain(bytes: number): void {
+    while (this.pending.length > 0 && bytes >= this.pending[0]!.size) {
+      const write = this.pending.shift()!;
+      bytes -= write.size;
+      this.bufferedAmount -= write.size;
+      write.cb?.();
+    }
+    if (this.pending.length > 0 && bytes > 0) {
+      this.pending[0]!.size -= bytes;
+      this.bufferedAmount -= bytes;
+    }
+  }
+
   /** Write out every queued frame, firing their callbacks in order. */
   flush(): void {
     const pending = this.pending;
@@ -101,10 +115,10 @@ class FakeSessions implements SessionStreamSessions {
 
 const LIMITS = { highWater: 100, lowWater: 20 };
 
-function rig() {
+function rig(limits = LIMITS) {
   const socket = new FakeSocket();
   const sessions = new FakeSessions();
-  const stream = createSessionStream(socket, sessions, LIMITS);
+  const stream = createSessionStream(socket, sessions, limits);
   const message = (frame: object) => stream.onMessage(JSON.stringify(frame));
   return { socket, sessions, stream, message };
 }
@@ -178,31 +192,36 @@ describe("subscribe", () => {
   });
 });
 
+const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
+
 describe("backpressure", () => {
-  test("output past the high-water mark is dropped, not queued, until the socket drains", async () => {
+  test("output past the high-water mark is held, not sent, until the socket drains", async () => {
     const { socket, sessions, message } = rig();
     await message({ t: "sub", id: "s" });
     socket.take();
-    sessions.out("x".repeat(150)); // sent: buffer was empty
-    sessions.out("dropped-1");
-    sessions.out("dropped-2");
-    assert.deepEqual(
-      socket.take().map((f) => (f.t === "out" ? f.data.length : f.t)),
-      [150]
-    );
-    assert.equal(sessions.scrollbacks, 1, "no resync while the socket is still backed up");
+    sessions.out("x".repeat(150)); // sent: the buffer was below the mark
+    sessions.out("held-1");
+    sessions.out("held-2");
+    assert.deepEqual(socket.take(), [{ t: "out", id: "s", data: "x".repeat(150) }]);
+    socket.flush(); // the write callbacks see the drain
+    assert.deepEqual(socket.take(), [{ t: "out", id: "s", data: "held-1held-2" }]);
+    sessions.out("live");
+    assert.deepEqual(socket.take(), [{ t: "out", id: "s", data: "live" }]);
+    assert.equal(sessions.scrollbacks, 1, "no resync when the held output fit its budget");
   });
 
-  test("a drained socket gets reset, a fresh snapshot, then live output again", async () => {
+  test("held output past its budget is dropped; the drain brings reset, a fresh snapshot, then live output", async () => {
     const { socket, sessions, message } = rig();
     await message({ t: "sub", id: "s" });
     socket.take();
     sessions.out("x".repeat(150));
+    sessions.out("y".repeat(120)); // held, over the 100-char budget → overflowed
     sessions.out("dropped");
-    socket.take();
+    assert.deepEqual(socket.take().map((f) => f.t), ["out"]);
+    assert.equal(sessions.scrollbacks, 1, "no resync while the socket is still backed up");
     sessions.snapshot = "FRESH";
-    socket.flush(); // the write callback sees the drain
-    await new Promise<void>((resolve) => setImmediate(resolve));
+    socket.flush();
+    await tick();
     sessions.out("after");
     assert.deepEqual(socket.take(), [
       { t: "reset", id: "s" },
@@ -211,35 +230,49 @@ describe("backpressure", () => {
     ]);
   });
 
-  test("a partial drain above the low-water mark does not resync yet", async () => {
+  test("a partial drain above the low-water mark keeps holding", async () => {
     const { socket, sessions, message } = rig();
     await message({ t: "sub", id: "s" });
     socket.take();
     socket.flush();
     sessions.out("x".repeat(150));
-    sessions.out("dropped");
+    sessions.out("held");
     // Something else still sits in the buffer above the low-water mark.
     socket.bufferedAmount += 50;
     socket.flush();
-    await new Promise<void>((resolve) => setImmediate(resolve));
+    await tick();
     assert.deepEqual(socket.take(), [{ t: "out", id: "s", data: "x".repeat(150) }]);
     assert.equal(sessions.scrollbacks, 1);
   });
 
-  test("every terminal that overflowed is resynced; quiet ones are not", async () => {
+  test("every terminal that overflowed is resynced; others are not", async () => {
     const { socket, sessions, message } = rig();
     await message({ t: "sub", id: "a" });
     await message({ t: "sub", id: "b" });
     socket.take();
     socket.flush();
     sessions.out("x".repeat(150)); // both subscribed to the same fake emitter
-    assert.equal(socket.take().length, 1, "only the first fits; the second overflowed");
+    assert.equal(socket.take().length, 1, "only the first fits; the second overflowed its budget");
     socket.flush();
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    const frames = socket.take();
-    assert.deepEqual(frames, [
+    await tick();
+    assert.deepEqual(socket.take(), [
       { t: "reset", id: "b" },
       { t: "out", id: "b", data: "SNAP", replay: true }
+    ]);
+  });
+
+  test("an exit while held follows the held output", async () => {
+    const { socket, sessions, message } = rig();
+    await message({ t: "sub", id: "s" });
+    socket.take();
+    sessions.out("x".repeat(150));
+    sessions.out("tail");
+    sessions.emitter.emit("exit", 0);
+    socket.take();
+    socket.flush();
+    assert.deepEqual(socket.take(), [
+      { t: "out", id: "s", data: "tail" },
+      { t: "end", id: "s" }
     ]);
   });
 
@@ -248,11 +281,11 @@ describe("backpressure", () => {
     await message({ t: "sub", id: "s" });
     socket.take();
     sessions.out("x".repeat(150));
-    sessions.out("dropped");
+    sessions.out("y".repeat(120));
     sessions.emitter.emit("exit", 1);
     assert.deepEqual(socket.take().map((f) => f.t), ["out"]);
     socket.flush();
-    await new Promise<void>((resolve) => setImmediate(resolve));
+    await tick();
     assert.deepEqual(socket.take(), [
       { t: "reset", id: "s" },
       { t: "out", id: "s", data: "SNAP", replay: true },
@@ -265,22 +298,79 @@ describe("backpressure", () => {
     await message({ t: "sub", id: "s" });
     socket.take();
     sessions.out("x".repeat(150));
-    sessions.out("dropped");
+    sessions.out("y".repeat(120));
     socket.take();
     sessions.capture = deferred();
     socket.flush();
-    sessions.out("y".repeat(150)); // held during the capture, over budget → dropped
+    sessions.out("z".repeat(150)); // held during the capture, over budget → dropped
     sessions.capture.resolve();
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    const frames = socket.take();
-    assert.deepEqual(frames.map((f) => f.t), ["reset", "out"]);
+    await tick();
+    assert.deepEqual(socket.take().map((f) => f.t), ["reset", "out"]);
     assert.equal(sessions.scrollbacks, 2);
     // The snapshot frames drain → the stale terminal is resynced again.
     sessions.capture = null;
     socket.flush();
-    await new Promise<void>((resolve) => setImmediate(resolve));
+    await tick();
     assert.equal(sessions.scrollbacks, 3);
     assert.deepEqual(socket.take().map((f) => f.t), ["reset", "out"]);
+  });
+
+  test("a slow link behind a snapshot near the budget does not loop on snapshots", async () => {
+    // The review's case: a snapshot almost as large as the high-water mark,
+    // modest output, and a link that drains a little more than it gets.
+    const { socket, sessions, message } = rig({ highWater: 1000, lowWater: 250 });
+    sessions.snapshot = "s".repeat(950);
+    await message({ t: "sub", id: "s" });
+    let produced = "";
+    for (let i = 0; i < 200; i += 1) {
+      // Two lines a tick, ~160 bytes framed; the link carries 200.
+      for (const half of ["a", "b"]) {
+        const line = `line ${String(i).padStart(3, "0")}${half} ${"x".repeat(40)}\n`;
+        produced += line;
+        sessions.out(line);
+      }
+      socket.drain(200);
+      await tick();
+    }
+    socket.flush();
+    const frames = socket.take();
+    const replays = frames.filter((f) => f.t === "out" && f.replay);
+    const live = frames
+      .filter((f): f is Extract<TerminalStreamServerFrame, { t: "out" }> => f.t === "out" && !f.replay)
+      .map((f) => f.data)
+      .join("");
+    assert.equal(replays.length, 1, "only the subscribe snapshot");
+    assert.equal(sessions.scrollbacks, 1);
+    assert.equal(live, produced, "every line arrived, in order");
+  });
+
+  test("after one real overflow a slow link recovers to live output", async () => {
+    const { socket, sessions, message } = rig({ highWater: 1000, lowWater: 250 });
+    sessions.snapshot = "s".repeat(900);
+    await message({ t: "sub", id: "s" });
+    // A burst the link can't carry: one resync.
+    for (let i = 0; i < 40; i += 1) sessions.out("b".repeat(100));
+    let after = "";
+    for (let i = 0; i < 300; i += 1) {
+      const line = `line ${String(i).padStart(3, "0")} ${"x".repeat(30)}\n`;
+      sessions.out(line);
+      if (sessions.scrollbacks >= 2) after += line;
+      socket.drain(120);
+      await tick();
+    }
+    socket.flush();
+    await tick();
+    const frames = socket.take();
+    assert.equal(sessions.scrollbacks, 2, "the subscribe snapshot and one resync");
+    assert.equal(frames.filter((f) => f.t === "reset").length, 1);
+    const lastReplay = frames.map((f) => f.t === "out" && f.replay === true).lastIndexOf(true);
+    const live = frames
+      .slice(lastReplay + 1)
+      .filter((f): f is Extract<TerminalStreamServerFrame, { t: "out" }> => f.t === "out")
+      .map((f) => f.data)
+      .join("");
+    assert.ok(live.length > 0 && after.endsWith(live), "live output resumed after the resync and kept up");
+    assert.ok(live.endsWith("line 299 " + "x".repeat(30) + "\n"));
   });
 
   test("pong and end are never dropped", async () => {
