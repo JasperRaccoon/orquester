@@ -13,7 +13,7 @@
 // `owner`: a session this block's owner names, created at or after the create began and not one the
 // block already knows, IS the one the lost response would have named.
 
-import { renderTemplate, type CreateSessionRequest, type SessionSummary, type WorkflowSessionOwner } from "@orquester/api";
+import { renderTemplate, type CreateSessionRequest, type SessionOwner, type SessionSummary, type WorkflowSessionOwner } from "@orquester/api";
 import type { CreateAgentChatSessionFields } from "@orquester/api/agent-chat";
 import {
   expectOk,
@@ -185,8 +185,8 @@ export function profileRefusalMessage(code: string, message: string, profileId: 
   return `The Agent Profile this block launches with could not be used: ${message}`;
 }
 
-function sameOwner(a: WorkflowSessionOwner | undefined, b: WorkflowSessionOwner): boolean {
-  return Boolean(a && a.kind === b.kind && a.workflowId === b.workflowId && a.runId === b.runId && a.nodeId === b.nodeId);
+function sameOwner(a: SessionOwner | undefined, b: WorkflowSessionOwner): boolean {
+  return Boolean(a && a.kind === "workflow" && a.workflowId === b.workflowId && a.runId === b.runId && a.nodeId === b.nodeId);
 }
 
 /**

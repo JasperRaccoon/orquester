@@ -1359,6 +1359,20 @@ export const workflowSessionOwnerSchema = z.object({
 export type WorkflowSessionOwnerRecord = z.infer<typeof workflowSessionOwnerSchema>;
 
 /**
+ * A worker chat the Knowledge Graph plugin's indexer started for one linking run. Mirrors
+ * `KnowledgeSessionOwner` in `@orquester/api`.
+ */
+export const knowledgeSessionOwnerSchema = z.object({
+  kind: z.literal("knowledge-indexer"),
+  runId: ownerIdSchema
+});
+export type KnowledgeSessionOwnerRecord = z.infer<typeof knowledgeSessionOwnerSchema>;
+
+/** Every owner a chat tab may carry; the daemon validates a create's `owner` against it (400 `INVALID_OWNER`). */
+export const sessionOwnerSchema = z.union([workflowSessionOwnerSchema, knowledgeSessionOwnerSchema]);
+export type SessionOwnerRecord = z.infer<typeof sessionOwnerSchema>;
+
+/**
  * A chat thread's parent (spec 2026-10-14 §6). Mirrors `ThreadLineage` in
  * `@orquester/api` (`parseThreadLineage`, the same rules). Read with `.catch`
  * wherever it is persisted: a lineage that does not parse is dropped, never
@@ -1417,11 +1431,12 @@ export const sessionRecordSchema = z.object({
   // parseSessionsConfig: a bad chat block drops that ONE session, never the
   // index — an unparseable index disables orphan reaping for every terminal.
   chat: sessionChatRecordSchema.optional(),
-  // Set when an automated workflow run started this (chat) tab (workflows spec §5.10).
-  // Tolerant: a malformed owner — a newer shape, a hand edit — is DROPPED, never the record
-  // (`.catch`), so a bad owner can't cost the user a tab. An older daemon strips the key on
-  // rollback, which only loses the Workflow chip.
-  owner: workflowSessionOwnerSchema.optional().catch(undefined),
+  // Set when an automated workflow run (workflows spec §5.10) or the Knowledge Graph indexer
+  // started this (chat) tab. Tolerant: a malformed owner — a newer shape, a hand edit — is
+  // DROPPED, never the record (`.catch`), so a bad owner can't cost the user a tab. An older
+  // daemon strips the key on rollback (a knowledge-indexer owner included), which only loses the
+  // Workflow chip, or shows a former worker chat as an ordinary tab.
+  owner: sessionOwnerSchema.optional().catch(undefined),
   // Agent-chat tabs: the thread this one was forked from or delegated by (spec 2026-10-14 §6).
   // Tolerant like `owner`: a malformed lineage is dropped, never the record; an older daemon
   // strips the key, which only loses the lineage chip.
