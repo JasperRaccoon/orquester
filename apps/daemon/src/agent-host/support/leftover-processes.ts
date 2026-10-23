@@ -299,7 +299,8 @@ async function eachLimited<T>(items: readonly T[], work: (item: T) => Promise<vo
  * The sessions `parentPid`'s direct children take part in, recorded now — a
  * provider CLI's, while it lives. A child that leads a session of its own
  * (every child of the Grok CLI, fixtures 24 and 31) names its own; one that
- * stayed in its parent's session names the parent's. A gone parent names
+ * stayed in its parent's session names the parent's — except the CLI's
+ * lifeline watcher (`lifeline.ts`), which names nothing. A gone parent names
  * none. Linux-only; elsewhere, nothing.
  */
 export async function recordChildSessions(
@@ -327,6 +328,11 @@ export async function recordChildSessions(
   for (const child of children) {
     const stat = await proc.stat(child);
     if (!running(stat) || stat.ppid !== parentPid) {
+      continue;
+    }
+    // The CLI's lifeline watcher stays in the CLI's own session: it must not put that session —
+    // the CLI itself, and whatever runs beside it — in a helper's or a task's scope.
+    if (await proc.lifeline(child)) {
       continue;
     }
     if (stat.sid === child) {
