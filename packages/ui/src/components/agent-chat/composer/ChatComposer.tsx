@@ -23,7 +23,6 @@ import { createEscapeSequence, type EscapeSequence } from "../../../lib/agent-ch
 import type { ChatComposerProps } from "../contracts";
 import { AccountChip, ComposerLinkChips, ModelChip, OptionChip, PlanChip, RuntimeModeChip } from "./ComposerChips";
 import { ResumeCompactionChip } from "./ResumeCompactionChip";
-import { sendAfterCompaction } from "../../../lib/agent-chat/resume-compaction.logic";
 import { ProfileChip, type ProfileChipProps } from "./ProfileChip";
 import { removeFilePath, textNamesPath } from "./composer-files";
 import {
@@ -1371,16 +1370,16 @@ export function ChatComposer({
           ...(options.resolveText ? { resolveText: options.resolveText } : {}),
           ...(options.returnToDraftOnFailure === false ? { returnToDraftOnFailure: false } : {}),
           send: (resolved, { generatedPrompt }) =>
-            sendAfterCompaction(options.compactFirst === true, () => actions.compact(), () =>
-              actions.sendTurn({
-                text: resolved,
-                ...(refs.length > 0 ? { attachments: refs } : {}),
-                interactionMode: mode,
-                ...(modelSelection ? { modelSelection } : {}),
-                ...(generatedPrompt ? { generatedPrompt: true } : {}),
-                ...(options.declineApprovals ? { declineApprovals: options.declineApprovals } : {})
-              })
-            )
+            actions.sendTurn({
+              text: resolved,
+              ...(refs.length > 0 ? { attachments: refs } : {}),
+              interactionMode: mode,
+              ...(modelSelection ? { modelSelection } : {}),
+              ...(generatedPrompt ? { generatedPrompt: true } : {}),
+              ...(options.declineApprovals ? { declineApprovals: options.declineApprovals } : {}),
+              // In the outbox before the compaction goes out (`sendTurn`).
+              ...(options.compactFirst ? { compactFirst: true } : {})
+            })
         });
         if (outcome.kind === "sent") {
           // The keyboard is worse than a lost second on mobile: dismiss it only
