@@ -47,6 +47,10 @@
  *   user's work ran — and their descendants that stayed in their session,
  *   each by pid and starttime.
  *
+ * **The CLI's lifeline watcher is never taken** (`lifeline.ts`, {@link isLifelineWatcher}): a
+ * child of the CLI carrying its marker, it would read as a helper, and a sweep that stopped it
+ * while the CLI still ran would leave that CLI working after a host death. It ends by itself.
+ *
  * **Shared daemons are never taken** ({@link isSharedDaemon}), whichever scope
  * would hold them. agent-browser's daemon is one long-lived process every
  * chat on a host shares, with the Chromium it drives: the first chat to use
@@ -73,6 +77,7 @@
 import { readFileSync } from "node:fs";
 import { readFile, readdir } from "node:fs/promises";
 
+import { isLifelineWatcher } from "./lifeline.ts";
 import { DEFAULT_KILL_GRACE_MS } from "./spawn.ts";
 
 /**
@@ -209,6 +214,11 @@ const PROC = {
   // latin1: an environment is bytes, and the marker is ASCII — a non-UTF-8
   // value elsewhere in it must not be able to hide it.
   environ: async (pid: number) => await readText(`/proc/${pid}/environ`, "latin1"),
+  /** Whether `pid` is the CLI's lifeline watcher (`lifeline.ts`), which nothing here takes. */
+  async lifeline(pid: number): Promise<boolean> {
+    const cmdline = await readText(`/proc/${pid}/cmdline`, "latin1");
+    return cmdline !== null && isLifelineWatcher(cmdline);
+  },
   async stat(pid: number): Promise<ProcStat | null> {
     const content = await readText(`/proc/${pid}/stat`, "latin1");
     return content === null ? null : parseStat(content);
@@ -402,7 +412,7 @@ export async function recordHelperProcesses(
     if (!running(before)) return;
     if (parent !== null && (before.ppid !== parent.pid || before.sid !== parent.sid)) return;
     const environ = await PROC.environ(pid);
-    if (environ === null || isSharedDaemon(environ, before.comm)) return;
+    if (environ === null || isSharedDaemon(environ, before.comm) || (await PROC.lifeline(pid))) return;
     const after = await PROC.stat(pid);
     if (!running(after) || after.starttime !== before.starttime) return;
     recorded.set(pid, { pid, starttime: before.starttime });
@@ -494,6 +504,9 @@ export async function findLeftoverProcesses(launchId: string, scope: LeftoverSco
     }
     const environ = await proc.environ(pid);
     if (environ === null || !environ.split("\0").includes(marker) || isSharedDaemon(environ, before.comm)) {
+      return;
+    }
+    if (await proc.lifeline(pid)) {
       return;
     }
     const after = await proc.stat(pid);

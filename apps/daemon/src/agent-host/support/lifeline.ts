@@ -35,7 +35,7 @@ import type { Writable } from "node:stream";
 export const LIFELINE_KILL_GRACE_S = 5;
 
 /** The `argv[0]` the wrapper shows in `ps` (`$0` of the script). */
-const LIFELINE_ARGV0 = "orq-lifeline";
+export const LIFELINE_ARGV0 = "orq-lifeline";
 
 // Adapted from T3 Code (MIT): apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts
 export const LIFELINE_SCRIPT = [
@@ -50,6 +50,18 @@ export const LIFELINE_SCRIPT = [
  * (`env.ts`), so the wrapper unsets each of these the caller did not set.
  */
 const SHELL_EXPORTED_VARS = ["PWD", "OLDPWD", "SHLVL"] as const;
+
+/**
+ * Whether `/proc/<pid>/cmdline` (`cmdline`, NUL-separated) is a lifeline watcher: the forked
+ * subshell keeps the wrapper's own argv (`/bin/sh -c <script> orq-lifeline …`) after the wrapper
+ * execs the CLI. No leftover sweep or helper recording may take one: it ends by itself when its
+ * CLI ends while the host lives, and stops the CLI's group when the host is gone — killing it
+ * while the CLI still runs would leave that CLI working after a host death.
+ */
+export function isLifelineWatcher(cmdline: string): boolean {
+  const argv = cmdline.split("\0");
+  return argv[1] === "-c" && argv[2] === LIFELINE_SCRIPT && argv[3] === LIFELINE_ARGV0;
+}
 
 /** True where the lifeline applies: a POSIX host with `/bin/sh`. */
 export const LIFELINE_SUPPORTED = process.platform !== "win32";

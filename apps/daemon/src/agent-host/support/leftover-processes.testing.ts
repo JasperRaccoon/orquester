@@ -11,6 +11,8 @@ interface KernelProcess {
   pgid?: number;
   /** The executable's name, `/proc/<pid>/stat` field 2. */
   comm?: string;
+  /** `/proc/<pid>/cmdline` (NUL-separated); absent reads as unreadable. */
+  cmdline?: string;
   diesOn?: NodeJS.Signals;
   zombie?: boolean;
 }
@@ -60,6 +62,9 @@ export function mockProc(t: TestContext, initial: Record<number, KernelProcess>)
       fields[3] = String(row.sid);
       fields[19] = String(row.starttime);
       return `${pid} (${row.comm ?? "provider (child)"}) ${fields.join(" ")}\n`;
+    }
+    if (path.endsWith("/cmdline")) {
+      return row.cmdline ?? missing();
     }
     if (path.endsWith("/children")) {
       return [...table].filter(([, child]) => child.ppid === pid).map(([child]) => child).join(" ");

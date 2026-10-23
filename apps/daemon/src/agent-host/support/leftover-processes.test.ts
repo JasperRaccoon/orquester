@@ -15,6 +15,7 @@ import {
   stopLeftoverProcesses,
   type RecordedSession
 } from "./leftover-processes.ts";
+import { LIFELINE_ARGV0, LIFELINE_SCRIPT } from "./lifeline.ts";
 import { drain, mockProc } from "./leftover-processes.testing.ts";
 
 function environ(vars: Record<string, string>): string {
@@ -244,6 +245,25 @@ test("recordHelperProcesses: the CLI's children and what stays in their session;
   // A CLI gone (or recycled) records nothing new.
   proc.table.set(850, { environ: MARKED, starttime: 99, sid: 1 });
   assert.deepEqual(await recordHelperProcesses(cli), []);
+});
+
+test("the CLI's lifeline watcher is never a helper, nor taken by a sweep of its group", async (t) => {
+  const watcher = ["/bin/sh", "-c", LIFELINE_SCRIPT, LIFELINE_ARGV0, "--", "/usr/bin/claude", ""].join("\0");
+  const proc = mockProc(t, {
+    // The CLI leads its own group (the lifeline wrapper exec'd into it).
+    870: { environ: MARKED, starttime: 70, sid: 870, pgid: 870, cmdline: "/usr/bin/claude\0" },
+    // The watcher the wrapper forked before the exec: the CLI's child, marked, in its group.
+    871: { environ: MARKED, starttime: 71, sid: 870, pgid: 870, ppid: 870, comm: "sh", cmdline: watcher },
+    // An MCP server.
+    872: { environ: MARKED, starttime: 72, sid: 870, pgid: 870, ppid: 870, cmdline: "node\0server.js\0" },
+    // A look-alike: another `sh -c` with a different script is no watcher.
+    873: { environ: MARKED, starttime: 73, sid: 870, pgid: 870, ppid: 870, comm: "sh", cmdline: `/bin/sh\0-c\0sleep 9\0${LIFELINE_ARGV0}\0` }
+  });
+  const helpers = await recordHelperProcesses({ pid: 870, starttime: 70 });
+  assert.deepEqual(helpers.map((entry) => entry.pid), [872, 873]);
+  const found = await findLeftoverProcesses(LAUNCH, { group: { pgid: 870, leaderStarttime: 70 }, processes: [{ pid: 871, starttime: 71 }] });
+  assert.deepEqual(found.map((entry) => entry.pid), [870, 872, 873]);
+  assert.equal(proc.signals.length, 0);
 });
 
 // ---------------------------------------------------------------------------
