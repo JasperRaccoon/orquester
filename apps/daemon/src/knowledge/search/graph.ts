@@ -49,8 +49,9 @@ export function entryIdOfSourceFile(sourceFile: string): string | null {
   return isKnowledgeEntryId(stem) ? stem : null;
 }
 
+/** `null` only when the record carries no `source_files` list at all; an empty list is `[]`. */
 function entryIdsOf(sourceFiles: unknown): string[] | null {
-  if (!Array.isArray(sourceFiles) || sourceFiles.length === 0) return null;
+  if (!Array.isArray(sourceFiles)) return null;
   const ids = new Set<string>();
   for (const file of sourceFiles) {
     if (typeof file !== "string") continue;
@@ -313,6 +314,9 @@ export interface KnowledgeConceptView {
  */
 export class KnowledgeGraph implements KnowledgeGraphPort {
   private snapshot: Snapshot = EMPTY;
+  /** Numbers loads and replaces in the order they start; `applied` is the current snapshot's. */
+  private generation = 0;
+  private applied = 0;
   private readonly getMeta: (id: string) => KnowledgeEntryMeta | null;
   private readonly logger: KnowledgeLogger;
 
@@ -323,6 +327,7 @@ export class KnowledgeGraph implements KnowledgeGraphPort {
 
   /** Reads `nodes.jsonl` / `edges.jsonl` from `outputDir` (or its `output/`). Throws when there is no nodes file. */
   async load(outputDir: string): Promise<{ nodes: number; edges: number }> {
+    const generation = ++this.generation;
     const dir = (await exists(join(outputDir, "nodes.jsonl"))) ? outputDir : join(outputDir, "output");
     const nodesPath = join(dir, "nodes.jsonl");
     const edgesPath = join(dir, "edges.jsonl");
@@ -330,12 +335,18 @@ export class KnowledgeGraph implements KnowledgeGraphPort {
     const edges = (await exists(edgesPath)) ? await readJsonl(edgesPath, this.logger, "edges.jsonl") : [];
     const { snapshot, skipped } = buildGraphSnapshot(nodes, edges);
     if (skipped > 0) this.logger.warn(`knowledge: skipped ${skipped} graph record(s) (unreadable, repeated, or an edge to an unknown concept)`);
+    if (generation < this.applied) {
+      // A load (or replace) that started later has already swapped in the newer graph.
+      return { nodes: snapshot.concepts.size, edges: snapshot.edges.length };
+    }
     this.snapshot = snapshot;
+    this.applied = generation;
     return this.counts();
   }
 
   /** Swap in records directly (tests, synthetic graphs). */
   replace(nodes: readonly unknown[], edges: readonly unknown[]): { nodes: number; edges: number } {
+    this.applied = ++this.generation;
     this.snapshot = buildGraphSnapshot(nodes, edges).snapshot;
     return this.counts();
   }

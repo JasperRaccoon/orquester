@@ -203,3 +203,34 @@ test("load reads myKG's jsonl from a session output dir, tolerating bad lines an
   await assert.rejects(graph.load(join(dir, "missing")));
   assert.deepEqual(graph.counts(), { nodes: 2, edges: 1 }, "a failed load keeps the old graph");
 });
+
+test("an edge whose source_files list is empty has no visible support", () => {
+  const { graph, profile } = fixture();
+  graph.replace(
+    [node("tactic-alt", "Alternatives pages", [`${eA}.md`, `${eB}.md`]), node("tool-shared", "Ahrefs", [`${eAB}.md`])],
+    [{ ...edge("e-empty", "tactic-alt", "tool-shared", null), source_files: [] }]
+  );
+  assert.deepEqual(graph.graph(profile)!.edges, []);
+  assert.deepEqual(graph.concept("tactic-alt", profile)!.neighbors, []);
+});
+
+test("overlapping loads: the graph ends up as the one loaded last, never an older one", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "kg-graph-race-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const store = new FakeStore();
+  store.collection(A, "SEO");
+  store.put(eA, "x", [A], {}, true);
+  const big = join(dir, "big");
+  const small = join(dir, "small");
+  await mkdir(big);
+  await mkdir(small);
+  const lines = Array.from({ length: 40_000 }, (_, i) => JSON.stringify(node(`tool-n${i}`, `Tool ${i}`, [`${eA}.md`])));
+  await writeFile(join(big, "nodes.jsonl"), `${lines.join("\n")}\n`);
+  await writeFile(join(small, "nodes.jsonl"), `${JSON.stringify(node("tool-latest", "Latest", [`${eA}.md`]))}\n`);
+  const graph = new KnowledgeGraph({ entries: store, logger: silentLogger() });
+  const older = graph.load(big);
+  const newer = graph.load(small);
+  await Promise.all([older, newer]);
+  assert.deepEqual(graph.counts(), { nodes: 1, edges: 0 });
+  assert.ok(graph.hasConcept("tool-latest"));
+});
