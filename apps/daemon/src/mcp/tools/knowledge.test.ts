@@ -25,6 +25,8 @@ import {
 import type { ThreadCaller } from "../catalog/contract.ts";
 import { executeToolCall } from "../executor.ts";
 import { FakeDaemonApi } from "../testing.ts";
+import { KNOWLEDGE_QUERY_MAX } from "../../knowledge/search/search.ts";
+import { KNOWLEDGE_AUTHOR_MAX, KNOWLEDGE_HANDLE_MAX, KNOWLEDGE_KIND_MAX, KNOWLEDGE_URL_MAX } from "../../knowledge/store/validate.ts";
 import { KNOWLEDGE_GET_BODY_MAX_BYTES } from "./knowledge.ts";
 
 const caller = (over: Partial<ThreadCaller> = {}): ThreadCaller => ({
@@ -95,7 +97,7 @@ test("knowledge_search: posts the query with the calling session; compact hits w
 test("knowledge_search: nothing found says so; the limits are the contract's", async () => {
   const api = withCollections(new FakeDaemonApi()).on("POST", knowledgeRoutes.search, { status: 200, body: { hits: [], searched: ["kc_seo0000000"] } });
   assert.match(textOf(await run(api, "knowledge_search", { query: "x" })), /^No knowledge found \(over SEO\)/);
-  for (const args of [{ query: "" }, { query: "   " }, { query: "x", limit: KNOWLEDGE_SEARCH_MAX_LIMIT + 1 }, { query: "x", limit: 0 }, { query: "x".repeat(2_001) }, { query: "x", collections: ["c".repeat(65)] }, { query: "x", sessionId: "other" }]) {
+  for (const args of [{ query: "" }, { query: "   " }, { query: "x", limit: KNOWLEDGE_SEARCH_MAX_LIMIT + 1 }, { query: "x", limit: 0 }, { query: "x".repeat(KNOWLEDGE_QUERY_MAX + 1) }, { query: "x", collections: ["c".repeat(65)] }, { query: "x", sessionId: "other" }]) {
     assert.equal(errorOf(await run(api, "knowledge_search", args)).code, "INVALID_ARGUMENT", JSON.stringify(args).slice(0, 60));
   }
 });
@@ -197,6 +199,11 @@ test("knowledge_save: inputs mirror the contract — at least one collection, bo
     { entries: [{ ...item, body: "x".repeat(KNOWLEDGE_ENTRY_MAX_BYTES + 1) }] },
     { entries: Array.from({ length: KNOWLEDGE_SAVE_MAX_ENTRIES + 1 }, () => item) },
     { entries: [{ ...item, title: "t".repeat(201) }] },
+    // The store's own limits: one field over them would refuse the whole batch at the daemon.
+    { entries: [{ ...item, kind: "k".repeat(KNOWLEDGE_KIND_MAX + 1) }] },
+    { entries: [{ ...item, author: "a".repeat(KNOWLEDGE_AUTHOR_MAX + 1) }] },
+    { entries: [{ ...item, handle: "h".repeat(KNOWLEDGE_HANDLE_MAX + 1) }] },
+    { entries: [{ ...item, url: `https://x.com/${"u".repeat(KNOWLEDGE_URL_MAX)}` }] },
     { entries: [{ ...item, tags: ["x"] }] },
     { entries: [item], newCollections: [{ name: "New" }] },
     { entries: [item], newCollections: [{ name: "n".repeat(61), description: "d" }] }
@@ -261,4 +268,43 @@ test("the family is chat-only: an external caller is never served it", async () 
   assert.equal(r.isError, true);
   assert.equal(errorOf(r).code, "TOOL_NOT_FOUND");
   assert.equal(api.calls.length, 0);
+});
+
+test("knowledge inputs accept exactly the daemon's limits (query, kind, author, handle)", async () => {
+  const api = withCollections(new FakeDaemonApi())
+    .on("POST", knowledgeRoutes.search, { status: 200, body: { hits: [], searched: [] } })
+    .on("POST", knowledgeRoutes.save, { status: 200, body: { results: [], createdCollections: [], linking: "not-needed" } });
+  assert.equal((await run(api, "knowledge_search", { query: "q".repeat(KNOWLEDGE_QUERY_MAX) })).isError, undefined);
+  const r = await run(api, "knowledge_save", {
+    entries: [{ body: "text", kind: "k".repeat(KNOWLEDGE_KIND_MAX), author: "a".repeat(KNOWLEDGE_AUTHOR_MAX), handle: `@${"h".repeat(KNOWLEDGE_HANDLE_MAX)}`, collections: ["SEO"] }]
+  });
+  assert.equal(r.isError, undefined, textOf(r));
+});
+
+test("knowledge_get: a concept's text fields are bounded — a text result is not capped by the executor", async () => {
+  const huge = "word ".repeat(30_000);
+  const api = withCollections(new FakeDaemonApi()).on("GET", knowledgeRoutes.item("tactic-x"), {
+    status: 200,
+    body: {
+      kind: "concept",
+      concept: {
+        concept: {
+          id: "tactic-x",
+          name: huge,
+          type: "Tactic",
+          confidence: 0.5,
+          description: huge,
+          aliases: Array.from({ length: 2_000 }, (_, index) => `alias ${index} ${"a".repeat(200)}`),
+          attributes: Object.fromEntries(Array.from({ length: 20 }, (_, index) => [`${"k".repeat(5_000)}${index}`, { value: huge, confidence: 1 }]))
+        },
+        collections: ["kc_seo0000000"],
+        entries: Array.from({ length: 30 }, () => meta()),
+        neighbors: Array.from({ length: 100 }, (_, index) => ({ edge: { id: `e${index}`, type: huge, from: "tactic-x", to: `tool-${index}`, confidence: 1 }, concept: { id: `tool-${index}`, name: huge, type: huge } }))
+      }
+    }
+  });
+  const out = textOf(await run(api, "knowledge_get", { id: "tactic-x" }));
+  assert.ok(Buffer.byteLength(out, "utf8") < 60_000, `${Buffer.byteLength(out, "utf8")} bytes`);
+  assert.match(out, /^concept tactic-x "word word/);
+  assert.match(out, /Aliases: alias 0 a+…?, .*\+\d+ more/);
 });

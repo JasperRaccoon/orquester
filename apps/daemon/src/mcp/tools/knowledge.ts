@@ -59,12 +59,21 @@ import { capText, clipText } from "../result.ts";
 export const KNOWLEDGE_SNIPPET_CHARS = 280;
 /** A concept description in a search hit or a list. */
 const DESCRIPTION_CHARS = 200;
+/** A concept's own description in `knowledge_get` (myKG merges descriptions: they can grow). */
+const CONCEPT_DESCRIPTION_CHARS = 2_000;
+/** A concept, type, edge or attribute name, or an alias, wherever it is shown (myKG's, unbounded). */
+const NAME_CHARS = 120;
 /** `knowledge_get` shows an entry body up to this many UTF-8 bytes (results stay under the 60 000-byte cap). */
 export const KNOWLEDGE_GET_BODY_MAX_BYTES = 48_000;
 /** Lists inside one `knowledge_get` answer. */
 const GET_LIST_MAX = 12;
-/** A query, in characters. */
-export const KNOWLEDGE_QUERY_MAX_CHARS = 2_000;
+/** A query, in characters (the search's own `KNOWLEDGE_QUERY_MAX`). */
+export const KNOWLEDGE_QUERY_MAX_CHARS = 1_000;
+/** A save item's metadata, in characters: the store's limits (`knowledge/store/validate.ts`), which refuse the whole batch. */
+const KIND_MAX_CHARS = 40;
+const AUTHOR_MAX_CHARS = 120;
+const HANDLE_MAX_CHARS = 64;
+const URL_MAX_CHARS = 2_048;
 /** Collections an agent may create in one save. */
 export const KNOWLEDGE_NEW_COLLECTIONS_MAX = 10;
 /** A worker answer, in characters. */
@@ -106,6 +115,8 @@ async function collectionNames(api: DaemonApi): Promise<Map<string, string>> {
 }
 
 const oneLine = (value: string): string => value.replace(/\s+/g, " ").trim();
+/** A graph name on one line, clipped: concept, type, edge and attribute names come from myKG unbounded. */
+const label = (value: string): string => clipText(oneLine(value), NAME_CHARS);
 
 /** "Om Patel (@om_patel5)", "@om_patel5", "Om Patel" or "". */
 export function authorLabel(meta: Pick<KnowledgeEntryMeta, "author" | "handle">): string {
@@ -149,7 +160,7 @@ function hitLines(hit: KnowledgeSearchHit, index: number, names: ReadonlyMap<str
   const concept = hit.concept;
   const description = concept.description ? `: ${clipText(oneLine(concept.description), DESCRIPTION_CHARS)}` : "";
   const entries = hit.entryIds.length > 0 ? ` · entries ${hit.entryIds.join(", ")}` : "";
-  return [`${n}concept ${concept.id} "${oneLine(concept.name)}" (${oneLine(concept.type)})${description}${entries}`];
+  return [`${n}concept ${concept.id} "${label(concept.name)}" (${label(concept.type)})${description}${entries}`];
 }
 
 /** The search answer as the agent reads it. */
@@ -183,7 +194,7 @@ function renderEntryDetail(detail: KnowledgeEntryDetail, names: ReadonlyMap<stri
   const lines = [`cite: ${detail.citation}`, `entry ${entryHead(entry, names)}`, `Title: ${oneLine(entry.title)}`];
   if (entry.url) lines.push(`URL: ${entry.url}`);
   if (detail.concepts.length > 0) {
-    const shown = detail.concepts.slice(0, GET_LIST_MAX).map((concept) => `${oneLine(concept.name)} (${oneLine(concept.type)}) [${concept.id}]`);
+    const shown = detail.concepts.slice(0, GET_LIST_MAX).map((concept) => `${label(concept.name)} (${label(concept.type)}) [${concept.id}]`);
     const more = detail.concepts.length - shown.length;
     lines.push(`Concepts: ${shown.join(", ")}${more > 0 ? `, +${more} more` : ""}`);
   }
@@ -199,11 +210,14 @@ function renderEntryDetail(detail: KnowledgeEntryDetail, names: ReadonlyMap<stri
 
 function renderConceptDetail(detail: KnowledgeConceptDetail, names: ReadonlyMap<string, string>): string {
   const concept = detail.concept;
-  const lines = [`concept ${concept.id} "${oneLine(concept.name)}" (${oneLine(concept.type)}) · confidence ${concept.confidence.toFixed(2)} · ${inCollections(detail.collections, names)}`];
-  if (concept.aliases.length > 0) lines.push(`Aliases: ${concept.aliases.map(oneLine).join(", ")}`);
-  if (concept.description) lines.push(concept.description.trim());
+  const lines = [`concept ${concept.id} "${label(concept.name)}" (${label(concept.type)}) · confidence ${concept.confidence.toFixed(2)} · ${inCollections(detail.collections, names)}`];
+  if (concept.aliases.length > 0) {
+    const more = concept.aliases.length - GET_LIST_MAX;
+    lines.push(`Aliases: ${concept.aliases.slice(0, GET_LIST_MAX).map(label).join(", ")}${more > 0 ? `, +${more} more` : ""}`);
+  }
+  if (concept.description) lines.push(clipText(concept.description.trim(), CONCEPT_DESCRIPTION_CHARS));
   const attributes = Object.entries(concept.attributes).slice(0, GET_LIST_MAX);
-  if (attributes.length > 0) lines.push(`Attributes: ${attributes.map(([key, attribute]) => `${key}: ${clipText(oneLine(attribute.value), DESCRIPTION_CHARS)}`).join("; ")}`);
+  if (attributes.length > 0) lines.push(`Attributes: ${attributes.map(([key, attribute]) => `${label(key)}: ${clipText(oneLine(attribute.value), DESCRIPTION_CHARS)}`).join("; ")}`);
   if (detail.entries.length > 0) {
     lines.push("Entries:");
     for (const entry of detail.entries.slice(0, GET_LIST_MAX)) {
@@ -214,8 +228,8 @@ function renderConceptDetail(detail: KnowledgeConceptDetail, names: ReadonlyMap<
   if (detail.neighbors.length > 0) {
     lines.push("Links:");
     for (const { edge, concept: other } of detail.neighbors.slice(0, GET_LIST_MAX * 2)) {
-      const arrow = edge.from === concept.id ? `${oneLine(edge.type)} →` : `← ${oneLine(edge.type)}`;
-      lines.push(`- ${arrow} ${oneLine(other.name)} (${oneLine(other.type)}) [${other.id}]`);
+      const arrow = edge.from === concept.id ? `${label(edge.type)} →` : `← ${label(edge.type)}`;
+      lines.push(`- ${arrow} ${label(other.name)} (${label(other.type)}) [${other.id}]`);
     }
   }
   return lines.join("\n");
@@ -282,10 +296,17 @@ const saveItem = z
       .refine((value) => Buffer.byteLength(value, "utf8") <= KNOWLEDGE_ENTRY_MAX_BYTES, `body is over ${KNOWLEDGE_ENTRY_MAX_BYTES} bytes: split it`)
       .describe("The text, verbatim, site chrome removed."),
     title: optionalText(KNOWLEDGE_TITLE_MAX).describe("Short and descriptive."),
-    kind: optionalText(40).describe('"post", "thread", "article", "note", "case study"…'),
-    author: optionalText(200),
-    handle: optionalText(100).describe("Without the @."),
-    url: optionalText(2_048),
+    kind: optionalText(KIND_MAX_CHARS).describe('"post", "thread", "article", "note", "case study"…'),
+    author: optionalText(AUTHOR_MAX_CHARS),
+    handle: z
+      .string()
+      .trim()
+      .min(1)
+      // The "@" is dropped before the store counts it.
+      .refine((value) => value.replace(/^@+/, "").length <= HANDLE_MAX_CHARS, `a handle is at most ${HANDLE_MAX_CHARS} characters`)
+      .optional()
+      .describe("Without the @."),
+    url: optionalText(URL_MAX_CHARS),
     postedAt: optionalText(40).describe("ISO date of the original, when shown."),
     collections: z.array(collectionRef).min(1).max(KNOWLEDGE_COLLECTIONS_MAX).describe("Names (or ids); at least one.")
   })
