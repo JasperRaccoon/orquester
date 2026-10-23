@@ -12,6 +12,7 @@
  * chat without a thread stream.
  */
 
+import { isAgentOwnedActivity } from "./compaction.ts";
 import { failureReasonOfActivity } from "./failure-reason.ts";
 import type { ThreadItem, Turn } from "./thread.ts";
 
@@ -56,10 +57,17 @@ function isProgress(item: ThreadItem): boolean {
  *
  * Newest first, the scan stops at the first user message (the user — or a resume — spoke after
  * any limit). The newest usage-limit failure row found before that is the limit, unless:
- * - the agent made progress after it (an assistant message or a tool row: a parked turn that
- *   went on by itself once the window reset);
+ * - the main agent made progress after it (an assistant message or a tool row: a parked turn
+ *   that went on by itself once the window reset);
  * - a newer turn started after it (a provider-started turn, a goal continuing).
- * Subagent rows (`agentId`) never count as the user speaking. An auth failure is not a limit.
+ *
+ * Every subagent row — a message or an activity carrying `agentId`, on the row or its payload
+ * (`isAgentOwnedActivity`) — is passed over: it is neither the user speaking, nor the main
+ * agent's progress, nor the thread's limit. Background subagents keep finishing the tool calls
+ * they started before the limit (their `tool.completed` / `tool.output` and `task.*` rows land
+ * after it), and none of that means the conversation went on; nor does a subagent's own new
+ * message after the reset — what clears the limit is the user's next message, or the main
+ * agent's own next row. An auth failure is not a limit.
  */
 export function usageLimitNoticeOf(items: readonly ThreadItem[], turns: readonly Turn[]): ThreadUsageLimitNotice | null {
   let progressAfter = false;
@@ -72,6 +80,7 @@ export function usageLimitNoticeOf(items: readonly ThreadItem[], turns: readonly
       if (isProgress(item)) progressAfter = true;
       continue;
     }
+    if (isAgentOwnedActivity(item)) continue;
     const failure = failureReasonOfActivity(item);
     if (failure === null) {
       if (isProgress(item)) progressAfter = true;

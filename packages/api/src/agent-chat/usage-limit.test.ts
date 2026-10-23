@@ -85,6 +85,35 @@ test("progress after a parked limit (the turn went on by itself) clears it", () 
   assert.equal(usageLimitNoticeOf(withTool, [turn("t1", "running", start)]), null);
 });
 
+test("background subagents finishing their work after the limit never clear it (two chats on one account)", () => {
+  clock = 0;
+  const start = at();
+  const warning = activity("runtime.warning", { message: "Claude usage limit reached.", reason: "usage_limit" });
+  // What the live log held after the limit: subagents finishing calls they had started before it,
+  // their task rows, and later one subagent's task failing.
+  const items: ThreadItem[] = [
+    message("user"),
+    warning,
+    activity("tool.completed", { title: "Bash" }, { agentId: "sub-1" }),
+    activity("tool.output", { chunk: "ok" }, { agentId: "sub-1" }),
+    activity("tool.updated", { title: "Read" }, { agentId: "sub-2" }),
+    activity("tool.started", { title: "Grep" }, { agentId: "sub-2" }),
+    activity("tool.completed", { title: "Grep" }, { agentId: "sub-2" }),
+    activity("task.completed", { status: "completed" }, { agentId: "sub-1" }),
+    // The owner named on the payload only counts the same.
+    activity("tool.completed", { title: "Edit", agentId: "sub-3" }),
+    message("assistant", { agentId: "sub-2" }),
+    activity("task.completed", { status: "failed", message: "Claude usage limit reached.", reason: "usage_limit" }, { agentId: "sub-2" })
+  ];
+  const notice = usageLimitNoticeOf(items, [turn("t1", "running", start)]);
+  assert.equal(notice?.activityId, warning.id, "the main thread's own limit, still standing");
+  assert.equal(notice?.parked, true);
+
+  // The main agent's own progress after it still clears it.
+  assert.equal(usageLimitNoticeOf([...items, activity("tool.started", { title: "Bash" })], [turn("t1", "running", start)]), null);
+  assert.equal(usageLimitNoticeOf([...items, message("assistant")], [turn("t1", "running", start)]), null);
+});
+
 test("a newer turn that started after the limit (no user message) clears it", () => {
   clock = 0;
   const first = at();
