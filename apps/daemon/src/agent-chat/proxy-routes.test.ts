@@ -407,6 +407,31 @@ test("the host-stop route drives the supervisor's drain restart", async () => {
   await h.close();
 });
 
+test("the host-status route answers the supervisor's pending-restart view, and 404 without one", async () => {
+  const status = {
+    state: "healthy" as const,
+    reason: null,
+    hostInstanceId: "host-1",
+    pid: 7,
+    codeStamp: "old",
+    checkoutCodeStamp: "new",
+    pendingRestart: {
+      reason: "agent host code old != new",
+      since: null,
+      deferredBy: null,
+      blockers: [{ threadId: "t1", kind: "wake" as const, since: "2026-10-23T09:20:10.905Z" }]
+    }
+  };
+  const h = await makeHarness({}, { hostStatus: () => status });
+  const response = await h.app.inject({ method: "GET", url: agentChatRoutes.hostStatus });
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(response.json(), status);
+  await h.close();
+  const bare = await makeHarness();
+  assert.equal((await bare.app.inject({ method: "GET", url: agentChatRoutes.hostStatus })).statusCode, 404);
+  await bare.close();
+});
+
 // --- the long-lived §6.3 stream --------------------------------------------
 
 test("the stream is piped through, and the client disconnect cancels the upstream", async () => {

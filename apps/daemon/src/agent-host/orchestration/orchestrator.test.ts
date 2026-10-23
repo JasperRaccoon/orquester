@@ -670,41 +670,12 @@ describe("orchestrator — a card waiting on the user is never a stall (§3.1)",
   });
 });
 
-describe("orchestrator — a turn the provider started sweeps no watch loop (§3.1)", () => {
+describe("orchestrator — a quiet shell is live until its work ends, never swept by a turn (§3.1)", () => {
   const liveness = (host: TestHost, threadId: string) =>
     host.orchestrator.summary(threadId)?.backgroundLiveness ?? null;
   const shell = { payload: { taskId: "sh-1", taskType: "shell", description: "npm run dev" } };
 
-  it("a shell silent through a turn nobody sent survives its end, and still expires at its TTL", async () => {
-    const host = createTestHost();
-    const threadId = await host.createThread();
-    const { emit, handledAll, loop } = consumed(host, threadId);
-    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "start the dev server" });
-    await host.settle();
-    const first = host.adapter.turnIds[0]!;
-    await emit("turn.started", { turnId: first });
-    await emit("task.started", { turnId: first, ...shell });
-    await emit("turn.completed", { turnId: first, payload: { state: "completed" } });
-    await handledAll();
-    assert.equal(liveness(host, threadId), "monitoring", "it reported during the turn that started it");
-
-    // A wake: the provider starts a turn nobody sent, and the server stays
-    // silent through it.
-    host.clock.advance(60_000);
-    await emit("turn.started", { turnId: "turn-wake" });
-    host.clock.advance(5_000);
-    await emit("turn.completed", { turnId: "turn-wake", payload: { state: "completed" } });
-    await handledAll();
-    assert.equal(liveness(host, threadId), "monitoring", "a wake's end sweeps nothing");
-
-    host.clock.advance(10 * 60_000);
-    assert.equal(liveness(host, threadId), null, "the TTL still bounds a silent watch loop");
-    host.adapter.close();
-    await loop;
-    await host.stop();
-  });
-
-  it("a turn the host sent still sweeps a shell silent through it", async () => {
+  it("a shell silent through a wake, through the user's own turn and for an hour still runs", async () => {
     const host = createTestHost();
     const threadId = await host.createThread();
     const { emit, handledAll, loop } = consumed(host, threadId);
@@ -712,41 +683,49 @@ describe("orchestrator — a turn the provider started sweeps no watch loop (§3
     await handledAll();
     assert.equal(liveness(host, threadId), "monitoring");
 
-    host.clock.advance(1_000);
-    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
+    // A wake: the provider starts a turn nobody sent; the server says nothing.
+    host.clock.advance(60_000);
+    await emit("turn.started", { turnId: "turn-wake" });
+    host.clock.advance(5_000);
+    await emit("turn.completed", { turnId: "turn-wake", payload: { state: "completed" } });
+    await handledAll();
+    assert.equal(liveness(host, threadId), "monitoring", "a wake's end sweeps nothing");
+
+    // The user's own turn, with the shell silent through it (the 2026-10-23
+    // incident's test suite, its output in a file).
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "status?" });
     await host.settle();
     const first = host.adapter.turnIds[0]!;
     await emit("turn.started", { turnId: first });
     host.clock.advance(1_000);
     await emit("turn.completed", { turnId: first, payload: { state: "completed" } });
     await handledAll();
-    assert.equal(liveness(host, threadId), null, "silent through the user's own turn");
+    assert.equal(liveness(host, threadId), "monitoring", "silence through a turn is not an end");
+    host.clock.advance(60 * 60_000);
+    assert.equal(liveness(host, threadId), "monitoring", "nor an hour of it");
+    assert.deepEqual(host.orchestrator.backgroundWorkThreadIds(), [threadId], "a deploy's drain keeps waiting");
+
+    // Its own end does end it.
+    await emit("task.completed", { payload: { taskId: "sh-1", taskType: "shell", status: "completed" } });
+    await handledAll();
+    assert.equal(liveness(host, threadId), null);
     host.adapter.close();
     await loop;
     await host.stop();
   });
 
-  it("…even when its turn.started is handled before sendTurn answers: the command's row is pending", async () => {
+  it("an adapter that reports the shell's process gone ends it at once", async () => {
     const host = createTestHost();
+    let running = true;
+    host.adapter.backgroundTaskLive = () => running;
     const threadId = await host.createThread();
-    const { emit, caughtUp, handledAll, loop } = consumed(host, threadId);
+    const { emit, handledAll, loop } = consumed(host, threadId);
     await emit("task.started", shell);
     await handledAll();
-
-    host.clock.advance(1_000);
-    const send = host.adapter.sendTurn.bind(host.adapter);
-    host.adapter.sendTurn = async (input) => {
-      await emit("turn.started", { turnId: "turn-1" });
-      await caughtUp();
-      return await send(input);
-    };
-    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
-    await host.settle();
-    assert.deepEqual(host.adapter.turnIds, ["turn-1"]);
-    host.clock.advance(1_000);
-    await emit("turn.completed", { turnId: "turn-1", payload: { state: "completed" } });
-    await handledAll();
+    assert.equal(liveness(host, threadId), "monitoring");
+    running = false;
     assert.equal(liveness(host, threadId), null);
+    assert.deepEqual(host.orchestrator.backgroundWorkThreadIds(), []);
     host.adapter.close();
     await loop;
     await host.stop();

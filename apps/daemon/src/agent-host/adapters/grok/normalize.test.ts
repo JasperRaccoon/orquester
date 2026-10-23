@@ -1492,3 +1492,24 @@ test("a session tool reached through use_tool is never an app, even with a ui://
   assert.equal("mcpApp" in (twice as { data: object }).data, false);
   assert.deepEqual(htmlRenderReferenceOfActivityPayload(twice), ref);
 });
+
+// ---------------------------------------------------------------------------
+// A shell's own process is what says it still runs (2026-10-23): the pid the
+// CLI's `BackgroundTaskStarted` reports (fixture 11) rides the track
+// ---------------------------------------------------------------------------
+
+test("a background shell's pid is kept, so the host can tell a quiet shell from a gone one", () => {
+  const grok = normalizer();
+  grok.handleSessionUpdate(
+    frame({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "call-pid",
+      status: "completed",
+      rawOutput: { type: "BackgroundTaskStarted", task_id: SHELL, command: "pnpm test > /tmp/out.log", pid: 3120632 }
+    })
+  );
+  assert.deepEqual(grok.backgroundTaskRun(SHELL), { kind: "running", pid: 3120632 });
+  grok.handleXaiNotification(TASK_COMPLETED, killedSnapshot(SHELL));
+  assert.deepEqual(grok.backgroundTaskRun(SHELL), { kind: "ended" });
+  assert.deepEqual(grok.backgroundTaskRun("never-named"), { kind: "unknown" });
+});

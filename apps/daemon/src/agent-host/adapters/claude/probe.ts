@@ -62,6 +62,9 @@ export const CLAUDE_CAPABILITIES: AdapterCapabilities = {
   // `query.stopTask(taskId)`, the `stop_task` control: one task — a workflow
   // run, a subagent, a shell — stopped while the rest keep running.
   supportsTaskStop: true,
+  // A background agent or shell that ends while no turn runs wakes the parent:
+  // the CLI streams its reply and the adapter opens a synthetic turn for it.
+  wakesOnBackgroundCompletion: true,
   // The CLI parses `/goal` itself, so it is forwarded verbatim. Its goal is a
   // Stop hook that re-runs only at a turn end: "continue" nudges an idle goal
   // on, and "clear" is `/goal clear`. There is no pause, and the CLI never

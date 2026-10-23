@@ -444,6 +444,8 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
         liveThreadIds: orchestrator.liveThreadIds(),
         activeTurnThreadIds: orchestrator.activeTurnThreadIds(),
         backgroundWorkThreadIds: orchestrator.backgroundWorkThreadIds(),
+        pendingWakes: orchestrator.pendingWakes(),
+        backgroundTasks: orchestrator.backgroundTasks(),
         pid: options.pid ?? process.pid,
         startedAt: options.startedAt,
         codeStamp: options.codeStamp ?? null,

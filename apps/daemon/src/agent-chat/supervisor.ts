@@ -18,6 +18,7 @@ import { randomBytes } from "node:crypto";
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { AgentHostRestartBlocker, AgentHostStatusResponse } from "@orquester/api/agent-chat";
 import { codeStampsDiffer } from "../agent-host/support/code-stamp.ts";
 import {
   AGENT_HOST_PREPARED_TIMEOUT_MS,
@@ -93,6 +94,22 @@ const HOST_EXIT_GRACE_MS = 30_000;
  */
 const RESTART_PENDING_WARN_MS = 6 * 60 * 60_000;
 const HOST_EXIT_POLL_MS = 100;
+
+/**
+ * How long a pending wake (`AgentHostHealthResponse.pendingWakes`) holds a
+ * drain. A provider starts the turn that hands the agent a finished background
+ * task within seconds (Claude: 1-5 s); one that has not after this long may
+ * never, and the deploy goes ahead — the host's mark survives the restart, and
+ * the next host hands the agent the result itself.
+ */
+export const PENDING_WAKE_DRAIN_CAP_MS = 2 * 60_000;
+
+/**
+ * A host from before `pendingWakes` cannot say a wake is pending, so the drain
+ * waits this long after a thread's background work ended — unless a turn of
+ * that thread settled since, which was the wake.
+ */
+export const BACKGROUND_END_GRACE_MS = 60_000;
 
 /**
  * Agent goals §5.7, a host from before the goal hold: how young a Codex goal's
@@ -268,6 +285,10 @@ export interface SupervisorOptions {
    * host would otherwise keep running old code for as long as it lived.
    */
   codeStamp?: string | null;
+  /** {@link PENDING_WAKE_DRAIN_CAP_MS} unless set: how long one pending wake holds a drain. */
+  pendingWakeCapMs?: number;
+  /** {@link BACKGROUND_END_GRACE_MS} unless set: the older host's grace after background work ends. */
+  backgroundEndGraceMs?: number;
 }
 
 export interface AgentHostStatus {
@@ -323,6 +344,14 @@ export class AgentHostSupervisor {
   /** The §5.7 hold request still waiting for its answer, if any: one at a time. */
   private goalHoldInFlight: Promise<void> | null = null;
   /**
+   * For a host from before `pendingWakes`: when each thread's background work
+   * was last seen ending (adapter clock), until a turn of it settles or the
+   * grace runs out ({@link BACKGROUND_END_GRACE_MS}).
+   */
+  private readonly backgroundEndedAt = new Map<string, number>();
+  /** The threads with background work at the last fresh probe, to see an end between two. */
+  private lastBackgroundThreads = new Set<string>();
+  /**
    * Agent goals §5.7, a host from before the goal hold: the Codex threads whose
    * session this daemon stopped at a turn boundary so the deploy could go
    * ahead, their goals still active in Codex's own store — each owed a session
@@ -359,6 +388,61 @@ export class AgentHostSupervisor {
       pendingVersionRestart: this.pendingVersionRestart,
       pid: this.hostPid(),
       reason: this.reason
+    };
+  }
+
+  /**
+   * `GET /api/agent-host/status`: the host and the drain-restart a deploy left
+   * pending — why, since when, and what it waits on per thread, off the last
+   * fresh probe (at most one health interval old). Thread titles are the
+   * caller's to add.
+   */
+  restartStatus(): AgentHostStatusResponse {
+    const health = this.health;
+    const status = this.status();
+    const base: AgentHostStatusResponse = {
+      state: status.state,
+      reason: status.reason,
+      hostInstanceId: status.hostInstanceId,
+      pid: status.pid,
+      codeStamp: typeof health?.codeStamp === "string" ? health.codeStamp : null,
+      checkoutCodeStamp: this.opts.codeStamp ?? null,
+      pendingRestart: null
+    };
+    if (!this.pendingVersionRestart || health === null) return base;
+    const blockers: AgentHostRestartBlocker[] = [];
+    for (const threadId of new Set(health.activeTurnThreadIds)) {
+      blockers.push({ threadId, kind: "turn" });
+    }
+    const itemised = new Set<string>();
+    for (const task of health.backgroundTasks ?? []) {
+      itemised.add(task.threadId);
+      blockers.push({
+        threadId: task.threadId,
+        kind: task.kind === "agent" ? "agent" : "background",
+        taskId: task.taskId,
+        since: task.since,
+        stoppable: task.stoppable,
+        ...(task.title !== undefined ? { title: task.title } : {}),
+        ...(task.command !== undefined ? { command: task.command } : {})
+      });
+    }
+    for (const threadId of backgroundWorkThreadIds(health, this.daemonBackgroundWork())) {
+      if (!itemised.has(threadId)) blockers.push({ threadId, kind: "work" });
+    }
+    const wakes = new Map((health.pendingWakes ?? []).map((wake) => [wake.threadId, wake.since]));
+    for (const threadId of this.pendingWakeThreads(health)) {
+      const since = wakes.get(threadId);
+      blockers.push({ threadId, kind: "wake", ...(since !== undefined ? { since } : {}) });
+    }
+    return {
+      ...base,
+      pendingRestart: {
+        reason: this.staleReason(health),
+        since: this.pendingRestartSince === null ? null : new Date(this.pendingRestartSince).toISOString(),
+        deferredBy: this.lastDrainDeferral,
+        blockers
+      }
     };
   }
 
@@ -588,7 +672,25 @@ export class AgentHostSupervisor {
    * happens the moment the host goes quiet rather than on the next 15 s tick.
    * Still blocked, it renews the agent goals §5.7 hold instead.
    */
-  handleTurnSettled(): void {
+  handleTurnSettled(threadId?: string): void {
+    // A turn that settled after the thread's background work ended was the
+    // wake an older host could not report: that thread waits no longer.
+    if (threadId !== undefined) this.backgroundEndedAt.delete(threadId);
+    this.evaluateDrainSoon();
+  }
+
+  /**
+   * A thread's background work ended (the daemon's summary poll). It reopens
+   * the drain window as a settled turn does — but for a host that cannot
+   * report a pending wake, that thread first gets {@link BACKGROUND_END_GRACE_MS}
+   * for the provider to start the turn that hands the agent its result.
+   */
+  handleBackgroundWorkEnded(threadId?: string): void {
+    if (threadId !== undefined) this.backgroundEndedAt.set(threadId, this.opts.adapters.now());
+    this.evaluateDrainSoon();
+  }
+
+  private evaluateDrainSoon(): void {
     if (!this.pendingVersionRestart || this.state !== "healthy") return;
     // Fire-and-forget: `transition()` only catches its own QUEUE copy, so the
     // returned promise must be caught here or an unhandled rejection takes the
@@ -690,7 +792,9 @@ export class AgentHostSupervisor {
       this.pendingVersionRestart = true; // `adopt` clears it only on a match
     }
     if (!this.pendingVersionRestart) return;
-    const blockers = drainBlockers(probed.health, this.daemonBackgroundWork());
+    const daemonView = this.daemonBackgroundWork();
+    this.observeBackgroundEnds(probed.health, daemonView);
+    const blockers = drainBlockers(probed.health, daemonView, this.pendingWakeThreads(probed.health));
     if (blockers !== null) {
       // Once per change of reason, not once per 15 s tick.
       if (blockers !== this.lastDrainDeferral) {
@@ -791,6 +895,53 @@ export class AgentHostSupervisor {
   }
 
   /**
+   * Threads whose provider is about to wake the agent for a finished
+   * background task, so a restart now would lose its result: what the host
+   * reports (`pendingWakes`), each for at most the cap; for a host from before
+   * that field, every thread whose background work ended within the grace and
+   * no turn of which settled since.
+   */
+  private pendingWakeThreads(health: AgentHostHealthResponse): string[] {
+    const now = this.opts.adapters.now();
+    if (health.pendingWakes !== undefined) {
+      const cap = this.opts.pendingWakeCapMs ?? PENDING_WAKE_DRAIN_CAP_MS;
+      return [
+        ...new Set(
+          health.pendingWakes
+            .filter((wake) => {
+              const since = Date.parse(wake.since);
+              return Number.isFinite(since) && now - since < cap;
+            })
+            .map((wake) => wake.threadId)
+        )
+      ];
+    }
+    const grace = this.opts.backgroundEndGraceMs ?? BACKGROUND_END_GRACE_MS;
+    const waiting: string[] = [];
+    for (const [threadId, endedAt] of this.backgroundEndedAt) {
+      if (now - endedAt < grace) waiting.push(threadId);
+      else this.backgroundEndedAt.delete(threadId);
+    }
+    return waiting;
+  }
+
+  /**
+   * An end of background work seen between two fresh probes — the summary
+   * poll may not have reported it ({@link handleBackgroundWorkEnded}) — starts
+   * the older host's grace too; work seen running again ends it.
+   */
+  private observeBackgroundEnds(health: AgentHostHealthResponse, daemonView: readonly string[] | null): void {
+    const now = new Set(backgroundWorkThreadIds(health, daemonView));
+    for (const threadId of this.lastBackgroundThreads) {
+      if (!now.has(threadId) && !this.backgroundEndedAt.has(threadId)) {
+        this.backgroundEndedAt.set(threadId, this.opts.adapters.now());
+      }
+    }
+    for (const threadId of now) this.backgroundEndedAt.delete(threadId);
+    this.lastBackgroundThreads = now;
+  }
+
+  /**
    * Agent goals §5.7 for a host from before the goal hold (its route-miss
    * 404). Such a host knows nothing of goals and cannot pause one, and a
    * continuing Codex goal starts its next turn within milliseconds of the
@@ -817,6 +968,7 @@ export class AgentHostSupervisor {
     const daemonView = this.daemonBackgroundWork();
     if (health.backgroundWorkThreadIds === undefined && daemonView === null) return;
     if (backgroundWorkThreadIds(health, daemonView).length > 0) return;
+    if (this.pendingWakeThreads(health).length > 0) return;
     const active = [...new Set(health.activeTurnThreadIds)];
     if (active.length === 0) return;
     const adapterOf = this.opts.adapters.threadAdapter;
@@ -1245,17 +1397,20 @@ function hostHasWork(
  */
 function drainBlockers(
   health: AgentHostHealthResponse,
-  daemonView: readonly string[] | null = []
+  daemonView: readonly string[] | null = [],
+  pendingWakes: readonly string[] = []
 ): string | null {
   if (health.backgroundWorkThreadIds === undefined && daemonView === null) {
     return "background work not known yet (the host predates the health field; waiting for the first summary poll)";
   }
   const turns = health.activeTurnThreadIds.length;
   const background = backgroundWorkThreadIds(health, daemonView).length;
-  if (turns === 0 && background === 0) return null;
+  const wakes = pendingWakes.length;
+  if (turns === 0 && background === 0 && wakes === 0) return null;
   const parts: string[] = [];
   if (turns > 0) parts.push(`${turns} thread(s) with an active turn`);
   if (background > 0) parts.push(`${background} thread(s) with live background work`);
+  if (wakes > 0) parts.push(`${wakes} thread(s) about to hand the agent a finished background task`);
   return parts.join(", ");
 }
 

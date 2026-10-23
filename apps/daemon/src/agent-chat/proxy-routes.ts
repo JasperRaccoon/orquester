@@ -30,6 +30,7 @@ import {
   threadHeadQueryParams,
   threadHeadQueryProblem,
   type AgentChatCommandName,
+  type AgentHostStatusResponse,
   type AgentChatErrorCode,
   type AgentChatErrorEnvelope,
   type McpAppOperation,
@@ -105,6 +106,12 @@ export interface AgentChatRouteDeps {
    * ready — §8's "reported as not switched").
    */
   restartHost(): Promise<{ hostInstanceId: string | null; markedThreadIds: string[] }>;
+  /**
+   * `GET /api/agent-host/status`: the supervised host and a pending drain-restart's blockers,
+   * per thread (`AgentHostSupervisor.restartStatus`). Optional: route tests build partial deps
+   * (the route then answers 404).
+   */
+  hostStatus?(): AgentHostStatusResponse;
   /**
    * §6.3/§6.4: a refresh that actually changed something raises the coarse
    * `agent.providers.changed` and the client re-reads. Only `changed: true`
@@ -746,6 +753,14 @@ export function registerAgentChatRoutes(app: FastifyInstance, deps: AgentChatRou
   // The intentional host stop of §3.3/§6.3: the host writes every continuation
   // marker for a running thread with a usable cursor, then drains and stops.
   // The supervisor then brings a replacement up and holds §8's deadline on it.
+  // What a deploy's pending restart waits on — Settings → System shows it, with
+  // a Stop for each task and the restart-now below. Read-only and cheap: it
+  // answers from the supervisor's last fresh probe.
+  app.get(agentChatRoutes.hostStatus, async (_request, reply) => {
+    if (deps.hostStatus === undefined) return reply.code(404).send({ error: { code: "NOT_FOUND", message: "Not found." } });
+    return deps.hostStatus();
+  });
+
   app.post(agentChatRoutes.hostStop, async (_request, reply) => {
     if (!deps.isHostHealthy()) return reply.code(503).send(HOST_UNAVAILABLE);
     try {

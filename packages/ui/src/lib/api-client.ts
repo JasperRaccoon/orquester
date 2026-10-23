@@ -223,7 +223,15 @@ import type {
   WorkflowProblem,
   WorkflowWriteResponse
 } from "@orquester/api";
-import { agentChatRoutes, type AgentVisualUrlResponse, type McpAppOperation } from "@orquester/api/agent-chat";
+import {
+  agentChatCommandPath,
+  agentChatRoutes,
+  type AgentHostStatusResponse,
+  type AgentHostStopResponse,
+  type AgentVisualUrlResponse,
+  type CommandReceiptResponse,
+  type McpAppOperation
+} from "@orquester/api/agent-chat";
 import { desktopVisualScheme, visualFrameSrc, type VisualFrameUrl } from "./agent-chat/visual-frame";
 import type {
   ForkSessionRequest,
@@ -2124,6 +2132,30 @@ export class ApiClient {
     return this.send("GET", "/api/system/ports", { signal });
   }
 
+  /** The agent host and a deploy's pending drain-restart, with what it waits on (Settings → Host status). */
+  agentHostStatus(signal?: AbortSignal): Promise<AgentHostStatusResponse> {
+    return this.send("GET", agentChatRoutes.hostStatus, { signal });
+  }
+
+  /** Restart the agent host NOW, whatever is running — every turn and background task stops. */
+  restartAgentHost(): Promise<AgentHostStopResponse> {
+    return this.send("POST", agentChatRoutes.hostStop, { body: {} });
+  }
+
+  /** Stop one background task of a chat (`task/stop`), outside its own view. */
+  stopAgentTask(sessionId: string, taskId: string): Promise<CommandReceiptResponse> {
+    return this.send("POST", agentChatCommandPath(sessionId, "task/stop"), {
+      body: { commandId: newCommandId(), taskId }
+    });
+  }
+
+  /** End a chat's provider session (`session/stop`), and with it everything the session runs. */
+  stopAgentSession(sessionId: string): Promise<CommandReceiptResponse> {
+    return this.send("POST", agentChatCommandPath(sessionId, "session/stop"), {
+      body: { commandId: newCommandId() }
+    });
+  }
+
   /**
    * Signal a pid and its descendants — SIGTERM, or SIGKILL to force. Refusals come back as a 400 whose body
    * carries a {@link KillProcessErrorCode} — thrown as an ApiError, so callers
@@ -2301,4 +2333,11 @@ export class WorkflowApiError extends ApiError {
     }
     return problems;
   }
+}
+
+/** A §6.2 command id (the idempotency key), minted by the client. */
+function newCommandId(): string {
+  const cryptoRef = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto;
+  if (cryptoRef?.randomUUID) return cryptoRef.randomUUID();
+  return `id-${Math.random().toString(36).slice(2)}-${Date.now().toString(36)}`;
 }

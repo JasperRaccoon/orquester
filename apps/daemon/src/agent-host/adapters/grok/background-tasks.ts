@@ -61,6 +61,12 @@ export interface BackgroundTrack {
   status: RuntimeTaskStatus;
   toolUseId?: string;
   outputFile?: string;
+  /**
+   * The shell's own process id, as the CLI's `BackgroundTaskStarted` answer
+   * reports it (`rawOutput.pid`, fixture 11). What tells a quiet shell that
+   * still runs from one that is gone (`GrokSession.backgroundTaskLive`).
+   */
+  pid?: number;
   turnId?: string;
   /**
    * Live again on the CLI's word after an end the adapter wrote itself (see
@@ -542,6 +548,7 @@ function startBackgroundTask(
     description?: string;
     toolUseId?: string;
     outputFile?: string;
+    pid?: number;
   },
   raw: RuntimeEventRaw
 ): RuntimeEvent[] {
@@ -599,9 +606,11 @@ export function taskBackgrounded(
   const monitorDescription = textArgument(update, "monitor_description");
   const description = textArgument(update, "description") ?? monitorDescription;
   const outputFile = typeof update["output_file"] === "string" ? update["output_file"] : undefined;
+  const pid = positivePid(update["pid"]);
   const existing = state.tasks.get(taskId);
   if (existing !== undefined) {
     existing.toolUseId ??= toolUseId;
+    existing.pid ??= pid;
     return [];
   }
   const reported = shellReport(state, taskId, undefined, raw, { toolUseId, outputFile });
@@ -618,7 +627,8 @@ export function taskBackgrounded(
       status: "running",
       ...(description === undefined ? {} : { description }),
       ...(toolUseId === undefined ? {} : { toolUseId }),
-      ...(outputFile === undefined ? {} : { outputFile })
+      ...(outputFile === undefined ? {} : { outputFile }),
+      ...(pid === undefined ? {} : { pid })
     },
     raw
   );
@@ -775,7 +785,8 @@ export function backgroundFromToolCall(
       command,
       tool_call_id: toolCallId,
       description: typeof record["summary"] === "string" ? record["summary"] : undefined,
-      output_file: typeof record["output_file"] === "string" ? record["output_file"] : undefined
+      output_file: typeof record["output_file"] === "string" ? record["output_file"] : undefined,
+      pid: record["pid"]
     },
     answerRaw,
     scope
@@ -1009,4 +1020,36 @@ function normalizeTaskStatus(status: string | undefined): RuntimeTaskStatus {
     default:
       return "running";
   }
+}
+
+/** A process id as the CLI reports one: a positive integer, else nothing. */
+function positivePid(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : undefined;
+}
+
+/**
+ * What the normaliser knows of a background task's run, for the host's
+ * liveness check: `running` with the shell's pid when the CLI reported one,
+ * `ended` once its end was written, `agent` for a subagent's id (no process
+ * of its own), `unknown` for an id it never named.
+ */
+export type BackgroundTaskRun =
+  | { kind: "running"; pid: number | undefined }
+  | { kind: "ended" }
+  | { kind: "agent" }
+  | { kind: "unknown" };
+
+export function backgroundTaskRun(state: GrokNormalizerState, taskId: string): BackgroundTaskRun {
+  const track = state.tasks.get(taskId);
+  if (track !== undefined && !isTerminalStatus(track.status)) {
+    return { kind: "running", pid: track.pid };
+  }
+  if (track !== undefined) return { kind: "ended" };
+  // A subagent first: a relaunched one shares the id of the run that ended.
+  if (state.subagents.has(taskId)) return { kind: "agent" };
+  return state.endedTasks.has(taskId.toLowerCase()) ? { kind: "ended" } : { kind: "unknown" };
+}
+
+function isTerminalStatus(status: RuntimeTaskStatus): boolean {
+  return status === "completed" || status === "failed" || status === "cancelled" || status === "interrupted" || status === "idle";
 }

@@ -248,13 +248,31 @@ const NOTICE_TASK_NAMES = 8;
 export function backgroundWorkStoppedNotice(
   closings: readonly LeftoverClosing[]
 ): { summary: string; detail: string } | null {
-  const names = closings
-    .filter((closing) => closing.key.startsWith("task:"))
-    .map((closing) => {
-      const payload = asRecord(closing.activity.payload) ?? {};
-      const name = nonBlank(payload.title) ?? nonBlank(payload.detail) ?? closing.key.slice("task:".length);
-      return payload.agentKind === "background" ? `${name} (background task)` : `${name} (agent)`;
-    });
+  return stoppedWorkNotice(
+    closings
+      .filter((closing) => closing.key.startsWith("task:"))
+      .map((closing) => {
+        const payload = asRecord(closing.activity.payload) ?? {};
+        return {
+          name: nonBlank(payload.title) ?? nonBlank(payload.detail) ?? closing.key.slice("task:".length),
+          background: payload.agentKind === "background"
+        };
+      })
+  );
+}
+
+/**
+ * The notice for background work — each task by name, a background task or an
+ * agent — that stopped with the agent host: a dead process's work the next
+ * host closed ({@link backgroundWorkStoppedNotice}), or what a host's own
+ * teardown stopped. `null` for none.
+ */
+export function stoppedWorkNotice(
+  tasks: ReadonlyArray<{ name: string; background: boolean }>
+): { summary: string; detail: string } | null {
+  const names = tasks.map(({ name, background }) =>
+    background ? `${name} (background task)` : `${name} (agent)`
+  );
   if (names.length === 0) return null;
   const listed = names.slice(0, NOTICE_TASK_NAMES).join(", ");
   const more = names.length > NOTICE_TASK_NAMES ? `, and ${names.length - NOTICE_TASK_NAMES} more` : "";

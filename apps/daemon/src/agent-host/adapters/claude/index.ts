@@ -594,6 +594,13 @@ export async function createClaudeAdapterWith(
       return sessions.get(threadId)?.isAlive === true;
     },
 
+    backgroundTaskLive(threadId, taskId) {
+      const session = sessions.get(threadId);
+      // The CLI that ran it is gone: so is every shell and agent it ran.
+      if (session === undefined || !session.isAlive) return false;
+      return session.normalizer.backgroundTaskLive(taskId);
+    },
+
     async stopSession(threadId) {
       await sessions.get(threadId)?.stop();
     },

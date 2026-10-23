@@ -104,6 +104,49 @@ export interface CrashResumedTurn {
 }
 
 /**
+ * One background task whose completion the agent has not consumed yet ({@link PendingWake}).
+ * `result` is the provider's own final summary of the task, capped
+ * (`PENDING_WAKE_RESULT_MAX_CHARS` on the host).
+ */
+export interface PendingWakeTask {
+  taskId: string;
+  /** `completed` or `failed`: only a task's own end wakes the agent. */
+  status: string;
+  /** When its end was consumed by the host (ISO). */
+  completedAt: string;
+  title?: string;
+  /** The provider's task type (`local_agent`, `local_bash`, `subagent`, …). */
+  taskType?: string;
+  /** The task's final summary or result text, capped. */
+  result?: string;
+  /** Where the provider wrote the task's whole output, when it names one. */
+  outputFile?: string;
+  exitCode?: number;
+}
+
+/**
+ * A pending WAKE (agent-host restart safety, 2026-10-23): a background task — a subagent, a
+ * background shell — finished after the thread's last turn settled, on a provider that starts a
+ * turn by itself to hand the agent that result (Claude, Grok, OpenCode), and no turn has started
+ * since. While it is set the agent is about to continue on its own: a deploy's drain waits for
+ * it (`/health` `pendingWakes`), and a host that stops anyway leaves it on `meta.json`, so the
+ * next host hands the agent the results itself (under the §3.3 continuation rules) instead of
+ * the chat silently waiting for a "continue". Cleared when any turn starts, when the user ends
+ * the session, and once it is too old to be a wake at all. `prepared`/`attempt` are written by
+ * the next host right before it delivers it, so a host that dies in between counts on, bounded.
+ * Head-only like {@link ContinueAfterRestart}; an older host ignores it.
+ */
+export interface PendingWake {
+  /** When the first un-consumed completion landed (ISO). */
+  since: string;
+  tasks: PendingWakeTask[];
+  /** More tasks completed than {@link tasks} lists (the list is capped). */
+  moreTasks?: number;
+  prepared?: boolean;
+  attempt?: number;
+}
+
+/**
  * `meta.json` — rewritten atomically every 50 events and on turn end (§5.1).
  *
  * *T3: `orchestration.ts:599-609` (`OrchestrationSession`) plus the thread row;
@@ -129,6 +172,8 @@ export interface ThreadHead {
   continueAfterRestart?: ContinueAfterRestart;
   /** Crash-safe resume (§3.3): see {@link CrashResumedTurn}. Head-only. */
   crashResumedTurn?: CrashResumedTurn;
+  /** A background task's completion the agent has not picked up yet: see {@link PendingWake}. Head-only. */
+  pendingWake?: PendingWake;
   /**
    * Goals §5.5: the deploy handover found this thread's goal CONTINUING —
    * active on a provider that starts its own turns (Codex) — with a usable

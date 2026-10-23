@@ -205,6 +205,42 @@ test("the crash-resume count round-trips on the marker and the head — through 
   assert.deepEqual(parseAgentThreadHead(JSON.parse(JSON.stringify(parsed))), parsed);
 });
 
+test("a pending wake round-trips on the head through JSON; a bad one reads as none, a bad task is dropped", () => {
+  const pendingWake = {
+    since: "2026-10-23T09:20:10.905Z",
+    tasks: [
+      {
+        taskId: "a848b4c83033e0f67",
+        status: "completed",
+        completedAt: "2026-10-23T09:20:10.905Z",
+        title: "Fix: revocable auth sessions",
+        taskType: "local_agent",
+        result: "All four items (A to D) are fixed and committed.",
+        outputFile: "/tmp/tasks/a848b4c83033e0f67.output"
+      }
+    ],
+    prepared: true,
+    attempt: 1
+  };
+  const parsed = parseAgentThreadHead({ ...persistedHead, pendingWake });
+  assert.ok(parsed);
+  assert.deepEqual(parsed.pendingWake, pendingWake, "a dropped mark would lose the finished task's result");
+  assert.deepEqual(parseAgentThreadHead(JSON.parse(JSON.stringify(parsed))), parsed);
+
+  const mixed = parseAgentThreadHead({
+    ...persistedHead,
+    pendingWake: { since: "2026-10-23T09:20:10.905Z", tasks: [{ status: "completed" }, pendingWake.tasks[0]], attempt: "x" }
+  });
+  assert.ok(mixed);
+  assert.deepEqual(mixed.pendingWake?.tasks, pendingWake.tasks);
+  assert.equal(mixed.pendingWake?.attempt, undefined);
+  for (const value of [null, 7, { tasks: [] }, { since: 3, tasks: [] }]) {
+    const head = parseAgentThreadHead({ ...persistedHead, pendingWake: value });
+    assert.ok(head, JSON.stringify(value));
+    assert.equal(head.pendingWake, undefined, JSON.stringify(value));
+  }
+});
+
 test("a malformed crash-resume count reads as none, never an unreadable head", () => {
   for (const value of [0, -1, 1.5, "2", null, { n: 2 }]) {
     const parsed = parseAgentThreadHead({
