@@ -94,10 +94,10 @@
 ## Verification commands
 
 - Run `pnpm install` when dependency changes require it; keep `pnpm-lock.yaml` in sync.
-- Run `pnpm check` before committing; it typechecks every workspace and is the pre-commit gate.
-- For code behavior changes, run the affected test files plus `pnpm check`; leave repo-wide `pnpm test` to integration runs.
+- Run `pnpm check:changed` before committing: it typechecks the packages you changed and their dependents, and runs the changed test files and the tests beside changed files (`foo.ts` → `foo.test.ts`, `foo.*.test.ts`). `--dry-run` lists what it would run; `--base <ref>` changes the comparison base (default: the merge base with `main`).
+- Add focused test runs for behavior whose tests are not beside the changed files.
 - Run one test file from its package directory, e.g. in `apps/daemon`: `TSX_DISABLE_CACHE=1 node --import tsx --test src/daily-log.test.ts`.
-- Name the affected files in one command rather than running a whole package; `pnpm --filter @orquester/<pkg> test` runs every file in that package.
+- `pnpm check` typechecks every workspace and `pnpm test` runs every package's tests; they are the full gate, run rarely and before merging to `main`.
 - Package test scripts set `TSX_DISABLE_CACHE=1`, so test runs never grow the shared tsx transpile cache; do the same for ad hoc `tsx` runs.
 - Test scripts run one package at a time and at most 4 test files at once; set `ORQUESTER_TEST_CONCURRENCY` to change the per-package cap.
 - Keep one test run going per worktree, run long ones in the background, and wait for their completion instead of polling or sleeping.
