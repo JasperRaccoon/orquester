@@ -2259,6 +2259,23 @@ describe("a stopped chat is not woken by the delegates its stop interrupted", ()
     await w.cleanup();
   });
 
+  it("after a stop, a wait on a reply still to come says it will be held for the user, never that it comes as a message", async () => {
+    const w = await stoppable();
+    // A finished delegate's turn is not interrupted: its subscription stays open, held.
+    w.host.threads.get("tgt")!.turns.at(-1)!.state = "pending";
+    w.host.sessions.set("tgt", { ...w.host.sessions.get("tgt")!, latestTurn: undefined, chatSessionStatus: "ready" } as SessionSummary);
+    w.cascade.commandAccepted("req", "interrupt", { commandId: "stop-1" });
+    await w.cascade.whenIdle();
+    await idle(w);
+    assert.equal(sub(w, w.res.subscriptionId).state, "notify");
+    const answer = await w.router.wait("tgt", w.res.subscriptionId, { timeoutSeconds: 5 }, { principal: { kind: "agent", threadId: "req", projectPath: "" } });
+    assert.equal(answer.outcome, "replied");
+    assert.equal((answer as { state?: string }).state, "failed");
+    assert.match((answer as { error?: string }).error ?? "", /not delivered as a message: when it comes, it is held for the user to deliver or discard/);
+    assert.equal((answer as { willNotify?: true }).willNotify, undefined);
+    await w.cleanup();
+  });
+
   it("while a stop is on its way to the host, replies to that chat wait; a refused stop lets them go", async () => {
     const w = await stoppable();
     const done = w.cascade.commandRequested("req", "interrupt", { commandId: "stop-pending" });

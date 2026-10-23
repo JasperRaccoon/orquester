@@ -656,6 +656,11 @@ export class ReplyRouter implements DeliveryListener {
     if (typeof timeoutSeconds !== "number" || !Number.isInteger(timeoutSeconds) || timeoutSeconds < 1 || timeoutSeconds > MAX_WAIT_SECONDS) {
       throw new ReplyError(`timeoutSeconds must be a whole number from 1 to ${MAX_WAIT_SECONDS}.`, "INVALID_COMMAND");
     }
+    // Asked before a stop of the requester: its reply is held for the user, never a message — said
+    // so, not `notify` (an agent acts on that answer).
+    if (sub.stopHold && (sub.state === "notify" || (sub.state === "waiting" && sub.released))) {
+      return { outcome: "replied", turnId: sub.turnId ?? null, state: "failed", error: this.noticeText("stop-held", sub) };
+    }
     if (sub.state === "notify") return { outcome: "notify", reason: "timeout", willNotify: true };
     if (sub.released) {
       // Tombstoned: never attached, never taken back — the reply is (or will be) a message.
@@ -2099,7 +2104,7 @@ export class ReplyRouter implements DeliveryListener {
   }
 
   /** The sentence a requester reads when no reply will come (`ReplyResult` kind `notice`). */
-  private noticeText(kind: "discarded" | "steered" | "lost" | "expired" | "stopped" | "stop-wait", sub: Sub): string {
+  private noticeText(kind: "discarded" | "steered" | "lost" | "expired" | "stopped" | "stop-wait" | "stop-held", sub: Sub): string {
     const title = oneLine(this.titleOf(sub)) || "Untitled";
     const look = `Read what it did with read_transcript {sessionId: "${sub.toThreadId}"}.`;
     switch (kind) {
@@ -2109,6 +2114,8 @@ export class ReplyRouter implements DeliveryListener {
         return `"${title}" was already working, so your message joined its running turn instead of starting its own; no reply of its own will come. ${look}`;
       case "lost":
         return `Orquester lost track of the turn your message to "${title}" started (it was rewound, or could not be identified), so no reply will come. ${look}`;
+      case "stop-held":
+        return `You were stopped after asking "${title}", so its reply is not delivered as a message: when it comes, it is held for the user to deliver or discard. ${look}`;
       case "stop-wait":
         return `You were stopped while waiting for "${title}". Its reply, if one comes, is held for the user and not delivered on its own. ${look}`;
       case "stopped":
