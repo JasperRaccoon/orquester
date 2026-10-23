@@ -115,7 +115,7 @@ import { applyEventToHead } from "./head.ts";
 import { RawFrameLog, pruneRawLogDirectory } from "./raw-log.ts";
 import { joinToolOutput, type ItemWrite } from "./tool-output.ts";
 import { createToolOutputCache } from "./tool-output-cache.ts";
-import { ReplayCursorRing } from "./replay-cursors.ts";
+import { REPLAY_CURSOR_IDLE_MS, ReplayCursorRing } from "./replay-cursors.ts";
 
 /** `meta.json` is rewritten after this many appended events (§5.1). */
 const HEAD_CHECKPOINT_EVENTS = 50;
@@ -273,7 +273,9 @@ interface ThreadRuntime {
   /**
    * Where the thread's newest lines start (`replay-cursors.ts`), from this process's own appends:
    * what lets a reconnect's {@link ThreadStore.readTail} read from line `after + 1` instead of the
-   * whole log. Null until the first append. Cleared whenever the log's length is re-read from disk.
+   * whole log. Null until the first append, and again once the thread has been idle
+   * {@link REPLAY_CURSOR_IDLE_MS} (`dropIdleReplayCursors`). Cleared whenever the log's length is
+   * re-read from disk.
    */
   replayCursors: ReplayCursorRing | null;
 }
@@ -329,6 +331,12 @@ export interface AgentThreadStore extends ThreadStore {
    */
   sweepStartup(): Promise<void>;
   /**
+   * Drop the reconnect cursors (`replay-cursors.ts`) of every thread with no append for
+   * `REPLAY_CURSOR_IDLE_MS`, and answer how many. Runs on an unref'd timer; a dropped thread's
+   * next reconnect reads its whole log, and its next append starts new cursors.
+   */
+  dropIdleReplayCursors(nowMs?: number): number;
+  /**
    * Stop the background sweep. The timer is `unref`'d, so forgetting this
    * never holds the process open; it exists so a host stop is deterministic.
    */
@@ -346,6 +354,7 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
   const pendingDir = path.join(rootDir, "pending-attachments");
 
   let sweepTimer: NodeJS.Timeout | null = null;
+  let replayCursorTimer: NodeJS.Timeout | null = null;
 
   // --- receipts ------------------------------------------------------------
 
@@ -1202,7 +1211,8 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
             throw error;
           }
           entry.logBytes = endOffset;
-          (entry.replayCursors ??= new ReplayCursorRing()).note(positions);
+          const nowMs = clock.now().getTime();
+          (entry.replayCursors ??= new ReplayCursorRing(nowMs)).note(positions, nowMs);
         }
 
         // STRICTLY after the events: a receipt must never exist for events
@@ -1711,14 +1721,30 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
       }
     },
 
+    dropIdleReplayCursors(nowMs = clock.now().getTime()): number {
+      let dropped = 0;
+      for (const entry of threads.values()) {
+        if (entry.replayCursors !== null && nowMs - entry.replayCursors.lastNotedAtMs >= REPLAY_CURSOR_IDLE_MS) {
+          entry.replayCursors = null;
+          dropped += 1;
+        }
+      }
+      return dropped;
+    },
+
     close(): void {
       if (sweepTimer !== null) {
         clearInterval(sweepTimer);
         sweepTimer = null;
       }
+      if (replayCursorTimer !== null) {
+        clearInterval(replayCursorTimer);
+        replayCursorTimer = null;
+      }
       for (const entry of threads.values()) {
         entry.raw?.close();
         entry.raw = null;
+        entry.replayCursors = null;
       }
       toolOutputCache.clear();
     },
@@ -1765,6 +1791,9 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
     void store.pruneAttachments().catch(() => undefined);
   }, DEFAULT_SWEEP_INTERVAL_MS);
   sweepTimer.unref?.();
+  // Reconnect cursors live only while their thread is being written to (`replay-cursors.ts`).
+  replayCursorTimer = setInterval(() => void store.dropIdleReplayCursors(), REPLAY_CURSOR_IDLE_MS);
+  replayCursorTimer.unref?.();
 
   return store;
 }
