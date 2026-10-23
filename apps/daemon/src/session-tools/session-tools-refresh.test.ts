@@ -449,3 +449,26 @@ test("Knowledge Graph: the chat's knowledge view is read fresh for every manifes
   // Unwired (the integration not there yet): off.
   assert.deepEqual((await manifestOf(rig({ catalog: () => catalog }), "claude-1")).tools, ALL);
 });
+
+test("Knowledge Graph: a worker session (its owner in the session list) gets ONLY the worker tools even when the knowledge read fails, hangs or is unwired", async () => {
+  const catalog = [...CATALOG, tool("knowledge_search", "knowledge"), tool("knowledge_save", "knowledge"), tool("knowledge_worker_next_task", "knowledge"), tool("knowledge_worker_submit", "knowledge")];
+  const worker = [chatSummary({ id: "claude-1", owner: { kind: "knowledge-indexer", runId: "r1" } } as unknown as Partial<SessionSummary>)];
+  let view: Error | "hang" = new Error("store down");
+  const r = rig({
+    catalog: () => catalog,
+    knowledgeInfoTimeoutMs: 20,
+    knowledgeForSession: async () => (view === "hang" ? new Promise<ManifestKnowledge>(() => undefined) : Promise.reject(view))
+  });
+  r.api.on("GET", "/api/sessions", { status: 200, body: worker });
+  for (const failing of [new Error("store down"), "hang" as const]) {
+    view = failing;
+    const manifest = await manifestOf(r, "claude-1");
+    assert.deepEqual(manifest.tools, ["knowledge_worker_next_task", "knowledge_worker_submit"], String(failing));
+    assert.doesNotMatch(manifest.instructions, /list_sessions|update_todos/);
+  }
+  const unwired = rig({ catalog: () => catalog });
+  unwired.api.on("GET", "/api/sessions", { status: 200, body: worker });
+  assert.deepEqual((await manifestOf(unwired, "claude-1")).tools, ["knowledge_worker_next_task", "knowledge_worker_submit"]);
+  // A chat that is no worker is untouched by the owner check.
+  assert.deepEqual((await manifestOf(rig({ catalog: () => catalog }), "claude-1")).tools, ALL);
+});

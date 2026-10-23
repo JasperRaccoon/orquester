@@ -33,6 +33,7 @@ import type { AnyOrquesterTool } from "../mcp/catalog/contract.ts";
 import type { DaemonApi } from "../mcp/daemon-api.ts";
 import { isWorkflowOwned } from "../mcp/gate/scope.ts";
 import { listSessions } from "../mcp/reads.ts";
+import { KNOWLEDGE_WORKER_OWNER_KIND, ownerKindOf } from "../knowledge/visibility.ts";
 import { buildSessionToolsManifest, isWithinDir, type ManifestKnowledge, type ManifestThread } from "./manifest.ts";
 
 /** How long a read of the daemon-pointing servers is reused (the read walks every account home). */
@@ -103,7 +104,9 @@ export interface SessionToolsRefreshDeps {
    * not, what it sees (`knowledge/visibility.ts` `createKnowledgeForSession`). Read fresh for every
    * manifest; push a refresh when the plugin is switched, a collection is created, renamed or
    * deleted, or a profile's `knowledgeCollections` change. Absent, failing or slower than
-   * {@link KNOWLEDGE_INFO_TIMEOUT_MS}: the plugin counts as off for that manifest.
+   * {@link KNOWLEDGE_INFO_TIMEOUT_MS}: the plugin counts as off for that manifest — except that a
+   * session the session list shows owned by the plugin (`owner.kind === "knowledge-indexer"`) is
+   * still a worker, advertised only its two tools.
    */
   knowledgeForSession?(threadId: string): Promise<ManifestKnowledge>;
   /** The daemon's in-process API (null while it does not exist yet). */
@@ -332,6 +335,9 @@ export class SessionToolsRefresher {
     // closed — an unreadable (or unanswered, bounded) list counts as owned, so no Admin tool is
     // advertised.
     let workflowOwned = true;
+    // Knowledge Graph: a worker session says so in its owner too — the second signal that keeps it
+    // to its two tools when the knowledge read fails, hangs or is not wired.
+    let knowledgeWorker = false;
     if (api) {
       let timer: NodeJS.Timeout | undefined;
       try {
@@ -342,7 +348,10 @@ export class SessionToolsRefresher {
           })
         ]);
         if (sessions === "timeout") this.deps.logger?.warn?.("session-tools: the session list did not answer in time; the chat counts as workflow-owned");
-        else workflowOwned = isWorkflowOwned(sessions, threadId);
+        else {
+          workflowOwned = isWorkflowOwned(sessions, threadId);
+          knowledgeWorker = ownerKindOf(sessions.find((session) => session.id === threadId)?.owner) === KNOWLEDGE_WORKER_OWNER_KIND;
+        }
       } catch {
         workflowOwned = true;
       } finally {
@@ -357,7 +366,8 @@ export class SessionToolsRefresher {
       ...(denyEveryKnown ? { denyEveryKnown: true } : {}),
       workflowOwned
     };
-    const knowledge = await this.knowledgeFor(threadId);
+    const read = await this.knowledgeFor(threadId);
+    const knowledge: ManifestKnowledge | undefined = knowledgeWorker && read?.worker !== true ? { enabled: read?.enabled === true, worker: true, searchable: false, visibleCollectionNames: [] } : read;
     const manifest = buildSessionToolsManifest({
       thread: manifestThread,
       catalog: this.deps.catalog(),
