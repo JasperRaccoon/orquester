@@ -43,7 +43,9 @@ export const TOOLSET_IDS = [
   "desktops",
   "secret-files",
   // boxes: temporary boxes for agent chats (Ephemeral AI VMs spec §13).
-  "boxes"
+  "boxes",
+  // Knowledge Graph plugin: the shared knowledge base (its spec, "Agent tools").
+  "knowledge"
 ] as const;
 export type ToolsetId = (typeof TOOLSET_IDS)[number];
 
@@ -73,7 +75,11 @@ const read = (name: string): ToolsetToolSpec => ({ name, tier: "read" });
 const act = (name: string): ToolsetToolSpec => ({ name, tier: "act" });
 const admin = (name: string): ToolsetToolSpec => ({ name, tier: "admin" });
 
-/** Every toolset, with its tools in catalog order (spec §9.1): 54 chat tools, all advertised to every chat (the `boxes` ones while boxes can be rented). */
+/**
+ * Every toolset, with its tools in catalog order (spec §9.1): 60 chat tools, all advertised to every
+ * chat (the `boxes` ones while boxes can be rented, the `knowledge` ones while the Knowledge Graph
+ * plugin is on).
+ */
 export const TOOLSETS: readonly ToolsetSpec[] = [
   {
     id: "core",
@@ -168,6 +174,21 @@ export const TOOLSETS: readonly ToolsetSpec[] = [
       act("box_download"),
       act("box_forward_port"),
       act("destroy_box")
+    ]
+  },
+  // Knowledge Graph: advertised only while the plugin is on (`session-tools/manifest.ts`); search and
+  // get only to a chat that sees a collection; the two worker tools only to the plugin's own
+  // indexing sessions, which get nothing else. Saving raises no card (it must stay fast).
+  {
+    id: "knowledge",
+    label: "Knowledge base",
+    tools: [
+      read("knowledge_search"),
+      read("knowledge_get"),
+      act("knowledge_save"),
+      read("knowledge_collections"),
+      act("knowledge_worker_next_task"),
+      act("knowledge_worker_submit")
     ]
   }
 ];
