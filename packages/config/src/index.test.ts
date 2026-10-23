@@ -190,6 +190,35 @@ test("a stamped continuation marker round-trips beside both goal marks — throu
   assert.deepEqual(reread, parsed, "unchanged through JSON");
 });
 
+// --- §3.3: crash-safe resume (`crashAttempt`, `crashResumedTurn`) ----------
+
+test("the crash-resume count round-trips on the marker and the head — through JSON, as meta.json holds it", () => {
+  const marker = { turnId: "turn-7", prepared: true, markedAt: "2026-10-23T08:00:00.000Z", crashAttempt: 2 };
+  const parsed = parseAgentThreadHead({
+    ...persistedHead,
+    continueAfterRestart: marker,
+    crashResumedTurn: { turnId: "turn-8", attempt: 1 }
+  });
+  assert.ok(parsed);
+  assert.deepEqual(parsed.continueAfterRestart, marker, "a dropped count would let a crashing turn loop");
+  assert.deepEqual(parsed.crashResumedTurn, { turnId: "turn-8", attempt: 1 });
+  assert.deepEqual(parseAgentThreadHead(JSON.parse(JSON.stringify(parsed))), parsed);
+});
+
+test("a malformed crash-resume count reads as none, never an unreadable head", () => {
+  for (const value of [0, -1, 1.5, "2", null, { n: 2 }]) {
+    const parsed = parseAgentThreadHead({
+      ...persistedHead,
+      continueAfterRestart: { turnId: "turn-7", prepared: true, crashAttempt: value },
+      crashResumedTurn: { turnId: "turn-8", attempt: value }
+    });
+    assert.ok(parsed, JSON.stringify(value));
+    assert.deepEqual(JSON.parse(JSON.stringify(parsed.continueAfterRestart)), { turnId: "turn-7", prepared: true }, JSON.stringify(value));
+    assert.equal(parsed.crashResumedTurn, undefined, JSON.stringify(value));
+    assert.equal(parsed.id, "t1");
+  }
+});
+
 test("a malformed continuation stamp reads as unstamped — an older host's marker — never an unreadable head", () => {
   // The stamp is optional state the host writes; a bad one must not turn the
   // thread's meta.json into one nothing can read. Unstamped, the marker keeps

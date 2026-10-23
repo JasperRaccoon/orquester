@@ -702,6 +702,39 @@ describe("SessionProfileLifecycle versions and GC", () => {
     assert.equal(leases.listeners.size, 0, "stop() unsubscribes");
   });
 
+  it("skips quietly while the host is not adopted yet, then collects once it is (no boot false alarm)", async () => {
+    let healthy = false;
+    const listeners = new Set<() => void>();
+    const leases = Object.assign(leasesOf(), {
+      available: () => healthy,
+      onAvailable(listener: () => void) {
+        listeners.add(listener);
+        return () => void listeners.delete(listener);
+      }
+    });
+    const h = await setup({ claude: fakePreparer("claude") }, { leases, handoutGraceMs: 0 });
+    const profile = await h.service.create({ name: "Dev" });
+    const v1 = await h.lifecycle.ensureReady(profile.id, "claude", null);
+    await h.service.update(profile.id, { revision: profile.revision, description: "x" });
+    await h.lifecycle.ensureReady(profile.id, "claude", null);
+    const callsBefore = leases.calls;
+    await h.lifecycle.start();
+    await h.lifecycle.idle();
+    assert.ok(await exists(v1.preparedDir), "nothing is known yet: kept");
+    assert.equal(leases.calls, callsBefore, "the host is not even asked before it is adopted");
+    assert.deepEqual(
+      h.logs.filter((line) => line.includes("cannot tell which prepared dirs")),
+      [],
+      "and no warning is logged for it"
+    );
+
+    healthy = true;
+    for (const listener of listeners) listener();
+    await h.lifecycle.idle();
+    assert.equal(await exists(v1.preparedDir), false, "collected once the host is adopted");
+    h.lifecycle.stop();
+  });
+
   it("runs a slow periodic pass that collects what no trigger would (a deleted profile's leftovers)", async (t) => {
     t.mock.timers.enable({ apis: ["setInterval"] });
     const leases = leasesOf();

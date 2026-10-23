@@ -660,7 +660,7 @@ export async function startAgentHost(
     startedAt,
     // Read ONCE at boot: this is the code this process is running, which is
     // the whole point — after a deploy the checkout moves and this does not.
-    codeStamp: readCodeStamp(process.cwd()),
+    codeStamp: readCodeStamp(),
     // Everything that leaves the host as a message goes through the same
     // redaction the stderr path uses (§3.1).
     homeDirs: [homeDir],

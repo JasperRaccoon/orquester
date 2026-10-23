@@ -1504,9 +1504,18 @@ export const agentThreadHeadSchema = z.object({
     .object({
       turnId: z.string().min(1),
       prepared: z.boolean().optional(),
-      markedAt: z.string().optional().catch(undefined)
+      markedAt: z.string().optional().catch(undefined),
+      // Crash-safe resume: the attempt count of a prepared automatic resume. Unreadable reads
+      // as none (a first attempt), never as a head nothing can read.
+      crashAttempt: z.number().int().positive().optional().catch(undefined)
     })
     .optional(),
+  // Crash-safe resume: the continuation a host started after an unexpected stop, and how many
+  // in a row. Head-only; unreadable reads as none.
+  crashResumedTurn: z
+    .object({ turnId: z.string().min(1), attempt: z.number().int().positive() })
+    .optional()
+    .catch(undefined),
   resumeGoalAfterRestart: z.literal(true).optional().catch(undefined),
   goalHeldForHandover: z.literal(true).optional().catch(undefined),
   // Spec 2026-10-14 §6, as `thread.created` recorded it. Must be listed (zod strips unknown

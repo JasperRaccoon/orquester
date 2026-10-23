@@ -1,68 +1,150 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
-import { readCodeStamp } from "./code-stamp.ts";
+import { codeStampsDiffer, computeCodeStamp, readCodeStamp } from "./code-stamp.ts";
 
-const SHA_A = "a".repeat(40);
-const SHA_B = "b".repeat(40);
+const ENTRY = join("apps", "daemon", "src", "agent-host", "main.ts");
 
-async function withRepo(run: (root: string) => Promise<void>): Promise<void> {
+/**
+ * A miniature checkout: the host entry importing a sibling, a module outside
+ * `agent-host/`, a workspace package through its `exports`, an npm package and
+ * a `node:` builtin — and files nothing imports.
+ */
+const CHECKOUT: Record<string, string> = {
+  "pnpm-workspace.yaml": 'packages:\n  - "apps/*"\n  - "packages/*"\n',
+  "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+  "apps/daemon/package.json": JSON.stringify({ name: "@orquester/daemon" }),
+  [ENTRY]: [
+    'import { join } from "node:path";',
+    'import { helper } from "./support/helper.ts";',
+    'import type { Thread } from "@orquester/api/agent-chat";',
+    'import { z } from "zod";',
+    'export { boxes } from "../boxes/relay.ts";',
+    "export const main = helper;"
+  ].join("\n"),
+  "apps/daemon/src/agent-host/support/helper.ts": 'import "../side-effect.ts";\nexport const helper = 1;\n',
+  "apps/daemon/src/agent-host/side-effect.ts": "export {};\n",
+  "apps/daemon/src/boxes/relay.ts": 'export const boxes = await import("./lazy.ts");\n',
+  "apps/daemon/src/boxes/lazy.ts": "export const lazy = 1;\n",
+  // Not reached: the daemon's own code, a UI package, a test beside the host.
+  "apps/daemon/src/index.ts": 'import "./agent-host/main.ts";\n',
+  "apps/daemon/src/agent-host/main.test.ts": 'import "./main.ts";\n',
+  "packages/api/package.json": JSON.stringify({
+    name: "@orquester/api",
+    exports: { ".": "./src/index.ts", "./agent-chat": "./src/agent-chat/index.ts" }
+  }),
+  "packages/api/src/agent-chat/index.ts": 'export * from "./thread.ts";\n',
+  "packages/api/src/agent-chat/thread.ts": "export interface Thread { id: string }\n",
+  "packages/api/src/index.ts": "export const unrelated = 1;\n",
+  "packages/ui/package.json": JSON.stringify({ name: "@orquester/ui", exports: { ".": "./src/index.ts" } }),
+  "packages/ui/src/index.ts": "export const ui = 1;\n"
+};
+
+async function withCheckout(run: (root: string) => Promise<void>): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), "code-stamp-"));
   try {
+    for (const [path, content] of Object.entries(CHECKOUT)) {
+      await mkdir(dirname(join(root, path)), { recursive: true });
+      await writeFile(join(root, path), content);
+    }
     await run(root);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 }
 
-describe("readCodeStamp", () => {
-  it("resolves a symbolic HEAD through a loose ref", async () => {
-    await withRepo(async (root) => {
-      await mkdir(join(root, ".git", "refs", "heads"), { recursive: true });
-      await writeFile(join(root, ".git", "HEAD"), "ref: refs/heads/main\n");
-      await writeFile(join(root, ".git", "refs", "heads", "main"), `${SHA_A}\n`);
-      assert.equal(readCodeStamp(root), SHA_A);
-      // From a subdirectory too — the host's cwd is the repo root, but be safe.
-      await mkdir(join(root, "apps", "daemon"), { recursive: true });
-      assert.equal(readCodeStamp(join(root, "apps", "daemon")), SHA_A);
+/** Rewrite a file and move its mtime, so the per-process cache cannot hide the change. */
+async function rewrite(root: string, path: string, content: string): Promise<void> {
+  await writeFile(join(root, path), content);
+  const later = new Date(Date.now() + 60_000);
+  await utimes(join(root, path), later, later);
+}
+
+const stampOf = (root: string, nodeMajor = 24): string | null =>
+  computeCodeStamp({ entry: join(root, ENTRY), nodeMajor });
+
+describe("computeCodeStamp", () => {
+  it("is deterministic: the same code gives the same stamp, run after run and checkout after checkout", async () => {
+    await withCheckout(async (first) => {
+      await withCheckout(async (second) => {
+        const stamp = stampOf(first);
+        assert.match(stamp ?? "", /^[0-9a-f]{64}$/);
+        assert.equal(stampOf(first), stamp);
+        assert.equal(stampOf(second), stamp, "only paths relative to the checkout count");
+      });
     });
   });
 
-  it("falls back to packed-refs and reads a detached HEAD verbatim", async () => {
-    await withRepo(async (root) => {
-      await mkdir(join(root, ".git"), { recursive: true });
-      await writeFile(join(root, ".git", "HEAD"), "ref: refs/heads/main\n");
-      await writeFile(
-        join(root, ".git", "packed-refs"),
-        `# pack-refs with: peeled fully-peeled sorted\n${SHA_B} refs/heads/main\n^${SHA_A}\n`
-      );
-      assert.equal(readCodeStamp(root), SHA_B);
-      await writeFile(join(root, ".git", "HEAD"), `${SHA_A}\n`);
-      assert.equal(readCodeStamp(root), SHA_A);
+  it("does not move for a change outside the host's import graph", async () => {
+    await withCheckout(async (root) => {
+      const before = stampOf(root);
+      await rewrite(root, "apps/daemon/src/index.ts", 'import "./agent-host/main.ts";\nexport const daemonOnly = 2;\n');
+      await rewrite(root, "apps/daemon/src/agent-host/main.test.ts", "// a test edit\n");
+      await rewrite(root, "packages/ui/src/index.ts", "export const ui = 2;\n");
+      await rewrite(root, "packages/api/src/index.ts", "export const unrelated = 2;\n");
+      await writeFile(join(root, "README.md"), "docs\n");
+      assert.equal(stampOf(root), before);
     });
   });
 
-  it("follows a worktree's gitdir pointer and its commondir for refs", async () => {
-    await withRepo(async (root) => {
-      const main = join(root, "main");
-      await mkdir(join(main, ".git", "refs", "heads"), { recursive: true });
-      await mkdir(join(main, ".git", "worktrees", "wt"), { recursive: true });
-      await writeFile(join(main, ".git", "refs", "heads", "feature"), `${SHA_B}\n`);
-      await writeFile(join(main, ".git", "worktrees", "wt", "HEAD"), "ref: refs/heads/feature\n");
-      await writeFile(join(main, ".git", "worktrees", "wt", "commondir"), "../..\n");
-      const wt = join(root, "wt");
-      await mkdir(wt, { recursive: true });
-      await writeFile(join(wt, ".git"), `gitdir: ${join(main, ".git", "worktrees", "wt")}\n`);
-      assert.equal(readCodeStamp(wt), SHA_B);
+  for (const [what, path] of [
+    ["the entry", ENTRY],
+    ["a relative import", "apps/daemon/src/agent-host/support/helper.ts"],
+    ["a side-effect import", "apps/daemon/src/agent-host/side-effect.ts"],
+    ["a module outside agent-host/ it imports", "apps/daemon/src/boxes/relay.ts"],
+    ["a literal dynamic import outside agent-host/", "apps/daemon/src/boxes/lazy.ts"],
+    ["a workspace package reached through its exports", "packages/api/src/agent-chat/thread.ts"]
+  ] as const) {
+    it(`moves when ${what} changes`, async () => {
+      await withCheckout(async (root) => {
+        const before = stampOf(root);
+        await rewrite(root, path, `${CHECKOUT[path]}\n// changed\n`);
+        const after = stampOf(root);
+        assert.notEqual(after, null);
+        assert.notEqual(after, before);
+      });
+    });
+  }
+
+  it("moves when the lockfile changes (third-party versions) and with the Node major", async () => {
+    await withCheckout(async (root) => {
+      const before = stampOf(root);
+      assert.notEqual(stampOf(root, 22), before);
+      await rewrite(root, "pnpm-lock.yaml", "lockfileVersion: '9.0'\n# zod bumped\n");
+      assert.notEqual(stampOf(root), before);
     });
   });
 
-  it("is null outside a repository and never throws", async () => {
-    await withRepo(async (root) => {
-      assert.equal(readCodeStamp(root), null);
-      assert.equal(readCodeStamp(join(root, "missing")), null);
+  it("moves when a new import pulls in another file", async () => {
+    await withCheckout(async (root) => {
+      const before = stampOf(root);
+      await rewrite(root, "apps/daemon/src/agent-host/support/helper.ts", 'import "../side-effect.ts";\nimport "@orquester/api";\nexport const helper = 1;\n');
+      assert.notEqual(stampOf(root), before);
     });
+  });
+
+  it("is null without an entry or a workspace, and never throws", async () => {
+    await withCheckout(async (root) => {
+      assert.equal(computeCodeStamp({ entry: join(root, "apps", "missing.ts") }), null);
+      await rm(join(root, "pnpm-workspace.yaml"));
+      assert.equal(stampOf(root), null);
+    });
+  });
+
+  it("stamps this checkout's agent host", () => {
+    const stamp = readCodeStamp();
+    assert.match(stamp ?? "", /^[0-9a-f]{64}$/);
+    assert.equal(readCodeStamp(), stamp);
+  });
+});
+
+describe("codeStampsDiffer", () => {
+  it("is a mismatch only when both are known and differ", () => {
+    assert.equal(codeStampsDiffer("a", "b"), true);
+    assert.equal(codeStampsDiffer("a", "a"), false);
+    assert.equal(codeStampsDiffer(null, "a"), false);
+    assert.equal(codeStampsDiffer("a", undefined), false);
   });
 });

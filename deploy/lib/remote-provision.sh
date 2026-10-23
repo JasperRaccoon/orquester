@@ -121,7 +121,7 @@ else
 fi
 
 log "5/7 systemd unit + session devtools + start"
-cp deploy/orquester.service /etc/systemd/system/orquester.service
+bash deploy/install-unit.sh </dev/null
 bash deploy/provision-devtools.sh </dev/null
 systemctl daemon-reload
 systemctl enable --now orquester

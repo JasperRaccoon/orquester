@@ -96,7 +96,18 @@ deleted and rebuilt from the logs. Tests use the real driver in a temp dir.
    folded — settled at the time their process last wrote (`crashSettleAt`), then their leftover
    work closed and their legacy agents' launches named (`repairLeftovers`), or those repaired
    first and then continued; the rest wait in `bootSettlePending` for their first load, which
-   settles and repairs the same way.
+   settles and repairs the same way. **Crash-safe resume:** `meta.json` is rewritten on every
+   session transition, so a head that still reads running IS the in-flight record of a host that
+   stopped unexpectedly (OOM kill, crash, its tmux session killed). Such an orphan — no `/stop`
+   marker names its turn — is resumed under the same opt-in, cursor, closed-tab rules as a
+   deploy's handover, unless a newer turn follows it in the log (`hasLaterTurn`: the user's
+   message wins); a `runtime.warning` row says the host stopped unexpectedly, and the resume is
+   counted (`ContinueAfterRestart.crashAttempt` while prepared, `ThreadHead.crashResumedTurn`
+   while the resumed turn runs, cleared when it ends) — past `MAX_CRASH_RESUME_ATTEMPTS` (2) in a
+   row the turn is settled with `CRASH_RESUME_LIMIT_MESSAGE`, never resumed in a loop. A deploy's
+   handover (an unprepared marker naming the turn) is neither noted nor counted. Background work
+   the dead process ran is closed by `closeLeftoverWork` and named in one `runtime.warning`
+   (`backgroundWorkStoppedNotice`).
 3. `store.sweepStartup()` — fired, never awaited: stale partial uploads and the raw-log ceiling,
    no log read. The deep sweep (`pruneAttachments`: snapshot + tail, threads with stored attachments only)
    runs on the store's 6 h schedule.

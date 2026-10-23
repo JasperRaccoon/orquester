@@ -551,7 +551,8 @@ export interface AgentHostHealthResponse {
   pid: number;
   startedAt: string;
   /**
-   * The commit the host's code was read from (`support/code-stamp.ts`), so a
+   * The identity of the code the host runs (`support/code-stamp.ts`: its static import graph,
+   * the lockfile and the Node major), so a
    * code-only deploy is a §3.1 case-3 drain-restart, not just a protocol bump.
    * Optional: an older host omits it, and `null` means "could not read".
    */
@@ -914,6 +915,25 @@ export const CONTINUATION_FAILED_MESSAGE =
  */
 export const CONTINUATION_SEND_FAILED_MESSAGE =
   "Could not continue this thread after the server restart. Send a new message to continue.";
+
+/**
+ * Crash-safe resume (§3.3): the `runtime.warning` row a host writes before it resumes, on its
+ * own, a turn the previous host was running when it stopped unexpectedly (a crash, an OOM kill,
+ * its tmux session killed) — never for a deploy's handover, which the user expects.
+ */
+export const CRASH_RESUME_SUMMARY = "Resumed after the agent host stopped unexpectedly";
+
+/** The detail of {@link CRASH_RESUME_SUMMARY}'s row. */
+export function crashResumeDetail(attempt: number, maxAttempts: number): string {
+  return `The agent host stopped unexpectedly while this turn was running. It was resumed automatically (attempt ${attempt} of ${maxAttempts}).`;
+}
+
+/**
+ * Crash-safe resume (§3.3): the settle of a turn whose automatic resumes after unexpected host
+ * stops ran out — the host died again each time, so resuming once more could loop.
+ */
+export const CRASH_RESUME_LIMIT_MESSAGE =
+  "The agent host stopped unexpectedly again while resuming this turn, so it was not resumed again. Send a new message to continue.";
 
 /** §3.4 — a queued message whose compaction failed is never silently dropped. */
 export const COMPACTION_FAILED_MESSAGE =
