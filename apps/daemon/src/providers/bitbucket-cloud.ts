@@ -1,6 +1,7 @@
 import type { OwnerSummary, RepoSummary } from "@orquester/api";
 
 import { AccountError } from "../account-error";
+import { rateGateFor, type RequestMode } from "./rate-gate";
 import { TtlCache } from "./ttl-cache";
 import type {
   CloneUrls,
@@ -51,8 +52,6 @@ function authHeader(creds: ProviderCreds): string {
   // Atlassian API tokens authenticate REST via Basic email:token — NOT Bearer.
   return "Basic " + Buffer.from(`${creds.email ?? ""}:${creds.token}`).toString("base64");
 }
-
-const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 /**
  * Read the scopes a 403 says are missing. Scoped Atlassian API tokens answer
@@ -107,13 +106,29 @@ interface CloudResponse {
 /**
  * A Bitbucket Cloud REST call; throws on a non-2xx (and on a 304 only when the
  * caller sent no ETag). `creds: null` reads anonymously (public repos).
+ *
+ * Every call goes through the account's rate gate (`rate-gate.ts`): at most 4
+ * in flight, and after a 429 one pause for all of them instead of a retry per
+ * request — Bitbucket REST has a ~1,000 req/h floor, and retrying each request
+ * is what kept a startup sweep's quota spent. `mode` says whether a user is
+ * waiting (`interactive`, the default) or the poller is (`background`).
  */
 async function bbRequest(
   creds: ProviderCreds | null,
   method: string,
   pathOrUrl: string,
-  opts: { body?: unknown; etag?: string } = {},
-  retry = 2
+  opts: { body?: unknown; etag?: string; mode?: RequestMode } = {}
+): Promise<CloudResponse> {
+  return rateGateFor("bitbucket.org", "Bitbucket", creds).run(opts.mode ?? "interactive", () =>
+    bbRequestOnce(creds, method, pathOrUrl, opts)
+  );
+}
+
+async function bbRequestOnce(
+  creds: ProviderCreds | null,
+  method: string,
+  pathOrUrl: string,
+  opts: { body?: unknown; etag?: string }
 ): Promise<CloudResponse> {
   const url = pathOrUrl.startsWith("http") ? pathOrUrl : `${API}${pathOrUrl}`;
   // A page's `next` link (and any absolute URL) is followed only on the API's own origin, over
@@ -142,11 +157,6 @@ async function bbRequest(
       `Bitbucket ${method} ${pathOrUrl} failed: ${error instanceof Error ? error.message : "network error"}`,
       "upstream"
     );
-  }
-  if (res.status === 429 && retry > 0) {
-    // Bitbucket REST has a ~1,000 req/h floor — back off and retry.
-    await sleep((3 - retry) * 2000);
-    return bbRequest(creds, method, pathOrUrl, opts, retry - 1);
   }
   if (res.status === 304 && etag) {
     return { status: 304, data: undefined, headers: res.headers };
@@ -466,7 +476,7 @@ export const bitbucketCloudProvider: GitProvider = {
     const path =
       `/repositories/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.repo)}/pullrequests` +
       `?state=OPEN&state=MERGED&state=DECLINED&sort=-updated_on&pagelen=${POLL_PAGE_SIZE}`;
-    const res = await bbRequest(creds?.token ? creds : null, "GET", path, { etag: opts?.etag });
+    const res = await bbRequest(creds?.token ? creds : null, "GET", path, { etag: opts?.etag, mode: "background" });
     if (res.status === 304) {
       return { notModified: true };
     }

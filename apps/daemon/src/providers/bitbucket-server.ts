@@ -4,6 +4,7 @@ import type { OwnerSummary, RepoSummary } from "@orquester/api";
 import { Agent } from "undici";
 
 import { AccountError } from "../account-error";
+import { rateGateFor, type RequestMode } from "./rate-gate";
 import type {
   CloneUrls,
   ConditionalListOptions,
@@ -20,7 +21,7 @@ import type {
   SshProbe,
   UrlContext
 } from "./types";
-import { GitRemoteError, POLL_PAGE_SIZE } from "./types";
+import { GitRemoteError, POLL_PAGE_SIZE, retryAfterMs } from "./types";
 
 /** The git trigger's DC listing reads at most this many OPEN pull requests per poll. */
 const DC_OPEN_PULLS_CAP = 200;
@@ -51,8 +52,6 @@ const SCOPES = "an HTTP access token with Repository write (and Project read) pe
 function manualKeysUrl(baseUrl: string): string {
   return `${baseUrl.replace(/\/+$/, "")}/plugins/servlet/ssh/account/keys`;
 }
-
-const sleep = (ms: number): Promise<void> => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 /** Normalized instance base URL (no trailing slash); 400 when unset. */
 function base(creds: { baseUrl?: string }): string {
@@ -161,15 +160,32 @@ async function dcFetch(url: string, init: RequestInit): Promise<Response> {
  * Authenticated DC REST call returning the status, decoded body and response
  * headers. A 304 comes back as `{status: 304}` only when the caller sent an
  * `etag` (`If-None-Match`); every other non-2xx throws `GitRemoteError`.
+ *
+ * Every call goes through the instance-and-account rate gate (`rate-gate.ts`):
+ * DC rate limiting is an admin-configured token bucket, and a poll pages through
+ * up to ~30 requests, so after a 429 the rest wait out one shared pause instead
+ * of each retrying into it. `mode` defaults to `interactive` (a user waits).
  */
 async function dcRequest(
   creds: ProviderCreds,
   method: string,
   path: string,
   body?: unknown,
-  opts: { retry?: number; etag?: string } = {}
+  opts: { etag?: string; mode?: RequestMode } = {}
 ): Promise<{ status: number; data: any; headers: Headers }> {
-  const retry = opts.retry ?? 1;
+  const host = new URL(base(creds)).host;
+  return rateGateFor(host, `Bitbucket Server (${host})`, creds).run(opts.mode ?? "interactive", () =>
+    dcRequestOnce(creds, method, path, body, opts)
+  );
+}
+
+async function dcRequestOnce(
+  creds: ProviderCreds,
+  method: string,
+  path: string,
+  body: unknown,
+  opts: { etag?: string }
+): Promise<{ status: number; data: any; headers: Headers }> {
   const dispatcher = await dispatcherFor(creds.caCertPath);
   const response = await dcFetch(`${base(creds)}${path}`, {
     method,
@@ -186,11 +202,6 @@ async function dcRequest(
     // Non-standard RequestInit key understood by Node's undici-backed fetch.
     ...(dispatcher ? ({ dispatcher } as object) : {})
   });
-  if (response.status === 429 && retry > 0) {
-    // DC rate limiting (token-bucket, admin-configured) — one backoff retry.
-    await sleep(2000);
-    return dcRequest(creds, method, path, body, { ...opts, retry: retry - 1 });
-  }
   if (response.status === 304 && opts.etag) {
     return { status: 304, data: undefined, headers: response.headers };
   }
@@ -205,7 +216,13 @@ async function dcRequest(
       );
     }
     if (response.status === 429) {
-      throw new GitRemoteError(429, `Bitbucket Server ${method} ${path} → 429: rate limited. ${text}`, "rate_limited", 429);
+      throw new GitRemoteError(
+        429,
+        `Bitbucket Server ${method} ${path} → 429: rate limited. ${text}`,
+        "rate_limited",
+        429,
+        retryAfterMs(response.headers.get("retry-after"))
+      );
     }
     const unauthorized = response.status === 401 || response.status === 403;
     const hint = unauthorized ? ` (check the token: ${SCOPES})` : "";
@@ -659,7 +676,9 @@ export const bitbucketServerProvider: GitProvider = {
     };
     let start = 0;
     for (let fetched = 0; fetched < DC_OPEN_PULLS_CAP; ) {
-      const res = await dcRequest(creds, "GET", `${prefix}?state=OPEN&order=NEWEST&limit=${POLL_PAGE_SIZE}&start=${start}`);
+      const res = await dcRequest(creds, "GET", `${prefix}?state=OPEN&order=NEWEST&limit=${POLL_PAGE_SIZE}&start=${start}`, undefined, {
+        mode: "background"
+      });
       const values: unknown[] = Array.isArray(res.data?.values) ? res.data.values : [];
       add(values);
       fetched += values.length;
@@ -668,13 +687,15 @@ export const bitbucketServerProvider: GitProvider = {
       start = next;
     }
     for (const state of ["MERGED", "DECLINED"]) {
-      const res = await dcRequest(creds, "GET", `${prefix}?state=${state}&order=NEWEST&limit=${POLL_PAGE_SIZE}`);
+      const res = await dcRequest(creds, "GET", `${prefix}?state=${state}&order=NEWEST&limit=${POLL_PAGE_SIZE}`, undefined, {
+        mode: "background"
+      });
       add(res.data?.values);
     }
     const missing = (opts?.knownOpen ?? []).filter((id) => Number.isInteger(id) && id > 0 && !byId.has(id)).slice(0, DC_KNOWN_OPEN_LOOKUPS);
     for (const id of missing) {
       try {
-        const res = await dcRequest(creds, "GET", `${prefix}/${id}`);
+        const res = await dcRequest(creds, "GET", `${prefix}/${id}`, undefined, { mode: "background" });
         add([res.data]);
       } catch (error) {
         // A PR that is gone (deleted, moved) is simply not reported; anything else is a failed poll.
