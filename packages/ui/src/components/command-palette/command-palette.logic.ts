@@ -88,6 +88,30 @@ export function sessionRecency(
   );
 }
 
+/**
+ * Recency stamps frozen while the palette is open: each row keeps the stamp
+ * it had when first ranked, so a turn finishing in the background cannot move
+ * a result under the user's highlight. A new snapshot per opening.
+ */
+export interface RecencySnapshot {
+  /** `key`'s stamp as first read; `live` is asked once per key. */
+  get(key: string, live: () => number): number;
+}
+
+export function createRecencySnapshot(): RecencySnapshot {
+  const stamps = new Map<string, number>();
+  return {
+    get: (key, live) => {
+      let stamp = stamps.get(key);
+      if (stamp === undefined) {
+        stamp = live();
+        stamps.set(key, stamp);
+      }
+      return stamp;
+    }
+  };
+}
+
 export interface PaletteSession {
   session: SessionSummary;
   project: ProjectSummary;

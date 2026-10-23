@@ -9,6 +9,7 @@ import { describe, it } from "node:test";
 
 import type { ProjectSummary, SessionSummary } from "../../types";
 import {
+  createRecencySnapshot,
   matchRanges,
   normalizeSearchText,
   paletteResults,
@@ -148,5 +149,41 @@ describe("highlight ranges", () => {
     assert.deepEqual(matchRanges("Auth main chat", "main auth"), [[0, 4], [5, 9]]);
     assert.deepEqual(matchRanges("abc", "ab bc"), [[0, 3]]);
     assert.deepEqual(matchRanges("abc", "zz"), []);
+  });
+});
+
+describe("the recency snapshot", () => {
+  it("a row keeps the stamp it was first ranked with while the palette is open", () => {
+    const app = project("app");
+    const rows = [session("Fix A", app), session("Fix B", app)];
+    const live: Record<string, number> = { "Fix A": 1, "Fix B": 2 };
+    const snapshot = createRecencySnapshot();
+    const rank = () =>
+      titles(
+        paletteResults({
+          query: "fix",
+          sessions: rows,
+          projects: [],
+          sessionRecency: (s) => snapshot.get(s.id, () => live[s.title] ?? 0),
+          projectRecency: () => 0
+        }).sessions
+      );
+    assert.deepEqual(rank(), ["Fix B", "Fix A"]);
+    live["Fix A"] = 99; // a turn finished in the background
+    assert.deepEqual(rank(), ["Fix B", "Fix A"], "nothing moves under the highlight");
+    const reopened = createRecencySnapshot();
+    assert.equal(reopened.get(rows[0]!.session.id, () => live["Fix A"]!), 99, "the next opening sees it");
+  });
+
+  it("asks for a key's live stamp once", () => {
+    const snapshot = createRecencySnapshot();
+    let asked = 0;
+    const live = () => {
+      asked += 1;
+      return asked;
+    };
+    assert.equal(snapshot.get("k", live), 1);
+    assert.equal(snapshot.get("k", live), 1);
+    assert.equal(asked, 1);
   });
 });

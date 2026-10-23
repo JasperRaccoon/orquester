@@ -29,7 +29,7 @@ import {
   type ConversationSearchRow
 } from "./ConversationSearchResults";
 import { revealConversationTurn } from "./reveal-turn";
-import { matchRanges, paletteResults, sessionRecency } from "./command-palette.logic";
+import { createRecencySnapshot, matchRanges, paletteResults, sessionRecency } from "./command-palette.logic";
 
 /** One selectable row: an open session tab, or a project to jump into. */
 interface SessionRow {
@@ -167,6 +167,9 @@ export const CommandPalette: React.FC = () => {
   // Scrolling the highlighted row into view is a keyboard affordance; doing it
   // for a hover would fight the pointer that caused it.
   const navSourceRef = useRef<"keyboard" | "pointer">("keyboard");
+  // Recency as of this opening: live turn activity must not reorder the rows
+  // under the highlight. Replaced on every open.
+  const recencyRef = useRef(createRecencySnapshot());
 
   const close = useCallback((restoreFocus: boolean) => {
     openRef.current = false;
@@ -194,6 +197,7 @@ export const CommandPalette: React.FC = () => {
       return false;
     }
     restoreFocusRef.current = document.activeElement as HTMLElement | null;
+    recencyRef.current = createRecencySnapshot();
     openRef.current = true;
     setOpen(true);
     return true;
@@ -311,12 +315,14 @@ export const CommandPalette: React.FC = () => {
       (a, b) => a.workspace.localeCompare(b.workspace) || a.name.localeCompare(b.name)
     );
     const interactedAt = new Map(recentProjects.map((recent) => [recent.path, Date.parse(recent.lastInteractedAt) || 0]));
+    const recency = recencyRef.current;
     const ranked = paletteResults({
       query,
       sessions: sessionRows,
       projects,
-      sessionRecency: (session) => sessionRecency(session, threadVisits[session.id]),
-      projectRecency: (project) => interactedAt.get(project.path) ?? 0
+      sessionRecency: (session) =>
+        recency.get(`session:${session.id}`, () => sessionRecency(session, threadVisits[session.id])),
+      projectRecency: (project) => recency.get(`project:${project.path}`, () => interactedAt.get(project.path) ?? 0)
     });
     return {
       sessions: ranked.sessions.map((row) => sessionRowById.get(row.session.id)!),
@@ -324,7 +330,8 @@ export const CommandPalette: React.FC = () => {
       projectsLabel: ranked.projectsLabel,
       projectsFirst: ranked.projectsFirst
     };
-  }, [query, projectsByPath, sessionRows, sessionRowById, threadVisits, recentProjects]);
+    // `open` is a dependency because a reopening brings a fresh recency snapshot.
+  }, [open, query, projectsByPath, sessionRows, sessionRowById, threadVisits, recentProjects]);
 
   // Keyboard order is display order: the group with the best match leads.
   const flat = useMemo<PaletteItem[]>(
