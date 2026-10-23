@@ -283,6 +283,22 @@ describe("InboxBroker", () => {
     watched.dispose();
   });
 
+  it("a broker disposed while it is still attaching (the run ended at once) opens no watcher", async () => {
+    const h = await harness();
+    let open = 0;
+    const broker = new InboxBroker({
+      clock: h.clock,
+      watch: () => {
+        open += 1;
+        return { close: () => void (open -= 1) };
+      }
+    });
+    const attaching = broker.attach(join(h.dir, "late"));
+    broker.dispose();
+    await attaching;
+    assert.equal(open, 0, "no fs watcher outlives the run");
+  });
+
   it("retires a chat that waited the whole long-poll with nothing to do", async () => {
     const h = await harness({ nextWaitMs: 60_000 });
     const waiting = h.broker.next("w1");

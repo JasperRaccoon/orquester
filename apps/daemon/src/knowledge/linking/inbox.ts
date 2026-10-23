@@ -210,6 +210,7 @@ export class InboxBroker {
   private readonly reusable = new Map<string, string>();
   private reused = 0;
   private watcher: { close(): void } | null = null;
+  private disposed = false;
   private readonly tasks = new Map<string, TaskEntry>();
   private readonly sessions = new Map<string, SessionEntry>();
   private readonly wakers = new Set<() => void>();
@@ -236,6 +237,8 @@ export class InboxBroker {
     await this.files.mkdir(this.inbox);
     await this.files.mkdir(this.outbox);
     await this.loadReuseIndex();
+    // The run may have ended while the dirs were made: no watcher outlives it.
+    if (this.disposed) return;
     this.watcher?.close();
     this.watcher = this.watchFn ? this.watchFn(this.inbox, () => void this.rescan()) : null;
     await this.rescan();
@@ -291,6 +294,7 @@ export class InboxBroker {
   }
 
   dispose(): void {
+    this.disposed = true;
     this.watcher?.close();
     this.watcher = null;
     if (!this.finished) this.finish("run-cancelled");
