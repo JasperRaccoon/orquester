@@ -6,8 +6,12 @@ import test from "node:test";
 
 import {
   AGENT_LAUNCH_ENV_VAR,
+  findLaunchRoot,
   findLeftoverProcesses,
+  isSharedDaemon,
   recordChildSessions,
+  recordHelperProcesses,
+  recordOwnGroup,
   stopLeftoverProcesses,
   type RecordedSession
 } from "./leftover-processes.ts";
@@ -140,6 +144,106 @@ test("recordChildSessions: each child's own session, and the parent's for a chil
   const sessions = await recordChildSessions(700);
   assert.deepEqual([...sessions].sort((a, b) => a.sid - b.sid), [led(700, 70), led(701, 71), led(702, 72)]);
   assert.deepEqual(await recordChildSessions(799), []);
+});
+
+// ---------------------------------------------------------------------------
+// Scopes beyond a session: the CLI's own group, recorded helper processes
+
+const BROWSER_DAEMON = `${MARKED}AGENT_BROWSER_DAEMON=1\0`;
+
+test("isSharedDaemon: agent-browser's daemon (and what inherits its env) and a tmux server", () => {
+  assert.equal(isSharedDaemon(BROWSER_DAEMON, "agent-browser-l"), true);
+  assert.equal(isSharedDaemon(MARKED, "tmux: server"), true);
+  assert.equal(isSharedDaemon(MARKED, "agent-browser-l"), false, "agent-browser's per-chat MCP server is no daemon");
+  assert.equal(isSharedDaemon(`X_AGENT_BROWSER_DAEMON=1\0`, "node"), false);
+});
+
+test("a group scope takes this launch's marked members, and spares shared daemons, strangers and the setsid'd", async (t) => {
+  const proc = mockProc(t, {
+    800: { environ: MARKED, starttime: 80, sid: 800, pgid: 800 },
+    801: { environ: MARKED, starttime: 81, sid: 800, pgid: 800, ppid: 800 },
+    802: { environ: environ({ ORQUESTER_AGENT_LAUNCH: "launch-b" }), starttime: 82, sid: 800, pgid: 800 },
+    803: { environ: BROWSER_DAEMON, starttime: 83, sid: 800, pgid: 800, comm: "agent-browser-l" },
+    804: { environ: `${BROWSER_DAEMON}CHROME=1\0`, starttime: 84, sid: 800, pgid: 800, comm: "chrome", ppid: 803 },
+    805: { environ: MARKED, starttime: 85, sid: 800, pgid: 800, comm: "tmux: server" },
+    806: { environ: MARKED, starttime: 86, sid: 806, pgid: 806, ppid: 1 },
+    807: { environ: MARKED, starttime: 87, sid: 900, pgid: 900 }
+  });
+  proc.table.set(process.pid, { environ: MARKED, starttime: 1, sid: 800, pgid: 800 });
+  const found = await findLeftoverProcesses(LAUNCH, { group: { pgid: 800, leaderStarttime: 80 } });
+  assert.deepEqual(found.map((entry) => entry.pid), [800, 801]);
+});
+
+test("a group whose live leader is not the recorded one is somebody else's", async (t) => {
+  mockProc(t, {
+    810: { environ: MARKED, starttime: 99, sid: 810, pgid: 810 },
+    811: { environ: MARKED, starttime: 91, sid: 810, pgid: 810 }
+  });
+  assert.deepEqual(await findLeftoverProcesses(LAUNCH, { group: { pgid: 810, leaderStarttime: 81 } }), []);
+});
+
+test("recordOwnGroup: only a process that leads its group records one", async (t) => {
+  mockProc(t, {
+    820: { environ: MARKED, starttime: 20, sid: 820, pgid: 820 },
+    821: { environ: MARKED, starttime: 21, sid: 1, pgid: 1 }
+  });
+  assert.deepEqual(await recordOwnGroup(820), { pgid: 820, leaderStarttime: 20 });
+  assert.equal(await recordOwnGroup(821), null, "a CLI spawned into the host's group never sweeps it");
+  assert.equal(await recordOwnGroup(829), null);
+  assert.equal(await recordOwnGroup(undefined), null);
+});
+
+test("recorded processes are looked up by pid alone, under their recorded starttime", async (t) => {
+  const proc = mockProc(t, {
+    830: { environ: MARKED, starttime: 30, sid: 1 },
+    831: { environ: MARKED, starttime: 99, sid: 1 },
+    832: { environ: BROWSER_DAEMON, starttime: 32, sid: 1 }
+  });
+  const found = await findLeftoverProcesses(LAUNCH, {
+    processes: [{ pid: 830, starttime: 30 }, { pid: 831, starttime: 31 }, { pid: 832, starttime: 32 }]
+  });
+  assert.deepEqual(found.map((entry) => entry.pid), [830]);
+  assert.equal(proc.reads.includes("/proc"), false, "no scan of every pid");
+});
+
+test("findLaunchRoot: the parent's child carrying this launch's marker", async (t) => {
+  mockProc(t, {
+    840: { environ: MARKED, starttime: 40, sid: 1 },
+    841: { environ: environ({ ORQUESTER_AGENT_LAUNCH: "launch-b" }), starttime: 41, sid: 1, ppid: 840 },
+    842: { environ: MARKED, starttime: 42, sid: 1, ppid: 840 }
+  });
+  assert.deepEqual(await findLaunchRoot(LAUNCH, 840), { pid: 842, starttime: 42 });
+  assert.equal(await findLaunchRoot("launch-c", 840), null);
+});
+
+test("recordHelperProcesses: the CLI's children and what stays in their session; never a daemon nor below one", async (t) => {
+  const proc = mockProc(t, {
+    // The CLI, in the host's session and group (as the Claude SDK spawns it).
+    850: { environ: MARKED, starttime: 50, sid: 1, pgid: 1 },
+    // An MCP server and the server its wrapper started.
+    851: { environ: MARKED, starttime: 51, sid: 1, pgid: 1, ppid: 850 },
+    852: { environ: MARKED, starttime: 52, sid: 1, pgid: 1, ppid: 851 },
+    // A helper's child that daemonized away.
+    853: { environ: MARKED, starttime: 53, sid: 853, pgid: 853, ppid: 851 },
+    // agent-browser's MCP server, its daemon (same session: a build that stopped detaching) and Chromium.
+    854: { environ: MARKED, starttime: 54, sid: 1, pgid: 1, ppid: 850, comm: "agent-browser-l" },
+    855: { environ: BROWSER_DAEMON, starttime: 55, sid: 1, pgid: 1, ppid: 854, comm: "agent-browser-l" },
+    856: { environ: BROWSER_DAEMON, starttime: 56, sid: 1, pgid: 1, ppid: 855, comm: "chrome" }
+  });
+  const cli = { pid: 850, starttime: 50 };
+  const first = await recordHelperProcesses(cli);
+  assert.deepEqual(first.map((entry) => entry.pid), [851, 852, 854]);
+
+  // Later: the user's shell is a NEW child of the CLI; the MCP server started one more process.
+  proc.table.set(857, { environ: MARKED, starttime: 57, sid: 1, pgid: 1, ppid: 850 });
+  proc.table.set(858, { environ: MARKED, starttime: 58, sid: 1, pgid: 1, ppid: 852 });
+  proc.table.delete(851);
+  const refreshed = await recordHelperProcesses(cli, first);
+  assert.deepEqual(refreshed.map((entry) => entry.pid), [852, 854, 858]);
+
+  // A CLI gone (or recycled) records nothing new.
+  proc.table.set(850, { environ: MARKED, starttime: 99, sid: 1 });
+  assert.deepEqual(await recordHelperProcesses(cli), []);
 });
 
 // ---------------------------------------------------------------------------

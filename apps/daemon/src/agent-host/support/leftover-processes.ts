@@ -33,10 +33,37 @@
  * id is a pid too: a session whose leader still lives must have the leader
  * that was recorded. A zombie is gone already.
  *
- * WHICH sessions a sweep takes is the caller's policy (`GrokSession`): a
- * deploy must never kill running work. **Linux-only**, by construction:
- * everything here reads `/proc`. Elsewhere nothing is read or signalled —
- * the direct-child kill in `spawn.ts` is all a stop does there.
+ * **What a sweep may take — its scope.** A process is taken only when it
+ * carries the ending launch's marker exactly, is not a shared daemon (below),
+ * and belongs to one of the scopes the caller recorded while the CLI lived:
+ * - a recorded SESSION ({@link recordChildSessions}; Grok, whose children each
+ *   lead one);
+ * - the CLI's own PROCESS GROUP ({@link recordOwnGroup}): only a CLI that
+ *   leads its group (`spawn.ts` starts every provider `detached`), so a
+ *   provider spawned into the host's own group — the Claude SDK's — never
+ *   records one, and nothing here can reach the host's group;
+ * - recorded HELPER PROCESSES ({@link recordHelperProcesses}): the CLI's
+ *   children while its session opened — its MCP servers, before any of the
+ *   user's work ran — and their descendants that stayed in their session,
+ *   each by pid and starttime.
+ *
+ * **Shared daemons are never taken** ({@link isSharedDaemon}), whichever scope
+ * would hold them. agent-browser's daemon is one long-lived process every
+ * chat on a host shares, with the Chromium it drives: the first chat to use
+ * it starts it, so it carries THAT chat's marker. It `setsid`s away, which the
+ * session and group scopes already spare, and it marks itself (and so the
+ * browser it launches) with `AGENT_BROWSER_DAEMON` in its environment, which
+ * this module spares explicitly in case a build stops detaching. A tmux
+ * server — the user's, or one an agent started — is spared by name. T3 Code
+ * (`apps/server/src/process/agentScope.ts`, `stop`) reaps an agent's whole
+ * systemd scope, agent-browser and Chrome included; here the shared browser
+ * outlives the chat by design, so the rule is narrower.
+ *
+ * WHICH scopes a sweep takes, and when, is the caller's policy
+ * (`GrokSession`, `ProviderLeftovers`): a deploy must never kill running
+ * work. **Linux-only**, by construction: everything here reads `/proc`.
+ * Elsewhere nothing is read or signalled — the direct-child kill in
+ * `spawn.ts` is all a stop does there.
  *
  * The daemon's Settings → System reads the same marker (`system-status.ts`):
  * an orphan carrying it is managed, and killable, whether or not a sweep ever
@@ -69,8 +96,12 @@ export interface ProcStat {
   readonly state: string;
   /** Field 4. */
   readonly ppid: number;
+  /** Field 5: the process group — the pid of the process that leads it. */
+  readonly pgid: number;
   /** Field 6: the session — the pid of the process that leads it. */
   readonly sid: number;
+  /** Field 2, without its parentheses: the executable's name, at most 15 bytes. */
+  readonly comm: string;
 }
 
 /**
@@ -83,10 +114,49 @@ export interface RecordedSession {
   readonly leaderStarttime: number;
 }
 
-interface LeftoverProcess {
+/**
+ * A provider CLI's own process group, recorded while it lived: its id — the
+ * CLI's pid, as it leads the group — and the CLI's starttime.
+ */
+export interface RecordedGroup {
+  readonly pgid: number;
+  readonly leaderStarttime: number;
+}
+
+/** One process recorded while the CLI lived: by pid, and by the starttime that makes it this process. */
+export interface RecordedProcess {
   readonly pid: number;
   readonly starttime: number;
 }
+
+/** What a sweep may take: any of these scopes, each optional ({@link findLeftoverProcesses}). */
+export interface LeftoverScope {
+  readonly sessions?: readonly RecordedSession[];
+  readonly group?: RecordedGroup;
+  readonly processes?: readonly RecordedProcess[];
+}
+
+type LeftoverProcess = RecordedProcess;
+
+/**
+ * The environment variables that mark a process as a host-wide daemon every
+ * chat shares — never one launch's leftover, whatever marker it carries.
+ * `AGENT_BROWSER_DAEMON`: agent-browser's daemon (0.39 reads it at start-up
+ * to run as the daemon), inherited by the Chromium it launches.
+ */
+export const SHARED_DAEMON_ENV_VARS: readonly string[] = ["AGENT_BROWSER_DAEMON"];
+
+/** Executable names (`comm`) of host-wide daemons: a tmux server is the user's terminal. */
+const SHARED_DAEMON_COMM = /^tmux/;
+
+/** Whether a process is a shared daemon a sweep never takes: by its environment, or by its name. */
+export function isSharedDaemon(environ: string, comm: string): boolean {
+  if (SHARED_DAEMON_COMM.test(comm)) return true;
+  return environ.split("\0").some((entry) => SHARED_DAEMON_ENV_VARS.some((name) => entry.startsWith(`${name}=`)));
+}
+
+/** At most this many helper processes are recorded per launch: an MCP server's tree, not a build farm. */
+const MAX_HELPER_PROCESSES = 256;
 
 /** The fields of `/proc/<pid>/stat` the sweep needs; null for anything unparsable. */
 export function parseStat(content: string): ProcStat | null {
@@ -99,18 +169,22 @@ export function parseStat(content: string): ProcStat | null {
   const fields = content.slice(close + 2).split(" ");
   const state = fields[0];
   const ppid = Number(fields[1]);
+  const pgid = Number(fields[2]);
   const sid = Number(fields[3]);
   const starttime = Number(fields[19]);
   if (
     state === undefined ||
     state.length === 0 ||
     !Number.isInteger(ppid) ||
+    !Number.isInteger(pgid) ||
     !Number.isInteger(sid) ||
     !Number.isFinite(starttime)
   ) {
     return null;
   }
-  return { starttime, state, ppid, sid };
+  const open = content.indexOf("(");
+  const comm = open === -1 || open > close ? "" : content.slice(open + 1, close);
+  return { starttime, state, ppid, pgid, sid, comm };
 }
 
 async function readText(path: string, encoding: BufferEncoding): Promise<string | null> {
@@ -258,46 +332,172 @@ export async function recordChildSessions(
 }
 
 /**
- * Every live process in one of `sessions` whose environment carries
- * `AGENT_LAUNCH_ENV_VAR=<launchId>` exactly, in pid order — this process
- * excluded. Only a recorded session's members have their environment read.
- * A process's starttime is read on both sides of the environment read, and a
- * pid whose starttime moved in between is skipped: the environment matched may
- * have been either process's. A session whose leader still lives must have the
- * recorded leader (a session id is a pid, and pids are recycled); one whose
- * leader is gone is taken on its members' marker.
+ * The CLI's own process group, recorded now — while `pid` lives and only if
+ * it leads its group (a `detached` spawn). Null for a process in somebody
+ * else's group (the Claude SDK spawns its CLI into the host's): a sweep can
+ * then never reach the group the host itself is in. Linux-only.
  */
-export async function findLeftoverProcesses(
-  launchId: string,
-  options: { sessions: readonly RecordedSession[] }
-): Promise<LeftoverProcess[]> {
-  if (launchId.length === 0 || options.sessions.length === 0) {
+export async function recordOwnGroup(pid: number | undefined): Promise<RecordedGroup | null> {
+  if (process.platform !== "linux" || pid === undefined || pid <= 1 || pid === process.pid) {
+    return null;
+  }
+  const stat = await PROC.stat(pid);
+  if (!running(stat) || stat.pgid !== pid) {
+    return null;
+  }
+  return { pgid: pid, leaderStarttime: stat.starttime };
+}
+
+/**
+ * The provider CLI among `parentPid`'s children: the one whose environment
+ * carries `launchId`'s marker — how a CLI another library spawned (the Claude
+ * SDK's) is found without its pid. Null when none does. Linux-only.
+ */
+export async function findLaunchRoot(launchId: string, parentPid: number = process.pid): Promise<RecordedProcess | null> {
+  if (process.platform !== "linux" || launchId.length === 0) {
+    return null;
+  }
+  const marker = `${AGENT_LAUNCH_ENV_VAR}=${launchId}`;
+  for (const pid of (await childrenOf(parentPid)).sort((left, right) => left - right)) {
+    const before = await PROC.stat(pid);
+    if (!running(before) || before.ppid !== parentPid) continue;
+    const environ = await PROC.environ(pid);
+    if (environ === null || !environ.split("\0").includes(marker)) continue;
+    const after = await PROC.stat(pid);
+    if (running(after) && after.starttime === before.starttime) {
+      return { pid, starttime: before.starttime };
+    }
+  }
+  return null;
+}
+
+/**
+ * The CLI's helper processes, recorded now — while the CLI lives.
+ *
+ * With nothing `known`, the roots are `cli`'s direct children as they are
+ * now: called once the CLI's session has opened and before any of the user's
+ * work ran, they are its MCP servers. With some `known`, the roots are those
+ * of them still running — never a NEW child of the CLI, which is the user's
+ * work (a shell, a dev server) by then. From each root, its descendants are
+ * added while they stay in their parent's session (one that `setsid`s away
+ * daemonized, and is no helper's), and never a shared daemon nor anything
+ * under one. Answers `known` (still running) plus what was found, by pid,
+ * at most {@link MAX_HELPER_PROCESSES}. A recording refreshed while the
+ * helpers live catches the server a wrapper started (`bun run start` →
+ * `bun server.ts`) before the wrapper's exit orphans it. Linux-only.
+ */
+export async function recordHelperProcesses(
+  cli: RecordedProcess,
+  known: readonly RecordedProcess[] = []
+): Promise<RecordedProcess[]> {
+  if (process.platform !== "linux") {
+    return [];
+  }
+  const recorded = new Map<number, RecordedProcess>();
+  const queue: Array<{ pid: number; sid: number }> = [];
+  /** Record `pid` as a helper when it is `parent`'s child, in `parent`'s session, and no shared daemon. */
+  const admit = async (pid: number, parent: { pid: number; sid: number } | null): Promise<void> => {
+    if (recorded.size >= MAX_HELPER_PROCESSES || recorded.has(pid) || pid === process.pid) return;
+    const before = await PROC.stat(pid);
+    if (!running(before)) return;
+    if (parent !== null && (before.ppid !== parent.pid || before.sid !== parent.sid)) return;
+    const environ = await PROC.environ(pid);
+    if (environ === null || isSharedDaemon(environ, before.comm)) return;
+    const after = await PROC.stat(pid);
+    if (!running(after) || after.starttime !== before.starttime) return;
+    recorded.set(pid, { pid, starttime: before.starttime });
+    queue.push({ pid, sid: before.sid });
+  };
+  if (known.length === 0) {
+    const current = await PROC.stat(cli.pid);
+    if (!running(current) || current.starttime !== cli.starttime) return [];
+    // The CLI's children are its helpers whatever session each leads.
+    for (const child of await childrenOf(cli.pid)) {
+      const stat = await PROC.stat(child);
+      if (running(stat) && stat.ppid === cli.pid) await admit(child, { pid: cli.pid, sid: stat.sid });
+    }
+  } else {
+    for (const entry of known) {
+      const current = await PROC.stat(entry.pid);
+      if (!running(current) || current.starttime !== entry.starttime) continue;
+      recorded.set(entry.pid, entry);
+      queue.push({ pid: entry.pid, sid: current.sid });
+    }
+  }
+  while (queue.length > 0 && recorded.size < MAX_HELPER_PROCESSES) {
+    const parent = queue.shift()!;
+    for (const child of await childrenOf(parent.pid)) {
+      await admit(child, parent);
+    }
+  }
+  return [...recorded.values()].sort((left, right) => left.pid - right.pid);
+}
+
+/** `pid`'s children, by the per-thread lists or, without them, by a scan of every parent. */
+async function childrenOf(pid: number): Promise<number[]> {
+  const listed = await PROC.children(pid);
+  if (listed !== null) return listed;
+  const found: number[] = [];
+  await eachLimited(await PROC.pids(), async (candidate) => {
+    const stat = await PROC.stat(candidate);
+    if (running(stat) && stat.ppid === pid) found.push(candidate);
+  });
+  return found;
+}
+
+function scopeIsEmpty(scope: LeftoverScope): boolean {
+  return (scope.sessions?.length ?? 0) === 0 && scope.group === undefined && (scope.processes?.length ?? 0) === 0;
+}
+
+/**
+ * Every live process in `scope` whose environment carries
+ * `AGENT_LAUNCH_ENV_VAR=<launchId>` exactly and that is no shared daemon
+ * ({@link isSharedDaemon}), in pid order — this process excluded. Only a
+ * candidate in the scope has its environment read. A process's starttime is
+ * read on both sides of the environment read, and a pid whose starttime moved
+ * in between is skipped: the environment matched may have been either
+ * process's. In scope means one of:
+ * - in a recorded session; a session whose leader still lives must have the
+ *   recorded leader (a session id is a pid, and pids are recycled); one whose
+ *   leader is gone is taken on its members' marker;
+ * - in the recorded group, by the same leader rule;
+ * - a recorded process, still under its recorded starttime.
+ */
+export async function findLeftoverProcesses(launchId: string, scope: LeftoverScope): Promise<LeftoverProcess[]> {
+  if (launchId.length === 0 || scopeIsEmpty(scope)) {
     return [];
   }
   const proc = PROC;
-  const bySid = new Map(options.sessions.map((session) => [session.sid, session]));
+  const bySid = new Map((scope.sessions ?? []).map((session) => [session.sid, session]));
+  const byPid = new Map((scope.processes ?? []).map((entry) => [entry.pid, entry]));
+  const group = scope.group;
   const marker = `${AGENT_LAUNCH_ENV_VAR}=${launchId}`;
+  /** A live leader must be the one recorded; a gone one leaves its members to their marker. */
+  const leaderMatches = async (stat: ProcStat, pid: number, leaderPid: number, leaderStarttime: number): Promise<boolean> => {
+    const leader = leaderPid === pid ? stat : await proc.stat(leaderPid);
+    return !running(leader) || leader.starttime === leaderStarttime;
+  };
+  const inScope = async (pid: number, stat: ProcStat): Promise<boolean> => {
+    const recorded = byPid.get(pid);
+    if (recorded !== undefined && recorded.starttime === stat.starttime) return true;
+    const session = bySid.get(stat.sid);
+    if (session !== undefined && (await leaderMatches(stat, pid, stat.sid, session.leaderStarttime))) return true;
+    return group !== undefined && stat.pgid === group.pgid && (await leaderMatches(stat, pid, group.pgid, group.leaderStarttime));
+  };
+  // Recorded processes alone are looked up by pid; a session or a group needs every pid.
+  const candidates = bySid.size === 0 && group === undefined ? [...byPid.keys()] : await proc.pids();
   const found: LeftoverProcess[] = [];
-  const pids = (await proc.pids()).filter((pid) => pid !== process.pid);
-  await eachLimited(pids, async (pid) => {
+  await eachLimited(candidates.filter((pid) => pid !== process.pid), async (pid) => {
     const before = await proc.stat(pid);
-    if (!running(before)) {
-      return;
-    }
-    const session = bySid.get(before.sid);
-    if (session === undefined) {
+    if (!running(before) || !(await inScope(pid, before))) {
       return;
     }
     const environ = await proc.environ(pid);
-    if (environ === null || !environ.split("\0").includes(marker)) {
+    if (environ === null || !environ.split("\0").includes(marker) || isSharedDaemon(environ, before.comm)) {
       return;
     }
     const after = await proc.stat(pid);
     if (!running(after) || after.starttime !== before.starttime) {
-      return;
-    }
-    const leader = before.sid === pid ? before : await proc.stat(before.sid);
-    if (running(leader) && leader.starttime !== session.leaderStarttime) {
       return;
     }
     found.push({ pid, starttime: before.starttime });
@@ -305,11 +505,9 @@ export async function findLeftoverProcesses(
   return found.sort((left, right) => left.pid - right.pid);
 }
 
-export interface StopLeftoversOptions {
+export interface StopLeftoversOptions extends LeftoverScope {
   /** The launch whose leftovers are stopped: the value its launch env gave the marker. */
   launchId: string;
-  /** The recorded sessions to sweep; none, and nothing is read or signalled. */
-  sessions: readonly RecordedSession[];
   /** SIGTERM, then SIGKILL this long after. Defaults to `spawn.ts`'s grace. */
   graceMs?: number;
 }
@@ -329,22 +527,23 @@ const sleepFor = async (ms: number): Promise<void> =>
   });
 
 /**
- * Stop what `launchId` left behind in `sessions`: SIGTERM each, wait until
+ * Stop what `launchId` left behind in its scope (sessions, group, helper
+ * processes; none, and nothing is read or signalled): SIGTERM each, wait until
  * they are gone or the grace runs out, then SIGKILL whatever a FRESH scan of
- * the same sessions still finds (a dying tree may start something on its way
+ * the same scope still finds (a dying tree may start something on its way
  * out), and wait once more, as long again, for the kernel to finish them.
  * Each signal is preceded by a starttime check against the scan that found
  * the pid. Resolves with what it did; never rejects — a process that is gone
  * or not ours to signal is not an error here.
  */
 export async function stopLeftoverProcesses(options: StopLeftoversOptions): Promise<LeftoverSweepResult> {
-  if (process.platform !== "linux" || options.sessions.length === 0) {
+  if (process.platform !== "linux" || scopeIsEmpty(options)) {
     return { found: 0, terminated: 0, killed: 0 };
   }
   const proc = PROC;
   const graceMs = options.graceMs ?? DEFAULT_KILL_GRACE_MS;
   const find = async (): Promise<LeftoverProcess[]> =>
-    await findLeftoverProcesses(options.launchId, { sessions: options.sessions });
+    await findLeftoverProcesses(options.launchId, options);
 
   /** Signal each target still the process the scan saw; the count of signals sent. */
   const signalAll = async (targets: readonly LeftoverProcess[], signal: NodeJS.Signals): Promise<number> => {

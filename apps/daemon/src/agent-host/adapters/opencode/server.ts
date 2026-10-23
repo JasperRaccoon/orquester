@@ -49,6 +49,7 @@ import {
   type ChildExitReason,
   type ProviderChild
 } from "../../support/spawn.ts";
+import { ProviderLeftovers } from "../../support/provider-leftovers.ts";
 import { OpenCodeClient } from "./http.ts";
 import { meetsMinimumOpenCodeVersion, tooOldMessage } from "./semver.ts";
 // boxes:
@@ -557,6 +558,11 @@ export class OpenCodeServerPool {
       // serve` is a Bun binary that spawns its own children.
       killGraceMs: OPENCODE_KILL_GRACE_MS
     });
+    // A stop signals the server's whole group; its own exit (a crash) now does the same, by the
+    // launch marker and never a shared daemon (`support/provider-leftovers.ts`).
+    const leftovers = new ProviderLeftovers({ env: childEnv, label: "opencode", logger: this.options.logger });
+    void leftovers.watchGroup(child.pid);
+    void child.exited.then(() => leftovers.sweep());
     return await this.awaitReady(entry, child, { homeDir: childEnv.HOME ?? "", password });
   }
 
