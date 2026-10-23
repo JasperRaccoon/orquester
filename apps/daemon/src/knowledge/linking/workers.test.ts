@@ -196,6 +196,40 @@ describe("WorkerPool", () => {
     assert.equal(again.kind === "task" && again.task.taskId, id);
   });
 
+  it("chats that end their turn while holding a task count as failures: no endless restarts on a task nobody answers", async () => {
+    const h = await harness({ mode: "manual", concurrency: 1 });
+    const [id] = await h.addTasks(1);
+    for (let round = 0; round < 6; round += 1) {
+      await flushAsync(20);
+      const chat = h.port.sessions[round];
+      if (!chat) break;
+      const taken = await h.broker.next(chat.id);
+      assert.equal(taken.kind === "task" && taken.task.taskId, id);
+      // The chat gives up on it (it ends its turn without submitting).
+      chat.end({ kind: "done" });
+    }
+    await flushAsync(20);
+    assert.equal(h.port.sessions.length, 3, "three chats tried it, no fourth is started");
+    assert.deepEqual(
+      h.events.filter((e) => e.kind === "error").map((e) => e.kind === "error" && e.message),
+      ["Worker chats keep ending without answering their task."]
+    );
+  });
+
+  it("a chat that keeps submitting answers that do not parse is retired and its task handed on", async () => {
+    const h = await harness({ mode: "manual", concurrency: 1 });
+    const [id] = await h.addTasks(1);
+    await flushAsync();
+    const chat = h.port.sessions[0]!;
+    await h.broker.next(chat.id);
+    for (let i = 0; i < 2; i += 1) assert.equal((await h.broker.submit(chat.id, id!, "no JSON here")).accepted, false);
+    const third = await h.broker.submit(chat.id, id!, "still no JSON");
+    assert.equal(third.accepted, false);
+    assert.match(!third.accepted ? third.error : "", /end your turn/);
+    assert.deepEqual(await h.broker.next(chat.id), { kind: "done", reason: "session-budget" });
+    assert.equal(h.broker.counts().pending, 1, "the task waits for another chat");
+  });
+
   it("gives up with an error after repeated start failures", async () => {
     const h = await harness({ concurrency: 1 });
     h.port.failStarts = 5;

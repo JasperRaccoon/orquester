@@ -16,7 +16,9 @@
  *   another account; when no account is left the pool pauses until the earliest reset
  *   (`resumesAt`) and says so;
  * - a chat that ends or fails has its lease released, so another chat answers its task;
- * - repeated failures to start or run a chat (no task answered) stop the pool with an error.
+ * - repeated failures to start or run a chat (no task answered, or a task given up on: the chat
+ *   ended its turn holding it, or kept giving answers that do not parse) stop the pool with an
+ *   error, so a task no chat can answer never starts chat after chat.
  *
  * The chats themselves are behind {@link WorkerSessionPort} (`daemon-workers.ts`: the daemon's
  * own session create, the same way the Agent block creates its chats); tests use a fake.
@@ -288,18 +290,28 @@ export class WorkerPool<C extends WorkerCandidate = WorkerCandidate> {
     if (outcome.kind === "cancelled" || !this.workers.has(sessionId)) return; // `stop` ends it
     broker.release(sessionId);
     const answered = broker.tasksOf(sessionId) > 0;
+    // A usage limit is the account's doing (failover handles it), not the task's.
+    const gaveUp = outcome.kind !== "limit" && broker.gaveUp(sessionId);
     if (outcome.kind === "limit") {
       if (worker.candidate) await port.coolDown(worker.candidate, this.memory, outcome).catch(() => undefined);
       await port.stop(sessionId, { interrupt: true });
     } else {
       await port.stop(sessionId, { interrupt: outcome.kind !== "done" });
     }
-    // A chat that answered something proves the setup works; one that failed without doing so counts.
-    if (answered) this.failures = 0;
+    // A chat that answered something proves the setup works; one that failed without doing so, or
+    // gave up on its task, counts.
+    if (gaveUp) this.failures += 1;
+    else if (answered) this.failures = 0;
     else if (outcome.kind === "failed" || outcome.kind === "closed") this.failures += 1;
     await this.finishWorker(worker, outcome.kind === "done" || outcome.kind === "limit" ? "done" : "failed");
     if (this.failures >= this.maxFailures()) {
-      this.fail(outcome.kind === "failed" ? `Worker chats keep failing: ${outcome.message}` : "Worker chats keep ending without answering a task.");
+      this.fail(
+        outcome.kind === "failed"
+          ? `Worker chats keep failing: ${outcome.message}`
+          : gaveUp
+            ? "Worker chats keep ending without answering their task."
+            : "Worker chats keep ending without answering a task."
+      );
       return;
     }
     this.reconcile();

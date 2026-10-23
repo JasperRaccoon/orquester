@@ -14,7 +14,8 @@
  *   released (`release`) and the task goes to the next asker;
  * - checks every answer: it must parse as JSON (an object or an array) once trimmed and stripped
  *   of an optional ```json fence — else `{accepted: false, error}` with the parse error and the
- *   chat keeps the task to redo it; an accepted answer is written as `<id>.answer.json` (temp +
+ *   chat keeps the task to redo it; after {@link MAX_REFUSALS} refusals of one task the chat is
+ *   retired and the task goes to another chat (a chat that cannot answer it must not loop); an accepted answer is written as `<id>.answer.json` (temp +
  *   rename) and only THEN `<id>.done` (temp + rename), so myKG never reads half an answer;
  * - sends a task's instructions (myKG's system prompt) only the first time a chat sees that exact
  *   text; afterwards `instructions: null, sameInstructionsAs: <the task it came with>`;
@@ -51,6 +52,8 @@ const TASK_SUFFIX = ".task.json";
 export const DEFAULT_SESSION_BUDGET = { tasks: 12, tokens: 60_000 };
 /** A task view above this estimate is logged: it may not fit the worker's tool-result limit (60k, see the Claude launch). */
 export const MAX_TASK_TOKENS = 45_000;
+/** Answers of one task a chat may have refused before it is retired and the task handed on. */
+export const MAX_REFUSALS = 3;
 /** How long `next` holds a call with nothing to hand out before it retires the chat. */
 export const DEFAULT_NEXT_WAIT_MS = 10 * 60_000;
 
@@ -151,7 +154,11 @@ interface SessionEntry {
   /** instructions hash → the task they were first sent with. */
   seen: Map<string, string>;
   lease: string | null;
+  /** Refused answers to the task it holds now. */
+  refusals: number;
   retired: boolean;
+  /** It ended (or was retired) while holding a task it did not answer. */
+  gaveUp: boolean;
 }
 
 export interface InboxCounts {
@@ -224,7 +231,7 @@ export class InboxBroker {
   /** A worker chat of this run (also implicit on its first call). */
   register(sessionId: string): void {
     if (!this.sessions.has(sessionId)) {
-      this.sessions.set(sessionId, { id: sessionId, tasks: 0, tokens: 0, seen: new Map(), lease: null, retired: false });
+      this.sessions.set(sessionId, { id: sessionId, tasks: 0, tokens: 0, seen: new Map(), lease: null, refusals: 0, retired: false, gaveUp: false });
     }
   }
 
@@ -233,8 +240,14 @@ export class InboxBroker {
     const session = this.sessions.get(sessionId);
     if (!session) return;
     session.retired = true;
+    if (session.lease !== null) session.gaveUp = true;
     this.dropLease(session);
     this.changed();
+  }
+
+  /** The chat ended, or was retired, holding a task it never answered (the pool counts it as a failure). */
+  gaveUp(sessionId: string): boolean {
+    return this.sessions.get(sessionId)?.gaveUp === true;
   }
 
   /** The chat holds a task or is waiting in `next` (so it needs no new chat beside it). */
@@ -321,6 +334,7 @@ export class InboxBroker {
       if (task) {
         task.leasedTo = session.id;
         session.lease = task.id;
+        session.refusals = 0;
         return { kind: "task", task: this.view(session, task) };
       }
       const left = deadline - this.clock.now().getTime();
@@ -355,6 +369,15 @@ export class InboxBroker {
       // The chat keeps the task and redoes it.
       if (task.leasedTo === null) task.leasedTo = session.id;
       if (task.leasedTo === session.id) session.lease = task.id;
+      session.refusals += 1;
+      if (session.refusals >= MAX_REFUSALS && session.lease === task.id) {
+        // This chat cannot answer it: the task goes to a fresh chat, this one ends.
+        session.retired = true;
+        session.gaveUp = true;
+        this.dropLease(session);
+        this.changed();
+        return { accepted: false, error: `${parsed.error} This task goes to another worker: end your turn now.` };
+      }
       return { accepted: false, error: `${parsed.error} Answer with only the JSON the task's instructions ask for, then submit it again.` };
     }
     task.writing = true;
