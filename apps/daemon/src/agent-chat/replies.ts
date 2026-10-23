@@ -37,9 +37,20 @@
  * exchange-limit notice and outcome `exchange-limit`; its turn's hop is past the cap, so no tool
  * call from it can cause another turn.
  *
+ * A Stop sticks ({@link ReplyRouter.delegatesStopped}): when a chat is stopped (interrupted, its
+ * agent stopped, or its tab closed), the delegate stop cascade tells the router BEFORE it interrupts
+ * the delegated chats below it. Every open subscription along those delegate links ends `stopped`
+ * (a message still queued for the child is taken back, never run), so the interrupted child's
+ * "interrupted before it replied" notice never wakes the chat the user just stopped. Deliveries
+ * already waiting for it are not posted either: a notice is dropped, a real reply is held in the
+ * delivery queue for the user (Deliver now / Discard). A child the user stops directly, its parent
+ * left running, still reports back as before.
+ *
  * Two additive fields ride a subscription record (the config schema is `passthrough`): `posted`
  * `{commandId, seq, messageId?}` — the post that landed and the user message it opened — and
- * `ended` (`delivered | waiter | closed | dropped | refused | discarded`), how a `done` one ended.
+ * `ended` (`delivered | waiter | closed | dropped | refused | discarded | stopped`), how a `done`
+ * one ended. A delivery may carry `held` (posted only by the user's Deliver now) or `stopped` (dropped
+ * because the chat it was for was stopped).
  */
 
 import { createHash, randomUUID } from "node:crypto";
@@ -57,9 +68,11 @@ import {
   MAX_PENDING_REPLY_SUBSCRIPTIONS,
   MAX_TURN_INPUT_CHARS,
   parseCausedBy,
+  parseInterruptCause,
   replyDeliveryContext,
   replyNoticeText,
   SETTLED_TURN_STATES,
+  STOP_CASCADED_ACTIVITY_KIND,
   THREAD_MESSAGE_OVERHEAD_CHARS,
   threadMessageContext,
   type AgentChatPendingEventPayload,
@@ -152,6 +165,8 @@ export interface DeliveryQueue {
   drop(mergeId: string): Promise<void>;
   /** Take a queued entry back if no post of it started; true when it is gone now. */
   retract(mergeId: string): Promise<boolean>;
+  /** Keep a queued entry for the user (Deliver now / Discard), never posted on its own, saying why. */
+  hold(mergeId: string, reason: string): Promise<void>;
 }
 
 export interface ReplyRouterOptions {
@@ -171,7 +186,25 @@ export interface ReplyRouterOptions {
 }
 
 /** How a `done` subscription ended (persisted as `ended`). */
-type Ended = "delivered" | "waiter" | "closed" | "dropped" | "refused" | "discarded";
+type Ended = "delivered" | "waiter" | "closed" | "dropped" | "refused" | "discarded" | "stopped";
+
+/**
+ * A delivery record with its additive fields: `held` — the chat it is for was stopped while it
+ * waited, so it is posted only when the user says Deliver now; `stopped` — dropped for that reason.
+ */
+type Delivery = ReplyDeliveryRecord & { held?: true; stopped?: true };
+
+/** A delegate link a stop runs down: the stopped (or cascaded) chat and a chat it delegated to. */
+export interface StoppedDelegateLink {
+  parentId: string;
+  childId: string;
+}
+
+/** What a held reply says in the delivery queue (the lineage bar shows it with Deliver now / Discard). */
+export const HELD_AFTER_STOP_TEXT = "Held because this chat was stopped: Deliver now to hand it over, or Discard it.";
+
+/** Delivery outcomes that carry the child's reply: held after a stop. The rest are notices: dropped. */
+const REPLY_OUTCOMES: ReadonlySet<string> = new Set(["reply", "empty", "exchange-limit"]);
 
 /**
  * The post that landed: its command id, the receipt's seq, when, the user message it opened, a
@@ -689,6 +722,7 @@ export class ReplyRouter implements DeliveryListener {
    */
   private async answerForEnded(sub: Sub): Promise<ReplyWaitResponse> {
     if (sub.ended === "closed") return { outcome: "closed" };
+    if (sub.ended === "stopped") return { outcome: "replied", turnId: sub.turnId ?? null, state: "interrupted", error: this.noticeText("stopped", sub) };
     if (sub.ended === "waiter" && sub.answeredNotice !== undefined) {
       return { outcome: "replied", turnId: null, state: "failed", error: sub.answeredNotice };
     }
@@ -1561,7 +1595,14 @@ export class ReplyRouter implements DeliveryListener {
         sub.turnId = turn.turnId;
         dirty = true;
       }
-      if (SETTLED_TURN_STATES.has(turn.state)) {
+      if (turn.state === "interrupted" && this.stoppedByCascade(sub, snap, turn)) {
+        // Interrupted because the chat that asked was stopped, but heard of only now (the stop's
+        // own ending was not written): it wakes nobody either.
+        const waiter = this.waiters.get(sub.id);
+        this.finish(sub, "stopped");
+        dirty = true;
+        waiter?.resolve({ kind: "notice", text: this.noticeText("stopped", sub) });
+      } else if (SETTLED_TURN_STATES.has(turn.state)) {
         const deliver = await this.claim(sub, resultOf(snap, turn));
         await deliver();
       } else if (asking) {
@@ -1571,6 +1612,23 @@ export class ReplyRouter implements DeliveryListener {
       }
     }
     if (dirty) await this.persist();
+  }
+
+  /**
+   * Whether the delegate stop cascade interrupted `turn` (its `STOP_CASCADED_ACTIVITY_KIND` row on
+   * that turn): the requester, or a chat above it, was stopped. Only for a delegate link — the
+   * cascade follows nothing else.
+   */
+  private stoppedByCascade(sub: Sub, snap: ThreadSnapshotPayload, turn: Turn): boolean {
+    const target = this.opts.sessions.get(sub.toThreadId);
+    if (target?.lineage?.relation !== "delegate" || target.lineage.parentThreadId !== sub.fromThreadId) return false;
+    return snap.items.some(
+      (item) =>
+        item.kind === "activity" &&
+        item.activityKind === STOP_CASCADED_ACTIVITY_KIND &&
+        item.turnId === turn.turnId &&
+        parseInterruptCause(item.payload) !== undefined
+    );
   }
 
   /**
@@ -1827,13 +1885,16 @@ export class ReplyRouter implements DeliveryListener {
       await this.persist();
       return;
     }
+    const held = (delivery as Delivery).held === true;
     const entry: MergeOutboxEntry = {
       mergeId: delivery.queueEntryId ?? delivery.id,
       parentSessionId: delivery.toThreadId,
       childSessionId: delivery.fromThreadId,
       input: delivery.input,
       queuedAt: delivery.createdAt,
-      state: "queued",
+      // Held after a stop: it waits for the user's Deliver now, never for an idle point.
+      state: held ? "failed" : "queued",
+      ...(held ? { error: HELD_AFTER_STOP_TEXT, held: true as const } : {}),
       attempts: 0,
       kind: "reply",
       causedBy: delivery.causedBy,
@@ -1880,6 +1941,62 @@ export class ReplyRouter implements DeliveryListener {
     }
   }
 
+  /**
+   * A chat was stopped — interrupted, its agent stopped, or its tab closed — and the delegate stop
+   * cascade is about to interrupt the chats it delegated to (`links`: every delegate link of the
+   * stopped tree, the root's own and those below). Called BEFORE those interrupts are posted, and
+   * persisted first, so no turn they settle wakes a chat the user stopped:
+   * - an open subscription along a link ends `stopped`: no reply or notice is delivered for it, a
+   *   live waiter returns at once, and a message of it still queued for the child is taken back;
+   * - a delivery already waiting for the stopped chat is not posted: a notice (an interrupted,
+   *   failed or closed turn) is dropped, a real reply is held for the user (Deliver now / Discard);
+   * - an attention notice waiting for it is dropped.
+   * The children's own transcripts keep everything (`read_transcript`).
+   */
+  async delegatesStopped(links: readonly StoppedDelegateLink[]): Promise<void> {
+    if (links.length === 0) return;
+    const linked = (from: string, to: string): boolean => links.some((link) => link.parentId === from && link.childId === to);
+    const waiting: { sub: Sub; waiter: Waiter | undefined }[] = [];
+    const unposted: string[] = [];
+    for (const sub of this.openSubs()) {
+      if ((sub.state !== "waiting" && sub.state !== "notify") || !linked(sub.fromThreadId, sub.toThreadId)) continue;
+      if (!sub.posted) unposted.push(sub.queueEntryId ?? sub.commandId);
+      waiting.push({ sub, waiter: this.waiters.get(sub.id) });
+      this.finish(sub, "stopped");
+    }
+    const deliveries = (this.outbox.deliveries as Delivery[]).filter(
+      (d) => (d.state === "pending" || d.state === "queued") && !d.held && linked(d.toThreadId, d.fromThreadId)
+    );
+    for (const delivery of deliveries) {
+      if (REPLY_OUTCOMES.has(delivery.outcome)) delivery.held = true;
+    }
+    if (waiting.length === 0 && deliveries.length === 0 && !this.notices().some((n) => (n.state === "pending" || n.state === "queued") && linked(n.toThreadId, n.fromThreadId))) {
+      return;
+    }
+    // The endings first: a turn the cascade settles finds nothing left to claim.
+    await this.persist();
+    for (const { sub, waiter } of waiting) waiter?.resolve({ kind: "notice", text: this.noticeText("stopped", sub) });
+    for (const entryId of unposted) await this.opts.queue.drop(entryId);
+    for (const delivery of deliveries) {
+      const entryId = delivery.queueEntryId ?? delivery.id;
+      if (delivery.held) {
+        // Kept for the user; a pending one is queued held when it is handed (`handNow`).
+        if (delivery.state === "queued") await this.opts.queue.hold(entryId, HELD_AFTER_STOP_TEXT);
+        continue;
+      }
+      if (delivery.state === "queued") await this.opts.queue.drop(entryId);
+      delivery.state = "dropped";
+      delivery.stopped = true;
+    }
+    for (const notice of this.notices()) {
+      if ((notice.state !== "pending" && notice.state !== "queued") || !linked(notice.toThreadId, notice.fromThreadId)) continue;
+      if (notice.state === "queued") await this.opts.queue.drop(notice.commandId);
+      notice.state = "dropped";
+      notice.updatedAt = this.stamp();
+    }
+    await this.persist();
+  }
+
   // --- helpers ----------------------------------------------------------------
 
   private subs(): Sub[] {
@@ -1912,7 +2029,7 @@ export class ReplyRouter implements DeliveryListener {
   }
 
   /** The sentence a requester reads when no reply will come (`ReplyResult` kind `notice`). */
-  private noticeText(kind: "discarded" | "steered" | "lost" | "expired", sub: Sub): string {
+  private noticeText(kind: "discarded" | "steered" | "lost" | "expired" | "stopped", sub: Sub): string {
     const title = oneLine(this.titleOf(sub)) || "Untitled";
     const look = `Read what it did with read_transcript {sessionId: "${sub.toThreadId}"}.`;
     switch (kind) {
@@ -1922,6 +2039,8 @@ export class ReplyRouter implements DeliveryListener {
         return `"${title}" was already working, so your message joined its running turn instead of starting its own; no reply of its own will come. ${look}`;
       case "lost":
         return `Orquester lost track of the turn your message to "${title}" started (it was rewound, or could not be identified), so no reply will come. ${look}`;
+      case "stopped":
+        return `"${title}" was stopped together with the chat that asked, so no reply will come. ${look}`;
       case "expired":
         return `No reply from "${title}" came within ${Math.round(MAX_SUBSCRIPTION_AGE_MS / 86_400_000)} days; Orquester stopped waiting for it. ${look}`;
     }

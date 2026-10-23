@@ -327,6 +327,11 @@ export interface PendingMergeBack {
   attempts: number;
   /** The last refusal, in the parent's words. */
   error?: string;
+  /**
+   * With `state: "failed"`: not refused but held — a reply that waited for this chat when it was
+   * stopped. Only the user's Deliver now posts it (or Discard drops it).
+   */
+  held?: true;
 }
 
 /** How much of a pending merge's text the lineage views show. */

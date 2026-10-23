@@ -1723,6 +1723,11 @@ export const mergeOutboxEntrySchema = z
     attempts: z.number().int().nonnegative().catch(0).default(0),
     /** The last refusal, in the parent's words. */
     error: z.string().max(2_000).optional().catch(undefined),
+    /**
+     * A reply held because the chat it is for was stopped (the reply router, `replies.ts`): kept
+     * `failed` so no build posts it on its own, and said as held rather than refused.
+     */
+    held: z.literal(true).optional().catch(undefined),
     /** The parent's turn mode (`MergeBackRequest.interactionMode`); absent: default. */
     interactionMode: z.enum(["default", "plan"]).optional().catch(undefined),
     /**
@@ -1812,9 +1817,11 @@ export type ReplySubscriptionState = (typeof REPLY_SUBSCRIPTION_STATES)[number];
 /**
  * How a `done` subscription ended (`ended`): its reply `delivered` as a message, handed to its
  * `waiter`, the target `closed`, `dropped` (the requester closed), `refused` (nothing was posted or
- * queued), or its message `discarded` from the target's queue. A newer build's value is kept as is.
+ * queued), its message `discarded` from the target's queue, or `stopped` (the requester, or a chat
+ * above it, was stopped and the delegate with it: nothing is delivered). A newer build's value is
+ * kept as is.
  */
-export const REPLY_SUBSCRIPTION_ENDINGS = ["delivered", "waiter", "closed", "dropped", "refused", "discarded"] as const;
+export const REPLY_SUBSCRIPTION_ENDINGS = ["delivered", "waiter", "closed", "dropped", "refused", "discarded", "stopped"] as const;
 export type ReplySubscriptionEnding = (typeof REPLY_SUBSCRIPTION_ENDINGS)[number];
 
 const replyExchangeSchema = z.object({
