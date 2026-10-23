@@ -120,6 +120,35 @@ import { buildQueryString } from "./transporter";
 import { AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, agentProfileRoutes, agentToolsRoutes, desktopRoutes, githubLinkRoutes, pluginRoutes, repoIdentityRoutes, secretFilesRoutes, sessionProfileRoutes, workflowRoutes } from "@orquester/api";
 // boxes: the Ephemeral AI VMs plugin's routes and payloads.
 import { boxRoutes } from "@orquester/api";
+// The Knowledge Graph plugin's routes and payloads (answers validated by `lib/knowledge/validate.ts`).
+import { knowledgeRoutes } from "@orquester/api";
+import type {
+  CreateKnowledgeCollectionRequest,
+  KnowledgeCollectionsResponse,
+  KnowledgeEntriesQuery,
+  KnowledgeEntriesResponse,
+  KnowledgeGraphQuery,
+  KnowledgeGraphResponse,
+  KnowledgeItemResponse,
+  KnowledgeRebuildEstimate,
+  KnowledgeSaveRequest,
+  KnowledgeSaveResponse,
+  KnowledgeSearchRequest,
+  KnowledgeSearchResponse,
+  KnowledgeSettings,
+  KnowledgeStatus,
+  UpdateKnowledgeCollectionRequest,
+  UpdateKnowledgeEntryRequest,
+  UpdateKnowledgeSettingsRequest
+} from "@orquester/api";
+import {
+  parseKnowledgeCollectionsResponse,
+  parseKnowledgeEntriesResponse,
+  parseKnowledgeGraphResponse,
+  parseKnowledgeItemResponse,
+  parseKnowledgeSearchResponse,
+  parseKnowledgeStatus
+} from "./knowledge/validate";
 import type {
   BlacksmithSetupResponse,
   BoxConfigChangeSet,
@@ -949,6 +978,91 @@ export class ApiClient {
   /** Switch one Global MCP server's "Run in box"; answers with every server's setting. */
   setBoxMcpRunInBox(req: SetBoxMcpRunInBoxRequest): Promise<BoxMcpRunInBoxResponse> {
     return this.send("PUT", boxRoutes.mcpRunInBox, { body: req });
+  }
+
+  // --- Knowledge Graph (`knowledgeRoutes`; the worker routes are the daemon's own) ---
+  // Reads are validated here and reject with an Error when the answer is not
+  // readable; refusals are ApiErrors whose body is `{ code, message }`.
+
+  async getKnowledgeStatus(signal?: AbortSignal): Promise<KnowledgeStatus> {
+    return readKnowledge(parseKnowledgeStatus(await this.send<unknown>("GET", knowledgeRoutes.status, { signal })), "status");
+  }
+
+  getKnowledgeSettings(signal?: AbortSignal): Promise<KnowledgeSettings> {
+    return this.send("GET", knowledgeRoutes.settings, { signal });
+  }
+
+  updateKnowledgeSettings(req: UpdateKnowledgeSettingsRequest): Promise<KnowledgeSettings> {
+    return this.send("PATCH", knowledgeRoutes.settings, { body: req });
+  }
+
+  async listKnowledgeCollections(signal?: AbortSignal): Promise<KnowledgeCollectionsResponse> {
+    const data = await this.send<unknown>("GET", knowledgeRoutes.collections, { signal });
+    return readKnowledge(parseKnowledgeCollectionsResponse(data), "collections list");
+  }
+
+  /** The answer is not relied on: callers refetch the collections. */
+  createKnowledgeCollection(req: CreateKnowledgeCollectionRequest): Promise<unknown> {
+    return this.send("POST", knowledgeRoutes.collections, { body: req });
+  }
+
+  updateKnowledgeCollection(id: string, req: UpdateKnowledgeCollectionRequest): Promise<unknown> {
+    return this.send("PATCH", knowledgeRoutes.collection(id), { body: req });
+  }
+
+  /** Entries left with no collection become Unfiled. */
+  deleteKnowledgeCollection(id: string): Promise<unknown> {
+    return this.send("DELETE", knowledgeRoutes.collection(id));
+  }
+
+  /** Newest first; `nextCursor` pages on. */
+  async listKnowledgeEntries(query: KnowledgeEntriesQuery = {}, signal?: AbortSignal): Promise<KnowledgeEntriesResponse> {
+    const data = await this.send<unknown>("GET", knowledgeRoutes.entries, {
+      query: { collection: query.collection, cursor: query.cursor, limit: query.limit },
+      signal
+    });
+    return readKnowledge(parseKnowledgeEntriesResponse(data), "entries list");
+  }
+
+  /** Edit an entry; changing only its collections never queues a linking run. */
+  updateKnowledgeEntry(id: string, req: UpdateKnowledgeEntryRequest): Promise<unknown> {
+    return this.send("PATCH", knowledgeRoutes.entry(id), { body: req });
+  }
+
+  deleteKnowledgeEntry(id: string): Promise<unknown> {
+    return this.send("DELETE", knowledgeRoutes.entry(id));
+  }
+
+  /** An entry (`ke_…`) or a concept, with what it links to. */
+  async getKnowledgeItem(id: string, signal?: AbortSignal): Promise<KnowledgeItemResponse> {
+    return readKnowledge(parseKnowledgeItemResponse(await this.send<unknown>("GET", knowledgeRoutes.item(id), { signal })), "item");
+  }
+
+  async getKnowledgeGraph(query: KnowledgeGraphQuery = {}, signal?: AbortSignal): Promise<KnowledgeGraphResponse> {
+    const data = await this.send<unknown>("GET", knowledgeRoutes.graph, {
+      query: { collections: query.collections, focus: query.focus, depth: query.depth, limit: query.limit },
+      signal
+    });
+    return readKnowledge(parseKnowledgeGraphResponse(data), "graph");
+  }
+
+  /** Hybrid search (meaning + keywords) over every collection the user can see. */
+  async searchKnowledge(req: KnowledgeSearchRequest, signal?: AbortSignal): Promise<KnowledgeSearchResponse> {
+    const data = await this.send<unknown>("POST", knowledgeRoutes.search, { body: req, signal });
+    return readKnowledge(parseKnowledgeSearchResponse(data), "search result");
+  }
+
+  saveKnowledge(req: KnowledgeSaveRequest): Promise<KnowledgeSaveResponse> {
+    return this.send("POST", knowledgeRoutes.save, { body: req });
+  }
+
+  /** Queue a full re-extraction of every entry. */
+  rebuildKnowledge(): Promise<unknown> {
+    return this.send("POST", knowledgeRoutes.rebuild, { body: {} });
+  }
+
+  getKnowledgeRebuildEstimate(signal?: AbortSignal): Promise<KnowledgeRebuildEstimate> {
+    return this.send("GET", knowledgeRoutes.rebuildEstimate, { signal });
   }
 
   // --- Repo identities (icon + label per git repo; daemon-persisted, shared) ---
@@ -2199,6 +2313,12 @@ export function parseWorkflowLogWindow(data: ArrayBuffer, headers: Record<string
     size: Number.isFinite(size) ? size : nextOffset,
     live: headerOf(headers, "x-log-live") === "1"
   };
+}
+
+/** A validated knowledge answer, or a rejection naming what could not be read. */
+function readKnowledge<T>(value: T | null, what: string): T {
+  if (value === null) throw new Error(`The server sent a knowledge ${what} this app cannot read.`);
+  return value;
 }
 
 export class ApiError extends Error {
