@@ -5,13 +5,19 @@
  * (packages/api).
  *
  * Output is bounded per socket. Live output is sent only while the socket's
- * send buffer is below {@link SEND_HIGH_WATER}; past it, a terminal's output is
- * dropped instead of queued in daemon memory, and the terminal is marked
- * overflowed. Once the buffer drains below {@link SEND_LOW_WATER} (seen from
- * the socket's own write callbacks), each overflowed terminal is resynced:
- * `reset`, then a fresh snapshot (tmux capture-pane, or the replay ring on the
- * direct backend), then live output again. A slow phone watching a noisy build
- * sees the build's current state rather than a growing backlog.
+ * send buffer is below {@link SEND_HIGH_WATER}. Past it, a terminal's output is
+ * held, up to the same budget, and sent as one frame once the buffer drains
+ * below {@link SEND_LOW_WATER} (seen from the socket's own write callbacks).
+ * Only when the held output outgrows its budget — the link cannot keep up
+ * with the terminal — is it dropped and the terminal marked overflowed; after
+ * the drain it is resynced: `reset`, then a fresh snapshot (tmux capture-pane,
+ * or the replay ring on the direct backend), then live output again. A slow
+ * phone watching a noisy build sees the build's current state rather than a
+ * growing backlog in daemon memory.
+ *
+ * A snapshot's own bytes fill the send buffer too (a full capture can be about
+ * as large as the budget), so the output that follows one is held while it
+ * drains, never treated as a new overflow: one resync, not a loop of them.
  *
  * While a snapshot is being taken, live output is held and sent after it, so
  * nothing produced during the capture is lost.
@@ -20,9 +26,12 @@ import type { TerminalStreamServerFrame } from "@orquester/api";
 import type { ISessionManager } from "./sessions.ts";
 
 // Adapted from T3 Code (MIT): apps/server/src/terminal/OutputProtocol.ts
-/** Socket send-buffer size above which live terminal output is dropped (and later resynced). */
+/**
+ * Socket send-buffer size above which live terminal output is held instead of
+ * sent; also the most a terminal holds before it is dropped and resynced.
+ */
 export const SEND_HIGH_WATER = 1024 * 1024;
-/** Send-buffer size an overflowed socket must drain below before its terminals are resynced. */
+/** Send-buffer size a backed-up socket must drain below before held output is sent or terminals are resynced. */
 export const SEND_LOW_WATER = 256 * 1024;
 
 /** The part of a WebSocket the stream uses (a `ws` WebSocket satisfies it). */
@@ -47,15 +56,17 @@ export interface SessionStream {
 
 interface Subscription {
   /**
-   * live: output is sent. overflowed: output is dropped until the socket
-   * drains. snapshot: a snapshot is being taken; output is held for after it.
+   * live: output is sent. draining: the socket is backed up; output is held
+   * until it drains. overflowed: held output outgrew its budget; output is
+   * dropped until the socket drains, then a snapshot follows. snapshot: a
+   * snapshot is being taken; output is held for after it.
    */
-  mode: "live" | "overflowed" | "snapshot";
+  mode: "live" | "draining" | "overflowed" | "snapshot";
   held: string[];
   heldChars: number;
-  /** Held output outgrew the high-water mark and was dropped: resync again after this snapshot. */
+  /** Held output outgrew the high-water mark during a snapshot and was dropped: resync again after it. */
   stale: boolean;
-  /** The session exited while output was held or dropped; `end` follows the snapshot. */
+  /** The session exited while output was held or dropped; `end` follows the held output or the snapshot. */
   ended: boolean;
   endSent: boolean;
   /** The first resize after the subscribe snapshot re-snapshots at the client's real size. */
@@ -94,11 +105,46 @@ export function createSessionStream(
       return;
     }
     for (const [id, sub] of subs) {
-      if (sub.mode === "overflowed") {
+      if (sub.mode === "draining") {
+        flushHeld(id, sub);
+      } else if (sub.mode === "overflowed") {
         void snapshot(id, sub, true);
       }
     }
   }
+
+  /** Hold output while draining or snapshotting; past the budget, drop it (and resync later). */
+  const hold = (sub: Subscription, data: string) => {
+    if (sub.stale) {
+      return;
+    }
+    sub.heldChars += data.length;
+    if (sub.heldChars <= limits.highWater) {
+      sub.held.push(data);
+      return;
+    }
+    sub.held = [];
+    sub.heldChars = 0;
+    if (sub.mode === "snapshot") {
+      sub.stale = true;
+    } else {
+      sub.mode = "overflowed";
+    }
+  };
+
+  /** The socket drained: send what was held while it was backed up, then carry on live. */
+  const flushHeld = (id: string, sub: Subscription) => {
+    const held = sub.held.join("");
+    sub.held = [];
+    sub.heldChars = 0;
+    sub.mode = "live";
+    if (held.length > 0) {
+      send({ t: "out", id, data: held });
+    }
+    if (sub.ended && !sub.endSent) {
+      sendEnd(id, sub);
+    }
+  };
 
   const output = (id: string, sub: Subscription, data: string) => {
     if (subs.get(id) !== sub) {
@@ -107,23 +153,12 @@ export function createSessionStream(
     if (sub.mode === "overflowed") {
       return;
     }
-    if (sub.mode === "snapshot") {
-      if (sub.stale) {
-        return;
-      }
-      sub.heldChars += data.length;
-      if (sub.heldChars > limits.highWater) {
-        sub.held = [];
-        sub.heldChars = 0;
-        sub.stale = true;
-      } else {
-        sub.held.push(data);
-      }
-      return;
-    }
-    if (socket.bufferedAmount > limits.highWater) {
+    if (sub.mode === "live" && socket.bufferedAmount > limits.highWater) {
       // The socket's write callbacks (resumeDrained) bring it back.
-      sub.mode = "overflowed";
+      sub.mode = "draining";
+    }
+    if (sub.mode !== "live") {
+      hold(sub, data);
       return;
     }
     send({ t: "out", id, data });
@@ -166,12 +201,13 @@ export function createSessionStream(
       sub.stale = false;
       sub.mode = "overflowed";
     } else if (held.length > 0) {
+      // Behind a large snapshot this is held (draining) until it has gone out.
       output(id, sub, held);
     }
-    if (sub.ended && !sub.endSent) {
+    if (sub.mode === "live" && sub.ended && !sub.endSent) {
       sendEnd(id, sub);
     }
-    if (sub.mode === "overflowed") {
+    if (sub.mode !== "live") {
       resumeDrained();
     }
     return true;
@@ -223,6 +259,9 @@ export function createSessionStream(
     // before we subscribed will never emit an exit, so end it here.
     const current = sessions.get(id);
     if (!current || current.status === "exited") {
+      if (sub.mode === "draining") {
+        flushHeld(id, sub);
+      }
       if (!sub.endSent) {
         sendEnd(id, sub);
       }
@@ -245,7 +284,7 @@ export function createSessionStream(
     // or not the program emits more output (an idle agent would stay garbled).
     sub.resizeResync = false;
     await sessions.settleResize?.(id, sub.abort.signal);
-    if (subs.get(id) === sub && sub.mode === "live") {
+    if (subs.get(id) === sub && (sub.mode === "live" || sub.mode === "draining")) {
       await snapshot(id, sub, true);
     }
   };
