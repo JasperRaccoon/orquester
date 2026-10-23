@@ -600,6 +600,13 @@ function openAgentChatStream(
   let closed = false;
   /** The host said the thread does not exist: no reconnect until `retry()`. */
   let gone = false;
+  /**
+   * The daemon refused the bearer (401): the session was revoked or lapsed. Retrying with the same
+   * token can only fail again — and each failure counts against the daemon's per-IP throttle — so
+   * this reader stops. A sign-in rebuilds the transport, and the thread store reopens the stream
+   * on it (`rebind`, from `ensureThreadStore`).
+   */
+  let unauthorized = false;
   let attempt = 0;
   let lastSeq = options.after ?? 0;
   let hostInstanceId: string | null = options.hostInstanceId ?? null;
@@ -633,7 +640,7 @@ function openAgentChatStream(
   };
 
   const scheduleReconnect = (reason: string): void => {
-    if (closed || gone || retryTimer !== null) {
+    if (closed || gone || unauthorized || retryTimer !== null) {
       return;
     }
     clearStall();
@@ -732,6 +739,10 @@ function openAgentChatStream(
       onError: (error) => {
         if (closed || gone) {
           return;
+        }
+        if ((error as { status?: unknown } | null)?.status === 401) {
+          unauthorized = true;
+          clearStall();
         }
         handlers.onError?.(error);
       }

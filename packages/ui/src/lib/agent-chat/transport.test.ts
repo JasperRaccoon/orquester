@@ -238,6 +238,34 @@ describe("the stream reader", () => {
     handle.close();
   });
 
+  it("stops reconnecting on a 401: the token is revoked, and every retry would feed the login throttle", () => {
+    const transporter = new FakeTransporter();
+    const transport = createAgentChatTransport(transporter);
+    mock.timers.enable({ apis: ["setTimeout"] });
+    const errors: unknown[] = [];
+    const reconnects: string[] = [];
+    const handle = transport.stream("s1", {}, {
+      onFrame: () => {},
+      onError: (error) => errors.push(error),
+      onReconnect: (info) => reconnects.push(info.reason)
+    });
+    transporter.latest.handlers.onError?.(Object.assign(new Error("The stream failed with status 401."), { status: 401 }));
+    transporter.latest.handlers.onEnd();
+    mock.timers.tick(10 * 60_000);
+    assert.equal(errors.length, 1, "the error is still reported");
+    assert.equal(transporter.streams.length, 1, "no reconnect loop, stalled or ended");
+    assert.deepEqual(reconnects, []);
+    handle.close();
+
+    // Any other refusal (the host restarting) still reconnects.
+    const other = transport.stream("s2", {}, { onFrame: () => {} });
+    transporter.latest.handlers.onError?.(Object.assign(new Error("The stream failed with status 503."), { status: 503 }));
+    transporter.latest.handlers.onEnd();
+    mock.timers.tick(1_000);
+    assert.equal(transporter.streams.length, 3);
+    other.close();
+  });
+
   it("any other error line still ends in an ordinary reconnect", () => {
     const transporter = new FakeTransporter();
     const transport = createAgentChatTransport(transporter);

@@ -989,6 +989,14 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
   let stream: AgentChatStreamHandle | null = null;
   let closed = false;
   /**
+   * The transport this generation talks through. Swapped by the store's `rebind` (from {@link ensureThreadStore}) when the
+   * client is rebuilt (a sign-in mints a new token): commands and reads from then on carry the new
+   * bearer, and the stream is reopened on it from where it got to.
+   */
+  let transport = deps.transport;
+  /** Opens the stream with this generation's handlers (set once the store exists). */
+  let openStream: ((options: AgentChatStreamOptions) => AgentChatStreamHandle) | null = null;
+  /**
    * The §7.4 queue's drive loop re-checks when a queued send of this thread
    * settles — this generation's or one a torn-down generation still had out
    * (`beginQueuedSend`, which is also its in-flight latch).
@@ -1044,7 +1052,7 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
     ): Promise<void> => {
       const payload = { ...body, commandId } as AgentChatCommandBodies[TName];
       await withCommandRetries(
-        (signal) => deps.transport.command(sessionId, name, payload, signal),
+        (signal) => transport.command(sessionId, name, payload, signal),
         { outlivesGeneration: RETRIED_PAST_TEARDOWN.has(name) }
       );
     };
@@ -1620,7 +1628,7 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
             history.pages !== asked.pages || history.bounds !== asked.bounds;
           let page: ThreadHistoryPage;
           try {
-            page = await deps.transport.readHistory(sessionId, {
+            page = await transport.readHistory(sessionId, {
               ...(before === undefined ? {} : { before }),
               turns: THREAD_HISTORY_DEFAULT_TURNS
             });
@@ -1747,7 +1755,7 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
         if (plan.truncated !== true) {
           return plan.planMarkdown;
         }
-        const response = await deps.transport.readItem(sessionId, plan.id).catch(() => null);
+        const response = await transport.readItem(sessionId, plan.id).catch(() => null);
         const item = response?.item;
         const payload = item?.kind === "activity" ? item.payload : null;
         const markdown =
@@ -1908,7 +1916,7 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
         // where it was.
         const commandId = newId();
         await withCommandRetries((signal) =>
-          deps.transport.switchAccount(sessionId, { commandId, accountId: input.accountId }, signal)
+          transport.switchAccount(sessionId, { commandId, accountId: input.accountId }, signal)
         );
       },
 
@@ -1917,7 +1925,7 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
         // head's `profileId` arrives as `thread.meta-updated` on the stream.
         const commandId = newId();
         await withCommandRetries((signal) =>
-          deps.transport.switchProfile(sessionId, { commandId, profileId: input.profileId }, signal)
+          transport.switchProfile(sessionId, { commandId, profileId: input.profileId }, signal)
         );
       },
 
@@ -1926,11 +1934,11 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       },
 
       async uploadAttachment(file, meta) {
-        return deps.transport.upload(sessionId, file, meta);
+        return transport.upload(sessionId, file, meta);
       },
 
       fetchAttachmentBytes(attachmentId, signal) {
-        return deps.transport.fetchAttachment(sessionId, attachmentId, signal);
+        return transport.fetchAttachment(sessionId, attachmentId, signal);
       },
 
       queueMessage(message) {
@@ -2105,7 +2113,7 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       },
 
       async refresh() {
-        const response = await deps.transport.read(sessionId);
+        const response = await transport.read(sessionId);
         if (response.kind === "snapshot") {
           applyStreamFrame({ kind: "snapshot", thread: response.thread });
           return;
@@ -2342,7 +2350,7 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
      * connection state.
      */
     const resyncHistory = async (): Promise<void> => {
-      const response = await deps.transport.read(sessionId);
+      const response = await transport.read(sessionId);
       if (closed || response.kind !== "snapshot" || response.thread.seq < get().reducer.fold.seq) {
         return;
       }
@@ -2505,9 +2513,9 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       } catch (error) {
         console.warn(`agent chat: could not resume what a reload left for session ${sessionId}`, error);
       }
-      stream = deps.transport.stream(
+      openStream = (options) => transport.stream(
         sessionId,
-        resumeOptions,
+        options,
         {
           onFrame: applyStreamFrame,
           onFrames: applyStreamFrames,
@@ -2522,6 +2530,7 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
           onGone: () => setSlice({ connection: "gone" })
         }
       );
+      stream = openStream(resumeOptions);
     });
 
     const initialState: InternalState = {
@@ -2589,6 +2598,19 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
     document.addEventListener("visibilitychange", onVisibilityChange);
   }
 
+  // Expose the rebind on the store object so the registry can call it.
+  (store as RebindableThreadStore).rebind = (next) => {
+    if (closed || next === transport) return;
+    transport = next;
+    // Not opened yet (the microtask above): it opens on the new transport.
+    if (stream === null || openStream === null) return;
+    const previous = stream;
+    const options: AgentChatStreamOptions =
+      previous.lastSeq > 0 ? { after: previous.lastSeq, hostInstanceId: previous.hostInstanceId } : {};
+    previous.close();
+    stream = openStream(options);
+  };
+
   // Expose the teardown on the store object so the registry can call it.
   (store as ThreadStore & { destroy?: () => void }).destroy = () => {
     closed = true;
@@ -2638,6 +2660,9 @@ function errorMessage(error: unknown): string {
 // ---------------------------------------------------------------------------
 // The registry
 // ---------------------------------------------------------------------------
+
+/** A store whose transport can be swapped (`rebind` in {@link createThreadStore}). */
+type RebindableThreadStore = ThreadStore & { rebind?: (transport: AgentChatTransport) => void };
 
 interface RegistryEntry {
   store: ThreadStore;
@@ -2708,6 +2733,8 @@ function cancelDispose(entry: RegistryEntry): void {
 export function ensureThreadStore(sessionId: string, deps: ThreadStoreDeps): ThreadStore {
   const existing = registry.get(sessionId);
   if (existing) {
+    // The client was rebuilt (a new sign-in, a reconnect): the slice stays, its transport moves.
+    (existing.store as RebindableThreadStore).rebind?.(deps.transport);
     if (existing.refCount === 0) {
       cancelDispose(existing);
       scheduleDispose(sessionId, existing);
