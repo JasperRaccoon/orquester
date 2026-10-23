@@ -426,8 +426,12 @@ export type BoxChannelSpec =
   | { kind: "file-write"; path: string; mode?: number; mkdirs?: boolean; append?: boolean }
   /** Host → box: a directory (or file) as a tar stream (stream 1). */
   | { kind: "tar-read"; path: string; exclude?: string[] }
-  /** Host → box: extract a tar stream (stream 0) into directory `path`. */
-  | { kind: "tar-write"; path: string }
+  /**
+   * Host → box: extract a tar stream (stream 0) into directory `path`. `compression: "gzip"`: the
+   * stream is gzipped and `orq-agent` inflates it before `tar` reads it (an `orq-agent` older than
+   * the field ignores it and its `tar` fails on the gzip bytes, so a sender falls back to plain).
+   */
+  | { kind: "tar-write"; path: string; compression?: "gzip" }
   /** Box → host: an SSH agent connection (OpenSSH agent protocol bytes); the daemon answers with host keys. */
   | { kind: "ssh-agent" }
   /** Box → host: a stdio MCP server bridged to the host (`orq-agent mcp-bridge <serverId>`). */

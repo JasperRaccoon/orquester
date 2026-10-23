@@ -309,10 +309,12 @@ export function localBoxConnection(options: LocalBoxConnectionOptions = {}): Loc
       child.stdout.pipe(out);
       return out;
     },
-    async writeTar(path: string, tar: Readable): Promise<void> {
+    async writeTar(path: string, tar: Readable, tarOptions?: { compression?: "gzip" }): Promise<void> {
       requireConnected();
       await mkdir(path, { recursive: true });
-      const child = spawn("tar", ["-xf", "-", "-C", path], { stdio: ["pipe", "ignore", "ignore"] });
+      // As `orq-agent` does: `tar -xf -` as the box user (umask applies), the stream inflated first.
+      const args = tarOptions?.compression === "gzip" ? ["-xzf", "-", "-C", path] : ["-xf", "-", "-C", path];
+      const child = spawn("tar", args, { stdio: ["pipe", "ignore", "ignore"] });
       // Listened for before the pipeline: a tar that exits as soon as its input ends is not missed.
       const exited = new Promise<void>((resolve, reject) => child.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(`tar exited ${code}`)))));
       await pipeline(tar, child.stdin);
