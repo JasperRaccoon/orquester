@@ -2051,7 +2051,7 @@ describe("attention: a delegated child's question wakes its parent", () => {
 // ---------------------------------------------------------------------------
 
 describe("a stopped chat is not woken by the delegates its stop interrupted", () => {
-  const delegate = (parentThreadId: string) => ({ lineage: { parentThreadId, relation: "delegate" as const, createdAt: "t", agentCreated: true } });
+  const delegate = (parentThreadId: string): Partial<SessionSummary> => ({ lineage: { parentThreadId, relation: "delegate", createdAt: "t", agentCreated: true } });
 
   /** `req` delegated a task to `tgt` (`reply: "notify"`, as `create_session {delegate: true}`), now running; the cascade is wired as the daemon wires it. */
   async function stoppable(options: { reply?: "wait" | "notify" } = {}) {
@@ -2100,7 +2100,7 @@ describe("a stopped chat is not woken by the delegates its stop interrupted", ()
 
   it("a parent waiting in wait_for_session returns at once, told the task stopped with it, and is not woken after", async () => {
     const w = await stoppable({ reply: "wait" });
-    const waiting = w.router.wait("tgt", w.res.subscriptionId, { timeoutSeconds: 60 }, { principal: { kind: "agent", threadId: "req" } });
+    const waiting = w.router.wait("tgt", w.res.subscriptionId, { timeoutSeconds: 60 }, { principal: { kind: "agent", threadId: "req", projectPath: "" } });
     await until(() => sub(w, w.res.subscriptionId).state === "waiting" && w.timers.pending() > 0);
     await w.stop();
     const answer = await waiting;
@@ -2108,7 +2108,7 @@ describe("a stopped chat is not woken by the delegates its stop interrupted", ()
     assert.match((answer as { error?: string }).error ?? "", /was stopped together with the chat that asked, so no reply will come/);
     assert.equal(postsTo(w.host, "req").length, 0);
     // A later wait on it says the same, truthfully.
-    const later = await w.router.wait("tgt", w.res.subscriptionId, { timeoutSeconds: 1 }, { principal: { kind: "agent", threadId: "req" } });
+    const later = await w.router.wait("tgt", w.res.subscriptionId, { timeoutSeconds: 1 }, { principal: { kind: "agent", threadId: "req", projectPath: "" } });
     assert.equal((later as { state?: string }).state, "interrupted");
     await w.cleanup();
   });
