@@ -42,9 +42,12 @@ function world() {
 
 test("forSession: no session and Global chats see all; a profile chat its ticked ids; a worker, an unknown session and an unreadable profile nothing", async () => {
   const { visibility, warnings } = world();
-  for (const id of [undefined, "", "global", "global-null", "workflow", "orphan"]) assert.deepEqual(await visibility.forSession(id), { kind: "all" }, String(id));
+  for (const id of [undefined, "", "global", "global-null", "workflow"]) assert.deepEqual(await visibility.forSession(id), { kind: "all" }, String(id));
   assert.deepEqual(await visibility.forSession("saas"), { kind: "collections", ids: ["kc_seo", "kc_saas"] });
-  for (const id of ["blind", "worker", "nobody", "throws", "broken"]) assert.deepEqual(await visibility.forSession(id), { kind: "collections", ids: [] }, id);
+  // A chat whose profile was deleted still runs that profile's kit until its next start re-homes it
+  // as Global (the daemon then records no profile) — and an unattended one never does: it sees
+  // nothing meanwhile, never everything.
+  for (const id of ["blind", "orphan", "worker", "nobody", "throws", "broken"]) assert.deepEqual(await visibility.forSession(id), { kind: "collections", ids: [] }, id);
   assert.equal(warnings.length, 2, "an unreadable session and an unreadable profile are warned");
 });
 
@@ -80,6 +83,8 @@ test("createKnowledgeForSession: off, Global, a profile with and without collect
   assert.deepEqual(await forSession("saas"), { enabled: true, worker: false, searchable: true, visibleCollectionNames: ["SEO", "SaaS"] });
   assert.deepEqual(await forSession("blind"), { enabled: true, worker: false, searchable: false, visibleCollectionNames: [] });
   assert.deepEqual(await forSession("worker"), { enabled: true, worker: true, searchable: false, visibleCollectionNames: [] });
+  // A deleted profile: nothing to search until the chat restarts as Global.
+  assert.deepEqual(await forSession("orphan"), { enabled: true, worker: false, searchable: false, visibleCollectionNames: [] });
   // Only deleted collections ticked: nothing to search.
   const stale = createKnowledgeForSession({ enabled: () => true, visibility, collections: () => [{ id: "kc_ads", name: "Ads" }] });
   assert.deepEqual(await stale("saas"), { enabled: true, worker: false, searchable: false, visibleCollectionNames: [] });

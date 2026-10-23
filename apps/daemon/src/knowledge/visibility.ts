@@ -8,7 +8,9 @@
  * - a chat with a profile → exactly the collections ticked in it (`settings.knowledgeCollections`;
  *   none ticked, or never set, → no collection). Ids of collections deleted since are passed on:
  *   search ignores what does not exist;
- * - a chat whose profile was deleted → `all` (it runs Global from its next start on);
+ * - a chat whose profile was deleted → no collection: it still runs that profile's kit until its
+ *   next start, when the daemon re-homes an interactive chat as Global (its record then names no
+ *   profile, so it sees everything); an unattended chat is never re-homed;
  * - one of the plugin's own worker sessions (`owner.kind === "knowledge-indexer"`) → no collection:
  *   it works through the two worker tools only;
  * - a session the daemon does not know, or a profile that cannot be read → no collection (fail closed).
@@ -38,7 +40,8 @@ export interface KnowledgeVisibilityDeps {
   session(sessionId: string): KnowledgeSessionRecord | null | Promise<KnowledgeSessionRecord | null>;
   /**
    * The collection ids the profile ticks now (`[]` for none), or `"missing"` when there is no such
-   * profile. A throw (unreadable) counts as none ticked. The session-profiles helper
+   * profile (also none: the chat is not Global until it restarts as Global). A throw (unreadable)
+   * counts as none ticked. The session-profiles helper
    * `profileKnowledgeCollections(store, id)` is this read.
    */
   profileCollections(profileId: string): Promise<readonly string[] | "missing">;
@@ -75,7 +78,7 @@ export class KnowledgeSessionVisibility implements KnowledgeVisibilityPort {
     if (profileId === undefined || profileId === null || profileId === "") return { kind: "all" };
     try {
       const ids = await this.deps.profileCollections(profileId);
-      if (ids === "missing") return { kind: "all" };
+      if (ids === "missing") return NONE;
       return { kind: "collections", ids: [...new Set(ids)] };
     } catch (error) {
       this.deps.logger?.warn?.("knowledge: an Agent Profile could not be read; its chat sees no collection", error instanceof Error ? error.message : String(error));
