@@ -5,6 +5,9 @@
 #   SUDO       "" or "sudo" — prefix for privileged commands (git/pnpm/node/chown/systemctl)
 #   BRANCH     branch to deploy (default main)
 #   RESET_REF  ref to reset to (default origin/$BRANCH; rollback passes a sha)
+#   DOMAIN     the target's public domain (optional): adds ORQUESTER_PUBLIC_URL=https://$DOMAIN
+#              to /etc/orquester/daemon.env when it has none
+#   ENV_FILE   for local testing only (default /etc/orquester/daemon.env)
 #   REPO_DIR   for local testing only (default /opt/orquester)
 set -euo pipefail
 trap 'echo "[remote-update] FAILED at line $LINENO" >&2' ERR
@@ -13,6 +16,8 @@ SUDO="${SUDO:-}"
 BRANCH="${BRANCH:-main}"
 REPO_DIR="${REPO_DIR:-/opt/orquester}"
 RESET_REF="${RESET_REF:-origin/$BRANCH}"
+DOMAIN="${DOMAIN:-}"
+ENV_FILE="${ENV_FILE:-/etc/orquester/daemon.env}"
 
 cd "$REPO_DIR"
 old_head="$($SUDO git rev-parse HEAD)"
@@ -70,6 +75,12 @@ if ! $SUDO git diff --quiet "$drift_base" "$new_head" -- deploy/Caddyfile; then
   echo "[remote-update] NOTE: deploy/Caddyfile changed (${drift_base:0:7}..${new_head:0:7})."
   echo "[remote-update]       Reconcile /etc/caddy/Caddyfile by hand (it has the real domain"
   echo "[remote-update]       substituted), then: ${SUDO:+$SUDO }systemctl reload caddy"
+fi
+
+# The daemon's public origin, from the target's domain (an existing value is kept). Refs from
+# before the helper existed (old rollbacks) skip it.
+if [ -f deploy/lib/ensure-public-url.sh ]; then
+  $SUDO bash deploy/lib/ensure-public-url.sh "$ENV_FILE" "$DOMAIN" </dev/null
 fi
 
 $SUDO systemctl restart orquester

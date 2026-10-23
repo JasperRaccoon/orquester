@@ -418,10 +418,47 @@ export interface BoxConnectionSettings {
     daemonUrl: string | null;
     /** Policy snippet for the owner to paste (Orquester never edits the policy itself in the product). */
     policySnippet: string;
+    /** Tailscale on the daemon's own machine (absent from older daemons). */
+    local?: BoxLocalTailscale;
+    /**
+     * The Tailscale federated identity macOS (Blacksmith) runners join the tailnet with: they run
+     * on GitHub Actions outside it. Null when not set (absent from older daemons). Not secret.
+     */
+    workloadIdentity?: BoxTailscaleWorkloadIdentity | null;
   };
   reachable: "unknown" | "ok" | "failed";
   reachableMessage: string | null;
   checkedAt: string | null;
+}
+
+export interface BoxTailscaleWorkloadIdentity {
+  /** The federated identity's client id (Tailscale admin console → Trust credentials). */
+  clientId: string;
+  /** The audience it expects in the GitHub OIDC token. */
+  audience: string;
+}
+
+/**
+ * Tailscale on the daemon's machine, read from its `tailscale` CLI. The daemon listens on loopback,
+ * so boxes reach it over the tailnet only where `tailscale serve` proxies an HTTPS port to it.
+ */
+export interface BoxLocalTailscale {
+  /** The `tailscale` CLI is on the daemon's PATH. */
+  installed: boolean;
+  /** Its backend is up and logged in (`BackendState` "Running"). */
+  running: boolean;
+  /** This machine's MagicDNS name, e.g. `my-pc.tail1234.ts.net`. */
+  dnsName: string | null;
+  /** This machine's first Tailscale IPv4 address. */
+  tailnetIp: string | null;
+  /** The HTTPS port that serves Orquester, or the one "Set up for me" would use (default 10000). */
+  servePort: number;
+  /** `tailscale serve` proxies `servePort` on this machine's name to the daemon. */
+  serving: boolean;
+  /** `https://<dnsName>[:<servePort>]`, the address boxes should dial. */
+  suggestedUrl: string | null;
+  /** The command that serves Orquester on `servePort` (null when Tailscale is not installed). */
+  serveCommand: string | null;
 }
 
 /** Body for `PUT boxRoutes.connection`; secret fields are write-only. */
@@ -436,6 +473,9 @@ export interface SetBoxConnectionRequest {
   tailscaleOAuthClientSecret?: string;
   /** Remove the stored Tailscale credentials. */
   clearTailscale?: boolean;
+  /** The federated identity macOS runners join the tailnet with: both together; null or "" clears it. */
+  tailscaleWorkloadClientId?: string | null;
+  tailscaleWorkloadAudience?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -537,6 +577,14 @@ export const boxRoutes = {
   connection: "/api/boxes/connection",
   /** `POST` → `BoxConnectionSettings` after a reachability check. */
   connectionTest: "/api/boxes/connection/test",
+  /**
+   * `POST` → `BoxConnectionSettings`: runs `tailscale serve` on this machine so its tailnet name
+   * proxies an HTTPS port to the daemon, stores that URL (Tailscale mode) and checks it. 409
+   * `BOX_CONNECTION_NOT_CONFIGURED` when Tailscale isn't installed or running; 409
+   * `BOX_TAILSCALE_NEEDS_PERMISSION` (`{ code, message, commands }`) when the daemon's user may not
+   * change Tailscale's serve config.
+   */
+  connectionTailscaleServe: "/api/boxes/connection/tailscale-serve",
   /** `GET` → `BlacksmithSetupResponse`; `PUT` `SetBlacksmithSetupRequest` → `BlacksmithSetupResponse` (runs the automatic steps). */
   blacksmith: "/api/boxes/blacksmith",
   /** `POST` → 202; starts a test macOS box, waits for it to connect, destroys it. */
@@ -627,6 +675,8 @@ export type BoxErrorCode =
   | "BOX_INVALID_REQUEST"
   | "BOX_CONNECTION_NOT_CONFIGURED"
   | "BOX_UNSUPPORTED"
+  /** 409 from `connectionTailscaleServe`: the body's `commands` are the two ways to fix it. */
+  | "BOX_TAILSCALE_NEEDS_PERMISSION"
   // boxes (sync): `POST boxRoutes.configChange(id)` refusals.
   | "BOX_CONFIG_CHANGE_NOT_FOUND"
   | "BOX_CONFIG_CHANGE_DECIDED"

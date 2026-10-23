@@ -6,6 +6,11 @@ Use the repository-root `./deploy.sh` for provisioning and deployment commands.
 - `orquester.service` → `/etc/systemd/system/orquester.service`
   - Runs the daemon via `node --import tsx` (the repo is `noEmit`; no dist build).
 - `daemon.env.example` → copy to `/etc/orquester/daemon.env` (chmod 600), fill the password.
+  `ORQUESTER_PUBLIC_URL=https://<domain>` is the daemon's public origin: Ephemeral AI VMs use it as
+  the default Public URL, and macOS boxes (GitHub Actions runners, outside any tailnet) always dial
+  it. `./deploy.sh provision` and `./deploy.sh deploy`/`rollback` add it from the target's `domain`
+  (`lib/ensure-public-url.sh`) when the file has no `ORQUESTER_PUBLIC_URL=` line; an existing value
+  is never changed, and the file stays 0600. Restart the daemon after editing it by hand.
 - `opencode.env.example` → optional per-launcher proxy env; copy to
   `/var/lib/orquester/daemon/env/opencode.env` (chmod 600) to affect only OpenCode sessions.
 - `Caddyfile` → `/etc/caddy/Caddyfile` (set your real domain or a sslip.io host).

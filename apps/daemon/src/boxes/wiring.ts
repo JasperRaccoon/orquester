@@ -75,6 +75,7 @@ import {
   registerBoxConfigChangeRoutes
 } from "./sync/index.ts";
 import { createTailscaleKeys, type TailscaleCredentials as TailscaleApiCredentials } from "./tailscale/keys.ts";
+import { createLocalTailscale, type DaemonHttpAddress } from "./tailscale/local.ts";
 import { createBoxGuiInstaller, type BoxGuiInstaller } from "./remote/gui/index.ts";
 import type { TemporaryBoxes } from "./temporary/contract.ts";
 import type { TemporaryBoxTools } from "./temporary/tools.ts";
@@ -92,6 +93,8 @@ export interface DaemonBoxesDeps {
   /** The daemon user's home. */
   home: string;
   env: NodeJS.ProcessEnv;
+  /** Where the daemon's HTTP transport listens (`transports.http`; PUT /api/config/daemon moves it). */
+  daemonHttp: () => DaemonHttpAddress;
   accounts: AccountsService;
   agentAccounts: AgentAccountsService;
   plugins: PluginsService;
@@ -266,7 +269,9 @@ export function createDaemonBoxes(deps: DaemonBoxesDeps): DaemonBoxes {
       configSync: watchedSync,
       tooling,
       blacksmith: createBlacksmithSetupDriver(),
-      agentBuilds: builds
+      agentBuilds: builds,
+      localTailscale: createLocalTailscale({ daemonHttp: deps.daemonHttp }),
+      daemonHttp: deps.daemonHttp
     }
   );
   const boxes = service;

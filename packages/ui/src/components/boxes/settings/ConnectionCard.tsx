@@ -1,12 +1,13 @@
 import React, { useEffect, useState } from "react";
-import { Check, Copy, Loader2, PlugZap, Trash2 } from "lucide-react";
+import { Check, Copy, Loader2, PlugZap, Trash2, Wand2 } from "lucide-react";
 import type { BoxConnectionMode, BoxConnectionSettings } from "@orquester/api";
 
 import { useAppStore } from "../../../store/app";
 import { copyText } from "../../../lib/clipboard";
 import { boxesErrorText } from "../../../lib/boxes/errors";
 import { relativeTime } from "../../../lib/relative-time";
-import { saveBoxConnection, testBoxConnection, useBoxConnection } from "../../../lib/boxes/store";
+import { saveBoxConnection, setupBoxTailscaleServe, testBoxConnection, useBoxConnection } from "../../../lib/boxes/store";
+import { cn } from "../../../lib/cn";
 import { Button, ConfirmDialog, Input } from "../../ui";
 import { Badge, FormField, Notice, SegmentedControl, SettingRow, SettingsSection } from "../../settings/primitives";
 import {
@@ -14,6 +15,8 @@ import {
   connectionProblems,
   connectionRequest,
   reachabilityView,
+  tailscaleLocalView,
+  tailscaleSetupFailure,
   type ConnectionDraft,
   type TailscaleCredentialKind
 } from "./connection.logic";
@@ -38,8 +41,9 @@ export const ConnectionCard: React.FC = () => {
   const [draft, setDraft] = useState<ConnectionDraft>(() => connectionDraft(settings));
   const [dirty, setDirty] = useState(false);
   const [attempted, setAttempted] = useState(false);
-  const [busy, setBusy] = useState<"save" | "check" | "clear" | null>(null);
+  const [busy, setBusy] = useState<"save" | "check" | "clear" | "setup" | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [setupFailure, setSetupFailure] = useState<{ message: string; commands: string[] } | null>(null);
   const [confirmClear, setConfirmClear] = useState(false);
 
   // The daemon's settings replace the draft until the user edits it.
@@ -64,6 +68,7 @@ export const ConnectionCard: React.FC = () => {
   const problems = attempted ? connectionProblems(draft, settings) : {};
   const request = connectionRequest(draft, settings);
   const reachability = reachabilityView(settings);
+  const local = tailscaleLocalView(settings, draft.daemonUrl);
   const checked = settings.checkedAt ? relativeTime(settings.checkedAt) : "";
 
   const run = async (kind: "save" | "check" | "clear", call: () => Promise<BoxConnectionSettings>) => {
@@ -84,11 +89,60 @@ export const ConnectionCard: React.FC = () => {
     }
   };
 
+  // "Set up for me": the daemon serves itself on the tailnet, saves that URL (Tailscale mode) and checks it.
+  const setUp = async () => {
+    if (!api) return;
+    setBusy("setup");
+    setError(null);
+    setSetupFailure(null);
+    try {
+      const next = await setupBoxTailscaleServe(api);
+      if (draft.apiToken.trim() || draft.oauthClientId.trim() || draft.oauthClientSecret.trim()) {
+        // Typed credentials are not saved yet: keep them, take the new address.
+        setDraft((current) => ({ ...current, mode: next.mode, daemonUrl: next.tailscale.daemonUrl ?? current.daemonUrl }));
+      } else {
+        setDirty(false);
+        setAttempted(false);
+        setDraft(connectionDraft(next));
+      }
+    } catch (err) {
+      setSetupFailure(tailscaleSetupFailure(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const save = () => {
     setAttempted(true);
     if (!api || !request) return;
     void run("save", () => saveBoxConnection(api, request));
   };
+
+  // Both modes: in Tailscale mode macOS boxes still dial it (their runners are outside the tailnet).
+  const publicUrlField = (
+    <FormField
+      label={draft.mode === "public-url" ? "Public URL" : "Public URL (also used by macOS boxes)"}
+      htmlFor="box-public-url"
+      hint={
+        problems.publicUrl ? (
+          <span className="text-danger">{problems.publicUrl}</span>
+        ) : draft.mode === "public-url" ? (
+          "This server's HTTPS address, e.g. https://orquester.example.com."
+        ) : (
+          "Optional. macOS boxes run on GitHub Actions runners outside your tailnet and dial this address."
+        )
+      }
+    >
+      <Input
+        id="box-public-url"
+        placeholder="https://"
+        value={draft.publicUrl}
+        disabled={busy !== null}
+        aria-invalid={problems.publicUrl ? true : undefined}
+        onChange={(e) => edit({ publicUrl: e.target.value })}
+      />
+    </FormField>
+  );
 
   return (
     <SettingsSection
@@ -105,22 +159,7 @@ export const ConnectionCard: React.FC = () => {
       </SettingRow>
 
       {draft.mode === "public-url" ? (
-        <div className="px-4 py-3.5">
-          <FormField
-            label="Public URL"
-            htmlFor="box-public-url"
-            hint={problems.publicUrl ? <span className="text-danger">{problems.publicUrl}</span> : "This server's HTTPS address, e.g. https://orquester.example.com."}
-          >
-            <Input
-              id="box-public-url"
-              placeholder="https://"
-              value={draft.publicUrl}
-              disabled={busy !== null}
-              aria-invalid={problems.publicUrl ? true : undefined}
-              onChange={(e) => edit({ publicUrl: e.target.value })}
-            />
-          </FormField>
-        </div>
+        <div className="px-4 py-3.5">{publicUrlField}</div>
       ) : (
         <div className="space-y-3 px-4 py-3.5">
           <div className="flex flex-wrap items-center justify-between gap-2">
@@ -208,7 +247,7 @@ export const ConnectionCard: React.FC = () => {
               problems.daemonUrl ? (
                 <span className="text-danger">{problems.daemonUrl}</span>
               ) : (
-                "The address boxes dial, e.g. https://my-pc.tail1234.ts.net."
+                "The address boxes dial — Tailscale must serve Orquester there, e.g. https://my-pc.tail1234.ts.net:10000."
               )
             }
           >
@@ -221,7 +260,76 @@ export const ConnectionCard: React.FC = () => {
               onChange={(e) => edit({ daemonUrl: e.target.value })}
             />
           </FormField>
-          {settings.tailscale.policySnippet && <PolicySnippet snippet={settings.tailscale.policySnippet} />}
+          {local.status && (
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="flex min-w-0 items-center gap-2 text-xs text-neutral-400" data-testid="box-ts-local-status">
+                <span aria-hidden className={cn("h-1.5 w-1.5 shrink-0 rounded-full", local.tone === "ok" ? "bg-ok" : "bg-warn")} />
+                <span className="min-w-0 break-words">{local.status}</span>
+              </span>
+              {local.suggestion && (
+                <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => edit({ daemonUrl: local.suggestion ?? "" })}>
+                  Use {local.suggestion}
+                </Button>
+              )}
+              {local.canSetUp && (
+                <Button size="sm" variant="outline" className="ml-auto" disabled={busy !== null} onClick={() => void setUp()}>
+                  {busy === "setup" ? <Loader2 size={12} className="animate-spin" /> : <Wand2 size={12} />}
+                  {busy === "setup" ? "Setting up…" : "Set up for me"}
+                </Button>
+              )}
+            </div>
+          )}
+          {setupFailure && !settings.tailscale.local?.serving && (
+            <Notice tone="warn" title="Tailscale isn't serving Orquester yet">
+              <p>{setupFailure.message}</p>
+              {setupFailure.commands.length > 0 && <CopyBlock label="Commands" ariaLabel="Copy the commands" text={setupFailure.commands.join("\n")} />}
+            </Notice>
+          )}
+          {publicUrlField}
+          <div className="grid gap-3 sm:grid-cols-2">
+            <FormField
+              label="Federated identity client ID (macOS boxes)"
+              htmlFor="box-ts-workload-id"
+              hint={
+                problems.workloadClientId ? (
+                  <span className="text-danger">{problems.workloadClientId}</span>
+                ) : (
+                  "Optional, instead of a public URL: macOS runners join the tailnet with it."
+                )
+              }
+            >
+              <Input
+                id="box-ts-workload-id"
+                autoComplete="off"
+                value={draft.workloadClientId}
+                disabled={busy !== null}
+                aria-invalid={problems.workloadClientId ? true : undefined}
+                onChange={(e) => edit({ workloadClientId: e.target.value })}
+              />
+            </FormField>
+            <FormField
+              label="Federated identity audience"
+              htmlFor="box-ts-workload-audience"
+              hint={problems.workloadAudience ? <span className="text-danger">{problems.workloadAudience}</span> : undefined}
+            >
+              <Input
+                id="box-ts-workload-audience"
+                autoComplete="off"
+                value={draft.workloadAudience}
+                disabled={busy !== null}
+                aria-invalid={problems.workloadAudience ? true : undefined}
+                onChange={(e) => edit({ workloadAudience: e.target.value })}
+              />
+            </FormField>
+          </div>
+          {settings.tailscale.policySnippet && (
+            <div className="space-y-1.5">
+              <CopyBlock label="Tailnet policy" ariaLabel="Copy the policy snippet" text={settings.tailscale.policySnippet} />
+              <p className="text-[11px] leading-relaxed text-neutral-500">
+                Paste it into your tailnet policy (Access controls). It lets boxes tagged tag:orq-box reach only this server's port.
+              </p>
+            </div>
+          )}
         </div>
       )}
 
@@ -272,8 +380,8 @@ export const ConnectionCard: React.FC = () => {
   );
 };
 
-/** The tailnet policy snippet to paste (Orquester never edits the policy itself). */
-const PolicySnippet: React.FC<{ snippet: string }> = ({ snippet }) => {
+/** Text to copy: the tailnet policy snippet (Orquester never edits the policy itself), or shell commands. */
+const CopyBlock: React.FC<{ label: string; ariaLabel: string; text: string }> = ({ label, ariaLabel, text }) => {
   const [copied, setCopied] = useState(false);
   useEffect(() => {
     if (!copied) return;
@@ -283,22 +391,19 @@ const PolicySnippet: React.FC<{ snippet: string }> = ({ snippet }) => {
   return (
     <div className="space-y-1.5">
       <div className="flex items-center justify-between gap-2">
-        <span className="text-xs font-medium text-neutral-300">Tailnet policy</span>
+        <span className="text-xs font-medium text-neutral-300">{label}</span>
         <Button
           size="sm"
           variant="ghost"
-          aria-label="Copy the policy snippet"
-          onClick={() => void copyText(snippet).then((ok) => setCopied(ok))}
+          aria-label={ariaLabel}
+          onClick={() => void copyText(text).then((ok) => setCopied(ok))}
         >
           {copied ? <Check size={12} /> : <Copy size={12} />} {copied ? "Copied" : "Copy"}
         </Button>
       </div>
       <pre className="max-h-48 overflow-auto rounded-md border border-neutral-800 bg-neutral-950 px-3 py-2 text-[11px] leading-relaxed text-neutral-300">
-        <code>{snippet}</code>
+        <code>{text}</code>
       </pre>
-      <p className="text-[11px] leading-relaxed text-neutral-500">
-        Paste it into your tailnet policy (Access controls). It lets boxes tagged tag:orq-box reach only this server's port.
-      </p>
     </div>
   );
 };

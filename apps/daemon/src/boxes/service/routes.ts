@@ -29,7 +29,9 @@ import type { BoxService } from "./index.ts";
 
 /** Answer a thrown error: a `BoxError` verbatim, an account/git error (`status`) as `ACCOUNT_ERROR`, anything else 500. */
 export function sendBoxError(reply: FastifyReply, error: unknown): FastifyReply {
-  if (error instanceof BoxError) return reply.code(error.status).send({ code: error.code, message: error.message });
+  if (error instanceof BoxError) {
+    return reply.code(error.status).send({ code: error.code, message: error.message, ...(error.commands ? { commands: error.commands } : {}) });
+  }
   const status = (error as { status?: unknown } | null)?.status;
   if (typeof status === "number" && status >= 400 && status < 600) {
     return reply.code(status).send({ code: "ACCOUNT_ERROR", message: error instanceof Error ? error.message : "Request failed." });
@@ -77,11 +79,12 @@ export function registerBoxRoutes(app: FastifyInstance, service: BoxService): vo
 
   app.get(boxRoutes.providers, read((): BoxProvidersResponse => service.settings.providersResponse()));
 
-  app.get(boxRoutes.connection, read((): BoxConnectionSettings => service.settings.connectionSettings()));
+  app.get(boxRoutes.connection, read((): Promise<BoxConnectionSettings> => service.settings.loadConnectionSettings()));
   app.put<{ Body: SetBoxConnectionRequest }>(boxRoutes.connection, (request, reply) =>
     guarded(() => service.settings.setConnection(request.body))(request, reply)
   );
   app.post(boxRoutes.connectionTest, guarded(() => service.settings.testConnection()));
+  app.post(boxRoutes.connectionTailscaleServe, guarded(() => service.settings.setupTailscaleServe()));
 
   app.get(boxRoutes.blacksmith, read((): BlacksmithSetupResponse => service.settings.blacksmithResponse()));
   app.put<{ Body: SetBlacksmithSetupRequest }>(boxRoutes.blacksmith, (request, reply) =>

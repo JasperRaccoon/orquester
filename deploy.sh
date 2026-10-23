@@ -107,7 +107,7 @@ cmd_deploy_target() {
   s="$(sudo_word)"
   info "=== deploy $name ($T_USER@$T_HOST) ==="
   STEP="preflight";     preflight_pushed "$T_BRANCH" || return 1
-  STEP="remote-update"; run_payload "$here/deploy/lib/remote-update.sh" "SUDO=$s" "BRANCH=$T_BRANCH" || return 1
+  STEP="remote-update"; run_payload "$here/deploy/lib/remote-update.sh" "SUDO=$s" "BRANCH=$T_BRANCH" "DOMAIN=$T_DOMAIN" || return 1
   STEP="smoke-test";    smoke_test || return 1
   ok "$name deployed"
 }
@@ -119,7 +119,7 @@ cmd_rollback() {
   build_ssh_args
   s="$(sudo_word)"
   info "=== rollback $name -> $sha ($T_USER@$T_HOST) ==="
-  STEP="remote-update"; run_payload "$here/deploy/lib/remote-update.sh" "SUDO=$s" "BRANCH=$T_BRANCH" "RESET_REF=$sha" || return 1
+  STEP="remote-update"; run_payload "$here/deploy/lib/remote-update.sh" "SUDO=$s" "BRANCH=$T_BRANCH" "RESET_REF=$sha" "DOMAIN=$T_DOMAIN" || return 1
   STEP="smoke-test";    smoke_test || return 1
   ok "$name rolled back to $sha"
 }

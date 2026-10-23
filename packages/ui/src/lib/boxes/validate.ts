@@ -30,6 +30,7 @@ import {
   type BoxGpuInfo,
   type BoxImageOffer,
   type BoxKindAvailability,
+  type BoxLocalTailscale,
   type BoxKindsResponse,
   type BoxMcpRunInBoxEntry,
   type BoxMcpRunInBoxResponse,
@@ -359,9 +360,29 @@ export function sanitizeBoxOffersResponse(
 // ---------------------------------------------------------------------------
 
 /** `GET/PUT boxRoutes.connection`, `POST connectionTest`; null when it is not a settings object. */
+/** Tailscale on the daemon's machine; null when absent (older daemons) or malformed. */
+function sanitizeLocalTailscale(value: unknown): BoxLocalTailscale | null {
+  if (!isRecord(value) || typeof value.installed !== "boolean") return null;
+  const port = value.servePort;
+  return {
+    installed: value.installed,
+    running: value.running === true,
+    dnsName: stringOrNull(value.dnsName),
+    tailnetIp: stringOrNull(value.tailnetIp),
+    servePort: finite(port) && Number.isInteger(port) && port > 0 && port < 65536 ? port : 10000,
+    serving: value.serving === true,
+    // As sent (an origin without a trailing slash): it fills the URL field.
+    suggestedUrl: httpUrlOrNull(value.suggestedUrl) ? (value.suggestedUrl as string) : null,
+    serveCommand: stringOrNull(value.serveCommand)
+  };
+}
+
 export function sanitizeBoxConnectionSettings(value: unknown): BoxConnectionSettings | null {
   if (!isRecord(value)) return null;
   const tailscale = isRecord(value.tailscale) ? value.tailscale : {};
+  const local = sanitizeLocalTailscale(tailscale.local);
+  const identity = isRecord(tailscale.workloadIdentity) ? tailscale.workloadIdentity : null;
+  const workloadIdentity = identity && nonEmpty(identity.clientId) && nonEmpty(identity.audience) ? { clientId: identity.clientId, audience: identity.audience } : null;
   return {
     mode: value.mode === "tailscale" ? "tailscale" : "public-url",
     publicUrl: stringOrNull(value.publicUrl),
@@ -370,7 +391,9 @@ export function sanitizeBoxConnectionSettings(value: unknown): BoxConnectionSett
       keyHint: stringOrNull(tailscale.keyHint),
       tailnet: stringOrNull(tailscale.tailnet),
       daemonUrl: stringOrNull(tailscale.daemonUrl),
-      policySnippet: stringOr(tailscale.policySnippet, "")
+      policySnippet: stringOr(tailscale.policySnippet, ""),
+      ...(local ? { local } : {}),
+      workloadIdentity
     },
     reachable: value.reachable === "ok" || value.reachable === "failed" ? value.reachable : "unknown",
     reachableMessage: stringOrNull(value.reachableMessage),

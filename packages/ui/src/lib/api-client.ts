@@ -906,6 +906,11 @@ export class ApiClient {
     return this.send("POST", boxRoutes.connectionTest);
   }
 
+  /** "Set up for me": serve the daemon over `tailscale serve`, store that URL and check it. */
+  setupBoxTailscaleServe(): Promise<BoxConnectionSettings> {
+    return this.send("POST", boxRoutes.connectionTailscaleServe);
+  }
+
   getBlacksmithSetup(signal?: AbortSignal): Promise<BlacksmithSetupResponse> {
     return this.send("GET", boxRoutes.blacksmith, { signal });
   }

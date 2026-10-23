@@ -117,8 +117,10 @@ if [ ! -f /etc/orquester/daemon.env ]; then
   sed "s|replace-with-a-32+char-random-secret|$GENERATED_PASSWORD|" \
     deploy/daemon.env.example > /etc/orquester/daemon.env
 else
-  log "daemon.env already exists — leaving it untouched"
+  log "daemon.env already exists — leaving it untouched (except a missing ORQUESTER_PUBLIC_URL)"
 fi
+# The daemon's public origin, from the target's domain (an existing value is kept).
+bash deploy/lib/ensure-public-url.sh /etc/orquester/daemon.env "$DOMAIN" </dev/null
 
 log "5/7 systemd unit + session devtools + start"
 cp deploy/orquester.service /etc/systemd/system/orquester.service

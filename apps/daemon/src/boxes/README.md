@@ -13,7 +13,7 @@ Contracts: `packages/api/src/boxes.ts` (HTTP/UI), `packages/api/src/box-protocol
 | `boxes/client/` | A `BoxConnection` over a relay socket, for the agent host and other local processes (static imports only — agent-host rule). |
 | `boxes/providers/` | One adapter per provider (`BoxProviderAdapter`), price tables, recorded API fixtures. `vm-providers.ts`, `gpu-providers.ts` and `blacksmith.ts` each export their adapters; `index.ts` assembles the registry. |
 | `boxes/bootstrap/` | `BuildBootstrap`: POSIX, PowerShell, container and cloud-init bootstraps that fetch and start `orq-agent`, and the staged POSIX bootstrap for size-capped startup scripts (its generic second stage is served by the hub). |
-| `boxes/tailscale/` | `TailscaleKeys` over the Tailscale API (API token or OAuth client). |
+| `boxes/tailscale/` | `TailscaleKeys` over the Tailscale API (API token or OAuth client); `LocalTailscale` (`local.ts`): this machine's `tailscale` CLI — status, whether `tailscale serve` proxies an HTTPS port to the daemon, and the Connection's "Set up for me". |
 | `boxes/github/` | GitHub Actions OIDC verification, the Blacksmith control repo (create, workflow commit, dispatch, cancel), the workflow template. |
 | `boxes/service/` | Box records (`boxes.json`, `box-secrets.json`), `BoxRegistry`, the lifecycle and provisioning pipeline, reconciler, costs, project integration (create/list/delete), the plugin's HTTP routes and events. |
 | `boxes/broker/` | `AgentTokenBroker` and the refresh-scheduling rules (spec §7). |

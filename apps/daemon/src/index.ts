@@ -696,6 +696,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     keysDir: resolved.keysDir,
     home: resolved.vars.userhome,
     env,
+    daemonHttp: () => ({ host: config.transports.http.host, port: config.transports.http.port }),
     accounts,
     agentAccounts,
     plugins,

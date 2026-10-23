@@ -32,6 +32,7 @@ import type {
   BuildBootstrap,
   TailscaleKeys
 } from "../contracts.ts";
+import type { DaemonHttpAddress, LocalTailscale } from "../tailscale/local.ts";
 import { BoxSetupLog } from "./box-exec.ts";
 import { BoxError, errorLine } from "./errors.ts";
 import { BoxLifecycle, systemClock, type BoxClock, type BoxGitAccess, type ManagedAgentHome } from "./lifecycle.ts";
@@ -74,6 +75,10 @@ export interface BoxServiceDeps {
   publish: (channel: string, type: string, payload: unknown) => void;
   /** The daemon's configured public origin, when it has one (the default public URL). */
   publicOrigin: () => string | null;
+  /** Tailscale on this machine (Connection's status line and "Set up for me"). Absent: not reported. */
+  localTailscale?: LocalTailscale;
+  /** Where the daemon's HTTP transport listens. */
+  daemonHttp?: () => DaemonHttpAddress;
   fetch?: typeof fetch;
   clock?: BoxClock;
   logger?: Pick<Console, "warn" | "error" | "log">;
@@ -158,6 +163,8 @@ export function createBoxService(deps: BoxServiceDeps): BoxService {
     accounts: deps.accounts,
     ...(deps.blacksmith ? { blacksmith: deps.blacksmith } : {}),
     publicOrigin: deps.publicOrigin,
+    ...(deps.localTailscale ? { localTailscale: deps.localTailscale } : {}),
+    ...(deps.daemonHttp ? { daemonHttp: deps.daemonHttp } : {}),
     setupLog,
     clock,
     ...(deps.fetch ? { fetch: deps.fetch } : {}),
@@ -365,6 +372,7 @@ export function createBoxService(deps: BoxServiceDeps): BoxService {
         await lifecycle.settled();
         await reconciler.settled();
         await settings.windowsImagesSettled();
+        await settings.blacksmithChecksSettled();
         await store.flush();
         await setupLog.flush();
         if (background.size === 0) return;

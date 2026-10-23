@@ -68,6 +68,10 @@ describe("the Ephemeral AI VMs settings section", () => {
   let deletes: string[];
   let connectionPuts: SetBoxConnectionRequest[];
   let refuse: Error | null;
+  /** Tailscale on the daemon's machine, as `getBoxConnection` reports it (null: an older daemon). */
+  let local: Record<string, unknown> | null = null;
+  let setupAnswer: () => Promise<unknown> = async () => ({});
+  let setupCalls = 0;
   const initial = { ...useAppStore.getState() };
 
   const api = {
@@ -82,7 +86,7 @@ describe("the Ephemeral AI VMs settings section", () => {
     getBoxConnection: async () => ({
       mode: "public-url",
       publicUrl: "https://orquester.example.com",
-      tailscale: { configured: false, keyHint: null, tailnet: null, daemonUrl: null, policySnippet: '{"acls":[]}' },
+      tailscale: { configured: false, keyHint: null, tailnet: null, daemonUrl: null, policySnippet: '{"acls":[]}', ...(local ? { local } : {}) },
       reachable: "unknown",
       reachableMessage: null,
       checkedAt: null
@@ -108,6 +112,10 @@ describe("the Ephemeral AI VMs settings section", () => {
       reachable: "ok",
       checkedAt: new Date().toISOString()
     }),
+    setupBoxTailscaleServe: async () => {
+      setupCalls += 1;
+      return setupAnswer();
+    },
     destroyBox: async (id: string) => {
       deletes.push(`box:${id}`);
       return { box: box({ id, purpose: "temporary", project: null, state: "destroying" }) };
@@ -119,6 +127,8 @@ describe("the Ephemeral AI VMs settings section", () => {
     deletes = [];
     connectionPuts = [];
     refuse = null;
+    local = null;
+    setupCalls = 0;
     resetBoxes();
     const mount = document.createElement("div");
     document.body.replaceChildren(mount);
@@ -237,6 +247,148 @@ describe("the Ephemeral AI VMs settings section", () => {
     assert.equal(document.querySelector<HTMLInputElement>("#box-ts-token")?.type, "password");
     assert.ok(text().includes('{"acls":[]}'));
     assert.ok(document.querySelector('[aria-label="Copy the policy snippet"]'));
+  });
+
+  describe("Tailscale on this machine", () => {
+    const LOCAL = {
+      installed: true,
+      running: true,
+      dnsName: "my-pc.tail1234.ts.net",
+      tailnetIp: "100.64.0.7",
+      servePort: 10000,
+      serving: false,
+      suggestedUrl: "https://my-pc.tail1234.ts.net:10000",
+      serveCommand: "tailscale serve --bg --https=10000 http://127.0.0.1:47831"
+    };
+    const remount = async () => {
+      act(() => root.unmount());
+      resetBoxes();
+      const mount = document.createElement("div");
+      document.body.replaceChildren(mount);
+      root = createRoot(mount);
+      await act(async () => {
+        root.render(createElement(BoxesPluginSection, { enabled: true }));
+      });
+      await settle();
+      const radio = [...document.querySelectorAll<HTMLButtonElement>('[role="radio"]')].find((b) => b.textContent === "Tailscale");
+      await click(radio);
+    };
+    const urlField = () => document.querySelector<HTMLInputElement>("#box-ts-daemon-url")!;
+
+    it("shows the status line, fills the suggested URL, and sets up serving", async () => {
+      local = { ...LOCAL };
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      setupAnswer = async () => {
+        await gate;
+        return {
+          mode: "tailscale",
+          publicUrl: null,
+          tailscale: { configured: false, daemonUrl: "https://my-pc.tail1234.ts.net:10000", policySnippet: "{}", local: { ...LOCAL, serving: true } },
+          reachable: "ok",
+          checkedAt: new Date().toISOString()
+        };
+      };
+      await remount();
+      assert.ok(text().includes("Tailscale on this machine: my-pc.tail1234.ts.net · not serving Orquester yet"));
+      assert.ok(text().includes("Tailscale must serve Orquester there, e.g. https://my-pc.tail1234.ts.net:10000."));
+
+      await click(buttonNamed("Use https://my-pc.tail1234.ts.net:10000"));
+      assert.equal(urlField().value, "https://my-pc.tail1234.ts.net:10000");
+      assert.equal(buttonNamed("Use https://my-pc.tail1234.ts.net:10000"), undefined, "no suggestion once the field holds it");
+
+      await click(buttonNamed("Set up for me"));
+      assert.equal(setupCalls, 1);
+      assert.ok(buttonNamed("Setting up…")?.disabled, "progress while it runs");
+      release();
+      await settle();
+      assert.ok(text().includes("Tailscale on this machine: my-pc.tail1234.ts.net · serving Orquester on :10000"));
+      assert.equal(buttonNamed("Set up for me"), undefined, "no button once serving");
+      assert.equal(urlField().value, "https://my-pc.tail1234.ts.net:10000");
+      assert.ok(text().includes("Reachable"));
+    });
+
+    it("without permission, shows the daemon's message and the commands to copy", async () => {
+      local = { ...LOCAL };
+      setupAnswer = async () => {
+        throw new ApiError(409, "POST", "/api/boxes/connection/tailscale-serve", undefined, {
+          code: "BOX_TAILSCALE_NEEDS_PERMISSION",
+          message: "Tailscale doesn't let this server's user (orq) change what it serves.",
+          commands: ["sudo tailscale set --operator=orq", "sudo tailscale serve --bg --https=10000 http://127.0.0.1:47831"]
+        });
+      };
+      await remount();
+      await click(buttonNamed("Set up for me"));
+      assert.ok(text().includes("Tailscale doesn't let this server's user (orq) change what it serves."));
+      const block = [...document.querySelectorAll("pre code")].map((code) => code.textContent).find((content) => content?.includes("--operator"));
+      assert.equal(block, "sudo tailscale set --operator=orq\nsudo tailscale serve --bg --https=10000 http://127.0.0.1:47831");
+      assert.ok(document.querySelector('[aria-label="Copy the commands"]'));
+      assert.ok(buttonNamed("Set up for me"), "can try again");
+    });
+
+    it("says when Tailscale isn't running, with nothing to set up", async () => {
+      local = { ...LOCAL, running: false };
+      await remount();
+      assert.ok(text().includes("Tailscale isn't running on this machine."));
+      assert.equal(buttonNamed("Set up for me"), undefined);
+    });
+  });
+
+  it("Tailscale mode keeps the public URL for macOS boxes and saves it", async () => {
+    const radio = [...document.querySelectorAll<HTMLButtonElement>('[role="radio"]')].find((b) => b.textContent === "Tailscale");
+    await click(radio);
+    assert.ok(text().includes("Public URL (also used by macOS boxes)"));
+    const field = document.querySelector<HTMLInputElement>("#box-public-url")!;
+    assert.equal(field.value, "https://orquester.example.com");
+    assert.ok(document.querySelector("#box-ts-workload-id"));
+    assert.ok(document.querySelector("#box-ts-workload-audience"));
+    await type(document.querySelector<HTMLInputElement>("#box-ts-token")!, "tskey-api-abc");
+    await type(document.querySelector<HTMLInputElement>("#box-ts-daemon-url")!, "https://pc.tail1234.ts.net:10000");
+    await type(field, "https://mac.example.com");
+    await click(buttonNamed("Save"));
+    assert.deepEqual(connectionPuts, [
+      { mode: "tailscale", tailscaleDaemonUrl: "https://pc.tail1234.ts.net:10000", publicUrl: "https://mac.example.com", tailscaleApiToken: "tskey-api-abc" }
+    ]);
+  });
+
+  it("a stopped control repo step offers Retry, which re-runs the automatic steps", async () => {
+    const blacksmithSaves: unknown[] = [];
+    const steps = (repo: string, message: string | null) => [
+      { id: "account", label: "GitHub account", state: "ok", message: null, actionUrl: null },
+      { id: "org", label: "GitHub organization", state: "ok", message: null, actionUrl: null },
+      { id: "app", label: "Blacksmith GitHub App", state: "ok", message: null, actionUrl: null },
+      { id: "repo", label: "Control repository", state: repo, message, actionUrl: null },
+      { id: "test", label: "Test run", state: "todo", message: null, actionUrl: null }
+    ];
+    const originals = { listBoxProviders: api.listBoxProviders, getBlacksmithSetup: api.getBlacksmithSetup };
+    const message = "macOS boxes run on GitHub Actions runners outside your tailnet: set a Public URL (the runner dials it), or add a Tailscale federated identity.";
+    Object.assign(api, {
+      listBoxProviders: async () => ({ providers: [provider(), provider({ id: "blacksmith", label: "Blacksmith", kinds: ["macos"], status: "not-configured", keyHint: null, credentialFields: [] })] }),
+      getBlacksmithSetup: async () => ({ gitAccountId: "acct", org: "Org", repo: null, steps: steps("action-needed", message) }),
+      setBlacksmithSetup: async (req: unknown) => {
+        blacksmithSaves.push(req);
+        return { gitAccountId: "acct", org: "Org", repo: "Org/orquester-macos-boxes", steps: steps("ok", "Org/orquester-macos-boxes") };
+      }
+    });
+    try {
+      act(() => root.unmount());
+      resetBoxes();
+      const mount = document.createElement("div");
+      document.body.replaceChildren(mount);
+      root = createRoot(mount);
+      await act(async () => {
+        root.render(createElement(BoxesPluginSection, { enabled: true }));
+      });
+      await settle();
+      await click(document.querySelector<HTMLButtonElement>('[aria-label="Blacksmith setup"]'));
+      assert.ok(text().includes(message));
+      await click(buttonNamed("Retry"));
+      assert.deepEqual(blacksmithSaves, [{}]);
+      assert.equal(buttonNamed("Retry"), undefined);
+      assert.ok(text().includes("Org/orquester-macos-boxes"));
+    } finally {
+      Object.assign(api, originals);
+    }
   });
 
   it("marks every secret field new-password so Chrome does not fill a saved login into the page", async () => {
