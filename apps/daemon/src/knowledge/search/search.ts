@@ -63,6 +63,12 @@ const EMBED_CALL_CHUNKS = 4;
 const FLUSH_EVERY = 64;
 /** Chunks a save waits to embed (~0.1 s each on two CPU threads); the rest are embedded after it returns. */
 const SYNC_EMBED_CHUNKS = 12;
+/**
+ * The longest a save waits for those embeddings (spec: a save returns within about 2 s). The
+ * first one after a start also loads the model; whatever is not done by then finishes in the
+ * background, and the entry is searchable by text meanwhile.
+ */
+const SYNC_EMBED_WAIT_MS = 1_200;
 
 interface Doc {
   id: string;
@@ -142,8 +148,9 @@ export class KnowledgeSearch {
 
   /**
    * Index these entries now: text at once, embeddings first in the queue. Resolves when they are
-   * searchable by text and — up to {@link SYNC_EMBED_CHUNKS} chunks in total, so a save stays
-   * fast — by meaning; longer bodies finish embedding in the background.
+   * searchable by text and — up to {@link SYNC_EMBED_CHUNKS} chunks in total, and for at most
+   * {@link SYNC_EMBED_WAIT_MS}, so a save stays fast — by meaning; the rest is embedded in the
+   * background.
    */
   async indexEntries(ids: readonly string[]): Promise<void> {
     await this.whenReady();
@@ -164,7 +171,13 @@ export class KnowledgeSearch {
     }
     const waiting = this.requestEmbeddings(now, true);
     void this.requestEmbeddings(later, false);
-    await waiting;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, SYNC_EMBED_WAIT_MS);
+      timer.unref?.();
+    });
+    await Promise.race([waiting, deadline]);
+    clearTimeout(timer);
   }
 
   /** Resolves once queued text indexing and embedding have finished (tests, shutdown). */

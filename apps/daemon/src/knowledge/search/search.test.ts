@@ -283,3 +283,30 @@ test("vectors are cached under the hash of the text that was embedded, not the h
   // The ads entry must keep its own meaning (a query sharing no word with it), not the edited entry's.
   assert.equal(entryIds((await search.search({ query: "cpc", limit: 25 }, ALL)).hits)[0], ADSPOST);
 });
+
+test("a save waits a bounded time for its embeddings (a slow first model load never holds the chat)", async (t) => {
+  const { store, search, embedder } = await setup(t);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  const embed = embedder!.embed.bind(embedder!);
+  embedder!.embed = async (texts) => {
+    if (texts.some((text) => text.includes("onboarding"))) await gate;
+    return embed(texts);
+  };
+  const id = "ke_slowslowslow";
+  store.put(id, "Welcome emails: onboarding sequences that convert.", [SEO], { title: "Onboarding emails" }, true);
+  let done = false;
+  const indexing = search.indexEntries([id]).then(() => (done = true));
+  for (let waited = 0; !done && waited < 10_000; waited += 500) {
+    t.mock.timers.tick(500);
+    for (let i = 0; i < 20 && !done; i += 1) await new Promise((resolve) => setImmediate(resolve));
+  }
+  if (!done) release();
+  assert.ok(done, "the save is still waiting for the model after 10 s");
+  await indexing;
+  assert.equal(entryIds((await search.search({ query: "welcome emails" }, ALL)).hits)[0], id, "searchable by text already");
+  release();
+  await search.idle();
+  assert.ok(entryIds((await search.search({ query: "onboarding" }, ALL)).hits).includes(id));
+});
