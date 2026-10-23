@@ -41,6 +41,11 @@ export interface KnowledgeRuntime {
   embeddingModelId: string;
   /** Embedding vector length. */
   embeddingDimensions: number;
+  /**
+   * tiktoken's cache dir (`TIKTOKEN_CACHE_DIR` of every myKG child), filled with the
+   * encodings myKG loads at install time, so a linking run never fetches one.
+   */
+  tiktokenCacheDir: string;
 }
 
 export interface KnowledgeRuntimePort {

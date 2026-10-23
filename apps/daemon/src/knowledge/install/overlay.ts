@@ -5,8 +5,10 @@
  * prompt is written for WWII aircraft documents. `../mykg-prompts/<line>/`
  * mirrors the package's paths with versions for saved posts, threads,
  * articles and notes. They keep myKG's output contract (JSON shapes, field
- * names, the trailing "## SOURCE TEXT" / "## SCHEMA:" headers the code appends
- * to) and change only the domain guidance and examples.
+ * names, and the "## SOURCE TEXT" / "## SCHEMA:" headers that end the system
+ * prompts: myKG sends the source text or schema as the separate user message,
+ * and may append its own blocks, such as a schema lock, to the system prompt
+ * after the header) and change only the domain guidance and examples.
  *
  * Overlaid for 0.4: pass1/system, pass2/system, normalize/system and the four
  * schema_merge prompts. Not overlaid (no domain wording): feedback/* (generic

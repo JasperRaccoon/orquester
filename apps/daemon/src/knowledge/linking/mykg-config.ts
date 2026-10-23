@@ -41,6 +41,8 @@ export const MYKG_CONFIG_VERSION = "0.4.10";
 /** The profile name myKG resolves (`profile:`); the only one in the file. */
 export const MYKG_PROFILE = "agent-claude-code";
 export const MYKG_CONFIG_FILE = "mykg_config.yaml";
+/** `chunking.tiktoken_encoding`: the one encoding myKG loads; the installer prefetches it (`TIKTOKEN_ENCODINGS`). */
+export const MYKG_TIKTOKEN_ENCODING = "cl100k_base";
 /**
  * Task size. A worker receives each task as an MCP tool result, which Claude Code truncates past
  * `MAX_MCP_OUTPUT_TOKENS` (25k by default; the indexer launch raises it, `CLAUDE_NO_BUILTIN_TOOLS_ENV`).
@@ -102,7 +104,7 @@ export function buildMykgConfig(options: MykgConfigOptions): Record<string, unkn
             extensions: []
           },
           fetch: { enabled: false, max_workers: 1 },
-          chunking: { window_tokens: MYKG_CHUNK_TOKENS, overlap_tokens: 800, tiktoken_encoding: "cl100k_base" },
+          chunking: { window_tokens: MYKG_CHUNK_TOKENS, overlap_tokens: 800, tiktoken_encoding: MYKG_TIKTOKEN_ENCODING },
           pass1: {
             batch_token_target: MYKG_BATCH_TOKENS,
             max_workers: workers,

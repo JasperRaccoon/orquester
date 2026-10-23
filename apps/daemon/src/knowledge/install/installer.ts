@@ -10,6 +10,8 @@
  * Layout under `knowledgeRuntimeDir(appdir)`:
  *   versions/<mykg>/venv/      the relocatable venv with `mykg==<mykg>` and the prompt overlay
  *   versions/<mykg>/models/    the embedding model (`<models>/Xenova/all-MiniLM-L6-v2/…`)
+ *   versions/<mykg>/tiktoken/  tiktoken's cache (`TIKTOKEN_CACHE_DIR`): the encodings myKG loads,
+ *                              hash-checked, under tiktoken's own names (sha1 of the URL)
  *   versions/<mykg>/runtime.json  written last, after the smoke test: what was installed
  *   python/                    uv's managed CPython (`UV_PYTHON_INSTALL_DIR`), shared by the
  *                              venvs (a venv points at its interpreter by absolute path)
@@ -23,7 +25,10 @@
  * minor line installs its PyPI wheel by sha256 with the lock's other entries,
  * hashes included, as constraints (a dependency the lock lacks fails the
  * install). Only wheels: nothing is built from source (`--no-build`; a build's
- * own dependencies carry no hash). Children get a built-from-scratch env (never the daemon's own):
+ * own dependencies carry no hash). The smoke test runs `mykg --help`, then has the
+ * installed myKG load and validate the config linking generates (its profile, its
+ * LLM adapter, its tiktoken encoding from the cache, offline), with no extraction and
+ * no LLM call. Children get a built-from-scratch env (never the daemon's own):
  * no credentials in argv or env, nothing written under the daemon user's HOME.
  */
 import { execFile } from "node:child_process";
@@ -34,9 +39,11 @@ import { dirname, join } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
+import { KNOWLEDGE_CONCURRENCY_DEFAULT } from "@orquester/api";
 import type { PluginInstalledVersion } from "@orquester/config";
 import type { KnowledgeRuntime } from "../ports.ts";
 import type { PluginRelease } from "../../plugins/updater.ts";
+import { MYKG_PROFILE, writeMykgConfig } from "../linking/mykg-config.ts";
 import {
   EMBEDDING_MODEL,
   type EmbeddingModelSpec,
@@ -47,7 +54,10 @@ import {
   MYKG_PINNED_WHEEL_SHA256,
   PYPI,
   PYTHON_VERSION,
-  type UvBuild
+  TIKTOKEN_ENCODINGS,
+  type TiktokenEncodingSpec,
+  type UvBuild,
+  tiktokenCacheKey
 } from "./pins.ts";
 import { MYKG_PROMPTS_ROOT, applyOverlay, overlayApplied, overlayDigest } from "./overlay.ts";
 
@@ -72,6 +82,7 @@ export type KnowledgeInstallStep =
   | "venv"
   | "packages"
   | "overlay"
+  | "tiktoken"
   | "smoke-test"
   | "model"
   | "install";
@@ -130,6 +141,8 @@ export interface KnowledgeRuntimeManifest {
   python: string;
   overlay: { line: string; digest: string; files: string[] };
   embeddingModel: { id: string; revision: string; dimensions: number };
+  /** The tiktoken encodings in `tiktoken/` (absent in a manifest written before they were prefetched). */
+  tiktokenEncodings?: string[];
   installedAt: string;
 }
 
@@ -172,7 +185,8 @@ export function knowledgeRuntimeOf(
     pythonBin: join(dir, "venv", "bin", "python"),
     embeddingModelDir: join(dir, "models"),
     embeddingModelId: model.id,
-    embeddingDimensions: model.dimensions
+    embeddingDimensions: model.dimensions,
+    tiktokenCacheDir: join(dir, "tiktoken")
   };
 }
 
@@ -191,12 +205,14 @@ export async function readKnowledgeManifest(versionDir: string): Promise<Knowled
  * smoke test) names it, its mykg entry point and python (through the venv's
  * link to the shared interpreter) are there, and every model file has its
  * pinned size. With `overlayDigestNow`, the overlay it was installed with must
- * be that one too (an Orquester update that changes the prompts repairs it).
+ * be that one too (an Orquester update that changes the prompts repairs it);
+ * with `encodings`, every one must be in its tiktoken cache at its pinned size
+ * (a runtime without them still runs: tiktoken would fetch them).
  */
 export async function knowledgeRuntimeReady(
   runtimeDir: string,
   version: string,
-  options: { overlayDigestNow?: string; model?: EmbeddingModelSpec } = {}
+  options: { overlayDigestNow?: string; model?: EmbeddingModelSpec; encodings?: readonly TiktokenEncodingSpec[] } = {}
 ): Promise<boolean> {
   const model = options.model ?? EMBEDDING_MODEL;
   const manifest = await readKnowledgeManifest(knowledgeVersionDir(runtimeDir, version));
@@ -210,6 +226,10 @@ export async function knowledgeRuntimeReady(
       () => null
     );
     if (!info?.isFile() || info.size !== file.size) return false;
+  }
+  for (const encoding of options.encodings ?? []) {
+    const info = await stat(join(runtime.tiktokenCacheDir, tiktokenCacheKey(encoding.url))).catch(() => null);
+    if (!info?.isFile() || info.size !== encoding.size) return false;
   }
   return true;
 }
@@ -358,14 +378,16 @@ export interface InstallKnowledgeRuntimeOptions {
   /** The prompt overlay root and the locks dir (the shipped ones by default; tests pass fixtures). */
   overlayRoot?: string;
   locksDir?: string;
-  /** The embedding model (the pinned one by default). */
+  /** The embedding model and the tiktoken encodings (the pinned ones by default). */
   model?: EmbeddingModelSpec;
+  encodings?: readonly TiktokenEncodingSpec[];
   smokeTestTimeoutMs?: number;
 }
 
 /**
  * Download uv, install the managed Python, build the venv with `release`,
- * overlay the prompts, smoke-test, fetch the embedding model, and rename it
+ * overlay the prompts, prefetch tiktoken's encodings, smoke-test (`--help`
+ * and the generated config), fetch the embedding model, and rename it
  * all into `versions/<version>/`. A leftover dir of the same version (one the
  * state no longer names) is replaced. Returns the record to store as
  * `current` (`integrity` is the wheel's `sha256:<hex>`); throws a
@@ -386,10 +408,12 @@ export async function installKnowledgeRuntime(
   const overlayRoot = options.overlayRoot ?? MYKG_PROMPTS_ROOT;
   const locksDir = options.locksDir ?? MYKG_LOCKS_DIR;
   const model = options.model ?? EMBEDDING_MODEL;
+  const encodings = options.encodings ?? TIKTOKEN_ENCODINGS;
   const { uv: build, signal } = options;
   const staging = join(knowledgeStagingDir(runtimeDir), `${release.version}-${randomUUID()}`);
   const built = join(staging, "runtime");
   const venv = join(built, "venv");
+  const tiktokenDir = join(built, "tiktoken");
   const env = uvEnv(runtimeDir, staging, options.env);
   const uvBin = join(staging, "uv", `uv-${build.target}`, "uv");
   const runStep = async (name: KnowledgeInstallStep, timeoutMs: number, command: string, args: string[]) =>
@@ -458,16 +482,38 @@ export async function installKnowledgeRuntime(
       return { line: MYKG_LINE, digest: await overlayDigest(MYKG_LINE, overlayRoot), files };
     });
 
+    await step("tiktoken", DOWNLOAD_TIMEOUT_MS, signal, async (bounded) => {
+      await mkdir(tiktokenDir, { recursive: true });
+      for (const encoding of encodings) {
+        const dest = join(tiktokenDir, tiktokenCacheKey(encoding.url));
+        await deps.download(encoding.url, dest, bounded);
+        if ((await sha256Hex(dest)) !== encoding.sha256) {
+          throw new Error(`tiktoken's ${encoding.name} encoding does not match its sha256`);
+        }
+      }
+    });
+
     await step("smoke-test", 0, signal, async () => {
       const timeoutMs = options.smokeTestTimeoutMs ?? KNOWLEDGE_SMOKE_TEST_TIMEOUT_MS;
-      const result = await deps.run(join(venv, "bin", "mykg"), ["--help"], {
-        cwd: staging,
-        env: mykgEnv(runtimeDir, venv, options.env),
-        timeoutMs,
-        signal
-      });
-      assertSucceeded(result, "mykg --help", timeoutMs);
-      if (!result.stdout.includes("extract-graph")) throw new Error("mykg --help lists no extract-graph command");
+      const env = { ...mykgEnv(runtimeDir, venv, options.env), TIKTOKEN_CACHE_DIR: tiktokenDir };
+      const help = await deps.run(join(venv, "bin", "mykg"), ["--help"], { cwd: staging, env, timeoutMs, signal });
+      assertSucceeded(help, "mykg --help", timeoutMs);
+      if (!help.stdout.includes("extract-graph")) throw new Error("mykg --help lists no extract-graph command");
+
+      // The config linking writes, loaded and checked by this myKG from a dir of its own.
+      const smokeDir = join(staging, "smoke");
+      await writeMykgConfig(smokeDir, { concurrency: KNOWLEDGE_CONCURRENCY_DEFAULT });
+      const check = await deps.run(
+        join(venv, "bin", "python"),
+        ["-I", "-c", MYKG_CONFIG_CHECK, MYKG_PROFILE, join(smokeDir, "intermediate")],
+        { cwd: smokeDir, env, timeoutMs, signal }
+      );
+      if (check.spawnError || check.timedOut) assertSucceeded(check, "the config check", timeoutMs);
+      const report = check.exitCode === 0 ? parseConfigCheck(check.stdout) : null;
+      if (report?.profile !== MYKG_PROFILE) {
+        const detail = lastLines(check.stderr || check.stdout) || `exit ${check.exitCode ?? "by a signal"}`;
+        throw new Error(`myKG ${release.version} rejected the generated config (profile ${MYKG_PROFILE}): ${detail}`);
+      }
     });
 
     await step("model", DOWNLOAD_TIMEOUT_MS, signal, async (bounded) => {
@@ -492,6 +538,7 @@ export async function installKnowledgeRuntime(
         python: PYTHON_VERSION,
         overlay,
         embeddingModel: { id: model.id, revision: model.revision, dimensions: model.dimensions },
+        tiktokenEncodings: encodings.map((encoding) => encoding.name),
         installedAt
       };
       await writeFile(join(built, MANIFEST_FILE), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o644 });
@@ -515,6 +562,50 @@ export async function installKnowledgeRuntime(
     return { version: release.version, integrity: `sha256:${release.wheelSha256}`, installedAt };
   } finally {
     await rm(staging, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+/**
+ * The config check of the smoke test (`python -I -c <this> <profile> <intermediate dir>`, cwd
+ * = the dir holding the generated `mykg_config.yaml`). Importing `mykg.config` finds that file,
+ * resolves the selected profile and reads every constant (a missing key raises); `mykg.pipeline`
+ * imports every step module against it; `load_adapter` builds the profile's LLM adapter (the
+ * agent adapter only makes its inbox and outbox dirs: no call); and the configured tiktoken
+ * encoding loads with tiktoken's downloader replaced, so only the prefetched cache can serve it.
+ * Prints one JSON line.
+ */
+export const MYKG_CONFIG_CHECK = `
+import json, sys
+import tiktoken, tiktoken.load
+
+def offline(blobpath):
+    raise RuntimeError("tiktoken tried to download " + blobpath + ": it is not in the runtime's cache")
+
+tiktoken.load.read_file = offline
+
+import mykg.config as cfg
+import mykg.pipeline
+from mykg.llm.config import load_adapter
+
+profile, intermediate = sys.argv[1], sys.argv[2]
+selected = cfg.RAW.get("profile")
+if selected != profile:
+    raise SystemExit("the config selects profile %r, not %r" % (selected, profile))
+adapter = load_adapter(intermediate_dir=intermediate)
+encoding = tiktoken.get_encoding(cfg.CHUNK_TIKTOKEN_ENCODING)
+encoding.encode("smoke test")
+print(json.dumps({"config": str(cfg.CONFIG_PATH), "profile": selected, "provider": cfg.RAW.get("provider"),
+                  "adapter": type(adapter).__name__, "encoding": encoding.name}))
+`;
+
+/** The config check's report (its last stdout line), or null when it printed none. */
+function parseConfigCheck(stdout: string): { profile?: unknown } | null {
+  const line = stdout.trim().split(/\r?\n/).at(-1) ?? "";
+  try {
+    const value = JSON.parse(line) as unknown;
+    return typeof value === "object" && value !== null ? (value as { profile?: unknown }) : null;
+  } catch {
+    return null;
   }
 }
 
