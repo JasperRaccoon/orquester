@@ -32,7 +32,7 @@ import {
 } from "../../../lib/boxes/store";
 import { readDestroyedReason } from "../../../lib/boxes/validate";
 import { useAppStore, type AppState } from "../../../store/app";
-import { boxShellRefId, boxTerminalTitle, currentSetupStep } from "./box-surfaces.logic";
+import { boxShellRefId, boxTerminalTitle, currentSetupStep, setupStepText } from "./box-surfaces.logic";
 
 export { useBoxConfigChanges, useBoxes };
 
@@ -79,7 +79,7 @@ export function useProjectBox(projectPath: string | null | undefined, listed?: P
       return {
         info: normalizedInfo(projectBoxInfo(live)),
         box: live,
-        setupStep: live.state === "provisioning" ? (currentSetupStep(live.setup)?.label ?? null) : null
+        setupStep: live.state === "provisioning" ? setupStepText(currentSetupStep(live.setup)) : null
       };
     }
     return summary ? { info: normalizedInfo(summary), box: null, setupStep: null } : null;

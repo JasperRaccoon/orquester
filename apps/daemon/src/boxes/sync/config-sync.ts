@@ -30,6 +30,36 @@
  * host's version back in the box (or deletes a file the box added). A set whose host copy moved
  * since it was made is marked `stale` instead and the host copy wins; a file whose box copy moved
  * since (a newer change, in a newer set) is left out of the decision.
+ *
+ * **Sending.** A pass with at least `bulkMinFiles` raw files to send (a new box's first sync, a
+ * plugin update) sends them as ONE gzipped tar stream extracted in the box (`tar-write`), then
+ * reads the box's size and mtime of each with one concurrent listing of their dirs for the
+ * baseline. `tar` keeps each file's mode bits (the box user's umask applies, as for any `tar -x`
+ * by a non-root user: exec bits survive, group/other write may not) and its whole-second mtime.
+ * If the box's `orq-agent` cannot inflate (older than `compression`) the stream goes plain; if
+ * `tar-write` fails at all, the files go one by one. Codec'd configs, small batches and that
+ * fallback use a file channel per file, `PUSH_CONCURRENCY` at a time.
+ *
+ * **Shared dirs: mirrored links.** `syncAccountHome` makes `skills`, `plugins` (and `commands`)
+ * of every Claude account home links to ONE shared dir. On a POSIX box with identity paths, an
+ * included top-level entry of an account root that is a link to a dir named like the entry
+ * (`<home>/skills` → `…/.claude/skills`) becomes the same link in the box, and its target is
+ * synced ONCE per box as a *linked root*: root = the target's parent, the account rule with only
+ * that entry included, two-way like the account root. Its box paths are the target's (the box
+ * uses the host's paths), so its baselines, change sets and approvals name the shared files
+ * themselves: a box-made change under it is one change, approved once, written to the host file
+ * it names (deny list checked on its realpath, as always), and pushed to every other box. The
+ * account root then neither walks nor accepts anything below a mirrored entry. Not mirrored (the
+ * link's target walked and materialized as before): Windows boxes (links need privileges there)
+ * and mapped paths, prepared profile dirs, a target named otherwise, inside the root or holding
+ * it, a denied target (never synced at all), and every box where making a link failed once.
+ * When the host's entry stops being such a link the box link is removed and the entry syncs as
+ * a real dir; when a real dir becomes one, the box's old copy moves to the target (if the box has
+ * none yet; else it is dropped) with its baselines, and pending sets touching it go stale.
+ *
+ * **Claude's plugin cache.** Below `plugins/cache` only the dirs some `installed_plugins.json`
+ * points at sync (the host's, and the box's so that a plugin installed in the box is collected
+ * for approval with its files); old versions and `temp_git_*` clones stay out.
  */
 
 import { randomUUID } from "node:crypto";
@@ -55,8 +85,21 @@ import {
 } from "@orquester/config";
 
 import { unifiedDiff } from "../../mcp/tools/agent-profile-preview.ts";
-import type { BoxConfigSync, BoxConnection, BoxHub, BoxSyncScope } from "../contracts.ts";
-import { boxPathOf, boxStat, execBoxHasher, readBoxFile, removeBoxPath, walkBox, writeBoxFile, type BoxFile, type BoxHasher } from "./box-fs.ts";
+import type { BoxConfigSync, BoxConnection, BoxHub, BoxSyncProgress, BoxSyncScope } from "../contracts.ts";
+import {
+  boxPathOf,
+  boxStat,
+  execBoxHasher,
+  forEachLimited,
+  readBoxFile,
+  removeBoxPath,
+  statBoxFiles,
+  walkBox,
+  writeBoxFile,
+  writeBoxTar,
+  type BoxFile,
+  type BoxHasher
+} from "./box-fs.ts";
 import { syncCodec, type CodecContext } from "./codecs.ts";
 import {
   hostFileAt,
@@ -74,12 +117,17 @@ import {
   type HostWatchTarget
 } from "./host-fs.ts";
 import {
+  CLAUDE_INSTALLED_PLUGINS_REL,
   defaultSyncDenyRoots,
   executableConfigKeys,
+  installedPluginCacheDirs,
   isDeniedRealPath,
   isExecutableChange,
   isInsidePath,
   isSyncedRel,
+  isUninstalledPluginCache,
+  ruleExcluding,
+  ruleWithOnly,
   syncRootKind,
   syncRuleFor,
   type SyncAgent,
@@ -117,8 +165,15 @@ export interface BoxConfigSyncOptions {
   hasher?: BoxHasher;
   /** Watch host trees with `fs.watch` (off: call {@link BoxConfigSyncService.hostChanged} instead). */
   watchHost?: boolean;
+  /** A pass sending at least this many raw files sends them as one tar stream (default {@link BULK_MIN_FILES}). */
+  bulkMinFiles?: number;
   now?: () => Date;
 }
+
+/** Raw files a pass sends as one tar stream from this many on. */
+export const BULK_MIN_FILES = 16;
+/** File channels (or removals, mkdirs) in flight at once when files go one by one. */
+const PUSH_CONCURRENCY = 12;
 
 export class BoxSyncError extends Error {
   constructor(
@@ -137,6 +192,19 @@ interface SyncRoot {
   root: string;
   agent: SyncAgent;
   rule: SyncRule;
+  /** A linked root (module doc): the one top-level entry it stands for. */
+  link?: string;
+}
+
+interface PassOptions {
+  mode: "full" | "host" | "paths";
+  paths?: ReadonlySet<string>;
+  signal?: AbortSignal;
+  onProgress?: (progress: BoxSyncProgress) => void;
+}
+
+function linkedRootKey(agent: SyncAgent, target: string): string {
+  return `${agent}:link:${target}`;
 }
 
 interface HostWatcherEntry {
@@ -168,6 +236,20 @@ interface Runtime {
   connection: BoxConnection | null;
   unbind: (() => void)[];
   hubUnsub: (() => void) | null;
+  /** Linked roots by key, with the keys of the roots whose link they stand for. */
+  linked: Map<string, { root: SyncRoot; owners: Set<string> }>;
+  /** Root key → its mirrored top-level entries (name → target realpath), as of its last host walk. */
+  linksOf: Map<string, Map<string, string>>;
+  /** Box top-level entries known (this connection) to be in the shape the host wants: path → `dir` or `link:<target>`. */
+  boxTops: Map<string, string>;
+  /** Making a link in this box failed: nothing is mirrored here any more. */
+  noLinks: boolean;
+  /** `tar-write` failed on this connection: files go one by one until it reconnects. */
+  noTar: boolean;
+  /** `orq-agent` here did not inflate a gzipped tar: plain ones until it reconnects. */
+  noGzip: boolean;
+  /** Root key → the plugin cache dirs the box's `installed_plugins.json` named at its last read. */
+  boxPluginDirs: Map<string, Set<string>>;
 }
 
 /** Both sides of one path, as a change set file sees them. */
@@ -239,6 +321,7 @@ export class BoxConfigSyncService implements BoxConfigSync {
   private readonly idleFlushMs: number;
   private readonly turnMarkMaxMs: number;
   private readonly boxEventDebounceMs: number;
+  private readonly bulkMinFiles: number;
   private readonly now: () => Date;
   private watchCounter = 0;
   private closed = false;
@@ -254,13 +337,19 @@ export class BoxConfigSyncService implements BoxConfigSync {
     this.idleFlushMs = options.idleFlushMs ?? 3000;
     this.turnMarkMaxMs = options.turnMarkMaxMs ?? 6 * 60 * 60_000;
     this.boxEventDebounceMs = options.boxEventDebounceMs ?? 100;
+    this.bulkMinFiles = options.bulkMinFiles ?? BULK_MIN_FILES;
   }
 
   // -------------------------------------------------------------------------
   // BoxConfigSync
   // -------------------------------------------------------------------------
 
-  async ensureSynced(boxId: string, scope: BoxSyncScope, signal: AbortSignal): Promise<void> {
+  async ensureSynced(
+    boxId: string,
+    scope: BoxSyncScope,
+    signal: AbortSignal,
+    options: { onProgress?: (progress: BoxSyncProgress) => void } = {}
+  ): Promise<void> {
     const roots = this.resolveRoots(scope);
     const connection = this.requireConnection(boxId);
     const runtime = this.runtime(boxId);
@@ -268,10 +357,7 @@ export class BoxConfigSyncService implements BoxConfigSync {
     await this.enqueue(runtime, async () => {
       await this.store.load();
       await connection.request("agent.ensurePaths", { paths: roots.map((root) => boxPathOf(connection, root.root)) }, { signal });
-      for (const root of roots) {
-        signal.throwIfAborted();
-        await this.pass(runtime, connection, root, { mode: "full", signal });
-      }
+      await this.passAll(runtime, connection, roots, { mode: "full", signal, onProgress: options.onProgress });
     });
   }
 
@@ -292,7 +378,7 @@ export class BoxConfigSyncService implements BoxConfigSync {
     if (wasBound && bound?.connected) {
       this.background(runtime, "watch start", async () => {
         await this.store.load();
-        for (const root of roots) await this.pass(runtime, bound, root, { mode: "host" });
+        await this.passAll(runtime, bound, roots, { mode: "host" });
         await this.refreshWatches(runtime);
       });
     }
@@ -327,9 +413,8 @@ export class BoxConfigSyncService implements BoxConfigSync {
     }
     await this.enqueue(runtime, async () => {
       await this.store.load();
-      for (const root of runtime.roots.values()) {
-        if (root.rule.twoWay) await this.pass(runtime, connection, root, { mode: "full" });
-      }
+      const twoWay = [...runtime.roots.values()].filter((root) => root.rule.twoWay);
+      await this.passAll(runtime, connection, twoWay, { mode: "full" });
       await this.flush(runtime, connection, threadId);
     });
   }
@@ -439,7 +524,14 @@ export class BoxConfigSyncService implements BoxConfigSync {
         boxWatches: new Map(),
         connection: null,
         unbind: [],
-        hubUnsub: null
+        hubUnsub: null,
+        linked: new Map(),
+        linksOf: new Map(),
+        boxTops: new Map(),
+        noLinks: false,
+        noTar: false,
+        noGzip: false,
+        boxPluginDirs: new Map()
       };
       this.runtimes.set(boxId, runtime);
     }
@@ -488,7 +580,31 @@ export class BoxConfigSyncService implements BoxConfigSync {
     return [...out.values()];
   }
 
+  /** The watched roots and the linked roots they own: what host and box watchers cover. */
+  private watchTargets(runtime: Runtime): SyncRoot[] {
+    const roots = this.watchedRoots(runtime);
+    const keys = new Set(roots.map((root) => root.key));
+    for (const entry of runtime.linked.values()) {
+      if (!keys.has(entry.root.key) && [...entry.owners].some((owner) => keys.has(owner))) {
+        keys.add(entry.root.key);
+        roots.push(entry.root);
+      }
+    }
+    return roots;
+  }
+
+  /** A root this runtime syncs (a scope root or a linked root), by key. */
+  private rootByKey(runtime: Runtime, key: string): SyncRoot | undefined {
+    return runtime.roots.get(key) ?? runtime.linked.get(key)?.root;
+  }
+
   private rootOf(runtime: Runtime, file: StoredBoxConfigChangeFile): SyncRoot | null {
+    // A root synced now (a linked root's rule includes only its entry); else rebuilt from the record.
+    for (const root of [...runtime.roots.values(), ...[...runtime.linked.values()].map((entry) => entry.root)]) {
+      if ((file.root !== undefined && file.root !== root.root) || (file.agent !== undefined && file.agent !== root.agent)) continue;
+      const rel = relOf(root.root, file.path);
+      if (rel !== null && isSyncedRel(root.rule, rel) && !runtime.linksOf.get(root.key)?.has(rel.split("/")[0]!)) return root;
+    }
     if (file.root !== undefined && file.agent !== undefined) {
       const agent = file.agent as SyncAgent;
       if (agent === "claude" || agent === "codex" || agent === "grok" || agent === "opencode") {
@@ -522,11 +638,15 @@ export class BoxConfigSyncService implements BoxConfigSync {
       connection.onEvent("fs.change", (data) => this.onBoxEvent(runtime, connection, data as BoxFsChangeEvent)),
       connection.onStatus((connected) => {
         runtime.boxWatches.clear();
+        // What this connection learned about the box (its links, its orq-agent) is checked again.
+        runtime.boxTops.clear();
+        runtime.noTar = false;
+        runtime.noGzip = false;
         if (!connected || this.closed || runtime.scopes.size === 0) return;
         // Back: watches are gone on the box side; re-create them and compare everything.
         this.background(runtime, "reconnect pass", async () => {
           await this.store.load();
-          for (const root of runtime.roots.values()) await this.pass(runtime, connection, root, { mode: "full" });
+          await this.passAll(runtime, connection, [...runtime.roots.values()], { mode: "full" });
           await this.refreshWatches(runtime);
           if (runtime.collected.size > 0) this.scheduleFlush(runtime);
         });
@@ -535,7 +655,7 @@ export class BoxConfigSyncService implements BoxConfigSync {
     if (connection.connected) {
       this.background(runtime, "watch start", async () => {
         await this.store.load();
-        for (const root of this.watchedRoots(runtime)) await this.pass(runtime, connection, root, { mode: "host" });
+        await this.passAll(runtime, connection, this.watchedRoots(runtime), { mode: "host" });
         await this.refreshWatches(runtime);
       });
     }
@@ -568,15 +688,18 @@ export class BoxConfigSyncService implements BoxConfigSync {
   /** Bring host and box watchers in line with the watched roots. */
   private async refreshWatches(runtime: Runtime): Promise<void> {
     if (this.closed) return;
-    const roots = this.watchedRoots(runtime);
+    const roots = this.watchTargets(runtime);
     this.refreshHostWatchers(runtime, roots);
     const connection = runtime.connection;
     if (!connection?.connected) return;
     const wanted = new Map<string, SyncRoot>();
     for (const root of roots) {
       if (!root.rule.twoWay) continue;
-      wanted.set(root.root, root);
+      // A linked root's parent is not ours to watch: only its one entry is.
+      if (root.link === undefined) wanted.set(root.root, root);
+      const links = runtime.linksOf.get(root.key);
       for (const top of root.rule.include) {
+        if (links?.has(top)) continue; // the linked root watches its target
         const dir = `${root.root}/${top}`;
         const info = await boxStat(connection, dir).catch(() => null);
         if (info?.kind === "dir") wanted.set(dir, root);
@@ -671,7 +794,7 @@ export class BoxConfigSyncService implements BoxConfigSync {
       const connection = runtime.connection;
       if (!connection?.connected || this.closed) return;
       await this.store.load();
-      for (const root of this.watchedRoots(runtime)) await this.pass(runtime, connection, root, { mode: "host" });
+      await this.passAll(runtime, connection, this.watchedRoots(runtime), { mode: "host" });
       await this.refreshWatches(runtime);
     });
   }
@@ -698,7 +821,7 @@ export class BoxConfigSyncService implements BoxConfigSync {
         await this.store.load();
         let newTopDir = false;
         for (const [key, paths] of pending) {
-          const root = runtime.roots.get(key);
+          const root = this.rootByKey(runtime, key);
           if (!root) continue;
           await this.pass(runtime, connection, root, { mode: "paths", paths });
           newTopDir ||= [...paths].some((path) => {
@@ -739,24 +862,117 @@ export class BoxConfigSyncService implements BoxConfigSync {
   // -------------------------------------------------------------------------
 
   /**
+   * Pass `roots`, then every linked root they own (each once, after them: an account root's pass
+   * makes the box links its linked roots' files are reached through).
+   */
+  private async passAll(runtime: Runtime, connection: BoxConnection, roots: readonly SyncRoot[], options: PassOptions): Promise<void> {
+    const done = new Set<string>();
+    for (const root of roots) {
+      if (done.has(root.key)) continue;
+      done.add(root.key);
+      options.signal?.throwIfAborted();
+      await this.pass(runtime, connection, root, options);
+    }
+    for (const root of roots) {
+      for (const target of runtime.linksOf.get(root.key)?.values() ?? []) {
+        const linked = runtime.linked.get(linkedRootKey(root.agent, target))?.root;
+        if (!linked || done.has(linked.key)) continue;
+        done.add(linked.key);
+        options.signal?.throwIfAborted();
+        await this.pass(runtime, connection, linked, options);
+      }
+    }
+  }
+
+  /** Whether `root`'s top-level dir links may be mirrored in this box (module doc). */
+  private mirrorsLinks(runtime: Runtime, connection: BoxConnection, root: SyncRoot): boolean {
+    return root.rule.twoWay && root.link === undefined && !runtime.noLinks && connection.sys.os !== "win32" && connection.paths.kind === "identity";
+  }
+
+  /** Record `root`'s mirrored links (from its host walk) and the linked roots they stand for. */
+  private updateLinks(runtime: Runtime, root: SyncRoot, links: ReadonlyMap<string, string>): void {
+    const keys = new Set<string>();
+    for (const [top, target] of links) {
+      const key = linkedRootKey(root.agent, target);
+      keys.add(key);
+      let entry = runtime.linked.get(key);
+      if (!entry) {
+        entry = { root: { key, root: posix.dirname(target), agent: root.agent, rule: ruleWithOnly(root.rule, top), link: top }, owners: new Set() };
+        runtime.linked.set(key, entry);
+      }
+      entry.owners.add(root.key);
+    }
+    for (const target of runtime.linksOf.get(root.key)?.values() ?? []) {
+      const key = linkedRootKey(root.agent, target);
+      const entry = runtime.linked.get(key);
+      if (keys.has(key) || !entry) continue;
+      entry.owners.delete(root.key);
+      if (entry.owners.size === 0) {
+        // Nothing links it any more: no more passes nor watches (its box copy stays, unused).
+        runtime.linked.delete(key);
+        runtime.hostTargets.delete(key);
+        runtime.hostDirs.delete(key);
+      }
+    }
+    runtime.linksOf.set(root.key, new Map(links));
+  }
+
+  /**
+   * The rule a pass of `root` goes by: its own, and for a Claude account root (or one of its
+   * linked roots) with a `plugins/cache`, only the cache dirs an `installed_plugins.json` names
+   * (the host's, plus the box's read in `full` passes and when a `paths` pass covers it). A
+   * `paths` pass whose box file names new dirs also looks at those dirs (returned in `paths`).
+   */
+  private async passRule(
+    runtime: Runtime,
+    connection: BoxConnection,
+    root: SyncRoot,
+    options: PassOptions
+  ): Promise<{ rule: SyncRule; paths: ReadonlySet<string> | undefined }> {
+    const { rule } = root;
+    if (rule.agent !== "claude" || rule.kind !== "account" || !rule.include.has("plugins")) return { rule, paths: options.paths };
+    // A mirrored `plugins` is its linked root's to filter (it was at the last walk; one that stopped
+    // being a link is filtered from the next pass on).
+    if (runtime.linksOf.get(root.key)?.has("plugins")) return { rule, paths: options.paths };
+    const listPath = `${root.root}/${CLAUDE_INSTALLED_PLUGINS_REL}`;
+    let hostDirs: string[] | null = null;
+    try {
+      const file = await hostFileAt(root.root, rule, listPath, this.denyRoots);
+      if (file) hostDirs = installedPluginCacheDirs(await readFile(file.real));
+    } catch {
+      hostDirs = null; // unreadable: no filter (as without the file)
+    }
+    let paths = options.paths;
+    const known = runtime.boxPluginDirs.get(root.key);
+    const readBox = options.mode === "full" || (options.mode === "paths" && [...(options.paths ?? [])].some((path) => isInsidePath(listPath, path)));
+    if (readBox) {
+      const bytes = await readBoxFile(connection, listPath, { signal: options.signal }).catch(() => undefined);
+      if (bytes !== undefined) {
+        const boxDirs = new Set(bytes === null ? [] : (installedPluginCacheDirs(bytes) ?? []));
+        runtime.boxPluginDirs.set(root.key, boxDirs);
+        if (options.mode === "paths") {
+          const added = [...boxDirs].filter((dir) => !known?.has(dir) && !hostDirs?.includes(dir));
+          if (added.length > 0) paths = new Set([...(options.paths ?? []), ...added.map((dir) => `${root.root}/plugins/cache/${dir}`)]);
+        }
+      }
+    }
+    if (hostDirs === null) return { rule, paths };
+    const allowed = new Set([...hostDirs, ...(runtime.boxPluginDirs.get(root.key) ?? [])]);
+    return { rule: ruleExcluding(rule, (rel) => isUninstalledPluginCache(rel, allowed)), paths };
+  }
+
+  /**
    * Compare one root and act (table in the module doc). Modes: `full` walks both sides; `host`
    * walks the host and trusts the baseline for the box (a host-change push); `paths` checks the
    * given host paths (and box dirs among them) on both sides.
    */
-  private async pass(
-    runtime: Runtime,
-    connection: BoxConnection,
-    root: SyncRoot,
-    options: { mode: "full" | "host" | "paths"; paths?: ReadonlySet<string>; signal?: AbortSignal }
-  ): Promise<void> {
+  private async pass(runtime: Runtime, connection: BoxConnection, root: SyncRoot, options: PassOptions): Promise<void> {
     if (!connection.connected) return;
-    const { mode, signal } = options;
+    const { mode, signal, onProgress } = options;
+    onProgress?.({ root: root.root, done: 0, total: 0 });
     const ctx: CodecContext = { paths: connection.paths };
     const baseline = await this.baselines.get(runtime.boxId);
-    const accept = (path: string): boolean => {
-      const rel = relOf(root.root, path);
-      return rel !== null && isSyncedRel(root.rule, rel);
-    };
+    const { rule, paths: checkPaths } = await this.passRule(runtime, connection, root, options);
 
     // Host side (`paths` mode: looked up per candidate below).
     const host = new Map<string, HostFile>();
@@ -764,10 +980,27 @@ export class BoxConfigSyncService implements BoxConfigSync {
     /** Host paths whose state could not be read: nothing at or below them is pushed, deleted or recorded. */
     const unreadable: string[] = [];
     if (mode !== "paths") {
-      const tree = await walkHost(root.root, root.rule, this.denyRoots);
+      const mirror = this.mirrorsLinks(runtime, connection, root);
+      const tree = await walkHost(root.root, rule, this.denyRoots, {
+        mirrorLink: mirror
+          ? (name, real, rootReal) => posix.basename(real) === name && !isInsidePath(real, rootReal) && !isInsidePath(rootReal, real) && !isInsidePath(root.root, real)
+          : undefined
+      });
       for (const [path, file] of tree.files) host.set(path, file);
       hostDirs = tree.dirs;
       unreadable.push(...tree.unreadable);
+      this.updateLinks(runtime, root, tree.links);
+      if (!(await this.alignBoxTops(runtime, connection, root, tree.links, hostDirs, baseline, mode === "full", signal))) {
+        // This box cannot make links: everything is materialized here from now on.
+        runtime.noLinks = true;
+        return this.pass(runtime, connection, root, options);
+      }
+      if (root.link !== undefined) {
+        // A linked root watches its one dir (the target), not the whole parent.
+        const dir = `${root.root}/${root.link}`;
+        tree.watch = tree.watch.filter((target) => target.logical !== root.root);
+        tree.watch.unshift({ dir, recursive: true, name: null, logical: dir });
+      }
       runtime.hostTargets.set(root.key, tree.watch);
       // A dir that appeared since the last walk may still be filling (a skill installed as
       // mkdir, then its files): what lands in it before its watcher exists raises no event, so
@@ -776,16 +1009,23 @@ export class BoxConfigSyncService implements BoxConfigSync {
       runtime.hostDirs.set(root.key, tree.dirs);
       if (before !== undefined && [...tree.dirs].some((dir) => !before.has(dir))) this.scheduleHostPass(runtime);
     }
+    // Mirrored entries are the linked roots' business: nothing below them is this root's.
+    const links = runtime.linksOf.get(root.key) ?? new Map<string, string>();
+    const accept = (path: string): boolean => {
+      const rel = relOf(root.root, path);
+      return rel !== null && !links.has(rel.split("/")[0]!) && isSyncedRel(rule, rel);
+    };
     // Box side (`host` mode: the baseline stands for it).
     let box: Map<string, BoxFile> | null = null;
     let boxDirs = new Set<string>();
     if (mode === "full") {
-      const tree = await walkBox(connection, [...root.rule.include].map((top) => `${root.root}/${top}`), accept, signal);
+      const starts = [...rule.include].filter((top) => !links.has(top)).map((top) => `${root.root}/${top}`);
+      const tree = await walkBox(connection, starts, accept, signal);
       box = tree.files;
       boxDirs = tree.dirs;
     } else if (mode === "paths") {
       box = new Map();
-      for (const path of options.paths ?? []) {
+      for (const path of checkPaths ?? []) {
         if (!accept(path)) continue;
         const tree = await walkBox(connection, [path], accept, signal);
         for (const [child, file] of tree.files) box.set(child, file);
@@ -797,14 +1037,14 @@ export class BoxConfigSyncService implements BoxConfigSync {
     if (box) for (const path of box.keys()) candidates.add(path);
     for (const path of baseline.keys()) {
       if (relOf(root.root, path) === null) continue;
-      if (mode === "paths" && ![...(options.paths ?? [])].some((p) => isInsidePath(path, p))) continue;
+      if (mode === "paths" && ![...(checkPaths ?? [])].some((p) => isInsidePath(path, p))) continue;
       candidates.add(path);
     }
     if (mode === "paths") {
-      for (const path of options.paths ?? []) if (accept(path)) candidates.add(path);
+      for (const path of checkPaths ?? []) if (accept(path)) candidates.add(path);
       for (const path of candidates) {
         try {
-          const file = await hostFileAt(root.root, root.rule, path, this.denyRoots);
+          const file = await hostFileAt(root.root, rule, path, this.denyRoots);
           if (file) host.set(path, file);
         } catch {
           unreadable.push(path);
@@ -886,14 +1126,36 @@ export class BoxConfigSyncService implements BoxConfigSync {
         continue;
       }
       if (root.rule.twoWay && (known ? hh === known.h : hh === null)) {
-        runtime.collected.set(path, root);
+        // A box-made change: collected for approval, unless the CLI manages the file (left as the box has it).
+        if (rule.hostOnly(relOf(root.root, path)!)) runtime.collected.delete(path);
+        else runtime.collected.set(path, root);
         continue;
       }
       runtime.collected.delete(path);
       (hh === null ? removals : pushes).push(path);
     }
 
-    for (const path of pushes) {
+    // Sending: progress per file sent.
+    let sent = 0;
+    const sentOne = (): void => {
+      sent = Math.min(pushes.length, sent + 1);
+      onProgress?.({ root: root.root, done: sent, total: pushes.length });
+    };
+    if (pushes.length > 0) onProgress?.({ root: root.root, done: 0, total: pushes.length });
+    let oneByOne = pushes;
+    const raw = pushes.filter((path) => rule.codec(relOf(root.root, path)!) === "raw");
+    if (raw.length >= this.bulkMinFiles && !runtime.noTar) {
+      const bulk = await this.pushTar(runtime, connection, root, raw, host, hostHash, baseline, sentOne, signal);
+      if (bulk) {
+        const done = new Set(raw);
+        oneByOne = pushes.filter((path) => !done.has(path));
+        // The extracting tar made every dir on the way to what it wrote.
+        for (const path of raw) for (let dir = posix.dirname(path); relOf(root.root, dir) !== null; dir = posix.dirname(dir)) boxDirs.add(dir);
+      } else {
+        sent = 0;
+      }
+    }
+    await forEachLimited(oneByOne, PUSH_CONCURRENCY, async (path) => {
       signal?.throwIfAborted();
       try {
         await this.pushToBox(connection, root, path, host.get(path)!, hostHash.get(path)!, baseline, ctx);
@@ -901,15 +1163,18 @@ export class BoxConfigSyncService implements BoxConfigSync {
         if (!connection.connected) throw error;
         this.options.logger?.warn?.(`box sync (${runtime.boxId}): pushing ${path} failed: ${error instanceof Error ? error.message : String(error)}`);
       }
-    }
-    for (const path of removals) {
+      sentOne();
+    });
+    await forEachLimited(removals, PUSH_CONCURRENCY, async (path) => {
       await removeBoxPath(connection, path);
       baseline.delete(path);
-    }
+    });
     if (mode === "full") {
-      for (const dir of hostDirs) {
-        if (!boxDirs.has(dir)) await connection.request("fs.mkdir", { path: boxPathOf(connection, dir), recursive: true });
-      }
+      // Not in CLI-managed trees: the box CLI's own layout there stands (files sent make their dirs).
+      const missing = [...hostDirs].filter((dir) => !boxDirs.has(dir) && !rule.hostOnly(relOf(root.root, dir) ?? ""));
+      await forEachLimited(missing, PUSH_CONCURRENCY, async (dir) => {
+        await connection.request("fs.mkdir", { path: boxPathOf(connection, dir), recursive: true });
+      });
     }
     if (removals.length > 0) await this.pruneEmptyBoxDirs(connection, root, removals, hostDirs);
     for (const set of staleSets) await this.markStale(runtime, set, root);
@@ -940,6 +1205,165 @@ export class BoxConfigSyncService implements BoxConfigSync {
     await writeBoxFile(connection, path, data, codecId === "raw" ? hostFile.mode : 0o600);
     const info = await boxStat(connection, path);
     if (info) baseline.set(path, { h: hash, s: info.size, m: info.mtimeMs });
+  }
+
+  /**
+   * Send raw files as one tar stream (gzipped unless this box's `orq-agent` cannot inflate it) and
+   * record each one's box size and mtime from one concurrent listing of their dirs. False (and
+   * nothing recorded) when the box could not extract it: the caller sends them one by one.
+   */
+  private async pushTar(
+    runtime: Runtime,
+    connection: BoxConnection,
+    root: SyncRoot,
+    paths: readonly string[],
+    host: ReadonlyMap<string, HostFile>,
+    hostHash: ReadonlyMap<string, string | null>,
+    baseline: Map<string, BoxSyncBaselineEntry>,
+    onFile: () => void,
+    signal: AbortSignal | undefined
+  ): Promise<boolean> {
+    const files = paths.map((path) => {
+      const file = host.get(path)!;
+      return { path, source: file.real, mode: file.mode };
+    });
+    let written: Map<string, number> | null = null;
+    for (const gzip of runtime.noGzip ? [false] : [true, false]) {
+      try {
+        written = await writeBoxTar(connection, root.root, files, { gzip, signal, onFile });
+        break;
+      } catch (error) {
+        if (!connection.connected || signal?.aborted) throw error;
+        const reason = error instanceof Error ? error.message : String(error);
+        if (gzip) {
+          runtime.noGzip = true;
+          this.options.logger?.warn?.(`box sync (${runtime.boxId}): a gzipped bulk push failed (${reason}); sending it plain`);
+        } else {
+          runtime.noTar = true;
+          this.options.logger?.warn?.(`box sync (${runtime.boxId}): a bulk push failed (${reason}); sending files one by one`);
+        }
+      }
+    }
+    if (written === null) return false;
+    const boxFiles = await statBoxFiles(connection, paths, signal);
+    for (const path of paths) {
+      const bytes = written.get(path);
+      const info = boxFiles.get(path);
+      const hash = hostHash.get(path);
+      // A file the box shows at another size than was sent is not known: the next pass hashes it.
+      if (bytes !== undefined && info && info.size === bytes && hash) baseline.set(path, { h: hash, s: info.size, m: info.mtimeMs });
+    }
+    return true;
+  }
+
+  /**
+   * Make the box's top-level entries of `root` take the host's shape (module doc): a mirrored link
+   * is the same link in the box, pointing at the box copy of its target; a host dir is never a
+   * link in the box. `verify` (full passes) checks the box even where this connection already
+   * did. False when the box could not make a link.
+   */
+  private async alignBoxTops(
+    runtime: Runtime,
+    connection: BoxConnection,
+    root: SyncRoot,
+    links: ReadonlyMap<string, string>,
+    hostDirs: ReadonlySet<string>,
+    baseline: Map<string, BoxSyncBaselineEntry>,
+    verify: boolean,
+    signal: AbortSignal | undefined
+  ): Promise<boolean> {
+    if (root.link !== undefined) return true;
+    const tops = [...root.rule.include].filter((top) => links.has(top) || hostDirs.has(`${root.root}/${top}`));
+    let linked = true;
+    await forEachLimited(tops, PUSH_CONCURRENCY, async (top) => {
+      const path = `${root.root}/${top}`;
+      const target = links.get(top) ?? null;
+      const want = target === null ? "dir" : `link:${target}`;
+      if (target !== null) this.dropBaselineBelow(baseline, path, null); // leftovers of a materialized copy
+      if (!verify && runtime.boxTops.get(path) === want) return;
+      const boxPath = boxPathOf(connection, path);
+      const info = await connection.request("fs.stat", { path: boxPath, followSymlinks: false }, { signal });
+      if (target === null) {
+        if (info?.kind === "symlink") await removeBoxPath(connection, path);
+        runtime.boxTops.set(path, want);
+        return;
+      }
+      if (info?.kind === "symlink") {
+        if (await this.sameBoxDir(connection, path, target, signal)) {
+          runtime.boxTops.set(path, want);
+          return;
+        }
+        await removeBoxPath(connection, path);
+      } else if (info?.kind === "dir") {
+        // A copy an earlier sync materialized (or the box made): it becomes the target's box copy
+        // when there is none yet, else it goes. Pending sets naming its files go stale.
+        await this.retireBoxTree(runtime, root, path);
+        let there = await boxStat(connection, target, signal);
+        if (there?.kind === "dir") {
+          const entries = await connection.request("fs.readdir", { path: boxPathOf(connection, target) }, { signal }).catch(() => null);
+          if (entries !== null && entries.length === 0) {
+            await removeBoxPath(connection, target, true);
+            there = null;
+          }
+        }
+        let moved = false;
+        if (there === null) {
+          await connection.request("agent.ensurePaths", { paths: [boxPathOf(connection, posix.dirname(target))] }, { signal });
+          moved = await connection.request("fs.rename", { from: boxPath, to: boxPathOf(connection, target) }, { signal }).then(
+            () => true,
+            () => false
+          );
+        }
+        if (!moved) await removeBoxPath(connection, path, true);
+        this.dropBaselineBelow(baseline, path, moved ? target : null);
+      } else if (info !== null) {
+        await removeBoxPath(connection, path);
+      }
+      try {
+        // The link first: a box that cannot make one is left with nothing new.
+        await connection.request("fs.symlink", { target: boxPathOf(connection, target), path: boxPath }, { signal });
+        await connection.request("agent.ensurePaths", { paths: [boxPathOf(connection, target)] }, { signal });
+      } catch (error) {
+        if (!connection.connected || signal?.aborted) throw error;
+        this.options.logger?.warn?.(
+          `box sync (${runtime.boxId}): cannot make a link in the box (${error instanceof Error ? error.message : String(error)}); shared dirs are copied per account there`
+        );
+        linked = false;
+        return;
+      }
+      runtime.boxTops.set(path, want);
+    });
+    return linked;
+  }
+
+  /** Whether the box's `path` (a link) leads to the box's `target` dir. */
+  private async sameBoxDir(connection: BoxConnection, path: string, target: string, signal: AbortSignal | undefined): Promise<boolean> {
+    const [via, real] = await Promise.all([boxStat(connection, path, signal), boxStat(connection, target, signal)]);
+    if (via?.kind !== "dir" || real?.kind !== "dir") return false;
+    if (via.identity !== null && real.identity !== null) return via.identity === real.identity;
+    const resolve = (hostPath: string) => connection.request("fs.realpath", { path: boxPathOf(connection, hostPath) }, { signal }).catch(() => null);
+    const [a, b] = await Promise.all([resolve(path), resolve(target)]);
+    return a !== null && a === b;
+  }
+
+  /** Baseline entries below `dir` go, or move below `moveTo` (where the box's copy went). */
+  private dropBaselineBelow(baseline: Map<string, BoxSyncBaselineEntry>, dir: string, moveTo: string | null): void {
+    for (const [path, entry] of [...baseline]) {
+      if (path === dir || !isInsidePath(path, dir)) continue;
+      baseline.delete(path);
+      if (moveTo !== null) {
+        const next = `${moveTo}${path.slice(dir.length)}`;
+        if (!baseline.has(next)) baseline.set(next, entry);
+      }
+    }
+  }
+
+  /** A box dir stops being `root`'s: pending sets naming files in it go stale; nothing in it stays collected. */
+  private async retireBoxTree(runtime: Runtime, root: SyncRoot, dir: string): Promise<void> {
+    for (const set of this.store.pending(runtime.boxId)) {
+      if (set.files.some((file) => isInsidePath(file.path, dir))) await this.markStale(runtime, set, root);
+    }
+    for (const path of [...runtime.collected.keys()]) if (isInsidePath(path, dir)) runtime.collected.delete(path);
   }
 
   /** Remove box dirs that a deletion emptied and that the host no longer has. */
@@ -1061,13 +1485,16 @@ export class BoxConfigSyncService implements BoxConfigSync {
       files.push({
         path,
         change,
-        executable: isExecutableChange({
-          rule: root.rule,
-          rel: seen.rel,
-          mode: seen.boxMode ?? seen.hostFile?.mode ?? null,
-          content: seen.boxBytes,
-          configKeysChanged: codec.executableKeysChanged(seen.hostView, seen.boxView, executableConfigKeys(root.agent, seen.rel))
-        }),
+        // A deletion runs nothing on the host.
+        executable:
+          change !== "deleted" &&
+          isExecutableChange({
+            rule: root.rule,
+            rel: seen.rel,
+            mode: seen.boxMode ?? seen.hostFile?.mode ?? null,
+            content: seen.boxBytes,
+            configKeysChanged: codec.executableKeysChanged(seen.hostView, seen.boxView, executableConfigKeys(root.agent, seen.rel))
+          }),
         diff,
         truncated,
         binary,
