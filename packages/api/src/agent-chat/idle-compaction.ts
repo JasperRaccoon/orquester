@@ -110,20 +110,46 @@ export function idleCompactionCandidateOf(items: readonly ThreadItem[], turns: r
   if (latest === undefined || latest.state !== "completed" || latest.completedAt === null || latest.turnId === null) {
     return null;
   }
-  // The newest reading's context size, and the newest expiry a request named.
-  let usedTokens: number | undefined;
-  let expiry: { expiresAt: string; ttlMs?: number } | undefined;
+  // Never a compaction of a compaction: the newest user message decides, wherever the reading
+  // is (a compaction's own turn writes a reading after its `/compact`).
   const floor = Math.max(0, items.length - CANDIDATE_SCAN_ROWS);
+  let usedTokens: number | undefined;
   for (let index = items.length - 1; index >= floor; index -= 1) {
     const item = items[index]!;
     if (item.kind === "message") {
       if (item.agentId !== undefined || item.role !== "user") continue;
-      // The newest user message decides, wherever the reading is: a compaction's own turn
-      // writes a reading after its `/compact`.
       if ((item.attachments?.length ?? 0) === 0 && isUserCompact(item.text)) return null;
       break;
     }
-    if (expiry !== undefined || isAgentOwnedActivity(item)) continue;
+    if (usedTokens === undefined && item.activityKind === "context-window.updated" && !isAgentOwnedActivity(item)) {
+      usedTokens = contextReadingOf(item)?.usedTokens;
+      if (usedTokens === undefined) return null;
+    }
+  }
+  const expiry = promptCacheExpiryOf(items);
+  if (usedTokens === undefined || expiry === null) return null;
+  return {
+    turnId: latest.turnId,
+    usedTokens,
+    promptCacheExpiresAt: expiry.expiresAt,
+    ...(expiry.ttlMs !== undefined ? { promptCacheTtlMs: expiry.ttlMs } : {})
+  };
+}
+
+/**
+ * The prompt-cache expiry in force for the conversation, read off its newest rows: the one the
+ * newest context reading of the parent names — past readings taken OUTSIDE any turn
+ * (`turnId: null`) with no expiry, which made no request (see {@link idleCompactionCandidateOf}).
+ * Null when it is unknown: a reading inside a turn with no expiry (a request that wrote no cache
+ * entry), or a compaction marker, an account switch or an Agent Profile switch newer than the
+ * stamped reading. The one rule for the daemon's idle compaction and the composer's "When you
+ * return" offer (`latestContextWindowActivity`), so the two cannot disagree.
+ */
+export function promptCacheExpiryOf(rows: readonly ThreadItem[]): { expiresAt: string; ttlMs?: number } | null {
+  const floor = Math.max(0, rows.length - CANDIDATE_SCAN_ROWS);
+  for (let index = rows.length - 1; index >= floor; index -= 1) {
+    const item = rows[index]!;
+    if (item.kind !== "activity" || isAgentOwnedActivity(item)) continue;
     if (
       isCompactionActivity(item) ||
       item.activityKind === IDENTITY_CHANGED_ACTIVITY_KIND ||
@@ -134,23 +160,16 @@ export function idleCompactionCandidateOf(items: readonly ThreadItem[], turns: r
     if (item.activityKind !== "context-window.updated") continue;
     const reading = contextReadingOf(item);
     if (reading === null) return null;
-    usedTokens ??= reading.usedTokens;
     if (reading.expiresAt !== undefined) {
-      expiry = { expiresAt: reading.expiresAt, ...(reading.ttlMs !== undefined ? { ttlMs: reading.ttlMs } : {}) };
-      continue;
+      return Number.isFinite(Date.parse(reading.expiresAt))
+        ? { expiresAt: reading.expiresAt, ...(reading.ttlMs !== undefined ? { ttlMs: reading.ttlMs } : {}) }
+        : null;
     }
-    // A reading taken outside any turn — a (re)started session's own context read — made no
-    // request, so it says nothing about the cache: the expiry the last request named stands.
-    // Inside a turn, no expiry means a request wrote no cache entry: unknown.
+    // Outside any turn — a (re)started session's own context read — no request was made, so the
+    // expiry the last request named stands. Inside a turn, no expiry means unknown.
     if (item.turnId !== null) return null;
   }
-  if (usedTokens === undefined || expiry === undefined || !Number.isFinite(Date.parse(expiry.expiresAt))) return null;
-  return {
-    turnId: latest.turnId,
-    usedTokens,
-    promptCacheExpiresAt: expiry.expiresAt,
-    ...(expiry.ttlMs !== undefined ? { promptCacheTtlMs: expiry.ttlMs } : {})
-  };
+  return null;
 }
 
 /** What the daemon's tab record says about the chat (`SessionSummary`), as the rule reads it. */

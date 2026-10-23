@@ -15,6 +15,7 @@
 
 import {
   SETTLED_TURN_STATES,
+  promptCacheExpiryOf,
   type BackgroundLiveness,
   type ThreadActivityItem,
   type ThreadSessionStatus,
@@ -230,12 +231,14 @@ export function latestContextWindowActivity(
       ...(typeof record.compactsAutomatically === "boolean"
         ? { compactsAutomatically: record.compactsAutomatically }
         : {}),
-      // Idle compaction's "when you return" offer reads when the prompt cache expires.
-      ...(typeof record.promptCacheTtlMs === "number" ? { promptCacheTtlMs: record.promptCacheTtlMs } : {}),
-      ...(typeof record.promptCacheExpiresAt === "string"
-        ? { promptCacheExpiresAt: record.promptCacheExpiresAt }
-        : {})
     };
+    // Idle compaction's "When you return" offer reads when the prompt cache expires: the daemon's
+    // own rule, which carries the last request's expiry past a restarted session's context read.
+    const expiry = promptCacheExpiryOf(activities);
+    if (expiry !== null) {
+      usage.promptCacheExpiresAt = expiry.expiresAt;
+      if (expiry.ttlMs !== undefined) usage.promptCacheTtlMs = expiry.ttlMs;
+    }
     return { usage, updatedAt: activity.createdAt };
   }
   return null;
