@@ -60,6 +60,7 @@ import type {
   XaiUsage
 } from "./acp/_generated/xai.ts";
 import {
+  backgroundTaskRun,
   endShell,
   foldBackgroundTasks,
   monitorEvent,
@@ -67,6 +68,7 @@ import {
   shellLinkage,
   taskBackgrounded,
   taskCompleted,
+  type BackgroundTaskRun,
   type TaskScope
 } from "./background-tasks.ts";
 import { GrokGoalTracker } from "./goal.ts";
@@ -167,6 +169,11 @@ export class GrokNormalizer {
    * fields below are the session-level readings only this class touches.
    */
   private readonly state: GrokNormalizerState;
+
+  /** What this session knows of a background task's run (`backgroundTaskRun`). */
+  backgroundTaskRun(taskId: string): BackgroundTaskRun {
+    return backgroundTaskRun(this.state, taskId);
+  }
 
   /**
    * What `session/load` replayed. Collected rather than emitted (see

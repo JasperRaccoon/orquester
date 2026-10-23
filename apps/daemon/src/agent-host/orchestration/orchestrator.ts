@@ -138,6 +138,8 @@ import {
   CRASH_RESUME_LIMIT_MESSAGE,
   CRASH_RESUME_SUMMARY,
   crashResumeDetail,
+  type AgentHostBackgroundTask,
+  type AgentHostPendingWake,
   type CreateHostThreadRequest,
   type ForkHostThreadRequest,
   type ForkHostThreadResponse,
@@ -152,7 +154,6 @@ import type {
   CaptureResult,
   CheckpointService,
   Ingestion,
-  LivenessObservation,
   LivenessRegistry,
   ProviderSnapshotRegistry,
   ThreadStore
@@ -198,7 +199,20 @@ import {
 } from "./errors.ts";
 import { applyEventsChunked } from "./fold-ops.ts";
 import {
+  MAX_WAKE_DELIVERY_ATTEMPTS,
+  PENDING_WAKE_EXPIRY_MS,
+  WAKE_NOTE_SUMMARY,
+  stoppedBackgroundWork,
+  wakeConsumed,
+  wakeExpired,
+  wakeNoteDetail,
+  wakePrompt,
+  wakingTaskEnd,
+  withWakeTask
+} from "./pending-wake.ts";
+import {
   backgroundWorkStoppedNotice,
+  stoppedWorkNotice,
   legacyLaunchStarts,
   leftoverWorkClosings,
   type LeftoverClosing
@@ -457,6 +471,12 @@ interface ThreadRuntime {
    * keeps taking the host down is resumed a bounded number of times.
    */
   crashResumedTurn: ThreadHead["crashResumedTurn"];
+  /**
+   * Head-only like {@link continueAfterRestart}: a background task finished after the last turn
+   * settled and the provider has not started the turn it wakes the agent with yet
+   * (`pending-wake.ts`) — or, read off `meta.json`, one the previous host left undelivered.
+   */
+  pendingWake: ThreadHead["pendingWake"];
   /**
    * Goals §5.5, head-only like {@link continueAfterRestart}: the handover
    * found this thread's goal continuing, so this host resumes its provider
@@ -838,6 +858,20 @@ export interface Orchestrator {
   liveThreadIds(): string[];
   activeTurnThreadIds(): string[];
   backgroundWorkThreadIds(): string[];
+  /**
+   * `GET /health` `pendingWakes`: every thread whose background task finished after its last
+   * turn settled, on a provider that is about to start a turn by itself for it, with no turn
+   * started since (`ThreadHead.pendingWake`, `pending-wake.ts`). The drain waits on these too.
+   */
+  pendingWakes(): AgentHostPendingWake[];
+  /** `GET /health` `backgroundTasks`: every live background task, for the pending-restart view. */
+  backgroundTasks(): AgentHostBackgroundTask[];
+  /**
+   * The host's teardown begins (`main.ts` `stop()`, before any adapter is stopped): background
+   * work the teardown stops from here on is named in the chat by {@link stop}, since no process
+   * is left to say so. Idempotent.
+   */
+  beginTeardown(): void;
 
   /**
    * Goals §5.7, `POST /goals/hold`: a deploy's drain is waiting. Renews the
@@ -945,6 +979,13 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   const { store, ingestion, checkpoints, liveness, snapshots, logger } = options;
 
   const runtimes = new Map<string, ThreadRuntime>();
+  // §3.1: a background task is live until its work ends — and only the
+  // adapter that runs it can tell (`AgentAdapter.backgroundTaskLive`).
+  liveness.setProbe((threadId, taskId) => {
+    const adapterId = runtimes.get(threadId)?.state.head?.adapter;
+    const adapter = adapterId !== undefined ? options.adapters.get(adapterId) : undefined;
+    return adapter?.backgroundTaskLive?.(threadId, taskId);
+  });
   /**
    * §6.1 / E5: which thread owns a provider conversation.
    *
@@ -1226,6 +1267,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       state,
       continueAfterRestart: persistedHead?.continueAfterRestart,
       crashResumedTurn: persistedHead?.crashResumedTurn,
+      pendingWake: persistedHead?.pendingWake,
       resumeGoalAfterRestart: persistedHead?.resumeGoalAfterRestart === true ? true : undefined,
       goalHeldForHandover: persistedHead?.goalHeldForHandover === true ? true : undefined,
       forkStrategy: persistedHead?.forkStrategy,
@@ -1287,6 +1329,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   const withHeadOnlyState = (runtime: ThreadRuntime, head: ThreadHead): ThreadHead =>
     runtime.continueAfterRestart === undefined &&
     runtime.crashResumedTurn === undefined &&
+    runtime.pendingWake === undefined &&
     runtime.resumeGoalAfterRestart === undefined &&
     runtime.goalHeldForHandover === undefined &&
     runtime.forkStrategy === undefined
@@ -1297,6 +1340,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
             ? { continueAfterRestart: runtime.continueAfterRestart }
             : {}),
           ...(runtime.crashResumedTurn !== undefined ? { crashResumedTurn: runtime.crashResumedTurn } : {}),
+          ...(runtime.pendingWake !== undefined ? { pendingWake: runtime.pendingWake } : {}),
           ...(runtime.resumeGoalAfterRestart === true ? { resumeGoalAfterRestart: true } : {}),
           ...(runtime.goalHeldForHandover === true ? { goalHeldForHandover: true } : {}),
           ...(runtime.forkStrategy !== undefined ? { forkStrategy: runtime.forkStrategy } : {})
@@ -2464,9 +2508,11 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     const adapter = options.adapters.get(head.adapter);
     runtime.watchdog?.stop();
     runtime.watchdog = null;
-    // The user ended the session: nothing of it is to be continued (§3.3).
+    // The user ended the session: nothing of it is to be continued (§3.3),
+    // and no finished background work is handed over later either.
     await dropContinuationMarker(runtime);
     await dropCrashResume(runtime);
+    await clearPendingWake(runtime);
     // FIRST, before the host answers the session's cards: a card's cancel can
     // end the provider, and an adapter that must read what its provider
     // started while it lives — or mark the end as the user's — does it now
@@ -6397,39 +6443,17 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   // Runtime event consumption
   // -------------------------------------------------------------------------
 
-  /**
-   * What the liveness registry cannot read off the event: on `turn.started`,
-   * whether the host sent the turn. A turn the host sent has a row in the fold
-   * before its `turn.started` is consumed — the command's pending row
-   * (`thread.turn-start-requested`, which the first turn to start adopts) or,
-   * once `sendTurn` has answered, that row under the provider's id. A turn
-   * with neither is the provider's own — a Grok wake, an OpenCode woken reply,
-   * Claude's synthetic woken turn — and its end sweeps no watch loop
-   * (`liveness.ts`). A continuation after a restart may read as either; a
-   * registry the restart emptied holds nothing its sweep could drop.
-   */
-  const livenessObservation = (
-    runtime: ThreadRuntime | undefined,
-    event: RuntimeEvent
-  ): LivenessObservation | undefined => {
-    if (event.type !== "turn.started" || runtime === undefined) {
-      return undefined;
-    }
-    const hostSent = (runtime.state.turns ?? []).some(
-      (turn) =>
-        (turn.turnId === null && turn.state === "pending") ||
-        (event.turnId !== undefined && turn.turnId === event.turnId)
-    );
-    return { providerInitiatedTurn: !hostSent };
-  };
-
   const consume = async (adapter: AgentAdapter): Promise<void> => {
     try {
       for await (const event of adapter.events) {
         if (stopped) break;
         try {
           const runtime = runtimes.get(event.threadId);
-          liveness.observe(event, livenessObservation(runtime, event));
+          liveness.observe(event);
+          // In the same synchronous step as the liveness drop, so no `/health`
+          // read can fall between a task's end and its pending wake.
+          const wakeWrite = runtime ? notePendingWake(runtime, adapter, event) : null;
+          if (wakeWrite !== null) await wakeWrite;
           if (runtime) {
             // §3.1 for EVERY live turn. A turn the provider starts by itself —
             // a goal's continuation, the turn Codex starts for a host `/goal`,
@@ -6683,10 +6707,285 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     }
   };
 
+  // -------------------------------------------------------------------------
+  // Pending wakes (`pending-wake.ts`): a background task's end the provider is
+  // about to start a turn for by itself
+  // -------------------------------------------------------------------------
+
+  /** One expiry timer per thread with a pending wake ({@link PENDING_WAKE_EXPIRY_MS}). */
+  const pendingWakeTimers = new Map<string, NodeJS.Timeout>();
+
+  /** The head-only mark goes: a turn took the wake, the user ended the session, it expired. */
+  const clearPendingWake = async (runtime: ThreadRuntime): Promise<void> => {
+    const timer = pendingWakeTimers.get(runtime.id);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      pendingWakeTimers.delete(runtime.id);
+    }
+    if (runtime.pendingWake === undefined) return;
+    runtime.pendingWake = undefined;
+    await saveHeadNow(runtime);
+  };
+
+  /**
+   * A wake the provider never acted on is let go of once {@link PENDING_WAKE_EXPIRY_MS} has
+   * passed since its first end — on this host only: a host that is going away keeps the mark
+   * for the next one. Unref'd, cleared with the mark and at the orchestrator's stop.
+   */
+  const armPendingWakeExpiry = (runtime: ThreadRuntime): void => {
+    const wake = runtime.pendingWake;
+    if (wake === undefined || pendingWakeTimers.has(runtime.id)) return;
+    const since = Date.parse(wake.since);
+    const remaining = Number.isFinite(since)
+      ? Math.max(0, since + PENDING_WAKE_EXPIRY_MS - clock.now().getTime())
+      : 0;
+    const timer = setTimeout(() => {
+      pendingWakeTimers.delete(runtime.id);
+      if (hostStopping() || runtime.pendingWake === undefined) return;
+      if (!wakeExpired(runtime.pendingWake, clock.now().getTime())) {
+        armPendingWakeExpiry(runtime);
+        return;
+      }
+      logger.info(`agent-host: ${runtime.id}'s provider never picked up its finished background work; no longer holding it`);
+      void clearPendingWake(runtime);
+    }, remaining);
+    timer.unref?.();
+    pendingWakeTimers.set(runtime.id, timer);
+  };
+
+  /**
+   * The pending-wake half of consuming one runtime event: a live turn's start
+   * consumes the wake; a background task's own end while no turn runs, on a
+   * provider that wakes the agent for it, is one. The in-memory mark is set
+   * synchronously; the head write it needs is the returned promise (null when
+   * nothing changed), so `meta.json` holds it before the event is ingested — a
+   * host that dies now leaves it for the next one.
+   */
+  const notePendingWake = (
+    runtime: ThreadRuntime,
+    adapter: AgentAdapter,
+    event: RuntimeEvent
+  ): Promise<void> | null => {
+    if (isHistoricalRuntimeEvent(event)) return null;
+    if (event.type === "turn.started") {
+      return runtime.pendingWake === undefined && !pendingWakeTimers.has(runtime.id)
+        ? null
+        : clearPendingWake(runtime);
+    }
+    if (adapter.capabilities.wakesOnBackgroundCompletion !== true) return null;
+    // A turn running takes the result in itself: a completion during a turn
+    // is followed by no wake of its own.
+    if (currentSession(runtime).activeTurnId !== null) return null;
+    const task = wakingTaskEnd(event, clock.nowIso());
+    if (task === null) return null;
+    runtime.pendingWake = withWakeTask(runtime.pendingWake, task);
+    armPendingWakeExpiry(runtime);
+    return saveHeadNow(runtime);
+  };
+
+  /**
+   * `GET /health` `backgroundTasks`: what the liveness registry holds live, named from the
+   * thread's roster and, for a shell, its launching call's command.
+   */
+  const backgroundTasks = (): AgentHostBackgroundTask[] => {
+    const tasks: AgentHostBackgroundTask[] = [];
+    for (const runtime of runtimes.values()) {
+      const live = liveness.liveTasks(runtime.id);
+      if (live.length === 0) continue;
+      const adapterId = runtime.state.head?.adapter;
+      const canStop =
+        adapterId !== undefined && options.adapters.get(adapterId)?.capabilities.supportsTaskStop === true;
+      for (const task of live) {
+        const row = runtime.state.roster.find((agent) => agent.id === task.taskId);
+        const command = launchCommandOf(runtime.state.activities, task.taskId);
+        const title = row?.title.trim() ? row.title : task.title;
+        tasks.push({
+          threadId: runtime.id,
+          taskId: task.taskId,
+          kind: task.kind,
+          since: task.since,
+          ...(task.taskType !== undefined ? { taskType: task.taskType } : {}),
+          ...(title !== undefined ? { title } : {}),
+          ...(command !== undefined ? { command } : {}),
+          stoppable: canStop && taskStopRefusal(runtime.state.roster, task.taskId) === null
+        });
+      }
+    }
+    return tasks;
+  };
+
+  /** `GET /health` `pendingWakes`: every live mark, an expired one excepted. */
+  const pendingWakes = (): AgentHostPendingWake[] => {
+    const now = clock.now().getTime();
+    const wakes: AgentHostPendingWake[] = [];
+    for (const runtime of runtimes.values()) {
+      const wake = runtime.pendingWake;
+      if (wake === undefined || runtime.deleted || wakeExpired(wake, now)) continue;
+      wakes.push({ threadId: runtime.id, since: wake.since });
+    }
+    return wakes;
+  };
+
+  /**
+   * The previous host left a pending wake nobody consumed — it stopped (a
+   * deploy that waited out the drain's cap, a crash, a reboot) between a
+   * background task's end and the turn the provider would have started for
+   * it. Under the §3.3 continuation rules — an open tab, the project's opt-in,
+   * a resume cursor, bounded attempts — the agent is handed the results in a
+   * turn of their own, with a visible row saying so; otherwise the row says
+   * what finished and that a message continues. Either way the mark goes, so
+   * nothing is delivered twice: a host that dies after the send finds a turn
+   * started after the wake (`wakeConsumed`), and one that dies before it finds
+   * the prepared mark and counts on ({@link MAX_WAKE_DELIVERY_ATTEMPTS}).
+   */
+  const deliverPendingWake = async (
+    runtime: ThreadRuntime,
+    head: ThreadHead,
+    wake: NonNullable<ThreadHead["pendingWake"]>
+  ): Promise<void> => {
+    const threadId = runtime.id;
+    // A queued message the dead host never sent is settled first, as on any
+    // first load; then a session that still reads running — the provider's
+    // wake was streaming when its process died, no turn open yet — is
+    // stopped at the time it last wrote. Nothing the user asked for failed,
+    // so neither is an error.
+    await settleStalePendingTurns(runtime);
+    if (isLiveOrphan(head) && currentSession(runtime).status !== "stopped") {
+      await persistSession(
+        runtime,
+        { ...currentSession(runtime), status: "stopped", activeTurnId: null },
+        { occurredAt: crashSettleAt(runtime), force: true }
+      );
+    }
+    // No marker can name anything here: any turn after the wake consumed it.
+    if (runtime.continueAfterRestart !== undefined) await writeMarker(runtime, undefined);
+    // What the dead process still ran is closed and named before anything is
+    // continued — and is listed to the agent below.
+    await repairLeftovers(runtime);
+    const closed = runtime.deleted || (await options.isThreadClosed?.(threadId)) === true;
+    if (closed) {
+      await clearPendingWake(runtime);
+      return;
+    }
+    const stoppedWork = stoppedBackgroundWork(runtime.state.roster, wake);
+    const attempt = (wake.prepared === true ? (wake.attempt ?? 1) : 0) + 1;
+    const optIn = (await options.continuationEnabled?.(head.projectPath)) === true;
+    const hasCursor = persistedResumeCursor(runtime, head) !== undefined;
+    const outcome = !optIn
+      ? "opted-out"
+      : !hasCursor
+        ? "no-cursor"
+        : attempt > MAX_WAKE_DELIVERY_ATTEMPTS
+          ? "attempts"
+          : "delivered";
+    const note = (): Promise<void> =>
+      appendActivity(runtime, {
+        kind: "runtime.warning",
+        tone: "info",
+        summary: WAKE_NOTE_SUMMARY,
+        detail: wakeNoteDetail(wake, stoppedWork, outcome),
+        turnId: null,
+        payload: { pendingWake: { taskIds: wake.tasks.map((task) => task.taskId), outcome } }
+      }).catch((error: unknown) => {
+        logger.warn(`agent-host: could not note the finished background work of ${threadId}`, error);
+      });
+    if (outcome !== "delivered") {
+      await note();
+      await clearPendingWake(runtime);
+      // A delivery the previous host prepared left the session `starting`.
+      if (currentSession(runtime).status === "starting") {
+        await upsertBinding(runtime, { status: "stopped" });
+        await persistSession(runtime, { ...currentSession(runtime), status: "stopped", activeTurnId: null });
+      }
+      return;
+    }
+    // Durable first, dispatched second, as a continuation's prepare (§3.3).
+    try {
+      runtime.pendingWake = { ...wake, prepared: true, attempt };
+      await saveHeadNow(runtime);
+      await upsertBinding(runtime, { status: "starting" });
+      await persistSession(runtime, { ...currentSession(runtime), status: "starting", activeTurnId: null });
+    } catch (error) {
+      logger.warn(`agent-host: failed to prepare handing ${threadId} its finished background work`, error);
+      await clearPendingWake(runtime);
+      await settleAsError(runtime, CONTINUATION_FAILED_MESSAGE);
+      return;
+    }
+    logger.info(`agent-host: handing ${threadId} the background work that finished while the host restarted (attempt ${attempt} of ${MAX_WAKE_DELIVERY_ATTEMPTS})`);
+    await note();
+    const input = wakePrompt(wake, stoppedWork);
+    void runEffect(runtime, async () => {
+      try {
+        await ensureSession(runtime, { pendingTurnStart: true });
+        const adapter = adapterFor(head.adapter);
+        const result = await adapter.sendTurn({
+          threadId,
+          input,
+          attachments: [],
+          interactionMode: "default"
+        });
+        await upsertBinding(runtime, {
+          status: "running",
+          ...(result.resumeCursor !== undefined ? { resumeCursor: result.resumeCursor } : {})
+        });
+        await persistSession(runtime, {
+          ...currentSession(runtime),
+          status: "running",
+          activeTurnId: result.turnId,
+          ...(result.resumeCursor !== undefined ? { resumeCursor: result.resumeCursor } : {})
+        });
+        watchdogFor(runtime);
+        await clearPendingWake(runtime);
+      } catch (error) {
+        logger.warn(`agent-host: failed to hand ${threadId} its finished background work`, error);
+        await clearPendingWake(runtime);
+        await settleAsError(runtime, CONTINUATION_SEND_FAILED_MESSAGE);
+      }
+    });
+  };
+
+  /**
+   * When this host's teardown began (`beginTeardown`, or the intentional
+   * stop's marking pass), or null while it serves.
+   */
+  let teardownStartedAt: string | null = null;
+
+  /**
+   * The teardown stopped background work — a subagent, a background shell —
+   * that was still running: its roster rows already say "stopped", and this
+   * says it where the user reads, as the next host does for work a crash left
+   * open (`closeLeftoverWork`). Best-effort.
+   */
+  const noteWorkTheTeardownStopped = async (runtime: ThreadRuntime): Promise<void> => {
+    if (teardownStartedAt === null || runtime.deleted || !runtime.state.head) return;
+    const since = Date.parse(teardownStartedAt);
+    const stoppedRows = (runtime.state.roster ?? []).filter((row) => {
+      if (row.status !== "interrupted" || row.parentAgentId !== null) return false;
+      const ended = row.completedAt !== null ? Date.parse(row.completedAt) : Number.NaN;
+      return Number.isFinite(ended) && ended >= since;
+    });
+    const notice = stoppedWorkNotice(
+      stoppedRows.map((row) => ({
+        name: row.title.trim() !== "" ? row.title : row.id,
+        background: row.agentKind === "background"
+      }))
+    );
+    if (notice === null) return;
+    await appendActivity(runtime, {
+      kind: "runtime.warning",
+      tone: "info",
+      summary: notice.summary,
+      detail: notice.detail
+    }).catch((error: unknown) => {
+      logger.warn(`agent-host: could not note the background work ${runtime.id}'s teardown stopped`, error);
+    });
+  };
+
   const markThreadsForContinuation = async (): Promise<string[]> => {
     // The intentional stop begins here: a goal resume that has not reached
     // the provider yet must not start a child now (goals §5.5).
     handoverStarted = true;
+    teardownStartedAt ??= clock.nowIso();
     const marked: string[] = [];
     // `/stop` is the deploy handover's critical path. Most production threads
     // are idle and some have 40-100 MB histories, so loading all of them here
@@ -6745,6 +7044,9 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         const runtime = await loadRuntime(threadId);
         const head = headOf(runtime);
         if (!head || runtime.deleted) continue;
+        // A pending wake is its own handover: written when the task ended,
+        // written again here so the next host finds it whatever came between.
+        if (runtime.pendingWake !== undefined) await saveHeadNow(runtime);
         const { activeTurnId, status } = head.session;
         // Only threads with a usable cursor (§3.3). The cursor is read from
         // the BINDING: a marker is only ever written for a thread that really
@@ -6796,6 +7098,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     // when a teardown failed part-way, and a goal a resume skipped keeps its
     // mark on disk for the next boot.
     handoverStarted = false;
+    teardownStartedAt = null;
     for (const threadId of threadIds) {
       const runtime = runtimes.get(threadId);
       if (!runtime) continue;
@@ -7428,7 +7731,11 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       const persistedHead = await store
         .loadHead(threadId, { seedRuntime: false })
         .catch(() => null);
-      if (persistedHead !== null && !isOrphanedHead(persistedHead)) {
+      if (
+        persistedHead !== null &&
+        !isOrphanedHead(persistedHead) &&
+        persistedHead.pendingWake === undefined
+      ) {
         bootSettlePending.add(threadId);
         // Goals §5.5, §5.7, decided off the same `meta.json` read: the
         // handover marked this thread's continuing goal for a resume after the
@@ -7456,6 +7763,19 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       goalResumePending.add(threadId);
     }
     const session = head.session;
+    // A pending wake the previous host left (`pending-wake.ts`): a turn that
+    // started after it — or the user's own message — consumed it, and it
+    // goes; otherwise the agent is handed what finished, and nothing below
+    // applies: no turn was running.
+    const wake = runtime.pendingWake;
+    if (wake !== undefined) {
+      if (session.activeTurnId !== null || wakeConsumed(wake, runtime.state.turns)) {
+        await clearPendingWake(runtime);
+      } else {
+        await deliverPendingWake(runtime, head, wake);
+        return;
+      }
+    }
     const marker = head.continueAfterRestart;
     const orphaned = isOrphanedHead(head, runtime.state.turns);
     // The intentional stop's handover: a marked turn the host's teardown
@@ -8165,6 +8485,14 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     for (const runtime of runtimes.values()) {
       runtime.watchdog?.stop();
     }
+    // A pending wake's mark stays on the head for the next host; only this
+    // host's expiry clocks go.
+    for (const timer of pendingWakeTimers.values()) clearTimeout(timer);
+    pendingWakeTimers.clear();
+    await drain(true);
+    for (const runtime of runtimes.values()) {
+      await noteWorkTheTeardownStopped(runtime);
+    }
     await drain(true);
     for (const runtime of runtimes.values()) {
       await saveHeadNow(runtime);
@@ -8227,6 +8555,11 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     },
     activeTurnThreadIds,
     backgroundWorkThreadIds,
+    pendingWakes,
+    backgroundTasks,
+    beginTeardown: () => {
+      teardownStartedAt ??= clock.nowIso();
+    },
     holdContinuingGoals,
     resumeGoalSessionsAfterHandover,
     recycleIdleOpenCodeServers: async (input) =>
@@ -9120,4 +9453,33 @@ class IdleCompactionRefusal extends AgentChatCommandError {
   constructor(message: string) {
     super("TURN_NOT_IDLE", message);
   }
+}
+
+/**
+ * The command line a background task's launching call ran, from the folded window: the latest
+ * call row naming the task's own call (`bgshell:<taskId>`, Claude's shell item) or the call its
+ * start names (`toolUseId`). `undefined` when no row there names one.
+ */
+function launchCommandOf(activities: readonly ThreadActivityItem[], taskId: string): string | undefined {
+  let launchCall: string | undefined;
+  for (let index = activities.length - 1; index >= 0; index -= 1) {
+    const payload = activities[index]!.payload as Record<string, unknown> | undefined;
+    if (payload === undefined || payload === null) continue;
+    if (payload.taskId === taskId && typeof payload.toolUseId === "string") {
+      launchCall ??= payload.toolUseId;
+    }
+  }
+  const calls = new Set([`bgshell:${taskId}`, ...(launchCall !== undefined ? [launchCall] : [])]);
+  for (let index = activities.length - 1; index >= 0; index -= 1) {
+    const payload = activities[index]!.payload as Record<string, unknown> | undefined;
+    if (payload === undefined || payload === null || typeof payload.toolUseId !== "string") continue;
+    if (!calls.has(payload.toolUseId) || payload.taskId !== undefined) continue;
+    const data = payload.data as Record<string, unknown> | undefined;
+    const input = data?.input as Record<string, unknown> | undefined;
+    const command = [data?.command, input?.command].find(
+      (value): value is string => typeof value === "string" && value.trim().length > 0
+    );
+    if (command !== undefined) return command.length > 500 ? `${command.slice(0, 500)}…` : command;
+  }
+  return undefined;
 }

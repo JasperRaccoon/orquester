@@ -2,12 +2,15 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  CLAUDE_INSTALLED_PLUGINS_REL,
+  installedPluginCacheDirs,
   isDeniedRealPath,
   isDeniedRelPath,
   isExecutableChange,
   isSafeEntryName,
   isSafeRelPath,
   isSyncedRel,
+  isUninstalledPluginCache,
   syncRootKind,
   syncRuleFor
 } from "./rules.ts";
@@ -123,4 +126,50 @@ test("executable changes: hooks, scripts, exec bits and process-starting config 
   assert.equal(isExecutableChange({ ...base, rel: "settings.json", configKeysChanged: true }), true);
   assert.equal(isExecutableChange({ ...base, rel: "skills/a/SKILL.md" }), false);
   assert.equal(isExecutableChange({ ...base, rel: "CLAUDE.md" }), false);
+});
+
+test("installed_plugins.json names the cache dirs of its installs (installPath of any account home, or name@marketplace + version)", () => {
+  const list = {
+    version: 2,
+    plugins: {
+      "superpowers@claude-plugins-official": [
+        {
+          scope: "user",
+          installPath: "/var/lib/orquester/daemon/agent-accounts/claude/bc97/home/plugins/cache/claude-plugins-official/superpowers/7.0.0",
+          version: "7.0.0"
+        }
+      ],
+      "hookify@claude-plugins-official": [
+        { scope: "user", installPath: "C:\\orq\\h\\plugins\\cache\\claude-plugins-official\\hookify\\465f0934\\", version: "465f0934" }
+      ],
+      "evil@m": [{ installPath: "/h/plugins/cache/../../../etc", version: "../x" }]
+    }
+  };
+  assert.deepEqual(installedPluginCacheDirs(JSON.stringify(list))?.sort(), [
+    "claude-plugins-official/hookify/465f0934",
+    "claude-plugins-official/superpowers/7.0.0"
+  ]);
+  // Version 1: one install object per plugin.
+  assert.deepEqual(installedPluginCacheDirs(JSON.stringify({ version: 1, plugins: { "p@m": { version: "1.0" } } })), ["m/p/1.0"]);
+  assert.equal(installedPluginCacheDirs("not json"), null);
+  assert.equal(installedPluginCacheDirs('{"version":2}'), null);
+  assert.equal(CLAUDE_INSTALLED_PLUGINS_REL, "plugins/installed_plugins.json");
+});
+
+test("the plugin cache keeps installed versions only; temp clones and in-use markers never sync; marketplaces are host → box only", () => {
+  const allowed = new Set(["m/p/1.0"]);
+  assert.equal(isUninstalledPluginCache("plugins/cache/m/p/1.0/skills/a/SKILL.md", allowed), false);
+  assert.equal(isUninstalledPluginCache("plugins/cache/m/p", allowed), false, "on the way to an installed one");
+  assert.equal(isUninstalledPluginCache("plugins/cache/m/p/0.9/skills/a/SKILL.md", allowed), true);
+  assert.equal(isUninstalledPluginCache("plugins/cache/m/q", allowed), true);
+  assert.equal(isUninstalledPluginCache("plugins/marketplaces/m/x", allowed), false, "outside the cache");
+  assert.equal(isUninstalledPluginCache("plugins/cache/m/p/0.9/x", null), false, "no list: no filter");
+  const claude = syncRuleFor("claude", "account");
+  assert.equal(isSyncedRel(claude, "plugins/cache/temp_git_1791328646189_oneqrz/README.md"), false);
+  assert.equal(isSyncedRel(claude, "plugins/cache/m/p/1.0/.in_use/3010287"), false);
+  assert.equal(isSyncedRel(claude, "plugins/cache/m/p/1.0/skills/x.md"), true);
+  assert.equal(claude.hostOnly("plugins/marketplaces/m/.gcs-sha"), true);
+  assert.equal(claude.hostOnly("plugins/known_marketplaces.json"), true);
+  assert.equal(claude.hostOnly("plugins/installed_plugins.json"), false);
+  assert.equal(claude.hostOnly("skills/x/SKILL.md"), false);
 });

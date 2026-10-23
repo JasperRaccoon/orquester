@@ -125,6 +125,11 @@
     {
       "kind": "tar-write",
       "path": "/srv/q"
+    },
+    {
+      "kind": "tar-write",
+      "path": "/srv/q",
+      "compression": "gzip"
     }
   ],
   "ssh-agent": [

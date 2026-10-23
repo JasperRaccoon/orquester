@@ -33,6 +33,7 @@ import {
   configChangeFileRow,
   configChangesIndicator,
   currentSetupStep,
+  setupStepText,
   formatBoxCountdown,
   formatHourly,
   formatUsd,
@@ -205,6 +206,18 @@ describe("project row badges", () => {
     assert.equal(currentSetupStep([step("create", "done"), step("connect", "failed"), step("clone", "pending")])?.id, "connect");
     assert.equal(currentSetupStep([step("create", "done"), step("connect", "pending")])?.id, "connect");
     assert.equal(currentSetupStep([step("create", "done")]), null);
+  });
+
+  it("shows a running step's progress next to its label, and only a running step's", () => {
+    const base = { id: "config" as const, label: "Sync agent configuration", startedAt: null, finishedAt: null };
+    assert.equal(
+      setupStepText({ ...base, state: "running", message: "Claude account 2 of 5 · 1,240 of 2,000 files" }),
+      "Sync agent configuration (Claude account 2 of 5 · 1,240 of 2,000 files)"
+    );
+    assert.equal(setupStepText({ ...base, state: "running", message: null }), "Sync agent configuration");
+    assert.equal(setupStepText({ ...base, state: "failed", message: "Could not sync" }), "Sync agent configuration");
+    assert.equal(setupStepText(null), null);
+    assert.match(projectBoxBadge(info({ state: "provisioning" }), 0, setupStepText({ ...base, state: "running", message: "Codex account 1 of 1 · comparing files" })).title, /Setting up: Sync agent configuration \(Codex account 1 of 1 · comparing files\)/);
   });
 });
 
@@ -407,6 +420,15 @@ describe("config change cards", () => {
     );
     assert.equal(model.canDecide, true);
     assert.equal(model.outcome, null);
+  });
+
+  it("never counts a deleted file as executable, even one an older daemon flagged", () => {
+    const set = change();
+    set.files.push({ path: "/home/a/.claude/hooks/old.sh", change: "deleted", executable: true, diff: "-#!/bin/sh", truncated: false, binary: false });
+    const model = configChangeCard(set, false);
+    assert.equal(model.executableCount, 1);
+    assert.equal(model.summary, "3 files · 1 executable");
+    assert.equal(model.rows[2]!.executable, false);
   });
 
   it("shows no diff for a binary or empty file, and makes hidden characters visible", () => {

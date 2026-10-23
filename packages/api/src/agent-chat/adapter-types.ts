@@ -388,6 +388,15 @@ export interface AdapterCapabilities {
    */
   supportsTaskStop?: boolean;
   /**
+   * When a background task the parent launched — a subagent, a background shell, a monitor —
+   * ends while no turn runs, the provider starts a turn BY ITSELF to hand the agent its result
+   * (Claude's woken parent, Grok's `subagent-completed-…`/`task-completed-…` prompts, OpenCode's
+   * woken reply). The host then holds such a completion as a pending wake
+   * (`ThreadHead.pendingWake`) until a turn starts. Absent means no (Codex: a collab child's
+   * result is read by the parent inside its own turn).
+   */
+  wakesOnBackgroundCompletion?: boolean;
+  /**
    * The provider's goal surface (goals §4.5). Absent means none: no chip, no
    * tab marker, no goal state (OpenCode).
    */

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { SystemPortsResponse, SystemProcessesResponse, SystemResourcesResponse } from "@orquester/api";
+import type { AgentHostStatusResponse } from "@orquester/api/agent-chat";
 import { usePollWhileActive } from "../../hooks";
 import { useApi } from "../../context/orquester-context";
 import { useAppStore } from "../../store/app";
@@ -140,6 +141,12 @@ export function useSystemResources(active: boolean): SystemPoll<SystemResourcesR
 export function useSystemProcesses(active: boolean): SystemPoll<SystemProcessesResponse> {
   const api = useApi();
   return usePolledResource(active, (signal) => api.systemProcesses(signal, "host"), unsupported);
+}
+
+/** The agent host and a deploy's pending restart (`GET /api/agent-host/status`); never terminal. */
+export function useAgentHostStatus(active: boolean): SystemPoll<AgentHostStatusResponse> {
+  const api = useApi();
+  return usePolledResource(active, (signal) => api.agentHostStatus(signal), () => false);
 }
 
 export function useSystemPorts(active: boolean): SystemPoll<SystemPortsResponse> {

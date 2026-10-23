@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
@@ -326,11 +327,53 @@ func (a *Agent) openTarRead(ch *Channel, spec *wire.TarReadSpec) {
 	ch.Close(nil)
 }
 
-// openTarWrite extracts stream 0 into directory `path` (created if needed).
-// Success = eof on stream 1, then close; failure = close with an error.
+// sourceReader remembers the first read error other than EOF, so a failure of
+// the source (the channel, or a corrupt gzip stream) is told apart from tar
+// no longer reading.
+type sourceReader struct {
+	r   io.Reader
+	err error
+}
+
+func (s *sourceReader) Read(p []byte) (int, error) {
+	n, err := s.r.Read(p)
+	if err != nil && err != io.EOF && s.err == nil {
+		s.err = err
+	}
+	return n, err
+}
+
+// lazyGzip inflates `src` once the first byte is asked for (the gzip header
+// arrives only after the channel opened).
+type lazyGzip struct {
+	src io.Reader
+	gz  *gzip.Reader
+}
+
+func (l *lazyGzip) Read(p []byte) (int, error) {
+	if l.gz == nil {
+		gz, err := gzip.NewReader(l.src)
+		if err != nil {
+			if err == io.EOF {
+				err = io.ErrUnexpectedEOF
+			}
+			return 0, err
+		}
+		l.gz = gz
+	}
+	return l.gz.Read(p)
+}
+
+// openTarWrite extracts stream 0 into directory `path` (created if needed),
+// inflating it first when `compression` is "gzip". Success = eof on stream 1,
+// then close; failure = close with an error.
 func (a *Agent) openTarWrite(ch *Channel, spec *wire.TarWriteSpec) {
 	if err := requireAbs(spec.Path); err != nil {
 		ch.OpenFailed(err)
+		return
+	}
+	if spec.Compression != "" && spec.Compression != "gzip" {
+		ch.OpenFailed(rpcErr("BAD_REQUEST", "unknown compression: "+spec.Compression))
 		return
 	}
 	if err := a.ensurePath(spec.Path); err != nil {
@@ -363,15 +406,28 @@ func (a *Agent) openTarWrite(ch *Channel, spec *wire.TarWriteSpec) {
 		_ = cmd.Wait()
 		return
 	}
-	_, copyErr := io.Copy(stdin, ch.Reader())
-	if copyErr != nil && !errors.Is(copyErr, errChannelClosed) {
-		// tar stopped reading (it failed); its exit status says why.
-		copyErr = nil
+	channelSource := &sourceReader{r: ch.Reader()}
+	source := &sourceReader{r: channelSource}
+	if spec.Compression == "gzip" {
+		source = &sourceReader{r: &lazyGzip{src: channelSource}}
 	}
-	if copyErr != nil {
+	_, copyErr := io.Copy(stdin, source)
+	if errors.Is(channelSource.err, errChannelClosed) {
+		// The host went away mid-stream: nothing to confirm.
 		cancel()
 		_ = cmd.Wait()
 		return
+	}
+	if source.err != nil {
+		// The bytes were not a whole gzip stream: tar may have read a cut archive.
+		cancel()
+		_ = cmd.Wait()
+		ch.Close(rpcErr("TAR_FAILED", "cannot inflate the stream: "+source.err.Error()))
+		return
+	}
+	if copyErr != nil {
+		// tar stopped reading (it failed); its exit status says why.
+		copyErr = nil
 	}
 	_ = stdin.Close()
 	if err := cmd.Wait(); err != nil {

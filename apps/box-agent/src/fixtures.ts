@@ -197,7 +197,7 @@ export const channelsFixture: ByKind = {
     { kind: "file-write", path: "/srv/p/out.txt", mode: 0o600, mkdirs: true, append: false }
   ],
   "tar-read": [{ kind: "tar-read", path: "/srv/p" }, { kind: "tar-read", path: "/srv/p", exclude: ["node_modules", "*.log"] }],
-  "tar-write": [{ kind: "tar-write", path: "/srv/q" }],
+  "tar-write": [{ kind: "tar-write", path: "/srv/q" }, { kind: "tar-write", path: "/srv/q", compression: "gzip" }],
   "ssh-agent": [{ kind: "ssh-agent" }],
   "mcp-bridge": [{ kind: "mcp-bridge", serverId: "github" }]
 };

@@ -752,8 +752,8 @@ export class LinkedBoxConnection implements BoxConnection {
     return this.openDownload({ kind: "tar-read", path, ...(options.exclude ? { exclude: options.exclude } : {}) });
   }
 
-  writeTar(path: string, tar: Readable): Promise<void> {
-    return this.upload({ kind: "tar-write", path }, tar);
+  writeTar(path: string, tar: Readable, options: { compression?: "gzip" } = {}): Promise<void> {
+    return this.upload({ kind: "tar-write", path, ...(options.compression ? { compression: options.compression } : {}) }, tar);
   }
 
   onEvent(name: string, listener: (data: unknown) => void): () => void {

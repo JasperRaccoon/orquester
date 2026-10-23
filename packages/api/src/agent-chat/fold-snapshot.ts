@@ -445,6 +445,8 @@ const isThreadHead = shaped<ThreadHead>({
   continueAfterRestart: optional(isContinueAfterRestart),
   // Head-only too (crash-safe resume): a fold's own head never holds it.
   crashResumedTurn: optional(isRecord),
+  // Head-only too (a pending wake); a fold's own head never holds it.
+  pendingWake: optional(isRecord),
   // Goals §5.5 and §5.7. Head-only state, so a fold's own head never holds
   // either; only the shape is checked, as for the other marker.
   resumeGoalAfterRestart: optional(isTrue),

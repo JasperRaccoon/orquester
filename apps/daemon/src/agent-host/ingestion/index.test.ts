@@ -1313,6 +1313,8 @@ describe("robustness (§10: never throws on a provider event)", () => {
         },
         liveness: () => null,
         liveAgentCount: () => 0,
+        liveTasks: () => [],
+        setProbe: () => undefined,
         clear: () => undefined
       },
       logger: { warn: (m) => warnings.push(m) }

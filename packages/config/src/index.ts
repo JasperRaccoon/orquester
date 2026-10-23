@@ -1581,6 +1581,18 @@ export const agentThreadSessionSchema = z.object({
   lastError: z.string().optional()
 });
 
+/** One task of `meta.json`'s `pendingWake` (`PendingWakeTask` in `@orquester/api`). */
+const agentPendingWakeTaskSchema = z.object({
+  taskId: z.string().min(1),
+  status: z.string().min(1),
+  completedAt: z.string(),
+  title: z.string().optional().catch(undefined),
+  taskType: z.string().optional().catch(undefined),
+  result: z.string().optional().catch(undefined),
+  outputFile: z.string().optional().catch(undefined),
+  exitCode: z.number().optional().catch(undefined)
+});
+
 /**
  * `meta.json`. `continueAfterRestart` is a TURN ID, never a boolean (§3.3), so
  * a marker left over from an older turn is ignored rather than replaying the
@@ -1628,6 +1640,26 @@ export const agentThreadHeadSchema = z.object({
   // in a row. Head-only; unreadable reads as none.
   crashResumedTurn: z
     .object({ turnId: z.string().min(1), attempt: z.number().int().positive() })
+    .optional()
+    .catch(undefined),
+  // A background task's completion the agent has not picked up yet (`ThreadHead.pendingWake`):
+  // the next host hands the agent its result. Head-only; unreadable reads as none, and a task
+  // entry that does not read is dropped rather than losing the others.
+  pendingWake: z
+    .object({
+      since: z.string().min(1),
+      tasks: z
+        .array(z.unknown())
+        .transform((entries) =>
+          entries.flatMap((entry) => {
+            const parsed = agentPendingWakeTaskSchema.safeParse(entry);
+            return parsed.success ? [parsed.data] : [];
+          })
+        ),
+      moreTasks: z.number().int().nonnegative().optional().catch(undefined),
+      prepared: z.boolean().optional().catch(undefined),
+      attempt: z.number().int().positive().optional().catch(undefined)
+    })
     .optional()
     .catch(undefined),
   resumeGoalAfterRestart: z.literal(true).optional().catch(undefined),

@@ -199,7 +199,7 @@ test("11 background task: the roster and the tool-call join produce one task.sta
   assert.equal(only(events, "task.completed").length, 0);
 });
 
-test("11 background task: the shell is live work — monitoring — in the real registry, bounded by its TTL", () => {
+test("11 background task: the shell is live work — monitoring — in the real registry, never ended by silence", () => {
   // Every task row of a Grok shell names the shell itself as its `agentId`;
   // the registry once read that as "a subagent's own shell" and dropped it, so
   // a dev server left running neither read "monitoring" nor held a deploy.
@@ -211,8 +211,13 @@ test("11 background task: the shell is live work — monitoring — in the real 
   }
   assert.equal(registry.liveness("thread-1"), "monitoring");
   assert.equal(registry.liveAgentCount("thread-1"), 0);
+  // A quiet shell is not a finished one (2026-10-23): ten silent minutes end
+  // nothing. Only a shell no adapter can answer for is bounded, by hours.
   clock.set(600_000);
-  assert.equal(registry.liveness("thread-1"), null, "the TTL still bounds a silent shell");
+  assert.equal(registry.liveness("thread-1"), "monitoring", "silence is not an end");
+  // The adapter checks the shell's own process: once it is gone, so is the row.
+  registry.setProbe(() => false);
+  assert.equal(registry.liveness("thread-1"), null, "its process is gone");
 });
 
 test("hooks on the private channel become hook.started / hook.completed pairs", () => {

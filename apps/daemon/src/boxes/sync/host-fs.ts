@@ -1,8 +1,9 @@
 /**
  * Config sync — the host side: walking a config root the way a CLI reads it (symlinks followed,
- * so the account home's links into the shared system config are materialized as real files in
- * the box), view hashes cached by (size, mtime), and atomic writes that go through symlinks to
- * their targets (an approved change to `<home>/skills/x` lands in the shared `~/.claude/skills`).
+ * so links into the shared system config are materialized as real files in the box — except a
+ * top-level dir link the caller chooses to mirror, see {@link HostWalkOptions.mirrorLink}), view
+ * hashes cached by (size, mtime), and atomic writes that go through symlinks to their targets (an
+ * approved change to `<home>/skills/x` lands in the shared `~/.claude/skills`).
  */
 
 import { createHash, randomUUID } from "node:crypto";
@@ -75,6 +76,17 @@ export interface HostTree {
    * known, so a pass neither pushes nor deletes there.
    */
   unreadable: string[];
+  /** Mirrored top-level links (see {@link HostWalkOptions.mirrorLink}): entry name → the target's realpath. Not descended. */
+  links: Map<string, string>;
+}
+
+export interface HostWalkOptions {
+  /**
+   * For an included top-level entry that is a symlink to a directory (its target already checked
+   * against the deny list): true = report it in {@link HostTree.links} instead of walking it.
+   * `rootReal` is the root's realpath.
+   */
+  mirrorLink?: (name: string, real: string, rootReal: string) => boolean;
 }
 
 export function relOf(root: string, path: string): string | null {
@@ -88,8 +100,8 @@ export function relOf(root: string, path: string): string | null {
  * is already an ancestor's) is not entered. Only a path that is not there counts as absent: one
  * whose state cannot be read lands in `unreadable` (see {@link HostTree.unreadable}).
  */
-export async function walkHost(root: string, rule: SyncRule, denyRoots: readonly string[]): Promise<HostTree> {
-  const tree: HostTree = { files: new Map(), dirs: new Set(), watch: [], skipped: [], unreadable: [] };
+export async function walkHost(root: string, rule: SyncRule, denyRoots: readonly string[], options: HostWalkOptions = {}): Promise<HostTree> {
+  const tree: HostTree = { files: new Map(), dirs: new Set(), watch: [], skipped: [], unreadable: [], links: new Map() };
   /** `operation`'s result; null when absent; `undefined` (and `path` recorded) when unreadable. */
   const read = async <T>(path: string, operation: Promise<T>): Promise<T | null | undefined> => {
     try {
@@ -122,6 +134,10 @@ export async function walkHost(root: string, rule: SyncRule, denyRoots: readonly
     }
     if (info.isDirectory()) {
       if (ancestors.has(real)) return;
+      if (depth === 1 && link.isSymbolicLink() && options.mirrorLink?.(rel, real, rootReal)) {
+        tree.links.set(rel, real);
+        return;
+      }
       const names = await read(path, readdir(path));
       if (!names) return; // unreadable, or gone meanwhile
       tree.dirs.add(path);
