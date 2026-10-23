@@ -40,6 +40,7 @@ import {
 } from "../../ingestion/test-harness.ts";
 import { withForkHandoff } from "../../orchestration/fork.ts";
 import { resumeCursorFor } from "../../orchestration/resume.ts";
+import { isLifelineWatcher } from "../../support/lifeline.ts";
 import { readLeftoverWork } from "../../support/leftover-work.ts";
 import { createGrokAdapter } from "./index.ts";
 import { recordingSessionTools } from "../../session-tools/testing.ts";
@@ -1561,6 +1562,15 @@ async function gone(pid: number): Promise<void> {
 }
 
 /** Every live process whose environment carries `name=value`. */
+/** `/proc/<pid>/cmdline`, NUL-separated; `""` for a process gone or unreadable. */
+function cmdlineOf(pid: number): string {
+  try {
+    return readFileSync(`/proc/${pid}/cmdline`, "latin1");
+  } catch {
+    return "";
+  }
+}
+
 function processesWith(name: string, value: string): number[] {
   const found: number[] = [];
   for (const entry of readdirSync("/proc")) {
@@ -1989,17 +1999,22 @@ test("a CLI that dies while its session opens takes the helpers it booted with i
     // them fails on the test's timeout.
     await r.logged(/recorded the agent's helpers/);
     assert.equal(leftovers(r).helper.length, 1, "the helper runs");
-    const cli = processesWith("GROK_RIG_MARK", r.mark).filter((pid) => {
-      try {
-        return readFileSync(`/proc/${pid}/cmdline`, "latin1").includes("mock-grok.mjs");
-      } catch {
-        return false;
-      }
-    });
+    // The marked processes running the mock: the CLI itself, and the host-death lifeline's
+    // watcher (`support/lifeline.ts`), a child of the CLI that keeps the wrapper's argv.
+    const mock = processesWith("GROK_RIG_MARK", r.mark).filter((pid) => cmdlineOf(pid).includes("mock-grok.mjs"));
+    const watchers = mock.filter((pid) => isLifelineWatcher(cmdlineOf(pid)));
+    const cli = mock.filter((pid) => !watchers.includes(pid));
     assert.equal(cli.length, 1, "the CLI runs");
+    assert.equal(watchers.length, 1, "with its lifeline watcher");
     process.kill(cli[0]!, "SIGKILL");
     await assert.rejects(opening);
     assert.deepEqual(leftovers(r).helper, [], "its exit swept the helper it booted");
+    // The host lives: the CLI's exit released the watcher, which goes by itself.
+    const deadline = Date.now() + 10_000;
+    while (isRunning(watchers[0]!) && Date.now() < deadline) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    assert.equal(isRunning(watchers[0]!), false, "its lifeline watcher went with it");
     assert.deepEqual(lifecycleRows(r.events), [], "the open's rejection is its whole report");
   } finally {
     reap(r);

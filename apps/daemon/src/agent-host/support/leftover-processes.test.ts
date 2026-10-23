@@ -147,6 +147,18 @@ test("recordChildSessions: each child's own session, and the parent's for a chil
   assert.deepEqual(await recordChildSessions(799), []);
 });
 
+test("recordChildSessions: the CLI's lifeline watcher, in the CLI's own session, records no session", async (t) => {
+  const watcher = ["/bin/sh", "-c", LIFELINE_SCRIPT, LIFELINE_ARGV0, "--", "/usr/bin/grok", ""].join("\0");
+  mockProc(t, {
+    // A detached CLI leads its own session; its MCP server leads another (fixtures 24, 31).
+    710: { environ: MARKED, starttime: 70, sid: 710, cmdline: "/usr/bin/grok\0" },
+    711: { environ: MARKED, starttime: 71, sid: 710, ppid: 710, comm: "sh", cmdline: watcher },
+    712: { environ: MARKED, starttime: 72, sid: 712, ppid: 710, cmdline: "node\0mcp.js\0" }
+  });
+  // Never the CLI's own session: that would put the CLI, and what runs beside it, in scope.
+  assert.deepEqual(await recordChildSessions(710), [led(712, 72)]);
+});
+
 // ---------------------------------------------------------------------------
 // Scopes beyond a session: the CLI's own group, recorded helper processes
 
