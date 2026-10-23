@@ -9,7 +9,8 @@ const STATUS: Record<KnowledgeErrorCode, number> = {
   KNOWLEDGE_UNKNOWN_COLLECTION: 400,
   KNOWLEDGE_TOO_LARGE: 413,
   KNOWLEDGE_NOT_A_WORKER: 403,
-  KNOWLEDGE_BUSY: 409
+  KNOWLEDGE_BUSY: 409,
+  KNOWLEDGE_ERROR: 500
 };
 
 /** A refusal the knowledge routes answer as `{ code, message }` with {@link status}. */
