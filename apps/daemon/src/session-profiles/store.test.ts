@@ -201,6 +201,16 @@ describe("SessionProfileStore — managed profiles", () => {
     assert.equal((await store.list()).profiles.length, 2, "the store itself still sees both (preparation)");
   });
 
+  it("no user read of a managed profile answers anything but 404 (instructions, items, preparation)", async () => {
+    const { store, service } = await setup();
+    await store.ensureManaged(SPEC);
+    await rejects(service.readInstructions(SPEC.id), "PROFILE_NOT_FOUND");
+    await rejects(service.prepareStatus(SPEC.id), "PROFILE_NOT_FOUND");
+    await rejects(service.readItem(SPEC.id, "x"), "PROFILE_NOT_FOUND");
+    // The lifecycle still reads it to prepare it.
+    assert.equal((await service.resolveForAgent(SPEC.id, "claude")).settings.claudeBuiltinTools, false);
+  });
+
   it("the service announces a managed profile only when it changed", async () => {
     const { service } = await setup();
     const events: unknown[] = [];
