@@ -246,7 +246,7 @@ test("worker tools: next task (instructions once, then a pointer), submit return
   const refused = await run(api, "knowledge_worker_submit", { taskId: "t2", answer: "nodes: []" });
   assert.equal(refused.isError, true);
   assert.equal(errorOf(refused).code, "KNOWLEDGE_INVALID");
-  assert.match(errorOf(refused).message, /task t2 was refused: Unexpected token 'n' at position 0\. Fix it and submit that task again\./);
+  assert.match(errorOf(refused).message, /task t2 was refused: Unexpected token 'n' at position 0\.$/, "the broker's own words say what to do next");
 
   api.on("POST", knowledgeRoutes.workerNext, { status: 200, body: { kind: "done", reason: "session-budget" } });
   assert.equal(textOf(await run(api, "knowledge_worker_next_task", {})), "No task (session-budget). End your turn now.");

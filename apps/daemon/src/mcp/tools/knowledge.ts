@@ -475,7 +475,8 @@ const workerSubmit = defineTool({
     const body: KnowledgeWorkerSubmitRequest = { sessionId, taskId: args.taskId, answer: args.answer };
     const response = await call<KnowledgeWorkerSubmitResponse>(api, "POST", knowledgeRoutes.workerSubmit, { body });
     if (!response.accepted) {
-      throw new ToolError("KNOWLEDGE_INVALID", `The answer to task ${clipText(args.taskId, 100)} was refused: ${clipText(response.error, 2_000)} Fix it and submit that task again.`);
+      // The daemon's own words say what to do next (redo it, call for the next task, or end the turn).
+      throw new ToolError("KNOWLEDGE_INVALID", `The answer to task ${clipText(args.taskId, 100)} was refused: ${clipText(response.error, 2_000)}`);
     }
     return text(`Accepted.\n${renderWorkerNext(response.next)}`);
   }

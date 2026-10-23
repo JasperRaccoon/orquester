@@ -239,8 +239,9 @@ describe("WorkerPool", () => {
     const third = await h.broker.submit(chat.id, id!, "still no JSON");
     assert.equal(third.accepted, false);
     assert.match(!third.accepted ? third.error : "", /end your turn/);
+    assert.equal((await h.broker.submit(chat.id, id!, "and again")).accepted, false);
     assert.deepEqual(await h.broker.next(chat.id), { kind: "done", reason: "session-budget" });
-    assert.equal(h.broker.counts().pending, 1, "the task waits for another chat");
+    assert.equal(h.broker.counts().pending, 1, "the task waits for another chat (a retired chat never takes it back)");
   });
 
   it("gives up with an error after repeated start failures", async () => {
