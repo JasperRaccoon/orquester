@@ -8,16 +8,20 @@ export const EXCALIDRAW_PLUGIN_ID = "excalidraw";
 export const SECRET_FILES_PLUGIN_ID = "secret-files";
 /** "Ephemeral AI VMs" (docs/superpowers/specs/2026-10-19-ephemeral-ai-vms-design.md; contracts in `boxes.ts`). */
 export const EPHEMERAL_VMS_PLUGIN_ID = "ephemeral-vms";
+/** "Knowledge Graph" (docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md; contracts in `knowledge.ts`). */
+export const KNOWLEDGE_GRAPH_PLUGIN_ID = "knowledge-graph";
 export type PluginId =
   | typeof TS_RUST_PLUGIN_ID
   | typeof EXCALIDRAW_PLUGIN_ID
   | typeof SECRET_FILES_PLUGIN_ID
-  | typeof EPHEMERAL_VMS_PLUGIN_ID;
+  | typeof EPHEMERAL_VMS_PLUGIN_ID
+  | typeof KNOWLEDGE_GRAPH_PLUGIN_ID;
 export const PLUGIN_IDS: readonly PluginId[] = [
   TS_RUST_PLUGIN_ID,
   EXCALIDRAW_PLUGIN_ID,
   SECRET_FILES_PLUGIN_ID,
-  EPHEMERAL_VMS_PLUGIN_ID
+  EPHEMERAL_VMS_PLUGIN_ID,
+  KNOWLEDGE_GRAPH_PLUGIN_ID
 ];
 
 export function isPluginId(value: unknown): value is PluginId {

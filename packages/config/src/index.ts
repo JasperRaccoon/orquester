@@ -156,6 +156,45 @@ export function tsRustPreloadPath(baseDir: string): string {
   return joinPath(tsRustPluginDir(baseDir), "preload.cjs");
 }
 
+/**
+ * `<appdir>/daemon/plugins/knowledge-graph` (docs/superpowers/specs/2026-10-23-knowledge-graph-plugin-design.md):
+ * entries/ (durable record), collections.json, index/ (disposable search cache),
+ * mykg/ (generated config, input/ mirror, myKG sessions), state.json (linking state),
+ * runtime/ (uv, the myKG venv versions, the embedding model).
+ */
+export function knowledgeGraphPluginDir(baseDir: string): string {
+  return joinPath(pluginsDir(baseDir), "knowledge-graph");
+}
+
+export function knowledgeEntriesDir(baseDir: string): string {
+  return joinPath(knowledgeGraphPluginDir(baseDir), "entries");
+}
+
+export function knowledgeCollectionsPath(baseDir: string): string {
+  return joinPath(knowledgeGraphPluginDir(baseDir), "collections.json");
+}
+
+export function knowledgeIndexDir(baseDir: string): string {
+  return joinPath(knowledgeGraphPluginDir(baseDir), "index");
+}
+
+export function knowledgeMykgDir(baseDir: string): string {
+  return joinPath(knowledgeGraphPluginDir(baseDir), "mykg");
+}
+
+/** What myKG reads: one generated `<entryId>.md` per entry, no frontmatter, no collections. */
+export function knowledgeMykgInputDir(baseDir: string): string {
+  return joinPath(knowledgeMykgDir(baseDir), "input");
+}
+
+export function knowledgeStatePath(baseDir: string): string {
+  return joinPath(knowledgeGraphPluginDir(baseDir), "state.json");
+}
+
+export function knowledgeRuntimeDir(baseDir: string): string {
+  return joinPath(knowledgeGraphPluginDir(baseDir), "runtime");
+}
+
 // appendNodeRequireOption lives in ./tooling.ts (re-exported below) beside the per-target env helpers.
 
 /** Ephemeral AI VMs: box records and plugin settings (`boxes.ts`). */
