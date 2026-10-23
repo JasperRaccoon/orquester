@@ -83,7 +83,6 @@ export * from "./box-protocol.ts";
 export * from "./box-tools.ts";
 export * from "./agent-tools.ts";
 export * from "./connection.ts";
-export * from "./tailscale.ts";
 
 export type {
   AgentChatBackgroundLiveness,

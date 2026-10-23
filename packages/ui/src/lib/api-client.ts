@@ -120,7 +120,6 @@ import { buildQueryString } from "./transporter";
 import { AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, agentProfileRoutes, agentToolsRoutes, desktopRoutes, githubLinkRoutes, pluginRoutes, repoIdentityRoutes, secretFilesRoutes, sessionProfileRoutes, workflowRoutes } from "@orquester/api";
 // boxes: the Ephemeral AI VMs plugin's routes and payloads.
 import { boxRoutes } from "@orquester/api";
-import { tailscaleServeRoutes, type SetTailscaleServeRequest, type TailscaleServeStatus } from "@orquester/api";
 import {
   authRoutes,
   authSessionPath,
@@ -454,16 +453,6 @@ export class ApiClient {
   /** Update daemon.json. Daemon rejects this (403) over the remote HTTP transport. */
   updateDaemonConfig(patch: Partial<DaemonConfig>): Promise<DaemonConfig> {
     return this.send("PUT", "/api/config/daemon", { body: patch });
-  }
-
-  /** Remote access → Tailscale HTTPS: what `tailscale` reports and whether it serves this daemon. */
-  getTailscaleServe(signal?: AbortSignal): Promise<TailscaleServeStatus> {
-    return this.send("GET", tailscaleServeRoutes.serve, { signal });
-  }
-
-  /** Turn Tailscale HTTPS on or off (allowed on both transports). Rejects with the daemon's fix in `serverMessage`. */
-  setTailscaleServe(enabled: boolean): Promise<TailscaleServeStatus> {
-    return this.send("PUT", tailscaleServeRoutes.serve, { body: { enabled } satisfies SetTailscaleServeRequest });
   }
 
   /** The one daemon-config field writable over remote HTTP (UI curtain toggle). */
