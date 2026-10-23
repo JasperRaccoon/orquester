@@ -9,7 +9,7 @@
  * `{ code, message }` refusals are shown under the form.
  */
 
-import React, { useCallback, useEffect, useId, useMemo, useState, useSyncExternalStore } from "react";
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { AlertTriangle, ExternalLink, Hammer, Loader2, RefreshCw, Waypoints } from "lucide-react";
 import {
   KNOWLEDGE_CONCURRENCY_MAX,
@@ -239,16 +239,23 @@ const RebuildButton: React.FC<{ disabled: boolean }> = ({ disabled }) => {
   const [estimateError, setEstimateError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** Bumped per confirmation: an estimate an earlier one asked for is dropped. */
+  const asked = useRef(0);
 
   const ask = () => {
     if (!api) return;
+    const mine = ++asked.current;
     setConfirming(true);
     setEstimate(null);
     setEstimateError(null);
     setError(null);
     api.getKnowledgeRebuildEstimate().then(
-      (answer) => setEstimate(answer),
-      (err: unknown) => setEstimateError(knowledgeErrorText(err))
+      (answer) => {
+        if (asked.current === mine) setEstimate(answer);
+      },
+      (err: unknown) => {
+        if (asked.current === mine) setEstimateError(knowledgeErrorText(err));
+      }
     );
   };
 
